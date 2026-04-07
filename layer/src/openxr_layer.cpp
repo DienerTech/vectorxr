@@ -19,9 +19,11 @@ bool NearlyEqual(double lhs, double rhs) {
 bool SameSettings(const ResolvedSettings& lhs, const ResolvedSettings& rhs) {
     return lhs.enabled == rhs.enabled &&
            lhs.stereo_boost_enabled == rhs.stereo_boost_enabled &&
+           lhs.convergence_enabled == rhs.convergence_enabled &&
            lhs.world_scale_enabled == rhs.world_scale_enabled &&
            lhs.fov_scale_enabled == rhs.fov_scale_enabled &&
            NearlyEqual(lhs.stereo_boost, rhs.stereo_boost) &&
+           NearlyEqual(lhs.convergence, rhs.convergence) &&
            NearlyEqual(lhs.world_scale, rhs.world_scale) &&
            NearlyEqual(lhs.fov_scale, rhs.fov_scale) &&
            lhs.log_level == rhs.log_level;
@@ -33,6 +35,16 @@ ConfigDocument DefaultConfig() {
     return document;
 }
 
+void AppendViewSummary(std::ostringstream& stream, std::span<const ViewAdjustmentData> views) {
+    const size_t summary_count = std::min<size_t>(views.size(), 2);
+    for (size_t i = 0; i < summary_count; ++i) {
+        stream << " view" << i << "Pos=(" << views[i].position.x << ", " << views[i].position.y << ", "
+               << views[i].position.z << ")"
+               << " view" << i << "Fov=(" << views[i].fov.angle_left << ", " << views[i].fov.angle_right << ", "
+               << views[i].fov.angle_up << ", " << views[i].fov.angle_down << ")";
+    }
+}
+
 } // namespace
 
 OpenXrLayer& OpenXrLayer::Instance() {
@@ -40,7 +52,7 @@ OpenXrLayer& OpenXrLayer::Instance() {
     return layer;
 }
 
-void OpenXrLayer::SetDllDirectory(std::filesystem::path dll_directory) {
+void OpenXrLayer::SetLayerDirectory(std::filesystem::path dll_directory) {
     std::scoped_lock lock(mutex_);
     dll_directory_ = std::move(dll_directory);
 }
@@ -100,6 +112,8 @@ XrResult OpenXrLayer::DestroyInstance(XrInstance instance) {
         next_destroy_instance_ = nullptr;
         next_locate_views_ = nullptr;
         has_loaded_config_ = false;
+        locate_views_call_count_ = 0;
+        pending_locate_views_diagnostics_ = 0;
     }
 
     return result;
@@ -133,8 +147,18 @@ XrResult OpenXrLayer::LocateViews(XrSession session,
 
     // DepthXR keeps the interception surface minimal and applies all current
     // stereo/depth experiments in xrLocateViews.
+    ++locate_views_call_count_;
+    std::vector<ViewAdjustmentData> original_views(count);
     std::vector<ViewAdjustmentData> adjusted_views(count);
     for (uint32_t i = 0; i < count; ++i) {
+        original_views[i].position.x = views[i].pose.position.x;
+        original_views[i].position.y = views[i].pose.position.y;
+        original_views[i].position.z = views[i].pose.position.z;
+        original_views[i].fov.angle_left = views[i].fov.angleLeft;
+        original_views[i].fov.angle_right = views[i].fov.angleRight;
+        original_views[i].fov.angle_up = views[i].fov.angleUp;
+        original_views[i].fov.angle_down = views[i].fov.angleDown;
+
         adjusted_views[i].position.x = views[i].pose.position.x;
         adjusted_views[i].position.y = views[i].pose.position.y;
         adjusted_views[i].position.z = views[i].pose.position.z;
@@ -146,6 +170,9 @@ XrResult OpenXrLayer::LocateViews(XrSession session,
 
     if (resolved_settings_.stereo_boost_enabled && !NearlyEqual(resolved_settings_.stereo_boost, 1.0)) {
         ApplyStereoBoost(adjusted_views, resolved_settings_.stereo_boost);
+    }
+    if (resolved_settings_.convergence_enabled && !NearlyEqual(resolved_settings_.convergence, 0.0)) {
+        ApplyConvergence(adjusted_views, resolved_settings_.convergence);
     }
     if (resolved_settings_.world_scale_enabled && !NearlyEqual(resolved_settings_.world_scale, 1.0)) {
         ApplyWorldScale(adjusted_views, resolved_settings_.world_scale);
@@ -162,6 +189,21 @@ XrResult OpenXrLayer::LocateViews(XrSession session,
         views[i].fov.angleRight = static_cast<float>(adjusted_views[i].fov.angle_right);
         views[i].fov.angleUp = static_cast<float>(adjusted_views[i].fov.angle_up);
         views[i].fov.angleDown = static_cast<float>(adjusted_views[i].fov.angle_down);
+    }
+
+    if (pending_locate_views_diagnostics_ > 0) {
+        std::ostringstream stream;
+        stream << "LocateViews call " << locate_views_call_count_ << ": count=" << count
+               << ", stereoBoost=" << resolved_settings_.stereo_boost
+               << ", convergence=" << resolved_settings_.convergence
+               << ", worldScale=" << resolved_settings_.world_scale
+               << ", fovScale=" << resolved_settings_.fov_scale
+               << ", before:";
+        AppendViewSummary(stream, original_views);
+        stream << " after:";
+        AppendViewSummary(stream, adjusted_views);
+        logger_.Debug(stream.str());
+        --pending_locate_views_diagnostics_;
     }
 
     return result;
@@ -209,6 +251,7 @@ void OpenXrLayer::RefreshResolvedSettings() {
     if (!last_logged_settings_ || !SameSettings(*last_logged_settings_, resolved_settings_)) {
         LogResolvedSettings(resolved_settings_);
         last_logged_settings_ = resolved_settings_;
+        pending_locate_views_diagnostics_ = 5;
     }
 }
 
@@ -231,6 +274,7 @@ void OpenXrLayer::LogResolvedSettings(const ResolvedSettings& settings) {
     stream << "Resolved settings for " << current_exe_name_ << ": "
            << "enabled=" << settings.enabled
            << ", stereoBoost=" << settings.stereo_boost
+           << ", convergence=" << settings.convergence
            << ", worldScale=" << settings.world_scale
            << ", fovScale=" << settings.fov_scale
            << ", logLevel=" << ToString(settings.log_level);

@@ -8,6 +8,7 @@ add_library(
     src/util/logger.cpp
     src/util/process_info.cpp
     src/math/stereo_boost.cpp
+    src/math/convergence.cpp
     src/math/world_scale.cpp
     src/math/fov_scale.cpp
 )
@@ -16,7 +17,48 @@ target_include_directories(depthxr_core PUBLIC include)
 target_compile_features(depthxr_core PUBLIC cxx_std_20)
 
 if(WIN32 AND DEPTHXR_BUILD_LAYER)
-    find_package(OpenXR CONFIG REQUIRED)
+    find_package(OpenXR CONFIG QUIET)
+
+    if(NOT OpenXR_FOUND)
+        file(GLOB _openxr_nupkgs "${CMAKE_SOURCE_DIR}/OpenXR.Loader.*.nupkg")
+        list(LENGTH _openxr_nupkgs _openxr_nupkg_count)
+
+        if(_openxr_nupkg_count GREATER 0)
+            list(GET _openxr_nupkgs 0 _openxr_nupkg)
+            set(_openxr_extract_dir "${CMAKE_BINARY_DIR}/_deps/openxr_loader")
+
+            file(MAKE_DIRECTORY "${_openxr_extract_dir}")
+            file(ARCHIVE_EXTRACT INPUT "${_openxr_nupkg}" DESTINATION "${_openxr_extract_dir}")
+
+            if(CMAKE_SIZEOF_VOID_P EQUAL 8)
+                set(_openxr_arch_dir "x64")
+            else()
+                set(_openxr_arch_dir "Win32")
+            endif()
+
+            set(_openxr_include_dir "${_openxr_extract_dir}/include")
+            set(_openxr_implib "${_openxr_extract_dir}/native/${_openxr_arch_dir}/release/lib/openxr_loader.lib")
+            set(_openxr_dll "${_openxr_extract_dir}/native/${_openxr_arch_dir}/release/bin/openxr_loader.dll")
+
+            if(NOT EXISTS "${_openxr_implib}" OR NOT EXISTS "${_openxr_dll}")
+                message(FATAL_ERROR "Vendored OpenXR loader package '${_openxr_nupkg}' is missing native/${_openxr_arch_dir}/release artifacts.")
+            endif()
+
+            add_library(OpenXR::openxr_loader SHARED IMPORTED)
+            set_target_properties(
+                OpenXR::openxr_loader
+                PROPERTIES
+                IMPORTED_IMPLIB "${_openxr_implib}"
+                IMPORTED_LOCATION "${_openxr_dll}"
+                INTERFACE_INCLUDE_DIRECTORIES "${_openxr_include_dir}"
+            )
+
+            set(OpenXR_FOUND TRUE)
+            message(STATUS "Using vendored OpenXR loader from ${_openxr_nupkg}")
+        else()
+            message(FATAL_ERROR "OpenXR SDK not found. Install an OpenXR SDK that provides OpenXRConfig.cmake, or place an OpenXR.Loader.*.nupkg package in the repository root.")
+        endif()
+    endif()
 
     add_library(
         XR_APILAYER_NOVENDOR_depthxr

@@ -16,7 +16,7 @@ class OpenXrLayer {
   public:
     static OpenXrLayer& Instance();
 
-    void SetDllDirectory(std::filesystem::path dll_directory);
+    void SetLayerDirectory(std::filesystem::path dll_directory);
     void SetNextProcAddr(PFN_xrGetInstanceProcAddr next_get_instance_proc_addr);
 
     XrResult OnInstanceCreated(const XrInstanceCreateInfo* create_info, XrInstance instance);
@@ -50,6 +50,8 @@ class OpenXrLayer {
     std::string current_exe_name_;
     ResolvedSettings resolved_settings_;
     std::optional<ResolvedSettings> last_logged_settings_;
+    uint64_t locate_views_call_count_{0};
+    uint32_t pending_locate_views_diagnostics_{0};
 
     PFN_xrGetInstanceProcAddr next_get_instance_proc_addr_{nullptr};
     PFN_xrDestroyInstance next_destroy_instance_{nullptr};

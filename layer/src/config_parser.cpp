@@ -441,9 +441,11 @@ bool ParseGlobal(const JsonValue::Object& object, ResolvedSettings& out, std::st
     static const std::unordered_set<std::string> allowed = {
         "enabled",
         "stereoBoostEnabled",
+        "convergenceEnabled",
         "worldScaleEnabled",
         "fovScaleEnabled",
         "stereoBoost",
+        "convergence",
         "worldScale",
         "fovScale",
         "logLevel",
@@ -463,6 +465,22 @@ bool ParseGlobal(const JsonValue::Object& object, ResolvedSettings& out, std::st
         return false;
     }
 
+    std::optional<bool> convergence_enabled;
+    if (!ReadOptionalBool(object, "convergenceEnabled", convergence_enabled, error)) {
+        return false;
+    }
+    if (convergence_enabled.has_value()) {
+        out.convergence_enabled = *convergence_enabled;
+    }
+
+    std::optional<double> convergence;
+    if (!ReadOptionalNumber(object, "convergence", convergence, error)) {
+        return false;
+    }
+    if (convergence.has_value()) {
+        out.convergence = *convergence;
+    }
+
     std::optional<LogLevel> level;
     if (!ReadOptionalLogLevel(object, "logLevel", level, error) || !level) {
         if (error.empty()) {
@@ -480,9 +498,11 @@ bool ParseSettingsOverride(const JsonValue::Object& object, SettingsOverride& ou
         "match",
         "enabled",
         "stereoBoostEnabled",
+        "convergenceEnabled",
         "worldScaleEnabled",
         "fovScaleEnabled",
         "stereoBoost",
+        "convergence",
         "worldScale",
         "fovScale",
         "logLevel",
@@ -494,9 +514,11 @@ bool ParseSettingsOverride(const JsonValue::Object& object, SettingsOverride& ou
 
     return ReadOptionalBool(object, "enabled", out.enabled, error) &&
            ReadOptionalBool(object, "stereoBoostEnabled", out.stereo_boost_enabled, error) &&
+           ReadOptionalBool(object, "convergenceEnabled", out.convergence_enabled, error) &&
            ReadOptionalBool(object, "worldScaleEnabled", out.world_scale_enabled, error) &&
            ReadOptionalBool(object, "fovScaleEnabled", out.fov_scale_enabled, error) &&
            ReadOptionalNumber(object, "stereoBoost", out.stereo_boost, error) &&
+           ReadOptionalNumber(object, "convergence", out.convergence, error) &&
            ReadOptionalNumber(object, "worldScale", out.world_scale, error) &&
            ReadOptionalNumber(object, "fovScale", out.fov_scale, error) &&
            ReadOptionalLogLevel(object, "logLevel", out.log_level, error);

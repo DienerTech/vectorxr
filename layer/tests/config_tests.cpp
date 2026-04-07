@@ -22,9 +22,11 @@ void TestParseConfig() {
   "global": {
     "enabled": true,
     "stereoBoostEnabled": true,
+    "convergenceEnabled": true,
     "worldScaleEnabled": true,
     "fovScaleEnabled": true,
     "stereoBoost": 1.1,
+    "convergence": 0.08,
     "worldScale": 1.0,
     "fovScale": 0.95,
     "logLevel": "debug"
@@ -43,6 +45,7 @@ void TestParseConfig() {
     Expect(result.ok, "Config parser rejected valid config: " + result.error);
     Expect(result.document.version == 1, "Version was not parsed");
     Expect(std::abs(result.document.global.stereo_boost - 1.1) < 0.0001, "Global stereoBoost mismatch");
+    Expect(std::abs(result.document.global.convergence - 0.08) < 0.0001, "Global convergence mismatch");
     Expect(result.document.profiles.size() == 1, "Profile count mismatch");
     Expect(result.document.profiles[0].match.exe_name == "Game.exe", "Profile exe match mismatch");
 }
@@ -54,9 +57,11 @@ void TestResolveSettings() {
   "global": {
     "enabled": true,
     "stereoBoostEnabled": true,
+    "convergenceEnabled": true,
     "worldScaleEnabled": true,
     "fovScaleEnabled": true,
     "stereoBoost": 1.05,
+    "convergence": 0.0,
     "worldScale": 1.0,
     "fovScale": 1.0,
     "logLevel": "info"
@@ -66,6 +71,7 @@ void TestResolveSettings() {
       "match": { "exe": "DCS.exe" },
       "enabled": true,
       "stereoBoost": 1.15,
+      "convergence": 0.12,
       "worldScale": 1.1
     }
   ]
@@ -77,6 +83,7 @@ void TestResolveSettings() {
 
     const depthxr::ResolvedSettings resolved = depthxr::ResolveSettings(result.document, "dcs.exe");
     Expect(std::abs(resolved.stereo_boost - 1.15) < 0.0001, "Profile stereoBoost override was not applied");
+    Expect(std::abs(resolved.convergence - 0.12) < 0.0001, "Profile convergence override was not applied");
     Expect(std::abs(resolved.world_scale - 1.1) < 0.0001, "Profile worldScale override was not applied");
     Expect(std::abs(resolved.fov_scale - 1.0) < 0.0001, "Global fovScale should have been inherited");
 }

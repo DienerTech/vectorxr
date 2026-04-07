@@ -5,6 +5,7 @@ function validateSettingsBlock(prefix: string, settings: GlobalSettings | Profil
 
   const bounded = [
     ['stereoBoost', settings.stereoBoost, 0.5, 2.0],
+    ['convergence', settings.convergence, -0.5, 0.5],
     ['worldScale', settings.worldScale, 0.5, 2.0],
     ['fovScale', settings.fovScale, 0.5, 1.5],
   ] as const

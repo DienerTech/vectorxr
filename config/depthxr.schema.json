@@ -44,6 +44,9 @@
         "stereoBoostEnabled": {
           "type": "boolean"
         },
+        "convergenceEnabled": {
+          "type": "boolean"
+        },
         "worldScaleEnabled": {
           "type": "boolean"
         },
@@ -54,6 +57,11 @@
           "type": "number",
           "minimum": 0.5,
           "maximum": 2.0
+        },
+        "convergence": {
+          "type": "number",
+          "minimum": -0.5,
+          "maximum": 0.5
         },
         "worldScale": {
           "type": "number",

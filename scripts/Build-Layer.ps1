@@ -1,0 +1,138 @@
+[CmdletBinding()]
+param(
+    [string]$BuildDir = "build",
+    [ValidateSet("Debug", "Release", "RelWithDebInfo", "MinSizeRel")]
+    [string]$Configuration = "Release",
+    [switch]$SkipTests,
+    [switch]$SkipFresh,
+    [switch]$CleanScratch
+)
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = "Stop"
+
+function Resolve-CMakeExecutable {
+    $cmakeCommand = Get-Command cmake -ErrorAction SilentlyContinue
+    if ($cmakeCommand) {
+        return $cmakeCommand.Source
+    }
+
+    $knownLocations = @(
+        "C:\Program Files\CMake\bin\cmake.exe",
+        "C:\Program Files (x86)\CMake\bin\cmake.exe"
+    )
+
+    foreach ($candidate in $knownLocations) {
+        if (Test-Path $candidate) {
+            return $candidate
+        }
+    }
+
+    throw "CMake was not found. Install CMake or add it to PATH."
+}
+
+function Resolve-CtestExecutable {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$CmakeExecutable
+    )
+
+    $ctestCommand = Get-Command ctest -ErrorAction SilentlyContinue
+    if ($ctestCommand) {
+        return $ctestCommand.Source
+    }
+
+    $cmakeBinDir = Split-Path -Parent $CmakeExecutable
+    $ctestPath = Join-Path $cmakeBinDir "ctest.exe"
+    if (Test-Path $ctestPath) {
+        return $ctestPath
+    }
+
+    throw "ctest.exe was not found alongside CMake."
+}
+
+function Get-VisualStudioGenerator {
+    $vswhere = "C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe"
+    if (-not (Test-Path $vswhere)) {
+        throw "vswhere.exe was not found. Install Visual Studio Build Tools or Visual Studio Community with Desktop C++ support."
+    }
+
+    $vsInfoJson = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -format json
+    if (-not $vsInfoJson) {
+        throw "No Visual Studio instance with MSVC C++ tools was found."
+    }
+
+    $vsInfo = $vsInfoJson | ConvertFrom-Json
+    if ($vsInfo -is [array]) {
+        $vsInfo = $vsInfo[0]
+    }
+
+    $majorVersion = [int]$vsInfo.catalog.productLineVersion
+    $yearByMajor = @{
+        18 = "2026"
+        17 = "2022"
+        16 = "2019"
+        15 = "2017"
+    }
+
+    if (-not $yearByMajor.ContainsKey($majorVersion)) {
+        throw "Unsupported Visual Studio major version '$majorVersion'."
+    }
+
+    return "Visual Studio $majorVersion $($yearByMajor[$majorVersion])"
+}
+
+function Remove-ScratchBuildDirectories {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$RepoRoot
+    )
+
+    $scratchDirectories = @(
+        "build-cmake-check",
+        "build-vendored",
+        "build-wincheck"
+    )
+
+    foreach ($directory in $scratchDirectories) {
+        $path = Join-Path $RepoRoot $directory
+        if (Test-Path $path) {
+            Remove-Item -LiteralPath $path -Recurse -Force
+            Write-Host "Removed scratch build directory $directory"
+        }
+    }
+}
+
+$repoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
+$buildPath = Join-Path $repoRoot $BuildDir
+$cmake = Resolve-CMakeExecutable
+$ctest = Resolve-CtestExecutable -CmakeExecutable $cmake
+$generator = Get-VisualStudioGenerator
+
+if ($CleanScratch) {
+    Remove-ScratchBuildDirectories -RepoRoot $repoRoot
+}
+
+$configureArgs = @(
+    "-S", $repoRoot,
+    "-B", $buildPath,
+    "-G", $generator,
+    "-A", "x64",
+    "-DDEPTHXR_BUILD_LAYER=ON",
+    "-DDEPTHXR_BUILD_TESTS=ON"
+)
+
+if (-not $SkipFresh) {
+    $configureArgs += "--fresh"
+}
+
+Write-Host "Using CMake: $cmake"
+Write-Host "Using generator: $generator"
+Write-Host "Build directory: $buildPath"
+
+& $cmake @configureArgs
+& $cmake --build $buildPath --config $Configuration
+
+if (-not $SkipTests) {
+    & $ctest --test-dir $buildPath -C $Configuration --output-on-failure
+}

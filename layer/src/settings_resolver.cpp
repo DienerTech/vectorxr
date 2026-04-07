@@ -20,28 +20,34 @@ std::string NormalizeExe(std::string_view value) {
 }
 
 void ApplyOverride(ResolvedSettings& target, const SettingsOverride& source) {
-    if (source.enabled) {
+    if (source.enabled.has_value()) {
         target.enabled = *source.enabled;
     }
-    if (source.stereo_boost_enabled) {
+    if (source.stereo_boost_enabled.has_value()) {
         target.stereo_boost_enabled = *source.stereo_boost_enabled;
     }
-    if (source.world_scale_enabled) {
+    if (source.convergence_enabled.has_value()) {
+        target.convergence_enabled = *source.convergence_enabled;
+    }
+    if (source.world_scale_enabled.has_value()) {
         target.world_scale_enabled = *source.world_scale_enabled;
     }
-    if (source.fov_scale_enabled) {
+    if (source.fov_scale_enabled.has_value()) {
         target.fov_scale_enabled = *source.fov_scale_enabled;
     }
-    if (source.stereo_boost) {
+    if (source.stereo_boost.has_value()) {
         target.stereo_boost = *source.stereo_boost;
     }
-    if (source.world_scale) {
+    if (source.convergence.has_value()) {
+        target.convergence = *source.convergence;
+    }
+    if (source.world_scale.has_value()) {
         target.world_scale = *source.world_scale;
     }
-    if (source.fov_scale) {
+    if (source.fov_scale.has_value()) {
         target.fov_scale = *source.fov_scale;
     }
-    if (source.log_level) {
+    if (source.log_level.has_value()) {
         target.log_level = *source.log_level;
     }
 }

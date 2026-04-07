@@ -76,14 +76,14 @@ XrResult XRAPI_CALL xrCreateApiLayerInstance(const XrInstanceCreateInfo* instanc
 
     if (layer_info->structType != XR_LOADER_INTERFACE_STRUCT_API_LAYER_CREATE_INFO ||
         layer_info->structVersion != XR_API_LAYER_CREATE_INFO_STRUCT_VERSION ||
-        layer_info->structSize != sizeof(XrApiLayerCreateInfo)) {
+        layer_info->structSize < sizeof(XrApiLayerCreateInfo)) {
         return XR_ERROR_INITIALIZATION_FAILED;
     }
 
     XrApiLayerNextInfo* next_info = layer_info->nextInfo;
     if (next_info->structType != XR_LOADER_INTERFACE_STRUCT_API_LAYER_NEXT_INFO ||
         next_info->structVersion != XR_API_LAYER_NEXT_INFO_STRUCT_VERSION ||
-        next_info->structSize != sizeof(XrApiLayerNextInfo) || !next_info->nextGetInstanceProcAddr ||
+        next_info->structSize < sizeof(XrApiLayerNextInfo) || !next_info->nextGetInstanceProcAddr ||
         !next_info->nextCreateApiLayerInstance) {
         return XR_ERROR_INITIALIZATION_FAILED;
     }
@@ -107,7 +107,7 @@ XrResult __declspec(dllexport) XRAPI_CALL
                                        depthxr::XrNegotiateApiLayerRequest* api_layer_request) {
     using namespace depthxr;
 
-    OpenXrLayer::Instance().SetDllDirectory(GetModuleDirectory());
+    OpenXrLayer::Instance().SetLayerDirectory(GetModuleDirectory());
 
     if (!loader_info || !api_layer_request || (api_layer_name && std::string_view(api_layer_name) != kLayerName)) {
         return XR_ERROR_INITIALIZATION_FAILED;
@@ -115,10 +115,10 @@ XrResult __declspec(dllexport) XRAPI_CALL
 
     if (loader_info->structType != XR_LOADER_INTERFACE_STRUCT_LOADER_INFO ||
         loader_info->structVersion != XR_LOADER_INFO_STRUCT_VERSION ||
-        loader_info->structSize != sizeof(XrNegotiateLoaderInfo) ||
+        loader_info->structSize < sizeof(XrNegotiateLoaderInfo) ||
         api_layer_request->structType != XR_LOADER_INTERFACE_STRUCT_API_LAYER_REQUEST ||
         api_layer_request->structVersion != XR_API_LAYER_INFO_STRUCT_VERSION ||
-        api_layer_request->structSize != sizeof(XrNegotiateApiLayerRequest) ||
+        api_layer_request->structSize < sizeof(XrNegotiateApiLayerRequest) ||
         loader_info->minInterfaceVersion > XR_CURRENT_LOADER_API_LAYER_VERSION ||
         loader_info->maxInterfaceVersion < XR_CURRENT_LOADER_API_LAYER_VERSION) {
         return XR_ERROR_INITIALIZATION_FAILED;

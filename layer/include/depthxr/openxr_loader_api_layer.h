@@ -21,6 +21,7 @@ constexpr uint32_t XR_API_LAYER_INFO_STRUCT_VERSION = 1;
 constexpr uint32_t XR_API_LAYER_CREATE_INFO_STRUCT_VERSION = 1;
 constexpr uint32_t XR_API_LAYER_NEXT_INFO_STRUCT_VERSION = 1;
 constexpr uint32_t XR_CURRENT_LOADER_API_LAYER_VERSION = 1;
+constexpr uint32_t XR_API_LAYER_MAX_SETTINGS_PATH_SIZE = 512;
 
 struct XrApiLayerCreateInfo;
 
@@ -51,7 +52,7 @@ struct XrApiLayerNextInfo {
     XrLoaderInterfaceStructs structType;
     uint32_t structVersion;
     size_t structSize;
-    const char* layerName;
+    char layerName[XR_MAX_API_LAYER_NAME_SIZE];
     PFN_xrGetInstanceProcAddr nextGetInstanceProcAddr;
     PFN_xrCreateApiLayerInstance nextCreateApiLayerInstance;
     XrApiLayerNextInfo* next;
@@ -61,6 +62,8 @@ struct XrApiLayerCreateInfo {
     XrLoaderInterfaceStructs structType;
     uint32_t structVersion;
     size_t structSize;
+    void* loaderInstance;
+    char settings_file_location[XR_API_LAYER_MAX_SETTINGS_PATH_SIZE];
     XrApiLayerNextInfo* nextInfo;
 };
 

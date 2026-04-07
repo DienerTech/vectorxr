@@ -23,6 +23,7 @@ struct ViewAdjustmentData {
 };
 
 void ApplyStereoBoost(std::span<ViewAdjustmentData> views, double factor);
+void ApplyConvergence(std::span<ViewAdjustmentData> views, double amount);
 void ApplyWorldScale(std::span<ViewAdjustmentData> views, double factor);
 void ApplyFovScale(std::span<ViewAdjustmentData> views, double factor);
 

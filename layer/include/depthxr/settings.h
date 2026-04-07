@@ -16,9 +16,11 @@ enum class LogLevel {
 struct SettingsOverride {
     std::optional<bool> enabled;
     std::optional<bool> stereo_boost_enabled;
+    std::optional<bool> convergence_enabled;
     std::optional<bool> world_scale_enabled;
     std::optional<bool> fov_scale_enabled;
     std::optional<double> stereo_boost;
+    std::optional<double> convergence;
     std::optional<double> world_scale;
     std::optional<double> fov_scale;
     std::optional<LogLevel> log_level;
@@ -27,9 +29,11 @@ struct SettingsOverride {
 struct ResolvedSettings {
     bool enabled{true};
     bool stereo_boost_enabled{true};
+    bool convergence_enabled{true};
     bool world_scale_enabled{true};
     bool fov_scale_enabled{true};
     double stereo_boost{1.0};
+    double convergence{0.0};
     double world_scale{1.0};
     double fov_scale{1.0};
     LogLevel log_level{LogLevel::Info};

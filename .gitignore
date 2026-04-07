@@ -1,9 +1,11 @@
 build/
+build-*/
 .DS_Store
 node_modules/
 dist/
-src-tauri/target/
+app/src-tauri/target/
 *.user
 *.suo
 *.VC.db
 *.VC.opendb
+*.nupkg

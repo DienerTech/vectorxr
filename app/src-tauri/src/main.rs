@@ -5,16 +5,52 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+fn default_enabled() -> bool {
+    true
+}
+
+fn default_stereo_boost() -> f64 {
+    1.10
+}
+
+fn default_convergence() -> f64 {
+    0.0
+}
+
+fn default_world_scale() -> f64 {
+    1.0
+}
+
+fn default_fov_scale() -> f64 {
+    1.0
+}
+
+fn default_log_level() -> String {
+    "info".into()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct SettingsBlock {
+    #[serde(default = "default_enabled")]
     enabled: bool,
+    #[serde(default = "default_enabled")]
     stereo_boost_enabled: bool,
+    #[serde(default = "default_enabled")]
+    convergence_enabled: bool,
+    #[serde(default = "default_enabled")]
     world_scale_enabled: bool,
+    #[serde(default = "default_enabled")]
     fov_scale_enabled: bool,
+    #[serde(default = "default_stereo_boost")]
     stereo_boost: f64,
+    #[serde(default = "default_convergence")]
+    convergence: f64,
+    #[serde(default = "default_world_scale")]
     world_scale: f64,
+    #[serde(default = "default_fov_scale")]
     fov_scale: f64,
+    #[serde(default = "default_log_level")]
     log_level: String,
 }
 
@@ -50,9 +86,11 @@ fn default_config() -> DepthXRConfig {
         global: SettingsBlock {
             enabled: true,
             stereo_boost_enabled: true,
+            convergence_enabled: true,
             world_scale_enabled: true,
             fov_scale_enabled: true,
             stereo_boost: 1.10,
+            convergence: 0.0,
             world_scale: 1.0,
             fov_scale: 1.0,
             log_level: "info".into(),

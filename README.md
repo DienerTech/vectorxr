@@ -4,6 +4,7 @@ DepthXR is a lightweight OpenXR API layer plus a small Tauri desktop app for exp
 
 Current scope:
 - stereo boost
+- convergence
 - world scale
 - FoV scale
 - global settings
@@ -25,11 +26,9 @@ The repository is intentionally narrow. It does not include an in-headset UI, po
 ### Layer
 
 The layer is Windows-only and expects:
-- Visual Studio 2022 or recent MSVC toolchain
+- Visual Studio with Desktop C++ tools
 - CMake 3.28+
-- OpenXR SDK / loader development package available to CMake
-
-The build currently assumes `find_package(OpenXR CONFIG REQUIRED)` succeeds on the Windows machine.
+- Either an OpenXR SDK that provides `OpenXRConfig.cmake`, or a vendored `OpenXR.Loader.*.nupkg` package in the repository root
 
 ### App
 
@@ -40,7 +39,43 @@ The app expects:
 
 ## CMake
 
-Configure and build from the repository root:
+The simplest Windows flow is the helper script:
+
+```powershell
+.\scripts\Build-Layer.ps1
+```
+
+It will:
+- find CMake even when it is not on `PATH`
+- detect the newest installed Visual Studio generator with C++ tools
+- run a fresh configure to avoid stale cache issues after moving the repo between machines
+- build the layer and tests
+- run `ctest` by default
+
+Optional flags:
+
+```powershell
+.\scripts\Build-Layer.ps1 -Configuration Debug
+.\scripts\Build-Layer.ps1 -SkipTests
+.\scripts\Build-Layer.ps1 -CleanScratch
+```
+
+To build and register the OpenXR layer in one go:
+
+```powershell
+.\scripts\Build-And-Install-Layer.ps1
+```
+
+To register or unregister an existing build directly:
+
+```powershell
+.\scripts\Install-Layer.ps1
+.\scripts\Uninstall-Layer.ps1
+```
+
+These scripts default to the built manifest at `build/layer/Release/XR_APILAYER_NOVENDOR_depthxr.json` and accept `-BuildDir` and `-Configuration` overrides when needed.
+
+If you prefer to invoke CMake directly, configure and build from the repository root:
 
 ```bash
 cmake -S . -B build -DDEPTHXR_BUILD_LAYER=ON -DDEPTHXR_BUILD_TESTS=ON
@@ -65,7 +100,7 @@ The Tauri app uses the same resolution logic and will create a default config wh
 - loader negotiation and manifest scaffold
 - `xrCreateApiLayerInstance` and `xrGetInstanceProcAddr` interception
 - config parsing and per-exe settings resolution
-- `xrLocateViews` adjustments for stereo boost, world scale, and FoV scale
+- `xrLocateViews` adjustments for stereo boost, convergence, world scale, and FoV scale
 - placeholder effect modularization for future tuning
 
 World scale is currently implemented as a first-pass positional scaling of located eye views in `xrLocateViews`. That is enough for experimentation, but a fuller implementation may need broader space interception later.
