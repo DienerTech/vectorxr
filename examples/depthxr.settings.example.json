@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "global": {
+    "enabled": true,
+    "stereoBoostEnabled": true,
+    "worldScaleEnabled": true,
+    "fovScaleEnabled": true,
+    "stereoBoost": 1.1,
+    "worldScale": 1.0,
+    "fovScale": 1.0,
+    "logLevel": "info"
+  },
+  "profiles": [
+    {
+      "match": {
+        "exe": "DCS.exe"
+      },
+      "enabled": true,
+      "stereoBoostEnabled": true,
+      "stereoBoost": 1.12,
+      "worldScaleEnabled": true,
+      "worldScale": 1.08,
+      "fovScaleEnabled": true,
+      "fovScale": 0.96
+    }
+  ]
+}

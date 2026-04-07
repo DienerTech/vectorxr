@@ -1,0 +1,124 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://depthxr.local/schema/depthxr.schema.json",
+  "title": "DepthXR Settings",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "version",
+    "global",
+    "profiles"
+  ],
+  "properties": {
+    "version": {
+      "type": "integer",
+      "const": 1
+    },
+    "global": {
+      "$ref": "#/$defs/globalSettings"
+    },
+    "profiles": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/profile"
+      }
+    }
+  },
+  "$defs": {
+    "logLevel": {
+      "type": "string",
+      "enum": [
+        "off",
+        "error",
+        "info",
+        "debug"
+      ]
+    },
+    "settingsOverride": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "stereoBoostEnabled": {
+          "type": "boolean"
+        },
+        "worldScaleEnabled": {
+          "type": "boolean"
+        },
+        "fovScaleEnabled": {
+          "type": "boolean"
+        },
+        "stereoBoost": {
+          "type": "number",
+          "minimum": 0.5,
+          "maximum": 2.0
+        },
+        "worldScale": {
+          "type": "number",
+          "minimum": 0.5,
+          "maximum": 2.0
+        },
+        "fovScale": {
+          "type": "number",
+          "minimum": 0.5,
+          "maximum": 1.5
+        },
+        "logLevel": {
+          "$ref": "#/$defs/logLevel"
+        }
+      }
+    },
+    "globalSettings": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/settingsOverride"
+        },
+        {
+          "required": [
+            "enabled",
+            "stereoBoostEnabled",
+            "worldScaleEnabled",
+            "fovScaleEnabled",
+            "stereoBoost",
+            "worldScale",
+            "fovScale",
+            "logLevel"
+          ]
+        }
+      ]
+    },
+    "profileMatch": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "exe"
+      ],
+      "properties": {
+        "exe": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "profile": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/settingsOverride"
+        },
+        {
+          "type": "object",
+          "required": [
+            "match"
+          ],
+          "properties": {
+            "match": {
+              "$ref": "#/$defs/profileMatch"
+            }
+          }
+        }
+      ]
+    }
+  }
+}
