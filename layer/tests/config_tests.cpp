@@ -4,6 +4,7 @@
 #include <string>
 
 #include "depthxr/config_parser.h"
+#include "depthxr/effects.h"
 #include "depthxr/settings_resolver.h"
 
 namespace {
@@ -93,12 +94,61 @@ void TestExeMatch() {
     Expect(depthxr::ExeNameMatches("C:\\Games\\DCS.exe", "dcs.exe"), "Basename exe match failed");
 }
 
+void TestQuadViewStereoBoostKeepsInsetViewsInSync() {
+    depthxr::ViewAdjustmentData views[4] = {
+        {{-0.03, 0.0, 0.0}, {-1.0, 0.8, 0.9, -0.9}},
+        {{0.03, 0.0, 0.0}, {-0.8, 1.0, 0.9, -0.9}},
+        {{-0.03, 0.0, 0.0}, {-0.4, 0.2, 0.3, -0.3}},
+        {{0.03, 0.0, 0.0}, {-0.2, 0.4, 0.3, -0.3}},
+    };
+
+    depthxr::ApplyStereoBoost(views, 1.4, depthxr::ViewLayout::kStereoWithFoveatedInset);
+
+    Expect(std::abs(views[0].position.x - views[2].position.x) < 0.0001,
+           "Left outer/inset positions diverged under quad-view stereo boost");
+    Expect(std::abs(views[1].position.x - views[3].position.x) < 0.0001,
+           "Right outer/inset positions diverged under quad-view stereo boost");
+    Expect(std::abs(views[0].position.x + 0.042) < 0.0001, "Left eye stereo boost value mismatch");
+    Expect(std::abs(views[1].position.x - 0.042) < 0.0001, "Right eye stereo boost value mismatch");
+}
+
+void TestQuadViewConvergenceKeepsInsetOffsetsAligned() {
+    depthxr::ViewAdjustmentData views[4] = {
+        {{-0.03, 0.0, 0.0}, {-1.0, 0.8, 0.9, -0.9}},
+        {{0.03, 0.0, 0.0}, {-0.8, 1.0, 0.9, -0.9}},
+        {{-0.03, 0.0, 0.0}, {-0.4, 0.2, 0.3, -0.3}},
+        {{0.03, 0.0, 0.0}, {-0.2, 0.4, 0.3, -0.3}},
+    };
+
+    const double original_left_outer_span =
+        std::tan(views[0].fov.angle_right) - std::tan(views[0].fov.angle_left);
+    const double original_left_inset_span =
+        std::tan(views[2].fov.angle_right) - std::tan(views[2].fov.angle_left);
+
+    depthxr::ApplyConvergence(views, 0.07, depthxr::ViewLayout::kStereoWithFoveatedInset);
+
+    Expect(std::abs((std::tan(views[0].fov.angle_left) - std::tan(views[2].fov.angle_left)) -
+                        ((std::tan(-1.0)) - std::tan(-0.4))) < 0.0001,
+           "Left outer/inset horizontal relationship changed under convergence");
+    Expect(std::abs((std::tan(views[1].fov.angle_right) - std::tan(views[3].fov.angle_right)) -
+                        (std::tan(1.0) - std::tan(0.4))) < 0.0001,
+           "Right outer/inset horizontal relationship changed under convergence");
+    Expect(std::abs((std::tan(views[0].fov.angle_right) - std::tan(views[0].fov.angle_left)) -
+                        original_left_outer_span) < 0.0001,
+           "Outer horizontal FoV span changed under convergence");
+    Expect(std::abs((std::tan(views[2].fov.angle_right) - std::tan(views[2].fov.angle_left)) -
+                        original_left_inset_span) < 0.0001,
+           "Inset horizontal FoV span changed under convergence");
+}
+
 } // namespace
 
 int main() {
     TestParseConfig();
     TestResolveSettings();
     TestExeMatch();
+    TestQuadViewStereoBoostKeepsInsetViewsInSync();
+    TestQuadViewConvergenceKeepsInsetOffsetsAligned();
     std::cout << "depthxr_layer_tests passed\n";
     return 0;
 }

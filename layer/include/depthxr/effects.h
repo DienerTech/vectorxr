@@ -4,6 +4,12 @@
 
 namespace depthxr {
 
+enum class ViewLayout {
+    kMono,
+    kStereo,
+    kStereoWithFoveatedInset,
+};
+
 struct ViewPose {
     double x{0.0};
     double y{0.0};
@@ -22,9 +28,9 @@ struct ViewAdjustmentData {
     ViewFov fov;
 };
 
-void ApplyStereoBoost(std::span<ViewAdjustmentData> views, double factor);
-void ApplyConvergence(std::span<ViewAdjustmentData> views, double amount);
-void ApplyWorldScale(std::span<ViewAdjustmentData> views, double factor);
-void ApplyFovScale(std::span<ViewAdjustmentData> views, double factor);
+void ApplyStereoBoost(std::span<ViewAdjustmentData> views, double factor, ViewLayout layout);
+void ApplyConvergence(std::span<ViewAdjustmentData> views, double amount, ViewLayout layout);
+void ApplyWorldScale(std::span<ViewAdjustmentData> views, double factor, ViewLayout layout);
+void ApplyFovScale(std::span<ViewAdjustmentData> views, double factor, ViewLayout layout);
 
 } // namespace depthxr

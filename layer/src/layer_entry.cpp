@@ -28,6 +28,10 @@ XrResult XRAPI_CALL DepthxrDestroyInstance(XrInstance instance) {
     return OpenXrLayer::Instance().DestroyInstance(instance);
 }
 
+XrResult XRAPI_CALL DepthxrBeginSession(XrSession session, const XrSessionBeginInfo* begin_info) {
+    return OpenXrLayer::Instance().BeginSession(session, begin_info);
+}
+
 XrResult XRAPI_CALL DepthxrLocateViews(XrSession session,
                                        const XrViewLocateInfo* view_locate_info,
                                        XrViewState* view_state,
@@ -55,6 +59,10 @@ XrResult XRAPI_CALL xrGetInstanceProcAddr(XrInstance instance, const char* name,
     }
     if (requested == "xrDestroyInstance") {
         *function = reinterpret_cast<PFN_xrVoidFunction>(depthxr::DepthxrDestroyInstance);
+        return XR_SUCCESS;
+    }
+    if (requested == "xrBeginSession") {
+        *function = reinterpret_cast<PFN_xrVoidFunction>(depthxr::DepthxrBeginSession);
         return XR_SUCCESS;
     }
     if (requested == "xrLocateViews") {

@@ -22,6 +22,7 @@ class OpenXrLayer {
     XrResult OnInstanceCreated(const XrInstanceCreateInfo* create_info, XrInstance instance);
     XrResult GetInstanceProcAddr(XrInstance instance, const char* name, PFN_xrVoidFunction* function);
     XrResult DestroyInstance(XrInstance instance);
+    XrResult BeginSession(XrSession session, const XrSessionBeginInfo* begin_info);
     XrResult LocateViews(XrSession session,
                          const XrViewLocateInfo* view_locate_info,
                          XrViewState* view_state,
@@ -52,9 +53,14 @@ class OpenXrLayer {
     std::optional<ResolvedSettings> last_logged_settings_;
     uint64_t locate_views_call_count_{0};
     uint32_t pending_locate_views_diagnostics_{0};
+    XrSession active_session_{XR_NULL_HANDLE};
+    XrViewConfigurationType active_primary_view_configuration_type_{XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO};
+    bool has_active_primary_view_configuration_{false};
+    bool has_logged_quad_view_short_count_{false};
 
     PFN_xrGetInstanceProcAddr next_get_instance_proc_addr_{nullptr};
     PFN_xrDestroyInstance next_destroy_instance_{nullptr};
+    PFN_xrBeginSession next_begin_session_{nullptr};
     PFN_xrLocateViews next_locate_views_{nullptr};
     XrInstance instance_{XR_NULL_HANDLE};
 };

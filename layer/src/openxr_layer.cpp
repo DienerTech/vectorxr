@@ -16,6 +16,31 @@ bool NearlyEqual(double lhs, double rhs) {
     return std::abs(lhs - rhs) < 0.0001;
 }
 
+const char* ToString(XrViewConfigurationType type) {
+    switch (type) {
+    case XR_VIEW_CONFIGURATION_TYPE_PRIMARY_MONO:
+        return "primary_mono";
+    case XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO:
+        return "primary_stereo";
+    case XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO_WITH_FOVEATED_INSET:
+        return "primary_stereo_with_foveated_inset";
+    default:
+        return "unknown";
+    }
+}
+
+ViewLayout DetermineViewLayout(XrViewConfigurationType type, uint32_t count) {
+    if (type == XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO_WITH_FOVEATED_INSET) {
+        return count >= 4 ? ViewLayout::kStereoWithFoveatedInset : ViewLayout::kMono;
+    }
+
+    if (count >= 2) {
+        return ViewLayout::kStereo;
+    }
+
+    return ViewLayout::kMono;
+}
+
 bool SameSettings(const ResolvedSettings& lhs, const ResolvedSettings& rhs) {
     return lhs.enabled == rhs.enabled &&
            lhs.stereo_boost_enabled == rhs.stereo_boost_enabled &&
@@ -81,7 +106,7 @@ XrResult OpenXrLayer::OnInstanceCreated(const XrInstanceCreateInfo* create_info,
     }
 
     CaptureInstanceFunctions();
-    if (!next_destroy_instance_ || !next_locate_views_) {
+    if (!next_destroy_instance_ || !next_begin_session_ || !next_locate_views_) {
         logger_.Error("Failed to resolve required OpenXR function pointers");
         return XR_ERROR_INITIALIZATION_FAILED;
     }
@@ -114,8 +139,29 @@ XrResult OpenXrLayer::DestroyInstance(XrInstance instance) {
         has_loaded_config_ = false;
         locate_views_call_count_ = 0;
         pending_locate_views_diagnostics_ = 0;
+        active_session_ = XR_NULL_HANDLE;
+        active_primary_view_configuration_type_ = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
+        has_active_primary_view_configuration_ = false;
+        has_logged_quad_view_short_count_ = false;
     }
 
+    return result;
+}
+
+XrResult OpenXrLayer::BeginSession(XrSession session, const XrSessionBeginInfo* begin_info) {
+    const XrResult result = next_begin_session_(session, begin_info);
+    if (XR_FAILED(result) || !begin_info) {
+        return result;
+    }
+
+    std::scoped_lock lock(mutex_);
+    active_session_ = session;
+    active_primary_view_configuration_type_ = begin_info->primaryViewConfigurationType;
+    has_active_primary_view_configuration_ = true;
+    has_logged_quad_view_short_count_ = false;
+
+    logger_.Info(std::string("Session began with view configuration: ") +
+                 ToString(active_primary_view_configuration_type_));
     return result;
 }
 
@@ -145,6 +191,24 @@ XrResult OpenXrLayer::LocateViews(XrSession session,
         return result;
     }
 
+    XrViewConfigurationType view_configuration_type = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
+    if (view_locate_info) {
+        view_configuration_type = view_locate_info->viewConfigurationType;
+    } else if (has_active_primary_view_configuration_ && session == active_session_) {
+        view_configuration_type = active_primary_view_configuration_type_;
+    }
+
+    const ViewLayout view_layout = DetermineViewLayout(view_configuration_type, count);
+    if (view_configuration_type == XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO_WITH_FOVEATED_INSET &&
+        view_layout == ViewLayout::kMono && !has_logged_quad_view_short_count_) {
+        std::ostringstream stream;
+        stream << "Quad-view session reported only " << count
+               << " views to xrLocateViews; skipping DepthXR adjustments for this call.";
+        logger_.Info(stream.str());
+        has_logged_quad_view_short_count_ = true;
+        return result;
+    }
+
     // DepthXR keeps the interception surface minimal and applies all current
     // stereo/depth experiments in xrLocateViews.
     ++locate_views_call_count_;
@@ -169,16 +233,16 @@ XrResult OpenXrLayer::LocateViews(XrSession session,
     }
 
     if (resolved_settings_.stereo_boost_enabled && !NearlyEqual(resolved_settings_.stereo_boost, 1.0)) {
-        ApplyStereoBoost(adjusted_views, resolved_settings_.stereo_boost);
+        ApplyStereoBoost(adjusted_views, resolved_settings_.stereo_boost, view_layout);
     }
     if (resolved_settings_.convergence_enabled && !NearlyEqual(resolved_settings_.convergence, 0.0)) {
-        ApplyConvergence(adjusted_views, resolved_settings_.convergence);
+        ApplyConvergence(adjusted_views, resolved_settings_.convergence, view_layout);
     }
     if (resolved_settings_.world_scale_enabled && !NearlyEqual(resolved_settings_.world_scale, 1.0)) {
-        ApplyWorldScale(adjusted_views, resolved_settings_.world_scale);
+        ApplyWorldScale(adjusted_views, resolved_settings_.world_scale, view_layout);
     }
     if (resolved_settings_.fov_scale_enabled && !NearlyEqual(resolved_settings_.fov_scale, 1.0)) {
-        ApplyFovScale(adjusted_views, resolved_settings_.fov_scale);
+        ApplyFovScale(adjusted_views, resolved_settings_.fov_scale, view_layout);
     }
 
     for (uint32_t i = 0; i < count; ++i) {
@@ -194,6 +258,7 @@ XrResult OpenXrLayer::LocateViews(XrSession session,
     if (pending_locate_views_diagnostics_ > 0) {
         std::ostringstream stream;
         stream << "LocateViews call " << locate_views_call_count_ << ": count=" << count
+               << ", viewConfig=" << ToString(view_configuration_type)
                << ", stereoBoost=" << resolved_settings_.stereo_boost
                << ", convergence=" << resolved_settings_.convergence
                << ", worldScale=" << resolved_settings_.world_scale
@@ -261,6 +326,11 @@ void OpenXrLayer::CaptureInstanceFunctions() {
     if (XR_SUCCEEDED(next_get_instance_proc_addr_(
             instance_, "xrDestroyInstance", &function))) {
         next_destroy_instance_ = reinterpret_cast<PFN_xrDestroyInstance>(function);
+    }
+
+    function = nullptr;
+    if (XR_SUCCEEDED(next_get_instance_proc_addr_(instance_, "xrBeginSession", &function))) {
+        next_begin_session_ = reinterpret_cast<PFN_xrBeginSession>(function);
     }
 
     function = nullptr;
