@@ -484,6 +484,27 @@ bool ReadOptionalActivationMode(const JsonValue::Object& object,
     return true;
 }
 
+bool ReadOptionalActivationKey(const JsonValue::Object& object,
+                               const std::string& key,
+                               std::optional<std::string>& out,
+                               std::string& error) {
+    const auto it = object.find(key);
+    if (it == object.end()) {
+        return true;
+    }
+    if (!it->second.IsString()) {
+        error = key + " must be a string";
+        return false;
+    }
+
+    out = ParseActivationKey(it->second.AsString());
+    if (!out) {
+        error = key + " must be one of: F1-F12, A-Z, 0-9, Space";
+        return false;
+    }
+    return true;
+}
+
 bool CheckAllowedKeys(const JsonValue::Object& object,
                       const std::unordered_set<std::string>& allowed,
                       std::string& error) {
@@ -696,6 +717,7 @@ bool ParseDepthModule(const JsonValue::Object& object, DepthXrModuleConfig& out,
 bool ParsePivotDefaults(const JsonValue::Object& object, PivotXrResolvedSettings& out, std::string& error) {
     static const std::unordered_set<std::string> allowed = {
         "activationMode",
+        "activationKey",
         "rotationMultiplier",
         "smoothing",
         "deadzoneDegrees",
@@ -706,11 +728,13 @@ bool ParsePivotDefaults(const JsonValue::Object& object, PivotXrResolvedSettings
     }
 
     std::optional<ActivationMode> activation_mode;
+    std::optional<std::string> activation_key;
     std::optional<double> rotation_multiplier;
     std::optional<double> smoothing;
     std::optional<double> deadzone_degrees;
 
     if (!ReadOptionalActivationMode(object, "activationMode", activation_mode, error) ||
+        !ReadOptionalActivationKey(object, "activationKey", activation_key, error) ||
         !ReadOptionalNumber(object, "rotationMultiplier", rotation_multiplier, error) ||
         !ReadOptionalNumber(object, "smoothing", smoothing, error) ||
         !ReadOptionalNumber(object, "deadzoneDegrees", deadzone_degrees, error)) {
@@ -719,6 +743,9 @@ bool ParsePivotDefaults(const JsonValue::Object& object, PivotXrResolvedSettings
 
     if (activation_mode.has_value()) {
         out.activation_mode = *activation_mode;
+    }
+    if (activation_key.has_value()) {
+        out.activation_key = *activation_key;
     }
     if (rotation_multiplier.has_value()) {
         out.rotation_multiplier = *rotation_multiplier;

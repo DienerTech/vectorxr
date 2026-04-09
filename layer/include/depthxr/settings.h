@@ -59,6 +59,7 @@ struct DepthXrModuleConfig {
 struct PivotXrResolvedSettings {
     bool enabled{false};
     ActivationMode activation_mode{ActivationMode::Toggle};
+    std::string activation_key{"F8"};
     double rotation_multiplier{1.5};
     double smoothing{0.2};
     double deadzone_degrees{8.0};
@@ -87,5 +88,6 @@ std::optional<LogLevel> ParseLogLevel(const std::string& value);
 
 const char* ToString(ActivationMode mode);
 std::optional<ActivationMode> ParseActivationMode(const std::string& value);
+std::optional<std::string> ParseActivationKey(const std::string& value);
 
 } // namespace depthxr

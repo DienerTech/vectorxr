@@ -37,6 +37,8 @@ class OpenXrLayer {
     void RefreshResolvedSettings();
     void CaptureInstanceFunctions();
     void LogResolvedSettings(const ResolvedRuntimeConfig& settings);
+    void ResetPivotActivationState();
+    bool IsPivotXrActive(const PivotXrResolvedSettings& settings);
 
     std::mutex mutex_;
     std::filesystem::path dll_directory_;
@@ -53,10 +55,14 @@ class OpenXrLayer {
     std::optional<ResolvedRuntimeConfig> last_logged_settings_;
     uint64_t locate_views_call_count_{0};
     uint32_t pending_locate_views_diagnostics_{0};
+    double pivotxr_smoothed_extra_yaw_radians_{0.0};
+    bool pivotxr_toggle_enabled_{false};
+    bool pivotxr_activation_key_was_down_{false};
     XrSession active_session_{XR_NULL_HANDLE};
     XrViewConfigurationType active_primary_view_configuration_type_{XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO};
     bool has_active_primary_view_configuration_{false};
     bool has_logged_quad_view_short_count_{false};
+    bool has_logged_pivotxr_spike_mode_{false};
 
     PFN_xrGetInstanceProcAddr next_get_instance_proc_addr_{nullptr};
     PFN_xrDestroyInstance next_destroy_instance_{nullptr};

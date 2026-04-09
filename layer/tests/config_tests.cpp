@@ -49,6 +49,7 @@ void TestParseConfig() {
       "enabled": false,
       "defaults": {
         "activationMode": "toggle",
+        "activationKey": "f8",
         "rotationMultiplier": 1.5,
         "smoothing": 0.2,
         "deadzoneDegrees": 8.0
@@ -67,6 +68,7 @@ void TestParseConfig() {
     Expect(std::abs(result.document.depthxr.defaults.convergence - 0.08) < 0.0001, "DepthXR convergence mismatch");
     Expect(result.document.depthxr.profiles.size() == 1, "DepthXR profile count mismatch");
     Expect(result.document.depthxr.profiles[0].match.exe_name == "Game.exe", "DepthXR profile exe mismatch");
+    Expect(result.document.pivotxr.defaults.activation_key == "F8", "PivotXR activation key mismatch");
 }
 
 void TestResolveRuntimeConfig() {
@@ -103,6 +105,7 @@ void TestResolveRuntimeConfig() {
       "enabled": true,
       "defaults": {
         "activationMode": "hold",
+        "activationKey": "Space",
         "rotationMultiplier": 1.7,
         "smoothing": 0.25,
         "deadzoneDegrees": 9.0
@@ -121,6 +124,7 @@ void TestResolveRuntimeConfig() {
     Expect(std::abs(resolved.depthxr.convergence - 0.12) < 0.0001, "Profile convergence override was not applied");
     Expect(resolved.pivotxr.enabled, "PivotXR module enable was not resolved");
     Expect(resolved.pivotxr.activation_mode == depthxr::ActivationMode::Hold, "PivotXR activation mode mismatch");
+    Expect(resolved.pivotxr.activation_key == "Space", "PivotXR activation key was not resolved");
 }
 
 void TestDisabledProfileFallsBackToDefaults() {
@@ -157,6 +161,7 @@ void TestDisabledProfileFallsBackToDefaults() {
       "enabled": false,
       "defaults": {
         "activationMode": "toggle",
+        "activationKey": "F8",
         "rotationMultiplier": 1.5,
         "smoothing": 0.2,
         "deadzoneDegrees": 8.0
@@ -172,6 +177,44 @@ void TestDisabledProfileFallsBackToDefaults() {
     const depthxr::ResolvedRuntimeConfig resolved = depthxr::ResolveRuntimeConfig(result.document, "DCS.exe");
     Expect(std::abs(resolved.depthxr.stereo_boost - 1.05) < 0.0001, "Disabled profile should fall back to defaults");
     Expect(std::abs(resolved.depthxr.convergence - 0.01) < 0.0001, "Disabled profile convergence should fall back to defaults");
+}
+
+void TestInvalidPivotActivationKeyRejected() {
+    const std::string json = R"json(
+{
+  "version": 2,
+  "core": {
+    "enabled": true,
+    "logLevel": "info",
+    "logRetentionFiles": 7
+  },
+  "modules": {
+    "depthxr": {
+      "enabled": true,
+      "defaults": {
+        "stereoBoostEnabled": true,
+        "convergenceEnabled": true,
+        "stereoBoost": 1.05,
+        "convergence": 0.0
+      },
+      "profiles": []
+    },
+    "pivotxr": {
+      "enabled": true,
+      "defaults": {
+        "activationMode": "toggle",
+        "activationKey": "Mouse4",
+        "rotationMultiplier": 1.5,
+        "smoothing": 0.2,
+        "deadzoneDegrees": 8.0
+      }
+    }
+  }
+}
+)json";
+
+    const depthxr::ParseResult result = depthxr::ParseConfig(json);
+    Expect(!result.ok, "Config parser accepted an unsupported PivotXR activation key");
 }
 
 void TestExeMatch() {
@@ -226,15 +269,60 @@ void TestQuadViewConvergenceKeepsInsetOffsetsAligned() {
            "Inset horizontal FoV span changed under convergence");
 }
 
+double ExtractYaw(const depthxr::ViewOrientation& orientation) {
+    return std::atan2(
+        2.0 * (orientation.w * orientation.y + orientation.x * orientation.z),
+        1.0 - 2.0 * (orientation.y * orientation.y + orientation.x * orientation.x));
+}
+
+depthxr::ViewOrientation YawOrientation(double yaw_radians) {
+    return {0.0, std::sin(yaw_radians * 0.5), 0.0, std::cos(yaw_radians * 0.5)};
+}
+
+void TestPivotYawAmplifiesBeyondDeadzone() {
+    depthxr::ViewAdjustmentData views[2] = {
+        {{-0.03, 0.0, 0.0}, {-1.0, 0.8, 0.9, -0.9}, YawOrientation(30.0 * 3.14159265358979323846 / 180.0)},
+        {{0.03, 0.0, 0.0}, {-0.8, 1.0, 0.9, -0.9}, YawOrientation(30.0 * 3.14159265358979323846 / 180.0)},
+    };
+
+    double smoothed_extra_yaw = 0.0;
+    depthxr::ApplyPivotYaw(views, 1.5, 10.0, 0.0, depthxr::ViewLayout::kStereo, smoothed_extra_yaw);
+
+    const double left_yaw = ExtractYaw(views[0].orientation) * 180.0 / 3.14159265358979323846;
+    const double right_yaw = ExtractYaw(views[1].orientation) * 180.0 / 3.14159265358979323846;
+
+    Expect(std::abs(left_yaw - 40.0) < 0.2, "PivotXR yaw amplification did not reach the expected left-eye yaw");
+    Expect(std::abs(right_yaw - 40.0) < 0.2, "PivotXR yaw amplification did not reach the expected right-eye yaw");
+    Expect(std::abs(views[0].position.x + views[1].position.x) < 0.0001, "PivotXR should preserve mirrored eye offsets");
+    Expect(smoothed_extra_yaw > 0.0, "PivotXR should accumulate positive extra yaw beyond the deadzone");
+}
+
+void TestPivotYawNoOpInsideDeadzone() {
+    depthxr::ViewAdjustmentData views[2] = {
+        {{-0.03, 0.0, 0.0}, {-1.0, 0.8, 0.9, -0.9}, YawOrientation(5.0 * 3.14159265358979323846 / 180.0)},
+        {{0.03, 0.0, 0.0}, {-0.8, 1.0, 0.9, -0.9}, YawOrientation(5.0 * 3.14159265358979323846 / 180.0)},
+    };
+
+    double smoothed_extra_yaw = 0.0;
+    depthxr::ApplyPivotYaw(views, 1.7, 10.0, 0.0, depthxr::ViewLayout::kStereo, smoothed_extra_yaw);
+
+    const double left_yaw = ExtractYaw(views[0].orientation) * 180.0 / 3.14159265358979323846;
+    Expect(std::abs(left_yaw - 5.0) < 0.2, "PivotXR should leave yaw unchanged inside the deadzone");
+    Expect(std::abs(smoothed_extra_yaw) < 0.0001, "PivotXR should not accumulate extra yaw inside the deadzone");
+}
+
 } // namespace
 
 int main() {
     TestParseConfig();
     TestResolveRuntimeConfig();
     TestDisabledProfileFallsBackToDefaults();
+    TestInvalidPivotActivationKeyRejected();
     TestExeMatch();
     TestQuadViewStereoBoostKeepsInsetViewsInSync();
     TestQuadViewConvergenceKeepsInsetOffsetsAligned();
+    TestPivotYawAmplifiesBeyondDeadzone();
+    TestPivotYawNoOpInsideDeadzone();
     std::cout << "depthxr_layer_tests passed\n";
     return 0;
 }

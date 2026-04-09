@@ -1,9 +1,24 @@
 #include "depthxr/settings.h"
 
 #include <algorithm>
+#include <cctype>
 
 namespace depthxr {
 namespace {
+
+std::string TrimWhitespace(const std::string& value) {
+    size_t begin = 0;
+    while (begin < value.size() && std::isspace(static_cast<unsigned char>(value[begin]))) {
+        ++begin;
+    }
+
+    size_t end = value.size();
+    while (end > begin && std::isspace(static_cast<unsigned char>(value[end - 1]))) {
+        --end;
+    }
+
+    return value.substr(begin, end - begin);
+}
 
 std::string NormalizeValue(const std::string& value) {
     std::string normalized = value;
@@ -68,6 +83,51 @@ std::optional<ActivationMode> ParseActivationMode(const std::string& value) {
     }
     if (normalized == "hold") {
         return ActivationMode::Hold;
+    }
+
+    return std::nullopt;
+}
+
+std::optional<std::string> ParseActivationKey(const std::string& value) {
+    const std::string trimmed = TrimWhitespace(value);
+    if (trimmed.empty()) {
+        return std::nullopt;
+    }
+
+    if (trimmed.size() == 1) {
+        const unsigned char character = static_cast<unsigned char>(trimmed[0]);
+        if (std::isalpha(character)) {
+            return std::string(1, static_cast<char>(std::toupper(character)));
+        }
+        if (std::isdigit(character)) {
+            return trimmed;
+        }
+    }
+
+    const std::string normalized = NormalizeValue(trimmed);
+    if (normalized == "space") {
+        return std::string("Space");
+    }
+
+    if (normalized.size() >= 2 && normalized[0] == 'f') {
+        bool digits_only = true;
+        for (size_t index = 1; index < normalized.size(); ++index) {
+            if (!std::isdigit(static_cast<unsigned char>(normalized[index]))) {
+                digits_only = false;
+                break;
+            }
+        }
+
+        if (digits_only) {
+            try {
+                const int function_key = std::stoi(normalized.substr(1));
+                if (function_key >= 1 && function_key <= 12) {
+                    return std::string("F") + std::to_string(function_key);
+                }
+            } catch (...) {
+                return std::nullopt;
+            }
+        }
     }
 
     return std::nullopt;

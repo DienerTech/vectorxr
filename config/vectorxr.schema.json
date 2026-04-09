@@ -38,6 +38,10 @@
         "hold"
       ]
     },
+    "activationKey": {
+      "type": "string",
+      "pattern": "^(F([1-9]|1[0-2])|[A-Z]|[0-9]|Space)$"
+    },
     "core": {
       "type": "object",
       "additionalProperties": false,
@@ -154,6 +158,7 @@
       "additionalProperties": false,
       "required": [
         "activationMode",
+        "activationKey",
         "rotationMultiplier",
         "smoothing",
         "deadzoneDegrees"
@@ -161,6 +166,9 @@
       "properties": {
         "activationMode": {
           "$ref": "#/$defs/activationMode"
+        },
+        "activationKey": {
+          "$ref": "#/$defs/activationKey"
         },
         "rotationMultiplier": {
           "type": "number",

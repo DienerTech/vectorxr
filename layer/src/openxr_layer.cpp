@@ -5,6 +5,16 @@
 #include <sstream>
 #include <vector>
 
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <Windows.h>
+#endif
+
 #include "depthxr/config_path.h"
 #include "depthxr/effects.h"
 #include "depthxr/process_info.h"
@@ -14,6 +24,10 @@ namespace {
 
 bool NearlyEqual(double lhs, double rhs) {
     return std::abs(lhs - rhs) < 0.0001;
+}
+
+double HorizontalProjectionCenter(const ViewFov& fov) {
+    return (std::tan(fov.angle_left) + std::tan(fov.angle_right)) * 0.5;
 }
 
 const char* ToString(XrViewConfigurationType type) {
@@ -52,10 +66,45 @@ bool SameSettings(const ResolvedRuntimeConfig& lhs, const ResolvedRuntimeConfig&
            NearlyEqual(lhs.depthxr.convergence, rhs.depthxr.convergence) &&
            lhs.pivotxr.enabled == rhs.pivotxr.enabled &&
            lhs.pivotxr.activation_mode == rhs.pivotxr.activation_mode &&
+           lhs.pivotxr.activation_key == rhs.pivotxr.activation_key &&
            NearlyEqual(lhs.pivotxr.rotation_multiplier, rhs.pivotxr.rotation_multiplier) &&
            NearlyEqual(lhs.pivotxr.smoothing, rhs.pivotxr.smoothing) &&
            NearlyEqual(lhs.pivotxr.deadzone_degrees, rhs.pivotxr.deadzone_degrees);
 }
+
+bool SamePivotActivationBinding(const PivotXrResolvedSettings& lhs, const PivotXrResolvedSettings& rhs) {
+    return lhs.enabled == rhs.enabled && lhs.activation_mode == rhs.activation_mode &&
+           lhs.activation_key == rhs.activation_key;
+}
+
+#if defined(_WIN32)
+std::optional<int> ToVirtualKey(std::string_view activation_key) {
+    if (activation_key == "Space") {
+        return VK_SPACE;
+    }
+
+    if (activation_key.size() == 1) {
+        const char character = activation_key[0];
+        if ((character >= 'A' && character <= 'Z') || (character >= '0' && character <= '9')) {
+            return static_cast<int>(character);
+        }
+    }
+
+    if (activation_key.size() >= 2 && activation_key[0] == 'F') {
+        const std::string suffix(activation_key.substr(1));
+        const int function_key = std::stoi(suffix);
+        if (function_key >= 1 && function_key <= 12) {
+            return VK_F1 + (function_key - 1);
+        }
+    }
+
+    return std::nullopt;
+}
+
+bool IsVirtualKeyDown(int virtual_key) {
+    return (GetAsyncKeyState(virtual_key) & 0x8000) != 0;
+}
+#endif
 
 ConfigDocument DefaultConfig() {
     ConfigDocument document;
@@ -69,7 +118,8 @@ void AppendViewSummary(std::ostringstream& stream, std::span<const ViewAdjustmen
         stream << " view" << i << "Pos=(" << views[i].position.x << ", " << views[i].position.y << ", "
                << views[i].position.z << ")"
                << " view" << i << "Fov=(" << views[i].fov.angle_left << ", " << views[i].fov.angle_right << ", "
-               << views[i].fov.angle_up << ", " << views[i].fov.angle_down << ")";
+               << views[i].fov.angle_up << ", " << views[i].fov.angle_down << ")"
+               << " view" << i << "ProjCenter=" << HorizontalProjectionCenter(views[i].fov);
     }
 }
 
@@ -143,10 +193,12 @@ XrResult OpenXrLayer::DestroyInstance(XrInstance instance) {
         has_loaded_config_ = false;
         locate_views_call_count_ = 0;
         pending_locate_views_diagnostics_ = 0;
+        ResetPivotActivationState();
         active_session_ = XR_NULL_HANDLE;
         active_primary_view_configuration_type_ = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
         has_active_primary_view_configuration_ = false;
         has_logged_quad_view_short_count_ = false;
+        has_logged_pivotxr_spike_mode_ = false;
     }
 
     return result;
@@ -186,7 +238,7 @@ XrResult OpenXrLayer::LocateViews(XrSession session,
     ReloadConfigIfNeeded();
     RefreshResolvedSettings();
 
-    if (!resolved_settings_.core.enabled || !resolved_settings_.depthxr.enabled) {
+    if (!resolved_settings_.core.enabled) {
         return result;
     }
 
@@ -234,12 +286,46 @@ XrResult OpenXrLayer::LocateViews(XrSession session,
         adjusted_views[i].fov.angle_right = views[i].fov.angleRight;
         adjusted_views[i].fov.angle_up = views[i].fov.angleUp;
         adjusted_views[i].fov.angle_down = views[i].fov.angleDown;
+        original_views[i].orientation.x = views[i].pose.orientation.x;
+        original_views[i].orientation.y = views[i].pose.orientation.y;
+        original_views[i].orientation.z = views[i].pose.orientation.z;
+        original_views[i].orientation.w = views[i].pose.orientation.w;
+        adjusted_views[i].orientation.x = views[i].pose.orientation.x;
+        adjusted_views[i].orientation.y = views[i].pose.orientation.y;
+        adjusted_views[i].orientation.z = views[i].pose.orientation.z;
+        adjusted_views[i].orientation.w = views[i].pose.orientation.w;
     }
 
-    if (resolved_settings_.depthxr.stereo_boost_enabled && !NearlyEqual(resolved_settings_.depthxr.stereo_boost, 1.0)) {
+    const bool pivotxr_active = IsPivotXrActive(resolved_settings_.pivotxr);
+    if (resolved_settings_.pivotxr.enabled && !has_logged_pivotxr_spike_mode_) {
+        std::ostringstream stream;
+        stream << "PivotXR spike is active in experimental xrLocateViews mode; press "
+               << resolved_settings_.pivotxr.activation_key << " to "
+               << (resolved_settings_.pivotxr.activation_mode == ActivationMode::Toggle ? "toggle" : "hold")
+               << " the extra pivot factor.";
+        logger_.Info(stream.str());
+        has_logged_pivotxr_spike_mode_ = true;
+    }
+
+    if (pivotxr_active) {
+        ApplyPivotYaw(adjusted_views,
+                      resolved_settings_.pivotxr.rotation_multiplier,
+                      resolved_settings_.pivotxr.deadzone_degrees,
+                      resolved_settings_.pivotxr.smoothing,
+                      view_layout,
+                      pivotxr_smoothed_extra_yaw_radians_);
+    } else {
+        pivotxr_smoothed_extra_yaw_radians_ = 0.0;
+    }
+
+    if (resolved_settings_.depthxr.enabled &&
+        resolved_settings_.depthxr.stereo_boost_enabled &&
+        !NearlyEqual(resolved_settings_.depthxr.stereo_boost, 1.0)) {
         ApplyStereoBoost(adjusted_views, resolved_settings_.depthxr.stereo_boost, view_layout);
     }
-    if (resolved_settings_.depthxr.convergence_enabled && !NearlyEqual(resolved_settings_.depthxr.convergence, 0.0)) {
+    if (resolved_settings_.depthxr.enabled &&
+        resolved_settings_.depthxr.convergence_enabled &&
+        !NearlyEqual(resolved_settings_.depthxr.convergence, 0.0)) {
         ApplyConvergence(adjusted_views, resolved_settings_.depthxr.convergence, view_layout);
     }
 
@@ -247,6 +333,10 @@ XrResult OpenXrLayer::LocateViews(XrSession session,
         views[i].pose.position.x = static_cast<float>(adjusted_views[i].position.x);
         views[i].pose.position.y = static_cast<float>(adjusted_views[i].position.y);
         views[i].pose.position.z = static_cast<float>(adjusted_views[i].position.z);
+        views[i].pose.orientation.x = static_cast<float>(adjusted_views[i].orientation.x);
+        views[i].pose.orientation.y = static_cast<float>(adjusted_views[i].orientation.y);
+        views[i].pose.orientation.z = static_cast<float>(adjusted_views[i].orientation.z);
+        views[i].pose.orientation.w = static_cast<float>(adjusted_views[i].orientation.w);
         views[i].fov.angleLeft = static_cast<float>(adjusted_views[i].fov.angle_left);
         views[i].fov.angleRight = static_cast<float>(adjusted_views[i].fov.angle_right);
         views[i].fov.angleUp = static_cast<float>(adjusted_views[i].fov.angle_up);
@@ -255,10 +345,27 @@ XrResult OpenXrLayer::LocateViews(XrSession session,
 
     if (pending_locate_views_diagnostics_ > 0) {
         std::ostringstream stream;
+        const double left_position_delta =
+            adjusted_views[0].position.x - original_views[0].position.x;
+        const double right_position_delta =
+            count > 1 ? adjusted_views[1].position.x - original_views[1].position.x : 0.0;
+        const double left_projection_center_delta =
+            HorizontalProjectionCenter(adjusted_views[0].fov) - HorizontalProjectionCenter(original_views[0].fov);
+        const double right_projection_center_delta = count > 1
+                                                         ? HorizontalProjectionCenter(adjusted_views[1].fov) -
+                                                               HorizontalProjectionCenter(original_views[1].fov)
+                                                         : 0.0;
         stream << "LocateViews call " << locate_views_call_count_ << ": count=" << count
                << ", viewConfig=" << ToString(view_configuration_type)
+               << ", pivotExtraYawRadians=" << pivotxr_smoothed_extra_yaw_radians_
+               << ", stereoBoostEnabled=" << resolved_settings_.depthxr.stereo_boost_enabled
                << ", stereoBoost=" << resolved_settings_.depthxr.stereo_boost
+               << ", convergenceEnabled=" << resolved_settings_.depthxr.convergence_enabled
                << ", convergence=" << resolved_settings_.depthxr.convergence
+               << ", leftXDelta=" << left_position_delta
+               << ", rightXDelta=" << right_position_delta
+               << ", leftProjCenterDelta=" << left_projection_center_delta
+               << ", rightProjCenterDelta=" << right_projection_center_delta
                << ", before:";
         AppendViewSummary(stream, original_views);
         stream << " after:";
@@ -307,7 +414,12 @@ void OpenXrLayer::ReloadConfigIfNeeded() {
 }
 
 void OpenXrLayer::RefreshResolvedSettings() {
+    const ResolvedRuntimeConfig previous = resolved_settings_;
     resolved_settings_ = ResolveRuntimeConfig(config_, current_exe_name_);
+    if (!SamePivotActivationBinding(previous.pivotxr, resolved_settings_.pivotxr)) {
+        ResetPivotActivationState();
+        has_logged_pivotxr_spike_mode_ = false;
+    }
     logger_.SetLevel(resolved_settings_.core.log_level);
     logger_.SetRetentionFiles(resolved_settings_.core.log_retention_files);
     if (!last_logged_settings_ || !SameSettings(*last_logged_settings_, resolved_settings_)) {
@@ -342,11 +454,52 @@ void OpenXrLayer::LogResolvedSettings(const ResolvedRuntimeConfig& settings) {
            << "coreEnabled=" << settings.core.enabled
            << ", logLevel=" << ToString(settings.core.log_level)
            << ", depthxrEnabled=" << settings.depthxr.enabled
+           << ", stereoBoostEnabled=" << settings.depthxr.stereo_boost_enabled
            << ", stereoBoost=" << settings.depthxr.stereo_boost
+           << ", convergenceEnabled=" << settings.depthxr.convergence_enabled
            << ", convergence=" << settings.depthxr.convergence
            << ", pivotxrEnabled=" << settings.pivotxr.enabled
-           << ", pivotActivation=" << ToString(settings.pivotxr.activation_mode);
+           << ", pivotActivation=" << ToString(settings.pivotxr.activation_mode)
+           << ", pivotActivationKey=" << settings.pivotxr.activation_key;
     logger_.Debug(stream.str());
+}
+
+void OpenXrLayer::ResetPivotActivationState() {
+    pivotxr_smoothed_extra_yaw_radians_ = 0.0;
+    pivotxr_toggle_enabled_ = false;
+    pivotxr_activation_key_was_down_ = false;
+}
+
+bool OpenXrLayer::IsPivotXrActive(const PivotXrResolvedSettings& settings) {
+    if (!settings.enabled) {
+        ResetPivotActivationState();
+        return false;
+    }
+
+#if defined(_WIN32)
+    const std::optional<int> virtual_key = ToVirtualKey(settings.activation_key);
+    if (!virtual_key.has_value()) {
+        return false;
+    }
+
+    const bool key_down = IsVirtualKeyDown(*virtual_key);
+    const bool was_pressed_this_call = key_down && !pivotxr_activation_key_was_down_;
+    pivotxr_activation_key_was_down_ = key_down;
+
+    if (settings.activation_mode == ActivationMode::Toggle) {
+        if (was_pressed_this_call) {
+            pivotxr_toggle_enabled_ = !pivotxr_toggle_enabled_;
+            logger_.Info(std::string("PivotXR extra pivot factor ") +
+                         (pivotxr_toggle_enabled_ ? "enabled" : "disabled") + " via " +
+                         settings.activation_key + ".");
+        }
+        return pivotxr_toggle_enabled_;
+    }
+
+    return key_down;
+#else
+    return settings.enabled;
+#endif
 }
 
 } // namespace depthxr

@@ -38,6 +38,10 @@ fn default_activation_mode() -> String {
     "toggle".into()
 }
 
+fn default_activation_key() -> String {
+    "F8".into()
+}
+
 fn default_rotation_multiplier() -> f64 {
     1.5
 }
@@ -138,6 +142,8 @@ impl Default for DepthXRModuleConfig {
 struct PivotXRDefaults {
     #[serde(default = "default_activation_mode")]
     activation_mode: String,
+    #[serde(default = "default_activation_key")]
+    activation_key: String,
     #[serde(default = "default_rotation_multiplier")]
     rotation_multiplier: f64,
     #[serde(default = "default_smoothing")]
@@ -150,6 +156,7 @@ impl Default for PivotXRDefaults {
     fn default() -> Self {
         Self {
             activation_mode: default_activation_mode(),
+            activation_key: default_activation_key(),
             rotation_multiplier: default_rotation_multiplier(),
             smoothing: default_smoothing(),
             deadzone_degrees: default_deadzone_degrees(),

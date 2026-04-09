@@ -1,6 +1,24 @@
 export type LogLevel = 'off' | 'error' | 'info' | 'debug'
 export type ActivationMode = 'toggle' | 'hold'
 export type AppTab = 'core' | 'depthxr' | 'pivotxr'
+export const pivotActivationKeyGroups = [
+  {
+    label: 'Function Keys',
+    options: Array.from({ length: 12 }, (_, index) => `F${index + 1}`),
+  },
+  {
+    label: 'Letter Keys',
+    options: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'.split(''),
+  },
+  {
+    label: 'Number Keys',
+    options: '0123456789'.split(''),
+  },
+  {
+    label: 'Special Keys',
+    options: ['Space'],
+  },
+] as const
 
 export interface CoreConfig {
   enabled: boolean
@@ -32,6 +50,7 @@ export interface DepthXRModuleConfig {
 
 export interface PivotXRDefaults {
   activationMode: ActivationMode
+  activationKey: string
   rotationMultiplier: number
   smoothing: number
   deadzoneDegrees: number
@@ -102,6 +121,7 @@ export function defaultDepthXRSettings(): DepthXRSettings {
 export function defaultPivotXRDefaults(): PivotXRDefaults {
   return {
     activationMode: 'toggle',
+    activationKey: 'F8',
     rotationMultiplier: 1.5,
     smoothing: 0.2,
     deadzoneDegrees: 8,
@@ -173,10 +193,36 @@ function normalizePivotXRDefaults(value: unknown, fallback: PivotXRDefaults): Pi
 
   return {
     activationMode,
+    activationKey: normalizePivotActivationKey(source.activationKey, fallback.activationKey),
     rotationMultiplier: normalizeNumber(source.rotationMultiplier, fallback.rotationMultiplier),
     smoothing: normalizeNumber(source.smoothing, fallback.smoothing),
     deadzoneDegrees: normalizeNumber(source.deadzoneDegrees, fallback.deadzoneDegrees),
   }
+}
+
+function normalizePivotActivationKey(value: unknown, fallback: string): string {
+  if (typeof value !== 'string') {
+    return fallback
+  }
+
+  const trimmed = value.trim()
+  if (/^[a-z]$/i.test(trimmed)) {
+    return trimmed.toUpperCase()
+  }
+
+  if (/^\d$/.test(trimmed)) {
+    return trimmed
+  }
+
+  if (/^f([1-9]|1[0-2])$/i.test(trimmed)) {
+    return `F${trimmed.slice(1)}`
+  }
+
+  if (/^space$/i.test(trimmed)) {
+    return 'Space'
+  }
+
+  return fallback
 }
 
 function normalizeVectorXRConfig(value: unknown): VectorXRConfig {
