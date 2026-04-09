@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import EffectField from '../EffectField.vue'
 import ProfileEditor from '../ProfileEditor.vue'
+import { convergenceBadge, fromConvergenceDisplay, fromStereoBoostDisplay, stereoBoostBadge, toConvergenceDisplay, toStereoBoostDisplay } from '../../lib/display'
 import type { VectorXRConfig } from '../../lib/model'
 
 defineProps<{
@@ -29,7 +30,8 @@ defineEmits<{
       </div>
 
       <div class="mb-4 rounded-2xl border border-dashed border-black/10 bg-[#f7f2e8] px-4 py-3 text-sm leading-6 text-depthxr-steel">
-        Milestone 2 keeps DepthXR focused on stereo boost and convergence while the app shell evolves around it.
+        Milestone 2 keeps DepthXR focused on stereo boost and convergence while the app shell evolves around it. Display values are now tuned for
+        easier sharing and discussion, while the config still stores canonical runtime numbers.
       </div>
 
       <div class="grid gap-3 lg:grid-cols-2">
@@ -41,6 +43,12 @@ defineEmits<{
           :min="0.5"
           :max="2"
           :step="0.01"
+          :display-min="-50"
+          :display-max="100"
+          :display-step="0.1"
+          :display-value="toStereoBoostDisplay"
+          :parse-display-value="fromStereoBoostDisplay"
+          :display-badge="stereoBoostBadge"
         />
         <EffectField
           v-model:enabled="config.modules.depthxr.defaults.convergenceEnabled"
@@ -50,6 +58,12 @@ defineEmits<{
           :min="-0.5"
           :max="0.5"
           :step="0.001"
+          :display-min="-500"
+          :display-max="500"
+          :display-step="0.1"
+          :display-value="toConvergenceDisplay"
+          :parse-display-value="fromConvergenceDisplay"
+          :display-badge="convergenceBadge"
         />
       </div>
     </article>
