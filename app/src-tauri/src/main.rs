@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::UNIX_EPOCH;
 
 fn default_true() -> bool {
     true
@@ -199,6 +200,23 @@ struct ConfigEnvelope {
     config: VectorXRConfig,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LogFileEntry {
+    name: String,
+    path: String,
+    modified_unix_seconds: u64,
+    content: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LogSnapshot {
+    directory: String,
+    active_path: String,
+    files: Vec<LogFileEntry>,
+}
+
 fn default_config() -> VectorXRConfig {
     VectorXRConfig {
         version: 2,
@@ -230,6 +248,29 @@ fn resolve_config_path() -> PathBuf {
         .join("vectorxr.settings.json")
 }
 
+fn resolve_log_path() -> PathBuf {
+    if let Ok(env_path) = env::var("VECTORXR_LOG_PATH") {
+        if !env_path.trim().is_empty() {
+            return PathBuf::from(env_path);
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        if let Ok(local_app_data) = env::var("LOCALAPPDATA") {
+            return PathBuf::from(local_app_data)
+                .join("VectorXR")
+                .join("logs")
+                .join("vectorxr-layer.log");
+        }
+    }
+
+    env::current_dir()
+        .unwrap_or_else(|_| PathBuf::from("."))
+        .join("logs")
+        .join("vectorxr-layer.log")
+}
+
 fn ensure_parent(path: &Path) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|error| error.to_string())?;
@@ -245,6 +286,77 @@ fn ensure_default_file(path: &Path) -> Result<(), String> {
     ensure_parent(path)?;
     let json = serde_json::to_string_pretty(&default_config()).map_err(|error| error.to_string())?;
     fs::write(path, json).map_err(|error| error.to_string())
+}
+
+fn log_series_paths(base_path: &Path) -> Result<Vec<PathBuf>, String> {
+    let directory = base_path.parent().unwrap_or_else(|| Path::new("."));
+    if !directory.exists() {
+        return Ok(Vec::new());
+    }
+
+    let stem = base_path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("vectorxr-layer")
+        .to_string();
+    let extension = base_path
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(|value| format!(".{value}"))
+        .unwrap_or_else(|| ".log".into());
+
+    let mut files = Vec::new();
+    for entry in fs::read_dir(directory).map_err(|error| error.to_string())? {
+        let entry = entry.map_err(|error| error.to_string())?;
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+
+        let Some(file_stem) = path.file_stem().and_then(|value| value.to_str()) else {
+            continue;
+        };
+        let file_extension = path
+            .extension()
+            .and_then(|value| value.to_str())
+            .map(|value| format!(".{value}"))
+            .unwrap_or_default();
+
+        if file_extension != extension {
+            continue;
+        }
+
+        if file_stem == stem || file_stem.starts_with(&(stem.clone() + "-")) {
+            files.push(path);
+        }
+    }
+
+    files.sort_by(|lhs, rhs| {
+        let lhs_modified = fs::metadata(lhs)
+            .and_then(|metadata| metadata.modified())
+            .unwrap_or(UNIX_EPOCH);
+        let rhs_modified = fs::metadata(rhs)
+            .and_then(|metadata| metadata.modified())
+            .unwrap_or(UNIX_EPOCH);
+        rhs_modified.cmp(&lhs_modified)
+    });
+
+    Ok(files)
+}
+
+fn read_log_preview(path: &Path) -> String {
+    const MAX_BYTES: usize = 120_000;
+
+    let Ok(content) = fs::read_to_string(path) else {
+        return "Unable to read this log file.".into();
+    };
+
+    if content.len() <= MAX_BYTES {
+        return content;
+    }
+
+    let start = content.len().saturating_sub(MAX_BYTES);
+    format!("... truncated to the most recent log output ...\n{}", &content[start..])
 }
 
 #[tauri::command]
@@ -271,9 +383,51 @@ fn save_config(config: VectorXRConfig) -> Result<String, String> {
     Ok(path.to_string_lossy().into_owned())
 }
 
+#[tauri::command]
+fn load_log_snapshot() -> Result<LogSnapshot, String> {
+    let base_path = resolve_log_path();
+    let directory = base_path.parent().unwrap_or_else(|| Path::new(".")).to_path_buf();
+    let files = log_series_paths(&base_path)?
+        .into_iter()
+        .take(10)
+        .map(|path| {
+            let modified_unix_seconds = fs::metadata(&path)
+                .and_then(|metadata| metadata.modified())
+                .ok()
+                .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+                .map(|duration| duration.as_secs())
+                .unwrap_or_default();
+
+            let name = path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or("log")
+                .to_string();
+
+            LogFileEntry {
+                name,
+                path: path.to_string_lossy().into_owned(),
+                modified_unix_seconds,
+                content: read_log_preview(&path),
+            }
+        })
+        .collect::<Vec<_>>();
+
+    let active_path = files
+        .first()
+        .map(|entry| entry.path.clone())
+        .unwrap_or_else(|| base_path.to_string_lossy().into_owned());
+
+    Ok(LogSnapshot {
+        directory: directory.to_string_lossy().into_owned(),
+        active_path,
+        files,
+    })
+}
+
 fn main() {
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![load_config, save_config])
+        .invoke_handler(tauri::generate_handler![load_config, save_config, load_log_snapshot])
         .run(tauri::generate_context!())
         .expect("failed to run VectorXR Tauri app");
 }

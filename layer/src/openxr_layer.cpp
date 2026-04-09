@@ -116,6 +116,7 @@ XrResult OpenXrLayer::OnInstanceCreated(const XrInstanceCreateInfo* create_info,
 
     ReloadConfigIfNeeded();
     RefreshResolvedSettings();
+    logger_.Info("Active log file: " + logger_.ActiveLogPath().string());
     return XR_SUCCESS;
 }
 
@@ -308,6 +309,7 @@ void OpenXrLayer::ReloadConfigIfNeeded() {
 void OpenXrLayer::RefreshResolvedSettings() {
     resolved_settings_ = ResolveRuntimeConfig(config_, current_exe_name_);
     logger_.SetLevel(resolved_settings_.core.log_level);
+    logger_.SetRetentionFiles(resolved_settings_.core.log_retention_files);
     if (!last_logged_settings_ || !SameSettings(*last_logged_settings_, resolved_settings_)) {
         LogResolvedSettings(resolved_settings_);
         last_logged_settings_ = resolved_settings_;

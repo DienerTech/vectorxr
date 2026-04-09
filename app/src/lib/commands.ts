@@ -3,6 +3,19 @@ import { defaultConfig, normalizeConfig, type ConfigEnvelope, type VectorXRConfi
 
 const localKey = 'vectorxr-config'
 
+export interface LogFileEntry {
+  name: string
+  path: string
+  modifiedUnixSeconds: number
+  content: string
+}
+
+export interface LogSnapshot {
+  directory: string
+  activePath: string
+  files: LogFileEntry[]
+}
+
 function tauriAvailable(): boolean {
   return typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
 }
@@ -37,4 +50,16 @@ export async function saveConfigEnvelope(config: VectorXRConfig): Promise<string
   }
 
   return invoke<string>('save_config', { config })
+}
+
+export async function loadLogSnapshot(): Promise<LogSnapshot> {
+  if (!tauriAvailable()) {
+    return {
+      directory: './logs',
+      activePath: '',
+      files: [],
+    }
+  }
+
+  return invoke<LogSnapshot>('load_log_snapshot')
 }

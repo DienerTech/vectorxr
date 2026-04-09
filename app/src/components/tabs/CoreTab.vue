@@ -6,6 +6,11 @@ import type { VectorXRConfig } from '../../lib/model'
 const props = defineProps<{
   config: VectorXRConfig
   path: string
+  logPath?: string
+}>()
+
+defineEmits<{
+  viewLogs: []
 }>()
 
 const moduleCards = computed(() => [
@@ -67,6 +72,19 @@ const moduleCards = computed(() => [
           Suite-level settings stay centralized here so logging, lifecycle intent, and module visibility remain consistent as more features arrive.
         </div>
       </div>
+
+      <div class="mt-4 flex flex-wrap items-center gap-3">
+        <button
+          class="rounded-full bg-depthxr-copper px-5 py-2.5 text-sm font-medium text-white transition hover:brightness-110"
+          type="button"
+          @click="$emit('viewLogs')"
+        >
+          View Logs
+        </button>
+        <div class="rounded-full border border-black/10 bg-white px-4 py-2 text-sm text-depthxr-steel">
+          Latest Log: <span class="font-mono text-xs">{{ logPath || 'Resolve after first runtime attach' }}</span>
+        </div>
+      </div>
     </article>
 
     <article class="rounded-[2rem] border border-black/10 bg-white/80 p-5 shadow-panel backdrop-blur">
@@ -116,8 +134,12 @@ const moduleCards = computed(() => [
         </div>
 
         <div class="rounded-[1.4rem] border border-white/10 bg-white/5 p-4 text-sm text-white/72">
-          <p class="font-medium text-white">Shared Config Path</p>
-          <p class="mt-2 break-all font-mono text-xs md:text-sm">{{ path || 'Resolving...' }}</p>
+          <p class="font-medium text-white">Lifecycle Notes</p>
+          <ul class="mt-3 space-y-2.5 leading-6">
+            <li>Disabling the suite currently bypasses effects, but it does not unregister the OpenXR layer from the loader.</li>
+            <li>Layer logs rotate into the shared VectorXR log directory and respect the configured retention count.</li>
+            <li>Shared Config Path: <span class="break-all font-mono text-xs md:text-sm">{{ path || 'Resolving...' }}</span></li>
+          </ul>
         </div>
       </div>
     </article>

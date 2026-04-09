@@ -1,17 +1,22 @@
 <script setup lang="ts">
-import { computed, onMounted } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 
+import LogViewerModal from './components/LogViewerModal.vue'
 import StickySaveBar from './components/StickySaveBar.vue'
 import TopNavTabs from './components/TopNavTabs.vue'
 import CoreTab from './components/tabs/CoreTab.vue'
 import DepthXrTab from './components/tabs/DepthXrTab.vue'
 import PivotXrTab from './components/tabs/PivotXrTab.vue'
+import { loadLogSnapshot, type LogSnapshot } from './lib/commands'
 import { validateConfig } from './lib/validation'
 import { useConfigStore } from './stores/configStore'
 
 const store = useConfigStore()
 const errors = computed(() => validateConfig(store.state.config))
 const dirty = computed(() => store.isDirty.value)
+const logViewerOpen = ref(false)
+const logViewerLoading = ref(false)
+const logSnapshot = ref<LogSnapshot | null>(null)
 
 const activeSummary = computed(() => {
   if (store.state.activeTab === 'core') {
@@ -39,6 +44,7 @@ const activeSummary = computed(() => {
 
 onMounted(() => {
   void store.load()
+  void refreshLogs()
 })
 
 async function saveConfig() {
@@ -48,6 +54,23 @@ async function saveConfig() {
   }
 
   await store.save()
+}
+
+async function refreshLogs() {
+  logViewerLoading.value = true
+
+  try {
+    logSnapshot.value = await loadLogSnapshot()
+  } catch (error) {
+    store.state.status = error instanceof Error ? error.message : 'Failed to load logs'
+  } finally {
+    logViewerLoading.value = false
+  }
+}
+
+async function openLogs() {
+  logViewerOpen.value = true
+  await refreshLogs()
 }
 </script>
 
@@ -78,7 +101,13 @@ async function saveConfig() {
 
       <section class="mt-6 grid gap-6 xl:grid-cols-[minmax(0,1.28fr)_320px]">
         <div class="min-w-0">
-          <CoreTab v-if="store.state.activeTab === 'core'" :config="store.state.config" :path="store.state.path" />
+          <CoreTab
+            v-if="store.state.activeTab === 'core'"
+            :config="store.state.config"
+            :path="store.state.path"
+            :log-path="logSnapshot?.activePath"
+            @view-logs="openLogs"
+          />
           <DepthXrTab
             v-else-if="store.state.activeTab === 'depthxr'"
             :config="store.state.config"
@@ -141,6 +170,8 @@ async function saveConfig() {
         @discard="store.discardChanges"
         @reload="store.load"
       />
+
+      <LogViewerModal :open="logViewerOpen" :loading="logViewerLoading" :snapshot="logSnapshot" @close="logViewerOpen = false" />
     </section>
   </main>
 </template>
