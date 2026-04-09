@@ -36,7 +36,7 @@ class OpenXrLayer {
     void ReloadConfigIfNeeded();
     void RefreshResolvedSettings();
     void CaptureInstanceFunctions();
-    void LogResolvedSettings(const ResolvedSettings& settings);
+    void LogResolvedSettings(const ResolvedRuntimeConfig& settings);
 
     std::mutex mutex_;
     std::filesystem::path dll_directory_;
@@ -49,8 +49,8 @@ class OpenXrLayer {
     ConfigDocument config_;
     bool has_loaded_config_{false};
     std::string current_exe_name_;
-    ResolvedSettings resolved_settings_;
-    std::optional<ResolvedSettings> last_logged_settings_;
+    ResolvedRuntimeConfig resolved_settings_;
+    std::optional<ResolvedRuntimeConfig> last_logged_settings_;
     uint64_t locate_views_call_count_{0};
     uint32_t pending_locate_views_diagnostics_{0};
     XrSession active_session_{XR_NULL_HANDLE};

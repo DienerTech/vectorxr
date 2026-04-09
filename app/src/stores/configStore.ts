@@ -2,13 +2,14 @@ import { reactive } from 'vue'
 
 import { loadConfigEnvelope, saveConfigEnvelope } from '../lib/commands'
 import { createProfile, defaultConfig } from '../lib/model'
-import type { DepthXRConfig } from '../lib/model'
+import { sanitizeProfileName } from '../lib/model'
+import type { VectorXRConfig } from '../lib/model'
 
 interface StoreState {
   loading: boolean
   saving: boolean
   path: string
-  config: DepthXRConfig
+  config: VectorXRConfig
   status: string
 }
 
@@ -52,11 +53,22 @@ export function useConfigStore() {
   }
 
   function addProfile() {
-    state.config.profiles.push(createProfile(state.config.global))
+    state.config.modules.depthxr.profiles.push(createProfile(state.config.modules.depthxr.defaults))
   }
 
   function removeProfile(index: number) {
-    state.config.profiles.splice(index, 1)
+    state.config.modules.depthxr.profiles.splice(index, 1)
+  }
+
+  function syncProfileName(index: number) {
+    const profile = state.config.modules.depthxr.profiles[index]
+    if (!profile) {
+      return
+    }
+
+    if (!profile.name.trim() || profile.name === 'New Profile') {
+      profile.name = sanitizeProfileName(profile.match.exe)
+    }
   }
 
   return {
@@ -65,5 +77,6 @@ export function useConfigStore() {
     save,
     addProfile,
     removeProfile,
+    syncProfileName,
   }
 }

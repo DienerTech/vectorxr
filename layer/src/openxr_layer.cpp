@@ -41,22 +41,25 @@ ViewLayout DetermineViewLayout(XrViewConfigurationType type, uint32_t count) {
     return ViewLayout::kMono;
 }
 
-bool SameSettings(const ResolvedSettings& lhs, const ResolvedSettings& rhs) {
-    return lhs.enabled == rhs.enabled &&
-           lhs.stereo_boost_enabled == rhs.stereo_boost_enabled &&
-           lhs.convergence_enabled == rhs.convergence_enabled &&
-           lhs.world_scale_enabled == rhs.world_scale_enabled &&
-           lhs.fov_scale_enabled == rhs.fov_scale_enabled &&
-           NearlyEqual(lhs.stereo_boost, rhs.stereo_boost) &&
-           NearlyEqual(lhs.convergence, rhs.convergence) &&
-           NearlyEqual(lhs.world_scale, rhs.world_scale) &&
-           NearlyEqual(lhs.fov_scale, rhs.fov_scale) &&
-           lhs.log_level == rhs.log_level;
+bool SameSettings(const ResolvedRuntimeConfig& lhs, const ResolvedRuntimeConfig& rhs) {
+    return lhs.core.enabled == rhs.core.enabled &&
+           lhs.core.log_level == rhs.core.log_level &&
+           lhs.core.log_retention_files == rhs.core.log_retention_files &&
+           lhs.depthxr.enabled == rhs.depthxr.enabled &&
+           lhs.depthxr.stereo_boost_enabled == rhs.depthxr.stereo_boost_enabled &&
+           lhs.depthxr.convergence_enabled == rhs.depthxr.convergence_enabled &&
+           NearlyEqual(lhs.depthxr.stereo_boost, rhs.depthxr.stereo_boost) &&
+           NearlyEqual(lhs.depthxr.convergence, rhs.depthxr.convergence) &&
+           lhs.pivotxr.enabled == rhs.pivotxr.enabled &&
+           lhs.pivotxr.activation_mode == rhs.pivotxr.activation_mode &&
+           NearlyEqual(lhs.pivotxr.rotation_multiplier, rhs.pivotxr.rotation_multiplier) &&
+           NearlyEqual(lhs.pivotxr.smoothing, rhs.pivotxr.smoothing) &&
+           NearlyEqual(lhs.pivotxr.deadzone_degrees, rhs.pivotxr.deadzone_degrees);
 }
 
 ConfigDocument DefaultConfig() {
     ConfigDocument document;
-    document.version = 1;
+    document.version = 2;
     return document;
 }
 
@@ -96,7 +99,7 @@ XrResult OpenXrLayer::OnInstanceCreated(const XrInstanceCreateInfo* create_info,
     logger_.Initialize(log_path_);
 
     current_exe_name_ = GetCurrentExecutableName();
-    logger_.Info("DepthXR attached to process: " + current_exe_name_);
+    logger_.Info("VectorXR attached to process: " + current_exe_name_);
 
     if (create_info) {
         std::ostringstream stream;
@@ -182,7 +185,7 @@ XrResult OpenXrLayer::LocateViews(XrSession session,
     ReloadConfigIfNeeded();
     RefreshResolvedSettings();
 
-    if (!resolved_settings_.enabled) {
+    if (!resolved_settings_.core.enabled || !resolved_settings_.depthxr.enabled) {
         return result;
     }
 
@@ -232,17 +235,11 @@ XrResult OpenXrLayer::LocateViews(XrSession session,
         adjusted_views[i].fov.angle_down = views[i].fov.angleDown;
     }
 
-    if (resolved_settings_.stereo_boost_enabled && !NearlyEqual(resolved_settings_.stereo_boost, 1.0)) {
-        ApplyStereoBoost(adjusted_views, resolved_settings_.stereo_boost, view_layout);
+    if (resolved_settings_.depthxr.stereo_boost_enabled && !NearlyEqual(resolved_settings_.depthxr.stereo_boost, 1.0)) {
+        ApplyStereoBoost(adjusted_views, resolved_settings_.depthxr.stereo_boost, view_layout);
     }
-    if (resolved_settings_.convergence_enabled && !NearlyEqual(resolved_settings_.convergence, 0.0)) {
-        ApplyConvergence(adjusted_views, resolved_settings_.convergence, view_layout);
-    }
-    if (resolved_settings_.world_scale_enabled && !NearlyEqual(resolved_settings_.world_scale, 1.0)) {
-        ApplyWorldScale(adjusted_views, resolved_settings_.world_scale, view_layout);
-    }
-    if (resolved_settings_.fov_scale_enabled && !NearlyEqual(resolved_settings_.fov_scale, 1.0)) {
-        ApplyFovScale(adjusted_views, resolved_settings_.fov_scale, view_layout);
+    if (resolved_settings_.depthxr.convergence_enabled && !NearlyEqual(resolved_settings_.depthxr.convergence, 0.0)) {
+        ApplyConvergence(adjusted_views, resolved_settings_.depthxr.convergence, view_layout);
     }
 
     for (uint32_t i = 0; i < count; ++i) {
@@ -259,10 +256,8 @@ XrResult OpenXrLayer::LocateViews(XrSession session,
         std::ostringstream stream;
         stream << "LocateViews call " << locate_views_call_count_ << ": count=" << count
                << ", viewConfig=" << ToString(view_configuration_type)
-               << ", stereoBoost=" << resolved_settings_.stereo_boost
-               << ", convergence=" << resolved_settings_.convergence
-               << ", worldScale=" << resolved_settings_.world_scale
-               << ", fovScale=" << resolved_settings_.fov_scale
+               << ", stereoBoost=" << resolved_settings_.depthxr.stereo_boost
+               << ", convergence=" << resolved_settings_.depthxr.convergence
                << ", before:";
         AppendViewSummary(stream, original_views);
         stream << " after:";
@@ -311,8 +306,8 @@ void OpenXrLayer::ReloadConfigIfNeeded() {
 }
 
 void OpenXrLayer::RefreshResolvedSettings() {
-    resolved_settings_ = ResolveSettings(config_, current_exe_name_);
-    logger_.SetLevel(resolved_settings_.log_level);
+    resolved_settings_ = ResolveRuntimeConfig(config_, current_exe_name_);
+    logger_.SetLevel(resolved_settings_.core.log_level);
     if (!last_logged_settings_ || !SameSettings(*last_logged_settings_, resolved_settings_)) {
         LogResolvedSettings(resolved_settings_);
         last_logged_settings_ = resolved_settings_;
@@ -339,15 +334,16 @@ void OpenXrLayer::CaptureInstanceFunctions() {
     }
 }
 
-void OpenXrLayer::LogResolvedSettings(const ResolvedSettings& settings) {
+void OpenXrLayer::LogResolvedSettings(const ResolvedRuntimeConfig& settings) {
     std::ostringstream stream;
     stream << "Resolved settings for " << current_exe_name_ << ": "
-           << "enabled=" << settings.enabled
-           << ", stereoBoost=" << settings.stereo_boost
-           << ", convergence=" << settings.convergence
-           << ", worldScale=" << settings.world_scale
-           << ", fovScale=" << settings.fov_scale
-           << ", logLevel=" << ToString(settings.log_level);
+           << "coreEnabled=" << settings.core.enabled
+           << ", logLevel=" << ToString(settings.core.log_level)
+           << ", depthxrEnabled=" << settings.depthxr.enabled
+           << ", stereoBoost=" << settings.depthxr.stereo_boost
+           << ", convergence=" << settings.depthxr.convergence
+           << ", pivotxrEnabled=" << settings.pivotxr.enabled
+           << ", pivotActivation=" << ToString(settings.pivotxr.activation_mode);
     logger_.Debug(stream.str());
 }
 

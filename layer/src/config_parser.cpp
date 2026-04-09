@@ -1,9 +1,9 @@
 #include "depthxr/config_parser.h"
 
 #include <cctype>
-#include <cstdlib>
 #include <fstream>
 #include <map>
+#include <optional>
 #include <sstream>
 #include <stdexcept>
 #include <unordered_set>
@@ -27,7 +27,6 @@ class JsonValue {
     explicit JsonValue(Object value) : storage_(std::move(value)) {}
     explicit JsonValue(Array value) : storage_(std::move(value)) {}
 
-    bool IsNull() const { return std::holds_alternative<std::nullptr_t>(storage_); }
     bool IsBool() const { return std::holds_alternative<bool>(storage_); }
     bool IsNumber() const { return std::holds_alternative<double>(storage_); }
     bool IsString() const { return std::holds_alternative<std::string>(storage_); }
@@ -64,13 +63,8 @@ class JsonParser {
         return value;
     }
 
-    bool ok() const {
-        return ok_;
-    }
-
-    const std::string& error() const {
-        return error_;
-    }
+    bool ok() const { return ok_; }
+    const std::string& error() const { return error_; }
 
   private:
     JsonValue ParseValue() {
@@ -320,6 +314,25 @@ class JsonParser {
     std::string error_;
 };
 
+std::string SanitizeProfileName(std::string_view exe_name) {
+    std::string value(exe_name);
+    const size_t slash = value.find_last_of("/\\");
+    if (slash != std::string::npos) {
+        value = value.substr(slash + 1);
+    }
+
+    const size_t dot = value.find_last_of('.');
+    if (dot != std::string::npos && dot > 0) {
+        value = value.substr(0, dot);
+    }
+
+    if (value.empty()) {
+        return "New Profile";
+    }
+
+    return value;
+}
+
 const JsonValue::Object* RequireObject(const JsonValue& value, const std::string& field, std::string& error) {
     if (!value.IsObject()) {
         error = field + " must be an object";
@@ -390,11 +403,36 @@ bool ReadOptionalNumber(const JsonValue::Object& object, const std::string& key,
     return true;
 }
 
+bool ReadOptionalInt(const JsonValue::Object& object, const std::string& key, std::optional<int>& out, std::string& error) {
+    std::optional<double> number;
+    if (!ReadOptionalNumber(object, key, number, error)) {
+        return false;
+    }
+    if (!number.has_value()) {
+        return true;
+    }
+    out = static_cast<int>(*number);
+    return true;
+}
+
 bool ReadRequiredString(const JsonValue::Object& object, const std::string& key, std::string& out, std::string& error) {
     const auto it = object.find(key);
     if (it == object.end()) {
         error = "Missing required field: " + key;
         return false;
+    }
+    if (!it->second.IsString()) {
+        error = key + " must be a string";
+        return false;
+    }
+    out = it->second.AsString();
+    return true;
+}
+
+bool ReadOptionalString(const JsonValue::Object& object, const std::string& key, std::optional<std::string>& out, std::string& error) {
+    const auto it = object.find(key);
+    if (it == object.end()) {
+        return true;
     }
     if (!it->second.IsString()) {
         error = key + " must be a string";
@@ -425,6 +463,27 @@ bool ReadOptionalLogLevel(const JsonValue::Object& object,
     return true;
 }
 
+bool ReadOptionalActivationMode(const JsonValue::Object& object,
+                                const std::string& key,
+                                std::optional<ActivationMode>& out,
+                                std::string& error) {
+    const auto it = object.find(key);
+    if (it == object.end()) {
+        return true;
+    }
+    if (!it->second.IsString()) {
+        error = key + " must be a string";
+        return false;
+    }
+
+    out = ParseActivationMode(it->second.AsString());
+    if (!out) {
+        error = key + " must be one of: toggle, hold";
+        return false;
+    }
+    return true;
+}
+
 bool CheckAllowedKeys(const JsonValue::Object& object,
                       const std::unordered_set<std::string>& allowed,
                       std::string& error) {
@@ -437,7 +496,7 @@ bool CheckAllowedKeys(const JsonValue::Object& object,
     return true;
 }
 
-bool ParseGlobal(const JsonValue::Object& object, ResolvedSettings& out, std::string& error) {
+bool ParseLegacyGlobal(const JsonValue::Object& object, ConfigDocument& out, std::string& error) {
     static const std::unordered_set<std::string> allowed = {
         "enabled",
         "stereoBoostEnabled",
@@ -455,13 +514,12 @@ bool ParseGlobal(const JsonValue::Object& object, ResolvedSettings& out, std::st
         return false;
     }
 
-    if (!ReadRequiredBool(object, "enabled", out.enabled, error) ||
-        !ReadRequiredBool(object, "stereoBoostEnabled", out.stereo_boost_enabled, error) ||
-        !ReadRequiredBool(object, "worldScaleEnabled", out.world_scale_enabled, error) ||
-        !ReadRequiredBool(object, "fovScaleEnabled", out.fov_scale_enabled, error) ||
-        !ReadRequiredNumber(object, "stereoBoost", out.stereo_boost, error) ||
-        !ReadRequiredNumber(object, "worldScale", out.world_scale, error) ||
-        !ReadRequiredNumber(object, "fovScale", out.fov_scale, error)) {
+    bool module_enabled = true;
+    bool stereo_boost_enabled = true;
+    double stereo_boost = 1.0;
+    if (!ReadRequiredBool(object, "enabled", module_enabled, error) ||
+        !ReadRequiredBool(object, "stereoBoostEnabled", stereo_boost_enabled, error) ||
+        !ReadRequiredNumber(object, "stereoBoost", stereo_boost, error)) {
         return false;
     }
 
@@ -469,16 +527,10 @@ bool ParseGlobal(const JsonValue::Object& object, ResolvedSettings& out, std::st
     if (!ReadOptionalBool(object, "convergenceEnabled", convergence_enabled, error)) {
         return false;
     }
-    if (convergence_enabled.has_value()) {
-        out.convergence_enabled = *convergence_enabled;
-    }
 
     std::optional<double> convergence;
     if (!ReadOptionalNumber(object, "convergence", convergence, error)) {
         return false;
-    }
-    if (convergence.has_value()) {
-        out.convergence = *convergence;
     }
 
     std::optional<LogLevel> level;
@@ -488,12 +540,29 @@ bool ParseGlobal(const JsonValue::Object& object, ResolvedSettings& out, std::st
         }
         return false;
     }
-    out.log_level = *level;
 
+    out.version = 2;
+    out.core.enabled = true;
+    out.core.log_level = *level;
+    out.core.log_retention_files = 7;
+    out.depthxr.enabled = module_enabled;
+    out.depthxr.defaults.enabled = module_enabled;
+    out.depthxr.defaults.stereo_boost_enabled = stereo_boost_enabled;
+    out.depthxr.defaults.convergence_enabled = convergence_enabled.value_or(true);
+    out.depthxr.defaults.stereo_boost = stereo_boost;
+    out.depthxr.defaults.convergence = convergence.value_or(0.0);
     return true;
 }
 
-bool ParseSettingsOverride(const JsonValue::Object& object, SettingsOverride& out, std::string& error) {
+bool ParseLegacyProfile(const JsonValue& value,
+                        const DepthXrResolvedSettings& defaults,
+                        DepthXrProfile& out,
+                        std::string& error) {
+    const JsonValue::Object* object = RequireObject(value, "profile", error);
+    if (!object) {
+        return false;
+    }
+
     static const std::unordered_set<std::string> allowed = {
         "match",
         "enabled",
@@ -508,29 +577,7 @@ bool ParseSettingsOverride(const JsonValue::Object& object, SettingsOverride& ou
         "logLevel",
     };
 
-    if (!CheckAllowedKeys(object, allowed, error)) {
-        return false;
-    }
-
-    return ReadOptionalBool(object, "enabled", out.enabled, error) &&
-           ReadOptionalBool(object, "stereoBoostEnabled", out.stereo_boost_enabled, error) &&
-           ReadOptionalBool(object, "convergenceEnabled", out.convergence_enabled, error) &&
-           ReadOptionalBool(object, "worldScaleEnabled", out.world_scale_enabled, error) &&
-           ReadOptionalBool(object, "fovScaleEnabled", out.fov_scale_enabled, error) &&
-           ReadOptionalNumber(object, "stereoBoost", out.stereo_boost, error) &&
-           ReadOptionalNumber(object, "convergence", out.convergence, error) &&
-           ReadOptionalNumber(object, "worldScale", out.world_scale, error) &&
-           ReadOptionalNumber(object, "fovScale", out.fov_scale, error) &&
-           ReadOptionalLogLevel(object, "logLevel", out.log_level, error);
-}
-
-bool ParseProfile(const JsonValue& value, Profile& out, std::string& error) {
-    const JsonValue::Object* object = RequireObject(value, "profile", error);
-    if (!object) {
-        return false;
-    }
-
-    if (!ParseSettingsOverride(*object, out.settings, error)) {
+    if (!CheckAllowedKeys(*object, allowed, error)) {
         return false;
     }
 
@@ -550,7 +597,356 @@ bool ParseProfile(const JsonValue& value, Profile& out, std::string& error) {
         return false;
     }
 
-    return ReadRequiredString(*match_object, "exe", out.match.exe_name, error);
+    if (!ReadRequiredString(*match_object, "exe", out.match.exe_name, error)) {
+        return false;
+    }
+
+    out.name = SanitizeProfileName(out.match.exe_name);
+
+    std::optional<bool> enabled;
+    std::optional<bool> stereo_boost_enabled;
+    std::optional<bool> convergence_enabled;
+    std::optional<double> stereo_boost;
+    std::optional<double> convergence;
+    std::optional<LogLevel> ignored_log_level;
+
+    if (!ReadOptionalBool(*object, "enabled", enabled, error) ||
+        !ReadOptionalBool(*object, "stereoBoostEnabled", stereo_boost_enabled, error) ||
+        !ReadOptionalBool(*object, "convergenceEnabled", convergence_enabled, error) ||
+        !ReadOptionalNumber(*object, "stereoBoost", stereo_boost, error) ||
+        !ReadOptionalNumber(*object, "convergence", convergence, error) ||
+        !ReadOptionalLogLevel(*object, "logLevel", ignored_log_level, error)) {
+        return false;
+    }
+
+    out.enabled = enabled.value_or(true);
+    out.settings.stereo_boost_enabled = stereo_boost_enabled.value_or(defaults.stereo_boost_enabled);
+    out.settings.convergence_enabled = convergence_enabled.value_or(defaults.convergence_enabled);
+    out.settings.stereo_boost = stereo_boost.value_or(defaults.stereo_boost);
+    out.settings.convergence = convergence.value_or(defaults.convergence);
+    return true;
+}
+
+bool ParseCoreSettings(const JsonValue::Object& object, CoreSettings& out, std::string& error) {
+    static const std::unordered_set<std::string> allowed = {
+        "enabled",
+        "logLevel",
+        "logRetentionFiles",
+    };
+
+    if (!CheckAllowedKeys(object, allowed, error)) {
+        return false;
+    }
+
+    std::optional<bool> enabled;
+    std::optional<LogLevel> log_level;
+    std::optional<int> log_retention_files;
+
+    if (!ReadOptionalBool(object, "enabled", enabled, error) ||
+        !ReadOptionalLogLevel(object, "logLevel", log_level, error) ||
+        !ReadOptionalInt(object, "logRetentionFiles", log_retention_files, error)) {
+        return false;
+    }
+
+    if (enabled.has_value()) {
+        out.enabled = *enabled;
+    }
+    if (log_level.has_value()) {
+        out.log_level = *log_level;
+    }
+    if (log_retention_files.has_value()) {
+        out.log_retention_files = *log_retention_files;
+    }
+
+    return true;
+}
+
+bool ParseDepthDefaults(const JsonValue::Object& object, DepthXrResolvedSettings& out, std::string& error) {
+    static const std::unordered_set<std::string> allowed = {
+        "stereoBoostEnabled",
+        "convergenceEnabled",
+        "stereoBoost",
+        "convergence",
+    };
+
+    if (!CheckAllowedKeys(object, allowed, error)) {
+        return false;
+    }
+
+    std::optional<bool> stereo_boost_enabled;
+    std::optional<bool> convergence_enabled;
+    std::optional<double> stereo_boost;
+    std::optional<double> convergence;
+
+    if (!ReadOptionalBool(object, "stereoBoostEnabled", stereo_boost_enabled, error) ||
+        !ReadOptionalBool(object, "convergenceEnabled", convergence_enabled, error) ||
+        !ReadOptionalNumber(object, "stereoBoost", stereo_boost, error) ||
+        !ReadOptionalNumber(object, "convergence", convergence, error)) {
+        return false;
+    }
+
+    if (stereo_boost_enabled.has_value()) {
+        out.stereo_boost_enabled = *stereo_boost_enabled;
+    }
+    if (convergence_enabled.has_value()) {
+        out.convergence_enabled = *convergence_enabled;
+    }
+    if (stereo_boost.has_value()) {
+        out.stereo_boost = *stereo_boost;
+    }
+    if (convergence.has_value()) {
+        out.convergence = *convergence;
+    }
+
+    return true;
+}
+
+bool ParseDepthProfileSettings(const JsonValue::Object& object, DepthXrSettingsOverride& out, std::string& error) {
+    static const std::unordered_set<std::string> allowed = {
+        "stereoBoostEnabled",
+        "convergenceEnabled",
+        "stereoBoost",
+        "convergence",
+    };
+
+    if (!CheckAllowedKeys(object, allowed, error)) {
+        return false;
+    }
+
+    return ReadOptionalBool(object, "stereoBoostEnabled", out.stereo_boost_enabled, error) &&
+           ReadOptionalBool(object, "convergenceEnabled", out.convergence_enabled, error) &&
+           ReadOptionalNumber(object, "stereoBoost", out.stereo_boost, error) &&
+           ReadOptionalNumber(object, "convergence", out.convergence, error);
+}
+
+bool ParseDepthProfile(const JsonValue& value, DepthXrProfile& out, std::string& error) {
+    const JsonValue::Object* object = RequireObject(value, "profile", error);
+    if (!object) {
+        return false;
+    }
+
+    static const std::unordered_set<std::string> allowed = {
+        "name",
+        "enabled",
+        "match",
+        "settings",
+    };
+
+    if (!CheckAllowedKeys(*object, allowed, error)) {
+        return false;
+    }
+
+    const auto match_it = object->find("match");
+    if (match_it == object->end()) {
+        error = "Missing required field: match";
+        return false;
+    }
+
+    const JsonValue::Object* match_object = RequireObject(match_it->second, "match", error);
+    if (!match_object) {
+        return false;
+    }
+
+    static const std::unordered_set<std::string> allowed_match = {"exe"};
+    if (!CheckAllowedKeys(*match_object, allowed_match, error)) {
+        return false;
+    }
+
+    if (!ReadRequiredString(*match_object, "exe", out.match.exe_name, error)) {
+        return false;
+    }
+
+    std::optional<std::string> name;
+    std::optional<bool> enabled;
+    if (!ReadOptionalString(*object, "name", name, error) ||
+        !ReadOptionalBool(*object, "enabled", enabled, error)) {
+        return false;
+    }
+
+    out.name = name.value_or(SanitizeProfileName(out.match.exe_name));
+    out.enabled = enabled.value_or(true);
+
+    const auto settings_it = object->find("settings");
+    if (settings_it != object->end()) {
+        const JsonValue::Object* settings_object = RequireObject(settings_it->second, "settings", error);
+        if (!settings_object || !ParseDepthProfileSettings(*settings_object, out.settings, error)) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+bool ParseDepthModule(const JsonValue::Object& object, DepthXrModuleConfig& out, std::string& error) {
+    static const std::unordered_set<std::string> allowed = {
+        "enabled",
+        "defaults",
+        "profiles",
+    };
+
+    if (!CheckAllowedKeys(object, allowed, error)) {
+        return false;
+    }
+
+    std::optional<bool> enabled;
+    if (!ReadOptionalBool(object, "enabled", enabled, error)) {
+        return false;
+    }
+    if (enabled.has_value()) {
+        out.enabled = *enabled;
+        out.defaults.enabled = *enabled;
+    }
+
+    const auto defaults_it = object.find("defaults");
+    if (defaults_it != object.end()) {
+        const JsonValue::Object* defaults_object = RequireObject(defaults_it->second, "defaults", error);
+        if (!defaults_object || !ParseDepthDefaults(*defaults_object, out.defaults, error)) {
+            return false;
+        }
+    }
+
+    const auto profiles_it = object.find("profiles");
+    if (profiles_it != object.end()) {
+        const JsonValue::Array* profiles = RequireArray(profiles_it->second, "profiles", error);
+        if (!profiles) {
+            return false;
+        }
+
+        for (const JsonValue& value : *profiles) {
+            DepthXrProfile profile;
+            if (!ParseDepthProfile(value, profile, error)) {
+                return false;
+            }
+            out.profiles.push_back(std::move(profile));
+        }
+    }
+
+    return true;
+}
+
+bool ParsePivotDefaults(const JsonValue::Object& object, PivotXrResolvedSettings& out, std::string& error) {
+    static const std::unordered_set<std::string> allowed = {
+        "activationMode",
+        "rotationMultiplier",
+        "smoothing",
+        "deadzoneDegrees",
+    };
+
+    if (!CheckAllowedKeys(object, allowed, error)) {
+        return false;
+    }
+
+    std::optional<ActivationMode> activation_mode;
+    std::optional<double> rotation_multiplier;
+    std::optional<double> smoothing;
+    std::optional<double> deadzone_degrees;
+
+    if (!ReadOptionalActivationMode(object, "activationMode", activation_mode, error) ||
+        !ReadOptionalNumber(object, "rotationMultiplier", rotation_multiplier, error) ||
+        !ReadOptionalNumber(object, "smoothing", smoothing, error) ||
+        !ReadOptionalNumber(object, "deadzoneDegrees", deadzone_degrees, error)) {
+        return false;
+    }
+
+    if (activation_mode.has_value()) {
+        out.activation_mode = *activation_mode;
+    }
+    if (rotation_multiplier.has_value()) {
+        out.rotation_multiplier = *rotation_multiplier;
+    }
+    if (smoothing.has_value()) {
+        out.smoothing = *smoothing;
+    }
+    if (deadzone_degrees.has_value()) {
+        out.deadzone_degrees = *deadzone_degrees;
+    }
+
+    return true;
+}
+
+bool ParsePivotModule(const JsonValue::Object& object, PivotXrModuleConfig& out, std::string& error) {
+    static const std::unordered_set<std::string> allowed = {
+        "enabled",
+        "defaults",
+    };
+
+    if (!CheckAllowedKeys(object, allowed, error)) {
+        return false;
+    }
+
+    std::optional<bool> enabled;
+    if (!ReadOptionalBool(object, "enabled", enabled, error)) {
+        return false;
+    }
+    if (enabled.has_value()) {
+        out.enabled = *enabled;
+        out.defaults.enabled = *enabled;
+    }
+
+    const auto defaults_it = object.find("defaults");
+    if (defaults_it != object.end()) {
+        const JsonValue::Object* defaults_object = RequireObject(defaults_it->second, "defaults", error);
+        if (!defaults_object || !ParsePivotDefaults(*defaults_object, out.defaults, error)) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+bool ParseVectorDocument(const JsonValue::Object& root_object, ConfigDocument& out, std::string& error) {
+    static const std::unordered_set<std::string> allowed_root = {"version", "core", "modules"};
+    if (!CheckAllowedKeys(root_object, allowed_root, error)) {
+        return false;
+    }
+
+    const auto core_it = root_object.find("core");
+    if (core_it == root_object.end()) {
+        error = "Missing required field: core";
+        return false;
+    }
+    const JsonValue::Object* core_object = RequireObject(core_it->second, "core", error);
+    if (!core_object || !ParseCoreSettings(*core_object, out.core, error)) {
+        return false;
+    }
+
+    const auto modules_it = root_object.find("modules");
+    if (modules_it == root_object.end()) {
+        error = "Missing required field: modules";
+        return false;
+    }
+
+    const JsonValue::Object* modules_object = RequireObject(modules_it->second, "modules", error);
+    if (!modules_object) {
+        return false;
+    }
+
+    static const std::unordered_set<std::string> allowed_modules = {"depthxr", "pivotxr"};
+    if (!CheckAllowedKeys(*modules_object, allowed_modules, error)) {
+        return false;
+    }
+
+    const auto depth_it = modules_object->find("depthxr");
+    if (depth_it == modules_object->end()) {
+        error = "Missing required field: modules.depthxr";
+        return false;
+    }
+    const JsonValue::Object* depth_object = RequireObject(depth_it->second, "modules.depthxr", error);
+    if (!depth_object || !ParseDepthModule(*depth_object, out.depthxr, error)) {
+        return false;
+    }
+
+    const auto pivot_it = modules_object->find("pivotxr");
+    if (pivot_it == modules_object->end()) {
+        error = "Missing required field: modules.pivotxr";
+        return false;
+    }
+    const JsonValue::Object* pivot_object = RequireObject(pivot_it->second, "modules.pivotxr", error);
+    if (!pivot_object || !ParsePivotModule(*pivot_object, out.pivotxr, error)) {
+        return false;
+    }
+
+    return true;
 }
 
 } // namespace
@@ -572,50 +968,26 @@ ParseResult ParseConfig(std::string_view json_text) {
         return result;
     }
 
-    static const std::unordered_set<std::string> allowed_root = {"version", "global", "profiles"};
-    if (!CheckAllowedKeys(*root_object, allowed_root, error)) {
-        result.error = error;
-        return result;
-    }
-
     const auto version_it = root_object->find("version");
     if (version_it == root_object->end() || !version_it->second.IsNumber()) {
         result.error = "version must be a number";
         return result;
     }
-    result.document.version = static_cast<int>(version_it->second.AsNumber());
 
-    const auto global_it = root_object->find("global");
-    if (global_it == root_object->end()) {
-        result.error = "Missing required field: global";
+    const int version = static_cast<int>(version_it->second.AsNumber());
+    if (version != 2) {
+        result.error = "Unsupported config version. Expected version 2.";
         return result;
     }
-    const JsonValue::Object* global_object = RequireObject(global_it->second, "global", error);
-    if (!global_object || !ParseGlobal(*global_object, result.document.global, error)) {
+
+    result.document.version = 2;
+    if (!ParseVectorDocument(*root_object, result.document, error)) {
         result.error = error;
         return result;
     }
 
-    const auto profiles_it = root_object->find("profiles");
-    if (profiles_it == root_object->end()) {
-        result.error = "Missing required field: profiles";
-        return result;
-    }
-    const JsonValue::Array* profiles = RequireArray(profiles_it->second, "profiles", error);
-    if (!profiles) {
-        result.error = error;
-        return result;
-    }
-
-    for (const JsonValue& value : *profiles) {
-        Profile profile;
-        if (!ParseProfile(value, profile, error)) {
-            result.error = error;
-            return result;
-        }
-        result.document.profiles.push_back(std::move(profile));
-    }
-
+    result.document.depthxr.defaults.enabled = result.document.depthxr.enabled;
+    result.document.pivotxr.defaults.enabled = result.document.pivotxr.enabled;
     result.ok = true;
     return result;
 }

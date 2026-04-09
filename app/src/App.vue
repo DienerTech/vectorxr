@@ -32,18 +32,18 @@ async function saveConfig() {
       <header class="mb-6 overflow-hidden rounded-[2rem] border border-black/10 bg-depthxr-ink text-white shadow-panel">
         <div class="grid gap-6 p-6 xl:grid-cols-[1.45fr_0.95fr]">
           <div>
-            <p class="text-xs uppercase tracking-[0.32em] text-depthxr-sand">DepthXR</p>
-            <h1 class="mt-2 text-4xl font-semibold tracking-tight xl:text-[2.8rem]">Stereo depth tuning without the toolkit runtime.</h1>
+            <p class="text-xs uppercase tracking-[0.32em] text-depthxr-sand">VectorXR</p>
+            <h1 class="mt-2 text-4xl font-semibold tracking-tight xl:text-[2.8rem]">Phase 2 config foundation for a modular XR utility suite.</h1>
             <p class="mt-3 max-w-3xl text-sm leading-6 text-white/72 md:text-[15px]">
-              Edit the shared JSON config used by the DepthXR OpenXR layer. Profiles are matched by executable name and resolved at runtime inside
-              <code class="rounded bg-white/10 px-2 py-1 text-sm">xrLocateViews</code>.
+              This build writes the new shared VectorXR config model while keeping DepthXR as the active runtime feature set. DepthXR defaults and
+              per-game overrides now live under the suite config.
             </p>
           </div>
 
           <div class="rounded-[1.6rem] border border-white/10 bg-white/5 p-4">
             <p class="text-xs uppercase tracking-[0.22em] text-white/56">Shared Config Path</p>
             <p class="mt-2 break-all rounded-3xl bg-white/10 px-4 py-3 font-mono text-xs leading-5 md:text-sm">
-              {{ store.state.path || 'Resolving…' }}
+              {{ store.state.path || 'Resolving...' }}
             </p>
 
             <div class="mt-4 flex flex-wrap gap-3">
@@ -53,7 +53,7 @@ async function saveConfig() {
                 type="button"
                 @click="saveConfig"
               >
-                {{ store.state.saving ? 'Saving…' : 'Save Config' }}
+                {{ store.state.saving ? 'Saving...' : 'Save Config' }}
               </button>
               <button
                 class="rounded-full border border-white/20 px-5 py-2.5 text-sm font-medium text-white transition hover:border-white/40"
@@ -75,33 +75,59 @@ async function saveConfig() {
           <article class="rounded-[2rem] border border-black/10 bg-white/80 p-5 shadow-panel backdrop-blur">
             <div class="mb-4 flex flex-wrap items-center justify-between gap-3">
               <div>
-                <p class="text-xs uppercase tracking-[0.24em] text-depthxr-copper">Global</p>
-                <h2 class="text-2xl font-semibold tracking-tight text-depthxr-pine">Default Runtime Settings</h2>
+                <p class="text-xs uppercase tracking-[0.24em] text-depthxr-copper">Core</p>
+                <h2 class="text-2xl font-semibold tracking-tight text-depthxr-pine">VectorXR Runtime Settings</h2>
               </div>
               <label class="inline-flex items-center gap-3 rounded-full bg-depthxr-pine px-4 py-2 text-sm font-medium text-white">
-                <input v-model="store.state.config.global.enabled" class="h-4 w-4 accent-depthxr-copper" type="checkbox" />
-                Layer Enabled
+                <input v-model="store.state.config.core.enabled" class="h-4 w-4 accent-depthxr-copper" type="checkbox" />
+                Suite Enabled
               </label>
             </div>
 
-            <div class="mb-4 grid gap-3 lg:grid-cols-[minmax(0,240px)_minmax(0,1fr)]">
+            <div class="grid gap-3 lg:grid-cols-[minmax(0,240px)_minmax(0,240px)_minmax(0,1fr)]">
               <label class="block">
                 <span class="mb-1.5 block text-sm font-medium">Log Level</span>
-                <select v-model="store.state.config.global.logLevel" class="w-full rounded-2xl border border-black/10 bg-white px-4 py-2.5">
+                <select v-model="store.state.config.core.logLevel" class="w-full rounded-2xl border border-black/10 bg-white px-4 py-2.5">
                   <option v-for="level in logLevels" :key="level" :value="level">
                     {{ level }}
                   </option>
                 </select>
               </label>
+
+              <label class="block">
+                <span class="mb-1.5 block text-sm font-medium">Log Retention</span>
+                <input
+                  v-model.number="store.state.config.core.logRetentionFiles"
+                  class="w-full rounded-2xl border border-black/10 bg-white px-4 py-2.5"
+                  min="1"
+                  max="50"
+                  step="1"
+                  type="number"
+                />
+              </label>
+
               <div class="rounded-2xl border border-dashed border-black/10 bg-[#f7f2e8] px-4 py-3 text-sm leading-6 text-depthxr-steel">
-                Stereo, world scale, and FoV are neutral at <strong>1.0</strong>. Convergence is neutral at <strong>0.0</strong>.
+                Phase 2 keeps DepthXR as the active runtime path while the config model expands to support suite-level settings and future modules.
               </div>
             </div>
+          </article>
 
-            <div class="grid gap-3 lg:grid-cols-2 2xl:grid-cols-4">
+          <article class="rounded-[2rem] border border-black/10 bg-white/80 p-5 shadow-panel backdrop-blur">
+            <div class="mb-4 flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <p class="text-xs uppercase tracking-[0.24em] text-depthxr-copper">DepthXR</p>
+                <h2 class="text-2xl font-semibold tracking-tight text-depthxr-pine">Default Module Settings</h2>
+              </div>
+              <label class="inline-flex items-center gap-3 rounded-full bg-depthxr-pine px-4 py-2 text-sm font-medium text-white">
+                <input v-model="store.state.config.modules.depthxr.enabled" class="h-4 w-4 accent-depthxr-copper" type="checkbox" />
+                DepthXR Enabled
+              </label>
+            </div>
+
+            <div class="grid gap-3 lg:grid-cols-2">
               <EffectField
-                v-model:enabled="store.state.config.global.stereoBoostEnabled"
-                v-model:value="store.state.config.global.stereoBoost"
+                v-model:enabled="store.state.config.modules.depthxr.defaults.stereoBoostEnabled"
+                v-model:value="store.state.config.modules.depthxr.defaults.stereoBoost"
                 title="Stereo Boost"
                 subtitle="Scales horizontal eye separation around the midpoint."
                 :min="0.5"
@@ -109,31 +135,13 @@ async function saveConfig() {
                 :step="0.01"
               />
               <EffectField
-                v-model:enabled="store.state.config.global.convergenceEnabled"
-                v-model:value="store.state.config.global.convergence"
+                v-model:enabled="store.state.config.modules.depthxr.defaults.convergenceEnabled"
+                v-model:value="store.state.config.modules.depthxr.defaults.convergence"
                 title="Convergence"
                 subtitle="Moves the zero-parallax plane by shifting per-eye projection centers."
                 :min="-0.5"
                 :max="0.5"
-                :step="0.01"
-              />
-              <EffectField
-                v-model:enabled="store.state.config.global.worldScaleEnabled"
-                v-model:value="store.state.config.global.worldScale"
-                title="World Scale"
-                subtitle="Scales view-space translations as a first-pass world scale experiment."
-                :min="0.5"
-                :max="2"
-                :step="0.01"
-              />
-              <EffectField
-                v-model:enabled="store.state.config.global.fovScaleEnabled"
-                v-model:value="store.state.config.global.fovScale"
-                title="FoV Scale"
-                subtitle="Adjusts returned FoV angles in tangent space."
-                :min="0.5"
-                :max="1.5"
-                :step="0.01"
+                :step="0.001"
               />
             </div>
           </article>
@@ -142,7 +150,7 @@ async function saveConfig() {
             <div class="flex flex-wrap items-center justify-between gap-3">
               <div>
                 <p class="text-xs uppercase tracking-[0.24em] text-depthxr-copper">Profiles</p>
-                <h2 class="text-2xl font-semibold tracking-tight text-depthxr-pine">Per-Game Overrides</h2>
+                <h2 class="text-2xl font-semibold tracking-tight text-depthxr-pine">DepthXR Per-Game Overrides</h2>
               </div>
               <button
                 class="rounded-full bg-depthxr-copper px-5 py-2.5 text-sm font-medium text-white transition hover:brightness-110"
@@ -154,18 +162,19 @@ async function saveConfig() {
             </div>
 
             <ProfileEditor
-              v-for="(profile, index) in store.state.config.profiles"
+              v-for="(profile, index) in store.state.config.modules.depthxr.profiles"
               :key="`${profile.match.exe}-${index}`"
               :index="index"
               :profile="profile"
               @remove="store.removeProfile(index)"
+              @sync-name="store.syncProfileName(index)"
             />
 
             <div
-              v-if="store.state.config.profiles.length === 0"
+              v-if="store.state.config.modules.depthxr.profiles.length === 0"
               class="rounded-[2rem] border border-dashed border-black/15 bg-white/50 px-6 py-7 text-center text-sm text-depthxr-steel"
             >
-              No per-game overrides yet. Add a profile to bind custom values to a specific executable.
+              No per-game overrides yet. Add a profile to bind custom DepthXR values to a specific executable.
             </div>
           </section>
         </div>
@@ -186,16 +195,16 @@ async function saveConfig() {
             </ul>
 
             <div v-else class="mt-3 rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-4 text-sm text-emerald-700">
-              Config structure and value ranges look valid.
+              VectorXR config structure and value ranges look valid.
             </div>
           </article>
 
           <article class="rounded-[2rem] border border-black/10 bg-[#24322d] p-5 text-white shadow-panel">
             <p class="text-xs uppercase tracking-[0.24em] text-depthxr-sand">Runtime Notes</p>
             <ul class="mt-3 space-y-2.5 text-sm leading-6 text-white/78">
-              <li>DepthXR is a standalone OpenXR API layer. Stereo boost scales the horizontal eye baseline; convergence shifts the per-eye projection centers.</li>
-              <li>Per-profile matching currently uses executable file name only.</li>
-              <li>World scale is intentionally labeled experimental because wider space interception may be needed later.</li>
+              <li>DepthXR remains the active runtime feature set during Milestone 1, but config now resolves through VectorXR core and module settings.</li>
+              <li>World Scale and FoV have been removed from the editable model as part of the Phase 2 config foundation.</li>
+              <li>PivotXR defaults are present in config for forward compatibility, even though the runtime path is not active yet.</li>
             </ul>
           </article>
         </aside>

@@ -1,17 +1,16 @@
 <script setup lang="ts">
 import EffectField from './EffectField.vue'
-import type { LogLevel, ProfileConfig } from '../lib/model'
+import type { DepthXRProfileConfig } from '../lib/model'
 
 defineProps<{
   index: number
-  profile: ProfileConfig
+  profile: DepthXRProfileConfig
 }>()
 
 defineEmits<{
   remove: []
+  syncName: []
 }>()
-
-const logLevels: LogLevel[] = ['off', 'error', 'info', 'debug']
 </script>
 
 <template>
@@ -30,7 +29,17 @@ const logLevels: LogLevel[] = ['off', 'error', 'info', 'debug']
       </button>
     </div>
 
-    <div class="grid gap-3 lg:grid-cols-[minmax(0,1.3fr)_minmax(0,0.8fr)_minmax(0,0.8fr)]">
+    <div class="grid gap-3 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
+      <label class="block">
+        <span class="mb-1.5 block text-sm font-medium">Profile Name</span>
+        <input
+          v-model="profile.name"
+          class="w-full rounded-2xl border border-black/10 bg-white px-4 py-2.5"
+          placeholder="DCS"
+          type="text"
+        />
+      </label>
+
       <label class="block">
         <span class="mb-1.5 block text-sm font-medium">Executable</span>
         <input
@@ -38,31 +47,20 @@ const logLevels: LogLevel[] = ['off', 'error', 'info', 'debug']
           class="w-full rounded-2xl border border-black/10 bg-white px-4 py-2.5"
           placeholder="Game.exe"
           type="text"
+          @blur="$emit('syncName')"
         />
-      </label>
-
-      <label class="block">
-        <span class="mb-1.5 block text-sm font-medium">Profile Enabled</span>
-        <select v-model="profile.enabled" class="w-full rounded-2xl border border-black/10 bg-white px-4 py-2.5">
-          <option :value="true">Enabled</option>
-          <option :value="false">Disabled</option>
-        </select>
-      </label>
-
-      <label class="block">
-        <span class="mb-1.5 block text-sm font-medium">Log Level</span>
-        <select v-model="profile.logLevel" class="w-full rounded-2xl border border-black/10 bg-white px-4 py-2.5">
-          <option v-for="level in logLevels" :key="level" :value="level">
-            {{ level }}
-          </option>
-        </select>
       </label>
     </div>
 
-    <div class="mt-4 grid gap-3 lg:grid-cols-2 2xl:grid-cols-4">
+    <label class="mt-4 inline-flex items-center gap-3 rounded-full bg-depthxr-pine px-4 py-2 text-sm font-medium text-white">
+      <input v-model="profile.enabled" class="h-4 w-4 accent-depthxr-copper" type="checkbox" />
+      Profile Enabled
+    </label>
+
+    <div class="mt-4 grid gap-3 lg:grid-cols-2">
       <EffectField
-        v-model:enabled="profile.stereoBoostEnabled"
-        v-model:value="profile.stereoBoost"
+        v-model:enabled="profile.settings.stereoBoostEnabled"
+        v-model:value="profile.settings.stereoBoost"
         title="Stereo Boost"
         subtitle="Scales horizontal eye separation around the midpoint."
         :min="0.5"
@@ -70,31 +68,13 @@ const logLevels: LogLevel[] = ['off', 'error', 'info', 'debug']
         :step="0.01"
       />
       <EffectField
-        v-model:enabled="profile.convergenceEnabled"
-        v-model:value="profile.convergence"
+        v-model:enabled="profile.settings.convergenceEnabled"
+        v-model:value="profile.settings.convergence"
         title="Convergence"
         subtitle="Shifts projection centers to move the zero-parallax plane."
         :min="-0.5"
         :max="0.5"
-        :step="0.01"
-      />
-      <EffectField
-        v-model:enabled="profile.worldScaleEnabled"
-        v-model:value="profile.worldScale"
-        title="World Scale"
-        subtitle="First-pass view-space translation scale for experimentation."
-        :min="0.5"
-        :max="2"
-        :step="0.01"
-      />
-      <EffectField
-        v-model:enabled="profile.fovScaleEnabled"
-        v-model:value="profile.fovScale"
-        title="FoV Scale"
-        subtitle="Scales tangent-space FoV angles while preserving sign."
-        :min="0.5"
-        :max="1.5"
-        :step="0.01"
+        :step="0.001"
       />
     </div>
   </article>

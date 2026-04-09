@@ -1,10 +1,12 @@
 # Config
 
-The canonical schema lives in `depthxr.schema.json`.
+The canonical Phase 2 schema lives in `vectorxr.schema.json`.
 
 The current file format supports:
-- a global settings block
-- per-executable overrides
-- optional per-effect enable flags
 
-The layer is tolerant of omitted optional profile fields and will inherit from the global block.
+- a shared `core` settings block
+- module-specific settings under `modules`
+- DepthXR defaults and per-executable overrides
+- placeholder PivotXR defaults for forward compatibility
+
+Phase 2 no longer treats the old DepthXR-only schema as the active source of truth.

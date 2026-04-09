@@ -2,7 +2,6 @@
 
 #include <algorithm>
 #include <cctype>
-#include <filesystem>
 
 namespace depthxr {
 namespace {
@@ -19,36 +18,18 @@ std::string NormalizeExe(std::string_view value) {
     return normalized;
 }
 
-void ApplyOverride(ResolvedSettings& target, const SettingsOverride& source) {
-    if (source.enabled.has_value()) {
-        target.enabled = *source.enabled;
-    }
+void ApplyDepthOverride(DepthXrResolvedSettings& target, const DepthXrSettingsOverride& source) {
     if (source.stereo_boost_enabled.has_value()) {
         target.stereo_boost_enabled = *source.stereo_boost_enabled;
     }
     if (source.convergence_enabled.has_value()) {
         target.convergence_enabled = *source.convergence_enabled;
     }
-    if (source.world_scale_enabled.has_value()) {
-        target.world_scale_enabled = *source.world_scale_enabled;
-    }
-    if (source.fov_scale_enabled.has_value()) {
-        target.fov_scale_enabled = *source.fov_scale_enabled;
-    }
     if (source.stereo_boost.has_value()) {
         target.stereo_boost = *source.stereo_boost;
     }
     if (source.convergence.has_value()) {
         target.convergence = *source.convergence;
-    }
-    if (source.world_scale.has_value()) {
-        target.world_scale = *source.world_scale;
-    }
-    if (source.fov_scale.has_value()) {
-        target.fov_scale = *source.fov_scale;
-    }
-    if (source.log_level.has_value()) {
-        target.log_level = *source.log_level;
     }
 }
 
@@ -58,8 +39,8 @@ bool ExeNameMatches(std::string_view lhs, std::string_view rhs) {
     return NormalizeExe(lhs) == NormalizeExe(rhs);
 }
 
-const Profile* FindMatchingProfile(const ConfigDocument& config, std::string_view exe_name) {
-    for (const Profile& profile : config.profiles) {
+const DepthXrProfile* FindMatchingDepthXrProfile(const ConfigDocument& config, std::string_view exe_name) {
+    for (const DepthXrProfile& profile : config.depthxr.profiles) {
         if (ExeNameMatches(profile.match.exe_name, exe_name)) {
             return &profile;
         }
@@ -67,13 +48,25 @@ const Profile* FindMatchingProfile(const ConfigDocument& config, std::string_vie
     return nullptr;
 }
 
-ResolvedSettings ResolveSettings(const ConfigDocument& config, std::string_view exe_name) {
-    ResolvedSettings resolved = config.global;
+DepthXrResolvedSettings ResolveDepthXrSettings(const ConfigDocument& config, std::string_view exe_name) {
+    DepthXrResolvedSettings resolved = config.depthxr.defaults;
+    resolved.enabled = config.depthxr.enabled;
 
-    if (const Profile* profile = FindMatchingProfile(config, exe_name)) {
-        ApplyOverride(resolved, profile->settings);
+    const DepthXrProfile* profile = FindMatchingDepthXrProfile(config, exe_name);
+    if (!profile || !profile->enabled) {
+        return resolved;
     }
 
+    ApplyDepthOverride(resolved, profile->settings);
+    return resolved;
+}
+
+ResolvedRuntimeConfig ResolveRuntimeConfig(const ConfigDocument& config, std::string_view exe_name) {
+    ResolvedRuntimeConfig resolved;
+    resolved.core = config.core;
+    resolved.depthxr = ResolveDepthXrSettings(config, exe_name);
+    resolved.pivotxr = config.pivotxr.defaults;
+    resolved.pivotxr.enabled = config.pivotxr.enabled;
     return resolved;
 }
 
