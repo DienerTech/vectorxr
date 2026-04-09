@@ -55,6 +55,8 @@ export interface ConfigEnvelope {
   config: VectorXRConfig
 }
 
+export type AppTab = 'core' | 'depthxr' | 'pivotxr'
+
 interface LegacyGlobalSettings {
   enabled: boolean
   stereoBoostEnabled: boolean
@@ -299,4 +301,8 @@ export function normalizeConfig(config: unknown): VectorXRConfig {
   }
 
   return defaultConfig()
+}
+
+export function cloneConfig(config: VectorXRConfig): VectorXRConfig {
+  return JSON.parse(JSON.stringify(config)) as VectorXRConfig
 }

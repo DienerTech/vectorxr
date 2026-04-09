@@ -1,15 +1,16 @@
-import { reactive } from 'vue'
+import { computed, reactive } from 'vue'
 
 import { loadConfigEnvelope, saveConfigEnvelope } from '../lib/commands'
-import { createProfile, defaultConfig } from '../lib/model'
-import { sanitizeProfileName } from '../lib/model'
-import type { VectorXRConfig } from '../lib/model'
+import { cloneConfig, createProfile, defaultConfig, sanitizeProfileName } from '../lib/model'
+import type { AppTab, VectorXRConfig } from '../lib/model'
 
 interface StoreState {
   loading: boolean
   saving: boolean
   path: string
   config: VectorXRConfig
+  originalConfig: VectorXRConfig
+  activeTab: AppTab
   status: string
 }
 
@@ -18,8 +19,12 @@ const state = reactive<StoreState>({
   saving: false,
   path: '',
   config: defaultConfig(),
+  originalConfig: defaultConfig(),
+  activeTab: 'core',
   status: '',
 })
+
+const isDirty = computed(() => JSON.stringify(state.config) !== JSON.stringify(state.originalConfig))
 
 export function useConfigStore() {
   async function load() {
@@ -29,7 +34,8 @@ export function useConfigStore() {
     try {
       const envelope = await loadConfigEnvelope()
       state.path = envelope.path
-      state.config = envelope.config
+      state.config = cloneConfig(envelope.config)
+      state.originalConfig = cloneConfig(envelope.config)
       state.status = 'Config loaded'
     } catch (error) {
       state.status = error instanceof Error ? error.message : 'Failed to load config'
@@ -44,12 +50,22 @@ export function useConfigStore() {
 
     try {
       state.path = await saveConfigEnvelope(state.config)
+      state.originalConfig = cloneConfig(state.config)
       state.status = 'Config saved'
     } catch (error) {
       state.status = error instanceof Error ? error.message : 'Failed to save config'
     } finally {
       state.saving = false
     }
+  }
+
+  function discardChanges() {
+    state.config = cloneConfig(state.originalConfig)
+    state.status = 'Unsaved changes discarded'
+  }
+
+  function setActiveTab(tab: AppTab) {
+    state.activeTab = tab
   }
 
   function addProfile() {
@@ -73,8 +89,11 @@ export function useConfigStore() {
 
   return {
     state,
+    isDirty,
     load,
     save,
+    discardChanges,
+    setActiveTab,
     addProfile,
     removeProfile,
     syncProfileName,
