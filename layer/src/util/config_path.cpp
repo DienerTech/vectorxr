@@ -20,10 +20,6 @@ std::filesystem::path ResolveConfigPath() {
         return std::filesystem::path(env_path);
     }
 
-    if (const char* env_path = std::getenv("DEPTHXR_CONFIG_PATH"); env_path && *env_path != '\0') {
-        return std::filesystem::path(env_path);
-    }
-
 #if defined(_WIN32)
     if (const char* local_app_data = std::getenv("LOCALAPPDATA"); local_app_data && *local_app_data != '\0') {
         return std::filesystem::path(local_app_data) / "VectorXR" / "config" / "settings.json";
@@ -35,10 +31,6 @@ std::filesystem::path ResolveConfigPath() {
 
 std::filesystem::path ResolveLogPath() {
     if (const char* env_path = std::getenv("VECTORXR_LOG_PATH"); env_path && *env_path != '\0') {
-        return std::filesystem::path(env_path);
-    }
-
-    if (const char* env_path = std::getenv("DEPTHXR_LOG_PATH"); env_path && *env_path != '\0') {
         return std::filesystem::path(env_path);
     }
 

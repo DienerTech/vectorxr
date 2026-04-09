@@ -30,7 +30,5 @@ struct ViewAdjustmentData {
 
 void ApplyStereoBoost(std::span<ViewAdjustmentData> views, double factor, ViewLayout layout);
 void ApplyConvergence(std::span<ViewAdjustmentData> views, double amount, ViewLayout layout);
-void ApplyWorldScale(std::span<ViewAdjustmentData> views, double factor, ViewLayout layout);
-void ApplyFovScale(std::span<ViewAdjustmentData> views, double factor, ViewLayout layout);
 
 } // namespace depthxr

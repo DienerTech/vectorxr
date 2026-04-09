@@ -1,5 +1,6 @@
 export type LogLevel = 'off' | 'error' | 'info' | 'debug'
 export type ActivationMode = 'toggle' | 'hold'
+export type AppTab = 'core' | 'depthxr' | 'pivotxr'
 
 export interface CoreConfig {
   enabled: boolean
@@ -53,33 +54,6 @@ export interface VectorXRConfig {
 export interface ConfigEnvelope {
   path: string
   config: VectorXRConfig
-}
-
-export type AppTab = 'core' | 'depthxr' | 'pivotxr'
-
-interface LegacyGlobalSettings {
-  enabled: boolean
-  stereoBoostEnabled: boolean
-  convergenceEnabled: boolean
-  worldScaleEnabled: boolean
-  fovScaleEnabled: boolean
-  stereoBoost: number
-  convergence: number
-  worldScale: number
-  fovScale: number
-  logLevel: LogLevel
-}
-
-interface LegacyProfileConfig extends LegacyGlobalSettings {
-  match: {
-    exe: string
-  }
-}
-
-interface LegacyDepthXRConfig {
-  version: 1
-  global: LegacyGlobalSettings
-  profiles: LegacyProfileConfig[]
 }
 
 type UnknownRecord = Record<string, unknown>
@@ -178,10 +152,6 @@ export function createProfile(defaultSettings: DepthXRSettings): DepthXRProfileC
   }
 }
 
-function isLegacyDepthXRConfig(value: unknown): value is LegacyDepthXRConfig {
-  return isRecord(value) && value.version === 1 && 'global' in value && 'profiles' in value
-}
-
 function isVectorXRConfig(value: unknown): value is VectorXRConfig {
   return isRecord(value) && value.version === 2 && 'core' in value && 'modules' in value
 }
@@ -252,52 +222,9 @@ function normalizeVectorXRConfig(value: unknown): VectorXRConfig {
   }
 }
 
-export function migrateLegacyConfig(config: LegacyDepthXRConfig): VectorXRConfig {
-  return {
-    version: 2,
-    core: {
-      enabled: true,
-      logLevel: normalizeLogLevel(config.global.logLevel),
-      logRetentionFiles: 7,
-    },
-    modules: {
-      depthxr: {
-        enabled: config.global.enabled,
-        defaults: {
-          stereoBoostEnabled: config.global.stereoBoostEnabled,
-          convergenceEnabled: config.global.convergenceEnabled,
-          stereoBoost: config.global.stereoBoost,
-          convergence: config.global.convergence,
-        },
-        profiles: config.profiles.map((profile) => ({
-          name: sanitizeProfileName(profile.match.exe),
-          enabled: profile.enabled,
-          match: {
-            exe: profile.match.exe,
-          },
-          settings: {
-            stereoBoostEnabled: profile.stereoBoostEnabled,
-            convergenceEnabled: profile.convergenceEnabled,
-            stereoBoost: profile.stereoBoost,
-            convergence: profile.convergence,
-          },
-        })),
-      },
-      pivotxr: {
-        enabled: false,
-        defaults: defaultPivotXRDefaults(),
-      },
-    },
-  }
-}
-
 export function normalizeConfig(config: unknown): VectorXRConfig {
   if (isVectorXRConfig(config)) {
     return normalizeVectorXRConfig(config)
-  }
-
-  if (isLegacyDepthXRConfig(config)) {
-    return normalizeVectorXRConfig(migrateLegacyConfig(config))
   }
 
   return defaultConfig()

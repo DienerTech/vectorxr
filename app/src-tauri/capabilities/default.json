@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Default capability for the DepthXR desktop app",
+  "description": "Default capability for the VectorXR desktop app",
   "windows": [
     "main"
   ],

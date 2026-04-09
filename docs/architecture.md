@@ -2,30 +2,42 @@
 
 ## Goals
 
-DepthXR is structured around a small shared core plus a thin Windows OpenXR API layer.
+VectorXR Phase 2 is organized as one shared OpenXR runtime pipeline with product-level feature separation in the app and config.
 
 Design rules:
-- keep OpenXR interception code separate from config and math
+
+- keep OpenXR interception separate from feature math
 - keep config parsing independent from the desktop app
-- make effect math replaceable without touching negotiation and dispatch
+- keep suite settings separate from feature settings
+- let features compose through shared runtime state instead of isolated runtime stacks
 - keep runtime logging useful in debug scenarios but quiet by default
 
-## Modules
+## Product Structure
+
+The app presents:
+
+- `VectorXR` core controls
+- `DepthXR` feature editing
+- `PivotXR` feature editing
+
+This "module" concept is a product and config boundary, not a separate runtime ownership boundary.
+
+## Runtime Structure
 
 ### Shared core
 
-Shared core code lives under `layer/` because the layer is the primary product today, but it is split so tests can run without the Windows DLL:
+Shared core code under `layer/` currently owns:
 
 - config model and parser
-- settings resolver
+- settings resolution
 - path resolution
 - process name resolution
-- effect math
 - logger abstraction
+- stereo boost and convergence math
 
 ### OpenXR layer
 
-The Windows DLL adds:
+The Windows DLL owns:
 
 - loader negotiation entry point
 - API layer instance creation
@@ -35,9 +47,16 @@ The Windows DLL adds:
 
 ### App
 
-The Tauri app edits the same JSON file used by the layer. It does not talk to the layer directly.
+The Tauri app edits the same VectorXR config file used by the layer.
 
-## Interception plan
+The app owns:
+
+- suite navigation
+- validation
+- working-copy save flow
+- feature-specific editing surfaces
+
+## Current interception plan
 
 Current interception surface:
 
@@ -45,6 +64,11 @@ Current interception surface:
 - `xrCreateApiLayerInstance`
 - `xrGetInstanceProcAddr`
 - `xrDestroyInstance`
+- `xrBeginSession`
 - `xrLocateViews`
 
-This is deliberately minimal. If later experiments show that world scale needs broader space handling, the next likely additions are `xrLocateSpace` and selected reference-space calls.
+This remains intentionally minimal while DepthXR stays focused on stereo boost and convergence.
+
+## Planned direction
+
+The next runtime step is to introduce a shared intermediate runtime context and ordered feature passes so DepthXR and PivotXR can compose cleanly inside one pipeline.

@@ -1,40 +1,36 @@
 # Bootstrap Notes
 
-## Assumptions
+## Current assumptions
 
 - The layer targets Windows only.
-- The config app and layer share a single JSON config file.
+- The app and layer share one VectorXR JSON config file.
 - Per-game matching is currently by executable file name only.
-- Stereo boost, world scale, and FoV scale are applied in `xrLocateViews`.
+- DepthXR currently applies stereo boost and convergence in `xrLocateViews`.
+- PivotXR config exists in the suite model, but the runtime feature path is not active yet.
 
-## Milestone coverage
+## Phase 2 progress
 
 ### Milestone 1
 
-- DLL scaffold
-- loader negotiation
-- manifest
-- process name detection
-- logging
-- instance creation interception
+- VectorXR v2 config model
+- shared app/layer config contract
+- parser and settings resolution updates
+- tests for v2 parsing and DepthXR profile fallback behavior
 
 ### Milestone 2
 
-- shared config schema
-- parser
-- global and per-profile settings merge
-- tests for parsing and profile matching
+- VectorXR suite shell
+- separate `VectorXR`, `DepthXR`, and `PivotXR` tabs
+- working-copy save model
+- sticky save bar
+- friendlier DepthXR value presentation
 
 ### Milestone 3
 
-- Tauri/Vue scaffold
-- global editor
-- profile CRUD
-- config path display
-- validation and save flow
+- DepthXR scope cleanup to stereo boost and convergence only
+- removal of World Scale and FoV from active config/build/runtime paths
+- profile naming and disabled-profile fallback UX
 
-### Milestone 4
+## Next step
 
-- dedicated effect modules
-- `xrLocateViews` hook
-- feature toggles and neutral-value bypass behavior
+Introduce the shared runtime pass model described in the Phase 2 planning docs so future features can compose through one coordinated pipeline.
