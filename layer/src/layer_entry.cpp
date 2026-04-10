@@ -28,8 +28,31 @@ XrResult XRAPI_CALL DepthxrDestroyInstance(XrInstance instance) {
     return OpenXrLayer::Instance().DestroyInstance(instance);
 }
 
+XrResult XRAPI_CALL DepthxrCreateSession(XrInstance instance,
+                                         const XrSessionCreateInfo* create_info,
+                                         XrSession* session) {
+    return OpenXrLayer::Instance().CreateSession(instance, create_info, session);
+}
+
 XrResult XRAPI_CALL DepthxrBeginSession(XrSession session, const XrSessionBeginInfo* begin_info) {
     return OpenXrLayer::Instance().BeginSession(session, begin_info);
+}
+
+XrResult XRAPI_CALL DepthxrEndFrame(XrSession session, const XrFrameEndInfo* frame_end_info) {
+    return OpenXrLayer::Instance().EndFrame(session, frame_end_info);
+}
+
+XrResult XRAPI_CALL DepthxrCreateReferenceSpace(XrSession session,
+                                                const XrReferenceSpaceCreateInfo* create_info,
+                                                XrSpace* space) {
+    return OpenXrLayer::Instance().CreateReferenceSpace(session, create_info, space);
+}
+
+XrResult XRAPI_CALL DepthxrLocateSpace(XrSpace space,
+                                       XrSpace base_space,
+                                       XrTime time,
+                                       XrSpaceLocation* location) {
+    return OpenXrLayer::Instance().LocateSpace(space, base_space, time, location);
 }
 
 XrResult XRAPI_CALL DepthxrLocateViews(XrSession session,
@@ -61,8 +84,24 @@ XrResult XRAPI_CALL xrGetInstanceProcAddr(XrInstance instance, const char* name,
         *function = reinterpret_cast<PFN_xrVoidFunction>(depthxr::DepthxrDestroyInstance);
         return XR_SUCCESS;
     }
+    if (requested == "xrCreateSession") {
+        *function = reinterpret_cast<PFN_xrVoidFunction>(depthxr::DepthxrCreateSession);
+        return XR_SUCCESS;
+    }
     if (requested == "xrBeginSession") {
         *function = reinterpret_cast<PFN_xrVoidFunction>(depthxr::DepthxrBeginSession);
+        return XR_SUCCESS;
+    }
+    if (requested == "xrEndFrame") {
+        *function = reinterpret_cast<PFN_xrVoidFunction>(depthxr::DepthxrEndFrame);
+        return XR_SUCCESS;
+    }
+    if (requested == "xrCreateReferenceSpace") {
+        *function = reinterpret_cast<PFN_xrVoidFunction>(depthxr::DepthxrCreateReferenceSpace);
+        return XR_SUCCESS;
+    }
+    if (requested == "xrLocateSpace") {
+        *function = reinterpret_cast<PFN_xrVoidFunction>(depthxr::DepthxrLocateSpace);
         return XR_SUCCESS;
     }
     if (requested == "xrLocateViews") {

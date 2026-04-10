@@ -81,19 +81,6 @@ ViewOrientation YawQuaternion(double yaw_radians) {
     return {0.0, std::sin(half), 0.0, std::cos(half)};
 }
 
-ViewPose RotateAroundY(const ViewPose& position, const ViewPose& center, double yaw_radians) {
-    const double sin_yaw = std::sin(yaw_radians);
-    const double cos_yaw = std::cos(yaw_radians);
-    const double relative_x = position.x - center.x;
-    const double relative_z = position.z - center.z;
-
-    return {
-        center.x + relative_x * cos_yaw + relative_z * sin_yaw,
-        position.y,
-        center.z - relative_x * sin_yaw + relative_z * cos_yaw,
-    };
-}
-
 } // namespace
 
 void ApplyPivotYaw(std::span<ViewAdjustmentData> views,
@@ -112,14 +99,6 @@ void ApplyPivotYaw(std::span<ViewAdjustmentData> views,
         smoothed_extra_yaw_radians = 0.0;
         return;
     }
-
-    const ViewPose left_center = AveragePosition(views, groups->left);
-    const ViewPose right_center = AveragePosition(views, groups->right);
-    const ViewPose headset_center{
-        (left_center.x + right_center.x) * 0.5,
-        (left_center.y + right_center.y) * 0.5,
-        (left_center.z + right_center.z) * 0.5,
-    };
 
     const double current_yaw = ExtractYaw(views[groups->left.front()].orientation);
     const double deadzone_radians = DegreesToRadians(std::max(0.0, deadzone_degrees));
@@ -142,7 +121,6 @@ void ApplyPivotYaw(std::span<ViewAdjustmentData> views,
 
     const ViewOrientation extra_rotation = YawQuaternion(smoothed_extra_yaw_radians);
     for (ViewAdjustmentData& view : views) {
-        view.position = RotateAroundY(view.position, headset_center, smoothed_extra_yaw_radians);
         view.orientation = Multiply(extra_rotation, view.orientation);
     }
 }
