@@ -1,1 +1,1 @@
-{"default":{"identifier":"default","description":"Default capability for the DepthXR desktop app","local":true,"windows":["main"],"permissions":["core:default"]}}
+{"default":{"identifier":"default","description":"Default capability for the VectorXR desktop app","local":true,"windows":["main"],"permissions":["core:default"]}}

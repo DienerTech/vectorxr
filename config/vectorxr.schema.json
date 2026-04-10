@@ -1,0 +1,253 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vectorxr.local/schema/vectorxr.schema.json",
+  "title": "VectorXR Settings",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "version",
+    "core",
+    "modules"
+  ],
+  "properties": {
+    "version": {
+      "type": "integer",
+      "const": 2
+    },
+    "core": {
+      "$ref": "#/$defs/core"
+    },
+    "modules": {
+      "$ref": "#/$defs/modules"
+    }
+  },
+  "$defs": {
+    "logLevel": {
+      "type": "string",
+      "enum": [
+        "off",
+        "error",
+        "info",
+        "debug"
+      ]
+    },
+    "activationMode": {
+      "type": "string",
+      "enum": [
+        "toggle",
+        "hold"
+      ]
+    },
+    "activationKey": {
+      "type": "string",
+      "pattern": "^(F([1-9]|1[0-2])|[A-Z]|[0-9]|Space)$"
+    },
+    "core": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "enabled",
+        "logLevel",
+        "logRetentionFiles"
+      ],
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "logLevel": {
+          "$ref": "#/$defs/logLevel"
+        },
+        "logRetentionFiles": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 50
+        }
+      }
+    },
+    "depthxrSettings": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "stereoBoostEnabled",
+        "convergenceEnabled",
+        "stereoBoost",
+        "convergence"
+      ],
+      "properties": {
+        "stereoBoostEnabled": {
+          "type": "boolean"
+        },
+        "convergenceEnabled": {
+          "type": "boolean"
+        },
+        "stereoBoost": {
+          "type": "number",
+          "minimum": 0.5,
+          "maximum": 2.0
+        },
+        "convergence": {
+          "type": "number",
+          "minimum": -0.5,
+          "maximum": 0.5
+        }
+      }
+    },
+    "profileMatch": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "exe"
+      ],
+      "properties": {
+        "exe": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "depthxrProfile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "enabled",
+        "match",
+        "settings"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "match": {
+          "$ref": "#/$defs/profileMatch"
+        },
+        "settings": {
+          "$ref": "#/$defs/depthxrSettings"
+        }
+      }
+    },
+    "depthxrModule": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "enabled",
+        "defaults",
+        "profiles"
+      ],
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "defaults": {
+          "$ref": "#/$defs/depthxrSettings"
+        },
+        "profiles": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/depthxrProfile"
+          }
+        }
+      }
+    },
+    "pivotxrDefaults": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "activationMode",
+        "activationKey",
+        "rotationMultiplier",
+        "smoothing",
+        "deadzoneDegrees",
+        "maxExtraYawDegrees",
+        "pitchRotationMultiplier",
+        "pitchSmoothing",
+        "pitchDeadzoneDegrees",
+        "maxExtraPitchDegrees"
+      ],
+      "properties": {
+        "activationMode": {
+          "$ref": "#/$defs/activationMode"
+        },
+        "activationKey": {
+          "$ref": "#/$defs/activationKey"
+        },
+        "rotationMultiplier": {
+          "type": "number",
+          "minimum": 1.0,
+          "maximum": 3.0
+        },
+        "smoothing": {
+          "type": "number",
+          "minimum": 0.0,
+          "maximum": 1.0
+        },
+        "deadzoneDegrees": {
+          "type": "number",
+          "minimum": 0.0,
+          "maximum": 45.0
+        },
+        "maxExtraYawDegrees": {
+          "type": "number",
+          "minimum": 0.0,
+          "maximum": 45.0
+        },
+        "pitchRotationMultiplier": {
+          "type": "number",
+          "minimum": 1.0,
+          "maximum": 3.0
+        },
+        "pitchSmoothing": {
+          "type": "number",
+          "minimum": 0.0,
+          "maximum": 1.0
+        },
+        "pitchDeadzoneDegrees": {
+          "type": "number",
+          "minimum": 0.0,
+          "maximum": 45.0
+        },
+        "maxExtraPitchDegrees": {
+          "type": "number",
+          "minimum": 0.0,
+          "maximum": 45.0
+        }
+      }
+    },
+    "pivotxrModule": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "enabled",
+        "defaults"
+      ],
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "defaults": {
+          "$ref": "#/$defs/pivotxrDefaults"
+        }
+      }
+    },
+    "modules": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "depthxr",
+        "pivotxr"
+      ],
+      "properties": {
+        "depthxr": {
+          "$ref": "#/$defs/depthxrModule"
+        },
+        "pivotxr": {
+          "$ref": "#/$defs/pivotxrModule"
+        }
+      }
+    }
+  }
+}

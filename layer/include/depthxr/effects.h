@@ -23,14 +23,26 @@ struct ViewFov {
     double angle_down{0.0};
 };
 
+struct ViewOrientation {
+    double x{0.0};
+    double y{0.0};
+    double z{0.0};
+    double w{1.0};
+};
+
 struct ViewAdjustmentData {
     ViewPose position;
     ViewFov fov;
+    ViewOrientation orientation;
 };
 
 void ApplyStereoBoost(std::span<ViewAdjustmentData> views, double factor, ViewLayout layout);
 void ApplyConvergence(std::span<ViewAdjustmentData> views, double amount, ViewLayout layout);
-void ApplyWorldScale(std::span<ViewAdjustmentData> views, double factor, ViewLayout layout);
-void ApplyFovScale(std::span<ViewAdjustmentData> views, double factor, ViewLayout layout);
+void ApplyPivotYaw(std::span<ViewAdjustmentData> views,
+                   double rotation_multiplier,
+                   double deadzone_degrees,
+                   double smoothing,
+                   ViewLayout layout,
+                   double& smoothed_extra_yaw_radians);
 
 } // namespace depthxr

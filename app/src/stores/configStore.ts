@@ -1,14 +1,16 @@
-import { reactive } from 'vue'
+import { computed, reactive } from 'vue'
 
 import { loadConfigEnvelope, saveConfigEnvelope } from '../lib/commands'
-import { createProfile, defaultConfig } from '../lib/model'
-import type { DepthXRConfig } from '../lib/model'
+import { cloneConfig, createProfile, defaultConfig, sanitizeProfileName } from '../lib/model'
+import type { AppTab, VectorXRConfig } from '../lib/model'
 
 interface StoreState {
   loading: boolean
   saving: boolean
   path: string
-  config: DepthXRConfig
+  config: VectorXRConfig
+  originalConfig: VectorXRConfig
+  activeTab: AppTab
   status: string
 }
 
@@ -17,8 +19,12 @@ const state = reactive<StoreState>({
   saving: false,
   path: '',
   config: defaultConfig(),
+  originalConfig: defaultConfig(),
+  activeTab: 'core',
   status: '',
 })
+
+const isDirty = computed(() => JSON.stringify(state.config) !== JSON.stringify(state.originalConfig))
 
 export function useConfigStore() {
   async function load() {
@@ -28,7 +34,8 @@ export function useConfigStore() {
     try {
       const envelope = await loadConfigEnvelope()
       state.path = envelope.path
-      state.config = envelope.config
+      state.config = cloneConfig(envelope.config)
+      state.originalConfig = cloneConfig(envelope.config)
       state.status = 'Config loaded'
     } catch (error) {
       state.status = error instanceof Error ? error.message : 'Failed to load config'
@@ -43,6 +50,7 @@ export function useConfigStore() {
 
     try {
       state.path = await saveConfigEnvelope(state.config)
+      state.originalConfig = cloneConfig(state.config)
       state.status = 'Config saved'
     } catch (error) {
       state.status = error instanceof Error ? error.message : 'Failed to save config'
@@ -51,19 +59,43 @@ export function useConfigStore() {
     }
   }
 
+  function discardChanges() {
+    state.config = cloneConfig(state.originalConfig)
+    state.status = 'Unsaved changes discarded'
+  }
+
+  function setActiveTab(tab: AppTab) {
+    state.activeTab = tab
+  }
+
   function addProfile() {
-    state.config.profiles.push(createProfile(state.config.global))
+    state.config.modules.depthxr.profiles.push(createProfile(state.config.modules.depthxr.defaults))
   }
 
   function removeProfile(index: number) {
-    state.config.profiles.splice(index, 1)
+    state.config.modules.depthxr.profiles.splice(index, 1)
+  }
+
+  function syncProfileName(index: number) {
+    const profile = state.config.modules.depthxr.profiles[index]
+    if (!profile) {
+      return
+    }
+
+    if (!profile.name.trim() || profile.name === 'New Profile') {
+      profile.name = sanitizeProfileName(profile.match.exe)
+    }
   }
 
   return {
     state,
+    isDirty,
     load,
     save,
+    discardChanges,
+    setActiveTab,
     addProfile,
     removeProfile,
+    syncProfileName,
   }
 }

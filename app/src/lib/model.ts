@@ -1,72 +1,296 @@
 export type LogLevel = 'off' | 'error' | 'info' | 'debug'
+export type ActivationMode = 'toggle' | 'hold'
+export type AppTab = 'core' | 'depthxr' | 'pivotxr'
+export const pivotActivationKeyGroups = [
+  {
+    label: 'Function Keys',
+    options: Array.from({ length: 12 }, (_, index) => `F${index + 1}`),
+  },
+  {
+    label: 'Letter Keys',
+    options: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'.split(''),
+  },
+  {
+    label: 'Number Keys',
+    options: '0123456789'.split(''),
+  },
+  {
+    label: 'Special Keys',
+    options: ['Space'],
+  },
+] as const
 
-export interface GlobalSettings {
+export interface CoreConfig {
   enabled: boolean
-  stereoBoostEnabled: boolean
-  convergenceEnabled: boolean
-  worldScaleEnabled: boolean
-  fovScaleEnabled: boolean
-  stereoBoost: number
-  convergence: number
-  worldScale: number
-  fovScale: number
   logLevel: LogLevel
+  logRetentionFiles: number
 }
 
-export interface ProfileConfig extends GlobalSettings {
+export interface DepthXRSettings {
+  stereoBoostEnabled: boolean
+  convergenceEnabled: boolean
+  stereoBoost: number
+  convergence: number
+}
+
+export interface DepthXRProfileConfig {
+  name: string
+  enabled: boolean
   match: {
     exe: string
   }
+  settings: DepthXRSettings
 }
 
-export interface DepthXRConfig {
-  version: 1
-  global: GlobalSettings
-  profiles: ProfileConfig[]
+export interface DepthXRModuleConfig {
+  enabled: boolean
+  defaults: DepthXRSettings
+  profiles: DepthXRProfileConfig[]
+}
+
+export interface PivotXRDefaults {
+  activationMode: ActivationMode
+  activationKey: string
+  rotationMultiplier: number
+  smoothing: number
+  deadzoneDegrees: number
+  maxExtraYawDegrees: number
+  pitchRotationMultiplier: number
+  pitchSmoothing: number
+  pitchDeadzoneDegrees: number
+  maxExtraPitchDegrees: number
+}
+
+export interface PivotXRModuleConfig {
+  enabled: boolean
+  defaults: PivotXRDefaults
+}
+
+export interface VectorXRConfig {
+  version: 2
+  core: CoreConfig
+  modules: {
+    depthxr: DepthXRModuleConfig
+    pivotxr: PivotXRModuleConfig
+  }
 }
 
 export interface ConfigEnvelope {
   path: string
-  config: DepthXRConfig
+  config: VectorXRConfig
 }
 
-export function defaultGlobalSettings(): GlobalSettings {
+type UnknownRecord = Record<string, unknown>
+
+function isRecord(value: unknown): value is UnknownRecord {
+  return typeof value === 'object' && value !== null
+}
+
+function normalizeLogLevel(value: unknown): LogLevel {
+  if (value === 'off' || value === 'error' || value === 'info' || value === 'debug') {
+    return value
+  }
+
+  return 'info'
+}
+
+function normalizeBoolean(value: unknown, fallback: boolean): boolean {
+  return typeof value === 'boolean' ? value : fallback
+}
+
+function normalizeNumber(value: unknown, fallback: number): number {
+  return typeof value === 'number' && Number.isFinite(value) ? value : fallback
+}
+
+function normalizeString(value: unknown, fallback: string): string {
+  return typeof value === 'string' ? value : fallback
+}
+
+export function defaultCoreConfig(): CoreConfig {
   return {
     enabled: true,
+    logLevel: 'info',
+    logRetentionFiles: 7,
+  }
+}
+
+export function defaultDepthXRSettings(): DepthXRSettings {
+  return {
     stereoBoostEnabled: true,
     convergenceEnabled: true,
-    worldScaleEnabled: true,
-    fovScaleEnabled: true,
     stereoBoost: 1.1,
     convergence: 0,
-    worldScale: 1.0,
-    fovScale: 1.0,
-    logLevel: 'info',
   }
 }
 
-export function defaultConfig(): DepthXRConfig {
+export function defaultPivotXRDefaults(): PivotXRDefaults {
   return {
-    version: 1,
-    global: defaultGlobalSettings(),
-    profiles: [],
+    activationMode: 'toggle',
+    activationKey: 'F8',
+    rotationMultiplier: 1.5,
+    smoothing: 0.2,
+    deadzoneDegrees: 8,
+    maxExtraYawDegrees: 25,
+    pitchRotationMultiplier: 1.0,
+    pitchSmoothing: 0.2,
+    pitchDeadzoneDegrees: 12,
+    maxExtraPitchDegrees: 20,
   }
 }
 
-export function createProfile(globalSettings: GlobalSettings): ProfileConfig {
+export function defaultConfig(): VectorXRConfig {
   return {
+    version: 2,
+    core: defaultCoreConfig(),
+    modules: {
+      depthxr: {
+        enabled: true,
+        defaults: defaultDepthXRSettings(),
+        profiles: [],
+      },
+      pivotxr: {
+        enabled: false,
+        defaults: defaultPivotXRDefaults(),
+      },
+    },
+  }
+}
+
+export function sanitizeProfileName(exe: string): string {
+  const trimmed = exe.trim()
+  if (!trimmed) {
+    return 'New Profile'
+  }
+
+  const basename = trimmed.split(/[/\\]/).pop() ?? trimmed
+  const dot = basename.lastIndexOf('.')
+  if (dot > 0) {
+    return basename.slice(0, dot)
+  }
+
+  return basename
+}
+
+export function createProfile(defaultSettings: DepthXRSettings): DepthXRProfileConfig {
+  return {
+    name: sanitizeProfileName('Game.exe'),
+    enabled: true,
     match: {
       exe: 'Game.exe',
     },
-    enabled: globalSettings.enabled,
-    stereoBoostEnabled: globalSettings.stereoBoostEnabled,
-    convergenceEnabled: globalSettings.convergenceEnabled,
-    worldScaleEnabled: globalSettings.worldScaleEnabled,
-    fovScaleEnabled: globalSettings.fovScaleEnabled,
-    stereoBoost: globalSettings.stereoBoost,
-    convergence: globalSettings.convergence,
-    worldScale: globalSettings.worldScale,
-    fovScale: globalSettings.fovScale,
-    logLevel: globalSettings.logLevel,
+    settings: { ...defaultSettings },
   }
+}
+
+function isVectorXRConfig(value: unknown): value is VectorXRConfig {
+  return isRecord(value) && value.version === 2 && 'core' in value && 'modules' in value
+}
+
+function normalizeDepthXRSettings(value: unknown, fallback: DepthXRSettings): DepthXRSettings {
+  const source = isRecord(value) ? value : {}
+
+  return {
+    stereoBoostEnabled: normalizeBoolean(source.stereoBoostEnabled, fallback.stereoBoostEnabled),
+    convergenceEnabled: normalizeBoolean(source.convergenceEnabled, fallback.convergenceEnabled),
+    stereoBoost: normalizeNumber(source.stereoBoost, fallback.stereoBoost),
+    convergence: normalizeNumber(source.convergence, fallback.convergence),
+  }
+}
+
+function normalizePivotXRDefaults(value: unknown, fallback: PivotXRDefaults): PivotXRDefaults {
+  const source = isRecord(value) ? value : {}
+  const activationMode = source.activationMode === 'hold' ? 'hold' : fallback.activationMode
+
+  return {
+    activationMode,
+    activationKey: normalizePivotActivationKey(source.activationKey, fallback.activationKey),
+    rotationMultiplier: normalizeNumber(source.rotationMultiplier, fallback.rotationMultiplier),
+    smoothing: normalizeNumber(source.smoothing, fallback.smoothing),
+    deadzoneDegrees: normalizeNumber(source.deadzoneDegrees, fallback.deadzoneDegrees),
+    maxExtraYawDegrees: normalizeNumber(source.maxExtraYawDegrees, fallback.maxExtraYawDegrees),
+    pitchRotationMultiplier: normalizeNumber(source.pitchRotationMultiplier, fallback.pitchRotationMultiplier),
+    pitchSmoothing: normalizeNumber(source.pitchSmoothing, fallback.pitchSmoothing),
+    pitchDeadzoneDegrees: normalizeNumber(source.pitchDeadzoneDegrees, fallback.pitchDeadzoneDegrees),
+    maxExtraPitchDegrees: normalizeNumber(source.maxExtraPitchDegrees, fallback.maxExtraPitchDegrees),
+  }
+}
+
+function normalizePivotActivationKey(value: unknown, fallback: string): string {
+  if (typeof value !== 'string') {
+    return fallback
+  }
+
+  const trimmed = value.trim()
+  if (/^[a-z]$/i.test(trimmed)) {
+    return trimmed.toUpperCase()
+  }
+
+  if (/^\d$/.test(trimmed)) {
+    return trimmed
+  }
+
+  if (/^f([1-9]|1[0-2])$/i.test(trimmed)) {
+    return `F${trimmed.slice(1)}`
+  }
+
+  if (/^space$/i.test(trimmed)) {
+    return 'Space'
+  }
+
+  return fallback
+}
+
+function normalizeVectorXRConfig(value: unknown): VectorXRConfig {
+  const fallback = defaultConfig()
+  const source = isRecord(value) ? value : {}
+  const core = isRecord(source.core) ? source.core : {}
+  const modules = isRecord(source.modules) ? source.modules : {}
+  const depthxr = isRecord(modules.depthxr) ? modules.depthxr : {}
+  const pivotxr = isRecord(modules.pivotxr) ? modules.pivotxr : {}
+  const profileValues = Array.isArray(depthxr.profiles) ? depthxr.profiles : []
+
+  return {
+    version: 2,
+    core: {
+      enabled: normalizeBoolean(core.enabled, fallback.core.enabled),
+      logLevel: normalizeLogLevel(core.logLevel),
+      logRetentionFiles: normalizeNumber(core.logRetentionFiles, fallback.core.logRetentionFiles),
+    },
+    modules: {
+      depthxr: {
+        enabled: normalizeBoolean(depthxr.enabled, fallback.modules.depthxr.enabled),
+        defaults: normalizeDepthXRSettings(depthxr.defaults, fallback.modules.depthxr.defaults),
+        profiles: profileValues.map((profileValue) => {
+          const profile = isRecord(profileValue) ? profileValue : {}
+          const match = isRecord(profile.match) ? profile.match : {}
+          const settings = normalizeDepthXRSettings(profile.settings, fallback.modules.depthxr.defaults)
+
+          return {
+            name: normalizeString(profile.name, sanitizeProfileName(normalizeString(match.exe, 'Game.exe'))),
+            enabled: normalizeBoolean(profile.enabled, true),
+            match: {
+              exe: normalizeString(match.exe, 'Game.exe'),
+            },
+            settings,
+          }
+        }),
+      },
+      pivotxr: {
+        enabled: normalizeBoolean(pivotxr.enabled, fallback.modules.pivotxr.enabled),
+        defaults: normalizePivotXRDefaults(pivotxr.defaults, fallback.modules.pivotxr.defaults),
+      },
+    },
+  }
+}
+
+export function normalizeConfig(config: unknown): VectorXRConfig {
+  if (isVectorXRConfig(config)) {
+    return normalizeVectorXRConfig(config)
+  }
+
+  return defaultConfig()
+}
+
+export function cloneConfig(config: VectorXRConfig): VectorXRConfig {
+  return JSON.parse(JSON.stringify(config)) as VectorXRConfig
 }

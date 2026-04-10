@@ -1,10 +1,14 @@
 #include <cmath>
 #include <cstdlib>
+#include <filesystem>
 #include <iostream>
+#include <fstream>
+#include <sstream>
 #include <string>
 
 #include "depthxr/config_parser.h"
 #include "depthxr/effects.h"
+#include "depthxr/logger.h"
 #include "depthxr/settings_resolver.h"
 
 namespace {
@@ -19,74 +23,229 @@ void Expect(bool condition, const std::string& message) {
 void TestParseConfig() {
     const std::string json = R"json(
 {
-  "version": 1,
-  "global": {
+  "version": 2,
+  "core": {
     "enabled": true,
-    "stereoBoostEnabled": true,
-    "convergenceEnabled": true,
-    "worldScaleEnabled": true,
-    "fovScaleEnabled": true,
-    "stereoBoost": 1.1,
-    "convergence": 0.08,
-    "worldScale": 1.0,
-    "fovScale": 0.95,
-    "logLevel": "debug"
+    "logLevel": "debug",
+    "logRetentionFiles": 9
   },
-  "profiles": [
-    {
-      "match": { "exe": "Game.exe" },
-      "stereoBoost": 1.2,
-      "fovScale": 0.9
+  "modules": {
+    "depthxr": {
+      "enabled": true,
+      "defaults": {
+        "stereoBoostEnabled": true,
+        "convergenceEnabled": true,
+        "stereoBoost": 1.1,
+        "convergence": 0.08
+      },
+      "profiles": [
+        {
+          "name": "Game",
+          "match": { "exe": "Game.exe" },
+          "enabled": true,
+          "settings": {
+            "stereoBoost": 1.2
+          }
+        }
+      ]
+    },
+    "pivotxr": {
+      "enabled": false,
+      "defaults": {
+        "activationMode": "toggle",
+        "activationKey": "f8",
+        "rotationMultiplier": 1.5,
+        "smoothing": 0.2,
+        "deadzoneDegrees": 8.0,
+        "maxExtraYawDegrees": 25.0,
+        "pitchRotationMultiplier": 1.2,
+        "pitchSmoothing": 0.15,
+        "pitchDeadzoneDegrees": 10.0,
+        "maxExtraPitchDegrees": 18.0
+      }
     }
-  ]
+  }
 }
 )json";
 
     const depthxr::ParseResult result = depthxr::ParseConfig(json);
-    Expect(result.ok, "Config parser rejected valid config: " + result.error);
-    Expect(result.document.version == 1, "Version was not parsed");
-    Expect(std::abs(result.document.global.stereo_boost - 1.1) < 0.0001, "Global stereoBoost mismatch");
-    Expect(std::abs(result.document.global.convergence - 0.08) < 0.0001, "Global convergence mismatch");
-    Expect(result.document.profiles.size() == 1, "Profile count mismatch");
-    Expect(result.document.profiles[0].match.exe_name == "Game.exe", "Profile exe match mismatch");
+    Expect(result.ok, "Config parser rejected valid v2 config: " + result.error);
+    Expect(result.document.version == 2, "Version was not normalized to 2");
+    Expect(result.document.core.log_level == depthxr::LogLevel::Debug, "Core log level mismatch");
+    Expect(result.document.core.log_retention_files == 9, "Core log retention mismatch");
+    Expect(std::abs(result.document.depthxr.defaults.stereo_boost - 1.1) < 0.0001, "DepthXR stereoBoost mismatch");
+    Expect(std::abs(result.document.depthxr.defaults.convergence - 0.08) < 0.0001, "DepthXR convergence mismatch");
+    Expect(result.document.depthxr.profiles.size() == 1, "DepthXR profile count mismatch");
+    Expect(result.document.depthxr.profiles[0].match.exe_name == "Game.exe", "DepthXR profile exe mismatch");
+    Expect(result.document.pivotxr.defaults.activation_key == "F8", "PivotXR activation key mismatch");
+    Expect(std::abs(result.document.pivotxr.defaults.yaw_max_extra_degrees - 25.0) < 0.0001,
+           "PivotXR yaw clamp mismatch");
+    Expect(std::abs(result.document.pivotxr.defaults.pitch_rotation_multiplier - 1.2) < 0.0001,
+           "PivotXR pitch multiplier mismatch");
 }
 
-void TestResolveSettings() {
+void TestResolveRuntimeConfig() {
     const std::string json = R"json(
 {
-  "version": 1,
-  "global": {
+  "version": 2,
+  "core": {
     "enabled": true,
-    "stereoBoostEnabled": true,
-    "convergenceEnabled": true,
-    "worldScaleEnabled": true,
-    "fovScaleEnabled": true,
-    "stereoBoost": 1.05,
-    "convergence": 0.0,
-    "worldScale": 1.0,
-    "fovScale": 1.0,
-    "logLevel": "info"
+    "logLevel": "info",
+    "logRetentionFiles": 7
   },
-  "profiles": [
-    {
-      "match": { "exe": "DCS.exe" },
+  "modules": {
+    "depthxr": {
       "enabled": true,
-      "stereoBoost": 1.15,
-      "convergence": 0.12,
-      "worldScale": 1.1
+      "defaults": {
+        "stereoBoostEnabled": true,
+        "convergenceEnabled": true,
+        "stereoBoost": 1.05,
+        "convergence": 0.0
+      },
+      "profiles": [
+        {
+          "name": "DCS",
+          "match": { "exe": "DCS.exe" },
+          "enabled": true,
+          "settings": {
+            "stereoBoost": 1.15,
+            "convergence": 0.12
+          }
+        }
+      ]
+    },
+    "pivotxr": {
+      "enabled": true,
+      "defaults": {
+        "activationMode": "hold",
+        "activationKey": "Space",
+        "rotationMultiplier": 1.7,
+        "smoothing": 0.25,
+        "deadzoneDegrees": 9.0,
+        "maxExtraYawDegrees": 22.0,
+        "pitchRotationMultiplier": 1.35,
+        "pitchSmoothing": 0.3,
+        "pitchDeadzoneDegrees": 14.0,
+        "maxExtraPitchDegrees": 24.0
+      }
     }
-  ]
+  }
 }
 )json";
 
     const depthxr::ParseResult result = depthxr::ParseConfig(json);
     Expect(result.ok, "Config parser rejected valid resolve test config: " + result.error);
 
-    const depthxr::ResolvedSettings resolved = depthxr::ResolveSettings(result.document, "dcs.exe");
-    Expect(std::abs(resolved.stereo_boost - 1.15) < 0.0001, "Profile stereoBoost override was not applied");
-    Expect(std::abs(resolved.convergence - 0.12) < 0.0001, "Profile convergence override was not applied");
-    Expect(std::abs(resolved.world_scale - 1.1) < 0.0001, "Profile worldScale override was not applied");
-    Expect(std::abs(resolved.fov_scale - 1.0) < 0.0001, "Global fovScale should have been inherited");
+    const depthxr::ResolvedRuntimeConfig resolved = depthxr::ResolveRuntimeConfig(result.document, "dcs.exe");
+    Expect(resolved.core.enabled, "Core enabled should be true");
+    Expect(std::abs(resolved.depthxr.stereo_boost - 1.15) < 0.0001, "Profile stereoBoost override was not applied");
+    Expect(std::abs(resolved.depthxr.convergence - 0.12) < 0.0001, "Profile convergence override was not applied");
+    Expect(resolved.pivotxr.enabled, "PivotXR module enable was not resolved");
+    Expect(resolved.pivotxr.activation_mode == depthxr::ActivationMode::Hold, "PivotXR activation mode mismatch");
+    Expect(resolved.pivotxr.activation_key == "Space", "PivotXR activation key was not resolved");
+    Expect(std::abs(resolved.pivotxr.yaw_max_extra_degrees - 22.0) < 0.0001, "PivotXR yaw clamp mismatch");
+    Expect(std::abs(resolved.pivotxr.pitch_rotation_multiplier - 1.35) < 0.0001,
+           "PivotXR pitch multiplier mismatch");
+}
+
+void TestDisabledProfileFallsBackToDefaults() {
+    const std::string json = R"json(
+{
+  "version": 2,
+  "core": {
+    "enabled": true,
+    "logLevel": "info",
+    "logRetentionFiles": 7
+  },
+  "modules": {
+    "depthxr": {
+      "enabled": true,
+      "defaults": {
+        "stereoBoostEnabled": true,
+        "convergenceEnabled": true,
+        "stereoBoost": 1.05,
+        "convergence": 0.01
+      },
+      "profiles": [
+        {
+          "name": "DCS",
+          "match": { "exe": "DCS.exe" },
+          "enabled": false,
+          "settings": {
+            "stereoBoost": 1.2,
+            "convergence": 0.12
+          }
+        }
+      ]
+    },
+    "pivotxr": {
+      "enabled": false,
+      "defaults": {
+        "activationMode": "toggle",
+        "activationKey": "F8",
+        "rotationMultiplier": 1.5,
+        "smoothing": 0.2,
+        "deadzoneDegrees": 8.0,
+        "maxExtraYawDegrees": 25.0,
+        "pitchRotationMultiplier": 1.0,
+        "pitchSmoothing": 0.2,
+        "pitchDeadzoneDegrees": 12.0,
+        "maxExtraPitchDegrees": 20.0
+      }
+    }
+  }
+}
+)json";
+
+    const depthxr::ParseResult result = depthxr::ParseConfig(json);
+    Expect(result.ok, "Config parser rejected disabled-profile config: " + result.error);
+
+    const depthxr::ResolvedRuntimeConfig resolved = depthxr::ResolveRuntimeConfig(result.document, "DCS.exe");
+    Expect(std::abs(resolved.depthxr.stereo_boost - 1.05) < 0.0001, "Disabled profile should fall back to defaults");
+    Expect(std::abs(resolved.depthxr.convergence - 0.01) < 0.0001, "Disabled profile convergence should fall back to defaults");
+}
+
+void TestInvalidPivotActivationKeyRejected() {
+    const std::string json = R"json(
+{
+  "version": 2,
+  "core": {
+    "enabled": true,
+    "logLevel": "info",
+    "logRetentionFiles": 7
+  },
+  "modules": {
+    "depthxr": {
+      "enabled": true,
+      "defaults": {
+        "stereoBoostEnabled": true,
+        "convergenceEnabled": true,
+        "stereoBoost": 1.05,
+        "convergence": 0.0
+      },
+      "profiles": []
+    },
+    "pivotxr": {
+      "enabled": true,
+      "defaults": {
+        "activationMode": "toggle",
+        "activationKey": "Mouse4",
+        "rotationMultiplier": 1.5,
+        "smoothing": 0.2,
+        "deadzoneDegrees": 8.0,
+        "maxExtraYawDegrees": 25.0,
+        "pitchRotationMultiplier": 1.0,
+        "pitchSmoothing": 0.2,
+        "pitchDeadzoneDegrees": 12.0,
+        "maxExtraPitchDegrees": 20.0
+      }
+    }
+  }
+}
+)json";
+
+    const depthxr::ParseResult result = depthxr::ParseConfig(json);
+    Expect(!result.ok, "Config parser accepted an unsupported PivotXR activation key");
 }
 
 void TestExeMatch() {
@@ -141,14 +300,98 @@ void TestQuadViewConvergenceKeepsInsetOffsetsAligned() {
            "Inset horizontal FoV span changed under convergence");
 }
 
+double ExtractYaw(const depthxr::ViewOrientation& orientation) {
+    return std::atan2(
+        2.0 * (orientation.w * orientation.y + orientation.x * orientation.z),
+        1.0 - 2.0 * (orientation.y * orientation.y + orientation.x * orientation.x));
+}
+
+depthxr::ViewOrientation YawOrientation(double yaw_radians) {
+    return {0.0, std::sin(yaw_radians * 0.5), 0.0, std::cos(yaw_radians * 0.5)};
+}
+
+void TestPivotYawAmplifiesBeyondDeadzone() {
+    depthxr::ViewAdjustmentData views[2] = {
+        {{-0.03, 0.0, 0.0}, {-1.0, 0.8, 0.9, -0.9}, YawOrientation(30.0 * 3.14159265358979323846 / 180.0)},
+        {{0.03, 0.0, 0.0}, {-0.8, 1.0, 0.9, -0.9}, YawOrientation(30.0 * 3.14159265358979323846 / 180.0)},
+    };
+
+    double smoothed_extra_yaw = 0.0;
+    depthxr::ApplyPivotYaw(views, 1.5, 10.0, 0.0, depthxr::ViewLayout::kStereo, smoothed_extra_yaw);
+
+    const double left_yaw = ExtractYaw(views[0].orientation) * 180.0 / 3.14159265358979323846;
+    const double right_yaw = ExtractYaw(views[1].orientation) * 180.0 / 3.14159265358979323846;
+
+    Expect(std::abs(left_yaw - 40.0) < 0.2, "PivotXR yaw amplification did not reach the expected left-eye yaw");
+    Expect(std::abs(right_yaw - 40.0) < 0.2, "PivotXR yaw amplification did not reach the expected right-eye yaw");
+    Expect(std::abs(views[0].position.x + 0.03) < 0.0001, "PivotXR should keep the left-eye position unchanged");
+    Expect(std::abs(views[1].position.x - 0.03) < 0.0001, "PivotXR should keep the right-eye position unchanged");
+    Expect(smoothed_extra_yaw > 0.0, "PivotXR should accumulate positive extra yaw beyond the deadzone");
+}
+
+void TestPivotYawNoOpInsideDeadzone() {
+    depthxr::ViewAdjustmentData views[2] = {
+        {{-0.03, 0.0, 0.0}, {-1.0, 0.8, 0.9, -0.9}, YawOrientation(5.0 * 3.14159265358979323846 / 180.0)},
+        {{0.03, 0.0, 0.0}, {-0.8, 1.0, 0.9, -0.9}, YawOrientation(5.0 * 3.14159265358979323846 / 180.0)},
+    };
+
+    double smoothed_extra_yaw = 0.0;
+    depthxr::ApplyPivotYaw(views, 1.7, 10.0, 0.0, depthxr::ViewLayout::kStereo, smoothed_extra_yaw);
+
+    const double left_yaw = ExtractYaw(views[0].orientation) * 180.0 / 3.14159265358979323846;
+    Expect(std::abs(left_yaw - 5.0) < 0.2, "PivotXR should leave yaw unchanged inside the deadzone");
+    Expect(std::abs(smoothed_extra_yaw) < 0.0001, "PivotXR should not accumulate extra yaw inside the deadzone");
+}
+
+void TestLoggerCollapsesDuplicateMessages() {
+    const std::filesystem::path test_directory =
+        std::filesystem::current_path() / "test-logger-duplicate-collapse";
+    std::error_code error;
+    std::filesystem::remove_all(test_directory, error);
+    std::filesystem::create_directories(test_directory, error);
+    Expect(!error, "Failed to create logger test directory");
+
+    const std::filesystem::path log_base_path = test_directory / "depthxr-test.log";
+    std::filesystem::path active_log_path;
+    {
+        depthxr::Logger logger;
+        logger.Initialize(log_base_path);
+        logger.SetLevel(depthxr::LogLevel::Debug);
+        active_log_path = logger.ActiveLogPath();
+        logger.Error("Repeated failure");
+        logger.Error("Repeated failure");
+        logger.Error("Repeated failure");
+        logger.Info("Different message");
+    }
+
+    std::ifstream stream(active_log_path);
+    Expect(stream.good(), "Failed to open logger test output");
+
+    std::ostringstream contents;
+    contents << stream.rdbuf();
+    const std::string text = contents.str();
+    Expect(text.find("Repeated failure") != std::string::npos, "Logger omitted the original repeated message");
+    Expect(text.find("Previous error message repeated 2 additional times") != std::string::npos,
+           "Logger did not summarize repeated duplicate errors");
+    Expect(text.find("Different message") != std::string::npos,
+           "Logger did not continue writing after collapsing duplicates");
+
+    std::filesystem::remove_all(test_directory, error);
+}
+
 } // namespace
 
 int main() {
     TestParseConfig();
-    TestResolveSettings();
+    TestResolveRuntimeConfig();
+    TestDisabledProfileFallsBackToDefaults();
+    TestInvalidPivotActivationKeyRejected();
     TestExeMatch();
     TestQuadViewStereoBoostKeepsInsetViewsInSync();
     TestQuadViewConvergenceKeepsInsetOffsetsAligned();
+    TestPivotYawAmplifiesBeyondDeadzone();
+    TestPivotYawNoOpInsideDeadzone();
+    TestLoggerCollapsesDuplicateMessages();
     std::cout << "depthxr_layer_tests passed\n";
     return 0;
 }

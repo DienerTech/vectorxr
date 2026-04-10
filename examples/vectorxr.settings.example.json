@@ -1,0 +1,44 @@
+{
+  "version": 2,
+  "core": {
+    "enabled": true,
+    "logLevel": "info",
+    "logRetentionFiles": 7
+  },
+  "modules": {
+    "depthxr": {
+      "enabled": true,
+      "defaults": {
+        "stereoBoostEnabled": true,
+        "convergenceEnabled": true,
+        "stereoBoost": 1.1,
+        "convergence": 0.0
+      },
+      "profiles": [
+        {
+          "name": "DCS",
+          "enabled": true,
+          "match": {
+            "exe": "DCS.exe"
+          },
+          "settings": {
+            "stereoBoostEnabled": true,
+            "convergenceEnabled": true,
+            "stereoBoost": 1.12,
+            "convergence": 0.06
+          }
+        }
+      ]
+    },
+    "pivotxr": {
+      "enabled": false,
+      "defaults": {
+        "activationMode": "toggle",
+        "activationKey": "F8",
+        "rotationMultiplier": 1.5,
+        "smoothing": 0.2,
+        "deadzoneDegrees": 8.0
+      }
+    }
+  }
+}
