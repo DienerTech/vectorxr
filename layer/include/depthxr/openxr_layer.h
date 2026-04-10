@@ -5,6 +5,7 @@
 #include <map>
 #include <mutex>
 #include <optional>
+#include <string>
 #include <unordered_set>
 #include <vector>
 
@@ -71,11 +72,14 @@ class OpenXrLayer {
     std::filesystem::path config_path_;
     std::filesystem::path log_path_;
     std::filesystem::file_time_type last_config_write_time_{};
+    std::filesystem::file_time_type last_failed_config_write_time_{};
     bool has_config_timestamp_{false};
+    bool has_failed_config_timestamp_{false};
 
     Logger logger_;
     ConfigDocument config_;
     bool has_loaded_config_{false};
+    std::string last_failed_config_error_;
     std::string current_exe_name_;
     ResolvedRuntimeConfig resolved_settings_;
     std::optional<ResolvedRuntimeConfig> last_logged_settings_;

@@ -1,10 +1,14 @@
 #include <cmath>
 #include <cstdlib>
+#include <filesystem>
 #include <iostream>
+#include <fstream>
+#include <sstream>
 #include <string>
 
 #include "depthxr/config_parser.h"
 #include "depthxr/effects.h"
+#include "depthxr/logger.h"
 #include "depthxr/settings_resolver.h"
 
 namespace {
@@ -339,6 +343,42 @@ void TestPivotYawNoOpInsideDeadzone() {
     Expect(std::abs(smoothed_extra_yaw) < 0.0001, "PivotXR should not accumulate extra yaw inside the deadzone");
 }
 
+void TestLoggerCollapsesDuplicateMessages() {
+    const std::filesystem::path test_directory =
+        std::filesystem::current_path() / "test-logger-duplicate-collapse";
+    std::error_code error;
+    std::filesystem::remove_all(test_directory, error);
+    std::filesystem::create_directories(test_directory, error);
+    Expect(!error, "Failed to create logger test directory");
+
+    const std::filesystem::path log_base_path = test_directory / "depthxr-test.log";
+    std::filesystem::path active_log_path;
+    {
+        depthxr::Logger logger;
+        logger.Initialize(log_base_path);
+        logger.SetLevel(depthxr::LogLevel::Debug);
+        active_log_path = logger.ActiveLogPath();
+        logger.Error("Repeated failure");
+        logger.Error("Repeated failure");
+        logger.Error("Repeated failure");
+        logger.Info("Different message");
+    }
+
+    std::ifstream stream(active_log_path);
+    Expect(stream.good(), "Failed to open logger test output");
+
+    std::ostringstream contents;
+    contents << stream.rdbuf();
+    const std::string text = contents.str();
+    Expect(text.find("Repeated failure") != std::string::npos, "Logger omitted the original repeated message");
+    Expect(text.find("Previous error message repeated 2 additional times") != std::string::npos,
+           "Logger did not summarize repeated duplicate errors");
+    Expect(text.find("Different message") != std::string::npos,
+           "Logger did not continue writing after collapsing duplicates");
+
+    std::filesystem::remove_all(test_directory, error);
+}
+
 } // namespace
 
 int main() {
@@ -351,6 +391,7 @@ int main() {
     TestQuadViewConvergenceKeepsInsetOffsetsAligned();
     TestPivotYawAmplifiesBeyondDeadzone();
     TestPivotYawNoOpInsideDeadzone();
+    TestLoggerCollapsesDuplicateMessages();
     std::cout << "depthxr_layer_tests passed\n";
     return 0;
 }

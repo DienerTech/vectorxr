@@ -2,7 +2,9 @@
 
 #include <algorithm>
 #include <cmath>
+#include <iomanip>
 #include <sstream>
+#include <string>
 #include <vector>
 
 #if defined(_WIN32)
@@ -36,6 +38,16 @@ double Clamp(double value, double min_value, double max_value) {
 
 double DegreesToRadians(double degrees) {
     return degrees * 3.14159265358979323846 / 180.0;
+}
+
+std::string FormatDiagnosticDouble(double value) {
+    std::ostringstream stream;
+    if (value != 0.0 && std::abs(value) < 0.0001) {
+        stream << std::scientific << std::setprecision(6) << value;
+    } else {
+        stream << std::fixed << std::setprecision(6) << value;
+    }
+    return stream.str();
 }
 
 double HorizontalProjectionCenter(const ViewFov& fov) {
@@ -271,11 +283,14 @@ ConfigDocument DefaultConfig() {
 void AppendViewSummary(std::ostringstream& stream, std::span<const ViewAdjustmentData> views) {
     const size_t summary_count = std::min<size_t>(views.size(), 2);
     for (size_t i = 0; i < summary_count; ++i) {
-        stream << " view" << i << "Pos=(" << views[i].position.x << ", " << views[i].position.y << ", "
-               << views[i].position.z << ")"
-               << " view" << i << "Fov=(" << views[i].fov.angle_left << ", " << views[i].fov.angle_right << ", "
-               << views[i].fov.angle_up << ", " << views[i].fov.angle_down << ")"
-               << " view" << i << "ProjCenter=" << HorizontalProjectionCenter(views[i].fov);
+        stream << " view" << i << "Pos=(" << FormatDiagnosticDouble(views[i].position.x) << ", "
+               << FormatDiagnosticDouble(views[i].position.y) << ", "
+               << FormatDiagnosticDouble(views[i].position.z) << ")"
+               << " view" << i << "Fov=(" << FormatDiagnosticDouble(views[i].fov.angle_left) << ", "
+               << FormatDiagnosticDouble(views[i].fov.angle_right) << ", "
+               << FormatDiagnosticDouble(views[i].fov.angle_up) << ", "
+               << FormatDiagnosticDouble(views[i].fov.angle_down) << ")"
+               << " view" << i << "ProjCenter=" << FormatDiagnosticDouble(HorizontalProjectionCenter(views[i].fov));
     }
 }
 
@@ -660,20 +675,20 @@ XrResult OpenXrLayer::LocateViews(XrSession session,
                       : 0.0;
         stream << "LocateViews call " << locate_views_call_count_ << ": count=" << count
                << ", viewConfig=" << ToString(view_configuration_type)
-               << ", pivotExtraYawRadians=" << pivotxr_smoothed_extra_yaw_radians_
-               << ", pivotExtraPitchRadians=" << pivotxr_smoothed_extra_pitch_radians_
-               << ", leftYawDelta=" << left_yaw_delta
-               << ", rightYawDelta=" << right_yaw_delta
-               << ", leftPitchDelta=" << left_pitch_delta
-               << ", rightPitchDelta=" << right_pitch_delta
+               << ", pivotExtraYawRadians=" << FormatDiagnosticDouble(pivotxr_smoothed_extra_yaw_radians_)
+               << ", pivotExtraPitchRadians=" << FormatDiagnosticDouble(pivotxr_smoothed_extra_pitch_radians_)
+               << ", leftYawDelta=" << FormatDiagnosticDouble(left_yaw_delta)
+               << ", rightYawDelta=" << FormatDiagnosticDouble(right_yaw_delta)
+               << ", leftPitchDelta=" << FormatDiagnosticDouble(left_pitch_delta)
+               << ", rightPitchDelta=" << FormatDiagnosticDouble(right_pitch_delta)
                << ", stereoBoostEnabled=" << resolved_settings_.depthxr.stereo_boost_enabled
-               << ", stereoBoost=" << resolved_settings_.depthxr.stereo_boost
+               << ", stereoBoost=" << FormatDiagnosticDouble(resolved_settings_.depthxr.stereo_boost)
                << ", convergenceEnabled=" << resolved_settings_.depthxr.convergence_enabled
-               << ", convergence=" << resolved_settings_.depthxr.convergence
-               << ", leftXDelta=" << left_position_delta
-               << ", rightXDelta=" << right_position_delta
-               << ", leftProjCenterDelta=" << left_projection_center_delta
-               << ", rightProjCenterDelta=" << right_projection_center_delta
+               << ", convergence=" << FormatDiagnosticDouble(resolved_settings_.depthxr.convergence)
+               << ", leftXDelta=" << FormatDiagnosticDouble(left_position_delta)
+               << ", rightXDelta=" << FormatDiagnosticDouble(right_position_delta)
+               << ", leftProjCenterDelta=" << FormatDiagnosticDouble(left_projection_center_delta)
+               << ", rightProjCenterDelta=" << FormatDiagnosticDouble(right_projection_center_delta)
                << ", before:";
         AppendViewSummary(stream, original_views);
         stream << " after:";
@@ -706,7 +721,15 @@ void OpenXrLayer::ReloadConfigIfNeeded() {
 
     const ParseResult loaded = LoadConfigFromFile(config_path_);
     if (!loaded.ok) {
-        logger_.Error("Failed to parse config: " + loaded.error);
+        const bool already_reported_failure =
+            has_failed_config_timestamp_ && timestamp == last_failed_config_write_time_ &&
+            loaded.error == last_failed_config_error_;
+        if (!already_reported_failure) {
+            logger_.Error("Failed to parse config: " + loaded.error);
+        }
+        last_failed_config_write_time_ = timestamp;
+        has_failed_config_timestamp_ = true;
+        last_failed_config_error_ = loaded.error;
         if (!has_loaded_config_) {
             config_ = DefaultConfig();
             has_loaded_config_ = true;
@@ -718,6 +741,8 @@ void OpenXrLayer::ReloadConfigIfNeeded() {
     has_loaded_config_ = true;
     has_config_timestamp_ = true;
     last_config_write_time_ = timestamp;
+    has_failed_config_timestamp_ = false;
+    last_failed_config_error_.clear();
     logger_.Info("Loaded config from " + config_path_.string());
 }
 

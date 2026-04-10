@@ -61,10 +61,23 @@ bool MatchesLogSeries(const std::filesystem::path& candidate, const std::filesys
     return stem == prefix || stem.starts_with(prefix + "-");
 }
 
+std::string FormatRepeatedDuration(std::chrono::system_clock::duration duration) {
+    const auto seconds = std::max<int64_t>(
+        1,
+        std::chrono::duration_cast<std::chrono::seconds>(duration).count());
+    return std::to_string(seconds) + "s";
+}
+
 } // namespace
+
+Logger::~Logger() {
+    std::scoped_lock lock(mutex_);
+    FlushPendingDuplicateLocked();
+}
 
 void Logger::Initialize(const std::filesystem::path& log_path) {
     std::scoped_lock lock(mutex_);
+    FlushPendingDuplicateLocked();
     base_log_path_ = log_path;
 
     if (!base_log_path_.parent_path().empty()) {
@@ -83,6 +96,7 @@ void Logger::SetRetentionFiles(int retention_files) {
 
 void Logger::SetLevel(LogLevel level) {
     std::scoped_lock lock(mutex_);
+    FlushPendingDuplicateLocked();
     level_ = level;
 }
 
@@ -133,6 +147,49 @@ void Logger::PruneLocked() {
     }
 }
 
+void Logger::FlushPendingDuplicateLocked() {
+    if (pending_duplicate_count_ <= 1 || pending_duplicate_message_.empty()) {
+        pending_duplicate_message_.clear();
+        pending_duplicate_count_ = 0;
+        pending_duplicate_first_time_ = {};
+        pending_duplicate_last_time_ = {};
+        return;
+    }
+
+    const auto now = pending_duplicate_last_time_;
+    const auto repeated_count = pending_duplicate_count_ - 1;
+    const auto repeated_duration = pending_duplicate_last_time_ - pending_duplicate_first_time_;
+
+    std::ostringstream stream;
+    stream << "Previous " << ToString(pending_duplicate_level_) << " message repeated "
+           << repeated_count << " additional times over "
+           << FormatRepeatedDuration(repeated_duration) << ": " << pending_duplicate_message_;
+    WriteLineLocked(pending_duplicate_level_, now, stream.str());
+
+    pending_duplicate_message_.clear();
+    pending_duplicate_count_ = 0;
+    pending_duplicate_first_time_ = {};
+    pending_duplicate_last_time_ = {};
+}
+
+void Logger::WriteLineLocked(LogLevel level,
+                             const std::chrono::system_clock::time_point& now,
+                             const std::string& message) {
+    if (active_log_path_.empty()) {
+        return;
+    }
+
+    std::ofstream stream(active_log_path_, std::ios::app);
+    if (!stream) {
+        return;
+    }
+
+    const auto time = std::chrono::system_clock::to_time_t(now);
+    const std::tm tm = LocalTime(time);
+
+    stream << std::put_time(&tm, "%Y-%m-%d %H:%M:%S") << " [" << ToString(level) << "] " << message << '\n';
+}
+
 void Logger::Write(LogLevel level, const std::string& message) {
     std::scoped_lock lock(mutex_);
 
@@ -144,16 +201,22 @@ void Logger::Write(LogLevel level, const std::string& message) {
         return;
     }
 
-    std::ofstream stream(active_log_path_, std::ios::app);
-    if (!stream) {
+    const auto now = std::chrono::system_clock::now();
+    if (pending_duplicate_count_ > 0 && pending_duplicate_level_ == level &&
+        pending_duplicate_message_ == message) {
+        ++pending_duplicate_count_;
+        pending_duplicate_last_time_ = now;
         return;
     }
 
-    const auto now = std::chrono::system_clock::now();
-    const auto time = std::chrono::system_clock::to_time_t(now);
-    const std::tm tm = LocalTime(time);
+    FlushPendingDuplicateLocked();
+    WriteLineLocked(level, now, message);
 
-    stream << std::put_time(&tm, "%Y-%m-%d %H:%M:%S") << " [" << ToString(level) << "] " << message << '\n';
+    pending_duplicate_level_ = level;
+    pending_duplicate_message_ = message;
+    pending_duplicate_count_ = 1;
+    pending_duplicate_first_time_ = now;
+    pending_duplicate_last_time_ = now;
 }
 
 } // namespace depthxr
