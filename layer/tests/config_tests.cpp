@@ -52,7 +52,12 @@ void TestParseConfig() {
         "activationKey": "f8",
         "rotationMultiplier": 1.5,
         "smoothing": 0.2,
-        "deadzoneDegrees": 8.0
+        "deadzoneDegrees": 8.0,
+        "maxExtraYawDegrees": 25.0,
+        "pitchRotationMultiplier": 1.2,
+        "pitchSmoothing": 0.15,
+        "pitchDeadzoneDegrees": 10.0,
+        "maxExtraPitchDegrees": 18.0
       }
     }
   }
@@ -69,6 +74,10 @@ void TestParseConfig() {
     Expect(result.document.depthxr.profiles.size() == 1, "DepthXR profile count mismatch");
     Expect(result.document.depthxr.profiles[0].match.exe_name == "Game.exe", "DepthXR profile exe mismatch");
     Expect(result.document.pivotxr.defaults.activation_key == "F8", "PivotXR activation key mismatch");
+    Expect(std::abs(result.document.pivotxr.defaults.yaw_max_extra_degrees - 25.0) < 0.0001,
+           "PivotXR yaw clamp mismatch");
+    Expect(std::abs(result.document.pivotxr.defaults.pitch_rotation_multiplier - 1.2) < 0.0001,
+           "PivotXR pitch multiplier mismatch");
 }
 
 void TestResolveRuntimeConfig() {
@@ -108,7 +117,12 @@ void TestResolveRuntimeConfig() {
         "activationKey": "Space",
         "rotationMultiplier": 1.7,
         "smoothing": 0.25,
-        "deadzoneDegrees": 9.0
+        "deadzoneDegrees": 9.0,
+        "maxExtraYawDegrees": 22.0,
+        "pitchRotationMultiplier": 1.35,
+        "pitchSmoothing": 0.3,
+        "pitchDeadzoneDegrees": 14.0,
+        "maxExtraPitchDegrees": 24.0
       }
     }
   }
@@ -125,6 +139,9 @@ void TestResolveRuntimeConfig() {
     Expect(resolved.pivotxr.enabled, "PivotXR module enable was not resolved");
     Expect(resolved.pivotxr.activation_mode == depthxr::ActivationMode::Hold, "PivotXR activation mode mismatch");
     Expect(resolved.pivotxr.activation_key == "Space", "PivotXR activation key was not resolved");
+    Expect(std::abs(resolved.pivotxr.yaw_max_extra_degrees - 22.0) < 0.0001, "PivotXR yaw clamp mismatch");
+    Expect(std::abs(resolved.pivotxr.pitch_rotation_multiplier - 1.35) < 0.0001,
+           "PivotXR pitch multiplier mismatch");
 }
 
 void TestDisabledProfileFallsBackToDefaults() {
@@ -164,7 +181,12 @@ void TestDisabledProfileFallsBackToDefaults() {
         "activationKey": "F8",
         "rotationMultiplier": 1.5,
         "smoothing": 0.2,
-        "deadzoneDegrees": 8.0
+        "deadzoneDegrees": 8.0,
+        "maxExtraYawDegrees": 25.0,
+        "pitchRotationMultiplier": 1.0,
+        "pitchSmoothing": 0.2,
+        "pitchDeadzoneDegrees": 12.0,
+        "maxExtraPitchDegrees": 20.0
       }
     }
   }
@@ -206,7 +228,12 @@ void TestInvalidPivotActivationKeyRejected() {
         "activationKey": "Mouse4",
         "rotationMultiplier": 1.5,
         "smoothing": 0.2,
-        "deadzoneDegrees": 8.0
+        "deadzoneDegrees": 8.0,
+        "maxExtraYawDegrees": 25.0,
+        "pitchRotationMultiplier": 1.0,
+        "pitchSmoothing": 0.2,
+        "pitchDeadzoneDegrees": 12.0,
+        "maxExtraPitchDegrees": 20.0
       }
     }
   }

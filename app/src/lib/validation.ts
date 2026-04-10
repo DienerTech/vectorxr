@@ -42,6 +42,26 @@ function validatePivotXRDefaults(defaults: PivotXRDefaults): string[] {
     errors.push('modules.pivotxr.defaults.deadzoneDegrees must be between 0 and 45')
   }
 
+  if (Number.isNaN(defaults.maxExtraYawDegrees) || defaults.maxExtraYawDegrees < 0 || defaults.maxExtraYawDegrees > 45) {
+    errors.push('modules.pivotxr.defaults.maxExtraYawDegrees must be between 0 and 45')
+  }
+
+  if (Number.isNaN(defaults.pitchRotationMultiplier) || defaults.pitchRotationMultiplier < 1.0 || defaults.pitchRotationMultiplier > 3.0) {
+    errors.push('modules.pivotxr.defaults.pitchRotationMultiplier must be between 1.0 and 3.0')
+  }
+
+  if (Number.isNaN(defaults.pitchSmoothing) || defaults.pitchSmoothing < 0 || defaults.pitchSmoothing > 1) {
+    errors.push('modules.pivotxr.defaults.pitchSmoothing must be between 0 and 1')
+  }
+
+  if (Number.isNaN(defaults.pitchDeadzoneDegrees) || defaults.pitchDeadzoneDegrees < 0 || defaults.pitchDeadzoneDegrees > 45) {
+    errors.push('modules.pivotxr.defaults.pitchDeadzoneDegrees must be between 0 and 45')
+  }
+
+  if (Number.isNaN(defaults.maxExtraPitchDegrees) || defaults.maxExtraPitchDegrees < 0 || defaults.maxExtraPitchDegrees > 45) {
+    errors.push('modules.pivotxr.defaults.maxExtraPitchDegrees must be between 0 and 45')
+  }
+
   return errors
 }
 

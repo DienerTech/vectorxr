@@ -43,7 +43,7 @@ defineProps<{
         </label>
 
         <label class="block">
-          <span class="mb-1.5 block text-sm font-medium">Rotation Multiplier</span>
+          <span class="mb-1.5 block text-sm font-medium">Yaw Multiplier</span>
           <input
             v-model.number="config.modules.pivotxr.defaults.rotationMultiplier"
             class="w-full rounded-2xl border border-black/10 bg-white px-4 py-2.5"
@@ -55,7 +55,7 @@ defineProps<{
         </label>
 
         <label class="block">
-          <span class="mb-1.5 block text-sm font-medium">Smoothing</span>
+          <span class="mb-1.5 block text-sm font-medium">Yaw Smoothing</span>
           <input
             v-model.number="config.modules.pivotxr.defaults.smoothing"
             class="w-full rounded-2xl border border-black/10 bg-white px-4 py-2.5"
@@ -67,7 +67,7 @@ defineProps<{
         </label>
 
         <label class="block">
-          <span class="mb-1.5 block text-sm font-medium">Deadzone Degrees</span>
+          <span class="mb-1.5 block text-sm font-medium">Yaw Deadzone</span>
           <input
             v-model.number="config.modules.pivotxr.defaults.deadzoneDegrees"
             class="w-full rounded-2xl border border-black/10 bg-white px-4 py-2.5"
@@ -77,16 +77,85 @@ defineProps<{
             type="number"
           />
         </label>
+
+        <label class="block">
+          <span class="mb-1.5 block text-sm font-medium">Yaw Max Extra</span>
+          <input
+            v-model.number="config.modules.pivotxr.defaults.maxExtraYawDegrees"
+            class="w-full rounded-2xl border border-black/10 bg-white px-4 py-2.5"
+            min="0"
+            max="45"
+            step="0.5"
+            type="number"
+          />
+        </label>
+      </div>
+
+      <div class="mt-5 rounded-2xl border border-black/10 bg-[#fbf7ef] p-4">
+        <p class="text-xs uppercase tracking-[0.18em] text-depthxr-copper">Pitch Assist</p>
+        <p class="mt-2 text-sm leading-6 text-depthxr-steel">
+          Pitch has its own multiplier, deadzone, smoothing, and clamp so you can look higher over the nose without over-driving the yaw feel you already like.
+        </p>
+
+        <div class="mt-4 grid gap-3 lg:grid-cols-2">
+          <label class="block">
+            <span class="mb-1.5 block text-sm font-medium">Pitch Multiplier</span>
+            <input
+              v-model.number="config.modules.pivotxr.defaults.pitchRotationMultiplier"
+              class="w-full rounded-2xl border border-black/10 bg-white px-4 py-2.5"
+              min="1"
+              max="3"
+              step="0.05"
+              type="number"
+            />
+          </label>
+
+          <label class="block">
+            <span class="mb-1.5 block text-sm font-medium">Pitch Smoothing</span>
+            <input
+              v-model.number="config.modules.pivotxr.defaults.pitchSmoothing"
+              class="w-full rounded-2xl border border-black/10 bg-white px-4 py-2.5"
+              min="0"
+              max="1"
+              step="0.01"
+              type="number"
+            />
+          </label>
+
+          <label class="block">
+            <span class="mb-1.5 block text-sm font-medium">Pitch Deadzone</span>
+            <input
+              v-model.number="config.modules.pivotxr.defaults.pitchDeadzoneDegrees"
+              class="w-full rounded-2xl border border-black/10 bg-white px-4 py-2.5"
+              min="0"
+              max="45"
+              step="0.5"
+              type="number"
+            />
+          </label>
+
+          <label class="block">
+            <span class="mb-1.5 block text-sm font-medium">Pitch Max Extra</span>
+            <input
+              v-model.number="config.modules.pivotxr.defaults.maxExtraPitchDegrees"
+              class="w-full rounded-2xl border border-black/10 bg-white px-4 py-2.5"
+              min="0"
+              max="45"
+              step="0.5"
+              type="number"
+            />
+          </label>
+        </div>
       </div>
     </article>
 
     <article class="rounded-[2rem] border border-black/10 bg-[#24322d] p-5 text-white shadow-panel">
       <p class="text-xs uppercase tracking-[0.24em] text-depthxr-sand">Compatibility Notes</p>
       <ul class="mt-3 space-y-2.5 text-sm leading-6 text-white/78">
-        <li>The current spike uses `xrLocateViews` to apply experimental yaw amplification by rotating the returned eye poses around the headset center.</li>
+        <li>The current runtime path uses `xrLocateSpace`, `xrLocateViews`, and `xrEndFrame` together so DCS can tolerate the extra pivot without the old black-mask failure.</li>
         <li>`toggle` starts inactive and flips the extra yaw factor on each press. `hold` only applies the extra factor while the activation key is down.</li>
-        <li>The first activation pass uses desktop keyboard polling with a focused key list, which is good enough for early tuning but not yet the final smart-activation story.</li>
-        <li>The final implementation may still move to a broader pass surface if real title testing shows `xrLocateViews` is too narrow.</li>
+        <li>Smoothing is time-based now, so the response should stay closer to the same feel even when frame rate changes.</li>
+        <li>The first activation pass still uses desktop keyboard polling with a focused key list, which is good enough for tuning but not yet the final smart-activation story.</li>
       </ul>
     </article>
   </div>

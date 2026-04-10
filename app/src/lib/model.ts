@@ -54,6 +54,11 @@ export interface PivotXRDefaults {
   rotationMultiplier: number
   smoothing: number
   deadzoneDegrees: number
+  maxExtraYawDegrees: number
+  pitchRotationMultiplier: number
+  pitchSmoothing: number
+  pitchDeadzoneDegrees: number
+  maxExtraPitchDegrees: number
 }
 
 export interface PivotXRModuleConfig {
@@ -125,6 +130,11 @@ export function defaultPivotXRDefaults(): PivotXRDefaults {
     rotationMultiplier: 1.5,
     smoothing: 0.2,
     deadzoneDegrees: 8,
+    maxExtraYawDegrees: 25,
+    pitchRotationMultiplier: 1.0,
+    pitchSmoothing: 0.2,
+    pitchDeadzoneDegrees: 12,
+    maxExtraPitchDegrees: 20,
   }
 }
 
@@ -197,6 +207,11 @@ function normalizePivotXRDefaults(value: unknown, fallback: PivotXRDefaults): Pi
     rotationMultiplier: normalizeNumber(source.rotationMultiplier, fallback.rotationMultiplier),
     smoothing: normalizeNumber(source.smoothing, fallback.smoothing),
     deadzoneDegrees: normalizeNumber(source.deadzoneDegrees, fallback.deadzoneDegrees),
+    maxExtraYawDegrees: normalizeNumber(source.maxExtraYawDegrees, fallback.maxExtraYawDegrees),
+    pitchRotationMultiplier: normalizeNumber(source.pitchRotationMultiplier, fallback.pitchRotationMultiplier),
+    pitchSmoothing: normalizeNumber(source.pitchSmoothing, fallback.pitchSmoothing),
+    pitchDeadzoneDegrees: normalizeNumber(source.pitchDeadzoneDegrees, fallback.pitchDeadzoneDegrees),
+    maxExtraPitchDegrees: normalizeNumber(source.maxExtraPitchDegrees, fallback.maxExtraPitchDegrees),
   }
 }
 

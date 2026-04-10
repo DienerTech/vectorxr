@@ -1,5 +1,6 @@
 #pragma once
 
+#include <chrono>
 #include <filesystem>
 #include <map>
 #include <mutex>
@@ -62,7 +63,8 @@ class OpenXrLayer {
                                   const PivotXrResolvedSettings& settings,
                                   bool pivotxr_active,
                                   XrSpaceLocation* location,
-                                  double* applied_extra_yaw_radians);
+                                  double* applied_extra_yaw_radians,
+                                  double* applied_extra_pitch_radians);
 
     std::mutex mutex_;
     std::filesystem::path dll_directory_;
@@ -80,6 +82,8 @@ class OpenXrLayer {
     uint64_t locate_views_call_count_{0};
     uint32_t pending_locate_views_diagnostics_{0};
     double pivotxr_smoothed_extra_yaw_radians_{0.0};
+    double pivotxr_smoothed_extra_pitch_radians_{0.0};
+    std::optional<std::chrono::steady_clock::time_point> pivotxr_last_smoothing_wall_time_;
     bool pivotxr_toggle_enabled_{false};
     bool pivotxr_activation_key_was_down_{false};
     XrSession active_session_{XR_NULL_HANDLE};

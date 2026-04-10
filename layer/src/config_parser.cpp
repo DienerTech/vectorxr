@@ -721,6 +721,11 @@ bool ParsePivotDefaults(const JsonValue::Object& object, PivotXrResolvedSettings
         "rotationMultiplier",
         "smoothing",
         "deadzoneDegrees",
+        "maxExtraYawDegrees",
+        "pitchRotationMultiplier",
+        "pitchSmoothing",
+        "pitchDeadzoneDegrees",
+        "maxExtraPitchDegrees",
     };
 
     if (!CheckAllowedKeys(object, allowed, error)) {
@@ -732,12 +737,22 @@ bool ParsePivotDefaults(const JsonValue::Object& object, PivotXrResolvedSettings
     std::optional<double> rotation_multiplier;
     std::optional<double> smoothing;
     std::optional<double> deadzone_degrees;
+    std::optional<double> max_extra_yaw_degrees;
+    std::optional<double> pitch_rotation_multiplier;
+    std::optional<double> pitch_smoothing;
+    std::optional<double> pitch_deadzone_degrees;
+    std::optional<double> max_extra_pitch_degrees;
 
     if (!ReadOptionalActivationMode(object, "activationMode", activation_mode, error) ||
         !ReadOptionalActivationKey(object, "activationKey", activation_key, error) ||
         !ReadOptionalNumber(object, "rotationMultiplier", rotation_multiplier, error) ||
         !ReadOptionalNumber(object, "smoothing", smoothing, error) ||
-        !ReadOptionalNumber(object, "deadzoneDegrees", deadzone_degrees, error)) {
+        !ReadOptionalNumber(object, "deadzoneDegrees", deadzone_degrees, error) ||
+        !ReadOptionalNumber(object, "maxExtraYawDegrees", max_extra_yaw_degrees, error) ||
+        !ReadOptionalNumber(object, "pitchRotationMultiplier", pitch_rotation_multiplier, error) ||
+        !ReadOptionalNumber(object, "pitchSmoothing", pitch_smoothing, error) ||
+        !ReadOptionalNumber(object, "pitchDeadzoneDegrees", pitch_deadzone_degrees, error) ||
+        !ReadOptionalNumber(object, "maxExtraPitchDegrees", max_extra_pitch_degrees, error)) {
         return false;
     }
 
@@ -748,13 +763,28 @@ bool ParsePivotDefaults(const JsonValue::Object& object, PivotXrResolvedSettings
         out.activation_key = *activation_key;
     }
     if (rotation_multiplier.has_value()) {
-        out.rotation_multiplier = *rotation_multiplier;
+        out.yaw_rotation_multiplier = *rotation_multiplier;
     }
     if (smoothing.has_value()) {
-        out.smoothing = *smoothing;
+        out.yaw_smoothing = *smoothing;
     }
     if (deadzone_degrees.has_value()) {
-        out.deadzone_degrees = *deadzone_degrees;
+        out.yaw_deadzone_degrees = *deadzone_degrees;
+    }
+    if (max_extra_yaw_degrees.has_value()) {
+        out.yaw_max_extra_degrees = *max_extra_yaw_degrees;
+    }
+    if (pitch_rotation_multiplier.has_value()) {
+        out.pitch_rotation_multiplier = *pitch_rotation_multiplier;
+    }
+    if (pitch_smoothing.has_value()) {
+        out.pitch_smoothing = *pitch_smoothing;
+    }
+    if (pitch_deadzone_degrees.has_value()) {
+        out.pitch_deadzone_degrees = *pitch_deadzone_degrees;
+    }
+    if (max_extra_pitch_degrees.has_value()) {
+        out.pitch_max_extra_degrees = *max_extra_pitch_degrees;
     }
 
     return true;

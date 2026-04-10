@@ -54,6 +54,26 @@ fn default_deadzone_degrees() -> f64 {
     8.0
 }
 
+fn default_max_extra_yaw_degrees() -> f64 {
+    25.0
+}
+
+fn default_pitch_rotation_multiplier() -> f64 {
+    1.0
+}
+
+fn default_pitch_smoothing() -> f64 {
+    0.2
+}
+
+fn default_pitch_deadzone_degrees() -> f64 {
+    12.0
+}
+
+fn default_max_extra_pitch_degrees() -> f64 {
+    20.0
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ProfileMatch {
     exe: String,
@@ -150,6 +170,16 @@ struct PivotXRDefaults {
     smoothing: f64,
     #[serde(default = "default_deadzone_degrees")]
     deadzone_degrees: f64,
+    #[serde(default = "default_max_extra_yaw_degrees")]
+    max_extra_yaw_degrees: f64,
+    #[serde(default = "default_pitch_rotation_multiplier")]
+    pitch_rotation_multiplier: f64,
+    #[serde(default = "default_pitch_smoothing")]
+    pitch_smoothing: f64,
+    #[serde(default = "default_pitch_deadzone_degrees")]
+    pitch_deadzone_degrees: f64,
+    #[serde(default = "default_max_extra_pitch_degrees")]
+    max_extra_pitch_degrees: f64,
 }
 
 impl Default for PivotXRDefaults {
@@ -160,6 +190,11 @@ impl Default for PivotXRDefaults {
             rotation_multiplier: default_rotation_multiplier(),
             smoothing: default_smoothing(),
             deadzone_degrees: default_deadzone_degrees(),
+            max_extra_yaw_degrees: default_max_extra_yaw_degrees(),
+            pitch_rotation_multiplier: default_pitch_rotation_multiplier(),
+            pitch_smoothing: default_pitch_smoothing(),
+            pitch_deadzone_degrees: default_pitch_deadzone_degrees(),
+            max_extra_pitch_degrees: default_max_extra_pitch_degrees(),
         }
     }
 }

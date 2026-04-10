@@ -48,6 +48,12 @@ double ExtractYawRadians(const ViewOrientation& orientation) {
         1.0 - 2.0 * (orientation.y * orientation.y + orientation.x * orientation.x));
 }
 
+double ExtractPitchRadians(const ViewOrientation& orientation) {
+    const double sin_pitch =
+        Clamp(2.0 * (orientation.w * orientation.x - orientation.z * orientation.y), -1.0, 1.0);
+    return std::asin(sin_pitch);
+}
+
 XrQuaternionf MultiplyQuaternion(const XrQuaternionf& lhs, const XrQuaternionf& rhs) {
     return {
         lhs.w * rhs.x + lhs.x * rhs.w + lhs.y * rhs.z - lhs.z * rhs.y,
@@ -86,6 +92,11 @@ XrQuaternionf YawQuaternion(float yaw_radians) {
     return {0.0f, std::sin(half), 0.0f, std::cos(half)};
 }
 
+XrQuaternionf PitchQuaternion(float pitch_radians) {
+    const float half = pitch_radians * 0.5f;
+    return {std::sin(half), 0.0f, 0.0f, std::cos(half)};
+}
+
 XrPosef MultiplyPoses(const XrPosef& local_pose, const XrPosef& parent_pose) {
     const XrQuaternionf parent_orientation = NormalizeQuaternion(parent_pose.orientation);
     return {
@@ -105,12 +116,13 @@ XrPosef InvertPose(const XrPosef& pose) {
     return {inverse_orientation, inverse_position};
 }
 
-XrPosef ApplyExtraYawToPose(const XrPosef& pose, float extra_yaw_radians) {
-    if (NearlyZero(extra_yaw_radians)) {
+XrPosef ApplyExtraRotationToPose(const XrPosef& pose, float extra_yaw_radians, float extra_pitch_radians) {
+    if (NearlyZero(extra_yaw_radians) && NearlyZero(extra_pitch_radians)) {
         return pose;
     }
 
-    const XrQuaternionf extra_rotation = YawQuaternion(extra_yaw_radians);
+    const XrQuaternionf extra_rotation = NormalizeQuaternion(
+        MultiplyQuaternion(YawQuaternion(extra_yaw_radians), PitchQuaternion(extra_pitch_radians)));
     return {
         NormalizeQuaternion(MultiplyQuaternion(extra_rotation, pose.orientation)),
         pose.position,
@@ -121,32 +133,52 @@ XrPosef IdentityPose() {
     return {{0.0f, 0.0f, 0.0f, 1.0f}, {0.0f, 0.0f, 0.0f}};
 }
 
-double ComputePivotExtraYawRadians(double current_yaw_radians,
-                                   const PivotXrResolvedSettings& settings,
-                                   double& smoothed_extra_yaw_radians) {
-    if (!settings.enabled || settings.rotation_multiplier <= 1.0) {
-        smoothed_extra_yaw_radians = 0.0;
+double ComputeTimeBasedBlend(double smoothing, double delta_seconds) {
+    const double clamped_smoothing = Clamp(smoothing, 0.0, 0.99);
+    const double fallback_blend = Clamp(1.0 - clamped_smoothing, 0.05, 1.0);
+    if (delta_seconds <= 0.0) {
+        return fallback_blend;
+    }
+
+    constexpr double kReferenceFrameSeconds = 1.0 / 90.0;
+    const double frame_scale = std::max(delta_seconds / kReferenceFrameSeconds, 0.0);
+    return Clamp(1.0 - std::pow(clamped_smoothing, frame_scale), 0.05, 1.0);
+}
+
+double ComputePivotExtraAngleRadians(double current_angle_radians,
+                                     double rotation_multiplier,
+                                     double deadzone_degrees,
+                                     double max_extra_degrees,
+                                     double smoothing,
+                                     double delta_seconds,
+                                     double& smoothed_extra_angle_radians) {
+    if (rotation_multiplier <= 1.0) {
+        smoothed_extra_angle_radians = 0.0;
         return 0.0;
     }
 
-    const double deadzone_radians = DegreesToRadians(std::max(0.0, settings.deadzone_degrees));
-    const double abs_yaw = std::abs(current_yaw_radians);
+    const double deadzone_radians = DegreesToRadians(std::max(0.0, deadzone_degrees));
+    const double max_extra_radians = DegreesToRadians(std::max(0.0, max_extra_degrees));
+    const double abs_angle = std::abs(current_angle_radians);
 
-    double target_extra_yaw = 0.0;
-    if (abs_yaw > deadzone_radians) {
-        const double direction = current_yaw_radians >= 0.0 ? 1.0 : -1.0;
-        const double pivoted_yaw = direction * deadzone_radians +
-                                   (current_yaw_radians - direction * deadzone_radians) *
-                                       settings.rotation_multiplier;
-        target_extra_yaw = pivoted_yaw - current_yaw_radians;
+    double target_extra_angle = 0.0;
+    if (abs_angle > deadzone_radians) {
+        const double direction = current_angle_radians >= 0.0 ? 1.0 : -1.0;
+        const double pivoted_angle = direction * deadzone_radians +
+                                     (current_angle_radians - direction * deadzone_radians) * rotation_multiplier;
+        target_extra_angle = pivoted_angle - current_angle_radians;
     }
 
-    const double blend = Clamp(1.0 - settings.smoothing, 0.05, 1.0);
-    smoothed_extra_yaw_radians += (target_extra_yaw - smoothed_extra_yaw_radians) * blend;
-    if (NearlyZero(smoothed_extra_yaw_radians)) {
-        smoothed_extra_yaw_radians = 0.0;
+    if (max_extra_radians > 0.0) {
+        target_extra_angle = Clamp(target_extra_angle, -max_extra_radians, max_extra_radians);
     }
-    return smoothed_extra_yaw_radians;
+
+    const double blend = ComputeTimeBasedBlend(smoothing, delta_seconds);
+    smoothed_extra_angle_radians += (target_extra_angle - smoothed_extra_angle_radians) * blend;
+    if (NearlyZero(smoothed_extra_angle_radians)) {
+        smoothed_extra_angle_radians = 0.0;
+    }
+    return smoothed_extra_angle_radians;
 }
 
 const char* ToString(XrViewConfigurationType type) {
@@ -186,9 +218,14 @@ bool SameSettings(const ResolvedRuntimeConfig& lhs, const ResolvedRuntimeConfig&
            lhs.pivotxr.enabled == rhs.pivotxr.enabled &&
            lhs.pivotxr.activation_mode == rhs.pivotxr.activation_mode &&
            lhs.pivotxr.activation_key == rhs.pivotxr.activation_key &&
-           NearlyEqual(lhs.pivotxr.rotation_multiplier, rhs.pivotxr.rotation_multiplier) &&
-           NearlyEqual(lhs.pivotxr.smoothing, rhs.pivotxr.smoothing) &&
-           NearlyEqual(lhs.pivotxr.deadzone_degrees, rhs.pivotxr.deadzone_degrees);
+           NearlyEqual(lhs.pivotxr.yaw_rotation_multiplier, rhs.pivotxr.yaw_rotation_multiplier) &&
+           NearlyEqual(lhs.pivotxr.yaw_smoothing, rhs.pivotxr.yaw_smoothing) &&
+           NearlyEqual(lhs.pivotxr.yaw_deadzone_degrees, rhs.pivotxr.yaw_deadzone_degrees) &&
+           NearlyEqual(lhs.pivotxr.yaw_max_extra_degrees, rhs.pivotxr.yaw_max_extra_degrees) &&
+           NearlyEqual(lhs.pivotxr.pitch_rotation_multiplier, rhs.pivotxr.pitch_rotation_multiplier) &&
+           NearlyEqual(lhs.pivotxr.pitch_smoothing, rhs.pivotxr.pitch_smoothing) &&
+           NearlyEqual(lhs.pivotxr.pitch_deadzone_degrees, rhs.pivotxr.pitch_deadzone_degrees) &&
+           NearlyEqual(lhs.pivotxr.pitch_max_extra_degrees, rhs.pivotxr.pitch_max_extra_degrees);
 }
 
 bool SamePivotActivationBinding(const PivotXrResolvedSettings& lhs, const PivotXrResolvedSettings& rhs) {
@@ -441,7 +478,7 @@ XrResult OpenXrLayer::LocateSpace(XrSpace space, XrSpace base_space, XrTime time
     const bool pivotxr_active = IsPivotXrActive(resolved_settings_.pivotxr);
 
     return LocateSpaceWithPivot(
-        space, base_space, time, resolved_settings_.pivotxr, pivotxr_active, location, nullptr);
+        space, base_space, time, resolved_settings_.pivotxr, pivotxr_active, location, nullptr, nullptr);
 }
 
 XrResult OpenXrLayer::LocateViews(XrSession session,
@@ -534,13 +571,15 @@ XrResult OpenXrLayer::LocateViews(XrSession session,
         view_locate_info && EnsureEyeOffsets(session, view_configuration_type, view_locate_info->displayTime, count)) {
         XrSpaceLocation pivot_view_location{XR_TYPE_SPACE_LOCATION};
         double applied_extra_yaw_radians = 0.0;
+        double applied_extra_pitch_radians = 0.0;
         const XrResult pivot_result = LocateSpaceWithPivot(internal_view_space_,
                                                            view_locate_info->space,
                                                            view_locate_info->displayTime,
                                                            resolved_settings_.pivotxr,
                                                            pivotxr_active,
                                                            &pivot_view_location,
-                                                           &applied_extra_yaw_radians);
+                                                           &applied_extra_yaw_radians,
+                                                           &applied_extra_pitch_radians);
         if (XR_SUCCEEDED(pivot_result)) {
             for (uint32_t i = 0; i < count; ++i) {
                 adjusted_views[i].position.x = cached_eye_offset_poses_[i].position.x;
@@ -562,9 +601,12 @@ XrResult OpenXrLayer::LocateViews(XrSession session,
                 adjusted_views[i].orientation.w = recomposed_pose.orientation.w;
             }
             pivotxr_smoothed_extra_yaw_radians_ = applied_extra_yaw_radians;
+            pivotxr_smoothed_extra_pitch_radians_ = applied_extra_pitch_radians;
         }
     } else if (!pivotxr_active) {
         pivotxr_smoothed_extra_yaw_radians_ = 0.0;
+        pivotxr_smoothed_extra_pitch_radians_ = 0.0;
+        pivotxr_last_smoothing_wall_time_.reset();
     }
 
     if (resolved_settings_.depthxr.enabled &&
@@ -610,11 +652,20 @@ XrResult OpenXrLayer::LocateViews(XrSession session,
             count > 1 ? ExtractYawRadians(adjusted_views[1].orientation) -
                             ExtractYawRadians(original_views[1].orientation)
                       : 0.0;
+        const double left_pitch_delta =
+            ExtractPitchRadians(adjusted_views[0].orientation) - ExtractPitchRadians(original_views[0].orientation);
+        const double right_pitch_delta =
+            count > 1 ? ExtractPitchRadians(adjusted_views[1].orientation) -
+                            ExtractPitchRadians(original_views[1].orientation)
+                      : 0.0;
         stream << "LocateViews call " << locate_views_call_count_ << ": count=" << count
                << ", viewConfig=" << ToString(view_configuration_type)
                << ", pivotExtraYawRadians=" << pivotxr_smoothed_extra_yaw_radians_
+               << ", pivotExtraPitchRadians=" << pivotxr_smoothed_extra_pitch_radians_
                << ", leftYawDelta=" << left_yaw_delta
                << ", rightYawDelta=" << right_yaw_delta
+               << ", leftPitchDelta=" << left_pitch_delta
+               << ", rightPitchDelta=" << right_pitch_delta
                << ", stereoBoostEnabled=" << resolved_settings_.depthxr.stereo_boost_enabled
                << ", stereoBoost=" << resolved_settings_.depthxr.stereo_boost
                << ", convergenceEnabled=" << resolved_settings_.depthxr.convergence_enabled
@@ -727,6 +778,9 @@ void OpenXrLayer::CaptureInstanceFunctions() {
 
 void OpenXrLayer::ResetSessionState() {
     active_session_ = XR_NULL_HANDLE;
+    pivotxr_smoothed_extra_yaw_radians_ = 0.0;
+    pivotxr_smoothed_extra_pitch_radians_ = 0.0;
+    pivotxr_last_smoothing_wall_time_.reset();
     internal_local_space_ = XR_NULL_HANDLE;
     internal_view_space_ = XR_NULL_HANDLE;
     internal_stage_space_ = XR_NULL_HANDLE;
@@ -859,7 +913,8 @@ XrResult OpenXrLayer::LocateSpaceWithPivot(XrSpace space,
                                            const PivotXrResolvedSettings& settings,
                                            bool pivotxr_active,
                                            XrSpaceLocation* location,
-                                           double* applied_extra_yaw_radians) {
+                                           double* applied_extra_yaw_radians,
+                                           double* applied_extra_pitch_radians) {
     if (!location) {
         return XR_ERROR_VALIDATION_FAILURE;
     }
@@ -869,13 +924,21 @@ XrResult OpenXrLayer::LocateSpaceWithPivot(XrSpace space,
         if (applied_extra_yaw_radians) {
             *applied_extra_yaw_radians = 0.0;
         }
+        if (applied_extra_pitch_radians) {
+            *applied_extra_pitch_radians = 0.0;
+        }
         return result;
     }
 
     if (!pivotxr_active) {
         pivotxr_smoothed_extra_yaw_radians_ = 0.0;
+        pivotxr_smoothed_extra_pitch_radians_ = 0.0;
+        pivotxr_last_smoothing_wall_time_.reset();
         if (applied_extra_yaw_radians) {
             *applied_extra_yaw_radians = 0.0;
+        }
+        if (applied_extra_pitch_radians) {
+            *applied_extra_pitch_radians = 0.0;
         }
         return result;
     }
@@ -885,6 +948,9 @@ XrResult OpenXrLayer::LocateSpaceWithPivot(XrSpace space,
     if (space_is_view == base_space_is_view) {
         if (applied_extra_yaw_radians) {
             *applied_extra_yaw_radians = 0.0;
+        }
+        if (applied_extra_pitch_radians) {
+            *applied_extra_pitch_radians = 0.0;
         }
         return result;
     }
@@ -896,17 +962,44 @@ XrResult OpenXrLayer::LocateSpaceWithPivot(XrSpace space,
         location->pose.orientation.z,
         location->pose.orientation.w,
     };
+    const auto now = std::chrono::steady_clock::now();
+    double delta_seconds = 0.0;
+    if (pivotxr_last_smoothing_wall_time_.has_value()) {
+        delta_seconds =
+            std::chrono::duration<double>(now - *pivotxr_last_smoothing_wall_time_).count();
+    }
+    pivotxr_last_smoothing_wall_time_ = now;
+
     const double current_yaw_radians = ExtractYawRadians(orientation);
-    const double extra_yaw_radians =
-        ComputePivotExtraYawRadians(current_yaw_radians, settings, pivotxr_smoothed_extra_yaw_radians_);
+    const double current_pitch_radians = ExtractPitchRadians(orientation);
+    const double extra_yaw_radians = ComputePivotExtraAngleRadians(current_yaw_radians,
+                                                                   settings.yaw_rotation_multiplier,
+                                                                   settings.yaw_deadzone_degrees,
+                                                                   settings.yaw_max_extra_degrees,
+                                                                   settings.yaw_smoothing,
+                                                                   delta_seconds,
+                                                                   pivotxr_smoothed_extra_yaw_radians_);
+    const double extra_pitch_radians = ComputePivotExtraAngleRadians(current_pitch_radians,
+                                                                     settings.pitch_rotation_multiplier,
+                                                                     settings.pitch_deadzone_degrees,
+                                                                     settings.pitch_max_extra_degrees,
+                                                                     settings.pitch_smoothing,
+                                                                     delta_seconds,
+                                                                     pivotxr_smoothed_extra_pitch_radians_);
     if (applied_extra_yaw_radians) {
         *applied_extra_yaw_radians = extra_yaw_radians;
     }
-    if (NearlyZero(extra_yaw_radians)) {
+    if (applied_extra_pitch_radians) {
+        *applied_extra_pitch_radians = extra_pitch_radians;
+    }
+    if (NearlyZero(extra_yaw_radians) && NearlyZero(extra_pitch_radians)) {
         return result;
     }
 
-    const XrPosef manipulated_pose = ApplyExtraYawToPose(location->pose, static_cast<float>(extra_yaw_radians));
+    const XrPosef manipulated_pose =
+        ApplyExtraRotationToPose(location->pose,
+                                 static_cast<float>(extra_yaw_radians),
+                                 static_cast<float>(extra_pitch_radians));
     location->pose = space_is_view ? manipulated_pose : InvertPose(manipulated_pose);
     CachePivotPoseDelta(time, MultiplyPoses(InvertPose(original_pose), location->pose));
     return result;
@@ -924,12 +1017,22 @@ void OpenXrLayer::LogResolvedSettings(const ResolvedRuntimeConfig& settings) {
            << ", convergence=" << settings.depthxr.convergence
            << ", pivotxrEnabled=" << settings.pivotxr.enabled
            << ", pivotActivation=" << ToString(settings.pivotxr.activation_mode)
-           << ", pivotActivationKey=" << settings.pivotxr.activation_key;
+           << ", pivotActivationKey=" << settings.pivotxr.activation_key
+           << ", pivotYawMultiplier=" << settings.pivotxr.yaw_rotation_multiplier
+           << ", pivotYawSmoothing=" << settings.pivotxr.yaw_smoothing
+           << ", pivotYawDeadzone=" << settings.pivotxr.yaw_deadzone_degrees
+           << ", pivotYawMaxExtra=" << settings.pivotxr.yaw_max_extra_degrees
+           << ", pivotPitchMultiplier=" << settings.pivotxr.pitch_rotation_multiplier
+           << ", pivotPitchSmoothing=" << settings.pivotxr.pitch_smoothing
+           << ", pivotPitchDeadzone=" << settings.pivotxr.pitch_deadzone_degrees
+           << ", pivotPitchMaxExtra=" << settings.pivotxr.pitch_max_extra_degrees;
     logger_.Debug(stream.str());
 }
 
 void OpenXrLayer::ResetPivotActivationState() {
     pivotxr_smoothed_extra_yaw_radians_ = 0.0;
+    pivotxr_smoothed_extra_pitch_radians_ = 0.0;
+    pivotxr_last_smoothing_wall_time_.reset();
     pivotxr_toggle_enabled_ = false;
     pivotxr_activation_key_was_down_ = false;
 }

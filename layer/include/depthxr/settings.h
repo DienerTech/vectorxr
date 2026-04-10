@@ -60,9 +60,14 @@ struct PivotXrResolvedSettings {
     bool enabled{false};
     ActivationMode activation_mode{ActivationMode::Toggle};
     std::string activation_key{"F8"};
-    double rotation_multiplier{1.5};
-    double smoothing{0.2};
-    double deadzone_degrees{8.0};
+    double yaw_rotation_multiplier{1.5};
+    double yaw_smoothing{0.2};
+    double yaw_deadzone_degrees{8.0};
+    double yaw_max_extra_degrees{25.0};
+    double pitch_rotation_multiplier{1.0};
+    double pitch_smoothing{0.2};
+    double pitch_deadzone_degrees{12.0};
+    double pitch_max_extra_degrees{20.0};
 };
 
 struct PivotXrModuleConfig {

@@ -161,7 +161,12 @@
         "activationKey",
         "rotationMultiplier",
         "smoothing",
-        "deadzoneDegrees"
+        "deadzoneDegrees",
+        "maxExtraYawDegrees",
+        "pitchRotationMultiplier",
+        "pitchSmoothing",
+        "pitchDeadzoneDegrees",
+        "maxExtraPitchDegrees"
       ],
       "properties": {
         "activationMode": {
@@ -181,6 +186,31 @@
           "maximum": 1.0
         },
         "deadzoneDegrees": {
+          "type": "number",
+          "minimum": 0.0,
+          "maximum": 45.0
+        },
+        "maxExtraYawDegrees": {
+          "type": "number",
+          "minimum": 0.0,
+          "maximum": 45.0
+        },
+        "pitchRotationMultiplier": {
+          "type": "number",
+          "minimum": 1.0,
+          "maximum": 3.0
+        },
+        "pitchSmoothing": {
+          "type": "number",
+          "minimum": 0.0,
+          "maximum": 1.0
+        },
+        "pitchDeadzoneDegrees": {
+          "type": "number",
+          "minimum": 0.0,
+          "maximum": 45.0
+        },
+        "maxExtraPitchDegrees": {
           "type": "number",
           "minimum": 0.0,
           "maximum": 45.0

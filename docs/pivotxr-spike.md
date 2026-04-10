@@ -22,27 +22,27 @@ Comparing against the original XrNeckSafer implementation showed that a viable n
 
 - `xrLocateSpace` for manipulating the head/view relationship
 - `xrLocateViews` for recomposing eyes from cached offsets
-- possibly `xrEndFrame` later to keep reprojection happy
+- `xrEndFrame` to keep reprojection happy after the view-space manipulation
 
 ## Current limits
 
 This spike is intentionally honest about what it does not do yet:
 
 - activation binding support is currently keyboard polling only
-- smoothing is call-based rather than time-based
-- the current pose manipulation only applies extra yaw, not the fuller translation model used by XRNeckSafer
-- there is not yet an `xrEndFrame` reprojection-compensation path
-- DCS still needs validation with this broader hook surface before PivotXR can be called production-ready
+- the current pose manipulation is still rotational rather than the fuller translation model used by XRNeckSafer
+- yaw and pitch amplification are configurable, but tuning still needs real flight-sim validation
+- DCS validation is promising, but PivotXR still needs broader cross-title validation before it can be called production-ready
 
 ## What this spike proves
 
 - PivotXR can be represented as a feature in the shared runtime path
 - a deadzone-based yaw amplifier can be moved out of the `xrLocateViews`-only spike
+- a separate pitch amplifier can ride on the same runtime path without regressing the DCS fix
 - VectorXR can now follow the same broad architectural direction as XRNeckSafer while keeping DepthXR intact
 
 ## What to validate next
 
-- behavior in DCS with the new locate-space path
+- behavior in DCS with yaw and pitch amplification enabled together
 - interaction quality with quad views and DFR
-- whether `xrEndFrame` compensation is required to eliminate remaining edge masking
+- whether max-extra clamps need per-title presets
 - whether activation should stay explicit, move to dynamic activation, or become a hybrid model

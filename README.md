@@ -8,7 +8,8 @@ Current active feature set:
 - DepthXR convergence
 - suite-level logging and config management
 - per-game DepthXR overrides
-- PivotXR config shell for upcoming runtime work
+- PivotXR runtime yaw amplification
+- PivotXR runtime pitch amplification
 
 The repository currently ships one shared OpenXR layer plus one Tauri desktop app:
 
@@ -55,7 +56,12 @@ High-level shape:
         "activationMode": "toggle",
         "rotationMultiplier": 1.5,
         "smoothing": 0.2,
-        "deadzoneDegrees": 8.0
+        "deadzoneDegrees": 8.0,
+        "maxExtraYawDegrees": 25.0,
+        "pitchRotationMultiplier": 1.0,
+        "pitchSmoothing": 0.2,
+        "pitchDeadzoneDegrees": 12.0,
+        "maxExtraPitchDegrees": 20.0
       }
     }
   }
@@ -130,10 +136,10 @@ Implemented today:
 - per-executable DepthXR settings resolution
 - `xrLocateViews` adjustments for stereo boost and convergence
 - quad-view-aware stereo/convergence behavior
+- PivotXR runtime path across `xrLocateSpace`, `xrLocateViews`, and `xrEndFrame`
 - VectorXR suite shell with separate core, DepthXR, and PivotXR tabs
 
 Deliberately not active yet:
 
 - true loader detachment when disabled
-- PivotXR runtime pass
 - World Scale and FoV controls from the old prototype scope
