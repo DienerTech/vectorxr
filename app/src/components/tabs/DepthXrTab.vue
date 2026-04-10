@@ -17,21 +17,21 @@ defineEmits<{
 
 <template>
   <div class="space-y-6">
-    <article class="rounded-[2rem] border border-black/10 bg-white/80 p-5 shadow-panel backdrop-blur">
+    <article class="rounded-[1.25rem] border p-5 shadow-panel backdrop-blur surface-panel">
       <div class="mb-4 flex flex-wrap items-center justify-between gap-3">
         <div>
-          <p class="text-xs uppercase tracking-[0.24em] text-depthxr-copper">DepthXR</p>
-          <h2 class="text-2xl font-semibold tracking-tight text-depthxr-pine">Default Module Settings</h2>
+          <p class="eyebrow text-xs uppercase tracking-[0.24em]">Depth</p>
+          <h2 class="text-2xl font-semibold tracking-tight">Default depth settings</h2>
         </div>
-        <label class="inline-flex items-center gap-3 rounded-full bg-depthxr-pine px-4 py-2 text-sm font-medium text-white">
+        <label class="pill-toggle inline-flex items-center gap-3 rounded-full px-4 py-2 text-sm font-medium">
           <input v-model="config.modules.depthxr.enabled" class="h-4 w-4 accent-depthxr-copper" type="checkbox" />
-          DepthXR Enabled
+          Depth Enabled
         </label>
       </div>
 
-      <div class="mb-4 rounded-2xl border border-dashed border-black/10 bg-[#f7f2e8] px-4 py-3 text-sm leading-6 text-depthxr-steel">
-        Milestone 2 keeps DepthXR focused on stereo boost and convergence while the app shell evolves around it. Display values are now tuned for
-        easier sharing and discussion, while the config still stores canonical runtime numbers.
+      <div class="mb-4 rounded-[0.9rem] border border-dashed px-4 py-3 text-sm leading-6 surface-panel-soft">
+        Adjust the shared depth defaults here. Profiles below can still override the same values per title while the config keeps the canonical
+        runtime numbers.
       </div>
 
       <div class="grid gap-3 lg:grid-cols-2">
@@ -71,11 +71,11 @@ defineEmits<{
     <section class="space-y-4">
       <div class="flex flex-wrap items-center justify-between gap-3">
         <div>
-          <p class="text-xs uppercase tracking-[0.24em] text-depthxr-copper">Profiles</p>
-          <h2 class="text-2xl font-semibold tracking-tight text-depthxr-pine">DepthXR Per-Game Overrides</h2>
+          <p class="eyebrow text-xs uppercase tracking-[0.24em]">Profiles</p>
+          <h2 class="text-2xl font-semibold tracking-tight">Depth per-game overrides</h2>
         </div>
         <button
-          class="rounded-full bg-depthxr-copper px-5 py-2.5 text-sm font-medium text-white transition hover:brightness-110"
+          class="button-accent rounded-[0.75rem] px-5 py-2.5 text-sm font-medium"
           type="button"
           @click="$emit('addProfile')"
         >
@@ -94,9 +94,9 @@ defineEmits<{
 
       <div
         v-if="config.modules.depthxr.profiles.length === 0"
-        class="rounded-[2rem] border border-dashed border-black/15 bg-white/50 px-6 py-7 text-center text-sm text-depthxr-steel"
+        class="rounded-[1rem] border border-dashed px-6 py-7 text-center text-sm surface-panel-soft"
       >
-        No per-game overrides yet. Add a profile to bind custom DepthXR values to a specific executable.
+        No per-game overrides yet. Add a profile to bind custom depth values to a specific executable.
       </div>
     </section>
   </div>

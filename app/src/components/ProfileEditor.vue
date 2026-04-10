@@ -16,24 +16,24 @@ defineEmits<{
 
 <template>
   <article
-    class="rounded-[2rem] border p-5 shadow-panel transition"
-    :class="profile.enabled ? 'border-black/10 bg-[#f7f2e8]/90' : 'border-stone-300 bg-stone-100/95'"
+    class="rounded-[1rem] border p-5 shadow-panel transition"
+    :class="profile.enabled ? 'surface-panel' : 'surface-panel-soft'"
   >
     <div class="mb-4 flex flex-wrap items-center justify-between gap-3">
       <div>
         <div class="flex flex-wrap items-center gap-2">
-          <p class="text-xs uppercase tracking-[0.24em] text-depthxr-copper">Profile {{ index + 1 }}</p>
+          <p class="eyebrow text-xs uppercase tracking-[0.24em]">Profile {{ index + 1 }}</p>
           <span
             class="rounded-full px-2.5 py-1 text-[11px] font-medium uppercase tracking-[0.15em]"
-            :class="profile.enabled ? 'bg-emerald-100 text-emerald-700' : 'bg-stone-300 text-stone-700'"
+            :class="profile.enabled ? 'chip-success' : 'chip-idle'"
           >
             {{ profile.enabled ? 'Active' : 'Fallback' }}
           </span>
         </div>
-        <h3 class="mt-2 text-xl font-semibold tracking-tight text-depthxr-pine">Per-Game Override</h3>
+        <h3 class="mt-2 text-xl font-semibold tracking-tight">Per-game override</h3>
       </div>
       <button
-        class="rounded-full border border-black/10 px-4 py-2 text-sm font-medium text-depthxr-ink transition hover:border-depthxr-copper hover:text-depthxr-copper"
+        class="button-secondary rounded-[0.75rem] px-4 py-2 text-sm font-medium"
         type="button"
         @click="$emit('remove')"
       >
@@ -43,7 +43,7 @@ defineEmits<{
 
     <div
       v-if="!profile.enabled"
-      class="mb-4 rounded-2xl border border-stone-300 bg-white/70 px-4 py-3 text-sm leading-6 text-depthxr-steel"
+      class="mb-4 rounded-[0.9rem] border px-4 py-3 text-sm leading-6 surface-panel-strong"
     >
       This profile is disabled, so VectorXR will fall back to the module defaults at runtime. The settings below remain editable for later reuse.
     </div>
@@ -53,7 +53,7 @@ defineEmits<{
         <span class="mb-1.5 block text-sm font-medium">Profile Name</span>
         <input
           v-model="profile.name"
-          class="w-full rounded-2xl border border-black/10 bg-white px-4 py-2.5"
+          class="app-input w-full rounded-[0.75rem] px-4 py-2.5"
           placeholder="DCS"
           type="text"
         />
@@ -63,7 +63,7 @@ defineEmits<{
         <span class="mb-1.5 block text-sm font-medium">Executable</span>
         <input
           v-model="profile.match.exe"
-          class="w-full rounded-2xl border border-black/10 bg-white px-4 py-2.5"
+          class="app-input w-full rounded-[0.75rem] px-4 py-2.5"
           placeholder="Game.exe"
           type="text"
           @blur="$emit('syncName')"
@@ -71,7 +71,7 @@ defineEmits<{
       </label>
     </div>
 
-    <label class="mt-4 inline-flex items-center gap-3 rounded-full bg-depthxr-pine px-4 py-2 text-sm font-medium text-white">
+    <label class="pill-toggle mt-4 inline-flex items-center gap-3 rounded-full px-4 py-2 text-sm font-medium">
       <input v-model="profile.enabled" class="h-4 w-4 accent-depthxr-copper" type="checkbox" />
       Profile Enabled
     </label>

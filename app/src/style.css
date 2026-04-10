@@ -4,24 +4,250 @@
 
 :root {
   font-family: "Bahnschrift", "Aptos", "Segoe UI Variable", sans-serif;
-  color: #111316;
-  background: #eff2eb;
+  color: #18211d;
+  background: #edf3ef;
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+  --app-shell-flat: #edf3ef;
+  --app-shell: radial-gradient(circle at top left, rgba(233, 118, 47, 0.12), transparent 26%),
+    radial-gradient(circle at top right, rgba(48, 109, 88, 0.14), transparent 24%),
+    linear-gradient(180deg, #f5f8f4 0%, #edf3ef 54%, #e2ebe6 100%);
+  --app-surface: rgba(255, 255, 255, 0.82);
+  --app-surface-strong: rgba(255, 255, 255, 0.94);
+  --app-surface-muted: #eef4ef;
+  --app-surface-subtle: #f6f1e7;
+  --app-surface-inverse: #1b2622;
+  --app-surface-inverse-soft: rgba(255, 255, 255, 0.06);
+  --app-border: rgba(24, 33, 29, 0.12);
+  --app-border-strong: rgba(24, 33, 29, 0.2);
+  --app-border-inverse: rgba(255, 255, 255, 0.12);
+  --app-text: #18211d;
+  --app-text-muted: #60716a;
+  --app-text-soft: #7b887f;
+  --app-text-inverse: rgba(255, 255, 255, 0.94);
+  --app-text-inverse-muted: rgba(255, 255, 255, 0.7);
+  --app-accent: #d0672a;
+  --app-accent-strong: #a74c1a;
+  --app-accent-soft: #f7ddc9;
+  --app-accent-soft-text: #9f4718;
+  --app-success-soft: #dff5e8;
+  --app-success-text: #1d7f50;
+  --app-idle-soft: #dce4de;
+  --app-idle-text: #5e6d67;
+  --app-warning-soft: #f8e7c8;
+  --app-warning-text: #946124;
+  --app-shadow: 0 22px 70px rgba(24, 33, 29, 0.12);
+}
+
+:root[data-theme='dark'] {
+  color: #eef6f2;
+  background: #0f1714;
+  --app-shell-flat: #0f1714;
+  --app-shell: radial-gradient(circle at top left, rgba(208, 103, 42, 0.16), transparent 22%),
+    radial-gradient(circle at top right, rgba(62, 134, 108, 0.14), transparent 24%),
+    linear-gradient(180deg, #121c18 0%, #0f1714 54%, #0b120f 100%);
+  --app-surface: rgba(23, 33, 29, 0.84);
+  --app-surface-strong: rgba(28, 39, 34, 0.96);
+  --app-surface-muted: #17231f;
+  --app-surface-subtle: #211d16;
+  --app-surface-inverse: #f3f7f4;
+  --app-surface-inverse-soft: rgba(0, 0, 0, 0.05);
+  --app-border: rgba(220, 234, 226, 0.12);
+  --app-border-strong: rgba(220, 234, 226, 0.18);
+  --app-border-inverse: rgba(24, 33, 29, 0.12);
+  --app-text: #eef6f2;
+  --app-text-muted: #aab9b1;
+  --app-text-soft: #90a199;
+  --app-text-inverse: #18211d;
+  --app-text-inverse-muted: rgba(24, 33, 29, 0.68);
+  --app-accent: #eb823d;
+  --app-accent-strong: #f0a86f;
+  --app-accent-soft: rgba(235, 130, 61, 0.18);
+  --app-accent-soft-text: #f2b487;
+  --app-success-soft: rgba(41, 136, 95, 0.18);
+  --app-success-text: #74d39f;
+  --app-idle-soft: rgba(127, 145, 136, 0.16);
+  --app-idle-text: #b8c4be;
+  --app-warning-soft: rgba(196, 143, 58, 0.18);
+  --app-warning-text: #f2c679;
+  --app-shadow: 0 28px 90px rgba(0, 0, 0, 0.28);
 }
 
 body {
   margin: 0;
+  background: var(--app-shell-flat);
+  color: var(--app-text);
+  transition: background-color 180ms ease, color 180ms ease;
+}
+
+#app {
+  min-height: 100vh;
 }
 
 button,
 input,
-select {
+select,
+textarea {
   font: inherit;
 }
 
 code {
   font-family: "Cascadia Code", "Fira Code", monospace;
+}
+
+button,
+input,
+select,
+textarea {
+  transition: background-color 180ms ease, border-color 180ms ease, color 180ms ease, box-shadow 180ms ease;
+}
+
+.app-shell-bg {
+  background: var(--app-shell);
+}
+
+.surface-panel {
+  background: var(--app-surface);
+  border-color: var(--app-border);
+  color: var(--app-text);
+  box-shadow: var(--app-shadow);
+}
+
+.surface-panel-strong {
+  background: var(--app-surface-strong);
+  border-color: var(--app-border-strong);
+  color: var(--app-text);
+  box-shadow: var(--app-shadow);
+}
+
+.surface-panel-muted {
+  background: var(--app-surface-subtle);
+  border-color: var(--app-border);
+  color: var(--app-text-muted);
+}
+
+.surface-panel-soft {
+  background: var(--app-surface-muted);
+  border-color: var(--app-border);
+  color: var(--app-text-muted);
+}
+
+.surface-panel-inverse {
+  background: var(--app-surface-inverse);
+  border-color: var(--app-border-inverse);
+  color: var(--app-text-inverse);
+  box-shadow: 0 28px 90px rgba(0, 0, 0, 0.22);
+}
+
+.app-input {
+  background: var(--app-surface-strong);
+  border: 1px solid var(--app-border);
+  color: var(--app-text);
+}
+
+.app-input::placeholder {
+  color: var(--app-text-soft);
+}
+
+.eyebrow {
+  color: var(--app-accent);
+}
+
+.text-muted {
+  color: var(--app-text-muted);
+}
+
+.text-soft {
+  color: var(--app-text-soft);
+}
+
+.text-inverse-muted {
+  color: var(--app-text-inverse-muted);
+}
+
+.chip-accent {
+  background: var(--app-accent-soft);
+  color: var(--app-accent-soft-text);
+}
+
+.chip-success {
+  background: var(--app-success-soft);
+  color: var(--app-success-text);
+}
+
+.chip-idle {
+  background: var(--app-idle-soft);
+  color: var(--app-idle-text);
+}
+
+.chip-warning {
+  background: var(--app-warning-soft);
+  color: var(--app-warning-text);
+}
+
+.button-accent {
+  background: var(--app-accent);
+  color: #fff;
+}
+
+.button-accent:hover {
+  filter: brightness(1.06);
+}
+
+.button-secondary {
+  background: var(--app-surface-strong);
+  border: 1px solid var(--app-border);
+  color: var(--app-text);
+}
+
+.button-secondary:hover {
+  border-color: var(--app-accent);
+  color: var(--app-accent);
+}
+
+.button-inverse {
+  background: transparent;
+  border: 1px solid var(--app-border-inverse);
+  color: var(--app-text-inverse);
+}
+
+.button-inverse:hover {
+  border-color: rgba(255, 255, 255, 0.32);
+}
+
+.pill-toggle {
+  background: var(--app-surface-inverse);
+  color: var(--app-text-inverse);
+}
+
+.tab-shell {
+  background: color-mix(in srgb, var(--app-surface) 88%, transparent);
+  border-color: var(--app-border);
+  box-shadow: var(--app-shadow);
+}
+
+.tab-button-idle {
+  background: var(--app-surface-strong);
+  border-color: var(--app-border);
+  color: var(--app-text);
+}
+
+.tab-button-idle:hover {
+  border-color: var(--app-accent);
+}
+
+.tab-button-active {
+  background: var(--app-surface-inverse);
+  border-color: var(--app-border-inverse);
+  color: var(--app-text-inverse);
+}
+
+.mono-text {
+  color: var(--app-text-soft);
+}
+
+.app-link {
+  color: var(--app-accent);
 }
