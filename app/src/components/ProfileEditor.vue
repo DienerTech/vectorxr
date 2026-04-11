@@ -29,10 +29,10 @@ defineEmits<{
             class="rounded-full px-2.5 py-1 text-[11px] font-medium uppercase tracking-[0.15em]"
             :class="profile.enabled ? 'chip-success' : 'chip-idle'"
           >
-            {{ profile.enabled ? 'Active' : 'Fallback' }}
+            {{ profile.enabled ? 'Active' : 'Disabled' }}
           </span>
         </div>
-        <h3 class="mt-2 text-xl font-semibold tracking-tight">Per-game override</h3>
+        <h3 class="mt-2 text-xl font-semibold tracking-tight">{{ profile.name }}</h3>
       </div>
       <button
         class="button-secondary rounded-[0.75rem] px-4 py-2 text-sm font-medium"
@@ -58,7 +58,7 @@ defineEmits<{
       v-if="!profile.enabled"
       class="mb-4 rounded-[0.9rem] border px-4 py-3 text-sm leading-6 surface-panel-strong"
     >
-      This profile is disabled, so VectorXR will fall back to the module defaults at runtime. The settings below remain editable for later reuse.
+      This profile is disabled and will not activate at runtime.
     </div>
 
     <div class="grid gap-3 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
@@ -104,10 +104,10 @@ defineEmits<{
         :muted="!profile.enabled"
         title="Stereo Boost"
         subtitle="Scales horizontal eye separation around the midpoint."
-        :min="0.5"
+        :min="1"
         :max="2"
         :step="0.01"
-        :display-min="-50"
+        :display-min="0"
         :display-max="100"
         :display-step="0.1"
         :display-value="toStereoBoostDisplay"
@@ -120,10 +120,10 @@ defineEmits<{
         :muted="!profile.enabled"
         title="Convergence"
         subtitle="Shifts projection centers to move the zero-parallax plane."
-        :min="-0.5"
+        :min="0"
         :max="0.5"
         :step="0.001"
-        :display-min="-500"
+        :display-min="0"
         :display-max="500"
         :display-step="0.1"
         :display-value="toConvergenceDisplay"

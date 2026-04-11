@@ -36,8 +36,8 @@ const activeSummary = computed(() => {
   if (store.state.activeTab === 'core') {
     return {
       eyebrow: 'Home',
-      title: 'Shared controls, release notes, and save state stay close at hand.',
-      body: 'Use the Home tab to keep an eye on suite-wide settings, logs, and the shape of the working copy while Depth and Pivot stay focused on their own tuning.',
+          title: 'VectorXR Utility Suite',
+    body: 'Modern, open-source configuration utility for VectorXR and its modules.',
       panelTitle: 'Home focus',
       panelBody: 'Suite-wide controls, log access, and the product summary live here.',
     }
@@ -46,8 +46,8 @@ const activeSummary = computed(() => {
   if (store.state.activeTab === 'depthxr') {
     return {
       eyebrow: 'Depth',
-      title: 'Depth tuning stays lean, with defaults and per-game overrides in one place.',
-      body: 'Stereo boost and convergence stay easy to adjust without mixing them back into unrelated shell or logging concerns.',
+    title: 'VectorXR Utility Suite',
+    body: 'Modern, open-source configuration utility for VectorXR and its modules.',
       panelTitle: 'Depth focus',
       panelBody: 'Defaults and profile overrides stay centered on depth tuning and quick comparison.',
     }
@@ -55,8 +55,8 @@ const activeSummary = computed(() => {
 
   return {
     eyebrow: 'Pivot',
-    title: 'Rotation tuning stays separate, so yaw and pitch changes read clearly.',
-    body: 'Activation mode, smoothing, deadzones, and extra range each have their own field so changes stay easy to read and compare.',
+    title: 'VectorXR Utility Suite',
+    body: 'Modern, open-source configuration utility for VectorXR and its modules.',
     panelTitle: 'Pivot focus',
     panelBody: 'Activation behavior, rotation limits, and tuning controls stay grouped together here.',
   }
@@ -134,12 +134,6 @@ async function openLogs() {
   await refreshLogs()
 }
 
-async function reloadFromDisk() {
-  if (dirty.value && !window.confirm('Reload config from disk? Unsaved changes will be lost.')) {
-    return
-  }
-  await store.load()
-}
 
 function triggerImport() {
   importFileInput.value?.click()
@@ -205,74 +199,33 @@ function cancelImport() {
       </div>
 
       <section class="min-h-0 flex-1 overflow-y-auto pb-4">
-        <div class="grid gap-6 xl:grid-cols-[minmax(0,1.28fr)_320px]">
-          <div class="min-w-0">
-            <CoreTab
-              v-if="store.state.activeTab === 'core'"
-              :config="store.state.config"
-              :path="store.state.path"
-            :log-path="logSnapshot?.activePath"
-            :theme-preference="themePreference"
-            @view-logs="openLogs"
-            @add-application="store.addApplication"
-            @remove-application="store.removeApplication"
-            @update:theme-preference="themePreference = $event"
-          />
-            <DepthXrTab
-            v-else-if="store.state.activeTab === 'depthxr'"
-            :config="store.state.config"
-            :applications="store.state.config.applications"
-            @add-profile="store.addProfile"
-            @remove-profile="store.removeProfile"
-            @sync-profile-name="store.syncProfileName"
-            />
-            <PivotXrTab
-              v-else
-              :config="store.state.config"
-              :applications="store.state.config.applications"
-              @add-pivot-profile="store.addPivotProfile"
-              @remove-pivot-profile="store.removePivotProfile"
-              @sync-pivot-profile-name="store.syncPivotProfileName"
-            />
-          </div>
-
-          <aside class="space-y-4">
-            <article class="rounded-[1.25rem] border p-5 shadow-panel surface-panel">
-              <p class="eyebrow text-xs uppercase tracking-[0.24em]">Validation</p>
-              <h2 class="mt-2 text-xl font-semibold tracking-tight">Config health</h2>
-
-              <ul v-if="errors.length > 0" class="mt-3 space-y-2.5">
-                <li v-for="error in errors" :key="error" class="chip-warning rounded-[0.9rem] border px-4 py-3 text-sm" style="border-color: var(--app-border)">
-                  {{ error }}
-                </li>
-              </ul>
-
-              <div v-else class="chip-success mt-3 rounded-[0.9rem] border px-4 py-4 text-sm" style="border-color: var(--app-border)">
-                VectorXR config structure and value ranges look valid.
-              </div>
-            </article>
-
-            <article class="rounded-[1.25rem] border p-5 shadow-panel surface-panel">
-              <p class="eyebrow text-xs uppercase tracking-[0.24em]">Working Copy</p>
-              <h2 class="mt-2 text-xl font-semibold tracking-tight">Save status</h2>
-              <div class="mt-3 rounded-[0.9rem] border px-4 py-4 text-sm leading-6 surface-panel-soft">
-                <p><strong>State:</strong> {{ dirty ? 'Unsaved changes' : 'Synced with disk' }}</p>
-                <p class="mt-2"><strong>Path:</strong></p>
-                <p class="mt-1 break-all font-mono text-xs md:text-sm">{{ store.state.path || 'Resolving...' }}</p>
-              </div>
-            </article>
-
-            <article class="rounded-[1.25rem] border p-5 shadow-panel surface-panel-inverse">
-              <p class="text-xs uppercase tracking-[0.24em] text-inverse-muted">{{ activeSummary.panelTitle }}</p>
-              <p class="mt-3 text-sm leading-6 text-inverse-muted">{{ activeSummary.panelBody }}</p>
-
-              <div class="mt-4 rounded-[0.9rem] border border-white/10 bg-white/5 px-4 py-4 text-sm leading-6 text-inverse-muted">
-                <p><strong class="text-white">Theme:</strong> {{ themePreference }}</p>
-                <p class="mt-2"><strong class="text-white">Latest patch:</strong> {{ latestPatch.version }}</p>
-              </div>
-            </article>
-          </aside>
-        </div>
+        <CoreTab
+          v-if="store.state.activeTab === 'core'"
+          :config="store.state.config"
+          :path="store.state.path"
+          :log-path="logSnapshot?.activePath"
+          :theme-preference="themePreference"
+          @view-logs="openLogs"
+          @add-application="store.addApplication"
+          @remove-application="store.removeApplication"
+          @update:theme-preference="themePreference = $event"
+        />
+        <DepthXrTab
+          v-else-if="store.state.activeTab === 'depthxr'"
+          :config="store.state.config"
+          :applications="store.state.config.applications"
+          @add-profile="store.addProfile"
+          @remove-profile="store.removeProfile"
+          @sync-profile-name="store.syncProfileName"
+        />
+        <PivotXrTab
+          v-else
+          :config="store.state.config"
+          :applications="store.state.config.applications"
+          @add-pivot-profile="store.addPivotProfile"
+          @remove-pivot-profile="store.removePivotProfile"
+          @sync-pivot-profile-name="store.syncPivotProfileName"
+        />
       </section>
 
       <StickySaveBar
@@ -284,7 +237,6 @@ function cancelImport() {
         :disabled="store.state.loading || store.state.saving || errors.length > 0"
         @save="saveConfig"
         @discard="store.discardChanges"
-        @reload="reloadFromDisk"
         @import="triggerImport"
       />
 

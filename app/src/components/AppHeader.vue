@@ -29,7 +29,6 @@ defineEmits<{
         <p class="eyebrow mt-4 text-xs uppercase tracking-[0.24em]">{{ eyebrow }}</p>
         <h1 class="mt-2 text-3xl font-semibold tracking-tight md:text-[2.4rem]">{{ title }}</h1>
         <p class="mt-3 max-w-3xl text-sm leading-6 text-muted md:text-[15px]">{{ body }}</p>
-        <p class="mt-4 text-sm text-muted">{{ status }}</p>
       </div>
 
       <div class="space-y-3 rounded-[1rem] border p-4 surface-panel">

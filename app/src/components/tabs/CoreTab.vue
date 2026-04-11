@@ -20,6 +20,12 @@ defineEmits<{
   'update:themePreference': [value: ThemePreference]
 }>()
 
+const logPathShort = computed(() => {
+  if (!props.logPath) return null
+  const sep = props.logPath.includes('\\') ? '\\' : '/'
+  return props.logPath.split(sep).pop() ?? props.logPath
+})
+
 const moduleCards = computed(() => [
   {
     name: 'Depth',
@@ -41,18 +47,25 @@ const moduleCards = computed(() => [
 <template>
   <div class="space-y-6">
     <article class="rounded-[1.25rem] border p-5 shadow-panel backdrop-blur surface-panel">
-      <div class="mb-4 flex flex-wrap items-center justify-between gap-3">
+      <div class="mb-4">
+        <p class="eyebrow text-xs uppercase tracking-[0.24em]">Home</p>
+        <h2 class="text-2xl font-semibold tracking-tight">Runtime settings</h2>
+      </div>
+
+      <!-- VectorXR Enabled — prominent full-width row -->
+      <div class="mb-5 flex items-center justify-between rounded-[0.9rem] border px-4 py-3 surface-panel-strong">
         <div>
-          <p class="eyebrow text-xs uppercase tracking-[0.24em]">Home</p>
-          <h2 class="text-2xl font-semibold tracking-tight">VectorXR runtime settings</h2>
+          <p class="text-sm font-semibold">VectorXR Enabled</p>
+          <p class="mt-0.5 text-xs text-muted">Enables or disables all VectorXR effects at runtime.</p>
         </div>
         <label class="pill-toggle inline-flex items-center gap-3 rounded-full px-4 py-2 text-sm font-medium">
           <input v-model="config.core.enabled" class="h-4 w-4 accent-depthxr-copper" type="checkbox" />
-          Suite Enabled
+          {{ config.core.enabled ? 'Enabled' : 'Disabled' }}
         </label>
       </div>
 
-      <div class="grid gap-3 lg:grid-cols-[minmax(0,240px)_minmax(0,240px)_minmax(0,1fr)]">
+      <!-- Log Level + Retention -->
+      <div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-[minmax(0,200px)_minmax(0,200px)]">
         <label class="block">
           <span class="mb-1.5 block text-sm font-medium">Log Level</span>
           <select v-model="config.core.logLevel" class="app-input w-full rounded-[0.75rem] px-4 py-2.5">
@@ -72,17 +85,19 @@ const moduleCards = computed(() => [
             max="50"
             step="1"
             type="number"
+            title="Number of log files to keep before rotating out the oldest."
           />
         </label>
+      </div>
 
-        <div class="block">
-          <span class="mb-1.5 block text-sm font-medium">Theme</span>
-          <ThemeToggle :model-value="themePreference" @update:model-value="$emit('update:themePreference', $event)" />
-        </div>
+      <!-- Theme on its own row -->
+      <div class="mt-3">
+        <span class="mb-1.5 block text-sm font-medium">Theme</span>
+        <ThemeToggle :model-value="themePreference" @update:model-value="$emit('update:themePreference', $event)" />
+      </div>
 
-        <div class="rounded-[0.9rem] border border-dashed px-4 py-3 text-sm leading-6 surface-panel-soft">
-          Log level, retention, and theme apply across the whole suite. Adjust them here before tuning depth or rotation in the module tabs.
-        </div>
+      <div class="mt-3 rounded-[0.9rem] border border-dashed px-4 py-3 text-sm leading-6 surface-panel-soft">
+        Log level controls what the runtime writes; retention sets how many files to keep before rotating. Theme is a local UI preference and does not affect the runtime config.
       </div>
 
       <div class="mt-4 flex flex-wrap items-center gap-3">
@@ -94,7 +109,7 @@ const moduleCards = computed(() => [
           View Logs
         </button>
         <div class="rounded-full border px-4 py-2 text-sm surface-panel-strong">
-          Latest Log: <span class="font-mono text-xs">{{ logPath || 'Available after first session' }}</span>
+          Latest Log: <span class="font-mono text-xs">{{ logPathShort || 'Available after first session' }}</span>
         </div>
       </div>
     </article>
@@ -142,20 +157,9 @@ const moduleCards = computed(() => [
 
       <div class="mt-5 grid gap-3 lg:grid-cols-[minmax(0,1.3fr)_minmax(0,0.9fr)]">
         <div class="rounded-[1rem] border border-white/10 bg-white/5 p-4 text-sm text-inverse-muted">
-          <p class="font-medium text-white">Built by Michael Diener - DienerTech</p>
+          <p class="font-medium">Built by Michael Diener - DienerTech</p>
           <ul class="mt-3 space-y-2.5 leading-6">
-            <li>Copyright Michael Diener.</li>
-            <li>One shared OpenXR layer, one shared config, and module-specific editing where it helps.</li>
-            <li>Designed for tuning without losing track of what changed.</li>
-          </ul>
-        </div>
-
-        <div class="rounded-[1rem] border border-white/10 bg-white/5 p-4 text-sm text-inverse-muted">
-          <p class="font-medium text-white">Runtime Notes</p>
-          <ul class="mt-3 space-y-2.5 leading-6">
-            <li>Disabling the suite bypasses effects, but it does not unregister the OpenXR layer from the loader.</li>
-            <li>Layer logs rotate inside the shared VectorXR log directory and respect the configured retention count.</li>
-            <li>Shared Config Path: <span class="break-all font-mono text-xs md:text-sm">{{ path || 'Resolving...' }}</span></li>
+            <li>Copyright DienerTech LLC</li>
           </ul>
         </div>
       </div>

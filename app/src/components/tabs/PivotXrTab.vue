@@ -2,7 +2,7 @@
 import { computed } from 'vue'
 
 import BindingEditor from '../BindingEditor.vue'
-import type { PivotXRProfileConfig, RegisteredApplication, VectorXRConfig } from '../../lib/model'
+import type { RegisteredApplication, VectorXRConfig } from '../../lib/model'
 import { bindingLabel } from '../../lib/model'
 
 const props = defineProps<{
@@ -57,7 +57,7 @@ const profileWarnings = computed(() => {
       <div class="mb-4 flex flex-wrap items-center justify-between gap-3">
         <div>
           <p class="eyebrow text-xs uppercase tracking-[0.24em]">Pivot</p>
-          <h2 class="text-2xl font-semibold tracking-tight">Default rotation settings</h2>
+          <h2 class="text-2xl font-semibold tracking-tight">Pivot XR</h2>
         </div>
         <label class="pill-toggle inline-flex items-center gap-3 rounded-full px-4 py-2 text-sm font-medium">
           <input v-model="config.modules.pivotxr.enabled" class="h-4 w-4 accent-depthxr-copper" type="checkbox" />
@@ -66,46 +66,56 @@ const profileWarnings = computed(() => {
       </div>
 
       <div class="mb-4 rounded-[0.9rem] border border-dashed px-4 py-3 text-sm leading-6 surface-panel-soft">
-        These values are copied into new profiles as a starting point. Pivot activates at runtime only when an enabled profile targets the current application.
+        These values apply when no custom profile targets the current application. New profiles are initialized from these defaults.
       </div>
 
-      <div class="mt-4 rounded-[1rem] border p-4 surface-panel-soft">
+      <p class="eyebrow mb-3 text-xs uppercase tracking-[0.24em]">Default Profile</p>
+
+      <div class="rounded-[1rem] border p-4 surface-panel-soft">
         <p class="eyebrow text-xs uppercase tracking-[0.18em]">Yaw</p>
-        <div class="mt-4 grid gap-3 lg:grid-cols-2">
+        <div class="mt-3 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
           <label class="block">
-            <span class="mb-1.5 block text-sm font-medium">Yaw Multiplier</span>
+            <span class="mb-1.5 flex items-center gap-1.5 text-sm font-medium">
+              Multiplier
+              <span title="Amplifies head yaw (left/right) outside the deadzone. 1.0 = no change. Good range: 1.3–2.0." class="cursor-help select-none text-xs text-muted">ⓘ</span>
+            </span>
             <input
               v-model.number="config.modules.pivotxr.defaults.rotationMultiplier"
               class="app-input w-full rounded-[0.75rem] px-4 py-2.5"
               min="1" max="3" step="0.05" type="number"
-              title="Scales yaw movement outside the deadzone."
             />
           </label>
           <label class="block">
-            <span class="mb-1.5 block text-sm font-medium">Yaw Smoothing</span>
+            <span class="mb-1.5 flex items-center gap-1.5 text-sm font-medium">
+              Smoothing
+              <span title="Low-pass filter on yaw output. 0 = instant response, higher values feel slower. Good range: 0.05–0.2." class="cursor-help select-none text-xs text-muted">ⓘ</span>
+            </span>
             <input
               v-model.number="config.modules.pivotxr.defaults.smoothing"
               class="app-input w-full rounded-[0.75rem] px-4 py-2.5"
               min="0" max="1" step="0.01" type="number"
-              title="Smooths yaw response over time. Higher values feel slower."
             />
           </label>
           <label class="block">
-            <span class="mb-1.5 block text-sm font-medium">Yaw Deadzone</span>
+            <span class="mb-1.5 flex items-center gap-1.5 text-sm font-medium">
+              Deadzone
+              <span title="Degrees of head yaw ignored before amplification activates. Prevents jitter at rest. Good range: 2–8°." class="cursor-help select-none text-xs text-muted">ⓘ</span>
+            </span>
             <input
               v-model.number="config.modules.pivotxr.defaults.deadzoneDegrees"
               class="app-input w-full rounded-[0.75rem] px-4 py-2.5"
               min="0" max="45" step="0.5" type="number"
-              title="Yaw movement inside this angle remains unchanged."
             />
           </label>
           <label class="block">
-            <span class="mb-1.5 block text-sm font-medium">Yaw Max Extra</span>
+            <span class="mb-1.5 flex items-center gap-1.5 text-sm font-medium">
+              Max Extra
+              <span title="Maximum extra yaw degrees Pivot can add on top of natural head movement. Good range: 20–60°." class="cursor-help select-none text-xs text-muted">ⓘ</span>
+            </span>
             <input
               v-model.number="config.modules.pivotxr.defaults.maxExtraYawDegrees"
               class="app-input w-full rounded-[0.75rem] px-4 py-2.5"
               min="0" max="180" step="0.5" type="number"
-              title="Maximum extra yaw Pivot can add."
             />
           </label>
         </div>
@@ -113,56 +123,64 @@ const profileWarnings = computed(() => {
 
       <div class="mt-3 rounded-[1rem] border p-4 surface-panel-soft">
         <p class="eyebrow text-xs uppercase tracking-[0.18em]">Pitch Assist</p>
-        <p class="mt-2 text-sm leading-6 text-muted">
-          Pitch has its own multiplier, deadzone, smoothing, and clamp so you can look higher over the nose without over-driving the yaw feel you already like.
+        <p class="mb-3 mt-2 text-sm leading-6 text-muted">
+          Independent pitch controls let you look over the nose without affecting yaw feel.
         </p>
-        <div class="mt-4 grid gap-3 lg:grid-cols-2">
+        <div class="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
           <label class="block">
-            <span class="mb-1.5 block text-sm font-medium">Pitch Multiplier</span>
+            <span class="mb-1.5 flex items-center gap-1.5 text-sm font-medium">
+              Multiplier
+              <span title="Amplifies head pitch (up/down) outside the deadzone. 1.0 = no change. Good range: 1.2–1.8." class="cursor-help select-none text-xs text-muted">ⓘ</span>
+            </span>
             <input
               v-model.number="config.modules.pivotxr.defaults.pitchRotationMultiplier"
               class="app-input w-full rounded-[0.75rem] px-4 py-2.5"
               min="1" max="3" step="0.05" type="number"
-              title="Scales pitch movement outside the deadzone."
             />
           </label>
           <label class="block">
-            <span class="mb-1.5 block text-sm font-medium">Pitch Smoothing</span>
+            <span class="mb-1.5 flex items-center gap-1.5 text-sm font-medium">
+              Smoothing
+              <span title="Low-pass filter on pitch output. 0 = instant response, higher values feel slower. Good range: 0.05–0.2." class="cursor-help select-none text-xs text-muted">ⓘ</span>
+            </span>
             <input
               v-model.number="config.modules.pivotxr.defaults.pitchSmoothing"
               class="app-input w-full rounded-[0.75rem] px-4 py-2.5"
               min="0" max="1" step="0.01" type="number"
-              title="Smooths pitch response over time. Higher values feel slower."
             />
           </label>
           <label class="block">
-            <span class="mb-1.5 block text-sm font-medium">Pitch Deadzone</span>
+            <span class="mb-1.5 flex items-center gap-1.5 text-sm font-medium">
+              Deadzone
+              <span title="Degrees of head pitch ignored before amplification activates. Good range: 2–8°." class="cursor-help select-none text-xs text-muted">ⓘ</span>
+            </span>
             <input
               v-model.number="config.modules.pivotxr.defaults.pitchDeadzoneDegrees"
               class="app-input w-full rounded-[0.75rem] px-4 py-2.5"
               min="0" max="45" step="0.5" type="number"
-              title="Pitch movement inside this angle remains unchanged."
             />
           </label>
           <label class="block">
-            <span class="mb-1.5 block text-sm font-medium">Pitch Max Extra</span>
+            <span class="mb-1.5 flex items-center gap-1.5 text-sm font-medium">
+              Max Extra
+              <span title="Maximum extra pitch degrees Pivot can add. Good range: 10–30°." class="cursor-help select-none text-xs text-muted">ⓘ</span>
+            </span>
             <input
               v-model.number="config.modules.pivotxr.defaults.maxExtraPitchDegrees"
               class="app-input w-full rounded-[0.75rem] px-4 py-2.5"
               min="0" max="180" step="0.5" type="number"
-              title="Maximum extra pitch Pivot can add."
             />
           </label>
         </div>
       </div>
     </article>
 
-    <!-- Profile list -->
+    <!-- Custom Profiles -->
     <section class="space-y-4">
       <div class="flex flex-wrap items-center justify-between gap-3">
         <div>
           <p class="eyebrow text-xs uppercase tracking-[0.24em]">Profiles</p>
-          <h2 class="text-2xl font-semibold tracking-tight">Pivot per-game overrides</h2>
+          <h2 class="text-2xl font-semibold tracking-tight">Custom Profiles</h2>
         </div>
         <button
           class="button-accent rounded-[0.75rem] px-5 py-2.5 text-sm font-medium"
@@ -201,7 +219,6 @@ const profileWarnings = computed(() => {
           </button>
         </div>
 
-        <!-- Conflict warning -->
         <div
           v-if="profileWarnings.get(index) && profileWarnings.get(index)!.length > 0"
           class="mb-4 rounded-[0.9rem] border px-4 py-3 text-sm leading-6 chip-warning"
@@ -220,7 +237,6 @@ const profileWarnings = computed(() => {
           This profile is disabled and will not activate at runtime.
         </div>
 
-        <!-- Name + applications -->
         <div class="grid gap-3 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
           <label class="block">
             <span class="mb-1.5 block text-sm font-medium">Profile Name</span>
@@ -264,16 +280,15 @@ const profileWarnings = computed(() => {
           Profile Enabled
         </label>
 
-        <!-- Activation -->
         <div class="mt-4 rounded-[1rem] border p-4 surface-panel-soft">
           <p class="eyebrow text-xs uppercase tracking-[0.18em]">Activation</p>
-          <div class="mt-4 grid gap-3 lg:grid-cols-2">
+          <div class="mt-3 grid gap-3 lg:grid-cols-2">
             <label class="block">
               <span class="mb-1.5 block text-sm font-medium">Activation Mode</span>
               <select
                 v-model="profile.activationMode"
                 class="app-input w-full rounded-[0.75rem] px-4 py-2.5"
-                title="Toggle flips Pivot on each binding press. Hold only applies Pivot while the binding is down."
+                title="Toggle flips Pivot on each binding press. Hold only applies Pivot while the binding is held down."
               >
                 <option value="toggle">toggle</option>
                 <option value="hold">hold</option>
@@ -288,90 +303,101 @@ const profileWarnings = computed(() => {
           </div>
         </div>
 
-        <!-- Yaw settings -->
         <div class="mt-3 rounded-[1rem] border p-4 surface-panel-soft">
           <p class="eyebrow text-xs uppercase tracking-[0.18em]">Yaw</p>
-          <div class="mt-4 grid gap-3 lg:grid-cols-2">
+          <div class="mt-3 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
             <label class="block">
-              <span class="mb-1.5 block text-sm font-medium">Yaw Multiplier</span>
+              <span class="mb-1.5 flex items-center gap-1.5 text-sm font-medium">
+                Multiplier
+                <span title="Amplifies head yaw (left/right) outside the deadzone. 1.0 = no change. Good range: 1.3–2.0." class="cursor-help select-none text-xs text-muted">ⓘ</span>
+              </span>
               <input
                 v-model.number="profile.settings.rotationMultiplier"
                 class="app-input w-full rounded-[0.75rem] px-4 py-2.5"
                 min="1" max="3" step="0.05" type="number"
-                title="Scales yaw movement outside the deadzone."
               />
             </label>
             <label class="block">
-              <span class="mb-1.5 block text-sm font-medium">Yaw Smoothing</span>
+              <span class="mb-1.5 flex items-center gap-1.5 text-sm font-medium">
+                Smoothing
+                <span title="Low-pass filter on yaw output. 0 = instant response, higher values feel slower. Good range: 0.05–0.2." class="cursor-help select-none text-xs text-muted">ⓘ</span>
+              </span>
               <input
                 v-model.number="profile.settings.smoothing"
                 class="app-input w-full rounded-[0.75rem] px-4 py-2.5"
                 min="0" max="1" step="0.01" type="number"
-                title="Smooths yaw response over time. Higher values feel slower."
               />
             </label>
             <label class="block">
-              <span class="mb-1.5 block text-sm font-medium">Yaw Deadzone</span>
+              <span class="mb-1.5 flex items-center gap-1.5 text-sm font-medium">
+                Deadzone
+                <span title="Degrees of head yaw ignored before amplification activates. Good range: 2–8°." class="cursor-help select-none text-xs text-muted">ⓘ</span>
+              </span>
               <input
                 v-model.number="profile.settings.deadzoneDegrees"
                 class="app-input w-full rounded-[0.75rem] px-4 py-2.5"
                 min="0" max="45" step="0.5" type="number"
-                title="Yaw movement inside this angle remains unchanged."
               />
             </label>
             <label class="block">
-              <span class="mb-1.5 block text-sm font-medium">Yaw Max Extra</span>
+              <span class="mb-1.5 flex items-center gap-1.5 text-sm font-medium">
+                Max Extra
+                <span title="Maximum extra yaw degrees Pivot can add. Good range: 20–60°." class="cursor-help select-none text-xs text-muted">ⓘ</span>
+              </span>
               <input
                 v-model.number="profile.settings.maxExtraYawDegrees"
                 class="app-input w-full rounded-[0.75rem] px-4 py-2.5"
                 min="0" max="180" step="0.5" type="number"
-                title="Maximum extra yaw Pivot can add."
               />
             </label>
           </div>
         </div>
 
-        <!-- Pitch settings -->
         <div class="mt-3 rounded-[1rem] border p-4 surface-panel-soft">
           <p class="eyebrow text-xs uppercase tracking-[0.18em]">Pitch Assist</p>
-          <p class="mt-2 text-sm leading-6 text-muted">
-            Pitch has its own multiplier, deadzone, smoothing, and clamp so you can look higher over the nose without over-driving the yaw feel.
-          </p>
-          <div class="mt-4 grid gap-3 lg:grid-cols-2">
+          <div class="mt-3 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
             <label class="block">
-              <span class="mb-1.5 block text-sm font-medium">Pitch Multiplier</span>
+              <span class="mb-1.5 flex items-center gap-1.5 text-sm font-medium">
+                Multiplier
+                <span title="Amplifies head pitch (up/down) outside the deadzone. 1.0 = no change. Good range: 1.2–1.8." class="cursor-help select-none text-xs text-muted">ⓘ</span>
+              </span>
               <input
                 v-model.number="profile.settings.pitchRotationMultiplier"
                 class="app-input w-full rounded-[0.75rem] px-4 py-2.5"
                 min="1" max="3" step="0.05" type="number"
-                title="Scales pitch movement outside the deadzone."
               />
             </label>
             <label class="block">
-              <span class="mb-1.5 block text-sm font-medium">Pitch Smoothing</span>
+              <span class="mb-1.5 flex items-center gap-1.5 text-sm font-medium">
+                Smoothing
+                <span title="Low-pass filter on pitch output. 0 = instant response, higher values feel slower. Good range: 0.05–0.2." class="cursor-help select-none text-xs text-muted">ⓘ</span>
+              </span>
               <input
                 v-model.number="profile.settings.pitchSmoothing"
                 class="app-input w-full rounded-[0.75rem] px-4 py-2.5"
                 min="0" max="1" step="0.01" type="number"
-                title="Smooths pitch response over time. Higher values feel slower."
               />
             </label>
             <label class="block">
-              <span class="mb-1.5 block text-sm font-medium">Pitch Deadzone</span>
+              <span class="mb-1.5 flex items-center gap-1.5 text-sm font-medium">
+                Deadzone
+                <span title="Degrees of head pitch ignored before amplification activates. Good range: 2–8°." class="cursor-help select-none text-xs text-muted">ⓘ</span>
+              </span>
               <input
                 v-model.number="profile.settings.pitchDeadzoneDegrees"
                 class="app-input w-full rounded-[0.75rem] px-4 py-2.5"
                 min="0" max="45" step="0.5" type="number"
-                title="Pitch movement inside this angle remains unchanged."
               />
             </label>
             <label class="block">
-              <span class="mb-1.5 block text-sm font-medium">Pitch Max Extra</span>
+              <span class="mb-1.5 flex items-center gap-1.5 text-sm font-medium">
+                Max Extra
+                <span title="Maximum extra pitch degrees Pivot can add. Good range: 10–30°." class="cursor-help select-none text-xs text-muted">ⓘ</span>
+              </span>
               <input
                 v-model.number="profile.settings.maxExtraPitchDegrees"
                 class="app-input w-full rounded-[0.75rem] px-4 py-2.5"
                 min="0" max="180" step="0.5" type="number"
-                title="Maximum extra pitch Pivot can add."
               />
             </label>
           </div>
@@ -382,7 +408,7 @@ const profileWarnings = computed(() => {
         v-if="config.modules.pivotxr.profiles.length === 0"
         class="rounded-[1rem] border border-dashed px-6 py-7 text-center text-sm surface-panel-soft"
       >
-        No per-game profiles yet. Add a profile to bind Pivot rotation to a specific application.
+        No custom profiles yet. Add a profile to bind Pivot rotation to a specific application.
       </div>
     </section>
   </div>

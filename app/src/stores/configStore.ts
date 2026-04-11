@@ -36,7 +36,7 @@ export function useConfigStore() {
       state.path = envelope.path
       state.config = cloneConfig(envelope.config)
       state.originalConfig = cloneConfig(envelope.config)
-      state.status = 'Config loaded'
+      state.status = ''
     } catch (error) {
       state.status = error instanceof Error ? error.message : 'Failed to load config'
     } finally {
