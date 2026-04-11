@@ -81,7 +81,7 @@ const moduleCards = computed(() => [
         </div>
 
         <div class="rounded-[0.9rem] border border-dashed px-4 py-3 text-sm leading-6 surface-panel-soft">
-          Shared suite settings stay here so logging, runtime intent, and module visibility remain consistent as the rest of the app grows.
+          Log level, retention, and theme apply across the whole suite. Adjust them here before tuning depth or rotation in the module tabs.
         </div>
       </div>
 
@@ -94,7 +94,7 @@ const moduleCards = computed(() => [
           View Logs
         </button>
         <div class="rounded-full border px-4 py-2 text-sm surface-panel-strong">
-          Latest Log: <span class="font-mono text-xs">{{ logPath || 'Resolve after first runtime attach' }}</span>
+          Latest Log: <span class="font-mono text-xs">{{ logPath || 'Available after first session' }}</span>
         </div>
       </div>
     </article>

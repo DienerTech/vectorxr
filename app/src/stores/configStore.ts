@@ -112,6 +112,11 @@ export function useConfigStore() {
     }
   }
 
+  function importConfig(config: VectorXRConfig) {
+    state.config = cloneConfig(config)
+    state.status = 'Config imported — save to write to disk'
+  }
+
   function addApplication() {
     state.config.applications.push(createApplication('Game.exe', state.config.applications))
   }
@@ -137,6 +142,7 @@ export function useConfigStore() {
     load,
     save,
     discardChanges,
+    importConfig,
     setActiveTab,
     addProfile,
     removeProfile,

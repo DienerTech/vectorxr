@@ -66,7 +66,7 @@ const profileWarnings = computed(() => {
       </div>
 
       <div class="mb-4 rounded-[0.9rem] border border-dashed px-4 py-3 text-sm leading-6 surface-panel-soft">
-        These defaults serve as the starting point when creating new profiles. Pivot only activates at runtime when a profile targets the current application.
+        These values are copied into new profiles as a starting point. Pivot activates at runtime only when an enabled profile targets the current application.
       </div>
 
       <div class="mt-4 rounded-[1rem] border p-4 surface-panel-soft">
@@ -190,7 +190,7 @@ const profileWarnings = computed(() => {
                 {{ profile.enabled ? 'Active' : 'Disabled' }}
               </span>
             </div>
-            <h3 class="mt-2 text-xl font-semibold tracking-tight">Per-game rotation profile</h3>
+            <h3 class="mt-2 text-xl font-semibold tracking-tight">{{ profile.name }}</h3>
           </div>
           <button
             class="button-secondary rounded-[0.75rem] px-4 py-2 text-sm font-medium"

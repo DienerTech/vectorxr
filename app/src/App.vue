@@ -2,6 +2,7 @@
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 
 import AppHeader from './components/AppHeader.vue'
+import ImportPreviewModal from './components/ImportPreviewModal.vue'
 import LogViewerModal from './components/LogViewerModal.vue'
 import PatchNotesModal from './components/PatchNotesModal.vue'
 import StickySaveBar from './components/StickySaveBar.vue'
@@ -10,6 +11,7 @@ import CoreTab from './components/tabs/CoreTab.vue'
 import DepthXrTab from './components/tabs/DepthXrTab.vue'
 import PivotXrTab from './components/tabs/PivotXrTab.vue'
 import { loadLogSnapshot, type LogSnapshot } from './lib/commands'
+import { normalizeConfig, type VectorXRConfig } from './lib/model'
 import { patchNotes } from './lib/patchNotes'
 import { applyThemePreference, loadThemePreference, observeSystemThemeChanges, type ThemePreference } from './lib/theme'
 import { validateConfig } from './lib/validation'
@@ -23,6 +25,10 @@ const patchNotesOpen = ref(false)
 const logViewerLoading = ref(false)
 const logSnapshot = ref<LogSnapshot | null>(null)
 const themePreference = ref<ThemePreference>(loadThemePreference())
+const importFileInput = ref<HTMLInputElement | null>(null)
+const importPreviewOpen = ref(false)
+const importedConfig = ref<VectorXRConfig | null>(null)
+const importErrors = ref<string[]>([])
 
 const latestPatch = patchNotes[0]
 
@@ -50,7 +56,7 @@ const activeSummary = computed(() => {
   return {
     eyebrow: 'Pivot',
     title: 'Rotation tuning stays separate, so yaw and pitch changes read clearly.',
-    body: 'Activation, smoothing, deadzones, and extra range now live in a cleaner workspace built for iteration instead of placeholders.',
+    body: 'Activation mode, smoothing, deadzones, and extra range each have their own field so changes stay easy to read and compare.',
     panelTitle: 'Pivot focus',
     panelBody: 'Activation behavior, rotation limits, and tuning controls stay grouped together here.',
   }
@@ -126,6 +132,56 @@ async function refreshLogs() {
 async function openLogs() {
   logViewerOpen.value = true
   await refreshLogs()
+}
+
+async function reloadFromDisk() {
+  if (dirty.value && !window.confirm('Reload config from disk? Unsaved changes will be lost.')) {
+    return
+  }
+  await store.load()
+}
+
+function triggerImport() {
+  importFileInput.value?.click()
+}
+
+function handleImportFile(event: Event) {
+  const input = event.target as HTMLInputElement
+  const file = input.files?.[0]
+  if (!file) {
+    return
+  }
+
+  const reader = new FileReader()
+  reader.onload = (e) => {
+    const content = e.target?.result as string
+    try {
+      const parsed: unknown = JSON.parse(content)
+      const config = normalizeConfig(parsed)
+      importedConfig.value = config
+      importErrors.value = validateConfig(config)
+      importPreviewOpen.value = true
+    } catch {
+      store.state.status = 'Import failed: file is not valid JSON'
+    }
+    input.value = ''
+  }
+  reader.readAsText(file)
+}
+
+function applyImport() {
+  if (importedConfig.value) {
+    store.importConfig(importedConfig.value)
+  }
+  importPreviewOpen.value = false
+  importedConfig.value = null
+  importErrors.value = []
+}
+
+function cancelImport() {
+  importPreviewOpen.value = false
+  importedConfig.value = null
+  importErrors.value = []
 }
 </script>
 
@@ -228,9 +284,12 @@ async function openLogs() {
         :disabled="store.state.loading || store.state.saving || errors.length > 0"
         @save="saveConfig"
         @discard="store.discardChanges"
-        @reload="store.load"
+        @reload="reloadFromDisk"
+        @import="triggerImport"
       />
 
+      <input ref="importFileInput" type="file" accept=".json" class="hidden" @change="handleImportFile" />
+      <ImportPreviewModal :open="importPreviewOpen" :config="importedConfig" :errors="importErrors" @apply="applyImport" @cancel="cancelImport" />
       <LogViewerModal :open="logViewerOpen" :loading="logViewerLoading" :snapshot="logSnapshot" @close="logViewerOpen = false" />
       <PatchNotesModal :open="patchNotesOpen" :entries="patchNotes" @close="patchNotesOpen = false" />
     </section>

@@ -60,8 +60,7 @@ const profileWarnings = computed(() => {
       </div>
 
       <div class="mb-4 rounded-[0.9rem] border border-dashed px-4 py-3 text-sm leading-6 surface-panel-soft">
-        Adjust the shared depth defaults here. Profiles below can still override the same values per title while the config keeps the canonical
-        runtime numbers.
+        Adjust the shared depth defaults here. Per-game profiles below can override these values for specific titles.
       </div>
 
       <BindingEditor
