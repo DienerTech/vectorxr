@@ -1,11 +1,12 @@
 <script setup lang="ts">
 import EffectField from './EffectField.vue'
 import { convergenceBadge, fromConvergenceDisplay, fromStereoBoostDisplay, stereoBoostBadge, toConvergenceDisplay, toStereoBoostDisplay } from '../lib/display'
-import type { DepthXRProfileConfig } from '../lib/model'
+import type { DepthXRProfileConfig, RegisteredApplication } from '../lib/model'
 
 defineProps<{
   index: number
   profile: DepthXRProfileConfig
+  applications: RegisteredApplication[]
 }>()
 
 defineEmits<{
@@ -60,14 +61,22 @@ defineEmits<{
       </label>
 
       <label class="block">
-        <span class="mb-1.5 block text-sm font-medium">Executable</span>
-        <input
-          v-model="profile.match.exe"
-          class="app-input w-full rounded-[0.75rem] px-4 py-2.5"
-          placeholder="Game.exe"
-          type="text"
-          @blur="$emit('syncName')"
-        />
+        <span class="mb-1.5 block text-sm font-medium">Applications</span>
+        <div class="rounded-[0.75rem] border p-3 surface-panel-strong">
+          <label
+            v-for="application in applications"
+            :key="application.id"
+            class="flex items-start gap-3 rounded-[0.65rem] px-2 py-2 text-sm"
+          >
+            <input v-model="profile.applicationIds" class="mt-0.5 h-4 w-4 accent-depthxr-copper" type="checkbox" :value="application.id" @change="$emit('syncName')" />
+            <span>
+              <span class="block font-medium">{{ application.name }}</span>
+              <span class="block font-mono text-xs text-muted">{{ application.match.exe }}</span>
+            </span>
+          </label>
+
+          <p v-if="applications.length === 0" class="text-sm text-muted">Add an application on the Home tab before assigning this profile.</p>
+        </div>
       </label>
     </div>
 

@@ -23,12 +23,20 @@ void Expect(bool condition, const std::string& message) {
 void TestParseConfig() {
     const std::string json = R"json(
 {
-  "version": 2,
+  "version": 3,
   "core": {
     "enabled": true,
     "logLevel": "debug",
     "logRetentionFiles": 9
   },
+  "applications": [
+    {
+      "id": "game",
+      "name": "Game",
+      "enabled": true,
+      "match": { "exe": "Game.exe" }
+    }
+  ],
   "modules": {
     "depthxr": {
       "enabled": true,
@@ -41,7 +49,7 @@ void TestParseConfig() {
       "profiles": [
         {
           "name": "Game",
-          "match": { "exe": "Game.exe" },
+          "applicationIds": ["game"],
           "enabled": true,
           "settings": {
             "stereoBoost": 1.2
@@ -69,14 +77,16 @@ void TestParseConfig() {
 )json";
 
     const depthxr::ParseResult result = depthxr::ParseConfig(json);
-    Expect(result.ok, "Config parser rejected valid v2 config: " + result.error);
-    Expect(result.document.version == 2, "Version was not normalized to 2");
+    Expect(result.ok, "Config parser rejected valid v3 config: " + result.error);
+    Expect(result.document.version == 3, "Version was not normalized to 3");
     Expect(result.document.core.log_level == depthxr::LogLevel::Debug, "Core log level mismatch");
     Expect(result.document.core.log_retention_files == 9, "Core log retention mismatch");
+    Expect(result.document.applications.size() == 1, "Application registry count mismatch");
+    Expect(result.document.applications[0].id == "game", "Application registry id mismatch");
     Expect(std::abs(result.document.depthxr.defaults.stereo_boost - 1.1) < 0.0001, "DepthXR stereoBoost mismatch");
     Expect(std::abs(result.document.depthxr.defaults.convergence - 0.08) < 0.0001, "DepthXR convergence mismatch");
     Expect(result.document.depthxr.profiles.size() == 1, "DepthXR profile count mismatch");
-    Expect(result.document.depthxr.profiles[0].match.exe_name == "Game.exe", "DepthXR profile exe mismatch");
+    Expect(result.document.depthxr.profiles[0].application_ids[0] == "game", "DepthXR profile application id mismatch");
     Expect(result.document.pivotxr.defaults.activation_key == "F8", "PivotXR activation key mismatch");
     Expect(std::abs(result.document.pivotxr.defaults.yaw_max_extra_degrees - 25.0) < 0.0001,
            "PivotXR yaw clamp mismatch");
@@ -87,12 +97,20 @@ void TestParseConfig() {
 void TestResolveRuntimeConfig() {
     const std::string json = R"json(
 {
-  "version": 2,
+  "version": 3,
   "core": {
     "enabled": true,
     "logLevel": "info",
     "logRetentionFiles": 7
   },
+  "applications": [
+    {
+      "id": "dcs",
+      "name": "DCS",
+      "enabled": true,
+      "match": { "exe": "DCS.exe" }
+    }
+  ],
   "modules": {
     "depthxr": {
       "enabled": true,
@@ -105,7 +123,7 @@ void TestResolveRuntimeConfig() {
       "profiles": [
         {
           "name": "DCS",
-          "match": { "exe": "DCS.exe" },
+          "applicationIds": ["dcs"],
           "enabled": true,
           "settings": {
             "stereoBoost": 1.15,
@@ -151,12 +169,20 @@ void TestResolveRuntimeConfig() {
 void TestDisabledProfileFallsBackToDefaults() {
     const std::string json = R"json(
 {
-  "version": 2,
+  "version": 3,
   "core": {
     "enabled": true,
     "logLevel": "info",
     "logRetentionFiles": 7
   },
+  "applications": [
+    {
+      "id": "dcs",
+      "name": "DCS",
+      "enabled": true,
+      "match": { "exe": "DCS.exe" }
+    }
+  ],
   "modules": {
     "depthxr": {
       "enabled": true,
@@ -169,7 +195,7 @@ void TestDisabledProfileFallsBackToDefaults() {
       "profiles": [
         {
           "name": "DCS",
-          "match": { "exe": "DCS.exe" },
+          "applicationIds": ["dcs"],
           "enabled": false,
           "settings": {
             "stereoBoost": 1.2,
@@ -208,12 +234,13 @@ void TestDisabledProfileFallsBackToDefaults() {
 void TestInvalidPivotActivationKeyRejected() {
     const std::string json = R"json(
 {
-  "version": 2,
+  "version": 3,
   "core": {
     "enabled": true,
     "logLevel": "info",
     "logRetentionFiles": 7
   },
+  "applications": [],
   "modules": {
     "depthxr": {
       "enabled": true,

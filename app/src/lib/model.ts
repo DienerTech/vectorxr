@@ -26,6 +26,15 @@ export interface CoreConfig {
   logRetentionFiles: number
 }
 
+export interface RegisteredApplication {
+  id: string
+  name: string
+  enabled: boolean
+  match: {
+    exe: string
+  }
+}
+
 export interface DepthXRSettings {
   stereoBoostEnabled: boolean
   convergenceEnabled: boolean
@@ -36,9 +45,7 @@ export interface DepthXRSettings {
 export interface DepthXRProfileConfig {
   name: string
   enabled: boolean
-  match: {
-    exe: string
-  }
+  applicationIds: string[]
   settings: DepthXRSettings
 }
 
@@ -67,8 +74,9 @@ export interface PivotXRModuleConfig {
 }
 
 export interface VectorXRConfig {
-  version: 2
+  version: 3
   core: CoreConfig
+  applications: RegisteredApplication[]
   modules: {
     depthxr: DepthXRModuleConfig
     pivotxr: PivotXRModuleConfig
@@ -123,6 +131,46 @@ export function defaultDepthXRSettings(): DepthXRSettings {
   }
 }
 
+export function sanitizeApplicationId(value: string): string {
+  const normalized = value
+    .trim()
+    .toLowerCase()
+    .replace(/\.[^.]+$/, '')
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+
+  return normalized || 'application'
+}
+
+export function uniqueApplicationId(base: string, applications: RegisteredApplication[]): string {
+  const stem = sanitizeApplicationId(base)
+  const existing = new Set(applications.map((application) => application.id.toLowerCase()))
+
+  if (!existing.has(stem)) {
+    return stem
+  }
+
+  let index = 2
+  while (existing.has(`${stem}-${index}`)) {
+    index += 1
+  }
+
+  return `${stem}-${index}`
+}
+
+export function createApplication(exe = 'Game.exe', applications: RegisteredApplication[] = []): RegisteredApplication {
+  const name = sanitizeProfileName(exe)
+
+  return {
+    id: uniqueApplicationId(name, applications),
+    name,
+    enabled: true,
+    match: {
+      exe,
+    },
+  }
+}
+
 export function defaultPivotXRDefaults(): PivotXRDefaults {
   return {
     activationMode: 'toggle',
@@ -140,8 +188,9 @@ export function defaultPivotXRDefaults(): PivotXRDefaults {
 
 export function defaultConfig(): VectorXRConfig {
   return {
-    version: 2,
+    version: 3,
     core: defaultCoreConfig(),
+    applications: [],
     modules: {
       depthxr: {
         enabled: true,
@@ -171,19 +220,17 @@ export function sanitizeProfileName(exe: string): string {
   return basename
 }
 
-export function createProfile(defaultSettings: DepthXRSettings): DepthXRProfileConfig {
+export function createProfile(defaultSettings: DepthXRSettings, applicationIds: string[] = []): DepthXRProfileConfig {
   return {
-    name: sanitizeProfileName('Game.exe'),
+    name: 'New Profile',
     enabled: true,
-    match: {
-      exe: 'Game.exe',
-    },
+    applicationIds,
     settings: { ...defaultSettings },
   }
 }
 
 function isVectorXRConfig(value: unknown): value is VectorXRConfig {
-  return isRecord(value) && value.version === 2 && 'core' in value && 'modules' in value
+  return isRecord(value) && value.version === 3 && 'core' in value && 'modules' in value
 }
 
 function normalizeDepthXRSettings(value: unknown, fallback: DepthXRSettings): DepthXRSettings {
@@ -240,6 +287,23 @@ function normalizePivotActivationKey(value: unknown, fallback: string): string {
   return fallback
 }
 
+function normalizeApplication(value: unknown, fallbackId: string, existing: RegisteredApplication[]): RegisteredApplication {
+  const source = isRecord(value) ? value : {}
+  const match = isRecord(source.match) ? source.match : {}
+  const exe = normalizeString(match.exe, 'Game.exe')
+  const name = normalizeString(source.name, sanitizeProfileName(exe))
+  const id = normalizeString(source.id, fallbackId).trim() || fallbackId
+
+  return {
+    id: uniqueApplicationId(id, existing),
+    name,
+    enabled: normalizeBoolean(source.enabled, true),
+    match: {
+      exe,
+    },
+  }
+}
+
 function normalizeVectorXRConfig(value: unknown): VectorXRConfig {
   const fallback = defaultConfig()
   const source = isRecord(value) ? value : {}
@@ -248,29 +312,36 @@ function normalizeVectorXRConfig(value: unknown): VectorXRConfig {
   const depthxr = isRecord(modules.depthxr) ? modules.depthxr : {}
   const pivotxr = isRecord(modules.pivotxr) ? modules.pivotxr : {}
   const profileValues = Array.isArray(depthxr.profiles) ? depthxr.profiles : []
+  const applicationValues = Array.isArray(source.applications) ? source.applications : []
+  const applications: RegisteredApplication[] = []
+
+  applicationValues.forEach((applicationValue, index) => {
+    applications.push(normalizeApplication(applicationValue, `application-${index + 1}`, applications))
+  })
 
   return {
-    version: 2,
+    version: 3,
     core: {
       enabled: normalizeBoolean(core.enabled, fallback.core.enabled),
       logLevel: normalizeLogLevel(core.logLevel),
       logRetentionFiles: normalizeNumber(core.logRetentionFiles, fallback.core.logRetentionFiles),
     },
+    applications,
     modules: {
       depthxr: {
         enabled: normalizeBoolean(depthxr.enabled, fallback.modules.depthxr.enabled),
         defaults: normalizeDepthXRSettings(depthxr.defaults, fallback.modules.depthxr.defaults),
         profiles: profileValues.map((profileValue) => {
           const profile = isRecord(profileValue) ? profileValue : {}
-          const match = isRecord(profile.match) ? profile.match : {}
           const settings = normalizeDepthXRSettings(profile.settings, fallback.modules.depthxr.defaults)
+          const applicationIds = Array.isArray(profile.applicationIds)
+            ? profile.applicationIds.filter((id): id is string => typeof id === 'string' && id.trim().length > 0)
+            : []
 
           return {
-            name: normalizeString(profile.name, sanitizeProfileName(normalizeString(match.exe, 'Game.exe'))),
+            name: normalizeString(profile.name, 'New Profile'),
             enabled: normalizeBoolean(profile.enabled, true),
-            match: {
-              exe: normalizeString(match.exe, 'Game.exe'),
-            },
+            applicationIds,
             settings,
           }
         }),

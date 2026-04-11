@@ -1,4 +1,4 @@
-import type { CoreConfig, DepthXRProfileConfig, DepthXRSettings, PivotXRDefaults, VectorXRConfig } from './model'
+import type { CoreConfig, DepthXRProfileConfig, DepthXRSettings, PivotXRDefaults, RegisteredApplication, VectorXRConfig } from './model'
 
 function validateCoreConfig(core: CoreConfig): string[] {
   const errors: string[] = []
@@ -65,7 +65,49 @@ function validatePivotXRDefaults(defaults: PivotXRDefaults): string[] {
   return errors
 }
 
-function validateDepthXRProfile(profile: DepthXRProfileConfig, index: number, seen: Set<string>): string[] {
+function validateApplications(applications: RegisteredApplication[]): string[] {
+  const errors: string[] = []
+  const seenIds = new Set<string>()
+  const seenExes = new Set<string>()
+
+  applications.forEach((application, index) => {
+    const prefix = `applications[${index}].`
+
+    if (!application.id.trim()) {
+      errors.push(`${prefix}id is required`)
+    }
+
+    if (!/^[a-z0-9][a-z0-9-]*$/.test(application.id)) {
+      errors.push(`${prefix}id must use lowercase letters, numbers, and hyphens`)
+    }
+
+    const normalizedId = application.id.trim().toLowerCase()
+    if (seenIds.has(normalizedId)) {
+      errors.push(`${prefix}id duplicates another application`)
+    }
+    seenIds.add(normalizedId)
+
+    if (!application.name.trim()) {
+      errors.push(`${prefix}name is required`)
+    }
+
+    if (!application.match.exe.trim()) {
+      errors.push(`${prefix}match.exe is required`)
+    }
+
+    const normalizedExe = application.match.exe.trim().toLowerCase()
+    if (normalizedExe) {
+      if (seenExes.has(normalizedExe)) {
+        errors.push(`${prefix}match.exe duplicates another application`)
+      }
+      seenExes.add(normalizedExe)
+    }
+  })
+
+  return errors
+}
+
+function validateDepthXRProfile(profile: DepthXRProfileConfig, index: number, applicationIds: Set<string>): string[] {
   const errors: string[] = []
   const prefix = `modules.depthxr.profiles[${index}].`
 
@@ -73,37 +115,64 @@ function validateDepthXRProfile(profile: DepthXRProfileConfig, index: number, se
     errors.push(`${prefix}name is required`)
   }
 
-  if (!profile.match.exe.trim()) {
-    errors.push(`${prefix}match.exe is required`)
+  if (profile.applicationIds.length === 0) {
+    errors.push(`${prefix}applicationIds must include at least one application`)
   }
 
-  const normalizedExe = profile.match.exe.trim().toLowerCase()
-  if (normalizedExe) {
-    if (seen.has(normalizedExe)) {
-      errors.push(`${prefix}match.exe duplicates another profile`)
+  const seenProfileApplicationIds = new Set<string>()
+  for (const applicationId of profile.applicationIds) {
+    if (!applicationIds.has(applicationId)) {
+      errors.push(`${prefix}applicationIds references unknown application: ${applicationId}`)
     }
-    seen.add(normalizedExe)
+    if (seenProfileApplicationIds.has(applicationId)) {
+      errors.push(`${prefix}applicationIds duplicates ${applicationId}`)
+    }
+    seenProfileApplicationIds.add(applicationId)
   }
 
   errors.push(...validateDepthXRSettings(`${prefix}settings.`, profile.settings))
   return errors
 }
 
+function validateDepthProfileConflicts(profiles: DepthXRProfileConfig[]): string[] {
+  const errors: string[] = []
+  const firstProfileByApplication = new Map<string, number>()
+
+  profiles.forEach((profile, index) => {
+    if (!profile.enabled) {
+      return
+    }
+
+    for (const applicationId of profile.applicationIds) {
+      const firstIndex = firstProfileByApplication.get(applicationId)
+      if (firstIndex !== undefined) {
+        errors.push(`modules.depthxr.profiles[${index}] conflicts with profiles[${firstIndex}] for application ${applicationId}; first enabled profile wins`)
+      } else {
+        firstProfileByApplication.set(applicationId, index)
+      }
+    }
+  })
+
+  return errors
+}
+
 export function validateConfig(config: VectorXRConfig): string[] {
   const errors: string[] = []
 
-  if (config.version !== 2) {
-    errors.push('version must equal 2')
+  if (config.version !== 3) {
+    errors.push('version must equal 3')
   }
 
   errors.push(...validateCoreConfig(config.core))
+  errors.push(...validateApplications(config.applications))
   errors.push(...validateDepthXRSettings('modules.depthxr.defaults.', config.modules.depthxr.defaults))
   errors.push(...validatePivotXRDefaults(config.modules.pivotxr.defaults))
 
-  const seen = new Set<string>()
+  const applicationIds = new Set(config.applications.map((application) => application.id))
   config.modules.depthxr.profiles.forEach((profile, index) => {
-    errors.push(...validateDepthXRProfile(profile, index, seen))
+    errors.push(...validateDepthXRProfile(profile, index, applicationIds))
   })
+  errors.push(...validateDepthProfileConflicts(config.modules.depthxr.profiles))
 
   return errors
 }

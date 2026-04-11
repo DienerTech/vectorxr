@@ -15,7 +15,7 @@ fn default_false() -> bool {
 }
 
 fn default_version() -> u32 {
-    2
+    3
 }
 
 fn default_stereo_boost() -> f64 {
@@ -79,6 +79,25 @@ struct ProfileMatch {
     exe: String,
 }
 
+impl Default for ProfileMatch {
+    fn default() -> Self {
+        Self {
+            exe: "Game.exe".into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RegisteredApplication {
+    id: String,
+    name: String,
+    #[serde(default = "default_true")]
+    enabled: bool,
+    #[serde(default)]
+    r#match: ProfileMatch,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CoreConfig {
@@ -131,7 +150,10 @@ struct DepthXRProfileConfig {
     name: String,
     #[serde(default = "default_true")]
     enabled: bool,
-    r#match: ProfileMatch,
+    #[serde(default)]
+    application_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    r#match: Option<ProfileMatch>,
     #[serde(default)]
     settings: DepthXRSettings,
 }
@@ -233,6 +255,8 @@ struct VectorXRConfig {
     #[serde(default)]
     core: CoreConfig,
     #[serde(default)]
+    applications: Vec<RegisteredApplication>,
+    #[serde(default)]
     modules: VectorXRModules,
 }
 
@@ -261,10 +285,93 @@ struct LogSnapshot {
 
 fn default_config() -> VectorXRConfig {
     VectorXRConfig {
-        version: 2,
+        version: 3,
         core: CoreConfig::default(),
+        applications: Vec::new(),
         modules: VectorXRModules::default(),
     }
+}
+
+fn sanitize_profile_name(exe: &str) -> String {
+    let basename = exe
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(exe)
+        .trim();
+
+    let without_extension = basename
+        .rsplit_once('.')
+        .map(|(stem, _)| stem)
+        .unwrap_or(basename)
+        .trim();
+
+    if without_extension.is_empty() {
+        "New Profile".into()
+    } else {
+        without_extension.into()
+    }
+}
+
+fn sanitize_application_id(value: &str) -> String {
+    let mut id = String::new();
+    let mut last_was_dash = false;
+
+    for character in value.trim().to_lowercase().chars() {
+        if character.is_ascii_alphanumeric() {
+            id.push(character);
+            last_was_dash = false;
+        } else if !last_was_dash && !id.is_empty() {
+            id.push('-');
+            last_was_dash = true;
+        }
+    }
+
+    while id.ends_with('-') {
+        id.pop();
+    }
+
+    if id.is_empty() {
+        "application".into()
+    } else {
+        id
+    }
+}
+
+fn normalize_config(mut config: VectorXRConfig) -> VectorXRConfig {
+    if config.version != 3 {
+        return default_config();
+    }
+
+    config.version = 3;
+
+    for application in &mut config.applications {
+        if application.id.trim().is_empty() {
+            application.id = sanitize_application_id(&application.name);
+        }
+        if application.name.trim().is_empty() {
+            application.name = sanitize_profile_name(&application.r#match.exe);
+        }
+        if application.r#match.exe.trim().is_empty() {
+            application.r#match.exe = "Game.exe".into();
+        }
+    }
+
+    for profile in &mut config.modules.depthxr.profiles {
+        if profile.name.trim().is_empty() {
+            let first_application = profile
+                .application_ids
+                .first()
+                .and_then(|application_id| config.applications.iter().find(|application| &application.id == application_id));
+
+            profile.name = first_application
+                .map(|application| application.name.clone())
+                .unwrap_or_else(|| "New Profile".into());
+        }
+
+        profile.r#match = None;
+    }
+
+    config
 }
 
 fn resolve_config_path() -> PathBuf {
@@ -407,7 +514,7 @@ fn load_config() -> Result<ConfigEnvelope, String> {
     ensure_default_file(&path)?;
 
     let content = fs::read_to_string(&path).map_err(|error| error.to_string())?;
-    let config = serde_json::from_str::<VectorXRConfig>(&content).map_err(|error| error.to_string())?;
+    let config = normalize_config(serde_json::from_str::<VectorXRConfig>(&content).map_err(|error| error.to_string())?);
 
     Ok(ConfigEnvelope {
         path: path.to_string_lossy().into_owned(),
@@ -420,7 +527,7 @@ fn save_config(config: VectorXRConfig) -> Result<String, String> {
     let path = resolve_config_path();
     ensure_parent(&path)?;
 
-    let content = serde_json::to_string_pretty(&config).map_err(|error| error.to_string())?;
+    let content = serde_json::to_string_pretty(&normalize_config(config)).map_err(|error| error.to_string())?;
     fs::write(&path, content).map_err(|error| error.to_string())?;
     Ok(path.to_string_lossy().into_owned())
 }

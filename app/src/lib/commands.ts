@@ -40,7 +40,11 @@ export async function loadConfigEnvelope(): Promise<ConfigEnvelope> {
     return localEnvelope()
   }
 
-  return invoke<ConfigEnvelope>('load_config')
+  const envelope = await invoke<ConfigEnvelope>('load_config')
+  return {
+    ...envelope,
+    config: normalizeConfig(envelope.config),
+  }
 }
 
 export async function saveConfigEnvelope(config: VectorXRConfig): Promise<string> {

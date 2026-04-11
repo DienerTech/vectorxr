@@ -39,9 +39,27 @@ bool ExeNameMatches(std::string_view lhs, std::string_view rhs) {
     return NormalizeExe(lhs) == NormalizeExe(rhs);
 }
 
+const RegisteredApplication* FindMatchingApplication(const ConfigDocument& config, std::string_view exe_name) {
+    for (const RegisteredApplication& application : config.applications) {
+        if (application.enabled && ExeNameMatches(application.match.exe_name, exe_name)) {
+            return &application;
+        }
+    }
+    return nullptr;
+}
+
 const DepthXrProfile* FindMatchingDepthXrProfile(const ConfigDocument& config, std::string_view exe_name) {
+    const RegisteredApplication* application = FindMatchingApplication(config, exe_name);
+    if (!application) {
+        return nullptr;
+    }
+
     for (const DepthXrProfile& profile : config.depthxr.profiles) {
-        if (ExeNameMatches(profile.match.exe_name, exe_name)) {
+        if (!profile.enabled) {
+            continue;
+        }
+
+        if (std::find(profile.application_ids.begin(), profile.application_ids.end(), application->id) != profile.application_ids.end()) {
             return &profile;
         }
     }

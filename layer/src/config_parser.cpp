@@ -314,25 +314,6 @@ class JsonParser {
     std::string error_;
 };
 
-std::string SanitizeProfileName(std::string_view exe_name) {
-    std::string value(exe_name);
-    const size_t slash = value.find_last_of("/\\");
-    if (slash != std::string::npos) {
-        value = value.substr(slash + 1);
-    }
-
-    const size_t dot = value.find_last_of('.');
-    if (dot != std::string::npos && dot > 0) {
-        value = value.substr(0, dot);
-    }
-
-    if (value.empty()) {
-        return "New Profile";
-    }
-
-    return value;
-}
-
 const JsonValue::Object* RequireObject(const JsonValue& value, const std::string& field, std::string& error) {
     if (!value.IsObject()) {
         error = field + " must be an object";
@@ -426,6 +407,23 @@ bool ReadRequiredString(const JsonValue::Object& object, const std::string& key,
         return false;
     }
     out = it->second.AsString();
+    return true;
+}
+
+bool ParseStringArray(const JsonValue& value, const std::string& field, std::vector<std::string>& out, std::string& error) {
+    const JsonValue::Array* array = RequireArray(value, field, error);
+    if (!array) {
+        return false;
+    }
+
+    for (const JsonValue& item : *array) {
+        if (!item.IsString()) {
+            error = field + " items must be strings";
+            return false;
+        }
+        out.push_back(item.AsString());
+    }
+
     return true;
 }
 
@@ -551,6 +549,48 @@ bool ParseCoreSettings(const JsonValue::Object& object, CoreSettings& out, std::
     return true;
 }
 
+bool ParseApplication(const JsonValue& value, RegisteredApplication& out, std::string& error) {
+    const JsonValue::Object* object = RequireObject(value, "application", error);
+    if (!object) {
+        return false;
+    }
+
+    static const std::unordered_set<std::string> allowed = {
+        "id",
+        "name",
+        "enabled",
+        "match",
+    };
+
+    if (!CheckAllowedKeys(*object, allowed, error)) {
+        return false;
+    }
+
+    if (!ReadRequiredString(*object, "id", out.id, error) ||
+        !ReadRequiredString(*object, "name", out.name, error) ||
+        !ReadRequiredBool(*object, "enabled", out.enabled, error)) {
+        return false;
+    }
+
+    const auto match_it = object->find("match");
+    if (match_it == object->end()) {
+        error = "Missing required field: match";
+        return false;
+    }
+
+    const JsonValue::Object* match_object = RequireObject(match_it->second, "match", error);
+    if (!match_object) {
+        return false;
+    }
+
+    static const std::unordered_set<std::string> allowed_match = {"exe"};
+    if (!CheckAllowedKeys(*match_object, allowed_match, error)) {
+        return false;
+    }
+
+    return ReadRequiredString(*match_object, "exe", out.match.exe_name, error);
+}
+
 bool ParseDepthDefaults(const JsonValue::Object& object, DepthXrResolvedSettings& out, std::string& error) {
     static const std::unordered_set<std::string> allowed = {
         "stereoBoostEnabled",
@@ -618,7 +658,7 @@ bool ParseDepthProfile(const JsonValue& value, DepthXrProfile& out, std::string&
     static const std::unordered_set<std::string> allowed = {
         "name",
         "enabled",
-        "match",
+        "applicationIds",
         "settings",
     };
 
@@ -626,23 +666,12 @@ bool ParseDepthProfile(const JsonValue& value, DepthXrProfile& out, std::string&
         return false;
     }
 
-    const auto match_it = object->find("match");
-    if (match_it == object->end()) {
-        error = "Missing required field: match";
+    const auto application_ids_it = object->find("applicationIds");
+    if (application_ids_it == object->end()) {
+        error = "Missing required field: applicationIds";
         return false;
     }
-
-    const JsonValue::Object* match_object = RequireObject(match_it->second, "match", error);
-    if (!match_object) {
-        return false;
-    }
-
-    static const std::unordered_set<std::string> allowed_match = {"exe"};
-    if (!CheckAllowedKeys(*match_object, allowed_match, error)) {
-        return false;
-    }
-
-    if (!ReadRequiredString(*match_object, "exe", out.match.exe_name, error)) {
+    if (!ParseStringArray(application_ids_it->second, "applicationIds", out.application_ids, error)) {
         return false;
     }
 
@@ -653,7 +682,7 @@ bool ParseDepthProfile(const JsonValue& value, DepthXrProfile& out, std::string&
         return false;
     }
 
-    out.name = name.value_or(SanitizeProfileName(out.match.exe_name));
+    out.name = name.value_or("New Profile");
     out.enabled = enabled.value_or(true);
 
     const auto settings_it = object->find("settings");
@@ -667,7 +696,9 @@ bool ParseDepthProfile(const JsonValue& value, DepthXrProfile& out, std::string&
     return true;
 }
 
-bool ParseDepthModule(const JsonValue::Object& object, DepthXrModuleConfig& out, std::string& error) {
+bool ParseDepthModule(const JsonValue::Object& object,
+                      DepthXrModuleConfig& out,
+                      std::string& error) {
     static const std::unordered_set<std::string> allowed = {
         "enabled",
         "defaults",
@@ -821,7 +852,7 @@ bool ParsePivotModule(const JsonValue::Object& object, PivotXrModuleConfig& out,
 }
 
 bool ParseVectorDocument(const JsonValue::Object& root_object, ConfigDocument& out, std::string& error) {
-    static const std::unordered_set<std::string> allowed_root = {"version", "core", "modules"};
+    static const std::unordered_set<std::string> allowed_root = {"version", "core", "applications", "modules"};
     if (!CheckAllowedKeys(root_object, allowed_root, error)) {
         return false;
     }
@@ -834,6 +865,25 @@ bool ParseVectorDocument(const JsonValue::Object& root_object, ConfigDocument& o
     const JsonValue::Object* core_object = RequireObject(core_it->second, "core", error);
     if (!core_object || !ParseCoreSettings(*core_object, out.core, error)) {
         return false;
+    }
+
+    const auto applications_it = root_object.find("applications");
+    if (applications_it == root_object.end()) {
+        error = "Missing required field: applications";
+        return false;
+    }
+
+    const JsonValue::Array* applications = RequireArray(applications_it->second, "applications", error);
+    if (!applications) {
+        return false;
+    }
+
+    for (const JsonValue& value : *applications) {
+        RegisteredApplication application;
+        if (!ParseApplication(value, application, error)) {
+            return false;
+        }
+        out.applications.push_back(std::move(application));
     }
 
     const auto modules_it = root_object.find("modules");
@@ -901,12 +951,12 @@ ParseResult ParseConfig(std::string_view json_text) {
     }
 
     const int version = static_cast<int>(version_it->second.AsNumber());
-    if (version != 2) {
-        result.error = "Unsupported config version. Expected version 2.";
+    if (version != 3) {
+        result.error = "Unsupported config version. Expected version 3.";
         return result;
     }
 
-    result.document.version = 2;
+    result.document.version = 3;
     if (!ParseVectorDocument(*root_object, result.document, error)) {
         result.error = error;
         return result;

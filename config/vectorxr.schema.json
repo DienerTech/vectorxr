@@ -7,15 +7,22 @@
   "required": [
     "version",
     "core",
+    "applications",
     "modules"
   ],
   "properties": {
     "version": {
       "type": "integer",
-      "const": 2
+      "const": 3
     },
     "core": {
       "$ref": "#/$defs/core"
+    },
+    "applications": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/application"
+      }
     },
     "modules": {
       "$ref": "#/$defs/modules"
@@ -41,6 +48,45 @@
     "activationKey": {
       "type": "string",
       "pattern": "^(F([1-9]|1[0-2])|[A-Z]|[0-9]|Space)$"
+    },
+    "profileMatch": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "exe"
+      ],
+      "properties": {
+        "exe": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "application": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "name",
+        "enabled",
+        "match"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9-]*$"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "match": {
+          "$ref": "#/$defs/profileMatch"
+        }
+      }
     },
     "core": {
       "type": "object",
@@ -92,26 +138,13 @@
         }
       }
     },
-    "profileMatch": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "exe"
-      ],
-      "properties": {
-        "exe": {
-          "type": "string",
-          "minLength": 1
-        }
-      }
-    },
     "depthxrProfile": {
       "type": "object",
       "additionalProperties": false,
       "required": [
         "name",
         "enabled",
-        "match",
+        "applicationIds",
         "settings"
       ],
       "properties": {
@@ -122,8 +155,14 @@
         "enabled": {
           "type": "boolean"
         },
-        "match": {
-          "$ref": "#/$defs/profileMatch"
+        "applicationIds": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9-]*$"
+          },
+          "uniqueItems": true
         },
         "settings": {
           "$ref": "#/$defs/depthxrSettings"

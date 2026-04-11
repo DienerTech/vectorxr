@@ -155,17 +155,20 @@ async function openLogs() {
               v-if="store.state.activeTab === 'core'"
               :config="store.state.config"
               :path="store.state.path"
-              :log-path="logSnapshot?.activePath"
-              :theme-preference="themePreference"
-              @view-logs="openLogs"
-              @update:theme-preference="themePreference = $event"
-            />
+            :log-path="logSnapshot?.activePath"
+            :theme-preference="themePreference"
+            @view-logs="openLogs"
+            @add-application="store.addApplication"
+            @remove-application="store.removeApplication"
+            @update:theme-preference="themePreference = $event"
+          />
             <DepthXrTab
-              v-else-if="store.state.activeTab === 'depthxr'"
-              :config="store.state.config"
-              @add-profile="store.addProfile"
-              @remove-profile="store.removeProfile"
-              @sync-profile-name="store.syncProfileName"
+            v-else-if="store.state.activeTab === 'depthxr'"
+            :config="store.state.config"
+            :applications="store.state.config.applications"
+            @add-profile="store.addProfile"
+            @remove-profile="store.removeProfile"
+            @sync-profile-name="store.syncProfileName"
             />
             <PivotXrTab v-else :config="store.state.config" />
           </div>

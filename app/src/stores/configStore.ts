@@ -1,7 +1,7 @@
 import { computed, reactive } from 'vue'
 
 import { loadConfigEnvelope, saveConfigEnvelope } from '../lib/commands'
-import { cloneConfig, createProfile, defaultConfig, sanitizeProfileName } from '../lib/model'
+import { cloneConfig, createApplication, createProfile, defaultConfig } from '../lib/model'
 import type { AppTab, VectorXRConfig } from '../lib/model'
 
 interface StoreState {
@@ -69,7 +69,8 @@ export function useConfigStore() {
   }
 
   function addProfile() {
-    state.config.modules.depthxr.profiles.push(createProfile(state.config.modules.depthxr.defaults))
+    const defaultApplicationId = state.config.applications[0]?.id
+    state.config.modules.depthxr.profiles.push(createProfile(state.config.modules.depthxr.defaults, defaultApplicationId ? [defaultApplicationId] : []))
   }
 
   function removeProfile(index: number) {
@@ -83,7 +84,24 @@ export function useConfigStore() {
     }
 
     if (!profile.name.trim() || profile.name === 'New Profile') {
-      profile.name = sanitizeProfileName(profile.match.exe)
+      const firstApplication = state.config.applications.find((application) => application.id === profile.applicationIds[0])
+      profile.name = firstApplication?.name || 'New Profile'
+    }
+  }
+
+  function addApplication() {
+    state.config.applications.push(createApplication('Game.exe', state.config.applications))
+  }
+
+  function removeApplication(index: number) {
+    const application = state.config.applications[index]
+    if (!application) {
+      return
+    }
+
+    state.config.applications.splice(index, 1)
+    for (const profile of state.config.modules.depthxr.profiles) {
+      profile.applicationIds = profile.applicationIds.filter((id) => id !== application.id)
     }
   }
 
@@ -97,5 +115,7 @@ export function useConfigStore() {
     addProfile,
     removeProfile,
     syncProfileName,
+    addApplication,
+    removeApplication,
   }
 }

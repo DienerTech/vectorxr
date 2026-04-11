@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 
+import AppRegistryEditor from '../AppRegistryEditor.vue'
 import ThemeToggle from '../ThemeToggle.vue'
 import type { VectorXRConfig } from '../../lib/model'
 import type { ThemePreference } from '../../lib/theme'
@@ -14,6 +15,8 @@ const props = defineProps<{
 
 defineEmits<{
   viewLogs: []
+  addApplication: []
+  removeApplication: [index: number]
   'update:themePreference': [value: ThemePreference]
 }>()
 
@@ -95,6 +98,12 @@ const moduleCards = computed(() => [
         </div>
       </div>
     </article>
+
+    <AppRegistryEditor
+      :applications="config.applications"
+      @add="$emit('addApplication')"
+      @remove="$emit('removeApplication', $event)"
+    />
 
     <article class="rounded-[1.25rem] border p-5 shadow-panel backdrop-blur surface-panel">
       <p class="eyebrow text-xs uppercase tracking-[0.24em]">Modules</p>

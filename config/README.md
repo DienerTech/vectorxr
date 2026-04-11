@@ -1,12 +1,13 @@
 # Config
 
-The canonical Phase 2 schema lives in `vectorxr.schema.json`.
+The canonical VectorXR schema lives in `vectorxr.schema.json`.
 
 The current file format supports:
 
 - a shared `core` settings block
+- a suite-level application registry
 - module-specific settings under `modules`
-- DepthXR defaults and per-executable overrides
-- PivotXR defaults including activation mode and activation key bindings
+- Depth defaults and per-application overrides
+- Pivot defaults including activation mode and activation key bindings
 
-Phase 2 no longer treats the old DepthXR-only schema as the active source of truth.
+Config v3 moves executable matching into the shared application registry so profiles can target reusable app ids.

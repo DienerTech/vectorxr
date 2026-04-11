@@ -43,9 +43,16 @@ struct ProfileMatch {
     std::string exe_name;
 };
 
+struct RegisteredApplication {
+    std::string id;
+    std::string name;
+    bool enabled{true};
+    ProfileMatch match;
+};
+
 struct DepthXrProfile {
     std::string name;
-    ProfileMatch match;
+    std::vector<std::string> application_ids;
     bool enabled{true};
     DepthXrSettingsOverride settings;
 };
@@ -76,8 +83,9 @@ struct PivotXrModuleConfig {
 };
 
 struct ConfigDocument {
-    int version{2};
+    int version{3};
     CoreSettings core;
+    std::vector<RegisteredApplication> applications;
     DepthXrModuleConfig depthxr;
     PivotXrModuleConfig pivotxr;
 };

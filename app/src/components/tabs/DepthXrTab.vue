@@ -2,10 +2,11 @@
 import EffectField from '../EffectField.vue'
 import ProfileEditor from '../ProfileEditor.vue'
 import { convergenceBadge, fromConvergenceDisplay, fromStereoBoostDisplay, stereoBoostBadge, toConvergenceDisplay, toStereoBoostDisplay } from '../../lib/display'
-import type { VectorXRConfig } from '../../lib/model'
+import type { RegisteredApplication, VectorXRConfig } from '../../lib/model'
 
 defineProps<{
   config: VectorXRConfig
+  applications: RegisteredApplication[]
 }>()
 
 defineEmits<{
@@ -85,9 +86,10 @@ defineEmits<{
 
       <ProfileEditor
         v-for="(profile, index) in config.modules.depthxr.profiles"
-        :key="`${profile.match.exe}-${index}`"
+        :key="`${profile.name}-${index}`"
         :index="index"
         :profile="profile"
+        :applications="applications"
         @remove="$emit('removeProfile', index)"
         @sync-name="$emit('syncProfileName', index)"
       />

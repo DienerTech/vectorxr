@@ -4,12 +4,13 @@ VectorXR is a modular OpenXR utility suite in progress.
 
 Current active feature set:
 
-- DepthXR stereo boost
-- DepthXR convergence
+- Depth stereo boost
+- Depth convergence
 - suite-level logging and config management
-- per-game DepthXR overrides
-- PivotXR runtime yaw amplification
-- PivotXR runtime pitch amplification
+- suite-level application registry
+- per-application Depth overrides
+- Pivot runtime yaw amplification
+- Pivot runtime pitch amplification
 
 The repository currently ships one shared OpenXR layer plus one Tauri desktop app:
 
@@ -27,18 +28,28 @@ The repository currently ships one shared OpenXR layer plus one Tauri desktop ap
 
 ## Current config model
 
-Phase 2 uses the VectorXR suite config schema in `config/vectorxr.schema.json`.
+VectorXR uses the v3 suite config schema in `config/vectorxr.schema.json`.
 
 High-level shape:
 
 ```json
 {
-  "version": 2,
+  "version": 3,
   "core": {
     "enabled": true,
     "logLevel": "info",
     "logRetentionFiles": 7
   },
+  "applications": [
+    {
+      "id": "dcs",
+      "name": "DCS",
+      "enabled": true,
+      "match": {
+        "exe": "DCS.exe"
+      }
+    }
+  ],
   "modules": {
     "depthxr": {
       "enabled": true,
@@ -48,7 +59,19 @@ High-level shape:
         "stereoBoost": 1.1,
         "convergence": 0.0
       },
-      "profiles": []
+      "profiles": [
+        {
+          "name": "DCS",
+          "enabled": true,
+          "applicationIds": ["dcs"],
+          "settings": {
+            "stereoBoostEnabled": true,
+            "convergenceEnabled": true,
+            "stereoBoost": 1.1,
+            "convergence": 0.0
+          }
+        }
+      ]
     },
     "pivotxr": {
       "enabled": false,
@@ -132,12 +155,12 @@ cargo check
 Implemented today:
 
 - loader negotiation and manifest scaffold
-- config parsing for the v2 VectorXR schema
-- per-executable DepthXR settings resolution
+- config parsing for the v3 VectorXR schema
+- per-application Depth settings resolution
 - `xrLocateViews` adjustments for stereo boost and convergence
 - quad-view-aware stereo/convergence behavior
-- PivotXR runtime path across `xrLocateSpace`, `xrLocateViews`, and `xrEndFrame`
-- VectorXR suite shell with separate core, DepthXR, and PivotXR tabs
+- Pivot runtime path across `xrLocateSpace`, `xrLocateViews`, and `xrEndFrame`
+- VectorXR suite shell with separate Home, Depth, and Pivot tabs
 
 Deliberately not active yet:
 

@@ -1,10 +1,20 @@
 {
-  "version": 2,
+  "version": 3,
   "core": {
     "enabled": true,
     "logLevel": "info",
     "logRetentionFiles": 7
   },
+  "applications": [
+    {
+      "id": "dcs",
+      "name": "DCS",
+      "enabled": true,
+      "match": {
+        "exe": "DCS.exe"
+      }
+    }
+  ],
   "modules": {
     "depthxr": {
       "enabled": true,
@@ -18,9 +28,9 @@
         {
           "name": "DCS",
           "enabled": true,
-          "match": {
-            "exe": "DCS.exe"
-          },
+          "applicationIds": [
+            "dcs"
+          ],
           "settings": {
             "stereoBoostEnabled": true,
             "convergenceEnabled": true,
@@ -37,7 +47,12 @@
         "activationKey": "F8",
         "rotationMultiplier": 1.5,
         "smoothing": 0.2,
-        "deadzoneDegrees": 8.0
+        "deadzoneDegrees": 8.0,
+        "maxExtraYawDegrees": 25.0,
+        "pitchRotationMultiplier": 1.0,
+        "pitchSmoothing": 0.2,
+        "pitchDeadzoneDegrees": 12.0,
+        "maxExtraPitchDegrees": 20.0
       }
     }
   }

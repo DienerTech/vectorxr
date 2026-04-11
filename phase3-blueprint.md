@@ -342,15 +342,15 @@ Design rule:
 - `inputPath` should represent a logical control like `button-1`, `hat-up`, or `axis+`
 - do not encode transient device order
 
-### 5.2 Migration Rules
+### 5.2 Compatibility Rule
 
-Recommended v2 to v3 migration:
+Phase 3 does not need to preserve Phase 2 saved config files.
 
-- create a registered app entry for each unique existing `match.exe`
-- generate stable ids from executable names with deduplication
-- rewrite Depth profiles to `applicationIds`
-- map current Pivot defaults into a default profile only if we decide profile-only Pivot ownership is cleaner
-- otherwise keep Pivot defaults plus optional profiles during the first v3 pass
+Recommended handling:
+
+- v3 is the only active schema
+- old saved configs may be discarded or replaced with a default v3 document
+- keep the implementation focused on the new application registry instead of v2 migration support
 
 ---
 
@@ -746,7 +746,7 @@ Acceptance criteria:
 
 Add or extend tests for:
 
-- v2 to v3 migration
+- v3 application registry parsing
 - application registry resolution
 - multi-application profile matching
 - Depth first-enabled conflict behavior
