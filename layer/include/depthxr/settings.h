@@ -104,6 +104,8 @@ struct PivotXrProfile {
 struct PivotXrModuleConfig {
     bool enabled{false};
     PivotXrSettings defaults;
+    ActivationMode activation_mode{ActivationMode::Toggle};
+    InputBinding activation_binding;
     std::vector<PivotXrProfile> profiles;
 };
 

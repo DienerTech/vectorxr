@@ -90,11 +90,12 @@ function finishNameEdit() {
     <div class="grid gap-3">
       <label class="block">
         <span class="mb-1.5 block text-sm font-medium">Applications</span>
-        <div class="rounded-[0.75rem] border p-3 surface-panel-strong">
+        <div class="overflow-x-auto rounded-[0.75rem] border p-3 surface-panel-strong">
+          <div class="flex min-w-max gap-3">
           <label
             v-for="application in applications"
             :key="application.id"
-            class="flex items-start gap-3 rounded-[0.65rem] px-2 py-2 text-sm"
+            class="flex min-w-[13rem] max-w-[16rem] items-start gap-3 rounded-[0.65rem] border px-3 py-3 text-sm surface-panel-soft"
           >
             <input v-model="profile.applicationIds" class="mt-0.5 h-4 w-4 accent-depthxr-copper" type="checkbox" :value="application.id" @change="$emit('syncName')" />
             <span>
@@ -102,6 +103,7 @@ function finishNameEdit() {
               <span class="block font-mono text-xs text-muted">{{ application.match.exe }}</span>
             </span>
           </label>
+          </div>
 
           <p v-if="applications.length === 0" class="text-sm text-muted">Add an application on the Application Registry tab before assigning this profile.</p>
         </div>

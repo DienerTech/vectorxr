@@ -158,10 +158,6 @@ function validateDepthXRProfile(profile: DepthXRProfileConfig, index: number, ap
     errors.push(`${prefix}name is required`)
   }
 
-  if (profile.applicationIds.length === 0) {
-    errors.push(`${prefix}applicationIds must include at least one application`)
-  }
-
   const seenProfileApplicationIds = new Set<string>()
   for (const applicationId of profile.applicationIds) {
     if (!applicationIds.has(applicationId)) {
@@ -205,10 +201,6 @@ function validatePivotXRProfile(profile: PivotXRProfileConfig, index: number, ap
 
   if (!profile.name.trim()) {
     errors.push(`${prefix}name is required`)
-  }
-
-  if (profile.applicationIds.length === 0) {
-    errors.push(`${prefix}applicationIds must include at least one application`)
   }
 
   const seenProfileApplicationIds = new Set<string>()
@@ -273,6 +265,7 @@ export function validateConfig(config: VectorXRConfig): string[] {
   errors.push(...validateDepthXRSettings('modules.depthxr.defaults.', config.modules.depthxr.defaults))
   errors.push(...validateInputBinding('modules.depthxr.bindings.toggleEnabled', config.modules.depthxr.bindings.toggleEnabled))
   errors.push(...validatePivotXRSettings('modules.pivotxr.defaults.', config.modules.pivotxr.defaults))
+  errors.push(...validateInputBinding('modules.pivotxr.activationBinding', config.modules.pivotxr.activationBinding))
 
   const applicationIds = new Set(config.applications.map((application) => application.id))
 

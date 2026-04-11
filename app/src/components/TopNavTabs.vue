@@ -19,6 +19,18 @@ defineEmits<{
 
 const primaryTabs = computed(() => props.tabs.filter((tab) => tab.id === 'core' || tab.id === 'registry' || tab.id === 'about'))
 const moduleTabs = computed(() => props.tabs.filter((tab) => tab.id === 'depthxr' || tab.id === 'pivotxr'))
+
+function statusChipClass(tab: { id: AppTab; status: string }): string {
+  if (tab.id === 'core') {
+    return tab.status === 'Suite on' ? 'chip-success' : 'chip-idle'
+  }
+
+  if (tab.id === 'depthxr' || tab.id === 'pivotxr') {
+    return tab.status === 'Enabled' ? 'chip-success' : 'chip-idle'
+  }
+
+  return 'chip-accent'
+}
 </script>
 
 <template>
@@ -32,11 +44,18 @@ const moduleTabs = computed(() => props.tabs.filter((tab) => tab.id === 'depthxr
         type="button"
         @click="$emit('select', tab.id)"
       >
-        <p class="text-sm font-semibold tracking-tight">{{ tab.label }}</p>
-        <p class="mt-1 text-xs" :class="activeTab === tab.id ? 'text-inverse-muted' : 'text-muted'">{{ tab.subtitle }}</p>
-        <p class="mt-3 text-[11px] font-medium uppercase tracking-[0.16em]" :class="activeTab === tab.id ? 'text-inverse-muted' : 'eyebrow'">
-          {{ tab.status }}
-        </p>
+        <div class="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <p class="text-sm font-semibold tracking-tight">{{ tab.label }}</p>
+            <p class="mt-1 text-xs" :class="activeTab === tab.id ? 'text-inverse-muted' : 'text-muted'">{{ tab.subtitle }}</p>
+          </div>
+          <span
+            class="rounded-full px-3 py-1 text-xs font-semibold uppercase tracking-[0.16em]"
+            :class="statusChipClass(tab)"
+          >
+            {{ tab.status }}
+          </span>
+        </div>
       </button>
     </div>
 
@@ -56,7 +75,7 @@ const moduleTabs = computed(() => props.tabs.filter((tab) => tab.id === 'depthxr
           </div>
           <span
             class="rounded-full px-3 py-1 text-xs font-semibold uppercase tracking-[0.16em]"
-            :class="tab.status === 'Enabled' ? 'chip-success' : 'chip-idle'"
+            :class="statusChipClass(tab)"
           >
             {{ tab.status }}
           </span>

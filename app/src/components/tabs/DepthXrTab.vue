@@ -112,7 +112,7 @@ const profileWarnings = computed(() => {
     </article>
 
     <section class="space-y-4">
-      <div class="flex flex-wrap items-center justify-between gap-3">
+      <div class="flex flex-wrap items-center justify-between gap-3 rounded-[1rem] border p-4 surface-panel">
         <div>
           <p class="eyebrow text-xs uppercase tracking-[0.24em]">Profiles</p>
           <h2 class="text-2xl font-semibold tracking-tight">Custom Profiles</h2>
@@ -128,7 +128,7 @@ const profileWarnings = computed(() => {
 
       <ProfileEditor
         v-for="(profile, index) in config.modules.depthxr.profiles"
-        :key="`${profile.name}-${index}`"
+        :key="`depth-profile-${index}`"
         :index="index"
         :profile="profile"
         :applications="applications"

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
 
-import BindingEditor from '../BindingEditor.vue'
+import PivotActivationEditor from '../PivotActivationEditor.vue'
 import type { RegisteredApplication, VectorXRConfig } from '../../lib/model'
 import { bindingLabel } from '../../lib/model'
 
@@ -77,6 +77,13 @@ const profileWarnings = computed(() => {
       <p class="mb-4 text-sm leading-6 text-muted">
         These values apply when no custom profile targets the current application. New profiles are initialized from these defaults.
       </p>
+
+      <PivotActivationEditor
+        v-model:activation-mode="config.modules.pivotxr.activationMode"
+        v-model:activation-binding="config.modules.pivotxr.activationBinding"
+        class="mb-3"
+        description="Choose how the default Pivot profile activates when no custom profile targets the current application."
+      />
 
       <div class="rounded-[1rem] border p-4 surface-panel-soft">
         <p class="eyebrow text-xs uppercase tracking-[0.18em]">Yaw</p>
@@ -184,7 +191,7 @@ const profileWarnings = computed(() => {
 
     <!-- Custom Profiles -->
     <section class="space-y-4">
-      <div class="flex flex-wrap items-center justify-between gap-3">
+      <div class="flex flex-wrap items-center justify-between gap-3 rounded-[1rem] border p-4 surface-panel">
         <div>
           <p class="eyebrow text-xs uppercase tracking-[0.24em]">Profiles</p>
           <h2 class="text-2xl font-semibold tracking-tight">Custom Profiles</h2>
@@ -200,7 +207,7 @@ const profileWarnings = computed(() => {
 
       <article
         v-for="(profile, index) in config.modules.pivotxr.profiles"
-        :key="`${profile.name}-${index}`"
+        :key="`pivot-profile-${index}`"
         class="rounded-[1rem] border p-5 shadow-panel transition"
         :class="profile.enabled ? 'surface-panel' : 'surface-panel-soft'"
       >
@@ -265,11 +272,12 @@ const profileWarnings = computed(() => {
         <div class="grid gap-3">
           <label class="block">
             <span class="mb-1.5 block text-sm font-medium">Applications</span>
-            <div class="rounded-[0.75rem] border p-3 surface-panel-strong">
+            <div class="overflow-x-auto rounded-[0.75rem] border p-3 surface-panel-strong">
+              <div class="flex min-w-max gap-3">
               <label
                 v-for="application in applications"
                 :key="application.id"
-                class="flex items-start gap-3 rounded-[0.65rem] px-2 py-2 text-sm"
+                class="flex min-w-[13rem] max-w-[16rem] items-start gap-3 rounded-[0.65rem] border px-3 py-3 text-sm surface-panel-soft"
               >
                 <input
                   v-model="profile.applicationIds"
@@ -283,6 +291,7 @@ const profileWarnings = computed(() => {
                   <span class="block font-mono text-xs text-muted">{{ application.match.exe }}</span>
                 </span>
               </label>
+              </div>
               <p v-if="applications.length === 0" class="text-sm text-muted">
                 Add an application on the Application Registry tab before assigning this profile.
               </p>
@@ -290,28 +299,12 @@ const profileWarnings = computed(() => {
           </label>
         </div>
 
-        <div class="mt-4 rounded-[1rem] border p-4 surface-panel-soft">
-          <p class="eyebrow text-xs uppercase tracking-[0.18em]">Activation</p>
-          <div class="mt-3 grid gap-3 lg:grid-cols-2">
-            <label class="block">
-              <span class="mb-1.5 block text-sm font-medium">Activation Mode</span>
-              <select
-                v-model="profile.activationMode"
-                class="app-input w-full rounded-[0.75rem] px-4 py-2.5"
-                title="Toggle flips Pivot on each binding press. Hold only applies Pivot while the binding is held down."
-              >
-                <option value="toggle">toggle</option>
-                <option value="hold">hold</option>
-              </select>
-            </label>
-
-            <BindingEditor
-              v-model="profile.activationBinding"
-              label="Activation Binding"
-              description="Keyboard chords work today. Device bindings are saved and available when HOTAS runtime support lands."
-            />
-          </div>
-        </div>
+        <PivotActivationEditor
+          v-model:activation-mode="profile.activationMode"
+          v-model:activation-binding="profile.activationBinding"
+          class="mt-4"
+          description="Keyboard bindings work today. Device bindings are saved and available when HOTAS runtime support lands."
+        />
 
         <div class="mt-3 rounded-[1rem] border p-4 surface-panel-soft">
           <p class="eyebrow text-xs uppercase tracking-[0.18em]">Yaw</p>

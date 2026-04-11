@@ -97,6 +97,17 @@ const PivotXrProfile* FindMatchingPivotXrProfile(const ConfigDocument& config, s
     return nullptr;
 }
 
+void ApplyPivotSettings(PivotXrResolvedSettings& resolved, const PivotXrSettings& settings) {
+    resolved.yaw_rotation_multiplier = settings.yaw_rotation_multiplier;
+    resolved.yaw_smoothing = settings.yaw_smoothing;
+    resolved.yaw_deadzone_degrees = settings.yaw_deadzone_degrees;
+    resolved.yaw_max_extra_degrees = settings.yaw_max_extra_degrees;
+    resolved.pitch_rotation_multiplier = settings.pitch_rotation_multiplier;
+    resolved.pitch_smoothing = settings.pitch_smoothing;
+    resolved.pitch_deadzone_degrees = settings.pitch_deadzone_degrees;
+    resolved.pitch_max_extra_degrees = settings.pitch_max_extra_degrees;
+}
+
 PivotXrResolvedSettings ResolvePivotXrSettings(const ConfigDocument& config, std::string_view exe_name) {
     PivotXrResolvedSettings resolved;
     resolved.enabled = config.pivotxr.enabled;
@@ -105,22 +116,17 @@ PivotXrResolvedSettings ResolvePivotXrSettings(const ConfigDocument& config, std
         return resolved;
     }
 
+    resolved.activation_mode = config.pivotxr.activation_mode;
+    resolved.activation_binding = config.pivotxr.activation_binding;
+    ApplyPivotSettings(resolved, config.pivotxr.defaults);
+
     const PivotXrProfile* profile = FindMatchingPivotXrProfile(config, exe_name);
-    if (!profile) {
-        resolved.enabled = false;
-        return resolved;
+    if (profile) {
+        resolved.activation_mode = profile->activation_mode;
+        resolved.activation_binding = profile->activation_binding;
+        ApplyPivotSettings(resolved, profile->settings);
     }
 
-    resolved.activation_mode = profile->activation_mode;
-    resolved.activation_binding = profile->activation_binding;
-    resolved.yaw_rotation_multiplier = profile->settings.yaw_rotation_multiplier;
-    resolved.yaw_smoothing = profile->settings.yaw_smoothing;
-    resolved.yaw_deadzone_degrees = profile->settings.yaw_deadzone_degrees;
-    resolved.yaw_max_extra_degrees = profile->settings.yaw_max_extra_degrees;
-    resolved.pitch_rotation_multiplier = profile->settings.pitch_rotation_multiplier;
-    resolved.pitch_smoothing = profile->settings.pitch_smoothing;
-    resolved.pitch_deadzone_degrees = profile->settings.pitch_deadzone_degrees;
-    resolved.pitch_max_extra_degrees = profile->settings.pitch_max_extra_degrees;
     return resolved;
 }
 

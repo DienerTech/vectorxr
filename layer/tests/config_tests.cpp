@@ -187,6 +187,8 @@ void TestResolveRuntimeConfig() {
         "pitchDeadzoneDegrees": 12.0,
         "maxExtraPitchDegrees": 20.0
       },
+      "activationMode": "hold",
+      "activationBinding": { "type": "keyboard", "chord": ["F9"] },
       "profiles": [
         {
           "name": "DCS",
@@ -368,9 +370,13 @@ void TestPivotProfileResolution() {
     Expect(std::abs(resolved.pivotxr.yaw_max_extra_degrees - 60.0) < 0.0001, "PivotXR yaw clamp mismatch");
     Expect(std::abs(resolved.pivotxr.pitch_rotation_multiplier - 1.5) < 0.0001, "PivotXR pitch multiplier mismatch");
 
-    // No profile for a different exe — Pivot should resolve as disabled.
+    // No profile for a different exe falls back to the default Pivot profile.
     const depthxr::ResolvedRuntimeConfig resolved_other = depthxr::ResolveRuntimeConfig(result.document, "other.exe");
-    Expect(!resolved_other.pivotxr.enabled, "PivotXR should be inactive for exe with no matching profile");
+    Expect(resolved_other.pivotxr.enabled, "PivotXR default profile should resolve for exe with no matching profile");
+    Expect(resolved_other.pivotxr.activation_binding.type == depthxr::InputBindingType::None,
+           "PivotXR default activation binding should fall back to none");
+    Expect(std::abs(resolved_other.pivotxr.yaw_rotation_multiplier - 1.5) < 0.0001,
+           "PivotXR default yaw multiplier mismatch");
 }
 
 void TestInvalidPivotActivationBindingRejected() {

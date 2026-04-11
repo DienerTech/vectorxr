@@ -32,7 +32,6 @@ defineEmits<{
         <div class="mb-3 flex flex-wrap items-center justify-between gap-3">
           <div>
             <p class="text-base font-semibold tracking-tight">{{ application.name || 'Unnamed application' }}</p>
-            <p class="mt-1 font-mono text-xs text-muted">{{ application.id }}</p>
           </div>
 
           <div class="flex flex-wrap items-center gap-3">

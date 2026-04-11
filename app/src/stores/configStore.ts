@@ -92,7 +92,12 @@ export function useConfigStore() {
   function addPivotProfile() {
     const defaultApplicationId = state.config.applications[0]?.id
     state.config.modules.pivotxr.profiles.push(
-      createPivotProfile(state.config.modules.pivotxr.defaults, defaultApplicationId ? [defaultApplicationId] : []),
+      createPivotProfile(
+        state.config.modules.pivotxr.defaults,
+        defaultApplicationId ? [defaultApplicationId] : [],
+        state.config.modules.pivotxr.activationMode,
+        state.config.modules.pivotxr.activationBinding,
+      ),
     )
   }
 

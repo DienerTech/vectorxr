@@ -102,6 +102,8 @@ export interface PivotXRProfileConfig {
 export interface PivotXRModuleConfig {
   enabled: boolean
   defaults: PivotXRSettings
+  activationMode: ActivationMode
+  activationBinding: InputBinding
   profiles: PivotXRProfileConfig[]
 }
 
@@ -266,6 +268,8 @@ export function defaultConfig(): VectorXRConfig {
       pivotxr: {
         enabled: false,
         defaults: defaultPivotXRSettings(),
+        activationMode: 'toggle',
+        activationBinding: defaultNoneBinding(),
         profiles: [],
       },
     },
@@ -296,13 +300,18 @@ export function createProfile(defaultSettings: DepthXRSettings, applicationIds: 
   }
 }
 
-export function createPivotProfile(defaultSettings: PivotXRSettings, applicationIds: string[] = []): PivotXRProfileConfig {
+export function createPivotProfile(
+  defaultSettings: PivotXRSettings,
+  applicationIds: string[] = [],
+  activationMode: ActivationMode = 'toggle',
+  activationBinding: InputBinding = defaultNoneBinding(),
+): PivotXRProfileConfig {
   return {
     name: 'New Profile',
     enabled: true,
     applicationIds,
-    activationMode: 'toggle',
-    activationBinding: defaultNoneBinding(),
+    activationMode,
+    activationBinding: normalizeInputBinding(activationBinding, defaultNoneBinding()),
     settings: { ...defaultSettings },
   }
 }
@@ -482,6 +491,8 @@ function normalizeVectorXRConfig(value: unknown): VectorXRConfig {
       pivotxr: {
         enabled: normalizeBoolean(pivotxr.enabled, fallback.modules.pivotxr.enabled),
         defaults: pivotDefaults,
+        activationMode: pivotxr.activationMode === 'hold' ? 'hold' : 'toggle',
+        activationBinding: normalizeInputBinding(pivotxr.activationBinding, fallback.modules.pivotxr.activationBinding),
         profiles: pivotProfileValues.map((profileValue) => {
           const profile = isRecord(profileValue) ? profileValue : {}
           const settings = normalizePivotXRSettings(profile.settings, pivotDefaults)

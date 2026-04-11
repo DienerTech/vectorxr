@@ -35,7 +35,6 @@ const logPathShort = computed(() => {
         </p>
       </div>
 
-      <!-- VectorXR Enabled — prominent full-width row -->
       <div class="mb-5 flex items-center justify-between rounded-[0.9rem] border px-4 py-3 surface-panel-strong">
         <div>
           <p class="text-sm font-semibold">VectorXR Enabled</p>
@@ -47,14 +46,13 @@ const logPathShort = computed(() => {
         </label>
       </div>
 
-      <!-- Log Level + Retention -->
       <div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-[minmax(0,200px)_minmax(0,200px)]">
         <label class="block">
           <span class="mb-1.5 flex items-center gap-1.5 text-sm font-medium">
             Log Level
-            <span title="None disables general runtime logging. Info writes normal operational messages and errors. Debug adds verbose diagnostics." class="cursor-help select-none text-xs text-muted">i</span>
+            <span title="None disables general runtime logging. Info writes normal operational messages and errors. Debug adds verbose diagnostics." class="cursor-help select-none text-xs text-muted">ⓘ</span>
           </span>
-          <select v-model="config.core.logLevel" class="app-input w-full rounded-[0.75rem] px-4 py-2.5">
+          <select v-model="config.core.logLevel" class="app-input h-11 w-full rounded-[0.75rem] px-4 py-2.5">
             <option value="none">none</option>
             <option value="info">info</option>
             <option value="debug">debug</option>
@@ -64,11 +62,11 @@ const logPathShort = computed(() => {
         <label class="block">
           <span class="mb-1.5 flex items-center gap-1.5 text-sm font-medium">
             Log Retention
-            <span title="Number of rotated log files to keep. Older files are removed after the retention count is exceeded." class="cursor-help select-none text-xs text-muted">i</span>
+            <span title="Number of rotated log files to keep. Older files are removed after the retention count is exceeded." class="cursor-help select-none text-xs text-muted">ⓘ</span>
           </span>
           <input
             v-model.number="config.core.logRetentionFiles"
-            class="app-input w-full rounded-[0.75rem] px-4 py-2.5"
+            class="app-input h-11 w-full rounded-[0.75rem] px-4 py-2.5"
             min="1"
             max="50"
             step="1"
@@ -77,7 +75,6 @@ const logPathShort = computed(() => {
         </label>
       </div>
 
-      <!-- Theme on its own row -->
       <div class="mt-3">
         <span class="mb-1.5 block text-sm font-medium">Theme</span>
         <ThemeToggle :model-value="themePreference" @update:model-value="$emit('update:themePreference', $event)" />

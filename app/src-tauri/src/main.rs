@@ -283,6 +283,10 @@ struct PivotXRModuleConfig {
     enabled: bool,
     #[serde(default)]
     defaults: PivotXRSettings,
+    #[serde(default = "default_activation_mode")]
+    activation_mode: String,
+    #[serde(default = "default_activation_binding")]
+    activation_binding: InputBinding,
     #[serde(default)]
     profiles: Vec<PivotXRProfileConfig>,
 }
@@ -292,6 +296,8 @@ impl Default for PivotXRModuleConfig {
         Self {
             enabled: false,
             defaults: PivotXRSettings::default(),
+            activation_mode: default_activation_mode(),
+            activation_binding: default_activation_binding(),
             profiles: Vec::new(),
         }
     }

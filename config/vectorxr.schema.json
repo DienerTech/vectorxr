@@ -215,7 +215,6 @@
         },
         "applicationIds": {
           "type": "array",
-          "minItems": 1,
           "items": {
             "type": "string",
             "pattern": "^[a-z0-9][a-z0-9-]*$"
@@ -343,7 +342,6 @@
         },
         "applicationIds": {
           "type": "array",
-          "minItems": 1,
           "items": {
             "type": "string",
             "pattern": "^[a-z0-9][a-z0-9-]*$"
@@ -375,6 +373,12 @@
         },
         "defaults": {
           "$ref": "#/$defs/pivotxrSettings"
+        },
+        "activationMode": {
+          "$ref": "#/$defs/activationMode"
+        },
+        "activationBinding": {
+          "$ref": "#/$defs/inputBinding"
         },
         "profiles": {
           "type": "array",

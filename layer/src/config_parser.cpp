@@ -971,6 +971,8 @@ bool ParsePivotModule(const JsonValue::Object& object, PivotXrModuleConfig& out,
     static const std::unordered_set<std::string> allowed = {
         "enabled",
         "defaults",
+        "activationMode",
+        "activationBinding",
         "profiles",
     };
 
@@ -979,11 +981,16 @@ bool ParsePivotModule(const JsonValue::Object& object, PivotXrModuleConfig& out,
     }
 
     std::optional<bool> enabled;
-    if (!ReadOptionalBool(object, "enabled", enabled, error)) {
+    std::optional<ActivationMode> activation_mode;
+    if (!ReadOptionalBool(object, "enabled", enabled, error) ||
+        !ReadOptionalActivationMode(object, "activationMode", activation_mode, error)) {
         return false;
     }
     if (enabled.has_value()) {
         out.enabled = *enabled;
+    }
+    if (activation_mode.has_value()) {
+        out.activation_mode = *activation_mode;
     }
 
     const auto defaults_it = object.find("defaults");
@@ -992,6 +999,11 @@ bool ParsePivotModule(const JsonValue::Object& object, PivotXrModuleConfig& out,
         if (!defaults_object || !ParsePivotSettings(*defaults_object, out.defaults, error)) {
             return false;
         }
+    }
+
+    const auto activation_binding_it = object.find("activationBinding");
+    if (activation_binding_it != object.end() && !ParseInputBinding(activation_binding_it->second, out.activation_binding, error)) {
+        return false;
     }
 
     const auto profiles_it = object.find("profiles");
