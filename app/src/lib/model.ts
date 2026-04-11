@@ -79,9 +79,7 @@ export interface DepthXRModuleConfig {
   profiles: DepthXRProfileConfig[]
 }
 
-export interface PivotXRDefaults {
-  activationMode: ActivationMode
-  activationBinding: InputBinding
+export interface PivotXRSettings {
   rotationMultiplier: number
   smoothing: number
   deadzoneDegrees: number
@@ -92,9 +90,19 @@ export interface PivotXRDefaults {
   maxExtraPitchDegrees: number
 }
 
+export interface PivotXRProfileConfig {
+  name: string
+  enabled: boolean
+  applicationIds: string[]
+  activationMode: ActivationMode
+  activationBinding: InputBinding
+  settings: PivotXRSettings
+}
+
 export interface PivotXRModuleConfig {
   enabled: boolean
-  defaults: PivotXRDefaults
+  defaults: PivotXRSettings
+  profiles: PivotXRProfileConfig[]
 }
 
 export interface VectorXRConfig {
@@ -201,10 +209,8 @@ export function createApplication(exe = 'Game.exe', applications: RegisteredAppl
   }
 }
 
-export function defaultPivotXRDefaults(): PivotXRDefaults {
+export function defaultPivotXRSettings(): PivotXRSettings {
   return {
-    activationMode: 'toggle',
-    activationBinding: defaultNoneBinding(),
     rotationMultiplier: 1.5,
     smoothing: 0.2,
     deadzoneDegrees: 8,
@@ -251,7 +257,8 @@ export function defaultConfig(): VectorXRConfig {
       },
       pivotxr: {
         enabled: false,
-        defaults: defaultPivotXRDefaults(),
+        defaults: defaultPivotXRSettings(),
+        profiles: [],
       },
     },
   }
@@ -281,6 +288,17 @@ export function createProfile(defaultSettings: DepthXRSettings, applicationIds: 
   }
 }
 
+export function createPivotProfile(defaultSettings: PivotXRSettings, applicationIds: string[] = []): PivotXRProfileConfig {
+  return {
+    name: 'New Profile',
+    enabled: true,
+    applicationIds,
+    activationMode: 'toggle',
+    activationBinding: defaultNoneBinding(),
+    settings: { ...defaultSettings },
+  }
+}
+
 function isVectorXRConfig(value: unknown): value is VectorXRConfig {
   return isRecord(value) && value.version === 3 && 'core' in value && 'modules' in value
 }
@@ -296,13 +314,10 @@ function normalizeDepthXRSettings(value: unknown, fallback: DepthXRSettings): De
   }
 }
 
-function normalizePivotXRDefaults(value: unknown, fallback: PivotXRDefaults): PivotXRDefaults {
+function normalizePivotXRSettings(value: unknown, fallback: PivotXRSettings): PivotXRSettings {
   const source = isRecord(value) ? value : {}
-  const activationMode = source.activationMode === 'hold' ? 'hold' : fallback.activationMode
 
   return {
-    activationMode,
-    activationBinding: normalizeInputBinding(source.activationBinding, fallback.activationBinding),
     rotationMultiplier: normalizeNumber(source.rotationMultiplier, fallback.rotationMultiplier),
     smoothing: normalizeNumber(source.smoothing, fallback.smoothing),
     deadzoneDegrees: normalizeNumber(source.deadzoneDegrees, fallback.deadzoneDegrees),
@@ -412,13 +427,16 @@ function normalizeVectorXRConfig(value: unknown): VectorXRConfig {
   const modules = isRecord(source.modules) ? source.modules : {}
   const depthxr = isRecord(modules.depthxr) ? modules.depthxr : {}
   const pivotxr = isRecord(modules.pivotxr) ? modules.pivotxr : {}
-  const profileValues = Array.isArray(depthxr.profiles) ? depthxr.profiles : []
+  const depthProfileValues = Array.isArray(depthxr.profiles) ? depthxr.profiles : []
+  const pivotProfileValues = Array.isArray(pivotxr.profiles) ? pivotxr.profiles : []
   const applicationValues = Array.isArray(source.applications) ? source.applications : []
   const applications: RegisteredApplication[] = []
 
   applicationValues.forEach((applicationValue, index) => {
     applications.push(normalizeApplication(applicationValue, `application-${index + 1}`, applications))
   })
+
+  const pivotDefaults = normalizePivotXRSettings(pivotxr.defaults, fallback.modules.pivotxr.defaults)
 
   return {
     version: 3,
@@ -438,7 +456,7 @@ function normalizeVectorXRConfig(value: unknown): VectorXRConfig {
             fallback.modules.depthxr.bindings.toggleEnabled,
           ),
         },
-        profiles: profileValues.map((profileValue) => {
+        profiles: depthProfileValues.map((profileValue) => {
           const profile = isRecord(profileValue) ? profileValue : {}
           const settings = normalizeDepthXRSettings(profile.settings, fallback.modules.depthxr.defaults)
           const applicationIds = Array.isArray(profile.applicationIds)
@@ -455,7 +473,24 @@ function normalizeVectorXRConfig(value: unknown): VectorXRConfig {
       },
       pivotxr: {
         enabled: normalizeBoolean(pivotxr.enabled, fallback.modules.pivotxr.enabled),
-        defaults: normalizePivotXRDefaults(pivotxr.defaults, fallback.modules.pivotxr.defaults),
+        defaults: pivotDefaults,
+        profiles: pivotProfileValues.map((profileValue) => {
+          const profile = isRecord(profileValue) ? profileValue : {}
+          const settings = normalizePivotXRSettings(profile.settings, pivotDefaults)
+          const applicationIds = Array.isArray(profile.applicationIds)
+            ? profile.applicationIds.filter((id): id is string => typeof id === 'string' && id.trim().length > 0)
+            : []
+          const activationMode = profile.activationMode === 'hold' ? 'hold' : 'toggle'
+
+          return {
+            name: normalizeString(profile.name, 'New Profile'),
+            enabled: normalizeBoolean(profile.enabled, true),
+            applicationIds,
+            activationMode,
+            activationBinding: normalizeInputBinding(profile.activationBinding, defaultNoneBinding()),
+            settings,
+          }
+        }),
       },
     },
   }

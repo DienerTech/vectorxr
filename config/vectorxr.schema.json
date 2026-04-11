@@ -267,12 +267,10 @@
         }
       }
     },
-    "pivotxrDefaults": {
+    "pivotxrSettings": {
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "activationMode",
-        "activationBinding",
         "rotationMultiplier",
         "smoothing",
         "deadzoneDegrees",
@@ -283,12 +281,6 @@
         "maxExtraPitchDegrees"
       ],
       "properties": {
-        "activationMode": {
-          "$ref": "#/$defs/activationMode"
-        },
-        "activationBinding": {
-          "$ref": "#/$defs/inputBinding"
-        },
         "rotationMultiplier": {
           "type": "number",
           "minimum": 1.0,
@@ -331,19 +323,65 @@
         }
       }
     },
+    "pivotxrProfile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "enabled",
+        "applicationIds",
+        "activationMode",
+        "activationBinding",
+        "settings"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "applicationIds": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9-]*$"
+          },
+          "uniqueItems": true
+        },
+        "activationMode": {
+          "$ref": "#/$defs/activationMode"
+        },
+        "activationBinding": {
+          "$ref": "#/$defs/inputBinding"
+        },
+        "settings": {
+          "$ref": "#/$defs/pivotxrSettings"
+        }
+      }
+    },
     "pivotxrModule": {
       "type": "object",
       "additionalProperties": false,
       "required": [
         "enabled",
-        "defaults"
+        "defaults",
+        "profiles"
       ],
       "properties": {
         "enabled": {
           "type": "boolean"
         },
         "defaults": {
-          "$ref": "#/$defs/pivotxrDefaults"
+          "$ref": "#/$defs/pivotxrSettings"
+        },
+        "profiles": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/pivotxrProfile"
+          }
         }
       }
     },

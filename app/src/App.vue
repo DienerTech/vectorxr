@@ -170,7 +170,14 @@ async function openLogs() {
             @remove-profile="store.removeProfile"
             @sync-profile-name="store.syncProfileName"
             />
-            <PivotXrTab v-else :config="store.state.config" />
+            <PivotXrTab
+              v-else
+              :config="store.state.config"
+              :applications="store.state.config.applications"
+              @add-pivot-profile="store.addPivotProfile"
+              @remove-pivot-profile="store.removePivotProfile"
+              @sync-pivot-profile-name="store.syncPivotProfileName"
+            />
           </div>
 
           <aside class="space-y-4">

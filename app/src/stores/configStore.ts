@@ -1,7 +1,7 @@
 import { computed, reactive } from 'vue'
 
 import { loadConfigEnvelope, saveConfigEnvelope } from '../lib/commands'
-import { cloneConfig, createApplication, createProfile, defaultConfig } from '../lib/model'
+import { cloneConfig, createApplication, createProfile, createPivotProfile, defaultConfig } from '../lib/model'
 import type { AppTab, VectorXRConfig } from '../lib/model'
 
 interface StoreState {
@@ -89,6 +89,29 @@ export function useConfigStore() {
     }
   }
 
+  function addPivotProfile() {
+    const defaultApplicationId = state.config.applications[0]?.id
+    state.config.modules.pivotxr.profiles.push(
+      createPivotProfile(state.config.modules.pivotxr.defaults, defaultApplicationId ? [defaultApplicationId] : []),
+    )
+  }
+
+  function removePivotProfile(index: number) {
+    state.config.modules.pivotxr.profiles.splice(index, 1)
+  }
+
+  function syncPivotProfileName(index: number) {
+    const profile = state.config.modules.pivotxr.profiles[index]
+    if (!profile) {
+      return
+    }
+
+    if (!profile.name.trim() || profile.name === 'New Profile') {
+      const firstApplication = state.config.applications.find((application) => application.id === profile.applicationIds[0])
+      profile.name = firstApplication?.name || 'New Profile'
+    }
+  }
+
   function addApplication() {
     state.config.applications.push(createApplication('Game.exe', state.config.applications))
   }
@@ -103,6 +126,9 @@ export function useConfigStore() {
     for (const profile of state.config.modules.depthxr.profiles) {
       profile.applicationIds = profile.applicationIds.filter((id) => id !== application.id)
     }
+    for (const profile of state.config.modules.pivotxr.profiles) {
+      profile.applicationIds = profile.applicationIds.filter((id) => id !== application.id)
+    }
   }
 
   return {
@@ -115,6 +141,9 @@ export function useConfigStore() {
     addProfile,
     removeProfile,
     syncProfileName,
+    addPivotProfile,
+    removePivotProfile,
+    syncPivotProfileName,
     addApplication,
     removeApplication,
   }

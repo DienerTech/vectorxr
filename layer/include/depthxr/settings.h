@@ -81,6 +81,33 @@ struct DepthXrModuleConfig {
     std::vector<DepthXrProfile> profiles;
 };
 
+struct PivotXrSettings {
+    double yaw_rotation_multiplier{1.5};
+    double yaw_smoothing{0.2};
+    double yaw_deadzone_degrees{8.0};
+    double yaw_max_extra_degrees{25.0};
+    double pitch_rotation_multiplier{1.0};
+    double pitch_smoothing{0.2};
+    double pitch_deadzone_degrees{12.0};
+    double pitch_max_extra_degrees{20.0};
+};
+
+struct PivotXrProfile {
+    std::string name;
+    bool enabled{true};
+    std::vector<std::string> application_ids;
+    ActivationMode activation_mode{ActivationMode::Toggle};
+    InputBinding activation_binding;
+    PivotXrSettings settings;
+};
+
+struct PivotXrModuleConfig {
+    bool enabled{false};
+    PivotXrSettings defaults;
+    std::vector<PivotXrProfile> profiles;
+};
+
+// Resolved at runtime for a specific executable — flattened from module + matched profile.
 struct PivotXrResolvedSettings {
     bool enabled{false};
     ActivationMode activation_mode{ActivationMode::Toggle};
@@ -93,11 +120,6 @@ struct PivotXrResolvedSettings {
     double pitch_smoothing{0.2};
     double pitch_deadzone_degrees{12.0};
     double pitch_max_extra_degrees{20.0};
-};
-
-struct PivotXrModuleConfig {
-    bool enabled{false};
-    PivotXrResolvedSettings defaults;
 };
 
 struct ConfigDocument {

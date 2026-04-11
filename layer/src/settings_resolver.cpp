@@ -79,13 +79,57 @@ DepthXrResolvedSettings ResolveDepthXrSettings(const ConfigDocument& config, std
     return resolved;
 }
 
+const PivotXrProfile* FindMatchingPivotXrProfile(const ConfigDocument& config, std::string_view exe_name) {
+    const RegisteredApplication* application = FindMatchingApplication(config, exe_name);
+    if (!application) {
+        return nullptr;
+    }
+
+    for (const PivotXrProfile& profile : config.pivotxr.profiles) {
+        if (!profile.enabled) {
+            continue;
+        }
+
+        if (std::find(profile.application_ids.begin(), profile.application_ids.end(), application->id) != profile.application_ids.end()) {
+            return &profile;
+        }
+    }
+    return nullptr;
+}
+
+PivotXrResolvedSettings ResolvePivotXrSettings(const ConfigDocument& config, std::string_view exe_name) {
+    PivotXrResolvedSettings resolved;
+    resolved.enabled = config.pivotxr.enabled;
+
+    if (!config.pivotxr.enabled) {
+        return resolved;
+    }
+
+    const PivotXrProfile* profile = FindMatchingPivotXrProfile(config, exe_name);
+    if (!profile) {
+        resolved.enabled = false;
+        return resolved;
+    }
+
+    resolved.activation_mode = profile->activation_mode;
+    resolved.activation_binding = profile->activation_binding;
+    resolved.yaw_rotation_multiplier = profile->settings.yaw_rotation_multiplier;
+    resolved.yaw_smoothing = profile->settings.yaw_smoothing;
+    resolved.yaw_deadzone_degrees = profile->settings.yaw_deadzone_degrees;
+    resolved.yaw_max_extra_degrees = profile->settings.yaw_max_extra_degrees;
+    resolved.pitch_rotation_multiplier = profile->settings.pitch_rotation_multiplier;
+    resolved.pitch_smoothing = profile->settings.pitch_smoothing;
+    resolved.pitch_deadzone_degrees = profile->settings.pitch_deadzone_degrees;
+    resolved.pitch_max_extra_degrees = profile->settings.pitch_max_extra_degrees;
+    return resolved;
+}
+
 ResolvedRuntimeConfig ResolveRuntimeConfig(const ConfigDocument& config, std::string_view exe_name) {
     ResolvedRuntimeConfig resolved;
     resolved.core = config.core;
     resolved.depthxr = ResolveDepthXrSettings(config, exe_name);
     resolved.depthxr_bindings = config.depthxr.bindings;
-    resolved.pivotxr = config.pivotxr.defaults;
-    resolved.pivotxr.enabled = config.pivotxr.enabled;
+    resolved.pivotxr = ResolvePivotXrSettings(config, exe_name);
     return resolved;
 }
 

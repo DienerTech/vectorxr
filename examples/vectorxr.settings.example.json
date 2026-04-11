@@ -48,10 +48,6 @@
     "pivotxr": {
       "enabled": false,
       "defaults": {
-        "activationMode": "toggle",
-        "activationBinding": {
-          "type": "none"
-        },
         "rotationMultiplier": 1.5,
         "smoothing": 0.2,
         "deadzoneDegrees": 8.0,
@@ -60,7 +56,30 @@
         "pitchSmoothing": 0.2,
         "pitchDeadzoneDegrees": 12.0,
         "maxExtraPitchDegrees": 20.0
-      }
+      },
+      "profiles": [
+        {
+          "name": "DCS",
+          "enabled": true,
+          "applicationIds": [
+            "dcs"
+          ],
+          "activationMode": "toggle",
+          "activationBinding": {
+            "type": "none"
+          },
+          "settings": {
+            "rotationMultiplier": 1.7,
+            "smoothing": 0.2,
+            "deadzoneDegrees": 10.0,
+            "maxExtraYawDegrees": 60.0,
+            "pitchRotationMultiplier": 1.2,
+            "pitchSmoothing": 0.2,
+            "pitchDeadzoneDegrees": 15.0,
+            "maxExtraPitchDegrees": 45.0
+          }
+        }
+      ]
     }
   }
 }

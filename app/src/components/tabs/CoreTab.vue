@@ -32,7 +32,7 @@ const moduleCards = computed(() => [
     name: 'Pivot',
     description: 'Rotation amplification controls and activation tuning.',
     status: props.config.modules.pivotxr.enabled ? 'Enabled' : 'Disabled',
-    detail: `${props.config.modules.pivotxr.defaults.activationMode} activation`,
+    detail: `${props.config.modules.pivotxr.profiles.length} profile${props.config.modules.pivotxr.profiles.length === 1 ? '' : 's'}`,
     tone: props.config.modules.pivotxr.enabled ? 'active' : 'idle',
   },
 ])

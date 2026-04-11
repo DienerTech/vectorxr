@@ -209,9 +209,7 @@ impl Default for DepthXRBindings {
 }
 
 fn default_depth_toggle_binding() -> InputBinding {
-    InputBinding::Keyboard {
-        chord: vec!["F7".into()],
-    }
+    InputBinding::None
 }
 
 impl Default for DepthXRModuleConfig {
@@ -227,11 +225,7 @@ impl Default for DepthXRModuleConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct PivotXRDefaults {
-    #[serde(default = "default_activation_mode")]
-    activation_mode: String,
-    #[serde(default = "default_activation_binding")]
-    activation_binding: InputBinding,
+struct PivotXRSettings {
     #[serde(default = "default_rotation_multiplier")]
     rotation_multiplier: f64,
     #[serde(default = "default_smoothing")]
@@ -250,11 +244,9 @@ struct PivotXRDefaults {
     max_extra_pitch_degrees: f64,
 }
 
-impl Default for PivotXRDefaults {
+impl Default for PivotXRSettings {
     fn default() -> Self {
         Self {
-            activation_mode: default_activation_mode(),
-            activation_binding: default_activation_binding(),
             rotation_multiplier: default_rotation_multiplier(),
             smoothing: default_smoothing(),
             deadzone_degrees: default_deadzone_degrees(),
@@ -269,18 +261,38 @@ impl Default for PivotXRDefaults {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct PivotXRProfileConfig {
+    #[serde(default)]
+    name: String,
+    #[serde(default = "default_true")]
+    enabled: bool,
+    #[serde(default)]
+    application_ids: Vec<String>,
+    #[serde(default = "default_activation_mode")]
+    activation_mode: String,
+    #[serde(default = "default_activation_binding")]
+    activation_binding: InputBinding,
+    #[serde(default)]
+    settings: PivotXRSettings,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct PivotXRModuleConfig {
     #[serde(default = "default_false")]
     enabled: bool,
     #[serde(default)]
-    defaults: PivotXRDefaults,
+    defaults: PivotXRSettings,
+    #[serde(default)]
+    profiles: Vec<PivotXRProfileConfig>,
 }
 
 impl Default for PivotXRModuleConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            defaults: PivotXRDefaults::default(),
+            defaults: PivotXRSettings::default(),
+            profiles: Vec::new(),
         }
     }
 }
@@ -415,6 +427,19 @@ fn normalize_config(mut config: VectorXRConfig) -> VectorXRConfig {
         }
 
         profile.r#match = None;
+    }
+
+    for profile in &mut config.modules.pivotxr.profiles {
+        if profile.name.trim().is_empty() {
+            let first_application = profile
+                .application_ids
+                .first()
+                .and_then(|application_id| config.applications.iter().find(|application| &application.id == application_id));
+
+            profile.name = first_application
+                .map(|application| application.name.clone())
+                .unwrap_or_else(|| "New Profile".into());
+        }
     }
 
     config

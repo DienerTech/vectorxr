@@ -521,11 +521,15 @@ bool ParseInputBinding(const JsonValue& value, InputBinding& out, std::string& e
 
     const std::optional<InputBindingType> type = ParseInputBindingType(type_it->second.AsString());
     if (!type.has_value()) {
-        error = "inputBinding.type must be one of: keyboard, device";
+        error = "inputBinding.type must be one of: none, keyboard, device";
         return false;
     }
 
     out.type = *type;
+    if (out.type == InputBindingType::None) {
+        return true;
+    }
+
     if (out.type == InputBindingType::Keyboard) {
         static const std::unordered_set<std::string> allowed = {"type", "chord"};
         if (!CheckAllowedKeys(*object, allowed, error)) {
@@ -839,10 +843,8 @@ bool ParseDepthModule(const JsonValue::Object& object,
     return true;
 }
 
-bool ParsePivotDefaults(const JsonValue::Object& object, PivotXrResolvedSettings& out, std::string& error) {
+bool ParsePivotSettings(const JsonValue::Object& object, PivotXrSettings& out, std::string& error) {
     static const std::unordered_set<std::string> allowed = {
-        "activationMode",
-        "activationBinding",
         "rotationMultiplier",
         "smoothing",
         "deadzoneDegrees",
@@ -857,7 +859,6 @@ bool ParsePivotDefaults(const JsonValue::Object& object, PivotXrResolvedSettings
         return false;
     }
 
-    std::optional<ActivationMode> activation_mode;
     std::optional<double> rotation_multiplier;
     std::optional<double> smoothing;
     std::optional<double> deadzone_degrees;
@@ -867,8 +868,7 @@ bool ParsePivotDefaults(const JsonValue::Object& object, PivotXrResolvedSettings
     std::optional<double> pitch_deadzone_degrees;
     std::optional<double> max_extra_pitch_degrees;
 
-    if (!ReadOptionalActivationMode(object, "activationMode", activation_mode, error) ||
-        !ReadOptionalNumber(object, "rotationMultiplier", rotation_multiplier, error) ||
+    if (!ReadOptionalNumber(object, "rotationMultiplier", rotation_multiplier, error) ||
         !ReadOptionalNumber(object, "smoothing", smoothing, error) ||
         !ReadOptionalNumber(object, "deadzoneDegrees", deadzone_degrees, error) ||
         !ReadOptionalNumber(object, "maxExtraYawDegrees", max_extra_yaw_degrees, error) ||
@@ -879,14 +879,6 @@ bool ParsePivotDefaults(const JsonValue::Object& object, PivotXrResolvedSettings
         return false;
     }
 
-    if (activation_mode.has_value()) {
-        out.activation_mode = *activation_mode;
-    }
-
-    const auto activation_binding_it = object.find("activationBinding");
-    if (activation_binding_it != object.end() && !ParseInputBinding(activation_binding_it->second, out.activation_binding, error)) {
-        return false;
-    }
     if (rotation_multiplier.has_value()) {
         out.yaw_rotation_multiplier = *rotation_multiplier;
     }
@@ -915,10 +907,71 @@ bool ParsePivotDefaults(const JsonValue::Object& object, PivotXrResolvedSettings
     return true;
 }
 
+bool ParsePivotProfile(const JsonValue& value, PivotXrProfile& out, std::string& error) {
+    const JsonValue::Object* object = RequireObject(value, "pivotProfile", error);
+    if (!object) {
+        return false;
+    }
+
+    static const std::unordered_set<std::string> allowed = {
+        "name",
+        "enabled",
+        "applicationIds",
+        "activationMode",
+        "activationBinding",
+        "settings",
+    };
+
+    if (!CheckAllowedKeys(*object, allowed, error)) {
+        return false;
+    }
+
+    const auto application_ids_it = object->find("applicationIds");
+    if (application_ids_it == object->end()) {
+        error = "Missing required field: pivotProfile.applicationIds";
+        return false;
+    }
+    if (!ParseStringArray(application_ids_it->second, "applicationIds", out.application_ids, error)) {
+        return false;
+    }
+
+    std::optional<std::string> name;
+    std::optional<bool> enabled;
+    std::optional<ActivationMode> activation_mode;
+
+    if (!ReadOptionalString(*object, "name", name, error) ||
+        !ReadOptionalBool(*object, "enabled", enabled, error) ||
+        !ReadOptionalActivationMode(*object, "activationMode", activation_mode, error)) {
+        return false;
+    }
+
+    out.name = name.value_or("New Profile");
+    out.enabled = enabled.value_or(true);
+    if (activation_mode.has_value()) {
+        out.activation_mode = *activation_mode;
+    }
+
+    const auto binding_it = object->find("activationBinding");
+    if (binding_it != object->end() && !ParseInputBinding(binding_it->second, out.activation_binding, error)) {
+        return false;
+    }
+
+    const auto settings_it = object->find("settings");
+    if (settings_it != object->end()) {
+        const JsonValue::Object* settings_object = RequireObject(settings_it->second, "pivotProfile.settings", error);
+        if (!settings_object || !ParsePivotSettings(*settings_object, out.settings, error)) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
 bool ParsePivotModule(const JsonValue::Object& object, PivotXrModuleConfig& out, std::string& error) {
     static const std::unordered_set<std::string> allowed = {
         "enabled",
         "defaults",
+        "profiles",
     };
 
     if (!CheckAllowedKeys(object, allowed, error)) {
@@ -931,14 +984,29 @@ bool ParsePivotModule(const JsonValue::Object& object, PivotXrModuleConfig& out,
     }
     if (enabled.has_value()) {
         out.enabled = *enabled;
-        out.defaults.enabled = *enabled;
     }
 
     const auto defaults_it = object.find("defaults");
     if (defaults_it != object.end()) {
-        const JsonValue::Object* defaults_object = RequireObject(defaults_it->second, "defaults", error);
-        if (!defaults_object || !ParsePivotDefaults(*defaults_object, out.defaults, error)) {
+        const JsonValue::Object* defaults_object = RequireObject(defaults_it->second, "pivotxr.defaults", error);
+        if (!defaults_object || !ParsePivotSettings(*defaults_object, out.defaults, error)) {
             return false;
+        }
+    }
+
+    const auto profiles_it = object.find("profiles");
+    if (profiles_it != object.end()) {
+        const JsonValue::Array* profiles = RequireArray(profiles_it->second, "pivotxr.profiles", error);
+        if (!profiles) {
+            return false;
+        }
+
+        for (const JsonValue& profile_value : *profiles) {
+            PivotXrProfile profile;
+            if (!ParsePivotProfile(profile_value, profile, error)) {
+                return false;
+            }
+            out.profiles.push_back(std::move(profile));
         }
     }
 
@@ -1057,7 +1125,6 @@ ParseResult ParseConfig(std::string_view json_text) {
     }
 
     result.document.depthxr.defaults.enabled = result.document.depthxr.enabled;
-    result.document.pivotxr.defaults.enabled = result.document.pivotxr.enabled;
     result.ok = true;
     return result;
 }

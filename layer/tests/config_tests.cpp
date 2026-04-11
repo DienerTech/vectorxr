@@ -66,11 +66,6 @@ void TestParseConfig() {
     "pivotxr": {
       "enabled": false,
       "defaults": {
-        "activationMode": "toggle",
-        "activationBinding": {
-          "type": "keyboard",
-          "chord": ["f8"]
-        },
         "rotationMultiplier": 1.5,
         "smoothing": 0.2,
         "deadzoneDegrees": 8.0,
@@ -79,7 +74,29 @@ void TestParseConfig() {
         "pitchSmoothing": 0.15,
         "pitchDeadzoneDegrees": 10.0,
         "maxExtraPitchDegrees": 18.0
-      }
+      },
+      "profiles": [
+        {
+          "name": "Game",
+          "applicationIds": ["game"],
+          "enabled": true,
+          "activationMode": "toggle",
+          "activationBinding": {
+            "type": "keyboard",
+            "chord": ["F8"]
+          },
+          "settings": {
+            "rotationMultiplier": 1.7,
+            "smoothing": 0.2,
+            "deadzoneDegrees": 8.0,
+            "maxExtraYawDegrees": 30.0,
+            "pitchRotationMultiplier": 1.2,
+            "pitchSmoothing": 0.15,
+            "pitchDeadzoneDegrees": 10.0,
+            "maxExtraPitchDegrees": 18.0
+          }
+        }
+      ]
     }
   }
 }
@@ -97,11 +114,12 @@ void TestParseConfig() {
     Expect(result.document.depthxr.bindings.toggle_enabled.chord[0] == "F7", "DepthXR toggle binding mismatch");
     Expect(result.document.depthxr.profiles.size() == 1, "DepthXR profile count mismatch");
     Expect(result.document.depthxr.profiles[0].application_ids[0] == "game", "DepthXR profile application id mismatch");
-    Expect(result.document.pivotxr.defaults.activation_binding.chord[0] == "F8", "PivotXR activation binding mismatch");
-    Expect(std::abs(result.document.pivotxr.defaults.yaw_max_extra_degrees - 25.0) < 0.0001,
-           "PivotXR yaw clamp mismatch");
-    Expect(std::abs(result.document.pivotxr.defaults.pitch_rotation_multiplier - 1.2) < 0.0001,
-           "PivotXR pitch multiplier mismatch");
+    Expect(result.document.pivotxr.profiles.size() == 1, "PivotXR profile count mismatch");
+    Expect(result.document.pivotxr.profiles[0].activation_binding.chord[0] == "F8", "PivotXR profile activation binding mismatch");
+    Expect(std::abs(result.document.pivotxr.profiles[0].settings.yaw_max_extra_degrees - 30.0) < 0.0001,
+           "PivotXR profile yaw clamp mismatch");
+    Expect(std::abs(result.document.pivotxr.profiles[0].settings.pitch_rotation_multiplier - 1.2) < 0.0001,
+           "PivotXR profile pitch multiplier mismatch");
 }
 
 void TestResolveRuntimeConfig() {
@@ -132,8 +150,7 @@ void TestResolveRuntimeConfig() {
       },
       "bindings": {
         "toggleEnabled": {
-          "type": "keyboard",
-          "chord": ["F7"]
+          "type": "none"
         }
       },
       "profiles": [
@@ -151,20 +168,37 @@ void TestResolveRuntimeConfig() {
     "pivotxr": {
       "enabled": true,
       "defaults": {
-        "activationMode": "hold",
-        "activationBinding": {
-          "type": "keyboard",
-          "chord": ["Ctrl", "Space"]
-        },
-        "rotationMultiplier": 1.7,
-        "smoothing": 0.25,
-        "deadzoneDegrees": 9.0,
+        "rotationMultiplier": 1.5,
+        "smoothing": 0.2,
+        "deadzoneDegrees": 8.0,
         "maxExtraYawDegrees": 22.0,
-        "pitchRotationMultiplier": 1.35,
-        "pitchSmoothing": 0.3,
-        "pitchDeadzoneDegrees": 14.0,
-        "maxExtraPitchDegrees": 24.0
-      }
+        "pitchRotationMultiplier": 1.0,
+        "pitchSmoothing": 0.2,
+        "pitchDeadzoneDegrees": 12.0,
+        "maxExtraPitchDegrees": 20.0
+      },
+      "profiles": [
+        {
+          "name": "DCS",
+          "applicationIds": ["dcs"],
+          "enabled": true,
+          "activationMode": "hold",
+          "activationBinding": {
+            "type": "keyboard",
+            "chord": ["Ctrl", "Space"]
+          },
+          "settings": {
+            "rotationMultiplier": 1.7,
+            "smoothing": 0.25,
+            "deadzoneDegrees": 9.0,
+            "maxExtraYawDegrees": 22.0,
+            "pitchRotationMultiplier": 1.35,
+            "pitchSmoothing": 0.3,
+            "pitchDeadzoneDegrees": 14.0,
+            "maxExtraPitchDegrees": 24.0
+          }
+        }
+      ]
     }
   }
 }
@@ -177,6 +211,7 @@ void TestResolveRuntimeConfig() {
     Expect(resolved.core.enabled, "Core enabled should be true");
     Expect(std::abs(resolved.depthxr.stereo_boost - 1.15) < 0.0001, "Profile stereoBoost override was not applied");
     Expect(std::abs(resolved.depthxr.convergence - 0.12) < 0.0001, "Profile convergence override was not applied");
+    Expect(resolved.depthxr_bindings.toggle_enabled.type == depthxr::InputBindingType::None, "DepthXR toggle binding should be none");
     Expect(resolved.pivotxr.enabled, "PivotXR module enable was not resolved");
     Expect(resolved.pivotxr.activation_mode == depthxr::ActivationMode::Hold, "PivotXR activation mode mismatch");
     Expect(resolved.pivotxr.activation_binding.chord.size() == 2, "PivotXR activation chord size mismatch");
@@ -214,8 +249,7 @@ void TestDisabledProfileFallsBackToDefaults() {
       },
       "bindings": {
         "toggleEnabled": {
-          "type": "keyboard",
-          "chord": ["F7"]
+          "type": "none"
         }
       },
       "profiles": [
@@ -233,11 +267,6 @@ void TestDisabledProfileFallsBackToDefaults() {
     "pivotxr": {
       "enabled": false,
       "defaults": {
-        "activationMode": "toggle",
-        "activationBinding": {
-          "type": "keyboard",
-          "chord": ["F8"]
-        },
         "rotationMultiplier": 1.5,
         "smoothing": 0.2,
         "deadzoneDegrees": 8.0,
@@ -246,7 +275,8 @@ void TestDisabledProfileFallsBackToDefaults() {
         "pitchSmoothing": 0.2,
         "pitchDeadzoneDegrees": 12.0,
         "maxExtraPitchDegrees": 20.0
-      }
+      },
+      "profiles": []
     }
   }
 }
@@ -258,6 +288,79 @@ void TestDisabledProfileFallsBackToDefaults() {
     const depthxr::ResolvedRuntimeConfig resolved = depthxr::ResolveRuntimeConfig(result.document, "DCS.exe");
     Expect(std::abs(resolved.depthxr.stereo_boost - 1.05) < 0.0001, "Disabled profile should fall back to defaults");
     Expect(std::abs(resolved.depthxr.convergence - 0.01) < 0.0001, "Disabled profile convergence should fall back to defaults");
+    Expect(!resolved.pivotxr.enabled, "PivotXR should be disabled");
+}
+
+void TestPivotProfileResolution() {
+    const std::string json = R"json(
+{
+  "version": 3,
+  "core": { "enabled": true, "logLevel": "info", "logRetentionFiles": 7 },
+  "applications": [
+    { "id": "dcs", "name": "DCS", "enabled": true, "match": { "exe": "DCS.exe" } }
+  ],
+  "modules": {
+    "depthxr": {
+      "enabled": true,
+      "defaults": {
+        "stereoBoostEnabled": true,
+        "convergenceEnabled": true,
+        "stereoBoost": 1.0,
+        "convergence": 0.0
+      },
+      "bindings": { "toggleEnabled": { "type": "none" } },
+      "profiles": []
+    },
+    "pivotxr": {
+      "enabled": true,
+      "defaults": {
+        "rotationMultiplier": 1.5,
+        "smoothing": 0.2,
+        "deadzoneDegrees": 8.0,
+        "maxExtraYawDegrees": 25.0,
+        "pitchRotationMultiplier": 1.0,
+        "pitchSmoothing": 0.2,
+        "pitchDeadzoneDegrees": 12.0,
+        "maxExtraPitchDegrees": 20.0
+      },
+      "profiles": [
+        {
+          "name": "DCS",
+          "applicationIds": ["dcs"],
+          "enabled": true,
+          "activationMode": "toggle",
+          "activationBinding": { "type": "keyboard", "chord": ["F8"] },
+          "settings": {
+            "rotationMultiplier": 2.0,
+            "smoothing": 0.3,
+            "deadzoneDegrees": 10.0,
+            "maxExtraYawDegrees": 60.0,
+            "pitchRotationMultiplier": 1.5,
+            "pitchSmoothing": 0.25,
+            "pitchDeadzoneDegrees": 14.0,
+            "maxExtraPitchDegrees": 45.0
+          }
+        }
+      ]
+    }
+  }
+}
+)json";
+
+    const depthxr::ParseResult result = depthxr::ParseConfig(json);
+    Expect(result.ok, "Config parser rejected valid pivot profile config: " + result.error);
+
+    const depthxr::ResolvedRuntimeConfig resolved = depthxr::ResolveRuntimeConfig(result.document, "DCS.exe");
+    Expect(resolved.pivotxr.enabled, "PivotXR should be enabled for DCS");
+    Expect(resolved.pivotxr.activation_mode == depthxr::ActivationMode::Toggle, "PivotXR activation mode mismatch");
+    Expect(resolved.pivotxr.activation_binding.chord[0] == "F8", "PivotXR activation binding mismatch");
+    Expect(std::abs(resolved.pivotxr.yaw_rotation_multiplier - 2.0) < 0.0001, "PivotXR yaw multiplier mismatch");
+    Expect(std::abs(resolved.pivotxr.yaw_max_extra_degrees - 60.0) < 0.0001, "PivotXR yaw clamp mismatch");
+    Expect(std::abs(resolved.pivotxr.pitch_rotation_multiplier - 1.5) < 0.0001, "PivotXR pitch multiplier mismatch");
+
+    // No profile for a different exe — Pivot should resolve as disabled.
+    const depthxr::ResolvedRuntimeConfig resolved_other = depthxr::ResolveRuntimeConfig(result.document, "other.exe");
+    Expect(!resolved_other.pivotxr.enabled, "PivotXR should be inactive for exe with no matching profile");
 }
 
 void TestInvalidPivotActivationBindingRejected() {
@@ -280,21 +383,13 @@ void TestInvalidPivotActivationBindingRejected() {
         "convergence": 0.0
       },
       "bindings": {
-        "toggleEnabled": {
-          "type": "keyboard",
-          "chord": ["F7"]
-        }
+        "toggleEnabled": { "type": "none" }
       },
       "profiles": []
     },
     "pivotxr": {
       "enabled": true,
       "defaults": {
-        "activationMode": "toggle",
-        "activationBinding": {
-          "type": "keyboard",
-          "chord": ["Mouse4"]
-        },
         "rotationMultiplier": 1.5,
         "smoothing": 0.2,
         "deadzoneDegrees": 8.0,
@@ -303,7 +398,28 @@ void TestInvalidPivotActivationBindingRejected() {
         "pitchSmoothing": 0.2,
         "pitchDeadzoneDegrees": 12.0,
         "maxExtraPitchDegrees": 20.0
-      }
+      },
+      "profiles": [
+        {
+          "name": "Game",
+          "applicationIds": [],
+          "enabled": true,
+          "activationBinding": {
+            "type": "keyboard",
+            "chord": ["Mouse4"]
+          },
+          "settings": {
+            "rotationMultiplier": 1.5,
+            "smoothing": 0.2,
+            "deadzoneDegrees": 8.0,
+            "maxExtraYawDegrees": 25.0,
+            "pitchRotationMultiplier": 1.0,
+            "pitchSmoothing": 0.2,
+            "pitchDeadzoneDegrees": 12.0,
+            "maxExtraPitchDegrees": 20.0
+          }
+        }
+      ]
     }
   }
 }
@@ -311,6 +427,48 @@ void TestInvalidPivotActivationBindingRejected() {
 
     const depthxr::ParseResult result = depthxr::ParseConfig(json);
     Expect(!result.ok, "Config parser accepted an unsupported PivotXR activation binding");
+}
+
+void TestNoneBindingParsed() {
+    const std::string json = R"json(
+{
+  "version": 3,
+  "core": { "enabled": true, "logLevel": "info", "logRetentionFiles": 7 },
+  "applications": [],
+  "modules": {
+    "depthxr": {
+      "enabled": true,
+      "defaults": {
+        "stereoBoostEnabled": true,
+        "convergenceEnabled": true,
+        "stereoBoost": 1.0,
+        "convergence": 0.0
+      },
+      "bindings": { "toggleEnabled": { "type": "none" } },
+      "profiles": []
+    },
+    "pivotxr": {
+      "enabled": false,
+      "defaults": {
+        "rotationMultiplier": 1.5,
+        "smoothing": 0.2,
+        "deadzoneDegrees": 8.0,
+        "maxExtraYawDegrees": 25.0,
+        "pitchRotationMultiplier": 1.0,
+        "pitchSmoothing": 0.2,
+        "pitchDeadzoneDegrees": 12.0,
+        "maxExtraPitchDegrees": 20.0
+      },
+      "profiles": []
+    }
+  }
+}
+)json";
+
+    const depthxr::ParseResult result = depthxr::ParseConfig(json);
+    Expect(result.ok, "Config parser rejected valid config with none binding: " + result.error);
+    Expect(result.document.depthxr.bindings.toggle_enabled.type == depthxr::InputBindingType::None,
+           "DepthXR toggle binding should be None");
 }
 
 void TestExeMatch() {
@@ -358,10 +516,10 @@ void TestQuadViewConvergenceKeepsInsetOffsetsAligned() {
                         (std::tan(1.0) - std::tan(0.4))) < 0.0001,
            "Right outer/inset horizontal relationship changed under convergence");
     Expect(std::abs((std::tan(views[0].fov.angle_right) - std::tan(views[0].fov.angle_left)) -
-                        original_left_outer_span) < 0.0001,
+                    original_left_outer_span) < 0.0001,
            "Outer horizontal FoV span changed under convergence");
     Expect(std::abs((std::tan(views[2].fov.angle_right) - std::tan(views[2].fov.angle_left)) -
-                        original_left_inset_span) < 0.0001,
+                    original_left_inset_span) < 0.0001,
            "Inset horizontal FoV span changed under convergence");
 }
 
@@ -450,7 +608,9 @@ int main() {
     TestParseConfig();
     TestResolveRuntimeConfig();
     TestDisabledProfileFallsBackToDefaults();
+    TestPivotProfileResolution();
     TestInvalidPivotActivationBindingRejected();
+    TestNoneBindingParsed();
     TestExeMatch();
     TestQuadViewStereoBoostKeepsInsetViewsInSync();
     TestQuadViewConvergenceKeepsInsetOffsetsAligned();
