@@ -43,14 +43,13 @@ fn default_rotation_multiplier() -> f64 {
 }
 
 fn default_activation_binding() -> InputBinding {
-    InputBinding::Keyboard {
-        chord: vec!["F8".into()],
-    }
+    InputBinding::None
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 enum InputBinding {
+    None,
     #[serde(rename_all = "camelCase")]
     Keyboard {
         #[serde(default)]
@@ -189,7 +188,30 @@ struct DepthXRModuleConfig {
     #[serde(default)]
     defaults: DepthXRSettings,
     #[serde(default)]
+    bindings: DepthXRBindings,
+    #[serde(default)]
     profiles: Vec<DepthXRProfileConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DepthXRBindings {
+    #[serde(default = "default_depth_toggle_binding")]
+    toggle_enabled: InputBinding,
+}
+
+impl Default for DepthXRBindings {
+    fn default() -> Self {
+        Self {
+            toggle_enabled: default_depth_toggle_binding(),
+        }
+    }
+}
+
+fn default_depth_toggle_binding() -> InputBinding {
+    InputBinding::Keyboard {
+        chord: vec!["F7".into()],
+    }
 }
 
 impl Default for DepthXRModuleConfig {
@@ -197,6 +219,7 @@ impl Default for DepthXRModuleConfig {
         Self {
             enabled: true,
             defaults: DepthXRSettings::default(),
+            bindings: DepthXRBindings::default(),
             profiles: Vec::new(),
         }
     }

@@ -83,6 +83,7 @@ ResolvedRuntimeConfig ResolveRuntimeConfig(const ConfigDocument& config, std::st
     ResolvedRuntimeConfig resolved;
     resolved.core = config.core;
     resolved.depthxr = ResolveDepthXrSettings(config, exe_name);
+    resolved.depthxr_bindings = config.depthxr.bindings;
     resolved.pivotxr = config.pivotxr.defaults;
     resolved.pivotxr.enabled = config.pivotxr.enabled;
     return resolved;

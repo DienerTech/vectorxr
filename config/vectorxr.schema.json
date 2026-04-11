@@ -55,6 +55,18 @@
           "type": "object",
           "additionalProperties": false,
           "required": [
+            "type"
+          ],
+          "properties": {
+            "type": {
+              "const": "none"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
             "type",
             "chord"
           ],
@@ -216,12 +228,25 @@
         }
       }
     },
+    "depthxrBindings": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "toggleEnabled"
+      ],
+      "properties": {
+        "toggleEnabled": {
+          "$ref": "#/$defs/inputBinding"
+        }
+      }
+    },
     "depthxrModule": {
       "type": "object",
       "additionalProperties": false,
       "required": [
         "enabled",
         "defaults",
+        "bindings",
         "profiles"
       ],
       "properties": {
@@ -230,6 +255,9 @@
         },
         "defaults": {
           "$ref": "#/$defs/depthxrSettings"
+        },
+        "bindings": {
+          "$ref": "#/$defs/depthxrBindings"
         },
         "profiles": {
           "type": "array",
@@ -279,7 +307,7 @@
         "maxExtraYawDegrees": {
           "type": "number",
           "minimum": 0.0,
-          "maximum": 45.0
+          "maximum": 180.0
         },
         "pitchRotationMultiplier": {
           "type": "number",
@@ -299,7 +327,7 @@
         "maxExtraPitchDegrees": {
           "type": "number",
           "minimum": 0.0,
-          "maximum": 45.0
+          "maximum": 180.0
         }
       }
     },

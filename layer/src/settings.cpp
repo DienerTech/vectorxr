@@ -145,6 +145,8 @@ std::optional<std::string> ParseActivationKey(const std::string& value) {
 
 const char* ToString(InputBindingType type) {
     switch (type) {
+    case InputBindingType::None:
+        return "none";
     case InputBindingType::Keyboard:
         return "keyboard";
     case InputBindingType::Device:
@@ -157,6 +159,9 @@ const char* ToString(InputBindingType type) {
 std::optional<InputBindingType> ParseInputBindingType(const std::string& value) {
     const std::string normalized = NormalizeValue(value);
 
+    if (normalized == "none") {
+        return InputBindingType::None;
+    }
     if (normalized == "keyboard") {
         return InputBindingType::Keyboard;
     }

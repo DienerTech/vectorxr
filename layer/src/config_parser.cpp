@@ -698,6 +698,24 @@ bool ParseDepthDefaults(const JsonValue::Object& object, DepthXrResolvedSettings
     return true;
 }
 
+bool ParseDepthBindings(const JsonValue::Object& object, DepthXrBindings& out, std::string& error) {
+    static const std::unordered_set<std::string> allowed = {
+        "toggleEnabled",
+    };
+
+    if (!CheckAllowedKeys(object, allowed, error)) {
+        return false;
+    }
+
+    const auto toggle_it = object.find("toggleEnabled");
+    if (toggle_it == object.end()) {
+        error = "Missing required field: toggleEnabled";
+        return false;
+    }
+
+    return ParseInputBinding(toggle_it->second, out.toggle_enabled, error);
+}
+
 bool ParseDepthProfileSettings(const JsonValue::Object& object, DepthXrSettingsOverride& out, std::string& error) {
     static const std::unordered_set<std::string> allowed = {
         "stereoBoostEnabled",
@@ -769,6 +787,7 @@ bool ParseDepthModule(const JsonValue::Object& object,
     static const std::unordered_set<std::string> allowed = {
         "enabled",
         "defaults",
+        "bindings",
         "profiles",
     };
 
@@ -789,6 +808,14 @@ bool ParseDepthModule(const JsonValue::Object& object,
     if (defaults_it != object.end()) {
         const JsonValue::Object* defaults_object = RequireObject(defaults_it->second, "defaults", error);
         if (!defaults_object || !ParseDepthDefaults(*defaults_object, out.defaults, error)) {
+            return false;
+        }
+    }
+
+    const auto bindings_it = object.find("bindings");
+    if (bindings_it != object.end()) {
+        const JsonValue::Object* bindings_object = RequireObject(bindings_it->second, "bindings", error);
+        if (!bindings_object || !ParseDepthBindings(*bindings_object, out.bindings, error)) {
             return false;
         }
     }

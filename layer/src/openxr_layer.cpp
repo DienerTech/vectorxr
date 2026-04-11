@@ -227,6 +227,10 @@ bool SameSettings(const ResolvedRuntimeConfig& lhs, const ResolvedRuntimeConfig&
            lhs.depthxr.convergence_enabled == rhs.depthxr.convergence_enabled &&
            NearlyEqual(lhs.depthxr.stereo_boost, rhs.depthxr.stereo_boost) &&
            NearlyEqual(lhs.depthxr.convergence, rhs.depthxr.convergence) &&
+           lhs.depthxr_bindings.toggle_enabled.type == rhs.depthxr_bindings.toggle_enabled.type &&
+           lhs.depthxr_bindings.toggle_enabled.chord == rhs.depthxr_bindings.toggle_enabled.chord &&
+           lhs.depthxr_bindings.toggle_enabled.device_guid == rhs.depthxr_bindings.toggle_enabled.device_guid &&
+           lhs.depthxr_bindings.toggle_enabled.input_path == rhs.depthxr_bindings.toggle_enabled.input_path &&
            lhs.pivotxr.enabled == rhs.pivotxr.enabled &&
            lhs.pivotxr.activation_mode == rhs.pivotxr.activation_mode &&
            lhs.pivotxr.activation_binding.type == rhs.pivotxr.activation_binding.type &&
@@ -243,12 +247,16 @@ bool SameSettings(const ResolvedRuntimeConfig& lhs, const ResolvedRuntimeConfig&
            NearlyEqual(lhs.pivotxr.pitch_max_extra_degrees, rhs.pivotxr.pitch_max_extra_degrees);
 }
 
+bool SameInputBinding(const InputBinding& lhs, const InputBinding& rhs) {
+    return lhs.type == rhs.type &&
+           lhs.chord == rhs.chord &&
+           lhs.device_guid == rhs.device_guid &&
+           lhs.input_path == rhs.input_path;
+}
+
 bool SamePivotActivationBinding(const PivotXrResolvedSettings& lhs, const PivotXrResolvedSettings& rhs) {
     return lhs.enabled == rhs.enabled && lhs.activation_mode == rhs.activation_mode &&
-           lhs.activation_binding.type == rhs.activation_binding.type &&
-           lhs.activation_binding.chord == rhs.activation_binding.chord &&
-           lhs.activation_binding.device_guid == rhs.activation_binding.device_guid &&
-           lhs.activation_binding.input_path == rhs.activation_binding.input_path;
+           SameInputBinding(lhs.activation_binding, rhs.activation_binding);
 }
 
 #if defined(_WIN32)
@@ -286,6 +294,32 @@ std::optional<int> ToVirtualKey(std::string_view key) {
 
 bool IsVirtualKeyDown(int virtual_key) {
     return (GetAsyncKeyState(virtual_key) & 0x8000) != 0;
+}
+
+bool IsKeyboardBindingDown(const InputBinding& binding) {
+    if (binding.type != InputBindingType::Keyboard) {
+        return false;
+    }
+
+    std::vector<int> virtual_keys;
+    virtual_keys.reserve(binding.chord.size());
+    for (const std::string& key : binding.chord) {
+        const std::optional<int> virtual_key = ToVirtualKey(key);
+        if (!virtual_key.has_value()) {
+            return false;
+        }
+        virtual_keys.push_back(*virtual_key);
+    }
+
+    if (virtual_keys.empty()) {
+        return false;
+    }
+
+    bool binding_down = true;
+    for (const int virtual_key : virtual_keys) {
+        binding_down = binding_down && IsVirtualKeyDown(virtual_key);
+    }
+    return binding_down;
 }
 #endif
 
@@ -401,6 +435,7 @@ XrResult OpenXrLayer::DestroyInstance(XrInstance instance) {
         locate_views_call_count_ = 0;
         pending_locate_views_diagnostics_ = 0;
         ResetPivotActivationState();
+        ResetDepthToggleState();
         ResetSessionState();
     }
 
@@ -521,6 +556,7 @@ XrResult OpenXrLayer::LocateSpace(XrSpace space, XrSpace base_space, XrTime time
     ReloadConfigIfNeeded();
     RefreshResolvedSettings();
     const bool pivotxr_active = IsPivotXrActive(resolved_settings_.pivotxr);
+    const bool depthxr_active = IsDepthXrActive();
 
     return LocateSpaceWithPivot(
         space, base_space, time, resolved_settings_.pivotxr, pivotxr_active, location, nullptr, nullptr);
@@ -654,12 +690,12 @@ XrResult OpenXrLayer::LocateViews(XrSession session,
         pivotxr_last_smoothing_wall_time_.reset();
     }
 
-    if (resolved_settings_.depthxr.enabled &&
+    if (depthxr_active &&
         resolved_settings_.depthxr.stereo_boost_enabled &&
         !NearlyEqual(resolved_settings_.depthxr.stereo_boost, 1.0)) {
         ApplyStereoBoost(adjusted_views, resolved_settings_.depthxr.stereo_boost, view_layout);
     }
-    if (resolved_settings_.depthxr.enabled &&
+    if (depthxr_active &&
         resolved_settings_.depthxr.convergence_enabled &&
         !NearlyEqual(resolved_settings_.depthxr.convergence, 0.0)) {
         ApplyConvergence(adjusted_views, resolved_settings_.depthxr.convergence, view_layout);
@@ -711,6 +747,7 @@ XrResult OpenXrLayer::LocateViews(XrSession session,
                << ", rightYawDelta=" << FormatDiagnosticDouble(right_yaw_delta)
                << ", leftPitchDelta=" << FormatDiagnosticDouble(left_pitch_delta)
                << ", rightPitchDelta=" << FormatDiagnosticDouble(right_pitch_delta)
+               << ", depthRuntimeActive=" << depthxr_active
                << ", stereoBoostEnabled=" << resolved_settings_.depthxr.stereo_boost_enabled
                << ", stereoBoost=" << FormatDiagnosticDouble(resolved_settings_.depthxr.stereo_boost)
                << ", convergenceEnabled=" << resolved_settings_.depthxr.convergence_enabled
@@ -779,6 +816,10 @@ void OpenXrLayer::ReloadConfigIfNeeded() {
 void OpenXrLayer::RefreshResolvedSettings() {
     const ResolvedRuntimeConfig previous = resolved_settings_;
     resolved_settings_ = ResolveRuntimeConfig(config_, current_exe_name_);
+    if (!SameInputBinding(previous.depthxr_bindings.toggle_enabled, resolved_settings_.depthxr_bindings.toggle_enabled) ||
+        previous.depthxr.enabled != resolved_settings_.depthxr.enabled) {
+        ResetDepthToggleState();
+    }
     if (!SamePivotActivationBinding(previous.pivotxr, resolved_settings_.pivotxr)) {
         ResetPivotActivationState();
         has_logged_pivotxr_spike_mode_ = false;
@@ -836,6 +877,8 @@ void OpenXrLayer::ResetSessionState() {
     pivotxr_smoothed_extra_yaw_radians_ = 0.0;
     pivotxr_smoothed_extra_pitch_radians_ = 0.0;
     pivotxr_last_smoothing_wall_time_.reset();
+    depthxr_toggle_enabled_ = true;
+    depthxr_toggle_binding_was_down_ = false;
     internal_local_space_ = XR_NULL_HANDLE;
     internal_view_space_ = XR_NULL_HANDLE;
     internal_stage_space_ = XR_NULL_HANDLE;
@@ -1066,6 +1109,7 @@ void OpenXrLayer::LogResolvedSettings(const ResolvedRuntimeConfig& settings) {
            << "coreEnabled=" << settings.core.enabled
            << ", logLevel=" << ToString(settings.core.log_level)
            << ", depthxrEnabled=" << settings.depthxr.enabled
+           << ", depthToggleBinding=" << BindingLabel(settings.depthxr_bindings.toggle_enabled)
            << ", stereoBoostEnabled=" << settings.depthxr.stereo_boost_enabled
            << ", stereoBoost=" << settings.depthxr.stereo_boost
            << ", convergenceEnabled=" << settings.depthxr.convergence_enabled
@@ -1092,6 +1136,36 @@ void OpenXrLayer::ResetPivotActivationState() {
     pivotxr_activation_key_was_down_ = false;
 }
 
+void OpenXrLayer::ResetDepthToggleState() {
+    depthxr_toggle_enabled_ = true;
+    depthxr_toggle_binding_was_down_ = false;
+}
+
+bool OpenXrLayer::IsDepthXrActive() {
+    if (!resolved_settings_.depthxr.enabled) {
+        ResetDepthToggleState();
+        return false;
+    }
+
+#if defined(_WIN32)
+    const bool binding_down = IsKeyboardBindingDown(resolved_settings_.depthxr_bindings.toggle_enabled);
+    const bool was_pressed_this_call = binding_down && !depthxr_toggle_binding_was_down_;
+    depthxr_toggle_binding_was_down_ = binding_down;
+
+    if (was_pressed_this_call) {
+        depthxr_toggle_enabled_ = !depthxr_toggle_enabled_;
+        pending_locate_views_diagnostics_ = 5;
+        logger_.Info(std::string("Depth effects ") +
+                     (depthxr_toggle_enabled_ ? "enabled" : "disabled") + " via " +
+                     BindingLabel(resolved_settings_.depthxr_bindings.toggle_enabled) + ".");
+    }
+
+    return depthxr_toggle_enabled_;
+#else
+    return resolved_settings_.depthxr.enabled;
+#endif
+}
+
 bool OpenXrLayer::IsPivotXrActive(const PivotXrResolvedSettings& settings) {
     if (!settings.enabled) {
         ResetPivotActivationState();
@@ -1099,29 +1173,7 @@ bool OpenXrLayer::IsPivotXrActive(const PivotXrResolvedSettings& settings) {
     }
 
 #if defined(_WIN32)
-    if (settings.activation_binding.type != InputBindingType::Keyboard) {
-        return false;
-    }
-
-    std::vector<int> virtual_keys;
-    virtual_keys.reserve(settings.activation_binding.chord.size());
-    for (const std::string& key : settings.activation_binding.chord) {
-        const std::optional<int> virtual_key = ToVirtualKey(key);
-        if (!virtual_key.has_value()) {
-            return false;
-        }
-        virtual_keys.push_back(*virtual_key);
-    }
-
-    if (virtual_keys.empty()) {
-        return false;
-    }
-
-    bool binding_down = true;
-    for (const int virtual_key : virtual_keys) {
-        binding_down = binding_down && IsVirtualKeyDown(virtual_key);
-    }
-
+    const bool binding_down = IsKeyboardBindingDown(settings.activation_binding);
     const bool was_pressed_this_call = binding_down && !pivotxr_activation_key_was_down_;
     pivotxr_activation_key_was_down_ = binding_down;
 

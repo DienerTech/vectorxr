@@ -30,6 +30,10 @@ function validateDepthXRSettings(prefix: string, settings: DepthXRSettings): str
 function validateInputBinding(prefix: string, binding: InputBinding): string[] {
   const errors: string[] = []
 
+  if (binding.type === 'none') {
+    return errors
+  }
+
   if (binding.type === 'keyboard') {
     if (binding.chord.length === 0) {
       errors.push(`${prefix}.chord must include at least one key`)
@@ -82,8 +86,8 @@ function validatePivotXRDefaults(defaults: PivotXRDefaults): string[] {
     errors.push('modules.pivotxr.defaults.deadzoneDegrees must be between 0 and 45')
   }
 
-  if (Number.isNaN(defaults.maxExtraYawDegrees) || defaults.maxExtraYawDegrees < 0 || defaults.maxExtraYawDegrees > 45) {
-    errors.push('modules.pivotxr.defaults.maxExtraYawDegrees must be between 0 and 45')
+  if (Number.isNaN(defaults.maxExtraYawDegrees) || defaults.maxExtraYawDegrees < 0 || defaults.maxExtraYawDegrees > 180) {
+    errors.push('modules.pivotxr.defaults.maxExtraYawDegrees must be between 0 and 180')
   }
 
   if (Number.isNaN(defaults.pitchRotationMultiplier) || defaults.pitchRotationMultiplier < 1.0 || defaults.pitchRotationMultiplier > 3.0) {
@@ -98,8 +102,8 @@ function validatePivotXRDefaults(defaults: PivotXRDefaults): string[] {
     errors.push('modules.pivotxr.defaults.pitchDeadzoneDegrees must be between 0 and 45')
   }
 
-  if (Number.isNaN(defaults.maxExtraPitchDegrees) || defaults.maxExtraPitchDegrees < 0 || defaults.maxExtraPitchDegrees > 45) {
-    errors.push('modules.pivotxr.defaults.maxExtraPitchDegrees must be between 0 and 45')
+  if (Number.isNaN(defaults.maxExtraPitchDegrees) || defaults.maxExtraPitchDegrees < 0 || defaults.maxExtraPitchDegrees > 180) {
+    errors.push('modules.pivotxr.defaults.maxExtraPitchDegrees must be between 0 and 180')
   }
 
   return errors
@@ -206,6 +210,7 @@ export function validateConfig(config: VectorXRConfig): string[] {
   errors.push(...validateCoreConfig(config.core))
   errors.push(...validateApplications(config.applications))
   errors.push(...validateDepthXRSettings('modules.depthxr.defaults.', config.modules.depthxr.defaults))
+  errors.push(...validateInputBinding('modules.depthxr.bindings.toggleEnabled', config.modules.depthxr.bindings.toggleEnabled))
   errors.push(...validatePivotXRDefaults(config.modules.pivotxr.defaults))
 
   const applicationIds = new Set(config.applications.map((application) => application.id))

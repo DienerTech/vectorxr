@@ -1,10 +1,13 @@
 <script setup lang="ts">
+import { computed } from 'vue'
+
+import BindingEditor from '../BindingEditor.vue'
 import EffectField from '../EffectField.vue'
 import ProfileEditor from '../ProfileEditor.vue'
 import { convergenceBadge, fromConvergenceDisplay, fromStereoBoostDisplay, stereoBoostBadge, toConvergenceDisplay, toStereoBoostDisplay } from '../../lib/display'
 import type { RegisteredApplication, VectorXRConfig } from '../../lib/model'
 
-defineProps<{
+const props = defineProps<{
   config: VectorXRConfig
   applications: RegisteredApplication[]
 }>()
@@ -14,6 +17,32 @@ defineEmits<{
   removeProfile: [index: number]
   syncProfileName: [index: number]
 }>()
+
+const profileWarnings = computed(() => {
+  const warnings = new Map<number, string[]>()
+  const firstProfileByApplication = new Map<string, number>()
+  const applicationNameById = new Map(props.applications.map((application) => [application.id, application.name]))
+
+  props.config.modules.depthxr.profiles.forEach((profile, index) => {
+    if (!profile.enabled) {
+      return
+    }
+
+    for (const applicationId of profile.applicationIds) {
+      const firstIndex = firstProfileByApplication.get(applicationId)
+      if (firstIndex === undefined) {
+        firstProfileByApplication.set(applicationId, index)
+        continue
+      }
+
+      const appName = applicationNameById.get(applicationId) ?? applicationId
+      const message = `${appName} is already targeted by Profile ${firstIndex + 1}. The first enabled profile wins.`
+      warnings.set(index, [...(warnings.get(index) ?? []), message])
+    }
+  })
+
+  return warnings
+})
 </script>
 
 <template>
@@ -34,6 +63,13 @@ defineEmits<{
         Adjust the shared depth defaults here. Profiles below can still override the same values per title while the config keeps the canonical
         runtime numbers.
       </div>
+
+      <BindingEditor
+        v-model="config.modules.depthxr.bindings.toggleEnabled"
+        class="mb-4"
+        label="Depth Toggle Binding"
+        description="Toggle Depth on or off at runtime for quick A/B testing."
+      />
 
       <div class="grid gap-3 lg:grid-cols-2">
         <EffectField
@@ -90,6 +126,7 @@ defineEmits<{
         :index="index"
         :profile="profile"
         :applications="applications"
+        :warnings="profileWarnings.get(index)"
         @remove="$emit('removeProfile', index)"
         @sync-name="$emit('syncProfileName', index)"
       />

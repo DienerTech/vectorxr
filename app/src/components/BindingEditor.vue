@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 
-import { defaultDeviceBinding, defaultKeyboardBinding, keyboardBindingKeyGroups, keyboardModifierKeys, type InputBinding } from '../lib/model'
+import { defaultDeviceBinding, defaultKeyboardBinding, defaultNoneBinding, keyboardBindingKeyGroups, keyboardModifierKeys, type InputBinding } from '../lib/model'
 
 const props = defineProps<{
   modelValue: InputBinding
@@ -16,6 +16,11 @@ const emit = defineEmits<{
 const bindingType = computed({
   get: () => props.modelValue.type,
   set: (type: InputBinding['type']) => {
+    if (type === 'none') {
+      emit('update:modelValue', defaultNoneBinding())
+      return
+    }
+
     emit('update:modelValue', type === 'keyboard' ? defaultKeyboardBinding() : defaultDeviceBinding())
   },
 })
@@ -72,12 +77,17 @@ function updateInputPath(inputPath: string) {
       </div>
 
       <select v-model="bindingType" class="app-input rounded-[0.75rem] px-3 py-2 text-sm">
+        <option value="none">None</option>
         <option value="keyboard">Keyboard</option>
         <option value="device">Device</option>
       </select>
     </div>
 
-    <div v-if="modelValue.type === 'keyboard'" class="mt-4 grid gap-3 lg:grid-cols-[minmax(0,1fr)_minmax(180px,240px)]">
+    <div v-if="modelValue.type === 'none'" class="mt-4 rounded-[0.75rem] border border-dashed px-4 py-3 text-sm surface-panel-strong">
+      No binding assigned. This action will not run until a binding is selected.
+    </div>
+
+    <div v-else-if="modelValue.type === 'keyboard'" class="mt-4 grid gap-3 lg:grid-cols-[minmax(0,1fr)_minmax(180px,240px)]">
       <div>
         <span class="mb-1.5 block text-sm font-medium">Modifiers</span>
         <div class="flex flex-wrap gap-2">

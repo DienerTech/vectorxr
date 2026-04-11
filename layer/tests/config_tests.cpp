@@ -46,6 +46,12 @@ void TestParseConfig() {
         "stereoBoost": 1.1,
         "convergence": 0.08
       },
+      "bindings": {
+        "toggleEnabled": {
+          "type": "keyboard",
+          "chord": ["F7"]
+        }
+      },
       "profiles": [
         {
           "name": "Game",
@@ -88,6 +94,7 @@ void TestParseConfig() {
     Expect(result.document.applications[0].id == "game", "Application registry id mismatch");
     Expect(std::abs(result.document.depthxr.defaults.stereo_boost - 1.1) < 0.0001, "DepthXR stereoBoost mismatch");
     Expect(std::abs(result.document.depthxr.defaults.convergence - 0.08) < 0.0001, "DepthXR convergence mismatch");
+    Expect(result.document.depthxr.bindings.toggle_enabled.chord[0] == "F7", "DepthXR toggle binding mismatch");
     Expect(result.document.depthxr.profiles.size() == 1, "DepthXR profile count mismatch");
     Expect(result.document.depthxr.profiles[0].application_ids[0] == "game", "DepthXR profile application id mismatch");
     Expect(result.document.pivotxr.defaults.activation_binding.chord[0] == "F8", "PivotXR activation binding mismatch");
@@ -122,6 +129,12 @@ void TestResolveRuntimeConfig() {
         "convergenceEnabled": true,
         "stereoBoost": 1.05,
         "convergence": 0.0
+      },
+      "bindings": {
+        "toggleEnabled": {
+          "type": "keyboard",
+          "chord": ["F7"]
+        }
       },
       "profiles": [
         {
@@ -199,6 +212,12 @@ void TestDisabledProfileFallsBackToDefaults() {
         "stereoBoost": 1.05,
         "convergence": 0.01
       },
+      "bindings": {
+        "toggleEnabled": {
+          "type": "keyboard",
+          "chord": ["F7"]
+        }
+      },
       "profiles": [
         {
           "name": "DCS",
@@ -259,6 +278,12 @@ void TestInvalidPivotActivationBindingRejected() {
         "convergenceEnabled": true,
         "stereoBoost": 1.05,
         "convergence": 0.0
+      },
+      "bindings": {
+        "toggleEnabled": {
+          "type": "keyboard",
+          "chord": ["F7"]
+        }
       },
       "profiles": []
     },

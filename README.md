@@ -59,6 +59,12 @@ High-level shape:
         "stereoBoost": 1.1,
         "convergence": 0.0
       },
+      "bindings": {
+        "toggleEnabled": {
+          "type": "keyboard",
+          "chord": ["F7"]
+        }
+      },
       "profiles": [
         {
           "name": "DCS",
@@ -78,8 +84,7 @@ High-level shape:
       "defaults": {
         "activationMode": "toggle",
         "activationBinding": {
-          "type": "keyboard",
-          "chord": ["F8"]
+          "type": "none"
         },
         "rotationMultiplier": 1.5,
         "smoothing": 0.2,

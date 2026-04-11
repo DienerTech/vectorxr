@@ -47,7 +47,9 @@ class OpenXrLayer {
     void CaptureInstanceFunctions();
     void LogResolvedSettings(const ResolvedRuntimeConfig& settings);
     void ResetPivotActivationState();
+    void ResetDepthToggleState();
     bool IsPivotXrActive(const PivotXrResolvedSettings& settings);
+    bool IsDepthXrActive();
     void ResetSessionState();
     XrResult CreateInternalReferenceSpaces(XrSession session);
     bool EnsureEyeOffsets(XrSession session,
@@ -90,6 +92,8 @@ class OpenXrLayer {
     std::optional<std::chrono::steady_clock::time_point> pivotxr_last_smoothing_wall_time_;
     bool pivotxr_toggle_enabled_{false};
     bool pivotxr_activation_key_was_down_{false};
+    bool depthxr_toggle_enabled_{true};
+    bool depthxr_toggle_binding_was_down_{false};
     XrSession active_session_{XR_NULL_HANDLE};
     XrSpace internal_local_space_{XR_NULL_HANDLE};
     XrSpace internal_view_space_{XR_NULL_HANDLE};

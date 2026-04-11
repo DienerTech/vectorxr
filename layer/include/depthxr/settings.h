@@ -19,13 +19,14 @@ enum class ActivationMode {
 };
 
 enum class InputBindingType {
+    None,
     Keyboard,
     Device,
 };
 
 struct InputBinding {
-    InputBindingType type{InputBindingType::Keyboard};
-    std::vector<std::string> chord{"F8"};
+    InputBindingType type{InputBindingType::None};
+    std::vector<std::string> chord;
     std::string device_guid;
     std::string input_path{"button-1"};
 };
@@ -51,6 +52,10 @@ struct DepthXrResolvedSettings {
     double convergence{0.0};
 };
 
+struct DepthXrBindings {
+    InputBinding toggle_enabled{InputBindingType::None, {}, "", "button-1"};
+};
+
 struct ProfileMatch {
     std::string exe_name;
 };
@@ -72,6 +77,7 @@ struct DepthXrProfile {
 struct DepthXrModuleConfig {
     bool enabled{true};
     DepthXrResolvedSettings defaults;
+    DepthXrBindings bindings;
     std::vector<DepthXrProfile> profiles;
 };
 
@@ -105,6 +111,7 @@ struct ConfigDocument {
 struct ResolvedRuntimeConfig {
     CoreSettings core;
     DepthXrResolvedSettings depthxr;
+    DepthXrBindings depthxr_bindings;
     PivotXrResolvedSettings pivotxr;
 };
 

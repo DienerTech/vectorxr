@@ -7,6 +7,7 @@ defineProps<{
   index: number
   profile: DepthXRProfileConfig
   applications: RegisteredApplication[]
+  warnings?: string[]
 }>()
 
 defineEmits<{
@@ -40,6 +41,17 @@ defineEmits<{
       >
         Remove
       </button>
+    </div>
+
+    <div
+      v-if="warnings && warnings.length > 0"
+      class="mb-4 rounded-[0.9rem] border px-4 py-3 text-sm leading-6 chip-warning"
+      style="border-color: var(--app-border)"
+    >
+      <p class="font-medium">Profile conflict</p>
+      <ul class="mt-2 space-y-1">
+        <li v-for="warning in warnings" :key="warning">{{ warning }}</li>
+      </ul>
     </div>
 
     <div

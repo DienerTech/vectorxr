@@ -28,7 +28,11 @@ defineProps<{
       <div class="mt-4 grid gap-3 lg:grid-cols-2">
         <label class="block">
           <span class="mb-1.5 block text-sm font-medium">Activation Mode</span>
-          <select v-model="config.modules.pivotxr.defaults.activationMode" class="app-input w-full rounded-[0.75rem] px-4 py-2.5">
+          <select
+            v-model="config.modules.pivotxr.defaults.activationMode"
+            class="app-input w-full rounded-[0.75rem] px-4 py-2.5"
+            title="Toggle flips Pivot on each binding press. Hold only applies Pivot while the binding is down."
+          >
             <option value="toggle">toggle</option>
             <option value="hold">hold</option>
           </select>
@@ -49,6 +53,7 @@ defineProps<{
             max="3"
             step="0.05"
             type="number"
+            title="Scales yaw movement outside the deadzone."
           />
         </label>
 
@@ -61,6 +66,7 @@ defineProps<{
             max="1"
             step="0.01"
             type="number"
+            title="Smooths yaw response over time. Higher values feel slower."
           />
         </label>
 
@@ -73,6 +79,7 @@ defineProps<{
             max="45"
             step="0.5"
             type="number"
+            title="Yaw movement inside this angle remains unchanged."
           />
         </label>
 
@@ -82,9 +89,10 @@ defineProps<{
             v-model.number="config.modules.pivotxr.defaults.maxExtraYawDegrees"
             class="app-input w-full rounded-[0.75rem] px-4 py-2.5"
             min="0"
-            max="45"
+            max="180"
             step="0.5"
             type="number"
+            title="Maximum extra yaw Pivot can add."
           />
         </label>
       </div>
@@ -105,6 +113,7 @@ defineProps<{
               max="3"
               step="0.05"
               type="number"
+              title="Scales pitch movement outside the deadzone."
             />
           </label>
 
@@ -117,6 +126,7 @@ defineProps<{
               max="1"
               step="0.01"
               type="number"
+              title="Smooths pitch response over time. Higher values feel slower."
             />
           </label>
 
@@ -129,6 +139,7 @@ defineProps<{
               max="45"
               step="0.5"
               type="number"
+              title="Pitch movement inside this angle remains unchanged."
             />
           </label>
 
@@ -138,9 +149,10 @@ defineProps<{
               v-model.number="config.modules.pivotxr.defaults.maxExtraPitchDegrees"
               class="app-input w-full rounded-[0.75rem] px-4 py-2.5"
               min="0"
-              max="45"
+              max="180"
               step="0.5"
               type="number"
+              title="Maximum extra pitch Pivot can add."
             />
           </label>
         </div>

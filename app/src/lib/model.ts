@@ -33,7 +33,11 @@ export interface DeviceBinding {
   inputPath: string
 }
 
-export type InputBinding = KeyboardBinding | DeviceBinding
+export interface NoneBinding {
+  type: 'none'
+}
+
+export type InputBinding = NoneBinding | KeyboardBinding | DeviceBinding
 
 export interface CoreConfig {
   enabled: boolean
@@ -64,9 +68,14 @@ export interface DepthXRProfileConfig {
   settings: DepthXRSettings
 }
 
+export interface DepthXRBindings {
+  toggleEnabled: InputBinding
+}
+
 export interface DepthXRModuleConfig {
   enabled: boolean
   defaults: DepthXRSettings
+  bindings: DepthXRBindings
   profiles: DepthXRProfileConfig[]
 }
 
@@ -146,6 +155,12 @@ export function defaultDepthXRSettings(): DepthXRSettings {
   }
 }
 
+export function defaultDepthXRBindings(): DepthXRBindings {
+  return {
+    toggleEnabled: defaultNoneBinding(),
+  }
+}
+
 export function sanitizeApplicationId(value: string): string {
   const normalized = value
     .trim()
@@ -189,7 +204,7 @@ export function createApplication(exe = 'Game.exe', applications: RegisteredAppl
 export function defaultPivotXRDefaults(): PivotXRDefaults {
   return {
     activationMode: 'toggle',
-    activationBinding: defaultKeyboardBinding('F8'),
+    activationBinding: defaultNoneBinding(),
     rotationMultiplier: 1.5,
     smoothing: 0.2,
     deadzoneDegrees: 8,
@@ -198,6 +213,12 @@ export function defaultPivotXRDefaults(): PivotXRDefaults {
     pitchSmoothing: 0.2,
     pitchDeadzoneDegrees: 12,
     maxExtraPitchDegrees: 20,
+  }
+}
+
+export function defaultNoneBinding(): NoneBinding {
+  return {
+    type: 'none',
   }
 }
 
@@ -225,6 +246,7 @@ export function defaultConfig(): VectorXRConfig {
       depthxr: {
         enabled: true,
         defaults: defaultDepthXRSettings(),
+        bindings: defaultDepthXRBindings(),
         profiles: [],
       },
       pivotxr: {
@@ -334,6 +356,10 @@ function normalizeKeyboardChord(value: unknown, fallback: string[]): string[] {
 export function normalizeInputBinding(value: unknown, fallback: InputBinding): InputBinding {
   const source = isRecord(value) ? value : {}
 
+  if (source.type === 'none') {
+    return defaultNoneBinding()
+  }
+
   if (source.type === 'device') {
     return {
       type: 'device',
@@ -353,6 +379,10 @@ export function bindingLabel(binding: InputBinding): string {
     const device = binding.deviceGuid.trim() || 'Unassigned device'
     const input = binding.inputPath.trim() || 'unassigned input'
     return `${device} / ${input}`
+  }
+
+  if (binding.type === 'none') {
+    return 'None'
   }
 
   return binding.chord.join('+')
@@ -402,6 +432,12 @@ function normalizeVectorXRConfig(value: unknown): VectorXRConfig {
       depthxr: {
         enabled: normalizeBoolean(depthxr.enabled, fallback.modules.depthxr.enabled),
         defaults: normalizeDepthXRSettings(depthxr.defaults, fallback.modules.depthxr.defaults),
+        bindings: {
+          toggleEnabled: normalizeInputBinding(
+            isRecord(depthxr.bindings) ? depthxr.bindings.toggleEnabled : undefined,
+            fallback.modules.depthxr.bindings.toggleEnabled,
+          ),
+        },
         profiles: profileValues.map((profileValue) => {
           const profile = isRecord(profileValue) ? profileValue : {}
           const settings = normalizeDepthXRSettings(profile.settings, fallback.modules.depthxr.defaults)
