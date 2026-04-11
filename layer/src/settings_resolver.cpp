@@ -41,7 +41,7 @@ bool ExeNameMatches(std::string_view lhs, std::string_view rhs) {
 
 const RegisteredApplication* FindMatchingApplication(const ConfigDocument& config, std::string_view exe_name) {
     for (const RegisteredApplication& application : config.applications) {
-        if (application.enabled && ExeNameMatches(application.match.exe_name, exe_name)) {
+        if (ExeNameMatches(application.match.exe_name, exe_name)) {
             return &application;
         }
     }

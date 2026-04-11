@@ -33,7 +33,7 @@ std::string NormalizeValue(const std::string& value) {
 const char* ToString(LogLevel level) {
     switch (level) {
     case LogLevel::Off:
-        return "off";
+        return "none";
     case LogLevel::Error:
         return "error";
     case LogLevel::Info:
@@ -48,11 +48,11 @@ const char* ToString(LogLevel level) {
 std::optional<LogLevel> ParseLogLevel(const std::string& value) {
     const std::string normalized = NormalizeValue(value);
 
-    if (normalized == "off") {
+    if (normalized == "none" || normalized == "off") {
         return LogLevel::Off;
     }
     if (normalized == "error") {
-        return LogLevel::Error;
+        return LogLevel::Info;
     }
     if (normalized == "info") {
         return LogLevel::Info;

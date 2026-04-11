@@ -1,6 +1,6 @@
-export type LogLevel = 'off' | 'error' | 'info' | 'debug'
+export type LogLevel = 'none' | 'info' | 'debug'
 export type ActivationMode = 'toggle' | 'hold'
-export type AppTab = 'core' | 'depthxr' | 'pivotxr'
+export type AppTab = 'core' | 'registry' | 'about' | 'depthxr' | 'pivotxr'
 export const keyboardBindingKeyGroups = [
   {
     label: 'Function Keys',
@@ -127,8 +127,16 @@ function isRecord(value: unknown): value is UnknownRecord {
 }
 
 function normalizeLogLevel(value: unknown): LogLevel {
-  if (value === 'off' || value === 'error' || value === 'info' || value === 'debug') {
+  if (value === 'none' || value === 'info' || value === 'debug') {
     return value
+  }
+
+  if (value === 'off') {
+    return 'none'
+  }
+
+  if (value === 'error') {
+    return 'info'
   }
 
   return 'info'
@@ -413,7 +421,7 @@ function normalizeApplication(value: unknown, fallbackId: string, existing: Regi
   return {
     id: uniqueApplicationId(id, existing),
     name,
-    enabled: normalizeBoolean(source.enabled, true),
+    enabled: true,
     match: {
       exe,
     },

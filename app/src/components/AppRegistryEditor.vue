@@ -18,7 +18,7 @@ defineEmits<{
         <p class="eyebrow text-xs uppercase tracking-[0.24em]">Applications</p>
         <h2 class="mt-2 text-2xl font-semibold tracking-tight">Application registry</h2>
         <p class="mt-2 text-sm leading-6 text-muted">
-          Register titles once, then reuse them across module profiles.
+          Register the applications that Depth and Pivot profiles can target by executable name. Add a title once here, then assign it from the profile editors in the module tabs.
         </p>
       </div>
 
@@ -36,10 +36,6 @@ defineEmits<{
           </div>
 
           <div class="flex flex-wrap items-center gap-3">
-            <label class="pill-toggle inline-flex items-center gap-2 rounded-full px-3 py-1.5 text-xs font-medium">
-              <input v-model="application.enabled" class="h-4 w-4 accent-depthxr-copper" type="checkbox" />
-              Enabled
-            </label>
             <button class="button-secondary rounded-[0.75rem] px-4 py-2 text-sm font-medium" type="button" @click="$emit('remove', index)">
               Remove
             </button>

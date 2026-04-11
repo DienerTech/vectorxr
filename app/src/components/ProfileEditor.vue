@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import { ref } from 'vue'
+
 import EffectField from './EffectField.vue'
 import { convergenceBadge, fromConvergenceDisplay, fromStereoBoostDisplay, stereoBoostBadge, toConvergenceDisplay, toStereoBoostDisplay } from '../lib/display'
 import type { DepthXRProfileConfig, RegisteredApplication } from '../lib/model'
@@ -14,6 +16,12 @@ defineEmits<{
   remove: []
   syncName: []
 }>()
+
+const editingName = ref(false)
+
+function finishNameEdit() {
+  editingName.value = false
+}
 </script>
 
 <template>
@@ -21,26 +29,44 @@ defineEmits<{
     class="rounded-[1rem] border p-5 shadow-panel transition"
     :class="profile.enabled ? 'surface-panel' : 'surface-panel-soft'"
   >
-    <div class="mb-4 flex flex-wrap items-center justify-between gap-3">
-      <div>
+    <div class="mb-4 space-y-2">
+      <p class="eyebrow text-xs uppercase tracking-[0.24em]">Profile {{ index + 1 }}</p>
+      <div class="flex flex-wrap items-center justify-between gap-3">
         <div class="flex flex-wrap items-center gap-2">
-          <p class="eyebrow text-xs uppercase tracking-[0.24em]">Profile {{ index + 1 }}</p>
-          <span
-            class="rounded-full px-2.5 py-1 text-[11px] font-medium uppercase tracking-[0.15em]"
-            :class="profile.enabled ? 'chip-success' : 'chip-idle'"
+          <h3 v-if="!editingName" class="text-xl font-semibold tracking-tight">{{ profile.name }}</h3>
+          <input
+            v-else
+            v-model="profile.name"
+            class="app-input w-full max-w-sm rounded-[0.75rem] px-3 py-2 text-xl font-semibold tracking-tight"
+            placeholder="DCS"
+            type="text"
+            @blur="finishNameEdit"
+            @keydown.enter="finishNameEdit"
+          />
+          <button
+            v-if="!editingName"
+            class="button-secondary inline-flex h-8 w-8 items-center justify-center rounded-[0.5rem]"
+            type="button"
+            aria-label="Edit profile name"
+            @click="editingName = true"
           >
-            {{ profile.enabled ? 'Active' : 'Disabled' }}
-          </span>
+            <svg aria-hidden="true" class="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
+              <path d="M13.92 2.87a2.2 2.2 0 0 1 3.11 3.11l-.72.72-3.11-3.11.72-.72Zm-1.7 1.7 3.11 3.11-8.7 8.7-3.44.33.33-3.44 8.7-8.7Z" />
+            </svg>
+          </button>
+          <label class="pill-toggle inline-flex items-center gap-2 rounded-full px-3 py-1.5 text-xs font-medium">
+            <input v-model="profile.enabled" class="h-4 w-4 accent-depthxr-copper" type="checkbox" />
+            {{ profile.enabled ? 'Profile Enabled' : 'Profile Disabled' }}
+          </label>
         </div>
-        <h3 class="mt-2 text-xl font-semibold tracking-tight">{{ profile.name }}</h3>
+        <button
+          class="button-secondary rounded-[0.75rem] px-4 py-2 text-sm font-medium"
+          type="button"
+          @click="$emit('remove')"
+        >
+          Remove
+        </button>
       </div>
-      <button
-        class="button-secondary rounded-[0.75rem] px-4 py-2 text-sm font-medium"
-        type="button"
-        @click="$emit('remove')"
-      >
-        Remove
-      </button>
     </div>
 
     <div
@@ -61,17 +87,7 @@ defineEmits<{
       This profile is disabled and will not activate at runtime.
     </div>
 
-    <div class="grid gap-3 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
-      <label class="block">
-        <span class="mb-1.5 block text-sm font-medium">Profile Name</span>
-        <input
-          v-model="profile.name"
-          class="app-input w-full rounded-[0.75rem] px-4 py-2.5"
-          placeholder="DCS"
-          type="text"
-        />
-      </label>
-
+    <div class="grid gap-3">
       <label class="block">
         <span class="mb-1.5 block text-sm font-medium">Applications</span>
         <div class="rounded-[0.75rem] border p-3 surface-panel-strong">
@@ -87,15 +103,10 @@ defineEmits<{
             </span>
           </label>
 
-          <p v-if="applications.length === 0" class="text-sm text-muted">Add an application on the Home tab before assigning this profile.</p>
+          <p v-if="applications.length === 0" class="text-sm text-muted">Add an application on the Application Registry tab before assigning this profile.</p>
         </div>
       </label>
     </div>
-
-    <label class="pill-toggle mt-4 inline-flex items-center gap-3 rounded-full px-4 py-2 text-sm font-medium">
-      <input v-model="profile.enabled" class="h-4 w-4 accent-depthxr-copper" type="checkbox" />
-      Profile Enabled
-    </label>
 
     <div class="mt-4 grid gap-3 lg:grid-cols-2">
       <EffectField
@@ -103,7 +114,7 @@ defineEmits<{
         v-model:value="profile.settings.stereoBoost"
         :muted="!profile.enabled"
         title="Stereo Boost"
-        subtitle="Scales horizontal eye separation around the midpoint."
+        subtitle="Scales horizontal eye separation around the midpoint. Start around +5.0 to +10.0 and adjust slowly."
         :min="1"
         :max="2"
         :step="0.01"
@@ -119,7 +130,7 @@ defineEmits<{
         v-model:value="profile.settings.convergence"
         :muted="!profile.enabled"
         title="Convergence"
-        subtitle="Shifts projection centers to move the zero-parallax plane."
+        subtitle="Shifts projection centers to move the zero-parallax plane. Start at 0.0; it can be particularly strong and may not apply in all titles."
         :min="0"
         :max="0.5"
         :step="0.001"

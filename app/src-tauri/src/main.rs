@@ -403,6 +403,7 @@ fn normalize_config(mut config: VectorXRConfig) -> VectorXRConfig {
     config.version = 3;
 
     for application in &mut config.applications {
+        application.enabled = true;
         if application.id.trim().is_empty() {
             application.id = sanitize_application_id(&application.name);
         }

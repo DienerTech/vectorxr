@@ -122,6 +122,16 @@ void TestParseConfig() {
            "PivotXR profile pitch multiplier mismatch");
 }
 
+void TestLogLevelCompatibility() {
+    const auto none = depthxr::ParseLogLevel("none");
+    const auto off = depthxr::ParseLogLevel("off");
+    const auto error = depthxr::ParseLogLevel("error");
+    Expect(none.has_value() && *none == depthxr::LogLevel::Off, "none should disable logging");
+    Expect(off.has_value() && *off == depthxr::LogLevel::Off, "off should remain compatible");
+    Expect(error.has_value() && *error == depthxr::LogLevel::Info, "error should normalize to enabled logging");
+    Expect(std::string(depthxr::ToString(depthxr::LogLevel::Off)) == "none", "Off should save as none");
+}
+
 void TestResolveRuntimeConfig() {
     const std::string json = R"json(
 {
@@ -606,6 +616,7 @@ void TestLoggerCollapsesDuplicateMessages() {
 
 int main() {
     TestParseConfig();
+    TestLogLevelCompatibility();
     TestResolveRuntimeConfig();
     TestDisabledProfileFallsBackToDefaults();
     TestPivotProfileResolution();

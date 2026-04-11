@@ -455,7 +455,7 @@ bool ReadOptionalLogLevel(const JsonValue::Object& object,
 
     out = ParseLogLevel(it->second.AsString());
     if (!out) {
-        error = key + " must be one of: off, error, info, debug";
+        error = key + " must be one of: none, info, debug";
         return false;
     }
     return true;

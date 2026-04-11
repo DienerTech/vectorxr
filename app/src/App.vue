@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 
-import AppHeader from './components/AppHeader.vue'
+import AppRegistryEditor from './components/AppRegistryEditor.vue'
 import ImportPreviewModal from './components/ImportPreviewModal.vue'
 import LogViewerModal from './components/LogViewerModal.vue'
 import PatchNotesModal from './components/PatchNotesModal.vue'
@@ -32,42 +32,24 @@ const importErrors = ref<string[]>([])
 
 const latestPatch = patchNotes[0]
 
-const activeSummary = computed(() => {
-  if (store.state.activeTab === 'core') {
-    return {
-      eyebrow: 'Home',
-          title: 'VectorXR Utility Suite',
-    body: 'Modern, open-source configuration utility for VectorXR and its modules.',
-      panelTitle: 'Home focus',
-      panelBody: 'Suite-wide controls, log access, and the product summary live here.',
-    }
-  }
-
-  if (store.state.activeTab === 'depthxr') {
-    return {
-      eyebrow: 'Depth',
-    title: 'VectorXR Utility Suite',
-    body: 'Modern, open-source configuration utility for VectorXR and its modules.',
-      panelTitle: 'Depth focus',
-      panelBody: 'Defaults and profile overrides stay centered on depth tuning and quick comparison.',
-    }
-  }
-
-  return {
-    eyebrow: 'Pivot',
-    title: 'VectorXR Utility Suite',
-    body: 'Modern, open-source configuration utility for VectorXR and its modules.',
-    panelTitle: 'Pivot focus',
-    panelBody: 'Activation behavior, rotation limits, and tuning controls stay grouped together here.',
-  }
-})
-
 const tabs = computed(() => [
   {
     id: 'core' as const,
     label: 'Home',
     subtitle: 'Suite settings and logs',
     status: store.state.config.core.enabled ? 'Suite on' : 'Suite off',
+  },
+  {
+    id: 'registry' as const,
+    label: 'Application Registry',
+    subtitle: 'Registered titles',
+    status: `${store.state.config.applications.length} app${store.state.config.applications.length === 1 ? '' : 's'}`,
+  },
+  {
+    id: 'about' as const,
+    label: 'About',
+    subtitle: 'Project and patches',
+    status: latestPatch.version,
   },
   {
     id: 'depthxr' as const,
@@ -183,19 +165,7 @@ function cancelImport() {
   <main class="app-shell-bg h-screen overflow-hidden px-4 py-4 md:px-6 xl:px-8">
     <section class="mx-auto flex h-full max-w-[1500px] flex-col">
       <div class="shrink-0 pb-4 pt-1">
-        <AppHeader
-          :eyebrow="activeSummary.eyebrow"
-          :title="activeSummary.title"
-          :body="activeSummary.body"
-          :status="store.state.status || 'Ready.'"
-          :dirty="dirty"
-          :latest-patch="latestPatch"
-          @open-patch-notes="patchNotesOpen = true"
-        />
-
-        <div class="mt-4">
-          <TopNavTabs :active-tab="store.state.activeTab" :tabs="tabs" @select="store.setActiveTab" />
-        </div>
+        <TopNavTabs :active-tab="store.state.activeTab" :tabs="tabs" @select="store.setActiveTab" />
       </div>
 
       <section class="min-h-0 flex-1 overflow-y-auto pb-4">
@@ -206,10 +176,44 @@ function cancelImport() {
           :log-path="logSnapshot?.activePath"
           :theme-preference="themePreference"
           @view-logs="openLogs"
-          @add-application="store.addApplication"
-          @remove-application="store.removeApplication"
           @update:theme-preference="themePreference = $event"
         />
+        <AppRegistryEditor
+          v-else-if="store.state.activeTab === 'registry'"
+          :applications="store.state.config.applications"
+          @add="store.addApplication"
+          @remove="store.removeApplication"
+        />
+        <div v-else-if="store.state.activeTab === 'about'" class="space-y-6">
+          <article class="rounded-[1.25rem] border p-5 shadow-panel backdrop-blur surface-panel">
+            <h2 class="text-2xl font-semibold tracking-tight">About VectorXR</h2>
+            <p class="mt-3 max-w-3xl text-sm leading-6 text-muted">
+              VectorXR is a shared configuration utility for depth, rotation, application profiles, and predictable runtime settings.
+              Developed by DienerTech. Copyright DienerTech LLC.
+            </p>
+          </article>
+
+          <article class="rounded-[1.25rem] border p-5 shadow-panel backdrop-blur surface-panel">
+            <div class="flex flex-wrap items-start justify-between gap-4">
+              <div>
+                <p class="eyebrow text-xs uppercase tracking-[0.24em]">Latest Patch Notes</p>
+                <h2 class="mt-2 text-2xl font-semibold tracking-tight">{{ latestPatch.title }}</h2>
+                <p class="mt-2 max-w-3xl text-sm leading-6 text-muted">{{ latestPatch.summary }}</p>
+              </div>
+
+              <span class="chip-accent rounded-full px-3 py-1 text-xs font-medium uppercase tracking-[0.18em]">
+                {{ latestPatch.version }}
+              </span>
+            </div>
+
+            <div class="mt-5 flex flex-wrap items-center justify-between gap-3 text-sm">
+              <span class="text-muted">{{ latestPatch.date }}</span>
+              <button class="button-accent rounded-[0.75rem] px-4 py-2 text-sm font-medium" type="button" @click="patchNotesOpen = true">
+                Read full patch notes
+              </button>
+            </div>
+          </article>
+        </div>
         <DepthXrTab
           v-else-if="store.state.activeTab === 'depthxr'"
           :config="store.state.config"

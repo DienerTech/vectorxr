@@ -62,16 +62,7 @@ function fromDisplay(value: number): number {
       </label>
     </div>
 
-    <div class="grid gap-3 md:grid-cols-[minmax(0,1fr)_7rem] md:items-center">
-      <input
-        :value="value"
-        :min="min"
-        :max="max"
-        :step="step"
-        class="w-full accent-depthxr-copper"
-        type="range"
-        @input="$emit('update:value', Number(($event.target as HTMLInputElement).value))"
-      />
+    <div class="max-w-[9rem]">
       <input
         :value="toDisplay(value)"
         :min="numberMin"

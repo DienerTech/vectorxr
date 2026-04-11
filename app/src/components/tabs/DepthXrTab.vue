@@ -51,8 +51,10 @@ const profileWarnings = computed(() => {
       <!-- Module header -->
       <div class="mb-4 flex flex-wrap items-center justify-between gap-3">
         <div>
-          <p class="eyebrow text-xs uppercase tracking-[0.24em]">Depth</p>
-          <h2 class="text-2xl font-semibold tracking-tight">Depth XR</h2>
+          <h2 class="text-2xl font-semibold tracking-tight">Depth</h2>
+          <p class="mt-2 max-w-3xl text-sm leading-6 text-muted">
+            Tune stereo boost and convergence defaults, then add per-application profiles when a title needs different depth behavior. Start with small value changes and use the runtime toggle binding for quick comparisons in headset.
+          </p>
         </div>
         <label class="pill-toggle inline-flex items-center gap-3 rounded-full px-4 py-2 text-sm font-medium">
           <input v-model="config.modules.depthxr.enabled" class="h-4 w-4 accent-depthxr-copper" type="checkbox" />
@@ -71,13 +73,15 @@ const profileWarnings = computed(() => {
       <!-- Default Profile -->
       <div class="border-t pt-5" style="border-color: var(--app-border)">
         <p class="eyebrow text-xs uppercase tracking-[0.24em]">Default Profile</p>
-        <p class="mb-4 mt-1 text-sm text-muted">Applied when no custom profile targets the current application.</p>
+        <p class="mb-4 mt-1 text-sm leading-6 text-muted">
+          These values apply when no custom profile targets the current application. New profiles are initialized from these defaults.
+        </p>
         <div class="grid gap-3 lg:grid-cols-2">
           <EffectField
             v-model:enabled="config.modules.depthxr.defaults.stereoBoostEnabled"
             v-model:value="config.modules.depthxr.defaults.stereoBoost"
             title="Stereo Boost"
-            subtitle="Scales horizontal eye separation around the midpoint."
+            subtitle="Scales horizontal eye separation around the midpoint. Start around +5.0 to +10.0 and adjust slowly."
             :min="1"
             :max="2"
             :step="0.01"
@@ -92,7 +96,7 @@ const profileWarnings = computed(() => {
             v-model:enabled="config.modules.depthxr.defaults.convergenceEnabled"
             v-model:value="config.modules.depthxr.defaults.convergence"
             title="Convergence"
-            subtitle="Moves the zero-parallax plane by shifting per-eye projection centers."
+            subtitle="Moves the zero-parallax plane by shifting per-eye projection centers. Start at 0.0; it can be particularly strong and may not apply in all titles."
             :min="0"
             :max="0.5"
             :step="0.001"

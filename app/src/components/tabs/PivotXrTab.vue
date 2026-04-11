@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 
 import BindingEditor from '../BindingEditor.vue'
 import type { RegisteredApplication, VectorXRConfig } from '../../lib/model'
@@ -15,6 +15,12 @@ defineEmits<{
   removePivotProfile: [index: number]
   syncPivotProfileName: [index: number]
 }>()
+
+const editingProfileName = ref<number | null>(null)
+
+function finishProfileNameEdit() {
+  editingProfileName.value = null
+}
 
 const profileWarnings = computed(() => {
   const warnings = new Map<number, string[]>()
@@ -56,8 +62,10 @@ const profileWarnings = computed(() => {
     <article class="rounded-[1.25rem] border p-5 shadow-panel backdrop-blur surface-panel">
       <div class="mb-4 flex flex-wrap items-center justify-between gap-3">
         <div>
-          <p class="eyebrow text-xs uppercase tracking-[0.24em]">Pivot</p>
-          <h2 class="text-2xl font-semibold tracking-tight">Pivot XR</h2>
+          <h2 class="text-2xl font-semibold tracking-tight">Pivot</h2>
+          <p class="mt-2 max-w-3xl text-sm leading-6 text-muted">
+            Configure how Pivot activates and how much extra yaw or pitch it can add for each title. Use profiles to keep rotation behavior specific to the games and simulators that benefit from it.
+          </p>
         </div>
         <label class="pill-toggle inline-flex items-center gap-3 rounded-full px-4 py-2 text-sm font-medium">
           <input v-model="config.modules.pivotxr.enabled" class="h-4 w-4 accent-depthxr-copper" type="checkbox" />
@@ -65,11 +73,10 @@ const profileWarnings = computed(() => {
         </label>
       </div>
 
-      <div class="mb-4 rounded-[0.9rem] border border-dashed px-4 py-3 text-sm leading-6 surface-panel-soft">
-        These values apply when no custom profile targets the current application. New profiles are initialized from these defaults.
-      </div>
-
       <p class="eyebrow mb-3 text-xs uppercase tracking-[0.24em]">Default Profile</p>
+      <p class="mb-4 text-sm leading-6 text-muted">
+        These values apply when no custom profile targets the current application. New profiles are initialized from these defaults.
+      </p>
 
       <div class="rounded-[1rem] border p-4 surface-panel-soft">
         <p class="eyebrow text-xs uppercase tracking-[0.18em]">Yaw</p>
@@ -197,26 +204,44 @@ const profileWarnings = computed(() => {
         class="rounded-[1rem] border p-5 shadow-panel transition"
         :class="profile.enabled ? 'surface-panel' : 'surface-panel-soft'"
       >
-        <div class="mb-4 flex flex-wrap items-center justify-between gap-3">
-          <div>
+        <div class="mb-4 space-y-2">
+          <p class="eyebrow text-xs uppercase tracking-[0.24em]">Profile {{ index + 1 }}</p>
+          <div class="flex flex-wrap items-center justify-between gap-3">
             <div class="flex flex-wrap items-center gap-2">
-              <p class="eyebrow text-xs uppercase tracking-[0.24em]">Profile {{ index + 1 }}</p>
-              <span
-                class="rounded-full px-2.5 py-1 text-[11px] font-medium uppercase tracking-[0.15em]"
-                :class="profile.enabled ? 'chip-success' : 'chip-idle'"
+              <h3 v-if="editingProfileName !== index" class="text-xl font-semibold tracking-tight">{{ profile.name }}</h3>
+              <input
+                v-else
+                v-model="profile.name"
+                class="app-input w-full max-w-sm rounded-[0.75rem] px-3 py-2 text-xl font-semibold tracking-tight"
+                placeholder="DCS"
+                type="text"
+                @blur="finishProfileNameEdit"
+                @keydown.enter="finishProfileNameEdit"
+              />
+              <button
+                v-if="editingProfileName !== index"
+                class="button-secondary inline-flex h-8 w-8 items-center justify-center rounded-[0.5rem]"
+                type="button"
+                aria-label="Edit profile name"
+                @click="editingProfileName = index"
               >
-                {{ profile.enabled ? 'Active' : 'Disabled' }}
-              </span>
+                <svg aria-hidden="true" class="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
+                  <path d="M13.92 2.87a2.2 2.2 0 0 1 3.11 3.11l-.72.72-3.11-3.11.72-.72Zm-1.7 1.7 3.11 3.11-8.7 8.7-3.44.33.33-3.44 8.7-8.7Z" />
+                </svg>
+              </button>
+              <label class="pill-toggle inline-flex items-center gap-2 rounded-full px-3 py-1.5 text-xs font-medium">
+                <input v-model="profile.enabled" class="h-4 w-4 accent-depthxr-copper" type="checkbox" />
+                {{ profile.enabled ? 'Profile Enabled' : 'Profile Disabled' }}
+              </label>
             </div>
-            <h3 class="mt-2 text-xl font-semibold tracking-tight">{{ profile.name }}</h3>
+            <button
+              class="button-secondary rounded-[0.75rem] px-4 py-2 text-sm font-medium"
+              type="button"
+              @click="$emit('removePivotProfile', index)"
+            >
+              Remove
+            </button>
           </div>
-          <button
-            class="button-secondary rounded-[0.75rem] px-4 py-2 text-sm font-medium"
-            type="button"
-            @click="$emit('removePivotProfile', index)"
-          >
-            Remove
-          </button>
         </div>
 
         <div
@@ -237,17 +262,7 @@ const profileWarnings = computed(() => {
           This profile is disabled and will not activate at runtime.
         </div>
 
-        <div class="grid gap-3 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
-          <label class="block">
-            <span class="mb-1.5 block text-sm font-medium">Profile Name</span>
-            <input
-              v-model="profile.name"
-              class="app-input w-full rounded-[0.75rem] px-4 py-2.5"
-              placeholder="DCS"
-              type="text"
-            />
-          </label>
-
+        <div class="grid gap-3">
           <label class="block">
             <span class="mb-1.5 block text-sm font-medium">Applications</span>
             <div class="rounded-[0.75rem] border p-3 surface-panel-strong">
@@ -269,16 +284,11 @@ const profileWarnings = computed(() => {
                 </span>
               </label>
               <p v-if="applications.length === 0" class="text-sm text-muted">
-                Add an application on the Home tab before assigning this profile.
+                Add an application on the Application Registry tab before assigning this profile.
               </p>
             </div>
           </label>
         </div>
-
-        <label class="pill-toggle mt-4 inline-flex items-center gap-3 rounded-full px-4 py-2 text-sm font-medium">
-          <input v-model="profile.enabled" class="h-4 w-4 accent-depthxr-copper" type="checkbox" />
-          Profile Enabled
-        </label>
 
         <div class="mt-4 rounded-[1rem] border p-4 surface-panel-soft">
           <p class="eyebrow text-xs uppercase tracking-[0.18em]">Activation</p>

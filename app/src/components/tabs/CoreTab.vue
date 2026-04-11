@@ -1,7 +1,6 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 
-import AppRegistryEditor from '../AppRegistryEditor.vue'
 import ThemeToggle from '../ThemeToggle.vue'
 import type { VectorXRConfig } from '../../lib/model'
 import type { ThemePreference } from '../../lib/theme'
@@ -15,8 +14,6 @@ const props = defineProps<{
 
 defineEmits<{
   viewLogs: []
-  addApplication: []
-  removeApplication: [index: number]
   'update:themePreference': [value: ThemePreference]
 }>()
 
@@ -25,23 +22,6 @@ const logPathShort = computed(() => {
   const sep = props.logPath.includes('\\') ? '\\' : '/'
   return props.logPath.split(sep).pop() ?? props.logPath
 })
-
-const moduleCards = computed(() => [
-  {
-    name: 'Depth',
-    description: 'Stereo depth tuning with per-title profiles.',
-    status: props.config.modules.depthxr.enabled ? 'Enabled' : 'Disabled',
-    detail: `${props.config.modules.depthxr.profiles.length} profile${props.config.modules.depthxr.profiles.length === 1 ? '' : 's'}`,
-    tone: props.config.modules.depthxr.enabled ? 'active' : 'idle',
-  },
-  {
-    name: 'Pivot',
-    description: 'Rotation amplification controls and activation tuning.',
-    status: props.config.modules.pivotxr.enabled ? 'Enabled' : 'Disabled',
-    detail: `${props.config.modules.pivotxr.profiles.length} profile${props.config.modules.pivotxr.profiles.length === 1 ? '' : 's'}`,
-    tone: props.config.modules.pivotxr.enabled ? 'active' : 'idle',
-  },
-])
 </script>
 
 <template>
@@ -50,6 +30,9 @@ const moduleCards = computed(() => [
       <div class="mb-4">
         <p class="eyebrow text-xs uppercase tracking-[0.24em]">Home</p>
         <h2 class="text-2xl font-semibold tracking-tight">Runtime settings</h2>
+        <p class="mt-2 max-w-3xl text-sm leading-6 text-muted">
+          Control the suite-wide runtime switch, logging verbosity, log retention, and local theme preference. Use this section when you want to confirm where logs are written or quickly open the latest runtime output.
+        </p>
       </div>
 
       <!-- VectorXR Enabled — prominent full-width row -->
@@ -67,17 +50,22 @@ const moduleCards = computed(() => [
       <!-- Log Level + Retention -->
       <div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-[minmax(0,200px)_minmax(0,200px)]">
         <label class="block">
-          <span class="mb-1.5 block text-sm font-medium">Log Level</span>
+          <span class="mb-1.5 flex items-center gap-1.5 text-sm font-medium">
+            Log Level
+            <span title="None disables general runtime logging. Info writes normal operational messages and errors. Debug adds verbose diagnostics." class="cursor-help select-none text-xs text-muted">i</span>
+          </span>
           <select v-model="config.core.logLevel" class="app-input w-full rounded-[0.75rem] px-4 py-2.5">
-            <option value="off">off</option>
-            <option value="error">error</option>
+            <option value="none">none</option>
             <option value="info">info</option>
             <option value="debug">debug</option>
           </select>
         </label>
 
         <label class="block">
-          <span class="mb-1.5 block text-sm font-medium">Log Retention</span>
+          <span class="mb-1.5 flex items-center gap-1.5 text-sm font-medium">
+            Log Retention
+            <span title="Number of rotated log files to keep. Older files are removed after the retention count is exceeded." class="cursor-help select-none text-xs text-muted">i</span>
+          </span>
           <input
             v-model.number="config.core.logRetentionFiles"
             class="app-input w-full rounded-[0.75rem] px-4 py-2.5"
@@ -85,7 +73,6 @@ const moduleCards = computed(() => [
             max="50"
             step="1"
             type="number"
-            title="Number of log files to keep before rotating out the oldest."
           />
         </label>
       </div>
@@ -97,7 +84,7 @@ const moduleCards = computed(() => [
       </div>
 
       <div class="mt-3 rounded-[0.9rem] border border-dashed px-4 py-3 text-sm leading-6 surface-panel-soft">
-        Log level controls what the runtime writes; retention sets how many files to keep before rotating. Theme is a local UI preference and does not affect the runtime config.
+        Log level controls what the runtime writes. Errors are always written when logging is enabled; retention sets how many files to keep before rotating. Theme is a local UI preference and does not affect the runtime config.
       </div>
 
       <div class="mt-4 flex flex-wrap items-center gap-3">
@@ -110,57 +97,6 @@ const moduleCards = computed(() => [
         </button>
         <div class="rounded-full border px-4 py-2 text-sm surface-panel-strong">
           Latest Log: <span class="font-mono text-xs">{{ logPathShort || 'Available after first session' }}</span>
-        </div>
-      </div>
-    </article>
-
-    <AppRegistryEditor
-      :applications="config.applications"
-      @add="$emit('addApplication')"
-      @remove="$emit('removeApplication', $event)"
-    />
-
-    <article class="rounded-[1.25rem] border p-5 shadow-panel backdrop-blur surface-panel">
-      <p class="eyebrow text-xs uppercase tracking-[0.24em]">Modules</p>
-      <h2 class="mt-2 text-2xl font-semibold tracking-tight">Module overview</h2>
-
-      <div class="mt-4 grid gap-3 md:grid-cols-2">
-        <div
-          v-for="moduleCard in moduleCards"
-          :key="moduleCard.name"
-          class="rounded-[1rem] border p-4"
-          :class="moduleCard.tone === 'active' ? 'surface-panel-strong' : 'surface-panel-soft'"
-        >
-          <div class="flex items-center justify-between gap-3">
-            <div>
-              <p class="text-base font-semibold tracking-tight">{{ moduleCard.name }}</p>
-              <p class="mt-1 text-sm text-muted">{{ moduleCard.description }}</p>
-            </div>
-            <span
-              class="rounded-full px-3 py-1 text-xs font-medium"
-              :class="moduleCard.tone === 'active' ? 'chip-success' : 'chip-idle'"
-            >
-              {{ moduleCard.status }}
-            </span>
-          </div>
-          <p class="eyebrow mt-4 text-xs uppercase tracking-[0.18em]">{{ moduleCard.detail }}</p>
-        </div>
-      </div>
-    </article>
-
-    <article class="rounded-[1.25rem] border p-5 shadow-panel surface-panel-inverse">
-      <p class="text-xs uppercase tracking-[0.24em] text-inverse-muted">About</p>
-      <h2 class="mt-2 text-2xl font-semibold tracking-tight">VectorXR</h2>
-      <p class="mt-3 max-w-3xl text-sm leading-6 text-inverse-muted">
-        VectorXR keeps shared XR tuning in one place, with focused editors for depth and rotation behavior and a save flow that stays predictable.
-      </p>
-
-      <div class="mt-5 grid gap-3 lg:grid-cols-[minmax(0,1.3fr)_minmax(0,0.9fr)]">
-        <div class="rounded-[1rem] border border-white/10 bg-white/5 p-4 text-sm text-inverse-muted">
-          <p class="font-medium">Built by Michael Diener - DienerTech</p>
-          <ul class="mt-3 space-y-2.5 leading-6">
-            <li>Copyright DienerTech LLC</li>
-          </ul>
         </div>
       </div>
     </article>
