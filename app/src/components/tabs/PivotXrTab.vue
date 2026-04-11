@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { pivotActivationKeyGroups, type VectorXRConfig } from '../../lib/model'
+import BindingEditor from '../BindingEditor.vue'
+import type { VectorXRConfig } from '../../lib/model'
 
 defineProps<{
   config: VectorXRConfig
@@ -21,7 +22,7 @@ defineProps<{
       </div>
 
       <div class="rounded-[0.9rem] border border-dashed px-4 py-3 text-sm leading-6 surface-panel-soft">
-        Tune how much extra yaw and pitch headroom the module can add. The activation key controls when the extra rotation factor is applied.
+        Tune how much extra yaw and pitch headroom the module can add. The activation binding controls when the extra rotation factor is applied.
       </div>
 
       <div class="mt-4 grid gap-3 lg:grid-cols-2">
@@ -33,14 +34,11 @@ defineProps<{
           </select>
         </label>
 
-        <label class="block">
-          <span class="mb-1.5 block text-sm font-medium">Activation Key</span>
-          <select v-model="config.modules.pivotxr.defaults.activationKey" class="app-input w-full rounded-[0.75rem] px-4 py-2.5">
-            <optgroup v-for="group in pivotActivationKeyGroups" :key="group.label" :label="group.label">
-              <option v-for="option in group.options" :key="option" :value="option">{{ option }}</option>
-            </optgroup>
-          </select>
-        </label>
+        <BindingEditor
+          v-model="config.modules.pivotxr.defaults.activationBinding"
+          label="Activation Binding"
+          description="Keyboard chords work in the runtime today. Device GUID bindings are saved for the upcoming HOTAS runtime pass."
+        />
 
         <label class="block">
           <span class="mb-1.5 block text-sm font-medium">Yaw Multiplier</span>
@@ -153,7 +151,7 @@ defineProps<{
       <p class="text-xs uppercase tracking-[0.24em] text-inverse-muted">Usage Notes</p>
       <ul class="mt-3 space-y-2.5 text-sm leading-6 text-inverse-muted">
         <li>`toggle` starts inactive and flips the extra rotation factor on each press.</li>
-        <li>`hold` only applies the extra factor while the activation key is down.</li>
+        <li>`hold` only applies the extra factor while the activation binding is down.</li>
         <li>Smoothing is time-based, so the feel stays closer to the same across frame rates.</li>
         <li>Small changes usually tune faster than large jumps, especially around deadzone and max extra limits.</li>
       </ul>

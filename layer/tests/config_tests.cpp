@@ -61,7 +61,10 @@ void TestParseConfig() {
       "enabled": false,
       "defaults": {
         "activationMode": "toggle",
-        "activationKey": "f8",
+        "activationBinding": {
+          "type": "keyboard",
+          "chord": ["f8"]
+        },
         "rotationMultiplier": 1.5,
         "smoothing": 0.2,
         "deadzoneDegrees": 8.0,
@@ -87,7 +90,7 @@ void TestParseConfig() {
     Expect(std::abs(result.document.depthxr.defaults.convergence - 0.08) < 0.0001, "DepthXR convergence mismatch");
     Expect(result.document.depthxr.profiles.size() == 1, "DepthXR profile count mismatch");
     Expect(result.document.depthxr.profiles[0].application_ids[0] == "game", "DepthXR profile application id mismatch");
-    Expect(result.document.pivotxr.defaults.activation_key == "F8", "PivotXR activation key mismatch");
+    Expect(result.document.pivotxr.defaults.activation_binding.chord[0] == "F8", "PivotXR activation binding mismatch");
     Expect(std::abs(result.document.pivotxr.defaults.yaw_max_extra_degrees - 25.0) < 0.0001,
            "PivotXR yaw clamp mismatch");
     Expect(std::abs(result.document.pivotxr.defaults.pitch_rotation_multiplier - 1.2) < 0.0001,
@@ -136,7 +139,10 @@ void TestResolveRuntimeConfig() {
       "enabled": true,
       "defaults": {
         "activationMode": "hold",
-        "activationKey": "Space",
+        "activationBinding": {
+          "type": "keyboard",
+          "chord": ["Ctrl", "Space"]
+        },
         "rotationMultiplier": 1.7,
         "smoothing": 0.25,
         "deadzoneDegrees": 9.0,
@@ -160,7 +166,8 @@ void TestResolveRuntimeConfig() {
     Expect(std::abs(resolved.depthxr.convergence - 0.12) < 0.0001, "Profile convergence override was not applied");
     Expect(resolved.pivotxr.enabled, "PivotXR module enable was not resolved");
     Expect(resolved.pivotxr.activation_mode == depthxr::ActivationMode::Hold, "PivotXR activation mode mismatch");
-    Expect(resolved.pivotxr.activation_key == "Space", "PivotXR activation key was not resolved");
+    Expect(resolved.pivotxr.activation_binding.chord.size() == 2, "PivotXR activation chord size mismatch");
+    Expect(resolved.pivotxr.activation_binding.chord[1] == "Space", "PivotXR activation binding was not resolved");
     Expect(std::abs(resolved.pivotxr.yaw_max_extra_degrees - 22.0) < 0.0001, "PivotXR yaw clamp mismatch");
     Expect(std::abs(resolved.pivotxr.pitch_rotation_multiplier - 1.35) < 0.0001,
            "PivotXR pitch multiplier mismatch");
@@ -208,7 +215,10 @@ void TestDisabledProfileFallsBackToDefaults() {
       "enabled": false,
       "defaults": {
         "activationMode": "toggle",
-        "activationKey": "F8",
+        "activationBinding": {
+          "type": "keyboard",
+          "chord": ["F8"]
+        },
         "rotationMultiplier": 1.5,
         "smoothing": 0.2,
         "deadzoneDegrees": 8.0,
@@ -231,7 +241,7 @@ void TestDisabledProfileFallsBackToDefaults() {
     Expect(std::abs(resolved.depthxr.convergence - 0.01) < 0.0001, "Disabled profile convergence should fall back to defaults");
 }
 
-void TestInvalidPivotActivationKeyRejected() {
+void TestInvalidPivotActivationBindingRejected() {
     const std::string json = R"json(
 {
   "version": 3,
@@ -256,7 +266,10 @@ void TestInvalidPivotActivationKeyRejected() {
       "enabled": true,
       "defaults": {
         "activationMode": "toggle",
-        "activationKey": "Mouse4",
+        "activationBinding": {
+          "type": "keyboard",
+          "chord": ["Mouse4"]
+        },
         "rotationMultiplier": 1.5,
         "smoothing": 0.2,
         "deadzoneDegrees": 8.0,
@@ -272,7 +285,7 @@ void TestInvalidPivotActivationKeyRejected() {
 )json";
 
     const depthxr::ParseResult result = depthxr::ParseConfig(json);
-    Expect(!result.ok, "Config parser accepted an unsupported PivotXR activation key");
+    Expect(!result.ok, "Config parser accepted an unsupported PivotXR activation binding");
 }
 
 void TestExeMatch() {
@@ -412,7 +425,7 @@ int main() {
     TestParseConfig();
     TestResolveRuntimeConfig();
     TestDisabledProfileFallsBackToDefaults();
-    TestInvalidPivotActivationKeyRejected();
+    TestInvalidPivotActivationBindingRejected();
     TestExeMatch();
     TestQuadViewStereoBoostKeepsInsetViewsInSync();
     TestQuadViewConvergenceKeepsInsetOffsetsAligned();

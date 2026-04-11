@@ -1,7 +1,7 @@
 export type LogLevel = 'off' | 'error' | 'info' | 'debug'
 export type ActivationMode = 'toggle' | 'hold'
 export type AppTab = 'core' | 'depthxr' | 'pivotxr'
-export const pivotActivationKeyGroups = [
+export const keyboardBindingKeyGroups = [
   {
     label: 'Function Keys',
     options: Array.from({ length: 12 }, (_, index) => `F${index + 1}`),
@@ -19,6 +19,21 @@ export const pivotActivationKeyGroups = [
     options: ['Space'],
   },
 ] as const
+
+export const keyboardModifierKeys = ['Ctrl', 'Alt', 'Shift'] as const
+
+export interface KeyboardBinding {
+  type: 'keyboard'
+  chord: string[]
+}
+
+export interface DeviceBinding {
+  type: 'device'
+  deviceGuid: string
+  inputPath: string
+}
+
+export type InputBinding = KeyboardBinding | DeviceBinding
 
 export interface CoreConfig {
   enabled: boolean
@@ -57,7 +72,7 @@ export interface DepthXRModuleConfig {
 
 export interface PivotXRDefaults {
   activationMode: ActivationMode
-  activationKey: string
+  activationBinding: InputBinding
   rotationMultiplier: number
   smoothing: number
   deadzoneDegrees: number
@@ -174,7 +189,7 @@ export function createApplication(exe = 'Game.exe', applications: RegisteredAppl
 export function defaultPivotXRDefaults(): PivotXRDefaults {
   return {
     activationMode: 'toggle',
-    activationKey: 'F8',
+    activationBinding: defaultKeyboardBinding('F8'),
     rotationMultiplier: 1.5,
     smoothing: 0.2,
     deadzoneDegrees: 8,
@@ -183,6 +198,21 @@ export function defaultPivotXRDefaults(): PivotXRDefaults {
     pitchSmoothing: 0.2,
     pitchDeadzoneDegrees: 12,
     maxExtraPitchDegrees: 20,
+  }
+}
+
+export function defaultKeyboardBinding(primaryKey = 'F8'): KeyboardBinding {
+  return {
+    type: 'keyboard',
+    chord: [primaryKey],
+  }
+}
+
+export function defaultDeviceBinding(): DeviceBinding {
+  return {
+    type: 'device',
+    deviceGuid: '',
+    inputPath: 'button-1',
   }
 }
 
@@ -250,7 +280,7 @@ function normalizePivotXRDefaults(value: unknown, fallback: PivotXRDefaults): Pi
 
   return {
     activationMode,
-    activationKey: normalizePivotActivationKey(source.activationKey, fallback.activationKey),
+    activationBinding: normalizeInputBinding(source.activationBinding, fallback.activationBinding),
     rotationMultiplier: normalizeNumber(source.rotationMultiplier, fallback.rotationMultiplier),
     smoothing: normalizeNumber(source.smoothing, fallback.smoothing),
     deadzoneDegrees: normalizeNumber(source.deadzoneDegrees, fallback.deadzoneDegrees),
@@ -262,7 +292,7 @@ function normalizePivotXRDefaults(value: unknown, fallback: PivotXRDefaults): Pi
   }
 }
 
-function normalizePivotActivationKey(value: unknown, fallback: string): string {
+export function normalizeKeyboardKey(value: unknown, fallback: string): string {
   if (typeof value !== 'string') {
     return fallback
   }
@@ -285,6 +315,47 @@ function normalizePivotActivationKey(value: unknown, fallback: string): string {
   }
 
   return fallback
+}
+
+function normalizeKeyboardChord(value: unknown, fallback: string[]): string[] {
+  const source = Array.isArray(value) ? value : fallback
+  const normalized: string[] = []
+
+  for (const item of source) {
+    const key = normalizeKeyboardKey(item, '')
+    if (key && !normalized.includes(key)) {
+      normalized.push(key)
+    }
+  }
+
+  return normalized.length > 0 ? normalized : fallback
+}
+
+export function normalizeInputBinding(value: unknown, fallback: InputBinding): InputBinding {
+  const source = isRecord(value) ? value : {}
+
+  if (source.type === 'device') {
+    return {
+      type: 'device',
+      deviceGuid: normalizeString(source.deviceGuid, fallback.type === 'device' ? fallback.deviceGuid : ''),
+      inputPath: normalizeString(source.inputPath, fallback.type === 'device' ? fallback.inputPath : 'button-1'),
+    }
+  }
+
+  return {
+    type: 'keyboard',
+    chord: normalizeKeyboardChord(source.chord, fallback.type === 'keyboard' ? fallback.chord : ['F8']),
+  }
+}
+
+export function bindingLabel(binding: InputBinding): string {
+  if (binding.type === 'device') {
+    const device = binding.deviceGuid.trim() || 'Unassigned device'
+    const input = binding.inputPath.trim() || 'unassigned input'
+    return `${device} / ${input}`
+  }
+
+  return binding.chord.join('+')
 }
 
 function normalizeApplication(value: unknown, fallbackId: string, existing: RegisteredApplication[]): RegisteredApplication {

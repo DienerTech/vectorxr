@@ -1,4 +1,4 @@
-import type { CoreConfig, DepthXRProfileConfig, DepthXRSettings, PivotXRDefaults, RegisteredApplication, VectorXRConfig } from './model'
+import type { CoreConfig, DepthXRProfileConfig, DepthXRSettings, InputBinding, PivotXRDefaults, RegisteredApplication, VectorXRConfig } from './model'
 
 function validateCoreConfig(core: CoreConfig): string[] {
   const errors: string[] = []
@@ -27,8 +27,48 @@ function validateDepthXRSettings(prefix: string, settings: DepthXRSettings): str
   return errors
 }
 
+function validateInputBinding(prefix: string, binding: InputBinding): string[] {
+  const errors: string[] = []
+
+  if (binding.type === 'keyboard') {
+    if (binding.chord.length === 0) {
+      errors.push(`${prefix}.chord must include at least one key`)
+    }
+
+    const seen = new Set<string>()
+    for (const key of binding.chord) {
+      if (!/^(Ctrl|Alt|Shift|Space|F([1-9]|1[0-2])|[A-Z]|[0-9])$/.test(key)) {
+        errors.push(`${prefix}.chord contains unsupported key: ${key}`)
+      }
+      if (seen.has(key)) {
+        errors.push(`${prefix}.chord duplicates ${key}`)
+      }
+      seen.add(key)
+    }
+
+    const primaryKeys = binding.chord.filter((key) => key !== 'Ctrl' && key !== 'Alt' && key !== 'Shift')
+    if (primaryKeys.length !== 1) {
+      errors.push(`${prefix}.chord must include exactly one non-modifier key`)
+    }
+
+    return errors
+  }
+
+  if (!binding.deviceGuid.trim()) {
+    errors.push(`${prefix}.deviceGuid is required`)
+  }
+
+  if (!binding.inputPath.trim()) {
+    errors.push(`${prefix}.inputPath is required`)
+  }
+
+  return errors
+}
+
 function validatePivotXRDefaults(defaults: PivotXRDefaults): string[] {
   const errors: string[] = []
+
+  errors.push(...validateInputBinding('modules.pivotxr.defaults.activationBinding', defaults.activationBinding))
 
   if (Number.isNaN(defaults.rotationMultiplier) || defaults.rotationMultiplier < 1.0 || defaults.rotationMultiplier > 3.0) {
     errors.push('modules.pivotxr.defaults.rotationMultiplier must be between 1.0 and 3.0')

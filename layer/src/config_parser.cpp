@@ -505,6 +505,73 @@ bool ReadOptionalActivationKey(const JsonValue::Object& object,
 
 bool CheckAllowedKeys(const JsonValue::Object& object,
                       const std::unordered_set<std::string>& allowed,
+                      std::string& error);
+
+bool ParseInputBinding(const JsonValue& value, InputBinding& out, std::string& error) {
+    const JsonValue::Object* object = RequireObject(value, "inputBinding", error);
+    if (!object) {
+        return false;
+    }
+
+    const auto type_it = object->find("type");
+    if (type_it == object->end() || !type_it->second.IsString()) {
+        error = "inputBinding.type must be a string";
+        return false;
+    }
+
+    const std::optional<InputBindingType> type = ParseInputBindingType(type_it->second.AsString());
+    if (!type.has_value()) {
+        error = "inputBinding.type must be one of: keyboard, device";
+        return false;
+    }
+
+    out.type = *type;
+    if (out.type == InputBindingType::Keyboard) {
+        static const std::unordered_set<std::string> allowed = {"type", "chord"};
+        if (!CheckAllowedKeys(*object, allowed, error)) {
+            return false;
+        }
+
+        const auto chord_it = object->find("chord");
+        if (chord_it == object->end()) {
+            error = "Missing required field: inputBinding.chord";
+            return false;
+        }
+
+        std::vector<std::string> raw_chord;
+        if (!ParseStringArray(chord_it->second, "inputBinding.chord", raw_chord, error)) {
+            return false;
+        }
+
+        out.chord.clear();
+        for (const std::string& key : raw_chord) {
+            const std::optional<std::string> normalized = ParseActivationKey(key);
+            if (!normalized.has_value()) {
+                error = "inputBinding.chord contains unsupported key: " + key;
+                return false;
+            }
+            out.chord.push_back(*normalized);
+        }
+
+        if (out.chord.empty()) {
+            error = "inputBinding.chord must include at least one key";
+            return false;
+        }
+
+        return true;
+    }
+
+    static const std::unordered_set<std::string> allowed = {"type", "deviceGuid", "inputPath"};
+    if (!CheckAllowedKeys(*object, allowed, error)) {
+        return false;
+    }
+
+    return ReadRequiredString(*object, "deviceGuid", out.device_guid, error) &&
+           ReadRequiredString(*object, "inputPath", out.input_path, error);
+}
+
+bool CheckAllowedKeys(const JsonValue::Object& object,
+                      const std::unordered_set<std::string>& allowed,
                       std::string& error) {
     for (const auto& [key, _] : object) {
         if (!allowed.contains(key)) {
@@ -748,7 +815,7 @@ bool ParseDepthModule(const JsonValue::Object& object,
 bool ParsePivotDefaults(const JsonValue::Object& object, PivotXrResolvedSettings& out, std::string& error) {
     static const std::unordered_set<std::string> allowed = {
         "activationMode",
-        "activationKey",
+        "activationBinding",
         "rotationMultiplier",
         "smoothing",
         "deadzoneDegrees",
@@ -764,7 +831,6 @@ bool ParsePivotDefaults(const JsonValue::Object& object, PivotXrResolvedSettings
     }
 
     std::optional<ActivationMode> activation_mode;
-    std::optional<std::string> activation_key;
     std::optional<double> rotation_multiplier;
     std::optional<double> smoothing;
     std::optional<double> deadzone_degrees;
@@ -775,7 +841,6 @@ bool ParsePivotDefaults(const JsonValue::Object& object, PivotXrResolvedSettings
     std::optional<double> max_extra_pitch_degrees;
 
     if (!ReadOptionalActivationMode(object, "activationMode", activation_mode, error) ||
-        !ReadOptionalActivationKey(object, "activationKey", activation_key, error) ||
         !ReadOptionalNumber(object, "rotationMultiplier", rotation_multiplier, error) ||
         !ReadOptionalNumber(object, "smoothing", smoothing, error) ||
         !ReadOptionalNumber(object, "deadzoneDegrees", deadzone_degrees, error) ||
@@ -790,8 +855,10 @@ bool ParsePivotDefaults(const JsonValue::Object& object, PivotXrResolvedSettings
     if (activation_mode.has_value()) {
         out.activation_mode = *activation_mode;
     }
-    if (activation_key.has_value()) {
-        out.activation_key = *activation_key;
+
+    const auto activation_binding_it = object.find("activationBinding");
+    if (activation_binding_it != object.end() && !ParseInputBinding(activation_binding_it->second, out.activation_binding, error)) {
+        return false;
     }
     if (rotation_multiplier.has_value()) {
         out.yaw_rotation_multiplier = *rotation_multiplier;

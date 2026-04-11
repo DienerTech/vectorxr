@@ -77,6 +77,10 @@ High-level shape:
       "enabled": false,
       "defaults": {
         "activationMode": "toggle",
+        "activationBinding": {
+          "type": "keyboard",
+          "chord": ["F8"]
+        },
         "rotationMultiplier": 1.5,
         "smoothing": 0.2,
         "deadzoneDegrees": 8.0,

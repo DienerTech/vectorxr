@@ -18,6 +18,18 @@ enum class ActivationMode {
     Hold,
 };
 
+enum class InputBindingType {
+    Keyboard,
+    Device,
+};
+
+struct InputBinding {
+    InputBindingType type{InputBindingType::Keyboard};
+    std::vector<std::string> chord{"F8"};
+    std::string device_guid;
+    std::string input_path{"button-1"};
+};
+
 struct CoreSettings {
     bool enabled{true};
     LogLevel log_level{LogLevel::Info};
@@ -66,7 +78,7 @@ struct DepthXrModuleConfig {
 struct PivotXrResolvedSettings {
     bool enabled{false};
     ActivationMode activation_mode{ActivationMode::Toggle};
-    std::string activation_key{"F8"};
+    InputBinding activation_binding;
     double yaw_rotation_multiplier{1.5};
     double yaw_smoothing{0.2};
     double yaw_deadzone_degrees{8.0};
@@ -102,5 +114,7 @@ std::optional<LogLevel> ParseLogLevel(const std::string& value);
 const char* ToString(ActivationMode mode);
 std::optional<ActivationMode> ParseActivationMode(const std::string& value);
 std::optional<std::string> ParseActivationKey(const std::string& value);
+const char* ToString(InputBindingType type);
+std::optional<InputBindingType> ParseInputBindingType(const std::string& value);
 
 } // namespace depthxr

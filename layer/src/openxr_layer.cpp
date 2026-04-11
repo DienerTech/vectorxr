@@ -229,7 +229,10 @@ bool SameSettings(const ResolvedRuntimeConfig& lhs, const ResolvedRuntimeConfig&
            NearlyEqual(lhs.depthxr.convergence, rhs.depthxr.convergence) &&
            lhs.pivotxr.enabled == rhs.pivotxr.enabled &&
            lhs.pivotxr.activation_mode == rhs.pivotxr.activation_mode &&
-           lhs.pivotxr.activation_key == rhs.pivotxr.activation_key &&
+           lhs.pivotxr.activation_binding.type == rhs.pivotxr.activation_binding.type &&
+           lhs.pivotxr.activation_binding.chord == rhs.pivotxr.activation_binding.chord &&
+           lhs.pivotxr.activation_binding.device_guid == rhs.pivotxr.activation_binding.device_guid &&
+           lhs.pivotxr.activation_binding.input_path == rhs.pivotxr.activation_binding.input_path &&
            NearlyEqual(lhs.pivotxr.yaw_rotation_multiplier, rhs.pivotxr.yaw_rotation_multiplier) &&
            NearlyEqual(lhs.pivotxr.yaw_smoothing, rhs.pivotxr.yaw_smoothing) &&
            NearlyEqual(lhs.pivotxr.yaw_deadzone_degrees, rhs.pivotxr.yaw_deadzone_degrees) &&
@@ -242,24 +245,36 @@ bool SameSettings(const ResolvedRuntimeConfig& lhs, const ResolvedRuntimeConfig&
 
 bool SamePivotActivationBinding(const PivotXrResolvedSettings& lhs, const PivotXrResolvedSettings& rhs) {
     return lhs.enabled == rhs.enabled && lhs.activation_mode == rhs.activation_mode &&
-           lhs.activation_key == rhs.activation_key;
+           lhs.activation_binding.type == rhs.activation_binding.type &&
+           lhs.activation_binding.chord == rhs.activation_binding.chord &&
+           lhs.activation_binding.device_guid == rhs.activation_binding.device_guid &&
+           lhs.activation_binding.input_path == rhs.activation_binding.input_path;
 }
 
 #if defined(_WIN32)
-std::optional<int> ToVirtualKey(std::string_view activation_key) {
-    if (activation_key == "Space") {
+std::optional<int> ToVirtualKey(std::string_view key) {
+    if (key == "Space") {
         return VK_SPACE;
     }
+    if (key == "Ctrl") {
+        return VK_CONTROL;
+    }
+    if (key == "Alt") {
+        return VK_MENU;
+    }
+    if (key == "Shift") {
+        return VK_SHIFT;
+    }
 
-    if (activation_key.size() == 1) {
-        const char character = activation_key[0];
+    if (key.size() == 1) {
+        const char character = key[0];
         if ((character >= 'A' && character <= 'Z') || (character >= '0' && character <= '9')) {
             return static_cast<int>(character);
         }
     }
 
-    if (activation_key.size() >= 2 && activation_key[0] == 'F') {
-        const std::string suffix(activation_key.substr(1));
+    if (key.size() >= 2 && key[0] == 'F') {
+        const std::string suffix(key.substr(1));
         const int function_key = std::stoi(suffix);
         if (function_key >= 1 && function_key <= 12) {
             return VK_F1 + (function_key - 1);
@@ -274,9 +289,24 @@ bool IsVirtualKeyDown(int virtual_key) {
 }
 #endif
 
+std::string BindingLabel(const InputBinding& binding) {
+    if (binding.type == InputBindingType::Device) {
+        return binding.device_guid + "/" + binding.input_path;
+    }
+
+    std::ostringstream stream;
+    for (size_t index = 0; index < binding.chord.size(); ++index) {
+        if (index > 0) {
+            stream << "+";
+        }
+        stream << binding.chord[index];
+    }
+    return stream.str();
+}
+
 ConfigDocument DefaultConfig() {
     ConfigDocument document;
-    document.version = 2;
+    document.version = 3;
     return document;
 }
 
@@ -575,7 +605,7 @@ XrResult OpenXrLayer::LocateViews(XrSession session,
     if (resolved_settings_.pivotxr.enabled && !has_logged_pivotxr_spike_mode_) {
         std::ostringstream stream;
         stream << "PivotXR spike is active in experimental view-space recomposition mode; press "
-               << resolved_settings_.pivotxr.activation_key << " to "
+               << BindingLabel(resolved_settings_.pivotxr.activation_binding) << " to "
                << (resolved_settings_.pivotxr.activation_mode == ActivationMode::Toggle ? "toggle" : "hold")
                << " the extra pivot factor.";
         logger_.Info(stream.str());
@@ -1042,7 +1072,7 @@ void OpenXrLayer::LogResolvedSettings(const ResolvedRuntimeConfig& settings) {
            << ", convergence=" << settings.depthxr.convergence
            << ", pivotxrEnabled=" << settings.pivotxr.enabled
            << ", pivotActivation=" << ToString(settings.pivotxr.activation_mode)
-           << ", pivotActivationKey=" << settings.pivotxr.activation_key
+           << ", pivotActivationBinding=" << BindingLabel(settings.pivotxr.activation_binding)
            << ", pivotYawMultiplier=" << settings.pivotxr.yaw_rotation_multiplier
            << ", pivotYawSmoothing=" << settings.pivotxr.yaw_smoothing
            << ", pivotYawDeadzone=" << settings.pivotxr.yaw_deadzone_degrees
@@ -1069,14 +1099,31 @@ bool OpenXrLayer::IsPivotXrActive(const PivotXrResolvedSettings& settings) {
     }
 
 #if defined(_WIN32)
-    const std::optional<int> virtual_key = ToVirtualKey(settings.activation_key);
-    if (!virtual_key.has_value()) {
+    if (settings.activation_binding.type != InputBindingType::Keyboard) {
         return false;
     }
 
-    const bool key_down = IsVirtualKeyDown(*virtual_key);
-    const bool was_pressed_this_call = key_down && !pivotxr_activation_key_was_down_;
-    pivotxr_activation_key_was_down_ = key_down;
+    std::vector<int> virtual_keys;
+    virtual_keys.reserve(settings.activation_binding.chord.size());
+    for (const std::string& key : settings.activation_binding.chord) {
+        const std::optional<int> virtual_key = ToVirtualKey(key);
+        if (!virtual_key.has_value()) {
+            return false;
+        }
+        virtual_keys.push_back(*virtual_key);
+    }
+
+    if (virtual_keys.empty()) {
+        return false;
+    }
+
+    bool binding_down = true;
+    for (const int virtual_key : virtual_keys) {
+        binding_down = binding_down && IsVirtualKeyDown(virtual_key);
+    }
+
+    const bool was_pressed_this_call = binding_down && !pivotxr_activation_key_was_down_;
+    pivotxr_activation_key_was_down_ = binding_down;
 
     if (settings.activation_mode == ActivationMode::Toggle) {
         if (was_pressed_this_call) {
@@ -1084,12 +1131,12 @@ bool OpenXrLayer::IsPivotXrActive(const PivotXrResolvedSettings& settings) {
             pending_locate_views_diagnostics_ = 5;
             logger_.Info(std::string("PivotXR extra pivot factor ") +
                          (pivotxr_toggle_enabled_ ? "enabled" : "disabled") + " via " +
-                         settings.activation_key + ".");
+                         BindingLabel(settings.activation_binding) + ".");
         }
         return pivotxr_toggle_enabled_;
     }
 
-    return key_down;
+    return binding_down;
 #else
     return settings.enabled;
 #endif

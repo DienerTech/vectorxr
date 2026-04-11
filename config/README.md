@@ -8,6 +8,6 @@ The current file format supports:
 - a suite-level application registry
 - module-specific settings under `modules`
 - Depth defaults and per-application overrides
-- Pivot defaults including activation mode and activation key bindings
+- Pivot defaults including activation mode and shared activation bindings
 
 Config v3 moves executable matching into the shared application registry so profiles can target reusable app ids.

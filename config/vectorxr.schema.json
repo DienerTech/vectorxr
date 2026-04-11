@@ -45,9 +45,56 @@
         "hold"
       ]
     },
-    "activationKey": {
+    "keyboardKey": {
       "type": "string",
-      "pattern": "^(F([1-9]|1[0-2])|[A-Z]|[0-9]|Space)$"
+      "pattern": "^(Ctrl|Alt|Shift|F([1-9]|1[0-2])|[A-Z]|[0-9]|Space)$"
+    },
+    "inputBinding": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "chord"
+          ],
+          "properties": {
+            "type": {
+              "const": "keyboard"
+            },
+            "chord": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "$ref": "#/$defs/keyboardKey"
+              },
+              "uniqueItems": true
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "deviceGuid",
+            "inputPath"
+          ],
+          "properties": {
+            "type": {
+              "const": "device"
+            },
+            "deviceGuid": {
+              "type": "string",
+              "minLength": 1
+            },
+            "inputPath": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        }
+      ]
     },
     "profileMatch": {
       "type": "object",
@@ -197,7 +244,7 @@
       "additionalProperties": false,
       "required": [
         "activationMode",
-        "activationKey",
+        "activationBinding",
         "rotationMultiplier",
         "smoothing",
         "deadzoneDegrees",
@@ -211,8 +258,8 @@
         "activationMode": {
           "$ref": "#/$defs/activationMode"
         },
-        "activationKey": {
-          "$ref": "#/$defs/activationKey"
+        "activationBinding": {
+          "$ref": "#/$defs/inputBinding"
         },
         "rotationMultiplier": {
           "type": "number",

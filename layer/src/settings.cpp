@@ -109,6 +109,16 @@ std::optional<std::string> ParseActivationKey(const std::string& value) {
         return std::string("Space");
     }
 
+    if (normalized == "ctrl" || normalized == "control") {
+        return std::string("Ctrl");
+    }
+    if (normalized == "alt") {
+        return std::string("Alt");
+    }
+    if (normalized == "shift") {
+        return std::string("Shift");
+    }
+
     if (normalized.size() >= 2 && normalized[0] == 'f') {
         bool digits_only = true;
         for (size_t index = 1; index < normalized.size(); ++index) {
@@ -128,6 +138,30 @@ std::optional<std::string> ParseActivationKey(const std::string& value) {
                 return std::nullopt;
             }
         }
+    }
+
+    return std::nullopt;
+}
+
+const char* ToString(InputBindingType type) {
+    switch (type) {
+    case InputBindingType::Keyboard:
+        return "keyboard";
+    case InputBindingType::Device:
+        return "device";
+    default:
+        return "keyboard";
+    }
+}
+
+std::optional<InputBindingType> ParseInputBindingType(const std::string& value) {
+    const std::string normalized = NormalizeValue(value);
+
+    if (normalized == "keyboard") {
+        return InputBindingType::Keyboard;
+    }
+    if (normalized == "device") {
+        return InputBindingType::Device;
     }
 
     return std::nullopt;
