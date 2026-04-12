@@ -3,6 +3,23 @@ import { defaultConfig, normalizeConfig, type ConfigEnvelope, type VectorXRConfi
 
 const localKey = 'vectorxr-config'
 
+interface SaveFilePickerHandle {
+  createWritable(): Promise<{
+    write(data: BlobPart): Promise<void>
+    close(): Promise<void>
+  }>
+}
+
+type SaveFilePickerWindow = Window & {
+  showSaveFilePicker?: (options: {
+    suggestedName?: string
+    types?: Array<{
+      description: string
+      accept: Record<string, string[]>
+    }>
+  }) => Promise<SaveFilePickerHandle>
+}
+
 export interface LogFileEntry {
   name: string
   path: string
@@ -54,6 +71,45 @@ export async function saveConfigEnvelope(config: VectorXRConfig): Promise<string
   }
 
   return invoke<string>('save_config', { config })
+}
+
+export async function exportConfigFile(config: VectorXRConfig): Promise<boolean> {
+  const content = JSON.stringify(normalizeConfig(config), null, 2)
+  const pickerWindow = window as SaveFilePickerWindow
+
+  if (pickerWindow.showSaveFilePicker) {
+    try {
+      const handle = await pickerWindow.showSaveFilePicker({
+        suggestedName: 'settings.json',
+        types: [
+          {
+            description: 'JSON config',
+            accept: { 'application/json': ['.json'] },
+          },
+        ],
+      })
+      const writable = await handle.createWritable()
+      await writable.write(content)
+      await writable.close()
+      return true
+    } catch (error) {
+      if (error instanceof DOMException && error.name === 'AbortError') {
+        return false
+      }
+      throw error
+    }
+  }
+
+  const blob = new Blob([content], { type: 'application/json' })
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = 'settings.json'
+  document.body.appendChild(link)
+  link.click()
+  link.remove()
+  window.setTimeout(() => URL.revokeObjectURL(url), 0)
+  return true
 }
 
 export async function loadLogSnapshot(): Promise<LogSnapshot> {

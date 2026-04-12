@@ -20,7 +20,9 @@ defineEmits<{
         <div>
           <p class="eyebrow text-xs uppercase tracking-[0.24em]">Import</p>
           <h2 class="mt-2 text-2xl font-semibold tracking-tight">Review before applying</h2>
-          <p class="mt-2 text-sm text-muted">The imported config will be loaded into the editor as unsaved changes.</p>
+          <p class="mt-2 text-sm text-muted">
+            A valid import will be saved immediately. Imports with validation issues can still be loaded into the editor for repair.
+          </p>
         </div>
         <button class="button-secondary rounded-[0.75rem] px-4 py-2 text-sm font-medium" type="button" @click="$emit('cancel')">
           Cancel
@@ -82,7 +84,7 @@ defineEmits<{
           type="button"
           @click="$emit('apply')"
         >
-          Apply to Editor
+          {{ errors.length > 0 ? 'Apply to Editor' : 'Import and Save' }}
         </button>
       </footer>
     </div>

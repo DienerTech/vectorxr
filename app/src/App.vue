@@ -10,7 +10,7 @@ import TopNavTabs from './components/TopNavTabs.vue'
 import CoreTab from './components/tabs/CoreTab.vue'
 import DepthXrTab from './components/tabs/DepthXrTab.vue'
 import PivotXrTab from './components/tabs/PivotXrTab.vue'
-import { loadLogSnapshot, type LogSnapshot } from './lib/commands'
+import { exportConfigFile, loadLogSnapshot, type LogSnapshot } from './lib/commands'
 import { normalizeConfig, type VectorXRConfig } from './lib/model'
 import { patchNotes } from './lib/patchNotes'
 import { applyThemePreference, loadThemePreference, observeSystemThemeChanges, type ThemePreference } from './lib/theme'
@@ -36,31 +36,31 @@ const tabs = computed(() => [
   {
     id: 'core' as const,
     label: 'Home',
-    subtitle: 'Suite settings and logs',
+    subtitle: 'App settings and logs',
     status: store.state.config.core.enabled ? 'Suite on' : 'Suite off',
   },
   {
     id: 'registry' as const,
     label: 'Application Registry',
-    subtitle: 'Registered titles',
+    subtitle: 'Register applications for profile assignment',
     status: `${store.state.config.applications.length} app${store.state.config.applications.length === 1 ? '' : 's'}`,
   },
   {
     id: 'about' as const,
     label: 'About',
-    subtitle: 'Project and patches',
+    subtitle: 'Project information and patch notes',
     status: latestPatch.version,
   },
   {
     id: 'depthxr' as const,
     label: 'Depth',
-    subtitle: 'Stereo depth tuning',
+    subtitle: 'Stereo depth tuning - see the world in a new way!',
     status: store.state.config.modules.depthxr.enabled ? 'Enabled' : 'Disabled',
   },
   {
     id: 'pivotxr' as const,
     label: 'Pivot',
-    subtitle: 'Rotation tuning',
+    subtitle: 'Rotation tuning - watch your six!',
     status: store.state.config.modules.pivotxr.enabled ? 'Enabled' : 'Disabled',
   },
 ])
@@ -116,6 +116,19 @@ async function openLogs() {
   await refreshLogs()
 }
 
+async function exportConfig() {
+  if (errors.value.length > 0) {
+    store.state.status = 'Fix validation errors before exporting'
+    return
+  }
+
+  try {
+    const exported = await exportConfigFile(store.state.config)
+    store.state.status = exported ? 'Config exported' : 'Export canceled'
+  } catch (error) {
+    store.state.status = error instanceof Error ? error.message : 'Failed to export config'
+  }
+}
 
 function triggerImport() {
   importFileInput.value?.click()
@@ -145,9 +158,13 @@ function handleImportFile(event: Event) {
   reader.readAsText(file)
 }
 
-function applyImport() {
+async function applyImport() {
   if (importedConfig.value) {
+    const shouldSave = importErrors.value.length === 0
     store.importConfig(importedConfig.value)
+    if (shouldSave) {
+      await store.save()
+    }
   }
   importPreviewOpen.value = false
   importedConfig.value = null
@@ -175,7 +192,10 @@ function cancelImport() {
           :path="store.state.path"
           :log-path="logSnapshot?.activePath"
           :theme-preference="themePreference"
+          :settings-actions-disabled="store.state.loading || store.state.saving"
           @view-logs="openLogs"
+          @import-config="triggerImport"
+          @export-config="exportConfig"
           @update:theme-preference="themePreference = $event"
         />
         <AppRegistryEditor
@@ -241,7 +261,6 @@ function cancelImport() {
         :disabled="store.state.loading || store.state.saving || errors.length > 0"
         @save="saveConfig"
         @discard="store.discardChanges"
-        @import="triggerImport"
       />
 
       <input ref="importFileInput" type="file" accept=".json" class="hidden" @change="handleImportFile" />

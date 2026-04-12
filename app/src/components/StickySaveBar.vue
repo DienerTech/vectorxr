@@ -10,7 +10,6 @@ defineProps<{
 defineEmits<{
   save: []
   discard: []
-  import: []
 }>()
 </script>
 
@@ -44,14 +43,6 @@ defineEmits<{
             @click="$emit('discard')"
           >
             Discard
-          </button>
-          <button
-            class="rounded-[0.75rem] px-5 py-2.5 text-sm font-medium transition button-secondary disabled:cursor-not-allowed disabled:opacity-50"
-            :disabled="loading || saving"
-            type="button"
-            @click="$emit('import')"
-          >
-            Import Config
           </button>
         </div>
       </div>
