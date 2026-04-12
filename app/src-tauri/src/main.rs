@@ -6,6 +6,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
+mod input_devices;
+
 fn default_true() -> bool {
     true
 }
@@ -61,6 +63,12 @@ enum InputBinding {
         device_guid: String,
         #[serde(default = "default_input_path")]
         input_path: String,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        product_guid: String,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        device_name: String,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        input_label: String,
     },
 }
 
@@ -611,6 +619,16 @@ fn save_config(config: VectorXRConfig) -> Result<String, String> {
 }
 
 #[tauri::command]
+fn list_input_devices() -> Result<Vec<input_devices::InputDeviceInfo>, String> {
+    input_devices::list_input_devices()
+}
+
+#[tauri::command]
+fn capture_device_binding(timeout_ms: Option<u64>) -> Result<Option<input_devices::CapturedDeviceBinding>, String> {
+    input_devices::capture_device_binding(timeout_ms)
+}
+
+#[tauri::command]
 fn load_log_snapshot() -> Result<LogSnapshot, String> {
     let base_path = resolve_log_path();
     let directory = base_path.parent().unwrap_or_else(|| Path::new(".")).to_path_buf();
@@ -654,7 +672,13 @@ fn load_log_snapshot() -> Result<LogSnapshot, String> {
 
 fn main() {
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![load_config, save_config, load_log_snapshot])
+        .invoke_handler(tauri::generate_handler![
+            load_config,
+            save_config,
+            load_log_snapshot,
+            list_input_devices,
+            capture_device_binding
+        ])
         .run(tauri::generate_context!())
         .expect("failed to run VectorXR Tauri app");
 }

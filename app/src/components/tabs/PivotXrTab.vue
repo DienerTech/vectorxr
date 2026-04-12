@@ -303,7 +303,7 @@ const profileWarnings = computed(() => {
           v-model:activation-mode="profile.activationMode"
           v-model:activation-binding="profile.activationBinding"
           class="mt-4"
-          description="Keyboard bindings work today. Device bindings are saved and available when HOTAS runtime support lands."
+          description="Choose a keyboard shortcut or capture a joystick button for this profile."
         />
 
         <div class="mt-3 rounded-[1rem] border p-4 surface-panel-soft">

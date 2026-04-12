@@ -31,6 +31,9 @@ export interface DeviceBinding {
   type: 'device'
   deviceGuid: string
   inputPath: string
+  productGuid?: string
+  deviceName?: string
+  inputLabel?: string
 }
 
 export interface NoneBinding {
@@ -250,6 +253,9 @@ export function defaultDeviceBinding(): DeviceBinding {
     type: 'device',
     deviceGuid: '',
     inputPath: 'button-1',
+    productGuid: '',
+    deviceName: '',
+    inputLabel: 'Button 1',
   }
 }
 
@@ -397,6 +403,9 @@ export function normalizeInputBinding(value: unknown, fallback: InputBinding): I
       type: 'device',
       deviceGuid: normalizeString(source.deviceGuid, fallback.type === 'device' ? fallback.deviceGuid : ''),
       inputPath: normalizeString(source.inputPath, fallback.type === 'device' ? fallback.inputPath : 'button-1'),
+      productGuid: normalizeString(source.productGuid, fallback.type === 'device' ? fallback.productGuid ?? '' : ''),
+      deviceName: normalizeString(source.deviceName, fallback.type === 'device' ? fallback.deviceName ?? '' : ''),
+      inputLabel: normalizeString(source.inputLabel, fallback.type === 'device' ? fallback.inputLabel ?? '' : ''),
     }
   }
 
@@ -408,8 +417,8 @@ export function normalizeInputBinding(value: unknown, fallback: InputBinding): I
 
 export function bindingLabel(binding: InputBinding): string {
   if (binding.type === 'device') {
-    const device = binding.deviceGuid.trim() || 'Unassigned device'
-    const input = binding.inputPath.trim() || 'unassigned input'
+    const device = binding.deviceName?.trim() || binding.deviceGuid.trim() || 'Unassigned device'
+    const input = binding.inputLabel?.trim() || binding.inputPath.trim() || 'unassigned input'
     return `${device} / ${input}`
   }
 

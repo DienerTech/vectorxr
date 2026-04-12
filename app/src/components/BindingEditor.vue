@@ -1,12 +1,14 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 
+import DeviceBindingEditor from './DeviceBindingEditor.vue'
 import { defaultDeviceBinding, defaultKeyboardBinding, defaultNoneBinding, keyboardBindingKeyGroups, keyboardModifierKeys, type InputBinding } from '../lib/model'
 
 const props = defineProps<{
   modelValue: InputBinding
   label: string
   description: string
+  noneText?: string
 }>()
 
 const emit = defineEmits<{
@@ -51,44 +53,34 @@ function toggleModifier(modifier: string, enabled: boolean) {
   emit('update:modelValue', { type: 'keyboard', chord: [...modifiers, primaryKey] })
 }
 
-function updateDeviceGuid(deviceGuid: string) {
-  if (props.modelValue.type !== 'device') {
-    return
-  }
-
-  emit('update:modelValue', { ...props.modelValue, deviceGuid })
-}
-
-function updateInputPath(inputPath: string) {
-  if (props.modelValue.type !== 'device') {
-    return
-  }
-
-  emit('update:modelValue', { ...props.modelValue, inputPath })
-}
 </script>
 
 <template>
   <div class="rounded-[1rem] border p-4 surface-panel-soft">
-    <div class="flex flex-wrap items-start justify-between gap-3">
-      <div>
-        <p class="text-sm font-semibold tracking-tight">{{ label }}</p>
-        <p class="mt-1 text-sm leading-6 text-muted">{{ description }}</p>
-      </div>
+    <div>
+      <p class="text-sm font-semibold tracking-tight">{{ label }}</p>
+      <p class="mt-1 text-sm leading-6 text-muted">{{ description }}</p>
+    </div>
 
-      <select v-model="bindingType" class="app-input rounded-[0.75rem] px-3 py-2 text-sm">
-        <option value="none">None</option>
-        <option value="keyboard">Keyboard</option>
-        <option value="device">Device</option>
-      </select>
+    <div class="mt-4 grid gap-3 sm:grid-cols-[repeat(auto-fit,minmax(150px,180px))]">
+      <slot name="controls" />
+
+      <label class="block">
+        <span class="mb-1.5 block text-sm font-medium">Binding Type</span>
+        <select v-model="bindingType" class="app-input w-full rounded-[0.75rem] px-4 py-2.5 text-sm">
+          <option value="none">None</option>
+          <option value="keyboard">Keyboard</option>
+          <option value="device">Device</option>
+        </select>
+      </label>
     </div>
 
     <div v-if="modelValue.type === 'none'" class="mt-4 rounded-[0.75rem] border border-dashed px-4 py-3 text-sm surface-panel-strong">
-      No binding assigned. This action will not run until a binding is selected.
+      {{ noneText || 'No binding assigned. This action will not run until a binding is selected.' }}
     </div>
 
-    <div v-else-if="modelValue.type === 'keyboard'" class="mt-4 grid gap-3 lg:grid-cols-[minmax(0,1fr)_minmax(180px,240px)]">
-      <div>
+    <div v-else-if="modelValue.type === 'keyboard'" class="mt-4 flex flex-wrap items-start gap-3">
+      <div class="min-w-[240px]">
         <span class="mb-1.5 block text-sm font-medium">Modifiers</span>
         <div class="flex flex-wrap gap-2">
           <label v-for="modifier in keyboardModifierKeys" :key="modifier" class="button-secondary inline-flex items-center gap-2 rounded-[0.75rem] px-3 py-2 text-sm">
@@ -103,7 +95,7 @@ function updateInputPath(inputPath: string) {
         </div>
       </div>
 
-      <label class="block">
+      <label class="block w-full sm:w-[220px]">
         <span class="mb-1.5 block text-sm font-medium">Primary Key</span>
         <select v-model="selectedPrimaryKey" class="app-input w-full rounded-[0.75rem] px-4 py-2.5">
           <optgroup v-for="group in keyboardBindingKeyGroups" :key="group.label" :label="group.label">
@@ -113,28 +105,6 @@ function updateInputPath(inputPath: string) {
       </label>
     </div>
 
-    <div v-else class="mt-4 grid gap-3 lg:grid-cols-2">
-      <label class="block">
-        <span class="mb-1.5 block text-sm font-medium">Windows Device GUID</span>
-        <input
-          :value="modelValue.deviceGuid"
-          class="app-input w-full rounded-[0.75rem] px-4 py-2.5"
-          placeholder="{00000000-0000-0000-0000-000000000000}"
-          type="text"
-          @input="updateDeviceGuid(($event.target as HTMLInputElement).value)"
-        />
-      </label>
-
-      <label class="block">
-        <span class="mb-1.5 block text-sm font-medium">Input Path</span>
-        <input
-          :value="modelValue.inputPath"
-          class="app-input w-full rounded-[0.75rem] px-4 py-2.5"
-          placeholder="button-1"
-          type="text"
-          @input="updateInputPath(($event.target as HTMLInputElement).value)"
-        />
-      </label>
-    </div>
+    <DeviceBindingEditor v-else :model-value="modelValue" @update:model-value="$emit('update:modelValue', $event)" />
   </div>
 </template>

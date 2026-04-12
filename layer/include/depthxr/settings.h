@@ -29,6 +29,9 @@ struct InputBinding {
     std::vector<std::string> chord;
     std::string device_guid;
     std::string input_path{"button-1"};
+    std::string product_guid;
+    std::string device_name;
+    std::string input_label;
 };
 
 struct CoreSettings {
@@ -53,7 +56,7 @@ struct DepthXrResolvedSettings {
 };
 
 struct DepthXrBindings {
-    InputBinding toggle_enabled{InputBindingType::None, {}, "", "button-1"};
+    InputBinding toggle_enabled{InputBindingType::None, {}, "", "button-1", "", "", ""};
 };
 
 struct ProfileMatch {

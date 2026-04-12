@@ -65,6 +65,8 @@ function validateInputBinding(prefix: string, binding: InputBinding): string[] {
 
   if (!binding.inputPath.trim()) {
     errors.push(`${prefix}.inputPath is required`)
+  } else if (!/^button-([1-9]|[1-9][0-9]|1[0-1][0-9]|12[0-8])$/.test(binding.inputPath.trim())) {
+    errors.push(`${prefix}.inputPath must use button-1 through button-128`)
   }
 
   return errors

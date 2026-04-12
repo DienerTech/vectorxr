@@ -487,6 +487,41 @@ void TestNoneBindingParsed() {
            "DepthXR toggle binding should be None");
 }
 
+void TestDeviceBindingMetadataParsed() {
+    const std::string json = R"json(
+{
+  "version": 3,
+  "core": { "enabled": true, "logLevel": "info", "logRetentionFiles": 7 },
+  "applications": [],
+  "modules": {
+    "depthxr": {
+      "bindings": {
+        "toggleEnabled": {
+          "type": "device",
+          "deviceGuid": "{11111111-2222-3333-4444-555555555555}",
+          "productGuid": "{aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee}",
+          "deviceName": "VKB Gladiator",
+          "inputPath": "button-12",
+          "inputLabel": "Button 12"
+        }
+      }
+    },
+    "pivotxr": { "enabled": false, "defaults": {}, "profiles": [] }
+  }
+}
+)json";
+
+    const depthxr::ParseResult result = depthxr::ParseConfig(json);
+    Expect(result.ok, "Config parser rejected valid device binding metadata: " + result.error);
+    const depthxr::InputBinding& binding = result.document.depthxr.bindings.toggle_enabled;
+    Expect(binding.type == depthxr::InputBindingType::Device, "Device binding type mismatch");
+    Expect(binding.device_guid == "{11111111-2222-3333-4444-555555555555}", "Device GUID metadata mismatch");
+    Expect(binding.product_guid == "{aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee}", "Product GUID metadata mismatch");
+    Expect(binding.device_name == "VKB Gladiator", "Device name metadata mismatch");
+    Expect(binding.input_path == "button-12", "Device input path mismatch");
+    Expect(binding.input_label == "Button 12", "Device input label metadata mismatch");
+}
+
 void TestExeMatch() {
     Expect(depthxr::ExeNameMatches("DCS.exe", "dcs.exe"), "Case-insensitive exe match failed");
     Expect(depthxr::ExeNameMatches("C:\\Games\\DCS.exe", "dcs.exe"), "Basename exe match failed");
@@ -628,6 +663,7 @@ int main() {
     TestPivotProfileResolution();
     TestInvalidPivotActivationBindingRejected();
     TestNoneBindingParsed();
+    TestDeviceBindingMetadataParsed();
     TestExeMatch();
     TestQuadViewStereoBoostKeepsInsetViewsInSync();
     TestQuadViewConvergenceKeepsInsetOffsetsAligned();

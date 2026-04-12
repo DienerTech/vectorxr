@@ -525,6 +525,7 @@ bool ParseInputBinding(const JsonValue& value, InputBinding& out, std::string& e
         return false;
     }
 
+    out = InputBinding{};
     out.type = *type;
     if (out.type == InputBindingType::None) {
         return true;
@@ -565,13 +566,41 @@ bool ParseInputBinding(const JsonValue& value, InputBinding& out, std::string& e
         return true;
     }
 
-    static const std::unordered_set<std::string> allowed = {"type", "deviceGuid", "inputPath"};
+    static const std::unordered_set<std::string> allowed = {"type", "deviceGuid", "inputPath", "productGuid", "deviceName", "inputLabel"};
     if (!CheckAllowedKeys(*object, allowed, error)) {
         return false;
     }
 
-    return ReadRequiredString(*object, "deviceGuid", out.device_guid, error) &&
-           ReadRequiredString(*object, "inputPath", out.input_path, error);
+    if (!ReadRequiredString(*object, "deviceGuid", out.device_guid, error) ||
+        !ReadRequiredString(*object, "inputPath", out.input_path, error)) {
+        return false;
+    }
+
+    if (const auto product_guid_it = object->find("productGuid"); product_guid_it != object->end()) {
+        if (!product_guid_it->second.IsString()) {
+            error = "productGuid must be a string";
+            return false;
+        }
+        out.product_guid = product_guid_it->second.AsString();
+    }
+
+    if (const auto device_name_it = object->find("deviceName"); device_name_it != object->end()) {
+        if (!device_name_it->second.IsString()) {
+            error = "deviceName must be a string";
+            return false;
+        }
+        out.device_name = device_name_it->second.AsString();
+    }
+
+    if (const auto input_label_it = object->find("inputLabel"); input_label_it != object->end()) {
+        if (!input_label_it->second.IsString()) {
+            error = "inputLabel must be a string";
+            return false;
+        }
+        out.input_label = input_label_it->second.AsString();
+    }
+
+    return true;
 }
 
 bool CheckAllowedKeys(const JsonValue::Object& object,

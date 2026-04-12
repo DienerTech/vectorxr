@@ -33,6 +33,23 @@ export interface LogSnapshot {
   files: LogFileEntry[]
 }
 
+export interface InputDeviceInfo {
+  deviceGuid: string
+  productGuid: string
+  deviceName: string
+  productName: string
+  buttonCount: number
+}
+
+export interface CapturedDeviceBinding {
+  deviceGuid: string
+  productGuid: string
+  deviceName: string
+  inputPath: string
+  inputLabel: string
+  buttonIndex: number
+}
+
 function tauriAvailable(): boolean {
   return typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
 }
@@ -110,6 +127,22 @@ export async function exportConfigFile(config: VectorXRConfig): Promise<boolean>
   link.remove()
   window.setTimeout(() => URL.revokeObjectURL(url), 0)
   return true
+}
+
+export async function listInputDevices(): Promise<InputDeviceInfo[]> {
+  if (!tauriAvailable()) {
+    return []
+  }
+
+  return invoke<InputDeviceInfo[]>('list_input_devices')
+}
+
+export async function captureDeviceBinding(timeoutMs = 15_000): Promise<CapturedDeviceBinding | null> {
+  if (!tauriAvailable()) {
+    return null
+  }
+
+  return invoke<CapturedDeviceBinding | null>('capture_device_binding', { timeoutMs })
 }
 
 export async function loadLogSnapshot(): Promise<LogSnapshot> {
