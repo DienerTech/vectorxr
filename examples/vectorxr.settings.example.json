@@ -1,10 +1,20 @@
 {
-  "version": 2,
+  "version": 3,
   "core": {
     "enabled": true,
     "logLevel": "info",
     "logRetentionFiles": 7
   },
+  "applications": [
+    {
+      "id": "dcs",
+      "name": "DCS",
+      "enabled": true,
+      "match": {
+        "exe": "DCS.exe"
+      }
+    }
+  ],
   "modules": {
     "depthxr": {
       "enabled": true,
@@ -14,13 +24,18 @@
         "stereoBoost": 1.1,
         "convergence": 0.0
       },
+      "bindings": {
+        "toggleEnabled": {
+          "type": "none"
+        }
+      },
       "profiles": [
         {
           "name": "DCS",
           "enabled": true,
-          "match": {
-            "exe": "DCS.exe"
-          },
+          "applicationIds": [
+            "dcs"
+          ],
           "settings": {
             "stereoBoostEnabled": true,
             "convergenceEnabled": true,
@@ -33,12 +48,38 @@
     "pivotxr": {
       "enabled": false,
       "defaults": {
-        "activationMode": "toggle",
-        "activationKey": "F8",
         "rotationMultiplier": 1.5,
         "smoothing": 0.2,
-        "deadzoneDegrees": 8.0
-      }
+        "deadzoneDegrees": 8.0,
+        "maxExtraYawDegrees": 25.0,
+        "pitchRotationMultiplier": 1.0,
+        "pitchSmoothing": 0.2,
+        "pitchDeadzoneDegrees": 12.0,
+        "maxExtraPitchDegrees": 20.0
+      },
+      "profiles": [
+        {
+          "name": "DCS",
+          "enabled": true,
+          "applicationIds": [
+            "dcs"
+          ],
+          "activationMode": "toggle",
+          "activationBinding": {
+            "type": "none"
+          },
+          "settings": {
+            "rotationMultiplier": 1.7,
+            "smoothing": 0.2,
+            "deadzoneDegrees": 10.0,
+            "maxExtraYawDegrees": 60.0,
+            "pitchRotationMultiplier": 1.2,
+            "pitchSmoothing": 0.2,
+            "pitchDeadzoneDegrees": 15.0,
+            "maxExtraPitchDegrees": 45.0
+          }
+        }
+      ]
     }
   }
 }

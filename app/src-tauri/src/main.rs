@@ -6,6 +6,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
+mod input_devices;
+
 fn default_true() -> bool {
     true
 }
@@ -15,7 +17,7 @@ fn default_false() -> bool {
 }
 
 fn default_version() -> u32 {
-    2
+    3
 }
 
 fn default_stereo_boost() -> f64 {
@@ -38,12 +40,40 @@ fn default_activation_mode() -> String {
     "toggle".into()
 }
 
-fn default_activation_key() -> String {
-    "F8".into()
-}
-
 fn default_rotation_multiplier() -> f64 {
     1.5
+}
+
+fn default_activation_binding() -> InputBinding {
+    InputBinding::None
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "camelCase")]
+enum InputBinding {
+    None,
+    #[serde(rename_all = "camelCase")]
+    Keyboard {
+        #[serde(default)]
+        chord: Vec<String>,
+    },
+    #[serde(rename_all = "camelCase")]
+    Device {
+        #[serde(default)]
+        device_guid: String,
+        #[serde(default = "default_input_path")]
+        input_path: String,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        product_guid: String,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        device_name: String,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        input_label: String,
+    },
+}
+
+fn default_input_path() -> String {
+    "button-1".into()
 }
 
 fn default_smoothing() -> f64 {
@@ -77,6 +107,25 @@ fn default_max_extra_pitch_degrees() -> f64 {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ProfileMatch {
     exe: String,
+}
+
+impl Default for ProfileMatch {
+    fn default() -> Self {
+        Self {
+            exe: "Game.exe".into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RegisteredApplication {
+    id: String,
+    name: String,
+    #[serde(default = "default_true")]
+    enabled: bool,
+    #[serde(default)]
+    r#match: ProfileMatch,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -131,7 +180,10 @@ struct DepthXRProfileConfig {
     name: String,
     #[serde(default = "default_true")]
     enabled: bool,
-    r#match: ProfileMatch,
+    #[serde(default)]
+    application_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    r#match: Option<ProfileMatch>,
     #[serde(default)]
     settings: DepthXRSettings,
 }
@@ -144,7 +196,28 @@ struct DepthXRModuleConfig {
     #[serde(default)]
     defaults: DepthXRSettings,
     #[serde(default)]
+    bindings: DepthXRBindings,
+    #[serde(default)]
     profiles: Vec<DepthXRProfileConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DepthXRBindings {
+    #[serde(default = "default_depth_toggle_binding")]
+    toggle_enabled: InputBinding,
+}
+
+impl Default for DepthXRBindings {
+    fn default() -> Self {
+        Self {
+            toggle_enabled: default_depth_toggle_binding(),
+        }
+    }
+}
+
+fn default_depth_toggle_binding() -> InputBinding {
+    InputBinding::None
 }
 
 impl Default for DepthXRModuleConfig {
@@ -152,6 +225,7 @@ impl Default for DepthXRModuleConfig {
         Self {
             enabled: true,
             defaults: DepthXRSettings::default(),
+            bindings: DepthXRBindings::default(),
             profiles: Vec::new(),
         }
     }
@@ -159,11 +233,7 @@ impl Default for DepthXRModuleConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct PivotXRDefaults {
-    #[serde(default = "default_activation_mode")]
-    activation_mode: String,
-    #[serde(default = "default_activation_key")]
-    activation_key: String,
+struct PivotXRSettings {
     #[serde(default = "default_rotation_multiplier")]
     rotation_multiplier: f64,
     #[serde(default = "default_smoothing")]
@@ -182,11 +252,9 @@ struct PivotXRDefaults {
     max_extra_pitch_degrees: f64,
 }
 
-impl Default for PivotXRDefaults {
+impl Default for PivotXRSettings {
     fn default() -> Self {
         Self {
-            activation_mode: default_activation_mode(),
-            activation_key: default_activation_key(),
             rotation_multiplier: default_rotation_multiplier(),
             smoothing: default_smoothing(),
             deadzone_degrees: default_deadzone_degrees(),
@@ -201,18 +269,44 @@ impl Default for PivotXRDefaults {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct PivotXRProfileConfig {
+    #[serde(default)]
+    name: String,
+    #[serde(default = "default_true")]
+    enabled: bool,
+    #[serde(default)]
+    application_ids: Vec<String>,
+    #[serde(default = "default_activation_mode")]
+    activation_mode: String,
+    #[serde(default = "default_activation_binding")]
+    activation_binding: InputBinding,
+    #[serde(default)]
+    settings: PivotXRSettings,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct PivotXRModuleConfig {
     #[serde(default = "default_false")]
     enabled: bool,
     #[serde(default)]
-    defaults: PivotXRDefaults,
+    defaults: PivotXRSettings,
+    #[serde(default = "default_activation_mode")]
+    activation_mode: String,
+    #[serde(default = "default_activation_binding")]
+    activation_binding: InputBinding,
+    #[serde(default)]
+    profiles: Vec<PivotXRProfileConfig>,
 }
 
 impl Default for PivotXRModuleConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            defaults: PivotXRDefaults::default(),
+            defaults: PivotXRSettings::default(),
+            activation_mode: default_activation_mode(),
+            activation_binding: default_activation_binding(),
+            profiles: Vec::new(),
         }
     }
 }
@@ -232,6 +326,8 @@ struct VectorXRConfig {
     version: u32,
     #[serde(default)]
     core: CoreConfig,
+    #[serde(default)]
+    applications: Vec<RegisteredApplication>,
     #[serde(default)]
     modules: VectorXRModules,
 }
@@ -261,10 +357,107 @@ struct LogSnapshot {
 
 fn default_config() -> VectorXRConfig {
     VectorXRConfig {
-        version: 2,
+        version: 3,
         core: CoreConfig::default(),
+        applications: Vec::new(),
         modules: VectorXRModules::default(),
     }
+}
+
+fn sanitize_profile_name(exe: &str) -> String {
+    let basename = exe
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(exe)
+        .trim();
+
+    let without_extension = basename
+        .rsplit_once('.')
+        .map(|(stem, _)| stem)
+        .unwrap_or(basename)
+        .trim();
+
+    if without_extension.is_empty() {
+        "New Profile".into()
+    } else {
+        without_extension.into()
+    }
+}
+
+fn sanitize_application_id(value: &str) -> String {
+    let mut id = String::new();
+    let mut last_was_dash = false;
+
+    for character in value.trim().to_lowercase().chars() {
+        if character.is_ascii_alphanumeric() {
+            id.push(character);
+            last_was_dash = false;
+        } else if !last_was_dash && !id.is_empty() {
+            id.push('-');
+            last_was_dash = true;
+        }
+    }
+
+    while id.ends_with('-') {
+        id.pop();
+    }
+
+    if id.is_empty() {
+        "application".into()
+    } else {
+        id
+    }
+}
+
+fn normalize_config(mut config: VectorXRConfig) -> VectorXRConfig {
+    if config.version != 3 {
+        return default_config();
+    }
+
+    config.version = 3;
+
+    for application in &mut config.applications {
+        application.enabled = true;
+        if application.id.trim().is_empty() {
+            application.id = sanitize_application_id(&application.name);
+        }
+        if application.name.trim().is_empty() {
+            application.name = sanitize_profile_name(&application.r#match.exe);
+        }
+        if application.r#match.exe.trim().is_empty() {
+            application.r#match.exe = "Game.exe".into();
+        }
+    }
+
+    for profile in &mut config.modules.depthxr.profiles {
+        if profile.name.trim().is_empty() {
+            let first_application = profile
+                .application_ids
+                .first()
+                .and_then(|application_id| config.applications.iter().find(|application| &application.id == application_id));
+
+            profile.name = first_application
+                .map(|application| application.name.clone())
+                .unwrap_or_else(|| "New Profile".into());
+        }
+
+        profile.r#match = None;
+    }
+
+    for profile in &mut config.modules.pivotxr.profiles {
+        if profile.name.trim().is_empty() {
+            let first_application = profile
+                .application_ids
+                .first()
+                .and_then(|application_id| config.applications.iter().find(|application| &application.id == application_id));
+
+            profile.name = first_application
+                .map(|application| application.name.clone())
+                .unwrap_or_else(|| "New Profile".into());
+        }
+    }
+
+    config
 }
 
 fn resolve_config_path() -> PathBuf {
@@ -407,7 +600,7 @@ fn load_config() -> Result<ConfigEnvelope, String> {
     ensure_default_file(&path)?;
 
     let content = fs::read_to_string(&path).map_err(|error| error.to_string())?;
-    let config = serde_json::from_str::<VectorXRConfig>(&content).map_err(|error| error.to_string())?;
+    let config = normalize_config(serde_json::from_str::<VectorXRConfig>(&content).map_err(|error| error.to_string())?);
 
     Ok(ConfigEnvelope {
         path: path.to_string_lossy().into_owned(),
@@ -420,9 +613,19 @@ fn save_config(config: VectorXRConfig) -> Result<String, String> {
     let path = resolve_config_path();
     ensure_parent(&path)?;
 
-    let content = serde_json::to_string_pretty(&config).map_err(|error| error.to_string())?;
+    let content = serde_json::to_string_pretty(&normalize_config(config)).map_err(|error| error.to_string())?;
     fs::write(&path, content).map_err(|error| error.to_string())?;
     Ok(path.to_string_lossy().into_owned())
+}
+
+#[tauri::command]
+fn list_input_devices() -> Result<Vec<input_devices::InputDeviceInfo>, String> {
+    input_devices::list_input_devices()
+}
+
+#[tauri::command]
+fn capture_device_binding(timeout_ms: Option<u64>) -> Result<Option<input_devices::CapturedDeviceBinding>, String> {
+    input_devices::capture_device_binding(timeout_ms)
 }
 
 #[tauri::command]
@@ -469,7 +672,13 @@ fn load_log_snapshot() -> Result<LogSnapshot, String> {
 
 fn main() {
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![load_config, save_config, load_log_snapshot])
+        .invoke_handler(tauri::generate_handler![
+            load_config,
+            save_config,
+            load_log_snapshot,
+            list_input_devices,
+            capture_device_binding
+        ])
         .run(tauri::generate_context!())
         .expect("failed to run VectorXR Tauri app");
 }

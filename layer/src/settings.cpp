@@ -33,7 +33,7 @@ std::string NormalizeValue(const std::string& value) {
 const char* ToString(LogLevel level) {
     switch (level) {
     case LogLevel::Off:
-        return "off";
+        return "none";
     case LogLevel::Error:
         return "error";
     case LogLevel::Info:
@@ -48,11 +48,11 @@ const char* ToString(LogLevel level) {
 std::optional<LogLevel> ParseLogLevel(const std::string& value) {
     const std::string normalized = NormalizeValue(value);
 
-    if (normalized == "off") {
+    if (normalized == "none" || normalized == "off") {
         return LogLevel::Off;
     }
     if (normalized == "error") {
-        return LogLevel::Error;
+        return LogLevel::Info;
     }
     if (normalized == "info") {
         return LogLevel::Info;
@@ -109,6 +109,16 @@ std::optional<std::string> ParseActivationKey(const std::string& value) {
         return std::string("Space");
     }
 
+    if (normalized == "ctrl" || normalized == "control") {
+        return std::string("Ctrl");
+    }
+    if (normalized == "alt") {
+        return std::string("Alt");
+    }
+    if (normalized == "shift") {
+        return std::string("Shift");
+    }
+
     if (normalized.size() >= 2 && normalized[0] == 'f') {
         bool digits_only = true;
         for (size_t index = 1; index < normalized.size(); ++index) {
@@ -128,6 +138,35 @@ std::optional<std::string> ParseActivationKey(const std::string& value) {
                 return std::nullopt;
             }
         }
+    }
+
+    return std::nullopt;
+}
+
+const char* ToString(InputBindingType type) {
+    switch (type) {
+    case InputBindingType::None:
+        return "none";
+    case InputBindingType::Keyboard:
+        return "keyboard";
+    case InputBindingType::Device:
+        return "device";
+    default:
+        return "keyboard";
+    }
+}
+
+std::optional<InputBindingType> ParseInputBindingType(const std::string& value) {
+    const std::string normalized = NormalizeValue(value);
+
+    if (normalized == "none") {
+        return InputBindingType::None;
+    }
+    if (normalized == "keyboard") {
+        return InputBindingType::Keyboard;
+    }
+    if (normalized == "device") {
+        return InputBindingType::Device;
     }
 
     return std::nullopt;

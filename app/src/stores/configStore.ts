@@ -1,7 +1,7 @@
 import { computed, reactive } from 'vue'
 
 import { loadConfigEnvelope, saveConfigEnvelope } from '../lib/commands'
-import { cloneConfig, createProfile, defaultConfig, sanitizeProfileName } from '../lib/model'
+import { cloneConfig, createApplication, createProfile, createPivotProfile, defaultConfig } from '../lib/model'
 import type { AppTab, VectorXRConfig } from '../lib/model'
 
 interface StoreState {
@@ -36,7 +36,7 @@ export function useConfigStore() {
       state.path = envelope.path
       state.config = cloneConfig(envelope.config)
       state.originalConfig = cloneConfig(envelope.config)
-      state.status = 'Config loaded'
+      state.status = ''
     } catch (error) {
       state.status = error instanceof Error ? error.message : 'Failed to load config'
     } finally {
@@ -69,7 +69,8 @@ export function useConfigStore() {
   }
 
   function addProfile() {
-    state.config.modules.depthxr.profiles.push(createProfile(state.config.modules.depthxr.defaults))
+    const defaultApplicationId = state.config.applications[0]?.id
+    state.config.modules.depthxr.profiles.push(createProfile(state.config.modules.depthxr.defaults, defaultApplicationId ? [defaultApplicationId] : []))
   }
 
   function removeProfile(index: number) {
@@ -83,7 +84,60 @@ export function useConfigStore() {
     }
 
     if (!profile.name.trim() || profile.name === 'New Profile') {
-      profile.name = sanitizeProfileName(profile.match.exe)
+      const firstApplication = state.config.applications.find((application) => application.id === profile.applicationIds[0])
+      profile.name = firstApplication?.name || 'New Profile'
+    }
+  }
+
+  function addPivotProfile() {
+    const defaultApplicationId = state.config.applications[0]?.id
+    state.config.modules.pivotxr.profiles.push(
+      createPivotProfile(
+        state.config.modules.pivotxr.defaults,
+        defaultApplicationId ? [defaultApplicationId] : [],
+        state.config.modules.pivotxr.activationMode,
+        state.config.modules.pivotxr.activationBinding,
+      ),
+    )
+  }
+
+  function removePivotProfile(index: number) {
+    state.config.modules.pivotxr.profiles.splice(index, 1)
+  }
+
+  function syncPivotProfileName(index: number) {
+    const profile = state.config.modules.pivotxr.profiles[index]
+    if (!profile) {
+      return
+    }
+
+    if (!profile.name.trim() || profile.name === 'New Profile') {
+      const firstApplication = state.config.applications.find((application) => application.id === profile.applicationIds[0])
+      profile.name = firstApplication?.name || 'New Profile'
+    }
+  }
+
+  function importConfig(config: VectorXRConfig) {
+    state.config = cloneConfig(config)
+    state.status = 'Config imported — save to write to disk'
+  }
+
+  function addApplication() {
+    state.config.applications.push(createApplication('Game.exe', state.config.applications))
+  }
+
+  function removeApplication(index: number) {
+    const application = state.config.applications[index]
+    if (!application) {
+      return
+    }
+
+    state.config.applications.splice(index, 1)
+    for (const profile of state.config.modules.depthxr.profiles) {
+      profile.applicationIds = profile.applicationIds.filter((id) => id !== application.id)
+    }
+    for (const profile of state.config.modules.pivotxr.profiles) {
+      profile.applicationIds = profile.applicationIds.filter((id) => id !== application.id)
     }
   }
 
@@ -93,9 +147,15 @@ export function useConfigStore() {
     load,
     save,
     discardChanges,
+    importConfig,
     setActiveTab,
     addProfile,
     removeProfile,
     syncProfileName,
+    addPivotProfile,
+    removePivotProfile,
+    syncPivotProfileName,
+    addApplication,
+    removeApplication,
   }
 }

@@ -1,11 +1,15 @@
 <script setup lang="ts">
+import { computed } from 'vue'
+
+import BindingEditor from '../BindingEditor.vue'
 import EffectField from '../EffectField.vue'
 import ProfileEditor from '../ProfileEditor.vue'
 import { convergenceBadge, fromConvergenceDisplay, fromStereoBoostDisplay, stereoBoostBadge, toConvergenceDisplay, toStereoBoostDisplay } from '../../lib/display'
-import type { VectorXRConfig } from '../../lib/model'
+import type { RegisteredApplication, VectorXRConfig } from '../../lib/model'
 
-defineProps<{
+const props = defineProps<{
   config: VectorXRConfig
+  applications: RegisteredApplication[]
 }>()
 
 defineEmits<{
@@ -13,69 +17,108 @@ defineEmits<{
   removeProfile: [index: number]
   syncProfileName: [index: number]
 }>()
+
+const profileWarnings = computed(() => {
+  const warnings = new Map<number, string[]>()
+  const firstProfileByApplication = new Map<string, number>()
+  const applicationNameById = new Map(props.applications.map((application) => [application.id, application.name]))
+
+  props.config.modules.depthxr.profiles.forEach((profile, index) => {
+    if (!profile.enabled) {
+      return
+    }
+
+    for (const applicationId of profile.applicationIds) {
+      const firstIndex = firstProfileByApplication.get(applicationId)
+      if (firstIndex === undefined) {
+        firstProfileByApplication.set(applicationId, index)
+        continue
+      }
+
+      const appName = applicationNameById.get(applicationId) ?? applicationId
+      const message = `${appName} is already targeted by Profile ${firstIndex + 1}. The first enabled profile wins.`
+      warnings.set(index, [...(warnings.get(index) ?? []), message])
+    }
+  })
+
+  return warnings
+})
 </script>
 
 <template>
   <div class="space-y-6">
-    <article class="rounded-[2rem] border border-black/10 bg-white/80 p-5 shadow-panel backdrop-blur">
+    <article class="rounded-[1.25rem] border p-5 shadow-panel backdrop-blur surface-panel">
+      <!-- Module header -->
       <div class="mb-4 flex flex-wrap items-center justify-between gap-3">
         <div>
-          <p class="text-xs uppercase tracking-[0.24em] text-depthxr-copper">DepthXR</p>
-          <h2 class="text-2xl font-semibold tracking-tight text-depthxr-pine">Default Module Settings</h2>
+          <h2 class="text-2xl font-semibold tracking-tight">Depth</h2>
+          <p class="mt-2 max-w-3xl text-sm leading-6 text-muted">
+            Tune stereo boost and convergence defaults, then add per-application profiles when a title needs different depth behavior. Start with small value changes and use the runtime toggle binding for quick comparisons in headset.
+          </p>
         </div>
-        <label class="inline-flex items-center gap-3 rounded-full bg-depthxr-pine px-4 py-2 text-sm font-medium text-white">
+        <label class="pill-toggle inline-flex items-center gap-3 rounded-full px-4 py-2 text-sm font-medium">
           <input v-model="config.modules.depthxr.enabled" class="h-4 w-4 accent-depthxr-copper" type="checkbox" />
-          DepthXR Enabled
+          Depth Enabled
         </label>
       </div>
 
-      <div class="mb-4 rounded-2xl border border-dashed border-black/10 bg-[#f7f2e8] px-4 py-3 text-sm leading-6 text-depthxr-steel">
-        Milestone 2 keeps DepthXR focused on stereo boost and convergence while the app shell evolves around it. Display values are now tuned for
-        easier sharing and discussion, while the config still stores canonical runtime numbers.
-      </div>
+      <!-- Module-level binding — applies regardless of which profile is active -->
+      <BindingEditor
+        v-model="config.modules.depthxr.bindings.toggleEnabled"
+        class="mb-5"
+        label="Depth Toggle Binding"
+        description="Toggle Depth on or off at runtime for quick A/B testing."
+      />
 
-      <div class="grid gap-3 lg:grid-cols-2">
-        <EffectField
-          v-model:enabled="config.modules.depthxr.defaults.stereoBoostEnabled"
-          v-model:value="config.modules.depthxr.defaults.stereoBoost"
-          title="Stereo Boost"
-          subtitle="Scales horizontal eye separation around the midpoint."
-          :min="0.5"
-          :max="2"
-          :step="0.01"
-          :display-min="-50"
-          :display-max="100"
-          :display-step="0.1"
-          :display-value="toStereoBoostDisplay"
-          :parse-display-value="fromStereoBoostDisplay"
-          :display-badge="stereoBoostBadge"
-        />
-        <EffectField
-          v-model:enabled="config.modules.depthxr.defaults.convergenceEnabled"
-          v-model:value="config.modules.depthxr.defaults.convergence"
-          title="Convergence"
-          subtitle="Moves the zero-parallax plane by shifting per-eye projection centers."
-          :min="-0.5"
-          :max="0.5"
-          :step="0.001"
-          :display-min="-500"
-          :display-max="500"
-          :display-step="0.1"
-          :display-value="toConvergenceDisplay"
-          :parse-display-value="fromConvergenceDisplay"
-          :display-badge="convergenceBadge"
-        />
+      <!-- Default Profile -->
+      <div class="border-t pt-5" style="border-color: var(--app-border)">
+        <p class="eyebrow text-xs uppercase tracking-[0.24em]">Default Profile</p>
+        <p class="mb-4 mt-1 text-sm leading-6 text-muted">
+          These values apply when no custom profile targets the current application. New profiles are initialized from these defaults.
+        </p>
+        <div class="grid gap-3 lg:grid-cols-2">
+          <EffectField
+            v-model:enabled="config.modules.depthxr.defaults.stereoBoostEnabled"
+            v-model:value="config.modules.depthxr.defaults.stereoBoost"
+            title="Stereo Boost"
+            subtitle="Scales horizontal eye separation around the midpoint. Start around +5.0 to +10.0 and adjust slowly."
+            :min="1"
+            :max="2"
+            :step="0.01"
+            :display-min="0"
+            :display-max="100"
+            :display-step="0.1"
+            :display-value="toStereoBoostDisplay"
+            :parse-display-value="fromStereoBoostDisplay"
+            :display-badge="stereoBoostBadge"
+          />
+          <EffectField
+            v-model:enabled="config.modules.depthxr.defaults.convergenceEnabled"
+            v-model:value="config.modules.depthxr.defaults.convergence"
+            title="Convergence"
+            subtitle="Moves the zero-parallax plane by shifting per-eye projection centers. Start at 0.0; it can be particularly strong and may not apply in all titles."
+            :min="0"
+            :max="0.5"
+            :step="0.001"
+            :display-min="0"
+            :display-max="500"
+            :display-step="0.1"
+            :display-value="toConvergenceDisplay"
+            :parse-display-value="fromConvergenceDisplay"
+            :display-badge="convergenceBadge"
+          />
+        </div>
       </div>
     </article>
 
     <section class="space-y-4">
-      <div class="flex flex-wrap items-center justify-between gap-3">
+      <div class="flex flex-wrap items-center justify-between gap-3 rounded-[1rem] border p-4 surface-panel">
         <div>
-          <p class="text-xs uppercase tracking-[0.24em] text-depthxr-copper">Profiles</p>
-          <h2 class="text-2xl font-semibold tracking-tight text-depthxr-pine">DepthXR Per-Game Overrides</h2>
+          <p class="eyebrow text-xs uppercase tracking-[0.24em]">Profiles</p>
+          <h2 class="text-2xl font-semibold tracking-tight">Custom Profiles</h2>
         </div>
         <button
-          class="rounded-full bg-depthxr-copper px-5 py-2.5 text-sm font-medium text-white transition hover:brightness-110"
+          class="button-accent rounded-[0.75rem] px-5 py-2.5 text-sm font-medium"
           type="button"
           @click="$emit('addProfile')"
         >
@@ -85,18 +128,20 @@ defineEmits<{
 
       <ProfileEditor
         v-for="(profile, index) in config.modules.depthxr.profiles"
-        :key="`${profile.match.exe}-${index}`"
+        :key="`depth-profile-${index}`"
         :index="index"
         :profile="profile"
+        :applications="applications"
+        :warnings="profileWarnings.get(index)"
         @remove="$emit('removeProfile', index)"
         @sync-name="$emit('syncProfileName', index)"
       />
 
       <div
         v-if="config.modules.depthxr.profiles.length === 0"
-        class="rounded-[2rem] border border-dashed border-black/15 bg-white/50 px-6 py-7 text-center text-sm text-depthxr-steel"
+        class="rounded-[1rem] border border-dashed px-6 py-7 text-center text-sm surface-panel-soft"
       >
-        No per-game overrides yet. Add a profile to bind custom DepthXR values to a specific executable.
+        No custom profiles yet. Add a profile to override depth values for a specific application.
       </div>
     </section>
   </div>

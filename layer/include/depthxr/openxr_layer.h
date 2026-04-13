@@ -47,7 +47,9 @@ class OpenXrLayer {
     void CaptureInstanceFunctions();
     void LogResolvedSettings(const ResolvedRuntimeConfig& settings);
     void ResetPivotActivationState();
+    void ResetDepthToggleState();
     bool IsPivotXrActive(const PivotXrResolvedSettings& settings);
+    bool IsDepthXrActive();
     void ResetSessionState();
     XrResult CreateInternalReferenceSpaces(XrSession session);
     bool EnsureEyeOffsets(XrSession session,
@@ -55,7 +57,7 @@ class OpenXrLayer {
                           XrTime display_time,
                           uint32_t view_count);
     void CachePivotPoseDelta(XrTime time, const XrPosef& pose_delta);
-    XrPosef FindPivotPoseDelta(XrTime time) const;
+    bool FindPivotPoseDelta(XrTime time, XrPosef* pose_delta, XrTime* matched_time) const;
     void PrunePivotPoseDeltas(XrTime time);
     bool IsTrackedViewSpace(XrSpace space) const;
     XrResult LocateSpaceWithPivot(XrSpace space,
@@ -65,7 +67,9 @@ class OpenXrLayer {
                                   bool pivotxr_active,
                                   XrSpaceLocation* location,
                                   double* applied_extra_yaw_radians,
-                                  double* applied_extra_pitch_radians);
+                                  double* applied_extra_pitch_radians,
+                                  XrPosef* applied_pose_delta,
+                                  bool update_smoothing);
 
     std::mutex mutex_;
     std::filesystem::path dll_directory_;
@@ -85,17 +89,19 @@ class OpenXrLayer {
     std::optional<ResolvedRuntimeConfig> last_logged_settings_;
     uint64_t locate_views_call_count_{0};
     uint32_t pending_locate_views_diagnostics_{0};
+    uint32_t pending_end_frame_diagnostics_{0};
     double pivotxr_smoothed_extra_yaw_radians_{0.0};
     double pivotxr_smoothed_extra_pitch_radians_{0.0};
     std::optional<std::chrono::steady_clock::time_point> pivotxr_last_smoothing_wall_time_;
     bool pivotxr_toggle_enabled_{false};
     bool pivotxr_activation_key_was_down_{false};
+    bool depthxr_toggle_enabled_{true};
+    bool depthxr_toggle_binding_was_down_{false};
     XrSession active_session_{XR_NULL_HANDLE};
     XrSpace internal_local_space_{XR_NULL_HANDLE};
     XrSpace internal_view_space_{XR_NULL_HANDLE};
     XrSpace internal_stage_space_{XR_NULL_HANDLE};
     XrViewConfigurationType active_primary_view_configuration_type_{XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO};
-    XrViewConfigurationType cached_eye_offsets_view_configuration_type_{XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO};
     bool has_active_primary_view_configuration_{false};
     bool has_logged_quad_view_short_count_{false};
     bool has_logged_pivotxr_spike_mode_{false};

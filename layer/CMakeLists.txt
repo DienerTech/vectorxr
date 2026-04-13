@@ -2,6 +2,7 @@ add_library(
     depthxr_core
     STATIC
     src/config_parser.cpp
+    src/input_devices.cpp
     src/settings.cpp
     src/settings_resolver.cpp
     src/util/config_path.cpp
@@ -14,6 +15,9 @@ add_library(
 
 target_include_directories(depthxr_core PUBLIC include)
 target_compile_features(depthxr_core PUBLIC cxx_std_20)
+if(WIN32)
+    target_link_libraries(depthxr_core PUBLIC dinput8 dxguid ole32)
+endif()
 
 if(WIN32 AND DEPTHXR_BUILD_LAYER)
     find_package(OpenXR CONFIG QUIET)

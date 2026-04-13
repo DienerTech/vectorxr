@@ -1,7 +1,7 @@
-export type LogLevel = 'off' | 'error' | 'info' | 'debug'
+export type LogLevel = 'none' | 'info' | 'debug'
 export type ActivationMode = 'toggle' | 'hold'
-export type AppTab = 'core' | 'depthxr' | 'pivotxr'
-export const pivotActivationKeyGroups = [
+export type AppTab = 'core' | 'registry' | 'about' | 'depthxr' | 'pivotxr'
+export const keyboardBindingKeyGroups = [
   {
     label: 'Function Keys',
     options: Array.from({ length: 12 }, (_, index) => `F${index + 1}`),
@@ -20,10 +20,41 @@ export const pivotActivationKeyGroups = [
   },
 ] as const
 
+export const keyboardModifierKeys = ['Ctrl', 'Alt', 'Shift'] as const
+
+export interface KeyboardBinding {
+  type: 'keyboard'
+  chord: string[]
+}
+
+export interface DeviceBinding {
+  type: 'device'
+  deviceGuid: string
+  inputPath: string
+  productGuid?: string
+  deviceName?: string
+  inputLabel?: string
+}
+
+export interface NoneBinding {
+  type: 'none'
+}
+
+export type InputBinding = NoneBinding | KeyboardBinding | DeviceBinding
+
 export interface CoreConfig {
   enabled: boolean
   logLevel: LogLevel
   logRetentionFiles: number
+}
+
+export interface RegisteredApplication {
+  id: string
+  name: string
+  enabled: boolean
+  match: {
+    exe: string
+  }
 }
 
 export interface DepthXRSettings {
@@ -36,21 +67,22 @@ export interface DepthXRSettings {
 export interface DepthXRProfileConfig {
   name: string
   enabled: boolean
-  match: {
-    exe: string
-  }
+  applicationIds: string[]
   settings: DepthXRSettings
+}
+
+export interface DepthXRBindings {
+  toggleEnabled: InputBinding
 }
 
 export interface DepthXRModuleConfig {
   enabled: boolean
   defaults: DepthXRSettings
+  bindings: DepthXRBindings
   profiles: DepthXRProfileConfig[]
 }
 
-export interface PivotXRDefaults {
-  activationMode: ActivationMode
-  activationKey: string
+export interface PivotXRSettings {
   rotationMultiplier: number
   smoothing: number
   deadzoneDegrees: number
@@ -61,14 +93,27 @@ export interface PivotXRDefaults {
   maxExtraPitchDegrees: number
 }
 
+export interface PivotXRProfileConfig {
+  name: string
+  enabled: boolean
+  applicationIds: string[]
+  activationMode: ActivationMode
+  activationBinding: InputBinding
+  settings: PivotXRSettings
+}
+
 export interface PivotXRModuleConfig {
   enabled: boolean
-  defaults: PivotXRDefaults
+  defaults: PivotXRSettings
+  activationMode: ActivationMode
+  activationBinding: InputBinding
+  profiles: PivotXRProfileConfig[]
 }
 
 export interface VectorXRConfig {
-  version: 2
+  version: 3
   core: CoreConfig
+  applications: RegisteredApplication[]
   modules: {
     depthxr: DepthXRModuleConfig
     pivotxr: PivotXRModuleConfig
@@ -87,8 +132,16 @@ function isRecord(value: unknown): value is UnknownRecord {
 }
 
 function normalizeLogLevel(value: unknown): LogLevel {
-  if (value === 'off' || value === 'error' || value === 'info' || value === 'debug') {
+  if (value === 'none' || value === 'info' || value === 'debug') {
     return value
+  }
+
+  if (value === 'off') {
+    return 'none'
+  }
+
+  if (value === 'error') {
+    return 'info'
   }
 
   return 'info'
@@ -123,10 +176,54 @@ export function defaultDepthXRSettings(): DepthXRSettings {
   }
 }
 
-export function defaultPivotXRDefaults(): PivotXRDefaults {
+export function defaultDepthXRBindings(): DepthXRBindings {
   return {
-    activationMode: 'toggle',
-    activationKey: 'F8',
+    toggleEnabled: defaultNoneBinding(),
+  }
+}
+
+export function sanitizeApplicationId(value: string): string {
+  const normalized = value
+    .trim()
+    .toLowerCase()
+    .replace(/\.[^.]+$/, '')
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+
+  return normalized || 'application'
+}
+
+export function uniqueApplicationId(base: string, applications: RegisteredApplication[]): string {
+  const stem = sanitizeApplicationId(base)
+  const existing = new Set(applications.map((application) => application.id.toLowerCase()))
+
+  if (!existing.has(stem)) {
+    return stem
+  }
+
+  let index = 2
+  while (existing.has(`${stem}-${index}`)) {
+    index += 1
+  }
+
+  return `${stem}-${index}`
+}
+
+export function createApplication(exe = 'Game.exe', applications: RegisteredApplication[] = []): RegisteredApplication {
+  const name = sanitizeProfileName(exe)
+
+  return {
+    id: uniqueApplicationId(name, applications),
+    name,
+    enabled: true,
+    match: {
+      exe,
+    },
+  }
+}
+
+export function defaultPivotXRSettings(): PivotXRSettings {
+  return {
     rotationMultiplier: 1.5,
     smoothing: 0.2,
     deadzoneDegrees: 8,
@@ -138,19 +235,48 @@ export function defaultPivotXRDefaults(): PivotXRDefaults {
   }
 }
 
+export function defaultNoneBinding(): NoneBinding {
+  return {
+    type: 'none',
+  }
+}
+
+export function defaultKeyboardBinding(primaryKey = 'F8'): KeyboardBinding {
+  return {
+    type: 'keyboard',
+    chord: [primaryKey],
+  }
+}
+
+export function defaultDeviceBinding(): DeviceBinding {
+  return {
+    type: 'device',
+    deviceGuid: '',
+    inputPath: 'button-1',
+    productGuid: '',
+    deviceName: '',
+    inputLabel: 'Button 1',
+  }
+}
+
 export function defaultConfig(): VectorXRConfig {
   return {
-    version: 2,
+    version: 3,
     core: defaultCoreConfig(),
+    applications: [],
     modules: {
       depthxr: {
         enabled: true,
         defaults: defaultDepthXRSettings(),
+        bindings: defaultDepthXRBindings(),
         profiles: [],
       },
       pivotxr: {
         enabled: false,
-        defaults: defaultPivotXRDefaults(),
+        defaults: defaultPivotXRSettings(),
+        activationMode: 'toggle',
+        activationBinding: defaultNoneBinding(),
+        profiles: [],
       },
     },
   }
@@ -171,19 +297,33 @@ export function sanitizeProfileName(exe: string): string {
   return basename
 }
 
-export function createProfile(defaultSettings: DepthXRSettings): DepthXRProfileConfig {
+export function createProfile(defaultSettings: DepthXRSettings, applicationIds: string[] = []): DepthXRProfileConfig {
   return {
-    name: sanitizeProfileName('Game.exe'),
+    name: 'New Profile',
     enabled: true,
-    match: {
-      exe: 'Game.exe',
-    },
+    applicationIds,
+    settings: { ...defaultSettings },
+  }
+}
+
+export function createPivotProfile(
+  defaultSettings: PivotXRSettings,
+  applicationIds: string[] = [],
+  activationMode: ActivationMode = 'toggle',
+  activationBinding: InputBinding = defaultNoneBinding(),
+): PivotXRProfileConfig {
+  return {
+    name: 'New Profile',
+    enabled: true,
+    applicationIds,
+    activationMode,
+    activationBinding: normalizeInputBinding(activationBinding, defaultNoneBinding()),
     settings: { ...defaultSettings },
   }
 }
 
 function isVectorXRConfig(value: unknown): value is VectorXRConfig {
-  return isRecord(value) && value.version === 2 && 'core' in value && 'modules' in value
+  return isRecord(value) && value.version === 3 && 'core' in value && 'modules' in value
 }
 
 function normalizeDepthXRSettings(value: unknown, fallback: DepthXRSettings): DepthXRSettings {
@@ -197,13 +337,10 @@ function normalizeDepthXRSettings(value: unknown, fallback: DepthXRSettings): De
   }
 }
 
-function normalizePivotXRDefaults(value: unknown, fallback: PivotXRDefaults): PivotXRDefaults {
+function normalizePivotXRSettings(value: unknown, fallback: PivotXRSettings): PivotXRSettings {
   const source = isRecord(value) ? value : {}
-  const activationMode = source.activationMode === 'hold' ? 'hold' : fallback.activationMode
 
   return {
-    activationMode,
-    activationKey: normalizePivotActivationKey(source.activationKey, fallback.activationKey),
     rotationMultiplier: normalizeNumber(source.rotationMultiplier, fallback.rotationMultiplier),
     smoothing: normalizeNumber(source.smoothing, fallback.smoothing),
     deadzoneDegrees: normalizeNumber(source.deadzoneDegrees, fallback.deadzoneDegrees),
@@ -215,7 +352,7 @@ function normalizePivotXRDefaults(value: unknown, fallback: PivotXRDefaults): Pi
   }
 }
 
-function normalizePivotActivationKey(value: unknown, fallback: string): string {
+export function normalizeKeyboardKey(value: unknown, fallback: string): string {
   if (typeof value !== 'string') {
     return fallback
   }
@@ -240,6 +377,75 @@ function normalizePivotActivationKey(value: unknown, fallback: string): string {
   return fallback
 }
 
+function normalizeKeyboardChord(value: unknown, fallback: string[]): string[] {
+  const source = Array.isArray(value) ? value : fallback
+  const normalized: string[] = []
+
+  for (const item of source) {
+    const key = normalizeKeyboardKey(item, '')
+    if (key && !normalized.includes(key)) {
+      normalized.push(key)
+    }
+  }
+
+  return normalized.length > 0 ? normalized : fallback
+}
+
+export function normalizeInputBinding(value: unknown, fallback: InputBinding): InputBinding {
+  const source = isRecord(value) ? value : {}
+
+  if (source.type === 'none') {
+    return defaultNoneBinding()
+  }
+
+  if (source.type === 'device') {
+    return {
+      type: 'device',
+      deviceGuid: normalizeString(source.deviceGuid, fallback.type === 'device' ? fallback.deviceGuid : ''),
+      inputPath: normalizeString(source.inputPath, fallback.type === 'device' ? fallback.inputPath : 'button-1'),
+      productGuid: normalizeString(source.productGuid, fallback.type === 'device' ? fallback.productGuid ?? '' : ''),
+      deviceName: normalizeString(source.deviceName, fallback.type === 'device' ? fallback.deviceName ?? '' : ''),
+      inputLabel: normalizeString(source.inputLabel, fallback.type === 'device' ? fallback.inputLabel ?? '' : ''),
+    }
+  }
+
+  return {
+    type: 'keyboard',
+    chord: normalizeKeyboardChord(source.chord, fallback.type === 'keyboard' ? fallback.chord : ['F8']),
+  }
+}
+
+export function bindingLabel(binding: InputBinding): string {
+  if (binding.type === 'device') {
+    const device = binding.deviceName?.trim() || binding.deviceGuid.trim() || 'Unassigned device'
+    const input = binding.inputLabel?.trim() || binding.inputPath.trim() || 'unassigned input'
+    return `${device} / ${input}`
+  }
+
+  if (binding.type === 'none') {
+    return 'None'
+  }
+
+  return binding.chord.join('+')
+}
+
+function normalizeApplication(value: unknown, fallbackId: string, existing: RegisteredApplication[]): RegisteredApplication {
+  const source = isRecord(value) ? value : {}
+  const match = isRecord(source.match) ? source.match : {}
+  const exe = normalizeString(match.exe, 'Game.exe')
+  const name = normalizeString(source.name, sanitizeProfileName(exe))
+  const id = normalizeString(source.id, fallbackId).trim() || fallbackId
+
+  return {
+    id: uniqueApplicationId(id, existing),
+    name,
+    enabled: true,
+    match: {
+      exe,
+    },
+  }
+}
+
 function normalizeVectorXRConfig(value: unknown): VectorXRConfig {
   const fallback = defaultConfig()
   const source = isRecord(value) ? value : {}
@@ -247,37 +453,72 @@ function normalizeVectorXRConfig(value: unknown): VectorXRConfig {
   const modules = isRecord(source.modules) ? source.modules : {}
   const depthxr = isRecord(modules.depthxr) ? modules.depthxr : {}
   const pivotxr = isRecord(modules.pivotxr) ? modules.pivotxr : {}
-  const profileValues = Array.isArray(depthxr.profiles) ? depthxr.profiles : []
+  const depthProfileValues = Array.isArray(depthxr.profiles) ? depthxr.profiles : []
+  const pivotProfileValues = Array.isArray(pivotxr.profiles) ? pivotxr.profiles : []
+  const applicationValues = Array.isArray(source.applications) ? source.applications : []
+  const applications: RegisteredApplication[] = []
+
+  applicationValues.forEach((applicationValue, index) => {
+    applications.push(normalizeApplication(applicationValue, `application-${index + 1}`, applications))
+  })
+
+  const pivotDefaults = normalizePivotXRSettings(pivotxr.defaults, fallback.modules.pivotxr.defaults)
 
   return {
-    version: 2,
+    version: 3,
     core: {
       enabled: normalizeBoolean(core.enabled, fallback.core.enabled),
       logLevel: normalizeLogLevel(core.logLevel),
       logRetentionFiles: normalizeNumber(core.logRetentionFiles, fallback.core.logRetentionFiles),
     },
+    applications,
     modules: {
       depthxr: {
         enabled: normalizeBoolean(depthxr.enabled, fallback.modules.depthxr.enabled),
         defaults: normalizeDepthXRSettings(depthxr.defaults, fallback.modules.depthxr.defaults),
-        profiles: profileValues.map((profileValue) => {
+        bindings: {
+          toggleEnabled: normalizeInputBinding(
+            isRecord(depthxr.bindings) ? depthxr.bindings.toggleEnabled : undefined,
+            fallback.modules.depthxr.bindings.toggleEnabled,
+          ),
+        },
+        profiles: depthProfileValues.map((profileValue) => {
           const profile = isRecord(profileValue) ? profileValue : {}
-          const match = isRecord(profile.match) ? profile.match : {}
           const settings = normalizeDepthXRSettings(profile.settings, fallback.modules.depthxr.defaults)
+          const applicationIds = Array.isArray(profile.applicationIds)
+            ? profile.applicationIds.filter((id): id is string => typeof id === 'string' && id.trim().length > 0)
+            : []
 
           return {
-            name: normalizeString(profile.name, sanitizeProfileName(normalizeString(match.exe, 'Game.exe'))),
+            name: normalizeString(profile.name, 'New Profile'),
             enabled: normalizeBoolean(profile.enabled, true),
-            match: {
-              exe: normalizeString(match.exe, 'Game.exe'),
-            },
+            applicationIds,
             settings,
           }
         }),
       },
       pivotxr: {
         enabled: normalizeBoolean(pivotxr.enabled, fallback.modules.pivotxr.enabled),
-        defaults: normalizePivotXRDefaults(pivotxr.defaults, fallback.modules.pivotxr.defaults),
+        defaults: pivotDefaults,
+        activationMode: pivotxr.activationMode === 'hold' ? 'hold' : 'toggle',
+        activationBinding: normalizeInputBinding(pivotxr.activationBinding, fallback.modules.pivotxr.activationBinding),
+        profiles: pivotProfileValues.map((profileValue) => {
+          const profile = isRecord(profileValue) ? profileValue : {}
+          const settings = normalizePivotXRSettings(profile.settings, pivotDefaults)
+          const applicationIds = Array.isArray(profile.applicationIds)
+            ? profile.applicationIds.filter((id): id is string => typeof id === 'string' && id.trim().length > 0)
+            : []
+          const activationMode = profile.activationMode === 'hold' ? 'hold' : 'toggle'
+
+          return {
+            name: normalizeString(profile.name, 'New Profile'),
+            enabled: normalizeBoolean(profile.enabled, true),
+            applicationIds,
+            activationMode,
+            activationBinding: normalizeInputBinding(profile.activationBinding, defaultNoneBinding()),
+            settings,
+          }
+        }),
       },
     },
   }

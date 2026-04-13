@@ -39,9 +39,27 @@ bool ExeNameMatches(std::string_view lhs, std::string_view rhs) {
     return NormalizeExe(lhs) == NormalizeExe(rhs);
 }
 
+const RegisteredApplication* FindMatchingApplication(const ConfigDocument& config, std::string_view exe_name) {
+    for (const RegisteredApplication& application : config.applications) {
+        if (ExeNameMatches(application.match.exe_name, exe_name)) {
+            return &application;
+        }
+    }
+    return nullptr;
+}
+
 const DepthXrProfile* FindMatchingDepthXrProfile(const ConfigDocument& config, std::string_view exe_name) {
+    const RegisteredApplication* application = FindMatchingApplication(config, exe_name);
+    if (!application) {
+        return nullptr;
+    }
+
     for (const DepthXrProfile& profile : config.depthxr.profiles) {
-        if (ExeNameMatches(profile.match.exe_name, exe_name)) {
+        if (!profile.enabled) {
+            continue;
+        }
+
+        if (std::find(profile.application_ids.begin(), profile.application_ids.end(), application->id) != profile.application_ids.end()) {
             return &profile;
         }
     }
@@ -61,12 +79,63 @@ DepthXrResolvedSettings ResolveDepthXrSettings(const ConfigDocument& config, std
     return resolved;
 }
 
+const PivotXrProfile* FindMatchingPivotXrProfile(const ConfigDocument& config, std::string_view exe_name) {
+    const RegisteredApplication* application = FindMatchingApplication(config, exe_name);
+    if (!application) {
+        return nullptr;
+    }
+
+    for (const PivotXrProfile& profile : config.pivotxr.profiles) {
+        if (!profile.enabled) {
+            continue;
+        }
+
+        if (std::find(profile.application_ids.begin(), profile.application_ids.end(), application->id) != profile.application_ids.end()) {
+            return &profile;
+        }
+    }
+    return nullptr;
+}
+
+void ApplyPivotSettings(PivotXrResolvedSettings& resolved, const PivotXrSettings& settings) {
+    resolved.yaw_rotation_multiplier = settings.yaw_rotation_multiplier;
+    resolved.yaw_smoothing = settings.yaw_smoothing;
+    resolved.yaw_deadzone_degrees = settings.yaw_deadzone_degrees;
+    resolved.yaw_max_extra_degrees = settings.yaw_max_extra_degrees;
+    resolved.pitch_rotation_multiplier = settings.pitch_rotation_multiplier;
+    resolved.pitch_smoothing = settings.pitch_smoothing;
+    resolved.pitch_deadzone_degrees = settings.pitch_deadzone_degrees;
+    resolved.pitch_max_extra_degrees = settings.pitch_max_extra_degrees;
+}
+
+PivotXrResolvedSettings ResolvePivotXrSettings(const ConfigDocument& config, std::string_view exe_name) {
+    PivotXrResolvedSettings resolved;
+    resolved.enabled = config.pivotxr.enabled;
+
+    if (!config.pivotxr.enabled) {
+        return resolved;
+    }
+
+    resolved.activation_mode = config.pivotxr.activation_mode;
+    resolved.activation_binding = config.pivotxr.activation_binding;
+    ApplyPivotSettings(resolved, config.pivotxr.defaults);
+
+    const PivotXrProfile* profile = FindMatchingPivotXrProfile(config, exe_name);
+    if (profile) {
+        resolved.activation_mode = profile->activation_mode;
+        resolved.activation_binding = profile->activation_binding;
+        ApplyPivotSettings(resolved, profile->settings);
+    }
+
+    return resolved;
+}
+
 ResolvedRuntimeConfig ResolveRuntimeConfig(const ConfigDocument& config, std::string_view exe_name) {
     ResolvedRuntimeConfig resolved;
     resolved.core = config.core;
     resolved.depthxr = ResolveDepthXrSettings(config, exe_name);
-    resolved.pivotxr = config.pivotxr.defaults;
-    resolved.pivotxr.enabled = config.pivotxr.enabled;
+    resolved.depthxr_bindings = config.depthxr.bindings;
+    resolved.pivotxr = ResolvePivotXrSettings(config, exe_name);
     return resolved;
 }
 

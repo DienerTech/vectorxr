@@ -7,15 +7,22 @@
   "required": [
     "version",
     "core",
+    "applications",
     "modules"
   ],
   "properties": {
     "version": {
       "type": "integer",
-      "const": 2
+      "const": 3
     },
     "core": {
       "$ref": "#/$defs/core"
+    },
+    "applications": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/application"
+      }
     },
     "modules": {
       "$ref": "#/$defs/modules"
@@ -25,8 +32,7 @@
     "logLevel": {
       "type": "string",
       "enum": [
-        "off",
-        "error",
+        "none",
         "info",
         "debug"
       ]
@@ -38,9 +44,116 @@
         "hold"
       ]
     },
-    "activationKey": {
+    "keyboardKey": {
       "type": "string",
-      "pattern": "^(F([1-9]|1[0-2])|[A-Z]|[0-9]|Space)$"
+      "pattern": "^(Ctrl|Alt|Shift|F([1-9]|1[0-2])|[A-Z]|[0-9]|Space)$"
+    },
+    "inputBinding": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "type"
+          ],
+          "properties": {
+            "type": {
+              "const": "none"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "chord"
+          ],
+          "properties": {
+            "type": {
+              "const": "keyboard"
+            },
+            "chord": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "$ref": "#/$defs/keyboardKey"
+              },
+              "uniqueItems": true
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "deviceGuid",
+            "inputPath"
+          ],
+          "properties": {
+            "type": {
+              "const": "device"
+            },
+            "deviceGuid": {
+              "type": "string",
+              "minLength": 1
+            },
+            "inputPath": {
+              "type": "string",
+              "pattern": "^button-([1-9]|[1-9][0-9]|1[0-1][0-9]|12[0-8])$"
+            },
+            "productGuid": {
+              "type": "string"
+            },
+            "deviceName": {
+              "type": "string"
+            },
+            "inputLabel": {
+              "type": "string"
+            }
+          }
+        }
+      ]
+    },
+    "profileMatch": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "exe"
+      ],
+      "properties": {
+        "exe": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "application": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "name",
+        "enabled",
+        "match"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9-]*$"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "match": {
+          "$ref": "#/$defs/profileMatch"
+        }
+      }
     },
     "core": {
       "type": "object",
@@ -92,26 +205,13 @@
         }
       }
     },
-    "profileMatch": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "exe"
-      ],
-      "properties": {
-        "exe": {
-          "type": "string",
-          "minLength": 1
-        }
-      }
-    },
     "depthxrProfile": {
       "type": "object",
       "additionalProperties": false,
       "required": [
         "name",
         "enabled",
-        "match",
+        "applicationIds",
         "settings"
       ],
       "properties": {
@@ -122,11 +222,28 @@
         "enabled": {
           "type": "boolean"
         },
-        "match": {
-          "$ref": "#/$defs/profileMatch"
+        "applicationIds": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9-]*$"
+          },
+          "uniqueItems": true
         },
         "settings": {
           "$ref": "#/$defs/depthxrSettings"
+        }
+      }
+    },
+    "depthxrBindings": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "toggleEnabled"
+      ],
+      "properties": {
+        "toggleEnabled": {
+          "$ref": "#/$defs/inputBinding"
         }
       }
     },
@@ -136,6 +253,7 @@
       "required": [
         "enabled",
         "defaults",
+        "bindings",
         "profiles"
       ],
       "properties": {
@@ -145,6 +263,9 @@
         "defaults": {
           "$ref": "#/$defs/depthxrSettings"
         },
+        "bindings": {
+          "$ref": "#/$defs/depthxrBindings"
+        },
         "profiles": {
           "type": "array",
           "items": {
@@ -153,12 +274,10 @@
         }
       }
     },
-    "pivotxrDefaults": {
+    "pivotxrSettings": {
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "activationMode",
-        "activationKey",
         "rotationMultiplier",
         "smoothing",
         "deadzoneDegrees",
@@ -169,12 +288,6 @@
         "maxExtraPitchDegrees"
       ],
       "properties": {
-        "activationMode": {
-          "$ref": "#/$defs/activationMode"
-        },
-        "activationKey": {
-          "$ref": "#/$defs/activationKey"
-        },
         "rotationMultiplier": {
           "type": "number",
           "minimum": 1.0,
@@ -193,7 +306,7 @@
         "maxExtraYawDegrees": {
           "type": "number",
           "minimum": 0.0,
-          "maximum": 45.0
+          "maximum": 180.0
         },
         "pitchRotationMultiplier": {
           "type": "number",
@@ -213,7 +326,45 @@
         "maxExtraPitchDegrees": {
           "type": "number",
           "minimum": 0.0,
-          "maximum": 45.0
+          "maximum": 180.0
+        }
+      }
+    },
+    "pivotxrProfile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "enabled",
+        "applicationIds",
+        "activationMode",
+        "activationBinding",
+        "settings"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "applicationIds": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9-]*$"
+          },
+          "uniqueItems": true
+        },
+        "activationMode": {
+          "$ref": "#/$defs/activationMode"
+        },
+        "activationBinding": {
+          "$ref": "#/$defs/inputBinding"
+        },
+        "settings": {
+          "$ref": "#/$defs/pivotxrSettings"
         }
       }
     },
@@ -222,14 +373,27 @@
       "additionalProperties": false,
       "required": [
         "enabled",
-        "defaults"
+        "defaults",
+        "profiles"
       ],
       "properties": {
         "enabled": {
           "type": "boolean"
         },
         "defaults": {
-          "$ref": "#/$defs/pivotxrDefaults"
+          "$ref": "#/$defs/pivotxrSettings"
+        },
+        "activationMode": {
+          "$ref": "#/$defs/activationMode"
+        },
+        "activationBinding": {
+          "$ref": "#/$defs/inputBinding"
+        },
+        "profiles": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/pivotxrProfile"
+          }
         }
       }
     },
