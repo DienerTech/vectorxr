@@ -68,7 +68,8 @@ class OpenXrLayer {
                                   XrSpaceLocation* location,
                                   double* applied_extra_yaw_radians,
                                   double* applied_extra_pitch_radians,
-                                  XrPosef* applied_pose_delta);
+                                  XrPosef* applied_pose_delta,
+                                  bool update_smoothing);
 
     std::mutex mutex_;
     std::filesystem::path dll_directory_;

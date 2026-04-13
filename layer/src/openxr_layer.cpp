@@ -579,7 +579,7 @@ XrResult OpenXrLayer::LocateSpace(XrSpace space, XrSpace base_space, XrTime time
     }
 
     return LocateSpaceWithPivot(
-        space, base_space, time, resolved_settings_.pivotxr, pivotxr_active, location, nullptr, nullptr, nullptr);
+        space, base_space, time, resolved_settings_.pivotxr, pivotxr_active, location, nullptr, nullptr, nullptr, false);
 }
 
 XrResult OpenXrLayer::LocateViews(XrSession session,
@@ -718,7 +718,7 @@ XrResult OpenXrLayer::LocateViews(XrSession session,
             }
         }
     } else if (resolved_settings_.pivotxr.enabled && pivotxr_active && internal_view_space_ != XR_NULL_HANDLE &&
-        view_locate_info && EnsureEyeOffsets(session, view_configuration_type, view_locate_info->displayTime, count)) {
+               view_locate_info) {
         XrSpaceLocation pivot_view_location{XR_TYPE_SPACE_LOCATION};
         double applied_extra_yaw_radians = 0.0;
         double applied_extra_pitch_radians = 0.0;
@@ -731,27 +731,34 @@ XrResult OpenXrLayer::LocateViews(XrSession session,
                                                            &pivot_view_location,
                                                            &applied_extra_yaw_radians,
                                                            &applied_extra_pitch_radians,
-                                                           &applied_pose_delta);
+                                                           &applied_pose_delta,
+                                                           true);
         if (XR_SUCCEEDED(pivot_result)) {
-            CachePivotPoseDelta(view_locate_info->displayTime, applied_pose_delta);
-            for (uint32_t i = 0; i < count; ++i) {
-                adjusted_views[i].position.x = cached_eye_offset_poses_[i].position.x;
-                adjusted_views[i].position.y = cached_eye_offset_poses_[i].position.y;
-                adjusted_views[i].position.z = cached_eye_offset_poses_[i].position.z;
-                adjusted_views[i].orientation.x = cached_eye_offset_poses_[i].orientation.x;
-                adjusted_views[i].orientation.y = cached_eye_offset_poses_[i].orientation.y;
-                adjusted_views[i].orientation.z = cached_eye_offset_poses_[i].orientation.z;
-                adjusted_views[i].orientation.w = cached_eye_offset_poses_[i].orientation.w;
+            if (NearlyZero(applied_extra_yaw_radians) && NearlyZero(applied_extra_pitch_radians)) {
+                CachePivotPoseDelta(view_locate_info->displayTime, IdentityPose());
+            } else if (EnsureEyeOffsets(session, view_configuration_type, view_locate_info->displayTime, count)) {
+                CachePivotPoseDelta(view_locate_info->displayTime, applied_pose_delta);
+                for (uint32_t i = 0; i < count; ++i) {
+                    adjusted_views[i].position.x = cached_eye_offset_poses_[i].position.x;
+                    adjusted_views[i].position.y = cached_eye_offset_poses_[i].position.y;
+                    adjusted_views[i].position.z = cached_eye_offset_poses_[i].position.z;
+                    adjusted_views[i].orientation.x = cached_eye_offset_poses_[i].orientation.x;
+                    adjusted_views[i].orientation.y = cached_eye_offset_poses_[i].orientation.y;
+                    adjusted_views[i].orientation.z = cached_eye_offset_poses_[i].orientation.z;
+                    adjusted_views[i].orientation.w = cached_eye_offset_poses_[i].orientation.w;
 
-                const XrPosef recomposed_pose = MultiplyPoses(
-                    cached_eye_offset_poses_[i], pivot_view_location.pose);
-                adjusted_views[i].position.x = recomposed_pose.position.x;
-                adjusted_views[i].position.y = recomposed_pose.position.y;
-                adjusted_views[i].position.z = recomposed_pose.position.z;
-                adjusted_views[i].orientation.x = recomposed_pose.orientation.x;
-                adjusted_views[i].orientation.y = recomposed_pose.orientation.y;
-                adjusted_views[i].orientation.z = recomposed_pose.orientation.z;
-                adjusted_views[i].orientation.w = recomposed_pose.orientation.w;
+                    const XrPosef recomposed_pose = MultiplyPoses(
+                        cached_eye_offset_poses_[i], pivot_view_location.pose);
+                    adjusted_views[i].position.x = recomposed_pose.position.x;
+                    adjusted_views[i].position.y = recomposed_pose.position.y;
+                    adjusted_views[i].position.z = recomposed_pose.position.z;
+                    adjusted_views[i].orientation.x = recomposed_pose.orientation.x;
+                    adjusted_views[i].orientation.y = recomposed_pose.orientation.y;
+                    adjusted_views[i].orientation.z = recomposed_pose.orientation.z;
+                    adjusted_views[i].orientation.w = recomposed_pose.orientation.w;
+                }
+            } else {
+                CachePivotPoseDelta(view_locate_info->displayTime, IdentityPose());
             }
             pivotxr_smoothed_extra_yaw_radians_ = applied_extra_yaw_radians;
             pivotxr_smoothed_extra_pitch_radians_ = applied_extra_pitch_radians;
@@ -1109,7 +1116,8 @@ XrResult OpenXrLayer::LocateSpaceWithPivot(XrSpace space,
                                            XrSpaceLocation* location,
                                            double* applied_extra_yaw_radians,
                                            double* applied_extra_pitch_radians,
-                                           XrPosef* applied_pose_delta) {
+                                           XrPosef* applied_pose_delta,
+                                           bool update_smoothing) {
     if (!location) {
         return XR_ERROR_VALIDATION_FAILURE;
     }
@@ -1161,30 +1169,36 @@ XrResult OpenXrLayer::LocateSpaceWithPivot(XrSpace space,
         view_pose.orientation.z,
         view_pose.orientation.w,
     };
-    const auto now = std::chrono::steady_clock::now();
     double delta_seconds = 0.0;
-    if (pivotxr_last_smoothing_wall_time_.has_value()) {
-        delta_seconds =
-            std::chrono::duration<double>(now - *pivotxr_last_smoothing_wall_time_).count();
+    if (update_smoothing) {
+        const auto now = std::chrono::steady_clock::now();
+        if (pivotxr_last_smoothing_wall_time_.has_value()) {
+            delta_seconds =
+                std::chrono::duration<double>(now - *pivotxr_last_smoothing_wall_time_).count();
+        }
+        pivotxr_last_smoothing_wall_time_ = now;
     }
-    pivotxr_last_smoothing_wall_time_ = now;
 
     const double current_yaw_radians = ExtractYawRadians(orientation);
     const double current_pitch_radians = ExtractPitchRadians(orientation);
-    const double extra_yaw_radians = ComputePivotExtraAngleRadians(current_yaw_radians,
-                                                                   settings.yaw_rotation_multiplier,
-                                                                   settings.yaw_deadzone_degrees,
-                                                                   settings.yaw_max_extra_degrees,
-                                                                   settings.yaw_smoothing,
-                                                                   delta_seconds,
-                                                                   pivotxr_smoothed_extra_yaw_radians_);
-    const double extra_pitch_radians = ComputePivotExtraAngleRadians(current_pitch_radians,
-                                                                     settings.pitch_rotation_multiplier,
-                                                                     settings.pitch_deadzone_degrees,
-                                                                     settings.pitch_max_extra_degrees,
-                                                                     settings.pitch_smoothing,
-                                                                     delta_seconds,
-                                                                     pivotxr_smoothed_extra_pitch_radians_);
+    double extra_yaw_radians = pivotxr_smoothed_extra_yaw_radians_;
+    double extra_pitch_radians = pivotxr_smoothed_extra_pitch_radians_;
+    if (update_smoothing) {
+        extra_yaw_radians = ComputePivotExtraAngleRadians(current_yaw_radians,
+                                                         settings.yaw_rotation_multiplier,
+                                                         settings.yaw_deadzone_degrees,
+                                                         settings.yaw_max_extra_degrees,
+                                                         settings.yaw_smoothing,
+                                                         delta_seconds,
+                                                         pivotxr_smoothed_extra_yaw_radians_);
+        extra_pitch_radians = ComputePivotExtraAngleRadians(current_pitch_radians,
+                                                           settings.pitch_rotation_multiplier,
+                                                           settings.pitch_deadzone_degrees,
+                                                           settings.pitch_max_extra_degrees,
+                                                           settings.pitch_smoothing,
+                                                           delta_seconds,
+                                                           pivotxr_smoothed_extra_pitch_radians_);
+    }
     if (applied_extra_yaw_radians) {
         *applied_extra_yaw_radians = extra_yaw_radians;
     }
