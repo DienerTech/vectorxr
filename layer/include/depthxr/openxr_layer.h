@@ -57,7 +57,7 @@ class OpenXrLayer {
                           XrTime display_time,
                           uint32_t view_count);
     void CachePivotPoseDelta(XrTime time, const XrPosef& pose_delta);
-    XrPosef FindPivotPoseDelta(XrTime time) const;
+    bool FindPivotPoseDelta(XrTime time, XrPosef* pose_delta, XrTime* matched_time) const;
     void PrunePivotPoseDeltas(XrTime time);
     bool IsTrackedViewSpace(XrSpace space) const;
     XrResult LocateSpaceWithPivot(XrSpace space,
@@ -67,7 +67,8 @@ class OpenXrLayer {
                                   bool pivotxr_active,
                                   XrSpaceLocation* location,
                                   double* applied_extra_yaw_radians,
-                                  double* applied_extra_pitch_radians);
+                                  double* applied_extra_pitch_radians,
+                                  XrPosef* applied_pose_delta);
 
     std::mutex mutex_;
     std::filesystem::path dll_directory_;
@@ -87,6 +88,7 @@ class OpenXrLayer {
     std::optional<ResolvedRuntimeConfig> last_logged_settings_;
     uint64_t locate_views_call_count_{0};
     uint32_t pending_locate_views_diagnostics_{0};
+    uint32_t pending_end_frame_diagnostics_{0};
     double pivotxr_smoothed_extra_yaw_radians_{0.0};
     double pivotxr_smoothed_extra_pitch_radians_{0.0};
     std::optional<std::chrono::steady_clock::time_point> pivotxr_last_smoothing_wall_time_;

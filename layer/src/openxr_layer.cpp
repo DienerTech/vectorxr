@@ -246,6 +246,8 @@ bool IsQuadViewConfiguration(XrViewConfigurationType type) {
     return type == XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO_WITH_FOVEATED_INSET;
 }
 
+constexpr XrTime kMaxPivotPoseDeltaMatchWindow = 5'000'000;
+
 bool SameSettings(const ResolvedRuntimeConfig& lhs, const ResolvedRuntimeConfig& rhs) {
     return lhs.core.enabled == rhs.core.enabled &&
            lhs.core.log_level == rhs.core.log_level &&
@@ -409,6 +411,7 @@ XrResult OpenXrLayer::DestroyInstance(XrInstance instance) {
         has_loaded_config_ = false;
         locate_views_call_count_ = 0;
         pending_locate_views_diagnostics_ = 0;
+        pending_end_frame_diagnostics_ = 0;
         ResetPivotActivationState();
         ResetDepthToggleState();
         ResetSessionState();
@@ -454,13 +457,29 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
     }
 
     std::scoped_lock lock(mutex_);
-    const XrPosef pose_delta = FindPivotPoseDelta(frame_end_info->displayTime);
+    XrPosef pose_delta = IdentityPose();
+    XrTime matched_time = 0;
+    const bool has_pose_delta = FindPivotPoseDelta(frame_end_info->displayTime, &pose_delta, &matched_time);
     const bool has_non_identity_delta =
-        !NearlyZero(pose_delta.orientation.x) || !NearlyZero(pose_delta.orientation.y) ||
-        !NearlyZero(pose_delta.orientation.z) || !NearlyEqual(pose_delta.orientation.w, 1.0f) ||
-        !NearlyZero(pose_delta.position.x) || !NearlyZero(pose_delta.position.y) || !NearlyZero(pose_delta.position.z);
+        has_pose_delta && (!NearlyZero(pose_delta.orientation.x) || !NearlyZero(pose_delta.orientation.y) ||
+                           !NearlyZero(pose_delta.orientation.z) || !NearlyEqual(pose_delta.orientation.w, 1.0f) ||
+                           !NearlyZero(pose_delta.position.x) || !NearlyZero(pose_delta.position.y) ||
+                           !NearlyZero(pose_delta.position.z));
 
     if (!has_non_identity_delta) {
+        if (pending_end_frame_diagnostics_ > 0) {
+            std::ostringstream stream;
+            stream << "EndFrame pivot correction skipped: cacheHit=" << has_pose_delta
+                   << ", frameTime=" << frame_end_info->displayTime;
+            if (has_pose_delta) {
+                stream << ", matchedTime=" << matched_time
+                       << ", matchedDeltaNs=" << (matched_time - frame_end_info->displayTime);
+            }
+            stream << ", cachedPivotDeltas=" << cached_pivot_pose_deltas_.size();
+            logger_.Debug(stream.str());
+            --pending_end_frame_diagnostics_;
+        }
+        PrunePivotPoseDeltas(frame_end_info->displayTime);
         return next_end_frame_(session, frame_end_info);
     }
 
@@ -468,6 +487,8 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
     std::vector<std::vector<XrCompositionLayerProjectionView>> adjusted_projection_views;
     std::vector<XrCompositionLayerProjection> adjusted_projection_layers;
     std::vector<const XrCompositionLayerBaseHeader*> adjusted_layers;
+    uint32_t corrected_projection_layer_count = 0;
+    uint32_t corrected_projection_view_count = 0;
     adjusted_projection_views.reserve(frame_end_info->layerCount);
     adjusted_projection_layers.reserve(frame_end_info->layerCount);
     adjusted_layers.reserve(frame_end_info->layerCount);
@@ -481,6 +502,8 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
 
         const XrCompositionLayerProjection* projection_layer =
             reinterpret_cast<const XrCompositionLayerProjection*>(base_header);
+        ++corrected_projection_layer_count;
+        corrected_projection_view_count += projection_layer->viewCount;
         adjusted_projection_views.emplace_back(
             projection_layer->views, projection_layer->views + projection_layer->viewCount);
         for (XrCompositionLayerProjectionView& projection_view : adjusted_projection_views.back()) {
@@ -495,6 +518,25 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
 
     XrFrameEndInfo adjusted_frame_end_info = *frame_end_info;
     adjusted_frame_end_info.layers = adjusted_layers.data();
+    if (pending_end_frame_diagnostics_ > 0) {
+        const ViewOrientation delta_orientation{
+            pose_delta.orientation.x,
+            pose_delta.orientation.y,
+            pose_delta.orientation.z,
+            pose_delta.orientation.w,
+        };
+        std::ostringstream stream;
+        stream << "EndFrame pivot correction applied: frameTime=" << frame_end_info->displayTime
+               << ", matchedTime=" << matched_time
+               << ", matchedDeltaNs=" << (matched_time - frame_end_info->displayTime)
+               << ", poseDeltaYaw=" << FormatDiagnosticDouble(ExtractYawRadians(delta_orientation))
+               << ", poseDeltaPitch=" << FormatDiagnosticDouble(ExtractPitchRadians(delta_orientation))
+               << ", projectionLayers=" << corrected_projection_layer_count
+               << ", projectionViews=" << corrected_projection_view_count
+               << ", cachedPivotDeltas=" << cached_pivot_pose_deltas_.size();
+        logger_.Debug(stream.str());
+        --pending_end_frame_diagnostics_;
+    }
     const XrResult result = next_end_frame_(session, &adjusted_frame_end_info);
     PrunePivotPoseDeltas(frame_end_info->displayTime);
     return result;
@@ -537,7 +579,7 @@ XrResult OpenXrLayer::LocateSpace(XrSpace space, XrSpace base_space, XrTime time
     }
 
     return LocateSpaceWithPivot(
-        space, base_space, time, resolved_settings_.pivotxr, pivotxr_active, location, nullptr, nullptr);
+        space, base_space, time, resolved_settings_.pivotxr, pivotxr_active, location, nullptr, nullptr, nullptr);
 }
 
 XrResult OpenXrLayer::LocateViews(XrSession session,
@@ -680,6 +722,7 @@ XrResult OpenXrLayer::LocateViews(XrSession session,
         XrSpaceLocation pivot_view_location{XR_TYPE_SPACE_LOCATION};
         double applied_extra_yaw_radians = 0.0;
         double applied_extra_pitch_radians = 0.0;
+        XrPosef applied_pose_delta = IdentityPose();
         const XrResult pivot_result = LocateSpaceWithPivot(internal_view_space_,
                                                            view_locate_info->space,
                                                            view_locate_info->displayTime,
@@ -687,8 +730,10 @@ XrResult OpenXrLayer::LocateViews(XrSession session,
                                                            pivotxr_active,
                                                            &pivot_view_location,
                                                            &applied_extra_yaw_radians,
-                                                           &applied_extra_pitch_radians);
+                                                           &applied_extra_pitch_radians,
+                                                           &applied_pose_delta);
         if (XR_SUCCEEDED(pivot_result)) {
+            CachePivotPoseDelta(view_locate_info->displayTime, applied_pose_delta);
             for (uint32_t i = 0; i < count; ++i) {
                 adjusted_views[i].position.x = cached_eye_offset_poses_[i].position.x;
                 adjusted_views[i].position.y = cached_eye_offset_poses_[i].position.y;
@@ -867,6 +912,7 @@ void OpenXrLayer::RefreshResolvedSettings() {
         LogResolvedSettings(resolved_settings_);
         last_logged_settings_ = resolved_settings_;
         pending_locate_views_diagnostics_ = 5;
+        pending_end_frame_diagnostics_ = 5;
     }
 }
 
@@ -911,6 +957,7 @@ void OpenXrLayer::CaptureInstanceFunctions() {
 
 void OpenXrLayer::ResetSessionState() {
     active_session_ = XR_NULL_HANDLE;
+    pending_end_frame_diagnostics_ = 0;
     pivotxr_smoothed_extra_yaw_radians_ = 0.0;
     pivotxr_smoothed_extra_pitch_radians_ = 0.0;
     pivotxr_last_smoothing_wall_time_.reset();
@@ -1000,30 +1047,49 @@ void OpenXrLayer::CachePivotPoseDelta(XrTime time, const XrPosef& pose_delta) {
     cached_pivot_pose_deltas_[time] = pose_delta;
 }
 
-XrPosef OpenXrLayer::FindPivotPoseDelta(XrTime time) const {
+bool OpenXrLayer::FindPivotPoseDelta(XrTime time, XrPosef* pose_delta, XrTime* matched_time) const {
+    if (!pose_delta || !matched_time) {
+        return false;
+    }
+
     if (cached_pivot_pose_deltas_.empty()) {
-        return IdentityPose();
+        *pose_delta = IdentityPose();
+        *matched_time = 0;
+        return false;
     }
 
     auto exact = cached_pivot_pose_deltas_.find(time);
     if (exact != cached_pivot_pose_deltas_.end()) {
-        return exact->second;
+        *pose_delta = exact->second;
+        *matched_time = exact->first;
+        return true;
     }
 
     auto upper = cached_pivot_pose_deltas_.lower_bound(time);
+    std::map<XrTime, XrPosef>::const_iterator best;
     if (upper == cached_pivot_pose_deltas_.begin()) {
-        return upper->second;
-    }
-    if (upper == cached_pivot_pose_deltas_.end()) {
-        return std::prev(upper)->second;
+        best = upper;
+    } else if (upper == cached_pivot_pose_deltas_.end()) {
+        best = std::prev(upper);
+    } else {
+        auto lower = std::prev(upper);
+        best = (time - lower->first <= upper->first - time) ? lower : upper;
     }
 
-    auto lower = std::prev(upper);
-    return (time - lower->first <= upper->first - time) ? lower->second : upper->second;
+    const XrTime match_delta = best->first > time ? best->first - time : time - best->first;
+    if (match_delta > kMaxPivotPoseDeltaMatchWindow) {
+        *pose_delta = IdentityPose();
+        *matched_time = best->first;
+        return false;
+    }
+
+    *pose_delta = best->second;
+    *matched_time = best->first;
+    return true;
 }
 
 void OpenXrLayer::PrunePivotPoseDeltas(XrTime time) {
-    auto keep_from = cached_pivot_pose_deltas_.lower_bound(time);
+    auto keep_from = cached_pivot_pose_deltas_.upper_bound(time);
     if (keep_from == cached_pivot_pose_deltas_.begin()) {
         return;
     }
@@ -1042,12 +1108,16 @@ XrResult OpenXrLayer::LocateSpaceWithPivot(XrSpace space,
                                            bool pivotxr_active,
                                            XrSpaceLocation* location,
                                            double* applied_extra_yaw_radians,
-                                           double* applied_extra_pitch_radians) {
+                                           double* applied_extra_pitch_radians,
+                                           XrPosef* applied_pose_delta) {
     if (!location) {
         return XR_ERROR_VALIDATION_FAILURE;
     }
 
     const XrResult result = next_locate_space_(space, base_space, time, location);
+    if (applied_pose_delta) {
+        *applied_pose_delta = IdentityPose();
+    }
     if (XR_FAILED(result) || !settings.enabled) {
         if (applied_extra_yaw_radians) {
             *applied_extra_yaw_radians = 0.0;
@@ -1130,8 +1200,8 @@ XrResult OpenXrLayer::LocateSpaceWithPivot(XrSpace space,
                                  static_cast<float>(extra_yaw_radians),
                                  static_cast<float>(extra_pitch_radians));
     location->pose = space_is_view ? manipulated_pose : InvertPose(manipulated_pose);
-    if (space_is_view && !base_space_is_view) {
-        CachePivotPoseDelta(time, MultiplyPoses(InvertPose(original_relation_pose), location->pose));
+    if (applied_pose_delta && space_is_view && !base_space_is_view) {
+        *applied_pose_delta = MultiplyPoses(InvertPose(original_relation_pose), location->pose);
     }
     return result;
 }
@@ -1214,6 +1284,7 @@ bool OpenXrLayer::IsPivotXrActive(const PivotXrResolvedSettings& settings) {
         if (was_pressed_this_call) {
             pivotxr_toggle_enabled_ = !pivotxr_toggle_enabled_;
             pending_locate_views_diagnostics_ = 5;
+            pending_end_frame_diagnostics_ = 5;
             logger_.Info(std::string("PivotXR extra pivot factor ") +
                          (pivotxr_toggle_enabled_ ? "enabled" : "disabled") + " via " +
                          BindingLabel(settings.activation_binding) + ".");
