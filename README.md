@@ -168,7 +168,7 @@ Implemented today:
 - per-application Depth settings resolution
 - `xrLocateViews` adjustments for stereo boost and convergence
 - quad-view-aware stereo/convergence behavior
-- Pivot runtime path across `xrLocateSpace`, `xrLocateViews`, and `xrEndFrame`
+- Pivot runtime path across `xrLocateSpace` and `xrLocateViews`
 - VectorXR suite shell with separate Home, Depth, and Pivot tabs
 
 Deliberately not active yet:
