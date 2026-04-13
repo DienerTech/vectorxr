@@ -137,6 +137,28 @@ XrPosef IdentityPose() {
     return {{0.0f, 0.0f, 0.0f, 1.0f}, {0.0f, 0.0f, 0.0f}};
 }
 
+ViewOrientation ApplyExtraRotationToOrientation(const ViewOrientation& orientation,
+                                                double extra_yaw_radians,
+                                                double extra_pitch_radians) {
+    const XrPosef pose{
+        {static_cast<float>(orientation.x),
+         static_cast<float>(orientation.y),
+         static_cast<float>(orientation.z),
+         static_cast<float>(orientation.w)},
+        {0.0f, 0.0f, 0.0f},
+    };
+    const XrPosef rotated_pose =
+        ApplyExtraRotationToPose(pose,
+                                 static_cast<float>(extra_yaw_radians),
+                                 static_cast<float>(extra_pitch_radians));
+    return {
+        rotated_pose.orientation.x,
+        rotated_pose.orientation.y,
+        rotated_pose.orientation.z,
+        rotated_pose.orientation.w,
+    };
+}
+
 double ComputeTimeBasedBlend(double smoothing, double delta_seconds) {
     const double clamped_smoothing = Clamp(smoothing, 0.0, 0.99);
     const double fallback_blend = Clamp(1.0 - clamped_smoothing, 0.05, 1.0);
@@ -155,7 +177,8 @@ double ComputePivotExtraAngleRadians(double current_angle_radians,
                                      double max_extra_degrees,
                                      double smoothing,
                                      double delta_seconds,
-                                     double& smoothed_extra_angle_radians) {
+                                     double& smoothed_extra_angle_radians,
+                                     bool subtract_deadzone_from_gain = true) {
     if (rotation_multiplier <= 1.0) {
         smoothed_extra_angle_radians = 0.0;
         return 0.0;
@@ -166,11 +189,20 @@ double ComputePivotExtraAngleRadians(double current_angle_radians,
     const double abs_angle = std::abs(current_angle_radians);
 
     double target_extra_angle = 0.0;
+    if (abs_angle <= deadzone_radians * 0.5) {
+        smoothed_extra_angle_radians = 0.0;
+        return 0.0;
+    }
+
     if (abs_angle > deadzone_radians) {
-        const double direction = current_angle_radians >= 0.0 ? 1.0 : -1.0;
-        const double pivoted_angle = direction * deadzone_radians +
-                                     (current_angle_radians - direction * deadzone_radians) * rotation_multiplier;
-        target_extra_angle = pivoted_angle - current_angle_radians;
+        if (subtract_deadzone_from_gain) {
+            const double direction = current_angle_radians >= 0.0 ? 1.0 : -1.0;
+            const double pivoted_angle = direction * deadzone_radians +
+                                         (current_angle_radians - direction * deadzone_radians) * rotation_multiplier;
+            target_extra_angle = pivoted_angle - current_angle_radians;
+        } else {
+            target_extra_angle = current_angle_radians * (rotation_multiplier - 1.0);
+        }
     }
 
     if (max_extra_radians > 0.0) {
@@ -208,6 +240,10 @@ ViewLayout DetermineViewLayout(XrViewConfigurationType type, uint32_t count) {
     }
 
     return ViewLayout::kMono;
+}
+
+bool IsQuadViewConfiguration(XrViewConfigurationType type) {
+    return type == XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO_WITH_FOVEATED_INSET;
 }
 
 bool SameSettings(const ResolvedRuntimeConfig& lhs, const ResolvedRuntimeConfig& rhs) {
@@ -284,7 +320,7 @@ ConfigDocument DefaultConfig() {
 }
 
 void AppendViewSummary(std::ostringstream& stream, std::span<const ViewAdjustmentData> views) {
-    const size_t summary_count = std::min<size_t>(views.size(), 2);
+    const size_t summary_count = std::min<size_t>(views.size(), 4);
     for (size_t i = 0; i < summary_count; ++i) {
         stream << " view" << i << "Pos=(" << FormatDiagnosticDouble(views[i].position.x) << ", "
                << FormatDiagnosticDouble(views[i].position.y) << ", "
@@ -495,6 +531,10 @@ XrResult OpenXrLayer::LocateSpace(XrSpace space, XrSpace base_space, XrTime time
     ReloadConfigIfNeeded();
     RefreshResolvedSettings();
     const bool pivotxr_active = IsPivotXrActive(resolved_settings_.pivotxr);
+    if (has_active_primary_view_configuration_ &&
+        IsQuadViewConfiguration(active_primary_view_configuration_type_)) {
+        return next_locate_space_(space, base_space, time, location);
+    }
 
     return LocateSpaceWithPivot(
         space, base_space, time, resolved_settings_.pivotxr, pivotxr_active, location, nullptr, nullptr);
@@ -534,7 +574,7 @@ XrResult OpenXrLayer::LocateViews(XrSession session,
     }
 
     const ViewLayout view_layout = DetermineViewLayout(view_configuration_type, count);
-    if (view_configuration_type == XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO_WITH_FOVEATED_INSET &&
+    if (IsQuadViewConfiguration(view_configuration_type) &&
         view_layout == ViewLayout::kMono && !has_logged_quad_view_short_count_) {
         std::ostringstream stream;
         stream << "Quad-view session reported only " << count
@@ -579,7 +619,7 @@ XrResult OpenXrLayer::LocateViews(XrSession session,
     const bool depthxr_active = IsDepthXrActive();
     if (resolved_settings_.pivotxr.enabled && !has_logged_pivotxr_spike_mode_) {
         std::ostringstream stream;
-        stream << "PivotXR spike is active in experimental view-space recomposition mode; press "
+        stream << "PivotXR spike is active; quad-view sessions use orientation-stable mode. Press "
                << BindingLabel(resolved_settings_.pivotxr.activation_binding) << " to "
                << (resolved_settings_.pivotxr.activation_mode == ActivationMode::Toggle ? "toggle" : "hold")
                << " the extra pivot factor.";
@@ -587,7 +627,55 @@ XrResult OpenXrLayer::LocateViews(XrSession session,
         has_logged_pivotxr_spike_mode_ = true;
     }
 
-    if (resolved_settings_.pivotxr.enabled && pivotxr_active && internal_view_space_ != XR_NULL_HANDLE &&
+    if (resolved_settings_.pivotxr.enabled && pivotxr_active && IsQuadViewConfiguration(view_configuration_type)) {
+        const auto now = std::chrono::steady_clock::now();
+        double delta_seconds = 0.0;
+        if (pivotxr_last_smoothing_wall_time_.has_value()) {
+            delta_seconds =
+                std::chrono::duration<double>(now - *pivotxr_last_smoothing_wall_time_).count();
+        }
+        pivotxr_last_smoothing_wall_time_ = now;
+
+        ViewOrientation pivot_reference_orientation = adjusted_views[0].orientation;
+        if (internal_view_space_ != XR_NULL_HANDLE && view_locate_info) {
+            XrSpaceLocation runtime_view_location{XR_TYPE_SPACE_LOCATION};
+            const XrResult runtime_view_result = next_locate_space_(internal_view_space_,
+                                                                    view_locate_info->space,
+                                                                    view_locate_info->displayTime,
+                                                                    &runtime_view_location);
+            if (XR_SUCCEEDED(runtime_view_result)) {
+                pivot_reference_orientation.x = runtime_view_location.pose.orientation.x;
+                pivot_reference_orientation.y = runtime_view_location.pose.orientation.y;
+                pivot_reference_orientation.z = runtime_view_location.pose.orientation.z;
+                pivot_reference_orientation.w = runtime_view_location.pose.orientation.w;
+            }
+        }
+
+        const double current_yaw_radians = ExtractYawRadians(pivot_reference_orientation);
+        const double current_pitch_radians = ExtractPitchRadians(pivot_reference_orientation);
+        const double extra_yaw_radians = ComputePivotExtraAngleRadians(current_yaw_radians,
+                                                                       resolved_settings_.pivotxr.yaw_rotation_multiplier,
+                                                                       resolved_settings_.pivotxr.yaw_deadzone_degrees,
+                                                                       resolved_settings_.pivotxr.yaw_max_extra_degrees,
+                                                                       resolved_settings_.pivotxr.yaw_smoothing,
+                                                                       delta_seconds,
+                                                                       pivotxr_smoothed_extra_yaw_radians_,
+                                                                       false);
+        const double extra_pitch_radians =
+            ComputePivotExtraAngleRadians(current_pitch_radians,
+                                          resolved_settings_.pivotxr.pitch_rotation_multiplier,
+                                          resolved_settings_.pivotxr.pitch_deadzone_degrees,
+                                          resolved_settings_.pivotxr.pitch_max_extra_degrees,
+                                          resolved_settings_.pivotxr.pitch_smoothing,
+                                          delta_seconds,
+                                          pivotxr_smoothed_extra_pitch_radians_,
+                                          false);
+        if (!NearlyZero(extra_yaw_radians) || !NearlyZero(extra_pitch_radians)) {
+            for (ViewAdjustmentData& view : adjusted_views) {
+                view.orientation = ApplyExtraRotationToOrientation(view.orientation, extra_yaw_radians, extra_pitch_radians);
+            }
+        }
+    } else if (resolved_settings_.pivotxr.enabled && pivotxr_active && internal_view_space_ != XR_NULL_HANDLE &&
         view_locate_info && EnsureEyeOffsets(session, view_configuration_type, view_locate_info->displayTime, count)) {
         XrSpaceLocation pivot_view_location{XR_TYPE_SPACE_LOCATION};
         double applied_extra_yaw_radians = 0.0;
@@ -672,6 +760,14 @@ XrResult OpenXrLayer::LocateViews(XrSession session,
             count > 1 ? ExtractYawRadians(adjusted_views[1].orientation) -
                             ExtractYawRadians(original_views[1].orientation)
                       : 0.0;
+        const double left_inset_yaw_delta =
+            count > 2 ? ExtractYawRadians(adjusted_views[2].orientation) -
+                            ExtractYawRadians(original_views[2].orientation)
+                      : 0.0;
+        const double right_inset_yaw_delta =
+            count > 3 ? ExtractYawRadians(adjusted_views[3].orientation) -
+                            ExtractYawRadians(original_views[3].orientation)
+                      : 0.0;
         const double left_pitch_delta =
             ExtractPitchRadians(adjusted_views[0].orientation) - ExtractPitchRadians(original_views[0].orientation);
         const double right_pitch_delta =
@@ -684,6 +780,8 @@ XrResult OpenXrLayer::LocateViews(XrSession session,
                << ", pivotExtraPitchRadians=" << FormatDiagnosticDouble(pivotxr_smoothed_extra_pitch_radians_)
                << ", leftYawDelta=" << FormatDiagnosticDouble(left_yaw_delta)
                << ", rightYawDelta=" << FormatDiagnosticDouble(right_yaw_delta)
+               << ", leftInsetYawDelta=" << FormatDiagnosticDouble(left_inset_yaw_delta)
+               << ", rightInsetYawDelta=" << FormatDiagnosticDouble(right_inset_yaw_delta)
                << ", leftPitchDelta=" << FormatDiagnosticDouble(left_pitch_delta)
                << ", rightPitchDelta=" << FormatDiagnosticDouble(right_pitch_delta)
                << ", depthRuntimeActive=" << depthxr_active
@@ -822,7 +920,6 @@ void OpenXrLayer::ResetSessionState() {
     internal_view_space_ = XR_NULL_HANDLE;
     internal_stage_space_ = XR_NULL_HANDLE;
     active_primary_view_configuration_type_ = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
-    cached_eye_offsets_view_configuration_type_ = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
     has_active_primary_view_configuration_ = false;
     has_logged_quad_view_short_count_ = false;
     has_logged_pivotxr_spike_mode_ = false;
@@ -874,11 +971,6 @@ bool OpenXrLayer::EnsureEyeOffsets(XrSession session,
         return false;
     }
 
-    if (cached_eye_offset_poses_.size() == view_count &&
-        cached_eye_offsets_view_configuration_type_ == view_configuration_type) {
-        return true;
-    }
-
     std::vector<XrView> eye_views(view_count);
     for (XrView& eye_view : eye_views) {
         eye_view = {XR_TYPE_VIEW};
@@ -901,7 +993,6 @@ bool OpenXrLayer::EnsureEyeOffsets(XrSession session,
     for (uint32_t i = 0; i < view_count; ++i) {
         cached_eye_offset_poses_[i] = eye_views[i].pose;
     }
-    cached_eye_offsets_view_configuration_type_ = view_configuration_type;
     return true;
 }
 
@@ -992,12 +1083,13 @@ XrResult OpenXrLayer::LocateSpaceWithPivot(XrSpace space,
         return result;
     }
 
-    const XrPosef original_pose = location->pose;
+    const XrPosef original_relation_pose = location->pose;
+    const XrPosef view_pose = space_is_view ? location->pose : InvertPose(location->pose);
     const ViewOrientation orientation{
-        location->pose.orientation.x,
-        location->pose.orientation.y,
-        location->pose.orientation.z,
-        location->pose.orientation.w,
+        view_pose.orientation.x,
+        view_pose.orientation.y,
+        view_pose.orientation.z,
+        view_pose.orientation.w,
     };
     const auto now = std::chrono::steady_clock::now();
     double delta_seconds = 0.0;
@@ -1034,11 +1126,13 @@ XrResult OpenXrLayer::LocateSpaceWithPivot(XrSpace space,
     }
 
     const XrPosef manipulated_pose =
-        ApplyExtraRotationToPose(location->pose,
+        ApplyExtraRotationToPose(view_pose,
                                  static_cast<float>(extra_yaw_radians),
                                  static_cast<float>(extra_pitch_radians));
     location->pose = space_is_view ? manipulated_pose : InvertPose(manipulated_pose);
-    CachePivotPoseDelta(time, MultiplyPoses(InvertPose(original_pose), location->pose));
+    if (space_is_view && !base_space_is_view) {
+        CachePivotPoseDelta(time, MultiplyPoses(InvertPose(original_relation_pose), location->pose));
+    }
     return result;
 }
 

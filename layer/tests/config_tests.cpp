@@ -529,10 +529,10 @@ void TestExeMatch() {
 
 void TestQuadViewStereoBoostKeepsInsetViewsInSync() {
     depthxr::ViewAdjustmentData views[4] = {
-        {{-0.03, 0.0, 0.0}, {-1.0, 0.8, 0.9, -0.9}},
-        {{0.03, 0.0, 0.0}, {-0.8, 1.0, 0.9, -0.9}},
-        {{-0.03, 0.0, 0.0}, {-0.4, 0.2, 0.3, -0.3}},
-        {{0.03, 0.0, 0.0}, {-0.2, 0.4, 0.3, -0.3}},
+        {{-0.03, 0.0, 0.01}, {-1.0, 0.8, 0.9, -0.9}},
+        {{0.03, 0.0, -0.01}, {-0.8, 1.0, 0.9, -0.9}},
+        {{-0.03, 0.0, 0.01}, {-0.4, 0.2, 0.3, -0.3}},
+        {{0.03, 0.0, -0.01}, {-0.2, 0.4, 0.3, -0.3}},
     };
 
     depthxr::ApplyStereoBoost(views, 1.4, depthxr::ViewLayout::kStereoWithFoveatedInset);
@@ -541,8 +541,28 @@ void TestQuadViewStereoBoostKeepsInsetViewsInSync() {
            "Left outer/inset positions diverged under quad-view stereo boost");
     Expect(std::abs(views[1].position.x - views[3].position.x) < 0.0001,
            "Right outer/inset positions diverged under quad-view stereo boost");
+    Expect(std::abs(views[0].position.z - views[2].position.z) < 0.0001,
+           "Left outer/inset depth positions diverged under quad-view stereo boost");
+    Expect(std::abs(views[1].position.z - views[3].position.z) < 0.0001,
+           "Right outer/inset depth positions diverged under quad-view stereo boost");
     Expect(std::abs(views[0].position.x + 0.042) < 0.0001, "Left eye stereo boost value mismatch");
     Expect(std::abs(views[1].position.x - 0.042) < 0.0001, "Right eye stereo boost value mismatch");
+    Expect(std::abs(views[0].position.z - 0.014) < 0.0001, "Left eye stereo boost depth-axis value mismatch");
+    Expect(std::abs(views[1].position.z + 0.014) < 0.0001, "Right eye stereo boost depth-axis value mismatch");
+}
+
+void TestStereoBoostScalesRotatedEyeBaseline() {
+    depthxr::ViewAdjustmentData views[2] = {
+        {{-0.02, 0.0, 0.02}, {-1.0, 0.8, 0.9, -0.9}},
+        {{0.02, 0.0, -0.02}, {-0.8, 1.0, 0.9, -0.9}},
+    };
+
+    depthxr::ApplyStereoBoost(views, 1.5, depthxr::ViewLayout::kStereo);
+
+    Expect(std::abs(views[0].position.x + 0.03) < 0.0001, "Left eye rotated baseline x mismatch");
+    Expect(std::abs(views[0].position.z - 0.03) < 0.0001, "Left eye rotated baseline z mismatch");
+    Expect(std::abs(views[1].position.x - 0.03) < 0.0001, "Right eye rotated baseline x mismatch");
+    Expect(std::abs(views[1].position.z + 0.03) < 0.0001, "Right eye rotated baseline z mismatch");
 }
 
 void TestQuadViewConvergenceKeepsInsetOffsetsAligned() {
@@ -666,6 +686,7 @@ int main() {
     TestDeviceBindingMetadataParsed();
     TestExeMatch();
     TestQuadViewStereoBoostKeepsInsetViewsInSync();
+    TestStereoBoostScalesRotatedEyeBaseline();
     TestQuadViewConvergenceKeepsInsetOffsetsAligned();
     TestPivotYawAmplifiesBeyondDeadzone();
     TestPivotYawNoOpInsideDeadzone();

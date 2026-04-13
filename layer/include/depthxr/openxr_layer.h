@@ -99,7 +99,6 @@ class OpenXrLayer {
     XrSpace internal_view_space_{XR_NULL_HANDLE};
     XrSpace internal_stage_space_{XR_NULL_HANDLE};
     XrViewConfigurationType active_primary_view_configuration_type_{XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO};
-    XrViewConfigurationType cached_eye_offsets_view_configuration_type_{XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO};
     bool has_active_primary_view_configuration_{false};
     bool has_logged_quad_view_short_count_{false};
     bool has_logged_pivotxr_spike_mode_{false};

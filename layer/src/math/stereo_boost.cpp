@@ -35,17 +35,24 @@ std::optional<EyeGroups> ResolveEyeGroups(std::span<ViewAdjustmentData> views, V
     return EyeGroups{std::span(kStereoLeft), std::span(kStereoRight)};
 }
 
-double AverageX(std::span<ViewAdjustmentData> views, std::span<const size_t> indices) {
-    double sum = 0.0;
+ViewPose AveragePosition(std::span<ViewAdjustmentData> views, std::span<const size_t> indices) {
+    ViewPose position;
     for (const size_t index : indices) {
-        sum += views[index].position.x;
+        position.x += views[index].position.x;
+        position.y += views[index].position.y;
+        position.z += views[index].position.z;
     }
-    return sum / static_cast<double>(indices.size());
+
+    const double scale = 1.0 / static_cast<double>(indices.size());
+    position.x *= scale;
+    position.y *= scale;
+    position.z *= scale;
+    return position;
 }
 
-void AssignX(std::span<ViewAdjustmentData> views, std::span<const size_t> indices, double value) {
+void AssignPosition(std::span<ViewAdjustmentData> views, std::span<const size_t> indices, const ViewPose& position) {
     for (const size_t index : indices) {
-        views[index].position.x = value;
+        views[index].position = position;
     }
 }
 
@@ -61,14 +68,26 @@ void ApplyStereoBoost(std::span<ViewAdjustmentData> views, double factor, ViewLa
         return;
     }
 
-    const double left_x = AverageX(views, groups->left);
-    const double right_x = AverageX(views, groups->right);
-    const double midpoint_x = (left_x + right_x) * 0.5;
-    const double adjusted_left_x = midpoint_x + (left_x - midpoint_x) * factor;
-    const double adjusted_right_x = midpoint_x + (right_x - midpoint_x) * factor;
+    const ViewPose left = AveragePosition(views, groups->left);
+    const ViewPose right = AveragePosition(views, groups->right);
+    const ViewPose midpoint{
+        (left.x + right.x) * 0.5,
+        (left.y + right.y) * 0.5,
+        (left.z + right.z) * 0.5,
+    };
+    const ViewPose adjusted_left{
+        midpoint.x + (left.x - midpoint.x) * factor,
+        midpoint.y + (left.y - midpoint.y) * factor,
+        midpoint.z + (left.z - midpoint.z) * factor,
+    };
+    const ViewPose adjusted_right{
+        midpoint.x + (right.x - midpoint.x) * factor,
+        midpoint.y + (right.y - midpoint.y) * factor,
+        midpoint.z + (right.z - midpoint.z) * factor,
+    };
 
-    AssignX(views, groups->left, adjusted_left_x);
-    AssignX(views, groups->right, adjusted_right_x);
+    AssignPosition(views, groups->left, adjusted_left);
+    AssignPosition(views, groups->right, adjusted_right);
 }
 
 } // namespace depthxr
