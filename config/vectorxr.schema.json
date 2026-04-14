@@ -161,7 +161,8 @@
       "required": [
         "enabled",
         "logLevel",
-        "logRetentionFiles"
+        "logRetentionFiles",
+        "trackSeenApps"
       ],
       "properties": {
         "enabled": {
@@ -174,6 +175,9 @@
           "type": "integer",
           "minimum": 1,
           "maximum": 50
+        },
+        "trackSeenApps": {
+          "type": "boolean"
         }
       }
     },

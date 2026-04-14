@@ -46,6 +46,7 @@ export interface CoreConfig {
   enabled: boolean
   logLevel: LogLevel
   logRetentionFiles: number
+  trackSeenApps: boolean
 }
 
 export interface RegisteredApplication {
@@ -164,6 +165,7 @@ export function defaultCoreConfig(): CoreConfig {
     enabled: true,
     logLevel: 'info',
     logRetentionFiles: 7,
+    trackSeenApps: true,
   }
 }
 
@@ -446,6 +448,58 @@ function normalizeApplication(value: unknown, fallbackId: string, existing: Regi
   }
 }
 
+function normalizeExeName(value: string): string {
+  return value
+    .trim()
+    .split(/[/\\]/)
+    .pop()
+    ?.toLowerCase() ?? ''
+}
+
+function findApplicationIdByExe(applications: RegisteredApplication[], exe: string): string | null {
+  const normalizedExe = normalizeExeName(exe)
+  if (!normalizedExe) {
+    return null
+  }
+
+  return applications.find((application) => normalizeExeName(application.match.exe) === normalizedExe)?.id ?? null
+}
+
+function createImportedApplication(exe: string, profileName: unknown, applications: RegisteredApplication[]): RegisteredApplication {
+  const application = createApplication(exe, applications)
+  const normalizedName = normalizeString(profileName, '').trim()
+  if (normalizedName && normalizedName !== 'New Profile') {
+    application.name = normalizedName
+    application.id = uniqueApplicationId(normalizedName, applications)
+  }
+  return application
+}
+
+function applicationIdsFromProfile(profile: UnknownRecord, applications: RegisteredApplication[]): string[] {
+  const applicationIds = Array.isArray(profile.applicationIds)
+    ? profile.applicationIds.filter((id): id is string => typeof id === 'string' && id.trim().length > 0)
+    : []
+
+  if (applicationIds.length > 0) {
+    return applicationIds
+  }
+
+  const match = isRecord(profile.match) ? profile.match : {}
+  const exe = normalizeString(match.exe, '').trim()
+  if (!exe) {
+    return []
+  }
+
+  const existingId = findApplicationIdByExe(applications, exe)
+  if (existingId) {
+    return [existingId]
+  }
+
+  const application = createImportedApplication(exe, profile.name, applications)
+  applications.push(application)
+  return [application.id]
+}
+
 function normalizeVectorXRConfig(value: unknown): VectorXRConfig {
   const fallback = defaultConfig()
   const source = isRecord(value) ? value : {}
@@ -470,6 +524,7 @@ function normalizeVectorXRConfig(value: unknown): VectorXRConfig {
       enabled: normalizeBoolean(core.enabled, fallback.core.enabled),
       logLevel: normalizeLogLevel(core.logLevel),
       logRetentionFiles: normalizeNumber(core.logRetentionFiles, fallback.core.logRetentionFiles),
+      trackSeenApps: normalizeBoolean(core.trackSeenApps, fallback.core.trackSeenApps),
     },
     applications,
     modules: {
@@ -485,9 +540,7 @@ function normalizeVectorXRConfig(value: unknown): VectorXRConfig {
         profiles: depthProfileValues.map((profileValue) => {
           const profile = isRecord(profileValue) ? profileValue : {}
           const settings = normalizeDepthXRSettings(profile.settings, fallback.modules.depthxr.defaults)
-          const applicationIds = Array.isArray(profile.applicationIds)
-            ? profile.applicationIds.filter((id): id is string => typeof id === 'string' && id.trim().length > 0)
-            : []
+          const applicationIds = applicationIdsFromProfile(profile, applications)
 
           return {
             name: normalizeString(profile.name, 'New Profile'),
@@ -505,9 +558,7 @@ function normalizeVectorXRConfig(value: unknown): VectorXRConfig {
         profiles: pivotProfileValues.map((profileValue) => {
           const profile = isRecord(profileValue) ? profileValue : {}
           const settings = normalizePivotXRSettings(profile.settings, pivotDefaults)
-          const applicationIds = Array.isArray(profile.applicationIds)
-            ? profile.applicationIds.filter((id): id is string => typeof id === 'string' && id.trim().length > 0)
-            : []
+          const applicationIds = applicationIdsFromProfile(profile, applications)
           const activationMode = profile.activationMode === 'hold' ? 'hold' : 'toggle'
 
           return {

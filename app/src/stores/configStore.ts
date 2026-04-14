@@ -1,6 +1,6 @@
 import { computed, reactive } from 'vue'
 
-import { loadConfigEnvelope, saveConfigEnvelope } from '../lib/commands'
+import { clearSeenApps, loadConfigEnvelope, loadSeenApps, saveConfigEnvelope, type SeenApplication } from '../lib/commands'
 import { cloneConfig, createApplication, createProfile, createPivotProfile, defaultConfig } from '../lib/model'
 import type { AppTab, VectorXRConfig } from '../lib/model'
 
@@ -8,6 +8,9 @@ interface StoreState {
   loading: boolean
   saving: boolean
   path: string
+  seenAppsPath: string
+  seenApps: SeenApplication[]
+  seenAppsLoading: boolean
   config: VectorXRConfig
   originalConfig: VectorXRConfig
   activeTab: AppTab
@@ -18,6 +21,9 @@ const state = reactive<StoreState>({
   loading: false,
   saving: false,
   path: '',
+  seenAppsPath: '',
+  seenApps: [],
+  seenAppsLoading: false,
   config: defaultConfig(),
   originalConfig: defaultConfig(),
   activeTab: 'core',
@@ -37,10 +43,25 @@ export function useConfigStore() {
       state.config = cloneConfig(envelope.config)
       state.originalConfig = cloneConfig(envelope.config)
       state.status = ''
+      await refreshSeenApps()
     } catch (error) {
       state.status = error instanceof Error ? error.message : 'Failed to load config'
     } finally {
       state.loading = false
+    }
+  }
+
+  async function refreshSeenApps() {
+    state.seenAppsLoading = true
+
+    try {
+      const envelope = await loadSeenApps()
+      state.seenAppsPath = envelope.path
+      state.seenApps = envelope.observations
+    } catch (error) {
+      state.status = error instanceof Error ? error.message : 'Failed to load seen apps'
+    } finally {
+      state.seenAppsLoading = false
     }
   }
 
@@ -126,6 +147,21 @@ export function useConfigStore() {
     state.config.applications.push(createApplication('Game.exe', state.config.applications))
   }
 
+  function addSeenApplication(exe: string) {
+    state.config.applications.push(createApplication(exe, state.config.applications))
+    state.status = `${exe} added to the application registry`
+  }
+
+  async function clearSeenApplications() {
+    try {
+      state.seenAppsPath = await clearSeenApps()
+      state.seenApps = []
+      state.status = 'Seen apps cleared'
+    } catch (error) {
+      state.status = error instanceof Error ? error.message : 'Failed to clear seen apps'
+    }
+  }
+
   function removeApplication(index: number) {
     const application = state.config.applications[index]
     if (!application) {
@@ -148,6 +184,7 @@ export function useConfigStore() {
     save,
     discardChanges,
     importConfig,
+    refreshSeenApps,
     setActiveTab,
     addProfile,
     removeProfile,
@@ -156,6 +193,8 @@ export function useConfigStore() {
     removePivotProfile,
     syncPivotProfileName,
     addApplication,
+    addSeenApplication,
+    clearSeenApplications,
     removeApplication,
   }
 }

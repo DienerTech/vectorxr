@@ -8,6 +8,10 @@ function validateCoreConfig(core: CoreConfig): string[] {
     errors.push('core.logRetentionFiles must be an integer between 1 and 50')
   }
 
+  if (typeof core.trackSeenApps !== 'boolean') {
+    errors.push('core.trackSeenApps must be a boolean')
+  }
+
   return errors
 }
 
@@ -140,7 +144,11 @@ function validateApplications(applications: RegisteredApplication[]): string[] {
       errors.push(`${prefix}match.exe is required`)
     }
 
-    const normalizedExe = application.match.exe.trim().toLowerCase()
+    const normalizedExe = application.match.exe
+      .trim()
+      .split(/[/\\]/)
+      .pop()
+      ?.toLowerCase() ?? ''
     if (normalizedExe) {
       if (seenExes.has(normalizedExe)) {
         errors.push(`${prefix}match.exe duplicates another application`)

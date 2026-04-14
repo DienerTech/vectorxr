@@ -38,6 +38,7 @@ struct CoreSettings {
     bool enabled{true};
     LogLevel log_level{LogLevel::Info};
     int log_retention_files{7};
+    bool track_seen_apps{true};
 };
 
 struct DepthXrSettingsOverride {

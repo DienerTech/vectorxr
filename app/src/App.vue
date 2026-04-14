@@ -200,8 +200,14 @@ function cancelImport() {
         />
         <AppRegistryEditor
           v-else-if="store.state.activeTab === 'registry'"
+          :config="store.state.config"
           :applications="store.state.config.applications"
+          :seen-apps="store.state.seenApps"
+          :seen-apps-loading="store.state.seenAppsLoading"
           @add="store.addApplication"
+          @add-seen="store.addSeenApplication"
+          @clear-seen="store.clearSeenApplications"
+          @refresh-seen="store.refreshSeenApps"
           @remove="store.removeApplication"
         />
         <div v-else-if="store.state.activeTab === 'about'" class="space-y-6">

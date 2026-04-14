@@ -9,6 +9,7 @@
 #include "depthxr/config_parser.h"
 #include "depthxr/effects.h"
 #include "depthxr/logger.h"
+#include "depthxr/seen_apps.h"
 #include "depthxr/settings_resolver.h"
 
 namespace {
@@ -27,7 +28,8 @@ void TestParseConfig() {
   "core": {
     "enabled": true,
     "logLevel": "debug",
-    "logRetentionFiles": 9
+    "logRetentionFiles": 9,
+    "trackSeenApps": false
   },
   "applications": [
     {
@@ -107,6 +109,7 @@ void TestParseConfig() {
     Expect(result.document.version == 3, "Version was not normalized to 3");
     Expect(result.document.core.log_level == depthxr::LogLevel::Debug, "Core log level mismatch");
     Expect(result.document.core.log_retention_files == 9, "Core log retention mismatch");
+    Expect(!result.document.core.track_seen_apps, "Core trackSeenApps mismatch");
     Expect(result.document.applications.size() == 1, "Application registry count mismatch");
     Expect(result.document.applications[0].id == "game", "Application registry id mismatch");
     Expect(std::abs(result.document.depthxr.defaults.stereo_boost - 1.1) < 0.0001, "DepthXR stereoBoost mismatch");
@@ -527,6 +530,35 @@ void TestExeMatch() {
     Expect(depthxr::ExeNameMatches("C:\\Games\\DCS.exe", "dcs.exe"), "Basename exe match failed");
 }
 
+void TestSeenAppObservationRecording() {
+    const std::filesystem::path test_directory =
+        std::filesystem::current_path() / "test-seen-app-observations";
+    std::error_code error;
+    std::filesystem::remove_all(test_directory, error);
+    std::filesystem::create_directories(test_directory, error);
+    Expect(!error, "Failed to create seen-apps test directory");
+
+    const std::filesystem::path path = test_directory / "seen-apps.json";
+    std::string record_error;
+    Expect(depthxr::RecordSeenAppObservation(path, "DCS.exe", 100, &record_error),
+           "Failed to record first seen app observation: " + record_error);
+    Expect(depthxr::RecordSeenAppObservation(path, "c:\\Games\\dcs.exe", 140, &record_error),
+           "Failed to merge second seen app observation: " + record_error);
+
+    std::ifstream stream(path);
+    Expect(stream.good(), "Failed to open seen-apps test output");
+
+    std::ostringstream contents;
+    contents << stream.rdbuf();
+    const std::string text = contents.str();
+    Expect(text.find("\"exe\": \"DCS.exe\"") != std::string::npos, "Seen app display exe was not preserved");
+    Expect(text.find("\"firstSeenUnixSeconds\": 100") != std::string::npos, "Seen app first-seen timestamp mismatch");
+    Expect(text.find("\"lastSeenUnixSeconds\": 140") != std::string::npos, "Seen app last-seen timestamp mismatch");
+    Expect(text.find("\"launchCount\": 2") != std::string::npos, "Seen app launch count did not merge");
+
+    std::filesystem::remove_all(test_directory, error);
+}
+
 void TestQuadViewStereoBoostKeepsInsetViewsInSync() {
     depthxr::ViewAdjustmentData views[4] = {
         {{-0.03, 0.0, 0.01}, {-1.0, 0.8, 0.9, -0.9}},
@@ -685,6 +717,7 @@ int main() {
     TestNoneBindingParsed();
     TestDeviceBindingMetadataParsed();
     TestExeMatch();
+    TestSeenAppObservationRecording();
     TestQuadViewStereoBoostKeepsInsetViewsInSync();
     TestStereoBoostScalesRotatedEyeBaseline();
     TestQuadViewConvergenceKeepsInsetOffsetsAligned();

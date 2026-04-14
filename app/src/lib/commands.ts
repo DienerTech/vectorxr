@@ -33,6 +33,18 @@ export interface LogSnapshot {
   files: LogFileEntry[]
 }
 
+export interface SeenApplication {
+  exe: string
+  firstSeenUnixSeconds: number
+  lastSeenUnixSeconds: number
+  launchCount: number
+}
+
+export interface SeenAppsEnvelope {
+  path: string
+  observations: SeenApplication[]
+}
+
 export interface InputDeviceInfo {
   deviceGuid: string
   productGuid: string
@@ -155,4 +167,23 @@ export async function loadLogSnapshot(): Promise<LogSnapshot> {
   }
 
   return invoke<LogSnapshot>('load_log_snapshot')
+}
+
+export async function loadSeenApps(): Promise<SeenAppsEnvelope> {
+  if (!tauriAvailable()) {
+    return {
+      path: './config/seen-apps.json',
+      observations: [],
+    }
+  }
+
+  return invoke<SeenAppsEnvelope>('load_seen_apps')
+}
+
+export async function clearSeenApps(): Promise<string> {
+  if (!tauriAvailable()) {
+    return './config/seen-apps.json'
+  }
+
+  return invoke<string>('clear_seen_apps')
 }

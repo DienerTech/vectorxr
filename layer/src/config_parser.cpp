@@ -620,6 +620,7 @@ bool ParseCoreSettings(const JsonValue::Object& object, CoreSettings& out, std::
         "enabled",
         "logLevel",
         "logRetentionFiles",
+        "trackSeenApps",
     };
 
     if (!CheckAllowedKeys(object, allowed, error)) {
@@ -629,10 +630,12 @@ bool ParseCoreSettings(const JsonValue::Object& object, CoreSettings& out, std::
     std::optional<bool> enabled;
     std::optional<LogLevel> log_level;
     std::optional<int> log_retention_files;
+    std::optional<bool> track_seen_apps;
 
     if (!ReadOptionalBool(object, "enabled", enabled, error) ||
         !ReadOptionalLogLevel(object, "logLevel", log_level, error) ||
-        !ReadOptionalInt(object, "logRetentionFiles", log_retention_files, error)) {
+        !ReadOptionalInt(object, "logRetentionFiles", log_retention_files, error) ||
+        !ReadOptionalBool(object, "trackSeenApps", track_seen_apps, error)) {
         return false;
     }
 
@@ -644,6 +647,9 @@ bool ParseCoreSettings(const JsonValue::Object& object, CoreSettings& out, std::
     }
     if (log_retention_files.has_value()) {
         out.log_retention_files = *log_retention_files;
+    }
+    if (track_seen_apps.has_value()) {
+        out.track_seen_apps = *track_seen_apps;
     }
 
     return true;

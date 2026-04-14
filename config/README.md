@@ -6,6 +6,7 @@ The current file format supports:
 
 - a shared `core` settings block
 - a suite-level application registry
+- local seen-app tracking preference
 - module-specific settings under `modules`
 - Depth defaults and per-application overrides
 - Pivot defaults including activation mode and shared activation bindings
