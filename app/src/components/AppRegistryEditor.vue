@@ -51,8 +51,8 @@ const seenAppViews = computed(() =>
   <article class="rounded-[1.25rem] border p-5 shadow-panel backdrop-blur surface-panel">
     <div class="flex flex-wrap items-center justify-between gap-3">
       <div>
-        <p class="eyebrow text-xs uppercase tracking-[0.24em]">Applications</p>
-        <h2 class="mt-2 text-2xl font-semibold tracking-tight">Application registry</h2>
+        <p class="eyebrow text-xs uppercase tracking-[0.24em]">Registry</p>
+        <h2 class="mt-2 text-2xl font-semibold tracking-tight">Application Registry</h2>
         <p class="mt-2 text-sm leading-6 text-muted">
           Register the applications that Depth and Pivot profiles can target by executable name. Add a title once here, then assign it from the profile editors in the module tabs.
         </p>
@@ -99,10 +99,10 @@ const seenAppViews = computed(() =>
   <article class="rounded-[1.25rem] border p-5 shadow-panel backdrop-blur surface-panel">
     <div class="flex flex-wrap items-start justify-between gap-3">
       <div>
-        <p class="eyebrow text-xs uppercase tracking-[0.24em]">Seen Apps</p>
-        <h2 class="mt-2 text-2xl font-semibold tracking-tight">XR apps VectorXR noticed</h2>
+        <p class="eyebrow text-xs uppercase tracking-[0.24em]">Disovery</p>
+        <h2 class="mt-2 text-2xl font-semibold tracking-tight">OpenXR App Discoverery</h2>
         <p class="mt-2 max-w-3xl text-sm leading-6 text-muted">
-          VectorXR stores executable names and timestamps locally so app setup is easier. Seen apps do not affect profiles until you add them to the registry.
+          Automatically detects OpenXR applications you launch and stores their details locally for easy registration. Discovered apps won’t affect XR settings until added to your registry.
         </p>
       </div>
 
@@ -118,9 +118,9 @@ const seenAppViews = computed(() =>
 
     <div class="mt-4 flex items-center justify-between gap-4 rounded-[1rem] border px-4 py-3 surface-panel-soft">
       <div>
-        <p class="text-sm font-semibold">Track seen XR apps</p>
+        <p class="text-sm font-semibold">Track Discovered XR apps</p>
         <p class="mt-1 text-xs leading-5 text-muted">
-          Stores only executable names and first/last seen timestamps on this PC.
+          Stores executable names and first/last seen timestamps. All data is kept locally on this PC.
         </p>
       </div>
       <label class="pill-toggle inline-flex items-center gap-3 rounded-full px-4 py-2 text-sm font-medium">
