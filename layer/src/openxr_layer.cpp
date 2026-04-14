@@ -12,6 +12,7 @@
 #include "depthxr/effects.h"
 #include "depthxr/input_devices.h"
 #include "depthxr/process_info.h"
+#include "depthxr/seen_apps.h"
 
 namespace depthxr {
 namespace {
@@ -252,6 +253,7 @@ bool SameSettings(const ResolvedRuntimeConfig& lhs, const ResolvedRuntimeConfig&
     return lhs.core.enabled == rhs.core.enabled &&
            lhs.core.log_level == rhs.core.log_level &&
            lhs.core.log_retention_files == rhs.core.log_retention_files &&
+           lhs.core.track_seen_apps == rhs.core.track_seen_apps &&
            lhs.depthxr.enabled == rhs.depthxr.enabled &&
            lhs.depthxr.stereo_boost_enabled == rhs.depthxr.stereo_boost_enabled &&
            lhs.depthxr.convergence_enabled == rhs.depthxr.convergence_enabled &&
@@ -379,6 +381,12 @@ XrResult OpenXrLayer::OnInstanceCreated(const XrInstanceCreateInfo* create_info,
     }
 
     ReloadConfigIfNeeded();
+    if (config_.core.track_seen_apps) {
+        std::string seen_apps_error;
+        if (!RecordSeenApp(current_exe_name_, &seen_apps_error)) {
+            logger_.Debug("Unable to record seen app: " + seen_apps_error);
+        }
+    }
     RefreshResolvedSettings();
     logger_.Info("Active log file: " + logger_.ActiveLogPath().string());
     return XR_SUCCESS;

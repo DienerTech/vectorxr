@@ -29,6 +29,20 @@ std::filesystem::path ResolveConfigPath() {
     return FallbackConfigPath();
 }
 
+std::filesystem::path ResolveSeenAppsPath() {
+    if (const char* env_path = std::getenv("VECTORXR_SEEN_APPS_PATH"); env_path && *env_path != '\0') {
+        return std::filesystem::path(env_path);
+    }
+
+#if defined(_WIN32)
+    if (const char* local_app_data = std::getenv("LOCALAPPDATA"); local_app_data && *local_app_data != '\0') {
+        return std::filesystem::path(local_app_data) / "VectorXR" / "config" / "seen-apps.json";
+    }
+#endif
+
+    return std::filesystem::current_path() / "config" / "seen-apps.json";
+}
+
 std::filesystem::path ResolveLogPath() {
     if (const char* env_path = std::getenv("VECTORXR_LOG_PATH"); env_path && *env_path != '\0') {
         return std::filesystem::path(env_path);

@@ -5,6 +5,7 @@
 namespace depthxr {
 
 std::filesystem::path ResolveConfigPath();
+std::filesystem::path ResolveSeenAppsPath();
 std::filesystem::path ResolveLogPath();
 
 } // namespace depthxr

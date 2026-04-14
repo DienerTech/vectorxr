@@ -137,6 +137,8 @@ struct CoreConfig {
     log_level: String,
     #[serde(default = "default_log_retention_files")]
     log_retention_files: u32,
+    #[serde(default = "default_true")]
+    track_seen_apps: bool,
 }
 
 impl Default for CoreConfig {
@@ -145,6 +147,7 @@ impl Default for CoreConfig {
             enabled: true,
             log_level: default_log_level(),
             log_retention_files: default_log_retention_files(),
+            track_seen_apps: true,
         }
     }
 }
@@ -276,6 +279,8 @@ struct PivotXRProfileConfig {
     enabled: bool,
     #[serde(default)]
     application_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    r#match: Option<ProfileMatch>,
     #[serde(default = "default_activation_mode")]
     activation_mode: String,
     #[serde(default = "default_activation_binding")]
@@ -355,6 +360,39 @@ struct LogSnapshot {
     files: Vec<LogFileEntry>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SeenApplication {
+    #[serde(default)]
+    exe: String,
+    #[serde(default)]
+    first_seen_unix_seconds: u64,
+    #[serde(default)]
+    last_seen_unix_seconds: u64,
+    #[serde(default)]
+    launch_count: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SeenAppsDocument {
+    #[serde(default = "default_seen_apps_version")]
+    version: u32,
+    #[serde(default)]
+    observations: Vec<SeenApplication>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SeenAppsEnvelope {
+    path: String,
+    observations: Vec<SeenApplication>,
+}
+
+fn default_seen_apps_version() -> u32 {
+    1
+}
+
 fn default_config() -> VectorXRConfig {
     VectorXRConfig {
         version: 3,
@@ -409,6 +447,69 @@ fn sanitize_application_id(value: &str) -> String {
     }
 }
 
+fn normalize_exe_name(value: &str) -> String {
+    value
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(value)
+        .trim()
+        .to_lowercase()
+}
+
+fn unique_application_id(base: &str, applications: &[RegisteredApplication]) -> String {
+    let stem = sanitize_application_id(base);
+    if !applications.iter().any(|application| application.id.eq_ignore_ascii_case(&stem)) {
+        return stem;
+    }
+
+    let mut index = 2;
+    loop {
+        let candidate = format!("{stem}-{index}");
+        if !applications
+            .iter()
+            .any(|application| application.id.eq_ignore_ascii_case(&candidate))
+        {
+            return candidate;
+        }
+        index += 1;
+    }
+}
+
+fn application_id_for_profile_match(
+    applications: &mut Vec<RegisteredApplication>,
+    profile_name: &str,
+    profile_match: &Option<ProfileMatch>,
+) -> Option<String> {
+    let exe = profile_match.as_ref()?.exe.trim();
+    if exe.is_empty() {
+        return None;
+    }
+
+    let normalized_exe = normalize_exe_name(exe);
+    if let Some(application) = applications
+        .iter()
+        .find(|application| normalize_exe_name(&application.r#match.exe) == normalized_exe)
+    {
+        return Some(application.id.clone());
+    }
+
+    let name = if profile_name.trim().is_empty() || profile_name.trim() == "New Profile" {
+        sanitize_profile_name(exe)
+    } else {
+        profile_name.trim().into()
+    };
+
+    let id = unique_application_id(&name, applications);
+    applications.push(RegisteredApplication {
+        id: id.clone(),
+        name,
+        enabled: true,
+        r#match: ProfileMatch { exe: exe.into() },
+    });
+
+    Some(id)
+}
+
 fn normalize_config(mut config: VectorXRConfig) -> VectorXRConfig {
     if config.version != 3 {
         return default_config();
@@ -430,6 +531,14 @@ fn normalize_config(mut config: VectorXRConfig) -> VectorXRConfig {
     }
 
     for profile in &mut config.modules.depthxr.profiles {
+        if profile.application_ids.is_empty() {
+            if let Some(application_id) =
+                application_id_for_profile_match(&mut config.applications, &profile.name, &profile.r#match)
+            {
+                profile.application_ids.push(application_id);
+            }
+        }
+
         if profile.name.trim().is_empty() {
             let first_application = profile
                 .application_ids
@@ -445,6 +554,14 @@ fn normalize_config(mut config: VectorXRConfig) -> VectorXRConfig {
     }
 
     for profile in &mut config.modules.pivotxr.profiles {
+        if profile.application_ids.is_empty() {
+            if let Some(application_id) =
+                application_id_for_profile_match(&mut config.applications, &profile.name, &profile.r#match)
+            {
+                profile.application_ids.push(application_id);
+            }
+        }
+
         if profile.name.trim().is_empty() {
             let first_application = profile
                 .application_ids
@@ -455,6 +572,8 @@ fn normalize_config(mut config: VectorXRConfig) -> VectorXRConfig {
                 .map(|application| application.name.clone())
                 .unwrap_or_else(|| "New Profile".into());
         }
+
+        profile.r#match = None;
     }
 
     config
@@ -506,11 +625,86 @@ fn resolve_log_path() -> PathBuf {
         .join("vectorxr-layer.log")
 }
 
+fn resolve_seen_apps_path() -> PathBuf {
+    if let Ok(env_path) = env::var("VECTORXR_SEEN_APPS_PATH") {
+        if !env_path.trim().is_empty() {
+            return PathBuf::from(env_path);
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        if let Ok(local_app_data) = env::var("LOCALAPPDATA") {
+            return PathBuf::from(local_app_data)
+                .join("VectorXR")
+                .join("config")
+                .join("seen-apps.json");
+        }
+    }
+
+    env::current_dir()
+        .unwrap_or_else(|_| PathBuf::from("."))
+        .join("config")
+        .join("seen-apps.json")
+}
+
 fn ensure_parent(path: &Path) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|error| error.to_string())?;
     }
     Ok(())
+}
+
+fn normalize_exe_display(value: &str) -> String {
+    value
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(value)
+        .trim()
+        .into()
+}
+
+fn normalize_seen_apps_document(mut document: SeenAppsDocument) -> SeenAppsDocument {
+    document.version = 1;
+    let mut observations = Vec::<SeenApplication>::new();
+
+    for mut observation in document.observations {
+        observation.exe = normalize_exe_display(&observation.exe);
+        if observation.exe.is_empty() {
+            continue;
+        }
+
+        if observation.first_seen_unix_seconds == 0 {
+            observation.first_seen_unix_seconds = observation.last_seen_unix_seconds;
+        }
+        if observation.last_seen_unix_seconds == 0 {
+            observation.last_seen_unix_seconds = observation.first_seen_unix_seconds;
+        }
+        if observation.launch_count == 0 {
+            observation.launch_count = 1;
+        }
+
+        let normalized_exe = normalize_exe_name(&observation.exe);
+        if let Some(existing) = observations
+            .iter_mut()
+            .find(|existing| normalize_exe_name(&existing.exe) == normalized_exe)
+        {
+            existing.first_seen_unix_seconds = existing
+                .first_seen_unix_seconds
+                .min(observation.first_seen_unix_seconds);
+            existing.last_seen_unix_seconds = existing
+                .last_seen_unix_seconds
+                .max(observation.last_seen_unix_seconds);
+            existing.launch_count += observation.launch_count;
+            continue;
+        }
+
+        observations.push(observation);
+    }
+
+    observations.sort_by(|lhs, rhs| rhs.last_seen_unix_seconds.cmp(&lhs.last_seen_unix_seconds));
+    document.observations = observations;
+    document
 }
 
 fn ensure_default_file(path: &Path) -> Result<(), String> {
@@ -670,12 +864,51 @@ fn load_log_snapshot() -> Result<LogSnapshot, String> {
     })
 }
 
+#[tauri::command]
+fn load_seen_apps() -> Result<SeenAppsEnvelope, String> {
+    let path = resolve_seen_apps_path();
+    if !path.exists() {
+        return Ok(SeenAppsEnvelope {
+            path: path.to_string_lossy().into_owned(),
+            observations: Vec::new(),
+        });
+    }
+
+    let content = fs::read_to_string(&path).map_err(|error| error.to_string())?;
+    let document = serde_json::from_str::<SeenAppsDocument>(&content)
+        .map(normalize_seen_apps_document)
+        .unwrap_or_else(|_| SeenAppsDocument {
+            version: 1,
+            observations: Vec::new(),
+        });
+
+    Ok(SeenAppsEnvelope {
+        path: path.to_string_lossy().into_owned(),
+        observations: document.observations,
+    })
+}
+
+#[tauri::command]
+fn clear_seen_apps() -> Result<String, String> {
+    let path = resolve_seen_apps_path();
+    ensure_parent(&path)?;
+    let content = serde_json::to_string_pretty(&SeenAppsDocument {
+        version: 1,
+        observations: Vec::new(),
+    })
+    .map_err(|error| error.to_string())?;
+    fs::write(&path, content).map_err(|error| error.to_string())?;
+    Ok(path.to_string_lossy().into_owned())
+}
+
 fn main() {
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
             load_config,
             save_config,
             load_log_snapshot,
+            load_seen_apps,
+            clear_seen_apps,
             list_input_devices,
             capture_device_binding
         ])

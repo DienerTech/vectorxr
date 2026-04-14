@@ -38,7 +38,8 @@ High-level shape:
   "core": {
     "enabled": true,
     "logLevel": "info",
-    "logRetentionFiles": 7
+    "logRetentionFiles": 7,
+    "trackSeenApps": true
   },
   "applications": [
     {

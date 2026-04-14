@@ -3,6 +3,7 @@ add_library(
     STATIC
     src/config_parser.cpp
     src/input_devices.cpp
+    src/seen_apps.cpp
     src/settings.cpp
     src/settings_resolver.cpp
     src/util/config_path.cpp
