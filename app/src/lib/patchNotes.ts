@@ -8,6 +8,19 @@ export interface PatchNoteEntry {
 
 export const patchNotes: PatchNoteEntry[] = [
   {
+    version: '0.4.0',
+    date: '2026-04-14',
+    title: 'Application discovery and portable profiles',
+    summary: 'VectorXR can now remember OpenXR apps it has seen and turn them into profile targets when you are ready.',
+    items: [
+      'Added local OpenXR application discovery with a registry toggle and clear action.',
+      'Added an Application Registry discovery panel with refresh, launch counts, first seen, and last seen details.',
+      'Added one-click registration for discovered executables.',
+      'Migrated imported profile executable matches into registered applications so shared configs can link Depth and Pivot profiles automatically.',
+      'Simplified registered app cards with inline title editing, executable guidance, and a two-column layout on wide screens.',
+    ],
+  },
+  {
     version: '0.3.0',
     date: '2026-04-10',
     title: 'Phase 3 shell foundation',
