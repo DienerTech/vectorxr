@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 
 import type { SeenApplication } from '../lib/commands'
 import type { RegisteredApplication, VectorXRConfig } from '../lib/model'
@@ -44,6 +44,12 @@ const seenAppViews = computed(() =>
     }
   }),
 )
+
+const editingApplicationId = ref<string | null>(null)
+
+function finishNameEdit() {
+  editingApplicationId.value = null
+}
 </script>
 
 <template>
@@ -63,11 +69,31 @@ const seenAppViews = computed(() =>
       </button>
     </div>
 
-    <div v-if="applications.length > 0" class="mt-4 space-y-3">
+    <div v-if="applications.length > 0" class="mt-4 grid gap-3 xl:grid-cols-2">
       <div v-for="(application, index) in applications" :key="application.id" class="rounded-[1rem] border p-4 surface-panel-soft">
         <div class="mb-3 flex flex-wrap items-center justify-between gap-3">
-          <div>
-            <p class="text-base font-semibold tracking-tight">{{ application.name || 'Unnamed application' }}</p>
+          <div class="flex flex-wrap items-center gap-2">
+            <p v-if="editingApplicationId !== application.id" class="text-base font-semibold tracking-tight">{{ application.name || 'Unnamed application' }}</p>
+            <input
+              v-else
+              v-model="application.name"
+              class="app-input w-full max-w-sm rounded-[0.75rem] px-3 py-2 text-base font-semibold tracking-tight"
+              placeholder="DCS"
+              type="text"
+              @blur="finishNameEdit"
+              @keydown.enter="finishNameEdit"
+            />
+            <button
+              v-if="editingApplicationId !== application.id"
+              class="button-secondary inline-flex h-8 w-8 items-center justify-center rounded-[0.5rem]"
+              type="button"
+              aria-label="Edit application name"
+              @click="editingApplicationId = application.id"
+            >
+              <svg aria-hidden="true" class="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
+                <path d="M13.92 2.87a2.2 2.2 0 0 1 3.11 3.11l-.72.72-3.11-3.11.72-.72Zm-1.7 1.7 3.11 3.11-8.7 8.7-3.44.33.33-3.44 8.7-8.7Z" />
+              </svg>
+            </button>
           </div>
 
           <div class="flex flex-wrap items-center gap-3">
@@ -77,17 +103,17 @@ const seenAppViews = computed(() =>
           </div>
         </div>
 
-        <div class="grid gap-3 md:grid-cols-2">
-          <label class="block">
-            <span class="mb-1.5 block text-sm font-medium">Application Name</span>
-            <input v-model="application.name" class="app-input w-full rounded-[0.75rem] px-4 py-2.5" placeholder="DCS" type="text" />
-          </label>
-
-          <label class="block">
-            <span class="mb-1.5 block text-sm font-medium">Executable</span>
-            <input v-model="application.match.exe" class="app-input w-full rounded-[0.75rem] px-4 py-2.5" placeholder="DCS.exe" type="text" />
-          </label>
-        </div>
+        <label class="block">
+          <span class="mb-1.5 flex items-center gap-1.5 text-sm font-medium">
+            Executable
+            <span
+              title="Executable matching is case-insensitive, but the name must include the application extension. For example: DCS.exe"
+              class="cursor-help select-none text-xs text-muted"
+              >ⓘ</span
+            >
+          </span>
+          <input v-model="application.match.exe" class="app-input w-full rounded-[0.75rem] px-4 py-2.5" placeholder="DCS.exe" type="text" />
+        </label>
       </div>
     </div>
 
@@ -99,8 +125,8 @@ const seenAppViews = computed(() =>
   <article class="rounded-[1.25rem] border p-5 shadow-panel backdrop-blur surface-panel">
     <div class="flex flex-wrap items-start justify-between gap-3">
       <div>
-        <p class="eyebrow text-xs uppercase tracking-[0.24em]">Disovery</p>
-        <h2 class="mt-2 text-2xl font-semibold tracking-tight">OpenXR App Discoverery</h2>
+        <p class="eyebrow text-xs uppercase tracking-[0.24em]">Discovery</p>
+        <h2 class="mt-2 text-2xl font-semibold tracking-tight">OpenXR Application Discovery</h2>
         <p class="mt-2 max-w-3xl text-sm leading-6 text-muted">
           Automatically detects OpenXR applications you launch and stores their details locally for easy registration. Discovered apps won’t affect XR settings until added to your registry.
         </p>
