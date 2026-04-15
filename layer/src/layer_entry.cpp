@@ -8,7 +8,7 @@
 namespace depthxr {
 namespace {
 
-constexpr std::string_view kLayerName = "XR_APILAYER_NOVENDOR_depthxr";
+constexpr std::string_view kLayerName = "XR_APILAYER_DIENERTECH_VECTORXR";
 
 std::filesystem::path GetModuleDirectory() {
     HMODULE module = nullptr;

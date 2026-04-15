@@ -17,31 +17,7 @@ From a 1.0-readiness angle, I’d treat the next sprint less like “add a few f
 
 2. **Application Registry Plus “Apps Seen”**
 
-   Yes, I think the XR “apps seen” capability belongs in the next major slice.
-
-   I’d split it into two related systems:
-
-   - **Registered apps:** user-managed app entries used by profiles.
-   - **Seen apps:** executables the layer has observed while active.
-
-   The layer can record lightweight observations like:
-
-   - executable name
-   - first seen time
-   - last seen time
-   - number of launches
-   - maybe runtime name if we can detect it safely
-   - whether it matches a registered app
-
-   Then the app can offer “Add to registry” from the seen list. That would make profile setup feel much less mysterious. Instead of asking users to know that DCS is `DCS.exe`, VectorXR can say: “I saw `DCS.exe`; do you want to create a profile target for it?”
-
-   Important design details:
-
-   - Keep this data local.
-   - Add a “clear seen apps” action.
-   - Do not make seen apps automatically become registered apps.
-   - Store observations separately from the core runtime settings, or under a clearly app-owned/diagnostic part of config.
-   - Avoid tracking paths at first unless there is a real need. Executable names are less invasive and already match your current registry model.
+COMPLETED
 
 3. **Installer And Uninstaller**
 
@@ -89,39 +65,7 @@ From a 1.0-readiness angle, I’d treat the next sprint less like “add a few f
 
 5. **OpenXR Layer Ordering**
 
-   Short version: **we can help, but we probably cannot guarantee it globally.**
-
-   Khronos’ OpenXR loader docs say implicit API layers are discovered automatically from the registry on Windows, and implicit layers intercept before explicit layers. Explicit layer order can be controlled by the app’s `enabledApiLayerNames` or by `XR_ENABLE_API_LAYERS`, where order matters. But for normal implicit layer registration, there is no clean product-level “put me last” priority field in your manifest.
-
-   So the installer can guarantee:
-
-   - VectorXR is registered.
-   - VectorXR can be disabled by its `disable_environment` variable.
-   - VectorXR’s manifest path points at the installed DLL.
-   - VectorXR unregisters cleanly.
-
-   The installer probably cannot guarantee:
-
-   - VectorXR is bottom-most / closest to the runtime in every OpenXR call chain.
-   - VectorXR appears after every other implicit layer.
-   - Other tools will not reorder, disable, or conflict with it.
-   - App-provided explicit layers will not sit below it.
-
-   For 1.0, I’d make this a **diagnostics and guidance problem**, not an installer magic problem.
-
-   Good launch-ready behavior would be:
-
-   - Add an “OpenXR Layer Status” screen.
-   - Show whether VectorXR is registered.
-   - Show the manifest path and DLL path.
-   - Show whether the DLL exists.
-   - Show other discovered implicit layers from `HKCU` / `HKLM`.
-   - Warn: “Layer ordering may affect behavior.”
-   - Link or mention external layer-management tools where appropriate.
-   - Provide a one-click “disable VectorXR layer” and “enable VectorXR layer” if registry permissions allow it.
-   - Document that users may need a layer manager/OpenXR toolkit if they have multiple OpenXR tools installed.
-
-   If you eventually want stronger control, one possible advanced path is a launcher mode that sets `XR_ENABLE_API_LAYERS` for a launched game. But that only helps for apps launched through VectorXR, and implicit layers still have their own behavior. I would not make that a 1.0 requirement.
+OUT OF SCOPE
 
 6. **Recovery And Safety**
 

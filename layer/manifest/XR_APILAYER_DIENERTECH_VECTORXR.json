@@ -1,14 +1,14 @@
 {
   "file_format_version": "1.0.0",
   "api_layer": {
-    "name": "XR_APILAYER_NOVENDOR_depthxr",
-    "library_path": ".\\XR_APILAYER_NOVENDOR_depthxr.dll",
+    "name": "XR_APILAYER_DIENERTECH_VECTORXR",
+    "library_path": ".\\XR_APILAYER_DIENERTECH_VECTORXR.dll",
     "api_version": "1.0",
     "implementation_version": "1",
-    "description": "VectorXR DepthXR module API layer",
+    "description": "VectorXR OpenXR API layer",
     "functions": {
       "xrNegotiateLoaderApiLayerInterface": "xrNegotiateLoaderApiLayerInterface"
     },
-    "disable_environment": "DISABLE_XR_APILAYER_NOVENDOR_depthxr"
+    "disable_environment": "DISABLE_XR_APILAYER_DIENERTECH_VECTORXR"
   }
 }
