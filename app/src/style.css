@@ -151,6 +151,14 @@ textarea {
   color: var(--app-text-soft);
 }
 
+.app-readonly-field {
+  background: var(--app-surface-muted);
+  border: 1px solid var(--app-border);
+  color: var(--app-text-muted);
+  cursor: default;
+  user-select: text;
+}
+
 .eyebrow {
   color: var(--app-accent);
 }
