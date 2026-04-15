@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::time::UNIX_EPOCH;
 
 mod input_devices;
@@ -623,14 +624,14 @@ fn resolve_log_path() -> PathBuf {
             return PathBuf::from(local_app_data)
                 .join("VectorXR")
                 .join("logs")
-                .join("vectorxr-layer.log");
+                .join("vectorxr.log");
         }
     }
 
     env::current_dir()
         .unwrap_or_else(|_| PathBuf::from("."))
         .join("logs")
-        .join("vectorxr-layer.log")
+        .join("vectorxr.log")
 }
 
 fn resolve_seen_apps_path() -> PathBuf {
@@ -725,6 +726,14 @@ fn ensure_default_file(path: &Path) -> Result<(), String> {
     fs::write(path, json).map_err(|error| error.to_string())
 }
 
+fn is_log_timestamp_suffix(value: &str) -> bool {
+    value.len() == 15
+        && value
+            .chars()
+            .enumerate()
+            .all(|(index, character)| if index == 8 { character == '-' } else { character.is_ascii_digit() })
+}
+
 fn log_series_paths(base_path: &Path) -> Result<Vec<PathBuf>, String> {
     let directory = base_path.parent().unwrap_or_else(|| Path::new("."));
     if !directory.exists() {
@@ -734,7 +743,7 @@ fn log_series_paths(base_path: &Path) -> Result<Vec<PathBuf>, String> {
     let stem = base_path
         .file_stem()
         .and_then(|value| value.to_str())
-        .unwrap_or("vectorxr-layer")
+        .unwrap_or("vectorxr")
         .to_string();
     let extension = base_path
         .extension()
@@ -763,7 +772,11 @@ fn log_series_paths(base_path: &Path) -> Result<Vec<PathBuf>, String> {
             continue;
         }
 
-        if file_stem == stem || file_stem.starts_with(&(stem.clone() + "-")) {
+        let timestamp_suffix = file_stem
+            .strip_prefix(&(stem.clone() + "-"))
+            .is_some_and(is_log_timestamp_suffix);
+
+        if file_stem == stem || timestamp_suffix {
             files.push(path);
         }
     }
@@ -899,6 +912,45 @@ fn load_log_snapshot() -> Result<LogSnapshot, String> {
 }
 
 #[tauri::command]
+fn open_file_directory(path: String) -> Result<(), String> {
+    let path = PathBuf::from(path);
+    let directory = path
+        .parent()
+        .ok_or_else(|| "Unable to determine file directory".to_string())?;
+
+    if !directory.exists() {
+        return Err(format!("Directory does not exist: {}", directory.to_string_lossy()));
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        Command::new("explorer")
+            .arg(directory)
+            .spawn()
+            .map_err(|error| error.to_string())?;
+        return Ok(());
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        Command::new("open")
+            .arg(directory)
+            .spawn()
+            .map_err(|error| error.to_string())?;
+        return Ok(());
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        Command::new("xdg-open")
+            .arg(directory)
+            .spawn()
+            .map_err(|error| error.to_string())?;
+        return Ok(());
+    }
+}
+
+#[tauri::command]
 fn load_seen_apps() -> Result<SeenAppsEnvelope, String> {
     let path = resolve_seen_apps_path();
     if !path.exists() {
@@ -942,6 +994,7 @@ fn main() {
             save_config,
             reset_stored_data,
             load_log_snapshot,
+            open_file_directory,
             load_seen_apps,
             clear_seen_apps,
             list_input_devices,

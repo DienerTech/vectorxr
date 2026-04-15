@@ -193,6 +193,14 @@ export async function loadLogSnapshot(): Promise<LogSnapshot> {
   return invoke<LogSnapshot>('load_log_snapshot')
 }
 
+export async function openFileDirectory(path: string): Promise<void> {
+  if (!tauriAvailable() || !path) {
+    return
+  }
+
+  await invoke('open_file_directory', { path })
+}
+
 export async function loadSeenApps(): Promise<SeenAppsEnvelope> {
   if (!tauriAvailable()) {
     return {

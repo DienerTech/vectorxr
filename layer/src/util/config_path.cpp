@@ -10,7 +10,7 @@ std::filesystem::path FallbackConfigPath() {
 }
 
 std::filesystem::path FallbackLogPath() {
-    return std::filesystem::current_path() / "logs" / "vectorxr-layer.log";
+    return std::filesystem::current_path() / "logs" / "vectorxr.log";
 }
 
 } // namespace
@@ -50,7 +50,7 @@ std::filesystem::path ResolveLogPath() {
 
 #if defined(_WIN32)
     if (const char* local_app_data = std::getenv("LOCALAPPDATA"); local_app_data && *local_app_data != '\0') {
-        return std::filesystem::path(local_app_data) / "VectorXR" / "logs" / "vectorxr-layer.log";
+        return std::filesystem::path(local_app_data) / "VectorXR" / "logs" / "vectorxr.log";
     }
 #endif
 

@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "observations": [
+    {
+      "exe": "DCS.exe",
+      "firstSeenUnixSeconds": 100,
+      "lastSeenUnixSeconds": 140,
+      "launchCount": 2
+    }
+  ]
+}

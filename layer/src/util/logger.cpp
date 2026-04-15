@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cctype>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -58,7 +59,30 @@ bool MatchesLogSeries(const std::filesystem::path& candidate, const std::filesys
 
     const std::string stem = candidate.stem().string();
     const std::string prefix = base_log_path.stem().string();
-    return stem == prefix || stem.starts_with(prefix + "-");
+    if (stem == prefix) {
+        return true;
+    }
+
+    const std::string expected_prefix = prefix + "-";
+    if (!stem.starts_with(expected_prefix)) {
+        return false;
+    }
+
+    const std::string suffix = stem.substr(expected_prefix.size());
+    if (suffix.size() != 15 || suffix[8] != '-') {
+        return false;
+    }
+
+    for (size_t index = 0; index < suffix.size(); ++index) {
+        if (index == 8) {
+            continue;
+        }
+        if (!std::isdigit(static_cast<unsigned char>(suffix[index]))) {
+            return false;
+        }
+    }
+
+    return true;
 }
 
 std::string FormatRepeatedDuration(std::chrono::system_clock::duration duration) {
