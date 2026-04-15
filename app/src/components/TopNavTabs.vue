@@ -35,52 +35,58 @@ function statusChipClass(tab: { id: AppTab; status: string }): string {
 
 <template>
   <nav class="rounded-[1.25rem] border p-3 backdrop-blur tab-shell">
-    <div class="grid gap-2 md:grid-cols-3">
-      <button
-        v-for="tab in primaryTabs"
-        :key="tab.id"
-        class="rounded-[1rem] border px-4 py-3 text-left transition"
-        :class="activeTab === tab.id ? 'tab-button-active' : 'tab-button-idle'"
-        type="button"
-        @click="$emit('select', tab.id)"
-      >
-        <div class="flex flex-wrap items-start justify-between gap-3">
-          <div>
-            <p class="text-sm font-semibold tracking-tight">{{ tab.label }}</p>
-            <p class="mt-1 text-xs" :class="activeTab === tab.id ? 'text-inverse-muted' : 'text-muted'">{{ tab.subtitle }}</p>
+    <div class="tab-group">
+      <p class="tab-group-label">App Settings</p>
+      <div class="grid gap-2 md:grid-cols-3">
+        <button
+          v-for="tab in primaryTabs"
+          :key="tab.id"
+          class="rounded-[1rem] border px-4 py-3 text-left transition"
+          :class="activeTab === tab.id ? 'tab-button-active' : 'tab-button-idle'"
+          type="button"
+          @click="$emit('select', tab.id)"
+        >
+          <div class="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <p class="text-sm font-semibold tracking-tight">{{ tab.label }}</p>
+              <p class="mt-1 text-xs" :class="activeTab === tab.id ? 'text-inverse-muted' : 'text-muted'">{{ tab.subtitle }}</p>
+            </div>
+            <span
+              class="rounded-full px-3 py-1 text-xs font-semibold uppercase tracking-[0.16em]"
+              :class="statusChipClass(tab)"
+            >
+              {{ tab.status }}
+            </span>
           </div>
-          <span
-            class="rounded-full px-3 py-1 text-xs font-semibold uppercase tracking-[0.16em]"
-            :class="statusChipClass(tab)"
-          >
-            {{ tab.status }}
-          </span>
-        </div>
-      </button>
+        </button>
+      </div>
     </div>
 
-    <div class="mt-2 grid gap-2 md:grid-cols-2">
-      <button
-        v-for="tab in moduleTabs"
-        :key="tab.id"
-        class="rounded-[1rem] border px-4 py-3 text-left transition"
-        :class="activeTab === tab.id ? 'tab-button-active' : 'tab-button-idle'"
-        type="button"
-        @click="$emit('select', tab.id)"
-      >
-        <div class="flex flex-wrap items-start justify-between gap-3">
-          <div>
-            <p class="text-sm font-semibold tracking-tight">{{ tab.label }}</p>
-            <p class="mt-1 text-xs" :class="activeTab === tab.id ? 'text-inverse-muted' : 'text-muted'">{{ tab.subtitle }}</p>
+    <div class="tab-group mt-3">
+      <p class="tab-group-label">OpenXR Modifications</p>
+      <div class="grid gap-2 md:grid-cols-2">
+        <button
+          v-for="tab in moduleTabs"
+          :key="tab.id"
+          class="rounded-[1rem] border px-4 py-3 text-left transition"
+          :class="activeTab === tab.id ? 'tab-button-active' : 'tab-button-idle'"
+          type="button"
+          @click="$emit('select', tab.id)"
+        >
+          <div class="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <p class="text-sm font-semibold tracking-tight">{{ tab.label }}</p>
+              <p class="mt-1 text-xs" :class="activeTab === tab.id ? 'text-inverse-muted' : 'text-muted'">{{ tab.subtitle }}</p>
+            </div>
+            <span
+              class="rounded-full px-3 py-1 text-xs font-semibold uppercase tracking-[0.16em]"
+              :class="statusChipClass(tab)"
+            >
+              {{ tab.status }}
+            </span>
           </div>
-          <span
-            class="rounded-full px-3 py-1 text-xs font-semibold uppercase tracking-[0.16em]"
-            :class="statusChipClass(tab)"
-          >
-            {{ tab.status }}
-          </span>
-        </div>
-      </button>
+        </button>
+      </div>
     </div>
   </nav>
 </template>

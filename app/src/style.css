@@ -228,6 +228,27 @@ textarea {
   box-shadow: var(--app-shadow);
 }
 
+.tab-group {
+  position: relative;
+  border: 1px solid var(--app-border);
+  border-radius: 0.75rem;
+  padding: 0.75rem 0.5rem 0.5rem;
+}
+
+.tab-group-label {
+  position: absolute;
+  top: -0.55rem;
+  left: 0.9rem;
+  padding: 0 0.45rem;
+  background: color-mix(in srgb, var(--app-surface) 92%, transparent);
+  color: var(--app-text-soft);
+  font-size: 0.68rem;
+  font-weight: 700;
+  line-height: 1;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
 .tab-button-idle {
   background: var(--app-surface-strong);
   border-color: var(--app-border);
