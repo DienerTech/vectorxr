@@ -176,6 +176,18 @@ function cancelImport() {
   importedConfig.value = null
   importErrors.value = []
 }
+
+async function confirmResetConfig() {
+  const confirmed = window.confirm(
+    'Reset VectorXR to defaults?\n\nThis will erase all saved settings, application registry entries, profiles, and OpenXR application discovery data. This cannot be undone.',
+  )
+
+  if (!confirmed) {
+    return
+  }
+
+  await store.resetToDefaults()
+}
 </script>
 
 <template>
@@ -196,6 +208,7 @@ function cancelImport() {
           @view-logs="openLogs"
           @import-config="triggerImport"
           @export-config="exportConfig"
+          @reset-config="confirmResetConfig"
           @update:theme-preference="themePreference = $event"
         />
         <AppRegistryEditor

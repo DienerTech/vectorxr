@@ -65,29 +65,29 @@ if(WIN32 AND DEPTHXR_BUILD_LAYER)
     endif()
 
     add_library(
-        XR_APILAYER_NOVENDOR_depthxr
+        XR_APILAYER_DIENERTECH_VECTORXR
         SHARED
         src/dll_main.cpp
         src/layer_entry.cpp
         src/openxr_layer.cpp
     )
 
-    target_include_directories(XR_APILAYER_NOVENDOR_depthxr PRIVATE include)
+    target_include_directories(XR_APILAYER_DIENERTECH_VECTORXR PRIVATE include)
     target_link_libraries(
-        XR_APILAYER_NOVENDOR_depthxr
+        XR_APILAYER_DIENERTECH_VECTORXR
         PRIVATE
         depthxr_core
         OpenXR::openxr_loader
         shlwapi
     )
-    target_compile_definitions(XR_APILAYER_NOVENDOR_depthxr PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+    target_compile_definitions(XR_APILAYER_DIENERTECH_VECTORXR PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
 
     add_custom_command(
-        TARGET XR_APILAYER_NOVENDOR_depthxr
+        TARGET XR_APILAYER_DIENERTECH_VECTORXR
         POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                ${CMAKE_CURRENT_SOURCE_DIR}/manifest/XR_APILAYER_NOVENDOR_depthxr.json
-                $<TARGET_FILE_DIR:XR_APILAYER_NOVENDOR_depthxr>/XR_APILAYER_NOVENDOR_depthxr.json
+                ${CMAKE_CURRENT_SOURCE_DIR}/manifest/XR_APILAYER_DIENERTECH_VECTORXR.json
+                $<TARGET_FILE_DIR:XR_APILAYER_DIENERTECH_VECTORXR>/XR_APILAYER_DIENERTECH_VECTORXR.json
     )
 endif()
 

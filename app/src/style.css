@@ -18,16 +18,16 @@
   --app-surface-strong: rgba(255, 255, 255, 0.94);
   --app-surface-muted: #eef4ef;
   --app-surface-subtle: #f6f1e7;
-  --app-surface-inverse: #1b2622;
+  --app-surface-inverse: #385146;
   --app-surface-inverse-soft: rgba(255, 255, 255, 0.06);
   --app-border: rgba(24, 33, 29, 0.12);
   --app-border-strong: rgba(24, 33, 29, 0.2);
-  --app-border-inverse: rgba(255, 255, 255, 0.12);
+  --app-border-inverse: rgba(255, 255, 255, 0.18);
   --app-text: #18211d;
   --app-text-muted: #60716a;
   --app-text-soft: #7b887f;
   --app-text-inverse: rgba(255, 255, 255, 0.94);
-  --app-text-inverse-muted: rgba(255, 255, 255, 0.7);
+  --app-text-inverse-muted: rgba(255, 255, 255, 0.76);
   --app-accent: #d0672a;
   --app-accent-strong: #a74c1a;
   --app-accent-soft: #f7ddc9;
@@ -38,6 +38,10 @@
   --app-idle-text: #5e6d67;
   --app-warning-soft: #f8e7c8;
   --app-warning-text: #946124;
+  --app-danger: #b54a42;
+  --app-danger-strong: #8f302d;
+  --app-danger-soft: #f5d8d5;
+  --app-danger-text: #8b2d2a;
   --app-shadow: 0 22px 70px rgba(24, 33, 29, 0.12);
 }
 
@@ -52,11 +56,11 @@
   --app-surface-strong: rgba(28, 39, 34, 0.96);
   --app-surface-muted: #17231f;
   --app-surface-subtle: #211d16;
-  --app-surface-inverse: #f3f7f4;
+  --app-surface-inverse: #bfd0c7;
   --app-surface-inverse-soft: rgba(0, 0, 0, 0.05);
   --app-border: rgba(220, 234, 226, 0.12);
   --app-border-strong: rgba(220, 234, 226, 0.18);
-  --app-border-inverse: rgba(24, 33, 29, 0.12);
+  --app-border-inverse: rgba(24, 33, 29, 0.18);
   --app-text: #eef6f2;
   --app-text-muted: #aab9b1;
   --app-text-soft: #90a199;
@@ -72,6 +76,10 @@
   --app-idle-text: #b8c4be;
   --app-warning-soft: rgba(196, 143, 58, 0.18);
   --app-warning-text: #f2c679;
+  --app-danger: #d46b64;
+  --app-danger-strong: #ef928b;
+  --app-danger-soft: rgba(212, 107, 100, 0.18);
+  --app-danger-text: #f0a39d;
   --app-shadow: 0 28px 90px rgba(0, 0, 0, 0.28);
 }
 
@@ -151,6 +159,14 @@ textarea {
   color: var(--app-text-soft);
 }
 
+.app-readonly-field {
+  background: var(--app-surface-muted);
+  border: 1px solid var(--app-border);
+  color: var(--app-text-muted);
+  cursor: default;
+  user-select: text;
+}
+
 .eyebrow {
   color: var(--app-accent);
 }
@@ -217,6 +233,18 @@ textarea {
   border-color: rgba(255, 255, 255, 0.32);
 }
 
+.button-danger {
+  background: var(--app-danger);
+  border: 1px solid color-mix(in srgb, var(--app-danger-strong) 70%, transparent);
+  color: #fff;
+}
+
+.button-danger:hover {
+  background: var(--app-danger-strong);
+  border-color: var(--app-danger-strong);
+  filter: brightness(1.02);
+}
+
 .pill-toggle {
   background: var(--app-surface-inverse);
   color: var(--app-text-inverse);
@@ -226,6 +254,27 @@ textarea {
   background: color-mix(in srgb, var(--app-surface) 88%, transparent);
   border-color: var(--app-border);
   box-shadow: var(--app-shadow);
+}
+
+.tab-group {
+  position: relative;
+  border: 1px solid var(--app-border);
+  border-radius: 0.75rem;
+  padding: 0.75rem 0.5rem 0.5rem;
+}
+
+.tab-group-label {
+  position: absolute;
+  top: -0.55rem;
+  left: 0.9rem;
+  padding: 0 0.45rem;
+  background: color-mix(in srgb, var(--app-surface) 92%, transparent);
+  color: var(--app-text-soft);
+  font-size: 0.68rem;
+  font-weight: 700;
+  line-height: 1;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
 }
 
 .tab-button-idle {
@@ -242,6 +291,21 @@ textarea {
   background: var(--app-surface-inverse);
   border-color: var(--app-border-inverse);
   color: var(--app-text-inverse);
+}
+
+:root[data-theme='dark'] .tab-button-active .chip-accent {
+  background: rgba(129, 70, 32, 0.18);
+  color: #51311f;
+}
+
+:root[data-theme='dark'] .tab-button-active .chip-success {
+  background: rgba(37, 102, 72, 0.2);
+  color: #1d3f31;
+}
+
+:root[data-theme='dark'] .tab-button-active .chip-idle {
+  background: rgba(24, 33, 29, 0.14);
+  color: #293832;
 }
 
 .mono-text {

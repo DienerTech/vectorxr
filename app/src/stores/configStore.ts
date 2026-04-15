@@ -1,6 +1,6 @@
 import { computed, reactive } from 'vue'
 
-import { clearSeenApps, loadConfigEnvelope, loadSeenApps, saveConfigEnvelope, type SeenApplication } from '../lib/commands'
+import { clearSeenApps, loadConfigEnvelope, loadSeenApps, resetStoredData, saveConfigEnvelope, type SeenApplication } from '../lib/commands'
 import { cloneConfig, createApplication, createProfile, createPivotProfile, defaultConfig } from '../lib/model'
 import type { AppTab, VectorXRConfig } from '../lib/model'
 
@@ -75,6 +75,25 @@ export function useConfigStore() {
       state.status = 'Config saved'
     } catch (error) {
       state.status = error instanceof Error ? error.message : 'Failed to save config'
+    } finally {
+      state.saving = false
+    }
+  }
+
+  async function resetToDefaults() {
+    state.saving = true
+    state.status = ''
+
+    try {
+      const envelope = await resetStoredData()
+      state.path = envelope.configPath
+      state.seenAppsPath = envelope.seenAppsPath
+      state.config = cloneConfig(envelope.config)
+      state.originalConfig = cloneConfig(envelope.config)
+      state.seenApps = []
+      state.status = 'Config reset to defaults'
+    } catch (error) {
+      state.status = error instanceof Error ? error.message : 'Failed to reset config'
     } finally {
       state.saving = false
     }
@@ -182,6 +201,7 @@ export function useConfigStore() {
     isDirty,
     load,
     save,
+    resetToDefaults,
     discardChanges,
     importConfig,
     refreshSeenApps,

@@ -45,6 +45,12 @@ export interface SeenAppsEnvelope {
   observations: SeenApplication[]
 }
 
+export interface ResetStoredDataEnvelope {
+  configPath: string
+  seenAppsPath: string
+  config: VectorXRConfig
+}
+
 export interface InputDeviceInfo {
   deviceGuid: string
   productGuid: string
@@ -100,6 +106,24 @@ export async function saveConfigEnvelope(config: VectorXRConfig): Promise<string
   }
 
   return invoke<string>('save_config', { config })
+}
+
+export async function resetStoredData(): Promise<ResetStoredDataEnvelope> {
+  if (!tauriAvailable()) {
+    const config = defaultConfig()
+    window.localStorage.setItem(localKey, JSON.stringify(config))
+    return {
+      configPath: './config/vectorxr.settings.json',
+      seenAppsPath: './config/seen-apps.json',
+      config,
+    }
+  }
+
+  const envelope = await invoke<ResetStoredDataEnvelope>('reset_stored_data')
+  return {
+    ...envelope,
+    config: normalizeConfig(envelope.config),
+  }
 }
 
 export async function exportConfigFile(config: VectorXRConfig): Promise<boolean> {
@@ -167,6 +191,14 @@ export async function loadLogSnapshot(): Promise<LogSnapshot> {
   }
 
   return invoke<LogSnapshot>('load_log_snapshot')
+}
+
+export async function openFileDirectory(path: string): Promise<void> {
+  if (!tauriAvailable() || !path) {
+    return
+  }
+
+  await invoke('open_file_directory', { path })
 }
 
 export async function loadSeenApps(): Promise<SeenAppsEnvelope> {

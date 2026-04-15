@@ -92,7 +92,7 @@ function selectDevice(deviceGuid: string) {
       <label class="block min-w-0">
         <span class="mb-1.5 block text-sm font-medium">Joystick Device</span>
         <select
-          class="app-input w-full rounded-[0.75rem] px-4 py-2.5"
+          class="app-input h-11 w-full rounded-[0.75rem] px-4 py-2.5 text-sm"
           :disabled="loading || capturing"
           :value="modelValue.deviceGuid"
           @change="selectDevice(($event.target as HTMLSelectElement).value)"
@@ -106,7 +106,7 @@ function selectDevice(deviceGuid: string) {
 
       <div>
         <span class="mb-1.5 block text-sm font-medium">Assigned Button</span>
-        <div class="app-input flex min-h-11 items-center rounded-[0.75rem] px-4 py-2.5 text-sm">
+        <div class="app-readonly-field flex h-11 items-center rounded-[0.75rem] px-4 py-2.5 text-sm" aria-readonly="true">
           {{ inputLabel }}
         </div>
       </div>
