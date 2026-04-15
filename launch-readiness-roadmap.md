@@ -69,20 +69,7 @@ OUT OF SCOPE
 
 6. **Recovery And Safety**
 
-   This is big for public release. Users should never feel trapped.
-
-   Add or polish:
-
-   - “Disable suite” toggle that the layer reliably honors.
-   - “Unregister OpenXR layer” action in the app.
-   - “Open logs folder” action.
-   - “Open config folder” action.
-   - “Reset config to defaults.”
-   - Clear error states when config is malformed.
-   - Safe fallback if config cannot be parsed.
-   - Startup self-check: config path, layer registration, manifest validity, DLL path, version mismatch.
-
-   The app should be able to answer: “Is VectorXR actually installed and active?” That will save you a mountain of support pain.
+COMPLETED
 
 7. **Packaging Pipeline**
 
@@ -111,25 +98,7 @@ OUT OF SCOPE
 
 8. **UI Changes Worth Prioritizing**
 
-   I’d make UI polish serve 1.0 readiness, not just aesthetics.
-
-   Highest-value UI work:
-
-   - Home page becomes a status dashboard.
-   - App registry editor lands.
-   - “Seen apps” list lands.
-   - OpenXR layer status lands.
-   - Save/reload/import flows become hard to misuse.
-   - Logs/config buttons are easy to find.
-   - Module names become product-facing: `Depth`, `Pivot`.
-   - Warnings become plain-language and actionable.
-
-   The UI should answer four questions fast:
-
-   - Is VectorXR enabled?
-   - Is the OpenXR layer installed?
-   - Which apps will it affect?
-   - What do I do if something breaks?
+COMPLETED
 
 **My Suggested Sprint Order**
 
