@@ -17,6 +17,7 @@ defineEmits<{
   viewLogs: [];
   importConfig: [];
   exportConfig: [];
+  resetConfig: [];
   "update:themePreference": [value: ThemePreference];
 }>();
 
@@ -179,6 +180,27 @@ const configDirectory = computed(() => {
             type="text"
           />
         </label>
+
+        <div class="mt-5 border-t pt-5">
+          <div class="flex flex-wrap items-center justify-between gap-4">
+            <div>
+              <h4 class="text-sm font-semibold tracking-tight">
+                Reset to defaults
+              </h4>
+              <p class="mt-1 max-w-2xl text-sm leading-6 text-muted">
+                Rebuild settings.json with default values and clear local OpenXR application discovery data.
+              </p>
+            </div>
+            <button
+              class="button-danger rounded-[0.75rem] px-5 py-2.5 text-sm font-medium transition disabled:cursor-not-allowed disabled:opacity-50"
+              :disabled="settingsActionsDisabled"
+              type="button"
+              @click="$emit('resetConfig')"
+            >
+              Reset to Default
+            </button>
+          </div>
+        </div>
       </section>
     </article>
   </div>

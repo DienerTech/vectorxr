@@ -345,6 +345,14 @@ struct ConfigEnvelope {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+struct ResetStoredDataEnvelope {
+    config_path: String,
+    seen_apps_path: String,
+    config: VectorXRConfig,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct LogFileEntry {
     name: String,
     path: String,
@@ -813,6 +821,32 @@ fn save_config(config: VectorXRConfig) -> Result<String, String> {
 }
 
 #[tauri::command]
+fn reset_stored_data() -> Result<ResetStoredDataEnvelope, String> {
+    let config_path = resolve_config_path();
+    let seen_apps_path = resolve_seen_apps_path();
+    let config = default_config();
+
+    ensure_parent(&config_path)?;
+    ensure_parent(&seen_apps_path)?;
+
+    let config_content = serde_json::to_string_pretty(&config).map_err(|error| error.to_string())?;
+    fs::write(&config_path, config_content).map_err(|error| error.to_string())?;
+
+    let seen_apps_content = serde_json::to_string_pretty(&SeenAppsDocument {
+        version: 1,
+        observations: Vec::new(),
+    })
+    .map_err(|error| error.to_string())?;
+    fs::write(&seen_apps_path, seen_apps_content).map_err(|error| error.to_string())?;
+
+    Ok(ResetStoredDataEnvelope {
+        config_path: config_path.to_string_lossy().into_owned(),
+        seen_apps_path: seen_apps_path.to_string_lossy().into_owned(),
+        config,
+    })
+}
+
+#[tauri::command]
 fn list_input_devices() -> Result<Vec<input_devices::InputDeviceInfo>, String> {
     input_devices::list_input_devices()
 }
@@ -906,6 +940,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             load_config,
             save_config,
+            reset_stored_data,
             load_log_snapshot,
             load_seen_apps,
             clear_seen_apps,

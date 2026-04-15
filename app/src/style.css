@@ -38,6 +38,10 @@
   --app-idle-text: #5e6d67;
   --app-warning-soft: #f8e7c8;
   --app-warning-text: #946124;
+  --app-danger: #b54a42;
+  --app-danger-strong: #8f302d;
+  --app-danger-soft: #f5d8d5;
+  --app-danger-text: #8b2d2a;
   --app-shadow: 0 22px 70px rgba(24, 33, 29, 0.12);
 }
 
@@ -72,6 +76,10 @@
   --app-idle-text: #b8c4be;
   --app-warning-soft: rgba(196, 143, 58, 0.18);
   --app-warning-text: #f2c679;
+  --app-danger: #d46b64;
+  --app-danger-strong: #ef928b;
+  --app-danger-soft: rgba(212, 107, 100, 0.18);
+  --app-danger-text: #f0a39d;
   --app-shadow: 0 28px 90px rgba(0, 0, 0, 0.28);
 }
 
@@ -223,6 +231,18 @@ textarea {
 
 .button-inverse:hover {
   border-color: rgba(255, 255, 255, 0.32);
+}
+
+.button-danger {
+  background: var(--app-danger);
+  border: 1px solid color-mix(in srgb, var(--app-danger-strong) 70%, transparent);
+  color: #fff;
+}
+
+.button-danger:hover {
+  background: var(--app-danger-strong);
+  border-color: var(--app-danger-strong);
+  filter: brightness(1.02);
 }
 
 .pill-toggle {
