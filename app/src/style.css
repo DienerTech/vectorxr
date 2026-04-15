@@ -18,16 +18,16 @@
   --app-surface-strong: rgba(255, 255, 255, 0.94);
   --app-surface-muted: #eef4ef;
   --app-surface-subtle: #f6f1e7;
-  --app-surface-inverse: #1b2622;
+  --app-surface-inverse: #385146;
   --app-surface-inverse-soft: rgba(255, 255, 255, 0.06);
   --app-border: rgba(24, 33, 29, 0.12);
   --app-border-strong: rgba(24, 33, 29, 0.2);
-  --app-border-inverse: rgba(255, 255, 255, 0.12);
+  --app-border-inverse: rgba(255, 255, 255, 0.18);
   --app-text: #18211d;
   --app-text-muted: #60716a;
   --app-text-soft: #7b887f;
   --app-text-inverse: rgba(255, 255, 255, 0.94);
-  --app-text-inverse-muted: rgba(255, 255, 255, 0.7);
+  --app-text-inverse-muted: rgba(255, 255, 255, 0.76);
   --app-accent: #d0672a;
   --app-accent-strong: #a74c1a;
   --app-accent-soft: #f7ddc9;
@@ -52,11 +52,11 @@
   --app-surface-strong: rgba(28, 39, 34, 0.96);
   --app-surface-muted: #17231f;
   --app-surface-subtle: #211d16;
-  --app-surface-inverse: #f3f7f4;
+  --app-surface-inverse: #bfd0c7;
   --app-surface-inverse-soft: rgba(0, 0, 0, 0.05);
   --app-border: rgba(220, 234, 226, 0.12);
   --app-border-strong: rgba(220, 234, 226, 0.18);
-  --app-border-inverse: rgba(24, 33, 29, 0.12);
+  --app-border-inverse: rgba(24, 33, 29, 0.18);
   --app-text: #eef6f2;
   --app-text-muted: #aab9b1;
   --app-text-soft: #90a199;
@@ -263,6 +263,21 @@ textarea {
   background: var(--app-surface-inverse);
   border-color: var(--app-border-inverse);
   color: var(--app-text-inverse);
+}
+
+:root[data-theme='dark'] .tab-button-active .chip-accent {
+  background: rgba(129, 70, 32, 0.18);
+  color: #51311f;
+}
+
+:root[data-theme='dark'] .tab-button-active .chip-success {
+  background: rgba(37, 102, 72, 0.2);
+  color: #1d3f31;
+}
+
+:root[data-theme='dark'] .tab-button-active .chip-idle {
+  background: rgba(24, 33, 29, 0.14);
+  color: #293832;
 }
 
 .mono-text {
