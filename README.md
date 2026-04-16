@@ -153,6 +153,15 @@ npm ci
 npm run build
 ```
 
+Production Windows installer:
+
+```powershell
+cd app
+npm run installer:build
+```
+
+This builds the OpenXR layer, stages the layer DLL and manifest for Tauri, and produces an elevated per-machine NSIS installer under `app\src-tauri\target\release\bundle\nsis`.
+
 Tauri backend:
 
 ```powershell

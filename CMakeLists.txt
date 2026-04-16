@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.28)
 
-project(VectorXR VERSION 0.4.0 LANGUAGES CXX)
+project(VectorXR VERSION 0.5.0 LANGUAGES CXX)
 
 option(DEPTHXR_BUILD_LAYER "Build the Windows OpenXR API layer" ON)
 option(DEPTHXR_BUILD_TESTS "Build VectorXR layer tests" ON)
