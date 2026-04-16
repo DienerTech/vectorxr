@@ -8,7 +8,8 @@
     "build": "vue-tsc --noEmit && vite build",
     "preview": "vite preview",
     "tauri:dev": "tauri dev",
-    "tauri:build": "tauri build"
+    "tauri:build": "tauri build",
+    "installer:build": "powershell -ExecutionPolicy Bypass -File ../scripts/Build-Installer.ps1"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.0.0",

@@ -4,6 +4,7 @@ build-*/
 node_modules/
 dist/
 app/src-tauri/target/
+app/src-tauri/resources/vectorxr-layer/
 *.user
 *.suo
 *.VC.db
