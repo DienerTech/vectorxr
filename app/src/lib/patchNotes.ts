@@ -8,6 +8,19 @@ export interface PatchNoteEntry {
 
 export const patchNotes: PatchNoteEntry[] = [
   {
+    version: '0.5.0',
+    date: '2026-04-15',
+    title: 'Windows installer milestone',
+    summary: 'VectorXR now has a local production build that creates a Windows installer with OpenXR layer registration and cleanup.',
+    items: [
+      'Added a local installer build command that builds the OpenXR layer, stages the payload, and runs the Tauri NSIS bundle.',
+      'Packaged the VectorXR OpenXR layer DLL and manifest with the desktop app installer.',
+      'Added elevated per-machine installer hooks that register the layer under the HKLM OpenXR implicit API layer registry location.',
+      'Added uninstall hooks that remove the installed VectorXR OpenXR layer registry entry.',
+      'Validated install, launch, desktop icon, registry registration, and uninstall cleanup locally.',
+    ],
+  },
+  {
     version: '0.4.0',
     date: '2026-04-14',
     title: 'Application discovery and portable profiles',
