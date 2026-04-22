@@ -14,8 +14,6 @@ namespace {
 
 int Severity(LogLevel level) {
     switch (level) {
-    case LogLevel::Off:
-        return 0;
     case LogLevel::Error:
         return 1;
     case LogLevel::Info:
@@ -217,7 +215,7 @@ void Logger::WriteLineLocked(LogLevel level,
 void Logger::Write(LogLevel level, const std::string& message) {
     std::scoped_lock lock(mutex_);
 
-    if (Severity(level) > Severity(level_) || level_ == LogLevel::Off) {
+    if (Severity(level) > Severity(level_)) {
         return;
     }
 

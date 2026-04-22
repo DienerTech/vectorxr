@@ -83,7 +83,7 @@ const configDirectory = computed(() => {
           <span class="mb-1.5 flex items-center gap-1.5 text-sm font-medium">
             Log Level
             <span
-              title="None disables general runtime logging. Info writes normal operational messages and errors. Debug adds verbose diagnostics."
+              title="Info writes normal operational messages and errors. Debug adds verbose diagnostics."
               class="cursor-help select-none text-xs text-muted"
               >ⓘ</span
             >
@@ -92,7 +92,6 @@ const configDirectory = computed(() => {
             v-model="config.core.logLevel"
             class="app-input h-11 w-full rounded-[0.75rem] px-4 py-2.5"
           >
-            <option value="none">none</option>
             <option value="info">info</option>
             <option value="debug">debug</option>
           </select>
