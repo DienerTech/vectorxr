@@ -17,7 +17,7 @@ defineEmits<{
   select: [tab: AppTab]
 }>()
 
-const primaryTabs = computed(() => props.tabs.filter((tab) => tab.id === 'core' || tab.id === 'registry' || tab.id === 'about'))
+const primaryTabs = computed(() => props.tabs.filter((tab) => tab.id === 'core' || tab.id === 'registry' || tab.id === 'layers' || tab.id === 'about'))
 const moduleTabs = computed(() => props.tabs.filter((tab) => tab.id === 'depthxr' || tab.id === 'pivotxr'))
 
 function statusChipClass(tab: { id: AppTab; status: string }): string {
@@ -37,7 +37,7 @@ function statusChipClass(tab: { id: AppTab; status: string }): string {
   <nav class="rounded-[1.25rem] border p-3 backdrop-blur tab-shell">
     <div class="tab-group">
       <p class="tab-group-label">App Settings</p>
-      <div class="grid gap-2 md:grid-cols-3">
+      <div class="grid gap-2 md:grid-cols-4">
         <button
           v-for="tab in primaryTabs"
           :key="tab.id"

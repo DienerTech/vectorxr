@@ -10,6 +10,7 @@ import TopNavTabs from './components/TopNavTabs.vue'
 import AboutTab from './components/tabs/AboutTab.vue'
 import CoreTab from './components/tabs/CoreTab.vue'
 import DepthXrTab from './components/tabs/DepthXrTab.vue'
+import OpenXrLayersTab from './components/tabs/OpenXrLayersTab.vue'
 import PivotXrTab from './components/tabs/PivotXrTab.vue'
 import { exportConfigFile, loadLogSnapshot, type LogSnapshot } from './lib/commands'
 import { normalizeConfig, type VectorXRConfig } from './lib/model'
@@ -45,6 +46,12 @@ const tabs = computed(() => [
     label: 'Application Registry',
     subtitle: 'Register applications for profile assignment',
     status: `${store.state.config.applications.length} app${store.state.config.applications.length === 1 ? '' : 's'}`,
+  },
+  {
+    id: 'layers' as const,
+    label: 'OpenXR Layers',
+    subtitle: 'Inspect and manage implicit layer order',
+    status: 'System',
   },
   {
     id: 'about' as const,
@@ -225,6 +232,7 @@ async function confirmResetConfig() {
           @remove="store.removeApplication"
         />
         <AboutTab v-else-if="store.state.activeTab === 'about'" :latest-patch="latestPatch" @open-patch-notes="patchNotesOpen = true" />
+        <OpenXrLayersTab v-else-if="store.state.activeTab === 'layers'" />
         <DepthXrTab
           v-else-if="store.state.activeTab === 'depthxr'"
           :config="store.state.config"

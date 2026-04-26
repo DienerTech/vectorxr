@@ -8,6 +8,7 @@ use std::process::Command;
 use std::time::UNIX_EPOCH;
 
 mod input_devices;
+mod openxr_layers;
 
 fn default_true() -> bool {
     true
@@ -412,11 +413,7 @@ fn default_config() -> VectorXRConfig {
 }
 
 fn sanitize_profile_name(exe: &str) -> String {
-    let basename = exe
-        .rsplit(['/', '\\'])
-        .next()
-        .unwrap_or(exe)
-        .trim();
+    let basename = exe.rsplit(['/', '\\']).next().unwrap_or(exe).trim();
 
     let without_extension = basename
         .rsplit_once('.')
@@ -467,7 +464,10 @@ fn normalize_exe_name(value: &str) -> String {
 
 fn unique_application_id(base: &str, applications: &[RegisteredApplication]) -> String {
     let stem = sanitize_application_id(base);
-    if !applications.iter().any(|application| application.id.eq_ignore_ascii_case(&stem)) {
+    if !applications
+        .iter()
+        .any(|application| application.id.eq_ignore_ascii_case(&stem))
+    {
         return stem;
     }
 
@@ -541,18 +541,22 @@ fn normalize_config(mut config: VectorXRConfig) -> VectorXRConfig {
 
     for profile in &mut config.modules.depthxr.profiles {
         if profile.application_ids.is_empty() {
-            if let Some(application_id) =
-                application_id_for_profile_match(&mut config.applications, &profile.name, &profile.r#match)
-            {
+            if let Some(application_id) = application_id_for_profile_match(
+                &mut config.applications,
+                &profile.name,
+                &profile.r#match,
+            ) {
                 profile.application_ids.push(application_id);
             }
         }
 
         if profile.name.trim().is_empty() {
-            let first_application = profile
-                .application_ids
-                .first()
-                .and_then(|application_id| config.applications.iter().find(|application| &application.id == application_id));
+            let first_application = profile.application_ids.first().and_then(|application_id| {
+                config
+                    .applications
+                    .iter()
+                    .find(|application| &application.id == application_id)
+            });
 
             profile.name = first_application
                 .map(|application| application.name.clone())
@@ -564,18 +568,22 @@ fn normalize_config(mut config: VectorXRConfig) -> VectorXRConfig {
 
     for profile in &mut config.modules.pivotxr.profiles {
         if profile.application_ids.is_empty() {
-            if let Some(application_id) =
-                application_id_for_profile_match(&mut config.applications, &profile.name, &profile.r#match)
-            {
+            if let Some(application_id) = application_id_for_profile_match(
+                &mut config.applications,
+                &profile.name,
+                &profile.r#match,
+            ) {
                 profile.application_ids.push(application_id);
             }
         }
 
         if profile.name.trim().is_empty() {
-            let first_application = profile
-                .application_ids
-                .first()
-                .and_then(|application_id| config.applications.iter().find(|application| &application.id == application_id));
+            let first_application = profile.application_ids.first().and_then(|application_id| {
+                config
+                    .applications
+                    .iter()
+                    .find(|application| &application.id == application_id)
+            });
 
             profile.name = first_application
                 .map(|application| application.name.clone())
@@ -722,16 +730,20 @@ fn ensure_default_file(path: &Path) -> Result<(), String> {
     }
 
     ensure_parent(path)?;
-    let json = serde_json::to_string_pretty(&default_config()).map_err(|error| error.to_string())?;
+    let json =
+        serde_json::to_string_pretty(&default_config()).map_err(|error| error.to_string())?;
     fs::write(path, json).map_err(|error| error.to_string())
 }
 
 fn is_log_timestamp_suffix(value: &str) -> bool {
     value.len() == 15
-        && value
-            .chars()
-            .enumerate()
-            .all(|(index, character)| if index == 8 { character == '-' } else { character.is_ascii_digit() })
+        && value.chars().enumerate().all(|(index, character)| {
+            if index == 8 {
+                character == '-'
+            } else {
+                character.is_ascii_digit()
+            }
+        })
 }
 
 fn log_series_paths(base_path: &Path) -> Result<Vec<PathBuf>, String> {
@@ -806,7 +818,10 @@ fn read_log_preview(path: &Path) -> String {
     }
 
     let start = content.len().saturating_sub(MAX_BYTES);
-    format!("... truncated to the most recent log output ...\n{}", &content[start..])
+    format!(
+        "... truncated to the most recent log output ...\n{}",
+        &content[start..]
+    )
 }
 
 #[tauri::command]
@@ -815,7 +830,9 @@ fn load_config() -> Result<ConfigEnvelope, String> {
     ensure_default_file(&path)?;
 
     let content = fs::read_to_string(&path).map_err(|error| error.to_string())?;
-    let config = normalize_config(serde_json::from_str::<VectorXRConfig>(&content).map_err(|error| error.to_string())?);
+    let config = normalize_config(
+        serde_json::from_str::<VectorXRConfig>(&content).map_err(|error| error.to_string())?,
+    );
 
     Ok(ConfigEnvelope {
         path: path.to_string_lossy().into_owned(),
@@ -828,7 +845,8 @@ fn save_config(config: VectorXRConfig) -> Result<String, String> {
     let path = resolve_config_path();
     ensure_parent(&path)?;
 
-    let content = serde_json::to_string_pretty(&normalize_config(config)).map_err(|error| error.to_string())?;
+    let content = serde_json::to_string_pretty(&normalize_config(config))
+        .map_err(|error| error.to_string())?;
     fs::write(&path, content).map_err(|error| error.to_string())?;
     Ok(path.to_string_lossy().into_owned())
 }
@@ -842,7 +860,8 @@ fn reset_stored_data() -> Result<ResetStoredDataEnvelope, String> {
     ensure_parent(&config_path)?;
     ensure_parent(&seen_apps_path)?;
 
-    let config_content = serde_json::to_string_pretty(&config).map_err(|error| error.to_string())?;
+    let config_content =
+        serde_json::to_string_pretty(&config).map_err(|error| error.to_string())?;
     fs::write(&config_path, config_content).map_err(|error| error.to_string())?;
 
     let seen_apps_content = serde_json::to_string_pretty(&SeenAppsDocument {
@@ -865,14 +884,19 @@ fn list_input_devices() -> Result<Vec<input_devices::InputDeviceInfo>, String> {
 }
 
 #[tauri::command]
-fn capture_device_binding(timeout_ms: Option<u64>) -> Result<Option<input_devices::CapturedDeviceBinding>, String> {
+fn capture_device_binding(
+    timeout_ms: Option<u64>,
+) -> Result<Option<input_devices::CapturedDeviceBinding>, String> {
     input_devices::capture_device_binding(timeout_ms)
 }
 
 #[tauri::command]
 fn load_log_snapshot() -> Result<LogSnapshot, String> {
     let base_path = resolve_log_path();
-    let directory = base_path.parent().unwrap_or_else(|| Path::new(".")).to_path_buf();
+    let directory = base_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .to_path_buf();
     let files = log_series_paths(&base_path)?
         .into_iter()
         .take(10)
@@ -919,7 +943,10 @@ fn open_file_directory(path: String) -> Result<(), String> {
         .ok_or_else(|| "Unable to determine file directory".to_string())?;
 
     if !directory.exists() {
-        return Err(format!("Directory does not exist: {}", directory.to_string_lossy()));
+        return Err(format!(
+            "Directory does not exist: {}",
+            directory.to_string_lossy()
+        ));
     }
 
     #[cfg(target_os = "windows")]
@@ -1027,6 +1054,29 @@ fn clear_seen_apps() -> Result<String, String> {
     Ok(path.to_string_lossy().into_owned())
 }
 
+#[tauri::command]
+fn load_openxr_layers() -> Result<openxr_layers::OpenXrLayerSnapshot, String> {
+    openxr_layers::load_openxr_layers()
+}
+
+#[tauri::command]
+fn set_openxr_layer_enabled(
+    slice: String,
+    manifest_path: String,
+    enabled: bool,
+) -> Result<openxr_layers::OpenXrLayerSnapshot, String> {
+    openxr_layers::set_openxr_layer_enabled(slice, manifest_path, enabled)
+}
+
+#[tauri::command]
+fn move_openxr_layer(
+    slice: String,
+    manifest_path: String,
+    direction: openxr_layers::MoveDirection,
+) -> Result<openxr_layers::OpenXrLayerSnapshot, String> {
+    openxr_layers::move_openxr_layer(slice, manifest_path, direction)
+}
+
 fn main() {
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
@@ -1039,7 +1089,10 @@ fn main() {
             load_seen_apps,
             clear_seen_apps,
             list_input_devices,
-            capture_device_binding
+            capture_device_binding,
+            load_openxr_layers,
+            set_openxr_layer_enabled,
+            move_openxr_layer
         ])
         .run(tauri::generate_context!())
         .expect("failed to run VectorXR Tauri app");

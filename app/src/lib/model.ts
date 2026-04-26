@@ -1,6 +1,6 @@
 export type LogLevel = 'info' | 'debug'
 export type ActivationMode = 'toggle' | 'hold'
-export type AppTab = 'core' | 'registry' | 'about' | 'depthxr' | 'pivotxr'
+export type AppTab = 'core' | 'registry' | 'layers' | 'about' | 'depthxr' | 'pivotxr'
 export const keyboardBindingKeyGroups = [
   {
     label: 'Function Keys',
