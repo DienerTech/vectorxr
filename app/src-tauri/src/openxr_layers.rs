@@ -43,6 +43,10 @@ pub struct OpenXrLayerEntry {
     enabled: bool,
     order: usize,
     signature_status: String,
+    signature_status_description: String,
+    signature_signer_subject: Option<String>,
+    signature_signer_issuer: Option<String>,
+    signature_signer_thumbprint: Option<String>,
     is_vector_xr: bool,
     manifest_exists: bool,
     library_exists: bool,
@@ -216,11 +220,11 @@ fn layer_entry_from_registry_value(
     let library_exists = library_path
         .as_ref()
         .is_some_and(|path| Path::new(path).exists());
-    let signature_status = library_path
+    let signature_info = library_path
         .as_ref()
         .filter(|_| library_exists)
-        .map(|path| signature_status(path))
-        .unwrap_or_else(|| "unknown".into());
+        .map(|path| signature_info(path))
+        .unwrap_or_else(SignatureInfo::unknown);
     let is_vector_xr = layer_name.to_ascii_lowercase().contains("vectorxr")
         || manifest_path.to_ascii_lowercase().contains("vectorxr");
     let error = manifest.err();
@@ -233,7 +237,11 @@ fn layer_entry_from_registry_value(
         library_path,
         enabled,
         order,
-        signature_status,
+        signature_status: signature_info.status,
+        signature_status_description: signature_info.status_description,
+        signature_signer_subject: signature_info.signer_subject,
+        signature_signer_issuer: signature_info.signer_issuer,
+        signature_signer_thumbprint: signature_info.signer_thumbprint,
         is_vector_xr,
         manifest_exists: Path::new(&value.name).exists(),
         library_exists,
@@ -529,22 +537,83 @@ foreach ($item in $values) {{ $key.SetValue($item.Name, [int]$item.Value, [Micro
     }
 }
 
-fn signature_status(path: &str) -> String {
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct RawSignatureInfo {
+    status: String,
+    status_message: Option<String>,
+    signer_subject: Option<String>,
+    signer_issuer: Option<String>,
+    signer_thumbprint: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct SignatureInfo {
+    status: String,
+    status_description: String,
+    signer_subject: Option<String>,
+    signer_issuer: Option<String>,
+    signer_thumbprint: Option<String>,
+}
+
+impl SignatureInfo {
+    fn unknown() -> Self {
+        Self {
+            status: "unknown".into(),
+            status_description: "Windows signature information is unavailable for this binary.".into(),
+            signer_subject: None,
+            signer_issuer: None,
+            signer_thumbprint: None,
+        }
+    }
+}
+
+fn signature_info(path: &str) -> SignatureInfo {
     let script = format!(
         r#"
 $signature = Get-AuthenticodeSignature -LiteralPath '{path}'
-$signature.Status.ToString()
+[pscustomobject]@{{
+  Status = $signature.Status.ToString()
+  StatusMessage = $signature.StatusMessage
+  SignerSubject = if ($null -ne $signature.SignerCertificate) {{ $signature.SignerCertificate.Subject }} else {{ $null }}
+  SignerIssuer = if ($null -ne $signature.SignerCertificate) {{ $signature.SignerCertificate.Issuer }} else {{ $null }}
+  SignerThumbprint = if ($null -ne $signature.SignerCertificate) {{ $signature.SignerCertificate.Thumbprint }} else {{ $null }}
+}} | ConvertTo-Json -Compress
 "#,
         path = escape_powershell_single_quoted(path),
     );
 
-    match run_powershell(&script).unwrap_or_default().as_str() {
-        "Valid" => "signed".into(),
-        "NotSigned" => "unsigned".into(),
-        "HashMismatch" | "NotTrusted" | "NotSupportedFileFormat" | "UnknownError" => {
-            "invalid".into()
-        }
-        _ => "unknown".into(),
+    let Ok(output) = run_powershell(&script) else {
+        return SignatureInfo::unknown();
+    };
+    let Ok(raw) = serde_json::from_str::<RawSignatureInfo>(&output) else {
+        return SignatureInfo::unknown();
+    };
+
+    let status = match raw.status.as_str() {
+        "Valid" => "signed",
+        "NotSigned" => "unsigned",
+        "HashMismatch" | "NotTrusted" | "NotSupportedFileFormat" | "UnknownError" => "invalid",
+        _ => "unknown",
+    }
+    .to_string();
+
+    let status_description = raw
+        .status_message
+        .filter(|message| !message.trim().is_empty())
+        .unwrap_or_else(|| match status.as_str() {
+            "signed" => "Windows reports a valid Authenticode signature.".into(),
+            "unsigned" => "Windows reports that this binary is not Authenticode signed.".into(),
+            "invalid" => "Windows reports that this binary's Authenticode signature is invalid.".into(),
+            _ => "Windows could not determine this binary's signature status.".into(),
+        });
+
+    SignatureInfo {
+        status,
+        status_description,
+        signer_subject: raw.signer_subject,
+        signer_issuer: raw.signer_issuer,
+        signer_thumbprint: raw.signer_thumbprint,
     }
 }
 

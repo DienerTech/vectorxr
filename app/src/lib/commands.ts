@@ -81,6 +81,10 @@ export interface OpenXrLayerEntry {
   enabled: boolean
   order: number
   signatureStatus: OpenXrLayerSignatureStatus
+  signatureStatusDescription: string
+  signatureSignerSubject?: string
+  signatureSignerIssuer?: string
+  signatureSignerThumbprint?: string
   isVectorXr: boolean
   manifestExists: boolean
   libraryExists: boolean

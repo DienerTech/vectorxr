@@ -157,6 +157,38 @@ function signatureChipClass(status: OpenXrLayerSignatureStatus): string {
       return 'chip-idle'
   }
 }
+
+function signatureTooltip(layer: OpenXrLayerEntry): string {
+  const lines = [`Signature: ${signatureLabel(layer.signatureStatus)}`, layer.signatureStatusDescription]
+  if (layer.signatureSignerSubject) {
+    lines.push(`Signer: ${layer.signatureSignerSubject}`)
+  }
+  return lines.filter(Boolean).join('\n')
+}
+
+function vectorXrTooltip(): string {
+  return 'VectorXR API layer. Pivot compatibility can depend on this layer being below Quad-Views-Foveated when both are present.'
+}
+
+function quadViewsTooltip(): string {
+  return 'Quad-Views-Foveated layer. For Pivot compatibility, this should usually appear above VectorXR in the same registry slice.'
+}
+
+function attentionTooltip(layer: OpenXrLayerEntry): string {
+  if (layer.error) {
+    return layer.error
+  }
+
+  if (!layer.manifestExists) {
+    return 'The registered manifest path does not exist.'
+  }
+
+  if (!layer.libraryExists) {
+    return 'The layer DLL could not be resolved or does not exist.'
+  }
+
+  return 'This layer has a condition that may need review.'
+}
 </script>
 
 <template>
@@ -296,12 +328,32 @@ function signatureChipClass(status: OpenXrLayerSignatureStatus): string {
                   <div class="min-w-0">
                     <div class="flex min-w-0 flex-wrap items-center gap-2">
                       <h4 class="truncate text-base font-semibold leading-5 tracking-tight">{{ layer.layerName }}</h4>
-                      <span class="mr-2 rounded-full px-2.5 py-1 text-xs font-semibold uppercase tracking-[0.14em]" :class="signatureChipClass(layer.signatureStatus)">
+                      <span
+                        class="mr-2 cursor-default rounded-full px-2.5 py-1 text-xs font-semibold uppercase tracking-[0.14em]"
+                        :class="signatureChipClass(layer.signatureStatus)"
+                        :title="signatureTooltip(layer)"
+                      >
                         {{ signatureLabel(layer.signatureStatus) }}
                       </span>
-                      <span v-if="layer.isVectorXr" class="mr-2 rounded-full px-2.5 py-1 text-xs font-semibold uppercase tracking-[0.14em] chip-success">VectorXR</span>
-                      <span v-if="isQuadViewsLayer(layer)" class="mr-2 rounded-full px-2.5 py-1 text-xs font-semibold uppercase tracking-[0.14em] chip-warning">Quadviews</span>
-                      <span v-if="!layer.manifestExists || !layer.libraryExists || layer.error" class="mr-2 rounded-full px-2.5 py-1 text-xs font-semibold uppercase tracking-[0.14em] chip-warning">
+                      <span
+                        v-if="layer.isVectorXr"
+                        class="mr-2 cursor-default rounded-full px-2.5 py-1 text-xs font-semibold uppercase tracking-[0.14em] chip-success"
+                        :title="vectorXrTooltip()"
+                      >
+                        VectorXR
+                      </span>
+                      <span
+                        v-if="isQuadViewsLayer(layer)"
+                        class="mr-2 cursor-default rounded-full px-2.5 py-1 text-xs font-semibold uppercase tracking-[0.14em] chip-warning"
+                        :title="quadViewsTooltip()"
+                      >
+                        Quadviews
+                      </span>
+                      <span
+                        v-if="!layer.manifestExists || !layer.libraryExists || layer.error"
+                        class="mr-2 cursor-default rounded-full px-2.5 py-1 text-xs font-semibold uppercase tracking-[0.14em] chip-warning"
+                        :title="attentionTooltip(layer)"
+                      >
                         Needs attention
                       </span>
                     </div>
@@ -360,7 +412,11 @@ function signatureChipClass(status: OpenXrLayerSignatureStatus): string {
               <span class="rounded-full px-3 py-1 text-xs font-semibold uppercase tracking-[0.16em]" :class="selectedLayer.libraryExists ? 'chip-success' : 'chip-warning'">
                 {{ selectedLayer.libraryExists ? 'Found' : 'Missing or Unknown' }}
               </span>
-              <span class="rounded-full px-3 py-1 text-xs font-semibold uppercase tracking-[0.16em]" :class="signatureChipClass(selectedLayer.signatureStatus)">
+              <span
+                class="cursor-default rounded-full px-3 py-1 text-xs font-semibold uppercase tracking-[0.16em]"
+                :class="signatureChipClass(selectedLayer.signatureStatus)"
+                :title="signatureTooltip(selectedLayer)"
+              >
                 {{ signatureLabel(selectedLayer.signatureStatus) }}
               </span>
               <button
@@ -373,6 +429,30 @@ function signatureChipClass(status: OpenXrLayerSignatureStatus): string {
               </button>
             </div>
           </div>
+        </div>
+
+        <div class="mt-3 rounded-[0.9rem] border p-3 surface-panel-soft">
+          <p class="text-xs font-semibold uppercase tracking-[0.16em] text-soft">Binary Signature</p>
+          <div class="mt-2 flex flex-wrap items-center gap-2">
+            <span class="rounded-full px-3 py-1 text-xs font-semibold uppercase tracking-[0.16em]" :class="signatureChipClass(selectedLayer.signatureStatus)">
+              {{ signatureLabel(selectedLayer.signatureStatus) }}
+            </span>
+            <span class="text-sm leading-6 text-muted">{{ selectedLayer.signatureStatusDescription }}</span>
+          </div>
+          <dl class="mt-3 grid gap-2 text-xs md:grid-cols-2">
+            <div v-if="selectedLayer.signatureSignerSubject" class="min-w-0">
+              <dt class="font-semibold uppercase tracking-[0.14em] text-soft">Signer</dt>
+              <dd class="mt-1 break-all font-mono">{{ selectedLayer.signatureSignerSubject }}</dd>
+            </div>
+            <div v-if="selectedLayer.signatureSignerIssuer" class="min-w-0">
+              <dt class="font-semibold uppercase tracking-[0.14em] text-soft">Issuer</dt>
+              <dd class="mt-1 break-all font-mono">{{ selectedLayer.signatureSignerIssuer }}</dd>
+            </div>
+            <div v-if="selectedLayer.signatureSignerThumbprint" class="min-w-0 md:col-span-2">
+              <dt class="font-semibold uppercase tracking-[0.14em] text-soft">Thumbprint</dt>
+              <dd class="mt-1 break-all font-mono">{{ selectedLayer.signatureSignerThumbprint }}</dd>
+            </div>
+          </dl>
         </div>
 
         <div v-if="selectedLayer.error" class="mt-3 rounded-[0.9rem] border px-3 py-2 text-sm leading-6 chip-warning" style="border-color: var(--app-border)">
