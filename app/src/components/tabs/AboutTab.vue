@@ -23,10 +23,10 @@ async function openLink(url: string) {
     <article class="rounded-[1.25rem] border p-5 shadow-panel backdrop-blur surface-panel">
       <h2 class="text-2xl font-semibold tracking-tight">About VectorXR</h2>
       <p class="mt-3 max-w-3xl text-sm leading-6 text-muted">
-        VectorXR is a shared configuration utility for depth, rotation, application profiles, and predictable runtime settings.
-        Developed by DienerTech. Copyright DienerTech LLC.
+        VectorXR is an OpenXR tweak platform with per-game profiles. Adjust stereo depth, configure neck-saver rotation, and manage your OpenXR layers from one place.
+Developed by DienerTech. Copyright DienerTech LLC.
       </p>
-    </article>
+    </article>improved 
 
     <article class="rounded-[1.25rem] border p-5 shadow-panel backdrop-blur surface-panel">
       <div class="flex flex-wrap items-start justify-between gap-5">

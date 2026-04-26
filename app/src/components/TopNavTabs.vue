@@ -63,7 +63,7 @@ function statusChipClass(tab: { id: AppTab; status: string }): string {
     </div>
 
     <div class="tab-group mt-3">
-      <p class="tab-group-label">OpenXR Modifications</p>
+      <p class="tab-group-label">OpenXR Tweaks</p>
       <div class="grid gap-2 md:grid-cols-2">
         <button
           v-for="tab in moduleTabs"
