@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 
 import { captureDeviceBinding, listInputDevices, type InputDeviceInfo } from '../lib/commands'
 import type { DeviceBinding } from '../lib/model'
@@ -17,13 +17,43 @@ const loading = ref(false)
 const capturing = ref(false)
 const status = ref('')
 const metadataOpen = ref(false)
+const hasCompletedInitialScan = ref(false)
+const lastRefreshFailed = ref(false)
+
+const DEVICE_REFRESH_INTERVAL_MS = 2_000
+
+let refreshIntervalId: ReturnType<typeof window.setInterval> | null = null
+let refreshInFlight = false
 
 const selectedDevice = computed(() => devices.value.find((device) => device.deviceGuid === props.modelValue.deviceGuid) ?? null)
-const deviceName = computed(() => props.modelValue.deviceName?.trim() || selectedDevice.value?.deviceName || props.modelValue.deviceGuid || 'No device selected')
+const hasBoundDevice = computed(() => props.modelValue.deviceGuid.trim().length > 0)
+const isBoundDeviceDisconnected = computed(() => (
+  hasCompletedInitialScan.value &&
+  !lastRefreshFailed.value &&
+  hasBoundDevice.value &&
+  !selectedDevice.value
+))
+const disconnectedDeviceName = computed(() => props.modelValue.deviceName?.trim() || '<device disconnected>')
+const deviceName = computed(() => {
+  if (selectedDevice.value) {
+    return selectedDevice.value.deviceName
+  }
+
+  if (isBoundDeviceDisconnected.value) {
+    return disconnectedDeviceName.value
+  }
+
+  return props.modelValue.deviceGuid || 'No device selected'
+})
 const inputLabel = computed(() => props.modelValue.inputLabel?.trim() || labelForInputPath(props.modelValue.inputPath))
 
 onMounted(() => {
   void refreshDevices()
+  startRefreshPolling()
+})
+
+onBeforeUnmount(() => {
+  stopRefreshPolling()
 })
 
 function labelForInputPath(inputPath: string) {
@@ -31,19 +61,60 @@ function labelForInputPath(inputPath: string) {
   return match ? `Button ${match[1]}` : inputPath || 'No button captured'
 }
 
-async function refreshDevices() {
-  loading.value = true
-  status.value = ''
+function startRefreshPolling() {
+  if (refreshIntervalId !== null) {
+    return
+  }
+
+  refreshIntervalId = window.setInterval(() => {
+    if (capturing.value) {
+      return
+    }
+
+    void refreshDevices({ silent: true })
+  }, DEVICE_REFRESH_INTERVAL_MS)
+}
+
+function stopRefreshPolling() {
+  if (refreshIntervalId === null) {
+    return
+  }
+
+  window.clearInterval(refreshIntervalId)
+  refreshIntervalId = null
+}
+
+async function refreshDevices(options: { silent?: boolean } = {}) {
+  if (refreshInFlight) {
+    return
+  }
+
+  refreshInFlight = true
+  const shouldShowLoading = !options.silent
+  if (shouldShowLoading) {
+    loading.value = true
+  }
+  if (!options.silent) {
+    status.value = ''
+  }
 
   try {
     devices.value = await listInputDevices()
-    if (devices.value.length === 0) {
+    lastRefreshFailed.value = false
+    if (devices.value.length === 0 && !options.silent) {
       status.value = 'No joystick devices found.'
     }
   } catch (error) {
-    status.value = error instanceof Error ? error.message : 'Failed to list joystick devices.'
+    lastRefreshFailed.value = true
+    if (!options.silent) {
+      status.value = error instanceof Error ? error.message : 'Failed to list joystick devices.'
+    }
   } finally {
-    loading.value = false
+    hasCompletedInitialScan.value = true
+    if (shouldShowLoading) {
+      loading.value = false
+    }
+    refreshInFlight = false
   }
 }
 
@@ -98,6 +169,9 @@ function selectDevice(deviceGuid: string) {
           @change="selectDevice(($event.target as HTMLSelectElement).value)"
         >
           <option value="">{{ loading ? 'Scanning...' : 'Select a device' }}</option>
+          <option v-if="isBoundDeviceDisconnected" :value="modelValue.deviceGuid">
+            {{ disconnectedDeviceName }} (disconnected)
+          </option>
           <option v-for="device in devices" :key="device.deviceGuid" :value="device.deviceGuid">
             {{ device.deviceName }} ({{ device.buttonCount }} buttons)
           </option>
@@ -108,6 +182,24 @@ function selectDevice(deviceGuid: string) {
         <span class="mb-1.5 block text-sm font-medium">Assigned Button</span>
         <div class="app-readonly-field flex h-11 items-center rounded-[0.75rem] px-4 py-2.5 text-sm" aria-readonly="true">
           {{ inputLabel }}
+        </div>
+      </div>
+    </div>
+
+    <div
+      v-if="isBoundDeviceDisconnected"
+      class="rounded-[0.9rem] border px-4 py-3 text-sm leading-6 chip-warning"
+      style="border-color: var(--app-border)"
+    >
+      <div class="flex items-start gap-3">
+        <svg aria-hidden="true" class="mt-0.5 h-4 w-4 shrink-0" viewBox="0 0 20 20" fill="currentColor">
+          <path fill-rule="evenodd" d="M10 2.5c.44 0 .85.23 1.08.62l6.63 11.3A1.25 1.25 0 0 1 16.63 16H3.37a1.25 1.25 0 0 1-1.08-1.88l6.63-11.3A1.25 1.25 0 0 1 10 2.5Zm0 4a.75.75 0 0 0-.75.75v3.5a.75.75 0 0 0 1.5 0v-3.5A.75.75 0 0 0 10 6.5Zm0 7.25a1 1 0 1 0 0-2 1 1 0 0 0 0 2Z" clip-rule="evenodd" />
+        </svg>
+        <div>
+          <p class="font-medium">Bound device not currently connected</p>
+          <p class="mt-1">
+            This binding is still saved as {{ deviceName }} / {{ inputLabel }}, but Windows is not currently reporting that joystick.
+          </p>
         </div>
       </div>
     </div>
@@ -125,7 +217,7 @@ function selectDevice(deviceGuid: string) {
         class="button-secondary rounded-[0.75rem] px-4 py-2 text-sm font-medium transition disabled:cursor-not-allowed disabled:opacity-50"
         :disabled="loading || capturing"
         type="button"
-        @click="refreshDevices"
+        @click="void refreshDevices()"
       >
         Refresh Devices
       </button>
@@ -156,6 +248,10 @@ function selectDevice(deviceGuid: string) {
           <div>
             <dt class="text-muted">Device GUID</dt>
             <dd class="mt-1 break-all font-mono text-xs">{{ modelValue.deviceGuid || 'Unassigned' }}</dd>
+          </div>
+          <div>
+            <dt class="text-muted">Connection Status</dt>
+            <dd class="mt-1 text-xs">{{ isBoundDeviceDisconnected ? 'Disconnected' : (modelValue.deviceGuid ? 'Connected' : 'Unassigned') }}</dd>
           </div>
           <div>
             <dt class="text-muted">Product GUID</dt>
