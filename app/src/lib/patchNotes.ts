@@ -8,6 +8,18 @@ export interface PatchNoteEntry {
 
 export const patchNotes: PatchNoteEntry[] = [
   {
+    version: '0.5.1',
+    date: '2026-04-26',
+    title: 'Launch prep and icon pipeline cleanup',
+    summary: 'VectorXR now has improved binding management and an improved icon!',
+    items: [
+      'Improved the device binding UI to better handle disconected devices.',
+      'Added a note regarding Pivot compatibility with quadviews supplied directly by the runtime, such as Pimax Play.',
+      'Replaced the ad hoc Tauri icon-generation flow with a repo-local PowerShell script for predictable `icon.png` and multi-size `icon.ico` output.',
+      'Updated the app icon assets to the latest VectorXR branding pass for continued launch evaluation.',
+    ],
+  },
+  {
     version: '0.5.0',
     date: '2026-04-15',
     title: 'Windows installer milestone',

@@ -951,6 +951,46 @@ fn open_file_directory(path: String) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn open_external_url(url: String) -> Result<(), String> {
+    let trimmed_url = url.trim();
+    if trimmed_url.is_empty() || trimmed_url.chars().any(char::is_whitespace) {
+        return Err("External link is not a valid URL".into());
+    }
+
+    if !trimmed_url.starts_with("https://") && !trimmed_url.starts_with("http://") {
+        return Err("External link must use http or https".into());
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        Command::new("rundll32.exe")
+            .arg("url.dll,FileProtocolHandler")
+            .arg(trimmed_url)
+            .spawn()
+            .map_err(|error| error.to_string())?;
+        return Ok(());
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        Command::new("open")
+            .arg(trimmed_url)
+            .spawn()
+            .map_err(|error| error.to_string())?;
+        return Ok(());
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        Command::new("xdg-open")
+            .arg(trimmed_url)
+            .spawn()
+            .map_err(|error| error.to_string())?;
+        return Ok(());
+    }
+}
+
+#[tauri::command]
 fn load_seen_apps() -> Result<SeenAppsEnvelope, String> {
     let path = resolve_seen_apps_path();
     if !path.exists() {
@@ -995,6 +1035,7 @@ fn main() {
             reset_stored_data,
             load_log_snapshot,
             open_file_directory,
+            open_external_url,
             load_seen_apps,
             clear_seen_apps,
             list_input_devices,

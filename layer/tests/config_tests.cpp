@@ -126,13 +126,16 @@ void TestParseConfig() {
 }
 
 void TestLogLevelCompatibility() {
+    const auto info = depthxr::ParseLogLevel("info");
+    const auto debug = depthxr::ParseLogLevel("debug");
     const auto none = depthxr::ParseLogLevel("none");
     const auto off = depthxr::ParseLogLevel("off");
     const auto error = depthxr::ParseLogLevel("error");
-    Expect(none.has_value() && *none == depthxr::LogLevel::Off, "none should disable logging");
-    Expect(off.has_value() && *off == depthxr::LogLevel::Off, "off should remain compatible");
-    Expect(error.has_value() && *error == depthxr::LogLevel::Info, "error should normalize to enabled logging");
-    Expect(std::string(depthxr::ToString(depthxr::LogLevel::Off)) == "none", "Off should save as none");
+    Expect(info.has_value() && *info == depthxr::LogLevel::Info, "info should enable normal logging");
+    Expect(debug.has_value() && *debug == depthxr::LogLevel::Debug, "debug should enable verbose logging");
+    Expect(none.has_value() && *none == depthxr::LogLevel::Info, "legacy none should normalize to info");
+    Expect(off.has_value() && *off == depthxr::LogLevel::Info, "legacy off should normalize to info");
+    Expect(error.has_value() && *error == depthxr::LogLevel::Info, "legacy error should normalize to info");
 }
 
 void TestResolveRuntimeConfig() {

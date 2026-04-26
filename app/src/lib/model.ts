@@ -1,4 +1,4 @@
-export type LogLevel = 'none' | 'info' | 'debug'
+export type LogLevel = 'info' | 'debug'
 export type ActivationMode = 'toggle' | 'hold'
 export type AppTab = 'core' | 'registry' | 'about' | 'depthxr' | 'pivotxr'
 export const keyboardBindingKeyGroups = [
@@ -133,15 +133,11 @@ function isRecord(value: unknown): value is UnknownRecord {
 }
 
 function normalizeLogLevel(value: unknown): LogLevel {
-  if (value === 'none' || value === 'info' || value === 'debug') {
+  if (value === 'info' || value === 'debug') {
     return value
   }
 
-  if (value === 'off') {
-    return 'none'
-  }
-
-  if (value === 'error') {
+  if (value === 'none' || value === 'off' || value === 'error') {
     return 'info'
   }
 

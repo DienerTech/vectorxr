@@ -7,6 +7,7 @@ import LogViewerModal from './components/LogViewerModal.vue'
 import PatchNotesModal from './components/PatchNotesModal.vue'
 import StickySaveBar from './components/StickySaveBar.vue'
 import TopNavTabs from './components/TopNavTabs.vue'
+import AboutTab from './components/tabs/AboutTab.vue'
 import CoreTab from './components/tabs/CoreTab.vue'
 import DepthXrTab from './components/tabs/DepthXrTab.vue'
 import PivotXrTab from './components/tabs/PivotXrTab.vue'
@@ -223,36 +224,7 @@ async function confirmResetConfig() {
           @refresh-seen="store.refreshSeenApps"
           @remove="store.removeApplication"
         />
-        <div v-else-if="store.state.activeTab === 'about'" class="space-y-6">
-          <article class="rounded-[1.25rem] border p-5 shadow-panel backdrop-blur surface-panel">
-            <h2 class="text-2xl font-semibold tracking-tight">About VectorXR</h2>
-            <p class="mt-3 max-w-3xl text-sm leading-6 text-muted">
-              VectorXR is a shared configuration utility for depth, rotation, application profiles, and predictable runtime settings.
-              Developed by DienerTech. Copyright DienerTech LLC.
-            </p>
-          </article>
-
-          <article class="rounded-[1.25rem] border p-5 shadow-panel backdrop-blur surface-panel">
-            <div class="flex flex-wrap items-start justify-between gap-4">
-              <div>
-                <p class="eyebrow text-xs uppercase tracking-[0.24em]">Latest Patch Notes</p>
-                <h2 class="mt-2 text-2xl font-semibold tracking-tight">{{ latestPatch.title }}</h2>
-                <p class="mt-2 max-w-3xl text-sm leading-6 text-muted">{{ latestPatch.summary }}</p>
-              </div>
-
-              <span class="chip-accent rounded-full px-3 py-1 text-xs font-medium uppercase tracking-[0.18em]">
-                {{ latestPatch.version }}
-              </span>
-            </div>
-
-            <div class="mt-5 flex flex-wrap items-center justify-between gap-3 text-sm">
-              <span class="text-muted">{{ latestPatch.date }}</span>
-              <button class="button-accent rounded-[0.75rem] px-4 py-2 text-sm font-medium" type="button" @click="patchNotesOpen = true">
-                Read full patch notes
-              </button>
-            </div>
-          </article>
-        </div>
+        <AboutTab v-else-if="store.state.activeTab === 'about'" :latest-patch="latestPatch" @open-patch-notes="patchNotesOpen = true" />
         <DepthXrTab
           v-else-if="store.state.activeTab === 'depthxr'"
           :config="store.state.config"

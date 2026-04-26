@@ -17,6 +17,7 @@ defineEmits<{
 }>()
 
 const editingProfileName = ref<number | null>(null)
+const compatibilityInfoOpen = ref(false)
 
 function finishProfileNameEdit() {
   editingProfileName.value = null
@@ -67,10 +68,22 @@ const profileWarnings = computed(() => {
             Configure how Pivot activates and how much extra yaw or pitch it can add for each title. Use profiles to keep rotation behavior specific to the games and simulators that benefit from it.
           </p>
         </div>
-        <label class="pill-toggle inline-flex items-center gap-3 rounded-full px-4 py-2 text-sm font-medium">
-          <input v-model="config.modules.pivotxr.enabled" class="h-4 w-4 accent-depthxr-copper" type="checkbox" />
-          Pivot Enabled
-        </label>
+        <div class="flex flex-wrap items-center gap-3">
+          <button
+            class="button-secondary inline-flex items-center gap-2 rounded-[0.75rem] px-4 py-2 text-sm font-medium"
+            type="button"
+            @click="compatibilityInfoOpen = true"
+          >
+            <span class="inline-flex h-5 w-5 items-center justify-center rounded-full border text-xs" style="border-color: var(--app-border)">
+              i
+            </span>
+            Quadviews Compatibility
+          </button>
+          <label class="pill-toggle inline-flex items-center gap-3 rounded-full px-4 py-2 text-sm font-medium">
+            <input v-model="config.modules.pivotxr.enabled" class="h-4 w-4 accent-depthxr-copper" type="checkbox" />
+            Pivot Enabled
+          </label>
+        </div>
       </div>
 
       <p class="eyebrow mb-3 text-xs uppercase tracking-[0.24em]">Default Profile</p>
@@ -414,5 +427,37 @@ const profileWarnings = computed(() => {
         No custom profiles yet. Add a profile to bind Pivot rotation to a specific application.
       </div>
     </section>
+
+    <div v-if="compatibilityInfoOpen" class="fixed inset-0 z-50 flex items-center justify-center bg-black/45 px-4 py-6 backdrop-blur-sm">
+      <div class="w-full max-w-[720px] rounded-[1.25rem] border p-5 surface-panel-strong">
+        <div class="flex flex-wrap items-start justify-between gap-4">
+          <div>
+            <p class="eyebrow text-xs uppercase tracking-[0.24em]">Pivot Compatibility</p>
+            <h2 class="mt-2 text-xl font-semibold tracking-tight">A Special Note About Quadviews</h2>
+          </div>
+          <button class="button-secondary rounded-[0.75rem] px-4 py-2 text-sm font-medium" type="button" @click="compatibilityInfoOpen = false">
+            Close
+          </button>
+        </div>
+
+        <div class="mt-5 space-y-4 text-sm leading-6">
+          <div class="rounded-[1rem] border px-4 py-4 chip-warning" style="border-color: var(--app-border)">
+            Pivot is NOT currently compatible with quadviews supplied directly by the runtime, such as Pimax Play.
+          </div>
+
+          <div class="rounded-[1rem] border px-4 py-4 surface-panel">
+            Pivot does work with OpenXR quadviews layers, including mbucchia's `Quad-Views-Foveated`.
+          </div>
+
+          <div class="rounded-[1rem] border px-4 py-4 surface-panel">
+            When using quadviews, OpenXR layer order matters. `Quad-Views-Foveated` should be first in the Windows OpenXR API layers list, with VectorXR second. If VectorXR is above the quadviews layer, Pivot rotation will cause the scene to break, rendering no content in areas outside your head's natural field of view.
+          </div>
+
+          <div class="rounded-[1rem] border px-4 py-4 surface-panel">
+            You can inspect and change that order with tools like OpenXR-API-Layers-GUI.
+          </div>
+        </div>
+      </div>
+    </div>
   </div>
 </template>

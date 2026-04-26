@@ -201,6 +201,19 @@ export async function openFileDirectory(path: string): Promise<void> {
   await invoke('open_file_directory', { path })
 }
 
+export async function openExternalUrl(url: string): Promise<void> {
+  if (!url) {
+    return
+  }
+
+  if (!tauriAvailable()) {
+    window.open(url, '_blank', 'noopener,noreferrer')
+    return
+  }
+
+  await invoke('open_external_url', { url })
+}
+
 export async function loadSeenApps(): Promise<SeenAppsEnvelope> {
   if (!tauriAvailable()) {
     return {

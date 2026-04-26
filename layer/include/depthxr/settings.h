@@ -7,7 +7,6 @@
 namespace depthxr {
 
 enum class LogLevel {
-    Off,
     Error,
     Info,
     Debug,
