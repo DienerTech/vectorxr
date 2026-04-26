@@ -203,6 +203,11 @@ textarea {
   color: var(--app-warning-text);
 }
 
+.chip-danger {
+  background: var(--app-danger-soft);
+  color: var(--app-danger-text);
+}
+
 .button-accent {
   background: var(--app-accent);
   color: #fff;
@@ -306,6 +311,11 @@ textarea {
 :root[data-theme='dark'] .tab-button-active .chip-idle {
   background: rgba(24, 33, 29, 0.14);
   color: #293832;
+}
+
+:root[data-theme='dark'] .tab-button-active .chip-danger {
+  background: rgba(139, 45, 42, 0.16);
+  color: #5f2524;
 }
 
 .mono-text {

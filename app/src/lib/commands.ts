@@ -85,6 +85,8 @@ export interface OpenXrLayerEntry {
   signatureSignerSubject?: string
   signatureSignerIssuer?: string
   signatureSignerThumbprint?: string
+  signatureSignerNotBefore?: string
+  signatureSignerNotAfter?: string
   isVectorXr: boolean
   manifestExists: boolean
   libraryExists: boolean

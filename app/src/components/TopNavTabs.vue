@@ -51,12 +51,6 @@ function statusChipClass(tab: { id: AppTab; status: string }): string {
               <p class="text-sm font-semibold tracking-tight">{{ tab.label }}</p>
               <p class="mt-1 text-xs" :class="activeTab === tab.id ? 'text-inverse-muted' : 'text-muted'">{{ tab.subtitle }}</p>
             </div>
-            <span
-              class="rounded-full px-3 py-1 text-xs font-semibold uppercase tracking-[0.16em]"
-              :class="statusChipClass(tab)"
-            >
-              {{ tab.status }}
-            </span>
           </div>
         </button>
       </div>

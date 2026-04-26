@@ -1,8 +1,7 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, ref, watch } from 'vue'
 
 import {
-  loadOpenXrLayers,
   moveOpenXrLayer,
   openFileDirectory,
   setOpenXrLayerEnabled,
@@ -14,22 +13,30 @@ import {
   type OpenXrLayerSnapshot,
 } from '../../lib/commands'
 
-const snapshot = ref<OpenXrLayerSnapshot | null>(null)
+const props = defineProps<{
+  snapshot: OpenXrLayerSnapshot | null
+  loading: boolean
+}>()
+
+const emit = defineEmits<{
+  refresh: []
+  snapshotUpdated: [snapshot: OpenXrLayerSnapshot]
+}>()
+
 const activeSliceId = ref<OpenXrLayerRegistrySliceId>('hklm64')
 const selectedLayer = ref<OpenXrLayerEntry | null>(null)
-const loading = ref(false)
 const busyKey = ref<string | null>(null)
 const status = ref('')
 
-const activeSlice = computed(() => snapshot.value?.slices.find((slice) => slice.id === activeSliceId.value) ?? null)
+const activeSlice = computed(() => props.snapshot?.slices.find((slice) => slice.id === activeSliceId.value) ?? null)
 const uncommonLayerCount = computed(
-  () => snapshot.value?.slices.filter((slice) => slice.uncommon).reduce((count, slice) => count + slice.layers.length, 0) ?? 0,
+  () => props.snapshot?.slices.filter((slice) => slice.uncommon).reduce((count, slice) => count + slice.layers.length, 0) ?? 0,
 )
 const enabledLayerCount = computed(() => activeSlice.value?.layers.filter((layer) => layer.enabled).length ?? 0)
 const vectorQuadWarning = computed(() => {
   const warnings: string[] = []
 
-  for (const slice of snapshot.value?.slices ?? []) {
+  for (const slice of props.snapshot?.slices ?? []) {
     const vector = slice.layers.find((layer) => layer.isVectorXr)
     const quad = slice.layers.find(isQuadViewsLayer)
 
@@ -41,28 +48,11 @@ const vectorQuadWarning = computed(() => {
   return warnings
 })
 
-watch(snapshot, (value) => {
+watch(() => props.snapshot, (value) => {
   if (value && !value.slices.some((slice) => slice.id === activeSliceId.value)) {
     activeSliceId.value = 'hklm64'
   }
 })
-
-onMounted(() => {
-  void refresh()
-})
-
-async function refresh() {
-  loading.value = true
-  status.value = ''
-
-  try {
-    snapshot.value = await loadOpenXrLayers()
-  } catch (error) {
-    status.value = error instanceof Error ? error.message : 'Failed to load OpenXR layers'
-  } finally {
-    loading.value = false
-  }
-}
 
 async function toggleLayer(slice: OpenXrLayerRegistrySliceId, layer: OpenXrLayerEntry) {
   const key = actionKey(layer, 'toggle')
@@ -70,8 +60,9 @@ async function toggleLayer(slice: OpenXrLayerRegistrySliceId, layer: OpenXrLayer
   status.value = ''
 
   try {
-    snapshot.value = await setOpenXrLayerEnabled(slice, layer.manifestPath, !layer.enabled)
-    selectedLayer.value = findLayer(slice, layer.manifestPath)
+    const nextSnapshot = await setOpenXrLayerEnabled(slice, layer.manifestPath, !layer.enabled)
+    emit('snapshotUpdated', nextSnapshot)
+    selectedLayer.value = findLayer(nextSnapshot, slice, layer.manifestPath)
     status.value = `${layer.enabled ? 'Disabled' : 'Enabled'} ${layer.layerName}`
   } catch (error) {
     status.value = error instanceof Error ? error.message : 'Failed to update OpenXR layer'
@@ -86,8 +77,9 @@ async function moveLayer(slice: OpenXrLayerRegistrySliceId, layer: OpenXrLayerEn
   status.value = ''
 
   try {
-    snapshot.value = await moveOpenXrLayer(slice, layer.manifestPath, direction)
-    selectedLayer.value = findLayer(slice, layer.manifestPath)
+    const nextSnapshot = await moveOpenXrLayer(slice, layer.manifestPath, direction)
+    emit('snapshotUpdated', nextSnapshot)
+    selectedLayer.value = findLayer(nextSnapshot, slice, layer.manifestPath)
     status.value = `Moved ${layer.layerName} ${direction}`
   } catch (error) {
     status.value = error instanceof Error ? error.message : 'Failed to reorder OpenXR layer'
@@ -108,8 +100,8 @@ async function openFolder(path: string | undefined) {
   }
 }
 
-function findLayer(slice: OpenXrLayerRegistrySliceId, manifestPath: string): OpenXrLayerEntry | null {
-  return snapshot.value?.slices.find((item) => item.id === slice)?.layers.find((layer) => layer.manifestPath === manifestPath) ?? null
+function findLayer(snapshot: OpenXrLayerSnapshot, slice: OpenXrLayerRegistrySliceId, manifestPath: string): OpenXrLayerEntry | null {
+  return snapshot.slices.find((item) => item.id === slice)?.layers.find((layer) => layer.manifestPath === manifestPath) ?? null
 }
 
 function actionKey(layer: OpenXrLayerEntry, action: string): string {
@@ -159,11 +151,18 @@ function signatureChipClass(status: OpenXrLayerSignatureStatus): string {
 }
 
 function signatureTooltip(layer: OpenXrLayerEntry): string {
-  const lines = [`Signature: ${signatureLabel(layer.signatureStatus)}`, layer.signatureStatusDescription]
-  if (layer.signatureSignerSubject) {
-    lines.push(`Signer: ${layer.signatureSignerSubject}`)
+  switch (layer.signatureStatus) {
+    case 'signed':
+      return 'Signature verified'
+    case 'unsigned':
+      return 'Signature unverified. This may cause problems with games that use anti-cheat software.'
+    case 'invalid':
+      return layer.signatureSignerNotAfter
+        ? `Signature invalid. Certificate was valid through ${layer.signatureSignerNotAfter}.`
+        : 'Signature invalid. Open details for Windows signature information.'
+    default:
+      return 'Signature status unknown. Open details for Windows signature information.'
   }
-  return lines.filter(Boolean).join('\n')
 }
 
 function vectorXrTooltip(): string {
@@ -171,7 +170,7 @@ function vectorXrTooltip(): string {
 }
 
 function quadViewsTooltip(): string {
-  return 'Quad-Views-Foveated layer. For Pivot compatibility, this should usually appear above VectorXR in the same registry slice.'
+  return 'Quad-Views-Foveated layer. For Pivot compatibility, this should occur above the VectorXR layer in the same registry slice.'
 }
 
 function attentionTooltip(layer: OpenXrLayerEntry): string {
@@ -188,6 +187,21 @@ function attentionTooltip(layer: OpenXrLayerEntry): string {
   }
 
   return 'This layer has a condition that may need review.'
+}
+
+function signatureGuidance(layer: OpenXrLayerEntry): string {
+  switch (layer.signatureStatus) {
+    case 'signed':
+      return 'Windows verified this binary signature.'
+    case 'unsigned':
+      return 'Unsigned OpenXR layers can be legitimate, but may conflict with games or platforms that enforce anti-cheat policies while the layer is enabled.'
+    case 'invalid':
+      return layer.signatureSignerNotAfter
+        ? `Windows did not verify this signature. The signing certificate was valid through ${layer.signatureSignerNotAfter}.`
+        : 'Windows did not verify this signature.'
+    default:
+      return 'Windows could not determine a signature status for this binary.'
+  }
 }
 </script>
 
@@ -206,7 +220,7 @@ function attentionTooltip(layer: OpenXrLayerEntry): string {
           <span v-if="uncommonLayerCount > 0" class="rounded-full px-3 py-1 text-xs font-semibold uppercase tracking-[0.16em] chip-warning">
             {{ uncommonLayerCount }} uncommon
           </span>
-          <button class="button-secondary rounded-[0.75rem] px-4 py-2 text-sm font-medium" type="button" :disabled="loading" @click="refresh">
+          <button class="button-secondary rounded-[0.75rem] px-4 py-2 text-sm font-medium" type="button" :disabled="loading" @click="$emit('refresh')">
             {{ loading ? 'Refreshing...' : 'Refresh' }}
           </button>
         </div>
@@ -343,6 +357,13 @@ function attentionTooltip(layer: OpenXrLayerEntry): string {
                         VectorXR
                       </span>
                       <span
+                        v-if="layer.isVectorXr && !layer.enabled"
+                        class="mr-2 cursor-default rounded-full px-2.5 py-1 text-xs font-semibold uppercase tracking-[0.14em] chip-warning"
+                        title="VectorXR's OpenXR layer is disabled. OpenXR tweaks will not apply even if the suite or individual tweaks are enabled."
+                      >
+                        Tweaks inactive
+                      </span>
+                      <span
                         v-if="isQuadViewsLayer(layer)"
                         class="mr-2 cursor-default rounded-full px-2.5 py-1 text-xs font-semibold uppercase tracking-[0.14em] chip-warning"
                         :title="quadViewsTooltip()"
@@ -437,9 +458,16 @@ function attentionTooltip(layer: OpenXrLayerEntry): string {
             <span class="rounded-full px-3 py-1 text-xs font-semibold uppercase tracking-[0.16em]" :class="signatureChipClass(selectedLayer.signatureStatus)">
               {{ signatureLabel(selectedLayer.signatureStatus) }}
             </span>
-            <span class="text-sm leading-6 text-muted">{{ selectedLayer.signatureStatusDescription }}</span>
+            <span class="text-sm leading-6 text-muted">{{ signatureGuidance(selectedLayer) }}</span>
           </div>
+          <p class="mt-2 text-xs leading-5 text-muted">Windows status: {{ selectedLayer.signatureStatusDescription }}</p>
           <dl class="mt-3 grid gap-2 text-xs md:grid-cols-2">
+            <div v-if="selectedLayer.signatureSignerNotBefore || selectedLayer.signatureSignerNotAfter" class="min-w-0 md:col-span-2">
+              <dt class="font-semibold uppercase tracking-[0.14em] text-soft">Certificate Validity</dt>
+              <dd class="mt-1 font-mono">
+                {{ selectedLayer.signatureSignerNotBefore || 'Unknown start' }} to {{ selectedLayer.signatureSignerNotAfter || 'Unknown end' }}
+              </dd>
+            </div>
             <div v-if="selectedLayer.signatureSignerSubject" class="min-w-0">
               <dt class="font-semibold uppercase tracking-[0.14em] text-soft">Signer</dt>
               <dd class="mt-1 break-all font-mono">{{ selectedLayer.signatureSignerSubject }}</dd>

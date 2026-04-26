@@ -47,6 +47,8 @@ pub struct OpenXrLayerEntry {
     signature_signer_subject: Option<String>,
     signature_signer_issuer: Option<String>,
     signature_signer_thumbprint: Option<String>,
+    signature_signer_not_before: Option<String>,
+    signature_signer_not_after: Option<String>,
     is_vector_xr: bool,
     manifest_exists: bool,
     library_exists: bool,
@@ -242,6 +244,8 @@ fn layer_entry_from_registry_value(
         signature_signer_subject: signature_info.signer_subject,
         signature_signer_issuer: signature_info.signer_issuer,
         signature_signer_thumbprint: signature_info.signer_thumbprint,
+        signature_signer_not_before: signature_info.signer_not_before,
+        signature_signer_not_after: signature_info.signer_not_after,
         is_vector_xr,
         manifest_exists: Path::new(&value.name).exists(),
         library_exists,
@@ -545,6 +549,8 @@ struct RawSignatureInfo {
     signer_subject: Option<String>,
     signer_issuer: Option<String>,
     signer_thumbprint: Option<String>,
+    signer_not_before: Option<String>,
+    signer_not_after: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -554,6 +560,8 @@ struct SignatureInfo {
     signer_subject: Option<String>,
     signer_issuer: Option<String>,
     signer_thumbprint: Option<String>,
+    signer_not_before: Option<String>,
+    signer_not_after: Option<String>,
 }
 
 impl SignatureInfo {
@@ -564,6 +572,8 @@ impl SignatureInfo {
             signer_subject: None,
             signer_issuer: None,
             signer_thumbprint: None,
+            signer_not_before: None,
+            signer_not_after: None,
         }
     }
 }
@@ -578,6 +588,8 @@ $signature = Get-AuthenticodeSignature -LiteralPath '{path}'
   SignerSubject = if ($null -ne $signature.SignerCertificate) {{ $signature.SignerCertificate.Subject }} else {{ $null }}
   SignerIssuer = if ($null -ne $signature.SignerCertificate) {{ $signature.SignerCertificate.Issuer }} else {{ $null }}
   SignerThumbprint = if ($null -ne $signature.SignerCertificate) {{ $signature.SignerCertificate.Thumbprint }} else {{ $null }}
+  SignerNotBefore = if ($null -ne $signature.SignerCertificate) {{ $signature.SignerCertificate.NotBefore.ToString('yyyy-MM-dd') }} else {{ $null }}
+  SignerNotAfter = if ($null -ne $signature.SignerCertificate) {{ $signature.SignerCertificate.NotAfter.ToString('yyyy-MM-dd') }} else {{ $null }}
 }} | ConvertTo-Json -Compress
 "#,
         path = escape_powershell_single_quoted(path),
@@ -598,15 +610,16 @@ $signature = Get-AuthenticodeSignature -LiteralPath '{path}'
     }
     .to_string();
 
-    let status_description = raw
-        .status_message
-        .filter(|message| !message.trim().is_empty())
-        .unwrap_or_else(|| match status.as_str() {
-            "signed" => "Windows reports a valid Authenticode signature.".into(),
-            "unsigned" => "Windows reports that this binary is not Authenticode signed.".into(),
-            "invalid" => "Windows reports that this binary's Authenticode signature is invalid.".into(),
-            _ => "Windows could not determine this binary's signature status.".into(),
-        });
+    let status_description = match status.as_str() {
+        "signed" => "Windows reports a valid Authenticode signature.".into(),
+        "unsigned" => "Windows did not find an Authenticode signature. This does not mean the binary cannot run.".into(),
+        "invalid" => raw
+            .status_message
+            .filter(|message| !message.trim().is_empty())
+            .map(|message| strip_urls(&message))
+            .unwrap_or_else(|| "Windows reports that this binary's Authenticode signature is invalid.".into()),
+        _ => "Windows could not determine this binary's signature status.".into(),
+    };
 
     SignatureInfo {
         status,
@@ -614,7 +627,17 @@ $signature = Get-AuthenticodeSignature -LiteralPath '{path}'
         signer_subject: raw.signer_subject,
         signer_issuer: raw.signer_issuer,
         signer_thumbprint: raw.signer_thumbprint,
+        signer_not_before: raw.signer_not_before,
+        signer_not_after: raw.signer_not_after,
     }
+}
+
+fn strip_urls(value: &str) -> String {
+    value
+        .split_whitespace()
+        .filter(|part| !part.starts_with("http://") && !part.starts_with("https://"))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 #[allow(dead_code)]

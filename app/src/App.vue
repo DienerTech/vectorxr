@@ -12,7 +12,7 @@ import CoreTab from './components/tabs/CoreTab.vue'
 import DepthXrTab from './components/tabs/DepthXrTab.vue'
 import OpenXrLayersTab from './components/tabs/OpenXrLayersTab.vue'
 import PivotXrTab from './components/tabs/PivotXrTab.vue'
-import { exportConfigFile, loadLogSnapshot, type LogSnapshot } from './lib/commands'
+import { exportConfigFile, loadLogSnapshot, loadOpenXrLayers, type LogSnapshot, type OpenXrLayerSnapshot } from './lib/commands'
 import { normalizeConfig, type VectorXRConfig } from './lib/model'
 import { patchNotes } from './lib/patchNotes'
 import { applyThemePreference, loadThemePreference, observeSystemThemeChanges, type ThemePreference } from './lib/theme'
@@ -31,6 +31,8 @@ const importFileInput = ref<HTMLInputElement | null>(null)
 const importPreviewOpen = ref(false)
 const importedConfig = ref<VectorXRConfig | null>(null)
 const importErrors = ref<string[]>([])
+const openXrLayerSnapshot = ref<OpenXrLayerSnapshot | null>(null)
+const openXrLayersLoading = ref(false)
 
 const latestPatch = patchNotes[0]
 
@@ -92,6 +94,7 @@ onMounted(() => {
 
   void store.load()
   void refreshLogs()
+  void refreshOpenXrLayers()
 })
 
 onUnmounted(() => {
@@ -116,6 +119,18 @@ async function refreshLogs() {
     store.state.status = error instanceof Error ? error.message : 'Failed to load logs'
   } finally {
     logViewerLoading.value = false
+  }
+}
+
+async function refreshOpenXrLayers() {
+  openXrLayersLoading.value = true
+
+  try {
+    openXrLayerSnapshot.value = await loadOpenXrLayers()
+  } catch (error) {
+    store.state.status = error instanceof Error ? error.message : 'Failed to load OpenXR layer status'
+  } finally {
+    openXrLayersLoading.value = false
   }
 }
 
@@ -213,6 +228,8 @@ async function confirmResetConfig() {
           :log-path="logSnapshot?.activePath"
           :theme-preference="themePreference"
           :settings-actions-disabled="store.state.loading || store.state.saving"
+          :open-xr-layer-snapshot="openXrLayerSnapshot"
+          :open-xr-layers-loading="openXrLayersLoading"
           @view-logs="openLogs"
           @import-config="triggerImport"
           @export-config="exportConfig"
@@ -232,7 +249,13 @@ async function confirmResetConfig() {
           @remove="store.removeApplication"
         />
         <AboutTab v-else-if="store.state.activeTab === 'about'" :latest-patch="latestPatch" @open-patch-notes="patchNotesOpen = true" />
-        <OpenXrLayersTab v-else-if="store.state.activeTab === 'layers'" />
+        <OpenXrLayersTab
+          v-else-if="store.state.activeTab === 'layers'"
+          :snapshot="openXrLayerSnapshot"
+          :loading="openXrLayersLoading"
+          @refresh="refreshOpenXrLayers"
+          @snapshot-updated="openXrLayerSnapshot = $event"
+        />
         <DepthXrTab
           v-else-if="store.state.activeTab === 'depthxr'"
           :config="store.state.config"

@@ -2,6 +2,7 @@
 import { computed } from "vue";
 
 import ThemeToggle from "../ThemeToggle.vue";
+import type { OpenXrLayerEntry, OpenXrLayerSnapshot } from "../../lib/commands";
 import type { VectorXRConfig } from "../../lib/model";
 import type { ThemePreference } from "../../lib/theme";
 
@@ -11,6 +12,8 @@ const props = defineProps<{
   logPath?: string;
   themePreference: ThemePreference;
   settingsActionsDisabled: boolean;
+  openXrLayerSnapshot: OpenXrLayerSnapshot | null;
+  openXrLayersLoading: boolean;
 }>();
 
 defineEmits<{
@@ -31,6 +34,39 @@ const configDirectory = computed(() => {
   if (!props.path) return "Available after config loads";
   const directory = props.path.replace(/[\\/][^\\/]*$/, "");
   return directory || props.path;
+});
+
+const vectorXrLayer = computed<OpenXrLayerEntry | null>(() => {
+  return props.openXrLayerSnapshot?.slices
+    .flatMap((slice) => slice.layers)
+    .find((layer) => layer.isVectorXr) ?? null;
+});
+
+const vectorXrLayerStatusLabel = computed(() => {
+  if (props.openXrLayersLoading) return "Checking";
+  if (!vectorXrLayer.value) return "Not found";
+  return vectorXrLayer.value.enabled ? "Layer enabled" : "Layer disabled";
+});
+
+const vectorXrLayerStatusClass = computed(() => {
+  if (props.openXrLayersLoading || !vectorXrLayer.value) return "chip-idle";
+  return vectorXrLayer.value.enabled ? "chip-success" : "chip-warning";
+});
+
+const vectorXrLayerStatusDescription = computed(() => {
+  if (props.openXrLayersLoading) {
+    return "Checking the registered VectorXR OpenXR API layer.";
+  }
+
+  if (!vectorXrLayer.value) {
+    return "VectorXR's OpenXR API layer registration was not found. OpenXR Tweaks will not apply until the layer is registered and enabled.";
+  }
+
+  if (vectorXrLayer.value.enabled) {
+    return "The VectorXR OpenXR API layer is enabled, so enabled OpenXR Tweaks can apply at runtime.";
+  }
+
+  return "The VectorXR OpenXR API layer is disabled. None of the VectorXR OpenXR Tweaks will apply, regardless of suite or tweak enabled state.";
 });
 </script>
 
@@ -53,7 +89,7 @@ const configDirectory = computed(() => {
         <div>
           <p class="text-sm font-semibold">VectorXR Enabled</p>
           <p class="mt-0.5 text-xs text-muted">
-            Enables or disables all VectorXR effects at runtime.
+            Enables or disables all VectorXR OpenXR Tweaks effects at runtime.
           </p>
         </div>
         <label
@@ -66,6 +102,24 @@ const configDirectory = computed(() => {
           />
           {{ config.core.enabled ? "Enabled" : "Disabled" }}
         </label>
+      </div>
+
+      <div
+        class="mb-5 flex items-center justify-between rounded-[0.9rem] border px-4 py-3 surface-panel-strong"
+      >
+        <div>
+          <p class="text-sm font-semibold">OpenXR Layer Status</p>
+          <p class="mt-0.5 text-xs text-muted">
+            {{ vectorXrLayerStatusDescription }}
+          </p>
+        </div>
+        <span
+          class="cursor-default rounded-full px-3 py-1 text-xs font-semibold uppercase tracking-[0.16em]"
+          :class="vectorXrLayerStatusClass"
+          title="Use the OpenXR Layers menu to enable, disable, or reorder the VectorXR OpenXR layer."
+        >
+          {{ vectorXrLayerStatusLabel }}
+        </span>
       </div>
 
       <div class="mt-5 mb-5">
