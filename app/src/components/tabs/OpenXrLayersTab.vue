@@ -246,53 +246,75 @@ function signatureChipClass(status: OpenXrLayerSignatureStatus): string {
           No implicit OpenXR layers are registered in this slice.
         </div>
 
-        <div v-else class="mt-3 overflow-hidden rounded-[0.9rem] border" style="border-color: var(--app-border)">
+        <div v-else class="mt-3 space-y-2">
           <article
             v-for="(layer, index) in activeSlice.layers"
             :key="`${activeSlice.id}-${layer.manifestPath}`"
-            class="grid gap-3 border-b px-3 py-2 last:border-b-0 surface-panel"
+            class="rounded-[0.9rem] border px-3 py-2.5 surface-panel"
             style="border-color: var(--app-border)"
           >
-            <div class="grid gap-3 lg:grid-cols-[8rem_minmax(0,1fr)_auto] lg:items-center">
-              <button
-                class="rounded-[0.75rem] border px-3 py-2 text-left transition"
-                :class="layer.enabled ? 'chip-success' : 'chip-idle'"
-                type="button"
-                :disabled="busyKey !== null"
-                @click="toggleLayer(activeSlice.id, layer)"
-              >
-                <span class="block text-xs font-semibold uppercase tracking-[0.16em]">{{ layer.enabled ? 'Enabled' : 'Disabled' }}</span>
-                <span class="mt-0.5 block text-xs">{{ layer.enabled ? 'Click to disable' : 'Click to enable' }}</span>
-              </button>
-
-              <div class="min-w-0">
-                <div class="flex flex-wrap items-center gap-2">
-                  <span class="rounded-full px-2.5 py-1 text-xs font-semibold uppercase tracking-[0.14em] chip-accent">#{{ layer.order }}</span>
-                  <span class="rounded-full px-2.5 py-1 text-xs font-semibold uppercase tracking-[0.14em]" :class="signatureChipClass(layer.signatureStatus)">
-                    {{ signatureLabel(layer.signatureStatus) }}
-                  </span>
-                  <span v-if="layer.isVectorXr" class="rounded-full px-2.5 py-1 text-xs font-semibold uppercase tracking-[0.14em] chip-success">VectorXR</span>
-                  <span v-if="isQuadViewsLayer(layer)" class="rounded-full px-2.5 py-1 text-xs font-semibold uppercase tracking-[0.14em] chip-warning">Quadviews</span>
-                  <span v-if="!layer.manifestExists || !layer.libraryExists || layer.error" class="rounded-full px-2.5 py-1 text-xs font-semibold uppercase tracking-[0.14em] chip-warning">
-                    Needs attention
-                  </span>
-                </div>
-                <div class="mt-1 flex min-w-0 flex-wrap items-baseline gap-x-3 gap-y-1">
-                  <h4 class="truncate text-base font-semibold tracking-tight">{{ layer.layerName }}</h4>
-                  <p class="min-w-0 flex-1 truncate text-sm text-muted">{{ layer.description }}</p>
+            <div class="flex items-center gap-3">
+              <div class="flex shrink-0 items-center gap-2 rounded-[0.75rem] border px-2 py-1.5 surface-panel-soft" style="border-color: var(--app-border)">
+                <span class="min-w-[3.25rem] rounded-full px-2.5 py-1 text-center text-xs font-semibold uppercase tracking-[0.14em] chip-accent">#{{ layer.order }}</span>
+                <div class="flex flex-col gap-1">
+                <button
+                  class="button-secondary inline-flex h-7 w-8 items-center justify-center rounded-[0.5rem] text-sm font-semibold"
+                  type="button"
+                  aria-label="Move layer up"
+                  :title="activeSlice.requiresElevationForWrites ? 'Move this layer earlier in this hive. Windows may request administrator approval.' : 'Move this layer earlier in this hive.'"
+                  :disabled="busyKey !== null || index === 0"
+                  @click="moveLayer(activeSlice.id, layer, 'up')"
+                >
+                  ↑
+                </button>
+                <button
+                  class="button-secondary inline-flex h-7 w-8 items-center justify-center rounded-[0.5rem] text-sm font-semibold"
+                  type="button"
+                  aria-label="Move layer down"
+                  :title="activeSlice.requiresElevationForWrites ? 'Move this layer later in this hive. Windows may request administrator approval.' : 'Move this layer later in this hive.'"
+                  :disabled="busyKey !== null || index === activeSlice.layers.length - 1"
+                  @click="moveLayer(activeSlice.id, layer, 'down')"
+                >
+                  ↓
+                </button>
                 </div>
               </div>
 
-              <div class="flex flex-wrap gap-2 lg:justify-end">
-                <button class="button-secondary rounded-[0.65rem] px-3 py-2 text-xs font-medium" type="button" :disabled="busyKey !== null || index === 0" @click="moveLayer(activeSlice.id, layer, 'up')">
-                  Up
-                </button>
-                <button class="button-secondary rounded-[0.65rem] px-3 py-2 text-xs font-medium" type="button" :disabled="busyKey !== null || index === activeSlice.layers.length - 1" @click="moveLayer(activeSlice.id, layer, 'down')">
-                  Down
-                </button>
-                <button class="button-secondary rounded-[0.65rem] px-3 py-2 text-xs font-medium" type="button" @click="selectedLayer = layer">
-                  Details
-                </button>
+              <button
+                class="w-[6.25rem] shrink-0 rounded-[0.7rem] border px-2.5 py-2 text-center transition"
+                :class="layer.enabled ? 'chip-success' : 'chip-idle'"
+                type="button"
+                :title="`${layer.enabled ? 'Disable' : 'Enable'} this OpenXR layer. ${activeSlice.requiresElevationForWrites ? 'Windows may request administrator approval for changes in this hive.' : 'This per-user hive should not require administrator approval.'}`"
+                :disabled="busyKey !== null"
+                @click="toggleLayer(activeSlice.id, layer)"
+              >
+                <span class="block text-[0.68rem] font-semibold uppercase tracking-[0.16em]">{{ layer.enabled ? 'Enabled' : 'Disabled' }}</span>
+              </button>
+
+              <div class="min-w-0 flex-1">
+                <div class="flex min-w-0 items-start justify-between gap-3">
+                  <div class="min-w-0">
+                    <div class="flex min-w-0 flex-wrap items-center gap-2">
+                      <h4 class="truncate text-base font-semibold leading-5 tracking-tight">{{ layer.layerName }}</h4>
+                      <span class="mr-2 rounded-full px-2.5 py-1 text-xs font-semibold uppercase tracking-[0.14em]" :class="signatureChipClass(layer.signatureStatus)">
+                        {{ signatureLabel(layer.signatureStatus) }}
+                      </span>
+                      <span v-if="layer.isVectorXr" class="mr-2 rounded-full px-2.5 py-1 text-xs font-semibold uppercase tracking-[0.14em] chip-success">VectorXR</span>
+                      <span v-if="isQuadViewsLayer(layer)" class="mr-2 rounded-full px-2.5 py-1 text-xs font-semibold uppercase tracking-[0.14em] chip-warning">Quadviews</span>
+                      <span v-if="!layer.manifestExists || !layer.libraryExists || layer.error" class="mr-2 rounded-full px-2.5 py-1 text-xs font-semibold uppercase tracking-[0.14em] chip-warning">
+                        Needs attention
+                      </span>
+                    </div>
+                    <p class="mt-0.5 truncate text-sm leading-5 text-muted">{{ layer.description }}</p>
+                  </div>
+
+                  <div class="flex shrink-0 flex-wrap justify-end gap-2">
+                    <button class="button-secondary rounded-[0.65rem] px-3 py-1.5 text-xs font-medium" type="button" @click="selectedLayer = layer">
+                      Details
+                    </button>
+                  </div>
+                </div>
+
               </div>
             </div>
           </article>
