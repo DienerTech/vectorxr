@@ -26,7 +26,7 @@ async function openLink(url: string) {
         VectorXR is an OpenXR tweak platform with per-game profiles. Adjust stereo depth, configure neck-saver rotation, and manage your OpenXR layers from one place.
 Developed by DienerTech. Copyright DienerTech LLC.
       </p>
-    </article>improved 
+    </article> 
 
     <article class="rounded-[1.25rem] border p-5 shadow-panel backdrop-blur surface-panel">
       <div class="flex flex-wrap items-start justify-between gap-5">

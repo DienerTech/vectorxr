@@ -5,23 +5,23 @@
 :root {
   font-family: "Bahnschrift", "Aptos", "Segoe UI Variable", sans-serif;
   color: #18211d;
-  background: #edf3ef;
+  background: #a6c2b0;
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
-  --app-shell-flat: #edf3ef;
-  --app-shell: radial-gradient(circle at top left, rgba(233, 118, 47, 0.12), transparent 26%),
-    radial-gradient(circle at top right, rgba(48, 109, 88, 0.14), transparent 24%),
-    linear-gradient(180deg, #f5f8f4 0%, #edf3ef 54%, #e2ebe6 100%);
-  --app-surface: rgba(255, 255, 255, 0.82);
-  --app-surface-strong: rgba(255, 255, 255, 0.94);
-  --app-surface-muted: #eef4ef;
-  --app-surface-subtle: #f6f1e7;
+  --app-shell-flat: #a6c2b0;
+  --app-shell: radial-gradient(circle at top left, rgba(233, 118, 47, 0.18), transparent 26%),
+    radial-gradient(circle at top right, rgba(48, 109, 88, 0.22), transparent 24%),
+    linear-gradient(180deg, #b8cfbf 0%, #a6c2b0 54%, #96b2a2 100%);
+  --app-surface: rgba(252, 248, 242, 0.88);
+  --app-surface-strong: rgba(255, 252, 246, 0.97);
+  --app-surface-muted: #c8ddd3;
+  --app-surface-subtle: #f0ebe0;
   --app-surface-inverse: #385146;
   --app-surface-inverse-soft: rgba(255, 255, 255, 0.06);
-  --app-border: rgba(24, 33, 29, 0.12);
-  --app-border-strong: rgba(24, 33, 29, 0.2);
+  --app-border: rgba(24, 33, 29, 0.18);
+  --app-border-strong: rgba(24, 33, 29, 0.28);
   --app-border-inverse: rgba(255, 255, 255, 0.18);
   --app-text: #18211d;
   --app-text-muted: #60716a;
@@ -42,7 +42,7 @@
   --app-danger-strong: #8f302d;
   --app-danger-soft: #f5d8d5;
   --app-danger-text: #8b2d2a;
-  --app-shadow: 0 22px 70px rgba(24, 33, 29, 0.12);
+  --app-shadow: 0 22px 70px rgba(24, 33, 29, 0.18);
 }
 
 :root[data-theme='dark'] {
