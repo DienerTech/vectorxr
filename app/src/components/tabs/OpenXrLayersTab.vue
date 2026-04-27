@@ -17,10 +17,12 @@ import {
 const props = defineProps<{
   snapshot: OpenXrLayerSnapshot | null
   loading: boolean
+  machineWritesUnlocked: boolean
 }>()
 
 const emit = defineEmits<{
   refresh: []
+  machineWritesUnlocked: [unlocked: boolean]
   snapshotUpdated: [snapshot: OpenXrLayerSnapshot]
   status: [message: string]
 }>()
@@ -28,11 +30,10 @@ const emit = defineEmits<{
 const activeSliceId = ref<OpenXrLayerRegistrySliceId>('hklm64')
 const selectedLayer = ref<OpenXrLayerEntry | null>(null)
 const busyKey = ref<string | null>(null)
-const machineWritesUnlocked = ref(false)
 const unlockingMachineWrites = ref(false)
 
 const activeSlice = computed(() => props.snapshot?.slices.find((slice) => slice.id === activeSliceId.value) ?? null)
-const activeSliceReadOnly = computed(() => activeSlice.value?.requiresElevationForWrites === true && !machineWritesUnlocked.value)
+const activeSliceReadOnly = computed(() => activeSlice.value?.requiresElevationForWrites === true && !props.machineWritesUnlocked)
 const uncommonLayerCount = computed(
   () => props.snapshot?.slices.filter((slice) => slice.uncommon).reduce((count, slice) => count + slice.layers.length, 0) ?? 0,
 )
@@ -63,7 +64,7 @@ async function unlockMachineWrites() {
 
   try {
     await ensureOpenXrLayerElevation()
-    machineWritesUnlocked.value = true
+    emit('machineWritesUnlocked', true)
     emit('status', 'Machine-wide OpenXR layer writes are unlocked for this app session.')
     await nextTick()
   } catch (error) {
@@ -268,7 +269,7 @@ function elevatedWriteTooltip(action: string, slice: OpenXrLayerRegistrySlice): 
     return `${action} This per-user hive should not require administrator approval.`
   }
 
-  if (!machineWritesUnlocked.value) {
+  if (!props.machineWritesUnlocked) {
     return `${action} Unlock admin writes before changing machine-wide OpenXR layers.`
   }
 
@@ -392,26 +393,25 @@ function signatureGuidance(layer: OpenXrLayerEntry): string {
             <p class="mt-1 text-sm leading-6 text-muted">{{ sliceDescription(activeSlice) }}</p>
           </div>
           <div class="flex max-w-full flex-wrap items-center justify-end gap-2">
-            <button
-              v-if="activeSlice.requiresElevationForWrites && !machineWritesUnlocked"
-              class="button-accent rounded-[0.75rem] px-4 py-2 text-sm font-medium"
-              type="button"
-              :disabled="unlockingMachineWrites || busyKey !== null"
-              title="Request administrator approval once, then enable machine-wide OpenXR layer controls for this app session."
-              @click.stop="unlockMachineWrites"
-            >
-              {{ unlockingMachineWrites ? 'Requesting...' : 'Unlock admin writes' }}
-            </button>
             <p class="max-w-full truncate font-mono text-xs text-soft">{{ activeSlice.registryPath }}</p>
           </div>
         </div>
 
         <div
           v-if="activeSliceReadOnly"
-          class="mt-3 rounded-[0.9rem] border px-3 py-2 text-sm leading-6 chip-warning"
+          class="mt-3 flex flex-wrap items-center justify-between gap-3 rounded-[0.9rem] border px-3 py-2 text-sm leading-6 chip-warning"
           style="border-color: var(--app-border)"
         >
-          Machine-wide layer controls are read-only until administrator approval is granted.
+          <span>Machine-wide layer controls are read-only until administrator approval is granted.</span>
+          <button
+            class="button-accent rounded-[0.7rem] px-3 py-1.5 text-sm font-medium"
+            type="button"
+            :disabled="unlockingMachineWrites || busyKey !== null"
+            title="Request administrator approval to enable machine-wide OpenXR layer controls for this app session."
+            @click.stop="unlockMachineWrites"
+          >
+            {{ unlockingMachineWrites ? 'Requesting...' : 'Unlock Admin Writes' }}
+          </button>
         </div>
 
         <div v-if="activeSlice.layers.length === 0" class="mt-3 rounded-[0.9rem] border border-dashed px-5 py-5 text-center text-sm surface-panel-soft">

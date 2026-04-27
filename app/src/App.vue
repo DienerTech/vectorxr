@@ -33,6 +33,7 @@ const importedConfig = ref<VectorXRConfig | null>(null)
 const importErrors = ref<string[]>([])
 const openXrLayerSnapshot = ref<OpenXrLayerSnapshot | null>(null)
 const openXrLayersLoading = ref(false)
+const openXrMachineWritesUnlocked = ref(false)
 
 const latestPatch = patchNotes[0]
 
@@ -253,7 +254,9 @@ async function confirmResetConfig() {
           v-else-if="store.state.activeTab === 'layers'"
           :snapshot="openXrLayerSnapshot"
           :loading="openXrLayersLoading"
+          :machine-writes-unlocked="openXrMachineWritesUnlocked"
           @refresh="refreshOpenXrLayers"
+          @machine-writes-unlocked="openXrMachineWritesUnlocked = $event"
           @snapshot-updated="openXrLayerSnapshot = $event"
           @status="store.state.status = $event"
         />
