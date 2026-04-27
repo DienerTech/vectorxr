@@ -228,6 +228,113 @@ textarea {
   color: var(--app-accent);
 }
 
+.button-accent:disabled,
+.button-secondary:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.button-accent:disabled:hover,
+.button-secondary:disabled:hover {
+  filter: none;
+  border-color: var(--app-border);
+  color: inherit;
+}
+
+.vectorxr-spinner {
+  position: relative;
+  display: inline-flex;
+  width: 0.95rem;
+  height: 0.95rem;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid color-mix(in srgb, currentColor 44%, transparent);
+  border-radius: 9999px;
+  overflow: hidden;
+}
+
+.vectorxr-spinner::before,
+.vectorxr-spinner::after {
+  content: "";
+  position: absolute;
+  width: 0.18rem;
+  height: 0.18rem;
+  border-radius: 9999px;
+  background: currentColor;
+  box-shadow: 0 0 0.4rem currentColor;
+}
+
+.vectorxr-spinner::before {
+  animation: vectorxr-orbit-a 0.9s linear infinite;
+}
+
+.vectorxr-spinner::after {
+  animation: vectorxr-orbit-b 0.9s linear infinite;
+}
+
+.vectorxr-spinner > span {
+  position: absolute;
+  width: 1.05rem;
+  height: 1px;
+  border-radius: 9999px;
+  background: currentColor;
+  opacity: 0.72;
+  transform-origin: center;
+  animation: vectorxr-slash 0.9s ease-in-out infinite;
+}
+
+.vectorxr-spinner > span:first-child {
+  transform: rotate(34deg);
+}
+
+.vectorxr-spinner > span:last-child {
+  animation-delay: 0.18s;
+  transform: rotate(-34deg);
+}
+
+@keyframes vectorxr-orbit-a {
+  0% {
+    transform: translate(-0.34rem, 0.28rem);
+    opacity: 0.45;
+  }
+  50% {
+    transform: translate(0.34rem, -0.28rem);
+    opacity: 1;
+  }
+  100% {
+    transform: translate(-0.34rem, 0.28rem);
+    opacity: 0.45;
+  }
+}
+
+@keyframes vectorxr-orbit-b {
+  0% {
+    transform: translate(0.34rem, 0.28rem);
+    opacity: 1;
+  }
+  50% {
+    transform: translate(-0.34rem, -0.28rem);
+    opacity: 0.45;
+  }
+  100% {
+    transform: translate(0.34rem, 0.28rem);
+    opacity: 1;
+  }
+}
+
+@keyframes vectorxr-slash {
+  0%,
+  100% {
+    opacity: 0.22;
+    scale: 0.72;
+  }
+  50% {
+    opacity: 0.82;
+    scale: 1;
+  }
+}
+
 .button-inverse {
   background: transparent;
   border: 1px solid var(--app-border-inverse);

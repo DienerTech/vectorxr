@@ -30,6 +30,7 @@ const emit = defineEmits<{
 const activeSliceId = ref<OpenXrLayerRegistrySliceId>('hklm64')
 const selectedLayer = ref<OpenXrLayerEntry | null>(null)
 const busyKey = ref<string | null>(null)
+const busyMoveSlotKey = ref<string | null>(null)
 const unlockingMachineWrites = ref(false)
 
 const activeSlice = computed(() => props.snapshot?.slices.find((slice) => slice.id === activeSliceId.value) ?? null)
@@ -82,6 +83,11 @@ async function toggleLayer(slice: OpenXrLayerRegistrySliceId, layer: OpenXrLayer
 
   const key = actionKey(layer, 'toggle')
   busyKey.value = key
+  const optimisticSnapshot = props.snapshot ? applyLayerEnabled(props.snapshot, slice, layer.manifestPath, !layer.enabled) : null
+  if (optimisticSnapshot) {
+    emit('snapshotUpdated', optimisticSnapshot)
+    updateSelectedLayer(optimisticSnapshot, slice, layer.manifestPath)
+  }
 
   try {
     const nextSnapshot = await setOpenXrLayerEnabled(slice, layer.manifestPath, !layer.enabled)
@@ -91,6 +97,7 @@ async function toggleLayer(slice: OpenXrLayerRegistrySliceId, layer: OpenXrLayer
     queueRefresh()
   } catch (error) {
     emit('status', error instanceof Error ? error.message : 'Failed to update OpenXR layer')
+    queueRefresh()
   } finally {
     busyKey.value = null
   }
@@ -104,6 +111,12 @@ async function moveLayer(slice: OpenXrLayerRegistrySliceId, layer: OpenXrLayerEn
 
   const key = actionKey(layer, direction)
   busyKey.value = key
+  busyMoveSlotKey.value = moveSlotKey(slice, layer.order, direction)
+  const optimisticSnapshot = props.snapshot ? applyLayerMove(props.snapshot, slice, layer.manifestPath, direction) : null
+  if (optimisticSnapshot) {
+    emit('snapshotUpdated', optimisticSnapshot)
+    updateSelectedLayer(optimisticSnapshot, slice, layer.manifestPath)
+  }
 
   try {
     const nextSnapshot = await moveOpenXrLayer(slice, layer.manifestPath, direction)
@@ -115,8 +128,10 @@ async function moveLayer(slice: OpenXrLayerRegistrySliceId, layer: OpenXrLayerEn
     queueRefresh()
   } catch (error) {
     emit('status', error instanceof Error ? error.message : 'Failed to reorder OpenXR layer')
+    queueRefresh()
   } finally {
     busyKey.value = null
+    busyMoveSlotKey.value = null
   }
 }
 
@@ -197,6 +212,18 @@ function queueRefresh() {
 
 function actionKey(layer: OpenXrLayerEntry, action: string): string {
   return `${layer.slice}:${layer.manifestPath}:${action}`
+}
+
+function isActionBusy(layer: OpenXrLayerEntry, action: string): boolean {
+  return busyKey.value === actionKey(layer, action)
+}
+
+function moveSlotKey(slice: OpenXrLayerRegistrySliceId, order: number, direction: OpenXrLayerMoveDirection): string {
+  return `${slice}:${order}:${direction}`
+}
+
+function isMoveSlotBusy(slice: OpenXrLayerRegistrySliceId, order: number, direction: OpenXrLayerMoveDirection): boolean {
+  return busyMoveSlotKey.value === moveSlotKey(slice, order, direction)
 }
 
 function isQuadViewsLayer(layer: OpenXrLayerEntry): boolean {
@@ -430,36 +457,48 @@ function signatureGuidance(layer: OpenXrLayerEntry): string {
                 <span class="min-w-[3.25rem] rounded-full px-2.5 py-1 text-center text-xs font-semibold uppercase tracking-[0.14em] chip-accent">#{{ layer.order }}</span>
                 <div class="flex flex-col gap-1">
                 <button
-                  class="button-secondary inline-flex h-7 w-8 items-center justify-center rounded-[0.5rem] text-sm font-semibold"
+                  class="button-secondary inline-flex h-7 w-8 items-center justify-center rounded-[0.5rem] text-sm font-semibold disabled:cursor-not-allowed disabled:opacity-60"
                   type="button"
                   aria-label="Move layer up"
                   :title="elevatedWriteTooltip('Move this layer earlier in this hive.', activeSlice)"
                   :disabled="busyKey !== null || activeSliceReadOnly || index === 0"
                   @click.stop="moveLayer(activeSlice.id, layer, 'up')"
                 >
-                  &uarr;
+                  <span v-if="isMoveSlotBusy(activeSlice.id, index + 1, 'up')" class="vectorxr-spinner" aria-hidden="true">
+                    <span></span>
+                    <span></span>
+                  </span>
+                  <span v-else>&uarr;</span>
                 </button>
                 <button
-                  class="button-secondary inline-flex h-7 w-8 items-center justify-center rounded-[0.5rem] text-sm font-semibold"
+                  class="button-secondary inline-flex h-7 w-8 items-center justify-center rounded-[0.5rem] text-sm font-semibold disabled:cursor-not-allowed disabled:opacity-60"
                   type="button"
                   aria-label="Move layer down"
                   :title="elevatedWriteTooltip('Move this layer later in this hive.', activeSlice)"
                   :disabled="busyKey !== null || activeSliceReadOnly || index === activeSlice.layers.length - 1"
                   @click.stop="moveLayer(activeSlice.id, layer, 'down')"
                 >
-                  &darr;
+                  <span v-if="isMoveSlotBusy(activeSlice.id, index + 1, 'down')" class="vectorxr-spinner" aria-hidden="true">
+                    <span></span>
+                    <span></span>
+                  </span>
+                  <span v-else>&darr;</span>
                 </button>
                 </div>
               </div>
 
               <button
-                class="w-[6.25rem] shrink-0 rounded-[0.7rem] border px-2.5 py-2 text-center transition"
+                class="inline-flex w-[6.25rem] shrink-0 items-center justify-center gap-2 rounded-[0.7rem] border px-2.5 py-2 text-center transition disabled:cursor-not-allowed disabled:opacity-60"
                 :class="layer.enabled ? 'chip-success' : 'chip-idle'"
                 type="button"
                 :title="elevatedWriteTooltip(`${layer.enabled ? 'Disable' : 'Enable'} this OpenXR layer.`, activeSlice)"
                 :disabled="busyKey !== null || activeSliceReadOnly"
                 @click.stop="toggleLayer(activeSlice.id, layer)"
               >
+                <span v-if="isActionBusy(layer, 'toggle')" class="vectorxr-spinner" aria-hidden="true">
+                  <span></span>
+                  <span></span>
+                </span>
                 <span class="block text-[0.68rem] font-semibold uppercase tracking-[0.16em]">{{ layer.enabled ? 'Enabled' : 'Disabled' }}</span>
               </button>
 
