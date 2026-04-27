@@ -30,7 +30,6 @@ const emit = defineEmits<{
 const activeSliceId = ref<OpenXrLayerRegistrySliceId>('hklm64')
 const selectedLayer = ref<OpenXrLayerEntry | null>(null)
 const busyKey = ref<string | null>(null)
-const busyMoveSlotKey = ref<string | null>(null)
 const unlockingMachineWrites = ref(false)
 
 const activeSlice = computed(() => props.snapshot?.slices.find((slice) => slice.id === activeSliceId.value) ?? null)
@@ -111,7 +110,6 @@ async function moveLayer(slice: OpenXrLayerRegistrySliceId, layer: OpenXrLayerEn
 
   const key = actionKey(layer, direction)
   busyKey.value = key
-  busyMoveSlotKey.value = moveSlotKey(slice, layer.order, direction)
   const optimisticSnapshot = props.snapshot ? applyLayerMove(props.snapshot, slice, layer.manifestPath, direction) : null
   if (optimisticSnapshot) {
     emit('snapshotUpdated', optimisticSnapshot)
@@ -131,7 +129,6 @@ async function moveLayer(slice: OpenXrLayerRegistrySliceId, layer: OpenXrLayerEn
     queueRefresh()
   } finally {
     busyKey.value = null
-    busyMoveSlotKey.value = null
   }
 }
 
@@ -216,14 +213,6 @@ function actionKey(layer: OpenXrLayerEntry, action: string): string {
 
 function isActionBusy(layer: OpenXrLayerEntry, action: string): boolean {
   return busyKey.value === actionKey(layer, action)
-}
-
-function moveSlotKey(slice: OpenXrLayerRegistrySliceId, order: number, direction: OpenXrLayerMoveDirection): string {
-  return `${slice}:${order}:${direction}`
-}
-
-function isMoveSlotBusy(slice: OpenXrLayerRegistrySliceId, order: number, direction: OpenXrLayerMoveDirection): boolean {
-  return busyMoveSlotKey.value === moveSlotKey(slice, order, direction)
 }
 
 function isQuadViewsLayer(layer: OpenXrLayerEntry): boolean {
@@ -445,7 +434,7 @@ function signatureGuidance(layer: OpenXrLayerEntry): string {
           No implicit OpenXR layers are registered in this slice.
         </div>
 
-        <div v-else class="mt-3 space-y-2">
+        <TransitionGroup v-else name="openxr-layer-list" tag="div" class="mt-3 space-y-2">
           <article
             v-for="(layer, index) in activeSlice.layers"
             :key="`${activeSlice.id}-${layer.manifestPath}`"
@@ -464,11 +453,7 @@ function signatureGuidance(layer: OpenXrLayerEntry): string {
                   :disabled="busyKey !== null || activeSliceReadOnly || index === 0"
                   @click.stop="moveLayer(activeSlice.id, layer, 'up')"
                 >
-                  <span v-if="isMoveSlotBusy(activeSlice.id, index + 1, 'up')" class="vectorxr-spinner" aria-hidden="true">
-                    <span></span>
-                    <span></span>
-                  </span>
-                  <span v-else>&uarr;</span>
+                  &uarr;
                 </button>
                 <button
                   class="button-secondary inline-flex h-7 w-8 items-center justify-center rounded-[0.5rem] text-sm font-semibold disabled:cursor-not-allowed disabled:opacity-60"
@@ -478,11 +463,7 @@ function signatureGuidance(layer: OpenXrLayerEntry): string {
                   :disabled="busyKey !== null || activeSliceReadOnly || index === activeSlice.layers.length - 1"
                   @click.stop="moveLayer(activeSlice.id, layer, 'down')"
                 >
-                  <span v-if="isMoveSlotBusy(activeSlice.id, index + 1, 'down')" class="vectorxr-spinner" aria-hidden="true">
-                    <span></span>
-                    <span></span>
-                  </span>
-                  <span v-else>&darr;</span>
+                  &darr;
                 </button>
                 </div>
               </div>
@@ -556,7 +537,7 @@ function signatureGuidance(layer: OpenXrLayerEntry): string {
               </div>
             </div>
           </article>
-        </div>
+        </TransitionGroup>
       </article>
     </section>
 

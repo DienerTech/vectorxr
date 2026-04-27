@@ -293,6 +293,23 @@ textarea {
   transform: rotate(-34deg);
 }
 
+.openxr-layer-list-move {
+  transition: transform 180ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.openxr-layer-list-enter-active,
+.openxr-layer-list-leave-active {
+  transition:
+    opacity 140ms ease,
+    transform 180ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.openxr-layer-list-enter-from,
+.openxr-layer-list-leave-to {
+  opacity: 0;
+  transform: translateY(0.35rem) scale(0.99);
+}
+
 @keyframes vectorxr-orbit-a {
   0% {
     transform: translate(-0.34rem, 0.28rem);
