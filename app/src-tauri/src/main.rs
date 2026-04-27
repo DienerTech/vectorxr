@@ -1060,6 +1060,11 @@ fn load_openxr_layers() -> Result<openxr_layers::OpenXrLayerSnapshot, String> {
 }
 
 #[tauri::command]
+fn ensure_openxr_layer_elevation() -> Result<(), String> {
+    openxr_layers::ensure_openxr_layer_elevation()
+}
+
+#[tauri::command]
 fn set_openxr_layer_enabled(
     slice: String,
     manifest_path: String,
@@ -1078,6 +1083,13 @@ fn move_openxr_layer(
 }
 
 fn main() {
+    if let Some(result) = openxr_layers::run_elevated_helper_from_args() {
+        if let Err(error) = result {
+            eprintln!("OpenXR elevated helper failed: {error}");
+        }
+        return;
+    }
+
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
             load_config,
@@ -1091,6 +1103,7 @@ fn main() {
             list_input_devices,
             capture_device_binding,
             load_openxr_layers,
+            ensure_openxr_layer_elevation,
             set_openxr_layer_enabled,
             move_openxr_layer
         ])

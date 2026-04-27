@@ -1,11 +1,31 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::HashMap;
 use std::env;
 use std::fs;
+use std::io::{BufRead, BufReader, Write};
+use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
+#[cfg(windows)]
+use windows::core::PWSTR;
+#[cfg(windows)]
+use windows::Win32::Foundation::{
+    ERROR_ACCESS_DENIED, ERROR_FILE_NOT_FOUND, ERROR_MORE_DATA, ERROR_NO_MORE_ITEMS, WIN32_ERROR,
+};
+#[cfg(windows)]
+use windows::Win32::System::Registry::{
+    RegCloseKey, RegDeleteValueW, RegEnumValueW, RegFlushKey, RegOpenKeyExW, RegSetValueExW, HKEY,
+    HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ, KEY_SET_VALUE, KEY_WOW64_32KEY,
+    KEY_WOW64_64KEY, REG_DWORD, REG_SAM_FLAGS,
+};
+
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -55,7 +75,45 @@ pub struct OpenXrLayerEntry {
     error: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ElevatedOpenXrRequest {
+    operation: ElevatedOpenXrOperation,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", tag = "type")]
+enum ElevatedOpenXrOperation {
+    Ping,
+    SetValue {
+        slice: String,
+        manifest_path: String,
+        value: i64,
+    },
+    RewriteValues {
+        slice: String,
+        values: Vec<RegistryValue>,
+    },
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ElevatedOpenXrResponse {
+    ok: bool,
+    error: Option<String>,
+}
+
+struct ElevatedOpenXrHelper {
+    reader: BufReader<TcpStream>,
+    writer: TcpStream,
+}
+
+struct ElevatedRequestError {
+    message: String,
+    recoverable: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "PascalCase")]
 struct RegistryValue {
     name: String,
@@ -86,6 +144,9 @@ struct SliceDefinition {
 }
 
 const IMPLICIT_KEY: &str = r"Software\Khronos\OpenXR\1\ApiLayers\Implicit";
+const ELEVATED_HELPER_ARG: &str = "--vectorxr-openxr-layer-helper";
+const ELEVATED_HELPER_TIMEOUT: Duration = Duration::from_secs(120);
+static ELEVATED_HELPER: OnceLock<Mutex<Option<ElevatedOpenXrHelper>>> = OnceLock::new();
 const SLICES: [SliceDefinition; 4] = [
     SliceDefinition {
         id: "hklm64",
@@ -132,6 +193,10 @@ pub fn load_openxr_layers() -> Result<OpenXrLayerSnapshot, String> {
         .collect::<Result<Vec<_>, _>>()?;
 
     Ok(OpenXrLayerSnapshot { slices })
+}
+
+pub fn ensure_openxr_layer_elevation() -> Result<(), String> {
+    run_elevated_registry_operation(ElevatedOpenXrOperation::Ping)
 }
 
 pub fn set_openxr_layer_enabled(
@@ -319,6 +384,15 @@ fn find_slice(slice: &str) -> Result<&'static SliceDefinition, String> {
         .ok_or_else(|| "Unknown OpenXR registry slice".to_string())
 }
 
+fn slice_for_elevated_operation(slice: &str) -> Result<&'static SliceDefinition, String> {
+    let definition = find_slice(slice)?;
+    if !matches!(definition.hive, RegistryHive::LocalMachine) {
+        return Err("Elevated OpenXR helper only accepts machine-wide registry operations".into());
+    }
+
+    Ok(definition)
+}
+
 fn registry_path_label(definition: &SliceDefinition) -> String {
     let hive = match definition.hive {
         RegistryHive::LocalMachine => "HKLM",
@@ -333,35 +407,25 @@ fn registry_path_label(definition: &SliceDefinition) -> String {
     format!(r"{hive}\{prefix}{}", definition.key_path)
 }
 
-fn powershell_registry_hive(hive: RegistryHive) -> &'static str {
-    match hive {
-        RegistryHive::LocalMachine => "LocalMachine",
-        RegistryHive::CurrentUser => "CurrentUser",
-    }
-}
-
-fn powershell_registry_view(view: RegistryView) -> &'static str {
-    match view {
-        RegistryView::Registry64 => "Registry64",
-        RegistryView::Registry32 => "Registry32",
-    }
-}
-
 fn escape_powershell_single_quoted(value: &str) -> String {
     value.replace('\'', "''")
 }
 
 fn run_powershell(script: &str) -> Result<String, String> {
-    let output = Command::new("powershell.exe")
+    let mut command = Command::new("powershell.exe");
+    command
         .arg("-NoProfile")
         .arg("-NonInteractive")
         .arg("-ExecutionPolicy")
         .arg("Bypass")
         .arg("-Command")
         .arg(script)
-        .stdin(Stdio::null())
-        .output()
-        .map_err(|error| error.to_string())?;
+        .stdin(Stdio::null());
+
+    #[cfg(windows)]
+    command.creation_flags(CREATE_NO_WINDOW);
+
+    let output = command.output().map_err(|error| error.to_string())?;
 
     if output.status.success() {
         Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
@@ -377,107 +441,457 @@ fn run_powershell(script: &str) -> Result<String, String> {
     }
 }
 
-fn run_powershell_elevated(script: &str) -> Result<(), String> {
-    let suffix = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_millis())
-        .unwrap_or_default();
-    let script_path = env::temp_dir().join(format!(
-        "vectorxr-openxr-layer-write-{}-{suffix}.ps1",
-        std::process::id()
-    ));
-    let result_path = env::temp_dir().join(format!(
-        "vectorxr-openxr-layer-write-{}-{suffix}.txt",
-        std::process::id()
-    ));
-    let wrapped_script = format!(
-        r#"
-$ErrorActionPreference = 'Stop'
-try {{
-{script}
-  Set-Content -LiteralPath '{result_path}' -Value 'OK' -Encoding UTF8
-  exit 0
-}} catch {{
-  Set-Content -LiteralPath '{result_path}' -Value ('ERROR: ' + $_.Exception.Message) -Encoding UTF8
-  exit 1
-}}
-"#,
-        script = script,
-        result_path = escape_powershell_single_quoted(&result_path.to_string_lossy())
-    );
+fn run_elevated_registry_operation(operation: ElevatedOpenXrOperation) -> Result<(), String> {
+    let helper_lock = ELEVATED_HELPER.get_or_init(|| Mutex::new(None));
+    let mut helper_guard = helper_lock
+        .lock()
+        .map_err(|_| "OpenXR elevated helper state is unavailable".to_string())?;
 
-    fs::write(&script_path, wrapped_script).map_err(|error| error.to_string())?;
-
-    let launch_script = format!(
-        r#"
-$process = Start-Process -FilePath 'powershell.exe' -ArgumentList '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{script_path}"' -Verb RunAs -Wait -PassThru
-if ($null -eq $process) {{ exit 1 }}
-exit $process.ExitCode
-"#,
-        script_path = script_path.to_string_lossy().replace('"', "`\""),
-    );
-
-    let launch_result = run_powershell(&launch_script);
-    let result_content = fs::read_to_string(&result_path).unwrap_or_default();
-    let _ = fs::remove_file(&script_path);
-    let _ = fs::remove_file(&result_path);
-
-    if let Err(error) = launch_result {
-        if result_content.trim().starts_with("ERROR:") {
-            return Err(result_content.trim().to_string());
-        }
-
-        if error.to_ascii_lowercase().contains("canceled") {
-            return Err("OpenXR layer change was canceled at the elevation prompt.".into());
-        }
-
-        return Err(error);
+    let had_helper = helper_guard.is_some();
+    if !had_helper {
+        *helper_guard = Some(start_elevated_helper()?);
     }
 
-    if result_content.trim() == "OK" {
+    let request = ElevatedOpenXrRequest { operation };
+
+    match send_elevated_request(
+        helper_guard
+            .as_mut()
+            .expect("elevated helper was just initialized"),
+        &request,
+    ) {
+        Ok(()) => Ok(()),
+        Err(first_error) if first_error.recoverable && had_helper => {
+            *helper_guard = None;
+            let mut helper = start_elevated_helper()?;
+            let retry = send_elevated_request(&mut helper, &request);
+            *helper_guard = Some(helper);
+            retry.map_err(|error| error.message)
+        }
+        Err(first_error) if first_error.recoverable => {
+            std::thread::sleep(Duration::from_millis(150));
+            send_elevated_request(
+                helper_guard
+                    .as_mut()
+                    .expect("elevated helper should still be available"),
+                &request,
+            )
+            .map_err(|error| error.message)
+        }
+        Err(error) => Err(error.message),
+    }
+}
+
+fn start_elevated_helper() -> Result<ElevatedOpenXrHelper, String> {
+    let listener = TcpListener::bind("127.0.0.1:0").map_err(|error| error.to_string())?;
+    listener
+        .set_nonblocking(true)
+        .map_err(|error| error.to_string())?;
+    let address = listener
+        .local_addr()
+        .map_err(|error| error.to_string())?
+        .to_string();
+    let token = helper_token();
+    launch_elevated_helper_process(&address, &token)?;
+
+    let started = Instant::now();
+    while started.elapsed() < ELEVATED_HELPER_TIMEOUT {
+        match listener.accept() {
+            Ok((stream, _)) => {
+                let mut reader = BufReader::new(stream);
+                let mut received_token = String::new();
+                reader
+                    .read_line(&mut received_token)
+                    .map_err(|error| error.to_string())?;
+
+                if received_token.trim() != token {
+                    return Err("OpenXR elevated helper authentication failed".into());
+                }
+
+                let writer = reader
+                    .get_ref()
+                    .try_clone()
+                    .map_err(|error| error.to_string())?;
+                return Ok(ElevatedOpenXrHelper { reader, writer });
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(error) => return Err(error.to_string()),
+        }
+    }
+
+    Err("OpenXR layer change was canceled at the elevation prompt or the elevated helper did not start.".into())
+}
+
+fn launch_elevated_helper_process(address: &str, token: &str) -> Result<(), String> {
+    let executable = env::current_exe().map_err(|error| error.to_string())?;
+    let argument_list = format!(
+        "'{}','{}','{}'",
+        ELEVATED_HELPER_ARG,
+        address.replace('\'', "''"),
+        token.replace('\'', "''")
+    );
+    let script = format!(
+        r#"
+$process = Start-Process -FilePath '{executable}' -ArgumentList @({argument_list}) -Verb RunAs -WindowStyle Hidden -PassThru
+if ($null -eq $process) {{ exit 1 }}
+"#,
+        executable = escape_powershell_single_quoted(&executable.to_string_lossy()),
+        argument_list = argument_list,
+    );
+
+    run_powershell(&script).map(|_| ())
+}
+
+fn helper_token() -> String {
+    let suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    format!("{}-{suffix}", std::process::id())
+}
+
+fn send_elevated_request(
+    helper: &mut ElevatedOpenXrHelper,
+    request: &ElevatedOpenXrRequest,
+) -> Result<(), ElevatedRequestError> {
+    let payload = serde_json::to_string(request).map_err(recoverable_helper_error)?;
+    helper
+        .writer
+        .write_all(payload.as_bytes())
+        .and_then(|_| helper.writer.write_all(b"\n"))
+        .and_then(|_| helper.writer.flush())
+        .map_err(recoverable_helper_error)?;
+
+    let mut response_line = String::new();
+    helper
+        .reader
+        .read_line(&mut response_line)
+        .map_err(recoverable_helper_error)?;
+
+    if response_line.trim().is_empty() {
+        return Err(ElevatedRequestError {
+            message: "OpenXR elevated helper stopped before the change completed".into(),
+            recoverable: true,
+        });
+    }
+
+    let response = serde_json::from_str::<ElevatedOpenXrResponse>(response_line.trim())
+        .map_err(recoverable_helper_error)?;
+
+    if response.ok {
         Ok(())
-    } else if result_content.trim().starts_with("ERROR:") {
-        Err(result_content.trim().to_string())
     } else {
-        Err("OpenXR layer change was canceled or did not complete.".into())
+        Err(ElevatedRequestError {
+            message: response
+                .error
+                .unwrap_or_else(|| "OpenXR elevated registry operation failed".into()),
+            recoverable: false,
+        })
+    }
+}
+
+fn recoverable_helper_error(error: impl ToString) -> ElevatedRequestError {
+    ElevatedRequestError {
+        message: error.to_string(),
+        recoverable: true,
+    }
+}
+
+pub fn run_elevated_helper_from_args() -> Option<Result<(), String>> {
+    let mut args = env::args().skip(1);
+    if args.next().as_deref() != Some(ELEVATED_HELPER_ARG) {
+        return None;
+    }
+
+    let Some(address) = args.next() else {
+        return Some(Err("OpenXR elevated helper address is missing".into()));
+    };
+    let Some(token) = args.next() else {
+        return Some(Err("OpenXR elevated helper token is missing".into()));
+    };
+
+    Some(run_elevated_helper(address, token))
+}
+
+fn run_elevated_helper(address: String, token: String) -> Result<(), String> {
+    let mut stream = TcpStream::connect(address).map_err(|error| error.to_string())?;
+    stream
+        .write_all(format!("{token}\n").as_bytes())
+        .and_then(|_| stream.flush())
+        .map_err(|error| error.to_string())?;
+
+    let reader_stream = stream.try_clone().map_err(|error| error.to_string())?;
+    let mut reader = BufReader::new(reader_stream);
+
+    loop {
+        let mut line = String::new();
+        let bytes_read = reader
+            .read_line(&mut line)
+            .map_err(|error| error.to_string())?;
+        if bytes_read == 0 {
+            return Ok(());
+        }
+
+        let response = match serde_json::from_str::<ElevatedOpenXrRequest>(line.trim()) {
+            Ok(request) => match run_elevated_operation(request.operation) {
+                Ok(()) => ElevatedOpenXrResponse {
+                    ok: true,
+                    error: None,
+                },
+                Err(error) => ElevatedOpenXrResponse {
+                    ok: false,
+                    error: Some(error),
+                },
+            },
+            Err(error) => ElevatedOpenXrResponse {
+                ok: false,
+                error: Some(error.to_string()),
+            },
+        };
+
+        let payload = serde_json::to_string(&response).map_err(|error| error.to_string())?;
+        stream
+            .write_all(payload.as_bytes())
+            .and_then(|_| stream.write_all(b"\n"))
+            .and_then(|_| stream.flush())
+            .map_err(|error| error.to_string())?;
+    }
+}
+
+fn run_elevated_operation(operation: ElevatedOpenXrOperation) -> Result<(), String> {
+    match operation {
+        ElevatedOpenXrOperation::Ping => Ok(()),
+        ElevatedOpenXrOperation::SetValue {
+            slice,
+            manifest_path,
+            value,
+        } => {
+            let definition = slice_for_elevated_operation(&slice)?;
+            write_registry_value_native(definition, &manifest_path, value)
+        }
+        ElevatedOpenXrOperation::RewriteValues { slice, values } => {
+            let definition = slice_for_elevated_operation(&slice)?;
+            rewrite_registry_values_native(definition, &values)
+        }
     }
 }
 
 fn read_registry_values(definition: &SliceDefinition) -> Result<Vec<RegistryValue>, String> {
-    let script = format!(
-        r#"
-$base = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::{hive}, [Microsoft.Win32.RegistryView]::{view})
-$key = $base.OpenSubKey('{key}', $false)
-if ($null -eq $key) {{
-  '[]'
-  exit 0
-}}
-$items = foreach ($name in $key.GetValueNames()) {{
-  [pscustomobject]@{{ Name = $name; Value = [int]$key.GetValue($name) }}
-}}
-$items | ConvertTo-Json -Compress
-"#,
-        hive = powershell_registry_hive(definition.hive),
-        view = powershell_registry_view(definition.view),
-        key = escape_powershell_single_quoted(definition.key_path),
-    );
-    let output = run_powershell(&script)?;
-    parse_registry_values(&output)
+    read_registry_values_native(definition)
 }
 
-fn parse_registry_values(output: &str) -> Result<Vec<RegistryValue>, String> {
-    let trimmed = output.trim();
-    if trimmed.is_empty() || trimmed == "null" {
-        return Ok(Vec::new());
+#[cfg(windows)]
+struct RegistryKeyHandle(HKEY);
+
+#[cfg(windows)]
+impl Drop for RegistryKeyHandle {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = RegCloseKey(self.0);
+        }
+    }
+}
+
+#[cfg(windows)]
+fn read_registry_values_native(definition: &SliceDefinition) -> Result<Vec<RegistryValue>, String> {
+    let key = match open_registry_key(definition, KEY_READ) {
+        Ok(key) => key,
+        Err(error) if error == ERROR_FILE_NOT_FOUND => return Ok(Vec::new()),
+        Err(error) => return Err(registry_error("open OpenXR registry key", error)),
+    };
+
+    let mut values = Vec::new();
+    let mut index = 0;
+
+    loop {
+        let mut name_buffer = vec![0u16; 32768];
+        let mut name_len = name_buffer.len() as u32;
+        let mut value_type = 0u32;
+        let mut data = [0u8; 4];
+        let mut data_len = data.len() as u32;
+        let status = unsafe {
+            RegEnumValueW(
+                key.0,
+                index,
+                Some(PWSTR(name_buffer.as_mut_ptr())),
+                &mut name_len,
+                None,
+                Some(&mut value_type),
+                Some(data.as_mut_ptr()),
+                Some(&mut data_len),
+            )
+        };
+
+        if status == ERROR_NO_MORE_ITEMS {
+            break;
+        }
+
+        if status == ERROR_MORE_DATA {
+            return Err("OpenXR registry value was larger than expected".into());
+        }
+
+        if status != WIN32_ERROR(0) {
+            return Err(registry_error("enumerate OpenXR registry values", status));
+        }
+
+        let name = String::from_utf16_lossy(&name_buffer[..name_len as usize]);
+        let value = if value_type == REG_DWORD.0 && data_len >= 4 {
+            u32::from_le_bytes(data) as i64
+        } else {
+            0
+        };
+        values.push(RegistryValue { name, value });
+        index += 1;
     }
 
-    if trimmed.starts_with('[') {
-        serde_json::from_str::<Vec<RegistryValue>>(trimmed).map_err(|error| error.to_string())
-    } else {
-        serde_json::from_str::<RegistryValue>(trimmed)
-            .map(|value| vec![value])
-            .map_err(|error| error.to_string())
+    Ok(values)
+}
+
+#[cfg(not(windows))]
+fn read_registry_values_native(
+    _definition: &SliceDefinition,
+) -> Result<Vec<RegistryValue>, String> {
+    Ok(Vec::new())
+}
+
+#[cfg(windows)]
+fn write_registry_value_native(
+    definition: &SliceDefinition,
+    manifest_path: &str,
+    value: i64,
+) -> Result<(), String> {
+    let key = open_registry_key(definition, KEY_SET_VALUE)
+        .map_err(|error| registry_error("open OpenXR registry key for writing", error))?;
+    set_registry_dword(&key, manifest_path, value as u32)?;
+    flush_registry_key(&key)
+}
+
+#[cfg(not(windows))]
+fn write_registry_value_native(
+    _definition: &SliceDefinition,
+    _manifest_path: &str,
+    _value: i64,
+) -> Result<(), String> {
+    Err("OpenXR registry writes are only supported on Windows".into())
+}
+
+#[cfg(windows)]
+fn rewrite_registry_values_native(
+    definition: &SliceDefinition,
+    values: &[RegistryValue],
+) -> Result<(), String> {
+    let existing = read_registry_values_native(definition)?;
+
+    {
+        let key = open_registry_key(definition, KEY_READ | KEY_SET_VALUE)
+            .map_err(|error| registry_error("open OpenXR registry key for reordering", error))?;
+
+        for value in existing {
+            let name = wide_null(&value.name);
+            let status = unsafe { RegDeleteValueW(key.0, PWSTR(name.as_ptr() as *mut u16)) };
+            if status != WIN32_ERROR(0) && status != ERROR_FILE_NOT_FOUND {
+                return Err(registry_error("delete OpenXR registry value", status));
+            }
+        }
+
+        flush_registry_key(&key)?;
     }
+
+    let key = open_registry_key(definition, KEY_SET_VALUE)
+        .map_err(|error| registry_error("reopen OpenXR registry key for reordering", error))?;
+
+    for value in values {
+        set_registry_dword(&key, &value.name, value.value as u32)?;
+    }
+
+    flush_registry_key(&key)
+}
+
+#[cfg(not(windows))]
+fn rewrite_registry_values_native(
+    _definition: &SliceDefinition,
+    _values: &[RegistryValue],
+) -> Result<(), String> {
+    Err("OpenXR registry writes are only supported on Windows".into())
+}
+
+#[cfg(windows)]
+fn open_registry_key(
+    definition: &SliceDefinition,
+    access: REG_SAM_FLAGS,
+) -> Result<RegistryKeyHandle, WIN32_ERROR> {
+    let root = match definition.hive {
+        RegistryHive::LocalMachine => HKEY_LOCAL_MACHINE,
+        RegistryHive::CurrentUser => HKEY_CURRENT_USER,
+    };
+    let view = match definition.view {
+        RegistryView::Registry64 => KEY_WOW64_64KEY,
+        RegistryView::Registry32 => KEY_WOW64_32KEY,
+    };
+    let path = wide_null(definition.key_path);
+    let mut key = HKEY(std::ptr::null_mut());
+    let status = unsafe {
+        RegOpenKeyExW(
+            root,
+            PWSTR(path.as_ptr() as *mut u16),
+            None,
+            access | view,
+            &mut key,
+        )
+    };
+
+    if status == WIN32_ERROR(0) {
+        Ok(RegistryKeyHandle(key))
+    } else {
+        Err(status)
+    }
+}
+
+#[cfg(windows)]
+fn set_registry_dword(key: &RegistryKeyHandle, name: &str, value: u32) -> Result<(), String> {
+    let name = wide_null(name);
+    let bytes = value.to_le_bytes();
+    let status = unsafe {
+        RegSetValueExW(
+            key.0,
+            PWSTR(name.as_ptr() as *mut u16),
+            None,
+            REG_DWORD,
+            Some(&bytes),
+        )
+    };
+
+    if status == WIN32_ERROR(0) {
+        Ok(())
+    } else {
+        Err(registry_error("set OpenXR registry value", status))
+    }
+}
+
+#[cfg(windows)]
+fn flush_registry_key(key: &RegistryKeyHandle) -> Result<(), String> {
+    let status = unsafe { RegFlushKey(key.0) };
+    if status == WIN32_ERROR(0) {
+        Ok(())
+    } else {
+        Err(registry_error("flush OpenXR registry key", status))
+    }
+}
+
+#[cfg(windows)]
+fn wide_null(value: &str) -> Vec<u16> {
+    value.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+#[cfg(windows)]
+fn registry_error(action: &str, error: WIN32_ERROR) -> String {
+    if error == ERROR_ACCESS_DENIED {
+        return "This OpenXR layer change requires elevation.".into();
+    }
+
+    format!("Unable to {action}: Windows error {}", error.0)
 }
 
 fn write_registry_value(
@@ -485,24 +899,14 @@ fn write_registry_value(
     manifest_path: &str,
     value: i64,
 ) -> Result<(), String> {
-    let script = format!(
-        r#"
-$base = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::{hive}, [Microsoft.Win32.RegistryView]::{view})
-$key = $base.OpenSubKey('{key}', $true)
-if ($null -eq $key) {{ throw 'OpenXR implicit API layer registry key does not exist.' }}
-$key.SetValue('{name}', {value}, [Microsoft.Win32.RegistryValueKind]::DWord)
-"#,
-        hive = powershell_registry_hive(definition.hive),
-        view = powershell_registry_view(definition.view),
-        key = escape_powershell_single_quoted(definition.key_path),
-        name = escape_powershell_single_quoted(manifest_path),
-        value = value,
-    );
-
     if matches!(definition.hive, RegistryHive::LocalMachine) {
-        run_powershell_elevated(&script)
+        run_elevated_registry_operation(ElevatedOpenXrOperation::SetValue {
+            slice: definition.id.into(),
+            manifest_path: manifest_path.into(),
+            value,
+        })
     } else {
-        run_powershell(&script).map(|_| ())
+        write_registry_value_native(definition, manifest_path, value)
     }
 }
 
@@ -510,34 +914,13 @@ fn rewrite_registry_values(
     definition: &SliceDefinition,
     values: &[RegistryValue],
 ) -> Result<(), String> {
-    let mut names_literal = String::new();
-    for value in values {
-        names_literal.push_str(&format!(
-            "[pscustomobject]@{{ Name = '{}'; Value = {} }},",
-            escape_powershell_single_quoted(&value.name),
-            value.value
-        ));
-    }
-
-    let script = format!(
-        r#"
-$base = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::{hive}, [Microsoft.Win32.RegistryView]::{view})
-$key = $base.OpenSubKey('{key}', $true)
-if ($null -eq $key) {{ throw 'OpenXR implicit API layer registry key does not exist.' }}
-$values = @({values})
-foreach ($name in @($key.GetValueNames())) {{ $key.DeleteValue($name, $false) }}
-foreach ($item in $values) {{ $key.SetValue($item.Name, [int]$item.Value, [Microsoft.Win32.RegistryValueKind]::DWord) }}
-"#,
-        hive = powershell_registry_hive(definition.hive),
-        view = powershell_registry_view(definition.view),
-        key = escape_powershell_single_quoted(definition.key_path),
-        values = names_literal,
-    );
-
     if matches!(definition.hive, RegistryHive::LocalMachine) {
-        run_powershell_elevated(&script)
+        run_elevated_registry_operation(ElevatedOpenXrOperation::RewriteValues {
+            slice: definition.id.into(),
+            values: values.to_vec(),
+        })
     } else {
-        run_powershell(&script).map(|_| ())
+        rewrite_registry_values_native(definition, values)
     }
 }
 
@@ -568,7 +951,8 @@ impl SignatureInfo {
     fn unknown() -> Self {
         Self {
             status: "unknown".into(),
-            status_description: "Windows signature information is unavailable for this binary.".into(),
+            status_description: "Windows signature information is unavailable for this binary."
+                .into(),
             signer_subject: None,
             signer_issuer: None,
             signer_thumbprint: None,
@@ -638,13 +1022,4 @@ fn strip_urls(value: &str) -> String {
         .filter(|part| !part.starts_with("http://") && !part.starts_with("https://"))
         .collect::<Vec<_>>()
         .join(" ")
-}
-
-#[allow(dead_code)]
-fn _preserve_registry_value_order(values: &[RegistryValue]) -> HashMap<String, usize> {
-    values
-        .iter()
-        .enumerate()
-        .map(|(index, value)| (value.name.clone(), index))
-        .collect()
 }

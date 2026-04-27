@@ -255,6 +255,7 @@ async function confirmResetConfig() {
           :loading="openXrLayersLoading"
           @refresh="refreshOpenXrLayers"
           @snapshot-updated="openXrLayerSnapshot = $event"
+          @status="store.state.status = $event"
         />
         <DepthXrTab
           v-else-if="store.state.activeTab === 'depthxr'"

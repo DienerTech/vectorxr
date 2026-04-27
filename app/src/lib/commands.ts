@@ -292,6 +292,14 @@ export async function loadOpenXrLayers(): Promise<OpenXrLayerSnapshot> {
   return invoke<OpenXrLayerSnapshot>('load_openxr_layers')
 }
 
+export async function ensureOpenXrLayerElevation(): Promise<void> {
+  if (!tauriAvailable()) {
+    return
+  }
+
+  await invoke('ensure_openxr_layer_elevation')
+}
+
 export async function setOpenXrLayerEnabled(
   slice: OpenXrLayerRegistrySliceId,
   manifestPath: string,

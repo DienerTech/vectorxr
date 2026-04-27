@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, nextTick, ref, watch } from 'vue'
 
 import {
+  ensureOpenXrLayerElevation,
   moveOpenXrLayer,
   openFileDirectory,
   setOpenXrLayerEnabled,
@@ -21,14 +22,17 @@ const props = defineProps<{
 const emit = defineEmits<{
   refresh: []
   snapshotUpdated: [snapshot: OpenXrLayerSnapshot]
+  status: [message: string]
 }>()
 
 const activeSliceId = ref<OpenXrLayerRegistrySliceId>('hklm64')
 const selectedLayer = ref<OpenXrLayerEntry | null>(null)
 const busyKey = ref<string | null>(null)
-const status = ref('')
+const machineWritesUnlocked = ref(false)
+const unlockingMachineWrites = ref(false)
 
 const activeSlice = computed(() => props.snapshot?.slices.find((slice) => slice.id === activeSliceId.value) ?? null)
+const activeSliceReadOnly = computed(() => activeSlice.value?.requiresElevationForWrites === true && !machineWritesUnlocked.value)
 const uncommonLayerCount = computed(
   () => props.snapshot?.slices.filter((slice) => slice.uncommon).reduce((count, slice) => count + slice.layers.length, 0) ?? 0,
 )
@@ -54,35 +58,62 @@ watch(() => props.snapshot, (value) => {
   }
 })
 
+async function unlockMachineWrites() {
+  unlockingMachineWrites.value = true
+
+  try {
+    await ensureOpenXrLayerElevation()
+    machineWritesUnlocked.value = true
+    emit('status', 'Machine-wide OpenXR layer writes are unlocked for this app session.')
+    await nextTick()
+  } catch (error) {
+    emit('status', error instanceof Error ? error.message : 'Administrator approval was not granted')
+  } finally {
+    unlockingMachineWrites.value = false
+  }
+}
+
 async function toggleLayer(slice: OpenXrLayerRegistrySliceId, layer: OpenXrLayerEntry) {
+  if (activeSliceReadOnly.value) {
+    emit('status', 'Unlock admin writes before changing machine-wide OpenXR layers.')
+    return
+  }
+
   const key = actionKey(layer, 'toggle')
   busyKey.value = key
-  status.value = ''
 
   try {
     const nextSnapshot = await setOpenXrLayerEnabled(slice, layer.manifestPath, !layer.enabled)
-    emit('snapshotUpdated', nextSnapshot)
-    selectedLayer.value = findLayer(nextSnapshot, slice, layer.manifestPath)
-    status.value = `${layer.enabled ? 'Disabled' : 'Enabled'} ${layer.layerName}`
+    const visibleSnapshot = applyLayerEnabled(nextSnapshot, slice, layer.manifestPath, !layer.enabled)
+    emit('snapshotUpdated', visibleSnapshot)
+    updateSelectedLayer(visibleSnapshot, slice, layer.manifestPath)
+    queueRefresh()
   } catch (error) {
-    status.value = error instanceof Error ? error.message : 'Failed to update OpenXR layer'
+    emit('status', error instanceof Error ? error.message : 'Failed to update OpenXR layer')
   } finally {
     busyKey.value = null
   }
 }
 
 async function moveLayer(slice: OpenXrLayerRegistrySliceId, layer: OpenXrLayerEntry, direction: OpenXrLayerMoveDirection) {
+  if (activeSliceReadOnly.value) {
+    emit('status', 'Unlock admin writes before reordering machine-wide OpenXR layers.')
+    return
+  }
+
   const key = actionKey(layer, direction)
   busyKey.value = key
-  status.value = ''
 
   try {
     const nextSnapshot = await moveOpenXrLayer(slice, layer.manifestPath, direction)
-    emit('snapshotUpdated', nextSnapshot)
-    selectedLayer.value = findLayer(nextSnapshot, slice, layer.manifestPath)
-    status.value = `Moved ${layer.layerName} ${direction}`
+    const visibleSnapshot = findLayer(nextSnapshot, slice, layer.manifestPath)?.order === layer.order
+      ? applyLayerMove(nextSnapshot, slice, layer.manifestPath, direction)
+      : nextSnapshot
+    emit('snapshotUpdated', visibleSnapshot)
+    updateSelectedLayer(visibleSnapshot, slice, layer.manifestPath)
+    queueRefresh()
   } catch (error) {
-    status.value = error instanceof Error ? error.message : 'Failed to reorder OpenXR layer'
+    emit('status', error instanceof Error ? error.message : 'Failed to reorder OpenXR layer')
   } finally {
     busyKey.value = null
   }
@@ -96,12 +127,71 @@ async function openFolder(path: string | undefined) {
   try {
     await openFileDirectory(path)
   } catch (error) {
-    status.value = error instanceof Error ? error.message : 'Unable to open folder'
+    emit('status', error instanceof Error ? error.message : 'Unable to open folder')
   }
 }
 
 function findLayer(snapshot: OpenXrLayerSnapshot, slice: OpenXrLayerRegistrySliceId, manifestPath: string): OpenXrLayerEntry | null {
   return snapshot.slices.find((item) => item.id === slice)?.layers.find((layer) => layer.manifestPath === manifestPath) ?? null
+}
+
+function updateSelectedLayer(snapshot: OpenXrLayerSnapshot, slice: OpenXrLayerRegistrySliceId, manifestPath: string) {
+  if (selectedLayer.value) {
+    selectedLayer.value = findLayer(snapshot, slice, manifestPath)
+  }
+}
+
+function applyLayerEnabled(
+  snapshot: OpenXrLayerSnapshot,
+  sliceId: OpenXrLayerRegistrySliceId,
+  manifestPath: string,
+  enabled: boolean,
+): OpenXrLayerSnapshot {
+  return {
+    slices: snapshot.slices.map((slice) => ({
+      ...slice,
+      layers: slice.id === sliceId
+        ? slice.layers.map((layer) => layer.manifestPath === manifestPath ? { ...layer, enabled } : layer)
+        : slice.layers,
+    })),
+  }
+}
+
+function applyLayerMove(
+  snapshot: OpenXrLayerSnapshot,
+  sliceId: OpenXrLayerRegistrySliceId,
+  manifestPath: string,
+  direction: OpenXrLayerMoveDirection,
+): OpenXrLayerSnapshot {
+  return {
+    slices: snapshot.slices.map((slice) => {
+      if (slice.id !== sliceId) {
+        return slice
+      }
+
+      const layers = [...slice.layers]
+      const index = layers.findIndex((layer) => layer.manifestPath === manifestPath)
+      const targetIndex = direction === 'up' ? index - 1 : index + 1
+
+      if (index < 0 || targetIndex < 0 || targetIndex >= layers.length) {
+        return slice
+      }
+
+      const [layer] = layers.splice(index, 1)
+      layers.splice(targetIndex, 0, layer)
+
+      return {
+        ...slice,
+        layers: layers.map((layer, layerIndex) => ({ ...layer, order: layerIndex + 1 })),
+      }
+    }),
+  }
+}
+
+function queueRefresh() {
+  window.setTimeout(() => {
+    emit('refresh')
+  }, 250)
 }
 
 function actionKey(layer: OpenXrLayerEntry, action: string): string {
@@ -173,6 +263,18 @@ function quadViewsTooltip(): string {
   return 'Quad-Views-Foveated layer. For Pivot compatibility, this should occur above the VectorXR layer in the same registry slice.'
 }
 
+function elevatedWriteTooltip(action: string, slice: OpenXrLayerRegistrySlice): string {
+  if (!slice.requiresElevationForWrites) {
+    return `${action} This per-user hive should not require administrator approval.`
+  }
+
+  if (!machineWritesUnlocked.value) {
+    return `${action} Unlock admin writes before changing machine-wide OpenXR layers.`
+  }
+
+  return `${action} Machine-wide writes are unlocked for this app session.`
+}
+
 function attentionTooltip(layer: OpenXrLayerEntry): string {
   if (layer.error) {
     return layer.error
@@ -239,9 +341,6 @@ function signatureGuidance(layer: OpenXrLayerEntry): string {
         {{ vectorQuadWarning.join(' ') }}
       </div>
 
-      <div v-if="status" class="mt-3 rounded-[0.9rem] border px-3 py-2 text-sm leading-6 surface-panel-strong">
-        {{ status }}
-      </div>
     </article>
 
     <section v-if="snapshot" class="rounded-[1.25rem] border p-3 shadow-panel surface-panel">
@@ -282,10 +381,37 @@ function signatureGuidance(layer: OpenXrLayerEntry): string {
               <span v-if="activeSlice.requiresElevationForWrites" class="rounded-full px-3 py-1 text-xs font-semibold uppercase tracking-[0.16em] chip-idle">
                 Admin writes
               </span>
+              <span
+                v-if="activeSlice.requiresElevationForWrites"
+                class="rounded-full px-3 py-1 text-xs font-semibold uppercase tracking-[0.16em]"
+                :class="machineWritesUnlocked ? 'chip-success' : 'chip-warning'"
+              >
+                {{ machineWritesUnlocked ? 'Unlocked' : 'Read only' }}
+              </span>
             </div>
             <p class="mt-1 text-sm leading-6 text-muted">{{ sliceDescription(activeSlice) }}</p>
           </div>
-          <p class="max-w-full truncate font-mono text-xs text-soft">{{ activeSlice.registryPath }}</p>
+          <div class="flex max-w-full flex-wrap items-center justify-end gap-2">
+            <button
+              v-if="activeSlice.requiresElevationForWrites && !machineWritesUnlocked"
+              class="button-accent rounded-[0.75rem] px-4 py-2 text-sm font-medium"
+              type="button"
+              :disabled="unlockingMachineWrites || busyKey !== null"
+              title="Request administrator approval once, then enable machine-wide OpenXR layer controls for this app session."
+              @click.stop="unlockMachineWrites"
+            >
+              {{ unlockingMachineWrites ? 'Requesting...' : 'Unlock admin writes' }}
+            </button>
+            <p class="max-w-full truncate font-mono text-xs text-soft">{{ activeSlice.registryPath }}</p>
+          </div>
+        </div>
+
+        <div
+          v-if="activeSliceReadOnly"
+          class="mt-3 rounded-[0.9rem] border px-3 py-2 text-sm leading-6 chip-warning"
+          style="border-color: var(--app-border)"
+        >
+          Machine-wide layer controls are read-only until administrator approval is granted.
         </div>
 
         <div v-if="activeSlice.layers.length === 0" class="mt-3 rounded-[0.9rem] border border-dashed px-5 py-5 text-center text-sm surface-panel-soft">
@@ -307,21 +433,21 @@ function signatureGuidance(layer: OpenXrLayerEntry): string {
                   class="button-secondary inline-flex h-7 w-8 items-center justify-center rounded-[0.5rem] text-sm font-semibold"
                   type="button"
                   aria-label="Move layer up"
-                  :title="activeSlice.requiresElevationForWrites ? 'Move this layer earlier in this hive. Windows may request administrator approval.' : 'Move this layer earlier in this hive.'"
-                  :disabled="busyKey !== null || index === 0"
-                  @click="moveLayer(activeSlice.id, layer, 'up')"
+                  :title="elevatedWriteTooltip('Move this layer earlier in this hive.', activeSlice)"
+                  :disabled="busyKey !== null || activeSliceReadOnly || index === 0"
+                  @click.stop="moveLayer(activeSlice.id, layer, 'up')"
                 >
-                  ↑
+                  &uarr;
                 </button>
                 <button
                   class="button-secondary inline-flex h-7 w-8 items-center justify-center rounded-[0.5rem] text-sm font-semibold"
                   type="button"
                   aria-label="Move layer down"
-                  :title="activeSlice.requiresElevationForWrites ? 'Move this layer later in this hive. Windows may request administrator approval.' : 'Move this layer later in this hive.'"
-                  :disabled="busyKey !== null || index === activeSlice.layers.length - 1"
-                  @click="moveLayer(activeSlice.id, layer, 'down')"
+                  :title="elevatedWriteTooltip('Move this layer later in this hive.', activeSlice)"
+                  :disabled="busyKey !== null || activeSliceReadOnly || index === activeSlice.layers.length - 1"
+                  @click.stop="moveLayer(activeSlice.id, layer, 'down')"
                 >
-                  ↓
+                  &darr;
                 </button>
                 </div>
               </div>
@@ -330,9 +456,9 @@ function signatureGuidance(layer: OpenXrLayerEntry): string {
                 class="w-[6.25rem] shrink-0 rounded-[0.7rem] border px-2.5 py-2 text-center transition"
                 :class="layer.enabled ? 'chip-success' : 'chip-idle'"
                 type="button"
-                :title="`${layer.enabled ? 'Disable' : 'Enable'} this OpenXR layer. ${activeSlice.requiresElevationForWrites ? 'Windows may request administrator approval for changes in this hive.' : 'This per-user hive should not require administrator approval.'}`"
-                :disabled="busyKey !== null"
-                @click="toggleLayer(activeSlice.id, layer)"
+                :title="elevatedWriteTooltip(`${layer.enabled ? 'Disable' : 'Enable'} this OpenXR layer.`, activeSlice)"
+                :disabled="busyKey !== null || activeSliceReadOnly"
+                @click.stop="toggleLayer(activeSlice.id, layer)"
               >
                 <span class="block text-[0.68rem] font-semibold uppercase tracking-[0.16em]">{{ layer.enabled ? 'Enabled' : 'Disabled' }}</span>
               </button>
@@ -382,7 +508,7 @@ function signatureGuidance(layer: OpenXrLayerEntry): string {
                   </div>
 
                   <div class="flex shrink-0 flex-wrap justify-end gap-2">
-                    <button class="button-secondary rounded-[0.65rem] px-3 py-1.5 text-xs font-medium" type="button" @click="selectedLayer = layer">
+                    <button class="button-secondary rounded-[0.65rem] px-3 py-1.5 text-xs font-medium" type="button" @click.stop="selectedLayer = layer">
                       Details
                     </button>
                   </div>
@@ -407,7 +533,7 @@ function signatureGuidance(layer: OpenXrLayerEntry): string {
             <h2 class="mt-2 truncate text-xl font-semibold tracking-tight">{{ selectedLayer.layerName }}</h2>
             <p class="mt-1 text-sm leading-6 text-muted">{{ selectedLayer.description }}</p>
           </div>
-          <button class="button-secondary rounded-[0.75rem] px-4 py-2 text-sm font-medium" type="button" @click="selectedLayer = null">
+          <button class="button-secondary rounded-[0.75rem] px-4 py-2 text-sm font-medium" type="button" @click.stop="selectedLayer = null">
             Close
           </button>
         </div>
@@ -420,7 +546,7 @@ function signatureGuidance(layer: OpenXrLayerEntry): string {
               <span class="rounded-full px-3 py-1 text-xs font-semibold uppercase tracking-[0.16em]" :class="selectedLayer.manifestExists ? 'chip-success' : 'chip-warning'">
                 {{ selectedLayer.manifestExists ? 'Found' : 'Missing' }}
               </span>
-              <button class="button-secondary rounded-[0.6rem] px-3 py-1.5 text-xs font-medium" type="button" @click="openFolder(selectedLayer.manifestPath)">
+              <button class="button-secondary rounded-[0.6rem] px-3 py-1.5 text-xs font-medium" type="button" @click.stop="openFolder(selectedLayer.manifestPath)">
                 Open Manifest Folder
               </button>
             </div>
@@ -444,7 +570,7 @@ function signatureGuidance(layer: OpenXrLayerEntry): string {
                 v-if="selectedLayer.libraryPath"
                 class="button-secondary rounded-[0.6rem] px-3 py-1.5 text-xs font-medium"
                 type="button"
-                @click="openFolder(selectedLayer.libraryPath)"
+                @click.stop="openFolder(selectedLayer.libraryPath)"
               >
                 Open DLL Folder
               </button>

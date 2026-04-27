@@ -18,4 +18,5 @@ windows = { version = "0.61.3", features = [
   "Win32_Devices_HumanInterfaceDevice",
   "Win32_Foundation",
   "Win32_System_LibraryLoader",
+  "Win32_System_Registry",
 ] }
