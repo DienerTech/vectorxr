@@ -203,6 +203,11 @@ textarea {
   color: var(--app-warning-text);
 }
 
+.chip-danger {
+  background: var(--app-danger-soft);
+  color: var(--app-danger-text);
+}
+
 .button-accent {
   background: var(--app-accent);
   color: #fff;
@@ -221,6 +226,130 @@ textarea {
 .button-secondary:hover {
   border-color: var(--app-accent);
   color: var(--app-accent);
+}
+
+.button-accent:disabled,
+.button-secondary:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.button-accent:disabled:hover,
+.button-secondary:disabled:hover {
+  filter: none;
+  border-color: var(--app-border);
+  color: inherit;
+}
+
+.vectorxr-spinner {
+  position: relative;
+  display: inline-flex;
+  width: 0.95rem;
+  height: 0.95rem;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid color-mix(in srgb, currentColor 44%, transparent);
+  border-radius: 9999px;
+  overflow: hidden;
+}
+
+.vectorxr-spinner::before,
+.vectorxr-spinner::after {
+  content: "";
+  position: absolute;
+  width: 0.18rem;
+  height: 0.18rem;
+  border-radius: 9999px;
+  background: currentColor;
+  box-shadow: 0 0 0.4rem currentColor;
+}
+
+.vectorxr-spinner::before {
+  animation: vectorxr-orbit-a 0.9s linear infinite;
+}
+
+.vectorxr-spinner::after {
+  animation: vectorxr-orbit-b 0.9s linear infinite;
+}
+
+.vectorxr-spinner > span {
+  position: absolute;
+  width: 1.05rem;
+  height: 1px;
+  border-radius: 9999px;
+  background: currentColor;
+  opacity: 0.72;
+  transform-origin: center;
+  animation: vectorxr-slash 0.9s ease-in-out infinite;
+}
+
+.vectorxr-spinner > span:first-child {
+  transform: rotate(34deg);
+}
+
+.vectorxr-spinner > span:last-child {
+  animation-delay: 0.18s;
+  transform: rotate(-34deg);
+}
+
+.openxr-layer-list-move {
+  transition: transform 180ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.openxr-layer-list-enter-active,
+.openxr-layer-list-leave-active {
+  transition:
+    opacity 140ms ease,
+    transform 180ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.openxr-layer-list-enter-from,
+.openxr-layer-list-leave-to {
+  opacity: 0;
+  transform: translateY(0.35rem) scale(0.99);
+}
+
+@keyframes vectorxr-orbit-a {
+  0% {
+    transform: translate(-0.34rem, 0.28rem);
+    opacity: 0.45;
+  }
+  50% {
+    transform: translate(0.34rem, -0.28rem);
+    opacity: 1;
+  }
+  100% {
+    transform: translate(-0.34rem, 0.28rem);
+    opacity: 0.45;
+  }
+}
+
+@keyframes vectorxr-orbit-b {
+  0% {
+    transform: translate(0.34rem, 0.28rem);
+    opacity: 1;
+  }
+  50% {
+    transform: translate(-0.34rem, -0.28rem);
+    opacity: 0.45;
+  }
+  100% {
+    transform: translate(0.34rem, 0.28rem);
+    opacity: 1;
+  }
+}
+
+@keyframes vectorxr-slash {
+  0%,
+  100% {
+    opacity: 0.22;
+    scale: 0.72;
+  }
+  50% {
+    opacity: 0.82;
+    scale: 1;
+  }
 }
 
 .button-inverse {
@@ -306,6 +435,11 @@ textarea {
 :root[data-theme='dark'] .tab-button-active .chip-idle {
   background: rgba(24, 33, 29, 0.14);
   color: #293832;
+}
+
+:root[data-theme='dark'] .tab-button-active .chip-danger {
+  background: rgba(139, 45, 42, 0.16);
+  color: #5f2524;
 }
 
 .mono-text {

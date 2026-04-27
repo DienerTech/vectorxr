@@ -8,6 +8,19 @@ export interface PatchNoteEntry {
 
 export const patchNotes: PatchNoteEntry[] = [
   {
+    version: '0.6.0',
+    date: '2026-04-26',
+    title: 'OpenXR layer manager',
+    summary: 'VectorXR can now inspect and manage implicit OpenXR API layers from inside the app.',
+    items: [
+      'Added an OpenXR Layers tab with registry-slice sub-tabs for machine-wide and per-user 64-bit and 32-bit implicit API layers.',
+      'Added layer enable/disable controls, adjacent move up/down ordering, and details for manifest paths, DLL paths, and Windows signature status.',
+      'Added VectorXR and Quad-Views-Foveated guidance so Pivot users can see when layer ordering may break quadviews compatibility.',
+      'Added on-demand elevation for machine-wide OpenXR layer changes instead of requiring VectorXR to always run as administrator.',
+      'Added a read-only Home status for the VectorXR OpenXR layer so users can tell whether OpenXR tweaks can apply at runtime.',
+    ],
+  },
+  {
     version: '0.5.1',
     date: '2026-04-26',
     title: 'Launch prep and icon pipeline cleanup',

@@ -68,6 +68,45 @@ export interface CapturedDeviceBinding {
   buttonIndex: number
 }
 
+export type OpenXrLayerRegistrySliceId = 'hklm64' | 'hkcu64' | 'hklm32' | 'hkcu32'
+export type OpenXrLayerSignatureStatus = 'signed' | 'unsigned' | 'invalid' | 'unknown'
+export type OpenXrLayerMoveDirection = 'up' | 'down'
+
+export interface OpenXrLayerEntry {
+  slice: OpenXrLayerRegistrySliceId
+  manifestPath: string
+  layerName: string
+  description: string
+  libraryPath?: string
+  enabled: boolean
+  order: number
+  signatureStatus: OpenXrLayerSignatureStatus
+  signatureStatusDescription: string
+  signatureSignerSubject?: string
+  signatureSignerIssuer?: string
+  signatureSignerThumbprint?: string
+  signatureSignerNotBefore?: string
+  signatureSignerNotAfter?: string
+  isVectorXr: boolean
+  manifestExists: boolean
+  libraryExists: boolean
+  error?: string
+}
+
+export interface OpenXrLayerRegistrySlice {
+  id: OpenXrLayerRegistrySliceId
+  label: string
+  registryPath: string
+  recommended: boolean
+  uncommon: boolean
+  requiresElevationForWrites: boolean
+  layers: OpenXrLayerEntry[]
+}
+
+export interface OpenXrLayerSnapshot {
+  slices: OpenXrLayerRegistrySlice[]
+}
+
 function tauriAvailable(): boolean {
   return typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
 }
@@ -231,4 +270,48 @@ export async function clearSeenApps(): Promise<string> {
   }
 
   return invoke<string>('clear_seen_apps')
+}
+
+export async function loadOpenXrLayers(): Promise<OpenXrLayerSnapshot> {
+  if (!tauriAvailable()) {
+    return {
+      slices: [
+        {
+          id: 'hklm64',
+          label: 'Machine-wide 64-bit',
+          registryPath: String.raw`HKLM\Software\Khronos\OpenXR\1\ApiLayers\Implicit`,
+          recommended: true,
+          uncommon: false,
+          requiresElevationForWrites: true,
+          layers: [],
+        },
+      ],
+    }
+  }
+
+  return invoke<OpenXrLayerSnapshot>('load_openxr_layers')
+}
+
+export async function ensureOpenXrLayerElevation(): Promise<void> {
+  if (!tauriAvailable()) {
+    return
+  }
+
+  await invoke('ensure_openxr_layer_elevation')
+}
+
+export async function setOpenXrLayerEnabled(
+  slice: OpenXrLayerRegistrySliceId,
+  manifestPath: string,
+  enabled: boolean,
+): Promise<OpenXrLayerSnapshot> {
+  return invoke<OpenXrLayerSnapshot>('set_openxr_layer_enabled', { slice, manifestPath, enabled })
+}
+
+export async function moveOpenXrLayer(
+  slice: OpenXrLayerRegistrySliceId,
+  manifestPath: string,
+  direction: OpenXrLayerMoveDirection,
+): Promise<OpenXrLayerSnapshot> {
+  return invoke<OpenXrLayerSnapshot>('move_openxr_layer', { slice, manifestPath, direction })
 }

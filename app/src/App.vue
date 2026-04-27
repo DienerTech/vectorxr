@@ -10,8 +10,9 @@ import TopNavTabs from './components/TopNavTabs.vue'
 import AboutTab from './components/tabs/AboutTab.vue'
 import CoreTab from './components/tabs/CoreTab.vue'
 import DepthXrTab from './components/tabs/DepthXrTab.vue'
+import OpenXrLayersTab from './components/tabs/OpenXrLayersTab.vue'
 import PivotXrTab from './components/tabs/PivotXrTab.vue'
-import { exportConfigFile, loadLogSnapshot, type LogSnapshot } from './lib/commands'
+import { exportConfigFile, loadLogSnapshot, loadOpenXrLayers, type LogSnapshot, type OpenXrLayerSnapshot } from './lib/commands'
 import { normalizeConfig, type VectorXRConfig } from './lib/model'
 import { patchNotes } from './lib/patchNotes'
 import { applyThemePreference, loadThemePreference, observeSystemThemeChanges, type ThemePreference } from './lib/theme'
@@ -30,6 +31,9 @@ const importFileInput = ref<HTMLInputElement | null>(null)
 const importPreviewOpen = ref(false)
 const importedConfig = ref<VectorXRConfig | null>(null)
 const importErrors = ref<string[]>([])
+const openXrLayerSnapshot = ref<OpenXrLayerSnapshot | null>(null)
+const openXrLayersLoading = ref(false)
+const openXrMachineWritesUnlocked = ref(false)
 
 const latestPatch = patchNotes[0]
 
@@ -45,6 +49,12 @@ const tabs = computed(() => [
     label: 'Application Registry',
     subtitle: 'Register applications for profile assignment',
     status: `${store.state.config.applications.length} app${store.state.config.applications.length === 1 ? '' : 's'}`,
+  },
+  {
+    id: 'layers' as const,
+    label: 'OpenXR Layers',
+    subtitle: 'Inspect and manage implicit layer order',
+    status: 'System',
   },
   {
     id: 'about' as const,
@@ -85,6 +95,7 @@ onMounted(() => {
 
   void store.load()
   void refreshLogs()
+  void refreshOpenXrLayers()
 })
 
 onUnmounted(() => {
@@ -109,6 +120,18 @@ async function refreshLogs() {
     store.state.status = error instanceof Error ? error.message : 'Failed to load logs'
   } finally {
     logViewerLoading.value = false
+  }
+}
+
+async function refreshOpenXrLayers() {
+  openXrLayersLoading.value = true
+
+  try {
+    openXrLayerSnapshot.value = await loadOpenXrLayers()
+  } catch (error) {
+    store.state.status = error instanceof Error ? error.message : 'Failed to load OpenXR layer status'
+  } finally {
+    openXrLayersLoading.value = false
   }
 }
 
@@ -206,6 +229,8 @@ async function confirmResetConfig() {
           :log-path="logSnapshot?.activePath"
           :theme-preference="themePreference"
           :settings-actions-disabled="store.state.loading || store.state.saving"
+          :open-xr-layer-snapshot="openXrLayerSnapshot"
+          :open-xr-layers-loading="openXrLayersLoading"
           @view-logs="openLogs"
           @import-config="triggerImport"
           @export-config="exportConfig"
@@ -225,6 +250,16 @@ async function confirmResetConfig() {
           @remove="store.removeApplication"
         />
         <AboutTab v-else-if="store.state.activeTab === 'about'" :latest-patch="latestPatch" @open-patch-notes="patchNotesOpen = true" />
+        <OpenXrLayersTab
+          v-else-if="store.state.activeTab === 'layers'"
+          :snapshot="openXrLayerSnapshot"
+          :loading="openXrLayersLoading"
+          :machine-writes-unlocked="openXrMachineWritesUnlocked"
+          @refresh="refreshOpenXrLayers"
+          @machine-writes-unlocked="openXrMachineWritesUnlocked = $event"
+          @snapshot-updated="openXrLayerSnapshot = $event"
+          @status="store.state.status = $event"
+        />
         <DepthXrTab
           v-else-if="store.state.activeTab === 'depthxr'"
           :config="store.state.config"
