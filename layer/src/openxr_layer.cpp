@@ -374,8 +374,9 @@ XrResult OpenXrLayer::OnInstanceCreated(const XrInstanceCreateInfo* create_info,
     }
 
     CaptureInstanceFunctions();
-    if (!next_destroy_instance_ || !next_create_session_ || !next_begin_session_ || !next_end_frame_ ||
-        !next_create_reference_space_ || !next_locate_space_ || !next_locate_views_) {
+    if (!next_destroy_instance_ || !next_create_session_ || !next_destroy_session_ || !next_begin_session_ ||
+        !next_end_frame_ || !next_create_reference_space_ || !next_destroy_space_ ||
+        !next_locate_space_ || !next_locate_views_) {
         logger_.Error("Failed to resolve required OpenXR function pointers");
         return XR_ERROR_INITIALIZATION_FAILED;
     }
@@ -407,12 +408,15 @@ XrResult OpenXrLayer::GetInstanceProcAddr(XrInstance instance, const char* name,
 XrResult OpenXrLayer::DestroyInstance(XrInstance instance) {
     std::scoped_lock lock(mutex_);
 
+    DestroyInternalReferenceSpaces();
     const XrResult result = next_destroy_instance_(instance);
     if (XR_SUCCEEDED(result)) {
         instance_ = XR_NULL_HANDLE;
         next_destroy_instance_ = nullptr;
         next_create_session_ = nullptr;
+        next_destroy_session_ = nullptr;
         next_create_reference_space_ = nullptr;
+        next_destroy_space_ = nullptr;
         next_end_frame_ = nullptr;
         next_locate_space_ = nullptr;
         next_locate_views_ = nullptr;
@@ -439,7 +443,31 @@ XrResult OpenXrLayer::CreateSession(XrInstance instance,
     std::scoped_lock lock(mutex_);
     ResetSessionState();
     active_session_ = *session;
-    return CreateInternalReferenceSpaces(*session);
+    const XrResult internal_result = CreateInternalReferenceSpaces(*session);
+    if (XR_FAILED(internal_result)) {
+        logger_.Error("Failed to create one or more internal reference spaces; PivotXR will degrade for this session.");
+        DestroyInternalReferenceSpaces();
+    }
+    return result;
+}
+
+XrResult OpenXrLayer::DestroySession(XrSession session) {
+    {
+        std::scoped_lock lock(mutex_);
+        if (session == active_session_) {
+            DestroyInternalReferenceSpaces();
+        }
+    }
+
+    const XrResult result = next_destroy_session_(session);
+    if (XR_SUCCEEDED(result)) {
+        std::scoped_lock lock(mutex_);
+        if (session == active_session_) {
+            ResetSessionState();
+        }
+    }
+
+    return result;
 }
 
 XrResult OpenXrLayer::BeginSession(XrSession session, const XrSessionBeginInfo* begin_info) {
@@ -465,6 +493,17 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
     }
 
     std::scoped_lock lock(mutex_);
+    ReloadConfigIfNeeded();
+    RefreshResolvedSettings();
+    if (!resolved_settings_.core.enabled || !resolved_settings_.pivotxr.enabled) {
+        cached_pivot_pose_deltas_.clear();
+        pivotxr_smoothed_extra_yaw_radians_ = 0.0;
+        pivotxr_smoothed_extra_pitch_radians_ = 0.0;
+        pivotxr_last_smoothing_wall_time_.reset();
+        PrunePivotPoseDeltas(frame_end_info->displayTime);
+        return next_end_frame_(session, frame_end_info);
+    }
+
     XrPosef pose_delta = IdentityPose();
     XrTime matched_time = 0;
     const bool has_pose_delta = FindPivotPoseDelta(frame_end_info->displayTime, &pose_delta, &matched_time);
@@ -580,6 +619,10 @@ XrResult OpenXrLayer::LocateSpace(XrSpace space, XrSpace base_space, XrTime time
     std::scoped_lock lock(mutex_);
     ReloadConfigIfNeeded();
     RefreshResolvedSettings();
+    if (!resolved_settings_.core.enabled) {
+        return next_locate_space_(space, base_space, time, location);
+    }
+
     const bool pivotxr_active = IsPivotXrActive(resolved_settings_.pivotxr);
     if (has_active_primary_view_configuration_ &&
         IsQuadViewConfiguration(active_primary_view_configuration_type_)) {
@@ -608,6 +651,9 @@ XrResult OpenXrLayer::LocateViews(XrSession session,
     RefreshResolvedSettings();
 
     if (!resolved_settings_.core.enabled) {
+        ResetPivotActivationState();
+        ResetDepthToggleState();
+        cached_pivot_pose_deltas_.clear();
         return result;
     }
 
@@ -864,6 +910,27 @@ XrResult OpenXrLayer::LocateViews(XrSession session,
     return result;
 }
 
+XrResult OpenXrLayer::DestroySpace(XrSpace space) {
+    const XrResult result = next_destroy_space_(space);
+    if (XR_SUCCEEDED(result)) {
+        std::scoped_lock lock(mutex_);
+        tracked_view_spaces_.erase(space);
+        tracked_local_spaces_.erase(space);
+        tracked_stage_spaces_.erase(space);
+        if (space == internal_view_space_) {
+            internal_view_space_ = XR_NULL_HANDLE;
+        }
+        if (space == internal_local_space_) {
+            internal_local_space_ = XR_NULL_HANDLE;
+        }
+        if (space == internal_stage_space_) {
+            internal_stage_space_ = XR_NULL_HANDLE;
+        }
+    }
+
+    return result;
+}
+
 void OpenXrLayer::ReloadConfigIfNeeded() {
     if (config_path_.empty()) {
         config_path_ = ResolveConfigPath();
@@ -945,6 +1012,11 @@ void OpenXrLayer::CaptureInstanceFunctions() {
     }
 
     function = nullptr;
+    if (XR_SUCCEEDED(next_get_instance_proc_addr_(instance_, "xrDestroySession", &function))) {
+        next_destroy_session_ = reinterpret_cast<PFN_xrDestroySession>(function);
+    }
+
+    function = nullptr;
     if (XR_SUCCEEDED(next_get_instance_proc_addr_(instance_, "xrBeginSession", &function))) {
         next_begin_session_ = reinterpret_cast<PFN_xrBeginSession>(function);
     }
@@ -957,6 +1029,11 @@ void OpenXrLayer::CaptureInstanceFunctions() {
     function = nullptr;
     if (XR_SUCCEEDED(next_get_instance_proc_addr_(instance_, "xrCreateReferenceSpace", &function))) {
         next_create_reference_space_ = reinterpret_cast<PFN_xrCreateReferenceSpace>(function);
+    }
+
+    function = nullptr;
+    if (XR_SUCCEEDED(next_get_instance_proc_addr_(instance_, "xrDestroySpace", &function))) {
+        next_destroy_space_ = reinterpret_cast<PFN_xrDestroySpace>(function);
     }
 
     function = nullptr;
@@ -1023,6 +1100,44 @@ XrResult OpenXrLayer::CreateInternalReferenceSpaces(XrSession session) {
     }
 
     return XR_SUCCESS;
+}
+
+void OpenXrLayer::DestroyInternalReferenceSpaces() {
+    if (!next_destroy_space_) {
+        internal_local_space_ = XR_NULL_HANDLE;
+        internal_view_space_ = XR_NULL_HANDLE;
+        internal_stage_space_ = XR_NULL_HANDLE;
+        tracked_local_spaces_.clear();
+        tracked_view_spaces_.clear();
+        tracked_stage_spaces_.clear();
+        cached_eye_offset_poses_.clear();
+        cached_pivot_pose_deltas_.clear();
+        return;
+    }
+
+    const XrSpace local_space = internal_local_space_;
+    const XrSpace view_space = internal_view_space_;
+    const XrSpace stage_space = internal_stage_space_;
+
+    internal_local_space_ = XR_NULL_HANDLE;
+    internal_view_space_ = XR_NULL_HANDLE;
+    internal_stage_space_ = XR_NULL_HANDLE;
+
+    if (local_space != XR_NULL_HANDLE) {
+        tracked_local_spaces_.erase(local_space);
+        next_destroy_space_(local_space);
+    }
+    if (view_space != XR_NULL_HANDLE) {
+        tracked_view_spaces_.erase(view_space);
+        next_destroy_space_(view_space);
+    }
+    if (stage_space != XR_NULL_HANDLE) {
+        tracked_stage_spaces_.erase(stage_space);
+        next_destroy_space_(stage_space);
+    }
+
+    cached_eye_offset_poses_.clear();
+    cached_pivot_pose_deltas_.clear();
 }
 
 bool OpenXrLayer::EnsureEyeOffsets(XrSession session,
