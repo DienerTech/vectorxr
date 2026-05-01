@@ -12,6 +12,7 @@ defineEmits<{
 
 const dienerTechUrl = "https://diener.tech";
 const githubUrl = "https://github.com/DienerTech/vectorxr";
+const koFiUrl = "https://ko-fi.com/dienertech";
 
 async function openLink(url: string) {
   await openExternalUrl(url);
@@ -39,10 +40,9 @@ Developed by DienerTech. Copyright DienerTech LLC.
         </div>
 
         <button
-          class="button-accent cursor-not-allowed rounded-[0.75rem] px-4 py-2 text-sm font-medium opacity-60"
-          disabled
+          class="button-accent rounded-[0.75rem] px-4 py-2 text-sm font-medium"
           type="button"
-          title="Ko-fi link coming soon"
+          @click="openLink(koFiUrl)"
         >
           Support on Ko-fi
         </button>
