@@ -672,6 +672,58 @@ fn ensure_parent(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
+fn temporary_write_path(path: &Path) -> PathBuf {
+    let file_name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("vectorxr.tmp");
+    let suffix = std::time::SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+
+    path.with_file_name(format!(
+        ".{file_name}.{}.{}.tmp",
+        std::process::id(),
+        suffix
+    ))
+}
+
+fn write_text_safely(path: &Path, content: &str) -> Result<(), String> {
+    ensure_parent(path)?;
+    let temporary_path = temporary_write_path(path);
+
+    if let Err(error) = fs::write(&temporary_path, content) {
+        let _ = fs::remove_file(&temporary_path);
+        return Err(error.to_string());
+    }
+
+    match fs::rename(&temporary_path, path) {
+        Ok(()) => Ok(()),
+        Err(first_error) => {
+            if path.exists() {
+                fs::remove_file(path).map_err(|error| {
+                    let _ = fs::remove_file(&temporary_path);
+                    format!(
+                        "Unable to replace {}: {}; original rename error: {}",
+                        path.to_string_lossy(),
+                        error,
+                        first_error
+                    )
+                })?;
+
+                fs::rename(&temporary_path, path).map_err(|error| {
+                    let _ = fs::remove_file(&temporary_path);
+                    error.to_string()
+                })
+            } else {
+                let _ = fs::remove_file(&temporary_path);
+                Err(first_error.to_string())
+            }
+        }
+    }
+}
+
 fn normalize_exe_display(value: &str) -> String {
     value
         .rsplit(['/', '\\'])
@@ -732,7 +784,7 @@ fn ensure_default_file(path: &Path) -> Result<(), String> {
     ensure_parent(path)?;
     let json =
         serde_json::to_string_pretty(&default_config()).map_err(|error| error.to_string())?;
-    fs::write(path, json).map_err(|error| error.to_string())
+    write_text_safely(path, &json)
 }
 
 fn is_log_timestamp_suffix(value: &str) -> bool {
@@ -843,11 +895,10 @@ fn load_config() -> Result<ConfigEnvelope, String> {
 #[tauri::command]
 fn save_config(config: VectorXRConfig) -> Result<String, String> {
     let path = resolve_config_path();
-    ensure_parent(&path)?;
 
     let content = serde_json::to_string_pretty(&normalize_config(config))
         .map_err(|error| error.to_string())?;
-    fs::write(&path, content).map_err(|error| error.to_string())?;
+    write_text_safely(&path, &content)?;
     Ok(path.to_string_lossy().into_owned())
 }
 
@@ -857,19 +908,16 @@ fn reset_stored_data() -> Result<ResetStoredDataEnvelope, String> {
     let seen_apps_path = resolve_seen_apps_path();
     let config = default_config();
 
-    ensure_parent(&config_path)?;
-    ensure_parent(&seen_apps_path)?;
-
     let config_content =
         serde_json::to_string_pretty(&config).map_err(|error| error.to_string())?;
-    fs::write(&config_path, config_content).map_err(|error| error.to_string())?;
+    write_text_safely(&config_path, &config_content)?;
 
     let seen_apps_content = serde_json::to_string_pretty(&SeenAppsDocument {
         version: 1,
         observations: Vec::new(),
     })
     .map_err(|error| error.to_string())?;
-    fs::write(&seen_apps_path, seen_apps_content).map_err(|error| error.to_string())?;
+    write_text_safely(&seen_apps_path, &seen_apps_content)?;
 
     Ok(ResetStoredDataEnvelope {
         config_path: config_path.to_string_lossy().into_owned(),
@@ -1044,13 +1092,12 @@ fn load_seen_apps() -> Result<SeenAppsEnvelope, String> {
 #[tauri::command]
 fn clear_seen_apps() -> Result<String, String> {
     let path = resolve_seen_apps_path();
-    ensure_parent(&path)?;
     let content = serde_json::to_string_pretty(&SeenAppsDocument {
         version: 1,
         observations: Vec::new(),
     })
     .map_err(|error| error.to_string())?;
-    fs::write(&path, content).map_err(|error| error.to_string())?;
+    write_text_safely(&path, &content)?;
     Ok(path.to_string_lossy().into_owned())
 }
 

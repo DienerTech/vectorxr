@@ -28,9 +28,11 @@ class OpenXrLayer {
     XrResult GetInstanceProcAddr(XrInstance instance, const char* name, PFN_xrVoidFunction* function);
     XrResult DestroyInstance(XrInstance instance);
     XrResult CreateSession(XrInstance instance, const XrSessionCreateInfo* create_info, XrSession* session);
+    XrResult DestroySession(XrSession session);
     XrResult BeginSession(XrSession session, const XrSessionBeginInfo* begin_info);
     XrResult EndFrame(XrSession session, const XrFrameEndInfo* frame_end_info);
     XrResult CreateReferenceSpace(XrSession session, const XrReferenceSpaceCreateInfo* create_info, XrSpace* space);
+    XrResult DestroySpace(XrSpace space);
     XrResult LocateSpace(XrSpace space, XrSpace base_space, XrTime time, XrSpaceLocation* location);
     XrResult LocateViews(XrSession session,
                          const XrViewLocateInfo* view_locate_info,
@@ -52,6 +54,7 @@ class OpenXrLayer {
     bool IsDepthXrActive();
     void ResetSessionState();
     XrResult CreateInternalReferenceSpaces(XrSession session);
+    void DestroyInternalReferenceSpaces();
     bool EnsureEyeOffsets(XrSession session,
                           XrViewConfigurationType view_configuration_type,
                           XrTime display_time,
@@ -114,9 +117,11 @@ class OpenXrLayer {
     PFN_xrGetInstanceProcAddr next_get_instance_proc_addr_{nullptr};
     PFN_xrDestroyInstance next_destroy_instance_{nullptr};
     PFN_xrCreateSession next_create_session_{nullptr};
+    PFN_xrDestroySession next_destroy_session_{nullptr};
     PFN_xrBeginSession next_begin_session_{nullptr};
     PFN_xrEndFrame next_end_frame_{nullptr};
     PFN_xrCreateReferenceSpace next_create_reference_space_{nullptr};
+    PFN_xrDestroySpace next_destroy_space_{nullptr};
     PFN_xrLocateSpace next_locate_space_{nullptr};
     PFN_xrLocateViews next_locate_views_{nullptr};
     XrInstance instance_{XR_NULL_HANDLE};

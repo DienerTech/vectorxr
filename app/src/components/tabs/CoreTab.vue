@@ -3,6 +3,7 @@ import { computed } from "vue";
 
 import ThemeToggle from "../ThemeToggle.vue";
 import type { OpenXrLayerEntry, OpenXrLayerSnapshot } from "../../lib/commands";
+import type { HealthSummary } from "../../lib/health";
 import type { VectorXRConfig } from "../../lib/model";
 import type { ThemePreference } from "../../lib/theme";
 
@@ -14,10 +15,13 @@ const props = defineProps<{
   settingsActionsDisabled: boolean;
   openXrLayerSnapshot: OpenXrLayerSnapshot | null;
   openXrLayersLoading: boolean;
+  healthSummary: HealthSummary;
 }>();
 
 defineEmits<{
   viewLogs: [];
+  viewHealth: [];
+  exportDebug: [];
   importConfig: [];
   exportConfig: [];
   resetConfig: [];
@@ -68,6 +72,28 @@ const vectorXrLayerStatusDescription = computed(() => {
 
   return "The VectorXR OpenXR API layer is disabled. None of the VectorXR OpenXR Tweaks will apply, regardless of suite or tweak enabled state.";
 });
+
+const runtimeStatusClass = computed(() => props.config.core.enabled ? "chip-success" : "chip-warning");
+const runtimeStatusLabel = computed(() => props.config.core.enabled ? "Runtime enabled" : "Runtime disabled");
+const systemHealthDescription = computed(() => {
+  if (!props.config.core.enabled) {
+    return "Runtime effects are disabled from the suite switch. Layer status is still available for troubleshooting.";
+  }
+
+  if (props.openXrLayersLoading) {
+    return "Checking VectorXR runtime and OpenXR layer readiness.";
+  }
+
+  if (!vectorXrLayer.value) {
+    return "VectorXR is enabled, but the OpenXR API layer registration was not found.";
+  }
+
+  if (!vectorXrLayer.value.enabled) {
+    return "VectorXR is enabled, but the OpenXR API layer is disabled.";
+  }
+
+  return "VectorXR runtime and OpenXR layer status look ready for future OpenXR app launches.";
+});
 </script>
 
 <template>
@@ -105,21 +131,40 @@ const vectorXrLayerStatusDescription = computed(() => {
       </div>
 
       <div
-        class="mb-5 flex items-center justify-between rounded-[0.9rem] border px-4 py-3 surface-panel-strong"
+        class="mb-5 rounded-[0.9rem] border px-4 py-3 surface-panel-strong"
       >
-        <div>
-          <p class="text-sm font-semibold">OpenXR Layer Status</p>
-          <p class="mt-0.5 text-xs text-muted">
-            {{ vectorXrLayerStatusDescription }}
-          </p>
+        <div class="grid gap-3 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-start">
+          <div class="min-w-0">
+            <p class="text-sm font-semibold">System Health</p>
+            <p class="mt-0.5 text-xs text-muted">
+              {{ systemHealthDescription }}
+            </p>
+          </div>
+          <div class="flex flex-wrap gap-2 lg:justify-end">
+            <span
+              class="inline-flex min-w-[9.75rem] cursor-default items-center justify-center rounded-full px-3 py-1 text-xs font-semibold uppercase tracking-[0.16em]"
+              :class="runtimeStatusClass"
+              title="Suite-level runtime switch state."
+            >
+              {{ runtimeStatusLabel }}
+            </span>
+            <span
+              class="inline-flex min-w-[9.75rem] cursor-default items-center justify-center rounded-full px-3 py-1 text-xs font-semibold uppercase tracking-[0.16em]"
+              :class="vectorXrLayerStatusClass"
+              :title="vectorXrLayerStatusDescription"
+            >
+              {{ vectorXrLayerStatusLabel }}
+            </span>
+          </div>
         </div>
-        <span
-          class="cursor-default rounded-full px-3 py-1 text-xs font-semibold uppercase tracking-[0.16em]"
-          :class="vectorXrLayerStatusClass"
-          title="Use the OpenXR Layers menu to enable, disable, or reorder the VectorXR OpenXR layer."
-        >
-          {{ vectorXrLayerStatusLabel }}
-        </span>
+        <div class="mt-3 flex flex-wrap gap-2 border-t pt-3" style="border-color: var(--app-border)">
+          <button class="button-secondary rounded-[0.65rem] px-3 py-1.5 text-xs font-medium" type="button" @click="$emit('viewHealth')">
+            View Health
+          </button>
+          <button class="button-secondary rounded-[0.65rem] px-3 py-1.5 text-xs font-medium" type="button" @click="$emit('exportDebug')">
+            Export Debug
+          </button>
+        </div>
       </div>
 
       <div class="mt-5 mb-5">
