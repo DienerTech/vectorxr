@@ -124,109 +124,122 @@ onMounted(() => {
 </script>
 
 <template>
-  <div class="space-y-6">
+  <div class="space-y-5">
     <article class="rounded-[1.25rem] border p-5 shadow-panel backdrop-blur surface-panel">
-      <h2 class="text-2xl font-semibold tracking-tight">About VectorXR</h2>
-      <p class="mt-3 max-w-3xl text-sm leading-6 text-muted">
-        VectorXR is an OpenXR tweak platform with per-game profiles. Adjust stereo depth, configure neck-saver rotation, and manage your OpenXR layers from one place.
-Developed by DienerTech. Copyright DienerTech LLC.
-      </p>
-    </article> 
-
-    <article class="rounded-[1.25rem] border p-5 shadow-panel backdrop-blur surface-panel">
-      <div class="flex flex-wrap items-start justify-between gap-5">
+      <div class="grid gap-5 lg:grid-cols-[minmax(0,1fr)_minmax(19rem,0.48fr)]">
         <div>
-          <p class="eyebrow text-xs uppercase tracking-[0.24em]">Updates</p>
-          <h2 class="mt-2 text-2xl font-semibold tracking-tight">VectorXR {{ currentVersion }}</h2>
-          <p class="mt-2 max-w-3xl text-sm leading-6 text-muted">{{ updateSummary }}</p>
+          <div class="flex flex-wrap items-center gap-3">
+            <p class="eyebrow text-xs uppercase tracking-[0.24em]">About</p>
+            <span class="chip-idle rounded-full px-3 py-1 text-xs font-medium uppercase tracking-[0.16em]">
+              Installed {{ currentVersion }}
+            </span>
+          </div>
+
+          <h2 class="mt-3 text-3xl font-semibold tracking-tight">VectorXR</h2>
+          <p class="mt-3 max-w-3xl text-sm leading-6 text-muted">
+            VectorXR is an OpenXR tweak platform with per-game profiles. Adjust stereo depth, configure enhanced head rotation, and manage your OpenXR layers from one place.
+          </p>
+          <p class="mt-2 text-sm leading-6 text-muted">Developed by DienerTech LLC.</p>
+          <p class="mt-2 text-sm leading-6 text-muted">© 2026 DienerTech LLC. Released under the MIT License.</p>
+
+          <div class="mt-5 flex flex-wrap gap-3">
+            <button
+              class="button-secondary rounded-[0.75rem] px-4 py-2 text-sm font-medium"
+              type="button"
+              @click="openLink(dienerTechUrl)"
+            >
+              DienerTech
+            </button>
+            <button
+              class="button-secondary rounded-[0.75rem] px-4 py-2 text-sm font-medium"
+              type="button"
+              @click="openLink(githubUrl)"
+            >
+              GitHub
+            </button>
+          </div>
+        </div>
+
+        <aside class="rounded-[1rem] border p-4 surface-panel-muted">
+          <div class="flex items-start justify-between gap-3">
+            <div>
+              <p class="eyebrow text-xs uppercase tracking-[0.24em]">Updates</p>
+              <h3 class="mt-2 text-lg font-semibold tracking-tight">Release status</h3>
+            </div>
+
+            <span :class="['rounded-full px-3 py-1 text-xs font-medium uppercase tracking-[0.18em]', updateChipClass]">
+              {{ updateChipLabel }}
+            </span>
+          </div>
+
+          <p class="mt-3 text-sm leading-6 text-muted">{{ updateSummary }}</p>
           <p v-if="releaseDate" class="mt-2 text-xs font-medium uppercase tracking-[0.16em] text-soft">
-            Latest release published {{ releaseDate }}
+            Published {{ releaseDate }}
           </p>
-        </div>
 
-        <span :class="['rounded-full px-3 py-1 text-xs font-medium uppercase tracking-[0.18em]', updateChipClass]">
-          {{ updateChipLabel }}
-        </span>
-      </div>
-
-      <div class="mt-5 flex flex-wrap gap-3">
-        <button
-          class="button-accent rounded-[0.75rem] px-4 py-2 text-sm font-medium"
-          type="button"
-          :disabled="updateStatus === 'checking'"
-          @click="refreshUpdates"
-        >
-          Check for updates
-        </button>
-        <button
-          class="button-secondary rounded-[0.75rem] px-4 py-2 text-sm font-medium"
-          type="button"
-          @click="openLink(latestRelease?.htmlUrl || releasesUrl)"
-        >
-          Open latest release
-        </button>
+          <div class="mt-4 grid grid-cols-2 gap-3">
+            <button
+              class="button-accent rounded-[0.75rem] px-3 py-2 text-sm font-medium"
+              type="button"
+              :disabled="updateStatus === 'checking'"
+              @click="refreshUpdates"
+            >
+              Check
+            </button>
+            <button
+              class="button-secondary rounded-[0.75rem] px-3 py-2 text-sm font-medium"
+              type="button"
+              @click="openLink(latestRelease?.htmlUrl || releasesUrl)"
+            >
+              Release
+            </button>
+          </div>
+        </aside>
       </div>
     </article>
 
     <article class="rounded-[1.25rem] border p-5 shadow-panel backdrop-blur surface-panel">
-      <div class="flex flex-wrap items-start justify-between gap-5">
+      <div class="grid gap-5 lg:grid-cols-[minmax(0,1fr)_minmax(17rem,0.36fr)]">
         <div>
-          <p class="eyebrow text-xs uppercase tracking-[0.24em]">Support</p>
-          <h2 class="mt-2 text-2xl font-semibold tracking-tight">Support independent development</h2>
-          <p class="mt-2 max-w-3xl text-sm leading-6 text-muted">
-            VectorXR is built independently. If it improves your setup, tips help keep development moving.
+          <div class="flex flex-wrap items-start justify-between gap-4">
+            <div>
+              <p class="eyebrow text-xs uppercase tracking-[0.24em]">Latest Patch Notes</p>
+              <h2 class="mt-2 text-2xl font-semibold tracking-tight">{{ props.latestPatch.title }}</h2>
+            </div>
+
+            <span class="chip-accent rounded-full px-3 py-1 text-xs font-medium uppercase tracking-[0.18em]">
+              {{ props.latestPatch.version }}
+            </span>
+          </div>
+
+          <p class="mt-3 max-w-3xl text-sm leading-6 text-muted">{{ props.latestPatch.summary }}</p>
+
+          <div class="mt-5 flex flex-wrap items-center gap-3 text-sm">
+            <span class="text-muted">{{ props.latestPatch.date }}</span>
+            <button
+              class="button-accent rounded-[0.75rem] px-4 py-2 text-sm font-medium"
+              type="button"
+              @click="$emit('openPatchNotes')"
+            >
+              Read full patch notes
+            </button>
+          </div>
+        </div>
+
+        <aside class="rounded-[1rem] border p-4 surface-panel-muted">
+          <p class="eyebrow text-xs uppercase tracking-[0.24em]">Support Development</p>
+          <h3 class="mt-2 text-lg font-semibold tracking-tight">Built independently</h3>
+          <p class="mt-2 text-sm leading-6 text-muted">
+            If VectorXR improves your setup, tips help keep development moving.
           </p>
-        </div>
-
-        <button
-          class="button-accent rounded-[0.75rem] px-4 py-2 text-sm font-medium"
-          type="button"
-          @click="openLink(koFiUrl)"
-        >
-          Support on Ko-fi
-        </button>
-      </div>
-
-      <div class="mt-5 flex flex-wrap gap-3">
-        <button
-          class="button-secondary rounded-[0.75rem] px-4 py-2 text-sm font-medium"
-          type="button"
-          @click="openLink(dienerTechUrl)"
-        >
-          DienerTech
-        </button>
-        <button
-          class="button-secondary rounded-[0.75rem] px-4 py-2 text-sm font-medium"
-          type="button"
-          @click="openLink(githubUrl)"
-        >
-          VectorXR GitHub
-        </button>
-      </div>
-    </article>
-
-    <article class="rounded-[1.25rem] border p-5 shadow-panel backdrop-blur surface-panel">
-      <div class="flex flex-wrap items-start justify-between gap-4">
-        <div>
-          <p class="eyebrow text-xs uppercase tracking-[0.24em]">Latest Patch Notes</p>
-          <h2 class="mt-2 text-2xl font-semibold tracking-tight">{{ props.latestPatch.title }}</h2>
-          <p class="mt-2 max-w-3xl text-sm leading-6 text-muted">{{ props.latestPatch.summary }}</p>
-        </div>
-
-        <span class="chip-accent rounded-full px-3 py-1 text-xs font-medium uppercase tracking-[0.18em]">
-          {{ props.latestPatch.version }}
-        </span>
-      </div>
-
-      <div class="mt-5 flex flex-wrap items-center justify-between gap-3 text-sm">
-        <span class="text-muted">{{ props.latestPatch.date }}</span>
-        <button
-          class="button-accent rounded-[0.75rem] px-4 py-2 text-sm font-medium"
-          type="button"
-          @click="$emit('openPatchNotes')"
-        >
-          Read full patch notes
-        </button>
+          <button
+            class="button-secondary mt-4 w-full rounded-[0.75rem] px-4 py-2 text-sm font-medium"
+            type="button"
+            @click="openLink(koFiUrl)"
+          >
+            Support on Ko-fi
+          </button>
+        </aside>
       </div>
     </article>
   </div>
