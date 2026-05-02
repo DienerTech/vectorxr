@@ -1,0 +1,91 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+
+env:
+  OPENXR_LOADER_VERSION: 1.1.58
+
+jobs:
+  windows-installer:
+    name: Build Windows installer
+    runs-on: windows-2022
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Verify tag matches app versions
+        shell: pwsh
+        run: ./scripts/Assert-VersionMatchesTag.ps1 -TagName "${{ github.ref_name }}"
+
+      - name: Install app dependencies
+        working-directory: app
+        run: npm ci
+
+      - name: Restore OpenXR loader package
+        shell: pwsh
+        run: |
+          $packageName = "OpenXR.Loader.$env:OPENXR_LOADER_VERSION.nupkg"
+          $packageUrl = "https://www.nuget.org/api/v2/package/OpenXR.Loader/$env:OPENXR_LOADER_VERSION"
+
+          Invoke-WebRequest -Uri $packageUrl -OutFile $packageName
+
+          if (-not (Test-Path $packageName)) {
+            throw "Failed to restore $packageName."
+          }
+
+      - name: Build installer
+        working-directory: app
+        run: npm run installer:build
+
+      - name: Prepare release assets
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $version = $tag.TrimStart("v")
+          $releaseDir = Join-Path $env:GITHUB_WORKSPACE "release-assets"
+          New-Item -ItemType Directory -Path $releaseDir -Force | Out-Null
+
+          $installer = Get-ChildItem -Path "app/src-tauri/target/release/bundle/nsis" -Filter "*.exe" | Select-Object -First 1
+          if (-not $installer) {
+            throw "No NSIS installer was found."
+          }
+
+          $installerName = "VectorXR-$version-windows-x64-setup.exe"
+          $installerPath = Join-Path $releaseDir $installerName
+          Copy-Item -LiteralPath $installer.FullName -Destination $installerPath -Force
+
+          $hash = Get-FileHash -LiteralPath $installerPath -Algorithm SHA256
+          "$($hash.Hash.ToLowerInvariant())  $installerName" | Set-Content -LiteralPath "$installerPath.sha256" -Encoding ascii
+
+      - name: Publish GitHub release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $assets = Get-ChildItem -Path "release-assets" -File | ForEach-Object { $_.FullName }
+          gh release view $tag *> $null
+          $releaseExists = $LASTEXITCODE -eq 0
+
+          if ($releaseExists) {
+            gh release upload $tag @assets --clobber
+          } else {
+            gh release create $tag @assets --verify-tag --title "VectorXR $tag" --generate-notes
+          }

@@ -121,6 +121,8 @@ The layer is Windows-only and expects:
 - CMake 3.28+
 - Either an OpenXR SDK that provides `OpenXRConfig.cmake`, or a vendored `OpenXR.Loader.*.nupkg` package in the repository root
 
+The vendored `OpenXR.Loader.*.nupkg` package is intentionally not tracked in source control. The GitHub release workflow restores the pinned NuGet package during CI before building the layer.
+
 ### App
 
 The app expects:
@@ -168,6 +170,27 @@ Tauri backend:
 cd app\src-tauri
 cargo check
 ```
+
+## Release tags
+
+GitHub builds release installers from `vMAJOR.MINOR.PATCH` tags.
+
+Before tagging, update the version in:
+
+- `app/package.json`
+- `app/src-tauri/tauri.conf.json`
+- `app/src-tauri/Cargo.toml`
+- `app/src/lib/patchNotes.ts`
+
+Then verify and tag:
+
+```powershell
+.\scripts\Assert-VersionMatchesTag.ps1 -TagName v0.7.0
+git tag v0.7.0
+git push origin main --tags
+```
+
+Pushing the tag runs `.github/workflows/release.yml`, builds the Windows installer, creates or updates the GitHub Release, and uploads the installer plus a SHA-256 checksum.
 
 ## Runtime status
 
