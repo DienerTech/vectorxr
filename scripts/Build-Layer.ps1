@@ -122,6 +122,19 @@ $configureArgs = @(
     "-DDEPTHXR_BUILD_TESTS=ON"
 )
 
+$vcpkgRoot = $env:VCPKG_ROOT
+if (-not $vcpkgRoot) {
+    $vcpkgRoot = $env:VCPKG_INSTALLATION_ROOT
+}
+
+if ($vcpkgRoot) {
+    $vcpkgToolchain = Join-Path $vcpkgRoot "scripts\buildsystems\vcpkg.cmake"
+    if (Test-Path $vcpkgToolchain) {
+        $configureArgs += "-DCMAKE_TOOLCHAIN_FILE=$vcpkgToolchain"
+        Write-Host "Using vcpkg toolchain: $vcpkgToolchain"
+    }
+}
+
 if (-not $SkipFresh) {
     $configureArgs += "--fresh"
 }

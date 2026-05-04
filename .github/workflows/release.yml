@@ -8,9 +8,6 @@ on:
 permissions:
   contents: write
 
-env:
-  OPENXR_LOADER_VERSION: 1.1.58
-
 jobs:
   windows-installer:
     name: Build Windows installer
@@ -38,17 +35,16 @@ jobs:
         working-directory: app
         run: npm ci
 
-      - name: Restore OpenXR loader package
+      - name: Install OpenXR loader
         shell: pwsh
         run: |
-          $packageName = "OpenXR.Loader.$env:OPENXR_LOADER_VERSION.nupkg"
-          $packageUrl = "https://www.nuget.org/api/v2/package/OpenXR.Loader/$env:OPENXR_LOADER_VERSION"
-
-          Invoke-WebRequest -Uri $packageUrl -OutFile $packageName
-
-          if (-not (Test-Path $packageName)) {
-            throw "Failed to restore $packageName."
+          $vcpkgRoot = $env:VCPKG_INSTALLATION_ROOT
+          if (-not $vcpkgRoot) {
+            $vcpkgRoot = "C:\vcpkg"
           }
+
+          $env:VCPKG_ROOT = $vcpkgRoot
+          & "$vcpkgRoot\vcpkg.exe" install openxr-loader:x64-windows
 
       - name: Build installer
         working-directory: app
