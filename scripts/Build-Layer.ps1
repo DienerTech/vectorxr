@@ -67,7 +67,8 @@ function Get-VisualStudioGenerator {
         $vsInfo = $vsInfo[0]
     }
 
-    $majorVersion = [int]$vsInfo.catalog.productLineVersion
+    $productLineVersion = [int]$vsInfo.catalog.productLineVersion
+    $majorVersion = [int]$vsInfo.installationVersion.Split(".")[0]
     $yearByMajor = @{
         18 = "2026"
         17 = "2022"
@@ -76,7 +77,11 @@ function Get-VisualStudioGenerator {
     }
 
     if (-not $yearByMajor.ContainsKey($majorVersion)) {
-        throw "Unsupported Visual Studio major version '$majorVersion'."
+        if ($productLineVersion -in @(2026, 2022, 2019, 2017)) {
+            return "Visual Studio $majorVersion $productLineVersion"
+        }
+
+        throw "Unsupported Visual Studio major version '$majorVersion' with product line '$productLineVersion'."
     }
 
     return "Visual Studio $majorVersion $($yearByMajor[$majorVersion])"
