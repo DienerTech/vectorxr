@@ -140,7 +140,7 @@ onMounted(() => {
             VectorXR is an OpenXR tweak platform with per-game profiles. Adjust stereo depth, configure enhanced head rotation, and manage your OpenXR layers from one place.
           </p>
           <p class="mt-2 text-sm leading-6 text-muted">Developed by DienerTech LLC.</p>
-          <p class="mt-2 text-sm leading-6 text-muted">© 2026 DienerTech LLC. Released under the MIT License.</p>
+          <p class="mt-2 text-sm leading-6 text-muted">(c) 2026 DienerTech LLC. Released under the MIT License.</p>
 
           <div class="mt-5 flex flex-wrap gap-3">
             <button
