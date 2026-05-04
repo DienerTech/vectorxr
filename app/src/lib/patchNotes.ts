@@ -8,6 +8,20 @@ export interface PatchNoteEntry {
 
 export const patchNotes: PatchNoteEntry[] = [
   {
+    version: '0.7.0',
+    date: '2026-05-03',
+    title: 'Release readiness',
+    summary: 'VectorXR now has in-app update checks, GitHub release automation, MIT licensing, and refreshed project documentation.',
+    items: [
+      'Added an About tab update checker that can detect newer published GitHub releases.',
+      'Added a tag-driven GitHub Actions release workflow for building Windows installers.',
+      'Added version/tag validation so release tags match the app version before a release build runs.',
+      'Added MIT licensing and clearer branding language for DienerTech LLC.',
+      'Refreshed the README with feature screenshots, installation guidance, acknowledgments, and release documentation.',
+      'Improved the About tab layout with integrated release status, patch notes, and support information.',
+    ],
+  },
+  {
     version: '0.6.0',
     date: '2026-04-26',
     title: 'OpenXR layer manager',
