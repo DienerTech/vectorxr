@@ -67,7 +67,8 @@ function Get-VisualStudioGenerator {
         $vsInfo = $vsInfo[0]
     }
 
-    $majorVersion = [int]$vsInfo.catalog.productLineVersion
+    $productLineVersion = [int]$vsInfo.catalog.productLineVersion
+    $majorVersion = [int]$vsInfo.installationVersion.Split(".")[0]
     $yearByMajor = @{
         18 = "2026"
         17 = "2022"
@@ -76,7 +77,11 @@ function Get-VisualStudioGenerator {
     }
 
     if (-not $yearByMajor.ContainsKey($majorVersion)) {
-        throw "Unsupported Visual Studio major version '$majorVersion'."
+        if ($productLineVersion -in @(2026, 2022, 2019, 2017)) {
+            return "Visual Studio $majorVersion $productLineVersion"
+        }
+
+        throw "Unsupported Visual Studio major version '$majorVersion' with product line '$productLineVersion'."
     }
 
     return "Visual Studio $majorVersion $($yearByMajor[$majorVersion])"
@@ -121,6 +126,19 @@ $configureArgs = @(
     "-DDEPTHXR_BUILD_LAYER=ON",
     "-DDEPTHXR_BUILD_TESTS=ON"
 )
+
+$vcpkgRoot = $env:VCPKG_ROOT
+if (-not $vcpkgRoot) {
+    $vcpkgRoot = $env:VCPKG_INSTALLATION_ROOT
+}
+
+if ($vcpkgRoot) {
+    $vcpkgToolchain = Join-Path $vcpkgRoot "scripts\buildsystems\vcpkg.cmake"
+    if (Test-Path $vcpkgToolchain) {
+        $configureArgs += "-DCMAKE_TOOLCHAIN_FILE=$vcpkgToolchain"
+        Write-Host "Using vcpkg toolchain: $vcpkgToolchain"
+    }
+}
 
 if (-not $SkipFresh) {
     $configureArgs += "--fresh"

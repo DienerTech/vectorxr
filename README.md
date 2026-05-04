@@ -1,187 +1,172 @@
 # VectorXR
 
-VectorXR is a modular OpenXR utility suite in progress.
+VectorXR is a Windows desktop app and OpenXR API layer for tuning VR experiences on a per-game basis.
 
-Current active feature set:
+It is built for users who want practical controls for stereo depth, convergence, enhanced head rotation, and OpenXR layer management without hand-editing config files or digging through the Windows registry.
 
-- Depth stereo boost
-- Depth convergence
-- suite-level logging and config management
-- suite-level application registry
-- per-application Depth overrides
-- Pivot runtime yaw amplification
-- Pivot runtime pitch amplification
+Developed by DienerTech LLC.
 
-The repository currently ships one shared OpenXR layer plus one Tauri desktop app:
+## Features
 
-- the layer owns interception, config loading, and runtime effect application
-- the app owns suite navigation, feature settings, validation, and save flow
+- Tune stereo depth and convergence through the Depth module.
+- Configure enhanced yaw and pitch rotation through the Pivot module.
+- Create per-application profiles so different OpenXR games can use different settings.
+- Track OpenXR apps VectorXR has seen and register them as profile targets.
+- Bind feature toggles to keyboard shortcuts or detected input devices.
+- Inspect, enable, disable, and reorder installed OpenXR implicit API layers.
+- View VectorXR runtime logs from inside the app.
+- Check for newer VectorXR releases from the About tab.
+- Import, export, reset, and validate local settings.
 
-## Repository layout
+## Screenshots
 
-- `layer/`: C++20 OpenXR layer and shared runtime logic
-- `app/`: Tauri 2 + Vue 3 desktop app
-- `config/`: shared config schema and notes
-- `docs/`: architecture and bootstrap notes
-- `examples/`: sample config files
-- `scripts/`: Windows helper scripts for manifest registration
+### Home
 
-## Current config model
+![VectorXR Home tab](docs/screenshots/screenshot-home.png)
 
-VectorXR uses the v3 suite config schema in `config/vectorxr.schema.json`.
+The Home tab shows suite-level settings, app status, log access, theme controls, import/export actions, and the current VectorXR OpenXR layer status.
 
-High-level shape:
+### Depth
 
-```json
-{
-  "version": 3,
-  "core": {
-    "enabled": true,
-    "logLevel": "info",
-    "logRetentionFiles": 7,
-    "trackSeenApps": true
-  },
-  "applications": [
-    {
-      "id": "dcs",
-      "name": "DCS",
-      "enabled": true,
-      "match": {
-        "exe": "DCS.exe"
-      }
-    }
-  ],
-  "modules": {
-    "depthxr": {
-      "enabled": true,
-      "defaults": {
-        "stereoBoostEnabled": true,
-        "convergenceEnabled": true,
-        "stereoBoost": 1.1,
-        "convergence": 0.0
-      },
-      "bindings": {
-        "toggleEnabled": {
-          "type": "keyboard",
-          "chord": ["F7"]
-        }
-      },
-      "profiles": [
-        {
-          "name": "DCS",
-          "enabled": true,
-          "applicationIds": ["dcs"],
-          "settings": {
-            "stereoBoostEnabled": true,
-            "convergenceEnabled": true,
-            "stereoBoost": 1.1,
-            "convergence": 0.0
-          }
-        }
-      ]
-    },
-    "pivotxr": {
-      "enabled": false,
-      "defaults": {
-        "activationMode": "toggle",
-        "activationBinding": {
-          "type": "none"
-        },
-        "rotationMultiplier": 1.5,
-        "smoothing": 0.2,
-        "deadzoneDegrees": 8.0,
-        "maxExtraYawDegrees": 25.0,
-        "pitchRotationMultiplier": 1.0,
-        "pitchSmoothing": 0.2,
-        "pitchDeadzoneDegrees": 12.0,
-        "maxExtraPitchDegrees": 20.0
-      }
-    }
-  }
-}
-```
+![VectorXR Depth tab](docs/screenshots/screenshot-depth.png)
 
-## Config path
+Depth profiles tune stereo boost and convergence globally or per application.
 
-VectorXR resolves the shared JSON config in this order:
+### Pivot
 
-1. `VECTORXR_CONFIG_PATH`
-2. `%LOCALAPPDATA%\\VectorXR\\config\\settings.json` on Windows
-3. `./config/vectorxr.settings.json` as a fallback for development
+![VectorXR Pivot tab](docs/screenshots/screenshot-pivot.png)
 
-The app and layer use the same path strategy.
+Pivot profiles configure enhanced yaw and pitch rotation, activation behavior, smoothing, deadzones, and device bindings.
 
-## Build prerequisites
+### Application Registry
 
-### Layer
+![VectorXR Application Registry tab](docs/screenshots/screenshot-application-registry.png)
 
-The layer is Windows-only and expects:
+The application registry keeps profile targets organized and can turn discovered OpenXR apps into reusable application entries.
+
+### OpenXR Layers
+
+![VectorXR OpenXR Layers tab](docs/screenshots/screenshot-openxr-layers.png)
+
+The OpenXR layer manager inspects installed implicit API layers, shows signature and path status, and can enable, disable, or reorder layers.
+
+### About And Updates
+
+![VectorXR About tab](docs/screenshots/screenshot-about.png)
+
+The About tab includes release status, GitHub update checks, project links, patch notes, and support information.
+
+### Dark Mode
+
+![VectorXR Home tab in dark mode](docs/screenshots/screenshot-home-darkmode.png)
+
+## How It Works
+
+VectorXR has two main pieces:
+
+- A Tauri desktop app for settings, profiles, update checks, logs, and OpenXR layer management.
+- A Windows OpenXR API layer that reads those settings and applies runtime adjustments when an OpenXR app is running.
+
+The installer registers the VectorXR API layer with Windows so OpenXR runtimes can load it automatically. Settings are stored locally under `%LOCALAPPDATA%\VectorXR`.
+
+## Installation
+
+Download the latest Windows installer from the GitHub Releases page:
+
+https://github.com/DienerTech/vectorxr/releases/latest
+
+Run the installer, then launch VectorXR from the Start menu or desktop shortcut.
+
+VectorXR installs its OpenXR API layer machine-wide, so the installer may require administrator permission.
+
+## Updates
+
+The About tab can check GitHub for the latest published VectorXR release and open the release page when a newer build is available.
+
+VectorXR does not currently auto-download or auto-install updates. Updates are installed manually from GitHub Releases.
+
+## Current Status
+
+VectorXR is approaching an alpha-ready release. The core app, installer, OpenXR layer registration, profile model, Depth module, Pivot module, app discovery, logs, and OpenXR layer manager are implemented.
+
+Planned launch polish includes screenshots, broader testing, release notes, and eventually Windows binary signing for a 1.0 milestone.
+
+## Build From Source
+
+VectorXR is Windows-focused and expects:
 
 - Visual Studio with Desktop C++ tools
 - CMake 3.28+
-- Either an OpenXR SDK that provides `OpenXRConfig.cmake`, or a vendored `OpenXR.Loader.*.nupkg` package in the repository root
-
-### App
-
-The app expects:
-
 - Node.js 20+
 - Rust toolchain with `cargo`
-- Tauri 2 prerequisites for the target machine
+- Tauri 2 prerequisites for Windows
+- Either an OpenXR SDK that provides `OpenXRConfig.cmake`, or a local `OpenXR.Loader.*.nupkg` package in the repository root
 
-## Build commands
+The local `OpenXR.Loader.*.nupkg` package is intentionally not tracked in source control. The GitHub release workflow restores the pinned NuGet package during CI before building the layer.
 
-Layer helper script:
-
-```powershell
-.\scripts\Build-Layer.ps1
-```
-
-Direct CMake flow:
-
-```bash
-cmake -S . -B build -DDEPTHXR_BUILD_LAYER=ON -DDEPTHXR_BUILD_TESTS=ON
-cmake --build build
-ctest --test-dir build --output-on-failure
-```
-
-Frontend app:
+Install app dependencies:
 
 ```powershell
 cd app
 npm ci
+```
+
+Build the frontend:
+
+```powershell
 npm run build
 ```
 
-Production Windows installer:
+Build the production Windows installer:
 
 ```powershell
-cd app
 npm run installer:build
 ```
 
-This builds the OpenXR layer, stages the layer DLL and manifest for Tauri, and produces an elevated per-machine NSIS installer under `app\src-tauri\target\release\bundle\nsis`.
+The installer build compiles the OpenXR layer, stages the layer DLL and manifest for Tauri, and produces an NSIS installer under `app\src-tauri\target\release\bundle\nsis`.
 
-Tauri backend:
+## Release Tags
+
+GitHub builds release installers from `vMAJOR.MINOR.PATCH` tags.
+
+Before tagging, update the version in:
+
+- `app/package.json`
+- `app/src-tauri/tauri.conf.json`
+- `app/src-tauri/Cargo.toml`
+- `app/src/lib/patchNotes.ts`
+
+Then verify and tag:
 
 ```powershell
-cd app\src-tauri
-cargo check
+.\scripts\Assert-VersionMatchesTag.ps1 -TagName v0.7.0
+git tag v0.7.0
+git push origin main --tags
 ```
 
-## Runtime status
+Pushing the tag runs `.github/workflows/release.yml`, builds the Windows installer, creates or updates the GitHub Release, and uploads the installer plus a SHA-256 checksum.
 
-Implemented today:
+## Project Layout
 
-- loader negotiation and manifest scaffold
-- config parsing for the v3 VectorXR schema
-- per-application Depth settings resolution
-- `xrLocateViews` adjustments for stereo boost and convergence
-- quad-view-aware stereo/convergence behavior
-- Pivot runtime path across `xrLocateSpace` and `xrLocateViews`
-- VectorXR suite shell with separate Home, Depth, and Pivot tabs
+- `app/`: Tauri 2 and Vue 3 desktop app
+- `layer/`: C++20 OpenXR API layer and runtime logic
+- `config/`: shared schema and config notes
+- `docs/`: architecture notes and implementation references
+- `examples/`: sample settings
+- `scripts/`: Windows build, install, staging, and release helpers
 
-Deliberately not active yet:
+## Acknowledgments
 
-- true loader detachment when disabled
-- World Scale and FoV controls from the old prototype scope
+VectorXR exists in the wider OpenXR community, and several open source projects helped shape it.
+
+- [Quad-Views-Foveated](https://github.com/mbucchia/Quad-Views-Foveated) by mbucchia: an OpenXR API layer for quad views and foveated rendering. It has been a major reference point for real-world OpenXR API layer behavior and compatibility concerns.
+- [OpenXR API Layers GUI](https://github.com/fredemmott/OpenXR-API-Layers-GUI) by Fred Emmott: a Windows tool for viewing, enabling, disabling, and reordering OpenXR API layers. It directly inspired VectorXR's built-in OpenXR layer management experience.
+- [XrNeckSafer](https://gitlab.com/NobiWan/xrnecksafer) by NobiWan: an OpenXR neck-saver utility that helped prove how useful runtime rotation assistance can be for seated VR and flight simulation setups.
+
+Thank you to the maintainers and contributors behind these projects.
+
+## License
+
+The VectorXR source code is released under the MIT License. See [LICENSE](LICENSE).
+
+VectorXR, the VectorXR name, and VectorXR branding are product identifiers of DienerTech LLC. The MIT License covers the source code, but it does not grant rights to use DienerTech LLC trademarks, logos, or branding except to refer to the project.

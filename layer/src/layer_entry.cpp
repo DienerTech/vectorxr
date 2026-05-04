@@ -34,6 +34,10 @@ XrResult XRAPI_CALL DepthxrCreateSession(XrInstance instance,
     return OpenXrLayer::Instance().CreateSession(instance, create_info, session);
 }
 
+XrResult XRAPI_CALL DepthxrDestroySession(XrSession session) {
+    return OpenXrLayer::Instance().DestroySession(session);
+}
+
 XrResult XRAPI_CALL DepthxrBeginSession(XrSession session, const XrSessionBeginInfo* begin_info) {
     return OpenXrLayer::Instance().BeginSession(session, begin_info);
 }
@@ -46,6 +50,10 @@ XrResult XRAPI_CALL DepthxrCreateReferenceSpace(XrSession session,
                                                 const XrReferenceSpaceCreateInfo* create_info,
                                                 XrSpace* space) {
     return OpenXrLayer::Instance().CreateReferenceSpace(session, create_info, space);
+}
+
+XrResult XRAPI_CALL DepthxrDestroySpace(XrSpace space) {
+    return OpenXrLayer::Instance().DestroySpace(space);
 }
 
 XrResult XRAPI_CALL DepthxrLocateSpace(XrSpace space,
@@ -88,6 +96,10 @@ XrResult XRAPI_CALL xrGetInstanceProcAddr(XrInstance instance, const char* name,
         *function = reinterpret_cast<PFN_xrVoidFunction>(depthxr::DepthxrCreateSession);
         return XR_SUCCESS;
     }
+    if (requested == "xrDestroySession") {
+        *function = reinterpret_cast<PFN_xrVoidFunction>(depthxr::DepthxrDestroySession);
+        return XR_SUCCESS;
+    }
     if (requested == "xrBeginSession") {
         *function = reinterpret_cast<PFN_xrVoidFunction>(depthxr::DepthxrBeginSession);
         return XR_SUCCESS;
@@ -98,6 +110,10 @@ XrResult XRAPI_CALL xrGetInstanceProcAddr(XrInstance instance, const char* name,
     }
     if (requested == "xrCreateReferenceSpace") {
         *function = reinterpret_cast<PFN_xrVoidFunction>(depthxr::DepthxrCreateReferenceSpace);
+        return XR_SUCCESS;
+    }
+    if (requested == "xrDestroySpace") {
+        *function = reinterpret_cast<PFN_xrVoidFunction>(depthxr::DepthxrDestroySpace);
         return XR_SUCCESS;
     }
     if (requested == "xrLocateSpace") {

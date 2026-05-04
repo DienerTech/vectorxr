@@ -2,6 +2,8 @@
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 
 import AppRegistryEditor from './components/AppRegistryEditor.vue'
+import DebugExportModal from './components/DebugExportModal.vue'
+import HealthCheckModal from './components/HealthCheckModal.vue'
 import ImportPreviewModal from './components/ImportPreviewModal.vue'
 import LogViewerModal from './components/LogViewerModal.vue'
 import PatchNotesModal from './components/PatchNotesModal.vue'
@@ -13,6 +15,8 @@ import DepthXrTab from './components/tabs/DepthXrTab.vue'
 import OpenXrLayersTab from './components/tabs/OpenXrLayersTab.vue'
 import PivotXrTab from './components/tabs/PivotXrTab.vue'
 import { exportConfigFile, loadLogSnapshot, loadOpenXrLayers, type LogSnapshot, type OpenXrLayerSnapshot } from './lib/commands'
+import { createDebugPackage, saveDebugPackage } from './lib/debugPackage'
+import { buildHealthSummary } from './lib/health'
 import { normalizeConfig, type VectorXRConfig } from './lib/model'
 import { patchNotes } from './lib/patchNotes'
 import { applyThemePreference, loadThemePreference, observeSystemThemeChanges, type ThemePreference } from './lib/theme'
@@ -23,6 +27,9 @@ const store = useConfigStore()
 const errors = computed(() => validateConfig(store.state.config))
 const dirty = computed(() => store.isDirty.value)
 const logViewerOpen = ref(false)
+const healthCheckOpen = ref(false)
+const debugExportOpen = ref(false)
+const debugExporting = ref(false)
 const patchNotesOpen = ref(false)
 const logViewerLoading = ref(false)
 const logSnapshot = ref<LogSnapshot | null>(null)
@@ -36,6 +43,14 @@ const openXrLayersLoading = ref(false)
 const openXrMachineWritesUnlocked = ref(false)
 
 const latestPatch = patchNotes[0]
+const healthSummary = computed(() => buildHealthSummary({
+  config: store.state.config,
+  configPath: store.state.path,
+  logSnapshot: logSnapshot.value,
+  openXrLayerSnapshot: openXrLayerSnapshot.value,
+  openXrLayersLoading: openXrLayersLoading.value,
+  seenApps: store.state.seenApps,
+}))
 
 const tabs = computed(() => [
   {
@@ -154,6 +169,33 @@ async function exportConfig() {
   }
 }
 
+async function exportDebugInformation() {
+  debugExporting.value = true
+
+  try {
+    await Promise.all([refreshLogs(), refreshOpenXrLayers(), store.refreshSeenApps()])
+    const packageBlob = createDebugPackage({
+      appVersion: latestPatch.version,
+      configPath: store.state.path,
+      seenAppsPath: store.state.seenAppsPath,
+      config: store.state.config,
+      seenApps: store.state.seenApps,
+      logSnapshot: logSnapshot.value,
+      openXrLayerSnapshot: openXrLayerSnapshot.value,
+      healthSummary: healthSummary.value,
+    })
+    const exported = await saveDebugPackage(packageBlob)
+    store.state.status = exported ? 'Debug information exported' : 'Debug export canceled'
+    if (exported) {
+      debugExportOpen.value = false
+    }
+  } catch (error) {
+    store.state.status = error instanceof Error ? error.message : 'Failed to export debug information'
+  } finally {
+    debugExporting.value = false
+  }
+}
+
 function triggerImport() {
   importFileInput.value?.click()
 }
@@ -231,7 +273,10 @@ async function confirmResetConfig() {
           :settings-actions-disabled="store.state.loading || store.state.saving"
           :open-xr-layer-snapshot="openXrLayerSnapshot"
           :open-xr-layers-loading="openXrLayersLoading"
+          :health-summary="healthSummary"
           @view-logs="openLogs"
+          @view-health="healthCheckOpen = true"
+          @export-debug="debugExportOpen = true"
           @import-config="triggerImport"
           @export-config="exportConfig"
           @reset-config="confirmResetConfig"
@@ -290,6 +335,8 @@ async function confirmResetConfig() {
       />
 
       <input ref="importFileInput" type="file" accept=".json" class="hidden" @change="handleImportFile" />
+      <HealthCheckModal :open="healthCheckOpen" :summary="healthSummary" @close="healthCheckOpen = false" @export-debug="debugExportOpen = true" />
+      <DebugExportModal :open="debugExportOpen" :exporting="debugExporting" @cancel="debugExportOpen = false" @confirm="exportDebugInformation" />
       <ImportPreviewModal :open="importPreviewOpen" :config="importedConfig" :errors="importErrors" @apply="applyImport" @cancel="cancelImport" />
       <LogViewerModal :open="logViewerOpen" :loading="logViewerLoading" :snapshot="logSnapshot" @close="logViewerOpen = false" />
       <PatchNotesModal :open="patchNotesOpen" :entries="patchNotes" @close="patchNotesOpen = false" />

@@ -30,11 +30,12 @@ mod platform {
     use std::thread;
     use std::time::{Duration, Instant};
 
-    use windows::core::{GUID, Interface, IUnknown};
+    use windows::core::{IUnknown, Interface, GUID};
     use windows::Win32::Devices::HumanInterfaceDevice::{
-        DirectInput8Create, DIDEVCAPS, DIDEVICEINSTANCEW, DIDATAFORMAT, DIOBJECTDATAFORMAT, DI8DEVCLASS_GAMECTRL,
-        DIEDFL_ATTACHEDONLY, DIDFT_BUTTON, DIDF_ABSAXIS, DISCL_BACKGROUND, DISCL_NONEXCLUSIVE, IDirectInput8W,
-        IDirectInputDevice8W, DIERR_INPUTLOST, DIERR_NOTACQUIRED,
+        DirectInput8Create, IDirectInput8W, IDirectInputDevice8W, DI8DEVCLASS_GAMECTRL,
+        DIDATAFORMAT, DIDEVCAPS, DIDEVICEINSTANCEW, DIDFT_BUTTON, DIDF_ABSAXIS,
+        DIEDFL_ATTACHEDONLY, DIERR_INPUTLOST, DIERR_NOTACQUIRED, DIOBJECTDATAFORMAT,
+        DISCL_BACKGROUND, DISCL_NONEXCLUSIVE,
     };
     use windows::Win32::Foundation::{HINSTANCE, HWND, TRUE};
     use windows::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -81,7 +82,9 @@ mod platform {
             .collect()
     }
 
-    pub fn capture_device_binding(timeout_ms: Option<u64>) -> Result<Option<CapturedDeviceBinding>, String> {
+    pub fn capture_device_binding(
+        timeout_ms: Option<u64>,
+    ) -> Result<Option<CapturedDeviceBinding>, String> {
         let direct_input = create_direct_input()?;
         let instances = enumerate_instances(&direct_input)?;
         let mut devices = Vec::new();
@@ -169,7 +172,10 @@ mod platform {
         Ok(None)
     }
 
-    fn pressed_button_mask(buttons: &[u8; MAX_BUTTONS], button_count: usize) -> [bool; MAX_BUTTONS] {
+    fn pressed_button_mask(
+        buttons: &[u8; MAX_BUTTONS],
+        button_count: usize,
+    ) -> [bool; MAX_BUTTONS] {
         let mut mask = [false; MAX_BUTTONS];
         for index in 0..button_count.min(MAX_BUTTONS) {
             mask[index] = (buttons[index] & 0x80) != 0;
@@ -199,7 +205,10 @@ mod platform {
     }
 
     fn enumerate_instances(direct_input: &IDirectInput8W) -> Result<Vec<DeviceInstance>, String> {
-        unsafe extern "system" fn enum_callback(instance: *mut DIDEVICEINSTANCEW, context: *mut c_void) -> windows::core::BOOL {
+        unsafe extern "system" fn enum_callback(
+            instance: *mut DIDEVICEINSTANCEW,
+            context: *mut c_void,
+        ) -> windows::core::BOOL {
             if instance.is_null() || context.is_null() {
                 return TRUE;
             }
@@ -230,7 +239,10 @@ mod platform {
         Ok(devices)
     }
 
-    fn create_device(direct_input: &IDirectInput8W, guid: &GUID) -> Result<IDirectInputDevice8W, String> {
+    fn create_device(
+        direct_input: &IDirectInput8W,
+        guid: &GUID,
+    ) -> Result<IDirectInputDevice8W, String> {
         let mut device = None;
         unsafe {
             direct_input
@@ -261,8 +273,11 @@ mod platform {
         };
 
         unsafe {
-            device.SetDataFormat(&mut data_format).map_err(|error| error.to_string())?;
-            let _ = device.SetCooperativeLevel(HWND(ptr::null_mut()), DISCL_BACKGROUND | DISCL_NONEXCLUSIVE);
+            device
+                .SetDataFormat(&mut data_format)
+                .map_err(|error| error.to_string())?;
+            let _ = device
+                .SetCooperativeLevel(HWND(ptr::null_mut()), DISCL_BACKGROUND | DISCL_NONEXCLUSIVE);
             let _ = device.Acquire();
         }
         Ok(())
@@ -272,7 +287,9 @@ mod platform {
         let mut caps = DIDEVCAPS::default();
         caps.dwSize = mem::size_of::<DIDEVCAPS>() as u32;
         unsafe {
-            device.GetCapabilities(&mut caps).map_err(|error| error.to_string())?;
+            device
+                .GetCapabilities(&mut caps)
+                .map_err(|error| error.to_string())?;
         }
         Ok(caps.dwButtons)
     }
@@ -288,9 +305,14 @@ mod platform {
 
             match device.GetDeviceState(buttons.len() as u32, buttons.as_mut_ptr() as *mut c_void) {
                 Ok(()) => Ok(buttons),
-                Err(error) if error.code() == DIERR_INPUTLOST || error.code() == DIERR_NOTACQUIRED => {
+                Err(error)
+                    if error.code() == DIERR_INPUTLOST || error.code() == DIERR_NOTACQUIRED =>
+                {
                     let _ = device.Acquire();
-                    device.GetDeviceState(buttons.len() as u32, buttons.as_mut_ptr() as *mut c_void)?;
+                    device.GetDeviceState(
+                        buttons.len() as u32,
+                        buttons.as_mut_ptr() as *mut c_void,
+                    )?;
                     Ok(buttons)
                 }
                 Err(error) => Err(error),
@@ -298,7 +320,9 @@ mod platform {
         }
     }
 
-    fn read_stable_buttons(device: &IDirectInputDevice8W) -> windows::core::Result<[u8; MAX_BUTTONS]> {
+    fn read_stable_buttons(
+        device: &IDirectInputDevice8W,
+    ) -> windows::core::Result<[u8; MAX_BUTTONS]> {
         let mut last_state = read_buttons(device)?;
         for _ in 0..3 {
             thread::sleep(Duration::from_millis(25));
@@ -308,7 +332,10 @@ mod platform {
     }
 
     fn wide_array_to_string(value: &[u16]) -> String {
-        let length = value.iter().position(|character| *character == 0).unwrap_or(value.len());
+        let length = value
+            .iter()
+            .position(|character| *character == 0)
+            .unwrap_or(value.len());
         String::from_utf16_lossy(&value[..length])
     }
 
@@ -338,7 +365,9 @@ mod platform {
         Ok(Vec::new())
     }
 
-    pub fn capture_device_binding(_timeout_ms: Option<u64>) -> Result<Option<CapturedDeviceBinding>, String> {
+    pub fn capture_device_binding(
+        _timeout_ms: Option<u64>,
+    ) -> Result<Option<CapturedDeviceBinding>, String> {
         Err("Joystick binding capture is only available on Windows".into())
     }
 }
