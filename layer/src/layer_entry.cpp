@@ -1,7 +1,9 @@
 #include "depthxr/openxr_layer.h"
 #include "depthxr/openxr_loader_api_layer.h"
 
+#include <algorithm>
 #include <string_view>
+#include <vector>
 
 #include <Windows.h>
 
@@ -46,6 +48,58 @@ XrResult XRAPI_CALL DepthxrEndFrame(XrSession session, const XrFrameEndInfo* fra
     return OpenXrLayer::Instance().EndFrame(session, frame_end_info);
 }
 
+XrResult XRAPI_CALL DepthxrGetSystemProperties(XrInstance instance,
+                                               XrSystemId system_id,
+                                               XrSystemProperties* properties) {
+    return OpenXrLayer::Instance().GetSystemProperties(instance, system_id, properties);
+}
+
+XrResult XRAPI_CALL DepthxrEnumerateEnvironmentBlendModes(
+    XrInstance instance,
+    XrSystemId system_id,
+    XrViewConfigurationType view_configuration_type,
+    uint32_t environment_blend_mode_capacity_input,
+    uint32_t* environment_blend_mode_count_output,
+    XrEnvironmentBlendMode* environment_blend_modes) {
+    return OpenXrLayer::Instance().EnumerateEnvironmentBlendModes(instance,
+                                                                 system_id,
+                                                                 view_configuration_type,
+                                                                 environment_blend_mode_capacity_input,
+                                                                 environment_blend_mode_count_output,
+                                                                 environment_blend_modes);
+}
+
+XrResult XRAPI_CALL DepthxrEnumerateViewConfigurations(XrInstance instance,
+                                                       XrSystemId system_id,
+                                                       uint32_t view_configuration_type_capacity_input,
+                                                       uint32_t* view_configuration_type_count_output,
+                                                       XrViewConfigurationType* view_configuration_types) {
+    return OpenXrLayer::Instance().EnumerateViewConfigurations(instance,
+                                                              system_id,
+                                                              view_configuration_type_capacity_input,
+                                                              view_configuration_type_count_output,
+                                                              view_configuration_types);
+}
+
+XrResult XRAPI_CALL DepthxrGetViewConfigurationProperties(
+    XrInstance instance,
+    XrSystemId system_id,
+    XrViewConfigurationType view_configuration_type,
+    XrViewConfigurationProperties* configuration_properties) {
+    return OpenXrLayer::Instance().GetViewConfigurationProperties(
+        instance, system_id, view_configuration_type, configuration_properties);
+}
+
+XrResult XRAPI_CALL DepthxrEnumerateViewConfigurationViews(XrInstance instance,
+                                                          XrSystemId system_id,
+                                                          XrViewConfigurationType view_configuration_type,
+                                                          uint32_t view_capacity_input,
+                                                          uint32_t* view_count_output,
+                                                          XrViewConfigurationView* views) {
+    return OpenXrLayer::Instance().EnumerateViewConfigurationViews(
+        instance, system_id, view_configuration_type, view_capacity_input, view_count_output, views);
+}
+
 XrResult XRAPI_CALL DepthxrCreateReferenceSpace(XrSession session,
                                                 const XrReferenceSpaceCreateInfo* create_info,
                                                 XrSpace* space) {
@@ -71,6 +125,11 @@ XrResult XRAPI_CALL DepthxrLocateViews(XrSession session,
                                        XrView* views) {
     return OpenXrLayer::Instance().LocateViews(
         session, view_locate_info, view_state, view_capacity_input, view_count_output, views);
+}
+
+bool IsLayerOwnedExtension(std::string_view extension_name) {
+    return extension_name == XR_VARJO_QUAD_VIEWS_EXTENSION_NAME ||
+           extension_name == XR_VARJO_FOVEATED_RENDERING_EXTENSION_NAME;
 }
 
 } // namespace
@@ -106,6 +165,26 @@ XrResult XRAPI_CALL xrGetInstanceProcAddr(XrInstance instance, const char* name,
     }
     if (requested == "xrEndFrame") {
         *function = reinterpret_cast<PFN_xrVoidFunction>(depthxr::DepthxrEndFrame);
+        return XR_SUCCESS;
+    }
+    if (requested == "xrGetSystemProperties") {
+        *function = reinterpret_cast<PFN_xrVoidFunction>(depthxr::DepthxrGetSystemProperties);
+        return XR_SUCCESS;
+    }
+    if (requested == "xrEnumerateEnvironmentBlendModes") {
+        *function = reinterpret_cast<PFN_xrVoidFunction>(depthxr::DepthxrEnumerateEnvironmentBlendModes);
+        return XR_SUCCESS;
+    }
+    if (requested == "xrEnumerateViewConfigurations") {
+        *function = reinterpret_cast<PFN_xrVoidFunction>(depthxr::DepthxrEnumerateViewConfigurations);
+        return XR_SUCCESS;
+    }
+    if (requested == "xrGetViewConfigurationProperties") {
+        *function = reinterpret_cast<PFN_xrVoidFunction>(depthxr::DepthxrGetViewConfigurationProperties);
+        return XR_SUCCESS;
+    }
+    if (requested == "xrEnumerateViewConfigurationViews") {
+        *function = reinterpret_cast<PFN_xrVoidFunction>(depthxr::DepthxrEnumerateViewConfigurationViews);
         return XR_SUCCESS;
     }
     if (requested == "xrCreateReferenceSpace") {
@@ -156,7 +235,20 @@ XrResult XRAPI_CALL xrCreateApiLayerInstance(const XrInstanceCreateInfo* instanc
     XrApiLayerCreateInfo chain_info = *layer_info;
     chain_info.nextInfo = next_info->next;
 
-    const XrResult result = next_info->nextCreateApiLayerInstance(instance_create_info, &chain_info, instance);
+    XrInstanceCreateInfo downstream_create_info = *instance_create_info;
+    std::vector<const char*> downstream_extensions;
+    downstream_extensions.reserve(instance_create_info->enabledExtensionCount);
+    for (uint32_t i = 0; i < instance_create_info->enabledExtensionCount; ++i) {
+        const char* extension_name = instance_create_info->enabledExtensionNames[i];
+        if (!extension_name || IsLayerOwnedExtension(extension_name)) {
+            continue;
+        }
+        downstream_extensions.push_back(extension_name);
+    }
+    downstream_create_info.enabledExtensionCount = static_cast<uint32_t>(downstream_extensions.size());
+    downstream_create_info.enabledExtensionNames = downstream_extensions.empty() ? nullptr : downstream_extensions.data();
+
+    const XrResult result = next_info->nextCreateApiLayerInstance(&downstream_create_info, &chain_info, instance);
     if (XR_FAILED(result)) {
         return result;
     }

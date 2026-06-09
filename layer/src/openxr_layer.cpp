@@ -1,7 +1,9 @@
 #include "depthxr/openxr_layer.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
+#include <cstring>
 #include <iomanip>
 #include <sstream>
 #include <string>
@@ -31,6 +33,96 @@ double Clamp(double value, double min_value, double max_value) {
 
 double DegreesToRadians(double degrees) {
     return degrees * 3.14159265358979323846 / 180.0;
+}
+
+bool ExtensionRequested(const XrInstanceCreateInfo* create_info, std::string_view extension_name) {
+    if (!create_info || !create_info->enabledExtensionNames) {
+        return false;
+    }
+
+    for (uint32_t i = 0; i < create_info->enabledExtensionCount; ++i) {
+        const char* requested = create_info->enabledExtensionNames[i];
+        if (requested && std::string_view(requested) == extension_name) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void* FindMutableStructInChain(void* next, XrStructureType type) {
+    auto* header = reinterpret_cast<XrBaseOutStructure*>(next);
+    while (header) {
+        if (header->type == type) {
+            return header;
+        }
+        header = header->next;
+    }
+    return nullptr;
+}
+
+uint32_t ScaleDimension(uint32_t value, double scale, uint32_t max_value) {
+    const double scaled = std::max(1.0, std::round(static_cast<double>(value) * std::max(0.01, scale)));
+    const uint32_t rounded = static_cast<uint32_t>(std::min<double>(scaled, std::max<uint32_t>(1, max_value)));
+    return std::max<uint32_t>(1, rounded);
+}
+
+void SetFoveatedViewActive(XrViewConfigurationView& view, XrBool32 active) {
+    void* foveated = FindMutableStructInChain(view.next, XR_TYPE_FOVEATED_VIEW_CONFIGURATION_VIEW_VARJO);
+    if (!foveated) {
+        return;
+    }
+    reinterpret_cast<XrFoveatedViewConfigurationViewVARJO*>(foveated)->foveatedRenderingActive = active;
+}
+
+XrFovf ClampAngularWindow(float base_negative,
+                          float base_positive,
+                          double center_radians,
+                          double size_radians,
+                          bool positive_first) {
+    const double half = std::max(0.001, size_radians * 0.5);
+    double negative = center_radians - half;
+    double positive = center_radians + half;
+
+    const double base_span = static_cast<double>(base_positive) - static_cast<double>(base_negative);
+    if (positive - negative >= base_span) {
+        negative = base_negative;
+        positive = base_positive;
+    } else {
+        if (negative < base_negative) {
+            positive += base_negative - negative;
+            negative = base_negative;
+        }
+        if (positive > base_positive) {
+            negative -= positive - base_positive;
+            positive = base_positive;
+        }
+        negative = Clamp(negative, base_negative, base_positive);
+        positive = Clamp(positive, base_negative, base_positive);
+    }
+
+    if (positive_first) {
+        return {0.0f, static_cast<float>(positive), 0.0f, static_cast<float>(negative)};
+    }
+    return {static_cast<float>(negative), static_cast<float>(positive), 0.0f, 0.0f};
+}
+
+XrFovf BuildFocusFov(const XrFovf& base_fov, const QuadViewsResolvedSettings& settings) {
+    const double horizontal_center = DegreesToRadians(settings.horizontal_offset_degrees);
+    const double vertical_center = DegreesToRadians(settings.vertical_offset_degrees);
+    const double horizontal_size = DegreesToRadians(settings.focus_horizontal_fov_degrees);
+    const double vertical_size = DegreesToRadians(settings.focus_vertical_fov_degrees);
+
+    const XrFovf horizontal =
+        ClampAngularWindow(base_fov.angleLeft, base_fov.angleRight, horizontal_center, horizontal_size, false);
+    const XrFovf vertical =
+        ClampAngularWindow(base_fov.angleDown, base_fov.angleUp, vertical_center, vertical_size, true);
+
+    return {
+        horizontal.angleLeft,
+        horizontal.angleRight,
+        vertical.angleUp,
+        vertical.angleDown,
+    };
 }
 
 std::string FormatDiagnosticDouble(double value) {
@@ -369,6 +461,7 @@ XrResult OpenXrLayer::OnInstanceCreated(const XrInstanceCreateInfo* create_info,
     std::scoped_lock lock(mutex_);
 
     instance_ = instance;
+    ResetInstanceState();
     ResetSessionState();
     config_path_ = ResolveConfigPath();
     log_path_ = ResolveLogPath();
@@ -378,15 +471,28 @@ XrResult OpenXrLayer::OnInstanceCreated(const XrInstanceCreateInfo* create_info,
     logger_.Info("VectorXR attached to process: " + current_exe_name_);
 
     if (create_info) {
+        quad_views_extension_requested_ =
+            ExtensionRequested(create_info, XR_VARJO_QUAD_VIEWS_EXTENSION_NAME);
+        varjo_foveated_rendering_extension_requested_ =
+            ExtensionRequested(create_info, XR_VARJO_FOVEATED_RENDERING_EXTENSION_NAME);
+
         std::ostringstream stream;
         stream << "Application=" << create_info->applicationInfo.applicationName << ", Engine="
                << create_info->applicationInfo.engineName;
         logger_.Info(stream.str());
+        if (quad_views_extension_requested_ || varjo_foveated_rendering_extension_requested_) {
+            logger_.Info(std::string("Application requested layer-owned extensions: quadViews=") +
+                         (quad_views_extension_requested_ ? "true" : "false") +
+                         ", varjoFoveatedRendering=" +
+                         (varjo_foveated_rendering_extension_requested_ ? "true" : "false"));
+        }
     }
 
     CaptureInstanceFunctions();
     if (!next_destroy_instance_ || !next_create_session_ || !next_destroy_session_ || !next_begin_session_ ||
-        !next_end_frame_ || !next_create_reference_space_ || !next_destroy_space_ ||
+        !next_end_frame_ || !next_get_system_properties_ || !next_enumerate_environment_blend_modes_ ||
+        !next_enumerate_view_configurations_ || !next_get_view_configuration_properties_ ||
+        !next_enumerate_view_configuration_views_ || !next_create_reference_space_ || !next_destroy_space_ ||
         !next_locate_space_ || !next_locate_views_) {
         logger_.Error("Failed to resolve required OpenXR function pointers");
         return XR_ERROR_INITIALIZATION_FAILED;
@@ -426,6 +532,12 @@ XrResult OpenXrLayer::DestroyInstance(XrInstance instance) {
         next_destroy_instance_ = nullptr;
         next_create_session_ = nullptr;
         next_destroy_session_ = nullptr;
+        next_begin_session_ = nullptr;
+        next_get_system_properties_ = nullptr;
+        next_enumerate_environment_blend_modes_ = nullptr;
+        next_enumerate_view_configurations_ = nullptr;
+        next_get_view_configuration_properties_ = nullptr;
+        next_enumerate_view_configuration_views_ = nullptr;
         next_create_reference_space_ = nullptr;
         next_destroy_space_ = nullptr;
         next_end_frame_ = nullptr;
@@ -437,6 +549,7 @@ XrResult OpenXrLayer::DestroyInstance(XrInstance instance) {
         pending_end_frame_diagnostics_ = 0;
         ResetPivotActivationState();
         ResetDepthToggleState();
+        ResetInstanceState();
         ResetSessionState();
     }
 
@@ -482,7 +595,23 @@ XrResult OpenXrLayer::DestroySession(XrSession session) {
 }
 
 XrResult OpenXrLayer::BeginSession(XrSession session, const XrSessionBeginInfo* begin_info) {
-    const XrResult result = next_begin_session_(session, begin_info);
+    bool quadviews_active = false;
+    {
+        std::scoped_lock lock(mutex_);
+        ReloadConfigIfNeeded();
+        RefreshResolvedSettings();
+        quadviews_active = IsQuadViewsActive();
+    }
+
+    XrSessionBeginInfo runtime_begin_info{};
+    const XrSessionBeginInfo* downstream_begin_info = begin_info;
+    if (begin_info && IsQuadViewConfiguration(begin_info->primaryViewConfigurationType) && quadviews_active) {
+        runtime_begin_info = *begin_info;
+        runtime_begin_info.primaryViewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
+        downstream_begin_info = &runtime_begin_info;
+    }
+
+    const XrResult result = next_begin_session_(session, downstream_begin_info);
     if (XR_FAILED(result) || !begin_info) {
         return result;
     }
@@ -490,12 +619,202 @@ XrResult OpenXrLayer::BeginSession(XrSession session, const XrSessionBeginInfo* 
     std::scoped_lock lock(mutex_);
     active_session_ = session;
     active_primary_view_configuration_type_ = begin_info->primaryViewConfigurationType;
+    active_runtime_view_configuration_type_ = downstream_begin_info->primaryViewConfigurationType;
     has_active_primary_view_configuration_ = true;
     has_logged_quad_view_short_count_ = false;
 
     logger_.Info(std::string("Session began with view configuration: ") +
-                 ToString(active_primary_view_configuration_type_));
+                 ToString(active_primary_view_configuration_type_) +
+                 (active_primary_view_configuration_type_ != active_runtime_view_configuration_type_
+                      ? std::string(" (runtime mapped to ") + ToString(active_runtime_view_configuration_type_) + ")"
+                      : std::string()));
     return result;
+}
+
+XrResult OpenXrLayer::GetSystemProperties(XrInstance instance,
+                                          XrSystemId system_id,
+                                          XrSystemProperties* properties) {
+    const XrResult result = next_get_system_properties_(instance, system_id, properties);
+    if (XR_FAILED(result) || !properties) {
+        return result;
+    }
+
+    std::scoped_lock lock(mutex_);
+    ReloadConfigIfNeeded();
+    RefreshResolvedSettings();
+    if (!IsQuadViewsActive()) {
+        return result;
+    }
+
+    void* foveated = FindMutableStructInChain(properties->next, XR_TYPE_SYSTEM_FOVEATED_RENDERING_PROPERTIES_VARJO);
+    if (foveated) {
+        reinterpret_cast<XrSystemFoveatedRenderingPropertiesVARJO*>(foveated)->supportsFoveatedRendering = XR_TRUE;
+    }
+    return result;
+}
+
+XrResult OpenXrLayer::EnumerateEnvironmentBlendModes(
+    XrInstance instance,
+    XrSystemId system_id,
+    XrViewConfigurationType view_configuration_type,
+    uint32_t environment_blend_mode_capacity_input,
+    uint32_t* environment_blend_mode_count_output,
+    XrEnvironmentBlendMode* environment_blend_modes) {
+    std::scoped_lock lock(mutex_);
+    ReloadConfigIfNeeded();
+    RefreshResolvedSettings();
+    const XrViewConfigurationType runtime_type =
+        IsQuadViewConfiguration(view_configuration_type) && IsQuadViewsActive()
+            ? XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO
+            : view_configuration_type;
+    return next_enumerate_environment_blend_modes_(instance,
+                                                  system_id,
+                                                  runtime_type,
+                                                  environment_blend_mode_capacity_input,
+                                                  environment_blend_mode_count_output,
+                                                  environment_blend_modes);
+}
+
+XrResult OpenXrLayer::EnumerateViewConfigurations(XrInstance instance,
+                                                  XrSystemId system_id,
+                                                  uint32_t view_configuration_type_capacity_input,
+                                                  uint32_t* view_configuration_type_count_output,
+                                                  XrViewConfigurationType* view_configuration_types) {
+    if (!view_configuration_type_count_output) {
+        return XR_ERROR_VALIDATION_FAILURE;
+    }
+
+    uint32_t runtime_count = 0;
+    XrResult result = next_enumerate_view_configurations_(instance, system_id, 0, &runtime_count, nullptr);
+    if (XR_FAILED(result)) {
+        return result;
+    }
+
+    std::vector<XrViewConfigurationType> runtime_types(runtime_count);
+    if (runtime_count > 0) {
+        result = next_enumerate_view_configurations_(
+            instance, system_id, runtime_count, &runtime_count, runtime_types.data());
+        if (XR_FAILED(result)) {
+            return result;
+        }
+        runtime_types.resize(runtime_count);
+    }
+
+    std::scoped_lock lock(mutex_);
+    ReloadConfigIfNeeded();
+    RefreshResolvedSettings();
+
+    std::vector<XrViewConfigurationType> exposed_types = runtime_types;
+    const bool runtime_has_quad =
+        std::find(exposed_types.begin(),
+                  exposed_types.end(),
+                  XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO_WITH_FOVEATED_INSET) != exposed_types.end();
+    const bool runtime_has_stereo =
+        std::find(exposed_types.begin(), exposed_types.end(), XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO) != exposed_types.end();
+    if (IsQuadViewsActive() && runtime_has_stereo && !runtime_has_quad) {
+        exposed_types.push_back(XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO_WITH_FOVEATED_INSET);
+    }
+
+    *view_configuration_type_count_output = static_cast<uint32_t>(exposed_types.size());
+    if (!view_configuration_types || view_configuration_type_capacity_input == 0) {
+        return XR_SUCCESS;
+    }
+
+    const uint32_t copy_count =
+        std::min<uint32_t>(view_configuration_type_capacity_input, static_cast<uint32_t>(exposed_types.size()));
+    std::copy_n(exposed_types.begin(), copy_count, view_configuration_types);
+    return view_configuration_type_capacity_input < exposed_types.size() ? XR_ERROR_SIZE_INSUFFICIENT : XR_SUCCESS;
+}
+
+XrResult OpenXrLayer::GetViewConfigurationProperties(
+    XrInstance instance,
+    XrSystemId system_id,
+    XrViewConfigurationType view_configuration_type,
+    XrViewConfigurationProperties* configuration_properties) {
+    std::scoped_lock lock(mutex_);
+    ReloadConfigIfNeeded();
+    RefreshResolvedSettings();
+    const bool synthesize_quad = IsQuadViewConfiguration(view_configuration_type) && IsQuadViewsActive();
+    const XrViewConfigurationType runtime_type =
+        synthesize_quad ? XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO : view_configuration_type;
+
+    const XrResult result =
+        next_get_view_configuration_properties_(instance, system_id, runtime_type, configuration_properties);
+    if (XR_SUCCEEDED(result) && synthesize_quad && configuration_properties) {
+        configuration_properties->viewConfigurationType =
+            XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO_WITH_FOVEATED_INSET;
+    }
+    return result;
+}
+
+XrResult OpenXrLayer::EnumerateViewConfigurationViews(XrInstance instance,
+                                                      XrSystemId system_id,
+                                                      XrViewConfigurationType view_configuration_type,
+                                                      uint32_t view_capacity_input,
+                                                      uint32_t* view_count_output,
+                                                      XrViewConfigurationView* views) {
+    if (!view_count_output) {
+        return XR_ERROR_VALIDATION_FAILURE;
+    }
+
+    std::scoped_lock lock(mutex_);
+    ReloadConfigIfNeeded();
+    RefreshResolvedSettings();
+    if (!IsQuadViewConfiguration(view_configuration_type) || !IsQuadViewsActive()) {
+        return next_enumerate_view_configuration_views_(
+            instance, system_id, view_configuration_type, view_capacity_input, view_count_output, views);
+    }
+
+    std::array<XrViewConfigurationView, 2> stereo_views{};
+    for (XrViewConfigurationView& view : stereo_views) {
+        view = {XR_TYPE_VIEW_CONFIGURATION_VIEW};
+    }
+    uint32_t stereo_count = 0;
+    const XrResult result = next_enumerate_view_configuration_views_(instance,
+                                                                    system_id,
+                                                                    XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO,
+                                                                    static_cast<uint32_t>(stereo_views.size()),
+                                                                    &stereo_count,
+                                                                    stereo_views.data());
+    if (XR_FAILED(result)) {
+        return result;
+    }
+    if (stereo_count < 2) {
+        *view_count_output = stereo_count;
+        return result;
+    }
+
+    *view_count_output = 4;
+    if (!views || view_capacity_input == 0) {
+        return XR_SUCCESS;
+    }
+    if (view_capacity_input < 4) {
+        return XR_ERROR_SIZE_INSUFFICIENT;
+    }
+
+    for (uint32_t i = 0; i < 2; ++i) {
+        views[i] = stereo_views[i];
+        views[i].recommendedImageRectWidth = ScaleDimension(stereo_views[i].recommendedImageRectWidth,
+                                                            resolved_settings_.quadviews.peripheral_scale,
+                                                            stereo_views[i].maxImageRectWidth);
+        views[i].recommendedImageRectHeight = ScaleDimension(stereo_views[i].recommendedImageRectHeight,
+                                                             resolved_settings_.quadviews.peripheral_scale,
+                                                             stereo_views[i].maxImageRectHeight);
+        SetFoveatedViewActive(views[i], XR_FALSE);
+    }
+
+    for (uint32_t i = 0; i < 2; ++i) {
+        views[i + 2] = stereo_views[i];
+        views[i + 2].recommendedImageRectWidth = ScaleDimension(stereo_views[i].recommendedImageRectWidth,
+                                                                resolved_settings_.quadviews.focus_scale,
+                                                                stereo_views[i].maxImageRectWidth);
+        views[i + 2].recommendedImageRectHeight = ScaleDimension(stereo_views[i].recommendedImageRectHeight,
+                                                                 resolved_settings_.quadviews.focus_scale,
+                                                                 stereo_views[i].maxImageRectHeight);
+        SetFoveatedViewActive(views[i + 2], XR_TRUE);
+    }
+
+    return XR_SUCCESS;
 }
 
 XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_end_info) {
@@ -506,7 +825,7 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
     std::scoped_lock lock(mutex_);
     ReloadConfigIfNeeded();
     RefreshResolvedSettings();
-    if (!resolved_settings_.core.enabled || !resolved_settings_.pivotxr.enabled) {
+    if (!resolved_settings_.core.enabled) {
         cached_pivot_pose_deltas_.clear();
         pivotxr_smoothed_extra_yaw_radians_ = 0.0;
         pivotxr_smoothed_extra_pitch_radians_ = 0.0;
@@ -515,16 +834,29 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
         return next_end_frame_(session, frame_end_info);
     }
 
+    const bool quadviews_projection_split_active =
+        IsQuadViewsActive() && has_active_primary_view_configuration_ &&
+        IsQuadViewConfiguration(active_primary_view_configuration_type_) &&
+        active_runtime_view_configuration_type_ == XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
+
+    if (!resolved_settings_.pivotxr.enabled) {
+        cached_pivot_pose_deltas_.clear();
+        pivotxr_smoothed_extra_yaw_radians_ = 0.0;
+        pivotxr_smoothed_extra_pitch_radians_ = 0.0;
+        pivotxr_last_smoothing_wall_time_.reset();
+    }
+
     XrPosef pose_delta = IdentityPose();
     XrTime matched_time = 0;
-    const bool has_pose_delta = FindPivotPoseDelta(frame_end_info->displayTime, &pose_delta, &matched_time);
+    const bool has_pose_delta = resolved_settings_.pivotxr.enabled &&
+                                FindPivotPoseDelta(frame_end_info->displayTime, &pose_delta, &matched_time);
     const bool has_non_identity_delta =
         has_pose_delta && (!NearlyZero(pose_delta.orientation.x) || !NearlyZero(pose_delta.orientation.y) ||
                            !NearlyZero(pose_delta.orientation.z) || !NearlyEqual(pose_delta.orientation.w, 1.0f) ||
                            !NearlyZero(pose_delta.position.x) || !NearlyZero(pose_delta.position.y) ||
                            !NearlyZero(pose_delta.position.z));
 
-    if (!has_non_identity_delta) {
+    if (!has_non_identity_delta && !quadviews_projection_split_active) {
         if (pending_end_frame_diagnostics_ > 0) {
             std::ostringstream stream;
             stream << "EndFrame pivot correction skipped: cacheHit=" << has_pose_delta
@@ -547,9 +879,31 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
     std::vector<const XrCompositionLayerBaseHeader*> adjusted_layers;
     uint32_t corrected_projection_layer_count = 0;
     uint32_t corrected_projection_view_count = 0;
-    adjusted_projection_views.reserve(frame_end_info->layerCount);
-    adjusted_projection_layers.reserve(frame_end_info->layerCount);
-    adjusted_layers.reserve(frame_end_info->layerCount);
+    uint32_t split_quad_projection_layer_count = 0;
+    adjusted_projection_views.reserve(frame_end_info->layerCount * 2);
+    adjusted_projection_layers.reserve(frame_end_info->layerCount * 2);
+    adjusted_layers.reserve(frame_end_info->layerCount * 2);
+
+    auto append_projection_layer = [&](const XrCompositionLayerProjection* projection_layer,
+                                       uint32_t first_view,
+                                       uint32_t view_count) {
+        adjusted_projection_views.emplace_back(projection_layer->views + first_view,
+                                               projection_layer->views + first_view + view_count);
+        for (XrCompositionLayerProjectionView& projection_view : adjusted_projection_views.back()) {
+            if (has_non_identity_delta) {
+                projection_view.pose = MultiplyPoses(projection_view.pose, reverse_delta);
+            }
+        }
+
+        adjusted_projection_layers.push_back(*projection_layer);
+        adjusted_projection_layers.back().viewCount = view_count;
+        adjusted_projection_layers.back().views = adjusted_projection_views.back().data();
+        adjusted_layers.push_back(
+            reinterpret_cast<const XrCompositionLayerBaseHeader*>(&adjusted_projection_layers.back()));
+
+        ++corrected_projection_layer_count;
+        corrected_projection_view_count += view_count;
+    };
 
     for (uint32_t i = 0; i < frame_end_info->layerCount; ++i) {
         const XrCompositionLayerBaseHeader* base_header = frame_end_info->layers[i];
@@ -560,18 +914,19 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
 
         const XrCompositionLayerProjection* projection_layer =
             reinterpret_cast<const XrCompositionLayerProjection*>(base_header);
-        ++corrected_projection_layer_count;
-        corrected_projection_view_count += projection_layer->viewCount;
-        adjusted_projection_views.emplace_back(
-            projection_layer->views, projection_layer->views + projection_layer->viewCount);
-        for (XrCompositionLayerProjectionView& projection_view : adjusted_projection_views.back()) {
-            projection_view.pose = MultiplyPoses(projection_view.pose, reverse_delta);
+        if (!projection_layer->views || projection_layer->viewCount == 0) {
+            adjusted_layers.push_back(base_header);
+            continue;
         }
 
-        adjusted_projection_layers.push_back(*projection_layer);
-        adjusted_projection_layers.back().views = adjusted_projection_views.back().data();
-        adjusted_layers.push_back(
-            reinterpret_cast<const XrCompositionLayerBaseHeader*>(&adjusted_projection_layers.back()));
+        if (quadviews_projection_split_active && projection_layer->viewCount >= 4) {
+            append_projection_layer(projection_layer, 0, 2);
+            append_projection_layer(projection_layer, 2, 2);
+            ++split_quad_projection_layer_count;
+            continue;
+        }
+
+        append_projection_layer(projection_layer, 0, projection_layer->viewCount);
     }
 
     XrFrameEndInfo adjusted_frame_end_info = *frame_end_info;
@@ -591,9 +946,15 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
                << ", poseDeltaPitch=" << FormatDiagnosticDouble(ExtractPitchRadians(delta_orientation))
                << ", projectionLayers=" << corrected_projection_layer_count
                << ", projectionViews=" << corrected_projection_view_count
+               << ", splitQuadProjectionLayers=" << split_quad_projection_layer_count
                << ", cachedPivotDeltas=" << cached_pivot_pose_deltas_.size();
         logger_.Debug(stream.str());
         --pending_end_frame_diagnostics_;
+    } else if (quadviews_projection_split_active && split_quad_projection_layer_count > 0) {
+        logger_.Debug("EndFrame quadviews projection split applied: splitLayers=" +
+                      std::to_string(split_quad_projection_layer_count) +
+                      ", submittedLayers=" + std::to_string(frame_end_info->layerCount) +
+                      ", runtimeLayers=" + std::to_string(adjusted_layers.size()));
     }
     const XrResult result = next_end_frame_(session, &adjusted_frame_end_info);
     PrunePivotPoseDeltas(frame_end_info->displayTime);
@@ -650,8 +1011,9 @@ XrResult OpenXrLayer::LocateViews(XrSession session,
                                   uint32_t view_capacity_input,
                                   uint32_t* view_count_output,
                                   XrView* views) {
-    const XrResult result =
-        next_locate_views_(session, view_locate_info, view_state, view_capacity_input, view_count_output, views);
+    bool synthesized_quad_views = false;
+    const XrResult result = LocateRuntimeViews(
+        session, view_locate_info, view_state, view_capacity_input, view_count_output, views, &synthesized_quad_views);
 
     if (XR_FAILED(result) || !views || !view_count_output) {
         return result;
@@ -1038,6 +1400,35 @@ void OpenXrLayer::CaptureInstanceFunctions() {
     }
 
     function = nullptr;
+    if (XR_SUCCEEDED(next_get_instance_proc_addr_(instance_, "xrGetSystemProperties", &function))) {
+        next_get_system_properties_ = reinterpret_cast<PFN_xrGetSystemProperties>(function);
+    }
+
+    function = nullptr;
+    if (XR_SUCCEEDED(next_get_instance_proc_addr_(instance_, "xrEnumerateEnvironmentBlendModes", &function))) {
+        next_enumerate_environment_blend_modes_ =
+            reinterpret_cast<PFN_xrEnumerateEnvironmentBlendModes>(function);
+    }
+
+    function = nullptr;
+    if (XR_SUCCEEDED(next_get_instance_proc_addr_(instance_, "xrEnumerateViewConfigurations", &function))) {
+        next_enumerate_view_configurations_ =
+            reinterpret_cast<PFN_xrEnumerateViewConfigurations>(function);
+    }
+
+    function = nullptr;
+    if (XR_SUCCEEDED(next_get_instance_proc_addr_(instance_, "xrGetViewConfigurationProperties", &function))) {
+        next_get_view_configuration_properties_ =
+            reinterpret_cast<PFN_xrGetViewConfigurationProperties>(function);
+    }
+
+    function = nullptr;
+    if (XR_SUCCEEDED(next_get_instance_proc_addr_(instance_, "xrEnumerateViewConfigurationViews", &function))) {
+        next_enumerate_view_configuration_views_ =
+            reinterpret_cast<PFN_xrEnumerateViewConfigurationViews>(function);
+    }
+
+    function = nullptr;
     if (XR_SUCCEEDED(next_get_instance_proc_addr_(instance_, "xrCreateReferenceSpace", &function))) {
         next_create_reference_space_ = reinterpret_cast<PFN_xrCreateReferenceSpace>(function);
     }
@@ -1070,6 +1461,7 @@ void OpenXrLayer::ResetSessionState() {
     internal_view_space_ = XR_NULL_HANDLE;
     internal_stage_space_ = XR_NULL_HANDLE;
     active_primary_view_configuration_type_ = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
+    active_runtime_view_configuration_type_ = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
     has_active_primary_view_configuration_ = false;
     has_logged_quad_view_short_count_ = false;
     has_logged_pivotxr_spike_mode_ = false;
@@ -1078,6 +1470,15 @@ void OpenXrLayer::ResetSessionState() {
     tracked_stage_spaces_.clear();
     cached_eye_offset_poses_.clear();
     cached_pivot_pose_deltas_.clear();
+}
+
+void OpenXrLayer::ResetInstanceState() {
+    quad_views_extension_requested_ = false;
+    varjo_foveated_rendering_extension_requested_ = false;
+}
+
+bool OpenXrLayer::IsQuadViewsActive() const {
+    return resolved_settings_.core.enabled && resolved_settings_.quadviews.enabled;
 }
 
 XrResult OpenXrLayer::CreateInternalReferenceSpaces(XrSession session) {
@@ -1240,6 +1641,101 @@ void OpenXrLayer::PrunePivotPoseDeltas(XrTime time) {
 
 bool OpenXrLayer::IsTrackedViewSpace(XrSpace space) const {
     return space != XR_NULL_HANDLE && tracked_view_spaces_.contains(space);
+}
+
+XrResult OpenXrLayer::LocateRuntimeViews(XrSession session,
+                                         const XrViewLocateInfo* view_locate_info,
+                                         XrViewState* view_state,
+                                         uint32_t view_capacity_input,
+                                         uint32_t* view_count_output,
+                                         XrView* views,
+                                         bool* synthesized_quad_views) {
+    if (synthesized_quad_views) {
+        *synthesized_quad_views = false;
+    }
+
+    bool quadviews_active = false;
+    QuadViewsResolvedSettings quadviews_settings;
+    {
+        std::scoped_lock lock(mutex_);
+        ReloadConfigIfNeeded();
+        RefreshResolvedSettings();
+        quadviews_active = IsQuadViewsActive();
+        quadviews_settings = resolved_settings_.quadviews;
+    }
+
+    if (!view_locate_info || !IsQuadViewConfiguration(view_locate_info->viewConfigurationType) || !quadviews_active) {
+        return next_locate_views_(
+            session, view_locate_info, view_state, view_capacity_input, view_count_output, views);
+    }
+
+    XrViewLocateInfo runtime_locate_info = *view_locate_info;
+    runtime_locate_info.viewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
+
+    std::array<XrView, 2> stereo_views{};
+    for (XrView& view : stereo_views) {
+        view = {XR_TYPE_VIEW};
+    }
+    XrViewState runtime_view_state{XR_TYPE_VIEW_STATE};
+    XrViewState* downstream_view_state = view_state ? &runtime_view_state : nullptr;
+    uint32_t stereo_count = 0;
+    const XrResult result = next_locate_views_(session,
+                                              &runtime_locate_info,
+                                              downstream_view_state,
+                                              static_cast<uint32_t>(stereo_views.size()),
+                                              &stereo_count,
+                                              stereo_views.data());
+    if (view_state && XR_SUCCEEDED(result)) {
+        *view_state = runtime_view_state;
+    }
+    if (XR_FAILED(result)) {
+        return result;
+    }
+    if (stereo_count < 2) {
+        if (view_count_output) {
+            *view_count_output = stereo_count;
+        }
+        return result;
+    }
+
+    if (!view_count_output) {
+        return XR_ERROR_VALIDATION_FAILURE;
+    }
+    *view_count_output = 4;
+    if (!views || view_capacity_input == 0) {
+        return XR_SUCCESS;
+    }
+    if (view_capacity_input < 4) {
+        return XR_ERROR_SIZE_INSUFFICIENT;
+    }
+
+    if (!SynthesizeQuadViewsFromStereo(stereo_views, quadviews_settings, view_capacity_input, view_count_output, views)) {
+        return XR_ERROR_RUNTIME_FAILURE;
+    }
+    if (synthesized_quad_views) {
+        *synthesized_quad_views = true;
+    }
+    return XR_SUCCESS;
+}
+
+bool OpenXrLayer::SynthesizeQuadViewsFromStereo(std::span<const XrView> stereo_views,
+                                                const QuadViewsResolvedSettings& quadviews_settings,
+                                                uint32_t view_capacity_input,
+                                                uint32_t* view_count_output,
+                                                XrView* views) const {
+    if (stereo_views.size() < 2 || !views || !view_count_output || view_capacity_input < 4) {
+        return false;
+    }
+
+    *view_count_output = 4;
+    views[0] = stereo_views[0];
+    views[1] = stereo_views[1];
+    views[2] = stereo_views[0];
+    views[3] = stereo_views[1];
+
+    views[2].fov = BuildFocusFov(stereo_views[0].fov, quadviews_settings);
+    views[3].fov = BuildFocusFov(stereo_views[1].fov, quadviews_settings);
+    return true;
 }
 
 XrResult OpenXrLayer::LocateSpaceWithPivot(XrSpace space,

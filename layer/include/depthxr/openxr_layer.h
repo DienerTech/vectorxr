@@ -5,6 +5,7 @@
 #include <map>
 #include <mutex>
 #include <optional>
+#include <span>
 #include <string>
 #include <unordered_set>
 #include <vector>
@@ -31,6 +32,28 @@ class OpenXrLayer {
     XrResult DestroySession(XrSession session);
     XrResult BeginSession(XrSession session, const XrSessionBeginInfo* begin_info);
     XrResult EndFrame(XrSession session, const XrFrameEndInfo* frame_end_info);
+    XrResult GetSystemProperties(XrInstance instance, XrSystemId system_id, XrSystemProperties* properties);
+    XrResult EnumerateEnvironmentBlendModes(XrInstance instance,
+                                            XrSystemId system_id,
+                                            XrViewConfigurationType view_configuration_type,
+                                            uint32_t environment_blend_mode_capacity_input,
+                                            uint32_t* environment_blend_mode_count_output,
+                                            XrEnvironmentBlendMode* environment_blend_modes);
+    XrResult EnumerateViewConfigurations(XrInstance instance,
+                                         XrSystemId system_id,
+                                         uint32_t view_configuration_type_capacity_input,
+                                         uint32_t* view_configuration_type_count_output,
+                                         XrViewConfigurationType* view_configuration_types);
+    XrResult GetViewConfigurationProperties(XrInstance instance,
+                                            XrSystemId system_id,
+                                            XrViewConfigurationType view_configuration_type,
+                                            XrViewConfigurationProperties* configuration_properties);
+    XrResult EnumerateViewConfigurationViews(XrInstance instance,
+                                             XrSystemId system_id,
+                                             XrViewConfigurationType view_configuration_type,
+                                             uint32_t view_capacity_input,
+                                             uint32_t* view_count_output,
+                                             XrViewConfigurationView* views);
     XrResult CreateReferenceSpace(XrSession session, const XrReferenceSpaceCreateInfo* create_info, XrSpace* space);
     XrResult DestroySpace(XrSpace space);
     XrResult LocateSpace(XrSpace space, XrSpace base_space, XrTime time, XrSpaceLocation* location);
@@ -52,7 +75,9 @@ class OpenXrLayer {
     void ResetDepthToggleState();
     bool IsPivotXrActive(const PivotXrResolvedSettings& settings);
     bool IsDepthXrActive();
+    bool IsQuadViewsActive() const;
     void ResetSessionState();
+    void ResetInstanceState();
     XrResult CreateInternalReferenceSpaces(XrSession session);
     void DestroyInternalReferenceSpaces();
     bool EnsureEyeOffsets(XrSession session,
@@ -63,6 +88,18 @@ class OpenXrLayer {
     bool FindPivotPoseDelta(XrTime time, XrPosef* pose_delta, XrTime* matched_time) const;
     void PrunePivotPoseDeltas(XrTime time);
     bool IsTrackedViewSpace(XrSpace space) const;
+    XrResult LocateRuntimeViews(XrSession session,
+                                const XrViewLocateInfo* view_locate_info,
+                                XrViewState* view_state,
+                                uint32_t view_capacity_input,
+                                uint32_t* view_count_output,
+                                XrView* views,
+                                bool* synthesized_quad_views);
+    bool SynthesizeQuadViewsFromStereo(std::span<const XrView> stereo_views,
+                                       const QuadViewsResolvedSettings& quadviews_settings,
+                                       uint32_t view_capacity_input,
+                                       uint32_t* view_count_output,
+                                       XrView* views) const;
     XrResult LocateSpaceWithPivot(XrSpace space,
                                   XrSpace base_space,
                                   XrTime time,
@@ -100,11 +137,14 @@ class OpenXrLayer {
     bool pivotxr_activation_key_was_down_{false};
     bool depthxr_toggle_enabled_{true};
     bool depthxr_toggle_binding_was_down_{false};
+    bool quad_views_extension_requested_{false};
+    bool varjo_foveated_rendering_extension_requested_{false};
     XrSession active_session_{XR_NULL_HANDLE};
     XrSpace internal_local_space_{XR_NULL_HANDLE};
     XrSpace internal_view_space_{XR_NULL_HANDLE};
     XrSpace internal_stage_space_{XR_NULL_HANDLE};
     XrViewConfigurationType active_primary_view_configuration_type_{XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO};
+    XrViewConfigurationType active_runtime_view_configuration_type_{XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO};
     bool has_active_primary_view_configuration_{false};
     bool has_logged_quad_view_short_count_{false};
     bool has_logged_pivotxr_spike_mode_{false};
@@ -120,6 +160,11 @@ class OpenXrLayer {
     PFN_xrDestroySession next_destroy_session_{nullptr};
     PFN_xrBeginSession next_begin_session_{nullptr};
     PFN_xrEndFrame next_end_frame_{nullptr};
+    PFN_xrGetSystemProperties next_get_system_properties_{nullptr};
+    PFN_xrEnumerateEnvironmentBlendModes next_enumerate_environment_blend_modes_{nullptr};
+    PFN_xrEnumerateViewConfigurations next_enumerate_view_configurations_{nullptr};
+    PFN_xrGetViewConfigurationProperties next_get_view_configuration_properties_{nullptr};
+    PFN_xrEnumerateViewConfigurationViews next_enumerate_view_configuration_views_{nullptr};
     PFN_xrCreateReferenceSpace next_create_reference_space_{nullptr};
     PFN_xrDestroySpace next_destroy_space_{nullptr};
     PFN_xrLocateSpace next_locate_space_{nullptr};

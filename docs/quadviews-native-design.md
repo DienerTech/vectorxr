@@ -1,6 +1,6 @@
 # Native Quadviews Design Notes
 
-Status: phase 1 control plane and engine contract.
+Status: control plane plus first OpenXR emulation path.
 
 ## Research Snapshot
 
@@ -34,24 +34,29 @@ The native engine should consume only resolved settings from `ResolvedRuntimeCon
 
 ## Runtime Architecture
 
-The full renderer needs a broader OpenXR interception surface than VectorXR currently uses:
+The first native renderer path is implemented as a stereo-runtime bridge:
 
-- `xrEnumerateInstanceExtensionProperties`
-- `xrCreateApiLayerInstance` / `xrCreateInstance` extension-name adjustment
-- `xrGetSystemProperties` for eye-gaze capability probing
-- `xrEnumerateViewConfigurations`
-- `xrEnumerateViewConfigurationViews`
-- `xrBeginSession`
+- The manifest advertises `XR_VARJO_quad_views` and `XR_VARJO_foveated_rendering`.
+- `xrCreateApiLayerInstance` removes layer-owned extension names before calling downstream so runtimes do not reject unsupported Varjo extensions.
+- `xrEnumerateViewConfigurations` adds `XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO_WITH_FOVEATED_INSET` when Quadviews resolves enabled and stereo is available.
+- `xrGetViewConfigurationProperties`, `xrEnumerateEnvironmentBlendModes`, and `xrEnumerateViewConfigurationViews` map quadview app queries to stereo runtime queries.
+- `xrBeginSession` maps an app-facing quadview session to a downstream stereo session.
+- `xrLocateViews` maps quadview locates to stereo runtime locates, then synthesizes peripheral left/right and foveal inset left/right views.
+- `xrEndFrame` splits a 4-view projection layer into two 2-view projection layers: peripheral first, foveal second.
+- `xrGetSystemProperties` reports Varjo foveated rendering support when the app chains `XrSystemFoveatedRenderingPropertiesVARJO`.
+
+The remaining full renderer work is mostly around richer view focus and device/runtime coverage:
+
 - `xrCreateSwapchain`
 - `xrEnumerateSwapchainImages`
 - `xrAcquireSwapchainImage`
 - `xrWaitSwapchainImage`
 - `xrReleaseSwapchainImage`
-- `xrLocateViews`
-- `xrEndFrame`
 - `xrDestroySwapchain`
+- `XR_EXT_eye_gaze_interaction` action setup and focus-source fallback
+- optional `XR_EXT_view_configuration_views_change` event handling if we need live foveal-view resizing
 
-The layer should advertise quadviews only when VectorXR quadviews are enabled for the resolved application and the graphics API path can safely emulate the extra views. A conservative fallback should leave stereo untouched.
+The manifest must statically advertise layer-owned extensions because the loader discovers API-layer extensions from manifest metadata. The runtime-facing quad view configuration is still gated by resolved `modules.quadviews.enabled`; if Quadviews is disabled for an app, VectorXR does not add the foveated-inset view configuration.
 
 ## Pivot Compatibility
 
@@ -81,10 +86,10 @@ Proposed per-frame order:
 ## Implementation Phases
 
 1. Control plane: complete.
-2. Extension advertisement and instance negotiation.
-3. Quadview view-configuration enumeration and sizing.
-4. Swapchain aliasing or allocation strategy for foveal/peripheral views.
-5. `xrLocateViews` foveal pose/FOV generation with shared Pivot focus direction.
-6. `xrEndFrame` projection-layer rewrite.
-7. Eye-gaze action setup and fallback.
+2. Extension advertisement and instance negotiation: complete.
+3. Quadview view-configuration enumeration and sizing: complete.
+4. `xrLocateViews` head-tracked foveal FOV generation: complete.
+5. `xrEndFrame` projection-layer split: complete.
+6. Eye-gaze action setup and fallback.
+7. Swapchain lifecycle interception for future graphics-aware validation/diagnostics.
 8. Runtime diagnostics and compatibility warnings in the UI.
