@@ -24,7 +24,9 @@ struct ID3D11Buffer;
 struct ID3D11Device;
 struct ID3D11DeviceContext;
 struct ID3D11PixelShader;
+struct ID3D11RenderTargetView;
 struct ID3D11SamplerState;
+struct ID3D11ShaderResourceView;
 struct ID3D11Texture2D;
 struct ID3D11VertexShader;
 
@@ -122,6 +124,16 @@ class OpenXrLayer {
         int64_t format{0};
         uint32_t image_count{0};
         std::vector<ID3D11Texture2D*> d3d11_images;
+        ID3D11Texture2D* render_texture{nullptr};
+        ID3D11RenderTargetView* render_target_view{nullptr};
+    };
+
+    struct QuadViewsInputCopy {
+        uint32_t width{0};
+        uint32_t height{0};
+        int64_t format{0};
+        ID3D11Texture2D* texture{nullptr};
+        ID3D11ShaderResourceView* shader_resource{nullptr};
     };
 
     struct D3D11QuadViewsCompositor {
@@ -134,6 +146,8 @@ class OpenXrLayer {
         ID3D11Buffer* constants{nullptr};
         bool initialized{false};
         bool failed{false};
+        uint32_t failure_logs_remaining{8};
+        std::array<QuadViewsInputCopy, 4> input_copies;
         std::array<QuadViewsCompositionTarget, 2> targets;
     };
 
@@ -168,6 +182,9 @@ class OpenXrLayer {
     void CachePivotPoseDelta(XrTime time, const XrPosef& pose_delta);
     bool FindPivotPoseDelta(XrTime time, XrPosef* pose_delta, XrTime* matched_time) const;
     void PrunePivotPoseDeltas(XrTime time);
+    void CacheQuadViewsFovs(XrTime time, std::span<const XrView> views);
+    bool FindQuadViewsFovs(XrTime time, std::array<XrFovf, 4>* fovs, XrTime* matched_time) const;
+    void PruneQuadViewsFovs(XrTime time);
     bool IsTrackedViewSpace(XrSpace space) const;
     XrResult LocateRuntimeViews(XrSession session,
                                 const XrViewLocateInfo* view_locate_info,
@@ -198,6 +215,7 @@ class OpenXrLayer {
                                         uint32_t output_height,
                                         int64_t output_format);
     bool ComposeQuadViewsD3D11(const XrCompositionLayerProjection* source_layer,
+                               XrTime display_time,
                                const XrPosef& reverse_delta,
                                bool has_non_identity_delta,
                                XrCompositionLayerProjection* composed_layer,
@@ -222,6 +240,10 @@ class OpenXrLayer {
     uint64_t locate_views_call_count_{0};
     uint32_t pending_locate_views_diagnostics_{0};
     uint32_t pending_end_frame_diagnostics_{0};
+    uint32_t pending_eye_gaze_diagnostics_{0};
+    uint32_t pending_eye_gaze_sync_diagnostics_{0};
+    uint32_t pending_quadviews_compositor_diagnostics_{0};
+    uint32_t eye_gaze_diagnostic_stride_counter_{0};
     double pivotxr_smoothed_extra_yaw_radians_{0.0};
     double pivotxr_smoothed_extra_pitch_radians_{0.0};
     std::optional<std::chrono::steady_clock::time_point> pivotxr_last_smoothing_wall_time_;
@@ -257,6 +279,7 @@ class OpenXrLayer {
     std::unordered_set<XrSpace> tracked_stage_spaces_;
     std::vector<XrPosef> cached_eye_offset_poses_;
     std::map<XrTime, XrPosef> cached_pivot_pose_deltas_;
+    std::map<XrTime, std::array<XrFovf, 4>> cached_quadviews_fovs_;
     std::unordered_map<XrSwapchain, SwapchainInfo> tracked_swapchains_;
     D3D11QuadViewsCompositor d3d11_quadviews_compositor_;
 

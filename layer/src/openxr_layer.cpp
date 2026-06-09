@@ -256,6 +256,19 @@ std::string FormatDiagnosticDouble(double value) {
     return stream.str();
 }
 
+std::string FormatHex(uint64_t value) {
+    std::ostringstream stream;
+    stream << "0x" << std::hex << std::uppercase << value;
+    return stream.str();
+}
+
+std::string FormatFov(const XrFovf& fov) {
+    std::ostringstream stream;
+    stream << "(" << FormatDiagnosticDouble(fov.angleLeft) << ", " << FormatDiagnosticDouble(fov.angleRight)
+           << ", " << FormatDiagnosticDouble(fov.angleUp) << ", " << FormatDiagnosticDouble(fov.angleDown) << ")";
+    return stream.str();
+}
+
 double HorizontalProjectionCenter(const ViewFov& fov) {
     return (std::tan(fov.angle_left) + std::tan(fov.angle_right)) * 0.5;
 }
@@ -303,6 +316,35 @@ XrVector3f RotateVector(const XrQuaternionf& rotation, const XrVector3f& vector)
     const XrQuaternionf rotated =
         MultiplyQuaternion(MultiplyQuaternion(rotation, pure_vector), ConjugateQuaternion(rotation));
     return {rotated.x, rotated.y, rotated.z};
+}
+
+struct GazeRayAngles {
+    double yaw_radians{0.0};
+    double pitch_radians{0.0};
+    XrVector3f forward{0.0f, 0.0f, -1.0f};
+};
+
+GazeRayAngles ExtractGazeRayAngles(const XrQuaternionf& orientation) {
+    const XrQuaternionf normalized_orientation = NormalizeQuaternion(orientation);
+    XrVector3f forward = RotateVector(normalized_orientation, {0.0f, 0.0f, -1.0f});
+    const double magnitude = std::sqrt(static_cast<double>(forward.x) * forward.x +
+                                       static_cast<double>(forward.y) * forward.y +
+                                       static_cast<double>(forward.z) * forward.z);
+    if (magnitude > 0.000001) {
+        const float scale = static_cast<float>(1.0 / magnitude);
+        forward.x *= scale;
+        forward.y *= scale;
+        forward.z *= scale;
+    } else {
+        forward = {0.0f, 0.0f, -1.0f};
+    }
+
+    const double forward_depth = std::max(0.000001, static_cast<double>(-forward.z));
+    return {
+        std::atan2(static_cast<double>(forward.x), forward_depth),
+        std::atan2(static_cast<double>(forward.y), forward_depth),
+        forward,
+    };
 }
 
 XrQuaternionf YawQuaternion(float yaw_radians) {
@@ -533,6 +575,8 @@ bool IsQuadViewConfiguration(XrViewConfigurationType type) {
 }
 
 constexpr XrTime kMaxPivotPoseDeltaMatchWindow = 5'000'000;
+constexpr XrTime kMaxQuadViewsFovMatchWindow = 5'000'000;
+constexpr size_t kMaxCachedQuadViewsFovFrames = 180;
 
 bool SameSettings(const ResolvedRuntimeConfig& lhs, const ResolvedRuntimeConfig& rhs) {
     return lhs.core.enabled == rhs.core.enabled &&
@@ -908,6 +952,8 @@ XrResult OpenXrLayer::AttachSessionActionSets(XrSession session, const XrSession
         std::scoped_lock lock(mutex_);
         if (session == active_session_) {
             eye_gaze_action_set_attached_ = true;
+            pending_eye_gaze_diagnostics_ = std::max(pending_eye_gaze_diagnostics_, 20u);
+            pending_eye_gaze_sync_diagnostics_ = std::max(pending_eye_gaze_sync_diagnostics_, 20u);
             logger_.Info("Attached VectorXR eye-gaze action set for quadviews.");
         }
     }
@@ -921,6 +967,8 @@ XrResult OpenXrLayer::SyncActions(XrSession session, const XrActionsSyncInfo* sy
 
     XrActionsSyncInfo downstream_sync_info = *sync_info;
     std::vector<XrActiveActionSet> active_action_sets;
+    bool appended_eye_gaze_active_set = false;
+    uint32_t submitted_action_set_count = sync_info->countActiveActionSets;
     {
         std::scoped_lock lock(mutex_);
         if (session == active_session_ && eye_gaze_resources_ready_ && eye_gaze_action_set_attached_ &&
@@ -937,13 +985,28 @@ XrResult OpenXrLayer::SyncActions(XrSession session, const XrActionsSyncInfo* sy
                                                       });
             if (already_present == active_action_sets.end()) {
                 active_action_sets.push_back({quadviews_action_set_, XR_NULL_PATH});
+                appended_eye_gaze_active_set = true;
                 downstream_sync_info.countActiveActionSets = static_cast<uint32_t>(active_action_sets.size());
                 downstream_sync_info.activeActionSets = active_action_sets.data();
             }
+            submitted_action_set_count = downstream_sync_info.countActiveActionSets;
         }
     }
 
-    return next_sync_actions_(session, &downstream_sync_info);
+    const XrResult result = next_sync_actions_(session, &downstream_sync_info);
+    if (pending_eye_gaze_sync_diagnostics_ > 0) {
+        std::scoped_lock lock(mutex_);
+        if (session == active_session_ && eye_gaze_resources_ready_) {
+            logger_.Debug("Quadviews eye-gaze action sync: result=" +
+                          FormatHex(static_cast<uint64_t>(result)) +
+                          ", appActionSets=" + std::to_string(sync_info->countActiveActionSets) +
+                          ", submittedActionSets=" + std::to_string(submitted_action_set_count) +
+                          ", appended=" + std::to_string(appended_eye_gaze_active_set) +
+                          ", actionSetAttached=" + std::to_string(eye_gaze_action_set_attached_));
+            --pending_eye_gaze_sync_diagnostics_;
+        }
+    }
+    return result;
 }
 
 XrResult OpenXrLayer::GetSystemProperties(XrInstance instance,
@@ -1412,19 +1475,27 @@ bool OpenXrLayer::EnsureD3D11QuadViewsCompositor(const XrCompositionLayerProject
         logger_.Info("D3D11 quadviews compositor initialized.");
     }
 
+    auto release_render_resources = [](QuadViewsCompositionTarget& target) {
+        SafeRelease(target.render_target_view);
+        SafeRelease(target.render_texture);
+    };
+
     for (QuadViewsCompositionTarget& target : d3d11_quadviews_compositor_.targets) {
         if (target.swapchain != XR_NULL_HANDLE && target.width == output_width && target.height == output_height &&
-            target.format == output_format && !target.d3d11_images.empty()) {
+            target.format == output_format && !target.d3d11_images.empty() && target.render_texture &&
+            target.render_target_view) {
             continue;
         }
 
         if (target.swapchain != XR_NULL_HANDLE && next_destroy_swapchain_) {
+            release_render_resources(target);
             next_destroy_swapchain_(target.swapchain);
             target = {};
         }
 
         XrSwapchainCreateInfo create_info{XR_TYPE_SWAPCHAIN_CREATE_INFO};
-        create_info.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_SAMPLED_BIT;
+        create_info.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_SAMPLED_BIT |
+                                 XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT;
         create_info.format = output_format;
         create_info.sampleCount = 1;
         create_info.width = output_width;
@@ -1435,10 +1506,17 @@ bool OpenXrLayer::EnsureD3D11QuadViewsCompositor(const XrCompositionLayerProject
 
         XrResult result = next_create_swapchain_(active_session_, &create_info, &target.swapchain);
         if (XR_FAILED(result) || target.swapchain == XR_NULL_HANDLE) {
-            logger_.Error("D3D11 quadviews compositor output swapchain creation failed.");
-            target = {};
-            d3d11_quadviews_compositor_.failed = true;
-            return false;
+            const XrResult transfer_result = result;
+            create_info.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_SAMPLED_BIT;
+            result = next_create_swapchain_(active_session_, &create_info, &target.swapchain);
+            if (XR_FAILED(result) || target.swapchain == XR_NULL_HANDLE) {
+                logger_.Error("D3D11 quadviews compositor output swapchain creation failed. transferDstResult=" +
+                              FormatHex(static_cast<uint64_t>(transfer_result)) +
+                              ", fallbackResult=" + FormatHex(static_cast<uint64_t>(result)));
+                target = {};
+                d3d11_quadviews_compositor_.failed = true;
+                return false;
+            }
         }
 
         uint32_t image_count = 0;
@@ -1474,15 +1552,50 @@ bool OpenXrLayer::EnsureD3D11QuadViewsCompositor(const XrCompositionLayerProject
             target.d3d11_images.push_back(image.texture);
         }
 
+        D3D11_TEXTURE2D_DESC render_desc{};
+        render_desc.Width = output_width;
+        render_desc.Height = output_height;
+        render_desc.MipLevels = 1;
+        render_desc.ArraySize = 1;
+        render_desc.Format = static_cast<DXGI_FORMAT>(output_format);
+        render_desc.SampleDesc.Count = 1;
+        render_desc.Usage = D3D11_USAGE_DEFAULT;
+        render_desc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+
+        HRESULT hr = d3d11_quadviews_compositor_.device->CreateTexture2D(&render_desc, nullptr, &target.render_texture);
+        std::string d3d_step = "CreatePrivateRenderTexture";
+        if (SUCCEEDED(hr)) {
+            hr = d3d11_quadviews_compositor_.device->CreateRenderTargetView(
+                target.render_texture,
+                nullptr,
+                &target.render_target_view);
+            d3d_step = "CreatePrivateRenderTargetView";
+        }
+        if (FAILED(hr)) {
+            logger_.Error("D3D11 quadviews compositor private render target creation failed. step=" + d3d_step +
+                          ", hr=" + FormatHex(static_cast<uint32_t>(hr)) +
+                          ", format=" + std::to_string(output_format) +
+                          ", size=" + std::to_string(output_width) + "x" + std::to_string(output_height));
+            release_render_resources(target);
+            if (target.swapchain != XR_NULL_HANDLE && next_destroy_swapchain_) {
+                next_destroy_swapchain_(target.swapchain);
+            }
+            target = {};
+            d3d11_quadviews_compositor_.failed = true;
+            return false;
+        }
+
         logger_.Info("D3D11 quadviews compositor output swapchain ready: size=" +
                      std::to_string(target.width) + "x" + std::to_string(target.height) +
-                     ", images=" + std::to_string(target.image_count));
+                     ", images=" + std::to_string(target.image_count) +
+                     ", privateRenderTarget=1");
     }
 
     return true;
 }
 
 bool OpenXrLayer::ComposeQuadViewsD3D11(const XrCompositionLayerProjection* source_layer,
+                                        XrTime display_time,
                                         const XrPosef& reverse_delta,
                                         bool has_non_identity_delta,
                                         XrCompositionLayerProjection* composed_layer,
@@ -1509,6 +1622,10 @@ bool OpenXrLayer::ComposeQuadViewsD3D11(const XrCompositionLayerProjection* sour
     if (!EnsureD3D11QuadViewsCompositor(source_layer, output_width, output_height, output_format)) {
         return false;
     }
+
+    std::array<XrFovf, 4> cached_fovs{};
+    XrTime matched_quadviews_fov_time = 0;
+    const bool has_cached_fovs = FindQuadViewsFovs(display_time, &cached_fovs, &matched_quadviews_fov_time);
 
     struct SavedD3D11State {
         ID3D11RenderTargetView* render_targets[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT]{};
@@ -1565,12 +1682,79 @@ bool OpenXrLayer::ComposeQuadViewsD3D11(const XrCompositionLayerProjection* sour
     };
 
     bool rendered = true;
+    std::string failure_reason;
     std::array<uint32_t, 2> output_indices{};
+    auto release_input_copy = [](QuadViewsInputCopy& input_copy) {
+        SafeRelease(input_copy.shader_resource);
+        SafeRelease(input_copy.texture);
+        input_copy = {};
+    };
+    auto ensure_input_copy = [&](uint32_t input_index, const SwapchainInfo& swapchain) -> bool {
+        QuadViewsInputCopy& input_copy = d3d11_quadviews_compositor_.input_copies[input_index];
+        if (input_copy.texture && input_copy.shader_resource && input_copy.width == swapchain.width &&
+            input_copy.height == swapchain.height && input_copy.format == swapchain.format) {
+            return true;
+        }
+
+        release_input_copy(input_copy);
+
+        D3D11_TEXTURE2D_DESC texture_desc{};
+        texture_desc.Width = swapchain.width;
+        texture_desc.Height = swapchain.height;
+        texture_desc.MipLevels = 1;
+        texture_desc.ArraySize = 1;
+        texture_desc.Format = static_cast<DXGI_FORMAT>(swapchain.format);
+        texture_desc.SampleDesc.Count = 1;
+        texture_desc.Usage = D3D11_USAGE_DEFAULT;
+        texture_desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+
+        HRESULT hr = d3d11_quadviews_compositor_.device->CreateTexture2D(&texture_desc, nullptr, &input_copy.texture);
+        std::string d3d_step = "CreateInputCopyTexture";
+        if (SUCCEEDED(hr)) {
+            hr = d3d11_quadviews_compositor_.device->CreateShaderResourceView(
+                input_copy.texture,
+                nullptr,
+                &input_copy.shader_resource);
+            d3d_step = "CreateInputCopyShaderResourceView";
+        }
+        if (FAILED(hr)) {
+            failure_reason = d3d_step + " input=" + std::to_string(input_index) +
+                             ", hr=" + FormatHex(static_cast<uint32_t>(hr)) +
+                             ", format=" + std::to_string(swapchain.format) +
+                             ", size=" + std::to_string(swapchain.width) + "x" +
+                             std::to_string(swapchain.height);
+            release_input_copy(input_copy);
+            return false;
+        }
+
+        input_copy.width = swapchain.width;
+        input_copy.height = swapchain.height;
+        input_copy.format = swapchain.format;
+        logger_.Info("D3D11 quadviews compositor input copy ready: input=" + std::to_string(input_index) +
+                     ", size=" + std::to_string(input_copy.width) + "x" + std::to_string(input_copy.height) +
+                     ", format=" + std::to_string(input_copy.format));
+        return true;
+    };
+
+    for (uint32_t input_index = 0; input_index < swapchains.size(); ++input_index) {
+        if (!ensure_input_copy(input_index, *swapchains[input_index])) {
+            rendered = false;
+            break;
+        }
+    }
+
     for (uint32_t eye = 0; eye < 2; ++eye) {
+        if (!rendered) {
+            break;
+        }
         QuadViewsCompositionTarget& target = d3d11_quadviews_compositor_.targets[eye];
         XrSwapchainImageAcquireInfo acquire_info{XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};
         XrResult result = next_acquire_swapchain_image_(target.swapchain, &acquire_info, &output_indices[eye]);
         if (XR_FAILED(result) || output_indices[eye] >= target.d3d11_images.size()) {
+            failure_reason = "outputAcquire eye=" + std::to_string(eye) +
+                             ", result=" + FormatHex(static_cast<uint64_t>(result)) +
+                             ", imageIndex=" + std::to_string(output_indices[eye]) +
+                             ", images=" + std::to_string(target.d3d11_images.size());
             rendered = false;
             break;
         }
@@ -1578,38 +1762,23 @@ bool OpenXrLayer::ComposeQuadViewsD3D11(const XrCompositionLayerProjection* sour
         wait_info.timeout = XR_INFINITE_DURATION;
         result = next_wait_swapchain_image_(target.swapchain, &wait_info);
         if (XR_FAILED(result)) {
+            failure_reason = "outputWait eye=" + std::to_string(eye) +
+                             ", result=" + FormatHex(static_cast<uint64_t>(result));
+            XrSwapchainImageReleaseInfo release_info{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
+            next_release_swapchain_image_(target.swapchain, &release_info);
             rendered = false;
             break;
         }
 
-        ID3D11RenderTargetView* render_target = nullptr;
-        ID3D11ShaderResourceView* peripheral_resource = nullptr;
-        ID3D11ShaderResourceView* focus_resource = nullptr;
-        HRESULT hr = d3d11_quadviews_compositor_.device->CreateRenderTargetView(
-            target.d3d11_images[output_indices[eye]],
-            nullptr,
-            &render_target);
-        if (SUCCEEDED(hr)) {
-            hr = d3d11_quadviews_compositor_.device->CreateShaderResourceView(
-                swapchains[eye]->d3d11_images[swapchains[eye]->last_acquired_image_index],
-                nullptr,
-                &peripheral_resource);
-        }
-        if (SUCCEEDED(hr)) {
-            hr = d3d11_quadviews_compositor_.device->CreateShaderResourceView(
-                swapchains[eye + 2]->d3d11_images[swapchains[eye + 2]->last_acquired_image_index],
-                nullptr,
-                &focus_resource);
-        }
-        if (FAILED(hr)) {
-            SafeRelease(render_target);
-            SafeRelease(peripheral_resource);
-            SafeRelease(focus_resource);
-            rendered = false;
-            break;
-        }
+        ID3D11Texture2D* peripheral_source =
+            swapchains[eye]->d3d11_images[swapchains[eye]->last_acquired_image_index];
+        ID3D11Texture2D* focus_source =
+            swapchains[eye + 2]->d3d11_images[swapchains[eye + 2]->last_acquired_image_index];
+        context->CopyResource(d3d11_quadviews_compositor_.input_copies[eye].texture, peripheral_source);
+        context->CopyResource(d3d11_quadviews_compositor_.input_copies[eye + 2].texture, focus_source);
 
         const float clear_color[4]{0.0f, 0.0f, 0.0f, 1.0f};
+        ID3D11RenderTargetView* render_target = target.render_target_view;
         context->ClearRenderTargetView(render_target, clear_color);
         context->OMSetRenderTargets(1, &render_target, nullptr);
 
@@ -1623,25 +1792,49 @@ bool OpenXrLayer::ComposeQuadViewsD3D11(const XrCompositionLayerProjection* sour
         context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
         context->VSSetShader(d3d11_quadviews_compositor_.vertex_shader, nullptr, 0);
         context->PSSetShader(d3d11_quadviews_compositor_.pixel_shader, nullptr, 0);
-        ID3D11ShaderResourceView* resources[2]{peripheral_resource, focus_resource};
+        ID3D11ShaderResourceView* resources[2]{
+            d3d11_quadviews_compositor_.input_copies[eye].shader_resource,
+            d3d11_quadviews_compositor_.input_copies[eye + 2].shader_resource,
+        };
         context->PSSetShaderResources(0, 2, resources);
         context->PSSetSamplers(0, 1, &d3d11_quadviews_compositor_.sampler);
 
-        FocusRectConstants constants =
-            BuildFocusRectConstants(source_layer->views[eye].fov, source_layer->views[eye + 2].fov, target.width, target.height);
+        const XrFovf& full_fov = has_cached_fovs ? cached_fovs[eye] : source_layer->views[eye].fov;
+        const XrFovf& focus_fov = has_cached_fovs ? cached_fovs[eye + 2] : source_layer->views[eye + 2].fov;
+        FocusRectConstants constants = BuildFocusRectConstants(full_fov, focus_fov, target.width, target.height);
+        if (pending_quadviews_compositor_diagnostics_ > 0) {
+            std::ostringstream stream;
+            stream << "D3D11 quadviews compositor focus rect: frameTime=" << display_time
+                   << ", eye=" << eye
+                   << ", cachedFovHit=" << has_cached_fovs
+                   << ", matchedTime=" << matched_quadviews_fov_time
+                   << ", matchedDeltaNs=" << (matched_quadviews_fov_time - display_time)
+                   << ", rect=(" << FormatDiagnosticDouble(constants.focus_rect[0]) << ", "
+                   << FormatDiagnosticDouble(constants.focus_rect[1]) << ", "
+                   << FormatDiagnosticDouble(constants.focus_rect[2]) << ", "
+                   << FormatDiagnosticDouble(constants.focus_rect[3]) << ")"
+                   << ", fullFov=" << FormatFov(full_fov)
+                   << ", focusFov=" << FormatFov(focus_fov)
+                   << ", sourceFullFov=" << FormatFov(source_layer->views[eye].fov)
+                   << ", sourceFocusFov=" << FormatFov(source_layer->views[eye + 2].fov);
+            logger_.Debug(stream.str());
+            --pending_quadviews_compositor_diagnostics_;
+        }
         context->UpdateSubresource(d3d11_quadviews_compositor_.constants, 0, nullptr, &constants, 0, 0);
         context->PSSetConstantBuffers(0, 1, &d3d11_quadviews_compositor_.constants);
         context->Draw(3, 0);
 
         ID3D11ShaderResourceView* null_resources[2]{nullptr, nullptr};
         context->PSSetShaderResources(0, 2, null_resources);
-        SafeRelease(render_target);
-        SafeRelease(peripheral_resource);
-        SafeRelease(focus_resource);
+        ID3D11RenderTargetView* null_render_target = nullptr;
+        context->OMSetRenderTargets(1, &null_render_target, nullptr);
+        context->CopyResource(target.d3d11_images[output_indices[eye]], target.render_texture);
 
         XrSwapchainImageReleaseInfo release_info{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
         result = next_release_swapchain_image_(target.swapchain, &release_info);
         if (XR_FAILED(result)) {
+            failure_reason = "outputRelease eye=" + std::to_string(eye) +
+                             ", result=" + FormatHex(static_cast<uint64_t>(result));
             rendered = false;
             break;
         }
@@ -1649,14 +1842,26 @@ bool OpenXrLayer::ComposeQuadViewsD3D11(const XrCompositionLayerProjection* sour
 
     restore_state();
     if (!rendered) {
-        logger_.Error("D3D11 quadviews composition failed; falling back to projection-layer split.");
+        if (d3d11_quadviews_compositor_.failure_logs_remaining > 0) {
+            logger_.Error("D3D11 quadviews composition failed; falling back to projection-layer split. reason=" +
+                          failure_reason);
+            --d3d11_quadviews_compositor_.failure_logs_remaining;
+            if (d3d11_quadviews_compositor_.failure_logs_remaining == 0) {
+                logger_.Error("D3D11 quadviews composition failures are repeating; suppressing further per-frame "
+                              "failure logs for this session.");
+            }
+        }
         return false;
     }
+    d3d11_quadviews_compositor_.failure_logs_remaining = 8;
 
     composed_views->assign(source_layer->views, source_layer->views + 2);
     for (uint32_t eye = 0; eye < 2; ++eye) {
         if (has_non_identity_delta) {
             (*composed_views)[eye].pose = MultiplyPoses((*composed_views)[eye].pose, reverse_delta);
+        }
+        if (has_cached_fovs) {
+            (*composed_views)[eye].fov = cached_fovs[eye];
         }
         QuadViewsCompositionTarget& target = d3d11_quadviews_compositor_.targets[eye];
         (*composed_views)[eye].subImage.swapchain = target.swapchain;
@@ -1687,10 +1892,12 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
     RefreshResolvedSettings();
     if (!resolved_settings_.core.enabled) {
         cached_pivot_pose_deltas_.clear();
+        cached_quadviews_fovs_.clear();
         pivotxr_smoothed_extra_yaw_radians_ = 0.0;
         pivotxr_smoothed_extra_pitch_radians_ = 0.0;
         pivotxr_last_smoothing_wall_time_.reset();
         PrunePivotPoseDeltas(frame_end_info->displayTime);
+        PruneQuadViewsFovs(frame_end_info->displayTime);
         return next_end_frame_(session, frame_end_info);
     }
 
@@ -1730,6 +1937,7 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
             --pending_end_frame_diagnostics_;
         }
         PrunePivotPoseDeltas(frame_end_info->displayTime);
+        PruneQuadViewsFovs(frame_end_info->displayTime);
         return next_end_frame_(session, frame_end_info);
     }
 
@@ -1799,6 +2007,7 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
             adjusted_projection_views.emplace_back();
             adjusted_projection_layers.emplace_back();
             if (ComposeQuadViewsD3D11(projection_layer,
+                                      frame_end_info->displayTime,
                                       reverse_delta,
                                       has_non_identity_delta,
                                       &adjusted_projection_layers.back(),
@@ -1867,6 +2076,7 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
     }
     const XrResult result = next_end_frame_(session, &adjusted_frame_end_info);
     PrunePivotPoseDeltas(frame_end_info->displayTime);
+    PruneQuadViewsFovs(frame_end_info->displayTime);
     return result;
 }
 
@@ -2052,6 +2262,25 @@ XrResult OpenXrLayer::LocateViews(XrSession session,
             for (ViewAdjustmentData& view : adjusted_views) {
                 view.orientation = ApplyExtraRotationToOrientation(view.orientation, extra_yaw_radians, extra_pitch_radians);
             }
+            XrPosef original_pose = IdentityPose();
+            original_pose.position.x = static_cast<float>(original_views[0].position.x);
+            original_pose.position.y = static_cast<float>(original_views[0].position.y);
+            original_pose.position.z = static_cast<float>(original_views[0].position.z);
+            original_pose.orientation.x = static_cast<float>(original_views[0].orientation.x);
+            original_pose.orientation.y = static_cast<float>(original_views[0].orientation.y);
+            original_pose.orientation.z = static_cast<float>(original_views[0].orientation.z);
+            original_pose.orientation.w = static_cast<float>(original_views[0].orientation.w);
+
+            XrPosef adjusted_pose = original_pose;
+            adjusted_pose.orientation.x = static_cast<float>(adjusted_views[0].orientation.x);
+            adjusted_pose.orientation.y = static_cast<float>(adjusted_views[0].orientation.y);
+            adjusted_pose.orientation.z = static_cast<float>(adjusted_views[0].orientation.z);
+            adjusted_pose.orientation.w = static_cast<float>(adjusted_views[0].orientation.w);
+            if (view_locate_info) {
+                CachePivotPoseDelta(view_locate_info->displayTime, MultiplyPoses(InvertPose(original_pose), adjusted_pose));
+            }
+        } else if (view_locate_info) {
+            CachePivotPoseDelta(view_locate_info->displayTime, IdentityPose());
         }
     } else if (resolved_settings_.pivotxr.enabled && pivotxr_active && internal_view_space_ != XR_NULL_HANDLE &&
                view_locate_info) {
@@ -2128,6 +2357,9 @@ XrResult OpenXrLayer::LocateViews(XrSession session,
         views[i].fov.angleRight = static_cast<float>(adjusted_views[i].fov.angle_right);
         views[i].fov.angleUp = static_cast<float>(adjusted_views[i].fov.angle_up);
         views[i].fov.angleDown = static_cast<float>(adjusted_views[i].fov.angle_down);
+    }
+    if (view_locate_info && IsQuadViewConfiguration(view_configuration_type) && count >= 4) {
+        CacheQuadViewsFovs(view_locate_info->displayTime, std::span<const XrView>(views, count));
     }
 
     if (pending_locate_views_diagnostics_ > 0) {
@@ -2277,6 +2509,18 @@ void OpenXrLayer::RefreshResolvedSettings() {
         last_logged_settings_ = resolved_settings_;
         pending_locate_views_diagnostics_ = 5;
         pending_end_frame_diagnostics_ = 5;
+        pending_eye_gaze_diagnostics_ = 10;
+        pending_eye_gaze_sync_diagnostics_ = 10;
+    }
+
+    if (IsQuadViewsActive() && resolved_settings_.quadviews.prefer_eye_tracking &&
+        resolved_settings_.quadviews.tracking_mode == QuadViewsTrackingMode::Eye &&
+        active_session_ != XR_NULL_HANDLE && !eye_gaze_resources_ready_) {
+        const XrResult eye_gaze_result = CreateEyeGazeResources(active_session_);
+        if (XR_FAILED(eye_gaze_result)) {
+            logger_.Info("Eye gaze resources unavailable after quadviews tracking-mode change; head/static focus remains active.");
+            DestroyEyeGazeResources();
+        }
     }
 }
 
@@ -2444,6 +2688,10 @@ void OpenXrLayer::ResetSessionState() {
     ResetD3D11QuadViewsCompositor();
     active_session_ = XR_NULL_HANDLE;
     pending_end_frame_diagnostics_ = 0;
+    pending_eye_gaze_diagnostics_ = 0;
+    pending_eye_gaze_sync_diagnostics_ = 0;
+    pending_quadviews_compositor_diagnostics_ = 0;
+    eye_gaze_diagnostic_stride_counter_ = 0;
     pivotxr_smoothed_extra_yaw_radians_ = 0.0;
     pivotxr_smoothed_extra_pitch_radians_ = 0.0;
     pivotxr_last_smoothing_wall_time_.reset();
@@ -2473,6 +2721,7 @@ void OpenXrLayer::ResetSessionState() {
     tracked_stage_spaces_.clear();
     cached_eye_offset_poses_.clear();
     cached_pivot_pose_deltas_.clear();
+    cached_quadviews_fovs_.clear();
     tracked_swapchains_.clear();
 }
 
@@ -2487,6 +2736,9 @@ bool OpenXrLayer::IsQuadViewsActive() const {
 }
 
 XrResult OpenXrLayer::CreateEyeGazeResources(XrSession session) {
+    if (eye_gaze_resources_ready_) {
+        return XR_SUCCESS;
+    }
     if (!eye_gaze_extension_enabled_ || !next_string_to_path_ || !next_create_action_set_ || !next_create_action_ ||
         !next_suggest_interaction_profile_bindings_ || !next_create_action_space_) {
         return XR_ERROR_FEATURE_UNSUPPORTED;
@@ -2542,6 +2794,10 @@ XrResult OpenXrLayer::CreateEyeGazeResources(XrSession session) {
 
     eye_gaze_resources_ready_ = true;
     eye_gaze_action_set_attached_ = false;
+    pending_eye_gaze_diagnostics_ = std::max(pending_eye_gaze_diagnostics_, 120u);
+    pending_eye_gaze_sync_diagnostics_ = std::max(pending_eye_gaze_sync_diagnostics_, 20u);
+    pending_quadviews_compositor_diagnostics_ = std::max(pending_quadviews_compositor_diagnostics_, 30u);
+    eye_gaze_diagnostic_stride_counter_ = 0;
     logger_.Info("Created VectorXR eye-gaze action resources for quadviews.");
     return XR_SUCCESS;
 }
@@ -2585,10 +2841,48 @@ bool OpenXrLayer::LocateEyeGazeFocusOffsets(XrSession session,
 
     *yaw_radians = 0.0;
     *pitch_radians = 0.0;
-    if (settings.tracking_mode != QuadViewsTrackingMode::Eye || !settings.prefer_eye_tracking ||
-        session != active_session_ || base_space == XR_NULL_HANDLE || !eye_gaze_resources_ready_ ||
-        !eye_gaze_action_set_attached_ || quadviews_eye_gaze_action_ == XR_NULL_HANDLE ||
-        quadviews_eye_gaze_space_ == XR_NULL_HANDLE || !next_get_action_state_pose_ || !next_locate_space_) {
+    auto log_eye_gaze_diagnostic = [&](const std::string& reason) {
+        if (settings.tracking_mode == QuadViewsTrackingMode::Eye && pending_eye_gaze_diagnostics_ > 0) {
+            logger_.Debug("Quadviews eye-gaze focus unavailable: " + reason +
+                          ", preferEyeTracking=" + std::to_string(settings.prefer_eye_tracking) +
+                          ", resourcesReady=" + std::to_string(eye_gaze_resources_ready_) +
+                          ", actionSetAttached=" + std::to_string(eye_gaze_action_set_attached_));
+            --pending_eye_gaze_diagnostics_;
+        }
+    };
+
+    if (settings.tracking_mode != QuadViewsTrackingMode::Eye) {
+        return false;
+    }
+    if (!settings.prefer_eye_tracking) {
+        log_eye_gaze_diagnostic("preferEyeTracking disabled");
+        return false;
+    }
+    if (session != active_session_) {
+        log_eye_gaze_diagnostic("session mismatch");
+        return false;
+    }
+    if (base_space == XR_NULL_HANDLE) {
+        log_eye_gaze_diagnostic("base space is null");
+        return false;
+    }
+    if (!eye_gaze_resources_ready_ || !eye_gaze_action_set_attached_ ||
+        quadviews_eye_gaze_action_ == XR_NULL_HANDLE || quadviews_eye_gaze_space_ == XR_NULL_HANDLE) {
+        log_eye_gaze_diagnostic("eye-gaze action resources are not ready");
+        return false;
+    }
+    if (!next_get_action_state_pose_ || !next_locate_space_ || !next_sync_actions_) {
+        log_eye_gaze_diagnostic("required OpenXR action/space functions are unavailable");
+        return false;
+    }
+
+    const XrActiveActionSet active_action_set{quadviews_action_set_, XR_NULL_PATH};
+    XrActionsSyncInfo sync_info{XR_TYPE_ACTIONS_SYNC_INFO};
+    sync_info.countActiveActionSets = 1;
+    sync_info.activeActionSets = &active_action_set;
+    const XrResult sync_result = next_sync_actions_(session, &sync_info);
+    if (XR_FAILED(sync_result)) {
+        log_eye_gaze_diagnostic("self sync failed, result=" + FormatHex(static_cast<uint64_t>(sync_result)));
         return false;
     }
 
@@ -2597,6 +2891,9 @@ bool OpenXrLayer::LocateEyeGazeFocusOffsets(XrSession session,
     XrActionStatePose action_state{XR_TYPE_ACTION_STATE_POSE};
     const XrResult state_result = next_get_action_state_pose_(session, &action_state_info, &action_state);
     if (XR_FAILED(state_result) || !action_state.isActive) {
+        log_eye_gaze_diagnostic("action state is unavailable, result=" +
+                                FormatHex(static_cast<uint64_t>(state_result)) +
+                                ", active=" + std::to_string(action_state.isActive));
         return false;
     }
 
@@ -2606,17 +2903,24 @@ bool OpenXrLayer::LocateEyeGazeFocusOffsets(XrSession session,
     const XrResult locate_result = next_locate_space_(quadviews_eye_gaze_space_, gaze_base_space, time, &gaze_location);
     if (XR_FAILED(locate_result) ||
         (gaze_location.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT) == 0) {
+        log_eye_gaze_diagnostic("gaze space locate failed, result=" +
+                                FormatHex(static_cast<uint64_t>(locate_result)) +
+                                ", flags=" + FormatHex(static_cast<uint64_t>(gaze_location.locationFlags)));
         return false;
     }
 
-    const ViewOrientation gaze_orientation{
-        gaze_location.pose.orientation.x,
-        gaze_location.pose.orientation.y,
-        gaze_location.pose.orientation.z,
-        gaze_location.pose.orientation.w,
+    const XrQuaternionf gaze_orientation = gaze_location.pose.orientation;
+    const GazeRayAngles gaze_ray_angles = ExtractGazeRayAngles(gaze_orientation);
+    const ViewOrientation diagnostic_orientation{
+        gaze_orientation.x,
+        gaze_orientation.y,
+        gaze_orientation.z,
+        gaze_orientation.w,
     };
-    double target_yaw = ExtractYawRadians(gaze_orientation);
-    double target_pitch = ExtractPitchRadians(gaze_orientation);
+    const double euler_yaw = ExtractYawRadians(diagnostic_orientation);
+    const double euler_pitch = ExtractPitchRadians(diagnostic_orientation);
+    double target_yaw = gaze_ray_angles.yaw_radians;
+    double target_pitch = gaze_ray_angles.pitch_radians;
     const double deadzone_radians = DegreesToRadians(std::max(0.0, settings.gaze_deadzone_degrees));
     if (std::abs(target_yaw) < deadzone_radians) {
         target_yaw = 0.0;
@@ -2643,6 +2947,23 @@ bool OpenXrLayer::LocateEyeGazeFocusOffsets(XrSession session,
 
     *yaw_radians = quadviews_smoothed_focus_yaw_radians_;
     *pitch_radians = quadviews_smoothed_focus_pitch_radians_;
+    const bool should_log_eye_gaze =
+        pending_eye_gaze_diagnostics_ > 0 &&
+        (eye_gaze_diagnostic_stride_counter_ < 20 || eye_gaze_diagnostic_stride_counter_ % 45 == 0);
+    ++eye_gaze_diagnostic_stride_counter_;
+    if (should_log_eye_gaze) {
+        logger_.Debug("Quadviews eye-gaze focus active: rawYaw=" + FormatDiagnosticDouble(target_yaw) +
+                      ", rawPitch=" + FormatDiagnosticDouble(target_pitch) +
+                      ", eulerYaw=" + FormatDiagnosticDouble(euler_yaw) +
+                      ", eulerPitch=" + FormatDiagnosticDouble(euler_pitch) +
+                      ", smoothedYaw=" + FormatDiagnosticDouble(*yaw_radians) +
+                      ", smoothedPitch=" + FormatDiagnosticDouble(*pitch_radians) +
+                      ", forward=(" + FormatDiagnosticDouble(gaze_ray_angles.forward.x) + ", " +
+                      FormatDiagnosticDouble(gaze_ray_angles.forward.y) + ", " +
+                      FormatDiagnosticDouble(gaze_ray_angles.forward.z) + ")" +
+                      ", baseSpace=" + std::string(gaze_base_space == internal_view_space_ ? "view" : "app"));
+        --pending_eye_gaze_diagnostics_;
+    }
     return true;
 }
 
@@ -2689,6 +3010,7 @@ void OpenXrLayer::DestroyInternalReferenceSpaces() {
         tracked_stage_spaces_.clear();
         cached_eye_offset_poses_.clear();
         cached_pivot_pose_deltas_.clear();
+        cached_quadviews_fovs_.clear();
         return;
     }
 
@@ -2715,6 +3037,7 @@ void OpenXrLayer::DestroyInternalReferenceSpaces() {
 
     cached_eye_offset_poses_.clear();
     cached_pivot_pose_deltas_.clear();
+    cached_quadviews_fovs_.clear();
 }
 
 bool OpenXrLayer::EnsureEyeOffsets(XrSession session,
@@ -2802,6 +3125,69 @@ void OpenXrLayer::PrunePivotPoseDeltas(XrTime time) {
     }
 
     cached_pivot_pose_deltas_.erase(cached_pivot_pose_deltas_.begin(), keep_from);
+}
+
+void OpenXrLayer::CacheQuadViewsFovs(XrTime time, std::span<const XrView> views) {
+    if (time == 0 || views.size() < 4) {
+        return;
+    }
+
+    std::array<XrFovf, 4> fovs{};
+    for (uint32_t i = 0; i < fovs.size(); ++i) {
+        fovs[i] = views[i].fov;
+    }
+    cached_quadviews_fovs_[time] = fovs;
+    while (cached_quadviews_fovs_.size() > kMaxCachedQuadViewsFovFrames) {
+        cached_quadviews_fovs_.erase(cached_quadviews_fovs_.begin());
+    }
+}
+
+bool OpenXrLayer::FindQuadViewsFovs(XrTime time, std::array<XrFovf, 4>* fovs, XrTime* matched_time) const {
+    if (!fovs || !matched_time) {
+        return false;
+    }
+
+    if (cached_quadviews_fovs_.empty()) {
+        *matched_time = 0;
+        return false;
+    }
+
+    auto exact = cached_quadviews_fovs_.find(time);
+    if (exact != cached_quadviews_fovs_.end()) {
+        *fovs = exact->second;
+        *matched_time = exact->first;
+        return true;
+    }
+
+    auto upper = cached_quadviews_fovs_.lower_bound(time);
+    std::map<XrTime, std::array<XrFovf, 4>>::const_iterator best;
+    if (upper == cached_quadviews_fovs_.begin()) {
+        best = upper;
+    } else if (upper == cached_quadviews_fovs_.end()) {
+        best = std::prev(upper);
+    } else {
+        auto lower = std::prev(upper);
+        best = (time - lower->first <= upper->first - time) ? lower : upper;
+    }
+
+    const XrTime match_delta = best->first > time ? best->first - time : time - best->first;
+    if (match_delta > kMaxQuadViewsFovMatchWindow) {
+        *matched_time = best->first;
+        return false;
+    }
+
+    *fovs = best->second;
+    *matched_time = best->first;
+    return true;
+}
+
+void OpenXrLayer::PruneQuadViewsFovs(XrTime time) {
+    auto keep_from = cached_quadviews_fovs_.upper_bound(time);
+    if (keep_from == cached_quadviews_fovs_.begin()) {
+        return;
+    }
+
+    cached_quadviews_fovs_.erase(cached_quadviews_fovs_.begin(), keep_from);
 }
 
 bool OpenXrLayer::IsTrackedViewSpace(XrSpace space) const {
@@ -3095,10 +3481,18 @@ void OpenXrLayer::ResetSwapchainState() {
 
 void OpenXrLayer::ResetD3D11QuadViewsCompositor() {
     for (QuadViewsCompositionTarget& target : d3d11_quadviews_compositor_.targets) {
+        SafeRelease(target.render_target_view);
+        SafeRelease(target.render_texture);
         if (target.swapchain != XR_NULL_HANDLE && next_destroy_swapchain_) {
             next_destroy_swapchain_(target.swapchain);
         }
         target = {};
+    }
+
+    for (QuadViewsInputCopy& input_copy : d3d11_quadviews_compositor_.input_copies) {
+        SafeRelease(input_copy.shader_resource);
+        SafeRelease(input_copy.texture);
+        input_copy = {};
     }
 
     SafeRelease(d3d11_quadviews_compositor_.constants);
@@ -3110,6 +3504,7 @@ void OpenXrLayer::ResetD3D11QuadViewsCompositor() {
     SafeRelease(d3d11_quadviews_compositor_.device);
     d3d11_quadviews_compositor_.initialized = false;
     d3d11_quadviews_compositor_.failed = false;
+    d3d11_quadviews_compositor_.failure_logs_remaining = 8;
 }
 
 void OpenXrLayer::LogSwapchainSummary(XrSwapchain swapchain,
