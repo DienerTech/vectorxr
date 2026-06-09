@@ -282,7 +282,18 @@ bool SameSettings(const ResolvedRuntimeConfig& lhs, const ResolvedRuntimeConfig&
            NearlyEqual(lhs.pivotxr.pitch_rotation_multiplier, rhs.pivotxr.pitch_rotation_multiplier) &&
            NearlyEqual(lhs.pivotxr.pitch_smoothing, rhs.pivotxr.pitch_smoothing) &&
            NearlyEqual(lhs.pivotxr.pitch_deadzone_degrees, rhs.pivotxr.pitch_deadzone_degrees) &&
-           NearlyEqual(lhs.pivotxr.pitch_max_extra_degrees, rhs.pivotxr.pitch_max_extra_degrees);
+           NearlyEqual(lhs.pivotxr.pitch_max_extra_degrees, rhs.pivotxr.pitch_max_extra_degrees) &&
+           lhs.quadviews.enabled == rhs.quadviews.enabled &&
+           lhs.quadviews.prefer_eye_tracking == rhs.quadviews.prefer_eye_tracking &&
+           lhs.quadviews.tracking_mode == rhs.quadviews.tracking_mode &&
+           NearlyEqual(lhs.quadviews.focus_horizontal_fov_degrees, rhs.quadviews.focus_horizontal_fov_degrees) &&
+           NearlyEqual(lhs.quadviews.focus_vertical_fov_degrees, rhs.quadviews.focus_vertical_fov_degrees) &&
+           NearlyEqual(lhs.quadviews.focus_scale, rhs.quadviews.focus_scale) &&
+           NearlyEqual(lhs.quadviews.peripheral_scale, rhs.quadviews.peripheral_scale) &&
+           NearlyEqual(lhs.quadviews.horizontal_offset_degrees, rhs.quadviews.horizontal_offset_degrees) &&
+           NearlyEqual(lhs.quadviews.vertical_offset_degrees, rhs.quadviews.vertical_offset_degrees) &&
+           NearlyEqual(lhs.quadviews.gaze_smoothing, rhs.quadviews.gaze_smoothing) &&
+           NearlyEqual(lhs.quadviews.gaze_deadzone_degrees, rhs.quadviews.gaze_deadzone_degrees);
 }
 
 bool SameInputBinding(const InputBinding& lhs, const InputBinding& rhs) {
@@ -1364,7 +1375,18 @@ void OpenXrLayer::LogResolvedSettings(const ResolvedRuntimeConfig& settings) {
            << ", pivotPitchMultiplier=" << settings.pivotxr.pitch_rotation_multiplier
            << ", pivotPitchSmoothing=" << settings.pivotxr.pitch_smoothing
            << ", pivotPitchDeadzone=" << settings.pivotxr.pitch_deadzone_degrees
-           << ", pivotPitchMaxExtra=" << settings.pivotxr.pitch_max_extra_degrees;
+           << ", pivotPitchMaxExtra=" << settings.pivotxr.pitch_max_extra_degrees
+           << ", quadviewsEnabled=" << settings.quadviews.enabled
+           << ", quadviewsPreferEyeTracking=" << settings.quadviews.prefer_eye_tracking
+           << ", quadviewsTrackingMode=" << ToString(settings.quadviews.tracking_mode)
+           << ", quadviewsFocusHorizontalFov=" << settings.quadviews.focus_horizontal_fov_degrees
+           << ", quadviewsFocusVerticalFov=" << settings.quadviews.focus_vertical_fov_degrees
+           << ", quadviewsFocusScale=" << settings.quadviews.focus_scale
+           << ", quadviewsPeripheralScale=" << settings.quadviews.peripheral_scale
+           << ", quadviewsHorizontalOffset=" << settings.quadviews.horizontal_offset_degrees
+           << ", quadviewsVerticalOffset=" << settings.quadviews.vertical_offset_degrees
+           << ", quadviewsGazeSmoothing=" << settings.quadviews.gaze_smoothing
+           << ", quadviewsGazeDeadzone=" << settings.quadviews.gaze_deadzone_degrees;
     logger_.Debug(stream.str());
 }
 

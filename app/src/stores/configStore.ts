@@ -1,7 +1,7 @@
 import { computed, reactive } from 'vue'
 
 import { clearSeenApps, loadConfigEnvelope, loadSeenApps, resetStoredData, saveConfigEnvelope, type SeenApplication } from '../lib/commands'
-import { cloneConfig, createApplication, createProfile, createPivotProfile, defaultConfig } from '../lib/model'
+import { cloneConfig, createApplication, createProfile, createPivotProfile, createQuadViewsProfile, defaultConfig } from '../lib/model'
 import type { AppTab, VectorXRConfig } from '../lib/model'
 
 interface StoreState {
@@ -157,6 +157,29 @@ export function useConfigStore() {
     }
   }
 
+  function addQuadViewsProfile() {
+    const defaultApplicationId = state.config.applications[0]?.id
+    state.config.modules.quadviews.profiles.push(
+      createQuadViewsProfile(state.config.modules.quadviews.defaults, defaultApplicationId ? [defaultApplicationId] : []),
+    )
+  }
+
+  function removeQuadViewsProfile(index: number) {
+    state.config.modules.quadviews.profiles.splice(index, 1)
+  }
+
+  function syncQuadViewsProfileName(index: number) {
+    const profile = state.config.modules.quadviews.profiles[index]
+    if (!profile) {
+      return
+    }
+
+    if (!profile.name.trim() || profile.name === 'New Profile') {
+      const firstApplication = state.config.applications.find((application) => application.id === profile.applicationIds[0])
+      profile.name = firstApplication?.name || 'New Profile'
+    }
+  }
+
   function importConfig(config: VectorXRConfig) {
     state.config = cloneConfig(config)
     state.status = 'Config imported — save to write to disk'
@@ -194,6 +217,9 @@ export function useConfigStore() {
     for (const profile of state.config.modules.pivotxr.profiles) {
       profile.applicationIds = profile.applicationIds.filter((id) => id !== application.id)
     }
+    for (const profile of state.config.modules.quadviews.profiles) {
+      profile.applicationIds = profile.applicationIds.filter((id) => id !== application.id)
+    }
   }
 
   return {
@@ -212,6 +238,9 @@ export function useConfigStore() {
     addPivotProfile,
     removePivotProfile,
     syncPivotProfileName,
+    addQuadViewsProfile,
+    removeQuadViewsProfile,
+    syncQuadViewsProfileName,
     addApplication,
     addSeenApplication,
     clearSeenApplications,

@@ -81,6 +81,41 @@
           }
         }
       ]
+    },
+    "quadviews": {
+      "enabled": false,
+      "preferEyeTracking": true,
+      "defaults": {
+        "trackingMode": "head",
+        "focusHorizontalFovDegrees": 35.0,
+        "focusVerticalFovDegrees": 30.0,
+        "focusScale": 1.1,
+        "peripheralScale": 0.45,
+        "horizontalOffsetDegrees": 0.0,
+        "verticalOffsetDegrees": 0.0,
+        "gazeSmoothing": 0.15,
+        "gazeDeadzoneDegrees": 1.5
+      },
+      "profiles": [
+        {
+          "name": "DCS",
+          "enabled": true,
+          "applicationIds": [
+            "dcs"
+          ],
+          "settings": {
+            "trackingMode": "eye",
+            "focusHorizontalFovDegrees": 32.0,
+            "focusVerticalFovDegrees": 28.0,
+            "focusScale": 1.15,
+            "peripheralScale": 0.4,
+            "horizontalOffsetDegrees": 0.0,
+            "verticalOffsetDegrees": 0.0,
+            "gazeSmoothing": 0.12,
+            "gazeDeadzoneDegrees": 1.0
+          }
+        }
+      ]
     }
   }
 }

@@ -385,6 +385,99 @@ void TestPivotProfileResolution() {
            "PivotXR default yaw multiplier mismatch");
 }
 
+void TestQuadViewsProfileResolution() {
+    const std::string json = R"json(
+{
+  "version": 3,
+  "core": { "enabled": true, "logLevel": "info", "logRetentionFiles": 7 },
+  "applications": [
+    { "id": "dcs", "name": "DCS", "enabled": true, "match": { "exe": "DCS.exe" } }
+  ],
+  "modules": {
+    "depthxr": {
+      "enabled": true,
+      "defaults": {
+        "stereoBoostEnabled": true,
+        "convergenceEnabled": true,
+        "stereoBoost": 1.0,
+        "convergence": 0.0
+      },
+      "bindings": { "toggleEnabled": { "type": "none" } },
+      "profiles": []
+    },
+    "pivotxr": {
+      "enabled": false,
+      "defaults": {
+        "rotationMultiplier": 1.5,
+        "smoothing": 0.2,
+        "deadzoneDegrees": 8.0,
+        "maxExtraYawDegrees": 25.0,
+        "pitchRotationMultiplier": 1.0,
+        "pitchSmoothing": 0.2,
+        "pitchDeadzoneDegrees": 12.0,
+        "maxExtraPitchDegrees": 20.0
+      },
+      "profiles": []
+    },
+    "quadviews": {
+      "enabled": true,
+      "preferEyeTracking": true,
+      "defaults": {
+        "trackingMode": "head",
+        "focusHorizontalFovDegrees": 35.0,
+        "focusVerticalFovDegrees": 30.0,
+        "focusScale": 1.1,
+        "peripheralScale": 0.45,
+        "horizontalOffsetDegrees": 0.0,
+        "verticalOffsetDegrees": 0.0,
+        "gazeSmoothing": 0.15,
+        "gazeDeadzoneDegrees": 1.5
+      },
+      "profiles": [
+        {
+          "name": "DCS",
+          "applicationIds": ["dcs"],
+          "enabled": true,
+          "settings": {
+            "trackingMode": "eye",
+            "focusHorizontalFovDegrees": 32.0,
+            "focusVerticalFovDegrees": 28.0,
+            "focusScale": 1.2,
+            "peripheralScale": 0.4,
+            "horizontalOffsetDegrees": 1.5,
+            "verticalOffsetDegrees": -2.0,
+            "gazeSmoothing": 0.1,
+            "gazeDeadzoneDegrees": 0.8
+          }
+        }
+      ]
+    }
+  }
+}
+)json";
+
+    const depthxr::ParseResult result = depthxr::ParseConfig(json);
+    Expect(result.ok, "Config parser rejected valid Quadviews config: " + result.error);
+
+    const depthxr::ResolvedRuntimeConfig resolved = depthxr::ResolveRuntimeConfig(result.document, "DCS.exe");
+    Expect(resolved.quadviews.enabled, "Quadviews module enable was not resolved");
+    Expect(resolved.quadviews.prefer_eye_tracking, "Quadviews eye tracking preference mismatch");
+    Expect(resolved.quadviews.tracking_mode == depthxr::QuadViewsTrackingMode::Eye,
+           "Quadviews profile tracking mode mismatch");
+    Expect(std::abs(resolved.quadviews.focus_horizontal_fov_degrees - 32.0) < 0.0001,
+           "Quadviews focus horizontal FOV mismatch");
+    Expect(std::abs(resolved.quadviews.peripheral_scale - 0.4) < 0.0001,
+           "Quadviews peripheral scale mismatch");
+    Expect(std::abs(resolved.quadviews.vertical_offset_degrees + 2.0) < 0.0001,
+           "Quadviews vertical offset mismatch");
+
+    const depthxr::ResolvedRuntimeConfig resolved_other = depthxr::ResolveRuntimeConfig(result.document, "other.exe");
+    Expect(resolved_other.quadviews.tracking_mode == depthxr::QuadViewsTrackingMode::Head,
+           "Quadviews default tracking mode mismatch");
+    Expect(std::abs(resolved_other.quadviews.focus_horizontal_fov_degrees - 35.0) < 0.0001,
+           "Quadviews default focus FOV mismatch");
+}
+
 void TestInvalidPivotActivationBindingRejected() {
     const std::string json = R"json(
 {
@@ -716,6 +809,7 @@ int main() {
     TestResolveRuntimeConfig();
     TestDisabledProfileFallsBackToDefaults();
     TestPivotProfileResolution();
+    TestQuadViewsProfileResolution();
     TestInvalidPivotActivationBindingRejected();
     TestNoneBindingParsed();
     TestDeviceBindingMetadataParsed();

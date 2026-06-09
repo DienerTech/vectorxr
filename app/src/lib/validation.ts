@@ -1,4 +1,4 @@
-import type { CoreConfig, DepthXRProfileConfig, DepthXRSettings, InputBinding, PivotXRProfileConfig, PivotXRSettings, RegisteredApplication, VectorXRConfig } from './model'
+import type { CoreConfig, DepthXRProfileConfig, DepthXRSettings, InputBinding, PivotXRProfileConfig, PivotXRSettings, QuadViewsProfileConfig, QuadViewsSettings, RegisteredApplication, VectorXRConfig } from './model'
 import { bindingLabel } from './model'
 
 function validateCoreConfig(core: CoreConfig): string[] {
@@ -109,6 +109,32 @@ function validatePivotXRSettings(prefix: string, settings: PivotXRSettings): str
 
   if (Number.isNaN(settings.maxExtraPitchDegrees) || settings.maxExtraPitchDegrees < 0 || settings.maxExtraPitchDegrees > 180) {
     errors.push(`${prefix}maxExtraPitchDegrees must be between 0 and 180`)
+  }
+
+  return errors
+}
+
+function validateQuadViewsSettings(prefix: string, settings: QuadViewsSettings): string[] {
+  const errors: string[] = []
+  const bounded = [
+    ['focusHorizontalFovDegrees', settings.focusHorizontalFovDegrees, 10, 90],
+    ['focusVerticalFovDegrees', settings.focusVerticalFovDegrees, 10, 90],
+    ['focusScale', settings.focusScale, 0.5, 2.0],
+    ['peripheralScale', settings.peripheralScale, 0.1, 1.5],
+    ['horizontalOffsetDegrees', settings.horizontalOffsetDegrees, -45, 45],
+    ['verticalOffsetDegrees', settings.verticalOffsetDegrees, -45, 45],
+    ['gazeSmoothing', settings.gazeSmoothing, 0, 1],
+    ['gazeDeadzoneDegrees', settings.gazeDeadzoneDegrees, 0, 10],
+  ] as const
+
+  if (settings.trackingMode !== 'head' && settings.trackingMode !== 'eye') {
+    errors.push(`${prefix}trackingMode must be head or eye`)
+  }
+
+  for (const [name, value, min, max] of bounded) {
+    if (Number.isNaN(value) || value < min || value > max) {
+      errors.push(`${prefix}${name} must be between ${min} and ${max}`)
+    }
   }
 
   return errors
@@ -263,6 +289,51 @@ function validatePivotProfileConflicts(profiles: PivotXRProfileConfig[]): string
   return errors
 }
 
+function validateQuadViewsProfile(profile: QuadViewsProfileConfig, index: number, applicationIds: Set<string>): string[] {
+  const errors: string[] = []
+  const prefix = `modules.quadviews.profiles[${index}].`
+
+  if (!profile.name.trim()) {
+    errors.push(`${prefix}name is required`)
+  }
+
+  const seenProfileApplicationIds = new Set<string>()
+  for (const applicationId of profile.applicationIds) {
+    if (!applicationIds.has(applicationId)) {
+      errors.push(`${prefix}applicationIds references unknown application: ${applicationId}`)
+    }
+    if (seenProfileApplicationIds.has(applicationId)) {
+      errors.push(`${prefix}applicationIds duplicates ${applicationId}`)
+    }
+    seenProfileApplicationIds.add(applicationId)
+  }
+
+  errors.push(...validateQuadViewsSettings(`${prefix}settings.`, profile.settings))
+  return errors
+}
+
+function validateQuadViewsProfileConflicts(profiles: QuadViewsProfileConfig[]): string[] {
+  const errors: string[] = []
+  const firstProfileByApplication = new Map<string, number>()
+
+  profiles.forEach((profile, index) => {
+    if (!profile.enabled) {
+      return
+    }
+
+    for (const applicationId of profile.applicationIds) {
+      const firstIndex = firstProfileByApplication.get(applicationId)
+      if (firstIndex !== undefined) {
+        errors.push(`modules.quadviews.profiles[${index}] conflicts with profiles[${firstIndex}] for application ${applicationId}; first enabled profile wins`)
+      } else {
+        firstProfileByApplication.set(applicationId, index)
+      }
+    }
+  })
+
+  return errors
+}
+
 export function validateConfig(config: VectorXRConfig): string[] {
   const errors: string[] = []
 
@@ -276,6 +347,7 @@ export function validateConfig(config: VectorXRConfig): string[] {
   errors.push(...validateInputBinding('modules.depthxr.bindings.toggleEnabled', config.modules.depthxr.bindings.toggleEnabled))
   errors.push(...validatePivotXRSettings('modules.pivotxr.defaults.', config.modules.pivotxr.defaults))
   errors.push(...validateInputBinding('modules.pivotxr.activationBinding', config.modules.pivotxr.activationBinding))
+  errors.push(...validateQuadViewsSettings('modules.quadviews.defaults.', config.modules.quadviews.defaults))
 
   const applicationIds = new Set(config.applications.map((application) => application.id))
 
@@ -288,6 +360,11 @@ export function validateConfig(config: VectorXRConfig): string[] {
     errors.push(...validatePivotXRProfile(profile, index, applicationIds))
   })
   errors.push(...validatePivotProfileConflicts(config.modules.pivotxr.profiles))
+
+  config.modules.quadviews.profiles.forEach((profile, index) => {
+    errors.push(...validateQuadViewsProfile(profile, index, applicationIds))
+  })
+  errors.push(...validateQuadViewsProfileConflicts(config.modules.quadviews.profiles))
 
   return errors
 }

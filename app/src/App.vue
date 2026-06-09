@@ -14,6 +14,7 @@ import CoreTab from './components/tabs/CoreTab.vue'
 import DepthXrTab from './components/tabs/DepthXrTab.vue'
 import OpenXrLayersTab from './components/tabs/OpenXrLayersTab.vue'
 import PivotXrTab from './components/tabs/PivotXrTab.vue'
+import QuadViewsTab from './components/tabs/QuadViewsTab.vue'
 import { exportConfigFile, loadLogSnapshot, loadOpenXrLayers, type LogSnapshot, type OpenXrLayerSnapshot } from './lib/commands'
 import { createDebugPackage, saveDebugPackage } from './lib/debugPackage'
 import { buildHealthSummary } from './lib/health'
@@ -88,6 +89,12 @@ const tabs = computed(() => [
     label: 'Pivot',
     subtitle: 'Rotation tuning - watch your six!',
     status: store.state.config.modules.pivotxr.enabled ? 'Enabled' : 'Disabled',
+  },
+  {
+    id: 'quadviews' as const,
+    label: 'Quadviews',
+    subtitle: 'Dynamic foveated rendering control',
+    status: store.state.config.modules.quadviews.enabled ? 'Enabled' : 'Disabled',
   },
 ])
 
@@ -314,12 +321,20 @@ async function confirmResetConfig() {
           @sync-profile-name="store.syncProfileName"
         />
         <PivotXrTab
-          v-else
+          v-else-if="store.state.activeTab === 'pivotxr'"
           :config="store.state.config"
           :applications="store.state.config.applications"
           @add-pivot-profile="store.addPivotProfile"
           @remove-pivot-profile="store.removePivotProfile"
           @sync-pivot-profile-name="store.syncPivotProfileName"
+        />
+        <QuadViewsTab
+          v-else
+          :config="store.state.config"
+          :applications="store.state.config.applications"
+          @add-quad-views-profile="store.addQuadViewsProfile"
+          @remove-quad-views-profile="store.removeQuadViewsProfile"
+          @sync-quad-views-profile-name="store.syncQuadViewsProfileName"
         />
       </section>
 

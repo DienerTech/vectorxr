@@ -167,4 +167,28 @@ std::optional<InputBindingType> ParseInputBindingType(const std::string& value) 
     return std::nullopt;
 }
 
+const char* ToString(QuadViewsTrackingMode mode) {
+    switch (mode) {
+    case QuadViewsTrackingMode::Head:
+        return "head";
+    case QuadViewsTrackingMode::Eye:
+        return "eye";
+    default:
+        return "head";
+    }
+}
+
+std::optional<QuadViewsTrackingMode> ParseQuadViewsTrackingMode(const std::string& value) {
+    const std::string normalized = NormalizeValue(value);
+
+    if (normalized == "head") {
+        return QuadViewsTrackingMode::Head;
+    }
+    if (normalized == "eye") {
+        return QuadViewsTrackingMode::Eye;
+    }
+
+    return std::nullopt;
+}
+
 } // namespace depthxr

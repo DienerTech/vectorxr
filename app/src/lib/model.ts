@@ -1,6 +1,7 @@
 export type LogLevel = 'info' | 'debug'
 export type ActivationMode = 'toggle' | 'hold'
-export type AppTab = 'core' | 'registry' | 'layers' | 'about' | 'depthxr' | 'pivotxr'
+export type QuadViewsTrackingMode = 'head' | 'eye'
+export type AppTab = 'core' | 'registry' | 'layers' | 'about' | 'depthxr' | 'pivotxr' | 'quadviews'
 export const keyboardBindingKeyGroups = [
   {
     label: 'Function Keys',
@@ -111,6 +112,32 @@ export interface PivotXRModuleConfig {
   profiles: PivotXRProfileConfig[]
 }
 
+export interface QuadViewsSettings {
+  trackingMode: QuadViewsTrackingMode
+  focusHorizontalFovDegrees: number
+  focusVerticalFovDegrees: number
+  focusScale: number
+  peripheralScale: number
+  horizontalOffsetDegrees: number
+  verticalOffsetDegrees: number
+  gazeSmoothing: number
+  gazeDeadzoneDegrees: number
+}
+
+export interface QuadViewsProfileConfig {
+  name: string
+  enabled: boolean
+  applicationIds: string[]
+  settings: QuadViewsSettings
+}
+
+export interface QuadViewsModuleConfig {
+  enabled: boolean
+  preferEyeTracking: boolean
+  defaults: QuadViewsSettings
+  profiles: QuadViewsProfileConfig[]
+}
+
 export interface VectorXRConfig {
   version: 3
   core: CoreConfig
@@ -118,6 +145,7 @@ export interface VectorXRConfig {
   modules: {
     depthxr: DepthXRModuleConfig
     pivotxr: PivotXRModuleConfig
+    quadviews: QuadViewsModuleConfig
   }
 }
 
@@ -233,6 +261,20 @@ export function defaultPivotXRSettings(): PivotXRSettings {
   }
 }
 
+export function defaultQuadViewsSettings(): QuadViewsSettings {
+  return {
+    trackingMode: 'head',
+    focusHorizontalFovDegrees: 35,
+    focusVerticalFovDegrees: 30,
+    focusScale: 1.1,
+    peripheralScale: 0.45,
+    horizontalOffsetDegrees: 0,
+    verticalOffsetDegrees: 0,
+    gazeSmoothing: 0.15,
+    gazeDeadzoneDegrees: 1.5,
+  }
+}
+
 export function defaultNoneBinding(): NoneBinding {
   return {
     type: 'none',
@@ -274,6 +316,12 @@ export function defaultConfig(): VectorXRConfig {
         defaults: defaultPivotXRSettings(),
         activationMode: 'toggle',
         activationBinding: defaultNoneBinding(),
+        profiles: [],
+      },
+      quadviews: {
+        enabled: false,
+        preferEyeTracking: true,
+        defaults: defaultQuadViewsSettings(),
         profiles: [],
       },
     },
@@ -320,6 +368,15 @@ export function createPivotProfile(
   }
 }
 
+export function createQuadViewsProfile(defaultSettings: QuadViewsSettings, applicationIds: string[] = []): QuadViewsProfileConfig {
+  return {
+    name: 'New Profile',
+    enabled: true,
+    applicationIds,
+    settings: { ...defaultSettings },
+  }
+}
+
 function isVectorXRConfig(value: unknown): value is VectorXRConfig {
   return isRecord(value) && value.version === 3 && 'core' in value && 'modules' in value
 }
@@ -347,6 +404,26 @@ function normalizePivotXRSettings(value: unknown, fallback: PivotXRSettings): Pi
     pitchSmoothing: normalizeNumber(source.pitchSmoothing, fallback.pitchSmoothing),
     pitchDeadzoneDegrees: normalizeNumber(source.pitchDeadzoneDegrees, fallback.pitchDeadzoneDegrees),
     maxExtraPitchDegrees: normalizeNumber(source.maxExtraPitchDegrees, fallback.maxExtraPitchDegrees),
+  }
+}
+
+function normalizeQuadViewsTrackingMode(value: unknown, fallback: QuadViewsTrackingMode): QuadViewsTrackingMode {
+  return value === 'eye' || value === 'head' ? value : fallback
+}
+
+function normalizeQuadViewsSettings(value: unknown, fallback: QuadViewsSettings): QuadViewsSettings {
+  const source = isRecord(value) ? value : {}
+
+  return {
+    trackingMode: normalizeQuadViewsTrackingMode(source.trackingMode, fallback.trackingMode),
+    focusHorizontalFovDegrees: normalizeNumber(source.focusHorizontalFovDegrees, fallback.focusHorizontalFovDegrees),
+    focusVerticalFovDegrees: normalizeNumber(source.focusVerticalFovDegrees, fallback.focusVerticalFovDegrees),
+    focusScale: normalizeNumber(source.focusScale, fallback.focusScale),
+    peripheralScale: normalizeNumber(source.peripheralScale, fallback.peripheralScale),
+    horizontalOffsetDegrees: normalizeNumber(source.horizontalOffsetDegrees, fallback.horizontalOffsetDegrees),
+    verticalOffsetDegrees: normalizeNumber(source.verticalOffsetDegrees, fallback.verticalOffsetDegrees),
+    gazeSmoothing: normalizeNumber(source.gazeSmoothing, fallback.gazeSmoothing),
+    gazeDeadzoneDegrees: normalizeNumber(source.gazeDeadzoneDegrees, fallback.gazeDeadzoneDegrees),
   }
 }
 
@@ -503,8 +580,10 @@ function normalizeVectorXRConfig(value: unknown): VectorXRConfig {
   const modules = isRecord(source.modules) ? source.modules : {}
   const depthxr = isRecord(modules.depthxr) ? modules.depthxr : {}
   const pivotxr = isRecord(modules.pivotxr) ? modules.pivotxr : {}
+  const quadviews = isRecord(modules.quadviews) ? modules.quadviews : {}
   const depthProfileValues = Array.isArray(depthxr.profiles) ? depthxr.profiles : []
   const pivotProfileValues = Array.isArray(pivotxr.profiles) ? pivotxr.profiles : []
+  const quadViewsProfileValues = Array.isArray(quadviews.profiles) ? quadviews.profiles : []
   const applicationValues = Array.isArray(source.applications) ? source.applications : []
   const applications: RegisteredApplication[] = []
 
@@ -513,6 +592,7 @@ function normalizeVectorXRConfig(value: unknown): VectorXRConfig {
   })
 
   const pivotDefaults = normalizePivotXRSettings(pivotxr.defaults, fallback.modules.pivotxr.defaults)
+  const quadViewsDefaults = normalizeQuadViewsSettings(quadviews.defaults, fallback.modules.quadviews.defaults)
 
   return {
     version: 3,
@@ -563,6 +643,23 @@ function normalizeVectorXRConfig(value: unknown): VectorXRConfig {
             applicationIds,
             activationMode,
             activationBinding: normalizeInputBinding(profile.activationBinding, defaultNoneBinding()),
+            settings,
+          }
+        }),
+      },
+      quadviews: {
+        enabled: normalizeBoolean(quadviews.enabled, fallback.modules.quadviews.enabled),
+        preferEyeTracking: normalizeBoolean(quadviews.preferEyeTracking, fallback.modules.quadviews.preferEyeTracking),
+        defaults: quadViewsDefaults,
+        profiles: quadViewsProfileValues.map((profileValue) => {
+          const profile = isRecord(profileValue) ? profileValue : {}
+          const settings = normalizeQuadViewsSettings(profile.settings, quadViewsDefaults)
+          const applicationIds = applicationIdsFromProfile(profile, applications)
+
+          return {
+            name: normalizeString(profile.name, 'New Profile'),
+            enabled: normalizeBoolean(profile.enabled, true),
+            applicationIds,
             settings,
           }
         }),

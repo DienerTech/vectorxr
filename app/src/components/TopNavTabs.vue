@@ -18,14 +18,14 @@ defineEmits<{
 }>()
 
 const primaryTabs = computed(() => props.tabs.filter((tab) => tab.id === 'core' || tab.id === 'registry' || tab.id === 'layers' || tab.id === 'about'))
-const moduleTabs = computed(() => props.tabs.filter((tab) => tab.id === 'depthxr' || tab.id === 'pivotxr'))
+const moduleTabs = computed(() => props.tabs.filter((tab) => tab.id === 'depthxr' || tab.id === 'pivotxr' || tab.id === 'quadviews'))
 
 function statusChipClass(tab: { id: AppTab; status: string }): string {
   if (tab.id === 'core') {
     return tab.status === 'Suite on' ? 'chip-success' : 'chip-idle'
   }
 
-  if (tab.id === 'depthxr' || tab.id === 'pivotxr') {
+  if (tab.id === 'depthxr' || tab.id === 'pivotxr' || tab.id === 'quadviews') {
     return tab.status === 'Enabled' ? 'chip-success' : 'chip-idle'
   }
 
@@ -58,7 +58,7 @@ function statusChipClass(tab: { id: AppTab; status: string }): string {
 
     <div class="tab-group mt-3">
       <p class="tab-group-label">OpenXR Tweaks</p>
-      <div class="grid gap-2 md:grid-cols-2">
+      <div class="grid gap-2 md:grid-cols-3">
         <button
           v-for="tab in moduleTabs"
           :key="tab.id"

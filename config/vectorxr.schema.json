@@ -400,12 +400,137 @@
         }
       }
     },
+    "quadviewsTrackingMode": {
+      "type": "string",
+      "enum": [
+        "head",
+        "eye"
+      ]
+    },
+    "quadviewsSettings": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "trackingMode",
+        "focusHorizontalFovDegrees",
+        "focusVerticalFovDegrees",
+        "focusScale",
+        "peripheralScale",
+        "horizontalOffsetDegrees",
+        "verticalOffsetDegrees",
+        "gazeSmoothing",
+        "gazeDeadzoneDegrees"
+      ],
+      "properties": {
+        "trackingMode": {
+          "$ref": "#/$defs/quadviewsTrackingMode"
+        },
+        "focusHorizontalFovDegrees": {
+          "type": "number",
+          "minimum": 10.0,
+          "maximum": 90.0
+        },
+        "focusVerticalFovDegrees": {
+          "type": "number",
+          "minimum": 10.0,
+          "maximum": 90.0
+        },
+        "focusScale": {
+          "type": "number",
+          "minimum": 0.5,
+          "maximum": 2.0
+        },
+        "peripheralScale": {
+          "type": "number",
+          "minimum": 0.1,
+          "maximum": 1.5
+        },
+        "horizontalOffsetDegrees": {
+          "type": "number",
+          "minimum": -45.0,
+          "maximum": 45.0
+        },
+        "verticalOffsetDegrees": {
+          "type": "number",
+          "minimum": -45.0,
+          "maximum": 45.0
+        },
+        "gazeSmoothing": {
+          "type": "number",
+          "minimum": 0.0,
+          "maximum": 1.0
+        },
+        "gazeDeadzoneDegrees": {
+          "type": "number",
+          "minimum": 0.0,
+          "maximum": 10.0
+        }
+      }
+    },
+    "quadviewsProfile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "enabled",
+        "applicationIds",
+        "settings"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "applicationIds": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9-]*$"
+          },
+          "uniqueItems": true
+        },
+        "settings": {
+          "$ref": "#/$defs/quadviewsSettings"
+        }
+      }
+    },
+    "quadviewsModule": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "enabled",
+        "preferEyeTracking",
+        "defaults",
+        "profiles"
+      ],
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "preferEyeTracking": {
+          "type": "boolean"
+        },
+        "defaults": {
+          "$ref": "#/$defs/quadviewsSettings"
+        },
+        "profiles": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/quadviewsProfile"
+          }
+        }
+      }
+    },
     "modules": {
       "type": "object",
       "additionalProperties": false,
       "required": [
         "depthxr",
-        "pivotxr"
+        "pivotxr",
+        "quadviews"
       ],
       "properties": {
         "depthxr": {
@@ -413,6 +538,9 @@
         },
         "pivotxr": {
           "$ref": "#/$defs/pivotxrModule"
+        },
+        "quadviews": {
+          "$ref": "#/$defs/quadviewsModule"
         }
       }
     }
