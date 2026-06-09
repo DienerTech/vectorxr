@@ -1,6 +1,6 @@
 # Native Quadviews Design Notes
 
-Status: control plane, OpenXR stereo-runtime bridge, eye-gaze focus path, and swapchain lifecycle diagnostics.
+Status: control plane, OpenXR stereo-runtime bridge, eye-gaze focus path, swapchain lifecycle diagnostics, and first-pass D3D11 native composition path.
 
 ## Research Snapshot
 
@@ -43,7 +43,8 @@ The first native renderer path is implemented as a stereo-runtime bridge:
 - `xrBeginSession` maps an app-facing quadview session to a downstream stereo session.
 - `xrLocateViews` maps quadview locates to stereo runtime locates, then synthesizes peripheral left/right and foveal inset left/right views.
 - When the runtime advertises `XR_EXT_eye_gaze_interaction`, VectorXR enables it downstream for the layer, creates a private eye-gaze pose action, appends that action set to app action attach/sync calls, and uses the located gaze pose to move the foveal inset.
-- `xrEndFrame` splits a 4-view projection layer into two 2-view projection layers: peripheral first, foveal second.
+- `xrEndFrame` first attempts to compose a 4-view projection layer into a single 2-view stereo projection layer through the native D3D11 compositor. The runtime projection-layer split remains a fallback/probe path only.
+- The D3D11 compositor captures the app graphics binding, tracks D3D11 swapchain images, creates VectorXR-owned stereo output swapchains, samples peripheral/focus images with a fullscreen shader, and feathers the focus inset edge before submitting the composed stereo layer.
 - `xrGetSystemProperties` reports Varjo foveated rendering support when the app chains `XrSystemFoveatedRenderingPropertiesVARJO`.
 - `xrCreateSwapchain`, `xrEnumerateSwapchainImages`, `xrAcquireSwapchainImage`, `xrWaitSwapchainImage`, `xrReleaseSwapchainImage`, and `xrDestroySwapchain` pass through transparently while recording lifecycle diagnostics for initial headset testing.
 
@@ -51,7 +52,8 @@ The remaining post-prototype work is mostly around live runtime adaptation and b
 
 - optional `XR_EXT_view_configuration_views_change` event handling if we need live foveal-view resizing
 - runtime/device compatibility warnings in the UI after we have real-world logs
-- graphics-aware validation if testing reveals runtimes that reject the transparent projection-layer split
+- D3D12/Vulkan/OpenGL graphics backends if testing shows non-D3D11 apps need native quadview composition.
+- runtime/device compatibility warnings in the UI when a game is not using a compositor-supported graphics API.
 
 The manifest must statically advertise layer-owned extensions because the loader discovers API-layer extensions from manifest metadata. The runtime-facing quad view configuration is still gated by resolved `modules.quadviews.enabled`; if Quadviews is disabled for an app, VectorXR does not add the foveated-inset view configuration.
 
@@ -86,7 +88,7 @@ Proposed per-frame order:
 2. Extension advertisement and instance negotiation: complete.
 3. Quadview view-configuration enumeration and sizing: complete.
 4. `xrLocateViews` head-tracked foveal FOV generation: complete.
-5. `xrEndFrame` projection-layer split: complete.
+5. `xrEndFrame` native composition path: D3D11 first pass complete; non-D3D11 backends pending.
 6. Eye-gaze action setup and fallback: complete.
 7. Swapchain lifecycle interception and diagnostics: complete.
 8. Initial headset/runtime testing.
@@ -101,6 +103,7 @@ For the first headset pass, enable Quadviews for one known app profile and check
 - `Session began with view configuration: primary_stereo_with_foveated_inset (runtime mapped to primary_stereo)`.
 - `Swapchain created` and `Swapchain imagesEnumerated` entries with `quadviewsSession=1`.
 - `LocateViews` diagnostics with `viewConfig=primary_stereo_with_foveated_inset`.
-- `EndFrame quadviews projection split applied` with `unknownProjectionSwapchains=0`.
+- `D3D11 graphics binding detected` and `D3D11 quadviews compositor initialized` for D3D11 applications.
+- `EndFrame quadviews projection split applied` with `d3d11QuadCompositions=1` and `unknownProjectionSwapchains=0` when native composition succeeds.
 
 If eye gaze is unavailable, the expected fallback log is `Eye gaze resources unavailable; quadviews will use head/static focus offsets.`

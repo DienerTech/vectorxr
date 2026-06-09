@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <chrono>
 #include <filesystem>
 #include <map>
@@ -17,6 +18,15 @@
 #include "depthxr/config_parser.h"
 #include "depthxr/logger.h"
 #include "depthxr/settings_resolver.h"
+
+struct ID3D11BlendState;
+struct ID3D11Buffer;
+struct ID3D11Device;
+struct ID3D11DeviceContext;
+struct ID3D11PixelShader;
+struct ID3D11SamplerState;
+struct ID3D11Texture2D;
+struct ID3D11VertexShader;
 
 namespace depthxr {
 
@@ -98,8 +108,33 @@ class OpenXrLayer {
         uint64_t acquire_count{0};
         uint64_t wait_count{0};
         uint64_t release_count{0};
+        uint32_t last_acquired_image_index{0};
         bool images_enumerated{false};
+        bool has_last_acquired_image_index{false};
         bool quadviews_session{false};
+        std::vector<ID3D11Texture2D*> d3d11_images;
+    };
+
+    struct QuadViewsCompositionTarget {
+        XrSwapchain swapchain{XR_NULL_HANDLE};
+        uint32_t width{0};
+        uint32_t height{0};
+        int64_t format{0};
+        uint32_t image_count{0};
+        std::vector<ID3D11Texture2D*> d3d11_images;
+    };
+
+    struct D3D11QuadViewsCompositor {
+        ID3D11Device* device{nullptr};
+        ID3D11DeviceContext* context{nullptr};
+        ID3D11VertexShader* vertex_shader{nullptr};
+        ID3D11PixelShader* pixel_shader{nullptr};
+        ID3D11SamplerState* sampler{nullptr};
+        ID3D11BlendState* blend_state{nullptr};
+        ID3D11Buffer* constants{nullptr};
+        bool initialized{false};
+        bool failed{false};
+        std::array<QuadViewsCompositionTarget, 2> targets;
     };
 
     void ReloadConfigIfNeeded();
@@ -115,6 +150,7 @@ class OpenXrLayer {
     void LogSwapchainSummary(XrSwapchain swapchain, const SwapchainInfo& info, std::string_view event_name);
     void ResetSessionState();
     void ResetInstanceState();
+    void ResetD3D11QuadViewsCompositor();
     XrResult CreateInternalReferenceSpaces(XrSession session);
     void DestroyInternalReferenceSpaces();
     XrResult CreateEyeGazeResources(XrSession session);
@@ -157,6 +193,15 @@ class OpenXrLayer {
                                   double* applied_extra_pitch_radians,
                                   XrPosef* applied_pose_delta,
                                   bool update_smoothing);
+    bool EnsureD3D11QuadViewsCompositor(const XrCompositionLayerProjection* projection_layer,
+                                        uint32_t output_width,
+                                        uint32_t output_height,
+                                        int64_t output_format);
+    bool ComposeQuadViewsD3D11(const XrCompositionLayerProjection* source_layer,
+                               const XrPosef& reverse_delta,
+                               bool has_non_identity_delta,
+                               XrCompositionLayerProjection* composed_layer,
+                               std::vector<XrCompositionLayerProjectionView>* composed_views);
 
     std::mutex mutex_;
     std::filesystem::path dll_directory_;
@@ -213,6 +258,7 @@ class OpenXrLayer {
     std::vector<XrPosef> cached_eye_offset_poses_;
     std::map<XrTime, XrPosef> cached_pivot_pose_deltas_;
     std::unordered_map<XrSwapchain, SwapchainInfo> tracked_swapchains_;
+    D3D11QuadViewsCompositor d3d11_quadviews_compositor_;
 
     PFN_xrGetInstanceProcAddr next_get_instance_proc_addr_{nullptr};
     PFN_xrDestroyInstance next_destroy_instance_{nullptr};

@@ -78,9 +78,18 @@ if(WIN32 AND DEPTHXR_BUILD_LAYER)
         PRIVATE
         depthxr_core
         OpenXR::openxr_loader
+        d3d11
+        d3dcompiler
+        dxgi
         shlwapi
     )
-    target_compile_definitions(XR_APILAYER_DIENERTECH_VECTORXR PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+    target_compile_definitions(
+        XR_APILAYER_DIENERTECH_VECTORXR
+        PRIVATE
+        WIN32_LEAN_AND_MEAN
+        NOMINMAX
+        XR_USE_GRAPHICS_API_D3D11
+    )
 
     add_custom_command(
         TARGET XR_APILAYER_DIENERTECH_VECTORXR
