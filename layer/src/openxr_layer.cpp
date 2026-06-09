@@ -75,11 +75,15 @@ void SetFoveatedViewActive(XrViewConfigurationView& view, XrBool32 active) {
     reinterpret_cast<XrFoveatedViewConfigurationViewVARJO*>(foveated)->foveatedRenderingActive = active;
 }
 
-XrFovf ClampAngularWindow(float base_negative,
-                          float base_positive,
-                          double center_radians,
-                          double size_radians,
-                          bool positive_first) {
+struct AngularWindow {
+    double negative;
+    double positive;
+};
+
+AngularWindow ClampAngularWindow(float base_negative,
+                                 float base_positive,
+                                 double center_radians,
+                                 double size_radians) {
     const double half = std::max(0.001, size_radians * 0.5);
     double negative = center_radians - half;
     double positive = center_radians + half;
@@ -101,10 +105,7 @@ XrFovf ClampAngularWindow(float base_negative,
         positive = Clamp(positive, base_negative, base_positive);
     }
 
-    if (positive_first) {
-        return {0.0f, static_cast<float>(positive), 0.0f, static_cast<float>(negative)};
-    }
-    return {static_cast<float>(negative), static_cast<float>(positive), 0.0f, 0.0f};
+    return {negative, positive};
 }
 
 XrFovf BuildFocusFov(const XrFovf& base_fov,
@@ -116,16 +117,16 @@ XrFovf BuildFocusFov(const XrFovf& base_fov,
     const double horizontal_size = DegreesToRadians(settings.focus_horizontal_fov_degrees);
     const double vertical_size = DegreesToRadians(settings.focus_vertical_fov_degrees);
 
-    const XrFovf horizontal =
-        ClampAngularWindow(base_fov.angleLeft, base_fov.angleRight, horizontal_center, horizontal_size, false);
-    const XrFovf vertical =
-        ClampAngularWindow(base_fov.angleDown, base_fov.angleUp, vertical_center, vertical_size, true);
+    const AngularWindow horizontal =
+        ClampAngularWindow(base_fov.angleLeft, base_fov.angleRight, horizontal_center, horizontal_size);
+    const AngularWindow vertical =
+        ClampAngularWindow(base_fov.angleDown, base_fov.angleUp, vertical_center, vertical_size);
 
     return {
-        horizontal.angleLeft,
-        horizontal.angleRight,
-        vertical.angleUp,
-        vertical.angleDown,
+        static_cast<float>(horizontal.negative),
+        static_cast<float>(horizontal.positive),
+        static_cast<float>(vertical.positive),
+        static_cast<float>(vertical.negative),
     };
 }
 
@@ -1224,13 +1225,14 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
     uint32_t split_quad_projection_layer_count = 0;
     uint32_t projection_swapchain_reference_count = 0;
     uint32_t unknown_projection_swapchain_count = 0;
-    adjusted_projection_views.reserve(frame_end_info->layerCount * 2);
-    adjusted_projection_layers.reserve(frame_end_info->layerCount * 2);
-    adjusted_layers.reserve(frame_end_info->layerCount * 2);
+    adjusted_projection_views.reserve(frame_end_info->layerCount * 3);
+    adjusted_projection_layers.reserve(frame_end_info->layerCount * 3);
+    adjusted_layers.reserve(frame_end_info->layerCount * 3);
 
     auto append_projection_layer = [&](const XrCompositionLayerProjection* projection_layer,
                                        uint32_t first_view,
-                                       uint32_t view_count) {
+                                       uint32_t view_count,
+                                       XrCompositionLayerFlags extra_layer_flags = 0) {
         adjusted_projection_views.emplace_back(projection_layer->views + first_view,
                                                projection_layer->views + first_view + view_count);
         for (XrCompositionLayerProjectionView& projection_view : adjusted_projection_views.back()) {
@@ -1240,6 +1242,7 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
         }
 
         adjusted_projection_layers.push_back(*projection_layer);
+        adjusted_projection_layers.back().layerFlags |= extra_layer_flags;
         adjusted_projection_layers.back().viewCount = view_count;
         adjusted_projection_layers.back().views = adjusted_projection_views.back().data();
         adjusted_layers.push_back(
@@ -1275,8 +1278,15 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
         }
 
         if (quadviews_projection_split_active && projection_layer->viewCount >= 4) {
+            // Stereo runtimes vary in how faithfully they composite multiple
+            // projection layers. Submit the inset on both sides of the
+            // peripheral layer so the focus view survives both normal and
+            // reversed painter ordering while we build the native compositor.
+            constexpr XrCompositionLayerFlags kFovealBlendFlags =
+                XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT | XR_COMPOSITION_LAYER_UNPREMULTIPLIED_ALPHA_BIT;
+            append_projection_layer(projection_layer, 2, 2, kFovealBlendFlags);
             append_projection_layer(projection_layer, 0, 2);
-            append_projection_layer(projection_layer, 2, 2);
+            append_projection_layer(projection_layer, 2, 2, kFovealBlendFlags);
             ++split_quad_projection_layer_count;
             continue;
         }
@@ -2051,8 +2061,10 @@ bool OpenXrLayer::LocateEyeGazeFocusOffsets(XrSession session,
         return false;
     }
 
+    const XrSpace gaze_base_space = internal_view_space_ != XR_NULL_HANDLE ? internal_view_space_ : base_space;
+
     XrSpaceLocation gaze_location{XR_TYPE_SPACE_LOCATION};
-    const XrResult locate_result = next_locate_space_(quadviews_eye_gaze_space_, base_space, time, &gaze_location);
+    const XrResult locate_result = next_locate_space_(quadviews_eye_gaze_space_, gaze_base_space, time, &gaze_location);
     if (XR_FAILED(locate_result) ||
         (gaze_location.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT) == 0) {
         return false;
