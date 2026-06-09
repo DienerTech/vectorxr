@@ -628,11 +628,12 @@ void TestExeMatch() {
 
 void TestSeenAppObservationRecording() {
     const std::filesystem::path test_directory =
-        std::filesystem::current_path() / "test-seen-app-observations";
+        std::filesystem::current_path() / "build" / "vectorxr-test-seen-app-observations";
     std::error_code error;
     std::filesystem::remove_all(test_directory, error);
+    error.clear();
     std::filesystem::create_directories(test_directory, error);
-    Expect(!error, "Failed to create seen-apps test directory");
+    Expect(!error, "Failed to create seen-apps test directory: " + error.message());
 
     const std::filesystem::path path = test_directory / "seen-apps.json";
     std::string record_error;
@@ -767,13 +768,14 @@ void TestPivotYawNoOpInsideDeadzone() {
 
 void TestLoggerCollapsesDuplicateMessages() {
     const std::filesystem::path test_directory =
-        std::filesystem::current_path() / "test-logger-duplicate-collapse";
+        std::filesystem::current_path() / "build" / "vectorxr-test-logger-duplicate-collapse";
     std::error_code error;
     std::filesystem::remove_all(test_directory, error);
+    error.clear();
     std::filesystem::create_directories(test_directory, error);
-    Expect(!error, "Failed to create logger test directory");
+    Expect(!error, "Failed to create logger test directory: " + error.message());
 
-    const std::filesystem::path log_base_path = test_directory / "depthxr-test.log";
+    const std::filesystem::path log_base_path = test_directory / "vectorxr-test.log";
     std::filesystem::path active_log_path;
     {
         depthxr::Logger logger;

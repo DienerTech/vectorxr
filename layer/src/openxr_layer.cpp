@@ -1233,13 +1233,15 @@ XrResult OpenXrLayer::EnumerateSwapchainImages(XrSwapchain swapchain,
         it->second.images_enumerated = true;
         it->second.d3d11_images.clear();
         it->second.d3d11_images.reserve(*image_count_output);
-        for (uint32_t i = 0; i < *image_count_output && i < image_capacity_input; ++i) {
-            if (!IsD3D11SwapchainImage(&images[i])) {
-                it->second.d3d11_images.clear();
-                break;
+        if (IsD3D11SwapchainImage(images)) {
+            const auto* d3d11_images = reinterpret_cast<const XrSwapchainImageD3D11KHR*>(images);
+            for (uint32_t i = 0; i < *image_count_output && i < image_capacity_input; ++i) {
+                if (d3d11_images[i].type != XR_TYPE_SWAPCHAIN_IMAGE_D3D11_KHR) {
+                    it->second.d3d11_images.clear();
+                    break;
+                }
+                it->second.d3d11_images.push_back(d3d11_images[i].texture);
             }
-            const auto* d3d11_image = reinterpret_cast<const XrSwapchainImageD3D11KHR*>(&images[i]);
-            it->second.d3d11_images.push_back(d3d11_image->texture);
         }
     }
     if (first_complete_enumeration || it->second.quadviews_session) {
@@ -3128,6 +3130,7 @@ void OpenXrLayer::LogSwapchainSummary(XrSwapchain swapchain,
            << ", createFlags=" << info.create_flags
            << ", imageCount=" << info.image_count
            << ", imagesEnumerated=" << info.images_enumerated
+           << ", d3d11Images=" << info.d3d11_images.size()
            << ", acquires=" << info.acquire_count
            << ", waits=" << info.wait_count
            << ", releases=" << info.release_count
