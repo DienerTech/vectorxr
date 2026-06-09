@@ -139,8 +139,8 @@ Before tagging, update the version in:
 Then verify and tag:
 
 ```powershell
-.\scripts\Assert-VersionMatchesTag.ps1 -TagName v0.7.0
-git tag v0.7.0
+.\scripts\Assert-VersionMatchesTag.ps1 -TagName v0.7.1
+git tag v0.7.1
 git push origin main --tags
 ```
 
