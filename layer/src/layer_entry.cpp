@@ -110,6 +110,40 @@ XrResult XRAPI_CALL DepthxrEnumerateViewConfigurationViews(XrInstance instance,
         instance, system_id, view_configuration_type, view_capacity_input, view_count_output, views);
 }
 
+XrResult XRAPI_CALL DepthxrCreateSwapchain(XrSession session,
+                                           const XrSwapchainCreateInfo* create_info,
+                                           XrSwapchain* swapchain) {
+    return OpenXrLayer::Instance().CreateSwapchain(session, create_info, swapchain);
+}
+
+XrResult XRAPI_CALL DepthxrDestroySwapchain(XrSwapchain swapchain) {
+    return OpenXrLayer::Instance().DestroySwapchain(swapchain);
+}
+
+XrResult XRAPI_CALL DepthxrEnumerateSwapchainImages(XrSwapchain swapchain,
+                                                    uint32_t image_capacity_input,
+                                                    uint32_t* image_count_output,
+                                                    XrSwapchainImageBaseHeader* images) {
+    return OpenXrLayer::Instance().EnumerateSwapchainImages(
+        swapchain, image_capacity_input, image_count_output, images);
+}
+
+XrResult XRAPI_CALL DepthxrAcquireSwapchainImage(XrSwapchain swapchain,
+                                                 const XrSwapchainImageAcquireInfo* acquire_info,
+                                                 uint32_t* index) {
+    return OpenXrLayer::Instance().AcquireSwapchainImage(swapchain, acquire_info, index);
+}
+
+XrResult XRAPI_CALL DepthxrWaitSwapchainImage(XrSwapchain swapchain,
+                                              const XrSwapchainImageWaitInfo* wait_info) {
+    return OpenXrLayer::Instance().WaitSwapchainImage(swapchain, wait_info);
+}
+
+XrResult XRAPI_CALL DepthxrReleaseSwapchainImage(XrSwapchain swapchain,
+                                                 const XrSwapchainImageReleaseInfo* release_info) {
+    return OpenXrLayer::Instance().ReleaseSwapchainImage(swapchain, release_info);
+}
+
 XrResult XRAPI_CALL DepthxrCreateReferenceSpace(XrSession session,
                                                 const XrReferenceSpaceCreateInfo* create_info,
                                                 XrSpace* space) {
@@ -247,6 +281,30 @@ XrResult XRAPI_CALL xrGetInstanceProcAddr(XrInstance instance, const char* name,
     }
     if (requested == "xrEnumerateViewConfigurationViews") {
         *function = reinterpret_cast<PFN_xrVoidFunction>(depthxr::DepthxrEnumerateViewConfigurationViews);
+        return XR_SUCCESS;
+    }
+    if (requested == "xrCreateSwapchain") {
+        *function = reinterpret_cast<PFN_xrVoidFunction>(depthxr::DepthxrCreateSwapchain);
+        return XR_SUCCESS;
+    }
+    if (requested == "xrDestroySwapchain") {
+        *function = reinterpret_cast<PFN_xrVoidFunction>(depthxr::DepthxrDestroySwapchain);
+        return XR_SUCCESS;
+    }
+    if (requested == "xrEnumerateSwapchainImages") {
+        *function = reinterpret_cast<PFN_xrVoidFunction>(depthxr::DepthxrEnumerateSwapchainImages);
+        return XR_SUCCESS;
+    }
+    if (requested == "xrAcquireSwapchainImage") {
+        *function = reinterpret_cast<PFN_xrVoidFunction>(depthxr::DepthxrAcquireSwapchainImage);
+        return XR_SUCCESS;
+    }
+    if (requested == "xrWaitSwapchainImage") {
+        *function = reinterpret_cast<PFN_xrVoidFunction>(depthxr::DepthxrWaitSwapchainImage);
+        return XR_SUCCESS;
+    }
+    if (requested == "xrReleaseSwapchainImage") {
+        *function = reinterpret_cast<PFN_xrVoidFunction>(depthxr::DepthxrReleaseSwapchainImage);
         return XR_SUCCESS;
     }
     if (requested == "xrCreateReferenceSpace") {

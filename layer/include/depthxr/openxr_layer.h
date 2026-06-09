@@ -7,6 +7,8 @@
 #include <optional>
 #include <span>
 #include <string>
+#include <string_view>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -58,6 +60,17 @@ class OpenXrLayer {
                                              uint32_t view_capacity_input,
                                              uint32_t* view_count_output,
                                              XrViewConfigurationView* views);
+    XrResult CreateSwapchain(XrSession session, const XrSwapchainCreateInfo* create_info, XrSwapchain* swapchain);
+    XrResult DestroySwapchain(XrSwapchain swapchain);
+    XrResult EnumerateSwapchainImages(XrSwapchain swapchain,
+                                      uint32_t image_capacity_input,
+                                      uint32_t* image_count_output,
+                                      XrSwapchainImageBaseHeader* images);
+    XrResult AcquireSwapchainImage(XrSwapchain swapchain,
+                                   const XrSwapchainImageAcquireInfo* acquire_info,
+                                   uint32_t* index);
+    XrResult WaitSwapchainImage(XrSwapchain swapchain, const XrSwapchainImageWaitInfo* wait_info);
+    XrResult ReleaseSwapchainImage(XrSwapchain swapchain, const XrSwapchainImageReleaseInfo* release_info);
     XrResult CreateReferenceSpace(XrSession session, const XrReferenceSpaceCreateInfo* create_info, XrSpace* space);
     XrResult DestroySpace(XrSpace space);
     XrResult LocateSpace(XrSpace space, XrSpace base_space, XrTime time, XrSpaceLocation* location);
@@ -71,6 +84,24 @@ class OpenXrLayer {
   private:
     OpenXrLayer() = default;
 
+    struct SwapchainInfo {
+        XrSession session{XR_NULL_HANDLE};
+        uint32_t width{0};
+        uint32_t height{0};
+        uint32_t array_size{0};
+        uint32_t mip_count{0};
+        uint32_t sample_count{0};
+        int64_t format{0};
+        XrSwapchainUsageFlags usage_flags{0};
+        XrSwapchainCreateFlags create_flags{0};
+        uint32_t image_count{0};
+        uint64_t acquire_count{0};
+        uint64_t wait_count{0};
+        uint64_t release_count{0};
+        bool images_enumerated{false};
+        bool quadviews_session{false};
+    };
+
     void ReloadConfigIfNeeded();
     void RefreshResolvedSettings();
     void CaptureInstanceFunctions();
@@ -80,6 +111,8 @@ class OpenXrLayer {
     bool IsPivotXrActive(const PivotXrResolvedSettings& settings);
     bool IsDepthXrActive();
     bool IsQuadViewsActive() const;
+    void ResetSwapchainState();
+    void LogSwapchainSummary(XrSwapchain swapchain, const SwapchainInfo& info, std::string_view event_name);
     void ResetSessionState();
     void ResetInstanceState();
     XrResult CreateInternalReferenceSpaces(XrSession session);
@@ -173,11 +206,13 @@ class OpenXrLayer {
     bool has_active_primary_view_configuration_{false};
     bool has_logged_quad_view_short_count_{false};
     bool has_logged_pivotxr_spike_mode_{false};
+    bool has_logged_quadviews_view_configuration_capabilities_{false};
     std::unordered_set<XrSpace> tracked_view_spaces_;
     std::unordered_set<XrSpace> tracked_local_spaces_;
     std::unordered_set<XrSpace> tracked_stage_spaces_;
     std::vector<XrPosef> cached_eye_offset_poses_;
     std::map<XrTime, XrPosef> cached_pivot_pose_deltas_;
+    std::unordered_map<XrSwapchain, SwapchainInfo> tracked_swapchains_;
 
     PFN_xrGetInstanceProcAddr next_get_instance_proc_addr_{nullptr};
     PFN_xrDestroyInstance next_destroy_instance_{nullptr};
@@ -192,6 +227,12 @@ class OpenXrLayer {
     PFN_xrEnumerateViewConfigurations next_enumerate_view_configurations_{nullptr};
     PFN_xrGetViewConfigurationProperties next_get_view_configuration_properties_{nullptr};
     PFN_xrEnumerateViewConfigurationViews next_enumerate_view_configuration_views_{nullptr};
+    PFN_xrCreateSwapchain next_create_swapchain_{nullptr};
+    PFN_xrDestroySwapchain next_destroy_swapchain_{nullptr};
+    PFN_xrEnumerateSwapchainImages next_enumerate_swapchain_images_{nullptr};
+    PFN_xrAcquireSwapchainImage next_acquire_swapchain_image_{nullptr};
+    PFN_xrWaitSwapchainImage next_wait_swapchain_image_{nullptr};
+    PFN_xrReleaseSwapchainImage next_release_swapchain_image_{nullptr};
     PFN_xrCreateReferenceSpace next_create_reference_space_{nullptr};
     PFN_xrCreateActionSpace next_create_action_space_{nullptr};
     PFN_xrDestroySpace next_destroy_space_{nullptr};

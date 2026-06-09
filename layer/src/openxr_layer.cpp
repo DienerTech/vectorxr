@@ -4,6 +4,7 @@
 #include <array>
 #include <cmath>
 #include <cstring>
+#include <cstdint>
 #include <iomanip>
 #include <sstream>
 #include <string>
@@ -336,6 +337,57 @@ const char* ToString(XrViewConfigurationType type) {
     }
 }
 
+std::string FormatHandle(XrSwapchain swapchain) {
+    std::uint64_t value = 0;
+    static_assert(sizeof(swapchain) <= sizeof(value));
+    std::memcpy(&value, &swapchain, sizeof(swapchain));
+
+    std::ostringstream stream;
+    stream << "0x" << std::hex << value;
+    return stream.str();
+}
+
+std::string FormatUsageFlags(XrSwapchainUsageFlags flags) {
+    std::vector<std::string_view> names;
+    if ((flags & XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT) != 0) {
+        names.push_back("color");
+    }
+    if ((flags & XR_SWAPCHAIN_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT) != 0) {
+        names.push_back("depth");
+    }
+    if ((flags & XR_SWAPCHAIN_USAGE_UNORDERED_ACCESS_BIT) != 0) {
+        names.push_back("unorderedAccess");
+    }
+    if ((flags & XR_SWAPCHAIN_USAGE_TRANSFER_SRC_BIT) != 0) {
+        names.push_back("transferSrc");
+    }
+    if ((flags & XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT) != 0) {
+        names.push_back("transferDst");
+    }
+    if ((flags & XR_SWAPCHAIN_USAGE_SAMPLED_BIT) != 0) {
+        names.push_back("sampled");
+    }
+    if ((flags & XR_SWAPCHAIN_USAGE_MUTABLE_FORMAT_BIT) != 0) {
+        names.push_back("mutableFormat");
+    }
+    if ((flags & XR_SWAPCHAIN_USAGE_INPUT_ATTACHMENT_BIT_KHR) != 0) {
+        names.push_back("inputAttachment");
+    }
+
+    if (names.empty()) {
+        return "none";
+    }
+
+    std::ostringstream stream;
+    for (size_t i = 0; i < names.size(); ++i) {
+        if (i > 0) {
+            stream << "|";
+        }
+        stream << names[i];
+    }
+    return stream.str();
+}
+
 ViewLayout DetermineViewLayout(XrViewConfigurationType type, uint32_t count) {
     if (type == XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO_WITH_FOVEATED_INSET) {
         return count >= 4 ? ViewLayout::kStereoWithFoveatedInset : ViewLayout::kMono;
@@ -512,7 +564,10 @@ XrResult OpenXrLayer::OnInstanceCreated(const XrInstanceCreateInfo* create_info,
         !next_attach_session_action_sets_ || !next_sync_actions_ ||
         !next_end_frame_ || !next_get_system_properties_ || !next_enumerate_environment_blend_modes_ ||
         !next_enumerate_view_configurations_ || !next_get_view_configuration_properties_ ||
-        !next_enumerate_view_configuration_views_ || !next_create_reference_space_ || !next_destroy_space_ ||
+        !next_enumerate_view_configuration_views_ ||
+        !next_create_swapchain_ || !next_destroy_swapchain_ || !next_enumerate_swapchain_images_ ||
+        !next_acquire_swapchain_image_ || !next_wait_swapchain_image_ || !next_release_swapchain_image_ ||
+        !next_create_reference_space_ || !next_destroy_space_ ||
         !next_locate_space_ || !next_locate_views_) {
         logger_.Error("Failed to resolve required OpenXR function pointers");
         return XR_ERROR_INITIALIZATION_FAILED;
@@ -547,6 +602,7 @@ XrResult OpenXrLayer::DestroyInstance(XrInstance instance) {
 
     DestroyEyeGazeResources();
     DestroyInternalReferenceSpaces();
+    ResetSwapchainState();
     const XrResult result = next_destroy_instance_(instance);
     if (XR_SUCCEEDED(result)) {
         instance_ = XR_NULL_HANDLE;
@@ -561,6 +617,12 @@ XrResult OpenXrLayer::DestroyInstance(XrInstance instance) {
         next_enumerate_view_configurations_ = nullptr;
         next_get_view_configuration_properties_ = nullptr;
         next_enumerate_view_configuration_views_ = nullptr;
+        next_create_swapchain_ = nullptr;
+        next_destroy_swapchain_ = nullptr;
+        next_enumerate_swapchain_images_ = nullptr;
+        next_acquire_swapchain_image_ = nullptr;
+        next_wait_swapchain_image_ = nullptr;
+        next_release_swapchain_image_ = nullptr;
         next_create_reference_space_ = nullptr;
         next_create_action_space_ = nullptr;
         next_destroy_space_ = nullptr;
@@ -603,10 +665,14 @@ XrResult OpenXrLayer::CreateSession(XrInstance instance,
         logger_.Error("Failed to create one or more internal reference spaces; PivotXR will degrade for this session.");
         DestroyInternalReferenceSpaces();
     }
-    const XrResult eye_gaze_result = CreateEyeGazeResources(*session);
-    if (XR_FAILED(eye_gaze_result)) {
-        logger_.Info("Eye gaze resources unavailable; quadviews will use head/static focus offsets.");
-        DestroyEyeGazeResources();
+    ReloadConfigIfNeeded();
+    RefreshResolvedSettings();
+    if (IsQuadViewsActive() && resolved_settings_.quadviews.prefer_eye_tracking) {
+        const XrResult eye_gaze_result = CreateEyeGazeResources(*session);
+        if (XR_FAILED(eye_gaze_result)) {
+            logger_.Info("Eye gaze resources unavailable; quadviews will use head/static focus offsets.");
+            DestroyEyeGazeResources();
+        }
     }
     return result;
 }
@@ -617,6 +683,7 @@ XrResult OpenXrLayer::DestroySession(XrSession session) {
         if (session == active_session_) {
             DestroyEyeGazeResources();
             DestroyInternalReferenceSpaces();
+            ResetSwapchainState();
         }
     }
 
@@ -624,6 +691,7 @@ XrResult OpenXrLayer::DestroySession(XrSession session) {
     if (XR_SUCCEEDED(result)) {
         std::scoped_lock lock(mutex_);
         if (session == active_session_) {
+            ResetSwapchainState();
             ResetSessionState();
         }
     }
@@ -817,7 +885,17 @@ XrResult OpenXrLayer::EnumerateViewConfigurations(XrInstance instance,
                   XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO_WITH_FOVEATED_INSET) != exposed_types.end();
     const bool runtime_has_stereo =
         std::find(exposed_types.begin(), exposed_types.end(), XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO) != exposed_types.end();
-    if (IsQuadViewsActive() && runtime_has_stereo && !runtime_has_quad) {
+    const bool quadviews_active = IsQuadViewsActive();
+    if (quadviews_active && !has_logged_quadviews_view_configuration_capabilities_) {
+        std::ostringstream stream;
+        stream << "Quadviews view configuration capabilities: runtimeStereo=" << runtime_has_stereo
+               << ", runtimeQuad=" << runtime_has_quad
+               << ", synthesizeQuad=" << (runtime_has_stereo && !runtime_has_quad)
+               << ", runtimeTypeCount=" << runtime_types.size();
+        logger_.Info(stream.str());
+        has_logged_quadviews_view_configuration_capabilities_ = true;
+    }
+    if (quadviews_active && runtime_has_stereo && !runtime_has_quad) {
         exposed_types.push_back(XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO_WITH_FOVEATED_INSET);
     }
 
@@ -923,6 +1001,129 @@ XrResult OpenXrLayer::EnumerateViewConfigurationViews(XrInstance instance,
     return XR_SUCCESS;
 }
 
+XrResult OpenXrLayer::CreateSwapchain(XrSession session,
+                                      const XrSwapchainCreateInfo* create_info,
+                                      XrSwapchain* swapchain) {
+    const XrResult result = next_create_swapchain_(session, create_info, swapchain);
+    if (XR_FAILED(result) || !create_info || !swapchain || *swapchain == XR_NULL_HANDLE) {
+        return result;
+    }
+
+    std::scoped_lock lock(mutex_);
+    SwapchainInfo info;
+    info.session = session;
+    info.width = create_info->width;
+    info.height = create_info->height;
+    info.array_size = create_info->arraySize;
+    info.mip_count = create_info->mipCount;
+    info.sample_count = create_info->sampleCount;
+    info.format = create_info->format;
+    info.usage_flags = create_info->usageFlags;
+    info.create_flags = create_info->createFlags;
+    info.quadviews_session = IsQuadViewsActive() && session == active_session_ &&
+                             (!has_active_primary_view_configuration_ ||
+                              IsQuadViewConfiguration(active_primary_view_configuration_type_));
+    tracked_swapchains_[*swapchain] = info;
+    LogSwapchainSummary(*swapchain, info, "created");
+    return result;
+}
+
+XrResult OpenXrLayer::DestroySwapchain(XrSwapchain swapchain) {
+    const XrResult result = next_destroy_swapchain_(swapchain);
+    if (XR_FAILED(result)) {
+        return result;
+    }
+
+    std::scoped_lock lock(mutex_);
+    const auto it = tracked_swapchains_.find(swapchain);
+    if (it == tracked_swapchains_.end()) {
+        logger_.Debug("Swapchain destroyed: handle=" + FormatHandle(swapchain) + ", tracked=false");
+        return result;
+    }
+
+    LogSwapchainSummary(swapchain, it->second, "destroyed");
+    tracked_swapchains_.erase(it);
+    return result;
+}
+
+XrResult OpenXrLayer::EnumerateSwapchainImages(XrSwapchain swapchain,
+                                               uint32_t image_capacity_input,
+                                               uint32_t* image_count_output,
+                                               XrSwapchainImageBaseHeader* images) {
+    const XrResult result =
+        next_enumerate_swapchain_images_(swapchain, image_capacity_input, image_count_output, images);
+    if (XR_FAILED(result) || !image_count_output) {
+        return result;
+    }
+
+    std::scoped_lock lock(mutex_);
+    const auto it = tracked_swapchains_.find(swapchain);
+    if (it == tracked_swapchains_.end()) {
+        return result;
+    }
+
+    const bool first_complete_enumeration = !it->second.images_enumerated && images && image_capacity_input > 0;
+    it->second.image_count = *image_count_output;
+    if (images && image_capacity_input > 0) {
+        it->second.images_enumerated = true;
+    }
+    if (first_complete_enumeration || it->second.quadviews_session) {
+        LogSwapchainSummary(swapchain, it->second, "imagesEnumerated");
+    }
+    return result;
+}
+
+XrResult OpenXrLayer::AcquireSwapchainImage(XrSwapchain swapchain,
+                                            const XrSwapchainImageAcquireInfo* acquire_info,
+                                            uint32_t* index) {
+    const XrResult result = next_acquire_swapchain_image_(swapchain, acquire_info, index);
+    if (XR_FAILED(result)) {
+        return result;
+    }
+
+    std::scoped_lock lock(mutex_);
+    const auto it = tracked_swapchains_.find(swapchain);
+    if (it != tracked_swapchains_.end()) {
+        ++it->second.acquire_count;
+        if (it->second.quadviews_session && it->second.acquire_count <= 3) {
+            LogSwapchainSummary(swapchain, it->second, "acquired");
+        }
+    }
+    return result;
+}
+
+XrResult OpenXrLayer::WaitSwapchainImage(XrSwapchain swapchain, const XrSwapchainImageWaitInfo* wait_info) {
+    const XrResult result = next_wait_swapchain_image_(swapchain, wait_info);
+    if (XR_FAILED(result)) {
+        return result;
+    }
+
+    std::scoped_lock lock(mutex_);
+    const auto it = tracked_swapchains_.find(swapchain);
+    if (it != tracked_swapchains_.end()) {
+        ++it->second.wait_count;
+    }
+    return result;
+}
+
+XrResult OpenXrLayer::ReleaseSwapchainImage(XrSwapchain swapchain,
+                                            const XrSwapchainImageReleaseInfo* release_info) {
+    const XrResult result = next_release_swapchain_image_(swapchain, release_info);
+    if (XR_FAILED(result)) {
+        return result;
+    }
+
+    std::scoped_lock lock(mutex_);
+    const auto it = tracked_swapchains_.find(swapchain);
+    if (it != tracked_swapchains_.end()) {
+        ++it->second.release_count;
+        if (it->second.quadviews_session && it->second.release_count <= 3) {
+            LogSwapchainSummary(swapchain, it->second, "released");
+        }
+    }
+    return result;
+}
+
 XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_end_info) {
     if (!frame_end_info) {
         return XR_ERROR_VALIDATION_FAILURE;
@@ -986,6 +1187,8 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
     uint32_t corrected_projection_layer_count = 0;
     uint32_t corrected_projection_view_count = 0;
     uint32_t split_quad_projection_layer_count = 0;
+    uint32_t projection_swapchain_reference_count = 0;
+    uint32_t unknown_projection_swapchain_count = 0;
     adjusted_projection_views.reserve(frame_end_info->layerCount * 2);
     adjusted_projection_layers.reserve(frame_end_info->layerCount * 2);
     adjusted_layers.reserve(frame_end_info->layerCount * 2);
@@ -1025,6 +1228,17 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
             continue;
         }
 
+        for (uint32_t view_index = 0; view_index < projection_layer->viewCount; ++view_index) {
+            const XrSwapchain referenced_swapchain = projection_layer->views[view_index].subImage.swapchain;
+            if (referenced_swapchain == XR_NULL_HANDLE) {
+                continue;
+            }
+            ++projection_swapchain_reference_count;
+            if (!tracked_swapchains_.contains(referenced_swapchain)) {
+                ++unknown_projection_swapchain_count;
+            }
+        }
+
         if (quadviews_projection_split_active && projection_layer->viewCount >= 4) {
             append_projection_layer(projection_layer, 0, 2);
             append_projection_layer(projection_layer, 2, 2);
@@ -1053,6 +1267,9 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
                << ", projectionLayers=" << corrected_projection_layer_count
                << ", projectionViews=" << corrected_projection_view_count
                << ", splitQuadProjectionLayers=" << split_quad_projection_layer_count
+               << ", projectionSwapchainRefs=" << projection_swapchain_reference_count
+               << ", unknownProjectionSwapchains=" << unknown_projection_swapchain_count
+               << ", trackedSwapchains=" << tracked_swapchains_.size()
                << ", cachedPivotDeltas=" << cached_pivot_pose_deltas_.size();
         logger_.Debug(stream.str());
         --pending_end_frame_diagnostics_;
@@ -1060,7 +1277,10 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
         logger_.Debug("EndFrame quadviews projection split applied: splitLayers=" +
                       std::to_string(split_quad_projection_layer_count) +
                       ", submittedLayers=" + std::to_string(frame_end_info->layerCount) +
-                      ", runtimeLayers=" + std::to_string(adjusted_layers.size()));
+                      ", runtimeLayers=" + std::to_string(adjusted_layers.size()) +
+                      ", projectionSwapchainRefs=" + std::to_string(projection_swapchain_reference_count) +
+                      ", unknownProjectionSwapchains=" + std::to_string(unknown_projection_swapchain_count) +
+                      ", trackedSwapchains=" + std::to_string(tracked_swapchains_.size()));
     }
     const XrResult result = next_end_frame_(session, &adjusted_frame_end_info);
     PrunePivotPoseDeltas(frame_end_info->displayTime);
@@ -1545,6 +1765,37 @@ void OpenXrLayer::CaptureInstanceFunctions() {
     }
 
     function = nullptr;
+    if (XR_SUCCEEDED(next_get_instance_proc_addr_(instance_, "xrCreateSwapchain", &function))) {
+        next_create_swapchain_ = reinterpret_cast<PFN_xrCreateSwapchain>(function);
+    }
+
+    function = nullptr;
+    if (XR_SUCCEEDED(next_get_instance_proc_addr_(instance_, "xrDestroySwapchain", &function))) {
+        next_destroy_swapchain_ = reinterpret_cast<PFN_xrDestroySwapchain>(function);
+    }
+
+    function = nullptr;
+    if (XR_SUCCEEDED(next_get_instance_proc_addr_(instance_, "xrEnumerateSwapchainImages", &function))) {
+        next_enumerate_swapchain_images_ =
+            reinterpret_cast<PFN_xrEnumerateSwapchainImages>(function);
+    }
+
+    function = nullptr;
+    if (XR_SUCCEEDED(next_get_instance_proc_addr_(instance_, "xrAcquireSwapchainImage", &function))) {
+        next_acquire_swapchain_image_ = reinterpret_cast<PFN_xrAcquireSwapchainImage>(function);
+    }
+
+    function = nullptr;
+    if (XR_SUCCEEDED(next_get_instance_proc_addr_(instance_, "xrWaitSwapchainImage", &function))) {
+        next_wait_swapchain_image_ = reinterpret_cast<PFN_xrWaitSwapchainImage>(function);
+    }
+
+    function = nullptr;
+    if (XR_SUCCEEDED(next_get_instance_proc_addr_(instance_, "xrReleaseSwapchainImage", &function))) {
+        next_release_swapchain_image_ = reinterpret_cast<PFN_xrReleaseSwapchainImage>(function);
+    }
+
+    function = nullptr;
     if (XR_SUCCEEDED(next_get_instance_proc_addr_(instance_, "xrCreateReferenceSpace", &function))) {
         next_create_reference_space_ = reinterpret_cast<PFN_xrCreateReferenceSpace>(function);
     }
@@ -1632,11 +1883,13 @@ void OpenXrLayer::ResetSessionState() {
     has_active_primary_view_configuration_ = false;
     has_logged_quad_view_short_count_ = false;
     has_logged_pivotxr_spike_mode_ = false;
+    has_logged_quadviews_view_configuration_capabilities_ = false;
     tracked_view_spaces_.clear();
     tracked_local_spaces_.clear();
     tracked_stage_spaces_.clear();
     cached_eye_offset_poses_.clear();
     cached_pivot_pose_deltas_.clear();
+    tracked_swapchains_.clear();
 }
 
 void OpenXrLayer::ResetInstanceState() {
@@ -2248,6 +2501,39 @@ void OpenXrLayer::ResetPivotActivationState() {
 void OpenXrLayer::ResetDepthToggleState() {
     depthxr_toggle_enabled_ = true;
     depthxr_toggle_binding_was_down_ = false;
+}
+
+void OpenXrLayer::ResetSwapchainState() {
+    tracked_swapchains_.clear();
+}
+
+void OpenXrLayer::LogSwapchainSummary(XrSwapchain swapchain,
+                                      const SwapchainInfo& info,
+                                      std::string_view event_name) {
+    std::ostringstream stream;
+    stream << "Swapchain " << event_name
+           << ": handle=" << FormatHandle(swapchain)
+           << ", sessionActive=" << (info.session == active_session_)
+           << ", quadviewsSession=" << info.quadviews_session
+           << ", activeViewConfig=" << ToString(active_primary_view_configuration_type_)
+           << ", size=" << info.width << "x" << info.height
+           << ", arraySize=" << info.array_size
+           << ", mipCount=" << info.mip_count
+           << ", sampleCount=" << info.sample_count
+           << ", format=" << info.format
+           << ", usage=" << FormatUsageFlags(info.usage_flags)
+           << ", createFlags=" << info.create_flags
+           << ", imageCount=" << info.image_count
+           << ", imagesEnumerated=" << info.images_enumerated
+           << ", acquires=" << info.acquire_count
+           << ", waits=" << info.wait_count
+           << ", releases=" << info.release_count
+           << ", trackedSwapchains=" << tracked_swapchains_.size();
+    if (info.quadviews_session) {
+        logger_.Info(stream.str());
+    } else {
+        logger_.Debug(stream.str());
+    }
 }
 
 bool OpenXrLayer::IsDepthXrActive() {

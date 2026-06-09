@@ -1,6 +1,6 @@
 # Native Quadviews Design Notes
 
-Status: control plane, OpenXR stereo-runtime bridge, and first eye-gaze focus path.
+Status: control plane, OpenXR stereo-runtime bridge, eye-gaze focus path, and swapchain lifecycle diagnostics.
 
 ## Research Snapshot
 
@@ -45,16 +45,13 @@ The first native renderer path is implemented as a stereo-runtime bridge:
 - When the runtime advertises `XR_EXT_eye_gaze_interaction`, VectorXR enables it downstream for the layer, creates a private eye-gaze pose action, appends that action set to app action attach/sync calls, and uses the located gaze pose to move the foveal inset.
 - `xrEndFrame` splits a 4-view projection layer into two 2-view projection layers: peripheral first, foveal second.
 - `xrGetSystemProperties` reports Varjo foveated rendering support when the app chains `XrSystemFoveatedRenderingPropertiesVARJO`.
+- `xrCreateSwapchain`, `xrEnumerateSwapchainImages`, `xrAcquireSwapchainImage`, `xrWaitSwapchainImage`, `xrReleaseSwapchainImage`, and `xrDestroySwapchain` pass through transparently while recording lifecycle diagnostics for initial headset testing.
 
-The remaining full renderer work is mostly around richer view focus and device/runtime coverage:
+The remaining post-prototype work is mostly around live runtime adaptation and broader device coverage:
 
-- `xrCreateSwapchain`
-- `xrEnumerateSwapchainImages`
-- `xrAcquireSwapchainImage`
-- `xrWaitSwapchainImage`
-- `xrReleaseSwapchainImage`
-- `xrDestroySwapchain`
 - optional `XR_EXT_view_configuration_views_change` event handling if we need live foveal-view resizing
+- runtime/device compatibility warnings in the UI after we have real-world logs
+- graphics-aware validation if testing reveals runtimes that reject the transparent projection-layer split
 
 The manifest must statically advertise layer-owned extensions because the loader discovers API-layer extensions from manifest metadata. The runtime-facing quad view configuration is still gated by resolved `modules.quadviews.enabled`; if Quadviews is disabled for an app, VectorXR does not add the foveated-inset view configuration.
 
@@ -91,5 +88,19 @@ Proposed per-frame order:
 4. `xrLocateViews` head-tracked foveal FOV generation: complete.
 5. `xrEndFrame` projection-layer split: complete.
 6. Eye-gaze action setup and fallback: complete.
-7. Swapchain lifecycle interception for future graphics-aware validation/diagnostics.
-8. Runtime diagnostics and compatibility warnings in the UI.
+7. Swapchain lifecycle interception and diagnostics: complete.
+8. Initial headset/runtime testing.
+9. Runtime diagnostics and compatibility warnings in the UI.
+
+## Initial Testing Checklist
+
+For the first headset pass, enable Quadviews for one known app profile and check the VectorXR log for:
+
+- `Enabled XR_EXT_eye_gaze_interaction downstream` when the runtime exposes eye gaze.
+- `Quadviews view configuration capabilities` showing `runtimeStereo=1` and `synthesizeQuad=1` on stereo-only runtimes.
+- `Session began with view configuration: primary_stereo_with_foveated_inset (runtime mapped to primary_stereo)`.
+- `Swapchain created` and `Swapchain imagesEnumerated` entries with `quadviewsSession=1`.
+- `LocateViews` diagnostics with `viewConfig=primary_stereo_with_foveated_inset`.
+- `EndFrame quadviews projection split applied` with `unknownProjectionSwapchains=0`.
+
+If eye gaze is unavailable, the expected fallback log is `Eye gaze resources unavailable; quadviews will use head/static focus offsets.`
