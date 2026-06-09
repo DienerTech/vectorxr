@@ -1,6 +1,6 @@
 # Native Quadviews Design Notes
 
-Status: control plane plus first OpenXR emulation path.
+Status: control plane, OpenXR stereo-runtime bridge, and first eye-gaze focus path.
 
 ## Research Snapshot
 
@@ -42,6 +42,7 @@ The first native renderer path is implemented as a stereo-runtime bridge:
 - `xrGetViewConfigurationProperties`, `xrEnumerateEnvironmentBlendModes`, and `xrEnumerateViewConfigurationViews` map quadview app queries to stereo runtime queries.
 - `xrBeginSession` maps an app-facing quadview session to a downstream stereo session.
 - `xrLocateViews` maps quadview locates to stereo runtime locates, then synthesizes peripheral left/right and foveal inset left/right views.
+- When the runtime advertises `XR_EXT_eye_gaze_interaction`, VectorXR enables it downstream for the layer, creates a private eye-gaze pose action, appends that action set to app action attach/sync calls, and uses the located gaze pose to move the foveal inset.
 - `xrEndFrame` splits a 4-view projection layer into two 2-view projection layers: peripheral first, foveal second.
 - `xrGetSystemProperties` reports Varjo foveated rendering support when the app chains `XrSystemFoveatedRenderingPropertiesVARJO`.
 
@@ -53,7 +54,6 @@ The remaining full renderer work is mostly around richer view focus and device/r
 - `xrWaitSwapchainImage`
 - `xrReleaseSwapchainImage`
 - `xrDestroySwapchain`
-- `XR_EXT_eye_gaze_interaction` action setup and focus-source fallback
 - optional `XR_EXT_view_configuration_views_change` event handling if we need live foveal-view resizing
 
 The manifest must statically advertise layer-owned extensions because the loader discovers API-layer extensions from manifest metadata. The runtime-facing quad view configuration is still gated by resolved `modules.quadviews.enabled`; if Quadviews is disabled for an app, VectorXR does not add the foveated-inset view configuration.
@@ -62,7 +62,7 @@ The manifest must statically advertise layer-owned extensions because the loader
 
 Pivot and Quadviews should share one focus-direction pipeline:
 
-1. Resolve raw gaze from `XR_EXT_eye_gaze_interaction` when available and enabled.
+1. Resolve raw gaze from `XR_EXT_eye_gaze_interaction` when available, attached, synced, and enabled in the Quadviews profile.
 2. Fall back to runtime VIEW pose when eye gaze is unavailable or disabled.
 3. Apply Quadviews smoothing/deadzone/offset.
 4. Apply Pivot's effective extra yaw/pitch to the same focus direction.
@@ -90,6 +90,6 @@ Proposed per-frame order:
 3. Quadview view-configuration enumeration and sizing: complete.
 4. `xrLocateViews` head-tracked foveal FOV generation: complete.
 5. `xrEndFrame` projection-layer split: complete.
-6. Eye-gaze action setup and fallback.
+6. Eye-gaze action setup and fallback: complete.
 7. Swapchain lifecycle interception for future graphics-aware validation/diagnostics.
 8. Runtime diagnostics and compatibility warnings in the UI.

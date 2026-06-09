@@ -2,6 +2,7 @@
 #include "depthxr/openxr_loader_api_layer.h"
 
 #include <algorithm>
+#include <cstring>
 #include <string_view>
 #include <vector>
 
@@ -42,6 +43,15 @@ XrResult XRAPI_CALL DepthxrDestroySession(XrSession session) {
 
 XrResult XRAPI_CALL DepthxrBeginSession(XrSession session, const XrSessionBeginInfo* begin_info) {
     return OpenXrLayer::Instance().BeginSession(session, begin_info);
+}
+
+XrResult XRAPI_CALL DepthxrAttachSessionActionSets(XrSession session,
+                                                   const XrSessionActionSetsAttachInfo* attach_info) {
+    return OpenXrLayer::Instance().AttachSessionActionSets(session, attach_info);
+}
+
+XrResult XRAPI_CALL DepthxrSyncActions(XrSession session, const XrActionsSyncInfo* sync_info) {
+    return OpenXrLayer::Instance().SyncActions(session, sync_info);
 }
 
 XrResult XRAPI_CALL DepthxrEndFrame(XrSession session, const XrFrameEndInfo* frame_end_info) {
@@ -132,6 +142,50 @@ bool IsLayerOwnedExtension(std::string_view extension_name) {
            extension_name == XR_VARJO_FOVEATED_RENDERING_EXTENSION_NAME;
 }
 
+bool ExtensionListContains(const std::vector<const char*>& extensions, std::string_view extension_name) {
+    return std::find_if(extensions.begin(), extensions.end(), [&](const char* candidate) {
+               return candidate && std::string_view(candidate) == extension_name;
+           }) != extensions.end();
+}
+
+bool RuntimeSupportsExtension(PFN_xrGetInstanceProcAddr next_get_instance_proc_addr,
+                              std::string_view extension_name) {
+    if (!next_get_instance_proc_addr) {
+        return false;
+    }
+
+    PFN_xrVoidFunction function = nullptr;
+    if (XR_FAILED(next_get_instance_proc_addr(
+            XR_NULL_HANDLE, "xrEnumerateInstanceExtensionProperties", &function)) ||
+        !function) {
+        return false;
+    }
+
+    const auto enumerate_extension_properties =
+        reinterpret_cast<PFN_xrEnumerateInstanceExtensionProperties>(function);
+    uint32_t extension_count = 0;
+    XrResult result = enumerate_extension_properties(nullptr, 0, &extension_count, nullptr);
+    if (XR_FAILED(result) || extension_count == 0) {
+        return false;
+    }
+
+    std::vector<XrExtensionProperties> properties(extension_count);
+    for (XrExtensionProperties& property : properties) {
+        property = {XR_TYPE_EXTENSION_PROPERTIES};
+    }
+    result = enumerate_extension_properties(
+        nullptr, extension_count, &extension_count, properties.data());
+    if (XR_FAILED(result)) {
+        return false;
+    }
+
+    return std::find_if(properties.begin(), properties.end(), [&](const XrExtensionProperties& property) {
+               return std::strncmp(property.extensionName,
+                                   extension_name.data(),
+                                   XR_MAX_EXTENSION_NAME_SIZE) == 0;
+           }) != properties.end();
+}
+
 } // namespace
 } // namespace depthxr
 
@@ -161,6 +215,14 @@ XrResult XRAPI_CALL xrGetInstanceProcAddr(XrInstance instance, const char* name,
     }
     if (requested == "xrBeginSession") {
         *function = reinterpret_cast<PFN_xrVoidFunction>(depthxr::DepthxrBeginSession);
+        return XR_SUCCESS;
+    }
+    if (requested == "xrAttachSessionActionSets") {
+        *function = reinterpret_cast<PFN_xrVoidFunction>(depthxr::DepthxrAttachSessionActionSets);
+        return XR_SUCCESS;
+    }
+    if (requested == "xrSyncActions") {
+        *function = reinterpret_cast<PFN_xrVoidFunction>(depthxr::DepthxrSyncActions);
         return XR_SUCCESS;
     }
     if (requested == "xrEndFrame") {
@@ -245,6 +307,14 @@ XrResult XRAPI_CALL xrCreateApiLayerInstance(const XrInstanceCreateInfo* instanc
         }
         downstream_extensions.push_back(extension_name);
     }
+
+    if (!ExtensionListContains(downstream_extensions, XR_EXT_EYE_GAZE_INTERACTION_EXTENSION_NAME) &&
+        RuntimeSupportsExtension(next_info->nextGetInstanceProcAddr, XR_EXT_EYE_GAZE_INTERACTION_EXTENSION_NAME)) {
+        downstream_extensions.push_back(XR_EXT_EYE_GAZE_INTERACTION_EXTENSION_NAME);
+    }
+    const bool eye_gaze_extension_enabled =
+        ExtensionListContains(downstream_extensions, XR_EXT_EYE_GAZE_INTERACTION_EXTENSION_NAME);
+
     downstream_create_info.enabledExtensionCount = static_cast<uint32_t>(downstream_extensions.size());
     downstream_create_info.enabledExtensionNames = downstream_extensions.empty() ? nullptr : downstream_extensions.data();
 
@@ -253,7 +323,8 @@ XrResult XRAPI_CALL xrCreateApiLayerInstance(const XrInstanceCreateInfo* instanc
         return result;
     }
 
-    return OpenXrLayer::Instance().OnInstanceCreated(instance_create_info, *instance);
+    return OpenXrLayer::Instance().OnInstanceCreated(
+        instance_create_info, *instance, eye_gaze_extension_enabled);
 }
 
 XrResult __declspec(dllexport) XRAPI_CALL

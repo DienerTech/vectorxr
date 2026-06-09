@@ -106,9 +106,12 @@ XrFovf ClampAngularWindow(float base_negative,
     return {static_cast<float>(negative), static_cast<float>(positive), 0.0f, 0.0f};
 }
 
-XrFovf BuildFocusFov(const XrFovf& base_fov, const QuadViewsResolvedSettings& settings) {
-    const double horizontal_center = DegreesToRadians(settings.horizontal_offset_degrees);
-    const double vertical_center = DegreesToRadians(settings.vertical_offset_degrees);
+XrFovf BuildFocusFov(const XrFovf& base_fov,
+                     const QuadViewsResolvedSettings& settings,
+                     double focus_yaw_radians,
+                     double focus_pitch_radians) {
+    const double horizontal_center = DegreesToRadians(settings.horizontal_offset_degrees) + focus_yaw_radians;
+    const double vertical_center = DegreesToRadians(settings.vertical_offset_degrees) + focus_pitch_radians;
     const double horizontal_size = DegreesToRadians(settings.focus_horizontal_fov_degrees);
     const double vertical_size = DegreesToRadians(settings.focus_vertical_fov_degrees);
 
@@ -228,6 +231,16 @@ XrPosef ApplyExtraRotationToPose(const XrPosef& pose, float extra_yaw_radians, f
 
 XrPosef IdentityPose() {
     return {{0.0f, 0.0f, 0.0f, 1.0f}, {0.0f, 0.0f, 0.0f}};
+}
+
+void CopyName(char* destination, size_t capacity, std::string_view value) {
+    if (!destination || capacity == 0) {
+        return;
+    }
+
+    const size_t copy_count = std::min(capacity - 1, value.size());
+    std::memcpy(destination, value.data(), copy_count);
+    destination[copy_count] = '\0';
 }
 
 ViewOrientation ApplyExtraRotationToOrientation(const ViewOrientation& orientation,
@@ -457,11 +470,14 @@ void OpenXrLayer::SetNextProcAddr(PFN_xrGetInstanceProcAddr next_get_instance_pr
     next_get_instance_proc_addr_ = next_get_instance_proc_addr;
 }
 
-XrResult OpenXrLayer::OnInstanceCreated(const XrInstanceCreateInfo* create_info, XrInstance instance) {
+XrResult OpenXrLayer::OnInstanceCreated(const XrInstanceCreateInfo* create_info,
+                                        XrInstance instance,
+                                        bool eye_gaze_extension_enabled) {
     std::scoped_lock lock(mutex_);
 
     instance_ = instance;
     ResetInstanceState();
+    eye_gaze_extension_enabled_ = eye_gaze_extension_enabled;
     ResetSessionState();
     config_path_ = ResolveConfigPath();
     log_path_ = ResolveLogPath();
@@ -487,9 +503,13 @@ XrResult OpenXrLayer::OnInstanceCreated(const XrInstanceCreateInfo* create_info,
                          (varjo_foveated_rendering_extension_requested_ ? "true" : "false"));
         }
     }
+    if (eye_gaze_extension_enabled_) {
+        logger_.Info("Enabled XR_EXT_eye_gaze_interaction downstream for VectorXR quadviews.");
+    }
 
     CaptureInstanceFunctions();
     if (!next_destroy_instance_ || !next_create_session_ || !next_destroy_session_ || !next_begin_session_ ||
+        !next_attach_session_action_sets_ || !next_sync_actions_ ||
         !next_end_frame_ || !next_get_system_properties_ || !next_enumerate_environment_blend_modes_ ||
         !next_enumerate_view_configurations_ || !next_get_view_configuration_properties_ ||
         !next_enumerate_view_configuration_views_ || !next_create_reference_space_ || !next_destroy_space_ ||
@@ -525,6 +545,7 @@ XrResult OpenXrLayer::GetInstanceProcAddr(XrInstance instance, const char* name,
 XrResult OpenXrLayer::DestroyInstance(XrInstance instance) {
     std::scoped_lock lock(mutex_);
 
+    DestroyEyeGazeResources();
     DestroyInternalReferenceSpaces();
     const XrResult result = next_destroy_instance_(instance);
     if (XR_SUCCEEDED(result)) {
@@ -533,16 +554,26 @@ XrResult OpenXrLayer::DestroyInstance(XrInstance instance) {
         next_create_session_ = nullptr;
         next_destroy_session_ = nullptr;
         next_begin_session_ = nullptr;
+        next_attach_session_action_sets_ = nullptr;
+        next_sync_actions_ = nullptr;
         next_get_system_properties_ = nullptr;
         next_enumerate_environment_blend_modes_ = nullptr;
         next_enumerate_view_configurations_ = nullptr;
         next_get_view_configuration_properties_ = nullptr;
         next_enumerate_view_configuration_views_ = nullptr;
         next_create_reference_space_ = nullptr;
+        next_create_action_space_ = nullptr;
         next_destroy_space_ = nullptr;
         next_end_frame_ = nullptr;
         next_locate_space_ = nullptr;
         next_locate_views_ = nullptr;
+        next_string_to_path_ = nullptr;
+        next_create_action_set_ = nullptr;
+        next_destroy_action_set_ = nullptr;
+        next_create_action_ = nullptr;
+        next_destroy_action_ = nullptr;
+        next_suggest_interaction_profile_bindings_ = nullptr;
+        next_get_action_state_pose_ = nullptr;
         has_loaded_config_ = false;
         locate_views_call_count_ = 0;
         pending_locate_views_diagnostics_ = 0;
@@ -572,6 +603,11 @@ XrResult OpenXrLayer::CreateSession(XrInstance instance,
         logger_.Error("Failed to create one or more internal reference spaces; PivotXR will degrade for this session.");
         DestroyInternalReferenceSpaces();
     }
+    const XrResult eye_gaze_result = CreateEyeGazeResources(*session);
+    if (XR_FAILED(eye_gaze_result)) {
+        logger_.Info("Eye gaze resources unavailable; quadviews will use head/static focus offsets.");
+        DestroyEyeGazeResources();
+    }
     return result;
 }
 
@@ -579,6 +615,7 @@ XrResult OpenXrLayer::DestroySession(XrSession session) {
     {
         std::scoped_lock lock(mutex_);
         if (session == active_session_) {
+            DestroyEyeGazeResources();
             DestroyInternalReferenceSpaces();
         }
     }
@@ -629,6 +666,75 @@ XrResult OpenXrLayer::BeginSession(XrSession session, const XrSessionBeginInfo* 
                       ? std::string(" (runtime mapped to ") + ToString(active_runtime_view_configuration_type_) + ")"
                       : std::string()));
     return result;
+}
+
+XrResult OpenXrLayer::AttachSessionActionSets(XrSession session, const XrSessionActionSetsAttachInfo* attach_info) {
+    if (!attach_info) {
+        return XR_ERROR_VALIDATION_FAILURE;
+    }
+
+    XrSessionActionSetsAttachInfo downstream_attach_info = *attach_info;
+    std::vector<XrActionSet> action_sets;
+    bool appended_eye_gaze_set = false;
+    {
+        std::scoped_lock lock(mutex_);
+        if (session == active_session_ && eye_gaze_resources_ready_ &&
+            quadviews_action_set_ != XR_NULL_HANDLE &&
+            (attach_info->countActionSets == 0 || attach_info->actionSets)) {
+            if (attach_info->countActionSets > 0 && attach_info->actionSets) {
+                action_sets.assign(attach_info->actionSets,
+                                   attach_info->actionSets + attach_info->countActionSets);
+            }
+            if (std::find(action_sets.begin(), action_sets.end(), quadviews_action_set_) == action_sets.end()) {
+                action_sets.push_back(quadviews_action_set_);
+                appended_eye_gaze_set = true;
+            }
+            downstream_attach_info.countActionSets = static_cast<uint32_t>(action_sets.size());
+            downstream_attach_info.actionSets = action_sets.data();
+        }
+    }
+
+    const XrResult result = next_attach_session_action_sets_(session, &downstream_attach_info);
+    if (XR_SUCCEEDED(result) && appended_eye_gaze_set) {
+        std::scoped_lock lock(mutex_);
+        if (session == active_session_) {
+            eye_gaze_action_set_attached_ = true;
+            logger_.Info("Attached VectorXR eye-gaze action set for quadviews.");
+        }
+    }
+    return result;
+}
+
+XrResult OpenXrLayer::SyncActions(XrSession session, const XrActionsSyncInfo* sync_info) {
+    if (!sync_info) {
+        return XR_ERROR_VALIDATION_FAILURE;
+    }
+
+    XrActionsSyncInfo downstream_sync_info = *sync_info;
+    std::vector<XrActiveActionSet> active_action_sets;
+    {
+        std::scoped_lock lock(mutex_);
+        if (session == active_session_ && eye_gaze_resources_ready_ && eye_gaze_action_set_attached_ &&
+            quadviews_action_set_ != XR_NULL_HANDLE &&
+            (sync_info->countActiveActionSets == 0 || sync_info->activeActionSets)) {
+            if (sync_info->countActiveActionSets > 0 && sync_info->activeActionSets) {
+                active_action_sets.assign(sync_info->activeActionSets,
+                                          sync_info->activeActionSets + sync_info->countActiveActionSets);
+            }
+            const auto already_present = std::find_if(active_action_sets.begin(),
+                                                      active_action_sets.end(),
+                                                      [&](const XrActiveActionSet& active_set) {
+                                                          return active_set.actionSet == quadviews_action_set_;
+                                                      });
+            if (already_present == active_action_sets.end()) {
+                active_action_sets.push_back({quadviews_action_set_, XR_NULL_PATH});
+                downstream_sync_info.countActiveActionSets = static_cast<uint32_t>(active_action_sets.size());
+                downstream_sync_info.activeActionSets = active_action_sets.data();
+            }
+        }
+    }
+
+    return next_sync_actions_(session, &downstream_sync_info);
 }
 
 XrResult OpenXrLayer::GetSystemProperties(XrInstance instance,
@@ -1395,6 +1501,16 @@ void OpenXrLayer::CaptureInstanceFunctions() {
     }
 
     function = nullptr;
+    if (XR_SUCCEEDED(next_get_instance_proc_addr_(instance_, "xrAttachSessionActionSets", &function))) {
+        next_attach_session_action_sets_ = reinterpret_cast<PFN_xrAttachSessionActionSets>(function);
+    }
+
+    function = nullptr;
+    if (XR_SUCCEEDED(next_get_instance_proc_addr_(instance_, "xrSyncActions", &function))) {
+        next_sync_actions_ = reinterpret_cast<PFN_xrSyncActions>(function);
+    }
+
+    function = nullptr;
     if (XR_SUCCEEDED(next_get_instance_proc_addr_(instance_, "xrEndFrame", &function))) {
         next_end_frame_ = reinterpret_cast<PFN_xrEndFrame>(function);
     }
@@ -1434,6 +1550,11 @@ void OpenXrLayer::CaptureInstanceFunctions() {
     }
 
     function = nullptr;
+    if (XR_SUCCEEDED(next_get_instance_proc_addr_(instance_, "xrCreateActionSpace", &function))) {
+        next_create_action_space_ = reinterpret_cast<PFN_xrCreateActionSpace>(function);
+    }
+
+    function = nullptr;
     if (XR_SUCCEEDED(next_get_instance_proc_addr_(instance_, "xrDestroySpace", &function))) {
         next_destroy_space_ = reinterpret_cast<PFN_xrDestroySpace>(function);
     }
@@ -1446,6 +1567,42 @@ void OpenXrLayer::CaptureInstanceFunctions() {
     function = nullptr;
     if (XR_SUCCEEDED(next_get_instance_proc_addr_(instance_, "xrLocateViews", &function))) {
         next_locate_views_ = reinterpret_cast<PFN_xrLocateViews>(function);
+    }
+
+    function = nullptr;
+    if (XR_SUCCEEDED(next_get_instance_proc_addr_(instance_, "xrStringToPath", &function))) {
+        next_string_to_path_ = reinterpret_cast<PFN_xrStringToPath>(function);
+    }
+
+    function = nullptr;
+    if (XR_SUCCEEDED(next_get_instance_proc_addr_(instance_, "xrCreateActionSet", &function))) {
+        next_create_action_set_ = reinterpret_cast<PFN_xrCreateActionSet>(function);
+    }
+
+    function = nullptr;
+    if (XR_SUCCEEDED(next_get_instance_proc_addr_(instance_, "xrDestroyActionSet", &function))) {
+        next_destroy_action_set_ = reinterpret_cast<PFN_xrDestroyActionSet>(function);
+    }
+
+    function = nullptr;
+    if (XR_SUCCEEDED(next_get_instance_proc_addr_(instance_, "xrCreateAction", &function))) {
+        next_create_action_ = reinterpret_cast<PFN_xrCreateAction>(function);
+    }
+
+    function = nullptr;
+    if (XR_SUCCEEDED(next_get_instance_proc_addr_(instance_, "xrDestroyAction", &function))) {
+        next_destroy_action_ = reinterpret_cast<PFN_xrDestroyAction>(function);
+    }
+
+    function = nullptr;
+    if (XR_SUCCEEDED(next_get_instance_proc_addr_(instance_, "xrSuggestInteractionProfileBindings", &function))) {
+        next_suggest_interaction_profile_bindings_ =
+            reinterpret_cast<PFN_xrSuggestInteractionProfileBindings>(function);
+    }
+
+    function = nullptr;
+    if (XR_SUCCEEDED(next_get_instance_proc_addr_(instance_, "xrGetActionStatePose", &function))) {
+        next_get_action_state_pose_ = reinterpret_cast<PFN_xrGetActionStatePose>(function);
     }
 }
 
@@ -1460,6 +1617,16 @@ void OpenXrLayer::ResetSessionState() {
     internal_local_space_ = XR_NULL_HANDLE;
     internal_view_space_ = XR_NULL_HANDLE;
     internal_stage_space_ = XR_NULL_HANDLE;
+    quadviews_action_set_ = XR_NULL_HANDLE;
+    quadviews_eye_gaze_action_ = XR_NULL_HANDLE;
+    quadviews_eye_gaze_space_ = XR_NULL_HANDLE;
+    eye_gaze_interaction_profile_path_ = XR_NULL_PATH;
+    eye_gaze_pose_path_ = XR_NULL_PATH;
+    eye_gaze_resources_ready_ = false;
+    eye_gaze_action_set_attached_ = false;
+    quadviews_smoothed_focus_yaw_radians_ = 0.0;
+    quadviews_smoothed_focus_pitch_radians_ = 0.0;
+    quadviews_last_focus_smoothing_wall_time_.reset();
     active_primary_view_configuration_type_ = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
     active_runtime_view_configuration_type_ = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
     has_active_primary_view_configuration_ = false;
@@ -1475,10 +1642,169 @@ void OpenXrLayer::ResetSessionState() {
 void OpenXrLayer::ResetInstanceState() {
     quad_views_extension_requested_ = false;
     varjo_foveated_rendering_extension_requested_ = false;
+    eye_gaze_extension_enabled_ = false;
 }
 
 bool OpenXrLayer::IsQuadViewsActive() const {
     return resolved_settings_.core.enabled && resolved_settings_.quadviews.enabled;
+}
+
+XrResult OpenXrLayer::CreateEyeGazeResources(XrSession session) {
+    if (!eye_gaze_extension_enabled_ || !next_string_to_path_ || !next_create_action_set_ || !next_create_action_ ||
+        !next_suggest_interaction_profile_bindings_ || !next_create_action_space_) {
+        return XR_ERROR_FEATURE_UNSUPPORTED;
+    }
+
+    XrResult result = next_string_to_path_(
+        instance_, "/interaction_profiles/ext/eye_gaze_interaction", &eye_gaze_interaction_profile_path_);
+    if (XR_FAILED(result)) {
+        return result;
+    }
+    result = next_string_to_path_(instance_, "/user/eyes_ext/input/gaze_ext/pose", &eye_gaze_pose_path_);
+    if (XR_FAILED(result)) {
+        return result;
+    }
+
+    XrActionSetCreateInfo action_set_info{XR_TYPE_ACTION_SET_CREATE_INFO};
+    CopyName(action_set_info.actionSetName, sizeof(action_set_info.actionSetName), "vectorxr_quadviews");
+    CopyName(action_set_info.localizedActionSetName,
+             sizeof(action_set_info.localizedActionSetName),
+             "VectorXR Quadviews");
+    action_set_info.priority = 0;
+    result = next_create_action_set_(instance_, &action_set_info, &quadviews_action_set_);
+    if (XR_FAILED(result)) {
+        return result;
+    }
+
+    XrActionCreateInfo action_info{XR_TYPE_ACTION_CREATE_INFO};
+    CopyName(action_info.actionName, sizeof(action_info.actionName), "eye_gaze");
+    CopyName(action_info.localizedActionName, sizeof(action_info.localizedActionName), "Eye Gaze");
+    action_info.actionType = XR_ACTION_TYPE_POSE_INPUT;
+    result = next_create_action_(quadviews_action_set_, &action_info, &quadviews_eye_gaze_action_);
+    if (XR_FAILED(result)) {
+        return result;
+    }
+
+    const XrActionSuggestedBinding suggested_binding{quadviews_eye_gaze_action_, eye_gaze_pose_path_};
+    XrInteractionProfileSuggestedBinding profile_bindings{XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING};
+    profile_bindings.interactionProfile = eye_gaze_interaction_profile_path_;
+    profile_bindings.countSuggestedBindings = 1;
+    profile_bindings.suggestedBindings = &suggested_binding;
+    result = next_suggest_interaction_profile_bindings_(instance_, &profile_bindings);
+    if (XR_FAILED(result)) {
+        return result;
+    }
+
+    XrActionSpaceCreateInfo action_space_info{XR_TYPE_ACTION_SPACE_CREATE_INFO};
+    action_space_info.action = quadviews_eye_gaze_action_;
+    action_space_info.poseInActionSpace = IdentityPose();
+    result = next_create_action_space_(session, &action_space_info, &quadviews_eye_gaze_space_);
+    if (XR_FAILED(result)) {
+        return result;
+    }
+
+    eye_gaze_resources_ready_ = true;
+    eye_gaze_action_set_attached_ = false;
+    logger_.Info("Created VectorXR eye-gaze action resources for quadviews.");
+    return XR_SUCCESS;
+}
+
+void OpenXrLayer::DestroyEyeGazeResources() {
+    const XrSpace eye_gaze_space = quadviews_eye_gaze_space_;
+    const XrAction eye_gaze_action = quadviews_eye_gaze_action_;
+    const XrActionSet action_set = quadviews_action_set_;
+
+    quadviews_eye_gaze_space_ = XR_NULL_HANDLE;
+    quadviews_eye_gaze_action_ = XR_NULL_HANDLE;
+    quadviews_action_set_ = XR_NULL_HANDLE;
+    eye_gaze_interaction_profile_path_ = XR_NULL_PATH;
+    eye_gaze_pose_path_ = XR_NULL_PATH;
+    eye_gaze_resources_ready_ = false;
+    eye_gaze_action_set_attached_ = false;
+    quadviews_smoothed_focus_yaw_radians_ = 0.0;
+    quadviews_smoothed_focus_pitch_radians_ = 0.0;
+    quadviews_last_focus_smoothing_wall_time_.reset();
+
+    if (eye_gaze_space != XR_NULL_HANDLE && next_destroy_space_) {
+        next_destroy_space_(eye_gaze_space);
+    }
+    if (eye_gaze_action != XR_NULL_HANDLE && next_destroy_action_) {
+        next_destroy_action_(eye_gaze_action);
+    }
+    if (action_set != XR_NULL_HANDLE && next_destroy_action_set_) {
+        next_destroy_action_set_(action_set);
+    }
+}
+
+bool OpenXrLayer::LocateEyeGazeFocusOffsets(XrSession session,
+                                            XrSpace base_space,
+                                            XrTime time,
+                                            const QuadViewsResolvedSettings& settings,
+                                            double* yaw_radians,
+                                            double* pitch_radians) {
+    if (!yaw_radians || !pitch_radians) {
+        return false;
+    }
+
+    *yaw_radians = 0.0;
+    *pitch_radians = 0.0;
+    if (settings.tracking_mode != QuadViewsTrackingMode::Eye || !settings.prefer_eye_tracking ||
+        session != active_session_ || base_space == XR_NULL_HANDLE || !eye_gaze_resources_ready_ ||
+        !eye_gaze_action_set_attached_ || quadviews_eye_gaze_action_ == XR_NULL_HANDLE ||
+        quadviews_eye_gaze_space_ == XR_NULL_HANDLE || !next_get_action_state_pose_ || !next_locate_space_) {
+        return false;
+    }
+
+    XrActionStateGetInfo action_state_info{XR_TYPE_ACTION_STATE_GET_INFO};
+    action_state_info.action = quadviews_eye_gaze_action_;
+    XrActionStatePose action_state{XR_TYPE_ACTION_STATE_POSE};
+    const XrResult state_result = next_get_action_state_pose_(session, &action_state_info, &action_state);
+    if (XR_FAILED(state_result) || !action_state.isActive) {
+        return false;
+    }
+
+    XrSpaceLocation gaze_location{XR_TYPE_SPACE_LOCATION};
+    const XrResult locate_result = next_locate_space_(quadviews_eye_gaze_space_, base_space, time, &gaze_location);
+    if (XR_FAILED(locate_result) ||
+        (gaze_location.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT) == 0) {
+        return false;
+    }
+
+    const ViewOrientation gaze_orientation{
+        gaze_location.pose.orientation.x,
+        gaze_location.pose.orientation.y,
+        gaze_location.pose.orientation.z,
+        gaze_location.pose.orientation.w,
+    };
+    double target_yaw = ExtractYawRadians(gaze_orientation);
+    double target_pitch = ExtractPitchRadians(gaze_orientation);
+    const double deadzone_radians = DegreesToRadians(std::max(0.0, settings.gaze_deadzone_degrees));
+    if (std::abs(target_yaw) < deadzone_radians) {
+        target_yaw = 0.0;
+    }
+    if (std::abs(target_pitch) < deadzone_radians) {
+        target_pitch = 0.0;
+    }
+
+    const auto now = std::chrono::steady_clock::now();
+    double delta_seconds = 0.0;
+    if (quadviews_last_focus_smoothing_wall_time_.has_value()) {
+        delta_seconds = std::chrono::duration<double>(now - *quadviews_last_focus_smoothing_wall_time_).count();
+    }
+    quadviews_last_focus_smoothing_wall_time_ = now;
+    const double blend = ComputeTimeBasedBlend(settings.gaze_smoothing, delta_seconds);
+    quadviews_smoothed_focus_yaw_radians_ += (target_yaw - quadviews_smoothed_focus_yaw_radians_) * blend;
+    quadviews_smoothed_focus_pitch_radians_ += (target_pitch - quadviews_smoothed_focus_pitch_radians_) * blend;
+    if (NearlyZero(quadviews_smoothed_focus_yaw_radians_)) {
+        quadviews_smoothed_focus_yaw_radians_ = 0.0;
+    }
+    if (NearlyZero(quadviews_smoothed_focus_pitch_radians_)) {
+        quadviews_smoothed_focus_pitch_radians_ = 0.0;
+    }
+
+    *yaw_radians = quadviews_smoothed_focus_yaw_radians_;
+    *pitch_radians = quadviews_smoothed_focus_pitch_radians_;
+    return true;
 }
 
 XrResult OpenXrLayer::CreateInternalReferenceSpaces(XrSession session) {
@@ -1709,7 +2035,30 @@ XrResult OpenXrLayer::LocateRuntimeViews(XrSession session,
         return XR_ERROR_SIZE_INSUFFICIENT;
     }
 
-    if (!SynthesizeQuadViewsFromStereo(stereo_views, quadviews_settings, view_capacity_input, view_count_output, views)) {
+    double focus_yaw_radians = 0.0;
+    double focus_pitch_radians = 0.0;
+    {
+        std::scoped_lock lock(mutex_);
+        const bool has_eye_focus = LocateEyeGazeFocusOffsets(session,
+                                                            view_locate_info->space,
+                                                            view_locate_info->displayTime,
+                                                            quadviews_settings,
+                                                            &focus_yaw_radians,
+                                                            &focus_pitch_radians);
+        if (!has_eye_focus) {
+            quadviews_smoothed_focus_yaw_radians_ = 0.0;
+            quadviews_smoothed_focus_pitch_radians_ = 0.0;
+            quadviews_last_focus_smoothing_wall_time_.reset();
+        }
+    }
+
+    if (!SynthesizeQuadViewsFromStereo(stereo_views,
+                                       quadviews_settings,
+                                       focus_yaw_radians,
+                                       focus_pitch_radians,
+                                       view_capacity_input,
+                                       view_count_output,
+                                       views)) {
         return XR_ERROR_RUNTIME_FAILURE;
     }
     if (synthesized_quad_views) {
@@ -1720,6 +2069,8 @@ XrResult OpenXrLayer::LocateRuntimeViews(XrSession session,
 
 bool OpenXrLayer::SynthesizeQuadViewsFromStereo(std::span<const XrView> stereo_views,
                                                 const QuadViewsResolvedSettings& quadviews_settings,
+                                                double focus_yaw_radians,
+                                                double focus_pitch_radians,
                                                 uint32_t view_capacity_input,
                                                 uint32_t* view_count_output,
                                                 XrView* views) const {
@@ -1733,8 +2084,8 @@ bool OpenXrLayer::SynthesizeQuadViewsFromStereo(std::span<const XrView> stereo_v
     views[2] = stereo_views[0];
     views[3] = stereo_views[1];
 
-    views[2].fov = BuildFocusFov(stereo_views[0].fov, quadviews_settings);
-    views[3].fov = BuildFocusFov(stereo_views[1].fov, quadviews_settings);
+    views[2].fov = BuildFocusFov(stereo_views[0].fov, quadviews_settings, focus_yaw_radians, focus_pitch_radians);
+    views[3].fov = BuildFocusFov(stereo_views[1].fov, quadviews_settings, focus_yaw_radians, focus_pitch_radians);
     return true;
 }
 

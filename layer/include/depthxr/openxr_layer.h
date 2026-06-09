@@ -25,12 +25,16 @@ class OpenXrLayer {
     void SetLayerDirectory(std::filesystem::path dll_directory);
     void SetNextProcAddr(PFN_xrGetInstanceProcAddr next_get_instance_proc_addr);
 
-    XrResult OnInstanceCreated(const XrInstanceCreateInfo* create_info, XrInstance instance);
+    XrResult OnInstanceCreated(const XrInstanceCreateInfo* create_info,
+                               XrInstance instance,
+                               bool eye_gaze_extension_enabled);
     XrResult GetInstanceProcAddr(XrInstance instance, const char* name, PFN_xrVoidFunction* function);
     XrResult DestroyInstance(XrInstance instance);
     XrResult CreateSession(XrInstance instance, const XrSessionCreateInfo* create_info, XrSession* session);
     XrResult DestroySession(XrSession session);
     XrResult BeginSession(XrSession session, const XrSessionBeginInfo* begin_info);
+    XrResult AttachSessionActionSets(XrSession session, const XrSessionActionSetsAttachInfo* attach_info);
+    XrResult SyncActions(XrSession session, const XrActionsSyncInfo* sync_info);
     XrResult EndFrame(XrSession session, const XrFrameEndInfo* frame_end_info);
     XrResult GetSystemProperties(XrInstance instance, XrSystemId system_id, XrSystemProperties* properties);
     XrResult EnumerateEnvironmentBlendModes(XrInstance instance,
@@ -80,6 +84,14 @@ class OpenXrLayer {
     void ResetInstanceState();
     XrResult CreateInternalReferenceSpaces(XrSession session);
     void DestroyInternalReferenceSpaces();
+    XrResult CreateEyeGazeResources(XrSession session);
+    void DestroyEyeGazeResources();
+    bool LocateEyeGazeFocusOffsets(XrSession session,
+                                   XrSpace base_space,
+                                   XrTime time,
+                                   const QuadViewsResolvedSettings& settings,
+                                   double* yaw_radians,
+                                   double* pitch_radians);
     bool EnsureEyeOffsets(XrSession session,
                           XrViewConfigurationType view_configuration_type,
                           XrTime display_time,
@@ -97,6 +109,8 @@ class OpenXrLayer {
                                 bool* synthesized_quad_views);
     bool SynthesizeQuadViewsFromStereo(std::span<const XrView> stereo_views,
                                        const QuadViewsResolvedSettings& quadviews_settings,
+                                       double focus_yaw_radians,
+                                       double focus_pitch_radians,
                                        uint32_t view_capacity_input,
                                        uint32_t* view_count_output,
                                        XrView* views) const;
@@ -139,10 +153,21 @@ class OpenXrLayer {
     bool depthxr_toggle_binding_was_down_{false};
     bool quad_views_extension_requested_{false};
     bool varjo_foveated_rendering_extension_requested_{false};
+    bool eye_gaze_extension_enabled_{false};
     XrSession active_session_{XR_NULL_HANDLE};
     XrSpace internal_local_space_{XR_NULL_HANDLE};
     XrSpace internal_view_space_{XR_NULL_HANDLE};
     XrSpace internal_stage_space_{XR_NULL_HANDLE};
+    XrActionSet quadviews_action_set_{XR_NULL_HANDLE};
+    XrAction quadviews_eye_gaze_action_{XR_NULL_HANDLE};
+    XrSpace quadviews_eye_gaze_space_{XR_NULL_HANDLE};
+    XrPath eye_gaze_interaction_profile_path_{XR_NULL_PATH};
+    XrPath eye_gaze_pose_path_{XR_NULL_PATH};
+    bool eye_gaze_resources_ready_{false};
+    bool eye_gaze_action_set_attached_{false};
+    double quadviews_smoothed_focus_yaw_radians_{0.0};
+    double quadviews_smoothed_focus_pitch_radians_{0.0};
+    std::optional<std::chrono::steady_clock::time_point> quadviews_last_focus_smoothing_wall_time_;
     XrViewConfigurationType active_primary_view_configuration_type_{XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO};
     XrViewConfigurationType active_runtime_view_configuration_type_{XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO};
     bool has_active_primary_view_configuration_{false};
@@ -159,6 +184,8 @@ class OpenXrLayer {
     PFN_xrCreateSession next_create_session_{nullptr};
     PFN_xrDestroySession next_destroy_session_{nullptr};
     PFN_xrBeginSession next_begin_session_{nullptr};
+    PFN_xrAttachSessionActionSets next_attach_session_action_sets_{nullptr};
+    PFN_xrSyncActions next_sync_actions_{nullptr};
     PFN_xrEndFrame next_end_frame_{nullptr};
     PFN_xrGetSystemProperties next_get_system_properties_{nullptr};
     PFN_xrEnumerateEnvironmentBlendModes next_enumerate_environment_blend_modes_{nullptr};
@@ -166,9 +193,17 @@ class OpenXrLayer {
     PFN_xrGetViewConfigurationProperties next_get_view_configuration_properties_{nullptr};
     PFN_xrEnumerateViewConfigurationViews next_enumerate_view_configuration_views_{nullptr};
     PFN_xrCreateReferenceSpace next_create_reference_space_{nullptr};
+    PFN_xrCreateActionSpace next_create_action_space_{nullptr};
     PFN_xrDestroySpace next_destroy_space_{nullptr};
     PFN_xrLocateSpace next_locate_space_{nullptr};
     PFN_xrLocateViews next_locate_views_{nullptr};
+    PFN_xrStringToPath next_string_to_path_{nullptr};
+    PFN_xrCreateActionSet next_create_action_set_{nullptr};
+    PFN_xrDestroyActionSet next_destroy_action_set_{nullptr};
+    PFN_xrCreateAction next_create_action_{nullptr};
+    PFN_xrDestroyAction next_destroy_action_{nullptr};
+    PFN_xrSuggestInteractionProfileBindings next_suggest_interaction_profile_bindings_{nullptr};
+    PFN_xrGetActionStatePose next_get_action_state_pose_{nullptr};
     XrInstance instance_{XR_NULL_HANDLE};
 };
 
