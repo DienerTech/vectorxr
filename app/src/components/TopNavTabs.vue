@@ -18,7 +18,12 @@ defineEmits<{
 }>()
 
 const primaryTabs = computed(() => props.tabs.filter((tab) => tab.id === 'core' || tab.id === 'registry' || tab.id === 'layers' || tab.id === 'about'))
-const moduleTabs = computed(() => props.tabs.filter((tab) => tab.id === 'depthxr' || tab.id === 'pivotxr' || tab.id === 'quadviews'))
+const moduleTabs = computed(() => {
+  const moduleOrder: AppTab[] = ['quadviews', 'pivotxr', 'depthxr']
+  return moduleOrder
+    .map((id) => props.tabs.find((tab) => tab.id === id))
+    .filter((tab): tab is NonNullable<typeof tab> => tab !== undefined)
+})
 
 function statusChipClass(tab: { id: AppTab; status: string }): string {
   if (tab.id === 'core') {

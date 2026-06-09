@@ -97,7 +97,7 @@ Proposed per-frame order:
 For the first headset pass, enable Quadviews for one known app profile and check the VectorXR log for:
 
 - `Enabled XR_EXT_eye_gaze_interaction downstream` when the runtime exposes eye gaze.
-- `Quadviews view configuration capabilities` showing `runtimeStereo=1` and `synthesizeQuad=1` on stereo-only runtimes.
+- `Quadviews view configuration capabilities` showing `runtimeStereo=1`, `synthesizeQuad=1`, `preferQuadFirst=1`, and `exposedTypes=[primary_stereo_with_foveated_inset,...]` on stereo-only runtimes.
 - `Session began with view configuration: primary_stereo_with_foveated_inset (runtime mapped to primary_stereo)`.
 - `Swapchain created` and `Swapchain imagesEnumerated` entries with `quadviewsSession=1`.
 - `LocateViews` diagnostics with `viewConfig=primary_stereo_with_foveated_inset`.

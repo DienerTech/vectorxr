@@ -63,6 +63,7 @@ function trackingModeLabel(settings: QuadViewsSettings) {
         <label class="pill-toggle inline-flex items-center gap-3 rounded-full px-4 py-2 text-sm font-medium">
           <input v-model="config.modules.quadviews.enabled" class="h-4 w-4 accent-depthxr-copper" type="checkbox" />
           Quadviews Enabled
+          <span title="Turns VectorXR's native quadviews rendering path on or off for OpenXR apps." class="cursor-help select-none text-xs text-muted">ⓘ</span>
         </label>
       </div>
 
@@ -73,6 +74,7 @@ function trackingModeLabel(settings: QuadViewsSettings) {
           <span class="pill-toggle inline-flex items-center gap-3 rounded-full px-4 py-2 text-sm font-medium">
             <input v-model="config.modules.quadviews.preferEyeTracking" class="h-4 w-4 accent-depthxr-copper" type="checkbox" />
             {{ config.modules.quadviews.preferEyeTracking ? 'Enabled' : 'Disabled' }}
+            <span title="Uses eye gaze for the sharp focus area when the headset and runtime support it." class="cursor-help select-none text-xs text-muted">ⓘ</span>
           </span>
         </label>
         <div class="rounded-[1rem] border p-4 surface-panel-soft">
@@ -89,19 +91,31 @@ function trackingModeLabel(settings: QuadViewsSettings) {
           <p class="eyebrow text-xs uppercase tracking-[0.18em]">Focus Window</p>
           <div class="mt-3 grid gap-3 sm:grid-cols-2">
             <label class="block">
-              <span class="mb-1.5 block text-sm font-medium">Horizontal FOV</span>
+              <span class="mb-1.5 flex items-center gap-1.5 text-sm font-medium">
+                Horizontal FOV
+                <span title="Width of the high-detail focus area in degrees. Larger values look sharper across more of the view but cost more GPU time." class="cursor-help select-none text-xs text-muted">ⓘ</span>
+              </span>
               <input v-model.number="config.modules.quadviews.defaults.focusHorizontalFovDegrees" class="app-input w-full rounded-[0.75rem] px-4 py-2.5" min="10" max="90" step="1" type="number" />
             </label>
             <label class="block">
-              <span class="mb-1.5 block text-sm font-medium">Vertical FOV</span>
+              <span class="mb-1.5 flex items-center gap-1.5 text-sm font-medium">
+                Vertical FOV
+                <span title="Height of the high-detail focus area in degrees. Larger values are more forgiving but reduce the performance gain." class="cursor-help select-none text-xs text-muted">ⓘ</span>
+              </span>
               <input v-model.number="config.modules.quadviews.defaults.focusVerticalFovDegrees" class="app-input w-full rounded-[0.75rem] px-4 py-2.5" min="10" max="90" step="1" type="number" />
             </label>
             <label class="block">
-              <span class="mb-1.5 block text-sm font-medium">Horizontal Offset</span>
+              <span class="mb-1.5 flex items-center gap-1.5 text-sm font-medium">
+                Horizontal Offset
+                <span title="Moves the focus area left or right in degrees. Use this only if the sharp region feels off-center." class="cursor-help select-none text-xs text-muted">ⓘ</span>
+              </span>
               <input v-model.number="config.modules.quadviews.defaults.horizontalOffsetDegrees" class="app-input w-full rounded-[0.75rem] px-4 py-2.5" min="-45" max="45" step="0.5" type="number" />
             </label>
             <label class="block">
-              <span class="mb-1.5 block text-sm font-medium">Vertical Offset</span>
+              <span class="mb-1.5 flex items-center gap-1.5 text-sm font-medium">
+                Vertical Offset
+                <span title="Moves the focus area up or down in degrees. Helpful if a headset's gaze center feels vertically biased." class="cursor-help select-none text-xs text-muted">ⓘ</span>
+              </span>
               <input v-model.number="config.modules.quadviews.defaults.verticalOffsetDegrees" class="app-input w-full rounded-[0.75rem] px-4 py-2.5" min="-45" max="45" step="0.5" type="number" />
             </label>
           </div>
@@ -111,11 +125,17 @@ function trackingModeLabel(settings: QuadViewsSettings) {
           <p class="eyebrow text-xs uppercase tracking-[0.18em]">Resolution</p>
           <div class="mt-3 grid gap-3 sm:grid-cols-2">
             <label class="block">
-              <span class="mb-1.5 block text-sm font-medium">Focus Scale</span>
+              <span class="mb-1.5 flex items-center gap-1.5 text-sm font-medium">
+                Focus Scale
+                <span title="Resolution scale for the high-detail focus views. Higher values sharpen the center but increase GPU load." class="cursor-help select-none text-xs text-muted">ⓘ</span>
+              </span>
               <input v-model.number="config.modules.quadviews.defaults.focusScale" class="app-input w-full rounded-[0.75rem] px-4 py-2.5" min="0.5" max="2" step="0.05" type="number" />
             </label>
             <label class="block">
-              <span class="mb-1.5 block text-sm font-medium">Peripheral Scale</span>
+              <span class="mb-1.5 flex items-center gap-1.5 text-sm font-medium">
+                Peripheral Scale
+                <span title="Resolution scale for the outer peripheral views. Lower values improve frames but make the edges softer." class="cursor-help select-none text-xs text-muted">ⓘ</span>
+              </span>
               <input v-model.number="config.modules.quadviews.defaults.peripheralScale" class="app-input w-full rounded-[0.75rem] px-4 py-2.5" min="0.1" max="1.5" step="0.05" type="number" />
             </label>
           </div>
@@ -125,18 +145,27 @@ function trackingModeLabel(settings: QuadViewsSettings) {
           <p class="eyebrow text-xs uppercase tracking-[0.18em]">Tracking</p>
           <div class="mt-3 grid gap-3">
             <label class="block">
-              <span class="mb-1.5 block text-sm font-medium">Mode</span>
+              <span class="mb-1.5 flex items-center gap-1.5 text-sm font-medium">
+                Mode
+                <span title="Chooses whether the focus area follows head direction or eye gaze when eye tracking is available." class="cursor-help select-none text-xs text-muted">ⓘ</span>
+              </span>
               <select v-model="config.modules.quadviews.defaults.trackingMode" class="app-input w-full rounded-[0.75rem] px-4 py-2.5">
                 <option value="head">Head tracked</option>
                 <option value="eye">Eye tracked</option>
               </select>
             </label>
             <label class="block">
-              <span class="mb-1.5 block text-sm font-medium">Smoothing</span>
+              <span class="mb-1.5 flex items-center gap-1.5 text-sm font-medium">
+                Smoothing
+                <span title="Softens focus-area movement. 0 is instant; higher values reduce jitter but add lag." class="cursor-help select-none text-xs text-muted">ⓘ</span>
+              </span>
               <input v-model.number="config.modules.quadviews.defaults.gazeSmoothing" class="app-input w-full rounded-[0.75rem] px-4 py-2.5" min="0" max="1" step="0.01" type="number" />
             </label>
             <label class="block">
-              <span class="mb-1.5 block text-sm font-medium">Deadzone</span>
+              <span class="mb-1.5 flex items-center gap-1.5 text-sm font-medium">
+                Deadzone
+                <span title="Small gaze movements ignored before the focus area moves. Useful for reducing shimmer near center." class="cursor-help select-none text-xs text-muted">ⓘ</span>
+              </span>
               <input v-model.number="config.modules.quadviews.defaults.gazeDeadzoneDegrees" class="app-input w-full rounded-[0.75rem] px-4 py-2.5" min="0" max="10" step="0.1" type="number" />
             </label>
           </div>
@@ -165,7 +194,7 @@ function trackingModeLabel(settings: QuadViewsSettings) {
           <div class="flex flex-wrap items-center gap-2">
             <p class="eyebrow text-xs uppercase tracking-[0.24em]">Profile {{ index + 1 }}</p>
             <h3 v-if="editingProfileName !== index" class="text-xl font-semibold tracking-tight">{{ profile.name }}</h3>
-            <input v-else v-model="profile.name" class="app-input w-full max-w-sm rounded-[0.75rem] px-3 py-2 text-xl font-semibold tracking-tight" type="text" @blur="finishProfileNameEdit" @keydown.enter="finishProfileNameEdit" />
+            <input v-else v-model="profile.name" class="app-input w-full max-w-sm rounded-[0.75rem] px-3 py-2 text-xl font-semibold tracking-tight" title="Friendly name for this Quadviews profile." type="text" @blur="finishProfileNameEdit" @keydown.enter="finishProfileNameEdit" />
             <button v-if="editingProfileName !== index" class="button-secondary inline-flex h-8 w-8 items-center justify-center rounded-[0.5rem]" type="button" aria-label="Edit profile name" @click="editingProfileName = index">
               <svg aria-hidden="true" class="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
                 <path d="M13.92 2.87a2.2 2.2 0 0 1 3.11 3.11l-.72.72-3.11-3.11.72-.72Zm-1.7 1.7 3.11 3.11-8.7 8.7-3.44.33.33-3.44 8.7-8.7Z" />
@@ -175,6 +204,7 @@ function trackingModeLabel(settings: QuadViewsSettings) {
             <label class="pill-toggle inline-flex items-center gap-2 rounded-full px-3 py-1.5 text-xs font-medium">
               <input v-model="profile.enabled" class="h-4 w-4 accent-depthxr-copper" type="checkbox" />
               {{ profile.enabled ? 'Profile Enabled' : 'Profile Disabled' }}
+              <span title="When enabled, this profile overrides the default Quadviews settings for its assigned applications." class="cursor-help select-none text-xs text-muted">ⓘ</span>
             </label>
           </div>
           <button class="button-secondary rounded-[0.75rem] px-4 py-2 text-sm font-medium" type="button" @click="$emit('removeQuadViewsProfile', index)">
@@ -190,11 +220,14 @@ function trackingModeLabel(settings: QuadViewsSettings) {
         </div>
 
         <label class="block">
-          <span class="mb-1.5 block text-sm font-medium">Applications</span>
+          <span class="mb-1.5 flex items-center gap-1.5 text-sm font-medium">
+            Applications
+            <span title="Choose which registered applications should use this Quadviews profile. The first enabled matching profile wins." class="cursor-help select-none text-xs text-muted">ⓘ</span>
+          </span>
           <div class="overflow-x-auto rounded-[0.75rem] border p-3 surface-panel-strong">
             <div class="flex min-w-max gap-3">
               <label v-for="application in applications" :key="application.id" class="flex min-w-[13rem] max-w-[16rem] items-start gap-3 rounded-[0.65rem] border px-3 py-3 text-sm surface-panel-soft">
-                <input v-model="profile.applicationIds" class="mt-0.5 h-4 w-4 accent-depthxr-copper" type="checkbox" :value="application.id" @change="$emit('syncQuadViewsProfileName', index)" />
+                <input v-model="profile.applicationIds" class="mt-0.5 h-4 w-4 accent-depthxr-copper" type="checkbox" :value="application.id" title="Assign this application to the current Quadviews profile." @change="$emit('syncQuadViewsProfileName', index)" />
                 <span>
                   <span class="block font-medium">{{ application.name }}</span>
                   <span class="block font-mono text-xs text-muted">{{ application.match.exe }}</span>
@@ -207,22 +240,34 @@ function trackingModeLabel(settings: QuadViewsSettings) {
 
         <div class="mt-4 grid gap-3 lg:grid-cols-4">
           <label class="block">
-            <span class="mb-1.5 block text-sm font-medium">Mode</span>
+            <span class="mb-1.5 flex items-center gap-1.5 text-sm font-medium">
+              Mode
+              <span title="Chooses whether this application's focus area follows head direction or eye gaze." class="cursor-help select-none text-xs text-muted">ⓘ</span>
+            </span>
             <select v-model="profile.settings.trackingMode" class="app-input w-full rounded-[0.75rem] px-4 py-2.5">
               <option value="head">Head tracked</option>
               <option value="eye">Eye tracked</option>
             </select>
           </label>
           <label class="block">
-            <span class="mb-1.5 block text-sm font-medium">Focus FOV H</span>
+            <span class="mb-1.5 flex items-center gap-1.5 text-sm font-medium">
+              Focus FOV H
+              <span title="Width of this application's high-detail focus area in degrees." class="cursor-help select-none text-xs text-muted">ⓘ</span>
+            </span>
             <input v-model.number="profile.settings.focusHorizontalFovDegrees" class="app-input w-full rounded-[0.75rem] px-4 py-2.5" min="10" max="90" step="1" type="number" />
           </label>
           <label class="block">
-            <span class="mb-1.5 block text-sm font-medium">Focus FOV V</span>
+            <span class="mb-1.5 flex items-center gap-1.5 text-sm font-medium">
+              Focus FOV V
+              <span title="Height of this application's high-detail focus area in degrees." class="cursor-help select-none text-xs text-muted">ⓘ</span>
+            </span>
             <input v-model.number="profile.settings.focusVerticalFovDegrees" class="app-input w-full rounded-[0.75rem] px-4 py-2.5" min="10" max="90" step="1" type="number" />
           </label>
           <label class="block">
-            <span class="mb-1.5 block text-sm font-medium">Peripheral Scale</span>
+            <span class="mb-1.5 flex items-center gap-1.5 text-sm font-medium">
+              Peripheral Scale
+              <span title="Resolution scale for this application's outer peripheral views. Lower values can improve frame rate." class="cursor-help select-none text-xs text-muted">ⓘ</span>
+            </span>
             <input v-model.number="profile.settings.peripheralScale" class="app-input w-full rounded-[0.75rem] px-4 py-2.5" min="0.1" max="1.5" step="0.05" type="number" />
           </label>
         </div>

@@ -79,10 +79,10 @@ const tabs = computed(() => [
     status: latestPatch.version,
   },
   {
-    id: 'depthxr' as const,
-    label: 'Depth',
-    subtitle: 'Stereo depth tuning - see the world in a new way!',
-    status: store.state.config.modules.depthxr.enabled ? 'Enabled' : 'Disabled',
+    id: 'quadviews' as const,
+    label: 'Quadviews',
+    subtitle: 'Dynamic foveated rendering control',
+    status: store.state.config.modules.quadviews.enabled ? 'Enabled' : 'Disabled',
   },
   {
     id: 'pivotxr' as const,
@@ -91,10 +91,10 @@ const tabs = computed(() => [
     status: store.state.config.modules.pivotxr.enabled ? 'Enabled' : 'Disabled',
   },
   {
-    id: 'quadviews' as const,
-    label: 'Quadviews',
-    subtitle: 'Dynamic foveated rendering control',
-    status: store.state.config.modules.quadviews.enabled ? 'Enabled' : 'Disabled',
+    id: 'depthxr' as const,
+    label: 'Depth',
+    subtitle: 'Stereo depth tuning - see the world in a new way!',
+    status: store.state.config.modules.depthxr.enabled ? 'Enabled' : 'Disabled',
   },
 ])
 

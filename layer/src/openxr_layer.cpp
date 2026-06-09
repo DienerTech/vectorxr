@@ -337,6 +337,17 @@ const char* ToString(XrViewConfigurationType type) {
     }
 }
 
+std::string FormatViewConfigurationTypes(std::span<const XrViewConfigurationType> types) {
+    std::ostringstream stream;
+    for (size_t i = 0; i < types.size(); ++i) {
+        if (i > 0) {
+            stream << ",";
+        }
+        stream << ToString(types[i]);
+    }
+    return stream.str();
+}
+
 std::string FormatHandle(XrSwapchain swapchain) {
     std::uint64_t value = 0;
     static_assert(sizeof(swapchain) <= sizeof(value));
@@ -880,23 +891,47 @@ XrResult OpenXrLayer::EnumerateViewConfigurations(XrInstance instance,
 
     std::vector<XrViewConfigurationType> exposed_types = runtime_types;
     const bool runtime_has_quad =
-        std::find(exposed_types.begin(),
-                  exposed_types.end(),
-                  XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO_WITH_FOVEATED_INSET) != exposed_types.end();
+        std::find(runtime_types.begin(),
+                  runtime_types.end(),
+                  XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO_WITH_FOVEATED_INSET) != runtime_types.end();
     const bool runtime_has_stereo =
-        std::find(exposed_types.begin(), exposed_types.end(), XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO) != exposed_types.end();
+        std::find(runtime_types.begin(), runtime_types.end(), XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO) != runtime_types.end();
     const bool quadviews_active = IsQuadViewsActive();
+    const bool app_requested_quadviews =
+        quad_views_extension_requested_ || varjo_foveated_rendering_extension_requested_;
+    const bool synthesize_quad = quadviews_active && runtime_has_stereo && !runtime_has_quad;
+    const bool prefer_quad_first = quadviews_active && app_requested_quadviews;
+
+    if (synthesize_quad) {
+        if (prefer_quad_first) {
+            exposed_types.insert(exposed_types.begin(), XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO_WITH_FOVEATED_INSET);
+        } else {
+            exposed_types.push_back(XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO_WITH_FOVEATED_INSET);
+        }
+    }
+
+    if (quadviews_active && runtime_has_quad && prefer_quad_first) {
+        const auto quad_it = std::find(exposed_types.begin(),
+                                       exposed_types.end(),
+                                       XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO_WITH_FOVEATED_INSET);
+        if (quad_it != exposed_types.end() && quad_it != exposed_types.begin()) {
+            const XrViewConfigurationType quad_type = *quad_it;
+            exposed_types.erase(quad_it);
+            exposed_types.insert(exposed_types.begin(), quad_type);
+        }
+    }
+
     if (quadviews_active && !has_logged_quadviews_view_configuration_capabilities_) {
         std::ostringstream stream;
-        stream << "Quadviews view configuration capabilities: runtimeStereo=" << runtime_has_stereo
+        stream << "Quadviews view configuration capabilities: appRequestedQuadviews=" << app_requested_quadviews
+               << ", runtimeStereo=" << runtime_has_stereo
                << ", runtimeQuad=" << runtime_has_quad
-               << ", synthesizeQuad=" << (runtime_has_stereo && !runtime_has_quad)
-               << ", runtimeTypeCount=" << runtime_types.size();
+               << ", synthesizeQuad=" << synthesize_quad
+               << ", preferQuadFirst=" << prefer_quad_first
+               << ", runtimeTypes=[" << FormatViewConfigurationTypes(runtime_types) << "]"
+               << ", exposedTypes=[" << FormatViewConfigurationTypes(exposed_types) << "]";
         logger_.Info(stream.str());
         has_logged_quadviews_view_configuration_capabilities_ = true;
-    }
-    if (quadviews_active && runtime_has_stereo && !runtime_has_quad) {
-        exposed_types.push_back(XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO_WITH_FOVEATED_INSET);
     }
 
     *view_configuration_type_count_output = static_cast<uint32_t>(exposed_types.size());
