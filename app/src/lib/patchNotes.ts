@@ -8,6 +8,17 @@ export interface PatchNoteEntry {
 
 export const patchNotes: PatchNoteEntry[] = [
   {
+    version: '0.7.1',
+    date: '2026-06-09',
+    title: 'UI polish',
+    summary: 'VectorXR now has cleaner About and Health Check layouts with more consistent spacing and clearer support visibility.',
+    items: [
+      'Made the Ko-fi support link more visible and moved it alongside the app description.',
+      'Aligned the About tab cards so the page spacing reads more cleanly.',
+      'Improved Health Check card alignment, status chip sizing, and footer composition.',
+    ],
+  },
+  {
     version: '0.7.0',
     date: '2026-05-03',
     title: 'Release readiness',
