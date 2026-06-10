@@ -114,7 +114,10 @@ class OpenXrLayer {
         bool images_enumerated{false};
         bool has_last_acquired_image_index{false};
         bool quadviews_session{false};
+        bool d3d11_shader_resources_attempted{false};
+        bool d3d11_shader_resources_available{false};
         std::vector<ID3D11Texture2D*> d3d11_images;
+        std::vector<ID3D11ShaderResourceView*> d3d11_shader_resources;
     };
 
     struct QuadViewsCompositionTarget {
@@ -124,6 +127,7 @@ class OpenXrLayer {
         int64_t format{0};
         uint32_t image_count{0};
         std::vector<ID3D11Texture2D*> d3d11_images;
+        std::vector<ID3D11RenderTargetView*> image_render_target_views;
         ID3D11Texture2D* render_texture{nullptr};
         ID3D11RenderTargetView* render_target_view{nullptr};
     };
@@ -274,6 +278,8 @@ class OpenXrLayer {
     bool has_logged_quad_view_short_count_{false};
     bool has_logged_pivotxr_spike_mode_{false};
     bool has_logged_quadviews_view_configuration_capabilities_{false};
+    uint32_t cached_quadviews_stereo_recommended_width_{0};
+    uint32_t cached_quadviews_stereo_recommended_height_{0};
     std::unordered_set<XrSpace> tracked_view_spaces_;
     std::unordered_set<XrSpace> tracked_local_spaces_;
     std::unordered_set<XrSpace> tracked_stage_spaces_;
