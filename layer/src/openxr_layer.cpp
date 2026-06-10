@@ -71,6 +71,19 @@ uint32_t ScaleDimension(uint32_t value, double scale, uint32_t max_value) {
     return std::max<uint32_t>(1, rounded);
 }
 
+double QuadViewsFocusWidthScale(const QuadViewsResolvedSettings& settings) {
+    return settings.focus_scale * Clamp(settings.focus_horizontal_size_percent, 1.0, 100.0) / 100.0;
+}
+
+double QuadViewsFocusHeightScale(const QuadViewsResolvedSettings& settings) {
+    return settings.focus_scale * Clamp(settings.focus_vertical_size_percent, 1.0, 100.0) / 100.0;
+}
+
+uint32_t EstimateFullResolutionDimension(uint32_t rendered_dimension, double render_scale) {
+    const double scale = std::max(0.01, render_scale);
+    return std::max<uint32_t>(1, static_cast<uint32_t>(std::round(static_cast<double>(rendered_dimension) / scale)));
+}
+
 void SetFoveatedViewActive(XrViewConfigurationView& view, XrBool32 active) {
     void* foveated = FindMutableStructInChain(view.next, XR_TYPE_FOVEATED_VIEW_CONFIGURATION_VIEW_VARJO);
     if (!foveated) {
@@ -1235,6 +1248,9 @@ XrResult OpenXrLayer::EnumerateViewConfigurationViews(XrInstance instance,
         return XR_ERROR_SIZE_INSUFFICIENT;
     }
 
+    const double focus_width_scale = QuadViewsFocusWidthScale(resolved_settings_.quadviews);
+    const double focus_height_scale = QuadViewsFocusHeightScale(resolved_settings_.quadviews);
+
     for (uint32_t i = 0; i < 2; ++i) {
         views[i] = stereo_views[i];
         views[i].recommendedImageRectWidth = ScaleDimension(stereo_views[i].recommendedImageRectWidth,
@@ -1249,13 +1265,28 @@ XrResult OpenXrLayer::EnumerateViewConfigurationViews(XrInstance instance,
     for (uint32_t i = 0; i < 2; ++i) {
         views[i + 2] = stereo_views[i];
         views[i + 2].recommendedImageRectWidth = ScaleDimension(stereo_views[i].recommendedImageRectWidth,
-                                                                resolved_settings_.quadviews.focus_scale,
+                                                                focus_width_scale,
                                                                 stereo_views[i].maxImageRectWidth);
         views[i + 2].recommendedImageRectHeight = ScaleDimension(stereo_views[i].recommendedImageRectHeight,
-                                                                 resolved_settings_.quadviews.focus_scale,
+                                                                 focus_height_scale,
                                                                  stereo_views[i].maxImageRectHeight);
         SetFoveatedViewActive(views[i + 2], XR_TRUE);
     }
+
+    const double estimated_pixel_budget =
+        resolved_settings_.quadviews.peripheral_scale * resolved_settings_.quadviews.peripheral_scale +
+        focus_width_scale * focus_height_scale;
+    logger_.Info("Quadviews synthesized view sizes: stereoRecommended=" +
+                 std::to_string(stereo_views[0].recommendedImageRectWidth) + "x" +
+                 std::to_string(stereo_views[0].recommendedImageRectHeight) +
+                 ", peripheralRecommended=" + std::to_string(views[0].recommendedImageRectWidth) + "x" +
+                 std::to_string(views[0].recommendedImageRectHeight) +
+                 ", focusRecommended=" + std::to_string(views[2].recommendedImageRectWidth) + "x" +
+                 std::to_string(views[2].recommendedImageRectHeight) +
+                 ", focusScaleEffective=(" + FormatDiagnosticDouble(focus_width_scale) + ", " +
+                 FormatDiagnosticDouble(focus_height_scale) + ")" +
+                 ", estimatedPerEyePixelBudget=" + FormatDiagnosticDouble(estimated_pixel_budget * 100.0) +
+                 "% of stereo");
 
     return XR_SUCCESS;
 }
@@ -1647,8 +1678,21 @@ bool OpenXrLayer::ComposeQuadViewsD3D11(const XrCompositionLayerProjection* sour
         swapchains[i] = &it->second;
     }
 
-    const uint32_t output_width = std::max<uint32_t>(swapchains[2]->width, swapchains[3]->width);
-    const uint32_t output_height = std::max<uint32_t>(swapchains[2]->height, swapchains[3]->height);
+    const double peripheral_scale = resolved_settings_.quadviews.peripheral_scale;
+    const double focus_width_scale = QuadViewsFocusWidthScale(resolved_settings_.quadviews);
+    const double focus_height_scale = QuadViewsFocusHeightScale(resolved_settings_.quadviews);
+    const uint32_t output_width = std::max({
+        EstimateFullResolutionDimension(swapchains[0]->width, peripheral_scale),
+        EstimateFullResolutionDimension(swapchains[1]->width, peripheral_scale),
+        EstimateFullResolutionDimension(swapchains[2]->width, focus_width_scale),
+        EstimateFullResolutionDimension(swapchains[3]->width, focus_width_scale),
+    });
+    const uint32_t output_height = std::max({
+        EstimateFullResolutionDimension(swapchains[0]->height, peripheral_scale),
+        EstimateFullResolutionDimension(swapchains[1]->height, peripheral_scale),
+        EstimateFullResolutionDimension(swapchains[2]->height, focus_height_scale),
+        EstimateFullResolutionDimension(swapchains[3]->height, focus_height_scale),
+    });
     const int64_t output_format = swapchains[2]->format;
     if (!EnsureD3D11QuadViewsCompositor(source_layer, output_width, output_height, output_format)) {
         return false;
