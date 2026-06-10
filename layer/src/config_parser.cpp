@@ -1084,10 +1084,12 @@ bool ParsePivotModule(const JsonValue::Object& object, PivotXrModuleConfig& out,
 bool ParseQuadViewsSettings(const JsonValue::Object& object, QuadViewsSettings& out, std::string& error) {
     static const std::unordered_set<std::string> allowed = {
         "trackingMode",
-        "focusHorizontalFovDegrees",
-        "focusVerticalFovDegrees",
+        "focusHorizontalSizePercent",
+        "focusVerticalSizePercent",
         "focusScale",
         "peripheralScale",
+        "foveateSharpness",
+        "transitionThicknessPercent",
         "horizontalOffsetDegrees",
         "verticalOffsetDegrees",
         "gazeSmoothing",
@@ -1099,20 +1101,24 @@ bool ParseQuadViewsSettings(const JsonValue::Object& object, QuadViewsSettings& 
     }
 
     std::optional<QuadViewsTrackingMode> tracking_mode;
-    std::optional<double> focus_horizontal_fov_degrees;
-    std::optional<double> focus_vertical_fov_degrees;
+    std::optional<double> focus_horizontal_size_percent;
+    std::optional<double> focus_vertical_size_percent;
     std::optional<double> focus_scale;
     std::optional<double> peripheral_scale;
+    std::optional<double> foveate_sharpness;
+    std::optional<double> transition_thickness_percent;
     std::optional<double> horizontal_offset_degrees;
     std::optional<double> vertical_offset_degrees;
     std::optional<double> gaze_smoothing;
     std::optional<double> gaze_deadzone_degrees;
 
     if (!ReadOptionalQuadViewsTrackingMode(object, "trackingMode", tracking_mode, error) ||
-        !ReadOptionalNumber(object, "focusHorizontalFovDegrees", focus_horizontal_fov_degrees, error) ||
-        !ReadOptionalNumber(object, "focusVerticalFovDegrees", focus_vertical_fov_degrees, error) ||
+        !ReadOptionalNumber(object, "focusHorizontalSizePercent", focus_horizontal_size_percent, error) ||
+        !ReadOptionalNumber(object, "focusVerticalSizePercent", focus_vertical_size_percent, error) ||
         !ReadOptionalNumber(object, "focusScale", focus_scale, error) ||
         !ReadOptionalNumber(object, "peripheralScale", peripheral_scale, error) ||
+        !ReadOptionalNumber(object, "foveateSharpness", foveate_sharpness, error) ||
+        !ReadOptionalNumber(object, "transitionThicknessPercent", transition_thickness_percent, error) ||
         !ReadOptionalNumber(object, "horizontalOffsetDegrees", horizontal_offset_degrees, error) ||
         !ReadOptionalNumber(object, "verticalOffsetDegrees", vertical_offset_degrees, error) ||
         !ReadOptionalNumber(object, "gazeSmoothing", gaze_smoothing, error) ||
@@ -1123,17 +1129,23 @@ bool ParseQuadViewsSettings(const JsonValue::Object& object, QuadViewsSettings& 
     if (tracking_mode.has_value()) {
         out.tracking_mode = *tracking_mode;
     }
-    if (focus_horizontal_fov_degrees.has_value()) {
-        out.focus_horizontal_fov_degrees = *focus_horizontal_fov_degrees;
+    if (focus_horizontal_size_percent.has_value()) {
+        out.focus_horizontal_size_percent = *focus_horizontal_size_percent;
     }
-    if (focus_vertical_fov_degrees.has_value()) {
-        out.focus_vertical_fov_degrees = *focus_vertical_fov_degrees;
+    if (focus_vertical_size_percent.has_value()) {
+        out.focus_vertical_size_percent = *focus_vertical_size_percent;
     }
     if (focus_scale.has_value()) {
         out.focus_scale = *focus_scale;
     }
     if (peripheral_scale.has_value()) {
         out.peripheral_scale = *peripheral_scale;
+    }
+    if (foveate_sharpness.has_value()) {
+        out.foveate_sharpness = *foveate_sharpness;
+    }
+    if (transition_thickness_percent.has_value()) {
+        out.transition_thickness_percent = *transition_thickness_percent;
     }
     if (horizontal_offset_degrees.has_value()) {
         out.horizontal_offset_degrees = *horizontal_offset_degrees;

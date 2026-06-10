@@ -117,10 +117,12 @@ function validatePivotXRSettings(prefix: string, settings: PivotXRSettings): str
 function validateQuadViewsSettings(prefix: string, settings: QuadViewsSettings): string[] {
   const errors: string[] = []
   const bounded = [
-    ['focusHorizontalFovDegrees', settings.focusHorizontalFovDegrees, 10, 90],
-    ['focusVerticalFovDegrees', settings.focusVerticalFovDegrees, 10, 90],
+    ['focusHorizontalSizePercent', settings.focusHorizontalSizePercent, 5, 100],
+    ['focusVerticalSizePercent', settings.focusVerticalSizePercent, 5, 100],
     ['focusScale', settings.focusScale, 0.5, 2.0],
     ['peripheralScale', settings.peripheralScale, 0.1, 1.5],
+    ['foveateSharpness', settings.foveateSharpness, 0, 100],
+    ['transitionThicknessPercent', settings.transitionThicknessPercent, 0, 50],
     ['horizontalOffsetDegrees', settings.horizontalOffsetDegrees, -45, 45],
     ['verticalOffsetDegrees', settings.verticalOffsetDegrees, -45, 45],
     ['gazeSmoothing', settings.gazeSmoothing, 0, 1],

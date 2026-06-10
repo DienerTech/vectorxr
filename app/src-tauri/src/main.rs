@@ -110,12 +110,12 @@ fn default_quadviews_tracking_mode() -> String {
     "head".into()
 }
 
-fn default_focus_horizontal_fov_degrees() -> f64 {
-    35.0
+fn default_focus_horizontal_size_percent() -> f64 {
+    32.0
 }
 
-fn default_focus_vertical_fov_degrees() -> f64 {
-    30.0
+fn default_focus_vertical_size_percent() -> f64 {
+    32.0
 }
 
 fn default_focus_scale() -> f64 {
@@ -124,6 +124,14 @@ fn default_focus_scale() -> f64 {
 
 fn default_peripheral_scale() -> f64 {
     0.45
+}
+
+fn default_foveate_sharpness() -> f64 {
+    0.0
+}
+
+fn default_transition_thickness_percent() -> f64 {
+    25.0
 }
 
 fn default_gaze_smoothing() -> f64 {
@@ -351,14 +359,18 @@ impl Default for PivotXRModuleConfig {
 struct QuadViewsSettings {
     #[serde(default = "default_quadviews_tracking_mode")]
     tracking_mode: String,
-    #[serde(default = "default_focus_horizontal_fov_degrees")]
-    focus_horizontal_fov_degrees: f64,
-    #[serde(default = "default_focus_vertical_fov_degrees")]
-    focus_vertical_fov_degrees: f64,
+    #[serde(default = "default_focus_horizontal_size_percent")]
+    focus_horizontal_size_percent: f64,
+    #[serde(default = "default_focus_vertical_size_percent")]
+    focus_vertical_size_percent: f64,
     #[serde(default = "default_focus_scale")]
     focus_scale: f64,
     #[serde(default = "default_peripheral_scale")]
     peripheral_scale: f64,
+    #[serde(default = "default_foveate_sharpness")]
+    foveate_sharpness: f64,
+    #[serde(default = "default_transition_thickness_percent")]
+    transition_thickness_percent: f64,
     #[serde(default)]
     horizontal_offset_degrees: f64,
     #[serde(default)]
@@ -373,10 +385,12 @@ impl Default for QuadViewsSettings {
     fn default() -> Self {
         Self {
             tracking_mode: default_quadviews_tracking_mode(),
-            focus_horizontal_fov_degrees: default_focus_horizontal_fov_degrees(),
-            focus_vertical_fov_degrees: default_focus_vertical_fov_degrees(),
+            focus_horizontal_size_percent: default_focus_horizontal_size_percent(),
+            focus_vertical_size_percent: default_focus_vertical_size_percent(),
             focus_scale: default_focus_scale(),
             peripheral_scale: default_peripheral_scale(),
+            foveate_sharpness: default_foveate_sharpness(),
+            transition_thickness_percent: default_transition_thickness_percent(),
             horizontal_offset_degrees: 0.0,
             vertical_offset_degrees: 0.0,
             gaze_smoothing: default_gaze_smoothing(),

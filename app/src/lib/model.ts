@@ -114,10 +114,12 @@ export interface PivotXRModuleConfig {
 
 export interface QuadViewsSettings {
   trackingMode: QuadViewsTrackingMode
-  focusHorizontalFovDegrees: number
-  focusVerticalFovDegrees: number
+  focusHorizontalSizePercent: number
+  focusVerticalSizePercent: number
   focusScale: number
   peripheralScale: number
+  foveateSharpness: number
+  transitionThicknessPercent: number
   horizontalOffsetDegrees: number
   verticalOffsetDegrees: number
   gazeSmoothing: number
@@ -264,10 +266,12 @@ export function defaultPivotXRSettings(): PivotXRSettings {
 export function defaultQuadViewsSettings(): QuadViewsSettings {
   return {
     trackingMode: 'head',
-    focusHorizontalFovDegrees: 35,
-    focusVerticalFovDegrees: 30,
+    focusHorizontalSizePercent: 32,
+    focusVerticalSizePercent: 32,
     focusScale: 1.1,
     peripheralScale: 0.45,
+    foveateSharpness: 0,
+    transitionThicknessPercent: 25,
     horizontalOffsetDegrees: 0,
     verticalOffsetDegrees: 0,
     gazeSmoothing: 0.15,
@@ -416,10 +420,12 @@ function normalizeQuadViewsSettings(value: unknown, fallback: QuadViewsSettings)
 
   return {
     trackingMode: normalizeQuadViewsTrackingMode(source.trackingMode, fallback.trackingMode),
-    focusHorizontalFovDegrees: normalizeNumber(source.focusHorizontalFovDegrees, fallback.focusHorizontalFovDegrees),
-    focusVerticalFovDegrees: normalizeNumber(source.focusVerticalFovDegrees, fallback.focusVerticalFovDegrees),
+    focusHorizontalSizePercent: normalizeNumber(source.focusHorizontalSizePercent, fallback.focusHorizontalSizePercent),
+    focusVerticalSizePercent: normalizeNumber(source.focusVerticalSizePercent, fallback.focusVerticalSizePercent),
     focusScale: normalizeNumber(source.focusScale, fallback.focusScale),
     peripheralScale: normalizeNumber(source.peripheralScale, fallback.peripheralScale),
+    foveateSharpness: normalizeNumber(source.foveateSharpness, fallback.foveateSharpness),
+    transitionThicknessPercent: normalizeNumber(source.transitionThicknessPercent, fallback.transitionThicknessPercent),
     horizontalOffsetDegrees: normalizeNumber(source.horizontalOffsetDegrees, fallback.horizontalOffsetDegrees),
     verticalOffsetDegrees: normalizeNumber(source.verticalOffsetDegrees, fallback.verticalOffsetDegrees),
     gazeSmoothing: normalizeNumber(source.gazeSmoothing, fallback.gazeSmoothing),

@@ -25,8 +25,10 @@ The UI and runtime resolver now provide `modules.quadviews` with:
 - default profile
 - per-application profiles through the existing application registry
 - tracking mode: `head` or `eye`
-- focus horizontal and vertical FOV
+- focus horizontal and vertical size as a percent of projected FOV
 - focus and peripheral resolution scale
+- foveate sharpening
+- focus/peripheral transition thickness
 - horizontal and vertical foveal offsets
 - gaze smoothing and deadzone
 

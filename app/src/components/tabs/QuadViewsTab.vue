@@ -92,17 +92,19 @@ function trackingModeLabel(settings: QuadViewsSettings) {
           <div class="mt-3 grid gap-3 sm:grid-cols-2">
             <label class="block">
               <span class="mb-1.5 flex items-center gap-1.5 text-sm font-medium">
-                Horizontal FOV
-                <span title="Width of the high-detail focus area in degrees. Larger values look sharper across more of the view but cost more GPU time." class="cursor-help select-none text-xs text-muted">ⓘ</span>
+                Focus Width
+                <span title="Width of the high-detail focus area as a percent of the projected eye view. Larger values sharpen more of the screen but cost more GPU time." class="cursor-help select-none text-xs text-muted">ⓘ</span>
               </span>
-              <input v-model.number="config.modules.quadviews.defaults.focusHorizontalFovDegrees" class="app-input w-full rounded-[0.75rem] px-4 py-2.5" min="10" max="90" step="1" type="number" />
+              <input v-model.number="config.modules.quadviews.defaults.focusHorizontalSizePercent" class="app-input w-full rounded-[0.75rem] px-4 py-2.5" min="5" max="100" step="1" type="number" />
+              <span class="mt-1 block text-xs text-muted">% of FOV</span>
             </label>
             <label class="block">
               <span class="mb-1.5 flex items-center gap-1.5 text-sm font-medium">
-                Vertical FOV
-                <span title="Height of the high-detail focus area in degrees. Larger values are more forgiving but reduce the performance gain." class="cursor-help select-none text-xs text-muted">ⓘ</span>
+                Focus Height
+                <span title="Height of the high-detail focus area as a percent of the projected eye view. Larger values are more forgiving but reduce the performance gain." class="cursor-help select-none text-xs text-muted">ⓘ</span>
               </span>
-              <input v-model.number="config.modules.quadviews.defaults.focusVerticalFovDegrees" class="app-input w-full rounded-[0.75rem] px-4 py-2.5" min="10" max="90" step="1" type="number" />
+              <input v-model.number="config.modules.quadviews.defaults.focusVerticalSizePercent" class="app-input w-full rounded-[0.75rem] px-4 py-2.5" min="5" max="100" step="1" type="number" />
+              <span class="mt-1 block text-xs text-muted">% of FOV</span>
             </label>
             <label class="block">
               <span class="mb-1.5 flex items-center gap-1.5 text-sm font-medium">
@@ -126,7 +128,7 @@ function trackingModeLabel(settings: QuadViewsSettings) {
           <div class="mt-3 grid gap-3 sm:grid-cols-2">
             <label class="block">
               <span class="mb-1.5 flex items-center gap-1.5 text-sm font-medium">
-                Focus Scale
+                Foveate Resolution
                 <span title="Resolution scale for the high-detail focus views. Higher values sharpen the center but increase GPU load." class="cursor-help select-none text-xs text-muted">ⓘ</span>
               </span>
               <input v-model.number="config.modules.quadviews.defaults.focusScale" class="app-input w-full rounded-[0.75rem] px-4 py-2.5" min="0.5" max="2" step="0.05" type="number" />
@@ -137,6 +139,21 @@ function trackingModeLabel(settings: QuadViewsSettings) {
                 <span title="Resolution scale for the outer peripheral views. Lower values improve frames but make the edges softer." class="cursor-help select-none text-xs text-muted">ⓘ</span>
               </span>
               <input v-model.number="config.modules.quadviews.defaults.peripheralScale" class="app-input w-full rounded-[0.75rem] px-4 py-2.5" min="0.1" max="1.5" step="0.05" type="number" />
+            </label>
+            <label class="block">
+              <span class="mb-1.5 flex items-center gap-1.5 text-sm font-medium">
+                Foveate Sharpness
+                <span title="Applies extra sharpening to the high-detail focus image. 0 is off; higher values add crispness but can create halos." class="cursor-help select-none text-xs text-muted">ⓘ</span>
+              </span>
+              <input v-model.number="config.modules.quadviews.defaults.foveateSharpness" class="app-input w-full rounded-[0.75rem] px-4 py-2.5" min="0" max="100" step="1" type="number" />
+            </label>
+            <label class="block">
+              <span class="mb-1.5 flex items-center gap-1.5 text-sm font-medium">
+                Transition Thickness
+                <span title="Controls how wide the blended edge is between the focus and peripheral images. Higher values hide the boundary better but soften more of the focus window." class="cursor-help select-none text-xs text-muted">ⓘ</span>
+              </span>
+              <input v-model.number="config.modules.quadviews.defaults.transitionThicknessPercent" class="app-input w-full rounded-[0.75rem] px-4 py-2.5" min="0" max="50" step="1" type="number" />
+              <span class="mt-1 block text-xs text-muted">% of focus window</span>
             </label>
           </div>
         </div>
@@ -251,17 +268,24 @@ function trackingModeLabel(settings: QuadViewsSettings) {
           </label>
           <label class="block">
             <span class="mb-1.5 flex items-center gap-1.5 text-sm font-medium">
-              Focus FOV H
-              <span title="Width of this application's high-detail focus area in degrees." class="cursor-help select-none text-xs text-muted">ⓘ</span>
+              Focus Width
+              <span title="Width of this application's high-detail focus area as a percent of the projected eye view." class="cursor-help select-none text-xs text-muted">ⓘ</span>
             </span>
-            <input v-model.number="profile.settings.focusHorizontalFovDegrees" class="app-input w-full rounded-[0.75rem] px-4 py-2.5" min="10" max="90" step="1" type="number" />
+            <input v-model.number="profile.settings.focusHorizontalSizePercent" class="app-input w-full rounded-[0.75rem] px-4 py-2.5" min="5" max="100" step="1" type="number" />
           </label>
           <label class="block">
             <span class="mb-1.5 flex items-center gap-1.5 text-sm font-medium">
-              Focus FOV V
-              <span title="Height of this application's high-detail focus area in degrees." class="cursor-help select-none text-xs text-muted">ⓘ</span>
+              Focus Height
+              <span title="Height of this application's high-detail focus area as a percent of the projected eye view." class="cursor-help select-none text-xs text-muted">ⓘ</span>
             </span>
-            <input v-model.number="profile.settings.focusVerticalFovDegrees" class="app-input w-full rounded-[0.75rem] px-4 py-2.5" min="10" max="90" step="1" type="number" />
+            <input v-model.number="profile.settings.focusVerticalSizePercent" class="app-input w-full rounded-[0.75rem] px-4 py-2.5" min="5" max="100" step="1" type="number" />
+          </label>
+          <label class="block">
+            <span class="mb-1.5 flex items-center gap-1.5 text-sm font-medium">
+              Focus Scale
+              <span title="Resolution scale for this application's high-detail focus views." class="cursor-help select-none text-xs text-muted">â“˜</span>
+            </span>
+            <input v-model.number="profile.settings.focusScale" class="app-input w-full rounded-[0.75rem] px-4 py-2.5" min="0.5" max="2" step="0.05" type="number" />
           </label>
           <label class="block">
             <span class="mb-1.5 flex items-center gap-1.5 text-sm font-medium">
@@ -269,6 +293,20 @@ function trackingModeLabel(settings: QuadViewsSettings) {
               <span title="Resolution scale for this application's outer peripheral views. Lower values can improve frame rate." class="cursor-help select-none text-xs text-muted">ⓘ</span>
             </span>
             <input v-model.number="profile.settings.peripheralScale" class="app-input w-full rounded-[0.75rem] px-4 py-2.5" min="0.1" max="1.5" step="0.05" type="number" />
+          </label>
+          <label class="block">
+            <span class="mb-1.5 flex items-center gap-1.5 text-sm font-medium">
+              Sharpness
+              <span title="Applies extra sharpening to this application's focus image." class="cursor-help select-none text-xs text-muted">â“˜</span>
+            </span>
+            <input v-model.number="profile.settings.foveateSharpness" class="app-input w-full rounded-[0.75rem] px-4 py-2.5" min="0" max="100" step="1" type="number" />
+          </label>
+          <label class="block">
+            <span class="mb-1.5 flex items-center gap-1.5 text-sm font-medium">
+              Transition
+              <span title="Blend width between the focus and peripheral images for this application." class="cursor-help select-none text-xs text-muted">â“˜</span>
+            </span>
+            <input v-model.number="profile.settings.transitionThicknessPercent" class="app-input w-full rounded-[0.75rem] px-4 py-2.5" min="0" max="50" step="1" type="number" />
           </label>
         </div>
       </article>

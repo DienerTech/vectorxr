@@ -84,32 +84,35 @@ struct AngularWindow {
     double positive;
 };
 
-AngularWindow ClampAngularWindow(float base_negative,
-                                 float base_positive,
-                                 double center_radians,
-                                 double size_radians) {
-    const double half = std::max(0.001, size_radians * 0.5);
-    double negative = center_radians - half;
-    double positive = center_radians + half;
+AngularWindow ClampProjectedWindow(float base_negative,
+                                   float base_positive,
+                                   double center_radians,
+                                   double size_percent) {
+    const double base_negative_tan = std::tan(base_negative);
+    const double base_positive_tan = std::tan(base_positive);
+    const double base_size_tan = std::max(0.0001, base_positive_tan - base_negative_tan);
+    const double window_size_tan = base_size_tan * Clamp(size_percent, 1.0, 100.0) / 100.0;
+    const double half_window_tan = window_size_tan * 0.5;
+    double negative_tan = std::tan(center_radians) - half_window_tan;
+    double positive_tan = std::tan(center_radians) + half_window_tan;
 
-    const double base_span = static_cast<double>(base_positive) - static_cast<double>(base_negative);
-    if (positive - negative >= base_span) {
-        negative = base_negative;
-        positive = base_positive;
+    if (window_size_tan >= base_size_tan) {
+        negative_tan = base_negative_tan;
+        positive_tan = base_positive_tan;
     } else {
-        if (negative < base_negative) {
-            positive += base_negative - negative;
-            negative = base_negative;
+        if (negative_tan < base_negative_tan) {
+            positive_tan += base_negative_tan - negative_tan;
+            negative_tan = base_negative_tan;
         }
-        if (positive > base_positive) {
-            negative -= positive - base_positive;
-            positive = base_positive;
+        if (positive_tan > base_positive_tan) {
+            negative_tan -= positive_tan - base_positive_tan;
+            positive_tan = base_positive_tan;
         }
-        negative = Clamp(negative, base_negative, base_positive);
-        positive = Clamp(positive, base_negative, base_positive);
+        negative_tan = Clamp(negative_tan, base_negative_tan, base_positive_tan);
+        positive_tan = Clamp(positive_tan, base_negative_tan, base_positive_tan);
     }
 
-    return {negative, positive};
+    return {std::atan(negative_tan), std::atan(positive_tan)};
 }
 
 XrFovf BuildFocusFov(const XrFovf& base_fov,
@@ -118,13 +121,17 @@ XrFovf BuildFocusFov(const XrFovf& base_fov,
                      double focus_pitch_radians) {
     const double horizontal_center = DegreesToRadians(settings.horizontal_offset_degrees) + focus_yaw_radians;
     const double vertical_center = DegreesToRadians(settings.vertical_offset_degrees) + focus_pitch_radians;
-    const double horizontal_size = DegreesToRadians(settings.focus_horizontal_fov_degrees);
-    const double vertical_size = DegreesToRadians(settings.focus_vertical_fov_degrees);
 
     const AngularWindow horizontal =
-        ClampAngularWindow(base_fov.angleLeft, base_fov.angleRight, horizontal_center, horizontal_size);
+        ClampProjectedWindow(base_fov.angleLeft,
+                             base_fov.angleRight,
+                             horizontal_center,
+                             settings.focus_horizontal_size_percent);
     const AngularWindow vertical =
-        ClampAngularWindow(base_fov.angleDown, base_fov.angleUp, vertical_center, vertical_size);
+        ClampProjectedWindow(base_fov.angleDown,
+                             base_fov.angleUp,
+                             vertical_center,
+                             settings.focus_vertical_size_percent);
 
     return {
         static_cast<float>(horizontal.negative),
@@ -159,14 +166,16 @@ bool IsD3D11SwapchainImage(const XrSwapchainImageBaseHeader* image) {
 
 struct FocusRectConstants {
     float focus_rect[4];
-    float feather[2];
-    float padding[2];
+    float blend_params[4];
+    float focus_texel[4];
 };
 
 FocusRectConstants BuildFocusRectConstants(const XrFovf& full_fov,
                                            const XrFovf& focus_fov,
                                            uint32_t width,
-                                           uint32_t height) {
+                                           uint32_t height,
+                                           double transition_thickness_percent,
+                                           double foveate_sharpness) {
     const double full_left = std::tan(full_fov.angleLeft);
     const double full_right = std::tan(full_fov.angleRight);
     const double full_down = std::tan(full_fov.angleDown);
@@ -184,9 +193,19 @@ FocusRectConstants BuildFocusRectConstants(const XrFovf& full_fov,
     constants.focus_rect[1] = static_cast<float>(Clamp((full_up - focus_up) / full_height, 0.0, 1.0));
     constants.focus_rect[3] = static_cast<float>(Clamp((full_up - focus_down) / full_height, 0.0, 1.0));
 
-    constexpr double kFeatherPixels = 28.0;
-    constants.feather[0] = static_cast<float>(kFeatherPixels / std::max<uint32_t>(1, width));
-    constants.feather[1] = static_cast<float>(kFeatherPixels / std::max<uint32_t>(1, height));
+    const double focus_rect_width =
+        std::max(0.0001, static_cast<double>(constants.focus_rect[2]) - constants.focus_rect[0]);
+    const double focus_rect_height =
+        std::max(0.0001, static_cast<double>(constants.focus_rect[3]) - constants.focus_rect[1]);
+    const double transition_fraction = Clamp(transition_thickness_percent, 0.0, 100.0) / 100.0;
+    constants.blend_params[0] = static_cast<float>(std::max(1.0 / std::max<uint32_t>(1, width),
+                                                           focus_rect_width * transition_fraction));
+    constants.blend_params[1] = static_cast<float>(std::max(1.0 / std::max<uint32_t>(1, height),
+                                                           focus_rect_height * transition_fraction));
+    constants.blend_params[2] = static_cast<float>(Clamp(foveate_sharpness, 0.0, 100.0) / 100.0);
+    constants.blend_params[3] = 0.0f;
+    constants.focus_texel[0] = 1.0f / static_cast<float>(std::max<uint32_t>(1, width));
+    constants.focus_texel[1] = 1.0f / static_cast<float>(std::max<uint32_t>(1, height));
     return constants;
 }
 
@@ -194,8 +213,8 @@ const char* D3D11QuadViewsShaderSource() {
     return R"(
 cbuffer QuadViewsConstants : register(b0) {
     float4 focusRect;
-    float2 feather;
-    float2 padding;
+    float4 blendParams;
+    float4 focusTexel;
 };
 
 Texture2D peripheralTexture : register(t0);
@@ -237,9 +256,20 @@ float4 PSMain(VSOut input) : SV_Target {
 
     float2 focusUv = saturate((uv - focusRect.xy) / max(focusRect.zw - focusRect.xy, float2(0.0001, 0.0001)));
     float4 focus = focusTexture.Sample(linearSampler, focusUv);
+    float sharpenAmount = saturate(blendParams.z) * 0.35;
+    if (sharpenAmount > 0.001) {
+        float2 texel = focusTexel.xy;
+        float4 blur =
+            focusTexture.Sample(linearSampler, saturate(focusUv + float2(texel.x, 0.0))) +
+            focusTexture.Sample(linearSampler, saturate(focusUv - float2(texel.x, 0.0))) +
+            focusTexture.Sample(linearSampler, saturate(focusUv + float2(0.0, texel.y))) +
+            focusTexture.Sample(linearSampler, saturate(focusUv - float2(0.0, texel.y)));
+        blur *= 0.25;
+        focus.rgb = saturate(focus.rgb + (focus.rgb - blur.rgb) * sharpenAmount);
+    }
 
     float2 distToEdge = min(uv - focusRect.xy, focusRect.zw - uv);
-    float edgeAlpha = saturate(min(distToEdge.x / max(feather.x, 0.0001), distToEdge.y / max(feather.y, 0.0001)));
+    float edgeAlpha = saturate(min(distToEdge.x / max(blendParams.x, 0.0001), distToEdge.y / max(blendParams.y, 0.0001)));
     edgeAlpha = edgeAlpha * edgeAlpha * (3.0 - 2.0 * edgeAlpha);
     return lerp(peripheral, focus, edgeAlpha);
 }
@@ -615,10 +645,12 @@ bool SameSettings(const ResolvedRuntimeConfig& lhs, const ResolvedRuntimeConfig&
            lhs.quadviews.enabled == rhs.quadviews.enabled &&
            lhs.quadviews.prefer_eye_tracking == rhs.quadviews.prefer_eye_tracking &&
            lhs.quadviews.tracking_mode == rhs.quadviews.tracking_mode &&
-           NearlyEqual(lhs.quadviews.focus_horizontal_fov_degrees, rhs.quadviews.focus_horizontal_fov_degrees) &&
-           NearlyEqual(lhs.quadviews.focus_vertical_fov_degrees, rhs.quadviews.focus_vertical_fov_degrees) &&
+           NearlyEqual(lhs.quadviews.focus_horizontal_size_percent, rhs.quadviews.focus_horizontal_size_percent) &&
+           NearlyEqual(lhs.quadviews.focus_vertical_size_percent, rhs.quadviews.focus_vertical_size_percent) &&
            NearlyEqual(lhs.quadviews.focus_scale, rhs.quadviews.focus_scale) &&
            NearlyEqual(lhs.quadviews.peripheral_scale, rhs.quadviews.peripheral_scale) &&
+           NearlyEqual(lhs.quadviews.foveate_sharpness, rhs.quadviews.foveate_sharpness) &&
+           NearlyEqual(lhs.quadviews.transition_thickness_percent, rhs.quadviews.transition_thickness_percent) &&
            NearlyEqual(lhs.quadviews.horizontal_offset_degrees, rhs.quadviews.horizontal_offset_degrees) &&
            NearlyEqual(lhs.quadviews.vertical_offset_degrees, rhs.quadviews.vertical_offset_degrees) &&
            NearlyEqual(lhs.quadviews.gaze_smoothing, rhs.quadviews.gaze_smoothing) &&
@@ -1801,7 +1833,12 @@ bool OpenXrLayer::ComposeQuadViewsD3D11(const XrCompositionLayerProjection* sour
 
         const XrFovf& full_fov = has_cached_fovs ? cached_fovs[eye] : source_layer->views[eye].fov;
         const XrFovf& focus_fov = has_cached_fovs ? cached_fovs[eye + 2] : source_layer->views[eye + 2].fov;
-        FocusRectConstants constants = BuildFocusRectConstants(full_fov, focus_fov, target.width, target.height);
+        FocusRectConstants constants = BuildFocusRectConstants(full_fov,
+                                                               focus_fov,
+                                                               target.width,
+                                                               target.height,
+                                                               resolved_settings_.quadviews.transition_thickness_percent,
+                                                               resolved_settings_.quadviews.foveate_sharpness);
         if (pending_quadviews_compositor_diagnostics_ > 0) {
             std::ostringstream stream;
             stream << "D3D11 quadviews compositor focus rect: frameTime=" << display_time
@@ -1813,6 +1850,9 @@ bool OpenXrLayer::ComposeQuadViewsD3D11(const XrCompositionLayerProjection* sour
                    << FormatDiagnosticDouble(constants.focus_rect[1]) << ", "
                    << FormatDiagnosticDouble(constants.focus_rect[2]) << ", "
                    << FormatDiagnosticDouble(constants.focus_rect[3]) << ")"
+                   << ", feather=(" << FormatDiagnosticDouble(constants.blend_params[0]) << ", "
+                   << FormatDiagnosticDouble(constants.blend_params[1]) << ")"
+                   << ", sharpness=" << FormatDiagnosticDouble(constants.blend_params[2])
                    << ", fullFov=" << FormatFov(full_fov)
                    << ", focusFov=" << FormatFov(focus_fov)
                    << ", sourceFullFov=" << FormatFov(source_layer->views[eye].fov)
@@ -3451,10 +3491,12 @@ void OpenXrLayer::LogResolvedSettings(const ResolvedRuntimeConfig& settings) {
            << ", quadviewsEnabled=" << settings.quadviews.enabled
            << ", quadviewsPreferEyeTracking=" << settings.quadviews.prefer_eye_tracking
            << ", quadviewsTrackingMode=" << ToString(settings.quadviews.tracking_mode)
-           << ", quadviewsFocusHorizontalFov=" << settings.quadviews.focus_horizontal_fov_degrees
-           << ", quadviewsFocusVerticalFov=" << settings.quadviews.focus_vertical_fov_degrees
+           << ", quadviewsFocusHorizontalSizePercent=" << settings.quadviews.focus_horizontal_size_percent
+           << ", quadviewsFocusVerticalSizePercent=" << settings.quadviews.focus_vertical_size_percent
            << ", quadviewsFocusScale=" << settings.quadviews.focus_scale
            << ", quadviewsPeripheralScale=" << settings.quadviews.peripheral_scale
+           << ", quadviewsFoveateSharpness=" << settings.quadviews.foveate_sharpness
+           << ", quadviewsTransitionThicknessPercent=" << settings.quadviews.transition_thickness_percent
            << ", quadviewsHorizontalOffset=" << settings.quadviews.horizontal_offset_degrees
            << ", quadviewsVerticalOffset=" << settings.quadviews.vertical_offset_degrees
            << ", quadviewsGazeSmoothing=" << settings.quadviews.gaze_smoothing

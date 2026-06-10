@@ -424,10 +424,12 @@ void TestQuadViewsProfileResolution() {
       "preferEyeTracking": true,
       "defaults": {
         "trackingMode": "head",
-        "focusHorizontalFovDegrees": 35.0,
-        "focusVerticalFovDegrees": 30.0,
+        "focusHorizontalSizePercent": 32.0,
+        "focusVerticalSizePercent": 32.0,
         "focusScale": 1.1,
         "peripheralScale": 0.45,
+        "foveateSharpness": 0.0,
+        "transitionThicknessPercent": 25.0,
         "horizontalOffsetDegrees": 0.0,
         "verticalOffsetDegrees": 0.0,
         "gazeSmoothing": 0.15,
@@ -440,10 +442,12 @@ void TestQuadViewsProfileResolution() {
           "enabled": true,
           "settings": {
             "trackingMode": "eye",
-            "focusHorizontalFovDegrees": 32.0,
-            "focusVerticalFovDegrees": 28.0,
+            "focusHorizontalSizePercent": 34.0,
+            "focusVerticalSizePercent": 30.0,
             "focusScale": 1.2,
             "peripheralScale": 0.4,
+            "foveateSharpness": 60.0,
+            "transitionThicknessPercent": 25.0,
             "horizontalOffsetDegrees": 1.5,
             "verticalOffsetDegrees": -2.0,
             "gazeSmoothing": 0.1,
@@ -464,18 +468,22 @@ void TestQuadViewsProfileResolution() {
     Expect(resolved.quadviews.prefer_eye_tracking, "Quadviews eye tracking preference mismatch");
     Expect(resolved.quadviews.tracking_mode == depthxr::QuadViewsTrackingMode::Eye,
            "Quadviews profile tracking mode mismatch");
-    Expect(std::abs(resolved.quadviews.focus_horizontal_fov_degrees - 32.0) < 0.0001,
-           "Quadviews focus horizontal FOV mismatch");
+    Expect(std::abs(resolved.quadviews.focus_horizontal_size_percent - 34.0) < 0.0001,
+           "Quadviews focus horizontal size mismatch");
     Expect(std::abs(resolved.quadviews.peripheral_scale - 0.4) < 0.0001,
            "Quadviews peripheral scale mismatch");
+    Expect(std::abs(resolved.quadviews.foveate_sharpness - 60.0) < 0.0001,
+           "Quadviews foveate sharpness mismatch");
+    Expect(std::abs(resolved.quadviews.transition_thickness_percent - 25.0) < 0.0001,
+           "Quadviews transition thickness mismatch");
     Expect(std::abs(resolved.quadviews.vertical_offset_degrees + 2.0) < 0.0001,
            "Quadviews vertical offset mismatch");
 
     const depthxr::ResolvedRuntimeConfig resolved_other = depthxr::ResolveRuntimeConfig(result.document, "other.exe");
     Expect(resolved_other.quadviews.tracking_mode == depthxr::QuadViewsTrackingMode::Head,
            "Quadviews default tracking mode mismatch");
-    Expect(std::abs(resolved_other.quadviews.focus_horizontal_fov_degrees - 35.0) < 0.0001,
-           "Quadviews default focus FOV mismatch");
+    Expect(std::abs(resolved_other.quadviews.focus_horizontal_size_percent - 32.0) < 0.0001,
+           "Quadviews default focus size mismatch");
 }
 
 void TestInvalidPivotActivationBindingRejected() {

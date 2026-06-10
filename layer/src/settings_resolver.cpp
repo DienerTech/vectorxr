@@ -150,10 +150,12 @@ const QuadViewsProfile* FindMatchingQuadViewsProfile(const ConfigDocument& confi
 
 void ApplyQuadViewsSettings(QuadViewsResolvedSettings& resolved, const QuadViewsSettings& settings) {
     resolved.tracking_mode = settings.tracking_mode;
-    resolved.focus_horizontal_fov_degrees = settings.focus_horizontal_fov_degrees;
-    resolved.focus_vertical_fov_degrees = settings.focus_vertical_fov_degrees;
+    resolved.focus_horizontal_size_percent = settings.focus_horizontal_size_percent;
+    resolved.focus_vertical_size_percent = settings.focus_vertical_size_percent;
     resolved.focus_scale = settings.focus_scale;
     resolved.peripheral_scale = settings.peripheral_scale;
+    resolved.foveate_sharpness = settings.foveate_sharpness;
+    resolved.transition_thickness_percent = settings.transition_thickness_percent;
     resolved.horizontal_offset_degrees = settings.horizontal_offset_degrees;
     resolved.vertical_offset_degrees = settings.vertical_offset_degrees;
     resolved.gaze_smoothing = settings.gaze_smoothing;
