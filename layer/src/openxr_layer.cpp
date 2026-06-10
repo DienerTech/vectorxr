@@ -2246,7 +2246,7 @@ XrResult OpenXrLayer::LocateViews(XrSession session,
     const bool depthxr_active = IsDepthXrActive();
     if (resolved_settings_.pivotxr.enabled && !has_logged_pivotxr_spike_mode_) {
         std::ostringstream stream;
-        stream << "PivotXR spike is active; quad-view sessions use orientation-stable mode. Press "
+        stream << "PivotXR spike is active; quad-view sessions use stereo eye-pose recomposition. Press "
                << BindingLabel(resolved_settings_.pivotxr.activation_binding) << " to "
                << (resolved_settings_.pivotxr.activation_mode == ActivationMode::Toggle ? "toggle" : "hold")
                << " the extra pivot factor.";
@@ -2254,75 +2254,8 @@ XrResult OpenXrLayer::LocateViews(XrSession session,
         has_logged_pivotxr_spike_mode_ = true;
     }
 
-    if (resolved_settings_.pivotxr.enabled && pivotxr_active && IsQuadViewConfiguration(view_configuration_type)) {
-        const auto now = std::chrono::steady_clock::now();
-        double delta_seconds = 0.0;
-        if (pivotxr_last_smoothing_wall_time_.has_value()) {
-            delta_seconds =
-                std::chrono::duration<double>(now - *pivotxr_last_smoothing_wall_time_).count();
-        }
-        pivotxr_last_smoothing_wall_time_ = now;
-
-        ViewOrientation pivot_reference_orientation = adjusted_views[0].orientation;
-        if (internal_view_space_ != XR_NULL_HANDLE && view_locate_info) {
-            XrSpaceLocation runtime_view_location{XR_TYPE_SPACE_LOCATION};
-            const XrResult runtime_view_result = next_locate_space_(internal_view_space_,
-                                                                    view_locate_info->space,
-                                                                    view_locate_info->displayTime,
-                                                                    &runtime_view_location);
-            if (XR_SUCCEEDED(runtime_view_result)) {
-                pivot_reference_orientation.x = runtime_view_location.pose.orientation.x;
-                pivot_reference_orientation.y = runtime_view_location.pose.orientation.y;
-                pivot_reference_orientation.z = runtime_view_location.pose.orientation.z;
-                pivot_reference_orientation.w = runtime_view_location.pose.orientation.w;
-            }
-        }
-
-        const double current_yaw_radians = ExtractYawRadians(pivot_reference_orientation);
-        const double current_pitch_radians = ExtractPitchRadians(pivot_reference_orientation);
-        const double extra_yaw_radians = ComputePivotExtraAngleRadians(current_yaw_radians,
-                                                                       resolved_settings_.pivotxr.yaw_rotation_multiplier,
-                                                                       resolved_settings_.pivotxr.yaw_deadzone_degrees,
-                                                                       resolved_settings_.pivotxr.yaw_max_extra_degrees,
-                                                                       resolved_settings_.pivotxr.yaw_smoothing,
-                                                                       delta_seconds,
-                                                                       pivotxr_smoothed_extra_yaw_radians_,
-                                                                       false);
-        const double extra_pitch_radians =
-            ComputePivotExtraAngleRadians(current_pitch_radians,
-                                          resolved_settings_.pivotxr.pitch_rotation_multiplier,
-                                          resolved_settings_.pivotxr.pitch_deadzone_degrees,
-                                          resolved_settings_.pivotxr.pitch_max_extra_degrees,
-                                          resolved_settings_.pivotxr.pitch_smoothing,
-                                          delta_seconds,
-                                          pivotxr_smoothed_extra_pitch_radians_,
-                                          false);
-        if (!NearlyZero(extra_yaw_radians) || !NearlyZero(extra_pitch_radians)) {
-            for (ViewAdjustmentData& view : adjusted_views) {
-                view.orientation = ApplyExtraRotationToOrientation(view.orientation, extra_yaw_radians, extra_pitch_radians);
-            }
-            XrPosef original_pose = IdentityPose();
-            original_pose.position.x = static_cast<float>(original_views[0].position.x);
-            original_pose.position.y = static_cast<float>(original_views[0].position.y);
-            original_pose.position.z = static_cast<float>(original_views[0].position.z);
-            original_pose.orientation.x = static_cast<float>(original_views[0].orientation.x);
-            original_pose.orientation.y = static_cast<float>(original_views[0].orientation.y);
-            original_pose.orientation.z = static_cast<float>(original_views[0].orientation.z);
-            original_pose.orientation.w = static_cast<float>(original_views[0].orientation.w);
-
-            XrPosef adjusted_pose = original_pose;
-            adjusted_pose.orientation.x = static_cast<float>(adjusted_views[0].orientation.x);
-            adjusted_pose.orientation.y = static_cast<float>(adjusted_views[0].orientation.y);
-            adjusted_pose.orientation.z = static_cast<float>(adjusted_views[0].orientation.z);
-            adjusted_pose.orientation.w = static_cast<float>(adjusted_views[0].orientation.w);
-            if (view_locate_info) {
-                CachePivotPoseDelta(view_locate_info->displayTime, MultiplyPoses(InvertPose(original_pose), adjusted_pose));
-            }
-        } else if (view_locate_info) {
-            CachePivotPoseDelta(view_locate_info->displayTime, IdentityPose());
-        }
-    } else if (resolved_settings_.pivotxr.enabled && pivotxr_active && internal_view_space_ != XR_NULL_HANDLE &&
-               view_locate_info) {
+    if (resolved_settings_.pivotxr.enabled && pivotxr_active && internal_view_space_ != XR_NULL_HANDLE &&
+        view_locate_info) {
         XrSpaceLocation pivot_view_location{XR_TYPE_SPACE_LOCATION};
         double applied_extra_yaw_radians = 0.0;
         double applied_extra_pitch_radians = 0.0;
@@ -2340,19 +2273,30 @@ XrResult OpenXrLayer::LocateViews(XrSession session,
         if (XR_SUCCEEDED(pivot_result)) {
             if (NearlyZero(applied_extra_yaw_radians) && NearlyZero(applied_extra_pitch_radians)) {
                 CachePivotPoseDelta(view_locate_info->displayTime, IdentityPose());
-            } else if (EnsureEyeOffsets(session, view_configuration_type, view_locate_info->displayTime, count)) {
+            } else if (IsQuadViewConfiguration(view_configuration_type) &&
+                       EnsureEyeOffsets(session,
+                                        XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO,
+                                        view_locate_info->displayTime,
+                                        2)) {
                 CachePivotPoseDelta(view_locate_info->displayTime, applied_pose_delta);
                 for (uint32_t i = 0; i < count; ++i) {
-                    adjusted_views[i].position.x = cached_eye_offset_poses_[i].position.x;
-                    adjusted_views[i].position.y = cached_eye_offset_poses_[i].position.y;
-                    adjusted_views[i].position.z = cached_eye_offset_poses_[i].position.z;
-                    adjusted_views[i].orientation.x = cached_eye_offset_poses_[i].orientation.x;
-                    adjusted_views[i].orientation.y = cached_eye_offset_poses_[i].orientation.y;
-                    adjusted_views[i].orientation.z = cached_eye_offset_poses_[i].orientation.z;
-                    adjusted_views[i].orientation.w = cached_eye_offset_poses_[i].orientation.w;
-
-                    const XrPosef recomposed_pose = MultiplyPoses(
-                        cached_eye_offset_poses_[i], pivot_view_location.pose);
+                    const uint32_t eye_index = i % 2;
+                    const XrPosef recomposed_pose =
+                        MultiplyPoses(cached_eye_offset_poses_[eye_index], pivot_view_location.pose);
+                    adjusted_views[i].position.x = recomposed_pose.position.x;
+                    adjusted_views[i].position.y = recomposed_pose.position.y;
+                    adjusted_views[i].position.z = recomposed_pose.position.z;
+                    adjusted_views[i].orientation.x = recomposed_pose.orientation.x;
+                    adjusted_views[i].orientation.y = recomposed_pose.orientation.y;
+                    adjusted_views[i].orientation.z = recomposed_pose.orientation.z;
+                    adjusted_views[i].orientation.w = recomposed_pose.orientation.w;
+                }
+            } else if (!IsQuadViewConfiguration(view_configuration_type) &&
+                       EnsureEyeOffsets(session, view_configuration_type, view_locate_info->displayTime, count)) {
+                CachePivotPoseDelta(view_locate_info->displayTime, applied_pose_delta);
+                for (uint32_t i = 0; i < count; ++i) {
+                    const XrPosef recomposed_pose =
+                        MultiplyPoses(cached_eye_offset_poses_[i], pivot_view_location.pose);
                     adjusted_views[i].position.x = recomposed_pose.position.x;
                     adjusted_views[i].position.y = recomposed_pose.position.y;
                     adjusted_views[i].position.z = recomposed_pose.position.z;
