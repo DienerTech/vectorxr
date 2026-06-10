@@ -48,6 +48,32 @@ const profileWarnings = computed(() => {
 function trackingModeLabel(settings: QuadViewsSettings) {
   return settings.trackingMode === 'eye' ? 'Eye tracked' : 'Head tracked'
 }
+
+function estimatedPixelBudget(settings: QuadViewsSettings) {
+  const focusWidthScale = settings.focusScale * Math.min(Math.max(settings.focusHorizontalSizePercent, 1), 100) / 100
+  const focusHeightScale = settings.focusScale * Math.min(Math.max(settings.focusVerticalSizePercent, 1), 100) / 100
+  const budget = settings.peripheralScale * settings.peripheralScale + focusWidthScale * focusHeightScale
+
+  return Math.max(0, budget * 100)
+}
+
+function budgetLabel(settings: QuadViewsSettings) {
+  return `${estimatedPixelBudget(settings).toFixed(1)}% of stereo pixels`
+}
+
+function budgetTone(settings: QuadViewsSettings) {
+  const budget = estimatedPixelBudget(settings)
+
+  if (budget <= 45) {
+    return 'Light'
+  }
+
+  if (budget <= 85) {
+    return 'Moderate'
+  }
+
+  return 'Heavy'
+}
 </script>
 
 <template>
@@ -106,6 +132,13 @@ function trackingModeLabel(settings: QuadViewsSettings) {
 
         <div class="rounded-[1rem] border p-4 surface-panel-soft">
           <p class="eyebrow text-xs uppercase tracking-[0.18em]">Resolution</p>
+          <div class="mt-3 rounded-[0.75rem] border px-3 py-2 surface-panel-strong">
+            <span class="flex items-center justify-between gap-3 text-sm">
+              <span class="font-medium">Estimated render budget</span>
+              <span class="rounded-full px-2.5 py-1 text-xs font-semibold uppercase tracking-[0.14em] chip-accent">{{ budgetTone(config.modules.quadviews.defaults) }}</span>
+            </span>
+            <span class="mt-1 block text-sm text-muted">{{ budgetLabel(config.modules.quadviews.defaults) }}</span>
+          </div>
           <div class="mt-3 grid gap-3 sm:grid-cols-2">
             <label class="block">
               <span class="mb-1.5 flex items-center gap-1.5 text-sm font-medium">
@@ -199,6 +232,7 @@ function trackingModeLabel(settings: QuadViewsSettings) {
               </svg>
             </button>
             <span class="rounded-full px-3 py-1 text-xs font-semibold uppercase tracking-[0.16em] chip-accent">{{ trackingModeLabel(profile.settings) }}</span>
+            <span class="rounded-full px-3 py-1 text-xs font-semibold uppercase tracking-[0.16em] chip-accent">{{ budgetLabel(profile.settings) }}</span>
             <label class="pill-toggle inline-flex items-center gap-2 rounded-full px-3 py-1.5 text-xs font-medium">
               <input v-model="profile.enabled" class="h-4 w-4 accent-depthxr-copper" type="checkbox" />
               {{ profile.enabled ? 'Profile Enabled' : 'Profile Disabled' }}
