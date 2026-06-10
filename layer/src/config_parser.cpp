@@ -1213,7 +1213,6 @@ bool ParseQuadViewsProfile(const JsonValue& value, QuadViewsProfile& out, std::s
 bool ParseQuadViewsModule(const JsonValue::Object& object, QuadViewsModuleConfig& out, std::string& error) {
     static const std::unordered_set<std::string> allowed = {
         "enabled",
-        "preferEyeTracking",
         "defaults",
         "profiles",
     };
@@ -1223,16 +1222,11 @@ bool ParseQuadViewsModule(const JsonValue::Object& object, QuadViewsModuleConfig
     }
 
     std::optional<bool> enabled;
-    std::optional<bool> prefer_eye_tracking;
-    if (!ReadOptionalBool(object, "enabled", enabled, error) ||
-        !ReadOptionalBool(object, "preferEyeTracking", prefer_eye_tracking, error)) {
+    if (!ReadOptionalBool(object, "enabled", enabled, error)) {
         return false;
     }
     if (enabled.has_value()) {
         out.enabled = *enabled;
-    }
-    if (prefer_eye_tracking.has_value()) {
-        out.prefer_eye_tracking = *prefer_eye_tracking;
     }
 
     const auto defaults_it = object.find("defaults");

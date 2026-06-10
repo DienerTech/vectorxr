@@ -21,10 +21,9 @@ Sources:
 The UI and runtime resolver now provide `modules.quadviews` with:
 
 - module enable flag
-- eye-tracking preference
 - default profile
 - per-application profiles through the existing application registry
-- tracking mode: `head` or `eye`
+- tracking source: `eye` by default with automatic head-centered fallback, or explicit `head`
 - focus horizontal and vertical size as a percent of projected FOV
 - focus and peripheral resolution scale
 - foveate sharpening

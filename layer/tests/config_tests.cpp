@@ -421,9 +421,8 @@ void TestQuadViewsProfileResolution() {
     },
     "quadviews": {
       "enabled": true,
-      "preferEyeTracking": true,
       "defaults": {
-        "trackingMode": "head",
+        "trackingMode": "eye",
         "focusHorizontalSizePercent": 32.0,
         "focusVerticalSizePercent": 32.0,
         "focusScale": 1.1,
@@ -465,7 +464,6 @@ void TestQuadViewsProfileResolution() {
 
     const depthxr::ResolvedRuntimeConfig resolved = depthxr::ResolveRuntimeConfig(result.document, "DCS.exe");
     Expect(resolved.quadviews.enabled, "Quadviews module enable was not resolved");
-    Expect(resolved.quadviews.prefer_eye_tracking, "Quadviews eye tracking preference mismatch");
     Expect(resolved.quadviews.tracking_mode == depthxr::QuadViewsTrackingMode::Eye,
            "Quadviews profile tracking mode mismatch");
     Expect(std::abs(resolved.quadviews.focus_horizontal_size_percent - 34.0) < 0.0001,
@@ -480,7 +478,7 @@ void TestQuadViewsProfileResolution() {
            "Quadviews vertical offset mismatch");
 
     const depthxr::ResolvedRuntimeConfig resolved_other = depthxr::ResolveRuntimeConfig(result.document, "other.exe");
-    Expect(resolved_other.quadviews.tracking_mode == depthxr::QuadViewsTrackingMode::Head,
+    Expect(resolved_other.quadviews.tracking_mode == depthxr::QuadViewsTrackingMode::Eye,
            "Quadviews default tracking mode mismatch");
     Expect(std::abs(resolved_other.quadviews.focus_horizontal_size_percent - 32.0) < 0.0001,
            "Quadviews default focus size mismatch");

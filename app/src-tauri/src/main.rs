@@ -107,7 +107,7 @@ fn default_max_extra_pitch_degrees() -> f64 {
 }
 
 fn default_quadviews_tracking_mode() -> String {
-    "head".into()
+    "eye".into()
 }
 
 fn default_focus_horizontal_size_percent() -> f64 {
@@ -419,8 +419,6 @@ struct QuadViewsProfileConfig {
 struct QuadViewsModuleConfig {
     #[serde(default = "default_false")]
     enabled: bool,
-    #[serde(default = "default_true")]
-    prefer_eye_tracking: bool,
     #[serde(default)]
     defaults: QuadViewsSettings,
     #[serde(default)]
@@ -431,7 +429,6 @@ impl Default for QuadViewsModuleConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            prefer_eye_tracking: true,
             defaults: QuadViewsSettings::default(),
             profiles: Vec::new(),
         }

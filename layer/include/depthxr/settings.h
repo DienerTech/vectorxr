@@ -133,7 +133,7 @@ struct PivotXrResolvedSettings {
 };
 
 struct QuadViewsSettings {
-    QuadViewsTrackingMode tracking_mode{QuadViewsTrackingMode::Head};
+    QuadViewsTrackingMode tracking_mode{QuadViewsTrackingMode::Eye};
     double focus_horizontal_size_percent{32.0};
     double focus_vertical_size_percent{32.0};
     double focus_scale{1.1};
@@ -155,14 +155,12 @@ struct QuadViewsProfile {
 
 struct QuadViewsModuleConfig {
     bool enabled{false};
-    bool prefer_eye_tracking{true};
     QuadViewsSettings defaults;
     std::vector<QuadViewsProfile> profiles;
 };
 
 struct QuadViewsResolvedSettings : QuadViewsSettings {
     bool enabled{false};
-    bool prefer_eye_tracking{true};
 };
 
 struct ConfigDocument {

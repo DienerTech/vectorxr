@@ -165,7 +165,6 @@ void ApplyQuadViewsSettings(QuadViewsResolvedSettings& resolved, const QuadViews
 QuadViewsResolvedSettings ResolveQuadViewsSettings(const ConfigDocument& config, std::string_view exe_name) {
     QuadViewsResolvedSettings resolved;
     resolved.enabled = config.quadviews.enabled;
-    resolved.prefer_eye_tracking = config.quadviews.prefer_eye_tracking;
     ApplyQuadViewsSettings(resolved, config.quadviews.defaults);
 
     if (!config.quadviews.enabled) {

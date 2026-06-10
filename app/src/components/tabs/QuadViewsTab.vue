@@ -66,25 +66,6 @@ function trackingModeLabel(settings: QuadViewsSettings) {
           <span title="Turns VectorXR's native quadviews rendering path on or off for OpenXR apps." class="cursor-help select-none text-xs text-muted">ⓘ</span>
         </label>
       </div>
-
-      <div class="mb-5 grid gap-3 md:grid-cols-2">
-        <label class="rounded-[1rem] border p-4 surface-panel-soft">
-          <span class="mb-1.5 block text-sm font-medium">Prefer Eye Tracking</span>
-          <span class="mb-3 block text-sm leading-6 text-muted">Use OpenXR eye gaze when available, then fall back to head-tracked focus.</span>
-          <span class="pill-toggle inline-flex items-center gap-3 rounded-full px-4 py-2 text-sm font-medium">
-            <input v-model="config.modules.quadviews.preferEyeTracking" class="h-4 w-4 accent-depthxr-copper" type="checkbox" />
-            {{ config.modules.quadviews.preferEyeTracking ? 'Enabled' : 'Disabled' }}
-            <span title="Uses eye gaze for the sharp focus area when the headset and runtime support it." class="cursor-help select-none text-xs text-muted">ⓘ</span>
-          </span>
-        </label>
-        <div class="rounded-[1rem] border p-4 surface-panel-soft">
-          <p class="mb-1.5 text-sm font-medium">Runtime Source</p>
-          <p class="text-sm leading-6 text-muted">
-            The engine contract resolves one focus direction shared by Quadviews and Pivot so the high-fidelity zone follows the effective look direction.
-          </p>
-        </div>
-      </div>
-
       <p class="eyebrow mb-3 text-xs uppercase tracking-[0.24em]">Default Profile</p>
       <div class="grid gap-3 lg:grid-cols-3">
         <div class="rounded-[1rem] border p-4 surface-panel-soft">

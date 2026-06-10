@@ -643,7 +643,6 @@ bool SameSettings(const ResolvedRuntimeConfig& lhs, const ResolvedRuntimeConfig&
            NearlyEqual(lhs.pivotxr.pitch_deadzone_degrees, rhs.pivotxr.pitch_deadzone_degrees) &&
            NearlyEqual(lhs.pivotxr.pitch_max_extra_degrees, rhs.pivotxr.pitch_max_extra_degrees) &&
            lhs.quadviews.enabled == rhs.quadviews.enabled &&
-           lhs.quadviews.prefer_eye_tracking == rhs.quadviews.prefer_eye_tracking &&
            lhs.quadviews.tracking_mode == rhs.quadviews.tracking_mode &&
            NearlyEqual(lhs.quadviews.focus_horizontal_size_percent, rhs.quadviews.focus_horizontal_size_percent) &&
            NearlyEqual(lhs.quadviews.focus_vertical_size_percent, rhs.quadviews.focus_vertical_size_percent) &&
@@ -883,7 +882,7 @@ XrResult OpenXrLayer::CreateSession(XrInstance instance,
     }
     ReloadConfigIfNeeded();
     RefreshResolvedSettings();
-    if (IsQuadViewsActive() && resolved_settings_.quadviews.prefer_eye_tracking) {
+    if (IsQuadViewsActive() && resolved_settings_.quadviews.tracking_mode == QuadViewsTrackingMode::Eye) {
         const XrResult eye_gaze_result = CreateEyeGazeResources(*session);
         if (XR_FAILED(eye_gaze_result)) {
             logger_.Info("Eye gaze resources unavailable; quadviews will use head/static focus offsets.");
@@ -2553,14 +2552,16 @@ void OpenXrLayer::RefreshResolvedSettings() {
         pending_eye_gaze_sync_diagnostics_ = 10;
     }
 
-    if (IsQuadViewsActive() && resolved_settings_.quadviews.prefer_eye_tracking &&
-        resolved_settings_.quadviews.tracking_mode == QuadViewsTrackingMode::Eye &&
+    if (IsQuadViewsActive() && resolved_settings_.quadviews.tracking_mode == QuadViewsTrackingMode::Eye &&
         active_session_ != XR_NULL_HANDLE && !eye_gaze_resources_ready_) {
         const XrResult eye_gaze_result = CreateEyeGazeResources(active_session_);
         if (XR_FAILED(eye_gaze_result)) {
             logger_.Info("Eye gaze resources unavailable after quadviews tracking-mode change; head/static focus remains active.");
             DestroyEyeGazeResources();
         }
+    } else if ((!IsQuadViewsActive() || resolved_settings_.quadviews.tracking_mode != QuadViewsTrackingMode::Eye) &&
+               eye_gaze_resources_ready_) {
+        DestroyEyeGazeResources();
     }
 }
 
@@ -2884,7 +2885,6 @@ bool OpenXrLayer::LocateEyeGazeFocusOffsets(XrSession session,
     auto log_eye_gaze_diagnostic = [&](const std::string& reason) {
         if (settings.tracking_mode == QuadViewsTrackingMode::Eye && pending_eye_gaze_diagnostics_ > 0) {
             logger_.Debug("Quadviews eye-gaze focus unavailable: " + reason +
-                          ", preferEyeTracking=" + std::to_string(settings.prefer_eye_tracking) +
                           ", resourcesReady=" + std::to_string(eye_gaze_resources_ready_) +
                           ", actionSetAttached=" + std::to_string(eye_gaze_action_set_attached_));
             --pending_eye_gaze_diagnostics_;
@@ -2892,10 +2892,6 @@ bool OpenXrLayer::LocateEyeGazeFocusOffsets(XrSession session,
     };
 
     if (settings.tracking_mode != QuadViewsTrackingMode::Eye) {
-        return false;
-    }
-    if (!settings.prefer_eye_tracking) {
-        log_eye_gaze_diagnostic("preferEyeTracking disabled");
         return false;
     }
     if (session != active_session_) {
@@ -3489,7 +3485,6 @@ void OpenXrLayer::LogResolvedSettings(const ResolvedRuntimeConfig& settings) {
            << ", pivotPitchDeadzone=" << settings.pivotxr.pitch_deadzone_degrees
            << ", pivotPitchMaxExtra=" << settings.pivotxr.pitch_max_extra_degrees
            << ", quadviewsEnabled=" << settings.quadviews.enabled
-           << ", quadviewsPreferEyeTracking=" << settings.quadviews.prefer_eye_tracking
            << ", quadviewsTrackingMode=" << ToString(settings.quadviews.tracking_mode)
            << ", quadviewsFocusHorizontalSizePercent=" << settings.quadviews.focus_horizontal_size_percent
            << ", quadviewsFocusVerticalSizePercent=" << settings.quadviews.focus_vertical_size_percent

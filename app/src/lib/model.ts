@@ -135,7 +135,6 @@ export interface QuadViewsProfileConfig {
 
 export interface QuadViewsModuleConfig {
   enabled: boolean
-  preferEyeTracking: boolean
   defaults: QuadViewsSettings
   profiles: QuadViewsProfileConfig[]
 }
@@ -265,7 +264,7 @@ export function defaultPivotXRSettings(): PivotXRSettings {
 
 export function defaultQuadViewsSettings(): QuadViewsSettings {
   return {
-    trackingMode: 'head',
+    trackingMode: 'eye',
     focusHorizontalSizePercent: 32,
     focusVerticalSizePercent: 32,
     focusScale: 1.1,
@@ -324,7 +323,6 @@ export function defaultConfig(): VectorXRConfig {
       },
       quadviews: {
         enabled: false,
-        preferEyeTracking: true,
         defaults: defaultQuadViewsSettings(),
         profiles: [],
       },
@@ -655,7 +653,6 @@ function normalizeVectorXRConfig(value: unknown): VectorXRConfig {
       },
       quadviews: {
         enabled: normalizeBoolean(quadviews.enabled, fallback.modules.quadviews.enabled),
-        preferEyeTracking: normalizeBoolean(quadviews.preferEyeTracking, fallback.modules.quadviews.preferEyeTracking),
         defaults: quadViewsDefaults,
         profiles: quadViewsProfileValues.map((profileValue) => {
           const profile = isRecord(profileValue) ? profileValue : {}
