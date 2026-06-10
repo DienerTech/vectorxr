@@ -1502,6 +1502,9 @@ XrResult OpenXrLayer::EnumerateSwapchainImages(XrSwapchain swapchain,
     if (first_complete_enumeration || it->second.quadviews_session) {
         LogSwapchainSummary(swapchain, it->second, "imagesEnumerated");
     }
+    if (it->second.quadviews_session) {
+        TryPrewarmD3D11QuadViewsCompositor();
+    }
     return result;
 }
 
@@ -1560,11 +1563,11 @@ XrResult OpenXrLayer::ReleaseSwapchainImage(XrSwapchain swapchain,
     return result;
 }
 
-bool OpenXrLayer::EnsureD3D11QuadViewsCompositor(const XrCompositionLayerProjection* projection_layer,
+bool OpenXrLayer::EnsureD3D11QuadViewsCompositor(const XrCompositionLayerProjection* /*projection_layer*/,
                                                  uint32_t output_width,
                                                  uint32_t output_height,
                                                  int64_t output_format) {
-    if (!projection_layer || d3d11_quadviews_compositor_.failed || !d3d11_quadviews_compositor_.device ||
+    if (d3d11_quadviews_compositor_.failed || !d3d11_quadviews_compositor_.device ||
         !d3d11_quadviews_compositor_.context || active_session_ == XR_NULL_HANDLE) {
         return false;
     }
@@ -1662,6 +1665,40 @@ bool OpenXrLayer::EnsureD3D11QuadViewsCompositor(const XrCompositionLayerProject
             d3d11_quadviews_compositor_.failed = true;
             return false;
         }
+
+        bool gpu_timing_ready = true;
+        for (QuadViewsGpuTimingQuery& query : d3d11_quadviews_compositor_.gpu_timing_queries) {
+            D3D11_QUERY_DESC disjoint_desc{};
+            disjoint_desc.Query = D3D11_QUERY_TIMESTAMP_DISJOINT;
+            hr = d3d11_quadviews_compositor_.device->CreateQuery(&disjoint_desc, &query.disjoint);
+            if (FAILED(hr)) {
+                gpu_timing_ready = false;
+                break;
+            }
+
+            D3D11_QUERY_DESC timestamp_desc{};
+            timestamp_desc.Query = D3D11_QUERY_TIMESTAMP;
+            hr = d3d11_quadviews_compositor_.device->CreateQuery(&timestamp_desc, &query.start);
+            if (FAILED(hr)) {
+                gpu_timing_ready = false;
+                break;
+            }
+            hr = d3d11_quadviews_compositor_.device->CreateQuery(&timestamp_desc, &query.end);
+            if (FAILED(hr)) {
+                gpu_timing_ready = false;
+                break;
+            }
+        }
+        if (!gpu_timing_ready) {
+            for (QuadViewsGpuTimingQuery& query : d3d11_quadviews_compositor_.gpu_timing_queries) {
+                SafeRelease(query.disjoint);
+                SafeRelease(query.start);
+                SafeRelease(query.end);
+                query = {};
+            }
+            logger_.Info("D3D11 quadviews compositor GPU timing queries unavailable; CPU timing remains active.");
+        }
+        d3d11_quadviews_compositor_.gpu_timing_available = gpu_timing_ready;
 
         d3d11_quadviews_compositor_.initialized = true;
         logger_.Info("D3D11 quadviews compositor initialized.");
@@ -1812,14 +1849,128 @@ bool OpenXrLayer::EnsureD3D11QuadViewsCompositor(const XrCompositionLayerProject
             return false;
         }
 
-        logger_.Info("D3D11 quadviews compositor output swapchain ready: size=" +
-                     std::to_string(target.width) + "x" + std::to_string(target.height) +
-                     ", images=" + std::to_string(target.image_count) +
-                     ", directOutputRtvs=" + std::to_string(target.image_render_target_views.size()) +
-                     ", privateRenderTarget=1");
+        logger_.Debug("D3D11 quadviews compositor output swapchain ready: size=" +
+                      std::to_string(target.width) + "x" + std::to_string(target.height) +
+                      ", images=" + std::to_string(target.image_count) +
+                      ", directOutputRtvs=" + std::to_string(target.image_render_target_views.size()) +
+                      ", privateRenderTarget=1");
     }
 
     return true;
+}
+
+bool OpenXrLayer::EnsureD3D11SwapchainShaderResources(SwapchainInfo& swapchain) {
+    if (!d3d11_quadviews_compositor_.device ||
+        (swapchain.usage_flags & XR_SWAPCHAIN_USAGE_SAMPLED_BIT) == 0 ||
+        swapchain.d3d11_images.empty()) {
+        return false;
+    }
+    if (swapchain.d3d11_shader_resources_attempted) {
+        return swapchain.d3d11_shader_resources_available;
+    }
+    swapchain.d3d11_shader_resources_attempted = true;
+    if (swapchain.d3d11_shader_resources.size() == swapchain.d3d11_images.size()) {
+        const bool all_ready = std::all_of(swapchain.d3d11_shader_resources.begin(),
+                                           swapchain.d3d11_shader_resources.end(),
+                                           [](ID3D11ShaderResourceView* view) { return view != nullptr; });
+        if (all_ready) {
+            swapchain.d3d11_shader_resources_available = true;
+            return true;
+        }
+        SafeReleaseVector(swapchain.d3d11_shader_resources);
+    }
+
+    uint32_t image_index = 0;
+    swapchain.d3d11_shader_resources.reserve(swapchain.d3d11_images.size());
+    for (ID3D11Texture2D* texture : swapchain.d3d11_images) {
+        ID3D11ShaderResourceView* shader_resource = nullptr;
+        HRESULT hr = CreateTextureShaderResourceView(d3d11_quadviews_compositor_.device,
+                                                     texture,
+                                                     swapchain.format,
+                                                     &shader_resource);
+        if (FAILED(hr)) {
+            D3D11_TEXTURE2D_DESC texture_desc{};
+            if (texture) {
+                texture->GetDesc(&texture_desc);
+            }
+            SafeRelease(shader_resource);
+            SafeReleaseVector(swapchain.d3d11_shader_resources);
+            logger_.Info("D3D11 quadviews compositor direct input SRVs unavailable; using input copy path. "
+                         "hr=" + FormatHex(static_cast<uint32_t>(hr)) +
+                         ", failedImage=" + std::to_string(image_index) +
+                         ", format=" + std::to_string(swapchain.format) +
+                         ", size=" + std::to_string(swapchain.width) + "x" + std::to_string(swapchain.height) +
+                         ", usage=" + FormatUsageFlags(swapchain.usage_flags) +
+                         ", " + FormatTextureDesc(texture_desc));
+            swapchain.d3d11_shader_resources_available = false;
+            return false;
+        }
+        swapchain.d3d11_shader_resources.push_back(shader_resource);
+        ++image_index;
+    }
+    swapchain.d3d11_shader_resources_available =
+        swapchain.d3d11_shader_resources.size() == swapchain.d3d11_images.size();
+    if (swapchain.d3d11_shader_resources_available) {
+        logger_.Debug("D3D11 quadviews compositor direct input SRVs ready: size=" +
+                      std::to_string(swapchain.width) + "x" + std::to_string(swapchain.height) +
+                      ", images=" + std::to_string(swapchain.d3d11_shader_resources.size()) +
+                      ", format=" + std::to_string(swapchain.format));
+    }
+    return swapchain.d3d11_shader_resources_available;
+}
+
+void OpenXrLayer::TryPrewarmD3D11QuadViewsCompositor() {
+    if (!d3d11_quadviews_compositor_.device || !d3d11_quadviews_compositor_.context ||
+        active_session_ == XR_NULL_HANDLE || cached_quadviews_stereo_recommended_width_ == 0 ||
+        cached_quadviews_stereo_recommended_height_ == 0) {
+        return;
+    }
+
+    std::array<SwapchainInfo*, 4> quad_swapchains{};
+    uint32_t count = 0;
+    for (auto& [swapchain_handle, swapchain] : tracked_swapchains_) {
+        if (!swapchain.quadviews_session || swapchain.d3d11_images.empty()) {
+            continue;
+        }
+        if (count < quad_swapchains.size()) {
+            quad_swapchains[count++] = &swapchain;
+        }
+    }
+    if (count < quad_swapchains.size()) {
+        return;
+    }
+
+    SwapchainInfo* largest_swapchain = quad_swapchains[0];
+    for (SwapchainInfo* swapchain : quad_swapchains) {
+        if (static_cast<uint64_t>(swapchain->width) * swapchain->height >
+            static_cast<uint64_t>(largest_swapchain->width) * largest_swapchain->height) {
+            largest_swapchain = swapchain;
+        }
+    }
+
+    uint32_t direct_input_count = 0;
+    for (SwapchainInfo* swapchain : quad_swapchains) {
+        if (EnsureD3D11SwapchainShaderResources(*swapchain)) {
+            ++direct_input_count;
+        }
+    }
+
+    const bool output_ready = EnsureD3D11QuadViewsCompositor(nullptr,
+                                                            cached_quadviews_stereo_recommended_width_,
+                                                            cached_quadviews_stereo_recommended_height_,
+                                                            largest_swapchain->format);
+    if (output_ready && !d3d11_quadviews_compositor_.has_logged_prewarm) {
+        const uint32_t direct_output_count =
+            static_cast<uint32_t>(d3d11_quadviews_compositor_.targets[0].image_render_target_views.empty() ? 0 : 1) +
+            static_cast<uint32_t>(d3d11_quadviews_compositor_.targets[1].image_render_target_views.empty() ? 0 : 1);
+        logger_.Info("D3D11 quadviews compositor prewarmed: outputSize=" +
+                     std::to_string(cached_quadviews_stereo_recommended_width_) + "x" +
+                     std::to_string(cached_quadviews_stereo_recommended_height_) +
+                     ", directInputSwapchains=" + std::to_string(direct_input_count) + "/4" +
+                     ", directOutputEyes=" + std::to_string(direct_output_count) + "/2" +
+                     ", gpuTiming=" + std::to_string(d3d11_quadviews_compositor_.gpu_timing_available));
+        d3d11_quadviews_compositor_.has_logged_prewarm = true;
+    }
 }
 
 bool OpenXrLayer::ComposeQuadViewsD3D11(const XrCompositionLayerProjection* source_layer,
@@ -1934,67 +2085,51 @@ bool OpenXrLayer::ComposeQuadViewsD3D11(const XrCompositionLayerProjection* sour
     uint32_t direct_input_count = 0;
     uint32_t output_copy_count = 0;
     uint32_t direct_output_count = 0;
+    double completed_gpu_ms = -1.0;
+    XrTime completed_gpu_frame_time = 0;
+    if (d3d11_quadviews_compositor_.gpu_timing_available) {
+        for (QuadViewsGpuTimingQuery& query : d3d11_quadviews_compositor_.gpu_timing_queries) {
+            if (!query.issued || !query.disjoint || !query.start || !query.end) {
+                continue;
+            }
+
+            D3D11_QUERY_DATA_TIMESTAMP_DISJOINT disjoint{};
+            UINT64 start_timestamp = 0;
+            UINT64 end_timestamp = 0;
+            const HRESULT disjoint_result =
+                context->GetData(query.disjoint, &disjoint, sizeof(disjoint), D3D11_ASYNC_GETDATA_DONOTFLUSH);
+            const HRESULT start_result =
+                context->GetData(query.start, &start_timestamp, sizeof(start_timestamp), D3D11_ASYNC_GETDATA_DONOTFLUSH);
+            const HRESULT end_result =
+                context->GetData(query.end, &end_timestamp, sizeof(end_timestamp), D3D11_ASYNC_GETDATA_DONOTFLUSH);
+            if (disjoint_result == S_OK && start_result == S_OK && end_result == S_OK) {
+                if (!disjoint.Disjoint && disjoint.Frequency > 0 && end_timestamp >= start_timestamp) {
+                    completed_gpu_ms =
+                        static_cast<double>(end_timestamp - start_timestamp) /
+                        static_cast<double>(disjoint.Frequency) * 1000.0;
+                    completed_gpu_frame_time = query.frame_time;
+                }
+                query.issued = false;
+                break;
+            }
+        }
+    }
+
+    QuadViewsGpuTimingQuery* active_gpu_query = nullptr;
+    if (pending_quadviews_compositor_diagnostics_ > 0 && d3d11_quadviews_compositor_.gpu_timing_available) {
+        QuadViewsGpuTimingQuery& query =
+            d3d11_quadviews_compositor_.gpu_timing_queries[d3d11_quadviews_compositor_.next_gpu_timing_query %
+                                                           d3d11_quadviews_compositor_.gpu_timing_queries.size()];
+        if (!query.issued && query.disjoint && query.start && query.end) {
+            active_gpu_query = &query;
+            context->Begin(active_gpu_query->disjoint);
+            context->End(active_gpu_query->start);
+        }
+    }
     auto release_input_copy = [](QuadViewsInputCopy& input_copy) {
         SafeRelease(input_copy.shader_resource);
         SafeRelease(input_copy.texture);
         input_copy = {};
-    };
-    auto ensure_direct_input_resources = [&](SwapchainInfo& swapchain) -> bool {
-        if ((swapchain.usage_flags & XR_SWAPCHAIN_USAGE_SAMPLED_BIT) == 0 || swapchain.d3d11_images.empty()) {
-            return false;
-        }
-        if (swapchain.d3d11_shader_resources_attempted) {
-            return swapchain.d3d11_shader_resources_available;
-        }
-        swapchain.d3d11_shader_resources_attempted = true;
-        if (swapchain.d3d11_shader_resources.size() == swapchain.d3d11_images.size()) {
-            const bool all_ready = std::all_of(swapchain.d3d11_shader_resources.begin(),
-                                               swapchain.d3d11_shader_resources.end(),
-                                               [](ID3D11ShaderResourceView* view) { return view != nullptr; });
-            if (all_ready) {
-                swapchain.d3d11_shader_resources_available = true;
-                return true;
-            }
-            SafeReleaseVector(swapchain.d3d11_shader_resources);
-        }
-
-        uint32_t image_index = 0;
-        swapchain.d3d11_shader_resources.reserve(swapchain.d3d11_images.size());
-        for (ID3D11Texture2D* texture : swapchain.d3d11_images) {
-            ID3D11ShaderResourceView* shader_resource = nullptr;
-            HRESULT hr = CreateTextureShaderResourceView(d3d11_quadviews_compositor_.device,
-                                                         texture,
-                                                         swapchain.format,
-                                                         &shader_resource);
-            if (FAILED(hr)) {
-                D3D11_TEXTURE2D_DESC texture_desc{};
-                if (texture) {
-                    texture->GetDesc(&texture_desc);
-                }
-                SafeRelease(shader_resource);
-                SafeReleaseVector(swapchain.d3d11_shader_resources);
-                logger_.Info("D3D11 quadviews compositor direct input SRVs unavailable; using input copy path. "
-                             "hr=" + FormatHex(static_cast<uint32_t>(hr)) +
-                             ", failedImage=" + std::to_string(image_index) +
-                             ", format=" + std::to_string(swapchain.format) +
-                             ", size=" + std::to_string(swapchain.width) + "x" + std::to_string(swapchain.height) +
-                             ", usage=" + FormatUsageFlags(swapchain.usage_flags) +
-                             ", " + FormatTextureDesc(texture_desc));
-                swapchain.d3d11_shader_resources_available = false;
-                return false;
-            }
-            swapchain.d3d11_shader_resources.push_back(shader_resource);
-            ++image_index;
-        }
-        swapchain.d3d11_shader_resources_available =
-            swapchain.d3d11_shader_resources.size() == swapchain.d3d11_images.size();
-        if (swapchain.d3d11_shader_resources_available) {
-            logger_.Info("D3D11 quadviews compositor direct input SRVs ready: size=" +
-                         std::to_string(swapchain.width) + "x" + std::to_string(swapchain.height) +
-                         ", images=" + std::to_string(swapchain.d3d11_shader_resources.size()) +
-                         ", format=" + std::to_string(swapchain.format));
-        }
-        return swapchain.d3d11_shader_resources_available;
     };
     auto ensure_input_copy = [&](uint32_t input_index, const SwapchainInfo& swapchain) -> bool {
         QuadViewsInputCopy& input_copy = d3d11_quadviews_compositor_.input_copies[input_index];
@@ -2037,9 +2172,9 @@ bool OpenXrLayer::ComposeQuadViewsD3D11(const XrCompositionLayerProjection* sour
         input_copy.width = swapchain.width;
         input_copy.height = swapchain.height;
         input_copy.format = swapchain.format;
-        logger_.Info("D3D11 quadviews compositor input copy ready: input=" + std::to_string(input_index) +
-                     ", size=" + std::to_string(input_copy.width) + "x" + std::to_string(input_copy.height) +
-                     ", format=" + std::to_string(input_copy.format));
+        logger_.Debug("D3D11 quadviews compositor input copy ready: input=" + std::to_string(input_index) +
+                      ", size=" + std::to_string(input_copy.width) + "x" + std::to_string(input_copy.height) +
+                      ", format=" + std::to_string(input_copy.format));
         return true;
     };
 
@@ -2083,7 +2218,7 @@ bool OpenXrLayer::ComposeQuadViewsD3D11(const XrCompositionLayerProjection* sour
         ID3D11ShaderResourceView* focus_resource = nullptr;
         SwapchainInfo& peripheral_swapchain = *swapchains[eye];
         SwapchainInfo& focus_swapchain = *swapchains[eye + 2];
-        if (ensure_direct_input_resources(peripheral_swapchain) &&
+        if (EnsureD3D11SwapchainShaderResources(peripheral_swapchain) &&
             peripheral_swapchain.last_acquired_image_index < peripheral_swapchain.d3d11_shader_resources.size()) {
             peripheral_resource =
                 peripheral_swapchain.d3d11_shader_resources[peripheral_swapchain.last_acquired_image_index];
@@ -2098,7 +2233,7 @@ bool OpenXrLayer::ComposeQuadViewsD3D11(const XrCompositionLayerProjection* sour
             peripheral_resource = d3d11_quadviews_compositor_.input_copies[eye].shader_resource;
             ++input_copy_count;
         }
-        if (ensure_direct_input_resources(focus_swapchain) &&
+        if (EnsureD3D11SwapchainShaderResources(focus_swapchain) &&
             focus_swapchain.last_acquired_image_index < focus_swapchain.d3d11_shader_resources.size()) {
             focus_resource = focus_swapchain.d3d11_shader_resources[focus_swapchain.last_acquired_image_index];
             ++direct_input_count;
@@ -2206,6 +2341,17 @@ bool OpenXrLayer::ComposeQuadViewsD3D11(const XrCompositionLayerProjection* sour
             break;
         }
     }
+    if (active_gpu_query) {
+        context->End(active_gpu_query->end);
+        context->End(active_gpu_query->disjoint);
+        if (rendered) {
+            active_gpu_query->issued = true;
+            active_gpu_query->frame_time = display_time;
+            d3d11_quadviews_compositor_.next_gpu_timing_query =
+                (d3d11_quadviews_compositor_.next_gpu_timing_query + 1) %
+                static_cast<uint32_t>(d3d11_quadviews_compositor_.gpu_timing_queries.size());
+        }
+    }
 
     restore_state();
     if (!rendered) {
@@ -2221,6 +2367,23 @@ bool OpenXrLayer::ComposeQuadViewsD3D11(const XrCompositionLayerProjection* sour
         return false;
     }
     d3d11_quadviews_compositor_.failure_logs_remaining = 8;
+    if (!d3d11_quadviews_compositor_.has_logged_capabilities) {
+        logger_.Info("D3D11 quadviews compositor capabilities: outputSize=" +
+                     std::to_string(output_width) + "x" + std::to_string(output_height) +
+                     ", cachedStereoSize=" + std::to_string(cached_quadviews_stereo_recommended_width_) + "x" +
+                     std::to_string(cached_quadviews_stereo_recommended_height_) +
+                     ", directInputs=" + std::to_string(direct_input_count) + "/4" +
+                     ", inputCopyFallbacks=" + std::to_string(input_copy_count) +
+                     ", directOutputs=" + std::to_string(direct_output_count) + "/2" +
+                     ", outputCopyFallbacks=" + std::to_string(output_copy_count) +
+                     ", gpuTiming=" + std::to_string(d3d11_quadviews_compositor_.gpu_timing_available) +
+                     ", appPixelBudget=" + FormatDiagnosticDouble(
+                         (static_cast<double>(swapchains[0]->width) * swapchains[0]->height +
+                          static_cast<double>(swapchains[2]->width) * swapchains[2]->height) /
+                         std::max(1.0, static_cast<double>(output_width) * output_height) * 100.0) +
+                     "%");
+        d3d11_quadviews_compositor_.has_logged_capabilities = true;
+    }
     if (pending_quadviews_compositor_diagnostics_ > 0) {
         const auto compose_end = std::chrono::steady_clock::now();
         const double cpu_ms = std::chrono::duration<double, std::milli>(compose_end - compose_start).count();
@@ -2234,6 +2397,9 @@ bool OpenXrLayer::ComposeQuadViewsD3D11(const XrCompositionLayerProjection* sour
                << ", inputCopies=" << input_copy_count
                << ", directOutputs=" << direct_output_count
                << ", outputCopies=" << output_copy_count
+               << ", completedGpuFrameTime=" << completed_gpu_frame_time
+               << ", completedGpuMs="
+               << (completed_gpu_ms >= 0.0 ? FormatDiagnosticDouble(completed_gpu_ms) : "pending")
                << ", appPixelBudget=" << FormatDiagnosticDouble(
                       (static_cast<double>(swapchains[0]->width) * swapchains[0]->height +
                        static_cast<double>(swapchains[2]->width) * swapchains[2]->height) /
@@ -3830,6 +3996,12 @@ void OpenXrLayer::ResetD3D11QuadViewsCompositor() {
         SafeRelease(input_copy.texture);
         input_copy = {};
     }
+    for (QuadViewsGpuTimingQuery& query : d3d11_quadviews_compositor_.gpu_timing_queries) {
+        SafeRelease(query.disjoint);
+        SafeRelease(query.start);
+        SafeRelease(query.end);
+        query = {};
+    }
 
     SafeRelease(d3d11_quadviews_compositor_.constants);
     SafeRelease(d3d11_quadviews_compositor_.blend_state);
@@ -3840,7 +4012,11 @@ void OpenXrLayer::ResetD3D11QuadViewsCompositor() {
     SafeRelease(d3d11_quadviews_compositor_.device);
     d3d11_quadviews_compositor_.initialized = false;
     d3d11_quadviews_compositor_.failed = false;
+    d3d11_quadviews_compositor_.gpu_timing_available = false;
+    d3d11_quadviews_compositor_.has_logged_capabilities = false;
+    d3d11_quadviews_compositor_.has_logged_prewarm = false;
     d3d11_quadviews_compositor_.failure_logs_remaining = 8;
+    d3d11_quadviews_compositor_.next_gpu_timing_query = 0;
 }
 
 void OpenXrLayer::LogSwapchainSummary(XrSwapchain swapchain,

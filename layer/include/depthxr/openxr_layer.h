@@ -24,6 +24,7 @@ struct ID3D11Buffer;
 struct ID3D11Device;
 struct ID3D11DeviceContext;
 struct ID3D11PixelShader;
+struct ID3D11Query;
 struct ID3D11RenderTargetView;
 struct ID3D11SamplerState;
 struct ID3D11ShaderResourceView;
@@ -140,6 +141,14 @@ class OpenXrLayer {
         ID3D11ShaderResourceView* shader_resource{nullptr};
     };
 
+    struct QuadViewsGpuTimingQuery {
+        ID3D11Query* disjoint{nullptr};
+        ID3D11Query* start{nullptr};
+        ID3D11Query* end{nullptr};
+        bool issued{false};
+        XrTime frame_time{0};
+    };
+
     struct D3D11QuadViewsCompositor {
         ID3D11Device* device{nullptr};
         ID3D11DeviceContext* context{nullptr};
@@ -150,9 +159,14 @@ class OpenXrLayer {
         ID3D11Buffer* constants{nullptr};
         bool initialized{false};
         bool failed{false};
+        bool gpu_timing_available{false};
+        bool has_logged_capabilities{false};
+        bool has_logged_prewarm{false};
         uint32_t failure_logs_remaining{8};
+        uint32_t next_gpu_timing_query{0};
         std::array<QuadViewsInputCopy, 4> input_copies;
         std::array<QuadViewsCompositionTarget, 2> targets;
+        std::array<QuadViewsGpuTimingQuery, 4> gpu_timing_queries;
     };
 
     void ReloadConfigIfNeeded();
@@ -218,6 +232,8 @@ class OpenXrLayer {
                                         uint32_t output_width,
                                         uint32_t output_height,
                                         int64_t output_format);
+    bool EnsureD3D11SwapchainShaderResources(SwapchainInfo& swapchain);
+    void TryPrewarmD3D11QuadViewsCompositor();
     bool ComposeQuadViewsD3D11(const XrCompositionLayerProjection* source_layer,
                                XrTime display_time,
                                const XrPosef& reverse_delta,
