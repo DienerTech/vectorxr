@@ -742,6 +742,13 @@ bool IsQuadViewConfiguration(XrViewConfigurationType type) {
 constexpr XrTime kMaxPivotPoseDeltaMatchWindow = 5'000'000;
 constexpr XrTime kMaxQuadViewsFovMatchWindow = 5'000'000;
 constexpr size_t kMaxCachedQuadViewsFovFrames = 180;
+// Hot-path throttles. xrLocateSpace/xrLocateViews/xrEndFrame run multiple
+// times per frame; filesystem stats, input-device polls, and downstream
+// helper calls must not.
+constexpr std::chrono::milliseconds kConfigCheckInterval{500};
+constexpr std::chrono::milliseconds kInputBindingPollInterval{30};
+constexpr std::chrono::milliseconds kEyeOffsetRefreshInterval{250};
+constexpr std::chrono::milliseconds kAppActionSyncFreshWindow{100};
 
 bool SameSettings(const ResolvedRuntimeConfig& lhs, const ResolvedRuntimeConfig& rhs) {
     return lhs.core.enabled == rhs.core.enabled &&
@@ -1160,6 +1167,10 @@ XrResult OpenXrLayer::SyncActions(XrSession session, const XrActionsSyncInfo* sy
     }
 
     const XrResult result = next_sync_actions_(session, &downstream_sync_info);
+    if (XR_SUCCEEDED(result) && appended_eye_gaze_active_set) {
+        std::scoped_lock lock(mutex_);
+        last_app_action_sync_time_ = std::chrono::steady_clock::now();
+    }
     if (pending_eye_gaze_sync_diagnostics_ > 0) {
         std::scoped_lock lock(mutex_);
         if (session == active_session_ && eye_gaze_resources_ready_) {
@@ -2496,9 +2507,13 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
     }
 
     const XrPosef reverse_delta = InvertPose(pose_delta);
-    std::vector<std::vector<XrCompositionLayerProjectionView>> adjusted_projection_views;
-    std::vector<XrCompositionLayerProjection> adjusted_projection_layers;
-    std::vector<const XrCompositionLayerBaseHeader*> adjusted_layers;
+    std::vector<std::vector<XrCompositionLayerProjectionView>>& adjusted_projection_views =
+        end_frame_projection_views_scratch_;
+    std::vector<XrCompositionLayerProjection>& adjusted_projection_layers = end_frame_projection_layers_scratch_;
+    std::vector<const XrCompositionLayerBaseHeader*>& adjusted_layers = end_frame_layers_scratch_;
+    adjusted_projection_views.clear();
+    adjusted_projection_layers.clear();
+    adjusted_layers.clear();
     uint32_t corrected_projection_layer_count = 0;
     uint32_t corrected_projection_view_count = 0;
     uint32_t split_quad_projection_layer_count = 0;
@@ -2618,7 +2633,8 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
                << ", cachedPivotDeltas=" << cached_pivot_pose_deltas_.size();
         logger_.Debug(stream.str());
         --pending_end_frame_diagnostics_;
-    } else if (quadviews_projection_split_active && split_quad_projection_layer_count > 0) {
+    } else if (quadviews_projection_split_active && split_quad_projection_layer_count > 0 &&
+               logger_.IsDebugEnabled()) {
         logger_.Debug("EndFrame quadviews projection split applied: splitLayers=" +
                       std::to_string(split_quad_projection_layer_count) +
                       ", d3d11QuadCompositions=" + std::to_string(d3d11_quad_composition_count) +
@@ -2668,12 +2684,12 @@ XrResult OpenXrLayer::LocateSpace(XrSpace space, XrSpace base_space, XrTime time
         return next_locate_space_(space, base_space, time, location);
     }
 
+    // Quad-view sessions must keep xrLocateSpace consistent with the pivoted
+    // view poses returned from xrLocateViews. Apps such as DCS place
+    // head-attached geometry (e.g. the FA18 pilot visor) from VIEW-space
+    // locates; skipping pivot here desynchronizes that geometry from the
+    // pivoted camera.
     const bool pivotxr_active = IsPivotXrActive(resolved_settings_.pivotxr);
-    if (has_active_primary_view_configuration_ &&
-        IsQuadViewConfiguration(active_primary_view_configuration_type_)) {
-        return next_locate_space_(space, base_space, time, location);
-    }
-
     return LocateSpaceWithPivot(
         space, base_space, time, resolved_settings_.pivotxr, pivotxr_active, location, nullptr, nullptr, nullptr, false);
 }
@@ -2729,8 +2745,10 @@ XrResult OpenXrLayer::LocateViews(XrSession session,
     // DepthXR keeps the interception surface minimal and applies all current
     // stereo/depth experiments in xrLocateViews.
     ++locate_views_call_count_;
-    std::vector<ViewAdjustmentData> original_views(count);
-    std::vector<ViewAdjustmentData> adjusted_views(count);
+    std::vector<ViewAdjustmentData>& original_views = locate_views_original_scratch_;
+    std::vector<ViewAdjustmentData>& adjusted_views = locate_views_adjusted_scratch_;
+    original_views.resize(count);
+    adjusted_views.resize(count);
     for (uint32_t i = 0; i < count; ++i) {
         original_views[i].position.x = views[i].pose.position.x;
         original_views[i].position.y = views[i].pose.position.y;
@@ -2944,6 +2962,13 @@ XrResult OpenXrLayer::DestroySpace(XrSpace space) {
 }
 
 void OpenXrLayer::ReloadConfigIfNeeded() {
+    const auto now = std::chrono::steady_clock::now();
+    if (has_loaded_config_ && last_config_check_time_.has_value() &&
+        now - *last_config_check_time_ < kConfigCheckInterval) {
+        return;
+    }
+    last_config_check_time_ = now;
+
     if (config_path_.empty()) {
         config_path_ = ResolveConfigPath();
     }
@@ -2952,6 +2977,7 @@ void OpenXrLayer::ReloadConfigIfNeeded() {
         if (!has_loaded_config_) {
             config_ = DefaultConfig();
             has_loaded_config_ = true;
+            ++config_generation_;
             logger_.Info("No config file found. Using default settings.");
         }
         return;
@@ -2976,6 +3002,7 @@ void OpenXrLayer::ReloadConfigIfNeeded() {
         if (!has_loaded_config_) {
             config_ = DefaultConfig();
             has_loaded_config_ = true;
+            ++config_generation_;
         }
         return;
     }
@@ -2986,10 +3013,20 @@ void OpenXrLayer::ReloadConfigIfNeeded() {
     last_config_write_time_ = timestamp;
     has_failed_config_timestamp_ = false;
     last_failed_config_error_.clear();
+    ++config_generation_;
     logger_.Info("Loaded config from " + config_path_.string());
 }
 
 void OpenXrLayer::RefreshResolvedSettings() {
+    // Re-resolving settings is expensive (string compares, copies, logging
+    // checks); the result only changes when the config document or the active
+    // session changes, so skip the work otherwise.
+    if (resolved_settings_generation_ == config_generation_ && resolved_settings_session_ == active_session_) {
+        return;
+    }
+    resolved_settings_generation_ = config_generation_;
+    resolved_settings_session_ = active_session_;
+
     const ResolvedRuntimeConfig previous = resolved_settings_;
     resolved_settings_ = ResolveRuntimeConfig(config_, current_exe_name_);
     if (!SameInputBinding(previous.depthxr_bindings.toggle_enabled, resolved_settings_.depthxr_bindings.toggle_enabled) ||
@@ -3220,8 +3257,10 @@ void OpenXrLayer::ResetSessionState() {
     tracked_local_spaces_.clear();
     tracked_stage_spaces_.clear();
     cached_eye_offset_poses_.clear();
+    cached_eye_offsets_refresh_time_.reset();
     cached_pivot_pose_deltas_.clear();
     cached_quadviews_fovs_.clear();
+    last_app_action_sync_time_.reset();
     ResetSwapchainState();
 }
 
@@ -3373,14 +3412,21 @@ bool OpenXrLayer::LocateEyeGazeFocusOffsets(XrSession session,
         return false;
     }
 
-    const XrActiveActionSet active_action_set{quadviews_action_set_, XR_NULL_PATH};
-    XrActionsSyncInfo sync_info{XR_TYPE_ACTIONS_SYNC_INFO};
-    sync_info.countActiveActionSets = 1;
-    sync_info.activeActionSets = &active_action_set;
-    const XrResult sync_result = next_sync_actions_(session, &sync_info);
-    if (XR_FAILED(sync_result)) {
-        log_eye_gaze_diagnostic("self sync failed, result=" + FormatHex(static_cast<uint64_t>(sync_result)));
-        return false;
+    // The layer's action set rides along with the app's xrSyncActions; only
+    // issue a downstream self-sync when the app has not synced recently.
+    const auto sync_check_now = std::chrono::steady_clock::now();
+    const bool app_sync_fresh = last_app_action_sync_time_.has_value() &&
+                                sync_check_now - *last_app_action_sync_time_ < kAppActionSyncFreshWindow;
+    if (!app_sync_fresh) {
+        const XrActiveActionSet active_action_set{quadviews_action_set_, XR_NULL_PATH};
+        XrActionsSyncInfo sync_info{XR_TYPE_ACTIONS_SYNC_INFO};
+        sync_info.countActiveActionSets = 1;
+        sync_info.activeActionSets = &active_action_set;
+        const XrResult sync_result = next_sync_actions_(session, &sync_info);
+        if (XR_FAILED(sync_result)) {
+            log_eye_gaze_diagnostic("self sync failed, result=" + FormatHex(static_cast<uint64_t>(sync_result)));
+            return false;
+        }
     }
 
     XrActionStateGetInfo action_state_info{XR_TYPE_ACTION_STATE_GET_INFO};
@@ -3506,6 +3552,7 @@ void OpenXrLayer::DestroyInternalReferenceSpaces() {
         tracked_view_spaces_.clear();
         tracked_stage_spaces_.clear();
         cached_eye_offset_poses_.clear();
+        cached_eye_offsets_refresh_time_.reset();
         cached_pivot_pose_deltas_.clear();
         cached_quadviews_fovs_.clear();
         return;
@@ -3533,6 +3580,7 @@ void OpenXrLayer::DestroyInternalReferenceSpaces() {
     }
 
     cached_eye_offset_poses_.clear();
+    cached_eye_offsets_refresh_time_.reset();
     cached_pivot_pose_deltas_.clear();
     cached_quadviews_fovs_.clear();
 }
@@ -3543,6 +3591,17 @@ bool OpenXrLayer::EnsureEyeOffsets(XrSession session,
                                    uint32_t view_count) {
     if (internal_view_space_ == XR_NULL_HANDLE || !next_locate_views_ || view_count == 0) {
         return false;
+    }
+
+    // Per-eye offsets relative to VIEW space only change with physical IPD
+    // adjustments; refresh on an interval instead of issuing a downstream
+    // xrLocateViews every frame.
+    const auto now = std::chrono::steady_clock::now();
+    if (cached_eye_offset_poses_.size() == view_count &&
+        cached_eye_offsets_view_configuration_ == view_configuration_type &&
+        cached_eye_offsets_refresh_time_.has_value() &&
+        now - *cached_eye_offsets_refresh_time_ < kEyeOffsetRefreshInterval) {
+        return true;
     }
 
     std::vector<XrView> eye_views(view_count);
@@ -3567,6 +3626,8 @@ bool OpenXrLayer::EnsureEyeOffsets(XrSession session,
     for (uint32_t i = 0; i < view_count; ++i) {
         cached_eye_offset_poses_[i] = eye_views[i].pose;
     }
+    cached_eye_offsets_view_configuration_ = view_configuration_type;
+    cached_eye_offsets_refresh_time_ = now;
     return true;
 }
 
@@ -3966,11 +4027,15 @@ void OpenXrLayer::ResetPivotActivationState() {
     pivotxr_last_smoothing_wall_time_.reset();
     pivotxr_toggle_enabled_ = false;
     pivotxr_activation_key_was_down_ = false;
+    pivotxr_binding_last_poll_time_.reset();
+    pivotxr_binding_down_cached_ = false;
 }
 
 void OpenXrLayer::ResetDepthToggleState() {
     depthxr_toggle_enabled_ = true;
     depthxr_toggle_binding_was_down_ = false;
+    depthxr_binding_last_poll_time_.reset();
+    depthxr_binding_down_cached_ = false;
 }
 
 void OpenXrLayer::ResetSwapchainState() {
@@ -4056,7 +4121,15 @@ bool OpenXrLayer::IsDepthXrActive() {
     }
 
 #if defined(_WIN32)
-    const bool binding_down = IsInputBindingDown(resolved_settings_.depthxr_bindings.toggle_enabled);
+    // Input polls can hit DirectInput device reads; throttle them so per-call
+    // OpenXR interception stays cheap.
+    const auto now = std::chrono::steady_clock::now();
+    if (!depthxr_binding_last_poll_time_.has_value() ||
+        now - *depthxr_binding_last_poll_time_ >= kInputBindingPollInterval) {
+        depthxr_binding_last_poll_time_ = now;
+        depthxr_binding_down_cached_ = IsInputBindingDown(resolved_settings_.depthxr_bindings.toggle_enabled);
+    }
+    const bool binding_down = depthxr_binding_down_cached_;
     const bool was_pressed_this_call = binding_down && !depthxr_toggle_binding_was_down_;
     depthxr_toggle_binding_was_down_ = binding_down;
 
@@ -4081,7 +4154,13 @@ bool OpenXrLayer::IsPivotXrActive(const PivotXrResolvedSettings& settings) {
     }
 
 #if defined(_WIN32)
-    const bool binding_down = IsInputBindingDown(settings.activation_binding);
+    const auto now = std::chrono::steady_clock::now();
+    if (!pivotxr_binding_last_poll_time_.has_value() ||
+        now - *pivotxr_binding_last_poll_time_ >= kInputBindingPollInterval) {
+        pivotxr_binding_last_poll_time_ = now;
+        pivotxr_binding_down_cached_ = IsInputBindingDown(settings.activation_binding);
+    }
+    const bool binding_down = pivotxr_binding_down_cached_;
     const bool was_pressed_this_call = binding_down && !pivotxr_activation_key_was_down_;
     pivotxr_activation_key_was_down_ = binding_down;
 

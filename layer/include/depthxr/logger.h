@@ -3,6 +3,7 @@
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
+#include <fstream>
 #include <mutex>
 #include <string>
 
@@ -20,6 +21,7 @@ class Logger {
     void Error(const std::string& message);
     void Info(const std::string& message);
     void Debug(const std::string& message);
+    [[nodiscard]] bool IsDebugEnabled() const;
     [[nodiscard]] std::filesystem::path ActiveLogPath() const;
 
   private:
@@ -33,6 +35,7 @@ class Logger {
     mutable std::mutex mutex_;
     std::filesystem::path base_log_path_;
     std::filesystem::path active_log_path_;
+    std::ofstream stream_;
     LogLevel level_{LogLevel::Info};
     int retention_files_{7};
     LogLevel pending_duplicate_level_{LogLevel::Info};

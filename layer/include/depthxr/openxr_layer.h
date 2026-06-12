@@ -16,6 +16,7 @@
 #include <openxr/openxr.h>
 
 #include "depthxr/config_parser.h"
+#include "depthxr/effects.h"
 #include "depthxr/logger.h"
 #include "depthxr/settings_resolver.h"
 
@@ -253,6 +254,10 @@ class OpenXrLayer {
     Logger logger_;
     ConfigDocument config_;
     bool has_loaded_config_{false};
+    uint64_t config_generation_{0};
+    uint64_t resolved_settings_generation_{~0ull};
+    XrSession resolved_settings_session_{XR_NULL_HANDLE};
+    std::optional<std::chrono::steady_clock::time_point> last_config_check_time_;
     std::string last_failed_config_error_;
     std::string current_exe_name_;
     ResolvedRuntimeConfig resolved_settings_;
@@ -271,6 +276,10 @@ class OpenXrLayer {
     bool pivotxr_activation_key_was_down_{false};
     bool depthxr_toggle_enabled_{true};
     bool depthxr_toggle_binding_was_down_{false};
+    std::optional<std::chrono::steady_clock::time_point> pivotxr_binding_last_poll_time_;
+    std::optional<std::chrono::steady_clock::time_point> depthxr_binding_last_poll_time_;
+    bool pivotxr_binding_down_cached_{false};
+    bool depthxr_binding_down_cached_{false};
     bool quad_views_extension_requested_{false};
     bool varjo_foveated_rendering_extension_requested_{false};
     bool eye_gaze_extension_enabled_{false};
@@ -300,6 +309,14 @@ class OpenXrLayer {
     std::unordered_set<XrSpace> tracked_local_spaces_;
     std::unordered_set<XrSpace> tracked_stage_spaces_;
     std::vector<XrPosef> cached_eye_offset_poses_;
+    std::optional<std::chrono::steady_clock::time_point> cached_eye_offsets_refresh_time_;
+    XrViewConfigurationType cached_eye_offsets_view_configuration_{XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO};
+    std::optional<std::chrono::steady_clock::time_point> last_app_action_sync_time_;
+    std::vector<ViewAdjustmentData> locate_views_original_scratch_;
+    std::vector<ViewAdjustmentData> locate_views_adjusted_scratch_;
+    std::vector<std::vector<XrCompositionLayerProjectionView>> end_frame_projection_views_scratch_;
+    std::vector<XrCompositionLayerProjection> end_frame_projection_layers_scratch_;
+    std::vector<const XrCompositionLayerBaseHeader*> end_frame_layers_scratch_;
     std::map<XrTime, XrPosef> cached_pivot_pose_deltas_;
     std::map<XrTime, std::array<XrFovf, 4>> cached_quadviews_fovs_;
     std::unordered_map<XrSwapchain, SwapchainInfo> tracked_swapchains_;

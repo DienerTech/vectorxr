@@ -80,21 +80,20 @@ June 2026 DCS testing found a remaining Pivot + Quadviews failure mode in the FA
 - The issue was not reproduced in the same way in aircraft without close headgear geometry, such as the Mi-24.
 - A conservative Quadviews-only virtual-neck translation experiment, using a small down/back pivot offset, did not improve the FA18 case and was not kept.
 
-Current hypothesis: this is not the generic Pivot stereo-recomposition bug that was fixed earlier. It is likely a Quadviews-specific mismatch involving very-near cockpit/pilot geometry, synthetic peripheral/focus views, and final stereo recomposition/reverse correction. Future investigation should compare:
+Root cause identified (June 2026 code review): `xrLocateSpace` interception
+contained an early passthrough that skipped Pivot entirely whenever the active
+primary view configuration was a quad configuration. Apps that place
+head-attached geometry from VIEW-space locates (DCS positions the pilot
+helmet/visor this way) therefore rendered that geometry at the *unpivoted*
+head pose while `xrLocateViews` returned pivoted eye poses. The helmet stayed
+fixed while the eyes rotated inside it — pivoting right swings the right eye
+into the helmet shell interior, producing the observed stereo conflict. Pivot
+without Quadviews never hit the bypass, and aircraft without close headgear
+geometry had nothing near enough to expose the mismatch.
 
-1. FA18 Pivot without Quadviews.
-2. FA18 Quadviews with Pivot disabled.
-3. FA18 Quadviews + Pivot with head-tracked focus.
-4. FA18 Quadviews + Pivot with eye-tracked focus.
-5. Per-eye projection-view poses and FOVs before and after `xrEndFrame` recomposition.
-
-Potential fix directions:
-
-- inspect whether DCS renders pilot headgear using assumptions that do not survive synthetic quadview composition
-- test focus/peripheral pose divergence for extremely near geometry
-- validate the reverse pivot pose delta against both peripheral and focus views
-- add diagnostics that log per-eye pose differences for views 0/1 and 2/3 during Pivot + Quadviews
-- consider app/profile-specific mitigations only after the underlying pose/FOV relationship is understood
+Fix: the quad-configuration bypass in `OpenXrLayer::LocateSpace` was removed
+so VIEW-space locates receive the same pivot transform as the located views,
+matching stereo-session behavior. Pending headset verification in the FA18.
 
 ## FOV Tweak Compatibility
 

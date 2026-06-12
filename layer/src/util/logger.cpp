@@ -106,6 +106,9 @@ void Logger::Initialize(const std::filesystem::path& log_path) {
         std::filesystem::create_directories(base_log_path_.parent_path());
     }
 
+    if (stream_.is_open()) {
+        stream_.close();
+    }
     active_log_path_ = CreateSessionLogPath(base_log_path_);
     PruneLocked();
 }
@@ -132,6 +135,11 @@ void Logger::Info(const std::string& message) {
 
 void Logger::Debug(const std::string& message) {
     Write(LogLevel::Debug, message);
+}
+
+bool Logger::IsDebugEnabled() const {
+    std::scoped_lock lock(mutex_);
+    return Severity(LogLevel::Debug) <= Severity(level_);
 }
 
 std::filesystem::path Logger::ActiveLogPath() const {
@@ -201,15 +209,20 @@ void Logger::WriteLineLocked(LogLevel level,
         return;
     }
 
-    std::ofstream stream(active_log_path_, std::ios::app);
-    if (!stream) {
-        return;
+    // Reuse one open handle instead of reopening the file per line; flush so
+    // the log stays readable while the layer is loaded in a running app.
+    if (!stream_.is_open()) {
+        stream_.open(active_log_path_, std::ios::app);
+        if (!stream_.is_open()) {
+            return;
+        }
     }
 
     const auto time = std::chrono::system_clock::to_time_t(now);
     const std::tm tm = LocalTime(time);
 
-    stream << std::put_time(&tm, "%Y-%m-%d %H:%M:%S") << " [" << ToString(level) << "] " << message << '\n';
+    stream_ << std::put_time(&tm, "%Y-%m-%d %H:%M:%S") << " [" << ToString(level) << "] " << message << '\n';
+    stream_.flush();
 }
 
 void Logger::Write(LogLevel level, const std::string& message) {
