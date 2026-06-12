@@ -70,6 +70,32 @@ Pivot and Quadviews should share one focus-direction pipeline:
 
 This avoids the current failure mode where Pivot rotates the world but the foveal high-resolution zone remains tied to the natural, unpivoted head direction.
 
+### FA18 Near-Field Pilot Geometry Issue
+
+June 2026 DCS testing found a remaining Pivot + Quadviews failure mode in the FA18:
+
+- Pivot without Quadviews correctly moves the pilot head; the helmet/HMD/visor does not interfere.
+- Pivot with native Quadviews enabled can make the helmet appear not to rotate correctly with the pilot head.
+- When pivoting right, the right eye can quickly see into the inner helmet texture while the left eye sees past it, creating a stereo conflict.
+- The issue was not reproduced in the same way in aircraft without close headgear geometry, such as the Mi-24.
+- A conservative Quadviews-only virtual-neck translation experiment, using a small down/back pivot offset, did not improve the FA18 case and was not kept.
+
+Current hypothesis: this is not the generic Pivot stereo-recomposition bug that was fixed earlier. It is likely a Quadviews-specific mismatch involving very-near cockpit/pilot geometry, synthetic peripheral/focus views, and final stereo recomposition/reverse correction. Future investigation should compare:
+
+1. FA18 Pivot without Quadviews.
+2. FA18 Quadviews with Pivot disabled.
+3. FA18 Quadviews + Pivot with head-tracked focus.
+4. FA18 Quadviews + Pivot with eye-tracked focus.
+5. Per-eye projection-view poses and FOVs before and after `xrEndFrame` recomposition.
+
+Potential fix directions:
+
+- inspect whether DCS renders pilot headgear using assumptions that do not survive synthetic quadview composition
+- test focus/peripheral pose divergence for extremely near geometry
+- validate the reverse pivot pose delta against both peripheral and focus views
+- add diagnostics that log per-eye pose differences for views 0/1 and 2/3 during Pivot + Quadviews
+- consider app/profile-specific mitigations only after the underlying pose/FOV relationship is understood
+
 ## FOV Tweak Compatibility
 
 Future FOV reduction should be another resolved module that transforms the final view FOVs after quadview view generation but before DepthXR convergence adjustments. That ordering keeps FOV reduction from changing the focus-window size math and keeps DepthXR's projection-center work last.
