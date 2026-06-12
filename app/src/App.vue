@@ -83,6 +83,7 @@ const tabs = computed(() => [
     label: 'Quadviews',
     subtitle: 'Dynamic foveated rendering control',
     status: store.state.config.modules.quadviews.enabled ? 'Enabled' : 'Disabled',
+    badge: '⚠ Experimental',
   },
   {
     id: 'pivotxr' as const,

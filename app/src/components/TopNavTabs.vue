@@ -10,6 +10,7 @@ const props = defineProps<{
     label: string
     subtitle: string
     status: string
+    badge?: string
   }>
 }>()
 
@@ -53,7 +54,16 @@ function statusChipClass(tab: { id: AppTab; status: string }): string {
         >
           <div class="flex flex-wrap items-start justify-between gap-3">
             <div>
-              <p class="text-sm font-semibold tracking-tight">{{ tab.label }}</p>
+              <p class="flex flex-wrap items-center gap-2 text-sm font-semibold tracking-tight">
+                <span>{{ tab.label }}</span>
+                <span
+                  v-if="tab.badge"
+                  class="rounded-full px-2 py-0.5 text-[0.65rem] font-semibold uppercase tracking-[0.12em]"
+                  :class="activeTab === tab.id ? 'chip-warning' : 'chip-accent'"
+                >
+                  {{ tab.badge }}
+                </span>
+              </p>
               <p class="mt-1 text-xs" :class="activeTab === tab.id ? 'text-inverse-muted' : 'text-muted'">{{ tab.subtitle }}</p>
             </div>
           </div>
