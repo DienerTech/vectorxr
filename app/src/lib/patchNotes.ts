@@ -8,6 +8,19 @@ export interface PatchNoteEntry {
 
 export const patchNotes: PatchNoteEntry[] = [
   {
+    version: '0.8.0',
+    date: '2026-06-12',
+    title: 'Experimental Quadviews',
+    summary: 'VectorXR now includes experimental native Quadviews support for OpenXR apps, with per-application profiles and compatibility with Depth and Pivot.',
+    items: [
+      'Added an experimental Quadviews module for foveal and peripheral rendering control.',
+      'Added Quadviews defaults and per-application profiles for tracking mode, focus size, resolution scale, offsets, smoothing, and transition tuning.',
+      'Added native Quadviews composition support that works alongside VectorXR Depth and Pivot.',
+      'Improved Pivot compatibility for VectorXR-managed quadview sessions, including close cockpit/HMD geometry in supported apps.',
+      'Added Quadviews diagnostics and development notes for performance tuning and future dynamic foveation work.',
+    ],
+  },
+  {
     version: '0.7.1',
     date: '2026-06-09',
     title: 'UI polish',
