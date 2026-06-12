@@ -747,7 +747,6 @@ constexpr size_t kMaxCachedQuadViewsFovFrames = 180;
 // helper calls must not.
 constexpr std::chrono::milliseconds kConfigCheckInterval{500};
 constexpr std::chrono::milliseconds kInputBindingPollInterval{30};
-constexpr std::chrono::milliseconds kEyeOffsetRefreshInterval{250};
 constexpr std::chrono::milliseconds kAppActionSyncFreshWindow{100};
 
 bool SameSettings(const ResolvedRuntimeConfig& lhs, const ResolvedRuntimeConfig& rhs) {
@@ -2609,6 +2608,7 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
     }
 
     XrFrameEndInfo adjusted_frame_end_info = *frame_end_info;
+    adjusted_frame_end_info.layerCount = static_cast<uint32_t>(adjusted_layers.size());
     adjusted_frame_end_info.layers = adjusted_layers.data();
     if (pending_end_frame_diagnostics_ > 0) {
         const ViewOrientation delta_orientation{
@@ -3257,7 +3257,7 @@ void OpenXrLayer::ResetSessionState() {
     tracked_local_spaces_.clear();
     tracked_stage_spaces_.clear();
     cached_eye_offset_poses_.clear();
-    cached_eye_offsets_refresh_time_.reset();
+    cached_eye_offsets_display_time_ = 0;
     cached_pivot_pose_deltas_.clear();
     cached_quadviews_fovs_.clear();
     last_app_action_sync_time_.reset();
@@ -3552,7 +3552,7 @@ void OpenXrLayer::DestroyInternalReferenceSpaces() {
         tracked_view_spaces_.clear();
         tracked_stage_spaces_.clear();
         cached_eye_offset_poses_.clear();
-        cached_eye_offsets_refresh_time_.reset();
+        cached_eye_offsets_display_time_ = 0;
         cached_pivot_pose_deltas_.clear();
         cached_quadviews_fovs_.clear();
         return;
@@ -3580,7 +3580,7 @@ void OpenXrLayer::DestroyInternalReferenceSpaces() {
     }
 
     cached_eye_offset_poses_.clear();
-    cached_eye_offsets_refresh_time_.reset();
+    cached_eye_offsets_display_time_ = 0;
     cached_pivot_pose_deltas_.clear();
     cached_quadviews_fovs_.clear();
 }
@@ -3593,14 +3593,12 @@ bool OpenXrLayer::EnsureEyeOffsets(XrSession session,
         return false;
     }
 
-    // Per-eye offsets relative to VIEW space only change with physical IPD
-    // adjustments; refresh on an interval instead of issuing a downstream
-    // xrLocateViews every frame.
-    const auto now = std::chrono::steady_clock::now();
+    // Eye offsets are predicted poses. Reuse them only for repeated locates at
+    // the same displayTime so recomposition does not inherit stale prediction.
     if (cached_eye_offset_poses_.size() == view_count &&
         cached_eye_offsets_view_configuration_ == view_configuration_type &&
-        cached_eye_offsets_refresh_time_.has_value() &&
-        now - *cached_eye_offsets_refresh_time_ < kEyeOffsetRefreshInterval) {
+        cached_eye_offsets_display_time_ != 0 &&
+        cached_eye_offsets_display_time_ == display_time) {
         return true;
     }
 
@@ -3627,7 +3625,7 @@ bool OpenXrLayer::EnsureEyeOffsets(XrSession session,
         cached_eye_offset_poses_[i] = eye_views[i].pose;
     }
     cached_eye_offsets_view_configuration_ = view_configuration_type;
-    cached_eye_offsets_refresh_time_ = now;
+    cached_eye_offsets_display_time_ = display_time;
     return true;
 }
 

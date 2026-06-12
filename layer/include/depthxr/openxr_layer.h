@@ -309,7 +309,7 @@ class OpenXrLayer {
     std::unordered_set<XrSpace> tracked_local_spaces_;
     std::unordered_set<XrSpace> tracked_stage_spaces_;
     std::vector<XrPosef> cached_eye_offset_poses_;
-    std::optional<std::chrono::steady_clock::time_point> cached_eye_offsets_refresh_time_;
+    XrTime cached_eye_offsets_display_time_{0};
     XrViewConfigurationType cached_eye_offsets_view_configuration_{XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO};
     std::optional<std::chrono::steady_clock::time_point> last_app_action_sync_time_;
     std::vector<ViewAdjustmentData> locate_views_original_scratch_;
