@@ -23,6 +23,11 @@ enum class InputBindingType {
     Device,
 };
 
+enum class QuadViewsTrackingMode {
+    Head,
+    Eye,
+};
+
 struct InputBinding {
     InputBindingType type{InputBindingType::None};
     std::vector<std::string> chord;
@@ -127,12 +132,44 @@ struct PivotXrResolvedSettings {
     double pitch_max_extra_degrees{20.0};
 };
 
+struct QuadViewsSettings {
+    QuadViewsTrackingMode tracking_mode{QuadViewsTrackingMode::Eye};
+    double focus_horizontal_size_percent{32.0};
+    double focus_vertical_size_percent{32.0};
+    double focus_scale{1.1};
+    double peripheral_scale{0.45};
+    double foveate_sharpness{0.0};
+    double transition_thickness_percent{25.0};
+    double horizontal_offset_degrees{0.0};
+    double vertical_offset_degrees{0.0};
+    double gaze_smoothing{0.15};
+    double gaze_deadzone_degrees{1.5};
+};
+
+struct QuadViewsProfile {
+    std::string name;
+    bool enabled{true};
+    std::vector<std::string> application_ids;
+    QuadViewsSettings settings;
+};
+
+struct QuadViewsModuleConfig {
+    bool enabled{false};
+    QuadViewsSettings defaults;
+    std::vector<QuadViewsProfile> profiles;
+};
+
+struct QuadViewsResolvedSettings : QuadViewsSettings {
+    bool enabled{false};
+};
+
 struct ConfigDocument {
     int version{3};
     CoreSettings core;
     std::vector<RegisteredApplication> applications;
     DepthXrModuleConfig depthxr;
     PivotXrModuleConfig pivotxr;
+    QuadViewsModuleConfig quadviews;
 };
 
 struct ResolvedRuntimeConfig {
@@ -140,6 +177,7 @@ struct ResolvedRuntimeConfig {
     DepthXrResolvedSettings depthxr;
     DepthXrBindings depthxr_bindings;
     PivotXrResolvedSettings pivotxr;
+    QuadViewsResolvedSettings quadviews;
 };
 
 const char* ToString(LogLevel level);
@@ -150,5 +188,7 @@ std::optional<ActivationMode> ParseActivationMode(const std::string& value);
 std::optional<std::string> ParseActivationKey(const std::string& value);
 const char* ToString(InputBindingType type);
 std::optional<InputBindingType> ParseInputBindingType(const std::string& value);
+const char* ToString(QuadViewsTrackingMode mode);
+std::optional<QuadViewsTrackingMode> ParseQuadViewsTrackingMode(const std::string& value);
 
 } // namespace depthxr

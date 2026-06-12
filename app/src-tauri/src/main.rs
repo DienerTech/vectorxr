@@ -106,6 +106,42 @@ fn default_max_extra_pitch_degrees() -> f64 {
     20.0
 }
 
+fn default_quadviews_tracking_mode() -> String {
+    "eye".into()
+}
+
+fn default_focus_horizontal_size_percent() -> f64 {
+    32.0
+}
+
+fn default_focus_vertical_size_percent() -> f64 {
+    32.0
+}
+
+fn default_focus_scale() -> f64 {
+    1.1
+}
+
+fn default_peripheral_scale() -> f64 {
+    0.45
+}
+
+fn default_foveate_sharpness() -> f64 {
+    0.0
+}
+
+fn default_transition_thickness_percent() -> f64 {
+    25.0
+}
+
+fn default_gaze_smoothing() -> f64 {
+    0.15
+}
+
+fn default_gaze_deadzone_degrees() -> f64 {
+    1.5
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ProfileMatch {
     exe: String,
@@ -318,6 +354,87 @@ impl Default for PivotXRModuleConfig {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct QuadViewsSettings {
+    #[serde(default = "default_quadviews_tracking_mode")]
+    tracking_mode: String,
+    #[serde(default = "default_focus_horizontal_size_percent")]
+    focus_horizontal_size_percent: f64,
+    #[serde(default = "default_focus_vertical_size_percent")]
+    focus_vertical_size_percent: f64,
+    #[serde(default = "default_focus_scale")]
+    focus_scale: f64,
+    #[serde(default = "default_peripheral_scale")]
+    peripheral_scale: f64,
+    #[serde(default = "default_foveate_sharpness")]
+    foveate_sharpness: f64,
+    #[serde(default = "default_transition_thickness_percent")]
+    transition_thickness_percent: f64,
+    #[serde(default)]
+    horizontal_offset_degrees: f64,
+    #[serde(default)]
+    vertical_offset_degrees: f64,
+    #[serde(default = "default_gaze_smoothing")]
+    gaze_smoothing: f64,
+    #[serde(default = "default_gaze_deadzone_degrees")]
+    gaze_deadzone_degrees: f64,
+}
+
+impl Default for QuadViewsSettings {
+    fn default() -> Self {
+        Self {
+            tracking_mode: default_quadviews_tracking_mode(),
+            focus_horizontal_size_percent: default_focus_horizontal_size_percent(),
+            focus_vertical_size_percent: default_focus_vertical_size_percent(),
+            focus_scale: default_focus_scale(),
+            peripheral_scale: default_peripheral_scale(),
+            foveate_sharpness: default_foveate_sharpness(),
+            transition_thickness_percent: default_transition_thickness_percent(),
+            horizontal_offset_degrees: 0.0,
+            vertical_offset_degrees: 0.0,
+            gaze_smoothing: default_gaze_smoothing(),
+            gaze_deadzone_degrees: default_gaze_deadzone_degrees(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct QuadViewsProfileConfig {
+    #[serde(default)]
+    name: String,
+    #[serde(default = "default_true")]
+    enabled: bool,
+    #[serde(default)]
+    application_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    r#match: Option<ProfileMatch>,
+    #[serde(default)]
+    settings: QuadViewsSettings,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct QuadViewsModuleConfig {
+    #[serde(default = "default_false")]
+    enabled: bool,
+    #[serde(default)]
+    defaults: QuadViewsSettings,
+    #[serde(default)]
+    profiles: Vec<QuadViewsProfileConfig>,
+}
+
+impl Default for QuadViewsModuleConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            defaults: QuadViewsSettings::default(),
+            profiles: Vec::new(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 struct VectorXRModules {
@@ -325,6 +442,8 @@ struct VectorXRModules {
     depthxr: DepthXRModuleConfig,
     #[serde(default)]
     pivotxr: PivotXRModuleConfig,
+    #[serde(default)]
+    quadviews: QuadViewsModuleConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -567,6 +686,33 @@ fn normalize_config(mut config: VectorXRConfig) -> VectorXRConfig {
     }
 
     for profile in &mut config.modules.pivotxr.profiles {
+        if profile.application_ids.is_empty() {
+            if let Some(application_id) = application_id_for_profile_match(
+                &mut config.applications,
+                &profile.name,
+                &profile.r#match,
+            ) {
+                profile.application_ids.push(application_id);
+            }
+        }
+
+        if profile.name.trim().is_empty() {
+            let first_application = profile.application_ids.first().and_then(|application_id| {
+                config
+                    .applications
+                    .iter()
+                    .find(|application| &application.id == application_id)
+            });
+
+            profile.name = first_application
+                .map(|application| application.name.clone())
+                .unwrap_or_else(|| "New Profile".into());
+        }
+
+        profile.r#match = None;
+    }
+
+    for profile in &mut config.modules.quadviews.profiles {
         if profile.application_ids.is_empty() {
             if let Some(application_id) = application_id_for_profile_match(
                 &mut config.applications,

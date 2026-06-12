@@ -503,6 +503,27 @@ bool ReadOptionalActivationKey(const JsonValue::Object& object,
     return true;
 }
 
+bool ReadOptionalQuadViewsTrackingMode(const JsonValue::Object& object,
+                                       const std::string& key,
+                                       std::optional<QuadViewsTrackingMode>& out,
+                                       std::string& error) {
+    const auto it = object.find(key);
+    if (it == object.end()) {
+        return true;
+    }
+    if (!it->second.IsString()) {
+        error = key + " must be a string";
+        return false;
+    }
+
+    out = ParseQuadViewsTrackingMode(it->second.AsString());
+    if (!out) {
+        error = key + " must be one of: head, eye";
+        return false;
+    }
+    return true;
+}
+
 bool CheckAllowedKeys(const JsonValue::Object& object,
                       const std::unordered_set<std::string>& allowed,
                       std::string& error);
@@ -1060,6 +1081,181 @@ bool ParsePivotModule(const JsonValue::Object& object, PivotXrModuleConfig& out,
     return true;
 }
 
+bool ParseQuadViewsSettings(const JsonValue::Object& object, QuadViewsSettings& out, std::string& error) {
+    static const std::unordered_set<std::string> allowed = {
+        "trackingMode",
+        "focusHorizontalSizePercent",
+        "focusVerticalSizePercent",
+        "focusScale",
+        "peripheralScale",
+        "foveateSharpness",
+        "transitionThicknessPercent",
+        "horizontalOffsetDegrees",
+        "verticalOffsetDegrees",
+        "gazeSmoothing",
+        "gazeDeadzoneDegrees",
+    };
+
+    if (!CheckAllowedKeys(object, allowed, error)) {
+        return false;
+    }
+
+    std::optional<QuadViewsTrackingMode> tracking_mode;
+    std::optional<double> focus_horizontal_size_percent;
+    std::optional<double> focus_vertical_size_percent;
+    std::optional<double> focus_scale;
+    std::optional<double> peripheral_scale;
+    std::optional<double> foveate_sharpness;
+    std::optional<double> transition_thickness_percent;
+    std::optional<double> horizontal_offset_degrees;
+    std::optional<double> vertical_offset_degrees;
+    std::optional<double> gaze_smoothing;
+    std::optional<double> gaze_deadzone_degrees;
+
+    if (!ReadOptionalQuadViewsTrackingMode(object, "trackingMode", tracking_mode, error) ||
+        !ReadOptionalNumber(object, "focusHorizontalSizePercent", focus_horizontal_size_percent, error) ||
+        !ReadOptionalNumber(object, "focusVerticalSizePercent", focus_vertical_size_percent, error) ||
+        !ReadOptionalNumber(object, "focusScale", focus_scale, error) ||
+        !ReadOptionalNumber(object, "peripheralScale", peripheral_scale, error) ||
+        !ReadOptionalNumber(object, "foveateSharpness", foveate_sharpness, error) ||
+        !ReadOptionalNumber(object, "transitionThicknessPercent", transition_thickness_percent, error) ||
+        !ReadOptionalNumber(object, "horizontalOffsetDegrees", horizontal_offset_degrees, error) ||
+        !ReadOptionalNumber(object, "verticalOffsetDegrees", vertical_offset_degrees, error) ||
+        !ReadOptionalNumber(object, "gazeSmoothing", gaze_smoothing, error) ||
+        !ReadOptionalNumber(object, "gazeDeadzoneDegrees", gaze_deadzone_degrees, error)) {
+        return false;
+    }
+
+    if (tracking_mode.has_value()) {
+        out.tracking_mode = *tracking_mode;
+    }
+    if (focus_horizontal_size_percent.has_value()) {
+        out.focus_horizontal_size_percent = *focus_horizontal_size_percent;
+    }
+    if (focus_vertical_size_percent.has_value()) {
+        out.focus_vertical_size_percent = *focus_vertical_size_percent;
+    }
+    if (focus_scale.has_value()) {
+        out.focus_scale = *focus_scale;
+    }
+    if (peripheral_scale.has_value()) {
+        out.peripheral_scale = *peripheral_scale;
+    }
+    if (foveate_sharpness.has_value()) {
+        out.foveate_sharpness = *foveate_sharpness;
+    }
+    if (transition_thickness_percent.has_value()) {
+        out.transition_thickness_percent = *transition_thickness_percent;
+    }
+    if (horizontal_offset_degrees.has_value()) {
+        out.horizontal_offset_degrees = *horizontal_offset_degrees;
+    }
+    if (vertical_offset_degrees.has_value()) {
+        out.vertical_offset_degrees = *vertical_offset_degrees;
+    }
+    if (gaze_smoothing.has_value()) {
+        out.gaze_smoothing = *gaze_smoothing;
+    }
+    if (gaze_deadzone_degrees.has_value()) {
+        out.gaze_deadzone_degrees = *gaze_deadzone_degrees;
+    }
+
+    return true;
+}
+
+bool ParseQuadViewsProfile(const JsonValue& value, QuadViewsProfile& out, std::string& error) {
+    const JsonValue::Object* object = RequireObject(value, "quadviewsProfile", error);
+    if (!object) {
+        return false;
+    }
+
+    static const std::unordered_set<std::string> allowed = {
+        "name",
+        "enabled",
+        "applicationIds",
+        "settings",
+    };
+
+    if (!CheckAllowedKeys(*object, allowed, error)) {
+        return false;
+    }
+
+    const auto application_ids_it = object->find("applicationIds");
+    if (application_ids_it == object->end()) {
+        error = "Missing required field: quadviewsProfile.applicationIds";
+        return false;
+    }
+    if (!ParseStringArray(application_ids_it->second, "quadviewsProfile.applicationIds", out.application_ids, error)) {
+        return false;
+    }
+
+    std::optional<std::string> name;
+    std::optional<bool> enabled;
+    if (!ReadOptionalString(*object, "name", name, error) ||
+        !ReadOptionalBool(*object, "enabled", enabled, error)) {
+        return false;
+    }
+
+    out.name = name.value_or("New Profile");
+    out.enabled = enabled.value_or(true);
+
+    const auto settings_it = object->find("settings");
+    if (settings_it != object->end()) {
+        const JsonValue::Object* settings_object = RequireObject(settings_it->second, "quadviewsProfile.settings", error);
+        if (!settings_object || !ParseQuadViewsSettings(*settings_object, out.settings, error)) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+bool ParseQuadViewsModule(const JsonValue::Object& object, QuadViewsModuleConfig& out, std::string& error) {
+    static const std::unordered_set<std::string> allowed = {
+        "enabled",
+        "defaults",
+        "profiles",
+    };
+
+    if (!CheckAllowedKeys(object, allowed, error)) {
+        return false;
+    }
+
+    std::optional<bool> enabled;
+    if (!ReadOptionalBool(object, "enabled", enabled, error)) {
+        return false;
+    }
+    if (enabled.has_value()) {
+        out.enabled = *enabled;
+    }
+
+    const auto defaults_it = object.find("defaults");
+    if (defaults_it != object.end()) {
+        const JsonValue::Object* defaults_object = RequireObject(defaults_it->second, "quadviews.defaults", error);
+        if (!defaults_object || !ParseQuadViewsSettings(*defaults_object, out.defaults, error)) {
+            return false;
+        }
+    }
+
+    const auto profiles_it = object.find("profiles");
+    if (profiles_it != object.end()) {
+        const JsonValue::Array* profiles = RequireArray(profiles_it->second, "quadviews.profiles", error);
+        if (!profiles) {
+            return false;
+        }
+
+        for (const JsonValue& profile_value : *profiles) {
+            QuadViewsProfile profile;
+            if (!ParseQuadViewsProfile(profile_value, profile, error)) {
+                return false;
+            }
+            out.profiles.push_back(std::move(profile));
+        }
+    }
+
+    return true;
+}
+
 bool ParseVectorDocument(const JsonValue::Object& root_object, ConfigDocument& out, std::string& error) {
     static const std::unordered_set<std::string> allowed_root = {"version", "core", "applications", "modules"};
     if (!CheckAllowedKeys(root_object, allowed_root, error)) {
@@ -1106,7 +1302,7 @@ bool ParseVectorDocument(const JsonValue::Object& root_object, ConfigDocument& o
         return false;
     }
 
-    static const std::unordered_set<std::string> allowed_modules = {"depthxr", "pivotxr"};
+    static const std::unordered_set<std::string> allowed_modules = {"depthxr", "pivotxr", "quadviews"};
     if (!CheckAllowedKeys(*modules_object, allowed_modules, error)) {
         return false;
     }
@@ -1129,6 +1325,14 @@ bool ParseVectorDocument(const JsonValue::Object& root_object, ConfigDocument& o
     const JsonValue::Object* pivot_object = RequireObject(pivot_it->second, "modules.pivotxr", error);
     if (!pivot_object || !ParsePivotModule(*pivot_object, out.pivotxr, error)) {
         return false;
+    }
+
+    const auto quadviews_it = modules_object->find("quadviews");
+    if (quadviews_it != modules_object->end()) {
+        const JsonValue::Object* quadviews_object = RequireObject(quadviews_it->second, "modules.quadviews", error);
+        if (!quadviews_object || !ParseQuadViewsModule(*quadviews_object, out.quadviews, error)) {
+            return false;
+        }
     }
 
     return true;

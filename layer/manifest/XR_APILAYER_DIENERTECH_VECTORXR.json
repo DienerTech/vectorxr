@@ -9,6 +9,16 @@
     "functions": {
       "xrNegotiateLoaderApiLayerInterface": "xrNegotiateLoaderApiLayerInterface"
     },
+    "instance_extensions": [
+      {
+        "name": "XR_VARJO_quad_views",
+        "extension_version": "2"
+      },
+      {
+        "name": "XR_VARJO_foveated_rendering",
+        "extension_version": "3"
+      }
+    ],
     "disable_environment": "DISABLE_XR_APILAYER_DIENERTECH_VECTORXR"
   }
 }

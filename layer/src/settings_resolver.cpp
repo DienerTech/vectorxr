@@ -130,12 +130,62 @@ PivotXrResolvedSettings ResolvePivotXrSettings(const ConfigDocument& config, std
     return resolved;
 }
 
+const QuadViewsProfile* FindMatchingQuadViewsProfile(const ConfigDocument& config, std::string_view exe_name) {
+    const RegisteredApplication* application = FindMatchingApplication(config, exe_name);
+    if (!application) {
+        return nullptr;
+    }
+
+    for (const QuadViewsProfile& profile : config.quadviews.profiles) {
+        if (!profile.enabled) {
+            continue;
+        }
+
+        if (std::find(profile.application_ids.begin(), profile.application_ids.end(), application->id) != profile.application_ids.end()) {
+            return &profile;
+        }
+    }
+    return nullptr;
+}
+
+void ApplyQuadViewsSettings(QuadViewsResolvedSettings& resolved, const QuadViewsSettings& settings) {
+    resolved.tracking_mode = settings.tracking_mode;
+    resolved.focus_horizontal_size_percent = settings.focus_horizontal_size_percent;
+    resolved.focus_vertical_size_percent = settings.focus_vertical_size_percent;
+    resolved.focus_scale = settings.focus_scale;
+    resolved.peripheral_scale = settings.peripheral_scale;
+    resolved.foveate_sharpness = settings.foveate_sharpness;
+    resolved.transition_thickness_percent = settings.transition_thickness_percent;
+    resolved.horizontal_offset_degrees = settings.horizontal_offset_degrees;
+    resolved.vertical_offset_degrees = settings.vertical_offset_degrees;
+    resolved.gaze_smoothing = settings.gaze_smoothing;
+    resolved.gaze_deadzone_degrees = settings.gaze_deadzone_degrees;
+}
+
+QuadViewsResolvedSettings ResolveQuadViewsSettings(const ConfigDocument& config, std::string_view exe_name) {
+    QuadViewsResolvedSettings resolved;
+    resolved.enabled = config.quadviews.enabled;
+    ApplyQuadViewsSettings(resolved, config.quadviews.defaults);
+
+    if (!config.quadviews.enabled) {
+        return resolved;
+    }
+
+    const QuadViewsProfile* profile = FindMatchingQuadViewsProfile(config, exe_name);
+    if (profile) {
+        ApplyQuadViewsSettings(resolved, profile->settings);
+    }
+
+    return resolved;
+}
+
 ResolvedRuntimeConfig ResolveRuntimeConfig(const ConfigDocument& config, std::string_view exe_name) {
     ResolvedRuntimeConfig resolved;
     resolved.core = config.core;
     resolved.depthxr = ResolveDepthXrSettings(config, exe_name);
     resolved.depthxr_bindings = config.depthxr.bindings;
     resolved.pivotxr = ResolvePivotXrSettings(config, exe_name);
+    resolved.quadviews = ResolveQuadViewsSettings(config, exe_name);
     return resolved;
 }
 

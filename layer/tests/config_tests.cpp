@@ -385,6 +385,105 @@ void TestPivotProfileResolution() {
            "PivotXR default yaw multiplier mismatch");
 }
 
+void TestQuadViewsProfileResolution() {
+    const std::string json = R"json(
+{
+  "version": 3,
+  "core": { "enabled": true, "logLevel": "info", "logRetentionFiles": 7 },
+  "applications": [
+    { "id": "dcs", "name": "DCS", "enabled": true, "match": { "exe": "DCS.exe" } }
+  ],
+  "modules": {
+    "depthxr": {
+      "enabled": true,
+      "defaults": {
+        "stereoBoostEnabled": true,
+        "convergenceEnabled": true,
+        "stereoBoost": 1.0,
+        "convergence": 0.0
+      },
+      "bindings": { "toggleEnabled": { "type": "none" } },
+      "profiles": []
+    },
+    "pivotxr": {
+      "enabled": false,
+      "defaults": {
+        "rotationMultiplier": 1.5,
+        "smoothing": 0.2,
+        "deadzoneDegrees": 8.0,
+        "maxExtraYawDegrees": 25.0,
+        "pitchRotationMultiplier": 1.0,
+        "pitchSmoothing": 0.2,
+        "pitchDeadzoneDegrees": 12.0,
+        "maxExtraPitchDegrees": 20.0
+      },
+      "profiles": []
+    },
+    "quadviews": {
+      "enabled": true,
+      "defaults": {
+        "trackingMode": "eye",
+        "focusHorizontalSizePercent": 32.0,
+        "focusVerticalSizePercent": 32.0,
+        "focusScale": 1.1,
+        "peripheralScale": 0.45,
+        "foveateSharpness": 0.0,
+        "transitionThicknessPercent": 25.0,
+        "horizontalOffsetDegrees": 0.0,
+        "verticalOffsetDegrees": 0.0,
+        "gazeSmoothing": 0.15,
+        "gazeDeadzoneDegrees": 1.5
+      },
+      "profiles": [
+        {
+          "name": "DCS",
+          "applicationIds": ["dcs"],
+          "enabled": true,
+          "settings": {
+            "trackingMode": "eye",
+            "focusHorizontalSizePercent": 34.0,
+            "focusVerticalSizePercent": 30.0,
+            "focusScale": 1.2,
+            "peripheralScale": 0.4,
+            "foveateSharpness": 60.0,
+            "transitionThicknessPercent": 25.0,
+            "horizontalOffsetDegrees": 1.5,
+            "verticalOffsetDegrees": -2.0,
+            "gazeSmoothing": 0.1,
+            "gazeDeadzoneDegrees": 0.8
+          }
+        }
+      ]
+    }
+  }
+}
+)json";
+
+    const depthxr::ParseResult result = depthxr::ParseConfig(json);
+    Expect(result.ok, "Config parser rejected valid Quadviews config: " + result.error);
+
+    const depthxr::ResolvedRuntimeConfig resolved = depthxr::ResolveRuntimeConfig(result.document, "DCS.exe");
+    Expect(resolved.quadviews.enabled, "Quadviews module enable was not resolved");
+    Expect(resolved.quadviews.tracking_mode == depthxr::QuadViewsTrackingMode::Eye,
+           "Quadviews profile tracking mode mismatch");
+    Expect(std::abs(resolved.quadviews.focus_horizontal_size_percent - 34.0) < 0.0001,
+           "Quadviews focus horizontal size mismatch");
+    Expect(std::abs(resolved.quadviews.peripheral_scale - 0.4) < 0.0001,
+           "Quadviews peripheral scale mismatch");
+    Expect(std::abs(resolved.quadviews.foveate_sharpness - 60.0) < 0.0001,
+           "Quadviews foveate sharpness mismatch");
+    Expect(std::abs(resolved.quadviews.transition_thickness_percent - 25.0) < 0.0001,
+           "Quadviews transition thickness mismatch");
+    Expect(std::abs(resolved.quadviews.vertical_offset_degrees + 2.0) < 0.0001,
+           "Quadviews vertical offset mismatch");
+
+    const depthxr::ResolvedRuntimeConfig resolved_other = depthxr::ResolveRuntimeConfig(result.document, "other.exe");
+    Expect(resolved_other.quadviews.tracking_mode == depthxr::QuadViewsTrackingMode::Eye,
+           "Quadviews default tracking mode mismatch");
+    Expect(std::abs(resolved_other.quadviews.focus_horizontal_size_percent - 32.0) < 0.0001,
+           "Quadviews default focus size mismatch");
+}
+
 void TestInvalidPivotActivationBindingRejected() {
     const std::string json = R"json(
 {
@@ -535,11 +634,12 @@ void TestExeMatch() {
 
 void TestSeenAppObservationRecording() {
     const std::filesystem::path test_directory =
-        std::filesystem::current_path() / "test-seen-app-observations";
+        std::filesystem::current_path() / "build" / "vectorxr-test-seen-app-observations";
     std::error_code error;
     std::filesystem::remove_all(test_directory, error);
+    error.clear();
     std::filesystem::create_directories(test_directory, error);
-    Expect(!error, "Failed to create seen-apps test directory");
+    Expect(!error, "Failed to create seen-apps test directory: " + error.message());
 
     const std::filesystem::path path = test_directory / "seen-apps.json";
     std::string record_error;
@@ -674,13 +774,14 @@ void TestPivotYawNoOpInsideDeadzone() {
 
 void TestLoggerCollapsesDuplicateMessages() {
     const std::filesystem::path test_directory =
-        std::filesystem::current_path() / "test-logger-duplicate-collapse";
+        std::filesystem::current_path() / "build" / "vectorxr-test-logger-duplicate-collapse";
     std::error_code error;
     std::filesystem::remove_all(test_directory, error);
+    error.clear();
     std::filesystem::create_directories(test_directory, error);
-    Expect(!error, "Failed to create logger test directory");
+    Expect(!error, "Failed to create logger test directory: " + error.message());
 
-    const std::filesystem::path log_base_path = test_directory / "depthxr-test.log";
+    const std::filesystem::path log_base_path = test_directory / "vectorxr-test.log";
     std::filesystem::path active_log_path;
     {
         depthxr::Logger logger;
@@ -716,6 +817,7 @@ int main() {
     TestResolveRuntimeConfig();
     TestDisabledProfileFallsBackToDefaults();
     TestPivotProfileResolution();
+    TestQuadViewsProfileResolution();
     TestInvalidPivotActivationBindingRejected();
     TestNoneBindingParsed();
     TestDeviceBindingMetadataParsed();

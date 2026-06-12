@@ -437,6 +437,11 @@ textarea {
   color: #293832;
 }
 
+:root[data-theme='dark'] .tab-button-active .chip-warning {
+  background: rgba(148, 97, 36, 0.18);
+  color: #5f3d19;
+}
+
 :root[data-theme='dark'] .tab-button-active .chip-danger {
   background: rgba(139, 45, 42, 0.16);
   color: #5f2524;

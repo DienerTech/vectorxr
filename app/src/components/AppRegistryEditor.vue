@@ -60,7 +60,7 @@ function finishNameEdit() {
         <p class="eyebrow text-xs uppercase tracking-[0.24em]">Registry</p>
         <h2 class="mt-2 text-2xl font-semibold tracking-tight">Application Registry</h2>
         <p class="mt-2 text-sm leading-6 text-muted">
-          Register the applications that Depth and Pivot profiles can target by executable name. Add a title once here, then assign it from the profile editors in the module tabs.
+          Register the applications that module profiles can target by executable name. Add a title once here, then assign it from the profile editors in the module tabs.
         </p>
       </div>
 

@@ -45,6 +45,10 @@ defineEmits<{
               Pivot: <span class="font-medium" style="color: var(--app-text)">{{ config.modules.pivotxr.enabled ? 'Enabled' : 'Disabled' }}</span>
               — {{ config.modules.pivotxr.profiles.length }} {{ config.modules.pivotxr.profiles.length === 1 ? 'profile' : 'profiles' }}
             </li>
+            <li>
+              Quadviews: <span class="font-medium" style="color: var(--app-text)">{{ config.modules.quadviews.enabled ? 'Enabled' : 'Disabled' }}</span>
+              - {{ config.modules.quadviews.profiles.length }} {{ config.modules.quadviews.profiles.length === 1 ? 'profile' : 'profiles' }}
+            </li>
           </ul>
         </div>
 
