@@ -441,12 +441,16 @@ const profileWarnings = computed(() => {
         </div>
 
         <div class="mt-5 space-y-4 text-sm leading-6">
+          <div class="rounded-[1rem] border px-4 py-4 chip-success" style="border-color: var(--app-border)">
+            VectorXR Quadviews is fully compatible with Pivot and Depth when all three modules are managed by VectorXR.
+          </div>
+
           <div class="rounded-[1rem] border px-4 py-4 chip-warning" style="border-color: var(--app-border)">
             Pivot is NOT currently compatible with quadviews supplied directly by the runtime, such as Pimax Play.
           </div>
 
           <div class="rounded-[1rem] border px-4 py-4 surface-panel">
-            Pivot does work with OpenXR quadviews layers, including mbucchia's `Quad-Views-Foveated`.
+            Pivot also works with external OpenXR quadviews layers, including mbucchia's `Quad-Views-Foveated`, when layer order is configured correctly.
           </div>
 
           <div class="rounded-[1rem] border px-4 py-4 surface-panel">
@@ -454,7 +458,7 @@ const profileWarnings = computed(() => {
           </div>
 
           <div class="rounded-[1rem] border px-4 py-4 surface-panel">
-            You can inspect and change that order with tools like OpenXR-API-Layers-GUI.
+            You can inspect and change that order with the OpenXR Layer Manager tab in VectorXR.
           </div>
         </div>
       </div>
