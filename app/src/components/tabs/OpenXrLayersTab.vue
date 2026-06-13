@@ -470,7 +470,7 @@ function signatureGuidance(layer: OpenXrLayerEntry): string {
 
               <button
                 class="inline-flex w-[6.25rem] shrink-0 items-center justify-center gap-2 rounded-[0.7rem] border px-2.5 py-2 text-center transition disabled:cursor-not-allowed disabled:opacity-60"
-                :class="layer.enabled ? 'chip-success' : 'chip-idle'"
+                :class="layer.enabled ? 'layer-state-on' : 'layer-state-off'"
                 type="button"
                 :title="elevatedWriteTooltip(`${layer.enabled ? 'Disable' : 'Enable'} this OpenXR layer.`, activeSlice)"
                 :disabled="busyKey !== null || activeSliceReadOnly"
@@ -505,9 +505,9 @@ function signatureGuidance(layer: OpenXrLayerEntry): string {
                       <span
                         v-if="layer.isVectorXr && !layer.enabled"
                         class="mr-2 cursor-default rounded-full px-2.5 py-1 text-xs font-semibold uppercase tracking-[0.14em] chip-warning"
-                        title="VectorXR's OpenXR layer is disabled. OpenXR tweaks will not apply even if the suite or individual tweaks are enabled."
+                        title="VectorXR's OpenXR layer is disabled. OpenXR Enhancements will not apply even if the suite or individual Enhancements are enabled."
                       >
-                        Tweaks inactive
+                        Enhancements inactive
                       </span>
                       <span
                         v-if="isQuadViewsLayer(layer)"

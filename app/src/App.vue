@@ -7,18 +7,18 @@ import HealthCheckModal from './components/HealthCheckModal.vue'
 import ImportPreviewModal from './components/ImportPreviewModal.vue'
 import LogViewerModal from './components/LogViewerModal.vue'
 import PatchNotesModal from './components/PatchNotesModal.vue'
+import SidebarNav from './components/SidebarNav.vue'
 import StickySaveBar from './components/StickySaveBar.vue'
-import TopNavTabs from './components/TopNavTabs.vue'
-import AboutTab from './components/tabs/AboutTab.vue'
 import CoreTab from './components/tabs/CoreTab.vue'
 import DepthXrTab from './components/tabs/DepthXrTab.vue'
+import HomeTab from './components/tabs/HomeTab.vue'
 import OpenXrLayersTab from './components/tabs/OpenXrLayersTab.vue'
 import PivotXrTab from './components/tabs/PivotXrTab.vue'
 import QuadViewsTab from './components/tabs/QuadViewsTab.vue'
 import { exportConfigFile, loadLogSnapshot, loadOpenXrLayers, type LogSnapshot, type OpenXrLayerSnapshot } from './lib/commands'
 import { createDebugPackage, saveDebugPackage } from './lib/debugPackage'
 import { buildHealthSummary } from './lib/health'
-import { normalizeConfig, type VectorXRConfig } from './lib/model'
+import { moduleStateForApplication, normalizeConfig, type ModuleId, type VectorXRConfig } from './lib/model'
 import { patchNotes } from './lib/patchNotes'
 import { applyThemePreference, loadThemePreference, observeSystemThemeChanges, type ThemePreference } from './lib/theme'
 import { validateConfig } from './lib/validation'
@@ -55,9 +55,15 @@ const healthSummary = computed(() => buildHealthSummary({
 
 const tabs = computed(() => [
   {
-    id: 'core' as const,
+    id: 'home' as const,
     label: 'Home',
-    subtitle: 'App settings and logs',
+    subtitle: 'Status, updates, and support',
+    status: latestPatch.version,
+  },
+  {
+    id: 'core' as const,
+    label: 'Settings',
+    subtitle: 'Runtime, logging, theme, and config',
     status: store.state.config.core.enabled ? 'Suite on' : 'Suite off',
   },
   {
@@ -71,12 +77,6 @@ const tabs = computed(() => [
     label: 'OpenXR Layers',
     subtitle: 'Inspect and manage implicit layer order',
     status: 'System',
-  },
-  {
-    id: 'about' as const,
-    label: 'About',
-    subtitle: 'Project information and patch notes',
-    status: latestPatch.version,
   },
   {
     id: 'quadviews' as const,
@@ -251,6 +251,17 @@ function cancelImport() {
   importErrors.value = []
 }
 
+// Registry module chips: jump to an existing profile's module tab, or create a
+// profile for the app first when only the defaults currently apply.
+function handleOpenModule(moduleId: ModuleId, applicationId: string) {
+  const stateForApp = moduleStateForApplication(store.state.config, moduleId, applicationId)
+  if (stateForApp.kind === 'default') {
+    store.addModuleProfileForApplication(moduleId, applicationId)
+  } else {
+    store.setActiveTab(moduleId)
+  }
+}
+
 async function confirmResetConfig() {
   const confirmed = window.confirm(
     'Reset VectorXR to defaults?\n\nThis will erase all saved settings, application registry entries, profiles, and OpenXR application discovery data. This cannot be undone.',
@@ -265,26 +276,30 @@ async function confirmResetConfig() {
 </script>
 
 <template>
-  <main class="app-shell-bg h-screen overflow-hidden px-4 py-4 md:px-6 xl:px-8">
-    <section class="mx-auto flex h-full max-w-[1500px] flex-col">
-      <div class="shrink-0 pb-4 pt-1">
-        <TopNavTabs :active-tab="store.state.activeTab" :tabs="tabs" @select="store.setActiveTab" />
-      </div>
+  <main class="app-shell-bg h-screen overflow-hidden">
+    <section class="mx-auto flex h-full max-w-[1700px]">
+      <SidebarNav :active-tab="store.state.activeTab" :tabs="tabs" :version="latestPatch.version" @select="store.setActiveTab" />
 
-      <section class="min-h-0 flex-1 overflow-y-auto pb-4">
+      <div class="flex min-w-0 flex-1 flex-col px-4 py-4 md:px-6">
+      <section class="min-h-0 flex-1 overflow-y-auto pb-1">
+        <HomeTab
+          v-if="store.state.activeTab === 'home'"
+          :config="store.state.config"
+          :latest-patch="latestPatch"
+          :open-xr-layer-snapshot="openXrLayerSnapshot"
+          :open-xr-layers-loading="openXrLayersLoading"
+          @view-health="healthCheckOpen = true"
+          @export-debug="debugExportOpen = true"
+          @open-patch-notes="patchNotesOpen = true"
+        />
         <CoreTab
-          v-if="store.state.activeTab === 'core'"
+          v-else-if="store.state.activeTab === 'core'"
           :config="store.state.config"
           :path="store.state.path"
           :log-path="logSnapshot?.activePath"
           :theme-preference="themePreference"
           :settings-actions-disabled="store.state.loading || store.state.saving"
-          :open-xr-layer-snapshot="openXrLayerSnapshot"
-          :open-xr-layers-loading="openXrLayersLoading"
-          :health-summary="healthSummary"
           @view-logs="openLogs"
-          @view-health="healthCheckOpen = true"
-          @export-debug="debugExportOpen = true"
           @import-config="triggerImport"
           @export-config="exportConfig"
           @reset-config="confirmResetConfig"
@@ -301,8 +316,8 @@ async function confirmResetConfig() {
           @clear-seen="store.clearSeenApplications"
           @refresh-seen="store.refreshSeenApps"
           @remove="store.removeApplication"
+          @open-module="handleOpenModule"
         />
-        <AboutTab v-else-if="store.state.activeTab === 'about'" :latest-patch="latestPatch" @open-patch-notes="patchNotesOpen = true" />
         <OpenXrLayersTab
           v-else-if="store.state.activeTab === 'layers'"
           :snapshot="openXrLayerSnapshot"
@@ -340,7 +355,7 @@ async function confirmResetConfig() {
       </section>
 
       <StickySaveBar
-        class="shrink-0 pt-4"
+        class="shrink-0 pt-3"
         :dirty="dirty"
         :saving="store.state.saving"
         :loading="store.state.loading"
@@ -349,6 +364,7 @@ async function confirmResetConfig() {
         @save="saveConfig"
         @discard="store.discardChanges"
       />
+      </div>
 
       <input ref="importFileInput" type="file" accept=".json" class="hidden" @change="handleImportFile" />
       <HealthCheckModal :open="healthCheckOpen" :summary="healthSummary" @close="healthCheckOpen = false" @export-debug="debugExportOpen = true" />

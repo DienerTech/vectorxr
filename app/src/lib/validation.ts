@@ -207,7 +207,9 @@ function validateDepthXRProfile(profile: DepthXRProfileConfig, index: number, ap
     seenProfileApplicationIds.add(applicationId)
   }
 
-  errors.push(...validateDepthXRSettings(`${prefix}settings.`, profile.settings))
+  if (profile.mode !== 'disable') {
+    errors.push(...validateDepthXRSettings(`${prefix}settings.`, profile.settings))
+  }
   return errors
 }
 
@@ -252,8 +254,10 @@ function validatePivotXRProfile(profile: PivotXRProfileConfig, index: number, ap
     seenProfileApplicationIds.add(applicationId)
   }
 
-  errors.push(...validateInputBinding(`${prefix}activationBinding`, profile.activationBinding))
-  errors.push(...validatePivotXRSettings(prefix, profile.settings))
+  if (profile.mode !== 'disable') {
+    errors.push(...validateInputBinding(`${prefix}activationBinding`, profile.activationBinding))
+    errors.push(...validatePivotXRSettings(prefix, profile.settings))
+  }
   return errors
 }
 
@@ -310,7 +314,9 @@ function validateQuadViewsProfile(profile: QuadViewsProfileConfig, index: number
     seenProfileApplicationIds.add(applicationId)
   }
 
-  errors.push(...validateQuadViewsSettings(`${prefix}settings.`, profile.settings))
+  if (profile.mode !== 'disable') {
+    errors.push(...validateQuadViewsSettings(`${prefix}settings.`, profile.settings))
+  }
   return errors
 }
 

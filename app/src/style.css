@@ -208,6 +208,21 @@ textarea {
   color: var(--app-danger-text);
 }
 
+/* Solid, high-contrast state pills for the OpenXR layer toggle. The *-text
+   tokens flip light/dark together with --app-text-inverse, so this stays
+   readable and distinct from the panel in both themes. */
+.layer-state-on {
+  background: var(--app-success-text);
+  border-color: var(--app-success-text);
+  color: var(--app-text-inverse);
+}
+
+.layer-state-off {
+  background: var(--app-idle-text);
+  border-color: var(--app-idle-text);
+  color: var(--app-text-inverse);
+}
+
 .button-accent {
   background: var(--app-accent);
   color: #fff;
@@ -379,31 +394,66 @@ textarea {
   color: var(--app-text-inverse);
 }
 
-.tab-shell {
+.side-nav {
   background: color-mix(in srgb, var(--app-surface) 88%, transparent);
   border-color: var(--app-border);
-  box-shadow: var(--app-shadow);
+  backdrop-filter: blur(8px);
 }
 
-.tab-group {
-  position: relative;
-  border: 1px solid var(--app-border);
-  border-radius: 0.75rem;
-  padding: 0.75rem 0.5rem 0.5rem;
+.side-nav-mark {
+  background: var(--app-surface-inverse);
+  color: var(--app-text-inverse);
 }
 
-.tab-group-label {
-  position: absolute;
-  top: -0.55rem;
-  left: 0.9rem;
-  padding: 0 0.45rem;
-  background: color-mix(in srgb, var(--app-surface) 92%, transparent);
+.side-nav-group-label {
   color: var(--app-text-soft);
-  font-size: 0.68rem;
+  font-size: 0.66rem;
   font-weight: 700;
-  line-height: 1;
   letter-spacing: 0.14em;
   text-transform: uppercase;
+}
+
+.side-nav-item {
+  border: 1px solid transparent;
+  color: var(--app-text);
+}
+
+.side-nav-item:hover {
+  background: var(--app-surface-strong);
+  border-color: var(--app-border);
+}
+
+.side-nav-item-active,
+.side-nav-item-active:hover {
+  background: var(--app-surface-inverse);
+  border-color: var(--app-border-inverse);
+  color: var(--app-text-inverse);
+}
+
+.side-nav-exp {
+  background: var(--app-warning-soft);
+  color: var(--app-warning-text);
+}
+
+.nav-dot {
+  display: inline-block;
+  height: 0.5rem;
+  width: 0.5rem;
+  flex: 0 0 auto;
+  border-radius: 9999px;
+}
+
+.nav-dot-on {
+  background: var(--app-success-text);
+}
+
+.nav-dot-off {
+  background: var(--app-idle-text);
+  opacity: 0.55;
+}
+
+.nav-dot-warn {
+  background: var(--app-warning-text);
 }
 
 .tab-button-idle {
@@ -445,6 +495,78 @@ textarea {
 :root[data-theme='dark'] .tab-button-active .chip-danger {
   background: rgba(139, 45, 42, 0.16);
   color: #5f2524;
+}
+
+.section-disclosure > summary {
+  list-style: none;
+  cursor: pointer;
+  user-select: none;
+}
+
+.section-disclosure > summary::-webkit-details-marker {
+  display: none;
+}
+
+.section-disclosure .section-chevron {
+  color: var(--app-text-soft);
+  transition: transform 160ms ease;
+}
+
+.section-disclosure[open] .section-chevron {
+  transform: rotate(90deg);
+}
+
+.segmented {
+  display: inline-flex;
+  gap: 0.2rem;
+  padding: 0.2rem;
+  border: 1px solid var(--app-border);
+  border-radius: 9999px;
+  background: var(--app-surface-strong);
+}
+
+.segmented-option {
+  border: 1px solid transparent;
+  border-radius: 9999px;
+  padding: 0.3rem 0.85rem;
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--app-text-muted);
+}
+
+.segmented-option:hover {
+  color: var(--app-text);
+}
+
+.segmented-option-active,
+.segmented-option-active:hover {
+  background: var(--app-surface-inverse);
+  color: var(--app-text-inverse);
+}
+
+.segmented-option-active.segmented-option-danger,
+.segmented-option-active.segmented-option-danger:hover {
+  background: var(--app-danger);
+  color: #fff;
+}
+
+.app-pill {
+  border: 1px solid var(--app-border);
+  border-radius: 9999px;
+  background: var(--app-surface-strong);
+  color: var(--app-text-muted);
+}
+
+.app-pill:hover {
+  border-color: var(--app-accent);
+  color: var(--app-text);
+}
+
+.app-pill-active,
+.app-pill-active:hover {
+  background: var(--app-surface-inverse);
+  border-color: var(--app-border-inverse);
+  color: var(--app-text-inverse);
 }
 
 .mono-text {

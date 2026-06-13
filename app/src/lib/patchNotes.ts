@@ -8,6 +8,20 @@ export interface PatchNoteEntry {
 
 export const patchNotes: PatchNoteEntry[] = [
   {
+    version: '0.9.0',
+    date: '2026-06-13',
+    title: 'UI overhaul',
+    summary: 'A refreshed app shell that separates a welcome dashboard from settings, sharpens the OpenXR layer manager, and unifies the Quadviews profile editors around the new "Enhancement" language.',
+    items: [
+      'Split the old Home tab into a Home dashboard (welcome, system health, patch notes, updates, and support) and a dedicated Settings tab, with Home as the default landing tab.',
+      'Folded the former About tab into Home and rewrote the welcome hero to cover foveated rendering, head rotation, and stereo depth.',
+      'Adopted "Enhancement" wording throughout the app for the OpenXR modifications.',
+      'Made OpenXR layer enabled and disabled states far more distinct with solid, high-contrast status pills in both light and dark themes.',
+      'Unified the Quadviews default and per-application profile editors on one shared layout and fixed field alignment in the Resolution group.',
+      'Replaced the sidebar VXR text mark with the app logo and evened out the Pivot binding dropdown heights.',
+    ],
+  },
+  {
     version: '0.8.0',
     date: '2026-06-12',
     title: 'Experimental Quadviews',
@@ -55,7 +69,7 @@ export const patchNotes: PatchNoteEntry[] = [
       'Added layer enable/disable controls, adjacent move up/down ordering, and details for manifest paths, DLL paths, and Windows signature status.',
       'Added VectorXR and Quad-Views-Foveated guidance so Pivot users can see when layer ordering may break quadviews compatibility.',
       'Added on-demand elevation for machine-wide OpenXR layer changes instead of requiring VectorXR to always run as administrator.',
-      'Added a read-only Home status for the VectorXR OpenXR layer so users can tell whether OpenXR tweaks can apply at runtime.',
+      'Added a read-only Home status for the VectorXR OpenXR layer so users can tell whether OpenXR Enhancements  can apply at runtime.',
     ],
   },
   {

@@ -524,6 +524,27 @@ bool ReadOptionalQuadViewsTrackingMode(const JsonValue::Object& object,
     return true;
 }
 
+bool ReadOptionalProfileMode(const JsonValue::Object& object,
+                             const std::string& key,
+                             std::optional<ProfileMode>& out,
+                             std::string& error) {
+    const auto it = object.find(key);
+    if (it == object.end()) {
+        return true;
+    }
+    if (!it->second.IsString()) {
+        error = key + " must be a string";
+        return false;
+    }
+
+    out = ParseProfileMode(it->second.AsString());
+    if (!out) {
+        error = key + " must be one of: custom, disable";
+        return false;
+    }
+    return true;
+}
+
 bool CheckAllowedKeys(const JsonValue::Object& object,
                       const std::unordered_set<std::string>& allowed,
                       std::string& error);
@@ -803,6 +824,7 @@ bool ParseDepthProfile(const JsonValue& value, DepthXrProfile& out, std::string&
     static const std::unordered_set<std::string> allowed = {
         "name",
         "enabled",
+        "mode",
         "applicationIds",
         "settings",
     };
@@ -822,13 +844,16 @@ bool ParseDepthProfile(const JsonValue& value, DepthXrProfile& out, std::string&
 
     std::optional<std::string> name;
     std::optional<bool> enabled;
+    std::optional<ProfileMode> mode;
     if (!ReadOptionalString(*object, "name", name, error) ||
-        !ReadOptionalBool(*object, "enabled", enabled, error)) {
+        !ReadOptionalBool(*object, "enabled", enabled, error) ||
+        !ReadOptionalProfileMode(*object, "mode", mode, error)) {
         return false;
     }
 
     out.name = name.value_or("New Profile");
     out.enabled = enabled.value_or(true);
+    out.mode = mode.value_or(ProfileMode::Custom);
 
     const auto settings_it = object->find("settings");
     if (settings_it != object->end()) {
@@ -972,6 +997,7 @@ bool ParsePivotProfile(const JsonValue& value, PivotXrProfile& out, std::string&
     static const std::unordered_set<std::string> allowed = {
         "name",
         "enabled",
+        "mode",
         "applicationIds",
         "activationMode",
         "activationBinding",
@@ -993,16 +1019,19 @@ bool ParsePivotProfile(const JsonValue& value, PivotXrProfile& out, std::string&
 
     std::optional<std::string> name;
     std::optional<bool> enabled;
+    std::optional<ProfileMode> mode;
     std::optional<ActivationMode> activation_mode;
 
     if (!ReadOptionalString(*object, "name", name, error) ||
         !ReadOptionalBool(*object, "enabled", enabled, error) ||
+        !ReadOptionalProfileMode(*object, "mode", mode, error) ||
         !ReadOptionalActivationMode(*object, "activationMode", activation_mode, error)) {
         return false;
     }
 
     out.name = name.value_or("New Profile");
     out.enabled = enabled.value_or(true);
+    out.mode = mode.value_or(ProfileMode::Custom);
     if (activation_mode.has_value()) {
         out.activation_mode = *activation_mode;
     }
@@ -1172,6 +1201,7 @@ bool ParseQuadViewsProfile(const JsonValue& value, QuadViewsProfile& out, std::s
     static const std::unordered_set<std::string> allowed = {
         "name",
         "enabled",
+        "mode",
         "applicationIds",
         "settings",
     };
@@ -1191,13 +1221,16 @@ bool ParseQuadViewsProfile(const JsonValue& value, QuadViewsProfile& out, std::s
 
     std::optional<std::string> name;
     std::optional<bool> enabled;
+    std::optional<ProfileMode> mode;
     if (!ReadOptionalString(*object, "name", name, error) ||
-        !ReadOptionalBool(*object, "enabled", enabled, error)) {
+        !ReadOptionalBool(*object, "enabled", enabled, error) ||
+        !ReadOptionalProfileMode(*object, "mode", mode, error)) {
         return false;
     }
 
     out.name = name.value_or("New Profile");
     out.enabled = enabled.value_or(true);
+    out.mode = mode.value_or(ProfileMode::Custom);
 
     const auto settings_it = object->find("settings");
     if (settings_it != object->end()) {

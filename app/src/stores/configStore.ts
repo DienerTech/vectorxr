@@ -2,7 +2,7 @@ import { computed, reactive } from 'vue'
 
 import { clearSeenApps, loadConfigEnvelope, loadSeenApps, resetStoredData, saveConfigEnvelope, type SeenApplication } from '../lib/commands'
 import { cloneConfig, createApplication, createProfile, createPivotProfile, createQuadViewsProfile, defaultConfig } from '../lib/model'
-import type { AppTab, VectorXRConfig } from '../lib/model'
+import type { AppTab, ModuleId, VectorXRConfig } from '../lib/model'
 
 interface StoreState {
   loading: boolean
@@ -26,7 +26,7 @@ const state = reactive<StoreState>({
   seenAppsLoading: false,
   config: defaultConfig(),
   originalConfig: defaultConfig(),
-  activeTab: 'core',
+  activeTab: 'home',
   status: '',
 })
 
@@ -180,6 +180,32 @@ export function useConfigStore() {
     }
   }
 
+  // Registry shortcut: create a profile pre-assigned to one application and jump to the module tab.
+  function addModuleProfileForApplication(moduleId: ModuleId, applicationId: string) {
+    const application = state.config.applications.find((candidate) => candidate.id === applicationId)
+    const applicationIds = application ? [application.id] : []
+
+    if (moduleId === 'depthxr') {
+      state.config.modules.depthxr.profiles.push(createProfile(state.config.modules.depthxr.defaults, applicationIds))
+      syncProfileName(state.config.modules.depthxr.profiles.length - 1)
+    } else if (moduleId === 'pivotxr') {
+      state.config.modules.pivotxr.profiles.push(
+        createPivotProfile(
+          state.config.modules.pivotxr.defaults,
+          applicationIds,
+          state.config.modules.pivotxr.activationMode,
+          state.config.modules.pivotxr.activationBinding,
+        ),
+      )
+      syncPivotProfileName(state.config.modules.pivotxr.profiles.length - 1)
+    } else {
+      state.config.modules.quadviews.profiles.push(createQuadViewsProfile(state.config.modules.quadviews.defaults, applicationIds))
+      syncQuadViewsProfileName(state.config.modules.quadviews.profiles.length - 1)
+    }
+
+    state.activeTab = moduleId
+  }
+
   function importConfig(config: VectorXRConfig) {
     state.config = cloneConfig(config)
     state.status = 'Config imported — save to write to disk'
@@ -241,6 +267,7 @@ export function useConfigStore() {
     addQuadViewsProfile,
     removeQuadViewsProfile,
     syncQuadViewsProfileName,
+    addModuleProfileForApplication,
     addApplication,
     addSeenApplication,
     clearSeenApplications,
