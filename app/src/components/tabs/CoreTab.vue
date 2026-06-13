@@ -2,8 +2,6 @@
 import { computed } from "vue";
 
 import ThemeToggle from "../ThemeToggle.vue";
-import type { OpenXrLayerEntry, OpenXrLayerSnapshot } from "../../lib/commands";
-import type { HealthSummary } from "../../lib/health";
 import type { VectorXRConfig } from "../../lib/model";
 import type { ThemePreference } from "../../lib/theme";
 
@@ -13,15 +11,10 @@ const props = defineProps<{
   logPath?: string;
   themePreference: ThemePreference;
   settingsActionsDisabled: boolean;
-  openXrLayerSnapshot: OpenXrLayerSnapshot | null;
-  openXrLayersLoading: boolean;
-  healthSummary: HealthSummary;
 }>();
 
 defineEmits<{
   viewLogs: [];
-  viewHealth: [];
-  exportDebug: [];
   importConfig: [];
   exportConfig: [];
   resetConfig: [];
@@ -39,61 +32,6 @@ const configDirectory = computed(() => {
   const directory = props.path.replace(/[\\/][^\\/]*$/, "");
   return directory || props.path;
 });
-
-const vectorXrLayer = computed<OpenXrLayerEntry | null>(() => {
-  return props.openXrLayerSnapshot?.slices
-    .flatMap((slice) => slice.layers)
-    .find((layer) => layer.isVectorXr) ?? null;
-});
-
-const vectorXrLayerStatusLabel = computed(() => {
-  if (props.openXrLayersLoading) return "Checking";
-  if (!vectorXrLayer.value) return "Not found";
-  return vectorXrLayer.value.enabled ? "Layer enabled" : "Layer disabled";
-});
-
-const vectorXrLayerStatusClass = computed(() => {
-  if (props.openXrLayersLoading || !vectorXrLayer.value) return "chip-idle";
-  return vectorXrLayer.value.enabled ? "chip-success" : "chip-warning";
-});
-
-const vectorXrLayerStatusDescription = computed(() => {
-  if (props.openXrLayersLoading) {
-    return "Checking the registered VectorXR API layer.";
-  }
-
-  if (!vectorXrLayer.value) {
-    return "VectorXR's API layer registration was not found. Enhancements will not apply until the layer is registered and enabled.";
-  }
-
-  if (vectorXrLayer.value.enabled) {
-    return "The VectorXR API layer is enabled, so Enhancements can apply at runtime.";
-  }
-
-  return "The VectorXR API layer is disabled. None of the Enhancements will apply, regardless of suite or tweak enabled state.";
-});
-
-const runtimeStatusClass = computed(() => props.config.core.enabled ? "chip-success" : "chip-warning");
-const runtimeStatusLabel = computed(() => props.config.core.enabled ? "Runtime enabled" : "Runtime disabled");
-const systemHealthDescription = computed(() => {
-  if (!props.config.core.enabled) {
-    return "Runtime effects are disabled from the suite switch. Layer status is still available for troubleshooting.";
-  }
-
-  if (props.openXrLayersLoading) {
-    return "Checking VectorXR runtime and OpenXR layer readiness.";
-  }
-
-  if (!vectorXrLayer.value) {
-    return "VectorXR is enabled, but the OpenXR API layer registration was not found.";
-  }
-
-  if (!vectorXrLayer.value.enabled) {
-    return "VectorXR is enabled, but the OpenXR API layer is disabled.";
-  }
-
-  return "VectorXR runtime and OpenXR layer status look ready for future OpenXR app launches.";
-});
 </script>
 
 <template>
@@ -102,7 +40,7 @@ const systemHealthDescription = computed(() => {
       class="rounded-[1.25rem] border p-5 shadow-panel backdrop-blur surface-panel"
     >
       <div class="mb-4">
-        <p class="eyebrow text-xs uppercase tracking-[0.24em]">Home</p>
+        <p class="eyebrow text-xs uppercase tracking-[0.24em]">Settings</p>
         <h2 class="text-2xl font-semibold tracking-tight">Runtime settings</h2>
         <p class="mt-2 max-w-3xl text-sm leading-6 text-muted">
           Control the app-wide runtime switch, logging behavior, local theme preference, and import or export settings.
@@ -128,43 +66,6 @@ const systemHealthDescription = computed(() => {
           />
           {{ config.core.enabled ? "Enabled" : "Disabled" }}
         </label>
-      </div>
-
-      <div
-        class="mb-5 rounded-[0.9rem] border px-4 py-3 surface-panel-strong"
-      >
-        <div class="grid gap-3 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-start">
-          <div class="min-w-0">
-            <p class="text-sm font-semibold">System Health</p>
-            <p class="mt-0.5 text-xs text-muted">
-              {{ systemHealthDescription }}
-            </p>
-          </div>
-          <div class="flex flex-wrap gap-2 lg:justify-end">
-            <span
-              class="inline-flex min-w-[9.75rem] cursor-default items-center justify-center rounded-full px-3 py-1 text-xs font-semibold uppercase tracking-[0.16em]"
-              :class="runtimeStatusClass"
-              title="Suite-level runtime switch state."
-            >
-              {{ runtimeStatusLabel }}
-            </span>
-            <span
-              class="inline-flex min-w-[9.75rem] cursor-default items-center justify-center rounded-full px-3 py-1 text-xs font-semibold uppercase tracking-[0.16em]"
-              :class="vectorXrLayerStatusClass"
-              :title="vectorXrLayerStatusDescription"
-            >
-              {{ vectorXrLayerStatusLabel }}
-            </span>
-          </div>
-        </div>
-        <div class="mt-3 flex flex-wrap gap-2 border-t pt-3" style="border-color: var(--app-border)">
-          <button class="button-secondary rounded-[0.65rem] px-3 py-1.5 text-xs font-medium" type="button" @click="$emit('viewHealth')">
-            View Health
-          </button>
-          <button class="button-secondary rounded-[0.65rem] px-3 py-1.5 text-xs font-medium" type="button" @click="$emit('exportDebug')">
-            Export Debug
-          </button>
-        </div>
       </div>
 
       <div class="mt-5 mb-5">

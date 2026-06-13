@@ -26,7 +26,7 @@ const state = reactive<StoreState>({
   seenAppsLoading: false,
   config: defaultConfig(),
   originalConfig: defaultConfig(),
-  activeTab: 'core',
+  activeTab: 'home',
   status: '',
 })
 

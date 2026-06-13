@@ -12,6 +12,7 @@ import StickySaveBar from './components/StickySaveBar.vue'
 import AboutTab from './components/tabs/AboutTab.vue'
 import CoreTab from './components/tabs/CoreTab.vue'
 import DepthXrTab from './components/tabs/DepthXrTab.vue'
+import HomeTab from './components/tabs/HomeTab.vue'
 import OpenXrLayersTab from './components/tabs/OpenXrLayersTab.vue'
 import PivotXrTab from './components/tabs/PivotXrTab.vue'
 import QuadViewsTab from './components/tabs/QuadViewsTab.vue'
@@ -55,9 +56,15 @@ const healthSummary = computed(() => buildHealthSummary({
 
 const tabs = computed(() => [
   {
-    id: 'core' as const,
+    id: 'home' as const,
     label: 'Home',
-    subtitle: 'App settings and logs',
+    subtitle: 'Status, updates, and support',
+    status: latestPatch.version,
+  },
+  {
+    id: 'core' as const,
+    label: 'Settings',
+    subtitle: 'Runtime, logging, theme, and config',
     status: store.state.config.core.enabled ? 'Suite on' : 'Suite off',
   },
   {
@@ -282,19 +289,24 @@ async function confirmResetConfig() {
 
       <div class="flex min-w-0 flex-1 flex-col px-4 py-4 md:px-6">
       <section class="min-h-0 flex-1 overflow-y-auto pb-1">
+        <HomeTab
+          v-if="store.state.activeTab === 'home'"
+          :config="store.state.config"
+          :latest-patch="latestPatch"
+          :open-xr-layer-snapshot="openXrLayerSnapshot"
+          :open-xr-layers-loading="openXrLayersLoading"
+          @view-health="healthCheckOpen = true"
+          @export-debug="debugExportOpen = true"
+          @open-patch-notes="patchNotesOpen = true"
+        />
         <CoreTab
-          v-if="store.state.activeTab === 'core'"
+          v-else-if="store.state.activeTab === 'core'"
           :config="store.state.config"
           :path="store.state.path"
           :log-path="logSnapshot?.activePath"
           :theme-preference="themePreference"
           :settings-actions-disabled="store.state.loading || store.state.saving"
-          :open-xr-layer-snapshot="openXrLayerSnapshot"
-          :open-xr-layers-loading="openXrLayersLoading"
-          :health-summary="healthSummary"
           @view-logs="openLogs"
-          @view-health="healthCheckOpen = true"
-          @export-debug="debugExportOpen = true"
           @import-config="triggerImport"
           @export-config="exportConfig"
           @reset-config="confirmResetConfig"
