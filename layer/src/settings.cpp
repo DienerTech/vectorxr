@@ -191,4 +191,28 @@ std::optional<QuadViewsTrackingMode> ParseQuadViewsTrackingMode(const std::strin
     return std::nullopt;
 }
 
+const char* ToString(ProfileMode mode) {
+    switch (mode) {
+    case ProfileMode::Custom:
+        return "custom";
+    case ProfileMode::Disable:
+        return "disable";
+    default:
+        return "custom";
+    }
+}
+
+std::optional<ProfileMode> ParseProfileMode(const std::string& value) {
+    const std::string normalized = NormalizeValue(value);
+
+    if (normalized == "custom") {
+        return ProfileMode::Custom;
+    }
+    if (normalized == "disable") {
+        return ProfileMode::Disable;
+    }
+
+    return std::nullopt;
+}
+
 } // namespace depthxr

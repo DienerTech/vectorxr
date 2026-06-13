@@ -7,8 +7,8 @@ import HealthCheckModal from './components/HealthCheckModal.vue'
 import ImportPreviewModal from './components/ImportPreviewModal.vue'
 import LogViewerModal from './components/LogViewerModal.vue'
 import PatchNotesModal from './components/PatchNotesModal.vue'
+import SidebarNav from './components/SidebarNav.vue'
 import StickySaveBar from './components/StickySaveBar.vue'
-import TopNavTabs from './components/TopNavTabs.vue'
 import AboutTab from './components/tabs/AboutTab.vue'
 import CoreTab from './components/tabs/CoreTab.vue'
 import DepthXrTab from './components/tabs/DepthXrTab.vue'
@@ -18,7 +18,7 @@ import QuadViewsTab from './components/tabs/QuadViewsTab.vue'
 import { exportConfigFile, loadLogSnapshot, loadOpenXrLayers, type LogSnapshot, type OpenXrLayerSnapshot } from './lib/commands'
 import { createDebugPackage, saveDebugPackage } from './lib/debugPackage'
 import { buildHealthSummary } from './lib/health'
-import { normalizeConfig, type VectorXRConfig } from './lib/model'
+import { moduleStateForApplication, normalizeConfig, type ModuleId, type VectorXRConfig } from './lib/model'
 import { patchNotes } from './lib/patchNotes'
 import { applyThemePreference, loadThemePreference, observeSystemThemeChanges, type ThemePreference } from './lib/theme'
 import { validateConfig } from './lib/validation'
@@ -251,6 +251,17 @@ function cancelImport() {
   importErrors.value = []
 }
 
+// Registry module chips: jump to an existing profile's module tab, or create a
+// profile for the app first when only the defaults currently apply.
+function handleOpenModule(moduleId: ModuleId, applicationId: string) {
+  const stateForApp = moduleStateForApplication(store.state.config, moduleId, applicationId)
+  if (stateForApp.kind === 'default') {
+    store.addModuleProfileForApplication(moduleId, applicationId)
+  } else {
+    store.setActiveTab(moduleId)
+  }
+}
+
 async function confirmResetConfig() {
   const confirmed = window.confirm(
     'Reset VectorXR to defaults?\n\nThis will erase all saved settings, application registry entries, profiles, and OpenXR application discovery data. This cannot be undone.',
@@ -265,13 +276,12 @@ async function confirmResetConfig() {
 </script>
 
 <template>
-  <main class="app-shell-bg h-screen overflow-hidden px-4 py-4 md:px-6 xl:px-8">
-    <section class="mx-auto flex h-full max-w-[1500px] flex-col">
-      <div class="shrink-0 pb-4 pt-1">
-        <TopNavTabs :active-tab="store.state.activeTab" :tabs="tabs" @select="store.setActiveTab" />
-      </div>
+  <main class="app-shell-bg h-screen overflow-hidden">
+    <section class="mx-auto flex h-full max-w-[1700px]">
+      <SidebarNav :active-tab="store.state.activeTab" :tabs="tabs" :version="latestPatch.version" @select="store.setActiveTab" />
 
-      <section class="min-h-0 flex-1 overflow-y-auto pb-4">
+      <div class="flex min-w-0 flex-1 flex-col px-4 py-4 md:px-6">
+      <section class="min-h-0 flex-1 overflow-y-auto pb-1">
         <CoreTab
           v-if="store.state.activeTab === 'core'"
           :config="store.state.config"
@@ -301,6 +311,7 @@ async function confirmResetConfig() {
           @clear-seen="store.clearSeenApplications"
           @refresh-seen="store.refreshSeenApps"
           @remove="store.removeApplication"
+          @open-module="handleOpenModule"
         />
         <AboutTab v-else-if="store.state.activeTab === 'about'" :latest-patch="latestPatch" @open-patch-notes="patchNotesOpen = true" />
         <OpenXrLayersTab
@@ -340,7 +351,7 @@ async function confirmResetConfig() {
       </section>
 
       <StickySaveBar
-        class="shrink-0 pt-4"
+        class="shrink-0 pt-3"
         :dirty="dirty"
         :saving="store.state.saving"
         :loading="store.state.loading"
@@ -349,6 +360,7 @@ async function confirmResetConfig() {
         @save="saveConfig"
         @discard="store.discardChanges"
       />
+      </div>
 
       <input ref="importFileInput" type="file" accept=".json" class="hidden" @change="handleImportFile" />
       <HealthCheckModal :open="healthCheckOpen" :summary="healthSummary" @close="healthCheckOpen = false" @export-debug="debugExportOpen = true" />

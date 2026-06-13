@@ -2,7 +2,7 @@
 import { computed, ref } from 'vue'
 
 import type { SeenApplication } from '../lib/commands'
-import type { RegisteredApplication, VectorXRConfig } from '../lib/model'
+import { moduleLabels, moduleStateForApplication, type ModuleId, type RegisteredApplication, type VectorXRConfig } from '../lib/model'
 
 const props = defineProps<{
   config: VectorXRConfig
@@ -17,7 +17,42 @@ defineEmits<{
   clearSeen: []
   refreshSeen: []
   remove: [index: number]
+  openModule: [moduleId: ModuleId, applicationId: string]
 }>()
+
+const moduleIds: ModuleId[] = ['quadviews', 'pivotxr', 'depthxr']
+
+function moduleChip(applicationId: string, moduleId: ModuleId) {
+  const moduleState = moduleStateForApplication(props.config, moduleId, applicationId)
+  const label = moduleLabels[moduleId]
+
+  switch (moduleState.kind) {
+    case 'module-off':
+      return {
+        text: `${label} · Module off`,
+        chipClass: 'chip-idle',
+        title: `The ${label} module is turned off globally. Click to open it.`,
+      }
+    case 'custom':
+      return {
+        text: `${label} · ${moduleState.profileName}`,
+        chipClass: 'chip-success',
+        title: `Custom ${label} profile "${moduleState.profileName}" applies. Click to open it.`,
+      }
+    case 'disabled':
+      return {
+        text: `${label} · Off for this app`,
+        chipClass: 'chip-danger',
+        title: `Profile "${moduleState.profileName}" turns ${label} off for this application. Click to open it.`,
+      }
+    default:
+      return {
+        text: `${label} · Default`,
+        chipClass: 'chip-idle',
+        title: `The default ${label} profile applies. Click to create a custom profile for this application.`,
+      }
+  }
+}
 
 function normalizeExe(value: string): string {
   return value
@@ -60,7 +95,7 @@ function finishNameEdit() {
         <p class="eyebrow text-xs uppercase tracking-[0.24em]">Registry</p>
         <h2 class="mt-2 text-2xl font-semibold tracking-tight">Application Registry</h2>
         <p class="mt-2 text-sm leading-6 text-muted">
-          Register the applications that module profiles can target by executable name. Add a title once here, then assign it from the profile editors in the module tabs.
+          Register the applications that module profiles can target by executable name. The chips on each card show how every module currently treats that application — click one to jump to its profile, or to create one.
         </p>
       </div>
 
@@ -114,6 +149,20 @@ function finishNameEdit() {
           </span>
           <input v-model="application.match.exe" class="app-input w-full rounded-[0.75rem] px-4 py-2.5" placeholder="DCS.exe" type="text" />
         </label>
+
+        <div class="mt-3 flex flex-wrap items-center gap-2">
+          <button
+            v-for="moduleId in moduleIds"
+            :key="moduleId"
+            class="rounded-full px-3 py-1 text-xs font-medium transition hover:brightness-110"
+            :class="moduleChip(application.id, moduleId).chipClass"
+            type="button"
+            :title="moduleChip(application.id, moduleId).title"
+            @click="$emit('openModule', moduleId, application.id)"
+          >
+            {{ moduleChip(application.id, moduleId).text }}
+          </button>
+        </div>
       </div>
     </div>
 

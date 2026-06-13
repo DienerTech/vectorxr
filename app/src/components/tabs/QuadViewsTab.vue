@@ -1,8 +1,8 @@
 <script setup lang="ts">
-import { computed, ref } from "vue";
+import { computed } from "vue";
 
+import ProfileShell from "../ProfileShell.vue";
 import type {
-  QuadViewsProfileConfig,
   QuadViewsSettings,
   RegisteredApplication,
   VectorXRConfig,
@@ -18,12 +18,6 @@ defineEmits<{
   removeQuadViewsProfile: [index: number];
   syncQuadViewsProfileName: [index: number];
 }>();
-
-const editingProfileName = ref<number | null>(null);
-
-function finishProfileNameEdit() {
-  editingProfileName.value = null;
-}
 
 const profileWarnings = computed(() => {
   const warnings = new Map<number, string[]>();
@@ -47,7 +41,7 @@ const profileWarnings = computed(() => {
       const appName = applicationNameById.get(applicationId) ?? applicationId;
       warnings.set(index, [
         ...(warnings.get(index) ?? []),
-        `${appName} is already targeted by Profile ${firstIndex + 1}. The first enabled profile wins.`,
+        `${appName} is already targeted by Profile ${firstIndex + 1}. The first active profile wins.`,
       ]);
     }
   });
@@ -95,7 +89,7 @@ function budgetTone(settings: QuadViewsSettings) {
 </script>
 
 <template>
-  <div class="space-y-6">
+  <div class="space-y-4">
     <article
       class="rounded-[1.25rem] border p-5 shadow-panel backdrop-blur surface-panel"
     >
@@ -111,11 +105,8 @@ function budgetTone(settings: QuadViewsSettings) {
           </div>
           <p class="mt-2 max-w-3xl text-sm leading-6 text-muted">
             Manage native quadview defaults and per-application profiles for
-            foveal and peripheral rendering.
-          </p>
-          <p class="mt-2 max-w-3xl text-sm leading-6 text-muted">
-            Experimental - behavior may vary by
-            runtime and headset.
+            foveal and peripheral rendering. Experimental - behavior may vary
+            by runtime and headset.
           </p>
         </div>
         <label
@@ -134,10 +125,22 @@ function budgetTone(settings: QuadViewsSettings) {
           >
         </label>
       </div>
-      <p class="eyebrow mb-3 text-xs uppercase tracking-[0.24em]">
-        Default Profile
-      </p>
-      <div class="grid gap-3 lg:grid-cols-3">
+
+      <details class="section-disclosure border-t pt-4" style="border-color: var(--app-border)" open>
+        <summary class="flex flex-wrap items-center gap-2">
+          <svg aria-hidden="true" class="section-chevron h-3.5 w-3.5" viewBox="0 0 20 20" fill="currentColor">
+            <path fill-rule="evenodd" d="M7.2 14.8a1 1 0 0 1 0-1.4L10.6 10 7.2 6.6a1 1 0 1 1 1.4-1.4l4.1 4.1a1 1 0 0 1 0 1.4l-4.1 4.1a1 1 0 0 1-1.4 0Z" clip-rule="evenodd" />
+          </svg>
+          <span class="eyebrow text-xs font-semibold uppercase tracking-[0.24em]">Default Profile</span>
+          <span class="text-xs text-muted">Applies to every application without a custom profile</span>
+          <span class="ml-auto flex items-center gap-2">
+            <span class="rounded-full px-2.5 py-1 text-xs font-semibold uppercase tracking-[0.14em] chip-accent">
+              {{ budgetTone(config.modules.quadviews.defaults) }}
+            </span>
+            <span class="text-xs text-muted">{{ budgetLabel(config.modules.quadviews.defaults) }}</span>
+          </span>
+        </summary>
+        <div class="mt-3 grid gap-3 lg:grid-cols-3">
         <div class="rounded-[1rem] border p-4 surface-panel-soft">
           <p class="eyebrow text-xs uppercase tracking-[0.18em]">
             Focus Window
@@ -238,20 +241,6 @@ function budgetTone(settings: QuadViewsSettings) {
 
         <div class="rounded-[1rem] border p-4 surface-panel-soft">
           <p class="eyebrow text-xs uppercase tracking-[0.18em]">Resolution</p>
-          <div
-            class="mt-3 rounded-[0.75rem] border px-3 py-2 surface-panel-strong"
-          >
-            <span class="flex items-center justify-between gap-3 text-sm">
-              <span class="font-medium">Estimated render budget</span>
-              <span
-                class="rounded-full px-2.5 py-1 text-xs font-semibold uppercase tracking-[0.14em] chip-accent"
-                >{{ budgetTone(config.modules.quadviews.defaults) }}</span
-              >
-            </span>
-            <span class="mt-1 block text-sm text-muted">{{
-              budgetLabel(config.modules.quadviews.defaults)
-            }}</span>
-          </div>
           <div class="mt-3 grid gap-3 sm:grid-cols-2">
             <label class="block">
               <span
@@ -411,16 +400,17 @@ function budgetTone(settings: QuadViewsSettings) {
             </label>
           </div>
         </div>
-      </div>
+        </div>
+      </details>
     </article>
 
-    <section class="space-y-4">
+    <section class="space-y-3">
       <div
-        class="flex flex-wrap items-center justify-between gap-3 rounded-[1rem] border p-4 surface-panel"
+        class="flex flex-wrap items-center justify-between gap-3 rounded-[1rem] border px-4 py-3 surface-panel"
       >
         <div>
-          <p class="eyebrow text-xs uppercase tracking-[0.24em]">Profiles</p>
-          <h2 class="text-2xl font-semibold tracking-tight">Custom Profiles</h2>
+          <h2 class="text-lg font-semibold tracking-tight">Custom Profiles</h2>
+          <p class="text-sm text-muted">Override Quadviews per application, or disable it for specific titles.</p>
         </div>
         <button
           class="button-accent rounded-[0.75rem] px-5 py-2.5 text-sm font-medium"
@@ -431,138 +421,31 @@ function budgetTone(settings: QuadViewsSettings) {
         </button>
       </div>
 
-      <article
+      <ProfileShell
         v-for="(profile, index) in config.modules.quadviews.profiles"
         :key="`quadviews-profile-${index}`"
-        class="rounded-[1rem] border p-5 shadow-panel transition"
-        :class="profile.enabled ? 'surface-panel' : 'surface-panel-soft'"
+        :index="index"
+        :profile="profile"
+        :applications="applications"
+        module-label="Quadviews"
+        :warnings="profileWarnings.get(index)"
+        @remove="$emit('removeQuadViewsProfile', index)"
+        @sync-name="$emit('syncQuadViewsProfileName', index)"
       >
-        <div class="mb-4 flex flex-wrap items-center justify-between gap-3">
-          <div class="flex flex-wrap items-center gap-2">
-            <p class="eyebrow text-xs uppercase tracking-[0.24em]">
-              Profile {{ index + 1 }}
-            </p>
-            <h3
-              v-if="editingProfileName !== index"
-              class="text-xl font-semibold tracking-tight"
-            >
-              {{ profile.name }}
-            </h3>
-            <input
-              v-else
-              v-model="profile.name"
-              class="app-input w-full max-w-sm rounded-[0.75rem] px-3 py-2 text-xl font-semibold tracking-tight"
-              title="Friendly name for this Quadviews profile."
-              type="text"
-              @blur="finishProfileNameEdit"
-              @keydown.enter="finishProfileNameEdit"
-            />
-            <button
-              v-if="editingProfileName !== index"
-              class="button-secondary inline-flex h-8 w-8 items-center justify-center rounded-[0.5rem]"
-              type="button"
-              aria-label="Edit profile name"
-              @click="editingProfileName = index"
-            >
-              <svg
-                aria-hidden="true"
-                class="h-4 w-4"
-                viewBox="0 0 20 20"
-                fill="currentColor"
-              >
-                <path
-                  d="M13.92 2.87a2.2 2.2 0 0 1 3.11 3.11l-.72.72-3.11-3.11.72-.72Zm-1.7 1.7 3.11 3.11-8.7 8.7-3.44.33.33-3.44 8.7-8.7Z"
-                />
-              </svg>
-            </button>
-            <span
-              class="rounded-full px-3 py-1 text-xs font-semibold uppercase tracking-[0.16em] chip-accent"
-              >{{ trackingModeLabel(profile.settings) }}</span
-            >
-            <span
-              class="rounded-full px-3 py-1 text-xs font-semibold uppercase tracking-[0.16em] chip-accent"
-              >{{ budgetLabel(profile.settings) }}</span
-            >
-            <label
-              class="pill-toggle inline-flex items-center gap-2 rounded-full px-3 py-1.5 text-xs font-medium"
-            >
-              <input
-                v-model="profile.enabled"
-                class="h-4 w-4 accent-depthxr-copper"
-                type="checkbox"
-              />
-              {{ profile.enabled ? "Profile Enabled" : "Profile Disabled" }}
-              <span
-                title="When enabled, this profile overrides the default Quadviews settings for its assigned applications."
-                class="cursor-help select-none text-xs text-muted"
-                >ⓘ</span
-              >
-            </label>
-          </div>
-          <button
-            class="button-secondary rounded-[0.75rem] px-4 py-2 text-sm font-medium"
-            type="button"
-            @click="$emit('removeQuadViewsProfile', index)"
+        <template #badges>
+          <span
+            v-if="profile.enabled && profile.mode === 'custom'"
+            class="rounded-full px-3 py-1 text-xs font-semibold uppercase tracking-[0.16em] chip-accent"
+            >{{ trackingModeLabel(profile.settings) }}</span
           >
-            Remove
-          </button>
-        </div>
-
-        <div
-          v-if="profileWarnings.get(index)?.length"
-          class="mb-4 rounded-[0.9rem] border px-4 py-3 text-sm leading-6 chip-warning"
-          style="border-color: var(--app-border)"
-        >
-          <p class="font-medium">Profile conflict</p>
-          <ul class="mt-2 space-y-1">
-            <li v-for="warning in profileWarnings.get(index)" :key="warning">
-              {{ warning }}
-            </li>
-          </ul>
-        </div>
-
-        <label class="block">
-          <span class="mb-1.5 flex items-center gap-1.5 text-sm font-medium">
-            Applications
-            <span
-              title="Choose which registered applications should use this Quadviews profile. The first enabled matching profile wins."
-              class="cursor-help select-none text-xs text-muted"
-              >ⓘ</span
-            >
-          </span>
-          <div
-            class="overflow-x-auto rounded-[0.75rem] border p-3 surface-panel-strong"
+          <span
+            v-if="profile.enabled && profile.mode === 'custom'"
+            class="rounded-full px-3 py-1 text-xs font-semibold uppercase tracking-[0.16em] chip-accent"
+            >{{ budgetLabel(profile.settings) }}</span
           >
-            <div class="flex min-w-max gap-3">
-              <label
-                v-for="application in applications"
-                :key="application.id"
-                class="flex min-w-[13rem] max-w-[16rem] items-start gap-3 rounded-[0.65rem] border px-3 py-3 text-sm surface-panel-soft"
-              >
-                <input
-                  v-model="profile.applicationIds"
-                  class="mt-0.5 h-4 w-4 accent-depthxr-copper"
-                  type="checkbox"
-                  :value="application.id"
-                  title="Assign this application to the current Quadviews profile."
-                  @change="$emit('syncQuadViewsProfileName', index)"
-                />
-                <span>
-                  <span class="block font-medium">{{ application.name }}</span>
-                  <span class="block font-mono text-xs text-muted">{{
-                    application.match.exe
-                  }}</span>
-                </span>
-              </label>
-            </div>
-            <p v-if="applications.length === 0" class="text-sm text-muted">
-              Add an application on the Application Registry tab before
-              assigning this profile.
-            </p>
-          </div>
-        </label>
+        </template>
 
-        <div class="mt-4 grid gap-3 lg:grid-cols-4">
+        <div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
           <label class="block">
             <span class="mb-1.5 flex items-center gap-1.5 text-sm font-medium">
               Mode
@@ -622,7 +505,7 @@ function budgetTone(settings: QuadViewsSettings) {
               <span
                 title="Resolution scale for this application's high-detail focus views."
                 class="cursor-help select-none text-xs text-muted"
-                >â“˜</span
+                >ⓘ</span
               >
             </span>
             <input
@@ -658,7 +541,7 @@ function budgetTone(settings: QuadViewsSettings) {
               <span
                 title="Applies extra sharpening to this application's focus image."
                 class="cursor-help select-none text-xs text-muted"
-                >â“˜</span
+                >ⓘ</span
               >
             </span>
             <input
@@ -676,7 +559,7 @@ function budgetTone(settings: QuadViewsSettings) {
               <span
                 title="Blend width between the focus and peripheral images for this application."
                 class="cursor-help select-none text-xs text-muted"
-                >â“˜</span
+                >ⓘ</span
               >
             </span>
             <input
@@ -689,14 +572,14 @@ function budgetTone(settings: QuadViewsSettings) {
             />
           </label>
         </div>
-      </article>
+      </ProfileShell>
 
       <div
         v-if="config.modules.quadviews.profiles.length === 0"
         class="rounded-[1rem] border border-dashed px-6 py-7 text-center text-sm surface-panel-soft"
       >
         No custom profiles yet. Add a profile to override quadview values for a
-        specific application.
+        specific application, or to turn Quadviews off for one.
       </div>
     </section>
   </div>

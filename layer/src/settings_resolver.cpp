@@ -75,6 +75,11 @@ DepthXrResolvedSettings ResolveDepthXrSettings(const ConfigDocument& config, std
         return resolved;
     }
 
+    if (profile->mode == ProfileMode::Disable) {
+        resolved.enabled = false;
+        return resolved;
+    }
+
     ApplyDepthOverride(resolved, profile->settings);
     return resolved;
 }
@@ -122,6 +127,11 @@ PivotXrResolvedSettings ResolvePivotXrSettings(const ConfigDocument& config, std
 
     const PivotXrProfile* profile = FindMatchingPivotXrProfile(config, exe_name);
     if (profile) {
+        if (profile->mode == ProfileMode::Disable) {
+            resolved.enabled = false;
+            return resolved;
+        }
+
         resolved.activation_mode = profile->activation_mode;
         resolved.activation_binding = profile->activation_binding;
         ApplyPivotSettings(resolved, profile->settings);
@@ -173,6 +183,11 @@ QuadViewsResolvedSettings ResolveQuadViewsSettings(const ConfigDocument& config,
 
     const QuadViewsProfile* profile = FindMatchingQuadViewsProfile(config, exe_name);
     if (profile) {
+        if (profile->mode == ProfileMode::Disable) {
+            resolved.enabled = false;
+            return resolved;
+        }
+
         ApplyQuadViewsSettings(resolved, profile->settings);
     }
 

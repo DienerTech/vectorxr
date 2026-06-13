@@ -28,6 +28,13 @@ enum class QuadViewsTrackingMode {
     Eye,
 };
 
+// Custom: profile settings override the module defaults for its applications.
+// Disable: the module is turned off entirely for the profile's applications.
+enum class ProfileMode {
+    Custom,
+    Disable,
+};
+
 struct InputBinding {
     InputBindingType type{InputBindingType::None};
     std::vector<std::string> chord;
@@ -79,6 +86,7 @@ struct DepthXrProfile {
     std::string name;
     std::vector<std::string> application_ids;
     bool enabled{true};
+    ProfileMode mode{ProfileMode::Custom};
     DepthXrSettingsOverride settings;
 };
 
@@ -103,6 +111,7 @@ struct PivotXrSettings {
 struct PivotXrProfile {
     std::string name;
     bool enabled{true};
+    ProfileMode mode{ProfileMode::Custom};
     std::vector<std::string> application_ids;
     ActivationMode activation_mode{ActivationMode::Toggle};
     InputBinding activation_binding;
@@ -149,6 +158,7 @@ struct QuadViewsSettings {
 struct QuadViewsProfile {
     std::string name;
     bool enabled{true};
+    ProfileMode mode{ProfileMode::Custom};
     std::vector<std::string> application_ids;
     QuadViewsSettings settings;
 };
@@ -190,5 +200,7 @@ const char* ToString(InputBindingType type);
 std::optional<InputBindingType> ParseInputBindingType(const std::string& value);
 const char* ToString(QuadViewsTrackingMode mode);
 std::optional<QuadViewsTrackingMode> ParseQuadViewsTrackingMode(const std::string& value);
+const char* ToString(ProfileMode mode);
+std::optional<ProfileMode> ParseProfileMode(const std::string& value);
 
 } // namespace depthxr

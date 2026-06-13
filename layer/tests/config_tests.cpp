@@ -484,6 +484,90 @@ void TestQuadViewsProfileResolution() {
            "Quadviews default focus size mismatch");
 }
 
+void TestDisableModeProfileTurnsModuleOff() {
+    const std::string json = R"json(
+{
+  "version": 3,
+  "core": { "enabled": true, "logLevel": "info", "logRetentionFiles": 7 },
+  "applications": [
+    { "id": "msfs", "name": "MSFS", "enabled": true, "match": { "exe": "FlightSimulator2024.exe" } }
+  ],
+  "modules": {
+    "depthxr": {
+      "enabled": true,
+      "defaults": {
+        "stereoBoostEnabled": true,
+        "convergenceEnabled": true,
+        "stereoBoost": 1.1,
+        "convergence": 0.02
+      },
+      "bindings": { "toggleEnabled": { "type": "none" } },
+      "profiles": [
+        { "name": "MSFS", "applicationIds": ["msfs"], "enabled": true, "mode": "disable" }
+      ]
+    },
+    "pivotxr": {
+      "enabled": true,
+      "defaults": {
+        "rotationMultiplier": 1.5,
+        "smoothing": 0.2,
+        "deadzoneDegrees": 8.0,
+        "maxExtraYawDegrees": 25.0,
+        "pitchRotationMultiplier": 1.0,
+        "pitchSmoothing": 0.2,
+        "pitchDeadzoneDegrees": 12.0,
+        "maxExtraPitchDegrees": 20.0
+      },
+      "profiles": [
+        { "name": "MSFS", "applicationIds": ["msfs"], "enabled": true, "mode": "disable" }
+      ]
+    },
+    "quadviews": {
+      "enabled": true,
+      "defaults": {
+        "trackingMode": "eye",
+        "focusHorizontalSizePercent": 32.0,
+        "focusVerticalSizePercent": 32.0,
+        "focusScale": 1.1,
+        "peripheralScale": 0.45,
+        "foveateSharpness": 0.0,
+        "transitionThicknessPercent": 25.0,
+        "horizontalOffsetDegrees": 0.0,
+        "verticalOffsetDegrees": 0.0,
+        "gazeSmoothing": 0.15,
+        "gazeDeadzoneDegrees": 1.5
+      },
+      "profiles": [
+        { "name": "MSFS", "applicationIds": ["msfs"], "enabled": true, "mode": "disable" }
+      ]
+    }
+  }
+}
+)json";
+
+    const depthxr::ParseResult result = depthxr::ParseConfig(json);
+    Expect(result.ok, "Config parser rejected disable-mode profiles: " + result.error);
+    Expect(result.document.quadviews.profiles[0].mode == depthxr::ProfileMode::Disable,
+           "Quadviews profile mode was not parsed as disable");
+
+    const depthxr::ResolvedRuntimeConfig resolved = depthxr::ResolveRuntimeConfig(result.document, "FlightSimulator2024.exe");
+    Expect(!resolved.depthxr.enabled, "Disable-mode profile should turn DepthXR off for its application");
+    Expect(!resolved.pivotxr.enabled, "Disable-mode profile should turn PivotXR off for its application");
+    Expect(!resolved.quadviews.enabled, "Disable-mode profile should turn Quadviews off for its application");
+
+    // Unmatched applications still receive the module defaults.
+    const depthxr::ResolvedRuntimeConfig resolved_other = depthxr::ResolveRuntimeConfig(result.document, "DCS.exe");
+    Expect(resolved_other.depthxr.enabled, "DepthXR defaults should still apply to unmatched applications");
+    Expect(resolved_other.pivotxr.enabled, "PivotXR defaults should still apply to unmatched applications");
+    Expect(resolved_other.quadviews.enabled, "Quadviews defaults should still apply to unmatched applications");
+
+    // A disabled disable-mode profile is inert: defaults apply again.
+    depthxr::ConfigDocument inert = result.document;
+    inert.quadviews.profiles[0].enabled = false;
+    const depthxr::ResolvedRuntimeConfig resolved_inert = depthxr::ResolveRuntimeConfig(inert, "FlightSimulator2024.exe");
+    Expect(resolved_inert.quadviews.enabled, "Inactive disable-mode profile should fall back to defaults");
+}
+
 void TestInvalidPivotActivationBindingRejected() {
     const std::string json = R"json(
 {
@@ -818,6 +902,7 @@ int main() {
     TestDisabledProfileFallsBackToDefaults();
     TestPivotProfileResolution();
     TestQuadViewsProfileResolution();
+    TestDisableModeProfileTurnsModuleOff();
     TestInvalidPivotActivationBindingRejected();
     TestNoneBindingParsed();
     TestDeviceBindingMetadataParsed();
