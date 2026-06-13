@@ -7,6 +7,38 @@ notice. As of June 2026 the About tab was retired and its content folded into Ho
 shows "Developed independently by DienerTech LLC." That is fine for the UI — the licensing
 obligations below live at the **distribution** level, not in the Vue front end.
 
+## Inspiration repo source audit
+
+Audited on 2026-06-13 against fresh shallow clones of:
+
+- `mbucchia/Quad-Views-Foveated`
+- `NobiWan/xrnecksafer`
+- `fredemmott/OpenXR-API-Layers-GUI`
+
+Checks performed:
+
+- exact file SHA-256 matches across source/text files
+- exact long-line matches after filtering generated files, lockfiles, and license boilerplate
+- exact token-window matches for copied/reformatted code blocks
+- comment-line matches
+- function/class/struct definition-name overlap
+- project-specific phrase searches for upstream names and identifiers
+
+Result: no wholesale copied source files or copied code blocks from those projects were found.
+The only implementation-level overlaps were expected generic OpenXR/Windows items:
+
+- `xrNegotiateLoaderApiLayerInterface` in OpenXR layer manifests
+- the PowerShell `Start-Process -Verb RunAs` elevation pattern in install/uninstall helpers
+- `DllMain`, the standard Windows DLL entry point
+
+The references to those projects in `README.md`, docs, and UI copy are attribution and
+compatibility guidance, not vendored source. Their MIT license texts do not appear to need to be
+carried forward solely because of those references.
+
+One separate notice item remains: `layer/include/depthxr/openxr_loader_api_layer.h` mirrors
+Khronos OpenXR loader/API-layer interface structures and names. Treat this as OpenXR SDK/interface
+material when preparing third-party notices.
+
 ## TODO before launch
 
 - [ ] **Ship our own `LICENSE` in the Tauri bundle.** The MIT permission notice must be included
