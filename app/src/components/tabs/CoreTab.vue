@@ -53,7 +53,7 @@ const configDirectory = computed(() => {
         <div>
           <p class="text-sm font-semibold">VectorXR Enabled</p>
           <p class="mt-0.5 text-xs text-muted">
-            Enables or disables all VectorXR OpenXR Enhancements  effects at runtime.
+            Enables or disables all VectorXR OpenXR Enhancements at runtime.
           </p>
         </div>
         <label

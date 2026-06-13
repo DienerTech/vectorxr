@@ -58,7 +58,7 @@ const vectorXrLayerStatusDescription = computed(() => {
     return 'The VectorXR API layer is enabled, so Enhancements can apply at runtime.'
   }
 
-  return 'The VectorXR API layer is disabled. None of the Enhancements will apply, regardless of suite or tweak enabled state.'
+  return 'The VectorXR API layer is disabled. None of the Enhancements will apply, regardless of suite or Enhancement enabled state.'
 })
 
 const runtimeStatusClass = computed(() => props.config.core.enabled ? 'chip-success' : 'chip-warning')
@@ -190,10 +190,16 @@ onMounted(() => {
         <p class="eyebrow text-xs uppercase tracking-[0.24em]">Welcome</p>
 
         <h2 class="mt-3 text-3xl font-semibold tracking-tight">VectorXR</h2>
-        <p class="mt-3 max-w-3xl text-sm leading-6 text-muted">
-          VectorXR is an OpenXR tweak platform with per-game profiles. Adjust stereo depth, configure enhanced head rotation, and manage your OpenXR layers from one place. Pick an enhancement from the sidebar to get started, or review your system status below.
+        <p class="mt-1.5 text-sm font-medium" style="color: var(--app-accent)">
+          OpenXR Enhancements, tuned per game.
         </p>
-        <p class="mt-3 text-sm leading-6 text-muted">Developed independently by DienerTech LLC.</p>
+        <p class="mt-3 max-w-3xl text-sm leading-6 text-muted">
+          An OpenXR Enhancement platform that reshapes how your headset renders and tracks, title by title — reclaim frame rate with dynamic foveated rendering, amplify head rotation to check your six, and deepen stereo separation for a stronger sense of scale.
+        </p>
+        <p class="mt-3 max-w-3xl text-sm leading-6 text-muted">
+          Layer management and per-application profiles keep every title dialed in from one place. Pick an Enhancement from the sidebar, or review your system status below.
+        </p>
+        <p class="mt-3 text-xs text-soft">Developed independently by DienerTech LLC.</p>
 
         <div class="mt-5 flex flex-wrap gap-3">
           <button
