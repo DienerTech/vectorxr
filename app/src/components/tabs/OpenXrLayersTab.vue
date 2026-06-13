@@ -470,7 +470,7 @@ function signatureGuidance(layer: OpenXrLayerEntry): string {
 
               <button
                 class="inline-flex w-[6.25rem] shrink-0 items-center justify-center gap-2 rounded-[0.7rem] border px-2.5 py-2 text-center transition disabled:cursor-not-allowed disabled:opacity-60"
-                :class="layer.enabled ? 'chip-success' : 'chip-idle'"
+                :class="layer.enabled ? 'layer-state-on' : 'layer-state-off'"
                 type="button"
                 :title="elevatedWriteTooltip(`${layer.enabled ? 'Disable' : 'Enable'} this OpenXR layer.`, activeSlice)"
                 :disabled="busyKey !== null || activeSliceReadOnly"

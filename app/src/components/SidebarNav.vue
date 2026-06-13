@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 
+import logoUrl from '../assets/logo.png'
 import type { AppTab } from '../lib/model'
 
 const props = defineProps<{
@@ -35,7 +36,7 @@ function moduleDotClass(tab: { status: string }): string {
 <template>
   <nav class="side-nav flex h-full w-56 shrink-0 flex-col border-r px-3 py-4">
     <div class="mb-5 flex items-center gap-2.5 px-2">
-      <span class="side-nav-mark flex h-8 w-8 items-center justify-center rounded-[0.6rem] text-xs font-bold tracking-tight">VXR</span>
+      <img :src="logoUrl" alt="VectorXR logo" class="side-nav-mark h-8 w-8 rounded-[0.6rem] object-contain" />
       <div>
         <p class="text-sm font-semibold tracking-tight">VectorXR</p>
         <p class="text-[0.68rem] text-soft">v{{ version }}</p>

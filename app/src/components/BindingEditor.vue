@@ -67,7 +67,7 @@ function toggleModifier(modifier: string, enabled: boolean) {
 
       <label class="block">
         <span class="mb-1.5 block text-sm font-medium">Binding Type</span>
-        <select v-model="bindingType" class="app-input w-full rounded-[0.75rem] px-4 py-2.5 text-sm">
+        <select v-model="bindingType" class="app-input w-full rounded-[0.75rem] px-4 py-2.5">
           <option value="none">None</option>
           <option value="keyboard">Keyboard</option>
           <option value="device">Device</option>

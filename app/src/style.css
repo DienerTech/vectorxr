@@ -208,6 +208,21 @@ textarea {
   color: var(--app-danger-text);
 }
 
+/* Solid, high-contrast state pills for the OpenXR layer toggle. The *-text
+   tokens flip light/dark together with --app-text-inverse, so this stays
+   readable and distinct from the panel in both themes. */
+.layer-state-on {
+  background: var(--app-success-text);
+  border-color: var(--app-success-text);
+  color: var(--app-text-inverse);
+}
+
+.layer-state-off {
+  background: var(--app-idle-text);
+  border-color: var(--app-idle-text);
+  color: var(--app-text-inverse);
+}
+
 .button-accent {
   background: var(--app-accent);
   color: #fff;
