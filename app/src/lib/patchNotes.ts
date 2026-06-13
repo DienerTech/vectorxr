@@ -8,6 +8,20 @@ export interface PatchNoteEntry {
 
 export const patchNotes: PatchNoteEntry[] = [
   {
+    version: '0.9.0',
+    date: '2026-06-13',
+    title: 'UI overhaul',
+    summary: 'A refreshed app shell that separates a welcome dashboard from settings, sharpens the OpenXR layer manager, and unifies the Quadviews profile editors around the new "Enhancement" language.',
+    items: [
+      'Split the old Home tab into a Home dashboard (welcome, system health, patch notes, updates, and support) and a dedicated Settings tab, with Home as the default landing tab.',
+      'Folded the former About tab into Home and rewrote the welcome hero to cover foveated rendering, head rotation, and stereo depth.',
+      'Adopted "Enhancement" wording throughout the app for the OpenXR modifications.',
+      'Made OpenXR layer enabled and disabled states far more distinct with solid, high-contrast status pills in both light and dark themes.',
+      'Unified the Quadviews default and per-application profile editors on one shared layout and fixed field alignment in the Resolution group.',
+      'Replaced the sidebar VXR text mark with the app logo and evened out the Pivot binding dropdown heights.',
+    ],
+  },
+  {
     version: '0.8.0',
     date: '2026-06-12',
     title: 'Experimental Quadviews',

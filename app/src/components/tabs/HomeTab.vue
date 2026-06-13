@@ -58,7 +58,7 @@ const vectorXrLayerStatusDescription = computed(() => {
     return 'The VectorXR API layer is enabled, so Enhancements can apply at runtime.'
   }
 
-  return 'The VectorXR API layer is disabled. None of the Enhancements will apply, regardless of suite or Enhancement enabled state.'
+  return 'The VectorXR API layer is disabled. None of the Enhancements will apply, regardless of suite or tweak enabled state.'
 })
 
 const runtimeStatusClass = computed(() => props.config.core.enabled ? 'chip-success' : 'chip-warning')
@@ -190,14 +190,14 @@ onMounted(() => {
         <p class="eyebrow text-xs uppercase tracking-[0.24em]">Welcome</p>
 
         <h2 class="mt-3 text-3xl font-semibold tracking-tight">VectorXR</h2>
-        <p class="mt-1.5 text-sm font-medium" style="color: var(--app-accent)">
+        <p class="mt-1.5 text-sm font-medium accent-text">
           OpenXR Enhancements, tuned per game.
         </p>
         <p class="mt-3 max-w-3xl text-sm leading-6 text-muted">
-          An OpenXR Enhancement platform that reshapes how your headset renders and tracks, title by title — reclaim frame rate with dynamic foveated rendering, amplify head rotation to check your six, and deepen stereo separation for a stronger sense of scale.
+          VectorXR is an OpenXR Enhancement platform that reshapes how your headset renders and tracks — title by title. Reclaim frame rate with dynamic foveated rendering, amplify head rotation so you can check your six without overturning, and deepen stereo separation for a stronger sense of scale and presence.
         </p>
         <p class="mt-3 max-w-3xl text-sm leading-6 text-muted">
-          Layer management and per-application profiles keep every title dialed in from one place. Pick an Enhancement from the sidebar, or review your system status below.
+          OpenXR layer management and per-application profiles keep every title configured exactly how you like it, all from one place. Pick an Enhancement from the sidebar to get started, or review your system status below.
         </p>
         <p class="mt-3 text-xs text-soft">Developed independently by DienerTech LLC.</p>
 
@@ -300,29 +300,28 @@ onMounted(() => {
     </section>
 
     <article class="rounded-[1.25rem] border p-5 shadow-panel backdrop-blur surface-panel">
-      <div class="flex flex-wrap items-start justify-between gap-4">
+      <div class="flex flex-wrap items-start justify-between gap-3">
         <div>
           <p class="eyebrow text-xs uppercase tracking-[0.24em]">Latest Patch Notes</p>
           <h2 class="mt-2 text-2xl font-semibold tracking-tight">{{ props.latestPatch.title }}</h2>
         </div>
 
-        <span class="chip-accent rounded-full px-3 py-1 text-xs font-medium uppercase tracking-[0.18em]">
-          {{ props.latestPatch.version }}
-        </span>
+        <div class="flex flex-wrap items-center gap-3">
+          <span class="text-sm text-muted">{{ props.latestPatch.date }}</span>
+          <span class="chip-accent rounded-full px-3 py-1 text-xs font-medium uppercase tracking-[0.18em]">
+            {{ props.latestPatch.version }}
+          </span>
+          <button
+            class="button-secondary rounded-[0.75rem] px-4 py-2 text-sm font-medium"
+            type="button"
+            @click="$emit('openPatchNotes')"
+          >
+            Read full patch notes
+          </button>
+        </div>
       </div>
 
       <p class="mt-3 max-w-3xl text-sm leading-6 text-muted">{{ props.latestPatch.summary }}</p>
-
-      <div class="mt-5 flex flex-wrap items-center gap-3 text-sm">
-        <span class="text-muted">{{ props.latestPatch.date }}</span>
-        <button
-          class="button-accent rounded-[0.75rem] px-4 py-2 text-sm font-medium"
-          type="button"
-          @click="$emit('openPatchNotes')"
-        >
-          Read full patch notes
-        </button>
-      </div>
     </article>
   </div>
 </template>
