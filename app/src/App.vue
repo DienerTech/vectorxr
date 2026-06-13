@@ -9,7 +9,6 @@ import LogViewerModal from './components/LogViewerModal.vue'
 import PatchNotesModal from './components/PatchNotesModal.vue'
 import SidebarNav from './components/SidebarNav.vue'
 import StickySaveBar from './components/StickySaveBar.vue'
-import AboutTab from './components/tabs/AboutTab.vue'
 import CoreTab from './components/tabs/CoreTab.vue'
 import DepthXrTab from './components/tabs/DepthXrTab.vue'
 import HomeTab from './components/tabs/HomeTab.vue'
@@ -78,12 +77,6 @@ const tabs = computed(() => [
     label: 'OpenXR Layers',
     subtitle: 'Inspect and manage implicit layer order',
     status: 'System',
-  },
-  {
-    id: 'about' as const,
-    label: 'About',
-    subtitle: 'Project information and patch notes',
-    status: latestPatch.version,
   },
   {
     id: 'quadviews' as const,
@@ -325,7 +318,6 @@ async function confirmResetConfig() {
           @remove="store.removeApplication"
           @open-module="handleOpenModule"
         />
-        <AboutTab v-else-if="store.state.activeTab === 'about'" :latest-patch="latestPatch" @open-patch-notes="patchNotesOpen = true" />
         <OpenXrLayersTab
           v-else-if="store.state.activeTab === 'layers'"
           :snapshot="openXrLayerSnapshot"

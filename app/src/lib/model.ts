@@ -2,7 +2,7 @@ export type LogLevel = 'info' | 'debug'
 export type ActivationMode = 'toggle' | 'hold'
 export type ProfileMode = 'custom' | 'disable'
 export type QuadViewsTrackingMode = 'head' | 'eye'
-export type AppTab = 'home' | 'core' | 'registry' | 'layers' | 'about' | 'depthxr' | 'pivotxr' | 'quadviews'
+export type AppTab = 'home' | 'core' | 'registry' | 'layers' | 'depthxr' | 'pivotxr' | 'quadviews'
 export const keyboardBindingKeyGroups = [
   {
     label: 'Function Keys',
