@@ -59,18 +59,18 @@ const vectorXrLayerStatusClass = computed(() => {
 
 const vectorXrLayerStatusDescription = computed(() => {
   if (props.openXrLayersLoading) {
-    return "Checking the registered VectorXR OpenXR API layer.";
+    return "Checking the registered VectorXR API layer.";
   }
 
   if (!vectorXrLayer.value) {
-    return "VectorXR's OpenXR API layer registration was not found. OpenXR Tweaks will not apply until the layer is registered and enabled.";
+    return "VectorXR's API layer registration was not found. Enhancements will not apply until the layer is registered and enabled.";
   }
 
   if (vectorXrLayer.value.enabled) {
-    return "The VectorXR OpenXR API layer is enabled, so enabled OpenXR Tweaks can apply at runtime.";
+    return "The VectorXR API layer is enabled, so Enhancements can apply at runtime.";
   }
 
-  return "The VectorXR OpenXR API layer is disabled. None of the VectorXR OpenXR Tweaks will apply, regardless of suite or tweak enabled state.";
+  return "The VectorXR API layer is disabled. None of the Enhancements will apply, regardless of suite or tweak enabled state.";
 });
 
 const runtimeStatusClass = computed(() => props.config.core.enabled ? "chip-success" : "chip-warning");
@@ -115,7 +115,7 @@ const systemHealthDescription = computed(() => {
         <div>
           <p class="text-sm font-semibold">VectorXR Enabled</p>
           <p class="mt-0.5 text-xs text-muted">
-            Enables or disables all VectorXR OpenXR Tweaks effects at runtime.
+            Enables or disables all VectorXR OpenXR Enhancements  effects at runtime.
           </p>
         </div>
         <label

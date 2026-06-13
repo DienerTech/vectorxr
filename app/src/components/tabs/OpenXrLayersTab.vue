@@ -505,7 +505,7 @@ function signatureGuidance(layer: OpenXrLayerEntry): string {
                       <span
                         v-if="layer.isVectorXr && !layer.enabled"
                         class="mr-2 cursor-default rounded-full px-2.5 py-1 text-xs font-semibold uppercase tracking-[0.14em] chip-warning"
-                        title="VectorXR's OpenXR layer is disabled. OpenXR tweaks will not apply even if the suite or individual tweaks are enabled."
+                        title="VectorXR's OpenXR layer is disabled. OpenXR Enhancements  will not apply even if the suite or individual tweaks are enabled."
                       >
                         Tweaks inactive
                       </span>

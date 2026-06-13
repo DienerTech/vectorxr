@@ -24,7 +24,7 @@ Developed by DienerTech LLC.
 
 ![VectorXR Home tab](docs/screenshots/screenshot-home.png)
 
-The Home tab shows suite-level settings, app status, log access, theme controls, import/export actions, and the current VectorXR OpenXR layer status.
+The Home tab shows suite-level settings, app status, log access, theme controls, import/export actions, and the current VectorXR layer status.
 
 ### Depth
 

@@ -55,7 +55,7 @@ export const patchNotes: PatchNoteEntry[] = [
       'Added layer enable/disable controls, adjacent move up/down ordering, and details for manifest paths, DLL paths, and Windows signature status.',
       'Added VectorXR and Quad-Views-Foveated guidance so Pivot users can see when layer ordering may break quadviews compatibility.',
       'Added on-demand elevation for machine-wide OpenXR layer changes instead of requiring VectorXR to always run as administrator.',
-      'Added a read-only Home status for the VectorXR OpenXR layer so users can tell whether OpenXR tweaks can apply at runtime.',
+      'Added a read-only Home status for the VectorXR OpenXR layer so users can tell whether OpenXR Enhancements  can apply at runtime.',
     ],
   },
   {

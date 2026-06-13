@@ -58,7 +58,7 @@ function moduleDotClass(tab: { status: string }): string {
       </button>
     </div>
 
-    <p class="side-nav-group-label mt-5 px-2">OpenXR Tweaks</p>
+    <p class="side-nav-group-label mt-5 px-2">OpenXR Enhancements </p>
     <div class="mt-1.5 grid gap-1">
       <button
         v-for="tab in moduleTabs"
