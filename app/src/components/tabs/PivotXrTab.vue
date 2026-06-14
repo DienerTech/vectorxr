@@ -25,7 +25,7 @@ const profileWarnings = computed(() => {
 
   const enabledProfiles = props.config.modules.pivotxr.profiles
     .map((profile, index) => ({ profile, index }))
-    .filter(({ profile }) => profile.enabled && profile.mode === 'custom' && profile.activationBinding.type !== 'none')
+    .filter(({ profile }) => profile.enabled && profile.activationBinding.type !== 'none')
 
   for (let i = 0; i < enabledProfiles.length; i++) {
     for (let j = 0; j < i; j++) {
@@ -77,7 +77,7 @@ const profileWarnings = computed(() => {
           </button>
           <label class="pill-toggle inline-flex items-center gap-3 rounded-full px-4 py-2 text-sm font-medium">
             <input v-model="config.modules.pivotxr.enabled" class="h-4 w-4 accent-depthxr-copper" type="checkbox" />
-            Pivot Enabled
+            Default Profile {{ config.modules.pivotxr.enabled ? 'On' : 'Off' }}
           </label>
         </div>
       </div>
@@ -88,7 +88,7 @@ const profileWarnings = computed(() => {
             <path fill-rule="evenodd" d="M7.2 14.8a1 1 0 0 1 0-1.4L10.6 10 7.2 6.6a1 1 0 1 1 1.4-1.4l4.1 4.1a1 1 0 0 1 0 1.4l-4.1 4.1a1 1 0 0 1-1.4 0Z" clip-rule="evenodd" />
           </svg>
           <span class="eyebrow text-xs font-semibold uppercase tracking-[0.24em]">Default Profile</span>
-          <span class="text-xs text-muted">Applies to every application without a custom profile</span>
+          <span class="text-xs text-muted">Applies to applications without an enabled custom profile</span>
         </summary>
 
         <PivotActivationEditor
@@ -208,7 +208,7 @@ const profileWarnings = computed(() => {
       <div class="flex flex-wrap items-center justify-between gap-3 rounded-[1rem] border px-4 py-3 surface-panel">
         <div>
           <h2 class="text-lg font-semibold tracking-tight">Custom Profiles</h2>
-          <p class="text-sm text-muted">Override Pivot per application, or disable it for specific titles.</p>
+          <p class="text-sm text-muted">Override Pivot per application. The first enabled matching profile wins.</p>
         </div>
         <button
           class="button-accent rounded-[0.75rem] px-5 py-2.5 text-sm font-medium"
@@ -342,7 +342,7 @@ const profileWarnings = computed(() => {
         v-if="config.modules.pivotxr.profiles.length === 0"
         class="rounded-[1rem] border border-dashed px-6 py-7 text-center text-sm surface-panel-soft"
       >
-        No custom profiles yet. Add a profile to bind Pivot rotation to a specific application, or to turn Pivot off for one.
+        No custom profiles yet. Add a profile to bind Pivot rotation to a specific application.
       </div>
     </section>
 

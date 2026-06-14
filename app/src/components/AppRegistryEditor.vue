@@ -27,23 +27,17 @@ function moduleChip(applicationId: string, moduleId: ModuleId) {
   const label = moduleLabels[moduleId]
 
   switch (moduleState.kind) {
-    case 'module-off':
+    case 'default-off':
       return {
-        text: `${label} · Module off`,
+        text: `${label} · Default off`,
         chipClass: 'chip-idle',
-        title: `The ${label} module is turned off globally. Click to open it.`,
+        title: `The default ${label} profile is off. Click to create a custom profile for this application.`,
       }
     case 'custom':
       return {
         text: `${label} · ${moduleState.profileName}`,
         chipClass: 'chip-success',
         title: `Custom ${label} profile "${moduleState.profileName}" applies. Click to open it.`,
-      }
-    case 'disabled':
-      return {
-        text: `${label} · Off for this app`,
-        chipClass: 'chip-danger',
-        title: `Profile "${moduleState.profileName}" turns ${label} off for this application. Click to open it.`,
       }
     default:
       return {

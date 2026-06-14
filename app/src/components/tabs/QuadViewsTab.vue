@@ -118,9 +118,9 @@ function budgetTone(settings: QuadViewsSettings) {
             class="h-4 w-4 accent-depthxr-copper"
             type="checkbox"
           />
-          Quadviews Enabled
+          Default Profile {{ config.modules.quadviews.enabled ? "On" : "Off" }}
           <span
-            title="Turns VectorXR's native quadviews rendering path on or off for OpenXR apps."
+            title="Turns the default Quadviews profile on or off for apps without an enabled custom profile."
             class="cursor-help select-none text-xs text-muted"
             >ⓘ</span
           >
@@ -133,7 +133,7 @@ function budgetTone(settings: QuadViewsSettings) {
             <path fill-rule="evenodd" d="M7.2 14.8a1 1 0 0 1 0-1.4L10.6 10 7.2 6.6a1 1 0 1 1 1.4-1.4l4.1 4.1a1 1 0 0 1 0 1.4l-4.1 4.1a1 1 0 0 1-1.4 0Z" clip-rule="evenodd" />
           </svg>
           <span class="eyebrow text-xs font-semibold uppercase tracking-[0.24em]">Default Profile</span>
-          <span class="text-xs text-muted">Applies to every application without a custom profile</span>
+          <span class="text-xs text-muted">Applies to applications without an enabled custom profile</span>
           <span class="ml-auto flex items-center gap-2">
             <span class="rounded-full px-2.5 py-1 text-xs font-semibold uppercase tracking-[0.14em] chip-accent">
               {{ budgetTone(config.modules.quadviews.defaults) }}
@@ -151,7 +151,7 @@ function budgetTone(settings: QuadViewsSettings) {
       >
         <div>
           <h2 class="text-lg font-semibold tracking-tight">Custom Profiles</h2>
-          <p class="text-sm text-muted">Override Quadviews per application, or disable it for specific titles.</p>
+          <p class="text-sm text-muted">Override Quadviews per application. The first enabled matching profile wins.</p>
         </div>
         <button
           class="button-accent rounded-[0.75rem] px-5 py-2.5 text-sm font-medium"
@@ -175,12 +175,12 @@ function budgetTone(settings: QuadViewsSettings) {
       >
         <template #badges>
           <span
-            v-if="profile.enabled && profile.mode === 'custom'"
+            v-if="profile.enabled"
             class="rounded-full px-3 py-1 text-xs font-semibold uppercase tracking-[0.16em] chip-accent"
             >{{ trackingModeLabel(profile.settings) }}</span
           >
           <span
-            v-if="profile.enabled && profile.mode === 'custom'"
+            v-if="profile.enabled"
             class="rounded-full px-3 py-1 text-xs font-semibold uppercase tracking-[0.16em] chip-accent"
             >{{ budgetLabel(profile.settings) }}</span
           >
@@ -194,7 +194,7 @@ function budgetTone(settings: QuadViewsSettings) {
         class="rounded-[1rem] border border-dashed px-6 py-7 text-center text-sm surface-panel-soft"
       >
         No custom profiles yet. Add a profile to override quadview values for a
-        specific application, or to turn Quadviews off for one.
+        specific application.
       </div>
     </section>
   </div>

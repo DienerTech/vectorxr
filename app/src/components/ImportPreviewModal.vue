@@ -38,15 +38,15 @@ defineEmits<{
               <span class="font-medium" style="color: var(--app-text)">{{ config.applications.length }}</span>
             </li>
             <li>
-              Depth: <span class="font-medium" style="color: var(--app-text)">{{ config.modules.depthxr.enabled ? 'Enabled' : 'Disabled' }}</span>
+              Depth default: <span class="font-medium" style="color: var(--app-text)">{{ config.modules.depthxr.enabled ? 'On' : 'Off' }}</span>
               — {{ config.modules.depthxr.profiles.length }} {{ config.modules.depthxr.profiles.length === 1 ? 'profile' : 'profiles' }}
             </li>
             <li>
-              Pivot: <span class="font-medium" style="color: var(--app-text)">{{ config.modules.pivotxr.enabled ? 'Enabled' : 'Disabled' }}</span>
+              Pivot default: <span class="font-medium" style="color: var(--app-text)">{{ config.modules.pivotxr.enabled ? 'On' : 'Off' }}</span>
               — {{ config.modules.pivotxr.profiles.length }} {{ config.modules.pivotxr.profiles.length === 1 ? 'profile' : 'profiles' }}
             </li>
             <li>
-              Quadviews: <span class="font-medium" style="color: var(--app-text)">{{ config.modules.quadviews.enabled ? 'Enabled' : 'Disabled' }}</span>
+              Quadviews default: <span class="font-medium" style="color: var(--app-text)">{{ config.modules.quadviews.enabled ? 'On' : 'Off' }}</span>
               - {{ config.modules.quadviews.profiles.length }} {{ config.modules.quadviews.profiles.length === 1 ? 'profile' : 'profiles' }}
             </li>
           </ul>

@@ -430,11 +430,6 @@ textarea {
   color: var(--app-text-inverse);
 }
 
-.side-nav-exp {
-  background: var(--app-warning-soft);
-  color: var(--app-warning-text);
-}
-
 .nav-dot {
   display: inline-block;
   height: 0.5rem;

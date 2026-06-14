@@ -484,7 +484,7 @@ void TestQuadViewsProfileResolution() {
            "Quadviews default focus size mismatch");
 }
 
-void TestDisableModeProfileTurnsModuleOff() {
+void TestEnabledProfileOverridesDisabledDefault() {
     const std::string json = R"json(
 {
   "version": 3,
@@ -494,7 +494,7 @@ void TestDisableModeProfileTurnsModuleOff() {
   ],
   "modules": {
     "depthxr": {
-      "enabled": true,
+      "enabled": false,
       "defaults": {
         "stereoBoostEnabled": true,
         "convergenceEnabled": true,
@@ -503,11 +503,19 @@ void TestDisableModeProfileTurnsModuleOff() {
       },
       "bindings": { "toggleEnabled": { "type": "none" } },
       "profiles": [
-        { "name": "MSFS", "applicationIds": ["msfs"], "enabled": true, "mode": "disable" }
+        {
+          "name": "MSFS",
+          "applicationIds": ["msfs"],
+          "enabled": true,
+          "settings": {
+            "stereoBoost": 1.25,
+            "convergence": 0.08
+          }
+        }
       ]
     },
     "pivotxr": {
-      "enabled": true,
+      "enabled": false,
       "defaults": {
         "rotationMultiplier": 1.5,
         "smoothing": 0.2,
@@ -519,11 +527,27 @@ void TestDisableModeProfileTurnsModuleOff() {
         "maxExtraPitchDegrees": 20.0
       },
       "profiles": [
-        { "name": "MSFS", "applicationIds": ["msfs"], "enabled": true, "mode": "disable" }
+        {
+          "name": "MSFS",
+          "applicationIds": ["msfs"],
+          "enabled": true,
+          "activationMode": "hold",
+          "activationBinding": { "type": "keyboard", "chord": ["F9"] },
+          "settings": {
+            "rotationMultiplier": 2.1,
+            "smoothing": 0.1,
+            "deadzoneDegrees": 4.0,
+            "maxExtraYawDegrees": 45.0,
+            "pitchRotationMultiplier": 1.3,
+            "pitchSmoothing": 0.12,
+            "pitchDeadzoneDegrees": 6.0,
+            "maxExtraPitchDegrees": 25.0
+          }
+        }
       ]
     },
     "quadviews": {
-      "enabled": true,
+      "enabled": false,
       "defaults": {
         "trackingMode": "eye",
         "focusHorizontalSizePercent": 32.0,
@@ -538,7 +562,24 @@ void TestDisableModeProfileTurnsModuleOff() {
         "gazeDeadzoneDegrees": 1.5
       },
       "profiles": [
-        { "name": "MSFS", "applicationIds": ["msfs"], "enabled": true, "mode": "disable" }
+        {
+          "name": "MSFS",
+          "applicationIds": ["msfs"],
+          "enabled": true,
+          "settings": {
+            "trackingMode": "head",
+            "focusHorizontalSizePercent": 40.0,
+            "focusVerticalSizePercent": 36.0,
+            "focusScale": 1.0,
+            "peripheralScale": 0.5,
+            "foveateSharpness": 25.0,
+            "transitionThicknessPercent": 20.0,
+            "horizontalOffsetDegrees": 1.0,
+            "verticalOffsetDegrees": -1.0,
+            "gazeSmoothing": 0.2,
+            "gazeDeadzoneDegrees": 2.0
+          }
+        }
       ]
     }
   }
@@ -546,26 +587,32 @@ void TestDisableModeProfileTurnsModuleOff() {
 )json";
 
     const depthxr::ParseResult result = depthxr::ParseConfig(json);
-    Expect(result.ok, "Config parser rejected disable-mode profiles: " + result.error);
-    Expect(result.document.quadviews.profiles[0].mode == depthxr::ProfileMode::Disable,
-           "Quadviews profile mode was not parsed as disable");
+    Expect(result.ok, "Config parser rejected opt-in profile config: " + result.error);
 
     const depthxr::ResolvedRuntimeConfig resolved = depthxr::ResolveRuntimeConfig(result.document, "FlightSimulator2024.exe");
-    Expect(!resolved.depthxr.enabled, "Disable-mode profile should turn DepthXR off for its application");
-    Expect(!resolved.pivotxr.enabled, "Disable-mode profile should turn PivotXR off for its application");
-    Expect(!resolved.quadviews.enabled, "Disable-mode profile should turn Quadviews off for its application");
+    Expect(resolved.depthxr.enabled, "Enabled custom profile should turn DepthXR on when default is off");
+    Expect(std::abs(resolved.depthxr.stereo_boost - 1.25) < 0.0001,
+           "DepthXR custom profile should override disabled default");
+    Expect(resolved.pivotxr.enabled, "Enabled custom profile should turn PivotXR on when default is off");
+    Expect(resolved.pivotxr.activation_mode == depthxr::ActivationMode::Hold,
+           "PivotXR custom profile activation mode mismatch");
+    Expect(std::abs(resolved.pivotxr.yaw_rotation_multiplier - 2.1) < 0.0001,
+           "PivotXR custom profile should override disabled default");
+    Expect(resolved.quadviews.enabled, "Enabled custom profile should turn Quadviews on when default is off");
+    Expect(resolved.quadviews.tracking_mode == depthxr::QuadViewsTrackingMode::Head,
+           "Quadviews custom profile should override disabled default");
 
-    // Unmatched applications still receive the module defaults.
+    // Unmatched applications still follow the default profile enabled flag.
     const depthxr::ResolvedRuntimeConfig resolved_other = depthxr::ResolveRuntimeConfig(result.document, "DCS.exe");
-    Expect(resolved_other.depthxr.enabled, "DepthXR defaults should still apply to unmatched applications");
-    Expect(resolved_other.pivotxr.enabled, "PivotXR defaults should still apply to unmatched applications");
-    Expect(resolved_other.quadviews.enabled, "Quadviews defaults should still apply to unmatched applications");
+    Expect(!resolved_other.depthxr.enabled, "DepthXR default-off profile should not apply to unmatched applications");
+    Expect(!resolved_other.pivotxr.enabled, "PivotXR default-off profile should not apply to unmatched applications");
+    Expect(!resolved_other.quadviews.enabled, "Quadviews default-off profile should not apply to unmatched applications");
 
-    // A disabled disable-mode profile is inert: defaults apply again.
+    // A disabled custom profile is inert: defaults apply again.
     depthxr::ConfigDocument inert = result.document;
     inert.quadviews.profiles[0].enabled = false;
     const depthxr::ResolvedRuntimeConfig resolved_inert = depthxr::ResolveRuntimeConfig(inert, "FlightSimulator2024.exe");
-    Expect(resolved_inert.quadviews.enabled, "Inactive disable-mode profile should fall back to defaults");
+    Expect(!resolved_inert.quadviews.enabled, "Inactive custom profile should fall back to disabled default");
 }
 
 void TestInvalidPivotActivationBindingRejected() {
@@ -902,7 +949,7 @@ int main() {
     TestDisabledProfileFallsBackToDefaults();
     TestPivotProfileResolution();
     TestQuadViewsProfileResolution();
-    TestDisableModeProfileTurnsModuleOff();
+    TestEnabledProfileOverridesDisabledDefault();
     TestInvalidPivotActivationBindingRejected();
     TestNoneBindingParsed();
     TestDeviceBindingMetadataParsed();

@@ -53,6 +53,14 @@ const healthSummary = computed(() => buildHealthSummary({
   seenApps: store.state.seenApps,
 }))
 
+function enabledProfileCount(moduleId: ModuleId) {
+  return store.state.config.modules[moduleId].profiles.filter((profile) => profile.enabled).length
+}
+
+function enhancementActive(moduleId: ModuleId) {
+  return store.state.config.modules[moduleId].enabled || enabledProfileCount(moduleId) > 0
+}
+
 const tabs = computed(() => [
   {
     id: 'home' as const,
@@ -82,20 +90,22 @@ const tabs = computed(() => [
     id: 'quadviews' as const,
     label: 'Quadviews',
     subtitle: 'Dynamic foveated rendering control',
-    status: store.state.config.modules.quadviews.enabled ? 'Enabled' : 'Disabled',
-    badge: '⚠ Experimental',
+    status: enhancementActive('quadviews') ? 'Active' : 'Inactive',
+    enhancementActive: enhancementActive('quadviews'),
   },
   {
     id: 'pivotxr' as const,
     label: 'Pivot',
     subtitle: 'Rotation tuning - watch your six!',
-    status: store.state.config.modules.pivotxr.enabled ? 'Enabled' : 'Disabled',
+    status: enhancementActive('pivotxr') ? 'Active' : 'Inactive',
+    enhancementActive: enhancementActive('pivotxr'),
   },
   {
     id: 'depthxr' as const,
     label: 'Depth',
     subtitle: 'Stereo depth tuning - see the world in a new way!',
-    status: store.state.config.modules.depthxr.enabled ? 'Enabled' : 'Disabled',
+    status: enhancementActive('depthxr') ? 'Active' : 'Inactive',
+    enhancementActive: enhancementActive('depthxr'),
   },
 ])
 
@@ -255,7 +265,7 @@ function cancelImport() {
 // profile for the app first when only the defaults currently apply.
 function handleOpenModule(moduleId: ModuleId, applicationId: string) {
   const stateForApp = moduleStateForApplication(store.state.config, moduleId, applicationId)
-  if (stateForApp.kind === 'default') {
+  if (stateForApp.kind === 'default' || stateForApp.kind === 'default-off') {
     store.addModuleProfileForApplication(moduleId, applicationId)
   } else {
     store.setActiveTab(moduleId)

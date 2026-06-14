@@ -75,11 +75,7 @@ DepthXrResolvedSettings ResolveDepthXrSettings(const ConfigDocument& config, std
         return resolved;
     }
 
-    if (profile->mode == ProfileMode::Disable) {
-        resolved.enabled = false;
-        return resolved;
-    }
-
+    resolved.enabled = true;
     ApplyDepthOverride(resolved, profile->settings);
     return resolved;
 }
@@ -116,22 +112,13 @@ void ApplyPivotSettings(PivotXrResolvedSettings& resolved, const PivotXrSettings
 PivotXrResolvedSettings ResolvePivotXrSettings(const ConfigDocument& config, std::string_view exe_name) {
     PivotXrResolvedSettings resolved;
     resolved.enabled = config.pivotxr.enabled;
-
-    if (!config.pivotxr.enabled) {
-        return resolved;
-    }
-
     resolved.activation_mode = config.pivotxr.activation_mode;
     resolved.activation_binding = config.pivotxr.activation_binding;
     ApplyPivotSettings(resolved, config.pivotxr.defaults);
 
     const PivotXrProfile* profile = FindMatchingPivotXrProfile(config, exe_name);
     if (profile) {
-        if (profile->mode == ProfileMode::Disable) {
-            resolved.enabled = false;
-            return resolved;
-        }
-
+        resolved.enabled = true;
         resolved.activation_mode = profile->activation_mode;
         resolved.activation_binding = profile->activation_binding;
         ApplyPivotSettings(resolved, profile->settings);
@@ -177,17 +164,9 @@ QuadViewsResolvedSettings ResolveQuadViewsSettings(const ConfigDocument& config,
     resolved.enabled = config.quadviews.enabled;
     ApplyQuadViewsSettings(resolved, config.quadviews.defaults);
 
-    if (!config.quadviews.enabled) {
-        return resolved;
-    }
-
     const QuadViewsProfile* profile = FindMatchingQuadViewsProfile(config, exe_name);
     if (profile) {
-        if (profile->mode == ProfileMode::Disable) {
-            resolved.enabled = false;
-            return resolved;
-        }
-
+        resolved.enabled = true;
         ApplyQuadViewsSettings(resolved, profile->settings);
     }
 

@@ -28,8 +28,9 @@ enum class QuadViewsTrackingMode {
     Eye,
 };
 
-// Custom: profile settings override the module defaults for its applications.
-// Disable: the module is turned off entirely for the profile's applications.
+// Custom profiles override the defaults for their applications. The legacy
+// Disable value is still parsed for older configs but no longer has runtime
+// behavior; a profile's enabled flag controls whether it participates.
 enum class ProfileMode {
     Custom,
     Disable,

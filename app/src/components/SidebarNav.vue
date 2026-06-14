@@ -13,6 +13,7 @@ const props = defineProps<{
     subtitle: string
     status: string
     badge?: string
+    enhancementActive?: boolean
   }>
 }>()
 
@@ -28,8 +29,8 @@ const moduleTabs = computed(() => {
     .filter((tab): tab is NonNullable<typeof tab> => tab !== undefined)
 })
 
-function moduleDotClass(tab: { status: string }): string {
-  return tab.status === 'Enabled' ? 'nav-dot-on' : 'nav-dot-off'
+function moduleDotClass(tab: { enhancementActive?: boolean }): string {
+  return tab.enhancementActive ? 'nav-dot-on' : 'nav-dot-off'
 }
 </script>
 
@@ -67,12 +68,11 @@ function moduleDotClass(tab: { status: string }): string {
         class="side-nav-item flex items-center justify-between gap-2 rounded-[0.65rem] px-3 py-2 text-left text-sm font-medium transition"
         :class="activeTab === tab.id ? 'side-nav-item-active' : ''"
         type="button"
-        :title="tab.badge ? `${tab.subtitle} (Experimental)` : tab.subtitle"
+        :title="`${tab.subtitle}. ${tab.status}`"
         @click="$emit('select', tab.id)"
       >
         <span class="flex items-center gap-1.5">
           {{ tab.label }}
-          <span v-if="tab.badge" class="side-nav-exp rounded-full px-1.5 py-0.5 text-[0.58rem] font-bold uppercase tracking-[0.1em]">Exp</span>
         </span>
         <span class="nav-dot" :class="moduleDotClass(tab)" :title="tab.status" />
       </button>
