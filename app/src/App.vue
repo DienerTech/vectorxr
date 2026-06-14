@@ -9,6 +9,7 @@ import LogViewerModal from './components/LogViewerModal.vue'
 import PatchNotesModal from './components/PatchNotesModal.vue'
 import SidebarNav from './components/SidebarNav.vue'
 import StickySaveBar from './components/StickySaveBar.vue'
+import AboutTab from './components/tabs/AboutTab.vue'
 import CoreTab from './components/tabs/CoreTab.vue'
 import DepthXrTab from './components/tabs/DepthXrTab.vue'
 import HomeTab from './components/tabs/HomeTab.vue'
@@ -85,6 +86,12 @@ const tabs = computed(() => [
     label: 'OpenXR Layers',
     subtitle: 'Inspect and manage implicit layer order',
     status: 'System',
+  },
+  {
+    id: 'about' as const,
+    label: 'About',
+    subtitle: 'Project info, patch notes, and support',
+    status: latestPatch.version,
   },
   {
     id: 'quadviews' as const,
@@ -295,12 +302,11 @@ async function confirmResetConfig() {
         <HomeTab
           v-if="store.state.activeTab === 'home'"
           :config="store.state.config"
-          :latest-patch="latestPatch"
           :open-xr-layer-snapshot="openXrLayerSnapshot"
           :open-xr-layers-loading="openXrLayersLoading"
           @view-health="healthCheckOpen = true"
           @export-debug="debugExportOpen = true"
-          @open-patch-notes="patchNotesOpen = true"
+          @navigate="store.setActiveTab"
         />
         <CoreTab
           v-else-if="store.state.activeTab === 'core'"
@@ -337,6 +343,11 @@ async function confirmResetConfig() {
           @machine-writes-unlocked="openXrMachineWritesUnlocked = $event"
           @snapshot-updated="openXrLayerSnapshot = $event"
           @status="store.state.status = $event"
+        />
+        <AboutTab
+          v-else-if="store.state.activeTab === 'about'"
+          :latest-patch="latestPatch"
+          @open-patch-notes="patchNotesOpen = true"
         />
         <DepthXrTab
           v-else-if="store.state.activeTab === 'depthxr'"

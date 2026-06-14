@@ -3,9 +3,9 @@
 VectorXR is MIT-licensed (`LICENSE` at the repo root, "Copyright (c) 2026 DienerTech LLC").
 
 Copyright is automatic, so the in-app UI does **not** need to display a formal copyright
-notice. As of June 2026 the About tab was retired and its content folded into Home; Home only
-shows "Developed independently by DienerTech LLC." That is fine for the UI — the licensing
-obligations below live at the **distribution** level, not in the Vue front end.
+notice. The About tab shows "Developed independently by DienerTech LLC." and
+"(c) 2026 DienerTech LLC. Released under the MIT License." That is a courtesy, not a requirement —
+the licensing obligations below live at the **distribution** level, not in the Vue front end.
 
 ## Inspiration repo source audit
 
