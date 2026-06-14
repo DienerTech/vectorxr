@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 
-import { openExternalUrl, type OpenXrLayerEntry, type OpenXrLayerSnapshot } from '../../lib/commands'
+import type { OpenXrLayerEntry, OpenXrLayerSnapshot } from '../../lib/commands'
 import type { AppTab, ModuleId, VectorXRConfig } from '../../lib/model'
 
 const props = defineProps<{
@@ -15,8 +15,6 @@ defineEmits<{
   exportDebug: []
   navigate: [tab: AppTab]
 }>()
-
-const githubUrl = 'https://github.com/DienerTech/vectorxr'
 
 const vectorXrLayer = computed<OpenXrLayerEntry | null>(() => {
   return props.openXrLayerSnapshot?.slices
@@ -96,39 +94,10 @@ const enhancementRows = computed(() =>
 )
 
 const activeEnhancementCount = computed(() => enhancementRows.value.filter((row) => row.active).length)
-
-async function openLink(url: string) {
-  await openExternalUrl(url)
-}
 </script>
 
 <template>
   <div class="space-y-5">
-    <article class="rounded-[1.25rem] border p-5 shadow-panel backdrop-blur surface-panel">
-      <p class="eyebrow text-xs uppercase tracking-[0.24em]">Welcome</p>
-
-      <h2 class="mt-3 text-3xl font-semibold tracking-tight">VectorXR</h2>
-      <p class="mt-1.5 text-sm font-medium accent-text">
-        OpenXR Enhancements, tuned per game.
-      </p>
-      <p class="mt-3 max-w-3xl text-sm leading-6 text-muted">
-        VectorXR is an OpenXR Enhancement platform that reshapes how your headset renders and tracks — title by title. Reclaim frame rate with dynamic foveated rendering, amplify head rotation so you can check your six without overturning, and deepen stereo separation for a stronger sense of scale and presence.
-      </p>
-      <p class="mt-3 max-w-3xl text-sm leading-6 text-muted">
-        OpenXR layer management and per-application profiles keep every title configured exactly how you like it, all from one place. Pick an Enhancement from the sidebar to get started, or review your status below.
-      </p>
-
-      <div class="mt-5 flex flex-wrap gap-3">
-        <button
-          class="button-secondary rounded-[0.75rem] px-4 py-2 text-sm font-medium"
-          type="button"
-          @click="openLink(githubUrl)"
-        >
-          GitHub
-        </button>
-      </div>
-    </article>
-
     <article class="rounded-[1.25rem] border p-5 shadow-panel backdrop-blur surface-panel">
       <div class="flex flex-wrap items-center justify-between gap-3">
         <p class="eyebrow text-xs uppercase tracking-[0.24em]">System Health</p>
@@ -158,42 +127,6 @@ async function openLink(url: string) {
         </button>
         <button class="button-secondary rounded-[0.65rem] px-3 py-1.5 text-xs font-medium" type="button" @click="$emit('exportDebug')">
           Export Debug
-        </button>
-      </div>
-    </article>
-
-    <article class="rounded-[1.25rem] border p-5 shadow-panel backdrop-blur surface-panel">
-      <div class="flex flex-wrap items-end justify-between gap-3">
-        <div>
-          <p class="eyebrow text-xs uppercase tracking-[0.24em]">Registered Apps</p>
-          <h2 class="mt-2 text-2xl font-semibold tracking-tight">Profile targets</h2>
-        </div>
-        <span class="text-sm text-muted">{{ props.config.applications.length }} registered</span>
-      </div>
-
-      <div v-if="props.config.applications.length" class="mt-4 flex flex-wrap gap-2">
-        <button
-          v-for="app in props.config.applications"
-          :key="app.id"
-          type="button"
-          class="app-badge inline-flex items-center rounded-full border px-3 py-1.5 text-sm font-medium transition"
-          :title="`${app.match.exe} — open in Application Registry`"
-          @click="$emit('navigate', 'registry')"
-        >
-          {{ app.name }}
-        </button>
-      </div>
-      <div
-        v-else
-        class="mt-4 rounded-[0.9rem] border border-dashed px-4 py-5 text-sm surface-panel-soft"
-      >
-        <p class="text-muted">No applications registered yet. Register the OpenXR titles you want to target with custom profiles.</p>
-        <button
-          class="button-secondary mt-3 rounded-[0.75rem] px-4 py-2 text-sm font-medium"
-          type="button"
-          @click="$emit('navigate', 'registry')"
-        >
-          Open Application Registry
         </button>
       </div>
     </article>

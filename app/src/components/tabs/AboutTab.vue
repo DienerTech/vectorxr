@@ -130,10 +130,16 @@ onMounted(() => {
         <p class="eyebrow text-xs uppercase tracking-[0.24em]">About</p>
 
         <h2 class="mt-3 text-3xl font-semibold tracking-tight">VectorXR</h2>
-        <p class="mt-3 max-w-3xl text-sm leading-6 text-muted">
-          VectorXR is an OpenXR Enhancement platform with per-game profiles. Adjust stereo depth, configure enhanced head rotation, tune foveated rendering, and manage your OpenXR layers from one place.
+        <p class="mt-1.5 text-sm font-medium accent-text">
+          OpenXR Enhancements, tuned per game.
         </p>
-        <p class="mt-3 text-sm leading-6 text-muted">Developed independently by DienerTech LLC.</p>
+        <p class="mt-3 max-w-3xl text-sm leading-6 text-muted">
+          VectorXR is an OpenXR Enhancement platform that reshapes how your headset renders and tracks — title by title. Reclaim frame rate with dynamic foveated rendering, amplify head rotation so you can check your six without overturning, and deepen stereo separation for a stronger sense of scale and presence.
+        </p>
+        <p class="mt-3 max-w-3xl text-sm leading-6 text-muted">
+          OpenXR layer management and per-application profiles keep every title configured exactly how you like it, all from one place.
+        </p>
+        <p class="mt-4 text-sm leading-6 text-muted">Developed independently by DienerTech LLC.</p>
         <p class="mt-2 text-sm leading-6 text-muted">(c) 2026 DienerTech LLC. Released under the MIT License.</p>
 
         <div class="mt-5 flex flex-wrap gap-3">

@@ -237,17 +237,6 @@ textarea {
   border-color: var(--app-accent);
 }
 
-.app-badge {
-  background: var(--app-surface-strong);
-  border-color: var(--app-border);
-  color: var(--app-text);
-}
-
-.app-badge:hover {
-  border-color: var(--app-accent);
-  color: var(--app-accent);
-}
-
 .button-accent {
   background: var(--app-accent);
   color: #fff;
