@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
 
+import SeenAppDetailsModal from './SeenAppDetailsModal.vue'
 import type { SeenApplication } from '../lib/commands'
 import { moduleLabels, moduleStateForApplication, type ModuleId, type RegisteredApplication, type VectorXRConfig } from '../lib/model'
 
@@ -56,14 +57,6 @@ function normalizeExe(value: string): string {
     ?.toLowerCase() ?? ''
 }
 
-function formatUnixSeconds(value: number): string {
-  if (!value) {
-    return 'Unknown'
-  }
-
-  return new Date(value * 1000).toLocaleString()
-}
-
 const seenAppViews = computed(() =>
   props.seenApps.map((seenApp) => {
     const registeredApplication = props.applications.find((application) => normalizeExe(application.match.exe) === normalizeExe(seenApp.exe))
@@ -74,6 +67,14 @@ const seenAppViews = computed(() =>
   }),
 )
 
+// Unregistered apps are the actionable ones (promotion is the point); already
+// registered apps are "filed" and only kept around for reference.
+const unregisteredSeenApps = computed(() => seenAppViews.value.filter((seenApp) => !seenApp.registeredApplication))
+const registeredSeenApps = computed(() => seenAppViews.value.filter((seenApp) => seenApp.registeredApplication))
+
+type SeenAppView = SeenApplication & { registeredApplication: RegisteredApplication | undefined }
+
+const detailsApp = ref<SeenAppView | null>(null)
 const editingApplicationId = ref<string | null>(null)
 
 function finishNameEdit() {
@@ -168,81 +169,123 @@ function finishNameEdit() {
   <article class="rounded-[1.25rem] border p-5 shadow-panel backdrop-blur surface-panel">
     <div class="flex flex-wrap items-start justify-between gap-3">
       <div>
-        <p class="eyebrow text-xs uppercase tracking-[0.24em]">Discovery</p>
-        <h2 class="mt-2 text-2xl font-semibold tracking-tight">OpenXR Application Discovery</h2>
-        <p class="mt-2 max-w-3xl text-sm leading-6 text-muted">
-          Automatically detects OpenXR applications you launch and stores their details locally for easy registration. Discovered apps won’t affect XR settings until added to your registry.
+        <div class="flex flex-wrap items-center gap-2">
+          <p class="eyebrow text-xs uppercase tracking-[0.24em]">Discovery</p>
+          <span
+            class="rounded-full px-2.5 py-0.5 text-xs font-semibold uppercase tracking-[0.14em]"
+            :class="config.core.trackSeenApps ? 'chip-success' : 'chip-warning'"
+            :title="config.core.trackSeenApps
+              ? 'Discovery is tracking the OpenXR apps you launch.'
+              : 'Discovery is off. New OpenXR app launches will not be recorded until you enable tracking in Settings.'"
+          >
+            {{ config.core.trackSeenApps ? 'Tracking on' : 'Tracking off' }}
+          </span>
+        </div>
+        <h3 class="mt-1 text-lg font-semibold tracking-tight">Where new apps come from</h3>
+        <p class="mt-1 max-w-3xl text-sm leading-6 text-muted">
+          VectorXR notes the OpenXR apps you launch so you can easily register them in one click. Nothing here changes your settings until you register it. Tracking is controlled in Settings.
         </p>
       </div>
 
-      <div class="flex flex-wrap gap-3">
-        <button class="button-secondary rounded-[0.75rem] px-4 py-2 text-sm font-medium" type="button" @click="$emit('refreshSeen')">
+      <div class="flex flex-wrap gap-2">
+        <button class="button-secondary rounded-[0.65rem] px-3 py-1.5 text-xs font-medium" type="button" @click="$emit('refreshSeen')">
           Refresh
         </button>
-        <button class="button-secondary rounded-[0.75rem] px-4 py-2 text-sm font-medium" type="button" @click="$emit('clearSeen')">
+        <button class="button-secondary rounded-[0.65rem] px-3 py-1.5 text-xs font-medium" type="button" @click="$emit('clearSeen')">
           Clear Seen Apps
         </button>
       </div>
-    </div>
-
-    <div class="mt-4 flex items-center justify-between gap-4 rounded-[1rem] border px-4 py-3 surface-panel-soft">
-      <div>
-        <p class="text-sm font-semibold">Track Discovered XR apps</p>
-        <p class="mt-1 text-xs leading-5 text-muted">
-          Stores executable names and first/last seen timestamps. All data is kept locally on this PC.
-        </p>
-      </div>
-      <label class="pill-toggle inline-flex items-center gap-3 rounded-full px-4 py-2 text-sm font-medium">
-        <input v-model="config.core.trackSeenApps" class="h-4 w-4 accent-depthxr-copper" type="checkbox" />
-        {{ config.core.trackSeenApps ? 'On' : 'Off' }}
-      </label>
     </div>
 
     <div v-if="seenAppsLoading" class="mt-4 rounded-[1rem] border border-dashed px-6 py-7 text-center text-sm surface-panel-soft">
       Loading seen apps...
     </div>
 
-    <div v-else-if="seenAppViews.length > 0" class="mt-4 space-y-3">
-      <div v-for="seenApp in seenAppViews" :key="seenApp.exe" class="rounded-[1rem] border p-4 surface-panel-soft">
-        <div class="flex flex-wrap items-start justify-between gap-3">
-          <div>
+    <template v-else-if="seenAppViews.length > 0">
+      <!-- Actionable: unregistered discovered apps lead with a clear Register action -->
+      <div v-if="unregisteredSeenApps.length > 0" class="mt-4 space-y-3">
+        <div
+          v-for="seenApp in unregisteredSeenApps"
+          :key="seenApp.exe"
+          class="flex flex-wrap items-center justify-between gap-3 rounded-[1rem] border p-4 surface-panel-soft"
+        >
+          <div class="min-w-0">
             <p class="font-mono text-base font-semibold tracking-tight">{{ seenApp.exe }}</p>
             <p class="mt-1 text-sm text-muted">
               {{ seenApp.launchCount }} {{ seenApp.launchCount === 1 ? 'launch' : 'launches' }}
             </p>
           </div>
 
-          <div class="flex flex-wrap items-center gap-3">
-            <span v-if="seenApp.registeredApplication" class="chip-success rounded-full px-3 py-1 text-xs font-medium">
-              Registered as {{ seenApp.registeredApplication.name }}
-            </span>
+          <div class="flex flex-wrap items-center gap-2">
             <button
-              v-else
-              class="button-accent rounded-[0.75rem] px-4 py-2 text-sm font-medium"
+              class="button-secondary rounded-[0.75rem] px-3 py-2 text-sm font-medium"
+              type="button"
+              @click="detailsApp = seenApp"
+            >
+              Details
+            </button>
+            <button
+              class="button-accent rounded-[0.75rem] px-5 py-2 text-sm font-semibold"
               type="button"
               @click="$emit('addSeen', seenApp.exe)"
             >
-              Add to Registry
+              Register
             </button>
           </div>
         </div>
-
-        <dl class="mt-3 grid gap-3 text-sm md:grid-cols-2">
-          <div>
-            <dt class="text-xs uppercase tracking-[0.18em] text-muted">First seen</dt>
-            <dd class="mt-1">{{ formatUnixSeconds(seenApp.firstSeenUnixSeconds) }}</dd>
-          </div>
-          <div>
-            <dt class="text-xs uppercase tracking-[0.18em] text-muted">Last seen</dt>
-            <dd class="mt-1">{{ formatUnixSeconds(seenApp.lastSeenUnixSeconds) }}</dd>
-          </div>
-        </dl>
       </div>
-    </div>
+
+      <p v-else class="mt-4 rounded-[1rem] border border-dashed px-4 py-4 text-center text-sm text-muted surface-panel-soft">
+        <template v-if="config.core.trackSeenApps">
+          Every discovered app is registered. New apps you launch will appear here.
+        </template>
+        <template v-else>
+          Every discovered app is registered. Tracking is off, so no new apps will appear here.
+        </template>
+      </p>
+
+      <!-- Filed: already-registered apps recede; they are done -->
+      <div v-if="registeredSeenApps.length > 0" class="mt-5">
+        <p class="text-xs uppercase tracking-[0.18em] text-muted">Already registered</p>
+        <div class="mt-2 space-y-1.5">
+          <div
+            v-for="seenApp in registeredSeenApps"
+            :key="seenApp.exe"
+            class="flex flex-wrap items-center justify-between gap-3 rounded-[0.85rem] border px-4 py-2.5 surface-panel-soft opacity-60 transition hover:opacity-100"
+          >
+            <div class="flex min-w-0 flex-wrap items-center gap-2">
+              <span class="font-mono text-sm font-medium">{{ seenApp.exe }}</span>
+              <span class="chip-success rounded-full px-2.5 py-0.5 text-xs font-medium">
+                Registered as {{ seenApp.registeredApplication?.name }}
+              </span>
+            </div>
+            <button
+              class="button-secondary rounded-[0.6rem] px-3 py-1.5 text-xs font-medium"
+              type="button"
+              @click="detailsApp = seenApp"
+            >
+              Details
+            </button>
+          </div>
+        </div>
+      </div>
+    </template>
 
     <div v-else class="mt-4 rounded-[1rem] border border-dashed px-6 py-7 text-center text-sm surface-panel-soft">
-      No XR apps seen yet. Launch an OpenXR app while VectorXR is active, then refresh this list.
+      <template v-if="config.core.trackSeenApps">
+        No XR apps seen yet. Launch an OpenXR app while VectorXR is active, then refresh this list.
+      </template>
+      <template v-else>
+        Application tracking is disabled, so no new apps will appear here. Enable tracking in Settings to record OpenXR app launches.
+      </template>
     </div>
   </article>
+
+  <SeenAppDetailsModal
+    :open="detailsApp !== null"
+    :app="detailsApp"
+    :registered-name="detailsApp?.registeredApplication?.name ?? null"
+    @close="detailsApp = null"
+  />
   </div>
 </template>
