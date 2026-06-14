@@ -35,9 +35,12 @@ The references to those projects in `README.md`, docs, and UI copy are attributi
 compatibility guidance, not vendored source. Their MIT license texts do not appear to need to be
 carried forward solely because of those references.
 
-One separate notice item remains: `layer/include/depthxr/openxr_loader_api_layer.h` mirrors
-Khronos OpenXR loader/API-layer interface structures and names. Treat this as OpenXR SDK/interface
-material when preparing third-party notices.
+One separate Khronos notice item remains. `layer/include/depthxr/openxr_loader_api_layer.h` does
+not vendor `openxr_loader_negotiation.h` verbatim, but it manually redeclares the same OpenXR
+loader/API-layer ABI structs, constants, field order, and member names from the Khronos loader
+negotiation header. The local `OpenXR.Loader.1.1.58.nupkg` also includes Khronos headers and
+declares `Apache-2.0 OR MIT`. Include the Khronos OpenXR SDK/loader notice in the third-party
+notices overhaul.
 
 ## TODO before launch
 
