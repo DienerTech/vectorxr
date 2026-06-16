@@ -183,6 +183,10 @@ textarea {
   color: var(--app-text-inverse-muted);
 }
 
+.accent-text {
+  color: var(--app-accent);
+}
+
 .chip-accent {
   background: var(--app-accent-soft);
   color: var(--app-accent-soft-text);
@@ -221,6 +225,16 @@ textarea {
   background: var(--app-idle-text);
   border-color: var(--app-idle-text);
   color: var(--app-text-inverse);
+}
+
+.enhancement-row {
+  background: var(--app-surface-strong);
+  border-color: var(--app-border);
+  color: var(--app-text);
+}
+
+.enhancement-row:hover {
+  border-color: var(--app-accent);
 }
 
 .button-accent {
@@ -430,9 +444,14 @@ textarea {
   color: var(--app-text-inverse);
 }
 
-.side-nav-exp {
-  background: var(--app-warning-soft);
-  color: var(--app-warning-text);
+/* In dark mode --app-surface-inverse is a near-white panel, which over-brightens
+   the active item, washes out the module status dot, and hurts text contrast.
+   Use a subtle accent-tinted highlight with normal (light) text instead. */
+:root[data-theme='dark'] .side-nav-item-active,
+:root[data-theme='dark'] .side-nav-item-active:hover {
+  background: var(--app-accent-soft);
+  border-color: color-mix(in srgb, var(--app-accent) 45%, transparent);
+  color: var(--app-text);
 }
 
 .nav-dot {

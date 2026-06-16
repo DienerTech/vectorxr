@@ -1,8 +1,7 @@
 export type LogLevel = 'info' | 'debug'
 export type ActivationMode = 'toggle' | 'hold'
-export type ProfileMode = 'custom' | 'disable'
 export type QuadViewsTrackingMode = 'head' | 'eye'
-export type AppTab = 'home' | 'core' | 'registry' | 'layers' | 'depthxr' | 'pivotxr' | 'quadviews'
+export type AppTab = 'home' | 'core' | 'registry' | 'layers' | 'about' | 'depthxr' | 'pivotxr' | 'quadviews'
 export const keyboardBindingKeyGroups = [
   {
     label: 'Function Keys',
@@ -70,7 +69,6 @@ export interface DepthXRSettings {
 export interface DepthXRProfileConfig {
   name: string
   enabled: boolean
-  mode: ProfileMode
   applicationIds: string[]
   settings: DepthXRSettings
 }
@@ -100,7 +98,6 @@ export interface PivotXRSettings {
 export interface PivotXRProfileConfig {
   name: string
   enabled: boolean
-  mode: ProfileMode
   applicationIds: string[]
   activationMode: ActivationMode
   activationBinding: InputBinding
@@ -132,7 +129,6 @@ export interface QuadViewsSettings {
 export interface QuadViewsProfileConfig {
   name: string
   enabled: boolean
-  mode: ProfileMode
   applicationIds: string[]
   settings: QuadViewsSettings
 }
@@ -353,7 +349,6 @@ export function createProfile(defaultSettings: DepthXRSettings, applicationIds: 
   return {
     name: 'New Profile',
     enabled: true,
-    mode: 'custom',
     applicationIds,
     settings: { ...defaultSettings },
   }
@@ -368,7 +363,6 @@ export function createPivotProfile(
   return {
     name: 'New Profile',
     enabled: true,
-    mode: 'custom',
     applicationIds,
     activationMode,
     activationBinding: normalizeInputBinding(activationBinding, defaultNoneBinding()),
@@ -380,7 +374,6 @@ export function createQuadViewsProfile(defaultSettings: QuadViewsSettings, appli
   return {
     name: 'New Profile',
     enabled: true,
-    mode: 'custom',
     applicationIds,
     settings: { ...defaultSettings },
   }
@@ -418,10 +411,6 @@ function normalizePivotXRSettings(value: unknown, fallback: PivotXRSettings): Pi
 
 function normalizeQuadViewsTrackingMode(value: unknown, fallback: QuadViewsTrackingMode): QuadViewsTrackingMode {
   return value === 'eye' || value === 'head' ? value : fallback
-}
-
-function normalizeProfileMode(value: unknown): ProfileMode {
-  return value === 'disable' ? 'disable' : 'custom'
 }
 
 function normalizeQuadViewsSettings(value: unknown, fallback: QuadViewsSettings): QuadViewsSettings {
@@ -636,7 +625,6 @@ function normalizeVectorXRConfig(value: unknown): VectorXRConfig {
           return {
             name: normalizeString(profile.name, 'New Profile'),
             enabled: normalizeBoolean(profile.enabled, true),
-            mode: normalizeProfileMode(profile.mode),
             applicationIds,
             settings,
           }
@@ -656,7 +644,6 @@ function normalizeVectorXRConfig(value: unknown): VectorXRConfig {
           return {
             name: normalizeString(profile.name, 'New Profile'),
             enabled: normalizeBoolean(profile.enabled, true),
-            mode: normalizeProfileMode(profile.mode),
             applicationIds,
             activationMode,
             activationBinding: normalizeInputBinding(profile.activationBinding, defaultNoneBinding()),
@@ -675,7 +662,6 @@ function normalizeVectorXRConfig(value: unknown): VectorXRConfig {
           return {
             name: normalizeString(profile.name, 'New Profile'),
             enabled: normalizeBoolean(profile.enabled, true),
-            mode: normalizeProfileMode(profile.mode),
             applicationIds,
             settings,
           }
@@ -706,7 +692,7 @@ export const moduleLabels: Record<ModuleId, string> = {
 }
 
 export interface ModuleApplicationState {
-  kind: 'module-off' | 'default' | 'custom' | 'disabled'
+  kind: 'default-off' | 'default' | 'custom'
   profileName?: string
   profileIndex?: number
 }
@@ -715,10 +701,6 @@ export interface ModuleApplicationState {
 export function moduleStateForApplication(config: VectorXRConfig, moduleId: ModuleId, applicationId: string): ModuleApplicationState {
   const module = config.modules[moduleId]
 
-  if (!module.enabled) {
-    return { kind: 'module-off' }
-  }
-
   const profiles: Array<DepthXRProfileConfig | PivotXRProfileConfig | QuadViewsProfileConfig> = module.profiles
   for (const [index, profile] of profiles.entries()) {
     if (!profile.enabled || !profile.applicationIds.includes(applicationId)) {
@@ -726,11 +708,11 @@ export function moduleStateForApplication(config: VectorXRConfig, moduleId: Modu
     }
 
     return {
-      kind: profile.mode === 'disable' ? 'disabled' : 'custom',
+      kind: 'custom',
       profileName: profile.name,
       profileIndex: index,
     }
   }
 
-  return { kind: 'default' }
+  return module.enabled ? { kind: 'default' } : { kind: 'default-off' }
 }

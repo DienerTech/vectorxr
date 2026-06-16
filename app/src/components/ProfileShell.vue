@@ -1,13 +1,12 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { ref } from 'vue'
 
 import AppPicker from './AppPicker.vue'
-import type { ProfileMode, RegisteredApplication } from '../lib/model'
+import type { RegisteredApplication } from '../lib/model'
 
 interface ProfileLike {
   name: string
   enabled: boolean
-  mode: ProfileMode
   applicationIds: string[]
 }
 
@@ -26,21 +25,6 @@ defineEmits<{
 }>()
 
 const editingName = ref(false)
-
-// One control drives both persisted fields: enabled + mode.
-type ProfileStatus = ProfileMode | 'off'
-
-const status = computed<ProfileStatus>(() => (props.profile.enabled ? props.profile.mode : 'off'))
-
-function setStatus(next: ProfileStatus) {
-  if (next === 'off') {
-    props.profile.enabled = false
-    return
-  }
-
-  props.profile.enabled = true
-  props.profile.mode = next
-}
 </script>
 
 <template>
@@ -73,35 +57,13 @@ function setStatus(next: ProfileStatus) {
       </div>
 
       <div class="flex flex-wrap items-center gap-2">
-        <div class="segmented" role="radiogroup" :aria-label="`Profile ${index + 1} behavior`">
-          <button
-            class="segmented-option"
-            :class="status === 'custom' ? 'segmented-option-active' : ''"
-            type="button"
-            :title="`Override the default ${moduleLabel} settings for the assigned applications.`"
-            @click="setStatus('custom')"
-          >
-            Custom settings
-          </button>
-          <button
-            class="segmented-option"
-            :class="status === 'disable' ? 'segmented-option-active segmented-option-danger' : ''"
-            type="button"
-            :title="`Turn ${moduleLabel} off entirely for the assigned applications, even though the module is enabled.`"
-            @click="setStatus('disable')"
-          >
-            Disable {{ moduleLabel }}
-          </button>
-          <button
-            class="segmented-option"
-            :class="status === 'off' ? 'segmented-option-active' : ''"
-            type="button"
-            title="Keep this profile but ignore it at runtime. Assigned applications fall back to the defaults."
-            @click="setStatus('off')"
-          >
-            Inactive
-          </button>
-        </div>
+        <label
+          class="pill-toggle inline-flex items-center gap-3 rounded-full px-4 py-2 text-sm font-medium"
+          :title="profile.enabled ? `This profile applies custom ${moduleLabel} settings to its assigned applications.` : `This profile is ignored at runtime.`"
+        >
+          <input v-model="profile.enabled" class="h-4 w-4 accent-depthxr-copper" type="checkbox" />
+          {{ profile.enabled ? 'Profile On' : 'Profile Off' }}
+        </label>
         <button class="button-secondary rounded-[0.75rem] px-3.5 py-2 text-sm font-medium" type="button" @click="$emit('remove')">
           Remove
         </button>
@@ -136,11 +98,8 @@ function setStatus(next: ProfileStatus) {
       />
     </label>
 
-    <div v-if="status === 'disable'" class="mt-3 rounded-[0.9rem] border px-4 py-3 text-sm leading-6 chip-danger" style="border-color: var(--app-border)">
-      {{ moduleLabel }} is turned off for the applications above. Other applications keep using the default profile.
-    </div>
-    <div v-else-if="status === 'off'" class="mt-3 rounded-[0.9rem] border px-4 py-3 text-sm leading-6 surface-panel-strong">
-      This profile is inactive and has no effect. Its applications fall back to the default {{ moduleLabel }} profile.
+    <div v-if="!profile.enabled" class="mt-3 rounded-[0.9rem] border px-4 py-3 text-sm leading-6 surface-panel-strong">
+      This profile is off and has no effect. Its applications fall back to the default {{ moduleLabel }} profile.
     </div>
     <div v-else class="mt-3">
       <slot />

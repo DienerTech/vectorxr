@@ -133,6 +133,28 @@ const configDirectory = computed(() => {
         </div>
       </div>
 
+      <div
+        class="mt-6 flex flex-wrap items-center justify-between gap-4 rounded-[0.9rem] border px-4 py-3 surface-panel-strong"
+      >
+        <div>
+          <p class="text-sm font-semibold">Track Discovered XR apps</p>
+          <p class="mt-0.5 max-w-2xl text-xs leading-5 text-muted">
+            Notes the executable name and first/last seen time of OpenXR apps you launch, so you can easily
+            register them from the Application Registry. All data is kept locally on this PC.
+          </p>
+        </div>
+        <label
+          class="pill-toggle inline-flex items-center gap-3 rounded-full px-4 py-2 text-sm font-medium"
+        >
+          <input
+            v-model="config.core.trackSeenApps"
+            class="h-4 w-4 accent-depthxr-copper"
+            type="checkbox"
+          />
+          {{ config.core.trackSeenApps ? "On" : "Off" }}
+        </label>
+      </div>
+
       <section class="mt-6 border-t pt-5">
         <div class="flex flex-wrap items-start justify-between gap-4">
           <div>
