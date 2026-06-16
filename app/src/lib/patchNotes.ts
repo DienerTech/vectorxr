@@ -8,6 +8,20 @@ export interface PatchNoteEntry {
 
 export const patchNotes: PatchNoteEntry[] = [
   {
+    version: '0.10.0',
+    date: '2026-06-16',
+    title: 'Profile opt-in controls',
+    summary: 'Per-application profiles can now opt apps into Depth, Pivot, or Quadviews even when the default profile is off, with a clearer dashboard and restored About tab for release information.',
+    items: [
+      'Changed profile resolution so the first enabled custom profile targeting an app turns that Enhancement on and applies its settings, even if the default profile is disabled.',
+      'Retired the old per-profile disable mode from the app model and profile editor; profile participation is now controlled by a simple Profile On/Off toggle.',
+      'Added an active Enhancement overview to Home with quick navigation into Quadviews, Pivot, and Depth settings.',
+      'Restored the About tab as the home for project links, Ko-fi support, update checks, and full patch notes.',
+      'Moved discovered-app tracking controls into Settings and made the Application Registry focus on unregistered apps first, with details available in a modal.',
+      'Updated validation and runtime tests for the new custom-profile opt-in behavior.',
+    ],
+  },
+  {
     version: '0.9.0',
     date: '2026-06-13',
     title: 'UI overhaul',

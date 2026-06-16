@@ -1,6 +1,6 @@
 [package]
 name = "vectorxr-app"
-version = "0.9.0"
+version = "0.10.0"
 description = "VectorXR configuration app"
 authors = ["mdiener"]
 edition = "2021"
