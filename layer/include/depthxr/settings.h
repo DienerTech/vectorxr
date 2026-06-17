@@ -28,6 +28,11 @@ enum class QuadViewsTrackingMode {
     Eye,
 };
 
+enum class PerformanceCollectionMode {
+    Summary,
+    Diagnostic,
+};
+
 // Custom profiles override the defaults for their applications. The legacy
 // Disable value is still parsed for older configs but no longer has runtime
 // behavior; a profile's enabled flag controls whether it participates.
@@ -174,6 +179,28 @@ struct QuadViewsResolvedSettings : QuadViewsSettings {
     bool enabled{false};
 };
 
+struct PerformanceMonitorProfile {
+    std::string name;
+    bool enabled{true};
+    std::vector<std::string> application_ids;
+    PerformanceCollectionMode collection_mode{PerformanceCollectionMode::Summary};
+    int retention_sessions{20};
+    bool allow_dynamic_consumers{false};
+};
+
+struct PerformanceMonitorModuleConfig {
+    std::vector<PerformanceMonitorProfile> profiles;
+};
+
+struct PerformanceMonitorResolvedSettings {
+    bool enabled{false};
+    std::string profile_name;
+    std::string application_id;
+    PerformanceCollectionMode collection_mode{PerformanceCollectionMode::Summary};
+    int retention_sessions{20};
+    bool allow_dynamic_consumers{false};
+};
+
 struct ConfigDocument {
     int version{3};
     CoreSettings core;
@@ -181,6 +208,7 @@ struct ConfigDocument {
     DepthXrModuleConfig depthxr;
     PivotXrModuleConfig pivotxr;
     QuadViewsModuleConfig quadviews;
+    PerformanceMonitorModuleConfig performance;
 };
 
 struct ResolvedRuntimeConfig {
@@ -189,6 +217,7 @@ struct ResolvedRuntimeConfig {
     DepthXrBindings depthxr_bindings;
     PivotXrResolvedSettings pivotxr;
     QuadViewsResolvedSettings quadviews;
+    PerformanceMonitorResolvedSettings performance;
 };
 
 const char* ToString(LogLevel level);
@@ -201,6 +230,8 @@ const char* ToString(InputBindingType type);
 std::optional<InputBindingType> ParseInputBindingType(const std::string& value);
 const char* ToString(QuadViewsTrackingMode mode);
 std::optional<QuadViewsTrackingMode> ParseQuadViewsTrackingMode(const std::string& value);
+const char* ToString(PerformanceCollectionMode mode);
+std::optional<PerformanceCollectionMode> ParsePerformanceCollectionMode(const std::string& value);
 const char* ToString(ProfileMode mode);
 std::optional<ProfileMode> ParseProfileMode(const std::string& value);
 

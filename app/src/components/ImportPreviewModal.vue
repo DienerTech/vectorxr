@@ -49,6 +49,11 @@ defineEmits<{
               Quadviews default: <span class="font-medium" style="color: var(--app-text)">{{ config.modules.quadviews.enabled ? 'On' : 'Off' }}</span>
               - {{ config.modules.quadviews.profiles.length }} {{ config.modules.quadviews.profiles.length === 1 ? 'profile' : 'profiles' }}
             </li>
+            <li>
+              Performance monitoring:
+              <span class="font-medium" style="color: var(--app-text)">{{ config.modules.performance.profiles.length }}</span>
+              {{ config.modules.performance.profiles.length === 1 ? 'profile' : 'profiles' }}
+            </li>
           </ul>
         </div>
 

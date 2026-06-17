@@ -1,4 +1,4 @@
-import type { CoreConfig, DepthXRProfileConfig, DepthXRSettings, InputBinding, PivotXRProfileConfig, PivotXRSettings, QuadViewsProfileConfig, QuadViewsSettings, RegisteredApplication, VectorXRConfig } from './model'
+import type { CoreConfig, DepthXRProfileConfig, DepthXRSettings, InputBinding, PerformanceMonitorProfileConfig, PivotXRProfileConfig, PivotXRSettings, QuadViewsProfileConfig, QuadViewsSettings, RegisteredApplication, VectorXRConfig } from './model'
 import { bindingLabel } from './model'
 
 function validateCoreConfig(core: CoreConfig): string[] {
@@ -336,6 +336,58 @@ function validateQuadViewsProfileConflicts(profiles: QuadViewsProfileConfig[]): 
   return errors
 }
 
+function validatePerformanceMonitorProfile(profile: PerformanceMonitorProfileConfig, index: number, applicationIds: Set<string>): string[] {
+  const errors: string[] = []
+  const prefix = `modules.performance.profiles[${index}].`
+
+  if (!profile.name.trim()) {
+    errors.push(`${prefix}name is required`)
+  }
+
+  if (profile.collectionMode !== 'summary' && profile.collectionMode !== 'diagnostic') {
+    errors.push(`${prefix}collectionMode must be summary or diagnostic`)
+  }
+
+  if (!Number.isInteger(profile.retentionSessions) || profile.retentionSessions < 1 || profile.retentionSessions > 200) {
+    errors.push(`${prefix}retentionSessions must be an integer between 1 and 200`)
+  }
+
+  const seenProfileApplicationIds = new Set<string>()
+  for (const applicationId of profile.applicationIds) {
+    if (!applicationIds.has(applicationId)) {
+      errors.push(`${prefix}applicationIds references unknown application: ${applicationId}`)
+    }
+    if (seenProfileApplicationIds.has(applicationId)) {
+      errors.push(`${prefix}applicationIds duplicates ${applicationId}`)
+    }
+    seenProfileApplicationIds.add(applicationId)
+  }
+
+  return errors
+}
+
+function validatePerformanceMonitorProfileConflicts(profiles: PerformanceMonitorProfileConfig[]): string[] {
+  const errors: string[] = []
+  const firstProfileByApplication = new Map<string, number>()
+
+  profiles.forEach((profile, index) => {
+    if (!profile.enabled) {
+      return
+    }
+
+    for (const applicationId of profile.applicationIds) {
+      const firstIndex = firstProfileByApplication.get(applicationId)
+      if (firstIndex !== undefined) {
+        errors.push(`modules.performance.profiles[${index}] conflicts with profiles[${firstIndex}] for application ${applicationId}; first enabled profile wins`)
+      } else {
+        firstProfileByApplication.set(applicationId, index)
+      }
+    }
+  })
+
+  return errors
+}
+
 export function validateConfig(config: VectorXRConfig): string[] {
   const errors: string[] = []
 
@@ -367,6 +419,11 @@ export function validateConfig(config: VectorXRConfig): string[] {
     errors.push(...validateQuadViewsProfile(profile, index, applicationIds))
   })
   errors.push(...validateQuadViewsProfileConflicts(config.modules.quadviews.profiles))
+
+  config.modules.performance.profiles.forEach((profile, index) => {
+    errors.push(...validatePerformanceMonitorProfile(profile, index, applicationIds))
+  })
+  errors.push(...validatePerformanceMonitorProfileConflicts(config.modules.performance.profiles))
 
   return errors
 }

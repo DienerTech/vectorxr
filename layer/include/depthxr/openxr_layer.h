@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <filesystem>
 #include <map>
@@ -51,6 +52,8 @@ class OpenXrLayer {
     XrResult BeginSession(XrSession session, const XrSessionBeginInfo* begin_info);
     XrResult AttachSessionActionSets(XrSession session, const XrSessionActionSetsAttachInfo* attach_info);
     XrResult SyncActions(XrSession session, const XrActionsSyncInfo* sync_info);
+    XrResult WaitFrame(XrSession session, const XrFrameWaitInfo* frame_wait_info, XrFrameState* frame_state);
+    XrResult BeginFrame(XrSession session, const XrFrameBeginInfo* frame_begin_info);
     XrResult EndFrame(XrSession session, const XrFrameEndInfo* frame_end_info);
     XrResult GetSystemProperties(XrInstance instance, XrSystemId system_id, XrSystemProperties* properties);
     XrResult EnumerateEnvironmentBlendModes(XrInstance instance,
@@ -170,10 +173,59 @@ class OpenXrLayer {
         std::array<QuadViewsGpuTimingQuery, 4> gpu_timing_queries;
     };
 
+    static constexpr size_t kPerformanceFrameSampleCapacity = 512;
+
+    struct PerformanceMonitorState {
+        bool active{false};
+        XrSession session{XR_NULL_HANDLE};
+        std::string profile_name;
+        std::string application_id;
+        PerformanceCollectionMode collection_mode{PerformanceCollectionMode::Summary};
+        bool allow_dynamic_consumers{false};
+        std::chrono::steady_clock::time_point session_start{};
+        std::chrono::steady_clock::time_point last_wait_return{};
+        std::chrono::steady_clock::time_point last_begin_frame{};
+        bool has_last_wait_return{false};
+        bool has_last_begin_frame{false};
+        bool has_last_predicted_display_time{false};
+        XrTime last_predicted_display_time{0};
+        double target_frame_ms{0.0};
+        uint64_t wait_frame_count{0};
+        uint64_t begin_frame_count{0};
+        uint64_t end_frame_count{0};
+        uint64_t should_render_false_count{0};
+        uint64_t over_budget_frame_count{0};
+        uint64_t predicted_interval_sample_count{0};
+        double predicted_interval_sum_ms{0.0};
+        double predicted_interval_min_ms{0.0};
+        double predicted_interval_max_ms{0.0};
+        uint64_t cpu_span_sample_count{0};
+        double cpu_span_sum_ms{0.0};
+        double cpu_span_min_ms{0.0};
+        double cpu_span_max_ms{0.0};
+        std::array<double, kPerformanceFrameSampleCapacity> frame_time_samples{};
+        size_t frame_time_sample_index{0};
+        size_t frame_time_sample_count{0};
+    };
+
     void ReloadConfigIfNeeded();
     void RefreshResolvedSettings();
     void CaptureInstanceFunctions();
     void LogResolvedSettings(const ResolvedRuntimeConfig& settings);
+    void StartPerformanceMonitorSession();
+    void StopPerformanceMonitorSession(std::string_view reason);
+    void ResetPerformanceMonitorState();
+    void CapturePerformanceWaitFrame(XrSession session,
+                                     const XrFrameState* frame_state,
+                                     std::chrono::steady_clock::time_point wait_return_time,
+                                     XrResult result);
+    void CapturePerformanceBeginFrame(XrSession session,
+                                      std::chrono::steady_clock::time_point begin_time,
+                                      XrResult result);
+    void CapturePerformanceEndFrame(XrSession session,
+                                    const XrFrameEndInfo* frame_end_info,
+                                    std::chrono::steady_clock::time_point end_time);
+    std::string BuildPerformanceMonitorSummary(std::string_view reason) const;
     void ResetPivotActivationState();
     void ResetDepthToggleState();
     bool IsPivotXrActive(const PivotXrResolvedSettings& settings);
@@ -321,6 +373,8 @@ class OpenXrLayer {
     std::map<XrTime, std::array<XrFovf, 4>> cached_quadviews_fovs_;
     std::unordered_map<XrSwapchain, SwapchainInfo> tracked_swapchains_;
     D3D11QuadViewsCompositor d3d11_quadviews_compositor_;
+    PerformanceMonitorState performance_monitor_;
+    std::atomic_bool performance_monitor_capture_active_{false};
 
     PFN_xrGetInstanceProcAddr next_get_instance_proc_addr_{nullptr};
     PFN_xrDestroyInstance next_destroy_instance_{nullptr};
@@ -329,6 +383,8 @@ class OpenXrLayer {
     PFN_xrBeginSession next_begin_session_{nullptr};
     PFN_xrAttachSessionActionSets next_attach_session_action_sets_{nullptr};
     PFN_xrSyncActions next_sync_actions_{nullptr};
+    PFN_xrWaitFrame next_wait_frame_{nullptr};
+    PFN_xrBeginFrame next_begin_frame_{nullptr};
     PFN_xrEndFrame next_end_frame_{nullptr};
     PFN_xrGetSystemProperties next_get_system_properties_{nullptr};
     PFN_xrEnumerateEnvironmentBlendModes next_enumerate_environment_blend_modes_{nullptr};

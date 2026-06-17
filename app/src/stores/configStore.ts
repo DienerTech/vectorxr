@@ -246,6 +246,9 @@ export function useConfigStore() {
     for (const profile of state.config.modules.quadviews.profiles) {
       profile.applicationIds = profile.applicationIds.filter((id) => id !== application.id)
     }
+    for (const profile of state.config.modules.performance.profiles) {
+      profile.applicationIds = profile.applicationIds.filter((id) => id !== application.id)
+    }
   }
 
   return {

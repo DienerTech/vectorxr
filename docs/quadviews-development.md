@@ -225,8 +225,8 @@ Open questions:
 
 ### Dynamic Foveation
 
-Use compositor timing and pixel-budget diagnostics to automatically tune focus
-region size and/or resolution against a target frame time.
+Use the shared Performance Monitor to automatically tune focus region size
+and/or resolution against a target frame time.
 
 Goal:
 
@@ -235,7 +235,13 @@ Goal:
 - Increase quality when there is spare GPU headroom.
 - Differentiate VectorXR from existing quadview companion tools.
 
-Existing groundwork:
+Design dependency:
+
+- `docs/performance-monitoring-design.md` tracks the profile-scoped monitoring
+  feature, low-overhead telemetry contract, session model, UI surface, and
+  pressure summary that dynamic Quadviews should consume.
+
+Existing Quadviews groundwork:
 
 - D3D11 compositor GPU timing queries already exist.
 - Logs include `completedGpuMs` when timing resolves.
@@ -245,8 +251,8 @@ Existing groundwork:
 Implementation sketch:
 
 - Add a per-profile dynamic mode: off, conservative, balanced, aggressive.
-- Track rolling compositor GPU time and frame-time pressure.
-- Choose target frame time from refresh rate when available, or profile setting when not.
+- Consume the Performance Monitor pressure summary rather than raw frame history.
+- Use monitor-provided target frame time and CPU/frame-pressure classification.
 - Scale focus size, focus scale, or peripheral scale within user-defined min/max bounds.
 - Prefer small, slow adjustments to avoid visible quality pumping.
 - Log decisions: target frame time, measured timing, old/new settings, reason.
@@ -255,7 +261,9 @@ Open questions:
 
 - Which parameter should move first: peripheral scale, focus scale, or focus size?
 - Should dynamic changes be runtime-only or reflected back into UI recommendations?
-- How should CPU-bound frames be detected so GPU scaling does not chase the wrong bottleneck?
+- Should live adaptation wait for view-size-change support, or should the first
+  version only adjust within already-created swapchain bounds / next-launch
+  recommendations?
 
 ### Estimated GPU Savings UI
 
@@ -307,4 +315,3 @@ Related UI work:
 - The broad stashed experiment batch is not applied.
 - Layer build and `depthxr_layer_tests` pass.
 - Headset validation confirms Pivot + Quadviews foveated tracking remains good.
-

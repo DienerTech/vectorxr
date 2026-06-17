@@ -173,6 +173,56 @@ QuadViewsResolvedSettings ResolveQuadViewsSettings(const ConfigDocument& config,
     return resolved;
 }
 
+const PerformanceMonitorProfile* FindMatchingPerformanceMonitorProfile(const ConfigDocument& config,
+                                                                       std::string_view exe_name) {
+    const RegisteredApplication* application = FindMatchingApplication(config, exe_name);
+    if (!application) {
+        return nullptr;
+    }
+
+    for (const PerformanceMonitorProfile& profile : config.performance.profiles) {
+        if (!profile.enabled) {
+            continue;
+        }
+
+        if (std::find(profile.application_ids.begin(), profile.application_ids.end(), application->id) !=
+            profile.application_ids.end()) {
+            return &profile;
+        }
+    }
+    return nullptr;
+}
+
+PerformanceMonitorResolvedSettings ResolvePerformanceMonitorSettings(const ConfigDocument& config,
+                                                                     std::string_view exe_name) {
+    PerformanceMonitorResolvedSettings resolved;
+    const RegisteredApplication* application = FindMatchingApplication(config, exe_name);
+    if (!application) {
+        return resolved;
+    }
+
+    for (const PerformanceMonitorProfile& profile : config.performance.profiles) {
+        if (!profile.enabled) {
+            continue;
+        }
+
+        if (std::find(profile.application_ids.begin(), profile.application_ids.end(), application->id) ==
+            profile.application_ids.end()) {
+            continue;
+        }
+
+        resolved.enabled = true;
+        resolved.profile_name = profile.name;
+        resolved.application_id = application->id;
+        resolved.collection_mode = profile.collection_mode;
+        resolved.retention_sessions = profile.retention_sessions;
+        resolved.allow_dynamic_consumers = profile.allow_dynamic_consumers;
+        return resolved;
+    }
+
+    return resolved;
+}
+
 ResolvedRuntimeConfig ResolveRuntimeConfig(const ConfigDocument& config, std::string_view exe_name) {
     ResolvedRuntimeConfig resolved;
     resolved.core = config.core;
@@ -180,6 +230,7 @@ ResolvedRuntimeConfig ResolveRuntimeConfig(const ConfigDocument& config, std::st
     resolved.depthxr_bindings = config.depthxr.bindings;
     resolved.pivotxr = ResolvePivotXrSettings(config, exe_name);
     resolved.quadviews = ResolveQuadViewsSettings(config, exe_name);
+    resolved.performance = ResolvePerformanceMonitorSettings(config, exe_name);
     return resolved;
 }
 

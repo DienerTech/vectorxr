@@ -54,6 +54,16 @@ XrResult XRAPI_CALL DepthxrSyncActions(XrSession session, const XrActionsSyncInf
     return OpenXrLayer::Instance().SyncActions(session, sync_info);
 }
 
+XrResult XRAPI_CALL DepthxrWaitFrame(XrSession session,
+                                     const XrFrameWaitInfo* frame_wait_info,
+                                     XrFrameState* frame_state) {
+    return OpenXrLayer::Instance().WaitFrame(session, frame_wait_info, frame_state);
+}
+
+XrResult XRAPI_CALL DepthxrBeginFrame(XrSession session, const XrFrameBeginInfo* frame_begin_info) {
+    return OpenXrLayer::Instance().BeginFrame(session, frame_begin_info);
+}
+
 XrResult XRAPI_CALL DepthxrEndFrame(XrSession session, const XrFrameEndInfo* frame_end_info) {
     return OpenXrLayer::Instance().EndFrame(session, frame_end_info);
 }
@@ -257,6 +267,14 @@ XrResult XRAPI_CALL xrGetInstanceProcAddr(XrInstance instance, const char* name,
     }
     if (requested == "xrSyncActions") {
         *function = reinterpret_cast<PFN_xrVoidFunction>(depthxr::DepthxrSyncActions);
+        return XR_SUCCESS;
+    }
+    if (requested == "xrWaitFrame") {
+        *function = reinterpret_cast<PFN_xrVoidFunction>(depthxr::DepthxrWaitFrame);
+        return XR_SUCCESS;
+    }
+    if (requested == "xrBeginFrame") {
+        *function = reinterpret_cast<PFN_xrVoidFunction>(depthxr::DepthxrBeginFrame);
         return XR_SUCCESS;
     }
     if (requested == "xrEndFrame") {

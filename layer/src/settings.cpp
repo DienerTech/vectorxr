@@ -191,6 +191,30 @@ std::optional<QuadViewsTrackingMode> ParseQuadViewsTrackingMode(const std::strin
     return std::nullopt;
 }
 
+const char* ToString(PerformanceCollectionMode mode) {
+    switch (mode) {
+    case PerformanceCollectionMode::Summary:
+        return "summary";
+    case PerformanceCollectionMode::Diagnostic:
+        return "diagnostic";
+    default:
+        return "summary";
+    }
+}
+
+std::optional<PerformanceCollectionMode> ParsePerformanceCollectionMode(const std::string& value) {
+    const std::string normalized = NormalizeValue(value);
+
+    if (normalized == "summary") {
+        return PerformanceCollectionMode::Summary;
+    }
+    if (normalized == "diagnostic") {
+        return PerformanceCollectionMode::Diagnostic;
+    }
+
+    return std::nullopt;
+}
+
 const char* ToString(ProfileMode mode) {
     switch (mode) {
     case ProfileMode::Custom:

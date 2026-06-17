@@ -142,6 +142,14 @@ fn default_gaze_deadzone_degrees() -> f64 {
     1.5
 }
 
+fn default_collection_mode() -> String {
+    "summary".into()
+}
+
+fn default_retention_sessions() -> u32 {
+    20
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ProfileMatch {
     exe: String,
@@ -435,6 +443,32 @@ impl Default for QuadViewsModuleConfig {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PerformanceMonitorProfileConfig {
+    #[serde(default)]
+    name: String,
+    #[serde(default = "default_true")]
+    enabled: bool,
+    #[serde(default)]
+    application_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    r#match: Option<ProfileMatch>,
+    #[serde(default = "default_collection_mode")]
+    collection_mode: String,
+    #[serde(default = "default_retention_sessions")]
+    retention_sessions: u32,
+    #[serde(default)]
+    allow_dynamic_consumers: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct PerformanceMonitorModuleConfig {
+    #[serde(default)]
+    profiles: Vec<PerformanceMonitorProfileConfig>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 struct VectorXRModules {
@@ -444,6 +478,8 @@ struct VectorXRModules {
     pivotxr: PivotXRModuleConfig,
     #[serde(default)]
     quadviews: QuadViewsModuleConfig,
+    #[serde(default)]
+    performance: PerformanceMonitorModuleConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -734,6 +770,40 @@ fn normalize_config(mut config: VectorXRConfig) -> VectorXRConfig {
             profile.name = first_application
                 .map(|application| application.name.clone())
                 .unwrap_or_else(|| "New Profile".into());
+        }
+
+        profile.r#match = None;
+    }
+
+    for profile in &mut config.modules.performance.profiles {
+        if profile.application_ids.is_empty() {
+            if let Some(application_id) = application_id_for_profile_match(
+                &mut config.applications,
+                &profile.name,
+                &profile.r#match,
+            ) {
+                profile.application_ids.push(application_id);
+            }
+        }
+
+        if profile.name.trim().is_empty() {
+            let first_application = profile.application_ids.first().and_then(|application_id| {
+                config
+                    .applications
+                    .iter()
+                    .find(|application| &application.id == application_id)
+            });
+
+            profile.name = first_application
+                .map(|application| application.name.clone())
+                .unwrap_or_else(|| "New Profile".into());
+        }
+
+        if profile.collection_mode != "summary" && profile.collection_mode != "diagnostic" {
+            profile.collection_mode = default_collection_mode();
+        }
+        if profile.retention_sessions == 0 {
+            profile.retention_sessions = default_retention_sessions();
         }
 
         profile.r#match = None;

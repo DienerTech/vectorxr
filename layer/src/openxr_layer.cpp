@@ -749,6 +749,14 @@ constexpr std::chrono::milliseconds kConfigCheckInterval{500};
 constexpr std::chrono::milliseconds kInputBindingPollInterval{30};
 constexpr std::chrono::milliseconds kAppActionSyncFreshWindow{100};
 
+double DurationToMilliseconds(XrDuration duration) {
+    return static_cast<double>(duration) / 1'000'000.0;
+}
+
+double WallDurationToMilliseconds(std::chrono::steady_clock::duration duration) {
+    return std::chrono::duration<double, std::milli>(duration).count();
+}
+
 bool SameSettings(const ResolvedRuntimeConfig& lhs, const ResolvedRuntimeConfig& rhs) {
     return lhs.core.enabled == rhs.core.enabled &&
            lhs.core.log_level == rhs.core.log_level &&
@@ -794,7 +802,13 @@ bool SameSettings(const ResolvedRuntimeConfig& lhs, const ResolvedRuntimeConfig&
            NearlyEqual(lhs.quadviews.horizontal_offset_degrees, rhs.quadviews.horizontal_offset_degrees) &&
            NearlyEqual(lhs.quadviews.vertical_offset_degrees, rhs.quadviews.vertical_offset_degrees) &&
            NearlyEqual(lhs.quadviews.gaze_smoothing, rhs.quadviews.gaze_smoothing) &&
-           NearlyEqual(lhs.quadviews.gaze_deadzone_degrees, rhs.quadviews.gaze_deadzone_degrees);
+           NearlyEqual(lhs.quadviews.gaze_deadzone_degrees, rhs.quadviews.gaze_deadzone_degrees) &&
+           lhs.performance.enabled == rhs.performance.enabled &&
+           lhs.performance.profile_name == rhs.performance.profile_name &&
+           lhs.performance.application_id == rhs.performance.application_id &&
+           lhs.performance.collection_mode == rhs.performance.collection_mode &&
+           lhs.performance.retention_sessions == rhs.performance.retention_sessions &&
+           lhs.performance.allow_dynamic_consumers == rhs.performance.allow_dynamic_consumers;
 }
 
 bool SameInputBinding(const InputBinding& lhs, const InputBinding& rhs) {
@@ -906,7 +920,8 @@ XrResult OpenXrLayer::OnInstanceCreated(const XrInstanceCreateInfo* create_info,
     CaptureInstanceFunctions();
     if (!next_destroy_instance_ || !next_create_session_ || !next_destroy_session_ || !next_begin_session_ ||
         !next_attach_session_action_sets_ || !next_sync_actions_ ||
-        !next_end_frame_ || !next_get_system_properties_ || !next_enumerate_environment_blend_modes_ ||
+        !next_wait_frame_ || !next_begin_frame_ || !next_end_frame_ ||
+        !next_get_system_properties_ || !next_enumerate_environment_blend_modes_ ||
         !next_enumerate_view_configurations_ || !next_get_view_configuration_properties_ ||
         !next_enumerate_view_configuration_views_ ||
         !next_create_swapchain_ || !next_destroy_swapchain_ || !next_enumerate_swapchain_images_ ||
@@ -944,6 +959,7 @@ XrResult OpenXrLayer::GetInstanceProcAddr(XrInstance instance, const char* name,
 XrResult OpenXrLayer::DestroyInstance(XrInstance instance) {
     std::scoped_lock lock(mutex_);
 
+    StopPerformanceMonitorSession("instance destroyed");
     DestroyEyeGazeResources();
     DestroyInternalReferenceSpaces();
     ResetSwapchainState();
@@ -956,6 +972,8 @@ XrResult OpenXrLayer::DestroyInstance(XrInstance instance) {
         next_begin_session_ = nullptr;
         next_attach_session_action_sets_ = nullptr;
         next_sync_actions_ = nullptr;
+        next_wait_frame_ = nullptr;
+        next_begin_frame_ = nullptr;
         next_get_system_properties_ = nullptr;
         next_enumerate_environment_blend_modes_ = nullptr;
         next_enumerate_view_configurations_ = nullptr;
@@ -1037,6 +1055,7 @@ XrResult OpenXrLayer::DestroySession(XrSession session) {
     {
         std::scoped_lock lock(mutex_);
         if (session == active_session_) {
+            StopPerformanceMonitorSession("session ending");
             DestroyEyeGazeResources();
             DestroyInternalReferenceSpaces();
             ResetD3D11QuadViewsCompositor();
@@ -2446,14 +2465,44 @@ bool OpenXrLayer::ComposeQuadViewsD3D11(const XrCompositionLayerProjection* sour
     return true;
 }
 
+XrResult OpenXrLayer::WaitFrame(XrSession session,
+                                const XrFrameWaitInfo* frame_wait_info,
+                                XrFrameState* frame_state) {
+    const XrResult result = next_wait_frame_(session, frame_wait_info, frame_state);
+    if (performance_monitor_capture_active_.load(std::memory_order_relaxed)) {
+        const auto wait_return_time = std::chrono::steady_clock::now();
+        std::unique_lock<std::mutex> lock(mutex_, std::try_to_lock);
+        if (lock.owns_lock()) {
+            CapturePerformanceWaitFrame(session, frame_state, wait_return_time, result);
+        }
+    }
+    return result;
+}
+
+XrResult OpenXrLayer::BeginFrame(XrSession session, const XrFrameBeginInfo* frame_begin_info) {
+    const XrResult result = next_begin_frame_(session, frame_begin_info);
+    if (performance_monitor_capture_active_.load(std::memory_order_relaxed)) {
+        const auto begin_time = std::chrono::steady_clock::now();
+        std::unique_lock<std::mutex> lock(mutex_, std::try_to_lock);
+        if (lock.owns_lock()) {
+            CapturePerformanceBeginFrame(session, begin_time, result);
+        }
+    }
+    return result;
+}
+
 XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_end_info) {
     if (!frame_end_info) {
         return XR_ERROR_VALIDATION_FAILURE;
     }
 
+    const auto end_time = std::chrono::steady_clock::now();
     std::scoped_lock lock(mutex_);
     ReloadConfigIfNeeded();
     RefreshResolvedSettings();
+    if (performance_monitor_capture_active_.load(std::memory_order_relaxed)) {
+        CapturePerformanceEndFrame(session, frame_end_info, end_time);
+    }
     if (!resolved_settings_.core.enabled) {
         cached_pivot_pose_deltas_.clear();
         cached_quadviews_fovs_.clear();
@@ -3029,6 +3078,14 @@ void OpenXrLayer::RefreshResolvedSettings() {
 
     const ResolvedRuntimeConfig previous = resolved_settings_;
     resolved_settings_ = ResolveRuntimeConfig(config_, current_exe_name_);
+    const bool performance_settings_changed =
+        previous.core.enabled != resolved_settings_.core.enabled ||
+        previous.performance.enabled != resolved_settings_.performance.enabled ||
+        previous.performance.profile_name != resolved_settings_.performance.profile_name ||
+        previous.performance.application_id != resolved_settings_.performance.application_id ||
+        previous.performance.collection_mode != resolved_settings_.performance.collection_mode ||
+        previous.performance.retention_sessions != resolved_settings_.performance.retention_sessions ||
+        previous.performance.allow_dynamic_consumers != resolved_settings_.performance.allow_dynamic_consumers;
     if (!SameInputBinding(previous.depthxr_bindings.toggle_enabled, resolved_settings_.depthxr_bindings.toggle_enabled) ||
         previous.depthxr.enabled != resolved_settings_.depthxr.enabled) {
         ResetDepthToggleState();
@@ -3059,6 +3116,16 @@ void OpenXrLayer::RefreshResolvedSettings() {
                eye_gaze_resources_ready_) {
         DestroyEyeGazeResources();
     }
+
+    const bool should_monitor_performance =
+        resolved_settings_.core.enabled && resolved_settings_.performance.enabled && active_session_ != XR_NULL_HANDLE;
+    if (performance_monitor_.active && (performance_settings_changed || !should_monitor_performance)) {
+        StopPerformanceMonitorSession("settings changed");
+    }
+    if (!performance_monitor_.active && should_monitor_performance) {
+        StartPerformanceMonitorSession();
+    }
+    performance_monitor_capture_active_.store(performance_monitor_.active, std::memory_order_relaxed);
 }
 
 void OpenXrLayer::CaptureInstanceFunctions() {
@@ -3092,6 +3159,16 @@ void OpenXrLayer::CaptureInstanceFunctions() {
     function = nullptr;
     if (XR_SUCCEEDED(next_get_instance_proc_addr_(instance_, "xrSyncActions", &function))) {
         next_sync_actions_ = reinterpret_cast<PFN_xrSyncActions>(function);
+    }
+
+    function = nullptr;
+    if (XR_SUCCEEDED(next_get_instance_proc_addr_(instance_, "xrWaitFrame", &function))) {
+        next_wait_frame_ = reinterpret_cast<PFN_xrWaitFrame>(function);
+    }
+
+    function = nullptr;
+    if (XR_SUCCEEDED(next_get_instance_proc_addr_(instance_, "xrBeginFrame", &function))) {
+        next_begin_frame_ = reinterpret_cast<PFN_xrBeginFrame>(function);
     }
 
     function = nullptr;
@@ -3262,6 +3339,7 @@ void OpenXrLayer::ResetSessionState() {
     cached_quadviews_fovs_.clear();
     last_app_action_sync_time_.reset();
     ResetSwapchainState();
+    ResetPerformanceMonitorState();
 }
 
 void OpenXrLayer::ResetInstanceState() {
@@ -4015,8 +4093,209 @@ void OpenXrLayer::LogResolvedSettings(const ResolvedRuntimeConfig& settings) {
            << ", quadviewsHorizontalOffset=" << settings.quadviews.horizontal_offset_degrees
            << ", quadviewsVerticalOffset=" << settings.quadviews.vertical_offset_degrees
            << ", quadviewsGazeSmoothing=" << settings.quadviews.gaze_smoothing
-           << ", quadviewsGazeDeadzone=" << settings.quadviews.gaze_deadzone_degrees;
+           << ", quadviewsGazeDeadzone=" << settings.quadviews.gaze_deadzone_degrees
+           << ", performanceMonitorEnabled=" << settings.performance.enabled
+           << ", performanceProfile=" << settings.performance.profile_name
+           << ", performanceApplicationId=" << settings.performance.application_id
+           << ", performanceCollectionMode=" << ToString(settings.performance.collection_mode)
+           << ", performanceRetentionSessions=" << settings.performance.retention_sessions
+           << ", performanceAllowDynamicConsumers=" << settings.performance.allow_dynamic_consumers;
     logger_.Debug(stream.str());
+}
+
+void OpenXrLayer::StartPerformanceMonitorSession() {
+    if (performance_monitor_.active || active_session_ == XR_NULL_HANDLE ||
+        !resolved_settings_.core.enabled || !resolved_settings_.performance.enabled) {
+        performance_monitor_capture_active_.store(performance_monitor_.active, std::memory_order_relaxed);
+        return;
+    }
+
+    performance_monitor_ = {};
+    performance_monitor_.active = true;
+    performance_monitor_.session = active_session_;
+    performance_monitor_.profile_name = resolved_settings_.performance.profile_name;
+    performance_monitor_.application_id = resolved_settings_.performance.application_id;
+    performance_monitor_.collection_mode = resolved_settings_.performance.collection_mode;
+    performance_monitor_.allow_dynamic_consumers = resolved_settings_.performance.allow_dynamic_consumers;
+    performance_monitor_.session_start = std::chrono::steady_clock::now();
+    performance_monitor_capture_active_.store(true, std::memory_order_relaxed);
+
+    logger_.Info("Performance monitor started: profile=" + performance_monitor_.profile_name +
+                 ", applicationId=" + performance_monitor_.application_id +
+                 ", collectionMode=" + ToString(performance_monitor_.collection_mode) +
+                 ", dynamicConsumers=" +
+                 std::to_string(static_cast<int>(performance_monitor_.allow_dynamic_consumers)));
+}
+
+void OpenXrLayer::StopPerformanceMonitorSession(std::string_view reason) {
+    performance_monitor_capture_active_.store(false, std::memory_order_relaxed);
+    if (!performance_monitor_.active) {
+        ResetPerformanceMonitorState();
+        return;
+    }
+
+    logger_.Info(BuildPerformanceMonitorSummary(reason));
+    ResetPerformanceMonitorState();
+}
+
+void OpenXrLayer::ResetPerformanceMonitorState() {
+    performance_monitor_capture_active_.store(false, std::memory_order_relaxed);
+    performance_monitor_ = {};
+}
+
+void OpenXrLayer::CapturePerformanceWaitFrame(XrSession session,
+                                              const XrFrameState* frame_state,
+                                              std::chrono::steady_clock::time_point wait_return_time,
+                                              XrResult result) {
+    if (!performance_monitor_.active || session != performance_monitor_.session || XR_FAILED(result) || !frame_state) {
+        return;
+    }
+
+    ++performance_monitor_.wait_frame_count;
+    performance_monitor_.last_wait_return = wait_return_time;
+    performance_monitor_.has_last_wait_return = true;
+
+    if (frame_state->predictedDisplayPeriod > 0) {
+        performance_monitor_.target_frame_ms = DurationToMilliseconds(frame_state->predictedDisplayPeriod);
+    }
+
+    if (!frame_state->shouldRender) {
+        ++performance_monitor_.should_render_false_count;
+    }
+
+    if (performance_monitor_.has_last_predicted_display_time &&
+        frame_state->predictedDisplayTime > performance_monitor_.last_predicted_display_time) {
+        const double interval_ms = DurationToMilliseconds(
+            frame_state->predictedDisplayTime - performance_monitor_.last_predicted_display_time);
+        if (interval_ms > 0.0 && interval_ms < 1000.0) {
+            ++performance_monitor_.predicted_interval_sample_count;
+            performance_monitor_.predicted_interval_sum_ms += interval_ms;
+            if (performance_monitor_.predicted_interval_sample_count == 1) {
+                performance_monitor_.predicted_interval_min_ms = interval_ms;
+                performance_monitor_.predicted_interval_max_ms = interval_ms;
+            } else {
+                performance_monitor_.predicted_interval_min_ms =
+                    std::min(performance_monitor_.predicted_interval_min_ms, interval_ms);
+                performance_monitor_.predicted_interval_max_ms =
+                    std::max(performance_monitor_.predicted_interval_max_ms, interval_ms);
+            }
+
+            if (performance_monitor_.target_frame_ms > 0.0 &&
+                interval_ms > performance_monitor_.target_frame_ms * 1.05) {
+                ++performance_monitor_.over_budget_frame_count;
+            }
+
+            performance_monitor_.frame_time_samples[performance_monitor_.frame_time_sample_index] = interval_ms;
+            performance_monitor_.frame_time_sample_index =
+                (performance_monitor_.frame_time_sample_index + 1) % performance_monitor_.frame_time_samples.size();
+            performance_monitor_.frame_time_sample_count =
+                std::min(performance_monitor_.frame_time_sample_count + 1,
+                         performance_monitor_.frame_time_samples.size());
+        }
+    }
+
+    performance_monitor_.last_predicted_display_time = frame_state->predictedDisplayTime;
+    performance_monitor_.has_last_predicted_display_time = true;
+}
+
+void OpenXrLayer::CapturePerformanceBeginFrame(XrSession session,
+                                               std::chrono::steady_clock::time_point begin_time,
+                                               XrResult result) {
+    if (!performance_monitor_.active || session != performance_monitor_.session || XR_FAILED(result)) {
+        return;
+    }
+
+    ++performance_monitor_.begin_frame_count;
+    performance_monitor_.last_begin_frame = begin_time;
+    performance_monitor_.has_last_begin_frame = true;
+}
+
+void OpenXrLayer::CapturePerformanceEndFrame(XrSession session,
+                                             const XrFrameEndInfo* /*frame_end_info*/,
+                                             std::chrono::steady_clock::time_point end_time) {
+    if (!performance_monitor_.active || session != performance_monitor_.session) {
+        return;
+    }
+
+    ++performance_monitor_.end_frame_count;
+    if (!performance_monitor_.has_last_wait_return) {
+        return;
+    }
+
+    const double cpu_span_ms = WallDurationToMilliseconds(end_time - performance_monitor_.last_wait_return);
+    if (cpu_span_ms <= 0.0 || cpu_span_ms >= 10000.0) {
+        return;
+    }
+
+    ++performance_monitor_.cpu_span_sample_count;
+    performance_monitor_.cpu_span_sum_ms += cpu_span_ms;
+    if (performance_monitor_.cpu_span_sample_count == 1) {
+        performance_monitor_.cpu_span_min_ms = cpu_span_ms;
+        performance_monitor_.cpu_span_max_ms = cpu_span_ms;
+    } else {
+        performance_monitor_.cpu_span_min_ms = std::min(performance_monitor_.cpu_span_min_ms, cpu_span_ms);
+        performance_monitor_.cpu_span_max_ms = std::max(performance_monitor_.cpu_span_max_ms, cpu_span_ms);
+    }
+}
+
+std::string OpenXrLayer::BuildPerformanceMonitorSummary(std::string_view reason) const {
+    const PerformanceMonitorState& state = performance_monitor_;
+    const auto now = std::chrono::steady_clock::now();
+    const double duration_seconds = std::chrono::duration<double>(now - state.session_start).count();
+    const double avg_interval_ms = state.predicted_interval_sample_count > 0
+                                       ? state.predicted_interval_sum_ms /
+                                             static_cast<double>(state.predicted_interval_sample_count)
+                                       : 0.0;
+    const double avg_cpu_span_ms = state.cpu_span_sample_count > 0
+                                       ? state.cpu_span_sum_ms / static_cast<double>(state.cpu_span_sample_count)
+                                       : 0.0;
+    const double over_budget_percent = state.predicted_interval_sample_count > 0
+                                           ? static_cast<double>(state.over_budget_frame_count) /
+                                                 static_cast<double>(state.predicted_interval_sample_count) * 100.0
+                                           : 0.0;
+    const double target_hz = state.target_frame_ms > 0.0 ? 1000.0 / state.target_frame_ms : 0.0;
+
+    std::vector<double> frame_samples;
+    frame_samples.reserve(state.frame_time_sample_count);
+    for (size_t i = 0; i < state.frame_time_sample_count; ++i) {
+        frame_samples.push_back(state.frame_time_samples[i]);
+    }
+    std::sort(frame_samples.begin(), frame_samples.end());
+    auto percentile = [&](double fraction) -> double {
+        if (frame_samples.empty()) {
+            return 0.0;
+        }
+        const size_t index =
+            std::min(frame_samples.size() - 1,
+                     static_cast<size_t>(std::round(fraction * static_cast<double>(frame_samples.size() - 1))));
+        return frame_samples[index];
+    };
+
+    std::ostringstream stream;
+    stream << "Performance monitor summary: reason=" << reason
+           << ", profile=" << state.profile_name
+           << ", applicationId=" << state.application_id
+           << ", collectionMode=" << ToString(state.collection_mode)
+           << ", durationSeconds=" << FormatDiagnosticDouble(duration_seconds)
+           << ", targetFrameMs=" << FormatDiagnosticDouble(state.target_frame_ms)
+           << ", targetHz=" << FormatDiagnosticDouble(target_hz)
+           << ", waitFrames=" << state.wait_frame_count
+           << ", beginFrames=" << state.begin_frame_count
+           << ", endFrames=" << state.end_frame_count
+           << ", frameSamples=" << state.predicted_interval_sample_count
+           << ", frameAvgMs=" << FormatDiagnosticDouble(avg_interval_ms)
+           << ", frameP95Ms=" << FormatDiagnosticDouble(percentile(0.95))
+           << ", frameP99Ms=" << FormatDiagnosticDouble(percentile(0.99))
+           << ", frameMinMs=" << FormatDiagnosticDouble(state.predicted_interval_min_ms)
+           << ", frameMaxMs=" << FormatDiagnosticDouble(state.predicted_interval_max_ms)
+           << ", overBudgetFrames=" << state.over_budget_frame_count
+           << ", overBudgetPercent=" << FormatDiagnosticDouble(over_budget_percent)
+           << ", shouldRenderFalse=" << state.should_render_false_count
+           << ", cpuSpanSamples=" << state.cpu_span_sample_count
+           << ", cpuSpanAvgMs=" << FormatDiagnosticDouble(avg_cpu_span_ms)
+           << ", cpuSpanMinMs=" << FormatDiagnosticDouble(state.cpu_span_min_ms)
+           << ", cpuSpanMaxMs=" << FormatDiagnosticDouble(state.cpu_span_max_ms);
+    return stream.str();
 }
 
 void OpenXrLayer::ResetPivotActivationState() {

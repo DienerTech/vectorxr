@@ -524,6 +524,68 @@
         }
       }
     },
+    "performanceCollectionMode": {
+      "type": "string",
+      "enum": [
+        "summary",
+        "diagnostic"
+      ]
+    },
+    "performanceProfile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "enabled",
+        "applicationIds",
+        "collectionMode",
+        "retentionSessions",
+        "allowDynamicConsumers"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "applicationIds": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9-]*$"
+          },
+          "uniqueItems": true
+        },
+        "collectionMode": {
+          "$ref": "#/$defs/performanceCollectionMode"
+        },
+        "retentionSessions": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 200
+        },
+        "allowDynamicConsumers": {
+          "type": "boolean"
+        }
+      }
+    },
+    "performanceModule": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "profiles"
+      ],
+      "properties": {
+        "profiles": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/performanceProfile"
+          }
+        }
+      }
+    },
     "modules": {
       "type": "object",
       "additionalProperties": false,
@@ -541,6 +603,9 @@
         },
         "quadviews": {
           "$ref": "#/$defs/quadviewsModule"
+        },
+        "performance": {
+          "$ref": "#/$defs/performanceModule"
         }
       }
     }

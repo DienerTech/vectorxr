@@ -484,6 +484,84 @@ void TestQuadViewsProfileResolution() {
            "Quadviews default focus size mismatch");
 }
 
+void TestPerformanceMonitorProfileResolution() {
+    const std::string json = R"json(
+{
+  "version": 3,
+  "core": { "enabled": true, "logLevel": "info", "logRetentionFiles": 7 },
+  "applications": [
+    { "id": "dcs", "name": "DCS", "enabled": true, "match": { "exe": "DCS.exe" } },
+    { "id": "other", "name": "Other", "enabled": true, "match": { "exe": "Other.exe" } }
+  ],
+  "modules": {
+    "depthxr": {
+      "enabled": true,
+      "defaults": {
+        "stereoBoostEnabled": true,
+        "convergenceEnabled": true,
+        "stereoBoost": 1.0,
+        "convergence": 0.0
+      },
+      "bindings": { "toggleEnabled": { "type": "none" } },
+      "profiles": []
+    },
+    "pivotxr": {
+      "enabled": false,
+      "defaults": {
+        "rotationMultiplier": 1.5,
+        "smoothing": 0.2,
+        "deadzoneDegrees": 8.0,
+        "maxExtraYawDegrees": 25.0,
+        "pitchRotationMultiplier": 1.0,
+        "pitchSmoothing": 0.2,
+        "pitchDeadzoneDegrees": 12.0,
+        "maxExtraPitchDegrees": 20.0
+      },
+      "profiles": []
+    },
+    "performance": {
+      "profiles": [
+        {
+          "name": "DCS Monitor",
+          "enabled": true,
+          "applicationIds": ["dcs"],
+          "collectionMode": "diagnostic",
+          "retentionSessions": 12,
+          "allowDynamicConsumers": true
+        },
+        {
+          "name": "Inactive",
+          "enabled": false,
+          "applicationIds": ["other"],
+          "collectionMode": "summary",
+          "retentionSessions": 5,
+          "allowDynamicConsumers": false
+        }
+      ]
+    }
+  }
+}
+)json";
+
+    const depthxr::ParseResult result = depthxr::ParseConfig(json);
+    Expect(result.ok, "Config parser rejected valid Performance Monitor config: " + result.error);
+
+    const depthxr::ResolvedRuntimeConfig resolved = depthxr::ResolveRuntimeConfig(result.document, "DCS.exe");
+    Expect(resolved.performance.enabled, "Performance Monitor profile should enable collection for DCS");
+    Expect(resolved.performance.profile_name == "DCS Monitor", "Performance profile name mismatch");
+    Expect(resolved.performance.application_id == "dcs", "Performance application id mismatch");
+    Expect(resolved.performance.collection_mode == depthxr::PerformanceCollectionMode::Diagnostic,
+           "Performance collection mode mismatch");
+    Expect(resolved.performance.retention_sessions == 12, "Performance retention mismatch");
+    Expect(resolved.performance.allow_dynamic_consumers, "Performance dynamic consumer flag mismatch");
+
+    const depthxr::ResolvedRuntimeConfig resolved_other = depthxr::ResolveRuntimeConfig(result.document, "Other.exe");
+    Expect(!resolved_other.performance.enabled, "Disabled performance profile should be inert");
+
+    const depthxr::ResolvedRuntimeConfig resolved_unknown = depthxr::ResolveRuntimeConfig(result.document, "Unknown.exe");
+    Expect(!resolved_unknown.performance.enabled, "Unknown app should not collect performance data");
+}
+
 void TestEnabledProfileOverridesDisabledDefault() {
     const std::string json = R"json(
 {
@@ -949,6 +1027,7 @@ int main() {
     TestDisabledProfileFallsBackToDefaults();
     TestPivotProfileResolution();
     TestQuadViewsProfileResolution();
+    TestPerformanceMonitorProfileResolution();
     TestEnabledProfileOverridesDisabledDefault();
     TestInvalidPivotActivationBindingRejected();
     TestNoneBindingParsed();

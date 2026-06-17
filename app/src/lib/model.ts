@@ -1,6 +1,7 @@
 export type LogLevel = 'info' | 'debug'
 export type ActivationMode = 'toggle' | 'hold'
 export type QuadViewsTrackingMode = 'head' | 'eye'
+export type PerformanceCollectionMode = 'summary' | 'diagnostic'
 export type AppTab = 'home' | 'core' | 'registry' | 'layers' | 'about' | 'depthxr' | 'pivotxr' | 'quadviews'
 export const keyboardBindingKeyGroups = [
   {
@@ -139,6 +140,19 @@ export interface QuadViewsModuleConfig {
   profiles: QuadViewsProfileConfig[]
 }
 
+export interface PerformanceMonitorProfileConfig {
+  name: string
+  enabled: boolean
+  applicationIds: string[]
+  collectionMode: PerformanceCollectionMode
+  retentionSessions: number
+  allowDynamicConsumers: boolean
+}
+
+export interface PerformanceMonitorModuleConfig {
+  profiles: PerformanceMonitorProfileConfig[]
+}
+
 export interface VectorXRConfig {
   version: 3
   core: CoreConfig
@@ -147,6 +161,7 @@ export interface VectorXRConfig {
     depthxr: DepthXRModuleConfig
     pivotxr: PivotXRModuleConfig
     quadviews: QuadViewsModuleConfig
+    performance: PerformanceMonitorModuleConfig
   }
 }
 
@@ -326,6 +341,9 @@ export function defaultConfig(): VectorXRConfig {
         defaults: defaultQuadViewsSettings(),
         profiles: [],
       },
+      performance: {
+        profiles: [],
+      },
     },
   }
 }
@@ -379,6 +397,17 @@ export function createQuadViewsProfile(defaultSettings: QuadViewsSettings, appli
   }
 }
 
+export function createPerformanceMonitorProfile(applicationIds: string[] = []): PerformanceMonitorProfileConfig {
+  return {
+    name: 'New Profile',
+    enabled: true,
+    applicationIds,
+    collectionMode: 'summary',
+    retentionSessions: 20,
+    allowDynamicConsumers: false,
+  }
+}
+
 function isVectorXRConfig(value: unknown): value is VectorXRConfig {
   return isRecord(value) && value.version === 3 && 'core' in value && 'modules' in value
 }
@@ -428,6 +457,23 @@ function normalizeQuadViewsSettings(value: unknown, fallback: QuadViewsSettings)
     verticalOffsetDegrees: normalizeNumber(source.verticalOffsetDegrees, fallback.verticalOffsetDegrees),
     gazeSmoothing: normalizeNumber(source.gazeSmoothing, fallback.gazeSmoothing),
     gazeDeadzoneDegrees: normalizeNumber(source.gazeDeadzoneDegrees, fallback.gazeDeadzoneDegrees),
+  }
+}
+
+function normalizePerformanceCollectionMode(value: unknown, fallback: PerformanceCollectionMode): PerformanceCollectionMode {
+  return value === 'diagnostic' || value === 'summary' ? value : fallback
+}
+
+function normalizePerformanceMonitorProfile(value: unknown, applications: RegisteredApplication[]): PerformanceMonitorProfileConfig {
+  const source = isRecord(value) ? value : {}
+
+  return {
+    name: normalizeString(source.name, 'New Profile'),
+    enabled: normalizeBoolean(source.enabled, true),
+    applicationIds: applicationIdsFromProfile(source, applications),
+    collectionMode: normalizePerformanceCollectionMode(source.collectionMode, 'summary'),
+    retentionSessions: normalizeNumber(source.retentionSessions, 20),
+    allowDynamicConsumers: normalizeBoolean(source.allowDynamicConsumers, false),
   }
 }
 
@@ -585,9 +631,11 @@ function normalizeVectorXRConfig(value: unknown): VectorXRConfig {
   const depthxr = isRecord(modules.depthxr) ? modules.depthxr : {}
   const pivotxr = isRecord(modules.pivotxr) ? modules.pivotxr : {}
   const quadviews = isRecord(modules.quadviews) ? modules.quadviews : {}
+  const performance = isRecord(modules.performance) ? modules.performance : {}
   const depthProfileValues = Array.isArray(depthxr.profiles) ? depthxr.profiles : []
   const pivotProfileValues = Array.isArray(pivotxr.profiles) ? pivotxr.profiles : []
   const quadViewsProfileValues = Array.isArray(quadviews.profiles) ? quadviews.profiles : []
+  const performanceProfileValues = Array.isArray(performance.profiles) ? performance.profiles : []
   const applicationValues = Array.isArray(source.applications) ? source.applications : []
   const applications: RegisteredApplication[] = []
 
@@ -666,6 +714,9 @@ function normalizeVectorXRConfig(value: unknown): VectorXRConfig {
             settings,
           }
         }),
+      },
+      performance: {
+        profiles: performanceProfileValues.map((profileValue) => normalizePerformanceMonitorProfile(profileValue, applications)),
       },
     },
   }

@@ -545,6 +545,27 @@ bool ReadOptionalProfileMode(const JsonValue::Object& object,
     return true;
 }
 
+bool ReadOptionalPerformanceCollectionMode(const JsonValue::Object& object,
+                                           const std::string& key,
+                                           std::optional<PerformanceCollectionMode>& out,
+                                           std::string& error) {
+    const auto it = object.find(key);
+    if (it == object.end()) {
+        return true;
+    }
+    if (!it->second.IsString()) {
+        error = key + " must be a string";
+        return false;
+    }
+
+    out = ParsePerformanceCollectionMode(it->second.AsString());
+    if (!out) {
+        error = key + " must be one of: summary, diagnostic";
+        return false;
+    }
+    return true;
+}
+
 bool CheckAllowedKeys(const JsonValue::Object& object,
                       const std::unordered_set<std::string>& allowed,
                       std::string& error);
@@ -1289,6 +1310,91 @@ bool ParseQuadViewsModule(const JsonValue::Object& object, QuadViewsModuleConfig
     return true;
 }
 
+bool ParsePerformanceMonitorProfile(const JsonValue& value,
+                                    PerformanceMonitorProfile& out,
+                                    std::string& error) {
+    const JsonValue::Object* object = RequireObject(value, "performanceProfile", error);
+    if (!object) {
+        return false;
+    }
+
+    static const std::unordered_set<std::string> allowed = {
+        "name",
+        "enabled",
+        "applicationIds",
+        "collectionMode",
+        "retentionSessions",
+        "allowDynamicConsumers",
+    };
+
+    if (!CheckAllowedKeys(*object, allowed, error)) {
+        return false;
+    }
+
+    const auto application_ids_it = object->find("applicationIds");
+    if (application_ids_it == object->end()) {
+        error = "Missing required field: performanceProfile.applicationIds";
+        return false;
+    }
+    if (!ParseStringArray(application_ids_it->second,
+                          "performanceProfile.applicationIds",
+                          out.application_ids,
+                          error)) {
+        return false;
+    }
+
+    std::optional<std::string> name;
+    std::optional<bool> enabled;
+    std::optional<PerformanceCollectionMode> collection_mode;
+    std::optional<int> retention_sessions;
+    std::optional<bool> allow_dynamic_consumers;
+    if (!ReadOptionalString(*object, "name", name, error) ||
+        !ReadOptionalBool(*object, "enabled", enabled, error) ||
+        !ReadOptionalPerformanceCollectionMode(*object, "collectionMode", collection_mode, error) ||
+        !ReadOptionalInt(*object, "retentionSessions", retention_sessions, error) ||
+        !ReadOptionalBool(*object, "allowDynamicConsumers", allow_dynamic_consumers, error)) {
+        return false;
+    }
+
+    out.name = name.value_or("New Profile");
+    out.enabled = enabled.value_or(true);
+    out.collection_mode = collection_mode.value_or(PerformanceCollectionMode::Summary);
+    out.retention_sessions = retention_sessions.value_or(out.retention_sessions);
+    out.allow_dynamic_consumers = allow_dynamic_consumers.value_or(false);
+
+    return true;
+}
+
+bool ParsePerformanceMonitorModule(const JsonValue::Object& object,
+                                   PerformanceMonitorModuleConfig& out,
+                                   std::string& error) {
+    static const std::unordered_set<std::string> allowed = {
+        "profiles",
+    };
+
+    if (!CheckAllowedKeys(object, allowed, error)) {
+        return false;
+    }
+
+    const auto profiles_it = object.find("profiles");
+    if (profiles_it != object.end()) {
+        const JsonValue::Array* profiles = RequireArray(profiles_it->second, "performance.profiles", error);
+        if (!profiles) {
+            return false;
+        }
+
+        for (const JsonValue& profile_value : *profiles) {
+            PerformanceMonitorProfile profile;
+            if (!ParsePerformanceMonitorProfile(profile_value, profile, error)) {
+                return false;
+            }
+            out.profiles.push_back(std::move(profile));
+        }
+    }
+
+    return true;
+}
+
 bool ParseVectorDocument(const JsonValue::Object& root_object, ConfigDocument& out, std::string& error) {
     static const std::unordered_set<std::string> allowed_root = {"version", "core", "applications", "modules"};
     if (!CheckAllowedKeys(root_object, allowed_root, error)) {
@@ -1335,7 +1441,7 @@ bool ParseVectorDocument(const JsonValue::Object& root_object, ConfigDocument& o
         return false;
     }
 
-    static const std::unordered_set<std::string> allowed_modules = {"depthxr", "pivotxr", "quadviews"};
+    static const std::unordered_set<std::string> allowed_modules = {"depthxr", "pivotxr", "quadviews", "performance"};
     if (!CheckAllowedKeys(*modules_object, allowed_modules, error)) {
         return false;
     }
@@ -1364,6 +1470,15 @@ bool ParseVectorDocument(const JsonValue::Object& root_object, ConfigDocument& o
     if (quadviews_it != modules_object->end()) {
         const JsonValue::Object* quadviews_object = RequireObject(quadviews_it->second, "modules.quadviews", error);
         if (!quadviews_object || !ParseQuadViewsModule(*quadviews_object, out.quadviews, error)) {
+            return false;
+        }
+    }
+
+    const auto performance_it = modules_object->find("performance");
+    if (performance_it != modules_object->end()) {
+        const JsonValue::Object* performance_object =
+            RequireObject(performance_it->second, "modules.performance", error);
+        if (!performance_object || !ParsePerformanceMonitorModule(*performance_object, out.performance, error)) {
             return false;
         }
     }
