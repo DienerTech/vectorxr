@@ -106,8 +106,10 @@ function budgetTone(settings: QuadViewsSettings) {
           </div>
           <p class="mt-2 max-w-3xl text-sm leading-6 text-muted">
             Manage native quadview defaults and per-application profiles for
-            foveal and peripheral rendering. Experimental - behavior may vary
-            by runtime and headset.
+            foveal and peripheral rendering.
+          </p>
+          <p class="mt-2 max-w-3xl text-sm font-bold leading-6 text-muted">
+          Experimental - DX11 OpenXR applications only!
           </p>
         </div>
         <label
