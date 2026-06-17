@@ -167,6 +167,22 @@ function targetLabel(session: PerformanceSessionSummary | null) {
   return `${formatNumber(session.targetFrameMs)} ms @ ${formatNumber(session.targetHz, 0)} Hz`
 }
 
+function excludedSampleCount(session: PerformanceSessionSummary | null) {
+  if (!session) {
+    return 0
+  }
+
+  return session.excludedFrameSamples + session.excludedCpuSpanSamples
+}
+
+function formatSecondsFromMs(value: number) {
+  if (!Number.isFinite(value) || value <= 0) {
+    return '0s'
+  }
+
+  return `${(value / 1000).toFixed(value >= 10000 ? 0 : 1)}s`
+}
+
 function sessionTone(session: PerformanceSessionSummary | null) {
   if (!session || session.frameSamples === 0) {
     return 'chip-idle'
@@ -181,6 +197,10 @@ function sessionTone(session: PerformanceSessionSummary | null) {
 
 function sessionLabel(session: PerformanceSessionSummary | null) {
   if (!session || session.frameSamples === 0) {
+    if (excludedSampleCount(session) > 0) {
+      return 'Loading only'
+    }
+
     return 'No samples'
   }
 
@@ -380,6 +400,10 @@ function metricWidth(value: number) {
                 <p class="mt-1 text-lg font-semibold">{{ formatInteger(selectedSession.frameSamples) }}</p>
               </div>
               <div class="rounded-[0.85rem] border px-3 py-3 surface-panel-soft">
+                <p class="text-xs text-muted">Excluded</p>
+                <p class="mt-1 text-lg font-semibold">{{ formatInteger(excludedSampleCount(selectedSession)) }}</p>
+              </div>
+              <div class="rounded-[0.85rem] border px-3 py-3 surface-panel-soft">
                 <p class="text-xs text-muted">Duration</p>
                 <p class="mt-1 text-lg font-semibold">{{ formatNumber(selectedSession.durationSeconds, 0) }}s</p>
               </div>
@@ -422,6 +446,24 @@ function metricWidth(value: number) {
               <div class="flex justify-between gap-3">
                 <span class="text-muted">Should render false</span>
                 <span class="font-medium">{{ formatInteger(selectedSession.shouldRenderFalse) }}</span>
+              </div>
+              <div class="flex justify-between gap-3">
+                <span class="text-muted">Loading threshold</span>
+                <span class="font-medium">{{ formatNumber(selectedSession.loadingGapThresholdMs) }} ms</span>
+              </div>
+              <div class="flex justify-between gap-3">
+                <span class="text-muted">Excluded frame gaps</span>
+                <span class="font-medium">
+                  {{ formatInteger(selectedSession.excludedFrameSamples) }}
+                  / {{ formatSecondsFromMs(selectedSession.excludedFrameDurationMs) }}
+                </span>
+              </div>
+              <div class="flex justify-between gap-3">
+                <span class="text-muted">Excluded CPU spans</span>
+                <span class="font-medium">
+                  {{ formatInteger(selectedSession.excludedCpuSpanSamples) }}
+                  / {{ formatSecondsFromMs(selectedSession.excludedCpuSpanDurationMs) }}
+                </span>
               </div>
               <div class="flex justify-between gap-3">
                 <span class="text-muted">CPU span avg</span>

@@ -46,10 +46,14 @@ export interface PerformanceSessionSummary {
   durationSeconds: number
   targetFrameMs: number
   targetHz: number
+  loadingGapThresholdMs: number
   waitFrames: number
   beginFrames: number
   endFrames: number
   frameSamples: number
+  excludedFrameSamples: number
+  excludedFrameDurationMs: number
+  excludedFrameMaxMs: number
   frameAvgMs: number
   frameP95Ms: number
   frameP99Ms: number
@@ -59,6 +63,9 @@ export interface PerformanceSessionSummary {
   overBudgetPercent: number
   shouldRenderFalse: number
   cpuSpanSamples: number
+  excludedCpuSpanSamples: number
+  excludedCpuSpanDurationMs: number
+  excludedCpuSpanMaxMs: number
   cpuSpanAvgMs: number
   cpuSpanMinMs: number
   cpuSpanMaxMs: number

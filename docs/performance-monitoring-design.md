@@ -101,6 +101,8 @@ Useful UI metrics:
 - percent of frames over budget
 - frame pacing stability and stutter count
 - `shouldRender=false` count
+- loading-gap exclusions for scene loads or app stalls that would otherwise
+  pollute normal frame timing
 - session min/max/avg summaries
 - active enhancement timeline
 - notable runtime or VectorXR events
@@ -137,6 +139,7 @@ Allowed on the OpenXR frame hot path:
 - reading a monotonic timestamp
 - updating fixed-size counters or appending a tiny sample to a preallocated ring
   buffer
+- classifying very long gaps into excluded loading counters
 - dropping samples when buffers are full
 
 Avoid on the hot path:

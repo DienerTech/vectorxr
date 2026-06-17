@@ -194,10 +194,16 @@ class OpenXrLayer {
         uint64_t end_frame_count{0};
         uint64_t should_render_false_count{0};
         uint64_t over_budget_frame_count{0};
+        uint64_t excluded_frame_sample_count{0};
+        double excluded_frame_duration_ms{0.0};
+        double excluded_frame_max_ms{0.0};
         uint64_t predicted_interval_sample_count{0};
         double predicted_interval_sum_ms{0.0};
         double predicted_interval_min_ms{0.0};
         double predicted_interval_max_ms{0.0};
+        uint64_t excluded_cpu_span_count{0};
+        double excluded_cpu_span_duration_ms{0.0};
+        double excluded_cpu_span_max_ms{0.0};
         uint64_t cpu_span_sample_count{0};
         double cpu_span_sum_ms{0.0};
         double cpu_span_min_ms{0.0};

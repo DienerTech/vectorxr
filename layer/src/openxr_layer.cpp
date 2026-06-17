@@ -748,6 +748,9 @@ constexpr size_t kMaxCachedQuadViewsFovFrames = 180;
 constexpr std::chrono::milliseconds kConfigCheckInterval{500};
 constexpr std::chrono::milliseconds kInputBindingPollInterval{30};
 constexpr std::chrono::milliseconds kAppActionSyncFreshWindow{100};
+constexpr double kPerformanceLoadingGapMinimumMs = 500.0;
+constexpr double kPerformanceLoadingGapTargetMultiplier = 30.0;
+constexpr double kPerformanceMaximumTrackedGapMs = 300000.0;
 
 double DurationToMilliseconds(XrDuration duration) {
     return static_cast<double>(duration) / 1'000'000.0;
@@ -755,6 +758,21 @@ double DurationToMilliseconds(XrDuration duration) {
 
 double WallDurationToMilliseconds(std::chrono::steady_clock::duration duration) {
     return std::chrono::duration<double, std::milli>(duration).count();
+}
+
+double PerformanceLoadingGapThresholdMs(double target_frame_ms) {
+    const double target_threshold =
+        target_frame_ms > 0.0 ? target_frame_ms * kPerformanceLoadingGapTargetMultiplier : 0.0;
+    return std::max(kPerformanceLoadingGapMinimumMs, target_threshold);
+}
+
+bool IsTrackablePerformanceDuration(double duration_ms) {
+    return duration_ms > 0.0 && duration_ms < kPerformanceMaximumTrackedGapMs;
+}
+
+bool IsPerformanceLoadingGap(double duration_ms, double target_frame_ms) {
+    return IsTrackablePerformanceDuration(duration_ms) &&
+           duration_ms >= PerformanceLoadingGapThresholdMs(target_frame_ms);
 }
 
 bool SameSettings(const ResolvedRuntimeConfig& lhs, const ResolvedRuntimeConfig& rhs) {
@@ -4145,6 +4163,10 @@ void OpenXrLayer::CapturePerformanceWaitFrame(XrSession session,
         return;
     }
 
+    const double wait_gap_ms = performance_monitor_.has_last_wait_return
+                                   ? WallDurationToMilliseconds(wait_return_time -
+                                                                performance_monitor_.last_wait_return)
+                                   : 0.0;
     ++performance_monitor_.wait_frame_count;
     performance_monitor_.last_wait_return = wait_return_time;
     performance_monitor_.has_last_wait_return = true;
@@ -4161,30 +4183,38 @@ void OpenXrLayer::CapturePerformanceWaitFrame(XrSession session,
         frame_state->predictedDisplayTime > performance_monitor_.last_predicted_display_time) {
         const double interval_ms = DurationToMilliseconds(
             frame_state->predictedDisplayTime - performance_monitor_.last_predicted_display_time);
-        if (interval_ms > 0.0 && interval_ms < 1000.0) {
-            ++performance_monitor_.predicted_interval_sample_count;
-            performance_monitor_.predicted_interval_sum_ms += interval_ms;
-            if (performance_monitor_.predicted_interval_sample_count == 1) {
-                performance_monitor_.predicted_interval_min_ms = interval_ms;
-                performance_monitor_.predicted_interval_max_ms = interval_ms;
+        if (IsTrackablePerformanceDuration(interval_ms)) {
+            const double loading_gap_ms = std::max(interval_ms, wait_gap_ms);
+            if (IsPerformanceLoadingGap(loading_gap_ms, performance_monitor_.target_frame_ms)) {
+                ++performance_monitor_.excluded_frame_sample_count;
+                performance_monitor_.excluded_frame_duration_ms += loading_gap_ms;
+                performance_monitor_.excluded_frame_max_ms =
+                    std::max(performance_monitor_.excluded_frame_max_ms, loading_gap_ms);
             } else {
-                performance_monitor_.predicted_interval_min_ms =
-                    std::min(performance_monitor_.predicted_interval_min_ms, interval_ms);
-                performance_monitor_.predicted_interval_max_ms =
-                    std::max(performance_monitor_.predicted_interval_max_ms, interval_ms);
-            }
+                ++performance_monitor_.predicted_interval_sample_count;
+                performance_monitor_.predicted_interval_sum_ms += interval_ms;
+                if (performance_monitor_.predicted_interval_sample_count == 1) {
+                    performance_monitor_.predicted_interval_min_ms = interval_ms;
+                    performance_monitor_.predicted_interval_max_ms = interval_ms;
+                } else {
+                    performance_monitor_.predicted_interval_min_ms =
+                        std::min(performance_monitor_.predicted_interval_min_ms, interval_ms);
+                    performance_monitor_.predicted_interval_max_ms =
+                        std::max(performance_monitor_.predicted_interval_max_ms, interval_ms);
+                }
 
-            if (performance_monitor_.target_frame_ms > 0.0 &&
-                interval_ms > performance_monitor_.target_frame_ms * 1.05) {
-                ++performance_monitor_.over_budget_frame_count;
-            }
+                if (performance_monitor_.target_frame_ms > 0.0 &&
+                    interval_ms > performance_monitor_.target_frame_ms * 1.05) {
+                    ++performance_monitor_.over_budget_frame_count;
+                }
 
-            performance_monitor_.frame_time_samples[performance_monitor_.frame_time_sample_index] = interval_ms;
-            performance_monitor_.frame_time_sample_index =
-                (performance_monitor_.frame_time_sample_index + 1) % performance_monitor_.frame_time_samples.size();
-            performance_monitor_.frame_time_sample_count =
-                std::min(performance_monitor_.frame_time_sample_count + 1,
-                         performance_monitor_.frame_time_samples.size());
+                performance_monitor_.frame_time_samples[performance_monitor_.frame_time_sample_index] = interval_ms;
+                performance_monitor_.frame_time_sample_index =
+                    (performance_monitor_.frame_time_sample_index + 1) % performance_monitor_.frame_time_samples.size();
+                performance_monitor_.frame_time_sample_count =
+                    std::min(performance_monitor_.frame_time_sample_count + 1,
+                             performance_monitor_.frame_time_samples.size());
+            }
         }
     }
 
@@ -4217,7 +4247,15 @@ void OpenXrLayer::CapturePerformanceEndFrame(XrSession session,
     }
 
     const double cpu_span_ms = WallDurationToMilliseconds(end_time - performance_monitor_.last_wait_return);
-    if (cpu_span_ms <= 0.0 || cpu_span_ms >= 10000.0) {
+    if (!IsTrackablePerformanceDuration(cpu_span_ms)) {
+        return;
+    }
+
+    if (IsPerformanceLoadingGap(cpu_span_ms, performance_monitor_.target_frame_ms)) {
+        ++performance_monitor_.excluded_cpu_span_count;
+        performance_monitor_.excluded_cpu_span_duration_ms += cpu_span_ms;
+        performance_monitor_.excluded_cpu_span_max_ms =
+            std::max(performance_monitor_.excluded_cpu_span_max_ms, cpu_span_ms);
         return;
     }
 
@@ -4273,10 +4311,15 @@ std::string OpenXrLayer::BuildPerformanceMonitorSummary(std::string_view reason)
            << ", durationSeconds=" << FormatDiagnosticDouble(duration_seconds)
            << ", targetFrameMs=" << FormatDiagnosticDouble(state.target_frame_ms)
            << ", targetHz=" << FormatDiagnosticDouble(target_hz)
+           << ", loadingGapThresholdMs="
+           << FormatDiagnosticDouble(PerformanceLoadingGapThresholdMs(state.target_frame_ms))
            << ", waitFrames=" << state.wait_frame_count
            << ", beginFrames=" << state.begin_frame_count
            << ", endFrames=" << state.end_frame_count
            << ", frameSamples=" << state.predicted_interval_sample_count
+           << ", excludedFrameSamples=" << state.excluded_frame_sample_count
+           << ", excludedFrameDurationMs=" << FormatDiagnosticDouble(state.excluded_frame_duration_ms)
+           << ", excludedFrameMaxMs=" << FormatDiagnosticDouble(state.excluded_frame_max_ms)
            << ", frameAvgMs=" << FormatDiagnosticDouble(avg_interval_ms)
            << ", frameP95Ms=" << FormatDiagnosticDouble(percentile(0.95))
            << ", frameP99Ms=" << FormatDiagnosticDouble(percentile(0.99))
@@ -4286,6 +4329,9 @@ std::string OpenXrLayer::BuildPerformanceMonitorSummary(std::string_view reason)
            << ", overBudgetPercent=" << FormatDiagnosticDouble(over_budget_percent)
            << ", shouldRenderFalse=" << state.should_render_false_count
            << ", cpuSpanSamples=" << state.cpu_span_sample_count
+           << ", excludedCpuSpanSamples=" << state.excluded_cpu_span_count
+           << ", excludedCpuSpanDurationMs=" << FormatDiagnosticDouble(state.excluded_cpu_span_duration_ms)
+           << ", excludedCpuSpanMaxMs=" << FormatDiagnosticDouble(state.excluded_cpu_span_max_ms)
            << ", cpuSpanAvgMs=" << FormatDiagnosticDouble(avg_cpu_span_ms)
            << ", cpuSpanMinMs=" << FormatDiagnosticDouble(state.cpu_span_min_ms)
            << ", cpuSpanMaxMs=" << FormatDiagnosticDouble(state.cpu_span_max_ms);
