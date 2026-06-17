@@ -181,7 +181,6 @@ class OpenXrLayer {
         std::string profile_name;
         std::string application_id;
         PerformanceCollectionMode collection_mode{PerformanceCollectionMode::Summary};
-        bool allow_dynamic_consumers{false};
         std::chrono::steady_clock::time_point session_start{};
         std::chrono::steady_clock::time_point last_wait_return{};
         std::chrono::steady_clock::time_point last_begin_frame{};

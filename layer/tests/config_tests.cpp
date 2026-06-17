@@ -526,16 +526,14 @@ void TestPerformanceMonitorProfileResolution() {
           "enabled": true,
           "applicationIds": ["dcs"],
           "collectionMode": "diagnostic",
-          "retentionSessions": 12,
-          "allowDynamicConsumers": true
+          "retentionSessions": 12
         },
         {
           "name": "Inactive",
           "enabled": false,
           "applicationIds": ["other"],
           "collectionMode": "summary",
-          "retentionSessions": 5,
-          "allowDynamicConsumers": false
+          "retentionSessions": 5
         }
       ]
     }
@@ -553,7 +551,6 @@ void TestPerformanceMonitorProfileResolution() {
     Expect(resolved.performance.collection_mode == depthxr::PerformanceCollectionMode::Diagnostic,
            "Performance collection mode mismatch");
     Expect(resolved.performance.retention_sessions == 12, "Performance retention mismatch");
-    Expect(resolved.performance.allow_dynamic_consumers, "Performance dynamic consumer flag mismatch");
 
     const depthxr::ResolvedRuntimeConfig resolved_other = depthxr::ResolveRuntimeConfig(result.document, "Other.exe");
     Expect(!resolved_other.performance.enabled, "Disabled performance profile should be inert");

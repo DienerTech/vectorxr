@@ -807,8 +807,7 @@ bool SameSettings(const ResolvedRuntimeConfig& lhs, const ResolvedRuntimeConfig&
            lhs.performance.profile_name == rhs.performance.profile_name &&
            lhs.performance.application_id == rhs.performance.application_id &&
            lhs.performance.collection_mode == rhs.performance.collection_mode &&
-           lhs.performance.retention_sessions == rhs.performance.retention_sessions &&
-           lhs.performance.allow_dynamic_consumers == rhs.performance.allow_dynamic_consumers;
+           lhs.performance.retention_sessions == rhs.performance.retention_sessions;
 }
 
 bool SameInputBinding(const InputBinding& lhs, const InputBinding& rhs) {
@@ -3084,8 +3083,7 @@ void OpenXrLayer::RefreshResolvedSettings() {
         previous.performance.profile_name != resolved_settings_.performance.profile_name ||
         previous.performance.application_id != resolved_settings_.performance.application_id ||
         previous.performance.collection_mode != resolved_settings_.performance.collection_mode ||
-        previous.performance.retention_sessions != resolved_settings_.performance.retention_sessions ||
-        previous.performance.allow_dynamic_consumers != resolved_settings_.performance.allow_dynamic_consumers;
+        previous.performance.retention_sessions != resolved_settings_.performance.retention_sessions;
     if (!SameInputBinding(previous.depthxr_bindings.toggle_enabled, resolved_settings_.depthxr_bindings.toggle_enabled) ||
         previous.depthxr.enabled != resolved_settings_.depthxr.enabled) {
         ResetDepthToggleState();
@@ -4098,8 +4096,7 @@ void OpenXrLayer::LogResolvedSettings(const ResolvedRuntimeConfig& settings) {
            << ", performanceProfile=" << settings.performance.profile_name
            << ", performanceApplicationId=" << settings.performance.application_id
            << ", performanceCollectionMode=" << ToString(settings.performance.collection_mode)
-           << ", performanceRetentionSessions=" << settings.performance.retention_sessions
-           << ", performanceAllowDynamicConsumers=" << settings.performance.allow_dynamic_consumers;
+           << ", performanceRetentionSessions=" << settings.performance.retention_sessions;
     logger_.Debug(stream.str());
 }
 
@@ -4116,15 +4113,12 @@ void OpenXrLayer::StartPerformanceMonitorSession() {
     performance_monitor_.profile_name = resolved_settings_.performance.profile_name;
     performance_monitor_.application_id = resolved_settings_.performance.application_id;
     performance_monitor_.collection_mode = resolved_settings_.performance.collection_mode;
-    performance_monitor_.allow_dynamic_consumers = resolved_settings_.performance.allow_dynamic_consumers;
     performance_monitor_.session_start = std::chrono::steady_clock::now();
     performance_monitor_capture_active_.store(true, std::memory_order_relaxed);
 
     logger_.Info("Performance monitor started: profile=" + performance_monitor_.profile_name +
                  ", applicationId=" + performance_monitor_.application_id +
-                 ", collectionMode=" + ToString(performance_monitor_.collection_mode) +
-                 ", dynamicConsumers=" +
-                 std::to_string(static_cast<int>(performance_monitor_.allow_dynamic_consumers)));
+                 ", collectionMode=" + ToString(performance_monitor_.collection_mode));
 }
 
 void OpenXrLayer::StopPerformanceMonitorSession(std::string_view reason) {

@@ -1,7 +1,7 @@
 import { computed, reactive } from 'vue'
 
 import { clearSeenApps, loadConfigEnvelope, loadSeenApps, resetStoredData, saveConfigEnvelope, type SeenApplication } from '../lib/commands'
-import { cloneConfig, createApplication, createProfile, createPivotProfile, createQuadViewsProfile, defaultConfig } from '../lib/model'
+import { cloneConfig, createApplication, createPerformanceMonitorProfile, createProfile, createPivotProfile, createQuadViewsProfile, defaultConfig } from '../lib/model'
 import type { AppTab, ModuleId, VectorXRConfig } from '../lib/model'
 
 interface StoreState {
@@ -180,6 +180,29 @@ export function useConfigStore() {
     }
   }
 
+  function addPerformanceProfile() {
+    const defaultApplicationId = state.config.applications[0]?.id
+    state.config.modules.performance.profiles.push(
+      createPerformanceMonitorProfile(defaultApplicationId ? [defaultApplicationId] : []),
+    )
+  }
+
+  function removePerformanceProfile(index: number) {
+    state.config.modules.performance.profiles.splice(index, 1)
+  }
+
+  function syncPerformanceProfileName(index: number) {
+    const profile = state.config.modules.performance.profiles[index]
+    if (!profile) {
+      return
+    }
+
+    if (!profile.name.trim() || profile.name === 'New Profile') {
+      const firstApplication = state.config.applications.find((application) => application.id === profile.applicationIds[0])
+      profile.name = firstApplication?.name || 'New Profile'
+    }
+  }
+
   // Registry shortcut: create a profile pre-assigned to one application and jump to the module tab.
   function addModuleProfileForApplication(moduleId: ModuleId, applicationId: string) {
     const application = state.config.applications.find((candidate) => candidate.id === applicationId)
@@ -198,9 +221,12 @@ export function useConfigStore() {
         ),
       )
       syncPivotProfileName(state.config.modules.pivotxr.profiles.length - 1)
-    } else {
+    } else if (moduleId === 'quadviews') {
       state.config.modules.quadviews.profiles.push(createQuadViewsProfile(state.config.modules.quadviews.defaults, applicationIds))
       syncQuadViewsProfileName(state.config.modules.quadviews.profiles.length - 1)
+    } else {
+      state.config.modules.performance.profiles.push(createPerformanceMonitorProfile(applicationIds))
+      syncPerformanceProfileName(state.config.modules.performance.profiles.length - 1)
     }
 
     state.activeTab = moduleId
@@ -270,6 +296,9 @@ export function useConfigStore() {
     addQuadViewsProfile,
     removeQuadViewsProfile,
     syncQuadViewsProfileName,
+    addPerformanceProfile,
+    removePerformanceProfile,
+    syncPerformanceProfileName,
     addModuleProfileForApplication,
     addApplication,
     addSeenApplication,

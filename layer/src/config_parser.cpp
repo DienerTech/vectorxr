@@ -1324,7 +1324,6 @@ bool ParsePerformanceMonitorProfile(const JsonValue& value,
         "applicationIds",
         "collectionMode",
         "retentionSessions",
-        "allowDynamicConsumers",
     };
 
     if (!CheckAllowedKeys(*object, allowed, error)) {
@@ -1347,12 +1346,10 @@ bool ParsePerformanceMonitorProfile(const JsonValue& value,
     std::optional<bool> enabled;
     std::optional<PerformanceCollectionMode> collection_mode;
     std::optional<int> retention_sessions;
-    std::optional<bool> allow_dynamic_consumers;
     if (!ReadOptionalString(*object, "name", name, error) ||
         !ReadOptionalBool(*object, "enabled", enabled, error) ||
         !ReadOptionalPerformanceCollectionMode(*object, "collectionMode", collection_mode, error) ||
-        !ReadOptionalInt(*object, "retentionSessions", retention_sessions, error) ||
-        !ReadOptionalBool(*object, "allowDynamicConsumers", allow_dynamic_consumers, error)) {
+        !ReadOptionalInt(*object, "retentionSessions", retention_sessions, error)) {
         return false;
     }
 
@@ -1360,7 +1357,6 @@ bool ParsePerformanceMonitorProfile(const JsonValue& value,
     out.enabled = enabled.value_or(true);
     out.collection_mode = collection_mode.value_or(PerformanceCollectionMode::Summary);
     out.retention_sessions = retention_sessions.value_or(out.retention_sessions);
-    out.allow_dynamic_consumers = allow_dynamic_consumers.value_or(false);
 
     return true;
 }

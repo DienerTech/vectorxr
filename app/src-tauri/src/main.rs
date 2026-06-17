@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -458,8 +459,6 @@ struct PerformanceMonitorProfileConfig {
     collection_mode: String,
     #[serde(default = "default_retention_sessions")]
     retention_sessions: u32,
-    #[serde(default)]
-    allow_dynamic_consumers: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -523,6 +522,47 @@ struct LogSnapshot {
     directory: String,
     active_path: String,
     files: Vec<LogFileEntry>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PerformanceSessionSummary {
+    id: String,
+    application_id: String,
+    profile_name: String,
+    collection_mode: String,
+    source_log_path: String,
+    source_log_name: String,
+    source_line_number: usize,
+    recorded_unix_seconds: u64,
+    reason: String,
+    duration_seconds: f64,
+    target_frame_ms: f64,
+    target_hz: f64,
+    wait_frames: u64,
+    begin_frames: u64,
+    end_frames: u64,
+    frame_samples: u64,
+    frame_avg_ms: f64,
+    frame_p95_ms: f64,
+    frame_p99_ms: f64,
+    frame_min_ms: f64,
+    frame_max_ms: f64,
+    over_budget_frames: u64,
+    over_budget_percent: f64,
+    should_render_false: u64,
+    cpu_span_samples: u64,
+    cpu_span_avg_ms: f64,
+    cpu_span_min_ms: f64,
+    cpu_span_max_ms: f64,
+    raw_line: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PerformanceSessionsSnapshot {
+    directory: String,
+    sessions: Vec<PerformanceSessionSummary>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1092,6 +1132,82 @@ fn read_log_preview(path: &Path) -> String {
     )
 }
 
+fn parse_summary_pairs(value: &str) -> HashMap<String, String> {
+    value
+        .split(", ")
+        .filter_map(|part| {
+            let (key, raw_value) = part.split_once('=')?;
+            Some((key.trim().to_string(), raw_value.trim().to_string()))
+        })
+        .collect()
+}
+
+fn parse_summary_f64(values: &HashMap<String, String>, key: &str) -> f64 {
+    values
+        .get(key)
+        .and_then(|value| value.parse::<f64>().ok())
+        .unwrap_or_default()
+}
+
+fn parse_summary_u64(values: &HashMap<String, String>, key: &str) -> u64 {
+    values
+        .get(key)
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or_default()
+}
+
+fn parse_performance_session_line(
+    line: &str,
+    line_number: usize,
+    path: &Path,
+    modified_unix_seconds: u64,
+) -> Option<PerformanceSessionSummary> {
+    const MARKER: &str = "Performance monitor summary: ";
+    let marker_index = line.find(MARKER)?;
+    let values = parse_summary_pairs(&line[marker_index + MARKER.len()..]);
+    let application_id = values.get("applicationId")?.to_string();
+    let source_log_name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("log")
+        .to_string();
+
+    Some(PerformanceSessionSummary {
+        id: format!("{}:{}", path.to_string_lossy(), line_number),
+        application_id,
+        profile_name: values.get("profile").cloned().unwrap_or_default(),
+        collection_mode: values
+            .get("collectionMode")
+            .cloned()
+            .unwrap_or_else(|| "summary".into()),
+        source_log_path: path.to_string_lossy().into_owned(),
+        source_log_name,
+        source_line_number: line_number,
+        recorded_unix_seconds: modified_unix_seconds,
+        reason: values.get("reason").cloned().unwrap_or_default(),
+        duration_seconds: parse_summary_f64(&values, "durationSeconds"),
+        target_frame_ms: parse_summary_f64(&values, "targetFrameMs"),
+        target_hz: parse_summary_f64(&values, "targetHz"),
+        wait_frames: parse_summary_u64(&values, "waitFrames"),
+        begin_frames: parse_summary_u64(&values, "beginFrames"),
+        end_frames: parse_summary_u64(&values, "endFrames"),
+        frame_samples: parse_summary_u64(&values, "frameSamples"),
+        frame_avg_ms: parse_summary_f64(&values, "frameAvgMs"),
+        frame_p95_ms: parse_summary_f64(&values, "frameP95Ms"),
+        frame_p99_ms: parse_summary_f64(&values, "frameP99Ms"),
+        frame_min_ms: parse_summary_f64(&values, "frameMinMs"),
+        frame_max_ms: parse_summary_f64(&values, "frameMaxMs"),
+        over_budget_frames: parse_summary_u64(&values, "overBudgetFrames"),
+        over_budget_percent: parse_summary_f64(&values, "overBudgetPercent"),
+        should_render_false: parse_summary_u64(&values, "shouldRenderFalse"),
+        cpu_span_samples: parse_summary_u64(&values, "cpuSpanSamples"),
+        cpu_span_avg_ms: parse_summary_f64(&values, "cpuSpanAvgMs"),
+        cpu_span_min_ms: parse_summary_f64(&values, "cpuSpanMinMs"),
+        cpu_span_max_ms: parse_summary_f64(&values, "cpuSpanMaxMs"),
+        raw_line: line.to_string(),
+    })
+}
+
 #[tauri::command]
 fn load_config() -> Result<ConfigEnvelope, String> {
     let path = resolve_config_path();
@@ -1196,6 +1312,47 @@ fn load_log_snapshot() -> Result<LogSnapshot, String> {
         directory: directory.to_string_lossy().into_owned(),
         active_path,
         files,
+    })
+}
+
+#[tauri::command]
+fn load_performance_sessions() -> Result<PerformanceSessionsSnapshot, String> {
+    let base_path = resolve_log_path();
+    let directory = base_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .to_path_buf();
+    let mut sessions = Vec::new();
+
+    for path in log_series_paths(&base_path)?.into_iter().take(20) {
+        let modified_unix_seconds = fs::metadata(&path)
+            .and_then(|metadata| metadata.modified())
+            .ok()
+            .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+            .map(|duration| duration.as_secs())
+            .unwrap_or_default();
+        let Ok(content) = fs::read_to_string(&path) else {
+            continue;
+        };
+
+        for (index, line) in content.lines().enumerate() {
+            if let Some(session) =
+                parse_performance_session_line(line, index + 1, &path, modified_unix_seconds)
+            {
+                sessions.push(session);
+            }
+        }
+    }
+
+    sessions.sort_by(|lhs, rhs| {
+        rhs.recorded_unix_seconds
+            .cmp(&lhs.recorded_unix_seconds)
+            .then_with(|| rhs.source_line_number.cmp(&lhs.source_line_number))
+    });
+
+    Ok(PerformanceSessionsSnapshot {
+        directory: directory.to_string_lossy().into_owned(),
+        sessions,
     })
 }
 
@@ -1359,6 +1516,7 @@ fn main() {
             save_config,
             reset_stored_data,
             load_log_snapshot,
+            load_performance_sessions,
             open_file_directory,
             open_external_url,
             load_seen_apps,

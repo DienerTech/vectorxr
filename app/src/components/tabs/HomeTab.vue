@@ -71,7 +71,9 @@ const systemHealthDescription = computed(() => {
   return 'VectorXR runtime and OpenXR layer status look ready for future OpenXR app launches.'
 })
 
-const moduleMeta: { id: ModuleId; label: string }[] = [
+type EnhancementModuleId = Exclude<ModuleId, 'performance'>
+
+const moduleMeta: { id: EnhancementModuleId; label: string }[] = [
   { id: 'quadviews', label: 'Quadviews' },
   { id: 'pivotxr', label: 'Pivot' },
   { id: 'depthxr', label: 'Depth' },

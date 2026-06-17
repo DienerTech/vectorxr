@@ -185,7 +185,6 @@ struct PerformanceMonitorProfile {
     std::vector<std::string> application_ids;
     PerformanceCollectionMode collection_mode{PerformanceCollectionMode::Summary};
     int retention_sessions{20};
-    bool allow_dynamic_consumers{false};
 };
 
 struct PerformanceMonitorModuleConfig {
@@ -198,7 +197,6 @@ struct PerformanceMonitorResolvedSettings {
     std::string application_id;
     PerformanceCollectionMode collection_mode{PerformanceCollectionMode::Summary};
     int retention_sessions{20};
-    bool allow_dynamic_consumers{false};
 };
 
 struct ConfigDocument {

@@ -21,11 +21,27 @@ defineEmits<{
   openModule: [moduleId: ModuleId, applicationId: string]
 }>()
 
-const moduleIds: ModuleId[] = ['quadviews', 'pivotxr', 'depthxr']
+const moduleIds: ModuleId[] = ['quadviews', 'pivotxr', 'depthxr', 'performance']
 
 function moduleChip(applicationId: string, moduleId: ModuleId) {
   const moduleState = moduleStateForApplication(props.config, moduleId, applicationId)
   const label = moduleLabels[moduleId]
+
+  if (moduleId === 'performance') {
+    if (moduleState.kind === 'custom') {
+      return {
+        text: `${label} Aú ${moduleState.profileName}`,
+        chipClass: 'chip-success',
+        title: `Performance collection profile "${moduleState.profileName}" applies. Click to open it.`,
+      }
+    }
+
+    return {
+      text: `${label} Aú Off`,
+      chipClass: 'chip-idle',
+      title: 'Performance collection is off for this application. Click to create a monitoring profile.',
+    }
+  }
 
   switch (moduleState.kind) {
     case 'default-off':

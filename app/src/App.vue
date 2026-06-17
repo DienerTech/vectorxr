@@ -14,9 +14,10 @@ import CoreTab from './components/tabs/CoreTab.vue'
 import DepthXrTab from './components/tabs/DepthXrTab.vue'
 import HomeTab from './components/tabs/HomeTab.vue'
 import OpenXrLayersTab from './components/tabs/OpenXrLayersTab.vue'
+import PerformanceMonitoringTab from './components/tabs/PerformanceMonitoringTab.vue'
 import PivotXrTab from './components/tabs/PivotXrTab.vue'
 import QuadViewsTab from './components/tabs/QuadViewsTab.vue'
-import { exportConfigFile, loadLogSnapshot, loadOpenXrLayers, type LogSnapshot, type OpenXrLayerSnapshot } from './lib/commands'
+import { exportConfigFile, loadLogSnapshot, loadOpenXrLayers, loadPerformanceSessions, openFileDirectory, type LogSnapshot, type OpenXrLayerSnapshot, type PerformanceSessionsSnapshot } from './lib/commands'
 import { createDebugPackage, saveDebugPackage } from './lib/debugPackage'
 import { buildHealthSummary } from './lib/health'
 import { moduleStateForApplication, normalizeConfig, type ModuleId, type VectorXRConfig } from './lib/model'
@@ -35,6 +36,8 @@ const debugExporting = ref(false)
 const patchNotesOpen = ref(false)
 const logViewerLoading = ref(false)
 const logSnapshot = ref<LogSnapshot | null>(null)
+const performanceSessionsSnapshot = ref<PerformanceSessionsSnapshot | null>(null)
+const performanceSessionsLoading = ref(false)
 const themePreference = ref<ThemePreference>(loadThemePreference())
 const importFileInput = ref<HTMLInputElement | null>(null)
 const importPreviewOpen = ref(false)
@@ -59,6 +62,10 @@ function enabledProfileCount(moduleId: ModuleId) {
 }
 
 function enhancementActive(moduleId: ModuleId) {
+  if (moduleId === 'performance') {
+    return enabledProfileCount(moduleId) > 0
+  }
+
   return store.state.config.modules[moduleId].enabled || enabledProfileCount(moduleId) > 0
 }
 
@@ -86,6 +93,12 @@ const tabs = computed(() => [
     label: 'OpenXR Layers',
     subtitle: 'Inspect and manage implicit layer order',
     status: 'System',
+  },
+  {
+    id: 'performance' as const,
+    label: 'Performance Monitoring',
+    subtitle: 'Per-game frame stats and session logs',
+    status: `${enabledProfileCount('performance')} collecting`,
   },
   {
     id: 'about' as const,
@@ -135,6 +148,7 @@ onMounted(() => {
 
   void store.load()
   void refreshLogs()
+  void refreshPerformanceSessions()
   void refreshOpenXrLayers()
 })
 
@@ -175,9 +189,29 @@ async function refreshOpenXrLayers() {
   }
 }
 
+async function refreshPerformanceSessions() {
+  performanceSessionsLoading.value = true
+
+  try {
+    performanceSessionsSnapshot.value = await loadPerformanceSessions()
+  } catch (error) {
+    store.state.status = error instanceof Error ? error.message : 'Failed to load performance sessions'
+  } finally {
+    performanceSessionsLoading.value = false
+  }
+}
+
 async function openLogs() {
   logViewerOpen.value = true
   await refreshLogs()
+}
+
+async function openPerformanceLogDirectory(path: string) {
+  try {
+    await openFileDirectory(path)
+  } catch (error) {
+    store.state.status = error instanceof Error ? error.message : 'Failed to open performance log'
+  }
 }
 
 async function exportConfig() {
@@ -343,6 +377,18 @@ async function confirmResetConfig() {
           @machine-writes-unlocked="openXrMachineWritesUnlocked = $event"
           @snapshot-updated="openXrLayerSnapshot = $event"
           @status="store.state.status = $event"
+        />
+        <PerformanceMonitoringTab
+          v-else-if="store.state.activeTab === 'performance'"
+          :config="store.state.config"
+          :applications="store.state.config.applications"
+          :sessions-snapshot="performanceSessionsSnapshot"
+          :sessions-loading="performanceSessionsLoading"
+          @add-performance-profile="store.addPerformanceProfile"
+          @remove-performance-profile="store.removePerformanceProfile"
+          @sync-performance-profile-name="store.syncPerformanceProfileName"
+          @refresh-sessions="refreshPerformanceSessions"
+          @open-log-directory="openPerformanceLogDirectory"
         />
         <AboutTab
           v-else-if="store.state.activeTab === 'about'"

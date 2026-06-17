@@ -1,8 +1,9 @@
 # Performance Monitoring Design Notes
 
 Status: MVP infrastructure started. This document captures the shared design
-direction for a profile-scoped VectorXR performance monitor and how it can feed
-dynamic Quadviews without making Quadviews own the telemetry system.
+direction for a profile-scoped VectorXR performance monitor and how recorded
+session insights can inform Quadviews tuning without making Quadviews own the
+telemetry system.
 
 ## MVP Implementation Status
 
@@ -24,7 +25,7 @@ Still pending:
 - persisted session history
 - charting and notable-event history
 - background worker publication path
-- Quadviews dynamic consumer integration
+- Quadviews tuning workflow integration
 
 ## Goals
 
@@ -32,9 +33,9 @@ Still pending:
   collection for that game.
 - Make frame pacing, target frame time, and notable performance events visible
   in the UI.
-- Provide a low-overhead pressure signal that other enhancements can consume.
-- Let Quadviews dynamic mode adapt from the shared monitor rather than carrying
-  private timing logic.
+- Provide low-overhead session data that future tuning workflows can analyze.
+- Let Quadviews tuning and future dynamic modes derive from the shared monitor
+  rather than carrying private timing logic.
 - Keep monitoring, aggregation, charting, and logging off the frame hot path.
 
 ## Non-Goals
@@ -59,8 +60,6 @@ Suggested profile fields:
 - `collectionMode`: `summary` by default, with an optional short-lived
   `diagnostic` mode for denser capture.
 - `retention`: controls how many sessions or days of data are kept.
-- `allowDynamicConsumers`: allows features such as Quadviews to consume the
-  monitor's pressure summary for this game.
 
 Unknown apps should only appear as candidates in the seen-apps workflow. The UI
 can invite the user to create a monitoring profile, but should not collect
@@ -166,7 +165,6 @@ OpenXR frame hooks
   -> background performance worker
   -> rolling per-game/session stats
   -> local session store and UI snapshot
-  -> optional pressure summary for dynamic consumers
 ```
 
 The capture path and publish path should be separated. The UI and logs consume
@@ -192,12 +190,14 @@ Comparison views should always show context such as refresh rate, runtime,
 backend, active enhancements, and Quadviews settings. Comparing a 72 Hz session
 to a 90 Hz session without that context would be misleading.
 
-## Quadviews Integration
+## Quadviews Workflow Integration
 
-Dynamic Quadviews should consume a compact pressure summary from the monitor,
-not raw frame history.
+Quadviews tuning should start as a dedicated workflow over recorded performance
+sessions, not as an implicit side effect of enabling monitoring. The monitor
+records and summarizes the game session; the Quadviews workflow can then use
+that evidence to recommend or apply profile changes.
 
-Candidate consumer signal:
+Candidate tuning inputs:
 
 ```text
 targetFrameMs
@@ -213,12 +213,13 @@ confidence
 ```
 
 This lets Quadviews avoid chasing the wrong bottleneck. If frame pressure is
-high but CPU span is also high, the dynamic controller can hold quality and
-report likely CPU limitation. If pressure is high, CPU span is low, and the
-Quadviews pixel budget is heavy, reducing pixel cost is a better-supported
-decision.
+high but CPU span is also high, the workflow can hold quality and report likely
+CPU limitation. If pressure is high, CPU span is low, and the Quadviews pixel
+budget is heavy, reducing pixel cost is a better-supported recommendation.
 
-Dynamic Quadviews should adjust slowly and log decisions from the background or
+If a future dynamic Quadviews mode applies changes automatically, it should be
+enabled and configured from the Quadviews profile or a dedicated tuning flow.
+Its decisions should be slow, explainable, and logged from the background or a
 throttled control path:
 
 - target frame time
@@ -236,8 +237,8 @@ throttled control path:
 - How much per-frame history is needed for useful charts without creating large
   files?
 - How should UI charts downsample long sessions?
-- Should dynamic consumers be allowed by the performance profile, by the
-  consuming enhancement profile, or both?
+- What should the first Quadviews tuning workflow do: recommend values, apply
+  profile edits, or run a bounded adaptive test session?
 - Can any runtime-specific APIs provide reliable reprojection or missed-frame
   stats without compromising portability?
 
@@ -252,5 +253,6 @@ throttled control path:
 4. Add profile-scoped UI controls and a local session history surface.
 5. Add event logging for active enhancement changes, refresh-rate changes, and
    Quadviews compositor health.
-6. Expose a compact pressure summary to dynamic consumers.
-7. Build Quadviews dynamic mode on top of the shared pressure summary.
+6. Add a Quadviews tuning workflow that reads recorded session summaries.
+7. Build any future dynamic Quadviews mode on top of that explicit workflow and
+   the shared performance data.

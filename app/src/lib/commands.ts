@@ -33,6 +33,43 @@ export interface LogSnapshot {
   files: LogFileEntry[]
 }
 
+export interface PerformanceSessionSummary {
+  id: string
+  applicationId: string
+  profileName: string
+  collectionMode: string
+  sourceLogPath: string
+  sourceLogName: string
+  sourceLineNumber: number
+  recordedUnixSeconds: number
+  reason: string
+  durationSeconds: number
+  targetFrameMs: number
+  targetHz: number
+  waitFrames: number
+  beginFrames: number
+  endFrames: number
+  frameSamples: number
+  frameAvgMs: number
+  frameP95Ms: number
+  frameP99Ms: number
+  frameMinMs: number
+  frameMaxMs: number
+  overBudgetFrames: number
+  overBudgetPercent: number
+  shouldRenderFalse: number
+  cpuSpanSamples: number
+  cpuSpanAvgMs: number
+  cpuSpanMinMs: number
+  cpuSpanMaxMs: number
+  rawLine: string
+}
+
+export interface PerformanceSessionsSnapshot {
+  directory: string
+  sessions: PerformanceSessionSummary[]
+}
+
 export interface SeenApplication {
   exe: string
   firstSeenUnixSeconds: number
@@ -230,6 +267,17 @@ export async function loadLogSnapshot(): Promise<LogSnapshot> {
   }
 
   return invoke<LogSnapshot>('load_log_snapshot')
+}
+
+export async function loadPerformanceSessions(): Promise<PerformanceSessionsSnapshot> {
+  if (!tauriAvailable()) {
+    return {
+      directory: './logs',
+      sessions: [],
+    }
+  }
+
+  return invoke<PerformanceSessionsSnapshot>('load_performance_sessions')
 }
 
 export async function openFileDirectory(path: string): Promise<void> {

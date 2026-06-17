@@ -2,7 +2,7 @@ export type LogLevel = 'info' | 'debug'
 export type ActivationMode = 'toggle' | 'hold'
 export type QuadViewsTrackingMode = 'head' | 'eye'
 export type PerformanceCollectionMode = 'summary' | 'diagnostic'
-export type AppTab = 'home' | 'core' | 'registry' | 'layers' | 'about' | 'depthxr' | 'pivotxr' | 'quadviews'
+export type AppTab = 'home' | 'core' | 'registry' | 'layers' | 'about' | 'performance' | 'depthxr' | 'pivotxr' | 'quadviews'
 export const keyboardBindingKeyGroups = [
   {
     label: 'Function Keys',
@@ -146,7 +146,6 @@ export interface PerformanceMonitorProfileConfig {
   applicationIds: string[]
   collectionMode: PerformanceCollectionMode
   retentionSessions: number
-  allowDynamicConsumers: boolean
 }
 
 export interface PerformanceMonitorModuleConfig {
@@ -404,7 +403,6 @@ export function createPerformanceMonitorProfile(applicationIds: string[] = []): 
     applicationIds,
     collectionMode: 'summary',
     retentionSessions: 20,
-    allowDynamicConsumers: false,
   }
 }
 
@@ -473,7 +471,6 @@ function normalizePerformanceMonitorProfile(value: unknown, applications: Regist
     applicationIds: applicationIdsFromProfile(source, applications),
     collectionMode: normalizePerformanceCollectionMode(source.collectionMode, 'summary'),
     retentionSessions: normalizeNumber(source.retentionSessions, 20),
-    allowDynamicConsumers: normalizeBoolean(source.allowDynamicConsumers, false),
   }
 }
 
@@ -734,12 +731,13 @@ export function cloneConfig(config: VectorXRConfig): VectorXRConfig {
   return JSON.parse(JSON.stringify(config)) as VectorXRConfig
 }
 
-export type ModuleId = 'depthxr' | 'pivotxr' | 'quadviews'
+export type ModuleId = 'depthxr' | 'pivotxr' | 'quadviews' | 'performance'
 
 export const moduleLabels: Record<ModuleId, string> = {
   depthxr: 'Depth',
   pivotxr: 'Pivot',
   quadviews: 'Quadviews',
+  performance: 'Performance',
 }
 
 export interface ModuleApplicationState {
@@ -750,9 +748,24 @@ export interface ModuleApplicationState {
 
 // Mirrors the layer's resolver: the first enabled profile targeting the app wins.
 export function moduleStateForApplication(config: VectorXRConfig, moduleId: ModuleId, applicationId: string): ModuleApplicationState {
-  const module = config.modules[moduleId]
+  if (moduleId === 'performance') {
+    for (const [index, profile] of config.modules.performance.profiles.entries()) {
+      if (!profile.enabled || !profile.applicationIds.includes(applicationId)) {
+        continue
+      }
 
-  const profiles: Array<DepthXRProfileConfig | PivotXRProfileConfig | QuadViewsProfileConfig> = module.profiles
+      return {
+        kind: 'custom',
+        profileName: profile.name,
+        profileIndex: index,
+      }
+    }
+
+    return { kind: 'default-off' }
+  }
+
+  const module = config.modules[moduleId]
+  const profiles: Array<DepthXRProfileConfig | PivotXRProfileConfig | QuadViewsProfileConfig | PerformanceMonitorProfileConfig> = module.profiles
   for (const [index, profile] of profiles.entries()) {
     if (!profile.enabled || !profile.applicationIds.includes(applicationId)) {
       continue

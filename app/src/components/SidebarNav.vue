@@ -21,7 +21,7 @@ defineEmits<{
   select: [tab: AppTab]
 }>()
 
-const primaryTabs = computed(() => props.tabs.filter((tab) => tab.id === 'home' || tab.id === 'core' || tab.id === 'registry' || tab.id === 'layers' || tab.id === 'about'))
+const primaryTabs = computed(() => props.tabs.filter((tab) => tab.id === 'home' || tab.id === 'core' || tab.id === 'registry' || tab.id === 'performance' || tab.id === 'layers' || tab.id === 'about'))
 const moduleTabs = computed(() => {
   const moduleOrder: AppTab[] = ['quadviews', 'pivotxr', 'depthxr']
   return moduleOrder

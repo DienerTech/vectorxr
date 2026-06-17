@@ -216,7 +216,6 @@ PerformanceMonitorResolvedSettings ResolvePerformanceMonitorSettings(const Confi
         resolved.application_id = application->id;
         resolved.collection_mode = profile.collection_mode;
         resolved.retention_sessions = profile.retention_sessions;
-        resolved.allow_dynamic_consumers = profile.allow_dynamic_consumers;
         return resolved;
     }
 
