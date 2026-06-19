@@ -93,12 +93,12 @@ const PivotXrProfile* FindMatchingPivotXrProfile(const ConfigDocument& config, s
 }
 
 void ApplyPivotSettings(PivotXrResolvedSettings& resolved, const PivotXrSettings& settings) {
+    resolved.smoothing = settings.smoothing;
+    resolved.activation_ramp_seconds = settings.activation_ramp_seconds;
     resolved.yaw_rotation_multiplier = settings.yaw_rotation_multiplier;
-    resolved.yaw_smoothing = settings.yaw_smoothing;
     resolved.yaw_deadzone_degrees = settings.yaw_deadzone_degrees;
     resolved.yaw_max_extra_degrees = settings.yaw_max_extra_degrees;
     resolved.pitch_rotation_multiplier = settings.pitch_rotation_multiplier;
-    resolved.pitch_smoothing = settings.pitch_smoothing;
     resolved.pitch_deadzone_degrees = settings.pitch_deadzone_degrees;
     resolved.pitch_max_extra_degrees = settings.pitch_max_extra_degrees;
 }

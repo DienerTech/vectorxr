@@ -744,10 +744,10 @@ bool IsQuadViewConfiguration(XrViewConfigurationType type) {
     return type == XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO_WITH_FOVEATED_INSET;
 }
 
-// Duration over which the pivot effect eases in/out when activation toggles.
-// Decouples the on/off feel from the per-frame tracking smoothing so enabling
-// pivot while the head is already turned never snaps the view.
-constexpr double kPivotActivationRampSeconds = 0.35;
+// Pivot activation envelope easing duration is per-profile
+// (PivotXrResolvedSettings::activation_ramp_seconds, default 0.35s). It decouples
+// the on/off feel from the per-frame tracking smoothing so enabling pivot while
+// the head is already turned never snaps the view.
 constexpr double kPivotActivationGainEpsilon = 0.0001;
 constexpr XrTime kMaxPivotPoseDeltaMatchWindow = 5'000'000;
 constexpr XrTime kMaxQuadViewsFovMatchWindow = 5'000'000;
@@ -783,12 +783,12 @@ bool SameSettings(const ResolvedRuntimeConfig& lhs, const ResolvedRuntimeConfig&
            lhs.pivotxr.activation_binding.product_guid == rhs.pivotxr.activation_binding.product_guid &&
            lhs.pivotxr.activation_binding.device_name == rhs.pivotxr.activation_binding.device_name &&
            lhs.pivotxr.activation_binding.input_label == rhs.pivotxr.activation_binding.input_label &&
+           NearlyEqual(lhs.pivotxr.smoothing, rhs.pivotxr.smoothing) &&
+           NearlyEqual(lhs.pivotxr.activation_ramp_seconds, rhs.pivotxr.activation_ramp_seconds) &&
            NearlyEqual(lhs.pivotxr.yaw_rotation_multiplier, rhs.pivotxr.yaw_rotation_multiplier) &&
-           NearlyEqual(lhs.pivotxr.yaw_smoothing, rhs.pivotxr.yaw_smoothing) &&
            NearlyEqual(lhs.pivotxr.yaw_deadzone_degrees, rhs.pivotxr.yaw_deadzone_degrees) &&
            NearlyEqual(lhs.pivotxr.yaw_max_extra_degrees, rhs.pivotxr.yaw_max_extra_degrees) &&
            NearlyEqual(lhs.pivotxr.pitch_rotation_multiplier, rhs.pivotxr.pitch_rotation_multiplier) &&
-           NearlyEqual(lhs.pivotxr.pitch_smoothing, rhs.pivotxr.pitch_smoothing) &&
            NearlyEqual(lhs.pivotxr.pitch_deadzone_degrees, rhs.pivotxr.pitch_deadzone_degrees) &&
            NearlyEqual(lhs.pivotxr.pitch_max_extra_degrees, rhs.pivotxr.pitch_max_extra_degrees) &&
            lhs.quadviews.enabled == rhs.quadviews.enabled &&
@@ -3963,8 +3963,11 @@ XrResult OpenXrLayer::LocateSpaceWithPivot(XrSpace space,
         pivotxr_last_smoothing_wall_time_ = now;
 
         const double target_gain = pivotxr_active ? 1.0 : 0.0;
-        if (delta_seconds > 0.0 && kPivotActivationRampSeconds > 0.0) {
-            const double step = delta_seconds / kPivotActivationRampSeconds;
+        const double ramp_seconds = settings.activation_ramp_seconds;
+        if (ramp_seconds <= 0.0) {
+            pivotxr_activation_gain_ = target_gain;
+        } else if (delta_seconds > 0.0) {
+            const double step = delta_seconds / ramp_seconds;
             if (target_gain > pivotxr_activation_gain_) {
                 pivotxr_activation_gain_ = std::min(target_gain, pivotxr_activation_gain_ + step);
             } else {
@@ -4013,14 +4016,14 @@ XrResult OpenXrLayer::LocateSpaceWithPivot(XrSpace space,
                                       settings.yaw_rotation_multiplier,
                                       settings.yaw_deadzone_degrees,
                                       settings.yaw_max_extra_degrees,
-                                      settings.yaw_smoothing,
+                                      settings.smoothing,
                                       delta_seconds,
                                       pivotxr_smoothed_extra_yaw_radians_);
         ComputePivotExtraAngleRadians(current_pitch_radians,
                                       settings.pitch_rotation_multiplier,
                                       settings.pitch_deadzone_degrees,
                                       settings.pitch_max_extra_degrees,
-                                      settings.pitch_smoothing,
+                                      settings.smoothing,
                                       delta_seconds,
                                       pivotxr_smoothed_extra_pitch_radians_);
     }
@@ -4061,12 +4064,12 @@ void OpenXrLayer::LogResolvedSettings(const ResolvedRuntimeConfig& settings) {
            << ", pivotxrEnabled=" << settings.pivotxr.enabled
            << ", pivotActivation=" << ToString(settings.pivotxr.activation_mode)
            << ", pivotActivationBinding=" << BindingLabel(settings.pivotxr.activation_binding)
+           << ", pivotSmoothing=" << settings.pivotxr.smoothing
+           << ", pivotActivationRamp=" << settings.pivotxr.activation_ramp_seconds
            << ", pivotYawMultiplier=" << settings.pivotxr.yaw_rotation_multiplier
-           << ", pivotYawSmoothing=" << settings.pivotxr.yaw_smoothing
            << ", pivotYawDeadzone=" << settings.pivotxr.yaw_deadzone_degrees
            << ", pivotYawMaxExtra=" << settings.pivotxr.yaw_max_extra_degrees
            << ", pivotPitchMultiplier=" << settings.pivotxr.pitch_rotation_multiplier
-           << ", pivotPitchSmoothing=" << settings.pivotxr.pitch_smoothing
            << ", pivotPitchDeadzone=" << settings.pivotxr.pitch_deadzone_degrees
            << ", pivotPitchMaxExtra=" << settings.pivotxr.pitch_max_extra_degrees
            << ", quadviewsEnabled=" << settings.quadviews.enabled

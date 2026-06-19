@@ -918,45 +918,51 @@ bool ParseDepthModule(const JsonValue::Object& object,
 
 bool ParsePivotSettings(const JsonValue::Object& object, PivotXrSettings& out, std::string& error) {
     static const std::unordered_set<std::string> allowed = {
-        "rotationMultiplier",
         "smoothing",
+        "activationRampSeconds",
+        "rotationMultiplier",
         "deadzoneDegrees",
         "maxExtraYawDegrees",
         "pitchRotationMultiplier",
-        "pitchSmoothing",
         "pitchDeadzoneDegrees",
         "maxExtraPitchDegrees",
+        // Legacy: per-axis smoothing collapsed into a single "smoothing".
+        // Accepted but ignored so older configs still load.
+        "pitchSmoothing",
     };
 
     if (!CheckAllowedKeys(object, allowed, error)) {
         return false;
     }
 
-    std::optional<double> rotation_multiplier;
     std::optional<double> smoothing;
+    std::optional<double> activation_ramp_seconds;
+    std::optional<double> rotation_multiplier;
     std::optional<double> deadzone_degrees;
     std::optional<double> max_extra_yaw_degrees;
     std::optional<double> pitch_rotation_multiplier;
-    std::optional<double> pitch_smoothing;
     std::optional<double> pitch_deadzone_degrees;
     std::optional<double> max_extra_pitch_degrees;
 
-    if (!ReadOptionalNumber(object, "rotationMultiplier", rotation_multiplier, error) ||
-        !ReadOptionalNumber(object, "smoothing", smoothing, error) ||
+    if (!ReadOptionalNumber(object, "smoothing", smoothing, error) ||
+        !ReadOptionalNumber(object, "activationRampSeconds", activation_ramp_seconds, error) ||
+        !ReadOptionalNumber(object, "rotationMultiplier", rotation_multiplier, error) ||
         !ReadOptionalNumber(object, "deadzoneDegrees", deadzone_degrees, error) ||
         !ReadOptionalNumber(object, "maxExtraYawDegrees", max_extra_yaw_degrees, error) ||
         !ReadOptionalNumber(object, "pitchRotationMultiplier", pitch_rotation_multiplier, error) ||
-        !ReadOptionalNumber(object, "pitchSmoothing", pitch_smoothing, error) ||
         !ReadOptionalNumber(object, "pitchDeadzoneDegrees", pitch_deadzone_degrees, error) ||
         !ReadOptionalNumber(object, "maxExtraPitchDegrees", max_extra_pitch_degrees, error)) {
         return false;
     }
 
+    if (smoothing.has_value()) {
+        out.smoothing = *smoothing;
+    }
+    if (activation_ramp_seconds.has_value()) {
+        out.activation_ramp_seconds = *activation_ramp_seconds;
+    }
     if (rotation_multiplier.has_value()) {
         out.yaw_rotation_multiplier = *rotation_multiplier;
-    }
-    if (smoothing.has_value()) {
-        out.yaw_smoothing = *smoothing;
     }
     if (deadzone_degrees.has_value()) {
         out.yaw_deadzone_degrees = *deadzone_degrees;
@@ -966,9 +972,6 @@ bool ParsePivotSettings(const JsonValue::Object& object, PivotXrSettings& out, s
     }
     if (pitch_rotation_multiplier.has_value()) {
         out.pitch_rotation_multiplier = *pitch_rotation_multiplier;
-    }
-    if (pitch_smoothing.has_value()) {
-        out.pitch_smoothing = *pitch_smoothing;
     }
     if (pitch_deadzone_degrees.has_value()) {
         out.pitch_deadzone_degrees = *pitch_deadzone_degrees;

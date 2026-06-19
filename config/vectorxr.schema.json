@@ -273,25 +273,30 @@
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "rotationMultiplier",
         "smoothing",
+        "activationRampSeconds",
+        "rotationMultiplier",
         "deadzoneDegrees",
         "maxExtraYawDegrees",
         "pitchRotationMultiplier",
-        "pitchSmoothing",
         "pitchDeadzoneDegrees",
         "maxExtraPitchDegrees"
       ],
       "properties": {
-        "rotationMultiplier": {
-          "type": "number",
-          "minimum": 1.0,
-          "maximum": 3.0
-        },
         "smoothing": {
           "type": "number",
           "minimum": 0.0,
           "maximum": 1.0
+        },
+        "activationRampSeconds": {
+          "type": "number",
+          "minimum": 0.0,
+          "maximum": 2.0
+        },
+        "rotationMultiplier": {
+          "type": "number",
+          "minimum": 1.0,
+          "maximum": 3.0
         },
         "deadzoneDegrees": {
           "type": "number",
@@ -307,11 +312,6 @@
           "type": "number",
           "minimum": 1.0,
           "maximum": 3.0
-        },
-        "pitchSmoothing": {
-          "type": "number",
-          "minimum": 0.0,
-          "maximum": 1.0
         },
         "pitchDeadzoneDegrees": {
           "type": "number",

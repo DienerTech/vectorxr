@@ -87,6 +87,10 @@ function validatePivotXRSettings(prefix: string, settings: PivotXRSettings): str
     errors.push(`${prefix}smoothing must be between 0 and 1`)
   }
 
+  if (Number.isNaN(settings.activationRampSeconds) || settings.activationRampSeconds < 0 || settings.activationRampSeconds > 2) {
+    errors.push(`${prefix}activationRampSeconds must be between 0 and 2`)
+  }
+
   if (Number.isNaN(settings.deadzoneDegrees) || settings.deadzoneDegrees < 0 || settings.deadzoneDegrees > 45) {
     errors.push(`${prefix}deadzoneDegrees must be between 0 and 45`)
   }
@@ -97,10 +101,6 @@ function validatePivotXRSettings(prefix: string, settings: PivotXRSettings): str
 
   if (Number.isNaN(settings.pitchRotationMultiplier) || settings.pitchRotationMultiplier < 1.0 || settings.pitchRotationMultiplier > 3.0) {
     errors.push(`${prefix}pitchRotationMultiplier must be between 1.0 and 3.0`)
-  }
-
-  if (Number.isNaN(settings.pitchSmoothing) || settings.pitchSmoothing < 0 || settings.pitchSmoothing > 1) {
-    errors.push(`${prefix}pitchSmoothing must be between 0 and 1`)
   }
 
   if (Number.isNaN(settings.pitchDeadzoneDegrees) || settings.pitchDeadzoneDegrees < 0 || settings.pitchDeadzoneDegrees > 45) {

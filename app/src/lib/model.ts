@@ -83,12 +83,12 @@ export interface DepthXRModuleConfig {
 }
 
 export interface PivotXRSettings {
-  rotationMultiplier: number
   smoothing: number
+  activationRampSeconds: number
+  rotationMultiplier: number
   deadzoneDegrees: number
   maxExtraYawDegrees: number
   pitchRotationMultiplier: number
-  pitchSmoothing: number
   pitchDeadzoneDegrees: number
   maxExtraPitchDegrees: number
 }
@@ -247,12 +247,12 @@ export function createApplication(exe = 'Game.exe', applications: RegisteredAppl
 
 export function defaultPivotXRSettings(): PivotXRSettings {
   return {
-    rotationMultiplier: 1.5,
     smoothing: 0.2,
+    activationRampSeconds: 0.35,
+    rotationMultiplier: 1.5,
     deadzoneDegrees: 8,
     maxExtraYawDegrees: 25,
     pitchRotationMultiplier: 1.0,
-    pitchSmoothing: 0.2,
     pitchDeadzoneDegrees: 12,
     maxExtraPitchDegrees: 20,
   }
@@ -392,12 +392,12 @@ function normalizePivotXRSettings(value: unknown, fallback: PivotXRSettings): Pi
   const source = isRecord(value) ? value : {}
 
   return {
-    rotationMultiplier: normalizeNumber(source.rotationMultiplier, fallback.rotationMultiplier),
     smoothing: normalizeNumber(source.smoothing, fallback.smoothing),
+    activationRampSeconds: normalizeNumber(source.activationRampSeconds, fallback.activationRampSeconds),
+    rotationMultiplier: normalizeNumber(source.rotationMultiplier, fallback.rotationMultiplier),
     deadzoneDegrees: normalizeNumber(source.deadzoneDegrees, fallback.deadzoneDegrees),
     maxExtraYawDegrees: normalizeNumber(source.maxExtraYawDegrees, fallback.maxExtraYawDegrees),
     pitchRotationMultiplier: normalizeNumber(source.pitchRotationMultiplier, fallback.pitchRotationMultiplier),
-    pitchSmoothing: normalizeNumber(source.pitchSmoothing, fallback.pitchSmoothing),
     pitchDeadzoneDegrees: normalizeNumber(source.pitchDeadzoneDegrees, fallback.pitchDeadzoneDegrees),
     maxExtraPitchDegrees: normalizeNumber(source.maxExtraPitchDegrees, fallback.maxExtraPitchDegrees),
   }
