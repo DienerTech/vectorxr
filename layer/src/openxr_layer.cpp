@@ -2499,6 +2499,41 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
                            !NearlyZero(pose_delta.position.x) || !NearlyZero(pose_delta.position.y) ||
                            !NearlyZero(pose_delta.position.z));
 
+    // Log what the app actually submitted (independent of the pivot/quadviews
+    // branch below) so we can confirm whether DepthXR's xrLocateViews per-eye
+    // pose/FOV survives into the composition layer the runtime presents, or
+    // whether the app re-derives its own. Does not consume the counter; the
+    // branch diagnostics below own the decrement.
+    if (pending_end_frame_diagnostics_ > 0) {
+        for (uint32_t i = 0; i < frame_end_info->layerCount; ++i) {
+            const XrCompositionLayerBaseHeader* base_header = frame_end_info->layers[i];
+            if (!base_header || base_header->type != XR_TYPE_COMPOSITION_LAYER_PROJECTION) {
+                continue;
+            }
+            const auto* projection_layer =
+                reinterpret_cast<const XrCompositionLayerProjection*>(base_header);
+            if (!projection_layer->views || projection_layer->viewCount == 0) {
+                continue;
+            }
+            std::ostringstream stream;
+            stream << "EndFrame submitted projection: frameTime=" << frame_end_info->displayTime
+                   << ", layer=" << i << ", viewCount=" << projection_layer->viewCount;
+            const uint32_t logged = std::min<uint32_t>(projection_layer->viewCount, 4);
+            for (uint32_t v = 0; v < logged; ++v) {
+                const XrCompositionLayerProjectionView& view = projection_layer->views[v];
+                stream << " view" << v << "Pos=(" << FormatDiagnosticDouble(view.pose.position.x) << ", "
+                       << FormatDiagnosticDouble(view.pose.position.y) << ", "
+                       << FormatDiagnosticDouble(view.pose.position.z) << ")"
+                       << " view" << v << "Fov=(" << FormatDiagnosticDouble(view.fov.angleLeft) << ", "
+                       << FormatDiagnosticDouble(view.fov.angleRight) << ", "
+                       << FormatDiagnosticDouble(view.fov.angleUp) << ", "
+                       << FormatDiagnosticDouble(view.fov.angleDown) << ")";
+            }
+            logger_.Debug(stream.str());
+            break;
+        }
+    }
+
     if (!has_non_identity_delta && !quadviews_projection_split_active) {
         if (pending_end_frame_diagnostics_ > 0) {
             std::ostringstream stream;
@@ -4163,18 +4198,25 @@ bool OpenXrLayer::IsDepthXrActive() {
     // Input polls can hit DirectInput device reads; throttle them so per-call
     // OpenXR interception stays cheap.
     const auto now = std::chrono::steady_clock::now();
-    if (!depthxr_binding_last_poll_time_.has_value() ||
-        now - *depthxr_binding_last_poll_time_ >= kInputBindingPollInterval) {
+    // First poll after a reset (session start, or the binding being (re)assigned)
+    // primes the edge detector: a button still held from the bind gesture must
+    // not register as a press, or it would flip depth off its enabled default.
+    const bool first_poll = !depthxr_binding_last_poll_time_.has_value();
+    if (first_poll || now - *depthxr_binding_last_poll_time_ >= kInputBindingPollInterval) {
         depthxr_binding_last_poll_time_ = now;
         depthxr_binding_down_cached_ = IsInputBindingDown(resolved_settings_.depthxr_bindings.toggle_enabled);
     }
     const bool binding_down = depthxr_binding_down_cached_;
+    if (first_poll) {
+        depthxr_toggle_binding_was_down_ = binding_down;
+    }
     const bool was_pressed_this_call = binding_down && !depthxr_toggle_binding_was_down_;
     depthxr_toggle_binding_was_down_ = binding_down;
 
     if (was_pressed_this_call) {
         depthxr_toggle_enabled_ = !depthxr_toggle_enabled_;
         pending_locate_views_diagnostics_ = 5;
+        pending_end_frame_diagnostics_ = 5;
         logger_.Info(std::string("Depth effects ") +
                      (depthxr_toggle_enabled_ ? "enabled" : "disabled") + " via " +
                      BindingLabel(resolved_settings_.depthxr_bindings.toggle_enabled) + ".");
@@ -4194,12 +4236,17 @@ bool OpenXrLayer::IsPivotXrActive(const PivotXrResolvedSettings& settings) {
 
 #if defined(_WIN32)
     const auto now = std::chrono::steady_clock::now();
-    if (!pivotxr_binding_last_poll_time_.has_value() ||
-        now - *pivotxr_binding_last_poll_time_ >= kInputBindingPollInterval) {
+    // Prime the edge detector on the first poll after a reset so a button held
+    // from the bind gesture does not register as a spurious activation press.
+    const bool first_poll = !pivotxr_binding_last_poll_time_.has_value();
+    if (first_poll || now - *pivotxr_binding_last_poll_time_ >= kInputBindingPollInterval) {
         pivotxr_binding_last_poll_time_ = now;
         pivotxr_binding_down_cached_ = IsInputBindingDown(settings.activation_binding);
     }
     const bool binding_down = pivotxr_binding_down_cached_;
+    if (first_poll) {
+        pivotxr_activation_key_was_down_ = binding_down;
+    }
     const bool was_pressed_this_call = binding_down && !pivotxr_activation_key_was_down_;
     pivotxr_activation_key_was_down_ = binding_down;
 
