@@ -765,8 +765,6 @@ bool SameSettings(const ResolvedRuntimeConfig& lhs, const ResolvedRuntimeConfig&
            lhs.core.log_retention_files == rhs.core.log_retention_files &&
            lhs.core.track_seen_apps == rhs.core.track_seen_apps &&
            lhs.depthxr.enabled == rhs.depthxr.enabled &&
-           lhs.depthxr.stereo_boost_enabled == rhs.depthxr.stereo_boost_enabled &&
-           lhs.depthxr.convergence_enabled == rhs.depthxr.convergence_enabled &&
            NearlyEqual(lhs.depthxr.stereo_boost, rhs.depthxr.stereo_boost) &&
            NearlyEqual(lhs.depthxr.convergence, rhs.depthxr.convergence) &&
            lhs.depthxr_bindings.toggle_enabled.type == rhs.depthxr_bindings.toggle_enabled.type &&
@@ -2902,14 +2900,10 @@ XrResult OpenXrLayer::LocateViews(XrSession session,
         pivotxr_last_smoothing_wall_time_.reset();
     }
 
-    if (depthxr_active &&
-        resolved_settings_.depthxr.stereo_boost_enabled &&
-        !NearlyEqual(resolved_settings_.depthxr.stereo_boost, 1.0)) {
+    if (depthxr_active && !NearlyEqual(resolved_settings_.depthxr.stereo_boost, 1.0)) {
         ApplyStereoBoost(adjusted_views, resolved_settings_.depthxr.stereo_boost, view_layout);
     }
-    if (depthxr_active &&
-        resolved_settings_.depthxr.convergence_enabled &&
-        !NearlyEqual(resolved_settings_.depthxr.convergence, 0.0)) {
+    if (depthxr_active && !NearlyEqual(resolved_settings_.depthxr.convergence, 0.0)) {
         ApplyConvergence(adjusted_views, resolved_settings_.depthxr.convergence, view_layout);
     }
 
@@ -2974,9 +2968,7 @@ XrResult OpenXrLayer::LocateViews(XrSession session,
                << ", leftPitchDelta=" << FormatDiagnosticDouble(left_pitch_delta)
                << ", rightPitchDelta=" << FormatDiagnosticDouble(right_pitch_delta)
                << ", depthRuntimeActive=" << depthxr_active
-               << ", stereoBoostEnabled=" << resolved_settings_.depthxr.stereo_boost_enabled
                << ", stereoBoost=" << FormatDiagnosticDouble(resolved_settings_.depthxr.stereo_boost)
-               << ", convergenceEnabled=" << resolved_settings_.depthxr.convergence_enabled
                << ", convergence=" << FormatDiagnosticDouble(resolved_settings_.depthxr.convergence)
                << ", leftXDelta=" << FormatDiagnosticDouble(left_position_delta)
                << ", rightXDelta=" << FormatDiagnosticDouble(right_position_delta)
@@ -4064,9 +4056,7 @@ void OpenXrLayer::LogResolvedSettings(const ResolvedRuntimeConfig& settings) {
            << ", logLevel=" << ToString(settings.core.log_level)
            << ", depthxrEnabled=" << settings.depthxr.enabled
            << ", depthToggleBinding=" << BindingLabel(settings.depthxr_bindings.toggle_enabled)
-           << ", stereoBoostEnabled=" << settings.depthxr.stereo_boost_enabled
            << ", stereoBoost=" << settings.depthxr.stereo_boost
-           << ", convergenceEnabled=" << settings.depthxr.convergence_enabled
            << ", convergence=" << settings.depthxr.convergence
            << ", pivotxrEnabled=" << settings.pivotxr.enabled
            << ", pivotActivation=" << ToString(settings.pivotxr.activation_mode)

@@ -20,8 +20,6 @@
     "depthxr": {
       "enabled": true,
       "defaults": {
-        "stereoBoostEnabled": true,
-        "convergenceEnabled": true,
         "stereoBoost": 1.1,
         "convergence": 0.0
       },
@@ -38,8 +36,6 @@
             "dcs"
           ],
           "settings": {
-            "stereoBoostEnabled": true,
-            "convergenceEnabled": true,
             "stereoBoost": 1.12,
             "convergence": 0.06
           }

@@ -8,17 +8,18 @@ export function fromStereoBoostDisplay(value: number): number {
 
 export function stereoBoostBadge(value: number): string {
   const display = toStereoBoostDisplay(value)
-  return `SB ${display >= 0 ? '+' : ''}${display.toFixed(1)}`
+  return `IPD ${display >= 0 ? '+' : ''}${display.toFixed(1)}%`
 }
 
 export function toConvergenceDisplay(value: number): number {
-  return Number((value * 1000).toFixed(1))
+  return Number((value * 100).toFixed(1))
 }
 
 export function fromConvergenceDisplay(value: number): number {
-  return Number((value / 1000).toFixed(4))
+  return Number((value / 100).toFixed(4))
 }
 
 export function convergenceBadge(value: number): string {
-  return `Scale ${toConvergenceDisplay(value).toFixed(1)}`
+  const display = toConvergenceDisplay(value)
+  return `Conv ${display >= 0 ? '+' : ''}${display.toFixed(1)}`
 }

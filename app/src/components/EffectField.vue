@@ -4,7 +4,6 @@ import { computed } from 'vue'
 const props = defineProps<{
   title: string
   subtitle: string
-  enabled: boolean
   value: number
   min: number
   max: number
@@ -19,7 +18,6 @@ const props = defineProps<{
 }>()
 
 defineEmits<{
-  'update:enabled': [value: boolean]
   'update:value': [value: number]
 }>()
 
@@ -51,27 +49,29 @@ function fromDisplay(value: number): number {
         </div>
         <p class="mt-1 text-[13px] leading-5 text-muted">{{ subtitle }}</p>
       </div>
-      <label class="pill-toggle inline-flex shrink-0 items-center gap-2 rounded-full px-3 py-1.5 text-xs font-medium">
-        <input
-          :checked="enabled"
-          class="h-4 w-4 accent-depthxr-copper"
-          type="checkbox"
-          @change="$emit('update:enabled', ($event.target as HTMLInputElement).checked)"
-        />
-        Enabled
-      </label>
     </div>
 
-    <div class="max-w-[9rem]">
+    <div class="flex items-center gap-3">
       <input
         :value="toDisplay(value)"
         :min="numberMin"
         :max="numberMax"
         :step="numberStep"
-        class="app-input w-full rounded-[0.75rem] px-3 py-2 text-right text-sm"
-        type="number"
+        class="h-2 flex-1 cursor-pointer accent-depthxr-copper"
+        type="range"
         @input="$emit('update:value', fromDisplay(Number(($event.target as HTMLInputElement).value)))"
       />
+      <div class="w-[5.5rem] shrink-0">
+        <input
+          :value="toDisplay(value)"
+          :min="numberMin"
+          :max="numberMax"
+          :step="numberStep"
+          class="app-input w-full rounded-[0.75rem] px-3 py-2 text-right text-sm"
+          type="number"
+          @input="$emit('update:value', fromDisplay(Number(($event.target as HTMLInputElement).value)))"
+        />
+      </div>
     </div>
   </div>
 </template>

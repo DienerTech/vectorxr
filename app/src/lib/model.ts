@@ -60,8 +60,6 @@ export interface RegisteredApplication {
 }
 
 export interface DepthXRSettings {
-  stereoBoostEnabled: boolean
-  convergenceEnabled: boolean
   stereoBoost: number
   convergence: number
 }
@@ -196,9 +194,7 @@ export function defaultCoreConfig(): CoreConfig {
 
 export function defaultDepthXRSettings(): DepthXRSettings {
   return {
-    stereoBoostEnabled: true,
-    convergenceEnabled: true,
-    stereoBoost: 1.1,
+    stereoBoost: 1.0,
     convergence: 0,
   }
 }
@@ -387,8 +383,6 @@ function normalizeDepthXRSettings(value: unknown, fallback: DepthXRSettings): De
   const source = isRecord(value) ? value : {}
 
   return {
-    stereoBoostEnabled: normalizeBoolean(source.stereoBoostEnabled, fallback.stereoBoostEnabled),
-    convergenceEnabled: normalizeBoolean(source.convergenceEnabled, fallback.convergenceEnabled),
     stereoBoost: normalizeNumber(source.stereoBoost, fallback.stereoBoost),
     convergence: normalizeNumber(source.convergence, fallback.convergence),
   }

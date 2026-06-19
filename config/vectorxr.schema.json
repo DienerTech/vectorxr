@@ -184,27 +184,19 @@
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "stereoBoostEnabled",
-        "convergenceEnabled",
         "stereoBoost",
         "convergence"
       ],
       "properties": {
-        "stereoBoostEnabled": {
-          "type": "boolean"
-        },
-        "convergenceEnabled": {
-          "type": "boolean"
-        },
         "stereoBoost": {
           "type": "number",
-          "minimum": 0.5,
+          "minimum": 0.0,
           "maximum": 2.0
         },
         "convergence": {
           "type": "number",
-          "minimum": -0.5,
-          "maximum": 0.5
+          "minimum": -0.25,
+          "maximum": 0.25
         }
       }
     },

@@ -741,6 +741,9 @@ bool ParseApplication(const JsonValue& value, RegisteredApplication& out, std::s
 
 bool ParseDepthDefaults(const JsonValue::Object& object, DepthXrResolvedSettings& out, std::string& error) {
     static const std::unordered_set<std::string> allowed = {
+        // stereoBoostEnabled/convergenceEnabled are legacy: accepted (so older
+        // configs still load) but no longer have any effect. Neutral values
+        // (stereoBoost 1.0 / convergence 0.0) mean "off".
         "stereoBoostEnabled",
         "convergenceEnabled",
         "stereoBoost",
@@ -751,24 +754,14 @@ bool ParseDepthDefaults(const JsonValue::Object& object, DepthXrResolvedSettings
         return false;
     }
 
-    std::optional<bool> stereo_boost_enabled;
-    std::optional<bool> convergence_enabled;
     std::optional<double> stereo_boost;
     std::optional<double> convergence;
 
-    if (!ReadOptionalBool(object, "stereoBoostEnabled", stereo_boost_enabled, error) ||
-        !ReadOptionalBool(object, "convergenceEnabled", convergence_enabled, error) ||
-        !ReadOptionalNumber(object, "stereoBoost", stereo_boost, error) ||
+    if (!ReadOptionalNumber(object, "stereoBoost", stereo_boost, error) ||
         !ReadOptionalNumber(object, "convergence", convergence, error)) {
         return false;
     }
 
-    if (stereo_boost_enabled.has_value()) {
-        out.stereo_boost_enabled = *stereo_boost_enabled;
-    }
-    if (convergence_enabled.has_value()) {
-        out.convergence_enabled = *convergence_enabled;
-    }
     if (stereo_boost.has_value()) {
         out.stereo_boost = *stereo_boost;
     }
@@ -799,6 +792,7 @@ bool ParseDepthBindings(const JsonValue::Object& object, DepthXrBindings& out, s
 
 bool ParseDepthProfileSettings(const JsonValue::Object& object, DepthXrSettingsOverride& out, std::string& error) {
     static const std::unordered_set<std::string> allowed = {
+        // Legacy keys accepted but ignored (see ParseDepthDefaults).
         "stereoBoostEnabled",
         "convergenceEnabled",
         "stereoBoost",
@@ -809,9 +803,7 @@ bool ParseDepthProfileSettings(const JsonValue::Object& object, DepthXrSettingsO
         return false;
     }
 
-    return ReadOptionalBool(object, "stereoBoostEnabled", out.stereo_boost_enabled, error) &&
-           ReadOptionalBool(object, "convergenceEnabled", out.convergence_enabled, error) &&
-           ReadOptionalNumber(object, "stereoBoost", out.stereo_boost, error) &&
+    return ReadOptionalNumber(object, "stereoBoost", out.stereo_boost, error) &&
            ReadOptionalNumber(object, "convergence", out.convergence, error);
 }
 

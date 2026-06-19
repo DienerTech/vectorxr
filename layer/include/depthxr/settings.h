@@ -54,16 +54,14 @@ struct CoreSettings {
 };
 
 struct DepthXrSettingsOverride {
-    std::optional<bool> stereo_boost_enabled;
-    std::optional<bool> convergence_enabled;
     std::optional<double> stereo_boost;
     std::optional<double> convergence;
 };
 
 struct DepthXrResolvedSettings {
     bool enabled{true};
-    bool stereo_boost_enabled{true};
-    bool convergence_enabled{true};
+    // Neutral values (stereo_boost 1.0, convergence 0.0) mean "no effect"; there
+    // is no separate per-effect enable flag.
     double stereo_boost{1.0};
     double convergence{0.0};
 };

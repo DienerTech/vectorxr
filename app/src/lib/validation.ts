@@ -19,8 +19,8 @@ function validateDepthXRSettings(prefix: string, settings: DepthXRSettings): str
   const errors: string[] = []
 
   const bounded = [
-    ['stereoBoost', settings.stereoBoost, 0.5, 2.0],
-    ['convergence', settings.convergence, -0.5, 0.5],
+    ['stereoBoost', settings.stereoBoost, 0.0, 2.0],
+    ['convergence', settings.convergence, -0.25, 0.25],
   ] as const
 
   for (const [name, value, min, max] of bounded) {

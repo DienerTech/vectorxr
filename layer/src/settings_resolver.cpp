@@ -19,12 +19,6 @@ std::string NormalizeExe(std::string_view value) {
 }
 
 void ApplyDepthOverride(DepthXrResolvedSettings& target, const DepthXrSettingsOverride& source) {
-    if (source.stereo_boost_enabled.has_value()) {
-        target.stereo_boost_enabled = *source.stereo_boost_enabled;
-    }
-    if (source.convergence_enabled.has_value()) {
-        target.convergence_enabled = *source.convergence_enabled;
-    }
     if (source.stereo_boost.has_value()) {
         target.stereo_boost = *source.stereo_boost;
     }

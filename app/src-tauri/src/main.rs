@@ -23,7 +23,7 @@ fn default_version() -> u32 {
 }
 
 fn default_stereo_boost() -> f64 {
-    1.10
+    1.0
 }
 
 fn default_convergence() -> f64 {
@@ -193,10 +193,6 @@ impl Default for CoreConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct DepthXRSettings {
-    #[serde(default = "default_true")]
-    stereo_boost_enabled: bool,
-    #[serde(default = "default_true")]
-    convergence_enabled: bool,
     #[serde(default = "default_stereo_boost")]
     stereo_boost: f64,
     #[serde(default = "default_convergence")]
@@ -206,8 +202,6 @@ struct DepthXRSettings {
 impl Default for DepthXRSettings {
     fn default() -> Self {
         Self {
-            stereo_boost_enabled: true,
-            convergence_enabled: true,
             stereo_boost: default_stereo_boost(),
             convergence: default_convergence(),
         }
