@@ -36,6 +36,11 @@ double Clamp(double value, double min_value, double max_value) {
     return std::max(min_value, std::min(max_value, value));
 }
 
+double SmoothStep(double t) {
+    const double clamped = Clamp(t, 0.0, 1.0);
+    return clamped * clamped * (3.0 - 2.0 * clamped);
+}
+
 double DegreesToRadians(double degrees) {
     return degrees * 3.14159265358979323846 / 180.0;
 }
@@ -739,6 +744,11 @@ bool IsQuadViewConfiguration(XrViewConfigurationType type) {
     return type == XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO_WITH_FOVEATED_INSET;
 }
 
+// Duration over which the pivot effect eases in/out when activation toggles.
+// Decouples the on/off feel from the per-frame tracking smoothing so enabling
+// pivot while the head is already turned never snaps the view.
+constexpr double kPivotActivationRampSeconds = 0.35;
+constexpr double kPivotActivationGainEpsilon = 0.0001;
 constexpr XrTime kMaxPivotPoseDeltaMatchWindow = 5'000'000;
 constexpr XrTime kMaxQuadViewsFovMatchWindow = 5'000'000;
 constexpr size_t kMaxCachedQuadViewsFovFrames = 180;
@@ -2459,6 +2469,7 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
         cached_quadviews_fovs_.clear();
         pivotxr_smoothed_extra_yaw_radians_ = 0.0;
         pivotxr_smoothed_extra_pitch_radians_ = 0.0;
+        pivotxr_activation_gain_ = 0.0;
         pivotxr_last_smoothing_wall_time_.reset();
         PrunePivotPoseDeltas(frame_end_info->displayTime);
         PruneQuadViewsFovs(frame_end_info->displayTime);
@@ -2474,6 +2485,7 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
         cached_pivot_pose_deltas_.clear();
         pivotxr_smoothed_extra_yaw_radians_ = 0.0;
         pivotxr_smoothed_extra_pitch_radians_ = 0.0;
+        pivotxr_activation_gain_ = 0.0;
         pivotxr_last_smoothing_wall_time_.reset();
     }
 
@@ -2776,6 +2788,10 @@ XrResult OpenXrLayer::LocateViews(XrSession session,
     }
 
     const bool pivotxr_active = IsPivotXrActive(resolved_settings_.pivotxr);
+    // Keep driving pivot while the activation envelope is still easing out so a
+    // toggle-off releases the view smoothly instead of snapping back to center.
+    const bool pivotxr_envelope_engaged =
+        pivotxr_active || pivotxr_activation_gain_ > kPivotActivationGainEpsilon;
     const bool depthxr_active = IsDepthXrActive();
     if (resolved_settings_.pivotxr.enabled && !has_logged_pivotxr_spike_mode_) {
         std::ostringstream stream;
@@ -2787,7 +2803,7 @@ XrResult OpenXrLayer::LocateViews(XrSession session,
         has_logged_pivotxr_spike_mode_ = true;
     }
 
-    if (resolved_settings_.pivotxr.enabled && pivotxr_active && internal_view_space_ != XR_NULL_HANDLE &&
+    if (resolved_settings_.pivotxr.enabled && pivotxr_envelope_engaged && internal_view_space_ != XR_NULL_HANDLE &&
         view_locate_info) {
         XrSpaceLocation pivot_view_location{XR_TYPE_SPACE_LOCATION};
         double applied_extra_yaw_radians = 0.0;
@@ -2841,12 +2857,13 @@ XrResult OpenXrLayer::LocateViews(XrSession session,
             } else {
                 CachePivotPoseDelta(view_locate_info->displayTime, IdentityPose());
             }
-            pivotxr_smoothed_extra_yaw_radians_ = applied_extra_yaw_radians;
-            pivotxr_smoothed_extra_pitch_radians_ = applied_extra_pitch_radians;
+            // LocateSpaceWithPivot owns the steady-state smoothed angles and the
+            // activation envelope; do not write the eased output back onto them.
         }
-    } else if (!pivotxr_active) {
+    } else if (!pivotxr_envelope_engaged) {
         pivotxr_smoothed_extra_yaw_radians_ = 0.0;
         pivotxr_smoothed_extra_pitch_radians_ = 0.0;
+        pivotxr_activation_gain_ = 0.0;
         pivotxr_last_smoothing_wall_time_.reset();
     }
 
@@ -2914,6 +2931,7 @@ XrResult OpenXrLayer::LocateViews(XrSession session,
                << ", viewConfig=" << ToString(view_configuration_type)
                << ", pivotExtraYawRadians=" << FormatDiagnosticDouble(pivotxr_smoothed_extra_yaw_radians_)
                << ", pivotExtraPitchRadians=" << FormatDiagnosticDouble(pivotxr_smoothed_extra_pitch_radians_)
+               << ", pivotActivationGain=" << FormatDiagnosticDouble(pivotxr_activation_gain_)
                << ", leftYawDelta=" << FormatDiagnosticDouble(left_yaw_delta)
                << ", rightYawDelta=" << FormatDiagnosticDouble(right_yaw_delta)
                << ", leftInsetYawDelta=" << FormatDiagnosticDouble(left_inset_yaw_delta)
@@ -3231,6 +3249,7 @@ void OpenXrLayer::ResetSessionState() {
     eye_gaze_diagnostic_stride_counter_ = 0;
     pivotxr_smoothed_extra_yaw_radians_ = 0.0;
     pivotxr_smoothed_extra_pitch_radians_ = 0.0;
+    pivotxr_activation_gain_ = 0.0;
     pivotxr_last_smoothing_wall_time_.reset();
     depthxr_toggle_enabled_ = true;
     depthxr_toggle_binding_was_down_ = false;
@@ -3888,38 +3907,63 @@ XrResult OpenXrLayer::LocateSpaceWithPivot(XrSpace space,
     if (applied_pose_delta) {
         *applied_pose_delta = IdentityPose();
     }
-    if (XR_FAILED(result) || !settings.enabled) {
+    auto clear_extra_outputs = [&]() {
         if (applied_extra_yaw_radians) {
             *applied_extra_yaw_radians = 0.0;
         }
         if (applied_extra_pitch_radians) {
             *applied_extra_pitch_radians = 0.0;
         }
+    };
+
+    if (XR_FAILED(result) || !settings.enabled) {
+        pivotxr_activation_gain_ = 0.0;
+        clear_extra_outputs();
         return result;
     }
 
-    if (!pivotxr_active) {
+    // Advance the wall-clock delta and ease the activation envelope toward its
+    // target. update_smoothing is true only on the xrLocateViews drive call;
+    // the xrLocateSpace path (head-attached geometry) reads the same envelope
+    // without advancing it so both stay in sync within a frame.
+    double delta_seconds = 0.0;
+    if (update_smoothing) {
+        const auto now = std::chrono::steady_clock::now();
+        if (pivotxr_last_smoothing_wall_time_.has_value()) {
+            delta_seconds =
+                std::chrono::duration<double>(now - *pivotxr_last_smoothing_wall_time_).count();
+        }
+        pivotxr_last_smoothing_wall_time_ = now;
+
+        const double target_gain = pivotxr_active ? 1.0 : 0.0;
+        if (delta_seconds > 0.0 && kPivotActivationRampSeconds > 0.0) {
+            const double step = delta_seconds / kPivotActivationRampSeconds;
+            if (target_gain > pivotxr_activation_gain_) {
+                pivotxr_activation_gain_ = std::min(target_gain, pivotxr_activation_gain_ + step);
+            } else {
+                pivotxr_activation_gain_ = std::max(target_gain, pivotxr_activation_gain_ - step);
+            }
+        }
+    }
+
+    // Fully release once the envelope has closed and the pivot is no longer
+    // engaged. While the envelope is still open we keep applying the (eased)
+    // pivot so toggling off releases the view smoothly.
+    if (!pivotxr_active && pivotxr_activation_gain_ <= kPivotActivationGainEpsilon) {
+        pivotxr_activation_gain_ = 0.0;
         pivotxr_smoothed_extra_yaw_radians_ = 0.0;
         pivotxr_smoothed_extra_pitch_radians_ = 0.0;
-        pivotxr_last_smoothing_wall_time_.reset();
-        if (applied_extra_yaw_radians) {
-            *applied_extra_yaw_radians = 0.0;
+        if (update_smoothing) {
+            pivotxr_last_smoothing_wall_time_.reset();
         }
-        if (applied_extra_pitch_radians) {
-            *applied_extra_pitch_radians = 0.0;
-        }
+        clear_extra_outputs();
         return result;
     }
 
     const bool space_is_view = IsTrackedViewSpace(space);
     const bool base_space_is_view = IsTrackedViewSpace(base_space);
     if (space_is_view == base_space_is_view) {
-        if (applied_extra_yaw_radians) {
-            *applied_extra_yaw_radians = 0.0;
-        }
-        if (applied_extra_pitch_radians) {
-            *applied_extra_pitch_radians = 0.0;
-        }
+        clear_extra_outputs();
         return result;
     }
 
@@ -3931,36 +3975,32 @@ XrResult OpenXrLayer::LocateSpaceWithPivot(XrSpace space,
         view_pose.orientation.z,
         view_pose.orientation.w,
     };
-    double delta_seconds = 0.0;
-    if (update_smoothing) {
-        const auto now = std::chrono::steady_clock::now();
-        if (pivotxr_last_smoothing_wall_time_.has_value()) {
-            delta_seconds =
-                std::chrono::duration<double>(now - *pivotxr_last_smoothing_wall_time_).count();
-        }
-        pivotxr_last_smoothing_wall_time_ = now;
+
+    // Track the steady-state pivot amount only while actively engaged. During
+    // the release ramp it is frozen and the envelope eases the applied angle to
+    // zero, avoiding any snap on toggle-off.
+    if (update_smoothing && pivotxr_active) {
+        const double current_yaw_radians = ExtractYawRadians(orientation);
+        const double current_pitch_radians = ExtractPitchRadians(orientation);
+        ComputePivotExtraAngleRadians(current_yaw_radians,
+                                      settings.yaw_rotation_multiplier,
+                                      settings.yaw_deadzone_degrees,
+                                      settings.yaw_max_extra_degrees,
+                                      settings.yaw_smoothing,
+                                      delta_seconds,
+                                      pivotxr_smoothed_extra_yaw_radians_);
+        ComputePivotExtraAngleRadians(current_pitch_radians,
+                                      settings.pitch_rotation_multiplier,
+                                      settings.pitch_deadzone_degrees,
+                                      settings.pitch_max_extra_degrees,
+                                      settings.pitch_smoothing,
+                                      delta_seconds,
+                                      pivotxr_smoothed_extra_pitch_radians_);
     }
 
-    const double current_yaw_radians = ExtractYawRadians(orientation);
-    const double current_pitch_radians = ExtractPitchRadians(orientation);
-    double extra_yaw_radians = pivotxr_smoothed_extra_yaw_radians_;
-    double extra_pitch_radians = pivotxr_smoothed_extra_pitch_radians_;
-    if (update_smoothing) {
-        extra_yaw_radians = ComputePivotExtraAngleRadians(current_yaw_radians,
-                                                         settings.yaw_rotation_multiplier,
-                                                         settings.yaw_deadzone_degrees,
-                                                         settings.yaw_max_extra_degrees,
-                                                         settings.yaw_smoothing,
-                                                         delta_seconds,
-                                                         pivotxr_smoothed_extra_yaw_radians_);
-        extra_pitch_radians = ComputePivotExtraAngleRadians(current_pitch_radians,
-                                                           settings.pitch_rotation_multiplier,
-                                                           settings.pitch_deadzone_degrees,
-                                                           settings.pitch_max_extra_degrees,
-                                                           settings.pitch_smoothing,
-                                                           delta_seconds,
-                                                           pivotxr_smoothed_extra_pitch_radians_);
-    }
+    const double eased_gain = SmoothStep(pivotxr_activation_gain_);
+    const double extra_yaw_radians = pivotxr_smoothed_extra_yaw_radians_ * eased_gain;
+    const double extra_pitch_radians = pivotxr_smoothed_extra_pitch_radians_ * eased_gain;
     if (applied_extra_yaw_radians) {
         *applied_extra_yaw_radians = extra_yaw_radians;
     }
@@ -4022,6 +4062,7 @@ void OpenXrLayer::LogResolvedSettings(const ResolvedRuntimeConfig& settings) {
 void OpenXrLayer::ResetPivotActivationState() {
     pivotxr_smoothed_extra_yaw_radians_ = 0.0;
     pivotxr_smoothed_extra_pitch_radians_ = 0.0;
+    pivotxr_activation_gain_ = 0.0;
     pivotxr_last_smoothing_wall_time_.reset();
     pivotxr_toggle_enabled_ = false;
     pivotxr_activation_key_was_down_ = false;
