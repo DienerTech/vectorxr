@@ -98,37 +98,41 @@ defineProps<{
           <span class="mb-1.5 flex min-h-[2.5rem] items-start gap-1.5 text-sm font-medium">
             Foveate Resolution
             <span
-              title="Resolution scale for the high-detail focus views. Higher values sharpen the center but increase GPU load."
+              title="Render resolution of the high-detail focus views, as a percent of your headset's native resolution (100% = HMD default). Above 100% supersamples the center for extra sharpness at higher GPU cost."
               class="cursor-help select-none text-xs text-muted"
               >ⓘ</span
             >
           </span>
           <input
-            v-model.number="settings.focusScale"
+            :value="Math.round(settings.focusScale * 100)"
             class="app-input w-full rounded-[0.75rem] px-4 py-2.5"
-            min="0.5"
-            max="2"
-            step="0.05"
+            min="50"
+            max="200"
+            step="5"
             type="number"
+            @input="settings.focusScale = Number(($event.target as HTMLInputElement).value) / 100"
           />
+          <span class="mt-1 block text-xs text-muted">% of HMD resolution</span>
         </label>
         <label class="block">
           <span class="mb-1.5 flex min-h-[2.5rem] items-start gap-1.5 text-sm font-medium">
-            Peripheral Scale
+            Peripheral Resolution
             <span
-              title="Resolution scale for the outer peripheral views. Lower values improve frames but make the edges softer."
+              title="Render resolution of the outer peripheral views, as a percent of your headset's native resolution (100% = HMD default). Lower values boost frames but soften the edges."
               class="cursor-help select-none text-xs text-muted"
               >ⓘ</span
             >
           </span>
           <input
-            v-model.number="settings.peripheralScale"
+            :value="Math.round(settings.peripheralScale * 100)"
             class="app-input w-full rounded-[0.75rem] px-4 py-2.5"
-            min="0.1"
-            max="1.5"
-            step="0.05"
+            min="10"
+            max="150"
+            step="5"
             type="number"
+            @input="settings.peripheralScale = Number(($event.target as HTMLInputElement).value) / 100"
           />
+          <span class="mt-1 block text-xs text-muted">% of HMD resolution</span>
         </label>
         <label class="block">
           <span class="mb-1.5 flex min-h-[2.5rem] items-start gap-1.5 text-sm font-medium">

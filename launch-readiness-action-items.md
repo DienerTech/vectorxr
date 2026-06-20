@@ -17,6 +17,11 @@ Living tracker of open items found during launch-readiness testing (started 2026
 - [ ] **Test depth on Pimax Play 2.0 beta** (blocked on Pimax granting beta access).
 - [ ] **Report the depth-normalization regression to Pimax** (PiOpenXR overrides submitted per-eye IPD/convergence; SteamVR honors it; VXR output proven correct).
 
+## Done (2026-06-19, third pass)
+- [x] Active overview: four evenly-weighted columns, data centered under headers (fixes custom-profiles/status crowding).
+- [x] Quadviews Foveate/Peripheral now shown as % of HMD resolution (raw scale unchanged); "Peripheral Scale" → "Peripheral Resolution"; tooltips note 100% = HMD default.
+- [x] In-app **Depth Compatibility** dialog (mirrors Pivot's), orange accent callout warning that PiOpenXR-style runtimes may disregard depth and to try the SteamVR pipeline. (Partially covers the "document PiOpenXR limitation" item below — now surfaced in-app.)
+
 ## Done (2026-06-19, second pass)
 - [x] Pivot yaw/pitch defaults synchronized for a consistent feel (both: multiplier 1.5, deadzone 8, max extra 120).
 - [x] Depth default profile now ships OFF, consistent with pivot/quadviews.
