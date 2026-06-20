@@ -6,6 +6,10 @@ It is built for users who want practical controls for stereo depth, convergence,
 
 Developed by DienerTech LLC.
 
+## Why VectorXR
+
+**Pivot your foveated view.** When using OpenXR quad-views foveated rendering, VectorXR is the first and only solution that also pivots your head pose so the foveated region follows the rotated view. Foveated rendering exists in a few forms — the Quad-Views-Foveated OpenXR layer, some runtimes, some game engines — and neck-assist tools rotate the view, but no one had combined the two: run as independent OpenXR layers they don't coordinate, so the high-detail foveal region is left behind the moment the view rotates. VectorXR computes Pivot and Quadviews in a single layer with shared runtime state, keeping the foveal region locked to your gaze through the rotation. In DCS — the title that benefits from both at once — they work together cleanly.
+
 ## Features
 
 - Tune stereo depth and convergence through the Depth module.
@@ -23,43 +27,55 @@ Developed by DienerTech LLC.
 
 ### Home
 
-![VectorXR Home tab](docs/screenshots/screenshot-home.png)
+![VectorXR Home tab](docs/screenshots/home.png)
 
-The Home tab shows suite-level settings, app status, log access, theme controls, import/export actions, and the current VectorXR layer status.
+The Home tab is a status dashboard: runtime and layer status, system health, and an Active overview of every Enhancement's default profile, custom profiles, and current state.
 
 ### Depth
 
-![VectorXR Depth tab](docs/screenshots/screenshot-depth.png)
+![VectorXR Depth tab](docs/screenshots/depth.png)
 
-Depth profiles tune stereo boost and convergence globally or per application.
+Depth profiles tune stereo boost and convergence globally or per application, with a runtime toggle binding for quick in-headset A/B comparisons.
 
 ### Pivot
 
-![VectorXR Pivot tab](docs/screenshots/screenshot-pivot.png)
+![VectorXR Pivot tab](docs/screenshots/pivot.png)
 
-Pivot profiles configure enhanced yaw and pitch rotation, activation behavior, smoothing, deadzones, and device bindings.
+Pivot profiles configure enhanced yaw and pitch rotation, activation behavior, smoothing, deadzones, and keyboard or device bindings.
+
+### Quadviews
+
+![VectorXR Quadviews tab](docs/screenshots/quadviews.png)
+
+Quadviews configures foveated-style rendering with a live performance budget that estimates render cost before you launch a game.
 
 ### Application Registry
 
-![VectorXR Application Registry tab](docs/screenshots/screenshot-application-registry.png)
+![VectorXR Application Registry tab](docs/screenshots/application-registry.png)
 
 The application registry keeps profile targets organized and can turn discovered OpenXR apps into reusable application entries.
 
 ### OpenXR Layers
 
-![VectorXR OpenXR Layers tab](docs/screenshots/screenshot-openxr-layers.png)
+![VectorXR OpenXR Layer Manager tab](docs/screenshots/openxr-layer-manager.png)
 
-The OpenXR layer manager inspects installed implicit API layers, shows signature and path status, and can enable, disable, or reorder layers.
+The OpenXR layer manager inspects installed implicit API layers across the Windows registry slices, shows signature and path status, and can enable, disable, or reorder layers.
+
+### Settings
+
+![VectorXR Settings tab](docs/screenshots/settings.png)
+
+Settings holds the runtime master switch, theme, logging, discovered-app tracking, and config import/export/reset.
 
 ### About And Updates
 
-![VectorXR About tab](docs/screenshots/screenshot-about.png)
+![VectorXR About tab](docs/screenshots/about.png)
 
 The About tab includes release status, GitHub update checks, project links, patch notes, and support information.
 
 ### Dark Mode
 
-![VectorXR Home tab in dark mode](docs/screenshots/screenshot-home-darkmode.png)
+![VectorXR Home tab in dark mode](docs/screenshots/home-dark.png)
 
 ## How It Works
 
@@ -98,7 +114,7 @@ Beta means it is ready to use day-to-day, but it is young and has had limited re
 
 Feedback and bug reports are welcome — that is what this stage is for.
 
-The road to a 1.0 release includes Windows binary code signing (current builds are unsigned, so the installer will show a SmartScreen warning), broader cross-runtime testing, and a few packaging items. Updated screenshots are also on the way.
+The road to a 1.0 release includes Windows binary code signing (current builds are unsigned, so the installer will show a SmartScreen warning), broader cross-runtime testing, and a few packaging items.
 
 ## Build From Source
 
@@ -109,7 +125,9 @@ VectorXR is Windows-focused and expects:
 - Node.js 20+
 - Rust toolchain with `cargo`
 - Tauri 2 prerequisites for Windows
-- Either an OpenXR SDK that provides `OpenXRConfig.cmake`, or a local `OpenXR.Loader.*.nupkg` package in the repository root
+- Download the OpenXR SDK from [KhronosGroup](https://github.com/KhronosGroup/OpenXR-SDK/releases)
+- VectorXR needs either an OpenXR SDK that provides `OpenXRConfig.cmake`, or a local `OpenXR.Loader.*.nupkg` package in the repository root
+
 
 The local `OpenXR.Loader.*.nupkg` package is intentionally not tracked in source control. The GitHub release workflow restores the pinned NuGet package during CI before building the layer.
 
