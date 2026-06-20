@@ -22,6 +22,7 @@ export const patchNotes: PatchNoteEntry[] = [
       'Default profiles for all Enhancements now ship off for consistency.',
       'Quadviews now color-codes its performance budget (green/amber/red) with a blinking "Detrimental" warning above 100%, and Foveate/Peripheral resolution are entered as a percent of headset resolution.',
       'Tightened the Active overview table alignment and trimmed page spacing so settings fit without an unnecessary scrollbar.',
+      'Relicensed VectorXR under the Mozilla Public License 2.0 (previously MIT) ahead of the public release.',
     ],
   },
   {

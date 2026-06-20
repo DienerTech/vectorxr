@@ -2,7 +2,7 @@
 
 ## Goals
 
-VectorXR Phase 2 is organized as one shared OpenXR runtime pipeline with product-level feature separation in the app and config.
+VectorXR is organized as one shared OpenXR runtime pipeline with product-level feature separation in the app and config.
 
 Design rules:
 
@@ -14,26 +14,27 @@ Design rules:
 
 ## Product Structure
 
-The app presents:
+The app presents product modules:
 
-- `VectorXR` core controls
-- `DepthXR` feature editing
-- `PivotXR` feature editing
+- core suite controls (`core`)
+- `Depth` feature editing (internal id `depthxr`)
+- `Pivot` feature editing (internal id `pivotxr`)
+- `Quadviews` feature editing
 
-This "module" concept is a product and config boundary, not a separate runtime ownership boundary.
+This "module" concept is a product and config boundary, not a separate runtime ownership boundary. User-facing labels are display-first (`Depth`, `Pivot`); internal ids, config keys, and C++ namespaces stay `depthxr`/`pivotxr`.
 
 ## Runtime Structure
 
 ### Shared core
 
-Shared core code under `layer/` currently owns:
+Shared core code under `layer/` owns:
 
 - config model and parser
-- settings resolution
+- settings resolution and per-application profile matching
 - path resolution
 - process name resolution
 - logger abstraction
-- stereo boost and convergence math
+- feature math (Depth stereo boost/convergence, Pivot yaw/pitch recomposition, Quadviews composition)
 
 ### OpenXR layer
 
@@ -43,7 +44,7 @@ The Windows DLL owns:
 - API layer instance creation
 - function dispatch
 - OpenXR function pointer capture
-- `xrLocateViews` interception
+- interception of the view/pose, session, swapchain, and view-configuration calls the features need
 
 ### App
 
@@ -56,19 +57,22 @@ The app owns:
 - working-copy save flow
 - feature-specific editing surfaces
 
-## Current interception plan
+## Interception surface
 
-Current interception surface:
+Core entry points:
 
 - `xrNegotiateLoaderApiLayerInterface`
 - `xrCreateApiLayerInstance`
 - `xrGetInstanceProcAddr`
 - `xrDestroyInstance`
-- `xrBeginSession`
-- `xrLocateViews`
 
-This remains intentionally minimal while DepthXR stays focused on stereo boost and convergence.
+Feature interception (varies by which modules are active):
 
-## Planned direction
+- `xrBeginSession`, `xrCreateSession`, `xrDestroySession`
+- `xrLocateViews` — Depth stereo boost and convergence
+- `xrLocateSpace` — Pivot yaw/pitch recomposition
+- `xrEnumerateViewConfigurations` / `xrEnumerateViewConfigurationViews` and the swapchain
+  lifecycle calls — Quadviews composition
 
-The next runtime step is to introduce a shared intermediate runtime context and ordered feature passes so DepthXR and PivotXR can compose cleanly inside one pipeline.
+The interception set is intentionally scoped to what the enabled features need rather than
+hooking every call.

@@ -4,6 +4,7 @@ version = "0.11.0"
 description = "VectorXR configuration app"
 authors = ["mdiener"]
 edition = "2021"
+license = "MPL-2.0"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

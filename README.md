@@ -10,6 +10,7 @@ Developed by DienerTech LLC.
 
 - Tune stereo depth and convergence through the Depth module.
 - Configure enhanced yaw and pitch rotation through the Pivot module.
+- Drive foveated-style rendering with a visible performance budget through the Quadviews module.
 - Create per-application profiles so different OpenXR games can use different settings.
 - Track OpenXR apps VectorXR has seen and register them as profile targets.
 - Bind feature toggles to keyboard shortcuts or detected input devices.
@@ -68,6 +69,10 @@ VectorXR has two main pieces:
 - A Windows OpenXR API layer that reads those settings and applies runtime adjustments when an OpenXR app is running.
 
 The installer registers the VectorXR API layer with Windows so OpenXR runtimes can load it automatically. Settings are stored locally under `%LOCALAPPDATA%\VectorXR`.
+
+## Usage
+
+For a walkthrough of configuring profiles and each module — Depth, Pivot, Quadviews, the application registry, and OpenXR layer management — see the [usage guide](docs/usage.md).
 
 ## Installation
 
@@ -151,7 +156,7 @@ Pushing the tag runs `.github/workflows/release.yml`, builds the Windows install
 - `app/`: Tauri 2 and Vue 3 desktop app
 - `layer/`: C++20 OpenXR API layer and runtime logic
 - `config/`: shared schema and config notes
-- `docs/`: architecture notes and implementation references
+- `docs/`: architecture notes, the usage guide, and screenshots
 - `examples/`: sample settings
 - `scripts/`: Windows build, install, staging, and release helpers
 
@@ -167,6 +172,8 @@ Thank you to the maintainers and contributors behind these projects.
 
 ## License
 
-The VectorXR source code is released under the MIT License. See [LICENSE](LICENSE).
+The VectorXR source code is released under the Mozilla Public License 2.0 (MPL-2.0). See [LICENSE](LICENSE).
 
-VectorXR, the VectorXR name, and VectorXR branding are product identifiers of DienerTech LLC. The MIT License covers the source code, but it does not grant rights to use DienerTech LLC trademarks, logos, or branding except to refer to the project.
+MPL-2.0 is a file-level copyleft license: you are free to use, modify, and redistribute VectorXR, including as part of a larger work that combines it with proprietary code, provided that modifications to the MPL-covered files themselves remain available under the MPL.
+
+VectorXR, the VectorXR name, and VectorXR branding are product identifiers of DienerTech LLC. Consistent with MPL-2.0 section 2.3, the license covers the source code but does not grant rights to use DienerTech LLC trademarks, logos, or branding except to refer to the project.

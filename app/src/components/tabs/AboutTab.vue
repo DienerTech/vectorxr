@@ -140,7 +140,7 @@ onMounted(() => {
           OpenXR layer management and per-application profiles keep every title configured exactly how you like it, all from one place.
         </p>
         <p class="mt-4 text-sm leading-6 text-muted">Developed independently by DienerTech LLC.</p>
-        <p class="mt-2 text-sm leading-6 text-muted">(c) 2026 DienerTech LLC. Released under the MIT License.</p>
+        <p class="mt-2 text-sm leading-6 text-muted">(c) 2026 DienerTech LLC. Released under the Mozilla Public License 2.0.</p>
 
         <div class="mt-5 flex flex-wrap gap-3">
           <button
