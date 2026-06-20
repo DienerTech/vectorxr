@@ -8,6 +8,23 @@ export interface PatchNoteEntry {
 
 export const patchNotes: PatchNoteEntry[] = [
   {
+    version: '0.11.0',
+    date: '2026-06-19',
+    title: 'Pivot easing and Depth clarity',
+    summary: 'Pivot now eases smoothly on and off instead of snapping, Depth and Pivot tuning are cleaner and more honest, Quadviews gained a clearer performance budget, and Depth includes runtime-compatibility guidance.',
+    items: [
+      'Pivot now eases in and out when toggled on or off instead of snapping the view, with a tunable activation ramp (default 0.35s) in a new Pivot "General" section.',
+      'Unified Pivot smoothing into one setting shared by yaw and pitch, renamed "Pitch Assist" to "Pitch", and refreshed the Pivot tooltips and layout to match Quadviews.',
+      'Synchronized the default Pivot yaw and pitch values (multiplier 1.5, deadzone 8°, max extra 120°) for a consistent out-of-the-box feel.',
+      'Reworked the Depth controls with bipolar sliders centered at neutral, consistent percentage scaling, clearer descriptions, and a single value per effect (removed the redundant per-effect enable checkboxes).',
+      'Fixed the Depth runtime toggle so it applies your saved values immediately and acts as a clean universal on/off switch.',
+      'Added a Depth Compatibility notice explaining that some headset-native OpenXR runtimes (such as Pimax) can ignore Depth, with guidance to switch to the SteamVR pipeline.',
+      'Default profiles for all Enhancements now ship off for consistency.',
+      'Quadviews now color-codes its performance budget (green/amber/red) with a blinking "Detrimental" warning above 100%, and Foveate/Peripheral resolution are entered as a percent of headset resolution.',
+      'Tightened the Active overview table alignment and trimmed page spacing so settings fit without an unnecessary scrollbar.',
+    ],
+  },
+  {
     version: '0.10.0',
     date: '2026-06-16',
     title: 'Profile opt-in controls',
