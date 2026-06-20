@@ -168,7 +168,7 @@ Then verify and tag:
 ```powershell
 .\scripts\Assert-VersionMatchesTag.ps1 -TagName v0.8.0
 git tag v0.8.0
-git push origin main --tags
+git push origin master --tags
 ```
 
 Pushing the tag runs `.github/workflows/release.yml`, builds the Windows installer, creates or updates the GitHub Release, and uploads the installer plus a SHA-256 checksum.

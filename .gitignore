@@ -13,3 +13,6 @@ app/src-tauri/resources/vectorxr-layer/
 
 # Local internal planning/working notes (not part of the public repo)
 notes/
+
+# Scratch dir from local signature/copyright checks
+.tmp-signature-check/
