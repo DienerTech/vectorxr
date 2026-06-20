@@ -79,7 +79,7 @@ function moduleDotClass(tab: { enhancementActive?: boolean }): string {
     </div>
 
     <div class="mt-auto px-2 pt-4">
-      <p class="text-[0.68rem] leading-4 text-soft">Changes apply to future OpenXR app launches.</p>
+      <p class="text-[0.68rem] leading-4 text-soft">Enabling or disabling an enhancement will apply to future OpenXR app launches.</p>
     </div>
   </nav>
 </template>
