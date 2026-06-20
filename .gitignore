@@ -10,3 +10,6 @@ app/src-tauri/resources/vectorxr-layer/
 *.VC.db
 *.VC.opendb
 *.nupkg
+
+# Local internal planning/working notes (not part of the public repo)
+notes/
