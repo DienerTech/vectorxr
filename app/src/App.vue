@@ -297,7 +297,7 @@ async function confirmResetConfig() {
     <section class="mx-auto flex h-full max-w-[1700px]">
       <SidebarNav :active-tab="store.state.activeTab" :tabs="tabs" :version="latestPatch.version" @select="store.setActiveTab" />
 
-      <div class="flex min-w-0 flex-1 flex-col px-4 py-4 md:px-6">
+      <div class="flex min-w-0 flex-1 flex-col px-4 py-3 md:px-6">
       <section class="min-h-0 flex-1 overflow-y-auto pb-1">
         <HomeTab
           v-if="store.state.activeTab === 'home'"
