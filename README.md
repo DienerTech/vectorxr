@@ -92,9 +92,13 @@ VectorXR does not currently auto-download or auto-install updates. Updates are i
 
 ## Current Status
 
-VectorXR is approaching an alpha-ready release. The core app, installer, OpenXR layer registration, profile model, Depth module, Pivot module, app discovery, logs, and OpenXR layer manager are implemented.
+VectorXR is in **beta**. It is feature-complete for its current scope — the desktop app, Windows installer, OpenXR layer registration, per-application profile model, Depth, Pivot, and Quadviews modules, app discovery, logs, update checks, and the OpenXR layer manager are all implemented and working.
 
-Planned launch polish includes screenshots, broader testing, release notes, and eventually Windows binary signing for a 1.0 milestone.
+Beta means it is ready to use day-to-day, but it is young and has had limited real-world testing across the range of VR runtimes and hardware. You may hit rough edges on an untested runtime — some headset-native OpenXR runtimes (such as Pimax's PiOpenXR) are known to ignore Depth, for example. VectorXR is designed to be reversible: you can disable any Enhancement, disable the VectorXR layer, or uninstall entirely if anything misbehaves.
+
+Feedback and bug reports are welcome — that is what this stage is for.
+
+The road to a 1.0 release includes Windows binary code signing (current builds are unsigned, so the installer will show a SmartScreen warning), broader cross-runtime testing, and a few packaging items. Updated screenshots are also on the way.
 
 ## Build From Source
 
