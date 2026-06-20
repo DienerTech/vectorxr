@@ -17,6 +17,14 @@ Living tracker of open items found during launch-readiness testing (started 2026
 - [ ] **Test depth on Pimax Play 2.0 beta** (blocked on Pimax granting beta access).
 - [ ] **Report the depth-normalization regression to Pimax** (PiOpenXR overrides submitted per-eye IPD/convergence; SteamVR honors it; VXR output proven correct).
 
+## Done (2026-06-19, second pass)
+- [x] Pivot yaw/pitch defaults synchronized for a consistent feel (both: multiplier 1.5, deadzone 8, max extra 120).
+- [x] Depth default profile now ships OFF, consistent with pivot/quadviews.
+- [x] Quadviews budget chip color-coded (green/yellow/red), pixel % made prominent, new blinking ⚠ "Detrimental" state when budget > 100%.
+- [x] Default-profile enable toggle moved inside each module's Default Profile collapse section (depth/pivot/quadviews).
+- [x] Active overview table columns right-aligned under their headers.
+- [x] Fixed: Rust `PivotXRSettings` was missing `activation_ramp_seconds` and still had `pitch_smoothing` (prior turn missed main.rs) — would have dropped the new ramp setting on save.
+
 ## Done this session (2026-06-19)
 - [x] Pivot UI quality pass: unified smoothing, new General section (smoothing + activation-ramp-seconds, default 0.35) exposed as a per-profile setting, "Pitch Assist" → "Pitch", refreshed tooltips, shared `PivotSettingsFields.vue` component (mirrors QuadViews layout), multiplier max 3 confirmed.
 - [x] Pivot smooth on/off activation envelope (0.35s smoothstep) — headset-validated.

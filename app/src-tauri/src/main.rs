@@ -82,28 +82,28 @@ fn default_smoothing() -> f64 {
     0.2
 }
 
+fn default_activation_ramp_seconds() -> f64 {
+    0.35
+}
+
 fn default_deadzone_degrees() -> f64 {
     8.0
 }
 
 fn default_max_extra_yaw_degrees() -> f64 {
-    25.0
+    120.0
 }
 
 fn default_pitch_rotation_multiplier() -> f64 {
-    1.0
-}
-
-fn default_pitch_smoothing() -> f64 {
-    0.2
+    1.5
 }
 
 fn default_pitch_deadzone_degrees() -> f64 {
-    12.0
+    8.0
 }
 
 fn default_max_extra_pitch_degrees() -> f64 {
-    20.0
+    120.0
 }
 
 fn default_quadviews_tracking_mode() -> String {
@@ -226,7 +226,7 @@ struct DepthXRProfileConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct DepthXRModuleConfig {
-    #[serde(default = "default_true")]
+    #[serde(default = "default_false")]
     enabled: bool,
     #[serde(default)]
     defaults: DepthXRSettings,
@@ -258,7 +258,7 @@ fn default_depth_toggle_binding() -> InputBinding {
 impl Default for DepthXRModuleConfig {
     fn default() -> Self {
         Self {
-            enabled: true,
+            enabled: false,
             defaults: DepthXRSettings::default(),
             bindings: DepthXRBindings::default(),
             profiles: Vec::new(),
@@ -269,18 +269,18 @@ impl Default for DepthXRModuleConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct PivotXRSettings {
-    #[serde(default = "default_rotation_multiplier")]
-    rotation_multiplier: f64,
     #[serde(default = "default_smoothing")]
     smoothing: f64,
+    #[serde(default = "default_activation_ramp_seconds")]
+    activation_ramp_seconds: f64,
+    #[serde(default = "default_rotation_multiplier")]
+    rotation_multiplier: f64,
     #[serde(default = "default_deadzone_degrees")]
     deadzone_degrees: f64,
     #[serde(default = "default_max_extra_yaw_degrees")]
     max_extra_yaw_degrees: f64,
     #[serde(default = "default_pitch_rotation_multiplier")]
     pitch_rotation_multiplier: f64,
-    #[serde(default = "default_pitch_smoothing")]
-    pitch_smoothing: f64,
     #[serde(default = "default_pitch_deadzone_degrees")]
     pitch_deadzone_degrees: f64,
     #[serde(default = "default_max_extra_pitch_degrees")]
@@ -290,12 +290,12 @@ struct PivotXRSettings {
 impl Default for PivotXRSettings {
     fn default() -> Self {
         Self {
-            rotation_multiplier: default_rotation_multiplier(),
             smoothing: default_smoothing(),
+            activation_ramp_seconds: default_activation_ramp_seconds(),
+            rotation_multiplier: default_rotation_multiplier(),
             deadzone_degrees: default_deadzone_degrees(),
             max_extra_yaw_degrees: default_max_extra_yaw_degrees(),
             pitch_rotation_multiplier: default_pitch_rotation_multiplier(),
-            pitch_smoothing: default_pitch_smoothing(),
             pitch_deadzone_degrees: default_pitch_deadzone_degrees(),
             max_extra_pitch_degrees: default_max_extra_pitch_degrees(),
         }

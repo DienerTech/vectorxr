@@ -381,6 +381,27 @@ textarea {
   }
 }
 
+/* Pulsing alert for a detrimental Quadviews pixel budget (>100%). */
+@keyframes vectorxr-budget-alert {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.4;
+  }
+}
+
+.quadviews-budget-alert {
+  animation: vectorxr-budget-alert 1s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .quadviews-budget-alert {
+    animation: none;
+  }
+}
+
 .button-inverse {
   background: transparent;
   border: 1px solid var(--app-border-inverse);

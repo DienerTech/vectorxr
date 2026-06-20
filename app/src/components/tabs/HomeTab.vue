@@ -144,8 +144,8 @@ const activeEnhancementCount = computed(() => enhancementRows.value.filter((row)
         class="mt-4 grid grid-cols-[minmax(0,1.4fr)_minmax(0,1fr)_minmax(0,1fr)_auto] gap-3 border border-transparent px-3 text-[0.68rem] font-semibold uppercase tracking-[0.16em] text-soft"
       >
         <span>Enhancement</span>
-        <span>Default profile</span>
-        <span>Custom profiles</span>
+        <span class="text-right">Default profile</span>
+        <span class="text-right">Custom profiles</span>
         <span class="text-right">Status</span>
       </div>
 
@@ -159,7 +159,7 @@ const activeEnhancementCount = computed(() => enhancementRows.value.filter((row)
           @click="$emit('navigate', row.id)"
         >
           <span class="text-sm font-semibold">{{ row.label }}</span>
-          <span>
+          <span class="text-right">
             <span
               class="inline-flex rounded-full px-2.5 py-1 text-xs font-semibold uppercase tracking-[0.14em]"
               :class="row.defaultEnabled ? 'chip-success' : 'chip-idle'"
@@ -167,7 +167,7 @@ const activeEnhancementCount = computed(() => enhancementRows.value.filter((row)
               {{ row.defaultEnabled ? 'Enabled' : 'Disabled' }}
             </span>
           </span>
-          <span class="text-sm text-muted">{{ row.enabledCustom }} / {{ row.totalCustom }} enabled</span>
+          <span class="text-right text-sm text-muted">{{ row.enabledCustom }} / {{ row.totalCustom }} enabled</span>
           <span class="text-right">
             <span
               class="inline-flex rounded-full px-2.5 py-1 text-xs font-semibold uppercase tracking-[0.14em]"

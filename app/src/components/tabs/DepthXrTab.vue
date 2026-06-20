@@ -49,17 +49,11 @@ const profileWarnings = computed(() => {
   <div class="space-y-4">
     <article class="rounded-[1.25rem] border p-5 shadow-panel backdrop-blur surface-panel">
       <!-- Module header -->
-      <div class="mb-4 flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <h2 class="text-2xl font-semibold tracking-tight">Depth</h2>
-          <p class="mt-2 max-w-3xl text-sm leading-6 text-muted">
-            Tune stereo boost and convergence defaults, then add per-application profiles when a title needs different depth behavior. Start with small value changes and use the runtime toggle binding for quick comparisons in headset.
-          </p>
-        </div>
-        <label class="pill-toggle inline-flex items-center gap-3 rounded-full px-4 py-2 text-sm font-medium">
-          <input v-model="config.modules.depthxr.enabled" class="h-4 w-4 accent-depthxr-copper" type="checkbox" />
-          Default Profile {{ config.modules.depthxr.enabled ? 'On' : 'Off' }}
-        </label>
+      <div class="mb-4">
+        <h2 class="text-2xl font-semibold tracking-tight">Depth</h2>
+        <p class="mt-2 max-w-3xl text-sm leading-6 text-muted">
+          Tune stereo boost and convergence defaults, then add per-application profiles when a title needs different depth behavior. Start with small value changes and use the runtime toggle binding for quick comparisons in headset.
+        </p>
       </div>
 
       <!-- Module-level binding — applies regardless of which profile is active -->
@@ -79,6 +73,10 @@ const profileWarnings = computed(() => {
           <span class="eyebrow text-xs font-semibold uppercase tracking-[0.24em]">Default Profile</span>
           <span class="text-xs text-muted">Applies to applications without an enabled custom profile</span>
         </summary>
+        <label class="pill-toggle mt-3 inline-flex items-center gap-3 rounded-full px-4 py-2 text-sm font-medium">
+          <input v-model="config.modules.depthxr.enabled" class="h-4 w-4 accent-depthxr-copper" type="checkbox" />
+          Default Profile {{ config.modules.depthxr.enabled ? 'On' : 'Off' }}
+        </label>
         <div class="mt-3 grid gap-3 lg:grid-cols-2">
           <EffectField
             v-model:value="config.modules.depthxr.defaults.stereoBoost"

@@ -65,22 +65,16 @@ const profileWarnings = computed(() => {
             Configure how Pivot activates and how much extra yaw or pitch it can add for each title. Use profiles to keep rotation behavior specific to the games and simulators that benefit from it.
           </p>
         </div>
-        <div class="flex flex-wrap items-center gap-3">
-          <button
-            class="button-secondary inline-flex items-center gap-2 rounded-[0.75rem] px-4 py-2 text-sm font-medium"
-            type="button"
-            @click="compatibilityInfoOpen = true"
-          >
-            <span class="inline-flex h-5 w-5 items-center justify-center rounded-full border text-xs" style="border-color: var(--app-border)">
-              i
-            </span>
-            Quadviews Compatibility
-          </button>
-          <label class="pill-toggle inline-flex items-center gap-3 rounded-full px-4 py-2 text-sm font-medium">
-            <input v-model="config.modules.pivotxr.enabled" class="h-4 w-4 accent-depthxr-copper" type="checkbox" />
-            Default Profile {{ config.modules.pivotxr.enabled ? 'On' : 'Off' }}
-          </label>
-        </div>
+        <button
+          class="button-secondary inline-flex items-center gap-2 rounded-[0.75rem] px-4 py-2 text-sm font-medium"
+          type="button"
+          @click="compatibilityInfoOpen = true"
+        >
+          <span class="inline-flex h-5 w-5 items-center justify-center rounded-full border text-xs" style="border-color: var(--app-border)">
+            i
+          </span>
+          Quadviews Compatibility
+        </button>
       </div>
 
       <details class="section-disclosure border-t pt-4" style="border-color: var(--app-border)" open>
@@ -91,6 +85,11 @@ const profileWarnings = computed(() => {
           <span class="eyebrow text-xs font-semibold uppercase tracking-[0.24em]">Default Profile</span>
           <span class="text-xs text-muted">Applies to applications without an enabled custom profile</span>
         </summary>
+
+        <label class="pill-toggle mt-3 inline-flex items-center gap-3 rounded-full px-4 py-2 text-sm font-medium">
+          <input v-model="config.modules.pivotxr.enabled" class="h-4 w-4 accent-depthxr-copper" type="checkbox" />
+          Default Profile {{ config.modules.pivotxr.enabled ? 'On' : 'Off' }}
+        </label>
 
         <PivotActivationEditor
           v-model:activation-mode="config.modules.pivotxr.activationMode"

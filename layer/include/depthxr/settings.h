@@ -90,7 +90,7 @@ struct DepthXrProfile {
 };
 
 struct DepthXrModuleConfig {
-    bool enabled{true};
+    bool enabled{false};
     DepthXrResolvedSettings defaults;
     DepthXrBindings bindings;
     std::vector<DepthXrProfile> profiles;
@@ -103,11 +103,11 @@ struct PivotXrSettings {
     // Yaw.
     double yaw_rotation_multiplier{1.5};
     double yaw_deadzone_degrees{8.0};
-    double yaw_max_extra_degrees{25.0};
-    // Pitch.
-    double pitch_rotation_multiplier{1.0};
-    double pitch_deadzone_degrees{12.0};
-    double pitch_max_extra_degrees{20.0};
+    double yaw_max_extra_degrees{120.0};
+    // Pitch (defaults intentionally match yaw for a consistent feel).
+    double pitch_rotation_multiplier{1.5};
+    double pitch_deadzone_degrees{8.0};
+    double pitch_max_extra_degrees{120.0};
 };
 
 struct PivotXrProfile {
@@ -137,10 +137,10 @@ struct PivotXrResolvedSettings {
     double activation_ramp_seconds{0.35};
     double yaw_rotation_multiplier{1.5};
     double yaw_deadzone_degrees{8.0};
-    double yaw_max_extra_degrees{25.0};
-    double pitch_rotation_multiplier{1.0};
-    double pitch_deadzone_degrees{12.0};
-    double pitch_max_extra_degrees{20.0};
+    double yaw_max_extra_degrees{120.0};
+    double pitch_rotation_multiplier{1.5};
+    double pitch_deadzone_degrees{8.0};
+    double pitch_max_extra_degrees{120.0};
 };
 
 struct QuadViewsSettings {

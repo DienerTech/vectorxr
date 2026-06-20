@@ -251,10 +251,10 @@ export function defaultPivotXRSettings(): PivotXRSettings {
     activationRampSeconds: 0.35,
     rotationMultiplier: 1.5,
     deadzoneDegrees: 8,
-    maxExtraYawDegrees: 25,
-    pitchRotationMultiplier: 1.0,
-    pitchDeadzoneDegrees: 12,
-    maxExtraPitchDegrees: 20,
+    maxExtraYawDegrees: 120,
+    pitchRotationMultiplier: 1.5,
+    pitchDeadzoneDegrees: 8,
+    maxExtraPitchDegrees: 120,
   }
 }
 
@@ -305,7 +305,7 @@ export function defaultConfig(): VectorXRConfig {
     applications: [],
     modules: {
       depthxr: {
-        enabled: true,
+        enabled: false,
         defaults: defaultDepthXRSettings(),
         bindings: defaultDepthXRBindings(),
         profiles: [],
