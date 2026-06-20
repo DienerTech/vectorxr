@@ -1,5 +1,5 @@
 param(
-  [string]$SourcePath = (Join-Path $PSScriptRoot "..\icon-image-5.png"),
+  [string]$SourcePath = (Join-Path $PSScriptRoot "..\icon-vectorxr.png"),
   [string]$OutputDir = (Join-Path $PSScriptRoot "..\app\src-tauri\icons")
 )
 
