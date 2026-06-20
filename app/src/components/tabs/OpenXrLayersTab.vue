@@ -273,7 +273,7 @@ function signatureTooltip(layer: OpenXrLayerEntry): string {
 }
 
 function vectorXrTooltip(): string {
-  return 'VectorXR API layer. Pivot compatibility can depend on this layer being below Quad-Views-Foveated when both are present.'
+  return 'VectorXR API layer. You are here!'
 }
 
 function quadViewsTooltip(): string {
