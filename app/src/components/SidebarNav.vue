@@ -74,7 +74,7 @@ function moduleDotClass(tab: { enhancementActive?: boolean }): string {
       <p class="text-[0.68rem] leading-4 text-soft">Enabling or disabling an enhancement will apply to future OpenXR app launches.</p>
 
       <div class="mt-4 flex items-center gap-2.5 border-t pt-3" style="border-color: var(--app-border)">
-        <img :src="logoUrl" alt="VectorXR logo" class="side-nav-mark h-8 w-8 rounded-[0.6rem] object-contain" />
+        <img :src="logoUrl" alt="VectorXR logo" class="side-nav-mark h-10 w-10 rounded-[0.6rem] object-contain" />
         <div>
           <p class="text-sm font-semibold tracking-tight">VectorXR</p>
           <p class="text-[0.68rem] text-soft">v{{ version }}</p>
