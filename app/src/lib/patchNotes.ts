@@ -11,7 +11,7 @@ export const patchNotes: PatchNoteEntry[] = [
     version: '0.11.0',
     date: '2026-06-19',
     title: 'Pivot easing and Depth clarity',
-    summary: 'Pivot now eases smoothly on and off instead of snapping, Depth and Pivot tuning are cleaner and more honest, Quadviews gained a clearer performance budget, and Depth includes runtime-compatibility guidance.',
+    summary: 'Pivot now eases smoothly on and off instead of snapping, Depth and Pivot tuning are cleaner and more honest, Quadviews gained a clearer performance budget, Depth includes runtime-compatibility guidance, and bindings can now play optional activate/deactivate sound cues.',
     items: [
       'Pivot now eases in and out when toggled on or off instead of snapping the view, with a tunable activation ramp (default 0.35s) in a new Pivot "General" section.',
       'Unified Pivot smoothing into one setting shared by yaw and pitch, renamed "Pitch Assist" to "Pitch", and refreshed the Pivot tooltips and layout to match Quadviews.',
@@ -22,6 +22,8 @@ export const patchNotes: PatchNoteEntry[] = [
       'Default profiles for all Enhancements now ship off for consistency.',
       'Quadviews now color-codes its performance budget (green/amber/red) with a blinking "Detrimental" warning above 100%, and Foveate/Peripheral resolution are entered as a percent of headset resolution.',
       'Tightened the Active overview table alignment and trimmed page spacing so settings fit without an unnecessary scrollbar.',
+      'Added optional sound feedback for keybind and device bindings: play a short .wav when a binding activates or deactivates (such as the Depth toggle or Pivot activation), using the bundled default tones or your own .wav chosen per state.',
+      'Added a master Sound Feedback Volume control in Settings to scale every VectorXR cue, with a Test button to preview the level.',
       'Relicensed VectorXR under the Mozilla Public License 2.0 (previously MIT) ahead of the public release.',
     ],
   },
