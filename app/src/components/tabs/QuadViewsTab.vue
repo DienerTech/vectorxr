@@ -50,10 +50,6 @@ const profileWarnings = computed(() => {
   return warnings;
 });
 
-function trackingModeLabel(settings: QuadViewsSettings) {
-  return settings.trackingMode === "eye" ? "Eye tracked" : "Head tracked";
-}
-
 function estimatedPixelBudget(settings: QuadViewsSettings) {
   const focusWidthScale =
     (settings.focusScale *
@@ -198,15 +194,11 @@ function budgetChipClass(settings: QuadViewsSettings) {
         <template #badges>
           <span
             v-if="profile.enabled"
-            class="rounded-full px-3 py-1 text-xs font-semibold uppercase tracking-[0.16em] chip-accent"
-            >{{ trackingModeLabel(profile.settings) }}</span
-          >
-          <span
-            v-if="profile.enabled"
             class="rounded-full px-3 py-1 text-xs font-semibold uppercase tracking-[0.16em]"
             :class="budgetChipClass(profile.settings)"
-            >{{ budgetTone(profile.settings) }} · {{ estimatedPixelBudget(profile.settings).toFixed(0) }}%</span
+            >{{ budgetTone(profile.settings) }}</span
           >
+          <span v-if="profile.enabled" class="text-xs font-semibold">{{ budgetLabel(profile.settings) }}</span>
         </template>
 
         <QuadViewsSettingsFields :settings="profile.settings" />
