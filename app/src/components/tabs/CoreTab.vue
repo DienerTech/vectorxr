@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { computed } from "vue";
+import { computed, ref } from "vue";
 
 import ThemeToggle from "../ThemeToggle.vue";
+import { playTestSound } from "../../lib/commands";
 import type { VectorXRConfig } from "../../lib/model";
 import type { ThemePreference } from "../../lib/theme";
 
@@ -32,6 +33,17 @@ const configDirectory = computed(() => {
   const directory = props.path.replace(/[\\/][^\\/]*$/, "");
   return directory || props.path;
 });
+
+const soundPreviewError = ref("");
+
+async function previewSoundVolume() {
+  soundPreviewError.value = "";
+  try {
+    await playTestSound("", true, props.config.core.sound.volume);
+  } catch (error) {
+    soundPreviewError.value = error instanceof Error ? error.message : "Failed to play sound.";
+  }
+}
 </script>
 
 <template>
@@ -153,6 +165,38 @@ const configDirectory = computed(() => {
           />
           {{ config.core.trackSeenApps ? "On" : "Off" }}
         </label>
+      </div>
+
+      <div class="mt-6 rounded-[0.9rem] border px-4 py-3 surface-panel-strong">
+        <div class="flex flex-wrap items-start justify-between gap-4">
+          <div>
+            <p class="text-sm font-semibold">Sound Feedback Volume</p>
+            <p class="mt-0.5 max-w-2xl text-xs leading-5 text-muted">
+              Master volume for the activate / deactivate cues you can attach to bindings. Affects every VectorXR sound effect.
+            </p>
+          </div>
+          <button
+            class="button-secondary rounded-[0.75rem] px-4 py-2 text-sm font-medium"
+            type="button"
+            @click="previewSoundVolume"
+          >
+            ▶ Test
+          </button>
+        </div>
+
+        <div class="mt-3 flex items-center gap-3">
+          <input
+            v-model.number="config.core.sound.volume"
+            class="h-2 flex-1 cursor-pointer accent-depthxr-copper"
+            type="range"
+            min="0"
+            max="100"
+            step="1"
+          />
+          <span class="w-12 text-right font-mono text-sm">{{ config.core.sound.volume }}%</span>
+        </div>
+
+        <p v-if="soundPreviewError" class="mt-2 text-sm chip-warning">{{ soundPreviewError }}</p>
       </div>
 
       <section class="mt-6 border-t pt-5">

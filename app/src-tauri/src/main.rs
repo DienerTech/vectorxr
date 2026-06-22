@@ -188,6 +188,25 @@ struct RegisteredApplication {
     r#match: ProfileMatch,
 }
 
+fn default_sound_volume() -> u32 {
+    100
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SoundSettings {
+    #[serde(default = "default_sound_volume")]
+    volume: u32,
+}
+
+impl Default for SoundSettings {
+    fn default() -> Self {
+        Self {
+            volume: default_sound_volume(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CoreConfig {
@@ -199,6 +218,8 @@ struct CoreConfig {
     log_retention_files: u32,
     #[serde(default = "default_true")]
     track_seen_apps: bool,
+    #[serde(default)]
+    sound: SoundSettings,
 }
 
 impl Default for CoreConfig {
@@ -208,6 +229,7 @@ impl Default for CoreConfig {
             log_level: default_log_level(),
             log_retention_files: default_log_retention_files(),
             track_seen_apps: true,
+            sound: SoundSettings::default(),
         }
     }
 }
@@ -1291,53 +1313,64 @@ fn move_openxr_layer(
     openxr_layers::move_openxr_layer(slice, manifest_path, direction)
 }
 
-/// Opens a native file picker filtered to .wav files. Returns the chosen path,
-/// or None if the user cancelled.
-#[tauri::command]
-fn pick_sound_file() -> Result<Option<String>, String> {
-    #[cfg(target_os = "windows")]
-    {
-        use windows::core::{PCWSTR, PWSTR};
-        use windows::Win32::UI::Controls::Dialogs::{
-            GetOpenFileNameW, OFN_FILEMUSTEXIST, OFN_PATHMUSTEXIST, OPENFILENAMEW,
-        };
+// Loads a WAV into memory and scales 16-bit PCM samples by `gain`. Returns None
+// for formats we don't scale (the caller then plays the file at full volume) or
+// if the file isn't a parseable RIFF/WAVE container.
+#[cfg(target_os = "windows")]
+fn load_and_scale_wav(path: &Path, gain: f32) -> Option<Vec<u8>> {
+    let mut bytes = fs::read(path).ok()?;
+    if bytes.len() < 44 || &bytes[0..4] != b"RIFF" || &bytes[8..12] != b"WAVE" {
+        return None;
+    }
 
-        let filter: Vec<u16> = "WAV audio (*.wav)\0*.wav\0\0".encode_utf16().collect();
-        let title: Vec<u16> = "Select a .wav sound\0".encode_utf16().collect();
-        let mut buffer = vec![0u16; 1024];
-
-        let mut ofn = OPENFILENAMEW {
-            lStructSize: std::mem::size_of::<OPENFILENAMEW>() as u32,
-            lpstrFilter: PCWSTR(filter.as_ptr()),
-            lpstrFile: PWSTR(buffer.as_mut_ptr()),
-            nMaxFile: buffer.len() as u32,
-            lpstrTitle: PCWSTR(title.as_ptr()),
-            Flags: OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST,
-            ..Default::default()
-        };
-
-        let picked = unsafe { GetOpenFileNameW(&mut ofn) };
-        if !picked.as_bool() {
-            return Ok(None);
+    let mut audio_format = 0u16;
+    let mut bits = 0u16;
+    let mut data_range: Option<(usize, usize)> = None;
+    let mut pos = 12usize;
+    while pos + 8 <= bytes.len() {
+        let id = [bytes[pos], bytes[pos + 1], bytes[pos + 2], bytes[pos + 3]];
+        let size =
+            u32::from_le_bytes([bytes[pos + 4], bytes[pos + 5], bytes[pos + 6], bytes[pos + 7]])
+                as usize;
+        let body = pos + 8;
+        if &id == b"fmt " && body + 16 <= bytes.len() {
+            audio_format = u16::from_le_bytes([bytes[body], bytes[body + 1]]);
+            bits = u16::from_le_bytes([bytes[body + 14], bytes[body + 15]]);
+        } else if &id == b"data" {
+            data_range = Some((body, (body + size).min(bytes.len())));
         }
-
-        let end = buffer.iter().position(|&c| c == 0).unwrap_or(buffer.len());
-        return Ok(Some(String::from_utf16_lossy(&buffer[..end])));
+        pos = body + size + (size & 1);
     }
 
-    #[cfg(not(target_os = "windows"))]
-    {
-        Ok(None)
+    let (start, end) = data_range?;
+    if audio_format != 1 || bits != 16 {
+        return None;
     }
+
+    if (gain - 1.0).abs() > f32::EPSILON {
+        let mut i = start;
+        while i + 1 < end {
+            let sample = i16::from_le_bytes([bytes[i], bytes[i + 1]]) as f32;
+            let scaled = (sample * gain).round().clamp(-32768.0, 32767.0) as i16;
+            let out = scaled.to_le_bytes();
+            bytes[i] = out[0];
+            bytes[i + 1] = out[1];
+            i += 2;
+        }
+    }
+
+    Some(bytes)
 }
 
 /// Plays a .wav so the user can preview their choice from the config UI. An empty
-/// path falls back to the bundled default for the given transition.
+/// path falls back to the bundled default for the given transition; `volume`
+/// (0-100) scales the preview to match the configured level.
 #[tauri::command]
 fn play_test_sound(
     app: tauri::AppHandle,
     path: Option<String>,
     activate: bool,
+    volume: Option<u32>,
 ) -> Result<(), String> {
     use tauri::Manager;
 
@@ -1366,25 +1399,38 @@ fn play_test_sound(
     {
         use std::os::windows::ffi::OsStrExt;
         use windows::core::PCWSTR;
-        use windows::Win32::Media::Audio::{PlaySoundW, SND_ASYNC, SND_FILENAME, SND_NODEFAULT};
+        use windows::Win32::Media::Audio::{
+            PlaySoundW, SND_FILENAME, SND_MEMORY, SND_NODEFAULT,
+        };
+
+        let gain = (volume.unwrap_or(100).min(100) as f32) / 100.0;
+
+        // Scaled in-memory playback is synchronous (no SND_ASYNC) so the buffer
+        // stays valid for the lifetime of the call; the clip is a fraction of a
+        // second, so briefly blocking this command thread is fine.
+        if let Some(image) = load_and_scale_wav(&resolved, gain) {
+            let _ = unsafe {
+                PlaySoundW(
+                    PCWSTR(image.as_ptr() as *const u16),
+                    None,
+                    SND_MEMORY | SND_NODEFAULT,
+                )
+            };
+            return Ok(());
+        }
 
         let wide: Vec<u16> = resolved
             .as_os_str()
             .encode_wide()
             .chain(std::iter::once(0))
             .collect();
-        let _ = unsafe {
-            PlaySoundW(
-                PCWSTR(wide.as_ptr()),
-                None,
-                SND_FILENAME | SND_ASYNC | SND_NODEFAULT,
-            )
-        };
+        let _ = unsafe { PlaySoundW(PCWSTR(wide.as_ptr()), None, SND_FILENAME | SND_NODEFAULT) };
         Ok(())
     }
 
     #[cfg(not(target_os = "windows"))]
     {
+        let _ = volume;
         Err("Sound preview is only supported on Windows".into())
     }
 }
@@ -1398,6 +1444,7 @@ fn main() {
     }
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             load_config,
             save_config,
@@ -1413,7 +1460,6 @@ fn main() {
             ensure_openxr_layer_elevation,
             set_openxr_layer_enabled,
             move_openxr_layer,
-            pick_sound_file,
             play_test_sound
         ])
         .run(tauri::generate_context!())

@@ -61,6 +61,8 @@ struct CoreSettings {
     LogLevel log_level{LogLevel::Info};
     int log_retention_files{7};
     bool track_seen_apps{true};
+    // Master volume (0-100) for binding activate/deactivate sound feedback.
+    int sound_volume{100};
 };
 
 struct DepthXrSettingsOverride {

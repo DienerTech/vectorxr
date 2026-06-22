@@ -19,7 +19,9 @@ class SoundPlayer {
 
     // Plays the activate or deactivate sound for `sound` when enabled. An empty
     // custom path resolves to the bundled default under <layer_dir>/sounds/.
-    void PlayTransition(const SoundFeedback& sound, bool activated, const std::filesystem::path& layer_dir);
+    // `volume_percent` (0-100) scales playback; sounds are loaded into memory so
+    // 16-bit PCM can be attenuated.
+    void PlayTransition(const SoundFeedback& sound, bool activated, const std::filesystem::path& layer_dir, int volume_percent);
 
     SoundPlayer(const SoundPlayer&) = delete;
     SoundPlayer& operator=(const SoundPlayer&) = delete;

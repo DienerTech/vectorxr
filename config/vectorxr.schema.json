@@ -198,6 +198,17 @@
         },
         "trackSeenApps": {
           "type": "boolean"
+        },
+        "sound": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "volume": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 100
+            }
+          }
         }
       }
     },

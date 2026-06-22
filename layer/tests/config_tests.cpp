@@ -810,6 +810,24 @@ void TestBindingWithoutSoundDefaultsDisabled() {
            "Binding without sound block should default to disabled feedback");
 }
 
+void TestCoreSoundVolumeParsedAndClamped() {
+    const std::string json = R"json(
+{
+  "version": 3,
+  "core": { "enabled": true, "logLevel": "info", "logRetentionFiles": 7, "sound": { "volume": 150 } },
+  "applications": [],
+  "modules": {
+    "depthxr": { "bindings": { "toggleEnabled": { "type": "none" } } },
+    "pivotxr": { "enabled": false, "defaults": {}, "profiles": [] }
+  }
+}
+)json";
+
+    const depthxr::ParseResult result = depthxr::ParseConfig(json);
+    Expect(result.ok, "Config parser rejected core sound volume: " + result.error);
+    Expect(result.document.core.sound_volume == 100, "Core sound volume should clamp to 100");
+}
+
 void TestExeMatch() {
     Expect(depthxr::ExeNameMatches("DCS.exe", "dcs.exe"), "Case-insensitive exe match failed");
     Expect(depthxr::ExeNameMatches("C:\\Games\\DCS.exe", "dcs.exe"), "Basename exe match failed");
@@ -1007,6 +1025,7 @@ int main() {
     TestDeviceBindingMetadataParsed();
     TestBindingSoundFeedbackParsed();
     TestBindingWithoutSoundDefaultsDisabled();
+    TestCoreSoundVolumeParsedAndClamped();
     TestExeMatch();
     TestSeenAppObservationRecording();
     TestQuadViewStereoBoostKeepsInsetViewsInSync();

@@ -53,11 +53,17 @@ export interface NoneBinding {
 
 export type InputBinding = NoneBinding | KeyboardBinding | DeviceBinding
 
+// Global feedback-sound settings shared by every binding's activate/deactivate cue.
+export interface SoundSettings {
+  volume: number
+}
+
 export interface CoreConfig {
   enabled: boolean
   logLevel: LogLevel
   logRetentionFiles: number
   trackSeenApps: boolean
+  sound: SoundSettings
 }
 
 export interface RegisteredApplication {
@@ -199,7 +205,16 @@ export function defaultCoreConfig(): CoreConfig {
     logLevel: 'info',
     logRetentionFiles: 7,
     trackSeenApps: true,
+    sound: { volume: 100 },
   }
+}
+
+function normalizeVolume(value: unknown): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    return 100
+  }
+
+  return Math.min(100, Math.max(0, Math.round(value)))
 }
 
 export function defaultDepthXRSettings(): DepthXRSettings {
@@ -640,6 +655,7 @@ function normalizeVectorXRConfig(value: unknown): VectorXRConfig {
       logLevel: normalizeLogLevel(core.logLevel),
       logRetentionFiles: normalizeNumber(core.logRetentionFiles, fallback.core.logRetentionFiles),
       trackSeenApps: normalizeBoolean(core.trackSeenApps, fallback.core.trackSeenApps),
+      sound: { volume: normalizeVolume(isRecord(core.sound) ? core.sound.volume : undefined) },
     },
     applications,
     modules: {

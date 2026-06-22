@@ -1,5 +1,6 @@
 #include "depthxr/config_parser.h"
 
+#include <algorithm>
 #include <cctype>
 #include <fstream>
 #include <map>
@@ -697,6 +698,7 @@ bool ParseCoreSettings(const JsonValue::Object& object, CoreSettings& out, std::
         "logLevel",
         "logRetentionFiles",
         "trackSeenApps",
+        "sound",
     };
 
     if (!CheckAllowedKeys(object, allowed, error)) {
@@ -726,6 +728,24 @@ bool ParseCoreSettings(const JsonValue::Object& object, CoreSettings& out, std::
     }
     if (track_seen_apps.has_value()) {
         out.track_seen_apps = *track_seen_apps;
+    }
+
+    if (const auto sound_it = object.find("sound"); sound_it != object.end()) {
+        const JsonValue::Object* sound_object = RequireObject(sound_it->second, "core.sound", error);
+        if (!sound_object) {
+            return false;
+        }
+        static const std::unordered_set<std::string> sound_allowed = {"volume"};
+        if (!CheckAllowedKeys(*sound_object, sound_allowed, error)) {
+            return false;
+        }
+        std::optional<int> volume;
+        if (!ReadOptionalInt(*sound_object, "volume", volume, error)) {
+            return false;
+        }
+        if (volume.has_value()) {
+            out.sound_volume = std::clamp(*volume, 0, 100);
+        }
     }
 
     return true;

@@ -12,6 +12,10 @@ function validateCoreConfig(core: CoreConfig): string[] {
     errors.push('core.trackSeenApps must be a boolean')
   }
 
+  if (!Number.isFinite(core.sound.volume) || core.sound.volume < 0 || core.sound.volume > 100) {
+    errors.push('core.sound.volume must be between 0 and 100')
+  }
+
   return errors
 }
 

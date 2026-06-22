@@ -4218,7 +4218,8 @@ bool OpenXrLayer::IsDepthXrActive() {
                      (depthxr_toggle_enabled_ ? "enabled" : "disabled") + " via " +
                      BindingLabel(resolved_settings_.depthxr_bindings.toggle_enabled) + ".");
         SoundPlayer::Instance().PlayTransition(resolved_settings_.depthxr_bindings.toggle_enabled.sound,
-                                               depthxr_toggle_enabled_, dll_directory_);
+                                               depthxr_toggle_enabled_, dll_directory_,
+                                               resolved_settings_.core.sound_volume);
     }
 
     return depthxr_toggle_enabled_;
@@ -4259,16 +4260,19 @@ bool OpenXrLayer::IsPivotXrActive(const PivotXrResolvedSettings& settings) {
             logger_.Info(std::string("PivotXR extra pivot factor ") +
                          (pivotxr_toggle_enabled_ ? "enabled" : "disabled") + " via " +
                          BindingLabel(settings.activation_binding) + ".");
-            SoundPlayer::Instance().PlayTransition(settings.activation_binding.sound, pivotxr_toggle_enabled_, dll_directory_);
+            SoundPlayer::Instance().PlayTransition(settings.activation_binding.sound, pivotxr_toggle_enabled_,
+                                                   dll_directory_, resolved_settings_.core.sound_volume);
         }
         return pivotxr_toggle_enabled_;
     }
 
     // Hold mode: pressing activates the effect, releasing deactivates it.
     if (was_pressed_this_call) {
-        SoundPlayer::Instance().PlayTransition(settings.activation_binding.sound, true, dll_directory_);
+        SoundPlayer::Instance().PlayTransition(settings.activation_binding.sound, true, dll_directory_,
+                                               resolved_settings_.core.sound_volume);
     } else if (was_released_this_call) {
-        SoundPlayer::Instance().PlayTransition(settings.activation_binding.sound, false, dll_directory_);
+        SoundPlayer::Instance().PlayTransition(settings.activation_binding.sound, false, dll_directory_,
+                                               resolved_settings_.core.sound_volume);
     }
 
     return binding_down;

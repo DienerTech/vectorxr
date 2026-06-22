@@ -225,15 +225,22 @@ export async function pickSoundFile(): Promise<string | null> {
     return null
   }
 
-  return invoke<string | null>('pick_sound_file')
+  const { open } = await import('@tauri-apps/plugin-dialog')
+  const selected = await open({
+    multiple: false,
+    directory: false,
+    filters: [{ name: 'WAV audio', extensions: ['wav'] }],
+  })
+
+  return typeof selected === 'string' ? selected : null
 }
 
-export async function playTestSound(path: string, activate: boolean): Promise<void> {
+export async function playTestSound(path: string, activate: boolean, volume = 100): Promise<void> {
   if (!tauriAvailable()) {
     return
   }
 
-  await invoke('play_test_sound', { path: path.trim() ? path : null, activate })
+  await invoke('play_test_sound', { path: path.trim() ? path : null, activate, volume })
 }
 
 export async function loadLogSnapshot(): Promise<LogSnapshot> {
