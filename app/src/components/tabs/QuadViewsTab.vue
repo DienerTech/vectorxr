@@ -50,10 +50,6 @@ const profileWarnings = computed(() => {
   return warnings;
 });
 
-function trackingModeLabel(settings: QuadViewsSettings) {
-  return settings.trackingMode === "eye" ? "Eye tracked" : "Head tracked";
-}
-
 function estimatedPixelBudget(settings: QuadViewsSettings) {
   const focusWidthScale =
     (settings.focusScale *
@@ -74,18 +70,41 @@ function budgetLabel(settings: QuadViewsSettings) {
   return `${estimatedPixelBudget(settings).toFixed(1)}% of stereo pixels`;
 }
 
-function budgetTone(settings: QuadViewsSettings) {
+type BudgetTone = "light" | "moderate" | "heavy" | "detrimental";
+
+function budgetToneKey(settings: QuadViewsSettings): BudgetTone {
   const budget = estimatedPixelBudget(settings);
 
+  if (budget > 100) {
+    return "detrimental";
+  }
   if (budget <= 45) {
-    return "Light";
+    return "light";
   }
-
   if (budget <= 85) {
-    return "Moderate";
+    return "moderate";
   }
+  return "heavy";
+}
 
-  return "Heavy";
+function budgetTone(settings: QuadViewsSettings) {
+  const labels: Record<BudgetTone, string> = {
+    light: "Light",
+    moderate: "Moderate",
+    heavy: "Heavy",
+    detrimental: "⚠ Detrimental",
+  };
+  return labels[budgetToneKey(settings)];
+}
+
+function budgetChipClass(settings: QuadViewsSettings) {
+  const classes: Record<BudgetTone, string> = {
+    light: "chip-success",
+    moderate: "chip-warning",
+    heavy: "chip-danger",
+    detrimental: "chip-danger quadviews-budget-alert",
+  };
+  return classes[budgetToneKey(settings)];
 }
 </script>
 
@@ -112,21 +131,6 @@ function budgetTone(settings: QuadViewsSettings) {
           Experimental - DX11 OpenXR applications only!
           </p>
         </div>
-        <label
-          class="pill-toggle inline-flex items-center gap-3 rounded-full px-4 py-2 text-sm font-medium"
-        >
-          <input
-            v-model="config.modules.quadviews.enabled"
-            class="h-4 w-4 accent-depthxr-copper"
-            type="checkbox"
-          />
-          Default Profile {{ config.modules.quadviews.enabled ? "On" : "Off" }}
-          <span
-            title="Turns the default Quadviews profile on or off for apps without an enabled custom profile."
-            class="cursor-help select-none text-xs text-muted"
-            >ⓘ</span
-          >
-        </label>
       </div>
 
       <details class="section-disclosure border-t pt-4" style="border-color: var(--app-border)" open>
@@ -137,12 +141,24 @@ function budgetTone(settings: QuadViewsSettings) {
           <span class="eyebrow text-xs font-semibold uppercase tracking-[0.24em]">Default Profile</span>
           <span class="text-xs text-muted">Applies to applications without an enabled custom profile</span>
           <span class="ml-auto flex items-center gap-2">
-            <span class="rounded-full px-2.5 py-1 text-xs font-semibold uppercase tracking-[0.14em] chip-accent">
+            <span
+              class="rounded-full px-2.5 py-1 text-xs font-semibold uppercase tracking-[0.14em]"
+              :class="budgetChipClass(config.modules.quadviews.defaults)"
+            >
               {{ budgetTone(config.modules.quadviews.defaults) }}
             </span>
-            <span class="text-xs text-muted">{{ budgetLabel(config.modules.quadviews.defaults) }}</span>
+            <span class="text-xs font-semibold">{{ budgetLabel(config.modules.quadviews.defaults) }}</span>
           </span>
         </summary>
+        <label class="pill-toggle mt-3 inline-flex items-center gap-3 rounded-full px-4 py-2 text-sm font-medium">
+          <input v-model="config.modules.quadviews.enabled" class="h-4 w-4 accent-depthxr-copper" type="checkbox" />
+          Default Profile {{ config.modules.quadviews.enabled ? "On" : "Off" }}
+          <span
+            title="Turns the default Quadviews profile on or off for apps without an enabled custom profile."
+            class="cursor-help select-none text-xs text-muted"
+            >ⓘ</span
+          >
+        </label>
         <QuadViewsSettingsFields class="mt-3" :settings="config.modules.quadviews.defaults" />
       </details>
     </article>
@@ -178,14 +194,11 @@ function budgetTone(settings: QuadViewsSettings) {
         <template #badges>
           <span
             v-if="profile.enabled"
-            class="rounded-full px-3 py-1 text-xs font-semibold uppercase tracking-[0.16em] chip-accent"
-            >{{ trackingModeLabel(profile.settings) }}</span
+            class="rounded-full px-3 py-1 text-xs font-semibold uppercase tracking-[0.16em]"
+            :class="budgetChipClass(profile.settings)"
+            >{{ budgetTone(profile.settings) }}</span
           >
-          <span
-            v-if="profile.enabled"
-            class="rounded-full px-3 py-1 text-xs font-semibold uppercase tracking-[0.16em] chip-accent"
-            >{{ budgetLabel(profile.settings) }}</span
-          >
+          <span v-if="profile.enabled" class="text-xs font-semibold">{{ budgetLabel(profile.settings) }}</span>
         </template>
 
         <QuadViewsSettingsFields :settings="profile.settings" />

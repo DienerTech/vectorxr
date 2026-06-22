@@ -23,7 +23,7 @@ fn default_version() -> u32 {
 }
 
 fn default_stereo_boost() -> f64 {
-    1.10
+    1.0
 }
 
 fn default_convergence() -> f64 {
@@ -50,6 +50,24 @@ fn default_activation_binding() -> InputBinding {
     InputBinding::None
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SoundFeedback {
+    #[serde(default)]
+    enabled: bool,
+    #[serde(default)]
+    activate_sound: String,
+    #[serde(default)]
+    deactivate_sound: String,
+}
+
+impl SoundFeedback {
+    // Configs that never opted into sounds round-trip without an empty `sound` block.
+    fn is_unset(&self) -> bool {
+        !self.enabled && self.activate_sound.is_empty() && self.deactivate_sound.is_empty()
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 enum InputBinding {
@@ -58,6 +76,8 @@ enum InputBinding {
     Keyboard {
         #[serde(default)]
         chord: Vec<String>,
+        #[serde(default, skip_serializing_if = "SoundFeedback::is_unset")]
+        sound: SoundFeedback,
     },
     #[serde(rename_all = "camelCase")]
     Device {
@@ -71,6 +91,8 @@ enum InputBinding {
         device_name: String,
         #[serde(default, skip_serializing_if = "String::is_empty")]
         input_label: String,
+        #[serde(default, skip_serializing_if = "SoundFeedback::is_unset")]
+        sound: SoundFeedback,
     },
 }
 
@@ -82,28 +104,28 @@ fn default_smoothing() -> f64 {
     0.2
 }
 
+fn default_activation_ramp_seconds() -> f64 {
+    0.35
+}
+
 fn default_deadzone_degrees() -> f64 {
     8.0
 }
 
 fn default_max_extra_yaw_degrees() -> f64 {
-    25.0
+    120.0
 }
 
 fn default_pitch_rotation_multiplier() -> f64 {
-    1.0
-}
-
-fn default_pitch_smoothing() -> f64 {
-    0.2
+    1.5
 }
 
 fn default_pitch_deadzone_degrees() -> f64 {
-    12.0
+    8.0
 }
 
 fn default_max_extra_pitch_degrees() -> f64 {
-    20.0
+    120.0
 }
 
 fn default_quadviews_tracking_mode() -> String {
@@ -166,6 +188,25 @@ struct RegisteredApplication {
     r#match: ProfileMatch,
 }
 
+fn default_sound_volume() -> u32 {
+    100
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SoundSettings {
+    #[serde(default = "default_sound_volume")]
+    volume: u32,
+}
+
+impl Default for SoundSettings {
+    fn default() -> Self {
+        Self {
+            volume: default_sound_volume(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CoreConfig {
@@ -177,6 +218,8 @@ struct CoreConfig {
     log_retention_files: u32,
     #[serde(default = "default_true")]
     track_seen_apps: bool,
+    #[serde(default)]
+    sound: SoundSettings,
 }
 
 impl Default for CoreConfig {
@@ -186,6 +229,7 @@ impl Default for CoreConfig {
             log_level: default_log_level(),
             log_retention_files: default_log_retention_files(),
             track_seen_apps: true,
+            sound: SoundSettings::default(),
         }
     }
 }
@@ -193,10 +237,6 @@ impl Default for CoreConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct DepthXRSettings {
-    #[serde(default = "default_true")]
-    stereo_boost_enabled: bool,
-    #[serde(default = "default_true")]
-    convergence_enabled: bool,
     #[serde(default = "default_stereo_boost")]
     stereo_boost: f64,
     #[serde(default = "default_convergence")]
@@ -206,8 +246,6 @@ struct DepthXRSettings {
 impl Default for DepthXRSettings {
     fn default() -> Self {
         Self {
-            stereo_boost_enabled: true,
-            convergence_enabled: true,
             stereo_boost: default_stereo_boost(),
             convergence: default_convergence(),
         }
@@ -232,7 +270,7 @@ struct DepthXRProfileConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct DepthXRModuleConfig {
-    #[serde(default = "default_true")]
+    #[serde(default = "default_false")]
     enabled: bool,
     #[serde(default)]
     defaults: DepthXRSettings,
@@ -264,7 +302,7 @@ fn default_depth_toggle_binding() -> InputBinding {
 impl Default for DepthXRModuleConfig {
     fn default() -> Self {
         Self {
-            enabled: true,
+            enabled: false,
             defaults: DepthXRSettings::default(),
             bindings: DepthXRBindings::default(),
             profiles: Vec::new(),
@@ -275,18 +313,18 @@ impl Default for DepthXRModuleConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct PivotXRSettings {
-    #[serde(default = "default_rotation_multiplier")]
-    rotation_multiplier: f64,
     #[serde(default = "default_smoothing")]
     smoothing: f64,
+    #[serde(default = "default_activation_ramp_seconds")]
+    activation_ramp_seconds: f64,
+    #[serde(default = "default_rotation_multiplier")]
+    rotation_multiplier: f64,
     #[serde(default = "default_deadzone_degrees")]
     deadzone_degrees: f64,
     #[serde(default = "default_max_extra_yaw_degrees")]
     max_extra_yaw_degrees: f64,
     #[serde(default = "default_pitch_rotation_multiplier")]
     pitch_rotation_multiplier: f64,
-    #[serde(default = "default_pitch_smoothing")]
-    pitch_smoothing: f64,
     #[serde(default = "default_pitch_deadzone_degrees")]
     pitch_deadzone_degrees: f64,
     #[serde(default = "default_max_extra_pitch_degrees")]
@@ -296,12 +334,12 @@ struct PivotXRSettings {
 impl Default for PivotXRSettings {
     fn default() -> Self {
         Self {
-            rotation_multiplier: default_rotation_multiplier(),
             smoothing: default_smoothing(),
+            activation_ramp_seconds: default_activation_ramp_seconds(),
+            rotation_multiplier: default_rotation_multiplier(),
             deadzone_degrees: default_deadzone_degrees(),
             max_extra_yaw_degrees: default_max_extra_yaw_degrees(),
             pitch_rotation_multiplier: default_pitch_rotation_multiplier(),
-            pitch_smoothing: default_pitch_smoothing(),
             pitch_deadzone_degrees: default_pitch_deadzone_degrees(),
             max_extra_pitch_degrees: default_max_extra_pitch_degrees(),
         }
@@ -1275,6 +1313,128 @@ fn move_openxr_layer(
     openxr_layers::move_openxr_layer(slice, manifest_path, direction)
 }
 
+// Loads a WAV into memory and scales 16-bit PCM samples by `gain`. Returns None
+// for formats we don't scale (the caller then plays the file at full volume) or
+// if the file isn't a parseable RIFF/WAVE container.
+#[cfg(target_os = "windows")]
+fn load_and_scale_wav(path: &Path, gain: f32) -> Option<Vec<u8>> {
+    let mut bytes = fs::read(path).ok()?;
+    if bytes.len() < 44 || &bytes[0..4] != b"RIFF" || &bytes[8..12] != b"WAVE" {
+        return None;
+    }
+
+    let mut audio_format = 0u16;
+    let mut bits = 0u16;
+    let mut data_range: Option<(usize, usize)> = None;
+    let mut pos = 12usize;
+    while pos + 8 <= bytes.len() {
+        let id = [bytes[pos], bytes[pos + 1], bytes[pos + 2], bytes[pos + 3]];
+        let size =
+            u32::from_le_bytes([bytes[pos + 4], bytes[pos + 5], bytes[pos + 6], bytes[pos + 7]])
+                as usize;
+        let body = pos + 8;
+        if &id == b"fmt " && body + 16 <= bytes.len() {
+            audio_format = u16::from_le_bytes([bytes[body], bytes[body + 1]]);
+            bits = u16::from_le_bytes([bytes[body + 14], bytes[body + 15]]);
+        } else if &id == b"data" {
+            data_range = Some((body, (body + size).min(bytes.len())));
+        }
+        pos = body + size + (size & 1);
+    }
+
+    let (start, end) = data_range?;
+    if audio_format != 1 || bits != 16 {
+        return None;
+    }
+
+    if (gain - 1.0).abs() > f32::EPSILON {
+        let mut i = start;
+        while i + 1 < end {
+            let sample = i16::from_le_bytes([bytes[i], bytes[i + 1]]) as f32;
+            let scaled = (sample * gain).round().clamp(-32768.0, 32767.0) as i16;
+            let out = scaled.to_le_bytes();
+            bytes[i] = out[0];
+            bytes[i + 1] = out[1];
+            i += 2;
+        }
+    }
+
+    Some(bytes)
+}
+
+/// Plays a .wav so the user can preview their choice from the config UI. An empty
+/// path falls back to the bundled default for the given transition; `volume`
+/// (0-100) scales the preview to match the configured level.
+#[tauri::command]
+fn play_test_sound(
+    app: tauri::AppHandle,
+    path: Option<String>,
+    activate: bool,
+    volume: Option<u32>,
+) -> Result<(), String> {
+    use tauri::Manager;
+
+    let resolved = match path {
+        Some(value) if !value.trim().is_empty() => PathBuf::from(value),
+        _ => {
+            let name = if activate {
+                "sounds/activate.wav"
+            } else {
+                "sounds/deactivate.wav"
+            };
+            app.path()
+                .resolve(name, tauri::path::BaseDirectory::Resource)
+                .map_err(|error| error.to_string())?
+        }
+    };
+
+    if !resolved.exists() {
+        return Err(format!(
+            "Sound file not found: {}",
+            resolved.to_string_lossy()
+        ));
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        use windows::core::PCWSTR;
+        use windows::Win32::Media::Audio::{
+            PlaySoundW, SND_FILENAME, SND_MEMORY, SND_NODEFAULT,
+        };
+
+        let gain = (volume.unwrap_or(100).min(100) as f32) / 100.0;
+
+        // Scaled in-memory playback is synchronous (no SND_ASYNC) so the buffer
+        // stays valid for the lifetime of the call; the clip is a fraction of a
+        // second, so briefly blocking this command thread is fine.
+        if let Some(image) = load_and_scale_wav(&resolved, gain) {
+            let _ = unsafe {
+                PlaySoundW(
+                    PCWSTR(image.as_ptr() as *const u16),
+                    None,
+                    SND_MEMORY | SND_NODEFAULT,
+                )
+            };
+            return Ok(());
+        }
+
+        let wide: Vec<u16> = resolved
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        let _ = unsafe { PlaySoundW(PCWSTR(wide.as_ptr()), None, SND_FILENAME | SND_NODEFAULT) };
+        Ok(())
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = volume;
+        Err("Sound preview is only supported on Windows".into())
+    }
+}
+
 fn main() {
     if let Some(result) = openxr_layers::run_elevated_helper_from_args() {
         if let Err(error) = result {
@@ -1284,6 +1444,7 @@ fn main() {
     }
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             load_config,
             save_config,
@@ -1298,7 +1459,8 @@ fn main() {
             load_openxr_layers,
             ensure_openxr_layer_elevation,
             set_openxr_layer_enabled,
-            move_openxr_layer
+            move_openxr_layer,
+            play_test_sound
         ])
         .run(tauri::generate_context!())
         .expect("failed to run VectorXR Tauri app");

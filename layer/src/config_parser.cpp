@@ -1,5 +1,6 @@
 #include "depthxr/config_parser.h"
 
+#include <algorithm>
 #include <cctype>
 #include <fstream>
 #include <map>
@@ -549,6 +550,32 @@ bool CheckAllowedKeys(const JsonValue::Object& object,
                       const std::unordered_set<std::string>& allowed,
                       std::string& error);
 
+bool ParseSoundFeedback(const JsonValue& value, SoundFeedback& out, std::string& error) {
+    const JsonValue::Object* object = RequireObject(value, "inputBinding.sound", error);
+    if (!object) {
+        return false;
+    }
+
+    static const std::unordered_set<std::string> allowed = {"enabled", "activateSound", "deactivateSound"};
+    if (!CheckAllowedKeys(*object, allowed, error)) {
+        return false;
+    }
+
+    std::optional<bool> enabled;
+    std::optional<std::string> activate_sound;
+    std::optional<std::string> deactivate_sound;
+    if (!ReadOptionalBool(*object, "enabled", enabled, error) ||
+        !ReadOptionalString(*object, "activateSound", activate_sound, error) ||
+        !ReadOptionalString(*object, "deactivateSound", deactivate_sound, error)) {
+        return false;
+    }
+
+    out.enabled = enabled.value_or(false);
+    out.activate_sound = activate_sound.value_or(std::string{});
+    out.deactivate_sound = deactivate_sound.value_or(std::string{});
+    return true;
+}
+
 bool ParseInputBinding(const JsonValue& value, InputBinding& out, std::string& error) {
     const JsonValue::Object* object = RequireObject(value, "inputBinding", error);
     if (!object) {
@@ -574,7 +601,7 @@ bool ParseInputBinding(const JsonValue& value, InputBinding& out, std::string& e
     }
 
     if (out.type == InputBindingType::Keyboard) {
-        static const std::unordered_set<std::string> allowed = {"type", "chord"};
+        static const std::unordered_set<std::string> allowed = {"type", "chord", "sound"};
         if (!CheckAllowedKeys(*object, allowed, error)) {
             return false;
         }
@@ -605,10 +632,14 @@ bool ParseInputBinding(const JsonValue& value, InputBinding& out, std::string& e
             return false;
         }
 
+        if (const auto sound_it = object->find("sound"); sound_it != object->end() && !ParseSoundFeedback(sound_it->second, out.sound, error)) {
+            return false;
+        }
+
         return true;
     }
 
-    static const std::unordered_set<std::string> allowed = {"type", "deviceGuid", "inputPath", "productGuid", "deviceName", "inputLabel"};
+    static const std::unordered_set<std::string> allowed = {"type", "deviceGuid", "inputPath", "productGuid", "deviceName", "inputLabel", "sound"};
     if (!CheckAllowedKeys(*object, allowed, error)) {
         return false;
     }
@@ -642,6 +673,10 @@ bool ParseInputBinding(const JsonValue& value, InputBinding& out, std::string& e
         out.input_label = input_label_it->second.AsString();
     }
 
+    if (const auto sound_it = object->find("sound"); sound_it != object->end() && !ParseSoundFeedback(sound_it->second, out.sound, error)) {
+        return false;
+    }
+
     return true;
 }
 
@@ -663,6 +698,7 @@ bool ParseCoreSettings(const JsonValue::Object& object, CoreSettings& out, std::
         "logLevel",
         "logRetentionFiles",
         "trackSeenApps",
+        "sound",
     };
 
     if (!CheckAllowedKeys(object, allowed, error)) {
@@ -692,6 +728,24 @@ bool ParseCoreSettings(const JsonValue::Object& object, CoreSettings& out, std::
     }
     if (track_seen_apps.has_value()) {
         out.track_seen_apps = *track_seen_apps;
+    }
+
+    if (const auto sound_it = object.find("sound"); sound_it != object.end()) {
+        const JsonValue::Object* sound_object = RequireObject(sound_it->second, "core.sound", error);
+        if (!sound_object) {
+            return false;
+        }
+        static const std::unordered_set<std::string> sound_allowed = {"volume"};
+        if (!CheckAllowedKeys(*sound_object, sound_allowed, error)) {
+            return false;
+        }
+        std::optional<int> volume;
+        if (!ReadOptionalInt(*sound_object, "volume", volume, error)) {
+            return false;
+        }
+        if (volume.has_value()) {
+            out.sound_volume = std::clamp(*volume, 0, 100);
+        }
     }
 
     return true;
@@ -741,6 +795,9 @@ bool ParseApplication(const JsonValue& value, RegisteredApplication& out, std::s
 
 bool ParseDepthDefaults(const JsonValue::Object& object, DepthXrResolvedSettings& out, std::string& error) {
     static const std::unordered_set<std::string> allowed = {
+        // stereoBoostEnabled/convergenceEnabled are legacy: accepted (so older
+        // configs still load) but no longer have any effect. Neutral values
+        // (stereoBoost 1.0 / convergence 0.0) mean "off".
         "stereoBoostEnabled",
         "convergenceEnabled",
         "stereoBoost",
@@ -751,24 +808,14 @@ bool ParseDepthDefaults(const JsonValue::Object& object, DepthXrResolvedSettings
         return false;
     }
 
-    std::optional<bool> stereo_boost_enabled;
-    std::optional<bool> convergence_enabled;
     std::optional<double> stereo_boost;
     std::optional<double> convergence;
 
-    if (!ReadOptionalBool(object, "stereoBoostEnabled", stereo_boost_enabled, error) ||
-        !ReadOptionalBool(object, "convergenceEnabled", convergence_enabled, error) ||
-        !ReadOptionalNumber(object, "stereoBoost", stereo_boost, error) ||
+    if (!ReadOptionalNumber(object, "stereoBoost", stereo_boost, error) ||
         !ReadOptionalNumber(object, "convergence", convergence, error)) {
         return false;
     }
 
-    if (stereo_boost_enabled.has_value()) {
-        out.stereo_boost_enabled = *stereo_boost_enabled;
-    }
-    if (convergence_enabled.has_value()) {
-        out.convergence_enabled = *convergence_enabled;
-    }
     if (stereo_boost.has_value()) {
         out.stereo_boost = *stereo_boost;
     }
@@ -799,6 +846,7 @@ bool ParseDepthBindings(const JsonValue::Object& object, DepthXrBindings& out, s
 
 bool ParseDepthProfileSettings(const JsonValue::Object& object, DepthXrSettingsOverride& out, std::string& error) {
     static const std::unordered_set<std::string> allowed = {
+        // Legacy keys accepted but ignored (see ParseDepthDefaults).
         "stereoBoostEnabled",
         "convergenceEnabled",
         "stereoBoost",
@@ -809,9 +857,7 @@ bool ParseDepthProfileSettings(const JsonValue::Object& object, DepthXrSettingsO
         return false;
     }
 
-    return ReadOptionalBool(object, "stereoBoostEnabled", out.stereo_boost_enabled, error) &&
-           ReadOptionalBool(object, "convergenceEnabled", out.convergence_enabled, error) &&
-           ReadOptionalNumber(object, "stereoBoost", out.stereo_boost, error) &&
+    return ReadOptionalNumber(object, "stereoBoost", out.stereo_boost, error) &&
            ReadOptionalNumber(object, "convergence", out.convergence, error);
 }
 
@@ -926,45 +972,51 @@ bool ParseDepthModule(const JsonValue::Object& object,
 
 bool ParsePivotSettings(const JsonValue::Object& object, PivotXrSettings& out, std::string& error) {
     static const std::unordered_set<std::string> allowed = {
-        "rotationMultiplier",
         "smoothing",
+        "activationRampSeconds",
+        "rotationMultiplier",
         "deadzoneDegrees",
         "maxExtraYawDegrees",
         "pitchRotationMultiplier",
-        "pitchSmoothing",
         "pitchDeadzoneDegrees",
         "maxExtraPitchDegrees",
+        // Legacy: per-axis smoothing collapsed into a single "smoothing".
+        // Accepted but ignored so older configs still load.
+        "pitchSmoothing",
     };
 
     if (!CheckAllowedKeys(object, allowed, error)) {
         return false;
     }
 
-    std::optional<double> rotation_multiplier;
     std::optional<double> smoothing;
+    std::optional<double> activation_ramp_seconds;
+    std::optional<double> rotation_multiplier;
     std::optional<double> deadzone_degrees;
     std::optional<double> max_extra_yaw_degrees;
     std::optional<double> pitch_rotation_multiplier;
-    std::optional<double> pitch_smoothing;
     std::optional<double> pitch_deadzone_degrees;
     std::optional<double> max_extra_pitch_degrees;
 
-    if (!ReadOptionalNumber(object, "rotationMultiplier", rotation_multiplier, error) ||
-        !ReadOptionalNumber(object, "smoothing", smoothing, error) ||
+    if (!ReadOptionalNumber(object, "smoothing", smoothing, error) ||
+        !ReadOptionalNumber(object, "activationRampSeconds", activation_ramp_seconds, error) ||
+        !ReadOptionalNumber(object, "rotationMultiplier", rotation_multiplier, error) ||
         !ReadOptionalNumber(object, "deadzoneDegrees", deadzone_degrees, error) ||
         !ReadOptionalNumber(object, "maxExtraYawDegrees", max_extra_yaw_degrees, error) ||
         !ReadOptionalNumber(object, "pitchRotationMultiplier", pitch_rotation_multiplier, error) ||
-        !ReadOptionalNumber(object, "pitchSmoothing", pitch_smoothing, error) ||
         !ReadOptionalNumber(object, "pitchDeadzoneDegrees", pitch_deadzone_degrees, error) ||
         !ReadOptionalNumber(object, "maxExtraPitchDegrees", max_extra_pitch_degrees, error)) {
         return false;
     }
 
+    if (smoothing.has_value()) {
+        out.smoothing = *smoothing;
+    }
+    if (activation_ramp_seconds.has_value()) {
+        out.activation_ramp_seconds = *activation_ramp_seconds;
+    }
     if (rotation_multiplier.has_value()) {
         out.yaw_rotation_multiplier = *rotation_multiplier;
-    }
-    if (smoothing.has_value()) {
-        out.yaw_smoothing = *smoothing;
     }
     if (deadzone_degrees.has_value()) {
         out.yaw_deadzone_degrees = *deadzone_degrees;
@@ -974,9 +1026,6 @@ bool ParsePivotSettings(const JsonValue::Object& object, PivotXrSettings& out, s
     }
     if (pitch_rotation_multiplier.has_value()) {
         out.pitch_rotation_multiplier = *pitch_rotation_multiplier;
-    }
-    if (pitch_smoothing.has_value()) {
-        out.pitch_smoothing = *pitch_smoothing;
     }
     if (pitch_deadzone_degrees.has_value()) {
         out.pitch_deadzone_degrees = *pitch_deadzone_degrees;

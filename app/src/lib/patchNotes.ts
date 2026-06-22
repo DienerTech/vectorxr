@@ -8,6 +8,21 @@ export interface PatchNoteEntry {
 
 export const patchNotes: PatchNoteEntry[] = [
   {
+    version: '0.11.0',
+    date: '2026-06-19',
+    title: 'Beta Release',
+    summary: 'VectorXR enters beta with smoother Pivot easing, clearer and more honest Depth and Pivot controls, a color-coded Quadviews performance budget, optional sound cues for bindings, and headset runtime-compatibility guidance.',
+    items: [
+      'Pivot now eases smoothly in and out when toggled instead of snapping, with a tunable activation ramp and a single smoothing control shared by yaw and pitch.',
+      'Synchronized the Pivot yaw and pitch defaults for a consistent out-of-the-box feel.',
+      'Reworked the Depth controls with bipolar sliders centered at neutral and one value per effect, and fixed the runtime toggle to apply saved values instantly as a clean on/off switch.',
+      'Added a Depth compatibility notice for headset-native OpenXR runtimes (such as Pimax) that can ignore Depth, with guidance to use the SteamVR pipeline.',
+      'Quadviews now color-codes its performance budget (green/amber/red) and takes Foveate/Peripheral resolution as a percent of headset resolution.',
+      'Added optional sound feedback for keybind and device bindings: play a short .wav on activate/deactivate using the bundled tones or your own, with a master volume control in Settings.',
+      'Enhancement default profiles now ship off for consistency.',
+    ],
+  },
+  {
     version: '0.10.0',
     date: '2026-06-16',
     title: 'Profile opt-in controls',

@@ -271,6 +271,10 @@ class OpenXrLayer {
     uint32_t eye_gaze_diagnostic_stride_counter_{0};
     double pivotxr_smoothed_extra_yaw_radians_{0.0};
     double pivotxr_smoothed_extra_pitch_radians_{0.0};
+    // Activation envelope in [0,1]: eases the pivot effect in/out on the
+    // enable/disable transition so toggling never snaps the view, independent
+    // of the per-frame tracking smoothing.
+    double pivotxr_activation_gain_{0.0};
     std::optional<std::chrono::steady_clock::time_point> pivotxr_last_smoothing_wall_time_;
     bool pivotxr_toggle_enabled_{false};
     bool pivotxr_activation_key_was_down_{false};

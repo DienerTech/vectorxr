@@ -36,14 +36,6 @@ function moduleDotClass(tab: { enhancementActive?: boolean }): string {
 
 <template>
   <nav class="side-nav flex h-full w-56 shrink-0 flex-col border-r px-3 py-4">
-    <div class="mb-5 flex items-center gap-2.5 px-2">
-      <img :src="logoUrl" alt="VectorXR logo" class="side-nav-mark h-8 w-8 rounded-[0.6rem] object-contain" />
-      <div>
-        <p class="text-sm font-semibold tracking-tight">VectorXR</p>
-        <p class="text-[0.68rem] text-soft">v{{ version }}</p>
-      </div>
-    </div>
-
     <p class="side-nav-group-label px-2">App Settings</p>
     <div class="mt-1.5 grid gap-1">
       <button
@@ -79,7 +71,15 @@ function moduleDotClass(tab: { enhancementActive?: boolean }): string {
     </div>
 
     <div class="mt-auto px-2 pt-4">
-      <p class="text-[0.68rem] leading-4 text-soft">Changes apply to future OpenXR app launches.</p>
+      <p class="text-[0.68rem] leading-4 text-soft">Enabling or disabling an enhancement will apply to future OpenXR app launches.</p>
+
+      <div class="mt-4 flex items-center gap-2.5 border-t pt-3" style="border-color: var(--app-border)">
+        <img :src="logoUrl" alt="VectorXR logo" class="side-nav-mark h-10 w-10 rounded-[0.6rem] object-contain" />
+        <div>
+          <p class="text-sm font-semibold tracking-tight">VectorXR</p>
+          <p class="text-[0.68rem] text-soft">v{{ version }}</p>
+        </div>
+      </div>
     </div>
   </nav>
 </template>

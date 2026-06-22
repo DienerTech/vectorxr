@@ -1,6 +1,14 @@
 param(
-  [string]$SourcePath = (Join-Path $PSScriptRoot "..\icon-image-5.png"),
-  [string]$OutputDir = (Join-Path $PSScriptRoot "..\app\src-tauri\icons")
+  # Full "XR" logo, used as the main icon at larger resolutions.
+  [string]$SourcePath = (Join-Path $PSScriptRoot "..\icon-vectorxr-full.png"),
+  # Simplified chevron mark, used for small ICO frames (title bar, small taskbar)
+  # where the full logo would be illegible.
+  [string]$MarkSourcePath = (Join-Path $PSScriptRoot "..\icon-vectorxr-mark.png"),
+  # ICO frames at or below this pixel size use the mark; larger frames use the logo.
+  [int]$MarkMaxSize = 32,
+  [string]$OutputDir = (Join-Path $PSScriptRoot "..\app\src-tauri\icons"),
+  # In-app sidebar brand logo (bundled by Vite), kept in sync with the full logo.
+  [string]$AssetLogoPath = (Join-Path $PSScriptRoot "..\app\src\assets\logo.png")
 )
 
 $ErrorActionPreference = "Stop"
@@ -96,6 +104,7 @@ function New-IcoFile {
 }
 
 $sourceFullPath = Resolve-FullPath $SourcePath
+$markFullPath = Resolve-FullPath $MarkSourcePath
 
 if (-not (Test-Path -LiteralPath $OutputDir)) {
   New-Item -ItemType Directory -Path $OutputDir | Out-Null
@@ -105,13 +114,28 @@ $outputFullPath = Resolve-Path -LiteralPath $OutputDir
 $outputDirPath = $outputFullPath.ProviderPath
 
 $sourceImage = [System.Drawing.Bitmap]::FromFile($sourceFullPath)
+$markImage = [System.Drawing.Bitmap]::FromFile($markFullPath)
 try {
   if ($sourceImage.Width -ne $sourceImage.Height) {
-    throw "Source icon must be square. Got ${($sourceImage.Width)}x${($sourceImage.Height)}."
+    throw "Source icon must be square. Got $($sourceImage.Width)x$($sourceImage.Height)."
+  }
+  if ($markImage.Width -ne $markImage.Height) {
+    throw "Mark icon must be square. Got $($markImage.Width)x$($markImage.Height)."
   }
 
+  # The 512px PNG (window icon and non-Windows platforms) always uses the full logo.
   New-ResizedPng -Source $sourceImage -Size 512 -Path (Join-Path $outputDirPath "icon.png")
 
+  # In-app sidebar logo, regenerated from the same full logo so the UI stays in sync.
+  $assetLogoDir = Split-Path -Parent $AssetLogoPath
+  if (-not (Test-Path -LiteralPath $assetLogoDir)) {
+    New-Item -ItemType Directory -Path $assetLogoDir -Force | Out-Null
+  }
+  $assetLogoFullPath = Join-Path (Resolve-Path -LiteralPath $assetLogoDir).ProviderPath (Split-Path -Leaf $AssetLogoPath)
+  New-ResizedPng -Source $sourceImage -Size 256 -Path $assetLogoFullPath
+
+  # Two-tier ICO: small frames use the simplified mark so the title bar / small
+  # taskbar stay legible; larger frames carry the full logo.
   $icoFrames = @(16, 24, 32, 48, 64, 128, 256)
   $tempDir = Join-Path $outputDirPath ".icon-build"
   if (Test-Path -LiteralPath $tempDir) {
@@ -121,8 +145,9 @@ try {
 
   try {
     $icoPngPaths = foreach ($size in $icoFrames) {
+      $frameSource = if ($size -le $MarkMaxSize) { $markImage } else { $sourceImage }
       $framePath = Join-Path $tempDir "$size.png"
-      New-ResizedPng -Source $sourceImage -Size $size -Path $framePath
+      New-ResizedPng -Source $frameSource -Size $size -Path $framePath
       $framePath
     }
 
@@ -134,7 +159,11 @@ try {
   }
 } finally {
   $sourceImage.Dispose()
+  $markImage.Dispose()
 }
 
-Write-Host "Generated Tauri icons from $sourceFullPath"
-Write-Host "Output: $outputDirPath"
+Write-Host "Generated Tauri icons:"
+Write-Host "  Main logo : $sourceFullPath"
+Write-Host "  Small mark: $markFullPath  (ICO frames <= ${MarkMaxSize}px)"
+Write-Host "  OS icons  : $outputDirPath"
+Write-Host "  App logo  : $assetLogoFullPath"

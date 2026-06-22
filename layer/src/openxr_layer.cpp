@@ -20,6 +20,7 @@
 #include "depthxr/input_devices.h"
 #include "depthxr/process_info.h"
 #include "depthxr/seen_apps.h"
+#include "depthxr/sound_player.h"
 
 namespace depthxr {
 namespace {
@@ -34,6 +35,11 @@ bool NearlyZero(double value) {
 
 double Clamp(double value, double min_value, double max_value) {
     return std::max(min_value, std::min(max_value, value));
+}
+
+double SmoothStep(double t) {
+    const double clamped = Clamp(t, 0.0, 1.0);
+    return clamped * clamped * (3.0 - 2.0 * clamped);
 }
 
 double DegreesToRadians(double degrees) {
@@ -739,6 +745,11 @@ bool IsQuadViewConfiguration(XrViewConfigurationType type) {
     return type == XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO_WITH_FOVEATED_INSET;
 }
 
+// Pivot activation envelope easing duration is per-profile
+// (PivotXrResolvedSettings::activation_ramp_seconds, default 0.35s). It decouples
+// the on/off feel from the per-frame tracking smoothing so enabling pivot while
+// the head is already turned never snaps the view.
+constexpr double kPivotActivationGainEpsilon = 0.0001;
 constexpr XrTime kMaxPivotPoseDeltaMatchWindow = 5'000'000;
 constexpr XrTime kMaxQuadViewsFovMatchWindow = 5'000'000;
 constexpr size_t kMaxCachedQuadViewsFovFrames = 180;
@@ -755,8 +766,6 @@ bool SameSettings(const ResolvedRuntimeConfig& lhs, const ResolvedRuntimeConfig&
            lhs.core.log_retention_files == rhs.core.log_retention_files &&
            lhs.core.track_seen_apps == rhs.core.track_seen_apps &&
            lhs.depthxr.enabled == rhs.depthxr.enabled &&
-           lhs.depthxr.stereo_boost_enabled == rhs.depthxr.stereo_boost_enabled &&
-           lhs.depthxr.convergence_enabled == rhs.depthxr.convergence_enabled &&
            NearlyEqual(lhs.depthxr.stereo_boost, rhs.depthxr.stereo_boost) &&
            NearlyEqual(lhs.depthxr.convergence, rhs.depthxr.convergence) &&
            lhs.depthxr_bindings.toggle_enabled.type == rhs.depthxr_bindings.toggle_enabled.type &&
@@ -775,12 +784,12 @@ bool SameSettings(const ResolvedRuntimeConfig& lhs, const ResolvedRuntimeConfig&
            lhs.pivotxr.activation_binding.product_guid == rhs.pivotxr.activation_binding.product_guid &&
            lhs.pivotxr.activation_binding.device_name == rhs.pivotxr.activation_binding.device_name &&
            lhs.pivotxr.activation_binding.input_label == rhs.pivotxr.activation_binding.input_label &&
+           NearlyEqual(lhs.pivotxr.smoothing, rhs.pivotxr.smoothing) &&
+           NearlyEqual(lhs.pivotxr.activation_ramp_seconds, rhs.pivotxr.activation_ramp_seconds) &&
            NearlyEqual(lhs.pivotxr.yaw_rotation_multiplier, rhs.pivotxr.yaw_rotation_multiplier) &&
-           NearlyEqual(lhs.pivotxr.yaw_smoothing, rhs.pivotxr.yaw_smoothing) &&
            NearlyEqual(lhs.pivotxr.yaw_deadzone_degrees, rhs.pivotxr.yaw_deadzone_degrees) &&
            NearlyEqual(lhs.pivotxr.yaw_max_extra_degrees, rhs.pivotxr.yaw_max_extra_degrees) &&
            NearlyEqual(lhs.pivotxr.pitch_rotation_multiplier, rhs.pivotxr.pitch_rotation_multiplier) &&
-           NearlyEqual(lhs.pivotxr.pitch_smoothing, rhs.pivotxr.pitch_smoothing) &&
            NearlyEqual(lhs.pivotxr.pitch_deadzone_degrees, rhs.pivotxr.pitch_deadzone_degrees) &&
            NearlyEqual(lhs.pivotxr.pitch_max_extra_degrees, rhs.pivotxr.pitch_max_extra_degrees) &&
            lhs.quadviews.enabled == rhs.quadviews.enabled &&
@@ -804,7 +813,10 @@ bool SameInputBinding(const InputBinding& lhs, const InputBinding& rhs) {
            lhs.input_path == rhs.input_path &&
            lhs.product_guid == rhs.product_guid &&
            lhs.device_name == rhs.device_name &&
-           lhs.input_label == rhs.input_label;
+           lhs.input_label == rhs.input_label &&
+           lhs.sound.enabled == rhs.sound.enabled &&
+           lhs.sound.activate_sound == rhs.sound.activate_sound &&
+           lhs.sound.deactivate_sound == rhs.sound.deactivate_sound;
 }
 
 bool SamePivotActivationBinding(const PivotXrResolvedSettings& lhs, const PivotXrResolvedSettings& rhs) {
@@ -2459,6 +2471,7 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
         cached_quadviews_fovs_.clear();
         pivotxr_smoothed_extra_yaw_radians_ = 0.0;
         pivotxr_smoothed_extra_pitch_radians_ = 0.0;
+        pivotxr_activation_gain_ = 0.0;
         pivotxr_last_smoothing_wall_time_.reset();
         PrunePivotPoseDeltas(frame_end_info->displayTime);
         PruneQuadViewsFovs(frame_end_info->displayTime);
@@ -2474,6 +2487,7 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
         cached_pivot_pose_deltas_.clear();
         pivotxr_smoothed_extra_yaw_radians_ = 0.0;
         pivotxr_smoothed_extra_pitch_radians_ = 0.0;
+        pivotxr_activation_gain_ = 0.0;
         pivotxr_last_smoothing_wall_time_.reset();
     }
 
@@ -2486,6 +2500,41 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
                            !NearlyZero(pose_delta.orientation.z) || !NearlyEqual(pose_delta.orientation.w, 1.0f) ||
                            !NearlyZero(pose_delta.position.x) || !NearlyZero(pose_delta.position.y) ||
                            !NearlyZero(pose_delta.position.z));
+
+    // Log what the app actually submitted (independent of the pivot/quadviews
+    // branch below) so we can confirm whether DepthXR's xrLocateViews per-eye
+    // pose/FOV survives into the composition layer the runtime presents, or
+    // whether the app re-derives its own. Does not consume the counter; the
+    // branch diagnostics below own the decrement.
+    if (pending_end_frame_diagnostics_ > 0) {
+        for (uint32_t i = 0; i < frame_end_info->layerCount; ++i) {
+            const XrCompositionLayerBaseHeader* base_header = frame_end_info->layers[i];
+            if (!base_header || base_header->type != XR_TYPE_COMPOSITION_LAYER_PROJECTION) {
+                continue;
+            }
+            const auto* projection_layer =
+                reinterpret_cast<const XrCompositionLayerProjection*>(base_header);
+            if (!projection_layer->views || projection_layer->viewCount == 0) {
+                continue;
+            }
+            std::ostringstream stream;
+            stream << "EndFrame submitted projection: frameTime=" << frame_end_info->displayTime
+                   << ", layer=" << i << ", viewCount=" << projection_layer->viewCount;
+            const uint32_t logged = std::min<uint32_t>(projection_layer->viewCount, 4);
+            for (uint32_t v = 0; v < logged; ++v) {
+                const XrCompositionLayerProjectionView& view = projection_layer->views[v];
+                stream << " view" << v << "Pos=(" << FormatDiagnosticDouble(view.pose.position.x) << ", "
+                       << FormatDiagnosticDouble(view.pose.position.y) << ", "
+                       << FormatDiagnosticDouble(view.pose.position.z) << ")"
+                       << " view" << v << "Fov=(" << FormatDiagnosticDouble(view.fov.angleLeft) << ", "
+                       << FormatDiagnosticDouble(view.fov.angleRight) << ", "
+                       << FormatDiagnosticDouble(view.fov.angleUp) << ", "
+                       << FormatDiagnosticDouble(view.fov.angleDown) << ")";
+            }
+            logger_.Debug(stream.str());
+            break;
+        }
+    }
 
     if (!has_non_identity_delta && !quadviews_projection_split_active) {
         if (pending_end_frame_diagnostics_ > 0) {
@@ -2776,6 +2825,10 @@ XrResult OpenXrLayer::LocateViews(XrSession session,
     }
 
     const bool pivotxr_active = IsPivotXrActive(resolved_settings_.pivotxr);
+    // Keep driving pivot while the activation envelope is still easing out so a
+    // toggle-off releases the view smoothly instead of snapping back to center.
+    const bool pivotxr_envelope_engaged =
+        pivotxr_active || pivotxr_activation_gain_ > kPivotActivationGainEpsilon;
     const bool depthxr_active = IsDepthXrActive();
     if (resolved_settings_.pivotxr.enabled && !has_logged_pivotxr_spike_mode_) {
         std::ostringstream stream;
@@ -2787,7 +2840,7 @@ XrResult OpenXrLayer::LocateViews(XrSession session,
         has_logged_pivotxr_spike_mode_ = true;
     }
 
-    if (resolved_settings_.pivotxr.enabled && pivotxr_active && internal_view_space_ != XR_NULL_HANDLE &&
+    if (resolved_settings_.pivotxr.enabled && pivotxr_envelope_engaged && internal_view_space_ != XR_NULL_HANDLE &&
         view_locate_info) {
         XrSpaceLocation pivot_view_location{XR_TYPE_SPACE_LOCATION};
         double applied_extra_yaw_radians = 0.0;
@@ -2841,23 +2894,20 @@ XrResult OpenXrLayer::LocateViews(XrSession session,
             } else {
                 CachePivotPoseDelta(view_locate_info->displayTime, IdentityPose());
             }
-            pivotxr_smoothed_extra_yaw_radians_ = applied_extra_yaw_radians;
-            pivotxr_smoothed_extra_pitch_radians_ = applied_extra_pitch_radians;
+            // LocateSpaceWithPivot owns the steady-state smoothed angles and the
+            // activation envelope; do not write the eased output back onto them.
         }
-    } else if (!pivotxr_active) {
+    } else if (!pivotxr_envelope_engaged) {
         pivotxr_smoothed_extra_yaw_radians_ = 0.0;
         pivotxr_smoothed_extra_pitch_radians_ = 0.0;
+        pivotxr_activation_gain_ = 0.0;
         pivotxr_last_smoothing_wall_time_.reset();
     }
 
-    if (depthxr_active &&
-        resolved_settings_.depthxr.stereo_boost_enabled &&
-        !NearlyEqual(resolved_settings_.depthxr.stereo_boost, 1.0)) {
+    if (depthxr_active && !NearlyEqual(resolved_settings_.depthxr.stereo_boost, 1.0)) {
         ApplyStereoBoost(adjusted_views, resolved_settings_.depthxr.stereo_boost, view_layout);
     }
-    if (depthxr_active &&
-        resolved_settings_.depthxr.convergence_enabled &&
-        !NearlyEqual(resolved_settings_.depthxr.convergence, 0.0)) {
+    if (depthxr_active && !NearlyEqual(resolved_settings_.depthxr.convergence, 0.0)) {
         ApplyConvergence(adjusted_views, resolved_settings_.depthxr.convergence, view_layout);
     }
 
@@ -2914,6 +2964,7 @@ XrResult OpenXrLayer::LocateViews(XrSession session,
                << ", viewConfig=" << ToString(view_configuration_type)
                << ", pivotExtraYawRadians=" << FormatDiagnosticDouble(pivotxr_smoothed_extra_yaw_radians_)
                << ", pivotExtraPitchRadians=" << FormatDiagnosticDouble(pivotxr_smoothed_extra_pitch_radians_)
+               << ", pivotActivationGain=" << FormatDiagnosticDouble(pivotxr_activation_gain_)
                << ", leftYawDelta=" << FormatDiagnosticDouble(left_yaw_delta)
                << ", rightYawDelta=" << FormatDiagnosticDouble(right_yaw_delta)
                << ", leftInsetYawDelta=" << FormatDiagnosticDouble(left_inset_yaw_delta)
@@ -2921,9 +2972,7 @@ XrResult OpenXrLayer::LocateViews(XrSession session,
                << ", leftPitchDelta=" << FormatDiagnosticDouble(left_pitch_delta)
                << ", rightPitchDelta=" << FormatDiagnosticDouble(right_pitch_delta)
                << ", depthRuntimeActive=" << depthxr_active
-               << ", stereoBoostEnabled=" << resolved_settings_.depthxr.stereo_boost_enabled
                << ", stereoBoost=" << FormatDiagnosticDouble(resolved_settings_.depthxr.stereo_boost)
-               << ", convergenceEnabled=" << resolved_settings_.depthxr.convergence_enabled
                << ", convergence=" << FormatDiagnosticDouble(resolved_settings_.depthxr.convergence)
                << ", leftXDelta=" << FormatDiagnosticDouble(left_position_delta)
                << ", rightXDelta=" << FormatDiagnosticDouble(right_position_delta)
@@ -3231,6 +3280,7 @@ void OpenXrLayer::ResetSessionState() {
     eye_gaze_diagnostic_stride_counter_ = 0;
     pivotxr_smoothed_extra_yaw_radians_ = 0.0;
     pivotxr_smoothed_extra_pitch_radians_ = 0.0;
+    pivotxr_activation_gain_ = 0.0;
     pivotxr_last_smoothing_wall_time_.reset();
     depthxr_toggle_enabled_ = true;
     depthxr_toggle_binding_was_down_ = false;
@@ -3888,38 +3938,66 @@ XrResult OpenXrLayer::LocateSpaceWithPivot(XrSpace space,
     if (applied_pose_delta) {
         *applied_pose_delta = IdentityPose();
     }
-    if (XR_FAILED(result) || !settings.enabled) {
+    auto clear_extra_outputs = [&]() {
         if (applied_extra_yaw_radians) {
             *applied_extra_yaw_radians = 0.0;
         }
         if (applied_extra_pitch_radians) {
             *applied_extra_pitch_radians = 0.0;
         }
+    };
+
+    if (XR_FAILED(result) || !settings.enabled) {
+        pivotxr_activation_gain_ = 0.0;
+        clear_extra_outputs();
         return result;
     }
 
-    if (!pivotxr_active) {
+    // Advance the wall-clock delta and ease the activation envelope toward its
+    // target. update_smoothing is true only on the xrLocateViews drive call;
+    // the xrLocateSpace path (head-attached geometry) reads the same envelope
+    // without advancing it so both stay in sync within a frame.
+    double delta_seconds = 0.0;
+    if (update_smoothing) {
+        const auto now = std::chrono::steady_clock::now();
+        if (pivotxr_last_smoothing_wall_time_.has_value()) {
+            delta_seconds =
+                std::chrono::duration<double>(now - *pivotxr_last_smoothing_wall_time_).count();
+        }
+        pivotxr_last_smoothing_wall_time_ = now;
+
+        const double target_gain = pivotxr_active ? 1.0 : 0.0;
+        const double ramp_seconds = settings.activation_ramp_seconds;
+        if (ramp_seconds <= 0.0) {
+            pivotxr_activation_gain_ = target_gain;
+        } else if (delta_seconds > 0.0) {
+            const double step = delta_seconds / ramp_seconds;
+            if (target_gain > pivotxr_activation_gain_) {
+                pivotxr_activation_gain_ = std::min(target_gain, pivotxr_activation_gain_ + step);
+            } else {
+                pivotxr_activation_gain_ = std::max(target_gain, pivotxr_activation_gain_ - step);
+            }
+        }
+    }
+
+    // Fully release once the envelope has closed and the pivot is no longer
+    // engaged. While the envelope is still open we keep applying the (eased)
+    // pivot so toggling off releases the view smoothly.
+    if (!pivotxr_active && pivotxr_activation_gain_ <= kPivotActivationGainEpsilon) {
+        pivotxr_activation_gain_ = 0.0;
         pivotxr_smoothed_extra_yaw_radians_ = 0.0;
         pivotxr_smoothed_extra_pitch_radians_ = 0.0;
-        pivotxr_last_smoothing_wall_time_.reset();
-        if (applied_extra_yaw_radians) {
-            *applied_extra_yaw_radians = 0.0;
+        if (update_smoothing) {
+            pivotxr_last_smoothing_wall_time_.reset();
         }
-        if (applied_extra_pitch_radians) {
-            *applied_extra_pitch_radians = 0.0;
-        }
+        clear_extra_outputs();
         return result;
     }
 
     const bool space_is_view = IsTrackedViewSpace(space);
     const bool base_space_is_view = IsTrackedViewSpace(base_space);
     if (space_is_view == base_space_is_view) {
-        if (applied_extra_yaw_radians) {
-            *applied_extra_yaw_radians = 0.0;
-        }
-        if (applied_extra_pitch_radians) {
-            *applied_extra_pitch_radians = 0.0;
-        }
+        clear_extra_outputs();
         return result;
     }
 
@@ -3931,36 +4009,32 @@ XrResult OpenXrLayer::LocateSpaceWithPivot(XrSpace space,
         view_pose.orientation.z,
         view_pose.orientation.w,
     };
-    double delta_seconds = 0.0;
-    if (update_smoothing) {
-        const auto now = std::chrono::steady_clock::now();
-        if (pivotxr_last_smoothing_wall_time_.has_value()) {
-            delta_seconds =
-                std::chrono::duration<double>(now - *pivotxr_last_smoothing_wall_time_).count();
-        }
-        pivotxr_last_smoothing_wall_time_ = now;
+
+    // Track the steady-state pivot amount only while actively engaged. During
+    // the release ramp it is frozen and the envelope eases the applied angle to
+    // zero, avoiding any snap on toggle-off.
+    if (update_smoothing && pivotxr_active) {
+        const double current_yaw_radians = ExtractYawRadians(orientation);
+        const double current_pitch_radians = ExtractPitchRadians(orientation);
+        ComputePivotExtraAngleRadians(current_yaw_radians,
+                                      settings.yaw_rotation_multiplier,
+                                      settings.yaw_deadzone_degrees,
+                                      settings.yaw_max_extra_degrees,
+                                      settings.smoothing,
+                                      delta_seconds,
+                                      pivotxr_smoothed_extra_yaw_radians_);
+        ComputePivotExtraAngleRadians(current_pitch_radians,
+                                      settings.pitch_rotation_multiplier,
+                                      settings.pitch_deadzone_degrees,
+                                      settings.pitch_max_extra_degrees,
+                                      settings.smoothing,
+                                      delta_seconds,
+                                      pivotxr_smoothed_extra_pitch_radians_);
     }
 
-    const double current_yaw_radians = ExtractYawRadians(orientation);
-    const double current_pitch_radians = ExtractPitchRadians(orientation);
-    double extra_yaw_radians = pivotxr_smoothed_extra_yaw_radians_;
-    double extra_pitch_radians = pivotxr_smoothed_extra_pitch_radians_;
-    if (update_smoothing) {
-        extra_yaw_radians = ComputePivotExtraAngleRadians(current_yaw_radians,
-                                                         settings.yaw_rotation_multiplier,
-                                                         settings.yaw_deadzone_degrees,
-                                                         settings.yaw_max_extra_degrees,
-                                                         settings.yaw_smoothing,
-                                                         delta_seconds,
-                                                         pivotxr_smoothed_extra_yaw_radians_);
-        extra_pitch_radians = ComputePivotExtraAngleRadians(current_pitch_radians,
-                                                           settings.pitch_rotation_multiplier,
-                                                           settings.pitch_deadzone_degrees,
-                                                           settings.pitch_max_extra_degrees,
-                                                           settings.pitch_smoothing,
-                                                           delta_seconds,
-                                                           pivotxr_smoothed_extra_pitch_radians_);
-    }
+    const double eased_gain = SmoothStep(pivotxr_activation_gain_);
+    const double extra_yaw_radians = pivotxr_smoothed_extra_yaw_radians_ * eased_gain;
+    const double extra_pitch_radians = pivotxr_smoothed_extra_pitch_radians_ * eased_gain;
     if (applied_extra_yaw_radians) {
         *applied_extra_yaw_radians = extra_yaw_radians;
     }
@@ -3989,19 +4063,17 @@ void OpenXrLayer::LogResolvedSettings(const ResolvedRuntimeConfig& settings) {
            << ", logLevel=" << ToString(settings.core.log_level)
            << ", depthxrEnabled=" << settings.depthxr.enabled
            << ", depthToggleBinding=" << BindingLabel(settings.depthxr_bindings.toggle_enabled)
-           << ", stereoBoostEnabled=" << settings.depthxr.stereo_boost_enabled
            << ", stereoBoost=" << settings.depthxr.stereo_boost
-           << ", convergenceEnabled=" << settings.depthxr.convergence_enabled
            << ", convergence=" << settings.depthxr.convergence
            << ", pivotxrEnabled=" << settings.pivotxr.enabled
            << ", pivotActivation=" << ToString(settings.pivotxr.activation_mode)
            << ", pivotActivationBinding=" << BindingLabel(settings.pivotxr.activation_binding)
+           << ", pivotSmoothing=" << settings.pivotxr.smoothing
+           << ", pivotActivationRamp=" << settings.pivotxr.activation_ramp_seconds
            << ", pivotYawMultiplier=" << settings.pivotxr.yaw_rotation_multiplier
-           << ", pivotYawSmoothing=" << settings.pivotxr.yaw_smoothing
            << ", pivotYawDeadzone=" << settings.pivotxr.yaw_deadzone_degrees
            << ", pivotYawMaxExtra=" << settings.pivotxr.yaw_max_extra_degrees
            << ", pivotPitchMultiplier=" << settings.pivotxr.pitch_rotation_multiplier
-           << ", pivotPitchSmoothing=" << settings.pivotxr.pitch_smoothing
            << ", pivotPitchDeadzone=" << settings.pivotxr.pitch_deadzone_degrees
            << ", pivotPitchMaxExtra=" << settings.pivotxr.pitch_max_extra_degrees
            << ", quadviewsEnabled=" << settings.quadviews.enabled
@@ -4022,6 +4094,7 @@ void OpenXrLayer::LogResolvedSettings(const ResolvedRuntimeConfig& settings) {
 void OpenXrLayer::ResetPivotActivationState() {
     pivotxr_smoothed_extra_yaw_radians_ = 0.0;
     pivotxr_smoothed_extra_pitch_radians_ = 0.0;
+    pivotxr_activation_gain_ = 0.0;
     pivotxr_last_smoothing_wall_time_.reset();
     pivotxr_toggle_enabled_ = false;
     pivotxr_activation_key_was_down_ = false;
@@ -4122,21 +4195,31 @@ bool OpenXrLayer::IsDepthXrActive() {
     // Input polls can hit DirectInput device reads; throttle them so per-call
     // OpenXR interception stays cheap.
     const auto now = std::chrono::steady_clock::now();
-    if (!depthxr_binding_last_poll_time_.has_value() ||
-        now - *depthxr_binding_last_poll_time_ >= kInputBindingPollInterval) {
+    // First poll after a reset (session start, or the binding being (re)assigned)
+    // primes the edge detector: a button still held from the bind gesture must
+    // not register as a press, or it would flip depth off its enabled default.
+    const bool first_poll = !depthxr_binding_last_poll_time_.has_value();
+    if (first_poll || now - *depthxr_binding_last_poll_time_ >= kInputBindingPollInterval) {
         depthxr_binding_last_poll_time_ = now;
         depthxr_binding_down_cached_ = IsInputBindingDown(resolved_settings_.depthxr_bindings.toggle_enabled);
     }
     const bool binding_down = depthxr_binding_down_cached_;
+    if (first_poll) {
+        depthxr_toggle_binding_was_down_ = binding_down;
+    }
     const bool was_pressed_this_call = binding_down && !depthxr_toggle_binding_was_down_;
     depthxr_toggle_binding_was_down_ = binding_down;
 
     if (was_pressed_this_call) {
         depthxr_toggle_enabled_ = !depthxr_toggle_enabled_;
         pending_locate_views_diagnostics_ = 5;
+        pending_end_frame_diagnostics_ = 5;
         logger_.Info(std::string("Depth effects ") +
                      (depthxr_toggle_enabled_ ? "enabled" : "disabled") + " via " +
                      BindingLabel(resolved_settings_.depthxr_bindings.toggle_enabled) + ".");
+        SoundPlayer::Instance().PlayTransition(resolved_settings_.depthxr_bindings.toggle_enabled.sound,
+                                               depthxr_toggle_enabled_, dll_directory_,
+                                               resolved_settings_.core.sound_volume);
     }
 
     return depthxr_toggle_enabled_;
@@ -4153,13 +4236,20 @@ bool OpenXrLayer::IsPivotXrActive(const PivotXrResolvedSettings& settings) {
 
 #if defined(_WIN32)
     const auto now = std::chrono::steady_clock::now();
-    if (!pivotxr_binding_last_poll_time_.has_value() ||
-        now - *pivotxr_binding_last_poll_time_ >= kInputBindingPollInterval) {
+    // Prime the edge detector on the first poll after a reset so a button held
+    // from the bind gesture does not register as a spurious activation press.
+    const bool first_poll = !pivotxr_binding_last_poll_time_.has_value();
+    if (first_poll || now - *pivotxr_binding_last_poll_time_ >= kInputBindingPollInterval) {
         pivotxr_binding_last_poll_time_ = now;
         pivotxr_binding_down_cached_ = IsInputBindingDown(settings.activation_binding);
     }
     const bool binding_down = pivotxr_binding_down_cached_;
-    const bool was_pressed_this_call = binding_down && !pivotxr_activation_key_was_down_;
+    if (first_poll) {
+        pivotxr_activation_key_was_down_ = binding_down;
+    }
+    const bool was_down_before = pivotxr_activation_key_was_down_;
+    const bool was_pressed_this_call = binding_down && !was_down_before;
+    const bool was_released_this_call = !binding_down && was_down_before;
     pivotxr_activation_key_was_down_ = binding_down;
 
     if (settings.activation_mode == ActivationMode::Toggle) {
@@ -4170,8 +4260,19 @@ bool OpenXrLayer::IsPivotXrActive(const PivotXrResolvedSettings& settings) {
             logger_.Info(std::string("PivotXR extra pivot factor ") +
                          (pivotxr_toggle_enabled_ ? "enabled" : "disabled") + " via " +
                          BindingLabel(settings.activation_binding) + ".");
+            SoundPlayer::Instance().PlayTransition(settings.activation_binding.sound, pivotxr_toggle_enabled_,
+                                                   dll_directory_, resolved_settings_.core.sound_volume);
         }
         return pivotxr_toggle_enabled_;
+    }
+
+    // Hold mode: pressing activates the effect, releasing deactivates it.
+    if (was_pressed_this_call) {
+        SoundPlayer::Instance().PlayTransition(settings.activation_binding.sound, true, dll_directory_,
+                                               resolved_settings_.core.sound_volume);
+    } else if (was_released_this_call) {
+        SoundPlayer::Instance().PlayTransition(settings.activation_binding.sound, false, dll_directory_,
+                                               resolved_settings_.core.sound_volume);
     }
 
     return binding_down;

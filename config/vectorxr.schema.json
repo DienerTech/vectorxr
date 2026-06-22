@@ -47,6 +47,21 @@
       "type": "string",
       "pattern": "^(Ctrl|Alt|Shift|F([1-9]|1[0-2])|[A-Z]|[0-9]|Space)$"
     },
+    "soundFeedback": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "activateSound": {
+          "type": "string"
+        },
+        "deactivateSound": {
+          "type": "string"
+        }
+      }
+    },
     "inputBinding": {
       "oneOf": [
         {
@@ -79,6 +94,9 @@
                 "$ref": "#/$defs/keyboardKey"
               },
               "uniqueItems": true
+            },
+            "sound": {
+              "$ref": "#/$defs/soundFeedback"
             }
           }
         },
@@ -110,6 +128,9 @@
             },
             "inputLabel": {
               "type": "string"
+            },
+            "sound": {
+              "$ref": "#/$defs/soundFeedback"
             }
           }
         }
@@ -177,6 +198,17 @@
         },
         "trackSeenApps": {
           "type": "boolean"
+        },
+        "sound": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "volume": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 100
+            }
+          }
         }
       }
     },
@@ -184,27 +216,19 @@
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "stereoBoostEnabled",
-        "convergenceEnabled",
         "stereoBoost",
         "convergence"
       ],
       "properties": {
-        "stereoBoostEnabled": {
-          "type": "boolean"
-        },
-        "convergenceEnabled": {
-          "type": "boolean"
-        },
         "stereoBoost": {
           "type": "number",
-          "minimum": 0.5,
+          "minimum": 0.0,
           "maximum": 2.0
         },
         "convergence": {
           "type": "number",
-          "minimum": -0.5,
-          "maximum": 0.5
+          "minimum": -0.25,
+          "maximum": 0.25
         }
       }
     },
@@ -281,25 +305,30 @@
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "rotationMultiplier",
         "smoothing",
+        "activationRampSeconds",
+        "rotationMultiplier",
         "deadzoneDegrees",
         "maxExtraYawDegrees",
         "pitchRotationMultiplier",
-        "pitchSmoothing",
         "pitchDeadzoneDegrees",
         "maxExtraPitchDegrees"
       ],
       "properties": {
-        "rotationMultiplier": {
-          "type": "number",
-          "minimum": 1.0,
-          "maximum": 3.0
-        },
         "smoothing": {
           "type": "number",
           "minimum": 0.0,
           "maximum": 1.0
+        },
+        "activationRampSeconds": {
+          "type": "number",
+          "minimum": 0.0,
+          "maximum": 2.0
+        },
+        "rotationMultiplier": {
+          "type": "number",
+          "minimum": 1.0,
+          "maximum": 3.0
         },
         "deadzoneDegrees": {
           "type": "number",
@@ -315,11 +344,6 @@
           "type": "number",
           "minimum": 1.0,
           "maximum": 3.0
-        },
-        "pitchSmoothing": {
-          "type": "number",
-          "minimum": 0.0,
-          "maximum": 1.0
         },
         "pitchDeadzoneDegrees": {
           "type": "number",

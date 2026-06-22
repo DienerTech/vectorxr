@@ -20,8 +20,6 @@
     "depthxr": {
       "enabled": true,
       "defaults": {
-        "stereoBoostEnabled": true,
-        "convergenceEnabled": true,
         "stereoBoost": 1.1,
         "convergence": 0.0
       },
@@ -38,8 +36,6 @@
             "dcs"
           ],
           "settings": {
-            "stereoBoostEnabled": true,
-            "convergenceEnabled": true,
             "stereoBoost": 1.12,
             "convergence": 0.06
           }
@@ -49,12 +45,12 @@
     "pivotxr": {
       "enabled": false,
       "defaults": {
-        "rotationMultiplier": 1.5,
         "smoothing": 0.2,
+        "activationRampSeconds": 0.35,
+        "rotationMultiplier": 1.5,
         "deadzoneDegrees": 8.0,
         "maxExtraYawDegrees": 25.0,
         "pitchRotationMultiplier": 1.0,
-        "pitchSmoothing": 0.2,
         "pitchDeadzoneDegrees": 12.0,
         "maxExtraPitchDegrees": 20.0
       },
@@ -70,12 +66,12 @@
             "type": "none"
           },
           "settings": {
-            "rotationMultiplier": 1.7,
             "smoothing": 0.2,
+            "activationRampSeconds": 0.35,
+            "rotationMultiplier": 1.7,
             "deadzoneDegrees": 10.0,
             "maxExtraYawDegrees": 60.0,
             "pitchRotationMultiplier": 1.2,
-            "pitchSmoothing": 0.2,
             "pitchDeadzoneDegrees": 15.0,
             "maxExtraPitchDegrees": 45.0
           }

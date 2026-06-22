@@ -5,6 +5,7 @@ add_library(
     src/input_devices.cpp
     src/seen_apps.cpp
     src/settings.cpp
+    src/sound_player.cpp
     src/settings_resolver.cpp
     src/util/config_path.cpp
     src/util/logger.cpp
@@ -17,7 +18,7 @@ add_library(
 target_include_directories(depthxr_core PUBLIC include)
 target_compile_features(depthxr_core PUBLIC cxx_std_20)
 if(WIN32)
-    target_link_libraries(depthxr_core PUBLIC dinput8 dxguid ole32)
+    target_link_libraries(depthxr_core PUBLIC dinput8 dxguid ole32 winmm)
 endif()
 
 if(WIN32 AND DEPTHXR_BUILD_LAYER)
@@ -97,6 +98,12 @@ if(WIN32 AND DEPTHXR_BUILD_LAYER)
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
                 ${CMAKE_CURRENT_SOURCE_DIR}/manifest/XR_APILAYER_DIENERTECH_VECTORXR.json
                 $<TARGET_FILE_DIR:XR_APILAYER_DIENERTECH_VECTORXR>/XR_APILAYER_DIENERTECH_VECTORXR.json
+        COMMAND ${CMAKE_COMMAND} -E make_directory
+                $<TARGET_FILE_DIR:XR_APILAYER_DIENERTECH_VECTORXR>/sounds
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                ${CMAKE_CURRENT_SOURCE_DIR}/assets/sounds/activate.wav
+                ${CMAKE_CURRENT_SOURCE_DIR}/assets/sounds/deactivate.wav
+                $<TARGET_FILE_DIR:XR_APILAYER_DIENERTECH_VECTORXR>/sounds/
     )
 endif()
 

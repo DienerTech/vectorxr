@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 
 import BindingEditor from '../BindingEditor.vue'
 import EffectField from '../EffectField.vue'
@@ -17,6 +17,8 @@ defineEmits<{
   removeProfile: [index: number]
   syncProfileName: [index: number]
 }>()
+
+const compatibilityInfoOpen = ref(false)
 
 const profileWarnings = computed(() => {
   const warnings = new Map<number, string[]>()
@@ -49,17 +51,23 @@ const profileWarnings = computed(() => {
   <div class="space-y-4">
     <article class="rounded-[1.25rem] border p-5 shadow-panel backdrop-blur surface-panel">
       <!-- Module header -->
-      <div class="mb-4 flex flex-wrap items-center justify-between gap-3">
+      <div class="mb-4 flex flex-wrap items-start justify-between gap-3">
         <div>
           <h2 class="text-2xl font-semibold tracking-tight">Depth</h2>
           <p class="mt-2 max-w-3xl text-sm leading-6 text-muted">
             Tune stereo boost and convergence defaults, then add per-application profiles when a title needs different depth behavior. Start with small value changes and use the runtime toggle binding for quick comparisons in headset.
           </p>
         </div>
-        <label class="pill-toggle inline-flex items-center gap-3 rounded-full px-4 py-2 text-sm font-medium">
-          <input v-model="config.modules.depthxr.enabled" class="h-4 w-4 accent-depthxr-copper" type="checkbox" />
-          Default Profile {{ config.modules.depthxr.enabled ? 'On' : 'Off' }}
-        </label>
+        <button
+          class="button-secondary inline-flex items-center gap-2 rounded-[0.75rem] px-4 py-2 text-sm font-medium"
+          type="button"
+          @click="compatibilityInfoOpen = true"
+        >
+          <span class="inline-flex h-5 w-5 items-center justify-center rounded-full border text-xs" style="border-color: var(--app-border)">
+            i
+          </span>
+          Depth Compatibility
+        </button>
       </div>
 
       <!-- Module-level binding — applies regardless of which profile is active -->
@@ -79,33 +87,35 @@ const profileWarnings = computed(() => {
           <span class="eyebrow text-xs font-semibold uppercase tracking-[0.24em]">Default Profile</span>
           <span class="text-xs text-muted">Applies to applications without an enabled custom profile</span>
         </summary>
+        <label class="pill-toggle mt-3 inline-flex items-center gap-3 rounded-full px-4 py-2 text-sm font-medium">
+          <input v-model="config.modules.depthxr.enabled" class="h-4 w-4 accent-depthxr-copper" type="checkbox" />
+          Default Profile {{ config.modules.depthxr.enabled ? 'On' : 'Off' }}
+        </label>
         <div class="mt-3 grid gap-3 lg:grid-cols-2">
           <EffectField
-            v-model:enabled="config.modules.depthxr.defaults.stereoBoostEnabled"
             v-model:value="config.modules.depthxr.defaults.stereoBoost"
             title="Stereo Boost"
-            subtitle="Scales horizontal eye separation around the midpoint. Start around +5.0 to +10.0 and adjust slowly."
-            :min="1"
+            subtitle="Widens or narrows the gap between your two eye viewpoints (0% = your real IPD). Positive adds depth and 3D 'pop' and can make the world feel miniaturized; negative flattens depth and makes it feel larger. Start around +10–25%; high values exaggerate parallax and can strain your eyes."
+            :min="0"
             :max="2"
             :step="0.01"
-            :display-min="0"
+            :display-min="-100"
             :display-max="100"
-            :display-step="0.1"
+            :display-step="1"
             :display-value="toStereoBoostDisplay"
             :parse-display-value="fromStereoBoostDisplay"
             :display-badge="stereoBoostBadge"
           />
           <EffectField
-            v-model:enabled="config.modules.depthxr.defaults.convergenceEnabled"
             v-model:value="config.modules.depthxr.defaults.convergence"
             title="Convergence"
-            subtitle="Moves the zero-parallax plane by shifting per-eye projection centers. Start at 0.0; it can be particularly strong and may not apply in all titles."
-            :min="0"
-            :max="0.5"
-            :step="0.001"
-            :display-min="0"
-            :display-max="500"
-            :display-step="0.1"
+            subtitle="Shifts where your eyes' sightlines cross — the distance that sits at screen depth with no parallax. Positive pulls that plane toward you (near objects pop forward); negative pushes it away (scene settles back, can ease strain). 0 = app default. Use small amounts (±2–10); large values force your eyes to cross and break fusion."
+            :min="-0.25"
+            :max="0.25"
+            :step="0.01"
+            :display-min="-25"
+            :display-max="25"
+            :display-step="1"
             :display-value="toConvergenceDisplay"
             :parse-display-value="fromConvergenceDisplay"
             :display-badge="convergenceBadge"
@@ -138,33 +148,31 @@ const profileWarnings = computed(() => {
       >
         <div class="grid gap-3 lg:grid-cols-2">
           <EffectField
-            v-model:enabled="profile.settings.stereoBoostEnabled"
             v-model:value="profile.settings.stereoBoost"
             :muted="!profile.enabled"
             title="Stereo Boost"
-            subtitle="Scales horizontal eye separation around the midpoint. Start around +5.0 to +10.0 and adjust slowly."
-            :min="1"
+            subtitle="Widens or narrows the gap between your two eye viewpoints (0% = your real IPD). Positive adds depth and 3D 'pop' and can make the world feel miniaturized; negative flattens depth and makes it feel larger. Start around +10–25%; high values exaggerate parallax and can strain your eyes."
+            :min="0"
             :max="2"
             :step="0.01"
-            :display-min="0"
+            :display-min="-100"
             :display-max="100"
-            :display-step="0.1"
+            :display-step="1"
             :display-value="toStereoBoostDisplay"
             :parse-display-value="fromStereoBoostDisplay"
             :display-badge="stereoBoostBadge"
           />
           <EffectField
-            v-model:enabled="profile.settings.convergenceEnabled"
             v-model:value="profile.settings.convergence"
             :muted="!profile.enabled"
             title="Convergence"
-            subtitle="Shifts projection centers to move the zero-parallax plane. Start at 0.0; it can be particularly strong and may not apply in all titles."
-            :min="0"
-            :max="0.5"
-            :step="0.001"
-            :display-min="0"
-            :display-max="500"
-            :display-step="0.1"
+            subtitle="Shifts where your eyes' sightlines cross — the distance that sits at screen depth with no parallax. Positive pulls that plane toward you (near objects pop forward); negative pushes it away (scene settles back, can ease strain). 0 = app default. Use small amounts (±2–10); large values force your eyes to cross and break fusion."
+            :min="-0.25"
+            :max="0.25"
+            :step="0.01"
+            :display-min="-25"
+            :display-max="25"
+            :display-step="1"
             :display-value="toConvergenceDisplay"
             :parse-display-value="fromConvergenceDisplay"
             :display-badge="convergenceBadge"
@@ -179,5 +187,33 @@ const profileWarnings = computed(() => {
         No custom profiles yet. Add a profile to override depth values for a specific application.
       </div>
     </section>
+
+    <div v-if="compatibilityInfoOpen" class="fixed inset-0 z-50 flex items-center justify-center bg-black/45 px-4 py-6 backdrop-blur-sm">
+      <div class="w-full max-w-[720px] rounded-[1.25rem] border p-5 surface-panel-strong">
+        <div class="flex flex-wrap items-start justify-between gap-4">
+          <div>
+            <p class="eyebrow text-xs uppercase tracking-[0.24em]">Depth Compatibility</p>
+            <h2 class="mt-2 text-xl font-semibold tracking-tight">A Special Note About OpenXR Runtimes</h2>
+          </div>
+          <button class="button-secondary rounded-[0.75rem] px-4 py-2 text-sm font-medium" type="button" @click="compatibilityInfoOpen = false">
+            Close
+          </button>
+        </div>
+
+        <div class="mt-5 space-y-4 text-sm leading-6">
+          <div class="rounded-[1rem] border px-4 py-4 chip-accent" style="border-color: var(--app-border)">
+            ⚠ Some headset-native OpenXR runtimes — notably Pimax's PiOpenXR — can override the per-eye geometry VectorXR submits, ignoring Depth's stereo boost and convergence entirely.
+          </div>
+
+          <div class="rounded-[1rem] border px-4 py-4 surface-panel">
+            If you enable Depth and see no change in the headset even at strong values, your runtime is most likely normalizing it away. This is not a VectorXR limitation — the adjustment is applied correctly up to the point the runtime presents the frame.
+          </div>
+
+          <div class="rounded-[1rem] border px-4 py-4 surface-panel">
+            Workaround: switch your active OpenXR runtime to SteamVR, which faithfully honors the submitted projection. Depth then applies as expected. Pivot and Quadviews are unaffected by this issue.
+          </div>
+        </div>
+      </div>
+    </div>
   </div>
 </template>

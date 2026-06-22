@@ -36,6 +36,15 @@ enum class ProfileMode {
     Disable,
 };
 
+// Optional audible feedback played when a binding's action activates or
+// deactivates. Paths are absolute; an empty path means "use the bundled
+// default WAV shipped next to the layer DLL". Disabled bindings never play.
+struct SoundFeedback {
+    bool enabled{false};
+    std::string activate_sound;   // empty = bundled default
+    std::string deactivate_sound; // empty = bundled default
+};
+
 struct InputBinding {
     InputBindingType type{InputBindingType::None};
     std::vector<std::string> chord;
@@ -44,6 +53,7 @@ struct InputBinding {
     std::string product_guid;
     std::string device_name;
     std::string input_label;
+    SoundFeedback sound;
 };
 
 struct CoreSettings {
@@ -51,19 +61,19 @@ struct CoreSettings {
     LogLevel log_level{LogLevel::Info};
     int log_retention_files{7};
     bool track_seen_apps{true};
+    // Master volume (0-100) for binding activate/deactivate sound feedback.
+    int sound_volume{100};
 };
 
 struct DepthXrSettingsOverride {
-    std::optional<bool> stereo_boost_enabled;
-    std::optional<bool> convergence_enabled;
     std::optional<double> stereo_boost;
     std::optional<double> convergence;
 };
 
 struct DepthXrResolvedSettings {
     bool enabled{true};
-    bool stereo_boost_enabled{true};
-    bool convergence_enabled{true};
+    // Neutral values (stereo_boost 1.0, convergence 0.0) mean "no effect"; there
+    // is no separate per-effect enable flag.
     double stereo_boost{1.0};
     double convergence{0.0};
 };
@@ -92,21 +102,24 @@ struct DepthXrProfile {
 };
 
 struct DepthXrModuleConfig {
-    bool enabled{true};
+    bool enabled{false};
     DepthXrResolvedSettings defaults;
     DepthXrBindings bindings;
     std::vector<DepthXrProfile> profiles;
 };
 
 struct PivotXrSettings {
+    // General (apply to both axes).
+    double smoothing{0.2};
+    double activation_ramp_seconds{0.35};
+    // Yaw.
     double yaw_rotation_multiplier{1.5};
-    double yaw_smoothing{0.2};
     double yaw_deadzone_degrees{8.0};
-    double yaw_max_extra_degrees{25.0};
-    double pitch_rotation_multiplier{1.0};
-    double pitch_smoothing{0.2};
-    double pitch_deadzone_degrees{12.0};
-    double pitch_max_extra_degrees{20.0};
+    double yaw_max_extra_degrees{120.0};
+    // Pitch (defaults intentionally match yaw for a consistent feel).
+    double pitch_rotation_multiplier{1.5};
+    double pitch_deadzone_degrees{8.0};
+    double pitch_max_extra_degrees{120.0};
 };
 
 struct PivotXrProfile {
@@ -132,14 +145,14 @@ struct PivotXrResolvedSettings {
     bool enabled{false};
     ActivationMode activation_mode{ActivationMode::Toggle};
     InputBinding activation_binding;
+    double smoothing{0.2};
+    double activation_ramp_seconds{0.35};
     double yaw_rotation_multiplier{1.5};
-    double yaw_smoothing{0.2};
     double yaw_deadzone_degrees{8.0};
-    double yaw_max_extra_degrees{25.0};
-    double pitch_rotation_multiplier{1.0};
-    double pitch_smoothing{0.2};
-    double pitch_deadzone_degrees{12.0};
-    double pitch_max_extra_degrees{20.0};
+    double yaw_max_extra_degrees{120.0};
+    double pitch_rotation_multiplier{1.5};
+    double pitch_deadzone_degrees{8.0};
+    double pitch_max_extra_degrees{120.0};
 };
 
 struct QuadViewsSettings {

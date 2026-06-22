@@ -23,9 +23,18 @@ export const keyboardBindingKeyGroups = [
 
 export const keyboardModifierKeys = ['Ctrl', 'Alt', 'Shift'] as const
 
+// Optional audible feedback played when a binding's action activates or
+// deactivates. An empty sound path means "use the bundled default WAV".
+export interface SoundFeedback {
+  enabled: boolean
+  activateSound: string
+  deactivateSound: string
+}
+
 export interface KeyboardBinding {
   type: 'keyboard'
   chord: string[]
+  sound?: SoundFeedback
 }
 
 export interface DeviceBinding {
@@ -35,6 +44,7 @@ export interface DeviceBinding {
   productGuid?: string
   deviceName?: string
   inputLabel?: string
+  sound?: SoundFeedback
 }
 
 export interface NoneBinding {
@@ -43,11 +53,17 @@ export interface NoneBinding {
 
 export type InputBinding = NoneBinding | KeyboardBinding | DeviceBinding
 
+// Global feedback-sound settings shared by every binding's activate/deactivate cue.
+export interface SoundSettings {
+  volume: number
+}
+
 export interface CoreConfig {
   enabled: boolean
   logLevel: LogLevel
   logRetentionFiles: number
   trackSeenApps: boolean
+  sound: SoundSettings
 }
 
 export interface RegisteredApplication {
@@ -60,8 +76,6 @@ export interface RegisteredApplication {
 }
 
 export interface DepthXRSettings {
-  stereoBoostEnabled: boolean
-  convergenceEnabled: boolean
   stereoBoost: number
   convergence: number
 }
@@ -85,12 +99,12 @@ export interface DepthXRModuleConfig {
 }
 
 export interface PivotXRSettings {
-  rotationMultiplier: number
   smoothing: number
+  activationRampSeconds: number
+  rotationMultiplier: number
   deadzoneDegrees: number
   maxExtraYawDegrees: number
   pitchRotationMultiplier: number
-  pitchSmoothing: number
   pitchDeadzoneDegrees: number
   maxExtraPitchDegrees: number
 }
@@ -191,14 +205,21 @@ export function defaultCoreConfig(): CoreConfig {
     logLevel: 'info',
     logRetentionFiles: 7,
     trackSeenApps: true,
+    sound: { volume: 100 },
   }
+}
+
+function normalizeVolume(value: unknown): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    return 100
+  }
+
+  return Math.min(100, Math.max(0, Math.round(value)))
 }
 
 export function defaultDepthXRSettings(): DepthXRSettings {
   return {
-    stereoBoostEnabled: true,
-    convergenceEnabled: true,
-    stereoBoost: 1.1,
+    stereoBoost: 1.0,
     convergence: 0,
   }
 }
@@ -251,14 +272,14 @@ export function createApplication(exe = 'Game.exe', applications: RegisteredAppl
 
 export function defaultPivotXRSettings(): PivotXRSettings {
   return {
-    rotationMultiplier: 1.5,
     smoothing: 0.2,
+    activationRampSeconds: 0.35,
+    rotationMultiplier: 1.5,
     deadzoneDegrees: 8,
-    maxExtraYawDegrees: 25,
-    pitchRotationMultiplier: 1.0,
-    pitchSmoothing: 0.2,
-    pitchDeadzoneDegrees: 12,
-    maxExtraPitchDegrees: 20,
+    maxExtraYawDegrees: 120,
+    pitchRotationMultiplier: 1.5,
+    pitchDeadzoneDegrees: 8,
+    maxExtraPitchDegrees: 120,
   }
 }
 
@@ -275,6 +296,14 @@ export function defaultQuadViewsSettings(): QuadViewsSettings {
     verticalOffsetDegrees: 0,
     gazeSmoothing: 0.15,
     gazeDeadzoneDegrees: 1.5,
+  }
+}
+
+export function defaultSoundFeedback(): SoundFeedback {
+  return {
+    enabled: false,
+    activateSound: '',
+    deactivateSound: '',
   }
 }
 
@@ -309,7 +338,7 @@ export function defaultConfig(): VectorXRConfig {
     applications: [],
     modules: {
       depthxr: {
-        enabled: true,
+        enabled: false,
         defaults: defaultDepthXRSettings(),
         bindings: defaultDepthXRBindings(),
         profiles: [],
@@ -387,8 +416,6 @@ function normalizeDepthXRSettings(value: unknown, fallback: DepthXRSettings): De
   const source = isRecord(value) ? value : {}
 
   return {
-    stereoBoostEnabled: normalizeBoolean(source.stereoBoostEnabled, fallback.stereoBoostEnabled),
-    convergenceEnabled: normalizeBoolean(source.convergenceEnabled, fallback.convergenceEnabled),
     stereoBoost: normalizeNumber(source.stereoBoost, fallback.stereoBoost),
     convergence: normalizeNumber(source.convergence, fallback.convergence),
   }
@@ -398,12 +425,12 @@ function normalizePivotXRSettings(value: unknown, fallback: PivotXRSettings): Pi
   const source = isRecord(value) ? value : {}
 
   return {
-    rotationMultiplier: normalizeNumber(source.rotationMultiplier, fallback.rotationMultiplier),
     smoothing: normalizeNumber(source.smoothing, fallback.smoothing),
+    activationRampSeconds: normalizeNumber(source.activationRampSeconds, fallback.activationRampSeconds),
+    rotationMultiplier: normalizeNumber(source.rotationMultiplier, fallback.rotationMultiplier),
     deadzoneDegrees: normalizeNumber(source.deadzoneDegrees, fallback.deadzoneDegrees),
     maxExtraYawDegrees: normalizeNumber(source.maxExtraYawDegrees, fallback.maxExtraYawDegrees),
     pitchRotationMultiplier: normalizeNumber(source.pitchRotationMultiplier, fallback.pitchRotationMultiplier),
-    pitchSmoothing: normalizeNumber(source.pitchSmoothing, fallback.pitchSmoothing),
     pitchDeadzoneDegrees: normalizeNumber(source.pitchDeadzoneDegrees, fallback.pitchDeadzoneDegrees),
     maxExtraPitchDegrees: normalizeNumber(source.maxExtraPitchDegrees, fallback.maxExtraPitchDegrees),
   }
@@ -470,6 +497,27 @@ function normalizeKeyboardChord(value: unknown, fallback: string[]): string[] {
   return normalized.length > 0 ? normalized : fallback
 }
 
+function normalizeSoundFeedback(value: unknown): SoundFeedback | undefined {
+  if (!isRecord(value)) {
+    return undefined
+  }
+
+  return {
+    enabled: normalizeBoolean(value.enabled, false),
+    activateSound: normalizeString(value.activateSound, ''),
+    deactivateSound: normalizeString(value.deactivateSound, ''),
+  }
+}
+
+// Drops sound feedback that carries no signal, so configs that never use it stay clean.
+function withOptionalSound<T extends KeyboardBinding | DeviceBinding>(binding: T, sound: SoundFeedback | undefined): T {
+  if (!sound || (!sound.enabled && !sound.activateSound && !sound.deactivateSound)) {
+    return binding
+  }
+
+  return { ...binding, sound }
+}
+
 export function normalizeInputBinding(value: unknown, fallback: InputBinding): InputBinding {
   const source = isRecord(value) ? value : {}
 
@@ -477,21 +525,23 @@ export function normalizeInputBinding(value: unknown, fallback: InputBinding): I
     return defaultNoneBinding()
   }
 
+  const sound = normalizeSoundFeedback(source.sound)
+
   if (source.type === 'device') {
-    return {
+    return withOptionalSound({
       type: 'device',
       deviceGuid: normalizeString(source.deviceGuid, fallback.type === 'device' ? fallback.deviceGuid : ''),
       inputPath: normalizeString(source.inputPath, fallback.type === 'device' ? fallback.inputPath : 'button-1'),
       productGuid: normalizeString(source.productGuid, fallback.type === 'device' ? fallback.productGuid ?? '' : ''),
       deviceName: normalizeString(source.deviceName, fallback.type === 'device' ? fallback.deviceName ?? '' : ''),
       inputLabel: normalizeString(source.inputLabel, fallback.type === 'device' ? fallback.inputLabel ?? '' : ''),
-    }
+    }, sound)
   }
 
-  return {
+  return withOptionalSound({
     type: 'keyboard',
     chord: normalizeKeyboardChord(source.chord, fallback.type === 'keyboard' ? fallback.chord : ['F8']),
-  }
+  }, sound)
 }
 
 export function bindingLabel(binding: InputBinding): string {
@@ -605,6 +655,7 @@ function normalizeVectorXRConfig(value: unknown): VectorXRConfig {
       logLevel: normalizeLogLevel(core.logLevel),
       logRetentionFiles: normalizeNumber(core.logRetentionFiles, fallback.core.logRetentionFiles),
       trackSeenApps: normalizeBoolean(core.trackSeenApps, fallback.core.trackSeenApps),
+      sound: { volume: normalizeVolume(isRecord(core.sound) ? core.sound.volume : undefined) },
     },
     applications,
     modules: {

@@ -12,6 +12,10 @@ function validateCoreConfig(core: CoreConfig): string[] {
     errors.push('core.trackSeenApps must be a boolean')
   }
 
+  if (!Number.isFinite(core.sound.volume) || core.sound.volume < 0 || core.sound.volume > 100) {
+    errors.push('core.sound.volume must be between 0 and 100')
+  }
+
   return errors
 }
 
@@ -19,13 +23,29 @@ function validateDepthXRSettings(prefix: string, settings: DepthXRSettings): str
   const errors: string[] = []
 
   const bounded = [
-    ['stereoBoost', settings.stereoBoost, 0.5, 2.0],
-    ['convergence', settings.convergence, -0.5, 0.5],
+    ['stereoBoost', settings.stereoBoost, 0.0, 2.0],
+    ['convergence', settings.convergence, -0.25, 0.25],
   ] as const
 
   for (const [name, value, min, max] of bounded) {
     if (Number.isNaN(value) || value < min || value > max) {
       errors.push(`${prefix}${name} must be between ${min} and ${max}`)
+    }
+  }
+
+  return errors
+}
+
+function validateSoundFeedback(prefix: string, binding: InputBinding): string[] {
+  if (binding.type === 'none' || !binding.sound) {
+    return []
+  }
+
+  const errors: string[] = []
+  for (const field of ['activateSound', 'deactivateSound'] as const) {
+    const path = binding.sound[field].trim()
+    if (path && !/\.wav$/i.test(path)) {
+      errors.push(`${prefix}.sound.${field} must point to a .wav file`)
     }
   }
 
@@ -60,7 +80,7 @@ function validateInputBinding(prefix: string, binding: InputBinding): string[] {
       errors.push(`${prefix}.chord must include exactly one non-modifier key`)
     }
 
-    return errors
+    return [...errors, ...validateSoundFeedback(prefix, binding)]
   }
 
   if (!binding.deviceGuid.trim()) {
@@ -73,7 +93,7 @@ function validateInputBinding(prefix: string, binding: InputBinding): string[] {
     errors.push(`${prefix}.inputPath must use button-1 through button-128`)
   }
 
-  return errors
+  return [...errors, ...validateSoundFeedback(prefix, binding)]
 }
 
 function validatePivotXRSettings(prefix: string, settings: PivotXRSettings): string[] {
@@ -87,6 +107,10 @@ function validatePivotXRSettings(prefix: string, settings: PivotXRSettings): str
     errors.push(`${prefix}smoothing must be between 0 and 1`)
   }
 
+  if (Number.isNaN(settings.activationRampSeconds) || settings.activationRampSeconds < 0 || settings.activationRampSeconds > 2) {
+    errors.push(`${prefix}activationRampSeconds must be between 0 and 2`)
+  }
+
   if (Number.isNaN(settings.deadzoneDegrees) || settings.deadzoneDegrees < 0 || settings.deadzoneDegrees > 45) {
     errors.push(`${prefix}deadzoneDegrees must be between 0 and 45`)
   }
@@ -97,10 +121,6 @@ function validatePivotXRSettings(prefix: string, settings: PivotXRSettings): str
 
   if (Number.isNaN(settings.pitchRotationMultiplier) || settings.pitchRotationMultiplier < 1.0 || settings.pitchRotationMultiplier > 3.0) {
     errors.push(`${prefix}pitchRotationMultiplier must be between 1.0 and 3.0`)
-  }
-
-  if (Number.isNaN(settings.pitchSmoothing) || settings.pitchSmoothing < 0 || settings.pitchSmoothing > 1) {
-    errors.push(`${prefix}pitchSmoothing must be between 0 and 1`)
   }
 
   if (Number.isNaN(settings.pitchDeadzoneDegrees) || settings.pitchDeadzoneDegrees < 0 || settings.pitchDeadzoneDegrees > 45) {

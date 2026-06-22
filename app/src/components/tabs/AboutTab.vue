@@ -139,8 +139,11 @@ onMounted(() => {
         <p class="mt-3 max-w-3xl text-sm leading-6 text-muted">
           OpenXR layer management and per-application profiles keep every title configured exactly how you like it, all from one place.
         </p>
+        <p class="mt-3 max-w-3xl text-sm leading-6 text-muted">
+          <span class="font-semibold accent-text">The first and only</span> OpenXR solution where enhanced head rotation and quad-views foveated rendering work together — the foveated region follows your pivoted view instead of being left behind.
+        </p>
         <p class="mt-4 text-sm leading-6 text-muted">Developed independently by DienerTech LLC.</p>
-        <p class="mt-2 text-sm leading-6 text-muted">(c) 2026 DienerTech LLC. Released under the MIT License.</p>
+        <p class="mt-2 text-sm leading-6 text-muted">(c) 2026 DienerTech LLC. Released under the Mozilla Public License 2.0.</p>
 
         <div class="mt-5 flex flex-wrap gap-3">
           <button

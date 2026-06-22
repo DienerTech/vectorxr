@@ -758,6 +758,76 @@ void TestDeviceBindingMetadataParsed() {
     Expect(binding.input_label == "Button 12", "Device input label metadata mismatch");
 }
 
+void TestBindingSoundFeedbackParsed() {
+    const std::string json = R"json(
+{
+  "version": 3,
+  "core": { "enabled": true, "logLevel": "info", "logRetentionFiles": 7 },
+  "applications": [],
+  "modules": {
+    "depthxr": {
+      "bindings": {
+        "toggleEnabled": {
+          "type": "keyboard",
+          "chord": ["F8"],
+          "sound": {
+            "enabled": true,
+            "activateSound": "C:\\sounds\\on.wav",
+            "deactivateSound": ""
+          }
+        }
+      }
+    },
+    "pivotxr": { "enabled": false, "defaults": {}, "profiles": [] }
+  }
+}
+)json";
+
+    const depthxr::ParseResult result = depthxr::ParseConfig(json);
+    Expect(result.ok, "Config parser rejected valid binding sound feedback: " + result.error);
+    const depthxr::SoundFeedback& sound = result.document.depthxr.bindings.toggle_enabled.sound;
+    Expect(sound.enabled, "Binding sound feedback should be enabled");
+    Expect(sound.activate_sound == "C:\\sounds\\on.wav", "Activate sound path mismatch");
+    Expect(sound.deactivate_sound.empty(), "Deactivate sound should default to bundled (empty)");
+}
+
+void TestBindingWithoutSoundDefaultsDisabled() {
+    const std::string json = R"json(
+{
+  "version": 3,
+  "core": { "enabled": true, "logLevel": "info", "logRetentionFiles": 7 },
+  "applications": [],
+  "modules": {
+    "depthxr": { "bindings": { "toggleEnabled": { "type": "keyboard", "chord": ["F8"] } } },
+    "pivotxr": { "enabled": false, "defaults": {}, "profiles": [] }
+  }
+}
+)json";
+
+    const depthxr::ParseResult result = depthxr::ParseConfig(json);
+    Expect(result.ok, "Config parser rejected binding without sound: " + result.error);
+    Expect(!result.document.depthxr.bindings.toggle_enabled.sound.enabled,
+           "Binding without sound block should default to disabled feedback");
+}
+
+void TestCoreSoundVolumeParsedAndClamped() {
+    const std::string json = R"json(
+{
+  "version": 3,
+  "core": { "enabled": true, "logLevel": "info", "logRetentionFiles": 7, "sound": { "volume": 150 } },
+  "applications": [],
+  "modules": {
+    "depthxr": { "bindings": { "toggleEnabled": { "type": "none" } } },
+    "pivotxr": { "enabled": false, "defaults": {}, "profiles": [] }
+  }
+}
+)json";
+
+    const depthxr::ParseResult result = depthxr::ParseConfig(json);
+    Expect(result.ok, "Config parser rejected core sound volume: " + result.error);
+    Expect(result.document.core.sound_volume == 100, "Core sound volume should clamp to 100");
+}
+
 void TestExeMatch() {
     Expect(depthxr::ExeNameMatches("DCS.exe", "dcs.exe"), "Case-insensitive exe match failed");
     Expect(depthxr::ExeNameMatches("C:\\Games\\DCS.exe", "dcs.exe"), "Basename exe match failed");
@@ -953,6 +1023,9 @@ int main() {
     TestInvalidPivotActivationBindingRejected();
     TestNoneBindingParsed();
     TestDeviceBindingMetadataParsed();
+    TestBindingSoundFeedbackParsed();
+    TestBindingWithoutSoundDefaultsDisabled();
+    TestCoreSoundVolumeParsedAndClamped();
     TestExeMatch();
     TestSeenAppObservationRecording();
     TestQuadViewStereoBoostKeepsInsetViewsInSync();

@@ -220,6 +220,29 @@ export async function captureDeviceBinding(timeoutMs = 15_000): Promise<Captured
   return invoke<CapturedDeviceBinding | null>('capture_device_binding', { timeoutMs })
 }
 
+export async function pickSoundFile(): Promise<string | null> {
+  if (!tauriAvailable()) {
+    return null
+  }
+
+  const { open } = await import('@tauri-apps/plugin-dialog')
+  const selected = await open({
+    multiple: false,
+    directory: false,
+    filters: [{ name: 'WAV audio', extensions: ['wav'] }],
+  })
+
+  return typeof selected === 'string' ? selected : null
+}
+
+export async function playTestSound(path: string, activate: boolean, volume = 100): Promise<void> {
+  if (!tauriAvailable()) {
+    return
+  }
+
+  await invoke('play_test_sound', { path: path.trim() ? path : null, activate, volume })
+}
+
 export async function loadLogSnapshot(): Promise<LogSnapshot> {
   if (!tauriAvailable()) {
     return {

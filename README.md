@@ -6,10 +6,15 @@ It is built for users who want practical controls for stereo depth, convergence,
 
 Developed by DienerTech LLC.
 
+## Why VectorXR
+
+**Pivot your foveated view.** When using OpenXR quad-views foveated rendering, VectorXR is the first and only solution that also pivots your head pose so the foveated region follows the rotated view. Foveated rendering exists in a few forms — the Quad-Views-Foveated OpenXR layer, some runtimes, some game engines — and neck-assist tools rotate the view, but no one had combined the two: run as independent OpenXR layers they don't coordinate, so the high-detail foveal region is left behind the moment the view rotates. VectorXR computes Pivot and Quadviews in a single layer with shared runtime state, keeping the foveal region locked to your gaze through the rotation. In DCS — the title that benefits from both at once — they work together cleanly.
+
 ## Features
 
 - Tune stereo depth and convergence through the Depth module.
 - Configure enhanced yaw and pitch rotation through the Pivot module.
+- Drive foveated-style rendering with a visible performance budget through the Quadviews module.
 - Create per-application profiles so different OpenXR games can use different settings.
 - Track OpenXR apps VectorXR has seen and register them as profile targets.
 - Bind feature toggles to keyboard shortcuts or detected input devices.
@@ -22,43 +27,55 @@ Developed by DienerTech LLC.
 
 ### Home
 
-![VectorXR Home tab](docs/screenshots/screenshot-home.png)
+![VectorXR Home tab](docs/screenshots/home.png)
 
-The Home tab shows suite-level settings, app status, log access, theme controls, import/export actions, and the current VectorXR layer status.
+The Home tab is a status dashboard: runtime and layer status, system health, and an Active overview of every Enhancement's default profile, custom profiles, and current state.
 
 ### Depth
 
-![VectorXR Depth tab](docs/screenshots/screenshot-depth.png)
+![VectorXR Depth tab](docs/screenshots/depth.png)
 
-Depth profiles tune stereo boost and convergence globally or per application.
+Depth profiles tune stereo boost and convergence globally or per application, with a runtime toggle binding for quick in-headset A/B comparisons.
 
 ### Pivot
 
-![VectorXR Pivot tab](docs/screenshots/screenshot-pivot.png)
+![VectorXR Pivot tab](docs/screenshots/pivot.png)
 
-Pivot profiles configure enhanced yaw and pitch rotation, activation behavior, smoothing, deadzones, and device bindings.
+Pivot profiles configure enhanced yaw and pitch rotation, activation behavior, smoothing, deadzones, and keyboard or device bindings.
+
+### Quadviews
+
+![VectorXR Quadviews tab](docs/screenshots/quadviews.png)
+
+Quadviews configures foveated-style rendering with a live performance budget that estimates render cost before you launch a game.
 
 ### Application Registry
 
-![VectorXR Application Registry tab](docs/screenshots/screenshot-application-registry.png)
+![VectorXR Application Registry tab](docs/screenshots/application-registry.png)
 
 The application registry keeps profile targets organized and can turn discovered OpenXR apps into reusable application entries.
 
 ### OpenXR Layers
 
-![VectorXR OpenXR Layers tab](docs/screenshots/screenshot-openxr-layers.png)
+![VectorXR OpenXR Layer Manager tab](docs/screenshots/openxr-layer-manager.png)
 
-The OpenXR layer manager inspects installed implicit API layers, shows signature and path status, and can enable, disable, or reorder layers.
+The OpenXR layer manager inspects installed implicit API layers across the Windows registry slices, shows signature and path status, and can enable, disable, or reorder layers.
+
+### Settings
+
+![VectorXR Settings tab](docs/screenshots/settings.png)
+
+Settings holds the runtime master switch, theme, logging, discovered-app tracking, and config import/export/reset.
 
 ### About And Updates
 
-![VectorXR About tab](docs/screenshots/screenshot-about.png)
+![VectorXR About tab](docs/screenshots/about.png)
 
 The About tab includes release status, GitHub update checks, project links, patch notes, and support information.
 
 ### Dark Mode
 
-![VectorXR Home tab in dark mode](docs/screenshots/screenshot-home-darkmode.png)
+![VectorXR Home tab in dark mode](docs/screenshots/home-dark.png)
 
 ## How It Works
 
@@ -68,6 +85,10 @@ VectorXR has two main pieces:
 - A Windows OpenXR API layer that reads those settings and applies runtime adjustments when an OpenXR app is running.
 
 The installer registers the VectorXR API layer with Windows so OpenXR runtimes can load it automatically. Settings are stored locally under `%LOCALAPPDATA%\VectorXR`.
+
+## Usage
+
+For a walkthrough of configuring profiles and each module — Depth, Pivot, Quadviews, the application registry, and OpenXR layer management — see the [usage guide](docs/usage.md).
 
 ## Installation
 
@@ -87,9 +108,13 @@ VectorXR does not currently auto-download or auto-install updates. Updates are i
 
 ## Current Status
 
-VectorXR is approaching an alpha-ready release. The core app, installer, OpenXR layer registration, profile model, Depth module, Pivot module, app discovery, logs, and OpenXR layer manager are implemented.
+VectorXR is in **beta**. It is feature-complete for its current scope — the desktop app, Windows installer, OpenXR layer registration, per-application profile model, Depth, Pivot, and Quadviews modules, app discovery, logs, update checks, and the OpenXR layer manager are all implemented and working.
 
-Planned launch polish includes screenshots, broader testing, release notes, and eventually Windows binary signing for a 1.0 milestone.
+Beta means it is ready to use day-to-day, but it is young and has had limited real-world testing across the range of VR runtimes and hardware. You may hit rough edges on an untested runtime — some headset-native OpenXR runtimes (such as Pimax's PiOpenXR) are known to ignore Depth, for example. VectorXR is designed to be reversible: you can disable any Enhancement, disable the VectorXR layer, or uninstall entirely if anything misbehaves.
+
+Feedback and bug reports are welcome — that is what this stage is for.
+
+The road to a 1.0 release includes Windows binary code signing (current builds are unsigned, so the installer will show a SmartScreen warning), broader cross-runtime testing, and a few packaging items.
 
 ## Build From Source
 
@@ -100,7 +125,9 @@ VectorXR is Windows-focused and expects:
 - Node.js 20+
 - Rust toolchain with `cargo`
 - Tauri 2 prerequisites for Windows
-- Either an OpenXR SDK that provides `OpenXRConfig.cmake`, or a local `OpenXR.Loader.*.nupkg` package in the repository root
+- Download the OpenXR SDK from [KhronosGroup](https://github.com/KhronosGroup/OpenXR-SDK/releases)
+- VectorXR needs either an OpenXR SDK that provides `OpenXRConfig.cmake`, or a local `OpenXR.Loader.*.nupkg` package in the repository root
+
 
 The local `OpenXR.Loader.*.nupkg` package is intentionally not tracked in source control. The GitHub release workflow restores the pinned NuGet package during CI before building the layer.
 
@@ -141,7 +168,7 @@ Then verify and tag:
 ```powershell
 .\scripts\Assert-VersionMatchesTag.ps1 -TagName v0.8.0
 git tag v0.8.0
-git push origin main --tags
+git push origin master --tags
 ```
 
 Pushing the tag runs `.github/workflows/release.yml`, builds the Windows installer, creates or updates the GitHub Release, and uploads the installer plus a SHA-256 checksum.
@@ -151,7 +178,7 @@ Pushing the tag runs `.github/workflows/release.yml`, builds the Windows install
 - `app/`: Tauri 2 and Vue 3 desktop app
 - `layer/`: C++20 OpenXR API layer and runtime logic
 - `config/`: shared schema and config notes
-- `docs/`: architecture notes and implementation references
+- `docs/`: architecture notes, the usage guide, and screenshots
 - `examples/`: sample settings
 - `scripts/`: Windows build, install, staging, and release helpers
 
@@ -167,6 +194,8 @@ Thank you to the maintainers and contributors behind these projects.
 
 ## License
 
-The VectorXR source code is released under the MIT License. See [LICENSE](LICENSE).
+The VectorXR source code is released under the Mozilla Public License 2.0 (MPL-2.0). See [LICENSE](LICENSE).
 
-VectorXR, the VectorXR name, and VectorXR branding are product identifiers of DienerTech LLC. The MIT License covers the source code, but it does not grant rights to use DienerTech LLC trademarks, logos, or branding except to refer to the project.
+MPL-2.0 is a file-level copyleft license: you are free to use, modify, and redistribute VectorXR, including as part of a larger work that combines it with proprietary code, provided that modifications to the MPL-covered files themselves remain available under the MPL.
+
+VectorXR, the VectorXR name, and VectorXR branding are product identifiers of DienerTech LLC. Consistent with MPL-2.0 section 2.3, the license covers the source code but does not grant rights to use DienerTech LLC trademarks, logos, or branding except to refer to the project.
