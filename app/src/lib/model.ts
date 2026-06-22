@@ -23,9 +23,18 @@ export const keyboardBindingKeyGroups = [
 
 export const keyboardModifierKeys = ['Ctrl', 'Alt', 'Shift'] as const
 
+// Optional audible feedback played when a binding's action activates or
+// deactivates. An empty sound path means "use the bundled default WAV".
+export interface SoundFeedback {
+  enabled: boolean
+  activateSound: string
+  deactivateSound: string
+}
+
 export interface KeyboardBinding {
   type: 'keyboard'
   chord: string[]
+  sound?: SoundFeedback
 }
 
 export interface DeviceBinding {
@@ -35,6 +44,7 @@ export interface DeviceBinding {
   productGuid?: string
   deviceName?: string
   inputLabel?: string
+  sound?: SoundFeedback
 }
 
 export interface NoneBinding {
@@ -274,6 +284,14 @@ export function defaultQuadViewsSettings(): QuadViewsSettings {
   }
 }
 
+export function defaultSoundFeedback(): SoundFeedback {
+  return {
+    enabled: false,
+    activateSound: '',
+    deactivateSound: '',
+  }
+}
+
 export function defaultNoneBinding(): NoneBinding {
   return {
     type: 'none',
@@ -464,6 +482,27 @@ function normalizeKeyboardChord(value: unknown, fallback: string[]): string[] {
   return normalized.length > 0 ? normalized : fallback
 }
 
+function normalizeSoundFeedback(value: unknown): SoundFeedback | undefined {
+  if (!isRecord(value)) {
+    return undefined
+  }
+
+  return {
+    enabled: normalizeBoolean(value.enabled, false),
+    activateSound: normalizeString(value.activateSound, ''),
+    deactivateSound: normalizeString(value.deactivateSound, ''),
+  }
+}
+
+// Drops sound feedback that carries no signal, so configs that never use it stay clean.
+function withOptionalSound<T extends KeyboardBinding | DeviceBinding>(binding: T, sound: SoundFeedback | undefined): T {
+  if (!sound || (!sound.enabled && !sound.activateSound && !sound.deactivateSound)) {
+    return binding
+  }
+
+  return { ...binding, sound }
+}
+
 export function normalizeInputBinding(value: unknown, fallback: InputBinding): InputBinding {
   const source = isRecord(value) ? value : {}
 
@@ -471,21 +510,23 @@ export function normalizeInputBinding(value: unknown, fallback: InputBinding): I
     return defaultNoneBinding()
   }
 
+  const sound = normalizeSoundFeedback(source.sound)
+
   if (source.type === 'device') {
-    return {
+    return withOptionalSound({
       type: 'device',
       deviceGuid: normalizeString(source.deviceGuid, fallback.type === 'device' ? fallback.deviceGuid : ''),
       inputPath: normalizeString(source.inputPath, fallback.type === 'device' ? fallback.inputPath : 'button-1'),
       productGuid: normalizeString(source.productGuid, fallback.type === 'device' ? fallback.productGuid ?? '' : ''),
       deviceName: normalizeString(source.deviceName, fallback.type === 'device' ? fallback.deviceName ?? '' : ''),
       inputLabel: normalizeString(source.inputLabel, fallback.type === 'device' ? fallback.inputLabel ?? '' : ''),
-    }
+    }, sound)
   }
 
-  return {
+  return withOptionalSound({
     type: 'keyboard',
     chord: normalizeKeyboardChord(source.chord, fallback.type === 'keyboard' ? fallback.chord : ['F8']),
-  }
+  }, sound)
 }
 
 export function bindingLabel(binding: InputBinding): string {

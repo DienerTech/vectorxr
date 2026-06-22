@@ -1,8 +1,9 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 
 import DeviceBindingEditor from './DeviceBindingEditor.vue'
-import { defaultDeviceBinding, defaultKeyboardBinding, defaultNoneBinding, keyboardBindingKeyGroups, keyboardModifierKeys, type InputBinding } from '../lib/model'
+import { pickSoundFile, playTestSound } from '../lib/commands'
+import { defaultDeviceBinding, defaultKeyboardBinding, defaultNoneBinding, defaultSoundFeedback, keyboardBindingKeyGroups, keyboardModifierKeys, type InputBinding, type SoundFeedback } from '../lib/model'
 
 const props = defineProps<{
   modelValue: InputBinding
@@ -14,6 +15,56 @@ const props = defineProps<{
 const emit = defineEmits<{
   'update:modelValue': [value: InputBinding]
 }>()
+
+type SoundPath = 'activateSound' | 'deactivateSound'
+
+const soundError = ref('')
+
+const sound = computed<SoundFeedback | null>(() => (props.modelValue.type === 'none' ? null : props.modelValue.sound ?? null))
+
+const soundEnabled = computed({
+  get: () => sound.value?.enabled ?? false,
+  set: (enabled: boolean) => updateSound({ enabled }),
+})
+
+function updateSound(patch: Partial<SoundFeedback>) {
+  if (props.modelValue.type === 'none') {
+    return
+  }
+
+  const next: SoundFeedback = { ...(props.modelValue.sound ?? defaultSoundFeedback()), ...patch }
+  emit('update:modelValue', { ...props.modelValue, sound: next })
+}
+
+function soundFileName(path: string): string {
+  const trimmed = path.trim()
+  if (!trimmed) {
+    return 'Default tone'
+  }
+
+  return trimmed.split(/[/\\]/).pop() || trimmed
+}
+
+async function browseSound(which: SoundPath) {
+  soundError.value = ''
+  try {
+    const picked = await pickSoundFile()
+    if (picked) {
+      updateSound({ [which]: picked })
+    }
+  } catch (error) {
+    soundError.value = error instanceof Error ? error.message : 'Failed to open file picker.'
+  }
+}
+
+async function testSound(which: SoundPath) {
+  soundError.value = ''
+  try {
+    await playTestSound(sound.value?.[which] ?? '', which === 'activateSound')
+  } catch (error) {
+    soundError.value = error instanceof Error ? error.message : 'Failed to play sound.'
+  }
+}
 
 const bindingType = computed({
   get: () => props.modelValue.type,
@@ -106,5 +157,44 @@ function toggleModifier(modifier: string, enabled: boolean) {
     </div>
 
     <DeviceBindingEditor v-else :model-value="modelValue" @update:model-value="$emit('update:modelValue', $event)" />
+
+    <div v-if="modelValue.type !== 'none'" class="mt-4 border-t pt-4" style="border-color: var(--app-border)">
+      <label class="flex items-start gap-2.5">
+        <input v-model="soundEnabled" class="mt-0.5 h-4 w-4 accent-depthxr-copper" type="checkbox" />
+        <span>
+          <span class="block text-sm font-medium">Play a sound on activate / deactivate</span>
+          <span class="mt-0.5 block text-sm leading-6 text-muted">An extra audible cue when this binding flips state. Leave a slot on the default tone, or choose your own short .wav.</span>
+        </span>
+      </label>
+
+      <div v-if="soundEnabled" class="mt-3 space-y-2">
+        <div
+          v-for="row in [{ key: 'activateSound' as const, label: 'Activate' }, { key: 'deactivateSound' as const, label: 'Deactivate' }]"
+          :key="row.key"
+          class="flex flex-wrap items-center gap-2"
+        >
+          <span class="w-[88px] shrink-0 text-sm font-medium">{{ row.label }}</span>
+          <span class="app-readonly-field min-w-0 flex-1 truncate rounded-[0.75rem] px-3 py-2 text-sm" :title="sound?.[row.key] || 'Default tone'">
+            {{ soundFileName(sound?.[row.key] ?? '') }}
+          </span>
+          <button class="button-secondary rounded-[0.75rem] px-3 py-2 text-sm font-medium" type="button" @click="browseSound(row.key)">
+            Browse…
+          </button>
+          <button
+            v-if="sound?.[row.key]"
+            class="button-secondary rounded-[0.75rem] px-3 py-2 text-sm font-medium"
+            type="button"
+            @click="updateSound({ [row.key]: '' })"
+          >
+            Reset
+          </button>
+          <button class="button-accent rounded-[0.75rem] px-3 py-2 text-sm font-medium" type="button" @click="testSound(row.key)">
+            ▶ Test
+          </button>
+        </div>
+
+        <p v-if="soundError" class="text-sm chip-warning">{{ soundError }}</p>
+      </div>
+    </div>
   </div>
 </template>

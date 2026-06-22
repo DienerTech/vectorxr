@@ -549,6 +549,32 @@ bool CheckAllowedKeys(const JsonValue::Object& object,
                       const std::unordered_set<std::string>& allowed,
                       std::string& error);
 
+bool ParseSoundFeedback(const JsonValue& value, SoundFeedback& out, std::string& error) {
+    const JsonValue::Object* object = RequireObject(value, "inputBinding.sound", error);
+    if (!object) {
+        return false;
+    }
+
+    static const std::unordered_set<std::string> allowed = {"enabled", "activateSound", "deactivateSound"};
+    if (!CheckAllowedKeys(*object, allowed, error)) {
+        return false;
+    }
+
+    std::optional<bool> enabled;
+    std::optional<std::string> activate_sound;
+    std::optional<std::string> deactivate_sound;
+    if (!ReadOptionalBool(*object, "enabled", enabled, error) ||
+        !ReadOptionalString(*object, "activateSound", activate_sound, error) ||
+        !ReadOptionalString(*object, "deactivateSound", deactivate_sound, error)) {
+        return false;
+    }
+
+    out.enabled = enabled.value_or(false);
+    out.activate_sound = activate_sound.value_or(std::string{});
+    out.deactivate_sound = deactivate_sound.value_or(std::string{});
+    return true;
+}
+
 bool ParseInputBinding(const JsonValue& value, InputBinding& out, std::string& error) {
     const JsonValue::Object* object = RequireObject(value, "inputBinding", error);
     if (!object) {
@@ -574,7 +600,7 @@ bool ParseInputBinding(const JsonValue& value, InputBinding& out, std::string& e
     }
 
     if (out.type == InputBindingType::Keyboard) {
-        static const std::unordered_set<std::string> allowed = {"type", "chord"};
+        static const std::unordered_set<std::string> allowed = {"type", "chord", "sound"};
         if (!CheckAllowedKeys(*object, allowed, error)) {
             return false;
         }
@@ -605,10 +631,14 @@ bool ParseInputBinding(const JsonValue& value, InputBinding& out, std::string& e
             return false;
         }
 
+        if (const auto sound_it = object->find("sound"); sound_it != object->end() && !ParseSoundFeedback(sound_it->second, out.sound, error)) {
+            return false;
+        }
+
         return true;
     }
 
-    static const std::unordered_set<std::string> allowed = {"type", "deviceGuid", "inputPath", "productGuid", "deviceName", "inputLabel"};
+    static const std::unordered_set<std::string> allowed = {"type", "deviceGuid", "inputPath", "productGuid", "deviceName", "inputLabel", "sound"};
     if (!CheckAllowedKeys(*object, allowed, error)) {
         return false;
     }
@@ -640,6 +670,10 @@ bool ParseInputBinding(const JsonValue& value, InputBinding& out, std::string& e
             return false;
         }
         out.input_label = input_label_it->second.AsString();
+    }
+
+    if (const auto sound_it = object->find("sound"); sound_it != object->end() && !ParseSoundFeedback(sound_it->second, out.sound, error)) {
+        return false;
     }
 
     return true;

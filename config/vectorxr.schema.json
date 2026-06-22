@@ -47,6 +47,21 @@
       "type": "string",
       "pattern": "^(Ctrl|Alt|Shift|F([1-9]|1[0-2])|[A-Z]|[0-9]|Space)$"
     },
+    "soundFeedback": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "activateSound": {
+          "type": "string"
+        },
+        "deactivateSound": {
+          "type": "string"
+        }
+      }
+    },
     "inputBinding": {
       "oneOf": [
         {
@@ -79,6 +94,9 @@
                 "$ref": "#/$defs/keyboardKey"
               },
               "uniqueItems": true
+            },
+            "sound": {
+              "$ref": "#/$defs/soundFeedback"
             }
           }
         },
@@ -110,6 +128,9 @@
             },
             "inputLabel": {
               "type": "string"
+            },
+            "sound": {
+              "$ref": "#/$defs/soundFeedback"
             }
           }
         }

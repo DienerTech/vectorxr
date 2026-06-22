@@ -220,6 +220,22 @@ export async function captureDeviceBinding(timeoutMs = 15_000): Promise<Captured
   return invoke<CapturedDeviceBinding | null>('capture_device_binding', { timeoutMs })
 }
 
+export async function pickSoundFile(): Promise<string | null> {
+  if (!tauriAvailable()) {
+    return null
+  }
+
+  return invoke<string | null>('pick_sound_file')
+}
+
+export async function playTestSound(path: string, activate: boolean): Promise<void> {
+  if (!tauriAvailable()) {
+    return
+  }
+
+  await invoke('play_test_sound', { path: path.trim() ? path : null, activate })
+}
+
 export async function loadLogSnapshot(): Promise<LogSnapshot> {
   if (!tauriAvailable()) {
     return {

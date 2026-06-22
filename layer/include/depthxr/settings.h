@@ -36,6 +36,15 @@ enum class ProfileMode {
     Disable,
 };
 
+// Optional audible feedback played when a binding's action activates or
+// deactivates. Paths are absolute; an empty path means "use the bundled
+// default WAV shipped next to the layer DLL". Disabled bindings never play.
+struct SoundFeedback {
+    bool enabled{false};
+    std::string activate_sound;   // empty = bundled default
+    std::string deactivate_sound; // empty = bundled default
+};
+
 struct InputBinding {
     InputBindingType type{InputBindingType::None};
     std::vector<std::string> chord;
@@ -44,6 +53,7 @@ struct InputBinding {
     std::string product_guid;
     std::string device_name;
     std::string input_label;
+    SoundFeedback sound;
 };
 
 struct CoreSettings {

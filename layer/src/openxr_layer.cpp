@@ -20,6 +20,7 @@
 #include "depthxr/input_devices.h"
 #include "depthxr/process_info.h"
 #include "depthxr/seen_apps.h"
+#include "depthxr/sound_player.h"
 
 namespace depthxr {
 namespace {
@@ -812,7 +813,10 @@ bool SameInputBinding(const InputBinding& lhs, const InputBinding& rhs) {
            lhs.input_path == rhs.input_path &&
            lhs.product_guid == rhs.product_guid &&
            lhs.device_name == rhs.device_name &&
-           lhs.input_label == rhs.input_label;
+           lhs.input_label == rhs.input_label &&
+           lhs.sound.enabled == rhs.sound.enabled &&
+           lhs.sound.activate_sound == rhs.sound.activate_sound &&
+           lhs.sound.deactivate_sound == rhs.sound.deactivate_sound;
 }
 
 bool SamePivotActivationBinding(const PivotXrResolvedSettings& lhs, const PivotXrResolvedSettings& rhs) {
@@ -4213,6 +4217,8 @@ bool OpenXrLayer::IsDepthXrActive() {
         logger_.Info(std::string("Depth effects ") +
                      (depthxr_toggle_enabled_ ? "enabled" : "disabled") + " via " +
                      BindingLabel(resolved_settings_.depthxr_bindings.toggle_enabled) + ".");
+        SoundPlayer::Instance().PlayTransition(resolved_settings_.depthxr_bindings.toggle_enabled.sound,
+                                               depthxr_toggle_enabled_, dll_directory_);
     }
 
     return depthxr_toggle_enabled_;
@@ -4240,7 +4246,9 @@ bool OpenXrLayer::IsPivotXrActive(const PivotXrResolvedSettings& settings) {
     if (first_poll) {
         pivotxr_activation_key_was_down_ = binding_down;
     }
-    const bool was_pressed_this_call = binding_down && !pivotxr_activation_key_was_down_;
+    const bool was_down_before = pivotxr_activation_key_was_down_;
+    const bool was_pressed_this_call = binding_down && !was_down_before;
+    const bool was_released_this_call = !binding_down && was_down_before;
     pivotxr_activation_key_was_down_ = binding_down;
 
     if (settings.activation_mode == ActivationMode::Toggle) {
@@ -4251,8 +4259,16 @@ bool OpenXrLayer::IsPivotXrActive(const PivotXrResolvedSettings& settings) {
             logger_.Info(std::string("PivotXR extra pivot factor ") +
                          (pivotxr_toggle_enabled_ ? "enabled" : "disabled") + " via " +
                          BindingLabel(settings.activation_binding) + ".");
+            SoundPlayer::Instance().PlayTransition(settings.activation_binding.sound, pivotxr_toggle_enabled_, dll_directory_);
         }
         return pivotxr_toggle_enabled_;
+    }
+
+    // Hold mode: pressing activates the effect, releasing deactivates it.
+    if (was_pressed_this_call) {
+        SoundPlayer::Instance().PlayTransition(settings.activation_binding.sound, true, dll_directory_);
+    } else if (was_released_this_call) {
+        SoundPlayer::Instance().PlayTransition(settings.activation_binding.sound, false, dll_directory_);
     }
 
     return binding_down;

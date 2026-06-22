@@ -20,7 +20,11 @@
     ],
     "resources": {
       "resources/vectorxr-layer/XR_APILAYER_DIENERTECH_VECTORXR.dll": "vectorxr-layer/XR_APILAYER_DIENERTECH_VECTORXR.dll",
-      "resources/vectorxr-layer/XR_APILAYER_DIENERTECH_VECTORXR.json": "vectorxr-layer/XR_APILAYER_DIENERTECH_VECTORXR.json"
+      "resources/vectorxr-layer/XR_APILAYER_DIENERTECH_VECTORXR.json": "vectorxr-layer/XR_APILAYER_DIENERTECH_VECTORXR.json",
+      "resources/vectorxr-layer/sounds/activate.wav": "vectorxr-layer/sounds/activate.wav",
+      "resources/vectorxr-layer/sounds/deactivate.wav": "vectorxr-layer/sounds/deactivate.wav",
+      "resources/sounds/activate.wav": "sounds/activate.wav",
+      "resources/sounds/deactivate.wav": "sounds/deactivate.wav"
     },
     "windows": {
       "nsis": {

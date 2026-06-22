@@ -32,6 +32,22 @@ function validateDepthXRSettings(prefix: string, settings: DepthXRSettings): str
   return errors
 }
 
+function validateSoundFeedback(prefix: string, binding: InputBinding): string[] {
+  if (binding.type === 'none' || !binding.sound) {
+    return []
+  }
+
+  const errors: string[] = []
+  for (const field of ['activateSound', 'deactivateSound'] as const) {
+    const path = binding.sound[field].trim()
+    if (path && !/\.wav$/i.test(path)) {
+      errors.push(`${prefix}.sound.${field} must point to a .wav file`)
+    }
+  }
+
+  return errors
+}
+
 function validateInputBinding(prefix: string, binding: InputBinding): string[] {
   const errors: string[] = []
 
@@ -60,7 +76,7 @@ function validateInputBinding(prefix: string, binding: InputBinding): string[] {
       errors.push(`${prefix}.chord must include exactly one non-modifier key`)
     }
 
-    return errors
+    return [...errors, ...validateSoundFeedback(prefix, binding)]
   }
 
   if (!binding.deviceGuid.trim()) {
@@ -73,7 +89,7 @@ function validateInputBinding(prefix: string, binding: InputBinding): string[] {
     errors.push(`${prefix}.inputPath must use button-1 through button-128`)
   }
 
-  return errors
+  return [...errors, ...validateSoundFeedback(prefix, binding)]
 }
 
 function validatePivotXRSettings(prefix: string, settings: PivotXRSettings): string[] {

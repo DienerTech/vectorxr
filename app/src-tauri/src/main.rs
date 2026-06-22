@@ -50,6 +50,24 @@ fn default_activation_binding() -> InputBinding {
     InputBinding::None
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SoundFeedback {
+    #[serde(default)]
+    enabled: bool,
+    #[serde(default)]
+    activate_sound: String,
+    #[serde(default)]
+    deactivate_sound: String,
+}
+
+impl SoundFeedback {
+    // Configs that never opted into sounds round-trip without an empty `sound` block.
+    fn is_unset(&self) -> bool {
+        !self.enabled && self.activate_sound.is_empty() && self.deactivate_sound.is_empty()
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 enum InputBinding {
@@ -58,6 +76,8 @@ enum InputBinding {
     Keyboard {
         #[serde(default)]
         chord: Vec<String>,
+        #[serde(default, skip_serializing_if = "SoundFeedback::is_unset")]
+        sound: SoundFeedback,
     },
     #[serde(rename_all = "camelCase")]
     Device {
@@ -71,6 +91,8 @@ enum InputBinding {
         device_name: String,
         #[serde(default, skip_serializing_if = "String::is_empty")]
         input_label: String,
+        #[serde(default, skip_serializing_if = "SoundFeedback::is_unset")]
+        sound: SoundFeedback,
     },
 }
 
@@ -1269,6 +1291,104 @@ fn move_openxr_layer(
     openxr_layers::move_openxr_layer(slice, manifest_path, direction)
 }
 
+/// Opens a native file picker filtered to .wav files. Returns the chosen path,
+/// or None if the user cancelled.
+#[tauri::command]
+fn pick_sound_file() -> Result<Option<String>, String> {
+    #[cfg(target_os = "windows")]
+    {
+        use windows::core::{PCWSTR, PWSTR};
+        use windows::Win32::UI::Controls::Dialogs::{
+            GetOpenFileNameW, OFN_FILEMUSTEXIST, OFN_PATHMUSTEXIST, OPENFILENAMEW,
+        };
+
+        let filter: Vec<u16> = "WAV audio (*.wav)\0*.wav\0\0".encode_utf16().collect();
+        let title: Vec<u16> = "Select a .wav sound\0".encode_utf16().collect();
+        let mut buffer = vec![0u16; 1024];
+
+        let mut ofn = OPENFILENAMEW {
+            lStructSize: std::mem::size_of::<OPENFILENAMEW>() as u32,
+            lpstrFilter: PCWSTR(filter.as_ptr()),
+            lpstrFile: PWSTR(buffer.as_mut_ptr()),
+            nMaxFile: buffer.len() as u32,
+            lpstrTitle: PCWSTR(title.as_ptr()),
+            Flags: OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST,
+            ..Default::default()
+        };
+
+        let picked = unsafe { GetOpenFileNameW(&mut ofn) };
+        if !picked.as_bool() {
+            return Ok(None);
+        }
+
+        let end = buffer.iter().position(|&c| c == 0).unwrap_or(buffer.len());
+        return Ok(Some(String::from_utf16_lossy(&buffer[..end])));
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        Ok(None)
+    }
+}
+
+/// Plays a .wav so the user can preview their choice from the config UI. An empty
+/// path falls back to the bundled default for the given transition.
+#[tauri::command]
+fn play_test_sound(
+    app: tauri::AppHandle,
+    path: Option<String>,
+    activate: bool,
+) -> Result<(), String> {
+    use tauri::Manager;
+
+    let resolved = match path {
+        Some(value) if !value.trim().is_empty() => PathBuf::from(value),
+        _ => {
+            let name = if activate {
+                "sounds/activate.wav"
+            } else {
+                "sounds/deactivate.wav"
+            };
+            app.path()
+                .resolve(name, tauri::path::BaseDirectory::Resource)
+                .map_err(|error| error.to_string())?
+        }
+    };
+
+    if !resolved.exists() {
+        return Err(format!(
+            "Sound file not found: {}",
+            resolved.to_string_lossy()
+        ));
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        use windows::core::PCWSTR;
+        use windows::Win32::Media::Audio::{PlaySoundW, SND_ASYNC, SND_FILENAME, SND_NODEFAULT};
+
+        let wide: Vec<u16> = resolved
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        let _ = unsafe {
+            PlaySoundW(
+                PCWSTR(wide.as_ptr()),
+                None,
+                SND_FILENAME | SND_ASYNC | SND_NODEFAULT,
+            )
+        };
+        Ok(())
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        Err("Sound preview is only supported on Windows".into())
+    }
+}
+
 fn main() {
     if let Some(result) = openxr_layers::run_elevated_helper_from_args() {
         if let Err(error) = result {
@@ -1292,7 +1412,9 @@ fn main() {
             load_openxr_layers,
             ensure_openxr_layer_elevation,
             set_openxr_layer_enabled,
-            move_openxr_layer
+            move_openxr_layer,
+            pick_sound_file,
+            play_test_sound
         ])
         .run(tauri::generate_context!())
         .expect("failed to run VectorXR Tauri app");
