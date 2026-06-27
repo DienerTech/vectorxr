@@ -110,6 +110,14 @@ XrResult XRAPI_CALL DepthxrEnumerateViewConfigurationViews(XrInstance instance,
         instance, system_id, view_configuration_type, view_capacity_input, view_count_output, views);
 }
 
+XrResult XRAPI_CALL DepthxrEnumerateSwapchainFormats(XrSession session,
+                                                     uint32_t format_capacity_input,
+                                                     uint32_t* format_count_output,
+                                                     int64_t* formats) {
+    return OpenXrLayer::Instance().EnumerateSwapchainFormats(
+        session, format_capacity_input, format_count_output, formats);
+}
+
 XrResult XRAPI_CALL DepthxrCreateSwapchain(XrSession session,
                                            const XrSwapchainCreateInfo* create_info,
                                            XrSwapchain* swapchain) {
@@ -281,6 +289,10 @@ XrResult XRAPI_CALL xrGetInstanceProcAddr(XrInstance instance, const char* name,
     }
     if (requested == "xrEnumerateViewConfigurationViews") {
         *function = reinterpret_cast<PFN_xrVoidFunction>(depthxr::DepthxrEnumerateViewConfigurationViews);
+        return XR_SUCCESS;
+    }
+    if (requested == "xrEnumerateSwapchainFormats") {
+        *function = reinterpret_cast<PFN_xrVoidFunction>(depthxr::DepthxrEnumerateSwapchainFormats);
         return XR_SUCCESS;
     }
     if (requested == "xrCreateSwapchain") {
