@@ -901,9 +901,22 @@ XrResult OpenXrLayer::OnInstanceCreated(const XrInstanceCreateInfo* create_info,
             ExtensionRequested(create_info, XR_VARJO_FOVEATED_RENDERING_EXTENSION_NAME);
 
         std::ostringstream stream;
+        const XrVersion api_version = create_info->applicationInfo.apiVersion;
         stream << "Application=" << create_info->applicationInfo.applicationName << ", Engine="
-               << create_info->applicationInfo.engineName;
+               << create_info->applicationInfo.engineName
+               << ", AppVersion=" << create_info->applicationInfo.applicationVersion
+               << ", OpenXRApiVersion=" << XR_VERSION_MAJOR(api_version) << "."
+               << XR_VERSION_MINOR(api_version) << "." << XR_VERSION_PATCH(api_version);
         logger_.Info(stream.str());
+
+        std::ostringstream ext_stream;
+        ext_stream << "Application enabled OpenXR extensions (" << create_info->enabledExtensionCount << "):";
+        for (uint32_t i = 0; i < create_info->enabledExtensionCount; ++i) {
+            if (create_info->enabledExtensionNames && create_info->enabledExtensionNames[i]) {
+                ext_stream << ' ' << create_info->enabledExtensionNames[i];
+            }
+        }
+        logger_.Info(ext_stream.str());
         if (quad_views_extension_requested_ || varjo_foveated_rendering_extension_requested_) {
             logger_.Info(std::string("Application requested layer-owned extensions: quadViews=") +
                          (quad_views_extension_requested_ ? "true" : "false") +
@@ -921,12 +934,27 @@ XrResult OpenXrLayer::OnInstanceCreated(const XrInstanceCreateInfo* create_info,
         !next_end_frame_ || !next_get_system_properties_ || !next_enumerate_environment_blend_modes_ ||
         !next_enumerate_view_configurations_ || !next_get_view_configuration_properties_ ||
         !next_enumerate_view_configuration_views_ ||
+        !next_enumerate_swapchain_formats_ ||
         !next_create_swapchain_ || !next_destroy_swapchain_ || !next_enumerate_swapchain_images_ ||
         !next_acquire_swapchain_image_ || !next_wait_swapchain_image_ || !next_release_swapchain_image_ ||
         !next_create_reference_space_ || !next_destroy_space_ ||
         !next_locate_space_ || !next_locate_views_) {
         logger_.Error("Failed to resolve required OpenXR function pointers");
         return XR_ERROR_INITIALIZATION_FAILED;
+    }
+
+    if (next_get_instance_properties_) {
+        XrInstanceProperties instance_properties{XR_TYPE_INSTANCE_PROPERTIES};
+        const XrResult props_result = next_get_instance_properties_(instance_, &instance_properties);
+        if (XR_SUCCEEDED(props_result)) {
+            const XrVersion rt = instance_properties.runtimeVersion;
+            logger_.Info(std::string("OpenXR runtime: name=\"") + instance_properties.runtimeName +
+                         "\", version=" + std::to_string(XR_VERSION_MAJOR(rt)) + "." +
+                         std::to_string(XR_VERSION_MINOR(rt)) + "." + std::to_string(XR_VERSION_PATCH(rt)));
+        } else {
+            logger_.Info("OpenXR runtime identity unavailable: xrGetInstanceProperties returned " +
+                         std::to_string(static_cast<int>(props_result)));
+        }
     }
 
     ReloadConfigIfNeeded();
@@ -973,6 +1001,7 @@ XrResult OpenXrLayer::DestroyInstance(XrInstance instance) {
         next_enumerate_view_configurations_ = nullptr;
         next_get_view_configuration_properties_ = nullptr;
         next_enumerate_view_configuration_views_ = nullptr;
+        next_enumerate_swapchain_formats_ = nullptr;
         next_create_swapchain_ = nullptr;
         next_destroy_swapchain_ = nullptr;
         next_enumerate_swapchain_images_ = nullptr;
@@ -1008,10 +1037,21 @@ XrResult OpenXrLayer::DestroyInstance(XrInstance instance) {
 XrResult OpenXrLayer::CreateSession(XrInstance instance,
                                     const XrSessionCreateInfo* create_info,
                                     XrSession* session) {
+    {
+        const void* graphics_binding = create_info ? create_info->next : nullptr;
+        const auto* next_struct = static_cast<const XrBaseInStructure*>(graphics_binding);
+        logger_.Info(std::string("xrCreateSession requested by application: graphicsBindingType=") +
+                     (next_struct ? std::to_string(next_struct->type) : "none"));
+    }
+
     const XrResult result = next_create_session_(instance, create_info, session);
     if (XR_FAILED(result) || !session) {
+        if (XR_FAILED(result)) {
+            logger_.Error("xrCreateSession failed downstream: result=" + std::to_string(static_cast<int>(result)));
+        }
         return result;
     }
+    logger_.Info("xrCreateSession succeeded downstream; configuring VectorXR session resources.");
 
     std::scoped_lock lock(mutex_);
     ResetSessionState();
@@ -1085,8 +1125,16 @@ XrResult OpenXrLayer::BeginSession(XrSession session, const XrSessionBeginInfo* 
         downstream_begin_info = &runtime_begin_info;
     }
 
+    logger_.Info(std::string("xrBeginSession requested by application: appViewConfig=") +
+                 (begin_info ? ToString(begin_info->primaryViewConfigurationType) : "null") +
+                 ", runtimeViewConfig=" +
+                 (downstream_begin_info ? ToString(downstream_begin_info->primaryViewConfigurationType) : "null"));
+
     const XrResult result = next_begin_session_(session, downstream_begin_info);
     if (XR_FAILED(result) || !begin_info) {
+        if (XR_FAILED(result)) {
+            logger_.Error("xrBeginSession failed downstream: result=" + std::to_string(static_cast<int>(result)));
+        }
         return result;
     }
 
@@ -1131,8 +1179,17 @@ XrResult OpenXrLayer::AttachSessionActionSets(XrSession session, const XrSession
         }
     }
 
+    logger_.Info("xrAttachSessionActionSets requested by application: appActionSets=" +
+                 std::to_string(attach_info->countActionSets) +
+                 ", appendedEyeGazeSet=" + (appended_eye_gaze_set ? "1" : "0"));
+
     const XrResult result = next_attach_session_action_sets_(session, &downstream_attach_info);
-    if (XR_SUCCEEDED(result) && appended_eye_gaze_set) {
+    if (XR_FAILED(result)) {
+        logger_.Error("xrAttachSessionActionSets failed downstream: result=" +
+                      std::to_string(static_cast<int>(result)));
+        return result;
+    }
+    if (appended_eye_gaze_set) {
         std::scoped_lock lock(mutex_);
         if (session == active_session_) {
             eye_gaze_action_set_attached_ = true;
@@ -1208,6 +1265,24 @@ XrResult OpenXrLayer::GetSystemProperties(XrInstance instance,
     std::scoped_lock lock(mutex_);
     ReloadConfigIfNeeded();
     RefreshResolvedSettings();
+
+    const bool app_queried_varjo_foveation =
+        FindStructInChain(properties->next, XR_TYPE_SYSTEM_FOVEATED_RENDERING_PROPERTIES_VARJO) != nullptr;
+    if (!has_logged_system_properties_) {
+        std::ostringstream stream;
+        stream << "OpenXR system: name=\"" << properties->systemName << "\""
+               << ", vendorId=" << properties->vendorId
+               << ", maxSwapchainImage=" << properties->graphicsProperties.maxSwapchainImageWidth << "x"
+               << properties->graphicsProperties.maxSwapchainImageHeight
+               << ", maxLayerCount=" << properties->graphicsProperties.maxLayerCount
+               << ", orientationTracking=" << (properties->trackingProperties.orientationTracking ? 1 : 0)
+               << ", positionTracking=" << (properties->trackingProperties.positionTracking ? 1 : 0)
+               << ", appQueriedVarjoFoveation=" << (app_queried_varjo_foveation ? 1 : 0)
+               << ", quadViewsActive=" << (IsQuadViewsActive() ? 1 : 0);
+        logger_.Info(stream.str());
+        has_logged_system_properties_ = true;
+    }
+
     if (!IsQuadViewsActive()) {
         return result;
     }
@@ -1215,6 +1290,7 @@ XrResult OpenXrLayer::GetSystemProperties(XrInstance instance,
     void* foveated = FindMutableStructInChain(properties->next, XR_TYPE_SYSTEM_FOVEATED_RENDERING_PROPERTIES_VARJO);
     if (foveated) {
         reinterpret_cast<XrSystemFoveatedRenderingPropertiesVARJO*>(foveated)->supportsFoveatedRendering = XR_TRUE;
+        logger_.Info("Reported supportsFoveatedRendering=TRUE to application (Varjo foveated-rendering emulation).");
     }
     return result;
 }
@@ -1253,6 +1329,8 @@ XrResult OpenXrLayer::EnumerateViewConfigurations(XrInstance instance,
     uint32_t runtime_count = 0;
     XrResult result = next_enumerate_view_configurations_(instance, system_id, 0, &runtime_count, nullptr);
     if (XR_FAILED(result)) {
+        logger_.Error("xrEnumerateViewConfigurations failed downstream (count query): result=" +
+                      std::to_string(static_cast<int>(result)));
         return result;
     }
 
@@ -1261,6 +1339,8 @@ XrResult OpenXrLayer::EnumerateViewConfigurations(XrInstance instance,
         result = next_enumerate_view_configurations_(
             instance, system_id, runtime_count, &runtime_count, runtime_types.data());
         if (XR_FAILED(result)) {
+            logger_.Error("xrEnumerateViewConfigurations failed downstream (populate): result=" +
+                          std::to_string(static_cast<int>(result)));
             return result;
         }
         runtime_types.resize(runtime_count);
@@ -1340,7 +1420,16 @@ XrResult OpenXrLayer::GetViewConfigurationProperties(
 
     const XrResult result =
         next_get_view_configuration_properties_(instance, system_id, runtime_type, configuration_properties);
-    if (XR_SUCCEEDED(result) && synthesize_quad && configuration_properties) {
+    if (XR_FAILED(result)) {
+        logger_.Error("xrGetViewConfigurationProperties failed downstream: result=" +
+                      std::to_string(static_cast<int>(result)) + ", appViewConfig=" +
+                      ToString(view_configuration_type) + ", runtimeViewConfig=" + ToString(runtime_type));
+        return result;
+    }
+    logger_.Info(std::string("xrGetViewConfigurationProperties: appViewConfig=") +
+                 ToString(view_configuration_type) + ", runtimeViewConfig=" + ToString(runtime_type) +
+                 ", synthesizeQuad=" + (synthesize_quad ? "1" : "0"));
+    if (synthesize_quad && configuration_properties) {
         configuration_properties->viewConfigurationType =
             XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO_WITH_FOVEATED_INSET;
     }
@@ -1377,9 +1466,13 @@ XrResult OpenXrLayer::EnumerateViewConfigurationViews(XrInstance instance,
                                                                     &stereo_count,
                                                                     stereo_views.data());
     if (XR_FAILED(result)) {
+        logger_.Error("xrEnumerateViewConfigurationViews: underlying stereo query failed while synthesizing "
+                      "quad views: result=" + std::to_string(static_cast<int>(result)));
         return result;
     }
     if (stereo_count < 2) {
+        logger_.Error("xrEnumerateViewConfigurationViews: runtime reported fewer than 2 stereo views (" +
+                      std::to_string(stereo_count) + "); cannot synthesize quad views.");
         *view_count_output = stereo_count;
         return result;
     }
@@ -1439,11 +1532,76 @@ XrResult OpenXrLayer::EnumerateViewConfigurationViews(XrInstance instance,
     return XR_SUCCESS;
 }
 
+XrResult OpenXrLayer::EnumerateSwapchainFormats(XrSession session,
+                                                uint32_t format_capacity_input,
+                                                uint32_t* format_count_output,
+                                                int64_t* formats) {
+    const XrResult result = next_enumerate_swapchain_formats_(
+        session, format_capacity_input, format_count_output, formats);
+
+    if (XR_FAILED(result)) {
+        logger_.Error("xrEnumerateSwapchainFormats failed downstream: result=" +
+                      std::to_string(static_cast<int>(result)) +
+                      ", capacityInput=" + std::to_string(format_capacity_input));
+        return result;
+    }
+
+    // Log the returned format list once, on the populating call (capacity > 0).
+    if (formats && format_capacity_input > 0 && format_count_output) {
+        std::ostringstream stream;
+        const uint32_t count = std::min<uint32_t>(*format_count_output, format_capacity_input);
+        stream << "xrEnumerateSwapchainFormats returned " << count << " format(s):";
+        for (uint32_t i = 0; i < count; ++i) {
+            stream << ' ' << formats[i];
+        }
+        logger_.Info(stream.str());
+    }
+    return result;
+}
+
 XrResult OpenXrLayer::CreateSwapchain(XrSession session,
                                       const XrSwapchainCreateInfo* create_info,
                                       XrSwapchain* swapchain) {
+    {
+        std::ostringstream stream;
+        stream << "xrCreateSwapchain requested by application:";
+        if (create_info) {
+            stream << " size=" << create_info->width << "x" << create_info->height
+                   << ", arraySize=" << create_info->arraySize
+                   << ", faceCount=" << create_info->faceCount
+                   << ", mipCount=" << create_info->mipCount
+                   << ", sampleCount=" << create_info->sampleCount
+                   << ", format=" << create_info->format
+                   << ", usage=" << FormatUsageFlags(create_info->usageFlags)
+                   << ", createFlags=" << create_info->createFlags;
+            const auto* next_struct = static_cast<const XrBaseInStructure*>(create_info->next);
+            stream << ", nextChainType=" << (next_struct ? std::to_string(next_struct->type) : "none");
+        } else {
+            stream << " create_info=null";
+        }
+        logger_.Info(stream.str());
+    }
+
     const XrResult result = next_create_swapchain_(session, create_info, swapchain);
-    if (XR_FAILED(result) || !create_info || !swapchain || *swapchain == XR_NULL_HANDLE) {
+    if (XR_FAILED(result)) {
+        std::ostringstream stream;
+        stream << "xrCreateSwapchain failed downstream: result=" << static_cast<int>(result);
+        if (create_info) {
+            stream << ", size=" << create_info->width << "x" << create_info->height
+                   << ", arraySize=" << create_info->arraySize
+                   << ", faceCount=" << create_info->faceCount
+                   << ", mipCount=" << create_info->mipCount
+                   << ", sampleCount=" << create_info->sampleCount
+                   << ", format=" << create_info->format
+                   << ", usage=" << FormatUsageFlags(create_info->usageFlags)
+                   << ", createFlags=" << create_info->createFlags;
+            const auto* next_struct = static_cast<const XrBaseInStructure*>(create_info->next);
+            stream << ", nextChainType=" << (next_struct ? std::to_string(next_struct->type) : "none");
+        }
+        logger_.Error(stream.str());
+        return result;
+    }
+    if (!create_info || !swapchain || *swapchain == XR_NULL_HANDLE) {
         return result;
     }
 
@@ -2702,8 +2860,16 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
 XrResult OpenXrLayer::CreateReferenceSpace(XrSession session,
                                            const XrReferenceSpaceCreateInfo* create_info,
                                            XrSpace* space) {
+    logger_.Info(std::string("xrCreateReferenceSpace requested by application: referenceSpaceType=") +
+                 (create_info ? std::to_string(static_cast<int>(create_info->referenceSpaceType)) : "null"));
+
     const XrResult result = next_create_reference_space_(session, create_info, space);
-    if (XR_FAILED(result) || !create_info || !space) {
+    if (XR_FAILED(result)) {
+        logger_.Error("xrCreateReferenceSpace failed downstream: result=" +
+                      std::to_string(static_cast<int>(result)));
+        return result;
+    }
+    if (!create_info || !space) {
         return result;
     }
 
@@ -3119,6 +3285,11 @@ void OpenXrLayer::CaptureInstanceFunctions() {
     }
 
     function = nullptr;
+    if (XR_SUCCEEDED(next_get_instance_proc_addr_(instance_, "xrGetInstanceProperties", &function))) {
+        next_get_instance_properties_ = reinterpret_cast<PFN_xrGetInstanceProperties>(function);
+    }
+
+    function = nullptr;
     if (XR_SUCCEEDED(next_get_instance_proc_addr_(instance_, "xrCreateSession", &function))) {
         next_create_session_ = reinterpret_cast<PFN_xrCreateSession>(function);
     }
@@ -3175,6 +3346,11 @@ void OpenXrLayer::CaptureInstanceFunctions() {
     if (XR_SUCCEEDED(next_get_instance_proc_addr_(instance_, "xrEnumerateViewConfigurationViews", &function))) {
         next_enumerate_view_configuration_views_ =
             reinterpret_cast<PFN_xrEnumerateViewConfigurationViews>(function);
+    }
+
+    function = nullptr;
+    if (XR_SUCCEEDED(next_get_instance_proc_addr_(instance_, "xrEnumerateSwapchainFormats", &function))) {
+        next_enumerate_swapchain_formats_ = reinterpret_cast<PFN_xrEnumerateSwapchainFormats>(function);
     }
 
     function = nullptr;
@@ -3320,6 +3496,7 @@ void OpenXrLayer::ResetInstanceState() {
     eye_gaze_extension_enabled_ = false;
     cached_quadviews_stereo_recommended_width_ = 0;
     cached_quadviews_stereo_recommended_height_ = 0;
+    has_logged_system_properties_ = false;
 }
 
 bool OpenXrLayer::IsQuadViewsActive() const {

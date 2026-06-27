@@ -16,3 +16,6 @@ notes/
 
 # Scratch dir from local signature/copyright checks
 .tmp-signature-check/
+
+# scratch dir for user logs
+logs/

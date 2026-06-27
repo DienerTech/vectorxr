@@ -74,6 +74,10 @@ class OpenXrLayer {
                                              uint32_t view_capacity_input,
                                              uint32_t* view_count_output,
                                              XrViewConfigurationView* views);
+    XrResult EnumerateSwapchainFormats(XrSession session,
+                                       uint32_t format_capacity_input,
+                                       uint32_t* format_count_output,
+                                       int64_t* formats);
     XrResult CreateSwapchain(XrSession session, const XrSwapchainCreateInfo* create_info, XrSwapchain* swapchain);
     XrResult DestroySwapchain(XrSwapchain swapchain);
     XrResult EnumerateSwapchainImages(XrSwapchain swapchain,
@@ -307,6 +311,7 @@ class OpenXrLayer {
     bool has_logged_quad_view_short_count_{false};
     bool has_logged_pivotxr_spike_mode_{false};
     bool has_logged_quadviews_view_configuration_capabilities_{false};
+    bool has_logged_system_properties_{false};
     uint32_t cached_quadviews_stereo_recommended_width_{0};
     uint32_t cached_quadviews_stereo_recommended_height_{0};
     std::unordered_set<XrSpace> tracked_view_spaces_;
@@ -327,6 +332,7 @@ class OpenXrLayer {
     D3D11QuadViewsCompositor d3d11_quadviews_compositor_;
 
     PFN_xrGetInstanceProcAddr next_get_instance_proc_addr_{nullptr};
+    PFN_xrGetInstanceProperties next_get_instance_properties_{nullptr};
     PFN_xrDestroyInstance next_destroy_instance_{nullptr};
     PFN_xrCreateSession next_create_session_{nullptr};
     PFN_xrDestroySession next_destroy_session_{nullptr};
@@ -339,6 +345,7 @@ class OpenXrLayer {
     PFN_xrEnumerateViewConfigurations next_enumerate_view_configurations_{nullptr};
     PFN_xrGetViewConfigurationProperties next_get_view_configuration_properties_{nullptr};
     PFN_xrEnumerateViewConfigurationViews next_enumerate_view_configuration_views_{nullptr};
+    PFN_xrEnumerateSwapchainFormats next_enumerate_swapchain_formats_{nullptr};
     PFN_xrCreateSwapchain next_create_swapchain_{nullptr};
     PFN_xrDestroySwapchain next_destroy_swapchain_{nullptr};
     PFN_xrEnumerateSwapchainImages next_enumerate_swapchain_images_{nullptr};
