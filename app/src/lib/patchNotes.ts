@@ -8,6 +8,17 @@ export interface PatchNoteEntry {
 
 export const patchNotes: PatchNoteEntry[] = [
   {
+    version: '0.11.1',
+    date: '2026-06-27',
+    title: 'Layer startup diagnostics',
+    summary: 'Adds detailed runtime logging across the OpenXR layer chain during session startup to help diagnose headset- and runtime-specific issues, with no change to runtime behavior.',
+    items: [
+      'Logs the active OpenXR runtime, headset/system details, and the application’s enabled extensions at startup.',
+      'Traces each key OpenXR call during session bring-up (session creation, reference spaces, swapchain format and creation, action-set attach, and session begin) with parameters and results.',
+      'Surfaces previously-silent downstream failures in that startup window so the exact failing call is captured in logs and debug exports.',
+    ],
+  },
+  {
     version: '0.11.0',
     date: '2026-06-19',
     title: 'Beta Release',
