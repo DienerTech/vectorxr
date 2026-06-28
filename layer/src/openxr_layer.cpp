@@ -309,10 +309,20 @@ const void* FindStructInChain(const void* next, XrStructureType type) {
 }
 
 const void* StripVarjoFoveatedViewLocateNextChain(const void* next) {
-    if (!FindStructInChain(next, XR_TYPE_VIEW_LOCATE_FOVEATED_RENDERING_VARJO)) {
+    const auto* header = reinterpret_cast<const XrBaseInStructure*>(next);
+    if (!header) {
+        return nullptr;
+    }
+    if (header->type == XR_TYPE_VIEW_LOCATE_FOVEATED_RENDERING_VARJO) {
+        return header->next;
+    }
+    if (!FindStructInChain(header->next, XR_TYPE_VIEW_LOCATE_FOVEATED_RENDERING_VARJO)) {
         return next;
     }
 
+    // XrViewLocateInfo chains are const app memory. If the Varjo node is not
+    // first, drop the chain rather than mutating unknown extension structs to
+    // splice it out before forwarding to non-Varjo runtimes.
     return nullptr;
 }
 
