@@ -893,6 +893,14 @@ OpenXrLayer& OpenXrLayer::Instance() {
     return layer;
 }
 
+OpenXrLayer::~OpenXrLayer() {
+    // Safety net for apps that exit without xrDestroyInstance: join the watcher
+    // before members are destroyed so a still-joinable std::thread can't trip
+    // terminate(). The watcher only touches this object's own members, all of
+    // which outlive this destructor body.
+    StopConfigWatcher();
+}
+
 void OpenXrLayer::SetLayerDirectory(std::filesystem::path dll_directory) {
     std::scoped_lock lock(mutex_);
     dll_directory_ = std::move(dll_directory);
@@ -1029,6 +1037,11 @@ XrResult OpenXrLayer::OnInstanceCreated(const XrInstanceCreateInfo* create_info,
     }
     RefreshResolvedSettings();
     logger_.Info("Active log file: " + logger_.ActiveLogPath().string());
+
+    // Hand ongoing config hot-reload to the watcher thread now that the initial
+    // load and config_path_ are established. From here the render hot path never
+    // touches the filesystem for config.
+    StartConfigWatcher();
     return XR_SUCCESS;
 }
 
@@ -1045,6 +1058,10 @@ XrResult OpenXrLayer::GetInstanceProcAddr(XrInstance instance, const char* name,
 }
 
 XrResult OpenXrLayer::DestroyInstance(XrInstance instance) {
+    // Join the watcher before taking mutex_: it may be mid-PollConfigFile
+    // holding the lock, so stopping it under mutex_ would deadlock.
+    StopConfigWatcher();
+
     std::scoped_lock lock(mutex_);
 
     DestroyEyeGazeResources();
@@ -3406,59 +3423,163 @@ XrResult OpenXrLayer::DestroySpace(XrSpace space) {
 }
 
 void OpenXrLayer::ReloadConfigIfNeeded() {
-    const auto now = std::chrono::steady_clock::now();
-    if (has_loaded_config_ && last_config_check_time_.has_value() &&
-        now - *last_config_check_time_ < kConfigCheckInterval) {
+    // Steady-state config reloads run off the render thread in the config
+    // watcher (StartConfigWatcher / PollConfigFile). This path performs only the
+    // one-time initial load at instance creation, before the watcher starts, so
+    // the very first frame already sees the user's settings. Once the config is
+    // loaded it is a cheap single-bool early-out and never touches the
+    // filesystem on a hot path again.
+    if (has_loaded_config_) {
         return;
     }
-    last_config_check_time_ = now;
 
     if (config_path_.empty()) {
         config_path_ = ResolveConfigPath();
     }
 
-    if (!std::filesystem::exists(config_path_)) {
-        if (!has_loaded_config_) {
-            config_ = DefaultConfig();
-            has_loaded_config_ = true;
-            ++config_generation_;
-            logger_.Info("No config file found. Using default settings.");
-        }
+    std::error_code ec;
+    if (!std::filesystem::exists(config_path_, ec) || ec) {
+        config_ = DefaultConfig();
+        has_loaded_config_ = true;
+        ++config_generation_;
+        logger_.Info("No config file found. Using default settings.");
         return;
     }
 
-    const auto timestamp = std::filesystem::last_write_time(config_path_);
-    if (has_loaded_config_ && has_config_timestamp_ && timestamp == last_config_write_time_) {
-        return;
-    }
-
+    const auto timestamp = std::filesystem::last_write_time(config_path_, ec);
     const ParseResult loaded = LoadConfigFromFile(config_path_);
     if (!loaded.ok) {
-        const bool already_reported_failure =
-            has_failed_config_timestamp_ && timestamp == last_failed_config_write_time_ &&
-            loaded.error == last_failed_config_error_;
-        if (!already_reported_failure) {
-            logger_.Error("Failed to parse config: " + loaded.error);
+        logger_.Error("Failed to parse config: " + loaded.error);
+        if (!ec) {
+            last_failed_config_write_time_ = timestamp;
+            has_failed_config_timestamp_ = true;
         }
-        last_failed_config_write_time_ = timestamp;
-        has_failed_config_timestamp_ = true;
         last_failed_config_error_ = loaded.error;
-        if (!has_loaded_config_) {
-            config_ = DefaultConfig();
-            has_loaded_config_ = true;
-            ++config_generation_;
-        }
+        config_ = DefaultConfig();
+        has_loaded_config_ = true;
+        ++config_generation_;
         return;
     }
 
     config_ = loaded.document;
     has_loaded_config_ = true;
-    has_config_timestamp_ = true;
-    last_config_write_time_ = timestamp;
     has_failed_config_timestamp_ = false;
     last_failed_config_error_.clear();
+    if (!ec) {
+        has_config_timestamp_ = true;
+        last_config_write_time_ = timestamp;
+    }
     ++config_generation_;
     logger_.Info("Loaded config from " + config_path_.string());
+}
+
+void OpenXrLayer::StartConfigWatcher() {
+    if (config_watcher_thread_.joinable()) {
+        return;
+    }
+    {
+        std::scoped_lock watcher_lock(config_watcher_mutex_);
+        config_watcher_stop_ = false;
+    }
+    config_watcher_thread_ = std::thread([this] { ConfigWatcherLoop(); });
+}
+
+void OpenXrLayer::StopConfigWatcher() {
+    // Must be called WITHOUT holding mutex_: the watcher may be inside
+    // PollConfigFile waiting on mutex_, and join() would otherwise deadlock.
+    {
+        std::scoped_lock watcher_lock(config_watcher_mutex_);
+        config_watcher_stop_ = true;
+    }
+    config_watcher_cv_.notify_all();
+    if (config_watcher_thread_.joinable()) {
+        config_watcher_thread_.join();
+    }
+}
+
+void OpenXrLayer::ConfigWatcherLoop() {
+    for (;;) {
+        {
+            std::unique_lock<std::mutex> watcher_lock(config_watcher_mutex_);
+            config_watcher_cv_.wait_for(
+                watcher_lock, kConfigCheckInterval, [this] { return config_watcher_stop_; });
+            if (config_watcher_stop_) {
+                return;
+            }
+        }
+        PollConfigFile();
+    }
+}
+
+void OpenXrLayer::PollConfigFile() {
+    // Runs on the watcher thread. Every filesystem operation below executes
+    // WITHOUT holding mutex_; the lock is taken only to read the last-known
+    // timestamp and to publish a parsed change, so render-thread frames are
+    // never stalled by filesystem latency (or antivirus interception of it).
+    std::filesystem::path path;
+    {
+        std::scoped_lock lock(mutex_);
+        path = config_path_;
+    }
+    if (path.empty()) {
+        return;
+    }
+
+    std::error_code ec;
+    if (!std::filesystem::exists(path, ec) || ec) {
+        return;  // File missing or unreadable; keep the last good config.
+    }
+
+    const auto timestamp = std::filesystem::last_write_time(path, ec);
+    if (ec) {
+        return;  // Transient stat failure; retry on the next tick.
+    }
+
+    {
+        std::scoped_lock lock(mutex_);
+        if (has_loaded_config_ && has_config_timestamp_ && timestamp == last_config_write_time_) {
+            return;  // Unchanged since the last successful load.
+        }
+        if (has_failed_config_timestamp_ && timestamp == last_failed_config_write_time_) {
+            return;  // Same file we already parsed and reported as invalid.
+        }
+    }
+
+    // Parse outside the lock: this is the expensive part (file read + JSON parse).
+    ParseResult loaded = LoadConfigFromFile(path);
+
+    bool log_parse_failure = false;
+    bool log_reload_success = false;
+    {
+        std::scoped_lock lock(mutex_);
+        if (!loaded.ok) {
+            const bool already_reported_failure =
+                has_failed_config_timestamp_ && timestamp == last_failed_config_write_time_ &&
+                loaded.error == last_failed_config_error_;
+            log_parse_failure = !already_reported_failure;
+            last_failed_config_write_time_ = timestamp;
+            has_failed_config_timestamp_ = true;
+            last_failed_config_error_ = loaded.error;
+        } else {
+            config_ = std::move(loaded.document);
+            has_loaded_config_ = true;
+            has_config_timestamp_ = true;
+            last_config_write_time_ = timestamp;
+            has_failed_config_timestamp_ = false;
+            last_failed_config_error_.clear();
+            ++config_generation_;
+            log_reload_success = true;
+        }
+    }
+
+    // Log after releasing mutex_ so a render-thread frame waiting on the lock is
+    // never blocked behind the logger's disk flush. Logger has its own mutex, so
+    // logging off the layer lock is safe.
+    if (log_parse_failure) {
+        logger_.Error("Failed to parse config: " + loaded.error);
+    } else if (log_reload_success) {
+        logger_.Info("Reloaded config from " + path.string());
+    }
 }
 
 void OpenXrLayer::RefreshResolvedSettings() {

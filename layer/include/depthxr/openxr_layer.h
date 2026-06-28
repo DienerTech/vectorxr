@@ -2,6 +2,7 @@
 
 #include <array>
 #include <chrono>
+#include <condition_variable>
 #include <filesystem>
 #include <map>
 #include <mutex>
@@ -9,6 +10,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -123,6 +125,7 @@ class OpenXrLayer {
 
   private:
     OpenXrLayer() = default;
+    ~OpenXrLayer();
 
     struct SwapchainInfo {
         XrSession session{XR_NULL_HANDLE};
@@ -198,6 +201,10 @@ class OpenXrLayer {
     };
 
     void ReloadConfigIfNeeded();
+    void StartConfigWatcher();
+    void StopConfigWatcher();
+    void ConfigWatcherLoop();
+    void PollConfigFile();
     void RefreshResolvedSettings();
     void CaptureInstanceFunctions();
     void LogResolvedSettings(const ResolvedRuntimeConfig& settings);
@@ -289,8 +296,15 @@ class OpenXrLayer {
     uint64_t config_generation_{0};
     uint64_t resolved_settings_generation_{~0ull};
     XrSession resolved_settings_session_{XR_NULL_HANDLE};
-    std::optional<std::chrono::steady_clock::time_point> last_config_check_time_;
     std::string last_failed_config_error_;
+
+    // Config hot-reload runs on a dedicated watcher thread so that filesystem
+    // latency never blocks the render hot path. The watcher does all I/O without
+    // holding mutex_, taking it only briefly to publish a parsed change.
+    std::thread config_watcher_thread_;
+    std::mutex config_watcher_mutex_;
+    std::condition_variable config_watcher_cv_;
+    bool config_watcher_stop_{false};
     std::string runtime_name_;
     std::string current_exe_name_;
     ResolvedRuntimeConfig resolved_settings_;
