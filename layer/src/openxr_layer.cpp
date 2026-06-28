@@ -2929,6 +2929,35 @@ XrResult OpenXrLayer::CreateReferenceSpace(XrSession session,
     logger_.Info(std::string("xrCreateReferenceSpace requested by application: referenceSpaceType=") +
                  (create_info ? std::to_string(static_cast<int>(create_info->referenceSpaceType)) : "null"));
 
+    if (create_info && space &&
+        create_info->referenceSpaceType == XR_REFERENCE_SPACE_TYPE_COMBINED_EYE_VARJO) {
+        bool emulate_combined_eye = false;
+        {
+            std::scoped_lock lock(mutex_);
+            ReloadConfigIfNeeded();
+            RefreshResolvedSettings();
+            emulate_combined_eye = session == active_session_ && IsQuadViewsActive() &&
+                                   (quad_views_extension_requested_ ||
+                                    varjo_foveated_rendering_extension_requested_);
+        }
+
+        if (emulate_combined_eye) {
+            XrReferenceSpaceCreateInfo runtime_create_info = *create_info;
+            runtime_create_info.referenceSpaceType = XR_REFERENCE_SPACE_TYPE_VIEW;
+            const XrResult result = next_create_reference_space_(session, &runtime_create_info, space);
+            if (XR_FAILED(result)) {
+                logger_.Error("xrCreateReferenceSpace emulated COMBINED_EYE_VARJO failed downstream VIEW: result=" +
+                              std::to_string(static_cast<int>(result)));
+                return result;
+            }
+
+            std::scoped_lock lock(mutex_);
+            tracked_view_spaces_.insert(*space);
+            logger_.Info("Emulated XR_REFERENCE_SPACE_TYPE_COMBINED_EYE_VARJO with runtime VIEW reference space.");
+            return result;
+        }
+    }
+
     const XrResult result = next_create_reference_space_(session, create_info, space);
     if (XR_FAILED(result)) {
         logger_.Error("xrCreateReferenceSpace failed downstream: result=" +
