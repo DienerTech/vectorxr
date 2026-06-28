@@ -22,6 +22,13 @@
 #include "depthxr/seen_apps.h"
 #include "depthxr/sound_player.h"
 
+// Injected by layer/CMakeLists.txt from the canonical app version in
+// app/src-tauri/tauri.conf.json. Falls back when the layer is built without that
+// definition (e.g. the test target) so the symbol always resolves.
+#ifndef VECTORXR_VERSION
+#define VECTORXR_VERSION "unknown"
+#endif
+
 namespace depthxr {
 namespace {
 
@@ -892,6 +899,7 @@ XrResult OpenXrLayer::OnInstanceCreated(const XrInstanceCreateInfo* create_info,
     logger_.Initialize(log_path_);
 
     current_exe_name_ = GetCurrentExecutableName();
+    logger_.Info(std::string("VectorXR layer version: ") + VECTORXR_VERSION);
     logger_.Info("VectorXR attached to process: " + current_exe_name_);
 
     if (create_info) {
@@ -4354,6 +4362,10 @@ void OpenXrLayer::ResetSwapchainState() {
 }
 
 bool OpenXrLayer::ShouldDeferSwapchainRelease(const SwapchainInfo& info) const {
+    // Deliberately scoped to every swapchain in the quadviews session, not just the
+    // four compositor inputs. The extra swapchains are still flushed before
+    // next_end_frame_, so submission ordering stays correct; keying off the session
+    // avoids tracking which handles are compositor inputs versus app-owned layers.
     return defer_quadviews_swapchain_releases_ && info.quadviews_session && info.session == active_session_ &&
            IsQuadViewsActive();
 }
