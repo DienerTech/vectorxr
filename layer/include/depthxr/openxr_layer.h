@@ -200,6 +200,29 @@ class OpenXrLayer {
         std::array<QuadViewsGpuTimingQuery, 4> gpu_timing_queries;
     };
 
+    struct PivotDiagnosticState {
+        bool has_view_pose{false};
+        XrTime view_time{0};
+        XrSpaceLocationFlags view_location_flags{0};
+        bool pivot_active{false};
+        bool space_is_view{false};
+        bool base_space_is_view{false};
+        double raw_yaw_radians{0.0};
+        double raw_pitch_radians{0.0};
+        double steady_extra_yaw_radians{0.0};
+        double steady_extra_pitch_radians{0.0};
+        double eased_extra_yaw_radians{0.0};
+        double eased_extra_pitch_radians{0.0};
+        double activation_gain{0.0};
+        std::string_view recomposition_mode{"none"};
+
+        bool has_eye_offsets{false};
+        XrTime eye_offsets_time{0};
+        XrViewConfigurationType eye_offsets_view_configuration{XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO};
+        uint32_t eye_offset_count{0};
+        std::array<XrPosef, 4> eye_offsets{};
+    };
+
     void ReloadConfigIfNeeded();
     void StartConfigWatcher();
     void StopConfigWatcher();
@@ -316,6 +339,9 @@ class OpenXrLayer {
     uint32_t pending_eye_gaze_sync_diagnostics_{0};
     uint32_t pending_quadviews_compositor_diagnostics_{0};
     uint32_t eye_gaze_diagnostic_stride_counter_{0};
+    uint32_t pending_pivot_diagnostics_{0};
+    uint64_t pivot_diagnostic_stride_counter_{0};
+    PivotDiagnosticState pivot_diagnostic_;
     double pivotxr_smoothed_extra_yaw_radians_{0.0};
     double pivotxr_smoothed_extra_pitch_radians_{0.0};
     // Activation envelope in [0,1]: eases the pivot effect in/out on the

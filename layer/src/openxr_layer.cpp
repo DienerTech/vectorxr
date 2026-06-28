@@ -481,6 +481,34 @@ double ExtractPitchRadians(const ViewOrientation& orientation) {
     return std::asin(sin_pitch);
 }
 
+ViewOrientation ToViewOrientation(const XrQuaternionf& orientation) {
+    return {orientation.x, orientation.y, orientation.z, orientation.w};
+}
+
+double ExtractPoseYawRadians(const XrPosef& pose) {
+    return ExtractYawRadians(ToViewOrientation(pose.orientation));
+}
+
+double ExtractPosePitchRadians(const XrPosef& pose) {
+    return ExtractPitchRadians(ToViewOrientation(pose.orientation));
+}
+
+void AppendPoseSummary(std::ostringstream& stream, std::string_view label, const XrPosef& pose) {
+    stream << label << "Pos=(" << FormatDiagnosticDouble(pose.position.x) << ", "
+           << FormatDiagnosticDouble(pose.position.y) << ", "
+           << FormatDiagnosticDouble(pose.position.z) << ")"
+           << " " << label << "Yaw=" << FormatDiagnosticDouble(ExtractPoseYawRadians(pose))
+           << " " << label << "Pitch=" << FormatDiagnosticDouble(ExtractPosePitchRadians(pose));
+}
+
+void AppendPoseSummary(std::ostringstream& stream, std::string_view label, const ViewAdjustmentData& view) {
+    stream << label << "Pos=(" << FormatDiagnosticDouble(view.position.x) << ", "
+           << FormatDiagnosticDouble(view.position.y) << ", "
+           << FormatDiagnosticDouble(view.position.z) << ")"
+           << " " << label << "Yaw=" << FormatDiagnosticDouble(ExtractYawRadians(view.orientation))
+           << " " << label << "Pitch=" << FormatDiagnosticDouble(ExtractPitchRadians(view.orientation));
+}
+
 XrQuaternionf MultiplyQuaternion(const XrQuaternionf& lhs, const XrQuaternionf& rhs) {
     return {
         lhs.w * rhs.x + lhs.x * rhs.w + lhs.y * rhs.z - lhs.z * rhs.y,
@@ -778,6 +806,8 @@ constexpr double kPivotActivationGainEpsilon = 0.0001;
 constexpr XrTime kMaxPivotPoseDeltaMatchWindow = 5'000'000;
 constexpr XrTime kMaxQuadViewsFovMatchWindow = 5'000'000;
 constexpr size_t kMaxCachedQuadViewsFovFrames = 180;
+constexpr uint32_t kPivotDiagnosticBurstCount = 8;
+constexpr uint64_t kPivotDiagnosticStride = 120;
 // Hot-path throttles. xrLocateSpace/xrLocateViews/xrEndFrame run multiple
 // times per frame; filesystem stats, input-device polls, and downstream
 // helper calls must not.
@@ -875,14 +905,14 @@ ConfigDocument DefaultConfig() {
 void AppendViewSummary(std::ostringstream& stream, std::span<const ViewAdjustmentData> views) {
     const size_t summary_count = std::min<size_t>(views.size(), 4);
     for (size_t i = 0; i < summary_count; ++i) {
-        stream << " view" << i << "Pos=(" << FormatDiagnosticDouble(views[i].position.x) << ", "
-               << FormatDiagnosticDouble(views[i].position.y) << ", "
-               << FormatDiagnosticDouble(views[i].position.z) << ")"
-               << " view" << i << "Fov=(" << FormatDiagnosticDouble(views[i].fov.angle_left) << ", "
+        const std::string label = "view" + std::to_string(i);
+        stream << " ";
+        AppendPoseSummary(stream, label, views[i]);
+        stream << " " << label << "Fov=(" << FormatDiagnosticDouble(views[i].fov.angle_left) << ", "
                << FormatDiagnosticDouble(views[i].fov.angle_right) << ", "
                << FormatDiagnosticDouble(views[i].fov.angle_up) << ", "
                << FormatDiagnosticDouble(views[i].fov.angle_down) << ")"
-               << " view" << i << "ProjCenter=" << FormatDiagnosticDouble(HorizontalProjectionCenter(views[i].fov));
+               << " " << label << "ProjCenter=" << FormatDiagnosticDouble(HorizontalProjectionCenter(views[i].fov));
     }
 }
 
@@ -2810,9 +2840,12 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
             const uint32_t logged = std::min<uint32_t>(projection_layer->viewCount, 4);
             for (uint32_t v = 0; v < logged; ++v) {
                 const XrCompositionLayerProjectionView& view = projection_layer->views[v];
+                const ViewOrientation submitted_orientation = ToViewOrientation(view.pose.orientation);
                 stream << " view" << v << "Pos=(" << FormatDiagnosticDouble(view.pose.position.x) << ", "
                        << FormatDiagnosticDouble(view.pose.position.y) << ", "
                        << FormatDiagnosticDouble(view.pose.position.z) << ")"
+                       << " view" << v << "Yaw=" << FormatDiagnosticDouble(ExtractYawRadians(submitted_orientation))
+                       << " view" << v << "Pitch=" << FormatDiagnosticDouble(ExtractPitchRadians(submitted_orientation))
                        << " view" << v << "Fov=(" << FormatDiagnosticDouble(view.fov.angleLeft) << ", "
                        << FormatDiagnosticDouble(view.fov.angleRight) << ", "
                        << FormatDiagnosticDouble(view.fov.angleUp) << ", "
@@ -3242,6 +3275,9 @@ XrResult OpenXrLayer::LocateViews(XrSession session,
     const bool pivotxr_envelope_engaged =
         pivotxr_active || pivotxr_activation_gain_ > kPivotActivationGainEpsilon;
     const bool depthxr_active = IsDepthXrActive();
+    if (resolved_settings_.pivotxr.enabled) {
+        pivot_diagnostic_.recomposition_mode = pivotxr_envelope_engaged ? "pending" : "inactive";
+    }
     if (resolved_settings_.pivotxr.enabled && !has_logged_pivotxr_spike_mode_) {
         std::ostringstream stream;
         stream << "PivotXR spike is active; quad-view sessions use stereo eye-pose recomposition. Press "
@@ -3270,12 +3306,15 @@ XrResult OpenXrLayer::LocateViews(XrSession session,
                                                            true);
         if (XR_SUCCEEDED(pivot_result)) {
             if (NearlyZero(applied_extra_yaw_radians) && NearlyZero(applied_extra_pitch_radians)) {
+                pivot_diagnostic_.recomposition_mode = "identity";
+                pivot_diagnostic_.has_eye_offsets = false;
                 CachePivotPoseDelta(view_locate_info->displayTime, IdentityPose());
             } else if (IsQuadViewConfiguration(view_configuration_type) &&
                        EnsureEyeOffsets(session,
                                         XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO,
                                         view_locate_info->displayTime,
                                         2)) {
+                pivot_diagnostic_.recomposition_mode = "quad_from_stereo_eye_offsets";
                 CachePivotPoseDelta(view_locate_info->displayTime, applied_pose_delta);
                 for (uint32_t i = 0; i < count; ++i) {
                     const uint32_t eye_index = i % 2;
@@ -3291,6 +3330,7 @@ XrResult OpenXrLayer::LocateViews(XrSession session,
                 }
             } else if (!IsQuadViewConfiguration(view_configuration_type) &&
                        EnsureEyeOffsets(session, view_configuration_type, view_locate_info->displayTime, count)) {
+                pivot_diagnostic_.recomposition_mode = "stereo_eye_offsets";
                 CachePivotPoseDelta(view_locate_info->displayTime, applied_pose_delta);
                 for (uint32_t i = 0; i < count; ++i) {
                     const XrPosef recomposed_pose =
@@ -3304,10 +3344,14 @@ XrResult OpenXrLayer::LocateViews(XrSession session,
                     adjusted_views[i].orientation.w = recomposed_pose.orientation.w;
                 }
             } else {
+                pivot_diagnostic_.recomposition_mode = "eye_offset_capture_failed";
+                pivot_diagnostic_.has_eye_offsets = false;
                 CachePivotPoseDelta(view_locate_info->displayTime, IdentityPose());
             }
             // LocateSpaceWithPivot owns the steady-state smoothed angles and the
             // activation envelope; do not write the eased output back onto them.
+        } else {
+            pivot_diagnostic_.recomposition_mode = "locate_space_failed";
         }
     } else if (!pivotxr_envelope_engaged) {
         pivotxr_smoothed_extra_yaw_radians_ = 0.0;
@@ -3340,8 +3384,23 @@ XrResult OpenXrLayer::LocateViews(XrSession session,
         CacheQuadViewsFovs(view_locate_info->displayTime, std::span<const XrView>(views, count));
     }
 
-    if (pending_locate_views_diagnostics_ > 0) {
-        std::ostringstream stream;
+    const XrTime locate_time = view_locate_info ? view_locate_info->displayTime : 0;
+    bool should_log_pivot_diagnostic = false;
+    if (resolved_settings_.pivotxr.enabled && logger_.IsDebugEnabled()) {
+        const bool has_matching_pivot_pose =
+            pivot_diagnostic_.has_view_pose && pivot_diagnostic_.view_time == locate_time;
+        const bool has_pivot_context = pivotxr_envelope_engaged || has_matching_pivot_pose;
+        if (has_pivot_context) {
+            if (pivotxr_envelope_engaged) {
+                ++pivot_diagnostic_stride_counter_;
+            }
+            should_log_pivot_diagnostic = pending_pivot_diagnostics_ > 0 ||
+                                          (pivotxr_envelope_engaged &&
+                                           pivot_diagnostic_stride_counter_ % kPivotDiagnosticStride == 0);
+        }
+    }
+
+    if (pending_locate_views_diagnostics_ > 0 || should_log_pivot_diagnostic) {
         const double left_position_delta =
             adjusted_views[0].position.x - original_views[0].position.x;
         const double right_position_delta =
@@ -3372,30 +3431,96 @@ XrResult OpenXrLayer::LocateViews(XrSession session,
             count > 1 ? ExtractPitchRadians(adjusted_views[1].orientation) -
                             ExtractPitchRadians(original_views[1].orientation)
                       : 0.0;
-        stream << "LocateViews call " << locate_views_call_count_ << ": count=" << count
-               << ", viewConfig=" << ToString(view_configuration_type)
-               << ", pivotExtraYawRadians=" << FormatDiagnosticDouble(pivotxr_smoothed_extra_yaw_radians_)
-               << ", pivotExtraPitchRadians=" << FormatDiagnosticDouble(pivotxr_smoothed_extra_pitch_radians_)
-               << ", pivotActivationGain=" << FormatDiagnosticDouble(pivotxr_activation_gain_)
-               << ", leftYawDelta=" << FormatDiagnosticDouble(left_yaw_delta)
-               << ", rightYawDelta=" << FormatDiagnosticDouble(right_yaw_delta)
-               << ", leftInsetYawDelta=" << FormatDiagnosticDouble(left_inset_yaw_delta)
-               << ", rightInsetYawDelta=" << FormatDiagnosticDouble(right_inset_yaw_delta)
-               << ", leftPitchDelta=" << FormatDiagnosticDouble(left_pitch_delta)
-               << ", rightPitchDelta=" << FormatDiagnosticDouble(right_pitch_delta)
-               << ", depthRuntimeActive=" << depthxr_active
-               << ", stereoBoost=" << FormatDiagnosticDouble(resolved_settings_.depthxr.stereo_boost)
-               << ", convergence=" << FormatDiagnosticDouble(resolved_settings_.depthxr.convergence)
-               << ", leftXDelta=" << FormatDiagnosticDouble(left_position_delta)
-               << ", rightXDelta=" << FormatDiagnosticDouble(right_position_delta)
-               << ", leftProjCenterDelta=" << FormatDiagnosticDouble(left_projection_center_delta)
-               << ", rightProjCenterDelta=" << FormatDiagnosticDouble(right_projection_center_delta)
-               << ", before:";
-        AppendViewSummary(stream, original_views);
-        stream << " after:";
-        AppendViewSummary(stream, adjusted_views);
-        logger_.Debug(stream.str());
-        --pending_locate_views_diagnostics_;
+
+        if (pending_locate_views_diagnostics_ > 0) {
+            std::ostringstream stream;
+            stream << "LocateViews call " << locate_views_call_count_ << ": count=" << count
+                   << ", viewConfig=" << ToString(view_configuration_type)
+                   << ", pivotExtraYawRadians=" << FormatDiagnosticDouble(pivotxr_smoothed_extra_yaw_radians_)
+                   << ", pivotExtraPitchRadians=" << FormatDiagnosticDouble(pivotxr_smoothed_extra_pitch_radians_)
+                   << ", pivotActivationGain=" << FormatDiagnosticDouble(pivotxr_activation_gain_)
+                   << ", leftYawDelta=" << FormatDiagnosticDouble(left_yaw_delta)
+                   << ", rightYawDelta=" << FormatDiagnosticDouble(right_yaw_delta)
+                   << ", leftInsetYawDelta=" << FormatDiagnosticDouble(left_inset_yaw_delta)
+                   << ", rightInsetYawDelta=" << FormatDiagnosticDouble(right_inset_yaw_delta)
+                   << ", leftPitchDelta=" << FormatDiagnosticDouble(left_pitch_delta)
+                   << ", rightPitchDelta=" << FormatDiagnosticDouble(right_pitch_delta)
+                   << ", depthRuntimeActive=" << depthxr_active
+                   << ", stereoBoost=" << FormatDiagnosticDouble(resolved_settings_.depthxr.stereo_boost)
+                   << ", convergence=" << FormatDiagnosticDouble(resolved_settings_.depthxr.convergence)
+                   << ", leftXDelta=" << FormatDiagnosticDouble(left_position_delta)
+                   << ", rightXDelta=" << FormatDiagnosticDouble(right_position_delta)
+                   << ", leftProjCenterDelta=" << FormatDiagnosticDouble(left_projection_center_delta)
+                   << ", rightProjCenterDelta=" << FormatDiagnosticDouble(right_projection_center_delta)
+                   << ", before:";
+            AppendViewSummary(stream, original_views);
+            stream << " after:";
+            AppendViewSummary(stream, adjusted_views);
+            logger_.Debug(stream.str());
+            --pending_locate_views_diagnostics_;
+        }
+
+        if (should_log_pivot_diagnostic) {
+            const bool view_pose_fresh = pivot_diagnostic_.has_view_pose && pivot_diagnostic_.view_time == locate_time;
+            std::ostringstream stream;
+            stream << "Pivot diagnostic: frameTime=" << locate_time
+                   << ", locateCall=" << locate_views_call_count_
+                   << ", viewConfig=" << ToString(view_configuration_type)
+                   << ", recomposition=" << pivot_diagnostic_.recomposition_mode
+                   << ", pivotActive=" << pivot_diagnostic_.pivot_active
+                   << ", envelopeEngaged=" << pivotxr_envelope_engaged
+                   << ", viewPoseFresh=" << view_pose_fresh
+                   << ", rawYaw=" << FormatDiagnosticDouble(pivot_diagnostic_.raw_yaw_radians)
+                   << ", rawPitch=" << FormatDiagnosticDouble(pivot_diagnostic_.raw_pitch_radians)
+                   << ", steadyExtraYaw=" << FormatDiagnosticDouble(pivot_diagnostic_.steady_extra_yaw_radians)
+                   << ", steadyExtraPitch=" << FormatDiagnosticDouble(pivot_diagnostic_.steady_extra_pitch_radians)
+                   << ", easedExtraYaw=" << FormatDiagnosticDouble(pivot_diagnostic_.eased_extra_yaw_radians)
+                   << ", easedExtraPitch=" << FormatDiagnosticDouble(pivot_diagnostic_.eased_extra_pitch_radians)
+                   << ", activationGain=" << FormatDiagnosticDouble(pivot_diagnostic_.activation_gain)
+                   << ", locationFlags=" << FormatHex(static_cast<uint64_t>(pivot_diagnostic_.view_location_flags))
+                   << ", spaceIsView=" << pivot_diagnostic_.space_is_view
+                   << ", baseSpaceIsView=" << pivot_diagnostic_.base_space_is_view
+                   << ", leftYawDelta=" << FormatDiagnosticDouble(left_yaw_delta)
+                   << ", rightYawDelta=" << FormatDiagnosticDouble(right_yaw_delta)
+                   << ", leftInsetYawDelta=" << FormatDiagnosticDouble(left_inset_yaw_delta)
+                   << ", rightInsetYawDelta=" << FormatDiagnosticDouble(right_inset_yaw_delta)
+                   << ", leftPitchDelta=" << FormatDiagnosticDouble(left_pitch_delta)
+                   << ", rightPitchDelta=" << FormatDiagnosticDouble(right_pitch_delta)
+                   << ", leftXDelta=" << FormatDiagnosticDouble(left_position_delta)
+                   << ", rightXDelta=" << FormatDiagnosticDouble(right_position_delta)
+                   << ", leftProjCenterDelta=" << FormatDiagnosticDouble(left_projection_center_delta)
+                   << ", rightProjCenterDelta=" << FormatDiagnosticDouble(right_projection_center_delta);
+
+            if (pivot_diagnostic_.has_eye_offsets) {
+                stream << ", eyeOffsetTime=" << pivot_diagnostic_.eye_offsets_time
+                       << ", eyeOffsetConfig=" << ToString(pivot_diagnostic_.eye_offsets_view_configuration)
+                       << ", eyeOffsetCount=" << pivot_diagnostic_.eye_offset_count;
+                if (pivot_diagnostic_.eye_offset_count >= 2) {
+                    const XrPosef& left_offset = pivot_diagnostic_.eye_offsets[0];
+                    const XrPosef& right_offset = pivot_diagnostic_.eye_offsets[1];
+                    const double dx = static_cast<double>(right_offset.position.x) - left_offset.position.x;
+                    const double dy = static_cast<double>(right_offset.position.y) - left_offset.position.y;
+                    const double dz = static_cast<double>(right_offset.position.z) - left_offset.position.z;
+                    stream << ", eyeOffsetSeparation=" << FormatDiagnosticDouble(std::sqrt(dx * dx + dy * dy + dz * dz))
+                           << ", eyeOffsetMidpoint=("
+                           << FormatDiagnosticDouble((left_offset.position.x + right_offset.position.x) * 0.5) << ", "
+                           << FormatDiagnosticDouble((left_offset.position.y + right_offset.position.y) * 0.5) << ", "
+                           << FormatDiagnosticDouble((left_offset.position.z + right_offset.position.z) * 0.5) << ")";
+                }
+                for (uint32_t i = 0; i < pivot_diagnostic_.eye_offset_count; ++i) {
+                    const std::string label = "eyeOffset" + std::to_string(i);
+                    stream << ", ";
+                    AppendPoseSummary(stream, label, pivot_diagnostic_.eye_offsets[i]);
+                }
+            } else {
+                stream << ", eyeOffsets=unavailable";
+            }
+
+            logger_.Debug(stream.str());
+            if (pending_pivot_diagnostics_ > 0) {
+                --pending_pivot_diagnostics_;
+            }
+        }
     }
 
     return result;
@@ -3609,6 +3734,7 @@ void OpenXrLayer::RefreshResolvedSettings() {
         last_logged_settings_ = resolved_settings_;
         pending_locate_views_diagnostics_ = 5;
         pending_end_frame_diagnostics_ = 5;
+        pending_pivot_diagnostics_ = kPivotDiagnosticBurstCount;
         pending_eye_gaze_diagnostics_ = 10;
         pending_eye_gaze_sync_diagnostics_ = 10;
     }
@@ -3814,6 +3940,9 @@ void OpenXrLayer::ResetSessionState() {
     pending_eye_gaze_sync_diagnostics_ = 0;
     pending_quadviews_compositor_diagnostics_ = 0;
     eye_gaze_diagnostic_stride_counter_ = 0;
+    pending_pivot_diagnostics_ = 0;
+    pivot_diagnostic_stride_counter_ = 0;
+    pivot_diagnostic_ = PivotDiagnosticState{};
     pivotxr_smoothed_extra_yaw_radians_ = 0.0;
     pivotxr_smoothed_extra_pitch_radians_ = 0.0;
     pivotxr_activation_gain_ = 0.0;
@@ -4198,8 +4327,19 @@ bool OpenXrLayer::EnsureEyeOffsets(XrSession session,
                                    XrTime display_time,
                                    uint32_t view_count) {
     if (internal_view_space_ == XR_NULL_HANDLE || !next_locate_views_ || view_count == 0) {
+        pivot_diagnostic_.has_eye_offsets = false;
         return false;
     }
+
+    auto store_eye_offset_diagnostics = [&]() {
+        pivot_diagnostic_.has_eye_offsets = true;
+        pivot_diagnostic_.eye_offsets_time = display_time;
+        pivot_diagnostic_.eye_offsets_view_configuration = view_configuration_type;
+        pivot_diagnostic_.eye_offset_count = std::min<uint32_t>(view_count, static_cast<uint32_t>(pivot_diagnostic_.eye_offsets.size()));
+        for (uint32_t i = 0; i < pivot_diagnostic_.eye_offset_count; ++i) {
+            pivot_diagnostic_.eye_offsets[i] = cached_eye_offset_poses_[i];
+        }
+    };
 
     // Eye offsets are predicted poses. Reuse them only for repeated locates at
     // the same displayTime so recomposition does not inherit stale prediction.
@@ -4207,6 +4347,7 @@ bool OpenXrLayer::EnsureEyeOffsets(XrSession session,
         cached_eye_offsets_view_configuration_ == view_configuration_type &&
         cached_eye_offsets_display_time_ != 0 &&
         cached_eye_offsets_display_time_ == display_time) {
+        store_eye_offset_diagnostics();
         return true;
     }
 
@@ -4225,6 +4366,7 @@ bool OpenXrLayer::EnsureEyeOffsets(XrSession session,
         next_locate_views_(session, &eye_view_locate_info, &eye_view_state, view_count, &eye_view_count, eye_views.data());
     if (XR_FAILED(result) || eye_view_count < view_count) {
         logger_.Error("Failed to capture internal eye offsets for PivotXR view-space recomposition.");
+        pivot_diagnostic_.has_eye_offsets = false;
         return false;
     }
 
@@ -4234,6 +4376,7 @@ bool OpenXrLayer::EnsureEyeOffsets(XrSession session,
     }
     cached_eye_offsets_view_configuration_ = view_configuration_type;
     cached_eye_offsets_display_time_ = display_time;
+    store_eye_offset_diagnostics();
     return true;
 }
 
@@ -4579,12 +4722,13 @@ XrResult OpenXrLayer::LocateSpaceWithPivot(XrSpace space,
         view_pose.orientation.w,
     };
 
+    const double current_yaw_radians = ExtractYawRadians(orientation);
+    const double current_pitch_radians = ExtractPitchRadians(orientation);
+
     // Track the steady-state pivot amount only while actively engaged. During
     // the release ramp it is frozen and the envelope eases the applied angle to
     // zero, avoiding any snap on toggle-off.
     if (update_smoothing && pivotxr_active) {
-        const double current_yaw_radians = ExtractYawRadians(orientation);
-        const double current_pitch_radians = ExtractPitchRadians(orientation);
         ComputePivotExtraAngleRadians(current_yaw_radians,
                                       settings.yaw_rotation_multiplier,
                                       settings.yaw_deadzone_degrees,
@@ -4604,6 +4748,21 @@ XrResult OpenXrLayer::LocateSpaceWithPivot(XrSpace space,
     const double eased_gain = SmoothStep(pivotxr_activation_gain_);
     const double extra_yaw_radians = pivotxr_smoothed_extra_yaw_radians_ * eased_gain;
     const double extra_pitch_radians = pivotxr_smoothed_extra_pitch_radians_ * eased_gain;
+    if (update_smoothing) {
+        pivot_diagnostic_.has_view_pose = true;
+        pivot_diagnostic_.view_time = time;
+        pivot_diagnostic_.view_location_flags = location->locationFlags;
+        pivot_diagnostic_.pivot_active = pivotxr_active;
+        pivot_diagnostic_.space_is_view = space_is_view;
+        pivot_diagnostic_.base_space_is_view = base_space_is_view;
+        pivot_diagnostic_.raw_yaw_radians = current_yaw_radians;
+        pivot_diagnostic_.raw_pitch_radians = current_pitch_radians;
+        pivot_diagnostic_.steady_extra_yaw_radians = pivotxr_smoothed_extra_yaw_radians_;
+        pivot_diagnostic_.steady_extra_pitch_radians = pivotxr_smoothed_extra_pitch_radians_;
+        pivot_diagnostic_.eased_extra_yaw_radians = extra_yaw_radians;
+        pivot_diagnostic_.eased_extra_pitch_radians = extra_pitch_radians;
+        pivot_diagnostic_.activation_gain = pivotxr_activation_gain_;
+    }
     if (applied_extra_yaw_radians) {
         *applied_extra_yaw_radians = extra_yaw_radians;
     }
@@ -4669,6 +4828,8 @@ void OpenXrLayer::ResetPivotActivationState() {
     pivotxr_activation_key_was_down_ = false;
     pivotxr_binding_last_poll_time_.reset();
     pivotxr_binding_down_cached_ = false;
+    pivot_diagnostic_stride_counter_ = 0;
+    pivot_diagnostic_ = PivotDiagnosticState{};
 }
 
 void OpenXrLayer::ResetDepthToggleState() {
@@ -4875,6 +5036,7 @@ bool OpenXrLayer::IsPivotXrActive(const PivotXrResolvedSettings& settings) {
             pivotxr_toggle_enabled_ = !pivotxr_toggle_enabled_;
             pending_locate_views_diagnostics_ = 5;
             pending_end_frame_diagnostics_ = 5;
+            pending_pivot_diagnostics_ = kPivotDiagnosticBurstCount;
             logger_.Info(std::string("PivotXR extra pivot factor ") +
                          (pivotxr_toggle_enabled_ ? "enabled" : "disabled") + " via " +
                          BindingLabel(settings.activation_binding) + ".");
@@ -4885,6 +5047,11 @@ bool OpenXrLayer::IsPivotXrActive(const PivotXrResolvedSettings& settings) {
     }
 
     // Hold mode: pressing activates the effect, releasing deactivates it.
+    if (was_pressed_this_call || was_released_this_call) {
+        pending_locate_views_diagnostics_ = 5;
+        pending_end_frame_diagnostics_ = 5;
+        pending_pivot_diagnostics_ = kPivotDiagnosticBurstCount;
+    }
     if (was_pressed_this_call) {
         SoundPlayer::Instance().PlayTransition(settings.activation_binding.sound, true, dll_directory_,
                                                resolved_settings_.core.sound_volume);
