@@ -8,6 +8,16 @@ export interface PatchNoteEntry {
 
 export const patchNotes: PatchNoteEntry[] = [
   {
+    version: '0.11.2',
+    date: '2026-06-28',
+    title: 'Varjo Quadviews fix',
+    summary: 'Fixes a black-screen issue with Quadviews on Varjo headsets',
+    items: [
+      'Fixed a black screen on Varjo headsets when using VectorXR Quadviews; the focus and peripheral views are now composited correctly.',
+      'Each session log now records the VectorXR layer version to make troubleshooting easier.',
+    ],
+  },
+  {
     version: '0.11.1',
     date: '2026-06-27',
     title: 'Layer startup diagnostics',
