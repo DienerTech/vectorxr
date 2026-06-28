@@ -84,12 +84,32 @@ if(WIN32 AND DEPTHXR_BUILD_LAYER)
         dxgi
         shlwapi
     )
+    # Derive the layer version from the single source of truth (tauri.conf.json) so
+    # the layer logs the same version the app reports. Set-Version.ps1 keeps that
+    # file current; CMake's project(VERSION) is a separate, unmanaged C++ version.
+    set(_vectorxr_version "unknown")
+    set(_vectorxr_tauri_conf "${CMAKE_SOURCE_DIR}/app/src-tauri/tauri.conf.json")
+    if(EXISTS "${_vectorxr_tauri_conf}")
+        file(READ "${_vectorxr_tauri_conf}" _vectorxr_tauri_contents)
+        string(JSON _vectorxr_version_parsed ERROR_VARIABLE _vectorxr_version_error
+               GET "${_vectorxr_tauri_contents}" version)
+        if(_vectorxr_version_error)
+            message(WARNING "Could not read version from ${_vectorxr_tauri_conf}: ${_vectorxr_version_error}")
+        else()
+            set(_vectorxr_version "${_vectorxr_version_parsed}")
+        endif()
+        # Re-run configure when the version bumps so the baked-in value never goes stale.
+        set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_vectorxr_tauri_conf}")
+    endif()
+    message(STATUS "VectorXR layer version: ${_vectorxr_version}")
+
     target_compile_definitions(
         XR_APILAYER_DIENERTECH_VECTORXR
         PRIVATE
         WIN32_LEAN_AND_MEAN
         NOMINMAX
         XR_USE_GRAPHICS_API_D3D11
+        VECTORXR_VERSION="${_vectorxr_version}"
     )
 
     add_custom_command(
