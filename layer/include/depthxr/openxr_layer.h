@@ -89,6 +89,10 @@ class OpenXrLayer {
                                    uint32_t* index);
     XrResult WaitSwapchainImage(XrSwapchain swapchain, const XrSwapchainImageWaitInfo* wait_info);
     XrResult ReleaseSwapchainImage(XrSwapchain swapchain, const XrSwapchainImageReleaseInfo* release_info);
+    XrResult EnumerateReferenceSpaces(XrSession session,
+                                      uint32_t space_capacity_input,
+                                      uint32_t* space_count_output,
+                                      XrReferenceSpaceType* spaces);
     XrResult CreateReferenceSpace(XrSession session, const XrReferenceSpaceCreateInfo* create_info, XrSpace* space);
     XrResult DestroySpace(XrSpace space);
     XrResult LocateSpace(XrSpace space, XrSpace base_space, XrTime time, XrSpaceLocation* location);
@@ -360,6 +364,7 @@ class OpenXrLayer {
     PFN_xrAcquireSwapchainImage next_acquire_swapchain_image_{nullptr};
     PFN_xrWaitSwapchainImage next_wait_swapchain_image_{nullptr};
     PFN_xrReleaseSwapchainImage next_release_swapchain_image_{nullptr};
+    PFN_xrEnumerateReferenceSpaces next_enumerate_reference_spaces_{nullptr};
     PFN_xrCreateReferenceSpace next_create_reference_space_{nullptr};
     PFN_xrCreateActionSpace next_create_action_space_{nullptr};
     PFN_xrDestroySpace next_destroy_space_{nullptr};

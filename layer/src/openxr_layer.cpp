@@ -963,7 +963,7 @@ XrResult OpenXrLayer::OnInstanceCreated(const XrInstanceCreateInfo* create_info,
         !next_enumerate_swapchain_formats_ ||
         !next_create_swapchain_ || !next_destroy_swapchain_ || !next_enumerate_swapchain_images_ ||
         !next_acquire_swapchain_image_ || !next_wait_swapchain_image_ || !next_release_swapchain_image_ ||
-        !next_create_reference_space_ || !next_destroy_space_ ||
+        !next_enumerate_reference_spaces_ || !next_create_reference_space_ || !next_destroy_space_ ||
         !next_locate_space_ || !next_locate_views_) {
         logger_.Error("Failed to resolve required OpenXR function pointers");
         return XR_ERROR_INITIALIZATION_FAILED;
@@ -1039,6 +1039,7 @@ XrResult OpenXrLayer::DestroyInstance(XrInstance instance) {
         next_acquire_swapchain_image_ = nullptr;
         next_wait_swapchain_image_ = nullptr;
         next_release_swapchain_image_ = nullptr;
+        next_enumerate_reference_spaces_ = nullptr;
         next_create_reference_space_ = nullptr;
         next_create_action_space_ = nullptr;
         next_destroy_space_ = nullptr;
@@ -1525,7 +1526,9 @@ XrResult OpenXrLayer::EnumerateViewConfigurationViews(XrInstance instance,
         std::max(stereo_views[0].recommendedImageRectHeight, stereo_views[1].recommendedImageRectHeight);
 
     for (uint32_t i = 0; i < 2; ++i) {
+        void* app_next = views[i].next;
         views[i] = stereo_views[i];
+        views[i].next = app_next;
         views[i].recommendedImageRectWidth = ScaleDimension(stereo_views[i].recommendedImageRectWidth,
                                                             resolved_settings_.quadviews.peripheral_scale,
                                                             stereo_views[i].maxImageRectWidth);
@@ -1536,14 +1539,17 @@ XrResult OpenXrLayer::EnumerateViewConfigurationViews(XrInstance instance,
     }
 
     for (uint32_t i = 0; i < 2; ++i) {
-        views[i + 2] = stereo_views[i];
-        views[i + 2].recommendedImageRectWidth = ScaleDimension(stereo_views[i].recommendedImageRectWidth,
-                                                                focus_width_scale,
-                                                                stereo_views[i].maxImageRectWidth);
-        views[i + 2].recommendedImageRectHeight = ScaleDimension(stereo_views[i].recommendedImageRectHeight,
-                                                                 focus_height_scale,
-                                                                 stereo_views[i].maxImageRectHeight);
-        SetFoveatedViewActive(views[i + 2], XR_TRUE);
+        XrViewConfigurationView& focus_view = views[i + 2];
+        void* app_next = focus_view.next;
+        focus_view = stereo_views[i];
+        focus_view.next = app_next;
+        focus_view.recommendedImageRectWidth = ScaleDimension(stereo_views[i].recommendedImageRectWidth,
+                                                              focus_width_scale,
+                                                              stereo_views[i].maxImageRectWidth);
+        focus_view.recommendedImageRectHeight = ScaleDimension(stereo_views[i].recommendedImageRectHeight,
+                                                               focus_height_scale,
+                                                               stereo_views[i].maxImageRectHeight);
+        SetFoveatedViewActive(focus_view, XR_TRUE);
     }
 
     const double estimated_pixel_budget =
@@ -2941,6 +2947,57 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
     return result;
 }
 
+XrResult OpenXrLayer::EnumerateReferenceSpaces(XrSession session,
+                                               uint32_t space_capacity_input,
+                                               uint32_t* space_count_output,
+                                               XrReferenceSpaceType* spaces) {
+    if (!space_count_output) {
+        return XR_ERROR_VALIDATION_FAILURE;
+    }
+
+    uint32_t runtime_count = 0;
+    XrResult result = next_enumerate_reference_spaces_(session, 0, &runtime_count, nullptr);
+    if (XR_FAILED(result)) {
+        logger_.Error("xrEnumerateReferenceSpaces failed downstream (count query): result=" +
+                      std::to_string(static_cast<int>(result)));
+        return result;
+    }
+
+    std::vector<XrReferenceSpaceType> runtime_spaces(runtime_count);
+    if (runtime_count > 0) {
+        result = next_enumerate_reference_spaces_(
+            session, runtime_count, &runtime_count, runtime_spaces.data());
+        if (XR_FAILED(result)) {
+            logger_.Error("xrEnumerateReferenceSpaces failed downstream (populate): result=" +
+                          std::to_string(static_cast<int>(result)));
+            return result;
+        }
+        runtime_spaces.resize(runtime_count);
+    }
+
+    std::scoped_lock lock(mutex_);
+    ReloadConfigIfNeeded();
+    RefreshResolvedSettings();
+
+    std::vector<XrReferenceSpaceType> exposed_spaces = runtime_spaces;
+    if (session == active_session_ && IsQuadViewsActive() &&
+        std::find(exposed_spaces.begin(),
+                  exposed_spaces.end(),
+                  XR_REFERENCE_SPACE_TYPE_COMBINED_EYE_VARJO) == exposed_spaces.end()) {
+        exposed_spaces.push_back(XR_REFERENCE_SPACE_TYPE_COMBINED_EYE_VARJO);
+    }
+
+    *space_count_output = static_cast<uint32_t>(exposed_spaces.size());
+    if (!spaces || space_capacity_input == 0) {
+        return XR_SUCCESS;
+    }
+
+    const uint32_t copy_count =
+        std::min<uint32_t>(space_capacity_input, static_cast<uint32_t>(exposed_spaces.size()));
+    std::copy_n(exposed_spaces.begin(), copy_count, spaces);
+    return space_capacity_input < exposed_spaces.size() ? XR_ERROR_SIZE_INSUFFICIENT : XR_SUCCESS;
+}
+
 XrResult OpenXrLayer::CreateReferenceSpace(XrSession session,
                                            const XrReferenceSpaceCreateInfo* create_info,
                                            XrSpace* space) {
@@ -3494,6 +3551,11 @@ void OpenXrLayer::CaptureInstanceFunctions() {
     function = nullptr;
     if (XR_SUCCEEDED(next_get_instance_proc_addr_(instance_, "xrReleaseSwapchainImage", &function))) {
         next_release_swapchain_image_ = reinterpret_cast<PFN_xrReleaseSwapchainImage>(function);
+    }
+
+    function = nullptr;
+    if (XR_SUCCEEDED(next_get_instance_proc_addr_(instance_, "xrEnumerateReferenceSpaces", &function))) {
+        next_enumerate_reference_spaces_ = reinterpret_cast<PFN_xrEnumerateReferenceSpaces>(function);
     }
 
     function = nullptr;

@@ -152,6 +152,14 @@ XrResult XRAPI_CALL DepthxrReleaseSwapchainImage(XrSwapchain swapchain,
     return OpenXrLayer::Instance().ReleaseSwapchainImage(swapchain, release_info);
 }
 
+XrResult XRAPI_CALL DepthxrEnumerateReferenceSpaces(XrSession session,
+                                                   uint32_t space_capacity_input,
+                                                   uint32_t* space_count_output,
+                                                   XrReferenceSpaceType* spaces) {
+    return OpenXrLayer::Instance().EnumerateReferenceSpaces(
+        session, space_capacity_input, space_count_output, spaces);
+}
+
 XrResult XRAPI_CALL DepthxrCreateReferenceSpace(XrSession session,
                                                 const XrReferenceSpaceCreateInfo* create_info,
                                                 XrSpace* space) {
@@ -317,6 +325,10 @@ XrResult XRAPI_CALL xrGetInstanceProcAddr(XrInstance instance, const char* name,
     }
     if (requested == "xrReleaseSwapchainImage") {
         *function = reinterpret_cast<PFN_xrVoidFunction>(depthxr::DepthxrReleaseSwapchainImage);
+        return XR_SUCCESS;
+    }
+    if (requested == "xrEnumerateReferenceSpaces") {
+        *function = reinterpret_cast<PFN_xrVoidFunction>(depthxr::DepthxrEnumerateReferenceSpaces);
         return XR_SUCCESS;
     }
     if (requested == "xrCreateReferenceSpace") {
