@@ -160,6 +160,12 @@ XrResult XRAPI_CALL DepthxrEnumerateReferenceSpaces(XrSession session,
         session, space_capacity_input, space_count_output, spaces);
 }
 
+XrResult XRAPI_CALL DepthxrGetReferenceSpaceBoundsRect(XrSession session,
+                                                       XrReferenceSpaceType reference_space_type,
+                                                       XrExtent2Df* bounds) {
+    return OpenXrLayer::Instance().GetReferenceSpaceBoundsRect(session, reference_space_type, bounds);
+}
+
 XrResult XRAPI_CALL DepthxrCreateReferenceSpace(XrSession session,
                                                 const XrReferenceSpaceCreateInfo* create_info,
                                                 XrSpace* space) {
@@ -329,6 +335,10 @@ XrResult XRAPI_CALL xrGetInstanceProcAddr(XrInstance instance, const char* name,
     }
     if (requested == "xrEnumerateReferenceSpaces") {
         *function = reinterpret_cast<PFN_xrVoidFunction>(depthxr::DepthxrEnumerateReferenceSpaces);
+        return XR_SUCCESS;
+    }
+    if (requested == "xrGetReferenceSpaceBoundsRect") {
+        *function = reinterpret_cast<PFN_xrVoidFunction>(depthxr::DepthxrGetReferenceSpaceBoundsRect);
         return XR_SUCCESS;
     }
     if (requested == "xrCreateReferenceSpace") {

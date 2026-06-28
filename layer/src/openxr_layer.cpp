@@ -963,7 +963,8 @@ XrResult OpenXrLayer::OnInstanceCreated(const XrInstanceCreateInfo* create_info,
         !next_enumerate_swapchain_formats_ ||
         !next_create_swapchain_ || !next_destroy_swapchain_ || !next_enumerate_swapchain_images_ ||
         !next_acquire_swapchain_image_ || !next_wait_swapchain_image_ || !next_release_swapchain_image_ ||
-        !next_enumerate_reference_spaces_ || !next_create_reference_space_ || !next_destroy_space_ ||
+        !next_enumerate_reference_spaces_ || !next_get_reference_space_bounds_rect_ ||
+        !next_create_reference_space_ || !next_destroy_space_ ||
         !next_locate_space_ || !next_locate_views_) {
         logger_.Error("Failed to resolve required OpenXR function pointers");
         return XR_ERROR_INITIALIZATION_FAILED;
@@ -1040,6 +1041,7 @@ XrResult OpenXrLayer::DestroyInstance(XrInstance instance) {
         next_wait_swapchain_image_ = nullptr;
         next_release_swapchain_image_ = nullptr;
         next_enumerate_reference_spaces_ = nullptr;
+        next_get_reference_space_bounds_rect_ = nullptr;
         next_create_reference_space_ = nullptr;
         next_create_action_space_ = nullptr;
         next_destroy_space_ = nullptr;
@@ -2947,6 +2949,33 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
     return result;
 }
 
+XrResult OpenXrLayer::GetReferenceSpaceBoundsRect(XrSession session,
+                                                  XrReferenceSpaceType reference_space_type,
+                                                  XrExtent2Df* bounds) {
+    if (reference_space_type == XR_REFERENCE_SPACE_TYPE_COMBINED_EYE_VARJO) {
+        bool emulate_combined_eye = false;
+        {
+            std::scoped_lock lock(mutex_);
+            ReloadConfigIfNeeded();
+            RefreshResolvedSettings();
+            emulate_combined_eye = session == active_session_ && IsQuadViewsActive();
+        }
+
+        if (emulate_combined_eye) {
+            // The emulated combined-eye (gaze) space has no play-area bounds, and
+            // the downstream runtime never created it. Report bounds unavailable
+            // instead of forwarding a Varjo enum the runtime would reject.
+            if (bounds) {
+                bounds->width = 0.0f;
+                bounds->height = 0.0f;
+            }
+            return XR_SPACE_BOUNDS_UNAVAILABLE;
+        }
+    }
+
+    return next_get_reference_space_bounds_rect_(session, reference_space_type, bounds);
+}
+
 XrResult OpenXrLayer::EnumerateReferenceSpaces(XrSession session,
                                                uint32_t space_capacity_input,
                                                uint32_t* space_count_output,
@@ -3556,6 +3585,11 @@ void OpenXrLayer::CaptureInstanceFunctions() {
     function = nullptr;
     if (XR_SUCCEEDED(next_get_instance_proc_addr_(instance_, "xrEnumerateReferenceSpaces", &function))) {
         next_enumerate_reference_spaces_ = reinterpret_cast<PFN_xrEnumerateReferenceSpaces>(function);
+    }
+
+    function = nullptr;
+    if (XR_SUCCEEDED(next_get_instance_proc_addr_(instance_, "xrGetReferenceSpaceBoundsRect", &function))) {
+        next_get_reference_space_bounds_rect_ = reinterpret_cast<PFN_xrGetReferenceSpaceBoundsRect>(function);
     }
 
     function = nullptr;
