@@ -308,6 +308,14 @@ const void* FindStructInChain(const void* next, XrStructureType type) {
     return nullptr;
 }
 
+const void* StripVarjoFoveatedViewLocateNextChain(const void* next) {
+    if (!FindStructInChain(next, XR_TYPE_VIEW_LOCATE_FOVEATED_RENDERING_VARJO)) {
+        return next;
+    }
+
+    return nullptr;
+}
+
 bool IsD3D11SwapchainImage(const XrSwapchainImageBaseHeader* image) {
     return image && image->type == XR_TYPE_SWAPCHAIN_IMAGE_D3D11_KHR;
 }
@@ -2936,13 +2944,12 @@ XrResult OpenXrLayer::CreateReferenceSpace(XrSession session,
             std::scoped_lock lock(mutex_);
             ReloadConfigIfNeeded();
             RefreshResolvedSettings();
-            emulate_combined_eye = session == active_session_ && IsQuadViewsActive() &&
-                                   (quad_views_extension_requested_ ||
-                                    varjo_foveated_rendering_extension_requested_);
+            emulate_combined_eye = session == active_session_ && IsQuadViewsActive();
         }
 
         if (emulate_combined_eye) {
             XrReferenceSpaceCreateInfo runtime_create_info = *create_info;
+            runtime_create_info.next = nullptr;
             runtime_create_info.referenceSpaceType = XR_REFERENCE_SPACE_TYPE_VIEW;
             const XrResult result = next_create_reference_space_(session, &runtime_create_info, space);
             if (XR_FAILED(result)) {
@@ -4095,12 +4102,23 @@ XrResult OpenXrLayer::LocateRuntimeViews(XrSession session,
         quadviews_settings = resolved_settings_.quadviews;
     }
 
-    if (!view_locate_info || !IsQuadViewConfiguration(view_locate_info->viewConfigurationType) || !quadviews_active) {
-        return next_locate_views_(
-            session, view_locate_info, view_state, view_capacity_input, view_count_output, views);
+    XrViewLocateInfo downstream_locate_info{};
+    const XrViewLocateInfo* downstream_view_locate_info = view_locate_info;
+    if (view_locate_info) {
+        const void* stripped_next = StripVarjoFoveatedViewLocateNextChain(view_locate_info->next);
+        if (stripped_next != view_locate_info->next) {
+            downstream_locate_info = *view_locate_info;
+            downstream_locate_info.next = stripped_next;
+            downstream_view_locate_info = &downstream_locate_info;
+        }
     }
 
-    XrViewLocateInfo runtime_locate_info = *view_locate_info;
+    if (!view_locate_info || !IsQuadViewConfiguration(view_locate_info->viewConfigurationType) || !quadviews_active) {
+        return next_locate_views_(
+            session, downstream_view_locate_info, view_state, view_capacity_input, view_count_output, views);
+    }
+
+    XrViewLocateInfo runtime_locate_info = *downstream_view_locate_info;
     runtime_locate_info.viewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
 
     std::array<XrView, 2> stereo_views{};
