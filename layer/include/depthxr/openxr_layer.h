@@ -119,6 +119,7 @@ class OpenXrLayer {
         uint32_t last_acquired_image_index{0};
         bool images_enumerated{false};
         bool has_last_acquired_image_index{false};
+        bool release_deferred{false};
         bool quadviews_session{false};
         bool d3d11_shader_resources_attempted{false};
         bool d3d11_shader_resources_available{false};
@@ -185,6 +186,11 @@ class OpenXrLayer {
     bool IsQuadViewsActive() const;
     void ResetSwapchainState();
     void LogSwapchainSummary(XrSwapchain swapchain, const SwapchainInfo& info, std::string_view event_name);
+    bool ShouldDeferSwapchainRelease(const SwapchainInfo& info) const;
+    XrResult FlushDeferredSwapchainReleaseLocked(XrSwapchain swapchain,
+                                                 SwapchainInfo& info,
+                                                 std::string_view reason);
+    XrResult FlushDeferredSwapchainReleasesLocked(std::string_view reason);
     void ResetSessionState();
     void ResetInstanceState();
     void ResetD3D11QuadViewsCompositor();
@@ -263,6 +269,7 @@ class OpenXrLayer {
     XrSession resolved_settings_session_{XR_NULL_HANDLE};
     std::optional<std::chrono::steady_clock::time_point> last_config_check_time_;
     std::string last_failed_config_error_;
+    std::string runtime_name_;
     std::string current_exe_name_;
     ResolvedRuntimeConfig resolved_settings_;
     std::optional<ResolvedRuntimeConfig> last_logged_settings_;
@@ -291,6 +298,7 @@ class OpenXrLayer {
     bool quad_views_extension_requested_{false};
     bool varjo_foveated_rendering_extension_requested_{false};
     bool eye_gaze_extension_enabled_{false};
+    bool defer_quadviews_swapchain_releases_{false};
     XrSession active_session_{XR_NULL_HANDLE};
     XrSpace internal_local_space_{XR_NULL_HANDLE};
     XrSpace internal_view_space_{XR_NULL_HANDLE};

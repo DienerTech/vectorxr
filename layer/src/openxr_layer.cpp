@@ -22,6 +22,13 @@
 #include "depthxr/seen_apps.h"
 #include "depthxr/sound_player.h"
 
+// Injected by layer/CMakeLists.txt from the canonical app version in
+// app/src-tauri/tauri.conf.json. Falls back when the layer is built without that
+// definition (e.g. the test target) so the symbol always resolves.
+#ifndef VECTORXR_VERSION
+#define VECTORXR_VERSION "unknown"
+#endif
+
 namespace depthxr {
 namespace {
 
@@ -892,6 +899,7 @@ XrResult OpenXrLayer::OnInstanceCreated(const XrInstanceCreateInfo* create_info,
     logger_.Initialize(log_path_);
 
     current_exe_name_ = GetCurrentExecutableName();
+    logger_.Info(std::string("VectorXR layer version: ") + VECTORXR_VERSION);
     logger_.Info("VectorXR attached to process: " + current_exe_name_);
 
     if (create_info) {
@@ -947,10 +955,15 @@ XrResult OpenXrLayer::OnInstanceCreated(const XrInstanceCreateInfo* create_info,
         XrInstanceProperties instance_properties{XR_TYPE_INSTANCE_PROPERTIES};
         const XrResult props_result = next_get_instance_properties_(instance_, &instance_properties);
         if (XR_SUCCEEDED(props_result)) {
+            runtime_name_ = instance_properties.runtimeName;
+            defer_quadviews_swapchain_releases_ = runtime_name_.find("Varjo") != std::string::npos;
             const XrVersion rt = instance_properties.runtimeVersion;
-            logger_.Info(std::string("OpenXR runtime: name=\"") + instance_properties.runtimeName +
+            logger_.Info(std::string("OpenXR runtime: name=\"") + runtime_name_ +
                          "\", version=" + std::to_string(XR_VERSION_MAJOR(rt)) + "." +
                          std::to_string(XR_VERSION_MINOR(rt)) + "." + std::to_string(XR_VERSION_PATCH(rt)));
+            if (defer_quadviews_swapchain_releases_) {
+                logger_.Info("Varjo runtime detected; deferring app quadviews swapchain releases until xrEndFrame.");
+            }
         } else {
             logger_.Info("OpenXR runtime identity unavailable: xrGetInstanceProperties returned " +
                          std::to_string(static_cast<int>(props_result)));
@@ -1091,6 +1104,7 @@ XrResult OpenXrLayer::DestroySession(XrSession session) {
         if (session == active_session_) {
             DestroyEyeGazeResources();
             DestroyInternalReferenceSpaces();
+            FlushDeferredSwapchainReleasesLocked("session teardown");
             ResetD3D11QuadViewsCompositor();
             ResetSwapchainState();
         }
@@ -1625,6 +1639,18 @@ XrResult OpenXrLayer::CreateSwapchain(XrSession session,
 }
 
 XrResult OpenXrLayer::DestroySwapchain(XrSwapchain swapchain) {
+    {
+        std::scoped_lock lock(mutex_);
+        auto it = tracked_swapchains_.find(swapchain);
+        if (it != tracked_swapchains_.end()) {
+            const XrResult flush_result =
+                FlushDeferredSwapchainReleaseLocked(swapchain, it->second, "swapchain destroy");
+            if (XR_FAILED(flush_result)) {
+                return flush_result;
+            }
+        }
+    }
+
     const XrResult result = next_destroy_swapchain_(swapchain);
     if (XR_FAILED(result)) {
         return result;
@@ -1691,6 +1717,18 @@ XrResult OpenXrLayer::EnumerateSwapchainImages(XrSwapchain swapchain,
 XrResult OpenXrLayer::AcquireSwapchainImage(XrSwapchain swapchain,
                                             const XrSwapchainImageAcquireInfo* acquire_info,
                                             uint32_t* index) {
+    {
+        std::scoped_lock lock(mutex_);
+        auto it = tracked_swapchains_.find(swapchain);
+        if (it != tracked_swapchains_.end()) {
+            const XrResult flush_result =
+                FlushDeferredSwapchainReleaseLocked(swapchain, it->second, "swapchain acquire");
+            if (XR_FAILED(flush_result)) {
+                return flush_result;
+            }
+        }
+    }
+
     const XrResult result = next_acquire_swapchain_image_(swapchain, acquire_info, index);
     if (XR_FAILED(result)) {
         return result;
@@ -1727,6 +1765,19 @@ XrResult OpenXrLayer::WaitSwapchainImage(XrSwapchain swapchain, const XrSwapchai
 
 XrResult OpenXrLayer::ReleaseSwapchainImage(XrSwapchain swapchain,
                                             const XrSwapchainImageReleaseInfo* release_info) {
+    {
+        std::scoped_lock lock(mutex_);
+        const auto it = tracked_swapchains_.find(swapchain);
+        if (it != tracked_swapchains_.end() && ShouldDeferSwapchainRelease(it->second)) {
+            it->second.release_deferred = true;
+            ++it->second.release_count;
+            if (it->second.quadviews_session && it->second.release_count <= 3) {
+                LogSwapchainSummary(swapchain, it->second, "releaseDeferred");
+            }
+            return XR_SUCCESS;
+        }
+    }
+
     const XrResult result = next_release_swapchain_image_(swapchain, release_info);
     if (XR_FAILED(result)) {
         return result;
@@ -2631,8 +2682,12 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
         pivotxr_smoothed_extra_pitch_radians_ = 0.0;
         pivotxr_activation_gain_ = 0.0;
         pivotxr_last_smoothing_wall_time_.reset();
+        const XrResult release_result = FlushDeferredSwapchainReleasesLocked("end frame");
         PrunePivotPoseDeltas(frame_end_info->displayTime);
         PruneQuadViewsFovs(frame_end_info->displayTime);
+        if (XR_FAILED(release_result)) {
+            return release_result;
+        }
         return next_end_frame_(session, frame_end_info);
     }
 
@@ -2707,8 +2762,12 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
             logger_.Debug(stream.str());
             --pending_end_frame_diagnostics_;
         }
+        const XrResult release_result = FlushDeferredSwapchainReleasesLocked("end frame");
         PrunePivotPoseDeltas(frame_end_info->displayTime);
         PruneQuadViewsFovs(frame_end_info->displayTime);
+        if (XR_FAILED(release_result)) {
+            return release_result;
+        }
         return next_end_frame_(session, frame_end_info);
     }
 
@@ -2851,6 +2910,13 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
                       ", unknownProjectionSwapchains=" + std::to_string(unknown_projection_swapchain_count) +
                       ", trackedSwapchains=" + std::to_string(tracked_swapchains_.size()));
     }
+    const XrResult release_result = FlushDeferredSwapchainReleasesLocked("end frame");
+    if (XR_FAILED(release_result)) {
+        PrunePivotPoseDeltas(frame_end_info->displayTime);
+        PruneQuadViewsFovs(frame_end_info->displayTime);
+        return release_result;
+    }
+
     const XrResult result = next_end_frame_(session, &adjusted_frame_end_info);
     PrunePivotPoseDeltas(frame_end_info->displayTime);
     PruneQuadViewsFovs(frame_end_info->displayTime);
@@ -3494,6 +3560,8 @@ void OpenXrLayer::ResetInstanceState() {
     quad_views_extension_requested_ = false;
     varjo_foveated_rendering_extension_requested_ = false;
     eye_gaze_extension_enabled_ = false;
+    defer_quadviews_swapchain_releases_ = false;
+    runtime_name_.clear();
     cached_quadviews_stereo_recommended_width_ = 0;
     cached_quadviews_stereo_recommended_height_ = 0;
     has_logged_system_properties_ = false;
@@ -4293,6 +4361,54 @@ void OpenXrLayer::ResetSwapchainState() {
     tracked_swapchains_.clear();
 }
 
+bool OpenXrLayer::ShouldDeferSwapchainRelease(const SwapchainInfo& info) const {
+    // Deliberately scoped to every swapchain in the quadviews session, not just the
+    // four compositor inputs. The extra swapchains are still flushed before
+    // next_end_frame_, so submission ordering stays correct; keying off the session
+    // avoids tracking which handles are compositor inputs versus app-owned layers.
+    return defer_quadviews_swapchain_releases_ && info.quadviews_session && info.session == active_session_ &&
+           IsQuadViewsActive();
+}
+
+XrResult OpenXrLayer::FlushDeferredSwapchainReleaseLocked(XrSwapchain swapchain,
+                                                          SwapchainInfo& info,
+                                                          std::string_view reason) {
+    if (!info.release_deferred) {
+        return XR_SUCCESS;
+    }
+    if (!next_release_swapchain_image_) {
+        logger_.Error("Deferred swapchain release failed: xrReleaseSwapchainImage is unavailable, reason=" +
+                      std::string(reason));
+        return XR_ERROR_RUNTIME_FAILURE;
+    }
+
+    XrSwapchainImageReleaseInfo release_info{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
+    const XrResult result = next_release_swapchain_image_(swapchain, &release_info);
+    if (XR_FAILED(result)) {
+        logger_.Error("Deferred swapchain release failed: handle=" + FormatHandle(swapchain) +
+                      ", reason=" + std::string(reason) +
+                      ", result=" + FormatHex(static_cast<uint64_t>(result)));
+        return result;
+    }
+
+    info.release_deferred = false;
+    if (info.quadviews_session && info.release_count <= 3) {
+        LogSwapchainSummary(swapchain, info, "deferredReleaseFlushed");
+    }
+    return XR_SUCCESS;
+}
+
+XrResult OpenXrLayer::FlushDeferredSwapchainReleasesLocked(std::string_view reason) {
+    XrResult first_failure = XR_SUCCESS;
+    for (auto& [swapchain, info] : tracked_swapchains_) {
+        const XrResult result = FlushDeferredSwapchainReleaseLocked(swapchain, info, reason);
+        if (XR_FAILED(result) && XR_SUCCEEDED(first_failure)) {
+            first_failure = result;
+        }
+    }
+    return first_failure;
+}
+
 void OpenXrLayer::ResetD3D11QuadViewsCompositor() {
     for (QuadViewsCompositionTarget& target : d3d11_quadviews_compositor_.targets) {
         SafeReleaseVector(target.image_render_target_views);
@@ -4354,6 +4470,7 @@ void OpenXrLayer::LogSwapchainSummary(XrSwapchain swapchain,
            << ", acquires=" << info.acquire_count
            << ", waits=" << info.wait_count
            << ", releases=" << info.release_count
+           << ", releaseDeferred=" << info.release_deferred
            << ", trackedSwapchains=" << tracked_swapchains_.size();
     if (info.quadviews_session) {
         logger_.Info(stream.str());
