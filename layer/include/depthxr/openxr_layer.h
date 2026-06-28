@@ -41,9 +41,24 @@ class OpenXrLayer {
     void SetLayerDirectory(std::filesystem::path dll_directory);
     void SetNextProcAddr(PFN_xrGetInstanceProcAddr next_get_instance_proc_addr);
 
+    struct InstanceCreateDiagnostics {
+        bool app_requested_quad_views{false};
+        bool app_requested_varjo_foveated_rendering{false};
+        bool app_requested_eye_gaze{false};
+        bool cheap_eye_gaze_probe_ran{false};
+        bool cheap_eye_gaze_probe_supported{false};
+        bool optimistic_eye_gaze_request{false};
+        XrResult first_create_result{XR_SUCCESS};
+        bool retried_without_eye_gaze{false};
+        XrResult retry_create_result{XR_SUCCESS};
+        uint32_t first_downstream_extension_count{0};
+        uint32_t final_downstream_extension_count{0};
+    };
+
     XrResult OnInstanceCreated(const XrInstanceCreateInfo* create_info,
                                XrInstance instance,
-                               bool eye_gaze_extension_enabled);
+                               bool eye_gaze_extension_enabled,
+                               const InstanceCreateDiagnostics& diagnostics);
     XrResult GetInstanceProcAddr(XrInstance instance, const char* name, PFN_xrVoidFunction* function);
     XrResult DestroyInstance(XrInstance instance);
     XrResult CreateSession(XrInstance instance, const XrSessionCreateInfo* create_info, XrSession* session);

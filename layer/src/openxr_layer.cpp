@@ -905,7 +905,8 @@ void OpenXrLayer::SetNextProcAddr(PFN_xrGetInstanceProcAddr next_get_instance_pr
 
 XrResult OpenXrLayer::OnInstanceCreated(const XrInstanceCreateInfo* create_info,
                                         XrInstance instance,
-                                        bool eye_gaze_extension_enabled) {
+                                        bool eye_gaze_extension_enabled,
+                                        const InstanceCreateDiagnostics& diagnostics) {
     std::scoped_lock lock(mutex_);
 
     instance_ = instance;
@@ -950,8 +951,38 @@ XrResult OpenXrLayer::OnInstanceCreated(const XrInstanceCreateInfo* create_info,
                          (varjo_foveated_rendering_extension_requested_ ? "true" : "false"));
         }
     }
+    const bool log_eye_gaze_instance_setup =
+        diagnostics.app_requested_quad_views || diagnostics.app_requested_varjo_foveated_rendering ||
+        diagnostics.app_requested_eye_gaze || diagnostics.optimistic_eye_gaze_request ||
+        XR_FAILED(diagnostics.first_create_result) || diagnostics.retried_without_eye_gaze;
+    if (log_eye_gaze_instance_setup) {
+        std::ostringstream stream;
+        stream << "Quadviews eye-gaze instance setup: appRequestedQuadViews="
+               << (diagnostics.app_requested_quad_views ? 1 : 0)
+               << ", appRequestedVarjoFoveatedRendering="
+               << (diagnostics.app_requested_varjo_foveated_rendering ? 1 : 0)
+               << ", appRequestedEyeGaze=" << (diagnostics.app_requested_eye_gaze ? 1 : 0);
+        if (diagnostics.cheap_eye_gaze_probe_ran) {
+            stream << ", cheapProbeSupported=" << (diagnostics.cheap_eye_gaze_probe_supported ? 1 : 0);
+        } else {
+            stream << ", cheapProbeSupported=not-run";
+        }
+        stream << ", optimisticRequest=" << (diagnostics.optimistic_eye_gaze_request ? 1 : 0)
+               << ", firstCreateResult=" << static_cast<int>(diagnostics.first_create_result)
+               << ", firstDownstreamExtensionCount=" << diagnostics.first_downstream_extension_count
+               << ", retriedWithoutEyeGaze=" << (diagnostics.retried_without_eye_gaze ? 1 : 0);
+        if (diagnostics.retried_without_eye_gaze) {
+            stream << ", retryCreateResult=" << static_cast<int>(diagnostics.retry_create_result);
+        }
+        stream << ", finalDownstreamExtensionCount=" << diagnostics.final_downstream_extension_count
+               << ", finalEyeGazeEnabled=" << (eye_gaze_extension_enabled ? 1 : 0);
+        logger_.Info(stream.str());
+    }
     if (eye_gaze_extension_enabled_) {
         logger_.Info("Enabled XR_EXT_eye_gaze_interaction downstream for VectorXR quadviews.");
+    } else if (diagnostics.app_requested_quad_views || diagnostics.app_requested_varjo_foveated_rendering) {
+        logger_.Info("XR_EXT_eye_gaze_interaction is not enabled downstream; VectorXR quadviews eye tracking "
+                     "will use head/static focus if no other tracker is available.");
     }
 
     CaptureInstanceFunctions();
@@ -3717,18 +3748,29 @@ XrResult OpenXrLayer::CreateEyeGazeResources(XrSession session) {
     if (eye_gaze_resources_ready_) {
         return XR_SUCCESS;
     }
-    if (!eye_gaze_extension_enabled_ || !next_string_to_path_ || !next_create_action_set_ || !next_create_action_ ||
+    if (!eye_gaze_extension_enabled_) {
+        logger_.Info("VectorXR quadviews eye-gaze resources skipped: XR_EXT_eye_gaze_interaction "
+                     "is not enabled downstream.");
+        return XR_ERROR_FEATURE_UNSUPPORTED;
+    }
+    if (!next_string_to_path_ || !next_create_action_set_ || !next_create_action_ ||
         !next_suggest_interaction_profile_bindings_ || !next_create_action_space_) {
+        logger_.Info("VectorXR quadviews eye-gaze resources unavailable: required OpenXR action "
+                     "functions are missing.");
         return XR_ERROR_FEATURE_UNSUPPORTED;
     }
 
     XrResult result = next_string_to_path_(
         instance_, "/interaction_profiles/ext/eye_gaze_interaction", &eye_gaze_interaction_profile_path_);
     if (XR_FAILED(result)) {
+        logger_.Info("VectorXR quadviews eye-gaze interaction profile path lookup failed: result=" +
+                     std::to_string(static_cast<int>(result)));
         return result;
     }
     result = next_string_to_path_(instance_, "/user/eyes_ext/input/gaze_ext/pose", &eye_gaze_pose_path_);
     if (XR_FAILED(result)) {
+        logger_.Info("VectorXR quadviews eye-gaze pose path lookup failed: result=" +
+                     std::to_string(static_cast<int>(result)));
         return result;
     }
 
@@ -3740,6 +3782,8 @@ XrResult OpenXrLayer::CreateEyeGazeResources(XrSession session) {
     action_set_info.priority = 0;
     result = next_create_action_set_(instance_, &action_set_info, &quadviews_action_set_);
     if (XR_FAILED(result)) {
+        logger_.Info("VectorXR quadviews eye-gaze action set creation failed: result=" +
+                     std::to_string(static_cast<int>(result)));
         return result;
     }
 
@@ -3749,6 +3793,8 @@ XrResult OpenXrLayer::CreateEyeGazeResources(XrSession session) {
     action_info.actionType = XR_ACTION_TYPE_POSE_INPUT;
     result = next_create_action_(quadviews_action_set_, &action_info, &quadviews_eye_gaze_action_);
     if (XR_FAILED(result)) {
+        logger_.Info("VectorXR quadviews eye-gaze action creation failed: result=" +
+                     std::to_string(static_cast<int>(result)));
         return result;
     }
 
@@ -3759,6 +3805,8 @@ XrResult OpenXrLayer::CreateEyeGazeResources(XrSession session) {
     profile_bindings.suggestedBindings = &suggested_binding;
     result = next_suggest_interaction_profile_bindings_(instance_, &profile_bindings);
     if (XR_FAILED(result)) {
+        logger_.Info("VectorXR quadviews eye-gaze interaction profile binding suggestion failed: result=" +
+                     std::to_string(static_cast<int>(result)));
         return result;
     }
 
@@ -3767,6 +3815,8 @@ XrResult OpenXrLayer::CreateEyeGazeResources(XrSession session) {
     action_space_info.poseInActionSpace = IdentityPose();
     result = next_create_action_space_(session, &action_space_info, &quadviews_eye_gaze_space_);
     if (XR_FAILED(result)) {
+        logger_.Info("VectorXR quadviews eye-gaze action space creation failed: result=" +
+                     std::to_string(static_cast<int>(result)));
         return result;
     }
 
