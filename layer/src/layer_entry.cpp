@@ -152,6 +152,20 @@ XrResult XRAPI_CALL DepthxrReleaseSwapchainImage(XrSwapchain swapchain,
     return OpenXrLayer::Instance().ReleaseSwapchainImage(swapchain, release_info);
 }
 
+XrResult XRAPI_CALL DepthxrEnumerateReferenceSpaces(XrSession session,
+                                                   uint32_t space_capacity_input,
+                                                   uint32_t* space_count_output,
+                                                   XrReferenceSpaceType* spaces) {
+    return OpenXrLayer::Instance().EnumerateReferenceSpaces(
+        session, space_capacity_input, space_count_output, spaces);
+}
+
+XrResult XRAPI_CALL DepthxrGetReferenceSpaceBoundsRect(XrSession session,
+                                                       XrReferenceSpaceType reference_space_type,
+                                                       XrExtent2Df* bounds) {
+    return OpenXrLayer::Instance().GetReferenceSpaceBoundsRect(session, reference_space_type, bounds);
+}
+
 XrResult XRAPI_CALL DepthxrCreateReferenceSpace(XrSession session,
                                                 const XrReferenceSpaceCreateInfo* create_info,
                                                 XrSpace* space) {
@@ -188,6 +202,20 @@ bool ExtensionListContains(const std::vector<const char*>& extensions, std::stri
     return std::find_if(extensions.begin(), extensions.end(), [&](const char* candidate) {
                return candidate && std::string_view(candidate) == extension_name;
            }) != extensions.end();
+}
+
+bool ApplicationRequestedExtension(const XrInstanceCreateInfo* create_info, std::string_view extension_name) {
+    if (!create_info || !create_info->enabledExtensionNames) {
+        return false;
+    }
+
+    for (uint32_t i = 0; i < create_info->enabledExtensionCount; ++i) {
+        const char* candidate = create_info->enabledExtensionNames[i];
+        if (candidate && std::string_view(candidate) == extension_name) {
+            return true;
+        }
+    }
+    return false;
 }
 
 bool RuntimeSupportsExtension(PFN_xrGetInstanceProcAddr next_get_instance_proc_addr,
@@ -319,6 +347,14 @@ XrResult XRAPI_CALL xrGetInstanceProcAddr(XrInstance instance, const char* name,
         *function = reinterpret_cast<PFN_xrVoidFunction>(depthxr::DepthxrReleaseSwapchainImage);
         return XR_SUCCESS;
     }
+    if (requested == "xrEnumerateReferenceSpaces") {
+        *function = reinterpret_cast<PFN_xrVoidFunction>(depthxr::DepthxrEnumerateReferenceSpaces);
+        return XR_SUCCESS;
+    }
+    if (requested == "xrGetReferenceSpaceBoundsRect") {
+        *function = reinterpret_cast<PFN_xrVoidFunction>(depthxr::DepthxrGetReferenceSpaceBoundsRect);
+        return XR_SUCCESS;
+    }
     if (requested == "xrCreateReferenceSpace") {
         *function = reinterpret_cast<PFN_xrVoidFunction>(depthxr::DepthxrCreateReferenceSpace);
         return XR_SUCCESS;
@@ -367,34 +403,78 @@ XrResult XRAPI_CALL xrCreateApiLayerInstance(const XrInstanceCreateInfo* instanc
     XrApiLayerCreateInfo chain_info = *layer_info;
     chain_info.nextInfo = next_info->next;
 
-    XrInstanceCreateInfo downstream_create_info = *instance_create_info;
-    std::vector<const char*> downstream_extensions;
-    downstream_extensions.reserve(instance_create_info->enabledExtensionCount);
+    OpenXrLayer::InstanceCreateDiagnostics diagnostics;
+    diagnostics.app_requested_quad_views =
+        ApplicationRequestedExtension(instance_create_info, XR_VARJO_QUAD_VIEWS_EXTENSION_NAME);
+    diagnostics.app_requested_varjo_foveated_rendering =
+        ApplicationRequestedExtension(instance_create_info, XR_VARJO_FOVEATED_RENDERING_EXTENSION_NAME);
+    diagnostics.app_requested_eye_gaze =
+        ApplicationRequestedExtension(instance_create_info, XR_EXT_EYE_GAZE_INTERACTION_EXTENSION_NAME);
+
+    std::vector<const char*> base_downstream_extensions;
+    base_downstream_extensions.reserve(instance_create_info->enabledExtensionCount + 1);
     for (uint32_t i = 0; i < instance_create_info->enabledExtensionCount; ++i) {
         const char* extension_name = instance_create_info->enabledExtensionNames[i];
         if (!extension_name || IsLayerOwnedExtension(extension_name)) {
             continue;
         }
-        downstream_extensions.push_back(extension_name);
+        base_downstream_extensions.push_back(extension_name);
     }
 
-    if (!ExtensionListContains(downstream_extensions, XR_EXT_EYE_GAZE_INTERACTION_EXTENSION_NAME) &&
-        RuntimeSupportsExtension(next_info->nextGetInstanceProcAddr, XR_EXT_EYE_GAZE_INTERACTION_EXTENSION_NAME)) {
-        downstream_extensions.push_back(XR_EXT_EYE_GAZE_INTERACTION_EXTENSION_NAME);
+    const bool app_requested_layer_owned_quadviews =
+        diagnostics.app_requested_quad_views || diagnostics.app_requested_varjo_foveated_rendering;
+    if (app_requested_layer_owned_quadviews || diagnostics.app_requested_eye_gaze) {
+        diagnostics.cheap_eye_gaze_probe_ran = true;
+        diagnostics.cheap_eye_gaze_probe_supported =
+            RuntimeSupportsExtension(next_info->nextGetInstanceProcAddr, XR_EXT_EYE_GAZE_INTERACTION_EXTENSION_NAME);
     }
-    const bool eye_gaze_extension_enabled =
-        ExtensionListContains(downstream_extensions, XR_EXT_EYE_GAZE_INTERACTION_EXTENSION_NAME);
 
-    downstream_create_info.enabledExtensionCount = static_cast<uint32_t>(downstream_extensions.size());
-    downstream_create_info.enabledExtensionNames = downstream_extensions.empty() ? nullptr : downstream_extensions.data();
+    std::vector<const char*> first_downstream_extensions = base_downstream_extensions;
+    diagnostics.optimistic_eye_gaze_request =
+        app_requested_layer_owned_quadviews &&
+        !ExtensionListContains(first_downstream_extensions, XR_EXT_EYE_GAZE_INTERACTION_EXTENSION_NAME);
+    if (diagnostics.optimistic_eye_gaze_request) {
+        first_downstream_extensions.push_back(XR_EXT_EYE_GAZE_INTERACTION_EXTENSION_NAME);
+    }
+    diagnostics.first_downstream_extension_count = static_cast<uint32_t>(first_downstream_extensions.size());
 
-    const XrResult result = next_info->nextCreateApiLayerInstance(&downstream_create_info, &chain_info, instance);
+    XrInstanceCreateInfo downstream_create_info = *instance_create_info;
+    downstream_create_info.enabledExtensionCount = static_cast<uint32_t>(first_downstream_extensions.size());
+    downstream_create_info.enabledExtensionNames =
+        first_downstream_extensions.empty() ? nullptr : first_downstream_extensions.data();
+
+    XrResult result = next_info->nextCreateApiLayerInstance(&downstream_create_info, &chain_info, instance);
+    diagnostics.first_create_result = result;
+
+    const std::vector<const char*>* successful_downstream_extensions = &first_downstream_extensions;
+    if (XR_FAILED(result) && diagnostics.optimistic_eye_gaze_request) {
+        diagnostics.retried_without_eye_gaze = true;
+        *instance = XR_NULL_HANDLE;
+
+        XrApiLayerCreateInfo retry_chain_info = *layer_info;
+        retry_chain_info.nextInfo = next_info->next;
+
+        XrInstanceCreateInfo retry_create_info = *instance_create_info;
+        retry_create_info.enabledExtensionCount = static_cast<uint32_t>(base_downstream_extensions.size());
+        retry_create_info.enabledExtensionNames =
+            base_downstream_extensions.empty() ? nullptr : base_downstream_extensions.data();
+
+        result = next_info->nextCreateApiLayerInstance(&retry_create_info, &retry_chain_info, instance);
+        diagnostics.retry_create_result = result;
+        successful_downstream_extensions = &base_downstream_extensions;
+    }
+
     if (XR_FAILED(result)) {
         return result;
     }
 
+    diagnostics.final_downstream_extension_count =
+        static_cast<uint32_t>(successful_downstream_extensions->size());
+    const bool eye_gaze_extension_enabled = ExtensionListContains(
+        *successful_downstream_extensions, XR_EXT_EYE_GAZE_INTERACTION_EXTENSION_NAME);
+
     return OpenXrLayer::Instance().OnInstanceCreated(
-        instance_create_info, *instance, eye_gaze_extension_enabled);
+        instance_create_info, *instance, eye_gaze_extension_enabled, diagnostics);
 }
 
 XrResult __declspec(dllexport) XRAPI_CALL

@@ -8,6 +8,18 @@ export interface PatchNoteEntry {
 
 export const patchNotes: PatchNoteEntry[] = [
   {
+    version: '0.11.3',
+    date: '2026-06-28',
+    title: 'Varjo and Pivot diagnostics',
+    summary: 'Improves Quadviews compatibility and troubleshooting with stronger Varjo/OpenXR contract handling, more reliable live config reloads, safer eye-gaze fallback behavior, and detailed Pivot debug diagnostics.',
+    items: [
+      'Hardened Varjo Quadviews emulation and OpenXR next-chain handling, including COMBINED_EYE_VARJO reference-space behavior and xrGetReferenceSpaceBoundsRect support.',
+      'Improved eye-gaze setup and fallback behavior so Quadviews can continue with head/static focus when eye tracking resources are unavailable.',
+      'Improved config file watching and reload behavior so profile changes are picked up more reliably during active sessions.',
+      'Added debug-level Pivot diagnostics for tracking freshness, location flags, recomposition mode, eye offsets, and left/right pose deltas to help diagnose pivot drift or asymmetry.',
+    ],
+  },
+  {
     version: '0.11.2',
     date: '2026-06-28',
     title: 'Varjo Quadviews fix',

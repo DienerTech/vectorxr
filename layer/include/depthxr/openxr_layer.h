@@ -2,6 +2,7 @@
 
 #include <array>
 #include <chrono>
+#include <condition_variable>
 #include <filesystem>
 #include <map>
 #include <mutex>
@@ -9,6 +10,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -41,9 +43,24 @@ class OpenXrLayer {
     void SetLayerDirectory(std::filesystem::path dll_directory);
     void SetNextProcAddr(PFN_xrGetInstanceProcAddr next_get_instance_proc_addr);
 
+    struct InstanceCreateDiagnostics {
+        bool app_requested_quad_views{false};
+        bool app_requested_varjo_foveated_rendering{false};
+        bool app_requested_eye_gaze{false};
+        bool cheap_eye_gaze_probe_ran{false};
+        bool cheap_eye_gaze_probe_supported{false};
+        bool optimistic_eye_gaze_request{false};
+        XrResult first_create_result{XR_SUCCESS};
+        bool retried_without_eye_gaze{false};
+        XrResult retry_create_result{XR_SUCCESS};
+        uint32_t first_downstream_extension_count{0};
+        uint32_t final_downstream_extension_count{0};
+    };
+
     XrResult OnInstanceCreated(const XrInstanceCreateInfo* create_info,
                                XrInstance instance,
-                               bool eye_gaze_extension_enabled);
+                               bool eye_gaze_extension_enabled,
+                               const InstanceCreateDiagnostics& diagnostics);
     XrResult GetInstanceProcAddr(XrInstance instance, const char* name, PFN_xrVoidFunction* function);
     XrResult DestroyInstance(XrInstance instance);
     XrResult CreateSession(XrInstance instance, const XrSessionCreateInfo* create_info, XrSession* session);
@@ -89,6 +106,13 @@ class OpenXrLayer {
                                    uint32_t* index);
     XrResult WaitSwapchainImage(XrSwapchain swapchain, const XrSwapchainImageWaitInfo* wait_info);
     XrResult ReleaseSwapchainImage(XrSwapchain swapchain, const XrSwapchainImageReleaseInfo* release_info);
+    XrResult EnumerateReferenceSpaces(XrSession session,
+                                      uint32_t space_capacity_input,
+                                      uint32_t* space_count_output,
+                                      XrReferenceSpaceType* spaces);
+    XrResult GetReferenceSpaceBoundsRect(XrSession session,
+                                         XrReferenceSpaceType reference_space_type,
+                                         XrExtent2Df* bounds);
     XrResult CreateReferenceSpace(XrSession session, const XrReferenceSpaceCreateInfo* create_info, XrSpace* space);
     XrResult DestroySpace(XrSpace space);
     XrResult LocateSpace(XrSpace space, XrSpace base_space, XrTime time, XrSpaceLocation* location);
@@ -101,6 +125,7 @@ class OpenXrLayer {
 
   private:
     OpenXrLayer() = default;
+    ~OpenXrLayer();
 
     struct SwapchainInfo {
         XrSession session{XR_NULL_HANDLE};
@@ -175,7 +200,34 @@ class OpenXrLayer {
         std::array<QuadViewsGpuTimingQuery, 4> gpu_timing_queries;
     };
 
+    struct PivotDiagnosticState {
+        bool has_view_pose{false};
+        XrTime view_time{0};
+        XrSpaceLocationFlags view_location_flags{0};
+        bool pivot_active{false};
+        bool space_is_view{false};
+        bool base_space_is_view{false};
+        double raw_yaw_radians{0.0};
+        double raw_pitch_radians{0.0};
+        double steady_extra_yaw_radians{0.0};
+        double steady_extra_pitch_radians{0.0};
+        double eased_extra_yaw_radians{0.0};
+        double eased_extra_pitch_radians{0.0};
+        double activation_gain{0.0};
+        std::string_view recomposition_mode{"none"};
+
+        bool has_eye_offsets{false};
+        XrTime eye_offsets_time{0};
+        XrViewConfigurationType eye_offsets_view_configuration{XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO};
+        uint32_t eye_offset_count{0};
+        std::array<XrPosef, 4> eye_offsets{};
+    };
+
     void ReloadConfigIfNeeded();
+    void StartConfigWatcher();
+    void StopConfigWatcher();
+    void ConfigWatcherLoop();
+    void PollConfigFile();
     void RefreshResolvedSettings();
     void CaptureInstanceFunctions();
     void LogResolvedSettings(const ResolvedRuntimeConfig& settings);
@@ -267,8 +319,15 @@ class OpenXrLayer {
     uint64_t config_generation_{0};
     uint64_t resolved_settings_generation_{~0ull};
     XrSession resolved_settings_session_{XR_NULL_HANDLE};
-    std::optional<std::chrono::steady_clock::time_point> last_config_check_time_;
     std::string last_failed_config_error_;
+
+    // Config hot-reload runs on a dedicated watcher thread so that filesystem
+    // latency never blocks the render hot path. The watcher does all I/O without
+    // holding mutex_, taking it only briefly to publish a parsed change.
+    std::thread config_watcher_thread_;
+    std::mutex config_watcher_mutex_;
+    std::condition_variable config_watcher_cv_;
+    bool config_watcher_stop_{false};
     std::string runtime_name_;
     std::string current_exe_name_;
     ResolvedRuntimeConfig resolved_settings_;
@@ -280,6 +339,9 @@ class OpenXrLayer {
     uint32_t pending_eye_gaze_sync_diagnostics_{0};
     uint32_t pending_quadviews_compositor_diagnostics_{0};
     uint32_t eye_gaze_diagnostic_stride_counter_{0};
+    uint32_t pending_pivot_diagnostics_{0};
+    uint64_t pivot_diagnostic_stride_counter_{0};
+    PivotDiagnosticState pivot_diagnostic_;
     double pivotxr_smoothed_extra_yaw_radians_{0.0};
     double pivotxr_smoothed_extra_pitch_radians_{0.0};
     // Activation envelope in [0,1]: eases the pivot effect in/out on the
@@ -360,6 +422,8 @@ class OpenXrLayer {
     PFN_xrAcquireSwapchainImage next_acquire_swapchain_image_{nullptr};
     PFN_xrWaitSwapchainImage next_wait_swapchain_image_{nullptr};
     PFN_xrReleaseSwapchainImage next_release_swapchain_image_{nullptr};
+    PFN_xrEnumerateReferenceSpaces next_enumerate_reference_spaces_{nullptr};
+    PFN_xrGetReferenceSpaceBoundsRect next_get_reference_space_bounds_rect_{nullptr};
     PFN_xrCreateReferenceSpace next_create_reference_space_{nullptr};
     PFN_xrCreateActionSpace next_create_action_space_{nullptr};
     PFN_xrDestroySpace next_destroy_space_{nullptr};
