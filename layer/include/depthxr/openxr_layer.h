@@ -193,8 +193,11 @@ class OpenXrLayer {
         bool gpu_timing_available{false};
         bool has_logged_capabilities{false};
         bool has_logged_prewarm{false};
+        bool has_last_completed_gpu_timing{false};
         uint32_t failure_logs_remaining{8};
         uint32_t next_gpu_timing_query{0};
+        double last_completed_gpu_ms{0.0};
+        XrTime last_completed_gpu_frame_time{0};
         std::array<QuadViewsInputCopy, 4> input_copies;
         std::array<QuadViewsCompositionTarget, 2> targets;
         std::array<QuadViewsGpuTimingQuery, 4> gpu_timing_queries;
@@ -243,6 +246,8 @@ class OpenXrLayer {
                                                  SwapchainInfo& info,
                                                  std::string_view reason);
     XrResult FlushDeferredSwapchainReleasesLocked(std::string_view reason);
+    bool ShouldLogQuadViewsDebugHeartbeat(std::optional<std::chrono::steady_clock::time_point>& last_heartbeat);
+    void ResetQuadViewsDebugHeartbeatState();
     void ResetSessionState();
     void ResetInstanceState();
     void ResetD3D11QuadViewsCompositor();
@@ -341,6 +346,10 @@ class OpenXrLayer {
     uint32_t eye_gaze_diagnostic_stride_counter_{0};
     uint32_t pending_pivot_diagnostics_{0};
     uint64_t pivot_diagnostic_stride_counter_{0};
+    std::optional<std::chrono::steady_clock::time_point> last_quadviews_locate_debug_heartbeat_;
+    std::optional<std::chrono::steady_clock::time_point> last_quadviews_end_frame_debug_heartbeat_;
+    std::optional<std::chrono::steady_clock::time_point> last_quadviews_compositor_debug_heartbeat_;
+    std::optional<std::chrono::steady_clock::time_point> last_quadviews_eye_gaze_debug_heartbeat_;
     PivotDiagnosticState pivot_diagnostic_;
     double pivotxr_smoothed_extra_yaw_radians_{0.0};
     double pivotxr_smoothed_extra_pitch_radians_{0.0};
