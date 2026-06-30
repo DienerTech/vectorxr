@@ -372,6 +372,9 @@ class OpenXrLayer {
     XrPath eye_gaze_pose_path_{XR_NULL_PATH};
     bool eye_gaze_resources_ready_{false};
     bool eye_gaze_action_set_attached_{false};
+    bool has_logged_eye_gaze_focus_active_{false};
+    bool has_logged_eye_gaze_focus_unavailable_{false};
+    uint32_t eye_gaze_unavailable_streak_{0};
     double quadviews_smoothed_focus_yaw_radians_{0.0};
     double quadviews_smoothed_focus_pitch_radians_{0.0};
     std::optional<std::chrono::steady_clock::time_point> quadviews_last_focus_smoothing_wall_time_;

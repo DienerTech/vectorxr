@@ -340,6 +340,8 @@ FocusRectConstants BuildFocusRectConstants(const XrFovf& full_fov,
                                            const XrFovf& focus_fov,
                                            uint32_t width,
                                            uint32_t height,
+                                           uint32_t focus_width,
+                                           uint32_t focus_height,
                                            double transition_thickness_percent,
                                            double foveate_sharpness) {
     const double full_left = std::tan(full_fov.angleLeft);
@@ -364,14 +366,15 @@ FocusRectConstants BuildFocusRectConstants(const XrFovf& full_fov,
     const double focus_rect_height =
         std::max(0.0001, static_cast<double>(constants.focus_rect[3]) - constants.focus_rect[1]);
     const double transition_fraction = Clamp(transition_thickness_percent, 0.0, 100.0) / 100.0;
+    // Feathering is measured in output pixels, while sharpening samples the focus texture.
     constants.blend_params[0] = static_cast<float>(std::max(1.0 / std::max<uint32_t>(1, width),
                                                            focus_rect_width * transition_fraction));
     constants.blend_params[1] = static_cast<float>(std::max(1.0 / std::max<uint32_t>(1, height),
                                                            focus_rect_height * transition_fraction));
     constants.blend_params[2] = static_cast<float>(Clamp(foveate_sharpness, 0.0, 100.0) / 100.0);
     constants.blend_params[3] = 0.0f;
-    constants.focus_texel[0] = 1.0f / static_cast<float>(std::max<uint32_t>(1, width));
-    constants.focus_texel[1] = 1.0f / static_cast<float>(std::max<uint32_t>(1, height));
+    constants.focus_texel[0] = 1.0f / static_cast<float>(std::max<uint32_t>(1, focus_width));
+    constants.focus_texel[1] = 1.0f / static_cast<float>(std::max<uint32_t>(1, focus_height));
     return constants;
 }
 
@@ -808,6 +811,10 @@ constexpr XrTime kMaxQuadViewsFovMatchWindow = 5'000'000;
 constexpr size_t kMaxCachedQuadViewsFovFrames = 180;
 constexpr uint32_t kPivotDiagnosticBurstCount = 8;
 constexpr uint64_t kPivotDiagnosticStride = 120;
+// Consecutive unavailable frames before the eye-gaze focus is logged as lost.
+// Debounces sub-second dropouts (e.g. blinks, which invalidate the gaze pose for
+// ~100-400ms) so transient gaze loss does not churn the log. ~1/3s at 90Hz.
+constexpr uint32_t kEyeGazeUnavailableLogThreshold = 30;
 // Hot-path throttles. xrLocateSpace/xrLocateViews/xrEndFrame run multiple
 // times per frame; filesystem stats, input-device polls, and downstream
 // helper calls must not.
@@ -2630,6 +2637,8 @@ bool OpenXrLayer::ComposeQuadViewsD3D11(const XrCompositionLayerProjection* sour
                                                                focus_fov,
                                                                target.width,
                                                                target.height,
+                                                               focus_swapchain.width,
+                                                               focus_swapchain.height,
                                                                resolved_settings_.quadviews.transition_thickness_percent,
                                                                resolved_settings_.quadviews.foveate_sharpness);
         if (pending_quadviews_compositor_diagnostics_ > 0) {
@@ -3959,6 +3968,9 @@ void OpenXrLayer::ResetSessionState() {
     eye_gaze_pose_path_ = XR_NULL_PATH;
     eye_gaze_resources_ready_ = false;
     eye_gaze_action_set_attached_ = false;
+    has_logged_eye_gaze_focus_active_ = false;
+    has_logged_eye_gaze_focus_unavailable_ = false;
+    eye_gaze_unavailable_streak_ = 0;
     quadviews_smoothed_focus_yaw_radians_ = 0.0;
     quadviews_smoothed_focus_pitch_radians_ = 0.0;
     quadviews_last_focus_smoothing_wall_time_.reset();
@@ -4072,6 +4084,9 @@ XrResult OpenXrLayer::CreateEyeGazeResources(XrSession session) {
 
     eye_gaze_resources_ready_ = true;
     eye_gaze_action_set_attached_ = false;
+    has_logged_eye_gaze_focus_active_ = false;
+    has_logged_eye_gaze_focus_unavailable_ = false;
+    eye_gaze_unavailable_streak_ = 0;
     pending_eye_gaze_diagnostics_ = std::max(pending_eye_gaze_diagnostics_, 120u);
     pending_eye_gaze_sync_diagnostics_ = std::max(pending_eye_gaze_sync_diagnostics_, 20u);
     pending_quadviews_compositor_diagnostics_ = std::max(pending_quadviews_compositor_diagnostics_, 30u);
@@ -4092,6 +4107,9 @@ void OpenXrLayer::DestroyEyeGazeResources() {
     eye_gaze_pose_path_ = XR_NULL_PATH;
     eye_gaze_resources_ready_ = false;
     eye_gaze_action_set_attached_ = false;
+    has_logged_eye_gaze_focus_active_ = false;
+    has_logged_eye_gaze_focus_unavailable_ = false;
+    eye_gaze_unavailable_streak_ = 0;
     quadviews_smoothed_focus_yaw_radians_ = 0.0;
     quadviews_smoothed_focus_pitch_radians_ = 0.0;
     quadviews_last_focus_smoothing_wall_time_.reset();
@@ -4120,6 +4138,19 @@ bool OpenXrLayer::LocateEyeGazeFocusOffsets(XrSession session,
     *yaw_radians = 0.0;
     *pitch_radians = 0.0;
     auto log_eye_gaze_diagnostic = [&](const std::string& reason) {
+        if (settings.tracking_mode == QuadViewsTrackingMode::Eye && !has_logged_eye_gaze_focus_unavailable_) {
+            // Debounce: require the gaze to stay unavailable for several frames
+            // before declaring it lost, so a single-frame dropout (a blink) does
+            // not produce an unavailable/active churn pair in the log.
+            ++eye_gaze_unavailable_streak_;
+            if (eye_gaze_unavailable_streak_ >= kEyeGazeUnavailableLogThreshold) {
+                logger_.Info("Quadviews eye-gaze focus unavailable; using head/static focus offsets. reason=" + reason +
+                             ", resourcesReady=" + std::to_string(eye_gaze_resources_ready_) +
+                             ", actionSetAttached=" + std::to_string(eye_gaze_action_set_attached_));
+                has_logged_eye_gaze_focus_unavailable_ = true;
+                has_logged_eye_gaze_focus_active_ = false;
+            }
+        }
         if (settings.tracking_mode == QuadViewsTrackingMode::Eye && pending_eye_gaze_diagnostics_ > 0) {
             logger_.Debug("Quadviews eye-gaze focus unavailable: " + reason +
                           ", resourcesReady=" + std::to_string(eye_gaze_resources_ready_) +
@@ -4243,6 +4274,19 @@ bool OpenXrLayer::LocateEyeGazeFocusOffsets(XrSession session,
                       FormatDiagnosticDouble(gaze_ray_angles.forward.z) + ")" +
                       ", baseSpace=" + std::string(gaze_base_space == internal_view_space_ ? "view" : "app"));
         --pending_eye_gaze_diagnostics_;
+    }
+    // Gaze recovered this frame; clear the unavailable streak so a future
+    // dropout must persist past the debounce threshold again before it logs.
+    eye_gaze_unavailable_streak_ = 0;
+    if (!has_logged_eye_gaze_focus_active_) {
+        logger_.Info("Quadviews eye-gaze focus active; using gaze-relative focus offsets. rawYaw=" +
+                     FormatDiagnosticDouble(target_yaw) +
+                     ", rawPitch=" + FormatDiagnosticDouble(target_pitch) +
+                     ", smoothedYaw=" + FormatDiagnosticDouble(*yaw_radians) +
+                     ", smoothedPitch=" + FormatDiagnosticDouble(*pitch_radians) +
+                     ", baseSpace=" + std::string(gaze_base_space == internal_view_space_ ? "view" : "app"));
+        has_logged_eye_gaze_focus_active_ = true;
+        has_logged_eye_gaze_focus_unavailable_ = false;
     }
     return true;
 }
