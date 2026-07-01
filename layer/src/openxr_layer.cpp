@@ -375,6 +375,12 @@ FocusRectConstants BuildFocusRectConstants(const XrFovf& full_fov,
     constants.blend_params[3] = 0.0f;
     constants.focus_texel[0] = 1.0f / static_cast<float>(std::max<uint32_t>(1, focus_width));
     constants.focus_texel[1] = 1.0f / static_cast<float>(std::max<uint32_t>(1, focus_height));
+    // One output pixel expressed in focus-UV, so inline sharpening samples at output-pixel
+    // spacing (frequencies that survive the focus->output resample) instead of focus-texel scale.
+    constants.focus_texel[2] =
+        static_cast<float>((1.0 / std::max<uint32_t>(1, width)) / focus_rect_width);
+    constants.focus_texel[3] =
+        static_cast<float>((1.0 / std::max<uint32_t>(1, height)) / focus_rect_height);
     return constants;
 }
 
@@ -425,16 +431,24 @@ float4 PSMain(VSOut input) : SV_Target {
 
     float2 focusUv = saturate((uv - focusRect.xy) / max(focusRect.zw - focusRect.xy, float2(0.0001, 0.0001)));
     float4 focus = focusTexture.Sample(linearSampler, focusUv);
-    float sharpenAmount = saturate(blendParams.z) * 0.35;
+    float sharpenAmount = saturate(blendParams.z);
     if (sharpenAmount > 0.001) {
-        float2 texel = focusTexel.xy;
-        float4 blur =
-            focusTexture.Sample(linearSampler, saturate(focusUv + float2(texel.x, 0.0))) +
-            focusTexture.Sample(linearSampler, saturate(focusUv - float2(texel.x, 0.0))) +
-            focusTexture.Sample(linearSampler, saturate(focusUv + float2(0.0, texel.y))) +
-            focusTexture.Sample(linearSampler, saturate(focusUv - float2(0.0, texel.y)));
-        blur *= 0.25;
-        focus.rgb = saturate(focus.rgb + (focus.rgb - blur.rgb) * sharpenAmount);
+        // Sample neighbors at output-pixel spacing (focusTexel.zw is one output pixel expressed
+        // in focus-UV), not focus-texel spacing. The focus texture is minified into the focus
+        // rect, so a focus-texel-scale unsharp mask synthesizes detail that the resample averages
+        // away; output-space offsets target the frequencies the user actually sees.
+        float2 off = focusTexel.zw;
+        float3 n = focusTexture.Sample(linearSampler, saturate(focusUv + float2(0.0, -off.y))).rgb;
+        float3 s = focusTexture.Sample(linearSampler, saturate(focusUv + float2(0.0,  off.y))).rgb;
+        float3 e = focusTexture.Sample(linearSampler, saturate(focusUv + float2( off.x, 0.0))).rgb;
+        float3 w = focusTexture.Sample(linearSampler, saturate(focusUv + float2(-off.x, 0.0))).rgb;
+        float3 avg = (n + s + e + w) * 0.25;
+        float3 sharpened = focus.rgb + (focus.rgb - avg) * sharpenAmount;
+        // CAS-style clamp: keep the result inside the local neighborhood range so strong
+        // sharpening cannot ring into bright halos on high-contrast edges (cockpit text/MFDs).
+        float3 lo = min(focus.rgb, min(min(n, s), min(e, w)));
+        float3 hi = max(focus.rgb, max(max(n, s), max(e, w)));
+        focus.rgb = clamp(sharpened, lo, hi);
     }
 
     float2 distToEdge = min(uv - focusRect.xy, focusRect.zw - uv);
@@ -2662,6 +2676,11 @@ bool OpenXrLayer::ComposeQuadViewsD3D11(const XrCompositionLayerProjection* sour
                    << ", feather=(" << FormatDiagnosticDouble(constants.blend_params[0]) << ", "
                    << FormatDiagnosticDouble(constants.blend_params[1]) << ")"
                    << ", sharpness=" << FormatDiagnosticDouble(constants.blend_params[2])
+                   << ", sharpenBackend=inlineAdaptive"
+                   << ", outputTexel=(" << FormatDiagnosticDouble(constants.focus_texel[2]) << ", "
+                   << FormatDiagnosticDouble(constants.focus_texel[3]) << ")"
+                   << ", focusTexel=(" << FormatDiagnosticDouble(constants.focus_texel[0]) << ", "
+                   << FormatDiagnosticDouble(constants.focus_texel[1]) << ")"
                    << ", fullFov=" << FormatFov(full_fov)
                    << ", focusFov=" << FormatFov(focus_fov)
                    << ", sourceFullFov=" << FormatFov(source_layer->views[eye].fov)
