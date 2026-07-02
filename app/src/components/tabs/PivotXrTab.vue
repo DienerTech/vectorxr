@@ -19,6 +19,7 @@ defineEmits<{
 }>()
 
 const compatibilityInfoOpen = ref(false)
+const centeringInfoOpen = ref(false)
 
 const profileWarnings = computed(() => {
   const warnings = new Map<number, string[]>()
@@ -65,16 +66,28 @@ const profileWarnings = computed(() => {
             Configure how Pivot activates and how much extra yaw or pitch it can add for each title. Use profiles to keep rotation behavior specific to the games and simulators that benefit from it.
           </p>
         </div>
-        <button
-          class="button-secondary inline-flex items-center gap-2 rounded-[0.75rem] px-4 py-2 text-sm font-medium"
-          type="button"
-          @click="compatibilityInfoOpen = true"
-        >
-          <span class="inline-flex h-5 w-5 items-center justify-center rounded-full border text-xs" style="border-color: var(--app-border)">
-            i
-          </span>
-          Quadviews Compatibility
-        </button>
+        <div class="flex flex-wrap items-center gap-2">
+          <button
+            class="button-secondary inline-flex items-center gap-2 rounded-[0.75rem] px-4 py-2 text-sm font-medium"
+            type="button"
+            @click="compatibilityInfoOpen = true"
+          >
+            <span class="inline-flex h-5 w-5 items-center justify-center rounded-full border text-xs" style="border-color: var(--app-border)">
+              i
+            </span>
+            Quadviews Compatibility
+          </button>
+          <button
+            class="button-secondary inline-flex items-center gap-2 rounded-[0.75rem] px-4 py-2 text-sm font-medium"
+            type="button"
+            @click="centeringInfoOpen = true"
+          >
+            <span class="inline-flex h-5 w-5 items-center justify-center rounded-full border text-xs" style="border-color: var(--app-border)">
+              i
+            </span>
+            Centering &amp; Alignment
+          </button>
+        </div>
       </div>
 
       <details class="section-disclosure border-t pt-4" style="border-color: var(--app-border)" open>
@@ -178,6 +191,34 @@ const profileWarnings = computed(() => {
 
           <div class="rounded-[1rem] border px-4 py-4 surface-panel">
             You can inspect and change that order with the OpenXR Layer Manager tab in VectorXR.
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div v-if="centeringInfoOpen" class="fixed inset-0 z-50 flex items-center justify-center bg-black/45 px-4 py-6 backdrop-blur-sm">
+      <div class="w-full max-w-[720px] rounded-[1.25rem] border p-5 surface-panel-strong">
+        <div class="flex flex-wrap items-start justify-between gap-4">
+          <div>
+            <p class="eyebrow text-xs uppercase tracking-[0.24em]">Pivot Centering</p>
+            <h2 class="mt-2 text-xl font-semibold tracking-tight">Keeping Pivot Aligned</h2>
+          </div>
+          <button class="button-secondary rounded-[0.75rem] px-4 py-2 text-sm font-medium" type="button" @click="centeringInfoOpen = false">
+            Close
+          </button>
+        </div>
+
+        <div class="mt-5 space-y-4 text-sm leading-6">
+          <div class="rounded-[1rem] border px-4 py-4 surface-panel">
+            Pivot rotates around your headset's center point, not the game's. These are two separate concepts of "forward," and Pivot always uses the HMD one.
+          </div>
+
+          <div class="rounded-[1rem] border px-4 py-4 chip-warning" style="border-color: var(--app-border)">
+            If Pivot rotation feels off-center or skewed to one side, your HMD center and your in-game center have drifted apart.
+          </div>
+
+          <div class="rounded-[1rem] border px-4 py-4 surface-panel">
+            To fix it, recenter your HMD first, then recenter your view in the game. Doing both, in that order, re-aligns the two centers so Pivot rotates evenly around where you are actually looking.
           </div>
         </div>
       </div>
