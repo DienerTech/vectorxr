@@ -8,6 +8,19 @@ export interface PatchNoteEntry {
 
 export const patchNotes: PatchNoteEntry[] = [
   {
+    version: '0.11.5',
+    date: '2026-07-02',
+    title: 'Varjo Compatible Quadviews',
+    summary: 'Adds a Varjo compatible quadviews mode that forwards the four native view layers to Varjo runtimes so the high-density focus panels are driven directly, replacing the stereo-composite emulation that softened the image on Varjo headsets.',
+    items: [
+      'On Varjo runtimes with native quad-view support, Quadviews now hands the four view layers (two peripheral, two focus) straight to the runtime so the physical focus panels render at full resolution instead of being flattened into a single stereo image.',
+      'Focus Scale, Peripheral Scale, and Focus Sharpness still apply (sharpening runs as a focus post-process); focus size, transition, offsets, and gaze smoothing are owned by the Varjo runtime in this mode.',
+      'Pivot continues to work alongside the forwarded native views.',
+      'Automatic on supported Varjo headsets when Quadviews is enabled, and a no-op on all other headsets, which keep the existing composite emulation.',
+      'Added a Varjo Compatibility note in the Quadviews tab describing which controls apply.',
+    ],
+  },
+  {
     version: '0.11.4',
     date: '2026-07-01',
     title: 'Quadviews Focus & Sharpness Improvements',
