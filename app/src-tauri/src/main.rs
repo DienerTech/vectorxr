@@ -133,11 +133,11 @@ fn default_quadviews_tracking_mode() -> String {
 }
 
 fn default_focus_horizontal_size_percent() -> f64 {
-    32.0
+    40.0
 }
 
 fn default_focus_vertical_size_percent() -> f64 {
-    32.0
+    40.0
 }
 
 fn default_focus_scale() -> f64 {
@@ -145,11 +145,11 @@ fn default_focus_scale() -> f64 {
 }
 
 fn default_peripheral_scale() -> f64 {
-    0.45
+    0.35
 }
 
 fn default_foveate_sharpness() -> f64 {
-    0.0
+    50.0
 }
 
 fn default_transition_thickness_percent() -> f64 {

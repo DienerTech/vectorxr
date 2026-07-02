@@ -436,10 +436,12 @@
       "additionalProperties": false,
       "required": [
         "trackingMode",
-        "focusHorizontalFovDegrees",
-        "focusVerticalFovDegrees",
+        "focusHorizontalSizePercent",
+        "focusVerticalSizePercent",
         "focusScale",
         "peripheralScale",
+        "foveateSharpness",
+        "transitionThicknessPercent",
         "horizontalOffsetDegrees",
         "verticalOffsetDegrees",
         "gazeSmoothing",
@@ -449,15 +451,15 @@
         "trackingMode": {
           "$ref": "#/$defs/quadviewsTrackingMode"
         },
-        "focusHorizontalFovDegrees": {
+        "focusHorizontalSizePercent": {
           "type": "number",
-          "minimum": 10.0,
-          "maximum": 90.0
+          "minimum": 5.0,
+          "maximum": 100.0
         },
-        "focusVerticalFovDegrees": {
+        "focusVerticalSizePercent": {
           "type": "number",
-          "minimum": 10.0,
-          "maximum": 90.0
+          "minimum": 5.0,
+          "maximum": 100.0
         },
         "focusScale": {
           "type": "number",
@@ -468,6 +470,16 @@
           "type": "number",
           "minimum": 0.1,
           "maximum": 1.5
+        },
+        "foveateSharpness": {
+          "type": "number",
+          "minimum": 0.0,
+          "maximum": 100.0
+        },
+        "transitionThicknessPercent": {
+          "type": "number",
+          "minimum": 0.0,
+          "maximum": 50.0
         },
         "horizontalOffsetDegrees": {
           "type": "number",
@@ -526,15 +538,11 @@
       "additionalProperties": false,
       "required": [
         "enabled",
-        "preferEyeTracking",
         "defaults",
         "profiles"
       ],
       "properties": {
         "enabled": {
-          "type": "boolean"
-        },
-        "preferEyeTracking": {
           "type": "boolean"
         },
         "defaults": {
