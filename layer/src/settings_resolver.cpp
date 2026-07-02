@@ -156,8 +156,6 @@ void ApplyQuadViewsSettings(QuadViewsResolvedSettings& resolved, const QuadViews
 QuadViewsResolvedSettings ResolveQuadViewsSettings(const ConfigDocument& config, std::string_view exe_name) {
     QuadViewsResolvedSettings resolved;
     resolved.enabled = config.quadviews.enabled;
-    // Module-level Varjo mode switch — not part of per-profile QuadViewsSettings.
-    resolved.varjo_native_passthrough = config.quadviews.varjo_native_passthrough;
     ApplyQuadViewsSettings(resolved, config.quadviews.defaults);
 
     const QuadViewsProfile* profile = FindMatchingQuadViewsProfile(config, exe_name);
