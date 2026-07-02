@@ -8,6 +8,20 @@ export interface PatchNoteEntry {
 
 export const patchNotes: PatchNoteEntry[] = [
   {
+    version: '0.11.4',
+    date: '2026-07-01',
+    title: 'Quadviews Focus & Sharpness Improvements',
+    summary: 'Delivers the Quadviews focus region at full resolution end-to-end for a noticeably sharper image, turns on focus sharpening by default, retunes the default Quadviews profile, and adds deeper debug logging for focus resolution and eye tracking.',
+    items: [
+      'Fixed the Quadviews focus region being downscaled during compositing. The high-resolution focus view is now delivered at full 1:1 resolution, restoring sharpness that was previously lost and making the Focus Scale setting effective.',
+      'Dev Note: You may need to retune your Quadviews settings following this update. Previously, the Foveated Resolution setting was capped at 100%. Values above 100% will now apply correctly!',
+      'Focus sharpening now works correctly and is enabled by default, with edge clamping to avoid halos on high-contrast detail such as cockpit text and instruments. Further changes may be made here based on user feedback.',
+      'Retuned the default Quadviews profile with a larger focus region and lighter peripheral resolution for a sharper, more forgiving image out of the box at roughly a third of full-stereo pixel cost.',
+      'Added detailed Quadviews debug logging, including a focus sampling ratio and canvas density to confirm 1:1 focus rendering, plus eye-tracking interaction-profile diagnostics to help pinpoint why gaze-driven focus may be unavailable.',
+      'Added a subtle update indicator next to the version number that appears when a newer release is available on GitHub, linking to the About page for details.',
+    ],
+  },
+  {
     version: '0.11.3',
     date: '2026-06-28',
     title: 'Varjo and Pivot diagnostics',

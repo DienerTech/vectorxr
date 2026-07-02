@@ -286,11 +286,11 @@ export function defaultPivotXRSettings(): PivotXRSettings {
 export function defaultQuadViewsSettings(): QuadViewsSettings {
   return {
     trackingMode: 'eye',
-    focusHorizontalSizePercent: 32,
-    focusVerticalSizePercent: 32,
+    focusHorizontalSizePercent: 40,
+    focusVerticalSizePercent: 40,
     focusScale: 1.1,
-    peripheralScale: 0.45,
-    foveateSharpness: 0,
+    peripheralScale: 0.35,
+    foveateSharpness: 50,
     transitionThicknessPercent: 25,
     horizontalOffsetDegrees: 0,
     verticalOffsetDegrees: 0,

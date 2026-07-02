@@ -1,9 +1,9 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted } from 'vue'
 
 import { openExternalUrl } from '../../lib/commands'
 import type { PatchNoteEntry } from '../../lib/patchNotes'
-import { checkForUpdates, type GitHubReleaseInfo, type UpdateCheckStatus } from '../../lib/updates'
+import { useUpdateStore } from '../../stores/updateStore'
 
 const props = defineProps<{
   latestPatch: PatchNoteEntry
@@ -19,9 +19,11 @@ const koFiUrl = 'https://ko-fi.com/dienertech'
 const releasesUrl = 'https://github.com/DienerTech/vectorxr/releases/latest'
 const currentVersion = props.latestPatch.version
 
-const updateStatus = ref<UpdateCheckStatus>('idle')
-const updateError = ref('')
-const latestRelease = ref<GitHubReleaseInfo | null>(null)
+// Shared with the sidebar indicator so both reflect the same check result.
+const updateStore = useUpdateStore()
+const updateStatus = computed(() => updateStore.state.status)
+const updateError = computed(() => updateStore.state.error)
+const latestRelease = computed(() => updateStore.state.latestRelease)
 
 const releaseDate = computed(() => {
   if (!latestRelease.value?.publishedAt) {
@@ -97,29 +99,15 @@ async function openLink(url: string) {
   await openExternalUrl(url)
 }
 
-async function refreshUpdates() {
-  updateStatus.value = 'checking'
-  updateError.value = ''
-
-  try {
-    const result = await checkForUpdates(currentVersion)
-    latestRelease.value = result.latestRelease
-
-    if (!result.latestRelease) {
-      updateStatus.value = 'unavailable'
-    } else if (result.updateAvailable) {
-      updateStatus.value = 'available'
-    } else {
-      updateStatus.value = 'upToDate'
-    }
-  } catch (error) {
-    updateStatus.value = 'error'
-    updateError.value = error instanceof Error ? error.message : 'Unable to check for updates right now.'
-  }
+// Manual re-check from the "Check" button forces a fresh request.
+function refreshUpdates() {
+  void updateStore.check(currentVersion, true)
 }
 
 onMounted(() => {
-  void refreshUpdates()
+  // No-op if the startup check has already run; keeps the two entry points in sync
+  // without firing a duplicate request.
+  void updateStore.check(currentVersion)
 })
 </script>
 
