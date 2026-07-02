@@ -157,11 +157,11 @@ struct PivotXrResolvedSettings {
 
 struct QuadViewsSettings {
     QuadViewsTrackingMode tracking_mode{QuadViewsTrackingMode::Eye};
-    double focus_horizontal_size_percent{32.0};
-    double focus_vertical_size_percent{32.0};
+    double focus_horizontal_size_percent{40.0};
+    double focus_vertical_size_percent{40.0};
     double focus_scale{1.1};
-    double peripheral_scale{0.45};
-    double foveate_sharpness{0.0};
+    double peripheral_scale{0.35};
+    double foveate_sharpness{50.0};
     double transition_thickness_percent{25.0};
     double horizontal_offset_degrees{0.0};
     double vertical_offset_degrees{0.0};

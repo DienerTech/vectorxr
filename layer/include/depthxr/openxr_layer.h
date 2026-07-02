@@ -396,6 +396,8 @@ class OpenXrLayer {
     bool has_logged_system_properties_{false};
     uint32_t cached_quadviews_stereo_recommended_width_{0};
     uint32_t cached_quadviews_stereo_recommended_height_{0};
+    uint32_t cached_quadviews_stereo_max_width_{0};
+    uint32_t cached_quadviews_stereo_max_height_{0};
     std::unordered_set<XrSpace> tracked_view_spaces_;
     std::unordered_set<XrSpace> tracked_local_spaces_;
     std::unordered_set<XrSpace> tracked_stage_spaces_;
@@ -448,6 +450,8 @@ class OpenXrLayer {
     PFN_xrDestroyAction next_destroy_action_{nullptr};
     PFN_xrSuggestInteractionProfileBindings next_suggest_interaction_profile_bindings_{nullptr};
     PFN_xrGetActionStatePose next_get_action_state_pose_{nullptr};
+    PFN_xrGetCurrentInteractionProfile next_get_current_interaction_profile_{nullptr};
+    PFN_xrPathToString next_path_to_string_{nullptr};
     XrInstance instance_{XR_NULL_HANDLE};
 };
 
