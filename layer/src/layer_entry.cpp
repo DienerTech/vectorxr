@@ -411,11 +411,32 @@ XrResult XRAPI_CALL xrCreateApiLayerInstance(const XrInstanceCreateInfo* instanc
     diagnostics.app_requested_eye_gaze =
         ApplicationRequestedExtension(instance_create_info, XR_EXT_EYE_GAZE_INTERACTION_EXTENSION_NAME);
 
+    // Varjo native passthrough: when the user opts in AND the app requested quad
+    // views AND the runtime natively advertises them, forward the Varjo extensions
+    // to the runtime instead of stripping them for stereo-composite emulation. This
+    // lets the runtime drive the physical focus panels directly. Gated on the
+    // runtime probe so it is inert on every non-Varjo headset.
+    const bool app_requested_quad_views_for_forwarding =
+        diagnostics.app_requested_quad_views || diagnostics.app_requested_varjo_foveated_rendering;
+    bool forward_varjo_quad_extensions = false;
+    if (app_requested_quad_views_for_forwarding &&
+        OpenXrLayer::Instance().IsVarjoNativePassthroughRequested()) {
+        const bool runtime_supports_quad_views =
+            RuntimeSupportsExtension(next_info->nextGetInstanceProcAddr, XR_VARJO_QUAD_VIEWS_EXTENSION_NAME);
+        forward_varjo_quad_extensions = runtime_supports_quad_views;
+    }
+    diagnostics.varjo_native_quad_forwarded = forward_varjo_quad_extensions;
+
     std::vector<const char*> base_downstream_extensions;
     base_downstream_extensions.reserve(instance_create_info->enabledExtensionCount + 1);
     for (uint32_t i = 0; i < instance_create_info->enabledExtensionCount; ++i) {
         const char* extension_name = instance_create_info->enabledExtensionNames[i];
-        if (!extension_name || IsLayerOwnedExtension(extension_name)) {
+        if (!extension_name) {
+            continue;
+        }
+        // Keep the layer-owned Varjo extensions in the downstream list only when we
+        // are forwarding them for native passthrough; otherwise strip as usual.
+        if (IsLayerOwnedExtension(extension_name) && !forward_varjo_quad_extensions) {
             continue;
         }
         base_downstream_extensions.push_back(extension_name);

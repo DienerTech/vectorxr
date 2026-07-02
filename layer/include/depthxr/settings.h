@@ -179,12 +179,19 @@ struct QuadViewsProfile {
 
 struct QuadViewsModuleConfig {
     bool enabled{false};
+    // Varjo-only mode switch. When true (and the runtime natively supports
+    // XR_VARJO_quad_views), the layer forwards the app's native quad views to the
+    // runtime instead of compositing them into a stereo layer, so the physical
+    // focus panels are addressed directly. Inert on runtimes without native quad
+    // views. Defaults false (emulation) so existing headsets are unaffected.
+    bool varjo_native_passthrough{false};
     QuadViewsSettings defaults;
     std::vector<QuadViewsProfile> profiles;
 };
 
 struct QuadViewsResolvedSettings : QuadViewsSettings {
     bool enabled{false};
+    bool varjo_native_passthrough{false};
 };
 
 struct ConfigDocument {

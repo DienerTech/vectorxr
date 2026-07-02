@@ -464,6 +464,8 @@ void TestQuadViewsProfileResolution() {
 
     const depthxr::ResolvedRuntimeConfig resolved = depthxr::ResolveRuntimeConfig(result.document, "DCS.exe");
     Expect(resolved.quadviews.enabled, "Quadviews module enable was not resolved");
+    Expect(!resolved.quadviews.varjo_native_passthrough,
+           "Quadviews varjo native passthrough should default to false when unset");
     Expect(resolved.quadviews.tracking_mode == depthxr::QuadViewsTrackingMode::Eye,
            "Quadviews profile tracking mode mismatch");
     Expect(std::abs(resolved.quadviews.focus_horizontal_size_percent - 34.0) < 0.0001,
@@ -482,6 +484,35 @@ void TestQuadViewsProfileResolution() {
            "Quadviews default tracking mode mismatch");
     Expect(std::abs(resolved_other.quadviews.focus_horizontal_size_percent - 32.0) < 0.0001,
            "Quadviews default focus size mismatch");
+}
+
+void TestQuadViewsVarjoNativePassthroughParsed() {
+    const std::string json = R"json(
+{
+  "version": 3,
+  "core": { "enabled": true, "logLevel": "info", "logRetentionFiles": 7 },
+  "applications": [],
+  "modules": {
+    "depthxr": { "enabled": false, "bindings": { "toggleEnabled": { "type": "none" } }, "profiles": [] },
+    "pivotxr": { "enabled": false, "profiles": [] },
+    "quadviews": {
+      "enabled": true,
+      "varjoNativePassthrough": true,
+      "defaults": { "trackingMode": "eye" },
+      "profiles": []
+    }
+  }
+}
+)json";
+
+    const depthxr::ParseResult result = depthxr::ParseConfig(json);
+    Expect(result.ok, "Config parser rejected valid varjoNativePassthrough config: " + result.error);
+    Expect(result.document.quadviews.varjo_native_passthrough,
+           "varjoNativePassthrough module flag was not parsed as true");
+
+    const depthxr::ResolvedRuntimeConfig resolved = depthxr::ResolveRuntimeConfig(result.document, "anything.exe");
+    Expect(resolved.quadviews.varjo_native_passthrough,
+           "varjoNativePassthrough should flow through to resolved settings");
 }
 
 void TestEnabledProfileOverridesDisabledDefault() {
@@ -1019,6 +1050,7 @@ int main() {
     TestDisabledProfileFallsBackToDefaults();
     TestPivotProfileResolution();
     TestQuadViewsProfileResolution();
+    TestQuadViewsVarjoNativePassthroughParsed();
     TestEnabledProfileOverridesDisabledDefault();
     TestInvalidPivotActivationBindingRejected();
     TestNoneBindingParsed();

@@ -1295,6 +1295,7 @@ bool ParseQuadViewsProfile(const JsonValue& value, QuadViewsProfile& out, std::s
 bool ParseQuadViewsModule(const JsonValue::Object& object, QuadViewsModuleConfig& out, std::string& error) {
     static const std::unordered_set<std::string> allowed = {
         "enabled",
+        "varjoNativePassthrough",
         "defaults",
         "profiles",
     };
@@ -1304,11 +1305,16 @@ bool ParseQuadViewsModule(const JsonValue::Object& object, QuadViewsModuleConfig
     }
 
     std::optional<bool> enabled;
-    if (!ReadOptionalBool(object, "enabled", enabled, error)) {
+    std::optional<bool> varjo_native_passthrough;
+    if (!ReadOptionalBool(object, "enabled", enabled, error) ||
+        !ReadOptionalBool(object, "varjoNativePassthrough", varjo_native_passthrough, error)) {
         return false;
     }
     if (enabled.has_value()) {
         out.enabled = *enabled;
+    }
+    if (varjo_native_passthrough.has_value()) {
+        out.varjo_native_passthrough = *varjo_native_passthrough;
     }
 
     const auto defaults_it = object.find("defaults");

@@ -983,6 +983,7 @@ XrResult OpenXrLayer::OnInstanceCreated(const XrInstanceCreateInfo* create_info,
     instance_ = instance;
     ResetInstanceState();
     eye_gaze_extension_enabled_ = eye_gaze_extension_enabled;
+    varjo_native_passthrough_active_ = diagnostics.varjo_native_quad_forwarded;
     ResetSessionState();
     config_path_ = ResolveConfigPath();
     log_path_ = ResolveLogPath();
@@ -1021,6 +1022,17 @@ XrResult OpenXrLayer::OnInstanceCreated(const XrInstanceCreateInfo* create_info,
                          ", varjoFoveatedRendering=" +
                          (varjo_foveated_rendering_extension_requested_ ? "true" : "false"));
         }
+    }
+    if (varjo_native_passthrough_active_) {
+        logger_.Info(
+            "Quadviews Varjo native passthrough ACTIVE: forwarded native quad views to the runtime; "
+            "stereo composite and quad->stereo synthesis are disabled for this instance. Applied knobs: "
+            "focusScale/peripheralScale (view resolution). Runtime-owned in this mode: focus size, "
+            "transition, offsets, gaze smoothing/deadzone. NOTE: foveateSharpness (CAS) is not yet applied "
+            "in native passthrough (deferred to a focus-swapchain post-process).");
+    } else if (quad_views_extension_requested_ || varjo_foveated_rendering_extension_requested_) {
+        logger_.Info(
+            "Quadviews mode: stereo-composite emulation (Varjo native passthrough not active).");
     }
     const bool log_eye_gaze_instance_setup =
         diagnostics.app_requested_quad_views || diagnostics.app_requested_varjo_foveated_rendering ||
@@ -1265,7 +1277,11 @@ XrResult OpenXrLayer::BeginSession(XrSession session, const XrSessionBeginInfo* 
 
     XrSessionBeginInfo runtime_begin_info{};
     const XrSessionBeginInfo* downstream_begin_info = begin_info;
-    if (begin_info && IsQuadViewConfiguration(begin_info->primaryViewConfigurationType) && quadviews_active) {
+    // In native passthrough the runtime supports the quad configuration itself, so
+    // begin the session on the app's real config and let the runtime drive the
+    // focus panels. Only remap to stereo when we are emulating.
+    if (begin_info && IsQuadViewConfiguration(begin_info->primaryViewConfigurationType) && quadviews_active &&
+        !varjo_native_passthrough_active_) {
         runtime_begin_info = *begin_info;
         runtime_begin_info.primaryViewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
         downstream_begin_info = &runtime_begin_info;
@@ -1560,7 +1576,8 @@ XrResult OpenXrLayer::GetViewConfigurationProperties(
     std::scoped_lock lock(mutex_);
     ReloadConfigIfNeeded();
     RefreshResolvedSettings();
-    const bool synthesize_quad = IsQuadViewConfiguration(view_configuration_type) && IsQuadViewsActive();
+    const bool synthesize_quad = IsQuadViewConfiguration(view_configuration_type) && IsQuadViewsActive() &&
+                                 !varjo_native_passthrough_active_;
     const XrViewConfigurationType runtime_type =
         synthesize_quad ? XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO : view_configuration_type;
 
@@ -1598,6 +1615,47 @@ XrResult OpenXrLayer::EnumerateViewConfigurationViews(XrInstance instance,
     if (!IsQuadViewConfiguration(view_configuration_type) || !IsQuadViewsActive()) {
         return next_enumerate_view_configuration_views_(
             instance, system_id, view_configuration_type, view_capacity_input, view_count_output, views);
+    }
+
+    if (varjo_native_passthrough_active_) {
+        // Native passthrough: the runtime owns the quad view geometry (FOV, inset
+        // size, count). Query it directly and, as a carryover of the emulation
+        // knobs, rescale only the per-view recommended resolutions: peripheral
+        // views (0/1) by peripheral_scale, focus views (2/3) by focus_scale. Every
+        // other quadviews setting is runtime-owned in this mode.
+        const XrResult native_result = next_enumerate_view_configuration_views_(
+            instance, system_id, view_configuration_type, view_capacity_input, view_count_output, views);
+        if (XR_FAILED(native_result) || !views || view_capacity_input == 0) {
+            return native_result;
+        }
+        const double peripheral_scale = resolved_settings_.quadviews.peripheral_scale;
+        const double focus_scale = resolved_settings_.quadviews.focus_scale;
+        const uint32_t applied = std::min<uint32_t>(view_capacity_input, *view_count_output);
+        std::ostringstream native_sizes;
+        for (uint32_t i = 0; i < applied; ++i) {
+            const bool is_focus = (i >= 2);
+            const double scale = is_focus ? focus_scale : peripheral_scale;
+            const uint32_t runtime_width = views[i].recommendedImageRectWidth;
+            const uint32_t runtime_height = views[i].recommendedImageRectHeight;
+            views[i].recommendedImageRectWidth =
+                ScaleDimension(runtime_width, scale, views[i].maxImageRectWidth);
+            views[i].recommendedImageRectHeight =
+                ScaleDimension(runtime_height, scale, views[i].maxImageRectHeight);
+            if (!has_logged_varjo_native_view_sizes_) {
+                native_sizes << " view" << i << "=" << runtime_width << "x" << runtime_height << "->"
+                             << views[i].recommendedImageRectWidth << "x"
+                             << views[i].recommendedImageRectHeight << "(x" << FormatDiagnosticDouble(scale)
+                             << ")";
+            }
+        }
+        if (!has_logged_varjo_native_view_sizes_ && applied > 0) {
+            logger_.Info("Quadviews Varjo native view sizes (runtime->rescaled): count=" +
+                         std::to_string(applied) + ", peripheralScale=" +
+                         FormatDiagnosticDouble(peripheral_scale) + ", focusScale=" +
+                         FormatDiagnosticDouble(focus_scale) + native_sizes.str());
+            has_logged_varjo_native_view_sizes_ = true;
+        }
+        return native_result;
     }
 
     std::array<XrViewConfigurationView, 2> stereo_views{};
@@ -3125,7 +3183,10 @@ XrResult OpenXrLayer::GetReferenceSpaceBoundsRect(XrSession session,
             std::scoped_lock lock(mutex_);
             ReloadConfigIfNeeded();
             RefreshResolvedSettings();
-            emulate_combined_eye = session == active_session_ && IsQuadViewsActive();
+            // In native passthrough the runtime provides the real combined-eye space,
+            // so only emulate it while synthesizing quad views.
+            emulate_combined_eye =
+                session == active_session_ && IsQuadViewsActive() && !varjo_native_passthrough_active_;
         }
 
         if (emulate_combined_eye) {
@@ -3207,7 +3268,10 @@ XrResult OpenXrLayer::CreateReferenceSpace(XrSession session,
             std::scoped_lock lock(mutex_);
             ReloadConfigIfNeeded();
             RefreshResolvedSettings();
-            emulate_combined_eye = session == active_session_ && IsQuadViewsActive();
+            // In native passthrough the runtime provides the real combined-eye space,
+            // so only emulate it while synthesizing quad views.
+            emulate_combined_eye =
+                session == active_session_ && IsQuadViewsActive() && !varjo_native_passthrough_active_;
         }
 
         if (emulate_combined_eye) {
@@ -3397,13 +3461,21 @@ XrResult OpenXrLayer::LocateViews(XrSession session,
                 CachePivotPoseDelta(view_locate_info->displayTime, IdentityPose());
             } else if (IsQuadViewConfiguration(view_configuration_type) &&
                        EnsureEyeOffsets(session,
-                                        XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO,
+                                        // Emulation synthesizes quad from stereo, so it captures 2 stereo eye
+                                        // offsets. Native passthrough locates the real quad config (same config as
+                                        // the session) to get one offset per view and avoid a cross-config locate.
+                                        varjo_native_passthrough_active_
+                                            ? view_configuration_type
+                                            : XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO,
                                         view_locate_info->displayTime,
-                                        2)) {
-                pivot_diagnostic_.recomposition_mode = "quad_from_stereo_eye_offsets";
+                                        varjo_native_passthrough_active_ ? count : 2)) {
+                pivot_diagnostic_.recomposition_mode =
+                    varjo_native_passthrough_active_ ? "quad_native_eye_offsets" : "quad_from_stereo_eye_offsets";
                 CachePivotPoseDelta(view_locate_info->displayTime, applied_pose_delta);
                 for (uint32_t i = 0; i < count; ++i) {
-                    const uint32_t eye_index = i % 2;
+                    // Native: one offset per view. Emulation: focus views (2/3) reuse the
+                    // same eye offset as their peripheral counterpart (i % 2).
+                    const uint32_t eye_index = varjo_native_passthrough_active_ ? i : (i % 2);
                     const XrPosef recomposed_pose =
                         MultiplyPoses(cached_eye_offset_poses_[eye_index], pivot_view_location.pose);
                     adjusted_views[i].position.x = recomposed_pose.position.x;
@@ -3530,6 +3602,7 @@ XrResult OpenXrLayer::LocateViews(XrSession session,
                    << locate_views_call_count_ << ": count=" << count
                    << ", viewConfig=" << ToString(view_configuration_type)
                    << ", synthesizedQuadViews=" << synthesized_quad_views
+                   << ", varjoNativePassthrough=" << (varjo_native_passthrough_active_ ? 1 : 0)
                    << ", quadviewsTrackingMode=" << ToString(resolved_settings_.quadviews.tracking_mode)
                    << ", quadviewsFocusScale=" << FormatDiagnosticDouble(resolved_settings_.quadviews.focus_scale)
                    << ", quadviewsPeripheralScale="
@@ -4109,6 +4182,15 @@ void OpenXrLayer::ResetInstanceState() {
 
 bool OpenXrLayer::IsQuadViewsActive() const {
     return resolved_settings_.core.enabled && resolved_settings_.quadviews.enabled;
+}
+
+bool OpenXrLayer::IsVarjoNativePassthroughRequested() {
+    std::scoped_lock lock(mutex_);
+    ReloadConfigIfNeeded();
+    // Module-level switch, gated by the core + quadviews module being enabled at
+    // all. Per-app profiles do not change this Varjo-wide mode.
+    return config_.core.enabled && config_.quadviews.enabled &&
+           config_.quadviews.varjo_native_passthrough;
 }
 
 bool OpenXrLayer::ShouldLogQuadViewsDebugHeartbeat(
@@ -4736,13 +4818,25 @@ XrResult OpenXrLayer::LocateRuntimeViews(XrSession session,
     }
 
     bool quadviews_active = false;
+    bool native_passthrough = false;
     QuadViewsResolvedSettings quadviews_settings;
     {
         std::scoped_lock lock(mutex_);
         ReloadConfigIfNeeded();
         RefreshResolvedSettings();
         quadviews_active = IsQuadViewsActive();
+        native_passthrough = varjo_native_passthrough_active_;
         quadviews_settings = resolved_settings_.quadviews;
+    }
+
+    // Native passthrough: forward the app's quad locate untouched — including the
+    // Varjo foveated-rendering next chain, which the runtime consumes to place the
+    // focus inset by gaze — and return the runtime's real 4 views. No stereo remap,
+    // no synthesis. Pivot is still applied downstream in LocateViews.
+    if (native_passthrough && view_locate_info && quadviews_active &&
+        IsQuadViewConfiguration(view_locate_info->viewConfigurationType)) {
+        return next_locate_views_(
+            session, view_locate_info, view_state, view_capacity_input, view_count_output, views);
     }
 
     XrViewLocateInfo downstream_locate_info{};

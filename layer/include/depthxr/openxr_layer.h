@@ -55,7 +55,16 @@ class OpenXrLayer {
         XrResult retry_create_result{XR_SUCCESS};
         uint32_t first_downstream_extension_count{0};
         uint32_t final_downstream_extension_count{0};
+        // True when the layer forwarded the native Varjo quad-views extensions to
+        // the runtime (Varjo native-passthrough mode) instead of stripping them
+        // for stereo-composite emulation.
+        bool varjo_native_quad_forwarded{false};
     };
+
+    // Reads the module-level Varjo native-passthrough switch from config. Safe to
+    // call at instance-creation time (loads config lazily). Does not consider
+    // runtime capability — the caller pairs this with a runtime extension probe.
+    bool IsVarjoNativePassthroughRequested();
 
     XrResult OnInstanceCreated(const XrInstanceCreateInfo* create_info,
                                XrInstance instance,
@@ -369,6 +378,10 @@ class OpenXrLayer {
     bool quad_views_extension_requested_{false};
     bool varjo_foveated_rendering_extension_requested_{false};
     bool eye_gaze_extension_enabled_{false};
+    // True for the life of the instance when native Varjo quad-views were
+    // forwarded to the runtime. Single source of truth that suppresses quad->stereo
+    // synthesis, stereo composite, and combined-eye emulation on this instance.
+    bool varjo_native_passthrough_active_{false};
     bool defer_quadviews_swapchain_releases_{false};
     XrSession active_session_{XR_NULL_HANDLE};
     XrSpace internal_local_space_{XR_NULL_HANDLE};
@@ -393,6 +406,7 @@ class OpenXrLayer {
     bool has_logged_quad_view_short_count_{false};
     bool has_logged_pivotxr_spike_mode_{false};
     bool has_logged_quadviews_view_configuration_capabilities_{false};
+    bool has_logged_varjo_native_view_sizes_{false};
     bool has_logged_system_properties_{false};
     uint32_t cached_quadviews_stereo_recommended_width_{0};
     uint32_t cached_quadviews_stereo_recommended_height_{0};
