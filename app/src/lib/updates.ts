@@ -37,6 +37,9 @@ interface GitHubReleaseApiResponse {
 
 const latestReleaseUrl = 'https://api.github.com/repos/DienerTech/vectorxr/releases/latest'
 
+// Human-facing releases page, used as a fallback when we don't have a specific release object.
+export const releasesPageUrl = 'https://github.com/DienerTech/vectorxr/releases'
+
 function normalizeVersion(version: string): string {
   return version.trim().replace(/^v/i, '')
 }

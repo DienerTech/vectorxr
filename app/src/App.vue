@@ -24,8 +24,10 @@ import { patchNotes } from './lib/patchNotes'
 import { applyThemePreference, loadThemePreference, observeSystemThemeChanges, type ThemePreference } from './lib/theme'
 import { validateConfig } from './lib/validation'
 import { useConfigStore } from './stores/configStore'
+import { useUpdateStore } from './stores/updateStore'
 
 const store = useConfigStore()
+const updateStore = useUpdateStore()
 const errors = computed(() => validateConfig(store.state.config))
 const dirty = computed(() => store.isDirty.value)
 const logViewerOpen = ref(false)
@@ -45,6 +47,13 @@ const openXrLayersLoading = ref(false)
 const openXrMachineWritesUnlocked = ref(false)
 
 const latestPatch = patchNotes[0]
+
+const updateAvailable = updateStore.updateAvailable
+const updateTooltip = computed(() =>
+  updateStore.state.latestRelease
+    ? `Version ${updateStore.state.latestRelease.version} is available. Click for details.`
+    : '',
+)
 const healthSummary = computed(() => buildHealthSummary({
   config: store.state.config,
   configPath: store.state.path,
@@ -136,6 +145,9 @@ onMounted(() => {
   void store.load()
   void refreshLogs()
   void refreshOpenXrLayers()
+  // Best-effort and fully non-blocking: detached from startup, failures are swallowed
+  // inside the store, so the indicator simply stays hidden and nothing else is affected.
+  void updateStore.check(latestPatch.version)
 })
 
 onUnmounted(() => {
@@ -149,6 +161,10 @@ async function saveConfig() {
   }
 
   await store.save()
+}
+
+function showUpdateDetails() {
+  store.setActiveTab('about')
 }
 
 async function refreshLogs() {
@@ -295,7 +311,15 @@ async function confirmResetConfig() {
 <template>
   <main class="app-shell-bg h-screen overflow-hidden">
     <section class="mx-auto flex h-full max-w-[1700px]">
-      <SidebarNav :active-tab="store.state.activeTab" :tabs="tabs" :version="latestPatch.version" @select="store.setActiveTab" />
+      <SidebarNav
+        :active-tab="store.state.activeTab"
+        :tabs="tabs"
+        :version="latestPatch.version"
+        :update-available="updateAvailable"
+        :update-tooltip="updateTooltip"
+        @select="store.setActiveTab"
+        @show-updates="showUpdateDetails"
+      />
 
       <div class="flex min-w-0 flex-1 flex-col px-4 py-3 md:px-6">
       <section class="min-h-0 flex-1 overflow-y-auto pb-1">

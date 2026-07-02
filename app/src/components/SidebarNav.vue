@@ -7,6 +7,8 @@ import type { AppTab } from '../lib/model'
 const props = defineProps<{
   activeTab: AppTab
   version: string
+  updateAvailable?: boolean
+  updateTooltip?: string
   tabs: Array<{
     id: AppTab
     label: string
@@ -19,6 +21,7 @@ const props = defineProps<{
 
 defineEmits<{
   select: [tab: AppTab]
+  showUpdates: []
 }>()
 
 const primaryTabs = computed(() => props.tabs.filter((tab) => tab.id === 'home' || tab.id === 'core' || tab.id === 'registry' || tab.id === 'layers' || tab.id === 'about'))
@@ -79,7 +82,51 @@ function moduleDotClass(tab: { enhancementActive?: boolean }): string {
           <p class="text-sm font-semibold tracking-tight">VectorXR</p>
           <p class="text-[0.68rem] text-soft">v{{ version }}</p>
         </div>
+        <button
+          v-if="updateAvailable"
+          class="update-arrow ml-auto inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full"
+          type="button"
+          :title="updateTooltip || 'A new version is available. Click for details.'"
+          aria-label="A new version is available"
+          @click="$emit('showUpdates')"
+        >
+          <svg aria-hidden="true" viewBox="0 0 20 20" fill="currentColor" class="h-4 w-4">
+            <path fill-rule="evenodd" d="M10 3a1 1 0 0 1 .707.293l5 5a1 1 0 0 1-1.414 1.414L11 6.414V16a1 1 0 1 1-2 0V6.414L5.707 9.707a1 1 0 0 1-1.414-1.414l5-5A1 1 0 0 1 10 3Z" clip-rule="evenodd" />
+          </svg>
+        </button>
       </div>
     </div>
   </nav>
 </template>
+
+<style scoped>
+.update-arrow {
+  color: #22c55e;
+  border: 1px solid rgba(34, 197, 94, 0.45);
+  background: rgba(34, 197, 94, 0.12);
+  /* Slow, gentle blink a few times when it first appears, then settle fully visible. */
+  animation: update-arrow-blink 1s ease-in-out 3;
+  transition: transform 0.15s ease, background 0.15s ease;
+}
+
+.update-arrow:hover {
+  transform: translateY(-1px);
+  background: rgba(34, 197, 94, 0.22);
+}
+
+@keyframes update-arrow-blink {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.2;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .update-arrow {
+    animation: none;
+  }
+}
+</style>

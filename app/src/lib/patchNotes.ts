@@ -18,6 +18,7 @@ export const patchNotes: PatchNoteEntry[] = [
       'Focus sharpening now works correctly and is enabled by default, with edge clamping to avoid halos on high-contrast detail such as cockpit text and instruments. Further changes may be made here based on user feedback.',
       'Retuned the default Quadviews profile with a larger focus region and lighter peripheral resolution for a sharper, more forgiving image out of the box at roughly a third of full-stereo pixel cost.',
       'Added detailed Quadviews debug logging, including a focus sampling ratio and canvas density to confirm 1:1 focus rendering, plus eye-tracking interaction-profile diagnostics to help pinpoint why gaze-driven focus may be unavailable.',
+      'Added a subtle update indicator next to the version number that appears when a newer release is available on GitHub, linking to the About page for details.',
     ],
   },
   {
