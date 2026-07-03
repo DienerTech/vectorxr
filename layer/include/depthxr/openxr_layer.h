@@ -55,7 +55,17 @@ class OpenXrLayer {
         XrResult retry_create_result{XR_SUCCESS};
         uint32_t first_downstream_extension_count{0};
         uint32_t final_downstream_extension_count{0};
+        // True when the layer forwarded the native Varjo quad-views extensions to
+        // the runtime (Varjo compatible quadviews) instead of stripping them for
+        // stereo-composite emulation.
+        bool varjo_compatible_quad_forwarded{false};
     };
+
+    // True when VectorXR quadviews should run in Varjo compatible mode, i.e. core
+    // and the quadviews module are enabled. Safe to call at instance-creation time
+    // (loads config lazily). Does not consider runtime capability — the caller
+    // pairs this with a runtime extension probe.
+    bool IsVarjoCompatibleQuadviewsEligible();
 
     XrResult OnInstanceCreated(const XrInstanceCreateInfo* create_info,
                                XrInstance instance,
@@ -203,6 +213,22 @@ class OpenXrLayer {
         std::array<QuadViewsGpuTimingQuery, 4> gpu_timing_queries;
     };
 
+    // Standalone focus-view sharpen used only in Varjo compatible quadviews. The
+    // compositor is not running in that mode (the runtime drives the panels), so
+    // when foveate_sharpness > 0 we run a 1:1 CAS pass over the app's focus views
+    // (2/3) into our own swapchains and repoint the submitted layer at them.
+    struct D3D11FocusSharpen {
+        ID3D11VertexShader* vertex_shader{nullptr};
+        ID3D11PixelShader* pixel_shader{nullptr};
+        ID3D11SamplerState* sampler{nullptr};
+        ID3D11Buffer* constants{nullptr};
+        bool initialized{false};
+        bool failed{false};
+        bool has_logged_active{false};
+        uint32_t failure_logs_remaining{8};
+        std::array<QuadViewsCompositionTarget, 2> targets;
+    };
+
     struct PivotDiagnosticState {
         bool has_view_pose{false};
         XrTime view_time{0};
@@ -309,6 +335,18 @@ class OpenXrLayer {
                                XrCompositionLayerProjection* composed_layer,
                                std::vector<XrCompositionLayerProjectionView>* composed_views);
 
+    // Varjo compatible quadviews focus sharpen (see D3D11FocusSharpen).
+    void ResetD3D11FocusSharpen();
+    bool EnsureD3D11FocusSharpen();
+    bool EnsureFocusSharpenTarget(QuadViewsCompositionTarget& target,
+                                  uint32_t width,
+                                  uint32_t height,
+                                  int64_t format);
+    // Sharpens native focus views (indices 2/3) in place: renders each into one of
+    // our swapchains and repoints its subImage. Best-effort — any view that cannot
+    // be sharpened is left untouched (submits the app's unsharpened focus).
+    void SharpenNativeFocusViews(std::vector<XrCompositionLayerProjectionView>& views, XrTime display_time);
+
     std::mutex mutex_;
     std::filesystem::path dll_directory_;
     std::filesystem::path config_path_;
@@ -369,6 +407,11 @@ class OpenXrLayer {
     bool quad_views_extension_requested_{false};
     bool varjo_foveated_rendering_extension_requested_{false};
     bool eye_gaze_extension_enabled_{false};
+    // True for the life of the instance when native Varjo quad-views were
+    // forwarded to the runtime (Varjo compatible quadviews). Single source of truth
+    // that suppresses quad->stereo synthesis, stereo composite, and combined-eye
+    // emulation on this instance.
+    bool varjo_compatible_quadviews_active_{false};
     bool defer_quadviews_swapchain_releases_{false};
     XrSession active_session_{XR_NULL_HANDLE};
     XrSpace internal_local_space_{XR_NULL_HANDLE};
@@ -393,6 +436,7 @@ class OpenXrLayer {
     bool has_logged_quad_view_short_count_{false};
     bool has_logged_pivotxr_spike_mode_{false};
     bool has_logged_quadviews_view_configuration_capabilities_{false};
+    bool has_logged_varjo_compatible_view_sizes_{false};
     bool has_logged_system_properties_{false};
     uint32_t cached_quadviews_stereo_recommended_width_{0};
     uint32_t cached_quadviews_stereo_recommended_height_{0};
@@ -414,6 +458,7 @@ class OpenXrLayer {
     std::map<XrTime, std::array<XrFovf, 4>> cached_quadviews_fovs_;
     std::unordered_map<XrSwapchain, SwapchainInfo> tracked_swapchains_;
     D3D11QuadViewsCompositor d3d11_quadviews_compositor_;
+    D3D11FocusSharpen d3d11_focus_sharpen_;
 
     PFN_xrGetInstanceProcAddr next_get_instance_proc_addr_{nullptr};
     PFN_xrGetInstanceProperties next_get_instance_properties_{nullptr};

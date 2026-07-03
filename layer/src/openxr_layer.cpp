@@ -470,6 +470,72 @@ float4 PSMain(VSOut input) : SV_Target {
 )";
 }
 
+// Constants for the standalone focus sharpen pass (Varjo compatible quadviews).
+struct FocusSharpenConstants {
+    float params[4];   // x = sharpen amount [0,1], y/z = source texel size in UV, w = unused
+    float src_rect[4]; // xy = source UV offset, zw = source UV scale (the focus subImage rect)
+};
+
+// Standalone 1:1 CAS sharpen over a focus view. Unlike the compositor shader this
+// does not blend a peripheral view or resample into a sub-rect — the focus texture
+// is sampled at native density, so neighbours are taken at source-texel spacing.
+const char* D3D11FocusSharpenShaderSource() {
+    return R"(
+cbuffer FocusSharpenConstants : register(b0) {
+    float4 params;
+    float4 srcRect;
+};
+
+Texture2D focusTexture : register(t0);
+SamplerState linearSampler : register(s0);
+
+struct VSOut {
+    float4 position : SV_Position;
+    float2 uv : TEXCOORD0;
+};
+
+VSOut VSMain(uint vertexId : SV_VertexID) {
+    float2 positions[3] = {
+        float2(-1.0, -1.0),
+        float2(-1.0,  3.0),
+        float2( 3.0, -1.0)
+    };
+    float2 uvs[3] = {
+        float2(0.0, 1.0),
+        float2(0.0, -1.0),
+        float2(2.0, 1.0)
+    };
+
+    VSOut output;
+    output.position = float4(positions[vertexId], 0.0, 1.0);
+    output.uv = uvs[vertexId];
+    return output;
+}
+
+float4 PSMain(VSOut input) : SV_Target {
+    float2 uv = saturate(input.uv);
+    float2 srcUv = srcRect.xy + uv * srcRect.zw;
+    float4 focus = focusTexture.Sample(linearSampler, srcUv);
+    float amount = saturate(params.x);
+    if (amount > 0.001) {
+        float2 off = params.yz;
+        float3 n = focusTexture.Sample(linearSampler, srcUv + float2(0.0, -off.y)).rgb;
+        float3 s = focusTexture.Sample(linearSampler, srcUv + float2(0.0,  off.y)).rgb;
+        float3 e = focusTexture.Sample(linearSampler, srcUv + float2( off.x, 0.0)).rgb;
+        float3 w = focusTexture.Sample(linearSampler, srcUv + float2(-off.x, 0.0)).rgb;
+        float3 avg = (n + s + e + w) * 0.25;
+        float3 sharpened = focus.rgb + (focus.rgb - avg) * amount;
+        // CAS-style clamp to the local neighbourhood so strong sharpening cannot ring
+        // into halos on high-contrast edges (cockpit text/MFDs).
+        float3 lo = min(focus.rgb, min(min(n, s), min(e, w)));
+        float3 hi = max(focus.rgb, max(max(n, s), max(e, w)));
+        focus.rgb = clamp(sharpened, lo, hi);
+    }
+    return focus;
+}
+)";
+}
+
 std::string FormatDiagnosticDouble(double value) {
     std::ostringstream stream;
     if (value != 0.0 && std::abs(value) < 0.0001) {
@@ -983,6 +1049,7 @@ XrResult OpenXrLayer::OnInstanceCreated(const XrInstanceCreateInfo* create_info,
     instance_ = instance;
     ResetInstanceState();
     eye_gaze_extension_enabled_ = eye_gaze_extension_enabled;
+    varjo_compatible_quadviews_active_ = diagnostics.varjo_compatible_quad_forwarded;
     ResetSessionState();
     config_path_ = ResolveConfigPath();
     log_path_ = ResolveLogPath();
@@ -1021,6 +1088,18 @@ XrResult OpenXrLayer::OnInstanceCreated(const XrInstanceCreateInfo* create_info,
                          ", varjoFoveatedRendering=" +
                          (varjo_foveated_rendering_extension_requested_ ? "true" : "false"));
         }
+    }
+    if (varjo_compatible_quadviews_active_) {
+        logger_.Info(
+            "Quadviews Varjo compatible mode ACTIVE: forwarded native quad views to the runtime so the "
+            "focus panels are driven directly; stereo composite and quad->stereo synthesis are disabled "
+            "for this instance. Applied knobs: focusScale/peripheralScale (view resolution) and "
+            "foveateSharpness (focus CAS post-process, runs only when > 0). Runtime-owned in this mode: "
+            "focus size, transition, offsets, gaze smoothing/deadzone.");
+    } else if (quad_views_extension_requested_ || varjo_foveated_rendering_extension_requested_) {
+        logger_.Info(
+            "Quadviews mode: stereo-composite emulation (Varjo compatible mode not active — runtime lacks "
+            "native quad views or quadviews is disabled).");
     }
     const bool log_eye_gaze_instance_setup =
         diagnostics.app_requested_quad_views || diagnostics.app_requested_varjo_foveated_rendering ||
@@ -1265,7 +1344,11 @@ XrResult OpenXrLayer::BeginSession(XrSession session, const XrSessionBeginInfo* 
 
     XrSessionBeginInfo runtime_begin_info{};
     const XrSessionBeginInfo* downstream_begin_info = begin_info;
-    if (begin_info && IsQuadViewConfiguration(begin_info->primaryViewConfigurationType) && quadviews_active) {
+    // In Varjo compatible mode the runtime supports the quad configuration itself, so
+    // begin the session on the app's real config and let the runtime drive the
+    // focus panels. Only remap to stereo when we are emulating.
+    if (begin_info && IsQuadViewConfiguration(begin_info->primaryViewConfigurationType) && quadviews_active &&
+        !varjo_compatible_quadviews_active_) {
         runtime_begin_info = *begin_info;
         runtime_begin_info.primaryViewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
         downstream_begin_info = &runtime_begin_info;
@@ -1560,7 +1643,8 @@ XrResult OpenXrLayer::GetViewConfigurationProperties(
     std::scoped_lock lock(mutex_);
     ReloadConfigIfNeeded();
     RefreshResolvedSettings();
-    const bool synthesize_quad = IsQuadViewConfiguration(view_configuration_type) && IsQuadViewsActive();
+    const bool synthesize_quad = IsQuadViewConfiguration(view_configuration_type) && IsQuadViewsActive() &&
+                                 !varjo_compatible_quadviews_active_;
     const XrViewConfigurationType runtime_type =
         synthesize_quad ? XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO : view_configuration_type;
 
@@ -1598,6 +1682,47 @@ XrResult OpenXrLayer::EnumerateViewConfigurationViews(XrInstance instance,
     if (!IsQuadViewConfiguration(view_configuration_type) || !IsQuadViewsActive()) {
         return next_enumerate_view_configuration_views_(
             instance, system_id, view_configuration_type, view_capacity_input, view_count_output, views);
+    }
+
+    if (varjo_compatible_quadviews_active_) {
+        // Varjo compatible mode: the runtime owns the quad view geometry (FOV, inset
+        // size, count). Query it directly and, as a carryover of the emulation
+        // knobs, rescale only the per-view recommended resolutions: peripheral
+        // views (0/1) by peripheral_scale, focus views (2/3) by focus_scale. Every
+        // other quadviews setting is runtime-owned in this mode.
+        const XrResult native_result = next_enumerate_view_configuration_views_(
+            instance, system_id, view_configuration_type, view_capacity_input, view_count_output, views);
+        if (XR_FAILED(native_result) || !views || view_capacity_input == 0) {
+            return native_result;
+        }
+        const double peripheral_scale = resolved_settings_.quadviews.peripheral_scale;
+        const double focus_scale = resolved_settings_.quadviews.focus_scale;
+        const uint32_t applied = std::min<uint32_t>(view_capacity_input, *view_count_output);
+        std::ostringstream native_sizes;
+        for (uint32_t i = 0; i < applied; ++i) {
+            const bool is_focus = (i >= 2);
+            const double scale = is_focus ? focus_scale : peripheral_scale;
+            const uint32_t runtime_width = views[i].recommendedImageRectWidth;
+            const uint32_t runtime_height = views[i].recommendedImageRectHeight;
+            views[i].recommendedImageRectWidth =
+                ScaleDimension(runtime_width, scale, views[i].maxImageRectWidth);
+            views[i].recommendedImageRectHeight =
+                ScaleDimension(runtime_height, scale, views[i].maxImageRectHeight);
+            if (!has_logged_varjo_compatible_view_sizes_) {
+                native_sizes << " view" << i << "=" << runtime_width << "x" << runtime_height << "->"
+                             << views[i].recommendedImageRectWidth << "x"
+                             << views[i].recommendedImageRectHeight << "(x" << FormatDiagnosticDouble(scale)
+                             << ")";
+            }
+        }
+        if (!has_logged_varjo_compatible_view_sizes_ && applied > 0) {
+            logger_.Info("Quadviews Varjo compatible view sizes (runtime->rescaled): count=" +
+                         std::to_string(applied) + ", peripheralScale=" +
+                         FormatDiagnosticDouble(peripheral_scale) + ", focusScale=" +
+                         FormatDiagnosticDouble(focus_scale) + native_sizes.str());
+            has_logged_varjo_compatible_view_sizes_ = true;
+        }
+        return native_result;
     }
 
     std::array<XrViewConfigurationView, 2> stereo_views{};
@@ -3072,6 +3197,12 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
         }
 
         append_projection_layer(projection_layer, 0, projection_layer->viewCount);
+        // Varjo compatible quadviews: sharpen the runtime's focus views in place when
+        // foveate_sharpness > 0. No-op (pure passthrough) when sharpness is 0 or the
+        // layer is not a native quad projection.
+        if (varjo_compatible_quadviews_active_ && projection_layer->viewCount >= 4 && IsQuadViewsActive()) {
+            SharpenNativeFocusViews(adjusted_projection_views.back(), frame_end_info->displayTime);
+        }
     }
 
     XrFrameEndInfo adjusted_frame_end_info = *frame_end_info;
@@ -3125,7 +3256,10 @@ XrResult OpenXrLayer::GetReferenceSpaceBoundsRect(XrSession session,
             std::scoped_lock lock(mutex_);
             ReloadConfigIfNeeded();
             RefreshResolvedSettings();
-            emulate_combined_eye = session == active_session_ && IsQuadViewsActive();
+            // In Varjo compatible mode the runtime provides the real combined-eye space,
+            // so only emulate it while synthesizing quad views.
+            emulate_combined_eye =
+                session == active_session_ && IsQuadViewsActive() && !varjo_compatible_quadviews_active_;
         }
 
         if (emulate_combined_eye) {
@@ -3207,7 +3341,10 @@ XrResult OpenXrLayer::CreateReferenceSpace(XrSession session,
             std::scoped_lock lock(mutex_);
             ReloadConfigIfNeeded();
             RefreshResolvedSettings();
-            emulate_combined_eye = session == active_session_ && IsQuadViewsActive();
+            // In Varjo compatible mode the runtime provides the real combined-eye space,
+            // so only emulate it while synthesizing quad views.
+            emulate_combined_eye =
+                session == active_session_ && IsQuadViewsActive() && !varjo_compatible_quadviews_active_;
         }
 
         if (emulate_combined_eye) {
@@ -3397,13 +3534,21 @@ XrResult OpenXrLayer::LocateViews(XrSession session,
                 CachePivotPoseDelta(view_locate_info->displayTime, IdentityPose());
             } else if (IsQuadViewConfiguration(view_configuration_type) &&
                        EnsureEyeOffsets(session,
-                                        XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO,
+                                        // Emulation synthesizes quad from stereo, so it captures 2 stereo eye
+                                        // offsets. Varjo compatible mode locates the real quad config (same config as
+                                        // the session) to get one offset per view and avoid a cross-config locate.
+                                        varjo_compatible_quadviews_active_
+                                            ? view_configuration_type
+                                            : XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO,
                                         view_locate_info->displayTime,
-                                        2)) {
-                pivot_diagnostic_.recomposition_mode = "quad_from_stereo_eye_offsets";
+                                        varjo_compatible_quadviews_active_ ? count : 2)) {
+                pivot_diagnostic_.recomposition_mode =
+                    varjo_compatible_quadviews_active_ ? "quad_native_eye_offsets" : "quad_from_stereo_eye_offsets";
                 CachePivotPoseDelta(view_locate_info->displayTime, applied_pose_delta);
                 for (uint32_t i = 0; i < count; ++i) {
-                    const uint32_t eye_index = i % 2;
+                    // Native: one offset per view. Emulation: focus views (2/3) reuse the
+                    // same eye offset as their peripheral counterpart (i % 2).
+                    const uint32_t eye_index = varjo_compatible_quadviews_active_ ? i : (i % 2);
                     const XrPosef recomposed_pose =
                         MultiplyPoses(cached_eye_offset_poses_[eye_index], pivot_view_location.pose);
                     adjusted_views[i].position.x = recomposed_pose.position.x;
@@ -3530,6 +3675,7 @@ XrResult OpenXrLayer::LocateViews(XrSession session,
                    << locate_views_call_count_ << ": count=" << count
                    << ", viewConfig=" << ToString(view_configuration_type)
                    << ", synthesizedQuadViews=" << synthesized_quad_views
+                   << ", varjoCompatible=" << (varjo_compatible_quadviews_active_ ? 1 : 0)
                    << ", quadviewsTrackingMode=" << ToString(resolved_settings_.quadviews.tracking_mode)
                    << ", quadviewsFocusScale=" << FormatDiagnosticDouble(resolved_settings_.quadviews.focus_scale)
                    << ", quadviewsPeripheralScale="
@@ -4109,6 +4255,16 @@ void OpenXrLayer::ResetInstanceState() {
 
 bool OpenXrLayer::IsQuadViewsActive() const {
     return resolved_settings_.core.enabled && resolved_settings_.quadviews.enabled;
+}
+
+bool OpenXrLayer::IsVarjoCompatibleQuadviewsEligible() {
+    std::scoped_lock lock(mutex_);
+    ReloadConfigIfNeeded();
+    // Varjo compatible quadviews is the default whenever the suite and the quadviews
+    // module are enabled; the caller additionally requires that the runtime natively
+    // supports Varjo quad views. There is no separate opt-in — a user who does not
+    // want VectorXR quadviews simply disables the module (per profile or globally).
+    return config_.core.enabled && config_.quadviews.enabled;
 }
 
 bool OpenXrLayer::ShouldLogQuadViewsDebugHeartbeat(
@@ -4736,13 +4892,25 @@ XrResult OpenXrLayer::LocateRuntimeViews(XrSession session,
     }
 
     bool quadviews_active = false;
+    bool varjo_compatible = false;
     QuadViewsResolvedSettings quadviews_settings;
     {
         std::scoped_lock lock(mutex_);
         ReloadConfigIfNeeded();
         RefreshResolvedSettings();
         quadviews_active = IsQuadViewsActive();
+        varjo_compatible = varjo_compatible_quadviews_active_;
         quadviews_settings = resolved_settings_.quadviews;
+    }
+
+    // Varjo compatible mode: forward the app's quad locate untouched — including the
+    // Varjo foveated-rendering next chain, which the runtime consumes to place the
+    // focus inset by gaze — and return the runtime's real 4 views. No stereo remap,
+    // no synthesis. Pivot is still applied downstream in LocateViews.
+    if (varjo_compatible && view_locate_info && quadviews_active &&
+        IsQuadViewConfiguration(view_locate_info->viewConfigurationType)) {
+        return next_locate_views_(
+            session, view_locate_info, view_state, view_capacity_input, view_count_output, views);
     }
 
     XrViewLocateInfo downstream_locate_info{};
@@ -5117,7 +5285,358 @@ XrResult OpenXrLayer::FlushDeferredSwapchainReleasesLocked(std::string_view reas
     return first_failure;
 }
 
+void OpenXrLayer::ResetD3D11FocusSharpen() {
+    for (QuadViewsCompositionTarget& target : d3d11_focus_sharpen_.targets) {
+        SafeReleaseVector(target.image_render_target_views);
+        SafeRelease(target.render_target_view);
+        SafeRelease(target.render_texture);
+        if (target.swapchain != XR_NULL_HANDLE && next_destroy_swapchain_) {
+            next_destroy_swapchain_(target.swapchain);
+        }
+        target = {};
+    }
+    SafeRelease(d3d11_focus_sharpen_.constants);
+    SafeRelease(d3d11_focus_sharpen_.sampler);
+    SafeRelease(d3d11_focus_sharpen_.pixel_shader);
+    SafeRelease(d3d11_focus_sharpen_.vertex_shader);
+    d3d11_focus_sharpen_.initialized = false;
+    d3d11_focus_sharpen_.failed = false;
+    d3d11_focus_sharpen_.has_logged_active = false;
+    d3d11_focus_sharpen_.failure_logs_remaining = 8;
+}
+
+bool OpenXrLayer::EnsureD3D11FocusSharpen() {
+    if (d3d11_focus_sharpen_.failed) {
+        return false;
+    }
+    if (d3d11_focus_sharpen_.initialized) {
+        return true;
+    }
+    ID3D11Device* device = d3d11_quadviews_compositor_.device;
+    if (!device || !d3d11_quadviews_compositor_.context) {
+        return false;
+    }
+
+    const char* source = D3D11FocusSharpenShaderSource();
+    ID3DBlob* vertex_blob = nullptr;
+    ID3DBlob* pixel_blob = nullptr;
+    ID3DBlob* errors = nullptr;
+    HRESULT hr = D3DCompile(
+        source, std::strlen(source), nullptr, nullptr, nullptr, "VSMain", "vs_5_0", 0, 0, &vertex_blob, &errors);
+    if (FAILED(hr)) {
+        logger_.Error("D3D11 focus sharpen vertex shader compile failed.");
+        SafeRelease(errors);
+        d3d11_focus_sharpen_.failed = true;
+        return false;
+    }
+    SafeRelease(errors);
+    hr = D3DCompile(
+        source, std::strlen(source), nullptr, nullptr, nullptr, "PSMain", "ps_5_0", 0, 0, &pixel_blob, &errors);
+    if (FAILED(hr)) {
+        logger_.Error("D3D11 focus sharpen pixel shader compile failed.");
+        SafeRelease(vertex_blob);
+        SafeRelease(errors);
+        d3d11_focus_sharpen_.failed = true;
+        return false;
+    }
+    SafeRelease(errors);
+
+    hr = device->CreateVertexShader(
+        vertex_blob->GetBufferPointer(), vertex_blob->GetBufferSize(), nullptr, &d3d11_focus_sharpen_.vertex_shader);
+    SafeRelease(vertex_blob);
+    if (FAILED(hr)) {
+        logger_.Error("D3D11 focus sharpen vertex shader creation failed.");
+        SafeRelease(pixel_blob);
+        d3d11_focus_sharpen_.failed = true;
+        return false;
+    }
+    hr = device->CreatePixelShader(
+        pixel_blob->GetBufferPointer(), pixel_blob->GetBufferSize(), nullptr, &d3d11_focus_sharpen_.pixel_shader);
+    SafeRelease(pixel_blob);
+    if (FAILED(hr)) {
+        logger_.Error("D3D11 focus sharpen pixel shader creation failed.");
+        d3d11_focus_sharpen_.failed = true;
+        return false;
+    }
+
+    D3D11_SAMPLER_DESC sampler_desc{};
+    sampler_desc.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
+    sampler_desc.AddressU = D3D11_TEXTURE_ADDRESS_CLAMP;
+    sampler_desc.AddressV = D3D11_TEXTURE_ADDRESS_CLAMP;
+    sampler_desc.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
+    sampler_desc.MaxLOD = D3D11_FLOAT32_MAX;
+    hr = device->CreateSamplerState(&sampler_desc, &d3d11_focus_sharpen_.sampler);
+    if (FAILED(hr)) {
+        logger_.Error("D3D11 focus sharpen sampler creation failed.");
+        d3d11_focus_sharpen_.failed = true;
+        return false;
+    }
+
+    D3D11_BUFFER_DESC buffer_desc{};
+    buffer_desc.ByteWidth = sizeof(FocusSharpenConstants);
+    buffer_desc.Usage = D3D11_USAGE_DEFAULT;
+    buffer_desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+    hr = device->CreateBuffer(&buffer_desc, nullptr, &d3d11_focus_sharpen_.constants);
+    if (FAILED(hr)) {
+        logger_.Error("D3D11 focus sharpen constant buffer creation failed.");
+        d3d11_focus_sharpen_.failed = true;
+        return false;
+    }
+
+    d3d11_focus_sharpen_.initialized = true;
+    return true;
+}
+
+bool OpenXrLayer::EnsureFocusSharpenTarget(QuadViewsCompositionTarget& target,
+                                           uint32_t width,
+                                           uint32_t height,
+                                           int64_t format) {
+    if (width == 0 || height == 0 || !next_create_swapchain_ || !next_enumerate_swapchain_images_) {
+        return false;
+    }
+    if (target.swapchain != XR_NULL_HANDLE && target.width == width && target.height == height &&
+        target.format == format && !target.image_render_target_views.empty()) {
+        return true;
+    }
+
+    // Recreate on any size/format change.
+    SafeReleaseVector(target.image_render_target_views);
+    SafeRelease(target.render_target_view);
+    SafeRelease(target.render_texture);
+    if (target.swapchain != XR_NULL_HANDLE && next_destroy_swapchain_) {
+        next_destroy_swapchain_(target.swapchain);
+    }
+    target = {};
+
+    XrSwapchainCreateInfo create_info{XR_TYPE_SWAPCHAIN_CREATE_INFO};
+    create_info.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_SAMPLED_BIT;
+    create_info.format = format;
+    create_info.sampleCount = 1;
+    create_info.width = width;
+    create_info.height = height;
+    create_info.faceCount = 1;
+    create_info.arraySize = 1;
+    create_info.mipCount = 1;
+    XrResult result = next_create_swapchain_(active_session_, &create_info, &target.swapchain);
+    if (XR_FAILED(result) || target.swapchain == XR_NULL_HANDLE) {
+        logger_.Error("D3D11 focus sharpen output swapchain creation failed: result=" +
+                      FormatHex(static_cast<uint64_t>(result)));
+        target = {};
+        return false;
+    }
+
+    uint32_t image_count = 0;
+    result = next_enumerate_swapchain_images_(target.swapchain, 0, &image_count, nullptr);
+    if (XR_FAILED(result) || image_count == 0) {
+        logger_.Error("D3D11 focus sharpen output image count query failed.");
+        return false;
+    }
+    std::vector<XrSwapchainImageD3D11KHR> images(image_count);
+    for (XrSwapchainImageD3D11KHR& image : images) {
+        image = {XR_TYPE_SWAPCHAIN_IMAGE_D3D11_KHR};
+    }
+    result = next_enumerate_swapchain_images_(
+        target.swapchain, image_count, &image_count, reinterpret_cast<XrSwapchainImageBaseHeader*>(images.data()));
+    if (XR_FAILED(result)) {
+        logger_.Error("D3D11 focus sharpen output image enumeration failed.");
+        return false;
+    }
+
+    target.width = width;
+    target.height = height;
+    target.format = format;
+    target.image_count = image_count;
+    target.d3d11_images.reserve(image_count);
+    for (const XrSwapchainImageD3D11KHR& image : images) {
+        target.d3d11_images.push_back(image.texture);
+    }
+    target.image_render_target_views.reserve(target.d3d11_images.size());
+    for (ID3D11Texture2D* texture : target.d3d11_images) {
+        ID3D11RenderTargetView* rtv = nullptr;
+        HRESULT hr = CreateTextureRenderTargetView(d3d11_quadviews_compositor_.device, texture, format, &rtv);
+        if (FAILED(hr)) {
+            logger_.Error("D3D11 focus sharpen output RTV creation failed: hr=" +
+                          FormatHex(static_cast<uint32_t>(hr)));
+            SafeReleaseVector(target.image_render_target_views);
+            return false;
+        }
+        target.image_render_target_views.push_back(rtv);
+    }
+    return true;
+}
+
+void OpenXrLayer::SharpenNativeFocusViews(std::vector<XrCompositionLayerProjectionView>& views,
+                                          XrTime display_time) {
+    const double sharpen_amount = Clamp(resolved_settings_.quadviews.foveate_sharpness, 0.0, 100.0) / 100.0;
+    if (sharpen_amount <= 0.001 || views.size() < 4) {
+        return;
+    }
+    if (!EnsureD3D11FocusSharpen()) {
+        return;
+    }
+
+    ID3D11DeviceContext* context = d3d11_quadviews_compositor_.context;
+
+    // Save the app's context state so the sharpen draw leaves it untouched.
+    struct SavedD3D11State {
+        ID3D11RenderTargetView* render_targets[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT]{};
+        ID3D11DepthStencilView* depth_stencil{nullptr};
+        ID3D11VertexShader* vertex_shader{nullptr};
+        ID3D11PixelShader* pixel_shader{nullptr};
+        ID3D11InputLayout* input_layout{nullptr};
+        ID3D11ShaderResourceView* shader_resources[1]{};
+        ID3D11SamplerState* samplers[1]{};
+        ID3D11Buffer* constant_buffers[1]{};
+        D3D11_VIEWPORT viewports[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE]{};
+        UINT viewport_count{D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE};
+        D3D11_PRIMITIVE_TOPOLOGY topology{D3D11_PRIMITIVE_TOPOLOGY_UNDEFINED};
+    } saved;
+    context->OMGetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, saved.render_targets, &saved.depth_stencil);
+    context->VSGetShader(&saved.vertex_shader, nullptr, nullptr);
+    context->PSGetShader(&saved.pixel_shader, nullptr, nullptr);
+    context->IAGetInputLayout(&saved.input_layout);
+    context->IAGetPrimitiveTopology(&saved.topology);
+    context->PSGetShaderResources(0, 1, saved.shader_resources);
+    context->PSGetSamplers(0, 1, saved.samplers);
+    context->PSGetConstantBuffers(0, 1, saved.constant_buffers);
+    context->RSGetViewports(&saved.viewport_count, saved.viewports);
+
+    uint32_t sharpened_count = 0;
+    for (uint32_t i = 2; i < 4; ++i) {
+        XrCompositionLayerProjectionView& view = views[i];
+        // Only single-slice focus swapchains are supported for the sharpen pass; an
+        // arrayed subImage falls back to the app's unsharpened focus.
+        if (view.subImage.imageArrayIndex != 0 || view.subImage.swapchain == XR_NULL_HANDLE) {
+            continue;
+        }
+        const auto it = tracked_swapchains_.find(view.subImage.swapchain);
+        if (it == tracked_swapchains_.end() || it->second.d3d11_images.empty() ||
+            !it->second.has_last_acquired_image_index ||
+            it->second.last_acquired_image_index >= it->second.d3d11_images.size()) {
+            continue;
+        }
+        SwapchainInfo& src = it->second;
+        if (!EnsureD3D11SwapchainShaderResources(src) ||
+            src.last_acquired_image_index >= src.d3d11_shader_resources.size()) {
+            continue;
+        }
+        ID3D11ShaderResourceView* focus_srv = src.d3d11_shader_resources[src.last_acquired_image_index];
+        if (!focus_srv) {
+            continue;
+        }
+
+        const uint32_t out_width = static_cast<uint32_t>(view.subImage.imageRect.extent.width);
+        const uint32_t out_height = static_cast<uint32_t>(view.subImage.imageRect.extent.height);
+        QuadViewsCompositionTarget& target = d3d11_focus_sharpen_.targets[i - 2];
+        if (!EnsureFocusSharpenTarget(target, out_width, out_height, src.format)) {
+            continue;
+        }
+
+        uint32_t output_index = 0;
+        XrSwapchainImageAcquireInfo acquire_info{XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};
+        XrResult result = next_acquire_swapchain_image_(target.swapchain, &acquire_info, &output_index);
+        if (XR_FAILED(result) || output_index >= target.image_render_target_views.size()) {
+            continue;
+        }
+        XrSwapchainImageWaitInfo wait_info{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};
+        wait_info.timeout = XR_INFINITE_DURATION;
+        result = next_wait_swapchain_image_(target.swapchain, &wait_info);
+        if (XR_FAILED(result)) {
+            XrSwapchainImageReleaseInfo release_info{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
+            next_release_swapchain_image_(target.swapchain, &release_info);
+            continue;
+        }
+
+        FocusSharpenConstants constants{};
+        constants.params[0] = static_cast<float>(sharpen_amount);
+        constants.params[1] = 1.0f / static_cast<float>(std::max<uint32_t>(1, src.width));
+        constants.params[2] = 1.0f / static_cast<float>(std::max<uint32_t>(1, src.height));
+        constants.params[3] = 0.0f;
+        constants.src_rect[0] =
+            static_cast<float>(view.subImage.imageRect.offset.x) / static_cast<float>(std::max<uint32_t>(1, src.width));
+        constants.src_rect[1] =
+            static_cast<float>(view.subImage.imageRect.offset.y) / static_cast<float>(std::max<uint32_t>(1, src.height));
+        constants.src_rect[2] =
+            static_cast<float>(out_width) / static_cast<float>(std::max<uint32_t>(1, src.width));
+        constants.src_rect[3] =
+            static_cast<float>(out_height) / static_cast<float>(std::max<uint32_t>(1, src.height));
+
+        ID3D11RenderTargetView* render_target = target.image_render_target_views[output_index];
+        const float clear_color[4]{0.0f, 0.0f, 0.0f, 1.0f};
+        context->ClearRenderTargetView(render_target, clear_color);
+        context->OMSetRenderTargets(1, &render_target, nullptr);
+        D3D11_VIEWPORT viewport{};
+        viewport.Width = static_cast<float>(out_width);
+        viewport.Height = static_cast<float>(out_height);
+        viewport.MinDepth = 0.0f;
+        viewport.MaxDepth = 1.0f;
+        context->RSSetViewports(1, &viewport);
+        context->IASetInputLayout(nullptr);
+        context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        context->VSSetShader(d3d11_focus_sharpen_.vertex_shader, nullptr, 0);
+        context->PSSetShader(d3d11_focus_sharpen_.pixel_shader, nullptr, 0);
+        context->PSSetShaderResources(0, 1, &focus_srv);
+        context->PSSetSamplers(0, 1, &d3d11_focus_sharpen_.sampler);
+        context->UpdateSubresource(d3d11_focus_sharpen_.constants, 0, nullptr, &constants, 0, 0);
+        context->PSSetConstantBuffers(0, 1, &d3d11_focus_sharpen_.constants);
+        context->Draw(3, 0);
+
+        ID3D11ShaderResourceView* null_srv[1]{nullptr};
+        context->PSSetShaderResources(0, 1, null_srv);
+        ID3D11RenderTargetView* null_rtv = nullptr;
+        context->OMSetRenderTargets(1, &null_rtv, nullptr);
+
+        XrSwapchainImageReleaseInfo release_info{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
+        result = next_release_swapchain_image_(target.swapchain, &release_info);
+        if (XR_FAILED(result)) {
+            continue;
+        }
+
+        // Repoint the submitted view at our sharpened swapchain.
+        view.subImage.swapchain = target.swapchain;
+        view.subImage.imageArrayIndex = 0;
+        view.subImage.imageRect.offset = {0, 0};
+        view.subImage.imageRect.extent = {static_cast<int32_t>(out_width), static_cast<int32_t>(out_height)};
+        ++sharpened_count;
+    }
+
+    // Restore app context state.
+    context->OMSetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, saved.render_targets, saved.depth_stencil);
+    context->VSSetShader(saved.vertex_shader, nullptr, 0);
+    context->PSSetShader(saved.pixel_shader, nullptr, 0);
+    context->IASetInputLayout(saved.input_layout);
+    context->IASetPrimitiveTopology(saved.topology);
+    context->PSSetShaderResources(0, 1, saved.shader_resources);
+    context->PSSetSamplers(0, 1, saved.samplers);
+    context->PSSetConstantBuffers(0, 1, saved.constant_buffers);
+    context->RSSetViewports(saved.viewport_count, saved.viewports);
+    for (ID3D11RenderTargetView*& rtv : saved.render_targets) {
+        SafeRelease(rtv);
+    }
+    SafeRelease(saved.depth_stencil);
+    SafeRelease(saved.vertex_shader);
+    SafeRelease(saved.pixel_shader);
+    SafeRelease(saved.input_layout);
+    for (ID3D11ShaderResourceView*& resource : saved.shader_resources) {
+        SafeRelease(resource);
+    }
+    for (ID3D11SamplerState*& sampler : saved.samplers) {
+        SafeRelease(sampler);
+    }
+    for (ID3D11Buffer*& buffer : saved.constant_buffers) {
+        SafeRelease(buffer);
+    }
+
+    if (sharpened_count > 0 && !d3d11_focus_sharpen_.has_logged_active) {
+        logger_.Info("D3D11 focus sharpen active in Varjo compatible quadviews: sharpened " +
+                     std::to_string(sharpened_count) + " focus view(s), amount=" +
+                     FormatDiagnosticDouble(sharpen_amount) + " (frameTime=" + std::to_string(display_time) + ").");
+        d3d11_focus_sharpen_.has_logged_active = true;
+    }
+}
+
 void OpenXrLayer::ResetD3D11QuadViewsCompositor() {
+    ResetD3D11FocusSharpen();
     for (QuadViewsCompositionTarget& target : d3d11_quadviews_compositor_.targets) {
         SafeReleaseVector(target.image_render_target_views);
         SafeRelease(target.render_target_view);

@@ -1,5 +1,7 @@
 <script setup lang="ts">
-import { computed } from "vue";
+import { computed, ref } from "vue";
+
+const varjoCompatibilityInfoOpen = ref(false);
 
 import ProfileShell from "../ProfileShell.vue";
 import QuadViewsSettingsFields from "../QuadViewsSettingsFields.vue";
@@ -131,6 +133,16 @@ function budgetChipClass(settings: QuadViewsSettings) {
           Experimental - DX11 OpenXR applications only!
           </p>
         </div>
+        <button
+          class="button-secondary inline-flex items-center gap-2 rounded-[0.75rem] px-4 py-2 text-sm font-medium"
+          type="button"
+          @click="varjoCompatibilityInfoOpen = true"
+        >
+          <span class="inline-flex h-5 w-5 items-center justify-center rounded-full border text-xs" style="border-color: var(--app-border)">
+            i
+          </span>
+          Varjo Compatibility
+        </button>
       </div>
 
       <details class="section-disclosure border-t pt-4" style="border-color: var(--app-border)" open>
@@ -212,5 +224,51 @@ function budgetChipClass(settings: QuadViewsSettings) {
         specific application.
       </div>
     </section>
+
+    <div v-if="varjoCompatibilityInfoOpen" class="fixed inset-0 z-50 flex items-center justify-center bg-black/45 px-4 py-6 backdrop-blur-sm">
+      <div class="w-full max-w-[720px] rounded-[1.25rem] border p-5 surface-panel-strong">
+        <div class="flex flex-wrap items-start justify-between gap-4">
+          <div>
+            <p class="eyebrow text-xs uppercase tracking-[0.24em]">Varjo Compatibility</p>
+            <h2 class="mt-2 text-xl font-semibold tracking-tight">Varjo Compatible Quadviews</h2>
+          </div>
+          <button class="button-secondary rounded-[0.75rem] px-4 py-2 text-sm font-medium" type="button" @click="varjoCompatibilityInfoOpen = false">
+            Close
+          </button>
+        </div>
+
+        <div class="mt-5 space-y-4 text-sm leading-6">
+          <div class="rounded-[1rem] border px-4 py-4 chip-accent" style="border-color: var(--app-border)">
+            Varjo headsets are bi-panel: a wide, lower-density context display plus a small, high-density focus display per eye. VectorXR's Varjo compatible quadviews keeps the four view layers your headset expects (two peripheral, two focus) so the physical focus panels are driven directly. As a consequence, the Varjo runtime takes over the view geometry, and some Quadviews settings are ignored.
+          </div>
+
+          <div class="rounded-[1rem] border px-4 py-4 surface-panel">
+            VectorXR Quadviews &amp; Varjo runtime compatibility notes:
+            <div class="mt-3 grid gap-3 sm:grid-cols-2">
+              <div class="rounded-[0.9rem] border p-3" style="border-color: var(--app-border)">
+                <div class="text-xs font-semibold uppercase tracking-[0.16em] text-muted">VectorXR Still applies</div>
+                <ul class="mt-1.5 space-y-1">
+                  <li>Focus Scale </li>
+                  <li>Peripheral Scale</li>
+                  <li>Focus Sharpness</li>
+                </ul>
+              </div>
+              <div class="rounded-[0.9rem] border p-3" style="border-color: var(--app-border)">
+                <div class="text-xs font-semibold uppercase tracking-[0.16em] text-muted">Handled by the Varjo runtime</div>
+                <ul class="mt-1.5 space-y-1">
+                  <li>Focus Size &amp; Transition Thickness</li>
+                  <li>Horizontal &amp; Vertical Offset</li>
+                  <li>Gaze Smoothing &amp; Deadzone</li>
+                </ul>
+              </div>
+            </div>
+          </div>
+
+          <div class="rounded-[1rem] border px-4 py-4 surface-panel">
+            On headsets without native quad-view support (e.g. Quest Pro, Pimax Crystal), VectorXR Quadviews utilizes the standard emulation mode, and all settings apply. These compatibility notes apply only to Varjo runtimes.
+          </div>
+        </div>
+      </div>
+    </div>
   </div>
 </template>
