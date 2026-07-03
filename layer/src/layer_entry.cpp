@@ -2,7 +2,12 @@
 #include "depthxr/openxr_loader_api_layer.h"
 
 #include <algorithm>
+#include <cctype>
+#include <cstdlib>
 #include <cstring>
+#include <fstream>
+#include <iterator>
+#include <string>
 #include <string_view>
 #include <vector>
 
@@ -256,6 +261,135 @@ bool RuntimeSupportsExtension(PFN_xrGetInstanceProcAddr next_get_instance_proc_a
            }) != properties.end();
 }
 
+// Diagnostic sibling of RuntimeSupportsExtension that returns the full extension
+// list the pre-instance probe saw (plus the raw enumeration result), so the layer
+// can log exactly why Varjo compatible forwarding did or did not fire.
+struct RuntimeExtensionScan {
+    bool ran{false};
+    XrResult result{XR_SUCCESS};
+    uint32_t count{0};
+    std::vector<std::string> names;
+
+    bool Contains(std::string_view extension_name) const {
+        return std::find(names.begin(), names.end(), extension_name) != names.end();
+    }
+};
+
+RuntimeExtensionScan ScanRuntimeInstanceExtensions(PFN_xrGetInstanceProcAddr next_get_instance_proc_addr) {
+    RuntimeExtensionScan scan;
+    if (!next_get_instance_proc_addr) {
+        return scan;
+    }
+
+    PFN_xrVoidFunction function = nullptr;
+    if (XR_FAILED(next_get_instance_proc_addr(
+            XR_NULL_HANDLE, "xrEnumerateInstanceExtensionProperties", &function)) ||
+        !function) {
+        return scan;
+    }
+
+    const auto enumerate_extension_properties =
+        reinterpret_cast<PFN_xrEnumerateInstanceExtensionProperties>(function);
+    scan.ran = true;
+    uint32_t extension_count = 0;
+    scan.result = enumerate_extension_properties(nullptr, 0, &extension_count, nullptr);
+    if (XR_FAILED(scan.result) || extension_count == 0) {
+        scan.count = extension_count;
+        return scan;
+    }
+
+    std::vector<XrExtensionProperties> properties(extension_count);
+    for (XrExtensionProperties& property : properties) {
+        property = {XR_TYPE_EXTENSION_PROPERTIES};
+    }
+    scan.result = enumerate_extension_properties(nullptr, extension_count, &extension_count, properties.data());
+    scan.count = extension_count;
+    if (XR_FAILED(scan.result)) {
+        return scan;
+    }
+
+    scan.names.reserve(extension_count);
+    for (const XrExtensionProperties& property : properties) {
+        scan.names.emplace_back(property.extensionName);
+    }
+    return scan;
+}
+
+std::string ToLowerAscii(std::string value) {
+    for (char& character : value) {
+        character = static_cast<char>(std::tolower(static_cast<unsigned char>(character)));
+    }
+    return value;
+}
+
+// Path to the active OpenXR runtime manifest, honoring the loader's precedence:
+// the XR_RUNTIME_JSON override, then the per-user then machine-wide registry entry.
+// Returns empty when it cannot be resolved.
+std::string ReadActiveOpenXrRuntimeManifestPath() {
+    if (const char* env_path = std::getenv("XR_RUNTIME_JSON"); env_path && *env_path != '\0') {
+        return env_path;
+    }
+
+    for (const HKEY root : {HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE}) {
+        HKEY key = nullptr;
+        if (RegOpenKeyExW(root, L"SOFTWARE\\Khronos\\OpenXR\\1", 0, KEY_READ, &key) != ERROR_SUCCESS) {
+            continue;
+        }
+
+        wchar_t buffer[2048]{};
+        DWORD size = sizeof(buffer);
+        DWORD type = 0;
+        const LONG result =
+            RegQueryValueExW(key, L"ActiveRuntime", nullptr, &type, reinterpret_cast<LPBYTE>(buffer), &size);
+        RegCloseKey(key);
+        if (result != ERROR_SUCCESS || (type != REG_SZ && type != REG_EXPAND_SZ)) {
+            continue;
+        }
+
+        int length = static_cast<int>(size / sizeof(wchar_t));
+        while (length > 0 && buffer[length - 1] == L'\0') {
+            --length;
+        }
+        if (length <= 0) {
+            continue;
+        }
+        const int needed = WideCharToMultiByte(CP_UTF8, 0, buffer, length, nullptr, 0, nullptr, nullptr);
+        if (needed <= 0) {
+            continue;
+        }
+        std::string path(static_cast<size_t>(needed), '\0');
+        WideCharToMultiByte(CP_UTF8, 0, buffer, length, path.data(), needed, nullptr, nullptr);
+        if (!path.empty()) {
+            return path;
+        }
+    }
+
+    return {};
+}
+
+// Reliable Varjo detection: identify the active OpenXR runtime rather than probing
+// extensions before instance creation (which proved unreliable on Varjo). Reads no
+// OpenXR state, creates no instance, and is a pure no-op on non-Varjo runtimes.
+bool ActiveOpenXrRuntimeIsVarjo(std::string& out_path) {
+    out_path = ReadActiveOpenXrRuntimeManifestPath();
+    if (out_path.empty()) {
+        return false;
+    }
+    if (ToLowerAscii(out_path).find("varjo") != std::string::npos) {
+        return true;
+    }
+    // Fall back to the manifest contents (its runtime name is "Varjo OpenXR Runtime")
+    // in case the runtime is installed under a non-obvious path.
+    std::ifstream file(out_path, std::ios::binary);
+    if (file) {
+        std::string content((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+        if (ToLowerAscii(std::move(content)).find("varjo") != std::string::npos) {
+            return true;
+        }
+    }
+    return false;
+}
+
 } // namespace
 } // namespace depthxr
 
@@ -420,11 +554,36 @@ XrResult XRAPI_CALL xrCreateApiLayerInstance(const XrInstanceCreateInfo* instanc
     const bool app_requested_quad_views_for_forwarding =
         diagnostics.app_requested_quad_views || diagnostics.app_requested_varjo_foveated_rendering;
     bool forward_varjo_quad_extensions = false;
-    if (app_requested_quad_views_for_forwarding &&
-        OpenXrLayer::Instance().IsVarjoCompatibleQuadviewsEligible()) {
-        const bool runtime_supports_quad_views =
-            RuntimeSupportsExtension(next_info->nextGetInstanceProcAddr, XR_VARJO_QUAD_VIEWS_EXTENSION_NAME);
-        forward_varjo_quad_extensions = runtime_supports_quad_views;
+    if (app_requested_quad_views_for_forwarding) {
+        diagnostics.varjo_compatible_eligible = OpenXrLayer::Instance().IsVarjoCompatibleQuadviewsEligible();
+
+        // Always scan (even when ineligible) so the logs show exactly what the
+        // pre-instance probe returned — this is the signal the forward hinges on.
+        const RuntimeExtensionScan scan = ScanRuntimeInstanceExtensions(next_info->nextGetInstanceProcAddr);
+        diagnostics.pre_instance_extension_scan_ran = scan.ran;
+        diagnostics.pre_instance_extension_scan_result = scan.result;
+        diagnostics.pre_instance_extension_count = scan.count;
+        diagnostics.runtime_advertises_varjo_quad = scan.Contains(XR_VARJO_QUAD_VIEWS_EXTENSION_NAME);
+        diagnostics.runtime_advertises_varjo_foveated =
+            scan.Contains(XR_VARJO_FOVEATED_RENDERING_EXTENSION_NAME);
+        std::string joined_extensions;
+        for (const std::string& name : scan.names) {
+            if (!joined_extensions.empty()) {
+                joined_extensions += ' ';
+            }
+            joined_extensions += name;
+        }
+        diagnostics.pre_instance_extensions = std::move(joined_extensions);
+
+        // Drive the decision off the active OpenXR runtime (reliable, no-op off
+        // Varjo) rather than the pre-instance extension probe (kept above only for
+        // diagnostics — it proved to give false negatives on Varjo).
+        std::string active_runtime_path;
+        diagnostics.active_runtime_is_varjo = ActiveOpenXrRuntimeIsVarjo(active_runtime_path);
+        diagnostics.active_runtime_path = std::move(active_runtime_path);
+
+        forward_varjo_quad_extensions =
+            diagnostics.varjo_compatible_eligible && diagnostics.active_runtime_is_varjo;
     }
     diagnostics.varjo_compatible_quad_forwarded = forward_varjo_quad_extensions;
 

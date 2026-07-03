@@ -59,6 +59,22 @@ class OpenXrLayer {
         // the runtime (Varjo compatible quadviews) instead of stripping them for
         // stereo-composite emulation.
         bool varjo_compatible_quad_forwarded{false};
+        // Diagnostics for WHY Varjo compatible forwarding did/did not happen. The
+        // forward requires eligible && the runtime advertising XR_VARJO_quad_views
+        // to a pre-instance extension probe. These capture each input plus the raw
+        // extension list the probe saw, so a truncation-free (short-session) capture
+        // pinpoints the cause.
+        bool varjo_compatible_eligible{false};
+        bool runtime_advertises_varjo_quad{false};
+        bool runtime_advertises_varjo_foveated{false};
+        bool pre_instance_extension_scan_ran{false};
+        XrResult pre_instance_extension_scan_result{XR_SUCCESS};
+        uint32_t pre_instance_extension_count{0};
+        std::string pre_instance_extensions;
+        // Authoritative Varjo signal: the active OpenXR runtime (from the registry).
+        // This, not the extension probe, now drives the forward decision.
+        bool active_runtime_is_varjo{false};
+        std::string active_runtime_path;
     };
 
     // True when VectorXR quadviews should run in Varjo compatible mode, i.e. core

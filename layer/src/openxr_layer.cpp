@@ -1101,6 +1101,37 @@ XrResult OpenXrLayer::OnInstanceCreated(const XrInstanceCreateInfo* create_info,
             "Quadviews mode: stereo-composite emulation (Varjo compatible mode not active — runtime lacks "
             "native quad views or quadviews is disabled).");
     }
+
+    // Full forward-decision trace. This is the record needed to diagnose a Varjo
+    // headset that stays in emulation: it captures every input to the forward
+    // decision plus the raw pre-instance extension list the probe saw. Emitted at
+    // instance creation (before any frame), so a short launch-and-quit capture
+    // preserves it under the debug-report size cap.
+    if (diagnostics.app_requested_quad_views || diagnostics.app_requested_varjo_foveated_rendering) {
+        std::ostringstream decision;
+        decision << "Varjo compatible forwarding decision: appRequestedQuad="
+                 << (diagnostics.app_requested_quad_views ? 1 : 0) << ", appRequestedVarjoFoveated="
+                 << (diagnostics.app_requested_varjo_foveated_rendering ? 1 : 0)
+                 << ", eligible=" << (diagnostics.varjo_compatible_eligible ? 1 : 0)
+                 << ", extScanRan=" << (diagnostics.pre_instance_extension_scan_ran ? 1 : 0)
+                 << ", extScanResult=" << static_cast<int>(diagnostics.pre_instance_extension_scan_result)
+                 << ", extCount=" << diagnostics.pre_instance_extension_count
+                 << ", runtimeAdvertisesVarjoQuad=" << (diagnostics.runtime_advertises_varjo_quad ? 1 : 0)
+                 << ", runtimeAdvertisesVarjoFoveated=" << (diagnostics.runtime_advertises_varjo_foveated ? 1 : 0)
+                 << ", activeRuntimeIsVarjo=" << (diagnostics.active_runtime_is_varjo ? 1 : 0)
+                 << ", forwarded=" << (diagnostics.varjo_compatible_quad_forwarded ? 1 : 0);
+        logger_.Info(decision.str());
+        logger_.Info("Active OpenXR runtime manifest: [" + diagnostics.active_runtime_path + "]");
+        logger_.Info("Pre-instance runtime extensions seen by layer: [" + diagnostics.pre_instance_extensions +
+                     "]");
+        if (quad_views_extension_requested_ && !diagnostics.runtime_advertises_varjo_quad) {
+            logger_.Info(
+                "DIAGNOSTIC: the application enabled XR_VARJO_quad_views but the layer's pre-instance probe "
+                "did not report it — confirming the pre-instance extension probe is unreliable here. Varjo "
+                "detection now uses the active OpenXR runtime instead (see activeRuntimeIsVarjo).");
+        }
+    }
+
     const bool log_eye_gaze_instance_setup =
         diagnostics.app_requested_quad_views || diagnostics.app_requested_varjo_foveated_rendering ||
         diagnostics.app_requested_eye_gaze || diagnostics.optimistic_eye_gaze_request ||
@@ -1379,6 +1410,22 @@ XrResult OpenXrLayer::BeginSession(XrSession session, const XrSessionBeginInfo* 
                  (active_primary_view_configuration_type_ != active_runtime_view_configuration_type_
                       ? std::string(" (runtime mapped to ") + ToString(active_runtime_view_configuration_type_) + ")"
                       : std::string()));
+
+    // Unmissable, plain-language quadviews state for this session, so it can be
+    // confirmed with a single grep instead of inferring it from view-config names
+    // or the desktop-mirror appearance.
+    if (IsQuadViewsActive()) {
+        if (IsQuadViewConfiguration(active_primary_view_configuration_type_)) {
+            logger_.Info(std::string("Quadviews ACTIVE (foveated inset, ") +
+                         (varjo_compatible_quadviews_active_ ? "Varjo compatible mode)."
+                                                             : "stereo-composite emulation)."));
+        } else {
+            logger_.Info(
+                "Quadviews INACTIVE (application began a STEREO session; it did not select the foveated-inset "
+                "configuration). If you expected quadviews, this usually means the app must be restarted after "
+                "enabling quadviews.");
+        }
+    }
     return result;
 }
 
