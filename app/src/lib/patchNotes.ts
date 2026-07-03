@@ -18,6 +18,8 @@ export const patchNotes: PatchNoteEntry[] = [
       'Pivot continues to work alongside the forwarded native views.',
       'Automatic on supported Varjo headsets when Quadviews is enabled, and a no-op on all other headsets, which keep the existing composite emulation.',
       'Added a Varjo Compatibility note in the Quadviews tab describing which controls apply.',
+      'Added a new registry-based detection mechanism for binding the correct runtime.',
+
     ],
   },
   {
