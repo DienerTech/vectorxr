@@ -472,13 +472,24 @@ float4 PSMain(VSOut input) : SV_Target {
 
 // Constants for the standalone focus sharpen pass (Varjo compatible quadviews).
 struct FocusSharpenConstants {
-    float params[4];   // x = sharpen amount [0,1], y/z = source texel size in UV, w = unused
+    float params[4];   // x = sharpen amount [0,1], y/z = neighbor sample offset in UV, w = unused
     float src_rect[4]; // xy = source UV offset, zw = source UV scale (the focus subImage rect)
 };
 
+// Neighbor sampling radius for the Varjo focus sharpen, in source texels. Unlike the
+// compositor path there is no minification into a smaller output rect here — the focus
+// view is forwarded to the runtime near display-native — so a 1-texel unsharp lands at
+// the runtime's panel-resample Nyquist and gets averaged away (the same reason the
+// compositor path samples at output-pixel spacing; see D3D11QuadViewsShaderSource). A
+// few-texel radius targets the frequencies that survive the resample, reproducing the
+// visible-but-gentle sharpen of the compositor path while the CAS clamp still prevents
+// halos. Tunable; 3.0 matches the effective radius of the compositor path in testing.
+constexpr float kVarjoFocusSharpenRadiusTexels = 3.0f;
+
 // Standalone 1:1 CAS sharpen over a focus view. Unlike the compositor shader this
-// does not blend a peripheral view or resample into a sub-rect — the focus texture
-// is sampled at native density, so neighbours are taken at source-texel spacing.
+// does not blend a peripheral view or resample into a sub-rect. Neighbours are taken
+// at a widened offset (params.yz, a few source texels — see kVarjoFocusSharpenRadiusTexels)
+// so the boost survives the runtime's resample of the focus view onto its panel.
 const char* D3D11FocusSharpenShaderSource() {
     return R"(
 cbuffer FocusSharpenConstants : register(b0) {
@@ -5596,8 +5607,10 @@ void OpenXrLayer::SharpenNativeFocusViews(std::vector<XrCompositionLayerProjecti
 
         FocusSharpenConstants constants{};
         constants.params[0] = static_cast<float>(sharpen_amount);
-        constants.params[1] = 1.0f / static_cast<float>(std::max<uint32_t>(1, src.width));
-        constants.params[2] = 1.0f / static_cast<float>(std::max<uint32_t>(1, src.height));
+        constants.params[1] =
+            kVarjoFocusSharpenRadiusTexels / static_cast<float>(std::max<uint32_t>(1, src.width));
+        constants.params[2] =
+            kVarjoFocusSharpenRadiusTexels / static_cast<float>(std::max<uint32_t>(1, src.height));
         constants.params[3] = 0.0f;
         constants.src_rect[0] =
             static_cast<float>(view.subImage.imageRect.offset.x) / static_cast<float>(std::max<uint32_t>(1, src.width));
@@ -5677,7 +5690,9 @@ void OpenXrLayer::SharpenNativeFocusViews(std::vector<XrCompositionLayerProjecti
     if (sharpened_count > 0 && !d3d11_focus_sharpen_.has_logged_active) {
         logger_.Info("D3D11 focus sharpen active in Varjo compatible quadviews: sharpened " +
                      std::to_string(sharpened_count) + " focus view(s), amount=" +
-                     FormatDiagnosticDouble(sharpen_amount) + " (frameTime=" + std::to_string(display_time) + ").");
+                     FormatDiagnosticDouble(sharpen_amount) + ", radiusTexels=" +
+                     FormatDiagnosticDouble(kVarjoFocusSharpenRadiusTexels) +
+                     " (frameTime=" + std::to_string(display_time) + ").");
         d3d11_focus_sharpen_.has_logged_active = true;
     }
 }
