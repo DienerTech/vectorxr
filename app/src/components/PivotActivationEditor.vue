@@ -14,7 +14,7 @@ const emit = defineEmits<{
 }>()
 
 function updateMode(value: string) {
-  emit('update:activationMode', value === 'hold' ? 'hold' : 'toggle')
+  emit('update:activationMode', value === 'hold' || value === 'alwaysOn' ? value : 'toggle')
 }
 
 </script>
@@ -24,7 +24,9 @@ function updateMode(value: string) {
     :model-value="activationBinding"
     label="Activation"
     :description="description"
-    none-text="No binding assigned. Pivot will not activate until a binding is selected."
+    :none-text="activationMode === 'alwaysOn'
+      ? 'No binding assigned. Pivot stays engaged for the whole session (always on with no suspend key).'
+      : 'No binding assigned. Pivot will not activate until a binding is selected.'"
     @update:model-value="$emit('update:activationBinding', $event)"
   >
     <template #controls>
@@ -33,11 +35,12 @@ function updateMode(value: string) {
         <select
           :value="activationMode"
           class="app-input w-full rounded-[0.75rem] px-4 py-2.5"
-          title="Toggle flips Pivot on each binding press. Hold only applies Pivot while the binding is held down."
+          title="Toggle flips Pivot on each binding press. Hold only applies Pivot while the binding is held down. Always on keeps Pivot engaged automatically; the binding (optional) suspends and resumes it."
           @change="updateMode(($event.target as HTMLSelectElement).value)"
         >
           <option value="toggle">toggle</option>
           <option value="hold">hold</option>
+          <option value="alwaysOn">always on</option>
         </select>
       </label>
     </template>

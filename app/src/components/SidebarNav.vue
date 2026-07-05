@@ -26,7 +26,7 @@ defineEmits<{
 
 const primaryTabs = computed(() => props.tabs.filter((tab) => tab.id === 'home' || tab.id === 'core' || tab.id === 'registry' || tab.id === 'layers' || tab.id === 'about'))
 const moduleTabs = computed(() => {
-  const moduleOrder: AppTab[] = ['quadviews', 'pivotxr', 'depthxr']
+  const moduleOrder: AppTab[] = ['quadviews', 'turbo', 'pivotxr', 'depthxr']
   return moduleOrder
     .map((id) => props.tabs.find((tab) => tab.id === id))
     .filter((tab): tab is NonNullable<typeof tab> => tab !== undefined)

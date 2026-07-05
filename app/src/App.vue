@@ -16,6 +16,7 @@ import HomeTab from './components/tabs/HomeTab.vue'
 import OpenXrLayersTab from './components/tabs/OpenXrLayersTab.vue'
 import PivotXrTab from './components/tabs/PivotXrTab.vue'
 import QuadViewsTab from './components/tabs/QuadViewsTab.vue'
+import TurboTab from './components/tabs/TurboTab.vue'
 import { exportConfigFile, loadLogSnapshot, loadOpenXrLayers, type LogSnapshot, type OpenXrLayerSnapshot } from './lib/commands'
 import { createDebugPackage, saveDebugPackage } from './lib/debugPackage'
 import { buildHealthSummary } from './lib/health'
@@ -108,6 +109,13 @@ const tabs = computed(() => [
     subtitle: 'Dynamic foveated rendering control',
     status: enhancementActive('quadviews') ? 'Active' : 'Inactive',
     enhancementActive: enhancementActive('quadviews'),
+  },
+  {
+    id: 'turbo' as const,
+    label: 'Turbo',
+    subtitle: 'Frame pacing override for stubborn fps caps',
+    status: enhancementActive('turbo') ? 'Active' : 'Inactive',
+    enhancementActive: enhancementActive('turbo'),
   },
   {
     id: 'pivotxr' as const,
@@ -381,12 +389,21 @@ async function confirmResetConfig() {
           @remove-profile="store.removeProfile"
           @sync-profile-name="store.syncProfileName"
         />
+        <TurboTab
+          v-else-if="store.state.activeTab === 'turbo'"
+          :config="store.state.config"
+          :applications="store.state.config.applications"
+          @add-turbo-profile="store.addTurboProfile"
+          @remove-turbo-profile="store.removeTurboProfile"
+          @sync-turbo-profile-name="store.syncTurboProfileName"
+        />
         <PivotXrTab
           v-else-if="store.state.activeTab === 'pivotxr'"
           :config="store.state.config"
           :applications="store.state.config.applications"
           @add-pivot-profile="store.addPivotProfile"
           @remove-pivot-profile="store.removePivotProfile"
+          @move-pivot-profile="store.movePivotProfile"
           @sync-pivot-profile-name="store.syncPivotProfileName"
         />
         <QuadViewsTab

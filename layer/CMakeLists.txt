@@ -123,6 +123,8 @@ if(WIN32 AND DEPTHXR_BUILD_LAYER)
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
                 ${CMAKE_CURRENT_SOURCE_DIR}/assets/sounds/activate.wav
                 ${CMAKE_CURRENT_SOURCE_DIR}/assets/sounds/deactivate.wav
+                ${CMAKE_CURRENT_SOURCE_DIR}/assets/sounds/origin-set.wav
+                ${CMAKE_CURRENT_SOURCE_DIR}/assets/sounds/origin-release.wav
                 $<TARGET_FILE_DIR:XR_APILAYER_DIENERTECH_VECTORXR>/sounds/
     )
 endif()

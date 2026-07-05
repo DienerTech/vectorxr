@@ -329,6 +329,11 @@ struct PivotXRSettings {
     pitch_deadzone_degrees: f64,
     #[serde(default = "default_max_extra_pitch_degrees")]
     max_extra_pitch_degrees: f64,
+    // Newer pivot settings (response mode, stepped params, advanced axes, and
+    // anything added later) round-trip untouched; the frontend and the layer
+    // own their schema.
+    #[serde(flatten)]
+    extra: serde_json::Map<String, serde_json::Value>,
 }
 
 impl Default for PivotXRSettings {
@@ -342,6 +347,7 @@ impl Default for PivotXRSettings {
             pitch_rotation_multiplier: default_pitch_rotation_multiplier(),
             pitch_deadzone_degrees: default_pitch_deadzone_degrees(),
             max_extra_pitch_degrees: default_max_extra_pitch_degrees(),
+            extra: serde_json::Map::new(),
         }
     }
 }
@@ -349,6 +355,8 @@ impl Default for PivotXRSettings {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct PivotXRProfileConfig {
+    #[serde(default)]
+    id: String,
     #[serde(default)]
     name: String,
     #[serde(default = "default_true")]
@@ -361,6 +369,10 @@ struct PivotXRProfileConfig {
     activation_mode: String,
     #[serde(default = "default_activation_binding")]
     activation_binding: InputBinding,
+    #[serde(default = "default_activation_binding")]
+    set_origin_binding: InputBinding,
+    #[serde(default = "default_activation_binding")]
+    release_origin_binding: InputBinding,
     #[serde(default)]
     settings: PivotXRSettings,
 }
@@ -376,6 +388,10 @@ struct PivotXRModuleConfig {
     activation_mode: String,
     #[serde(default = "default_activation_binding")]
     activation_binding: InputBinding,
+    #[serde(default = "default_activation_binding")]
+    set_origin_binding: InputBinding,
+    #[serde(default = "default_activation_binding")]
+    release_origin_binding: InputBinding,
     #[serde(default)]
     profiles: Vec<PivotXRProfileConfig>,
 }
@@ -387,6 +403,8 @@ impl Default for PivotXRModuleConfig {
             defaults: PivotXRSettings::default(),
             activation_mode: default_activation_mode(),
             activation_binding: default_activation_binding(),
+            set_origin_binding: default_activation_binding(),
+            release_origin_binding: default_activation_binding(),
             profiles: Vec::new(),
         }
     }
@@ -473,6 +491,40 @@ impl Default for QuadViewsModuleConfig {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TurboProfileConfig {
+    #[serde(default)]
+    id: String,
+    #[serde(default)]
+    name: String,
+    #[serde(default = "default_true")]
+    enabled: bool,
+    #[serde(default)]
+    application_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TurboModuleConfig {
+    #[serde(default = "default_false")]
+    enabled: bool,
+    #[serde(default = "default_activation_binding")]
+    toggle_binding: InputBinding,
+    #[serde(default)]
+    profiles: Vec<TurboProfileConfig>,
+}
+
+impl Default for TurboModuleConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            toggle_binding: default_activation_binding(),
+            profiles: Vec::new(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 struct VectorXRModules {
@@ -482,6 +534,8 @@ struct VectorXRModules {
     pivotxr: PivotXRModuleConfig,
     #[serde(default)]
     quadviews: QuadViewsModuleConfig,
+    #[serde(default)]
+    turbo: TurboModuleConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1371,16 +1425,25 @@ fn play_test_sound(
     path: Option<String>,
     activate: bool,
     volume: Option<u32>,
+    default_name: Option<String>,
 ) -> Result<(), String> {
     use tauri::Manager;
 
     let resolved = match path {
         Some(value) if !value.trim().is_empty() => PathBuf::from(value),
         _ => {
-            let name = if activate {
-                "sounds/activate.wav"
-            } else {
-                "sounds/deactivate.wav"
+            // default_name selects an action-specific bundled cue; only known
+            // bundled files are honored.
+            let name = match default_name.as_deref() {
+                Some("origin-set.wav") => "sounds/origin-set.wav",
+                Some("origin-release.wav") => "sounds/origin-release.wav",
+                _ => {
+                    if activate {
+                        "sounds/activate.wav"
+                    } else {
+                        "sounds/deactivate.wav"
+                    }
+                }
             };
             app.path()
                 .resolve(name, tauri::path::BaseDirectory::Resource)

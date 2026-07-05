@@ -74,25 +74,7 @@ DepthXrResolvedSettings ResolveDepthXrSettings(const ConfigDocument& config, std
     return resolved;
 }
 
-const PivotXrProfile* FindMatchingPivotXrProfile(const ConfigDocument& config, std::string_view exe_name) {
-    const RegisteredApplication* application = FindMatchingApplication(config, exe_name);
-    if (!application) {
-        return nullptr;
-    }
-
-    for (const PivotXrProfile& profile : config.pivotxr.profiles) {
-        if (!profile.enabled) {
-            continue;
-        }
-
-        if (std::find(profile.application_ids.begin(), profile.application_ids.end(), application->id) != profile.application_ids.end()) {
-            return &profile;
-        }
-    }
-    return nullptr;
-}
-
-void ApplyPivotSettings(PivotXrResolvedSettings& resolved, const PivotXrSettings& settings) {
+void ApplyPivotSettings(PivotXrResolvedProfile& resolved, const PivotXrSettings& settings) {
     resolved.smoothing = settings.smoothing;
     resolved.activation_ramp_seconds = settings.activation_ramp_seconds;
     resolved.yaw_rotation_multiplier = settings.yaw_rotation_multiplier;
@@ -101,23 +83,95 @@ void ApplyPivotSettings(PivotXrResolvedSettings& resolved, const PivotXrSettings
     resolved.pitch_rotation_multiplier = settings.pitch_rotation_multiplier;
     resolved.pitch_deadzone_degrees = settings.pitch_deadzone_degrees;
     resolved.pitch_max_extra_degrees = settings.pitch_max_extra_degrees;
+    resolved.response_mode = settings.response_mode;
+    resolved.step_trigger_degrees = settings.step_trigger_degrees;
+    resolved.step_amount_degrees = settings.step_amount_degrees;
+    resolved.step_hysteresis_degrees = settings.step_hysteresis_degrees;
+
+    // Direction tunings collapse to the symmetric values unless advanced axes
+    // are enabled, so the runtime always reads one shape.
+    if (settings.advanced_axes) {
+        resolved.yaw_positive = settings.yaw_left;
+        resolved.yaw_negative = settings.yaw_right;
+        resolved.pitch_positive = settings.pitch_up;
+        resolved.pitch_negative = settings.pitch_down;
+    } else {
+        const PivotAxisTuning yaw{settings.yaw_rotation_multiplier, settings.yaw_deadzone_degrees,
+                                  settings.yaw_max_extra_degrees};
+        const PivotAxisTuning pitch{settings.pitch_rotation_multiplier, settings.pitch_deadzone_degrees,
+                                    settings.pitch_max_extra_degrees};
+        resolved.yaw_positive = yaw;
+        resolved.yaw_negative = yaw;
+        resolved.pitch_positive = pitch;
+        resolved.pitch_negative = pitch;
+    }
 }
+
+namespace {
+
+// Binding identity for activation arbitration: two profiles collide when the
+// same physical input would trigger both. Sound and display metadata are
+// irrelevant here. Unbound (None) profiles never collide — they simply can't
+// be activated by input.
+bool SameActivationInput(const InputBinding& lhs, const InputBinding& rhs) {
+    if (lhs.type != rhs.type || lhs.type == InputBindingType::None) {
+        return false;
+    }
+    if (lhs.type == InputBindingType::Keyboard) {
+        return lhs.chord == rhs.chord;
+    }
+    return lhs.device_guid == rhs.device_guid && lhs.input_path == rhs.input_path;
+}
+
+} // namespace
 
 PivotXrResolvedSettings ResolvePivotXrSettings(const ConfigDocument& config, std::string_view exe_name) {
     PivotXrResolvedSettings resolved;
-    resolved.enabled = config.pivotxr.enabled;
-    resolved.activation_mode = config.pivotxr.activation_mode;
-    resolved.activation_binding = config.pivotxr.activation_binding;
-    ApplyPivotSettings(resolved, config.pivotxr.defaults);
 
-    const PivotXrProfile* profile = FindMatchingPivotXrProfile(config, exe_name);
-    if (profile) {
-        resolved.enabled = true;
-        resolved.activation_mode = profile->activation_mode;
-        resolved.activation_binding = profile->activation_binding;
-        ApplyPivotSettings(resolved, profile->settings);
+    const RegisteredApplication* application = FindMatchingApplication(config, exe_name);
+    if (application) {
+        for (const PivotXrProfile& profile : config.pivotxr.profiles) {
+            if (!profile.enabled) {
+                continue;
+            }
+            if (std::find(profile.application_ids.begin(), profile.application_ids.end(), application->id) ==
+                profile.application_ids.end()) {
+                continue;
+            }
+
+            const bool binding_shadowed = std::any_of(
+                resolved.profiles.begin(), resolved.profiles.end(), [&](const PivotXrResolvedProfile& earlier) {
+                    return SameActivationInput(earlier.activation_binding, profile.activation_binding);
+                });
+            if (binding_shadowed) {
+                continue;
+            }
+
+            PivotXrResolvedProfile candidate;
+            candidate.name = profile.name;
+            candidate.activation_mode = profile.activation_mode;
+            candidate.activation_binding = profile.activation_binding;
+            candidate.set_origin_binding = profile.set_origin_binding;
+            candidate.release_origin_binding = profile.release_origin_binding;
+            ApplyPivotSettings(candidate, profile.settings);
+            resolved.profiles.push_back(std::move(candidate));
+        }
     }
 
+    // Custom profiles replace the default profile entirely; the default only
+    // participates when no custom profile targets this application.
+    if (resolved.profiles.empty() && config.pivotxr.enabled) {
+        PivotXrResolvedProfile candidate;
+        candidate.name = "Default";
+        candidate.activation_mode = config.pivotxr.activation_mode;
+        candidate.activation_binding = config.pivotxr.activation_binding;
+        candidate.set_origin_binding = config.pivotxr.set_origin_binding;
+        candidate.release_origin_binding = config.pivotxr.release_origin_binding;
+        ApplyPivotSettings(candidate, config.pivotxr.defaults);
+        resolved.profiles.push_back(std::move(candidate));
+    }
+
+    resolved.enabled = !resolved.profiles.empty();
     return resolved;
 }
 
@@ -167,6 +221,28 @@ QuadViewsResolvedSettings ResolveQuadViewsSettings(const ConfigDocument& config,
     return resolved;
 }
 
+TurboResolvedSettings ResolveTurboSettings(const ConfigDocument& config, std::string_view exe_name) {
+    TurboResolvedSettings resolved;
+    resolved.enabled = config.turbo.enabled;
+    resolved.toggle_binding = config.turbo.toggle_binding;
+
+    const RegisteredApplication* application = FindMatchingApplication(config, exe_name);
+    if (application) {
+        for (const TurboProfile& profile : config.turbo.profiles) {
+            if (!profile.enabled) {
+                continue;
+            }
+            if (std::find(profile.application_ids.begin(), profile.application_ids.end(), application->id) !=
+                profile.application_ids.end()) {
+                resolved.enabled = true;
+                break;
+            }
+        }
+    }
+
+    return resolved;
+}
+
 ResolvedRuntimeConfig ResolveRuntimeConfig(const ConfigDocument& config, std::string_view exe_name) {
     ResolvedRuntimeConfig resolved;
     resolved.core = config.core;
@@ -174,6 +250,7 @@ ResolvedRuntimeConfig ResolveRuntimeConfig(const ConfigDocument& config, std::st
     resolved.depthxr_bindings = config.depthxr.bindings;
     resolved.pivotxr = ResolvePivotXrSettings(config, exe_name);
     resolved.quadviews = ResolveQuadViewsSettings(config, exe_name);
+    resolved.turbo = ResolveTurboSettings(config, exe_name);
     return resolved;
 }
 

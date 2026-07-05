@@ -1,7 +1,8 @@
 export type LogLevel = 'info' | 'debug'
-export type ActivationMode = 'toggle' | 'hold'
+export type ActivationMode = 'toggle' | 'hold' | 'alwaysOn'
+export type PivotResponseMode = 'continuous' | 'stepped'
 export type QuadViewsTrackingMode = 'head' | 'eye'
-export type AppTab = 'home' | 'core' | 'registry' | 'layers' | 'about' | 'depthxr' | 'pivotxr' | 'quadviews'
+export type AppTab = 'home' | 'core' | 'registry' | 'layers' | 'about' | 'depthxr' | 'pivotxr' | 'quadviews' | 'turbo'
 export const keyboardBindingKeyGroups = [
   {
     label: 'Function Keys',
@@ -98,6 +99,14 @@ export interface DepthXRModuleConfig {
   profiles: DepthXRProfileConfig[]
 }
 
+// Per-direction tuning used when advanced axes are enabled. "Left"/"up" are
+// the positive yaw/pitch rotation directions.
+export interface PivotAxisTuning {
+  rotationMultiplier: number
+  deadzoneDegrees: number
+  maxExtraDegrees: number
+}
+
 export interface PivotXRSettings {
   smoothing: number
   activationRampSeconds: number
@@ -107,14 +116,33 @@ export interface PivotXRSettings {
   pitchRotationMultiplier: number
   pitchDeadzoneDegrees: number
   maxExtraPitchDegrees: number
+  // Response shaping: continuous multiplier or discrete steps with hysteresis.
+  responseMode: PivotResponseMode
+  stepTriggerDegrees: number
+  stepAmountDegrees: number
+  stepHysteresisDegrees: number
+  // When true, continuous mode tunes each direction independently.
+  advancedAxes: boolean
+  yawLeft: PivotAxisTuning
+  yawRight: PivotAxisTuning
+  pitchUp: PivotAxisTuning
+  pitchDown: PivotAxisTuning
 }
 
 export interface PivotXRProfileConfig {
+  // Stable identifier: keeps list rendering and profile references intact when
+  // profiles are reordered (array order is runtime priority order).
+  id: string
   name: string
   enabled: boolean
   applicationIds: string[]
   activationMode: ActivationMode
   activationBinding: InputBinding
+  // Optional origin bindings: set-origin captures the current head yaw/pitch as
+  // Pivot's neutral forward (bind it alongside the game's own recenter);
+  // release-origin restores the default HMD origin.
+  setOriginBinding: InputBinding
+  releaseOriginBinding: InputBinding
   settings: PivotXRSettings
 }
 
@@ -123,6 +151,8 @@ export interface PivotXRModuleConfig {
   defaults: PivotXRSettings
   activationMode: ActivationMode
   activationBinding: InputBinding
+  setOriginBinding: InputBinding
+  releaseOriginBinding: InputBinding
   profiles: PivotXRProfileConfig[]
 }
 
@@ -153,6 +183,21 @@ export interface QuadViewsModuleConfig {
   profiles: QuadViewsProfileConfig[]
 }
 
+// Turbo mode: overrides runtime frame pacing. Binary per application —
+// profiles carry no settings, only which applications they enable turbo for.
+export interface TurboProfileConfig {
+  id: string
+  name: string
+  enabled: boolean
+  applicationIds: string[]
+}
+
+export interface TurboModuleConfig {
+  enabled: boolean
+  toggleBinding: InputBinding
+  profiles: TurboProfileConfig[]
+}
+
 export interface VectorXRConfig {
   version: 3
   core: CoreConfig
@@ -161,6 +206,7 @@ export interface VectorXRConfig {
     depthxr: DepthXRModuleConfig
     pivotxr: PivotXRModuleConfig
     quadviews: QuadViewsModuleConfig
+    turbo: TurboModuleConfig
   }
 }
 
@@ -270,6 +316,14 @@ export function createApplication(exe = 'Game.exe', applications: RegisteredAppl
   }
 }
 
+export function defaultPivotAxisTuning(): PivotAxisTuning {
+  return {
+    rotationMultiplier: 1.5,
+    deadzoneDegrees: 8,
+    maxExtraDegrees: 120,
+  }
+}
+
 export function defaultPivotXRSettings(): PivotXRSettings {
   return {
     smoothing: 0.2,
@@ -280,6 +334,15 @@ export function defaultPivotXRSettings(): PivotXRSettings {
     pitchRotationMultiplier: 1.5,
     pitchDeadzoneDegrees: 8,
     maxExtraPitchDegrees: 120,
+    responseMode: 'continuous',
+    stepTriggerDegrees: 10,
+    stepAmountDegrees: 10,
+    stepHysteresisDegrees: 4,
+    advancedAxes: false,
+    yawLeft: defaultPivotAxisTuning(),
+    yawRight: defaultPivotAxisTuning(),
+    pitchUp: defaultPivotAxisTuning(),
+    pitchDown: defaultPivotAxisTuning(),
   }
 }
 
@@ -348,11 +411,18 @@ export function defaultConfig(): VectorXRConfig {
         defaults: defaultPivotXRSettings(),
         activationMode: 'toggle',
         activationBinding: defaultNoneBinding(),
+        setOriginBinding: defaultNoneBinding(),
+        releaseOriginBinding: defaultNoneBinding(),
         profiles: [],
       },
       quadviews: {
         enabled: false,
         defaults: defaultQuadViewsSettings(),
+        profiles: [],
+      },
+      turbo: {
+        enabled: false,
+        toggleBinding: defaultNoneBinding(),
         profiles: [],
       },
     },
@@ -383,6 +453,10 @@ export function createProfile(defaultSettings: DepthXRSettings, applicationIds: 
   }
 }
 
+export function newPivotProfileId(): string {
+  return `pivot-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
+}
+
 export function createPivotProfile(
   defaultSettings: PivotXRSettings,
   applicationIds: string[] = [],
@@ -390,11 +464,14 @@ export function createPivotProfile(
   activationBinding: InputBinding = defaultNoneBinding(),
 ): PivotXRProfileConfig {
   return {
+    id: newPivotProfileId(),
     name: 'New Profile',
     enabled: true,
     applicationIds,
     activationMode,
     activationBinding: normalizeInputBinding(activationBinding, defaultNoneBinding()),
+    setOriginBinding: defaultNoneBinding(),
+    releaseOriginBinding: defaultNoneBinding(),
     settings: { ...defaultSettings },
   }
 }
@@ -405,6 +482,19 @@ export function createQuadViewsProfile(defaultSettings: QuadViewsSettings, appli
     enabled: true,
     applicationIds,
     settings: { ...defaultSettings },
+  }
+}
+
+export function newTurboProfileId(): string {
+  return `turbo-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
+}
+
+export function createTurboProfile(applicationIds: string[] = []): TurboProfileConfig {
+  return {
+    id: newTurboProfileId(),
+    name: 'New Profile',
+    enabled: true,
+    applicationIds,
   }
 }
 
@@ -421,6 +511,16 @@ function normalizeDepthXRSettings(value: unknown, fallback: DepthXRSettings): De
   }
 }
 
+function normalizePivotAxisTuning(value: unknown, fallback: PivotAxisTuning): PivotAxisTuning {
+  const source = isRecord(value) ? value : {}
+
+  return {
+    rotationMultiplier: normalizeNumber(source.rotationMultiplier, fallback.rotationMultiplier),
+    deadzoneDegrees: normalizeNumber(source.deadzoneDegrees, fallback.deadzoneDegrees),
+    maxExtraDegrees: normalizeNumber(source.maxExtraDegrees, fallback.maxExtraDegrees),
+  }
+}
+
 function normalizePivotXRSettings(value: unknown, fallback: PivotXRSettings): PivotXRSettings {
   const source = isRecord(value) ? value : {}
 
@@ -433,7 +533,23 @@ function normalizePivotXRSettings(value: unknown, fallback: PivotXRSettings): Pi
     pitchRotationMultiplier: normalizeNumber(source.pitchRotationMultiplier, fallback.pitchRotationMultiplier),
     pitchDeadzoneDegrees: normalizeNumber(source.pitchDeadzoneDegrees, fallback.pitchDeadzoneDegrees),
     maxExtraPitchDegrees: normalizeNumber(source.maxExtraPitchDegrees, fallback.maxExtraPitchDegrees),
+    responseMode: source.responseMode === 'stepped' ? 'stepped' : fallback.responseMode,
+    stepTriggerDegrees: normalizeNumber(source.stepTriggerDegrees, fallback.stepTriggerDegrees),
+    stepAmountDegrees: normalizeNumber(source.stepAmountDegrees, fallback.stepAmountDegrees),
+    stepHysteresisDegrees: normalizeNumber(source.stepHysteresisDegrees, fallback.stepHysteresisDegrees),
+    advancedAxes: normalizeBoolean(source.advancedAxes, fallback.advancedAxes),
+    yawLeft: normalizePivotAxisTuning(source.yawLeft, fallback.yawLeft),
+    yawRight: normalizePivotAxisTuning(source.yawRight, fallback.yawRight),
+    pitchUp: normalizePivotAxisTuning(source.pitchUp, fallback.pitchUp),
+    pitchDown: normalizePivotAxisTuning(source.pitchDown, fallback.pitchDown),
   }
+}
+
+function normalizeActivationMode(value: unknown): ActivationMode {
+  if (value === 'hold' || value === 'alwaysOn') {
+    return value
+  }
+  return 'toggle'
 }
 
 function normalizeQuadViewsTrackingMode(value: unknown, fallback: QuadViewsTrackingMode): QuadViewsTrackingMode {
@@ -635,9 +751,11 @@ function normalizeVectorXRConfig(value: unknown): VectorXRConfig {
   const depthxr = isRecord(modules.depthxr) ? modules.depthxr : {}
   const pivotxr = isRecord(modules.pivotxr) ? modules.pivotxr : {}
   const quadviews = isRecord(modules.quadviews) ? modules.quadviews : {}
+  const turbo = isRecord(modules.turbo) ? modules.turbo : {}
   const depthProfileValues = Array.isArray(depthxr.profiles) ? depthxr.profiles : []
   const pivotProfileValues = Array.isArray(pivotxr.profiles) ? pivotxr.profiles : []
   const quadViewsProfileValues = Array.isArray(quadviews.profiles) ? quadviews.profiles : []
+  const turboProfileValues = Array.isArray(turbo.profiles) ? turbo.profiles : []
   const applicationValues = Array.isArray(source.applications) ? source.applications : []
   const applications: RegisteredApplication[] = []
 
@@ -684,20 +802,26 @@ function normalizeVectorXRConfig(value: unknown): VectorXRConfig {
       pivotxr: {
         enabled: normalizeBoolean(pivotxr.enabled, fallback.modules.pivotxr.enabled),
         defaults: pivotDefaults,
-        activationMode: pivotxr.activationMode === 'hold' ? 'hold' : 'toggle',
+        activationMode: normalizeActivationMode(pivotxr.activationMode),
         activationBinding: normalizeInputBinding(pivotxr.activationBinding, fallback.modules.pivotxr.activationBinding),
+        setOriginBinding: normalizeInputBinding(pivotxr.setOriginBinding, defaultNoneBinding()),
+        releaseOriginBinding: normalizeInputBinding(pivotxr.releaseOriginBinding, defaultNoneBinding()),
         profiles: pivotProfileValues.map((profileValue) => {
           const profile = isRecord(profileValue) ? profileValue : {}
           const settings = normalizePivotXRSettings(profile.settings, pivotDefaults)
           const applicationIds = applicationIdsFromProfile(profile, applications)
-          const activationMode = profile.activationMode === 'hold' ? 'hold' : 'toggle'
+          const activationMode = normalizeActivationMode(profile.activationMode)
+          const id = normalizeString(profile.id, '').trim() || newPivotProfileId()
 
           return {
+            id,
             name: normalizeString(profile.name, 'New Profile'),
             enabled: normalizeBoolean(profile.enabled, true),
             applicationIds,
             activationMode,
             activationBinding: normalizeInputBinding(profile.activationBinding, defaultNoneBinding()),
+            setOriginBinding: normalizeInputBinding(profile.setOriginBinding, defaultNoneBinding()),
+            releaseOriginBinding: normalizeInputBinding(profile.releaseOriginBinding, defaultNoneBinding()),
             settings,
           }
         }),
@@ -718,6 +842,22 @@ function normalizeVectorXRConfig(value: unknown): VectorXRConfig {
           }
         }),
       },
+      turbo: {
+        enabled: normalizeBoolean(turbo.enabled, fallback.modules.turbo.enabled),
+        toggleBinding: normalizeInputBinding(turbo.toggleBinding, fallback.modules.turbo.toggleBinding),
+        profiles: turboProfileValues.map((profileValue) => {
+          const profile = isRecord(profileValue) ? profileValue : {}
+          const applicationIds = applicationIdsFromProfile(profile, applications)
+          const id = normalizeString(profile.id, '').trim() || newTurboProfileId()
+
+          return {
+            id,
+            name: normalizeString(profile.name, 'New Profile'),
+            enabled: normalizeBoolean(profile.enabled, true),
+            applicationIds,
+          }
+        }),
+      },
     },
   }
 }
@@ -734,12 +874,13 @@ export function cloneConfig(config: VectorXRConfig): VectorXRConfig {
   return JSON.parse(JSON.stringify(config)) as VectorXRConfig
 }
 
-export type ModuleId = 'depthxr' | 'pivotxr' | 'quadviews'
+export type ModuleId = 'depthxr' | 'pivotxr' | 'quadviews' | 'turbo'
 
 export const moduleLabels: Record<ModuleId, string> = {
   depthxr: 'Depth',
   pivotxr: 'Pivot',
   quadviews: 'Quadviews',
+  turbo: 'Turbo',
 }
 
 export interface ModuleApplicationState {
@@ -752,7 +893,7 @@ export interface ModuleApplicationState {
 export function moduleStateForApplication(config: VectorXRConfig, moduleId: ModuleId, applicationId: string): ModuleApplicationState {
   const module = config.modules[moduleId]
 
-  const profiles: Array<DepthXRProfileConfig | PivotXRProfileConfig | QuadViewsProfileConfig> = module.profiles
+  const profiles: Array<DepthXRProfileConfig | PivotXRProfileConfig | QuadViewsProfileConfig | TurboProfileConfig> = module.profiles
   for (const [index, profile] of profiles.entries()) {
     if (!profile.enabled || !profile.applicationIds.includes(applicationId)) {
       continue

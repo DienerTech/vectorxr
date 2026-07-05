@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
 
-import PivotActivationEditor from '../PivotActivationEditor.vue'
+import PivotBindingsPanel from '../PivotBindingsPanel.vue'
 import PivotSettingsFields from '../PivotSettingsFields.vue'
 import ProfileShell from '../ProfileShell.vue'
 import type { RegisteredApplication, VectorXRConfig } from '../../lib/model'
@@ -15,6 +15,7 @@ const props = defineProps<{
 defineEmits<{
   addPivotProfile: []
   removePivotProfile: [index: number]
+  movePivotProfile: [index: number, direction: -1 | 1]
   syncPivotProfileName: [index: number]
 }>()
 
@@ -43,7 +44,7 @@ const profileWarnings = computed(() => {
       for (const applicationId of a.profile.applicationIds) {
         if (b.profile.applicationIds.includes(applicationId)) {
           const appName = applicationNameById.get(applicationId) ?? applicationId
-          const message = `${appName} shares binding ${labelA} with Profile ${b.index + 1}. First active profile executes.`
+          const message = `For ${appName}, binding ${labelA} is owned by the higher-priority "${b.profile.name}" (Profile ${b.index + 1}); it will not activate this profile. Reorder the profiles or pick a different binding.`
           warnings.set(a.index, [...(warnings.get(a.index) ?? []), message])
           break
         }
@@ -104,11 +105,13 @@ const profileWarnings = computed(() => {
           Default Profile {{ config.modules.pivotxr.enabled ? 'On' : 'Off' }}
         </label>
 
-        <PivotActivationEditor
+        <PivotBindingsPanel
           v-model:activation-mode="config.modules.pivotxr.activationMode"
           v-model:activation-binding="config.modules.pivotxr.activationBinding"
+          v-model:set-origin-binding="config.modules.pivotxr.setOriginBinding"
+          v-model:release-origin-binding="config.modules.pivotxr.releaseOriginBinding"
           class="mb-3 mt-3"
-          description="Choose how the default Pivot profile activates when no custom profile targets the current application."
+          context-label="Default Profile"
         />
 
         <PivotSettingsFields :settings="config.modules.pivotxr.defaults" />
@@ -120,7 +123,9 @@ const profileWarnings = computed(() => {
       <div class="flex flex-wrap items-center justify-between gap-3 rounded-[1rem] border px-4 py-3 surface-panel">
         <div>
           <h2 class="text-lg font-semibold tracking-tight">Custom Profiles</h2>
-          <p class="text-sm text-muted">Override Pivot per application. The first enabled matching profile wins.</p>
+          <p class="text-sm text-muted">
+            Override Pivot per application. Several profiles can target the same title with different bindings — the binding you press picks the profile. Order sets priority when bindings collide.
+          </p>
         </div>
         <button
           class="button-accent rounded-[0.75rem] px-5 py-2.5 text-sm font-medium"
@@ -133,20 +138,25 @@ const profileWarnings = computed(() => {
 
       <ProfileShell
         v-for="(profile, index) in config.modules.pivotxr.profiles"
-        :key="`pivot-profile-${index}`"
+        :key="profile.id"
         :index="index"
         :profile="profile"
         :applications="applications"
         module-label="Pivot"
-        warning-title="Binding conflict"
+        warning-title="Binding shadowed"
         :warnings="profileWarnings.get(index)"
+        reorderable
+        :profile-count="config.modules.pivotxr.profiles.length"
         @remove="$emit('removePivotProfile', index)"
+        @move="$emit('movePivotProfile', index, $event)"
         @sync-name="$emit('syncPivotProfileName', index)"
       >
-        <PivotActivationEditor
+        <PivotBindingsPanel
           v-model:activation-mode="profile.activationMode"
           v-model:activation-binding="profile.activationBinding"
-          description="Choose a keyboard shortcut or capture a joystick button for this profile."
+          v-model:set-origin-binding="profile.setOriginBinding"
+          v-model:release-origin-binding="profile.releaseOriginBinding"
+          :context-label="profile.name || `Profile ${index + 1}`"
         />
 
         <PivotSettingsFields class="mt-3" :settings="profile.settings" />
@@ -210,7 +220,7 @@ const profileWarnings = computed(() => {
 
         <div class="mt-5 space-y-4 text-sm leading-6">
           <div class="rounded-[1rem] border px-4 py-4 surface-panel">
-            Pivot rotates around your headset's center point, not the game's. These are two separate concepts of "forward," and Pivot always uses the HMD one.
+            Pivot rotates around your headset's center point, not the game's. These are two separate concepts of "forward," and by default Pivot uses the HMD one.
           </div>
 
           <div class="rounded-[1rem] border px-4 py-4 chip-warning" style="border-color: var(--app-border)">
@@ -218,7 +228,11 @@ const profileWarnings = computed(() => {
           </div>
 
           <div class="rounded-[1rem] border px-4 py-4 surface-panel">
-            To fix it, recenter your HMD first, then recenter your view in the game. Doing both, in that order, re-aligns the two centers so Pivot rotates evenly around where you are actually looking.
+            The best fix: assign the optional <strong>Set Origin</strong> binding (under Edit Bindings) to the same button you use to recenter the view in-game. Every recenter then updates both origins together, so they can never drift apart.
+          </div>
+
+          <div class="rounded-[1rem] border px-4 py-4 surface-panel">
+            Without a Set Origin binding, you can re-align manually: recenter your HMD first, then recenter your view in the game. Doing both, in that order, re-aligns the two centers so Pivot rotates evenly around where you are actually looking.
           </div>
         </div>
       </div>

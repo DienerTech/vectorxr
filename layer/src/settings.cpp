@@ -65,6 +65,8 @@ const char* ToString(ActivationMode mode) {
         return "toggle";
     case ActivationMode::Hold:
         return "hold";
+    case ActivationMode::AlwaysOn:
+        return "alwaysOn";
     default:
         return "toggle";
     }
@@ -78,6 +80,33 @@ std::optional<ActivationMode> ParseActivationMode(const std::string& value) {
     }
     if (normalized == "hold") {
         return ActivationMode::Hold;
+    }
+    if (normalized == "alwayson" || normalized == "always_on" || normalized == "always-on") {
+        return ActivationMode::AlwaysOn;
+    }
+
+    return std::nullopt;
+}
+
+const char* ToString(PivotResponseMode mode) {
+    switch (mode) {
+    case PivotResponseMode::Continuous:
+        return "continuous";
+    case PivotResponseMode::Stepped:
+        return "stepped";
+    default:
+        return "continuous";
+    }
+}
+
+std::optional<PivotResponseMode> ParsePivotResponseMode(const std::string& value) {
+    const std::string normalized = NormalizeValue(value);
+
+    if (normalized == "continuous") {
+        return PivotResponseMode::Continuous;
+    }
+    if (normalized == "stepped") {
+        return PivotResponseMode::Stepped;
     }
 
     return std::nullopt;

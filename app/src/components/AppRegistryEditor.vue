@@ -21,7 +21,7 @@ defineEmits<{
   openModule: [moduleId: ModuleId, applicationId: string]
 }>()
 
-const moduleIds: ModuleId[] = ['quadviews', 'pivotxr', 'depthxr']
+const moduleIds: ModuleId[] = ['quadviews', 'turbo', 'pivotxr', 'depthxr']
 
 function moduleChip(applicationId: string, moduleId: ModuleId) {
   const moduleState = moduleStateForApplication(props.config, moduleId, applicationId)

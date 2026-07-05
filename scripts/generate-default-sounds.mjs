@@ -11,6 +11,8 @@ const BITS_PER_SAMPLE = 16
 const AMPLITUDE = 0.35
 
 // One pair of notes per cue. Rising = activate (engaging), falling = deactivate.
+// The origin cues are shorter and higher — a mechanical "latch" click distinct
+// from the melodic engage/disengage pair.
 const cues = {
   activate: [
     { freq: 587.33, ms: 70 }, // D5
@@ -19,6 +21,14 @@ const cues = {
   deactivate: [
     { freq: 880.0, ms: 70 },
     { freq: 587.33, ms: 110 },
+  ],
+  'origin-set': [
+    { freq: 1046.5, ms: 40 }, // C6
+    { freq: 1568.0, ms: 55 }, // G6
+  ],
+  'origin-release': [
+    { freq: 1568.0, ms: 40 },
+    { freq: 1046.5, ms: 55 },
   ],
 }
 

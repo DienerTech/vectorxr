@@ -17,11 +17,16 @@ const props = defineProps<{
   moduleLabel: string
   warningTitle?: string
   warnings?: string[]
+  // When set, shows priority reorder controls. Array order is priority order:
+  // earlier profiles win contested bindings for a shared application.
+  reorderable?: boolean
+  profileCount?: number
 }>()
 
 defineEmits<{
   remove: []
   syncName: []
+  move: [direction: -1 | 1]
 }>()
 
 const editingName = ref(false)
@@ -57,6 +62,30 @@ const editingName = ref(false)
       </div>
 
       <div class="flex flex-wrap items-center gap-2">
+        <div v-if="reorderable" class="flex items-center gap-1" title="Priority order — when profiles overlap on an application, the higher profile owns any binding they share.">
+          <button
+            class="button-secondary inline-flex h-8 w-8 items-center justify-center rounded-[0.5rem] disabled:cursor-not-allowed disabled:opacity-35"
+            type="button"
+            aria-label="Move profile up (higher priority)"
+            :disabled="index === 0"
+            @click="$emit('move', -1)"
+          >
+            <svg aria-hidden="true" class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="currentColor">
+              <path fill-rule="evenodd" d="M5.2 12.8a1 1 0 0 1 0-1.4l4.1-4.1a1 1 0 0 1 1.4 0l4.1 4.1a1 1 0 1 1-1.4 1.4L10 9.4l-3.4 3.4a1 1 0 0 1-1.4 0Z" clip-rule="evenodd" />
+            </svg>
+          </button>
+          <button
+            class="button-secondary inline-flex h-8 w-8 items-center justify-center rounded-[0.5rem] disabled:cursor-not-allowed disabled:opacity-35"
+            type="button"
+            aria-label="Move profile down (lower priority)"
+            :disabled="profileCount !== undefined && index >= profileCount - 1"
+            @click="$emit('move', 1)"
+          >
+            <svg aria-hidden="true" class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="currentColor">
+              <path fill-rule="evenodd" d="M14.8 7.2a1 1 0 0 1 0 1.4l-4.1 4.1a1 1 0 0 1-1.4 0L5.2 8.6a1 1 0 1 1 1.4-1.4L10 10.6l3.4-3.4a1 1 0 0 1 1.4 0Z" clip-rule="evenodd" />
+            </svg>
+          </button>
+        </div>
         <label
           class="pill-toggle inline-flex items-center gap-3 rounded-full px-4 py-2 text-sm font-medium"
           :title="profile.enabled ? `This profile applies custom ${moduleLabel} settings to its assigned applications.` : `This profile is ignored at runtime.`"
