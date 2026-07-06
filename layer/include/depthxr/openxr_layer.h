@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <filesystem>
@@ -298,9 +299,21 @@ class OpenXrLayer {
     // must run before teardown that could strand the wait thread.
     bool IsTurboActive();
     void ResetTurboToggleState();
-    XrResult ForwardEndFrame(XrSession session, const XrFrameEndInfo* frame_end_info);
+    // Releases config_lock (mutex_) before any blocking runtime call so
+    // xrLocateViews/xrLocateSpace from other app threads are never serialized
+    // behind the compositor pacing wait. Call as the tail of EndFrame only.
+    XrResult ForwardEndFrame(XrSession session,
+                             const XrFrameEndInfo* frame_end_info,
+                             std::unique_lock<std::mutex>& config_lock);
     void DrainTurboAsyncWait();
     void ResetTurboFrameState();
+    // Frame pacing telemetry: logs a summary line (debug level) every ~5s so a
+    // judder report can be localized to our drain, the runtime's end-frame, the
+    // runtime's wait pacing, or upstream of the layer entirely.
+    void RecordFramePacing(std::chrono::steady_clock::time_point frame_start,
+                           std::chrono::steady_clock::time_point after_drain,
+                           std::chrono::steady_clock::time_point after_end,
+                           bool turbo_engaged);
     bool IsQuadViewsActive() const;
     void ResetSwapchainState();
     void LogSwapchainSummary(XrSwapchain swapchain, const SwapchainInfo& info, std::string_view event_name);
@@ -499,6 +512,34 @@ class OpenXrLayer {
     // first fabricated xrWaitFrame returns of each cycle.
     bool turbo_pipelining_logged_{false};
     int turbo_fabricated_wait_log_budget_{0};
+    // Self-healing: some runtimes interlock xrWaitFrame with the next submit
+    // (observed on Pimax's PiOpenXR when GPU-bound) so the pipelined wait
+    // stalls until our drain timeout every frame. Timeouts are counted in a
+    // rolling window (they interleave with clean frames, so a consecutive
+    // streak never trips); past the threshold turbo suspends itself for the
+    // session and the toggle binding re-arms it.
+    int turbo_drain_timeout_count_{0};
+    std::optional<std::chrono::steady_clock::time_point> turbo_timeout_window_start_;
+    std::atomic<bool> turbo_auto_suspended_{false};
+
+    // Frame pacing telemetry (debug log level): quantifies judder sources by
+    // timing the frame loop. EndFrame-side fields are only touched from the
+    // app's frame-submission thread (frame calls are app-serialized);
+    // WaitFrame-side counters live under turbo_mutex_.
+    std::optional<std::chrono::steady_clock::time_point> pacing_last_end_time_;
+    std::optional<std::chrono::steady_clock::time_point> pacing_window_start_;
+    uint32_t pacing_frames_{0};
+    double pacing_delta_sum_ms_{0.0};
+    double pacing_delta_max_ms_{0.0};
+    double pacing_drain_sum_ms_{0.0};
+    double pacing_drain_max_ms_{0.0};
+    double pacing_end_sum_ms_{0.0};
+    double pacing_end_max_ms_{0.0};
+    // Guarded by turbo_mutex_.
+    double pacing_wait_sum_ms_{0.0};
+    double pacing_wait_max_ms_{0.0};
+    uint32_t pacing_wait_samples_{0};
+    uint32_t pacing_fabricated_waits_{0};
     bool quad_views_extension_requested_{false};
     bool varjo_foveated_rendering_extension_requested_{false};
     bool eye_gaze_extension_enabled_{false};

@@ -13,9 +13,10 @@ const props = defineProps<{
   // 'single' hides the deactivate sound row for momentary actions (e.g. set
   // origin) that only ever fire an activate cue.
   soundMode?: 'transition' | 'single'
-  // Bundled default WAV used when the sound path is empty; lets actions with
-  // their own cue (origin set/release) test the right default tone.
-  defaultSoundName?: string
+  // Bundled default WAVs used when a sound path is empty; let actions with
+  // their own cues (origin set/release, turbo on/off) test the right default.
+  defaultActivateSound?: string
+  defaultDeactivateSound?: string
 }>()
 
 const emit = defineEmits<{
@@ -66,7 +67,8 @@ async function browseSound(which: SoundPath) {
 async function testSound(which: SoundPath) {
   soundError.value = ''
   try {
-    await playTestSound(sound.value?.[which] ?? '', which === 'activateSound', 100, props.defaultSoundName)
+    const defaultName = which === 'activateSound' ? props.defaultActivateSound : props.defaultDeactivateSound
+    await playTestSound(sound.value?.[which] ?? '', which === 'activateSound', 100, defaultName)
   } catch (error) {
     soundError.value = error instanceof Error ? error.message : 'Failed to play sound.'
   }

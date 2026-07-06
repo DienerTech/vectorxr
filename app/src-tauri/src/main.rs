@@ -1437,6 +1437,8 @@ fn play_test_sound(
             let name = match default_name.as_deref() {
                 Some("origin-set.wav") => "sounds/origin-set.wav",
                 Some("origin-release.wav") => "sounds/origin-release.wav",
+                Some("turbo-on.wav") => "sounds/turbo-on.wav",
+                Some("turbo-off.wav") => "sounds/turbo-off.wav",
                 _ => {
                     if activate {
                         "sounds/activate.wav"

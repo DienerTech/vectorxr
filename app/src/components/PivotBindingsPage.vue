@@ -79,7 +79,7 @@ onUnmounted(() => {
           description="Captures the current head yaw and pitch as Pivot's neutral forward. Bind this to the same button you use to recenter the view in-game so both origins update together. Until it is pressed, Pivot uses the HMD origin."
           none-text="No binding assigned. Pivot rotates around the HMD origin (the default)."
           sound-mode="single"
-          default-sound-name="origin-set.wav"
+          default-activate-sound="origin-set.wav"
         />
 
         <BindingEditor
@@ -88,7 +88,7 @@ onUnmounted(() => {
           description="Clears a captured origin and returns Pivot to the HMD origin. Useful if an origin was captured while looking off-center."
           none-text="No binding assigned. A captured origin stays active until the session ends or it is recaptured."
           sound-mode="single"
-          default-sound-name="origin-release.wav"
+          default-activate-sound="origin-release.wav"
         />
       </div>
 

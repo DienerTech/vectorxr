@@ -59,22 +59,24 @@ const chips = computed(() => {
 
 <template>
   <div class="rounded-[1rem] border p-4 surface-panel-soft">
-    <div class="flex flex-wrap items-center justify-between gap-3">
-      <div class="flex min-w-0 flex-wrap items-center gap-2">
+    <!-- items-start + shrink-0 keep the edit button pinned top-right, aligned
+         with the bindings row's button regardless of chip wrapping. -->
+    <div class="flex items-start justify-between gap-3">
+      <div class="flex min-w-0 flex-1 flex-wrap items-center gap-2">
         <p class="shrink-0 text-sm font-semibold tracking-tight">Rotation</p>
         <span
           v-for="chip in chips"
           :key="chip.label"
-          class="inline-flex items-center gap-1.5 rounded-full border px-3 py-1 text-xs font-medium"
+          class="inline-flex items-center gap-1.5 rounded-full border px-3 py-1 text-xs"
           style="border-color: var(--app-border)"
           :title="chip.title"
         >
-          <span class="text-muted">{{ chip.label }}</span>
-          {{ chip.value }}
+          <span class="font-semibold">{{ chip.label }}</span>
+          <span class="text-muted">{{ chip.value }}</span>
         </span>
       </div>
 
-      <button class="button-secondary rounded-[0.75rem] px-4 py-2 text-sm font-medium" type="button" @click="$emit('edit')">
+      <button class="button-secondary shrink-0 rounded-[0.75rem] px-4 py-2 text-sm font-medium" type="button" @click="$emit('edit')">
         Edit Settings…
       </button>
     </div>

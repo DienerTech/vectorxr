@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, nextTick, ref } from 'vue'
 
 import PivotBindingsPage from '../PivotBindingsPage.vue'
 import PivotBindingsPanel from '../PivotBindingsPanel.vue'
@@ -64,6 +64,32 @@ function profileContextLabel(target: 'default' | number | null): string {
   return profile?.name?.trim() || `Profile ${target + 1}`
 }
 
+// Sub-page navigation preserves the main page's scroll position, so returning
+// lands on the profile that was being edited instead of the top of the page.
+let savedScrollTop = 0
+
+function pageScroller(): Element | null {
+  return document.querySelector('main section.overflow-y-auto')
+}
+
+function openBindings(target: 'default' | number) {
+  savedScrollTop = pageScroller()?.scrollTop ?? 0
+  bindingsTarget.value = target
+  void nextTick(() => pageScroller()?.scrollTo({ top: 0 }))
+}
+
+function openSettings(target: 'default' | number) {
+  savedScrollTop = pageScroller()?.scrollTop ?? 0
+  settingsTarget.value = target
+  void nextTick(() => pageScroller()?.scrollTo({ top: 0 }))
+}
+
+function closeSubPages() {
+  bindingsTarget.value = null
+  settingsTarget.value = null
+  void nextTick(() => pageScroller()?.scrollTo({ top: savedScrollTop }))
+}
+
 const profileWarnings = computed(() => {
   const warnings = new Map<number, string[]>()
   const applicationNameById = new Map(props.applications.map((application) => [application.id, application.name]))
@@ -103,13 +129,13 @@ const profileWarnings = computed(() => {
     v-if="bindingsSubject"
     :subject="bindingsSubject"
     :context-label="bindingsContextLabel"
-    @close="bindingsTarget = null"
+    @close="closeSubPages"
   />
   <PivotSettingsPage
     v-else-if="settingsSubject"
     :settings="settingsSubject"
     :context-label="settingsContextLabel"
-    @close="settingsTarget = null"
+    @close="closeSubPages"
   />
   <div v-else class="space-y-4">
     <!-- Module header + defaults -->
@@ -159,16 +185,19 @@ const profileWarnings = computed(() => {
           Default Profile {{ config.modules.pivotxr.enabled ? 'On' : 'Off' }}
         </label>
 
-        <PivotBindingsPanel
-          :activation-mode="config.modules.pivotxr.activationMode"
-          :activation-binding="config.modules.pivotxr.activationBinding"
-          :set-origin-binding="config.modules.pivotxr.setOriginBinding"
-          :release-origin-binding="config.modules.pivotxr.releaseOriginBinding"
-          class="mb-3 mt-3"
-          @edit="bindingsTarget = 'default'"
-        />
+        <!-- Greyed when the default profile is off: these bindings/settings are inert then. -->
+        <div class="mt-3" :class="config.modules.pivotxr.enabled ? '' : 'pointer-events-none opacity-50'">
+          <PivotBindingsPanel
+            :activation-mode="config.modules.pivotxr.activationMode"
+            :activation-binding="config.modules.pivotxr.activationBinding"
+            :set-origin-binding="config.modules.pivotxr.setOriginBinding"
+            :release-origin-binding="config.modules.pivotxr.releaseOriginBinding"
+            class="mb-3"
+            @edit="openBindings('default')"
+          />
 
-        <PivotSettingsSummary :settings="config.modules.pivotxr.defaults" @edit="settingsTarget = 'default'" />
+          <PivotSettingsSummary :settings="config.modules.pivotxr.defaults" @edit="openSettings('default')" />
+        </div>
       </details>
     </article>
 
@@ -214,10 +243,10 @@ const profileWarnings = computed(() => {
             :activation-binding="profile.activationBinding"
             :set-origin-binding="profile.setOriginBinding"
             :release-origin-binding="profile.releaseOriginBinding"
-            @edit="bindingsTarget = index"
+            @edit="openBindings(index)"
           />
 
-          <PivotSettingsSummary class="mt-3" :settings="profile.settings" @edit="settingsTarget = index" />
+          <PivotSettingsSummary class="mt-3" :settings="profile.settings" @edit="openSettings(index)" />
         </ProfileShell>
       </TransitionGroup>
 

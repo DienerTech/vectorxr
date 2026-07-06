@@ -30,6 +30,18 @@ const cues = {
     { freq: 1568.0, ms: 40 },
     { freq: 1046.5, ms: 55 },
   ],
+  // Turbo: a three-note "spool up" arpeggio, clearly distinct from the
+  // two-note pivot cues; reversed for disengage.
+  'turbo-on': [
+    { freq: 523.25, ms: 45 }, // C5
+    { freq: 659.25, ms: 45 }, // E5
+    { freq: 783.99, ms: 80 }, // G5
+  ],
+  'turbo-off': [
+    { freq: 783.99, ms: 45 },
+    { freq: 659.25, ms: 45 },
+    { freq: 523.25, ms: 80 },
+  ],
 }
 
 function renderTones(tones) {

@@ -62,6 +62,8 @@ const howItWorksOpen = ref(false)
           label="Turbo Toggle (optional)"
           description="Flip Turbo on and off while in-game to compare fps and frame feel directly. Turbo starts enabled whenever it applies to the running application."
           none-text="No binding assigned. Turbo stays on for applications it applies to."
+          default-activate-sound="turbo-on.wav"
+          default-deactivate-sound="turbo-off.wav"
           @update:model-value="config.modules.turbo.toggleBinding = $event"
         />
       </details>
@@ -133,6 +135,10 @@ const howItWorksOpen = ref(false)
 
           <div class="rounded-[1rem] border px-4 py-4 surface-panel">
             Turbo works alongside all of VectorXR's other enhancements, including the Varjo quadviews compatibility path — VectorXR sequences its frame handling so the two never conflict.
+          </div>
+
+          <div class="rounded-[1rem] border px-4 py-4 chip-warning" style="border-color: var(--app-border)">
+            Not every runtime tolerates pipelining: some (observed with Pimax's PiOpenXR) hold the next frame hostage until the previous one is submitted, which turns Turbo into stutter instead of speed. VectorXR detects those stalls and automatically suspends Turbo for the session — press the toggle binding to re-arm it if you want to retry.
           </div>
 
           <div class="rounded-[1rem] border px-4 py-4 surface-panel">

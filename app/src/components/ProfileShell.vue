@@ -33,7 +33,7 @@ const editingName = ref(false)
 </script>
 
 <template>
-  <article class="rounded-[1rem] border p-4 shadow-panel transition" :class="profile.enabled ? 'surface-panel' : 'surface-panel-soft'">
+  <article class="rounded-[1rem] border p-4 shadow-panel transition" :class="profile.enabled ? 'surface-panel' : 'surface-panel-soft opacity-60'">
     <div class="mb-3 flex flex-wrap items-center justify-between gap-3">
       <div class="flex flex-wrap items-center gap-2">
         <p class="eyebrow text-xs uppercase tracking-[0.24em]">Profile {{ index + 1 }}</p>

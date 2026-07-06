@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <cwctype>
 #include <optional>
 #include <string>
@@ -152,18 +153,32 @@ class DirectInputButtonPoller {
             return false;
         }
 
+        // Several bindings commonly target the same physical device (multiple
+        // pivot profiles plus turbo/depth toggles on one HOTAS). A device read
+        // is a Poll+GetDeviceState round-trip on the render path, so reuse one
+        // state snapshot per device for the duration of a poll tick instead of
+        // hitting the hardware once per binding.
+        const std::wstring cache_key = NormalizeGuidText(binding.device_guid);
+        const auto now = std::chrono::steady_clock::now();
+        if (const auto it = state_cache_.find(cache_key); it != state_cache_.end() &&
+                                                          now - it->second.read_time < kStateCacheLifetime) {
+            return it->second.valid && (it->second.state.rgbButtons[*button_index] & 0x80) != 0;
+        }
+
         IDirectInputDevice8W* device = GetOrCreateDevice(binding.device_guid);
         if (!device) {
             return false;
         }
 
-        DIJOYSTATE2 state{};
-        if (!ReadState(device, state)) {
+        CachedDeviceState& cached = state_cache_[cache_key];
+        cached.read_time = now;
+        cached.valid = ReadState(device, cached.state);
+        if (!cached.valid) {
             DropDevice(binding.device_guid);
             return false;
         }
 
-        return (state.rgbButtons[*button_index] & 0x80) != 0;
+        return (cached.state.rgbButtons[*button_index] & 0x80) != 0;
     }
 
   private:
@@ -246,8 +261,19 @@ class DirectInputButtonPoller {
         devices_.erase(it);
     }
 
+    // Shorter than the callers' poll interval (30ms) so a snapshot never spans
+    // two edge-detection ticks, but long enough to collapse all same-tick reads.
+    static constexpr std::chrono::milliseconds kStateCacheLifetime{10};
+
+    struct CachedDeviceState {
+        DIJOYSTATE2 state{};
+        std::chrono::steady_clock::time_point read_time{};
+        bool valid{false};
+    };
+
     IDirectInput8W* direct_input_{nullptr};
     std::unordered_map<std::wstring, IDirectInputDevice8W*> devices_;
+    std::unordered_map<std::wstring, CachedDeviceState> state_cache_;
 };
 
 DirectInputButtonPoller& Poller() {
