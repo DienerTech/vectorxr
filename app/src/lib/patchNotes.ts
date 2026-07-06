@@ -8,6 +8,24 @@ export interface PatchNoteEntry {
 
 export const patchNotes: PatchNoteEntry[] = [
   {
+    version: '0.12.0',
+    date: '2026-07-05',
+    title: 'Turbo Mode & Pivot 2.0',
+    summary: 'A major update introducing Turbo mode for systems whose fps is held back by headset frame pacing, and a greatly expanded Pivot with multiple profiles per game, custom origin points, stepped and always-on modes, and per-direction tuning, alongside a sharper Varjo focus image and refined controls throughout the app.',
+    items: [
+      'New Turbo enhancement: it frees your game from the headset runtime\'s frame pacing to lift performance on systems where the runtime caps fps below what your hardware can deliver. Turn it on globally or per game, with an optional in-game toggle binding for instant A/B comparisons.',
+      'Turbo protects itself automatically: on runtimes that cannot be safely pipelined (such as Pimax\'s PiOpenXR) it detects the resulting stalls and suspends itself instead of stuttering. Press the toggle binding to re-arm it if you want to try again.',
+      'Pivot now supports several profiles per game, arranged in priority order. Each profile has its own activation binding, so the button you press decides which rotation behavior engages, and you can switch between them live in flight.',
+      'Added optional Set Origin and Release Origin bindings so Pivot can rotate around a point you choose. Bind Set Origin to the same button as your in-game recenter and the two stay aligned; Release Origin returns to the default headset origin. Each has its own audio cue.',
+      'Added a Stepped response mode, inspired by XRNeckSafer, that adds rotation in fixed increments as your head passes configurable thresholds, with hysteresis so the view does not oscillate at a boundary.',
+      'Added an Always On activation mode that keeps Pivot engaged automatically, plus an Advanced Axes option to tune left, right, up, and down independently.',
+      'Sharpened the Varjo focus image further by widening the sharpening sample area in the native Varjo view path.',
+      'Reworked the Pivot interface: bindings and rotation settings now open on their own focused sub-pages so each profile card stays compact, disabled profiles are clearly greyed out, and turning a default profile off explains exactly what that means for your games.',
+      'The Save button now lists the settings blocking a save when it is disabled, and fields with out-of-range values are outlined in red so they are easy to find.',
+      'Added frame-pacing telemetry and expanded Pivot, origin, stepped-mode, and Turbo logging in debug exports so playback and performance issues can be diagnosed precisely.',
+    ],
+  },
+  {
     version: '0.11.5',
     date: '2026-07-02',
     title: 'Varjo Compatible Quadviews',
