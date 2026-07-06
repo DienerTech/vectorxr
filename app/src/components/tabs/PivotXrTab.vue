@@ -185,8 +185,7 @@ const profileWarnings = computed(() => {
           Default Profile {{ config.modules.pivotxr.enabled ? 'On' : 'Off' }}
         </label>
 
-        <!-- Greyed when the default profile is off: these bindings/settings are inert then. -->
-        <div class="mt-3" :class="config.modules.pivotxr.enabled ? '' : 'pointer-events-none opacity-50'">
+        <div v-if="config.modules.pivotxr.enabled" class="mt-3">
           <PivotBindingsPanel
             :activation-mode="config.modules.pivotxr.activationMode"
             :activation-binding="config.modules.pivotxr.activationBinding"
@@ -197,6 +196,9 @@ const profileWarnings = computed(() => {
           />
 
           <PivotSettingsSummary :settings="config.modules.pivotxr.defaults" @edit="openSettings('default')" />
+        </div>
+        <div v-else class="mt-3 rounded-[0.9rem] border px-4 py-3 text-sm leading-6 surface-panel-strong">
+          The default profile is off and has no effect — applications without an enabled custom profile get no Pivot. Enabled custom profiles below still apply to their assigned applications.
         </div>
       </details>
     </article>

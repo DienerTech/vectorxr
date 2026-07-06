@@ -27,7 +27,7 @@ const howItWorksOpen = ref(false)
         <div>
           <h2 class="text-2xl font-semibold tracking-tight">Turbo</h2>
           <p class="mt-2 max-w-3xl text-sm leading-6 text-muted">
-            Frees your game from the headset runtime's frame pacing so the GPU sets the pace. On some systems the runtime throttles frames at an unfortunate moment, capping fps well below what the hardware can deliver — Turbo removes that wait. If your fps is already stable, Turbo changes nothing worth having; it is a targeted fix, not a general boost. Note: switching Turbo on mid-session can cause a brief (~1 second) hitch while the frame pipeline re-synchronizes.
+            Frees your game from the headset runtime's frame pacing so the GPU sets the pace. On some systems the runtime throttles frames at an unfortunate moment, capping fps well below what the hardware can deliver — Turbo removes that wait. If your fps is already stable, Turbo changes nothing worth having; it is a targeted fix, not a general boost.
           </p>
         </div>
         <button
@@ -41,6 +41,18 @@ const howItWorksOpen = ref(false)
           How Turbo Works
         </button>
       </div>
+
+      <!-- Module-level binding — applies regardless of which profile enabled turbo -->
+      <BindingEditor
+        :model-value="config.modules.turbo.toggleBinding"
+        class="mb-5"
+        label="Turbo Toggle Binding"
+        description="Flip Turbo on and off while in-game to compare fps and frame feel directly. Turbo starts enabled whenever it applies to the running application. Note: switching Turbo on mid-session can cause a brief hitch while the frame pipeline re-synchronizes."
+        none-text="No binding assigned. Turbo stays on for applications it applies to."
+        default-activate-sound="turbo-on.wav"
+        default-deactivate-sound="turbo-off.wav"
+        @update:model-value="config.modules.turbo.toggleBinding = $event"
+      />
 
       <details class="section-disclosure border-t pt-4" style="border-color: var(--app-border)" open>
         <summary class="flex items-center gap-2">
@@ -56,16 +68,9 @@ const howItWorksOpen = ref(false)
           Default Profile {{ config.modules.turbo.enabled ? 'On' : 'Off' }}
         </label>
 
-        <BindingEditor
-          :model-value="config.modules.turbo.toggleBinding"
-          class="mt-3"
-          label="Turbo Toggle (optional)"
-          description="Flip Turbo on and off while in-game to compare fps and frame feel directly. Turbo starts enabled whenever it applies to the running application."
-          none-text="No binding assigned. Turbo stays on for applications it applies to."
-          default-activate-sound="turbo-on.wav"
-          default-deactivate-sound="turbo-off.wav"
-          @update:model-value="config.modules.turbo.toggleBinding = $event"
-        />
+        <div v-if="!config.modules.turbo.enabled" class="mt-3 rounded-[0.9rem] border px-4 py-3 text-sm leading-6 surface-panel-strong">
+          The default profile is off — Turbo does not apply to applications without an enabled custom profile. Enabled custom profiles below still turn Turbo on for their assigned applications.
+        </div>
       </details>
     </article>
 
