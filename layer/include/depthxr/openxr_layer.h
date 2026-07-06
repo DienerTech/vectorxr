@@ -486,7 +486,7 @@ class OpenXrLayer {
     bool turbo_toggle_binding_was_down_{false};
     std::optional<std::chrono::steady_clock::time_point> turbo_binding_last_poll_time_;
     bool turbo_binding_down_cached_{false};
-    bool has_logged_turbo_varjo_denial_{false};
+    bool has_logged_turbo_varjo_note_{false};
     bool quad_views_extension_requested_{false};
     bool varjo_foveated_rendering_extension_requested_{false};
     bool eye_gaze_extension_enabled_{false};

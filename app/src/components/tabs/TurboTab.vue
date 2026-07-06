@@ -27,7 +27,7 @@ const howItWorksOpen = ref(false)
         <div>
           <h2 class="text-2xl font-semibold tracking-tight">Turbo</h2>
           <p class="mt-2 max-w-3xl text-sm leading-6 text-muted">
-            Frees your game from the headset runtime's frame pacing so the GPU sets the pace. On some systems the runtime throttles frames at an unfortunate moment, capping fps well below what the hardware can deliver — Turbo removes that wait. If your fps is already stable, Turbo changes nothing worth having; it is a targeted fix, not a general boost.
+            Frees your game from the headset runtime's frame pacing so the GPU sets the pace. On some systems the runtime throttles frames at an unfortunate moment, capping fps well below what the hardware can deliver — Turbo removes that wait. If your fps is already stable, Turbo changes nothing worth having; it is a targeted fix, not a general boost. Note: switching Turbo on mid-session can cause a brief (~1 second) hitch while the frame pipeline re-synchronizes.
           </p>
         </div>
         <button
@@ -132,7 +132,7 @@ const howItWorksOpen = ref(false)
           </div>
 
           <div class="rounded-[1rem] border px-4 py-4 surface-panel">
-            Turbo is automatically unavailable on Varjo runtimes where VectorXR's quadviews compatibility path is active, as the two techniques conflict.
+            Turbo works alongside all of VectorXR's other enhancements, including the Varjo quadviews compatibility path — VectorXR sequences its frame handling so the two never conflict.
           </div>
 
           <div class="rounded-[1rem] border px-4 py-4 surface-panel">

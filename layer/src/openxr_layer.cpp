@@ -5683,16 +5683,19 @@ bool OpenXrLayer::IsTurboActive() {
         return false;
     }
 
-    // Turbo's deferred begin/end pipelining conflicts with the Varjo deferred
-    // swapchain release quirk (a pending frame could hold onto a swapchain the
-    // deferral needs). Deny turbo outright on those runtimes.
-    if (defer_quadviews_swapchain_releases_) {
-        if (!has_logged_turbo_varjo_denial_) {
-            logger_.Info("Turbo mode requested but denied: incompatible with the Varjo deferred "
-                         "swapchain release quirk on this runtime.");
-            has_logged_turbo_varjo_denial_ = true;
-        }
-        return false;
+    // Note on Varjo: QVF denies turbo when its deferred-release quirk is
+    // active, but that denial exists because QVF flushes deferred releases at
+    // the app's *next acquire* — turbo's pipelining lets the app acquire (and
+    // overwrite) an image QVF's EndFrame is still sampling. VectorXR flushes
+    // its Varjo-deferred releases synchronously inside EndFrame, before the
+    // (possibly turbo-deferred) begin/end forward, so the app cannot run
+    // ahead of a pending release and the ordering the deferral protects is
+    // preserved. OpenXR Toolkit likewise ships turbo with no Varjo guard.
+    // Log once for diagnosability when both paths are live.
+    if (defer_quadviews_swapchain_releases_ && !has_logged_turbo_varjo_note_) {
+        logger_.Info("Turbo mode active on a Varjo runtime; deferred quadviews swapchain releases "
+                     "remain EndFrame-synchronous, so frame ordering is preserved.");
+        has_logged_turbo_varjo_note_ = true;
     }
 
 #if defined(_WIN32)

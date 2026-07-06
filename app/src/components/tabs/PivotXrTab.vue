@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
 
+import PivotBindingsPage from '../PivotBindingsPage.vue'
 import PivotBindingsPanel from '../PivotBindingsPanel.vue'
 import PivotSettingsFields from '../PivotSettingsFields.vue'
 import ProfileShell from '../ProfileShell.vue'
@@ -21,6 +22,29 @@ defineEmits<{
 
 const compatibilityInfoOpen = ref(false)
 const centeringInfoOpen = ref(false)
+
+// Bindings are edited on a dedicated sub-page (not a dialog) so the editors
+// can grow vertically without overlaying scrolled content. 'default' targets
+// the module's default profile; a number indexes a custom profile.
+const bindingsTarget = ref<'default' | number | null>(null)
+
+const bindingsSubject = computed(() => {
+  if (bindingsTarget.value === null) {
+    return null
+  }
+  if (bindingsTarget.value === 'default') {
+    return props.config.modules.pivotxr
+  }
+  return props.config.modules.pivotxr.profiles[bindingsTarget.value] ?? null
+})
+
+const bindingsContextLabel = computed(() => {
+  if (bindingsTarget.value === 'default' || bindingsTarget.value === null) {
+    return 'Default Profile'
+  }
+  const profile = props.config.modules.pivotxr.profiles[bindingsTarget.value]
+  return profile?.name?.trim() || `Profile ${bindingsTarget.value + 1}`
+})
 
 const profileWarnings = computed(() => {
   const warnings = new Map<number, string[]>()
@@ -57,7 +81,13 @@ const profileWarnings = computed(() => {
 </script>
 
 <template>
-  <div class="space-y-4">
+  <PivotBindingsPage
+    v-if="bindingsSubject"
+    :subject="bindingsSubject"
+    :context-label="bindingsContextLabel"
+    @close="bindingsTarget = null"
+  />
+  <div v-else class="space-y-4">
     <!-- Module header + defaults -->
     <article class="rounded-[1.25rem] border p-5 shadow-panel backdrop-blur surface-panel">
       <div class="mb-4 flex flex-wrap items-center justify-between gap-3">
@@ -106,12 +136,12 @@ const profileWarnings = computed(() => {
         </label>
 
         <PivotBindingsPanel
-          v-model:activation-mode="config.modules.pivotxr.activationMode"
-          v-model:activation-binding="config.modules.pivotxr.activationBinding"
-          v-model:set-origin-binding="config.modules.pivotxr.setOriginBinding"
-          v-model:release-origin-binding="config.modules.pivotxr.releaseOriginBinding"
+          :activation-mode="config.modules.pivotxr.activationMode"
+          :activation-binding="config.modules.pivotxr.activationBinding"
+          :set-origin-binding="config.modules.pivotxr.setOriginBinding"
+          :release-origin-binding="config.modules.pivotxr.releaseOriginBinding"
           class="mb-3 mt-3"
-          context-label="Default Profile"
+          @edit="bindingsTarget = 'default'"
         />
 
         <PivotSettingsFields :settings="config.modules.pivotxr.defaults" />
@@ -152,11 +182,11 @@ const profileWarnings = computed(() => {
         @sync-name="$emit('syncPivotProfileName', index)"
       >
         <PivotBindingsPanel
-          v-model:activation-mode="profile.activationMode"
-          v-model:activation-binding="profile.activationBinding"
-          v-model:set-origin-binding="profile.setOriginBinding"
-          v-model:release-origin-binding="profile.releaseOriginBinding"
-          :context-label="profile.name || `Profile ${index + 1}`"
+          :activation-mode="profile.activationMode"
+          :activation-binding="profile.activationBinding"
+          :set-origin-binding="profile.setOriginBinding"
+          :release-origin-binding="profile.releaseOriginBinding"
+          @edit="bindingsTarget = index"
         />
 
         <PivotSettingsFields class="mt-3" :settings="profile.settings" />

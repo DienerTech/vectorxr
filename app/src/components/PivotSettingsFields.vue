@@ -4,6 +4,10 @@ import type { PivotAxisTuning, PivotXRSettings } from '../lib/model'
 // Shared Pivot settings editor used by both the Default Profile and each custom
 // profile, so the two stay visually and structurally identical. Fields mutate
 // the passed-in reactive `settings` object directly.
+//
+// Layout: the General card always spans the full width with its fields side by
+// side; the rows below adapt to the response mode so no grid cell is ever left
+// empty.
 const props = defineProps<{
   settings: PivotXRSettings
 }>()
@@ -45,137 +49,137 @@ function onAdvancedAxesChange(enabled: boolean) {
 
 <template>
   <div class="space-y-3">
-    <div class="grid gap-3 lg:grid-cols-3">
-      <!-- General: applies to both axes -->
+    <!-- General: applies to both axes -->
+    <div class="rounded-[1rem] border p-4 surface-panel-soft">
+      <p class="eyebrow text-xs uppercase tracking-[0.18em]">General</p>
+      <div class="mt-3 grid gap-3 sm:grid-cols-3">
+        <label class="block">
+          <span class="mb-1.5 flex items-center gap-1.5 text-sm font-medium">
+            Response Mode
+            <span
+              title="Continuous scales your head rotation smoothly with a multiplier. Stepped adds fixed chunks of rotation as your head crosses angle thresholds, like XRNeckSafer's stepped mode."
+              class="cursor-help select-none text-xs text-muted"
+              >ⓘ</span
+            >
+          </span>
+          <select v-model="settings.responseMode" class="app-input w-full rounded-[0.75rem] px-4 py-2.5">
+            <option value="continuous">continuous</option>
+            <option value="stepped">stepped</option>
+          </select>
+        </label>
+        <label class="block">
+          <span class="mb-1.5 flex items-center gap-1.5 text-sm font-medium">
+            Smoothing
+            <span
+              title="Low-pass filter on pivot response for both yaw and pitch. 0 = instant, higher = smoother but laggier. Good range: 0.05–0.2. In stepped mode this eases the view between steps."
+              class="cursor-help select-none text-xs text-muted"
+              >ⓘ</span
+            >
+          </span>
+          <input
+            v-model.number="settings.smoothing"
+            class="app-input w-full rounded-[0.75rem] px-4 py-2.5"
+            min="0"
+            max="1"
+            step="0.01"
+            type="number"
+          />
+        </label>
+        <label class="block">
+          <span class="mb-1.5 flex items-center gap-1.5 text-sm font-medium">
+            Activation Ramp
+            <span
+              title="Seconds to ease the pivot effect in and out when you toggle it on or off, so activating it never snaps the view. 0 = instant. Default 0.35."
+              class="cursor-help select-none text-xs text-muted"
+              >ⓘ</span
+            >
+          </span>
+          <input
+            v-model.number="settings.activationRampSeconds"
+            class="app-input w-full rounded-[0.75rem] px-4 py-2.5"
+            min="0"
+            max="2"
+            step="0.05"
+            type="number"
+          />
+          <span class="mt-1 block text-xs text-muted">seconds</span>
+        </label>
+      </div>
+    </div>
+
+    <!-- Stepped response parameters -->
+    <div v-if="settings.responseMode === 'stepped'" class="rounded-[1rem] border p-4 surface-panel-soft">
+      <p class="eyebrow text-xs uppercase tracking-[0.18em]">Steps</p>
+      <p class="mt-2 text-xs leading-5 text-muted">
+        Starting past the deadzone, each additional Step Trigger of head rotation adds one Step Amount of extra view rotation. Hysteresis keeps a step engaged until you come back inside its threshold, so the view never oscillates at a boundary.
+      </p>
+      <div class="mt-3 grid gap-3 sm:grid-cols-3">
+        <label class="block">
+          <span class="mb-1.5 flex items-center gap-1.5 text-sm font-medium">
+            Step Trigger
+            <span
+              title="Degrees of head rotation between step thresholds. First step engages one trigger past the deadzone."
+              class="cursor-help select-none text-xs text-muted"
+              >ⓘ</span
+            >
+          </span>
+          <input
+            v-model.number="settings.stepTriggerDegrees"
+            class="app-input w-full rounded-[0.75rem] px-4 py-2.5"
+            min="1"
+            max="45"
+            step="0.5"
+            type="number"
+          />
+          <span class="mt-1 block text-xs text-muted">degrees</span>
+        </label>
+        <label class="block">
+          <span class="mb-1.5 flex items-center gap-1.5 text-sm font-medium">
+            Step Amount
+            <span
+              title="Extra view rotation added per engaged step."
+              class="cursor-help select-none text-xs text-muted"
+              >ⓘ</span
+            >
+          </span>
+          <input
+            v-model.number="settings.stepAmountDegrees"
+            class="app-input w-full rounded-[0.75rem] px-4 py-2.5"
+            min="0"
+            max="60"
+            step="0.5"
+            type="number"
+          />
+          <span class="mt-1 block text-xs text-muted">degrees</span>
+        </label>
+        <label class="block">
+          <span class="mb-1.5 flex items-center gap-1.5 text-sm font-medium">
+            Hysteresis
+            <span
+              title="Degrees a step stays engaged after your head comes back under its trigger threshold. Prevents flip-flopping when resting near a boundary. Keep below Step Trigger."
+              class="cursor-help select-none text-xs text-muted"
+              >ⓘ</span
+            >
+          </span>
+          <input
+            v-model.number="settings.stepHysteresisDegrees"
+            class="app-input w-full rounded-[0.75rem] px-4 py-2.5"
+            min="0"
+            max="20"
+            step="0.5"
+            type="number"
+          />
+          <span class="mt-1 block text-xs text-muted">degrees</span>
+        </label>
+      </div>
+    </div>
+
+    <!-- Yaw + Pitch (symmetric continuous, or stepped limits) -->
+    <div v-if="settings.responseMode === 'stepped' || !settings.advancedAxes" class="grid gap-3 md:grid-cols-2">
       <div class="rounded-[1rem] border p-4 surface-panel-soft">
-        <p class="eyebrow text-xs uppercase tracking-[0.18em]">General</p>
-        <div class="mt-3 grid gap-3">
-          <label class="block">
-            <span class="mb-1.5 flex items-center gap-1.5 text-sm font-medium">
-              Response Mode
-              <span
-                title="Continuous scales your head rotation smoothly with a multiplier. Stepped adds fixed chunks of rotation as your head crosses angle thresholds, like XRNeckSafer's stepped mode."
-                class="cursor-help select-none text-xs text-muted"
-                >ⓘ</span
-              >
-            </span>
-            <select v-model="settings.responseMode" class="app-input w-full rounded-[0.75rem] px-4 py-2.5">
-              <option value="continuous">continuous</option>
-              <option value="stepped">stepped</option>
-            </select>
-          </label>
-          <label class="block">
-            <span class="mb-1.5 flex items-center gap-1.5 text-sm font-medium">
-              Smoothing
-              <span
-                title="Low-pass filter on pivot response for both yaw and pitch. 0 = instant, higher = smoother but laggier. Good range: 0.05–0.2. In stepped mode this eases the view between steps."
-                class="cursor-help select-none text-xs text-muted"
-                >ⓘ</span
-              >
-            </span>
-            <input
-              v-model.number="settings.smoothing"
-              class="app-input w-full rounded-[0.75rem] px-4 py-2.5"
-              min="0"
-              max="1"
-              step="0.01"
-              type="number"
-            />
-          </label>
-          <label class="block">
-            <span class="mb-1.5 flex items-center gap-1.5 text-sm font-medium">
-              Activation Ramp
-              <span
-                title="Seconds to ease the pivot effect in and out when you toggle it on or off, so activating it never snaps the view. 0 = instant. Default 0.35."
-                class="cursor-help select-none text-xs text-muted"
-                >ⓘ</span
-              >
-            </span>
-            <input
-              v-model.number="settings.activationRampSeconds"
-              class="app-input w-full rounded-[0.75rem] px-4 py-2.5"
-              min="0"
-              max="2"
-              step="0.05"
-              type="number"
-            />
-            <span class="mt-1 block text-xs text-muted">seconds</span>
-          </label>
-        </div>
-      </div>
-
-      <!-- Stepped response parameters -->
-      <div v-if="settings.responseMode === 'stepped'" class="rounded-[1rem] border p-4 surface-panel-soft lg:col-span-2">
-        <p class="eyebrow text-xs uppercase tracking-[0.18em]">Steps</p>
-        <p class="mt-2 text-xs leading-5 text-muted">
-          Starting past the deadzone, each additional Step Trigger of head rotation adds one Step Amount of extra view rotation. Hysteresis keeps a step engaged until you come back inside its threshold, so the view never oscillates at a boundary.
-        </p>
-        <div class="mt-3 grid gap-3 sm:grid-cols-3">
-          <label class="block">
-            <span class="mb-1.5 flex items-center gap-1.5 text-sm font-medium">
-              Step Trigger
-              <span
-                title="Degrees of head rotation between step thresholds. First step engages one trigger past the deadzone."
-                class="cursor-help select-none text-xs text-muted"
-                >ⓘ</span
-              >
-            </span>
-            <input
-              v-model.number="settings.stepTriggerDegrees"
-              class="app-input w-full rounded-[0.75rem] px-4 py-2.5"
-              min="1"
-              max="45"
-              step="0.5"
-              type="number"
-            />
-            <span class="mt-1 block text-xs text-muted">degrees</span>
-          </label>
-          <label class="block">
-            <span class="mb-1.5 flex items-center gap-1.5 text-sm font-medium">
-              Step Amount
-              <span
-                title="Extra view rotation added per engaged step."
-                class="cursor-help select-none text-xs text-muted"
-                >ⓘ</span
-              >
-            </span>
-            <input
-              v-model.number="settings.stepAmountDegrees"
-              class="app-input w-full rounded-[0.75rem] px-4 py-2.5"
-              min="0"
-              max="60"
-              step="0.5"
-              type="number"
-            />
-            <span class="mt-1 block text-xs text-muted">degrees</span>
-          </label>
-          <label class="block">
-            <span class="mb-1.5 flex items-center gap-1.5 text-sm font-medium">
-              Hysteresis
-              <span
-                title="Degrees a step stays engaged after your head comes back under its trigger threshold. Prevents flip-flopping when resting near a boundary. Keep below Step Trigger."
-                class="cursor-help select-none text-xs text-muted"
-                >ⓘ</span
-              >
-            </span>
-            <input
-              v-model.number="settings.stepHysteresisDegrees"
-              class="app-input w-full rounded-[0.75rem] px-4 py-2.5"
-              min="0"
-              max="20"
-              step="0.5"
-              type="number"
-            />
-            <span class="mt-1 block text-xs text-muted">degrees</span>
-          </label>
-        </div>
-      </div>
-
-      <!-- Yaw (symmetric) -->
-      <div v-if="settings.responseMode === 'continuous' && !settings.advancedAxes" class="rounded-[1rem] border p-4 surface-panel-soft">
         <p class="eyebrow text-xs uppercase tracking-[0.18em]">Yaw</p>
-        <div class="mt-3 grid gap-3">
-          <label class="block">
+        <div class="mt-3 grid gap-3" :class="settings.responseMode === 'stepped' ? 'sm:grid-cols-2' : 'sm:grid-cols-3'">
+          <label v-if="settings.responseMode === 'continuous'" class="block">
             <span class="mb-1.5 flex items-center gap-1.5 text-sm font-medium">
               Multiplier
               <span
@@ -197,7 +201,9 @@ function onAdvancedAxesChange(enabled: boolean) {
             <span class="mb-1.5 flex items-center gap-1.5 text-sm font-medium">
               Deadzone
               <span
-                title="Degrees of head yaw ignored before amplification kicks in. Prevents jitter when looking straight ahead. 2–8° is typical."
+                :title="settings.responseMode === 'stepped'
+                  ? 'Degrees of head yaw before the first step threshold begins.'
+                  : 'Degrees of head yaw ignored before amplification kicks in. Prevents jitter when looking straight ahead. 2–8° is typical.'"
                 class="cursor-help select-none text-xs text-muted"
                 >ⓘ</span
               >
@@ -216,7 +222,9 @@ function onAdvancedAxesChange(enabled: boolean) {
             <span class="mb-1.5 flex items-center gap-1.5 text-sm font-medium">
               Max Extra
               <span
-                title="Cap on the extra yaw degrees pivot can add on top of natural head movement. 180° lets you look directly behind you."
+                :title="settings.responseMode === 'stepped'
+                  ? 'Cap on the total extra yaw the steps can add.'
+                  : 'Cap on the extra yaw degrees pivot can add on top of natural head movement. 180° lets you look directly behind you.'"
                 class="cursor-help select-none text-xs text-muted"
                 >ⓘ</span
               >
@@ -234,11 +242,10 @@ function onAdvancedAxesChange(enabled: boolean) {
         </div>
       </div>
 
-      <!-- Pitch (symmetric) -->
-      <div v-if="settings.responseMode === 'continuous' && !settings.advancedAxes" class="rounded-[1rem] border p-4 surface-panel-soft">
+      <div class="rounded-[1rem] border p-4 surface-panel-soft">
         <p class="eyebrow text-xs uppercase tracking-[0.18em]">Pitch</p>
-        <div class="mt-3 grid gap-3">
-          <label class="block">
+        <div class="mt-3 grid gap-3" :class="settings.responseMode === 'stepped' ? 'sm:grid-cols-2' : 'sm:grid-cols-3'">
+          <label v-if="settings.responseMode === 'continuous'" class="block">
             <span class="mb-1.5 flex items-center gap-1.5 text-sm font-medium">
               Multiplier
               <span
@@ -260,7 +267,9 @@ function onAdvancedAxesChange(enabled: boolean) {
             <span class="mb-1.5 flex items-center gap-1.5 text-sm font-medium">
               Deadzone
               <span
-                title="Degrees of head pitch ignored before amplification kicks in. 2–12° is typical."
+                :title="settings.responseMode === 'stepped'
+                  ? 'Degrees of head pitch before the first step threshold begins.'
+                  : 'Degrees of head pitch ignored before amplification kicks in. 2–12° is typical.'"
                 class="cursor-help select-none text-xs text-muted"
                 >ⓘ</span
               >
@@ -279,7 +288,9 @@ function onAdvancedAxesChange(enabled: boolean) {
             <span class="mb-1.5 flex items-center gap-1.5 text-sm font-medium">
               Max Extra
               <span
-                title="Cap on the extra pitch degrees pivot can add. Useful for looking over the nose or up at the canopy without craning your neck."
+                :title="settings.responseMode === 'stepped'
+                  ? 'Cap on the total extra pitch the steps can add.'
+                  : 'Cap on the extra pitch degrees pivot can add. Useful for looking over the nose or up at the canopy without craning your neck.'"
                 class="cursor-help select-none text-xs text-muted"
                 >ⓘ</span
               >
@@ -296,96 +307,6 @@ function onAdvancedAxesChange(enabled: boolean) {
           </label>
         </div>
       </div>
-
-      <!-- Yaw/Pitch deadzones for stepped mode (no multiplier — steps replace it) -->
-      <template v-if="settings.responseMode === 'stepped'">
-        <div class="rounded-[1rem] border p-4 surface-panel-soft">
-          <p class="eyebrow text-xs uppercase tracking-[0.18em]">Yaw</p>
-          <div class="mt-3 grid gap-3">
-            <label class="block">
-              <span class="mb-1.5 flex items-center gap-1.5 text-sm font-medium">
-                Deadzone
-                <span
-                  title="Degrees of head yaw before the first step threshold begins."
-                  class="cursor-help select-none text-xs text-muted"
-                  >ⓘ</span
-                >
-              </span>
-              <input
-                v-model.number="settings.deadzoneDegrees"
-                class="app-input w-full rounded-[0.75rem] px-4 py-2.5"
-                min="0"
-                max="45"
-                step="0.5"
-                type="number"
-              />
-              <span class="mt-1 block text-xs text-muted">degrees</span>
-            </label>
-            <label class="block">
-              <span class="mb-1.5 flex items-center gap-1.5 text-sm font-medium">
-                Max Extra
-                <span
-                  title="Cap on the total extra yaw the steps can add."
-                  class="cursor-help select-none text-xs text-muted"
-                  >ⓘ</span
-                >
-              </span>
-              <input
-                v-model.number="settings.maxExtraYawDegrees"
-                class="app-input w-full rounded-[0.75rem] px-4 py-2.5"
-                min="0"
-                max="180"
-                step="0.5"
-                type="number"
-              />
-              <span class="mt-1 block text-xs text-muted">degrees</span>
-            </label>
-          </div>
-        </div>
-        <div class="rounded-[1rem] border p-4 surface-panel-soft">
-          <p class="eyebrow text-xs uppercase tracking-[0.18em]">Pitch</p>
-          <div class="mt-3 grid gap-3">
-            <label class="block">
-              <span class="mb-1.5 flex items-center gap-1.5 text-sm font-medium">
-                Deadzone
-                <span
-                  title="Degrees of head pitch before the first step threshold begins."
-                  class="cursor-help select-none text-xs text-muted"
-                  >ⓘ</span
-                >
-              </span>
-              <input
-                v-model.number="settings.pitchDeadzoneDegrees"
-                class="app-input w-full rounded-[0.75rem] px-4 py-2.5"
-                min="0"
-                max="45"
-                step="0.5"
-                type="number"
-              />
-              <span class="mt-1 block text-xs text-muted">degrees</span>
-            </label>
-            <label class="block">
-              <span class="mb-1.5 flex items-center gap-1.5 text-sm font-medium">
-                Max Extra
-                <span
-                  title="Cap on the total extra pitch the steps can add."
-                  class="cursor-help select-none text-xs text-muted"
-                  >ⓘ</span
-                >
-              </span>
-              <input
-                v-model.number="settings.maxExtraPitchDegrees"
-                class="app-input w-full rounded-[0.75rem] px-4 py-2.5"
-                min="0"
-                max="180"
-                step="0.5"
-                type="number"
-              />
-              <span class="mt-1 block text-xs text-muted">degrees</span>
-            </label>
-          </div>
-        </div>
-      </template>
     </div>
 
     <!-- Advanced per-direction axes (continuous mode only) -->
