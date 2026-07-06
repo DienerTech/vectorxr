@@ -1,5 +1,4 @@
 import type { CoreConfig, DepthXRProfileConfig, DepthXRSettings, InputBinding, PivotXRProfileConfig, PivotXRSettings, QuadViewsProfileConfig, QuadViewsSettings, RegisteredApplication, VectorXRConfig } from './model'
-import { bindingLabel } from './model'
 
 function validateCoreConfig(core: CoreConfig): string[] {
   const errors: string[] = []
@@ -317,40 +316,6 @@ function validatePivotXRProfile(profile: PivotXRProfileConfig, index: number, ap
   return errors
 }
 
-function validatePivotProfileConflicts(profiles: PivotXRProfileConfig[]): string[] {
-  const errors: string[] = []
-
-  profiles.forEach((profile, index) => {
-    if (!profile.enabled || profile.activationBinding.type === 'none') {
-      return
-    }
-
-    const thisLabel = bindingLabel(profile.activationBinding)
-
-    profiles.forEach((other, otherIndex) => {
-      if (otherIndex >= index || !other.enabled || other.activationBinding.type === 'none') {
-        return
-      }
-
-      const otherLabel = bindingLabel(other.activationBinding)
-      if (thisLabel !== otherLabel) {
-        return
-      }
-
-      for (const applicationId of profile.applicationIds) {
-        if (other.applicationIds.includes(applicationId)) {
-          errors.push(
-            `modules.pivotxr.profiles[${index}] and profiles[${otherIndex}] share binding ${thisLabel} for application ${applicationId}; the earlier profile owns the binding and shadows the later one`,
-          )
-          break
-        }
-      }
-    })
-  })
-
-  return errors
-}
-
 function validateQuadViewsProfile(profile: QuadViewsProfileConfig, index: number, applicationIds: Set<string>): string[] {
   const errors: string[] = []
   const prefix = `modules.quadviews.profiles[${index}].`
@@ -420,10 +385,12 @@ export function validateConfig(config: VectorXRConfig): string[] {
   })
   errors.push(...validateDepthProfileConflicts(config.modules.depthxr.profiles))
 
+  // Shadowed pivot bindings (two profiles sharing a binding for the same app)
+  // are legitimate priority-order behavior, surfaced as a warning on the Pivot
+  // tab — they deliberately do not block saving.
   config.modules.pivotxr.profiles.forEach((profile, index) => {
     errors.push(...validatePivotXRProfile(profile, index, applicationIds))
   })
-  errors.push(...validatePivotProfileConflicts(config.modules.pivotxr.profiles))
 
   config.modules.quadviews.profiles.forEach((profile, index) => {
     errors.push(...validateQuadViewsProfile(profile, index, applicationIds))

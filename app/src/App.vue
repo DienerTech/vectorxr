@@ -423,6 +423,7 @@ async function confirmResetConfig() {
         :loading="store.state.loading"
         :status="store.state.status"
         :disabled="store.state.loading || store.state.saving || errors.length > 0"
+        :errors="errors"
         @save="saveConfig"
         @discard="store.discardChanges"
       />

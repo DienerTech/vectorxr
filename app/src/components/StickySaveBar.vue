@@ -1,16 +1,30 @@
 <script setup lang="ts">
-defineProps<{
+import { computed } from 'vue'
+
+const props = defineProps<{
   dirty: boolean
   saving: boolean
   loading: boolean
   status: string
   disabled: boolean
+  // Validation errors currently blocking save; shown as the save button's
+  // tooltip so the user can find the offending control.
+  errors?: string[]
 }>()
 
 defineEmits<{
   save: []
   discard: []
 }>()
+
+const saveTooltip = computed(() => {
+  if (!props.errors || props.errors.length === 0) {
+    return ''
+  }
+  const shown = props.errors.slice(0, 6)
+  const remainder = props.errors.length - shown.length
+  return `Fix before saving:\n• ${shown.join('\n• ')}${remainder > 0 ? `\n…and ${remainder} more` : ''}`
+})
 </script>
 
 <template>
@@ -28,14 +42,16 @@ defineEmits<{
         </div>
 
         <div class="flex flex-wrap gap-3">
-          <button
-            class="rounded-[0.75rem] px-5 py-2.5 text-sm font-medium transition button-accent disabled:cursor-not-allowed disabled:opacity-50"
-            :disabled="disabled || !dirty"
-            type="button"
-            @click="$emit('save')"
-          >
-            {{ saving ? 'Saving...' : 'Save Changes' }}
-          </button>
+          <span :title="saveTooltip" class="inline-flex">
+            <button
+              class="rounded-[0.75rem] px-5 py-2.5 text-sm font-medium transition button-accent disabled:cursor-not-allowed disabled:opacity-50"
+              :disabled="disabled || !dirty"
+              type="button"
+              @click="$emit('save')"
+            >
+              {{ saving ? 'Saving...' : 'Save Changes' }}
+            </button>
+          </span>
           <button
             class="rounded-[0.75rem] px-5 py-2.5 text-sm font-medium transition button-secondary disabled:cursor-not-allowed disabled:opacity-50"
             :disabled="loading || saving || !dirty"

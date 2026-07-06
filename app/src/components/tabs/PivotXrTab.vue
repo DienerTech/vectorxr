@@ -3,7 +3,8 @@ import { computed, ref } from 'vue'
 
 import PivotBindingsPage from '../PivotBindingsPage.vue'
 import PivotBindingsPanel from '../PivotBindingsPanel.vue'
-import PivotSettingsFields from '../PivotSettingsFields.vue'
+import PivotSettingsPage from '../PivotSettingsPage.vue'
+import PivotSettingsSummary from '../PivotSettingsSummary.vue'
 import ProfileShell from '../ProfileShell.vue'
 import type { RegisteredApplication, VectorXRConfig } from '../../lib/model'
 import { bindingLabel } from '../../lib/model'
@@ -38,13 +39,30 @@ const bindingsSubject = computed(() => {
   return props.config.modules.pivotxr.profiles[bindingsTarget.value] ?? null
 })
 
-const bindingsContextLabel = computed(() => {
-  if (bindingsTarget.value === 'default' || bindingsTarget.value === null) {
+const bindingsContextLabel = computed(() => profileContextLabel(bindingsTarget.value))
+
+// Rotation settings likewise get their own sub-page; the card shows a summary.
+const settingsTarget = ref<'default' | number | null>(null)
+
+const settingsSubject = computed(() => {
+  if (settingsTarget.value === null) {
+    return null
+  }
+  if (settingsTarget.value === 'default') {
+    return props.config.modules.pivotxr.defaults
+  }
+  return props.config.modules.pivotxr.profiles[settingsTarget.value]?.settings ?? null
+})
+
+const settingsContextLabel = computed(() => profileContextLabel(settingsTarget.value))
+
+function profileContextLabel(target: 'default' | number | null): string {
+  if (target === 'default' || target === null) {
     return 'Default Profile'
   }
-  const profile = props.config.modules.pivotxr.profiles[bindingsTarget.value]
-  return profile?.name?.trim() || `Profile ${bindingsTarget.value + 1}`
-})
+  const profile = props.config.modules.pivotxr.profiles[target]
+  return profile?.name?.trim() || `Profile ${target + 1}`
+}
 
 const profileWarnings = computed(() => {
   const warnings = new Map<number, string[]>()
@@ -86,6 +104,12 @@ const profileWarnings = computed(() => {
     :subject="bindingsSubject"
     :context-label="bindingsContextLabel"
     @close="bindingsTarget = null"
+  />
+  <PivotSettingsPage
+    v-else-if="settingsSubject"
+    :settings="settingsSubject"
+    :context-label="settingsContextLabel"
+    @close="settingsTarget = null"
   />
   <div v-else class="space-y-4">
     <!-- Module header + defaults -->
@@ -144,13 +168,14 @@ const profileWarnings = computed(() => {
           @edit="bindingsTarget = 'default'"
         />
 
-        <PivotSettingsFields :settings="config.modules.pivotxr.defaults" />
+        <PivotSettingsSummary :settings="config.modules.pivotxr.defaults" @edit="settingsTarget = 'default'" />
       </details>
     </article>
 
     <!-- Custom Profiles -->
     <section class="space-y-3">
-      <div class="flex flex-wrap items-center justify-between gap-3 rounded-[1rem] border px-4 py-3 surface-panel">
+      <!-- Sticky so Add Profile stays reachable while scrolling a long profile list. -->
+      <div class="sticky top-0 z-20 flex flex-wrap items-center justify-between gap-3 rounded-[1rem] border px-4 py-3 shadow-panel backdrop-blur surface-panel-strong">
         <div>
           <h2 class="text-lg font-semibold tracking-tight">Custom Profiles</h2>
           <p class="text-sm text-muted">
@@ -189,7 +214,7 @@ const profileWarnings = computed(() => {
           @edit="bindingsTarget = index"
         />
 
-        <PivotSettingsFields class="mt-3" :settings="profile.settings" />
+        <PivotSettingsSummary class="mt-3" :settings="profile.settings" @edit="settingsTarget = index" />
       </ProfileShell>
 
       <div

@@ -73,6 +73,7 @@ const systemHealthDescription = computed(() => {
 
 const moduleMeta: { id: ModuleId; label: string }[] = [
   { id: 'quadviews', label: 'Quadviews' },
+  { id: 'turbo', label: 'Turbo' },
   { id: 'pivotxr', label: 'Pivot' },
   { id: 'depthxr', label: 'Depth' },
 ]
@@ -135,7 +136,7 @@ const activeEnhancementCount = computed(() => enhancementRows.value.filter((row)
       <div class="flex flex-wrap items-end justify-between gap-3">
         <div>
           <p class="eyebrow text-xs uppercase tracking-[0.24em]">Enhancements</p>
-          <h2 class="mt-2 text-2xl font-semibold tracking-tight">Active overview</h2>
+          <h2 class="mt-2 text-2xl font-semibold tracking-tight">Active Overview</h2>
         </div>
         <span class="text-sm text-muted">{{ activeEnhancementCount }} of {{ enhancementRows.length }} active</span>
       </div>

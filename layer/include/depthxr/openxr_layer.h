@@ -262,6 +262,14 @@ class OpenXrLayer {
         double eased_extra_yaw_radians{0.0};
         double eased_extra_pitch_radians{0.0};
         double activation_gain{0.0};
+        // Origin-relative measurement context: raw_yaw/raw_pitch above are
+        // measured against this origin when active.
+        bool origin_active{false};
+        double origin_yaw_radians{0.0};
+        double origin_pitch_radians{0.0};
+        // Stepped response state (0 when continuous or centered).
+        int yaw_step{0};
+        int pitch_step{0};
         std::string_view recomposition_mode{"none"};
 
         bool has_eye_offsets{false};
@@ -487,6 +495,10 @@ class OpenXrLayer {
     std::optional<std::chrono::steady_clock::time_point> turbo_binding_last_poll_time_;
     bool turbo_binding_down_cached_{false};
     bool has_logged_turbo_varjo_note_{false};
+    // Info once per pipelining engage/release cycle; small Debug budget for the
+    // first fabricated xrWaitFrame returns of each cycle.
+    bool turbo_pipelining_logged_{false};
+    int turbo_fabricated_wait_log_budget_{0};
     bool quad_views_extension_requested_{false};
     bool varjo_foveated_rendering_extension_requested_{false};
     bool eye_gaze_extension_enabled_{false};

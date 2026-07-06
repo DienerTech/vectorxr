@@ -3205,6 +3205,12 @@ XrResult OpenXrLayer::WaitFrame(XrSession session,
             frame_state->predictedDisplayPeriod = turbo_last_predicted_display_period_;
             frame_state->shouldRender = turbo_last_should_render_ ? XR_TRUE : XR_FALSE;
             turbo_max_returned_display_time_ = frame_state->predictedDisplayTime;
+            if (turbo_fabricated_wait_log_budget_ > 0 && logger_.IsDebugEnabled()) {
+                --turbo_fabricated_wait_log_budget_;
+                logger_.Debug("Turbo: fabricated xrWaitFrame return, predictedDisplayTime=" +
+                              std::to_string(frame_state->predictedDisplayTime) +
+                              ", asyncWaitCompleted=" + (turbo_async_wait_completed_ ? "1" : "0"));
+            }
             return XR_SUCCESS;
         }
     }
@@ -3274,6 +3280,12 @@ XrResult OpenXrLayer::ForwardEndFrame(XrSession session, const XrFrameEndInfo* f
         if (!turbo_async_wait_.valid()) {
             turbo_async_wait_polled_ = false;
             turbo_async_wait_completed_ = false;
+            if (!turbo_pipelining_logged_) {
+                logger_.Info("Turbo: frame pipelining engaged; the app's xrWaitFrame is now decoupled "
+                             "from runtime pacing.");
+                turbo_pipelining_logged_ = true;
+                turbo_fabricated_wait_log_budget_ = 5;
+            }
             turbo_async_wait_ = std::async(std::launch::async, [this, session] {
                 XrFrameState frame_state{XR_TYPE_FRAME_STATE};
                 const XrResult wait_result = next_wait_frame_(session, nullptr, &frame_state);
@@ -3282,9 +3294,21 @@ XrResult OpenXrLayer::ForwardEndFrame(XrSession session, const XrFrameEndInfo* f
                     turbo_last_predicted_display_time_ = frame_state.predictedDisplayTime;
                     turbo_last_predicted_display_period_ = frame_state.predictedDisplayPeriod;
                     turbo_last_should_render_ = frame_state.shouldRender == XR_TRUE;
+                } else {
+                    logger_.Error("Turbo: async xrWaitFrame failed with " +
+                                  std::to_string(static_cast<int>(wait_result)) +
+                                  "; keeping previous frame timing.");
                 }
                 turbo_async_wait_completed_ = true;
             });
+        }
+    } else if (has_pending_wait && !turbo_engaged) {
+        // The pipeline just drained without relaunching (turbo toggled off or
+        // no longer applicable).
+        std::scoped_lock lock(turbo_mutex_);
+        if (turbo_pipelining_logged_) {
+            logger_.Info("Turbo: frame pipelining released; runtime pacing restored.");
+            turbo_pipelining_logged_ = false;
         }
     }
 
@@ -3314,6 +3338,8 @@ void OpenXrLayer::ResetTurboFrameState() {
     turbo_last_should_render_ = true;
     turbo_max_returned_display_time_ = 0;
     turbo_last_wait_frame_wall_time_.reset();
+    turbo_pipelining_logged_ = false;
+    turbo_fabricated_wait_log_budget_ = 0;
 }
 
 XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_end_info) {
@@ -4084,6 +4110,11 @@ XrResult OpenXrLayer::LocateViews(XrSession session,
                    << ", easedExtraYaw=" << FormatDiagnosticDouble(pivot_diagnostic_.eased_extra_yaw_radians)
                    << ", easedExtraPitch=" << FormatDiagnosticDouble(pivot_diagnostic_.eased_extra_pitch_radians)
                    << ", activationGain=" << FormatDiagnosticDouble(pivot_diagnostic_.activation_gain)
+                   << ", originActive=" << pivot_diagnostic_.origin_active
+                   << ", originYaw=" << FormatDiagnosticDouble(pivot_diagnostic_.origin_yaw_radians)
+                   << ", originPitch=" << FormatDiagnosticDouble(pivot_diagnostic_.origin_pitch_radians)
+                   << ", yawStep=" << pivot_diagnostic_.yaw_step
+                   << ", pitchStep=" << pivot_diagnostic_.pitch_step
                    << ", locationFlags=" << FormatHex(static_cast<uint64_t>(pivot_diagnostic_.view_location_flags))
                    << ", spaceIsView=" << pivot_diagnostic_.space_is_view
                    << ", baseSpaceIsView=" << pivot_diagnostic_.base_space_is_view
@@ -5510,6 +5541,8 @@ XrResult OpenXrLayer::LocateSpaceWithPivot(XrSpace space,
     // the release ramp it is frozen and the envelope eases the applied angle to
     // zero, avoiding any snap on toggle-off.
     if (update_smoothing && pivotxr_active) {
+        const int previous_yaw_step = pivotxr_yaw_step_;
+        const int previous_pitch_step = pivotxr_pitch_step_;
         if (settings.response_mode == PivotResponseMode::Stepped) {
             ComputePivotSteppedExtraAngleRadians(current_yaw_radians,
                                                  settings.yaw_deadzone_degrees,
@@ -5551,6 +5584,16 @@ XrResult OpenXrLayer::LocateSpaceWithPivot(XrSpace space,
                                           delta_seconds,
                                           pivotxr_smoothed_extra_pitch_radians_);
         }
+
+        if ((pivotxr_yaw_step_ != previous_yaw_step || pivotxr_pitch_step_ != previous_pitch_step) &&
+            logger_.IsDebugEnabled()) {
+            std::ostringstream step_stream;
+            step_stream << "PivotXR step change: yawStep=" << previous_yaw_step << "->" << pivotxr_yaw_step_
+                        << ", pitchStep=" << previous_pitch_step << "->" << pivotxr_pitch_step_
+                        << ", rawYaw=" << FormatDiagnosticDouble(current_yaw_radians)
+                        << ", rawPitch=" << FormatDiagnosticDouble(current_pitch_radians);
+            logger_.Debug(step_stream.str());
+        }
     }
 
     const double eased_gain = SmoothStep(pivotxr_activation_gain_);
@@ -5570,6 +5613,11 @@ XrResult OpenXrLayer::LocateSpaceWithPivot(XrSpace space,
         pivot_diagnostic_.eased_extra_yaw_radians = extra_yaw_radians;
         pivot_diagnostic_.eased_extra_pitch_radians = extra_pitch_radians;
         pivot_diagnostic_.activation_gain = pivotxr_activation_gain_;
+        pivot_diagnostic_.origin_active = pivotxr_origin_.has_value();
+        pivot_diagnostic_.origin_yaw_radians = pivotxr_origin_ ? pivotxr_origin_->yaw_radians : 0.0;
+        pivot_diagnostic_.origin_pitch_radians = pivotxr_origin_ ? pivotxr_origin_->pitch_radians : 0.0;
+        pivot_diagnostic_.yaw_step = pivotxr_yaw_step_;
+        pivot_diagnostic_.pitch_step = pivotxr_pitch_step_;
     }
     if (applied_extra_yaw_radians) {
         *applied_extra_yaw_radians = extra_yaw_radians;
@@ -6384,9 +6432,12 @@ bool OpenXrLayer::IsPivotXrActive() {
             if (was_pressed) {
                 if (is_engaged_profile) {
                     input_state.always_on_suspended = true;
+                    logger_.Info("PivotXR always-on profile '" + pivot.profiles[i].name +
+                                 "' suspended; it will not re-engage until resumed.");
                     disengage(i);
                 } else {
                     input_state.always_on_suspended = false;
+                    logger_.Info("PivotXR always-on profile '" + pivot.profiles[i].name + "' resumed.");
                     engage(i);
                 }
             }

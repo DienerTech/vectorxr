@@ -159,6 +159,14 @@ textarea {
   color: var(--app-text-soft);
 }
 
+/* Numeric inputs carry min/max mirroring the config validator; flag values the
+   validator would reject so the failing control is findable at a glance. */
+.app-input:out-of-range,
+.app-input:invalid {
+  border-color: #ef4444;
+  box-shadow: 0 0 0 1px rgba(239, 68, 68, 0.55);
+}
+
 .app-readonly-field {
   background: var(--app-surface-muted);
   border: 1px solid var(--app-border);
