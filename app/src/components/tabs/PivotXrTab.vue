@@ -191,31 +191,35 @@ const profileWarnings = computed(() => {
         </button>
       </div>
 
-      <ProfileShell
-        v-for="(profile, index) in config.modules.pivotxr.profiles"
-        :key="profile.id"
-        :index="index"
-        :profile="profile"
-        :applications="applications"
-        module-label="Pivot"
-        warning-title="Binding shadowed"
-        :warnings="profileWarnings.get(index)"
-        reorderable
-        :profile-count="config.modules.pivotxr.profiles.length"
-        @remove="$emit('removePivotProfile', index)"
-        @move="$emit('movePivotProfile', index, $event)"
-        @sync-name="$emit('syncPivotProfileName', index)"
-      >
-        <PivotBindingsPanel
-          :activation-mode="profile.activationMode"
-          :activation-binding="profile.activationBinding"
-          :set-origin-binding="profile.setOriginBinding"
-          :release-origin-binding="profile.releaseOriginBinding"
-          @edit="bindingsTarget = index"
-        />
+      <!-- TransitionGroup animates the cards swapping places on priority reorder
+           (FLIP on the stable profile ids). -->
+      <TransitionGroup name="pivot-profile" tag="div" class="flex flex-col gap-3">
+        <ProfileShell
+          v-for="(profile, index) in config.modules.pivotxr.profiles"
+          :key="profile.id"
+          :index="index"
+          :profile="profile"
+          :applications="applications"
+          module-label="Pivot"
+          warning-title="Binding shadowed"
+          :warnings="profileWarnings.get(index)"
+          reorderable
+          :profile-count="config.modules.pivotxr.profiles.length"
+          @remove="$emit('removePivotProfile', index)"
+          @move="$emit('movePivotProfile', index, $event)"
+          @sync-name="$emit('syncPivotProfileName', index)"
+        >
+          <PivotBindingsPanel
+            :activation-mode="profile.activationMode"
+            :activation-binding="profile.activationBinding"
+            :set-origin-binding="profile.setOriginBinding"
+            :release-origin-binding="profile.releaseOriginBinding"
+            @edit="bindingsTarget = index"
+          />
 
-        <PivotSettingsSummary class="mt-3" :settings="profile.settings" @edit="settingsTarget = index" />
-      </ProfileShell>
+          <PivotSettingsSummary class="mt-3" :settings="profile.settings" @edit="settingsTarget = index" />
+        </ProfileShell>
+      </TransitionGroup>
 
       <div
         v-if="config.modules.pivotxr.profiles.length === 0"
@@ -294,3 +298,17 @@ const profileWarnings = computed(() => {
     </div>
   </div>
 </template>
+
+<style scoped>
+/* Reorder animation: TransitionGroup applies this class while a card FLIPs to
+   its new slot after a priority move. */
+.pivot-profile-move {
+  transition: transform 0.3s ease;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pivot-profile-move {
+    transition: none;
+  }
+}
+</style>
