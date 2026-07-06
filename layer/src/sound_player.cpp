@@ -200,7 +200,12 @@ SoundPlayer::~SoundPlayer() {
 #endif
 }
 
-void SoundPlayer::PlayTransition(const SoundFeedback& sound, bool activated, const std::filesystem::path& layer_dir, int volume_percent) {
+void SoundPlayer::PlayTransition(const SoundFeedback& sound,
+                                 bool activated,
+                                 const std::filesystem::path& layer_dir,
+                                 int volume_percent,
+                                 const wchar_t* default_activate_file,
+                                 const wchar_t* default_deactivate_file) {
     if (!sound.enabled) {
         return;
     }
@@ -211,7 +216,7 @@ void SoundPlayer::PlayTransition(const SoundFeedback& sound, bool activated, con
     if (!custom.empty()) {
         resolved = FromUtf8(custom);
     } else if (!layer_dir.empty()) {
-        resolved = layer_dir / "sounds" / (activated ? L"activate.wav" : L"deactivate.wav");
+        resolved = layer_dir / "sounds" / (activated ? default_activate_file : default_deactivate_file);
     } else {
         return; // no custom path and no known layer directory to resolve a default
     }
@@ -227,6 +232,8 @@ void SoundPlayer::PlayTransition(const SoundFeedback& sound, bool activated, con
     (void)activated;
     (void)layer_dir;
     (void)volume_percent;
+    (void)default_activate_file;
+    (void)default_deactivate_file;
 #endif
 }
 

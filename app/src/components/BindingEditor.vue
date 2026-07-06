@@ -10,6 +10,13 @@ const props = defineProps<{
   label: string
   description: string
   noneText?: string
+  // 'single' hides the deactivate sound row for momentary actions (e.g. set
+  // origin) that only ever fire an activate cue.
+  soundMode?: 'transition' | 'single'
+  // Bundled default WAVs used when a sound path is empty; let actions with
+  // their own cues (origin set/release, turbo on/off) test the right default.
+  defaultActivateSound?: string
+  defaultDeactivateSound?: string
 }>()
 
 const emit = defineEmits<{
@@ -60,11 +67,21 @@ async function browseSound(which: SoundPath) {
 async function testSound(which: SoundPath) {
   soundError.value = ''
   try {
-    await playTestSound(sound.value?.[which] ?? '', which === 'activateSound')
+    const defaultName = which === 'activateSound' ? props.defaultActivateSound : props.defaultDeactivateSound
+    await playTestSound(sound.value?.[which] ?? '', which === 'activateSound', 100, defaultName)
   } catch (error) {
     soundError.value = error instanceof Error ? error.message : 'Failed to play sound.'
   }
 }
+
+const soundRows = computed(() =>
+  props.soundMode === 'single'
+    ? [{ key: 'activateSound' as const, label: 'Sound' }]
+    : [
+        { key: 'activateSound' as const, label: 'Activate' },
+        { key: 'deactivateSound' as const, label: 'Deactivate' },
+      ],
+)
 
 const bindingType = computed({
   get: () => props.modelValue.type,
@@ -162,14 +179,14 @@ function toggleModifier(modifier: string, enabled: boolean) {
       <label class="flex items-start gap-2.5">
         <input v-model="soundEnabled" class="mt-0.5 h-4 w-4 accent-depthxr-copper" type="checkbox" />
         <span>
-          <span class="block text-sm font-medium">Play a sound on activate / deactivate</span>
-          <span class="mt-0.5 block text-sm leading-6 text-muted">An extra audible cue when this binding flips state. Leave a slot on the default tone, or choose your own short .wav.</span>
+          <span class="block text-sm font-medium">{{ soundMode === 'single' ? 'Play a sound when this action fires' : 'Play a sound on activate / deactivate' }}</span>
+          <span class="mt-0.5 block text-sm leading-6 text-muted">An extra audible cue for this binding. Leave a slot on the default tone, or choose your own short .wav.</span>
         </span>
       </label>
 
       <div v-if="soundEnabled" class="mt-3 space-y-2">
         <div
-          v-for="row in [{ key: 'activateSound' as const, label: 'Activate' }, { key: 'deactivateSound' as const, label: 'Deactivate' }]"
+          v-for="row in soundRows"
           :key="row.key"
           class="flex flex-wrap items-center gap-2"
         >

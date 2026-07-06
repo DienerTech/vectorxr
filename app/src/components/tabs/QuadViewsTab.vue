@@ -171,7 +171,10 @@ function budgetChipClass(settings: QuadViewsSettings) {
             >ⓘ</span
           >
         </label>
-        <QuadViewsSettingsFields class="mt-3" :settings="config.modules.quadviews.defaults" />
+        <div v-if="!config.modules.quadviews.enabled" class="mt-3 rounded-[0.9rem] border px-4 py-3 text-sm leading-6 surface-panel-strong">
+          The default profile is off and has no effect — applications without an enabled custom profile get no Quadviews. Enabled custom profiles below still apply to their assigned applications.
+        </div>
+        <QuadViewsSettingsFields v-else class="mt-3" :settings="config.modules.quadviews.defaults" />
       </details>
     </article>
 

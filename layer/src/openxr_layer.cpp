@@ -472,13 +472,24 @@ float4 PSMain(VSOut input) : SV_Target {
 
 // Constants for the standalone focus sharpen pass (Varjo compatible quadviews).
 struct FocusSharpenConstants {
-    float params[4];   // x = sharpen amount [0,1], y/z = source texel size in UV, w = unused
+    float params[4];   // x = sharpen amount [0,1], y/z = neighbor sample offset in UV, w = unused
     float src_rect[4]; // xy = source UV offset, zw = source UV scale (the focus subImage rect)
 };
 
+// Neighbor sampling radius for the Varjo focus sharpen, in source texels. Unlike the
+// compositor path there is no minification into a smaller output rect here — the focus
+// view is forwarded to the runtime near display-native — so a 1-texel unsharp lands at
+// the runtime's panel-resample Nyquist and gets averaged away (the same reason the
+// compositor path samples at output-pixel spacing; see D3D11QuadViewsShaderSource). A
+// few-texel radius targets the frequencies that survive the resample, reproducing the
+// visible-but-gentle sharpen of the compositor path while the CAS clamp still prevents
+// halos. Tunable; 3.0 matches the effective radius of the compositor path in testing.
+constexpr float kVarjoFocusSharpenRadiusTexels = 3.0f;
+
 // Standalone 1:1 CAS sharpen over a focus view. Unlike the compositor shader this
-// does not blend a peripheral view or resample into a sub-rect — the focus texture
-// is sampled at native density, so neighbours are taken at source-texel spacing.
+// does not blend a peripheral view or resample into a sub-rect. Neighbours are taken
+// at a widened offset (params.yz, a few source texels — see kVarjoFocusSharpenRadiusTexels)
+// so the boost survives the runtime's resample of the focus view onto its panel.
 const char* D3D11FocusSharpenShaderSource() {
     return R"(
 cbuffer FocusSharpenConstants : register(b0) {
@@ -585,6 +596,19 @@ double ExtractPoseYawRadians(const XrPosef& pose) {
 
 double ExtractPosePitchRadians(const XrPosef& pose) {
     return ExtractPitchRadians(ToViewOrientation(pose.orientation));
+}
+
+// Wraps an angle to [-pi, pi]; origin-relative yaw deltas must not jump when
+// the raw yaw crosses the +/-pi seam.
+double WrapRadians(double angle) {
+    constexpr double kPi = 3.14159265358979323846;
+    while (angle > kPi) {
+        angle -= 2.0 * kPi;
+    }
+    while (angle < -kPi) {
+        angle += 2.0 * kPi;
+    }
+    return angle;
 }
 
 void AppendPoseSummary(std::ostringstream& stream, std::string_view label, const XrPosef& pose) {
@@ -755,6 +779,65 @@ double ComputeTimeBasedBlend(double smoothing, double delta_seconds) {
     return Clamp(1.0 - std::pow(clamped_smoothing, frame_scale), 0.05, 1.0);
 }
 
+// Stepped response: discrete extra rotation added per step_trigger of head
+// angle beyond the deadzone, with hysteresis so the view does not oscillate
+// when the head rests near a threshold. `current_step` is signed persistent
+// state (positive = positive rotation direction); the regular smoothing eases
+// the view between step targets.
+void ComputePivotSteppedExtraAngleRadians(double current_angle_radians,
+                                          double deadzone_degrees,
+                                          double step_trigger_degrees,
+                                          double step_amount_degrees,
+                                          double step_hysteresis_degrees,
+                                          double max_extra_degrees,
+                                          double smoothing,
+                                          double delta_seconds,
+                                          int& current_step,
+                                          double& smoothed_extra_angle_radians) {
+    const double deadzone = DegreesToRadians(std::max(0.0, deadzone_degrees));
+    // Clamp the trigger to a sane floor so a mis-set 0 cannot spin the loop.
+    const double trigger = DegreesToRadians(std::max(0.5, step_trigger_degrees));
+    const double amount = DegreesToRadians(std::max(0.0, step_amount_degrees));
+    // Hysteresis must stay below the trigger spacing or a step could re-engage
+    // the moment it releases.
+    const double hysteresis =
+        std::min(DegreesToRadians(std::max(0.0, step_hysteresis_degrees)), trigger * 0.9);
+    const double max_extra = DegreesToRadians(std::max(0.0, max_extra_degrees));
+
+    // Walk down while the head has come back inside the release threshold of
+    // the current step (crossing zero when the head swings to the other side).
+    while (current_step != 0) {
+        const int sign = current_step > 0 ? 1 : -1;
+        const double release_threshold = deadzone + std::abs(current_step) * trigger - hysteresis;
+        if (current_angle_radians * sign < release_threshold) {
+            current_step -= sign;
+        } else {
+            break;
+        }
+    }
+
+    // Walk up in the direction of the current angle.
+    {
+        const int sign = current_angle_radians >= 0.0 ? 1 : -1;
+        if (current_step == 0 || (current_step > 0) == (sign > 0)) {
+            while (current_angle_radians * sign >= deadzone + (std::abs(current_step) + 1) * trigger) {
+                current_step += sign;
+            }
+        }
+    }
+
+    double target_extra_angle = current_step * amount;
+    if (max_extra > 0.0) {
+        target_extra_angle = Clamp(target_extra_angle, -max_extra, max_extra);
+    }
+
+    const double blend = ComputeTimeBasedBlend(smoothing, delta_seconds);
+    smoothed_extra_angle_radians += (target_extra_angle - smoothed_extra_angle_radians) * blend;
+    if (current_step == 0 && NearlyZero(smoothed_extra_angle_radians)) {
+        smoothed_extra_angle_radians = 0.0;
+    }
+}
+
 double ComputePivotExtraAngleRadians(double current_angle_radians,
                                      double rotation_multiplier,
                                      double deadzone_degrees,
@@ -914,6 +997,50 @@ constexpr std::chrono::milliseconds kConfigCheckInterval{500};
 constexpr std::chrono::milliseconds kInputBindingPollInterval{30};
 constexpr std::chrono::milliseconds kAppActionSyncFreshWindow{100};
 
+bool SameInputBinding(const InputBinding& lhs, const InputBinding& rhs);
+
+bool SamePivotAxisTuning(const PivotAxisTuning& lhs, const PivotAxisTuning& rhs) {
+    return NearlyEqual(lhs.rotation_multiplier, rhs.rotation_multiplier) &&
+           NearlyEqual(lhs.deadzone_degrees, rhs.deadzone_degrees) &&
+           NearlyEqual(lhs.max_extra_degrees, rhs.max_extra_degrees);
+}
+
+bool SamePivotResolvedProfile(const PivotXrResolvedProfile& lhs, const PivotXrResolvedProfile& rhs) {
+    return lhs.name == rhs.name &&
+           lhs.activation_mode == rhs.activation_mode &&
+           SameInputBinding(lhs.activation_binding, rhs.activation_binding) &&
+           SameInputBinding(lhs.set_origin_binding, rhs.set_origin_binding) &&
+           SameInputBinding(lhs.release_origin_binding, rhs.release_origin_binding) &&
+           NearlyEqual(lhs.smoothing, rhs.smoothing) &&
+           NearlyEqual(lhs.activation_ramp_seconds, rhs.activation_ramp_seconds) &&
+           NearlyEqual(lhs.yaw_rotation_multiplier, rhs.yaw_rotation_multiplier) &&
+           NearlyEqual(lhs.yaw_deadzone_degrees, rhs.yaw_deadzone_degrees) &&
+           NearlyEqual(lhs.yaw_max_extra_degrees, rhs.yaw_max_extra_degrees) &&
+           NearlyEqual(lhs.pitch_rotation_multiplier, rhs.pitch_rotation_multiplier) &&
+           NearlyEqual(lhs.pitch_deadzone_degrees, rhs.pitch_deadzone_degrees) &&
+           NearlyEqual(lhs.pitch_max_extra_degrees, rhs.pitch_max_extra_degrees) &&
+           lhs.response_mode == rhs.response_mode &&
+           NearlyEqual(lhs.step_trigger_degrees, rhs.step_trigger_degrees) &&
+           NearlyEqual(lhs.step_amount_degrees, rhs.step_amount_degrees) &&
+           NearlyEqual(lhs.step_hysteresis_degrees, rhs.step_hysteresis_degrees) &&
+           SamePivotAxisTuning(lhs.yaw_positive, rhs.yaw_positive) &&
+           SamePivotAxisTuning(lhs.yaw_negative, rhs.yaw_negative) &&
+           SamePivotAxisTuning(lhs.pitch_positive, rhs.pitch_positive) &&
+           SamePivotAxisTuning(lhs.pitch_negative, rhs.pitch_negative);
+}
+
+bool SamePivotResolvedSettings(const PivotXrResolvedSettings& lhs, const PivotXrResolvedSettings& rhs) {
+    if (lhs.enabled != rhs.enabled || lhs.profiles.size() != rhs.profiles.size()) {
+        return false;
+    }
+    for (size_t i = 0; i < lhs.profiles.size(); ++i) {
+        if (!SamePivotResolvedProfile(lhs.profiles[i], rhs.profiles[i])) {
+            return false;
+        }
+    }
+    return true;
+}
+
 bool SameSettings(const ResolvedRuntimeConfig& lhs, const ResolvedRuntimeConfig& rhs) {
     return lhs.core.enabled == rhs.core.enabled &&
            lhs.core.log_level == rhs.core.log_level &&
@@ -929,23 +1056,9 @@ bool SameSettings(const ResolvedRuntimeConfig& lhs, const ResolvedRuntimeConfig&
            lhs.depthxr_bindings.toggle_enabled.product_guid == rhs.depthxr_bindings.toggle_enabled.product_guid &&
            lhs.depthxr_bindings.toggle_enabled.device_name == rhs.depthxr_bindings.toggle_enabled.device_name &&
            lhs.depthxr_bindings.toggle_enabled.input_label == rhs.depthxr_bindings.toggle_enabled.input_label &&
-           lhs.pivotxr.enabled == rhs.pivotxr.enabled &&
-           lhs.pivotxr.activation_mode == rhs.pivotxr.activation_mode &&
-           lhs.pivotxr.activation_binding.type == rhs.pivotxr.activation_binding.type &&
-           lhs.pivotxr.activation_binding.chord == rhs.pivotxr.activation_binding.chord &&
-           lhs.pivotxr.activation_binding.device_guid == rhs.pivotxr.activation_binding.device_guid &&
-           lhs.pivotxr.activation_binding.input_path == rhs.pivotxr.activation_binding.input_path &&
-           lhs.pivotxr.activation_binding.product_guid == rhs.pivotxr.activation_binding.product_guid &&
-           lhs.pivotxr.activation_binding.device_name == rhs.pivotxr.activation_binding.device_name &&
-           lhs.pivotxr.activation_binding.input_label == rhs.pivotxr.activation_binding.input_label &&
-           NearlyEqual(lhs.pivotxr.smoothing, rhs.pivotxr.smoothing) &&
-           NearlyEqual(lhs.pivotxr.activation_ramp_seconds, rhs.pivotxr.activation_ramp_seconds) &&
-           NearlyEqual(lhs.pivotxr.yaw_rotation_multiplier, rhs.pivotxr.yaw_rotation_multiplier) &&
-           NearlyEqual(lhs.pivotxr.yaw_deadzone_degrees, rhs.pivotxr.yaw_deadzone_degrees) &&
-           NearlyEqual(lhs.pivotxr.yaw_max_extra_degrees, rhs.pivotxr.yaw_max_extra_degrees) &&
-           NearlyEqual(lhs.pivotxr.pitch_rotation_multiplier, rhs.pivotxr.pitch_rotation_multiplier) &&
-           NearlyEqual(lhs.pivotxr.pitch_deadzone_degrees, rhs.pivotxr.pitch_deadzone_degrees) &&
-           NearlyEqual(lhs.pivotxr.pitch_max_extra_degrees, rhs.pivotxr.pitch_max_extra_degrees) &&
+           SamePivotResolvedSettings(lhs.pivotxr, rhs.pivotxr) &&
+           lhs.turbo.enabled == rhs.turbo.enabled &&
+           SameInputBinding(lhs.turbo.toggle_binding, rhs.turbo.toggle_binding) &&
            lhs.quadviews.enabled == rhs.quadviews.enabled &&
            lhs.quadviews.tracking_mode == rhs.quadviews.tracking_mode &&
            NearlyEqual(lhs.quadviews.focus_horizontal_size_percent, rhs.quadviews.focus_horizontal_size_percent) &&
@@ -973,9 +1086,21 @@ bool SameInputBinding(const InputBinding& lhs, const InputBinding& rhs) {
            lhs.sound.deactivate_sound == rhs.sound.deactivate_sound;
 }
 
-bool SamePivotActivationBinding(const PivotXrResolvedSettings& lhs, const PivotXrResolvedSettings& rhs) {
-    return lhs.enabled == rhs.enabled && lhs.activation_mode == rhs.activation_mode &&
-           SameInputBinding(lhs.activation_binding, rhs.activation_binding);
+// True when the activation surface (candidate count, modes, bindings) is
+// unchanged, so runtime toggle/edge state can survive a config hot-reload.
+bool SamePivotActivationSet(const PivotXrResolvedSettings& lhs, const PivotXrResolvedSettings& rhs) {
+    if (lhs.enabled != rhs.enabled || lhs.profiles.size() != rhs.profiles.size()) {
+        return false;
+    }
+    for (size_t i = 0; i < lhs.profiles.size(); ++i) {
+        if (lhs.profiles[i].activation_mode != rhs.profiles[i].activation_mode ||
+            !SameInputBinding(lhs.profiles[i].activation_binding, rhs.profiles[i].activation_binding) ||
+            !SameInputBinding(lhs.profiles[i].set_origin_binding, rhs.profiles[i].set_origin_binding) ||
+            !SameInputBinding(lhs.profiles[i].release_origin_binding, rhs.profiles[i].release_origin_binding)) {
+            return false;
+        }
+    }
+    return true;
 }
 
 std::string BindingLabel(const InputBinding& binding) {
@@ -1177,7 +1302,8 @@ XrResult OpenXrLayer::OnInstanceCreated(const XrInstanceCreateInfo* create_info,
         !next_acquire_swapchain_image_ || !next_wait_swapchain_image_ || !next_release_swapchain_image_ ||
         !next_enumerate_reference_spaces_ || !next_get_reference_space_bounds_rect_ ||
         !next_create_reference_space_ || !next_destroy_space_ ||
-        !next_locate_space_ || !next_locate_views_) {
+        !next_locate_space_ || !next_locate_views_ ||
+        !next_wait_frame_ || !next_begin_frame_) {
         logger_.Error("Failed to resolve required OpenXR function pointers");
         return XR_ERROR_INITIALIZATION_FAILED;
     }
@@ -1341,6 +1467,8 @@ XrResult OpenXrLayer::CreateSession(XrInstance instance,
 }
 
 XrResult OpenXrLayer::DestroySession(XrSession session) {
+    // Join any in-flight turbo async wait before tearing the session down.
+    ResetTurboFrameState();
     {
         std::scoped_lock lock(mutex_);
         if (session == active_session_) {
@@ -1952,6 +2080,9 @@ XrResult OpenXrLayer::CreateSwapchain(XrSession session,
 }
 
 XrResult OpenXrLayer::DestroySwapchain(XrSwapchain swapchain) {
+    // A pipelined turbo frame may still hold onto this swapchain; make sure the
+    // async xrWaitFrame has finished before the swapchain goes away.
+    DrainTurboAsyncWait();
     {
         std::scoped_lock lock(mutex_);
         auto it = tracked_swapchains_.find(swapchain);
@@ -3031,12 +3162,346 @@ bool OpenXrLayer::ComposeQuadViewsD3D11(const XrCompositionLayerProjection* sour
     return true;
 }
 
+// Turbo mode frame loop. The runtime always sees a conformant
+// wait->begin->end sequence; only the application's view of frame timing is
+// decoupled: while a pipelined async wait is outstanding, the app's
+// xrWaitFrame returns immediately with a fabricated (monotonic)
+// predictedDisplayTime and its xrBeginFrame becomes a no-op — the real
+// xrBeginFrame is issued inside ForwardEndFrame once the async xrWaitFrame
+// resolves. Exactly one frame of pipelining is allowed. These two hooks touch
+// only turbo_mutex_ so they never contend with the config/render lock.
+XrResult OpenXrLayer::WaitFrame(XrSession session,
+                                const XrFrameWaitInfo* frame_wait_info,
+                                XrFrameState* frame_state) {
+    if (!frame_state) {
+        return next_wait_frame_(session, frame_wait_info, frame_state);
+    }
+
+    {
+        std::unique_lock lock(turbo_mutex_);
+        if (turbo_async_wait_.valid()) {
+            if (turbo_async_wait_polled_) {
+                // Second poll while pipelined: only one frame of pipelining is
+                // allowed, so now we must wait for the real frame.
+                lock.unlock();
+                turbo_async_wait_.wait();
+                lock.lock();
+            }
+            turbo_async_wait_polled_ = true;
+
+            const auto now = std::chrono::steady_clock::now();
+            XrTime predicted = turbo_last_predicted_display_time_;
+            if (!turbo_async_wait_completed_ && turbo_last_wait_frame_wall_time_.has_value()) {
+                // Async wait still in flight: extrapolate by the wall-clock
+                // delta between the app's waits.
+                predicted += std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                 now - *turbo_last_wait_frame_wall_time_)
+                                 .count();
+            }
+            turbo_last_wait_frame_wall_time_ = now;
+
+            // The spec requires predictedDisplayTime to increase monotonically.
+            // When the app polls twice for one pipelined frame (DCS menu does),
+            // step the second return forward by a display period rather than
+            // 1ns — two frames "predicted" for the same instant confuse the
+            // app's pose prediction and animation timing.
+            const XrTime min_step =
+                turbo_last_predicted_display_period_ > 0 ? turbo_last_predicted_display_period_ : 1;
+            frame_state->predictedDisplayTime =
+                std::max(predicted, turbo_max_returned_display_time_ + min_step);
+            frame_state->predictedDisplayPeriod = turbo_last_predicted_display_period_;
+            frame_state->shouldRender = turbo_last_should_render_ ? XR_TRUE : XR_FALSE;
+            turbo_max_returned_display_time_ = frame_state->predictedDisplayTime;
+            ++pacing_fabricated_waits_;
+            if (turbo_fabricated_wait_log_budget_ > 0 && logger_.IsDebugEnabled()) {
+                --turbo_fabricated_wait_log_budget_;
+                logger_.Debug("Turbo: fabricated xrWaitFrame return, predictedDisplayTime=" +
+                              std::to_string(frame_state->predictedDisplayTime) +
+                              ", asyncWaitCompleted=" + (turbo_async_wait_completed_ ? "1" : "0"));
+            }
+            return XR_SUCCESS;
+        }
+    }
+
+    const auto wait_start = std::chrono::steady_clock::now();
+    const XrResult result = next_wait_frame_(session, frame_wait_info, frame_state);
+    const double wait_ms =
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - wait_start).count();
+    if (XR_SUCCEEDED(result)) {
+        std::scoped_lock lock(turbo_mutex_);
+        pacing_wait_sum_ms_ += wait_ms;
+        pacing_wait_max_ms_ = std::max(pacing_wait_max_ms_, wait_ms);
+        ++pacing_wait_samples_;
+        // Always record the real pacing so a mid-session switch into turbo has
+        // sane values to extrapolate from.
+        turbo_last_predicted_display_time_ = frame_state->predictedDisplayTime;
+        turbo_last_predicted_display_period_ = frame_state->predictedDisplayPeriod;
+        turbo_last_should_render_ = frame_state->shouldRender == XR_TRUE;
+        turbo_last_wait_frame_wall_time_ = std::chrono::steady_clock::now();
+        frame_state->predictedDisplayTime =
+            std::max(frame_state->predictedDisplayTime, turbo_max_returned_display_time_ + 1);
+        turbo_max_returned_display_time_ = frame_state->predictedDisplayTime;
+    }
+    return result;
+}
+
+XrResult OpenXrLayer::BeginFrame(XrSession session, const XrFrameBeginInfo* frame_begin_info) {
+    {
+        std::scoped_lock lock(turbo_mutex_);
+        if (turbo_async_wait_.valid()) {
+            // Deferred into ForwardEndFrame once the async wait resolves.
+            return XR_SUCCESS;
+        }
+    }
+    return next_begin_frame_(session, frame_begin_info);
+}
+
+XrResult OpenXrLayer::ForwardEndFrame(XrSession session,
+                                      const XrFrameEndInfo* frame_end_info,
+                                      std::unique_lock<std::mutex>& config_lock) {
+    const bool turbo_engaged = IsTurboActive();
+
+    // Copied under the lock: the auto-suspend path below runs after the lock
+    // is released and may need to play the toggle's deactivate cue.
+    SoundFeedback turbo_sound{};
+    int turbo_sound_volume = 100;
+    if (turbo_engaged) {
+        turbo_sound = resolved_settings_.turbo.toggle_binding.sound;
+        turbo_sound_volume = resolved_settings_.core.sound_volume;
+    }
+
+    // Everything past this point is frame forwarding: turbo drain (which can
+    // block a full frame interval), the deferred begin, and the runtime end.
+    // Release the config/render lock so locate calls from other app threads
+    // keep flowing — holding it here caused visible judder at locked fps.
+    config_lock.unlock();
+
+    const auto pacing_start = std::chrono::steady_clock::now();
+
+    bool has_pending_wait = false;
+    {
+        std::scoped_lock lock(turbo_mutex_);
+        has_pending_wait = turbo_async_wait_.valid();
+    }
+    if (has_pending_wait) {
+        // This is the latest point the pipelined frame must have been fully
+        // waited. Some runtimes interlock the wait with the next submit
+        // (PiOpenXR under GPU load), stalling it until we proceed anyway — cap
+        // the per-frame damage with a short timeout. If it trips, the future
+        // stays valid and no second wait is enqueued below; submitting is what
+        // unblocks the stalled runtime wait.
+        constexpr std::chrono::milliseconds kTurboDrainTimeout{250};
+        const bool ready = turbo_async_wait_.wait_for(kTurboDrainTimeout) == std::future_status::ready;
+        {
+            std::scoped_lock lock(turbo_mutex_);
+            if (ready) {
+                turbo_async_wait_ = {};
+            }
+        }
+        if (!ready && !turbo_auto_suspended_.load(std::memory_order_relaxed)) {
+            // Rolling-window count: stalled frames interleave with clean ones
+            // on these runtimes, so a consecutive-streak check never fires.
+            constexpr std::chrono::seconds kTimeoutWindow{30};
+            constexpr int kTimeoutSuspendThreshold = 5;
+            const auto now = std::chrono::steady_clock::now();
+            if (!turbo_timeout_window_start_.has_value() ||
+                now - *turbo_timeout_window_start_ > kTimeoutWindow) {
+                turbo_timeout_window_start_ = now;
+                turbo_drain_timeout_count_ = 0;
+            }
+            ++turbo_drain_timeout_count_;
+            if (turbo_drain_timeout_count_ >= kTimeoutSuspendThreshold) {
+                turbo_auto_suspended_.store(true, std::memory_order_relaxed);
+                logger_.Info("Turbo: this runtime's frame pacing does not tolerate pipelining (the pipelined "
+                             "xrWaitFrame repeatedly stalled until the next frame submit); auto-suspending "
+                             "turbo. Press the turbo toggle binding to re-arm it.");
+                // Same audible cue as a manual turbo-off, so the user knows the
+                // safety net fired. Non-blocking (worker-thread playback).
+                SoundPlayer::Instance().PlayTransition(turbo_sound, false, dll_directory_, turbo_sound_volume,
+                                                       L"turbo-on.wav", L"turbo-off.wav");
+            }
+        }
+
+        // Deferred xrBeginFrame for the pipelined frame. Errors pass through
+        // (e.g. the session state machine advanced under us).
+        const XrResult begin_result = next_begin_frame_(session, nullptr);
+        if (XR_FAILED(begin_result)) {
+            logger_.Error("Turbo: deferred xrBeginFrame failed with " +
+                          std::to_string(static_cast<int>(begin_result)));
+            return begin_result;
+        }
+    }
+
+    const auto pacing_after_drain = std::chrono::steady_clock::now();
+    const XrResult result = next_end_frame_(session, frame_end_info);
+    const auto pacing_after_end = std::chrono::steady_clock::now();
+    RecordFramePacing(pacing_start, pacing_after_drain, pacing_after_end, turbo_engaged);
+
+    if (XR_SUCCEEDED(result) && turbo_engaged) {
+        std::scoped_lock lock(turbo_mutex_);
+        if (!turbo_async_wait_.valid()) {
+            turbo_async_wait_polled_ = false;
+            turbo_async_wait_completed_ = false;
+            if (!turbo_pipelining_logged_) {
+                logger_.Info("Turbo: frame pipelining engaged; the app's xrWaitFrame is now decoupled "
+                             "from runtime pacing.");
+                turbo_pipelining_logged_ = true;
+                turbo_fabricated_wait_log_budget_ = 5;
+            }
+            turbo_async_wait_ = std::async(std::launch::async, [this, session] {
+                XrFrameState frame_state{XR_TYPE_FRAME_STATE};
+                const XrResult wait_result = next_wait_frame_(session, nullptr, &frame_state);
+                std::scoped_lock state_lock(turbo_mutex_);
+                if (XR_SUCCEEDED(wait_result)) {
+                    turbo_last_predicted_display_time_ = frame_state.predictedDisplayTime;
+                    turbo_last_predicted_display_period_ = frame_state.predictedDisplayPeriod;
+                    turbo_last_should_render_ = frame_state.shouldRender == XR_TRUE;
+                } else {
+                    logger_.Error("Turbo: async xrWaitFrame failed with " +
+                                  std::to_string(static_cast<int>(wait_result)) +
+                                  "; keeping previous frame timing.");
+                }
+                turbo_async_wait_completed_ = true;
+            });
+        }
+    } else if (has_pending_wait && !turbo_engaged) {
+        // The pipeline just drained without relaunching (turbo toggled off or
+        // no longer applicable).
+        std::scoped_lock lock(turbo_mutex_);
+        if (turbo_pipelining_logged_) {
+            logger_.Info("Turbo: frame pipelining released; runtime pacing restored.");
+            turbo_pipelining_logged_ = false;
+        }
+    }
+
+    return result;
+}
+
+void OpenXrLayer::RecordFramePacing(std::chrono::steady_clock::time_point frame_start,
+                                    std::chrono::steady_clock::time_point after_drain,
+                                    std::chrono::steady_clock::time_point after_end,
+                                    bool turbo_engaged) {
+    constexpr std::chrono::seconds kPacingWindow{5};
+
+    if (pacing_last_end_time_.has_value()) {
+        const double delta_ms =
+            std::chrono::duration<double, std::milli>(after_end - *pacing_last_end_time_).count();
+        pacing_delta_sum_ms_ += delta_ms;
+        pacing_delta_max_ms_ = std::max(pacing_delta_max_ms_, delta_ms);
+    }
+    pacing_last_end_time_ = after_end;
+    pacing_drain_sum_ms_ +=
+        std::chrono::duration<double, std::milli>(after_drain - frame_start).count();
+    pacing_drain_max_ms_ = std::max(
+        pacing_drain_max_ms_, std::chrono::duration<double, std::milli>(after_drain - frame_start).count());
+    pacing_end_sum_ms_ += std::chrono::duration<double, std::milli>(after_end - after_drain).count();
+    pacing_end_max_ms_ =
+        std::max(pacing_end_max_ms_, std::chrono::duration<double, std::milli>(after_end - after_drain).count());
+    ++pacing_frames_;
+
+    if (!pacing_window_start_.has_value()) {
+        pacing_window_start_ = after_end;
+        return;
+    }
+    if (after_end - *pacing_window_start_ < kPacingWindow) {
+        return;
+    }
+
+    if (logger_.IsDebugEnabled() && pacing_frames_ > 0) {
+        double wait_sum_ms = 0.0;
+        double wait_max_ms = 0.0;
+        uint32_t wait_samples = 0;
+        uint32_t fabricated_waits = 0;
+        {
+            std::scoped_lock lock(turbo_mutex_);
+            wait_sum_ms = pacing_wait_sum_ms_;
+            wait_max_ms = pacing_wait_max_ms_;
+            wait_samples = pacing_wait_samples_;
+            fabricated_waits = pacing_fabricated_waits_;
+            pacing_wait_sum_ms_ = 0.0;
+            pacing_wait_max_ms_ = 0.0;
+            pacing_wait_samples_ = 0;
+            pacing_fabricated_waits_ = 0;
+        }
+
+        const double window_seconds =
+            std::chrono::duration<double>(after_end - *pacing_window_start_).count();
+        std::ostringstream stream;
+        stream << "Frame pacing (" << FormatDiagnosticDouble(window_seconds) << "s window): frames="
+               << pacing_frames_ << " (" << FormatDiagnosticDouble(pacing_frames_ / window_seconds)
+               << " fps), turbo=" << (turbo_engaged ? 1 : 0)
+               << ", endFrameDelta avg/max=" << FormatDiagnosticDouble(pacing_delta_sum_ms_ / pacing_frames_)
+               << "/" << FormatDiagnosticDouble(pacing_delta_max_ms_)
+               << "ms, turboDrainAndBegin avg/max="
+               << FormatDiagnosticDouble(pacing_drain_sum_ms_ / pacing_frames_) << "/"
+               << FormatDiagnosticDouble(pacing_drain_max_ms_)
+               << "ms, runtimeEndFrame avg/max=" << FormatDiagnosticDouble(pacing_end_sum_ms_ / pacing_frames_)
+               << "/" << FormatDiagnosticDouble(pacing_end_max_ms_) << "ms, runtimeWaitFrame avg/max=";
+        if (wait_samples > 0) {
+            stream << FormatDiagnosticDouble(wait_sum_ms / wait_samples) << "/"
+                   << FormatDiagnosticDouble(wait_max_ms) << "ms over " << wait_samples << " calls";
+        } else {
+            stream << "n/a";
+        }
+        stream << ", fabricatedWaits=" << fabricated_waits;
+        logger_.Debug(stream.str());
+    } else {
+        // Keep the WaitFrame-side counters bounded even when debug is off.
+        std::scoped_lock lock(turbo_mutex_);
+        pacing_wait_sum_ms_ = 0.0;
+        pacing_wait_max_ms_ = 0.0;
+        pacing_wait_samples_ = 0;
+        pacing_fabricated_waits_ = 0;
+    }
+
+    pacing_window_start_ = after_end;
+    pacing_frames_ = 0;
+    pacing_delta_sum_ms_ = 0.0;
+    pacing_delta_max_ms_ = 0.0;
+    pacing_drain_sum_ms_ = 0.0;
+    pacing_drain_max_ms_ = 0.0;
+    pacing_end_sum_ms_ = 0.0;
+    pacing_end_max_ms_ = 0.0;
+}
+
+void OpenXrLayer::DrainTurboAsyncWait() {
+    // Wait without consuming the future: the pipelined frame is still pending
+    // and will be begun/ended by the normal path — only the blocking runtime
+    // call must finish before teardown proceeds.
+    std::unique_lock lock(turbo_mutex_);
+    if (turbo_async_wait_.valid()) {
+        lock.unlock();
+        turbo_async_wait_.wait();
+    }
+}
+
+void OpenXrLayer::ResetTurboFrameState() {
+    std::scoped_lock lock(turbo_mutex_);
+    // Destroying a std::async future joins its thread, which is the drain we
+    // want at session teardown.
+    turbo_async_wait_ = {};
+    turbo_async_wait_polled_ = false;
+    turbo_async_wait_completed_ = false;
+    turbo_last_predicted_display_time_ = 0;
+    turbo_last_predicted_display_period_ = 0;
+    turbo_last_should_render_ = true;
+    turbo_max_returned_display_time_ = 0;
+    turbo_last_wait_frame_wall_time_.reset();
+    turbo_pipelining_logged_ = false;
+    turbo_fabricated_wait_log_budget_ = 0;
+    turbo_drain_timeout_count_ = 0;
+    turbo_timeout_window_start_.reset();
+    turbo_auto_suspended_.store(false, std::memory_order_relaxed);
+}
+
 XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_end_info) {
     if (!frame_end_info) {
         return XR_ERROR_VALIDATION_FAILURE;
     }
 
-    std::scoped_lock lock(mutex_);
+    // unique_lock because ForwardEndFrame releases it before blocking runtime
+    // calls (turbo drain + next_end_frame_).
+    std::unique_lock lock(mutex_);
     ReloadConfigIfNeeded();
     RefreshResolvedSettings();
     if (!resolved_settings_.core.enabled) {
@@ -3044,6 +3509,8 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
         cached_quadviews_fovs_.clear();
         pivotxr_smoothed_extra_yaw_radians_ = 0.0;
         pivotxr_smoothed_extra_pitch_radians_ = 0.0;
+        pivotxr_yaw_step_ = 0;
+        pivotxr_pitch_step_ = 0;
         pivotxr_activation_gain_ = 0.0;
         pivotxr_last_smoothing_wall_time_.reset();
         const XrResult release_result = FlushDeferredSwapchainReleasesLocked("end frame");
@@ -3052,7 +3519,7 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
         if (XR_FAILED(release_result)) {
             return release_result;
         }
-        return next_end_frame_(session, frame_end_info);
+        return ForwardEndFrame(session, frame_end_info, lock);
     }
 
     const bool quadviews_projection_split_active =
@@ -3068,6 +3535,8 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
         cached_pivot_pose_deltas_.clear();
         pivotxr_smoothed_extra_yaw_radians_ = 0.0;
         pivotxr_smoothed_extra_pitch_radians_ = 0.0;
+        pivotxr_yaw_step_ = 0;
+        pivotxr_pitch_step_ = 0;
         pivotxr_activation_gain_ = 0.0;
         pivotxr_last_smoothing_wall_time_.reset();
     }
@@ -3141,7 +3610,7 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
         if (XR_FAILED(release_result)) {
             return release_result;
         }
-        return next_end_frame_(session, frame_end_info);
+        return ForwardEndFrame(session, frame_end_info, lock);
     }
 
     const XrPosef reverse_delta = InvertPose(pose_delta);
@@ -3282,16 +3751,15 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
         }
     }
     const XrResult release_result = FlushDeferredSwapchainReleasesLocked("end frame");
+    PrunePivotPoseDeltas(frame_end_info->displayTime);
+    PruneQuadViewsFovs(frame_end_info->displayTime);
     if (XR_FAILED(release_result)) {
-        PrunePivotPoseDeltas(frame_end_info->displayTime);
-        PruneQuadViewsFovs(frame_end_info->displayTime);
         return release_result;
     }
 
-    const XrResult result = next_end_frame_(session, &adjusted_frame_end_info);
-    PrunePivotPoseDeltas(frame_end_info->displayTime);
-    PruneQuadViewsFovs(frame_end_info->displayTime);
-    return result;
+    // Pruning happens above, while the lock is still held: ForwardEndFrame
+    // releases mutex_ before forwarding to the runtime.
+    return ForwardEndFrame(session, &adjusted_frame_end_info, lock);
 }
 
 XrResult OpenXrLayer::GetReferenceSpaceBoundsRect(XrSession session,
@@ -3453,9 +3921,9 @@ XrResult OpenXrLayer::LocateSpace(XrSpace space, XrSpace base_space, XrTime time
     // head-attached geometry (e.g. the FA18 pilot visor) from VIEW-space
     // locates; skipping pivot here desynchronizes that geometry from the
     // pivoted camera.
-    const bool pivotxr_active = IsPivotXrActive(resolved_settings_.pivotxr);
+    const bool pivotxr_active = IsPivotXrActive();
     return LocateSpaceWithPivot(
-        space, base_space, time, resolved_settings_.pivotxr, pivotxr_active, location, nullptr, nullptr, nullptr, false);
+        space, base_space, time, pivotxr_active, location, nullptr, nullptr, nullptr, false);
 }
 
 XrResult OpenXrLayer::LocateViews(XrSession session,
@@ -3539,7 +4007,7 @@ XrResult OpenXrLayer::LocateViews(XrSession session,
         adjusted_views[i].orientation.w = views[i].pose.orientation.w;
     }
 
-    const bool pivotxr_active = IsPivotXrActive(resolved_settings_.pivotxr);
+    const bool pivotxr_active = IsPivotXrActive();
     // Keep driving pivot while the activation envelope is still easing out so a
     // toggle-off releases the view smoothly instead of snapping back to center.
     const bool pivotxr_envelope_engaged =
@@ -3550,12 +4018,36 @@ XrResult OpenXrLayer::LocateViews(XrSession session,
     }
     if (resolved_settings_.pivotxr.enabled && !has_logged_pivotxr_spike_mode_) {
         std::ostringstream stream;
-        stream << "PivotXR spike is active; quad-view sessions use stereo eye-pose recomposition. Press "
-               << BindingLabel(resolved_settings_.pivotxr.activation_binding) << " to "
-               << (resolved_settings_.pivotxr.activation_mode == ActivationMode::Toggle ? "toggle" : "hold")
-               << " the extra pivot factor.";
+        stream << "PivotXR spike is active; quad-view sessions use stereo eye-pose recomposition.";
+        for (const PivotXrResolvedProfile& profile : resolved_settings_.pivotxr.profiles) {
+            stream << " Press " << BindingLabel(profile.activation_binding) << " to "
+                   << (profile.activation_mode == ActivationMode::Toggle ? "toggle" : "hold") << " '"
+                   << profile.name << "'.";
+        }
         logger_.Info(stream.str());
         has_logged_pivotxr_spike_mode_ = true;
+    }
+
+    // Consume a pending origin capture with this frame's head pose. This runs
+    // independently of engagement so the origin can be set before pivot is
+    // engaged; the capture uses the same displayTime as the pivot drive below.
+    if (pivotxr_origin_capture_pending_ && resolved_settings_.pivotxr.enabled &&
+        internal_view_space_ != XR_NULL_HANDLE && view_locate_info) {
+        XrSpaceLocation origin_location{XR_TYPE_SPACE_LOCATION};
+        const XrResult origin_result = next_locate_space_(
+            internal_view_space_, view_locate_info->space, view_locate_info->displayTime, &origin_location);
+        if (XR_SUCCEEDED(origin_result) &&
+            (origin_location.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT) != 0) {
+            PivotOrigin origin;
+            origin.yaw_radians = ExtractPoseYawRadians(origin_location.pose);
+            origin.pitch_radians = ExtractPosePitchRadians(origin_location.pose);
+            pivotxr_origin_ = origin;
+            pivotxr_origin_capture_pending_ = false;
+            std::ostringstream origin_stream;
+            origin_stream << "PivotXR origin captured: yaw=" << FormatDiagnosticDouble(origin.yaw_radians)
+                          << " pitch=" << FormatDiagnosticDouble(origin.pitch_radians) << " rad.";
+            logger_.Info(origin_stream.str());
+        }
     }
 
     if (resolved_settings_.pivotxr.enabled && pivotxr_envelope_engaged && internal_view_space_ != XR_NULL_HANDLE &&
@@ -3567,7 +4059,6 @@ XrResult OpenXrLayer::LocateViews(XrSession session,
         const XrResult pivot_result = LocateSpaceWithPivot(internal_view_space_,
                                                            view_locate_info->space,
                                                            view_locate_info->displayTime,
-                                                           resolved_settings_.pivotxr,
                                                            pivotxr_active,
                                                            &pivot_view_location,
                                                            &applied_extra_yaw_radians,
@@ -3634,6 +4125,8 @@ XrResult OpenXrLayer::LocateViews(XrSession session,
     } else if (!pivotxr_envelope_engaged) {
         pivotxr_smoothed_extra_yaw_radians_ = 0.0;
         pivotxr_smoothed_extra_pitch_radians_ = 0.0;
+        pivotxr_yaw_step_ = 0;
+        pivotxr_pitch_step_ = 0;
         pivotxr_activation_gain_ = 0.0;
         pivotxr_last_smoothing_wall_time_.reset();
     }
@@ -3770,6 +4263,11 @@ XrResult OpenXrLayer::LocateViews(XrSession session,
                    << ", easedExtraYaw=" << FormatDiagnosticDouble(pivot_diagnostic_.eased_extra_yaw_radians)
                    << ", easedExtraPitch=" << FormatDiagnosticDouble(pivot_diagnostic_.eased_extra_pitch_radians)
                    << ", activationGain=" << FormatDiagnosticDouble(pivot_diagnostic_.activation_gain)
+                   << ", originActive=" << pivot_diagnostic_.origin_active
+                   << ", originYaw=" << FormatDiagnosticDouble(pivot_diagnostic_.origin_yaw_radians)
+                   << ", originPitch=" << FormatDiagnosticDouble(pivot_diagnostic_.origin_pitch_radians)
+                   << ", yawStep=" << pivot_diagnostic_.yaw_step
+                   << ", pitchStep=" << pivot_diagnostic_.pitch_step
                    << ", locationFlags=" << FormatHex(static_cast<uint64_t>(pivot_diagnostic_.view_location_flags))
                    << ", spaceIsView=" << pivot_diagnostic_.space_is_view
                    << ", baseSpaceIsView=" << pivot_diagnostic_.base_space_is_view
@@ -4016,9 +4514,13 @@ void OpenXrLayer::RefreshResolvedSettings() {
         previous.depthxr.enabled != resolved_settings_.depthxr.enabled) {
         ResetDepthToggleState();
     }
-    if (!SamePivotActivationBinding(previous.pivotxr, resolved_settings_.pivotxr)) {
+    if (!SamePivotActivationSet(previous.pivotxr, resolved_settings_.pivotxr)) {
         ResetPivotActivationState();
         has_logged_pivotxr_spike_mode_ = false;
+    }
+    if (!SameInputBinding(previous.turbo.toggle_binding, resolved_settings_.turbo.toggle_binding) ||
+        previous.turbo.enabled != resolved_settings_.turbo.enabled) {
+        ResetTurboToggleState();
     }
     logger_.SetLevel(resolved_settings_.core.log_level);
     logger_.SetRetentionFiles(resolved_settings_.core.log_retention_files);
@@ -4082,6 +4584,16 @@ void OpenXrLayer::CaptureInstanceFunctions() {
     function = nullptr;
     if (XR_SUCCEEDED(next_get_instance_proc_addr_(instance_, "xrSyncActions", &function))) {
         next_sync_actions_ = reinterpret_cast<PFN_xrSyncActions>(function);
+    }
+
+    function = nullptr;
+    if (XR_SUCCEEDED(next_get_instance_proc_addr_(instance_, "xrWaitFrame", &function))) {
+        next_wait_frame_ = reinterpret_cast<PFN_xrWaitFrame>(function);
+    }
+
+    function = nullptr;
+    if (XR_SUCCEEDED(next_get_instance_proc_addr_(instance_, "xrBeginFrame", &function))) {
+        next_begin_frame_ = reinterpret_cast<PFN_xrBeginFrame>(function);
     }
 
     function = nullptr;
@@ -4250,10 +4762,14 @@ void OpenXrLayer::ResetSessionState() {
     pivot_diagnostic_ = PivotDiagnosticState{};
     pivotxr_smoothed_extra_yaw_radians_ = 0.0;
     pivotxr_smoothed_extra_pitch_radians_ = 0.0;
+    pivotxr_yaw_step_ = 0;
+    pivotxr_pitch_step_ = 0;
     pivotxr_activation_gain_ = 0.0;
     pivotxr_last_smoothing_wall_time_.reset();
     depthxr_toggle_enabled_ = true;
     depthxr_toggle_binding_was_down_ = false;
+    ResetTurboToggleState();
+    ResetTurboFrameState();
     internal_local_space_ = XR_NULL_HANDLE;
     internal_view_space_ = XR_NULL_HANDLE;
     internal_stage_space_ = XR_NULL_HANDLE;
@@ -5073,7 +5589,6 @@ bool OpenXrLayer::SynthesizeQuadViewsFromStereo(std::span<const XrView> stereo_v
 XrResult OpenXrLayer::LocateSpaceWithPivot(XrSpace space,
                                            XrSpace base_space,
                                            XrTime time,
-                                           const PivotXrResolvedSettings& settings,
                                            bool pivotxr_active,
                                            XrSpaceLocation* location,
                                            double* applied_extra_yaw_radians,
@@ -5097,11 +5612,15 @@ XrResult OpenXrLayer::LocateSpaceWithPivot(XrSpace space,
         }
     };
 
-    if (XR_FAILED(result) || !settings.enabled) {
+    if (XR_FAILED(result) || !resolved_settings_.pivotxr.enabled) {
         pivotxr_activation_gain_ = 0.0;
         clear_extra_outputs();
         return result;
     }
+
+    // During the release ramp this is the last-engaged profile, so the easing
+    // keeps using the settings the pivot was engaged with.
+    const PivotXrResolvedProfile& settings = ActivePivotProfile();
 
     // Advance the wall-clock delta and ease the activation envelope toward its
     // target. update_smoothing is true only on the xrLocateViews drive call;
@@ -5137,6 +5656,8 @@ XrResult OpenXrLayer::LocateSpaceWithPivot(XrSpace space,
         pivotxr_activation_gain_ = 0.0;
         pivotxr_smoothed_extra_yaw_radians_ = 0.0;
         pivotxr_smoothed_extra_pitch_radians_ = 0.0;
+        pivotxr_yaw_step_ = 0;
+        pivotxr_pitch_step_ = 0;
         if (update_smoothing) {
             pivotxr_last_smoothing_wall_time_.reset();
         }
@@ -5160,27 +5681,72 @@ XrResult OpenXrLayer::LocateSpaceWithPivot(XrSpace space,
         view_pose.orientation.w,
     };
 
-    const double current_yaw_radians = ExtractYawRadians(orientation);
-    const double current_pitch_radians = ExtractPitchRadians(orientation);
+    // Measure head angles against the captured origin when one is set; the
+    // default is the reference-space forward (HMD origin).
+    double current_yaw_radians = ExtractYawRadians(orientation);
+    double current_pitch_radians = ExtractPitchRadians(orientation);
+    if (pivotxr_origin_.has_value()) {
+        current_yaw_radians = WrapRadians(current_yaw_radians - pivotxr_origin_->yaw_radians);
+        current_pitch_radians = current_pitch_radians - pivotxr_origin_->pitch_radians;
+    }
 
     // Track the steady-state pivot amount only while actively engaged. During
     // the release ramp it is frozen and the envelope eases the applied angle to
     // zero, avoiding any snap on toggle-off.
     if (update_smoothing && pivotxr_active) {
-        ComputePivotExtraAngleRadians(current_yaw_radians,
-                                      settings.yaw_rotation_multiplier,
-                                      settings.yaw_deadzone_degrees,
-                                      settings.yaw_max_extra_degrees,
-                                      settings.smoothing,
-                                      delta_seconds,
-                                      pivotxr_smoothed_extra_yaw_radians_);
-        ComputePivotExtraAngleRadians(current_pitch_radians,
-                                      settings.pitch_rotation_multiplier,
-                                      settings.pitch_deadzone_degrees,
-                                      settings.pitch_max_extra_degrees,
-                                      settings.smoothing,
-                                      delta_seconds,
-                                      pivotxr_smoothed_extra_pitch_radians_);
+        const int previous_yaw_step = pivotxr_yaw_step_;
+        const int previous_pitch_step = pivotxr_pitch_step_;
+        if (settings.response_mode == PivotResponseMode::Stepped) {
+            ComputePivotSteppedExtraAngleRadians(current_yaw_radians,
+                                                 settings.yaw_deadzone_degrees,
+                                                 settings.step_trigger_degrees,
+                                                 settings.step_amount_degrees,
+                                                 settings.step_hysteresis_degrees,
+                                                 settings.yaw_max_extra_degrees,
+                                                 settings.smoothing,
+                                                 delta_seconds,
+                                                 pivotxr_yaw_step_,
+                                                 pivotxr_smoothed_extra_yaw_radians_);
+            ComputePivotSteppedExtraAngleRadians(current_pitch_radians,
+                                                 settings.pitch_deadzone_degrees,
+                                                 settings.step_trigger_degrees,
+                                                 settings.step_amount_degrees,
+                                                 settings.step_hysteresis_degrees,
+                                                 settings.pitch_max_extra_degrees,
+                                                 settings.smoothing,
+                                                 delta_seconds,
+                                                 pivotxr_pitch_step_,
+                                                 pivotxr_smoothed_extra_pitch_radians_);
+        } else {
+            const PivotAxisTuning& yaw_tuning =
+                current_yaw_radians >= 0.0 ? settings.yaw_positive : settings.yaw_negative;
+            const PivotAxisTuning& pitch_tuning =
+                current_pitch_radians >= 0.0 ? settings.pitch_positive : settings.pitch_negative;
+            ComputePivotExtraAngleRadians(current_yaw_radians,
+                                          yaw_tuning.rotation_multiplier,
+                                          yaw_tuning.deadzone_degrees,
+                                          yaw_tuning.max_extra_degrees,
+                                          settings.smoothing,
+                                          delta_seconds,
+                                          pivotxr_smoothed_extra_yaw_radians_);
+            ComputePivotExtraAngleRadians(current_pitch_radians,
+                                          pitch_tuning.rotation_multiplier,
+                                          pitch_tuning.deadzone_degrees,
+                                          pitch_tuning.max_extra_degrees,
+                                          settings.smoothing,
+                                          delta_seconds,
+                                          pivotxr_smoothed_extra_pitch_radians_);
+        }
+
+        if ((pivotxr_yaw_step_ != previous_yaw_step || pivotxr_pitch_step_ != previous_pitch_step) &&
+            logger_.IsDebugEnabled()) {
+            std::ostringstream step_stream;
+            step_stream << "PivotXR step change: yawStep=" << previous_yaw_step << "->" << pivotxr_yaw_step_
+                        << ", pitchStep=" << previous_pitch_step << "->" << pivotxr_pitch_step_
+                        << ", rawYaw=" << FormatDiagnosticDouble(current_yaw_radians)
+                        << ", rawPitch=" << FormatDiagnosticDouble(current_pitch_radians);
+            logger_.Debug(step_stream.str());
+        }
     }
 
     const double eased_gain = SmoothStep(pivotxr_activation_gain_);
@@ -5200,6 +5766,11 @@ XrResult OpenXrLayer::LocateSpaceWithPivot(XrSpace space,
         pivot_diagnostic_.eased_extra_yaw_radians = extra_yaw_radians;
         pivot_diagnostic_.eased_extra_pitch_radians = extra_pitch_radians;
         pivot_diagnostic_.activation_gain = pivotxr_activation_gain_;
+        pivot_diagnostic_.origin_active = pivotxr_origin_.has_value();
+        pivot_diagnostic_.origin_yaw_radians = pivotxr_origin_ ? pivotxr_origin_->yaw_radians : 0.0;
+        pivot_diagnostic_.origin_pitch_radians = pivotxr_origin_ ? pivotxr_origin_->pitch_radians : 0.0;
+        pivot_diagnostic_.yaw_step = pivotxr_yaw_step_;
+        pivot_diagnostic_.pitch_step = pivotxr_pitch_step_;
     }
     if (applied_extra_yaw_radians) {
         *applied_extra_yaw_radians = extra_yaw_radians;
@@ -5232,16 +5803,35 @@ void OpenXrLayer::LogResolvedSettings(const ResolvedRuntimeConfig& settings) {
            << ", stereoBoost=" << settings.depthxr.stereo_boost
            << ", convergence=" << settings.depthxr.convergence
            << ", pivotxrEnabled=" << settings.pivotxr.enabled
-           << ", pivotActivation=" << ToString(settings.pivotxr.activation_mode)
-           << ", pivotActivationBinding=" << BindingLabel(settings.pivotxr.activation_binding)
-           << ", pivotSmoothing=" << settings.pivotxr.smoothing
-           << ", pivotActivationRamp=" << settings.pivotxr.activation_ramp_seconds
-           << ", pivotYawMultiplier=" << settings.pivotxr.yaw_rotation_multiplier
-           << ", pivotYawDeadzone=" << settings.pivotxr.yaw_deadzone_degrees
-           << ", pivotYawMaxExtra=" << settings.pivotxr.yaw_max_extra_degrees
-           << ", pivotPitchMultiplier=" << settings.pivotxr.pitch_rotation_multiplier
-           << ", pivotPitchDeadzone=" << settings.pivotxr.pitch_deadzone_degrees
-           << ", pivotPitchMaxExtra=" << settings.pivotxr.pitch_max_extra_degrees
+           << ", pivotProfileCount=" << settings.pivotxr.profiles.size();
+    for (size_t i = 0; i < settings.pivotxr.profiles.size(); ++i) {
+        const PivotXrResolvedProfile& profile = settings.pivotxr.profiles[i];
+        stream << ", pivotProfile[" << i << "]={name=" << profile.name
+               << ", activation=" << ToString(profile.activation_mode)
+               << ", binding=" << BindingLabel(profile.activation_binding)
+               << ", setOriginBinding=" << BindingLabel(profile.set_origin_binding)
+               << ", releaseOriginBinding=" << BindingLabel(profile.release_origin_binding)
+               << ", smoothing=" << profile.smoothing
+               << ", activationRamp=" << profile.activation_ramp_seconds
+               << ", yawMultiplier=" << profile.yaw_rotation_multiplier
+               << ", yawDeadzone=" << profile.yaw_deadzone_degrees
+               << ", yawMaxExtra=" << profile.yaw_max_extra_degrees
+               << ", pitchMultiplier=" << profile.pitch_rotation_multiplier
+               << ", pitchDeadzone=" << profile.pitch_deadzone_degrees
+               << ", pitchMaxExtra=" << profile.pitch_max_extra_degrees
+               << ", responseMode=" << ToString(profile.response_mode);
+        if (profile.response_mode == PivotResponseMode::Stepped) {
+            stream << ", stepTrigger=" << profile.step_trigger_degrees
+                   << ", stepAmount=" << profile.step_amount_degrees
+                   << ", stepHysteresis=" << profile.step_hysteresis_degrees;
+        }
+        stream << ", yawLeftMultiplier=" << profile.yaw_positive.rotation_multiplier
+               << ", yawRightMultiplier=" << profile.yaw_negative.rotation_multiplier
+               << ", pitchUpMultiplier=" << profile.pitch_positive.rotation_multiplier
+               << ", pitchDownMultiplier=" << profile.pitch_negative.rotation_multiplier << "}";
+    }
+    stream << ", turboEnabled=" << settings.turbo.enabled
+           << ", turboToggleBinding=" << BindingLabel(settings.turbo.toggle_binding)
            << ", quadviewsEnabled=" << settings.quadviews.enabled
            << ", quadviewsTrackingMode=" << ToString(settings.quadviews.tracking_mode)
            << ", quadviewsFocusHorizontalSizePercent=" << settings.quadviews.focus_horizontal_size_percent
@@ -5260,12 +5850,16 @@ void OpenXrLayer::LogResolvedSettings(const ResolvedRuntimeConfig& settings) {
 void OpenXrLayer::ResetPivotActivationState() {
     pivotxr_smoothed_extra_yaw_radians_ = 0.0;
     pivotxr_smoothed_extra_pitch_radians_ = 0.0;
+    pivotxr_yaw_step_ = 0;
+    pivotxr_pitch_step_ = 0;
     pivotxr_activation_gain_ = 0.0;
     pivotxr_last_smoothing_wall_time_.reset();
-    pivotxr_toggle_enabled_ = false;
-    pivotxr_activation_key_was_down_ = false;
+    pivotxr_engaged_ = false;
+    pivotxr_active_profile_index_ = 0;
+    pivotxr_profile_input_states_.clear();
+    pivotxr_origin_.reset();
+    pivotxr_origin_capture_pending_ = false;
     pivotxr_binding_last_poll_time_.reset();
-    pivotxr_binding_down_cached_ = false;
     pivot_diagnostic_stride_counter_ = 0;
     pivot_diagnostic_ = PivotDiagnosticState{};
 }
@@ -5275,6 +5869,77 @@ void OpenXrLayer::ResetDepthToggleState() {
     depthxr_toggle_binding_was_down_ = false;
     depthxr_binding_last_poll_time_.reset();
     depthxr_binding_down_cached_ = false;
+}
+
+void OpenXrLayer::ResetTurboToggleState() {
+    turbo_toggle_enabled_ = true;
+    turbo_toggle_binding_was_down_ = false;
+    turbo_binding_last_poll_time_.reset();
+    turbo_binding_down_cached_ = false;
+}
+
+bool OpenXrLayer::IsTurboActive() {
+    if (!resolved_settings_.core.enabled || !resolved_settings_.turbo.enabled) {
+        ResetTurboToggleState();
+        return false;
+    }
+
+    // Note on Varjo: QVF denies turbo when its deferred-release quirk is
+    // active, but that denial exists because QVF flushes deferred releases at
+    // the app's *next acquire* — turbo's pipelining lets the app acquire (and
+    // overwrite) an image QVF's EndFrame is still sampling. VectorXR flushes
+    // its Varjo-deferred releases synchronously inside EndFrame, before the
+    // (possibly turbo-deferred) begin/end forward, so the app cannot run
+    // ahead of a pending release and the ordering the deferral protects is
+    // preserved. OpenXR Toolkit likewise ships turbo with no Varjo guard.
+    // Log once for diagnosability when both paths are live.
+    if (defer_quadviews_swapchain_releases_ && !has_logged_turbo_varjo_note_) {
+        logger_.Info("Turbo mode active on a Varjo runtime; deferred quadviews swapchain releases "
+                     "remain EndFrame-synchronous, so frame ordering is preserved.");
+        has_logged_turbo_varjo_note_ = true;
+    }
+
+#if defined(_WIN32)
+    const auto now = std::chrono::steady_clock::now();
+    // Prime the edge detector on the first poll so a button held from the bind
+    // gesture does not register as a press.
+    const bool first_poll = !turbo_binding_last_poll_time_.has_value();
+    if (first_poll || now - *turbo_binding_last_poll_time_ >= kInputBindingPollInterval) {
+        turbo_binding_last_poll_time_ = now;
+        turbo_binding_down_cached_ = IsInputBindingDown(resolved_settings_.turbo.toggle_binding);
+    }
+    const bool binding_down = turbo_binding_down_cached_;
+    if (first_poll) {
+        turbo_toggle_binding_was_down_ = binding_down;
+    }
+    const bool was_pressed_this_call = binding_down && !turbo_toggle_binding_was_down_;
+    turbo_toggle_binding_was_down_ = binding_down;
+
+    if (was_pressed_this_call) {
+        if (turbo_auto_suspended_.load(std::memory_order_relaxed)) {
+            // A toggle press after an auto-suspend re-arms turbo rather than
+            // flipping the enable state.
+            turbo_auto_suspended_.store(false, std::memory_order_relaxed);
+            turbo_drain_timeout_count_ = 0;
+            turbo_timeout_window_start_.reset();
+            turbo_toggle_enabled_ = true;
+            logger_.Info("Turbo mode re-armed after auto-suspend via " +
+                         BindingLabel(resolved_settings_.turbo.toggle_binding) + ".");
+        } else {
+            turbo_toggle_enabled_ = !turbo_toggle_enabled_;
+            logger_.Info(std::string("Turbo mode ") + (turbo_toggle_enabled_ ? "enabled" : "disabled") +
+                         " via " + BindingLabel(resolved_settings_.turbo.toggle_binding) + ".");
+        }
+        SoundPlayer::Instance().PlayTransition(resolved_settings_.turbo.toggle_binding.sound,
+                                               turbo_toggle_enabled_, dll_directory_,
+                                               resolved_settings_.core.sound_volume,
+                                               L"turbo-on.wav", L"turbo-off.wav");
+    }
+
+    return turbo_toggle_enabled_ && !turbo_auto_suspended_.load(std::memory_order_relaxed);
+#else
+    return !turbo_auto_suspended_.load(std::memory_order_relaxed);
+#endif
 }
 
 void OpenXrLayer::ResetSwapchainState() {
@@ -5596,8 +6261,10 @@ void OpenXrLayer::SharpenNativeFocusViews(std::vector<XrCompositionLayerProjecti
 
         FocusSharpenConstants constants{};
         constants.params[0] = static_cast<float>(sharpen_amount);
-        constants.params[1] = 1.0f / static_cast<float>(std::max<uint32_t>(1, src.width));
-        constants.params[2] = 1.0f / static_cast<float>(std::max<uint32_t>(1, src.height));
+        constants.params[1] =
+            kVarjoFocusSharpenRadiusTexels / static_cast<float>(std::max<uint32_t>(1, src.width));
+        constants.params[2] =
+            kVarjoFocusSharpenRadiusTexels / static_cast<float>(std::max<uint32_t>(1, src.height));
         constants.params[3] = 0.0f;
         constants.src_rect[0] =
             static_cast<float>(view.subImage.imageRect.offset.x) / static_cast<float>(std::max<uint32_t>(1, src.width));
@@ -5677,7 +6344,9 @@ void OpenXrLayer::SharpenNativeFocusViews(std::vector<XrCompositionLayerProjecti
     if (sharpened_count > 0 && !d3d11_focus_sharpen_.has_logged_active) {
         logger_.Info("D3D11 focus sharpen active in Varjo compatible quadviews: sharpened " +
                      std::to_string(sharpened_count) + " focus view(s), amount=" +
-                     FormatDiagnosticDouble(sharpen_amount) + " (frameTime=" + std::to_string(display_time) + ").");
+                     FormatDiagnosticDouble(sharpen_amount) + ", radiusTexels=" +
+                     FormatDiagnosticDouble(kVarjoFocusSharpenRadiusTexels) +
+                     " (frameTime=" + std::to_string(display_time) + ").");
         d3d11_focus_sharpen_.has_logged_active = true;
     }
 }
@@ -5799,62 +6468,176 @@ bool OpenXrLayer::IsDepthXrActive() {
 #endif
 }
 
-bool OpenXrLayer::IsPivotXrActive(const PivotXrResolvedSettings& settings) {
-    if (!settings.enabled) {
+const PivotXrResolvedProfile& OpenXrLayer::ActivePivotProfile() const {
+    static const PivotXrResolvedProfile kDisabledPivotProfile{};
+    const auto& profiles = resolved_settings_.pivotxr.profiles;
+    if (profiles.empty()) {
+        return kDisabledPivotProfile;
+    }
+    return profiles[std::min(pivotxr_active_profile_index_, profiles.size() - 1)];
+}
+
+bool OpenXrLayer::IsPivotXrActive() {
+    const PivotXrResolvedSettings& pivot = resolved_settings_.pivotxr;
+    if (!pivot.enabled || pivot.profiles.empty()) {
         ResetPivotActivationState();
         return false;
     }
 
 #if defined(_WIN32)
+    // RefreshResolvedSettings resets activation state whenever the candidate
+    // set changes, so a size mismatch only happens right after such a reset.
+    if (pivotxr_profile_input_states_.size() != pivot.profiles.size()) {
+        pivotxr_profile_input_states_.assign(pivot.profiles.size(), PivotProfileInputState{});
+        pivotxr_active_profile_index_ = std::min(pivotxr_active_profile_index_, pivot.profiles.size() - 1);
+    }
+
     const auto now = std::chrono::steady_clock::now();
-    // Prime the edge detector on the first poll after a reset so a button held
+    // Prime the edge detectors on the first poll after a reset so a button held
     // from the bind gesture does not register as a spurious activation press.
     const bool first_poll = !pivotxr_binding_last_poll_time_.has_value();
     if (first_poll || now - *pivotxr_binding_last_poll_time_ >= kInputBindingPollInterval) {
         pivotxr_binding_last_poll_time_ = now;
-        pivotxr_binding_down_cached_ = IsInputBindingDown(settings.activation_binding);
-    }
-    const bool binding_down = pivotxr_binding_down_cached_;
-    if (first_poll) {
-        pivotxr_activation_key_was_down_ = binding_down;
-    }
-    const bool was_down_before = pivotxr_activation_key_was_down_;
-    const bool was_pressed_this_call = binding_down && !was_down_before;
-    const bool was_released_this_call = !binding_down && was_down_before;
-    pivotxr_activation_key_was_down_ = binding_down;
-
-    if (settings.activation_mode == ActivationMode::Toggle) {
-        if (was_pressed_this_call) {
-            pivotxr_toggle_enabled_ = !pivotxr_toggle_enabled_;
-            pending_locate_views_diagnostics_ = 5;
-            pending_end_frame_diagnostics_ = 5;
-            pending_pivot_diagnostics_ = kPivotDiagnosticBurstCount;
-            logger_.Info(std::string("PivotXR extra pivot factor ") +
-                         (pivotxr_toggle_enabled_ ? "enabled" : "disabled") + " via " +
-                         BindingLabel(settings.activation_binding) + ".");
-            SoundPlayer::Instance().PlayTransition(settings.activation_binding.sound, pivotxr_toggle_enabled_,
-                                                   dll_directory_, resolved_settings_.core.sound_volume);
+        for (size_t i = 0; i < pivot.profiles.size(); ++i) {
+            PivotProfileInputState& input_state = pivotxr_profile_input_states_[i];
+            input_state.down_cached = IsInputBindingDown(pivot.profiles[i].activation_binding);
+            input_state.set_origin_down_cached = IsInputBindingDown(pivot.profiles[i].set_origin_binding);
+            input_state.release_origin_down_cached =
+                IsInputBindingDown(pivot.profiles[i].release_origin_binding);
         }
-        return pivotxr_toggle_enabled_;
     }
 
-    // Hold mode: pressing activates the effect, releasing deactivates it.
-    if (was_pressed_this_call || was_released_this_call) {
+    auto note_transition_diagnostics = [&]() {
         pending_locate_views_diagnostics_ = 5;
         pending_end_frame_diagnostics_ = 5;
         pending_pivot_diagnostics_ = kPivotDiagnosticBurstCount;
-    }
-    if (was_pressed_this_call) {
-        SoundPlayer::Instance().PlayTransition(settings.activation_binding.sound, true, dll_directory_,
+    };
+    auto engage = [&](size_t index) {
+        const PivotXrResolvedProfile& profile = pivot.profiles[index];
+        const bool switching = pivotxr_engaged_ && pivotxr_active_profile_index_ != index;
+        pivotxr_active_profile_index_ = index;
+        pivotxr_engaged_ = true;
+        note_transition_diagnostics();
+        logger_.Info("PivotXR profile '" + profile.name + "' engaged via " +
+                     BindingLabel(profile.activation_binding) + (switching ? " (switched profile)." : "."));
+        SoundPlayer::Instance().PlayTransition(profile.activation_binding.sound, true, dll_directory_,
                                                resolved_settings_.core.sound_volume);
-    } else if (was_released_this_call) {
-        SoundPlayer::Instance().PlayTransition(settings.activation_binding.sound, false, dll_directory_,
+    };
+    auto disengage = [&](size_t index) {
+        const PivotXrResolvedProfile& profile = pivot.profiles[index];
+        pivotxr_engaged_ = false;
+        note_transition_diagnostics();
+        logger_.Info("PivotXR profile '" + profile.name + "' disengaged via " +
+                     BindingLabel(profile.activation_binding) + ".");
+        SoundPlayer::Instance().PlayTransition(profile.activation_binding.sound, false, dll_directory_,
                                                resolved_settings_.core.sound_volume);
+    };
+
+    // Arbitrate across all candidates: last pressed wins. Duplicate bindings
+    // were pruned at resolve time, so at most one candidate sees a given edge.
+    for (size_t i = 0; i < pivot.profiles.size(); ++i) {
+        PivotProfileInputState& input_state = pivotxr_profile_input_states_[i];
+        const bool binding_down = input_state.down_cached;
+        if (first_poll) {
+            input_state.was_down = binding_down;
+            input_state.set_origin_was_down = input_state.set_origin_down_cached;
+            input_state.release_origin_was_down = input_state.release_origin_down_cached;
+            continue;
+        }
+
+        // Origin bindings act on press regardless of engagement, so the origin
+        // can be aligned (alongside the game's own recenter) before pivot is
+        // ever engaged. Capture is deferred to the xrLocateViews drive path,
+        // which has the head pose for this frame.
+        {
+            const bool down = input_state.set_origin_down_cached;
+            const bool pressed = down && !input_state.set_origin_was_down;
+            input_state.set_origin_was_down = down;
+            if (pressed) {
+                pivotxr_origin_capture_pending_ = true;
+                logger_.Info("PivotXR origin capture requested via " +
+                             BindingLabel(pivot.profiles[i].set_origin_binding) + ".");
+                SoundPlayer::Instance().PlayTransition(pivot.profiles[i].set_origin_binding.sound, true,
+                                                       dll_directory_, resolved_settings_.core.sound_volume,
+                                                       L"origin-set.wav", L"origin-set.wav");
+            }
+        }
+        {
+            const bool down = input_state.release_origin_down_cached;
+            const bool pressed = down && !input_state.release_origin_was_down;
+            input_state.release_origin_was_down = down;
+            if (pressed && (pivotxr_origin_.has_value() || pivotxr_origin_capture_pending_)) {
+                pivotxr_origin_.reset();
+                pivotxr_origin_capture_pending_ = false;
+                logger_.Info("PivotXR origin released via " +
+                             BindingLabel(pivot.profiles[i].release_origin_binding) +
+                             "; reverting to the HMD origin.");
+                SoundPlayer::Instance().PlayTransition(pivot.profiles[i].release_origin_binding.sound, true,
+                                                       dll_directory_, resolved_settings_.core.sound_volume,
+                                                       L"origin-release.wav", L"origin-release.wav");
+            }
+        }
+
+        const bool was_pressed = binding_down && !input_state.was_down;
+        const bool was_released = !binding_down && input_state.was_down;
+        input_state.was_down = binding_down;
+
+        const bool is_engaged_profile = pivotxr_engaged_ && pivotxr_active_profile_index_ == i;
+        if (pivot.profiles[i].activation_mode == ActivationMode::Toggle) {
+            if (was_pressed) {
+                if (is_engaged_profile) {
+                    disengage(i);
+                } else {
+                    engage(i);
+                }
+            }
+        } else if (pivot.profiles[i].activation_mode == ActivationMode::AlwaysOn) {
+            // Always-on profiles engage automatically (below); their binding
+            // suspends and resumes the automatic engagement.
+            if (was_pressed) {
+                if (is_engaged_profile) {
+                    input_state.always_on_suspended = true;
+                    logger_.Info("PivotXR always-on profile '" + pivot.profiles[i].name +
+                                 "' suspended; it will not re-engage until resumed.");
+                    disengage(i);
+                } else {
+                    input_state.always_on_suspended = false;
+                    logger_.Info("PivotXR always-on profile '" + pivot.profiles[i].name + "' resumed.");
+                    engage(i);
+                }
+            }
+        } else {
+            // Hold mode: down engages (taking over from any toggled profile),
+            // release disengages only if this profile still owns the pivot.
+            if (was_pressed) {
+                engage(i);
+            } else if (was_released && is_engaged_profile) {
+                disengage(i);
+            }
+        }
     }
 
-    return binding_down;
+    // Automatic engagement: when nothing is engaged, the first non-suspended
+    // always-on candidate takes over. Silent (no binding sound) because this is
+    // not a user action — it fires at session start and whenever another
+    // profile releases the pivot.
+    if (!pivotxr_engaged_) {
+        for (size_t i = 0; i < pivot.profiles.size(); ++i) {
+            if (pivot.profiles[i].activation_mode != ActivationMode::AlwaysOn ||
+                pivotxr_profile_input_states_[i].always_on_suspended) {
+                continue;
+            }
+            pivotxr_active_profile_index_ = i;
+            pivotxr_engaged_ = true;
+            note_transition_diagnostics();
+            logger_.Info("PivotXR profile '" + pivot.profiles[i].name + "' engaged (always on).");
+            break;
+        }
+    }
+
+    return pivotxr_engaged_;
 #else
-    return settings.enabled;
+    return pivot.enabled;
 #endif
 }
 

@@ -1,7 +1,7 @@
 import { computed, reactive } from 'vue'
 
 import { clearSeenApps, loadConfigEnvelope, loadSeenApps, resetStoredData, saveConfigEnvelope, type SeenApplication } from '../lib/commands'
-import { cloneConfig, createApplication, createProfile, createPivotProfile, createQuadViewsProfile, defaultConfig } from '../lib/model'
+import { cloneConfig, createApplication, createProfile, createPivotProfile, createQuadViewsProfile, createTurboProfile, defaultConfig } from '../lib/model'
 import type { AppTab, ModuleId, VectorXRConfig } from '../lib/model'
 
 interface StoreState {
@@ -145,6 +145,20 @@ export function useConfigStore() {
     state.config.modules.pivotxr.profiles.splice(index, 1)
   }
 
+  // Array order is runtime priority order: when several profiles target the
+  // same application, an earlier profile owns any binding it shares with a
+  // later one.
+  function movePivotProfile(index: number, direction: -1 | 1) {
+    const profiles = state.config.modules.pivotxr.profiles
+    const target = index + direction
+    if (index < 0 || index >= profiles.length || target < 0 || target >= profiles.length) {
+      return
+    }
+
+    const [profile] = profiles.splice(index, 1)
+    profiles.splice(target, 0, profile)
+  }
+
   function syncPivotProfileName(index: number) {
     const profile = state.config.modules.pivotxr.profiles[index]
     if (!profile) {
@@ -180,6 +194,27 @@ export function useConfigStore() {
     }
   }
 
+  function addTurboProfile() {
+    const defaultApplicationId = state.config.applications[0]?.id
+    state.config.modules.turbo.profiles.push(createTurboProfile(defaultApplicationId ? [defaultApplicationId] : []))
+  }
+
+  function removeTurboProfile(index: number) {
+    state.config.modules.turbo.profiles.splice(index, 1)
+  }
+
+  function syncTurboProfileName(index: number) {
+    const profile = state.config.modules.turbo.profiles[index]
+    if (!profile) {
+      return
+    }
+
+    if (!profile.name.trim() || profile.name === 'New Profile') {
+      const firstApplication = state.config.applications.find((application) => application.id === profile.applicationIds[0])
+      profile.name = firstApplication?.name || 'New Profile'
+    }
+  }
+
   // Registry shortcut: create a profile pre-assigned to one application and jump to the module tab.
   function addModuleProfileForApplication(moduleId: ModuleId, applicationId: string) {
     const application = state.config.applications.find((candidate) => candidate.id === applicationId)
@@ -198,6 +233,9 @@ export function useConfigStore() {
         ),
       )
       syncPivotProfileName(state.config.modules.pivotxr.profiles.length - 1)
+    } else if (moduleId === 'turbo') {
+      state.config.modules.turbo.profiles.push(createTurboProfile(applicationIds))
+      syncTurboProfileName(state.config.modules.turbo.profiles.length - 1)
     } else {
       state.config.modules.quadviews.profiles.push(createQuadViewsProfile(state.config.modules.quadviews.defaults, applicationIds))
       syncQuadViewsProfileName(state.config.modules.quadviews.profiles.length - 1)
@@ -263,10 +301,14 @@ export function useConfigStore() {
     syncProfileName,
     addPivotProfile,
     removePivotProfile,
+    movePivotProfile,
     syncPivotProfileName,
     addQuadViewsProfile,
     removeQuadViewsProfile,
     syncQuadViewsProfileName,
+    addTurboProfile,
+    removeTurboProfile,
+    syncTurboProfileName,
     addModuleProfileForApplication,
     addApplication,
     addSeenApplication,

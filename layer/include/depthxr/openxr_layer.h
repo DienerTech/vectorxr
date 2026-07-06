@@ -1,9 +1,11 @@
 #pragma once
 
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <filesystem>
+#include <future>
 #include <map>
 #include <mutex>
 #include <optional>
@@ -94,6 +96,8 @@ class OpenXrLayer {
     XrResult BeginSession(XrSession session, const XrSessionBeginInfo* begin_info);
     XrResult AttachSessionActionSets(XrSession session, const XrSessionActionSetsAttachInfo* attach_info);
     XrResult SyncActions(XrSession session, const XrActionsSyncInfo* sync_info);
+    XrResult WaitFrame(XrSession session, const XrFrameWaitInfo* frame_wait_info, XrFrameState* frame_state);
+    XrResult BeginFrame(XrSession session, const XrFrameBeginInfo* frame_begin_info);
     XrResult EndFrame(XrSession session, const XrFrameEndInfo* frame_end_info);
     XrResult GetSystemProperties(XrInstance instance, XrSystemId system_id, XrSystemProperties* properties);
     XrResult EnumerateEnvironmentBlendModes(XrInstance instance,
@@ -259,6 +263,14 @@ class OpenXrLayer {
         double eased_extra_yaw_radians{0.0};
         double eased_extra_pitch_radians{0.0};
         double activation_gain{0.0};
+        // Origin-relative measurement context: raw_yaw/raw_pitch above are
+        // measured against this origin when active.
+        bool origin_active{false};
+        double origin_yaw_radians{0.0};
+        double origin_pitch_radians{0.0};
+        // Stepped response state (0 when continuous or centered).
+        int yaw_step{0};
+        int pitch_step{0};
         std::string_view recomposition_mode{"none"};
 
         bool has_eye_offsets{false};
@@ -278,8 +290,30 @@ class OpenXrLayer {
     void LogResolvedSettings(const ResolvedRuntimeConfig& settings);
     void ResetPivotActivationState();
     void ResetDepthToggleState();
-    bool IsPivotXrActive(const PivotXrResolvedSettings& settings);
+    bool IsPivotXrActive();
+    const PivotXrResolvedProfile& ActivePivotProfile() const;
     bool IsDepthXrActive();
+    // Turbo mode (async frame pacing). IsTurboActive polls the toggle binding
+    // and applies the Varjo deferred-release guard; ForwardEndFrame wraps
+    // next_end_frame_ with the deferred-begin / async-wait dance; DrainTurbo*
+    // must run before teardown that could strand the wait thread.
+    bool IsTurboActive();
+    void ResetTurboToggleState();
+    // Releases config_lock (mutex_) before any blocking runtime call so
+    // xrLocateViews/xrLocateSpace from other app threads are never serialized
+    // behind the compositor pacing wait. Call as the tail of EndFrame only.
+    XrResult ForwardEndFrame(XrSession session,
+                             const XrFrameEndInfo* frame_end_info,
+                             std::unique_lock<std::mutex>& config_lock);
+    void DrainTurboAsyncWait();
+    void ResetTurboFrameState();
+    // Frame pacing telemetry: logs a summary line (debug level) every ~5s so a
+    // judder report can be localized to our drain, the runtime's end-frame, the
+    // runtime's wait pacing, or upstream of the layer entirely.
+    void RecordFramePacing(std::chrono::steady_clock::time_point frame_start,
+                           std::chrono::steady_clock::time_point after_drain,
+                           std::chrono::steady_clock::time_point after_end,
+                           bool turbo_engaged);
     bool IsQuadViewsActive() const;
     void ResetSwapchainState();
     void LogSwapchainSummary(XrSwapchain swapchain, const SwapchainInfo& info, std::string_view event_name);
@@ -331,7 +365,6 @@ class OpenXrLayer {
     XrResult LocateSpaceWithPivot(XrSpace space,
                                   XrSpace base_space,
                                   XrTime time,
-                                  const PivotXrResolvedSettings& settings,
                                   bool pivotxr_active,
                                   XrSpaceLocation* location,
                                   double* applied_extra_yaw_radians,
@@ -407,19 +440,106 @@ class OpenXrLayer {
     PivotDiagnosticState pivot_diagnostic_;
     double pivotxr_smoothed_extra_yaw_radians_{0.0};
     double pivotxr_smoothed_extra_pitch_radians_{0.0};
+    // Stepped response mode: signed persistent step per axis (with hysteresis).
+    int pivotxr_yaw_step_{0};
+    int pivotxr_pitch_step_{0};
     // Activation envelope in [0,1]: eases the pivot effect in/out on the
     // enable/disable transition so toggling never snaps the view, independent
     // of the per-frame tracking smoothing.
     double pivotxr_activation_gain_{0.0};
     std::optional<std::chrono::steady_clock::time_point> pivotxr_last_smoothing_wall_time_;
-    bool pivotxr_toggle_enabled_{false};
-    bool pivotxr_activation_key_was_down_{false};
+    // Per resolved-profile input edge state, index-aligned with
+    // resolved_settings_.pivotxr.profiles. Arbitration is last-pressed-wins:
+    // pressing another candidate's binding retargets the engaged profile and
+    // the activation envelope carries the view across the switch.
+    struct PivotProfileInputState {
+        bool was_down{false};
+        bool down_cached{false};
+        bool set_origin_was_down{false};
+        bool set_origin_down_cached{false};
+        bool release_origin_was_down{false};
+        bool release_origin_down_cached{false};
+        // Always-on profiles only: true after the user pressed the binding to
+        // suspend the automatic engagement.
+        bool always_on_suspended{false};
+    };
+    std::vector<PivotProfileInputState> pivotxr_profile_input_states_;
+    // Engaged profile index; retains the last-engaged profile during the
+    // release ramp so the easing keeps using that profile's settings.
+    size_t pivotxr_active_profile_index_{0};
+    bool pivotxr_engaged_{false};
+    // Optional captured pivot origin: head yaw/pitch (radians) in the app's
+    // reference space at the moment the set-origin binding fired. Empty means
+    // the default HMD/reference-space origin. Capture happens on the
+    // xrLocateViews drive path so the pose shares the frame's displayTime
+    // pipeline with the pivot drive.
+    struct PivotOrigin {
+        double yaw_radians{0.0};
+        double pitch_radians{0.0};
+    };
+    std::optional<PivotOrigin> pivotxr_origin_;
+    bool pivotxr_origin_capture_pending_{false};
     bool depthxr_toggle_enabled_{true};
     bool depthxr_toggle_binding_was_down_{false};
     std::optional<std::chrono::steady_clock::time_point> pivotxr_binding_last_poll_time_;
     std::optional<std::chrono::steady_clock::time_point> depthxr_binding_last_poll_time_;
-    bool pivotxr_binding_down_cached_{false};
     bool depthxr_binding_down_cached_{false};
+
+    // Turbo mode. The runtime always sees a conformant wait->begin->end
+    // sequence; the application is decoupled from runtime frame pacing: its
+    // xrWaitFrame returns immediately with a fabricated predictedDisplayTime
+    // (exactly one frame of pipelining), its xrBeginFrame becomes a no-op, and
+    // the real wait+begin happen inside xrEndFrame. turbo_mutex_ guards this
+    // state; it is never held across a blocking runtime wait except when
+    // spec-ordering requires it (second poll, teardown drains). mutex_ must
+    // NOT be required by WaitFrame/BeginFrame, which stay off the config lock.
+    std::mutex turbo_mutex_;
+    std::future<void> turbo_async_wait_;
+    bool turbo_async_wait_polled_{false};
+    bool turbo_async_wait_completed_{false};
+    XrTime turbo_last_predicted_display_time_{0};
+    XrDuration turbo_last_predicted_display_period_{0};
+    bool turbo_last_should_render_{true};
+    XrTime turbo_max_returned_display_time_{0};
+    std::optional<std::chrono::steady_clock::time_point> turbo_last_wait_frame_wall_time_;
+    // Toggle binding state (mutex_-guarded, polled from EndFrame like Depth's).
+    bool turbo_toggle_enabled_{true};
+    bool turbo_toggle_binding_was_down_{false};
+    std::optional<std::chrono::steady_clock::time_point> turbo_binding_last_poll_time_;
+    bool turbo_binding_down_cached_{false};
+    bool has_logged_turbo_varjo_note_{false};
+    // Info once per pipelining engage/release cycle; small Debug budget for the
+    // first fabricated xrWaitFrame returns of each cycle.
+    bool turbo_pipelining_logged_{false};
+    int turbo_fabricated_wait_log_budget_{0};
+    // Self-healing: some runtimes interlock xrWaitFrame with the next submit
+    // (observed on Pimax's PiOpenXR when GPU-bound) so the pipelined wait
+    // stalls until our drain timeout every frame. Timeouts are counted in a
+    // rolling window (they interleave with clean frames, so a consecutive
+    // streak never trips); past the threshold turbo suspends itself for the
+    // session and the toggle binding re-arms it.
+    int turbo_drain_timeout_count_{0};
+    std::optional<std::chrono::steady_clock::time_point> turbo_timeout_window_start_;
+    std::atomic<bool> turbo_auto_suspended_{false};
+
+    // Frame pacing telemetry (debug log level): quantifies judder sources by
+    // timing the frame loop. EndFrame-side fields are only touched from the
+    // app's frame-submission thread (frame calls are app-serialized);
+    // WaitFrame-side counters live under turbo_mutex_.
+    std::optional<std::chrono::steady_clock::time_point> pacing_last_end_time_;
+    std::optional<std::chrono::steady_clock::time_point> pacing_window_start_;
+    uint32_t pacing_frames_{0};
+    double pacing_delta_sum_ms_{0.0};
+    double pacing_delta_max_ms_{0.0};
+    double pacing_drain_sum_ms_{0.0};
+    double pacing_drain_max_ms_{0.0};
+    double pacing_end_sum_ms_{0.0};
+    double pacing_end_max_ms_{0.0};
+    // Guarded by turbo_mutex_.
+    double pacing_wait_sum_ms_{0.0};
+    double pacing_wait_max_ms_{0.0};
+    uint32_t pacing_wait_samples_{0};
+    uint32_t pacing_fabricated_waits_{0};
     bool quad_views_extension_requested_{false};
     bool varjo_foveated_rendering_extension_requested_{false};
     bool eye_gaze_extension_enabled_{false};
@@ -484,6 +604,8 @@ class OpenXrLayer {
     PFN_xrBeginSession next_begin_session_{nullptr};
     PFN_xrAttachSessionActionSets next_attach_session_action_sets_{nullptr};
     PFN_xrSyncActions next_sync_actions_{nullptr};
+    PFN_xrWaitFrame next_wait_frame_{nullptr};
+    PFN_xrBeginFrame next_begin_frame_{nullptr};
     PFN_xrEndFrame next_end_frame_{nullptr};
     PFN_xrGetSystemProperties next_get_system_properties_{nullptr};
     PFN_xrEnumerateEnvironmentBlendModes next_enumerate_environment_blend_modes_{nullptr};

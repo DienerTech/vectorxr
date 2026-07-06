@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "VectorXR",
-  "version": "0.11.5",
+  "version": "0.12.0",
   "identifier": "local.vectorxr.app",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -23,8 +23,16 @@
       "resources/vectorxr-layer/XR_APILAYER_DIENERTECH_VECTORXR.json": "vectorxr-layer/XR_APILAYER_DIENERTECH_VECTORXR.json",
       "resources/vectorxr-layer/sounds/activate.wav": "vectorxr-layer/sounds/activate.wav",
       "resources/vectorxr-layer/sounds/deactivate.wav": "vectorxr-layer/sounds/deactivate.wav",
+      "resources/vectorxr-layer/sounds/origin-set.wav": "vectorxr-layer/sounds/origin-set.wav",
+      "resources/vectorxr-layer/sounds/origin-release.wav": "vectorxr-layer/sounds/origin-release.wav",
+      "resources/vectorxr-layer/sounds/turbo-on.wav": "vectorxr-layer/sounds/turbo-on.wav",
+      "resources/vectorxr-layer/sounds/turbo-off.wav": "vectorxr-layer/sounds/turbo-off.wav",
       "resources/sounds/activate.wav": "sounds/activate.wav",
-      "resources/sounds/deactivate.wav": "sounds/deactivate.wav"
+      "resources/sounds/deactivate.wav": "sounds/deactivate.wav",
+      "resources/sounds/origin-set.wav": "sounds/origin-set.wav",
+      "resources/sounds/origin-release.wav": "sounds/origin-release.wav",
+      "resources/sounds/turbo-on.wav": "sounds/turbo-on.wav",
+      "resources/sounds/turbo-off.wav": "sounds/turbo-off.wav"
     },
     "windows": {
       "nsis": {

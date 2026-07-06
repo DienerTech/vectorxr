@@ -15,6 +15,17 @@ enum class LogLevel {
 enum class ActivationMode {
     Toggle,
     Hold,
+    // Engaged automatically whenever no other profile is engaged; the
+    // activation binding (optional) suspends/resumes it.
+    AlwaysOn,
+};
+
+enum class PivotResponseMode {
+    // Extra rotation grows continuously with head angle (multiplier).
+    Continuous,
+    // Extra rotation is added in discrete steps as angle thresholds are
+    // crossed, with hysteresis so the view does not oscillate at a threshold.
+    Stepped,
 };
 
 enum class InputBindingType {
@@ -108,6 +119,15 @@ struct DepthXrModuleConfig {
     std::vector<DepthXrProfile> profiles;
 };
 
+// Per-direction tuning used when advanced axes are enabled. "Left" and "up"
+// are the positive yaw/pitch directions in OpenXR's right-handed, y-up
+// convention. Defaults match the symmetric yaw/pitch defaults.
+struct PivotAxisTuning {
+    double rotation_multiplier{1.5};
+    double deadzone_degrees{8.0};
+    double max_extra_degrees{120.0};
+};
+
 struct PivotXrSettings {
     // General (apply to both axes).
     double smoothing{0.2};
@@ -120,15 +140,36 @@ struct PivotXrSettings {
     double pitch_rotation_multiplier{1.5};
     double pitch_deadzone_degrees{8.0};
     double pitch_max_extra_degrees{120.0};
+    // Response shaping. Stepped mode uses the symmetric yaw/pitch deadzones as
+    // its base and adds step_amount per step_trigger of head angle beyond it.
+    PivotResponseMode response_mode{PivotResponseMode::Continuous};
+    double step_trigger_degrees{10.0};
+    double step_amount_degrees{10.0};
+    double step_hysteresis_degrees{4.0};
+    // When true, continuous mode uses the four per-direction tunings below
+    // instead of the symmetric yaw/pitch values.
+    bool advanced_axes{false};
+    PivotAxisTuning yaw_left;
+    PivotAxisTuning yaw_right;
+    PivotAxisTuning pitch_up;
+    PivotAxisTuning pitch_down;
 };
 
 struct PivotXrProfile {
+    // Stable identifier assigned by the UI; optional in hand-written configs.
+    std::string id;
     std::string name;
     bool enabled{true};
     ProfileMode mode{ProfileMode::Custom};
     std::vector<std::string> application_ids;
     ActivationMode activation_mode{ActivationMode::Toggle};
     InputBinding activation_binding;
+    // Optional origin bindings. Set-origin captures the current head yaw/pitch
+    // as pivot's neutral forward (bind it to the same button as the game's
+    // recenter so both origins stay 1:1). Release-origin restores the default
+    // HMD/reference-space origin.
+    InputBinding set_origin_binding;
+    InputBinding release_origin_binding;
     PivotXrSettings settings;
 };
 
@@ -137,14 +178,19 @@ struct PivotXrModuleConfig {
     PivotXrSettings defaults;
     ActivationMode activation_mode{ActivationMode::Toggle};
     InputBinding activation_binding;
+    InputBinding set_origin_binding;
+    InputBinding release_origin_binding;
     std::vector<PivotXrProfile> profiles;
 };
 
-// Resolved at runtime for a specific executable — flattened from module + matched profile.
-struct PivotXrResolvedSettings {
-    bool enabled{false};
+// One activatable pivot behavior for the current executable, flattened from a
+// matched profile (or the module defaults when nothing matches).
+struct PivotXrResolvedProfile {
+    std::string name;
     ActivationMode activation_mode{ActivationMode::Toggle};
     InputBinding activation_binding;
+    InputBinding set_origin_binding;
+    InputBinding release_origin_binding;
     double smoothing{0.2};
     double activation_ramp_seconds{0.35};
     double yaw_rotation_multiplier{1.5};
@@ -153,6 +199,27 @@ struct PivotXrResolvedSettings {
     double pitch_rotation_multiplier{1.5};
     double pitch_deadzone_degrees{8.0};
     double pitch_max_extra_degrees{120.0};
+    PivotResponseMode response_mode{PivotResponseMode::Continuous};
+    double step_trigger_degrees{10.0};
+    double step_amount_degrees{10.0};
+    double step_hysteresis_degrees{4.0};
+    // Direction-resolved tunings for continuous mode. When advanced axes are
+    // off these all mirror the symmetric yaw/pitch values. Positive = the
+    // positive rotation direction (yaw: left, pitch: up).
+    PivotAxisTuning yaw_positive;
+    PivotAxisTuning yaw_negative;
+    PivotAxisTuning pitch_positive;
+    PivotAxisTuning pitch_negative;
+};
+
+// Resolved at runtime for a specific executable. Several profiles may target
+// the same application: array order is priority order, and the activation
+// binding pressed selects which profile engages. Later profiles whose binding
+// duplicates an earlier candidate's are pruned at resolve time (the earlier
+// profile owns that binding).
+struct PivotXrResolvedSettings {
+    bool enabled{false};
+    std::vector<PivotXrResolvedProfile> profiles;
 };
 
 struct QuadViewsSettings {
@@ -187,6 +254,28 @@ struct QuadViewsResolvedSettings : QuadViewsSettings {
     bool enabled{false};
 };
 
+// Turbo mode: overrides runtime frame pacing (async xrWaitFrame with one frame
+// of pipelining). Binary per application — profiles carry no settings.
+struct TurboProfile {
+    std::string id;
+    std::string name;
+    bool enabled{true};
+    ProfileMode mode{ProfileMode::Custom};
+    std::vector<std::string> application_ids;
+};
+
+struct TurboModuleConfig {
+    bool enabled{false};
+    // Optional in-session A/B toggle, mirroring the Depth toggle binding.
+    InputBinding toggle_binding;
+    std::vector<TurboProfile> profiles;
+};
+
+struct TurboResolvedSettings {
+    bool enabled{false};
+    InputBinding toggle_binding;
+};
+
 struct ConfigDocument {
     int version{3};
     CoreSettings core;
@@ -194,6 +283,7 @@ struct ConfigDocument {
     DepthXrModuleConfig depthxr;
     PivotXrModuleConfig pivotxr;
     QuadViewsModuleConfig quadviews;
+    TurboModuleConfig turbo;
 };
 
 struct ResolvedRuntimeConfig {
@@ -202,6 +292,7 @@ struct ResolvedRuntimeConfig {
     DepthXrBindings depthxr_bindings;
     PivotXrResolvedSettings pivotxr;
     QuadViewsResolvedSettings quadviews;
+    TurboResolvedSettings turbo;
 };
 
 const char* ToString(LogLevel level);
@@ -216,5 +307,7 @@ const char* ToString(QuadViewsTrackingMode mode);
 std::optional<QuadViewsTrackingMode> ParseQuadViewsTrackingMode(const std::string& value);
 const char* ToString(ProfileMode mode);
 std::optional<ProfileMode> ParseProfileMode(const std::string& value);
+const char* ToString(PivotResponseMode mode);
+std::optional<PivotResponseMode> ParsePivotResponseMode(const std::string& value);
 
 } // namespace depthxr

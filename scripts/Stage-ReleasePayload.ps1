@@ -41,7 +41,8 @@ Copy-Item -LiteralPath $layerManifest -Destination (Join-Path $payloadDir "XR_AP
 
 $payloadSoundsDir = Join-Path $payloadDir "sounds"
 New-Item -ItemType Directory -Path $payloadSoundsDir -Force | Out-Null
-Copy-Item -LiteralPath (Join-Path $layerSounds "activate.wav") -Destination (Join-Path $payloadSoundsDir "activate.wav") -Force
-Copy-Item -LiteralPath (Join-Path $layerSounds "deactivate.wav") -Destination (Join-Path $payloadSoundsDir "deactivate.wav") -Force
+foreach ($soundFile in @("activate.wav", "deactivate.wav", "origin-set.wav", "origin-release.wav", "turbo-on.wav", "turbo-off.wav")) {
+    Copy-Item -LiteralPath (Join-Path $layerSounds $soundFile) -Destination (Join-Path $payloadSoundsDir $soundFile) -Force
+}
 
 Write-Host "Staged VectorXR layer payload in $payloadDir"

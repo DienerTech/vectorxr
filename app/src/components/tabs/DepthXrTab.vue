@@ -91,7 +91,10 @@ const profileWarnings = computed(() => {
           <input v-model="config.modules.depthxr.enabled" class="h-4 w-4 accent-depthxr-copper" type="checkbox" />
           Default Profile {{ config.modules.depthxr.enabled ? 'On' : 'Off' }}
         </label>
-        <div class="mt-3 grid gap-3 lg:grid-cols-2">
+        <div v-if="!config.modules.depthxr.enabled" class="mt-3 rounded-[0.9rem] border px-4 py-3 text-sm leading-6 surface-panel-strong">
+          The default profile is off and has no effect — applications without an enabled custom profile get no Depth adjustment. Enabled custom profiles below still apply to their assigned applications.
+        </div>
+        <div v-else class="mt-3 grid gap-3 lg:grid-cols-2">
           <EffectField
             v-model:value="config.modules.depthxr.defaults.stereoBoost"
             title="Stereo Boost"

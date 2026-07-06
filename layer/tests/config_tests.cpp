@@ -231,11 +231,13 @@ void TestResolveRuntimeConfig() {
     Expect(std::abs(resolved.depthxr.convergence - 0.12) < 0.0001, "Profile convergence override was not applied");
     Expect(resolved.depthxr_bindings.toggle_enabled.type == depthxr::InputBindingType::None, "DepthXR toggle binding should be none");
     Expect(resolved.pivotxr.enabled, "PivotXR module enable was not resolved");
-    Expect(resolved.pivotxr.activation_mode == depthxr::ActivationMode::Hold, "PivotXR activation mode mismatch");
-    Expect(resolved.pivotxr.activation_binding.chord.size() == 2, "PivotXR activation chord size mismatch");
-    Expect(resolved.pivotxr.activation_binding.chord[1] == "Space", "PivotXR activation binding was not resolved");
-    Expect(std::abs(resolved.pivotxr.yaw_max_extra_degrees - 22.0) < 0.0001, "PivotXR yaw clamp mismatch");
-    Expect(std::abs(resolved.pivotxr.pitch_rotation_multiplier - 1.35) < 0.0001,
+    Expect(resolved.pivotxr.profiles.size() == 1, "PivotXR resolved candidate count mismatch");
+    const depthxr::PivotXrResolvedProfile& pivot_profile = resolved.pivotxr.profiles[0];
+    Expect(pivot_profile.activation_mode == depthxr::ActivationMode::Hold, "PivotXR activation mode mismatch");
+    Expect(pivot_profile.activation_binding.chord.size() == 2, "PivotXR activation chord size mismatch");
+    Expect(pivot_profile.activation_binding.chord[1] == "Space", "PivotXR activation binding was not resolved");
+    Expect(std::abs(pivot_profile.yaw_max_extra_degrees - 22.0) < 0.0001, "PivotXR yaw clamp mismatch");
+    Expect(std::abs(pivot_profile.pitch_rotation_multiplier - 1.35) < 0.0001,
            "PivotXR pitch multiplier mismatch");
 }
 
@@ -370,19 +372,248 @@ void TestPivotProfileResolution() {
 
     const depthxr::ResolvedRuntimeConfig resolved = depthxr::ResolveRuntimeConfig(result.document, "DCS.exe");
     Expect(resolved.pivotxr.enabled, "PivotXR should be enabled for DCS");
-    Expect(resolved.pivotxr.activation_mode == depthxr::ActivationMode::Toggle, "PivotXR activation mode mismatch");
-    Expect(resolved.pivotxr.activation_binding.chord[0] == "F8", "PivotXR activation binding mismatch");
-    Expect(std::abs(resolved.pivotxr.yaw_rotation_multiplier - 2.0) < 0.0001, "PivotXR yaw multiplier mismatch");
-    Expect(std::abs(resolved.pivotxr.yaw_max_extra_degrees - 60.0) < 0.0001, "PivotXR yaw clamp mismatch");
-    Expect(std::abs(resolved.pivotxr.pitch_rotation_multiplier - 1.5) < 0.0001, "PivotXR pitch multiplier mismatch");
+    Expect(resolved.pivotxr.profiles.size() == 1, "PivotXR resolved candidate count mismatch");
+    const depthxr::PivotXrResolvedProfile& dcs_profile = resolved.pivotxr.profiles[0];
+    Expect(dcs_profile.activation_mode == depthxr::ActivationMode::Toggle, "PivotXR activation mode mismatch");
+    Expect(dcs_profile.activation_binding.chord[0] == "F8", "PivotXR activation binding mismatch");
+    Expect(std::abs(dcs_profile.yaw_rotation_multiplier - 2.0) < 0.0001, "PivotXR yaw multiplier mismatch");
+    Expect(std::abs(dcs_profile.yaw_max_extra_degrees - 60.0) < 0.0001, "PivotXR yaw clamp mismatch");
+    Expect(std::abs(dcs_profile.pitch_rotation_multiplier - 1.5) < 0.0001, "PivotXR pitch multiplier mismatch");
 
     // No profile for a different exe falls back to the default Pivot profile.
     const depthxr::ResolvedRuntimeConfig resolved_other = depthxr::ResolveRuntimeConfig(result.document, "other.exe");
     Expect(resolved_other.pivotxr.enabled, "PivotXR default profile should resolve for exe with no matching profile");
-    Expect(resolved_other.pivotxr.activation_binding.type == depthxr::InputBindingType::None,
+    Expect(resolved_other.pivotxr.profiles.size() == 1, "PivotXR default candidate count mismatch");
+    Expect(resolved_other.pivotxr.profiles[0].activation_binding.type == depthxr::InputBindingType::None,
            "PivotXR default activation binding should fall back to none");
-    Expect(std::abs(resolved_other.pivotxr.yaw_rotation_multiplier - 1.5) < 0.0001,
+    Expect(std::abs(resolved_other.pivotxr.profiles[0].yaw_rotation_multiplier - 1.5) < 0.0001,
            "PivotXR default yaw multiplier mismatch");
+}
+
+void TestPivotMultiProfileResolution() {
+    const std::string json = R"json(
+{
+  "version": 3,
+  "core": { "enabled": true, "logLevel": "info", "logRetentionFiles": 7 },
+  "applications": [
+    { "id": "dcs", "name": "DCS", "enabled": true, "match": { "exe": "DCS.exe" } }
+  ],
+  "modules": {
+    "depthxr": {
+      "enabled": false,
+      "defaults": { "stereoBoost": 1.0, "convergence": 0.0 },
+      "bindings": { "toggleEnabled": { "type": "none" } },
+      "profiles": []
+    },
+    "pivotxr": {
+      "enabled": false,
+      "defaults": {},
+      "profiles": [
+        {
+          "id": "dcs-mild",
+          "name": "DCS Mild",
+          "applicationIds": ["dcs"],
+          "enabled": true,
+          "activationMode": "toggle",
+          "activationBinding": { "type": "keyboard", "chord": ["F8"] },
+          "settings": { "rotationMultiplier": 1.5 }
+        },
+        {
+          "id": "dcs-disabled",
+          "name": "DCS Disabled",
+          "applicationIds": ["dcs"],
+          "enabled": false,
+          "activationBinding": { "type": "keyboard", "chord": ["F10"] },
+          "settings": { "rotationMultiplier": 3.0 }
+        },
+        {
+          "id": "dcs-strong",
+          "name": "DCS Strong",
+          "applicationIds": ["dcs"],
+          "enabled": true,
+          "activationMode": "hold",
+          "activationBinding": { "type": "keyboard", "chord": ["F9"] },
+          "settings": { "rotationMultiplier": 2.5 }
+        },
+        {
+          "name": "DCS Shadowed",
+          "applicationIds": ["dcs"],
+          "enabled": true,
+          "activationBinding": { "type": "keyboard", "chord": ["F8"] },
+          "settings": { "rotationMultiplier": 4.0 }
+        }
+      ]
+    }
+  }
+}
+)json";
+
+    const depthxr::ParseResult result = depthxr::ParseConfig(json);
+    Expect(result.ok, "Config parser rejected multi-profile pivot config: " + result.error);
+    Expect(result.document.pivotxr.profiles[0].id == "dcs-mild", "Pivot profile id was not parsed");
+
+    const depthxr::ResolvedRuntimeConfig resolved = depthxr::ResolveRuntimeConfig(result.document, "DCS.exe");
+    Expect(resolved.pivotxr.enabled, "PivotXR should be enabled when custom profiles match");
+    // Disabled profile skipped; duplicate-F8 profile pruned as shadowed.
+    Expect(resolved.pivotxr.profiles.size() == 2, "PivotXR multi-profile candidate count mismatch");
+    Expect(resolved.pivotxr.profiles[0].name == "DCS Mild", "Candidate priority order mismatch (first)");
+    Expect(resolved.pivotxr.profiles[1].name == "DCS Strong", "Candidate priority order mismatch (second)");
+    Expect(std::abs(resolved.pivotxr.profiles[1].yaw_rotation_multiplier - 2.5) < 0.0001,
+           "Second candidate settings mismatch");
+    Expect(resolved.pivotxr.profiles[1].activation_mode == depthxr::ActivationMode::Hold,
+           "Second candidate activation mode mismatch");
+}
+
+void TestPivotResponseModeAndAdvancedAxes() {
+    const std::string json = R"json(
+{
+  "version": 3,
+  "core": { "enabled": true, "logLevel": "info", "logRetentionFiles": 7 },
+  "applications": [
+    { "id": "dcs", "name": "DCS", "enabled": true, "match": { "exe": "DCS.exe" } },
+    { "id": "msfs", "name": "MSFS", "enabled": true, "match": { "exe": "MSFS.exe" } }
+  ],
+  "modules": {
+    "depthxr": {
+      "enabled": false,
+      "defaults": { "stereoBoost": 1.0, "convergence": 0.0 },
+      "bindings": { "toggleEnabled": { "type": "none" } },
+      "profiles": []
+    },
+    "pivotxr": {
+      "enabled": false,
+      "defaults": {},
+      "profiles": [
+        {
+          "name": "DCS Stepped",
+          "applicationIds": ["dcs"],
+          "enabled": true,
+          "activationMode": "alwaysOn",
+          "activationBinding": { "type": "keyboard", "chord": ["F8"] },
+          "settings": {
+            "responseMode": "stepped",
+            "stepTriggerDegrees": 12.0,
+            "stepAmountDegrees": 15.0,
+            "stepHysteresisDegrees": 5.0,
+            "deadzoneDegrees": 6.0
+          }
+        },
+        {
+          "name": "MSFS Advanced",
+          "applicationIds": ["msfs"],
+          "enabled": true,
+          "activationBinding": { "type": "keyboard", "chord": ["F9"] },
+          "settings": {
+            "advancedAxes": true,
+            "yawLeft": { "rotationMultiplier": 2.0, "deadzoneDegrees": 5.0, "maxExtraDegrees": 90.0 },
+            "yawRight": { "rotationMultiplier": 1.2 },
+            "pitchUp": { "rotationMultiplier": 1.8 },
+            "pitchDown": { "rotationMultiplier": 1.1, "maxExtraDegrees": 30.0 }
+          }
+        }
+      ]
+    }
+  }
+}
+)json";
+
+    const depthxr::ParseResult result = depthxr::ParseConfig(json);
+    Expect(result.ok, "Config parser rejected response-mode config: " + result.error);
+
+    const depthxr::ResolvedRuntimeConfig stepped = depthxr::ResolveRuntimeConfig(result.document, "DCS.exe");
+    Expect(stepped.pivotxr.profiles.size() == 1, "Stepped candidate count mismatch");
+    const depthxr::PivotXrResolvedProfile& stepped_profile = stepped.pivotxr.profiles[0];
+    Expect(stepped_profile.activation_mode == depthxr::ActivationMode::AlwaysOn,
+           "alwaysOn activation mode was not parsed");
+    Expect(stepped_profile.response_mode == depthxr::PivotResponseMode::Stepped,
+           "Stepped response mode was not resolved");
+    Expect(std::abs(stepped_profile.step_trigger_degrees - 12.0) < 0.0001, "Step trigger mismatch");
+    Expect(std::abs(stepped_profile.step_amount_degrees - 15.0) < 0.0001, "Step amount mismatch");
+    Expect(std::abs(stepped_profile.step_hysteresis_degrees - 5.0) < 0.0001, "Step hysteresis mismatch");
+
+    const depthxr::ResolvedRuntimeConfig advanced = depthxr::ResolveRuntimeConfig(result.document, "MSFS.exe");
+    Expect(advanced.pivotxr.profiles.size() == 1, "Advanced candidate count mismatch");
+    const depthxr::PivotXrResolvedProfile& advanced_profile = advanced.pivotxr.profiles[0];
+    Expect(std::abs(advanced_profile.yaw_positive.rotation_multiplier - 2.0) < 0.0001,
+           "Advanced yaw-left multiplier mismatch");
+    Expect(std::abs(advanced_profile.yaw_positive.max_extra_degrees - 90.0) < 0.0001,
+           "Advanced yaw-left max extra mismatch");
+    Expect(std::abs(advanced_profile.yaw_negative.rotation_multiplier - 1.2) < 0.0001,
+           "Advanced yaw-right multiplier mismatch");
+    Expect(std::abs(advanced_profile.pitch_positive.rotation_multiplier - 1.8) < 0.0001,
+           "Advanced pitch-up multiplier mismatch");
+    Expect(std::abs(advanced_profile.pitch_negative.max_extra_degrees - 30.0) < 0.0001,
+           "Advanced pitch-down max extra mismatch");
+
+    // Symmetric profiles collapse direction tunings to the yaw/pitch values.
+    Expect(std::abs(stepped_profile.yaw_positive.deadzone_degrees - 6.0) < 0.0001,
+           "Symmetric collapse should mirror yaw deadzone into direction tunings");
+}
+
+void TestTurboModuleResolution() {
+    const std::string json = R"json(
+{
+  "version": 3,
+  "core": { "enabled": true, "logLevel": "info", "logRetentionFiles": 7 },
+  "applications": [
+    { "id": "dcs", "name": "DCS", "enabled": true, "match": { "exe": "DCS.exe" } }
+  ],
+  "modules": {
+    "depthxr": {
+      "enabled": false,
+      "defaults": { "stereoBoost": 1.0, "convergence": 0.0 },
+      "bindings": { "toggleEnabled": { "type": "none" } },
+      "profiles": []
+    },
+    "pivotxr": { "enabled": false, "defaults": {}, "profiles": [] },
+    "turbo": {
+      "enabled": false,
+      "toggleBinding": { "type": "keyboard", "chord": ["Ctrl", "F7"] },
+      "profiles": [
+        { "id": "turbo-dcs", "name": "DCS", "enabled": true, "applicationIds": ["dcs"] }
+      ]
+    }
+  }
+}
+)json";
+
+    const depthxr::ParseResult result = depthxr::ParseConfig(json);
+    Expect(result.ok, "Config parser rejected turbo config: " + result.error);
+    Expect(result.document.turbo.profiles.size() == 1, "Turbo profile count mismatch");
+    Expect(result.document.turbo.profiles[0].id == "turbo-dcs", "Turbo profile id mismatch");
+
+    const depthxr::ResolvedRuntimeConfig resolved = depthxr::ResolveRuntimeConfig(result.document, "DCS.exe");
+    Expect(resolved.turbo.enabled, "Turbo should resolve enabled for a matched profile");
+    Expect(resolved.turbo.toggle_binding.chord.size() == 2, "Turbo toggle binding chord mismatch");
+
+    const depthxr::ResolvedRuntimeConfig resolved_other = depthxr::ResolveRuntimeConfig(result.document, "other.exe");
+    Expect(!resolved_other.turbo.enabled, "Turbo default-off should not apply to unmatched applications");
+}
+
+void TestTurboModuleOptional() {
+    // Configs written before turbo existed must still parse, with turbo off.
+    const std::string json = R"json(
+{
+  "version": 3,
+  "core": { "enabled": true, "logLevel": "info", "logRetentionFiles": 7 },
+  "applications": [],
+  "modules": {
+    "depthxr": {
+      "enabled": false,
+      "defaults": { "stereoBoost": 1.0, "convergence": 0.0 },
+      "bindings": { "toggleEnabled": { "type": "none" } },
+      "profiles": []
+    },
+    "pivotxr": { "enabled": false, "defaults": {}, "profiles": [] }
+  }
+}
+)json";
+
+    const depthxr::ParseResult result = depthxr::ParseConfig(json);
+    Expect(result.ok, "Config parser rejected config without turbo module: " + result.error);
+    Expect(!result.document.turbo.enabled, "Turbo should default to disabled when absent");
+    const depthxr::ResolvedRuntimeConfig resolved = depthxr::ResolveRuntimeConfig(result.document, "any.exe");
+    Expect(!resolved.turbo.enabled, "Turbo resolved settings should default to disabled");
 }
 
 void TestQuadViewsProfileResolution() {
@@ -594,9 +825,10 @@ void TestEnabledProfileOverridesDisabledDefault() {
     Expect(std::abs(resolved.depthxr.stereo_boost - 1.25) < 0.0001,
            "DepthXR custom profile should override disabled default");
     Expect(resolved.pivotxr.enabled, "Enabled custom profile should turn PivotXR on when default is off");
-    Expect(resolved.pivotxr.activation_mode == depthxr::ActivationMode::Hold,
+    Expect(resolved.pivotxr.profiles.size() == 1, "PivotXR opt-in candidate count mismatch");
+    Expect(resolved.pivotxr.profiles[0].activation_mode == depthxr::ActivationMode::Hold,
            "PivotXR custom profile activation mode mismatch");
-    Expect(std::abs(resolved.pivotxr.yaw_rotation_multiplier - 2.1) < 0.0001,
+    Expect(std::abs(resolved.pivotxr.profiles[0].yaw_rotation_multiplier - 2.1) < 0.0001,
            "PivotXR custom profile should override disabled default");
     Expect(resolved.quadviews.enabled, "Enabled custom profile should turn Quadviews on when default is off");
     Expect(resolved.quadviews.tracking_mode == depthxr::QuadViewsTrackingMode::Head,
@@ -1018,6 +1250,10 @@ int main() {
     TestResolveRuntimeConfig();
     TestDisabledProfileFallsBackToDefaults();
     TestPivotProfileResolution();
+    TestPivotMultiProfileResolution();
+    TestPivotResponseModeAndAdvancedAxes();
+    TestTurboModuleResolution();
+    TestTurboModuleOptional();
     TestQuadViewsProfileResolution();
     TestEnabledProfileOverridesDisabledDefault();
     TestInvalidPivotActivationBindingRejected();

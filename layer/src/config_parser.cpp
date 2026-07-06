@@ -970,6 +970,136 @@ bool ParseDepthModule(const JsonValue::Object& object,
     return true;
 }
 
+bool ParseTurboProfile(const JsonValue& value, TurboProfile& out, std::string& error) {
+    const JsonValue::Object* object = RequireObject(value, "turboProfile", error);
+    if (!object) {
+        return false;
+    }
+
+    static const std::unordered_set<std::string> allowed = {
+        "id",
+        "name",
+        "enabled",
+        "mode",
+        "applicationIds",
+    };
+
+    if (!CheckAllowedKeys(*object, allowed, error)) {
+        return false;
+    }
+
+    const auto application_ids_it = object->find("applicationIds");
+    if (application_ids_it == object->end()) {
+        error = "Missing required field: turboProfile.applicationIds";
+        return false;
+    }
+    if (!ParseStringArray(application_ids_it->second, "applicationIds", out.application_ids, error)) {
+        return false;
+    }
+
+    std::optional<std::string> id;
+    std::optional<std::string> name;
+    std::optional<bool> enabled;
+    std::optional<ProfileMode> mode;
+
+    if (!ReadOptionalString(*object, "id", id, error) ||
+        !ReadOptionalString(*object, "name", name, error) ||
+        !ReadOptionalBool(*object, "enabled", enabled, error) ||
+        !ReadOptionalProfileMode(*object, "mode", mode, error)) {
+        return false;
+    }
+
+    out.id = id.value_or("");
+    out.name = name.value_or("New Profile");
+    out.enabled = enabled.value_or(true);
+    out.mode = mode.value_or(ProfileMode::Custom);
+
+    return true;
+}
+
+bool ParseTurboModule(const JsonValue::Object& object, TurboModuleConfig& out, std::string& error) {
+    static const std::unordered_set<std::string> allowed = {
+        "enabled",
+        "toggleBinding",
+        "profiles",
+    };
+
+    if (!CheckAllowedKeys(object, allowed, error)) {
+        return false;
+    }
+
+    std::optional<bool> enabled;
+    if (!ReadOptionalBool(object, "enabled", enabled, error)) {
+        return false;
+    }
+    if (enabled.has_value()) {
+        out.enabled = *enabled;
+    }
+
+    const auto toggle_binding_it = object.find("toggleBinding");
+    if (toggle_binding_it != object.end() &&
+        !ParseInputBinding(toggle_binding_it->second, out.toggle_binding, error)) {
+        return false;
+    }
+
+    const auto profiles_it = object.find("profiles");
+    if (profiles_it != object.end()) {
+        const JsonValue::Array* profiles = RequireArray(profiles_it->second, "turbo.profiles", error);
+        if (!profiles) {
+            return false;
+        }
+
+        for (const JsonValue& value : *profiles) {
+            TurboProfile profile;
+            if (!ParseTurboProfile(value, profile, error)) {
+                return false;
+            }
+            out.profiles.push_back(std::move(profile));
+        }
+    }
+
+    return true;
+}
+
+bool ParsePivotAxisTuning(const JsonValue& value, const char* field, PivotAxisTuning& out, std::string& error) {
+    const JsonValue::Object* object = RequireObject(value, field, error);
+    if (!object) {
+        return false;
+    }
+
+    static const std::unordered_set<std::string> allowed = {
+        "rotationMultiplier",
+        "deadzoneDegrees",
+        "maxExtraDegrees",
+    };
+
+    if (!CheckAllowedKeys(*object, allowed, error)) {
+        return false;
+    }
+
+    std::optional<double> rotation_multiplier;
+    std::optional<double> deadzone_degrees;
+    std::optional<double> max_extra_degrees;
+
+    if (!ReadOptionalNumber(*object, "rotationMultiplier", rotation_multiplier, error) ||
+        !ReadOptionalNumber(*object, "deadzoneDegrees", deadzone_degrees, error) ||
+        !ReadOptionalNumber(*object, "maxExtraDegrees", max_extra_degrees, error)) {
+        return false;
+    }
+
+    if (rotation_multiplier.has_value()) {
+        out.rotation_multiplier = *rotation_multiplier;
+    }
+    if (deadzone_degrees.has_value()) {
+        out.deadzone_degrees = *deadzone_degrees;
+    }
+    if (max_extra_degrees.has_value()) {
+        out.max_extra_degrees = *max_extra_degrees;
+    }
+
+    return true;
+}
+
 bool ParsePivotSettings(const JsonValue::Object& object, PivotXrSettings& out, std::string& error) {
     static const std::unordered_set<std::string> allowed = {
         "smoothing",
@@ -980,6 +1110,15 @@ bool ParsePivotSettings(const JsonValue::Object& object, PivotXrSettings& out, s
         "pitchRotationMultiplier",
         "pitchDeadzoneDegrees",
         "maxExtraPitchDegrees",
+        "responseMode",
+        "stepTriggerDegrees",
+        "stepAmountDegrees",
+        "stepHysteresisDegrees",
+        "advancedAxes",
+        "yawLeft",
+        "yawRight",
+        "pitchUp",
+        "pitchDown",
         // Legacy: per-axis smoothing collapsed into a single "smoothing".
         // Accepted but ignored so older configs still load.
         "pitchSmoothing",
@@ -1034,6 +1173,59 @@ bool ParsePivotSettings(const JsonValue::Object& object, PivotXrSettings& out, s
         out.pitch_max_extra_degrees = *max_extra_pitch_degrees;
     }
 
+    std::optional<std::string> response_mode;
+    std::optional<double> step_trigger_degrees;
+    std::optional<double> step_amount_degrees;
+    std::optional<double> step_hysteresis_degrees;
+    std::optional<bool> advanced_axes;
+
+    if (!ReadOptionalString(object, "responseMode", response_mode, error) ||
+        !ReadOptionalNumber(object, "stepTriggerDegrees", step_trigger_degrees, error) ||
+        !ReadOptionalNumber(object, "stepAmountDegrees", step_amount_degrees, error) ||
+        !ReadOptionalNumber(object, "stepHysteresisDegrees", step_hysteresis_degrees, error) ||
+        !ReadOptionalBool(object, "advancedAxes", advanced_axes, error)) {
+        return false;
+    }
+
+    if (response_mode.has_value()) {
+        const std::optional<PivotResponseMode> parsed = ParsePivotResponseMode(*response_mode);
+        if (!parsed.has_value()) {
+            error = "Invalid value for responseMode: " + *response_mode;
+            return false;
+        }
+        out.response_mode = *parsed;
+    }
+    if (step_trigger_degrees.has_value()) {
+        out.step_trigger_degrees = *step_trigger_degrees;
+    }
+    if (step_amount_degrees.has_value()) {
+        out.step_amount_degrees = *step_amount_degrees;
+    }
+    if (step_hysteresis_degrees.has_value()) {
+        out.step_hysteresis_degrees = *step_hysteresis_degrees;
+    }
+    if (advanced_axes.has_value()) {
+        out.advanced_axes = *advanced_axes;
+    }
+
+    const auto yaw_left_it = object.find("yawLeft");
+    if (yaw_left_it != object.end() && !ParsePivotAxisTuning(yaw_left_it->second, "yawLeft", out.yaw_left, error)) {
+        return false;
+    }
+    const auto yaw_right_it = object.find("yawRight");
+    if (yaw_right_it != object.end() && !ParsePivotAxisTuning(yaw_right_it->second, "yawRight", out.yaw_right, error)) {
+        return false;
+    }
+    const auto pitch_up_it = object.find("pitchUp");
+    if (pitch_up_it != object.end() && !ParsePivotAxisTuning(pitch_up_it->second, "pitchUp", out.pitch_up, error)) {
+        return false;
+    }
+    const auto pitch_down_it = object.find("pitchDown");
+    if (pitch_down_it != object.end() &&
+        !ParsePivotAxisTuning(pitch_down_it->second, "pitchDown", out.pitch_down, error)) {
+        return false;
+    }
+
     return true;
 }
 
@@ -1044,12 +1236,15 @@ bool ParsePivotProfile(const JsonValue& value, PivotXrProfile& out, std::string&
     }
 
     static const std::unordered_set<std::string> allowed = {
+        "id",
         "name",
         "enabled",
         "mode",
         "applicationIds",
         "activationMode",
         "activationBinding",
+        "setOriginBinding",
+        "releaseOriginBinding",
         "settings",
     };
 
@@ -1066,18 +1261,21 @@ bool ParsePivotProfile(const JsonValue& value, PivotXrProfile& out, std::string&
         return false;
     }
 
+    std::optional<std::string> id;
     std::optional<std::string> name;
     std::optional<bool> enabled;
     std::optional<ProfileMode> mode;
     std::optional<ActivationMode> activation_mode;
 
-    if (!ReadOptionalString(*object, "name", name, error) ||
+    if (!ReadOptionalString(*object, "id", id, error) ||
+        !ReadOptionalString(*object, "name", name, error) ||
         !ReadOptionalBool(*object, "enabled", enabled, error) ||
         !ReadOptionalProfileMode(*object, "mode", mode, error) ||
         !ReadOptionalActivationMode(*object, "activationMode", activation_mode, error)) {
         return false;
     }
 
+    out.id = id.value_or("");
     out.name = name.value_or("New Profile");
     out.enabled = enabled.value_or(true);
     out.mode = mode.value_or(ProfileMode::Custom);
@@ -1087,6 +1285,17 @@ bool ParsePivotProfile(const JsonValue& value, PivotXrProfile& out, std::string&
 
     const auto binding_it = object->find("activationBinding");
     if (binding_it != object->end() && !ParseInputBinding(binding_it->second, out.activation_binding, error)) {
+        return false;
+    }
+
+    const auto set_origin_it = object->find("setOriginBinding");
+    if (set_origin_it != object->end() && !ParseInputBinding(set_origin_it->second, out.set_origin_binding, error)) {
+        return false;
+    }
+
+    const auto release_origin_it = object->find("releaseOriginBinding");
+    if (release_origin_it != object->end() &&
+        !ParseInputBinding(release_origin_it->second, out.release_origin_binding, error)) {
         return false;
     }
 
@@ -1107,6 +1316,8 @@ bool ParsePivotModule(const JsonValue::Object& object, PivotXrModuleConfig& out,
         "defaults",
         "activationMode",
         "activationBinding",
+        "setOriginBinding",
+        "releaseOriginBinding",
         "profiles",
     };
 
@@ -1137,6 +1348,17 @@ bool ParsePivotModule(const JsonValue::Object& object, PivotXrModuleConfig& out,
 
     const auto activation_binding_it = object.find("activationBinding");
     if (activation_binding_it != object.end() && !ParseInputBinding(activation_binding_it->second, out.activation_binding, error)) {
+        return false;
+    }
+
+    const auto set_origin_it = object.find("setOriginBinding");
+    if (set_origin_it != object.end() && !ParseInputBinding(set_origin_it->second, out.set_origin_binding, error)) {
+        return false;
+    }
+
+    const auto release_origin_it = object.find("releaseOriginBinding");
+    if (release_origin_it != object.end() &&
+        !ParseInputBinding(release_origin_it->second, out.release_origin_binding, error)) {
         return false;
     }
 
@@ -1384,7 +1606,7 @@ bool ParseVectorDocument(const JsonValue::Object& root_object, ConfigDocument& o
         return false;
     }
 
-    static const std::unordered_set<std::string> allowed_modules = {"depthxr", "pivotxr", "quadviews"};
+    static const std::unordered_set<std::string> allowed_modules = {"depthxr", "pivotxr", "quadviews", "turbo"};
     if (!CheckAllowedKeys(*modules_object, allowed_modules, error)) {
         return false;
     }
@@ -1413,6 +1635,15 @@ bool ParseVectorDocument(const JsonValue::Object& root_object, ConfigDocument& o
     if (quadviews_it != modules_object->end()) {
         const JsonValue::Object* quadviews_object = RequireObject(quadviews_it->second, "modules.quadviews", error);
         if (!quadviews_object || !ParseQuadViewsModule(*quadviews_object, out.quadviews, error)) {
+            return false;
+        }
+    }
+
+    // Optional: absent in configs written before turbo existed.
+    const auto turbo_it = modules_object->find("turbo");
+    if (turbo_it != modules_object->end()) {
+        const JsonValue::Object* turbo_object = RequireObject(turbo_it->second, "modules.turbo", error);
+        if (!turbo_object || !ParseTurboModule(*turbo_object, out.turbo, error)) {
             return false;
         }
     }

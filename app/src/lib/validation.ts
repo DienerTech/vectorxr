@@ -1,5 +1,4 @@
 import type { CoreConfig, DepthXRProfileConfig, DepthXRSettings, InputBinding, PivotXRProfileConfig, PivotXRSettings, QuadViewsProfileConfig, QuadViewsSettings, RegisteredApplication, VectorXRConfig } from './model'
-import { bindingLabel } from './model'
 
 function validateCoreConfig(core: CoreConfig): string[] {
   const errors: string[] = []
@@ -129,6 +128,44 @@ function validatePivotXRSettings(prefix: string, settings: PivotXRSettings): str
 
   if (Number.isNaN(settings.maxExtraPitchDegrees) || settings.maxExtraPitchDegrees < 0 || settings.maxExtraPitchDegrees > 180) {
     errors.push(`${prefix}maxExtraPitchDegrees must be between 0 and 180`)
+  }
+
+  if (settings.responseMode !== 'continuous' && settings.responseMode !== 'stepped') {
+    errors.push(`${prefix}responseMode must be "continuous" or "stepped"`)
+  }
+
+  if (Number.isNaN(settings.stepTriggerDegrees) || settings.stepTriggerDegrees < 1 || settings.stepTriggerDegrees > 45) {
+    errors.push(`${prefix}stepTriggerDegrees must be between 1 and 45`)
+  }
+
+  if (Number.isNaN(settings.stepAmountDegrees) || settings.stepAmountDegrees < 0 || settings.stepAmountDegrees > 60) {
+    errors.push(`${prefix}stepAmountDegrees must be between 0 and 60`)
+  }
+
+  if (Number.isNaN(settings.stepHysteresisDegrees) || settings.stepHysteresisDegrees < 0 || settings.stepHysteresisDegrees > 20) {
+    errors.push(`${prefix}stepHysteresisDegrees must be between 0 and 20`)
+  }
+
+  if (settings.stepHysteresisDegrees >= settings.stepTriggerDegrees) {
+    errors.push(`${prefix}stepHysteresisDegrees must be smaller than stepTriggerDegrees`)
+  }
+
+  const tunings: Array<[string, typeof settings.yawLeft]> = [
+    ['yawLeft', settings.yawLeft],
+    ['yawRight', settings.yawRight],
+    ['pitchUp', settings.pitchUp],
+    ['pitchDown', settings.pitchDown],
+  ]
+  for (const [name, tuning] of tunings) {
+    if (Number.isNaN(tuning.rotationMultiplier) || tuning.rotationMultiplier < 1.0 || tuning.rotationMultiplier > 3.0) {
+      errors.push(`${prefix}${name}.rotationMultiplier must be between 1.0 and 3.0`)
+    }
+    if (Number.isNaN(tuning.deadzoneDegrees) || tuning.deadzoneDegrees < 0 || tuning.deadzoneDegrees > 45) {
+      errors.push(`${prefix}${name}.deadzoneDegrees must be between 0 and 45`)
+    }
+    if (Number.isNaN(tuning.maxExtraDegrees) || tuning.maxExtraDegrees < 0 || tuning.maxExtraDegrees > 180) {
+      errors.push(`${prefix}${name}.maxExtraDegrees must be between 0 and 180`)
+    }
   }
 
   return errors
@@ -273,41 +310,9 @@ function validatePivotXRProfile(profile: PivotXRProfileConfig, index: number, ap
   }
 
   errors.push(...validateInputBinding(`${prefix}activationBinding`, profile.activationBinding))
+  errors.push(...validateInputBinding(`${prefix}setOriginBinding`, profile.setOriginBinding))
+  errors.push(...validateInputBinding(`${prefix}releaseOriginBinding`, profile.releaseOriginBinding))
   errors.push(...validatePivotXRSettings(prefix, profile.settings))
-  return errors
-}
-
-function validatePivotProfileConflicts(profiles: PivotXRProfileConfig[]): string[] {
-  const errors: string[] = []
-
-  profiles.forEach((profile, index) => {
-    if (!profile.enabled || profile.activationBinding.type === 'none') {
-      return
-    }
-
-    const thisLabel = bindingLabel(profile.activationBinding)
-
-    profiles.forEach((other, otherIndex) => {
-      if (otherIndex >= index || !other.enabled || other.activationBinding.type === 'none') {
-        return
-      }
-
-      const otherLabel = bindingLabel(other.activationBinding)
-      if (thisLabel !== otherLabel) {
-        return
-      }
-
-      for (const applicationId of profile.applicationIds) {
-        if (other.applicationIds.includes(applicationId)) {
-          errors.push(
-            `modules.pivotxr.profiles[${index}] and profiles[${otherIndex}] share binding ${thisLabel} for application ${applicationId}; first enabled profile executes`,
-          )
-          break
-        }
-      }
-    })
-  })
-
   return errors
 }
 
@@ -369,6 +374,8 @@ export function validateConfig(config: VectorXRConfig): string[] {
   errors.push(...validateInputBinding('modules.depthxr.bindings.toggleEnabled', config.modules.depthxr.bindings.toggleEnabled))
   errors.push(...validatePivotXRSettings('modules.pivotxr.defaults.', config.modules.pivotxr.defaults))
   errors.push(...validateInputBinding('modules.pivotxr.activationBinding', config.modules.pivotxr.activationBinding))
+  errors.push(...validateInputBinding('modules.pivotxr.setOriginBinding', config.modules.pivotxr.setOriginBinding))
+  errors.push(...validateInputBinding('modules.pivotxr.releaseOriginBinding', config.modules.pivotxr.releaseOriginBinding))
   errors.push(...validateQuadViewsSettings('modules.quadviews.defaults.', config.modules.quadviews.defaults))
 
   const applicationIds = new Set(config.applications.map((application) => application.id))
@@ -378,15 +385,30 @@ export function validateConfig(config: VectorXRConfig): string[] {
   })
   errors.push(...validateDepthProfileConflicts(config.modules.depthxr.profiles))
 
+  // Shadowed pivot bindings (two profiles sharing a binding for the same app)
+  // are legitimate priority-order behavior, surfaced as a warning on the Pivot
+  // tab — they deliberately do not block saving.
   config.modules.pivotxr.profiles.forEach((profile, index) => {
     errors.push(...validatePivotXRProfile(profile, index, applicationIds))
   })
-  errors.push(...validatePivotProfileConflicts(config.modules.pivotxr.profiles))
 
   config.modules.quadviews.profiles.forEach((profile, index) => {
     errors.push(...validateQuadViewsProfile(profile, index, applicationIds))
   })
   errors.push(...validateQuadViewsProfileConflicts(config.modules.quadviews.profiles))
+
+  errors.push(...validateInputBinding('modules.turbo.toggleBinding', config.modules.turbo.toggleBinding))
+  config.modules.turbo.profiles.forEach((profile, index) => {
+    const prefix = `modules.turbo.profiles[${index}].`
+    if (!profile.name.trim()) {
+      errors.push(`${prefix}name is required`)
+    }
+    for (const applicationId of profile.applicationIds) {
+      if (!applicationIds.has(applicationId)) {
+        errors.push(`${prefix}applicationIds references unknown application: ${applicationId}`)
+      }
+    }
+  })
 
   return errors
 }

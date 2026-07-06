@@ -235,12 +235,12 @@ export async function pickSoundFile(): Promise<string | null> {
   return typeof selected === 'string' ? selected : null
 }
 
-export async function playTestSound(path: string, activate: boolean, volume = 100): Promise<void> {
+export async function playTestSound(path: string, activate: boolean, volume = 100, defaultName?: string): Promise<void> {
   if (!tauriAvailable()) {
     return
   }
 
-  await invoke('play_test_sound', { path: path.trim() ? path : null, activate, volume })
+  await invoke('play_test_sound', { path: path.trim() ? path : null, activate, volume, defaultName: defaultName ?? null })
 }
 
 export async function loadLogSnapshot(): Promise<LogSnapshot> {
