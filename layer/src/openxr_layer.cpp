@@ -3805,6 +3805,15 @@ XrResult OpenXrLayer::ForwardEndFrame(XrSession session,
     return result;
 }
 
+XrTime OpenXrLayer::ClampInternalLocateTime(XrTime app_time) {
+    std::scoped_lock lock(turbo_mutex_);
+    if (turbo_seq_state_ == TurboSequencedState::kActive && turbo_last_predicted_display_time_ > 0 &&
+        app_time > turbo_last_predicted_display_time_) {
+        return turbo_last_predicted_display_time_;
+    }
+    return app_time;
+}
+
 bool OpenXrLayer::TurboSequencedDebugTick() {
     if (!logger_.IsDebugEnabled()) {
         return false;
@@ -4730,11 +4739,14 @@ XrResult OpenXrLayer::LocateViews(XrSession session,
     // Consume a pending origin capture with this frame's head pose. This runs
     // independently of engagement so the origin can be set before pivot is
     // engaged; the capture uses the same displayTime as the pivot drive below.
+    const XrTime internal_locate_time =
+        view_locate_info ? ClampInternalLocateTime(view_locate_info->displayTime) : 0;
+
     if (pivotxr_origin_capture_pending_ && resolved_settings_.pivotxr.enabled &&
         internal_view_space_ != XR_NULL_HANDLE && view_locate_info) {
         XrSpaceLocation origin_location{XR_TYPE_SPACE_LOCATION};
         const XrResult origin_result = next_locate_space_(
-            internal_view_space_, view_locate_info->space, view_locate_info->displayTime, &origin_location);
+            internal_view_space_, view_locate_info->space, internal_locate_time, &origin_location);
         if (XR_SUCCEEDED(origin_result) &&
             (origin_location.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT) != 0) {
             PivotOrigin origin;
@@ -4757,7 +4769,7 @@ XrResult OpenXrLayer::LocateViews(XrSession session,
         XrPosef applied_pose_delta = IdentityPose();
         const XrResult pivot_result = LocateSpaceWithPivot(internal_view_space_,
                                                            view_locate_info->space,
-                                                           view_locate_info->displayTime,
+                                                           internal_locate_time,
                                                            pivotxr_active,
                                                            &pivot_view_location,
                                                            &applied_extra_yaw_radians,
@@ -4777,7 +4789,7 @@ XrResult OpenXrLayer::LocateViews(XrSession session,
                                         varjo_compatible_quadviews_active_
                                             ? view_configuration_type
                                             : XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO,
-                                        view_locate_info->displayTime,
+                                        internal_locate_time,
                                         varjo_compatible_quadviews_active_ ? count : 2)) {
                 pivot_diagnostic_.recomposition_mode =
                     varjo_compatible_quadviews_active_ ? "quad_native_eye_offsets" : "quad_from_stereo_eye_offsets";
@@ -4797,7 +4809,7 @@ XrResult OpenXrLayer::LocateViews(XrSession session,
                     adjusted_views[i].orientation.w = recomposed_pose.orientation.w;
                 }
             } else if (!IsQuadViewConfiguration(view_configuration_type) &&
-                       EnsureEyeOffsets(session, view_configuration_type, view_locate_info->displayTime, count)) {
+                       EnsureEyeOffsets(session, view_configuration_type, internal_locate_time, count)) {
                 pivot_diagnostic_.recomposition_mode = "stereo_eye_offsets";
                 CachePivotPoseDelta(view_locate_info->displayTime, applied_pose_delta);
                 for (uint32_t i = 0; i < count; ++i) {
@@ -6267,7 +6279,7 @@ XrResult OpenXrLayer::LocateRuntimeViews(XrSession session,
         std::scoped_lock lock(mutex_);
         const bool has_eye_focus = LocateEyeGazeFocusOffsets(session,
                                                             view_locate_info->space,
-                                                            view_locate_info->displayTime,
+                                                            ClampInternalLocateTime(view_locate_info->displayTime),
                                                             quadviews_settings,
                                                             &focus_yaw_radians,
                                                             &focus_pitch_radians);

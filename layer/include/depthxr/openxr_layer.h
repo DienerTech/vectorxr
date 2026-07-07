@@ -605,6 +605,15 @@ class OpenXrLayer {
     // sequenced engage.
     int turbo_seq_debug_log_budget_{0};
     bool TurboSequencedDebugTick();
+    // Internal helper locates (pivot drive, origin capture, eye offsets, eye
+    // gaze) run under mutex_ at the app's displayTime. Under sequenced turbo
+    // that time can sit one period past the runtime's last real xrWaitFrame,
+    // and a runtime may block such a locate until the next wait — which runs
+    // inside EndFrame behind the same mutex_ (deadlock, observed on
+    // PiOpenXR via xrLocateSpace before that path was unlocked). Clamp these
+    // locates to the known horizon; the sources are smoothed/near-static so
+    // <=1 period of staleness is invisible. Cache keys keep the app's time.
+    XrTime ClampInternalLocateTime(XrTime app_time);
     XrResult ApplyPivotToLocatedSpace(XrSpace space,
                                       XrSpace base_space,
                                       XrTime time,
