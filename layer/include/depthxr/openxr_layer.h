@@ -584,11 +584,10 @@ class OpenXrLayer {
     // (engage moved waits sim->render; unwind moved them back; re-engage
     // hardlocked DCS inside the runtime), so the turbo toggle must never
     // change thread topology — it only operates the pacing valve below.
-    // kUnwinding survives for teardown edges only.
-    enum class TurboSequencedState { kInactive, kEngaging, kActive, kUnwinding };
+    enum class TurboSequencedState { kInactive, kEngaging, kActive };
     TurboSequencedState turbo_seq_state_{TurboSequencedState::kInactive};
     // The app's next xrBeginFrame must pass through to the runtime (its wait
-    // ran real during a handshake/unwind).
+    // ran real during the establishment handshake).
     bool turbo_begin_owed_{false};
     // The frame the app will submit next has an open (begun) runtime frame.
     // Set by our pre-begin, a compensation begin, or the app's own begin

@@ -3321,16 +3321,14 @@ XrResult OpenXrLayer::WaitFrame(XrSession session,
         }
     }
 
-    // Handshake (engage) and unwind (release) run the REAL wait here, on the
-    // app's own wait callsite and thread — this wait can never duplicate an
-    // app wait because it IS the app's wait. The app's next xrBeginFrame then
-    // passes through real (turbo_begin_owed_).
+    // The establishment handshake runs the REAL wait here, on the app's own
+    // wait callsite and thread — this wait can never duplicate an app wait
+    // because it IS the app's wait. The app's next xrBeginFrame then passes
+    // through real (turbo_begin_owed_).
     bool handshake = false;
-    bool unwind = false;
     {
         std::scoped_lock lock(turbo_mutex_);
         handshake = turbo_seq_state_ == TurboSequencedState::kEngaging;
-        unwind = turbo_seq_state_ == TurboSequencedState::kUnwinding;
     }
 
     const auto wait_start = std::chrono::steady_clock::now();
@@ -3365,19 +3363,10 @@ XrResult OpenXrLayer::WaitFrame(XrSession session,
                               std::to_string(wait_ms) +
                               "ms); app wait/begin fabricated from the next frame on.");
             }
-        } else if (unwind && turbo_seq_state_ == TurboSequencedState::kUnwinding) {
-            turbo_seq_state_ = TurboSequencedState::kInactive;
-            turbo_begin_owed_ = true;
-            turbo_frame_begun_ = false;
-            if (turbo_pipelining_logged_) {
-                logger_.Info("Turbo: frame pipelining released; runtime pacing restored.");
-                turbo_pipelining_logged_ = false;
-            }
         }
     } else {
         std::scoped_lock lock(turbo_mutex_);
-        if ((handshake && turbo_seq_state_ == TurboSequencedState::kEngaging) ||
-            (unwind && turbo_seq_state_ == TurboSequencedState::kUnwinding)) {
+        if (handshake && turbo_seq_state_ == TurboSequencedState::kEngaging) {
             // Session state advanced under us; give up the transition.
             turbo_seq_state_ = TurboSequencedState::kInactive;
         }
@@ -3389,15 +3378,14 @@ XrResult OpenXrLayer::BeginFrame(XrSession session, const XrFrameBeginInfo* fram
     {
         std::scoped_lock lock(turbo_mutex_);
         if (turbo_begin_owed_) {
-            // The matching wait ran real during a handshake/unwind; this
+            // The matching wait ran real during the establishment handshake; this
             // begin must reach the runtime.
             turbo_begin_owed_ = false;
             if (turbo_seq_debug_log_budget_ > 0 && logger_.IsDebugEnabled()) {
                 --turbo_seq_debug_log_budget_;
                 logger_.Debug("Turbo-diag: owed xrBeginFrame passing through to the runtime.");
             }
-        } else if (turbo_async_wait_.valid() || turbo_seq_state_ == TurboSequencedState::kActive ||
-                   turbo_seq_state_ == TurboSequencedState::kUnwinding) {
+        } else if (turbo_async_wait_.valid() || turbo_seq_state_ == TurboSequencedState::kActive) {
             // Async pacing: deferred into ForwardEndFrame once the async wait
             // resolves. Sequenced pacing: the frame was pre-begun inside the
             // previous EndFrame (or will be compensated there).
@@ -3560,9 +3548,7 @@ XrResult OpenXrLayer::ForwardEndFrame(XrSession session,
                 return begin_result;
             }
         }
-    } else if ((seq_state == TurboSequencedState::kActive ||
-                seq_state == TurboSequencedState::kUnwinding) &&
-               !frame_begun) {
+    } else if (seq_state == TurboSequencedState::kActive && !frame_begun) {
         // Compensation: the app's wait for this frame was fabricated during a
         // state transition and no runtime frame is open — supply the
         // wait+begin pair before the submit so the runtime's sequence stays
@@ -3653,8 +3639,7 @@ XrResult OpenXrLayer::ForwardEndFrame(XrSession session,
                         do_steady_wait = !turbo_begin_owed_;
                         break;
                     case TurboSequencedState::kEngaging:
-                    case TurboSequencedState::kUnwinding:
-                        // Transition in flight; the app's WaitFrame completes it.
+                        // Handshake in flight; the app's WaitFrame completes it.
                         break;
                     }
                 }
