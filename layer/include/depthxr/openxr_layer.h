@@ -605,6 +605,15 @@ class OpenXrLayer {
     // sequenced engage.
     int turbo_seq_debug_log_budget_{0};
     bool TurboSequencedDebugTick();
+    XrResult ApplyPivotToLocatedSpace(XrSpace space,
+                                      XrSpace base_space,
+                                      XrTime time,
+                                      bool pivotxr_active,
+                                      XrSpaceLocation* location,
+                                      double* applied_extra_yaw_radians,
+                                      double* applied_extra_pitch_radians,
+                                      XrPosef* applied_pose_delta,
+                                      bool update_smoothing);
     // The pacing valve (turbo_mutex_): with the pipeline structural, the
     // turbo toggle only flips this. Open: app waits fabricate instantly
     // (decoupled). Closed: app waits block consuming a pacing token — one is

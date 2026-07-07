@@ -3642,7 +3642,7 @@ XrResult OpenXrLayer::ForwardEndFrame(XrSession session,
                                          "xrWaitFrame is now decoupled from runtime pacing.");
                             turbo_pipelining_logged_ = true;
                             turbo_fabricated_wait_log_budget_ = 5;
-                            turbo_seq_debug_log_budget_ = 40;
+                            turbo_seq_debug_log_budget_ = 80;
                         }
                         break;
                     case TurboSequencedState::kActive:
@@ -4162,9 +4162,18 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
         return XR_ERROR_VALIDATION_FAILURE;
     }
 
+    // Hang forensics: if a log ends between these two markers, a thread is
+    // parked inside a runtime call while holding mutex_.
+    const bool diag = TurboSequencedDebugTick();
+    if (diag) {
+        logger_.Debug("Turbo-diag: xrEndFrame entered; acquiring config lock.");
+    }
     // unique_lock because ForwardEndFrame releases it before blocking runtime
     // calls (turbo drain + next_end_frame_).
     std::unique_lock lock(mutex_);
+    if (diag) {
+        logger_.Debug("Turbo-diag: xrEndFrame config lock acquired.");
+    }
     ReloadConfigIfNeeded();
     RefreshResolvedSettings();
     if (!resolved_settings_.core.enabled) {
@@ -4572,10 +4581,19 @@ XrResult OpenXrLayer::CreateReferenceSpace(XrSession session,
 }
 
 XrResult OpenXrLayer::LocateSpace(XrSpace space, XrSpace base_space, XrTime time, XrSpaceLocation* location) {
-    std::scoped_lock lock(mutex_);
-    ReloadConfigIfNeeded();
-    RefreshResolvedSettings();
-    if (!resolved_settings_.core.enabled) {
+    bool enabled = false;
+    bool pivotxr_active = false;
+    {
+        std::scoped_lock lock(mutex_);
+        ReloadConfigIfNeeded();
+        RefreshResolvedSettings();
+        enabled = resolved_settings_.core.enabled;
+        if (enabled) {
+            pivotxr_active = IsPivotXrActive();
+        }
+    }
+
+    if (!enabled) {
         return next_locate_space_(space, base_space, time, location);
     }
 
@@ -4584,9 +4602,27 @@ XrResult OpenXrLayer::LocateSpace(XrSpace space, XrSpace base_space, XrTime time
     // head-attached geometry (e.g. the FA18 pilot visor) from VIEW-space
     // locates; skipping pivot here desynchronizes that geometry from the
     // pivoted camera.
-    const bool pivotxr_active = IsPivotXrActive();
-    return LocateSpaceWithPivot(
-        space, base_space, time, pivotxr_active, location, nullptr, nullptr, nullptr, false);
+    //
+    // Lock discipline: the runtime locate must NOT run under mutex_ — a
+    // runtime may block a locate (e.g. until frame prediction advances via
+    // the next xrWaitFrame, which sequenced turbo performs inside EndFrame
+    // behind this same mutex), and holding the config lock across it turns
+    // that stall into an app-wide deadlock.
+    const bool diag = TurboSequencedDebugTick();
+    if (diag) {
+        logger_.Debug("Turbo-diag: app xrLocateSpace starting (time=" + std::to_string(time) + ").");
+    }
+    const XrResult result = next_locate_space_(space, base_space, time, location);
+    if (diag) {
+        logger_.Debug("Turbo-diag: app xrLocateSpace completed.");
+    }
+    if (XR_FAILED(result)) {
+        return result;
+    }
+
+    std::scoped_lock lock(mutex_);
+    return ApplyPivotToLocatedSpace(space, base_space, time, pivotxr_active, location, nullptr,
+                                    nullptr, nullptr, false);
 }
 
 XrResult OpenXrLayer::LocateViews(XrSession session,
@@ -5772,7 +5808,14 @@ bool OpenXrLayer::LocateEyeGazeFocusOffsets(XrSession session,
     const XrSpace gaze_base_space = internal_view_space_ != XR_NULL_HANDLE ? internal_view_space_ : base_space;
 
     XrSpaceLocation gaze_location{XR_TYPE_SPACE_LOCATION};
+    const bool gaze_diag = TurboSequencedDebugTick();
+    if (gaze_diag) {
+        logger_.Debug("Turbo-diag: eye-gaze xrLocateSpace starting (under config lock).");
+    }
     const XrResult locate_result = next_locate_space_(quadviews_eye_gaze_space_, gaze_base_space, time, &gaze_location);
+    if (gaze_diag) {
+        logger_.Debug("Turbo-diag: eye-gaze xrLocateSpace completed.");
+    }
     if (XR_FAILED(locate_result) ||
         (gaze_location.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT) == 0) {
         log_eye_gaze_diagnostic("gaze space locate failed, result=" +
@@ -6159,8 +6202,16 @@ XrResult OpenXrLayer::LocateRuntimeViews(XrSession session,
     }
 
     if (!view_locate_info || !IsQuadViewConfiguration(view_locate_info->viewConfigurationType) || !quadviews_active) {
-        return next_locate_views_(
+        const bool diag = TurboSequencedDebugTick();
+        if (diag) {
+            logger_.Debug("Turbo-diag: app xrLocateViews starting (no lock held).");
+        }
+        const XrResult locate_result = next_locate_views_(
             session, downstream_view_locate_info, view_state, view_capacity_input, view_count_output, views);
+        if (diag) {
+            logger_.Debug("Turbo-diag: app xrLocateViews completed.");
+        }
+        return locate_result;
     }
 
     XrViewLocateInfo runtime_locate_info = *downstream_view_locate_info;
@@ -6173,12 +6224,19 @@ XrResult OpenXrLayer::LocateRuntimeViews(XrSession session,
     XrViewState runtime_view_state{XR_TYPE_VIEW_STATE};
     XrViewState* downstream_view_state = view_state ? &runtime_view_state : nullptr;
     uint32_t stereo_count = 0;
+    const bool diag = TurboSequencedDebugTick();
+    if (diag) {
+        logger_.Debug("Turbo-diag: synthesized-quadviews xrLocateViews starting (no lock held).");
+    }
     const XrResult result = next_locate_views_(session,
                                               &runtime_locate_info,
                                               downstream_view_state,
                                               static_cast<uint32_t>(stereo_views.size()),
                                               &stereo_count,
                                               stereo_views.data());
+    if (diag) {
+        logger_.Debug("Turbo-diag: synthesized-quadviews xrLocateViews completed.");
+    }
     if (view_state && XR_SUCCEEDED(result)) {
         *view_state = runtime_view_state;
     }
@@ -6271,6 +6329,38 @@ XrResult OpenXrLayer::LocateSpaceWithPivot(XrSpace space,
     }
 
     const XrResult result = next_locate_space_(space, base_space, time, location);
+    if (XR_FAILED(result)) {
+        if (applied_pose_delta) {
+            *applied_pose_delta = IdentityPose();
+        }
+        pivotxr_activation_gain_ = 0.0;
+        if (applied_extra_yaw_radians) {
+            *applied_extra_yaw_radians = 0.0;
+        }
+        if (applied_extra_pitch_radians) {
+            *applied_extra_pitch_radians = 0.0;
+        }
+        return result;
+    }
+
+    return ApplyPivotToLocatedSpace(space, base_space, time, pivotxr_active, location,
+                                    applied_extra_yaw_radians, applied_extra_pitch_radians,
+                                    applied_pose_delta, update_smoothing);
+}
+
+// Post-locate pivot application: everything LocateSpaceWithPivot does after
+// the runtime locate. Split out so callers that must not hold mutex_ across
+// the (potentially blocking) runtime locate can run it separately.
+XrResult OpenXrLayer::ApplyPivotToLocatedSpace(XrSpace space,
+                                               XrSpace base_space,
+                                               XrTime time,
+                                               bool pivotxr_active,
+                                               XrSpaceLocation* location,
+                                               double* applied_extra_yaw_radians,
+                                               double* applied_extra_pitch_radians,
+                                               XrPosef* applied_pose_delta,
+                                               bool update_smoothing) {
+    const XrResult result = XR_SUCCESS;
     if (applied_pose_delta) {
         *applied_pose_delta = IdentityPose();
     }
@@ -6283,7 +6373,7 @@ XrResult OpenXrLayer::LocateSpaceWithPivot(XrSpace space,
         }
     };
 
-    if (XR_FAILED(result) || !resolved_settings_.pivotxr.enabled) {
+    if (!resolved_settings_.pivotxr.enabled) {
         pivotxr_activation_gain_ = 0.0;
         clear_extra_outputs();
         return result;
