@@ -172,8 +172,15 @@ class OpenXrLayer {
         uint64_t wait_count{0};
         uint64_t release_count{0};
         uint32_t last_acquired_image_index{0};
+        // Index at the moment the app last RELEASED an image — the content the
+        // current frame's composite must sample. Under turbo pipelining the
+        // app re-acquires the next image before EndFrame runs the compositor,
+        // so last_acquired has already advanced past this frame's image
+        // (observed as mismatched per-eye content on Pimax).
+        uint32_t last_released_image_index{0};
         bool images_enumerated{false};
         bool has_last_acquired_image_index{false};
+        bool has_last_released_image_index{false};
         bool release_deferred{false};
         bool quadviews_session{false};
         bool d3d11_shader_resources_attempted{false};
@@ -305,7 +312,7 @@ class OpenXrLayer {
     // frame thread after the lock is released.
     void ResolveTurboPacingModeLocked();
     void RecordTurboPacingVerdict(TurboPacingMode mode, const char* source, std::int64_t stable_seconds);
-    void NoteTurboPacingStableFrame(std::chrono::steady_clock::time_point now);
+    void NoteTurboPacingStableFrame(double app_frame_delta_ms);
     // Returns true when turbo should suspend for the session (level-2 trip or
     // non-auto mode); false when it adapted (async -> sequenced fallback).
     bool HandleTurboDrainTimeout(std::chrono::steady_clock::time_point now);
@@ -539,18 +546,66 @@ class OpenXrLayer {
     // runtime, or the in-session fallback after async tripped.
     enum class TurboPacingSource { kForced, kPinned, kPreset, kDiscovered, kProbing, kFallback };
     // Frame-submission-thread only (resolved under the config lock at
-    // EndFrame, consumed after it is released) — except turbo_frame_prebegun_,
-    // which WaitFrame/BeginFrame consult under turbo_mutex_.
+    // EndFrame, consumed after it is released); the sequenced state machine
+    // below is turbo_mutex_-guarded because WaitFrame/BeginFrame consult it.
     TurboPacingMode turbo_pacing_mode_{TurboPacingMode::kAsync};
     TurboPacingSource turbo_pacing_source_{TurboPacingSource::kProbing};
     bool turbo_pacing_resolved_{false};
     // Auto only: a stable window is still owed before the verdict is written.
     bool turbo_pacing_verdict_pending_{false};
     std::int64_t turbo_probe_timeout_total_{0};
-    std::optional<std::chrono::steady_clock::time_point> turbo_stable_since_;
-    // Sequenced pacing (turbo_mutex_): the runtime frame the app is about to
-    // render was already waited+begun inside the previous EndFrame.
-    bool turbo_frame_prebegun_{false};
+    // Accumulated healthy engaged frame time; the verdict lands at 60s. Not
+    // wall-clock, so loading screens neither earn nor destroy stability.
+    double turbo_stable_accumulated_ms_{0.0};
+    // Cadence gate: a stalled runtime wait is only evidence against a pacing
+    // mode when the app itself is pacing normally. Turbo stays passive until
+    // the app delivers a streak of healthy frames (app-time only — our own
+    // drain/join blocking is subtracted via turbo_last_frame_blocked_ms_),
+    // and pauses across loading hitches. Discovery counts nothing while
+    // paused, so loading screens cannot poison verdicts.
+    uint32_t turbo_cadence_healthy_streak_{0};
+    bool turbo_cadence_ready_{false};
+    bool turbo_cadence_pause_logged_{false};
+    double turbo_last_frame_blocked_ms_{0.0};
+    // Sequenced pacing state machine (turbo_mutex_). DCS overlaps xrWaitFrame
+    // (sim thread) with xrEndFrame (render thread) — spec-legal — so the
+    // fabrication shield must never have a per-frame gap, and engage/release
+    // must hand off through the app's own WaitFrame call so we never issue a
+    // runtime wait that duplicates one the app already has in flight:
+    //   kInactive -> kEngaging (EndFrame decides to engage; no runtime calls)
+    //   kEngaging -> kActive  (the app's next WaitFrame runs REAL on its own
+    //                          thread — the handshake — then Begin passes real
+    //                          via turbo_begin_owed_)
+    //   kActive               (steady state: app wait/begin fabricated with no
+    //                          gaps; EndFrame does End -> Wait -> Begin
+    //                          synchronously on the frame thread)
+    //   kActive -> kUnwinding (EndFrame disengages; shield stays up)
+    //   kUnwinding -> kInactive (the app's next WaitFrame runs REAL and drops
+    //                          the shield; Begin passes real)
+    enum class TurboSequencedState { kInactive, kEngaging, kActive, kUnwinding };
+    TurboSequencedState turbo_seq_state_{TurboSequencedState::kInactive};
+    // The app's next xrBeginFrame must pass through to the runtime (its wait
+    // ran real during a handshake/unwind).
+    bool turbo_begin_owed_{false};
+    // The frame the app will submit next has an open (begun) runtime frame.
+    // Set by our pre-begin, a compensation begin, or the app's own begin
+    // passing through; consumed at EndFrame. A fabricated wait whose frame
+    // was never begun (engage/disengage race) is compensated at EndFrame.
+    bool turbo_frame_begun_{false};
+    // Serializes every real xrWaitFrame we issue or forward — the spec makes
+    // concurrent waits app-UB, and a handshake/compensation wait must never
+    // overlap a steady-state one.
+    std::mutex turbo_runtime_wait_mutex_;
+    // Hang forensics: a budget of debug markers around every blocking call in
+    // the pipelined path (End, steady wait, swapchain acquire/wait, owed
+    // begin) so a hardlock's log ends at the exact culprit. Refilled at each
+    // sequenced engage.
+    int turbo_seq_debug_log_budget_{0};
+    bool TurboSequencedDebugTick();
+    // Single-engage-per-session quirk (PiOpenXR): set when an established
+    // sequenced pipeline unwinds; blocks re-engaging until the next session.
+    bool turbo_reengage_blocked_{false};
+    bool turbo_reengage_blocked_logged_{false};
     std::string runtime_version_;
 
     // Frame pacing telemetry (debug log level): quantifies judder sources by

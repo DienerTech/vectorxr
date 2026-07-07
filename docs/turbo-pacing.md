@@ -22,14 +22,65 @@ Diagnostic signature in debug logs: `turboDrainAndBegin max` pinned at ~250 ms,
 - **Async** — background-thread wait, drained at the next EndFrame. Best
   overlap (the pacing wait runs concurrently with the app's next-frame CPU
   work). Fails on interlocking runtimes.
-- **Sequenced** — the wait is joined *inside* EndFrame, immediately after the
-  submit that unblocks it, and the next frame is pre-begun
-  (`turbo_frame_prebegun_`). Strictly ordered on the submit thread, spec-clean,
-  safe on interlocking runtimes; the cost is that EndFrame blocks for the
-  pacing wait. This is the OpenXR-Toolkit turbo design.
-- Sequenced still implements its wait as a joinable future with a timeout —
-  if a runtime ever withholds a post-submit wait, we degrade to the async
-  drain path next frame instead of deadlocking inside EndFrame.
+- **Sequenced** — the real wait+begin run *synchronously on the app's frame
+  thread* inside EndFrame, right after the submit. From the runtime's view
+  this is the standard single-threaded frame loop (End → Wait → Begin), which
+  every conformant runtime must release — so no timeout is needed. This is
+  the OpenXR-Toolkit turbo design. Two field-test lessons are baked in:
+  - **Thread identity matters** (Pimax test 2): PiOpenXR pins frame pacing to
+    the calling thread. A draft that ran the wait on an async worker and
+    merely *joined* it from the submit thread stalled ~360 ms per frame (our
+    stacked timeouts); the same wait on the frame thread returns in ~10 ms.
+  - **Apps overlap WaitFrame with EndFrame** (Pimax test 3): DCS calls
+    xrWaitFrame from its sim thread concurrently with xrEndFrame on its
+    render thread (spec-legal). Sequenced pacing is therefore a state machine
+    (`kInactive → kEngaging → kActive → kUnwinding`) whose fabrication shield
+    never has a per-frame gap, and whose engage/release run *through the
+    app's own WaitFrame call* (handshake/unwind on the app's wait thread, the
+    following xrBeginFrame passing through via `turbo_begin_owed_`) so we
+    never issue a runtime wait that duplicates one the app already has in
+    flight — a draft that did deadlocked DCS on the second pipelined frame.
+    A fabricated wait that raced a state transition is compensated with a
+    wait+begin pair at the next EndFrame, and every real xrWaitFrame we issue
+    or forward is serialized behind `turbo_runtime_wait_mutex_`.
+
+  A sequenced wait that blocks ≥250 ms is judged after the fact and counts
+  toward level 2.
+
+  **Single-engage-per-session quirk (PiOpenXR/Pimax):** field tests showed
+  steady-state sequenced turbo runs clean (full DCS flight at 85–90 fps), but
+  a mid-session unwind followed by re-engage hardlocks DCS inside the runtime
+  — outside every instrumented layer call — most plausibly because PiOpenXR's
+  per-thread frame pacing wedges when the wait-issuing thread migrates a
+  second time. On these runtimes, once an established pipeline unwinds
+  (toggle-off or suspend), re-engaging is refused for the rest of the session
+  with a log line; turbo returns at the next launch.
+
+## Cadence gate (added after the first field test)
+
+A stalled runtime wait is only evidence against a pacing mode when the app is
+pacing normally. The first DCS test engaged turbo on the 2 fps loading screen,
+"discovered" 9 stalls in 11 seconds, and recorded a poisoned `unsupported`
+verdict. So:
+
+- Turbo stays **passive** until the app delivers 90 consecutive frames under
+  50 ms of app-only time (our own drain/join blocking is subtracted, so a
+  turbo-induced stall cannot masquerade as an app hitch and dodge the
+  circuit). Once pipelining is established the gate only pauses **counting
+  and stability accrual** during hitches — it must never tear the pipeline
+  down and re-engage it: every unwind/re-engage transition races the app's
+  loose frame threading (a mission-load pause/resume cycle hardlocked DCS on
+  PiOpenXR while the same session's first engage ran clean for 28 s), and
+  riding through a hitch is harmless since the pipelined wait simply runs at
+  the app's own loading pace.
+- Timeouts are counted **only at the drain** and only while engaged past the
+  gate. The sequenced join never counts (a slow join simply defers to the next
+  drain — counting both double-counted one stall) and its timeout is 100 ms.
+- The stability window is **accumulated healthy engaged time** (60 s), not
+  wall-clock, so loading screens neither earn nor destroy verdicts.
+
+Side effect: this also removes turbo's engage-at-app-startup hitches on every
+runtime — pipelining now starts a second or two into stable rendering.
 
 ## Two-level safety circuit
 

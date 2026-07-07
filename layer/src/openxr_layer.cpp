@@ -54,6 +54,20 @@ std::optional<TurboPacingMode> SeededTurboPacingMode(const std::string& runtime_
     return std::nullopt;
 }
 
+// PiOpenXR wedges its internal frame pacing when the wait-issuing thread
+// migrates a second time (field tests: the first engage and a full flight run
+// clean; a mid-session unwind followed by re-engage hardlocks DCS inside the
+// runtime, outside every instrumented call). Steady state is safe, so these
+// runtimes get one engage per session; turbo returns at the next launch.
+bool RuntimeSingleEngagePerSession(const std::string& runtime_name) {
+    for (const char* fragment : {"PiOpenXR", "Pimax"}) {
+        if (runtime_name.find(fragment) != std::string::npos) {
+            return true;
+        }
+    }
+    return false;
+}
+
 bool NearlyZero(double value) {
     return std::abs(value) < 0.0001;
 }
@@ -2195,7 +2209,15 @@ XrResult OpenXrLayer::AcquireSwapchainImage(XrSwapchain swapchain,
         }
     }
 
+    const bool diag = TurboSequencedDebugTick();
+    if (diag) {
+        logger_.Debug("Turbo-diag: xrAcquireSwapchainImage(" +
+                      std::to_string(reinterpret_cast<uintptr_t>(swapchain)) + ") starting.");
+    }
     const XrResult result = next_acquire_swapchain_image_(swapchain, acquire_info, index);
+    if (diag) {
+        logger_.Debug("Turbo-diag: xrAcquireSwapchainImage completed.");
+    }
     if (XR_FAILED(result)) {
         return result;
     }
@@ -2216,7 +2238,20 @@ XrResult OpenXrLayer::AcquireSwapchainImage(XrSwapchain swapchain,
 }
 
 XrResult OpenXrLayer::WaitSwapchainImage(XrSwapchain swapchain, const XrSwapchainImageWaitInfo* wait_info) {
+    const bool diag = TurboSequencedDebugTick();
+    if (diag) {
+        logger_.Debug("Turbo-diag: xrWaitSwapchainImage(" +
+                      std::to_string(reinterpret_cast<uintptr_t>(swapchain)) + ") starting.");
+    }
+    const auto wait_start = std::chrono::steady_clock::now();
     const XrResult result = next_wait_swapchain_image_(swapchain, wait_info);
+    if (diag) {
+        logger_.Debug("Turbo-diag: xrWaitSwapchainImage completed in " +
+                      std::to_string(std::chrono::duration<double, std::milli>(
+                                         std::chrono::steady_clock::now() - wait_start)
+                                         .count()) +
+                      "ms.");
+    }
     if (XR_FAILED(result)) {
         return result;
     }
@@ -2234,17 +2269,34 @@ XrResult OpenXrLayer::ReleaseSwapchainImage(XrSwapchain swapchain,
     {
         std::scoped_lock lock(mutex_);
         const auto it = tracked_swapchains_.find(swapchain);
-        if (it != tracked_swapchains_.end() && ShouldDeferSwapchainRelease(it->second)) {
-            it->second.release_deferred = true;
-            ++it->second.release_count;
-            if (it->second.quadviews_session && it->second.release_count <= 3) {
-                LogSwapchainSummary(swapchain, it->second, "releaseDeferred");
+        if (it != tracked_swapchains_.end()) {
+            // Snapshot the released image index at the app's release moment —
+            // the compositor must sample this frame's image even after the
+            // (turbo-pipelined) app has acquired the next one.
+            if (it->second.has_last_acquired_image_index) {
+                it->second.last_released_image_index = it->second.last_acquired_image_index;
+                it->second.has_last_released_image_index = true;
             }
-            return XR_SUCCESS;
+            if (ShouldDeferSwapchainRelease(it->second)) {
+                it->second.release_deferred = true;
+                ++it->second.release_count;
+                if (it->second.quadviews_session && it->second.release_count <= 3) {
+                    LogSwapchainSummary(swapchain, it->second, "releaseDeferred");
+                }
+                return XR_SUCCESS;
+            }
         }
     }
 
+    const bool diag = TurboSequencedDebugTick();
+    if (diag) {
+        logger_.Debug("Turbo-diag: xrReleaseSwapchainImage(" +
+                      std::to_string(reinterpret_cast<uintptr_t>(swapchain)) + ") starting.");
+    }
     const XrResult result = next_release_swapchain_image_(swapchain, release_info);
+    if (diag) {
+        logger_.Debug("Turbo-diag: xrReleaseSwapchainImage completed.");
+    }
     if (XR_FAILED(result)) {
         return result;
     }
@@ -2682,12 +2734,19 @@ bool OpenXrLayer::ComposeQuadViewsD3D11(const XrCompositionLayerProjection* sour
         return false;
     }
 
+    // Sample the image the app last RELEASED (this frame's content); under
+    // turbo pipelining last_acquired may already point at the next frame.
+    const auto source_image_index = [](const SwapchainInfo& info) {
+        return info.has_last_released_image_index ? info.last_released_image_index
+                                                  : info.last_acquired_image_index;
+    };
+
     std::array<SwapchainInfo*, 4> swapchains{};
     for (uint32_t i = 0; i < 4; ++i) {
         const auto it = tracked_swapchains_.find(source_layer->views[i].subImage.swapchain);
         if (it == tracked_swapchains_.end() || it->second.d3d11_images.empty() ||
-            !it->second.has_last_acquired_image_index ||
-            it->second.last_acquired_image_index >= it->second.d3d11_images.size()) {
+            !(it->second.has_last_acquired_image_index || it->second.has_last_released_image_index) ||
+            source_image_index(it->second) >= it->second.d3d11_images.size()) {
             return false;
         }
         swapchains[i] = &it->second;
@@ -2925,19 +2984,18 @@ bool OpenXrLayer::ComposeQuadViewsD3D11(const XrCompositionLayerProjection* sour
             next_release_swapchain_image_(target.swapchain, &release_info);
         };
 
-        ID3D11Texture2D* peripheral_source =
-            swapchains[eye]->d3d11_images[swapchains[eye]->last_acquired_image_index];
-        ID3D11Texture2D* focus_source =
-            swapchains[eye + 2]->d3d11_images[swapchains[eye + 2]->last_acquired_image_index];
+        const uint32_t peripheral_index = source_image_index(*swapchains[eye]);
+        const uint32_t focus_index = source_image_index(*swapchains[eye + 2]);
+        ID3D11Texture2D* peripheral_source = swapchains[eye]->d3d11_images[peripheral_index];
+        ID3D11Texture2D* focus_source = swapchains[eye + 2]->d3d11_images[focus_index];
 
         ID3D11ShaderResourceView* peripheral_resource = nullptr;
         ID3D11ShaderResourceView* focus_resource = nullptr;
         SwapchainInfo& peripheral_swapchain = *swapchains[eye];
         SwapchainInfo& focus_swapchain = *swapchains[eye + 2];
         if (EnsureD3D11SwapchainShaderResources(peripheral_swapchain) &&
-            peripheral_swapchain.last_acquired_image_index < peripheral_swapchain.d3d11_shader_resources.size()) {
-            peripheral_resource =
-                peripheral_swapchain.d3d11_shader_resources[peripheral_swapchain.last_acquired_image_index];
+            peripheral_index < peripheral_swapchain.d3d11_shader_resources.size()) {
+            peripheral_resource = peripheral_swapchain.d3d11_shader_resources[peripheral_index];
             ++direct_input_count;
         } else {
             if (!ensure_input_copy(eye, *swapchains[eye])) {
@@ -2950,8 +3008,8 @@ bool OpenXrLayer::ComposeQuadViewsD3D11(const XrCompositionLayerProjection* sour
             ++input_copy_count;
         }
         if (EnsureD3D11SwapchainShaderResources(focus_swapchain) &&
-            focus_swapchain.last_acquired_image_index < focus_swapchain.d3d11_shader_resources.size()) {
-            focus_resource = focus_swapchain.d3d11_shader_resources[focus_swapchain.last_acquired_image_index];
+            focus_index < focus_swapchain.d3d11_shader_resources.size()) {
+            focus_resource = focus_swapchain.d3d11_shader_resources[focus_index];
             ++direct_input_count;
         } else {
             if (!ensure_input_copy(eye + 2, *swapchains[eye + 2])) {
@@ -3203,10 +3261,12 @@ XrResult OpenXrLayer::WaitFrame(XrSession session,
         std::unique_lock lock(turbo_mutex_);
         const bool wait_pipelined = turbo_async_wait_.valid();
         // Fabricate while a pipelined wait is outstanding (async pacing) or
-        // the runtime frame was already waited+begun inside the previous
-        // EndFrame (sequenced pacing) — in both cases the runtime already owns
-        // this frame's pacing and the app must not block here.
-        if (wait_pipelined || turbo_frame_prebegun_) {
+        // sequenced pacing is active — in both cases the runtime already owns
+        // this frame's pacing and the app must not block here. The sequenced
+        // shield is a persistent state, not a per-frame flag: DCS calls
+        // xrWaitFrame concurrently with xrEndFrame, and any gap here would
+        // let that wait reach the runtime alongside our own (hardlock).
+        if (wait_pipelined || turbo_seq_state_ == TurboSequencedState::kActive) {
             if (wait_pipelined) {
                 if (turbo_async_wait_polled_) {
                     // Second poll while pipelined: only one frame of
@@ -3256,8 +3316,24 @@ XrResult OpenXrLayer::WaitFrame(XrSession session,
         }
     }
 
+    // Handshake (engage) and unwind (release) run the REAL wait here, on the
+    // app's own wait callsite and thread — this wait can never duplicate an
+    // app wait because it IS the app's wait. The app's next xrBeginFrame then
+    // passes through real (turbo_begin_owed_).
+    bool handshake = false;
+    bool unwind = false;
+    {
+        std::scoped_lock lock(turbo_mutex_);
+        handshake = turbo_seq_state_ == TurboSequencedState::kEngaging;
+        unwind = turbo_seq_state_ == TurboSequencedState::kUnwinding;
+    }
+
     const auto wait_start = std::chrono::steady_clock::now();
-    const XrResult result = next_wait_frame_(session, frame_wait_info, frame_state);
+    XrResult result = XR_SUCCESS;
+    {
+        std::scoped_lock wait_lock(turbo_runtime_wait_mutex_);
+        result = next_wait_frame_(session, frame_wait_info, frame_state);
+    }
     const double wait_ms =
         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - wait_start).count();
     if (XR_SUCCEEDED(result)) {
@@ -3274,6 +3350,32 @@ XrResult OpenXrLayer::WaitFrame(XrSession session,
         frame_state->predictedDisplayTime =
             std::max(frame_state->predictedDisplayTime, turbo_max_returned_display_time_ + 1);
         turbo_max_returned_display_time_ = frame_state->predictedDisplayTime;
+
+        if (handshake && turbo_seq_state_ == TurboSequencedState::kEngaging) {
+            turbo_seq_state_ = TurboSequencedState::kActive;
+            turbo_begin_owed_ = true;
+            turbo_frame_begun_ = false;
+            if (logger_.IsDebugEnabled()) {
+                logger_.Debug("Turbo: sequenced handshake complete (real wait took " +
+                              std::to_string(wait_ms) +
+                              "ms); app wait/begin fabricated from the next frame on.");
+            }
+        } else if (unwind && turbo_seq_state_ == TurboSequencedState::kUnwinding) {
+            turbo_seq_state_ = TurboSequencedState::kInactive;
+            turbo_begin_owed_ = true;
+            turbo_frame_begun_ = false;
+            if (turbo_pipelining_logged_) {
+                logger_.Info("Turbo: frame pipelining released; runtime pacing restored.");
+                turbo_pipelining_logged_ = false;
+            }
+        }
+    } else {
+        std::scoped_lock lock(turbo_mutex_);
+        if ((handshake && turbo_seq_state_ == TurboSequencedState::kEngaging) ||
+            (unwind && turbo_seq_state_ == TurboSequencedState::kUnwinding)) {
+            // Session state advanced under us; give up the transition.
+            turbo_seq_state_ = TurboSequencedState::kInactive;
+        }
     }
     return result;
 }
@@ -3281,20 +3383,94 @@ XrResult OpenXrLayer::WaitFrame(XrSession session,
 XrResult OpenXrLayer::BeginFrame(XrSession session, const XrFrameBeginInfo* frame_begin_info) {
     {
         std::scoped_lock lock(turbo_mutex_);
-        if (turbo_async_wait_.valid() || turbo_frame_prebegun_) {
+        if (turbo_begin_owed_) {
+            // The matching wait ran real during a handshake/unwind; this
+            // begin must reach the runtime.
+            turbo_begin_owed_ = false;
+            if (turbo_seq_debug_log_budget_ > 0 && logger_.IsDebugEnabled()) {
+                --turbo_seq_debug_log_budget_;
+                logger_.Debug("Turbo-diag: owed xrBeginFrame passing through to the runtime.");
+            }
+        } else if (turbo_async_wait_.valid() || turbo_seq_state_ == TurboSequencedState::kActive ||
+                   turbo_seq_state_ == TurboSequencedState::kUnwinding) {
             // Async pacing: deferred into ForwardEndFrame once the async wait
-            // resolves. Sequenced pacing: already begun inside the previous
-            // EndFrame.
+            // resolves. Sequenced pacing: the frame was pre-begun inside the
+            // previous EndFrame (or will be compensated there).
             return XR_SUCCESS;
+        } else if (turbo_seq_state_ == TurboSequencedState::kEngaging &&
+                   turbo_seq_debug_log_budget_ > 0 && logger_.IsDebugEnabled()) {
+            --turbo_seq_debug_log_budget_;
+            logger_.Debug("Turbo-diag: app xrBeginFrame passing through while engaging.");
         }
     }
-    return next_begin_frame_(session, frame_begin_info);
+    const XrResult result = next_begin_frame_(session, frame_begin_info);
+    if (XR_SUCCEEDED(result)) {
+        std::scoped_lock lock(turbo_mutex_);
+        turbo_frame_begun_ = true;
+    }
+    return result;
 }
 
 XrResult OpenXrLayer::ForwardEndFrame(XrSession session,
                                       const XrFrameEndInfo* frame_end_info,
                                       std::unique_lock<std::mutex>& config_lock) {
     bool turbo_engaged = IsTurboActive();
+
+    // Cadence gate: app-only time since the previous EndFrame (our own
+    // drain/join blocking subtracted). A stalled runtime wait is only
+    // evidence against a pacing mode when the app is pacing normally, so
+    // turbo stays passive until the cadence steadies (loading screens) and
+    // pauses across mid-session load hitches. First field test: DCS's loading
+    // screen ran at 2fps, every wait "stalled", and discovery recorded a
+    // poisoned unsupported verdict within 11 seconds of launch.
+    constexpr double kHealthyFrameMs = 50.0;
+    constexpr double kCadencePauseMs = 150.0;
+    constexpr uint32_t kEngageStreakFrames = 90;
+    double app_frame_delta_ms = -1.0;
+    {
+        const auto entry_now = std::chrono::steady_clock::now();
+        if (pacing_last_end_time_.has_value()) {
+            app_frame_delta_ms =
+                std::chrono::duration<double, std::milli>(entry_now - *pacing_last_end_time_).count() -
+                turbo_last_frame_blocked_ms_;
+        }
+    }
+    if (app_frame_delta_ms >= 0.0 && app_frame_delta_ms < kHealthyFrameMs) {
+        ++turbo_cadence_healthy_streak_;
+    } else {
+        turbo_cadence_healthy_streak_ = 0;
+    }
+    if (!turbo_cadence_ready_) {
+        turbo_cadence_ready_ = turbo_cadence_healthy_streak_ >= kEngageStreakFrames;
+    } else if (app_frame_delta_ms >= kCadencePauseMs) {
+        turbo_cadence_ready_ = false;
+    }
+    // The gate delays the FIRST engage and (below) gates circuit counting and
+    // stability accrual — but it must NOT tear down an established pipeline:
+    // every unwind/re-engage transition is a race against the app's loose
+    // frame threading (a mission-load pause/resume cycle hardlocked DCS on
+    // PiOpenXR), and riding through a hitch is harmless — the pipelined wait
+    // simply runs at the app's own loading pace.
+    bool pipeline_established = false;
+    {
+        std::scoped_lock lock(turbo_mutex_);
+        pipeline_established = turbo_async_wait_.valid() ||
+                               turbo_seq_state_ == TurboSequencedState::kActive ||
+                               turbo_seq_state_ == TurboSequencedState::kEngaging;
+    }
+    const bool cadence_countable = turbo_cadence_ready_;
+    if (turbo_engaged && !turbo_cadence_ready_ && !pipeline_established) {
+        // Delay the first engage until the app renders steadily.
+        turbo_engaged = false;
+        if (!turbo_cadence_pause_logged_) {
+            logger_.Info("Turbo: waiting for a stable frame cadence before pipelining (app loading or "
+                         "hitching); engages automatically.");
+            turbo_cadence_pause_logged_ = true;
+        }
+    } else if (turbo_engaged && turbo_cadence_pause_logged_) {
+        logger_.Info("Turbo: frame cadence stabilized; pipelining engages.");
+        turbo_cadence_pause_logged_ = false;
+    }
 
     if (turbo_engaged && !turbo_pacing_resolved_) {
         ResolveTurboPacingModeLocked();
@@ -3323,15 +3499,19 @@ XrResult OpenXrLayer::ForwardEndFrame(XrSession session,
     const auto pacing_start = std::chrono::steady_clock::now();
 
     bool has_pending_wait = false;
-    bool frame_prebegun = false;
+    bool frame_begun = false;
+    TurboSequencedState seq_state = TurboSequencedState::kInactive;
     {
         std::scoped_lock lock(turbo_mutex_);
         has_pending_wait = turbo_async_wait_.valid();
-        // Sequenced pacing: this submit consumes the pre-begun frame.
-        frame_prebegun = turbo_frame_prebegun_;
-        turbo_frame_prebegun_ = false;
+        // This submit consumes the begun-frame marker (set by our pre-begin,
+        // a compensation begin, or the app's own begin passing through).
+        frame_begun = turbo_frame_begun_;
+        turbo_frame_begun_ = false;
+        seq_state = turbo_seq_state_;
     }
     bool timed_out = false;
+    double frame_blocked_ms = 0.0;
     if (has_pending_wait) {
         // This is the latest point the pipelined frame must have been fully
         // waited. Some runtimes interlock the wait with the next submit
@@ -3340,14 +3520,22 @@ XrResult OpenXrLayer::ForwardEndFrame(XrSession session,
         // future stays valid and no second wait is enqueued below; submitting
         // is what unblocks the stalled runtime wait.
         constexpr std::chrono::milliseconds kTurboDrainTimeout{250};
+        const auto drain_start = std::chrono::steady_clock::now();
         const bool ready = turbo_async_wait_.wait_for(kTurboDrainTimeout) == std::future_status::ready;
+        frame_blocked_ms +=
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - drain_start)
+                .count();
         {
             std::scoped_lock lock(turbo_mutex_);
             if (ready) {
                 turbo_async_wait_ = {};
             }
         }
-        if (!ready && !turbo_auto_suspended_.load(std::memory_order_relaxed)) {
+        // Only count while engaged with a healthy cadence: a drain-out during
+        // a suspend, or a stall while the app itself is hitching/loading, is
+        // not evidence against the pacing mode.
+        if (!ready && turbo_engaged && cadence_countable &&
+            !turbo_auto_suspended_.load(std::memory_order_relaxed)) {
             timed_out = true;
             if (HandleTurboDrainTimeout(std::chrono::steady_clock::now())) {
                 // Same audible cue as a manual turbo-off, so the user knows the
@@ -3357,7 +3545,7 @@ XrResult OpenXrLayer::ForwardEndFrame(XrSession session,
             }
         }
 
-        if (!frame_prebegun) {
+        if (!frame_begun) {
             // Deferred xrBeginFrame for the pipelined frame. Errors pass
             // through (e.g. the session state machine advanced under us).
             const XrResult begin_result = next_begin_frame_(session, nullptr);
@@ -3367,31 +3555,191 @@ XrResult OpenXrLayer::ForwardEndFrame(XrSession session,
                 return begin_result;
             }
         }
+    } else if ((seq_state == TurboSequencedState::kActive ||
+                seq_state == TurboSequencedState::kUnwinding) &&
+               !frame_begun) {
+        // Compensation: the app's wait for this frame was fabricated during a
+        // state transition and no runtime frame is open — supply the
+        // wait+begin pair before the submit so the runtime's sequence stays
+        // conformant.
+        XrFrameState frame_state{XR_TYPE_FRAME_STATE};
+        const auto comp_start = std::chrono::steady_clock::now();
+        XrResult comp_result = XR_SUCCESS;
+        {
+            std::scoped_lock wait_lock(turbo_runtime_wait_mutex_);
+            comp_result = next_wait_frame_(session, nullptr, &frame_state);
+        }
+        frame_blocked_ms +=
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - comp_start)
+                .count();
+        if (XR_SUCCEEDED(comp_result)) {
+            {
+                std::scoped_lock lock(turbo_mutex_);
+                turbo_last_predicted_display_time_ = frame_state.predictedDisplayTime;
+                turbo_last_predicted_display_period_ = frame_state.predictedDisplayPeriod;
+                turbo_last_should_render_ = frame_state.shouldRender == XR_TRUE;
+            }
+            const XrResult begin_result = next_begin_frame_(session, nullptr);
+            if (XR_FAILED(begin_result)) {
+                logger_.Error("Turbo: compensation xrBeginFrame failed with " +
+                              std::to_string(static_cast<int>(begin_result)));
+                return begin_result;
+            }
+        } else {
+            logger_.Error("Turbo: compensation xrWaitFrame failed with " +
+                          std::to_string(static_cast<int>(comp_result)) + ".");
+        }
     }
 
     const auto pacing_after_drain = std::chrono::steady_clock::now();
+    const bool diag_end = TurboSequencedDebugTick();
+    if (diag_end) {
+        logger_.Debug("Turbo-diag: runtime xrEndFrame starting.");
+    }
     const XrResult result = next_end_frame_(session, frame_end_info);
     const auto pacing_after_end = std::chrono::steady_clock::now();
+    if (diag_end) {
+        logger_.Debug("Turbo-diag: runtime xrEndFrame completed in " +
+                      std::to_string(std::chrono::duration<double, std::milli>(pacing_after_end -
+                                                                               pacing_after_drain)
+                                         .count()) +
+                      "ms.");
+    }
     RecordFramePacing(pacing_start, pacing_after_drain, pacing_after_end, turbo_engaged);
 
     if (XR_SUCCEEDED(result) && turbo_engaged) {
-        bool launched = false;
-        {
+        if (turbo_pacing_mode_ == TurboPacingMode::kSequenced) {
+            bool do_steady_wait = false;
+            {
+                std::scoped_lock lock(turbo_mutex_);
+                if (!turbo_async_wait_.valid()) {
+                    switch (turbo_seq_state_) {
+                    case TurboSequencedState::kInactive:
+                        if (turbo_reengage_blocked_) {
+                            if (!turbo_reengage_blocked_logged_) {
+                                turbo_reengage_blocked_logged_ = true;
+                                logger_.Info("Turbo: re-engaging mid-session is disabled on this runtime "
+                                             "(its frame pacing wedges when pipelining restarts); turbo "
+                                             "resumes at the next session.");
+                            }
+                            break;
+                        }
+                        // Engage via handshake: the app's own next WaitFrame
+                        // runs real and flips to kActive. No runtime call
+                        // here — the app's wait may already be in flight
+                        // concurrently with this EndFrame, and issuing our own
+                        // would duplicate it (observed hardlock on DCS).
+                        turbo_seq_state_ = TurboSequencedState::kEngaging;
+                        if (!turbo_pipelining_logged_) {
+                            logger_.Info("Turbo: frame pipelining engaged (sequenced pacing); the app's "
+                                         "xrWaitFrame is now decoupled from runtime pacing.");
+                            turbo_pipelining_logged_ = true;
+                            turbo_fabricated_wait_log_budget_ = 5;
+                            turbo_seq_debug_log_budget_ = 40;
+                        }
+                        break;
+                    case TurboSequencedState::kActive:
+                        // Steady state — unless the handshake just completed
+                        // concurrently and the app still owes its real begin,
+                        // in which case this cycle stays hands-off.
+                        do_steady_wait = !turbo_begin_owed_;
+                        break;
+                    case TurboSequencedState::kEngaging:
+                    case TurboSequencedState::kUnwinding:
+                        // Transition in flight; the app's WaitFrame completes it.
+                        break;
+                    }
+                }
+            }
+
+            if (do_steady_wait) {
+                // The real wait+begin run synchronously RIGHT HERE, on the
+                // app's frame thread. From the runtime's view this is the
+                // standard single-threaded frame loop (End -> Wait -> Begin),
+                // which every conformant runtime must release — no timeout
+                // needed. Thread identity matters: PiOpenXR pins frame pacing
+                // to the calling thread, and an off-thread wait stalls until
+                // the next submit.
+                if (turbo_seq_debug_log_budget_ > 0 && logger_.IsDebugEnabled()) {
+                    logger_.Debug("Turbo: sequenced wait+begin starting (frame thread).");
+                }
+                XrFrameState frame_state{XR_TYPE_FRAME_STATE};
+                const auto wait_start = std::chrono::steady_clock::now();
+                XrResult wait_result = XR_SUCCESS;
+                {
+                    std::scoped_lock wait_lock(turbo_runtime_wait_mutex_);
+                    wait_result = next_wait_frame_(session, nullptr, &frame_state);
+                }
+                const double wait_ms =
+                    std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() -
+                                                              wait_start)
+                        .count();
+                frame_blocked_ms += wait_ms;
+                if (turbo_seq_debug_log_budget_ > 0 && logger_.IsDebugEnabled()) {
+                    --turbo_seq_debug_log_budget_;
+                    logger_.Debug("Turbo: sequenced wait+begin completed in " +
+                                  std::to_string(wait_ms) + "ms.");
+                }
+                if (XR_SUCCEEDED(wait_result)) {
+                    {
+                        std::scoped_lock lock(turbo_mutex_);
+                        turbo_last_predicted_display_time_ = frame_state.predictedDisplayTime;
+                        turbo_last_predicted_display_period_ = frame_state.predictedDisplayPeriod;
+                        turbo_last_should_render_ = frame_state.shouldRender == XR_TRUE;
+                        turbo_async_wait_completed_ = true;
+                        pacing_wait_sum_ms_ += wait_ms;
+                        pacing_wait_max_ms_ = std::max(pacing_wait_max_ms_, wait_ms);
+                        ++pacing_wait_samples_;
+                    }
+                    const XrResult begin_result = next_begin_frame_(session, nullptr);
+                    if (XR_SUCCEEDED(begin_result)) {
+                        std::scoped_lock lock(turbo_mutex_);
+                        turbo_frame_begun_ = true;
+                    } else {
+                        // Session state advanced under us; the next EndFrame's
+                        // compensation path re-establishes the sequence.
+                        logger_.Error("Turbo: sequenced xrBeginFrame failed with " +
+                                      std::to_string(static_cast<int>(begin_result)));
+                    }
+                    // The wait cannot be capped, but it can be judged after
+                    // the fact: a post-submit wait that blocks far beyond
+                    // pacing is the level-2 signal.
+                    constexpr double kSequencedWaitStallMs = 250.0;
+                    if (wait_ms >= kSequencedWaitStallMs && cadence_countable &&
+                        !turbo_auto_suspended_.load(std::memory_order_relaxed)) {
+                        timed_out = true;
+                        if (HandleTurboDrainTimeout(std::chrono::steady_clock::now())) {
+                            SoundPlayer::Instance().PlayTransition(turbo_sound, false, dll_directory_,
+                                                                   turbo_sound_volume, L"turbo-on.wav",
+                                                                   L"turbo-off.wav");
+                        }
+                    }
+                } else {
+                    logger_.Error("Turbo: sequenced xrWaitFrame failed with " +
+                                  std::to_string(static_cast<int>(wait_result)) +
+                                  "; keeping previous frame timing.");
+                }
+            }
+        } else {
+            // Async pacing: background-thread wait, drained at the next
+            // EndFrame.
             std::scoped_lock lock(turbo_mutex_);
-            if (!turbo_async_wait_.valid()) {
-                launched = true;
-                turbo_async_wait_polled_ = false;
-                turbo_async_wait_completed_ = false;
+            if (!turbo_async_wait_.valid() && turbo_seq_state_ == TurboSequencedState::kInactive) {
                 if (!turbo_pipelining_logged_) {
-                    logger_.Info(std::string("Turbo: frame pipelining engaged (") +
-                                 ToString(turbo_pacing_mode_) +
-                                 " pacing); the app's xrWaitFrame is now decoupled from runtime pacing.");
+                    logger_.Info("Turbo: frame pipelining engaged (async pacing); the app's xrWaitFrame "
+                                 "is now decoupled from runtime pacing.");
                     turbo_pipelining_logged_ = true;
                     turbo_fabricated_wait_log_budget_ = 5;
                 }
+                turbo_async_wait_polled_ = false;
+                turbo_async_wait_completed_ = false;
                 turbo_async_wait_ = std::async(std::launch::async, [this, session] {
                     XrFrameState frame_state{XR_TYPE_FRAME_STATE};
-                    const XrResult wait_result = next_wait_frame_(session, nullptr, &frame_state);
+                    XrResult wait_result = XR_SUCCESS;
+                    {
+                        std::scoped_lock wait_lock(turbo_runtime_wait_mutex_);
+                        wait_result = next_wait_frame_(session, nullptr, &frame_state);
+                    }
                     std::scoped_lock state_lock(turbo_mutex_);
                     if (XR_SUCCEEDED(wait_result)) {
                         turbo_last_predicted_display_time_ = frame_state.predictedDisplayTime;
@@ -3407,57 +3755,55 @@ XrResult OpenXrLayer::ForwardEndFrame(XrSession session,
             }
         }
 
-        if (launched && turbo_pacing_mode_ == TurboPacingMode::kSequenced) {
-            // Sequenced pacing: join the wait right here — the submit above is
-            // exactly the event that unblocks an interlocking runtime's wait,
-            // so this is ordered safely; the timeout is a safety net only.
-            // Then pre-begin the next frame so the app's WaitFrame/BeginFrame
-            // stay fabricated no-ops.
-            constexpr std::chrono::milliseconds kSequencedJoinTimeout{250};
-            const bool ready =
-                turbo_async_wait_.wait_for(kSequencedJoinTimeout) == std::future_status::ready;
-            if (ready) {
-                {
-                    std::scoped_lock lock(turbo_mutex_);
-                    turbo_async_wait_ = {};
-                }
-                const XrResult begin_result = next_begin_frame_(session, nullptr);
-                if (XR_SUCCEEDED(begin_result)) {
-                    std::scoped_lock lock(turbo_mutex_);
-                    turbo_frame_prebegun_ = true;
-                } else {
-                    // Session state advanced under us; the app's next real
-                    // wait/begin will re-establish the sequence.
-                    logger_.Error("Turbo: sequenced xrBeginFrame failed with " +
-                                  std::to_string(static_cast<int>(begin_result)));
-                }
-            } else if (!turbo_auto_suspended_.load(std::memory_order_relaxed)) {
-                // A post-submit stall — the one thing sequenced pacing should
-                // rule out. Leave the future pending (next frame's drain picks
-                // it up like async pacing) and count toward the suspend.
-                timed_out = true;
-                if (HandleTurboDrainTimeout(std::chrono::steady_clock::now())) {
-                    SoundPlayer::Instance().PlayTransition(turbo_sound, false, dll_directory_,
-                                                           turbo_sound_volume, L"turbo-on.wav",
-                                                           L"turbo-off.wav");
-                }
-            }
+        if (!timed_out && cadence_countable &&
+            !turbo_auto_suspended_.load(std::memory_order_relaxed)) {
+            NoteTurboPacingStableFrame(app_frame_delta_ms);
         }
-
-        if (!timed_out && !turbo_auto_suspended_.load(std::memory_order_relaxed)) {
-            NoteTurboPacingStableFrame(std::chrono::steady_clock::now());
-        }
-    } else if ((has_pending_wait || frame_prebegun) && !turbo_engaged) {
-        // The pipeline just drained without relaunching (turbo toggled off or
-        // no longer applicable).
+    } else if (!turbo_engaged) {
+        // Turbo toggled off, cadence pause, suspend, or not applicable:
+        // transition sequenced pipelining toward release (the app's next
+        // WaitFrame completes the unwind) and log the async drain-out.
         std::scoped_lock lock(turbo_mutex_);
-        if (turbo_pipelining_logged_) {
+        if (turbo_seq_state_ == TurboSequencedState::kActive) {
+            turbo_seq_state_ = TurboSequencedState::kUnwinding;
+            if (RuntimeSingleEngagePerSession(runtime_name_)) {
+                turbo_reengage_blocked_ = true;
+            }
+        } else if (turbo_seq_state_ == TurboSequencedState::kEngaging) {
+            // Nothing was pipelined yet; drop the handshake request.
+            turbo_seq_state_ = TurboSequencedState::kInactive;
+            if (turbo_pipelining_logged_) {
+                logger_.Info("Turbo: frame pipelining released; runtime pacing restored.");
+                turbo_pipelining_logged_ = false;
+            }
+        } else if (has_pending_wait && !turbo_async_wait_.valid() && turbo_pipelining_logged_) {
+            // Async pipeline just drained without relaunching.
             logger_.Info("Turbo: frame pipelining released; runtime pacing restored.");
             turbo_pipelining_logged_ = false;
         }
     }
 
+    // Feeds next frame's cadence gate: subtracting our own blocking from the
+    // frame delta keeps a turbo-induced stall from masquerading as an app
+    // hitch (which would pause the gate and stop the very counting that
+    // should catch it).
+    turbo_last_frame_blocked_ms_ = frame_blocked_ms;
+
     return result;
+}
+
+bool OpenXrLayer::TurboSequencedDebugTick() {
+    if (!logger_.IsDebugEnabled()) {
+        return false;
+    }
+    std::scoped_lock lock(turbo_mutex_);
+    if (turbo_seq_debug_log_budget_ <= 0 ||
+        (turbo_seq_state_ != TurboSequencedState::kActive &&
+         turbo_seq_state_ != TurboSequencedState::kEngaging)) {
+        return false;
+    }
+    --turbo_seq_debug_log_budget_;
+    return true;
 }
 
 // Chooses the pacing strategy when turbo first engages (config lock held,
@@ -3467,7 +3813,7 @@ void OpenXrLayer::ResolveTurboPacingModeLocked() {
     turbo_pacing_resolved_ = true;
     turbo_pacing_verdict_pending_ = false;
     turbo_probe_timeout_total_ = 0;
-    turbo_stable_since_.reset();
+    turbo_stable_accumulated_ms_ = 0.0;
     turbo_drain_timeout_count_ = 0;
     turbo_timeout_window_start_.reset();
 
@@ -3569,18 +3915,17 @@ void OpenXrLayer::RecordTurboPacingVerdict(TurboPacingMode mode,
     }
 }
 
-void OpenXrLayer::NoteTurboPacingStableFrame(std::chrono::steady_clock::time_point now) {
-    if (!turbo_pacing_verdict_pending_) {
+void OpenXrLayer::NoteTurboPacingStableFrame(double app_frame_delta_ms) {
+    if (!turbo_pacing_verdict_pending_ || app_frame_delta_ms < 0.0) {
         return;
     }
-    if (!turbo_stable_since_.has_value()) {
-        turbo_stable_since_ = now;
-        return;
-    }
-    // Long enough that the DCS menu -> mission transition (where load spikes
+    // Accumulated healthy engaged time, not wall-clock: loading screens and
+    // cadence pauses neither earn nor destroy stability. 60s of real play is
+    // long enough that the DCS menu -> mission transition (where load spikes
     // surface interlocks) is usually covered before the verdict lands.
-    constexpr std::chrono::seconds kStableWindow{60};
-    if (now - *turbo_stable_since_ < kStableWindow) {
+    constexpr double kStableWindowMs = 60000.0;
+    turbo_stable_accumulated_ms_ += app_frame_delta_ms;
+    if (turbo_stable_accumulated_ms_ < kStableWindowMs) {
         return;
     }
     turbo_pacing_verdict_pending_ = false;
@@ -3590,11 +3935,11 @@ void OpenXrLayer::NoteTurboPacingStableFrame(std::chrono::steady_clock::time_poi
         turbo_pacing_source_ = TurboPacingSource::kDiscovered;
     }
     RecordTurboPacingVerdict(turbo_pacing_mode_, source,
-                             std::chrono::duration_cast<std::chrono::seconds>(kStableWindow).count());
+                             static_cast<std::int64_t>(turbo_stable_accumulated_ms_ / 1000.0));
 }
 
 bool OpenXrLayer::HandleTurboDrainTimeout(std::chrono::steady_clock::time_point now) {
-    turbo_stable_since_.reset();
+    turbo_stable_accumulated_ms_ = 0.0;
     ++turbo_probe_timeout_total_;
 
     // Rolling-window count: stalled frames interleave with clean ones on
@@ -3769,10 +4114,19 @@ void OpenXrLayer::ResetTurboFrameState() {
     turbo_drain_timeout_count_ = 0;
     turbo_timeout_window_start_.reset();
     turbo_auto_suspended_.store(false, std::memory_order_relaxed);
-    turbo_frame_prebegun_ = false;
+    turbo_seq_state_ = TurboSequencedState::kInactive;
+    turbo_begin_owed_ = false;
+    turbo_frame_begun_ = false;
+    turbo_seq_debug_log_budget_ = 0;
+    turbo_reengage_blocked_ = false;
+    turbo_reengage_blocked_logged_ = false;
     // Pacing resolution survives (it is per instance/runtime); the stability
-    // window cannot span sessions.
-    turbo_stable_since_.reset();
+    // window and cadence gate cannot span sessions.
+    turbo_stable_accumulated_ms_ = 0.0;
+    turbo_cadence_healthy_streak_ = 0;
+    turbo_cadence_ready_ = false;
+    turbo_cadence_pause_logged_ = false;
+    turbo_last_frame_blocked_ms_ = 0.0;
 }
 
 XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_end_info) {
@@ -6213,7 +6567,7 @@ bool OpenXrLayer::IsTurboActive() {
             turbo_auto_suspended_.store(false, std::memory_order_relaxed);
             turbo_drain_timeout_count_ = 0;
             turbo_timeout_window_start_.reset();
-            turbo_stable_since_.reset();
+            turbo_stable_accumulated_ms_ = 0.0;
             // Under Auto, a retry that then runs clean should overwrite the
             // verdict that suspended us (e.g. a stale "unsupported").
             if (turbo_pacing_source_ != TurboPacingSource::kForced &&
@@ -6521,16 +6875,22 @@ void OpenXrLayer::SharpenNativeFocusViews(std::vector<XrCompositionLayerProjecti
         }
         const auto it = tracked_swapchains_.find(view.subImage.swapchain);
         if (it == tracked_swapchains_.end() || it->second.d3d11_images.empty() ||
-            !it->second.has_last_acquired_image_index ||
-            it->second.last_acquired_image_index >= it->second.d3d11_images.size()) {
+            !(it->second.has_last_acquired_image_index || it->second.has_last_released_image_index)) {
             continue;
         }
         SwapchainInfo& src = it->second;
-        if (!EnsureD3D11SwapchainShaderResources(src) ||
-            src.last_acquired_image_index >= src.d3d11_shader_resources.size()) {
+        // This frame's content: the last-released image (turbo pipelining can
+        // advance last_acquired past it before EndFrame runs).
+        const uint32_t src_index = src.has_last_released_image_index ? src.last_released_image_index
+                                                                     : src.last_acquired_image_index;
+        if (src_index >= src.d3d11_images.size()) {
             continue;
         }
-        ID3D11ShaderResourceView* focus_srv = src.d3d11_shader_resources[src.last_acquired_image_index];
+        if (!EnsureD3D11SwapchainShaderResources(src) ||
+            src_index >= src.d3d11_shader_resources.size()) {
+            continue;
+        }
+        ID3D11ShaderResourceView* focus_srv = src.d3d11_shader_resources[src_index];
         if (!focus_srv) {
             continue;
         }
