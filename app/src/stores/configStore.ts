@@ -89,8 +89,14 @@ export function useConfigStore() {
     try {
       const envelope = await loadRuntimePacing()
       state.runtimePacingPath = envelope.path
-      state.runtimePacing = envelope.observations
-      state.activeRuntime = envelope.activeRuntime
+      // Polled while the Turbo tab is visible — only touch reactive state on
+      // real changes so the table doesn't rebuild every tick.
+      if (JSON.stringify(state.runtimePacing) !== JSON.stringify(envelope.observations)) {
+        state.runtimePacing = envelope.observations
+      }
+      if (JSON.stringify(state.activeRuntime) !== JSON.stringify(envelope.activeRuntime)) {
+        state.activeRuntime = envelope.activeRuntime
+      }
     } catch (error) {
       state.status = error instanceof Error ? error.message : 'Failed to load runtime pacing state'
     } finally {

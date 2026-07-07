@@ -569,19 +569,22 @@ class OpenXrLayer {
     double turbo_last_frame_blocked_ms_{0.0};
     // Sequenced pacing state machine (turbo_mutex_). DCS overlaps xrWaitFrame
     // (sim thread) with xrEndFrame (render thread) — spec-legal — so the
-    // fabrication shield must never have a per-frame gap, and engage/release
+    // fabrication shield must never have a per-frame gap, and establishment
     // must hand off through the app's own WaitFrame call so we never issue a
     // runtime wait that duplicates one the app already has in flight:
-    //   kInactive -> kEngaging (EndFrame decides to engage; no runtime calls)
+    //   kInactive -> kEngaging (EndFrame decides to establish; no runtime calls)
     //   kEngaging -> kActive  (the app's next WaitFrame runs REAL on its own
     //                          thread — the handshake — then Begin passes real
     //                          via turbo_begin_owed_)
     //   kActive               (steady state: app wait/begin fabricated with no
     //                          gaps; EndFrame does End -> Wait -> Begin
     //                          synchronously on the frame thread)
-    //   kActive -> kUnwinding (EndFrame disengages; shield stays up)
-    //   kUnwinding -> kInactive (the app's next WaitFrame runs REAL and drops
-    //                          the shield; Begin passes real)
+    // The pipeline is STRUCTURAL: once kActive it persists until session end.
+    // PiOpenXR wedges when the wait-issuing thread migrates a second time
+    // (engage moved waits sim->render; unwind moved them back; re-engage
+    // hardlocked DCS inside the runtime), so the turbo toggle must never
+    // change thread topology — it only operates the pacing valve below.
+    // kUnwinding survives for teardown edges only.
     enum class TurboSequencedState { kInactive, kEngaging, kActive, kUnwinding };
     TurboSequencedState turbo_seq_state_{TurboSequencedState::kInactive};
     // The app's next xrBeginFrame must pass through to the runtime (its wait
@@ -602,10 +605,34 @@ class OpenXrLayer {
     // sequenced engage.
     int turbo_seq_debug_log_budget_{0};
     bool TurboSequencedDebugTick();
-    // Single-engage-per-session quirk (PiOpenXR): set when an established
-    // sequenced pipeline unwinds; blocks re-engaging until the next session.
-    bool turbo_reengage_blocked_{false};
-    bool turbo_reengage_blocked_logged_{false};
+    // Internal helper locates (pivot drive, origin capture, eye offsets, eye
+    // gaze) run under mutex_ at the app's displayTime. Under sequenced turbo
+    // that time can sit one period past the runtime's last real xrWaitFrame,
+    // and a runtime may block such a locate until the next wait — which runs
+    // inside EndFrame behind the same mutex_ (deadlock, observed on
+    // PiOpenXR via xrLocateSpace before that path was unlocked). Clamp these
+    // locates to the known horizon; the sources are smoothed/near-static so
+    // <=1 period of staleness is invisible. Cache keys keep the app's time.
+    XrTime ClampInternalLocateTime(XrTime app_time);
+    XrResult ApplyPivotToLocatedSpace(XrSpace space,
+                                      XrSpace base_space,
+                                      XrTime time,
+                                      bool pivotxr_active,
+                                      XrSpaceLocation* location,
+                                      double* applied_extra_yaw_radians,
+                                      double* applied_extra_pitch_radians,
+                                      XrPosef* applied_pose_delta,
+                                      bool update_smoothing);
+    // The pacing valve (turbo_mutex_): with the pipeline structural, the
+    // turbo toggle only flips this. Open: app waits fabricate instantly
+    // (decoupled). Closed: app waits block consuming a pacing token — one is
+    // posted per completed pre-wait — re-coupling the app to genuine runtime
+    // pacing with zero thread-topology change. A bounded cv timeout lets a
+    // blocked wait fall back to fabrication so an app that stops submitting
+    // can never deadlock against the valve.
+    bool turbo_valve_open_{false};
+    int turbo_pacing_tokens_{0};
+    std::condition_variable turbo_valve_cv_;
     std::string runtime_version_;
 
     // Frame pacing telemetry (debug log level): quantifies judder sources by

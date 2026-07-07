@@ -47,14 +47,24 @@ Diagnostic signature in debug logs: `turboDrainAndBegin max` pinned at ~250 ms,
   A sequenced wait that blocks ≥250 ms is judged after the fact and counts
   toward level 2.
 
-  **Single-engage-per-session quirk (PiOpenXR/Pimax):** field tests showed
-  steady-state sequenced turbo runs clean (full DCS flight at 85–90 fps), but
+  **Structural pipeline + pacing valve:** field tests showed steady-state
+  sequenced turbo runs clean (full DCS flight at 85–90 fps on PiOpenXR), but
   a mid-session unwind followed by re-engage hardlocks DCS inside the runtime
-  — outside every instrumented layer call — most plausibly because PiOpenXR's
-  per-thread frame pacing wedges when the wait-issuing thread migrates a
-  second time. On these runtimes, once an established pipeline unwinds
-  (toggle-off or suspend), re-engaging is refused for the rest of the session
-  with a log line; turbo returns at the next launch.
+  — outside every instrumented layer call — because PiOpenXR's per-thread
+  frame pacing wedges when the wait-issuing thread migrates a second time
+  (engage moves waits sim→render, unwind moves them back). Async mode never
+  crashed on toggles precisely because it never changed the app's thread
+  topology; its off-thread wait just stalled gracefully. So the sequenced
+  pipeline is **structural**: established once per session (cadence gate +
+  handshake) and kept until session end. The turbo toggle operates a **pacing
+  valve** instead of tearing anything down — valve open: app waits fabricate
+  instantly (decoupled); valve closed: each app wait blocks consuming a
+  pacing token posted by that frame's real pre-wait, re-coupling the app to
+  genuine runtime pacing with zero topology change (a bounded 100 ms cv
+  timeout falls back to fabrication so an app that stops submitting can never
+  deadlock against the valve). Suspend/re-arm ride the same valve. Mid-session
+  pacing-mode changes are deferred to the next session once the pipeline is
+  established.
 
 ## Cadence gate (added after the first field test)
 

@@ -148,11 +148,34 @@ watch(
 
 // The layer writes pacing verdicts during play; re-read them whenever the
 // user lands on the Turbo tab so discoveries from the last session show up.
+// The layer writes pacing verdicts mid-session (e.g. while the user watches
+// the Turbo tab with the game running); poll gently while the tab is visible
+// and refresh on window focus so the runtimes table updates without needing
+// to navigate away and back.
+let runtimePacingRefreshTimer: number | undefined
+
+function stopRuntimePacingRefresh() {
+  if (runtimePacingRefreshTimer !== undefined) {
+    window.clearInterval(runtimePacingRefreshTimer)
+    runtimePacingRefreshTimer = undefined
+  }
+}
+
+function onWindowFocus() {
+  if (store.state.activeTab === 'turbo') {
+    void store.refreshRuntimePacing()
+  }
+}
+
 watch(
   () => store.state.activeTab,
   (tab) => {
+    stopRuntimePacingRefresh()
     if (tab === 'turbo') {
       void store.refreshRuntimePacing()
+      runtimePacingRefreshTimer = window.setInterval(() => {
+        void store.refreshRuntimePacing()
+      }, 5000)
     }
   },
 )
@@ -166,6 +189,8 @@ onMounted(() => {
     }
   })
 
+  window.addEventListener('focus', onWindowFocus)
+
   void store.load()
   void refreshLogs()
   void refreshOpenXrLayers()
@@ -176,6 +201,8 @@ onMounted(() => {
 
 onUnmounted(() => {
   stopSystemThemeObservation()
+  stopRuntimePacingRefresh()
+  window.removeEventListener('focus', onWindowFocus)
 })
 
 async function saveConfig() {
