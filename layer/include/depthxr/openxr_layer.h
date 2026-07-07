@@ -299,6 +299,16 @@ class OpenXrLayer {
     // must run before teardown that could strand the wait thread.
     bool IsTurboActive();
     void ResetTurboToggleState();
+    // Pacing-strategy resolution and discovery. ResolveTurboPacingModeLocked
+    // runs under the config lock on the frame thread when turbo first engages
+    // (and again after a config change); the verdict/stall helpers run on the
+    // frame thread after the lock is released.
+    void ResolveTurboPacingModeLocked();
+    void RecordTurboPacingVerdict(TurboPacingMode mode, const char* source, std::int64_t stable_seconds);
+    void NoteTurboPacingStableFrame(std::chrono::steady_clock::time_point now);
+    // Returns true when turbo should suspend for the session (level-2 trip or
+    // non-auto mode); false when it adapted (async -> sequenced fallback).
+    bool HandleTurboDrainTimeout(std::chrono::steady_clock::time_point now);
     // Releases config_lock (mutex_) before any blocking runtime call so
     // xrLocateViews/xrLocateSpace from other app threads are never serialized
     // behind the compositor pacing wait. Call as the tail of EndFrame only.
@@ -513,14 +523,35 @@ class OpenXrLayer {
     bool turbo_pipelining_logged_{false};
     int turbo_fabricated_wait_log_budget_{0};
     // Self-healing: some runtimes interlock xrWaitFrame with the next submit
-    // (observed on Pimax's PiOpenXR when GPU-bound) so the pipelined wait
-    // stalls until our drain timeout every frame. Timeouts are counted in a
-    // rolling window (they interleave with clean frames, so a consecutive
-    // streak never trips); past the threshold turbo suspends itself for the
-    // session and the toggle binding re-arms it.
+    // (observed on Pimax's PiOpenXR, Oculus, and Varjo) so the pipelined wait
+    // stalls until our drain timeout. Timeouts are counted in a rolling window
+    // (they interleave with clean frames, so a consecutive streak never
+    // trips). Two-level circuit: async pacing trips into sequenced pacing
+    // (under Auto), sequenced pacing trips into a session suspend that the
+    // toggle binding re-arms.
     int turbo_drain_timeout_count_{0};
     std::optional<std::chrono::steady_clock::time_point> turbo_timeout_window_start_;
     std::atomic<bool> turbo_auto_suspended_{false};
+
+    // Pacing strategy state. Source records how the active mode was chosen —
+    // forced by settings, pinned per runtime, seeded from the known-runtime
+    // table, read back from a recorded sidecar verdict, probing an unknown
+    // runtime, or the in-session fallback after async tripped.
+    enum class TurboPacingSource { kForced, kPinned, kPreset, kDiscovered, kProbing, kFallback };
+    // Frame-submission-thread only (resolved under the config lock at
+    // EndFrame, consumed after it is released) — except turbo_frame_prebegun_,
+    // which WaitFrame/BeginFrame consult under turbo_mutex_.
+    TurboPacingMode turbo_pacing_mode_{TurboPacingMode::kAsync};
+    TurboPacingSource turbo_pacing_source_{TurboPacingSource::kProbing};
+    bool turbo_pacing_resolved_{false};
+    // Auto only: a stable window is still owed before the verdict is written.
+    bool turbo_pacing_verdict_pending_{false};
+    std::int64_t turbo_probe_timeout_total_{0};
+    std::optional<std::chrono::steady_clock::time_point> turbo_stable_since_;
+    // Sequenced pacing (turbo_mutex_): the runtime frame the app is about to
+    // render was already waited+begun inside the previous EndFrame.
+    bool turbo_frame_prebegun_{false};
+    std::string runtime_version_;
 
     // Frame pacing telemetry (debug log level): quantifies judder sources by
     // timing the frame loop. EndFrame-side fields are only touched from the

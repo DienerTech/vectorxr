@@ -1,8 +1,18 @@
 import { computed, reactive } from 'vue'
 
-import { clearSeenApps, loadConfigEnvelope, loadSeenApps, resetStoredData, saveConfigEnvelope, type SeenApplication } from '../lib/commands'
+import {
+  clearRuntimePacingObservation,
+  clearSeenApps,
+  loadConfigEnvelope,
+  loadRuntimePacing,
+  loadSeenApps,
+  resetStoredData,
+  saveConfigEnvelope,
+  type ActiveRuntimeInfo,
+  type SeenApplication,
+} from '../lib/commands'
 import { cloneConfig, createApplication, createProfile, createPivotProfile, createQuadViewsProfile, createTurboProfile, defaultConfig } from '../lib/model'
-import type { AppTab, ModuleId, VectorXRConfig } from '../lib/model'
+import type { AppTab, ModuleId, RuntimePacingObservation, VectorXRConfig } from '../lib/model'
 
 interface StoreState {
   loading: boolean
@@ -11,6 +21,10 @@ interface StoreState {
   seenAppsPath: string
   seenApps: SeenApplication[]
   seenAppsLoading: boolean
+  runtimePacingPath: string
+  runtimePacing: RuntimePacingObservation[]
+  activeRuntime: ActiveRuntimeInfo | null
+  runtimePacingLoading: boolean
   config: VectorXRConfig
   originalConfig: VectorXRConfig
   activeTab: AppTab
@@ -24,6 +38,10 @@ const state = reactive<StoreState>({
   seenAppsPath: '',
   seenApps: [],
   seenAppsLoading: false,
+  runtimePacingPath: '',
+  runtimePacing: [],
+  activeRuntime: null,
+  runtimePacingLoading: false,
   config: defaultConfig(),
   originalConfig: defaultConfig(),
   activeTab: 'home',
@@ -43,7 +61,7 @@ export function useConfigStore() {
       state.config = cloneConfig(envelope.config)
       state.originalConfig = cloneConfig(envelope.config)
       state.status = ''
-      await refreshSeenApps()
+      await Promise.all([refreshSeenApps(), refreshRuntimePacing()])
     } catch (error) {
       state.status = error instanceof Error ? error.message : 'Failed to load config'
     } finally {
@@ -62,6 +80,33 @@ export function useConfigStore() {
       state.status = error instanceof Error ? error.message : 'Failed to load seen apps'
     } finally {
       state.seenAppsLoading = false
+    }
+  }
+
+  async function refreshRuntimePacing() {
+    state.runtimePacingLoading = true
+
+    try {
+      const envelope = await loadRuntimePacing()
+      state.runtimePacingPath = envelope.path
+      state.runtimePacing = envelope.observations
+      state.activeRuntime = envelope.activeRuntime
+    } catch (error) {
+      state.status = error instanceof Error ? error.message : 'Failed to load runtime pacing state'
+    } finally {
+      state.runtimePacingLoading = false
+    }
+  }
+
+  async function rediscoverRuntimePacing(runtimeName: string) {
+    try {
+      const envelope = await clearRuntimePacingObservation(runtimeName)
+      state.runtimePacingPath = envelope.path
+      state.runtimePacing = envelope.observations
+      state.activeRuntime = envelope.activeRuntime
+      state.status = `Pacing verdict cleared for ${runtimeName}; Auto re-discovers at the next session`
+    } catch (error) {
+      state.status = error instanceof Error ? error.message : 'Failed to clear pacing verdict'
     }
   }
 
@@ -295,6 +340,8 @@ export function useConfigStore() {
     discardChanges,
     importConfig,
     refreshSeenApps,
+    refreshRuntimePacing,
+    rediscoverRuntimePacing,
     setActiveTab,
     addProfile,
     removeProfile,

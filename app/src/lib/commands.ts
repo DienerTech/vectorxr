@@ -1,5 +1,11 @@
 import { invoke } from '@tauri-apps/api/core'
-import { defaultConfig, normalizeConfig, type ConfigEnvelope, type VectorXRConfig } from './model'
+import {
+  defaultConfig,
+  normalizeConfig,
+  type ConfigEnvelope,
+  type RuntimePacingObservation,
+  type VectorXRConfig,
+} from './model'
 
 const localKey = 'vectorxr-config'
 
@@ -43,6 +49,17 @@ export interface SeenApplication {
 export interface SeenAppsEnvelope {
   path: string
   observations: SeenApplication[]
+}
+
+export interface ActiveRuntimeInfo {
+  manifestPath: string
+  name: string | null
+}
+
+export interface RuntimePacingEnvelope {
+  path: string
+  observations: RuntimePacingObservation[]
+  activeRuntime: ActiveRuntimeInfo | null
 }
 
 export interface ResetStoredDataEnvelope {
@@ -293,6 +310,30 @@ export async function clearSeenApps(): Promise<string> {
   }
 
   return invoke<string>('clear_seen_apps')
+}
+
+export async function loadRuntimePacing(): Promise<RuntimePacingEnvelope> {
+  if (!tauriAvailable()) {
+    return {
+      path: './config/runtime-pacing.json',
+      observations: [],
+      activeRuntime: null,
+    }
+  }
+
+  return invoke<RuntimePacingEnvelope>('load_runtime_pacing')
+}
+
+export async function clearRuntimePacingObservation(runtimeName: string): Promise<RuntimePacingEnvelope> {
+  if (!tauriAvailable()) {
+    return {
+      path: './config/runtime-pacing.json',
+      observations: [],
+      activeRuntime: null,
+    }
+  }
+
+  return invoke<RuntimePacingEnvelope>('clear_runtime_pacing_observation', { runtimeName })
 }
 
 export async function loadOpenXrLayers(): Promise<OpenXrLayerSnapshot> {

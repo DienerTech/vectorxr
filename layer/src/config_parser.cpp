@@ -1021,6 +1021,8 @@ bool ParseTurboModule(const JsonValue::Object& object, TurboModuleConfig& out, s
     static const std::unordered_set<std::string> allowed = {
         "enabled",
         "toggleBinding",
+        "pacingMode",
+        "runtimePins",
         "profiles",
     };
 
@@ -1034,6 +1036,40 @@ bool ParseTurboModule(const JsonValue::Object& object, TurboModuleConfig& out, s
     }
     if (enabled.has_value()) {
         out.enabled = *enabled;
+    }
+
+    // Optional: absent in configs written before pacing modes existed.
+    std::optional<std::string> pacing_mode;
+    if (!ReadOptionalString(object, "pacingMode", pacing_mode, error)) {
+        return false;
+    }
+    if (pacing_mode.has_value()) {
+        const std::optional<TurboPacingSetting> parsed = ParseTurboPacingSetting(*pacing_mode);
+        if (!parsed.has_value()) {
+            error = "turbo.pacingMode must be one of: auto, async, sequenced";
+            return false;
+        }
+        out.pacing_mode = *parsed;
+    }
+
+    const auto pins_it = object.find("runtimePins");
+    if (pins_it != object.end()) {
+        const JsonValue::Object* pins_object = RequireObject(pins_it->second, "turbo.runtimePins", error);
+        if (!pins_object) {
+            return false;
+        }
+        for (const auto& [runtime_name, pin_value] : *pins_object) {
+            if (!pin_value.IsString()) {
+                error = "turbo.runtimePins values must be strings";
+                return false;
+            }
+            const std::optional<TurboPacingMode> pin = ParseTurboPacingMode(pin_value.AsString());
+            if (!pin.has_value() || *pin == TurboPacingMode::kUnsupported) {
+                error = "turbo.runtimePins values must be one of: async, sequenced";
+                return false;
+            }
+            out.runtime_pins.emplace_back(runtime_name, *pin);
+        }
     }
 
     const auto toggle_binding_it = object.find("toggleBinding");

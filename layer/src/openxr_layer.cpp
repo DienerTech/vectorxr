@@ -19,6 +19,7 @@
 #include "depthxr/effects.h"
 #include "depthxr/input_devices.h"
 #include "depthxr/process_info.h"
+#include "depthxr/runtime_pacing.h"
 #include "depthxr/seen_apps.h"
 #include "depthxr/sound_player.h"
 
@@ -34,6 +35,23 @@ namespace {
 
 bool NearlyEqual(double lhs, double rhs) {
     return std::abs(lhs - rhs) < 0.0001;
+}
+
+// Seed table for Auto pacing. Known-interlocking runtimes get sequenced
+// pacing up front (their xrWaitFrame can stall until the next submit — 0.12
+// field reports on Oculus and Varjo; PiOpenXR observed during development);
+// runtimes with async pipelining confirmed stable in the field start async.
+// Unknown runtimes return nullopt and are probed async-first.
+std::optional<TurboPacingMode> SeededTurboPacingMode(const std::string& runtime_name) {
+    for (const char* fragment : {"Oculus", "Varjo", "PiOpenXR", "Pimax"}) {
+        if (runtime_name.find(fragment) != std::string::npos) {
+            return TurboPacingMode::kSequenced;
+        }
+    }
+    if (runtime_name.find("SteamVR") != std::string::npos) {
+        return TurboPacingMode::kAsync;
+    }
+    return std::nullopt;
 }
 
 bool NearlyZero(double value) {
@@ -1059,6 +1077,8 @@ bool SameSettings(const ResolvedRuntimeConfig& lhs, const ResolvedRuntimeConfig&
            SamePivotResolvedSettings(lhs.pivotxr, rhs.pivotxr) &&
            lhs.turbo.enabled == rhs.turbo.enabled &&
            SameInputBinding(lhs.turbo.toggle_binding, rhs.turbo.toggle_binding) &&
+           lhs.turbo.pacing_mode == rhs.turbo.pacing_mode &&
+           lhs.turbo.runtime_pins == rhs.turbo.runtime_pins &&
            lhs.quadviews.enabled == rhs.quadviews.enabled &&
            lhs.quadviews.tracking_mode == rhs.quadviews.tracking_mode &&
            NearlyEqual(lhs.quadviews.focus_horizontal_size_percent, rhs.quadviews.focus_horizontal_size_percent) &&
@@ -1315,9 +1335,11 @@ XrResult OpenXrLayer::OnInstanceCreated(const XrInstanceCreateInfo* create_info,
             runtime_name_ = instance_properties.runtimeName;
             defer_quadviews_swapchain_releases_ = runtime_name_.find("Varjo") != std::string::npos;
             const XrVersion rt = instance_properties.runtimeVersion;
+            runtime_version_ = std::to_string(XR_VERSION_MAJOR(rt)) + "." +
+                               std::to_string(XR_VERSION_MINOR(rt)) + "." +
+                               std::to_string(XR_VERSION_PATCH(rt));
             logger_.Info(std::string("OpenXR runtime: name=\"") + runtime_name_ +
-                         "\", version=" + std::to_string(XR_VERSION_MAJOR(rt)) + "." +
-                         std::to_string(XR_VERSION_MINOR(rt)) + "." + std::to_string(XR_VERSION_PATCH(rt)));
+                         "\", version=" + runtime_version_);
             if (defer_quadviews_swapchain_releases_) {
                 logger_.Info("Varjo runtime detected; deferring app quadviews swapchain releases until xrEndFrame.");
             }
@@ -3179,21 +3201,32 @@ XrResult OpenXrLayer::WaitFrame(XrSession session,
 
     {
         std::unique_lock lock(turbo_mutex_);
-        if (turbo_async_wait_.valid()) {
-            if (turbo_async_wait_polled_) {
-                // Second poll while pipelined: only one frame of pipelining is
-                // allowed, so now we must wait for the real frame.
-                lock.unlock();
-                turbo_async_wait_.wait();
-                lock.lock();
+        const bool wait_pipelined = turbo_async_wait_.valid();
+        // Fabricate while a pipelined wait is outstanding (async pacing) or
+        // the runtime frame was already waited+begun inside the previous
+        // EndFrame (sequenced pacing) — in both cases the runtime already owns
+        // this frame's pacing and the app must not block here.
+        if (wait_pipelined || turbo_frame_prebegun_) {
+            if (wait_pipelined) {
+                if (turbo_async_wait_polled_) {
+                    // Second poll while pipelined: only one frame of
+                    // pipelining is allowed, so now we must wait for the real
+                    // frame.
+                    lock.unlock();
+                    turbo_async_wait_.wait();
+                    lock.lock();
+                }
+                turbo_async_wait_polled_ = true;
             }
-            turbo_async_wait_polled_ = true;
 
             const auto now = std::chrono::steady_clock::now();
             XrTime predicted = turbo_last_predicted_display_time_;
-            if (!turbo_async_wait_completed_ && turbo_last_wait_frame_wall_time_.has_value()) {
+            if (wait_pipelined && !turbo_async_wait_completed_ &&
+                turbo_last_wait_frame_wall_time_.has_value()) {
                 // Async wait still in flight: extrapolate by the wall-clock
-                // delta between the app's waits.
+                // delta between the app's waits. (Sequenced pacing never needs
+                // this — its wait completed before EndFrame returned, so the
+                // recorded timing is already this frame's real timing.)
                 predicted += std::chrono::duration_cast<std::chrono::nanoseconds>(
                                  now - *turbo_last_wait_frame_wall_time_)
                                  .count();
@@ -3248,8 +3281,10 @@ XrResult OpenXrLayer::WaitFrame(XrSession session,
 XrResult OpenXrLayer::BeginFrame(XrSession session, const XrFrameBeginInfo* frame_begin_info) {
     {
         std::scoped_lock lock(turbo_mutex_);
-        if (turbo_async_wait_.valid()) {
-            // Deferred into ForwardEndFrame once the async wait resolves.
+        if (turbo_async_wait_.valid() || turbo_frame_prebegun_) {
+            // Async pacing: deferred into ForwardEndFrame once the async wait
+            // resolves. Sequenced pacing: already begun inside the previous
+            // EndFrame.
             return XR_SUCCESS;
         }
     }
@@ -3259,7 +3294,16 @@ XrResult OpenXrLayer::BeginFrame(XrSession session, const XrFrameBeginInfo* fram
 XrResult OpenXrLayer::ForwardEndFrame(XrSession session,
                                       const XrFrameEndInfo* frame_end_info,
                                       std::unique_lock<std::mutex>& config_lock) {
-    const bool turbo_engaged = IsTurboActive();
+    bool turbo_engaged = IsTurboActive();
+
+    if (turbo_engaged && !turbo_pacing_resolved_) {
+        ResolveTurboPacingModeLocked();
+        // Resolution can suspend immediately (a recorded "unsupported"
+        // verdict) — honor it before any pipelining starts.
+        if (turbo_auto_suspended_.load(std::memory_order_relaxed)) {
+            turbo_engaged = false;
+        }
+    }
 
     // Copied under the lock: the auto-suspend path below runs after the lock
     // is released and may need to play the toggle's deactivate cue.
@@ -3279,17 +3323,22 @@ XrResult OpenXrLayer::ForwardEndFrame(XrSession session,
     const auto pacing_start = std::chrono::steady_clock::now();
 
     bool has_pending_wait = false;
+    bool frame_prebegun = false;
     {
         std::scoped_lock lock(turbo_mutex_);
         has_pending_wait = turbo_async_wait_.valid();
+        // Sequenced pacing: this submit consumes the pre-begun frame.
+        frame_prebegun = turbo_frame_prebegun_;
+        turbo_frame_prebegun_ = false;
     }
+    bool timed_out = false;
     if (has_pending_wait) {
         // This is the latest point the pipelined frame must have been fully
         // waited. Some runtimes interlock the wait with the next submit
-        // (PiOpenXR under GPU load), stalling it until we proceed anyway — cap
-        // the per-frame damage with a short timeout. If it trips, the future
-        // stays valid and no second wait is enqueued below; submitting is what
-        // unblocks the stalled runtime wait.
+        // (PiOpenXR, Oculus, Varjo), stalling it until we proceed anyway —
+        // cap the per-frame damage with a short timeout. If it trips, the
+        // future stays valid and no second wait is enqueued below; submitting
+        // is what unblocks the stalled runtime wait.
         constexpr std::chrono::milliseconds kTurboDrainTimeout{250};
         const bool ready = turbo_async_wait_.wait_for(kTurboDrainTimeout) == std::future_status::ready;
         {
@@ -3299,22 +3348,8 @@ XrResult OpenXrLayer::ForwardEndFrame(XrSession session,
             }
         }
         if (!ready && !turbo_auto_suspended_.load(std::memory_order_relaxed)) {
-            // Rolling-window count: stalled frames interleave with clean ones
-            // on these runtimes, so a consecutive-streak check never fires.
-            constexpr std::chrono::seconds kTimeoutWindow{30};
-            constexpr int kTimeoutSuspendThreshold = 5;
-            const auto now = std::chrono::steady_clock::now();
-            if (!turbo_timeout_window_start_.has_value() ||
-                now - *turbo_timeout_window_start_ > kTimeoutWindow) {
-                turbo_timeout_window_start_ = now;
-                turbo_drain_timeout_count_ = 0;
-            }
-            ++turbo_drain_timeout_count_;
-            if (turbo_drain_timeout_count_ >= kTimeoutSuspendThreshold) {
-                turbo_auto_suspended_.store(true, std::memory_order_relaxed);
-                logger_.Info("Turbo: this runtime's frame pacing does not tolerate pipelining (the pipelined "
-                             "xrWaitFrame repeatedly stalled until the next frame submit); auto-suspending "
-                             "turbo. Press the turbo toggle binding to re-arm it.");
+            timed_out = true;
+            if (HandleTurboDrainTimeout(std::chrono::steady_clock::now())) {
                 // Same audible cue as a manual turbo-off, so the user knows the
                 // safety net fired. Non-blocking (worker-thread playback).
                 SoundPlayer::Instance().PlayTransition(turbo_sound, false, dll_directory_, turbo_sound_volume,
@@ -3322,13 +3357,15 @@ XrResult OpenXrLayer::ForwardEndFrame(XrSession session,
             }
         }
 
-        // Deferred xrBeginFrame for the pipelined frame. Errors pass through
-        // (e.g. the session state machine advanced under us).
-        const XrResult begin_result = next_begin_frame_(session, nullptr);
-        if (XR_FAILED(begin_result)) {
-            logger_.Error("Turbo: deferred xrBeginFrame failed with " +
-                          std::to_string(static_cast<int>(begin_result)));
-            return begin_result;
+        if (!frame_prebegun) {
+            // Deferred xrBeginFrame for the pipelined frame. Errors pass
+            // through (e.g. the session state machine advanced under us).
+            const XrResult begin_result = next_begin_frame_(session, nullptr);
+            if (XR_FAILED(begin_result)) {
+                logger_.Error("Turbo: deferred xrBeginFrame failed with " +
+                              std::to_string(static_cast<int>(begin_result)));
+                return begin_result;
+            }
         }
     }
 
@@ -3338,33 +3375,79 @@ XrResult OpenXrLayer::ForwardEndFrame(XrSession session,
     RecordFramePacing(pacing_start, pacing_after_drain, pacing_after_end, turbo_engaged);
 
     if (XR_SUCCEEDED(result) && turbo_engaged) {
-        std::scoped_lock lock(turbo_mutex_);
-        if (!turbo_async_wait_.valid()) {
-            turbo_async_wait_polled_ = false;
-            turbo_async_wait_completed_ = false;
-            if (!turbo_pipelining_logged_) {
-                logger_.Info("Turbo: frame pipelining engaged; the app's xrWaitFrame is now decoupled "
-                             "from runtime pacing.");
-                turbo_pipelining_logged_ = true;
-                turbo_fabricated_wait_log_budget_ = 5;
-            }
-            turbo_async_wait_ = std::async(std::launch::async, [this, session] {
-                XrFrameState frame_state{XR_TYPE_FRAME_STATE};
-                const XrResult wait_result = next_wait_frame_(session, nullptr, &frame_state);
-                std::scoped_lock state_lock(turbo_mutex_);
-                if (XR_SUCCEEDED(wait_result)) {
-                    turbo_last_predicted_display_time_ = frame_state.predictedDisplayTime;
-                    turbo_last_predicted_display_period_ = frame_state.predictedDisplayPeriod;
-                    turbo_last_should_render_ = frame_state.shouldRender == XR_TRUE;
-                } else {
-                    logger_.Error("Turbo: async xrWaitFrame failed with " +
-                                  std::to_string(static_cast<int>(wait_result)) +
-                                  "; keeping previous frame timing.");
+        bool launched = false;
+        {
+            std::scoped_lock lock(turbo_mutex_);
+            if (!turbo_async_wait_.valid()) {
+                launched = true;
+                turbo_async_wait_polled_ = false;
+                turbo_async_wait_completed_ = false;
+                if (!turbo_pipelining_logged_) {
+                    logger_.Info(std::string("Turbo: frame pipelining engaged (") +
+                                 ToString(turbo_pacing_mode_) +
+                                 " pacing); the app's xrWaitFrame is now decoupled from runtime pacing.");
+                    turbo_pipelining_logged_ = true;
+                    turbo_fabricated_wait_log_budget_ = 5;
                 }
-                turbo_async_wait_completed_ = true;
-            });
+                turbo_async_wait_ = std::async(std::launch::async, [this, session] {
+                    XrFrameState frame_state{XR_TYPE_FRAME_STATE};
+                    const XrResult wait_result = next_wait_frame_(session, nullptr, &frame_state);
+                    std::scoped_lock state_lock(turbo_mutex_);
+                    if (XR_SUCCEEDED(wait_result)) {
+                        turbo_last_predicted_display_time_ = frame_state.predictedDisplayTime;
+                        turbo_last_predicted_display_period_ = frame_state.predictedDisplayPeriod;
+                        turbo_last_should_render_ = frame_state.shouldRender == XR_TRUE;
+                    } else {
+                        logger_.Error("Turbo: async xrWaitFrame failed with " +
+                                      std::to_string(static_cast<int>(wait_result)) +
+                                      "; keeping previous frame timing.");
+                    }
+                    turbo_async_wait_completed_ = true;
+                });
+            }
         }
-    } else if (has_pending_wait && !turbo_engaged) {
+
+        if (launched && turbo_pacing_mode_ == TurboPacingMode::kSequenced) {
+            // Sequenced pacing: join the wait right here — the submit above is
+            // exactly the event that unblocks an interlocking runtime's wait,
+            // so this is ordered safely; the timeout is a safety net only.
+            // Then pre-begin the next frame so the app's WaitFrame/BeginFrame
+            // stay fabricated no-ops.
+            constexpr std::chrono::milliseconds kSequencedJoinTimeout{250};
+            const bool ready =
+                turbo_async_wait_.wait_for(kSequencedJoinTimeout) == std::future_status::ready;
+            if (ready) {
+                {
+                    std::scoped_lock lock(turbo_mutex_);
+                    turbo_async_wait_ = {};
+                }
+                const XrResult begin_result = next_begin_frame_(session, nullptr);
+                if (XR_SUCCEEDED(begin_result)) {
+                    std::scoped_lock lock(turbo_mutex_);
+                    turbo_frame_prebegun_ = true;
+                } else {
+                    // Session state advanced under us; the app's next real
+                    // wait/begin will re-establish the sequence.
+                    logger_.Error("Turbo: sequenced xrBeginFrame failed with " +
+                                  std::to_string(static_cast<int>(begin_result)));
+                }
+            } else if (!turbo_auto_suspended_.load(std::memory_order_relaxed)) {
+                // A post-submit stall — the one thing sequenced pacing should
+                // rule out. Leave the future pending (next frame's drain picks
+                // it up like async pacing) and count toward the suspend.
+                timed_out = true;
+                if (HandleTurboDrainTimeout(std::chrono::steady_clock::now())) {
+                    SoundPlayer::Instance().PlayTransition(turbo_sound, false, dll_directory_,
+                                                           turbo_sound_volume, L"turbo-on.wav",
+                                                           L"turbo-off.wav");
+                }
+            }
+        }
+
+        if (!timed_out && !turbo_auto_suspended_.load(std::memory_order_relaxed)) {
+            NoteTurboPacingStableFrame(std::chrono::steady_clock::now());
+        }
+    } else if ((has_pending_wait || frame_prebegun) && !turbo_engaged) {
         // The pipeline just drained without relaunching (turbo toggled off or
         // no longer applicable).
         std::scoped_lock lock(turbo_mutex_);
@@ -3375,6 +3458,197 @@ XrResult OpenXrLayer::ForwardEndFrame(XrSession session,
     }
 
     return result;
+}
+
+// Chooses the pacing strategy when turbo first engages (config lock held,
+// frame thread). Precedence: forced setting > per-runtime pin > recorded
+// sidecar verdict > known-runtime seed table > async-first probe.
+void OpenXrLayer::ResolveTurboPacingModeLocked() {
+    turbo_pacing_resolved_ = true;
+    turbo_pacing_verdict_pending_ = false;
+    turbo_probe_timeout_total_ = 0;
+    turbo_stable_since_.reset();
+    turbo_drain_timeout_count_ = 0;
+    turbo_timeout_window_start_.reset();
+
+    const TurboPacingSetting setting = resolved_settings_.turbo.pacing_mode;
+    if (setting != TurboPacingSetting::kAuto) {
+        turbo_pacing_mode_ = setting == TurboPacingSetting::kSequenced ? TurboPacingMode::kSequenced
+                                                                       : TurboPacingMode::kAsync;
+        turbo_pacing_source_ = TurboPacingSource::kForced;
+        logger_.Info(std::string("Turbo pacing: ") + ToString(turbo_pacing_mode_) +
+                     " (forced in settings; per-runtime discovery and pins are disabled).");
+        return;
+    }
+
+    for (const auto& [pinned_runtime, pinned_mode] : resolved_settings_.turbo.runtime_pins) {
+        if (pinned_runtime == runtime_name_) {
+            turbo_pacing_mode_ = pinned_mode;
+            turbo_pacing_source_ = TurboPacingSource::kPinned;
+            logger_.Info(std::string("Turbo pacing: ") + ToString(turbo_pacing_mode_) +
+                         " (pinned for runtime \"" + runtime_name_ + "\").");
+            return;
+        }
+    }
+
+    if (const auto observation =
+            FindRuntimePacingObservation(ResolveRuntimePacingPath(), runtime_name_)) {
+        if (observation->mode == TurboPacingMode::kUnsupported) {
+            // Verdict from a previous session: even sequenced pacing stalled.
+            // Suspend before the first pipelined frame instead of replaying
+            // the failure; a toggle press retries (sequenced) and a stable
+            // window overwrites the verdict.
+            turbo_pacing_mode_ = TurboPacingMode::kSequenced;
+            turbo_pacing_source_ = TurboPacingSource::kDiscovered;
+            turbo_pacing_verdict_pending_ = true;
+            turbo_auto_suspended_.store(true, std::memory_order_relaxed);
+            logger_.Info("Turbo pacing: runtime \"" + runtime_name_ +
+                         "\" is recorded as not tolerating turbo pipelining; turbo stays suspended. "
+                         "Press the turbo toggle binding to retry.");
+            return;
+        }
+        turbo_pacing_mode_ = observation->mode;
+        turbo_pacing_source_ = TurboPacingSource::kDiscovered;
+        logger_.Info(std::string("Turbo pacing: ") + ToString(turbo_pacing_mode_) +
+                     " (recorded verdict for runtime \"" + runtime_name_ + "\", source=" +
+                     observation->source + ").");
+        RuntimePacingObservation updated = *observation;
+        updated.runtime_version = runtime_version_;
+        updated.last_used_unix_seconds =
+            std::chrono::duration_cast<std::chrono::seconds>(
+                std::chrono::system_clock::now().time_since_epoch())
+                .count();
+        RecordRuntimePacingObservation(ResolveRuntimePacingPath(), updated, nullptr);
+        return;
+    }
+
+    if (const auto seeded = SeededTurboPacingMode(runtime_name_)) {
+        turbo_pacing_mode_ = *seeded;
+        turbo_pacing_source_ = TurboPacingSource::kPreset;
+        turbo_pacing_verdict_pending_ = true;
+        logger_.Info(std::string("Turbo pacing: ") + ToString(turbo_pacing_mode_) +
+                     " (preset for runtime \"" + runtime_name_ +
+                     "\"); will record the verdict once frame pacing proves stable.");
+        return;
+    }
+
+    turbo_pacing_mode_ = TurboPacingMode::kAsync;
+    turbo_pacing_source_ = TurboPacingSource::kProbing;
+    turbo_pacing_verdict_pending_ = true;
+    logger_.Info("Turbo pacing: unknown runtime \"" + runtime_name_ +
+                 "\"; probing async pacing first (falls back to sequenced on stalls).");
+}
+
+void OpenXrLayer::RecordTurboPacingVerdict(TurboPacingMode mode,
+                                           const char* source,
+                                           std::int64_t stable_seconds) {
+    if (runtime_name_.empty()) {
+        return;
+    }
+    RuntimePacingObservation observation;
+    observation.runtime_name = runtime_name_;
+    observation.runtime_version = runtime_version_;
+    observation.mode = mode;
+    observation.source = source;
+#if defined(VECTORXR_VERSION)
+    observation.layer_version = VECTORXR_VERSION;
+#endif
+    observation.last_used_unix_seconds =
+        std::chrono::duration_cast<std::chrono::seconds>(
+            std::chrono::system_clock::now().time_since_epoch())
+            .count();
+    observation.probe_timeouts = turbo_probe_timeout_total_;
+    observation.stable_seconds = stable_seconds;
+
+    std::string error;
+    if (RecordRuntimePacingObservation(ResolveRuntimePacingPath(), observation, &error)) {
+        logger_.Info(std::string("Turbo pacing: recorded ") + ToString(mode) +
+                     " verdict for runtime \"" + runtime_name_ + "\" (" + source + ").");
+    } else {
+        logger_.Info("Turbo pacing: failed to record verdict: " + error);
+    }
+}
+
+void OpenXrLayer::NoteTurboPacingStableFrame(std::chrono::steady_clock::time_point now) {
+    if (!turbo_pacing_verdict_pending_) {
+        return;
+    }
+    if (!turbo_stable_since_.has_value()) {
+        turbo_stable_since_ = now;
+        return;
+    }
+    // Long enough that the DCS menu -> mission transition (where load spikes
+    // surface interlocks) is usually covered before the verdict lands.
+    constexpr std::chrono::seconds kStableWindow{60};
+    if (now - *turbo_stable_since_ < kStableWindow) {
+        return;
+    }
+    turbo_pacing_verdict_pending_ = false;
+    const char* source = turbo_pacing_source_ == TurboPacingSource::kPreset ? "preset" : "discovered";
+    if (turbo_pacing_source_ == TurboPacingSource::kProbing ||
+        turbo_pacing_source_ == TurboPacingSource::kFallback) {
+        turbo_pacing_source_ = TurboPacingSource::kDiscovered;
+    }
+    RecordTurboPacingVerdict(turbo_pacing_mode_, source,
+                             std::chrono::duration_cast<std::chrono::seconds>(kStableWindow).count());
+}
+
+bool OpenXrLayer::HandleTurboDrainTimeout(std::chrono::steady_clock::time_point now) {
+    turbo_stable_since_.reset();
+    ++turbo_probe_timeout_total_;
+
+    // Rolling-window count: stalled frames interleave with clean ones on
+    // these runtimes, so a consecutive-streak check never fires.
+    constexpr std::chrono::seconds kTimeoutWindow{30};
+    if (!turbo_timeout_window_start_.has_value() ||
+        now - *turbo_timeout_window_start_ > kTimeoutWindow) {
+        turbo_timeout_window_start_ = now;
+        turbo_drain_timeout_count_ = 0;
+    }
+    ++turbo_drain_timeout_count_;
+
+    const bool auto_pacing = turbo_pacing_source_ != TurboPacingSource::kForced &&
+                             turbo_pacing_source_ != TurboPacingSource::kPinned;
+
+    if (turbo_pacing_mode_ == TurboPacingMode::kAsync && auto_pacing) {
+        // Level 1: adapt instead of suspending. Probing gets a hair trigger so
+        // an unknown runtime suffers at most a couple of stalled frames before
+        // the fallback; a recorded/preset async verdict gets more benefit of
+        // the doubt before we conclude conditions changed.
+        const int threshold = turbo_pacing_source_ == TurboPacingSource::kProbing ? 2 : 5;
+        if (turbo_drain_timeout_count_ < threshold) {
+            return false;
+        }
+        turbo_pacing_mode_ = TurboPacingMode::kSequenced;
+        turbo_pacing_source_ = TurboPacingSource::kFallback;
+        turbo_pacing_verdict_pending_ = true;
+        turbo_drain_timeout_count_ = 0;
+        turbo_timeout_window_start_.reset();
+        logger_.Info("Turbo: this runtime interlocks xrWaitFrame with frame submission; switching to "
+                     "sequenced pacing (the wait now happens right after each submit). No action needed.");
+        return false;
+    }
+
+    // Level 2 (sequenced pacing still stalling), or a forced/pinned mode the
+    // user asked us not to adapt: suspend turbo for the session.
+    const int threshold = turbo_pacing_mode_ == TurboPacingMode::kSequenced ? 3 : 5;
+    if (turbo_drain_timeout_count_ < threshold) {
+        return false;
+    }
+    turbo_auto_suspended_.store(true, std::memory_order_relaxed);
+    logger_.Info(std::string("Turbo: ") +
+                 (turbo_pacing_mode_ == TurboPacingMode::kAsync
+                      ? "the pipelined xrWaitFrame repeatedly stalled until the next frame submit"
+                      : "the sequenced xrWaitFrame stalled even after the frame submit") +
+                 "; auto-suspending turbo for this session. Press the turbo toggle binding to re-arm it.");
+    if (auto_pacing && turbo_pacing_verdict_pending_ &&
+        turbo_pacing_mode_ == TurboPacingMode::kSequenced) {
+        // Discovery concluded: neither strategy is tolerated. Record it so the
+        // next session suspends up front instead of replaying the hitches.
+        turbo_pacing_verdict_pending_ = false;
+        RecordTurboPacingVerdict(TurboPacingMode::kUnsupported, "discovered", 0);
+    }
+    return true;
 }
 
 void OpenXrLayer::RecordFramePacing(std::chrono::steady_clock::time_point frame_start,
@@ -3429,8 +3703,11 @@ void OpenXrLayer::RecordFramePacing(std::chrono::steady_clock::time_point frame_
         std::ostringstream stream;
         stream << "Frame pacing (" << FormatDiagnosticDouble(window_seconds) << "s window): frames="
                << pacing_frames_ << " (" << FormatDiagnosticDouble(pacing_frames_ / window_seconds)
-               << " fps), turbo=" << (turbo_engaged ? 1 : 0)
-               << ", endFrameDelta avg/max=" << FormatDiagnosticDouble(pacing_delta_sum_ms_ / pacing_frames_)
+               << " fps), turbo=" << (turbo_engaged ? 1 : 0);
+        if (turbo_engaged) {
+            stream << ", pacing=" << ToString(turbo_pacing_mode_);
+        }
+        stream << ", endFrameDelta avg/max=" << FormatDiagnosticDouble(pacing_delta_sum_ms_ / pacing_frames_)
                << "/" << FormatDiagnosticDouble(pacing_delta_max_ms_)
                << "ms, turboDrainAndBegin avg/max="
                << FormatDiagnosticDouble(pacing_drain_sum_ms_ / pacing_frames_) << "/"
@@ -3492,6 +3769,10 @@ void OpenXrLayer::ResetTurboFrameState() {
     turbo_drain_timeout_count_ = 0;
     turbo_timeout_window_start_.reset();
     turbo_auto_suspended_.store(false, std::memory_order_relaxed);
+    turbo_frame_prebegun_ = false;
+    // Pacing resolution survives (it is per instance/runtime); the stability
+    // window cannot span sessions.
+    turbo_stable_since_.reset();
 }
 
 XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_end_info) {
@@ -4522,6 +4803,12 @@ void OpenXrLayer::RefreshResolvedSettings() {
         previous.turbo.enabled != resolved_settings_.turbo.enabled) {
         ResetTurboToggleState();
     }
+    if (previous.turbo.pacing_mode != resolved_settings_.turbo.pacing_mode ||
+        previous.turbo.runtime_pins != resolved_settings_.turbo.runtime_pins) {
+        // Re-resolve at the next engaged frame so a UI change (mode, pins,
+        // re-discover) applies without restarting the session.
+        turbo_pacing_resolved_ = false;
+    }
     logger_.SetLevel(resolved_settings_.core.log_level);
     logger_.SetRetentionFiles(resolved_settings_.core.log_retention_files);
     if (!last_logged_settings_ || !SameSettings(*last_logged_settings_, resolved_settings_)) {
@@ -4809,6 +5096,8 @@ void OpenXrLayer::ResetInstanceState() {
     eye_gaze_extension_enabled_ = false;
     defer_quadviews_swapchain_releases_ = false;
     runtime_name_.clear();
+    runtime_version_.clear();
+    turbo_pacing_resolved_ = false;
     cached_quadviews_stereo_recommended_width_ = 0;
     cached_quadviews_stereo_recommended_height_ = 0;
     cached_quadviews_stereo_max_width_ = 0;
@@ -5832,6 +6121,8 @@ void OpenXrLayer::LogResolvedSettings(const ResolvedRuntimeConfig& settings) {
     }
     stream << ", turboEnabled=" << settings.turbo.enabled
            << ", turboToggleBinding=" << BindingLabel(settings.turbo.toggle_binding)
+           << ", turboPacingMode=" << ToString(settings.turbo.pacing_mode)
+           << ", turboRuntimePins=" << settings.turbo.runtime_pins.size()
            << ", quadviewsEnabled=" << settings.quadviews.enabled
            << ", quadviewsTrackingMode=" << ToString(settings.quadviews.tracking_mode)
            << ", quadviewsFocusHorizontalSizePercent=" << settings.quadviews.focus_horizontal_size_percent
@@ -5922,6 +6213,13 @@ bool OpenXrLayer::IsTurboActive() {
             turbo_auto_suspended_.store(false, std::memory_order_relaxed);
             turbo_drain_timeout_count_ = 0;
             turbo_timeout_window_start_.reset();
+            turbo_stable_since_.reset();
+            // Under Auto, a retry that then runs clean should overwrite the
+            // verdict that suspended us (e.g. a stale "unsupported").
+            if (turbo_pacing_source_ != TurboPacingSource::kForced &&
+                turbo_pacing_source_ != TurboPacingSource::kPinned) {
+                turbo_pacing_verdict_pending_ = true;
+            }
             turbo_toggle_enabled_ = true;
             logger_.Info("Turbo mode re-armed after auto-suspend via " +
                          BindingLabel(resolved_settings_.turbo.toggle_binding) + ".");

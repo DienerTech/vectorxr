@@ -18,6 +18,7 @@ const props = defineProps<{
   snapshot: OpenXrLayerSnapshot | null
   loading: boolean
   machineWritesUnlocked: boolean
+  turboInUse: boolean
 }>()
 
 const emit = defineEmits<{
@@ -51,6 +52,17 @@ const vectorQuadWarning = computed(() => {
   }
 
   return warnings
+})
+
+// Two frame-pacing layers fight each other: advise when OpenXR Toolkit is
+// enabled while VectorXR Turbo applies anywhere.
+const toolkitTurboWarning = computed(() => {
+  if (!props.turboInUse) {
+    return false
+  }
+  return (props.snapshot?.slices ?? []).some((slice) =>
+    slice.layers.some((layer) => layer.enabled && layer.layerName.toLowerCase().includes('mbucchia_toolkit')),
+  )
 })
 
 watch(() => props.snapshot, (value) => {
@@ -356,6 +368,15 @@ function signatureGuidance(layer: OpenXrLayerEntry): string {
       >
         <span class="font-medium">Pivot compatibility:</span>
         {{ vectorQuadWarning.join(' ') }}
+      </div>
+
+      <div
+        v-if="toolkitTurboWarning"
+        class="mt-3 rounded-[0.9rem] border px-3 py-2 text-sm leading-6 chip-warning"
+        style="border-color: var(--app-border)"
+      >
+        <span class="font-medium">Turbo conflict:</span>
+        OpenXR Toolkit is enabled while VectorXR Turbo is in use. Two frame-pacing layers fight each other — if OXRTK's Turbo Mode is on, disable it there or in VectorXR, never both.
       </div>
 
     </article>

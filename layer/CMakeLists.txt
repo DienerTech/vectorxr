@@ -3,6 +3,7 @@ add_library(
     STATIC
     src/config_parser.cpp
     src/input_devices.cpp
+    src/runtime_pacing.cpp
     src/seen_apps.cpp
     src/settings.cpp
     src/sound_player.cpp

@@ -192,10 +192,38 @@ export interface TurboProfileConfig {
   applicationIds: string[]
 }
 
+// How turbo sequences the real xrWaitFrame against the frame submit.
+// 'async' overlaps the wait with the app's next-frame work; 'sequenced' joins
+// it inside EndFrame right after the submit (safe on runtimes that interlock
+// the wait with submission: Oculus, Varjo, PiOpenXR).
+export type TurboPacingMode = 'async' | 'sequenced'
+// 'auto' discovers the right mode per runtime and remembers the verdict in
+// the layer-written runtime-pacing sidecar; forced modes disable discovery
+// and runtime pins entirely.
+export type TurboPacingSetting = 'auto' | TurboPacingMode
+
 export interface TurboModuleConfig {
   enabled: boolean
   toggleBinding: InputBinding
+  pacingMode: TurboPacingSetting
+  // Per-runtime user overrides keyed by the exact OpenXR runtime name.
+  // Only consulted when pacingMode is 'auto'.
+  runtimePins: Record<string, TurboPacingMode>
   profiles: TurboProfileConfig[]
+}
+
+// One row of the layer-written runtime-pacing.json sidecar: what Auto pacing
+// learned about a runtime. Read-only facts; user intent lives in the config.
+export interface RuntimePacingObservation {
+  runtimeName: string
+  runtimeVersion: string
+  mode: TurboPacingMode | 'unsupported'
+  source: 'preset' | 'discovered'
+  layerVersion: string
+  firstUsedUnixSeconds: number
+  lastUsedUnixSeconds: number
+  probeTimeouts: number
+  stableSeconds: number
 }
 
 export interface VectorXRConfig {
@@ -243,6 +271,23 @@ function normalizeNumber(value: unknown, fallback: number): number {
 
 function normalizeString(value: unknown, fallback: string): string {
   return typeof value === 'string' ? value : fallback
+}
+
+function normalizeTurboPacingSetting(value: unknown): TurboPacingSetting {
+  return value === 'async' || value === 'sequenced' ? value : 'auto'
+}
+
+function normalizeTurboRuntimePins(value: unknown): Record<string, TurboPacingMode> {
+  if (!isRecord(value)) {
+    return {}
+  }
+  const pins: Record<string, TurboPacingMode> = {}
+  for (const [runtimeName, pin] of Object.entries(value)) {
+    if (runtimeName && (pin === 'async' || pin === 'sequenced')) {
+      pins[runtimeName] = pin
+    }
+  }
+  return pins
 }
 
 export function defaultCoreConfig(): CoreConfig {
@@ -423,6 +468,8 @@ export function defaultConfig(): VectorXRConfig {
       turbo: {
         enabled: false,
         toggleBinding: defaultNoneBinding(),
+        pacingMode: 'auto',
+        runtimePins: {},
         profiles: [],
       },
     },
@@ -845,6 +892,8 @@ function normalizeVectorXRConfig(value: unknown): VectorXRConfig {
       turbo: {
         enabled: normalizeBoolean(turbo.enabled, fallback.modules.turbo.enabled),
         toggleBinding: normalizeInputBinding(turbo.toggleBinding, fallback.modules.turbo.toggleBinding),
+        pacingMode: normalizeTurboPacingSetting(turbo.pacingMode),
+        runtimePins: normalizeTurboRuntimePins(turbo.runtimePins),
         profiles: turboProfileValues.map((profileValue) => {
           const profile = isRecord(profileValue) ? profileValue : {}
           const applicationIds = applicationIdsFromProfile(profile, applications)
