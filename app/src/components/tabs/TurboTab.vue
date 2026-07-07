@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
 
-import BindingEditor from '../BindingEditor.vue'
+import ModuleBindingPage from '../ModuleBindingPage.vue'
+import ModuleBindingPanel from '../ModuleBindingPanel.vue'
 import ProfileShell from '../ProfileShell.vue'
 import type { ActiveRuntimeInfo, OpenXrLayerSnapshot } from '../../lib/commands'
 import type {
@@ -27,6 +28,7 @@ const emit = defineEmits<{
 }>()
 
 const howItWorksOpen = ref(false)
+const bindingSubPageOpen = ref(false)
 
 const pacingForced = computed(() => props.config.modules.turbo.pacingMode !== 'auto')
 
@@ -175,8 +177,21 @@ function formatDate(unixSeconds: number): string {
 </script>
 
 <template>
-  <div class="space-y-4">
-    <!-- Module header + defaults -->
+  <ModuleBindingPage
+    v-if="bindingSubPageOpen"
+    module-label="Turbo"
+    :binding="config.modules.turbo.toggleBinding"
+    label="Turbo Toggle Binding"
+    description="Flip Turbo on and off while in-game to compare fps and frame feel directly. Turbo starts enabled whenever it applies to the running application. Note: switching Turbo on mid-session can cause a brief hitch while the frame pipeline re-synchronizes."
+    none-text="No binding assigned. Turbo stays on for applications it applies to."
+    default-activate-sound="turbo-on.wav"
+    default-deactivate-sound="turbo-off.wav"
+    @update:binding="config.modules.turbo.toggleBinding = $event"
+    @close="bindingSubPageOpen = false"
+  />
+  <div v-else class="space-y-4">
+    <!-- Turbo module: frame pacing first (it decides how Turbo behaves),
+         then the toggle binding, then the default profile. -->
     <article class="rounded-[1.25rem] border p-5 shadow-panel backdrop-blur surface-panel">
       <div class="mb-4 flex flex-wrap items-center justify-between gap-3">
         <div>
@@ -205,48 +220,16 @@ function formatDate(unixSeconds: number): string {
         OpenXR Toolkit is enabled alongside VectorXR Turbo. Two frame-pacing layers fight each other — if OXRTK's own Turbo Mode is switched on, disable it there or here, never both.
       </div>
 
-      <!-- Module-level binding — applies regardless of which profile enabled turbo -->
-      <BindingEditor
-        :model-value="config.modules.turbo.toggleBinding"
-        class="mb-5"
-        label="Turbo Toggle Binding"
-        description="Flip Turbo on and off while in-game to compare fps and frame feel directly. Turbo starts enabled whenever it applies to the running application. Note: switching Turbo on mid-session can cause a brief hitch while the frame pipeline re-synchronizes."
-        none-text="No binding assigned. Turbo stays on for applications it applies to."
-        default-activate-sound="turbo-on.wav"
-        default-deactivate-sound="turbo-off.wav"
-        @update:model-value="config.modules.turbo.toggleBinding = $event"
-      />
-
-      <details class="section-disclosure border-t pt-4" style="border-color: var(--app-border)" open>
-        <summary class="flex items-center gap-2">
-          <svg aria-hidden="true" class="section-chevron h-3.5 w-3.5" viewBox="0 0 20 20" fill="currentColor">
-            <path fill-rule="evenodd" d="M7.2 14.8a1 1 0 0 1 0-1.4L10.6 10 7.2 6.6a1 1 0 1 1 1.4-1.4l4.1 4.1a1 1 0 0 1 0 1.4l-4.1 4.1a1 1 0 0 1-1.4 0Z" clip-rule="evenodd" />
-          </svg>
-          <span class="eyebrow text-xs font-semibold uppercase tracking-[0.24em]">Default Profile</span>
-          <span class="text-xs text-muted">Applies to applications without an enabled custom profile</span>
-        </summary>
-
-        <label class="pill-toggle mt-3 inline-flex items-center gap-3 rounded-full px-4 py-2 text-sm font-medium">
-          <input v-model="config.modules.turbo.enabled" class="h-4 w-4 accent-depthxr-copper" type="checkbox" />
-          Default Profile {{ config.modules.turbo.enabled ? 'On' : 'Off' }}
-        </label>
-
-        <div v-if="!config.modules.turbo.enabled" class="mt-3 rounded-[0.9rem] border px-4 py-3 text-sm leading-6 surface-panel-strong">
-          The default profile is off — Turbo does not apply to applications without an enabled custom profile. Enabled custom profiles below still turn Turbo on for their assigned applications.
+      <!-- Frame pacing strategy -->
+      <div class="border-t pt-4" style="border-color: var(--app-border)">
+        <div class="mb-3">
+          <span class="eyebrow text-xs font-semibold uppercase tracking-[0.24em]">Frame Pacing</span>
+          <p class="mt-1 max-w-3xl text-sm leading-6 text-muted">
+            How Turbo sequences the runtime's frame wait. Auto picks the right strategy per runtime and remembers what works — leave it on Auto unless you are debugging.
+          </p>
         </div>
-      </details>
-    </article>
 
-    <!-- Frame pacing strategy -->
-    <article class="rounded-[1.25rem] border p-5 shadow-panel backdrop-blur surface-panel">
-      <div class="mb-3">
-        <h2 class="text-lg font-semibold tracking-tight">Frame Pacing</h2>
-        <p class="mt-1 max-w-3xl text-sm leading-6 text-muted">
-          How Turbo sequences the runtime's frame wait. Auto picks the right strategy per runtime and remembers what works — leave it on Auto unless you are debugging.
-        </p>
-      </div>
-
-      <label class="flex flex-wrap items-center gap-3 text-sm font-medium">
+        <label class="flex flex-wrap items-center gap-3 text-sm font-medium">
         Pacing mode
         <select
           v-model="config.modules.turbo.pacingMode"
@@ -350,7 +333,37 @@ function formatDate(unixSeconds: number): string {
         <p v-else-if="activeRuntimeLabel && !activeRuntimeHasRow && pacingRows.length > 0" class="mt-2 text-xs text-muted">
           No verdict yet for {{ activeRuntimeLabel }} — Auto will discover it on the next Turbo session.
         </p>
+        </div>
       </div>
+
+      <!-- Module-level binding — applies regardless of which profile enabled turbo -->
+      <div class="mt-4 border-t pt-4" style="border-color: var(--app-border)">
+        <ModuleBindingPanel
+          heading="Turbo Toggle Binding"
+          :binding="config.modules.turbo.toggleBinding"
+          hint="Flip Turbo on and off while in-game to compare fps and frame feel directly. Turbo starts enabled whenever it applies to the running application."
+          @edit="bindingSubPageOpen = true"
+        />
+      </div>
+
+      <details class="section-disclosure mt-4 border-t pt-4" style="border-color: var(--app-border)" open>
+        <summary class="flex items-center gap-2">
+          <svg aria-hidden="true" class="section-chevron h-3.5 w-3.5" viewBox="0 0 20 20" fill="currentColor">
+            <path fill-rule="evenodd" d="M7.2 14.8a1 1 0 0 1 0-1.4L10.6 10 7.2 6.6a1 1 0 1 1 1.4-1.4l4.1 4.1a1 1 0 0 1 0 1.4l-4.1 4.1a1 1 0 0 1-1.4 0Z" clip-rule="evenodd" />
+          </svg>
+          <span class="eyebrow text-xs font-semibold uppercase tracking-[0.24em]">Default Profile</span>
+          <span class="text-xs text-muted">Applies to applications without an enabled custom profile</span>
+        </summary>
+
+        <label class="pill-toggle mt-3 inline-flex items-center gap-3 rounded-full px-4 py-2 text-sm font-medium">
+          <input v-model="config.modules.turbo.enabled" class="h-4 w-4 accent-depthxr-copper" type="checkbox" />
+          Default Profile {{ config.modules.turbo.enabled ? 'On' : 'Off' }}
+        </label>
+
+        <div v-if="!config.modules.turbo.enabled" class="mt-3 rounded-[0.9rem] border px-4 py-3 text-sm leading-6 surface-panel-strong">
+          The default profile is off — Turbo does not apply to applications without an enabled custom profile. Enabled custom profiles below still turn Turbo on for their assigned applications.
+        </div>
+      </details>
     </article>
 
     <!-- Custom Profiles -->
