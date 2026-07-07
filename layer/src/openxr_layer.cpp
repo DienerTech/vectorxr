@@ -4231,8 +4231,8 @@ bool OpenXrLayer::IsTurboMetricsCaptureArmed(const InputBinding& binding, int so
                      (turbo_metrics_capture_armed_ ? "started" : "paused") + " via " +
                      BindingLabel(binding) + ".");
         SoundPlayer::Instance().PlayTransition(binding.sound, turbo_metrics_capture_armed_,
-                                               dll_directory_, sound_volume, L"activate.wav",
-                                               L"deactivate.wav");
+                                               dll_directory_, sound_volume, L"metrics-on.wav",
+                                               L"metrics-off.wav");
     }
 #else
     (void)binding;

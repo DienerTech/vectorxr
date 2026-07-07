@@ -296,8 +296,8 @@ function formatDeltaPercent(value: number): string {
     label="Metrics Capture Binding"
     description="Start and stop frame-pacing metric collection while in-game. Arm it once you are actually flying and pause it before loading screens or menus, so the recorded numbers reflect real play."
     none-text="No binding assigned. In keybinding mode, no metrics are recorded until a binding is set."
-    default-activate-sound="activate.wav"
-    default-deactivate-sound="deactivate.wav"
+    default-activate-sound="metrics-on.wav"
+    default-deactivate-sound="metrics-off.wav"
     @update:binding="config.modules.turbo.metricsBinding = $event"
     @close="metricsBindingSubPageOpen = false"
   />

@@ -1705,6 +1705,8 @@ fn play_test_sound(
                 Some("origin-release.wav") => "sounds/origin-release.wav",
                 Some("turbo-on.wav") => "sounds/turbo-on.wav",
                 Some("turbo-off.wav") => "sounds/turbo-off.wav",
+                Some("metrics-on.wav") => "sounds/metrics-on.wav",
+                Some("metrics-off.wav") => "sounds/metrics-off.wav",
                 _ => {
                     if activate {
                         "sounds/activate.wav"
