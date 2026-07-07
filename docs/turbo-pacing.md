@@ -149,3 +149,32 @@ appears on both the Turbo tab and the OpenXR Layers page.
 The 5 s frame-pacing debug line now includes `pacing=async|sequenced` while
 turbo is engaged. Resolution, fallback, verdicts, and suspends are logged at
 info level.
+
+## Metrics (turbo-metrics sidecar, branch `turbo-metrics`)
+
+Measures the effect of each pacing strategy on real frame pacing and shows it
+in the Turbo panel. Per EndFrame the layer buckets the frame by state — `off`
+(toggled off / suspended / not yet engaged), `async`, `sequenced` — and
+accumulates: frame count, frame-interval sum/max plus a 0.5 ms histogram (for
+p99), app-visible runtime-pacing block time (WaitFrame pass-through waits,
+the valve re-coupling wait, and the EndFrame drain/sequenced wait), fabricated
+waits, and drain timeouts. Intervals ≥ 1 s are excluded (counted as
+`discardedFrames`) so loading stalls don't drown the averages.
+
+- **Collection modes** (`turbo.metricsMode`): `always` (default), `binding`
+  (record only while the capture binding — `turbo.metricsBinding` — is armed,
+  so the user can cut loading screens/menus out of the data), `off`.
+- **Sidecar** `turbo-metrics.json` (seen-apps pattern, next to
+  runtime-pacing.json): one entry per capture session with per-state buckets
+  of display-ready stats (avg fps, avg/p99/max frame ms, avg wait-block ms).
+  Sessions are newest-first, retention-capped at 8, so history display is
+  possible later without a schema change. Flushed every ~15 s via a detached
+  async write (skipped if the previous write is in flight — the frame thread
+  never touches the filesystem) and synchronously with `live:false` at
+  session teardown. Ships in debug reports.
+- **UI**: Metrics section on the Turbo tab — collection dropdown, capture
+  binding panel, session picker, per-state table (avg fps, 1% low ≈
+  1000/p99, avg/p99 frame, wait blocked, stalls), and a "+X% avg fps vs off"
+  callout shown only when both states have ≥ 30 s captured in the same
+  session. Comparisons across states are honest only if the scenes were
+  comparable; the UI says so.

@@ -302,4 +302,33 @@ std::optional<TurboPacingSetting> ParseTurboPacingSetting(const std::string& val
     return std::nullopt;
 }
 
+const char* ToString(TurboMetricsMode mode) {
+    switch (mode) {
+    case TurboMetricsMode::kOff:
+        return "off";
+    case TurboMetricsMode::kAlways:
+        return "always";
+    case TurboMetricsMode::kBinding:
+        return "binding";
+    default:
+        return "always";
+    }
+}
+
+std::optional<TurboMetricsMode> ParseTurboMetricsMode(const std::string& value) {
+    const std::string normalized = NormalizeValue(value);
+
+    if (normalized == "off") {
+        return TurboMetricsMode::kOff;
+    }
+    if (normalized == "always") {
+        return TurboMetricsMode::kAlways;
+    }
+    if (normalized == "binding") {
+        return TurboMetricsMode::kBinding;
+    }
+
+    return std::nullopt;
+}
+
 } // namespace depthxr

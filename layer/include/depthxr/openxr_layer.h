@@ -331,6 +331,23 @@ class OpenXrLayer {
                            std::chrono::steady_clock::time_point after_drain,
                            std::chrono::steady_clock::time_point after_end,
                            bool turbo_engaged);
+    // Turbo metrics capture: per-pacing-state (off/async/sequenced) frame
+    // stats, flushed to the turbo-metrics sidecar so the app can show the
+    // measured effect of each strategy. Runs at the tail of ForwardEndFrame
+    // on the frame thread; the periodic flush hands the snapshot to a
+    // detached-async write so the frame thread never touches the filesystem.
+    // Config values are passed in (copied under the config lock by
+    // ForwardEndFrame) because the recorder runs after that lock is released.
+    void RecordTurboMetricsFrame(bool turbo_engaged,
+                                 double frame_blocked_ms,
+                                 bool timed_out,
+                                 TurboMetricsMode metrics_mode,
+                                 const InputBinding& metrics_binding,
+                                 bool metrics_available,
+                                 int sound_volume);
+    bool IsTurboMetricsCaptureArmed(const InputBinding& binding, int sound_volume);
+    void FlushTurboMetrics(bool final_flush);
+    void ResetTurboMetricsState();
     bool IsQuadViewsActive() const;
     void ResetSwapchainState();
     void LogSwapchainSummary(XrSwapchain swapchain, const SwapchainInfo& info, std::string_view event_name);
@@ -652,6 +669,48 @@ class OpenXrLayer {
     double pacing_wait_max_ms_{0.0};
     uint32_t pacing_wait_samples_{0};
     uint32_t pacing_fabricated_waits_{0};
+
+    // Turbo metrics capture: frame stats segmented by pacing state so the
+    // app can compare turbo-off/async/sequenced within a session. Frame-thread
+    // only except the *_pending_ counters (turbo_mutex_), which WaitFrame-side
+    // paths feed and RecordTurboMetricsFrame drains once per EndFrame.
+    // Histogram bins are 0.5 ms wide (256 ms cap) — enough resolution for a
+    // p99 frame time without meaningful memory cost.
+    static constexpr std::size_t kTurboMetricsHistogramBins = 512;
+    static constexpr double kTurboMetricsHistogramBinMs = 0.5;
+    struct TurboMetricsAccum {
+        std::int64_t frames{0};
+        double delta_sum_ms{0.0};
+        double delta_max_ms{0.0};
+        double wait_block_sum_ms{0.0};
+        std::int64_t fabricated_waits{0};
+        std::int64_t drain_timeouts{0};
+        std::int64_t discarded_frames{0};
+        std::array<std::uint32_t, kTurboMetricsHistogramBins> histogram{};
+    };
+    // Indexed by pacing state: 0 = off, 1 = async, 2 = sequenced.
+    std::array<TurboMetricsAccum, 3> turbo_metrics_accum_{};
+    bool turbo_metrics_capture_armed_{false};
+    bool turbo_metrics_binding_was_down_{false};
+    std::optional<std::chrono::steady_clock::time_point> turbo_metrics_binding_last_poll_time_;
+    bool turbo_metrics_binding_down_cached_{false};
+    // Cleared whenever capture pauses so the first frame interval after a
+    // resume (which spans the pause) never lands in the stats.
+    bool turbo_metrics_was_capturing_{false};
+    std::optional<std::chrono::steady_clock::time_point> turbo_metrics_last_end_time_;
+    std::string turbo_metrics_session_id_;
+    std::int64_t turbo_metrics_started_unix_seconds_{0};
+    // Mode observed while recording; kept as a member so the teardown flush
+    // never has to touch resolved_settings_ outside the config lock.
+    TurboMetricsMode turbo_metrics_collection_mode_{TurboMetricsMode::kAlways};
+    std::optional<std::chrono::steady_clock::time_point> turbo_metrics_last_flush_time_;
+    bool turbo_metrics_dirty_{false};
+    std::future<void> turbo_metrics_write_future_;
+    // Guarded by turbo_mutex_: app-visible runtime-pacing block time observed
+    // on the WaitFrame side (pass-through waits, valve re-coupling) and
+    // fabricated-wait count since the last EndFrame.
+    double turbo_metrics_wait_pending_ms_{0.0};
+    std::int64_t turbo_metrics_fabricated_pending_{0};
     bool quad_views_extension_requested_{false};
     bool varjo_foveated_rendering_extension_requested_{false};
     bool eye_gaze_extension_enabled_{false};

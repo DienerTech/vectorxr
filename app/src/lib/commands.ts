@@ -4,6 +4,7 @@ import {
   normalizeConfig,
   type ConfigEnvelope,
   type RuntimePacingObservation,
+  type TurboMetricsSession,
   type VectorXRConfig,
 } from './model'
 
@@ -334,6 +335,33 @@ export async function clearRuntimePacingObservation(runtimeName: string): Promis
   }
 
   return invoke<RuntimePacingEnvelope>('clear_runtime_pacing_observation', { runtimeName })
+}
+
+export interface TurboMetricsEnvelope {
+  path: string
+  sessions: TurboMetricsSession[]
+}
+
+export async function loadTurboMetrics(): Promise<TurboMetricsEnvelope> {
+  if (!tauriAvailable()) {
+    return {
+      path: './config/turbo-metrics.json',
+      sessions: [],
+    }
+  }
+
+  return invoke<TurboMetricsEnvelope>('load_turbo_metrics')
+}
+
+export async function clearTurboMetrics(): Promise<TurboMetricsEnvelope> {
+  if (!tauriAvailable()) {
+    return {
+      path: './config/turbo-metrics.json',
+      sessions: [],
+    }
+  }
+
+  return invoke<TurboMetricsEnvelope>('clear_turbo_metrics')
 }
 
 export async function loadOpenXrLayers(): Promise<OpenXrLayerSnapshot> {

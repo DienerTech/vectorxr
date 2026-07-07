@@ -202,6 +202,11 @@ export type TurboPacingMode = 'async' | 'sequenced'
 // and runtime pins entirely.
 export type TurboPacingSetting = 'auto' | TurboPacingMode
 
+// When the layer captures frame-pacing metrics: 'always' whenever turbo
+// applies to the running app, 'binding' only while the capture binding is
+// armed (cuts loading screens/menus out of the data), 'off' never.
+export type TurboMetricsMode = 'off' | 'always' | 'binding'
+
 export interface TurboModuleConfig {
   enabled: boolean
   toggleBinding: InputBinding
@@ -209,6 +214,8 @@ export interface TurboModuleConfig {
   // Per-runtime user overrides keyed by the exact OpenXR runtime name.
   // Only consulted when pacingMode is 'auto'.
   runtimePins: Record<string, TurboPacingMode>
+  metricsMode: TurboMetricsMode
+  metricsBinding: InputBinding
   profiles: TurboProfileConfig[]
 }
 
@@ -224,6 +231,36 @@ export interface RuntimePacingObservation {
   lastUsedUnixSeconds: number
   probeTimeouts: number
   stableSeconds: number
+}
+
+// One state's aggregate within a layer-written turbo-metrics session:
+// display-ready frame pacing stats for turbo off / async / sequenced.
+export interface TurboMetricsBucket {
+  state: 'off' | 'async' | 'sequenced' | string
+  frames: number
+  seconds: number
+  avgFps: number
+  avgFrameMs: number
+  p99FrameMs: number
+  maxFrameMs: number
+  avgWaitBlockMs: number
+  fabricatedWaits: number
+  drainTimeouts: number
+  discardedFrames: number
+}
+
+// One capture session from the layer-written turbo-metrics.json sidecar.
+// Sessions arrive newest-first with a small retention cap.
+export interface TurboMetricsSession {
+  sessionId: string
+  appName: string
+  runtimeName: string
+  layerVersion: string
+  collectionMode: string
+  live: boolean
+  startedUnixSeconds: number
+  updatedUnixSeconds: number
+  buckets: TurboMetricsBucket[]
 }
 
 export interface VectorXRConfig {
@@ -275,6 +312,10 @@ function normalizeString(value: unknown, fallback: string): string {
 
 function normalizeTurboPacingSetting(value: unknown): TurboPacingSetting {
   return value === 'async' || value === 'sequenced' ? value : 'auto'
+}
+
+function normalizeTurboMetricsMode(value: unknown): TurboMetricsMode {
+  return value === 'off' || value === 'binding' ? value : 'always'
 }
 
 function normalizeTurboRuntimePins(value: unknown): Record<string, TurboPacingMode> {
@@ -470,6 +511,8 @@ export function defaultConfig(): VectorXRConfig {
         toggleBinding: defaultNoneBinding(),
         pacingMode: 'auto',
         runtimePins: {},
+        metricsMode: 'always',
+        metricsBinding: defaultNoneBinding(),
         profiles: [],
       },
     },
@@ -894,6 +937,8 @@ function normalizeVectorXRConfig(value: unknown): VectorXRConfig {
         toggleBinding: normalizeInputBinding(turbo.toggleBinding, fallback.modules.turbo.toggleBinding),
         pacingMode: normalizeTurboPacingSetting(turbo.pacingMode),
         runtimePins: normalizeTurboRuntimePins(turbo.runtimePins),
+        metricsMode: normalizeTurboMetricsMode(turbo.metricsMode),
+        metricsBinding: normalizeInputBinding(turbo.metricsBinding, fallback.modules.turbo.metricsBinding),
         profiles: turboProfileValues.map((profileValue) => {
           const profile = isRecord(profileValue) ? profileValue : {}
           const applicationIds = applicationIdsFromProfile(profile, applications)

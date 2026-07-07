@@ -5,6 +5,7 @@ add_library(
     src/input_devices.cpp
     src/runtime_pacing.cpp
     src/seen_apps.cpp
+    src/turbo_metrics.cpp
     src/settings.cpp
     src/sound_player.cpp
     src/settings_resolver.cpp

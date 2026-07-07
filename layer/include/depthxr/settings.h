@@ -289,6 +289,16 @@ enum class TurboPacingSetting {
     kSequenced,
 };
 
+// When turbo's frame-pacing metrics are captured. kAlways records whenever a
+// session with turbo available is rendering; kBinding records only while the
+// capture binding is armed, so the user can cut loading screens and menus out
+// of the data; kOff disables capture entirely.
+enum class TurboMetricsMode {
+    kOff,
+    kAlways,
+    kBinding,
+};
+
 struct TurboModuleConfig {
     bool enabled{false};
     // Optional in-session A/B toggle, mirroring the Depth toggle binding.
@@ -297,6 +307,9 @@ struct TurboModuleConfig {
     // Per-runtime user overrides, keyed by exact xrGetInstanceProperties
     // runtimeName. Only consulted when pacing_mode is kAuto.
     std::vector<std::pair<std::string, TurboPacingMode>> runtime_pins;
+    TurboMetricsMode metrics_mode{TurboMetricsMode::kAlways};
+    // Begin/end metric capture while in-game (kBinding mode only).
+    InputBinding metrics_binding;
     std::vector<TurboProfile> profiles;
 };
 
@@ -305,6 +318,8 @@ struct TurboResolvedSettings {
     InputBinding toggle_binding;
     TurboPacingSetting pacing_mode{TurboPacingSetting::kAuto};
     std::vector<std::pair<std::string, TurboPacingMode>> runtime_pins;
+    TurboMetricsMode metrics_mode{TurboMetricsMode::kAlways};
+    InputBinding metrics_binding;
 };
 
 struct ConfigDocument {
@@ -333,6 +348,8 @@ const char* ToString(TurboPacingMode mode);
 std::optional<TurboPacingMode> ParseTurboPacingMode(const std::string& value);
 const char* ToString(TurboPacingSetting setting);
 std::optional<TurboPacingSetting> ParseTurboPacingSetting(const std::string& value);
+const char* ToString(TurboMetricsMode mode);
+std::optional<TurboMetricsMode> ParseTurboMetricsMode(const std::string& value);
 
 const char* ToString(ActivationMode mode);
 std::optional<ActivationMode> ParseActivationMode(const std::string& value);
