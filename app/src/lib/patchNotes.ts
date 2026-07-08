@@ -8,6 +8,20 @@ export interface PatchNoteEntry {
 
 export const patchNotes: PatchNoteEntry[] = [
   {
+    version: '0.12.2',
+    date: '2026-07-07',
+    title: 'Turbo Metrics',
+    summary: 'Measure what Turbo actually does to your frame pacing - fps, frame times, and pacing wait time recorded per strategy and compared in the Turbo panel - plus Turbo engagement fixes validated on MSFS 2024.',
+    items: [
+      'Turbo Metrics: avg fps, 1% low, avg/p99 frame times, and runtime pacing wait time are recorded separately for Turbo off, async, and sequenced, with a per-session comparison in the Turbo panel.',
+      'Metrics collection is configurable: always-on, off, or gated behind a new capture keybinding (with its own sound cues) so loading screens and menus stay out of your data.',
+      'Fixed a game freeze when switching to VR mode in MSFS 2024 while Turbo was available (frame-call ordering during Turbo engagement).',
+      'Turbo now waits at least 5 seconds after a session starts before engaging, so it never kicks in mid VR-mode transition.',
+      'Turbo panel now explains that Sequenced-pacing runtimes (Pimax, Oculus, Varjo) cannot exceed a runtime-enforced framerate lock.',
+      'Sharper diagnostics: runtime submit failures, shouldRender changes, and empty-frame transitions are now logged, making black-screen reports self-explanatory.',
+    ],
+  },
+  {
     version: '0.12.1',
     date: '2026-07-06',
     title: 'Turbo Pacing Auto-Discovery',

@@ -1,7 +1,7 @@
 {
   "name": "vectorxr-app",
   "private": true,
-  "version": "0.12.1",
+  "version": "0.12.2",
   "license": "MPL-2.0",
   "type": "module",
   "scripts": {

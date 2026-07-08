@@ -678,6 +678,10 @@ function formatDeltaPercent(value: number): string {
           </div>
 
           <div class="rounded-[1rem] border px-4 py-4 surface-panel">
+            Know the limit: on runtimes that require Sequenced pacing (Pimax, Oculus, Varjo), Turbo cannot raise a framerate the runtime enforces through its frame wait — a locked or half-rate cap stays locked. What Turbo reclaims there is the time your game spends blocked on pacing, which you can see directly in the Metrics section.
+          </div>
+
+          <div class="rounded-[1rem] border px-4 py-4 surface-panel">
             Turbo works alongside all of VectorXR's other enhancements, including the Varjo quadviews compatibility path — VectorXR sequences its frame handling so the two never conflict.
           </div>
 
