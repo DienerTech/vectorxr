@@ -8,6 +8,15 @@ export interface PatchNoteEntry {
 
 export const patchNotes: PatchNoteEntry[] = [
   {
+    version: '0.12.3',
+    date: '2026-07-08',
+    title: 'Pivot Pitch Fix',
+    summary: 'Pivot\'s extra pitch now rotates around your own view axis, fixing inverted or rolled pitch response for cockpits facing away from the headset\'s calibrated forward.',
+    items: [
+      'Fixed Pivot pitch rotating around the playspace axis instead of your current view heading - pitch pivot felt inverted or rolled sideways when your seat faced away from the headset\'s room-calibration forward, while yaw was unaffected.',
+    ],
+  },
+  {
     version: '0.12.2',
     date: '2026-07-07',
     title: 'Turbo Metrics',
