@@ -720,12 +720,13 @@ XrQuaternionf PitchQuaternion(float pitch_radians) {
 
 XrPosef MultiplyPoses(const XrPosef& local_pose, const XrPosef& parent_pose) {
     const XrQuaternionf parent_orientation = NormalizeQuaternion(parent_pose.orientation);
+    const XrVector3f rotated_position = RotateVector(parent_orientation, local_pose.position);
     return {
         NormalizeQuaternion(MultiplyQuaternion(parent_orientation, local_pose.orientation)),
         {
-            RotateVector(parent_orientation, local_pose.position).x + parent_pose.position.x,
-            RotateVector(parent_orientation, local_pose.position).y + parent_pose.position.y,
-            RotateVector(parent_orientation, local_pose.position).z + parent_pose.position.z,
+            rotated_position.x + parent_pose.position.x,
+            rotated_position.y + parent_pose.position.y,
+            rotated_position.z + parent_pose.position.z,
         },
     };
 }
@@ -742,8 +743,17 @@ XrPosef ApplyExtraRotationToPose(const XrPosef& pose, float extra_yaw_radians, f
         return pose;
     }
 
+    // Extra pitch must rotate about the view's own right axis, not the
+    // reference space's X axis; a fixed world-X pitch inverts (and rolls) for
+    // users whose seated forward is yawed away from the space's forward.
+    // Yaw(heading + extraYaw) * Pitch(extraPitch) * Yaw(-heading) pitches
+    // about the right axis of the final (extra-yawed) view heading, and
+    // reduces to the plain Yaw * Pitch composition when heading is zero.
+    const float heading_radians = static_cast<float>(ExtractPoseYawRadians(pose));
     const XrQuaternionf extra_rotation = NormalizeQuaternion(
-        MultiplyQuaternion(YawQuaternion(extra_yaw_radians), PitchQuaternion(extra_pitch_radians)));
+        MultiplyQuaternion(YawQuaternion(heading_radians + extra_yaw_radians),
+                           MultiplyQuaternion(PitchQuaternion(extra_pitch_radians),
+                                              YawQuaternion(-heading_radians))));
     return {
         NormalizeQuaternion(MultiplyQuaternion(extra_rotation, pose.orientation)),
         pose.position,
@@ -762,28 +772,6 @@ void CopyName(char* destination, size_t capacity, std::string_view value) {
     const size_t copy_count = std::min(capacity - 1, value.size());
     std::memcpy(destination, value.data(), copy_count);
     destination[copy_count] = '\0';
-}
-
-ViewOrientation ApplyExtraRotationToOrientation(const ViewOrientation& orientation,
-                                                double extra_yaw_radians,
-                                                double extra_pitch_radians) {
-    const XrPosef pose{
-        {static_cast<float>(orientation.x),
-         static_cast<float>(orientation.y),
-         static_cast<float>(orientation.z),
-         static_cast<float>(orientation.w)},
-        {0.0f, 0.0f, 0.0f},
-    };
-    const XrPosef rotated_pose =
-        ApplyExtraRotationToPose(pose,
-                                 static_cast<float>(extra_yaw_radians),
-                                 static_cast<float>(extra_pitch_radians));
-    return {
-        rotated_pose.orientation.x,
-        rotated_pose.orientation.y,
-        rotated_pose.orientation.z,
-        rotated_pose.orientation.w,
-    };
 }
 
 double ComputeTimeBasedBlend(double smoothing, double delta_seconds) {
