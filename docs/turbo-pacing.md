@@ -66,6 +66,26 @@ Diagnostic signature in debug logs: `turboDrainAndBegin max` pinned at ~250 ms,
   pacing-mode changes are deferred to the next session once the pipeline is
   established.
 
+  **MSFS2024 establishment lessons (2026-07-07):** the first MSFS2024 VR test
+  froze the game on PiOpenXR on the first pipelined frame — its Zouna engine
+  orders frame calls differently than DCS: the establishment handshake
+  completed *while the previous frame's EndFrame was already in flight*, so
+  the owed begin was on course to reach the runtime as Begin(N+1) before
+  End(N). Three hardenings (all on `turbo-metrics`):
+  - An owed establishment begin arriving while ForwardEndFrame is mid-submit
+    is **deferred** (swallowed, flagged) and issued on the frame thread right
+    after the submit returns — the runtime always sees End(N) → Begin(N+1).
+  - The compensation wait+begin is **skipped while the establishment begin is
+    still owed** (it would duplicate the handshake's real wait from the
+    submit thread — the PiOpenXR wedge class).
+  - The first engage additionally requires **≥5 s of session age**: MSFS
+    renders at full rate through its VR-mode transition, so the healthy-frame
+    streak alone passed within a second and engaged turbo mid-transition.
+  Every runtime call in the turbo window now has budgeted `Turbo-diag`
+  markers (pre-submit state snapshot, drain, compensation, owed/deferred
+  begin, wait pass-through, valve re-coupling), so any future wedge
+  pinpoints its exact call site from the log tail.
+
 ## Cadence gate (added after the first field test)
 
 A stalled runtime wait is only evidence against a pacing mode when the app is

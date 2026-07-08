@@ -582,6 +582,11 @@ class OpenXrLayer {
     // paused, so loading screens cannot poison verdicts.
     uint32_t turbo_cadence_healthy_streak_{0};
     bool turbo_cadence_ready_{false};
+    // Set when xrBeginSession succeeds. The first turbo engage additionally
+    // requires the session to be a few seconds old: MSFS2024 pumps full-rate
+    // frames immediately during its VR-mode transition, so the healthy-streak
+    // gate alone passed within a second and turbo engaged mid-transition.
+    std::optional<std::chrono::steady_clock::time_point> session_begin_wall_time_;
     bool turbo_cadence_pause_logged_{false};
     double turbo_last_frame_blocked_ms_{0.0};
     // Sequenced pacing state machine (turbo_mutex_). DCS overlaps xrWaitFrame
@@ -606,6 +611,15 @@ class OpenXrLayer {
     // The app's next xrBeginFrame must pass through to the runtime (its wait
     // ran real during the establishment handshake).
     bool turbo_begin_owed_{false};
+    // (turbo_mutex_) True while ForwardEndFrame is between its state snapshot
+    // and the runtime xrEndFrame returning. An owed establishment begin that
+    // arrives in that window is swallowed and flagged (turbo_begin_deferred_)
+    // so it can be issued on the frame thread right after the submit —
+    // otherwise Begin(N+1) reaches the runtime before End(N), which is how
+    // MSFS2024 orders its frame calls and how it wedged PiOpenXR on the first
+    // pipelined frame (2026-07-07).
+    bool turbo_end_frame_in_flight_{false};
+    bool turbo_begin_deferred_{false};
     // The frame the app will submit next has an open (begun) runtime frame.
     // Set by our pre-begin, a compensation begin, or the app's own begin
     // passing through; consumed at EndFrame. A fabricated wait whose frame
