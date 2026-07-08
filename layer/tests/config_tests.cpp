@@ -12,6 +12,7 @@
 #include "depthxr/runtime_pacing.h"
 #include "depthxr/seen_apps.h"
 #include "depthxr/settings_resolver.h"
+#include "depthxr/turbo_metrics.h"
 
 namespace {
 
@@ -676,6 +677,176 @@ void TestTurboModuleOptional() {
     Expect(result.document.turbo.runtime_pins.empty(), "Turbo runtime pins should default empty");
     const depthxr::ResolvedRuntimeConfig resolved = depthxr::ResolveRuntimeConfig(result.document, "any.exe");
     Expect(!resolved.turbo.enabled, "Turbo resolved settings should default to disabled");
+}
+
+void TestTurboMetricsSettingsParsing() {
+    const std::string json = R"json(
+{
+  "version": 3,
+  "core": { "enabled": true, "logLevel": "info", "logRetentionFiles": 7 },
+  "applications": [],
+  "modules": {
+    "depthxr": {
+      "enabled": false,
+      "defaults": { "stereoBoost": 1.0, "convergence": 0.0 },
+      "bindings": { "toggleEnabled": { "type": "none" } },
+      "profiles": []
+    },
+    "pivotxr": { "enabled": false, "defaults": {}, "profiles": [] },
+    "turbo": {
+      "enabled": true,
+      "pacingMode": "auto",
+      "metricsMode": "binding",
+      "metricsBinding": { "type": "keyboard", "chord": ["ctrl", "f10"] },
+      "toggleBinding": { "type": "none" },
+      "profiles": []
+    }
+  }
+}
+)json";
+
+    const depthxr::ParseResult result = depthxr::ParseConfig(json);
+    Expect(result.ok, "Config parser rejected turbo metrics config: " + result.error);
+    Expect(result.document.turbo.metrics_mode == depthxr::TurboMetricsMode::kBinding,
+           "Turbo metrics mode should parse binding");
+    Expect(result.document.turbo.metrics_binding.type == depthxr::InputBindingType::Keyboard,
+           "Turbo metrics binding should parse as keyboard");
+
+    const depthxr::ResolvedRuntimeConfig resolved = depthxr::ResolveRuntimeConfig(result.document, "any.exe");
+    Expect(resolved.turbo.metrics_mode == depthxr::TurboMetricsMode::kBinding,
+           "Turbo metrics mode should resolve through");
+    Expect(resolved.turbo.metrics_binding.chord.size() == 2,
+           "Turbo metrics binding chord should resolve through");
+
+    // Absent keys default to always-on capture with no binding.
+    std::string without_metrics = json;
+    const std::string mode_needle = "\"metricsMode\": \"binding\",";
+    without_metrics.replace(without_metrics.find(mode_needle), mode_needle.size(), "");
+    const std::string binding_needle =
+        "\"metricsBinding\": { \"type\": \"keyboard\", \"chord\": [\"ctrl\", \"f10\"] },";
+    without_metrics.replace(without_metrics.find(binding_needle), binding_needle.size(), "");
+    const depthxr::ParseResult default_result = depthxr::ParseConfig(without_metrics);
+    Expect(default_result.ok, "Config parser rejected config without metrics keys: " + default_result.error);
+    Expect(default_result.document.turbo.metrics_mode == depthxr::TurboMetricsMode::kAlways,
+           "Turbo metrics mode should default to always");
+    Expect(default_result.document.turbo.metrics_binding.type == depthxr::InputBindingType::None,
+           "Turbo metrics binding should default to none");
+
+    // Invalid values are rejected rather than silently defaulted.
+    std::string invalid = json;
+    const std::string needle = "\"metricsMode\": \"binding\"";
+    invalid.replace(invalid.find(needle), needle.size(), "\"metricsMode\": \"sometimes\"");
+    const depthxr::ParseResult invalid_result = depthxr::ParseConfig(invalid);
+    Expect(!invalid_result.ok, "Config parser should reject an unknown turbo metrics mode");
+}
+
+void TestTurboMetricsSessionRoundTrip() {
+    const std::filesystem::path test_directory =
+        std::filesystem::current_path() / "build" / "vectorxr-test-turbo-metrics";
+    std::error_code error;
+    std::filesystem::remove_all(test_directory, error);
+    error.clear();
+    std::filesystem::create_directories(test_directory, error);
+    Expect(!error, "Failed to create turbo-metrics test directory: " + error.message());
+
+    const std::filesystem::path path = test_directory / "turbo-metrics.json";
+    std::string record_error;
+
+    depthxr::TurboMetricsSession session;
+    session.session_id = "DCS.exe-1000";
+    session.app_name = "DCS.exe";
+    session.runtime_name = "PiOpenXR";
+    session.layer_version = "0.12.1";
+    session.collection_mode = "binding";
+    session.live = true;
+    session.started_unix_seconds = 1000;
+    session.updated_unix_seconds = 1015;
+
+    depthxr::TurboMetricsBucket off_bucket;
+    off_bucket.state = "off";
+    off_bucket.frames = 500;
+    off_bucket.seconds = 7.25;
+    off_bucket.avg_fps = 69.12;
+    off_bucket.avg_frame_ms = 14.47;
+    off_bucket.p99_frame_ms = 22.5;
+    off_bucket.max_frame_ms = 41.03;
+    off_bucket.avg_wait_block_ms = 6.81;
+    session.buckets.push_back(off_bucket);
+
+    depthxr::TurboMetricsBucket seq_bucket;
+    seq_bucket.state = "sequenced";
+    seq_bucket.frames = 900;
+    seq_bucket.seconds = 10.0;
+    seq_bucket.avg_fps = 90.0;
+    seq_bucket.avg_frame_ms = 11.11;
+    seq_bucket.p99_frame_ms = 15.5;
+    seq_bucket.max_frame_ms = 30.2;
+    seq_bucket.avg_wait_block_ms = 1.42;
+    seq_bucket.fabricated_waits = 890;
+    seq_bucket.drain_timeouts = 1;
+    seq_bucket.discarded_frames = 3;
+    session.buckets.push_back(seq_bucket);
+
+    Expect(depthxr::RecordTurboMetricsSession(path, session, &record_error),
+           "Failed to record turbo metrics session: " + record_error);
+
+    // Update the same session (periodic flush) — upsert, not append.
+    session.updated_unix_seconds = 1030;
+    session.live = false;
+    session.buckets[1].frames = 1800;
+    Expect(depthxr::RecordTurboMetricsSession(path, session, &record_error),
+           "Failed to upsert turbo metrics session: " + record_error);
+
+    auto sessions = depthxr::ReadTurboMetricsSessions(path);
+    Expect(sessions.size() == 1, "Turbo metrics session upsert should not duplicate");
+    Expect(sessions[0].session_id == "DCS.exe-1000", "Turbo metrics session id mismatch");
+    Expect(sessions[0].app_name == "DCS.exe", "Turbo metrics app name mismatch");
+    Expect(sessions[0].runtime_name == "PiOpenXR", "Turbo metrics runtime name mismatch");
+    Expect(sessions[0].collection_mode == "binding", "Turbo metrics collection mode mismatch");
+    Expect(!sessions[0].live, "Turbo metrics live flag should update on upsert");
+    Expect(sessions[0].updated_unix_seconds == 1030, "Turbo metrics updated timestamp mismatch");
+    Expect(sessions[0].buckets.size() == 2, "Turbo metrics bucket count mismatch");
+    Expect(sessions[0].buckets[0].state == "off", "Turbo metrics bucket order mismatch");
+    Expect(sessions[0].buckets[0].frames == 500, "Turbo metrics off bucket frames mismatch");
+    Expect(std::abs(sessions[0].buckets[0].avg_fps - 69.12) < 0.001,
+           "Turbo metrics off bucket avgFps mismatch");
+    Expect(std::abs(sessions[0].buckets[0].avg_wait_block_ms - 6.81) < 0.001,
+           "Turbo metrics off bucket avgWaitBlockMs mismatch");
+    Expect(sessions[0].buckets[1].frames == 1800, "Turbo metrics sequenced bucket frames mismatch");
+    Expect(sessions[0].buckets[1].fabricated_waits == 890,
+           "Turbo metrics sequenced bucket fabricatedWaits mismatch");
+    Expect(sessions[0].buckets[1].drain_timeouts == 1,
+           "Turbo metrics sequenced bucket drainTimeouts mismatch");
+    Expect(sessions[0].buckets[1].discarded_frames == 3,
+           "Turbo metrics sequenced bucket discardedFrames mismatch");
+    Expect(std::abs(sessions[0].buckets[1].p99_frame_ms - 15.5) < 0.001,
+           "Turbo metrics sequenced bucket p99FrameMs mismatch");
+
+    // Retention: the newest sessions win, capped at kTurboMetricsRetainedSessions.
+    for (int i = 0; i < 12; ++i) {
+        depthxr::TurboMetricsSession extra;
+        extra.session_id = "extra-" + std::to_string(i);
+        extra.app_name = "other.exe";
+        extra.collection_mode = "always";
+        extra.started_unix_seconds = 2000 + i;
+        extra.updated_unix_seconds = 2000 + i;
+        depthxr::TurboMetricsBucket bucket;
+        bucket.state = "async";
+        bucket.frames = 10 + i;
+        extra.buckets.push_back(bucket);
+        Expect(depthxr::RecordTurboMetricsSession(path, extra, &record_error),
+               "Failed to record extra turbo metrics session: " + record_error);
+    }
+    sessions = depthxr::ReadTurboMetricsSessions(path);
+    Expect(sessions.size() == depthxr::kTurboMetricsRetainedSessions,
+           "Turbo metrics retention cap not applied");
+    Expect(sessions.front().session_id == "extra-11", "Turbo metrics sessions should be newest-first");
+    for (const auto& retained : sessions) {
+        Expect(retained.session_id != "DCS.exe-1000",
+               "Oldest turbo metrics session should have been evicted");
+    }
+
+    std::filesystem::remove_all(test_directory, error);
 }
 
 void TestQuadViewsProfileResolution() {
@@ -1377,6 +1548,8 @@ int main() {
     TestTurboModuleResolution();
     TestTurboPacingModeParsing();
     TestTurboModuleOptional();
+    TestTurboMetricsSettingsParsing();
+    TestTurboMetricsSessionRoundTrip();
     TestQuadViewsProfileResolution();
     TestEnabledProfileOverridesDisabledDefault();
     TestInvalidPivotActivationBindingRejected();

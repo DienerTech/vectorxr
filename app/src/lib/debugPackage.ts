@@ -1,6 +1,6 @@
 import type { ActiveRuntimeInfo, LogSnapshot, OpenXrLayerSnapshot, SeenApplication } from './commands'
 import type { HealthSummary } from './health'
-import type { RuntimePacingObservation, VectorXRConfig } from './model'
+import type { RuntimePacingObservation, TurboMetricsSession, VectorXRConfig } from './model'
 
 interface SaveFilePickerHandle {
   createWritable(): Promise<{
@@ -27,6 +27,8 @@ interface DebugPackageInput {
   seenApps: SeenApplication[]
   runtimePacingPath: string
   runtimePacing: RuntimePacingObservation[]
+  turboMetricsPath: string
+  turboMetrics: TurboMetricsSession[]
   activeRuntime: ActiveRuntimeInfo | null
   logSnapshot: LogSnapshot | null
   openXrLayerSnapshot: OpenXrLayerSnapshot | null
@@ -207,6 +209,10 @@ export function createDebugPackage(input: DebugPackageInput): Blob {
       path: input.runtimePacingPath,
       activeRuntime: input.activeRuntime,
       observations: input.runtimePacing,
+    }),
+    stringEntry('turbo-metrics.json', {
+      path: input.turboMetricsPath,
+      sessions: input.turboMetrics,
     }),
     stringEntry('openxr-layer-snapshot.json', input.openXrLayerSnapshot ?? { slices: [] }),
     stringEntry('build-info.json', {

@@ -227,6 +227,8 @@ TurboResolvedSettings ResolveTurboSettings(const ConfigDocument& config, std::st
     resolved.toggle_binding = config.turbo.toggle_binding;
     resolved.pacing_mode = config.turbo.pacing_mode;
     resolved.runtime_pins = config.turbo.runtime_pins;
+    resolved.metrics_mode = config.turbo.metrics_mode;
+    resolved.metrics_binding = config.turbo.metrics_binding;
 
     const RegisteredApplication* application = FindMatchingApplication(config, exe_name);
     if (application) {

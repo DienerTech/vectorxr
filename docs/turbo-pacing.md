@@ -66,6 +66,26 @@ Diagnostic signature in debug logs: `turboDrainAndBegin max` pinned at ~250 ms,
   pacing-mode changes are deferred to the next session once the pipeline is
   established.
 
+  **MSFS2024 establishment lessons (2026-07-07):** the first MSFS2024 VR test
+  froze the game on PiOpenXR on the first pipelined frame — its Zouna engine
+  orders frame calls differently than DCS: the establishment handshake
+  completed *while the previous frame's EndFrame was already in flight*, so
+  the owed begin was on course to reach the runtime as Begin(N+1) before
+  End(N). Three hardenings (all on `turbo-metrics`):
+  - An owed establishment begin arriving while ForwardEndFrame is mid-submit
+    is **deferred** (swallowed, flagged) and issued on the frame thread right
+    after the submit returns — the runtime always sees End(N) → Begin(N+1).
+  - The compensation wait+begin is **skipped while the establishment begin is
+    still owed** (it would duplicate the handshake's real wait from the
+    submit thread — the PiOpenXR wedge class).
+  - The first engage additionally requires **≥5 s of session age**: MSFS
+    renders at full rate through its VR-mode transition, so the healthy-frame
+    streak alone passed within a second and engaged turbo mid-transition.
+  Every runtime call in the turbo window now has budgeted `Turbo-diag`
+  markers (pre-submit state snapshot, drain, compensation, owed/deferred
+  begin, wait pass-through, valve re-coupling), so any future wedge
+  pinpoints its exact call site from the log tail.
+
 ## Cadence gate (added after the first field test)
 
 A stalled runtime wait is only evidence against a pacing mode when the app is
@@ -149,3 +169,54 @@ appears on both the Turbo tab and the OpenXR Layers page.
 The 5 s frame-pacing debug line now includes `pacing=async|sequenced` while
 turbo is engaged. Resolution, fallback, verdicts, and suspends are logged at
 info level.
+
+## Field findings, 2026-07-07 (metrics-instrumented)
+
+- **The wait/submit interlock is a driver property, not a runtime property.**
+  SteamVR driving a Crystal through Pimax's `aapvr` driver interlocks exactly
+  like PiOpenXR — the async preset stalled twice and level-1 fell back to
+  sequenced within 2 frames (as designed, no suspend). "SteamVR → async" in
+  the seed table really means "SteamVR with a non-interlocking driver".
+- **Sequenced pacing cannot lift a wait-enforced fps lock.** Measured with
+  Pimax's 45 fps lock + smart smoothing: wait-block 16.5 ms/frame with turbo
+  off, 15.8 ms with turbo on, fps identical — the synchronous post-submit
+  wait absorbs the pacing gate on the frame thread. On interlocking drivers
+  turbo is therefore a wait-latency/CPU-headroom tool (measured 2.9 ms/frame
+  reclaimed at the 90 Hz cap), never an fps uplift. Uplift requires async,
+  i.e. a non-interlocking driver.
+- **Known-unsupported combo**: DCS + SteamVR runtime + synthesized quadviews
+  renders exactly one (perfectly composited) frame, then silently submits
+  layerCount=0 forever — black screen with a healthy 45 fps frame loop and
+  no error anywhere. Undiagnosed; no benefit to the config on Pimax hardware,
+  so parked. Black-screen forensics (runtime EndFrame failure logging,
+  shouldRender transitions, submitting→empty transitions, all budgeted
+  per session) were added so a future repro self-diagnoses.
+
+## Metrics (turbo-metrics sidecar, branch `turbo-metrics`)
+
+Measures the effect of each pacing strategy on real frame pacing and shows it
+in the Turbo panel. Per EndFrame the layer buckets the frame by state — `off`
+(toggled off / suspended / not yet engaged), `async`, `sequenced` — and
+accumulates: frame count, frame-interval sum/max plus a 0.5 ms histogram (for
+p99), app-visible runtime-pacing block time (WaitFrame pass-through waits,
+the valve re-coupling wait, and the EndFrame drain/sequenced wait), fabricated
+waits, and drain timeouts. Intervals ≥ 1 s are excluded (counted as
+`discardedFrames`) so loading stalls don't drown the averages.
+
+- **Collection modes** (`turbo.metricsMode`): `always` (default), `binding`
+  (record only while the capture binding — `turbo.metricsBinding` — is armed,
+  so the user can cut loading screens/menus out of the data), `off`.
+- **Sidecar** `turbo-metrics.json` (seen-apps pattern, next to
+  runtime-pacing.json): one entry per capture session with per-state buckets
+  of display-ready stats (avg fps, avg/p99/max frame ms, avg wait-block ms).
+  Sessions are newest-first, retention-capped at 8, so history display is
+  possible later without a schema change. Flushed every ~15 s via a detached
+  async write (skipped if the previous write is in flight — the frame thread
+  never touches the filesystem) and synchronously with `live:false` at
+  session teardown. Ships in debug reports.
+- **UI**: Metrics section on the Turbo tab — collection dropdown, capture
+  binding panel, session picker, per-state table (avg fps, 1% low ≈
+  1000/p99, avg/p99 frame, wait blocked, stalls), and a "+X% avg fps vs off"
+  callout shown only when both states have ≥ 30 s captured in the same
+  session. Comparisons across states are honest only if the scenes were
+  comparable; the UI says so.

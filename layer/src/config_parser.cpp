@@ -1023,6 +1023,8 @@ bool ParseTurboModule(const JsonValue::Object& object, TurboModuleConfig& out, s
         "toggleBinding",
         "pacingMode",
         "runtimePins",
+        "metricsMode",
+        "metricsBinding",
         "profiles",
     };
 
@@ -1072,9 +1074,29 @@ bool ParseTurboModule(const JsonValue::Object& object, TurboModuleConfig& out, s
         }
     }
 
+    // Optional: absent in configs written before metrics capture existed.
+    std::optional<std::string> metrics_mode;
+    if (!ReadOptionalString(object, "metricsMode", metrics_mode, error)) {
+        return false;
+    }
+    if (metrics_mode.has_value()) {
+        const std::optional<TurboMetricsMode> parsed = ParseTurboMetricsMode(*metrics_mode);
+        if (!parsed.has_value()) {
+            error = "turbo.metricsMode must be one of: off, always, binding";
+            return false;
+        }
+        out.metrics_mode = *parsed;
+    }
+
     const auto toggle_binding_it = object.find("toggleBinding");
     if (toggle_binding_it != object.end() &&
         !ParseInputBinding(toggle_binding_it->second, out.toggle_binding, error)) {
+        return false;
+    }
+
+    const auto metrics_binding_it = object.find("metricsBinding");
+    if (metrics_binding_it != object.end() &&
+        !ParseInputBinding(metrics_binding_it->second, out.metrics_binding, error)) {
         return false;
     }
 

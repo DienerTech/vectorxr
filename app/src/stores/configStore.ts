@@ -3,16 +3,18 @@ import { computed, reactive } from 'vue'
 import {
   clearRuntimePacingObservation,
   clearSeenApps,
+  clearTurboMetrics,
   loadConfigEnvelope,
   loadRuntimePacing,
   loadSeenApps,
+  loadTurboMetrics,
   resetStoredData,
   saveConfigEnvelope,
   type ActiveRuntimeInfo,
   type SeenApplication,
 } from '../lib/commands'
 import { cloneConfig, createApplication, createProfile, createPivotProfile, createQuadViewsProfile, createTurboProfile, defaultConfig } from '../lib/model'
-import type { AppTab, ModuleId, RuntimePacingObservation, VectorXRConfig } from '../lib/model'
+import type { AppTab, ModuleId, RuntimePacingObservation, TurboMetricsSession, VectorXRConfig } from '../lib/model'
 
 interface StoreState {
   loading: boolean
@@ -25,6 +27,8 @@ interface StoreState {
   runtimePacing: RuntimePacingObservation[]
   activeRuntime: ActiveRuntimeInfo | null
   runtimePacingLoading: boolean
+  turboMetricsPath: string
+  turboMetrics: TurboMetricsSession[]
   config: VectorXRConfig
   originalConfig: VectorXRConfig
   activeTab: AppTab
@@ -42,6 +46,8 @@ const state = reactive<StoreState>({
   runtimePacing: [],
   activeRuntime: null,
   runtimePacingLoading: false,
+  turboMetricsPath: '',
+  turboMetrics: [],
   config: defaultConfig(),
   originalConfig: defaultConfig(),
   activeTab: 'home',
@@ -61,7 +67,7 @@ export function useConfigStore() {
       state.config = cloneConfig(envelope.config)
       state.originalConfig = cloneConfig(envelope.config)
       state.status = ''
-      await Promise.all([refreshSeenApps(), refreshRuntimePacing()])
+      await Promise.all([refreshSeenApps(), refreshRuntimePacing(), refreshTurboMetrics()])
     } catch (error) {
       state.status = error instanceof Error ? error.message : 'Failed to load config'
     } finally {
@@ -101,6 +107,31 @@ export function useConfigStore() {
       state.status = error instanceof Error ? error.message : 'Failed to load runtime pacing state'
     } finally {
       state.runtimePacingLoading = false
+    }
+  }
+
+  async function refreshTurboMetrics() {
+    try {
+      const envelope = await loadTurboMetrics()
+      state.turboMetricsPath = envelope.path
+      // Polled while the Turbo tab is visible — only touch reactive state on
+      // real changes so the metrics card doesn't rebuild every tick.
+      if (JSON.stringify(state.turboMetrics) !== JSON.stringify(envelope.sessions)) {
+        state.turboMetrics = envelope.sessions
+      }
+    } catch (error) {
+      state.status = error instanceof Error ? error.message : 'Failed to load turbo metrics'
+    }
+  }
+
+  async function clearTurboMetricsSessions() {
+    try {
+      const envelope = await clearTurboMetrics()
+      state.turboMetricsPath = envelope.path
+      state.turboMetrics = envelope.sessions
+      state.status = 'Turbo metrics cleared'
+    } catch (error) {
+      state.status = error instanceof Error ? error.message : 'Failed to clear turbo metrics'
     }
   }
 
@@ -348,6 +379,8 @@ export function useConfigStore() {
     refreshSeenApps,
     refreshRuntimePacing,
     rediscoverRuntimePacing,
+    refreshTurboMetrics,
+    clearTurboMetricsSessions,
     setActiveTab,
     addProfile,
     removeProfile,

@@ -8,6 +8,8 @@ import type { ActiveRuntimeInfo, OpenXrLayerSnapshot } from '../../lib/commands'
 import type {
   RegisteredApplication,
   RuntimePacingObservation,
+  TurboMetricsBucket,
+  TurboMetricsSession,
   TurboPacingMode,
   VectorXRConfig,
 } from '../../lib/model'
@@ -18,6 +20,7 @@ const props = defineProps<{
   runtimePacing: RuntimePacingObservation[]
   activeRuntime: ActiveRuntimeInfo | null
   layerSnapshot: OpenXrLayerSnapshot | null
+  turboMetrics: TurboMetricsSession[]
 }>()
 
 const emit = defineEmits<{
@@ -25,10 +28,12 @@ const emit = defineEmits<{
   removeTurboProfile: [index: number]
   syncTurboProfileName: [index: number]
   rediscoverRuntime: [runtimeName: string]
+  clearTurboMetrics: []
 }>()
 
 const howItWorksOpen = ref(false)
 const bindingSubPageOpen = ref(false)
+const metricsBindingSubPageOpen = ref(false)
 
 const pacingForced = computed(() => props.config.modules.turbo.pacingMode !== 'auto')
 
@@ -174,6 +179,101 @@ function formatDate(unixSeconds: number): string {
   }
   return new Date(unixSeconds * 1000).toLocaleDateString()
 }
+
+// --- Session metrics (layer-written turbo-metrics.json) ---
+
+const selectedSessionId = ref('')
+
+// Sessions arrive newest-first; fall back to the newest when nothing (or a
+// since-evicted session) is selected.
+const selectedSession = computed<TurboMetricsSession | null>(() => {
+  if (props.turboMetrics.length === 0) {
+    return null
+  }
+  return props.turboMetrics.find((session) => session.sessionId === selectedSessionId.value) ?? props.turboMetrics[0]
+})
+
+function formatSessionLabel(session: TurboMetricsSession): string {
+  const when = session.startedUnixSeconds
+    ? new Date(session.startedUnixSeconds * 1000).toLocaleString([], {
+        month: 'short',
+        day: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit',
+      })
+    : 'Unknown time'
+  const runtime = session.runtimeName ? ` · ${session.runtimeName}` : ''
+  return `${when} — ${session.appName || 'unknown app'}${runtime}${session.live ? ' (live)' : ''}`
+}
+
+function bucketLabel(state: string): string {
+  if (state === 'off') {
+    return 'Turbo off'
+  }
+  if (state === 'async') {
+    return 'Turbo — async'
+  }
+  if (state === 'sequenced') {
+    return 'Turbo — sequenced'
+  }
+  return state
+}
+
+function formatSeconds(seconds: number): string {
+  if (seconds >= 90) {
+    const minutes = Math.floor(seconds / 60)
+    const rest = Math.round(seconds % 60)
+    return `${minutes}m ${rest}s`
+  }
+  return `${seconds.toFixed(0)}s`
+}
+
+function onePercentLowFps(bucket: TurboMetricsBucket): string {
+  return bucket.p99FrameMs > 0 ? (1000 / bucket.p99FrameMs).toFixed(1) : '—'
+}
+
+const bucketOrder: Record<string, number> = { off: 0, async: 1, sequenced: 2 }
+
+const selectedBuckets = computed<TurboMetricsBucket[]>(() => {
+  const session = selectedSession.value
+  if (!session) {
+    return []
+  }
+  return [...session.buckets]
+    .filter((bucket) => bucket.frames > 0)
+    .sort((lhs, rhs) => (bucketOrder[lhs.state] ?? 9) - (bucketOrder[rhs.state] ?? 9))
+})
+
+// Honest comparison gate: both states need meaningful captured time in the
+// same session before an improvement number means anything.
+const kComparisonMinSeconds = 30
+
+interface MetricsComparison {
+  label: string
+  offFps: number
+  turboFps: number
+  deltaPercent: number
+}
+
+const comparisons = computed<MetricsComparison[]>(() => {
+  const buckets = selectedBuckets.value
+  const off = buckets.find((bucket) => bucket.state === 'off')
+  if (!off || off.seconds < kComparisonMinSeconds || off.avgFps <= 0) {
+    return []
+  }
+  return buckets
+    .filter((bucket) => bucket.state !== 'off' && bucket.seconds >= kComparisonMinSeconds && bucket.avgFps > 0)
+    .map((bucket) => ({
+      label: bucketLabel(bucket.state),
+      offFps: off.avgFps,
+      turboFps: bucket.avgFps,
+      deltaPercent: ((bucket.avgFps - off.avgFps) / off.avgFps) * 100,
+    }))
+})
+
+function formatDeltaPercent(value: number): string {
+  return `${value >= 0 ? '+' : ''}${value.toFixed(1)}%`
+}
 </script>
 
 <template>
@@ -188,6 +288,18 @@ function formatDate(unixSeconds: number): string {
     default-deactivate-sound="turbo-off.wav"
     @update:binding="config.modules.turbo.toggleBinding = $event"
     @close="bindingSubPageOpen = false"
+  />
+  <ModuleBindingPage
+    v-else-if="metricsBindingSubPageOpen"
+    module-label="Turbo"
+    :binding="config.modules.turbo.metricsBinding"
+    label="Metrics Capture Binding"
+    description="Start and stop frame-pacing metric collection while in-game. Arm it once you are actually flying and pause it before loading screens or menus, so the recorded numbers reflect real play."
+    none-text="No binding assigned. In keybinding mode, no metrics are recorded until a binding is set."
+    default-activate-sound="metrics-on.wav"
+    default-deactivate-sound="metrics-off.wav"
+    @update:binding="config.modules.turbo.metricsBinding = $event"
+    @close="metricsBindingSubPageOpen = false"
   />
   <div v-else class="space-y-4">
     <!-- Turbo module: frame pacing first (it decides how Turbo behaves),
@@ -344,6 +456,137 @@ function formatDate(unixSeconds: number): string {
           hint="Flip Turbo on and off while in-game to compare fps and frame feel directly. Turbo starts enabled whenever it applies to the running application."
           @edit="bindingSubPageOpen = true"
         />
+      </div>
+
+      <!-- Frame pacing metrics: measured effect of each pacing strategy -->
+      <div class="mt-4 border-t pt-4" style="border-color: var(--app-border)">
+        <div class="mb-3 flex flex-wrap items-center justify-between gap-2">
+          <div>
+            <span class="eyebrow text-xs font-semibold uppercase tracking-[0.24em]">Metrics</span>
+            <p class="mt-1 max-w-3xl text-sm leading-6 text-muted">
+              Measures what Turbo actually does to your frame pacing: fps, frame times, and time spent blocked on runtime pacing, recorded separately for Turbo off, async, and sequenced. Flip the Turbo toggle mid-flight to collect both sides of the comparison.
+            </p>
+          </div>
+        </div>
+
+        <label class="flex flex-wrap items-center gap-3 text-sm font-medium">
+          Collection
+          <select
+            v-model="config.modules.turbo.metricsMode"
+            class="rounded-[0.6rem] border px-3 py-1.5 text-sm surface-panel-strong"
+            style="border-color: var(--app-border)"
+          >
+            <option value="always">Always while in-game</option>
+            <option value="binding">Only while capture binding is armed</option>
+            <option value="off">Off</option>
+          </select>
+        </label>
+        <p class="mt-2 text-xs leading-5 text-muted">
+          <template v-if="config.modules.turbo.metricsMode === 'binding'">
+            Nothing is recorded until you press the capture binding in-game; press it again to pause. Use it to cut loading screens and menus out of the data.
+          </template>
+          <template v-else-if="config.modules.turbo.metricsMode === 'always'">
+            Records whenever Turbo applies to the running application. Frame hitches over one second are excluded automatically, but menus and loading screens still count — use the capture binding mode for clean A/B comparisons.
+          </template>
+          <template v-else>
+            No metrics are recorded.
+          </template>
+        </p>
+
+        <div v-if="config.modules.turbo.metricsMode === 'binding'" class="mt-3">
+          <ModuleBindingPanel
+            heading="Metrics Capture Binding"
+            :binding="config.modules.turbo.metricsBinding"
+            hint="Arm capture once you are actually flying; pause it before loading screens or menus."
+            @edit="metricsBindingSubPageOpen = true"
+          />
+        </div>
+
+        <div class="mt-4">
+          <div v-if="turboMetrics.length === 0" class="rounded-[0.9rem] border border-dashed px-4 py-4 text-sm text-muted surface-panel-soft">
+            No metrics captured yet — they appear here after the first Turbo-enabled session (updated every ~15 seconds while playing).
+          </div>
+
+          <template v-else>
+            <div class="mb-2 flex flex-wrap items-center justify-between gap-2">
+              <label class="flex flex-wrap items-center gap-2 text-xs font-medium text-muted">
+                Session
+                <select
+                  :value="selectedSession?.sessionId ?? ''"
+                  class="rounded-[0.5rem] border px-2 py-1 text-xs surface-panel-strong"
+                  style="border-color: var(--app-border)"
+                  @change="selectedSessionId = ($event.target as HTMLSelectElement).value"
+                >
+                  <option v-for="session in turboMetrics" :key="session.sessionId" :value="session.sessionId">
+                    {{ formatSessionLabel(session) }}
+                  </option>
+                </select>
+              </label>
+              <button
+                class="button-secondary rounded-[0.5rem] px-2.5 py-1 text-xs"
+                type="button"
+                title="Delete all recorded metric sessions"
+                @click="emit('clearTurboMetrics')"
+              >
+                Clear metrics
+              </button>
+            </div>
+
+            <div
+              v-for="comparison in comparisons"
+              :key="comparison.label"
+              class="mb-2 rounded-[0.9rem] border px-4 py-3 text-sm leading-6 surface-panel-strong"
+            >
+              <span class="font-semibold">{{ formatDeltaPercent(comparison.deltaPercent) }} average fps</span>
+              with {{ comparison.label }} vs Turbo off ({{ comparison.offFps.toFixed(1) }} → {{ comparison.turboFps.toFixed(1) }} fps).
+              <span class="text-muted">Both states measured in this session; the comparison is only as fair as the scenes were similar.</span>
+            </div>
+
+            <div v-if="selectedBuckets.length === 0" class="rounded-[0.9rem] border border-dashed px-4 py-4 text-sm text-muted surface-panel-soft">
+              This session has no captured frames yet.
+            </div>
+            <div v-else class="overflow-x-auto">
+              <table class="w-full text-sm">
+                <thead>
+                  <tr class="text-left text-xs uppercase tracking-wide text-muted">
+                    <th class="py-2 pr-3 font-medium">Pacing</th>
+                    <th class="py-2 pr-3 font-medium">Time</th>
+                    <th class="py-2 pr-3 font-medium">Avg fps</th>
+                    <th class="py-2 pr-3 font-medium">1% low fps</th>
+                    <th class="py-2 pr-3 font-medium">Avg frame</th>
+                    <th class="py-2 pr-3 font-medium">p99 frame</th>
+                    <th class="py-2 pr-3 font-medium" title="Average per-frame time the game spent blocked on runtime pacing">Wait blocked</th>
+                    <th class="py-2 font-medium" title="Frame-pacing stalls counted by the safety circuit">Stalls</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr
+                    v-for="bucket in selectedBuckets"
+                    :key="bucket.state"
+                    class="border-t"
+                    style="border-color: var(--app-border)"
+                  >
+                    <td class="py-2.5 pr-3 font-medium">{{ bucketLabel(bucket.state) }}</td>
+                    <td class="py-2.5 pr-3 text-muted">{{ formatSeconds(bucket.seconds) }}</td>
+                    <td class="py-2.5 pr-3">{{ bucket.avgFps.toFixed(1) }}</td>
+                    <td class="py-2.5 pr-3">{{ onePercentLowFps(bucket) }}</td>
+                    <td class="py-2.5 pr-3">{{ bucket.avgFrameMs.toFixed(2) }} ms</td>
+                    <td class="py-2.5 pr-3">{{ bucket.p99FrameMs.toFixed(2) }} ms</td>
+                    <td class="py-2.5 pr-3">{{ bucket.avgWaitBlockMs.toFixed(2) }} ms</td>
+                    <td class="py-2.5">{{ bucket.drainTimeouts }}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+            <p v-if="selectedSession" class="mt-2 text-xs text-muted">
+              {{ selectedSession.live ? 'Session in progress — updates every ~15s.' : 'Session complete.' }}
+              Collection mode: {{ selectedSession.collectionMode === 'binding' ? 'capture binding' : 'always' }}.
+              <template v-if="selectedBuckets.some((bucket) => bucket.discardedFrames > 0)">
+                Frame hitches over 1s are excluded from the stats.
+              </template>
+            </p>
+          </template>
+        </div>
       </div>
 
       <details class="section-disclosure mt-4 border-t pt-4" style="border-color: var(--app-border)" open>

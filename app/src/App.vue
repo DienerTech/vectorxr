@@ -164,6 +164,7 @@ function stopRuntimePacingRefresh() {
 function onWindowFocus() {
   if (store.state.activeTab === 'turbo') {
     void store.refreshRuntimePacing()
+    void store.refreshTurboMetrics()
   }
 }
 
@@ -173,8 +174,10 @@ watch(
     stopRuntimePacingRefresh()
     if (tab === 'turbo') {
       void store.refreshRuntimePacing()
+      void store.refreshTurboMetrics()
       runtimePacingRefreshTimer = window.setInterval(() => {
         void store.refreshRuntimePacing()
+        void store.refreshTurboMetrics()
       }, 5000)
     }
   },
@@ -265,7 +268,7 @@ async function exportDebugInformation() {
   debugExporting.value = true
 
   try {
-    await Promise.all([refreshLogs(), refreshOpenXrLayers(), store.refreshSeenApps(), store.refreshRuntimePacing()])
+    await Promise.all([refreshLogs(), refreshOpenXrLayers(), store.refreshSeenApps(), store.refreshRuntimePacing(), store.refreshTurboMetrics()])
     const packageBlob = createDebugPackage({
       appVersion: latestPatch.version,
       configPath: store.state.path,
@@ -274,6 +277,8 @@ async function exportDebugInformation() {
       seenApps: store.state.seenApps,
       runtimePacingPath: store.state.runtimePacingPath,
       runtimePacing: store.state.runtimePacing,
+      turboMetricsPath: store.state.turboMetricsPath,
+      turboMetrics: store.state.turboMetrics,
       activeRuntime: store.state.activeRuntime,
       logSnapshot: logSnapshot.value,
       openXrLayerSnapshot: openXrLayerSnapshot.value,
@@ -443,10 +448,12 @@ async function confirmResetConfig() {
           :runtime-pacing="store.state.runtimePacing"
           :active-runtime="store.state.activeRuntime"
           :layer-snapshot="openXrLayerSnapshot"
+          :turbo-metrics="store.state.turboMetrics"
           @add-turbo-profile="store.addTurboProfile"
           @remove-turbo-profile="store.removeTurboProfile"
           @sync-turbo-profile-name="store.syncTurboProfileName"
           @rediscover-runtime="store.rediscoverRuntimePacing"
+          @clear-turbo-metrics="store.clearTurboMetricsSessions"
         />
         <PivotXrTab
           v-else-if="store.state.activeTab === 'pivotxr'"
