@@ -649,7 +649,7 @@ function formatDeltaPercent(value: number): string {
     </section>
 
     <div v-if="howItWorksOpen" class="fixed inset-0 z-50 flex items-center justify-center bg-black/45 px-4 py-6 backdrop-blur-sm">
-      <div class="w-full max-w-[720px] rounded-[1.25rem] border p-5 surface-panel-strong">
+      <div class="max-h-[85vh] w-full max-w-[720px] overflow-y-auto rounded-[1.25rem] border p-5 surface-panel-strong">
         <div class="flex flex-wrap items-start justify-between gap-4">
           <div>
             <p class="eyebrow text-xs uppercase tracking-[0.24em]">Turbo Mode</p>
@@ -660,38 +660,33 @@ function formatDeltaPercent(value: number): string {
           </button>
         </div>
 
-        <div class="mt-5 space-y-4 text-sm leading-6">
-          <div class="rounded-[1rem] border px-4 py-4 surface-panel">
-            Normally, an OpenXR game must wait for the headset runtime to say "start the next frame now." Some runtime and GPU combinations time that signal badly, forcing the game to idle and capping fps below what the hardware can do.
-          </div>
+        <div class="mt-5 space-y-5 text-sm leading-6">
+          <section class="space-y-3">
+            <p class="eyebrow text-xs font-semibold uppercase tracking-[0.24em]">What it does</p>
+            <div class="rounded-[1rem] border px-4 py-3 surface-panel">
+              A game normally idles until the headset runtime signals the next frame. Turbo performs that wait out of the game's way, so it starts its next frame the moment the previous one is submitted. The runtime still receives a fully correct frame sequence.
+            </div>
+            <div class="rounded-[1rem] border px-4 py-3 surface-panel">
+              <strong>Auto</strong> (recommended) picks the wait strategy per runtime and remembers what works: <strong>Async</strong> waits in the background where supported (SteamVR); <strong>Sequenced</strong> waits right after each submit where required (Pimax, Oculus, Varjo).
+            </div>
+          </section>
 
-          <div class="rounded-[1rem] border px-4 py-4 surface-panel">
-            With Turbo, VectorXR performs that wait out of the game's way and lets it begin its next frame immediately after submitting the previous one — one frame of pipelining. The headset runtime still receives a fully correct frame sequence; only the game's pacing is decoupled.
-          </div>
+          <section class="space-y-3">
+            <p class="eyebrow text-xs font-semibold uppercase tracking-[0.24em]">What to expect</p>
+            <div class="rounded-[1rem] border px-4 py-3 surface-panel">
+              Turbo is a targeted fix, not a general boost: it helps only when the runtime caps fps below what your hardware can deliver. It cannot raise a runtime-enforced framerate lock (such as half-rate smoothing) on Sequenced runtimes. Use the Metrics section with the toggle binding to measure what it changes for you — if a title shows no benefit, leave Turbo off there.
+            </div>
+            <div class="rounded-[1rem] border px-4 py-3 chip-warning" style="border-color: var(--app-border)">
+              Trade-offs: slightly less accurate frame-time prediction (can read as minor latency or judder), and toggling mid-session may hitch for a second.
+            </div>
+          </section>
 
-          <div class="rounded-[1rem] border px-4 py-4 surface-panel">
-            Runtimes disagree about where that wait may happen. <strong>Async</strong> pacing runs it in the background, overlapping it with the game's next frame — the most effective form, proven on SteamVR. <strong>Sequenced</strong> pacing performs it right after each frame submit, which is what runtimes like Oculus, Varjo, and Pimax require. <strong>Auto</strong> starts from what is known about your runtime, verifies it against live frame timing, adapts if needed, and remembers the verdict per runtime — so the right strategy is applied from the first frame of your next session.
-          </div>
-
-          <div class="rounded-[1rem] border px-4 py-4 chip-warning" style="border-color: var(--app-border)">
-            Trade-offs: frame timing prediction becomes slightly less accurate, which can show up as marginally increased latency or judder in some titles. Turning Turbo on mid-session can occasionally cause a one-second hitch while the frame pipeline re-synchronizes.
-          </div>
-
-          <div class="rounded-[1rem] border px-4 py-4 surface-panel">
-            Know the limit: on runtimes that require Sequenced pacing (Pimax, Oculus, Varjo), Turbo cannot raise a framerate the runtime enforces through its frame wait — a locked or half-rate cap stays locked. What Turbo reclaims there is the time your game spends blocked on pacing, which you can see directly in the Metrics section.
-          </div>
-
-          <div class="rounded-[1rem] border px-4 py-4 surface-panel">
-            Turbo works alongside all of VectorXR's other enhancements, including the Varjo quadviews compatibility path — VectorXR sequences its frame handling so the two never conflict.
-          </div>
-
-          <div class="rounded-[1rem] border px-4 py-4 chip-warning" style="border-color: var(--app-border)">
-            Safety net: if frame pacing stalls even after Auto has adapted, VectorXR suspends Turbo for the session (you'll hear the turbo-off cue) and records the runtime as unsupported so the stutter never replays on launch. Press the toggle binding to retry — a clean run overwrites the verdict.
-          </div>
-
-          <div class="rounded-[1rem] border px-4 py-4 surface-panel">
-            Tip: assign the optional Turbo Toggle binding and flip it in-game while watching an fps counter. If Turbo does not clearly help a title, leave it off there.
-          </div>
+          <section class="space-y-3">
+            <p class="eyebrow text-xs font-semibold uppercase tracking-[0.24em]">Safety net</p>
+            <div class="rounded-[1rem] border px-4 py-3 chip-warning" style="border-color: var(--app-border)">
+              If frame pacing stalls even after Auto adapts, Turbo suspends itself for the session (you'll hear the turbo-off cue) and records the runtime as unsupported so the stutter never replays at launch. Press the toggle binding to retry — a clean run clears the verdict.
+            </div>
+          </section>
         </div>
       </div>
     </div>
