@@ -13,6 +13,7 @@ export const patchNotes: PatchNoteEntry[] = [
     title: 'Turbo Metrics',
     summary: 'Measure what Turbo actually does to your frame pacing - fps, frame times, and pacing wait time recorded per strategy and compared in the Turbo panel - plus Turbo engagement fixes validated on MSFS 2024.',
     items: [
+      'Split turbo into two distinct strategies: async (the original Turbo) and sequenced (a new strategy for runtimes that cannot tolerate async).',
       'Turbo Metrics: avg fps, 1% low, avg/p99 frame times, and runtime pacing wait time are recorded separately for Turbo off, async, and sequenced, with a per-session comparison in the Turbo panel.',
       'Metrics collection is configurable: always-on, off, or gated behind a new capture keybinding (with its own sound cues) so loading screens and menus stay out of your data.',
       'Fixed a game freeze when switching to VR mode in MSFS 2024 while Turbo was available (frame-call ordering during Turbo engagement).',
