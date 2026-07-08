@@ -170,6 +170,28 @@ The 5 s frame-pacing debug line now includes `pacing=async|sequenced` while
 turbo is engaged. Resolution, fallback, verdicts, and suspends are logged at
 info level.
 
+## Field findings, 2026-07-07 (metrics-instrumented)
+
+- **The wait/submit interlock is a driver property, not a runtime property.**
+  SteamVR driving a Crystal through Pimax's `aapvr` driver interlocks exactly
+  like PiOpenXR — the async preset stalled twice and level-1 fell back to
+  sequenced within 2 frames (as designed, no suspend). "SteamVR → async" in
+  the seed table really means "SteamVR with a non-interlocking driver".
+- **Sequenced pacing cannot lift a wait-enforced fps lock.** Measured with
+  Pimax's 45 fps lock + smart smoothing: wait-block 16.5 ms/frame with turbo
+  off, 15.8 ms with turbo on, fps identical — the synchronous post-submit
+  wait absorbs the pacing gate on the frame thread. On interlocking drivers
+  turbo is therefore a wait-latency/CPU-headroom tool (measured 2.9 ms/frame
+  reclaimed at the 90 Hz cap), never an fps uplift. Uplift requires async,
+  i.e. a non-interlocking driver.
+- **Known-unsupported combo**: DCS + SteamVR runtime + synthesized quadviews
+  renders exactly one (perfectly composited) frame, then silently submits
+  layerCount=0 forever — black screen with a healthy 45 fps frame loop and
+  no error anywhere. Undiagnosed; no benefit to the config on Pimax hardware,
+  so parked. Black-screen forensics (runtime EndFrame failure logging,
+  shouldRender transitions, submitting→empty transitions, all budgeted
+  per session) were added so a future repro self-diagnoses.
+
 ## Metrics (turbo-metrics sidecar, branch `turbo-metrics`)
 
 Measures the effect of each pacing strategy on real frame pacing and shows it

@@ -3378,6 +3378,7 @@ XrResult OpenXrLayer::WaitFrame(XrSession session,
         turbo_last_predicted_display_time_ = frame_state->predictedDisplayTime;
         turbo_last_predicted_display_period_ = frame_state->predictedDisplayPeriod;
         turbo_last_should_render_ = frame_state->shouldRender == XR_TRUE;
+        NoteTurboShouldRenderLocked(turbo_last_should_render_);
         turbo_last_wait_frame_wall_time_ = std::chrono::steady_clock::now();
         frame_state->predictedDisplayTime =
             std::max(frame_state->predictedDisplayTime, turbo_max_returned_display_time_ + 1);
@@ -3449,6 +3450,28 @@ XrResult OpenXrLayer::BeginFrame(XrSession session, const XrFrameBeginInfo* fram
 XrResult OpenXrLayer::ForwardEndFrame(XrSession session,
                                       const XrFrameEndInfo* frame_end_info,
                                       std::unique_lock<std::mutex>& config_lock) {
+    // Black-screen forensics: an app that keeps its frame loop running but
+    // stops submitting layers shows a void with no error anywhere (DCS did
+    // exactly this on SteamVR, silently, after one rendered frame). The
+    // first observation is skipped — apps commonly start empty while loading.
+    const bool submitting_layers = frame_end_info && frame_end_info->layerCount > 0;
+    if (!app_submitting_layers_.has_value()) {
+        app_submitting_layers_ = submitting_layers;
+    } else if (*app_submitting_layers_ != submitting_layers) {
+        app_submitting_layers_ = submitting_layers;
+        if (submission_transition_log_budget_ > 0) {
+            --submission_transition_log_budget_;
+            logger_.Info(std::string(submitting_layers
+                                         ? "App began submitting composition layers (layerCount=" +
+                                               std::to_string(frame_end_info->layerCount) + ")"
+                                         : "App stopped submitting composition layers (layerCount=0; "
+                                           "the headset shows a void while this holds)") +
+                         (submission_transition_log_budget_ == 0
+                              ? "; further transitions suppressed this session."
+                              : "."));
+        }
+    }
+
     bool turbo_engaged = IsTurboActive();
 
     // Cadence gate: app-only time since the previous EndFrame (our own
@@ -3670,6 +3693,7 @@ XrResult OpenXrLayer::ForwardEndFrame(XrSession session,
                 turbo_last_predicted_display_time_ = frame_state.predictedDisplayTime;
                 turbo_last_predicted_display_period_ = frame_state.predictedDisplayPeriod;
                 turbo_last_should_render_ = frame_state.shouldRender == XR_TRUE;
+                NoteTurboShouldRenderLocked(turbo_last_should_render_);
             }
             const XrResult begin_result = next_begin_frame_(session, nullptr);
             if (XR_FAILED(begin_result)) {
@@ -3690,6 +3714,16 @@ XrResult OpenXrLayer::ForwardEndFrame(XrSession session,
     }
     const XrResult result = next_end_frame_(session, frame_end_info);
     const auto pacing_after_end = std::chrono::steady_clock::now();
+    if (XR_FAILED(result) && end_frame_error_log_budget_ > 0) {
+        // A failing runtime EndFrame shows as a silent black screen if the
+        // app ignores the result (DCS does); make it visible at info level.
+        --end_frame_error_log_budget_;
+        logger_.Error("Runtime xrEndFrame failed with " + std::to_string(static_cast<int>(result)) +
+                      " (layerCount=" +
+                      std::to_string(frame_end_info ? frame_end_info->layerCount : 0) + ")" +
+                      (end_frame_error_log_budget_ == 0 ? "; further failures suppressed this session."
+                                                        : "."));
+    }
     if (diag_end) {
         logger_.Debug("Turbo-diag: runtime xrEndFrame completed in " +
                       std::to_string(std::chrono::duration<double, std::milli>(pacing_after_end -
@@ -3784,6 +3818,7 @@ XrResult OpenXrLayer::ForwardEndFrame(XrSession session,
                         turbo_last_predicted_display_time_ = frame_state.predictedDisplayTime;
                         turbo_last_predicted_display_period_ = frame_state.predictedDisplayPeriod;
                         turbo_last_should_render_ = frame_state.shouldRender == XR_TRUE;
+                        NoteTurboShouldRenderLocked(turbo_last_should_render_);
                         turbo_async_wait_completed_ = true;
                         pacing_wait_sum_ms_ += wait_ms;
                         pacing_wait_max_ms_ = std::max(pacing_wait_max_ms_, wait_ms);
@@ -3848,6 +3883,7 @@ XrResult OpenXrLayer::ForwardEndFrame(XrSession session,
                         turbo_last_predicted_display_time_ = frame_state.predictedDisplayTime;
                         turbo_last_predicted_display_period_ = frame_state.predictedDisplayPeriod;
                         turbo_last_should_render_ = frame_state.shouldRender == XR_TRUE;
+                        NoteTurboShouldRenderLocked(turbo_last_should_render_);
                     } else {
                         logger_.Error("Turbo: async xrWaitFrame failed with " +
                                       std::to_string(static_cast<int>(wait_result)) +
@@ -4440,6 +4476,23 @@ void OpenXrLayer::FlushTurboMetrics(bool final_flush) {
     turbo_metrics_dirty_ = false;
 }
 
+void OpenXrLayer::NoteTurboShouldRenderLocked(bool should_render) {
+    if (last_noted_should_render_.has_value() && *last_noted_should_render_ == should_render) {
+        return;
+    }
+    const bool first_observation = !last_noted_should_render_.has_value();
+    last_noted_should_render_ = should_render;
+    // TRUE from the first frame is the steady state — not worth a line.
+    if ((first_observation && should_render) || should_render_log_budget_ <= 0) {
+        return;
+    }
+    --should_render_log_budget_;
+    logger_.Info(std::string("Runtime frame state shouldRender is now ") +
+                 (should_render ? "TRUE" : "FALSE (apps submit empty frames while this holds)") +
+                 (should_render_log_budget_ == 0 ? "; further changes suppressed this session."
+                                                 : "."));
+}
+
 void OpenXrLayer::ResetTurboMetricsState() {
     // Serialize against an in-flight periodic write first: the final flush
     // below must be the last write, or a stale "live" snapshot could land
@@ -4480,7 +4533,12 @@ void OpenXrLayer::ResetTurboFrameState() {
     // Final metrics flush first (it takes turbo_mutex_ itself and joins the
     // async writer); a second call at teardown is a no-op.
     ResetTurboMetricsState();
+    end_frame_error_log_budget_ = 5;
+    submission_transition_log_budget_ = 8;
+    app_submitting_layers_.reset();
     std::scoped_lock lock(turbo_mutex_);
+    should_render_log_budget_ = 8;
+    last_noted_should_render_.reset();
     // Destroying a std::async future joins its thread, which is the drain we
     // want at session teardown.
     turbo_async_wait_ = {};

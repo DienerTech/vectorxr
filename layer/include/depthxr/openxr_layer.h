@@ -348,6 +348,10 @@ class OpenXrLayer {
     bool IsTurboMetricsCaptureArmed(const InputBinding& binding, int sound_volume);
     void FlushTurboMetrics(bool final_flush);
     void ResetTurboMetricsState();
+    // Logs shouldRender changes (turbo_mutex_ held by caller). A silent
+    // shouldRender=false is one of the ways an app goes black while its
+    // frame loop keeps running — worth an info line the first few times.
+    void NoteTurboShouldRenderLocked(bool should_render);
     bool IsQuadViewsActive() const;
     void ResetSwapchainState();
     void LogSwapchainSummary(XrSwapchain swapchain, const SwapchainInfo& info, std::string_view event_name);
@@ -725,6 +729,16 @@ class OpenXrLayer {
     // fabricated-wait count since the last EndFrame.
     double turbo_metrics_wait_pending_ms_{0.0};
     std::int64_t turbo_metrics_fabricated_pending_{0};
+
+    // Session-scoped black-screen forensics (added after the DCS-on-SteamVR
+    // one-frame-then-black session, where none of the three signals below
+    // were logged and the cause could not be discriminated). Budgeted so a
+    // flapping state cannot flood the log.
+    int end_frame_error_log_budget_{5};
+    int should_render_log_budget_{8};      // turbo_mutex_
+    std::optional<bool> last_noted_should_render_; // turbo_mutex_
+    int submission_transition_log_budget_{8};
+    std::optional<bool> app_submitting_layers_;
     bool quad_views_extension_requested_{false};
     bool varjo_foveated_rendering_extension_requested_{false};
     bool eye_gaze_extension_enabled_{false};
