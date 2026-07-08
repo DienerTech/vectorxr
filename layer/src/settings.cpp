@@ -244,4 +244,91 @@ std::optional<ProfileMode> ParseProfileMode(const std::string& value) {
     return std::nullopt;
 }
 
+const char* ToString(TurboPacingMode mode) {
+    switch (mode) {
+    case TurboPacingMode::kAsync:
+        return "async";
+    case TurboPacingMode::kSequenced:
+        return "sequenced";
+    case TurboPacingMode::kUnsupported:
+        return "unsupported";
+    default:
+        return "async";
+    }
+}
+
+std::optional<TurboPacingMode> ParseTurboPacingMode(const std::string& value) {
+    const std::string normalized = NormalizeValue(value);
+
+    if (normalized == "async") {
+        return TurboPacingMode::kAsync;
+    }
+    if (normalized == "sequenced") {
+        return TurboPacingMode::kSequenced;
+    }
+    if (normalized == "unsupported") {
+        return TurboPacingMode::kUnsupported;
+    }
+
+    return std::nullopt;
+}
+
+const char* ToString(TurboPacingSetting setting) {
+    switch (setting) {
+    case TurboPacingSetting::kAuto:
+        return "auto";
+    case TurboPacingSetting::kAsync:
+        return "async";
+    case TurboPacingSetting::kSequenced:
+        return "sequenced";
+    default:
+        return "auto";
+    }
+}
+
+std::optional<TurboPacingSetting> ParseTurboPacingSetting(const std::string& value) {
+    const std::string normalized = NormalizeValue(value);
+
+    if (normalized == "auto") {
+        return TurboPacingSetting::kAuto;
+    }
+    if (normalized == "async") {
+        return TurboPacingSetting::kAsync;
+    }
+    if (normalized == "sequenced") {
+        return TurboPacingSetting::kSequenced;
+    }
+
+    return std::nullopt;
+}
+
+const char* ToString(TurboMetricsMode mode) {
+    switch (mode) {
+    case TurboMetricsMode::kOff:
+        return "off";
+    case TurboMetricsMode::kAlways:
+        return "always";
+    case TurboMetricsMode::kBinding:
+        return "binding";
+    default:
+        return "always";
+    }
+}
+
+std::optional<TurboMetricsMode> ParseTurboMetricsMode(const std::string& value) {
+    const std::string normalized = NormalizeValue(value);
+
+    if (normalized == "off") {
+        return TurboMetricsMode::kOff;
+    }
+    if (normalized == "always") {
+        return TurboMetricsMode::kAlways;
+    }
+    if (normalized == "binding") {
+        return TurboMetricsMode::kBinding;
+    }
+
+    return std::nullopt;
+}
+
 } // namespace depthxr

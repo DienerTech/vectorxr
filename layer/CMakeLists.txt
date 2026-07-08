@@ -3,7 +3,9 @@ add_library(
     STATIC
     src/config_parser.cpp
     src/input_devices.cpp
+    src/runtime_pacing.cpp
     src/seen_apps.cpp
+    src/turbo_metrics.cpp
     src/settings.cpp
     src/sound_player.cpp
     src/settings_resolver.cpp
@@ -127,6 +129,8 @@ if(WIN32 AND DEPTHXR_BUILD_LAYER)
                 ${CMAKE_CURRENT_SOURCE_DIR}/assets/sounds/origin-release.wav
                 ${CMAKE_CURRENT_SOURCE_DIR}/assets/sounds/turbo-on.wav
                 ${CMAKE_CURRENT_SOURCE_DIR}/assets/sounds/turbo-off.wav
+                ${CMAKE_CURRENT_SOURCE_DIR}/assets/sounds/metrics-on.wav
+                ${CMAKE_CURRENT_SOURCE_DIR}/assets/sounds/metrics-off.wav
                 $<TARGET_FILE_DIR:XR_APILAYER_DIENERTECH_VECTORXR>/sounds/
     )
 endif()

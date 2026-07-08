@@ -1,8 +1,9 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
 
-import BindingEditor from '../BindingEditor.vue'
 import EffectField from '../EffectField.vue'
+import ModuleBindingPage from '../ModuleBindingPage.vue'
+import ModuleBindingPanel from '../ModuleBindingPanel.vue'
 import ProfileShell from '../ProfileShell.vue'
 import { convergenceBadge, fromConvergenceDisplay, fromStereoBoostDisplay, stereoBoostBadge, toConvergenceDisplay, toStereoBoostDisplay } from '../../lib/display'
 import type { RegisteredApplication, VectorXRConfig } from '../../lib/model'
@@ -19,6 +20,7 @@ defineEmits<{
 }>()
 
 const compatibilityInfoOpen = ref(false)
+const bindingSubPageOpen = ref(false)
 
 const profileWarnings = computed(() => {
   const warnings = new Map<number, string[]>()
@@ -48,7 +50,16 @@ const profileWarnings = computed(() => {
 </script>
 
 <template>
-  <div class="space-y-4">
+  <ModuleBindingPage
+    v-if="bindingSubPageOpen"
+    module-label="Depth"
+    :binding="config.modules.depthxr.bindings.toggleEnabled"
+    label="Depth Toggle Binding"
+    description="Toggle Depth on or off at runtime for quick A/B testing."
+    @update:binding="config.modules.depthxr.bindings.toggleEnabled = $event"
+    @close="bindingSubPageOpen = false"
+  />
+  <div v-else class="space-y-4">
     <article class="rounded-[1.25rem] border p-5 shadow-panel backdrop-blur surface-panel">
       <!-- Module header -->
       <div class="mb-4 flex flex-wrap items-start justify-between gap-3">
@@ -71,11 +82,12 @@ const profileWarnings = computed(() => {
       </div>
 
       <!-- Module-level binding — applies regardless of which profile is active -->
-      <BindingEditor
-        v-model="config.modules.depthxr.bindings.toggleEnabled"
+      <ModuleBindingPanel
         class="mb-5"
-        label="Depth Toggle Binding"
-        description="Toggle Depth on or off at runtime for quick A/B testing."
+        heading="Depth Toggle Binding"
+        :binding="config.modules.depthxr.bindings.toggleEnabled"
+        hint="Toggle Depth on or off at runtime for quick A/B testing."
+        @edit="bindingSubPageOpen = true"
       />
 
       <!-- Default Profile -->

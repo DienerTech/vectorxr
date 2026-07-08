@@ -30,6 +30,11 @@ import { useUpdateStore } from './stores/updateStore'
 const store = useConfigStore()
 const updateStore = useUpdateStore()
 const errors = computed(() => validateConfig(store.state.config))
+const turboInUse = computed(
+  () =>
+    store.state.config.modules.turbo.enabled ||
+    store.state.config.modules.turbo.profiles.some((profile) => profile.enabled),
+)
 const dirty = computed(() => store.isDirty.value)
 const logViewerOpen = ref(false)
 const healthCheckOpen = ref(false)
@@ -141,6 +146,43 @@ watch(
   { immediate: true },
 )
 
+// The layer writes pacing verdicts during play; re-read them whenever the
+// user lands on the Turbo tab so discoveries from the last session show up.
+// The layer writes pacing verdicts mid-session (e.g. while the user watches
+// the Turbo tab with the game running); poll gently while the tab is visible
+// and refresh on window focus so the runtimes table updates without needing
+// to navigate away and back.
+let runtimePacingRefreshTimer: number | undefined
+
+function stopRuntimePacingRefresh() {
+  if (runtimePacingRefreshTimer !== undefined) {
+    window.clearInterval(runtimePacingRefreshTimer)
+    runtimePacingRefreshTimer = undefined
+  }
+}
+
+function onWindowFocus() {
+  if (store.state.activeTab === 'turbo') {
+    void store.refreshRuntimePacing()
+    void store.refreshTurboMetrics()
+  }
+}
+
+watch(
+  () => store.state.activeTab,
+  (tab) => {
+    stopRuntimePacingRefresh()
+    if (tab === 'turbo') {
+      void store.refreshRuntimePacing()
+      void store.refreshTurboMetrics()
+      runtimePacingRefreshTimer = window.setInterval(() => {
+        void store.refreshRuntimePacing()
+        void store.refreshTurboMetrics()
+      }, 5000)
+    }
+  },
+)
+
 let stopSystemThemeObservation = () => {}
 
 onMounted(() => {
@@ -149,6 +191,8 @@ onMounted(() => {
       applyThemePreference(themePreference.value)
     }
   })
+
+  window.addEventListener('focus', onWindowFocus)
 
   void store.load()
   void refreshLogs()
@@ -160,6 +204,8 @@ onMounted(() => {
 
 onUnmounted(() => {
   stopSystemThemeObservation()
+  stopRuntimePacingRefresh()
+  window.removeEventListener('focus', onWindowFocus)
 })
 
 async function saveConfig() {
@@ -222,13 +268,18 @@ async function exportDebugInformation() {
   debugExporting.value = true
 
   try {
-    await Promise.all([refreshLogs(), refreshOpenXrLayers(), store.refreshSeenApps()])
+    await Promise.all([refreshLogs(), refreshOpenXrLayers(), store.refreshSeenApps(), store.refreshRuntimePacing(), store.refreshTurboMetrics()])
     const packageBlob = createDebugPackage({
       appVersion: latestPatch.version,
       configPath: store.state.path,
       seenAppsPath: store.state.seenAppsPath,
       config: store.state.config,
       seenApps: store.state.seenApps,
+      runtimePacingPath: store.state.runtimePacingPath,
+      runtimePacing: store.state.runtimePacing,
+      turboMetricsPath: store.state.turboMetricsPath,
+      turboMetrics: store.state.turboMetrics,
+      activeRuntime: store.state.activeRuntime,
       logSnapshot: logSnapshot.value,
       openXrLayerSnapshot: openXrLayerSnapshot.value,
       healthSummary: healthSummary.value,
@@ -371,6 +422,7 @@ async function confirmResetConfig() {
           :snapshot="openXrLayerSnapshot"
           :loading="openXrLayersLoading"
           :machine-writes-unlocked="openXrMachineWritesUnlocked"
+          :turbo-in-use="turboInUse"
           @refresh="refreshOpenXrLayers"
           @machine-writes-unlocked="openXrMachineWritesUnlocked = $event"
           @snapshot-updated="openXrLayerSnapshot = $event"
@@ -393,9 +445,15 @@ async function confirmResetConfig() {
           v-else-if="store.state.activeTab === 'turbo'"
           :config="store.state.config"
           :applications="store.state.config.applications"
+          :runtime-pacing="store.state.runtimePacing"
+          :active-runtime="store.state.activeRuntime"
+          :layer-snapshot="openXrLayerSnapshot"
+          :turbo-metrics="store.state.turboMetrics"
           @add-turbo-profile="store.addTurboProfile"
           @remove-turbo-profile="store.removeTurboProfile"
           @sync-turbo-profile-name="store.syncTurboProfileName"
+          @rediscover-runtime="store.rediscoverRuntimePacing"
+          @clear-turbo-metrics="store.clearTurboMetricsSessions"
         />
         <PivotXrTab
           v-else-if="store.state.activeTab === 'pivotxr'"

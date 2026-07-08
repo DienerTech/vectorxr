@@ -8,6 +8,39 @@ export interface PatchNoteEntry {
 
 export const patchNotes: PatchNoteEntry[] = [
   {
+    version: '0.12.2',
+    date: '2026-07-07',
+    title: 'Turbo Metrics',
+    summary: 'Measure what Turbo actually does to your frame pacing - fps, frame times, and pacing wait time recorded per strategy and compared in the Turbo panel - plus Turbo engagement fixes validated on MSFS 2024.',
+    items: [
+      'Split turbo into two distinct strategies: async (the original Turbo) and sequenced (a new strategy for runtimes that cannot tolerate async).',
+      'Turbo Metrics: avg fps, 1% low, avg/p99 frame times, and runtime pacing wait time are recorded separately for Turbo off, async, and sequenced, with a per-session comparison in the Turbo panel.',
+      'Metrics collection is configurable: always-on, off, or gated behind a new capture keybinding (with its own sound cues) so loading screens and menus stay out of your data.',
+      'Fixed a game freeze when switching to VR mode in MSFS 2024 while Turbo was available (frame-call ordering during Turbo engagement).',
+      'Turbo now waits at least 5 seconds after a session starts before engaging, so it never kicks in mid VR-mode transition.',
+      'Turbo panel now explains that Sequenced-pacing runtimes (Pimax, Oculus, Varjo) cannot exceed a runtime-enforced framerate lock.',
+      'Sharper diagnostics: runtime submit failures, shouldRender changes, and empty-frame transitions are now logged, making black-screen reports self-explanatory.',
+    ],
+  },
+  {
+    version: '0.12.1',
+    date: '2026-07-06',
+    title: 'Turbo Pacing Auto-Discovery',
+    summary: 'Turbo now adapts its frame-pacing strategy to each headset runtime automatically, fixing the immediate self-suspension seen on Quest, Varjo, and Pimax headsets while leaving the already-working SteamVR behavior untouched. Toggling Turbo mid-flight is now instant, loading screens no longer confuse it, and a new Frame Pacing panel shows exactly what was chosen for each runtime.',
+    items: [
+      'Turbo now chooses the right frame-pacing strategy per headset runtime. Auto mode starts from what is known about your runtime, verifies it against live frame timing, adapts if needed, and remembers the verdict so the right strategy applies from the first frame of your next session.',
+      'New Sequenced pacing strategy makes Turbo work on runtimes that could not be pipelined before, including Quest and other Oculus-runtime headsets, Varjo, and Pimax. The 0.12.0 behavior of Turbo activating briefly and then suspending itself on these headsets is fixed.',
+      'The Turbo page gained a Frame Pacing panel listing each runtime you have used, the strategy in effect, and how it was chosen. You can pin a strategy per runtime or clear a recorded verdict to re-discover, and the list updates live while a game is running.',
+      'Turbo now waits for the game to reach a steady frame rate before engaging and rides through loading screens, removing startup hiccups and false self-suspensions during mission loads.',
+      'The Turbo toggle binding now switches instantly, with no re-synchronization hitch, making in-flight A/B comparisons seamless.',
+      'Fixed a scrambled, mismatched per-eye image that could appear when Turbo ran together with Quadviews.',
+      'Fixed rare full-game freezes with Turbo active, caused by a deadlock between frame pacing and pose queries inside the layer.',
+      'Turbo and Depth toggle bindings are now compact one-line rows with a dedicated edit page, matching the Pivot layout and freeing up screen space.',
+      'Added a conflict warning on the Turbo and OpenXR Layers pages when OpenXR Toolkit is enabled alongside VectorXR Turbo, since two frame-pacing layers fight each other.',
+      'Debug reports now include the per-runtime pacing history, and debug-level logs carry detailed pacing forensics to make headset-specific reports precise.',
+    ],
+  },
+  {
     version: '0.12.0',
     date: '2026-07-05',
     title: 'Turbo Mode & Pivot 2.0',

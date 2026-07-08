@@ -2,6 +2,7 @@
 
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace depthxr {
@@ -254,8 +255,8 @@ struct QuadViewsResolvedSettings : QuadViewsSettings {
     bool enabled{false};
 };
 
-// Turbo mode: overrides runtime frame pacing (async xrWaitFrame with one frame
-// of pipelining). Binary per application — profiles carry no settings.
+// Turbo mode: overrides runtime frame pacing (one frame of pipelining).
+// Binary per application — profiles carry no settings.
 struct TurboProfile {
     std::string id;
     std::string name;
@@ -264,16 +265,61 @@ struct TurboProfile {
     std::vector<std::string> application_ids;
 };
 
+// How the real xrWaitFrame is sequenced against the frame submit.
+// kAsync: background-thread wait launched after submit, drained at the next
+//   EndFrame — best overlap, but stalls on runtimes that interlock the wait
+//   with submission (Oculus, Varjo, PiOpenXR).
+// kSequenced: wait joined inside EndFrame right after the submit that
+//   unblocks it, then the next frame is pre-begun — safe on interlocking
+//   runtimes at the cost of blocking EndFrame for the pacing wait.
+// kUnsupported: verdict-only value — even sequenced pacing stalled, so turbo
+//   auto-suspends on this runtime until re-armed.
+enum class TurboPacingMode {
+    kAsync,
+    kSequenced,
+    kUnsupported,
+};
+
+// User intent for pacing. kAuto discovers per runtime (seed table, then
+// probe) and records verdicts to the runtime-pacing sidecar; forced modes
+// disable discovery, pins, and verdict writes entirely.
+enum class TurboPacingSetting {
+    kAuto,
+    kAsync,
+    kSequenced,
+};
+
+// When turbo's frame-pacing metrics are captured. kAlways records whenever a
+// session with turbo available is rendering; kBinding records only while the
+// capture binding is armed, so the user can cut loading screens and menus out
+// of the data; kOff disables capture entirely.
+enum class TurboMetricsMode {
+    kOff,
+    kAlways,
+    kBinding,
+};
+
 struct TurboModuleConfig {
     bool enabled{false};
     // Optional in-session A/B toggle, mirroring the Depth toggle binding.
     InputBinding toggle_binding;
+    TurboPacingSetting pacing_mode{TurboPacingSetting::kAuto};
+    // Per-runtime user overrides, keyed by exact xrGetInstanceProperties
+    // runtimeName. Only consulted when pacing_mode is kAuto.
+    std::vector<std::pair<std::string, TurboPacingMode>> runtime_pins;
+    TurboMetricsMode metrics_mode{TurboMetricsMode::kAlways};
+    // Begin/end metric capture while in-game (kBinding mode only).
+    InputBinding metrics_binding;
     std::vector<TurboProfile> profiles;
 };
 
 struct TurboResolvedSettings {
     bool enabled{false};
     InputBinding toggle_binding;
+    TurboPacingSetting pacing_mode{TurboPacingSetting::kAuto};
+    std::vector<std::pair<std::string, TurboPacingMode>> runtime_pins;
+    TurboMetricsMode metrics_mode{TurboMetricsMode::kAlways};
+    InputBinding metrics_binding;
 };
 
 struct ConfigDocument {
@@ -297,6 +343,13 @@ struct ResolvedRuntimeConfig {
 
 const char* ToString(LogLevel level);
 std::optional<LogLevel> ParseLogLevel(const std::string& value);
+
+const char* ToString(TurboPacingMode mode);
+std::optional<TurboPacingMode> ParseTurboPacingMode(const std::string& value);
+const char* ToString(TurboPacingSetting setting);
+std::optional<TurboPacingSetting> ParseTurboPacingSetting(const std::string& value);
+const char* ToString(TurboMetricsMode mode);
+std::optional<TurboMetricsMode> ParseTurboMetricsMode(const std::string& value);
 
 const char* ToString(ActivationMode mode);
 std::optional<ActivationMode> ParseActivationMode(const std::string& value);

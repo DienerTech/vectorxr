@@ -1023,3 +1023,94 @@ fn strip_urls(value: &str) -> String {
         .collect::<Vec<_>>()
         .join(" ")
 }
+
+// The system's active OpenXR runtime, read from the registry so the UI can
+// highlight the matching runtime-pacing row without needing a live session.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ActiveRuntimeInfo {
+    pub manifest_path: String,
+    // Optional: runtime manifests are not required to carry a name. The
+    // authoritative name comes from xrGetInstanceProperties (layer sidecar);
+    // this is display/matching metadata only.
+    pub name: Option<String>,
+}
+
+pub fn read_active_runtime() -> Option<ActiveRuntimeInfo> {
+    read_active_runtime_native()
+}
+
+#[cfg(windows)]
+fn read_active_runtime_native() -> Option<ActiveRuntimeInfo> {
+    let path = wide_null(r"SOFTWARE\Khronos\OpenXR\1");
+    let mut key = HKEY(std::ptr::null_mut());
+    let status = unsafe {
+        RegOpenKeyExW(
+            HKEY_LOCAL_MACHINE,
+            PWSTR(path.as_ptr() as *mut u16),
+            None,
+            KEY_READ | KEY_WOW64_64KEY,
+            &mut key,
+        )
+    };
+    if status != WIN32_ERROR(0) {
+        return None;
+    }
+    let key = RegistryKeyHandle(key);
+
+    let mut index = 0;
+    loop {
+        let mut name_buffer = vec![0u16; 512];
+        let mut name_len = name_buffer.len() as u32;
+        let mut value_type = 0u32;
+        let mut data = vec![0u8; 65536];
+        let mut data_len = data.len() as u32;
+        let status = unsafe {
+            RegEnumValueW(
+                key.0,
+                index,
+                Some(PWSTR(name_buffer.as_mut_ptr())),
+                &mut name_len,
+                None,
+                Some(&mut value_type),
+                Some(data.as_mut_ptr()),
+                Some(&mut data_len),
+            )
+        };
+        if status != WIN32_ERROR(0) {
+            return None;
+        }
+        let name = String::from_utf16_lossy(&name_buffer[..name_len as usize]);
+        if name.eq_ignore_ascii_case("ActiveRuntime") {
+            let wide: Vec<u16> = data[..data_len as usize]
+                .chunks_exact(2)
+                .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
+                .collect();
+            let mut manifest_path = String::from_utf16_lossy(&wide);
+            while manifest_path.ends_with('\0') {
+                manifest_path.pop();
+            }
+            let name = runtime_name_from_manifest(&manifest_path);
+            return Some(ActiveRuntimeInfo {
+                manifest_path,
+                name,
+            });
+        }
+        index += 1;
+    }
+}
+
+#[cfg(not(windows))]
+fn read_active_runtime_native() -> Option<ActiveRuntimeInfo> {
+    None
+}
+
+fn runtime_name_from_manifest(manifest_path: &str) -> Option<String> {
+    let content = fs::read_to_string(manifest_path).ok()?;
+    let value: Value = serde_json::from_str(&content).ok()?;
+    value
+        .get("runtime")?
+        .get("name")?
+        .as_str()
+        .map(|name| name.to_string())
+}

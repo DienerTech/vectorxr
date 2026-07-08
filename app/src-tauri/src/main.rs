@@ -511,8 +511,24 @@ struct TurboModuleConfig {
     enabled: bool,
     #[serde(default = "default_activation_binding")]
     toggle_binding: InputBinding,
+    #[serde(default = "default_turbo_pacing_mode")]
+    pacing_mode: String,
+    #[serde(default)]
+    runtime_pins: std::collections::BTreeMap<String, String>,
+    #[serde(default = "default_turbo_metrics_mode")]
+    metrics_mode: String,
+    #[serde(default = "default_activation_binding")]
+    metrics_binding: InputBinding,
     #[serde(default)]
     profiles: Vec<TurboProfileConfig>,
+}
+
+fn default_turbo_pacing_mode() -> String {
+    "auto".into()
+}
+
+fn default_turbo_metrics_mode() -> String {
+    "always".into()
 }
 
 impl Default for TurboModuleConfig {
@@ -520,6 +536,10 @@ impl Default for TurboModuleConfig {
         Self {
             enabled: false,
             toggle_binding: default_activation_binding(),
+            pacing_mode: default_turbo_pacing_mode(),
+            runtime_pins: std::collections::BTreeMap::new(),
+            metrics_mode: default_turbo_metrics_mode(),
+            metrics_binding: default_activation_binding(),
             profiles: Vec::new(),
         }
     }
@@ -612,6 +632,118 @@ struct SeenAppsEnvelope {
 
 fn default_seen_apps_version() -> u32 {
     1
+}
+
+// Layer-written runtime-pacing sidecar (seen-apps pattern): per-runtime turbo
+// pacing verdicts recorded by Auto discovery. Read-only facts for the UI —
+// user intent (pacing mode, pins) lives in the config document.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RuntimePacingObservation {
+    #[serde(default)]
+    runtime_name: String,
+    #[serde(default)]
+    runtime_version: String,
+    #[serde(default)]
+    mode: String,
+    #[serde(default)]
+    source: String,
+    #[serde(default)]
+    layer_version: String,
+    #[serde(default)]
+    first_used_unix_seconds: u64,
+    #[serde(default)]
+    last_used_unix_seconds: u64,
+    #[serde(default)]
+    probe_timeouts: u64,
+    #[serde(default)]
+    stable_seconds: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RuntimePacingDocument {
+    #[serde(default = "default_seen_apps_version")]
+    version: u32,
+    #[serde(default)]
+    observations: Vec<RuntimePacingObservation>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RuntimePacingEnvelope {
+    path: String,
+    observations: Vec<RuntimePacingObservation>,
+    active_runtime: Option<openxr_layers::ActiveRuntimeInfo>,
+}
+
+// Layer-written turbo-metrics sidecar (seen-apps pattern): per-session frame
+// pacing stats segmented by pacing state (off/async/sequenced). Read-only
+// facts for the Turbo panel's session metrics card.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TurboMetricsBucket {
+    #[serde(default)]
+    state: String,
+    #[serde(default)]
+    frames: i64,
+    #[serde(default)]
+    seconds: f64,
+    #[serde(default)]
+    avg_fps: f64,
+    #[serde(default)]
+    avg_frame_ms: f64,
+    #[serde(default)]
+    p99_frame_ms: f64,
+    #[serde(default)]
+    max_frame_ms: f64,
+    #[serde(default)]
+    avg_wait_block_ms: f64,
+    #[serde(default)]
+    fabricated_waits: i64,
+    #[serde(default)]
+    drain_timeouts: i64,
+    #[serde(default)]
+    discarded_frames: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TurboMetricsSession {
+    #[serde(default)]
+    session_id: String,
+    #[serde(default)]
+    app_name: String,
+    #[serde(default)]
+    runtime_name: String,
+    #[serde(default)]
+    layer_version: String,
+    #[serde(default)]
+    collection_mode: String,
+    #[serde(default)]
+    live: bool,
+    #[serde(default)]
+    started_unix_seconds: i64,
+    #[serde(default)]
+    updated_unix_seconds: i64,
+    #[serde(default)]
+    buckets: Vec<TurboMetricsBucket>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TurboMetricsDocument {
+    #[serde(default = "default_seen_apps_version")]
+    version: u32,
+    #[serde(default)]
+    sessions: Vec<TurboMetricsSession>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TurboMetricsEnvelope {
+    path: String,
+    sessions: Vec<TurboMetricsSession>,
 }
 
 fn default_config() -> VectorXRConfig {
@@ -901,6 +1033,84 @@ fn resolve_seen_apps_path() -> PathBuf {
         .unwrap_or_else(|_| PathBuf::from("."))
         .join("config")
         .join("seen-apps.json")
+}
+
+fn resolve_runtime_pacing_path() -> PathBuf {
+    if let Ok(env_path) = env::var("VECTORXR_RUNTIME_PACING_PATH") {
+        if !env_path.trim().is_empty() {
+            return PathBuf::from(env_path);
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        if let Ok(local_app_data) = env::var("LOCALAPPDATA") {
+            return PathBuf::from(local_app_data)
+                .join("VectorXR")
+                .join("config")
+                .join("runtime-pacing.json");
+        }
+    }
+
+    env::current_dir()
+        .unwrap_or_else(|_| PathBuf::from("."))
+        .join("config")
+        .join("runtime-pacing.json")
+}
+
+fn resolve_turbo_metrics_path() -> PathBuf {
+    if let Ok(env_path) = env::var("VECTORXR_TURBO_METRICS_PATH") {
+        if !env_path.trim().is_empty() {
+            return PathBuf::from(env_path);
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        if let Ok(local_app_data) = env::var("LOCALAPPDATA") {
+            return PathBuf::from(local_app_data)
+                .join("VectorXR")
+                .join("config")
+                .join("turbo-metrics.json");
+        }
+    }
+
+    env::current_dir()
+        .unwrap_or_else(|_| PathBuf::from("."))
+        .join("config")
+        .join("turbo-metrics.json")
+}
+
+fn read_turbo_metrics_document(path: &Path) -> TurboMetricsDocument {
+    if !path.exists() {
+        return TurboMetricsDocument {
+            version: 1,
+            sessions: Vec::new(),
+        };
+    }
+    fs::read_to_string(path)
+        .ok()
+        .and_then(|content| serde_json::from_str(&content).ok())
+        .unwrap_or(TurboMetricsDocument {
+            version: 1,
+            sessions: Vec::new(),
+        })
+}
+
+fn read_runtime_pacing_document(path: &Path) -> RuntimePacingDocument {
+    if !path.exists() {
+        return RuntimePacingDocument {
+            version: 1,
+            observations: Vec::new(),
+        };
+    }
+    fs::read_to_string(path)
+        .ok()
+        .and_then(|content| serde_json::from_str::<RuntimePacingDocument>(&content).ok())
+        .unwrap_or_else(|| RuntimePacingDocument {
+            version: 1,
+            observations: Vec::new(),
+        })
 }
 
 fn ensure_parent(path: &Path) -> Result<(), String> {
@@ -1340,6 +1550,62 @@ fn clear_seen_apps() -> Result<String, String> {
 }
 
 #[tauri::command]
+fn load_runtime_pacing() -> Result<RuntimePacingEnvelope, String> {
+    let path = resolve_runtime_pacing_path();
+    let document = read_runtime_pacing_document(&path);
+    Ok(RuntimePacingEnvelope {
+        path: path.to_string_lossy().into_owned(),
+        observations: document.observations,
+        active_runtime: openxr_layers::read_active_runtime(),
+    })
+}
+
+// "Re-discover": drop one runtime's recorded verdict so Auto probes it again
+// at the next session. Leaves other runtimes' verdicts intact.
+#[tauri::command]
+fn clear_runtime_pacing_observation(runtime_name: String) -> Result<RuntimePacingEnvelope, String> {
+    let path = resolve_runtime_pacing_path();
+    let mut document = read_runtime_pacing_document(&path);
+    document
+        .observations
+        .retain(|observation| observation.runtime_name != runtime_name);
+    let content = serde_json::to_string_pretty(&document).map_err(|error| error.to_string())?;
+    write_text_safely(&path, &content)?;
+    Ok(RuntimePacingEnvelope {
+        path: path.to_string_lossy().into_owned(),
+        observations: document.observations,
+        active_runtime: openxr_layers::read_active_runtime(),
+    })
+}
+
+#[tauri::command]
+fn load_turbo_metrics() -> Result<TurboMetricsEnvelope, String> {
+    let path = resolve_turbo_metrics_path();
+    let document = read_turbo_metrics_document(&path);
+    Ok(TurboMetricsEnvelope {
+        path: path.to_string_lossy().into_owned(),
+        sessions: document.sessions,
+    })
+}
+
+// Drops all recorded metric sessions so the next capture starts from a clean
+// slate (useful when settings changed and old comparisons no longer apply).
+#[tauri::command]
+fn clear_turbo_metrics() -> Result<TurboMetricsEnvelope, String> {
+    let path = resolve_turbo_metrics_path();
+    let document = TurboMetricsDocument {
+        version: 1,
+        sessions: Vec::new(),
+    };
+    let content = serde_json::to_string_pretty(&document).map_err(|error| error.to_string())?;
+    write_text_safely(&path, &content)?;
+    Ok(TurboMetricsEnvelope {
+        path: path.to_string_lossy().into_owned(),
+        sessions: document.sessions,
+    })
+}
+
+#[tauri::command]
 fn load_openxr_layers() -> Result<openxr_layers::OpenXrLayerSnapshot, String> {
     openxr_layers::load_openxr_layers()
 }
@@ -1439,6 +1705,8 @@ fn play_test_sound(
                 Some("origin-release.wav") => "sounds/origin-release.wav",
                 Some("turbo-on.wav") => "sounds/turbo-on.wav",
                 Some("turbo-off.wav") => "sounds/turbo-off.wav",
+                Some("metrics-on.wav") => "sounds/metrics-on.wav",
+                Some("metrics-off.wav") => "sounds/metrics-off.wav",
                 _ => {
                     if activate {
                         "sounds/activate.wav"
@@ -1519,6 +1787,10 @@ fn main() {
             open_external_url,
             load_seen_apps,
             clear_seen_apps,
+            load_runtime_pacing,
+            clear_runtime_pacing_observation,
+            load_turbo_metrics,
+            clear_turbo_metrics,
             list_input_devices,
             capture_device_binding,
             load_openxr_layers,

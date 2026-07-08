@@ -1021,6 +1021,10 @@ bool ParseTurboModule(const JsonValue::Object& object, TurboModuleConfig& out, s
     static const std::unordered_set<std::string> allowed = {
         "enabled",
         "toggleBinding",
+        "pacingMode",
+        "runtimePins",
+        "metricsMode",
+        "metricsBinding",
         "profiles",
     };
 
@@ -1036,9 +1040,63 @@ bool ParseTurboModule(const JsonValue::Object& object, TurboModuleConfig& out, s
         out.enabled = *enabled;
     }
 
+    // Optional: absent in configs written before pacing modes existed.
+    std::optional<std::string> pacing_mode;
+    if (!ReadOptionalString(object, "pacingMode", pacing_mode, error)) {
+        return false;
+    }
+    if (pacing_mode.has_value()) {
+        const std::optional<TurboPacingSetting> parsed = ParseTurboPacingSetting(*pacing_mode);
+        if (!parsed.has_value()) {
+            error = "turbo.pacingMode must be one of: auto, async, sequenced";
+            return false;
+        }
+        out.pacing_mode = *parsed;
+    }
+
+    const auto pins_it = object.find("runtimePins");
+    if (pins_it != object.end()) {
+        const JsonValue::Object* pins_object = RequireObject(pins_it->second, "turbo.runtimePins", error);
+        if (!pins_object) {
+            return false;
+        }
+        for (const auto& [runtime_name, pin_value] : *pins_object) {
+            if (!pin_value.IsString()) {
+                error = "turbo.runtimePins values must be strings";
+                return false;
+            }
+            const std::optional<TurboPacingMode> pin = ParseTurboPacingMode(pin_value.AsString());
+            if (!pin.has_value() || *pin == TurboPacingMode::kUnsupported) {
+                error = "turbo.runtimePins values must be one of: async, sequenced";
+                return false;
+            }
+            out.runtime_pins.emplace_back(runtime_name, *pin);
+        }
+    }
+
+    // Optional: absent in configs written before metrics capture existed.
+    std::optional<std::string> metrics_mode;
+    if (!ReadOptionalString(object, "metricsMode", metrics_mode, error)) {
+        return false;
+    }
+    if (metrics_mode.has_value()) {
+        const std::optional<TurboMetricsMode> parsed = ParseTurboMetricsMode(*metrics_mode);
+        if (!parsed.has_value()) {
+            error = "turbo.metricsMode must be one of: off, always, binding";
+            return false;
+        }
+        out.metrics_mode = *parsed;
+    }
+
     const auto toggle_binding_it = object.find("toggleBinding");
     if (toggle_binding_it != object.end() &&
         !ParseInputBinding(toggle_binding_it->second, out.toggle_binding, error)) {
+        return false;
+    }
+
+    const auto metrics_binding_it = object.find("metricsBinding");
+    if (metrics_binding_it != object.end() &&
+        !ParseInputBinding(metrics_binding_it->second, out.metrics_binding, error)) {
         return false;
     }
 
