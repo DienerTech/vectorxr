@@ -252,6 +252,8 @@ class OpenXrLayer {
         bool initialized{false};
         bool failed{false};
         bool has_logged_active{false};
+        bool has_logged_skipped{false};
+        uint32_t consecutive_skipped_frames{0};
         uint32_t failure_logs_remaining{8};
         std::array<QuadViewsCompositionTarget, 2> targets;
     };

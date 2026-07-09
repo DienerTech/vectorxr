@@ -505,6 +505,12 @@ struct FocusSharpenConstants {
 // halos. Tunable; 3.0 matches the effective radius of the compositor path in testing.
 constexpr float kVarjoFocusSharpenRadiusTexels = 3.0f;
 
+// Frames of continuous "sharpen requested but nothing sharpened" before the skip
+// diagnostic is logged. Filters startup transients (first frames can legitimately
+// skip before the focus swapchains have a released image) so the one-shot log
+// only fires for a persistent condition.
+constexpr uint32_t kFocusSharpenSkipLogFrames = 90;
+
 // Standalone 1:1 CAS sharpen over a focus view. Unlike the compositor shader this
 // does not blend a peripheral view or resample into a sub-rect. Neighbours are taken
 // at a widened offset (params.yz, a few source texels — see kVarjoFocusSharpenRadiusTexels)
@@ -4601,6 +4607,14 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
         IsQuadViewsActive() && has_active_primary_view_configuration_ &&
         IsQuadViewConfiguration(active_primary_view_configuration_type_) &&
         active_runtime_view_configuration_type_ == XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
+    // Varjo compatible quadviews: the focus sharpen runs inside the projection
+    // rewrite loop below, so a requested sharpen must keep this frame out of the
+    // identity-delta fast path — otherwise sharpening only ever ran on frames
+    // where PivotXR happened to produce a correction. Threshold matches
+    // SharpenNativeFocusViews (amount <= 0.001 is treated as off).
+    const bool needs_native_focus_sharpen =
+        varjo_compatible_quadviews_active_ && IsQuadViewsActive() &&
+        Clamp(resolved_settings_.quadviews.foveate_sharpness, 0.0, 100.0) / 100.0 > 0.001;
     const bool should_log_end_frame_diagnostic =
         pending_end_frame_diagnostics_ > 0 ||
         (quadviews_projection_split_active &&
@@ -4664,7 +4678,7 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
         }
     }
 
-    if (!has_non_identity_delta && !quadviews_projection_split_active) {
+    if (!has_non_identity_delta && !quadviews_projection_split_active && !needs_native_focus_sharpen) {
         if (should_log_end_frame_diagnostic) {
             std::ostringstream stream;
             stream << "EndFrame pivot correction skipped: cacheHit=" << has_pose_delta
@@ -7202,6 +7216,8 @@ void OpenXrLayer::ResetD3D11FocusSharpen() {
     d3d11_focus_sharpen_.initialized = false;
     d3d11_focus_sharpen_.failed = false;
     d3d11_focus_sharpen_.has_logged_active = false;
+    d3d11_focus_sharpen_.has_logged_skipped = false;
+    d3d11_focus_sharpen_.consecutive_skipped_frames = 0;
     d3d11_focus_sharpen_.failure_logs_remaining = 8;
 }
 
@@ -7372,6 +7388,15 @@ void OpenXrLayer::SharpenNativeFocusViews(std::vector<XrCompositionLayerProjecti
         return;
     }
     if (!EnsureD3D11FocusSharpen()) {
+        if (!d3d11_focus_sharpen_.has_logged_skipped) {
+            logger_.Info(std::string("Varjo focus sharpen requested (amount=") +
+                         FormatDiagnosticDouble(sharpen_amount) +
+                         ") but the D3D11 sharpen pass is unavailable: " +
+                         (d3d11_focus_sharpen_.failed
+                              ? "shader/resource initialization failed (see earlier errors)."
+                              : "no D3D11 graphics binding for this session."));
+            d3d11_focus_sharpen_.has_logged_skipped = true;
+        }
         return;
     }
 
@@ -7402,16 +7427,22 @@ void OpenXrLayer::SharpenNativeFocusViews(std::vector<XrCompositionLayerProjecti
     context->RSGetViewports(&saved.viewport_count, saved.viewports);
 
     uint32_t sharpened_count = 0;
+    // Why each focus view was skipped, for the one-shot diagnostic below — the
+    // pass otherwise degrades to a silent no-op that looks like a dead slider.
+    const char* skip_reason[2] = {"ok", "ok"};
     for (uint32_t i = 2; i < 4; ++i) {
+        const char*& reason = skip_reason[i - 2];
         XrCompositionLayerProjectionView& view = views[i];
         // Only single-slice focus swapchains are supported for the sharpen pass; an
         // arrayed subImage falls back to the app's unsharpened focus.
         if (view.subImage.imageArrayIndex != 0 || view.subImage.swapchain == XR_NULL_HANDLE) {
+            reason = "arrayed or null subImage";
             continue;
         }
         const auto it = tracked_swapchains_.find(view.subImage.swapchain);
         if (it == tracked_swapchains_.end() || it->second.d3d11_images.empty() ||
             !(it->second.has_last_acquired_image_index || it->second.has_last_released_image_index)) {
+            reason = "swapchain untracked or no acquired image yet";
             continue;
         }
         SwapchainInfo& src = it->second;
@@ -7420,14 +7451,17 @@ void OpenXrLayer::SharpenNativeFocusViews(std::vector<XrCompositionLayerProjecti
         const uint32_t src_index = src.has_last_released_image_index ? src.last_released_image_index
                                                                      : src.last_acquired_image_index;
         if (src_index >= src.d3d11_images.size()) {
+            reason = "image index out of range";
             continue;
         }
         if (!EnsureD3D11SwapchainShaderResources(src) ||
             src_index >= src.d3d11_shader_resources.size()) {
+            reason = "no shader resource views (focus swapchain needs sampled usage)";
             continue;
         }
         ID3D11ShaderResourceView* focus_srv = src.d3d11_shader_resources[src_index];
         if (!focus_srv) {
+            reason = "null shader resource view";
             continue;
         }
 
@@ -7435,6 +7469,7 @@ void OpenXrLayer::SharpenNativeFocusViews(std::vector<XrCompositionLayerProjecti
         const uint32_t out_height = static_cast<uint32_t>(view.subImage.imageRect.extent.height);
         QuadViewsCompositionTarget& target = d3d11_focus_sharpen_.targets[i - 2];
         if (!EnsureFocusSharpenTarget(target, out_width, out_height, src.format)) {
+            reason = "sharpen output swapchain unavailable";
             continue;
         }
 
@@ -7442,6 +7477,7 @@ void OpenXrLayer::SharpenNativeFocusViews(std::vector<XrCompositionLayerProjecti
         XrSwapchainImageAcquireInfo acquire_info{XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};
         XrResult result = next_acquire_swapchain_image_(target.swapchain, &acquire_info, &output_index);
         if (XR_FAILED(result) || output_index >= target.image_render_target_views.size()) {
+            reason = "sharpen output acquire failed";
             continue;
         }
         XrSwapchainImageWaitInfo wait_info{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};
@@ -7450,6 +7486,7 @@ void OpenXrLayer::SharpenNativeFocusViews(std::vector<XrCompositionLayerProjecti
         if (XR_FAILED(result)) {
             XrSwapchainImageReleaseInfo release_info{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
             next_release_swapchain_image_(target.swapchain, &release_info);
+            reason = "sharpen output wait failed";
             continue;
         }
 
@@ -7497,6 +7534,7 @@ void OpenXrLayer::SharpenNativeFocusViews(std::vector<XrCompositionLayerProjecti
         XrSwapchainImageReleaseInfo release_info{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
         result = next_release_swapchain_image_(target.swapchain, &release_info);
         if (XR_FAILED(result)) {
+            reason = "sharpen output release failed";
             continue;
         }
 
@@ -7535,13 +7573,27 @@ void OpenXrLayer::SharpenNativeFocusViews(std::vector<XrCompositionLayerProjecti
         SafeRelease(buffer);
     }
 
-    if (sharpened_count > 0 && !d3d11_focus_sharpen_.has_logged_active) {
-        logger_.Info("D3D11 focus sharpen active in Varjo compatible quadviews: sharpened " +
-                     std::to_string(sharpened_count) + " focus view(s), amount=" +
-                     FormatDiagnosticDouble(sharpen_amount) + ", radiusTexels=" +
-                     FormatDiagnosticDouble(kVarjoFocusSharpenRadiusTexels) +
-                     " (frameTime=" + std::to_string(display_time) + ").");
-        d3d11_focus_sharpen_.has_logged_active = true;
+    if (sharpened_count > 0) {
+        d3d11_focus_sharpen_.consecutive_skipped_frames = 0;
+        if (!d3d11_focus_sharpen_.has_logged_active) {
+            logger_.Info("D3D11 focus sharpen active in Varjo compatible quadviews: sharpened " +
+                         std::to_string(sharpened_count) + " focus view(s), amount=" +
+                         FormatDiagnosticDouble(sharpen_amount) + ", radiusTexels=" +
+                         FormatDiagnosticDouble(kVarjoFocusSharpenRadiusTexels) +
+                         " (frameTime=" + std::to_string(display_time) + ").");
+            d3d11_focus_sharpen_.has_logged_active = true;
+        }
+    } else {
+        ++d3d11_focus_sharpen_.consecutive_skipped_frames;
+        if (!d3d11_focus_sharpen_.has_logged_skipped &&
+            d3d11_focus_sharpen_.consecutive_skipped_frames >= kFocusSharpenSkipLogFrames) {
+            logger_.Info(std::string("Varjo focus sharpen requested (amount=") +
+                         FormatDiagnosticDouble(sharpen_amount) + ") but no focus view was sharpened for " +
+                         std::to_string(d3d11_focus_sharpen_.consecutive_skipped_frames) +
+                         " consecutive frames: view2=[" + skip_reason[0] + "], view3=[" + skip_reason[1] +
+                         "] (frameTime=" + std::to_string(display_time) + ").");
+            d3d11_focus_sharpen_.has_logged_skipped = true;
+        }
     }
 }
 
