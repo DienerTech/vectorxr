@@ -119,11 +119,6 @@ function budgetChipClass(settings: QuadViewsSettings) {
         <div>
           <div class="flex flex-wrap items-center gap-3">
             <h2 class="text-2xl font-semibold tracking-tight">Quadviews</h2>
-            <span
-              class="rounded-full px-3 py-1 text-xs font-semibold uppercase tracking-[0.16em] chip-warning"
-            >
-              ⚠ Experimental
-            </span>
           </div>
           <p class="mt-2 max-w-3xl text-sm leading-6 text-muted">
             Manage native quadview defaults and per-application profiles for
