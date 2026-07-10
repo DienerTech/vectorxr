@@ -4,13 +4,74 @@ import type { QuadViewsSettings } from '../lib/model'
 // Shared Quadviews settings editor used by both the Default Profile and each
 // custom profile, so the two stay visually and structurally identical.
 // Fields mutate the passed-in reactive `settings` object directly.
-defineProps<{
+const props = defineProps<{
   settings: QuadViewsSettings
 }>()
+
+type QuadViewsPreset = 'performance' | 'balanced' | 'quality'
+
+const presets: Record<QuadViewsPreset, Pick<QuadViewsSettings,
+  'focusHorizontalSizePercent' | 'focusVerticalSizePercent' | 'focusScale' |
+  'peripheralScale' | 'foveateSharpness' | 'transitionThicknessPercent'>> = {
+  performance: {
+    focusHorizontalSizePercent: 35,
+    focusVerticalSizePercent: 35,
+    focusScale: 1,
+    peripheralScale: 0.3,
+    foveateSharpness: 55,
+    transitionThicknessPercent: 20,
+  },
+  balanced: {
+    focusHorizontalSizePercent: 40,
+    focusVerticalSizePercent: 40,
+    focusScale: 1.1,
+    peripheralScale: 0.35,
+    foveateSharpness: 50,
+    transitionThicknessPercent: 25,
+  },
+  quality: {
+    focusHorizontalSizePercent: 45,
+    focusVerticalSizePercent: 45,
+    focusScale: 1.15,
+    peripheralScale: 0.5,
+    foveateSharpness: 45,
+    transitionThicknessPercent: 25,
+  },
+}
+
+function applyPreset(preset: QuadViewsPreset) {
+  Object.assign(props.settings, presets[preset])
+}
+
+function presetActive(preset: QuadViewsPreset) {
+  return Object.entries(presets[preset]).every(
+    ([key, value]) => props.settings[key as keyof QuadViewsSettings] === value,
+  )
+}
 </script>
 
 <template>
-  <div class="grid gap-3 lg:grid-cols-3">
+  <div class="space-y-3">
+    <div class="flex flex-wrap items-center justify-between gap-3 rounded-[1rem] border px-4 py-3 surface-panel-soft">
+      <div>
+        <p class="eyebrow text-xs uppercase tracking-[0.18em]">Vector Preset</p>
+        <p class="mt-1 text-xs text-muted">A strong starting point; tracking and alignment remain yours.</p>
+      </div>
+      <div class="flex flex-wrap gap-2">
+        <button
+          v-for="preset in (['performance', 'balanced', 'quality'] as QuadViewsPreset[])"
+          :key="preset"
+          class="rounded-[0.65rem] border px-3 py-1.5 text-xs font-semibold capitalize"
+          :class="presetActive(preset) ? 'button-accent' : 'button-secondary'"
+          type="button"
+          @click="applyPreset(preset)"
+        >
+          {{ preset }}
+        </button>
+      </div>
+    </div>
+
+    <div class="grid gap-3 lg:grid-cols-3">
     <div class="rounded-[1rem] border p-4 surface-panel-soft">
       <p class="eyebrow text-xs uppercase tracking-[0.18em]">Focus Window</p>
       <div class="mt-3 grid gap-3 sm:grid-cols-2">
@@ -231,6 +292,7 @@ defineProps<{
           />
         </label>
       </div>
+    </div>
     </div>
   </div>
 </template>

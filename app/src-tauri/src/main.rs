@@ -645,6 +645,12 @@ struct RuntimePacingObservation {
     #[serde(default)]
     runtime_version: String,
     #[serde(default)]
+    system_name: String,
+    #[serde(default)]
+    vendor_id: u32,
+    #[serde(default)]
+    graphics_api: String,
+    #[serde(default)]
     mode: String,
     #[serde(default)]
     source: String,

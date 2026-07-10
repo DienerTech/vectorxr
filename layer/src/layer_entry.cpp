@@ -50,6 +50,10 @@ XrResult XRAPI_CALL DepthxrBeginSession(XrSession session, const XrSessionBeginI
     return OpenXrLayer::Instance().BeginSession(session, begin_info);
 }
 
+XrResult XRAPI_CALL DepthxrEndSession(XrSession session) {
+    return OpenXrLayer::Instance().EndSession(session);
+}
+
 XrResult XRAPI_CALL DepthxrAttachSessionActionSets(XrSession session,
                                                    const XrSessionActionSetsAttachInfo* attach_info) {
     return OpenXrLayer::Instance().AttachSessionActionSets(session, attach_info);
@@ -431,6 +435,10 @@ XrResult XRAPI_CALL xrGetInstanceProcAddr(XrInstance instance, const char* name,
         *function = reinterpret_cast<PFN_xrVoidFunction>(depthxr::DepthxrBeginSession);
         return XR_SUCCESS;
     }
+    if (requested == "xrEndSession") {
+        *function = reinterpret_cast<PFN_xrVoidFunction>(depthxr::DepthxrEndSession);
+        return XR_SUCCESS;
+    }
     if (requested == "xrAttachSessionActionSets") {
         *function = reinterpret_cast<PFN_xrVoidFunction>(depthxr::DepthxrAttachSessionActionSets);
         return XR_SUCCESS;
@@ -550,6 +558,10 @@ XrResult XRAPI_CALL xrCreateApiLayerInstance(const XrInstanceCreateInfo* instanc
         return XR_ERROR_INITIALIZATION_FAILED;
     }
 
+    if (!OpenXrLayer::Instance().CanCreateInstance()) {
+        return XR_ERROR_LIMIT_REACHED;
+    }
+
     OpenXrLayer::Instance().SetNextProcAddr(next_info->nextGetInstanceProcAddr);
 
     XrApiLayerCreateInfo chain_info = *layer_info;
@@ -563,12 +575,10 @@ XrResult XRAPI_CALL xrCreateApiLayerInstance(const XrInstanceCreateInfo* instanc
     diagnostics.app_requested_eye_gaze =
         ApplicationRequestedExtension(instance_create_info, XR_EXT_EYE_GAZE_INTERACTION_EXTENSION_NAME);
 
-    // Varjo compatible quadviews: when VectorXR quadviews is enabled AND the app
-    // requested quad views AND the runtime natively advertises them, forward the
-    // Varjo extensions to the runtime instead of stripping them for stereo-composite
-    // emulation. This lets the runtime drive the physical focus panels directly. It
-    // is the default on Varjo (no opt-in), and gated on the runtime probe so it is
-    // inert on every non-Varjo headset.
+    // Native Varjo extensions are part of the app/runtime contract, not a VectorXR
+    // feature toggle. Always preserve them for the active Varjo runtime. VectorXR's
+    // profile still decides whether scaling/sharpening modifications are applied,
+    // but disabling Quadviews must never disable an application's native path.
     const bool app_requested_quad_views_for_forwarding =
         diagnostics.app_requested_quad_views || diagnostics.app_requested_varjo_foveated_rendering;
     bool forward_varjo_quad_extensions = false;
@@ -593,15 +603,19 @@ XrResult XRAPI_CALL xrCreateApiLayerInstance(const XrInstanceCreateInfo* instanc
         }
         diagnostics.pre_instance_extensions = std::move(joined_extensions);
 
-        // Drive the decision off the active OpenXR runtime (reliable, no-op off
-        // Varjo) rather than the pre-instance extension probe (kept above only for
-        // diagnostics — it proved to give false negatives on Varjo).
+        // The manifest identity is a fallback for Varjo, whose pre-instance
+        // extension probe can return false negatives. Other runtimes forward
+        // only when they advertise every native extension the app requested.
         std::string active_runtime_path;
         diagnostics.active_runtime_is_varjo = ActiveOpenXrRuntimeIsVarjo(active_runtime_path);
         diagnostics.active_runtime_path = std::move(active_runtime_path);
 
+        const bool runtime_supports_requested_native_extensions =
+            (!diagnostics.app_requested_quad_views || diagnostics.runtime_advertises_varjo_quad) &&
+            (!diagnostics.app_requested_varjo_foveated_rendering ||
+             diagnostics.runtime_advertises_varjo_foveated);
         forward_varjo_quad_extensions =
-            diagnostics.varjo_compatible_eligible && diagnostics.active_runtime_is_varjo;
+            diagnostics.active_runtime_is_varjo || runtime_supports_requested_native_extensions;
     }
     diagnostics.varjo_compatible_quad_forwarded = forward_varjo_quad_extensions;
 
@@ -630,7 +644,8 @@ XrResult XRAPI_CALL xrCreateApiLayerInstance(const XrInstanceCreateInfo* instanc
 
     std::vector<const char*> first_downstream_extensions = base_downstream_extensions;
     diagnostics.optimistic_eye_gaze_request =
-        app_requested_layer_owned_quadviews &&
+        app_requested_layer_owned_quadviews && !forward_varjo_quad_extensions &&
+        diagnostics.cheap_eye_gaze_probe_supported &&
         !ExtensionListContains(first_downstream_extensions, XR_EXT_EYE_GAZE_INTERACTION_EXTENSION_NAME);
     if (diagnostics.optimistic_eye_gaze_request) {
         first_downstream_extensions.push_back(XR_EXT_EYE_GAZE_INTERACTION_EXTENSION_NAME);
@@ -646,7 +661,8 @@ XrResult XRAPI_CALL xrCreateApiLayerInstance(const XrInstanceCreateInfo* instanc
     diagnostics.first_create_result = result;
 
     const std::vector<const char*>* successful_downstream_extensions = &first_downstream_extensions;
-    if (XR_FAILED(result) && diagnostics.optimistic_eye_gaze_request) {
+    if ((result == XR_ERROR_EXTENSION_NOT_PRESENT || result == XR_ERROR_EXTENSION_DEPENDENCY_NOT_ENABLED) &&
+        diagnostics.optimistic_eye_gaze_request) {
         diagnostics.retried_without_eye_gaze = true;
         *instance = XR_NULL_HANDLE;
 

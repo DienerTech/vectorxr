@@ -95,6 +95,9 @@ std::string FormatRepeatedDuration(std::chrono::system_clock::duration duration)
 Logger::~Logger() {
     std::scoped_lock lock(mutex_);
     FlushPendingDuplicateLocked();
+    if (stream_.is_open()) {
+        stream_.flush();
+    }
 }
 
 void Logger::Initialize(const std::filesystem::path& log_path) {
@@ -110,6 +113,7 @@ void Logger::Initialize(const std::filesystem::path& log_path) {
         stream_.close();
     }
     active_log_path_ = CreateSessionLogPath(base_log_path_);
+    last_stream_flush_time_ = {};
     PruneLocked();
 }
 
@@ -209,8 +213,9 @@ void Logger::WriteLineLocked(LogLevel level,
         return;
     }
 
-    // Reuse one open handle instead of reopening the file per line; flush so
-    // the log stays readable while the layer is loaded in a running app.
+    // Reuse one open handle instead of reopening the file per line. Debug and
+    // heartbeat messages can originate on the frame path, so batch ordinary
+    // flushes briefly; errors remain immediately durable.
     if (!stream_.is_open()) {
         stream_.open(active_log_path_, std::ios::app);
         if (!stream_.is_open()) {
@@ -222,7 +227,13 @@ void Logger::WriteLineLocked(LogLevel level,
     const std::tm tm = LocalTime(time);
 
     stream_ << std::put_time(&tm, "%Y-%m-%d %H:%M:%S") << " [" << ToString(level) << "] " << message << '\n';
-    stream_.flush();
+    constexpr std::chrono::milliseconds kFlushInterval{250};
+    const auto flush_now = std::chrono::steady_clock::now();
+    if (level == LogLevel::Error || last_stream_flush_time_ == std::chrono::steady_clock::time_point{} ||
+        flush_now - last_stream_flush_time_ >= kFlushInterval) {
+        stream_.flush();
+        last_stream_flush_time_ = flush_now;
+    }
 }
 
 void Logger::Write(LogLevel level, const std::string& message) {

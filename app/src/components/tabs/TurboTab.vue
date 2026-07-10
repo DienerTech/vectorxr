@@ -58,6 +58,9 @@ const toolkitConflict = computed(() => {
 interface PacingRow {
   runtimeName: string
   runtimeVersion: string
+  systemName: string
+  vendorId: number
+  graphicsApi: string
   mode: RuntimePacingObservation['mode'] | null
   source: RuntimePacingObservation['source'] | null
   lastUsedUnixSeconds: number
@@ -92,6 +95,9 @@ const pacingRows = computed<PacingRow[]>(() => {
   const rows: PacingRow[] = props.runtimePacing.map((observation) => ({
     runtimeName: observation.runtimeName,
     runtimeVersion: observation.runtimeVersion,
+    systemName: observation.systemName,
+    vendorId: observation.vendorId,
+    graphicsApi: observation.graphicsApi,
     mode: observation.mode,
     source: observation.source,
     lastUsedUnixSeconds: observation.lastUsedUnixSeconds,
@@ -103,6 +109,9 @@ const pacingRows = computed<PacingRow[]>(() => {
       rows.push({
         runtimeName,
         runtimeVersion: '',
+        systemName: '',
+        vendorId: 0,
+        graphicsApi: '',
         mode: null,
         source: null,
         lastUsedUnixSeconds: 0,
@@ -389,13 +398,16 @@ function formatDeltaPercent(value: number): string {
             <tbody>
               <tr
                 v-for="row in pacingRows"
-                :key="row.runtimeName"
+                :key="`${row.runtimeName}|${row.systemName}|${row.vendorId}|${row.graphicsApi}`"
                 class="border-t"
                 style="border-color: var(--app-border)"
               >
                 <td class="py-2.5 pr-3">
                   <span :class="row.isActive ? 'font-semibold' : ''">{{ row.runtimeName }}</span>
                   <span v-if="row.runtimeVersion" class="ml-1 text-xs text-muted">{{ row.runtimeVersion }}</span>
+                  <span v-if="row.systemName || row.graphicsApi" class="mt-0.5 block text-xs text-muted">
+                    {{ row.systemName || 'Unknown headset' }}<template v-if="row.graphicsApi"> · {{ row.graphicsApi }}</template>
+                  </span>
                   <span
                     v-if="row.isActive"
                     class="ml-2 rounded-full border px-2 py-0.5 text-[0.65rem] uppercase tracking-wide"

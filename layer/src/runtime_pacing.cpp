@@ -1,12 +1,25 @@
 #include "depthxr/runtime_pacing.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdlib>
 #include <exception>
 #include <fstream>
+#include <functional>
 #include <regex>
 #include <sstream>
 #include <system_error>
+#include <thread>
+
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <Windows.h>
+#endif
 
 namespace depthxr {
 namespace {
@@ -108,13 +121,16 @@ std::string ExtractString(const std::string& object, const std::string& key) {
 std::string SerializeObservations(const std::vector<RuntimePacingObservation>& observations) {
     std::ostringstream stream;
     stream << "{\n";
-    stream << "  \"version\": 1,\n";
+    stream << "  \"version\": 2,\n";
     stream << "  \"observations\": [\n";
     for (size_t i = 0; i < observations.size(); ++i) {
         const RuntimePacingObservation& observation = observations[i];
         stream << "    {\n";
         stream << "      \"runtimeName\": \"" << EscapeJsonString(observation.runtime_name) << "\",\n";
         stream << "      \"runtimeVersion\": \"" << EscapeJsonString(observation.runtime_version) << "\",\n";
+        stream << "      \"systemName\": \"" << EscapeJsonString(observation.system_name) << "\",\n";
+        stream << "      \"vendorId\": " << observation.vendor_id << ",\n";
+        stream << "      \"graphicsApi\": \"" << EscapeJsonString(observation.graphics_api) << "\",\n";
         stream << "      \"mode\": \"" << ToString(observation.mode) << "\",\n";
         stream << "      \"source\": \"" << EscapeJsonString(observation.source) << "\",\n";
         stream << "      \"layerVersion\": \"" << EscapeJsonString(observation.layer_version) << "\",\n";
@@ -145,7 +161,10 @@ bool WriteFileAtomically(const std::filesystem::path& path, const std::string& c
         }
     }
 
-    const std::filesystem::path temporary_path = path.string() + ".tmp";
+    const auto unique_suffix = std::to_string(
+        std::chrono::steady_clock::now().time_since_epoch().count()) + "." +
+        std::to_string(std::hash<std::thread::id>{}(std::this_thread::get_id()));
+    const std::filesystem::path temporary_path = path.string() + ".tmp." + unique_suffix;
     {
         std::ofstream stream(temporary_path, std::ios::trunc);
         if (!stream) {
@@ -157,6 +176,18 @@ bool WriteFileAtomically(const std::filesystem::path& path, const std::string& c
         stream << content;
     }
 
+#if defined(_WIN32)
+    if (!MoveFileExW(temporary_path.c_str(),
+                     path.c_str(),
+                     MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+        const DWORD move_error = GetLastError();
+        std::filesystem::remove(temporary_path, ec);
+        if (error) {
+            *error = "Unable to replace runtime-pacing file: Win32 error " + std::to_string(move_error);
+        }
+        return false;
+    }
+#else
     std::filesystem::remove(path, ec);
     ec.clear();
     std::filesystem::rename(temporary_path, path, ec);
@@ -167,6 +198,7 @@ bool WriteFileAtomically(const std::filesystem::path& path, const std::string& c
         }
         return false;
     }
+#endif
     return true;
 }
 
@@ -208,6 +240,9 @@ std::vector<RuntimePacingObservation> ReadRuntimePacingObservations(const std::f
             continue;
         }
         observation.runtime_version = ExtractString(object, "runtimeVersion");
+        observation.system_name = ExtractString(object, "systemName");
+        observation.vendor_id = static_cast<std::uint32_t>(ExtractInteger(object, "vendorId", 0));
+        observation.graphics_api = ExtractString(object, "graphicsApi");
         observation.mode = ParseTurboPacingMode(ExtractString(object, "mode")).value_or(TurboPacingMode::kAsync);
         observation.source = ExtractString(object, "source");
         observation.layer_version = ExtractString(object, "layerVersion");
@@ -222,9 +257,17 @@ std::vector<RuntimePacingObservation> ReadRuntimePacingObservations(const std::f
 }
 
 std::optional<RuntimePacingObservation> FindRuntimePacingObservation(const std::filesystem::path& path,
-                                                                     const std::string& runtime_name) {
+                                                                     const std::string& runtime_name,
+                                                                     const std::string& system_name,
+                                                                     std::uint32_t vendor_id,
+                                                                     const std::string& graphics_api) {
     for (RuntimePacingObservation& observation : ReadRuntimePacingObservations(path)) {
-        if (observation.runtime_name == runtime_name) {
+        const bool runtime_matches = observation.runtime_name == runtime_name;
+        const bool fingerprint_requested = !system_name.empty() || vendor_id != 0 || !graphics_api.empty();
+        const bool fingerprint_matches = observation.system_name == system_name &&
+                                         observation.vendor_id == vendor_id &&
+                                         observation.graphics_api == graphics_api;
+        if (runtime_matches && (!fingerprint_requested || fingerprint_matches)) {
             return std::move(observation);
         }
     }
@@ -241,7 +284,10 @@ bool RecordRuntimePacingObservation(const std::filesystem::path& path,
     std::vector<RuntimePacingObservation> observations = ReadRuntimePacingObservations(path);
     auto existing = std::find_if(observations.begin(), observations.end(),
                                  [&](const RuntimePacingObservation& candidate) {
-                                     return candidate.runtime_name == observation.runtime_name;
+                                     return candidate.runtime_name == observation.runtime_name &&
+                                            candidate.system_name == observation.system_name &&
+                                            candidate.vendor_id == observation.vendor_id &&
+                                            candidate.graphics_api == observation.graphics_api;
                                  });
 
     if (existing == observations.end()) {

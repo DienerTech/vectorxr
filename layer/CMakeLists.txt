@@ -9,6 +9,7 @@ add_library(
     src/settings.cpp
     src/sound_player.cpp
     src/settings_resolver.cpp
+    src/swapchain_state.cpp
     src/util/config_path.cpp
     src/util/logger.cpp
     src/util/process_info.cpp

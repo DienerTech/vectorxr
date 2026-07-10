@@ -1,6 +1,6 @@
 # Turbo Frame Pacing: Auto Discovery Design
 
-Status: implemented (first draft) on `feature-branch-twelve`, July 2026.
+Status: implemented and hardened on `sol-review`, July 2026.
 
 ## Problem
 
@@ -21,7 +21,9 @@ Diagnostic signature in debug logs: `turboDrainAndBegin max` pinned at ~250 ms,
 
 - **Async** — background-thread wait, drained at the next EndFrame. Best
   overlap (the pacing wait runs concurrently with the app's next-frame CPU
-  work). Fails on interlocking runtimes.
+  work). Fails on interlocking runtimes. VectorXR now uses one persistent
+  per-instance worker instead of launching a new `std::async` task every frame;
+  overlap is unchanged while thread identity and scheduling are stable.
 - **Sequenced** — the real wait+begin run *synchronously on the app's frame
   thread* inside EndFrame, right after the submit. From the runtime's view
   this is the standard single-threaded frame loop (End → Wait → Begin), which
@@ -130,10 +132,11 @@ straight to suspend, preserving pre-0.13 behavior.
 1. `turbo.pacingMode` forced to async/sequenced in settings → use it, no
    discovery, no sidecar writes.
 2. `turbo.runtimePins[runtimeName]` (Auto only) → pinned mode.
-3. Recorded verdict in `runtime-pacing.json` → use it (refreshes `lastUsed`).
+3. Recorded verdict for the runtime + headset + graphics fingerprint in
+   `runtime-pacing.json` → use it (refreshes `lastUsed`).
 4. Seed table: Oculus / Varjo / PiOpenXR / Pimax → sequenced; SteamVR → async.
    Recorded as a `preset` verdict after a stable window.
-5. Unknown runtime → probe async with the hair trigger; fall back to
+5. Unknown fingerprint → probe async with the hair trigger; fall back to
    sequenced on stalls. Recorded as `discovered` after a stable window.
 
 A **stable window** is 60 s of engaged turbo with zero drain timeouts. Config
@@ -145,7 +148,8 @@ changes to `pacingMode`/`runtimePins` re-resolve mid-session.
   (`auto|async|sequenced`, default `auto`) and `turbo.runtimePins`
   (`{ runtimeName: async|sequenced }`).
 - `runtime-pacing.json` sidecar (facts, layer-written, seen-apps pattern):
-  one observation per runtime — name, version, mode
+  one observation per runtime/headset/graphics fingerprint — runtime name and
+  version, system name/vendor, graphics API, mode
   (`async|sequenced|unsupported`), source (`preset|discovered`), layer
   version, first/last used, probe stats. Ships in debug reports. The app's
   "Re-discover" removes one runtime's row; the layer re-probes next session.

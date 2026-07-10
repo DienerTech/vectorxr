@@ -36,6 +36,7 @@ class Logger {
     std::filesystem::path base_log_path_;
     std::filesystem::path active_log_path_;
     std::ofstream stream_;
+    std::chrono::steady_clock::time_point last_stream_flush_time_{};
     LogLevel level_{LogLevel::Info};
     int retention_files_{7};
     LogLevel pending_duplicate_level_{LogLevel::Info};

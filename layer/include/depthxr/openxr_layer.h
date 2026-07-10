@@ -7,6 +7,7 @@
 #include <filesystem>
 #include <future>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <span>
@@ -22,12 +23,16 @@
 #include "depthxr/config_parser.h"
 #include "depthxr/effects.h"
 #include "depthxr/logger.h"
+#include "depthxr/runtime_pacing.h"
 #include "depthxr/settings_resolver.h"
+#include "depthxr/swapchain_state.h"
 
 struct ID3D11BlendState;
 struct ID3D11Buffer;
 struct ID3D11Device;
 struct ID3D11DeviceContext;
+struct ID3D11DeviceContext1;
+struct ID3DDeviceContextState;
 struct ID3D11PixelShader;
 struct ID3D11Query;
 struct ID3D11RenderTargetView;
@@ -44,6 +49,7 @@ class OpenXrLayer {
 
     void SetLayerDirectory(std::filesystem::path dll_directory);
     void SetNextProcAddr(PFN_xrGetInstanceProcAddr next_get_instance_proc_addr);
+    bool CanCreateInstance();
 
     struct InstanceCreateDiagnostics {
         bool app_requested_quad_views{false};
@@ -61,11 +67,10 @@ class OpenXrLayer {
         // the runtime (Varjo compatible quadviews) instead of stripping them for
         // stereo-composite emulation.
         bool varjo_compatible_quad_forwarded{false};
-        // Diagnostics for WHY Varjo compatible forwarding did/did not happen. The
-        // forward requires eligible && the runtime advertising XR_VARJO_quad_views
-        // to a pre-instance extension probe. These capture each input plus the raw
-        // extension list the probe saw, so a truncation-free (short-session) capture
-        // pinpoints the cause.
+        // Diagnostics for native forwarding and for whether VectorXR's own
+        // profile is eligible to modify that native path. Forwarding itself is
+        // transparent whenever the active runtime is Varjo or advertises every
+        // requested native extension.
         bool varjo_compatible_eligible{false};
         bool runtime_advertises_varjo_quad{false};
         bool runtime_advertises_varjo_foveated{false};
@@ -73,8 +78,8 @@ class OpenXrLayer {
         XrResult pre_instance_extension_scan_result{XR_SUCCESS};
         uint32_t pre_instance_extension_count{0};
         std::string pre_instance_extensions;
-        // Authoritative Varjo signal: the active OpenXR runtime (from the registry).
-        // This, not the extension probe, now drives the forward decision.
+        // Authoritative fallback Varjo signal: the active runtime manifest.
+        // This covers Varjo's unreliable pre-instance extension enumeration.
         bool active_runtime_is_varjo{false};
         std::string active_runtime_path;
     };
@@ -94,6 +99,7 @@ class OpenXrLayer {
     XrResult CreateSession(XrInstance instance, const XrSessionCreateInfo* create_info, XrSession* session);
     XrResult DestroySession(XrSession session);
     XrResult BeginSession(XrSession session, const XrSessionBeginInfo* begin_info);
+    XrResult EndSession(XrSession session);
     XrResult AttachSessionActionSets(XrSession session, const XrSessionActionSetsAttachInfo* attach_info);
     XrResult SyncActions(XrSession session, const XrActionsSyncInfo* sync_info);
     XrResult WaitFrame(XrSession session, const XrFrameWaitInfo* frame_wait_info, XrFrameState* frame_state);
@@ -181,10 +187,11 @@ class OpenXrLayer {
         bool images_enumerated{false};
         bool has_last_acquired_image_index{false};
         bool has_last_released_image_index{false};
-        bool release_deferred{false};
+        uint32_t deferred_release_count{0};
         bool quadviews_session{false};
-        bool d3d11_shader_resources_attempted{false};
-        bool d3d11_shader_resources_available{false};
+        SwapchainImageQueue image_states;
+        std::unordered_set<uint32_t> d3d11_shader_resource_slices_attempted;
+        std::unordered_set<uint32_t> d3d11_shader_resource_slices_available;
         std::vector<ID3D11Texture2D*> d3d11_images;
         std::vector<ID3D11ShaderResourceView*> d3d11_shader_resources;
     };
@@ -220,6 +227,8 @@ class OpenXrLayer {
     struct D3D11QuadViewsCompositor {
         ID3D11Device* device{nullptr};
         ID3D11DeviceContext* context{nullptr};
+        ID3D11DeviceContext1* context1{nullptr};
+        ID3DDeviceContextState* layer_context_state{nullptr};
         ID3D11VertexShader* vertex_shader{nullptr};
         ID3D11PixelShader* pixel_shader{nullptr};
         ID3D11SamplerState* sampler{nullptr};
@@ -314,6 +323,8 @@ class OpenXrLayer {
     // frame thread after the lock is released.
     void ResolveTurboPacingModeLocked();
     void RecordTurboPacingVerdict(TurboPacingMode mode, const char* source, std::int64_t stable_seconds);
+    void QueueRuntimePacingWrite(RuntimePacingObservation observation);
+    void DrainRuntimePacingWrites();
     void NoteTurboPacingStableFrame(double app_frame_delta_ms);
     // Returns true when turbo should suspend for the session (level-2 trip or
     // non-auto mode); false when it adapted (async -> sequenced fallback).
@@ -324,6 +335,9 @@ class OpenXrLayer {
     XrResult ForwardEndFrame(XrSession session,
                              const XrFrameEndInfo* frame_end_info,
                              std::unique_lock<std::mutex>& config_lock);
+    void EnsureTurboAsyncWorkerLocked();
+    void StopTurboAsyncWorker();
+    void TurboAsyncWorkerLoop();
     void DrainTurboAsyncWait();
     void ResetTurboFrameState();
     // Frame pacing telemetry: logs a summary line (debug level) every ~5s so a
@@ -355,6 +369,7 @@ class OpenXrLayer {
     // frame loop keeps running — worth an info line the first few times.
     void NoteTurboShouldRenderLocked(bool should_render);
     bool IsQuadViewsActive() const;
+    bool IsQuadViewsEmulationActive() const;
     void ResetSwapchainState();
     void LogSwapchainSummary(XrSwapchain swapchain, const SwapchainInfo& info, std::string_view event_name);
     bool ShouldDeferSwapchainRelease(const SwapchainInfo& info) const;
@@ -381,6 +396,11 @@ class OpenXrLayer {
                           XrViewConfigurationType view_configuration_type,
                           XrTime display_time,
                           uint32_t view_count);
+    bool CacheEyeOffsetsFromLocatedViews(XrViewConfigurationType view_configuration_type,
+                                         XrTime display_time,
+                                         const XrPosef& runtime_view_pose,
+                                         std::span<const XrView> located_views,
+                                         uint32_t view_count);
     void CachePivotPoseDelta(XrTime time, const XrPosef& pose_delta);
     bool FindPivotPoseDelta(XrTime time, XrPosef* pose_delta, XrTime* matched_time) const;
     void PrunePivotPoseDeltas(XrTime time);
@@ -415,7 +435,7 @@ class OpenXrLayer {
                                         uint32_t output_width,
                                         uint32_t output_height,
                                         int64_t output_format);
-    bool EnsureD3D11SwapchainShaderResources(SwapchainInfo& swapchain);
+    bool EnsureD3D11SwapchainShaderResources(SwapchainInfo& swapchain, uint32_t array_slice = 0);
     void TryPrewarmD3D11QuadViewsCompositor();
     bool ComposeQuadViewsD3D11(const XrCompositionLayerProjection* source_layer,
                                XrTime display_time,
@@ -461,6 +481,9 @@ class OpenXrLayer {
     std::condition_variable config_watcher_cv_;
     bool config_watcher_stop_{false};
     std::string runtime_name_;
+    std::string system_name_;
+    uint32_t system_vendor_id_{0};
+    std::string graphics_api_;
     std::string current_exe_name_;
     ResolvedRuntimeConfig resolved_settings_;
     std::optional<ResolvedRuntimeConfig> last_logged_settings_;
@@ -534,12 +557,23 @@ class OpenXrLayer {
     // spec-ordering requires it (second poll, teardown drains). mutex_ must
     // NOT be required by WaitFrame/BeginFrame, which stay off the config lock.
     std::mutex turbo_mutex_;
-    std::future<void> turbo_async_wait_;
+    std::condition_variable turbo_async_worker_cv_;
+    std::thread turbo_async_worker_;
+    bool turbo_async_worker_stop_{false};
+    bool turbo_async_job_pending_{false};
+    XrSession turbo_async_job_session_{XR_NULL_HANDLE};
+    std::shared_ptr<std::promise<void>> turbo_async_job_completion_;
+    // Shared snapshots let WaitFrame, EndFrame, and teardown observe the same
+    // in-flight wait without concurrently mutating a std::future object.
+    std::shared_future<void> turbo_async_wait_;
+    std::uint64_t turbo_async_wait_generation_{0};
     bool turbo_async_wait_polled_{false};
     bool turbo_async_wait_completed_{false};
+    XrResult turbo_async_wait_result_{XR_SUCCESS};
     XrTime turbo_last_predicted_display_time_{0};
     XrDuration turbo_last_predicted_display_period_{0};
     bool turbo_last_should_render_{true};
+    XrEnvironmentBlendMode turbo_last_environment_blend_mode_{XR_ENVIRONMENT_BLEND_MODE_OPAQUE};
     XrTime turbo_max_returned_display_time_{0};
     std::optional<std::chrono::steady_clock::time_point> turbo_last_wait_frame_wall_time_;
     // Toggle binding state (mutex_-guarded, polled from EndFrame like Depth's).
@@ -577,6 +611,8 @@ class OpenXrLayer {
     // Auto only: a stable window is still owed before the verdict is written.
     bool turbo_pacing_verdict_pending_{false};
     std::int64_t turbo_probe_timeout_total_{0};
+    std::future<void> runtime_pacing_write_future_;
+    std::optional<RuntimePacingObservation> pending_runtime_pacing_write_;
     // Accumulated healthy engaged frame time; the verdict lands at 60s. Not
     // wall-clock, so loading screens neither earn nor destroy stability.
     double turbo_stable_accumulated_ms_{0.0};
@@ -743,6 +779,7 @@ class OpenXrLayer {
     std::optional<bool> app_submitting_layers_;
     bool quad_views_extension_requested_{false};
     bool varjo_foveated_rendering_extension_requested_{false};
+    bool d3d11_graphics_extension_requested_{false};
     bool eye_gaze_extension_enabled_{false};
     // True for the life of the instance when native Varjo quad-views were
     // forwarded to the runtime (Varjo compatible quadviews). Single source of truth
@@ -767,6 +804,7 @@ class OpenXrLayer {
     double quadviews_smoothed_focus_yaw_radians_{0.0};
     double quadviews_smoothed_focus_pitch_radians_{0.0};
     std::optional<std::chrono::steady_clock::time_point> quadviews_last_focus_smoothing_wall_time_;
+    std::optional<std::chrono::steady_clock::time_point> quadviews_last_valid_gaze_wall_time_;
     XrViewConfigurationType active_primary_view_configuration_type_{XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO};
     XrViewConfigurationType active_runtime_view_configuration_type_{XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO};
     bool has_active_primary_view_configuration_{false};
@@ -786,6 +824,7 @@ class OpenXrLayer {
     XrTime cached_eye_offsets_display_time_{0};
     XrViewConfigurationType cached_eye_offsets_view_configuration_{XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO};
     std::optional<std::chrono::steady_clock::time_point> last_app_action_sync_time_;
+    std::optional<std::chrono::steady_clock::time_point> last_eye_gaze_self_sync_time_;
     std::vector<ViewAdjustmentData> locate_views_original_scratch_;
     std::vector<ViewAdjustmentData> locate_views_adjusted_scratch_;
     std::vector<std::vector<XrCompositionLayerProjectionView>> end_frame_projection_views_scratch_;
@@ -803,6 +842,7 @@ class OpenXrLayer {
     PFN_xrCreateSession next_create_session_{nullptr};
     PFN_xrDestroySession next_destroy_session_{nullptr};
     PFN_xrBeginSession next_begin_session_{nullptr};
+    PFN_xrEndSession next_end_session_{nullptr};
     PFN_xrAttachSessionActionSets next_attach_session_action_sets_{nullptr};
     PFN_xrSyncActions next_sync_actions_{nullptr};
     PFN_xrWaitFrame next_wait_frame_{nullptr};
