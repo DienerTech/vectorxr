@@ -224,6 +224,9 @@ export interface TurboModuleConfig {
 export interface RuntimePacingObservation {
   runtimeName: string
   runtimeVersion: string
+  systemName: string
+  vendorId: number
+  graphicsApi: string
   mode: TurboPacingMode | 'unsupported'
   source: 'preset' | 'discovered'
   layerVersion: string

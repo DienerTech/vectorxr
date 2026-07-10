@@ -1,16 +1,16 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, nextTick, ref } from 'vue'
 
 import ModuleBindingPage from '../ModuleBindingPage.vue'
 import ModuleBindingPanel from '../ModuleBindingPanel.vue'
 import ProfileShell from '../ProfileShell.vue'
+import TurboDiagnosticsPage from '../TurboDiagnosticsPage.vue'
+import TurboRuntimePage from '../TurboRuntimePage.vue'
 import type { ActiveRuntimeInfo, OpenXrLayerSnapshot } from '../../lib/commands'
 import type {
   RegisteredApplication,
   RuntimePacingObservation,
-  TurboMetricsBucket,
   TurboMetricsSession,
-  TurboPacingMode,
   VectorXRConfig,
 } from '../../lib/model'
 
@@ -33,19 +33,13 @@ const emit = defineEmits<{
 
 const howItWorksOpen = ref(false)
 const bindingSubPageOpen = ref(false)
-const metricsBindingSubPageOpen = ref(false)
+const activeSubPage = ref<'runtime' | 'diagnostics' | null>(null)
+let savedScrollTop = 0
 
-const pacingForced = computed(() => props.config.modules.turbo.pacingMode !== 'auto')
-
-// Turbo counts as "in use" when the default profile is on or any enabled
-// custom profile exists — the advisory should fire for either.
 const turboInUse = computed(
   () => props.config.modules.turbo.enabled || props.config.modules.turbo.profiles.some((profile) => profile.enabled),
 )
 
-// Two frame-pacing layers fight each other: warn when OpenXR Toolkit is
-// enabled anywhere while Turbo applies. (We cannot see whether OXRTK's own
-// turbo is switched on, so this stays an advisory, not an error.)
 const toolkitConflict = computed(() => {
   if (!turboInUse.value) {
     return false
@@ -55,224 +49,69 @@ const toolkitConflict = computed(() => {
   )
 })
 
-interface PacingRow {
-  runtimeName: string
-  runtimeVersion: string
-  mode: RuntimePacingObservation['mode'] | null
-  source: RuntimePacingObservation['source'] | null
-  lastUsedUnixSeconds: number
-  isActive: boolean
-}
-
-// Generic tokens that appear in nearly every OpenXR manifest path and would
-// make the active-runtime match meaningless.
-const genericTokens = new Set(['openxr', 'runtime', 'windows', 'program', 'files'])
-
-function matchesActiveRuntime(runtimeName: string): boolean {
-  const active = props.activeRuntime
-  if (!active) {
-    return false
+const pacingModeLabel = computed(() => {
+  const mode = props.config.modules.turbo.pacingMode
+  if (mode === 'async') {
+    return 'Forced Async'
   }
-  const name = runtimeName.toLowerCase()
-  if (active.name) {
-    const activeName = active.name.toLowerCase()
-    if (activeName.includes(name) || name.includes(activeName)) {
-      return true
-    }
+  if (mode === 'sequenced') {
+    return 'Forced Sequenced'
   }
-  const normalizedPath = active.manifestPath.toLowerCase().replace(/[^a-z0-9]+/g, '')
-  return runtimeName
-    .toLowerCase()
-    .split(/[^a-z0-9]+/)
-    .filter((token) => token.length >= 4 && !genericTokens.has(token))
-    .some((token) => normalizedPath.includes(token))
-}
-
-const pacingRows = computed<PacingRow[]>(() => {
-  const rows: PacingRow[] = props.runtimePacing.map((observation) => ({
-    runtimeName: observation.runtimeName,
-    runtimeVersion: observation.runtimeVersion,
-    mode: observation.mode,
-    source: observation.source,
-    lastUsedUnixSeconds: observation.lastUsedUnixSeconds,
-    isActive: matchesActiveRuntime(observation.runtimeName),
-  }))
-  // Pins for runtimes without an observation still deserve a row.
-  for (const runtimeName of Object.keys(props.config.modules.turbo.runtimePins)) {
-    if (!rows.some((row) => row.runtimeName === runtimeName)) {
-      rows.push({
-        runtimeName,
-        runtimeVersion: '',
-        mode: null,
-        source: null,
-        lastUsedUnixSeconds: 0,
-        isActive: matchesActiveRuntime(runtimeName),
-      })
-    }
-  }
-  return rows.sort((lhs, rhs) => rhs.lastUsedUnixSeconds - lhs.lastUsedUnixSeconds)
+  return 'Auto'
 })
 
-const activeRuntimeLabel = computed(() => {
-  const active = props.activeRuntime
-  if (!active) {
-    return ''
+const pacingSummary = computed(() => {
+  if (props.config.modules.turbo.pacingMode !== 'auto') {
+    return 'A manual strategy is being used for every runtime.'
   }
-  if (active.name) {
-    return active.name
+  const environments = props.runtimePacing.length
+  if (environments === 0) {
+    return 'VectorXR will choose and remember the safe strategy for each runtime.'
   }
-  const file = active.manifestPath.split(/[\\/]/).pop() ?? ''
-  return file.replace(/\.json$/i, '')
+  return `${environments} runtime ${environments === 1 ? 'environment' : 'environments'} observed. VectorXR adapts each one independently.`
 })
 
-const activeRuntimeHasRow = computed(() => pacingRows.value.some((row) => row.isActive))
-
-function pinValue(runtimeName: string): TurboPacingMode | 'auto' {
-  return props.config.modules.turbo.runtimePins[runtimeName] ?? 'auto'
-}
-
-function setPin(runtimeName: string, value: string) {
-  const pins = props.config.modules.turbo.runtimePins
-  if (value === 'async' || value === 'sequenced') {
-    pins[runtimeName] = value
-  } else {
-    delete pins[runtimeName]
+const metricsModeLabel = computed(() => {
+  const mode = props.config.modules.turbo.metricsMode
+  if (mode === 'binding') {
+    return 'Controlled capture'
   }
-}
-
-function rowModeLabel(row: PacingRow): string {
-  const pinned = props.config.modules.turbo.runtimePins[row.runtimeName]
-  if (pinned) {
-    return pinned === 'async' ? 'Async' : 'Sequenced'
+  if (mode === 'off') {
+    return 'Collection off'
   }
-  if (row.mode === 'async') {
-    return 'Async'
-  }
-  if (row.mode === 'sequenced') {
-    return 'Sequenced'
-  }
-  if (row.mode === 'unsupported') {
-    return 'Not supported'
-  }
-  return 'Undiscovered'
-}
-
-function rowBadge(row: PacingRow): string {
-  if (props.config.modules.turbo.runtimePins[row.runtimeName]) {
-    return 'Pinned'
-  }
-  if (row.mode === 'unsupported') {
-    return 'Suspended'
-  }
-  if (row.source === 'preset') {
-    return 'Preset'
-  }
-  if (row.source === 'discovered') {
-    return 'Discovered'
-  }
-  return ''
-}
-
-function formatDate(unixSeconds: number): string {
-  if (!unixSeconds) {
-    return '—'
-  }
-  return new Date(unixSeconds * 1000).toLocaleDateString()
-}
-
-// --- Session metrics (layer-written turbo-metrics.json) ---
-
-const selectedSessionId = ref('')
-
-// Sessions arrive newest-first; fall back to the newest when nothing (or a
-// since-evicted session) is selected.
-const selectedSession = computed<TurboMetricsSession | null>(() => {
-  if (props.turboMetrics.length === 0) {
-    return null
-  }
-  return props.turboMetrics.find((session) => session.sessionId === selectedSessionId.value) ?? props.turboMetrics[0]
+  return 'Automatic capture'
 })
 
-function formatSessionLabel(session: TurboMetricsSession): string {
-  const when = session.startedUnixSeconds
-    ? new Date(session.startedUnixSeconds * 1000).toLocaleString([], {
-        month: 'short',
-        day: 'numeric',
-        hour: '2-digit',
-        minute: '2-digit',
-      })
-    : 'Unknown time'
-  const runtime = session.runtimeName ? ` · ${session.runtimeName}` : ''
-  return `${when} — ${session.appName || 'unknown app'}${runtime}${session.live ? ' (live)' : ''}`
-}
-
-function bucketLabel(state: string): string {
-  if (state === 'off') {
-    return 'Turbo off'
+const metricsSummary = computed(() => {
+  const count = props.turboMetrics.length
+  if (count === 0) {
+    return 'Run an in-game A/B check to see whether Turbo helps this title.'
   }
-  if (state === 'async') {
-    return 'Turbo — async'
-  }
-  if (state === 'sequenced') {
-    return 'Turbo — sequenced'
-  }
-  return state
-}
-
-function formatSeconds(seconds: number): string {
-  if (seconds >= 90) {
-    const minutes = Math.floor(seconds / 60)
-    const rest = Math.round(seconds % 60)
-    return `${minutes}m ${rest}s`
-  }
-  return `${seconds.toFixed(0)}s`
-}
-
-function onePercentLowFps(bucket: TurboMetricsBucket): string {
-  return bucket.p99FrameMs > 0 ? (1000 / bucket.p99FrameMs).toFixed(1) : '—'
-}
-
-const bucketOrder: Record<string, number> = { off: 0, async: 1, sequenced: 2 }
-
-const selectedBuckets = computed<TurboMetricsBucket[]>(() => {
-  const session = selectedSession.value
-  if (!session) {
-    return []
-  }
-  return [...session.buckets]
-    .filter((bucket) => bucket.frames > 0)
-    .sort((lhs, rhs) => (bucketOrder[lhs.state] ?? 9) - (bucketOrder[rhs.state] ?? 9))
+  const latest = props.turboMetrics[0]
+  const app = latest.appName || 'unknown app'
+  return `${count} ${count === 1 ? 'flight' : 'flights'} recorded. Latest: ${app}${latest.live ? ' (in progress)' : ''}.`
 })
 
-// Honest comparison gate: both states need meaningful captured time in the
-// same session before an improvement number means anything.
-const kComparisonMinSeconds = 30
-
-interface MetricsComparison {
-  label: string
-  offFps: number
-  turboFps: number
-  deltaPercent: number
+function pageScroller(): Element | null {
+  return document.querySelector('main section.overflow-y-auto')
 }
 
-const comparisons = computed<MetricsComparison[]>(() => {
-  const buckets = selectedBuckets.value
-  const off = buckets.find((bucket) => bucket.state === 'off')
-  if (!off || off.seconds < kComparisonMinSeconds || off.avgFps <= 0) {
-    return []
-  }
-  return buckets
-    .filter((bucket) => bucket.state !== 'off' && bucket.seconds >= kComparisonMinSeconds && bucket.avgFps > 0)
-    .map((bucket) => ({
-      label: bucketLabel(bucket.state),
-      offFps: off.avgFps,
-      turboFps: bucket.avgFps,
-      deltaPercent: ((bucket.avgFps - off.avgFps) / off.avgFps) * 100,
-    }))
-})
+function openSubPage(page: 'runtime' | 'diagnostics') {
+  savedScrollTop = pageScroller()?.scrollTop ?? 0
+  activeSubPage.value = page
+  void nextTick(() => pageScroller()?.scrollTo({ top: 0 }))
+}
 
-function formatDeltaPercent(value: number): string {
-  return `${value >= 0 ? '+' : ''}${value.toFixed(1)}%`
+function openToggleBinding() {
+  savedScrollTop = pageScroller()?.scrollTop ?? 0
+  bindingSubPageOpen.value = true
+  void nextTick(() => pageScroller()?.scrollTo({ top: 0 }))
+}
+
+function closeSubPage() {
+  bindingSubPageOpen.value = false
+  activeSubPage.value = null
+  void nextTick(() => pageScroller()?.scrollTo({ top: savedScrollTop }))
 }
 </script>
 
@@ -282,34 +121,35 @@ function formatDeltaPercent(value: number): string {
     module-label="Turbo"
     :binding="config.modules.turbo.toggleBinding"
     label="Turbo Toggle Binding"
-    description="Flip Turbo on and off while in-game to compare fps and frame feel directly. Turbo starts enabled whenever it applies to the running application. Note: switching Turbo on mid-session can cause a brief hitch while the frame pipeline re-synchronizes."
+    description="Flip Turbo on and off while in-game to compare fps and frame feel directly. Turbo starts enabled whenever it applies to the running application. Switching Turbo on mid-session can cause a brief hitch while the frame pipeline re-synchronizes."
     none-text="No binding assigned. Turbo stays on for applications it applies to."
     default-activate-sound="turbo-on.wav"
     default-deactivate-sound="turbo-off.wav"
     @update:binding="config.modules.turbo.toggleBinding = $event"
-    @close="bindingSubPageOpen = false"
+    @close="closeSubPage"
   />
-  <ModuleBindingPage
-    v-else-if="metricsBindingSubPageOpen"
-    module-label="Turbo"
-    :binding="config.modules.turbo.metricsBinding"
-    label="Metrics Capture Binding"
-    description="Start and stop frame-pacing metric collection while in-game. Arm it once you are actually flying and pause it before loading screens or menus, so the recorded numbers reflect real play."
-    none-text="No binding assigned. In keybinding mode, no metrics are recorded until a binding is set."
-    default-activate-sound="metrics-on.wav"
-    default-deactivate-sound="metrics-off.wav"
-    @update:binding="config.modules.turbo.metricsBinding = $event"
-    @close="metricsBindingSubPageOpen = false"
+  <TurboRuntimePage
+    v-else-if="activeSubPage === 'runtime'"
+    :config="config"
+    :runtime-pacing="runtimePacing"
+    :active-runtime="activeRuntime"
+    @rediscover-runtime="emit('rediscoverRuntime', $event)"
+    @close="closeSubPage"
+  />
+  <TurboDiagnosticsPage
+    v-else-if="activeSubPage === 'diagnostics'"
+    :config="config"
+    :turbo-metrics="turboMetrics"
+    @clear-turbo-metrics="emit('clearTurboMetrics')"
+    @close="closeSubPage"
   />
   <div v-else class="space-y-4">
-    <!-- Turbo module: frame pacing first (it decides how Turbo behaves),
-         then the toggle binding, then the default profile. -->
     <article class="rounded-[1.25rem] border p-5 shadow-panel backdrop-blur surface-panel">
-      <div class="mb-4 flex flex-wrap items-center justify-between gap-3">
+      <div class="mb-4 flex flex-wrap items-start justify-between gap-4">
         <div>
           <h2 class="text-2xl font-semibold tracking-tight">Turbo</h2>
           <p class="mt-2 max-w-3xl text-sm leading-6 text-muted">
-            Frees your game from the headset runtime's frame pacing so the GPU sets the pace. On some systems the runtime throttles frames at an unfortunate moment, capping fps well below what the hardware can deliver — Turbo removes that wait. If your fps is already stable, Turbo changes nothing worth having; it is a targeted fix, not a general boost.
+            Removes an unnecessary runtime wait when it is holding a game back. Choose where Turbo applies here; VectorXR handles the pacing details automatically.
           </p>
         </div>
         <button
@@ -317,9 +157,7 @@ function formatDeltaPercent(value: number): string {
           type="button"
           @click="howItWorksOpen = true"
         >
-          <span class="inline-flex h-5 w-5 items-center justify-center rounded-full border text-xs" style="border-color: var(--app-border)">
-            i
-          </span>
+          <span class="inline-flex h-5 w-5 items-center justify-center rounded-full border text-xs" style="border-color: var(--app-border)">i</span>
           How Turbo Works
         </button>
       </div>
@@ -329,292 +167,98 @@ function formatDeltaPercent(value: number): string {
         class="mb-5 rounded-[0.9rem] border px-4 py-3 text-sm leading-6 chip-warning"
         style="border-color: var(--app-border)"
       >
-        OpenXR Toolkit is enabled alongside VectorXR Turbo. Two frame-pacing layers fight each other — if OXRTK's own Turbo Mode is switched on, disable it there or here, never both.
+        OpenXR Toolkit is enabled alongside VectorXR Turbo. If OXRTK's Turbo Mode is also on, disable one of them so the two pacing layers do not compete.
       </div>
 
-      <!-- Frame pacing strategy -->
-      <div class="border-t pt-4" style="border-color: var(--app-border)">
+      <section class="border-t pt-4" style="border-color: var(--app-border)">
         <div class="mb-3">
-          <span class="eyebrow text-xs font-semibold uppercase tracking-[0.24em]">Frame Pacing</span>
-          <p class="mt-1 max-w-3xl text-sm leading-6 text-muted">
-            How Turbo sequences the runtime's frame wait. Auto picks the right strategy per runtime and remembers what works — leave it on Auto unless you are debugging.
-          </p>
+          <p class="eyebrow text-xs font-semibold uppercase tracking-[0.24em]">Essentials</p>
+          <p class="mt-1 text-sm text-muted">Turn Turbo on broadly, or leave the default off and enable only the applications that benefit.</p>
         </div>
 
-        <label class="flex flex-wrap items-center gap-3 text-sm font-medium">
-        Pacing mode
-        <select
-          v-model="config.modules.turbo.pacingMode"
-          class="rounded-[0.6rem] border px-3 py-1.5 text-sm surface-panel-strong"
-          style="border-color: var(--app-border)"
-        >
-          <option value="auto">Auto (recommended)</option>
-          <option value="async">Async — always</option>
-          <option value="sequenced">Sequenced — always</option>
-        </select>
-      </label>
-      <p class="mt-2 text-xs leading-5 text-muted">
-        <template v-if="!pacingForced">
-          Async overlaps the runtime wait with the next frame's work; Sequenced performs it right after each submit for runtimes that interlock the wait with submission (Oculus, Varjo, Pimax). Auto probes async first and falls back automatically.
-        </template>
-        <template v-else>
-          Forced mode: this strategy is used on every runtime. Per-runtime discovery and pins below are paused, and Turbo suspends itself (instead of adapting) if the runtime cannot keep pace.
-        </template>
-      </p>
-
-      <div class="mt-4 border-t pt-4" style="border-color: var(--app-border)">
-        <div class="mb-2 flex flex-wrap items-center justify-between gap-2">
-          <span class="eyebrow text-xs font-semibold uppercase tracking-[0.24em]">Runtimes</span>
-          <span v-if="activeRuntimeLabel" class="text-xs text-muted">
-            Active runtime: <span class="font-medium">{{ activeRuntimeLabel }}</span>
-          </span>
+        <div class="rounded-[1rem] border p-4 surface-panel-soft">
+          <div class="flex flex-wrap items-center justify-between gap-3">
+            <div class="max-w-2xl">
+              <h3 class="text-base font-semibold tracking-tight">Default Profile</h3>
+              <p class="mt-1 text-sm leading-6 text-muted">
+                {{ config.modules.turbo.enabled
+                  ? 'Turbo applies to applications without a custom profile.'
+                  : 'Turbo stays off unless an enabled custom profile turns it on.' }}
+              </p>
+            </div>
+            <label class="pill-toggle inline-flex items-center gap-3 rounded-full px-4 py-2 text-sm font-medium">
+              <input v-model="config.modules.turbo.enabled" class="h-4 w-4 accent-depthxr-copper" type="checkbox" />
+              Default {{ config.modules.turbo.enabled ? 'On' : 'Off' }}
+            </label>
+          </div>
         </div>
 
-        <div v-if="pacingRows.length === 0" class="rounded-[0.9rem] border border-dashed px-4 py-4 text-sm text-muted surface-panel-soft">
-          No runtimes observed yet — discoveries appear after Turbo's first session on each runtime.
-        </div>
-
-        <div v-else class="overflow-x-auto" :class="pacingForced ? 'opacity-50 pointer-events-none' : ''">
-          <table class="w-full text-sm">
-            <thead>
-              <tr class="text-left text-xs uppercase tracking-wide text-muted">
-                <th class="py-2 pr-3 font-medium">Runtime</th>
-                <th class="py-2 pr-3 font-medium">Mode</th>
-                <th class="py-2 pr-3 font-medium">Source</th>
-                <th class="py-2 pr-3 font-medium">Last used</th>
-                <th class="py-2 pr-3 font-medium">Override</th>
-                <th class="py-2 font-medium"></th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr
-                v-for="row in pacingRows"
-                :key="row.runtimeName"
-                class="border-t"
-                style="border-color: var(--app-border)"
-              >
-                <td class="py-2.5 pr-3">
-                  <span :class="row.isActive ? 'font-semibold' : ''">{{ row.runtimeName }}</span>
-                  <span v-if="row.runtimeVersion" class="ml-1 text-xs text-muted">{{ row.runtimeVersion }}</span>
-                  <span
-                    v-if="row.isActive"
-                    class="ml-2 rounded-full border px-2 py-0.5 text-[0.65rem] uppercase tracking-wide"
-                    style="border-color: var(--app-border)"
-                  >Active</span>
-                </td>
-                <td class="py-2.5 pr-3">{{ rowModeLabel(row) }}</td>
-                <td class="py-2.5 pr-3">
-                  <span
-                    v-if="rowBadge(row)"
-                    class="rounded-full border px-2 py-0.5 text-xs"
-                    style="border-color: var(--app-border)"
-                  >{{ rowBadge(row) }}</span>
-                </td>
-                <td class="py-2.5 pr-3 text-muted">{{ formatDate(row.lastUsedUnixSeconds) }}</td>
-                <td class="py-2.5 pr-3">
-                  <select
-                    :value="pinValue(row.runtimeName)"
-                    class="rounded-[0.5rem] border px-2 py-1 text-xs surface-panel-strong"
-                    style="border-color: var(--app-border)"
-                    @change="setPin(row.runtimeName, ($event.target as HTMLSelectElement).value)"
-                  >
-                    <option value="auto">Auto</option>
-                    <option value="async">Pin Async</option>
-                    <option value="sequenced">Pin Sequenced</option>
-                  </select>
-                </td>
-                <td class="py-2.5 text-right">
-                  <button
-                    v-if="row.source"
-                    class="button-secondary rounded-[0.5rem] px-2.5 py-1 text-xs"
-                    type="button"
-                    title="Clear this runtime's recorded verdict so Auto probes it again at the next session"
-                    @click="emit('rediscoverRuntime', row.runtimeName)"
-                  >
-                    Re-discover
-                  </button>
-                </td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
-
-        <p v-if="pacingForced && pacingRows.length > 0" class="mt-2 text-xs text-muted">
-          Forced mode in effect for all runtimes — pins and discovery are paused. Switch back to Auto to use them.
-        </p>
-        <p v-else-if="activeRuntimeLabel && !activeRuntimeHasRow && pacingRows.length > 0" class="mt-2 text-xs text-muted">
-          No verdict yet for {{ activeRuntimeLabel }} — Auto will discover it on the next Turbo session.
-        </p>
-        </div>
-      </div>
-
-      <!-- Module-level binding — applies regardless of which profile enabled turbo -->
-      <div class="mt-4 border-t pt-4" style="border-color: var(--app-border)">
         <ModuleBindingPanel
-          heading="Turbo Toggle Binding"
+          class="mt-3"
+          heading="In-game Turbo Toggle"
           :binding="config.modules.turbo.toggleBinding"
-          hint="Flip Turbo on and off while in-game to compare fps and frame feel directly. Turbo starts enabled whenever it applies to the running application."
-          @edit="bindingSubPageOpen = true"
+          hint="Flip Turbo on and off while in-game for a direct comparison."
+          @edit="openToggleBinding"
         />
-      </div>
+      </section>
 
-      <!-- Frame pacing metrics: measured effect of each pacing strategy -->
-      <div class="mt-4 border-t pt-4" style="border-color: var(--app-border)">
-        <div class="mb-3 flex flex-wrap items-center justify-between gap-2">
-          <div>
-            <span class="eyebrow text-xs font-semibold uppercase tracking-[0.24em]">Metrics</span>
-            <p class="mt-1 max-w-3xl text-sm leading-6 text-muted">
-              Measures what Turbo actually does to your frame pacing: fps, frame times, and time spent blocked on runtime pacing, recorded separately for Turbo off, async, and sequenced. Flip the Turbo toggle mid-flight to collect both sides of the comparison.
-            </p>
-          </div>
+      <section class="mt-5 border-t pt-4" style="border-color: var(--app-border)">
+        <div class="mb-3">
+          <p class="eyebrow text-xs font-semibold uppercase tracking-[0.24em]">Tune &amp; Verify</p>
+          <p class="mt-1 text-sm text-muted">These tools are here when you need them, without getting between you and the basic setup.</p>
         </div>
 
-        <label class="flex flex-wrap items-center gap-3 text-sm font-medium">
-          Collection
-          <select
-            v-model="config.modules.turbo.metricsMode"
-            class="rounded-[0.6rem] border px-3 py-1.5 text-sm surface-panel-strong"
-            style="border-color: var(--app-border)"
+        <div class="grid gap-3 md:grid-cols-2">
+          <button
+            class="group rounded-[1rem] border p-4 text-left transition surface-panel-soft hover:-translate-y-0.5 hover:shadow-panel"
+            type="button"
+            @click="openSubPage('runtime')"
           >
-            <option value="always">Always while in-game</option>
-            <option value="binding">Only while capture binding is armed</option>
-            <option value="off">Off</option>
-          </select>
-        </label>
-        <p class="mt-2 text-xs leading-5 text-muted">
-          <template v-if="config.modules.turbo.metricsMode === 'binding'">
-            Nothing is recorded until you press the capture binding in-game; press it again to pause. Use it to cut loading screens and menus out of the data.
-          </template>
-          <template v-else-if="config.modules.turbo.metricsMode === 'always'">
-            Records whenever Turbo applies to the running application. Frame hitches over one second are excluded automatically, but menus and loading screens still count — use the capture binding mode for clean A/B comparisons.
-          </template>
-          <template v-else>
-            No metrics are recorded.
-          </template>
-        </p>
+            <div class="flex items-start justify-between gap-3">
+              <span class="inline-flex h-10 w-10 items-center justify-center rounded-[0.8rem] border surface-panel-strong" style="border-color: var(--app-border)">
+                <svg aria-hidden="true" class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
+                  <path d="M3 5.5A2.5 2.5 0 0 1 5.5 3h9A2.5 2.5 0 0 1 17 5.5v4a2.5 2.5 0 0 1-2.5 2.5h-9A2.5 2.5 0 0 1 3 9.5v-4Zm2.5-.5a.5.5 0 0 0-.5.5v4a.5.5 0 0 0 .5.5h9a.5.5 0 0 0 .5-.5v-4a.5.5 0 0 0-.5-.5h-9ZM6 15a1 1 0 0 1 1-1h6a1 1 0 1 1 0 2H7a1 1 0 0 1-1-1Z" />
+                </svg>
+              </span>
+              <span class="rounded-full border px-3 py-1 text-xs font-medium" style="border-color: var(--app-border)">{{ pacingModeLabel }}</span>
+            </div>
+            <h3 class="mt-4 text-base font-semibold tracking-tight">Runtime Behavior</h3>
+            <p class="mt-1 min-h-[3rem] text-sm leading-6 text-muted">{{ pacingSummary }}</p>
+            <span class="mt-4 inline-flex items-center gap-2 text-sm font-medium">
+              Review pacing
+              <span aria-hidden="true" class="transition group-hover:translate-x-1">→</span>
+            </span>
+          </button>
 
-        <div v-if="config.modules.turbo.metricsMode === 'binding'" class="mt-3">
-          <ModuleBindingPanel
-            heading="Metrics Capture Binding"
-            :binding="config.modules.turbo.metricsBinding"
-            hint="Arm capture once you are actually flying; pause it before loading screens or menus."
-            @edit="metricsBindingSubPageOpen = true"
-          />
+          <button
+            class="group rounded-[1rem] border p-4 text-left transition surface-panel-soft hover:-translate-y-0.5 hover:shadow-panel"
+            type="button"
+            @click="openSubPage('diagnostics')"
+          >
+            <div class="flex items-start justify-between gap-3">
+              <span class="inline-flex h-10 w-10 items-center justify-center rounded-[0.8rem] border surface-panel-strong" style="border-color: var(--app-border)">
+                <svg aria-hidden="true" class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
+                  <path d="M3 15a1 1 0 0 1 1-1h1.5V9.5a1 1 0 0 1 2 0V14H9V5a1 1 0 0 1 2 0v9h1.5V7.5a1 1 0 0 1 2 0V14H16a1 1 0 1 1 0 2H4a1 1 0 0 1-1-1Z" />
+                </svg>
+              </span>
+              <span class="rounded-full border px-3 py-1 text-xs font-medium" style="border-color: var(--app-border)">{{ metricsModeLabel }}</span>
+            </div>
+            <h3 class="mt-4 text-base font-semibold tracking-tight">Performance Diagnostics</h3>
+            <p class="mt-1 min-h-[3rem] text-sm leading-6 text-muted">{{ metricsSummary }}</p>
+            <span class="mt-4 inline-flex items-center gap-2 text-sm font-medium">
+              View performance checks
+              <span aria-hidden="true" class="transition group-hover:translate-x-1">→</span>
+            </span>
+          </button>
         </div>
-
-        <div class="mt-4">
-          <div v-if="turboMetrics.length === 0" class="rounded-[0.9rem] border border-dashed px-4 py-4 text-sm text-muted surface-panel-soft">
-            No metrics captured yet — they appear here after the first Turbo-enabled session (updated every ~15 seconds while playing).
-          </div>
-
-          <template v-else>
-            <div class="mb-2 flex flex-wrap items-center justify-between gap-2">
-              <label class="flex flex-wrap items-center gap-2 text-xs font-medium text-muted">
-                Session
-                <select
-                  :value="selectedSession?.sessionId ?? ''"
-                  class="rounded-[0.5rem] border px-2 py-1 text-xs surface-panel-strong"
-                  style="border-color: var(--app-border)"
-                  @change="selectedSessionId = ($event.target as HTMLSelectElement).value"
-                >
-                  <option v-for="session in turboMetrics" :key="session.sessionId" :value="session.sessionId">
-                    {{ formatSessionLabel(session) }}
-                  </option>
-                </select>
-              </label>
-              <button
-                class="button-secondary rounded-[0.5rem] px-2.5 py-1 text-xs"
-                type="button"
-                title="Delete all recorded metric sessions"
-                @click="emit('clearTurboMetrics')"
-              >
-                Clear metrics
-              </button>
-            </div>
-
-            <div
-              v-for="comparison in comparisons"
-              :key="comparison.label"
-              class="mb-2 rounded-[0.9rem] border px-4 py-3 text-sm leading-6 surface-panel-strong"
-            >
-              <span class="font-semibold">{{ formatDeltaPercent(comparison.deltaPercent) }} average fps</span>
-              with {{ comparison.label }} vs Turbo off ({{ comparison.offFps.toFixed(1) }} → {{ comparison.turboFps.toFixed(1) }} fps).
-              <span class="text-muted">Both states measured in this session; the comparison is only as fair as the scenes were similar.</span>
-            </div>
-
-            <div v-if="selectedBuckets.length === 0" class="rounded-[0.9rem] border border-dashed px-4 py-4 text-sm text-muted surface-panel-soft">
-              This session has no captured frames yet.
-            </div>
-            <div v-else class="overflow-x-auto">
-              <table class="w-full text-sm">
-                <thead>
-                  <tr class="text-left text-xs uppercase tracking-wide text-muted">
-                    <th class="py-2 pr-3 font-medium">Pacing</th>
-                    <th class="py-2 pr-3 font-medium">Time</th>
-                    <th class="py-2 pr-3 font-medium">Avg fps</th>
-                    <th class="py-2 pr-3 font-medium">1% low fps</th>
-                    <th class="py-2 pr-3 font-medium">Avg frame</th>
-                    <th class="py-2 pr-3 font-medium">p99 frame</th>
-                    <th class="py-2 pr-3 font-medium" title="Average per-frame time the game spent blocked on runtime pacing">Wait blocked</th>
-                    <th class="py-2 font-medium" title="Frame-pacing stalls counted by the safety circuit">Stalls</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  <tr
-                    v-for="bucket in selectedBuckets"
-                    :key="bucket.state"
-                    class="border-t"
-                    style="border-color: var(--app-border)"
-                  >
-                    <td class="py-2.5 pr-3 font-medium">{{ bucketLabel(bucket.state) }}</td>
-                    <td class="py-2.5 pr-3 text-muted">{{ formatSeconds(bucket.seconds) }}</td>
-                    <td class="py-2.5 pr-3">{{ bucket.avgFps.toFixed(1) }}</td>
-                    <td class="py-2.5 pr-3">{{ onePercentLowFps(bucket) }}</td>
-                    <td class="py-2.5 pr-3">{{ bucket.avgFrameMs.toFixed(2) }} ms</td>
-                    <td class="py-2.5 pr-3">{{ bucket.p99FrameMs.toFixed(2) }} ms</td>
-                    <td class="py-2.5 pr-3">{{ bucket.avgWaitBlockMs.toFixed(2) }} ms</td>
-                    <td class="py-2.5">{{ bucket.drainTimeouts }}</td>
-                  </tr>
-                </tbody>
-              </table>
-            </div>
-            <p v-if="selectedSession" class="mt-2 text-xs text-muted">
-              {{ selectedSession.live ? 'Session in progress — updates every ~15s.' : 'Session complete.' }}
-              Collection mode: {{ selectedSession.collectionMode === 'binding' ? 'capture binding' : 'always' }}.
-              <template v-if="selectedBuckets.some((bucket) => bucket.discardedFrames > 0)">
-                Frame hitches over 1s are excluded from the stats.
-              </template>
-            </p>
-          </template>
-        </div>
-      </div>
-
-      <details class="section-disclosure mt-4 border-t pt-4" style="border-color: var(--app-border)" open>
-        <summary class="flex items-center gap-2">
-          <svg aria-hidden="true" class="section-chevron h-3.5 w-3.5" viewBox="0 0 20 20" fill="currentColor">
-            <path fill-rule="evenodd" d="M7.2 14.8a1 1 0 0 1 0-1.4L10.6 10 7.2 6.6a1 1 0 1 1 1.4-1.4l4.1 4.1a1 1 0 0 1 0 1.4l-4.1 4.1a1 1 0 0 1-1.4 0Z" clip-rule="evenodd" />
-          </svg>
-          <span class="eyebrow text-xs font-semibold uppercase tracking-[0.24em]">Default Profile</span>
-          <span class="text-xs text-muted">Applies to applications without an enabled custom profile</span>
-        </summary>
-
-        <label class="pill-toggle mt-3 inline-flex items-center gap-3 rounded-full px-4 py-2 text-sm font-medium">
-          <input v-model="config.modules.turbo.enabled" class="h-4 w-4 accent-depthxr-copper" type="checkbox" />
-          Default Profile {{ config.modules.turbo.enabled ? 'On' : 'Off' }}
-        </label>
-
-        <div v-if="!config.modules.turbo.enabled" class="mt-3 rounded-[0.9rem] border px-4 py-3 text-sm leading-6 surface-panel-strong">
-          The default profile is off — Turbo does not apply to applications without an enabled custom profile. Enabled custom profiles below still turn Turbo on for their assigned applications.
-        </div>
-      </details>
+      </section>
     </article>
 
-    <!-- Custom Profiles -->
     <section class="space-y-3">
-      <div class="flex flex-wrap items-center justify-between gap-3 rounded-[1rem] border px-4 py-3 surface-panel">
+      <div class="sticky top-0 z-20 flex flex-wrap items-center justify-between gap-3 rounded-[1rem] border px-4 py-3 shadow-panel backdrop-blur surface-panel-strong">
         <div>
           <h2 class="text-lg font-semibold tracking-tight">Custom Profiles</h2>
-          <p class="text-sm text-muted">Enable Turbo for specific applications while leaving the default off.</p>
+          <p class="text-sm text-muted">Enable Turbo for selected applications while leaving the default off.</p>
         </div>
         <button
           class="button-accent rounded-[0.75rem] px-5 py-2.5 text-sm font-medium"
@@ -623,6 +267,10 @@ function formatDeltaPercent(value: number): string {
         >
           Add Profile
         </button>
+      </div>
+
+      <div v-if="config.modules.turbo.enabled" class="rounded-[0.9rem] border px-4 py-3 text-sm leading-6 surface-panel-soft">
+        The default is already on, so Turbo applies without a custom profile. Turn the default off if you want to use this list as an application allowlist.
       </div>
 
       <ProfileShell
@@ -636,7 +284,7 @@ function formatDeltaPercent(value: number): string {
         @sync-name="$emit('syncTurboProfileName', index)"
       >
         <div class="rounded-[0.9rem] border px-4 py-3 text-sm leading-6 surface-panel-strong">
-          Turbo is on for this profile's applications. There is nothing further to tune — pacing is either overridden or it isn't.
+          Turbo is on for this profile's applications. Runtime behavior remains automatic unless you changed it on the Runtime Behavior page.
         </div>
       </ProfileShell>
 
@@ -644,7 +292,7 @@ function formatDeltaPercent(value: number): string {
         v-if="config.modules.turbo.profiles.length === 0"
         class="rounded-[1rem] border border-dashed px-6 py-7 text-center text-sm surface-panel-soft"
       >
-        No custom profiles yet. Add a profile to enable Turbo for a specific application.
+        No custom profiles yet. Add one when an application needs different behavior from the default.
       </div>
     </section>
 
@@ -655,36 +303,34 @@ function formatDeltaPercent(value: number): string {
             <p class="eyebrow text-xs uppercase tracking-[0.24em]">Turbo Mode</p>
             <h2 class="mt-2 text-xl font-semibold tracking-tight">How Turbo Works</h2>
           </div>
-          <button class="button-secondary rounded-[0.75rem] px-4 py-2 text-sm font-medium" type="button" @click="howItWorksOpen = false">
-            Close
-          </button>
+          <button class="button-secondary rounded-[0.75rem] px-4 py-2 text-sm font-medium" type="button" @click="howItWorksOpen = false">Close</button>
         </div>
 
         <div class="mt-5 space-y-5 text-sm leading-6">
           <section class="space-y-3">
             <p class="eyebrow text-xs font-semibold uppercase tracking-[0.24em]">What it does</p>
             <div class="rounded-[1rem] border px-4 py-3 surface-panel">
-              A game normally idles until the headset runtime signals the next frame. Turbo performs that wait out of the game's way, so it starts its next frame the moment the previous one is submitted. The runtime still receives a fully correct frame sequence.
+              A game normally idles until the headset runtime signals the next frame. Turbo performs that wait out of the game's way, so the game can begin its next frame as soon as the previous one is submitted. The runtime still receives a correct frame sequence.
             </div>
             <div class="rounded-[1rem] border px-4 py-3 surface-panel">
-              <strong>Auto</strong> (recommended) picks the wait strategy per runtime and remembers what works: <strong>Async</strong> waits in the background where supported (SteamVR); <strong>Sequenced</strong> waits right after each submit where required (Pimax, Oculus, Varjo).
+              <strong>Auto</strong> chooses the wait strategy and remembers what works: <strong>Async</strong> waits in the background where supported, while <strong>Sequenced</strong> supports runtimes that interlock waiting with submission.
             </div>
           </section>
 
           <section class="space-y-3">
             <p class="eyebrow text-xs font-semibold uppercase tracking-[0.24em]">What to expect</p>
             <div class="rounded-[1rem] border px-4 py-3 surface-panel">
-              Turbo is a targeted fix, not a general boost: it helps only when the runtime caps fps below what your hardware can deliver. It cannot raise a runtime-enforced framerate lock (such as half-rate smoothing) on Sequenced runtimes. Use the Metrics section with the toggle binding to measure what it changes for you — if a title shows no benefit, leave Turbo off there.
+              Turbo is a targeted fix, not a general boost. It helps only when runtime pacing holds fps below what the hardware can deliver, and it cannot remove a runtime-enforced framerate lock. Use Performance Diagnostics with the in-game toggle to measure each title.
             </div>
             <div class="rounded-[1rem] border px-4 py-3 chip-warning" style="border-color: var(--app-border)">
-              Trade-offs: slightly less accurate frame-time prediction (can read as minor latency or judder), and toggling mid-session may hitch for a second.
+              Trade-offs: frame-time prediction may be slightly less accurate, and switching Turbo on mid-session can briefly hitch while the frame pipeline re-synchronizes.
             </div>
           </section>
 
           <section class="space-y-3">
             <p class="eyebrow text-xs font-semibold uppercase tracking-[0.24em]">Safety net</p>
             <div class="rounded-[1rem] border px-4 py-3 chip-warning" style="border-color: var(--app-border)">
-              If frame pacing stalls even after Auto adapts, Turbo suspends itself for the session (you'll hear the turbo-off cue) and records the runtime as unsupported so the stutter never replays at launch. Press the toggle binding to retry — a clean run clears the verdict.
+              If pacing stalls even after Auto adapts, Turbo suspends itself for that session and remembers the runtime as unsupported so the stutter does not replay at launch. Use the in-game toggle to retry; a clean run clears the verdict.
             </div>
           </section>
         </div>

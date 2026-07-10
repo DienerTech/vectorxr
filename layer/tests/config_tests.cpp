@@ -12,6 +12,7 @@
 #include "depthxr/runtime_pacing.h"
 #include "depthxr/seen_apps.h"
 #include "depthxr/settings_resolver.h"
+#include "depthxr/swapchain_state.h"
 #include "depthxr/turbo_metrics.h"
 
 namespace {
@@ -1343,6 +1344,9 @@ void TestRuntimePacingObservationRoundTrip() {
     depthxr::RuntimePacingObservation first;
     first.runtime_name = "Oculus";
     first.runtime_version = "1.205.0";
+    first.system_name = "Quest 3";
+    first.vendor_id = 1;
+    first.graphics_api = "D3D11";
     first.mode = depthxr::TurboPacingMode::kSequenced;
     first.source = "discovered";
     first.layer_version = "0.13.0";
@@ -1360,6 +1364,14 @@ void TestRuntimePacingObservationRoundTrip() {
     Expect(depthxr::RecordRuntimePacingObservation(path, second, &record_error),
            "Failed to record second runtime pacing observation: " + record_error);
 
+    depthxr::RuntimePacingObservation second_oculus_system = first;
+    second_oculus_system.system_name = "Crystal";
+    second_oculus_system.vendor_id = 2;
+    second_oculus_system.mode = depthxr::TurboPacingMode::kAsync;
+    second_oculus_system.last_used_unix_seconds = 250;
+    Expect(depthxr::RecordRuntimePacingObservation(path, second_oculus_system, &record_error),
+           "Failed to record second headset fingerprint for one runtime: " + record_error);
+
     // Upsert: a later verdict for the same runtime replaces the mode but
     // preserves first-used.
     first.mode = depthxr::TurboPacingMode::kAsync;
@@ -1368,7 +1380,7 @@ void TestRuntimePacingObservationRoundTrip() {
            "Failed to upsert runtime pacing observation: " + record_error);
 
     const auto observations = depthxr::ReadRuntimePacingObservations(path);
-    Expect(observations.size() == 2, "Runtime pacing observation count mismatch");
+    Expect(observations.size() == 3, "Runtime pacing observation fingerprint count mismatch");
 
     const auto oculus = depthxr::FindRuntimePacingObservation(path, "Oculus");
     Expect(oculus.has_value(), "Oculus runtime pacing observation missing");
@@ -1377,6 +1389,12 @@ void TestRuntimePacingObservationRoundTrip() {
     Expect(oculus->last_used_unix_seconds == 300, "Last-used timestamp was not updated on upsert");
     Expect(oculus->runtime_version == "1.205.0", "Runtime version mismatch");
     Expect(oculus->source == "discovered", "Source mismatch");
+
+    const auto quest = depthxr::FindRuntimePacingObservation(path, "Oculus", "Quest 3", 1, "D3D11");
+    Expect(quest.has_value(), "Exact runtime/headset/graphics fingerprint was not found");
+    Expect(quest->mode == depthxr::TurboPacingMode::kAsync, "Exact fingerprint upsert mode mismatch");
+    const auto crystal = depthxr::FindRuntimePacingObservation(path, "Oculus", "Crystal", 2, "D3D11");
+    Expect(crystal.has_value(), "Second headset fingerprint was collapsed into the first");
 
     const auto steam = depthxr::FindRuntimePacingObservation(path, "SteamVR/OpenXR");
     Expect(steam.has_value(), "SteamVR runtime pacing observation missing");
@@ -1535,6 +1553,29 @@ void TestLoggerCollapsesDuplicateMessages() {
     std::filesystem::remove_all(test_directory, error);
 }
 
+void TestSwapchainImageQueuePreservesFifo() {
+    depthxr::SwapchainImageQueue queue;
+    queue.Acquire(2);
+    queue.Acquire(0);
+    Expect(queue.Size() == 2, "Swapchain queue did not retain both acquired images");
+
+    Expect(queue.WaitOldest() == 2, "First wait did not target the oldest acquired image");
+    Expect(queue.WaitOldest() == 0, "Second wait did not advance to the next acquired image");
+    Expect(!queue.WaitOldest().has_value(), "Wait succeeded without an un-waited acquired image");
+
+    Expect(queue.ReleaseOldest() == 2, "First app release did not target the oldest waited image");
+    Expect(queue.ReleaseOldest() == 0, "Second app release did not preserve FIFO order");
+    Expect(queue.PendingDownstreamReleases() == 2,
+           "Deferred downstream release count did not retain both app releases");
+
+    Expect(queue.ReleaseDownstreamOldest() == 2,
+           "First downstream release did not target the oldest app-released image");
+    Expect(queue.Size() == 1, "Completed FIFO prefix was not retired");
+    Expect(queue.ReleaseDownstreamOldest() == 0,
+           "Second downstream release did not target the remaining image");
+    Expect(queue.Size() == 0, "Fully released queue was not emptied");
+}
+
 } // namespace
 
 int main() {
@@ -1566,6 +1607,7 @@ int main() {
     TestQuadViewConvergenceKeepsInsetOffsetsAligned();
     TestPivotYawAmplifiesBeyondDeadzone();
     TestPivotYawNoOpInsideDeadzone();
+    TestSwapchainImageQueuePreservesFifo();
     TestLoggerCollapsesDuplicateMessages();
     std::cout << "depthxr_layer_tests passed\n";
     return 0;

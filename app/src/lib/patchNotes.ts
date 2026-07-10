@@ -8,6 +8,18 @@ export interface PatchNoteEntry {
 
 export const patchNotes: PatchNoteEntry[] = [
   {
+    version: '0.13.0',
+    date: '2026-07-10',
+    title: 'Performance & Runtime Hardening',
+    summary: 'Refines Turbo and the core OpenXR architecture for smoother performance, broader runtime compatibility, and a clearer configuration experience.',
+    items: [
+      'Refactored Turbo frame pacing to reduce overhead, improve lifecycle stability, and avoid unnecessary performance penalties in titles that do not benefit from it.',
+      'Reorganized Turbo into focused Runtime Behavior and Performance Diagnostics pages that keep everyday setup simple while preserving advanced controls.',
+      'Improved Quadviews compatibility and rendering resilience, including stronger native Varjo behavior and new opinionated performance presets.',
+      'Strengthened session, swapchain, graphics-state, tracking, and logging architecture throughout the OpenXR layer.',
+    ],
+  },
+  {
     version: '0.12.3',
     date: '2026-07-08',
     title: 'Pivot Pitch Fix',

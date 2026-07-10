@@ -69,7 +69,7 @@ function estimatedPixelBudget(settings: QuadViewsSettings) {
 }
 
 function budgetLabel(settings: QuadViewsSettings) {
-  return `${estimatedPixelBudget(settings).toFixed(1)}% of stereo pixels`;
+  return `${estimatedPixelBudget(settings).toFixed(1)}% estimated app render pixels`;
 }
 
 type BudgetTone = "light" | "moderate" | "heavy" | "detrimental";
@@ -119,18 +119,16 @@ function budgetChipClass(settings: QuadViewsSettings) {
         <div>
           <div class="flex flex-wrap items-center gap-3">
             <h2 class="text-2xl font-semibold tracking-tight">Quadviews</h2>
-            <span
-              class="rounded-full px-3 py-1 text-xs font-semibold uppercase tracking-[0.16em] chip-warning"
-            >
-              ⚠ Experimental
-            </span>
           </div>
           <p class="mt-2 max-w-3xl text-sm leading-6 text-muted">
             Manage native quadview defaults and per-application profiles for
             foveal and peripheral rendering.
           </p>
           <p class="mt-2 max-w-3xl text-sm font-bold leading-6 text-muted">
-          Experimental - DX11 OpenXR applications only!
+          Emulated Quadviews currently supports D3D11 OpenXR applications. Native Varjo quadviews remains runtime-driven.
+          </p>
+          <p class="mt-1 max-w-3xl text-xs leading-5 text-muted">
+            Pixel estimates compare application view rendering only; the runtime and VectorXR composite have additional GPU cost.
           </p>
         </div>
         <button
