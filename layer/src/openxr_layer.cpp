@@ -510,12 +510,17 @@ float4 PSMain(VSOut input) : SV_Target {
         float3 e = focusTexture.Sample(linearSampler, clamp(focusSampleUv + float2( off.x, 0.0), focusSampleMin, focusSampleMax)).rgb;
         float3 w = focusTexture.Sample(linearSampler, clamp(focusSampleUv + float2(-off.x, 0.0), focusSampleMin, focusSampleMax)).rgb;
         float3 avg = (n + s + e + w) * 0.25;
-        float3 sharpened = focus.rgb + (focus.rgb - avg) * sharpenAmount;
-        // CAS-style clamp: keep the result inside the local neighborhood range so strong
-        // sharpening cannot ring into bright halos on high-contrast edges (cockpit text/MFDs).
+        // Bound the added high-frequency detail relative to the local contrast range. The old
+        // min/max clamp included the center sample, which forced local maxima/minima straight
+        // back to their original value and cancelled nearly all visible sharpening at edges.
+        // A 2x gain gives the 0-100 slider a useful range while the half-range limiter keeps
+        // bright cockpit text and MFD edges from developing unbounded halos.
         float3 lo = min(focus.rgb, min(min(n, s), min(e, w)));
         float3 hi = max(focus.rgb, max(max(n, s), max(e, w)));
-        focus.rgb = clamp(sharpened, lo, hi);
+        float3 localRange = max(hi - lo, float3(1.0 / 255.0, 1.0 / 255.0, 1.0 / 255.0));
+        float3 detail = (focus.rgb - avg) * (sharpenAmount * 2.0);
+        detail = clamp(detail, -localRange * 0.5, localRange * 0.5);
+        focus.rgb = saturate(focus.rgb + detail);
     }
 
     float2 distToEdge = min(uv - focusRect.xy, focusRect.zw - uv);
@@ -597,12 +602,15 @@ float4 PSMain(VSOut input) : SV_Target {
         float3 e = focusTexture.Sample(linearSampler, srcUv + float2( off.x, 0.0)).rgb;
         float3 w = focusTexture.Sample(linearSampler, srcUv + float2(-off.x, 0.0)).rgb;
         float3 avg = (n + s + e + w) * 0.25;
-        float3 sharpened = focus.rgb + (focus.rgb - avg) * amount;
-        // CAS-style clamp to the local neighbourhood so strong sharpening cannot ring
-        // into halos on high-contrast edges (cockpit text/MFDs).
+        // Preserve extrema instead of clamping them back to the unmodified center sample.
+        // Limit the added detail to half the local contrast range so the slider remains
+        // visibly effective without allowing runaway halos.
         float3 lo = min(focus.rgb, min(min(n, s), min(e, w)));
         float3 hi = max(focus.rgb, max(max(n, s), max(e, w)));
-        focus.rgb = clamp(sharpened, lo, hi);
+        float3 localRange = max(hi - lo, float3(1.0 / 255.0, 1.0 / 255.0, 1.0 / 255.0));
+        float3 detail = (focus.rgb - avg) * (amount * 2.0);
+        detail = clamp(detail, -localRange * 0.5, localRange * 0.5);
+        focus.rgb = saturate(focus.rgb + detail);
     }
     return focus;
 }
@@ -3278,7 +3286,6 @@ bool OpenXrLayer::ComposeQuadViewsD3D11(const XrCompositionLayerProjection* sour
             break;
         }
 
-        const float clear_color[4]{0.0f, 0.0f, 0.0f, 1.0f};
         ID3D11RenderTargetView* render_target =
             output_indices[eye] < target.image_render_target_views.size()
                 ? target.image_render_target_views[output_indices[eye]]
@@ -3293,7 +3300,14 @@ bool OpenXrLayer::ComposeQuadViewsD3D11(const XrCompositionLayerProjection* sour
             rendered = false;
             break;
         }
-        context->ClearRenderTargetView(render_target, clear_color);
+        // ClearState gives the layer a known rasterizer/blend configuration, and the fullscreen
+        // triangle then overwrites every output pixel. Avoid a redundant full-target clear on
+        // that normal path; retain it on the legacy manual-state fallback where app rasterizer
+        // or blend state may still be active.
+        if (!use_context_state) {
+            const float clear_color[4]{0.0f, 0.0f, 0.0f, 1.0f};
+            context->ClearRenderTargetView(render_target, clear_color);
+        }
         context->OMSetRenderTargets(1, &render_target, nullptr);
 
         D3D11_VIEWPORT viewport{};
@@ -8094,8 +8108,12 @@ void OpenXrLayer::SharpenNativeFocusViews(std::vector<XrCompositionLayerProjecti
             static_cast<float>(out_height) / static_cast<float>(std::max<uint32_t>(1, src.height));
 
         ID3D11RenderTargetView* render_target = target.image_render_target_views[output_index];
-        const float clear_color[4]{0.0f, 0.0f, 0.0f, 1.0f};
-        context->ClearRenderTargetView(render_target, clear_color);
+        // As above, the context-state path has known fullscreen state and needs no pre-clear.
+        // Keep the fallback safe when the application's rasterizer/blend state is inherited.
+        if (!use_context_state) {
+            const float clear_color[4]{0.0f, 0.0f, 0.0f, 1.0f};
+            context->ClearRenderTargetView(render_target, clear_color);
+        }
         context->OMSetRenderTargets(1, &render_target, nullptr);
         D3D11_VIEWPORT viewport{};
         viewport.Width = static_cast<float>(out_width);
