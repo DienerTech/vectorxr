@@ -1,6 +1,8 @@
 #include "depthxr/openxr_layer.h"
 #include "depthxr/openxr_loader_api_layer.h"
 
+#include "depthxr/runtime_compatibility.h"
+
 #include <algorithm>
 #include <cctype>
 #include <cstdlib>
@@ -656,10 +658,17 @@ XrResult XRAPI_CALL xrCreateApiLayerInstance(const XrInstanceCreateInfo* instanc
     }
 
     std::vector<const char*> first_downstream_extensions = base_downstream_extensions;
-    diagnostics.optimistic_eye_gaze_request =
-        app_requested_layer_owned_quadviews && !forward_varjo_quad_extensions &&
-        diagnostics.cheap_eye_gaze_probe_supported &&
-        !ExtensionListContains(first_downstream_extensions, XR_EXT_EYE_GAZE_INTERACTION_EXTENSION_NAME);
+    const std::string active_runtime_path_lower = ToLowerAscii(diagnostics.active_runtime_path);
+    const bool steamvr_probe_known_unreliable =
+        active_runtime_path_lower.find("steamvr") != std::string::npos ||
+        active_runtime_path_lower.find("steamxr") != std::string::npos;
+    diagnostics.optimistic_eye_gaze_request = ShouldOptimisticallyRequestEyeGaze({
+        app_requested_layer_owned_quadviews,
+        forward_varjo_quad_extensions,
+        ExtensionListContains(first_downstream_extensions, XR_EXT_EYE_GAZE_INTERACTION_EXTENSION_NAME),
+        diagnostics.cheap_eye_gaze_probe_supported,
+        steamvr_probe_known_unreliable,
+    });
     if (diagnostics.optimistic_eye_gaze_request) {
         first_downstream_extensions.push_back(XR_EXT_EYE_GAZE_INTERACTION_EXTENSION_NAME);
     }
@@ -674,8 +683,10 @@ XrResult XRAPI_CALL xrCreateApiLayerInstance(const XrInstanceCreateInfo* instanc
     diagnostics.first_create_result = result;
 
     const std::vector<const char*>* successful_downstream_extensions = &first_downstream_extensions;
-    if ((result == XR_ERROR_EXTENSION_NOT_PRESENT || result == XR_ERROR_EXTENSION_DEPENDENCY_NOT_ENABLED) &&
-        diagnostics.optimistic_eye_gaze_request) {
+    const bool eye_gaze_extension_related_failure =
+        result == XR_ERROR_EXTENSION_NOT_PRESENT || result == XR_ERROR_EXTENSION_DEPENDENCY_NOT_ENABLED;
+    if (ShouldRetryWithoutOptimisticEyeGaze(
+            diagnostics.optimistic_eye_gaze_request, eye_gaze_extension_related_failure)) {
         diagnostics.retried_without_eye_gaze = true;
         *instance = XR_NULL_HANDLE;
 

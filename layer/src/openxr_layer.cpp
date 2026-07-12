@@ -20,6 +20,7 @@
 #include "depthxr/effects.h"
 #include "depthxr/input_devices.h"
 #include "depthxr/process_info.h"
+#include "depthxr/runtime_compatibility.h"
 #include "depthxr/runtime_pacing.h"
 #include "depthxr/seen_apps.h"
 #include "depthxr/sound_player.h"
@@ -3786,10 +3787,13 @@ XrResult OpenXrLayer::ForwardEndFrame(XrSession session,
     // this combination; the runtime then rejects every frame with
     // XR_ERROR_TIME_INVALID and repeatedly drops to its Waiting overlay.
     // Keep the rendering feature active, but leave frame pacing pass-through.
-    const bool turbo_blocked_for_session =
-        current_exe_name_ == "DCS.exe" && runtime_name_.find("SteamVR") != std::string::npos &&
-        IsQuadViewsActive() && !varjo_compatible_quadviews_active_ &&
-        (quad_views_extension_requested_ || varjo_foveated_rendering_extension_requested_);
+    const bool turbo_blocked_for_session = ShouldBlockTurboForSession({
+        current_exe_name_,
+        runtime_name_,
+        IsQuadViewsActive(),
+        varjo_compatible_quadviews_active_,
+        quad_views_extension_requested_ || varjo_foveated_rendering_extension_requested_,
+    });
     if (turbo_blocked_for_session && !has_logged_turbo_session_compatibility_block_) {
         logger_.Info("Turbo: disabled for this session because DCS + SteamVR + synthesized quadviews "
                      "does not accept pipelined display times; Quadviews remains active.");
@@ -4112,6 +4116,9 @@ XrResult OpenXrLayer::ForwardEndFrame(XrSession session,
                         if (!turbo_pipelining_logged_) {
                             logger_.Info("Turbo: frame pipelining engaged (sequenced pacing); the app's "
                                          "xrWaitFrame is now decoupled from runtime pacing.");
+                            logger_.Info("Turbo compatibility notice: frame pipelining can prevent runtime "
+                                         "reprojection or frame synthesis (including SteamVR Motion Smoothing). "
+                                         "Disable Turbo first if presentation becomes unstable.");
                             turbo_pipelining_logged_ = true;
                             turbo_fabricated_wait_log_budget_ = 5;
                             // Generous: the forensic markers added after the
@@ -4217,6 +4224,9 @@ XrResult OpenXrLayer::ForwardEndFrame(XrSession session,
                 if (!turbo_pipelining_logged_) {
                     logger_.Info("Turbo: frame pipelining engaged (async pacing); the app's xrWaitFrame "
                                  "is now decoupled from runtime pacing.");
+                    logger_.Info("Turbo compatibility notice: frame pipelining can prevent runtime "
+                                 "reprojection or frame synthesis (including SteamVR Motion Smoothing). "
+                                 "Disable Turbo first if presentation becomes unstable.");
                     turbo_pipelining_logged_ = true;
                     turbo_fabricated_wait_log_budget_ = 5;
                 }

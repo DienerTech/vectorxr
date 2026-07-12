@@ -17,6 +17,15 @@ const emit = defineEmits<{
 
 const pacingForced = computed(() => props.config.modules.turbo.pacingMode !== 'auto')
 
+const steamVrActive = computed(() => {
+  const active = props.activeRuntime
+  if (!active) {
+    return false
+  }
+  const identity = `${active.name} ${active.manifestPath}`.toLowerCase()
+  return identity.includes('steamvr') || identity.includes('steamxr')
+})
+
 interface PacingRow {
   runtimeName: string
   runtimeVersion: string
@@ -30,6 +39,11 @@ interface PacingRow {
 }
 
 const genericTokens = new Set(['openxr', 'runtime', 'windows', 'program', 'files'])
+
+function isSteamVrRuntime(runtimeName: string): boolean {
+  const normalized = runtimeName.toLowerCase()
+  return normalized.includes('steamvr') || normalized.includes('steamxr')
+}
 
 function matchesActiveRuntime(runtimeName: string): boolean {
   const active = props.activeRuntime
@@ -169,7 +183,7 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
           </nav>
           <h2 class="mt-2 text-2xl font-semibold tracking-tight">Runtime Behavior</h2>
           <p class="mt-1 max-w-3xl text-sm leading-6 text-muted">
-            Control how Turbo coordinates with each OpenXR runtime. Auto is designed to make this decision for you and is the right choice for almost everyone.
+            Control how Turbo coordinates with each OpenXR runtime. Auto is the right choice for almost everyone, but it cannot make runtime reprojection compatible with pipelined timing.
           </p>
         </div>
         <button
@@ -182,6 +196,20 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
             <path d="M5.3 5.3a1 1 0 0 1 1.4 0L10 8.6l3.3-3.3a1 1 0 1 1 1.4 1.4L11.4 10l3.3 3.3a1 1 0 0 1-1.4 1.4L10 11.4l-3.3 3.3a1 1 0 0 1-1.4-1.4L8.6 10 5.3 6.7a1 1 0 0 1 0-1.4Z" />
           </svg>
         </button>
+      </div>
+
+      <div
+        class="mt-5 rounded-[0.9rem] border px-4 py-3 text-sm leading-6"
+        :class="steamVrActive ? 'chip-danger' : 'chip-warning'"
+        style="border-color: var(--app-border)"
+        role="note"
+      >
+        <template v-if="steamVrActive">
+          <strong>SteamVR detected:</strong> Turbo prevents Motion Smoothing. DCS with synthesized Quadviews is hard-blocked from Turbo because SteamVR can reject its pipelined display times. A manual strategy cannot override that safety block.
+        </template>
+        <template v-else>
+          <strong>Compatibility boundary:</strong> Auto chooses between supported pacing strategies and suspends repeated stalls, but Turbo may still conflict with runtime reprojection, frame synthesis, or a headset driver's presentation behavior.
+        </template>
       </div>
 
       <section class="mt-5 rounded-[1rem] border p-4 surface-panel-soft">
@@ -215,7 +243,7 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
             <strong>Automatic protection is active.</strong> Async overlaps the runtime wait with game work; Sequenced supports runtimes that require wait and submission to remain interlocked.
           </template>
           <template v-else>
-            <strong>Manual override is active.</strong> This strategy is forced on every runtime. Discovery and per-runtime decisions below are paused, and Turbo suspends itself if the runtime cannot keep pace.
+            <strong>Manual override is active.</strong> This strategy is forced wherever Turbo is permitted. Discovery and per-runtime decisions below are paused; hard compatibility blocks remain active, and repeated pacing stalls still suspend Turbo.
           </template>
         </div>
       </section>
@@ -257,6 +285,7 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
                   <span :class="row.isActive ? 'font-semibold' : ''">{{ row.runtimeName }}</span>
                   <span v-if="row.runtimeVersion" class="ml-1 text-xs text-muted">{{ row.runtimeVersion }}</span>
                   <span v-if="row.isActive" class="ml-2 rounded-full border px-2 py-0.5 text-[0.65rem] uppercase tracking-wide" style="border-color: var(--app-border)">Active</span>
+                  <span v-if="isSteamVrRuntime(row.runtimeName)" class="mt-1 block w-fit rounded-full px-2 py-0.5 text-[0.65rem] font-semibold uppercase tracking-wide chip-warning">No Motion Smoothing</span>
                   <span v-if="row.systemName || row.graphicsApi" class="mt-0.5 block text-xs text-muted">
                     {{ row.systemName || 'Unknown headset' }}<template v-if="row.graphicsApi"> · {{ row.graphicsApi }}</template>
                   </span>
