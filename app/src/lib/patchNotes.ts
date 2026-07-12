@@ -8,6 +8,21 @@ export interface PatchNoteEntry {
 
 export const patchNotes: PatchNoteEntry[] = [
   {
+    version: '0.13.1',
+    date: '2026-07-12',
+    title: 'Runtime Compatibility & Sharpening',
+    summary: 'Restores visible Quadviews sharpening, improves SteamVR and PSVR2 eye-tracking compatibility, and makes Turbo safer around motion smoothing and synthesized DCS quadviews.',
+    items: [
+      'Fixed Quadviews sharpening being visually cancelled at high-contrast edges, including native Varjo focus views, while avoiding redundant render-target clears to reduce composition overhead.',
+      'Restored PSVR2 eye tracking through SteamVR when its pre-instance extension probe reports a false negative, with a safe retry for runtimes that truly reject the extension.',
+      'Improved SteamVR Quadviews compatibility by translating visibility-mask requests to stereo views and correcting reversed gaze poses from affected headset drivers.',
+      'Prevented DCS with synthesized Quadviews on SteamVR from entering incompatible Turbo pacing that caused invalid display times, Waiting overlays, broken rendering, or crashes.',
+      'Made Turbo compatibility risks explicit in the app and logs, including its incompatibility with SteamVR Motion Smoothing, safer per-application guidance, and unoverrideable runtime safety blocks.',
+      'Prevented development installs from enabling duplicate VectorXR layer manifests and added bounded retries when saving runtime pacing decisions.',
+      'Added regression coverage for sharpening shaders, gaze-extension policy, and Turbo compatibility rules.',
+    ],
+  },
+  {
     version: '0.13.0',
     date: '2026-07-10',
     title: 'Performance & Runtime Hardening',
