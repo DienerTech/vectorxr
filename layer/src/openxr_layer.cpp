@@ -54,7 +54,7 @@ std::optional<TurboPacingMode> SeededTurboPacingMode(const std::string& runtime_
     // SteamVR's pacing behavior also depends on its active headset driver.
     // Pimax's SteamVR driver interlocks waits like PiOpenXR, so do not replay
     // the async probe merely because the outer runtime identifies as SteamVR.
-    for (const char* fragment : {"Pimax", "Crystal"}) {
+    for (const char* fragment : {"Pimax", "Crystal", "aapvr"}) {
         if (system_name.find(fragment) != std::string::npos) {
             return TurboPacingMode::kSequenced;
         }
@@ -726,6 +726,7 @@ struct GazeRayAngles {
     double yaw_radians{0.0};
     double pitch_radians{0.0};
     XrVector3f forward{0.0f, 0.0f, -1.0f};
+    bool hemisphere_corrected{false};
 };
 
 GazeRayAngles ExtractGazeRayAngles(const XrQuaternionf& orientation) {
@@ -743,11 +744,25 @@ GazeRayAngles ExtractGazeRayAngles(const XrQuaternionf& orientation) {
         forward = {0.0f, 0.0f, -1.0f};
     }
 
+    // XR_EXT_eye_gaze_interaction defines forward as -Z, but the Pimax aapvr
+    // path through SteamVR has been observed returning the otherwise-valid
+    // gaze pose in the +Z hemisphere. A human gaze cannot point behind the
+    // headset, so fold that driver convention back into the OpenXR hemisphere
+    // before deriving offsets. Without this guard atan2 saturates near +/-90
+    // degrees and pins the high-resolution focus inset to a canvas corner.
+    const bool hemisphere_corrected = forward.z > 0.0f;
+    if (hemisphere_corrected) {
+        forward.x = -forward.x;
+        forward.y = -forward.y;
+        forward.z = -forward.z;
+    }
+
     const double forward_depth = std::max(0.000001, static_cast<double>(-forward.z));
     return {
         std::atan2(static_cast<double>(forward.x), forward_depth),
         std::atan2(static_cast<double>(forward.y), forward_depth),
         forward,
+        hemisphere_corrected,
     };
 }
 
@@ -2172,6 +2187,46 @@ XrResult OpenXrLayer::EnumerateViewConfigurationViews(XrInstance instance,
                  "% of stereo");
 
     return XR_SUCCESS;
+}
+
+XrResult OpenXrLayer::GetVisibilityMaskKHR(XrSession session,
+                                           XrViewConfigurationType view_configuration_type,
+                                           uint32_t view_index,
+                                           XrVisibilityMaskTypeKHR visibility_mask_type,
+                                           XrVisibilityMaskKHR* visibility_mask) {
+    std::scoped_lock lock(mutex_);
+    if (!next_get_visibility_mask_khr_) {
+        return XR_ERROR_FUNCTION_UNSUPPORTED;
+    }
+
+    ReloadConfigIfNeeded();
+    RefreshResolvedSettings();
+    const bool synthesize_quad = IsQuadViewConfiguration(view_configuration_type) && IsQuadViewsActive() &&
+                                 !varjo_compatible_quadviews_active_;
+    const XrViewConfigurationType runtime_type =
+        synthesize_quad ? XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO : view_configuration_type;
+    // Synthetic quadviews use [left peripheral, right peripheral, left focus,
+    // right focus]. The underlying stereo runtime only accepts view indices 0/1.
+    const uint32_t runtime_view_index = synthesize_quad ? view_index % 2 : view_index;
+
+    if (synthesize_quad && !has_logged_visibility_mask_mapping_) {
+        logger_.Info("Mapped xrGetVisibilityMaskKHR from synthesized quadviews to the runtime's stereo "
+                     "view configuration (appViewIndex=" +
+                     std::to_string(view_index) + ", runtimeViewIndex=" +
+                     std::to_string(runtime_view_index) + ").");
+        has_logged_visibility_mask_mapping_ = true;
+    }
+
+    const XrResult result = next_get_visibility_mask_khr_(
+        session, runtime_type, runtime_view_index, visibility_mask_type, visibility_mask);
+    if (XR_FAILED(result)) {
+        logger_.Error("xrGetVisibilityMaskKHR failed downstream: result=" +
+                      std::to_string(static_cast<int>(result)) + ", appViewConfig=" +
+                      ToString(view_configuration_type) + ", runtimeViewConfig=" + ToString(runtime_type) +
+                      ", appViewIndex=" + std::to_string(view_index) +
+                      ", runtimeViewIndex=" + std::to_string(runtime_view_index));
+    }
+    return result;
 }
 
 XrResult OpenXrLayer::EnumerateSwapchainFormats(XrSession session,
@@ -3711,7 +3766,22 @@ XrResult OpenXrLayer::ForwardEndFrame(XrSession session,
         }
     }
 
-    bool turbo_engaged = IsTurboActive();
+    // DCS submits Varjo-style quadviews, which VectorXR composites down to
+    // stereo for SteamVR. Both async and sequenced Turbo pacing cause DCS's
+    // submitted displayTime to diverge from SteamVR's accepted horizon in
+    // this combination; the runtime then rejects every frame with
+    // XR_ERROR_TIME_INVALID and repeatedly drops to its Waiting overlay.
+    // Keep the rendering feature active, but leave frame pacing pass-through.
+    const bool turbo_blocked_for_session =
+        current_exe_name_ == "DCS.exe" && runtime_name_.find("SteamVR") != std::string::npos &&
+        IsQuadViewsActive() && !varjo_compatible_quadviews_active_ &&
+        (quad_views_extension_requested_ || varjo_foveated_rendering_extension_requested_);
+    if (turbo_blocked_for_session && !has_logged_turbo_session_compatibility_block_) {
+        logger_.Info("Turbo: disabled for this session because DCS + SteamVR + synthesized quadviews "
+                     "does not accept pipelined display times; Quadviews remains active.");
+        has_logged_turbo_session_compatibility_block_ = true;
+    }
+    bool turbo_engaged = IsTurboActive() && !turbo_blocked_for_session;
 
     // Cadence gate: app-only time since the previous EndFrame (our own
     // drain/join blocking subtracted). A stalled runtime wait is only
@@ -3724,6 +3794,7 @@ XrResult OpenXrLayer::ForwardEndFrame(XrSession session,
     constexpr double kCadencePauseMs = 150.0;
     constexpr uint32_t kEngageStreakFrames = 90;
     double app_frame_delta_ms = -1.0;
+    bool runtime_should_render = true;
     {
         const auto entry_now = std::chrono::steady_clock::now();
         if (pacing_last_end_time_.has_value()) {
@@ -3731,8 +3802,15 @@ XrResult OpenXrLayer::ForwardEndFrame(XrSession session,
                 std::chrono::duration<double, std::milli>(entry_now - *pacing_last_end_time_).count() -
                 turbo_last_frame_blocked_ms_;
         }
+        std::scoped_lock lock(turbo_mutex_);
+        runtime_should_render = turbo_last_should_render_;
     }
-    if (app_frame_delta_ms >= 0.0 && app_frame_delta_ms < kHealthyFrameMs) {
+    // A steady empty-frame loop while the session is merely SYNCHRONIZED is
+    // not a usable cadence. Engaging there lets fabricated display times run
+    // ahead while SteamVR is not presenting; when visibility returns, the
+    // runtime rejects every submit with XR_ERROR_TIME_INVALID.
+    const bool renderable_frame = runtime_should_render && submitting_layers;
+    if (renderable_frame && app_frame_delta_ms >= 0.0 && app_frame_delta_ms < kHealthyFrameMs) {
         ++turbo_cadence_healthy_streak_;
     } else {
         turbo_cadence_healthy_streak_ = 0;
@@ -3769,8 +3847,8 @@ XrResult OpenXrLayer::ForwardEndFrame(XrSession session,
         // Delay the first engage until the app renders steadily.
         turbo_engaged = false;
         if (!turbo_cadence_pause_logged_) {
-            logger_.Info("Turbo: waiting for a stable frame cadence before pipelining (app loading or "
-                         "hitching); engages automatically.");
+            logger_.Info("Turbo: waiting for a stable renderable frame cadence before pipelining "
+                         "(app loading, hidden, or hitching); engages automatically.");
             turbo_cadence_pause_logged_ = true;
         }
     } else if (turbo_engaged && turbo_cadence_pause_logged_) {
@@ -4938,6 +5016,7 @@ void OpenXrLayer::ResetTurboFrameState() {
     turbo_cadence_ready_ = false;
     turbo_cadence_pause_logged_ = false;
     turbo_last_frame_blocked_ms_ = 0.0;
+    has_logged_turbo_session_compatibility_block_ = false;
 }
 
 XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_end_info) {
@@ -6159,6 +6238,11 @@ void OpenXrLayer::CaptureInstanceFunctions() {
     }
 
     function = nullptr;
+    if (XR_SUCCEEDED(next_get_instance_proc_addr_(instance_, "xrGetVisibilityMaskKHR", &function))) {
+        next_get_visibility_mask_khr_ = reinterpret_cast<PFN_xrGetVisibilityMaskKHR>(function);
+    }
+
+    function = nullptr;
     if (XR_SUCCEEDED(next_get_instance_proc_addr_(instance_, "xrEnumerateSwapchainFormats", &function))) {
         next_enumerate_swapchain_formats_ = reinterpret_cast<PFN_xrEnumerateSwapchainFormats>(function);
     }
@@ -6322,6 +6406,7 @@ void OpenXrLayer::ResetSessionState() {
     has_logged_quad_view_short_count_ = false;
     has_logged_pivotxr_spike_mode_ = false;
     has_logged_quadviews_view_configuration_capabilities_ = false;
+    has_logged_visibility_mask_mapping_ = false;
     tracked_view_spaces_.clear();
     tracked_local_spaces_.clear();
     tracked_stage_spaces_.clear();
@@ -6339,6 +6424,7 @@ void OpenXrLayer::ResetInstanceState() {
     varjo_foveated_rendering_extension_requested_ = false;
     d3d11_graphics_extension_requested_ = false;
     eye_gaze_extension_enabled_ = false;
+    next_get_visibility_mask_khr_ = nullptr;
     defer_quadviews_swapchain_releases_ = false;
     runtime_name_.clear();
     runtime_version_.clear();
@@ -6720,6 +6806,7 @@ bool OpenXrLayer::LocateEyeGazeFocusOffsets(XrSession session,
                       ", forward=(" + FormatDiagnosticDouble(gaze_ray_angles.forward.x) + ", " +
                       FormatDiagnosticDouble(gaze_ray_angles.forward.y) + ", " +
                       FormatDiagnosticDouble(gaze_ray_angles.forward.z) + ")" +
+                      ", hemisphereCorrected=" + std::to_string(gaze_ray_angles.hemisphere_corrected) +
                       ", baseSpace=" + std::string(gaze_base_space == internal_view_space_ ? "view" : "app") +
                       ", locationFlags=" + FormatHex(static_cast<uint64_t>(gaze_location.locationFlags)) +
                       ", appSyncFresh=" + std::to_string(app_sync_fresh) +
@@ -6737,6 +6824,7 @@ bool OpenXrLayer::LocateEyeGazeFocusOffsets(XrSession session,
                      ", rawPitch=" + FormatDiagnosticDouble(target_pitch) +
                      ", smoothedYaw=" + FormatDiagnosticDouble(*yaw_radians) +
                      ", smoothedPitch=" + FormatDiagnosticDouble(*pitch_radians) +
+                     ", hemisphereCorrected=" + std::to_string(gaze_ray_angles.hemisphere_corrected) +
                      ", baseSpace=" + std::string(gaze_base_space == internal_view_space_ ? "view" : "app"));
         has_logged_eye_gaze_focus_active_ = true;
         has_logged_eye_gaze_focus_unavailable_ = false;

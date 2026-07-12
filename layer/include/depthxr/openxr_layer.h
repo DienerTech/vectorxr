@@ -127,6 +127,11 @@ class OpenXrLayer {
                                              uint32_t view_capacity_input,
                                              uint32_t* view_count_output,
                                              XrViewConfigurationView* views);
+    XrResult GetVisibilityMaskKHR(XrSession session,
+                                  XrViewConfigurationType view_configuration_type,
+                                  uint32_t view_index,
+                                  XrVisibilityMaskTypeKHR visibility_mask_type,
+                                  XrVisibilityMaskKHR* visibility_mask);
     XrResult EnumerateSwapchainFormats(XrSession session,
                                        uint32_t format_capacity_input,
                                        uint32_t* format_count_output,
@@ -582,6 +587,7 @@ class OpenXrLayer {
     std::optional<std::chrono::steady_clock::time_point> turbo_binding_last_poll_time_;
     bool turbo_binding_down_cached_{false};
     bool has_logged_turbo_varjo_note_{false};
+    bool has_logged_turbo_session_compatibility_block_{false};
     // Info once per pipelining engage/release cycle; small Debug budget for the
     // first fabricated xrWaitFrame returns of each cycle.
     bool turbo_pipelining_logged_{false};
@@ -812,6 +818,7 @@ class OpenXrLayer {
     bool has_logged_pivotxr_spike_mode_{false};
     bool has_logged_quadviews_view_configuration_capabilities_{false};
     bool has_logged_varjo_compatible_view_sizes_{false};
+    bool has_logged_visibility_mask_mapping_{false};
     bool has_logged_system_properties_{false};
     uint32_t cached_quadviews_stereo_recommended_width_{0};
     uint32_t cached_quadviews_stereo_recommended_height_{0};
@@ -853,6 +860,7 @@ class OpenXrLayer {
     PFN_xrEnumerateViewConfigurations next_enumerate_view_configurations_{nullptr};
     PFN_xrGetViewConfigurationProperties next_get_view_configuration_properties_{nullptr};
     PFN_xrEnumerateViewConfigurationViews next_enumerate_view_configuration_views_{nullptr};
+    PFN_xrGetVisibilityMaskKHR next_get_visibility_mask_khr_{nullptr};
     PFN_xrEnumerateSwapchainFormats next_enumerate_swapchain_formats_{nullptr};
     PFN_xrCreateSwapchain next_create_swapchain_{nullptr};
     PFN_xrDestroySwapchain next_destroy_swapchain_{nullptr};

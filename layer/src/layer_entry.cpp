@@ -129,6 +129,15 @@ XrResult XRAPI_CALL DepthxrEnumerateViewConfigurationViews(XrInstance instance,
         instance, system_id, view_configuration_type, view_capacity_input, view_count_output, views);
 }
 
+XrResult XRAPI_CALL DepthxrGetVisibilityMaskKHR(XrSession session,
+                                                XrViewConfigurationType view_configuration_type,
+                                                uint32_t view_index,
+                                                XrVisibilityMaskTypeKHR visibility_mask_type,
+                                                XrVisibilityMaskKHR* visibility_mask) {
+    return OpenXrLayer::Instance().GetVisibilityMaskKHR(
+        session, view_configuration_type, view_index, visibility_mask_type, visibility_mask);
+}
+
 XrResult XRAPI_CALL DepthxrEnumerateSwapchainFormats(XrSession session,
                                                      uint32_t format_capacity_input,
                                                      uint32_t* format_count_output,
@@ -477,6 +486,10 @@ XrResult XRAPI_CALL xrGetInstanceProcAddr(XrInstance instance, const char* name,
     }
     if (requested == "xrEnumerateViewConfigurationViews") {
         *function = reinterpret_cast<PFN_xrVoidFunction>(depthxr::DepthxrEnumerateViewConfigurationViews);
+        return XR_SUCCESS;
+    }
+    if (requested == "xrGetVisibilityMaskKHR") {
+        *function = reinterpret_cast<PFN_xrVoidFunction>(depthxr::DepthxrGetVisibilityMaskKHR);
         return XR_SUCCESS;
     }
     if (requested == "xrEnumerateSwapchainFormats") {
