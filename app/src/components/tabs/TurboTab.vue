@@ -40,6 +40,15 @@ const turboInUse = computed(
   () => props.config.modules.turbo.enabled || props.config.modules.turbo.profiles.some((profile) => profile.enabled),
 )
 
+const steamVrActive = computed(() => {
+  const runtime = props.activeRuntime
+  if (!runtime) {
+    return false
+  }
+  const identity = `${runtime.name} ${runtime.manifestPath}`.toLowerCase()
+  return identity.includes('steamvr') || identity.includes('steamxr')
+})
+
 const toolkitConflict = computed(() => {
   if (!turboInUse.value) {
     return false
@@ -121,7 +130,7 @@ function closeSubPage() {
     module-label="Turbo"
     :binding="config.modules.turbo.toggleBinding"
     label="Turbo Toggle Binding"
-    description="Flip Turbo on and off while in-game to compare fps and frame feel directly. Turbo starts enabled whenever it applies to the running application. Switching Turbo on mid-session can cause a brief hitch while the frame pipeline re-synchronizes."
+    description="Flip Turbo on and off while in-game to compare fps and frame feel directly—and to disable it immediately if presentation breaks. Turbo starts enabled whenever it applies to the running application. Switching it mid-session can cause a brief re-synchronization hitch."
     none-text="No binding assigned. Turbo stays on for applications it applies to."
     default-activate-sound="turbo-on.wav"
     default-deactivate-sound="turbo-off.wav"
@@ -147,9 +156,12 @@ function closeSubPage() {
     <article class="rounded-[1.25rem] border p-5 shadow-panel backdrop-blur surface-panel">
       <div class="mb-4 flex flex-wrap items-start justify-between gap-4">
         <div>
-          <h2 class="text-2xl font-semibold tracking-tight">Turbo</h2>
+          <div class="flex flex-wrap items-center gap-2">
+            <h2 class="text-2xl font-semibold tracking-tight">Turbo</h2>
+            <span class="rounded-full px-2.5 py-1 text-xs font-semibold uppercase tracking-[0.14em] chip-warning">Advanced pacing override</span>
+          </div>
           <p class="mt-2 max-w-3xl text-sm leading-6 text-muted">
-            Removes an unnecessary runtime wait when it is holding a game back. Choose where Turbo applies here; VectorXR handles the pacing details automatically.
+            Moves runtime waiting out of a game's critical path when pacing is holding it back. Enable it only where an in-game A/B comparison proves that it helps.
           </p>
         </div>
         <button
@@ -160,6 +172,26 @@ function closeSubPage() {
           <span class="inline-flex h-5 w-5 items-center justify-center rounded-full border text-xs" style="border-color: var(--app-border)">i</span>
           How Turbo Works
         </button>
+      </div>
+
+      <div
+        class="mb-5 rounded-[0.9rem] border px-4 py-3 text-sm leading-6"
+        :class="steamVrActive && turboInUse ? 'chip-danger' : 'chip-warning'"
+        style="border-color: var(--app-border)"
+        role="note"
+      >
+        <p class="font-semibold">
+          {{ steamVrActive ? 'SteamVR Motion Smoothing conflict' : 'Compatibility-sensitive feature' }}
+        </p>
+        <p v-if="steamVrActive" class="mt-1">
+          Turbo and SteamVR Motion Smoothing cannot be used together. VectorXR blocks Turbo automatically for DCS with synthesized Quadviews; in other SteamVR applications, choose either Turbo or Motion Smoothing—not both.
+        </p>
+        <p v-else class="mt-1">
+          Turbo changes OpenXR frame timing and can interfere with runtime reprojection or presentation. Keep the default off and enable it per application. If you see a Waiting overlay, black frames, persistent stutter, broken reprojection, or a crash, disable Turbo first.
+        </p>
+        <p class="mt-1 text-xs opacity-90">
+          Auto reduces pacing risk, but no strategy can guarantee compatibility with every runtime, headset driver, or frame-synthesis mode.
+        </p>
       </div>
 
       <div
@@ -269,8 +301,8 @@ function closeSubPage() {
         </button>
       </div>
 
-      <div v-if="config.modules.turbo.enabled" class="rounded-[0.9rem] border px-4 py-3 text-sm leading-6 surface-panel-soft">
-        The default is already on, so Turbo applies without a custom profile. Turn the default off if you want to use this list as an application allowlist.
+      <div v-if="config.modules.turbo.enabled" class="rounded-[0.9rem] border px-4 py-3 text-sm leading-6 chip-warning" style="border-color: var(--app-border)">
+        <strong>Broad enablement is active.</strong> Turbo applies to applications without a custom profile, including ones you have not validated. The safer setup is Default Off with this list used as an application allowlist.
       </div>
 
       <ProfileShell
@@ -310,7 +342,7 @@ function closeSubPage() {
           <section class="space-y-3">
             <p class="eyebrow text-xs font-semibold uppercase tracking-[0.24em]">What it does</p>
             <div class="rounded-[1rem] border px-4 py-3 surface-panel">
-              A game normally idles until the headset runtime signals the next frame. Turbo performs that wait out of the game's way, so the game can begin its next frame as soon as the previous one is submitted. The runtime still receives a correct frame sequence.
+              A game normally idles until the headset runtime signals the next frame. Turbo performs that wait out of the game's way, so the game can begin its next frame as soon as the previous one is submitted. VectorXR preserves downstream frame-call order, but changes when pacing occurs and may estimate the next display time.
             </div>
             <div class="rounded-[1rem] border px-4 py-3 surface-panel">
               <strong>Auto</strong> chooses the wait strategy and remembers what works: <strong>Async</strong> waits in the background where supported, while <strong>Sequenced</strong> supports runtimes that interlock waiting with submission.
@@ -323,14 +355,14 @@ function closeSubPage() {
               Turbo is a targeted fix, not a general boost. It helps only when runtime pacing holds fps below what the hardware can deliver, and it cannot remove a runtime-enforced framerate lock. Use Performance Diagnostics with the in-game toggle to measure each title.
             </div>
             <div class="rounded-[1rem] border px-4 py-3 chip-warning" style="border-color: var(--app-border)">
-              Trade-offs: frame-time prediction may be slightly less accurate, and switching Turbo on mid-session can briefly hitch while the frame pipeline re-synchronizes.
+              <strong>Known incompatibility:</strong> Turbo prevents SteamVR Motion Smoothing and may interfere with other runtime reprojection systems such as ASW. Frame-time prediction may also be less accurate, and switching Turbo mid-session can briefly hitch while the pipeline re-synchronizes.
             </div>
           </section>
 
           <section class="space-y-3">
             <p class="eyebrow text-xs font-semibold uppercase tracking-[0.24em]">Safety net</p>
             <div class="rounded-[1rem] border px-4 py-3 chip-warning" style="border-color: var(--app-border)">
-              If pacing stalls even after Auto adapts, Turbo suspends itself for that session and remembers the runtime as unsupported so the stutter does not replay at launch. Use the in-game toggle to retry; a clean run clears the verdict.
+              If pacing stalls even after Auto adapts, Turbo suspends itself for that session and remembers the runtime as unsupported so the stutter does not replay at launch. This catches pacing stalls—not every visual or driver failure. Disable Turbo first whenever presentation breaks; use the in-game toggle to retry only after the session is stable.
             </div>
           </section>
         </div>

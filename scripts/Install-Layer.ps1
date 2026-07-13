@@ -38,6 +38,18 @@ Start-Process -FilePath powershell.exe -Verb RunAs -Wait -ArgumentList @"
       New-Item -Path '$RegistryPath' -Force | Out-Null
     }
 
+    # Only one manifest for a given API layer name may be enabled. A normal
+    # VectorXR installation can coexist on disk with this development build,
+    # but loading both DLLs into the same OpenXR process crashes during the
+    # instance dispatch-chain setup.
+    `$existingRegistrations = (Get-Item -Path '$RegistryPath').Property
+    foreach (`$registration in `$existingRegistrations) {
+      if (`$registration -ne '$ManifestPath' -and
+          [System.IO.Path]::GetFileName(`$registration) -ieq 'XR_APILAYER_DIENERTECH_VECTORXR.json') {
+        New-ItemProperty -Path '$RegistryPath' -Name `$registration -PropertyType DWord -Value 1 -Force | Out-Null
+      }
+    }
+
     New-ItemProperty -Path '$RegistryPath' -Name '$ManifestPath' -PropertyType DWord -Value 0 -Force | Out-Null
     Remove-ItemProperty -Path '$RegistryPath' -Name '$LegacyManifestPath' -Force -ErrorAction SilentlyContinue | Out-Null
   }

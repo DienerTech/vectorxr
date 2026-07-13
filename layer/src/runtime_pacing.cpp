@@ -177,16 +177,32 @@ bool WriteFileAtomically(const std::filesystem::path& path, const std::string& c
     }
 
 #if defined(_WIN32)
-    if (!MoveFileExW(temporary_path.c_str(),
-                     path.c_str(),
-                     MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
-        const DWORD move_error = GetLastError();
-        std::filesystem::remove(temporary_path, ec);
-        if (error) {
-            *error = "Unable to replace runtime-pacing file: Win32 error " + std::to_string(move_error);
+    // Antivirus/indexing can briefly open the just-written JSON without delete
+    // sharing, making an otherwise valid atomic replacement fail with access
+    // denied or a sharing violation. Retry for a short bounded interval; this
+    // also keeps rapid test/app restarts from randomly losing a pacing verdict.
+    DWORD move_error = ERROR_SUCCESS;
+    constexpr int kMoveAttempts = 6;
+    for (int attempt = 0; attempt < kMoveAttempts; ++attempt) {
+        if (MoveFileExW(temporary_path.c_str(),
+                        path.c_str(),
+                        MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+            return true;
         }
-        return false;
+        move_error = GetLastError();
+        const bool transient = move_error == ERROR_ACCESS_DENIED || move_error == ERROR_SHARING_VIOLATION ||
+                               move_error == ERROR_LOCK_VIOLATION;
+        if (!transient || attempt + 1 == kMoveAttempts) {
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(2u << attempt));
     }
+    std::filesystem::remove(temporary_path, ec);
+    if (error) {
+        *error = "Unable to replace runtime-pacing file after retries: Win32 error " +
+                 std::to_string(move_error);
+    }
+    return false;
 #else
     std::filesystem::remove(path, ec);
     ec.clear();

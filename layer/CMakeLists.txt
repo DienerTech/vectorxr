@@ -4,6 +4,7 @@ add_library(
     src/config_parser.cpp
     src/input_devices.cpp
     src/runtime_pacing.cpp
+    src/runtime_compatibility.cpp
     src/seen_apps.cpp
     src/turbo_metrics.cpp
     src/settings.cpp
@@ -143,5 +144,12 @@ if(DEPTHXR_BUILD_TESTS)
     )
 
     target_link_libraries(depthxr_layer_tests PRIVATE depthxr_core)
+    if(WIN32)
+        target_link_libraries(depthxr_layer_tests PRIVATE d3dcompiler)
+        target_compile_definitions(
+            depthxr_layer_tests
+            PRIVATE VECTORXR_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
+        )
+    endif()
     add_test(NAME depthxr_layer_tests COMMAND depthxr_layer_tests)
 endif()

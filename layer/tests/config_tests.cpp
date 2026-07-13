@@ -10,10 +10,15 @@
 #include "depthxr/effects.h"
 #include "depthxr/logger.h"
 #include "depthxr/runtime_pacing.h"
+#include "depthxr/runtime_compatibility.h"
 #include "depthxr/seen_apps.h"
 #include "depthxr/settings_resolver.h"
 #include "depthxr/swapchain_state.h"
 #include "depthxr/turbo_metrics.h"
+
+#ifdef _WIN32
+#include <d3dcompiler.h>
+#endif
 
 namespace {
 
@@ -1353,31 +1358,31 @@ void TestRuntimePacingObservationRoundTrip() {
     first.last_used_unix_seconds = 100;
     first.probe_timeouts = 3;
     first.stable_seconds = 60;
-    Expect(depthxr::RecordRuntimePacingObservation(path, first, &record_error),
-           "Failed to record first runtime pacing observation: " + record_error);
+    bool recorded = depthxr::RecordRuntimePacingObservation(path, first, &record_error);
+    Expect(recorded, "Failed to record first runtime pacing observation: " + record_error);
 
     depthxr::RuntimePacingObservation second;
     second.runtime_name = "SteamVR/OpenXR";
     second.mode = depthxr::TurboPacingMode::kAsync;
     second.source = "preset";
     second.last_used_unix_seconds = 200;
-    Expect(depthxr::RecordRuntimePacingObservation(path, second, &record_error),
-           "Failed to record second runtime pacing observation: " + record_error);
+    recorded = depthxr::RecordRuntimePacingObservation(path, second, &record_error);
+    Expect(recorded, "Failed to record second runtime pacing observation: " + record_error);
 
     depthxr::RuntimePacingObservation second_oculus_system = first;
     second_oculus_system.system_name = "Crystal";
     second_oculus_system.vendor_id = 2;
     second_oculus_system.mode = depthxr::TurboPacingMode::kAsync;
     second_oculus_system.last_used_unix_seconds = 250;
-    Expect(depthxr::RecordRuntimePacingObservation(path, second_oculus_system, &record_error),
-           "Failed to record second headset fingerprint for one runtime: " + record_error);
+    recorded = depthxr::RecordRuntimePacingObservation(path, second_oculus_system, &record_error);
+    Expect(recorded, "Failed to record second headset fingerprint for one runtime: " + record_error);
 
     // Upsert: a later verdict for the same runtime replaces the mode but
     // preserves first-used.
     first.mode = depthxr::TurboPacingMode::kAsync;
     first.last_used_unix_seconds = 300;
-    Expect(depthxr::RecordRuntimePacingObservation(path, first, &record_error),
-           "Failed to upsert runtime pacing observation: " + record_error);
+    recorded = depthxr::RecordRuntimePacingObservation(path, first, &record_error);
+    Expect(recorded, "Failed to upsert runtime pacing observation: " + record_error);
 
     const auto observations = depthxr::ReadRuntimePacingObservations(path);
     Expect(observations.size() == 3, "Runtime pacing observation fingerprint count mismatch");
@@ -1553,6 +1558,128 @@ void TestLoggerCollapsesDuplicateMessages() {
     std::filesystem::remove_all(test_directory, error);
 }
 
+#ifdef _WIN32
+std::string ExtractRawShaderSource(const std::string& source_file, const std::string& function_marker) {
+    const size_t function_position = source_file.find(function_marker);
+    Expect(function_position != std::string::npos, "Shader function marker is missing: " + function_marker);
+    const std::string raw_start_marker = std::string("return R") + static_cast<char>(34) + "(";
+    const size_t raw_start = source_file.find(raw_start_marker, function_position);
+    Expect(raw_start != std::string::npos, "Shader raw string start is missing: " + function_marker);
+    const size_t source_start = raw_start + raw_start_marker.size();
+    const std::string raw_end_marker = std::string(")") + static_cast<char>(34) + ";";
+    const size_t source_end = source_file.find(raw_end_marker, source_start);
+    Expect(source_end != std::string::npos, "Shader raw string end is missing: " + function_marker);
+    return source_file.substr(source_start, source_end - source_start);
+}
+
+void ExpectShaderCompiles(const std::string& source,
+                          const char* entry_point,
+                          const char* target,
+                          const std::string& label) {
+    ID3DBlob* bytecode = nullptr;
+    ID3DBlob* errors = nullptr;
+    const HRESULT result = D3DCompile(source.data(),
+                                     source.size(),
+                                     label.c_str(),
+                                     nullptr,
+                                     nullptr,
+                                     entry_point,
+                                     target,
+                                     0,
+                                     0,
+                                     &bytecode,
+                                     &errors);
+    std::string diagnostic;
+    if (errors) {
+        diagnostic.assign(static_cast<const char*>(errors->GetBufferPointer()), errors->GetBufferSize());
+        errors->Release();
+    }
+    if (bytecode) {
+        bytecode->Release();
+    }
+    Expect(SUCCEEDED(result), label + " failed to compile: " + diagnostic);
+}
+
+void TestD3D11SharpenShaderRegression() {
+    const std::filesystem::path source_path =
+        std::filesystem::path(VECTORXR_SOURCE_DIR) / "layer" / "src" / "openxr_layer.cpp";
+    std::ifstream stream(source_path, std::ios::binary);
+    Expect(stream.good(), "Failed to open the D3D11 shader source for regression testing");
+    const std::string source_file((std::istreambuf_iterator<char>(stream)), std::istreambuf_iterator<char>());
+
+    for (const std::string& function_marker : {
+             "const char* D3D11QuadViewsShaderSource()",
+             "const char* D3D11FocusSharpenShaderSource()",
+         }) {
+        const std::string shader = ExtractRawShaderSource(source_file, function_marker);
+        Expect(shader.find("focus.rgb = saturate(focus.rgb + detail);") != std::string::npos,
+               function_marker + " lost the extrema-preserving sharpen output");
+        Expect(shader.find("focus.rgb = clamp(sharpened, lo, hi);") == std::string::npos,
+               function_marker + " regressed to the clamp that cancelled sharpening at extrema");
+        ExpectShaderCompiles(shader, "VSMain", "vs_5_0", function_marker + " vertex shader");
+        ExpectShaderCompiles(shader, "PSMain", "ps_5_0", function_marker + " pixel shader");
+    }
+}
+#endif
+
+void TestEyeGazeExtensionCompatibilityPolicy() {
+    depthxr::EyeGazeRequestPolicyInput psvr2_steamvr{
+        true,
+        false,
+        false,
+        false,
+        true,
+    };
+    Expect(depthxr::ShouldOptimisticallyRequestEyeGaze(psvr2_steamvr),
+           "A false-negative SteamVR probe must not disable PSVR2 eye tracking");
+
+    psvr2_steamvr.pre_instance_probe_supported = true;
+    psvr2_steamvr.pre_instance_probe_known_unreliable = false;
+    Expect(depthxr::ShouldOptimisticallyRequestEyeGaze(psvr2_steamvr),
+           "A positive gaze probe should still enable the injected extension");
+
+    psvr2_steamvr.pre_instance_probe_supported = false;
+    Expect(!depthxr::ShouldOptimisticallyRequestEyeGaze(psvr2_steamvr),
+           "An unsupported runtime with a reliable negative probe should not pay for a failed instance retry");
+    psvr2_steamvr.pre_instance_probe_supported = true;
+
+    psvr2_steamvr.forwarding_native_quadviews = true;
+    Expect(!depthxr::ShouldOptimisticallyRequestEyeGaze(psvr2_steamvr),
+           "Native Varjo quadviews should retain its runtime-owned extension contract");
+
+    psvr2_steamvr.forwarding_native_quadviews = false;
+    psvr2_steamvr.downstream_already_has_eye_gaze = true;
+    Expect(!depthxr::ShouldOptimisticallyRequestEyeGaze(psvr2_steamvr),
+           "The layer must not duplicate an application-requested gaze extension");
+
+    Expect(depthxr::ShouldRetryWithoutOptimisticEyeGaze(true, true),
+           "An injected gaze extension rejected by a runtime should use the safe retry");
+    Expect(!depthxr::ShouldRetryWithoutOptimisticEyeGaze(true, false),
+           "Unrelated instance failures must not be hidden by the gaze retry");
+    Expect(!depthxr::ShouldRetryWithoutOptimisticEyeGaze(false, true),
+           "Application-owned extension failures must not be retried behind its back");
+}
+
+void TestTurboSteamVrQuadviewsCompatibilityPolicy() {
+    depthxr::TurboCompatibilityInput psvr2{
+        "DCS.exe", "SteamVR/OpenXR", true, false, true,
+    };
+    Expect(depthxr::ShouldBlockTurboForSession(psvr2),
+           "DCS synthesized quadviews on SteamVR must keep runtime display times pass-through");
+
+    psvr2.native_quadviews_active = true;
+    Expect(!depthxr::ShouldBlockTurboForSession(psvr2),
+           "Native quadviews should not inherit the SteamVR compositor compatibility block");
+    psvr2.native_quadviews_active = false;
+    psvr2.quadviews_active = false;
+    Expect(!depthxr::ShouldBlockTurboForSession(psvr2),
+           "Stereo DCS sessions should retain normal Turbo behavior");
+    psvr2.quadviews_active = true;
+    psvr2.executable_name = "FlightSimulator.exe";
+    Expect(!depthxr::ShouldBlockTurboForSession(psvr2),
+           "The DCS compatibility rule must not disable Turbo globally");
+}
+
 void TestSwapchainImageQueuePreservesFifo() {
     depthxr::SwapchainImageQueue queue;
     queue.Acquire(2);
@@ -1609,6 +1736,11 @@ int main() {
     TestPivotYawNoOpInsideDeadzone();
     TestSwapchainImageQueuePreservesFifo();
     TestLoggerCollapsesDuplicateMessages();
+    TestEyeGazeExtensionCompatibilityPolicy();
+    TestTurboSteamVrQuadviewsCompatibilityPolicy();
+#ifdef _WIN32
+    TestD3D11SharpenShaderRegression();
+#endif
     std::cout << "depthxr_layer_tests passed\n";
     return 0;
 }
