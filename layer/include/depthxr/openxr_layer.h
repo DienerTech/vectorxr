@@ -303,6 +303,30 @@ class OpenXrLayer {
         std::array<XrPosef, 4> eye_offsets{};
     };
 
+    // Session-scoped evidence for the native Varjo foveation contract. The
+    // first occurrence of each request state is logged at Info, while exact
+    // focus-FOV movement ranges are summarized periodically at Debug and once
+    // at teardown. This keeps the hot xrLocateViews path useful without
+    // producing a line per frame.
+    struct VarjoNativeFoveationDiagnosticState {
+        uint64_t locate_calls{0};
+        std::array<uint64_t, 3> request_state_counts{}; // absent, present/inactive, present/active
+        uint8_t logged_request_state_mask{0};
+        uint64_t successful_quad_locates{0};
+        bool focus_ranges_initialized{false};
+        bool focus_motion_logged{false};
+        std::array<XrFovf, 2> initial_focus_fovs{};
+        std::array<double, 2> min_focus_yaw{};
+        std::array<double, 2> max_focus_yaw{};
+        std::array<double, 2> min_focus_pitch{};
+        std::array<double, 2> max_focus_pitch{};
+        std::array<double, 2> min_focus_width{};
+        std::array<double, 2> max_focus_width{};
+        std::array<double, 2> min_focus_height{};
+        std::array<double, 2> max_focus_height{};
+        std::optional<std::chrono::steady_clock::time_point> last_summary_wall_time;
+    };
+
     void ReloadConfigIfNeeded();
     void StartConfigWatcher();
     void StopConfigWatcher();
@@ -420,6 +444,13 @@ class OpenXrLayer {
                                 uint32_t* view_count_output,
                                 XrView* views,
                                 bool* synthesized_quad_views);
+    void RecordVarjoNativeLocateDiagnostics(const XrViewLocateInfo* view_locate_info,
+                                            const XrViewState* view_state,
+                                            XrResult result,
+                                            uint32_t view_capacity_input,
+                                            const uint32_t* view_count_output,
+                                            const XrView* views);
+    void LogVarjoNativeFoveationSummaryLocked(std::string_view reason, bool info_level);
     bool SynthesizeQuadViewsFromStereo(std::span<const XrView> stereo_views,
                                        const QuadViewsResolvedSettings& quadviews_settings,
                                        double focus_yaw_radians,
@@ -817,7 +848,11 @@ class OpenXrLayer {
     bool has_logged_quad_view_short_count_{false};
     bool has_logged_pivotxr_spike_mode_{false};
     bool has_logged_quadviews_view_configuration_capabilities_{false};
-    bool has_logged_varjo_compatible_view_sizes_{false};
+    uint64_t varjo_native_view_configuration_calls_{0};
+    bool has_logged_varjo_native_view_configuration_count_{false};
+    bool has_logged_varjo_native_view_configuration_signature_limit_{false};
+    std::unordered_set<std::string> logged_varjo_native_view_configuration_signatures_;
+    VarjoNativeFoveationDiagnosticState varjo_native_foveation_diagnostic_;
     bool has_logged_visibility_mask_mapping_{false};
     bool has_logged_system_properties_{false};
     uint32_t cached_quadviews_stereo_recommended_width_{0};

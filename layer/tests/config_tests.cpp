@@ -503,7 +503,8 @@ void TestPivotResponseModeAndAdvancedAxes() {
             "stepTriggerDegrees": 12.0,
             "stepAmountDegrees": 15.0,
             "stepHysteresisDegrees": 5.0,
-            "deadzoneDegrees": 6.0
+            "deadzoneDegrees": 180.0,
+            "pitchDeadzoneDegrees": 90.0
           }
         },
         {
@@ -513,9 +514,9 @@ void TestPivotResponseModeAndAdvancedAxes() {
           "activationBinding": { "type": "keyboard", "chord": ["F9"] },
           "settings": {
             "advancedAxes": true,
-            "yawLeft": { "rotationMultiplier": 2.0, "deadzoneDegrees": 5.0, "maxExtraDegrees": 90.0 },
+            "yawLeft": { "rotationMultiplier": 2.0, "deadzoneDegrees": 180.0, "maxExtraDegrees": 90.0 },
             "yawRight": { "rotationMultiplier": 1.2 },
-            "pitchUp": { "rotationMultiplier": 1.8 },
+            "pitchUp": { "rotationMultiplier": 1.8, "deadzoneDegrees": 90.0 },
             "pitchDown": { "rotationMultiplier": 1.1, "maxExtraDegrees": 30.0 }
           }
         }
@@ -544,18 +545,24 @@ void TestPivotResponseModeAndAdvancedAxes() {
     const depthxr::PivotXrResolvedProfile& advanced_profile = advanced.pivotxr.profiles[0];
     Expect(std::abs(advanced_profile.yaw_positive.rotation_multiplier - 2.0) < 0.0001,
            "Advanced yaw-left multiplier mismatch");
+    Expect(std::abs(advanced_profile.yaw_positive.deadzone_degrees - 180.0) < 0.0001,
+           "Advanced yaw-left deadzone boundary mismatch");
     Expect(std::abs(advanced_profile.yaw_positive.max_extra_degrees - 90.0) < 0.0001,
            "Advanced yaw-left max extra mismatch");
     Expect(std::abs(advanced_profile.yaw_negative.rotation_multiplier - 1.2) < 0.0001,
            "Advanced yaw-right multiplier mismatch");
     Expect(std::abs(advanced_profile.pitch_positive.rotation_multiplier - 1.8) < 0.0001,
            "Advanced pitch-up multiplier mismatch");
+    Expect(std::abs(advanced_profile.pitch_positive.deadzone_degrees - 90.0) < 0.0001,
+           "Advanced pitch-up deadzone boundary mismatch");
     Expect(std::abs(advanced_profile.pitch_negative.max_extra_degrees - 30.0) < 0.0001,
            "Advanced pitch-down max extra mismatch");
 
     // Symmetric profiles collapse direction tunings to the yaw/pitch values.
-    Expect(std::abs(stepped_profile.yaw_positive.deadzone_degrees - 6.0) < 0.0001,
+    Expect(std::abs(stepped_profile.yaw_positive.deadzone_degrees - 180.0) < 0.0001,
            "Symmetric collapse should mirror yaw deadzone into direction tunings");
+    Expect(std::abs(stepped_profile.pitch_positive.deadzone_degrees - 90.0) < 0.0001,
+           "Symmetric collapse should mirror pitch deadzone into direction tunings");
 }
 
 void TestTurboModuleResolution() {

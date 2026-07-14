@@ -110,8 +110,8 @@ function validatePivotXRSettings(prefix: string, settings: PivotXRSettings): str
     errors.push(`${prefix}activationRampSeconds must be between 0 and 2`)
   }
 
-  if (Number.isNaN(settings.deadzoneDegrees) || settings.deadzoneDegrees < 0 || settings.deadzoneDegrees > 45) {
-    errors.push(`${prefix}deadzoneDegrees must be between 0 and 45`)
+  if (Number.isNaN(settings.deadzoneDegrees) || settings.deadzoneDegrees < 0 || settings.deadzoneDegrees > 180) {
+    errors.push(`${prefix}deadzoneDegrees must be between 0 and 180`)
   }
 
   if (Number.isNaN(settings.maxExtraYawDegrees) || settings.maxExtraYawDegrees < 0 || settings.maxExtraYawDegrees > 180) {
@@ -122,8 +122,8 @@ function validatePivotXRSettings(prefix: string, settings: PivotXRSettings): str
     errors.push(`${prefix}pitchRotationMultiplier must be between 1.0 and 3.0`)
   }
 
-  if (Number.isNaN(settings.pitchDeadzoneDegrees) || settings.pitchDeadzoneDegrees < 0 || settings.pitchDeadzoneDegrees > 45) {
-    errors.push(`${prefix}pitchDeadzoneDegrees must be between 0 and 45`)
+  if (Number.isNaN(settings.pitchDeadzoneDegrees) || settings.pitchDeadzoneDegrees < 0 || settings.pitchDeadzoneDegrees > 90) {
+    errors.push(`${prefix}pitchDeadzoneDegrees must be between 0 and 90`)
   }
 
   if (Number.isNaN(settings.maxExtraPitchDegrees) || settings.maxExtraPitchDegrees < 0 || settings.maxExtraPitchDegrees > 180) {
@@ -150,18 +150,18 @@ function validatePivotXRSettings(prefix: string, settings: PivotXRSettings): str
     errors.push(`${prefix}stepHysteresisDegrees must be smaller than stepTriggerDegrees`)
   }
 
-  const tunings: Array<[string, typeof settings.yawLeft]> = [
-    ['yawLeft', settings.yawLeft],
-    ['yawRight', settings.yawRight],
-    ['pitchUp', settings.pitchUp],
-    ['pitchDown', settings.pitchDown],
+  const tunings: Array<[string, typeof settings.yawLeft, number]> = [
+    ['yawLeft', settings.yawLeft, 180],
+    ['yawRight', settings.yawRight, 180],
+    ['pitchUp', settings.pitchUp, 90],
+    ['pitchDown', settings.pitchDown, 90],
   ]
-  for (const [name, tuning] of tunings) {
+  for (const [name, tuning, deadzoneMax] of tunings) {
     if (Number.isNaN(tuning.rotationMultiplier) || tuning.rotationMultiplier < 1.0 || tuning.rotationMultiplier > 3.0) {
       errors.push(`${prefix}${name}.rotationMultiplier must be between 1.0 and 3.0`)
     }
-    if (Number.isNaN(tuning.deadzoneDegrees) || tuning.deadzoneDegrees < 0 || tuning.deadzoneDegrees > 45) {
-      errors.push(`${prefix}${name}.deadzoneDegrees must be between 0 and 45`)
+    if (Number.isNaN(tuning.deadzoneDegrees) || tuning.deadzoneDegrees < 0 || tuning.deadzoneDegrees > deadzoneMax) {
+      errors.push(`${prefix}${name}.deadzoneDegrees must be between 0 and ${deadzoneMax}`)
     }
     if (Number.isNaN(tuning.maxExtraDegrees) || tuning.maxExtraDegrees < 0 || tuning.maxExtraDegrees > 180) {
       errors.push(`${prefix}${name}.maxExtraDegrees must be between 0 and 180`)

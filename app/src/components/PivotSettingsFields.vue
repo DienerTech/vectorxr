@@ -13,10 +13,10 @@ const props = defineProps<{
 }>()
 
 const advancedDirections = [
-  { key: 'yawLeft', label: 'Yaw Left', hint: 'Applied when turning your head to the left.' },
-  { key: 'yawRight', label: 'Yaw Right', hint: 'Applied when turning your head to the right.' },
-  { key: 'pitchUp', label: 'Pitch Up', hint: 'Applied when tilting your head up.' },
-  { key: 'pitchDown', label: 'Pitch Down', hint: 'Applied when tilting your head down.' },
+  { key: 'yawLeft', label: 'Yaw Left', hint: 'Applied when turning your head to the left.', deadzoneMax: 180 },
+  { key: 'yawRight', label: 'Yaw Right', hint: 'Applied when turning your head to the right.', deadzoneMax: 180 },
+  { key: 'pitchUp', label: 'Pitch Up', hint: 'Applied when tilting your head up.', deadzoneMax: 90 },
+  { key: 'pitchDown', label: 'Pitch Down', hint: 'Applied when tilting your head down.', deadzoneMax: 90 },
 ] as const
 
 function axisTuning(key: (typeof advancedDirections)[number]['key']): PivotAxisTuning {
@@ -212,7 +212,7 @@ function onAdvancedAxesChange(enabled: boolean) {
               v-model.number="settings.deadzoneDegrees"
               class="app-input w-full rounded-[0.75rem] px-4 py-2.5"
               min="0"
-              max="45"
+              max="180"
               step="0.5"
               type="number"
             />
@@ -278,7 +278,7 @@ function onAdvancedAxesChange(enabled: boolean) {
               v-model.number="settings.pitchDeadzoneDegrees"
               class="app-input w-full rounded-[0.75rem] px-4 py-2.5"
               min="0"
-              max="45"
+              max="90"
               step="0.5"
               type="number"
             />
@@ -347,7 +347,7 @@ function onAdvancedAxesChange(enabled: boolean) {
                 v-model.number="axisTuning(direction.key).deadzoneDegrees"
                 class="app-input w-full rounded-[0.75rem] px-3 py-2"
                 min="0"
-                max="45"
+                :max="direction.deadzoneMax"
                 step="0.5"
                 type="number"
               />

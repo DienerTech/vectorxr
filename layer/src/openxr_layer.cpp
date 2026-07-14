@@ -114,6 +114,26 @@ uint32_t ScaleDimension(uint32_t value, double scale, uint32_t max_value) {
     return std::max<uint32_t>(1, rounded);
 }
 
+uint64_t RequestedScaledDimension(uint32_t value, double scale) {
+    return std::max<uint64_t>(
+        1, static_cast<uint64_t>(std::round(static_cast<double>(value) * std::max(0.01, scale))));
+}
+
+std::string_view VarjoNativeViewRole(uint32_t index) {
+    switch (index) {
+    case 0:
+        return "peripheral-left";
+    case 1:
+        return "peripheral-right";
+    case 2:
+        return "focus-left";
+    case 3:
+        return "focus-right";
+    default:
+        return "unknown";
+    }
+}
+
 double QuadViewsFocusWidthScale(const QuadViewsResolvedSettings& settings) {
     return settings.focus_scale * Clamp(settings.focus_horizontal_size_percent, 1.0, 100.0) / 100.0;
 }
@@ -1656,6 +1676,10 @@ XrResult OpenXrLayer::BeginSession(XrSession session, const XrSessionBeginInfo* 
     }
 
     std::scoped_lock lock(mutex_);
+    if (varjo_native_foveation_diagnostic_.locate_calls > 0) {
+        LogVarjoNativeFoveationSummaryLocked("session-rebegin", true);
+        varjo_native_foveation_diagnostic_ = {};
+    }
     active_session_ = session;
     session_begin_wall_time_ = std::chrono::steady_clock::now();
     active_primary_view_configuration_type_ = begin_info->primaryViewConfigurationType;
@@ -1881,8 +1905,13 @@ XrResult OpenXrLayer::GetSystemProperties(XrInstance instance,
     system_name_ = properties->systemName;
     system_vendor_id_ = properties->vendorId;
 
-    const bool app_queried_varjo_foveation =
-        FindStructInChain(properties->next, XR_TYPE_SYSTEM_FOVEATED_RENDERING_PROPERTIES_VARJO) != nullptr;
+    void* foveated_properties =
+        FindMutableStructInChain(properties->next, XR_TYPE_SYSTEM_FOVEATED_RENDERING_PROPERTIES_VARJO);
+    const bool app_queried_varjo_foveation = foveated_properties != nullptr;
+    const bool runtime_reported_varjo_foveation =
+        foveated_properties &&
+        reinterpret_cast<const XrSystemFoveatedRenderingPropertiesVARJO*>(foveated_properties)
+                ->supportsFoveatedRendering == XR_TRUE;
     if (!has_logged_system_properties_) {
         std::ostringstream stream;
         stream << "OpenXR system: name=\"" << properties->systemName << "\""
@@ -1893,6 +1922,9 @@ XrResult OpenXrLayer::GetSystemProperties(XrInstance instance,
                << ", orientationTracking=" << (properties->trackingProperties.orientationTracking ? 1 : 0)
                << ", positionTracking=" << (properties->trackingProperties.positionTracking ? 1 : 0)
                << ", appQueriedVarjoFoveation=" << (app_queried_varjo_foveation ? 1 : 0)
+               << ", runtimeReportedVarjoFoveation=" << (runtime_reported_varjo_foveation ? 1 : 0)
+               << ", vectorReturnedVarjoFoveation="
+               << ((app_queried_varjo_foveation && IsQuadViewsActive()) || runtime_reported_varjo_foveation ? 1 : 0)
                << ", quadViewsActive=" << (IsQuadViewsActive() ? 1 : 0);
         logger_.Info(stream.str());
         has_logged_system_properties_ = true;
@@ -1902,10 +1934,15 @@ XrResult OpenXrLayer::GetSystemProperties(XrInstance instance,
         return result;
     }
 
-    void* foveated = FindMutableStructInChain(properties->next, XR_TYPE_SYSTEM_FOVEATED_RENDERING_PROPERTIES_VARJO);
-    if (foveated) {
-        reinterpret_cast<XrSystemFoveatedRenderingPropertiesVARJO*>(foveated)->supportsFoveatedRendering = XR_TRUE;
-        logger_.Info("Reported supportsFoveatedRendering=TRUE to application (Varjo foveated-rendering emulation).");
+    if (foveated_properties) {
+        reinterpret_cast<XrSystemFoveatedRenderingPropertiesVARJO*>(foveated_properties)
+            ->supportsFoveatedRendering = XR_TRUE;
+        logger_.Info(varjo_compatible_quadviews_active_
+                         ? "Native Varjo foveation system property: runtimeReportedSupports=" +
+                               std::to_string(runtime_reported_varjo_foveation ? 1 : 0) +
+                               ", vectorReturnedSupports=1."
+                         : "Reported supportsFoveatedRendering=TRUE to application "
+                           "(Varjo foveated-rendering emulation).");
     }
     return result;
 }
@@ -2076,37 +2113,165 @@ XrResult OpenXrLayer::EnumerateViewConfigurationViews(XrInstance instance,
         // knobs, rescale only the per-view recommended resolutions: peripheral
         // views (0/1) by peripheral_scale, focus views (2/3) by focus_scale. Every
         // other quadviews setting is runtime-owned in this mode.
+        ++varjo_native_view_configuration_calls_;
         const XrResult native_result = next_enumerate_view_configuration_views_(
             instance, system_id, view_configuration_type, view_capacity_input, view_count_output, views);
-        if (XR_FAILED(native_result) || !views || view_capacity_input == 0) {
+        if (XR_FAILED(native_result)) {
+            return native_result;
+        }
+        if (!views || view_capacity_input == 0) {
+            if (!has_logged_varjo_native_view_configuration_count_) {
+                logger_.Info(
+                    "Native Varjo resolution contract count query: enumerateCall=" +
+                    std::to_string(varjo_native_view_configuration_calls_) +
+                    ", runtimeViewCount=" + std::to_string(*view_count_output) +
+                    ", appCapacity=" + std::to_string(view_capacity_input) +
+                    ", appFoveatedTextureRequest=not-applicable(no per-view next chains). "
+                    "A populated query will log the raw recommended/max dimensions and request state.");
+                has_logged_varjo_native_view_configuration_count_ = true;
+            }
             return native_result;
         }
         const double peripheral_scale = resolved_settings_.quadviews.peripheral_scale;
         const double focus_scale = resolved_settings_.quadviews.focus_scale;
         const uint32_t applied = std::min<uint32_t>(view_capacity_input, *view_count_output);
-        std::ostringstream native_sizes;
+
+        struct NativeViewDiagnostic {
+            uint32_t runtime_recommended_width{0};
+            uint32_t runtime_recommended_height{0};
+            uint32_t runtime_max_width{0};
+            uint32_t runtime_max_height{0};
+            uint32_t recommended_sample_count{0};
+            uint32_t max_sample_count{0};
+            uint64_t vector_requested_width{0};
+            uint64_t vector_requested_height{0};
+            uint32_t final_width{0};
+            uint32_t final_height{0};
+            double requested_scale{1.0};
+            bool foveated_request_present{false};
+            bool foveated_request_active{false};
+            bool clamped_to_runtime_max{false};
+        };
+        std::vector<NativeViewDiagnostic> diagnostics;
+        diagnostics.reserve(applied);
+        uint64_t foveated_request_present_mask = 0;
+        uint64_t foveated_request_active_mask = 0;
+        uint64_t runtime_max_clamp_mask = 0;
         for (uint32_t i = 0; i < applied; ++i) {
             const bool is_focus = (i >= 2);
             const double scale = is_focus ? focus_scale : peripheral_scale;
-            const uint32_t runtime_width = views[i].recommendedImageRectWidth;
-            const uint32_t runtime_height = views[i].recommendedImageRectHeight;
+            NativeViewDiagnostic diagnostic;
+            diagnostic.runtime_recommended_width = views[i].recommendedImageRectWidth;
+            diagnostic.runtime_recommended_height = views[i].recommendedImageRectHeight;
+            diagnostic.runtime_max_width = views[i].maxImageRectWidth;
+            diagnostic.runtime_max_height = views[i].maxImageRectHeight;
+            diagnostic.recommended_sample_count = views[i].recommendedSwapchainSampleCount;
+            diagnostic.max_sample_count = views[i].maxSwapchainSampleCount;
+            diagnostic.requested_scale = scale;
+            diagnostic.vector_requested_width = RequestedScaledDimension(diagnostic.runtime_recommended_width, scale);
+            diagnostic.vector_requested_height =
+                RequestedScaledDimension(diagnostic.runtime_recommended_height, scale);
+
+            const auto* foveated_request = reinterpret_cast<const XrFoveatedViewConfigurationViewVARJO*>(
+                FindStructInChain(views[i].next, XR_TYPE_FOVEATED_VIEW_CONFIGURATION_VIEW_VARJO));
+            diagnostic.foveated_request_present = foveated_request != nullptr;
+            diagnostic.foveated_request_active =
+                foveated_request && foveated_request->foveatedRenderingActive == XR_TRUE;
+            if (i < 64 && diagnostic.foveated_request_present) {
+                foveated_request_present_mask |= uint64_t{1} << i;
+            }
+            if (i < 64 && diagnostic.foveated_request_active) {
+                foveated_request_active_mask |= uint64_t{1} << i;
+            }
+
             views[i].recommendedImageRectWidth =
-                ScaleDimension(runtime_width, scale, views[i].maxImageRectWidth);
+                ScaleDimension(diagnostic.runtime_recommended_width, scale, diagnostic.runtime_max_width);
             views[i].recommendedImageRectHeight =
-                ScaleDimension(runtime_height, scale, views[i].maxImageRectHeight);
-            if (!has_logged_varjo_compatible_view_sizes_) {
-                native_sizes << " view" << i << "=" << runtime_width << "x" << runtime_height << "->"
-                             << views[i].recommendedImageRectWidth << "x"
-                             << views[i].recommendedImageRectHeight << "(x" << FormatDiagnosticDouble(scale)
-                             << ")";
+                ScaleDimension(diagnostic.runtime_recommended_height, scale, diagnostic.runtime_max_height);
+            diagnostic.final_width = views[i].recommendedImageRectWidth;
+            diagnostic.final_height = views[i].recommendedImageRectHeight;
+            diagnostic.clamped_to_runtime_max =
+                diagnostic.final_width < diagnostic.vector_requested_width ||
+                diagnostic.final_height < diagnostic.vector_requested_height;
+            if (i < 64 && diagnostic.clamped_to_runtime_max) {
+                runtime_max_clamp_mask |= uint64_t{1} << i;
+            }
+            diagnostics.push_back(diagnostic);
+        }
+        std::ostringstream signature;
+        signature << applied << ":" << FormatDiagnosticDouble(peripheral_scale) << ":"
+                  << FormatDiagnosticDouble(focus_scale) << ":" << foveated_request_present_mask << ":"
+                  << foveated_request_active_mask;
+        for (const NativeViewDiagnostic& diagnostic : diagnostics) {
+            signature << ":" << diagnostic.runtime_recommended_width << "x"
+                      << diagnostic.runtime_recommended_height << "/" << diagnostic.runtime_max_width << "x"
+                      << diagnostic.runtime_max_height << "@" << diagnostic.recommended_sample_count << "/"
+                      << diagnostic.max_sample_count << "->" << diagnostic.final_width << "x"
+                      << diagnostic.final_height;
+        }
+
+        constexpr size_t kMaxLoggedVarjoViewConfigurationSignatures = 16;
+        bool should_log_contract = false;
+        const std::string signature_value = signature.str();
+        if (!logged_varjo_native_view_configuration_signatures_.contains(signature_value)) {
+            if (logged_varjo_native_view_configuration_signatures_.size() <
+                kMaxLoggedVarjoViewConfigurationSignatures) {
+                logged_varjo_native_view_configuration_signatures_.insert(signature_value);
+                should_log_contract = true;
+            } else if (!has_logged_varjo_native_view_configuration_signature_limit_) {
+                logger_.Info(
+                    "Native Varjo resolution contract logging reached its 16-signature safety limit; "
+                    "further unique enumeration results will still be applied but not logged.");
+                has_logged_varjo_native_view_configuration_signature_limit_ = true;
             }
         }
-        if (!has_logged_varjo_compatible_view_sizes_ && applied > 0) {
-            logger_.Info("Quadviews Varjo compatible view sizes (runtime->rescaled): count=" +
-                         std::to_string(applied) + ", peripheralScale=" +
-                         FormatDiagnosticDouble(peripheral_scale) + ", focusScale=" +
-                         FormatDiagnosticDouble(focus_scale) + native_sizes.str());
-            has_logged_varjo_compatible_view_sizes_ = true;
+        if (should_log_contract && applied > 0) {
+            std::ostringstream stream;
+            stream << "Native Varjo resolution contract: enumerateCall=" << varjo_native_view_configuration_calls_
+                   << ", runtimeViewCount=" << *view_count_output
+                   << ", appCapacity=" << view_capacity_input
+                   << ", appFoveatedTextureRequestPresentMask=" << FormatHex(foveated_request_present_mask)
+                   << ", appFoveatedTextureRequestActiveMask=" << FormatHex(foveated_request_active_mask)
+                   << ", vectorPeripheralScale=" << FormatDiagnosticDouble(peripheral_scale)
+                   << ", vectorFocusScale=" << FormatDiagnosticDouble(focus_scale)
+                   << ", runtimeMaxClampMask=" << FormatHex(runtime_max_clamp_mask);
+            for (uint32_t i = 0; i < diagnostics.size(); ++i) {
+                const NativeViewDiagnostic& diagnostic = diagnostics[i];
+                const double effective_width_scale =
+                    diagnostic.runtime_recommended_width > 0
+                        ? static_cast<double>(diagnostic.final_width) / diagnostic.runtime_recommended_width
+                        : 0.0;
+                const double effective_height_scale =
+                    diagnostic.runtime_recommended_height > 0
+                        ? static_cast<double>(diagnostic.final_height) / diagnostic.runtime_recommended_height
+                        : 0.0;
+                const char* foveated_state = diagnostic.foveated_request_active
+                                                  ? "active"
+                                                  : (diagnostic.foveated_request_present ? "inactive" : "absent");
+                stream << ", view" << i << "{role=" << VarjoNativeViewRole(i)
+                       << ", runtimeRecommended=" << diagnostic.runtime_recommended_width << "x"
+                       << diagnostic.runtime_recommended_height
+                       << ", runtimeMax=" << diagnostic.runtime_max_width << "x" << diagnostic.runtime_max_height
+                       << ", runtimeSamples=" << diagnostic.recommended_sample_count << "/"
+                       << diagnostic.max_sample_count
+                       << ", foveatedRequest=" << foveated_state
+                       << ", vectorRequested=" << diagnostic.vector_requested_width << "x"
+                       << diagnostic.vector_requested_height << "@x"
+                       << FormatDiagnosticDouble(diagnostic.requested_scale)
+                       << ", appFinal=" << diagnostic.final_width << "x" << diagnostic.final_height
+                       << ", effectiveScale=" << FormatDiagnosticDouble(effective_width_scale) << "x"
+                       << FormatDiagnosticDouble(effective_height_scale)
+                       << ", recommendedAtRuntimeMax="
+                       << ((diagnostic.runtime_recommended_width >= diagnostic.runtime_max_width ||
+                            diagnostic.runtime_recommended_height >= diagnostic.runtime_max_height)
+                               ? 1
+                               : 0)
+                       << ", clampedToRuntimeMax=" << (diagnostic.clamped_to_runtime_max ? 1 : 0) << "}";
+            }
+            stream << ". runtimeMax is the per-view limit advertised by the active Varjo runtime; comparing this "
+                      "line after a Varjo Base resolution change and application restart distinguishes a "
+                      "setting-controlled cap from a fixed runtime limit.";
+            logger_.Info(stream.str());
         }
         return native_result;
     }
@@ -6385,6 +6550,10 @@ void OpenXrLayer::CaptureInstanceFunctions() {
 }
 
 void OpenXrLayer::ResetSessionState() {
+    if (varjo_native_foveation_diagnostic_.locate_calls > 0) {
+        LogVarjoNativeFoveationSummaryLocked("session-teardown", true);
+    }
+    varjo_native_foveation_diagnostic_ = {};
     ResetD3D11QuadViewsCompositor();
     active_session_ = XR_NULL_HANDLE;
     session_begin_wall_time_.reset();
@@ -6460,6 +6629,10 @@ void OpenXrLayer::ResetInstanceState() {
     cached_quadviews_stereo_recommended_height_ = 0;
     cached_quadviews_stereo_max_width_ = 0;
     cached_quadviews_stereo_max_height_ = 0;
+    varjo_native_view_configuration_calls_ = 0;
+    has_logged_varjo_native_view_configuration_count_ = false;
+    has_logged_varjo_native_view_configuration_signature_limit_ = false;
+    logged_varjo_native_view_configuration_signatures_.clear();
     has_logged_system_properties_ = false;
 }
 
@@ -7141,6 +7314,166 @@ bool OpenXrLayer::IsTrackedViewSpace(XrSpace space) const {
     return space != XR_NULL_HANDLE && tracked_view_spaces_.contains(space);
 }
 
+void OpenXrLayer::RecordVarjoNativeLocateDiagnostics(const XrViewLocateInfo* view_locate_info,
+                                                     const XrViewState* view_state,
+                                                     XrResult result,
+                                                     uint32_t view_capacity_input,
+                                                     const uint32_t* view_count_output,
+                                                     const XrView* views) {
+    const auto* foveated_request = view_locate_info
+                                        ? reinterpret_cast<const XrViewLocateFoveatedRenderingVARJO*>(
+                                              FindStructInChain(view_locate_info->next,
+                                                                XR_TYPE_VIEW_LOCATE_FOVEATED_RENDERING_VARJO))
+                                        : nullptr;
+    const bool request_present = foveated_request != nullptr;
+    const bool request_active = request_present && foveated_request->foveatedRenderingActive == XR_TRUE;
+    const size_t request_state = request_present ? (request_active ? 2 : 1) : 0;
+    const uint32_t returned_views =
+        view_count_output ? std::min(view_capacity_input, *view_count_output) : 0;
+
+    std::scoped_lock lock(mutex_);
+    VarjoNativeFoveationDiagnosticState& diagnostic = varjo_native_foveation_diagnostic_;
+    ++diagnostic.locate_calls;
+    ++diagnostic.request_state_counts[request_state];
+
+    const uint8_t request_state_bit = static_cast<uint8_t>(uint8_t{1} << request_state);
+    if ((diagnostic.logged_request_state_mask & request_state_bit) == 0) {
+        diagnostic.logged_request_state_mask |= request_state_bit;
+        std::ostringstream stream;
+        stream << "Native Varjo foveated locate contract: locateCall=" << diagnostic.locate_calls
+               << ", requestChainPresent=" << (request_present ? 1 : 0)
+               << ", foveatedRenderingActive=" << (request_active ? 1 : 0)
+               << ", displayTime=" << (view_locate_info ? view_locate_info->displayTime : 0)
+               << ", result=" << FormatHex(static_cast<uint64_t>(result))
+               << ", appCapacity=" << view_capacity_input
+               << ", returnedViews=" << returned_views
+               << ", viewStateFlags="
+               << FormatHex(view_state ? static_cast<uint64_t>(view_state->viewStateFlags) : 0);
+        if (views && returned_views >= 4) {
+            stream << ", focusView2FovRadians=" << FormatFov(views[2].fov)
+                   << ", focusView3FovRadians=" << FormatFov(views[3].fov);
+        }
+        stream << ". Counts for every native locate call and exact focus-FOV ranges are included in the "
+                  "periodic/session summary.";
+        logger_.Info(stream.str());
+    }
+
+    if (XR_FAILED(result) || !views || returned_views < 4) {
+        return;
+    }
+    ++diagnostic.successful_quad_locates;
+
+    std::array<double, 2> focus_yaw{};
+    std::array<double, 2> focus_pitch{};
+    std::array<double, 2> focus_width{};
+    std::array<double, 2> focus_height{};
+    for (uint32_t eye = 0; eye < 2; ++eye) {
+        const XrFovf& fov = views[eye + 2].fov;
+        focus_yaw[eye] = (static_cast<double>(fov.angleLeft) + fov.angleRight) * 0.5;
+        focus_pitch[eye] = (static_cast<double>(fov.angleUp) + fov.angleDown) * 0.5;
+        focus_width[eye] = static_cast<double>(fov.angleRight) - fov.angleLeft;
+        focus_height[eye] = static_cast<double>(fov.angleUp) - fov.angleDown;
+    }
+
+    if (!diagnostic.focus_ranges_initialized) {
+        diagnostic.focus_ranges_initialized = true;
+        for (uint32_t eye = 0; eye < 2; ++eye) {
+            diagnostic.initial_focus_fovs[eye] = views[eye + 2].fov;
+            diagnostic.min_focus_yaw[eye] = diagnostic.max_focus_yaw[eye] = focus_yaw[eye];
+            diagnostic.min_focus_pitch[eye] = diagnostic.max_focus_pitch[eye] = focus_pitch[eye];
+            diagnostic.min_focus_width[eye] = diagnostic.max_focus_width[eye] = focus_width[eye];
+            diagnostic.min_focus_height[eye] = diagnostic.max_focus_height[eye] = focus_height[eye];
+        }
+    } else {
+        for (uint32_t eye = 0; eye < 2; ++eye) {
+            diagnostic.min_focus_yaw[eye] = std::min(diagnostic.min_focus_yaw[eye], focus_yaw[eye]);
+            diagnostic.max_focus_yaw[eye] = std::max(diagnostic.max_focus_yaw[eye], focus_yaw[eye]);
+            diagnostic.min_focus_pitch[eye] = std::min(diagnostic.min_focus_pitch[eye], focus_pitch[eye]);
+            diagnostic.max_focus_pitch[eye] = std::max(diagnostic.max_focus_pitch[eye], focus_pitch[eye]);
+            diagnostic.min_focus_width[eye] = std::min(diagnostic.min_focus_width[eye], focus_width[eye]);
+            diagnostic.max_focus_width[eye] = std::max(diagnostic.max_focus_width[eye], focus_width[eye]);
+            diagnostic.min_focus_height[eye] = std::min(diagnostic.min_focus_height[eye], focus_height[eye]);
+            diagnostic.max_focus_height[eye] = std::max(diagnostic.max_focus_height[eye], focus_height[eye]);
+        }
+    }
+
+    constexpr double kFocusMotionThresholdRadians = 0.05 * 3.14159265358979323846 / 180.0;
+    bool focus_fov_moved = false;
+    for (uint32_t eye = 0; eye < 2; ++eye) {
+        focus_fov_moved =
+            focus_fov_moved ||
+            diagnostic.max_focus_yaw[eye] - diagnostic.min_focus_yaw[eye] >= kFocusMotionThresholdRadians ||
+            diagnostic.max_focus_pitch[eye] - diagnostic.min_focus_pitch[eye] >= kFocusMotionThresholdRadians ||
+            diagnostic.max_focus_width[eye] - diagnostic.min_focus_width[eye] >= kFocusMotionThresholdRadians ||
+            diagnostic.max_focus_height[eye] - diagnostic.min_focus_height[eye] >= kFocusMotionThresholdRadians;
+    }
+    if (focus_fov_moved && !diagnostic.focus_motion_logged) {
+        diagnostic.focus_motion_logged = true;
+        std::ostringstream stream;
+        stream << "Native Varjo focus FOV movement observed after " << diagnostic.successful_quad_locates
+               << " successful quad locates: requestChainPresent=" << (request_present ? 1 : 0)
+               << ", foveatedRenderingActive=" << (request_active ? 1 : 0)
+               << ", initialFocusView2=" << FormatFov(diagnostic.initial_focus_fovs[0])
+               << ", currentFocusView2=" << FormatFov(views[2].fov)
+               << ", initialFocusView3=" << FormatFov(diagnostic.initial_focus_fovs[1])
+               << ", currentFocusView3=" << FormatFov(views[3].fov)
+               << ". This confirms the runtime-returned native focus geometry is changing during the session.";
+        logger_.Info(stream.str());
+    }
+
+    const auto now = std::chrono::steady_clock::now();
+    if (!diagnostic.last_summary_wall_time.has_value()) {
+        diagnostic.last_summary_wall_time = now;
+    } else if (now - *diagnostic.last_summary_wall_time >= std::chrono::seconds(10)) {
+        diagnostic.last_summary_wall_time = now;
+        if (logger_.IsDebugEnabled()) {
+            LogVarjoNativeFoveationSummaryLocked("periodic-10s", false);
+        }
+    }
+}
+
+void OpenXrLayer::LogVarjoNativeFoveationSummaryLocked(std::string_view reason, bool info_level) {
+    const VarjoNativeFoveationDiagnosticState& diagnostic = varjo_native_foveation_diagnostic_;
+    if (diagnostic.locate_calls == 0) {
+        return;
+    }
+
+    constexpr double kRadiansToDegrees = 180.0 / 3.14159265358979323846;
+    std::ostringstream stream;
+    stream << "Native Varjo foveation summary: reason=" << reason
+           << ", locateCalls=" << diagnostic.locate_calls
+           << ", requestAbsent=" << diagnostic.request_state_counts[0]
+           << ", requestPresentInactive=" << diagnostic.request_state_counts[1]
+           << ", requestPresentActive=" << diagnostic.request_state_counts[2]
+           << ", successfulQuadLocates=" << diagnostic.successful_quad_locates
+           << ", focusFovObserved=" << (diagnostic.focus_ranges_initialized ? 1 : 0)
+           << ", focusFovMotionObserved=" << (diagnostic.focus_motion_logged ? 1 : 0);
+    if (diagnostic.focus_ranges_initialized) {
+        for (uint32_t eye = 0; eye < 2; ++eye) {
+            stream << ", focusView" << (eye + 2)
+                   << "{initialFovRadians=" << FormatFov(diagnostic.initial_focus_fovs[eye])
+                   << ", centerYawRangeDegrees=["
+                   << FormatDiagnosticDouble(diagnostic.min_focus_yaw[eye] * kRadiansToDegrees) << ","
+                   << FormatDiagnosticDouble(diagnostic.max_focus_yaw[eye] * kRadiansToDegrees)
+                   << "], centerPitchRangeDegrees=["
+                   << FormatDiagnosticDouble(diagnostic.min_focus_pitch[eye] * kRadiansToDegrees) << ","
+                   << FormatDiagnosticDouble(diagnostic.max_focus_pitch[eye] * kRadiansToDegrees)
+                   << "], widthRangeDegrees=["
+                   << FormatDiagnosticDouble(diagnostic.min_focus_width[eye] * kRadiansToDegrees) << ","
+                   << FormatDiagnosticDouble(diagnostic.max_focus_width[eye] * kRadiansToDegrees)
+                   << "], heightRangeDegrees=["
+                   << FormatDiagnosticDouble(diagnostic.min_focus_height[eye] * kRadiansToDegrees) << ","
+                   << FormatDiagnosticDouble(diagnostic.max_focus_height[eye] * kRadiansToDegrees) << "]}";
+        }
+    }
+
+    if (info_level) {
+        logger_.Info(stream.str());
+    } else {
+        logger_.Debug(stream.str());
+    }
+}
+
 XrResult OpenXrLayer::LocateRuntimeViews(XrSession session,
                                          const XrViewLocateInfo* view_locate_info,
                                          XrViewState* view_state,
@@ -7170,8 +7503,11 @@ XrResult OpenXrLayer::LocateRuntimeViews(XrSession session,
     // no synthesis. Pivot is still applied downstream in LocateViews.
     if (varjo_compatible && view_locate_info &&
         IsQuadViewConfiguration(view_locate_info->viewConfigurationType)) {
-        return next_locate_views_(
+        const XrResult native_result = next_locate_views_(
             session, view_locate_info, view_state, view_capacity_input, view_count_output, views);
+        RecordVarjoNativeLocateDiagnostics(
+            view_locate_info, view_state, native_result, view_capacity_input, view_count_output, views);
+        return native_result;
     }
 
     XrViewLocateInfo downstream_locate_info{};
