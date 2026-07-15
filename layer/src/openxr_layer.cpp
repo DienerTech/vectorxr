@@ -3756,6 +3756,9 @@ bool OpenXrLayer::ComposeQuadViewsD3D11(const XrCompositionLayerProjection* sour
 XrResult OpenXrLayer::WaitFrame(XrSession session,
                                 const XrFrameWaitInfo* frame_wait_info,
                                 XrFrameState* frame_state) {
+    if (!turbo_frame_interception_required_.load(std::memory_order_acquire)) {
+        return next_wait_frame_(session, frame_wait_info, frame_state);
+    }
     if (!frame_state) {
         return next_wait_frame_(session, frame_wait_info, frame_state);
     }
@@ -3930,6 +3933,9 @@ XrResult OpenXrLayer::WaitFrame(XrSession session,
 }
 
 XrResult OpenXrLayer::BeginFrame(XrSession session, const XrFrameBeginInfo* frame_begin_info) {
+    if (!turbo_frame_interception_required_.load(std::memory_order_acquire)) {
+        return next_begin_frame_(session, frame_begin_info);
+    }
     {
         std::scoped_lock lock(turbo_mutex_);
         if (turbo_begin_owed_) {
@@ -3975,6 +3981,11 @@ XrResult OpenXrLayer::BeginFrame(XrSession session, const XrFrameBeginInfo* fram
 XrResult OpenXrLayer::ForwardEndFrame(XrSession session,
                                       const XrFrameEndInfo* frame_end_info,
                                       std::unique_lock<std::mutex>& config_lock) {
+    if (!turbo_frame_interception_required_.load(std::memory_order_acquire)) {
+        config_lock.unlock();
+        return next_end_frame_(session, frame_end_info);
+    }
+
     // Black-screen forensics: an app that keeps its frame loop running but
     // stops submitting layers shows a void with no error anywhere (DCS did
     // exactly this on SteamVR, silently, after one rendered frame). The
@@ -5261,6 +5272,7 @@ void OpenXrLayer::ResetTurboFrameState() {
     turbo_cadence_pause_logged_ = false;
     turbo_last_frame_blocked_ms_ = 0.0;
     has_logged_turbo_session_compatibility_block_ = false;
+    turbo_frame_interception_required_.store(false, std::memory_order_release);
 }
 
 XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_end_info) {
@@ -5700,19 +5712,20 @@ XrResult OpenXrLayer::CreateReferenceSpace(XrSession session,
 }
 
 XrResult OpenXrLayer::LocateSpace(XrSpace space, XrSpace base_space, XrTime time, XrSpaceLocation* location) {
-    bool enabled = false;
     bool pivotxr_active = false;
+    bool pivot_processing_required = false;
     {
         std::scoped_lock lock(mutex_);
         ReloadConfigIfNeeded();
         RefreshResolvedSettings();
-        enabled = resolved_settings_.core.enabled;
-        if (enabled) {
+        if (resolved_settings_.core.enabled && resolved_settings_.pivotxr.enabled) {
             pivotxr_active = IsPivotXrActive();
+            pivot_processing_required =
+                pivotxr_active || pivotxr_activation_gain_ > kPivotActivationGainEpsilon;
         }
     }
 
-    if (!enabled) {
+    if (!pivot_processing_required) {
         return next_locate_space_(space, base_space, time, location);
     }
 
@@ -5771,6 +5784,10 @@ XrResult OpenXrLayer::LocateViews(XrSession session,
 
     const uint32_t count = std::min(view_capacity_input, *view_count_output);
     if (count == 0) {
+        return result;
+    }
+    if (!resolved_settings_.pivotxr.enabled && !resolved_settings_.depthxr.enabled &&
+        !IsQuadViewsActive()) {
         return result;
     }
 
@@ -6347,6 +6364,9 @@ void OpenXrLayer::RefreshResolvedSettings() {
     // checks); the result only changes when the config document or the active
     // session changes, so skip the work otherwise.
     if (resolved_settings_generation_ == config_generation_ && resolved_settings_session_ == active_session_) {
+        if (resolved_settings_.core.enabled && resolved_settings_.turbo.enabled) {
+            turbo_frame_interception_required_.store(true, std::memory_order_release);
+        }
         return;
     }
     resolved_settings_generation_ = config_generation_;
@@ -6354,6 +6374,12 @@ void OpenXrLayer::RefreshResolvedSettings() {
 
     const ResolvedRuntimeConfig previous = resolved_settings_;
     resolved_settings_ = ResolveRuntimeConfig(config_, current_exe_name_);
+    if (resolved_settings_.core.enabled && resolved_settings_.turbo.enabled) {
+        // Do not disarm this flag on a live-session settings change: once a
+        // Turbo pipeline has been established, Wait/Begin/End interception is
+        // required until ResetTurboFrameState balances and clears it.
+        turbo_frame_interception_required_.store(true, std::memory_order_release);
+    }
     if (!SameInputBinding(previous.depthxr_bindings.toggle_enabled, resolved_settings_.depthxr_bindings.toggle_enabled) ||
         previous.depthxr.enabled != resolved_settings_.depthxr.enabled) {
         ResetDepthToggleState();

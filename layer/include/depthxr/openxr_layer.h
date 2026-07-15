@@ -595,6 +595,12 @@ class OpenXrLayer {
     // state; it is never held across a blocking runtime wait except when
     // spec-ordering requires it (second poll, teardown drains). mutex_ must
     // NOT be required by WaitFrame/BeginFrame, which stay off the config lock.
+    // False when Turbo has never been enabled for the current session. This
+    // gives non-Turbo sessions a literal wait/begin/end pass-through instead
+    // of making SteamVR observe VectorXR's pacing bookkeeping. Once armed it
+    // stays armed until the frame state is reset because an established Turbo
+    // pipeline is structural for the remainder of the session.
+    std::atomic<bool> turbo_frame_interception_required_{false};
     std::mutex turbo_mutex_;
     std::condition_variable turbo_async_worker_cv_;
     std::thread turbo_async_worker_;
