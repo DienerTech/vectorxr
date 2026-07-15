@@ -8,6 +8,20 @@ export interface PatchNoteEntry {
 
 export const patchNotes: PatchNoteEntry[] = [
   {
+    version: '0.13.2',
+    date: '2026-07-14',
+    title: 'Pivot Reliability & Headset Compatibility',
+    summary: 'Makes Pivot Always On dependable across overlapping profiles, restores eye-tracked Quadviews on affected PimaxXR setups, and expands headset diagnostics and Pivot tuning.',
+    items: [
+      'Fixed Pivot Always On profiles being discarded when their optional suspend or resume binding overlapped a higher-priority profile; automatic engagement now remains active while only the conflicting binding is shadowed.',
+      'Improved the Pivot UI, usage guide, and startup logs so Always On behavior, optional bindings, and binding-shadow warnings accurately describe what the runtime will do.',
+      'Restored eye-tracked Quadviews on PimaxXR runtimes that omit XR_EXT_eye_gaze_interaction during pre-instance enumeration but accept it when the OpenXR instance is created, retaining a safe retry for runtimes that reject it.',
+      'Expanded Pivot deadzone limits to 180 degrees for yaw and 90 degrees for pitch across the controls, validation, and configuration schema.',
+      'Added detailed native Varjo resolution and foveation contract diagnostics to distinguish application requests, runtime limits, scaling, focus movement, and headset-side caps.',
+      'Added regression coverage for PimaxXR eye-gaze compatibility and Always On profile resolution with overlapping bindings.',
+    ],
+  },
+  {
     version: '0.13.1',
     date: '2026-07-12',
     title: 'Runtime Compatibility & Sharpening',
