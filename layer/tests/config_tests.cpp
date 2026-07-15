@@ -449,6 +449,14 @@ void TestPivotMultiProfileResolution() {
           "enabled": true,
           "activationBinding": { "type": "keyboard", "chord": ["F8"] },
           "settings": { "rotationMultiplier": 4.0 }
+        },
+        {
+          "name": "DCS Always",
+          "applicationIds": ["dcs"],
+          "enabled": true,
+          "activationMode": "alwaysOn",
+          "activationBinding": { "type": "keyboard", "chord": ["F8"] },
+          "settings": { "rotationMultiplier": 3.0 }
         }
       ]
     }
@@ -462,14 +470,21 @@ void TestPivotMultiProfileResolution() {
 
     const depthxr::ResolvedRuntimeConfig resolved = depthxr::ResolveRuntimeConfig(result.document, "DCS.exe");
     Expect(resolved.pivotxr.enabled, "PivotXR should be enabled when custom profiles match");
-    // Disabled profile skipped; duplicate-F8 profile pruned as shadowed.
-    Expect(resolved.pivotxr.profiles.size() == 2, "PivotXR multi-profile candidate count mismatch");
+    // Disabled and duplicate-F8 toggle profiles are skipped. The always-on
+    // profile remains eligible automatically, but its colliding optional
+    // suspend/resume binding is stripped from the resolved candidate.
+    Expect(resolved.pivotxr.profiles.size() == 3, "PivotXR multi-profile candidate count mismatch");
     Expect(resolved.pivotxr.profiles[0].name == "DCS Mild", "Candidate priority order mismatch (first)");
     Expect(resolved.pivotxr.profiles[1].name == "DCS Strong", "Candidate priority order mismatch (second)");
     Expect(std::abs(resolved.pivotxr.profiles[1].yaw_rotation_multiplier - 2.5) < 0.0001,
            "Second candidate settings mismatch");
     Expect(resolved.pivotxr.profiles[1].activation_mode == depthxr::ActivationMode::Hold,
            "Second candidate activation mode mismatch");
+    Expect(resolved.pivotxr.profiles[2].name == "DCS Always", "Candidate priority order mismatch (third)");
+    Expect(resolved.pivotxr.profiles[2].activation_mode == depthxr::ActivationMode::AlwaysOn,
+           "Shadowed always-on candidate activation mode mismatch");
+    Expect(resolved.pivotxr.profiles[2].activation_binding.type == depthxr::InputBindingType::None,
+           "Shadowed always-on suspend/resume binding should resolve to none");
 }
 
 void TestPivotResponseModeAndAdvancedAxes() {

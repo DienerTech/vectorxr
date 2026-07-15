@@ -5776,9 +5776,17 @@ XrResult OpenXrLayer::LocateViews(XrSession session,
         std::ostringstream stream;
         stream << "PivotXR spike is active; quad-view sessions use stereo eye-pose recomposition.";
         for (const PivotXrResolvedProfile& profile : resolved_settings_.pivotxr.profiles) {
-            stream << " Press " << BindingLabel(profile.activation_binding) << " to "
-                   << (profile.activation_mode == ActivationMode::Toggle ? "toggle" : "hold") << " '"
-                   << profile.name << "'.";
+            if (profile.activation_mode == ActivationMode::AlwaysOn) {
+                stream << " '" << profile.name << "' engages automatically";
+                if (profile.activation_binding.type != InputBindingType::None) {
+                    stream << "; press " << BindingLabel(profile.activation_binding) << " to suspend/resume";
+                }
+                stream << ".";
+            } else {
+                stream << " Press " << BindingLabel(profile.activation_binding) << " to "
+                       << (profile.activation_mode == ActivationMode::Toggle ? "toggle" : "hold") << " '"
+                       << profile.name << "'.";
+            }
         }
         logger_.Info(stream.str());
         has_logged_pivotxr_spike_mode_ = true;

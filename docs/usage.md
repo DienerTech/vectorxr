@@ -110,13 +110,14 @@ Depth adjusts stereo separation and convergence to change perceived scale and co
 Pivot enhances head rotation for seated and flight-sim VR, letting you see further to the side or
 up/down than your physical neck allows.
 
-- **Pivot needs an activation binding to do anything.** In the **Activation** section, choose an
-  **Activation Mode** (*toggle* or *hold*) and assign a **Binding** — a keyboard chord or a
-  detected input device (joystick / HOTAS). Until a binding is set, Pivot will not activate.
+- In the **Activation** section, choose an **Activation Mode**. *Toggle* and *hold* require an
+  activation **Binding** — a keyboard chord or a detected input device (joystick / HOTAS).
+  *Always on* engages Pivot automatically without a binding. If you assign one, pressing it
+  suspends and resumes automatic engagement.
 - Tune **Yaw** and **Pitch** independently: rotation **Multiplier**, **Deadzone**, and **Max
   Extra** degrees. A shared **Smoothing** softens the motion for both axes.
-- The **Activation Ramp** (default 0.35s) eases Pivot in and out when toggled rather than
-  snapping the view.
+- The **Activation Ramp** (default 0.35s) eases Pivot in and out when it engages or disengages
+  rather than snapping the view.
 
 Pivot and Quadviews are built to work together: because VectorXR computes both in one layer, the
 foveated focus region stays locked to your gaze even while Pivot rotates your view. This
