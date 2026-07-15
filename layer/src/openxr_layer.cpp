@@ -1782,6 +1782,10 @@ XrResult OpenXrLayer::EndSession(XrSession session) {
         quadviews_smoothed_focus_pitch_radians_ = 0.0;
         quadviews_last_focus_smoothing_wall_time_.reset();
         quadviews_last_valid_gaze_wall_time_.reset();
+        quadviews_eye_gaze_loss_started_wall_time_.reset();
+        quadviews_eye_gaze_loss_was_locate_failure_ = false;
+        quadviews_has_seen_valid_gaze_ = false;
+        quadviews_compositor_recovery_pending_ = false;
         ResetPivotActivationState();
         ResetDepthToggleState();
         ResetTurboToggleState();
@@ -2114,8 +2118,40 @@ XrResult OpenXrLayer::EnumerateViewConfigurationViews(XrInstance instance,
         // views (0/1) by peripheral_scale, focus views (2/3) by focus_scale. Every
         // other quadviews setting is runtime-owned in this mode.
         ++varjo_native_view_configuration_calls_;
+
+        // DCS enables XR_VARJO_foveated_rendering but does not attach the
+        // per-view request that tells the Varjo runtime to return the texture
+        // sizes for dynamic foveation. When VectorXR eye tracking is enabled,
+        // supply that missing request downstream without changing the app's
+        // next chains. Respect an explicit app request, including inactive.
+        const bool request_native_foveated_views =
+            varjo_foveated_rendering_extension_requested_ &&
+            resolved_settings_.quadviews.tracking_mode == QuadViewsTrackingMode::Eye;
+        std::vector<XrViewConfigurationView> downstream_views_storage;
+        std::vector<XrFoveatedViewConfigurationViewVARJO> injected_foveated_requests;
+        XrViewConfigurationView* downstream_views = views;
+        uint64_t vector_foveated_request_injected_mask = 0;
+        if (request_native_foveated_views && views && view_capacity_input > 0) {
+            downstream_views_storage.assign(views, views + view_capacity_input);
+            injected_foveated_requests.resize(view_capacity_input);
+            for (uint32_t i = 0; i < view_capacity_input; ++i) {
+                if (FindStructInChain(views[i].next,
+                                      XR_TYPE_FOVEATED_VIEW_CONFIGURATION_VIEW_VARJO)) {
+                    continue;
+                }
+                XrFoveatedViewConfigurationViewVARJO& request = injected_foveated_requests[i];
+                request = {XR_TYPE_FOVEATED_VIEW_CONFIGURATION_VIEW_VARJO};
+                request.next = downstream_views_storage[i].next;
+                request.foveatedRenderingActive = XR_TRUE;
+                downstream_views_storage[i].next = &request;
+                if (i < 64) {
+                    vector_foveated_request_injected_mask |= uint64_t{1} << i;
+                }
+            }
+            downstream_views = downstream_views_storage.data();
+        }
         const XrResult native_result = next_enumerate_view_configuration_views_(
-            instance, system_id, view_configuration_type, view_capacity_input, view_count_output, views);
+            instance, system_id, view_configuration_type, view_capacity_input, view_count_output, downstream_views);
         if (XR_FAILED(native_result)) {
             return native_result;
         }
@@ -2131,6 +2167,18 @@ XrResult OpenXrLayer::EnumerateViewConfigurationViews(XrInstance instance,
                 has_logged_varjo_native_view_configuration_count_ = true;
             }
             return native_result;
+        }
+
+        // Copy only the base structure fields returned by the runtime. The app
+        // owns its next chains, so never expose pointers to our temporary
+        // foveation request structures.
+        if (!downstream_views_storage.empty()) {
+            const uint32_t returned = std::min<uint32_t>(view_capacity_input, *view_count_output);
+            for (uint32_t i = 0; i < returned; ++i) {
+                void* app_next = views[i].next;
+                views[i] = downstream_views_storage[i];
+                views[i].next = app_next;
+            }
         }
         const double peripheral_scale = resolved_settings_.quadviews.peripheral_scale;
         const double focus_scale = resolved_settings_.quadviews.focus_scale;
@@ -2150,6 +2198,7 @@ XrResult OpenXrLayer::EnumerateViewConfigurationViews(XrInstance instance,
             double requested_scale{1.0};
             bool foveated_request_present{false};
             bool foveated_request_active{false};
+            bool vector_foveated_request_injected{false};
             bool clamped_to_runtime_max{false};
         };
         std::vector<NativeViewDiagnostic> diagnostics;
@@ -2177,6 +2226,8 @@ XrResult OpenXrLayer::EnumerateViewConfigurationViews(XrInstance instance,
             diagnostic.foveated_request_present = foveated_request != nullptr;
             diagnostic.foveated_request_active =
                 foveated_request && foveated_request->foveatedRenderingActive == XR_TRUE;
+            diagnostic.vector_foveated_request_injected =
+                i < 64 && (vector_foveated_request_injected_mask & (uint64_t{1} << i)) != 0;
             if (i < 64 && diagnostic.foveated_request_present) {
                 foveated_request_present_mask |= uint64_t{1} << i;
             }
@@ -2201,7 +2252,7 @@ XrResult OpenXrLayer::EnumerateViewConfigurationViews(XrInstance instance,
         std::ostringstream signature;
         signature << applied << ":" << FormatDiagnosticDouble(peripheral_scale) << ":"
                   << FormatDiagnosticDouble(focus_scale) << ":" << foveated_request_present_mask << ":"
-                  << foveated_request_active_mask;
+                  << foveated_request_active_mask << ":" << vector_foveated_request_injected_mask;
         for (const NativeViewDiagnostic& diagnostic : diagnostics) {
             signature << ":" << diagnostic.runtime_recommended_width << "x"
                       << diagnostic.runtime_recommended_height << "/" << diagnostic.runtime_max_width << "x"
@@ -2232,6 +2283,8 @@ XrResult OpenXrLayer::EnumerateViewConfigurationViews(XrInstance instance,
                    << ", appCapacity=" << view_capacity_input
                    << ", appFoveatedTextureRequestPresentMask=" << FormatHex(foveated_request_present_mask)
                    << ", appFoveatedTextureRequestActiveMask=" << FormatHex(foveated_request_active_mask)
+                   << ", vectorFoveatedTextureRequestInjectedMask="
+                   << FormatHex(vector_foveated_request_injected_mask)
                    << ", vectorPeripheralScale=" << FormatDiagnosticDouble(peripheral_scale)
                    << ", vectorFocusScale=" << FormatDiagnosticDouble(focus_scale)
                    << ", runtimeMaxClampMask=" << FormatHex(runtime_max_clamp_mask);
@@ -2255,6 +2308,8 @@ XrResult OpenXrLayer::EnumerateViewConfigurationViews(XrInstance instance,
                        << ", runtimeSamples=" << diagnostic.recommended_sample_count << "/"
                        << diagnostic.max_sample_count
                        << ", foveatedRequest=" << foveated_state
+                       << ", vectorFoveatedRequestInjected="
+                       << (diagnostic.vector_foveated_request_injected ? 1 : 0)
                        << ", vectorRequested=" << diagnostic.vector_requested_width << "x"
                        << diagnostic.vector_requested_height << "@x"
                        << FormatDiagnosticDouble(diagnostic.requested_scale)
@@ -5249,6 +5304,13 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
         IsQuadViewsEmulationActive() && has_active_primary_view_configuration_ &&
         IsQuadViewConfiguration(active_primary_view_configuration_type_) &&
         active_runtime_view_configuration_type_ == XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
+    if (quadviews_compositor_recovery_pending_ && quadviews_projection_split_active) {
+        RecycleD3D11QuadViewsCompositionTargets();
+        quadviews_compositor_recovery_pending_ = false;
+        pending_quadviews_compositor_diagnostics_ =
+            std::max<uint32_t>(pending_quadviews_compositor_diagnostics_, 120);
+        logger_.Info("Quadviews compositor output targets recycled after eye-gaze tracking recovered.");
+    }
     // Varjo compatible quadviews: the focus sharpen runs inside the projection
     // rewrite loop below, so a requested sharpen must keep this frame out of the
     // identity-delta fast path — otherwise sharpening only ever ran on frames
@@ -6601,6 +6663,10 @@ void OpenXrLayer::ResetSessionState() {
     quadviews_smoothed_focus_pitch_radians_ = 0.0;
     quadviews_last_focus_smoothing_wall_time_.reset();
     quadviews_last_valid_gaze_wall_time_.reset();
+    quadviews_eye_gaze_loss_started_wall_time_.reset();
+    quadviews_eye_gaze_loss_was_locate_failure_ = false;
+    quadviews_has_seen_valid_gaze_ = false;
+    quadviews_compositor_recovery_pending_ = false;
     active_primary_view_configuration_type_ = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
     active_runtime_view_configuration_type_ = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
     has_active_primary_view_configuration_ = false;
@@ -6793,6 +6859,10 @@ void OpenXrLayer::DestroyEyeGazeResources() {
     quadviews_smoothed_focus_pitch_radians_ = 0.0;
     quadviews_last_focus_smoothing_wall_time_.reset();
     quadviews_last_valid_gaze_wall_time_.reset();
+    quadviews_eye_gaze_loss_started_wall_time_.reset();
+    quadviews_eye_gaze_loss_was_locate_failure_ = false;
+    quadviews_has_seen_valid_gaze_ = false;
+    quadviews_compositor_recovery_pending_ = false;
     last_eye_gaze_self_sync_time_.reset();
 
     if (eye_gaze_space != XR_NULL_HANDLE && next_destroy_space_) {
@@ -6853,7 +6923,14 @@ bool OpenXrLayer::LocateEyeGazeFocusOffsets(XrSession session,
         return "path#" + std::to_string(static_cast<uint64_t>(state.interactionProfile));
     };
 
-    auto log_eye_gaze_diagnostic = [&](const std::string& reason) {
+    auto log_eye_gaze_diagnostic = [&](const std::string& reason, bool locate_failure = false) {
+        if (settings.tracking_mode == QuadViewsTrackingMode::Eye && quadviews_has_seen_valid_gaze_ &&
+            !quadviews_eye_gaze_loss_started_wall_time_.has_value()) {
+            quadviews_eye_gaze_loss_started_wall_time_ = std::chrono::steady_clock::now();
+        }
+        if (locate_failure && quadviews_eye_gaze_loss_started_wall_time_.has_value()) {
+            quadviews_eye_gaze_loss_was_locate_failure_ = true;
+        }
         if (settings.tracking_mode == QuadViewsTrackingMode::Eye && !has_logged_eye_gaze_focus_unavailable_) {
             // Debounce: require the gaze to stay unavailable for several frames
             // before declaring it lost, so a single-frame dropout (a blink) does
@@ -6885,6 +6962,10 @@ bool OpenXrLayer::LocateEyeGazeFocusOffsets(XrSession session,
     };
 
     if (settings.tracking_mode != QuadViewsTrackingMode::Eye) {
+        quadviews_eye_gaze_loss_started_wall_time_.reset();
+        quadviews_eye_gaze_loss_was_locate_failure_ = false;
+        quadviews_has_seen_valid_gaze_ = false;
+        quadviews_compositor_recovery_pending_ = false;
         return false;
     }
     if (session != active_session_) {
@@ -6951,7 +7032,7 @@ bool OpenXrLayer::LocateEyeGazeFocusOffsets(XrSession session,
         (gaze_location.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT) == 0) {
         log_eye_gaze_diagnostic("gaze space locate failed, result=" +
                                 FormatHex(static_cast<uint64_t>(locate_result)) +
-                                ", flags=" + FormatHex(static_cast<uint64_t>(gaze_location.locationFlags)));
+                                ", flags=" + FormatHex(static_cast<uint64_t>(gaze_location.locationFlags)), true);
         return false;
     }
 
@@ -6976,6 +7057,20 @@ bool OpenXrLayer::LocateEyeGazeFocusOffsets(XrSession session,
     }
 
     const auto now = std::chrono::steady_clock::now();
+    if (quadviews_eye_gaze_loss_started_wall_time_.has_value()) {
+        const auto gaze_loss_duration = now - *quadviews_eye_gaze_loss_started_wall_time_;
+        if (quadviews_has_seen_valid_gaze_ && quadviews_eye_gaze_loss_was_locate_failure_ &&
+            gaze_loss_duration >= std::chrono::seconds(2)) {
+            const auto gaze_loss_ms =
+                std::chrono::duration_cast<std::chrono::milliseconds>(gaze_loss_duration).count();
+            quadviews_compositor_recovery_pending_ = true;
+            logger_.Info("Quadviews eye-gaze tracking recovered after " + std::to_string(gaze_loss_ms) +
+                         " ms; scheduling compositor output target recycle.");
+        }
+        quadviews_eye_gaze_loss_started_wall_time_.reset();
+        quadviews_eye_gaze_loss_was_locate_failure_ = false;
+    }
+    quadviews_has_seen_valid_gaze_ = true;
     quadviews_last_valid_gaze_wall_time_ = now;
     double delta_seconds = 0.0;
     if (quadviews_last_focus_smoothing_wall_time_.has_value()) {
@@ -7323,6 +7418,7 @@ bool OpenXrLayer::IsTrackedViewSpace(XrSpace space) const {
 }
 
 void OpenXrLayer::RecordVarjoNativeLocateDiagnostics(const XrViewLocateInfo* view_locate_info,
+                                                     bool vector_request_injected,
                                                      const XrViewState* view_state,
                                                      XrResult result,
                                                      uint32_t view_capacity_input,
@@ -7343,6 +7439,9 @@ void OpenXrLayer::RecordVarjoNativeLocateDiagnostics(const XrViewLocateInfo* vie
     VarjoNativeFoveationDiagnosticState& diagnostic = varjo_native_foveation_diagnostic_;
     ++diagnostic.locate_calls;
     ++diagnostic.request_state_counts[request_state];
+    if (vector_request_injected) {
+        ++diagnostic.vector_injected_locate_requests;
+    }
 
     const uint8_t request_state_bit = static_cast<uint8_t>(uint8_t{1} << request_state);
     if ((diagnostic.logged_request_state_mask & request_state_bit) == 0) {
@@ -7350,6 +7449,7 @@ void OpenXrLayer::RecordVarjoNativeLocateDiagnostics(const XrViewLocateInfo* vie
         std::ostringstream stream;
         stream << "Native Varjo foveated locate contract: locateCall=" << diagnostic.locate_calls
                << ", requestChainPresent=" << (request_present ? 1 : 0)
+               << ", vectorRequestInjected=" << (vector_request_injected ? 1 : 0)
                << ", foveatedRenderingActive=" << (request_active ? 1 : 0)
                << ", displayTime=" << (view_locate_info ? view_locate_info->displayTime : 0)
                << ", result=" << FormatHex(static_cast<uint64_t>(result))
@@ -7420,6 +7520,7 @@ void OpenXrLayer::RecordVarjoNativeLocateDiagnostics(const XrViewLocateInfo* vie
         std::ostringstream stream;
         stream << "Native Varjo focus FOV movement observed after " << diagnostic.successful_quad_locates
                << " successful quad locates: requestChainPresent=" << (request_present ? 1 : 0)
+               << ", vectorRequestInjected=" << (vector_request_injected ? 1 : 0)
                << ", foveatedRenderingActive=" << (request_active ? 1 : 0)
                << ", initialFocusView2=" << FormatFov(diagnostic.initial_focus_fovs[0])
                << ", currentFocusView2=" << FormatFov(views[2].fov)
@@ -7453,6 +7554,7 @@ void OpenXrLayer::LogVarjoNativeFoveationSummaryLocked(std::string_view reason, 
            << ", requestAbsent=" << diagnostic.request_state_counts[0]
            << ", requestPresentInactive=" << diagnostic.request_state_counts[1]
            << ", requestPresentActive=" << diagnostic.request_state_counts[2]
+           << ", vectorInjectedLocateRequests=" << diagnostic.vector_injected_locate_requests
            << ", successfulQuadLocates=" << diagnostic.successful_quad_locates
            << ", focusFovObserved=" << (diagnostic.focus_ranges_initialized ? 1 : 0)
            << ", focusFovMotionObserved=" << (diagnostic.focus_motion_logged ? 1 : 0);
@@ -7495,6 +7597,7 @@ XrResult OpenXrLayer::LocateRuntimeViews(XrSession session,
 
     bool quadviews_emulation_active = false;
     bool varjo_compatible = false;
+    bool request_native_foveated_locates = false;
     QuadViewsResolvedSettings quadviews_settings;
     {
         std::scoped_lock lock(mutex_);
@@ -7503,18 +7606,37 @@ XrResult OpenXrLayer::LocateRuntimeViews(XrSession session,
         quadviews_emulation_active = IsQuadViewsEmulationActive();
         varjo_compatible = varjo_compatible_quadviews_active_;
         quadviews_settings = resolved_settings_.quadviews;
+        request_native_foveated_locates =
+            IsQuadViewsActive() && varjo_foveated_rendering_extension_requested_ &&
+            quadviews_settings.tracking_mode == QuadViewsTrackingMode::Eye;
     }
 
     // Varjo compatible mode: forward the app's quad locate untouched — including the
     // Varjo foveated-rendering next chain, which the runtime consumes to place the
     // focus inset by gaze — and return the runtime's real 4 views. No stereo remap,
     // no synthesis. Pivot is still applied downstream in LocateViews.
+    // The one exception to transparent forwarding is supplying a missing
+    // foveated-rendering request while VectorXR eye tracking is active.
     if (varjo_compatible && view_locate_info &&
         IsQuadViewConfiguration(view_locate_info->viewConfigurationType)) {
+        XrViewLocateInfo native_locate_info = *view_locate_info;
+        XrViewLocateFoveatedRenderingVARJO injected_foveated_request{
+            XR_TYPE_VIEW_LOCATE_FOVEATED_RENDERING_VARJO};
+        const XrViewLocateInfo* native_view_locate_info = view_locate_info;
+        bool vector_request_injected = false;
+        if (request_native_foveated_locates &&
+            !FindStructInChain(view_locate_info->next, XR_TYPE_VIEW_LOCATE_FOVEATED_RENDERING_VARJO)) {
+            injected_foveated_request.next = view_locate_info->next;
+            injected_foveated_request.foveatedRenderingActive = XR_TRUE;
+            native_locate_info.next = &injected_foveated_request;
+            native_view_locate_info = &native_locate_info;
+            vector_request_injected = true;
+        }
         const XrResult native_result = next_locate_views_(
-            session, view_locate_info, view_state, view_capacity_input, view_count_output, views);
+            session, native_view_locate_info, view_state, view_capacity_input, view_count_output, views);
         RecordVarjoNativeLocateDiagnostics(
-            view_locate_info, view_state, native_result, view_capacity_input, view_count_output, views);
+            native_view_locate_info, vector_request_injected, view_state, native_result, view_capacity_input,
+            view_count_output, views);
         return native_result;
     }
 
@@ -8560,6 +8682,32 @@ void OpenXrLayer::SharpenNativeFocusViews(std::vector<XrCompositionLayerProjecti
             d3d11_focus_sharpen_.has_logged_skipped = true;
         }
     }
+}
+
+void OpenXrLayer::RecycleD3D11QuadViewsCompositionTargets() {
+    for (QuadViewsCompositionTarget& target : d3d11_quadviews_compositor_.targets) {
+        SafeReleaseVector(target.image_render_target_views);
+        SafeRelease(target.render_target_view);
+        SafeRelease(target.render_texture);
+        if (target.swapchain != XR_NULL_HANDLE && next_destroy_swapchain_) {
+            next_destroy_swapchain_(target.swapchain);
+        }
+        target = {};
+    }
+
+    // A query issued before the headset session break may never become
+    // readable. Preserve the device-level query objects but discard their
+    // pending state along with the runtime-owned output swapchains.
+    for (QuadViewsGpuTimingQuery& query : d3d11_quadviews_compositor_.gpu_timing_queries) {
+        query.issued = false;
+        query.frame_time = 0;
+    }
+    d3d11_quadviews_compositor_.has_logged_prewarm = false;
+    d3d11_quadviews_compositor_.has_last_completed_gpu_timing = false;
+    d3d11_quadviews_compositor_.failure_logs_remaining = 8;
+    d3d11_quadviews_compositor_.next_gpu_timing_query = 0;
+    d3d11_quadviews_compositor_.last_completed_gpu_ms = 0.0;
+    d3d11_quadviews_compositor_.last_completed_gpu_frame_time = 0;
 }
 
 void OpenXrLayer::ResetD3D11QuadViewsCompositor() {
