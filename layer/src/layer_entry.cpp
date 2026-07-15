@@ -658,16 +658,14 @@ XrResult XRAPI_CALL xrCreateApiLayerInstance(const XrInstanceCreateInfo* instanc
     }
 
     std::vector<const char*> first_downstream_extensions = base_downstream_extensions;
-    const std::string active_runtime_path_lower = ToLowerAscii(diagnostics.active_runtime_path);
-    const bool steamvr_probe_known_unreliable =
-        active_runtime_path_lower.find("steamvr") != std::string::npos ||
-        active_runtime_path_lower.find("steamxr") != std::string::npos;
+    const bool eye_gaze_probe_known_unreliable =
+        IsEyeGazeExtensionProbeKnownUnreliable(diagnostics.active_runtime_path);
     diagnostics.optimistic_eye_gaze_request = ShouldOptimisticallyRequestEyeGaze({
         app_requested_layer_owned_quadviews,
         forward_varjo_quad_extensions,
         ExtensionListContains(first_downstream_extensions, XR_EXT_EYE_GAZE_INTERACTION_EXTENSION_NAME),
         diagnostics.cheap_eye_gaze_probe_supported,
-        steamvr_probe_known_unreliable,
+        eye_gaze_probe_known_unreliable,
     });
     if (diagnostics.optimistic_eye_gaze_request) {
         first_downstream_extensions.push_back(XR_EXT_EYE_GAZE_INTERACTION_EXTENSION_NAME);

@@ -1,10 +1,25 @@
 #include "depthxr/runtime_compatibility.h"
 
+#include <string>
+
 namespace depthxr {
 
+bool IsEyeGazeExtensionProbeKnownUnreliable(std::string_view active_runtime_manifest_path) {
+    std::string normalized_path;
+    normalized_path.reserve(active_runtime_manifest_path.size());
+    for (const char character : active_runtime_manifest_path) {
+        normalized_path.push_back(character >= 'A' && character <= 'Z' ? character - 'A' + 'a' : character);
+    }
+
+    return normalized_path.find("steamvr") != std::string::npos ||
+           normalized_path.find("steamxr") != std::string::npos ||
+           normalized_path.find("pimax-openxr") != std::string::npos ||
+           normalized_path.find("pimaxxr") != std::string::npos;
+}
+
 bool ShouldOptimisticallyRequestEyeGaze(const EyeGazeRequestPolicyInput& input) {
-    // SteamVR 2.16 with the PlayStation VR2 driver reports no gaze extension
-    // during pre-instance enumeration, but accepts it in xrCreateInstance.
+    // SteamVR with some eye-tracking drivers and PimaxXR can report no gaze
+    // extension during pre-instance enumeration, but accept it in xrCreateInstance.
     // Limit the false-negative exception to runtimes known to have unreliable
     // probes so unrelated runtimes do not pay for a failed create/retry.
     return input.app_requested_layer_owned_quadviews && !input.forwarding_native_quadviews &&

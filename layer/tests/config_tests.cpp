@@ -1630,6 +1630,16 @@ void TestD3D11SharpenShaderRegression() {
 #endif
 
 void TestEyeGazeExtensionCompatibilityPolicy() {
+    Expect(depthxr::IsEyeGazeExtensionProbeKnownUnreliable(
+               R"(C:\Program Files (x86)\Steam\steamapps\common\SteamVR\steamxr_win64.json)"),
+           "SteamVR manifests should retain the false-negative eye-gaze probe workaround");
+    Expect(depthxr::IsEyeGazeExtensionProbeKnownUnreliable(
+               R"(C:\Program Files\PimaxXR\pimax-openxr.json)"),
+           "PimaxXR manifests should use the false-negative eye-gaze probe workaround");
+    Expect(!depthxr::IsEyeGazeExtensionProbeKnownUnreliable(
+               R"(C:\Program Files\Virtual Desktop Streamer\OpenXR\virtualdesktop-openxr.json)"),
+           "Runtimes with reliable extension enumeration should not be classified as probe-unreliable");
+
     depthxr::EyeGazeRequestPolicyInput psvr2_steamvr{
         true,
         false,
@@ -1639,6 +1649,17 @@ void TestEyeGazeExtensionCompatibilityPolicy() {
     };
     Expect(depthxr::ShouldOptimisticallyRequestEyeGaze(psvr2_steamvr),
            "A false-negative SteamVR probe must not disable PSVR2 eye tracking");
+
+    depthxr::EyeGazeRequestPolicyInput pimaxxr{
+        true,
+        false,
+        false,
+        false,
+        depthxr::IsEyeGazeExtensionProbeKnownUnreliable(
+            R"(C:\Program Files\PimaxXR\pimax-openxr.json)"),
+    };
+    Expect(depthxr::ShouldOptimisticallyRequestEyeGaze(pimaxxr),
+           "A false-negative PimaxXR probe must not disable Crystal eye tracking");
 
     psvr2_steamvr.pre_instance_probe_supported = true;
     psvr2_steamvr.pre_instance_probe_known_unreliable = false;
