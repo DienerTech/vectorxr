@@ -143,14 +143,17 @@ PivotXrResolvedSettings ResolvePivotXrSettings(const ConfigDocument& config, std
                 resolved.profiles.begin(), resolved.profiles.end(), [&](const PivotXrResolvedProfile& earlier) {
                     return SameActivationInput(earlier.activation_binding, profile.activation_binding);
                 });
-            if (binding_shadowed) {
+            // A shadowed toggle/hold profile cannot be selected. Always-on
+            // participation does not depend on its optional binding, however,
+            // so retain that profile and shadow only its suspend/resume input.
+            if (binding_shadowed && profile.activation_mode != ActivationMode::AlwaysOn) {
                 continue;
             }
 
             PivotXrResolvedProfile candidate;
             candidate.name = profile.name;
             candidate.activation_mode = profile.activation_mode;
-            candidate.activation_binding = profile.activation_binding;
+            candidate.activation_binding = binding_shadowed ? InputBinding{} : profile.activation_binding;
             candidate.set_origin_binding = profile.set_origin_binding;
             candidate.release_origin_binding = profile.release_origin_binding;
             ApplyPivotSettings(candidate, profile.settings);

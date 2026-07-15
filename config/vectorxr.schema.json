@@ -333,7 +333,7 @@
         "deadzoneDegrees": {
           "type": "number",
           "minimum": 0.0,
-          "maximum": 45.0
+          "maximum": 180.0
         },
         "maxExtraYawDegrees": {
           "type": "number",
@@ -348,7 +348,7 @@
         "pitchDeadzoneDegrees": {
           "type": "number",
           "minimum": 0.0,
-          "maximum": 45.0
+          "maximum": 90.0
         },
         "maxExtraPitchDegrees": {
           "type": "number",

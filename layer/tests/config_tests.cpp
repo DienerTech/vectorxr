@@ -449,6 +449,14 @@ void TestPivotMultiProfileResolution() {
           "enabled": true,
           "activationBinding": { "type": "keyboard", "chord": ["F8"] },
           "settings": { "rotationMultiplier": 4.0 }
+        },
+        {
+          "name": "DCS Always",
+          "applicationIds": ["dcs"],
+          "enabled": true,
+          "activationMode": "alwaysOn",
+          "activationBinding": { "type": "keyboard", "chord": ["F8"] },
+          "settings": { "rotationMultiplier": 3.0 }
         }
       ]
     }
@@ -462,14 +470,21 @@ void TestPivotMultiProfileResolution() {
 
     const depthxr::ResolvedRuntimeConfig resolved = depthxr::ResolveRuntimeConfig(result.document, "DCS.exe");
     Expect(resolved.pivotxr.enabled, "PivotXR should be enabled when custom profiles match");
-    // Disabled profile skipped; duplicate-F8 profile pruned as shadowed.
-    Expect(resolved.pivotxr.profiles.size() == 2, "PivotXR multi-profile candidate count mismatch");
+    // Disabled and duplicate-F8 toggle profiles are skipped. The always-on
+    // profile remains eligible automatically, but its colliding optional
+    // suspend/resume binding is stripped from the resolved candidate.
+    Expect(resolved.pivotxr.profiles.size() == 3, "PivotXR multi-profile candidate count mismatch");
     Expect(resolved.pivotxr.profiles[0].name == "DCS Mild", "Candidate priority order mismatch (first)");
     Expect(resolved.pivotxr.profiles[1].name == "DCS Strong", "Candidate priority order mismatch (second)");
     Expect(std::abs(resolved.pivotxr.profiles[1].yaw_rotation_multiplier - 2.5) < 0.0001,
            "Second candidate settings mismatch");
     Expect(resolved.pivotxr.profiles[1].activation_mode == depthxr::ActivationMode::Hold,
            "Second candidate activation mode mismatch");
+    Expect(resolved.pivotxr.profiles[2].name == "DCS Always", "Candidate priority order mismatch (third)");
+    Expect(resolved.pivotxr.profiles[2].activation_mode == depthxr::ActivationMode::AlwaysOn,
+           "Shadowed always-on candidate activation mode mismatch");
+    Expect(resolved.pivotxr.profiles[2].activation_binding.type == depthxr::InputBindingType::None,
+           "Shadowed always-on suspend/resume binding should resolve to none");
 }
 
 void TestPivotResponseModeAndAdvancedAxes() {
@@ -503,7 +518,8 @@ void TestPivotResponseModeAndAdvancedAxes() {
             "stepTriggerDegrees": 12.0,
             "stepAmountDegrees": 15.0,
             "stepHysteresisDegrees": 5.0,
-            "deadzoneDegrees": 6.0
+            "deadzoneDegrees": 180.0,
+            "pitchDeadzoneDegrees": 90.0
           }
         },
         {
@@ -513,9 +529,9 @@ void TestPivotResponseModeAndAdvancedAxes() {
           "activationBinding": { "type": "keyboard", "chord": ["F9"] },
           "settings": {
             "advancedAxes": true,
-            "yawLeft": { "rotationMultiplier": 2.0, "deadzoneDegrees": 5.0, "maxExtraDegrees": 90.0 },
+            "yawLeft": { "rotationMultiplier": 2.0, "deadzoneDegrees": 180.0, "maxExtraDegrees": 90.0 },
             "yawRight": { "rotationMultiplier": 1.2 },
-            "pitchUp": { "rotationMultiplier": 1.8 },
+            "pitchUp": { "rotationMultiplier": 1.8, "deadzoneDegrees": 90.0 },
             "pitchDown": { "rotationMultiplier": 1.1, "maxExtraDegrees": 30.0 }
           }
         }
@@ -544,18 +560,24 @@ void TestPivotResponseModeAndAdvancedAxes() {
     const depthxr::PivotXrResolvedProfile& advanced_profile = advanced.pivotxr.profiles[0];
     Expect(std::abs(advanced_profile.yaw_positive.rotation_multiplier - 2.0) < 0.0001,
            "Advanced yaw-left multiplier mismatch");
+    Expect(std::abs(advanced_profile.yaw_positive.deadzone_degrees - 180.0) < 0.0001,
+           "Advanced yaw-left deadzone boundary mismatch");
     Expect(std::abs(advanced_profile.yaw_positive.max_extra_degrees - 90.0) < 0.0001,
            "Advanced yaw-left max extra mismatch");
     Expect(std::abs(advanced_profile.yaw_negative.rotation_multiplier - 1.2) < 0.0001,
            "Advanced yaw-right multiplier mismatch");
     Expect(std::abs(advanced_profile.pitch_positive.rotation_multiplier - 1.8) < 0.0001,
            "Advanced pitch-up multiplier mismatch");
+    Expect(std::abs(advanced_profile.pitch_positive.deadzone_degrees - 90.0) < 0.0001,
+           "Advanced pitch-up deadzone boundary mismatch");
     Expect(std::abs(advanced_profile.pitch_negative.max_extra_degrees - 30.0) < 0.0001,
            "Advanced pitch-down max extra mismatch");
 
     // Symmetric profiles collapse direction tunings to the yaw/pitch values.
-    Expect(std::abs(stepped_profile.yaw_positive.deadzone_degrees - 6.0) < 0.0001,
+    Expect(std::abs(stepped_profile.yaw_positive.deadzone_degrees - 180.0) < 0.0001,
            "Symmetric collapse should mirror yaw deadzone into direction tunings");
+    Expect(std::abs(stepped_profile.pitch_positive.deadzone_degrees - 90.0) < 0.0001,
+           "Symmetric collapse should mirror pitch deadzone into direction tunings");
 }
 
 void TestTurboModuleResolution() {
@@ -1623,6 +1645,16 @@ void TestD3D11SharpenShaderRegression() {
 #endif
 
 void TestEyeGazeExtensionCompatibilityPolicy() {
+    Expect(depthxr::IsEyeGazeExtensionProbeKnownUnreliable(
+               R"(C:\Program Files (x86)\Steam\steamapps\common\SteamVR\steamxr_win64.json)"),
+           "SteamVR manifests should retain the false-negative eye-gaze probe workaround");
+    Expect(depthxr::IsEyeGazeExtensionProbeKnownUnreliable(
+               R"(C:\Program Files\PimaxXR\pimax-openxr.json)"),
+           "PimaxXR manifests should use the false-negative eye-gaze probe workaround");
+    Expect(!depthxr::IsEyeGazeExtensionProbeKnownUnreliable(
+               R"(C:\Program Files\Virtual Desktop Streamer\OpenXR\virtualdesktop-openxr.json)"),
+           "Runtimes with reliable extension enumeration should not be classified as probe-unreliable");
+
     depthxr::EyeGazeRequestPolicyInput psvr2_steamvr{
         true,
         false,
@@ -1632,6 +1664,17 @@ void TestEyeGazeExtensionCompatibilityPolicy() {
     };
     Expect(depthxr::ShouldOptimisticallyRequestEyeGaze(psvr2_steamvr),
            "A false-negative SteamVR probe must not disable PSVR2 eye tracking");
+
+    depthxr::EyeGazeRequestPolicyInput pimaxxr{
+        true,
+        false,
+        false,
+        false,
+        depthxr::IsEyeGazeExtensionProbeKnownUnreliable(
+            R"(C:\Program Files\PimaxXR\pimax-openxr.json)"),
+    };
+    Expect(depthxr::ShouldOptimisticallyRequestEyeGaze(pimaxxr),
+           "A false-negative PimaxXR probe must not disable Crystal eye tracking");
 
     psvr2_steamvr.pre_instance_probe_supported = true;
     psvr2_steamvr.pre_instance_probe_known_unreliable = false;

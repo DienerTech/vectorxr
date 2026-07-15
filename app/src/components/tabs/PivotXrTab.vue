@@ -112,7 +112,9 @@ const profileWarnings = computed(() => {
       for (const applicationId of a.profile.applicationIds) {
         if (b.profile.applicationIds.includes(applicationId)) {
           const appName = applicationNameById.get(applicationId) ?? applicationId
-          const message = `For ${appName}, binding ${labelA} is owned by the higher-priority "${b.profile.name}" (Profile ${b.index + 1}); it will not activate this profile. Reorder the profiles or pick a different binding.`
+          const message = a.profile.activationMode === 'alwaysOn'
+            ? `For ${appName}, binding ${labelA} is owned by the higher-priority "${b.profile.name}" (Profile ${b.index + 1}). Always On still engages automatically, but this binding cannot suspend or resume it. Reorder the profiles or pick a different binding.`
+            : `For ${appName}, binding ${labelA} is owned by the higher-priority "${b.profile.name}" (Profile ${b.index + 1}); it will not activate this profile. Reorder the profiles or pick a different binding.`
           warnings.set(a.index, [...(warnings.get(a.index) ?? []), message])
           break
         }
