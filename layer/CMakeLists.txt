@@ -3,6 +3,7 @@ add_library(
     STATIC
     src/config_parser.cpp
     src/input_devices.cpp
+    src/quadviews_sizing.cpp
     src/runtime_pacing.cpp
     src/runtime_compatibility.cpp
     src/seen_apps.cpp

@@ -20,6 +20,7 @@
 #include "depthxr/effects.h"
 #include "depthxr/input_devices.h"
 #include "depthxr/process_info.h"
+#include "depthxr/quadviews_sizing.h"
 #include "depthxr/runtime_compatibility.h"
 #include "depthxr/runtime_pacing.h"
 #include "depthxr/seen_apps.h"
@@ -140,17 +141,6 @@ double QuadViewsFocusWidthScale(const QuadViewsResolvedSettings& settings) {
 
 double QuadViewsFocusHeightScale(const QuadViewsResolvedSettings& settings) {
     return settings.focus_scale * Clamp(settings.focus_vertical_size_percent, 1.0, 100.0) / 100.0;
-}
-
-// Density multiplier for the full-FOV composite canvas relative to the runtime's
-// stereo-recommended resolution. The focus view is rendered at focus_scale x its
-// FOV fraction of stereo; for the focus texture to sample 1:1 into its sub-rectangle
-// of the canvas (rather than being downsampled back to stereo-native, which throws
-// away the whole point of a high-density inset), the canvas must span the full FOV
-// at focus_scale density. Never drop below 1.0 so the submitted layer keeps at least
-// stereo-native quality. This mirrors OpenXR-Quad-Views-Foveated's focus_multiplier.
-double QuadViewsCanvasDensity(const QuadViewsResolvedSettings& settings) {
-    return std::max(1.0, settings.focus_scale);
 }
 
 uint32_t EstimateFullResolutionDimension(uint32_t rendered_dimension, double render_scale) {
@@ -3143,17 +3133,22 @@ void OpenXrLayer::TryPrewarmD3D11QuadViewsCompositor() {
         }
     }
 
-    const bool output_ready = EnsureD3D11QuadViewsCompositor(nullptr,
-                                                            cached_quadviews_stereo_recommended_width_,
-                                                            cached_quadviews_stereo_recommended_height_,
-                                                            largest_swapchain->format);
+    const QuadViewsCanvasDimensions canvas_dimensions = ComputeQuadViewsCanvasDimensions(
+        cached_quadviews_stereo_recommended_width_,
+        cached_quadviews_stereo_recommended_height_,
+        cached_quadviews_stereo_max_width_,
+        cached_quadviews_stereo_max_height_,
+        resolved_settings_.quadviews.focus_scale);
+    const bool output_ready = EnsureD3D11QuadViewsCompositor(
+        nullptr, canvas_dimensions.width, canvas_dimensions.height, largest_swapchain->format);
     if (output_ready && !d3d11_quadviews_compositor_.has_logged_prewarm) {
         const uint32_t direct_output_count =
             static_cast<uint32_t>(d3d11_quadviews_compositor_.targets[0].image_render_target_views.empty() ? 0 : 1) +
             static_cast<uint32_t>(d3d11_quadviews_compositor_.targets[1].image_render_target_views.empty() ? 0 : 1);
         logger_.Info("D3D11 quadviews compositor prewarmed: outputSize=" +
-                     std::to_string(cached_quadviews_stereo_recommended_width_) + "x" +
-                     std::to_string(cached_quadviews_stereo_recommended_height_) +
+                     std::to_string(canvas_dimensions.width) + "x" +
+                     std::to_string(canvas_dimensions.height) +
+                     ", canvasDensity=" + FormatDiagnosticDouble(canvas_dimensions.density) +
                      ", directInputSwapchains=" + std::to_string(direct_input_count) + "/4" +
                      ", directOutputEyes=" + std::to_string(direct_output_count) + "/2" +
                      ", gpuTiming=" + std::to_string(d3d11_quadviews_compositor_.gpu_timing_available));
@@ -3195,7 +3190,6 @@ bool OpenXrLayer::ComposeQuadViewsD3D11(const XrCompositionLayerProjection* sour
     const double peripheral_scale = resolved_settings_.quadviews.peripheral_scale;
     const double focus_width_scale = QuadViewsFocusWidthScale(resolved_settings_.quadviews);
     const double focus_height_scale = QuadViewsFocusHeightScale(resolved_settings_.quadviews);
-    const double canvas_density = QuadViewsCanvasDensity(resolved_settings_.quadviews);
 
     // Reconstruct the runtime's stereo-native full-FOV resolution (preferring the value
     // cached during xrEnumerateViewConfigurationViews), then scale it by the focus density
@@ -3218,12 +3212,15 @@ bool OpenXrLayer::ComposeQuadViewsD3D11(const XrCompositionLayerProjection* sour
             EstimateFullResolutionDimension(swapchains[3]->height, focus_height_scale),
         });
     }
-    const uint32_t canvas_max_width =
-        cached_quadviews_stereo_max_width_ > 0 ? cached_quadviews_stereo_max_width_ : stereo_full_width * 4;
-    const uint32_t canvas_max_height =
-        cached_quadviews_stereo_max_height_ > 0 ? cached_quadviews_stereo_max_height_ : stereo_full_height * 4;
-    const uint32_t output_width = ScaleDimension(stereo_full_width, canvas_density, canvas_max_width);
-    const uint32_t output_height = ScaleDimension(stereo_full_height, canvas_density, canvas_max_height);
+    const QuadViewsCanvasDimensions canvas_dimensions = ComputeQuadViewsCanvasDimensions(
+        stereo_full_width,
+        stereo_full_height,
+        cached_quadviews_stereo_max_width_,
+        cached_quadviews_stereo_max_height_,
+        resolved_settings_.quadviews.focus_scale);
+    const double canvas_density = canvas_dimensions.density;
+    const uint32_t output_width = canvas_dimensions.width;
+    const uint32_t output_height = canvas_dimensions.height;
     const int64_t output_format = swapchains[2]->format;
     if (!EnsureD3D11QuadViewsCompositor(source_layer, output_width, output_height, output_format)) {
         return false;
