@@ -8,6 +8,19 @@ export interface PatchNoteEntry {
 
 export const patchNotes: PatchNoteEntry[] = [
   {
+    version: '0.13.3',
+    date: '2026-07-15',
+    title: 'Headset Recovery & Frame Pacing',
+    summary: 'Restores gaze-driven rendering after Virtual Desktop reconnects, activates native Varjo foveation when DCS omits its request, and fixes inactive-layer and Quadviews prewarm paths that could disrupt frame pacing.',
+    items: [
+      'Fixed Virtual Desktop reconnects leaving synthesized Quadviews visually stuck on a stale focus region: after a sustained eye-gaze locate failure recovers, VectorXR now rebuilds the compositor output targets so live gaze control returns without restarting the game.',
+      'Fixed native Varjo eye-tracked Quadviews when DCS enables the Varjo extension but omits its per-view foveated-rendering request; VectorXR now supplies the request while eye tracking is active, allowing the runtime to return its foveated texture sizes and moving focus geometry.',
+      'Reduced overhead when enhancements are inactive: sessions that never enable Turbo now pass frame pacing directly through, while disabled Pivot, Depth, and Quadviews paths skip unnecessary pose processing.',
+      'Fixed synthesized Quadviews output targets being prewarmed at native stereo size and rebuilt on the first composed frame at the configured focus density, removing a large first-frame stall and a runtime resource-churn path that could keep DCS below headset refresh.',
+      'Expanded Varjo foveation-request and Quadviews compositor-recovery diagnostics, with regression coverage for density scaling and runtime maximum-size clamping.',
+    ],
+  },
+  {
     version: '0.13.2',
     date: '2026-07-14',
     title: 'Pivot Reliability & Headset Compatibility',
