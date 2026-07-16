@@ -9,6 +9,7 @@
 #include "depthxr/config_parser.h"
 #include "depthxr/effects.h"
 #include "depthxr/logger.h"
+#include "depthxr/quadviews_sizing.h"
 #include "depthxr/runtime_pacing.h"
 #include "depthxr/runtime_compatibility.h"
 #include "depthxr/seen_apps.h"
@@ -1723,6 +1724,30 @@ void TestTurboSteamVrQuadviewsCompatibilityPolicy() {
            "The DCS compatibility rule must not disable Turbo globally");
 }
 
+void TestQuadViewsCanvasDimensionsMatchCompositionDensity() {
+    const depthxr::QuadViewsCanvasDimensions supersampled =
+        depthxr::ComputeQuadViewsCanvasDimensions(6240, 6280, 16384, 16384, 1.1);
+    Expect(supersampled.width == 6864 && supersampled.height == 6908,
+           "Quadviews prewarm dimensions did not match the density-scaled composition canvas");
+    Expect(std::abs(supersampled.density - 1.1) < 0.0001,
+           "Quadviews canvas density did not retain focus supersampling");
+
+    const depthxr::QuadViewsCanvasDimensions fallback_maximum =
+        depthxr::ComputeQuadViewsCanvasDimensions(6240, 6280, 0, 0, 1.1);
+    Expect(fallback_maximum.width == 6864 && fallback_maximum.height == 6908,
+           "Quadviews canvas fallback maximum unexpectedly clamped the scaled dimensions");
+
+    const depthxr::QuadViewsCanvasDimensions native =
+        depthxr::ComputeQuadViewsCanvasDimensions(6240, 6280, 16384, 16384, 0.8);
+    Expect(native.width == 6240 && native.height == 6280 && std::abs(native.density - 1.0) < 0.0001,
+           "Quadviews canvas dropped below runtime-native density");
+
+    const depthxr::QuadViewsCanvasDimensions clamped =
+        depthxr::ComputeQuadViewsCanvasDimensions(1000, 900, 1050, 920, 1.2);
+    Expect(clamped.width == 1050 && clamped.height == 920,
+           "Quadviews canvas dimensions exceeded the runtime maximum");
+}
+
 void TestSwapchainImageQueuePreservesFifo() {
     depthxr::SwapchainImageQueue queue;
     queue.Acquire(2);
@@ -1781,6 +1806,7 @@ int main() {
     TestLoggerCollapsesDuplicateMessages();
     TestEyeGazeExtensionCompatibilityPolicy();
     TestTurboSteamVrQuadviewsCompatibilityPolicy();
+    TestQuadViewsCanvasDimensionsMatchCompositionDensity();
 #ifdef _WIN32
     TestD3D11SharpenShaderRegression();
 #endif

@@ -311,6 +311,7 @@ class OpenXrLayer {
     struct VarjoNativeFoveationDiagnosticState {
         uint64_t locate_calls{0};
         std::array<uint64_t, 3> request_state_counts{}; // absent, present/inactive, present/active
+        uint64_t vector_injected_locate_requests{0};
         uint8_t logged_request_state_mask{0};
         uint64_t successful_quad_locates{0};
         bool focus_ranges_initialized{false};
@@ -411,6 +412,7 @@ class OpenXrLayer {
     void ResetSessionState();
     void ResetInstanceState();
     void ResetD3D11QuadViewsCompositor();
+    void RecycleD3D11QuadViewsCompositionTargets();
     XrResult CreateInternalReferenceSpaces(XrSession session);
     void DestroyInternalReferenceSpaces();
     XrResult CreateEyeGazeResources(XrSession session);
@@ -445,6 +447,7 @@ class OpenXrLayer {
                                 XrView* views,
                                 bool* synthesized_quad_views);
     void RecordVarjoNativeLocateDiagnostics(const XrViewLocateInfo* view_locate_info,
+                                            bool vector_request_injected,
                                             const XrViewState* view_state,
                                             XrResult result,
                                             uint32_t view_capacity_input,
@@ -592,6 +595,12 @@ class OpenXrLayer {
     // state; it is never held across a blocking runtime wait except when
     // spec-ordering requires it (second poll, teardown drains). mutex_ must
     // NOT be required by WaitFrame/BeginFrame, which stay off the config lock.
+    // False when Turbo has never been enabled for the current session. This
+    // gives non-Turbo sessions a literal wait/begin/end pass-through instead
+    // of making SteamVR observe VectorXR's pacing bookkeeping. Once armed it
+    // stays armed until the frame state is reset because an established Turbo
+    // pipeline is structural for the remainder of the session.
+    std::atomic<bool> turbo_frame_interception_required_{false};
     std::mutex turbo_mutex_;
     std::condition_variable turbo_async_worker_cv_;
     std::thread turbo_async_worker_;
@@ -842,6 +851,10 @@ class OpenXrLayer {
     double quadviews_smoothed_focus_pitch_radians_{0.0};
     std::optional<std::chrono::steady_clock::time_point> quadviews_last_focus_smoothing_wall_time_;
     std::optional<std::chrono::steady_clock::time_point> quadviews_last_valid_gaze_wall_time_;
+    std::optional<std::chrono::steady_clock::time_point> quadviews_eye_gaze_loss_started_wall_time_;
+    bool quadviews_eye_gaze_loss_was_locate_failure_{false};
+    bool quadviews_has_seen_valid_gaze_{false};
+    bool quadviews_compositor_recovery_pending_{false};
     XrViewConfigurationType active_primary_view_configuration_type_{XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO};
     XrViewConfigurationType active_runtime_view_configuration_type_{XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO};
     bool has_active_primary_view_configuration_{false};
