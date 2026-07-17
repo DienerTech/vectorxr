@@ -294,6 +294,154 @@ std::string FormatTextureDesc(const D3D11_TEXTURE2D_DESC& desc) {
     return stream.str();
 }
 
+struct QuadViewsPixelMetrics {
+    uint64_t hash{1469598103934665603ull};
+    double mean_luma{0.0};
+    double standard_deviation{0.0};
+    double mean_neighbor_edge{0.0};
+    double near_black_fraction{0.0};
+};
+
+uint32_t PixelProbeBytesPerPixel(DXGI_FORMAT format) {
+    switch (format) {
+    case DXGI_FORMAT_R8G8B8A8_UNORM:
+    case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB:
+    case DXGI_FORMAT_B8G8R8A8_UNORM:
+    case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB:
+    case DXGI_FORMAT_B8G8R8X8_UNORM:
+    case DXGI_FORMAT_B8G8R8X8_UNORM_SRGB:
+    case DXGI_FORMAT_R10G10B10A2_UNORM:
+        return 4;
+    case DXGI_FORMAT_R16G16B16A16_FLOAT:
+    case DXGI_FORMAT_R16G16B16A16_UNORM:
+        return 8;
+    default:
+        return 0;
+    }
+}
+
+double HalfToDouble(uint16_t value) {
+    const double sign = (value & 0x8000u) != 0 ? -1.0 : 1.0;
+    const uint32_t exponent = (value >> 10u) & 0x1fu;
+    const uint32_t mantissa = value & 0x3ffu;
+    if (exponent == 0) {
+        return sign * std::ldexp(static_cast<double>(mantissa), -24);
+    }
+    if (exponent == 31) {
+        return mantissa == 0 ? sign * HUGE_VAL : NAN;
+    }
+    return sign * std::ldexp(1.0 + static_cast<double>(mantissa) / 1024.0,
+                             static_cast<int>(exponent) - 15);
+}
+
+bool DecodePixelProbeLuma(const uint8_t* pixel, DXGI_FORMAT format, double* luma) {
+    double red = 0.0;
+    double green = 0.0;
+    double blue = 0.0;
+    switch (format) {
+    case DXGI_FORMAT_R8G8B8A8_UNORM:
+    case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB:
+        red = pixel[0] / 255.0;
+        green = pixel[1] / 255.0;
+        blue = pixel[2] / 255.0;
+        break;
+    case DXGI_FORMAT_B8G8R8A8_UNORM:
+    case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB:
+    case DXGI_FORMAT_B8G8R8X8_UNORM:
+    case DXGI_FORMAT_B8G8R8X8_UNORM_SRGB:
+        red = pixel[2] / 255.0;
+        green = pixel[1] / 255.0;
+        blue = pixel[0] / 255.0;
+        break;
+    case DXGI_FORMAT_R10G10B10A2_UNORM: {
+        uint32_t packed = 0;
+        std::memcpy(&packed, pixel, sizeof(packed));
+        red = (packed & 0x3ffu) / 1023.0;
+        green = ((packed >> 10u) & 0x3ffu) / 1023.0;
+        blue = ((packed >> 20u) & 0x3ffu) / 1023.0;
+        break;
+    }
+    case DXGI_FORMAT_R16G16B16A16_FLOAT: {
+        std::array<uint16_t, 4> channels{};
+        std::memcpy(channels.data(), pixel, sizeof(channels));
+        red = HalfToDouble(channels[0]);
+        green = HalfToDouble(channels[1]);
+        blue = HalfToDouble(channels[2]);
+        break;
+    }
+    case DXGI_FORMAT_R16G16B16A16_UNORM: {
+        std::array<uint16_t, 4> channels{};
+        std::memcpy(channels.data(), pixel, sizeof(channels));
+        red = channels[0] / 65535.0;
+        green = channels[1] / 65535.0;
+        blue = channels[2] / 65535.0;
+        break;
+    }
+    default:
+        return false;
+    }
+    *luma = 0.2126 * red + 0.7152 * green + 0.0722 * blue;
+    return std::isfinite(*luma);
+}
+
+bool AnalyzePixelProbe(const D3D11_MAPPED_SUBRESOURCE& mapped,
+                       DXGI_FORMAT format,
+                       uint32_t width,
+                       uint32_t height,
+                       QuadViewsPixelMetrics* metrics) {
+    const uint32_t bytes_per_pixel = PixelProbeBytesPerPixel(format);
+    if (!mapped.pData || bytes_per_pixel == 0 || !metrics || width == 0 || height == 0 ||
+        width * height > 1024) {
+        return false;
+    }
+
+    std::array<double, 1024> luma{};
+    double sum = 0.0;
+    uint32_t near_black = 0;
+    for (uint32_t y = 0; y < height; ++y) {
+        const auto* row = static_cast<const uint8_t*>(mapped.pData) + y * mapped.RowPitch;
+        for (uint32_t x = 0; x < width; ++x) {
+            const uint8_t* pixel = row + x * bytes_per_pixel;
+            for (uint32_t byte = 0; byte < bytes_per_pixel; ++byte) {
+                metrics->hash ^= pixel[byte];
+                metrics->hash *= 1099511628211ull;
+            }
+            double value = 0.0;
+            if (!DecodePixelProbeLuma(pixel, format, &value)) {
+                return false;
+            }
+            luma[y * width + x] = value;
+            sum += value;
+            near_black += value <= (1.0 / 255.0) ? 1u : 0u;
+        }
+    }
+
+    const double count = static_cast<double>(width * height);
+    metrics->mean_luma = sum / count;
+    metrics->near_black_fraction = near_black / count;
+    double squared_delta_sum = 0.0;
+    double edge_sum = 0.0;
+    uint32_t edge_count = 0;
+    for (uint32_t y = 0; y < height; ++y) {
+        for (uint32_t x = 0; x < width; ++x) {
+            const double value = luma[y * width + x];
+            const double delta = value - metrics->mean_luma;
+            squared_delta_sum += delta * delta;
+            if (x > 0) {
+                edge_sum += std::abs(value - luma[y * width + x - 1]);
+                ++edge_count;
+            }
+            if (y > 0) {
+                edge_sum += std::abs(value - luma[(y - 1) * width + x]);
+                ++edge_count;
+            }
+        }
+    }
+    metrics->standard_deviation = std::sqrt(squared_delta_sum / count);
+    metrics->mean_neighbor_edge = edge_count > 0 ? edge_sum / edge_count : 0.0;
+    return true;
+}
+
 HRESULT CreateTextureShaderResourceView(ID3D11Device* device,
                                         ID3D11Texture2D* texture,
                                         int64_t fallback_format,
@@ -1383,6 +1531,9 @@ XrResult OpenXrLayer::OnInstanceCreated(const XrInstanceCreateInfo* create_info,
     }
     if (eye_gaze_extension_enabled_) {
         logger_.Info("Enabled XR_EXT_eye_gaze_interaction downstream for VectorXR quadviews.");
+    } else if (varjo_compatible_quadviews_active_ && varjo_foveated_rendering_extension_requested_) {
+        logger_.Info("XR_EXT_eye_gaze_interaction is not needed in native Varjo mode; rendering gaze will use "
+                     "XR_REFERENCE_SPACE_TYPE_COMBINED_EYE_VARJO.");
     } else if (diagnostics.app_requested_quad_views || diagnostics.app_requested_varjo_foveated_rendering) {
         logger_.Info("XR_EXT_eye_gaze_interaction is not enabled downstream; VectorXR quadviews eye tracking "
                      "will use head/static focus if no other tracker is available.");
@@ -1465,6 +1616,7 @@ XrResult OpenXrLayer::DestroyInstance(XrInstance instance) {
     std::scoped_lock lock(mutex_);
 
     DestroyEyeGazeResources();
+    DestroyVarjoNativeFoveationResources();
     DestroyInternalReferenceSpaces();
     ResetSwapchainState();
     const XrResult result = next_destroy_instance_(instance);
@@ -1612,6 +1764,7 @@ XrResult OpenXrLayer::DestroySession(XrSession session) {
         std::scoped_lock lock(mutex_);
         if (session == active_session_) {
             DestroyEyeGazeResources();
+            DestroyVarjoNativeFoveationResources();
             DestroyInternalReferenceSpaces();
             FlushDeferredSwapchainReleasesLocked("session teardown");
             ResetD3D11QuadViewsCompositor();
@@ -2878,6 +3031,10 @@ bool OpenXrLayer::EnsureD3D11QuadViewsCompositor(const XrCompositionLayerProject
         d3d11_quadviews_compositor_.gpu_timing_available = gpu_timing_ready;
 
         d3d11_quadviews_compositor_.initialized = true;
+        if (logger_.IsDebugEnabled()) {
+            pending_quadviews_pixel_diagnostics_ =
+                std::max<uint32_t>(pending_quadviews_pixel_diagnostics_, 2);
+        }
         logger_.Info("D3D11 quadviews compositor initialized.");
     }
 
@@ -3026,11 +3183,45 @@ bool OpenXrLayer::EnsureD3D11QuadViewsCompositor(const XrCompositionLayerProject
             return false;
         }
 
-        logger_.Debug("D3D11 quadviews compositor output swapchain ready: size=" +
-                      std::to_string(target.width) + "x" + std::to_string(target.height) +
-                      ", images=" + std::to_string(target.image_count) +
-                      ", directOutputRtvs=" + std::to_string(target.image_render_target_views.size()) +
-                      ", privateRenderTarget=1");
+        const uint32_t eye = static_cast<uint32_t>(
+            &target - d3d11_quadviews_compositor_.targets.data());
+        const uint32_t bytes_per_pixel = PixelProbeBytesPerPixel(static_cast<DXGI_FORMAT>(target.format));
+        const double approximate_mebibytes = bytes_per_pixel == 0
+                                                ? 0.0
+                                                : static_cast<double>(target.width) * target.height *
+                                                      (target.image_count + 1) * bytes_per_pixel /
+                                                      (1024.0 * 1024.0);
+        std::ostringstream ready_stream;
+        ready_stream << "D3D11 quadviews compositor output swapchain ready: eye=" << eye
+                     << ", generation=" << d3d11_quadviews_compositor_.output_target_generation
+                     << ", handle=" << FormatHandle(target.swapchain)
+                     << ", usage=" << FormatUsageFlags(create_info.usageFlags)
+                     << ", size=" << target.width << "x" << target.height
+                     << ", format=" << target.format
+                     << ", images=" << target.image_count
+                     << ", directOutputRtvs=" << target.image_render_target_views.size()
+                     << ", privateRenderTarget=1"
+                     << ", approximateRuntimePlusPrivateMiB="
+                     << FormatDiagnosticDouble(approximate_mebibytes);
+        for (uint32_t image = 0; image < target.d3d11_images.size(); ++image) {
+            D3D11_TEXTURE2D_DESC desc{};
+            if (target.d3d11_images[image]) {
+                target.d3d11_images[image]->GetDesc(&desc);
+            }
+            ready_stream << ", runtimeTexture" << image << "="
+                         << FormatHex(reinterpret_cast<uintptr_t>(target.d3d11_images[image]))
+                         << " " << FormatTextureDesc(desc);
+        }
+        D3D11_TEXTURE2D_DESC private_desc{};
+        target.render_texture->GetDesc(&private_desc);
+        ready_stream << ", privateTexture="
+                     << FormatHex(reinterpret_cast<uintptr_t>(target.render_texture))
+                     << " " << FormatTextureDesc(private_desc);
+        if (d3d11_quadviews_compositor_.output_target_generation > 0) {
+            logger_.Info(ready_stream.str());
+        } else {
+            logger_.Debug(ready_stream.str());
+        }
     }
 
     return true;
@@ -3302,6 +3493,8 @@ bool OpenXrLayer::ComposeQuadViewsD3D11(const XrCompositionLayerProjection* sour
     bool rendered = true;
     std::string failure_reason;
     std::array<uint32_t, 2> output_indices{};
+    std::array<uint32_t, 4> selected_source_indices{};
+    std::array<ID3D11Texture2D*, 4> selected_source_textures{};
     uint32_t input_copy_count = 0;
     uint32_t direct_input_count = 0;
     uint32_t output_copy_count = 0;
@@ -3339,6 +3532,12 @@ bool OpenXrLayer::ComposeQuadViewsD3D11(const XrCompositionLayerProjection* sour
         }
     }
 
+    PollD3D11QuadViewsPixelProbe();
+    const bool should_issue_pixel_probe =
+        pending_quadviews_pixel_diagnostics_ > 0 && logger_.IsDebugEnabled() &&
+        output_width >= kQuadViewsPixelProbeSize && output_height >= kQuadViewsPixelProbeSize &&
+        !d3d11_quadviews_compositor_.pixel_probe.issued &&
+        EnsureD3D11QuadViewsPixelProbeResources(output_format);
     const bool should_log_compositor_diagnostic =
         pending_quadviews_compositor_diagnostics_ > 0 ||
         ShouldLogQuadViewsDebugHeartbeat(last_quadviews_compositor_debug_heartbeat_);
@@ -3440,6 +3639,10 @@ bool OpenXrLayer::ComposeQuadViewsD3D11(const XrCompositionLayerProjection* sour
         const uint32_t focus_index = source_image_index(*swapchains[eye + 2]);
         ID3D11Texture2D* peripheral_source = swapchains[eye]->d3d11_images[peripheral_index];
         ID3D11Texture2D* focus_source = swapchains[eye + 2]->d3d11_images[focus_index];
+        selected_source_indices[eye] = peripheral_index;
+        selected_source_indices[eye + 2] = focus_index;
+        selected_source_textures[eye] = peripheral_source;
+        selected_source_textures[eye + 2] = focus_source;
 
         ID3D11ShaderResourceView* peripheral_resource = nullptr;
         ID3D11ShaderResourceView* focus_resource = nullptr;
@@ -3627,6 +3830,35 @@ bool OpenXrLayer::ComposeQuadViewsD3D11(const XrCompositionLayerProjection* sour
             ++output_copy_count;
         }
 
+        if (should_issue_pixel_probe) {
+            QuadViewsPixelProbe& probe = d3d11_quadviews_compositor_.pixel_probe;
+            const uint32_t half_probe = kQuadViewsPixelProbeSize / 2;
+            const uint32_t left = std::min(
+                target.width - kQuadViewsPixelProbeSize,
+                target.width / 2 > half_probe ? target.width / 2 - half_probe : 0u);
+            const std::array<uint32_t, kQuadViewsPixelProbeBandsPerEye> center_y{
+                target.height / 5,
+                target.height / 2,
+                target.height * 4 / 5,
+            };
+            for (uint32_t band = 0; band < kQuadViewsPixelProbeBandsPerEye; ++band) {
+                const uint32_t top = std::min(
+                    target.height - kQuadViewsPixelProbeSize,
+                    center_y[band] > half_probe ? center_y[band] - half_probe : 0u);
+                const D3D11_BOX source_box{
+                    left,
+                    top,
+                    0,
+                    left + kQuadViewsPixelProbeSize,
+                    top + kQuadViewsPixelProbeSize,
+                    1,
+                };
+                const uint32_t probe_index = eye * kQuadViewsPixelProbeBandsPerEye + band;
+                context->CopySubresourceRegion(probe.staging_textures[probe_index], 0, 0, 0, 0,
+                                               target.d3d11_images[output_indices[eye]], 0, &source_box);
+            }
+        }
+
         XrSwapchainImageReleaseInfo release_info{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
         result = next_release_swapchain_image_(target.swapchain, &release_info);
         if (XR_FAILED(result)) {
@@ -3646,6 +3878,15 @@ bool OpenXrLayer::ComposeQuadViewsD3D11(const XrCompositionLayerProjection* sour
                 (d3d11_quadviews_compositor_.next_gpu_timing_query + 1) %
                 static_cast<uint32_t>(d3d11_quadviews_compositor_.gpu_timing_queries.size());
         }
+    }
+    if (should_issue_pixel_probe && rendered) {
+        QuadViewsPixelProbe& probe = d3d11_quadviews_compositor_.pixel_probe;
+        context->End(probe.completion);
+        probe.issued = true;
+        probe.frame_time = display_time;
+        probe.target_generation = d3d11_quadviews_compositor_.output_target_generation;
+        probe.output_image_indices = output_indices;
+        --pending_quadviews_pixel_diagnostics_;
     }
 
     restore_state();
@@ -3708,7 +3949,36 @@ bool OpenXrLayer::ComposeQuadViewsD3D11(const XrCompositionLayerProjection* sour
                       (static_cast<double>(swapchains[0]->width) * swapchains[0]->height +
                        static_cast<double>(swapchains[2]->width) * swapchains[2]->height) /
                       std::max(1.0, static_cast<double>(output_width) * output_height) * 100.0)
-               << "%";
+               << "%"
+               << ", targetGeneration=" << d3d11_quadviews_compositor_.output_target_generation
+               << ", deviceRemovedReason="
+               << FormatHex(static_cast<uint32_t>(d3d11_quadviews_compositor_.device->GetDeviceRemovedReason()));
+        for (uint32_t eye = 0; eye < 2; ++eye) {
+            const QuadViewsCompositionTarget& target = d3d11_quadviews_compositor_.targets[eye];
+            stream << ", output" << eye
+                   << "{swapchain=" << FormatHandle(target.swapchain)
+                   << ",image=" << output_indices[eye]
+                   << ",texture="
+                   << FormatHex(reinterpret_cast<uintptr_t>(target.d3d11_images[output_indices[eye]]))
+                   << "}";
+        }
+        for (uint32_t view = 0; view < 4; ++view) {
+            const XrSwapchainSubImage& sub_image = source_layer->views[view].subImage;
+            stream << ", source" << view
+                   << "{swapchain=" << FormatHandle(sub_image.swapchain)
+                   << ",image=" << selected_source_indices[view]
+                   << ",texture="
+                   << FormatHex(reinterpret_cast<uintptr_t>(selected_source_textures[view]))
+                   << ",arraySlice=" << sub_image.imageArrayIndex
+                   << ",rect=(" << sub_image.imageRect.offset.x << ","
+                   << sub_image.imageRect.offset.y << ","
+                   << sub_image.imageRect.extent.width << "x"
+                   << sub_image.imageRect.extent.height << ")"
+                   << ",acquires=" << swapchains[view]->acquire_count
+                   << ",waits=" << swapchains[view]->wait_count
+                   << ",releases=" << swapchains[view]->release_count
+                   << "}";
+        }
         logger_.Debug(stream.str());
         if (pending_quadviews_compositor_diagnostics_ > 0) {
             --pending_quadviews_compositor_diagnostics_;
@@ -5317,7 +5587,11 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
         RecycleD3D11QuadViewsCompositionTargets();
         quadviews_compositor_recovery_pending_ = false;
         pending_quadviews_compositor_diagnostics_ =
-            std::max<uint32_t>(pending_quadviews_compositor_diagnostics_, 120);
+            std::max<uint32_t>(pending_quadviews_compositor_diagnostics_, 16);
+        if (logger_.IsDebugEnabled()) {
+            pending_quadviews_pixel_diagnostics_ =
+                std::max<uint32_t>(pending_quadviews_pixel_diagnostics_, 12);
+        }
         logger_.Info("Quadviews compositor output targets recycled after eye-gaze tracking recovered.");
     }
     // Varjo compatible quadviews: the focus sharpen runs inside the projection
@@ -6430,6 +6704,22 @@ void OpenXrLayer::RefreshResolvedSettings() {
                eye_gaze_resources_ready_) {
         DestroyEyeGazeResources();
     }
+
+    const bool wants_varjo_rendering_gaze =
+        varjo_compatible_quadviews_active_ && varjo_foveated_rendering_extension_requested_ &&
+        IsQuadViewsActive() && resolved_settings_.quadviews.tracking_mode == QuadViewsTrackingMode::Eye;
+    if (wants_varjo_rendering_gaze && active_session_ != XR_NULL_HANDLE &&
+        varjo_native_combined_eye_space_ == XR_NULL_HANDLE &&
+        !varjo_native_foveation_resources_attempted_) {
+        const XrResult varjo_result = CreateVarjoNativeFoveationResources(active_session_);
+        if (XR_FAILED(varjo_result)) {
+            logger_.Info("Native Varjo rendering-gaze resources unavailable; the runtime will use its fixed-center "
+                         "focus fallback for this session. result=" +
+                         FormatHex(static_cast<uint64_t>(varjo_result)));
+        }
+    } else if (!wants_varjo_rendering_gaze && varjo_native_foveation_resources_attempted_) {
+        DestroyVarjoNativeFoveationResources();
+    }
 }
 
 void OpenXrLayer::CaptureInstanceFunctions() {
@@ -6672,6 +6962,13 @@ void OpenXrLayer::ResetSessionState() {
     internal_local_space_ = XR_NULL_HANDLE;
     internal_view_space_ = XR_NULL_HANDLE;
     internal_stage_space_ = XR_NULL_HANDLE;
+    varjo_native_view_space_ = XR_NULL_HANDLE;
+    varjo_native_combined_eye_space_ = XR_NULL_HANDLE;
+    varjo_native_rendering_gaze_tracked_ = false;
+    has_logged_varjo_native_rendering_gaze_active_ = false;
+    has_logged_varjo_native_rendering_gaze_unavailable_ = false;
+    varjo_native_foveation_resources_attempted_ = false;
+    varjo_native_rendering_gaze_transition_logs_remaining_ = 8;
     quadviews_action_set_ = XR_NULL_HANDLE;
     quadviews_eye_gaze_action_ = XR_NULL_HANDLE;
     quadviews_eye_gaze_space_ = XR_NULL_HANDLE;
@@ -6690,6 +6987,7 @@ void OpenXrLayer::ResetSessionState() {
     quadviews_eye_gaze_loss_was_locate_failure_ = false;
     quadviews_has_seen_valid_gaze_ = false;
     quadviews_compositor_recovery_pending_ = false;
+    pending_quadviews_pixel_diagnostics_ = 0;
     active_primary_view_configuration_type_ = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
     active_runtime_view_configuration_type_ = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
     has_active_primary_view_configuration_ = false;
@@ -7230,6 +7528,135 @@ void OpenXrLayer::DestroyInternalReferenceSpaces() {
     cached_quadviews_fovs_.clear();
 }
 
+XrResult OpenXrLayer::CreateVarjoNativeFoveationResources(XrSession session) {
+    if (varjo_native_view_space_ != XR_NULL_HANDLE &&
+        varjo_native_combined_eye_space_ != XR_NULL_HANDLE) {
+        return XR_SUCCESS;
+    }
+    if (varjo_native_foveation_resources_attempted_) {
+        return XR_ERROR_FEATURE_UNSUPPORTED;
+    }
+    varjo_native_foveation_resources_attempted_ = true;
+
+    if (!next_create_reference_space_ || !next_destroy_space_ || !next_locate_space_) {
+        return XR_ERROR_INITIALIZATION_FAILED;
+    }
+
+    XrReferenceSpaceCreateInfo create_info{XR_TYPE_REFERENCE_SPACE_CREATE_INFO};
+    create_info.poseInReferenceSpace.orientation = {0.0f, 0.0f, 0.0f, 1.0f};
+    create_info.poseInReferenceSpace.position = {0.0f, 0.0f, 0.0f};
+
+    create_info.referenceSpaceType = XR_REFERENCE_SPACE_TYPE_VIEW;
+    XrResult result = next_create_reference_space_(session, &create_info, &varjo_native_view_space_);
+    if (XR_FAILED(result)) {
+        varjo_native_view_space_ = XR_NULL_HANDLE;
+        logger_.Info("Failed to create the native Varjo VIEW space used as the rendering-gaze base. result=" +
+                     FormatHex(static_cast<uint64_t>(result)));
+        return result;
+    }
+
+    create_info.referenceSpaceType = XR_REFERENCE_SPACE_TYPE_COMBINED_EYE_VARJO;
+    result = next_create_reference_space_(session, &create_info, &varjo_native_combined_eye_space_);
+    if (XR_FAILED(result)) {
+        varjo_native_combined_eye_space_ = XR_NULL_HANDLE;
+        const XrResult destroy_result = next_destroy_space_(varjo_native_view_space_);
+        varjo_native_view_space_ = XR_NULL_HANDLE;
+        logger_.Info("Failed to create XR_REFERENCE_SPACE_TYPE_COMBINED_EYE_VARJO. createResult=" +
+                     FormatHex(static_cast<uint64_t>(result)) +
+                     ", viewCleanupResult=" + FormatHex(static_cast<uint64_t>(destroy_result)));
+        return result;
+    }
+
+    logger_.Info("Native Varjo rendering-gaze resources ready: viewSpace=" +
+                 FormatHex(reinterpret_cast<uintptr_t>(varjo_native_view_space_)) +
+                 ", combinedEyeSpace=" +
+                 FormatHex(reinterpret_cast<uintptr_t>(varjo_native_combined_eye_space_)) +
+                 ". Foveated rendering will be activated only while orientation tracking is reported.");
+    return XR_SUCCESS;
+}
+
+void OpenXrLayer::DestroyVarjoNativeFoveationResources() {
+    const XrSpace combined_eye_space = varjo_native_combined_eye_space_;
+    const XrSpace view_space = varjo_native_view_space_;
+    varjo_native_combined_eye_space_ = XR_NULL_HANDLE;
+    varjo_native_view_space_ = XR_NULL_HANDLE;
+    varjo_native_rendering_gaze_tracked_ = false;
+    has_logged_varjo_native_rendering_gaze_active_ = false;
+    has_logged_varjo_native_rendering_gaze_unavailable_ = false;
+    varjo_native_foveation_resources_attempted_ = false;
+    varjo_native_rendering_gaze_transition_logs_remaining_ = 8;
+
+    if (!next_destroy_space_) {
+        return;
+    }
+    if (combined_eye_space != XR_NULL_HANDLE) {
+        const XrResult result = next_destroy_space_(combined_eye_space);
+        if (XR_FAILED(result)) {
+            logger_.Info("Failed to destroy native Varjo COMBINED_EYE space. result=" +
+                         FormatHex(static_cast<uint64_t>(result)));
+        }
+    }
+    if (view_space != XR_NULL_HANDLE) {
+        const XrResult result = next_destroy_space_(view_space);
+        if (XR_FAILED(result)) {
+            logger_.Info("Failed to destroy native Varjo VIEW space. result=" +
+                         FormatHex(static_cast<uint64_t>(result)));
+        }
+    }
+}
+
+bool OpenXrLayer::LocateVarjoRenderingGaze(XrTime display_time,
+                                           XrResult* locate_result,
+                                           XrSpaceLocationFlags* location_flags) {
+    XrSpace combined_eye_space = XR_NULL_HANDLE;
+    XrSpace view_space = XR_NULL_HANDLE;
+    {
+        std::scoped_lock lock(mutex_);
+        combined_eye_space = varjo_native_combined_eye_space_;
+        view_space = varjo_native_view_space_;
+    }
+
+    XrResult result = XR_ERROR_HANDLE_INVALID;
+    XrSpaceLocation location{XR_TYPE_SPACE_LOCATION};
+    if (!next_locate_space_) {
+        result = XR_ERROR_FUNCTION_UNSUPPORTED;
+    } else if (combined_eye_space != XR_NULL_HANDLE && view_space != XR_NULL_HANDLE) {
+        result = next_locate_space_(combined_eye_space, view_space, display_time, &location);
+    }
+    const bool tracked = XR_SUCCEEDED(result) &&
+                         (location.locationFlags & XR_SPACE_LOCATION_ORIENTATION_TRACKED_BIT) != 0;
+
+    if (locate_result) {
+        *locate_result = result;
+    }
+    if (location_flags) {
+        *location_flags = location.locationFlags;
+    }
+
+    std::scoped_lock lock(mutex_);
+    const bool was_tracked = varjo_native_rendering_gaze_tracked_;
+    varjo_native_rendering_gaze_tracked_ = tracked;
+    if (tracked && (!was_tracked || !has_logged_varjo_native_rendering_gaze_active_) &&
+        varjo_native_rendering_gaze_transition_logs_remaining_ > 0) {
+        logger_.Info("Native Varjo rendering gaze is tracked; gaze-driven focus placement is active. displayTime=" +
+                     std::to_string(display_time) +
+                     ", locationFlags=" + FormatHex(static_cast<uint64_t>(location.locationFlags)));
+        has_logged_varjo_native_rendering_gaze_active_ = true;
+        --varjo_native_rendering_gaze_transition_logs_remaining_;
+        has_logged_varjo_native_rendering_gaze_unavailable_ = false;
+    } else if (!tracked && (was_tracked || !has_logged_varjo_native_rendering_gaze_unavailable_) &&
+               varjo_native_rendering_gaze_transition_logs_remaining_ > 0) {
+        logger_.Info("Native Varjo rendering gaze is unavailable; requesting the runtime's fixed-center focus "
+                     "fallback. displayTime=" + std::to_string(display_time) +
+                     ", locateResult=" + FormatHex(static_cast<uint64_t>(result)) +
+                     ", locationFlags=" + FormatHex(static_cast<uint64_t>(location.locationFlags)));
+        has_logged_varjo_native_rendering_gaze_unavailable_ = true;
+        has_logged_varjo_native_rendering_gaze_active_ = false;
+        --varjo_native_rendering_gaze_transition_logs_remaining_;
+    }
+    return tracked;
+}
+
 bool OpenXrLayer::CacheEyeOffsetsFromLocatedViews(XrViewConfigurationType view_configuration_type,
                                                    XrTime display_time,
                                                    const XrPosef& runtime_view_pose,
@@ -7442,6 +7869,9 @@ bool OpenXrLayer::IsTrackedViewSpace(XrSpace space) const {
 
 void OpenXrLayer::RecordVarjoNativeLocateDiagnostics(const XrViewLocateInfo* view_locate_info,
                                                      bool vector_request_injected,
+                                                     bool rendering_gaze_queried,
+                                                     XrResult rendering_gaze_result,
+                                                     XrSpaceLocationFlags rendering_gaze_flags,
                                                      const XrViewState* view_state,
                                                      XrResult result,
                                                      uint32_t view_capacity_input,
@@ -7465,6 +7895,17 @@ void OpenXrLayer::RecordVarjoNativeLocateDiagnostics(const XrViewLocateInfo* vie
     if (vector_request_injected) {
         ++diagnostic.vector_injected_locate_requests;
     }
+    if (rendering_gaze_queried) {
+        ++diagnostic.rendering_gaze_queries;
+        if (XR_FAILED(rendering_gaze_result)) {
+            ++diagnostic.rendering_gaze_failed_queries;
+        }
+        if ((rendering_gaze_flags & XR_SPACE_LOCATION_ORIENTATION_TRACKED_BIT) != 0) {
+            ++diagnostic.rendering_gaze_tracked_queries;
+        } else {
+            ++diagnostic.rendering_gaze_untracked_queries;
+        }
+    }
 
     const uint8_t request_state_bit = static_cast<uint8_t>(uint8_t{1} << request_state);
     if ((diagnostic.logged_request_state_mask & request_state_bit) == 0) {
@@ -7475,6 +7916,11 @@ void OpenXrLayer::RecordVarjoNativeLocateDiagnostics(const XrViewLocateInfo* vie
                << ", vectorRequestInjected=" << (vector_request_injected ? 1 : 0)
                << ", foveatedRenderingActive=" << (request_active ? 1 : 0)
                << ", displayTime=" << (view_locate_info ? view_locate_info->displayTime : 0)
+               << ", renderingGazeQueried=" << (rendering_gaze_queried ? 1 : 0)
+               << ", renderingGazeResult="
+               << FormatHex(static_cast<uint64_t>(rendering_gaze_result))
+               << ", renderingGazeFlags="
+               << FormatHex(static_cast<uint64_t>(rendering_gaze_flags))
                << ", result=" << FormatHex(static_cast<uint64_t>(result))
                << ", appCapacity=" << view_capacity_input
                << ", returnedViews=" << returned_views
@@ -7578,6 +8024,10 @@ void OpenXrLayer::LogVarjoNativeFoveationSummaryLocked(std::string_view reason, 
            << ", requestPresentInactive=" << diagnostic.request_state_counts[1]
            << ", requestPresentActive=" << diagnostic.request_state_counts[2]
            << ", vectorInjectedLocateRequests=" << diagnostic.vector_injected_locate_requests
+           << ", renderingGazeQueries=" << diagnostic.rendering_gaze_queries
+           << ", renderingGazeTracked=" << diagnostic.rendering_gaze_tracked_queries
+           << ", renderingGazeUntracked=" << diagnostic.rendering_gaze_untracked_queries
+           << ", renderingGazeFailed=" << diagnostic.rendering_gaze_failed_queries
            << ", successfulQuadLocates=" << diagnostic.successful_quad_locates
            << ", focusFovObserved=" << (diagnostic.focus_ranges_initialized ? 1 : 0)
            << ", focusFovMotionObserved=" << (diagnostic.focus_motion_logged ? 1 : 0);
@@ -7647,10 +8097,17 @@ XrResult OpenXrLayer::LocateRuntimeViews(XrSession session,
             XR_TYPE_VIEW_LOCATE_FOVEATED_RENDERING_VARJO};
         const XrViewLocateInfo* native_view_locate_info = view_locate_info;
         bool vector_request_injected = false;
+        bool rendering_gaze_queried = false;
+        XrResult rendering_gaze_result = XR_SUCCESS;
+        XrSpaceLocationFlags rendering_gaze_flags = 0;
         if (request_native_foveated_locates &&
             !FindStructInChain(view_locate_info->next, XR_TYPE_VIEW_LOCATE_FOVEATED_RENDERING_VARJO)) {
+            rendering_gaze_queried = true;
+            const bool rendering_gaze_tracked = LocateVarjoRenderingGaze(
+                view_locate_info->displayTime, &rendering_gaze_result, &rendering_gaze_flags);
             injected_foveated_request.next = view_locate_info->next;
-            injected_foveated_request.foveatedRenderingActive = XR_TRUE;
+            injected_foveated_request.foveatedRenderingActive =
+                rendering_gaze_tracked ? XR_TRUE : XR_FALSE;
             native_locate_info.next = &injected_foveated_request;
             native_view_locate_info = &native_locate_info;
             vector_request_injected = true;
@@ -7658,7 +8115,8 @@ XrResult OpenXrLayer::LocateRuntimeViews(XrSession session,
         const XrResult native_result = next_locate_views_(
             session, native_view_locate_info, view_state, view_capacity_input, view_count_output, views);
         RecordVarjoNativeLocateDiagnostics(
-            native_view_locate_info, vector_request_injected, view_state, native_result, view_capacity_input,
+            native_view_locate_info, vector_request_injected, rendering_gaze_queried, rendering_gaze_result,
+            rendering_gaze_flags, view_state, native_result, view_capacity_input,
             view_count_output, views);
         return native_result;
     }
@@ -8707,16 +9165,207 @@ void OpenXrLayer::SharpenNativeFocusViews(std::vector<XrCompositionLayerProjecti
     }
 }
 
+bool OpenXrLayer::EnsureD3D11QuadViewsPixelProbeResources(int64_t format) {
+    QuadViewsPixelProbe& probe = d3d11_quadviews_compositor_.pixel_probe;
+    const DXGI_FORMAT dxgi_format = static_cast<DXGI_FORMAT>(format);
+    const bool has_all_staging_textures = std::all_of(
+        probe.staging_textures.begin(), probe.staging_textures.end(),
+        [](ID3D11Texture2D* texture) { return texture != nullptr; });
+    if (probe.completion && has_all_staging_textures && probe.format == format) {
+        return true;
+    }
+    if (probe.issued || !d3d11_quadviews_compositor_.device || PixelProbeBytesPerPixel(dxgi_format) == 0) {
+        if (PixelProbeBytesPerPixel(dxgi_format) == 0) {
+            logger_.Debug("D3D11 quadviews pixel probes disabled for unsupported format=" +
+                          std::to_string(static_cast<uint32_t>(format)) + ".");
+            pending_quadviews_pixel_diagnostics_ = 0;
+        }
+        return false;
+    }
+
+    const bool preserve_history = probe.format == 0 || probe.format == format;
+    ReleaseD3D11QuadViewsPixelProbeResources(preserve_history);
+
+    D3D11_TEXTURE2D_DESC staging_desc{};
+    staging_desc.Width = kQuadViewsPixelProbeSize;
+    staging_desc.Height = kQuadViewsPixelProbeSize;
+    staging_desc.MipLevels = 1;
+    staging_desc.ArraySize = 1;
+    staging_desc.Format = dxgi_format;
+    staging_desc.SampleDesc.Count = 1;
+    staging_desc.Usage = D3D11_USAGE_STAGING;
+    staging_desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+
+    HRESULT result = S_OK;
+    for (ID3D11Texture2D*& staging_texture : probe.staging_textures) {
+        result = d3d11_quadviews_compositor_.device->CreateTexture2D(
+            &staging_desc, nullptr, &staging_texture);
+        if (FAILED(result)) {
+            break;
+        }
+    }
+    if (SUCCEEDED(result)) {
+        D3D11_QUERY_DESC query_desc{};
+        query_desc.Query = D3D11_QUERY_EVENT;
+        result = d3d11_quadviews_compositor_.device->CreateQuery(&query_desc, &probe.completion);
+    }
+    if (FAILED(result)) {
+        logger_.Info("D3D11 quadviews recovery pixel probes unavailable. hr=" +
+                     FormatHex(static_cast<uint32_t>(result)) +
+                     ", format=" + std::to_string(static_cast<uint32_t>(format)));
+        ReleaseD3D11QuadViewsPixelProbeResources(preserve_history);
+        pending_quadviews_pixel_diagnostics_ = 0;
+        return false;
+    }
+    probe.format = format;
+    return true;
+}
+
+void OpenXrLayer::ReleaseD3D11QuadViewsPixelProbeResources(bool preserve_history) {
+    QuadViewsPixelProbe& probe = d3d11_quadviews_compositor_.pixel_probe;
+    const std::array<uint64_t, kQuadViewsPixelProbeCount> previous_hashes = probe.previous_hashes;
+    const bool has_previous_hashes = probe.has_previous_hashes;
+    const int64_t previous_format = probe.format;
+    for (ID3D11Texture2D*& staging_texture : probe.staging_textures) {
+        SafeRelease(staging_texture);
+    }
+    SafeRelease(probe.completion);
+    probe = {};
+    if (preserve_history) {
+        probe.previous_hashes = previous_hashes;
+        probe.has_previous_hashes = has_previous_hashes;
+        probe.format = previous_format;
+    }
+}
+
+void OpenXrLayer::PollD3D11QuadViewsPixelProbe() {
+    QuadViewsPixelProbe& probe = d3d11_quadviews_compositor_.pixel_probe;
+    ID3D11DeviceContext* context = d3d11_quadviews_compositor_.context;
+    if (!probe.issued || !probe.completion || !context) {
+        return;
+    }
+
+    BOOL complete = FALSE;
+    const HRESULT query_result = context->GetData(
+        probe.completion, &complete, sizeof(complete), D3D11_ASYNC_GETDATA_DONOTFLUSH);
+    if (query_result == S_FALSE || (query_result == S_OK && !complete)) {
+        return;
+    }
+    if (FAILED(query_result)) {
+        logger_.Info("D3D11 quadviews recovery pixel-probe query failed. hr=" +
+                     FormatHex(static_cast<uint32_t>(query_result)));
+        probe.issued = false;
+        return;
+    }
+
+    std::array<QuadViewsPixelMetrics, kQuadViewsPixelProbeCount> metrics{};
+    bool all_mapped = true;
+    for (uint32_t index = 0; index < kQuadViewsPixelProbeCount; ++index) {
+        D3D11_MAPPED_SUBRESOURCE mapped{};
+        const HRESULT map_result = context->Map(
+            probe.staging_textures[index], 0, D3D11_MAP_READ, 0, &mapped);
+        if (FAILED(map_result)) {
+            logger_.Info("D3D11 quadviews recovery pixel-probe map failed. probe=" +
+                         std::to_string(index) +
+                         ", hr=" + FormatHex(static_cast<uint32_t>(map_result)));
+            all_mapped = false;
+            break;
+        }
+        const bool analyzed = AnalyzePixelProbe(mapped,
+                                                static_cast<DXGI_FORMAT>(probe.format),
+                                                kQuadViewsPixelProbeSize,
+                                                kQuadViewsPixelProbeSize,
+                                                &metrics[index]);
+        context->Unmap(probe.staging_textures[index], 0);
+        if (!analyzed) {
+            all_mapped = false;
+            break;
+        }
+    }
+
+    if (all_mapped) {
+        static constexpr std::array<std::string_view, kQuadViewsPixelProbeBandsPerEye> kBandNames{
+            "top", "center", "bottom"};
+        std::ostringstream stream;
+        stream << "D3D11 quadviews submitted-pixel probe: frameTime=" << probe.frame_time
+               << ", targetGeneration=" << probe.target_generation
+               << ", format=" << static_cast<uint32_t>(probe.format)
+               << ", outputImageIndices=[" << probe.output_image_indices[0] << ","
+               << probe.output_image_indices[1] << "]";
+        for (uint32_t eye = 0; eye < 2; ++eye) {
+            for (uint32_t band = 0; band < kQuadViewsPixelProbeBandsPerEye; ++band) {
+                const uint32_t index = eye * kQuadViewsPixelProbeBandsPerEye + band;
+                stream << ", eye" << eye << "." << kBandNames[band]
+                       << "{hash=" << FormatHex(metrics[index].hash)
+                       << ",changed="
+                       << (!probe.has_previous_hashes || metrics[index].hash != probe.previous_hashes[index])
+                       << ",mean=" << FormatDiagnosticDouble(metrics[index].mean_luma)
+                       << ",stddev=" << FormatDiagnosticDouble(metrics[index].standard_deviation)
+                       << ",edge=" << FormatDiagnosticDouble(metrics[index].mean_neighbor_edge)
+                       << ",nearBlack=" << FormatDiagnosticDouble(metrics[index].near_black_fraction)
+                       << "}";
+                probe.previous_hashes[index] = metrics[index].hash;
+            }
+        }
+        probe.has_previous_hashes = true;
+        logger_.Debug(stream.str());
+    }
+    probe.issued = false;
+}
+
 void OpenXrLayer::RecycleD3D11QuadViewsCompositionTargets() {
-    for (QuadViewsCompositionTarget& target : d3d11_quadviews_compositor_.targets) {
+    const uint64_t old_generation = d3d11_quadviews_compositor_.output_target_generation;
+    const HRESULT device_removed_reason = d3d11_quadviews_compositor_.device
+                                              ? d3d11_quadviews_compositor_.device->GetDeviceRemovedReason()
+                                              : E_POINTER;
+    logger_.Info("Quadviews compositor recovery recycle starting: oldGeneration=" +
+                 std::to_string(old_generation) +
+                 ", device=" + FormatHex(reinterpret_cast<uintptr_t>(d3d11_quadviews_compositor_.device)) +
+                 ", deviceRemovedReason=" + FormatHex(static_cast<uint32_t>(device_removed_reason)));
+
+    for (uint32_t eye = 0; eye < d3d11_quadviews_compositor_.targets.size(); ++eye) {
+        QuadViewsCompositionTarget& target = d3d11_quadviews_compositor_.targets[eye];
+        std::ostringstream stream;
+        stream << "Quadviews compositor recovery retiring target: eye=" << eye
+               << ", generation=" << old_generation
+               << ", swapchain=" << FormatHandle(target.swapchain)
+               << ", size=" << target.width << "x" << target.height
+               << ", format=" << target.format
+               << ", declaredImages=" << target.image_count
+               << ", runtimeTextures=" << target.d3d11_images.size()
+               << ", directRtvs=" << target.image_render_target_views.size()
+               << ", privateTexture="
+               << FormatHex(reinterpret_cast<uintptr_t>(target.render_texture));
+        for (uint32_t image = 0; image < target.d3d11_images.size(); ++image) {
+            D3D11_TEXTURE2D_DESC desc{};
+            if (target.d3d11_images[image]) {
+                target.d3d11_images[image]->GetDesc(&desc);
+            }
+            stream << ", runtimeTexture" << image << "="
+                   << FormatHex(reinterpret_cast<uintptr_t>(target.d3d11_images[image]))
+                   << " " << FormatTextureDesc(desc);
+        }
+        if (target.render_texture) {
+            D3D11_TEXTURE2D_DESC desc{};
+            target.render_texture->GetDesc(&desc);
+            stream << ", private" << FormatTextureDesc(desc);
+        }
+        logger_.Info(stream.str());
+
         SafeReleaseVector(target.image_render_target_views);
         SafeRelease(target.render_target_view);
         SafeRelease(target.render_texture);
         if (target.swapchain != XR_NULL_HANDLE && next_destroy_swapchain_) {
-            next_destroy_swapchain_(target.swapchain);
+            const XrResult destroy_result = next_destroy_swapchain_(target.swapchain);
+            logger_.Info("Quadviews compositor recovery destroyed output swapchain: eye=" +
+                         std::to_string(eye) +
+                         ", handle=" + FormatHandle(target.swapchain) +
+                         ", result=" + FormatHex(static_cast<uint64_t>(destroy_result)));
         }
         target = {};
     }
+    ReleaseD3D11QuadViewsPixelProbeResources(true);
+    d3d11_quadviews_compositor_.output_target_generation = old_generation + 1;
 
     // A query issued before the headset session break may never become
     // readable. Preserve the device-level query objects but discard their
@@ -8735,6 +9384,7 @@ void OpenXrLayer::RecycleD3D11QuadViewsCompositionTargets() {
 
 void OpenXrLayer::ResetD3D11QuadViewsCompositor() {
     ResetD3D11FocusSharpen();
+    ReleaseD3D11QuadViewsPixelProbeResources(false);
     for (QuadViewsCompositionTarget& target : d3d11_quadviews_compositor_.targets) {
         SafeReleaseVector(target.image_render_target_views);
         SafeRelease(target.render_target_view);
@@ -8774,6 +9424,7 @@ void OpenXrLayer::ResetD3D11QuadViewsCompositor() {
     d3d11_quadviews_compositor_.has_last_completed_gpu_timing = false;
     d3d11_quadviews_compositor_.failure_logs_remaining = 8;
     d3d11_quadviews_compositor_.next_gpu_timing_query = 0;
+    d3d11_quadviews_compositor_.output_target_generation = 0;
     d3d11_quadviews_compositor_.last_completed_gpu_ms = 0.0;
     d3d11_quadviews_compositor_.last_completed_gpu_frame_time = 0;
 }
