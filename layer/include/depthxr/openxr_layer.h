@@ -229,6 +229,25 @@ class OpenXrLayer {
         XrTime frame_time{0};
     };
 
+    static constexpr uint32_t kQuadViewsPixelProbeSize = 32;
+    static constexpr uint32_t kQuadViewsPixelProbeBandsPerEye = 3;
+    static constexpr uint32_t kQuadViewsPixelProbeCount = 2 * kQuadViewsPixelProbeBandsPerEye;
+
+    // Debug-only, recovery-triggered pixel probes. Six tiny output regions are
+    // copied to staging resources and read only after an event query completes,
+    // so diagnostics never stall the frame waiting for the GPU.
+    struct QuadViewsPixelProbe {
+        std::array<ID3D11Texture2D*, kQuadViewsPixelProbeCount> staging_textures{};
+        ID3D11Query* completion{nullptr};
+        int64_t format{0};
+        bool issued{false};
+        XrTime frame_time{0};
+        uint64_t target_generation{0};
+        std::array<uint32_t, 2> output_image_indices{};
+        std::array<uint64_t, kQuadViewsPixelProbeCount> previous_hashes{};
+        bool has_previous_hashes{false};
+    };
+
     struct D3D11QuadViewsCompositor {
         ID3D11Device* device{nullptr};
         ID3D11DeviceContext* context{nullptr};
@@ -247,11 +266,13 @@ class OpenXrLayer {
         bool has_last_completed_gpu_timing{false};
         uint32_t failure_logs_remaining{8};
         uint32_t next_gpu_timing_query{0};
+        uint64_t output_target_generation{0};
         double last_completed_gpu_ms{0.0};
         XrTime last_completed_gpu_frame_time{0};
         std::array<QuadViewsInputCopy, 4> input_copies;
         std::array<QuadViewsCompositionTarget, 2> targets;
         std::array<QuadViewsGpuTimingQuery, 4> gpu_timing_queries;
+        QuadViewsPixelProbe pixel_probe;
     };
 
     // Standalone focus-view sharpen used only in Varjo compatible quadviews. The
@@ -312,6 +333,10 @@ class OpenXrLayer {
         uint64_t locate_calls{0};
         std::array<uint64_t, 3> request_state_counts{}; // absent, present/inactive, present/active
         uint64_t vector_injected_locate_requests{0};
+        uint64_t rendering_gaze_queries{0};
+        uint64_t rendering_gaze_tracked_queries{0};
+        uint64_t rendering_gaze_untracked_queries{0};
+        uint64_t rendering_gaze_failed_queries{0};
         uint8_t logged_request_state_mask{0};
         uint64_t successful_quad_locates{0};
         bool focus_ranges_initialized{false};
@@ -415,6 +440,11 @@ class OpenXrLayer {
     void RecycleD3D11QuadViewsCompositionTargets();
     XrResult CreateInternalReferenceSpaces(XrSession session);
     void DestroyInternalReferenceSpaces();
+    XrResult CreateVarjoNativeFoveationResources(XrSession session);
+    void DestroyVarjoNativeFoveationResources();
+    bool LocateVarjoRenderingGaze(XrTime display_time,
+                                  XrResult* locate_result,
+                                  XrSpaceLocationFlags* location_flags);
     XrResult CreateEyeGazeResources(XrSession session);
     void DestroyEyeGazeResources();
     bool LocateEyeGazeFocusOffsets(XrSession session,
@@ -448,12 +478,18 @@ class OpenXrLayer {
                                 bool* synthesized_quad_views);
     void RecordVarjoNativeLocateDiagnostics(const XrViewLocateInfo* view_locate_info,
                                             bool vector_request_injected,
+                                            bool rendering_gaze_queried,
+                                            XrResult rendering_gaze_result,
+                                            XrSpaceLocationFlags rendering_gaze_flags,
                                             const XrViewState* view_state,
                                             XrResult result,
                                             uint32_t view_capacity_input,
                                             const uint32_t* view_count_output,
                                             const XrView* views);
     void LogVarjoNativeFoveationSummaryLocked(std::string_view reason, bool info_level);
+    bool EnsureD3D11QuadViewsPixelProbeResources(int64_t format);
+    void ReleaseD3D11QuadViewsPixelProbeResources(bool preserve_history);
+    void PollD3D11QuadViewsPixelProbe();
     bool SynthesizeQuadViewsFromStereo(std::span<const XrView> stereo_views,
                                        const QuadViewsResolvedSettings& quadviews_settings,
                                        double focus_yaw_radians,
@@ -839,6 +875,13 @@ class OpenXrLayer {
     XrSpace internal_stage_space_{XR_NULL_HANDLE};
     XrActionSet quadviews_action_set_{XR_NULL_HANDLE};
     XrAction quadviews_eye_gaze_action_{XR_NULL_HANDLE};
+    XrSpace varjo_native_view_space_{XR_NULL_HANDLE};
+    XrSpace varjo_native_combined_eye_space_{XR_NULL_HANDLE};
+    bool varjo_native_rendering_gaze_tracked_{false};
+    bool has_logged_varjo_native_rendering_gaze_active_{false};
+    bool has_logged_varjo_native_rendering_gaze_unavailable_{false};
+    bool varjo_native_foveation_resources_attempted_{false};
+    uint32_t varjo_native_rendering_gaze_transition_logs_remaining_{8};
     XrSpace quadviews_eye_gaze_space_{XR_NULL_HANDLE};
     XrPath eye_gaze_interaction_profile_path_{XR_NULL_PATH};
     XrPath eye_gaze_pose_path_{XR_NULL_PATH};
@@ -857,6 +900,7 @@ class OpenXrLayer {
     bool quadviews_compositor_recovery_pending_{false};
     XrViewConfigurationType active_primary_view_configuration_type_{XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO};
     XrViewConfigurationType active_runtime_view_configuration_type_{XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO};
+    uint32_t pending_quadviews_pixel_diagnostics_{0};
     bool has_active_primary_view_configuration_{false};
     bool has_logged_quad_view_short_count_{false};
     bool has_logged_pivotxr_spike_mode_{false};

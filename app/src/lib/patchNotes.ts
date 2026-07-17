@@ -8,6 +8,16 @@ export interface PatchNoteEntry {
 
 export const patchNotes: PatchNoteEntry[] = [
   {
+    version: '0.13.4',
+    date: '2026-07-17',
+    title: 'Varjo Eye Tracking & Recovery Diagnostics',
+    summary: 'Restores gaze-driven native Varjo foveation and adds targeted diagnostics for Virtual Desktop reconnect blur.',
+    items: [
+      'Fixed native Varjo Quadviews remaining fixed-center by activating foveated rendering only while the combined-eye orientation is tracked.',
+      'Added bounded, debug-only compositor resource and pixel diagnostics to identify Virtual Desktop reconnect blur without affecting normal rendering.',
+    ],
+  },
+  {
     version: '0.13.3',
     date: '2026-07-15',
     title: 'Headset Recovery & Frame Pacing',
