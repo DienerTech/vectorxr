@@ -1484,6 +1484,8 @@ XrResult OpenXrLayer::OnInstanceCreated(const XrInstanceCreateInfo* create_info,
                  << (diagnostics.app_requested_varjo_foveated_rendering ? 1 : 0)
                  << ", eligible=" << (diagnostics.varjo_compatible_eligible ? 1 : 0)
                  << ", extScanRan=" << (diagnostics.pre_instance_extension_scan_ran ? 1 : 0)
+                 << ", extScanComplete=" << (diagnostics.pre_instance_extension_scan_complete ? 1 : 0)
+                 << ", extScanDetail=" << diagnostics.pre_instance_extension_scan_detail
                  << ", extScanResult=" << static_cast<int>(diagnostics.pre_instance_extension_scan_result)
                  << ", extCount=" << diagnostics.pre_instance_extension_count
                  << ", runtimeAdvertisesVarjoQuad=" << (diagnostics.runtime_advertises_varjo_quad ? 1 : 0)
@@ -1494,7 +1496,8 @@ XrResult OpenXrLayer::OnInstanceCreated(const XrInstanceCreateInfo* create_info,
         logger_.Info("Active OpenXR runtime manifest: [" + diagnostics.active_runtime_path + "]");
         logger_.Info("Pre-instance runtime extensions seen by layer: [" + diagnostics.pre_instance_extensions +
                      "]");
-        if (quad_views_extension_requested_ && !diagnostics.runtime_advertises_varjo_quad) {
+        if (diagnostics.active_runtime_is_varjo && quad_views_extension_requested_ &&
+            !diagnostics.runtime_advertises_varjo_quad) {
             logger_.Info(
                 "DIAGNOSTIC: the application enabled XR_VARJO_quad_views but the layer's pre-instance probe "
                 "did not report it — confirming the pre-instance extension probe is unreliable here. Varjo "
@@ -1502,31 +1505,36 @@ XrResult OpenXrLayer::OnInstanceCreated(const XrInstanceCreateInfo* create_info,
         }
     }
 
-    const bool log_eye_gaze_instance_setup =
+    const bool log_eye_gaze_startup =
         diagnostics.app_requested_quad_views || diagnostics.app_requested_varjo_foveated_rendering ||
-        diagnostics.app_requested_eye_gaze || diagnostics.optimistic_eye_gaze_request ||
-        XR_FAILED(diagnostics.first_create_result) || diagnostics.retried_without_eye_gaze;
-    if (log_eye_gaze_instance_setup) {
+        diagnostics.app_requested_eye_gaze || diagnostics.layer_injected_eye_gaze_request ||
+        diagnostics.retried_without_eye_gaze;
+    if (log_eye_gaze_startup) {
+        const char* extension_request = diagnostics.app_requested_eye_gaze
+                                            ? "application"
+                                            : diagnostics.layer_injected_eye_gaze_request ? "layer-injected"
+                                                                                          : "skipped";
+        const char* tracking_path = eye_gaze_extension_enabled
+                                        ? "ext-eye-gaze-action"
+                                        : diagnostics.varjo_compatible_quad_forwarded ? "native-varjo-runtime"
+                                                                                       : "head-static";
         std::ostringstream stream;
-        stream << "Quadviews eye-gaze instance setup: appRequestedQuadViews="
-               << (diagnostics.app_requested_quad_views ? 1 : 0)
-               << ", appRequestedVarjoFoveatedRendering="
-               << (diagnostics.app_requested_varjo_foveated_rendering ? 1 : 0)
-               << ", appRequestedEyeGaze=" << (diagnostics.app_requested_eye_gaze ? 1 : 0);
-        if (diagnostics.cheap_eye_gaze_probe_ran) {
-            stream << ", cheapProbeSupported=" << (diagnostics.cheap_eye_gaze_probe_supported ? 1 : 0);
-        } else {
-            stream << ", cheapProbeSupported=not-run";
-        }
-        stream << ", optimisticRequest=" << (diagnostics.optimistic_eye_gaze_request ? 1 : 0)
+        stream << "Quadviews eye-gaze startup: probe="
+               << EyeGazeProbeStateName(diagnostics.eye_gaze_probe_state)
+               << ", probeDetail=" << diagnostics.pre_instance_extension_scan_detail
+               << ", probeXrResult=" << static_cast<int>(diagnostics.pre_instance_extension_scan_result)
+               << ", runtimeWorkaround=" << (diagnostics.eye_gaze_probe_known_unreliable ? 1 : 0)
+               << ", extensionRequest=" << extension_request
+               << ", requestReason=" << EyeGazeRequestReasonName(diagnostics.eye_gaze_request_reason)
                << ", firstCreateResult=" << static_cast<int>(diagnostics.first_create_result)
                << ", firstDownstreamExtensionCount=" << diagnostics.first_downstream_extension_count
-               << ", retriedWithoutEyeGaze=" << (diagnostics.retried_without_eye_gaze ? 1 : 0);
+               << ", retry=" << (diagnostics.retried_without_eye_gaze ? "without-eye-gaze" : "not-needed");
         if (diagnostics.retried_without_eye_gaze) {
             stream << ", retryCreateResult=" << static_cast<int>(diagnostics.retry_create_result);
         }
         stream << ", finalDownstreamExtensionCount=" << diagnostics.final_downstream_extension_count
-               << ", finalEyeGazeEnabled=" << (eye_gaze_extension_enabled ? 1 : 0);
+               << ", finalExtensionEnabled=" << (eye_gaze_extension_enabled ? 1 : 0)
+               << ", trackingPath=" << tracking_path;
         logger_.Info(stream.str());
     }
     if (eye_gaze_extension_enabled_) {

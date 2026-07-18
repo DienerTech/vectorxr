@@ -248,49 +248,12 @@ bool ApplicationRequestedExtension(const XrInstanceCreateInfo* create_info, std:
     return false;
 }
 
-bool RuntimeSupportsExtension(PFN_xrGetInstanceProcAddr next_get_instance_proc_addr,
-                              std::string_view extension_name) {
-    if (!next_get_instance_proc_addr) {
-        return false;
-    }
-
-    PFN_xrVoidFunction function = nullptr;
-    if (XR_FAILED(next_get_instance_proc_addr(
-            XR_NULL_HANDLE, "xrEnumerateInstanceExtensionProperties", &function)) ||
-        !function) {
-        return false;
-    }
-
-    const auto enumerate_extension_properties =
-        reinterpret_cast<PFN_xrEnumerateInstanceExtensionProperties>(function);
-    uint32_t extension_count = 0;
-    XrResult result = enumerate_extension_properties(nullptr, 0, &extension_count, nullptr);
-    if (XR_FAILED(result) || extension_count == 0) {
-        return false;
-    }
-
-    std::vector<XrExtensionProperties> properties(extension_count);
-    for (XrExtensionProperties& property : properties) {
-        property = {XR_TYPE_EXTENSION_PROPERTIES};
-    }
-    result = enumerate_extension_properties(
-        nullptr, extension_count, &extension_count, properties.data());
-    if (XR_FAILED(result)) {
-        return false;
-    }
-
-    return std::find_if(properties.begin(), properties.end(), [&](const XrExtensionProperties& property) {
-               return std::strncmp(property.extensionName,
-                                   extension_name.data(),
-                                   XR_MAX_EXTENSION_NAME_SIZE) == 0;
-           }) != properties.end();
-}
-
-// Diagnostic sibling of RuntimeSupportsExtension that returns the full extension
-// list the pre-instance probe saw (plus the raw enumeration result), so the layer
-// can log exactly why Varjo compatible forwarding did or did not fire.
+// Single authoritative pre-instance extension probe used by native Varjo
+// forwarding, synthesized-quadviews gaze setup, and startup diagnostics.
 struct RuntimeExtensionScan {
     bool ran{false};
+    bool complete{false};
+    const char* detail{"not-run"};
     XrResult result{XR_SUCCESS};
     uint32_t count{0};
     std::vector<std::string> names;
@@ -303,13 +266,19 @@ struct RuntimeExtensionScan {
 RuntimeExtensionScan ScanRuntimeInstanceExtensions(PFN_xrGetInstanceProcAddr next_get_instance_proc_addr) {
     RuntimeExtensionScan scan;
     if (!next_get_instance_proc_addr) {
+        scan.detail = "next-get-instance-proc-addr-unavailable";
         return scan;
     }
 
     PFN_xrVoidFunction function = nullptr;
-    if (XR_FAILED(next_get_instance_proc_addr(
-            XR_NULL_HANDLE, "xrEnumerateInstanceExtensionProperties", &function)) ||
-        !function) {
+    scan.result = next_get_instance_proc_addr(
+        XR_NULL_HANDLE, "xrEnumerateInstanceExtensionProperties", &function);
+    if (XR_FAILED(scan.result)) {
+        scan.detail = "enumeration-function-query-failed";
+        return scan;
+    }
+    if (!function) {
+        scan.detail = "enumeration-function-unavailable";
         return scan;
     }
 
@@ -318,8 +287,14 @@ RuntimeExtensionScan ScanRuntimeInstanceExtensions(PFN_xrGetInstanceProcAddr nex
     scan.ran = true;
     uint32_t extension_count = 0;
     scan.result = enumerate_extension_properties(nullptr, 0, &extension_count, nullptr);
-    if (XR_FAILED(scan.result) || extension_count == 0) {
+    if (XR_FAILED(scan.result)) {
+        scan.detail = "enumeration-count-query-failed";
+        return scan;
+    }
+    if (extension_count == 0) {
         scan.count = extension_count;
+        scan.complete = true;
+        scan.detail = "complete";
         return scan;
     }
 
@@ -330,6 +305,7 @@ RuntimeExtensionScan ScanRuntimeInstanceExtensions(PFN_xrGetInstanceProcAddr nex
     scan.result = enumerate_extension_properties(nullptr, extension_count, &extension_count, properties.data());
     scan.count = extension_count;
     if (XR_FAILED(scan.result)) {
+        scan.detail = "enumeration-list-query-failed";
         return scan;
     }
 
@@ -337,6 +313,8 @@ RuntimeExtensionScan ScanRuntimeInstanceExtensions(PFN_xrGetInstanceProcAddr nex
     for (const XrExtensionProperties& property : properties) {
         scan.names.emplace_back(property.extensionName);
     }
+    scan.complete = true;
+    scan.detail = "complete";
     return scan;
 }
 
@@ -594,23 +572,27 @@ XrResult XRAPI_CALL xrCreateApiLayerInstance(const XrInstanceCreateInfo* instanc
     // feature toggle. Always preserve them for the active Varjo runtime. VectorXR's
     // profile still decides whether scaling/sharpening modifications are applied,
     // but disabling Quadviews must never disable an application's native path.
-    const bool app_requested_quad_views_for_forwarding =
+    const bool app_requested_layer_owned_quadviews =
         diagnostics.app_requested_quad_views || diagnostics.app_requested_varjo_foveated_rendering;
+    RuntimeExtensionScan extension_scan;
     bool forward_varjo_quad_extensions = false;
-    if (app_requested_quad_views_for_forwarding) {
+    if (app_requested_layer_owned_quadviews) {
         diagnostics.varjo_compatible_eligible = OpenXrLayer::Instance().IsVarjoCompatibleQuadviewsEligible();
 
         // Always scan (even when ineligible) so the logs show exactly what the
         // pre-instance probe returned — this is the signal the forward hinges on.
-        const RuntimeExtensionScan scan = ScanRuntimeInstanceExtensions(next_info->nextGetInstanceProcAddr);
-        diagnostics.pre_instance_extension_scan_ran = scan.ran;
-        diagnostics.pre_instance_extension_scan_result = scan.result;
-        diagnostics.pre_instance_extension_count = scan.count;
-        diagnostics.runtime_advertises_varjo_quad = scan.Contains(XR_VARJO_QUAD_VIEWS_EXTENSION_NAME);
+        extension_scan = ScanRuntimeInstanceExtensions(next_info->nextGetInstanceProcAddr);
+        diagnostics.pre_instance_extension_scan_ran = extension_scan.ran;
+        diagnostics.pre_instance_extension_scan_complete = extension_scan.complete;
+        diagnostics.pre_instance_extension_scan_detail = extension_scan.detail;
+        diagnostics.pre_instance_extension_scan_result = extension_scan.result;
+        diagnostics.pre_instance_extension_count = extension_scan.count;
+        diagnostics.runtime_advertises_varjo_quad =
+            extension_scan.Contains(XR_VARJO_QUAD_VIEWS_EXTENSION_NAME);
         diagnostics.runtime_advertises_varjo_foveated =
-            scan.Contains(XR_VARJO_FOVEATED_RENDERING_EXTENSION_NAME);
+            extension_scan.Contains(XR_VARJO_FOVEATED_RENDERING_EXTENSION_NAME);
         std::string joined_extensions;
-        for (const std::string& name : scan.names) {
+        for (const std::string& name : extension_scan.names) {
             if (!joined_extensions.empty()) {
                 joined_extensions += ' ';
             }
@@ -649,25 +631,25 @@ XrResult XRAPI_CALL xrCreateApiLayerInstance(const XrInstanceCreateInfo* instanc
         base_downstream_extensions.push_back(extension_name);
     }
 
-    const bool app_requested_layer_owned_quadviews =
-        diagnostics.app_requested_quad_views || diagnostics.app_requested_varjo_foveated_rendering;
-    if (app_requested_layer_owned_quadviews || diagnostics.app_requested_eye_gaze) {
-        diagnostics.cheap_eye_gaze_probe_ran = true;
-        diagnostics.cheap_eye_gaze_probe_supported =
-            RuntimeSupportsExtension(next_info->nextGetInstanceProcAddr, XR_EXT_EYE_GAZE_INTERACTION_EXTENSION_NAME);
+    if (app_requested_layer_owned_quadviews) {
+        diagnostics.eye_gaze_probe_state = ClassifyEyeGazeProbe(
+            extension_scan.complete,
+            extension_scan.Contains(XR_EXT_EYE_GAZE_INTERACTION_EXTENSION_NAME));
     }
 
     std::vector<const char*> first_downstream_extensions = base_downstream_extensions;
-    const bool eye_gaze_probe_known_unreliable =
+    diagnostics.eye_gaze_probe_known_unreliable =
         IsEyeGazeExtensionProbeKnownUnreliable(diagnostics.active_runtime_path);
-    diagnostics.optimistic_eye_gaze_request = ShouldOptimisticallyRequestEyeGaze({
+    const EyeGazeRequestDecision eye_gaze_request = DecideEyeGazeExtensionRequest({
         app_requested_layer_owned_quadviews,
         forward_varjo_quad_extensions,
         ExtensionListContains(first_downstream_extensions, XR_EXT_EYE_GAZE_INTERACTION_EXTENSION_NAME),
-        diagnostics.cheap_eye_gaze_probe_supported,
-        eye_gaze_probe_known_unreliable,
+        diagnostics.eye_gaze_probe_state,
+        diagnostics.eye_gaze_probe_known_unreliable,
     });
-    if (diagnostics.optimistic_eye_gaze_request) {
+    diagnostics.eye_gaze_request_reason = eye_gaze_request.reason;
+    diagnostics.layer_injected_eye_gaze_request = eye_gaze_request.inject_extension;
+    if (diagnostics.layer_injected_eye_gaze_request) {
         first_downstream_extensions.push_back(XR_EXT_EYE_GAZE_INTERACTION_EXTENSION_NAME);
     }
     diagnostics.first_downstream_extension_count = static_cast<uint32_t>(first_downstream_extensions.size());
@@ -683,8 +665,8 @@ XrResult XRAPI_CALL xrCreateApiLayerInstance(const XrInstanceCreateInfo* instanc
     const std::vector<const char*>* successful_downstream_extensions = &first_downstream_extensions;
     const bool eye_gaze_extension_related_failure =
         result == XR_ERROR_EXTENSION_NOT_PRESENT || result == XR_ERROR_EXTENSION_DEPENDENCY_NOT_ENABLED;
-    if (ShouldRetryWithoutOptimisticEyeGaze(
-            diagnostics.optimistic_eye_gaze_request, eye_gaze_extension_related_failure)) {
+    if (ShouldRetryWithoutInjectedEyeGaze(
+            diagnostics.layer_injected_eye_gaze_request, eye_gaze_extension_related_failure)) {
         diagnostics.retried_without_eye_gaze = true;
         *instance = XR_NULL_HANDLE;
 

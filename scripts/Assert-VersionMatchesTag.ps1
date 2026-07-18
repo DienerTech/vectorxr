@@ -46,4 +46,14 @@ if ($mismatches.Count -gt 0) {
     throw "Version mismatch for tag '$TagName':`n$($details -join "`n")"
 }
 
+$releaseNotesPath = Get-ReleaseNotesPath -Version $expectedVersion
+if (-not (Test-Path -LiteralPath $releaseNotesPath -PathType Leaf)) {
+    throw "Release notes for tag '$TagName' are missing: $releaseNotesPath"
+}
+
+$releaseNotes = Read-FileRaw -Path $releaseNotesPath
+if ($releaseNotes -notmatch '(?m)^##\s+\S') {
+    throw "Release notes for tag '$TagName' must begin with a level-two Markdown heading."
+}
+
 Write-Host "Version check passed for $TagName."

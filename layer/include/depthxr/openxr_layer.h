@@ -23,6 +23,7 @@
 #include "depthxr/config_parser.h"
 #include "depthxr/effects.h"
 #include "depthxr/logger.h"
+#include "depthxr/runtime_compatibility.h"
 #include "depthxr/runtime_pacing.h"
 #include "depthxr/settings_resolver.h"
 #include "depthxr/swapchain_state.h"
@@ -55,9 +56,10 @@ class OpenXrLayer {
         bool app_requested_quad_views{false};
         bool app_requested_varjo_foveated_rendering{false};
         bool app_requested_eye_gaze{false};
-        bool cheap_eye_gaze_probe_ran{false};
-        bool cheap_eye_gaze_probe_supported{false};
-        bool optimistic_eye_gaze_request{false};
+        EyeGazeProbeState eye_gaze_probe_state{EyeGazeProbeState::kIndeterminate};
+        bool eye_gaze_probe_known_unreliable{false};
+        EyeGazeRequestReason eye_gaze_request_reason{EyeGazeRequestReason::kQuadviewsNotRequested};
+        bool layer_injected_eye_gaze_request{false};
         XrResult first_create_result{XR_SUCCESS};
         bool retried_without_eye_gaze{false};
         XrResult retry_create_result{XR_SUCCESS};
@@ -75,6 +77,8 @@ class OpenXrLayer {
         bool runtime_advertises_varjo_quad{false};
         bool runtime_advertises_varjo_foveated{false};
         bool pre_instance_extension_scan_ran{false};
+        bool pre_instance_extension_scan_complete{false};
+        std::string pre_instance_extension_scan_detail{"not-run"};
         XrResult pre_instance_extension_scan_result{XR_SUCCESS};
         uint32_t pre_instance_extension_count{0};
         std::string pre_instance_extensions;

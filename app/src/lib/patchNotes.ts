@@ -8,6 +8,18 @@ export interface PatchNoteEntry {
 
 export const patchNotes: PatchNoteEntry[] = [
   {
+    version: '0.13.5',
+    date: '2026-07-17',
+    title: 'Eye-Tracking Runtime Compatibility',
+    summary: 'Restores eye-tracked Quadviews on affected Virtual Desktop setups and makes startup capability decisions immediately diagnosable across runtimes.',
+    items: [
+      'Fixed eye-tracked Quadviews falling back to fixed foveation when a runtime or API-layer chain cannot complete pre-instance eye-gaze extension enumeration; VectorXR now treats that result as indeterminate, requests XR_EXT_eye_gaze_interaction optimistically, and safely retries without it when rejected.',
+      'Replaced the binary eye-gaze capability check with one authoritative tri-state extension probe, preserving completed negative results, known SteamVR and PimaxXR false-negative workarounds, and the native Varjo gaze contract.',
+      'Added an info-level Quadviews eye-gaze startup summary covering probe state and failure detail, extension-request reason, instance create and retry results, final extension state, and selected tracking path.',
+      'Added regression coverage for present, absent, and indeterminate gaze probes, including the Virtual Desktop failure mode.',
+    ],
+  },
+  {
     version: '0.13.4',
     date: '2026-07-17',
     title: 'Varjo Eye Tracking & Recovery Diagnostics',
