@@ -1646,6 +1646,10 @@ void TestD3D11SharpenShaderRegression() {
 #endif
 
 void TestEyeGazeExtensionCompatibilityPolicy() {
+    using depthxr::EyeGazeProbeState;
+    using depthxr::EyeGazeRequestPolicyInput;
+    using depthxr::EyeGazeRequestReason;
+
     Expect(depthxr::IsEyeGazeExtensionProbeKnownUnreliable(
                R"(C:\Program Files (x86)\Steam\steamapps\common\SteamVR\steamxr_win64.json)"),
            "SteamVR manifests should retain the false-negative eye-gaze probe workaround");
@@ -1654,53 +1658,78 @@ void TestEyeGazeExtensionCompatibilityPolicy() {
            "PimaxXR manifests should use the false-negative eye-gaze probe workaround");
     Expect(!depthxr::IsEyeGazeExtensionProbeKnownUnreliable(
                R"(C:\Program Files\Virtual Desktop Streamer\OpenXR\virtualdesktop-openxr.json)"),
-           "Runtimes with reliable extension enumeration should not be classified as probe-unreliable");
+           "VDXR should use the generic indeterminate-probe policy instead of a manifest exception");
 
-    depthxr::EyeGazeRequestPolicyInput psvr2_steamvr{
-        true,
-        false,
-        false,
-        false,
-        true,
+    Expect(depthxr::ClassifyEyeGazeProbe(false, false) == EyeGazeProbeState::kIndeterminate,
+           "An extension scan that could not complete must remain indeterminate");
+    Expect(depthxr::ClassifyEyeGazeProbe(false, true) == EyeGazeProbeState::kIndeterminate,
+           "An incomplete scan must not expose partial extension evidence as authoritative");
+    Expect(depthxr::ClassifyEyeGazeProbe(true, true) == EyeGazeProbeState::kPresent,
+           "A completed scan that advertises gaze must classify it as present");
+    Expect(depthxr::ClassifyEyeGazeProbe(true, false) == EyeGazeProbeState::kAbsent,
+           "Only a completed scan may classify gaze as absent");
+
+    auto expect_decision = [](const EyeGazeRequestPolicyInput& input,
+                              bool expected_injection,
+                              EyeGazeRequestReason expected_reason,
+                              const std::string& message) {
+        const depthxr::EyeGazeRequestDecision decision = depthxr::DecideEyeGazeExtensionRequest(input);
+        Expect(decision.inject_extension == expected_injection, message + " (injection)");
+        Expect(decision.reason == expected_reason, message + " (reason)");
     };
-    Expect(depthxr::ShouldOptimisticallyRequestEyeGaze(psvr2_steamvr),
-           "A false-negative SteamVR probe must not disable PSVR2 eye tracking");
 
-    depthxr::EyeGazeRequestPolicyInput pimaxxr{
-        true,
-        false,
-        false,
-        false,
-        depthxr::IsEyeGazeExtensionProbeKnownUnreliable(
-            R"(C:\Program Files\PimaxXR\pimax-openxr.json)"),
-    };
-    Expect(depthxr::ShouldOptimisticallyRequestEyeGaze(pimaxxr),
-           "A false-negative PimaxXR probe must not disable Crystal eye tracking");
+    EyeGazeRequestPolicyInput input;
+    input.app_requested_layer_owned_quadviews = true;
 
-    psvr2_steamvr.pre_instance_probe_supported = true;
-    psvr2_steamvr.pre_instance_probe_known_unreliable = false;
-    Expect(depthxr::ShouldOptimisticallyRequestEyeGaze(psvr2_steamvr),
-           "A positive gaze probe should still enable the injected extension");
+    input.pre_instance_probe = EyeGazeProbeState::kPresent;
+    expect_decision(input, true, EyeGazeRequestReason::kRuntimeAdvertised,
+                    "An advertised gaze extension should be injected for synthesized quadviews");
 
-    psvr2_steamvr.pre_instance_probe_supported = false;
-    Expect(!depthxr::ShouldOptimisticallyRequestEyeGaze(psvr2_steamvr),
-           "An unsupported runtime with a reliable negative probe should not pay for a failed instance retry");
-    psvr2_steamvr.pre_instance_probe_supported = true;
+    input.pre_instance_probe = EyeGazeProbeState::kIndeterminate;
+    expect_decision(input, true, EyeGazeRequestReason::kProbeIndeterminate,
+                    "An unavailable VDXR-style probe should optimistically request gaze");
 
-    psvr2_steamvr.forwarding_native_quadviews = true;
-    Expect(!depthxr::ShouldOptimisticallyRequestEyeGaze(psvr2_steamvr),
-           "Native Varjo quadviews should retain its runtime-owned extension contract");
+    input.pre_instance_probe = EyeGazeProbeState::kAbsent;
+    expect_decision(input, false, EyeGazeRequestReason::kReliableNegative,
+                    "A completed negative probe on an ordinary runtime should be trusted");
 
-    psvr2_steamvr.forwarding_native_quadviews = false;
-    psvr2_steamvr.downstream_already_has_eye_gaze = true;
-    Expect(!depthxr::ShouldOptimisticallyRequestEyeGaze(psvr2_steamvr),
-           "The layer must not duplicate an application-requested gaze extension");
+    input.pre_instance_probe_known_unreliable = true;
+    expect_decision(input, true, EyeGazeRequestReason::kRuntimeWorkaround,
+                    "A completed false-negative on a known runtime should retain the workaround");
 
-    Expect(depthxr::ShouldRetryWithoutOptimisticEyeGaze(true, true),
+    input.pre_instance_probe_known_unreliable = false;
+    input.forwarding_native_quadviews = true;
+    input.pre_instance_probe = EyeGazeProbeState::kIndeterminate;
+    expect_decision(input, false, EyeGazeRequestReason::kNativeQuadviews,
+                    "Native Varjo quadviews should retain its runtime-owned gaze contract");
+
+    input.forwarding_native_quadviews = false;
+    input.downstream_already_has_eye_gaze = true;
+    expect_decision(input, false, EyeGazeRequestReason::kApplicationRequested,
+                    "The layer must not duplicate an application-requested gaze extension");
+
+    input.downstream_already_has_eye_gaze = false;
+    input.app_requested_layer_owned_quadviews = false;
+    expect_decision(input, false, EyeGazeRequestReason::kQuadviewsNotRequested,
+                    "Applications without layer-owned quadviews should not receive an injected extension");
+
+    Expect(depthxr::EyeGazeProbeStateName(EyeGazeProbeState::kPresent) == "present" &&
+               depthxr::EyeGazeProbeStateName(EyeGazeProbeState::kAbsent) == "absent" &&
+               depthxr::EyeGazeProbeStateName(EyeGazeProbeState::kIndeterminate) == "indeterminate",
+           "Probe state names must remain stable for startup diagnostics");
+    Expect(depthxr::EyeGazeRequestReasonName(EyeGazeRequestReason::kProbeIndeterminate) ==
+               "probe-indeterminate" &&
+               depthxr::EyeGazeRequestReasonName(EyeGazeRequestReason::kRuntimeWorkaround) ==
+                   "runtime-workaround" &&
+               depthxr::EyeGazeRequestReasonName(EyeGazeRequestReason::kReliableNegative) ==
+                   "reliable-negative",
+           "Request reason names must remain stable for startup diagnostics");
+
+    Expect(depthxr::ShouldRetryWithoutInjectedEyeGaze(true, true),
            "An injected gaze extension rejected by a runtime should use the safe retry");
-    Expect(!depthxr::ShouldRetryWithoutOptimisticEyeGaze(true, false),
+    Expect(!depthxr::ShouldRetryWithoutInjectedEyeGaze(true, false),
            "Unrelated instance failures must not be hidden by the gaze retry");
-    Expect(!depthxr::ShouldRetryWithoutOptimisticEyeGaze(false, true),
+    Expect(!depthxr::ShouldRetryWithoutInjectedEyeGaze(false, true),
            "Application-owned extension failures must not be retried behind its back");
 }
 
