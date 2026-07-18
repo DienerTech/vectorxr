@@ -55,6 +55,23 @@ function Get-PatchNotesPath {
     return (Join-Path (Get-RepoRoot) "app/src/lib/patchNotes.ts")
 }
 
+function Get-ReleaseNotesPath {
+    param([Parameter(Mandatory = $true)][string]$Version)
+    return (Join-Path (Get-RepoRoot) "release/notes/v$Version.md")
+}
+
+function Get-ReleaseManagedPaths {
+    param([Parameter(Mandatory = $true)][string]$Version)
+
+    $root = Get-RepoRoot
+    $paths = @((Get-VersionTargets | ForEach-Object { $_.Path }))
+    $paths += Get-PatchNotesPath
+    $paths += Join-Path $root "app/package-lock.json"
+    $paths += Join-Path $root "app/src-tauri/Cargo.lock"
+    $paths += Get-ReleaseNotesPath -Version $Version
+    return $paths
+}
+
 # Three capture groups: (1) prefix up to and including the opening quote,
 # (2) the version value, (3) the closing quote. Only the FIRST match is ever used,
 # so nested / dependency versions are never touched.

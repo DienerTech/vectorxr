@@ -14,6 +14,10 @@ app/src-tauri/resources/vectorxr-layer/
 # Local internal planning/working notes (not part of the public repo)
 notes/
 
+# Versioned GitHub release notes are public artifacts
+!release/notes/
+!release/notes/*.md
+
 # Scratch dir from local signature/copyright checks
 .tmp-signature-check/
 

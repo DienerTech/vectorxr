@@ -154,24 +154,18 @@ The installer build compiles the OpenXR layer, stages the layer DLL and manifest
 
 ## Release Tags
 
-GitHub builds release installers from `vMAJOR.MINOR.PATCH` tags.
-
-Before tagging, update the version in:
-
-- `app/package.json`
-- `app/src-tauri/tauri.conf.json`
-- `app/src-tauri/Cargo.toml`
-- `app/src/lib/patchNotes.ts`
-
-Then verify and tag:
+GitHub builds release installers from `vMAJOR.MINOR.PATCH` tags. The release script updates every version location and lock file, creates the in-app patch-note entry and matching Markdown release notes, validates the result, commits it, creates an annotated tag, atomically pushes the branch and tag, and waits for the GitHub Release workflow:
 
 ```powershell
-.\scripts\Assert-VersionMatchesTag.ps1 -TagName v0.8.0
-git tag v0.8.0
-git push origin master --tags
+.\scripts\Set-Version.ps1 `
+  -Version 0.13.6 `
+  -Title "Release title" `
+  -Summary "One-sentence release summary." `
+  -Items "First change.", "Second change." `
+  -Publish
 ```
 
-Pushing the tag runs `.github/workflows/release.yml`, builds the Windows installer, creates or updates the GitHub Release, and uploads the installer plus a SHA-256 checksum.
+Run the command from a clean branch with working Git credentials and an authenticated GitHub CLI (`gh auth login`). Use `-WhatIf` to preview the operation, or `-NoWait` with `-Publish` to return after the tag is pushed instead of following the workflow. The generated release body is committed at `release/notes/vMAJOR.MINOR.PATCH.md`; `.github/workflows/release.yml` uses it verbatim and uploads the Windows installer plus a SHA-256 checksum.
 
 ## Project Layout
 

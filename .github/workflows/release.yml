@@ -76,12 +76,28 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           $tag = "${{ github.ref_name }}"
+          $notesPath = Join-Path $env:GITHUB_WORKSPACE "release/notes/$tag.md"
+          if (-not (Test-Path -LiteralPath $notesPath -PathType Leaf)) {
+            throw "Release notes were not found at $notesPath."
+          }
+
           $assets = Get-ChildItem -Path "release-assets" -File | ForEach-Object { $_.FullName }
           gh release view $tag *> $null
           $releaseExists = $LASTEXITCODE -eq 0
 
           if ($releaseExists) {
+            gh release edit $tag --title "VectorXR $tag" --notes-file $notesPath
+            if ($LASTEXITCODE -ne 0) {
+              throw "Failed to update release metadata for $tag."
+            }
+
             gh release upload $tag @assets --clobber
+            if ($LASTEXITCODE -ne 0) {
+              throw "Failed to upload release assets for $tag."
+            }
           } else {
-            gh release create $tag @assets --verify-tag --title "VectorXR $tag" --generate-notes
+            gh release create $tag @assets --verify-tag --title "VectorXR $tag" --notes-file $notesPath
+            if ($LASTEXITCODE -ne 0) {
+              throw "Failed to create release $tag."
+            }
           }
