@@ -345,7 +345,12 @@ function Wait-ForReleaseWorkflow {
         ) -FailureMessage "Could not query GitHub Actions runs"
 
         if ($json) {
-            $runs = @($json | ConvertFrom-Json)
+            # Windows PowerShell 5.1 emits a top-level JSON array as one pipeline
+            # object. Explicitly pipe the parsed value again so its elements are
+            # enumerated; otherwise property access below returns all run IDs and
+            # gh run watch receives them as one malformed, space-delimited ID.
+            $parsedRuns = $json | ConvertFrom-Json
+            $runs = @($parsedRuns | ForEach-Object { $_ })
             $run = $runs |
                 Where-Object { $_.headBranch -eq $TagName -and $_.headSha -eq $TaggedCommit } |
                 Sort-Object -Property databaseId -Descending |
