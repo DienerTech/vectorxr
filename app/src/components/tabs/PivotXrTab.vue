@@ -6,8 +6,8 @@ import PivotBindingsPanel from '../PivotBindingsPanel.vue'
 import PivotSettingsPage from '../PivotSettingsPage.vue'
 import PivotSettingsSummary from '../PivotSettingsSummary.vue'
 import ProfileShell from '../ProfileShell.vue'
-import type { RegisteredApplication, VectorXRConfig } from '../../lib/model'
-import { bindingLabel } from '../../lib/model'
+import type { ActivationMode, InputBinding, RegisteredApplication, VectorXRConfig } from '../../lib/model'
+import { bindingLabel, bindingsShareInput } from '../../lib/model'
 
 const props = defineProps<{
   config: VectorXRConfig
@@ -90,6 +90,27 @@ function closeSubPages() {
   void nextTick(() => pageScroller()?.scrollTo({ top: savedScrollTop }))
 }
 
+function activationOriginBindingWarning(
+  mode: ActivationMode,
+  activationBinding: InputBinding,
+  setOriginBinding: InputBinding,
+): string | null {
+  if (!bindingsShareInput(activationBinding, setOriginBinding)) {
+    return null
+  }
+
+  const action = mode === 'toggle' ? 'Every Toggle press, including deactivation,' : 'Every press'
+  return `Activation and Set Origin both use ${bindingLabel(activationBinding)}. ${action} recaptures the current head direction as Pivot's neutral forward. Keep this only if it is intentional; otherwise give Set Origin its own binding.`
+}
+
+const defaultOriginBindingWarning = computed(() =>
+  activationOriginBindingWarning(
+    props.config.modules.pivotxr.activationMode,
+    props.config.modules.pivotxr.activationBinding,
+    props.config.modules.pivotxr.setOriginBinding,
+  ),
+)
+
 const profileWarnings = computed(() => {
   const warnings = new Map<number, string[]>()
   const applicationNameById = new Map(props.applications.map((application) => [application.id, application.name]))
@@ -97,15 +118,20 @@ const profileWarnings = computed(() => {
   const enabledProfiles = props.config.modules.pivotxr.profiles
     .map((profile, index) => ({ profile, index }))
     .filter(({ profile }) => profile.enabled && profile.activationBinding.type !== 'none')
+  for (const { profile, index } of enabledProfiles) {
+    const warning = activationOriginBindingWarning(profile.activationMode, profile.activationBinding, profile.setOriginBinding)
+    if (warning) {
+      warnings.set(index, [warning])
+    }
+  }
 
   for (let i = 0; i < enabledProfiles.length; i++) {
     for (let j = 0; j < i; j++) {
       const a = enabledProfiles[i]
       const b = enabledProfiles[j]
       const labelA = bindingLabel(a.profile.activationBinding)
-      const labelB = bindingLabel(b.profile.activationBinding)
 
-      if (labelA !== labelB) {
+      if (!bindingsShareInput(a.profile.activationBinding, b.profile.activationBinding)) {
         continue
       }
 
@@ -188,6 +214,15 @@ const profileWarnings = computed(() => {
         </label>
 
         <div v-if="config.modules.pivotxr.enabled" class="mt-3">
+          <div
+            v-if="defaultOriginBindingWarning"
+            class="mb-3 rounded-[0.9rem] border px-4 py-3 text-sm leading-6 chip-warning"
+            style="border-color: var(--app-border)"
+          >
+            <p class="font-medium">Activation also sets the origin</p>
+            <p class="mt-1">{{ defaultOriginBindingWarning }}</p>
+          </div>
+
           <PivotBindingsPanel
             :activation-mode="config.modules.pivotxr.activationMode"
             :activation-binding="config.modules.pivotxr.activationBinding"
@@ -234,7 +269,7 @@ const profileWarnings = computed(() => {
           :profile="profile"
           :applications="applications"
           module-label="Pivot"
-          warning-title="Binding shadowed"
+          warning-title="Binding warning"
           :warnings="profileWarnings.get(index)"
           reorderable
           :profile-count="config.modules.pivotxr.profiles.length"

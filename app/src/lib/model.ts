@@ -757,6 +757,33 @@ export function normalizeInputBinding(value: unknown, fallback: InputBinding): I
   }, sound)
 }
 
+export function bindingsShareInput(left: InputBinding, right: InputBinding): boolean {
+  if (left.type === 'none' || right.type === 'none' || left.type !== right.type) {
+    return false
+  }
+
+  if (left.type === 'keyboard' && right.type === 'keyboard') {
+    const leftChord = left.chord.map((key) => key.toLowerCase()).sort()
+    const rightChord = right.chord.map((key) => key.toLowerCase()).sort()
+    if (leftChord.length === 0 || rightChord.length === 0) {
+      return false
+    }
+
+    return leftChord.length === rightChord.length && leftChord.every((key, index) => key === rightChord[index])
+  }
+
+  if (left.type === 'device' && right.type === 'device') {
+    if (!left.deviceGuid.trim() || !right.deviceGuid.trim()) {
+      return false
+    }
+
+    return left.deviceGuid.trim().toLowerCase() === right.deviceGuid.trim().toLowerCase()
+      && left.inputPath.trim().toLowerCase() === right.inputPath.trim().toLowerCase()
+  }
+
+  return false
+}
+
 export function bindingLabel(binding: InputBinding): string {
   if (binding.type === 'device') {
     const device = binding.deviceName?.trim() || binding.deviceGuid.trim() || 'Unassigned device'
