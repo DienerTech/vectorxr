@@ -43,6 +43,10 @@ std::optional<int> ToVirtualKey(std::string_view key) {
         return VK_SHIFT;
     }
 
+    if (key.size() == 7 && key.starts_with("Numpad") && key[6] >= '0' && key[6] <= '9') {
+        return VK_NUMPAD0 + (key[6] - '0');
+    }
+
     if (key.size() == 1) {
         const char character = key[0];
         if ((character >= 'A' && character <= 'Z') || (character >= '0' && character <= '9')) {

@@ -23,6 +23,7 @@
 #include "depthxr/config_parser.h"
 #include "depthxr/effects.h"
 #include "depthxr/logger.h"
+#include "depthxr/quadviews_recovery.h"
 #include "depthxr/runtime_compatibility.h"
 #include "depthxr/runtime_pacing.h"
 #include "depthxr/settings_resolver.h"
@@ -901,7 +902,7 @@ class OpenXrLayer {
     std::optional<std::chrono::steady_clock::time_point> quadviews_eye_gaze_loss_started_wall_time_;
     bool quadviews_eye_gaze_loss_was_locate_failure_{false};
     bool quadviews_has_seen_valid_gaze_{false};
-    bool quadviews_compositor_recovery_pending_{false};
+    QuadViewsRecoveryStabilizer quadviews_compositor_recovery_;
     XrViewConfigurationType active_primary_view_configuration_type_{XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO};
     XrViewConfigurationType active_runtime_view_configuration_type_{XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO};
     uint32_t pending_quadviews_pixel_diagnostics_{0};

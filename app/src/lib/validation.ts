@@ -65,7 +65,7 @@ function validateInputBinding(prefix: string, binding: InputBinding): string[] {
 
     const seen = new Set<string>()
     for (const key of binding.chord) {
-      if (!/^(Ctrl|Alt|Shift|Space|F([1-9]|1[0-2])|[A-Z]|[0-9])$/.test(key)) {
+      if (!/^(Ctrl|Alt|Shift|Space|F([1-9]|1[0-2])|Numpad[0-9]|[A-Z]|[0-9])$/.test(key)) {
         errors.push(`${prefix}.chord contains unsupported key: ${key}`)
       }
       if (seen.has(key)) {

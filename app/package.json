@@ -1,12 +1,13 @@
 {
   "name": "vectorxr-app",
   "private": true,
-  "version": "0.13.5",
+  "version": "0.13.6",
   "license": "MPL-2.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "vue-tsc --noEmit && vite build",
+    "test": "node --experimental-strip-types --test --test-isolation=none tests/*.test.mjs",
     "preview": "vite preview",
     "icons:generate": "powershell -ExecutionPolicy Bypass -File ../scripts/Generate-TauriIcons.ps1",
     "tauri:dev": "tauri dev",

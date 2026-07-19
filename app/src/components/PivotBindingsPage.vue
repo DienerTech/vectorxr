@@ -1,9 +1,9 @@
 <script setup lang="ts">
-import { onMounted, onUnmounted } from 'vue'
+import { computed, onMounted, onUnmounted } from 'vue'
 
 import BindingEditor from './BindingEditor.vue'
 import PivotActivationEditor from './PivotActivationEditor.vue'
-import type { ActivationMode, InputBinding } from '../lib/model'
+import { pivotBindingConflictWarnings, type ActivationMode, type InputBinding } from '../lib/model'
 
 // The default module config and each pivot profile share this binding shape;
 // fields are mutated directly on the passed-in reactive object.
@@ -14,11 +14,17 @@ interface PivotBindingsSubject {
   releaseOriginBinding: InputBinding
 }
 
-defineProps<{
+const props = defineProps<{
   subject: PivotBindingsSubject
   // Names the profile in the breadcrumb/title, e.g. "Default Profile" or "DCS".
   contextLabel: string
 }>()
+const bindingWarnings = computed(() => pivotBindingConflictWarnings(
+  props.subject.activationMode,
+  props.subject.activationBinding,
+  props.subject.setOriginBinding,
+  props.subject.releaseOriginBinding,
+))
 
 const emit = defineEmits<{
   close: []
@@ -73,6 +79,15 @@ onUnmounted(() => {
           description="Choose a keyboard shortcut or capture a joystick button that engages Pivot."
         />
 
+        <div
+          v-for="warning in bindingWarnings"
+          :key="warning.title"
+          class="rounded-[0.9rem] border px-4 py-3 text-sm leading-6 chip-warning"
+          style="border-color: var(--app-border)"
+        >
+          <p class="font-medium">{{ warning.title }}</p>
+          <p class="mt-1">{{ warning.message }}</p>
+        </div>
         <BindingEditor
           v-model="subject.setOriginBinding"
           label="Set Origin (optional)"

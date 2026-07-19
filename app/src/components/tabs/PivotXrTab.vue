@@ -7,7 +7,7 @@ import PivotSettingsPage from '../PivotSettingsPage.vue'
 import PivotSettingsSummary from '../PivotSettingsSummary.vue'
 import ProfileShell from '../ProfileShell.vue'
 import type { RegisteredApplication, VectorXRConfig } from '../../lib/model'
-import { bindingLabel } from '../../lib/model'
+import { bindingLabel, bindingsMatchRuntimeActivation, pivotBindingConflictWarnings } from '../../lib/model'
 
 const props = defineProps<{
   config: VectorXRConfig
@@ -90,22 +90,41 @@ function closeSubPages() {
   void nextTick(() => pageScroller()?.scrollTo({ top: savedScrollTop }))
 }
 
+const defaultBindingWarnings = computed(() => pivotBindingConflictWarnings(
+  props.config.modules.pivotxr.activationMode,
+  props.config.modules.pivotxr.activationBinding,
+  props.config.modules.pivotxr.setOriginBinding,
+  props.config.modules.pivotxr.releaseOriginBinding,
+))
+
 const profileWarnings = computed(() => {
   const warnings = new Map<number, string[]>()
   const applicationNameById = new Map(props.applications.map((application) => [application.id, application.name]))
 
   const enabledProfiles = props.config.modules.pivotxr.profiles
     .map((profile, index) => ({ profile, index }))
-    .filter(({ profile }) => profile.enabled && profile.activationBinding.type !== 'none')
+    .filter(({ profile }) => profile.enabled)
+  for (const { profile, index } of enabledProfiles) {
+    const conflictMessages = pivotBindingConflictWarnings(
+      profile.activationMode,
+      profile.activationBinding,
+      profile.setOriginBinding,
+      profile.releaseOriginBinding,
+    ).map((warning) => warning.message)
+    if (conflictMessages.length > 0) {
+      warnings.set(index, conflictMessages)
+    }
+  }
 
-  for (let i = 0; i < enabledProfiles.length; i++) {
+  const activatableProfiles = enabledProfiles.filter(({ profile }) => profile.activationBinding.type !== 'none')
+
+  for (let i = 0; i < activatableProfiles.length; i++) {
     for (let j = 0; j < i; j++) {
-      const a = enabledProfiles[i]
-      const b = enabledProfiles[j]
+      const a = activatableProfiles[i]
+      const b = activatableProfiles[j]
       const labelA = bindingLabel(a.profile.activationBinding)
-      const labelB = bindingLabel(b.profile.activationBinding)
 
-      if (labelA !== labelB) {
+      if (!bindingsMatchRuntimeActivation(a.profile.activationBinding, b.profile.activationBinding)) {
         continue
       }
 
@@ -188,6 +207,16 @@ const profileWarnings = computed(() => {
         </label>
 
         <div v-if="config.modules.pivotxr.enabled" class="mt-3">
+          <div
+            v-for="warning in defaultBindingWarnings"
+            :key="warning.title"
+            class="mb-3 rounded-[0.9rem] border px-4 py-3 text-sm leading-6 chip-warning"
+            style="border-color: var(--app-border)"
+          >
+            <p class="font-medium">{{ warning.title }}</p>
+            <p class="mt-1">{{ warning.message }}</p>
+          </div>
+
           <PivotBindingsPanel
             :activation-mode="config.modules.pivotxr.activationMode"
             :activation-binding="config.modules.pivotxr.activationBinding"
@@ -234,7 +263,7 @@ const profileWarnings = computed(() => {
           :profile="profile"
           :applications="applications"
           module-label="Pivot"
-          warning-title="Binding shadowed"
+          warning-title="Binding warning"
           :warnings="profileWarnings.get(index)"
           reorderable
           :profile-count="config.modules.pivotxr.profiles.length"

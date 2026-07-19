@@ -8,6 +8,18 @@ export interface PatchNoteEntry {
 
 export const patchNotes: PatchNoteEntry[] = [
   {
+    version: '0.13.6',
+    date: '2026-07-18',
+    title: 'Pivot & Recovery Reliability',
+    summary: 'Fixes Pivot pose handling and Virtual Desktop Quadviews recovery, with safer and more flexible bindings.',
+    items: [
+      'Fixed Pivot origin capture and pose routing when applications issue VIEW-relative xrLocateViews calls.',
+      'Made Virtual Desktop Quadviews recovery wait for continuously stable eye tracking before rebuilding compositor targets.',
+      'Added Numpad 0-9 support for keyboard bindings.',
+      'Added non-blocking warnings when Pivot activation, Set Origin, or Release Origin share an input, including Toggle mode.',
+    ],
+  },
+  {
     version: '0.13.5',
     date: '2026-07-17',
     title: 'Eye-Tracking Runtime Compatibility',

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <chrono>
 #include <string_view>
 
 namespace depthxr {
@@ -52,5 +53,6 @@ struct TurboCompatibilityInput {
 };
 
 bool ShouldBlockTurboForSession(const TurboCompatibilityInput& input);
+std::chrono::milliseconds QuadViewsRecoveryStabilizationDelay(std::string_view runtime_name);
 
 } // namespace depthxr

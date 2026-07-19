@@ -3,12 +3,15 @@
 #include <filesystem>
 #include <iostream>
 #include <fstream>
+#include <map>
 #include <sstream>
 #include <string>
 
 #include "depthxr/config_parser.h"
 #include "depthxr/effects.h"
 #include "depthxr/logger.h"
+#include "depthxr/pivot_routing.h"
+#include "depthxr/quadviews_recovery.h"
 #include "depthxr/quadviews_sizing.h"
 #include "depthxr/runtime_pacing.h"
 #include "depthxr/runtime_compatibility.h"
@@ -1753,6 +1756,92 @@ void TestTurboSteamVrQuadviewsCompatibilityPolicy() {
            "The DCS compatibility rule must not disable Turbo globally");
 }
 
+void TestQuadViewsRecoveryStabilizationPolicy() {
+    Expect(depthxr::QuadViewsRecoveryStabilizationDelay("VirtualDesktopXR").count() == 250,
+           "VDXR recovery should wait for focus and reference-space events to settle");
+    Expect(depthxr::QuadViewsRecoveryStabilizationDelay("virtualdesktopxr").count() == 250,
+           "VDXR runtime matching should be case-insensitive");
+    Expect(depthxr::QuadViewsRecoveryStabilizationDelay("SteamVR/OpenXR").count() == 0,
+           "Other runtimes must retain the immediate recovery path");
+}
+
+void TestQuadViewsRecoveryStabilizer() {
+    using namespace std::chrono_literals;
+    using Stabilizer = depthxr::QuadViewsRecoveryStabilizer;
+
+    Stabilizer stabilizer;
+    const Stabilizer::TimePoint start{};
+    stabilizer.Schedule(start, 250ms);
+    Expect(stabilizer.Pending(), "A recovered gaze sample should schedule compositor recovery");
+    Expect(!stabilizer.Ready(start + 249ms), "Recovery must wait for the full stabilization window");
+
+    stabilizer.NoteUnstable(start + 200ms);
+    Expect(!stabilizer.Ready(start + 449ms),
+           "A renewed tracking failure must restart the stabilization window");
+    Expect(stabilizer.Ready(start + 450ms),
+           "Recovery should become ready after 250 ms of continuous stability");
+
+    stabilizer.Reset();
+    Expect(!stabilizer.Pending(), "Reset must cancel a pending compositor recovery");
+    stabilizer.Schedule(start, 0ms);
+    Expect(stabilizer.Ready(start), "Other runtimes must retain immediate recovery");
+}
+
+void TestPivotLocateViewsRouting() {
+    Expect(depthxr::ShouldDrivePivotFromLocateViews(true, false),
+           "A world-space xrLocateViews query must drive Pivot frame state");
+    Expect(!depthxr::ShouldDrivePivotFromLocateViews(true, true),
+           "A VIEW-relative xrLocateViews query must remain pass-through");
+    Expect(!depthxr::ShouldDrivePivotFromLocateViews(false, false),
+           "A missing locate request must not drive Pivot frame state");
+
+    using Time = std::int64_t;
+    std::map<Time, int> pose_deltas;
+    auto record_locate_result = [&](bool base_is_view, Time time, int pose_delta) {
+        if (depthxr::ShouldDrivePivotFromLocateViews(true, base_is_view)) {
+            depthxr::CachePivotPoseDeltaValue(pose_deltas, time, pose_delta);
+        }
+    };
+    auto expect_delta = [&](Time time, int expected, const std::string& message) {
+        int pose_delta = 0;
+        Time matched_time = 0;
+        const bool found = depthxr::FindPivotPoseDeltaValue(
+            pose_deltas, time, 0, &pose_delta, &matched_time);
+        Expect(found && matched_time == time && pose_delta == expected, message);
+    };
+
+    record_locate_result(false, 100, 42);
+    record_locate_result(true, 100, 0);
+    expect_delta(100, 42,
+                 "A later VIEW-relative query must not overwrite the world-space frame delta");
+
+    pose_deltas.clear();
+    record_locate_result(true, 200, 0);
+    record_locate_result(false, 200, 84);
+    expect_delta(200, 84,
+                 "A world-space query must drive the frame after an earlier VIEW-relative query");
+
+    depthxr::PrunePivotPoseDeltaValues(pose_deltas, static_cast<Time>(200));
+    record_locate_result(true, 300, 0);
+    int pose_delta = -1;
+    Time matched_time = -1;
+    Expect(!depthxr::FindPivotPoseDeltaValue(
+               pose_deltas, static_cast<Time>(300), 0, &pose_delta, &matched_time) &&
+               pose_delta == 0 && matched_time == 0,
+           "A VIEW-only frame must not reuse a pruned pose delta");
+}
+
+void TestNumpadActivationKeys() {
+    Expect(depthxr::ParseActivationKey("numpad0") == std::optional<std::string>("Numpad0"),
+           "Numpad 0 should normalize to the canonical binding name");
+    Expect(depthxr::ParseActivationKey("Numpad5") == std::optional<std::string>("Numpad5"),
+           "Numpad 5 should be accepted as a keyboard binding");
+    Expect(depthxr::ParseActivationKey("NUMPAD9") == std::optional<std::string>("Numpad9"),
+           "Numpad 9 should parse case-insensitively");
+    Expect(!depthxr::ParseActivationKey("Numpad10").has_value(),
+           "Multi-digit numpad names must remain unsupported");
+}
+
 void TestQuadViewsCanvasDimensionsMatchCompositionDensity() {
     const depthxr::QuadViewsCanvasDimensions supersampled =
         depthxr::ComputeQuadViewsCanvasDimensions(6240, 6280, 16384, 16384, 1.1);
@@ -1835,7 +1924,11 @@ int main() {
     TestLoggerCollapsesDuplicateMessages();
     TestEyeGazeExtensionCompatibilityPolicy();
     TestTurboSteamVrQuadviewsCompatibilityPolicy();
+    TestQuadViewsRecoveryStabilizationPolicy();
+    TestQuadViewsRecoveryStabilizer();
     TestQuadViewsCanvasDimensionsMatchCompositionDensity();
+    TestPivotLocateViewsRouting();
+    TestNumpadActivationKeys();
 #ifdef _WIN32
     TestD3D11SharpenShaderRegression();
 #endif
