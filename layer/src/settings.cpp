@@ -143,6 +143,10 @@ std::optional<std::string> ParseActivationKey(const std::string& value) {
         return std::string("Shift");
     }
 
+    if (normalized.size() == 7 && normalized.starts_with("numpad") && std::isdigit(normalized[6])) {
+        return std::string("Numpad") + normalized[6];
+    }
+
     if (normalized.size() >= 2 && normalized[0] == 'f') {
         bool digits_only = true;
         for (size_t index = 1; index < normalized.size(); ++index) {

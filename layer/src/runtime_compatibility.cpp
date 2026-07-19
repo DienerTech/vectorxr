@@ -94,4 +94,17 @@ bool ShouldBlockTurboForSession(const TurboCompatibilityInput& input) {
            input.quadviews_active && !input.native_quadviews_active && input.app_requested_quadviews_extensions;
 }
 
+std::chrono::milliseconds QuadViewsRecoveryStabilizationDelay(std::string_view runtime_name) {
+    std::string normalized_name;
+    normalized_name.reserve(runtime_name.size());
+    for (const char character : runtime_name) {
+        normalized_name.push_back(character >= 'A' && character <= 'Z' ? character - 'A' + 'a' : character);
+    }
+
+    if (normalized_name.find("virtualdesktop") != std::string::npos) {
+        return std::chrono::milliseconds(250);
+    }
+    return std::chrono::milliseconds(0);
+}
+
 } // namespace depthxr

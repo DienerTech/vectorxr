@@ -17,6 +17,10 @@ export const keyboardBindingKeyGroups = [
     options: '0123456789'.split(''),
   },
   {
+    label: 'Numpad Keys',
+    options: Array.from({ length: 10 }, (_, index) => `Numpad${index}`),
+  },
+  {
     label: 'Special Keys',
     options: ['Space'],
   },

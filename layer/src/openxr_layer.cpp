@@ -1,4 +1,5 @@
 #include "depthxr/openxr_layer.h"
+#include "depthxr/pivot_routing.h"
 
 #include <algorithm>
 #include <array>
@@ -1936,7 +1937,7 @@ XrResult OpenXrLayer::EndSession(XrSession session) {
         quadviews_eye_gaze_loss_started_wall_time_.reset();
         quadviews_eye_gaze_loss_was_locate_failure_ = false;
         quadviews_has_seen_valid_gaze_ = false;
-        quadviews_compositor_recovery_pending_ = false;
+        quadviews_compositor_recovery_not_before_.reset();
         ResetPivotActivationState();
         ResetDepthToggleState();
         ResetTurboToggleState();
@@ -5591,9 +5592,11 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
         IsQuadViewsEmulationActive() && has_active_primary_view_configuration_ &&
         IsQuadViewConfiguration(active_primary_view_configuration_type_) &&
         active_runtime_view_configuration_type_ == XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
-    if (quadviews_compositor_recovery_pending_ && quadviews_projection_split_active) {
+    if (quadviews_compositor_recovery_not_before_.has_value() &&
+        std::chrono::steady_clock::now() >= *quadviews_compositor_recovery_not_before_ &&
+        quadviews_projection_split_active) {
         RecycleD3D11QuadViewsCompositionTargets();
-        quadviews_compositor_recovery_pending_ = false;
+        quadviews_compositor_recovery_not_before_.reset();
         pending_quadviews_compositor_diagnostics_ =
             std::max<uint32_t>(pending_quadviews_compositor_diagnostics_, 16);
         if (logger_.IsDebugEnabled()) {
@@ -6150,14 +6153,20 @@ XrResult OpenXrLayer::LocateViews(XrSession session,
         has_logged_pivotxr_spike_mode_ = true;
     }
 
+    const bool pivot_drive_query = ShouldDrivePivotFromLocateViews(
+        view_locate_info != nullptr,
+        view_locate_info != nullptr && IsTrackedViewSpace(view_locate_info->space));
+
     // Consume a pending origin capture with this frame's head pose. This runs
     // independently of engagement so the origin can be set before pivot is
     // engaged; the capture uses the same displayTime as the pivot drive below.
+    // VIEW-relative calls are pass-through queries and wait for a world-space
+    // call, otherwise they would capture an identity origin.
     const XrTime internal_locate_time =
         view_locate_info ? ClampInternalLocateTime(view_locate_info->displayTime) : 0;
 
     if (pivotxr_origin_capture_pending_ && resolved_settings_.pivotxr.enabled &&
-        internal_view_space_ != XR_NULL_HANDLE && view_locate_info) {
+        internal_view_space_ != XR_NULL_HANDLE && pivot_drive_query) {
         XrSpaceLocation origin_location{XR_TYPE_SPACE_LOCATION};
         const XrResult origin_result = next_locate_space_(
             internal_view_space_, view_locate_info->space, internal_locate_time, &origin_location);
@@ -6176,7 +6185,7 @@ XrResult OpenXrLayer::LocateViews(XrSession session,
     }
 
     if (resolved_settings_.pivotxr.enabled && pivotxr_envelope_engaged && internal_view_space_ != XR_NULL_HANDLE &&
-        view_locate_info) {
+        pivot_drive_query) {
         XrSpaceLocation pivot_view_location{XR_TYPE_SPACE_LOCATION};
         double applied_extra_yaw_radians = 0.0;
         double applied_extra_pitch_radians = 0.0;
@@ -6994,7 +7003,7 @@ void OpenXrLayer::ResetSessionState() {
     quadviews_eye_gaze_loss_started_wall_time_.reset();
     quadviews_eye_gaze_loss_was_locate_failure_ = false;
     quadviews_has_seen_valid_gaze_ = false;
-    quadviews_compositor_recovery_pending_ = false;
+    quadviews_compositor_recovery_not_before_.reset();
     pending_quadviews_pixel_diagnostics_ = 0;
     active_primary_view_configuration_type_ = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
     active_runtime_view_configuration_type_ = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
@@ -7191,7 +7200,7 @@ void OpenXrLayer::DestroyEyeGazeResources() {
     quadviews_eye_gaze_loss_started_wall_time_.reset();
     quadviews_eye_gaze_loss_was_locate_failure_ = false;
     quadviews_has_seen_valid_gaze_ = false;
-    quadviews_compositor_recovery_pending_ = false;
+    quadviews_compositor_recovery_not_before_.reset();
     last_eye_gaze_self_sync_time_.reset();
 
     if (eye_gaze_space != XR_NULL_HANDLE && next_destroy_space_) {
@@ -7294,7 +7303,7 @@ bool OpenXrLayer::LocateEyeGazeFocusOffsets(XrSession session,
         quadviews_eye_gaze_loss_started_wall_time_.reset();
         quadviews_eye_gaze_loss_was_locate_failure_ = false;
         quadviews_has_seen_valid_gaze_ = false;
-        quadviews_compositor_recovery_pending_ = false;
+        quadviews_compositor_recovery_not_before_.reset();
         return false;
     }
     if (session != active_session_) {
@@ -7392,9 +7401,14 @@ bool OpenXrLayer::LocateEyeGazeFocusOffsets(XrSession session,
             gaze_loss_duration >= std::chrono::seconds(2)) {
             const auto gaze_loss_ms =
                 std::chrono::duration_cast<std::chrono::milliseconds>(gaze_loss_duration).count();
-            quadviews_compositor_recovery_pending_ = true;
+            const std::chrono::milliseconds recovery_delay =
+                QuadViewsRecoveryStabilizationDelay(runtime_name_);
+            quadviews_compositor_recovery_not_before_ = now + recovery_delay;
+            const std::string recovery_delay_note = recovery_delay.count() > 0
+                ? " after " + std::to_string(recovery_delay.count()) + " ms of runtime stabilization"
+                : "";
             logger_.Info("Quadviews eye-gaze tracking recovered after " + std::to_string(gaze_loss_ms) +
-                         " ms; scheduling compositor output target recycle.");
+                         " ms; scheduling compositor output target recycle" + recovery_delay_note + ".");
         }
         quadviews_eye_gaze_loss_started_wall_time_.reset();
         quadviews_eye_gaze_loss_was_locate_failure_ = false;

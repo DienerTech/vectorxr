@@ -9,6 +9,7 @@
 #include "depthxr/config_parser.h"
 #include "depthxr/effects.h"
 #include "depthxr/logger.h"
+#include "depthxr/pivot_routing.h"
 #include "depthxr/quadviews_sizing.h"
 #include "depthxr/runtime_pacing.h"
 #include "depthxr/runtime_compatibility.h"
@@ -1753,6 +1754,36 @@ void TestTurboSteamVrQuadviewsCompatibilityPolicy() {
            "The DCS compatibility rule must not disable Turbo globally");
 }
 
+void TestQuadViewsRecoveryStabilizationPolicy() {
+    Expect(depthxr::QuadViewsRecoveryStabilizationDelay("VirtualDesktopXR").count() == 250,
+           "VDXR recovery should wait for focus and reference-space events to settle");
+    Expect(depthxr::QuadViewsRecoveryStabilizationDelay("virtualdesktopxr").count() == 250,
+           "VDXR runtime matching should be case-insensitive");
+    Expect(depthxr::QuadViewsRecoveryStabilizationDelay("SteamVR/OpenXR").count() == 0,
+           "Other runtimes must retain the immediate recovery path");
+}
+
+void TestPivotLocateViewsRouting() {
+    Expect(depthxr::ShouldDrivePivotFromLocateViews(true, false),
+           "A world-space xrLocateViews query must drive Pivot frame state");
+    Expect(!depthxr::ShouldDrivePivotFromLocateViews(true, true),
+           "A VIEW-relative xrLocateViews query must remain pass-through");
+    Expect(!depthxr::ShouldDrivePivotFromLocateViews(false, false),
+           "A missing locate request must not drive Pivot frame state");
+}
+
+
+void TestNumpadActivationKeys() {
+    Expect(depthxr::ParseActivationKey("numpad0") == std::optional<std::string>("Numpad0"),
+           "Numpad 0 should normalize to the canonical binding name");
+    Expect(depthxr::ParseActivationKey("Numpad5") == std::optional<std::string>("Numpad5"),
+           "Numpad 5 should be accepted as a keyboard binding");
+    Expect(depthxr::ParseActivationKey("NUMPAD9") == std::optional<std::string>("Numpad9"),
+           "Numpad 9 should parse case-insensitively");
+    Expect(!depthxr::ParseActivationKey("Numpad10").has_value(),
+           "Multi-digit numpad names must remain unsupported");
+}
+
 void TestQuadViewsCanvasDimensionsMatchCompositionDensity() {
     const depthxr::QuadViewsCanvasDimensions supersampled =
         depthxr::ComputeQuadViewsCanvasDimensions(6240, 6280, 16384, 16384, 1.1);
@@ -1835,7 +1866,10 @@ int main() {
     TestLoggerCollapsesDuplicateMessages();
     TestEyeGazeExtensionCompatibilityPolicy();
     TestTurboSteamVrQuadviewsCompatibilityPolicy();
+    TestQuadViewsRecoveryStabilizationPolicy();
     TestQuadViewsCanvasDimensionsMatchCompositionDensity();
+    TestPivotLocateViewsRouting();
+    TestNumpadActivationKeys();
 #ifdef _WIN32
     TestD3D11SharpenShaderRegression();
 #endif

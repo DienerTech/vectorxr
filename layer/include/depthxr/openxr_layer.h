@@ -901,7 +901,7 @@ class OpenXrLayer {
     std::optional<std::chrono::steady_clock::time_point> quadviews_eye_gaze_loss_started_wall_time_;
     bool quadviews_eye_gaze_loss_was_locate_failure_{false};
     bool quadviews_has_seen_valid_gaze_{false};
-    bool quadviews_compositor_recovery_pending_{false};
+    std::optional<std::chrono::steady_clock::time_point> quadviews_compositor_recovery_not_before_;
     XrViewConfigurationType active_primary_view_configuration_type_{XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO};
     XrViewConfigurationType active_runtime_view_configuration_type_{XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO};
     uint32_t pending_quadviews_pixel_diagnostics_{0};
