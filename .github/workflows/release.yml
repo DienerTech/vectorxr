@@ -35,6 +35,10 @@ jobs:
         working-directory: app
         run: npm ci
 
+      - name: Test app model
+        working-directory: app
+        run: npm test
+
       - name: Install OpenXR loader
         shell: pwsh
         run: |

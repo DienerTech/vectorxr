@@ -689,6 +689,22 @@ export function normalizeKeyboardKey(value: unknown, fallback: string): string {
     return `F${trimmed.slice(1)}`
   }
 
+  if (/^numpad[0-9]$/i.test(trimmed)) {
+    return `Numpad${trimmed.slice(-1)}`
+  }
+
+  if (/^(ctrl|control)$/i.test(trimmed)) {
+    return 'Ctrl'
+  }
+
+  if (/^alt$/i.test(trimmed)) {
+    return 'Alt'
+  }
+
+  if (/^shift$/i.test(trimmed)) {
+    return 'Shift'
+  }
+
   if (/^space$/i.test(trimmed)) {
     return 'Space'
   }
@@ -784,6 +800,28 @@ export function bindingsShareInput(left: InputBinding, right: InputBinding): boo
   return false
 }
 
+// Mirrors settings_resolver.cpp's activation arbitration exactly. Keep this
+// separate from bindingsShareInput: physical chords are order-independent, but
+// changing the runtime's serialized-order behavior would alter existing profile
+// priority for ambiguous hand-authored configurations.
+export function bindingsMatchRuntimeActivation(left: InputBinding, right: InputBinding): boolean {
+  if (left.type === 'none' || right.type === 'none' || left.type !== right.type) {
+    return false
+  }
+
+  if (left.type === 'keyboard' && right.type === 'keyboard') {
+    return left.chord.length === right.chord.length
+      && left.chord.every((key, index) => key === right.chord[index])
+  }
+
+  if (left.type === 'device' && right.type === 'device') {
+    return left.deviceGuid === right.deviceGuid
+      && left.inputPath === right.inputPath
+  }
+
+  return false
+}
+
 export function bindingLabel(binding: InputBinding): string {
   if (binding.type === 'device') {
     const device = binding.deviceName?.trim() || binding.deviceGuid.trim() || 'Unassigned device'
@@ -796,6 +834,54 @@ export function bindingLabel(binding: InputBinding): string {
   }
 
   return binding.chord.join('+')
+}
+
+export interface PivotBindingWarning {
+  title: string
+  message: string
+}
+
+export function pivotBindingConflictWarnings(
+  mode: ActivationMode,
+  activationBinding: InputBinding,
+  setOriginBinding: InputBinding,
+  releaseOriginBinding: InputBinding,
+): PivotBindingWarning[] {
+  const activationSetsOrigin = bindingsShareInput(activationBinding, setOriginBinding)
+  const activationReleasesOrigin = bindingsShareInput(activationBinding, releaseOriginBinding)
+  const setAlsoReleasesOrigin = bindingsShareInput(setOriginBinding, releaseOriginBinding)
+  const action = mode === 'toggle' ? 'Every Toggle press, including deactivation,' : 'Every press'
+
+  if (activationSetsOrigin && activationReleasesOrigin) {
+    return [{
+      title: 'One binding controls three conflicting actions',
+      message: `Activation, Set Origin, and Release Origin all use ${bindingLabel(activationBinding)}. ${action} requests a new neutral forward and then immediately clears it, so the origin is not captured. Give Set Origin or Release Origin its own binding.`,
+    }]
+  }
+
+  const warnings: PivotBindingWarning[] = []
+  if (activationSetsOrigin) {
+    warnings.push({
+      title: 'Activation also sets the origin',
+      message: `Activation and Set Origin both use ${bindingLabel(activationBinding)}. ${action} recaptures the current head direction as Pivot's neutral forward. Keep this only if it is intentional; otherwise give Set Origin its own binding, normally your in-game recenter control.`,
+    })
+  }
+
+  if (activationReleasesOrigin) {
+    warnings.push({
+      title: 'Activation also releases the origin',
+      message: `Activation and Release Origin both use ${bindingLabel(activationBinding)}. ${action} clears any captured Pivot origin. Keep this only if it is intentional; otherwise give Release Origin its own binding.`,
+    })
+  }
+
+  if (setAlsoReleasesOrigin) {
+    warnings.push({
+      title: 'Set Origin is immediately canceled',
+      message: `Set Origin and Release Origin both use ${bindingLabel(setOriginBinding)}. A press requests a new neutral forward and then immediately clears it, so the origin is not captured. Give one action a different binding.`,
+    })
+  }
+
+  return warnings
 }
 
 function normalizeApplication(value: unknown, fallbackId: string, existing: RegisteredApplication[]): RegisteredApplication {

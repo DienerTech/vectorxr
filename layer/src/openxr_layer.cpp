@@ -1213,9 +1213,7 @@ bool IsQuadViewConfiguration(XrViewConfigurationType type) {
 // the on/off feel from the per-frame tracking smoothing so enabling pivot while
 // the head is already turned never snaps the view.
 constexpr double kPivotActivationGainEpsilon = 0.0001;
-constexpr XrTime kMaxPivotPoseDeltaMatchWindow = 5'000'000;
 constexpr XrTime kMaxQuadViewsFovMatchWindow = 5'000'000;
-constexpr size_t kMaxCachedPivotPoseFrames = 180;
 constexpr size_t kMaxCachedQuadViewsFovFrames = 180;
 constexpr XrDuration kInternalSwapchainWaitTimeout = 100'000'000; // 100 ms
 constexpr uint32_t kPivotDiagnosticBurstCount = 8;
@@ -1937,7 +1935,7 @@ XrResult OpenXrLayer::EndSession(XrSession session) {
         quadviews_eye_gaze_loss_started_wall_time_.reset();
         quadviews_eye_gaze_loss_was_locate_failure_ = false;
         quadviews_has_seen_valid_gaze_ = false;
-        quadviews_compositor_recovery_not_before_.reset();
+        quadviews_compositor_recovery_.Reset();
         ResetPivotActivationState();
         ResetDepthToggleState();
         ResetTurboToggleState();
@@ -5592,11 +5590,11 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
         IsQuadViewsEmulationActive() && has_active_primary_view_configuration_ &&
         IsQuadViewConfiguration(active_primary_view_configuration_type_) &&
         active_runtime_view_configuration_type_ == XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
-    if (quadviews_compositor_recovery_not_before_.has_value() &&
-        std::chrono::steady_clock::now() >= *quadviews_compositor_recovery_not_before_ &&
-        quadviews_projection_split_active) {
+    if (quadviews_compositor_recovery_.Pending() &&
+        quadviews_projection_split_active &&
+        quadviews_compositor_recovery_.Ready(std::chrono::steady_clock::now())) {
         RecycleD3D11QuadViewsCompositionTargets();
-        quadviews_compositor_recovery_not_before_.reset();
+        quadviews_compositor_recovery_.Reset();
         pending_quadviews_compositor_diagnostics_ =
             std::max<uint32_t>(pending_quadviews_compositor_diagnostics_, 16);
         if (logger_.IsDebugEnabled()) {
@@ -7003,7 +7001,7 @@ void OpenXrLayer::ResetSessionState() {
     quadviews_eye_gaze_loss_started_wall_time_.reset();
     quadviews_eye_gaze_loss_was_locate_failure_ = false;
     quadviews_has_seen_valid_gaze_ = false;
-    quadviews_compositor_recovery_not_before_.reset();
+    quadviews_compositor_recovery_.Reset();
     pending_quadviews_pixel_diagnostics_ = 0;
     active_primary_view_configuration_type_ = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
     active_runtime_view_configuration_type_ = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
@@ -7200,7 +7198,7 @@ void OpenXrLayer::DestroyEyeGazeResources() {
     quadviews_eye_gaze_loss_started_wall_time_.reset();
     quadviews_eye_gaze_loss_was_locate_failure_ = false;
     quadviews_has_seen_valid_gaze_ = false;
-    quadviews_compositor_recovery_not_before_.reset();
+    quadviews_compositor_recovery_.Reset();
     last_eye_gaze_self_sync_time_.reset();
 
     if (eye_gaze_space != XR_NULL_HANDLE && next_destroy_space_) {
@@ -7262,9 +7260,13 @@ bool OpenXrLayer::LocateEyeGazeFocusOffsets(XrSession session,
     };
 
     auto log_eye_gaze_diagnostic = [&](const std::string& reason, bool locate_failure = false) {
-        if (settings.tracking_mode == QuadViewsTrackingMode::Eye && quadviews_has_seen_valid_gaze_ &&
-            !quadviews_eye_gaze_loss_started_wall_time_.has_value()) {
-            quadviews_eye_gaze_loss_started_wall_time_ = std::chrono::steady_clock::now();
+        if (settings.tracking_mode == QuadViewsTrackingMode::Eye) {
+            const auto unavailable_now = std::chrono::steady_clock::now();
+            if (quadviews_has_seen_valid_gaze_ &&
+                !quadviews_eye_gaze_loss_started_wall_time_.has_value()) {
+                quadviews_eye_gaze_loss_started_wall_time_ = unavailable_now;
+            }
+            quadviews_compositor_recovery_.NoteUnstable(unavailable_now);
         }
         if (locate_failure && quadviews_eye_gaze_loss_started_wall_time_.has_value()) {
             quadviews_eye_gaze_loss_was_locate_failure_ = true;
@@ -7303,7 +7305,7 @@ bool OpenXrLayer::LocateEyeGazeFocusOffsets(XrSession session,
         quadviews_eye_gaze_loss_started_wall_time_.reset();
         quadviews_eye_gaze_loss_was_locate_failure_ = false;
         quadviews_has_seen_valid_gaze_ = false;
-        quadviews_compositor_recovery_not_before_.reset();
+        quadviews_compositor_recovery_.Reset();
         return false;
     }
     if (session != active_session_) {
@@ -7403,7 +7405,7 @@ bool OpenXrLayer::LocateEyeGazeFocusOffsets(XrSession session,
                 std::chrono::duration_cast<std::chrono::milliseconds>(gaze_loss_duration).count();
             const std::chrono::milliseconds recovery_delay =
                 QuadViewsRecoveryStabilizationDelay(runtime_name_);
-            quadviews_compositor_recovery_not_before_ = now + recovery_delay;
+            quadviews_compositor_recovery_.Schedule(now, recovery_delay);
             const std::string recovery_delay_note = recovery_delay.count() > 0
                 ? " after " + std::to_string(recovery_delay.count()) + " ms of runtime stabilization"
                 : "";
@@ -7766,60 +7768,19 @@ bool OpenXrLayer::EnsureEyeOffsets(XrSession session,
 }
 
 void OpenXrLayer::CachePivotPoseDelta(XrTime time, const XrPosef& pose_delta) {
-    cached_pivot_pose_deltas_[time] = pose_delta;
-    while (cached_pivot_pose_deltas_.size() > kMaxCachedPivotPoseFrames) {
-        cached_pivot_pose_deltas_.erase(cached_pivot_pose_deltas_.begin());
-    }
+    CachePivotPoseDeltaValue(cached_pivot_pose_deltas_, time, pose_delta);
 }
 
 bool OpenXrLayer::FindPivotPoseDelta(XrTime time, XrPosef* pose_delta, XrTime* matched_time) const {
-    if (!pose_delta || !matched_time) {
-        return false;
-    }
-
-    if (cached_pivot_pose_deltas_.empty()) {
-        *pose_delta = IdentityPose();
-        *matched_time = 0;
-        return false;
-    }
-
-    auto exact = cached_pivot_pose_deltas_.find(time);
-    if (exact != cached_pivot_pose_deltas_.end()) {
-        *pose_delta = exact->second;
-        *matched_time = exact->first;
-        return true;
-    }
-
-    auto upper = cached_pivot_pose_deltas_.lower_bound(time);
-    std::map<XrTime, XrPosef>::const_iterator best;
-    if (upper == cached_pivot_pose_deltas_.begin()) {
-        best = upper;
-    } else if (upper == cached_pivot_pose_deltas_.end()) {
-        best = std::prev(upper);
-    } else {
-        auto lower = std::prev(upper);
-        best = (time - lower->first <= upper->first - time) ? lower : upper;
-    }
-
-    const XrTime match_delta = best->first > time ? best->first - time : time - best->first;
-    if (match_delta > kMaxPivotPoseDeltaMatchWindow) {
-        *pose_delta = IdentityPose();
-        *matched_time = best->first;
-        return false;
-    }
-
-    *pose_delta = best->second;
-    *matched_time = best->first;
-    return true;
+    return FindPivotPoseDeltaValue(cached_pivot_pose_deltas_,
+                                   time,
+                                   IdentityPose(),
+                                   pose_delta,
+                                   matched_time);
 }
 
 void OpenXrLayer::PrunePivotPoseDeltas(XrTime time) {
-    auto keep_from = cached_pivot_pose_deltas_.upper_bound(time);
-    if (keep_from == cached_pivot_pose_deltas_.begin()) {
-        return;
-    }
-
-    cached_pivot_pose_deltas_.erase(cached_pivot_pose_deltas_.begin(), keep_from);
+    PrunePivotPoseDeltaValues(cached_pivot_pose_deltas_, time);
 }
 
 void OpenXrLayer::CacheQuadViewsFovs(XrTime time, std::span<const XrView> views) {

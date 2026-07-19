@@ -6,8 +6,8 @@ import PivotBindingsPanel from '../PivotBindingsPanel.vue'
 import PivotSettingsPage from '../PivotSettingsPage.vue'
 import PivotSettingsSummary from '../PivotSettingsSummary.vue'
 import ProfileShell from '../ProfileShell.vue'
-import type { ActivationMode, InputBinding, RegisteredApplication, VectorXRConfig } from '../../lib/model'
-import { bindingLabel, bindingsShareInput } from '../../lib/model'
+import type { RegisteredApplication, VectorXRConfig } from '../../lib/model'
+import { bindingLabel, bindingsMatchRuntimeActivation, pivotBindingConflictWarnings } from '../../lib/model'
 
 const props = defineProps<{
   config: VectorXRConfig
@@ -90,26 +90,12 @@ function closeSubPages() {
   void nextTick(() => pageScroller()?.scrollTo({ top: savedScrollTop }))
 }
 
-function activationOriginBindingWarning(
-  mode: ActivationMode,
-  activationBinding: InputBinding,
-  setOriginBinding: InputBinding,
-): string | null {
-  if (!bindingsShareInput(activationBinding, setOriginBinding)) {
-    return null
-  }
-
-  const action = mode === 'toggle' ? 'Every Toggle press, including deactivation,' : 'Every press'
-  return `Activation and Set Origin both use ${bindingLabel(activationBinding)}. ${action} recaptures the current head direction as Pivot's neutral forward. Keep this only if it is intentional; otherwise give Set Origin its own binding.`
-}
-
-const defaultOriginBindingWarning = computed(() =>
-  activationOriginBindingWarning(
-    props.config.modules.pivotxr.activationMode,
-    props.config.modules.pivotxr.activationBinding,
-    props.config.modules.pivotxr.setOriginBinding,
-  ),
-)
+const defaultBindingWarnings = computed(() => pivotBindingConflictWarnings(
+  props.config.modules.pivotxr.activationMode,
+  props.config.modules.pivotxr.activationBinding,
+  props.config.modules.pivotxr.setOriginBinding,
+  props.config.modules.pivotxr.releaseOriginBinding,
+))
 
 const profileWarnings = computed(() => {
   const warnings = new Map<number, string[]>()
@@ -117,21 +103,28 @@ const profileWarnings = computed(() => {
 
   const enabledProfiles = props.config.modules.pivotxr.profiles
     .map((profile, index) => ({ profile, index }))
-    .filter(({ profile }) => profile.enabled && profile.activationBinding.type !== 'none')
+    .filter(({ profile }) => profile.enabled)
   for (const { profile, index } of enabledProfiles) {
-    const warning = activationOriginBindingWarning(profile.activationMode, profile.activationBinding, profile.setOriginBinding)
-    if (warning) {
-      warnings.set(index, [warning])
+    const conflictMessages = pivotBindingConflictWarnings(
+      profile.activationMode,
+      profile.activationBinding,
+      profile.setOriginBinding,
+      profile.releaseOriginBinding,
+    ).map((warning) => warning.message)
+    if (conflictMessages.length > 0) {
+      warnings.set(index, conflictMessages)
     }
   }
 
-  for (let i = 0; i < enabledProfiles.length; i++) {
+  const activatableProfiles = enabledProfiles.filter(({ profile }) => profile.activationBinding.type !== 'none')
+
+  for (let i = 0; i < activatableProfiles.length; i++) {
     for (let j = 0; j < i; j++) {
-      const a = enabledProfiles[i]
-      const b = enabledProfiles[j]
+      const a = activatableProfiles[i]
+      const b = activatableProfiles[j]
       const labelA = bindingLabel(a.profile.activationBinding)
 
-      if (!bindingsShareInput(a.profile.activationBinding, b.profile.activationBinding)) {
+      if (!bindingsMatchRuntimeActivation(a.profile.activationBinding, b.profile.activationBinding)) {
         continue
       }
 
@@ -215,12 +208,13 @@ const profileWarnings = computed(() => {
 
         <div v-if="config.modules.pivotxr.enabled" class="mt-3">
           <div
-            v-if="defaultOriginBindingWarning"
+            v-for="warning in defaultBindingWarnings"
+            :key="warning.title"
             class="mb-3 rounded-[0.9rem] border px-4 py-3 text-sm leading-6 chip-warning"
             style="border-color: var(--app-border)"
           >
-            <p class="font-medium">Activation also sets the origin</p>
-            <p class="mt-1">{{ defaultOriginBindingWarning }}</p>
+            <p class="font-medium">{{ warning.title }}</p>
+            <p class="mt-1">{{ warning.message }}</p>
           </div>
 
           <PivotBindingsPanel
