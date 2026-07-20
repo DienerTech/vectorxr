@@ -229,6 +229,10 @@
           "type": "number",
           "minimum": -0.25,
           "maximum": 0.25
+        },
+        "compatibilityMode": {
+          "type": "boolean",
+          "default": false
         }
       }
     },

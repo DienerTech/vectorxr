@@ -1,13 +1,17 @@
 #include <cmath>
+#include <cstdint>
 #include <cstdlib>
 #include <filesystem>
 #include <iostream>
 #include <fstream>
 #include <map>
 #include <sstream>
+#include <span>
 #include <string>
+#include <vector>
 
 #include "depthxr/config_parser.h"
+#include "depthxr/depth_submission.h"
 #include "depthxr/effects.h"
 #include "depthxr/logger.h"
 #include "depthxr/pivot_routing.h"
@@ -58,7 +62,8 @@ void TestParseConfig() {
         "stereoBoostEnabled": true,
         "convergenceEnabled": true,
         "stereoBoost": 1.1,
-        "convergence": 0.08
+        "convergence": 0.08,
+        "compatibilityMode": false
       },
       "bindings": {
         "toggleEnabled": {
@@ -72,7 +77,8 @@ void TestParseConfig() {
           "applicationIds": ["game"],
           "enabled": true,
           "settings": {
-            "stereoBoost": 1.2
+            "stereoBoost": 1.2,
+            "compatibilityMode": true
           }
         }
       ]
@@ -126,8 +132,10 @@ void TestParseConfig() {
     Expect(result.document.applications[0].id == "game", "Application registry id mismatch");
     Expect(std::abs(result.document.depthxr.defaults.stereo_boost - 1.1) < 0.0001, "DepthXR stereoBoost mismatch");
     Expect(std::abs(result.document.depthxr.defaults.convergence - 0.08) < 0.0001, "DepthXR convergence mismatch");
+    Expect(!result.document.depthxr.defaults.compatibility_mode, "DepthXR compatibility default mismatch");
     Expect(result.document.depthxr.bindings.toggle_enabled.chord[0] == "F7", "DepthXR toggle binding mismatch");
     Expect(result.document.depthxr.profiles.size() == 1, "DepthXR profile count mismatch");
+    Expect(result.document.depthxr.profiles[0].settings.compatibility_mode.value_or(false), "DepthXR profile compatibility mode mismatch");
     Expect(result.document.depthxr.profiles[0].application_ids[0] == "game", "DepthXR profile application id mismatch");
     Expect(result.document.pivotxr.profiles.size() == 1, "PivotXR profile count mismatch");
     Expect(result.document.pivotxr.profiles[0].activation_binding.chord[0] == "F8", "PivotXR profile activation binding mismatch");
@@ -174,7 +182,8 @@ void TestResolveRuntimeConfig() {
         "stereoBoostEnabled": true,
         "convergenceEnabled": true,
         "stereoBoost": 1.05,
-        "convergence": 0.0
+        "convergence": 0.0,
+        "compatibilityMode": false
       },
       "bindings": {
         "toggleEnabled": {
@@ -188,7 +197,8 @@ void TestResolveRuntimeConfig() {
           "enabled": true,
           "settings": {
             "stereoBoost": 1.15,
-            "convergence": 0.12
+            "convergence": 0.12,
+            "compatibilityMode": true
           }
         }
       ]
@@ -241,6 +251,7 @@ void TestResolveRuntimeConfig() {
     Expect(resolved.core.enabled, "Core enabled should be true");
     Expect(std::abs(resolved.depthxr.stereo_boost - 1.15) < 0.0001, "Profile stereoBoost override was not applied");
     Expect(std::abs(resolved.depthxr.convergence - 0.12) < 0.0001, "Profile convergence override was not applied");
+    Expect(resolved.depthxr.compatibility_mode, "Profile compatibility mode override was not applied");
     Expect(resolved.depthxr_bindings.toggle_enabled.type == depthxr::InputBindingType::None, "DepthXR toggle binding should be none");
     Expect(resolved.pivotxr.enabled, "PivotXR module enable was not resolved");
     Expect(resolved.pivotxr.profiles.size() == 1, "PivotXR resolved candidate count mismatch");
@@ -1831,6 +1842,47 @@ void TestPivotLocateViewsRouting() {
            "A VIEW-only frame must not reuse a pruned pose delta");
 }
 
+void TestDepthSubmissionGeometryRouting() {
+    using Time = std::int64_t;
+    using Record = depthxr::DepthSubmissionGeometryRecord<int, int>;
+    std::map<Time, std::vector<Record>> cache;
+
+    const std::vector<int> original{1, 2};
+    const std::vector<int> adjusted{3, 4};
+    depthxr::CacheDepthSubmissionGeometryValue(
+        cache, static_cast<Time>(10'000'000), 7, std::span<const int>(original), std::span<const int>(adjusted));
+
+    const Record* found = nullptr;
+    Time matched_time = 0;
+    Expect(depthxr::FindDepthSubmissionGeometryValue(
+               cache, static_cast<Time>(10'000'000), 7, 2, &found, &matched_time),
+           "Depth submission geometry exact match was not found");
+    Expect(found && matched_time == 10'000'000 && found->original_views == original &&
+               found->adjusted_views == adjusted,
+           "Depth submission geometry exact match returned the wrong values");
+    Expect(!depthxr::FindDepthSubmissionGeometryValue(
+               cache, static_cast<Time>(10'000'000), 8, 2, &found, &matched_time),
+           "Depth submission geometry crossed reference spaces");
+    Expect(found == nullptr, "Depth submission geometry failure retained a stale result");
+    Expect(!depthxr::FindDepthSubmissionGeometryValue(
+               cache, static_cast<Time>(10'000'000), 7, 4, &found, &matched_time),
+           "Depth submission geometry ignored the projection view count");
+
+    const std::vector<int> later_original{5, 6};
+    const std::vector<int> later_adjusted{7, 8};
+    depthxr::CacheDepthSubmissionGeometryValue(
+        cache, static_cast<Time>(20'000'000), 7,
+        std::span<const int>(later_original), std::span<const int>(later_adjusted));
+    Expect(depthxr::FindDepthSubmissionGeometryValue(
+               cache, static_cast<Time>(21'000'000), 7, 2, &found, &matched_time) &&
+               found && matched_time == 20'000'000 && found->original_views == later_original,
+           "Depth submission geometry did not use the nearest in-window frame");
+
+    depthxr::PruneDepthSubmissionGeometryValues(cache, static_cast<Time>(10'000'000));
+    Expect(cache.size() == 1 && cache.begin()->first == 20'000'000,
+           "Depth submission geometry pruning did not retire completed frames");
+}
+
 void TestNumpadActivationKeys() {
     Expect(depthxr::ParseActivationKey("numpad0") == std::optional<std::string>("Numpad0"),
            "Numpad 0 should normalize to the canonical binding name");
@@ -1928,6 +1980,7 @@ int main() {
     TestQuadViewsRecoveryStabilizer();
     TestQuadViewsCanvasDimensionsMatchCompositionDensity();
     TestPivotLocateViewsRouting();
+    TestDepthSubmissionGeometryRouting();
     TestNumpadActivationKeys();
 #ifdef _WIN32
     TestD3D11SharpenShaderRegression();

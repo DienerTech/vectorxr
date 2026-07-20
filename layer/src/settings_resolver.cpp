@@ -25,6 +25,9 @@ void ApplyDepthOverride(DepthXrResolvedSettings& target, const DepthXrSettingsOv
     if (source.convergence.has_value()) {
         target.convergence = *source.convergence;
     }
+    if (source.compatibility_mode.has_value()) {
+        target.compatibility_mode = *source.compatibility_mode;
+    }
 }
 
 } // namespace

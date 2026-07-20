@@ -21,7 +21,8 @@
       "enabled": true,
       "defaults": {
         "stereoBoost": 1.1,
-        "convergence": 0.0
+        "convergence": 0.0,
+        "compatibilityMode": false
       },
       "bindings": {
         "toggleEnabled": {
@@ -37,7 +38,8 @@
           ],
           "settings": {
             "stereoBoost": 1.12,
-            "convergence": 0.06
+            "convergence": 0.06,
+            "compatibilityMode": false
           }
         }
       ]

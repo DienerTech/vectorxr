@@ -80,6 +80,7 @@ struct CoreSettings {
 struct DepthXrSettingsOverride {
     std::optional<double> stereo_boost;
     std::optional<double> convergence;
+    std::optional<bool> compatibility_mode;
 };
 
 struct DepthXrResolvedSettings {
@@ -88,6 +89,9 @@ struct DepthXrResolvedSettings {
     // is no separate per-effect enable flag.
     double stereo_boost{1.0};
     double convergence{0.0};
+    // Keep DepthXR's intentional camera geometry baked into the rendered eye
+    // images while submitting the runtime's original pose/FOV metadata.
+    bool compatibility_mode{false};
 };
 
 struct DepthXrBindings {

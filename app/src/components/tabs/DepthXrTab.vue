@@ -106,7 +106,8 @@ const profileWarnings = computed(() => {
         <div v-if="!config.modules.depthxr.enabled" class="mt-3 rounded-[0.9rem] border px-4 py-3 text-sm leading-6 surface-panel-strong">
           The default profile is off and has no effect — applications without an enabled custom profile get no Depth adjustment. Enabled custom profiles below still apply to their assigned applications.
         </div>
-        <div v-else class="mt-3 grid gap-3 lg:grid-cols-2">
+        <div v-else class="mt-3 space-y-3">
+          <div class="grid gap-3 lg:grid-cols-2">
           <EffectField
             v-model:value="config.modules.depthxr.defaults.stereoBoost"
             title="Stereo Boost"
@@ -135,6 +136,16 @@ const profileWarnings = computed(() => {
             :parse-display-value="fromConvergenceDisplay"
             :display-badge="convergenceBadge"
           />
+          </div>
+          <label class="flex cursor-pointer items-start gap-3 rounded-[0.9rem] border px-4 py-3 surface-panel-strong">
+            <input v-model="config.modules.depthxr.defaults.compatibilityMode" class="mt-1 h-4 w-4 accent-depthxr-copper" type="checkbox" />
+            <span>
+              <span class="block text-sm font-semibold">Runtime Compatibility Mode</span>
+              <span class="mt-1 block text-xs leading-5 text-muted">
+                Use when an OpenXR runtime neutralizes Depth. Keeps the adjustment baked into the rendered eye images while submitting the runtime's original pose and FOV metadata.
+              </span>
+            </span>
+          </label>
         </div>
       </details>
     </article>
@@ -193,6 +204,18 @@ const profileWarnings = computed(() => {
             :display-badge="convergenceBadge"
           />
         </div>
+        <label
+          class="mt-3 flex cursor-pointer items-start gap-3 rounded-[0.9rem] border px-4 py-3 surface-panel-strong"
+          :class="{ 'opacity-50': !profile.enabled }"
+        >
+          <input v-model="profile.settings.compatibilityMode" class="mt-1 h-4 w-4 accent-depthxr-copper" type="checkbox" :disabled="!profile.enabled" />
+          <span>
+            <span class="block text-sm font-semibold">Runtime Compatibility Mode</span>
+            <span class="mt-1 block text-xs leading-5 text-muted">
+              Enable when this application's active OpenXR runtime neutralizes stereo boost or convergence.
+            </span>
+          </span>
+        </label>
       </ProfileShell>
 
       <div
@@ -225,7 +248,7 @@ const profileWarnings = computed(() => {
           </div>
 
           <div class="rounded-[1rem] border px-4 py-4 surface-panel">
-            Workaround: switch your active OpenXR runtime to SteamVR, which faithfully honors the submitted projection. Depth then applies as expected. Pivot and Quadviews are unaffected by this issue.
+            Enable Runtime Compatibility Mode for the affected application's Depth profile. It restores the runtime's original projection metadata after the application renders the adjusted stereo images; leave it off when Depth already works normally.
           </div>
         </div>
       </div>

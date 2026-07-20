@@ -21,6 +21,14 @@ test('keyboard normalization preserves numpad and modifier keys', () => {
   assert.equal(normalizeKeyboardKey('SHIFT', ''), 'Shift')
 })
 
+test('depth compatibility mode defaults off and preserves the configured value', () => {
+  const depthConfig = defaultConfig()
+  assert.equal(depthConfig.modules.depthxr.defaults.compatibilityMode, false)
+  depthConfig.modules.depthxr.defaults.compatibilityMode = true
+  const normalizedDepth = normalizeConfig(depthConfig)
+  assert.equal(normalizedDepth.modules.depthxr.defaults.compatibilityMode, true)
+})
+
 test('config normalization round-trips a modified numpad chord', () => {
   const config = defaultConfig()
   config.modules.pivotxr.activationBinding = keyboard('Ctrl', 'Numpad5')

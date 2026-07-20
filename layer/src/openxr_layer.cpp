@@ -804,6 +804,23 @@ double HorizontalProjectionCenter(const ViewFov& fov) {
     return (std::tan(fov.angle_left) + std::tan(fov.angle_right)) * 0.5;
 }
 
+XrVector3f ToXrPosition(const ViewPose& position) {
+    return {
+        static_cast<float>(position.x),
+        static_cast<float>(position.y),
+        static_cast<float>(position.z),
+    };
+}
+
+XrFovf ToXrFov(const ViewFov& fov) {
+    return {
+        static_cast<float>(fov.angle_left),
+        static_cast<float>(fov.angle_right),
+        static_cast<float>(fov.angle_up),
+        static_cast<float>(fov.angle_down),
+    };
+
+}
 double ExtractYawRadians(const ViewOrientation& orientation) {
     return std::atan2(
         2.0 * (orientation.w * orientation.y + orientation.x * orientation.z),
@@ -1282,6 +1299,7 @@ bool SameSettings(const ResolvedRuntimeConfig& lhs, const ResolvedRuntimeConfig&
            lhs.depthxr.enabled == rhs.depthxr.enabled &&
            NearlyEqual(lhs.depthxr.stereo_boost, rhs.depthxr.stereo_boost) &&
            NearlyEqual(lhs.depthxr.convergence, rhs.depthxr.convergence) &&
+           lhs.depthxr.compatibility_mode == rhs.depthxr.compatibility_mode &&
            lhs.depthxr_bindings.toggle_enabled.type == rhs.depthxr_bindings.toggle_enabled.type &&
            lhs.depthxr_bindings.toggle_enabled.chord == rhs.depthxr_bindings.toggle_enabled.chord &&
            lhs.depthxr_bindings.toggle_enabled.device_guid == rhs.depthxr_bindings.toggle_enabled.device_guid &&
@@ -1925,6 +1943,7 @@ XrResult OpenXrLayer::EndSession(XrSession session) {
         cached_eye_offset_poses_.clear();
         cached_eye_offsets_display_time_ = 0;
         cached_pivot_pose_deltas_.clear();
+        cached_depth_submission_geometry_.clear();
         cached_quadviews_fovs_.clear();
         last_app_action_sync_time_.reset();
         last_eye_gaze_self_sync_time_.reset();
@@ -3358,6 +3377,7 @@ bool OpenXrLayer::ComposeQuadViewsD3D11(const XrCompositionLayerProjection* sour
                                         XrTime display_time,
                                         const XrPosef& reverse_delta,
                                         bool has_non_identity_delta,
+                                        const DepthSubmissionGeometry* depth_submission_geometry,
                                         XrCompositionLayerProjection* composed_layer,
                                         std::vector<XrCompositionLayerProjectionView>* composed_views) {
     const auto compose_start = std::chrono::steady_clock::now();
@@ -3994,11 +4014,14 @@ bool OpenXrLayer::ComposeQuadViewsD3D11(const XrCompositionLayerProjection* sour
 
     composed_views->assign(source_layer->views, source_layer->views + 2);
     for (uint32_t eye = 0; eye < 2; ++eye) {
+        if (depth_submission_geometry && depth_submission_geometry->original_views.size() >= 2) {
+            (*composed_views)[eye].pose.position = ToXrPosition(depth_submission_geometry->original_views[eye].position);
+            (*composed_views)[eye].fov = ToXrFov(depth_submission_geometry->original_views[eye].fov);
+        } else if (has_cached_fovs) {
+            (*composed_views)[eye].fov = cached_fovs[eye];
+        }
         if (has_non_identity_delta) {
             (*composed_views)[eye].pose = MultiplyPoses((*composed_views)[eye].pose, reverse_delta);
-        }
-        if (has_cached_fovs) {
-            (*composed_views)[eye].fov = cached_fovs[eye];
         }
         QuadViewsCompositionTarget& target = d3d11_quadviews_compositor_.targets[eye];
         (*composed_views)[eye].subImage.swapchain = target.swapchain;
@@ -5570,6 +5593,7 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
     RefreshResolvedSettings();
     if (!resolved_settings_.core.enabled) {
         cached_pivot_pose_deltas_.clear();
+        cached_depth_submission_geometry_.clear();
         cached_quadviews_fovs_.clear();
         pivotxr_smoothed_extra_yaw_radians_ = 0.0;
         pivotxr_smoothed_extra_pitch_radians_ = 0.0;
@@ -5674,16 +5698,48 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
         }
     }
 
-    if (!has_non_identity_delta && !quadviews_projection_split_active && !needs_native_focus_sharpen) {
+    const auto find_depth_submission_geometry =
+        [&](const XrCompositionLayerProjection& projection_layer,
+            const DepthSubmissionGeometry** geometry,
+            XrTime* geometry_time) {
+            return FindDepthSubmissionGeometry(frame_end_info->displayTime,
+                                               projection_layer.space,
+                                               projection_layer.viewCount,
+                                               geometry,
+                                               geometry_time) &&
+                   ProjectionMatchesDepthGeometry(projection_layer, **geometry);
+        };
+
+    bool has_depth_compatibility_rewrite = false;
+    for (uint32_t i = 0; i < frame_end_info->layerCount; ++i) {
+        const XrCompositionLayerBaseHeader* base_header = frame_end_info->layers[i];
+        if (!base_header || base_header->type != XR_TYPE_COMPOSITION_LAYER_PROJECTION) {
+            continue;
+        }
+        const auto* projection_layer =
+            reinterpret_cast<const XrCompositionLayerProjection*>(base_header);
+        const DepthSubmissionGeometry* geometry = nullptr;
+        XrTime geometry_time = 0;
+        if (projection_layer->views && projection_layer->viewCount > 0 &&
+            find_depth_submission_geometry(*projection_layer, &geometry, &geometry_time)) {
+            has_depth_compatibility_rewrite = true;
+            break;
+        }
+    }
+
+    if (!has_non_identity_delta && !has_depth_compatibility_rewrite &&
+        !quadviews_projection_split_active && !needs_native_focus_sharpen) {
         if (should_log_end_frame_diagnostic) {
             std::ostringstream stream;
-            stream << "EndFrame pivot correction skipped: cacheHit=" << has_pose_delta
+            stream << "EndFrame projection rewrite skipped: pivotCacheHit=" << has_pose_delta
+                   << ", depthCompatibilityMatch=" << has_depth_compatibility_rewrite
                    << ", frameTime=" << frame_end_info->displayTime;
             if (has_pose_delta) {
-                stream << ", matchedTime=" << matched_time
-                       << ", matchedDeltaNs=" << (matched_time - frame_end_info->displayTime);
+                stream << ", pivotMatchedTime=" << matched_time
+                       << ", pivotMatchedDeltaNs=" << (matched_time - frame_end_info->displayTime);
             }
-            stream << ", cachedPivotDeltas=" << cached_pivot_pose_deltas_.size();
+            stream << ", cachedPivotDeltas=" << cached_pivot_pose_deltas_.size()
+                   << ", cachedDepthFrames=" << cached_depth_submission_geometry_.size();
             logger_.Debug(stream.str());
             if (pending_end_frame_diagnostics_ > 0) {
                 --pending_end_frame_diagnostics_;
@@ -5691,6 +5747,7 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
         }
         const XrResult release_result = FlushDeferredSwapchainReleasesLocked("end frame");
         PrunePivotPoseDeltas(frame_end_info->displayTime);
+        PruneDepthSubmissionGeometry(frame_end_info->displayTime);
         PruneQuadViewsFovs(frame_end_info->displayTime);
         if (XR_FAILED(release_result)) {
             return release_result;
@@ -5708,6 +5765,9 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
     adjusted_layers.clear();
     uint32_t corrected_projection_layer_count = 0;
     uint32_t corrected_projection_view_count = 0;
+    uint32_t depth_compatibility_layer_count = 0;
+    uint32_t depth_compatibility_view_count = 0;
+    XrTime depth_compatibility_matched_time = 0;
     uint32_t split_quad_projection_layer_count = 0;
     uint32_t d3d11_quad_composition_count = 0;
     uint32_t projection_swapchain_reference_count = 0;
@@ -5719,10 +5779,19 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
     auto append_projection_layer = [&](const XrCompositionLayerProjection* projection_layer,
                                        uint32_t first_view,
                                        uint32_t view_count,
+                                       const DepthSubmissionGeometry* depth_submission_geometry = nullptr,
                                        XrCompositionLayerFlags extra_layer_flags = 0) {
         adjusted_projection_views.emplace_back(projection_layer->views + first_view,
                                                projection_layer->views + first_view + view_count);
-        for (XrCompositionLayerProjectionView& projection_view : adjusted_projection_views.back()) {
+        std::vector<XrCompositionLayerProjectionView>& copied_views = adjusted_projection_views.back();
+        for (uint32_t view_offset = 0; view_offset < copied_views.size(); ++view_offset) {
+            XrCompositionLayerProjectionView& projection_view = copied_views[view_offset];
+            const uint32_t source_view = first_view + view_offset;
+            if (depth_submission_geometry &&
+                source_view < depth_submission_geometry->original_views.size()) {
+                projection_view.pose.position = ToXrPosition(depth_submission_geometry->original_views[source_view].position);
+                projection_view.fov = ToXrFov(depth_submission_geometry->original_views[source_view].fov);
+            }
             if (has_non_identity_delta) {
                 projection_view.pose = MultiplyPoses(projection_view.pose, reverse_delta);
             }
@@ -5752,6 +5821,15 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
             adjusted_layers.push_back(base_header);
             continue;
         }
+        const DepthSubmissionGeometry* depth_submission = nullptr;
+        XrTime depth_submission_time = 0;
+        const bool restore_depth_submission = find_depth_submission_geometry(
+            *projection_layer, &depth_submission, &depth_submission_time);
+        if (restore_depth_submission) {
+            ++depth_compatibility_layer_count;
+            depth_compatibility_view_count += projection_layer->viewCount;
+            depth_compatibility_matched_time = depth_submission_time;
+        }
 
         for (uint32_t view_index = 0; view_index < projection_layer->viewCount; ++view_index) {
             const XrSwapchain referenced_swapchain = projection_layer->views[view_index].subImage.swapchain;
@@ -5771,6 +5849,7 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
                                       frame_end_info->displayTime,
                                       reverse_delta,
                                       has_non_identity_delta,
+                                      depth_submission,
                                       &adjusted_projection_layers.back(),
                                       &adjusted_projection_views.back())) {
                 adjusted_layers.push_back(
@@ -5790,14 +5869,14 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
             // reversed painter ordering while we build the native compositor.
             constexpr XrCompositionLayerFlags kFovealBlendFlags =
                 XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT | XR_COMPOSITION_LAYER_UNPREMULTIPLIED_ALPHA_BIT;
-            append_projection_layer(projection_layer, 2, 2, kFovealBlendFlags);
-            append_projection_layer(projection_layer, 0, 2);
-            append_projection_layer(projection_layer, 2, 2, kFovealBlendFlags);
+            append_projection_layer(projection_layer, 2, 2, depth_submission, kFovealBlendFlags);
+            append_projection_layer(projection_layer, 0, 2, depth_submission);
+            append_projection_layer(projection_layer, 2, 2, depth_submission, kFovealBlendFlags);
             ++split_quad_projection_layer_count;
             continue;
         }
 
-        append_projection_layer(projection_layer, 0, projection_layer->viewCount);
+        append_projection_layer(projection_layer, 0, projection_layer->viewCount, depth_submission);
         // Varjo compatible quadviews: sharpen the runtime's focus views in place when
         // foveate_sharpness > 0. No-op (pure passthrough) when sharpness is 0 or the
         // layer is not a native quad projection.
@@ -5817,10 +5896,20 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
             pose_delta.orientation.w,
         };
         std::ostringstream stream;
-        stream << "EndFrame pivot correction applied: frameTime=" << frame_end_info->displayTime
-               << ", matchedTime=" << matched_time
-               << ", matchedDeltaNs=" << (matched_time - frame_end_info->displayTime)
-               << ", poseDeltaYaw=" << FormatDiagnosticDouble(ExtractYawRadians(delta_orientation))
+        stream << "EndFrame projection rewrite applied: frameTime=" << frame_end_info->displayTime
+               << ", pivotApplied=" << has_non_identity_delta
+               << ", depthCompatibilityLayers=" << depth_compatibility_layer_count
+               << ", depthCompatibilityViews=" << depth_compatibility_view_count;
+        if (has_pose_delta) {
+            stream << ", pivotMatchedTime=" << matched_time
+                   << ", pivotMatchedDeltaNs=" << (matched_time - frame_end_info->displayTime);
+        }
+        if (depth_compatibility_layer_count > 0) {
+            stream << ", depthMatchedTime=" << depth_compatibility_matched_time
+                   << ", depthMatchedDeltaNs="
+                   << (depth_compatibility_matched_time - frame_end_info->displayTime);
+        }
+        stream << ", poseDeltaYaw=" << FormatDiagnosticDouble(ExtractYawRadians(delta_orientation))
                << ", poseDeltaPitch=" << FormatDiagnosticDouble(ExtractPitchRadians(delta_orientation))
                << ", projectionLayers=" << corrected_projection_layer_count
                << ", projectionViews=" << corrected_projection_view_count
@@ -5829,7 +5918,8 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
                << ", projectionSwapchainRefs=" << projection_swapchain_reference_count
                << ", unknownProjectionSwapchains=" << unknown_projection_swapchain_count
                << ", trackedSwapchains=" << tracked_swapchains_.size()
-               << ", cachedPivotDeltas=" << cached_pivot_pose_deltas_.size();
+               << ", cachedPivotDeltas=" << cached_pivot_pose_deltas_.size()
+               << ", cachedDepthFrames=" << cached_depth_submission_geometry_.size();
         logger_.Debug(stream.str());
         if (pending_end_frame_diagnostics_ > 0) {
             --pending_end_frame_diagnostics_;
@@ -5837,6 +5927,7 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
     }
     const XrResult release_result = FlushDeferredSwapchainReleasesLocked("end frame");
     PrunePivotPoseDeltas(frame_end_info->displayTime);
+    PruneDepthSubmissionGeometry(frame_end_info->displayTime);
     PruneQuadViewsFovs(frame_end_info->displayTime);
     if (XR_FAILED(release_result)) {
         return release_result;
@@ -6059,6 +6150,7 @@ XrResult OpenXrLayer::LocateViews(XrSession session,
         ResetPivotActivationState();
         ResetDepthToggleState();
         cached_pivot_pose_deltas_.clear();
+        cached_depth_submission_geometry_.clear();
         return result;
     }
 
@@ -6278,11 +6370,25 @@ XrResult OpenXrLayer::LocateViews(XrSession session,
         pivotxr_last_smoothing_wall_time_.reset();
     }
 
-    if (depthxr_active && !NearlyEqual(resolved_settings_.depthxr.stereo_boost, 1.0)) {
+    const bool apply_stereo_boost =
+        depthxr_active && !NearlyEqual(resolved_settings_.depthxr.stereo_boost, 1.0);
+    const bool apply_convergence =
+        depthxr_active && !NearlyEqual(resolved_settings_.depthxr.convergence, 0.0);
+    const bool cache_depth_submission_geometry = resolved_settings_.depthxr.compatibility_mode &&
+                                                 view_locate_info && view_layout != ViewLayout::kMono &&
+                                                 (apply_stereo_boost || apply_convergence);
+    if (cache_depth_submission_geometry) {
+        locate_views_pre_depth_scratch_.assign(adjusted_views.begin(), adjusted_views.end());
+    }
+    if (apply_stereo_boost) {
         ApplyStereoBoost(adjusted_views, resolved_settings_.depthxr.stereo_boost, view_layout);
     }
-    if (depthxr_active && !NearlyEqual(resolved_settings_.depthxr.convergence, 0.0)) {
+    if (apply_convergence) {
         ApplyConvergence(adjusted_views, resolved_settings_.depthxr.convergence, view_layout);
+    }
+    if (cache_depth_submission_geometry) {
+        CacheDepthSubmissionGeometry(view_locate_info->displayTime, view_locate_info->space,
+                                     locate_views_pre_depth_scratch_, adjusted_views);
     }
 
     for (uint32_t i = 0; i < count; ++i) {
@@ -6377,6 +6483,8 @@ XrResult OpenXrLayer::LocateViews(XrSession session,
                    << ", leftPitchDelta=" << FormatDiagnosticDouble(left_pitch_delta)
                    << ", rightPitchDelta=" << FormatDiagnosticDouble(right_pitch_delta)
                    << ", depthRuntimeActive=" << depthxr_active
+                   << ", depthCompatibilityMode=" << resolved_settings_.depthxr.compatibility_mode
+                   << ", depthCompatibilityCached=" << cache_depth_submission_geometry
                    << ", stereoBoost=" << FormatDiagnosticDouble(resolved_settings_.depthxr.stereo_boost)
                    << ", convergence=" << FormatDiagnosticDouble(resolved_settings_.depthxr.convergence)
                    << ", leftXDelta=" << FormatDiagnosticDouble(left_position_delta)
@@ -6669,6 +6777,12 @@ void OpenXrLayer::RefreshResolvedSettings() {
     if (!SameInputBinding(previous.depthxr_bindings.toggle_enabled, resolved_settings_.depthxr_bindings.toggle_enabled) ||
         previous.depthxr.enabled != resolved_settings_.depthxr.enabled) {
         ResetDepthToggleState();
+    }
+    if (previous.depthxr.enabled != resolved_settings_.depthxr.enabled ||
+        previous.depthxr.compatibility_mode != resolved_settings_.depthxr.compatibility_mode ||
+        !NearlyEqual(previous.depthxr.stereo_boost, resolved_settings_.depthxr.stereo_boost) ||
+        !NearlyEqual(previous.depthxr.convergence, resolved_settings_.depthxr.convergence)) {
+        cached_depth_submission_geometry_.clear();
     }
     if (!SamePivotActivationSet(previous.pivotxr, resolved_settings_.pivotxr)) {
         ResetPivotActivationState();
@@ -7016,6 +7130,7 @@ void OpenXrLayer::ResetSessionState() {
     cached_eye_offset_poses_.clear();
     cached_eye_offsets_display_time_ = 0;
     cached_pivot_pose_deltas_.clear();
+    cached_depth_submission_geometry_.clear();
     cached_quadviews_fovs_.clear();
     last_app_action_sync_time_.reset();
     last_eye_gaze_self_sync_time_.reset();
@@ -7521,6 +7636,7 @@ void OpenXrLayer::DestroyInternalReferenceSpaces() {
         cached_eye_offset_poses_.clear();
         cached_eye_offsets_display_time_ = 0;
         cached_pivot_pose_deltas_.clear();
+        cached_depth_submission_geometry_.clear();
         cached_quadviews_fovs_.clear();
         return;
     }
@@ -7549,6 +7665,7 @@ void OpenXrLayer::DestroyInternalReferenceSpaces() {
     cached_eye_offset_poses_.clear();
     cached_eye_offsets_display_time_ = 0;
     cached_pivot_pose_deltas_.clear();
+    cached_depth_submission_geometry_.clear();
     cached_quadviews_fovs_.clear();
 }
 
@@ -7781,6 +7898,61 @@ bool OpenXrLayer::FindPivotPoseDelta(XrTime time, XrPosef* pose_delta, XrTime* m
 
 void OpenXrLayer::PrunePivotPoseDeltas(XrTime time) {
     PrunePivotPoseDeltaValues(cached_pivot_pose_deltas_, time);
+}
+
+void OpenXrLayer::CacheDepthSubmissionGeometry(
+    XrTime time,
+    XrSpace space,
+    std::span<const ViewAdjustmentData> original_views,
+    std::span<const ViewAdjustmentData> adjusted_views) {
+    if (time == 0 || space == XR_NULL_HANDLE || original_views.empty() ||
+        original_views.size() != adjusted_views.size()) {
+        return;
+    }
+
+    CacheDepthSubmissionGeometryValue(
+        cached_depth_submission_geometry_,
+        time,
+        space,
+        original_views,
+        adjusted_views);
+}
+
+bool OpenXrLayer::FindDepthSubmissionGeometry(
+    XrTime time,
+    XrSpace space,
+    uint32_t view_count,
+    const DepthSubmissionGeometry** geometry,
+    XrTime* matched_time) const {
+    return FindDepthSubmissionGeometryValue(
+        cached_depth_submission_geometry_, time, space, view_count, geometry, matched_time);
+}
+
+void OpenXrLayer::PruneDepthSubmissionGeometry(XrTime time) {
+    PruneDepthSubmissionGeometryValues(cached_depth_submission_geometry_, time);
+}
+
+bool OpenXrLayer::ProjectionMatchesDepthGeometry(
+    const XrCompositionLayerProjection& layer,
+    const DepthSubmissionGeometry& geometry) const {
+    if (!layer.views || layer.viewCount != geometry.adjusted_views.size()) {
+        return false;
+    }
+
+    for (uint32_t i = 0; i < layer.viewCount; ++i) {
+        const XrCompositionLayerProjectionView& submitted = layer.views[i];
+        const ViewAdjustmentData& adjusted = geometry.adjusted_views[i];
+        if (!NearlyEqual(submitted.pose.position.x, adjusted.position.x) ||
+            !NearlyEqual(submitted.pose.position.y, adjusted.position.y) ||
+            !NearlyEqual(submitted.pose.position.z, adjusted.position.z) ||
+            !NearlyEqual(submitted.fov.angleLeft, adjusted.fov.angle_left) ||
+            !NearlyEqual(submitted.fov.angleRight, adjusted.fov.angle_right) ||
+            !NearlyEqual(submitted.fov.angleUp, adjusted.fov.angle_up) ||
+            !NearlyEqual(submitted.fov.angleDown, adjusted.fov.angle_down)) {
+            return false;
+        }
+    }
+    return true;
 }
 
 void OpenXrLayer::CacheQuadViewsFovs(XrTime time, std::span<const XrView> views) {
@@ -8512,6 +8684,7 @@ void OpenXrLayer::LogResolvedSettings(const ResolvedRuntimeConfig& settings) {
            << ", depthToggleBinding=" << BindingLabel(settings.depthxr_bindings.toggle_enabled)
            << ", stereoBoost=" << settings.depthxr.stereo_boost
            << ", convergence=" << settings.depthxr.convergence
+           << ", depthCompatibilityMode=" << settings.depthxr.compatibility_mode
            << ", pivotxrEnabled=" << settings.pivotxr.enabled
            << ", pivotProfileCount=" << settings.pivotxr.profiles.size();
     for (size_t i = 0; i < settings.pivotxr.profiles.size(); ++i) {
@@ -9471,6 +9644,7 @@ bool OpenXrLayer::IsDepthXrActive() {
 
     if (was_pressed_this_call) {
         depthxr_toggle_enabled_ = !depthxr_toggle_enabled_;
+        cached_depth_submission_geometry_.clear();
         pending_locate_views_diagnostics_ = 5;
         pending_end_frame_diagnostics_ = 5;
         logger_.Info(std::string("Depth effects ") +

@@ -101,7 +101,7 @@ Depth adjusts stereo separation and convergence to change perceived scale and co
   comparisons in headset.
 - Start with small changes. Some headset-native OpenXR runtimes (such as Pimax's PiOpenXR) can
   ignore submitted depth geometry — open the **Depth Compatibility** notice for guidance, and try
-  the SteamVR pipeline if Depth seems to do nothing.
+  enabling **Runtime Compatibility Mode** on the affected application profile if Depth seems to do nothing.
 
 ### Pivot
 

@@ -802,6 +802,7 @@ bool ParseDepthDefaults(const JsonValue::Object& object, DepthXrResolvedSettings
         "convergenceEnabled",
         "stereoBoost",
         "convergence",
+        "compatibilityMode",
     };
 
     if (!CheckAllowedKeys(object, allowed, error)) {
@@ -810,9 +811,11 @@ bool ParseDepthDefaults(const JsonValue::Object& object, DepthXrResolvedSettings
 
     std::optional<double> stereo_boost;
     std::optional<double> convergence;
+    std::optional<bool> compatibility_mode;
 
     if (!ReadOptionalNumber(object, "stereoBoost", stereo_boost, error) ||
-        !ReadOptionalNumber(object, "convergence", convergence, error)) {
+        !ReadOptionalNumber(object, "convergence", convergence, error) ||
+        !ReadOptionalBool(object, "compatibilityMode", compatibility_mode, error)) {
         return false;
     }
 
@@ -821,6 +824,9 @@ bool ParseDepthDefaults(const JsonValue::Object& object, DepthXrResolvedSettings
     }
     if (convergence.has_value()) {
         out.convergence = *convergence;
+    }
+    if (compatibility_mode.has_value()) {
+        out.compatibility_mode = *compatibility_mode;
     }
 
     return true;
@@ -851,6 +857,7 @@ bool ParseDepthProfileSettings(const JsonValue::Object& object, DepthXrSettingsO
         "convergenceEnabled",
         "stereoBoost",
         "convergence",
+        "compatibilityMode",
     };
 
     if (!CheckAllowedKeys(object, allowed, error)) {
@@ -858,7 +865,8 @@ bool ParseDepthProfileSettings(const JsonValue::Object& object, DepthXrSettingsO
     }
 
     return ReadOptionalNumber(object, "stereoBoost", out.stereo_boost, error) &&
-           ReadOptionalNumber(object, "convergence", out.convergence, error);
+           ReadOptionalNumber(object, "convergence", out.convergence, error) &&
+           ReadOptionalBool(object, "compatibilityMode", out.compatibility_mode, error);
 }
 
 bool ParseDepthProfile(const JsonValue& value, DepthXrProfile& out, std::string& error) {

@@ -83,6 +83,7 @@ export interface RegisteredApplication {
 export interface DepthXRSettings {
   stereoBoost: number
   convergence: number
+  compatibilityMode: boolean
 }
 
 export interface DepthXRProfileConfig {
@@ -360,6 +361,7 @@ export function defaultDepthXRSettings(): DepthXRSettings {
   return {
     stereoBoost: 1.0,
     convergence: 0,
+    compatibilityMode: false,
   }
 }
 
@@ -605,6 +607,7 @@ function normalizeDepthXRSettings(value: unknown, fallback: DepthXRSettings): De
   return {
     stereoBoost: normalizeNumber(source.stereoBoost, fallback.stereoBoost),
     convergence: normalizeNumber(source.convergence, fallback.convergence),
+    compatibilityMode: normalizeBoolean(source.compatibilityMode, fallback.compatibilityMode),
   }
 }
 
