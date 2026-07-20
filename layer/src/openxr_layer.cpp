@@ -1605,7 +1605,18 @@ XrResult OpenXrLayer::OnInstanceCreated(const XrInstanceCreateInfo* create_info,
         }
     }
 
+    const bool config_was_loaded_before_log_initialization = has_loaded_config_;
     ReloadConfigIfNeeded();
+    if (config_was_loaded_before_log_initialization) {
+        if (!last_failed_config_error_.empty()) {
+            logger_.Error("Failed to parse config before log initialization: " + last_failed_config_error_ +
+                          ". Using default settings; VectorXR enhancements are disabled until a valid config is loaded.");
+        } else if (has_config_timestamp_) {
+            logger_.Info("Loaded config from " + config_path_.string());
+        } else {
+            logger_.Info("No config file found. Using default settings.");
+        }
+    }
     if (config_.core.track_seen_apps) {
         std::string seen_apps_error;
         if (!RecordSeenApp(current_exe_name_, &seen_apps_error)) {
@@ -6608,6 +6619,9 @@ void OpenXrLayer::ReloadConfigIfNeeded() {
     if (!std::filesystem::exists(config_path_, ec) || ec) {
         config_ = DefaultConfig();
         has_loaded_config_ = true;
+        has_config_timestamp_ = false;
+        has_failed_config_timestamp_ = false;
+        last_failed_config_error_.clear();
         ++config_generation_;
         logger_.Info("No config file found. Using default settings.");
         return;
@@ -6616,7 +6630,9 @@ void OpenXrLayer::ReloadConfigIfNeeded() {
     const auto timestamp = std::filesystem::last_write_time(config_path_, ec);
     const ParseResult loaded = LoadConfigFromFile(config_path_);
     if (!loaded.ok) {
-        logger_.Error("Failed to parse config: " + loaded.error);
+        logger_.Error("Failed to parse config: " + loaded.error +
+                      ". Using default settings; VectorXR enhancements are disabled until a valid config is loaded.");
+        has_config_timestamp_ = false;
         if (!ec) {
             last_failed_config_write_time_ = timestamp;
             has_failed_config_timestamp_ = true;
