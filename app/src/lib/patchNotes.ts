@@ -8,6 +8,17 @@ export interface PatchNoteEntry {
 
 export const patchNotes: PatchNoteEntry[] = [
   {
+    version: '0.13.7',
+    date: '2026-07-19',
+    title: 'Depth tuning and diagnostics',
+    summary: 'Improves Depth tuning and diagnostics for games that manage their own IPD.',
+    items: [
+      'Adds 0.1-step Convergence adjustments.',
+      'Warns when in-game Force IPD or stereo settings can override Stereo Boost.',
+      'Adds concise runtime geometry logging for troubleshooting Depth behavior.',
+    ],
+  },
+  {
     version: '0.13.6',
     date: '2026-07-18',
     title: 'Pivot & Recovery Reliability',
