@@ -42,15 +42,20 @@ bool NearlyEqual(double lhs, double rhs) {
     return std::abs(lhs - rhs) < 0.0001;
 }
 
+template <typename Position>
+double PositionSeparationMeters(const Position& left, const Position& right) {
+    const double x = left.x - right.x;
+    const double y = left.y - right.y;
+    const double z = left.z - right.z;
+    return std::sqrt(x * x + y * y + z * z);
+}
+
 double ViewSeparationMeters(std::span<const ViewAdjustmentData> views) {
     if (views.size() < 2) {
         return 0.0;
     }
 
-    const double x = views[0].position.x - views[1].position.x;
-    const double y = views[0].position.y - views[1].position.y;
-    const double z = views[0].position.z - views[1].position.z;
-    return std::sqrt(x * x + y * y + z * z);
+    return PositionSeparationMeters(views[0].position, views[1].position);
 }
 
 // Seed table for Auto pacing. Known-interlocking runtimes get sequenced
@@ -813,6 +818,10 @@ std::string FormatFov(const XrFovf& fov) {
 
 double HorizontalProjectionCenter(const ViewFov& fov) {
     return (std::tan(fov.angle_left) + std::tan(fov.angle_right)) * 0.5;
+}
+
+double HorizontalProjectionCenter(const XrFovf& fov) {
+    return (std::tan(fov.angleLeft) + std::tan(fov.angleRight)) * 0.5;
 }
 
 double ExtractYawRadians(const ViewOrientation& orientation) {
@@ -1847,6 +1856,8 @@ XrResult OpenXrLayer::BeginSession(XrSession session, const XrSessionBeginInfo* 
     active_runtime_view_configuration_type_ = downstream_begin_info->primaryViewConfigurationType;
     has_active_primary_view_configuration_ = true;
     has_logged_quad_view_short_count_ = false;
+    depth_view_info_pending_ = true;
+    depth_submission_info_pending_ = true;
 
     logger_.Info(std::string("Session began with view configuration: ") +
                  ToString(active_primary_view_configuration_type_) +
@@ -5647,6 +5658,55 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
                            !NearlyZero(pose_delta.position.x) || !NearlyZero(pose_delta.position.y) ||
                            !NearlyZero(pose_delta.position.z));
 
+    const bool depth_adjustment_active_for_submission =
+        resolved_settings_.depthxr.enabled && depthxr_toggle_enabled_ &&
+        (!NearlyEqual(resolved_settings_.depthxr.stereo_boost, 1.0) ||
+         !NearlyEqual(resolved_settings_.depthxr.convergence, 0.0));
+    auto log_depth_runtime_submission =
+        [&](const XrFrameEndInfo& submitted_frame, std::string_view submission_path) {
+            if (!depth_submission_info_pending_ ||
+                !depth_adjustment_active_for_submission ||
+                !submitted_frame.layers) {
+                return;
+            }
+
+            for (uint32_t i = 0; i < submitted_frame.layerCount; ++i) {
+                const XrCompositionLayerBaseHeader* base_header = submitted_frame.layers[i];
+                if (!base_header || base_header->type != XR_TYPE_COMPOSITION_LAYER_PROJECTION) {
+                    continue;
+                }
+                const auto* projection_layer =
+                    reinterpret_cast<const XrCompositionLayerProjection*>(base_header);
+                if (!projection_layer->views || projection_layer->viewCount == 0) {
+                    continue;
+                }
+
+                double eye_separation_mm = 0.0;
+                if (projection_layer->viewCount >= 2) {
+                    eye_separation_mm =
+                        PositionSeparationMeters(projection_layer->views[0].pose.position,
+                                                 projection_layer->views[1].pose.position) *
+                        1000.0;
+                }
+                std::ostringstream stream;
+                stream << "Depth runtime submission: frameTime=" << submitted_frame.displayTime
+                       << ", submissionPath=" << submission_path
+                       << ", layer=" << i
+                       << ", layerCount=" << submitted_frame.layerCount
+                       << ", viewCount=" << projection_layer->viewCount
+                       << ", eyeSeparationMm=" << FormatDiagnosticDouble(eye_separation_mm)
+                       << ", view0ProjCenter="
+                       << FormatDiagnosticDouble(HorizontalProjectionCenter(projection_layer->views[0].fov));
+                if (projection_layer->viewCount >= 2) {
+                    stream << ", view1ProjCenter="
+                           << FormatDiagnosticDouble(HorizontalProjectionCenter(projection_layer->views[1].fov));
+                }
+                logger_.Info(stream.str());
+                depth_submission_info_pending_ = false;
+                break;
+            }
+        };
+
     // Log what the app actually submitted (independent of the pivot/quadviews
     // branch below) so we can confirm whether DepthXR's xrLocateViews per-eye
     // pose/FOV survives into the composition layer the runtime presents, or
@@ -5706,6 +5766,7 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
         if (XR_FAILED(release_result)) {
             return release_result;
         }
+        log_depth_runtime_submission(*frame_end_info, "passthrough");
         return ForwardEndFrame(session, frame_end_info, lock);
     }
 
@@ -5855,6 +5916,7 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
 
     // Pruning happens above, while the lock is still held: ForwardEndFrame
     // releases mutex_ before forwarding to the runtime.
+    log_depth_runtime_submission(adjusted_frame_end_info, "rewritten");
     return ForwardEndFrame(session, &adjusted_frame_end_info, lock);
 }
 
@@ -6332,8 +6394,13 @@ XrResult OpenXrLayer::LocateViews(XrSession session,
     const bool should_log_quadviews_locate_heartbeat =
         (IsQuadViewConfiguration(view_configuration_type) || synthesized_quad_views) &&
         ShouldLogQuadViewsDebugHeartbeat(last_quadviews_locate_debug_heartbeat_);
-    if (pending_locate_views_diagnostics_ > 0 || should_log_pivot_diagnostic ||
-        should_log_quadviews_locate_heartbeat) {
+    const bool depth_adjustment_active_for_info =
+        depthxr_active &&
+        (!NearlyEqual(resolved_settings_.depthxr.stereo_boost, 1.0) ||
+         !NearlyEqual(resolved_settings_.depthxr.convergence, 0.0));
+    const bool should_log_depth_view_info = depth_view_info_pending_ && depth_adjustment_active_for_info;
+    if (pending_locate_views_diagnostics_ > 0 || should_log_depth_view_info ||
+        should_log_pivot_diagnostic || should_log_quadviews_locate_heartbeat) {
         const double left_position_delta =
             adjusted_views[0].position.x - original_views[0].position.x;
         const double right_position_delta =
@@ -6371,7 +6438,8 @@ XrResult OpenXrLayer::LocateViews(XrSession session,
                             ExtractPitchRadians(original_views[1].orientation)
                       : 0.0;
 
-        if (pending_locate_views_diagnostics_ > 0 || should_log_quadviews_locate_heartbeat) {
+        if (pending_locate_views_diagnostics_ > 0 || should_log_depth_view_info ||
+            should_log_quadviews_locate_heartbeat) {
             std::ostringstream stream;
             stream << "LocateViews "
                    << (should_log_quadviews_locate_heartbeat && pending_locate_views_diagnostics_ == 0 ?
@@ -6408,6 +6476,22 @@ XrResult OpenXrLayer::LocateViews(XrSession session,
             stream << " after:";
             AppendViewSummary(stream, adjusted_views);
             logger_.Debug(stream.str());
+            if (should_log_depth_view_info) {
+                std::ostringstream depth_stream;
+                depth_stream << "Depth view geometry applied: frameTime=" << locate_time
+                             << ", locateCall=" << locate_views_call_count_
+                             << ", viewConfig=" << ToString(view_configuration_type)
+                             << ", viewCount=" << count
+                             << ", stereoBoost=" << FormatDiagnosticDouble(resolved_settings_.depthxr.stereo_boost)
+                             << ", convergence=" << FormatDiagnosticDouble(resolved_settings_.depthxr.convergence)
+                             << ", eyeSeparationBeforeMm=" << FormatDiagnosticDouble(eye_separation_before_mm)
+                             << ", eyeSeparationAfterMm=" << FormatDiagnosticDouble(eye_separation_after_mm)
+                             << ", effectiveStereoFactor=" << FormatDiagnosticDouble(effective_stereo_factor)
+                             << ", leftProjCenterDelta=" << FormatDiagnosticDouble(left_projection_center_delta)
+                             << ", rightProjCenterDelta=" << FormatDiagnosticDouble(right_projection_center_delta);
+                logger_.Info(depth_stream.str());
+                depth_view_info_pending_ = false;
+            }
             if (pending_locate_views_diagnostics_ > 0) {
                 --pending_locate_views_diagnostics_;
             }
@@ -6718,6 +6802,8 @@ void OpenXrLayer::RefreshResolvedSettings() {
     if (!last_logged_settings_ || !SameSettings(*last_logged_settings_, resolved_settings_)) {
         LogResolvedSettings(resolved_settings_);
         last_logged_settings_ = resolved_settings_;
+        depth_view_info_pending_ = true;
+        depth_submission_info_pending_ = true;
         pending_locate_views_diagnostics_ = 5;
         pending_end_frame_diagnostics_ = 5;
         pending_pivot_diagnostics_ = kPivotDiagnosticBurstCount;
@@ -9491,6 +9577,8 @@ bool OpenXrLayer::IsDepthXrActive() {
 
     if (was_pressed_this_call) {
         depthxr_toggle_enabled_ = !depthxr_toggle_enabled_;
+        depth_view_info_pending_ = true;
+        depth_submission_info_pending_ = true;
         pending_locate_views_diagnostics_ = 5;
         pending_end_frame_diagnostics_ = 5;
         logger_.Info(std::string("Depth effects ") +
