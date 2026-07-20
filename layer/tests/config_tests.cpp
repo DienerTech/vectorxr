@@ -57,6 +57,7 @@ void TestParseConfig() {
       "defaults": {
         "stereoBoostEnabled": true,
         "convergenceEnabled": true,
+        "compatibilityMode": true,
         "stereoBoost": 1.1,
         "convergence": 0.08
       },
@@ -72,6 +73,7 @@ void TestParseConfig() {
           "applicationIds": ["game"],
           "enabled": true,
           "settings": {
+            "compatibilityMode": false,
             "stereoBoost": 1.2
           }
         }

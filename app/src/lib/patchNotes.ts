@@ -8,6 +8,17 @@ export interface PatchNoteEntry {
 
 export const patchNotes: PatchNoteEntry[] = [
   {
+    version: '0.13.7',
+    date: '2026-07-19',
+    title: 'Depth tuning and diagnostics',
+    summary: 'Improves Depth tuning and diagnostics for games that manage their own IPD.',
+    items: [
+      'Adds 0.1-step Convergence adjustments.',
+      'Warns when in-game Force IPD or stereo settings can override Stereo Boost.',
+      'Adds concise runtime geometry logging for troubleshooting Depth behavior.',
+    ],
+  },
+  {
     version: '0.13.6',
     date: '2026-07-18',
     title: 'Pivot & Recovery Reliability',
@@ -226,7 +237,7 @@ export const patchNotes: PatchNoteEntry[] = [
       'Pivot now eases smoothly in and out when toggled instead of snapping, with a tunable activation ramp and a single smoothing control shared by yaw and pitch.',
       'Synchronized the Pivot yaw and pitch defaults for a consistent out-of-the-box feel.',
       'Reworked the Depth controls with bipolar sliders centered at neutral and one value per effect, and fixed the runtime toggle to apply saved values instantly as a clean on/off switch.',
-      'Added a Depth compatibility notice for headset-native OpenXR runtimes (such as Pimax) that can ignore Depth, with guidance to use the SteamVR pipeline.',
+      'Added a Depth troubleshooting notice for game or runtime settings that can override OpenXR stereo geometry.',
       'Quadviews now color-codes its performance budget (green/amber/red) and takes Foveate/Peripheral resolution as a percent of headset resolution.',
       'Added optional sound feedback for keybind and device bindings: play a short .wav on activate/deactivate using the bundled tones or your own, with a master volume control in Settings.',
       'Enhancement default profiles now ship off for consistency.',

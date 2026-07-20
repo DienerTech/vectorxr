@@ -19,7 +19,7 @@ defineEmits<{
   syncProfileName: [index: number]
 }>()
 
-const compatibilityInfoOpen = ref(false)
+const depthInfoOpen = ref(false)
 const bindingSubPageOpen = ref(false)
 
 const profileWarnings = computed(() => {
@@ -72,13 +72,22 @@ const profileWarnings = computed(() => {
         <button
           class="button-secondary inline-flex items-center gap-2 rounded-[0.75rem] px-4 py-2 text-sm font-medium"
           type="button"
-          @click="compatibilityInfoOpen = true"
+          @click="depthInfoOpen = true"
         >
           <span class="inline-flex h-5 w-5 items-center justify-center rounded-full border text-xs" style="border-color: var(--app-border)">
             i
           </span>
-          Depth Compatibility
+          Depth Troubleshooting
         </button>
+      </div>
+      <div
+        class="mb-5 rounded-[0.9rem] border px-4 py-3 text-sm leading-6 chip-warning"
+        style="border-color: var(--app-border)"
+        role="note"
+      >
+        <p class="font-medium">In-game IPD settings can override Stereo Boost</p>
+        <p class="mt-1">Disable any Force IPD, virtual IPD, stereo-separation, or world-scale override before testing Depth.</p>
+        <p class="mt-1">Example: in DCS, uncheck <strong>Force IPD Distance</strong> under Options &gt; VR.</p>
       </div>
 
       <!-- Module-level binding — applies regardless of which profile is active -->
@@ -130,7 +139,7 @@ const profileWarnings = computed(() => {
             :step="0.01"
             :display-min="-25"
             :display-max="25"
-            :display-step="1"
+            :display-step="0.1"
             :display-value="toConvergenceDisplay"
             :parse-display-value="fromConvergenceDisplay"
             :display-badge="convergenceBadge"
@@ -187,7 +196,7 @@ const profileWarnings = computed(() => {
             :step="0.01"
             :display-min="-25"
             :display-max="25"
-            :display-step="1"
+            :display-step="0.1"
             :display-value="toConvergenceDisplay"
             :parse-display-value="fromConvergenceDisplay"
             :display-badge="convergenceBadge"
@@ -203,29 +212,29 @@ const profileWarnings = computed(() => {
       </div>
     </section>
 
-    <div v-if="compatibilityInfoOpen" class="fixed inset-0 z-50 flex items-center justify-center bg-black/45 px-4 py-6 backdrop-blur-sm">
+    <div v-if="depthInfoOpen" class="fixed inset-0 z-50 flex items-center justify-center bg-black/45 px-4 py-6 backdrop-blur-sm">
       <div class="w-full max-w-[720px] rounded-[1.25rem] border p-5 surface-panel-strong">
         <div class="flex flex-wrap items-start justify-between gap-4">
           <div>
-            <p class="eyebrow text-xs uppercase tracking-[0.24em]">Depth Compatibility</p>
-            <h2 class="mt-2 text-xl font-semibold tracking-tight">A Special Note About OpenXR Runtimes</h2>
+            <p class="eyebrow text-xs uppercase tracking-[0.24em]">Depth Troubleshooting</p>
+            <h2 class="mt-2 text-xl font-semibold tracking-tight">When Stereo Boost Appears Inactive</h2>
           </div>
-          <button class="button-secondary rounded-[0.75rem] px-4 py-2 text-sm font-medium" type="button" @click="compatibilityInfoOpen = false">
+          <button class="button-secondary rounded-[0.75rem] px-4 py-2 text-sm font-medium" type="button" @click="depthInfoOpen = false">
             Close
           </button>
         </div>
 
         <div class="mt-5 space-y-4 text-sm leading-6">
-          <div class="rounded-[1rem] border px-4 py-4 chip-accent" style="border-color: var(--app-border)">
-            ⚠ Some headset-native OpenXR runtimes — notably Pimax's PiOpenXR — can override the per-eye geometry VectorXR submits, ignoring Depth's stereo boost and convergence entirely.
+          <div class="rounded-[1rem] border px-4 py-4 chip-warning" style="border-color: var(--app-border)">
+            Games with a Force IPD, virtual IPD, stereo-separation, or world-scale setting may replace the eye separation reported by OpenXR. That override takes precedence over VectorXR Stereo Boost.
           </div>
 
           <div class="rounded-[1rem] border px-4 py-4 surface-panel">
-            If you enable Depth and see no change in the headset even at strong values, your runtime is most likely normalizing it away. This is not a VectorXR limitation — the adjustment is applied correctly up to the point the runtime presents the frame.
+            <strong>DCS:</strong> uncheck <strong>Force IPD Distance</strong> under Options &gt; VR, then fully restart DCS. A forced value fixes DCS's own virtual camera separation and can make Stereo Boost appear to do nothing.
           </div>
 
           <div class="rounded-[1rem] border px-4 py-4 surface-panel">
-            Workaround: switch your active OpenXR runtime to SteamVR, which faithfully honors the submitted projection. Depth then applies as expected. Pivot and Quadviews are unaffected by this issue.
+            Convergence may still respond while Stereo Boost is overridden because it adjusts the projection center rather than the distance between the game's two eye cameras. If Stereo Boost still has no effect after disabling game-level overrides, enable debug logging and export the session logs.
           </div>
         </div>
       </div>

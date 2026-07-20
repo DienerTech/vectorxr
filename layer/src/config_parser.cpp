@@ -800,6 +800,10 @@ bool ParseDepthDefaults(const JsonValue::Object& object, DepthXrResolvedSettings
         // (stereoBoost 1.0 / convergence 0.0) mean "off".
         "stereoBoostEnabled",
         "convergenceEnabled",
+        // Retired 0.13.7-development field. Accept and ignore it so a config
+        // written by the experimental compatibility-mode branch does not make
+        // the entire layer fall back to defaults.
+        "compatibilityMode",
         "stereoBoost",
         "convergence",
     };
@@ -849,6 +853,9 @@ bool ParseDepthProfileSettings(const JsonValue::Object& object, DepthXrSettingsO
         // Legacy keys accepted but ignored (see ParseDepthDefaults).
         "stereoBoostEnabled",
         "convergenceEnabled",
+        // Profile copies of the retired experimental field are harmless too.
+        // Keep strict rejection for every other unknown setting.
+        "compatibilityMode",
         "stereoBoost",
         "convergence",
     };
