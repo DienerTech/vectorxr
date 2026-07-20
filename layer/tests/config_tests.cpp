@@ -1854,19 +1854,31 @@ void TestDepthSubmissionGeometryRouting() {
 
     const Record* found = nullptr;
     Time matched_time = 0;
+    depthxr::DepthSubmissionLookupDiagnostics lookup;
     Expect(depthxr::FindDepthSubmissionGeometryValue(
-               cache, static_cast<Time>(10'000'000), 7, 2, &found, &matched_time),
+               cache, static_cast<Time>(10'000'000), 7, 2, &found, &matched_time, &lookup),
            "Depth submission geometry exact match was not found");
     Expect(found && matched_time == 10'000'000 && found->original_views == original &&
                found->adjusted_views == adjusted,
            "Depth submission geometry exact match returned the wrong values");
+    Expect(lookup.cache_available && lookup.time_candidate && lookup.space_candidate &&
+               lookup.view_count_candidate,
+           "Depth submission geometry exact-match diagnostics were incomplete");
+
     Expect(!depthxr::FindDepthSubmissionGeometryValue(
-               cache, static_cast<Time>(10'000'000), 8, 2, &found, &matched_time),
+               cache, static_cast<Time>(10'000'000), 8, 2, &found, &matched_time, &lookup),
            "Depth submission geometry crossed reference spaces");
     Expect(found == nullptr, "Depth submission geometry failure retained a stale result");
+    Expect(lookup.cache_available && lookup.time_candidate && !lookup.space_candidate &&
+               !lookup.view_count_candidate,
+           "Depth submission geometry did not classify a reference-space mismatch");
+
     Expect(!depthxr::FindDepthSubmissionGeometryValue(
-               cache, static_cast<Time>(10'000'000), 7, 4, &found, &matched_time),
+               cache, static_cast<Time>(10'000'000), 7, 4, &found, &matched_time, &lookup),
            "Depth submission geometry ignored the projection view count");
+    Expect(lookup.cache_available && lookup.time_candidate && lookup.space_candidate &&
+               !lookup.view_count_candidate,
+           "Depth submission geometry did not classify a view-count mismatch");
 
     const std::vector<int> later_original{5, 6};
     const std::vector<int> later_adjusted{7, 8};
@@ -1874,9 +1886,24 @@ void TestDepthSubmissionGeometryRouting() {
         cache, static_cast<Time>(20'000'000), 7,
         std::span<const int>(later_original), std::span<const int>(later_adjusted));
     Expect(depthxr::FindDepthSubmissionGeometryValue(
-               cache, static_cast<Time>(21'000'000), 7, 2, &found, &matched_time) &&
+               cache, static_cast<Time>(21'000'000), 7, 2, &found, &matched_time, &lookup) &&
                found && matched_time == 20'000'000 && found->original_views == later_original,
            "Depth submission geometry did not use the nearest in-window frame");
+
+    Expect(!depthxr::FindDepthSubmissionGeometryValue(
+               cache, static_cast<Time>(30'000'001), 7, 2, &found, &matched_time, &lookup),
+           "Depth submission geometry reused an out-of-window frame");
+    Expect(lookup.cache_available && !lookup.time_candidate && !lookup.space_candidate &&
+               !lookup.view_count_candidate,
+           "Depth submission geometry did not classify a display-time mismatch");
+
+    std::map<Time, std::vector<Record>> empty_cache;
+    Expect(!depthxr::FindDepthSubmissionGeometryValue(
+               empty_cache, static_cast<Time>(10'000'000), 7, 2,
+               &found, &matched_time, &lookup),
+           "Depth submission geometry unexpectedly matched an empty cache");
+    Expect(!lookup.cache_available && !lookup.time_candidate,
+           "Depth submission geometry did not classify an empty cache");
 
     depthxr::PruneDepthSubmissionGeometryValues(cache, static_cast<Time>(10'000'000));
     Expect(cache.size() == 1 && cache.begin()->first == 20'000'000,

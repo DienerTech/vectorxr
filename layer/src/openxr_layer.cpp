@@ -42,6 +42,56 @@ bool NearlyEqual(double lhs, double rhs) {
     return std::abs(lhs - rhs) < 0.0001;
 }
 
+enum class DepthCompatibilityMatchResult {
+    kNotEvaluated,
+    kMatched,
+    kNoCachedGeometry,
+    kNoTimeMatch,
+    kSpaceMismatch,
+    kViewCountMismatch,
+    kGeometryMismatch,
+};
+
+constexpr uint32_t kDepthCompatibilityWarningFrameThreshold = 120;
+constexpr auto kDepthCompatibilityWarningInterval = std::chrono::seconds(30);
+
+const char* ToString(DepthCompatibilityMatchResult result) {
+    switch (result) {
+    case DepthCompatibilityMatchResult::kNotEvaluated:
+        return "not-evaluated";
+    case DepthCompatibilityMatchResult::kMatched:
+        return "matched";
+    case DepthCompatibilityMatchResult::kNoCachedGeometry:
+        return "no-cached-geometry";
+    case DepthCompatibilityMatchResult::kNoTimeMatch:
+        return "no-time-match";
+    case DepthCompatibilityMatchResult::kSpaceMismatch:
+        return "space-mismatch";
+    case DepthCompatibilityMatchResult::kViewCountMismatch:
+        return "view-count-mismatch";
+    case DepthCompatibilityMatchResult::kGeometryMismatch:
+        return "submitted-geometry-mismatch";
+    }
+    return "unknown";
+}
+
+int DepthCompatibilityFailurePriority(DepthCompatibilityMatchResult result) {
+    switch (result) {
+    case DepthCompatibilityMatchResult::kGeometryMismatch:
+        return 5;
+    case DepthCompatibilityMatchResult::kViewCountMismatch:
+        return 4;
+    case DepthCompatibilityMatchResult::kSpaceMismatch:
+        return 3;
+    case DepthCompatibilityMatchResult::kNoTimeMatch:
+        return 2;
+    case DepthCompatibilityMatchResult::kNoCachedGeometry:
+        return 1;
+    default:
+        return 0;
+    }
+}
+
 // Seed table for Auto pacing. Known-interlocking runtimes get sequenced
 // pacing up front (their xrWaitFrame can stall until the next submit — 0.12
 // field reports on Oculus and Varjo; PiOpenXR observed during development);
@@ -1937,6 +1987,7 @@ XrResult OpenXrLayer::EndSession(XrSession session) {
     {
         std::scoped_lock lock(mutex_);
         session_begin_wall_time_.reset();
+        LogDepthCompatibilitySummaryLocked("session-end", true);
         active_primary_view_configuration_type_ = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
         active_runtime_view_configuration_type_ = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
         has_active_primary_view_configuration_ = false;
@@ -5698,33 +5749,126 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
         }
     }
 
+    const bool depth_compatibility_expected =
+        resolved_settings_.depthxr.compatibility_mode &&
+        resolved_settings_.depthxr.enabled &&
+        depthxr_toggle_enabled_ &&
+        (!NearlyEqual(resolved_settings_.depthxr.stereo_boost, 1.0) ||
+         !NearlyEqual(resolved_settings_.depthxr.convergence, 0.0));
     const auto find_depth_submission_geometry =
         [&](const XrCompositionLayerProjection& projection_layer,
             const DepthSubmissionGeometry** geometry,
-            XrTime* geometry_time) {
-            return FindDepthSubmissionGeometry(frame_end_info->displayTime,
-                                               projection_layer.space,
-                                               projection_layer.viewCount,
-                                               geometry,
-                                               geometry_time) &&
-                   ProjectionMatchesDepthGeometry(projection_layer, **geometry);
+            XrTime* geometry_time,
+            DepthCompatibilityMatchResult* match_result) {
+            DepthSubmissionLookupDiagnostics lookup;
+            if (!FindDepthSubmissionGeometry(frame_end_info->displayTime,
+                                             projection_layer.space,
+                                             projection_layer.viewCount,
+                                             geometry,
+                                             geometry_time,
+                                             &lookup)) {
+                if (!lookup.cache_available) {
+                    *match_result = DepthCompatibilityMatchResult::kNoCachedGeometry;
+                } else if (!lookup.time_candidate) {
+                    *match_result = DepthCompatibilityMatchResult::kNoTimeMatch;
+                } else if (!lookup.space_candidate) {
+                    *match_result = DepthCompatibilityMatchResult::kSpaceMismatch;
+                } else {
+                    *match_result = DepthCompatibilityMatchResult::kViewCountMismatch;
+                }
+                return false;
+            }
+            if (!ProjectionMatchesDepthGeometry(projection_layer, **geometry)) {
+                *match_result = DepthCompatibilityMatchResult::kGeometryMismatch;
+                return false;
+            }
+            *match_result = DepthCompatibilityMatchResult::kMatched;
+            return true;
         };
 
+    bool has_projection_layer = false;
     bool has_depth_compatibility_rewrite = false;
-    for (uint32_t i = 0; i < frame_end_info->layerCount; ++i) {
-        const XrCompositionLayerBaseHeader* base_header = frame_end_info->layers[i];
-        if (!base_header || base_header->type != XR_TYPE_COMPOSITION_LAYER_PROJECTION) {
-            continue;
+    DepthCompatibilityMatchResult depth_compatibility_result =
+        DepthCompatibilityMatchResult::kNotEvaluated;
+    if (depth_compatibility_expected) {
+        for (uint32_t i = 0; i < frame_end_info->layerCount; ++i) {
+            const XrCompositionLayerBaseHeader* base_header = frame_end_info->layers[i];
+            if (!base_header || base_header->type != XR_TYPE_COMPOSITION_LAYER_PROJECTION) {
+                continue;
+            }
+            const auto* projection_layer =
+                reinterpret_cast<const XrCompositionLayerProjection*>(base_header);
+            if (!projection_layer->views || projection_layer->viewCount == 0) {
+                continue;
+            }
+            has_projection_layer = true;
+            const DepthSubmissionGeometry* geometry = nullptr;
+            XrTime geometry_time = 0;
+            DepthCompatibilityMatchResult layer_result =
+                DepthCompatibilityMatchResult::kNotEvaluated;
+            if (find_depth_submission_geometry(
+                    *projection_layer, &geometry, &geometry_time, &layer_result)) {
+                has_depth_compatibility_rewrite = true;
+                depth_compatibility_result = DepthCompatibilityMatchResult::kMatched;
+                break;
+            }
+            if (DepthCompatibilityFailurePriority(layer_result) >
+                DepthCompatibilityFailurePriority(depth_compatibility_result)) {
+                depth_compatibility_result = layer_result;
+            }
         }
-        const auto* projection_layer =
-            reinterpret_cast<const XrCompositionLayerProjection*>(base_header);
-        const DepthSubmissionGeometry* geometry = nullptr;
-        XrTime geometry_time = 0;
-        if (projection_layer->views && projection_layer->viewCount > 0 &&
-            find_depth_submission_geometry(*projection_layer, &geometry, &geometry_time)) {
-            has_depth_compatibility_rewrite = true;
-            break;
+    }
+
+    DepthCompatibilityDiagnosticState& depth_diagnostic =
+        depth_compatibility_diagnostic_;
+    if (depth_compatibility_expected && has_projection_layer) {
+        ++depth_diagnostic.evaluated_frames;
+        if (has_depth_compatibility_rewrite) {
+            ++depth_diagnostic.matched_frames;
+            depth_diagnostic.consecutive_unmatched_frames = 0;
+        } else {
+            ++depth_diagnostic.consecutive_unmatched_frames;
+            switch (depth_compatibility_result) {
+            case DepthCompatibilityMatchResult::kNoCachedGeometry:
+                ++depth_diagnostic.no_cache_frames;
+                break;
+            case DepthCompatibilityMatchResult::kNoTimeMatch:
+                ++depth_diagnostic.no_time_match_frames;
+                break;
+            case DepthCompatibilityMatchResult::kSpaceMismatch:
+                ++depth_diagnostic.space_mismatch_frames;
+                break;
+            case DepthCompatibilityMatchResult::kViewCountMismatch:
+                ++depth_diagnostic.view_count_mismatch_frames;
+                break;
+            case DepthCompatibilityMatchResult::kGeometryMismatch:
+                ++depth_diagnostic.geometry_mismatch_frames;
+                break;
+            default:
+                break;
+            }
+
+            if (depth_diagnostic.consecutive_unmatched_frames >=
+                kDepthCompatibilityWarningFrameThreshold) {
+                const auto now = std::chrono::steady_clock::now();
+                if (!depth_diagnostic.last_warning_wall_time ||
+                    now - *depth_diagnostic.last_warning_wall_time >=
+                        kDepthCompatibilityWarningInterval) {
+                    std::ostringstream stream;
+                    stream << "Depth runtime compatibility warning: no matching projection for "
+                           << depth_diagnostic.consecutive_unmatched_frames
+                           << " consecutive submitted frames; latestResult="
+                           << ToString(depth_compatibility_result)
+                           << ", cachedLocateCalls=" << depth_diagnostic.cached_locate_calls
+                           << ", cachedDepthFrames=" << cached_depth_submission_geometry_.size()
+                           << ". Enable debug logging and export the session log for mismatch details.";
+                    logger_.Info(stream.str());
+                    depth_diagnostic.last_warning_wall_time = now;
+                }
+            }
         }
+    } else {
+        depth_diagnostic.consecutive_unmatched_frames = 0;
     }
 
     if (!has_non_identity_delta && !has_depth_compatibility_rewrite &&
@@ -5732,7 +5876,10 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
         if (should_log_end_frame_diagnostic) {
             std::ostringstream stream;
             stream << "EndFrame projection rewrite skipped: pivotCacheHit=" << has_pose_delta
+                   << ", depthCompatibilityExpected=" << depth_compatibility_expected
                    << ", depthCompatibilityMatch=" << has_depth_compatibility_rewrite
+                   << ", depthCompatibilityResult="
+                   << ToString(depth_compatibility_result)
                    << ", frameTime=" << frame_end_info->displayTime;
             if (has_pose_delta) {
                 stream << ", pivotMatchedTime=" << matched_time
@@ -5823,8 +5970,12 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
         }
         const DepthSubmissionGeometry* depth_submission = nullptr;
         XrTime depth_submission_time = 0;
-        const bool restore_depth_submission = find_depth_submission_geometry(
-            *projection_layer, &depth_submission, &depth_submission_time);
+        DepthCompatibilityMatchResult layer_depth_result =
+            DepthCompatibilityMatchResult::kNotEvaluated;
+        const bool restore_depth_submission =
+            depth_compatibility_expected &&
+            find_depth_submission_geometry(
+                *projection_layer, &depth_submission, &depth_submission_time, &layer_depth_result);
         if (restore_depth_submission) {
             ++depth_compatibility_layer_count;
             depth_compatibility_view_count += projection_layer->viewCount;
@@ -5885,6 +6036,30 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
         }
     }
 
+    if (depth_compatibility_layer_count > 0) {
+        depth_diagnostic.rewritten_layers += depth_compatibility_layer_count;
+        depth_diagnostic.rewritten_views += depth_compatibility_view_count;
+        if (!depth_diagnostic.success_logged) {
+            std::string_view projection_path = "stereo";
+            if (quadviews_projection_split_active) {
+                projection_path = "quadviews-emulation";
+            } else if (has_active_primary_view_configuration_ &&
+                       IsQuadViewConfiguration(active_primary_view_configuration_type_)) {
+                projection_path = "native-quadviews";
+            }
+
+            std::ostringstream stream;
+            stream << "Depth runtime compatibility ACTIVE: matched and restored original projection metadata for "
+                   << depth_compatibility_layer_count << " layer(s) / "
+                   << depth_compatibility_view_count << " view(s)"
+                   << ", projectionPath=" << projection_path
+                   << ", matchedDeltaNs="
+                   << (depth_compatibility_matched_time - frame_end_info->displayTime)
+                   << ", pivotApplied=" << has_non_identity_delta << ".";
+            logger_.Info(stream.str());
+            depth_diagnostic.success_logged = true;
+        }
+    }
     XrFrameEndInfo adjusted_frame_end_info = *frame_end_info;
     adjusted_frame_end_info.layerCount = static_cast<uint32_t>(adjusted_layers.size());
     adjusted_frame_end_info.layers = adjusted_layers.data();
@@ -5898,6 +6073,9 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
         std::ostringstream stream;
         stream << "EndFrame projection rewrite applied: frameTime=" << frame_end_info->displayTime
                << ", pivotApplied=" << has_non_identity_delta
+               << ", depthCompatibilityExpected=" << depth_compatibility_expected
+               << ", depthCompatibilityResult="
+               << ToString(depth_compatibility_result)
                << ", depthCompatibilityLayers=" << depth_compatibility_layer_count
                << ", depthCompatibilityViews=" << depth_compatibility_view_count;
         if (has_pose_delta) {
@@ -6809,6 +6987,27 @@ void OpenXrLayer::RefreshResolvedSettings() {
     }
     logger_.SetLevel(resolved_settings_.core.log_level);
     logger_.SetRetentionFiles(resolved_settings_.core.log_retention_files);
+    if (!resolved_settings_.depthxr.compatibility_mode) {
+        depth_compatibility_diagnostic_.configuration_logged = false;
+        depth_compatibility_diagnostic_.success_logged = false;
+        depth_compatibility_diagnostic_.consecutive_unmatched_frames = 0;
+        depth_compatibility_diagnostic_.last_warning_wall_time.reset();
+    } else if (!depth_compatibility_diagnostic_.configuration_logged) {
+        const bool non_neutral_depth =
+            !NearlyEqual(resolved_settings_.depthxr.stereo_boost, 1.0) ||
+            !NearlyEqual(resolved_settings_.depthxr.convergence, 0.0);
+        std::ostringstream stream;
+        stream << "Depth runtime compatibility configured for the active profile: depthEnabled="
+               << resolved_settings_.depthxr.enabled
+               << ", stereoBoost=" << resolved_settings_.depthxr.stereo_boost
+               << ", convergence=" << resolved_settings_.depthxr.convergence
+               << ", state="
+               << (resolved_settings_.depthxr.enabled && non_neutral_depth
+                       ? "armed; awaiting a matching projection submission."
+                       : "idle until Depth is active with a non-neutral adjustment.");
+        logger_.Info(stream.str());
+        depth_compatibility_diagnostic_.configuration_logged = true;
+    }
     if (!last_logged_settings_ || !SameSettings(*last_logged_settings_, resolved_settings_)) {
         LogResolvedSettings(resolved_settings_);
         last_logged_settings_ = resolved_settings_;
@@ -7062,6 +7261,7 @@ void OpenXrLayer::CaptureInstanceFunctions() {
 }
 
 void OpenXrLayer::ResetSessionState() {
+    LogDepthCompatibilitySummaryLocked("session-reset", true);
     if (varjo_native_foveation_diagnostic_.locate_calls > 0) {
         LogVarjoNativeFoveationSummaryLocked("session-teardown", true);
     }
@@ -7916,6 +8116,7 @@ void OpenXrLayer::CacheDepthSubmissionGeometry(
         space,
         original_views,
         adjusted_views);
+    ++depth_compatibility_diagnostic_.cached_locate_calls;
 }
 
 bool OpenXrLayer::FindDepthSubmissionGeometry(
@@ -7923,9 +8124,10 @@ bool OpenXrLayer::FindDepthSubmissionGeometry(
     XrSpace space,
     uint32_t view_count,
     const DepthSubmissionGeometry** geometry,
-    XrTime* matched_time) const {
+    XrTime* matched_time,
+    DepthSubmissionLookupDiagnostics* diagnostics) const {
     return FindDepthSubmissionGeometryValue(
-        cached_depth_submission_geometry_, time, space, view_count, geometry, matched_time);
+        cached_depth_submission_geometry_, time, space, view_count, geometry, matched_time, diagnostics);
 }
 
 void OpenXrLayer::PruneDepthSubmissionGeometry(XrTime time) {
@@ -7953,6 +8155,36 @@ bool OpenXrLayer::ProjectionMatchesDepthGeometry(
         }
     }
     return true;
+}
+
+void OpenXrLayer::LogDepthCompatibilitySummaryLocked(std::string_view reason, bool reset) {
+    DepthCompatibilityDiagnosticState& diagnostic = depth_compatibility_diagnostic_;
+    const uint64_t unmatched_frames =
+        diagnostic.no_cache_frames +
+        diagnostic.no_time_match_frames +
+        diagnostic.space_mismatch_frames +
+        diagnostic.view_count_mismatch_frames +
+        diagnostic.geometry_mismatch_frames;
+    if (diagnostic.cached_locate_calls > 0 || diagnostic.evaluated_frames > 0 ||
+        diagnostic.rewritten_layers > 0) {
+        std::ostringstream stream;
+        stream << "Depth runtime compatibility summary (" << reason << "): "
+               << "cachedLocateCalls=" << diagnostic.cached_locate_calls
+               << ", evaluatedFrames=" << diagnostic.evaluated_frames
+               << ", matchedFrames=" << diagnostic.matched_frames
+               << ", unmatchedFrames=" << unmatched_frames
+               << ", rewrittenLayers=" << diagnostic.rewritten_layers
+               << ", rewrittenViews=" << diagnostic.rewritten_views
+               << ", missNoCache=" << diagnostic.no_cache_frames
+               << ", missTime=" << diagnostic.no_time_match_frames
+               << ", missSpace=" << diagnostic.space_mismatch_frames
+               << ", missViewCount=" << diagnostic.view_count_mismatch_frames
+               << ", missGeometry=" << diagnostic.geometry_mismatch_frames;
+        logger_.Info(stream.str());
+    }
+    if (reset) {
+        diagnostic = {};
+    }
 }
 
 void OpenXrLayer::CacheQuadViewsFovs(XrTime time, std::span<const XrView> views) {

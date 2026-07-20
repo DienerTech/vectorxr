@@ -175,6 +175,22 @@ class OpenXrLayer {
     ~OpenXrLayer();
 
     using DepthSubmissionGeometry = DepthSubmissionGeometryRecord<XrSpace, ViewAdjustmentData>;
+    struct DepthCompatibilityDiagnosticState {
+        uint64_t cached_locate_calls{0};
+        uint64_t evaluated_frames{0};
+        uint64_t matched_frames{0};
+        uint64_t rewritten_layers{0};
+        uint64_t rewritten_views{0};
+        uint64_t no_cache_frames{0};
+        uint64_t no_time_match_frames{0};
+        uint64_t space_mismatch_frames{0};
+        uint64_t view_count_mismatch_frames{0};
+        uint64_t geometry_mismatch_frames{0};
+        uint32_t consecutive_unmatched_frames{0};
+        bool configuration_logged{false};
+        bool success_logged{false};
+        std::optional<std::chrono::steady_clock::time_point> last_warning_wall_time;
+    };
 
     struct SwapchainInfo {
         XrSession session{XR_NULL_HANDLE};
@@ -481,10 +497,12 @@ class OpenXrLayer {
                                      XrSpace space,
                                      uint32_t view_count,
                                      const DepthSubmissionGeometry** geometry,
-                                     XrTime* matched_time) const;
+                                     XrTime* matched_time,
+                                     DepthSubmissionLookupDiagnostics* diagnostics = nullptr) const;
     void PruneDepthSubmissionGeometry(XrTime time);
     bool ProjectionMatchesDepthGeometry(const XrCompositionLayerProjection& layer,
                                         const DepthSubmissionGeometry& geometry) const;
+    void LogDepthCompatibilitySummaryLocked(std::string_view reason, bool reset);
     void CacheQuadViewsFovs(XrTime time, std::span<const XrView> views);
     bool FindQuadViewsFovs(XrTime time, std::array<XrFovf, 4>* fovs, XrTime* matched_time) const;
     void PruneQuadViewsFovs(XrTime time);
@@ -953,6 +971,7 @@ class OpenXrLayer {
     std::vector<const XrCompositionLayerBaseHeader*> end_frame_layers_scratch_;
     std::map<XrTime, XrPosef> cached_pivot_pose_deltas_;
     std::map<XrTime, std::vector<DepthSubmissionGeometry>> cached_depth_submission_geometry_;
+    DepthCompatibilityDiagnosticState depth_compatibility_diagnostic_;
     std::map<XrTime, std::array<XrFovf, 4>> cached_quadviews_fovs_;
     std::unordered_map<XrSwapchain, SwapchainInfo> tracked_swapchains_;
     D3D11QuadViewsCompositor d3d11_quadviews_compositor_;

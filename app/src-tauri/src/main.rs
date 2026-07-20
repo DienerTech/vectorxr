@@ -241,6 +241,8 @@ struct DepthXRSettings {
     stereo_boost: f64,
     #[serde(default = "default_convergence")]
     convergence: f64,
+    #[serde(default = "default_false")]
+    compatibility_mode: bool,
 }
 
 impl Default for DepthXRSettings {
@@ -248,6 +250,7 @@ impl Default for DepthXRSettings {
         Self {
             stereo_boost: default_stereo_boost(),
             convergence: default_convergence(),
+            compatibility_mode: false,
         }
     }
 }
@@ -1807,4 +1810,65 @@ fn main() {
         ])
         .run(tauri::generate_context!())
         .expect("failed to run VectorXR Tauri app");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn depth_compatibility_mode_round_trips_through_config_bridge() {
+        let input = serde_json::json!({
+            "version": 3,
+            "modules": {
+                "depthxr": {
+                    "enabled": true,
+                    "defaults": {
+                        "stereoBoost": 1.5,
+                        "convergence": 0.02,
+                        "compatibilityMode": true
+                    },
+                    "profiles": [{
+                        "name": "DCS",
+                        "enabled": true,
+                        "applicationIds": ["dcs"],
+                        "settings": {
+                            "stereoBoost": 2.0,
+                            "convergence": 0.1,
+                            "compatibilityMode": true
+                        }
+                    }]
+                }
+            }
+        });
+
+        let config = normalize_config(serde_json::from_value(input).unwrap());
+        assert!(config.modules.depthxr.defaults.compatibility_mode);
+        assert!(
+            config.modules.depthxr.profiles[0]
+                .settings
+                .compatibility_mode
+        );
+
+        let output = serde_json::to_value(config).unwrap();
+        assert_eq!(
+            output["modules"]["depthxr"]["defaults"]["compatibilityMode"],
+            true
+        );
+        assert_eq!(
+            output["modules"]["depthxr"]["profiles"][0]["settings"]["compatibilityMode"],
+            true
+        );
+    }
+
+    #[test]
+    fn depth_compatibility_mode_defaults_off_for_existing_configs() {
+        let settings: DepthXRSettings = serde_json::from_value(serde_json::json!({
+            "stereoBoost": 1.0,
+            "convergence": 0.0
+        }))
+        .unwrap();
+
+        assert!(!settings.compatibility_mode);
+    }
 }

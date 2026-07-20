@@ -21,6 +21,13 @@ struct DepthSubmissionGeometryRecord {
     std::vector<View> adjusted_views;
 };
 
+struct DepthSubmissionLookupDiagnostics {
+    bool cache_available{false};
+    bool time_candidate{false};
+    bool space_candidate{false};
+    bool view_count_candidate{false};
+};
+
 inline constexpr std::int64_t kDepthSubmissionGeometryMatchWindow = 5'000'000;
 inline constexpr std::size_t kDepthSubmissionGeometryMaxFrames = 180;
 
@@ -58,7 +65,12 @@ bool FindDepthSubmissionGeometryValue(
     Space space,
     std::size_t view_count,
     const DepthSubmissionGeometryRecord<Space, View>** geometry,
-    Time* matched_time) {
+    Time* matched_time,
+    DepthSubmissionLookupDiagnostics* diagnostics = nullptr) {
+    if (diagnostics) {
+        *diagnostics = {};
+        diagnostics->cache_available = !cache.empty();
+    }
     if (!geometry || !matched_time) {
         return false;
     }
@@ -76,15 +88,28 @@ bool FindDepthSubmissionGeometryValue(
             (found && delta >= best_delta)) {
             return;
         }
+        if (diagnostics) {
+            diagnostics->time_candidate = true;
+        }
         for (const DepthSubmissionGeometryRecord<Space, View>& record : candidate->second) {
-            if (record.space == space && record.original_views.size() == view_count &&
-                record.adjusted_views.size() == view_count) {
-                found = true;
-                best_time = candidate->first;
-                best_delta = delta;
-                best_record = &record;
-                break;
+            if (record.space != space) {
+                continue;
             }
+            if (diagnostics) {
+                diagnostics->space_candidate = true;
+            }
+            if (record.original_views.size() != view_count ||
+                record.adjusted_views.size() != view_count) {
+                continue;
+            }
+            if (diagnostics) {
+                diagnostics->view_count_candidate = true;
+            }
+            found = true;
+            best_time = candidate->first;
+            best_delta = delta;
+            best_record = &record;
+            break;
         }
     };
 
