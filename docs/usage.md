@@ -99,9 +99,10 @@ Depth adjusts stereo separation and convergence to change perceived scale and co
   right of center to push the effect either way. Values read as a percentage relative to neutral.
 - The **Depth Toggle Binding** at the top lets you toggle Depth on/off at runtime for quick A/B
   comparisons in headset.
-- Start with small changes. Some headset-native OpenXR runtimes (such as Pimax's PiOpenXR) can
-  ignore submitted depth geometry — open the **Depth Compatibility** notice for guidance, and try
-  the SteamVR pipeline if Depth seems to do nothing.
+- Start with small changes. Games with a **Force IPD**, virtual-IPD, stereo-separation, or
+  world-scale setting can override Stereo Boost; disable that setting before testing Depth.
+  In DCS, uncheck **Force IPD Distance** under **Options > VR**, fully restart DCS, and open
+  **Depth Troubleshooting** for additional guidance if Stereo Boost still seems inactive.
 
 ### Pivot
 

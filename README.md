@@ -110,7 +110,7 @@ VectorXR does not currently auto-download or auto-install updates. Updates are i
 
 VectorXR is in **beta**. It is feature-complete for its current scope — the desktop app, Windows installer, OpenXR layer registration, per-application profile model, Depth, Pivot, and Quadviews modules, app discovery, logs, update checks, and the OpenXR layer manager are all implemented and working.
 
-Beta means it is ready to use day-to-day, but it is young and has had limited real-world testing across the range of VR runtimes and hardware. You may hit rough edges on an untested runtime — some headset-native OpenXR runtimes (such as Pimax's PiOpenXR) are known to ignore Depth, for example. VectorXR is designed to be reversible: you can disable any Enhancement, disable the VectorXR layer, or uninstall entirely if anything misbehaves.
+Beta means it is ready to use day-to-day, but it is young and has had limited real-world testing across the range of VR runtimes, hardware, and game-specific VR behavior. Some games expose Force IPD or world-scale controls that can override Stereo Boost; disable those controls before testing Depth. VectorXR is designed to be reversible: you can disable any Enhancement, disable the VectorXR layer, or uninstall entirely if anything misbehaves.
 
 Feedback and bug reports are welcome — that is what this stage is for.
 
