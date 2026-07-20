@@ -42,6 +42,17 @@ bool NearlyEqual(double lhs, double rhs) {
     return std::abs(lhs - rhs) < 0.0001;
 }
 
+double ViewSeparationMeters(std::span<const ViewAdjustmentData> views) {
+    if (views.size() < 2) {
+        return 0.0;
+    }
+
+    const double x = views[0].position.x - views[1].position.x;
+    const double y = views[0].position.y - views[1].position.y;
+    const double z = views[0].position.z - views[1].position.z;
+    return std::sqrt(x * x + y * y + z * z);
+}
+
 // Seed table for Auto pacing. Known-interlocking runtimes get sequenced
 // pacing up front (their xrWaitFrame can stall until the next submit — 0.12
 // field reports on Oculus and Varjo; PiOpenXR observed during development);
@@ -6327,6 +6338,12 @@ XrResult OpenXrLayer::LocateViews(XrSession session,
             adjusted_views[0].position.x - original_views[0].position.x;
         const double right_position_delta =
             count > 1 ? adjusted_views[1].position.x - original_views[1].position.x : 0.0;
+        const double eye_separation_before_mm = ViewSeparationMeters(original_views) * 1000.0;
+        const double eye_separation_after_mm = ViewSeparationMeters(adjusted_views) * 1000.0;
+        const double effective_stereo_factor =
+            eye_separation_before_mm > 0.0001
+                ? eye_separation_after_mm / eye_separation_before_mm
+                : 0.0;
         const double left_projection_center_delta =
             HorizontalProjectionCenter(adjusted_views[0].fov) - HorizontalProjectionCenter(original_views[0].fov);
         const double right_projection_center_delta = count > 1
@@ -6379,6 +6396,9 @@ XrResult OpenXrLayer::LocateViews(XrSession session,
                    << ", depthRuntimeActive=" << depthxr_active
                    << ", stereoBoost=" << FormatDiagnosticDouble(resolved_settings_.depthxr.stereo_boost)
                    << ", convergence=" << FormatDiagnosticDouble(resolved_settings_.depthxr.convergence)
+                   << ", eyeSeparationBeforeMm=" << FormatDiagnosticDouble(eye_separation_before_mm)
+                   << ", eyeSeparationAfterMm=" << FormatDiagnosticDouble(eye_separation_after_mm)
+                   << ", effectiveStereoFactor=" << FormatDiagnosticDouble(effective_stereo_factor)
                    << ", leftXDelta=" << FormatDiagnosticDouble(left_position_delta)
                    << ", rightXDelta=" << FormatDiagnosticDouble(right_position_delta)
                    << ", leftProjCenterDelta=" << FormatDiagnosticDouble(left_projection_center_delta)
