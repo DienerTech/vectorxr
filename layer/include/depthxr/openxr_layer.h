@@ -572,6 +572,7 @@ class OpenXrLayer {
     uint32_t pending_end_frame_diagnostics_{0};
     bool depth_view_info_pending_{false};
     bool depth_submission_info_pending_{false};
+    std::optional<XrTime> depth_submission_info_not_before_time_;
     uint32_t pending_eye_gaze_diagnostics_{0};
     uint32_t pending_eye_gaze_sync_diagnostics_{0};
     uint32_t pending_quadviews_compositor_diagnostics_{0};

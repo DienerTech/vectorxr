@@ -1869,6 +1869,7 @@ XrResult OpenXrLayer::BeginSession(XrSession session, const XrSessionBeginInfo* 
     has_logged_quad_view_short_count_ = false;
     depth_view_info_pending_ = true;
     depth_submission_info_pending_ = true;
+    depth_submission_info_not_before_time_.reset();
 
     logger_.Info(std::string("Session began with view configuration: ") +
                  ToString(active_primary_view_configuration_type_) +
@@ -5675,8 +5676,13 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
          !NearlyEqual(resolved_settings_.depthxr.convergence, 0.0));
     auto log_depth_runtime_submission =
         [&](const XrFrameEndInfo& submitted_frame, std::string_view submission_path) {
+            // An application can locate a newer frame before ending the previous
+            // one. Do not let that older in-flight submission consume the
+            // breadcrumb armed by the newly adjusted locate call.
             if (!depth_submission_info_pending_ ||
                 !depth_adjustment_active_for_submission ||
+                !depth_submission_info_not_before_time_.has_value() ||
+                submitted_frame.displayTime < *depth_submission_info_not_before_time_ ||
                 !submitted_frame.layers) {
                 return;
             }
@@ -5714,6 +5720,7 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
                 }
                 logger_.Info(stream.str());
                 depth_submission_info_pending_ = false;
+                depth_submission_info_not_before_time_.reset();
                 break;
             }
         };
@@ -6501,6 +6508,7 @@ XrResult OpenXrLayer::LocateViews(XrSession session,
                              << ", leftProjCenterDelta=" << FormatDiagnosticDouble(left_projection_center_delta)
                              << ", rightProjCenterDelta=" << FormatDiagnosticDouble(right_projection_center_delta);
                 logger_.Info(depth_stream.str());
+                depth_submission_info_not_before_time_ = locate_time;
                 depth_view_info_pending_ = false;
             }
             if (pending_locate_views_diagnostics_ > 0) {
@@ -6820,6 +6828,7 @@ void OpenXrLayer::RefreshResolvedSettings() {
         last_logged_settings_ = resolved_settings_;
         depth_view_info_pending_ = true;
         depth_submission_info_pending_ = true;
+        depth_submission_info_not_before_time_.reset();
         pending_locate_views_diagnostics_ = 5;
         pending_end_frame_diagnostics_ = 5;
         pending_pivot_diagnostics_ = kPivotDiagnosticBurstCount;
@@ -9595,6 +9604,7 @@ bool OpenXrLayer::IsDepthXrActive() {
         depthxr_toggle_enabled_ = !depthxr_toggle_enabled_;
         depth_view_info_pending_ = true;
         depth_submission_info_pending_ = true;
+        depth_submission_info_not_before_time_.reset();
         pending_locate_views_diagnostics_ = 5;
         pending_end_frame_diagnostics_ = 5;
         logger_.Info(std::string("Depth effects ") +
