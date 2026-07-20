@@ -86,7 +86,8 @@ const profileWarnings = computed(() => {
         role="note"
       >
         <p class="font-medium">In-game IPD settings can override Stereo Boost</p>
-        <p class="mt-1">Disable any Force IPD, virtual IPD, stereo-separation, or world-scale override before testing Depth. In DCS, uncheck <strong>Force IPD Distance</strong> under Options &gt; VR.</p>
+        <p class="mt-1">Disable any Force IPD, virtual IPD, stereo-separation, or world-scale override before testing Depth.</p>
+        <p class="mt-1">Example: in DCS, uncheck <strong>Force IPD Distance</strong> under Options &gt; VR.</p>
       </div>
 
       <!-- Module-level binding — applies regardless of which profile is active -->
