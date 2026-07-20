@@ -234,7 +234,11 @@ const profileWarnings = computed(() => {
           </div>
 
           <div class="rounded-[1rem] border px-4 py-4 surface-panel">
-            Convergence may still respond while Stereo Boost is overridden because it adjusts the projection center rather than the distance between the game's two eye cameras. If Stereo Boost still has no effect after disabling game-level overrides, enable debug logging and export the session logs.
+            <strong>Expected result:</strong> Stereo Boost changes binocular scale most noticeably on nearby geometry, so a cockpit can look larger or smaller while the distant terrain and horizon appear nearly unchanged. That distance-dependent response is normal.
+          </div>
+
+          <div class="rounded-[1rem] border px-4 py-4 surface-panel">
+            <strong>Convergence is subtler:</strong> it shifts the zero-parallax plane rather than scaling the scene. Compare a nearby cockpit edge against distant scenery while moving it in small steps. If Stereo Boost still has no effect after disabling game-level overrides, enable debug logging and export the session logs.
           </div>
         </div>
       </div>

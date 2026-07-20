@@ -3086,9 +3086,12 @@ bool OpenXrLayer::EnsureD3D11QuadViewsCompositor(const XrCompositionLayerProject
     };
 
     for (QuadViewsCompositionTarget& target : d3d11_quadviews_compositor_.targets) {
+        const bool has_direct_targets =
+            !target.d3d11_images.empty() &&
+            target.image_render_target_views.size() == target.d3d11_images.size();
+        const bool has_private_target = target.render_texture && target.render_target_view;
         if (target.swapchain != XR_NULL_HANDLE && target.width == output_width && target.height == output_height &&
-            target.format == output_format && !target.d3d11_images.empty() && target.render_texture &&
-            target.render_target_view) {
+            target.format == output_format && (has_direct_targets || has_private_target)) {
             continue;
         }
 
@@ -3191,46 +3194,51 @@ bool OpenXrLayer::EnsureD3D11QuadViewsCompositor(const XrCompositionLayerProject
                          ", " + FormatTextureDesc(failed_direct_render_target_desc));
         }
 
-        D3D11_TEXTURE2D_DESC render_desc{};
-        render_desc.Width = output_width;
-        render_desc.Height = output_height;
-        render_desc.MipLevels = 1;
-        render_desc.ArraySize = 1;
-        render_desc.Format = static_cast<DXGI_FORMAT>(output_format);
-        render_desc.SampleDesc.Count = 1;
-        render_desc.Usage = D3D11_USAGE_DEFAULT;
-        render_desc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+        if (!direct_render_targets_ready) {
+            D3D11_TEXTURE2D_DESC render_desc{};
+            render_desc.Width = output_width;
+            render_desc.Height = output_height;
+            render_desc.MipLevels = 1;
+            render_desc.ArraySize = 1;
+            render_desc.Format = static_cast<DXGI_FORMAT>(output_format);
+            render_desc.SampleDesc.Count = 1;
+            render_desc.Usage = D3D11_USAGE_DEFAULT;
+            render_desc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
 
-        HRESULT hr = d3d11_quadviews_compositor_.device->CreateTexture2D(&render_desc, nullptr, &target.render_texture);
-        std::string d3d_step = "CreatePrivateRenderTexture";
-        if (SUCCEEDED(hr)) {
-            hr = d3d11_quadviews_compositor_.device->CreateRenderTargetView(
-                target.render_texture,
-                nullptr,
-                &target.render_target_view);
-            d3d_step = "CreatePrivateRenderTargetView";
-        }
-        if (FAILED(hr)) {
-            logger_.Error("D3D11 quadviews compositor private render target creation failed. step=" + d3d_step +
-                          ", hr=" + FormatHex(static_cast<uint32_t>(hr)) +
-                          ", format=" + std::to_string(output_format) +
-                          ", size=" + std::to_string(output_width) + "x" + std::to_string(output_height));
-            release_render_resources(target);
-            if (target.swapchain != XR_NULL_HANDLE && next_destroy_swapchain_) {
-                next_destroy_swapchain_(target.swapchain);
+            HRESULT hr =
+                d3d11_quadviews_compositor_.device->CreateTexture2D(&render_desc, nullptr, &target.render_texture);
+            std::string d3d_step = "CreatePrivateRenderTexture";
+            if (SUCCEEDED(hr)) {
+                hr = d3d11_quadviews_compositor_.device->CreateRenderTargetView(
+                    target.render_texture,
+                    nullptr,
+                    &target.render_target_view);
+                d3d_step = "CreatePrivateRenderTargetView";
             }
-            target = {};
-            d3d11_quadviews_compositor_.failed = true;
-            return false;
+            if (FAILED(hr)) {
+                logger_.Error("D3D11 quadviews compositor private render target creation failed. step=" + d3d_step +
+                              ", hr=" + FormatHex(static_cast<uint32_t>(hr)) +
+                              ", format=" + std::to_string(output_format) +
+                              ", size=" + std::to_string(output_width) + "x" + std::to_string(output_height));
+                release_render_resources(target);
+                if (target.swapchain != XR_NULL_HANDLE && next_destroy_swapchain_) {
+                    next_destroy_swapchain_(target.swapchain);
+                }
+                target = {};
+                d3d11_quadviews_compositor_.failed = true;
+                return false;
+            }
         }
 
         const uint32_t eye = static_cast<uint32_t>(
             &target - d3d11_quadviews_compositor_.targets.data());
         const uint32_t bytes_per_pixel = PixelProbeBytesPerPixel(static_cast<DXGI_FORMAT>(target.format));
+        const bool has_private_render_target = target.render_texture != nullptr;
         const double approximate_mebibytes = bytes_per_pixel == 0
                                                 ? 0.0
                                                 : static_cast<double>(target.width) * target.height *
-                                                      (target.image_count + 1) * bytes_per_pixel /
+                                                      (target.image_count + (has_private_render_target ? 1 : 0)) *
+                                                      bytes_per_pixel /
                                                       (1024.0 * 1024.0);
         std::ostringstream ready_stream;
         ready_stream << "D3D11 quadviews compositor output swapchain ready: eye=" << eye
@@ -3241,7 +3249,7 @@ bool OpenXrLayer::EnsureD3D11QuadViewsCompositor(const XrCompositionLayerProject
                      << ", format=" << target.format
                      << ", images=" << target.image_count
                      << ", directOutputRtvs=" << target.image_render_target_views.size()
-                     << ", privateRenderTarget=1"
+                     << ", privateRenderTarget=" << has_private_render_target
                      << ", approximateRuntimePlusPrivateMiB="
                      << FormatDiagnosticDouble(approximate_mebibytes);
         for (uint32_t image = 0; image < target.d3d11_images.size(); ++image) {
@@ -3253,11 +3261,13 @@ bool OpenXrLayer::EnsureD3D11QuadViewsCompositor(const XrCompositionLayerProject
                          << FormatHex(reinterpret_cast<uintptr_t>(target.d3d11_images[image]))
                          << " " << FormatTextureDesc(desc);
         }
-        D3D11_TEXTURE2D_DESC private_desc{};
-        target.render_texture->GetDesc(&private_desc);
-        ready_stream << ", privateTexture="
-                     << FormatHex(reinterpret_cast<uintptr_t>(target.render_texture))
-                     << " " << FormatTextureDesc(private_desc);
+        if (target.render_texture) {
+            D3D11_TEXTURE2D_DESC private_desc{};
+            target.render_texture->GetDesc(&private_desc);
+            ready_stream << ", privateTexture="
+                         << FormatHex(reinterpret_cast<uintptr_t>(target.render_texture))
+                         << " " << FormatTextureDesc(private_desc);
+        }
         if (d3d11_quadviews_compositor_.output_target_generation > 0) {
             logger_.Info(ready_stream.str());
         } else {

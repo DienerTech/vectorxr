@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::HashMap;
 use std::env;
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
@@ -94,6 +95,10 @@ enum ElevatedOpenXrOperation {
         slice: String,
         values: Vec<RegistryValue>,
     },
+    DeleteValue {
+        slice: String,
+        manifest_path: String,
+    },
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -147,6 +152,7 @@ const IMPLICIT_KEY: &str = r"Software\Khronos\OpenXR\1\ApiLayers\Implicit";
 const ELEVATED_HELPER_ARG: &str = "--vectorxr-openxr-layer-helper";
 const ELEVATED_HELPER_TIMEOUT: Duration = Duration::from_secs(120);
 static ELEVATED_HELPER: OnceLock<Mutex<Option<ElevatedOpenXrHelper>>> = OnceLock::new();
+static SIGNATURE_CACHE: OnceLock<Mutex<HashMap<String, SignatureCacheEntry>>> = OnceLock::new();
 const SLICES: [SliceDefinition; 4] = [
     SliceDefinition {
         id: "hklm64",
@@ -240,6 +246,24 @@ pub fn move_openxr_layer(
 
     values.swap(index, target_index);
     rewrite_registry_values(definition, &values)?;
+    load_openxr_layers()
+}
+
+pub fn delete_openxr_layer(
+    slice: String,
+    manifest_path: String,
+) -> Result<OpenXrLayerSnapshot, String> {
+    let definition = find_slice(&slice)?;
+    let values = read_registry_values(definition)?;
+
+    if !values
+        .iter()
+        .any(|value| value.name.eq_ignore_ascii_case(&manifest_path))
+    {
+        return Err("Layer manifest is no longer registered in that OpenXR slice".into());
+    }
+
+    delete_registry_value(definition, &manifest_path)?;
     load_openxr_layers()
 }
 
@@ -675,6 +699,13 @@ fn run_elevated_operation(operation: ElevatedOpenXrOperation) -> Result<(), Stri
             let definition = slice_for_elevated_operation(&slice)?;
             rewrite_registry_values_native(definition, &values)
         }
+        ElevatedOpenXrOperation::DeleteValue {
+            slice,
+            manifest_path,
+        } => {
+            let definition = slice_for_elevated_operation(&slice)?;
+            delete_registry_value_native(definition, &manifest_path)
+        }
     }
 }
 
@@ -773,6 +804,29 @@ fn write_registry_value_native(
     _definition: &SliceDefinition,
     _manifest_path: &str,
     _value: i64,
+) -> Result<(), String> {
+    Err("OpenXR registry writes are only supported on Windows".into())
+}
+
+#[cfg(windows)]
+fn delete_registry_value_native(
+    definition: &SliceDefinition,
+    manifest_path: &str,
+) -> Result<(), String> {
+    let key = open_registry_key(definition, KEY_SET_VALUE)
+        .map_err(|error| registry_error("open OpenXR registry key for removal", error))?;
+    let name = wide_null(manifest_path);
+    let status = unsafe { RegDeleteValueW(key.0, PWSTR(name.as_ptr() as *mut u16)) };
+    if status != WIN32_ERROR(0) && status != ERROR_FILE_NOT_FOUND {
+        return Err(registry_error("remove OpenXR registry value", status));
+    }
+    flush_registry_key(&key)
+}
+
+#[cfg(not(windows))]
+fn delete_registry_value_native(
+    _definition: &SliceDefinition,
+    _manifest_path: &str,
 ) -> Result<(), String> {
     Err("OpenXR registry writes are only supported on Windows".into())
 }
@@ -924,6 +978,17 @@ fn rewrite_registry_values(
     }
 }
 
+fn delete_registry_value(definition: &SliceDefinition, manifest_path: &str) -> Result<(), String> {
+    if matches!(definition.hive, RegistryHive::LocalMachine) {
+        run_elevated_registry_operation(ElevatedOpenXrOperation::DeleteValue {
+            slice: definition.id.into(),
+            manifest_path: manifest_path.into(),
+        })
+    } else {
+        delete_registry_value_native(definition, manifest_path)
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 struct RawSignatureInfo {
@@ -947,6 +1012,13 @@ struct SignatureInfo {
     signer_not_after: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+struct SignatureCacheEntry {
+    file_len: u64,
+    modified: Option<SystemTime>,
+    info: SignatureInfo,
+}
+
 impl SignatureInfo {
     fn unknown() -> Self {
         Self {
@@ -963,6 +1035,38 @@ impl SignatureInfo {
 }
 
 fn signature_info(path: &str) -> SignatureInfo {
+    let metadata = fs::metadata(path).ok();
+    let file_len = metadata
+        .as_ref()
+        .map(|value| value.len())
+        .unwrap_or_default();
+    let modified = metadata.and_then(|value| value.modified().ok());
+    let cache_key = path.to_ascii_lowercase();
+    let cache = SIGNATURE_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+
+    if let Ok(entries) = cache.lock() {
+        if let Some(entry) = entries.get(&cache_key) {
+            if entry.file_len == file_len && entry.modified == modified {
+                return entry.info.clone();
+            }
+        }
+    }
+
+    let info = query_signature_info(path);
+    if let Ok(mut entries) = cache.lock() {
+        entries.insert(
+            cache_key,
+            SignatureCacheEntry {
+                file_len,
+                modified,
+                info: info.clone(),
+            },
+        );
+    }
+    info
+}
+
+fn query_signature_info(path: &str) -> SignatureInfo {
     let script = format!(
         r#"
 $signature = Get-AuthenticodeSignature -LiteralPath '{path}'

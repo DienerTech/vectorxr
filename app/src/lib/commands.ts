@@ -407,3 +407,10 @@ export async function moveOpenXrLayer(
 ): Promise<OpenXrLayerSnapshot> {
   return invoke<OpenXrLayerSnapshot>('move_openxr_layer', { slice, manifestPath, direction })
 }
+
+export async function deleteOpenXrLayer(
+  slice: OpenXrLayerRegistrySliceId,
+  manifestPath: string,
+): Promise<OpenXrLayerSnapshot> {
+  return invoke<OpenXrLayerSnapshot>('delete_openxr_layer', { slice, manifestPath })
+}

@@ -2,6 +2,7 @@
 import { computed, nextTick, ref, watch } from 'vue'
 
 import {
+  deleteOpenXrLayer,
   ensureOpenXrLayerElevation,
   moveOpenXrLayer,
   openFileDirectory,
@@ -105,7 +106,6 @@ async function toggleLayer(slice: OpenXrLayerRegistrySliceId, layer: OpenXrLayer
     const visibleSnapshot = applyLayerEnabled(nextSnapshot, slice, layer.manifestPath, !layer.enabled)
     emit('snapshotUpdated', visibleSnapshot)
     updateSelectedLayer(visibleSnapshot, slice, layer.manifestPath)
-    queueRefresh()
   } catch (error) {
     emit('status', error instanceof Error ? error.message : 'Failed to update OpenXR layer')
     queueRefresh()
@@ -135,9 +135,40 @@ async function moveLayer(slice: OpenXrLayerRegistrySliceId, layer: OpenXrLayerEn
       : nextSnapshot
     emit('snapshotUpdated', visibleSnapshot)
     updateSelectedLayer(visibleSnapshot, slice, layer.manifestPath)
-    queueRefresh()
   } catch (error) {
     emit('status', error instanceof Error ? error.message : 'Failed to reorder OpenXR layer')
+    queueRefresh()
+  } finally {
+    busyKey.value = null
+  }
+}
+
+async function deleteLayer(slice: OpenXrLayerRegistrySliceId, layer: OpenXrLayerEntry) {
+  if (activeSliceReadOnly.value) {
+    emit('status', 'Unlock admin writes before removing machine-wide OpenXR layer registrations.')
+    return
+  }
+
+  const confirmed = window.confirm(`Remove "${layer.layerName}" from this OpenXR registry hive? This unregisters the layer but does not delete its manifest or DLL files.`)
+  if (!confirmed) {
+    return
+  }
+
+  const key = actionKey(layer, 'delete')
+  busyKey.value = key
+  const optimisticSnapshot = props.snapshot ? applyLayerDelete(props.snapshot, slice, layer.manifestPath) : null
+  if (optimisticSnapshot) {
+    emit('snapshotUpdated', optimisticSnapshot)
+    selectedLayer.value = null
+  }
+
+  try {
+    const nextSnapshot = await deleteOpenXrLayer(slice, layer.manifestPath)
+    emit('snapshotUpdated', nextSnapshot)
+    selectedLayer.value = null
+    emit('status', `Removed "${layer.layerName}" from ${activeSlice.value?.label ?? 'the OpenXR registry'}.`)
+  } catch (error) {
+    emit('status', error instanceof Error ? error.message : 'Failed to remove OpenXR layer registration')
     queueRefresh()
   } finally {
     busyKey.value = null
@@ -210,6 +241,23 @@ function applyLayerMove(
         layers: layers.map((layer, layerIndex) => ({ ...layer, order: layerIndex + 1 })),
       }
     }),
+  }
+}
+
+function applyLayerDelete(
+  snapshot: OpenXrLayerSnapshot,
+  sliceId: OpenXrLayerRegistrySliceId,
+  manifestPath: string,
+): OpenXrLayerSnapshot {
+  return {
+    slices: snapshot.slices.map((slice) => ({
+      ...slice,
+      layers: slice.id === sliceId
+        ? slice.layers
+            .filter((layer) => layer.manifestPath !== manifestPath)
+            .map((layer, layerIndex) => ({ ...layer, order: layerIndex + 1 }))
+        : slice.layers,
+    })),
   }
 }
 
@@ -566,17 +614,28 @@ function signatureGuidance(layer: OpenXrLayerEntry): string {
       {{ loading ? 'Reading OpenXR layer registrations...' : 'OpenXR layer state has not loaded yet.' }}
     </div>
 
-    <div v-if="selectedLayer" class="fixed inset-0 z-50 flex items-center justify-center bg-black/45 px-4 py-6 backdrop-blur-sm">
-      <div class="w-full max-w-[820px] rounded-[1.25rem] border p-5 surface-panel-strong">
-        <div class="flex flex-wrap items-start justify-between gap-4">
-          <div class="min-w-0">
+    <div v-if="selectedLayer" class="fixed inset-0 z-50 flex items-center justify-center bg-black/45 px-4 py-6 backdrop-blur-sm" role="dialog" aria-modal="true" @click.self="selectedLayer = null">
+      <div class="max-h-[calc(100vh-3rem)] w-full max-w-[820px] overflow-y-auto rounded-[1.25rem] border p-5 surface-panel-strong">
+        <div class="sticky top-0 z-10 -mx-5 -mt-5 flex flex-wrap items-start justify-between gap-4 border-b px-5 py-4 surface-panel-strong" style="border-color: var(--app-border)">
+          <div class="min-w-0 flex-1">
             <p class="eyebrow text-xs uppercase tracking-[0.24em]">Layer Details</p>
             <h2 class="mt-2 truncate text-xl font-semibold tracking-tight">{{ selectedLayer.layerName }}</h2>
             <p class="mt-1 text-sm leading-6 text-muted">{{ selectedLayer.description }}</p>
           </div>
-          <button class="button-secondary rounded-[0.75rem] px-4 py-2 text-sm font-medium" type="button" @click.stop="selectedLayer = null">
-            Close
-          </button>
+          <div class="flex shrink-0 flex-wrap items-center justify-end gap-2">
+            <button class="button-secondary rounded-[0.75rem] px-4 py-2 text-sm font-medium" type="button" @click.stop="selectedLayer = null">
+              Close
+            </button>
+            <button
+              class="button-danger rounded-[0.75rem] px-4 py-2 text-sm font-medium disabled:cursor-not-allowed disabled:opacity-50"
+              type="button"
+              :disabled="busyKey !== null || activeSliceReadOnly"
+              :title="activeSlice ? elevatedWriteTooltip('Remove this registration from the selected registry hive. Files will remain on disk.', activeSlice) : 'Remove this OpenXR layer registration.'"
+              @click.stop="deleteLayer(selectedLayer.slice, selectedLayer)"
+            >
+              Remove Registration
+            </button>
+          </div>
         </div>
 
         <div class="mt-5 grid gap-3 md:grid-cols-2">

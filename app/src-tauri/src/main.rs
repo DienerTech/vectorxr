@@ -1639,6 +1639,14 @@ fn move_openxr_layer(
     openxr_layers::move_openxr_layer(slice, manifest_path, direction)
 }
 
+#[tauri::command]
+fn delete_openxr_layer(
+    slice: String,
+    manifest_path: String,
+) -> Result<openxr_layers::OpenXrLayerSnapshot, String> {
+    openxr_layers::delete_openxr_layer(slice, manifest_path)
+}
+
 // Loads a WAV into memory and scales 16-bit PCM samples by `gain`. Returns None
 // for formats we don't scale (the caller then plays the file at full volume) or
 // if the file isn't a parseable RIFF/WAVE container.
@@ -1803,6 +1811,7 @@ fn main() {
             ensure_openxr_layer_elevation,
             set_openxr_layer_enabled,
             move_openxr_layer,
+            delete_openxr_layer,
             play_test_sound
         ])
         .run(tauri::generate_context!())
