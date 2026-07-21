@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, ref } from 'vue'
+import { computed, nextTick, reactive, ref } from 'vue'
 
 import ConvergenceField from '../ConvergenceField.vue'
 import DepthAnchorField from '../DepthAnchorField.vue'
@@ -7,8 +7,8 @@ import DepthBindingsPage from '../DepthBindingsPage.vue'
 import DepthNetEffect from '../DepthNetEffect.vue'
 import EffectField from '../EffectField.vue'
 import ProfileShell from '../ProfileShell.vue'
-import { fromStereoBoostDisplay, stereoBoostBadge, toStereoBoostDisplay } from '../../lib/display'
-import { savedBindingConflictWarnings, type RegisteredApplication, type VectorXRConfig } from '../../lib/model'
+import { fromStereoBoostDisplay, stereoBoostBadge, toConvergenceDisplay, toStereoBoostDisplay } from '../../lib/display'
+import { savedBindingConflictWarnings, type DepthXRSettings, type RegisteredApplication, type VectorXRConfig } from '../../lib/model'
 
 const props = defineProps<{
   config: VectorXRConfig
@@ -23,7 +23,17 @@ defineEmits<{
 
 const depthInfoOpen = ref(false)
 const bindingsPageOpen = ref(false)
+const convergenceDisplayLimits = reactive(new WeakMap<DepthXRSettings, number>())
 let savedScrollTop = 0
+
+function convergenceDisplayLimit(settings: DepthXRSettings): number {
+  return convergenceDisplayLimits.get(settings)
+    ?? (Math.abs(toConvergenceDisplay(settings.convergence)) > 5 ? 25 : 5)
+}
+
+function setConvergenceDisplayLimit(settings: DepthXRSettings, limit: number) {
+  convergenceDisplayLimits.set(settings, limit > 5 ? 25 : 5)
+}
 
 function pageScroller(): Element | null {
   return document.querySelector('main section.overflow-y-auto')
@@ -195,12 +205,15 @@ const profileWarnings = computed(() => {
             />
             <ConvergenceField
               v-model:value="config.modules.depthxr.defaults.convergence"
+              :display-limit="convergenceDisplayLimit(config.modules.depthxr.defaults)"
+              @update:display-limit="setConvergenceDisplayLimit(config.modules.depthxr.defaults, $event)"
             />
           </div>
           <DepthAnchorField v-model:value="config.modules.depthxr.defaults.depthAnchor" />
           <DepthNetEffect
             :stereo-boost="config.modules.depthxr.defaults.stereoBoost"
             :convergence="config.modules.depthxr.defaults.convergence"
+            :convergence-limit="convergenceDisplayLimit(config.modules.depthxr.defaults)"
             :depth-lock="config.modules.depthxr.defaults.depthAnchor"
             @update:stereo-boost="config.modules.depthxr.defaults.stereoBoost = $event"
             @update:convergence="config.modules.depthxr.defaults.convergence = $event"
@@ -253,13 +266,16 @@ const profileWarnings = computed(() => {
             />
             <ConvergenceField
               v-model:value="profile.settings.convergence"
+              :display-limit="convergenceDisplayLimit(profile.settings)"
               :muted="!profile.enabled"
+              @update:display-limit="setConvergenceDisplayLimit(profile.settings, $event)"
             />
           </div>
           <DepthAnchorField v-model:value="profile.settings.depthAnchor" :muted="!profile.enabled" />
           <DepthNetEffect
             :stereo-boost="profile.settings.stereoBoost"
             :convergence="profile.settings.convergence"
+            :convergence-limit="convergenceDisplayLimit(profile.settings)"
             :depth-lock="profile.settings.depthAnchor"
             :muted="!profile.enabled"
             @update:stereo-boost="profile.settings.stereoBoost = $event"

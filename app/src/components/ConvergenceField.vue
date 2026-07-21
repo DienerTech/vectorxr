@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed } from 'vue'
 
 import EffectField from './EffectField.vue'
 import {
@@ -10,18 +10,19 @@ import {
 
 const props = defineProps<{
   value: number
+  displayLimit: number
   muted?: boolean
 }>()
 
 const emit = defineEmits<{
   'update:value': [value: number]
+  'update:displayLimit': [value: number]
 }>()
 
-const extendedRange = ref(Math.abs(toConvergenceDisplay(props.value)) > 5)
-const displayLimit = computed(() => extendedRange.value ? 25 : 5)
+const extendedRange = computed(() => props.displayLimit > 5)
 
 function setExtendedRange(enabled: boolean) {
-  extendedRange.value = enabled
+  emit('update:displayLimit', enabled ? 25 : 5)
   if (!enabled && Math.abs(toConvergenceDisplay(props.value)) > 5) {
     emit('update:value', fromConvergenceDisplay(Math.sign(props.value) * 5))
   }
@@ -34,11 +35,11 @@ function setExtendedRange(enabled: boolean) {
     :muted="muted"
     title="Convergence / Depth Plane"
     subtitle="Places the zero-parallax plane without changing relative depth. Keep 0 while tuning Stereo Depth, then use small steps: negative moves the plane farther; positive moves it nearer."
-    :min="-displayLimit / 100"
-    :max="displayLimit / 100"
+    :min="-props.displayLimit / 100"
+    :max="props.displayLimit / 100"
     :step="0.001"
-    :display-min="-displayLimit"
-    :display-max="displayLimit"
+    :display-min="-props.displayLimit"
+    :display-max="props.displayLimit"
     :display-step="0.1"
     :display-value="toConvergenceDisplay"
     :parse-display-value="fromConvergenceDisplay"

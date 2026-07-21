@@ -172,7 +172,7 @@ const netEffect = computed(() => {
           {{ depthLock ? 'Depth Lock on' : 'Depth Lock off' }}
         </span>
       </div>
-      <p class="mb-2 text-center text-[10px] font-medium uppercase tracking-[0.08em] text-muted">Convergence: Nearer</p>
+      <p class="mb-2 text-center text-[10px] font-medium uppercase tracking-[0.08em] text-muted">Convergence: Nearer (+{{ mapConvergenceLimit }})</p>
       <div class="grid gap-2 sm:grid-cols-[minmax(6rem,0.32fr)_minmax(15rem,1fr)_minmax(6rem,0.32fr)] sm:items-center">
         <p class="text-center text-[10px] font-medium uppercase tracking-[0.08em] text-muted sm:text-right">Depth: Larger &amp; Flatter</p>
         <button
@@ -207,7 +207,7 @@ const netEffect = computed(() => {
         </button>
         <p class="text-center text-[10px] font-medium uppercase tracking-[0.08em] text-muted sm:text-left">Depth: Stronger Stereo</p>
       </div>
-      <p class="mt-2 text-center text-[10px] font-medium uppercase tracking-[0.08em] text-muted">Convergence: Farther</p>
+      <p class="mt-2 text-center text-[10px] font-medium uppercase tracking-[0.08em] text-muted">Convergence: Farther (&minus;{{ mapConvergenceLimit }})</p>
     </div>
 
     <div class="min-w-0 rounded-[0.8rem] border p-4 surface-panel-strong" style="border-color: var(--app-border)">
