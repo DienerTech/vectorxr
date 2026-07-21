@@ -22,7 +22,7 @@ defineEmits<{
     />
     <span class="min-w-0">
       <span class="flex flex-wrap items-center gap-2">
-        <span class="text-base font-semibold tracking-tight">Depth Anchor</span>
+        <span class="text-base font-semibold tracking-tight">Depth Lock</span>
         <span class="chip-warning rounded-full px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.14em]">
           Experimental
         </span>
@@ -34,7 +34,7 @@ defineEmits<{
         </span>
       </span>
       <span class="mt-1 block text-[13px] leading-5 text-muted">
-        Keep the tuned stereo geometry in the rendered image, then restore headset-native eye poses and FOV for runtime submission. This is the experimental "restore Depth geometry at submission" path; test it per game for comfort and reprojection stability.
+        Lock the tuned stereo geometry into the rendered image, then restore headset-native eye poses and FOV for submission so the runtime cannot normalize the effect away. Test it per game and reduce intensity if discomfort or nausea appears.
       </span>
     </span>
   </label>

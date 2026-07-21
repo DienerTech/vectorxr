@@ -102,10 +102,13 @@ Depth controls perceived world scale; Convergence places the zero-parallax depth
 - Once scale feels right, adjust **Convergence / Depth Plane** in small 0.1–0.5 steps. Negative
   moves the plane farther away; positive moves it nearer. The normal control is limited to ±5 for
   comfort. Enable the explicit extended range only for an existing profile or careful testing.
-- **Depth Anchor** is an experimental per-profile option. The game renders with the tuned eye
-  positions and FOV, but VectorXR restores headset-native geometry when submitting the projection
-  layer to the runtime. Compare it on and off at identical slider values; disable it if reprojection,
-  edge stability, or comfort becomes worse.
+- **Depth Lock** preserves the tuned stereo image by restoring headset-native geometry when the
+  projection layer is submitted, preventing the runtime from normalizing much of the pairing away.
+  Compare it on and off at identical slider values; reduce intensity or disable it if comfort worsens.
+- The live **Depth Pairing Map** shows which of the four Stereo Depth/Convergence combinations is
+  active and summarizes the expected net effect. Positive Stereo Depth with negative Convergence
+  often preserves stronger relative depth while giving the scene more distance; two positive values
+  compound near-field intensity and carry the greatest fusion-strain risk.
 - The **Depth Toggle Binding** at the top lets you toggle Depth on/off at runtime for quick A/B
   comparisons in headset.
 - Games with a **Force IPD**, virtual-IPD, stereo-separation, or

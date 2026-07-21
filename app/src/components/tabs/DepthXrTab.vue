@@ -2,6 +2,7 @@
 import { computed, ref } from 'vue'
 
 import DepthAnchorField from '../DepthAnchorField.vue'
+import DepthNetEffect from '../DepthNetEffect.vue'
 import EffectField from '../EffectField.vue'
 import ModuleBindingPage from '../ModuleBindingPage.vue'
 import ModuleBindingPanel from '../ModuleBindingPanel.vue'
@@ -69,10 +70,10 @@ const profileWarnings = computed(() => {
   />
   <ModuleBindingPage
     v-else-if="bindingSubPage === 'anchor'"
-    module-label="Depth Anchor"
+    module-label="Depth Lock"
     :binding="config.modules.depthxr.bindings.toggleAnchor"
-    label="Depth Anchor Toggle Binding"
-    description="Temporarily flip Depth Anchor during a live session for direct A/B testing."
+    label="Depth Lock Toggle Binding"
+    description="Temporarily flip Depth Lock during a live session for direct A/B testing."
     @update:binding="config.modules.depthxr.bindings.toggleAnchor = $event"
     @close="bindingSubPage = null"
   />
@@ -146,9 +147,9 @@ const profileWarnings = computed(() => {
       />
       <ModuleBindingPanel
         class="mb-5"
-        heading="Depth Anchor Toggle Binding"
+        heading="Depth Lock Toggle Binding"
         :binding="config.modules.depthxr.bindings.toggleAnchor"
-        hint="Flip only Depth Anchor at runtime while leaving the tuned Depth geometry active."
+        hint="Flip only Depth Lock at runtime while leaving the tuned Depth geometry active."
         @edit="bindingSubPage = 'anchor'"
       />
 
@@ -205,6 +206,11 @@ const profileWarnings = computed(() => {
               right-label="+ Nearer plane"
             />
           </div>
+          <DepthNetEffect
+            :stereo-boost="config.modules.depthxr.defaults.stereoBoost"
+            :convergence="config.modules.depthxr.defaults.convergence"
+            :depth-lock="config.modules.depthxr.defaults.depthAnchor"
+          />
           <DepthAnchorField v-model:value="config.modules.depthxr.defaults.depthAnchor" />
         </div>
       </details>
@@ -272,6 +278,12 @@ const profileWarnings = computed(() => {
             />
           </div>
           <DepthAnchorField v-model:value="profile.settings.depthAnchor" :muted="!profile.enabled" />
+          <DepthNetEffect
+            :stereo-boost="profile.settings.stereoBoost"
+            :convergence="profile.settings.convergence"
+            :depth-lock="profile.settings.depthAnchor"
+            :muted="!profile.enabled"
+          />
         </div>
       </ProfileShell>
 
@@ -313,7 +325,7 @@ const profileWarnings = computed(() => {
           </div>
 
           <div class="rounded-[1rem] border px-4 py-4 surface-panel">
-            <strong>Depth Anchor changes submission geometry:</strong> the game still renders the tuned stereo image, but the runtime receives headset-native eye poses and FOV. Treat it as a per-game experiment: compare it both on and off at the same slider values, and leave it off if reprojection, edge stability, or comfort becomes worse.
+            <strong>Depth Lock preserves the tuned image at submission:</strong> the game renders with altered stereo geometry, then the runtime receives headset-native eye poses and FOV so it cannot normalize the pairing away. Compare it on and off at identical values, and reduce intensity or disable it if comfort becomes worse.
           </div>
         </div>
       </div>

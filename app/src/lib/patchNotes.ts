@@ -11,9 +11,10 @@ export const patchNotes: PatchNoteEntry[] = [
     version: '0.14.0',
     date: '2026-07-20',
     title: 'Depth Geometry Reimagined',
-    summary: 'Clarifies world scale and convergence tuning and adds an experimental native-submission path.',
+    summary: 'Clarifies world scale and convergence tuning and adds a native-submission Depth Lock.',
     items: [
-      'Adds per-profile Depth Anchor, which renders with tuned Depth geometry and restores headset-native eye poses and FOV at submission.',
+      'Adds a live four-quadrant pairing map and net-effect guidance for Stereo Depth and Convergence.',
+      'Adds per-profile Depth Lock, which preserves tuned Depth geometry while restoring headset-native eye poses and FOV at submission.',
       'Redesigns Depth controls around World Scale, Stereo Depth, and the Convergence Plane, with directional labels and a guided tuning sequence.',
       'Uses a comfort-oriented +/-5 Convergence range by default while keeping the legacy +/-25 range behind an explicit extended-range control.',
     ],

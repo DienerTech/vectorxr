@@ -8987,7 +8987,7 @@ void OpenXrLayer::PollDepthAnchorToggle() {
         depth_submission_info_not_before_time_.reset();
         pending_locate_views_diagnostics_ = 5;
         pending_end_frame_diagnostics_ = 5;
-        logger_.Info(std::string("Depth Anchor ") +
+        logger_.Info(std::string("Depth Lock ") +
                      (depth_anchor_active_ ? "enabled" : "disabled") + " via " +
                      BindingLabel(resolved_settings_.depthxr_bindings.toggle_anchor) + ".");
         SoundPlayer::Instance().PlayTransition(resolved_settings_.depthxr_bindings.toggle_anchor.sound,
