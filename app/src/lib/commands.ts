@@ -75,6 +75,7 @@ export interface InputDeviceInfo {
   deviceName: string
   productName: string
   buttonCount: number
+  hatCount: number
 }
 
 export interface CapturedDeviceBinding {
@@ -83,7 +84,7 @@ export interface CapturedDeviceBinding {
   deviceName: string
   inputPath: string
   inputLabel: string
-  buttonIndex: number
+  inputIndex: number
 }
 
 export type OpenXrLayerRegistrySliceId = 'hklm64' | 'hkcu64' | 'hklm32' | 'hkcu32'

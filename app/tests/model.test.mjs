@@ -81,6 +81,12 @@ test('physical input sharing stays distinct from runtime activation arbitration'
   const leftDevice = { type: 'device', deviceGuid: '{ABC}', inputPath: 'button-1', deviceName: 'Stick A' }
   const rightDevice = { type: 'device', deviceGuid: '{ABC}', inputPath: 'button-1', deviceName: 'Stick B' }
   assert.equal(bindingsMatchRuntimeActivation(leftDevice, rightDevice), true)
+
+  const hatLeft = { type: 'device', deviceGuid: '{ABC}', inputPath: 'hat-1-left', inputLabel: 'HAT 1 Left' }
+  const sameHatLeft = { type: 'device', deviceGuid: '{abc}', inputPath: 'HAT-1-LEFT' }
+  const hatRight = { type: 'device', deviceGuid: '{ABC}', inputPath: 'hat-1-right' }
+  assert.equal(bindingsShareInput(hatLeft, sameHatLeft), true)
+  assert.equal(bindingsShareInput(hatLeft, hatRight), false)
 })
 
 test('pivot binding warnings cover activation, set, and release conflicts', () => {

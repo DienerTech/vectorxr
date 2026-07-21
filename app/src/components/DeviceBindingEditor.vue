@@ -57,8 +57,28 @@ onBeforeUnmount(() => {
 })
 
 function labelForInputPath(inputPath: string) {
-  const match = /^button-(\d+)$/.exec(inputPath.trim())
-  return match ? `Button ${match[1]}` : inputPath || 'No button captured'
+  const normalized = inputPath.trim()
+  const button = /^button-(\d+)$/.exec(normalized)
+  if (button) {
+    return `Button ${button[1]}`
+  }
+
+  const hat = /^hat-(\d+)-(up|up-right|right|down-right|down|down-left|left|up-left)$/.exec(normalized)
+  if (hat) {
+    const direction = hat[2]
+      .split('-')
+      .map((part) => part[0].toUpperCase() + part.slice(1))
+      .join(' ')
+    return `HAT ${hat[1]} ${direction}`
+  }
+
+  return normalized || 'No input captured'
+}
+
+function deviceCapabilityLabel(device: InputDeviceInfo) {
+  const buttons = `${device.buttonCount} ${device.buttonCount === 1 ? 'button' : 'buttons'}`
+  const hats = `${device.hatCount} ${device.hatCount === 1 ? 'HAT' : 'HATs'}`
+  return `${buttons}, ${hats}`
 }
 
 function startRefreshPolling() {
@@ -120,7 +140,7 @@ async function refreshDevices(options: { silent?: boolean } = {}) {
 
 async function captureBinding() {
   capturing.value = true
-  status.value = 'Press a joystick button now.'
+  status.value = 'Press a joystick button or move a HAT switch now.'
 
   try {
     const binding = await captureDeviceBinding()
@@ -140,7 +160,7 @@ async function captureBinding() {
     status.value = `Captured ${binding.deviceName} / ${binding.inputLabel}.`
     void refreshDevices()
   } catch (error) {
-    status.value = error instanceof Error ? error.message : 'Failed to capture joystick button.'
+    status.value = error instanceof Error ? error.message : 'Failed to capture joystick input.'
   } finally {
     capturing.value = false
   }
@@ -173,13 +193,13 @@ function selectDevice(deviceGuid: string) {
             {{ disconnectedDeviceName }} (disconnected)
           </option>
           <option v-for="device in devices" :key="device.deviceGuid" :value="device.deviceGuid">
-            {{ device.deviceName }} ({{ device.buttonCount }} buttons)
+            {{ device.deviceName }} ({{ deviceCapabilityLabel(device) }})
           </option>
         </select>
       </label>
 
       <div>
-        <span class="mb-1.5 block text-sm font-medium">Assigned Button</span>
+        <span class="mb-1.5 block text-sm font-medium">Assigned Input</span>
         <div class="app-readonly-field flex h-11 items-center rounded-[0.75rem] px-4 py-2.5 text-sm" aria-readonly="true">
           {{ inputLabel }}
         </div>
@@ -211,7 +231,7 @@ function selectDevice(deviceGuid: string) {
         type="button"
         @click="captureBinding"
       >
-        {{ capturing ? 'Listening...' : 'Capture Button' }}
+        {{ capturing ? 'Listening...' : 'Capture Input' }}
       </button>
       <button
         class="button-secondary rounded-[0.75rem] px-4 py-2 text-sm font-medium transition disabled:cursor-not-allowed disabled:opacity-50"

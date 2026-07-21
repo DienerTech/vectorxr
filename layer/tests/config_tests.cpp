@@ -9,6 +9,7 @@
 
 #include "depthxr/config_parser.h"
 #include "depthxr/effects.h"
+#include "depthxr/input_devices.h"
 #include "depthxr/logger.h"
 #include "depthxr/pivot_routing.h"
 #include "depthxr/quadviews_recovery.h"
@@ -1899,6 +1900,41 @@ void TestNumpadActivationKeys() {
            "Multi-digit numpad names must remain unsupported");
 }
 
+void TestDeviceInputPathsAndHatDirections() {
+    const std::optional<depthxr::DeviceInputPath> button =
+        depthxr::ParseDeviceInputPath("button-12");
+    Expect(button.has_value() &&
+               button->kind == depthxr::DeviceInputKind::Button &&
+               button->index == 11,
+           "Button input paths must retain their one-based serialized index");
+
+    const std::optional<depthxr::DeviceInputPath> hat =
+        depthxr::ParseDeviceInputPath("hat-1-left");
+    Expect(hat.has_value() &&
+               hat->kind == depthxr::DeviceInputKind::Hat &&
+               hat->index == 0 &&
+               hat->direction == 6,
+           "HAT input paths must parse the switch index and direction");
+
+    Expect(!depthxr::ParseDeviceInputPath("hat-5-up").has_value(),
+           "DirectInput exposes at most four HAT switches");
+    Expect(!depthxr::ParseDeviceInputPath("hat-1-forward").has_value(),
+           "Unknown HAT direction names must be rejected");
+    Expect(!depthxr::ParseDeviceInputPath("button-129").has_value(),
+           "Out-of-range button paths must be rejected");
+
+    Expect(depthxr::DirectInputHatDirection(0) == std::optional<std::size_t>(0),
+           "DirectInput HAT up must normalize to the up octant");
+    Expect(depthxr::DirectInputHatDirection(4'500) == std::optional<std::size_t>(1),
+           "DirectInput diagonal HAT positions must remain bindable");
+    Expect(depthxr::DirectInputHatDirection(27'000) == std::optional<std::size_t>(6),
+           "DirectInput HAT left must normalize to the left octant");
+    Expect(depthxr::DirectInputHatDirection(35'999) == std::optional<std::size_t>(0),
+           "HAT values near 360 degrees must wrap to up");
+    Expect(!depthxr::DirectInputHatDirection(UINT32_MAX).has_value(),
+           "A centered HAT must not report a pressed direction");
+}
+
 void TestQuadViewsCanvasDimensionsMatchCompositionDensity() {
     const depthxr::QuadViewsCanvasDimensions supersampled =
         depthxr::ComputeQuadViewsCanvasDimensions(6240, 6280, 16384, 16384, 1.1);
@@ -1987,6 +2023,7 @@ int main() {
     TestQuadViewsCanvasDimensionsMatchCompositionDensity();
     TestPivotLocateViewsRouting();
     TestNumpadActivationKeys();
+    TestDeviceInputPathsAndHatDirections();
 #ifdef _WIN32
     TestD3D11SharpenShaderRegression();
 #endif

@@ -83,7 +83,7 @@ onUnmounted(() => {
         <PivotActivationEditor
           v-model:activation-mode="subject.activationMode"
           v-model:activation-binding="subject.activationBinding"
-          description="Choose a keyboard shortcut or capture a joystick button that engages Pivot."
+          description="Choose a keyboard shortcut, joystick button, or HAT direction that engages Pivot."
         />
 
         <div
