@@ -96,6 +96,7 @@ struct DepthXrResolvedSettings {
 
 struct DepthXrBindings {
     InputBinding toggle_enabled{InputBindingType::None, {}, "", "button-1", "", "", ""};
+    InputBinding toggle_anchor{InputBindingType::None, {}, "", "button-1", "", "", ""};
 };
 
 struct ProfileMatch {

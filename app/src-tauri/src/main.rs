@@ -288,12 +288,15 @@ struct DepthXRModuleConfig {
 struct DepthXRBindings {
     #[serde(default = "default_depth_toggle_binding")]
     toggle_enabled: InputBinding,
+    #[serde(default = "default_depth_toggle_binding")]
+    toggle_anchor: InputBinding,
 }
 
 impl Default for DepthXRBindings {
     fn default() -> Self {
         Self {
             toggle_enabled: default_depth_toggle_binding(),
+            toggle_anchor: default_depth_toggle_binding(),
         }
     }
 }
@@ -1787,7 +1790,7 @@ fn play_test_sound(
 
 #[cfg(test)]
 mod tests {
-    use super::DepthXRSettings;
+    use super::{DepthXRBindings, DepthXRSettings};
 
     #[test]
     fn depth_anchor_survives_the_config_save_round_trip() {
@@ -1812,7 +1815,24 @@ mod tests {
 
         assert!(!settings.depth_anchor);
     }
+
+    #[test]
+    fn depth_anchor_toggle_binding_survives_the_config_save_round_trip() {
+        let bindings: DepthXRBindings = serde_json::from_value(serde_json::json!({
+            "toggleEnabled": { "type": "none" },
+            "toggleAnchor": {
+                "type": "keyboard",
+                "chord": ["F9"]
+            }
+        }))
+        .expect("Depth bindings should deserialize");
+
+        let serialized = serde_json::to_value(bindings).expect("Depth bindings should serialize");
+        assert_eq!(serialized["toggleAnchor"]["type"], "keyboard");
+        assert_eq!(serialized["toggleAnchor"]["chord"][0], "F9");
+    }
 }
+
 fn main() {
     if let Some(result) = openxr_layers::run_elevated_helper_from_args() {
         if let Err(error) = result {

@@ -275,6 +275,9 @@
       "properties": {
         "toggleEnabled": {
           "$ref": "#/$defs/inputBinding"
+        },
+        "toggleAnchor": {
+          "$ref": "#/$defs/inputBinding"
         }
       }
     },

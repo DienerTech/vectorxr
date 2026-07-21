@@ -21,7 +21,7 @@ defineEmits<{
 }>()
 
 const depthInfoOpen = ref(false)
-const bindingSubPageOpen = ref(false)
+const bindingSubPage = ref<'depth' | 'anchor' | null>(null)
 const extendedConvergenceRange = ref(false)
 
 function convergenceDisplayLimit(value: number): number {
@@ -59,13 +59,22 @@ const profileWarnings = computed(() => {
 
 <template>
   <ModuleBindingPage
-    v-if="bindingSubPageOpen"
+    v-if="bindingSubPage === 'depth'"
     module-label="Depth"
     :binding="config.modules.depthxr.bindings.toggleEnabled"
     label="Depth Toggle Binding"
     description="Toggle Depth on or off at runtime for quick A/B testing."
     @update:binding="config.modules.depthxr.bindings.toggleEnabled = $event"
-    @close="bindingSubPageOpen = false"
+    @close="bindingSubPage = null"
+  />
+  <ModuleBindingPage
+    v-else-if="bindingSubPage === 'anchor'"
+    module-label="Depth Anchor"
+    :binding="config.modules.depthxr.bindings.toggleAnchor"
+    label="Depth Anchor Toggle Binding"
+    description="Temporarily flip Depth Anchor during a live session for direct A/B testing."
+    @update:binding="config.modules.depthxr.bindings.toggleAnchor = $event"
+    @close="bindingSubPage = null"
   />
   <div v-else class="space-y-4">
     <article class="rounded-[1.25rem] border p-5 shadow-panel backdrop-blur surface-panel">
@@ -133,7 +142,14 @@ const profileWarnings = computed(() => {
         heading="Depth Toggle Binding"
         :binding="config.modules.depthxr.bindings.toggleEnabled"
         hint="Toggle Depth on or off at runtime for quick A/B testing."
-        @edit="bindingSubPageOpen = true"
+        @edit="bindingSubPage = 'depth'"
+      />
+      <ModuleBindingPanel
+        class="mb-5"
+        heading="Depth Anchor Toggle Binding"
+        :binding="config.modules.depthxr.bindings.toggleAnchor"
+        hint="Flip only Depth Anchor at runtime while leaving the tuned Depth geometry active."
+        @edit="bindingSubPage = 'anchor'"
       />
 
       <!-- Default Profile -->

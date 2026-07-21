@@ -39,6 +39,15 @@ test('legacy Depth settings normalize with Depth Anchor disabled', () => {
   assert.equal(normalized.modules.depthxr.defaults.depthAnchor, false)
 })
 
+test('legacy Depth bindings normalize with the Anchor toggle unbound', () => {
+  const config = defaultConfig()
+  delete config.modules.depthxr.bindings.toggleAnchor
+
+  const normalized = normalizeConfig(config)
+
+  assert.deepEqual(normalized.modules.depthxr.bindings.toggleAnchor, none())
+})
+
 test('physical input sharing stays distinct from runtime activation arbitration', () => {
   const shiftThenCtrl = keyboard('Shift', 'Ctrl', 'F8')
   const ctrlThenShift = keyboard('Ctrl', 'Shift', 'F8')

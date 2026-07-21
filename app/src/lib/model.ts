@@ -95,6 +95,7 @@ export interface DepthXRProfileConfig {
 
 export interface DepthXRBindings {
   toggleEnabled: InputBinding
+  toggleAnchor: InputBinding
 }
 
 export interface DepthXRModuleConfig {
@@ -368,6 +369,7 @@ export function defaultDepthXRSettings(): DepthXRSettings {
 export function defaultDepthXRBindings(): DepthXRBindings {
   return {
     toggleEnabled: defaultNoneBinding(),
+    toggleAnchor: defaultNoneBinding(),
   }
 }
 
@@ -752,6 +754,9 @@ function withOptionalSound<T extends KeyboardBinding | DeviceBinding>(binding: T
 
 export function normalizeInputBinding(value: unknown, fallback: InputBinding): InputBinding {
   const source = isRecord(value) ? value : {}
+  if (source.type !== 'none' && source.type !== 'keyboard' && source.type !== 'device') {
+    return normalizeInputBinding(fallback, defaultNoneBinding())
+  }
 
   if (source.type === 'none') {
     return defaultNoneBinding()
@@ -997,6 +1002,10 @@ function normalizeVectorXRConfig(value: unknown): VectorXRConfig {
           toggleEnabled: normalizeInputBinding(
             isRecord(depthxr.bindings) ? depthxr.bindings.toggleEnabled : undefined,
             fallback.modules.depthxr.bindings.toggleEnabled,
+          ),
+          toggleAnchor: normalizeInputBinding(
+            isRecord(depthxr.bindings) ? depthxr.bindings.toggleAnchor : undefined,
+            fallback.modules.depthxr.bindings.toggleAnchor,
           ),
         },
         profiles: depthProfileValues.map((profileValue) => {

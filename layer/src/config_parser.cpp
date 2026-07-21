@@ -839,6 +839,7 @@ bool ParseDepthDefaults(const JsonValue::Object& object, DepthXrResolvedSettings
 bool ParseDepthBindings(const JsonValue::Object& object, DepthXrBindings& out, std::string& error) {
     static const std::unordered_set<std::string> allowed = {
         "toggleEnabled",
+        "toggleAnchor",
     };
 
     if (!CheckAllowedKeys(object, allowed, error)) {
@@ -851,7 +852,16 @@ bool ParseDepthBindings(const JsonValue::Object& object, DepthXrBindings& out, s
         return false;
     }
 
-    return ParseInputBinding(toggle_it->second, out.toggle_enabled, error);
+    if (!ParseInputBinding(toggle_it->second, out.toggle_enabled, error)) {
+        return false;
+    }
+
+    const auto anchor_it = object.find("toggleAnchor");
+    if (anchor_it != object.end() && !ParseInputBinding(anchor_it->second, out.toggle_anchor, error)) {
+        return false;
+    }
+
+    return true;
 }
 
 bool ParseDepthProfileSettings(const JsonValue::Object& object, DepthXrSettingsOverride& out, std::string& error) {

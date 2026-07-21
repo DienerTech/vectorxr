@@ -66,6 +66,10 @@ void TestParseConfig() {
         "toggleEnabled": {
           "type": "keyboard",
           "chord": ["F7"]
+        },
+        "toggleAnchor": {
+          "type": "keyboard",
+          "chord": ["F9"]
         }
       },
       "profiles": [
@@ -133,6 +137,8 @@ void TestParseConfig() {
     Expect(!result.document.depthxr.defaults.depth_anchor, "DepthXR default Depth Anchor mismatch");
     Expect(result.document.depthxr.profiles[0].settings.depth_anchor.value_or(false), "DepthXR profile Depth Anchor mismatch");
     Expect(result.document.depthxr.bindings.toggle_enabled.chord[0] == "F7", "DepthXR toggle binding mismatch");
+    Expect(result.document.depthxr.bindings.toggle_anchor.chord[0] == "F9",
+           "DepthXR Depth Anchor toggle binding mismatch");
     Expect(result.document.depthxr.profiles.size() == 1, "DepthXR profile count mismatch");
     Expect(result.document.depthxr.profiles[0].application_ids[0] == "game", "DepthXR profile application id mismatch");
     Expect(result.document.pivotxr.profiles.size() == 1, "PivotXR profile count mismatch");

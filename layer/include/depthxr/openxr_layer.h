@@ -368,6 +368,8 @@ class OpenXrLayer {
     void LogResolvedSettings(const ResolvedRuntimeConfig& settings);
     void ResetPivotActivationState();
     void ResetDepthToggleState();
+    void ResetDepthAnchorToggleState();
+    void PollDepthAnchorToggle();
     bool IsPivotXrActive();
     const PivotXrResolvedProfile& ActivePivotProfile() const;
     bool IsDepthXrActive();
@@ -648,6 +650,11 @@ class OpenXrLayer {
     std::optional<std::chrono::steady_clock::time_point> pivotxr_binding_last_poll_time_;
     std::optional<std::chrono::steady_clock::time_point> depthxr_binding_last_poll_time_;
     bool depthxr_binding_down_cached_{false};
+    bool depth_anchor_toggle_inverted_{false};
+    bool depth_anchor_active_{false};
+    bool depth_anchor_toggle_binding_was_down_{false};
+    std::optional<std::chrono::steady_clock::time_point> depth_anchor_binding_last_poll_time_;
+    bool depth_anchor_binding_down_cached_{false};
 
     // Turbo mode. The runtime always sees a conformant wait->begin->end
     // sequence; the application is decoupled from runtime frame pacing: its

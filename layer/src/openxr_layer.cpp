@@ -1312,6 +1312,7 @@ bool SameSettings(const ResolvedRuntimeConfig& lhs, const ResolvedRuntimeConfig&
            lhs.depthxr_bindings.toggle_enabled.product_guid == rhs.depthxr_bindings.toggle_enabled.product_guid &&
            lhs.depthxr_bindings.toggle_enabled.device_name == rhs.depthxr_bindings.toggle_enabled.device_name &&
            lhs.depthxr_bindings.toggle_enabled.input_label == rhs.depthxr_bindings.toggle_enabled.input_label &&
+           SameInputBinding(lhs.depthxr_bindings.toggle_anchor, rhs.depthxr_bindings.toggle_anchor) &&
            SamePivotResolvedSettings(lhs.pivotxr, rhs.pivotxr) &&
            lhs.turbo.enabled == rhs.turbo.enabled &&
            SameInputBinding(lhs.turbo.toggle_binding, rhs.turbo.toggle_binding) &&
@@ -5676,7 +5677,7 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
         pivotxr_last_smoothing_wall_time_.reset();
     }
     if (!resolved_settings_.depthxr.enabled || !depthxr_toggle_enabled_ ||
-        !resolved_settings_.depthxr.depth_anchor) {
+        !depth_anchor_active_) {
         cached_depth_submission_geometry_.clear();
     }
 
@@ -5694,7 +5695,7 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
     XrTime matched_depth_submission_time = 0;
     const bool has_depth_submission_geometry =
         resolved_settings_.depthxr.enabled && depthxr_toggle_enabled_ &&
-        resolved_settings_.depthxr.depth_anchor &&
+        depth_anchor_active_ &&
         FindDepthSubmissionGeometry(frame_end_info->displayTime,
                                     &depth_submission_geometry,
                                     &matched_depth_submission_time);
@@ -6430,7 +6431,7 @@ XrResult OpenXrLayer::LocateViews(XrSession session,
         (!NearlyEqual(resolved_settings_.depthxr.stereo_boost, 1.0) ||
          !NearlyEqual(resolved_settings_.depthxr.convergence, 0.0));
     const bool cache_depth_submission_geometry =
-        depth_geometry_adjusted && resolved_settings_.depthxr.depth_anchor &&
+        depth_geometry_adjusted && depth_anchor_active_ &&
         view_locate_info && view_locate_info->displayTime != 0;
     std::vector<ViewAdjustmentData>& depth_native_views = locate_views_depth_native_scratch_;
     if (cache_depth_submission_geometry) {
@@ -6553,7 +6554,7 @@ XrResult OpenXrLayer::LocateViews(XrSession session,
                    << ", depthRuntimeActive=" << depthxr_active
                    << ", stereoBoost=" << FormatDiagnosticDouble(resolved_settings_.depthxr.stereo_boost)
                    << ", convergence=" << FormatDiagnosticDouble(resolved_settings_.depthxr.convergence)
-                   << ", depthAnchor=" << resolved_settings_.depthxr.depth_anchor
+                   << ", depthAnchor=" << depth_anchor_active_
                    << ", eyeSeparationBeforeMm=" << FormatDiagnosticDouble(eye_separation_before_mm)
                    << ", eyeSeparationAfterMm=" << FormatDiagnosticDouble(eye_separation_after_mm)
                    << ", effectiveStereoFactor=" << FormatDiagnosticDouble(effective_stereo_factor)
@@ -6574,7 +6575,7 @@ XrResult OpenXrLayer::LocateViews(XrSession session,
                              << ", viewCount=" << count
                              << ", stereoBoost=" << FormatDiagnosticDouble(resolved_settings_.depthxr.stereo_boost)
                              << ", convergence=" << FormatDiagnosticDouble(resolved_settings_.depthxr.convergence)
-                             << ", depthAnchor=" << resolved_settings_.depthxr.depth_anchor
+                             << ", depthAnchor=" << depth_anchor_active_
                              << ", eyeSeparationBeforeMm=" << FormatDiagnosticDouble(eye_separation_before_mm)
                              << ", eyeSeparationAfterMm=" << FormatDiagnosticDouble(eye_separation_after_mm)
                              << ", effectiveStereoFactor=" << FormatDiagnosticDouble(effective_stereo_factor)
@@ -6870,6 +6871,10 @@ void OpenXrLayer::RefreshResolvedSettings() {
     if (!SameInputBinding(previous.depthxr_bindings.toggle_enabled, resolved_settings_.depthxr_bindings.toggle_enabled) ||
         previous.depthxr.enabled != resolved_settings_.depthxr.enabled) {
         ResetDepthToggleState();
+    }
+    if (!SameInputBinding(previous.depthxr_bindings.toggle_anchor, resolved_settings_.depthxr_bindings.toggle_anchor) ||
+        previous.depthxr.depth_anchor != resolved_settings_.depthxr.depth_anchor) {
+        ResetDepthAnchorToggleState();
     }
     if (!SamePivotActivationSet(previous.pivotxr, resolved_settings_.pivotxr)) {
         ResetPivotActivationState();
@@ -7174,8 +7179,7 @@ void OpenXrLayer::ResetSessionState() {
     pivotxr_pitch_step_ = 0;
     pivotxr_activation_gain_ = 0.0;
     pivotxr_last_smoothing_wall_time_.reset();
-    depthxr_toggle_enabled_ = true;
-    depthxr_toggle_binding_was_down_ = false;
+    ResetDepthToggleState();
     ResetTurboToggleState();
     ResetTurboFrameState();
     internal_local_space_ = XR_NULL_HANDLE;
@@ -8871,6 +8875,7 @@ void OpenXrLayer::LogResolvedSettings(const ResolvedRuntimeConfig& settings) {
            << ", logLevel=" << ToString(settings.core.log_level)
            << ", depthxrEnabled=" << settings.depthxr.enabled
            << ", depthToggleBinding=" << BindingLabel(settings.depthxr_bindings.toggle_enabled)
+           << ", depthAnchorToggleBinding=" << BindingLabel(settings.depthxr_bindings.toggle_anchor)
            << ", stereoBoost=" << settings.depthxr.stereo_boost
            << ", convergence=" << settings.depthxr.convergence
            << ", depthAnchor=" << settings.depthxr.depth_anchor
@@ -8945,6 +8950,51 @@ void OpenXrLayer::ResetDepthToggleState() {
     depthxr_toggle_binding_was_down_ = false;
     depthxr_binding_last_poll_time_.reset();
     depthxr_binding_down_cached_ = false;
+    ResetDepthAnchorToggleState();
+}
+
+void OpenXrLayer::ResetDepthAnchorToggleState() {
+    depth_anchor_toggle_inverted_ = false;
+    depth_anchor_active_ = resolved_settings_.depthxr.depth_anchor;
+    depth_anchor_toggle_binding_was_down_ = false;
+    depth_anchor_binding_last_poll_time_.reset();
+    depth_anchor_binding_down_cached_ = false;
+}
+
+void OpenXrLayer::PollDepthAnchorToggle() {
+    depth_anchor_active_ = resolved_settings_.depthxr.depth_anchor != depth_anchor_toggle_inverted_;
+
+#if defined(_WIN32)
+    const auto now = std::chrono::steady_clock::now();
+    const bool first_poll = !depth_anchor_binding_last_poll_time_.has_value();
+    if (first_poll || now - *depth_anchor_binding_last_poll_time_ >= kInputBindingPollInterval) {
+        depth_anchor_binding_last_poll_time_ = now;
+        depth_anchor_binding_down_cached_ =
+            IsInputBindingDown(resolved_settings_.depthxr_bindings.toggle_anchor);
+    }
+    const bool binding_down = depth_anchor_binding_down_cached_;
+    if (first_poll) {
+        depth_anchor_toggle_binding_was_down_ = binding_down;
+    }
+    const bool was_pressed_this_call = binding_down && !depth_anchor_toggle_binding_was_down_;
+    depth_anchor_toggle_binding_was_down_ = binding_down;
+
+    if (was_pressed_this_call) {
+        depth_anchor_toggle_inverted_ = !depth_anchor_toggle_inverted_;
+        depth_anchor_active_ = resolved_settings_.depthxr.depth_anchor != depth_anchor_toggle_inverted_;
+        depth_view_info_pending_ = true;
+        depth_submission_info_pending_ = true;
+        depth_submission_info_not_before_time_.reset();
+        pending_locate_views_diagnostics_ = 5;
+        pending_end_frame_diagnostics_ = 5;
+        logger_.Info(std::string("Depth Anchor ") +
+                     (depth_anchor_active_ ? "enabled" : "disabled") + " via " +
+                     BindingLabel(resolved_settings_.depthxr_bindings.toggle_anchor) + ".");
+        SoundPlayer::Instance().PlayTransition(resolved_settings_.depthxr_bindings.toggle_anchor.sound,
+                                               depth_anchor_active_, dll_directory_,
+                                               resolved_settings_.core.sound_volume);
+    }
+#endif
 }
 
 void OpenXrLayer::ResetTurboToggleState() {
@@ -9811,6 +9861,8 @@ bool OpenXrLayer::IsDepthXrActive() {
         ResetDepthToggleState();
         return false;
     }
+
+    PollDepthAnchorToggle();
 
 #if defined(_WIN32)
     // Input polls can hit DirectInput device reads; throttle them so per-call
