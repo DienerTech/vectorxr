@@ -1392,10 +1392,20 @@ fn list_input_devices() -> Result<Vec<input_devices::InputDeviceInfo>, String> {
 }
 
 #[tauri::command]
-fn capture_device_binding(
+async fn capture_device_binding(
     timeout_ms: Option<u64>,
 ) -> Result<Option<input_devices::CapturedDeviceBinding>, String> {
-    input_devices::capture_device_binding(timeout_ms)
+    let capture_id = input_devices::begin_device_binding_capture();
+    tauri::async_runtime::spawn_blocking(move || {
+        input_devices::capture_device_binding(timeout_ms, capture_id)
+    })
+    .await
+    .map_err(|error| format!("Device binding capture task failed: {error}"))?
+}
+
+#[tauri::command]
+fn cancel_device_binding_capture() {
+    input_devices::cancel_device_binding_capture();
 }
 
 #[tauri::command]
@@ -1860,6 +1870,7 @@ fn main() {
             clear_turbo_metrics,
             list_input_devices,
             capture_device_binding,
+            cancel_device_binding_capture,
             load_openxr_layers,
             ensure_openxr_layer_elevation,
             set_openxr_layer_enabled,

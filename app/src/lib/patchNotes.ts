@@ -17,7 +17,7 @@ export const patchNotes: PatchNoteEntry[] = [
       'Adds per-profile Depth Lock, which preserves tuned Depth geometry while restoring headset-native eye poses and FOV at submission.',
       'Redesigns Depth controls around World Scale, Stereo Depth, and the Convergence Plane, with directional labels and a guided tuning sequence.',
       'Uses a comfort-oriented +/-5 Convergence range by default while keeping the legacy +/-25 range behind an explicit extended-range control.',
-      'Adds joystick HAT/POV directions as bindable inputs alongside buttons, including cardinal and diagonal positions.',
+      'Adds joystick HAT/POV directions as bindable inputs alongside buttons, with cardinal/diagonal positions and a timed, cancellable capture flow.',
     ],
   },
   {

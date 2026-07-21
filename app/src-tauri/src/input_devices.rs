@@ -1,4 +1,5 @@
 use serde::Serialize;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -22,9 +23,30 @@ pub struct CapturedDeviceBinding {
     pub input_index: u32,
 }
 
+static NEXT_CAPTURE_ID: AtomicU64 = AtomicU64::new(1);
+static ACTIVE_CAPTURE_ID: AtomicU64 = AtomicU64::new(0);
+
+pub fn begin_device_binding_capture() -> u64 {
+    let capture_id = NEXT_CAPTURE_ID.fetch_add(1, Ordering::Relaxed);
+    ACTIVE_CAPTURE_ID.store(capture_id, Ordering::Release);
+    capture_id
+}
+
+pub fn cancel_device_binding_capture() {
+    ACTIVE_CAPTURE_ID.store(0, Ordering::Release);
+}
+
+fn capture_is_active(capture_id: u64) -> bool {
+    capture_id != 0 && ACTIVE_CAPTURE_ID.load(Ordering::Acquire) == capture_id
+}
+
+fn finish_capture(capture_id: u64) {
+    let _ = ACTIVE_CAPTURE_ID.compare_exchange(capture_id, 0, Ordering::AcqRel, Ordering::Acquire);
+}
+
 #[cfg(windows)]
 mod platform {
-    use super::{CapturedDeviceBinding, InputDeviceInfo};
+    use super::{capture_is_active, CapturedDeviceBinding, InputDeviceInfo};
     use std::ffi::c_void;
     use std::mem;
     use std::ptr;
@@ -105,14 +127,19 @@ mod platform {
             .collect()
     }
 
-    pub fn capture_device_binding(
+    pub fn capture_device_binding_platform(
         timeout_ms: Option<u64>,
+        capture_id: u64,
     ) -> Result<Option<CapturedDeviceBinding>, String> {
         let direct_input = create_direct_input()?;
         let instances = enumerate_instances(&direct_input)?;
         let mut devices = Vec::new();
 
         for instance in instances {
+            if !capture_is_active(capture_id) {
+                return Ok(None);
+            }
+
             let device = match create_device(&direct_input, &instance.device_guid) {
                 Ok(device) => device,
                 Err(_) => continue,
@@ -160,7 +187,7 @@ mod platform {
 
         let timeout = Duration::from_millis(timeout_ms.unwrap_or(DEFAULT_CAPTURE_TIMEOUT_MS));
         let started = Instant::now();
-        while started.elapsed() < timeout {
+        while started.elapsed() < timeout && capture_is_active(capture_id) {
             for capture_device in &mut devices {
                 let state = match read_state(&capture_device.device) {
                     Ok(state) => state,
@@ -523,11 +550,43 @@ mod platform {
         Ok(Vec::new())
     }
 
-    pub fn capture_device_binding(
+    pub fn capture_device_binding_platform(
         _timeout_ms: Option<u64>,
+        _capture_id: u64,
     ) -> Result<Option<CapturedDeviceBinding>, String> {
         Err("Joystick binding capture is only available on Windows".into())
     }
 }
 
-pub use platform::{capture_device_binding, list_input_devices};
+pub use platform::list_input_devices;
+
+pub fn capture_device_binding(
+    timeout_ms: Option<u64>,
+    capture_id: u64,
+) -> Result<Option<CapturedDeviceBinding>, String> {
+    if !capture_is_active(capture_id) {
+        return Ok(None);
+    }
+
+    let result = platform::capture_device_binding_platform(timeout_ms, capture_id);
+    finish_capture(capture_id);
+    result
+}
+
+#[cfg(test)]
+mod capture_session_tests {
+    use super::{begin_device_binding_capture, cancel_device_binding_capture, capture_is_active};
+
+    #[test]
+    fn capture_tokens_cancel_and_supersede_safely() {
+        let first = begin_device_binding_capture();
+        assert!(capture_is_active(first));
+
+        let second = begin_device_binding_capture();
+        assert!(!capture_is_active(first));
+        assert!(capture_is_active(second));
+
+        cancel_device_binding_capture();
+        assert!(!capture_is_active(second));
+    }
+}

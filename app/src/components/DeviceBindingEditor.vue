@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 
-import { captureDeviceBinding, listInputDevices, type InputDeviceInfo } from '../lib/commands'
+import { cancelDeviceBindingCapture, captureDeviceBinding, listInputDevices, type InputDeviceInfo } from '../lib/commands'
 import type { DeviceBinding } from '../lib/model'
 
 const props = defineProps<{
@@ -15,14 +15,22 @@ const emit = defineEmits<{
 const devices = ref<InputDeviceInfo[]>([])
 const loading = ref(false)
 const capturing = ref(false)
+const canCancelCapture = ref(false)
+const cancelRequested = ref(false)
+const captureSecondsRemaining = ref(0)
 const status = ref('')
 const metadataOpen = ref(false)
 const hasCompletedInitialScan = ref(false)
 const lastRefreshFailed = ref(false)
 
 const DEVICE_REFRESH_INTERVAL_MS = 2_000
+const CAPTURE_TIMEOUT_MS = 15_000
+const CAPTURE_CANCEL_DEBOUNCE_MS = 1_000
 
 let refreshIntervalId: ReturnType<typeof window.setInterval> | null = null
+let captureCountdownIntervalId: ReturnType<typeof window.setInterval> | null = null
+let captureCancelDelayId: ReturnType<typeof window.setTimeout> | null = null
+let captureDeadline = 0
 let refreshInFlight = false
 
 const selectedDevice = computed(() => devices.value.find((device) => device.deviceGuid === props.modelValue.deviceGuid) ?? null)
@@ -46,14 +54,26 @@ const deviceName = computed(() => {
   return props.modelValue.deviceGuid || 'No device selected'
 })
 const inputLabel = computed(() => props.modelValue.inputLabel?.trim() || labelForInputPath(props.modelValue.inputPath))
+const captureButtonLabel = computed(() => {
+  if (!capturing.value) return 'Capture Input'
+  if (cancelRequested.value) return 'Canceling...'
+  if (!canCancelCapture.value) return `Listening... ${captureSecondsRemaining.value}s`
+  return `Cancel Listening (${captureSecondsRemaining.value}s)`
+})
 
 onMounted(() => {
   void refreshDevices()
   startRefreshPolling()
+  window.addEventListener('keydown', onKeydown, true)
 })
 
 onBeforeUnmount(() => {
+  window.removeEventListener('keydown', onKeydown, true)
   stopRefreshPolling()
+  stopCaptureUi()
+  if (capturing.value) {
+    void cancelDeviceBindingCapture()
+  }
 })
 
 function labelForInputPath(inputPath: string) {
@@ -104,6 +124,67 @@ function stopRefreshPolling() {
   refreshIntervalId = null
 }
 
+function updateCaptureCountdown() {
+  captureSecondsRemaining.value = Math.max(0, Math.ceil((captureDeadline - Date.now()) / 1_000))
+}
+
+function startCaptureUi() {
+  captureDeadline = Date.now() + CAPTURE_TIMEOUT_MS
+  captureSecondsRemaining.value = CAPTURE_TIMEOUT_MS / 1_000
+  canCancelCapture.value = false
+  cancelRequested.value = false
+  captureCountdownIntervalId = window.setInterval(updateCaptureCountdown, 250)
+  captureCancelDelayId = window.setTimeout(() => {
+    if (capturing.value && !cancelRequested.value) {
+      canCancelCapture.value = true
+    }
+  }, CAPTURE_CANCEL_DEBOUNCE_MS)
+}
+
+function stopCaptureUi() {
+  if (captureCountdownIntervalId !== null) {
+    window.clearInterval(captureCountdownIntervalId)
+    captureCountdownIntervalId = null
+  }
+  if (captureCancelDelayId !== null) {
+    window.clearTimeout(captureCancelDelayId)
+    captureCancelDelayId = null
+  }
+  canCancelCapture.value = false
+  captureSecondsRemaining.value = 0
+}
+
+function onKeydown(event: KeyboardEvent) {
+  if (event.key !== 'Escape' || !capturing.value) {
+    return
+  }
+
+  // Capture before the bindings page's own Escape listener so this key stops
+  // listening without also navigating away from the page.
+  event.preventDefault()
+  event.stopImmediatePropagation()
+  void cancelCapture()
+}
+
+async function cancelCapture() {
+  if (!capturing.value || cancelRequested.value) {
+    return
+  }
+
+  cancelRequested.value = true
+  canCancelCapture.value = false
+  status.value = 'Canceling input capture...'
+  try {
+    await cancelDeviceBindingCapture()
+  } catch (error) {
+    cancelRequested.value = false
+    canCancelCapture.value = true
+    status.value = error instanceof Error
+      ? `Could not cancel capture: ${error.message}`
+      : 'Could not cancel capture. It will stop automatically at the time limit.'
+  }
+}
+
 async function refreshDevices(options: { silent?: boolean } = {}) {
   if (refreshInFlight) {
     return
@@ -139,13 +220,20 @@ async function refreshDevices(options: { silent?: boolean } = {}) {
 }
 
 async function captureBinding() {
+  if (capturing.value) {
+    return
+  }
+
   capturing.value = true
-  status.value = 'Press a joystick button or move a HAT switch now.'
+  startCaptureUi()
+  status.value = 'Listening for a joystick button or HAT direction. Press Escape to cancel; capture stops automatically after 15 seconds.'
 
   try {
-    const binding = await captureDeviceBinding()
+    const binding = await captureDeviceBinding(CAPTURE_TIMEOUT_MS)
     if (!binding) {
-      status.value = 'Capture timed out.'
+      status.value = cancelRequested.value
+        ? 'Input capture canceled.'
+        : 'Input capture timed out after 15 seconds.'
       return
     }
 
@@ -163,6 +251,8 @@ async function captureBinding() {
     status.value = error instanceof Error ? error.message : 'Failed to capture joystick input.'
   } finally {
     capturing.value = false
+    stopCaptureUi()
+    cancelRequested.value = false
   }
 }
 
@@ -226,12 +316,13 @@ function selectDevice(deviceGuid: string) {
 
     <div class="flex flex-wrap items-center gap-3">
       <button
-        class="button-accent rounded-[0.75rem] px-4 py-2 text-sm font-medium transition disabled:cursor-not-allowed disabled:opacity-50"
-        :disabled="capturing"
+        class="rounded-[0.75rem] px-4 py-2 text-sm font-medium transition disabled:cursor-not-allowed disabled:opacity-50"
+        :class="capturing && canCancelCapture ? 'button-secondary' : 'button-accent'"
+        :disabled="capturing && !canCancelCapture"
         type="button"
-        @click="captureBinding"
+        @click="capturing ? void cancelCapture() : void captureBinding()"
       >
-        {{ capturing ? 'Listening...' : 'Capture Input' }}
+        {{ captureButtonLabel }}
       </button>
       <button
         class="button-secondary rounded-[0.75rem] px-4 py-2 text-sm font-medium transition disabled:cursor-not-allowed disabled:opacity-50"

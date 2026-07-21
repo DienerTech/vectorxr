@@ -239,6 +239,14 @@ export async function captureDeviceBinding(timeoutMs = 15_000): Promise<Captured
   return invoke<CapturedDeviceBinding | null>('capture_device_binding', { timeoutMs })
 }
 
+export async function cancelDeviceBindingCapture(): Promise<void> {
+  if (!tauriAvailable()) {
+    return
+  }
+
+  await invoke('cancel_device_binding_capture')
+}
+
 export async function pickSoundFile(): Promise<string | null> {
   if (!tauriAvailable()) {
     return null
