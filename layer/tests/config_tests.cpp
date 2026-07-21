@@ -59,7 +59,8 @@ void TestParseConfig() {
         "convergenceEnabled": true,
         "compatibilityMode": true,
         "stereoBoost": 1.1,
-        "convergence": 0.08
+        "convergence": 0.08,
+        "depthAnchor": false
       },
       "bindings": {
         "toggleEnabled": {
@@ -74,7 +75,8 @@ void TestParseConfig() {
           "enabled": true,
           "settings": {
             "compatibilityMode": false,
-            "stereoBoost": 1.2
+            "stereoBoost": 1.2,
+            "depthAnchor": true
           }
         }
       ]
@@ -128,6 +130,8 @@ void TestParseConfig() {
     Expect(result.document.applications[0].id == "game", "Application registry id mismatch");
     Expect(std::abs(result.document.depthxr.defaults.stereo_boost - 1.1) < 0.0001, "DepthXR stereoBoost mismatch");
     Expect(std::abs(result.document.depthxr.defaults.convergence - 0.08) < 0.0001, "DepthXR convergence mismatch");
+    Expect(!result.document.depthxr.defaults.depth_anchor, "DepthXR default Depth Anchor mismatch");
+    Expect(result.document.depthxr.profiles[0].settings.depth_anchor.value_or(false), "DepthXR profile Depth Anchor mismatch");
     Expect(result.document.depthxr.bindings.toggle_enabled.chord[0] == "F7", "DepthXR toggle binding mismatch");
     Expect(result.document.depthxr.profiles.size() == 1, "DepthXR profile count mismatch");
     Expect(result.document.depthxr.profiles[0].application_ids[0] == "game", "DepthXR profile application id mismatch");
@@ -176,7 +180,8 @@ void TestResolveRuntimeConfig() {
         "stereoBoostEnabled": true,
         "convergenceEnabled": true,
         "stereoBoost": 1.05,
-        "convergence": 0.0
+        "convergence": 0.0,
+        "depthAnchor": false
       },
       "bindings": {
         "toggleEnabled": {
@@ -190,7 +195,8 @@ void TestResolveRuntimeConfig() {
           "enabled": true,
           "settings": {
             "stereoBoost": 1.15,
-            "convergence": 0.12
+            "convergence": 0.12,
+            "depthAnchor": true
           }
         }
       ]
@@ -243,6 +249,7 @@ void TestResolveRuntimeConfig() {
     Expect(resolved.core.enabled, "Core enabled should be true");
     Expect(std::abs(resolved.depthxr.stereo_boost - 1.15) < 0.0001, "Profile stereoBoost override was not applied");
     Expect(std::abs(resolved.depthxr.convergence - 0.12) < 0.0001, "Profile convergence override was not applied");
+    Expect(resolved.depthxr.depth_anchor, "Profile Depth Anchor override was not applied");
     Expect(resolved.depthxr_bindings.toggle_enabled.type == depthxr::InputBindingType::None, "DepthXR toggle binding should be none");
     Expect(resolved.pivotxr.enabled, "PivotXR module enable was not resolved");
     Expect(resolved.pivotxr.profiles.size() == 1, "PivotXR resolved candidate count mismatch");
@@ -1506,6 +1513,48 @@ void TestQuadViewConvergenceKeepsInsetOffsetsAligned() {
            "Inset horizontal FoV span changed under convergence");
 }
 
+void TestDepthSubmissionRestorePreservesApplicationDeltas() {
+    const depthxr::ViewAdjustmentData native_views[2] = {
+        {{-0.032, 0.0, 0.0}, {-1.0, 0.8, 0.9, -0.9}},
+        {{0.032, 0.0, 0.0}, {-0.8, 1.0, 0.9, -0.9}},
+    };
+    depthxr::ViewAdjustmentData render_views[2] = {native_views[0], native_views[1]};
+    depthxr::ApplyStereoBoost(render_views, 1.25, depthxr::ViewLayout::kStereo);
+    depthxr::ApplyConvergence(render_views, 0.03, depthxr::ViewLayout::kStereo);
+
+    depthxr::ViewAdjustmentData submitted = render_views[0];
+    constexpr double kApplicationPositionDelta = 0.004;
+    constexpr double kApplicationProjectionDelta = 0.012;
+    submitted.position.x += kApplicationPositionDelta;
+    submitted.fov.angle_left =
+        std::atan(std::tan(submitted.fov.angle_left) + kApplicationProjectionDelta);
+    submitted.fov.angle_right =
+        std::atan(std::tan(submitted.fov.angle_right) + kApplicationProjectionDelta);
+
+    depthxr::RestoreDepthSubmissionView(submitted, native_views[0], render_views[0]);
+
+    Expect(std::abs(submitted.position.x -
+                    (native_views[0].position.x + kApplicationPositionDelta)) < 0.000001,
+           "Depth submission restore did not recover native eye position");
+    Expect(std::abs((std::tan(submitted.fov.angle_left) -
+                     std::tan(native_views[0].fov.angle_left)) -
+                    kApplicationProjectionDelta) < 0.000001,
+           "Depth submission restore lost the app's left projection delta");
+    Expect(std::abs((std::tan(submitted.fov.angle_right) -
+                     std::tan(native_views[0].fov.angle_right)) -
+                    kApplicationProjectionDelta) < 0.000001,
+           "Depth submission restore lost the app's right projection delta");
+    Expect(std::abs(submitted.fov.angle_up - native_views[0].fov.angle_up) < 0.000001,
+           "Depth submission restore changed an untouched vertical FOV boundary");
+
+    depthxr::ViewAdjustmentData already_native = native_views[0];
+    depthxr::RestoreDepthSubmissionView(already_native, native_views[0], render_views[0]);
+    Expect(std::abs(already_native.position.x - native_views[0].position.x) < 0.000001,
+           "Depth submission restore double-corrected an already-native eye position");
+    Expect(std::abs(already_native.fov.angle_left - native_views[0].fov.angle_left) < 0.000001,
+           "Depth submission restore double-corrected an already-native FOV");
+}
+
 double ExtractYaw(const depthxr::ViewOrientation& orientation) {
     return std::atan2(
         2.0 * (orientation.w * orientation.y + orientation.x * orientation.z),
@@ -1920,6 +1969,7 @@ int main() {
     TestQuadViewStereoBoostKeepsInsetViewsInSync();
     TestStereoBoostScalesRotatedEyeBaseline();
     TestQuadViewConvergenceKeepsInsetOffsetsAligned();
+    TestDepthSubmissionRestorePreservesApplicationDeltas();
     TestPivotYawAmplifiesBeyondDeadzone();
     TestPivotYawNoOpInsideDeadzone();
     TestSwapchainImageQueuePreservesFifo();

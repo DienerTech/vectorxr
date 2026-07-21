@@ -30,6 +30,15 @@ test('config normalization round-trips a modified numpad chord', () => {
   assert.deepEqual(normalized.modules.pivotxr.activationBinding, keyboard('Ctrl', 'Numpad5'))
 })
 
+test('legacy Depth settings normalize with Depth Anchor disabled', () => {
+  const config = defaultConfig()
+  delete config.modules.depthxr.defaults.depthAnchor
+
+  const normalized = normalizeConfig(config)
+
+  assert.equal(normalized.modules.depthxr.defaults.depthAnchor, false)
+})
+
 test('physical input sharing stays distinct from runtime activation arbitration', () => {
   const shiftThenCtrl = keyboard('Shift', 'Ctrl', 'F8')
   const ctrlThenShift = keyboard('Ctrl', 'Shift', 'F8')

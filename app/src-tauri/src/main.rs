@@ -241,6 +241,8 @@ struct DepthXRSettings {
     stereo_boost: f64,
     #[serde(default = "default_convergence")]
     convergence: f64,
+    #[serde(default = "default_false")]
+    depth_anchor: bool,
 }
 
 impl Default for DepthXRSettings {
@@ -248,6 +250,7 @@ impl Default for DepthXRSettings {
         Self {
             stereo_boost: default_stereo_boost(),
             convergence: default_convergence(),
+            depth_anchor: false,
         }
     }
 }
@@ -1782,6 +1785,34 @@ fn play_test_sound(
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::DepthXRSettings;
+
+    #[test]
+    fn depth_anchor_survives_the_config_save_round_trip() {
+        let settings: DepthXRSettings = serde_json::from_value(serde_json::json!({
+            "stereoBoost": 1.2,
+            "convergence": 0.07,
+            "depthAnchor": true
+        }))
+        .expect("Depth settings should deserialize");
+
+        let serialized = serde_json::to_value(settings).expect("Depth settings should serialize");
+        assert_eq!(serialized["depthAnchor"], true);
+    }
+
+    #[test]
+    fn depth_anchor_defaults_off_for_older_configs() {
+        let settings: DepthXRSettings = serde_json::from_value(serde_json::json!({
+            "stereoBoost": 1.2,
+            "convergence": 0.0
+        }))
+        .expect("Legacy Depth settings should deserialize");
+
+        assert!(!settings.depth_anchor);
+    }
+}
 fn main() {
     if let Some(result) = openxr_layers::run_elevated_helper_from_args() {
         if let Err(error) = result {

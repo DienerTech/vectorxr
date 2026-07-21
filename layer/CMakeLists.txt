@@ -17,6 +17,7 @@ add_library(
     src/util/process_info.cpp
     src/math/stereo_boost.cpp
     src/math/convergence.cpp
+    src/math/depth_submission.cpp
     src/math/pivot_yaw.cpp
 )
 

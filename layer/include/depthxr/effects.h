@@ -38,6 +38,12 @@ struct ViewAdjustmentData {
 
 void ApplyStereoBoost(std::span<ViewAdjustmentData> views, double factor, ViewLayout layout);
 void ApplyConvergence(std::span<ViewAdjustmentData> views, double amount, ViewLayout layout);
+// Remove only Depth's render-time pose/FOV delta from a submitted view. FOV
+// restoration is additive in tangent space, matching ApplyConvergence and
+// preserving projection changes authored by the application after LocateViews.
+void RestoreDepthSubmissionView(ViewAdjustmentData& submitted_view,
+                                const ViewAdjustmentData& native_view,
+                                const ViewAdjustmentData& render_view);
 void ApplyPivotYaw(std::span<ViewAdjustmentData> views,
                    double rotation_multiplier,
                    double deadzone_degrees,

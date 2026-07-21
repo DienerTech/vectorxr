@@ -8,6 +8,17 @@ export interface PatchNoteEntry {
 
 export const patchNotes: PatchNoteEntry[] = [
   {
+    version: '0.14.0',
+    date: '2026-07-20',
+    title: 'Depth Geometry Reimagined',
+    summary: 'Clarifies world scale and convergence tuning and adds an experimental native-submission path.',
+    items: [
+      'Adds per-profile Depth Anchor, which renders with tuned Depth geometry and restores headset-native eye poses and FOV at submission.',
+      'Redesigns Depth controls around World Scale, Stereo Depth, and the Convergence Plane, with directional labels and a guided tuning sequence.',
+      'Uses a comfort-oriented +/-5 Convergence range by default while keeping the legacy +/-25 range behind an explicit extended-range control.',
+    ],
+  },
+  {
     version: '0.13.7',
     date: '2026-07-19',
     title: 'Depth tuning and diagnostics',

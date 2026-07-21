@@ -467,9 +467,27 @@ class OpenXrLayer {
                                          const XrPosef& runtime_view_pose,
                                          std::span<const XrView> located_views,
                                          uint32_t view_count);
+    struct DepthSubmissionGeometry {
+        std::vector<XrPosef> native_poses;
+        std::vector<XrPosef> render_poses;
+        std::vector<XrFovf> native_fovs;
+        std::vector<XrFovf> render_fovs;
+    };
     void CachePivotPoseDelta(XrTime time, const XrPosef& pose_delta);
     bool FindPivotPoseDelta(XrTime time, XrPosef* pose_delta, XrTime* matched_time) const;
     void PrunePivotPoseDeltas(XrTime time);
+    void CacheDepthSubmissionGeometry(XrTime time,
+                                      std::span<const ViewAdjustmentData> native_views,
+                                      std::span<const ViewAdjustmentData> render_views);
+    bool FindDepthSubmissionGeometry(XrTime time,
+                                     const DepthSubmissionGeometry** geometry,
+                                     XrTime* matched_time) const;
+    void PruneDepthSubmissionGeometry(XrTime time);
+    uint32_t RestoreDepthSubmissionGeometry(std::span<XrCompositionLayerProjectionView> views,
+                                            uint32_t first_view,
+                                            const DepthSubmissionGeometry& geometry,
+                                            const XrPosef& reverse_pose_delta,
+                                            bool has_reverse_pose_delta) const;
     void CacheQuadViewsFovs(XrTime time, std::span<const XrView> views);
     bool FindQuadViewsFovs(XrTime time, std::array<XrFovf, 4>* fovs, XrTime* matched_time) const;
     void PruneQuadViewsFovs(XrTime time);
@@ -934,10 +952,12 @@ class OpenXrLayer {
     std::optional<std::chrono::steady_clock::time_point> last_eye_gaze_self_sync_time_;
     std::vector<ViewAdjustmentData> locate_views_original_scratch_;
     std::vector<ViewAdjustmentData> locate_views_adjusted_scratch_;
+    std::vector<ViewAdjustmentData> locate_views_depth_native_scratch_;
     std::vector<std::vector<XrCompositionLayerProjectionView>> end_frame_projection_views_scratch_;
     std::vector<XrCompositionLayerProjection> end_frame_projection_layers_scratch_;
     std::vector<const XrCompositionLayerBaseHeader*> end_frame_layers_scratch_;
     std::map<XrTime, XrPosef> cached_pivot_pose_deltas_;
+    std::map<XrTime, DepthSubmissionGeometry> cached_depth_submission_geometry_;
     std::map<XrTime, std::array<XrFovf, 4>> cached_quadviews_fovs_;
     std::unordered_map<XrSwapchain, SwapchainInfo> tracked_swapchains_;
     D3D11QuadViewsCompositor d3d11_quadviews_compositor_;

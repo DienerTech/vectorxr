@@ -34,7 +34,7 @@ Shared core code under `layer/` owns:
 - path resolution
 - process name resolution
 - logger abstraction
-- feature math (Depth stereo boost/convergence, Pivot yaw/pitch recomposition, Quadviews composition)
+- feature math (Depth stereo boost/convergence/submission restore, Pivot yaw/pitch recomposition, Quadviews composition)
 
 ### OpenXR layer
 
@@ -70,6 +70,7 @@ Feature interception (varies by which modules are active):
 
 - `xrBeginSession`, `xrCreateSession`, `xrDestroySession`
 - `xrLocateViews` — Depth stereo boost and convergence
+- `xrEndFrame` — Pivot correction, optional Depth Anchor geometry restore, and Quadviews submission composition
 - `xrLocateSpace` — Pivot yaw/pitch recomposition
 - `xrEnumerateViewConfigurations` / `xrEnumerateViewConfigurationViews` and the swapchain
   lifecycle calls — Quadviews composition

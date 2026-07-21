@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
 
+import DepthAnchorField from '../DepthAnchorField.vue'
 import EffectField from '../EffectField.vue'
 import ModuleBindingPage from '../ModuleBindingPage.vue'
 import ModuleBindingPanel from '../ModuleBindingPanel.vue'
@@ -21,6 +22,13 @@ defineEmits<{
 
 const depthInfoOpen = ref(false)
 const bindingSubPageOpen = ref(false)
+const extendedConvergenceRange = ref(false)
+
+function convergenceDisplayLimit(value: number): number {
+  return extendedConvergenceRange.value || Math.abs(toConvergenceDisplay(value)) > 5
+    ? 25
+    : 5
+}
 
 const profileWarnings = computed(() => {
   const warnings = new Map<number, string[]>()
@@ -66,7 +74,7 @@ const profileWarnings = computed(() => {
         <div>
           <h2 class="text-2xl font-semibold tracking-tight">Depth</h2>
           <p class="mt-2 max-w-3xl text-sm leading-6 text-muted">
-            Tune stereo boost and convergence defaults, then add per-application profiles when a title needs different depth behavior. Start with small value changes and use the runtime toggle binding for quick comparisons in headset.
+            Shape binocular scale and depth placement as one system, then use per-application profiles where a title needs its own tuning. Start at neutral, change one control at a time, and use the runtime binding for immediate A/B comparisons.
           </p>
         </div>
         <button
@@ -80,12 +88,41 @@ const profileWarnings = computed(() => {
           Depth Troubleshooting
         </button>
       </div>
+
+      <div class="mb-5 grid gap-3 lg:grid-cols-3" role="note" aria-label="Depth tuning guide">
+        <div class="rounded-[1rem] border p-4 surface-panel-strong">
+          <p class="eyebrow text-[10px] font-semibold uppercase tracking-[0.18em]">Step 1: Set scale</p>
+          <p class="mt-2 text-sm font-semibold">Stereo Depth</p>
+          <p class="mt-1 text-[13px] leading-5 text-muted">
+            Left makes the world feel larger and flatter. Right strengthens stereo parallax and can make the world feel smaller. Nearby geometry changes most.
+          </p>
+        </div>
+        <div class="rounded-[1rem] border p-4 surface-panel-strong">
+          <p class="eyebrow text-[10px] font-semibold uppercase tracking-[0.18em]">Step 2: Place depth</p>
+          <p class="mt-2 text-sm font-semibold">Convergence Plane</p>
+          <p class="mt-1 text-[13px] leading-5 text-muted">
+            Leave this at zero while setting scale. Then use tiny steps: left moves the plane farther, right moves it nearer. Either extreme can make fusion uncomfortable.
+          </p>
+        </div>
+        <div class="rounded-[1rem] border p-4 surface-panel-strong">
+          <p class="eyebrow text-[10px] font-semibold uppercase tracking-[0.18em]">Step 3: Compare</p>
+          <p class="mt-2 text-sm font-semibold">Tune as a pair</p>
+          <p class="mt-1 text-[13px] leading-5 text-muted">
+            Find scale first, then use Convergence only to settle the scene's depth placement. Stop at the first sign of eye strain, double vision, or a hard-to-fuse horizon.
+          </p>
+        </div>
+      </div>
+      <label class="mb-5 inline-flex cursor-pointer items-center gap-3 rounded-full border px-4 py-2 text-xs font-medium surface-panel-strong">
+        <input v-model="extendedConvergenceRange" class="h-4 w-4 accent-depthxr-copper" type="checkbox" />
+        Extended Convergence range (&plusmn;25)
+        <span class="text-muted">Normal tuning is limited to &plusmn;5.</span>
+      </label>
       <div
         class="mb-5 rounded-[0.9rem] border px-4 py-3 text-sm leading-6 chip-warning"
         style="border-color: var(--app-border)"
         role="note"
       >
-        <p class="font-medium">In-game IPD settings can override Stereo Boost</p>
+        <p class="font-medium">In-game IPD settings can override Stereo Depth</p>
         <p class="mt-1">Disable any Force IPD, virtual IPD, stereo-separation, or world-scale override before testing Depth.</p>
         <p class="mt-1">Example: in DCS, uncheck <strong>Force IPD Distance</strong> under Options &gt; VR.</p>
       </div>
@@ -115,35 +152,44 @@ const profileWarnings = computed(() => {
         <div v-if="!config.modules.depthxr.enabled" class="mt-3 rounded-[0.9rem] border px-4 py-3 text-sm leading-6 surface-panel-strong">
           The default profile is off and has no effect — applications without an enabled custom profile get no Depth adjustment. Enabled custom profiles below still apply to their assigned applications.
         </div>
-        <div v-else class="mt-3 grid gap-3 lg:grid-cols-2">
-          <EffectField
-            v-model:value="config.modules.depthxr.defaults.stereoBoost"
-            title="Stereo Boost"
-            subtitle="Widens or narrows the gap between your two eye viewpoints (0% = your real IPD). Positive adds depth and 3D 'pop' and can make the world feel miniaturized; negative flattens depth and makes it feel larger. Start around +10–25%; high values exaggerate parallax and can strain your eyes."
-            :min="0"
-            :max="2"
-            :step="0.01"
-            :display-min="-100"
-            :display-max="100"
-            :display-step="1"
-            :display-value="toStereoBoostDisplay"
-            :parse-display-value="fromStereoBoostDisplay"
-            :display-badge="stereoBoostBadge"
-          />
-          <EffectField
-            v-model:value="config.modules.depthxr.defaults.convergence"
-            title="Convergence"
-            subtitle="Shifts where your eyes' sightlines cross — the distance that sits at screen depth with no parallax. Positive pulls that plane toward you (near objects pop forward); negative pushes it away (scene settles back, can ease strain). 0 = app default. Use small amounts (±2–10); large values force your eyes to cross and break fusion."
-            :min="-0.25"
-            :max="0.25"
-            :step="0.01"
-            :display-min="-25"
-            :display-max="25"
-            :display-step="0.1"
-            :display-value="toConvergenceDisplay"
-            :parse-display-value="fromConvergenceDisplay"
-            :display-badge="convergenceBadge"
-          />
+        <div v-else class="mt-3 space-y-3">
+          <div class="grid gap-3 lg:grid-cols-2">
+            <EffectField
+              v-model:value="config.modules.depthxr.defaults.stereoBoost"
+              title="Stereo Depth / World Scale"
+              subtitle="Changes virtual eye separation while keeping your physical headset IPD untouched. Move right for stronger near-field stereo and a smaller-feeling world; move left for a larger-feeling, flatter world. Start around ±5–15%."
+              :min="0"
+              :max="2"
+              :step="0.01"
+              :display-min="-100"
+              :display-max="100"
+              :display-step="1"
+              :display-value="toStereoBoostDisplay"
+              :parse-display-value="fromStereoBoostDisplay"
+              :display-badge="stereoBoostBadge"
+              left-label="- Larger world"
+              center-label="0 Native scale"
+              right-label="+ 3D stereo effect"
+            />
+            <EffectField
+              v-model:value="config.modules.depthxr.defaults.convergence"
+              title="Convergence / Depth Plane"
+              subtitle="Applies an equal-and-opposite projection shift to place the zero-parallax plane. Keep 0 while tuning Stereo Depth, then adjust in 0.1–0.5 steps. Negative moves the plane farther; positive moves it nearer."
+              :min="-convergenceDisplayLimit(config.modules.depthxr.defaults.convergence) / 100"
+              :max="convergenceDisplayLimit(config.modules.depthxr.defaults.convergence) / 100"
+              :step="0.001"
+              :display-min="-convergenceDisplayLimit(config.modules.depthxr.defaults.convergence)"
+              :display-max="convergenceDisplayLimit(config.modules.depthxr.defaults.convergence)"
+              :display-step="0.1"
+              :display-value="toConvergenceDisplay"
+              :parse-display-value="fromConvergenceDisplay"
+              :display-badge="convergenceBadge"
+              left-label="- Farther plane"
+              center-label="0 App default"
+              right-label="+ Nearer plane"
+            />
+          </div>
+          <DepthAnchorField v-model:value="config.modules.depthxr.defaults.depthAnchor" />
         </div>
       </details>
     </article>
@@ -170,37 +216,46 @@ const profileWarnings = computed(() => {
         @remove="$emit('removeProfile', index)"
         @sync-name="$emit('syncProfileName', index)"
       >
-        <div class="grid gap-3 lg:grid-cols-2">
-          <EffectField
-            v-model:value="profile.settings.stereoBoost"
-            :muted="!profile.enabled"
-            title="Stereo Boost"
-            subtitle="Widens or narrows the gap between your two eye viewpoints (0% = your real IPD). Positive adds depth and 3D 'pop' and can make the world feel miniaturized; negative flattens depth and makes it feel larger. Start around +10–25%; high values exaggerate parallax and can strain your eyes."
-            :min="0"
-            :max="2"
-            :step="0.01"
-            :display-min="-100"
-            :display-max="100"
-            :display-step="1"
-            :display-value="toStereoBoostDisplay"
-            :parse-display-value="fromStereoBoostDisplay"
-            :display-badge="stereoBoostBadge"
-          />
-          <EffectField
-            v-model:value="profile.settings.convergence"
-            :muted="!profile.enabled"
-            title="Convergence"
-            subtitle="Shifts where your eyes' sightlines cross — the distance that sits at screen depth with no parallax. Positive pulls that plane toward you (near objects pop forward); negative pushes it away (scene settles back, can ease strain). 0 = app default. Use small amounts (±2–10); large values force your eyes to cross and break fusion."
-            :min="-0.25"
-            :max="0.25"
-            :step="0.01"
-            :display-min="-25"
-            :display-max="25"
-            :display-step="0.1"
-            :display-value="toConvergenceDisplay"
-            :parse-display-value="fromConvergenceDisplay"
-            :display-badge="convergenceBadge"
-          />
+        <div class="space-y-3">
+          <div class="grid gap-3 lg:grid-cols-2">
+            <EffectField
+              v-model:value="profile.settings.stereoBoost"
+              :muted="!profile.enabled"
+              title="Stereo Depth / World Scale"
+              subtitle="Changes virtual eye separation while keeping your physical headset IPD untouched. Move right for stronger near-field stereo and a smaller-feeling world; move left for a larger-feeling, flatter world. Start around ±5–15%."
+              :min="0"
+              :max="2"
+              :step="0.01"
+              :display-min="-100"
+              :display-max="100"
+              :display-step="1"
+              :display-value="toStereoBoostDisplay"
+              :parse-display-value="fromStereoBoostDisplay"
+              :display-badge="stereoBoostBadge"
+              left-label="- Larger world"
+              center-label="0 Native scale"
+              right-label="+ 3D stereo effect"
+            />
+            <EffectField
+              v-model:value="profile.settings.convergence"
+              :muted="!profile.enabled"
+              title="Convergence / Depth Plane"
+              subtitle="Applies an equal-and-opposite projection shift to place the zero-parallax plane. Keep 0 while tuning Stereo Depth, then adjust in 0.1–0.5 steps. Negative moves the plane farther; positive moves it nearer."
+              :min="-convergenceDisplayLimit(profile.settings.convergence) / 100"
+              :max="convergenceDisplayLimit(profile.settings.convergence) / 100"
+              :step="0.001"
+              :display-min="-convergenceDisplayLimit(profile.settings.convergence)"
+              :display-max="convergenceDisplayLimit(profile.settings.convergence)"
+              :display-step="0.1"
+              :display-value="toConvergenceDisplay"
+              :parse-display-value="fromConvergenceDisplay"
+              :display-badge="convergenceBadge"
+              left-label="- Farther plane"
+              center-label="0 App default"
+              right-label="+ Nearer plane"
+            />
+          </div>
+          <DepthAnchorField v-model:value="profile.settings.depthAnchor" :muted="!profile.enabled" />
         </div>
       </ProfileShell>
 
@@ -217,7 +272,7 @@ const profileWarnings = computed(() => {
         <div class="flex flex-wrap items-start justify-between gap-4">
           <div>
             <p class="eyebrow text-xs uppercase tracking-[0.24em]">Depth Troubleshooting</p>
-            <h2 class="mt-2 text-xl font-semibold tracking-tight">When Stereo Boost Appears Inactive</h2>
+            <h2 class="mt-2 text-xl font-semibold tracking-tight">When Depth Behaves Unexpectedly</h2>
           </div>
           <button class="button-secondary rounded-[0.75rem] px-4 py-2 text-sm font-medium" type="button" @click="depthInfoOpen = false">
             Close
@@ -226,19 +281,23 @@ const profileWarnings = computed(() => {
 
         <div class="mt-5 space-y-4 text-sm leading-6">
           <div class="rounded-[1rem] border px-4 py-4 chip-warning" style="border-color: var(--app-border)">
-            Games with a Force IPD, virtual IPD, stereo-separation, or world-scale setting may replace the eye separation reported by OpenXR. That override takes precedence over VectorXR Stereo Boost.
+            Games with a Force IPD, virtual IPD, stereo-separation, or world-scale setting may replace the eye separation reported by OpenXR. That override takes precedence over VectorXR Stereo Depth.
           </div>
 
           <div class="rounded-[1rem] border px-4 py-4 surface-panel">
-            <strong>DCS:</strong> uncheck <strong>Force IPD Distance</strong> under Options &gt; VR, then fully restart DCS. A forced value fixes DCS's own virtual camera separation and can make Stereo Boost appear to do nothing.
+            <strong>DCS:</strong> uncheck <strong>Force IPD Distance</strong> under Options &gt; VR, then fully restart DCS. A forced value fixes DCS's own virtual camera separation and can make Stereo Depth appear to do nothing.
           </div>
 
           <div class="rounded-[1rem] border px-4 py-4 surface-panel">
-            <strong>Expected result:</strong> Stereo Boost changes binocular scale most noticeably on nearby geometry, so a cockpit can look larger or smaller while the distant terrain and horizon appear nearly unchanged. That distance-dependent response is normal.
+            <strong>Expected result:</strong> Stereo Depth changes binocular scale most noticeably on nearby geometry, so a cockpit can look larger or smaller while the distant terrain and horizon appear nearly unchanged. That distance-dependent response is normal.
           </div>
 
           <div class="rounded-[1rem] border px-4 py-4 surface-panel">
-            <strong>Convergence is subtler:</strong> it shifts the zero-parallax plane rather than scaling the scene. Compare a nearby cockpit edge against distant scenery while moving it in small steps. If Stereo Boost still has no effect after disabling game-level overrides, enable debug logging and export the session logs.
+            <strong>Convergence is subtler:</strong> it shifts the zero-parallax plane rather than scaling the scene. Compare a nearby cockpit edge against distant scenery while moving it in small steps. If Stereo Depth still has no effect after disabling game-level overrides, enable debug logging and export the session logs.
+          </div>
+
+          <div class="rounded-[1rem] border px-4 py-4 surface-panel">
+            <strong>Depth Anchor changes submission geometry:</strong> the game still renders the tuned stereo image, but the runtime receives headset-native eye poses and FOV. Treat it as a per-game experiment: compare it both on and off at the same slider values, and leave it off if reprojection, edge stability, or comfort becomes worse.
           </div>
         </div>
       </div>

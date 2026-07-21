@@ -93,13 +93,22 @@ The three Enhancements:
 
 ![VectorXR Depth tab](screenshots/depth.png)
 
-Depth adjusts stereo separation and convergence to change perceived scale and comfort.
+Depth adjusts virtual eye separation and projection convergence as one binocular system. Stereo
+Depth controls perceived world scale; Convergence places the zero-parallax depth plane.
 
-- **Stereo Boost** and **Convergence** are bipolar sliders centered at neutral — move left or
-  right of center to push the effect either way. Values read as a percentage relative to neutral.
+- Begin with **Convergence at 0**. Move **Stereo Depth / World Scale** left for a larger, flatter
+  world or right for stronger near-field stereo and a smaller-feeling world. Nearby geometry will
+  change more visibly than the horizon.
+- Once scale feels right, adjust **Convergence / Depth Plane** in small 0.1–0.5 steps. Negative
+  moves the plane farther away; positive moves it nearer. The normal control is limited to ±5 for
+  comfort. Enable the explicit extended range only for an existing profile or careful testing.
+- **Depth Anchor** is an experimental per-profile option. The game renders with the tuned eye
+  positions and FOV, but VectorXR restores headset-native geometry when submitting the projection
+  layer to the runtime. Compare it on and off at identical slider values; disable it if reprojection,
+  edge stability, or comfort becomes worse.
 - The **Depth Toggle Binding** at the top lets you toggle Depth on/off at runtime for quick A/B
   comparisons in headset.
-- Start with small changes. Games with a **Force IPD**, virtual-IPD, stereo-separation, or
+- Games with a **Force IPD**, virtual-IPD, stereo-separation, or
   world-scale setting can override Stereo Boost; disable that setting before testing Depth.
   In DCS, uncheck **Force IPD Distance** under **Options > VR**, fully restart DCS, and open
   **Depth Troubleshooting** for additional guidance if Stereo Boost still seems inactive.

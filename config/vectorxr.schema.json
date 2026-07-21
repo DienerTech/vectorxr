@@ -217,7 +217,8 @@
       "additionalProperties": false,
       "required": [
         "stereoBoost",
-        "convergence"
+        "convergence",
+        "depthAnchor"
       ],
       "properties": {
         "stereoBoost": {
@@ -229,6 +230,9 @@
           "type": "number",
           "minimum": -0.25,
           "maximum": 0.25
+        },
+        "depthAnchor": {
+          "type": "boolean"
         }
       }
     },

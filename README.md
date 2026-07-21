@@ -35,7 +35,7 @@ The Home tab is a status dashboard: runtime and layer status, system health, and
 
 ![VectorXR Depth tab](docs/screenshots/depth.png)
 
-Depth profiles tune stereo boost and convergence globally or per application, with a runtime toggle binding for quick in-headset A/B comparisons.
+Depth profiles tune world scale and the convergence plane globally or per application, with directional guidance, an experimental native-submission Depth Anchor, and a runtime toggle for quick in-headset A/B comparisons.
 
 ### Pivot
 

@@ -21,6 +21,10 @@ function validateCoreConfig(core: CoreConfig): string[] {
 function validateDepthXRSettings(prefix: string, settings: DepthXRSettings): string[] {
   const errors: string[] = []
 
+  if (typeof settings.depthAnchor !== 'boolean') {
+    errors.push(`${prefix}depthAnchor must be a boolean`)
+  }
+
   const bounded = [
     ['stereoBoost', settings.stereoBoost, 0.0, 2.0],
     ['convergence', settings.convergence, -0.25, 0.25],
