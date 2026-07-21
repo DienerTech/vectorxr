@@ -7,11 +7,12 @@ import ProfileShell from '../ProfileShell.vue'
 import TurboDiagnosticsPage from '../TurboDiagnosticsPage.vue'
 import TurboRuntimePage from '../TurboRuntimePage.vue'
 import type { ActiveRuntimeInfo, OpenXrLayerSnapshot } from '../../lib/commands'
-import type {
-  RegisteredApplication,
-  RuntimePacingObservation,
-  TurboMetricsSession,
-  VectorXRConfig,
+import {
+  savedBindingConflictWarnings,
+  type RegisteredApplication,
+  type RuntimePacingObservation,
+  type TurboMetricsSession,
+  type VectorXRConfig,
 } from '../../lib/model'
 
 const props = defineProps<{
@@ -35,6 +36,10 @@ const howItWorksOpen = ref(false)
 const bindingSubPageOpen = ref(false)
 const activeSubPage = ref<'runtime' | 'diagnostics' | null>(null)
 let savedScrollTop = 0
+const toggleBindingWarnings = computed(() => savedBindingConflictWarnings(props.config, [
+  props.config.modules.turbo.toggleBinding,
+]))
+
 
 const turboInUse = computed(
   () => props.config.modules.turbo.enabled || props.config.modules.turbo.profiles.some((profile) => profile.enabled),
@@ -134,6 +139,7 @@ function closeSubPage() {
     none-text="No binding assigned. Turbo stays on for applications it applies to."
     default-activate-sound="turbo-on.wav"
     default-deactivate-sound="turbo-off.wav"
+    :warnings="toggleBindingWarnings"
     @update:binding="config.modules.turbo.toggleBinding = $event"
     @close="closeSubPage"
   />

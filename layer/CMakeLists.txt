@@ -135,6 +135,8 @@ if(WIN32 AND DEPTHXR_BUILD_LAYER)
                 ${CMAKE_CURRENT_SOURCE_DIR}/assets/sounds/turbo-off.wav
                 ${CMAKE_CURRENT_SOURCE_DIR}/assets/sounds/metrics-on.wav
                 ${CMAKE_CURRENT_SOURCE_DIR}/assets/sounds/metrics-off.wav
+                ${CMAKE_CURRENT_SOURCE_DIR}/assets/sounds/depth-lock-on.wav
+                ${CMAKE_CURRENT_SOURCE_DIR}/assets/sounds/depth-lock-off.wav
                 $<TARGET_FILE_DIR:XR_APILAYER_DIENERTECH_VECTORXR>/sounds/
     )
 endif()

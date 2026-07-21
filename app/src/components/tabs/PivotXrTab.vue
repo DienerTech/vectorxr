@@ -150,6 +150,7 @@ const profileWarnings = computed(() => {
     v-if="bindingsSubject"
     :subject="bindingsSubject"
     :context-label="bindingsContextLabel"
+    :config="config"
     @close="closeSubPages"
   />
   <PivotSettingsPage

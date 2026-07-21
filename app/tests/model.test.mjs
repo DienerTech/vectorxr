@@ -8,6 +8,7 @@ import {
   normalizeConfig,
   normalizeKeyboardKey,
   pivotBindingConflictWarnings,
+  savedBindingConflictWarnings,
 } from '../src/lib/model.ts'
 
 const keyboard = (...chord) => ({ type: 'keyboard', chord })
@@ -30,6 +31,10 @@ test('config normalization round-trips a modified numpad chord', () => {
   assert.deepEqual(normalized.modules.pivotxr.activationBinding, keyboard('Ctrl', 'Numpad5'))
 })
 
+test('new Depth profiles enable Depth Lock by default', () => {
+  assert.equal(defaultConfig().modules.depthxr.defaults.depthAnchor, true)
+})
+
 test('legacy Depth settings normalize with Depth Anchor disabled', () => {
   const config = defaultConfig()
   delete config.modules.depthxr.defaults.depthAnchor
@@ -46,6 +51,23 @@ test('legacy Depth bindings normalize with the Anchor toggle unbound', () => {
   const normalized = normalizeConfig(config)
 
   assert.deepEqual(normalized.modules.depthxr.bindings.toggleAnchor, none())
+})
+
+test('saved binding warnings scan across modules and profiles without blocking', () => {
+  const config = defaultConfig()
+  config.modules.depthxr.bindings.toggleAnchor = keyboard('Shift', 'F8')
+  config.modules.turbo.toggleBinding = keyboard('F8', 'Shift')
+  config.modules.pivotxr.activationBinding = keyboard('Shift', 'F8')
+
+  const warnings = savedBindingConflictWarnings(config, [
+    config.modules.depthxr.bindings.toggleAnchor,
+  ])
+
+  assert.equal(warnings.length, 1)
+  assert.match(warnings[0].message, /Depth: Depth Lock A\/B/)
+  assert.match(warnings[0].message, /Turbo: A\/B toggle/)
+  assert.match(warnings[0].message, /Pivot Default: Activate/)
+  assert.match(warnings[0].message, /does not block saving/)
 })
 
 test('physical input sharing stays distinct from runtime activation arbitration', () => {

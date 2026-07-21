@@ -8992,7 +8992,8 @@ void OpenXrLayer::PollDepthAnchorToggle() {
                      BindingLabel(resolved_settings_.depthxr_bindings.toggle_anchor) + ".");
         SoundPlayer::Instance().PlayTransition(resolved_settings_.depthxr_bindings.toggle_anchor.sound,
                                                depth_anchor_active_, dll_directory_,
-                                               resolved_settings_.core.sound_volume);
+                                               resolved_settings_.core.sound_volume,
+                                               L"depth-lock-on.wav", L"depth-lock-off.wav");
     }
 #endif
 }

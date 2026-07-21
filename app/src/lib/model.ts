@@ -362,7 +362,7 @@ export function defaultDepthXRSettings(): DepthXRSettings {
   return {
     stereoBoost: 1.0,
     convergence: 0,
-    depthAnchor: false,
+    depthAnchor: true,
   }
 }
 
@@ -609,7 +609,12 @@ function normalizeDepthXRSettings(value: unknown, fallback: DepthXRSettings): De
   return {
     stereoBoost: normalizeNumber(source.stereoBoost, fallback.stereoBoost),
     convergence: normalizeNumber(source.convergence, fallback.convergence),
-    depthAnchor: normalizeBoolean(source.depthAnchor, fallback.depthAnchor),
+    // Depth Lock is on for new profiles, but configs written before 0.14.0 did
+    // not have this field. Preserve their rendered image instead of silently
+    // changing it during an upgrade.
+    depthAnchor: Object.prototype.hasOwnProperty.call(source, 'depthAnchor')
+      ? normalizeBoolean(source.depthAnchor, fallback.depthAnchor)
+      : false,
   }
 }
 
@@ -847,6 +852,68 @@ export function bindingLabel(binding: InputBinding): string {
 export interface PivotBindingWarning {
   title: string
   message: string
+}
+
+interface SavedBindingAssignment {
+  id: string
+  label: string
+  binding: InputBinding
+}
+
+function savedBindingAssignments(config: VectorXRConfig): SavedBindingAssignment[] {
+  const assignments: SavedBindingAssignment[] = [
+    { id: 'depth.toggle', label: 'Depth: A/B toggle', binding: config.modules.depthxr.bindings.toggleEnabled },
+    { id: 'depth.lock', label: 'Depth: Depth Lock A/B', binding: config.modules.depthxr.bindings.toggleAnchor },
+    { id: 'turbo.toggle', label: 'Turbo: A/B toggle', binding: config.modules.turbo.toggleBinding },
+    { id: 'turbo.metrics', label: 'Turbo: metrics capture', binding: config.modules.turbo.metricsBinding },
+    { id: 'pivot.default.activate', label: 'Pivot Default: Activate', binding: config.modules.pivotxr.activationBinding },
+    { id: 'pivot.default.set-origin', label: 'Pivot Default: Set Origin', binding: config.modules.pivotxr.setOriginBinding },
+    { id: 'pivot.default.release-origin', label: 'Pivot Default: Release Origin', binding: config.modules.pivotxr.releaseOriginBinding },
+  ]
+
+  config.modules.pivotxr.profiles.forEach((profile, index) => {
+    const context = profile.name.trim() || `Profile ${index + 1}`
+    assignments.push(
+      { id: `pivot.${profile.id}.activate`, label: `Pivot ${context}: Activate`, binding: profile.activationBinding },
+      { id: `pivot.${profile.id}.set-origin`, label: `Pivot ${context}: Set Origin`, binding: profile.setOriginBinding },
+      { id: `pivot.${profile.id}.release-origin`, label: `Pivot ${context}: Release Origin`, binding: profile.releaseOriginBinding },
+    )
+  })
+
+  return assignments
+}
+
+function bindingInputKey(binding: InputBinding): string | null {
+  if (binding.type === 'none') return null
+  if (binding.type === 'keyboard') {
+    const chord = binding.chord.map((key) => key.trim().toLowerCase()).filter(Boolean).sort()
+    return chord.length > 0 ? `keyboard:${chord.join('+')}` : null
+  }
+  const guid = binding.deviceGuid.trim().toLowerCase()
+  const path = binding.inputPath.trim().toLowerCase()
+  return guid && path ? `device:${guid}:${path}` : null
+}
+
+export function savedBindingConflictWarnings(
+  config: VectorXRConfig,
+  focusBindings: InputBinding[],
+): PivotBindingWarning[] {
+  const focusKeys = new Set(focusBindings.map(bindingInputKey).filter((key): key is string => key !== null))
+  if (focusKeys.size === 0) return []
+
+  const groups = new Map<string, SavedBindingAssignment[]>()
+  for (const assignment of savedBindingAssignments(config)) {
+    const key = bindingInputKey(assignment.binding)
+    if (!key) continue
+    groups.set(key, [...(groups.get(key) ?? []), assignment])
+  }
+
+  return [...groups.entries()]
+    .filter(([key, assignments]) => focusKeys.has(key) && assignments.length > 1)
+    .map(([, assignments]) => ({
+      title: `${bindingLabel(assignments[0].binding)} is assigned more than once`,
+      message: `This input is assigned to ${assignments.map((assignment) => assignment.label).join('; ')}. A press may trigger multiple actions, or a higher-priority action may shadow another. This warning does not block saving.`,
+    }))
 }
 
 export function pivotBindingConflictWarnings(

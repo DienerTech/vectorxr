@@ -1,14 +1,14 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, nextTick, ref } from 'vue'
 
+import ConvergenceField from '../ConvergenceField.vue'
 import DepthAnchorField from '../DepthAnchorField.vue'
+import DepthBindingsPage from '../DepthBindingsPage.vue'
 import DepthNetEffect from '../DepthNetEffect.vue'
 import EffectField from '../EffectField.vue'
-import ModuleBindingPage from '../ModuleBindingPage.vue'
-import ModuleBindingPanel from '../ModuleBindingPanel.vue'
 import ProfileShell from '../ProfileShell.vue'
-import { convergenceBadge, fromConvergenceDisplay, fromStereoBoostDisplay, stereoBoostBadge, toConvergenceDisplay, toStereoBoostDisplay } from '../../lib/display'
-import type { RegisteredApplication, VectorXRConfig } from '../../lib/model'
+import { fromStereoBoostDisplay, stereoBoostBadge, toStereoBoostDisplay } from '../../lib/display'
+import { savedBindingConflictWarnings, type RegisteredApplication, type VectorXRConfig } from '../../lib/model'
 
 const props = defineProps<{
   config: VectorXRConfig
@@ -22,14 +22,33 @@ defineEmits<{
 }>()
 
 const depthInfoOpen = ref(false)
-const bindingSubPage = ref<'depth' | 'anchor' | null>(null)
-const extendedConvergenceRange = ref(false)
+const bindingsPageOpen = ref(false)
+let savedScrollTop = 0
 
-function convergenceDisplayLimit(value: number): number {
-  return extendedConvergenceRange.value || Math.abs(toConvergenceDisplay(value)) > 5
-    ? 25
-    : 5
+function pageScroller(): Element | null {
+  return document.querySelector('main section.overflow-y-auto')
 }
+
+function openBindings() {
+  savedScrollTop = pageScroller()?.scrollTop ?? 0
+  bindingsPageOpen.value = true
+  void nextTick(() => pageScroller()?.scrollTo({ top: 0 }))
+}
+
+function closeBindings() {
+  bindingsPageOpen.value = false
+  void nextTick(() => pageScroller()?.scrollTo({ top: savedScrollTop }))
+}
+
+const depthBindingCount = computed(() => [
+  props.config.modules.depthxr.bindings.toggleEnabled,
+  props.config.modules.depthxr.bindings.toggleAnchor,
+].filter((binding) => binding.type !== 'none').length)
+
+const depthBindingWarnings = computed(() => savedBindingConflictWarnings(props.config, [
+  props.config.modules.depthxr.bindings.toggleEnabled,
+  props.config.modules.depthxr.bindings.toggleAnchor,
+]))
 
 const profileWarnings = computed(() => {
   const warnings = new Map<number, string[]>()
@@ -59,24 +78,7 @@ const profileWarnings = computed(() => {
 </script>
 
 <template>
-  <ModuleBindingPage
-    v-if="bindingSubPage === 'depth'"
-    module-label="Depth"
-    :binding="config.modules.depthxr.bindings.toggleEnabled"
-    label="Depth Toggle Binding"
-    description="Toggle Depth on or off at runtime for quick A/B testing."
-    @update:binding="config.modules.depthxr.bindings.toggleEnabled = $event"
-    @close="bindingSubPage = null"
-  />
-  <ModuleBindingPage
-    v-else-if="bindingSubPage === 'anchor'"
-    module-label="Depth Lock"
-    :binding="config.modules.depthxr.bindings.toggleAnchor"
-    label="Depth Lock Toggle Binding"
-    description="Temporarily flip Depth Lock during a live session for direct A/B testing."
-    @update:binding="config.modules.depthxr.bindings.toggleAnchor = $event"
-    @close="bindingSubPage = null"
-  />
+  <DepthBindingsPage v-if="bindingsPageOpen" :config="config" @close="closeBindings" />
   <div v-else class="space-y-4">
     <article class="rounded-[1.25rem] border p-5 shadow-panel backdrop-blur surface-panel">
       <!-- Module header -->
@@ -118,15 +120,10 @@ const profileWarnings = computed(() => {
           <p class="eyebrow text-[10px] font-semibold uppercase tracking-[0.18em]">Step 3: Compare</p>
           <p class="mt-2 text-sm font-semibold">Tune as a pair</p>
           <p class="mt-1 text-[13px] leading-5 text-muted">
-            Find scale first, then use Convergence only to settle the scene's depth placement. Stop at the first sign of eye strain, double vision, or a hard-to-fuse horizon.
+            Find scale first, then use Convergence only to settle the scene. During A/B tests, pause between rapid changes and stop at the first sign of eye strain, double vision, or a hard-to-fuse horizon.
           </p>
         </div>
       </div>
-      <label class="mb-5 inline-flex cursor-pointer items-center gap-3 rounded-full border px-4 py-2 text-xs font-medium surface-panel-strong">
-        <input v-model="extendedConvergenceRange" class="h-4 w-4 accent-depthxr-copper" type="checkbox" />
-        Extended Convergence range (&plusmn;25)
-        <span class="text-muted">Normal tuning is limited to &plusmn;5.</span>
-      </label>
       <div
         class="mb-5 rounded-[0.9rem] border px-4 py-3 text-sm leading-6 chip-warning"
         style="border-color: var(--app-border)"
@@ -138,20 +135,28 @@ const profileWarnings = computed(() => {
       </div>
 
       <!-- Module-level binding — applies regardless of which profile is active -->
-      <ModuleBindingPanel
-        class="mb-5"
-        heading="Depth Toggle Binding"
-        :binding="config.modules.depthxr.bindings.toggleEnabled"
-        hint="Toggle Depth on or off at runtime for quick A/B testing."
-        @edit="bindingSubPage = 'depth'"
-      />
-      <ModuleBindingPanel
-        class="mb-5"
-        heading="Depth Lock Toggle Binding"
-        :binding="config.modules.depthxr.bindings.toggleAnchor"
-        hint="Flip only Depth Lock at runtime while leaving the tuned Depth geometry active."
-        @edit="bindingSubPage = 'anchor'"
-      />
+      <button
+        class="group mb-5 w-full rounded-[1rem] border p-4 text-left transition surface-panel-soft hover:-translate-y-0.5 hover:shadow-panel"
+        type="button"
+        @click="openBindings"
+      >
+        <div class="flex flex-wrap items-center justify-between gap-4">
+          <div>
+            <p class="eyebrow text-[10px] font-semibold uppercase tracking-[0.18em]">Tune &amp; Compare</p>
+            <h3 class="mt-1 text-base font-semibold tracking-tight">In-game Bindings</h3>
+            <p class="mt-1 text-sm text-muted">Configure the complete Depth and Depth Lock A/B toggles in one place.</p>
+          </div>
+          <div class="flex flex-wrap items-center gap-2">
+            <span class="rounded-full border px-3 py-1 text-xs font-medium" style="border-color: var(--app-border)">
+              {{ depthBindingCount }} of 2 assigned
+            </span>
+            <span v-if="depthBindingWarnings.length" class="rounded-full px-3 py-1 text-xs font-medium chip-warning">
+              {{ depthBindingWarnings.length }} duplicate {{ depthBindingWarnings.length === 1 ? 'input' : 'inputs' }}
+            </span>
+            <span aria-hidden="true" class="transition group-hover:translate-x-1">&rarr;</span>
+          </div>
+        </div>
+      </button>
 
       <!-- Default Profile -->
       <details class="section-disclosure border-t pt-4" style="border-color: var(--app-border)" open>
@@ -188,30 +193,18 @@ const profileWarnings = computed(() => {
               center-label="0 Native scale"
               right-label="+ 3D stereo effect"
             />
-            <EffectField
+            <ConvergenceField
               v-model:value="config.modules.depthxr.defaults.convergence"
-              title="Convergence / Depth Plane"
-              subtitle="Applies an equal-and-opposite projection shift to place the zero-parallax plane. Keep 0 while tuning Stereo Depth, then adjust in 0.1–0.5 steps. Negative moves the plane farther; positive moves it nearer."
-              :min="-convergenceDisplayLimit(config.modules.depthxr.defaults.convergence) / 100"
-              :max="convergenceDisplayLimit(config.modules.depthxr.defaults.convergence) / 100"
-              :step="0.001"
-              :display-min="-convergenceDisplayLimit(config.modules.depthxr.defaults.convergence)"
-              :display-max="convergenceDisplayLimit(config.modules.depthxr.defaults.convergence)"
-              :display-step="0.1"
-              :display-value="toConvergenceDisplay"
-              :parse-display-value="fromConvergenceDisplay"
-              :display-badge="convergenceBadge"
-              left-label="- Farther plane"
-              center-label="0 App default"
-              right-label="+ Nearer plane"
             />
           </div>
+          <DepthAnchorField v-model:value="config.modules.depthxr.defaults.depthAnchor" />
           <DepthNetEffect
             :stereo-boost="config.modules.depthxr.defaults.stereoBoost"
             :convergence="config.modules.depthxr.defaults.convergence"
             :depth-lock="config.modules.depthxr.defaults.depthAnchor"
+            @update:stereo-boost="config.modules.depthxr.defaults.stereoBoost = $event"
+            @update:convergence="config.modules.depthxr.defaults.convergence = $event"
           />
-          <DepthAnchorField v-model:value="config.modules.depthxr.defaults.depthAnchor" />
         </div>
       </details>
     </article>
@@ -258,23 +251,9 @@ const profileWarnings = computed(() => {
               center-label="0 Native scale"
               right-label="+ 3D stereo effect"
             />
-            <EffectField
+            <ConvergenceField
               v-model:value="profile.settings.convergence"
               :muted="!profile.enabled"
-              title="Convergence / Depth Plane"
-              subtitle="Applies an equal-and-opposite projection shift to place the zero-parallax plane. Keep 0 while tuning Stereo Depth, then adjust in 0.1–0.5 steps. Negative moves the plane farther; positive moves it nearer."
-              :min="-convergenceDisplayLimit(profile.settings.convergence) / 100"
-              :max="convergenceDisplayLimit(profile.settings.convergence) / 100"
-              :step="0.001"
-              :display-min="-convergenceDisplayLimit(profile.settings.convergence)"
-              :display-max="convergenceDisplayLimit(profile.settings.convergence)"
-              :display-step="0.1"
-              :display-value="toConvergenceDisplay"
-              :parse-display-value="fromConvergenceDisplay"
-              :display-badge="convergenceBadge"
-              left-label="- Farther plane"
-              center-label="0 App default"
-              right-label="+ Nearer plane"
             />
           </div>
           <DepthAnchorField v-model:value="profile.settings.depthAnchor" :muted="!profile.enabled" />
@@ -283,6 +262,8 @@ const profileWarnings = computed(() => {
             :convergence="profile.settings.convergence"
             :depth-lock="profile.settings.depthAnchor"
             :muted="!profile.enabled"
+            @update:stereo-boost="profile.settings.stereoBoost = $event"
+            @update:convergence="profile.settings.convergence = $event"
           />
         </div>
       </ProfileShell>

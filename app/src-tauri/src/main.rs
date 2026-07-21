@@ -1727,6 +1727,8 @@ fn play_test_sound(
                 Some("turbo-off.wav") => "sounds/turbo-off.wav",
                 Some("metrics-on.wav") => "sounds/metrics-on.wav",
                 Some("metrics-off.wav") => "sounds/metrics-off.wav",
+                Some("depth-lock-on.wav") => "sounds/depth-lock-on.wav",
+                Some("depth-lock-off.wav") => "sounds/depth-lock-off.wav",
                 _ => {
                     if activate {
                         "sounds/activate.wav"

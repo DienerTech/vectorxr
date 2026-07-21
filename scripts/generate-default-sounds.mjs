@@ -42,6 +42,16 @@ const cues = {
     { freq: 659.25, ms: 45 },
     { freq: 523.25, ms: 80 },
   ],
+  // Depth Lock: a compact octave snap, distinct from Depth's normal two-note
+  // transition and Turbo's three-note arpeggio.
+  'depth-lock-on': [
+    { freq: 523.25, ms: 45 }, // C5
+    { freq: 1046.5, ms: 75 }, // C6
+  ],
+  'depth-lock-off': [
+    { freq: 1046.5, ms: 45 },
+    { freq: 523.25, ms: 75 },
+  ],
 }
 
 function renderTones(tones) {

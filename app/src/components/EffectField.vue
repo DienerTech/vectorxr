@@ -86,5 +86,8 @@ function fromDisplay(value: number): number {
         />
       </div>
     </div>
+    <div v-if="$slots.footer" class="mt-4 border-t pt-3" style="border-color: var(--app-border)">
+      <slot name="footer" />
+    </div>
   </div>
 </template>

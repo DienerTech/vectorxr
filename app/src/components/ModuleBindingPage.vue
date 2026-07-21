@@ -1,8 +1,9 @@
 <script setup lang="ts">
 import { onMounted, onUnmounted } from 'vue'
 
+import BindingConflictWarnings from './BindingConflictWarnings.vue'
 import BindingEditor from './BindingEditor.vue'
-import type { InputBinding } from '../lib/model'
+import type { InputBinding, PivotBindingWarning } from '../lib/model'
 
 // Dedicated sub-page for editing a single module-level binding (Turbo/Depth
 // toggles), mirroring PivotBindingsPage: breadcrumb, Esc/Done to return.
@@ -15,6 +16,7 @@ defineProps<{
   noneText?: string
   defaultActivateSound?: string
   defaultDeactivateSound?: string
+  warnings?: PivotBindingWarning[]
 }>()
 
 const emit = defineEmits<{
@@ -62,7 +64,8 @@ onUnmounted(() => {
         </button>
       </div>
 
-      <div class="mt-5">
+      <div class="mt-5 space-y-4">
+        <BindingConflictWarnings :warnings="warnings ?? []" />
         <BindingEditor
           :model-value="binding"
           :label="label"
