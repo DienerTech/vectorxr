@@ -2,7 +2,7 @@
 import { computed, onMounted } from 'vue'
 
 import { openExternalUrl } from '../../lib/commands'
-import type { PatchNoteEntry } from '../../lib/patchNotes'
+import { formatPatchNoteInlineHtml, type PatchNoteEntry } from '../../lib/patchNotes'
 import { useUpdateStore } from '../../stores/updateStore'
 
 const props = defineProps<{
@@ -180,7 +180,10 @@ onMounted(() => {
           </span>
         </div>
 
-        <p class="mt-3 max-w-3xl text-sm leading-6 text-muted">{{ props.latestPatch.summary }}</p>
+        <p
+          class="mt-3 max-w-3xl text-sm leading-6 text-muted"
+          v-html="formatPatchNoteInlineHtml(props.latestPatch.summary)"
+        ></p>
 
         <div class="mt-5 flex flex-wrap items-center gap-3 text-sm">
           <span class="text-muted">{{ props.latestPatch.date }}</span>

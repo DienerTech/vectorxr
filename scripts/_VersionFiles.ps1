@@ -5,7 +5,7 @@
 # If a new version-bearing file is added, add it here and both scripts pick it up.
 #
 # Scope note: this lists the "gated" version files only -- the three source-of-truth
-# files plus patchNotes.ts, which the release tag must match. The lock files
+# files plus patchNotes.json, which the release tag must match. The lock files
 # (app/package-lock.json, app/src-tauri/Cargo.lock) are derived artifacts that are
 # NOT part of the tag gate; Set-Version.ps1 keeps them in sync separately.
 # CMakeLists.txt's project(VERSION ...) is the C++ project version and does not
@@ -52,7 +52,7 @@ function Get-VersionTargets {
 }
 
 function Get-PatchNotesPath {
-    return (Join-Path (Get-RepoRoot) "app/src/lib/patchNotes.ts")
+    return (Join-Path (Get-RepoRoot) "app/src/lib/patchNotes.json")
 }
 
 function Get-ReleaseNotesPath {
@@ -109,11 +109,74 @@ function Set-TargetVersion {
     Write-FileNoBom -Path $Target.Path -Content $updated
 }
 
-function Read-LatestPatchVersion {
-    $content = Read-FileRaw -Path (Get-PatchNotesPath)
-    $match = [regex]::Match($content, "version:\s*'([^']+)'")
-    if (-not $match.Success) {
-        throw "Could not find latest patch note version in patchNotes.ts."
+function Assert-PatchNoteItems {
+    param(
+        [Parameter(Mandatory = $true)][object[]]$Items,
+        [Parameter(Mandatory = $true)][string]$Path
+    )
+
+    if ($Items.Count -eq 0) {
+        throw "$Path must contain at least one item."
     }
-    return $match.Groups[1].Value
+    for ($index = 0; $index -lt $Items.Count; $index++) {
+        $item = $Items[$index]
+        $itemPath = "$Path[$index]"
+        if ($item -is [string]) {
+            if ([string]::IsNullOrWhiteSpace([string]$item)) {
+                throw "$itemPath must not be empty."
+            }
+            continue
+        }
+        if ($null -eq $item) {
+            throw "$itemPath must be a string or nested list item."
+        }
+        $propertyNames = @($item.PSObject.Properties.Name)
+        if ($propertyNames -notcontains "html" -or
+            [string]::IsNullOrWhiteSpace([string]$item.html)) {
+            throw "$itemPath.html must be a non-empty string."
+        }
+        if ($propertyNames -contains "items") {
+            Assert-PatchNoteItems -Items @($item.items) -Path "$itemPath.items"
+        }
+    }
+}
+
+function Read-PatchNotes {
+    $path = Get-PatchNotesPath
+    $content = Read-FileRaw -Path $path
+    if (-not $content.TrimStart().StartsWith("[")) {
+        throw "Patch notes must be a JSON array: $path"
+    }
+    try {
+        $parsed = $content | ConvertFrom-Json
+        $entries = @($parsed | ForEach-Object { $_ })
+    }
+    catch {
+        throw "Could not parse patch notes JSON at '$path': $($_.Exception.Message)"
+    }
+    if ($entries.Count -eq 0) {
+        throw "Patch notes JSON must contain at least one entry."
+    }
+    $seenVersions = @{}
+    for ($index = 0; $index -lt $entries.Count; $index++) {
+        $entry = $entries[$index]
+        if (-not $entry.version -or -not $entry.date -or -not $entry.title -or
+            -not $entry.summary -or @($entry.items).Count -eq 0) {
+            throw "Each patch-notes entry must define version, date, title, summary, and items."
+        }
+        if (([string]$entry.date) -notmatch '^\d{4}-\d{2}-\d{2}$') {
+            throw "Patch-notes entry $index must use a YYYY-MM-DD date."
+        }
+        if ($seenVersions.ContainsKey([string]$entry.version)) {
+            throw "Patch notes contain duplicate version $($entry.version)."
+        }
+        $seenVersions[[string]$entry.version] = $true
+        Assert-PatchNoteItems -Items @($entry.items) -Path "entries[$index].items"
+    }
+    return $entries
+}
+
+function Read-LatestPatchVersion {
+    $entries = @(Read-PatchNotes)
+    return [string]$entries[0].version
 }

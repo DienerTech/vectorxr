@@ -51,17 +51,9 @@ if ($Date -notmatch '^\d{4}-\d{2}-\d{2}$') {
     throw "Date '$Date' must use YYYY-MM-DD format."
 }
 
-# --- IMPORTANT: quote-escaping gotcha -----------------------------------------
-# patchNotes.ts uses SINGLE-QUOTED TypeScript string literals. Any apostrophe in a
-# title / summary / item (e.g. "application's") would terminate the string literal
-# and break the build if inserted raw. Escape backslashes first (so we don't double
-# escape), then escape single quotes as \'. Do NOT remove this -- it is the reason
-# patch-note entries with apostrophes can be passed safely on the command line.
-# ------------------------------------------------------------------------------
-function ConvertTo-TsSingleQuoted {
+function ConvertTo-JsonString {
     param([Parameter(Mandatory = $true)][AllowEmptyString()][string]$Text)
-    $escaped = $Text.Replace('\', '\\').Replace("'", "\'")
-    return "'$escaped'"
+    return (ConvertTo-Json -InputObject $Text -Compress)
 }
 
 function Add-PatchNoteEntry {
@@ -74,33 +66,30 @@ function Add-PatchNoteEntry {
     )
 
     $path = Get-PatchNotesPath
+    $entries = @(Read-PatchNotes)
+    if (@($entries | Where-Object { $_.version -eq $Version }).Count -gt 0) {
+        throw "patchNotes.json already contains an entry for version $Version."
+    }
+
     $content = Read-FileRaw -Path $path
-
-    if ($content -match ("version:\s*'" + [regex]::Escape($Version) + "'")) {
-        throw "patchNotes.ts already contains an entry for version $Version."
-    }
-
-    # Preserve the file's existing newline style so the insertion produces a clean diff.
     $nl = if ($content -match "`r`n") { "`r`n" } else { "`n" }
-
-    $anchor = "export const patchNotes: PatchNoteEntry[] = ["
-    $anchorIndex = $content.IndexOf($anchor)
-    if ($anchorIndex -lt 0) {
-        throw "Could not find the patchNotes array opener in patchNotes.ts."
+    $insertPos = $content.IndexOf($nl) + $nl.Length
+    if ($insertPos -lt $nl.Length) {
+        throw "Could not find the first array entry in patchNotes.json."
     }
-    $insertPos = $content.IndexOf($nl, $anchorIndex) + $nl.Length
 
     $lines = New-Object System.Collections.Generic.List[string]
     $lines.Add("  {")
-    $lines.Add("    version: $(ConvertTo-TsSingleQuoted $Version),")
-    $lines.Add("    date: $(ConvertTo-TsSingleQuoted $Date),")
-    $lines.Add("    title: $(ConvertTo-TsSingleQuoted $Title),")
-    $lines.Add("    summary: $(ConvertTo-TsSingleQuoted $Summary),")
-    $lines.Add("    items: [")
-    foreach ($item in $Items) {
-        $lines.Add("      $(ConvertTo-TsSingleQuoted $item),")
+    $lines.Add("    `"version`": $(ConvertTo-JsonString $Version),")
+    $lines.Add("    `"date`": $(ConvertTo-JsonString $Date),")
+    $lines.Add("    `"title`": $(ConvertTo-JsonString $Title),")
+    $lines.Add("    `"summary`": $(ConvertTo-JsonString $Summary),")
+    $lines.Add("    `"items`": [")
+    for ($index = 0; $index -lt $Items.Count; $index++) {
+        $suffix = if ($index -lt $Items.Count - 1) { "," } else { "" }
+        $lines.Add("      $(ConvertTo-JsonString $Items[$index])$suffix")
     }
-    $lines.Add("    ],")
+    $lines.Add("    ]")
     $lines.Add("  },")
 
     $block = ($lines -join $nl) + $nl
@@ -133,6 +122,31 @@ function Update-LockVersion {
     Write-Host "  $Name"
 }
 
+function Get-PatchNoteLeafItems {
+    param([Parameter(Mandatory = $true)][object[]]$Items)
+
+    $leaves = New-Object System.Collections.Generic.List[string]
+    foreach ($item in $Items) {
+        if ($item -is [string]) {
+            $leaves.Add([string]$item)
+            continue
+        }
+        $propertyNames = @($item.PSObject.Properties.Name)
+        if ($propertyNames -contains "items" -and @($item.items).Count -gt 0) {
+            foreach ($leaf in @(Get-PatchNoteLeafItems -Items @($item.items))) {
+                $leaves.Add([string]$leaf)
+            }
+            continue
+        }
+        if ($propertyNames -contains "html" -and -not [string]::IsNullOrWhiteSpace([string]$item.html)) {
+            $leaves.Add([string]$item.html)
+            continue
+        }
+        throw "Patch-note items must be strings or objects with html and optional child items."
+    }
+    return $leaves
+}
+
 function Assert-ExistingPatchNoteMatches {
     param(
         [Parameter(Mandatory = $true)][string]$Version,
@@ -142,25 +156,24 @@ function Assert-ExistingPatchNoteMatches {
         [Parameter(Mandatory = $true)][string[]]$Items
     )
 
-    $content = Read-FileRaw -Path (Get-PatchNotesPath)
-    $nl = if ($content -match "`r`n") { "`r`n" } else { "`n" }
-    $lines = @(
-        "  {"
-        "    version: $(ConvertTo-TsSingleQuoted $Version),"
-        "    date: $(ConvertTo-TsSingleQuoted $Date),"
-        "    title: $(ConvertTo-TsSingleQuoted $Title),"
-        "    summary: $(ConvertTo-TsSingleQuoted $Summary),"
-        "    items: ["
-    )
-    foreach ($item in $Items) {
-        $lines += "      $(ConvertTo-TsSingleQuoted $item),"
+    $matches = @(@(Read-PatchNotes) | Where-Object { $_.version -eq $Version })
+    if ($matches.Count -ne 1) {
+        throw "Could not find exactly one patch-notes entry for $Version."
     }
-    $lines += "    ],"
-    $lines += "  },"
+    $entry = $matches[0]
+    if ([string]$entry.date -ne $Date -or [string]$entry.title -ne $Title -or
+        [string]$entry.summary -ne $Summary) {
+        throw "The existing patch-notes entry for $Version does not match -Date, -Title, and -Summary."
+    }
 
-    $expectedBlock = ($lines -join $nl) + $nl
-    if (-not $content.Contains($expectedBlock)) {
-        throw "The existing patch-notes entry for $Version does not match -Date, -Title, -Summary, and -Items."
+    $actualItems = @(Get-PatchNoteLeafItems -Items @($entry.items))
+    if ($actualItems.Count -ne $Items.Count) {
+        throw "The existing patch-notes entry for $Version does not match -Items."
+    }
+    for ($index = 0; $index -lt $Items.Count; $index++) {
+        if ($actualItems[$index] -ne $Items[$index]) {
+            throw "The existing patch-notes entry for $Version does not match -Items at index $index."
+        }
     }
 }
 
@@ -510,15 +523,14 @@ if ($Publish) {
     $publishState = Assert-PublishPreconditions -RepoRoot $repoRoot -Remote $Remote -TagName $tagName -WaitForWorkflow $waitForWorkflow
 }
 
-$patchNotesContent = Read-FileRaw -Path (Get-PatchNotesPath)
+$patchNotesEntries = @(Read-PatchNotes)
 $latestPatchVersion = Read-LatestPatchVersion
-$versionPattern = "version:\s*'" + [regex]::Escape($Version) + "'"
 if ($latestPatchVersion -eq $Version) {
     Write-Host "Using existing patch-notes entry for $Version ($Date) ..."
     Assert-ExistingPatchNoteMatches -Version $Version -Date $Date -Title $Title -Summary $Summary -Items $Items
 }
-elseif ($patchNotesContent -match $versionPattern) {
-    throw "patchNotes.ts contains version $Version, but it is not the latest entry."
+elseif (@($patchNotesEntries | Where-Object { $_.version -eq $Version }).Count -gt 0) {
+    throw "patchNotes.json contains version $Version, but it is not the latest entry."
 }
 else {
     Write-Host "Inserting patch-notes entry for $Version ($Date) ..."

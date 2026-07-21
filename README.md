@@ -167,6 +167,22 @@ GitHub builds release installers from `vMAJOR.MINOR.PATCH` tags. The release scr
 
 Run the command from a clean branch with working Git credentials and an authenticated GitHub CLI (`gh auth login`). Use `-WhatIf` to preview the operation, or `-NoWait` with `-Publish` to return after the tag is pushed instead of following the workflow. The generated release body is committed at `release/notes/vMAJOR.MINOR.PATCH.md`; `.github/workflows/release.yml` uses it verbatim and uploads the Windows installer plus a SHA-256 checksum.
 
+In-app release data lives in `app/src/lib/patchNotes.json`. `Set-Version.ps1` inserts a flat item list by default; before publishing, entries can be grouped into nested lists without changing the generated release-note comparison:
+
+```json
+"items": [
+  {
+    "html": "<strong>DepthXR</strong>",
+    "items": [
+      "First DepthXR change.",
+      "Second DepthXR change."
+    ]
+  }
+]
+```
+
+Patch-note summaries and item text support the attribute-free inline tags `<strong>`, `<em>`, `<code>`, and `<br>`. Lists stay structural JSON rather than raw HTML, and all other markup is escaped by the app renderer.
+
 ## Project Layout
 
 - `app/`: Tauri 2 and Vue 3 desktop app
