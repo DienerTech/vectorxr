@@ -809,6 +809,84 @@ std::string FormatHex(uint64_t value) {
     return stream.str();
 }
 
+const char* CompositionLayerTypeName(XrStructureType type) {
+    switch (type) {
+    case XR_TYPE_COMPOSITION_LAYER_PROJECTION:
+        return "projection";
+    case XR_TYPE_COMPOSITION_LAYER_QUAD:
+        return "quad";
+    case XR_TYPE_COMPOSITION_LAYER_CUBE_KHR:
+        return "cube";
+    case XR_TYPE_COMPOSITION_LAYER_CYLINDER_KHR:
+        return "cylinder";
+    case XR_TYPE_COMPOSITION_LAYER_EQUIRECT_KHR:
+        return "equirect";
+    case XR_TYPE_COMPOSITION_LAYER_EQUIRECT2_KHR:
+        return "equirect2";
+    case XR_TYPE_COMPOSITION_LAYER_PASSTHROUGH_FB:
+        return "passthrough_fb";
+    default:
+        return "other";
+    }
+}
+
+void HashCompositionTopologyValue(std::uint64_t value, std::uint64_t* hash) {
+    constexpr std::uint64_t kFnvPrime = 1099511628211ull;
+    for (std::size_t byte = 0; byte < sizeof(value); ++byte) {
+        *hash ^= (value >> (byte * 8u)) & 0xffu;
+        *hash *= kFnvPrime;
+    }
+}
+
+std::uint64_t CompositionLayerTopologySignature(const XrFrameEndInfo* frame_end_info) {
+    std::uint64_t hash = 1469598103934665603ull;
+    HashCompositionTopologyValue(frame_end_info ? frame_end_info->layerCount : 0, &hash);
+    HashCompositionTopologyValue(
+        frame_end_info ? static_cast<std::uint64_t>(frame_end_info->environmentBlendMode) : 0, &hash);
+    if (!frame_end_info || !frame_end_info->layers) {
+        return hash;
+    }
+    for (std::uint32_t index = 0; index < frame_end_info->layerCount; ++index) {
+        const XrCompositionLayerBaseHeader* layer = frame_end_info->layers[index];
+        HashCompositionTopologyValue(layer ? static_cast<std::uint64_t>(layer->type) : 0, &hash);
+        HashCompositionTopologyValue(layer ? static_cast<std::uint64_t>(layer->layerFlags) : 0, &hash);
+        if (layer && layer->type == XR_TYPE_COMPOSITION_LAYER_PROJECTION) {
+            const auto* projection = reinterpret_cast<const XrCompositionLayerProjection*>(layer);
+            HashCompositionTopologyValue(projection->viewCount, &hash);
+        }
+    }
+    return hash;
+}
+
+std::string FormatCompositionLayerTopology(const XrFrameEndInfo* frame_end_info) {
+    std::ostringstream stream;
+    stream << "layerCount=" << (frame_end_info ? frame_end_info->layerCount : 0)
+           << ", blendMode="
+           << (frame_end_info ? static_cast<int>(frame_end_info->environmentBlendMode) : 0)
+           << ", layers=[";
+    if (frame_end_info && frame_end_info->layers) {
+        for (std::uint32_t index = 0; index < frame_end_info->layerCount; ++index) {
+            if (index > 0) {
+                stream << ", ";
+            }
+            const XrCompositionLayerBaseHeader* layer = frame_end_info->layers[index];
+            stream << index << ":" << (layer ? CompositionLayerTypeName(layer->type) : "null");
+            if (layer) {
+                stream << "(type=" << static_cast<int>(layer->type)
+                       << ",flags=" << FormatHex(static_cast<std::uint64_t>(layer->layerFlags));
+                if (layer->type == XR_TYPE_COMPOSITION_LAYER_PROJECTION) {
+                    const auto* projection = reinterpret_cast<const XrCompositionLayerProjection*>(layer);
+                    stream << ",views=" << projection->viewCount;
+                }
+                stream << ")";
+            }
+        }
+    }
+    stream << "]";
+    return stream.str();
+}
+
+
 std::string FormatFov(const XrFovf& fov) {
     std::ostringstream stream;
     stream << "(" << FormatDiagnosticDouble(fov.angleLeft) << ", " << FormatDiagnosticDouble(fov.angleRight)
@@ -1451,6 +1529,29 @@ XrResult OpenXrLayer::OnInstanceCreated(const XrInstanceCreateInfo* create_info,
     current_exe_name_ = GetCurrentExecutableName();
     logger_.Info(std::string("VectorXR layer version: ") + VECTORXR_VERSION);
     logger_.Info("VectorXR attached to process: " + current_exe_name_);
+    {
+        const ProcessInteropSnapshot interop = GetProcessInteropSnapshot();
+        std::ostringstream stream;
+        stream << "Interop snapshot: inProcessModules=";
+        if (!interop.module_scan_succeeded) {
+            stream << "unavailable";
+        } else {
+            stream << interop.modules.size();
+            for (const LoadedInteropModule& module : interop.modules) {
+                stream << " [" << module.name << "=" << module.path.string() << "]";
+            }
+        }
+        stream << ", knownCompanionProcesses=";
+        if (!interop.process_scan_succeeded) {
+            stream << "unavailable";
+        } else {
+            stream << interop.processes.size();
+            for (const RunningInteropProcess& process : interop.processes) {
+                stream << " [" << process.name << ",pid=" << process.process_id << "]";
+            }
+        }
+        logger_.Info(stream.str());
+    }
 
     if (create_info) {
         quad_views_extension_requested_ =
@@ -3392,12 +3493,27 @@ void OpenXrLayer::TryPrewarmD3D11QuadViewsCompositor() {
         const uint32_t direct_output_count =
             static_cast<uint32_t>(d3d11_quadviews_compositor_.targets[0].image_render_target_views.empty() ? 0 : 1) +
             static_cast<uint32_t>(d3d11_quadviews_compositor_.targets[1].image_render_target_views.empty() ? 0 : 1);
+        std::uint64_t output_allocation_bytes = 0;
+        std::uint32_t private_output_count = 0;
+        for (const QuadViewsCompositionTarget& target : d3d11_quadviews_compositor_.targets) {
+            const std::uint32_t bytes_per_pixel =
+                PixelProbeBytesPerPixel(static_cast<DXGI_FORMAT>(target.format));
+            const std::uint64_t texture_count = target.d3d11_images.size() +
+                                                (target.render_texture != nullptr ? 1u : 0u);
+            output_allocation_bytes += static_cast<std::uint64_t>(target.width) * target.height *
+                                       bytes_per_pixel * texture_count;
+            private_output_count += target.render_texture != nullptr ? 1u : 0u;
+        }
         logger_.Info("D3D11 quadviews compositor prewarmed: outputSize=" +
                      std::to_string(canvas_dimensions.width) + "x" +
                      std::to_string(canvas_dimensions.height) +
                      ", canvasDensity=" + FormatDiagnosticDouble(canvas_dimensions.density) +
                      ", directInputSwapchains=" + std::to_string(direct_input_count) + "/4" +
                      ", directOutputEyes=" + std::to_string(direct_output_count) + "/2" +
+                     ", privateOutputEyes=" + std::to_string(private_output_count) + "/2" +
+                     ", outputAllocationApproxMiB=" +
+                     FormatDiagnosticDouble(static_cast<double>(output_allocation_bytes) /
+                                            (1024.0 * 1024.0)) +
                      ", gpuTiming=" + std::to_string(d3d11_quadviews_compositor_.gpu_timing_available));
         d3d11_quadviews_compositor_.has_logged_prewarm = true;
     }
@@ -4080,7 +4196,30 @@ XrResult OpenXrLayer::WaitFrame(XrSession session,
                                 const XrFrameWaitInfo* frame_wait_info,
                                 XrFrameState* frame_state) {
     if (!turbo_frame_interception_required_.load(std::memory_order_acquire)) {
-        return next_wait_frame_(session, frame_wait_info, frame_state);
+        if (!frame_pacing_debug_enabled_.load(std::memory_order_relaxed)) {
+            return next_wait_frame_(session, frame_wait_info, frame_state);
+        }
+        const auto wait_start = std::chrono::steady_clock::now();
+        const XrResult result = next_wait_frame_(session, frame_wait_info, frame_state);
+        const auto wait_end = std::chrono::steady_clock::now();
+        if (XR_SUCCEEDED(result) && frame_state) {
+            const double wait_ms =
+                std::chrono::duration<double, std::milli>(wait_end - wait_start).count();
+            std::scoped_lock lock(turbo_mutex_);
+            pacing_wait_sum_ms_ += wait_ms;
+            pacing_wait_max_ms_ = std::max(pacing_wait_max_ms_, wait_ms);
+            ++pacing_wait_samples_;
+            // Preserve the runtime timing horizon so enabling Turbo later in
+            // the same session begins from the last real app-visible frame.
+            turbo_last_predicted_display_time_ = frame_state->predictedDisplayTime;
+            turbo_last_predicted_display_period_ = frame_state->predictedDisplayPeriod;
+            turbo_last_should_render_ = frame_state->shouldRender == XR_TRUE;
+            turbo_max_returned_display_time_ =
+                std::max(turbo_max_returned_display_time_, frame_state->predictedDisplayTime);
+            NoteTurboShouldRenderLocked(turbo_last_should_render_);
+            turbo_last_wait_frame_wall_time_ = wait_end;
+        }
+        return result;
     }
     if (!frame_state) {
         return next_wait_frame_(session, frame_wait_info, frame_state);
@@ -4301,12 +4440,69 @@ XrResult OpenXrLayer::BeginFrame(XrSession session, const XrFrameBeginInfo* fram
     return result;
 }
 
+void OpenXrLayer::ObserveCompositionLayerTopology(const XrFrameEndInfo* frame_end_info) {
+    if (composition_topology_log_budget_ <= 0) {
+        return;
+    }
+    const std::uint64_t signature = CompositionLayerTopologySignature(frame_end_info);
+    if (last_composition_topology_signature_ == signature) {
+        return;
+    }
+    last_composition_topology_signature_ = signature;
+    --composition_topology_log_budget_;
+    logger_.Info("Composition layer topology forwarded downstream by VectorXR: " +
+                 FormatCompositionLayerTopology(frame_end_info) +
+                 (composition_topology_log_budget_ == 0
+                      ? "; further topology changes suppressed this session."
+                      : "."));
+}
+
 XrResult OpenXrLayer::ForwardEndFrame(XrSession session,
                                       const XrFrameEndInfo* frame_end_info,
                                       std::unique_lock<std::mutex>& config_lock) {
+    ObserveCompositionLayerTopology(frame_end_info);
+    if (frame_pacing_debug_enabled_.load(std::memory_order_relaxed) && frame_end_info) {
+        std::scoped_lock lock(turbo_mutex_);
+        if (turbo_last_predicted_display_period_ > 0 && turbo_max_returned_display_time_ > 0) {
+            const double delta_periods =
+                static_cast<double>(frame_end_info->displayTime - turbo_max_returned_display_time_) /
+                static_cast<double>(turbo_last_predicted_display_period_);
+            pacing_submit_delta_sum_periods_ += delta_periods;
+            if (pacing_submit_delta_samples_ == 0) {
+                pacing_submit_delta_min_periods_ = delta_periods;
+                pacing_submit_delta_max_periods_ = delta_periods;
+            } else {
+                pacing_submit_delta_min_periods_ =
+                    std::min(pacing_submit_delta_min_periods_, delta_periods);
+                pacing_submit_delta_max_periods_ =
+                    std::max(pacing_submit_delta_max_periods_, delta_periods);
+            }
+            ++pacing_submit_delta_samples_;
+        }
+    }
     if (!turbo_frame_interception_required_.load(std::memory_order_acquire)) {
+        const bool timing_enabled =
+            frame_pacing_debug_enabled_.load(std::memory_order_relaxed);
+        std::optional<std::chrono::steady_clock::time_point> pacing_start;
+        if (timing_enabled) {
+            pacing_start = std::chrono::steady_clock::now();
+        }
         config_lock.unlock();
-        return next_end_frame_(session, frame_end_info);
+        const XrResult result = next_end_frame_(session, frame_end_info);
+        if (XR_FAILED(result) && end_frame_error_log_budget_ > 0) {
+            --end_frame_error_log_budget_;
+            logger_.Error("Runtime xrEndFrame failed with " +
+                          std::to_string(static_cast<int>(result)) + " (layerCount=" +
+                          std::to_string(frame_end_info ? frame_end_info->layerCount : 0) + ")" +
+                          (end_frame_error_log_budget_ == 0
+                               ? "; further failures suppressed this session."
+                               : "."));
+        }
+        if (timing_enabled) {
+            const auto pacing_after_end = std::chrono::steady_clock::now();
+            RecordFramePacing(*pacing_start, *pacing_start, pacing_after_end, false);
+        }
+        return result;
     }
 
     // Black-screen forensics: an app that keeps its frame loop running but
@@ -5168,12 +5364,24 @@ void OpenXrLayer::RecordFramePacing(std::chrono::steady_clock::time_point frame_
         double wait_max_ms = 0.0;
         uint32_t wait_samples = 0;
         uint32_t fabricated_waits = 0;
+        double submit_delta_sum_periods = 0.0;
+        double submit_delta_min_periods = 0.0;
+        double submit_delta_max_periods = 0.0;
+        uint32_t submit_delta_samples = 0;
         {
             std::scoped_lock lock(turbo_mutex_);
             wait_sum_ms = pacing_wait_sum_ms_;
             wait_max_ms = pacing_wait_max_ms_;
             wait_samples = pacing_wait_samples_;
             fabricated_waits = pacing_fabricated_waits_;
+            submit_delta_sum_periods = pacing_submit_delta_sum_periods_;
+            submit_delta_min_periods = pacing_submit_delta_min_periods_;
+            submit_delta_max_periods = pacing_submit_delta_max_periods_;
+            submit_delta_samples = pacing_submit_delta_samples_;
+            pacing_submit_delta_sum_periods_ = 0.0;
+            pacing_submit_delta_min_periods_ = 0.0;
+            pacing_submit_delta_max_periods_ = 0.0;
+            pacing_submit_delta_samples_ = 0;
             pacing_wait_sum_ms_ = 0.0;
             pacing_wait_max_ms_ = 0.0;
             pacing_wait_samples_ = 0;
@@ -5191,7 +5399,7 @@ void OpenXrLayer::RecordFramePacing(std::chrono::steady_clock::time_point frame_
         }
         stream << ", endFrameDelta avg/max=" << FormatDiagnosticDouble(pacing_delta_sum_ms_ / pacing_frames_)
                << "/" << FormatDiagnosticDouble(pacing_delta_max_ms_)
-               << "ms, turboDrainAndBegin avg/max="
+               << "ms, preRuntimeEndFrame avg/max="
                << FormatDiagnosticDouble(pacing_drain_sum_ms_ / pacing_frames_) << "/"
                << FormatDiagnosticDouble(pacing_drain_max_ms_)
                << "ms, runtimeEndFrame avg/max=" << FormatDiagnosticDouble(pacing_end_sum_ms_ / pacing_frames_)
@@ -5203,6 +5411,12 @@ void OpenXrLayer::RecordFramePacing(std::chrono::steady_clock::time_point frame_
             stream << "n/a";
         }
         stream << ", fabricatedWaits=" << fabricated_waits;
+        if (submit_delta_samples > 0) {
+            stream << ", submittedDisplayTimeVsLatestWait avg/min/max="
+                   << FormatDiagnosticDouble(submit_delta_sum_periods / submit_delta_samples) << "/"
+                   << FormatDiagnosticDouble(submit_delta_min_periods) << "/"
+                   << FormatDiagnosticDouble(submit_delta_max_periods) << " periods";
+        }
         logger_.Debug(stream.str());
     } else {
         // Keep the WaitFrame-side counters bounded even when debug is off.
@@ -5211,6 +5425,10 @@ void OpenXrLayer::RecordFramePacing(std::chrono::steady_clock::time_point frame_
         pacing_wait_max_ms_ = 0.0;
         pacing_wait_samples_ = 0;
         pacing_fabricated_waits_ = 0;
+        pacing_submit_delta_sum_periods_ = 0.0;
+        pacing_submit_delta_min_periods_ = 0.0;
+        pacing_submit_delta_max_periods_ = 0.0;
+        pacing_submit_delta_samples_ = 0;
     }
 
     pacing_window_start_ = after_end;
@@ -5559,9 +5777,28 @@ void OpenXrLayer::ResetTurboFrameState() {
     end_frame_error_log_budget_ = 5;
     submission_transition_log_budget_ = 8;
     app_submitting_layers_.reset();
+    composition_topology_log_budget_ = 12;
+    last_composition_topology_signature_.reset();
+    pacing_last_end_time_.reset();
+    pacing_window_start_.reset();
+    pacing_frames_ = 0;
+    pacing_delta_sum_ms_ = 0.0;
+    pacing_delta_max_ms_ = 0.0;
+    pacing_drain_sum_ms_ = 0.0;
+    pacing_drain_max_ms_ = 0.0;
+    pacing_end_sum_ms_ = 0.0;
+    pacing_end_max_ms_ = 0.0;
     std::scoped_lock lock(turbo_mutex_);
     should_render_log_budget_ = 8;
     last_noted_should_render_.reset();
+    pacing_wait_sum_ms_ = 0.0;
+    pacing_wait_max_ms_ = 0.0;
+    pacing_wait_samples_ = 0;
+    pacing_fabricated_waits_ = 0;
+    pacing_submit_delta_sum_periods_ = 0.0;
+    pacing_submit_delta_min_periods_ = 0.0;
+    pacing_submit_delta_max_periods_ = 0.0;
+    pacing_submit_delta_samples_ = 0;
     turbo_async_wait_ = {};
     ++turbo_async_wait_generation_;
     turbo_async_wait_polled_ = false;
@@ -6942,6 +7179,8 @@ void OpenXrLayer::RefreshResolvedSettings() {
         // re-discover) applies without restarting the session.
         turbo_pacing_resolved_ = false;
     }
+    frame_pacing_debug_enabled_.store(resolved_settings_.core.log_level == LogLevel::Debug,
+                                      std::memory_order_relaxed);
     logger_.SetLevel(resolved_settings_.core.log_level);
     logger_.SetRetentionFiles(resolved_settings_.core.log_retention_files);
     if (!last_logged_settings_ || !SameSettings(*last_logged_settings_, resolved_settings_)) {

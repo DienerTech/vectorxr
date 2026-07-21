@@ -397,6 +397,7 @@ class OpenXrLayer {
     XrResult ForwardEndFrame(XrSession session,
                              const XrFrameEndInfo* frame_end_info,
                              std::unique_lock<std::mutex>& config_lock);
+    void ObserveCompositionLayerTopology(const XrFrameEndInfo* frame_end_info);
     void EnsureTurboAsyncWorkerLocked();
     void StopTurboAsyncWorker();
     void TurboAsyncWorkerLoop();
@@ -847,6 +848,13 @@ class OpenXrLayer {
     double pacing_wait_max_ms_{0.0};
     uint32_t pacing_wait_samples_{0};
     uint32_t pacing_fabricated_waits_{0};
+    double pacing_submit_delta_sum_periods_{0.0};
+    double pacing_submit_delta_min_periods_{0.0};
+    double pacing_submit_delta_max_periods_{0.0};
+    uint32_t pacing_submit_delta_samples_{0};
+    // Cached from resolved settings so pass-through Wait/EndFrame can opt into
+    // timing without taking Logger's mutex on every frame.
+    std::atomic<bool> frame_pacing_debug_enabled_{false};
 
     // Turbo metrics capture: frame stats segmented by pacing state so the
     // app can compare turbo-off/async/sequenced within a session. Frame-thread
@@ -899,6 +907,8 @@ class OpenXrLayer {
     std::optional<bool> last_noted_should_render_; // turbo_mutex_
     int submission_transition_log_budget_{8};
     std::optional<bool> app_submitting_layers_;
+    int composition_topology_log_budget_{12};
+    std::optional<std::uint64_t> last_composition_topology_signature_;
     bool quad_views_extension_requested_{false};
     bool varjo_foveated_rendering_extension_requested_{false};
     bool d3d11_graphics_extension_requested_{false};
