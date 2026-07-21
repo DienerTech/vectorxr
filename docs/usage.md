@@ -98,7 +98,8 @@ Depth controls perceived world scale; Convergence places the zero-parallax depth
 
 - Begin with **Convergence at 0**. Move **Stereo Depth / World Scale** left for a larger, flatter
   world or right for stronger near-field stereo and a smaller-feeling world. Nearby geometry will
-  change more visibly than the horizon.
+  change more visibly than the horizon. The normal Stereo Depth range is ±25%; enable its explicit
+  extended range only when you intentionally need the full ±100%.
 - Once scale feels right, adjust **Convergence / Depth Plane** in small 0.1–0.5 steps. Negative
   moves the plane farther away; positive moves it nearer. The normal control is limited to ±5 for
   comfort. Enable the explicit extended range only for an existing profile or careful testing.

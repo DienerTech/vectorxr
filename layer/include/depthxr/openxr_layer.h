@@ -470,6 +470,8 @@ class OpenXrLayer {
                                          std::span<const XrView> located_views,
                                          uint32_t view_count);
     struct DepthSubmissionGeometry {
+        XrSpace space{XR_NULL_HANDLE};
+        XrViewConfigurationType view_configuration_type{XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO};
         std::vector<XrPosef> native_poses;
         std::vector<XrPosef> render_poses;
         std::vector<XrFovf> native_fovs;
@@ -479,9 +481,14 @@ class OpenXrLayer {
     bool FindPivotPoseDelta(XrTime time, XrPosef* pose_delta, XrTime* matched_time) const;
     void PrunePivotPoseDeltas(XrTime time);
     void CacheDepthSubmissionGeometry(XrTime time,
+                                      XrSpace space,
+                                      XrViewConfigurationType view_configuration_type,
                                       std::span<const ViewAdjustmentData> native_views,
                                       std::span<const ViewAdjustmentData> render_views);
     bool FindDepthSubmissionGeometry(XrTime time,
+                                     XrSpace space,
+                                     XrViewConfigurationType view_configuration_type,
+                                     uint32_t view_count,
                                      const DepthSubmissionGeometry** geometry,
                                      XrTime* matched_time) const;
     void PruneDepthSubmissionGeometry(XrTime time);
@@ -964,7 +971,7 @@ class OpenXrLayer {
     std::vector<XrCompositionLayerProjection> end_frame_projection_layers_scratch_;
     std::vector<const XrCompositionLayerBaseHeader*> end_frame_layers_scratch_;
     std::map<XrTime, XrPosef> cached_pivot_pose_deltas_;
-    std::map<XrTime, DepthSubmissionGeometry> cached_depth_submission_geometry_;
+    std::map<XrTime, std::vector<DepthSubmissionGeometry>> cached_depth_submission_geometry_;
     std::map<XrTime, std::array<XrFovf, 4>> cached_quadviews_fovs_;
     std::unordered_map<XrSwapchain, SwapchainInfo> tracked_swapchains_;
     D3D11QuadViewsCompositor d3d11_quadviews_compositor_;

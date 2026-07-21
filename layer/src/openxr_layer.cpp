@@ -5691,14 +5691,51 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
                            !NearlyZero(pose_delta.position.x) || !NearlyZero(pose_delta.position.y) ||
                            !NearlyZero(pose_delta.position.z));
 
+    auto find_depth_submission_geometry_for_layer =
+        [&](const XrCompositionLayerProjection* projection_layer,
+            XrTime* matched_time) -> const DepthSubmissionGeometry* {
+            if (!projection_layer ||
+                !resolved_settings_.depthxr.enabled ||
+                !depthxr_toggle_enabled_ ||
+                !depth_anchor_active_) {
+                return nullptr;
+            }
+
+            const DepthSubmissionGeometry* geometry = nullptr;
+            XrTime candidate_time = 0;
+            if (!FindDepthSubmissionGeometry(frame_end_info->displayTime,
+                                             projection_layer->space,
+                                             active_primary_view_configuration_type_,
+                                             projection_layer->viewCount,
+                                             &geometry,
+                                             &candidate_time)) {
+                return nullptr;
+            }
+            if (matched_time) {
+                *matched_time = candidate_time;
+            }
+            return geometry;
+        };
+
     const DepthSubmissionGeometry* depth_submission_geometry = nullptr;
     XrTime matched_depth_submission_time = 0;
-    const bool has_depth_submission_geometry =
-        resolved_settings_.depthxr.enabled && depthxr_toggle_enabled_ &&
-        depth_anchor_active_ &&
-        FindDepthSubmissionGeometry(frame_end_info->displayTime,
-                                    &depth_submission_geometry,
-                                    &matched_depth_submission_time);
+    if (frame_end_info->layers) {
+        for (uint32_t i = 0; i < frame_end_info->layerCount; ++i) {
+            const XrCompositionLayerBaseHeader* base_header = frame_end_info->layers[i];
+            if (!base_header || base_header->type != XR_TYPE_COMPOSITION_LAYER_PROJECTION) {
+                continue;
+            }
+            const auto* projection_layer =
+                reinterpret_cast<const XrCompositionLayerProjection*>(base_header);
+            depth_submission_geometry =
+                find_depth_submission_geometry_for_layer(projection_layer,
+                                                         &matched_depth_submission_time);
+            if (depth_submission_geometry) {
+                break;
+            }
+        }
+    }
+    const bool has_depth_submission_geometry = depth_submission_geometry != nullptr;
 
     const bool depth_adjustment_active_for_submission =
         resolved_settings_.depthxr.enabled && depthxr_toggle_enabled_ &&
@@ -5851,11 +5888,12 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
                 projection_view.pose = MultiplyPoses(projection_view.pose, reverse_delta);
             }
         }
-        if (has_depth_submission_geometry && depth_submission_geometry) {
+        if (const DepthSubmissionGeometry* layer_geometry =
+                find_depth_submission_geometry_for_layer(projection_layer, nullptr)) {
             depth_anchor_restored_view_count += RestoreDepthSubmissionGeometry(
                 std::span<XrCompositionLayerProjectionView>(adjusted_projection_views.back()),
                 first_view,
-                *depth_submission_geometry,
+                *layer_geometry,
                 reverse_delta,
                 has_non_identity_delta);
         }
@@ -5905,11 +5943,12 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
                                       has_non_identity_delta,
                                       &adjusted_projection_layers.back(),
                                       &adjusted_projection_views.back())) {
-                if (has_depth_submission_geometry && depth_submission_geometry) {
+                if (const DepthSubmissionGeometry* layer_geometry =
+                        find_depth_submission_geometry_for_layer(projection_layer, nullptr)) {
                     depth_anchor_restored_view_count += RestoreDepthSubmissionGeometry(
                         std::span<XrCompositionLayerProjectionView>(adjusted_projection_views.back()),
                         0,
-                        *depth_submission_geometry,
+                        *layer_geometry,
                         reverse_delta,
                         has_non_identity_delta);
                 }
@@ -6445,7 +6484,11 @@ XrResult OpenXrLayer::LocateViews(XrSession session,
         ApplyConvergence(adjusted_views, resolved_settings_.depthxr.convergence, view_layout);
     }
     if (cache_depth_submission_geometry) {
-        CacheDepthSubmissionGeometry(view_locate_info->displayTime, depth_native_views, adjusted_views);
+        CacheDepthSubmissionGeometry(view_locate_info->displayTime,
+                                     view_locate_info->space,
+                                     view_configuration_type,
+                                     depth_native_views,
+                                     adjusted_views);
     }
 
     for (uint32_t i = 0; i < count; ++i) {
@@ -7996,6 +8039,8 @@ void OpenXrLayer::PrunePivotPoseDeltas(XrTime time) {
 
 void OpenXrLayer::CacheDepthSubmissionGeometry(
     XrTime time,
+    XrSpace space,
+    XrViewConfigurationType view_configuration_type,
     std::span<const ViewAdjustmentData> native_views,
     std::span<const ViewAdjustmentData> render_views) {
     if (time == 0 || native_views.empty() || native_views.size() != render_views.size()) {
@@ -8003,6 +8048,8 @@ void OpenXrLayer::CacheDepthSubmissionGeometry(
     }
 
     DepthSubmissionGeometry geometry;
+    geometry.space = space;
+    geometry.view_configuration_type = view_configuration_type;
     geometry.native_poses.resize(native_views.size());
     geometry.render_poses.resize(render_views.size());
     geometry.native_fovs.resize(native_views.size());
@@ -8031,7 +8078,19 @@ void OpenXrLayer::CacheDepthSubmissionGeometry(
         copy_view(render_views[i], &geometry.render_poses[i], &geometry.render_fovs[i]);
     }
 
-    cached_depth_submission_geometry_[time] = std::move(geometry);
+    std::vector<DepthSubmissionGeometry>& frame_geometry =
+        cached_depth_submission_geometry_[time];
+    const auto existing = std::find_if(
+        frame_geometry.begin(), frame_geometry.end(),
+        [space, view_configuration_type](const DepthSubmissionGeometry& candidate) {
+            return candidate.space == space &&
+                   candidate.view_configuration_type == view_configuration_type;
+        });
+    if (existing != frame_geometry.end()) {
+        *existing = std::move(geometry);
+    } else {
+        frame_geometry.push_back(std::move(geometry));
+    }
     while (cached_depth_submission_geometry_.size() > kMaxCachedDepthSubmissionFrames) {
         cached_depth_submission_geometry_.erase(cached_depth_submission_geometry_.begin());
     }
@@ -8039,6 +8098,9 @@ void OpenXrLayer::CacheDepthSubmissionGeometry(
 
 bool OpenXrLayer::FindDepthSubmissionGeometry(
     XrTime time,
+    XrSpace space,
+    XrViewConfigurationType view_configuration_type,
+    uint32_t view_count,
     const DepthSubmissionGeometry** geometry,
     XrTime* matched_time) const {
     if (!geometry || !matched_time) {
@@ -8050,22 +8112,17 @@ bool OpenXrLayer::FindDepthSubmissionGeometry(
         return false;
     }
 
-    const auto exact = cached_depth_submission_geometry_.find(time);
-    if (exact != cached_depth_submission_geometry_.end()) {
-        *geometry = &exact->second;
-        *matched_time = exact->first;
-        return true;
-    }
-
-    const auto upper = cached_depth_submission_geometry_.lower_bound(time);
-    std::map<XrTime, DepthSubmissionGeometry>::const_iterator best;
-    if (upper == cached_depth_submission_geometry_.begin()) {
-        best = upper;
-    } else if (upper == cached_depth_submission_geometry_.end()) {
-        best = std::prev(upper);
-    } else {
-        const auto lower = std::prev(upper);
-        best = (time - lower->first <= upper->first - time) ? lower : upper;
+    auto best = cached_depth_submission_geometry_.find(time);
+    if (best == cached_depth_submission_geometry_.end()) {
+        const auto upper = cached_depth_submission_geometry_.lower_bound(time);
+        if (upper == cached_depth_submission_geometry_.begin()) {
+            best = upper;
+        } else if (upper == cached_depth_submission_geometry_.end()) {
+            best = std::prev(upper);
+        } else {
+            const auto lower = std::prev(upper);
+            best = (time - lower->first <= upper->first - time) ? lower : upper;
+        }
     }
 
     const XrTime match_delta = best->first > time ? best->first - time : time - best->first;
@@ -8073,7 +8130,22 @@ bool OpenXrLayer::FindDepthSubmissionGeometry(
     if (match_delta > kMaxDepthSubmissionMatchWindow) {
         return false;
     }
-    *geometry = &best->second;
+
+    const auto matching_geometry = std::find_if(
+        best->second.begin(), best->second.end(),
+        [space, view_configuration_type, view_count](const DepthSubmissionGeometry& candidate) {
+            return candidate.space == space &&
+                   candidate.view_configuration_type == view_configuration_type &&
+                   candidate.native_poses.size() == view_count &&
+                   candidate.render_poses.size() == view_count &&
+                   candidate.native_fovs.size() == view_count &&
+                   candidate.render_fovs.size() == view_count;
+        });
+    if (matching_geometry == best->second.end()) {
+        return false;
+    }
+
+    *geometry = &*matching_geometry;
     return true;
 }
 

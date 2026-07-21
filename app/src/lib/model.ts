@@ -897,7 +897,9 @@ function bindingInputKey(binding: InputBinding): string | null {
 export function savedBindingConflictWarnings(
   config: VectorXRConfig,
   focusBindings: InputBinding[],
+  options: { suppressFocusOnlyConflicts?: boolean } = {},
 ): PivotBindingWarning[] {
+  const focusBindingSet = new Set(focusBindings)
   const focusKeys = new Set(focusBindings.map(bindingInputKey).filter((key): key is string => key !== null))
   if (focusKeys.size === 0) return []
 
@@ -909,7 +911,12 @@ export function savedBindingConflictWarnings(
   }
 
   return [...groups.entries()]
-    .filter(([key, assignments]) => focusKeys.has(key) && assignments.length > 1)
+    .filter(([key, assignments]) => (
+      focusKeys.has(key) &&
+      assignments.length > 1 &&
+      (!options.suppressFocusOnlyConflicts ||
+        !assignments.every((assignment) => focusBindingSet.has(assignment.binding)))
+    ))
     .map(([, assignments]) => ({
       title: `${bindingLabel(assignments[0].binding)} is assigned more than once`,
       message: `This input is assigned to ${assignments.map((assignment) => assignment.label).join('; ')}. A press may trigger multiple actions, or a higher-priority action may shadow another. This warning does not block saving.`,

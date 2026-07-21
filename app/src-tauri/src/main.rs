@@ -250,7 +250,10 @@ impl Default for DepthXRSettings {
         Self {
             stereo_boost: default_stereo_boost(),
             convergence: default_convergence(),
-            depth_anchor: false,
+            // Fresh profiles/configs opt into Depth Lock. The field-level
+            // serde default remains false so pre-0.14 configs retain their
+            // previous submission behavior when the property is absent.
+            depth_anchor: true,
         }
     }
 }
@@ -1802,7 +1805,12 @@ fn play_test_sound(
 
 #[cfg(test)]
 mod tests {
-    use super::{DepthXRBindings, DepthXRSettings};
+    use super::{default_config, DepthXRBindings, DepthXRSettings};
+
+    #[test]
+    fn new_configs_enable_depth_anchor_by_default() {
+        assert!(default_config().modules.depthxr.defaults.depth_anchor);
+    }
 
     #[test]
     fn depth_anchor_survives_the_config_save_round_trip() {

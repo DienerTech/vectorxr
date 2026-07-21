@@ -16,7 +16,7 @@ export const patchNotes: PatchNoteEntry[] = [
       'Adds a live four-quadrant pairing map and net-effect guidance for Stereo Depth and Convergence.',
       'Adds per-profile Depth Lock, which preserves tuned Depth geometry while restoring headset-native eye poses and FOV at submission.',
       'Redesigns Depth controls around World Scale, Stereo Depth, and the Convergence Plane, with directional labels and a guided tuning sequence.',
-      'Uses a comfort-oriented +/-5 Convergence range by default while keeping the legacy +/-25 range behind an explicit extended-range control.',
+      'Uses comfort-oriented +/-25% Stereo Depth and +/-5 Convergence ranges by default, with explicit extended-range controls for +/-100% and +/-25.',
       'Adds joystick HAT/POV directions as bindable inputs alongside buttons, with cardinal/diagonal positions and a timed, cancellable capture flow.',
     ],
   },

@@ -5,9 +5,9 @@ import ConvergenceField from '../ConvergenceField.vue'
 import DepthAnchorField from '../DepthAnchorField.vue'
 import DepthBindingsPage from '../DepthBindingsPage.vue'
 import DepthNetEffect from '../DepthNetEffect.vue'
-import EffectField from '../EffectField.vue'
 import ProfileShell from '../ProfileShell.vue'
-import { fromStereoBoostDisplay, stereoBoostBadge, toConvergenceDisplay, toStereoBoostDisplay } from '../../lib/display'
+import StereoDepthField from '../StereoDepthField.vue'
+import { toConvergenceDisplay, toStereoBoostDisplay } from '../../lib/display'
 import { savedBindingConflictWarnings, type DepthXRSettings, type RegisteredApplication, type VectorXRConfig } from '../../lib/model'
 
 const props = defineProps<{
@@ -23,8 +23,18 @@ defineEmits<{
 
 const depthInfoOpen = ref(false)
 const bindingsPageOpen = ref(false)
+const stereoDepthDisplayLimits = reactive(new WeakMap<DepthXRSettings, number>())
 const convergenceDisplayLimits = reactive(new WeakMap<DepthXRSettings, number>())
 let savedScrollTop = 0
+
+function stereoDepthDisplayLimit(settings: DepthXRSettings): number {
+  return stereoDepthDisplayLimits.get(settings)
+    ?? (Math.abs(toStereoBoostDisplay(settings.stereoBoost)) > 25 ? 100 : 25)
+}
+
+function setStereoDepthDisplayLimit(settings: DepthXRSettings, limit: number) {
+  stereoDepthDisplayLimits.set(settings, limit > 25 ? 100 : 25)
+}
 
 function convergenceDisplayLimit(settings: DepthXRSettings): number {
   return convergenceDisplayLimits.get(settings)
@@ -186,22 +196,10 @@ const profileWarnings = computed(() => {
         </div>
         <div v-else class="mt-3 space-y-3">
           <div class="grid gap-3 lg:grid-cols-2">
-            <EffectField
+            <StereoDepthField
               v-model:value="config.modules.depthxr.defaults.stereoBoost"
-              title="Stereo Depth / World Scale"
-              subtitle="Changes virtual eye separation while keeping your physical headset IPD untouched. Move right for stronger near-field stereo and a smaller-feeling world; move left for a larger-feeling, flatter world. Start around ±5–15%."
-              :min="0"
-              :max="2"
-              :step="0.01"
-              :display-min="-100"
-              :display-max="100"
-              :display-step="0.1"
-              :display-value="toStereoBoostDisplay"
-              :parse-display-value="fromStereoBoostDisplay"
-              :display-badge="stereoBoostBadge"
-              left-label="- Larger world"
-              center-label="0 Native scale"
-              right-label="+ 3D stereo effect"
+              :display-limit="stereoDepthDisplayLimit(config.modules.depthxr.defaults)"
+              @update:display-limit="setStereoDepthDisplayLimit(config.modules.depthxr.defaults, $event)"
             />
             <ConvergenceField
               v-model:value="config.modules.depthxr.defaults.convergence"
@@ -212,6 +210,7 @@ const profileWarnings = computed(() => {
           <DepthAnchorField v-model:value="config.modules.depthxr.defaults.depthAnchor" />
           <DepthNetEffect
             :stereo-boost="config.modules.depthxr.defaults.stereoBoost"
+            :stereo-depth-limit="stereoDepthDisplayLimit(config.modules.depthxr.defaults)"
             :convergence="config.modules.depthxr.defaults.convergence"
             :convergence-limit="convergenceDisplayLimit(config.modules.depthxr.defaults)"
             :depth-lock="config.modules.depthxr.defaults.depthAnchor"
@@ -246,23 +245,11 @@ const profileWarnings = computed(() => {
       >
         <div class="space-y-3">
           <div class="grid gap-3 lg:grid-cols-2">
-            <EffectField
+            <StereoDepthField
               v-model:value="profile.settings.stereoBoost"
+              :display-limit="stereoDepthDisplayLimit(profile.settings)"
               :muted="!profile.enabled"
-              title="Stereo Depth / World Scale"
-              subtitle="Changes virtual eye separation while keeping your physical headset IPD untouched. Move right for stronger near-field stereo and a smaller-feeling world; move left for a larger-feeling, flatter world. Start around ±5–15%."
-              :min="0"
-              :max="2"
-              :step="0.01"
-              :display-min="-100"
-              :display-max="100"
-              :display-step="0.1"
-              :display-value="toStereoBoostDisplay"
-              :parse-display-value="fromStereoBoostDisplay"
-              :display-badge="stereoBoostBadge"
-              left-label="- Larger world"
-              center-label="0 Native scale"
-              right-label="+ 3D stereo effect"
+              @update:display-limit="setStereoDepthDisplayLimit(profile.settings, $event)"
             />
             <ConvergenceField
               v-model:value="profile.settings.convergence"
@@ -274,6 +261,7 @@ const profileWarnings = computed(() => {
           <DepthAnchorField v-model:value="profile.settings.depthAnchor" :muted="!profile.enabled" />
           <DepthNetEffect
             :stereo-boost="profile.settings.stereoBoost"
+            :stereo-depth-limit="stereoDepthDisplayLimit(profile.settings)"
             :convergence="profile.settings.convergence"
             :convergence-limit="convergenceDisplayLimit(profile.settings)"
             :depth-lock="profile.settings.depthAnchor"

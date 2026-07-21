@@ -70,6 +70,29 @@ test('saved binding warnings scan across modules and profiles without blocking',
   assert.match(warnings[0].message, /does not block saving/)
 })
 
+test('Pivot global warnings suppress conflicts already explained by the local warning', () => {
+  const config = defaultConfig()
+  config.modules.pivotxr.activationBinding = keyboard('Shift', 'F8')
+  config.modules.pivotxr.setOriginBinding = keyboard('F8', 'Shift')
+  const focus = [
+    config.modules.pivotxr.activationBinding,
+    config.modules.pivotxr.setOriginBinding,
+    config.modules.pivotxr.releaseOriginBinding,
+  ]
+
+  assert.equal(savedBindingConflictWarnings(config, focus).length, 1)
+  assert.equal(savedBindingConflictWarnings(config, focus, {
+    suppressFocusOnlyConflicts: true,
+  }).length, 0)
+
+  config.modules.turbo.toggleBinding = keyboard('Shift', 'F8')
+  const crossFeatureWarnings = savedBindingConflictWarnings(config, focus, {
+    suppressFocusOnlyConflicts: true,
+  })
+  assert.equal(crossFeatureWarnings.length, 1)
+  assert.match(crossFeatureWarnings[0].message, /Turbo: A\/B toggle/)
+})
+
 test('physical input sharing stays distinct from runtime activation arbitration', () => {
   const shiftThenCtrl = keyboard('Shift', 'Ctrl', 'F8')
   const ctrlThenShift = keyboard('Ctrl', 'Shift', 'F8')

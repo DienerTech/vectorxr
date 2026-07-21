@@ -31,7 +31,9 @@ const globalBindingWarnings = computed(() => savedBindingConflictWarnings(props.
   props.subject.activationBinding,
   props.subject.setOriginBinding,
   props.subject.releaseOriginBinding,
-]))
+], {
+  suppressFocusOnlyConflicts: true,
+}))
 
 const emit = defineEmits<{
   close: []

@@ -7,6 +7,7 @@ const props = defineProps<{
   stereoBoost: number
   convergence: number
   depthLock: boolean
+  stereoDepthLimit?: number
   convergenceLimit?: number
   muted?: boolean
 }>()
@@ -30,13 +31,14 @@ function clamp(value: number, min: number, max: number): number {
 
 const depthValue = computed(() => toStereoBoostDisplay(props.stereoBoost))
 const convergenceValue = computed(() => toConvergenceDisplay(props.convergence))
+const mapStereoDepthLimit = computed(() => props.stereoDepthLimit ?? 25)
 const mapConvergenceLimit = computed(() => props.convergenceLimit ?? 5)
 const depthSign = computed(() => sign(depthValue.value, 0.05))
 const convergenceSign = computed(() => sign(convergenceValue.value, 0.05))
 const dragging = ref(false)
 
 const markerStyle = computed(() => ({
-  left: `${50 + clamp(depthValue.value / 25, -1, 1) * 43}%`,
+  left: `${50 + clamp(depthValue.value / mapStereoDepthLimit.value, -1, 1) * 43}%`,
   top: `${50 - clamp(convergenceValue.value / mapConvergenceLimit.value, -1, 1) * 43}%`,
 }))
 
@@ -46,7 +48,7 @@ function setFromPointer(event: PointerEvent) {
   const bounds = element.getBoundingClientRect()
   const x = clamp(((event.clientX - bounds.left) / bounds.width - 0.5) / 0.43, -1, 1)
   const y = clamp((0.5 - (event.clientY - bounds.top) / bounds.height) / 0.43, -1, 1)
-  emit('update:stereoBoost', fromStereoBoostDisplay(x * 25))
+  emit('update:stereoBoost', fromStereoBoostDisplay(x * mapStereoDepthLimit.value))
   emit('update:convergence', fromConvergenceDisplay(y * mapConvergenceLimit.value))
 }
 
@@ -79,7 +81,7 @@ function adjustFromKeyboard(event: KeyboardEvent) {
   else if (event.key === 'ArrowUp') convergence += convergenceStep
   else return
   event.preventDefault()
-  emit('update:stereoBoost', fromStereoBoostDisplay(clamp(depth, -25, 25)))
+  emit('update:stereoBoost', fromStereoBoostDisplay(clamp(depth, -mapStereoDepthLimit.value, mapStereoDepthLimit.value)))
   emit('update:convergence', fromConvergenceDisplay(clamp(convergence, -mapConvergenceLimit.value, mapConvergenceLimit.value)))
 }
 
@@ -174,7 +176,7 @@ const netEffect = computed(() => {
       </div>
       <p class="mb-2 text-center text-[10px] font-medium uppercase tracking-[0.08em] text-muted">Convergence: Nearer (+{{ mapConvergenceLimit }})</p>
       <div class="grid gap-2 sm:grid-cols-[minmax(6rem,0.32fr)_minmax(15rem,1fr)_minmax(6rem,0.32fr)] sm:items-center">
-        <p class="text-center text-[10px] font-medium uppercase tracking-[0.08em] text-muted sm:text-right">Depth: Larger &amp; Flatter</p>
+        <p class="text-center text-[10px] font-medium uppercase tracking-[0.08em] text-muted sm:text-right">Depth: Larger &amp; Flatter (&minus;{{ mapStereoDepthLimit }}%)</p>
         <button
           class="depth-map relative grid aspect-[1.65/1] min-h-[12rem] w-full touch-none grid-cols-2 grid-rows-2 overflow-hidden rounded-[0.8rem] border text-left"
           :class="{ dragging }"
@@ -205,7 +207,7 @@ const netEffect = computed(() => {
           </span>
           <span class="depth-marker" :style="markerStyle" aria-hidden="true"></span>
         </button>
-        <p class="text-center text-[10px] font-medium uppercase tracking-[0.08em] text-muted sm:text-left">Depth: Stronger Stereo</p>
+        <p class="text-center text-[10px] font-medium uppercase tracking-[0.08em] text-muted sm:text-left">Depth: Stronger Stereo (+{{ mapStereoDepthLimit }}%)</p>
       </div>
       <p class="mt-2 text-center text-[10px] font-medium uppercase tracking-[0.08em] text-muted">Convergence: Farther (&minus;{{ mapConvergenceLimit }})</p>
     </div>
