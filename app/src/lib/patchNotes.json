@@ -1,7 +1,7 @@
 [
   {
     "version": "0.14.0",
-    "date": "2026-07-20",
+    "date": "2026-07-21",
     "title": "Introducing Depth Lock",
     "summary": "Depth Lock gives you direct control over how virtual-world geometry is rendered and submitted, pairing tuned stereo depth and convergence with headset-native OpenXR geometry through a new visual workflow.",
     "items": [
