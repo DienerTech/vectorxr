@@ -1,396 +1,98 @@
+import patchNotesData from './patchNotes.json' with { type: 'json' }
+
+export type PatchNoteItem =
+  | string
+  | {
+      html: string
+      items?: PatchNoteItem[]
+    }
+
 export interface PatchNoteEntry {
   version: string
   date: string
   title: string
   summary: string
-  items: string[]
+  items: PatchNoteItem[]
 }
 
-export const patchNotes: PatchNoteEntry[] = [
-  {
-    version: '0.13.7',
-    date: '2026-07-19',
-    title: 'Depth tuning and diagnostics',
-    summary: 'Improves Depth tuning and diagnostics for games that manage their own IPD.',
-    items: [
-      'Adds 0.1-step Convergence adjustments.',
-      'Warns when in-game Force IPD or stereo settings can override Stereo Boost.',
-      'Adds concise runtime geometry logging for troubleshooting Depth behavior.',
-    ],
-  },
-  {
-    version: '0.13.6',
-    date: '2026-07-18',
-    title: 'Pivot & Recovery Reliability',
-    summary: 'Fixes Pivot pose handling and Virtual Desktop Quadviews recovery, with safer and more flexible bindings.',
-    items: [
-      'Fixed Pivot origin capture and pose routing when applications issue VIEW-relative xrLocateViews calls.',
-      'Made Virtual Desktop Quadviews recovery wait for continuously stable eye tracking before rebuilding compositor targets.',
-      'Added Numpad 0-9 support for keyboard bindings.',
-      'Added non-blocking warnings when Pivot activation, Set Origin, or Release Origin share an input, including Toggle mode.',
-    ],
-  },
-  {
-    version: '0.13.5',
-    date: '2026-07-17',
-    title: 'Eye-Tracking Runtime Compatibility',
-    summary: 'Restores eye-tracked Quadviews on affected Virtual Desktop setups and makes startup capability decisions immediately diagnosable across runtimes.',
-    items: [
-      'Fixed eye-tracked Quadviews falling back to fixed foveation when a runtime or API-layer chain cannot complete pre-instance eye-gaze extension enumeration; VectorXR now treats that result as indeterminate, requests XR_EXT_eye_gaze_interaction optimistically, and safely retries without it when rejected.',
-      'Replaced the binary eye-gaze capability check with one authoritative tri-state extension probe, preserving completed negative results, known SteamVR and PimaxXR false-negative workarounds, and the native Varjo gaze contract.',
-      'Added an info-level Quadviews eye-gaze startup summary covering probe state and failure detail, extension-request reason, instance create and retry results, final extension state, and selected tracking path.',
-      'Added regression coverage for present, absent, and indeterminate gaze probes, including the Virtual Desktop failure mode.',
-    ],
-  },
-  {
-    version: '0.13.4',
-    date: '2026-07-17',
-    title: 'Varjo Eye Tracking & Recovery Diagnostics',
-    summary: 'Restores gaze-driven native Varjo foveation and adds targeted diagnostics for Virtual Desktop reconnect blur.',
-    items: [
-      'Fixed native Varjo Quadviews remaining fixed-center by activating foveated rendering only while the combined-eye orientation is tracked.',
-      'Added bounded, debug-only compositor resource and pixel diagnostics to identify Virtual Desktop reconnect blur without affecting normal rendering.',
-    ],
-  },
-  {
-    version: '0.13.3',
-    date: '2026-07-15',
-    title: 'Headset Recovery & Frame Pacing',
-    summary: 'Restores gaze-driven rendering after Virtual Desktop reconnects, activates native Varjo foveation when DCS omits its request, and fixes inactive-layer and Quadviews prewarm paths that could disrupt frame pacing.',
-    items: [
-      'Fixed Virtual Desktop reconnects leaving synthesized Quadviews visually stuck on a stale focus region: after a sustained eye-gaze locate failure recovers, VectorXR now rebuilds the compositor output targets so live gaze control returns without restarting the game.',
-      'Fixed native Varjo eye-tracked Quadviews when DCS enables the Varjo extension but omits its per-view foveated-rendering request; VectorXR now supplies the request while eye tracking is active, allowing the runtime to return its foveated texture sizes and moving focus geometry.',
-      'Reduced overhead when enhancements are inactive: sessions that never enable Turbo now pass frame pacing directly through, while disabled Pivot, Depth, and Quadviews paths skip unnecessary pose processing.',
-      'Fixed synthesized Quadviews output targets being prewarmed at native stereo size and rebuilt on the first composed frame at the configured focus density, removing a large first-frame stall and a runtime resource-churn path that could keep DCS below headset refresh.',
-      'Expanded Varjo foveation-request and Quadviews compositor-recovery diagnostics, with regression coverage for density scaling and runtime maximum-size clamping.',
-    ],
-  },
-  {
-    version: '0.13.2',
-    date: '2026-07-14',
-    title: 'Pivot Reliability & Headset Compatibility',
-    summary: 'Makes Pivot Always On dependable across overlapping profiles, restores eye-tracked Quadviews on affected PimaxXR setups, and expands headset diagnostics and Pivot tuning.',
-    items: [
-      'Fixed Pivot Always On profiles being discarded when their optional suspend or resume binding overlapped a higher-priority profile; automatic engagement now remains active while only the conflicting binding is shadowed.',
-      'Improved the Pivot UI, usage guide, and startup logs so Always On behavior, optional bindings, and binding-shadow warnings accurately describe what the runtime will do.',
-      'Restored eye-tracked Quadviews on PimaxXR runtimes that omit XR_EXT_eye_gaze_interaction during pre-instance enumeration but accept it when the OpenXR instance is created, retaining a safe retry for runtimes that reject it.',
-      'Expanded Pivot deadzone limits to 180 degrees for yaw and 90 degrees for pitch across the controls, validation, and configuration schema.',
-      'Added detailed native Varjo resolution and foveation contract diagnostics to distinguish application requests, runtime limits, scaling, focus movement, and headset-side caps.',
-      'Added regression coverage for PimaxXR eye-gaze compatibility and Always On profile resolution with overlapping bindings.',
-    ],
-  },
-  {
-    version: '0.13.1',
-    date: '2026-07-12',
-    title: 'Runtime Compatibility & Sharpening',
-    summary: 'Restores visible Quadviews sharpening, improves SteamVR and PSVR2 eye-tracking compatibility, and makes Turbo safer around motion smoothing and synthesized DCS quadviews.',
-    items: [
-      'Fixed Quadviews sharpening being visually cancelled at high-contrast edges, including native Varjo focus views, while avoiding redundant render-target clears to reduce composition overhead.',
-      'Restored PSVR2 eye tracking through SteamVR when its pre-instance extension probe reports a false negative, with a safe retry for runtimes that truly reject the extension.',
-      'Improved SteamVR Quadviews compatibility by translating visibility-mask requests to stereo views and correcting reversed gaze poses from affected headset drivers.',
-      'Prevented DCS with synthesized Quadviews on SteamVR from entering incompatible Turbo pacing that caused invalid display times, Waiting overlays, broken rendering, or crashes.',
-      'Made Turbo compatibility risks explicit in the app and logs, including its incompatibility with SteamVR Motion Smoothing, safer per-application guidance, and unoverrideable runtime safety blocks.',
-      'Prevented development installs from enabling duplicate VectorXR layer manifests and added bounded retries when saving runtime pacing decisions.',
-      'Added regression coverage for sharpening shaders, gaze-extension policy, and Turbo compatibility rules.',
-    ],
-  },
-  {
-    version: '0.13.0',
-    date: '2026-07-10',
-    title: 'Performance & Runtime Hardening',
-    summary: 'Refines Turbo and the core OpenXR architecture for smoother performance, broader runtime compatibility, and a clearer configuration experience.',
-    items: [
-      'Refactored Turbo frame pacing to reduce overhead, improve lifecycle stability, and avoid unnecessary performance penalties in titles that do not benefit from it.',
-      'Reorganized Turbo into focused Runtime Behavior and Performance Diagnostics pages that keep everyday setup simple while preserving advanced controls.',
-      'Improved Quadviews compatibility and rendering resilience, including stronger native Varjo behavior and new opinionated performance presets.',
-      'Strengthened session, swapchain, graphics-state, tracking, and logging architecture throughout the OpenXR layer.',
-    ],
-  },
-  {
-    version: '0.12.3',
-    date: '2026-07-08',
-    title: 'Pivot Pitch Fix',
-    summary: 'Pivot\'s extra pitch now rotates around your own view axis, fixing inverted or rolled pitch response for cockpits facing away from the headset\'s calibrated forward.',
-    items: [
-      'Fixed Pivot pitch rotating around the playspace axis instead of your current view heading - pitch pivot felt inverted or rolled sideways when your seat faced away from the headset\'s room-calibration forward, while yaw was unaffected.',
-    ],
-  },
-  {
-    version: '0.12.2',
-    date: '2026-07-07',
-    title: 'Turbo Metrics',
-    summary: 'Measure what Turbo actually does to your frame pacing - fps, frame times, and pacing wait time recorded per strategy and compared in the Turbo panel - plus Turbo engagement fixes validated on MSFS 2024.',
-    items: [
-      'Split turbo into two distinct strategies: async (the original Turbo) and sequenced (a new strategy for runtimes that cannot tolerate async).',
-      'Turbo Metrics: avg fps, 1% low, avg/p99 frame times, and runtime pacing wait time are recorded separately for Turbo off, async, and sequenced, with a per-session comparison in the Turbo panel.',
-      'Metrics collection is configurable: always-on, off, or gated behind a new capture keybinding (with its own sound cues) so loading screens and menus stay out of your data.',
-      'Fixed a game freeze when switching to VR mode in MSFS 2024 while Turbo was available (frame-call ordering during Turbo engagement).',
-      'Turbo now waits at least 5 seconds after a session starts before engaging, so it never kicks in mid VR-mode transition.',
-      'Turbo panel now explains that Sequenced-pacing runtimes (Pimax, Oculus, Varjo) cannot exceed a runtime-enforced framerate lock.',
-      'Sharper diagnostics: runtime submit failures, shouldRender changes, and empty-frame transitions are now logged, making black-screen reports self-explanatory.',
-    ],
-  },
-  {
-    version: '0.12.1',
-    date: '2026-07-06',
-    title: 'Turbo Pacing Auto-Discovery',
-    summary: 'Turbo now adapts its frame-pacing strategy to each headset runtime automatically, fixing the immediate self-suspension seen on Quest, Varjo, and Pimax headsets while leaving the already-working SteamVR behavior untouched. Toggling Turbo mid-flight is now instant, loading screens no longer confuse it, and a new Frame Pacing panel shows exactly what was chosen for each runtime.',
-    items: [
-      'Turbo now chooses the right frame-pacing strategy per headset runtime. Auto mode starts from what is known about your runtime, verifies it against live frame timing, adapts if needed, and remembers the verdict so the right strategy applies from the first frame of your next session.',
-      'New Sequenced pacing strategy makes Turbo work on runtimes that could not be pipelined before, including Quest and other Oculus-runtime headsets, Varjo, and Pimax. The 0.12.0 behavior of Turbo activating briefly and then suspending itself on these headsets is fixed.',
-      'The Turbo page gained a Frame Pacing panel listing each runtime you have used, the strategy in effect, and how it was chosen. You can pin a strategy per runtime or clear a recorded verdict to re-discover, and the list updates live while a game is running.',
-      'Turbo now waits for the game to reach a steady frame rate before engaging and rides through loading screens, removing startup hiccups and false self-suspensions during mission loads.',
-      'The Turbo toggle binding now switches instantly, with no re-synchronization hitch, making in-flight A/B comparisons seamless.',
-      'Fixed a scrambled, mismatched per-eye image that could appear when Turbo ran together with Quadviews.',
-      'Fixed rare full-game freezes with Turbo active, caused by a deadlock between frame pacing and pose queries inside the layer.',
-      'Turbo and Depth toggle bindings are now compact one-line rows with a dedicated edit page, matching the Pivot layout and freeing up screen space.',
-      'Added a conflict warning on the Turbo and OpenXR Layers pages when OpenXR Toolkit is enabled alongside VectorXR Turbo, since two frame-pacing layers fight each other.',
-      'Debug reports now include the per-runtime pacing history, and debug-level logs carry detailed pacing forensics to make headset-specific reports precise.',
-    ],
-  },
-  {
-    version: '0.12.0',
-    date: '2026-07-05',
-    title: 'Turbo Mode & Pivot 2.0',
-    summary: 'A major update introducing Turbo mode for systems whose fps is held back by headset frame pacing, and a greatly expanded Pivot with multiple profiles per game, custom origin points, stepped and always-on modes, and per-direction tuning, alongside a sharper Varjo focus image and refined controls throughout the app.',
-    items: [
-      'New Turbo enhancement: it frees your game from the headset runtime\'s frame pacing to lift performance on systems where the runtime caps fps below what your hardware can deliver. Turn it on globally or per game, with an optional in-game toggle binding for instant A/B comparisons.',
-      'Turbo protects itself automatically: on runtimes that cannot be safely pipelined (such as Pimax\'s PiOpenXR) it detects the resulting stalls and suspends itself instead of stuttering. Press the toggle binding to re-arm it if you want to try again.',
-      'Pivot now supports several profiles per game, arranged in priority order. Each profile has its own activation binding, so the button you press decides which rotation behavior engages, and you can switch between them live in flight.',
-      'Added optional Set Origin and Release Origin bindings so Pivot can rotate around a point you choose. Bind Set Origin to the same button as your in-game recenter and the two stay aligned; Release Origin returns to the default headset origin. Each has its own audio cue.',
-      'Added a Stepped response mode, inspired by XRNeckSafer, that adds rotation in fixed increments as your head passes configurable thresholds, with hysteresis so the view does not oscillate at a boundary.',
-      'Added an Always On activation mode that keeps Pivot engaged automatically, plus an Advanced Axes option to tune left, right, up, and down independently.',
-      'Sharpened the Varjo focus image further by widening the sharpening sample area in the native Varjo view path.',
-      'Reworked the Pivot interface: bindings and rotation settings now open on their own focused sub-pages so each profile card stays compact, disabled profiles are clearly greyed out, and turning a default profile off explains exactly what that means for your games.',
-      'The Save button now lists the settings blocking a save when it is disabled, and fields with out-of-range values are outlined in red so they are easy to find.',
-      'Added frame-pacing telemetry and expanded Pivot, origin, stepped-mode, and Turbo logging in debug exports so playback and performance issues can be diagnosed precisely.',
-    ],
-  },
-  {
-    version: '0.11.5',
-    date: '2026-07-02',
-    title: 'Varjo Compatible Quadviews',
-    summary: 'Adds a Varjo compatible quadviews mode that forwards the four native view layers to Varjo runtimes so the high-density focus panels are driven directly, replacing the stereo-composite emulation that softened the image on Varjo headsets.',
-    items: [
-      'On Varjo runtimes with native quad-view support, Quadviews now hands the four view layers (two peripheral, two focus) straight to the runtime so the physical focus panels render at full resolution instead of being flattened into a single stereo image.',
-      'Focus Scale, Peripheral Scale, and Focus Sharpness still apply (sharpening runs as a focus post-process); focus size, transition, offsets, and gaze smoothing are owned by the Varjo runtime in this mode.',
-      'Pivot continues to work alongside the forwarded native views.',
-      'Automatic on supported Varjo headsets when Quadviews is enabled, and a no-op on all other headsets, which keep the existing composite emulation.',
-      'Added a Varjo Compatibility note in the Quadviews tab describing which controls apply.',
-      'Added a new registry-based detection mechanism for binding the correct runtime.',
+function requireString(value: unknown, path: string): string {
+  if (typeof value !== 'string' || value.trim().length === 0) {
+    throw new Error(`Invalid patch notes: ${path} must be a non-empty string.`)
+  }
+  return value
+}
 
-    ],
-  },
-  {
-    version: '0.11.4',
-    date: '2026-07-01',
-    title: 'Quadviews Focus & Sharpness Improvements',
-    summary: 'Delivers the Quadviews focus region at full resolution end-to-end for a noticeably sharper image, turns on focus sharpening by default, retunes the default Quadviews profile, and adds deeper debug logging for focus resolution and eye tracking.',
-    items: [
-      'Fixed the Quadviews focus region being downscaled during compositing. The high-resolution focus view is now delivered at full 1:1 resolution, restoring sharpness that was previously lost and making the Focus Scale setting effective.',
-      'Dev Note: You may need to retune your Quadviews settings following this update. Previously, the Foveated Resolution setting was capped at 100%. Values above 100% will now apply correctly!',
-      'Focus sharpening now works correctly and is enabled by default, with edge clamping to avoid halos on high-contrast detail such as cockpit text and instruments. Further changes may be made here based on user feedback.',
-      'Retuned the default Quadviews profile with a larger focus region and lighter peripheral resolution for a sharper, more forgiving image out of the box at roughly a third of full-stereo pixel cost.',
-      'Added detailed Quadviews debug logging, including a focus sampling ratio and canvas density to confirm 1:1 focus rendering, plus eye-tracking interaction-profile diagnostics to help pinpoint why gaze-driven focus may be unavailable.',
-      'Added a subtle update indicator next to the version number that appears when a newer release is available on GitHub, linking to the About page for details.',
-    ],
-  },
-  {
-    version: '0.11.3',
-    date: '2026-06-28',
-    title: 'Varjo and Pivot diagnostics',
-    summary: 'Improves Quadviews compatibility and troubleshooting with stronger Varjo/OpenXR contract handling, more reliable live config reloads, safer eye-gaze fallback behavior, and detailed Pivot debug diagnostics.',
-    items: [
-      'Hardened Varjo Quadviews emulation and OpenXR next-chain handling, including COMBINED_EYE_VARJO reference-space behavior and xrGetReferenceSpaceBoundsRect support.',
-      'Improved eye-gaze setup and fallback behavior so Quadviews can continue with head/static focus when eye tracking resources are unavailable.',
-      'Improved config file watching and reload behavior so profile changes are picked up more reliably during active sessions.',
-      'Added debug-level Pivot diagnostics for tracking freshness, location flags, recomposition mode, eye offsets, and left/right pose deltas to help diagnose pivot drift or asymmetry.',
-    ],
-  },
-  {
-    version: '0.11.2',
-    date: '2026-06-28',
-    title: 'Varjo Quadviews fix',
-    summary: 'Fixes a black-screen issue with Quadviews on Varjo headsets',
-    items: [
-      'Fixed a black screen on Varjo headsets when using VectorXR Quadviews; the focus and peripheral views are now composited correctly.',
-      'Each session log now records the VectorXR layer version to make troubleshooting easier.',
-    ],
-  },
-  {
-    version: '0.11.1',
-    date: '2026-06-27',
-    title: 'Layer startup diagnostics',
-    summary: 'Adds detailed runtime logging across the OpenXR layer chain during session startup to help diagnose headset- and runtime-specific issues, with no change to runtime behavior.',
-    items: [
-      'Logs the active OpenXR runtime, headset/system details, and the application’s enabled extensions at startup.',
-      'Traces each key OpenXR call during session bring-up (session creation, reference spaces, swapchain format and creation, action-set attach, and session begin) with parameters and results.',
-      'Surfaces previously-silent downstream failures in that startup window so the exact failing call is captured in logs and debug exports.',
-    ],
-  },
-  {
-    version: '0.11.0',
-    date: '2026-06-19',
-    title: 'Beta Release',
-    summary: 'VectorXR enters beta with smoother Pivot easing, clearer and more honest Depth and Pivot controls, a color-coded Quadviews performance budget, optional sound cues for bindings, and headset runtime-compatibility guidance.',
-    items: [
-      'Pivot now eases smoothly in and out when toggled instead of snapping, with a tunable activation ramp and a single smoothing control shared by yaw and pitch.',
-      'Synchronized the Pivot yaw and pitch defaults for a consistent out-of-the-box feel.',
-      'Reworked the Depth controls with bipolar sliders centered at neutral and one value per effect, and fixed the runtime toggle to apply saved values instantly as a clean on/off switch.',
-      'Added a Depth troubleshooting notice for game or runtime settings that can override OpenXR stereo geometry.',
-      'Quadviews now color-codes its performance budget (green/amber/red) and takes Foveate/Peripheral resolution as a percent of headset resolution.',
-      'Added optional sound feedback for keybind and device bindings: play a short .wav on activate/deactivate using the bundled tones or your own, with a master volume control in Settings.',
-      'Enhancement default profiles now ship off for consistency.',
-    ],
-  },
-  {
-    version: '0.10.0',
-    date: '2026-06-16',
-    title: 'Profile opt-in controls',
-    summary: 'Per-application profiles can now opt apps into Depth, Pivot, or Quadviews even when the default profile is off, with a clearer dashboard and restored About tab for release information.',
-    items: [
-      'Changed profile resolution so the first enabled custom profile targeting an app turns that Enhancement on and applies its settings, even if the default profile is disabled.',
-      'Retired the old per-profile disable mode from the app model and profile editor; profile participation is now controlled by a simple Profile On/Off toggle.',
-      'Added an active Enhancement overview to Home with quick navigation into Quadviews, Pivot, and Depth settings.',
-      'Restored the About tab as the home for project links, Ko-fi support, update checks, and full patch notes.',
-      'Moved discovered-app tracking controls into Settings and made the Application Registry focus on unregistered apps first, with details available in a modal.',
-      'Updated validation and runtime tests for the new custom-profile opt-in behavior.',
-    ],
-  },
-  {
-    version: '0.9.0',
-    date: '2026-06-13',
-    title: 'UI overhaul',
-    summary: 'A refreshed app shell that separates a welcome dashboard from settings, sharpens the OpenXR layer manager, and unifies the Quadviews profile editors around the new "Enhancement" language.',
-    items: [
-      'Split the old Home tab into a Home dashboard (welcome, system health, patch notes, updates, and support) and a dedicated Settings tab, with Home as the default landing tab.',
-      'Folded the former About tab into Home and rewrote the welcome hero to cover foveated rendering, head rotation, and stereo depth.',
-      'Adopted "Enhancement" wording throughout the app for the OpenXR modifications.',
-      'Made OpenXR layer enabled and disabled states far more distinct with solid, high-contrast status pills in both light and dark themes.',
-      'Unified the Quadviews default and per-application profile editors on one shared layout and fixed field alignment in the Resolution group.',
-      'Replaced the sidebar VXR text mark with the app logo and evened out the Pivot binding dropdown heights.',
-    ],
-  },
-  {
-    version: '0.8.0',
-    date: '2026-06-12',
-    title: 'Experimental Quadviews',
-    summary: 'VectorXR now includes experimental native Quadviews support for OpenXR apps, with per-application profiles and compatibility with Depth and Pivot.',
-    items: [
-      'Added an experimental Quadviews module for foveal and peripheral rendering control.',
-      'Added Quadviews defaults and per-application profiles for tracking mode, focus size, resolution scale, offsets, smoothing, and transition tuning.',
-      'Added native Quadviews composition support that works alongside VectorXR Depth and Pivot.',
-      'Improved Pivot compatibility for VectorXR-managed quadview sessions, including close cockpit/HMD geometry in supported apps.',
-      'Added Quadviews diagnostics and development notes for performance tuning and future dynamic foveation work.',
-    ],
-  },
-  {
-    version: '0.7.1',
-    date: '2026-06-09',
-    title: 'UI polish',
-    summary: 'VectorXR now has cleaner About and Health Check layouts with more consistent spacing and clearer support visibility.',
-    items: [
-      'Made the Ko-fi support link more visible and moved it alongside the app description.',
-      'Aligned the About tab cards so the page spacing reads more cleanly.',
-      'Improved Health Check card alignment, status chip sizing, and footer composition.',
-    ],
-  },
-  {
-    version: '0.7.0',
-    date: '2026-05-03',
-    title: 'Release readiness',
-    summary: 'VectorXR now has in-app update checks, GitHub release automation, MIT licensing, and refreshed project documentation.',
-    items: [
-      'Added an About tab update checker that can detect newer published GitHub releases.',
-      'Added a tag-driven GitHub Actions release workflow for building Windows installers.',
-      'Added version/tag validation so release tags match the app version before a release build runs.',
-      'Added MIT licensing and clearer branding language for DienerTech LLC.',
-      'Refreshed the README with feature screenshots, installation guidance, acknowledgments, and release documentation.',
-      'Improved the About tab layout with integrated release status, patch notes, and support information.',
-    ],
-  },
-  {
-    version: '0.6.0',
-    date: '2026-04-26',
-    title: 'OpenXR layer manager',
-    summary: 'VectorXR can now inspect and manage implicit OpenXR API layers from inside the app.',
-    items: [
-      'Added an OpenXR Layers tab with registry-slice sub-tabs for machine-wide and per-user 64-bit and 32-bit implicit API layers.',
-      'Added layer enable/disable controls, adjacent move up/down ordering, and details for manifest paths, DLL paths, and Windows signature status.',
-      'Added VectorXR and Quad-Views-Foveated guidance so Pivot users can see when layer ordering may break quadviews compatibility.',
-      'Added on-demand elevation for machine-wide OpenXR layer changes instead of requiring VectorXR to always run as administrator.',
-      'Added a read-only Home status for the VectorXR OpenXR layer so users can tell whether OpenXR Enhancements  can apply at runtime.',
-    ],
-  },
-  {
-    version: '0.5.1',
-    date: '2026-04-26',
-    title: 'Launch prep and icon pipeline cleanup',
-    summary: 'VectorXR now has improved binding management and an improved icon!',
-    items: [
-      'Improved the device binding UI to better handle disconected devices.',
-      'Added a note regarding Pivot compatibility with quadviews supplied directly by the runtime, such as Pimax Play.',
-      'Replaced the ad hoc Tauri icon-generation flow with a repo-local PowerShell script for predictable `icon.png` and multi-size `icon.ico` output.',
-      'Updated the app icon assets to the latest VectorXR branding pass for continued launch evaluation.',
-    ],
-  },
-  {
-    version: '0.5.0',
-    date: '2026-04-15',
-    title: 'Windows installer milestone',
-    summary: 'VectorXR now has a local production build that creates a Windows installer with OpenXR layer registration and cleanup.',
-    items: [
-      'Added a local installer build command that builds the OpenXR layer, stages the payload, and runs the Tauri NSIS bundle.',
-      'Packaged the VectorXR OpenXR layer DLL and manifest with the desktop app installer.',
-      'Added elevated per-machine installer hooks that register the layer under the HKLM OpenXR implicit API layer registry location.',
-      'Added uninstall hooks that remove the installed VectorXR OpenXR layer registry entry.',
-      'Validated install, launch, desktop icon, registry registration, and uninstall cleanup locally.',
-    ],
-  },
-  {
-    version: '0.4.0',
-    date: '2026-04-14',
-    title: 'Application discovery and portable profiles',
-    summary: 'VectorXR can now remember OpenXR apps it has seen and turn them into profile targets when you are ready.',
-    items: [
-      'Added local OpenXR application discovery with a registry toggle and clear action.',
-      'Added an Application Registry discovery panel with refresh, launch counts, first seen, and last seen details.',
-      'Added one-click registration for discovered executables.',
-      'Migrated imported profile executable matches into registered applications so shared configs can link Depth and Pivot profiles automatically.',
-      'Simplified registered app cards with inline title editing, executable guidance, and a two-column layout on wide screens.',
-    ],
-  },
-  {
-    version: '0.3.0',
-    date: '2026-04-10',
-    title: 'Phase 3 shell foundation',
-    summary: 'The app now has a cleaner home surface, theme support, and a built-in patch notes view.',
-    items: [
-      'Renamed front-end module labels to Home, Depth, and Pivot.',
-      'Added system, light, and dark theme preferences.',
-      'Moved release notes into an in-app log so recent updates stay easy to find.',
-    ],
-  },
-  {
-    version: '0.2.0',
-    date: '2026-04-09',
-    title: 'VectorXR suite shell',
-    summary: 'Home, Depth, and Pivot now live inside one shared app shell with a unified save flow.',
-    items: [
-      'Split the suite into dedicated tabs.',
-      'Added sticky save controls and shared validation status.',
-      'Exposed the runtime log viewer from inside the app.',
-    ],
-  },
-  {
-    version: '0.1.0',
-    date: '2026-04-08',
-    title: 'Suite foundation',
-    summary: 'VectorXR moved onto the shared suite config and runtime model.',
-    items: [
-      'Centralized suite-level config and logging.',
-      'Kept stereo boost and convergence under one shared runtime layer.',
-      'Prepared Pivot runtime settings for future expansion.',
-    ],
-  },
-]
+function parseItem(value: unknown, path: string): PatchNoteItem {
+  if (typeof value === 'string') {
+    return requireString(value, path)
+  }
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error(`Invalid patch notes: ${path} must be a string or nested list item.`)
+  }
+
+  const candidate = value as Record<string, unknown>
+  const item: Exclude<PatchNoteItem, string> = {
+    html: requireString(candidate.html, `${path}.html`),
+  }
+  if ('items' in candidate) {
+    if (!Array.isArray(candidate.items) || candidate.items.length === 0) {
+      throw new Error(`Invalid patch notes: ${path}.items must be a non-empty array when present.`)
+    }
+    item.items = candidate.items.map((child, index) => parseItem(child, `${path}.items[${index}]`))
+  }
+  return item
+}
+
+function parsePatchNotes(value: unknown): PatchNoteEntry[] {
+  if (!Array.isArray(value) || value.length === 0) {
+    throw new Error('Invalid patch notes: the JSON root must be a non-empty array.')
+  }
+
+  const versions = new Set<string>()
+  return value.map((entry, index) => {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+      throw new Error(`Invalid patch notes: entries[${index}] must be an object.`)
+    }
+    const candidate = entry as Record<string, unknown>
+    const version = requireString(candidate.version, `entries[${index}].version`)
+    const date = requireString(candidate.date, `entries[${index}].date`)
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+      throw new Error(`Invalid patch notes: entries[${index}].date must use YYYY-MM-DD.`)
+    }
+    if (versions.has(version)) {
+      throw new Error(`Invalid patch notes: duplicate version ${version}.`)
+    }
+    versions.add(version)
+    if (!Array.isArray(candidate.items) || candidate.items.length === 0) {
+      throw new Error(`Invalid patch notes: entries[${index}].items must be a non-empty array.`)
+    }
+
+    return {
+      version,
+      date,
+      title: requireString(candidate.title, `entries[${index}].title`),
+      summary: requireString(candidate.summary, `entries[${index}].summary`),
+      items: candidate.items.map((item, itemIndex) =>
+        parseItem(item, `entries[${index}].items[${itemIndex}]`),
+      ),
+    }
+  })
+}
+
+// Patch-note data is bundled with the app, but keep v-html constrained anyway:
+// only exact, attribute-free inline formatting tags survive escaping. Lists are
+// represented structurally in JSON and rendered by Vue rather than accepted as HTML.
+export function formatPatchNoteInlineHtml(value: string): string {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;')
+    .replace(/&lt;(\/?)(strong|em|code)&gt;/gi, (_: string, close: string, tag: string) =>
+      `<${close}${tag.toLowerCase()}>`,
+    )
+    .replace(/&lt;br\s*\/?&gt;/gi, '<br>')
+}
+
+export const patchNotes = parsePatchNotes(patchNotesData)

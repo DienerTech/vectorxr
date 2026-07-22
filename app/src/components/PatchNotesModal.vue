@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import type { PatchNoteEntry } from '../lib/patchNotes'
+import PatchNoteList from './PatchNoteList.vue'
+import { formatPatchNoteInlineHtml, type PatchNoteEntry } from '../lib/patchNotes'
 
 defineProps<{
   open: boolean
@@ -34,11 +35,9 @@ defineEmits<{
           </div>
 
           <h3 class="mt-3 text-xl font-semibold tracking-tight">{{ entry.title }}</h3>
-          <p class="mt-2 text-sm leading-6 text-muted">{{ entry.summary }}</p>
+          <p class="mt-2 text-sm leading-6 text-muted" v-html="formatPatchNoteInlineHtml(entry.summary)"></p>
 
-          <ul class="mt-4 space-y-2 text-sm leading-6 text-muted">
-            <li v-for="item in entry.items" :key="item">{{ item }}</li>
-          </ul>
+          <PatchNoteList class="mt-4" :items="entry.items" />
         </article>
       </div>
     </div>

@@ -1,12 +1,14 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, nextTick, reactive, ref } from 'vue'
 
-import EffectField from '../EffectField.vue'
-import ModuleBindingPage from '../ModuleBindingPage.vue'
-import ModuleBindingPanel from '../ModuleBindingPanel.vue'
+import ConvergenceField from '../ConvergenceField.vue'
+import DepthAnchorField from '../DepthAnchorField.vue'
+import DepthBindingsPage from '../DepthBindingsPage.vue'
+import DepthNetEffect from '../DepthNetEffect.vue'
 import ProfileShell from '../ProfileShell.vue'
-import { convergenceBadge, fromConvergenceDisplay, fromStereoBoostDisplay, stereoBoostBadge, toConvergenceDisplay, toStereoBoostDisplay } from '../../lib/display'
-import type { RegisteredApplication, VectorXRConfig } from '../../lib/model'
+import StereoDepthField from '../StereoDepthField.vue'
+import { toConvergenceDisplay, toStereoBoostDisplay } from '../../lib/display'
+import { savedBindingConflictWarnings, type DepthXRSettings, type RegisteredApplication, type VectorXRConfig } from '../../lib/model'
 
 const props = defineProps<{
   config: VectorXRConfig
@@ -20,7 +22,53 @@ defineEmits<{
 }>()
 
 const depthInfoOpen = ref(false)
-const bindingSubPageOpen = ref(false)
+const bindingsPageOpen = ref(false)
+const stereoDepthDisplayLimits = reactive(new WeakMap<DepthXRSettings, number>())
+const convergenceDisplayLimits = reactive(new WeakMap<DepthXRSettings, number>())
+let savedScrollTop = 0
+
+function stereoDepthDisplayLimit(settings: DepthXRSettings): number {
+  return stereoDepthDisplayLimits.get(settings)
+    ?? (Math.abs(toStereoBoostDisplay(settings.stereoBoost)) > 25 ? 100 : 25)
+}
+
+function setStereoDepthDisplayLimit(settings: DepthXRSettings, limit: number) {
+  stereoDepthDisplayLimits.set(settings, limit > 25 ? 100 : 25)
+}
+
+function convergenceDisplayLimit(settings: DepthXRSettings): number {
+  return convergenceDisplayLimits.get(settings)
+    ?? (Math.abs(toConvergenceDisplay(settings.convergence)) > 5 ? 25 : 5)
+}
+
+function setConvergenceDisplayLimit(settings: DepthXRSettings, limit: number) {
+  convergenceDisplayLimits.set(settings, limit > 5 ? 25 : 5)
+}
+
+function pageScroller(): Element | null {
+  return document.querySelector('main section.overflow-y-auto')
+}
+
+function openBindings() {
+  savedScrollTop = pageScroller()?.scrollTop ?? 0
+  bindingsPageOpen.value = true
+  void nextTick(() => pageScroller()?.scrollTo({ top: 0 }))
+}
+
+function closeBindings() {
+  bindingsPageOpen.value = false
+  void nextTick(() => pageScroller()?.scrollTo({ top: savedScrollTop }))
+}
+
+const depthBindingCount = computed(() => [
+  props.config.modules.depthxr.bindings.toggleEnabled,
+  props.config.modules.depthxr.bindings.toggleAnchor,
+].filter((binding) => binding.type !== 'none').length)
+
+const depthBindingWarnings = computed(() => savedBindingConflictWarnings(props.config, [
+  props.config.modules.depthxr.bindings.toggleEnabled,
+  props.config.modules.depthxr.bindings.toggleAnchor,
+]))
 
 const profileWarnings = computed(() => {
   const warnings = new Map<number, string[]>()
@@ -50,15 +98,7 @@ const profileWarnings = computed(() => {
 </script>
 
 <template>
-  <ModuleBindingPage
-    v-if="bindingSubPageOpen"
-    module-label="Depth"
-    :binding="config.modules.depthxr.bindings.toggleEnabled"
-    label="Depth Toggle Binding"
-    description="Toggle Depth on or off at runtime for quick A/B testing."
-    @update:binding="config.modules.depthxr.bindings.toggleEnabled = $event"
-    @close="bindingSubPageOpen = false"
-  />
+  <DepthBindingsPage v-if="bindingsPageOpen" :config="config" @close="closeBindings" />
   <div v-else class="space-y-4">
     <article class="rounded-[1.25rem] border p-5 shadow-panel backdrop-blur surface-panel">
       <!-- Module header -->
@@ -66,7 +106,7 @@ const profileWarnings = computed(() => {
         <div>
           <h2 class="text-2xl font-semibold tracking-tight">Depth</h2>
           <p class="mt-2 max-w-3xl text-sm leading-6 text-muted">
-            Tune stereo boost and convergence defaults, then add per-application profiles when a title needs different depth behavior. Start with small value changes and use the runtime toggle binding for quick comparisons in headset.
+            Shape binocular scale and depth placement as one system, then use per-application profiles where a title needs its own tuning. Start at neutral, change one control at a time, and use the runtime binding for immediate A/B comparisons.
           </p>
         </div>
         <button
@@ -80,24 +120,63 @@ const profileWarnings = computed(() => {
           Depth Troubleshooting
         </button>
       </div>
+
+      <div class="mb-5 grid gap-3 lg:grid-cols-3" role="note" aria-label="Depth tuning guide">
+        <div class="rounded-[1rem] border p-4 surface-panel-strong">
+          <p class="eyebrow text-[10px] font-semibold uppercase tracking-[0.18em]">Step 1: Set scale</p>
+          <p class="mt-2 text-sm font-semibold">Stereo Depth</p>
+          <p class="mt-1 text-[13px] leading-5 text-muted">
+            Left makes the world feel larger and flatter. Right strengthens stereo parallax and can make the world feel smaller. Nearby geometry changes most.
+          </p>
+        </div>
+        <div class="rounded-[1rem] border p-4 surface-panel-strong">
+          <p class="eyebrow text-[10px] font-semibold uppercase tracking-[0.18em]">Step 2: Place depth</p>
+          <p class="mt-2 text-sm font-semibold">Convergence Plane</p>
+          <p class="mt-1 text-[13px] leading-5 text-muted">
+            Leave this at zero while setting scale. Then use tiny steps: left moves the plane farther, right moves it nearer. Either extreme can make fusion uncomfortable.
+          </p>
+        </div>
+        <div class="rounded-[1rem] border p-4 surface-panel-strong">
+          <p class="eyebrow text-[10px] font-semibold uppercase tracking-[0.18em]">Step 3: Compare</p>
+          <p class="mt-2 text-sm font-semibold">Tune as a pair</p>
+          <p class="mt-1 text-[13px] leading-5 text-muted">
+            Find scale first, then use Convergence only to settle the scene. During A/B tests, pause between rapid changes and stop at the first sign of eye strain, double vision, or a hard-to-fuse horizon.
+          </p>
+        </div>
+      </div>
       <div
         class="mb-5 rounded-[0.9rem] border px-4 py-3 text-sm leading-6 chip-warning"
         style="border-color: var(--app-border)"
         role="note"
       >
-        <p class="font-medium">In-game IPD settings can override Stereo Boost</p>
+        <p class="font-medium">In-game IPD settings can override Stereo Depth</p>
         <p class="mt-1">Disable any Force IPD, virtual IPD, stereo-separation, or world-scale override before testing Depth.</p>
         <p class="mt-1">Example: in DCS, uncheck <strong>Force IPD Distance</strong> under Options &gt; VR.</p>
       </div>
 
       <!-- Module-level binding — applies regardless of which profile is active -->
-      <ModuleBindingPanel
-        class="mb-5"
-        heading="Depth Toggle Binding"
-        :binding="config.modules.depthxr.bindings.toggleEnabled"
-        hint="Toggle Depth on or off at runtime for quick A/B testing."
-        @edit="bindingSubPageOpen = true"
-      />
+      <button
+        class="group mb-5 w-full rounded-[1rem] border p-4 text-left transition surface-panel-soft hover:-translate-y-0.5 hover:shadow-panel"
+        type="button"
+        @click="openBindings"
+      >
+        <div class="flex flex-wrap items-center justify-between gap-4">
+          <div>
+            <p class="eyebrow text-[10px] font-semibold uppercase tracking-[0.18em]">Tune &amp; Compare</p>
+            <h3 class="mt-1 text-base font-semibold tracking-tight">In-game Bindings</h3>
+            <p class="mt-1 text-sm text-muted">Configure the complete Depth and Depth Lock A/B toggles in one place.</p>
+          </div>
+          <div class="flex flex-wrap items-center gap-2">
+            <span class="rounded-full border px-3 py-1 text-xs font-medium" style="border-color: var(--app-border)">
+              {{ depthBindingCount }} of 2 assigned
+            </span>
+            <span v-if="depthBindingWarnings.length" class="rounded-full px-3 py-1 text-xs font-medium chip-warning">
+              {{ depthBindingWarnings.length }} duplicate {{ depthBindingWarnings.length === 1 ? 'input' : 'inputs' }}
+            </span>
+            <span aria-hidden="true" class="transition group-hover:translate-x-1">&rarr;</span>
+          </div>
+        </div>
+      </button>
 
       <!-- Default Profile -->
       <details class="section-disclosure border-t pt-4" style="border-color: var(--app-border)" open>
@@ -115,34 +194,28 @@ const profileWarnings = computed(() => {
         <div v-if="!config.modules.depthxr.enabled" class="mt-3 rounded-[0.9rem] border px-4 py-3 text-sm leading-6 surface-panel-strong">
           The default profile is off and has no effect — applications without an enabled custom profile get no Depth adjustment. Enabled custom profiles below still apply to their assigned applications.
         </div>
-        <div v-else class="mt-3 grid gap-3 lg:grid-cols-2">
-          <EffectField
-            v-model:value="config.modules.depthxr.defaults.stereoBoost"
-            title="Stereo Boost"
-            subtitle="Widens or narrows the gap between your two eye viewpoints (0% = your real IPD). Positive adds depth and 3D 'pop' and can make the world feel miniaturized; negative flattens depth and makes it feel larger. Start around +10–25%; high values exaggerate parallax and can strain your eyes."
-            :min="0"
-            :max="2"
-            :step="0.01"
-            :display-min="-100"
-            :display-max="100"
-            :display-step="1"
-            :display-value="toStereoBoostDisplay"
-            :parse-display-value="fromStereoBoostDisplay"
-            :display-badge="stereoBoostBadge"
-          />
-          <EffectField
-            v-model:value="config.modules.depthxr.defaults.convergence"
-            title="Convergence"
-            subtitle="Shifts where your eyes' sightlines cross — the distance that sits at screen depth with no parallax. Positive pulls that plane toward you (near objects pop forward); negative pushes it away (scene settles back, can ease strain). 0 = app default. Use small amounts (±2–10); large values force your eyes to cross and break fusion."
-            :min="-0.25"
-            :max="0.25"
-            :step="0.01"
-            :display-min="-25"
-            :display-max="25"
-            :display-step="0.1"
-            :display-value="toConvergenceDisplay"
-            :parse-display-value="fromConvergenceDisplay"
-            :display-badge="convergenceBadge"
+        <div v-else class="mt-3 space-y-3">
+          <div class="grid gap-3 lg:grid-cols-2">
+            <StereoDepthField
+              v-model:value="config.modules.depthxr.defaults.stereoBoost"
+              :display-limit="stereoDepthDisplayLimit(config.modules.depthxr.defaults)"
+              @update:display-limit="setStereoDepthDisplayLimit(config.modules.depthxr.defaults, $event)"
+            />
+            <ConvergenceField
+              v-model:value="config.modules.depthxr.defaults.convergence"
+              :display-limit="convergenceDisplayLimit(config.modules.depthxr.defaults)"
+              @update:display-limit="setConvergenceDisplayLimit(config.modules.depthxr.defaults, $event)"
+            />
+          </div>
+          <DepthAnchorField v-model:value="config.modules.depthxr.defaults.depthAnchor" />
+          <DepthNetEffect
+            :stereo-boost="config.modules.depthxr.defaults.stereoBoost"
+            :stereo-depth-limit="stereoDepthDisplayLimit(config.modules.depthxr.defaults)"
+            :convergence="config.modules.depthxr.defaults.convergence"
+            :convergence-limit="convergenceDisplayLimit(config.modules.depthxr.defaults)"
+            :depth-lock="config.modules.depthxr.defaults.depthAnchor"
+            @update:stereo-boost="config.modules.depthxr.defaults.stereoBoost = $event"
+            @update:convergence="config.modules.depthxr.defaults.convergence = $event"
           />
         </div>
       </details>
@@ -170,36 +243,31 @@ const profileWarnings = computed(() => {
         @remove="$emit('removeProfile', index)"
         @sync-name="$emit('syncProfileName', index)"
       >
-        <div class="grid gap-3 lg:grid-cols-2">
-          <EffectField
-            v-model:value="profile.settings.stereoBoost"
+        <div class="space-y-3">
+          <div class="grid gap-3 lg:grid-cols-2">
+            <StereoDepthField
+              v-model:value="profile.settings.stereoBoost"
+              :display-limit="stereoDepthDisplayLimit(profile.settings)"
+              :muted="!profile.enabled"
+              @update:display-limit="setStereoDepthDisplayLimit(profile.settings, $event)"
+            />
+            <ConvergenceField
+              v-model:value="profile.settings.convergence"
+              :display-limit="convergenceDisplayLimit(profile.settings)"
+              :muted="!profile.enabled"
+              @update:display-limit="setConvergenceDisplayLimit(profile.settings, $event)"
+            />
+          </div>
+          <DepthAnchorField v-model:value="profile.settings.depthAnchor" :muted="!profile.enabled" />
+          <DepthNetEffect
+            :stereo-boost="profile.settings.stereoBoost"
+            :stereo-depth-limit="stereoDepthDisplayLimit(profile.settings)"
+            :convergence="profile.settings.convergence"
+            :convergence-limit="convergenceDisplayLimit(profile.settings)"
+            :depth-lock="profile.settings.depthAnchor"
             :muted="!profile.enabled"
-            title="Stereo Boost"
-            subtitle="Widens or narrows the gap between your two eye viewpoints (0% = your real IPD). Positive adds depth and 3D 'pop' and can make the world feel miniaturized; negative flattens depth and makes it feel larger. Start around +10–25%; high values exaggerate parallax and can strain your eyes."
-            :min="0"
-            :max="2"
-            :step="0.01"
-            :display-min="-100"
-            :display-max="100"
-            :display-step="1"
-            :display-value="toStereoBoostDisplay"
-            :parse-display-value="fromStereoBoostDisplay"
-            :display-badge="stereoBoostBadge"
-          />
-          <EffectField
-            v-model:value="profile.settings.convergence"
-            :muted="!profile.enabled"
-            title="Convergence"
-            subtitle="Shifts where your eyes' sightlines cross — the distance that sits at screen depth with no parallax. Positive pulls that plane toward you (near objects pop forward); negative pushes it away (scene settles back, can ease strain). 0 = app default. Use small amounts (±2–10); large values force your eyes to cross and break fusion."
-            :min="-0.25"
-            :max="0.25"
-            :step="0.01"
-            :display-min="-25"
-            :display-max="25"
-            :display-step="0.1"
-            :display-value="toConvergenceDisplay"
-            :parse-display-value="fromConvergenceDisplay"
-            :display-badge="convergenceBadge"
+            @update:stereo-boost="profile.settings.stereoBoost = $event"
+            @update:convergence="profile.settings.convergence = $event"
           />
         </div>
       </ProfileShell>
@@ -217,7 +285,7 @@ const profileWarnings = computed(() => {
         <div class="flex flex-wrap items-start justify-between gap-4">
           <div>
             <p class="eyebrow text-xs uppercase tracking-[0.24em]">Depth Troubleshooting</p>
-            <h2 class="mt-2 text-xl font-semibold tracking-tight">When Stereo Boost Appears Inactive</h2>
+            <h2 class="mt-2 text-xl font-semibold tracking-tight">When Depth Behaves Unexpectedly</h2>
           </div>
           <button class="button-secondary rounded-[0.75rem] px-4 py-2 text-sm font-medium" type="button" @click="depthInfoOpen = false">
             Close
@@ -226,15 +294,23 @@ const profileWarnings = computed(() => {
 
         <div class="mt-5 space-y-4 text-sm leading-6">
           <div class="rounded-[1rem] border px-4 py-4 chip-warning" style="border-color: var(--app-border)">
-            Games with a Force IPD, virtual IPD, stereo-separation, or world-scale setting may replace the eye separation reported by OpenXR. That override takes precedence over VectorXR Stereo Boost.
+            Games with a Force IPD, virtual IPD, stereo-separation, or world-scale setting may replace the eye separation reported by OpenXR. That override takes precedence over VectorXR Stereo Depth.
           </div>
 
           <div class="rounded-[1rem] border px-4 py-4 surface-panel">
-            <strong>DCS:</strong> uncheck <strong>Force IPD Distance</strong> under Options &gt; VR, then fully restart DCS. A forced value fixes DCS's own virtual camera separation and can make Stereo Boost appear to do nothing.
+            <strong>DCS:</strong> uncheck <strong>Force IPD Distance</strong> under Options &gt; VR, then fully restart DCS. A forced value fixes DCS's own virtual camera separation and can make Stereo Depth appear to do nothing.
           </div>
 
           <div class="rounded-[1rem] border px-4 py-4 surface-panel">
-            Convergence may still respond while Stereo Boost is overridden because it adjusts the projection center rather than the distance between the game's two eye cameras. If Stereo Boost still has no effect after disabling game-level overrides, enable debug logging and export the session logs.
+            <strong>Expected result:</strong> Stereo Depth changes binocular scale most noticeably on nearby geometry, so a cockpit can look larger or smaller while the distant terrain and horizon appear nearly unchanged. That distance-dependent response is normal.
+          </div>
+
+          <div class="rounded-[1rem] border px-4 py-4 surface-panel">
+            <strong>Convergence is subtler:</strong> it shifts the zero-parallax plane rather than scaling the scene. Compare a nearby cockpit edge against distant scenery while moving it in small steps. If Stereo Depth still has no effect after disabling game-level overrides, enable debug logging and export the session logs.
+          </div>
+
+          <div class="rounded-[1rem] border px-4 py-4 surface-panel">
+            <strong>Depth Lock preserves the tuned image at submission:</strong> the game renders with altered stereo geometry, then the runtime receives headset-native eye poses and FOV so it cannot normalize the pairing away. Compare it on and off at identical values, and reduce intensity or disable it if comfort becomes worse.
           </div>
         </div>
       </div>

@@ -33,7 +33,7 @@ foreach ($target in Get-VersionTargets) {
     }
 }
 $versions += [pscustomobject]@{
-    Name    = "app/src/lib/patchNotes.ts"
+    Name    = "app/src/lib/patchNotes.json"
     Version = (Read-LatestPatchVersion)
 }
 

@@ -1,9 +1,10 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted } from 'vue'
 
+import BindingConflictWarnings from './BindingConflictWarnings.vue'
 import BindingEditor from './BindingEditor.vue'
 import PivotActivationEditor from './PivotActivationEditor.vue'
-import { pivotBindingConflictWarnings, type ActivationMode, type InputBinding } from '../lib/model'
+import { pivotBindingConflictWarnings, savedBindingConflictWarnings, type ActivationMode, type InputBinding, type VectorXRConfig } from '../lib/model'
 
 // The default module config and each pivot profile share this binding shape;
 // fields are mutated directly on the passed-in reactive object.
@@ -16,6 +17,7 @@ interface PivotBindingsSubject {
 
 const props = defineProps<{
   subject: PivotBindingsSubject
+  config: VectorXRConfig
   // Names the profile in the breadcrumb/title, e.g. "Default Profile" or "DCS".
   contextLabel: string
 }>()
@@ -25,6 +27,13 @@ const bindingWarnings = computed(() => pivotBindingConflictWarnings(
   props.subject.setOriginBinding,
   props.subject.releaseOriginBinding,
 ))
+const globalBindingWarnings = computed(() => savedBindingConflictWarnings(props.config, [
+  props.subject.activationBinding,
+  props.subject.setOriginBinding,
+  props.subject.releaseOriginBinding,
+], {
+  suppressFocusOnlyConflicts: true,
+}))
 
 const emit = defineEmits<{
   close: []
@@ -76,7 +85,7 @@ onUnmounted(() => {
         <PivotActivationEditor
           v-model:activation-mode="subject.activationMode"
           v-model:activation-binding="subject.activationBinding"
-          description="Choose a keyboard shortcut or capture a joystick button that engages Pivot."
+          description="Choose a keyboard shortcut, joystick button, or HAT direction that engages Pivot."
         />
 
         <div
@@ -88,6 +97,7 @@ onUnmounted(() => {
           <p class="font-medium">{{ warning.title }}</p>
           <p class="mt-1">{{ warning.message }}</p>
         </div>
+        <BindingConflictWarnings :warnings="globalBindingWarnings" />
         <BindingEditor
           v-model="subject.setOriginBinding"
           label="Set Origin (optional)"

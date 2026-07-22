@@ -3,7 +3,7 @@ import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue'
 
 import ModuleBindingPage from './ModuleBindingPage.vue'
 import ModuleBindingPanel from './ModuleBindingPanel.vue'
-import type { TurboMetricsBucket, TurboMetricsSession, VectorXRConfig } from '../lib/model'
+import { savedBindingConflictWarnings, type TurboMetricsBucket, type TurboMetricsSession, type VectorXRConfig } from '../lib/model'
 
 const props = defineProps<{
   config: VectorXRConfig
@@ -17,6 +17,10 @@ const emit = defineEmits<{
 
 const metricsBindingOpen = ref(false)
 const selectedSessionId = ref('')
+const metricsBindingWarnings = computed(() => savedBindingConflictWarnings(props.config, [
+  props.config.modules.turbo.metricsBinding,
+]))
+
 let savedScrollTop = 0
 
 function pageScroller(): Element | null {
@@ -161,6 +165,7 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
     none-text="No binding assigned. In capture-binding mode, no metrics are recorded until a binding is set."
     default-activate-sound="metrics-on.wav"
     default-deactivate-sound="metrics-off.wav"
+    :warnings="metricsBindingWarnings"
     @update:binding="config.modules.turbo.metricsBinding = $event"
     @close="closeMetricsBinding"
   />

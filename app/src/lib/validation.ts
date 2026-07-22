@@ -21,6 +21,10 @@ function validateCoreConfig(core: CoreConfig): string[] {
 function validateDepthXRSettings(prefix: string, settings: DepthXRSettings): string[] {
   const errors: string[] = []
 
+  if (typeof settings.depthAnchor !== 'boolean') {
+    errors.push(`${prefix}depthAnchor must be a boolean`)
+  }
+
   const bounded = [
     ['stereoBoost', settings.stereoBoost, 0.0, 2.0],
     ['convergence', settings.convergence, -0.25, 0.25],
@@ -372,6 +376,7 @@ export function validateConfig(config: VectorXRConfig): string[] {
   errors.push(...validateApplications(config.applications))
   errors.push(...validateDepthXRSettings('modules.depthxr.defaults.', config.modules.depthxr.defaults))
   errors.push(...validateInputBinding('modules.depthxr.bindings.toggleEnabled', config.modules.depthxr.bindings.toggleEnabled))
+  errors.push(...validateInputBinding('modules.depthxr.bindings.toggleAnchor', config.modules.depthxr.bindings.toggleAnchor))
   errors.push(...validatePivotXRSettings('modules.pivotxr.defaults.', config.modules.pivotxr.defaults))
   errors.push(...validateInputBinding('modules.pivotxr.activationBinding', config.modules.pivotxr.activationBinding))
   errors.push(...validateInputBinding('modules.pivotxr.setOriginBinding', config.modules.pivotxr.setOriginBinding))

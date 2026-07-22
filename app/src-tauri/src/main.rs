@@ -241,6 +241,8 @@ struct DepthXRSettings {
     stereo_boost: f64,
     #[serde(default = "default_convergence")]
     convergence: f64,
+    #[serde(default = "default_false")]
+    depth_anchor: bool,
 }
 
 impl Default for DepthXRSettings {
@@ -248,6 +250,10 @@ impl Default for DepthXRSettings {
         Self {
             stereo_boost: default_stereo_boost(),
             convergence: default_convergence(),
+            // Fresh profiles/configs opt into Depth Lock. The field-level
+            // serde default remains false so pre-0.14 configs retain their
+            // previous submission behavior when the property is absent.
+            depth_anchor: true,
         }
     }
 }
@@ -285,12 +291,15 @@ struct DepthXRModuleConfig {
 struct DepthXRBindings {
     #[serde(default = "default_depth_toggle_binding")]
     toggle_enabled: InputBinding,
+    #[serde(default = "default_depth_toggle_binding")]
+    toggle_anchor: InputBinding,
 }
 
 impl Default for DepthXRBindings {
     fn default() -> Self {
         Self {
             toggle_enabled: default_depth_toggle_binding(),
+            toggle_anchor: default_depth_toggle_binding(),
         }
     }
 }
@@ -1386,10 +1395,20 @@ fn list_input_devices() -> Result<Vec<input_devices::InputDeviceInfo>, String> {
 }
 
 #[tauri::command]
-fn capture_device_binding(
+async fn capture_device_binding(
     timeout_ms: Option<u64>,
 ) -> Result<Option<input_devices::CapturedDeviceBinding>, String> {
-    input_devices::capture_device_binding(timeout_ms)
+    let capture_id = input_devices::begin_device_binding_capture();
+    tauri::async_runtime::spawn_blocking(move || {
+        input_devices::capture_device_binding(timeout_ms, capture_id)
+    })
+    .await
+    .map_err(|error| format!("Device binding capture task failed: {error}"))?
+}
+
+#[tauri::command]
+fn cancel_device_binding_capture() {
+    input_devices::cancel_device_binding_capture();
 }
 
 #[tauri::command]
@@ -1639,6 +1658,14 @@ fn move_openxr_layer(
     openxr_layers::move_openxr_layer(slice, manifest_path, direction)
 }
 
+#[tauri::command]
+fn delete_openxr_layer(
+    slice: String,
+    manifest_path: String,
+) -> Result<openxr_layers::OpenXrLayerSnapshot, String> {
+    openxr_layers::delete_openxr_layer(slice, manifest_path)
+}
+
 // Loads a WAV into memory and scales 16-bit PCM samples by `gain`. Returns None
 // for formats we don't scale (the caller then plays the file at full volume) or
 // if the file isn't a parseable RIFF/WAVE container.
@@ -1713,6 +1740,8 @@ fn play_test_sound(
                 Some("turbo-off.wav") => "sounds/turbo-off.wav",
                 Some("metrics-on.wav") => "sounds/metrics-on.wav",
                 Some("metrics-off.wav") => "sounds/metrics-off.wav",
+                Some("depth-lock-on.wav") => "sounds/depth-lock-on.wav",
+                Some("depth-lock-off.wav") => "sounds/depth-lock-off.wav",
                 _ => {
                     if activate {
                         "sounds/activate.wav"
@@ -1774,6 +1803,56 @@ fn play_test_sound(
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::{default_config, DepthXRBindings, DepthXRSettings};
+
+    #[test]
+    fn new_configs_enable_depth_anchor_by_default() {
+        assert!(default_config().modules.depthxr.defaults.depth_anchor);
+    }
+
+    #[test]
+    fn depth_anchor_survives_the_config_save_round_trip() {
+        let settings: DepthXRSettings = serde_json::from_value(serde_json::json!({
+            "stereoBoost": 1.2,
+            "convergence": 0.07,
+            "depthAnchor": true
+        }))
+        .expect("Depth settings should deserialize");
+
+        let serialized = serde_json::to_value(settings).expect("Depth settings should serialize");
+        assert_eq!(serialized["depthAnchor"], true);
+    }
+
+    #[test]
+    fn depth_anchor_defaults_off_for_older_configs() {
+        let settings: DepthXRSettings = serde_json::from_value(serde_json::json!({
+            "stereoBoost": 1.2,
+            "convergence": 0.0
+        }))
+        .expect("Legacy Depth settings should deserialize");
+
+        assert!(!settings.depth_anchor);
+    }
+
+    #[test]
+    fn depth_anchor_toggle_binding_survives_the_config_save_round_trip() {
+        let bindings: DepthXRBindings = serde_json::from_value(serde_json::json!({
+            "toggleEnabled": { "type": "none" },
+            "toggleAnchor": {
+                "type": "keyboard",
+                "chord": ["F9"]
+            }
+        }))
+        .expect("Depth bindings should deserialize");
+
+        let serialized = serde_json::to_value(bindings).expect("Depth bindings should serialize");
+        assert_eq!(serialized["toggleAnchor"]["type"], "keyboard");
+        assert_eq!(serialized["toggleAnchor"]["chord"][0], "F9");
+    }
+}
+
 fn main() {
     if let Some(result) = openxr_layers::run_elevated_helper_from_args() {
         if let Err(error) = result {
@@ -1799,10 +1878,12 @@ fn main() {
             clear_turbo_metrics,
             list_input_devices,
             capture_device_binding,
+            cancel_device_binding_capture,
             load_openxr_layers,
             ensure_openxr_layer_elevation,
             set_openxr_layer_enabled,
             move_openxr_layer,
+            delete_openxr_layer,
             play_test_sound
         ])
         .run(tauri::generate_context!())

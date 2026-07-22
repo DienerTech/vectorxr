@@ -75,6 +75,7 @@ export interface InputDeviceInfo {
   deviceName: string
   productName: string
   buttonCount: number
+  hatCount: number
 }
 
 export interface CapturedDeviceBinding {
@@ -83,7 +84,7 @@ export interface CapturedDeviceBinding {
   deviceName: string
   inputPath: string
   inputLabel: string
-  buttonIndex: number
+  inputIndex: number
 }
 
 export type OpenXrLayerRegistrySliceId = 'hklm64' | 'hkcu64' | 'hklm32' | 'hkcu32'
@@ -236,6 +237,14 @@ export async function captureDeviceBinding(timeoutMs = 15_000): Promise<Captured
   }
 
   return invoke<CapturedDeviceBinding | null>('capture_device_binding', { timeoutMs })
+}
+
+export async function cancelDeviceBindingCapture(): Promise<void> {
+  if (!tauriAvailable()) {
+    return
+  }
+
+  await invoke('cancel_device_binding_capture')
 }
 
 export async function pickSoundFile(): Promise<string | null> {
@@ -406,4 +415,11 @@ export async function moveOpenXrLayer(
   direction: OpenXrLayerMoveDirection,
 ): Promise<OpenXrLayerSnapshot> {
   return invoke<OpenXrLayerSnapshot>('move_openxr_layer', { slice, manifestPath, direction })
+}
+
+export async function deleteOpenXrLayer(
+  slice: OpenXrLayerRegistrySliceId,
+  manifestPath: string,
+): Promise<OpenXrLayerSnapshot> {
+  return invoke<OpenXrLayerSnapshot>('delete_openxr_layer', { slice, manifestPath })
 }

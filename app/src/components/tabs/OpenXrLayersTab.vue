@@ -2,6 +2,7 @@
 import { computed, nextTick, ref, watch } from 'vue'
 
 import {
+  deleteOpenXrLayer,
   ensureOpenXrLayerElevation,
   moveOpenXrLayer,
   openFileDirectory,
@@ -30,6 +31,7 @@ const emit = defineEmits<{
 
 const activeSliceId = ref<OpenXrLayerRegistrySliceId>('hklm64')
 const selectedLayer = ref<OpenXrLayerEntry | null>(null)
+const pendingDeletion = ref<{ slice: OpenXrLayerRegistrySliceId; layer: OpenXrLayerEntry } | null>(null)
 const busyKey = ref<string | null>(null)
 const unlockingMachineWrites = ref(false)
 
@@ -105,7 +107,6 @@ async function toggleLayer(slice: OpenXrLayerRegistrySliceId, layer: OpenXrLayer
     const visibleSnapshot = applyLayerEnabled(nextSnapshot, slice, layer.manifestPath, !layer.enabled)
     emit('snapshotUpdated', visibleSnapshot)
     updateSelectedLayer(visibleSnapshot, slice, layer.manifestPath)
-    queueRefresh()
   } catch (error) {
     emit('status', error instanceof Error ? error.message : 'Failed to update OpenXR layer')
     queueRefresh()
@@ -135,9 +136,53 @@ async function moveLayer(slice: OpenXrLayerRegistrySliceId, layer: OpenXrLayerEn
       : nextSnapshot
     emit('snapshotUpdated', visibleSnapshot)
     updateSelectedLayer(visibleSnapshot, slice, layer.manifestPath)
-    queueRefresh()
   } catch (error) {
     emit('status', error instanceof Error ? error.message : 'Failed to reorder OpenXR layer')
+    queueRefresh()
+  } finally {
+    busyKey.value = null
+  }
+}
+
+function requestLayerDeletion(slice: OpenXrLayerRegistrySliceId, layer: OpenXrLayerEntry) {
+  if (activeSliceReadOnly.value) {
+    emit('status', 'Unlock admin writes before removing machine-wide OpenXR layer registrations.')
+    return
+  }
+
+  pendingDeletion.value = { slice, layer }
+}
+
+function cancelLayerDeletion() {
+  if (busyKey.value === null) {
+    pendingDeletion.value = null
+  }
+}
+
+async function confirmLayerDeletion() {
+  const pending = pendingDeletion.value
+  if (!pending) {
+    return
+  }
+
+  const { slice, layer } = pending
+  const key = actionKey(layer, 'delete')
+  busyKey.value = key
+  const optimisticSnapshot = props.snapshot ? applyLayerDelete(props.snapshot, slice, layer.manifestPath) : null
+  if (optimisticSnapshot) {
+    emit('snapshotUpdated', optimisticSnapshot)
+    selectedLayer.value = null
+  }
+
+  try {
+    const nextSnapshot = await deleteOpenXrLayer(slice, layer.manifestPath)
+    emit('snapshotUpdated', nextSnapshot)
+    selectedLayer.value = null
+    pendingDeletion.value = null
+    emit('status', `Removed "${layer.layerName}" from ${activeSlice.value?.label ?? 'the OpenXR registry'}.`)
+    emit('refresh')
+  } catch (error) {
+    emit('status', error instanceof Error ? error.message : 'Failed to remove OpenXR layer registration')
     queueRefresh()
   } finally {
     busyKey.value = null
@@ -210,6 +255,23 @@ function applyLayerMove(
         layers: layers.map((layer, layerIndex) => ({ ...layer, order: layerIndex + 1 })),
       }
     }),
+  }
+}
+
+function applyLayerDelete(
+  snapshot: OpenXrLayerSnapshot,
+  sliceId: OpenXrLayerRegistrySliceId,
+  manifestPath: string,
+): OpenXrLayerSnapshot {
+  return {
+    slices: snapshot.slices.map((slice) => ({
+      ...slice,
+      layers: slice.id === sliceId
+        ? slice.layers
+            .filter((layer) => layer.manifestPath !== manifestPath)
+            .map((layer, layerIndex) => ({ ...layer, order: layerIndex + 1 }))
+        : slice.layers,
+    })),
   }
 }
 
@@ -552,6 +614,15 @@ function signatureGuidance(layer: OpenXrLayerEntry): string {
                     <button class="button-secondary rounded-[0.65rem] px-3 py-1.5 text-xs font-medium" type="button" @click.stop="selectedLayer = layer">
                       Details
                     </button>
+                    <button
+                      class="button-danger rounded-[0.65rem] px-3 py-1.5 text-xs font-medium disabled:cursor-not-allowed disabled:opacity-50"
+                      type="button"
+                      :disabled="busyKey !== null || activeSliceReadOnly"
+                      :title="elevatedWriteTooltip('Remove this registration from the selected registry hive. Files will remain on disk.', activeSlice)"
+                      @click.stop="requestLayerDeletion(activeSlice.id, layer)"
+                    >
+                      Remove
+                    </button>
                   </div>
                 </div>
 
@@ -566,15 +637,15 @@ function signatureGuidance(layer: OpenXrLayerEntry): string {
       {{ loading ? 'Reading OpenXR layer registrations...' : 'OpenXR layer state has not loaded yet.' }}
     </div>
 
-    <div v-if="selectedLayer" class="fixed inset-0 z-50 flex items-center justify-center bg-black/45 px-4 py-6 backdrop-blur-sm">
-      <div class="w-full max-w-[820px] rounded-[1.25rem] border p-5 surface-panel-strong">
-        <div class="flex flex-wrap items-start justify-between gap-4">
-          <div class="min-w-0">
+    <div v-if="selectedLayer" class="fixed inset-0 z-50 flex items-center justify-center bg-black/45 px-4 py-6 backdrop-blur-sm" role="dialog" aria-modal="true" @click.self="selectedLayer = null">
+      <div class="max-h-[calc(100vh-3rem)] w-full max-w-[820px] overflow-y-auto rounded-[1.25rem] border p-5 surface-panel-strong">
+        <div class="sticky top-0 z-10 -mx-5 -mt-5 flex flex-wrap items-start justify-between gap-4 border-b px-5 py-4 surface-panel-strong" style="border-color: var(--app-border)">
+          <div class="min-w-0 flex-1">
             <p class="eyebrow text-xs uppercase tracking-[0.24em]">Layer Details</p>
             <h2 class="mt-2 truncate text-xl font-semibold tracking-tight">{{ selectedLayer.layerName }}</h2>
             <p class="mt-1 text-sm leading-6 text-muted">{{ selectedLayer.description }}</p>
           </div>
-          <button class="button-secondary rounded-[0.75rem] px-4 py-2 text-sm font-medium" type="button" @click.stop="selectedLayer = null">
+          <button class="button-secondary shrink-0 rounded-[0.75rem] px-4 py-2 text-sm font-medium" type="button" @click.stop="selectedLayer = null">
             Close
           </button>
         </div>
@@ -652,6 +723,48 @@ function signatureGuidance(layer: OpenXrLayerEntry): string {
 
         <div v-if="selectedLayer.error" class="mt-3 rounded-[0.9rem] border px-3 py-2 text-sm leading-6 chip-warning" style="border-color: var(--app-border)">
           {{ selectedLayer.error }}
+        </div>
+      </div>
+    </div>
+
+    <div
+      v-if="pendingDeletion"
+      class="fixed inset-0 z-[60] flex items-center justify-center bg-black/55 px-4 py-6 backdrop-blur-sm"
+      role="alertdialog"
+      aria-modal="true"
+      aria-labelledby="remove-layer-title"
+      aria-describedby="remove-layer-description"
+      @click.self="cancelLayerDeletion"
+    >
+      <div class="w-full max-w-[520px] rounded-[1.15rem] border p-5 shadow-panel surface-panel-strong">
+        <p class="eyebrow text-xs uppercase tracking-[0.24em]">Destructive action</p>
+        <h2 id="remove-layer-title" class="mt-2 text-xl font-semibold tracking-tight">
+          Remove {{ pendingDeletion.layer.layerName }}?
+        </h2>
+        <p id="remove-layer-description" class="mt-3 text-sm leading-6 text-muted">
+          This permanently removes the layer registration from {{ activeSlice?.label ?? 'the selected registry hive' }}.
+          The manifest and DLL files will remain on disk, but this action cannot be undone from VectorXR.
+        </p>
+        <p class="mt-3 break-all rounded-[0.75rem] border px-3 py-2 font-mono text-xs text-soft surface-panel-soft" style="border-color: var(--app-border)">
+          {{ pendingDeletion.layer.manifestPath }}
+        </p>
+        <div class="mt-5 flex flex-wrap justify-end gap-2">
+          <button
+            class="button-secondary rounded-[0.75rem] px-4 py-2 text-sm font-medium"
+            type="button"
+            :disabled="busyKey !== null"
+            @click="cancelLayerDeletion"
+          >
+            Cancel
+          </button>
+          <button
+            class="button-danger rounded-[0.75rem] px-4 py-2 text-sm font-medium disabled:cursor-not-allowed disabled:opacity-50"
+            type="button"
+            :disabled="busyKey !== null"
+            @click="confirmLayerDeletion"
+          >
+            {{ isActionBusy(pendingDeletion.layer, 'delete') ? 'Removing...' : 'Remove Registration' }}
+          </button>
         </div>
       </div>
     </div>

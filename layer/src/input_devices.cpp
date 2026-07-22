@@ -1,6 +1,7 @@
 #include "depthxr/input_devices.h"
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <chrono>
 #include <cwctype>
@@ -26,6 +27,74 @@
 #endif
 
 namespace depthxr {
+
+std::optional<DeviceInputPath> ParseDeviceInputPath(std::string_view input_path) {
+    const auto parse_index = [](std::string_view text, std::size_t maximum) -> std::optional<std::size_t> {
+        if (text.empty() ||
+            !std::all_of(text.begin(), text.end(), [](unsigned char character) {
+                return std::isdigit(character) != 0;
+            })) {
+            return std::nullopt;
+        }
+
+        std::size_t value = 0;
+        for (const char character : text) {
+            value = value * 10 + static_cast<std::size_t>(character - '0');
+            if (value > maximum) {
+                return std::nullopt;
+            }
+        }
+        if (value < 1) {
+            return std::nullopt;
+        }
+        return value - 1;
+    };
+
+    constexpr std::string_view button_prefix = "button-";
+    if (input_path.starts_with(button_prefix)) {
+        const std::optional<std::size_t> index =
+            parse_index(input_path.substr(button_prefix.size()), 128);
+        if (index.has_value()) {
+            return DeviceInputPath{DeviceInputKind::Button, *index, 0};
+        }
+        return std::nullopt;
+    }
+
+    constexpr std::string_view hat_prefix = "hat-";
+    if (!input_path.starts_with(hat_prefix)) {
+        return std::nullopt;
+    }
+
+    const std::string_view remainder = input_path.substr(hat_prefix.size());
+    const std::size_t separator = remainder.find('-');
+    if (separator == std::string_view::npos) {
+        return std::nullopt;
+    }
+
+    const std::optional<std::size_t> index = parse_index(remainder.substr(0, separator), 4);
+    constexpr std::array<std::string_view, 8> directions = {
+        "up", "up-right", "right", "down-right",
+        "down", "down-left", "left", "up-left",
+    };
+    const auto direction = std::find(directions.begin(), directions.end(), remainder.substr(separator + 1));
+    if (!index.has_value() || direction == directions.end()) {
+        return std::nullopt;
+    }
+
+    return DeviceInputPath{
+        DeviceInputKind::Hat,
+        *index,
+        static_cast<std::size_t>(std::distance(directions.begin(), direction)),
+    };
+}
+
+std::optional<std::size_t> DirectInputHatDirection(std::uint32_t value) {
+    if (value == UINT32_MAX) {
+        return std::nullopt;
+    }
+    return static_cast<std::size_t>((((value % 36'000) + 2'250) / 4'500) % 8);
+}
+
 namespace {
 
 #if defined(_WIN32)
@@ -118,28 +187,10 @@ std::optional<GUID> ParseGuid(std::string_view value) {
     return std::nullopt;
 }
 
-std::optional<size_t> ParseButtonIndex(std::string_view input_path) {
-    constexpr std::string_view prefix = "button-";
-    if (!input_path.starts_with(prefix)) {
-        return std::nullopt;
-    }
 
-    const std::string number(input_path.substr(prefix.size()));
-    if (number.empty() || !std::all_of(number.begin(), number.end(), [](unsigned char character) { return std::isdigit(character) != 0; })) {
-        return std::nullopt;
-    }
-
-    const int one_based_index = std::stoi(number);
-    if (one_based_index < 1 || one_based_index > 128) {
-        return std::nullopt;
-    }
-
-    return static_cast<size_t>(one_based_index - 1);
-}
-
-class DirectInputButtonPoller {
+class DirectInputPoller {
   public:
-    ~DirectInputButtonPoller() {
+    ~DirectInputPoller() {
         for (auto& [_, device] : devices_) {
             if (device) {
                 device->Unacquire();
@@ -151,9 +202,9 @@ class DirectInputButtonPoller {
         }
     }
 
-    bool IsButtonDown(const InputBinding& binding) {
-        const std::optional<size_t> button_index = ParseButtonIndex(binding.input_path);
-        if (!button_index.has_value()) {
+    bool IsInputDown(const InputBinding& binding) {
+        const std::optional<DeviceInputPath> input = ParseDeviceInputPath(binding.input_path);
+        if (!input.has_value()) {
             return false;
         }
 
@@ -166,7 +217,7 @@ class DirectInputButtonPoller {
         const auto now = std::chrono::steady_clock::now();
         if (const auto it = state_cache_.find(cache_key); it != state_cache_.end() &&
                                                           now - it->second.read_time < kStateCacheLifetime) {
-            return it->second.valid && (it->second.state.rgbButtons[*button_index] & 0x80) != 0;
+            return it->second.valid && IsStateDown(*input, it->second.state);
         }
 
         IDirectInputDevice8W* device = GetOrCreateDevice(binding.device_guid);
@@ -182,10 +233,21 @@ class DirectInputButtonPoller {
             return false;
         }
 
-        return (cached.state.rgbButtons[*button_index] & 0x80) != 0;
+        return IsStateDown(*input, cached.state);
     }
 
   private:
+    static bool IsStateDown(const DeviceInputPath& input, const DIJOYSTATE2& state) {
+        if (input.kind == DeviceInputKind::Button) {
+            return input.index < std::size(state.rgbButtons) &&
+                   (state.rgbButtons[input.index] & 0x80) != 0;
+        }
+
+        return input.index < std::size(state.rgdwPOV) &&
+               DirectInputHatDirection(state.rgdwPOV[input.index]) ==
+                   std::optional<std::size_t>(input.direction);
+    }
+
     IDirectInput8W* GetDirectInput() {
         if (direct_input_) {
             return direct_input_;
@@ -280,8 +342,8 @@ class DirectInputButtonPoller {
     std::unordered_map<std::wstring, CachedDeviceState> state_cache_;
 };
 
-DirectInputButtonPoller& Poller() {
-    static DirectInputButtonPoller poller;
+DirectInputPoller& Poller() {
+    static DirectInputPoller poller;
     return poller;
 }
 #endif
@@ -292,7 +354,7 @@ bool IsDeviceBindingDown(const InputBinding& binding) {
     }
 
 #if defined(_WIN32)
-    return Poller().IsButtonDown(binding);
+    return Poller().IsInputDown(binding);
 #else
     return false;
 #endif
