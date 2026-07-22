@@ -1,7 +1,8 @@
 # Shared, single-source definition of where the VectorXR app version string lives.
 #
-# Dot-sourced by both Set-Version.ps1 (the writer) and Assert-VersionMatchesTag.ps1
-# (the reader) so the canonical list of version locations is defined exactly ONCE.
+# Dot-sourced by both Set-Version.ps1 (the version writer and release-data reader)
+# and Assert-VersionMatchesTag.ps1 (the tag reader) so the canonical list of
+# version locations is defined exactly ONCE.
 # If a new version-bearing file is added, add it here and both scripts pick it up.
 #
 # Scope note: this lists the "gated" version files only -- the three source-of-truth

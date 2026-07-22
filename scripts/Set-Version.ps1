@@ -3,32 +3,22 @@
     Prepares a VectorXR version and can publish its complete GitHub release.
 
 .DESCRIPTION
-    Updates every app version and lock file, inserts the in-app patch note, writes
-    the matching Markdown GitHub release notes, and validates the result. With
+    Reads the matching entry from app/src/lib/patchNotes.json, updates every app
+    version and lock file, writes the matching Markdown GitHub release notes, and
+    validates the result. With
     -Publish, it also commits release-managed files, creates an annotated tag,
     atomically pushes the current branch and tag, and waits for the GitHub Actions
     release workflow to finish.
 
 .EXAMPLE
-    ./scripts/Set-Version.ps1 -Version 0.11.2 `
-        -Title "Layer startup diagnostics" `
-        -Summary "Adds detailed startup logging across the OpenXR layer chain." `
-        -Items "First change.","Second change." `
-        -Publish
+    ./scripts/Set-Version.ps1 -Version 0.14.0 -Publish
 
 .EXAMPLE
-    ./scripts/Set-Version.ps1 -Version 0.11.2 `
-        -Title "Layer startup diagnostics" `
-        -Summary "Adds detailed startup logging across the OpenXR layer chain." `
-        -Items "First change.","Second change." -Publish -WhatIf
+    ./scripts/Set-Version.ps1 -Version 0.14.0 -Publish -WhatIf
 #>
 [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = "Medium")]
 param(
     [Parameter(Mandatory = $true)][string]$Version,
-    [Parameter(Mandatory = $true)][string]$Title,
-    [Parameter(Mandatory = $true)][string]$Summary,
-    [Parameter(Mandatory = $true)][string[]]$Items,
-    [string]$Date,
     [switch]$SkipLocks,
     [switch]$Publish,
     [switch]$NoWait,
@@ -46,57 +36,6 @@ if ($Version.StartsWith("v")) { $Version = $Version.Substring(1) }
 if ($Version -notmatch '^\d+\.\d+\.\d+$') {
     throw "Version '$Version' must use MAJOR.MINOR.PATCH format, such as 0.11.1."
 }
-if (-not $Date) { $Date = (Get-Date -Format 'yyyy-MM-dd') }
-if ($Date -notmatch '^\d{4}-\d{2}-\d{2}$') {
-    throw "Date '$Date' must use YYYY-MM-DD format."
-}
-
-function ConvertTo-JsonString {
-    param([Parameter(Mandatory = $true)][AllowEmptyString()][string]$Text)
-    return (ConvertTo-Json -InputObject $Text -Compress)
-}
-
-function Add-PatchNoteEntry {
-    param(
-        [Parameter(Mandatory = $true)][string]$Version,
-        [Parameter(Mandatory = $true)][string]$Date,
-        [Parameter(Mandatory = $true)][string]$Title,
-        [Parameter(Mandatory = $true)][string]$Summary,
-        [Parameter(Mandatory = $true)][string[]]$Items
-    )
-
-    $path = Get-PatchNotesPath
-    $entries = @(Read-PatchNotes)
-    if (@($entries | Where-Object { $_.version -eq $Version }).Count -gt 0) {
-        throw "patchNotes.json already contains an entry for version $Version."
-    }
-
-    $content = Read-FileRaw -Path $path
-    $nl = if ($content -match "`r`n") { "`r`n" } else { "`n" }
-    $insertPos = $content.IndexOf($nl) + $nl.Length
-    if ($insertPos -lt $nl.Length) {
-        throw "Could not find the first array entry in patchNotes.json."
-    }
-
-    $lines = New-Object System.Collections.Generic.List[string]
-    $lines.Add("  {")
-    $lines.Add("    `"version`": $(ConvertTo-JsonString $Version),")
-    $lines.Add("    `"date`": $(ConvertTo-JsonString $Date),")
-    $lines.Add("    `"title`": $(ConvertTo-JsonString $Title),")
-    $lines.Add("    `"summary`": $(ConvertTo-JsonString $Summary),")
-    $lines.Add("    `"items`": [")
-    for ($index = 0; $index -lt $Items.Count; $index++) {
-        $suffix = if ($index -lt $Items.Count - 1) { "," } else { "" }
-        $lines.Add("      $(ConvertTo-JsonString $Items[$index])$suffix")
-    }
-    $lines.Add("    ]")
-    $lines.Add("  },")
-
-    $block = ($lines -join $nl) + $nl
-    $updated = $content.Substring(0, $insertPos) + $block + $content.Substring($insertPos)
-    Write-FileNoBom -Path $path -Content $updated
-}
-
 # Edits ONLY the vectorxr-app entry in a derived lock file, anchored on its package
 # name so dependency versions are never touched. We deliberately edit rather than
 # regenerate (npm install / cargo update), which would churn unrelated dependencies
@@ -122,57 +61,24 @@ function Update-LockVersion {
     Write-Host "  $Name"
 }
 
-function Get-PatchNoteLeafItems {
-    param([Parameter(Mandatory = $true)][object[]]$Items)
-
-    $leaves = New-Object System.Collections.Generic.List[string]
-    foreach ($item in $Items) {
-        if ($item -is [string]) {
-            $leaves.Add([string]$item)
-            continue
-        }
-        $propertyNames = @($item.PSObject.Properties.Name)
-        if ($propertyNames -contains "items" -and @($item.items).Count -gt 0) {
-            foreach ($leaf in @(Get-PatchNoteLeafItems -Items @($item.items))) {
-                $leaves.Add([string]$leaf)
-            }
-            continue
-        }
-        if ($propertyNames -contains "html" -and -not [string]::IsNullOrWhiteSpace([string]$item.html)) {
-            $leaves.Add([string]$item.html)
-            continue
-        }
-        throw "Patch-note items must be strings or objects with html and optional child items."
-    }
-    return $leaves
-}
-
-function Assert-ExistingPatchNoteMatches {
+function Add-PatchNoteMarkdownItems {
     param(
-        [Parameter(Mandatory = $true)][string]$Version,
-        [Parameter(Mandatory = $true)][string]$Date,
-        [Parameter(Mandatory = $true)][string]$Title,
-        [Parameter(Mandatory = $true)][string]$Summary,
-        [Parameter(Mandatory = $true)][string[]]$Items
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][System.Collections.Generic.List[string]]$Lines,
+        [Parameter(Mandatory = $true)][object[]]$Items,
+        [int]$Depth = 0
     )
 
-    $matches = @(@(Read-PatchNotes) | Where-Object { $_.version -eq $Version })
-    if ($matches.Count -ne 1) {
-        throw "Could not find exactly one patch-notes entry for $Version."
-    }
-    $entry = $matches[0]
-    if ([string]$entry.date -ne $Date -or [string]$entry.title -ne $Title -or
-        [string]$entry.summary -ne $Summary) {
-        throw "The existing patch-notes entry for $Version does not match -Date, -Title, and -Summary."
-    }
+    $indent = "  " * $Depth
+    foreach ($item in $Items) {
+        if ($item -is [string]) {
+            $Lines.Add("$indent- $item")
+            continue
+        }
 
-    $actualItems = @(Get-PatchNoteLeafItems -Items @($entry.items))
-    if ($actualItems.Count -ne $Items.Count) {
-        throw "The existing patch-notes entry for $Version does not match -Items."
-    }
-    for ($index = 0; $index -lt $Items.Count; $index++) {
-        if ($actualItems[$index] -ne $Items[$index]) {
-            throw "The existing patch-notes entry for $Version does not match -Items at index $index."
+        $Lines.Add("$indent- $($item.html)")
+        $propertyNames = @($item.PSObject.Properties.Name)
+        if ($propertyNames -contains "items" -and @($item.items).Count -gt 0) {
+            Add-PatchNoteMarkdownItems -Lines $Lines -Items @($item.items) -Depth ($Depth + 1)
         }
     }
 }
@@ -182,7 +88,7 @@ function Write-ReleaseNotes {
         [Parameter(Mandatory = $true)][string]$Version,
         [Parameter(Mandatory = $true)][string]$Title,
         [Parameter(Mandatory = $true)][string]$Summary,
-        [Parameter(Mandatory = $true)][string[]]$Items
+        [Parameter(Mandatory = $true)][object[]]$Items
     )
 
     $path = Get-ReleaseNotesPath -Version $Version
@@ -197,9 +103,9 @@ function Write-ReleaseNotes {
         "### Changes"
         ""
     )
-    foreach ($item in $Items) {
-        $lines += "- $item"
-    }
+    $markdownItems = New-Object System.Collections.Generic.List[string]
+    Add-PatchNoteMarkdownItems -Lines $markdownItems -Items $Items
+    $lines += $markdownItems
 
     Write-FileNoBom -Path $path -Content (($lines -join "`n") + "`n")
     Write-Host "  release/notes/v$Version.md"
@@ -476,19 +382,6 @@ function Publish-Release {
     }
 }
 
-if (-not $Title.Trim()) {
-    throw "Title cannot be empty."
-}
-if (-not $Summary.Trim()) {
-    throw "Summary cannot be empty."
-}
-if ($Items.Count -eq 0 -or @($Items | Where-Object { [string]::IsNullOrWhiteSpace($_) }).Count -gt 0) {
-    throw "Items must contain at least one non-empty release-note item."
-}
-$textValues = @($Title, $Summary) + @($Items)
-if (@($textValues | Where-Object { $_ -match "[`r`n]" }).Count -gt 0) {
-    throw "Title, Summary, and Items must each be single-line text."
-}
 if (-not $Remote -or $Remote.StartsWith("-")) {
     throw "Remote must be a configured Git remote name."
 }
@@ -525,17 +418,18 @@ if ($Publish) {
 
 $patchNotesEntries = @(Read-PatchNotes)
 $latestPatchVersion = Read-LatestPatchVersion
-if ($latestPatchVersion -eq $Version) {
-    Write-Host "Using existing patch-notes entry for $Version ($Date) ..."
-    Assert-ExistingPatchNoteMatches -Version $Version -Date $Date -Title $Title -Summary $Summary -Items $Items
-}
-elseif (@($patchNotesEntries | Where-Object { $_.version -eq $Version }).Count -gt 0) {
+if ($latestPatchVersion -ne $Version -and @($patchNotesEntries | Where-Object { $_.version -eq $Version }).Count -gt 0) {
     throw "patchNotes.json contains version $Version, but it is not the latest entry."
 }
-else {
-    Write-Host "Inserting patch-notes entry for $Version ($Date) ..."
-    Add-PatchNoteEntry -Version $Version -Date $Date -Title $Title -Summary $Summary -Items $Items
+if ($latestPatchVersion -ne $Version) {
+    throw "Add version $Version as the first entry in app/src/lib/patchNotes.json before running Set-Version.ps1."
 }
+$patchNote = @($patchNotesEntries | Where-Object { $_.version -eq $Version })[0]
+$Date = [string]$patchNote.date
+$Title = [string]$patchNote.title
+$Summary = [string]$patchNote.summary
+$Items = @($patchNote.items)
+Write-Host "Using patchNotes.json entry for $Version ($Date): $Title"
 
 Write-Host "Updating source version files to $Version ..."
 foreach ($target in Get-VersionTargets) {

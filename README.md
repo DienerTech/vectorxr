@@ -154,20 +154,15 @@ The installer build compiles the OpenXR layer, stages the layer DLL and manifest
 
 ## Release Tags
 
-GitHub builds release installers from `vMAJOR.MINOR.PATCH` tags. The release script updates every version location and lock file, creates the in-app patch-note entry and matching Markdown release notes, validates the result, commits it, creates an annotated tag, atomically pushes the branch and tag, and waits for the GitHub Release workflow:
+GitHub builds release installers from `vMAJOR.MINOR.PATCH` tags. First add the release as the first object in `app/src/lib/patchNotes.json`. The release script uses that object as the single source for the date, title, summary, and complete nested change list; it then updates every version location and lock file, generates matching Markdown release notes, validates the result, commits it, creates an annotated tag, atomically pushes the branch and tag, and waits for the GitHub Release workflow:
 
 ```powershell
-.\scripts\Set-Version.ps1 `
-  -Version 0.13.6 `
-  -Title "Release title" `
-  -Summary "One-sentence release summary." `
-  -Items "First change.", "Second change." `
-  -Publish
+.\scripts\Set-Version.ps1 -Version 0.14.0 -Publish
 ```
 
 Run the command from a clean branch with working Git credentials and an authenticated GitHub CLI (`gh auth login`). Use `-WhatIf` to preview the operation, or `-NoWait` with `-Publish` to return after the tag is pushed instead of following the workflow. The generated release body is committed at `release/notes/vMAJOR.MINOR.PATCH.md`; `.github/workflows/release.yml` uses it verbatim and uploads the Windows installer plus a SHA-256 checksum.
 
-In-app release data lives in `app/src/lib/patchNotes.json`. `Set-Version.ps1` inserts a flat item list by default; before publishing, entries can be grouped into nested lists without changing the generated release-note comparison:
+In-app and GitHub release data lives in `app/src/lib/patchNotes.json`. Author the complete entry there before running `Set-Version.ps1`; nested items are preserved in both the app and generated Markdown:
 
 ```json
 "items": [

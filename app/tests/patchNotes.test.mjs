@@ -39,8 +39,15 @@ test('patch notes load from structured JSON with unique versions', () => {
   }
 })
 
-test('0.14 patch notes exercise nested lists', () => {
+test('legacy and current patch notes use organized nested sections', () => {
+  for (const entry of patchNotes) {
+    assert.ok(entry.items.every((item) => typeof item !== 'string'), `${entry.version} has an ungrouped top-level item`)
+  }
+
   assert.equal(patchNotes[0].version, '0.14.0')
+  assert.equal(patchNotes[0].title, 'Introducing Depth Lock')
+  assert.match(patchNotes[0].summary, /Depth Lock/)
+  assert.match(JSON.stringify(patchNotes[0].items), /formalizes render\/submission geometry pairing/)
   const maxDepth = Math.max(
     ...patchNotes[0].items.map((item, index) => assertItem(item, `latest.items[${index}]`)),
   )
