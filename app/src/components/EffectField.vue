@@ -39,7 +39,7 @@ function fromDisplay(value: number): number {
 
 <template>
   <div
-    class="min-w-0 rounded-[1rem] border p-4 shadow-panel backdrop-blur transition"
+    class="flex h-full min-w-0 flex-col rounded-[1rem] border p-4 shadow-panel backdrop-blur transition"
     :class="muted ? 'surface-panel-soft opacity-70' : 'surface-panel'"
   >
     <div class="mb-3 flex items-start justify-between gap-3">
@@ -86,8 +86,10 @@ function fromDisplay(value: number): number {
         />
       </div>
     </div>
-    <div v-if="$slots.footer" class="mt-4 border-t pt-3" style="border-color: var(--app-border)">
-      <slot name="footer" />
+    <div v-if="$slots.footer" class="mt-auto pt-4">
+      <div class="border-t pt-3" style="border-color: var(--app-border)">
+        <slot name="footer" />
+      </div>
     </div>
   </div>
 </template>
