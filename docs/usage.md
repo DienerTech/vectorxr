@@ -14,17 +14,17 @@ config file directly. Settings are stored locally under `%LOCALAPPDATA%\VectorXR
 
 ## What you see on first launch
 
-![VectorXR Home tab on first run](screenshots/home.png)
+![VectorXR Home tab on first run](screenshots/home.jpg)
 
 On a clean install, the **Home** tab is a status dashboard and everything is off:
 
 - The **Runtime Enabled** and **Layer Enabled** pills (top right) confirm the OpenXR layer is
   registered and ready for the next VR app launch. **System Health** summarizes the same thing.
-- The **Active overview** lists the three Enhancements — **Quadviews**, **Pivot**, and
+- The **Active overview** lists the four Enhancements — **Quadviews**, **Turbo**, **Pivot**, and
   **Depth**. On first run each shows *Default Profile: Disabled*, *Custom Profiles: 0 / 0
   enabled*, and *Status: Inactive*. That is expected — you haven't configured anything yet.
 - The left sidebar holds app sections (Home, Settings, Application Registry, OpenXR Layers,
-  About) and the three Enhancements, each with its own on/off toggle.
+  About) and the four Enhancements, each with its own on/off toggle.
 - The bar at the bottom is the **save bar**. Changes you make are staged until you click **Save
   Changes** (or **Discard**). Watch this bar — nothing you change takes effect until it's saved.
 
@@ -52,7 +52,7 @@ about the conflict so it is never silent.
 
 ## Step 1 — Confirm the runtime is enabled
 
-![VectorXR Settings tab](screenshots/settings.png)
+![VectorXR Settings tab](screenshots/settings.jpg)
 
 Open **Settings** and check that **VectorXR Enabled** is on (it is by default). This is the
 single master switch for all Enhancements at runtime.
@@ -67,7 +67,7 @@ While you're here:
 
 ## Step 2 — Register the app you want to tune
 
-![VectorXR Application Registry tab](screenshots/application-registry.png)
+![VectorXR Application Registry tab](screenshots/application-registry.jpg)
 
 Custom profiles target apps by executable name, so first register the app in the **Application
 Registry**. On first run it's empty ("No applications registered yet").
@@ -87,11 +87,11 @@ top and a **Custom Profiles** list below. To apply it to the app you just regist
 **Add Profile**, point the profile at that application, tune the values, and save. To apply it
 broadly instead, just turn the **Default Profile** on.
 
-The three Enhancements:
+The four Enhancements:
 
 ### Depth
 
-![VectorXR Depth tab](screenshots/depth.png)
+![VectorXR Depth tab](screenshots/depth.jpg)
 
 Depth adjusts virtual eye separation and projection convergence as one binocular system. Stereo
 Depth controls perceived world scale; Convergence places the zero-parallax depth plane.
@@ -119,7 +119,7 @@ Depth controls perceived world scale; Convergence places the zero-parallax depth
 
 ### Pivot
 
-![VectorXR Pivot tab](screenshots/pivot.png)
+![VectorXR Pivot tab](screenshots/pivot.jpg)
 
 Pivot enhances head rotation for seated and flight-sim VR, letting you see further to the side or
 up/down than your physical neck allows.
@@ -139,7 +139,7 @@ combination is VectorXR's signature capability — see [Why VectorXR](../README.
 
 ### Quadviews
 
-![VectorXR Quadviews tab](screenshots/quadviews.png)
+![VectorXR Quadviews tab](screenshots/quadviews.jpg)
 
 Quadviews drives foveated-style rendering, concentrating detail where you are looking. It is
 marked **Experimental** and currently targets **DX11 quadview-capable apps**.
@@ -157,17 +157,36 @@ Quadviews and Pivot are designed to compose: unlike running separate foveation a
 layers, VectorXR keeps the foveated focus region aligned with your gaze while Pivot rotates the
 view. See [Why VectorXR](../README.md#why-vectorxr).
 
+### Turbo
+
+![VectorXR Turbo tab](screenshots/turbo.jpg)
+
+Turbo is an opt-in frame-pacing override for games whose main thread is being held back by the
+OpenXR runtime's wait behavior. It is compatibility-sensitive, so keep the default profile off
+and enable it only for applications where an in-headset A/B comparison demonstrates a benefit.
+
+- Leave **Strategy** on **Auto** unless troubleshooting. VectorXR selects an async or sequenced
+  path for the active runtime and remembers safe results.
+- Use the **In-game Turbo Toggle** for immediate comparisons in the same scene.
+- **Runtime Behavior** shows the selected strategy and saved per-runtime pacing history.
+- **Performance Diagnostics** captures per-strategy FPS, frame-time, low-percentile, and
+  pacing-wait metrics so the comparison is based on measured behavior.
+- Do not combine Turbo with another frame-pacing override such as OpenXR Toolkit Turbo Mode.
+  Disable Turbo first if you see a Waiting overlay, black frames, persistent stutter, broken
+  reprojection, or a crash.
+
 When you're happy, click **Save Changes** in the bottom bar. Back on **Home**, the Active
 overview will now show that Enhancement as **Active** for your app.
 
 ## OpenXR layer management
 
-![VectorXR OpenXR Layer Manager tab](screenshots/openxr-layer-manager.png)
+![VectorXR OpenXR Layer Manager tab](screenshots/openxr-layer-manager.jpg)
 
 The **OpenXR Layers** tab manages the implicit API layers installed on your system across the
 four Windows registry slices (Machine-wide / Per-user × 64-bit / 32-bit — *Machine-wide 64-bit*
 is the recommended one for most PCVR). For each layer you can see its name, path, and signature
-status, and you can enable, disable, or reorder it.
+status, and you can enable, disable, reorder, or remove its registry registration. Removal asks
+for confirmation and does not delete the layer's files from disk.
 
 **Order matters.** For Pivot with quad views, the app notes that **Quad-Views-Foveated should be
 above VectorXR**. If Pivot or Quadviews isn't behaving, check VectorXR's position here relative to
@@ -176,7 +195,7 @@ expected; see the README's status section.)
 
 ## Updates
 
-![VectorXR About tab](screenshots/about.png)
+![VectorXR About tab](screenshots/about.jpg)
 
 The **About** tab shows project info, support links, the latest patch notes, and a **Release
 status** panel that checks GitHub for the newest published release. VectorXR does not auto-download

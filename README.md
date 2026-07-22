@@ -15,10 +15,11 @@ Developed by DienerTech LLC.
 - Tune stereo depth and convergence through the Depth module.
 - Configure enhanced yaw and pitch rotation through the Pivot module.
 - Drive foveated-style rendering with a visible performance budget through the Quadviews module.
+- Override OpenXR runtime frame pacing per application with Turbo and compare strategies using built-in diagnostics.
 - Create per-application profiles so different OpenXR games can use different settings.
 - Track OpenXR apps VectorXR has seen and register them as profile targets.
 - Bind feature toggles to keyboard shortcuts or detected input devices.
-- Inspect, enable, disable, and reorder installed OpenXR implicit API layers.
+- Inspect, enable, disable, reorder, and remove stale OpenXR implicit API layer registrations.
 - View VectorXR runtime logs from inside the app.
 - Check for newer VectorXR releases from the About tab.
 - Import, export, reset, and validate local settings.
@@ -27,55 +28,61 @@ Developed by DienerTech LLC.
 
 ### Home
 
-![VectorXR Home tab](docs/screenshots/home.png)
+![VectorXR Home tab](docs/screenshots/home.jpg)
 
 The Home tab is a status dashboard: runtime and layer status, system health, and an Active overview of every Enhancement's default profile, custom profiles, and current state.
 
 ### Depth
 
-![VectorXR Depth tab](docs/screenshots/depth.png)
+![VectorXR Depth tab](docs/screenshots/depth.jpg)
 
 Depth profiles tune world scale and the convergence plane globally or per application, with a live pairing map, a native-submission Depth Lock, and runtime toggles for quick in-headset A/B comparisons.
 
 ### Pivot
 
-![VectorXR Pivot tab](docs/screenshots/pivot.png)
+![VectorXR Pivot tab](docs/screenshots/pivot.jpg)
 
 Pivot profiles configure enhanced yaw and pitch rotation, activation behavior, smoothing, deadzones, and keyboard or device bindings.
 
 ### Quadviews
 
-![VectorXR Quadviews tab](docs/screenshots/quadviews.png)
+![VectorXR Quadviews tab](docs/screenshots/quadviews.jpg)
 
 Quadviews configures foveated-style rendering with a live performance budget that estimates render cost before you launch a game.
 
+### Turbo
+
+![VectorXR Turbo tab](docs/screenshots/turbo.jpg)
+
+Turbo provides an opt-in per-application frame-pacing override, automatic runtime strategy selection, in-headset A/B controls, and performance diagnostics.
+
 ### Application Registry
 
-![VectorXR Application Registry tab](docs/screenshots/application-registry.png)
+![VectorXR Application Registry tab](docs/screenshots/application-registry.jpg)
 
 The application registry keeps profile targets organized and can turn discovered OpenXR apps into reusable application entries.
 
 ### OpenXR Layers
 
-![VectorXR OpenXR Layer Manager tab](docs/screenshots/openxr-layer-manager.png)
+![VectorXR OpenXR Layer Manager tab](docs/screenshots/openxr-layer-manager.jpg)
 
-The OpenXR layer manager inspects installed implicit API layers across the Windows registry slices, shows signature and path status, and can enable, disable, or reorder layers.
+The OpenXR layer manager inspects installed implicit API layers across the Windows registry slices, shows signature and path status, and can enable, disable, reorder, or remove stale registrations.
 
 ### Settings
 
-![VectorXR Settings tab](docs/screenshots/settings.png)
+![VectorXR Settings tab](docs/screenshots/settings.jpg)
 
 Settings holds the runtime master switch, theme, logging, discovered-app tracking, and config import/export/reset.
 
 ### About And Updates
 
-![VectorXR About tab](docs/screenshots/about.png)
+![VectorXR About tab](docs/screenshots/about.jpg)
 
 The About tab includes release status, GitHub update checks, project links, patch notes, and support information.
 
 ### Dark Mode
 
-![VectorXR Home tab in dark mode](docs/screenshots/home-dark.png)
+![VectorXR Home tab in dark mode](docs/screenshots/home-dark.jpg)
 
 ## How It Works
 
@@ -88,7 +95,7 @@ The installer registers the VectorXR API layer with Windows so OpenXR runtimes c
 
 ## Usage
 
-For a walkthrough of configuring profiles and each module — Depth, Pivot, Quadviews, the application registry, and OpenXR layer management — see the [usage guide](docs/usage.md).
+For a walkthrough of configuring profiles and each module — Depth, Pivot, Quadviews, Turbo, the application registry, and OpenXR layer management — see the [usage guide](docs/usage.md).
 
 ## Installation
 
@@ -108,7 +115,7 @@ VectorXR does not currently auto-download or auto-install updates. Updates are i
 
 ## Current Status
 
-VectorXR is in **beta**. It is feature-complete for its current scope — the desktop app, Windows installer, OpenXR layer registration, per-application profile model, Depth, Pivot, and Quadviews modules, app discovery, logs, update checks, and the OpenXR layer manager are all implemented and working.
+VectorXR is in **beta**. It is feature-complete for its current scope — the desktop app, Windows installer, OpenXR layer registration, per-application profile model, Depth, Pivot, Quadviews, and Turbo modules, app discovery, logs, update checks, and the OpenXR layer manager are all implemented and working.
 
 Beta means it is ready to use day-to-day, but it is young and has had limited real-world testing across the range of VR runtimes, hardware, and game-specific VR behavior. Some games expose Force IPD or world-scale controls that can override Stereo Boost; disable those controls before testing Depth. VectorXR is designed to be reversible: you can disable any Enhancement, disable the VectorXR layer, or uninstall entirely if anything misbehaves.
 
