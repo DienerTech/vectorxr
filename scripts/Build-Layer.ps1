@@ -149,8 +149,18 @@ Write-Host "Using generator: $generator"
 Write-Host "Build directory: $buildPath"
 
 & $cmake @configureArgs
+if ($LASTEXITCODE -ne 0) {
+    throw "CMake configure failed (exit code $LASTEXITCODE)."
+}
+
 & $cmake --build $buildPath --config $Configuration
+if ($LASTEXITCODE -ne 0) {
+    throw "CMake build failed (exit code $LASTEXITCODE)."
+}
 
 if (-not $SkipTests) {
     & $ctest --test-dir $buildPath -C $Configuration --output-on-failure
+    if ($LASTEXITCODE -ne 0) {
+        throw "Layer tests failed (exit code $LASTEXITCODE)."
+    }
 }

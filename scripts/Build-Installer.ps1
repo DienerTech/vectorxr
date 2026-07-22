@@ -36,6 +36,9 @@ if ($CleanScratch) {
 Push-Location (Join-Path $repoRoot "app")
 try {
     npm run tauri:build
+    if ($LASTEXITCODE -ne 0) {
+        throw "Tauri installer build failed (exit code $LASTEXITCODE)."
+    }
 }
 finally {
     Pop-Location

@@ -41,7 +41,7 @@ Copy-Item -LiteralPath $layerManifest -Destination (Join-Path $payloadDir "XR_AP
 
 $payloadSoundsDir = Join-Path $payloadDir "sounds"
 New-Item -ItemType Directory -Path $payloadSoundsDir -Force | Out-Null
-foreach ($soundFile in @("activate.wav", "deactivate.wav", "origin-set.wav", "origin-release.wav", "turbo-on.wav", "turbo-off.wav", "metrics-on.wav", "metrics-off.wav")) {
+foreach ($soundFile in @("activate.wav", "deactivate.wav", "origin-set.wav", "origin-release.wav", "turbo-on.wav", "turbo-off.wav", "metrics-on.wav", "metrics-off.wav", "depth-lock-on.wav", "depth-lock-off.wav")) {
     Copy-Item -LiteralPath (Join-Path $layerSounds $soundFile) -Destination (Join-Path $payloadSoundsDir $soundFile) -Force
 }
 
