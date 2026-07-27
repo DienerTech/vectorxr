@@ -266,7 +266,7 @@ function budgetChipClass(settings: QuadViewsSettings) {
           </div>
 
           <div class="rounded-[1rem] border px-4 py-4 surface-panel">
-            On headsets without native quad-view support (e.g. Quest Pro, Pimax Crystal), VectorXR Quadviews utilizes the standard emulation mode, and all settings apply. These compatibility notes apply only to Varjo runtimes.
+            On headsets without physical quad-view support via bi-panel displays (e.g. Quest Pro, Pimax Crystal), VectorXR Quadviews utilizes the standard emulation mode, and all settings apply. These compatibility notes apply only to Varjo runtimes.
           </div>
         </div>
       </div>
