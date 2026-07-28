@@ -136,6 +136,12 @@
         }
       ]
     },
+    "inputBindings": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/inputBinding"
+      }
+    },
     "profileMatch": {
       "type": "object",
       "additionalProperties": false,
@@ -372,7 +378,7 @@
         "enabled",
         "applicationIds",
         "activationMode",
-        "activationBinding",
+        "activationBindings",
         "settings"
       ],
       "properties": {
@@ -394,8 +400,14 @@
         "activationMode": {
           "$ref": "#/$defs/activationMode"
         },
-        "activationBinding": {
-          "$ref": "#/$defs/inputBinding"
+        "activationBindings": {
+          "$ref": "#/$defs/inputBindings"
+        },
+        "setOriginBindings": {
+          "$ref": "#/$defs/inputBindings"
+        },
+        "releaseOriginBindings": {
+          "$ref": "#/$defs/inputBindings"
         },
         "settings": {
           "$ref": "#/$defs/pivotxrSettings"
@@ -420,8 +432,14 @@
         "activationMode": {
           "$ref": "#/$defs/activationMode"
         },
-        "activationBinding": {
-          "$ref": "#/$defs/inputBinding"
+        "activationBindings": {
+          "$ref": "#/$defs/inputBindings"
+        },
+        "setOriginBindings": {
+          "$ref": "#/$defs/inputBindings"
+        },
+        "releaseOriginBindings": {
+          "$ref": "#/$defs/inputBindings"
         },
         "profiles": {
           "type": "array",

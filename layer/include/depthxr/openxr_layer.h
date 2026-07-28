@@ -367,6 +367,7 @@ class OpenXrLayer {
     void ConfigWatcherLoop();
     void PollConfigFile();
     void RefreshResolvedSettings();
+    void ResetPivotInputStateForConfigChange();
     void CaptureInstanceFunctions();
     void LogResolvedSettings(const ResolvedRuntimeConfig& settings);
     void ResetPivotActivationState();
@@ -643,12 +644,13 @@ class OpenXrLayer {
     // pressing another candidate's binding retargets the engaged profile and
     // the activation envelope carries the view across the switch.
     struct PivotProfileInputState {
-        bool was_down{false};
-        bool down_cached{false};
-        bool set_origin_was_down{false};
-        bool set_origin_down_cached{false};
-        bool release_origin_was_down{false};
-        bool release_origin_down_cached{false};
+        struct BindingState {
+            bool was_down{false};
+            bool down_cached{false};
+        };
+        std::vector<BindingState> activation;
+        std::vector<BindingState> set_origin;
+        std::vector<BindingState> release_origin;
         // Always-on profiles only: true after the user pressed the binding to
         // suspend the automatic engagement.
         bool always_on_suspended{false};
@@ -658,14 +660,18 @@ class OpenXrLayer {
     // release ramp so the easing keeps using that profile's settings.
     size_t pivotxr_active_profile_index_{0};
     bool pivotxr_engaged_{false};
-    // Optional captured pivot origin: head yaw/pitch (radians) in the app's
-    // reference space at the moment the set-origin binding fired. Empty means
-    // the default HMD/reference-space origin. Capture happens on the
-    // xrLocateViews drive path so the pose shares the frame's displayTime
-    // pipeline with the pivot drive.
+    // Optional full seated origin in the app's reference space. Motion Assist
+    // currently consumes yaw/pitch, while the complete pose, capture time, and
+    // session identity establish the stable positional reference required by
+    // future Quick Views. Capture happens on the xrLocateViews drive path so
+    // it shares the frame's displayTime pipeline with the pivot drive.
     struct PivotOrigin {
+        XrPosef pose{{0.0f, 0.0f, 0.0f, 1.0f}, {0.0f, 0.0f, 0.0f}};
         double yaw_radians{0.0};
         double pitch_radians{0.0};
+        XrTime capture_time{0};
+        XrSession session{XR_NULL_HANDLE};
+        XrSpaceLocationFlags location_flags{0};
     };
     std::optional<PivotOrigin> pivotxr_origin_;
     bool pivotxr_origin_capture_pending_{false};

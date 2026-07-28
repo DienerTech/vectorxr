@@ -143,12 +143,12 @@ export interface PivotXRProfileConfig {
   enabled: boolean
   applicationIds: string[]
   activationMode: ActivationMode
-  activationBinding: InputBinding
+  activationBindings: InputBinding[]
   // Optional origin bindings: set-origin captures the current head yaw/pitch as
   // Pivot's neutral forward (bind it alongside the game's own recenter);
   // release-origin restores the default HMD origin.
-  setOriginBinding: InputBinding
-  releaseOriginBinding: InputBinding
+  setOriginBindings: InputBinding[]
+  releaseOriginBindings: InputBinding[]
   settings: PivotXRSettings
 }
 
@@ -156,9 +156,9 @@ export interface PivotXRModuleConfig {
   enabled: boolean
   defaults: PivotXRSettings
   activationMode: ActivationMode
-  activationBinding: InputBinding
-  setOriginBinding: InputBinding
-  releaseOriginBinding: InputBinding
+  activationBindings: InputBinding[]
+  setOriginBindings: InputBinding[]
+  releaseOriginBindings: InputBinding[]
   profiles: PivotXRProfileConfig[]
 }
 
@@ -507,9 +507,9 @@ export function defaultConfig(): VectorXRConfig {
         enabled: false,
         defaults: defaultPivotXRSettings(),
         activationMode: 'toggle',
-        activationBinding: defaultNoneBinding(),
-        setOriginBinding: defaultNoneBinding(),
-        releaseOriginBinding: defaultNoneBinding(),
+        activationBindings: [],
+        setOriginBindings: [],
+        releaseOriginBindings: [],
         profiles: [],
       },
       quadviews: {
@@ -562,7 +562,7 @@ export function createPivotProfile(
   defaultSettings: PivotXRSettings,
   applicationIds: string[] = [],
   activationMode: ActivationMode = 'toggle',
-  activationBinding: InputBinding = defaultNoneBinding(),
+  activationBindings: InputBinding[] = [],
 ): PivotXRProfileConfig {
   return {
     id: newPivotProfileId(),
@@ -570,9 +570,9 @@ export function createPivotProfile(
     enabled: true,
     applicationIds,
     activationMode,
-    activationBinding: normalizeInputBinding(activationBinding, defaultNoneBinding()),
-    setOriginBinding: defaultNoneBinding(),
-    releaseOriginBinding: defaultNoneBinding(),
+    activationBindings: normalizeInputBindings(activationBindings),
+    setOriginBindings: [],
+    releaseOriginBindings: [],
     settings: { ...defaultSettings },
   }
 }
@@ -786,6 +786,20 @@ export function normalizeInputBinding(value: unknown, fallback: InputBinding): I
   }, sound)
 }
 
+export function normalizeInputBindings(value: unknown, legacyValue?: unknown): InputBinding[] {
+  const source = Array.isArray(value)
+    ? value
+    : value !== undefined
+      ? [value]
+      : legacyValue !== undefined
+        ? [legacyValue]
+        : []
+
+  return source
+    .map((binding) => normalizeInputBinding(binding, defaultNoneBinding()))
+    .filter((binding) => binding.type !== 'none')
+}
+
 export function bindingsShareInput(left: InputBinding, right: InputBinding): boolean {
   if (left.type === 'none' || right.type === 'none' || left.type !== right.type) {
     return false
@@ -849,6 +863,14 @@ export function bindingLabel(binding: InputBinding): string {
   return binding.chord.join('+')
 }
 
+export function bindingListLabel(bindings: InputBinding[]): string {
+  if (bindings.length === 0) return 'None'
+  if (bindings.length <= 2) return bindings.map(bindingLabel).join(' or ')
+
+  const remaining = bindings.length - 1
+  return `${bindingLabel(bindings[0])} or ${remaining} other${remaining === 1 ? '' : 's'}`
+}
+
 export interface PivotBindingWarning {
   title: string
   message: string
@@ -860,24 +882,39 @@ interface SavedBindingAssignment {
   binding: InputBinding
 }
 
+function pushBindingAssignments(
+  assignments: SavedBindingAssignment[],
+  id: string,
+  label: string,
+  bindings: InputBinding[],
+) {
+  bindings.forEach((binding, index) => {
+    assignments.push({
+      id: `${id}.${index}`,
+      label: bindings.length > 1 ? `${label} (binding ${index + 1})` : label,
+      binding,
+    })
+  })
+}
+
 function savedBindingAssignments(config: VectorXRConfig): SavedBindingAssignment[] {
   const assignments: SavedBindingAssignment[] = [
     { id: 'depth.toggle', label: 'Depth: A/B toggle', binding: config.modules.depthxr.bindings.toggleEnabled },
     { id: 'depth.lock', label: 'Depth: Depth Lock A/B', binding: config.modules.depthxr.bindings.toggleAnchor },
     { id: 'turbo.toggle', label: 'Turbo: A/B toggle', binding: config.modules.turbo.toggleBinding },
     { id: 'turbo.metrics', label: 'Turbo: metrics capture', binding: config.modules.turbo.metricsBinding },
-    { id: 'pivot.default.activate', label: 'Pivot Default: Activate', binding: config.modules.pivotxr.activationBinding },
-    { id: 'pivot.default.set-origin', label: 'Pivot Default: Set Origin', binding: config.modules.pivotxr.setOriginBinding },
-    { id: 'pivot.default.release-origin', label: 'Pivot Default: Release Origin', binding: config.modules.pivotxr.releaseOriginBinding },
   ]
 
-  config.modules.pivotxr.profiles.forEach((profile, index) => {
+  const pivot = config.modules.pivotxr
+  pushBindingAssignments(assignments, 'pivot.default.activate', 'Pivot Default: Activate', pivot.activationBindings)
+  pushBindingAssignments(assignments, 'pivot.default.set-origin', 'Pivot Default: Set Origin', pivot.setOriginBindings)
+  pushBindingAssignments(assignments, 'pivot.default.release-origin', 'Pivot Default: Release Origin', pivot.releaseOriginBindings)
+
+  pivot.profiles.forEach((profile, index) => {
     const context = profile.name.trim() || `Profile ${index + 1}`
-    assignments.push(
-      { id: `pivot.${profile.id}.activate`, label: `Pivot ${context}: Activate`, binding: profile.activationBinding },
-      { id: `pivot.${profile.id}.set-origin`, label: `Pivot ${context}: Set Origin`, binding: profile.setOriginBinding },
-      { id: `pivot.${profile.id}.release-origin`, label: `Pivot ${context}: Release Origin`, binding: profile.releaseOriginBinding },
-    )
+    pushBindingAssignments(assignments, `pivot.${profile.id}.activate`, `Pivot ${context}: Activate`, profile.activationBindings)
+    pushBindingAssignments(assignments, `pivot.${profile.id}.set-origin`, `Pivot ${context}: Set Origin`, profile.setOriginBindings)
+    pushBindingAssignments(assignments, `pivot.${profile.id}.release-origin`, `Pivot ${context}: Release Origin`, profile.releaseOriginBindings)
   })
 
   return assignments
@@ -923,43 +960,74 @@ export function savedBindingConflictWarnings(
     }))
 }
 
+function firstSharedBinding(left: InputBinding[], right: InputBinding[]): InputBinding | undefined {
+  for (const binding of left) {
+    const match = right.find((candidate) => bindingsShareInput(binding, candidate))
+    if (match) return binding
+  }
+  return undefined
+}
+
+function duplicateBindingWarnings(actionLabel: string, bindings: InputBinding[]): PivotBindingWarning[] {
+  const seen = new Set<string>()
+  const warnings: PivotBindingWarning[] = []
+  for (const binding of bindings) {
+    const key = bindingInputKey(binding)
+    if (!key) continue
+    if (seen.has(key)) {
+      warnings.push({
+        title: `${bindingLabel(binding)} is duplicated`,
+        message: `${actionLabel} contains the same physical input more than once. The duplicate is redundant and only the first copy is used at runtime.`,
+      })
+    } else {
+      seen.add(key)
+    }
+  }
+  return warnings
+}
+
 export function pivotBindingConflictWarnings(
   mode: ActivationMode,
-  activationBinding: InputBinding,
-  setOriginBinding: InputBinding,
-  releaseOriginBinding: InputBinding,
+  activationBindings: InputBinding[],
+  setOriginBindings: InputBinding[],
+  releaseOriginBindings: InputBinding[],
 ): PivotBindingWarning[] {
-  const activationSetsOrigin = bindingsShareInput(activationBinding, setOriginBinding)
-  const activationReleasesOrigin = bindingsShareInput(activationBinding, releaseOriginBinding)
-  const setAlsoReleasesOrigin = bindingsShareInput(setOriginBinding, releaseOriginBinding)
+  const activationSetsOrigin = firstSharedBinding(activationBindings, setOriginBindings)
+  const activationReleasesOrigin = firstSharedBinding(activationBindings, releaseOriginBindings)
+  const setAlsoReleasesOrigin = firstSharedBinding(setOriginBindings, releaseOriginBindings)
   const action = mode === 'toggle' ? 'Every Toggle press, including deactivation,' : 'Every press'
 
-  if (activationSetsOrigin && activationReleasesOrigin) {
+  if (activationSetsOrigin && activationReleasesOrigin
+      && bindingsShareInput(activationSetsOrigin, activationReleasesOrigin)) {
     return [{
       title: 'One binding controls three conflicting actions',
-      message: `Activation, Set Origin, and Release Origin all use ${bindingLabel(activationBinding)}. ${action} requests a new neutral forward and then immediately clears it, so the origin is not captured. Give Set Origin or Release Origin its own binding.`,
+      message: `Activation, Set Origin, and Release Origin all use ${bindingLabel(activationSetsOrigin)}. ${action} requests a new neutral forward and then immediately clears it, so the origin is not captured. Give Set Origin or Release Origin its own binding.`,
     }]
   }
 
-  const warnings: PivotBindingWarning[] = []
+  const warnings: PivotBindingWarning[] = [
+    ...duplicateBindingWarnings('Activation', activationBindings),
+    ...duplicateBindingWarnings('Set Origin', setOriginBindings),
+    ...duplicateBindingWarnings('Release Origin', releaseOriginBindings),
+  ]
   if (activationSetsOrigin) {
     warnings.push({
       title: 'Activation also sets the origin',
-      message: `Activation and Set Origin both use ${bindingLabel(activationBinding)}. ${action} recaptures the current head direction as Pivot's neutral forward. Keep this only if it is intentional; otherwise give Set Origin its own binding, normally your in-game recenter control.`,
+      message: `Activation and Set Origin both use ${bindingLabel(activationSetsOrigin)}. ${action} recaptures the current head direction as Pivot's neutral forward. Keep this only if it is intentional; otherwise give Set Origin its own binding, normally your in-game recenter control.`,
     })
   }
 
   if (activationReleasesOrigin) {
     warnings.push({
       title: 'Activation also releases the origin',
-      message: `Activation and Release Origin both use ${bindingLabel(activationBinding)}. ${action} clears any captured Pivot origin. Keep this only if it is intentional; otherwise give Release Origin its own binding.`,
+      message: `Activation and Release Origin both use ${bindingLabel(activationReleasesOrigin)}. ${action} clears any captured Pivot origin. Keep this only if it is intentional; otherwise give Release Origin its own binding.`,
     })
   }
 
   if (setAlsoReleasesOrigin) {
     warnings.push({
       title: 'Set Origin is immediately canceled',
-      message: `Set Origin and Release Origin both use ${bindingLabel(setOriginBinding)}. A press requests a new neutral forward and then immediately clears it, so the origin is not captured. Give one action a different binding.`,
+      message: `Set Origin and Release Origin both use ${bindingLabel(setAlsoReleasesOrigin)}. A press requests a new neutral forward and then immediately clears it, so the origin is not captured. Give one action a different binding.`,
     })
   }
 
@@ -1099,9 +1167,9 @@ function normalizeVectorXRConfig(value: unknown): VectorXRConfig {
         enabled: normalizeBoolean(pivotxr.enabled, fallback.modules.pivotxr.enabled),
         defaults: pivotDefaults,
         activationMode: normalizeActivationMode(pivotxr.activationMode),
-        activationBinding: normalizeInputBinding(pivotxr.activationBinding, fallback.modules.pivotxr.activationBinding),
-        setOriginBinding: normalizeInputBinding(pivotxr.setOriginBinding, defaultNoneBinding()),
-        releaseOriginBinding: normalizeInputBinding(pivotxr.releaseOriginBinding, defaultNoneBinding()),
+        activationBindings: normalizeInputBindings(pivotxr.activationBindings, pivotxr.activationBinding),
+        setOriginBindings: normalizeInputBindings(pivotxr.setOriginBindings, pivotxr.setOriginBinding),
+        releaseOriginBindings: normalizeInputBindings(pivotxr.releaseOriginBindings, pivotxr.releaseOriginBinding),
         profiles: pivotProfileValues.map((profileValue) => {
           const profile = isRecord(profileValue) ? profileValue : {}
           const settings = normalizePivotXRSettings(profile.settings, pivotDefaults)
@@ -1115,9 +1183,9 @@ function normalizeVectorXRConfig(value: unknown): VectorXRConfig {
             enabled: normalizeBoolean(profile.enabled, true),
             applicationIds,
             activationMode,
-            activationBinding: normalizeInputBinding(profile.activationBinding, defaultNoneBinding()),
-            setOriginBinding: normalizeInputBinding(profile.setOriginBinding, defaultNoneBinding()),
-            releaseOriginBinding: normalizeInputBinding(profile.releaseOriginBinding, defaultNoneBinding()),
+            activationBindings: normalizeInputBindings(profile.activationBindings, profile.activationBinding),
+            setOriginBindings: normalizeInputBindings(profile.setOriginBindings, profile.setOriginBinding),
+            releaseOriginBindings: normalizeInputBindings(profile.releaseOriginBindings, profile.releaseOriginBinding),
             settings,
           }
         }),

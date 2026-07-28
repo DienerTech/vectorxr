@@ -67,9 +67,7 @@
             "dcs"
           ],
           "activationMode": "toggle",
-          "activationBinding": {
-            "type": "none"
-          },
+          "activationBindings": [],
           "settings": {
             "smoothing": 0.2,
             "activationRampSeconds": 0.35,

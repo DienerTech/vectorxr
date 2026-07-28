@@ -143,7 +143,7 @@ void TestParseConfig() {
     Expect(result.document.depthxr.profiles.size() == 1, "DepthXR profile count mismatch");
     Expect(result.document.depthxr.profiles[0].application_ids[0] == "game", "DepthXR profile application id mismatch");
     Expect(result.document.pivotxr.profiles.size() == 1, "PivotXR profile count mismatch");
-    Expect(result.document.pivotxr.profiles[0].activation_binding.chord[0] == "F8", "PivotXR profile activation binding mismatch");
+    Expect(result.document.pivotxr.profiles[0].activation_bindings[0].chord[0] == "F8", "PivotXR profile activation binding mismatch");
     Expect(std::abs(result.document.pivotxr.profiles[0].settings.yaw_max_extra_degrees - 30.0) < 0.0001,
            "PivotXR profile yaw clamp mismatch");
     Expect(std::abs(result.document.pivotxr.profiles[0].settings.pitch_rotation_multiplier - 1.2) < 0.0001,
@@ -262,8 +262,8 @@ void TestResolveRuntimeConfig() {
     Expect(resolved.pivotxr.profiles.size() == 1, "PivotXR resolved candidate count mismatch");
     const depthxr::PivotXrResolvedProfile& pivot_profile = resolved.pivotxr.profiles[0];
     Expect(pivot_profile.activation_mode == depthxr::ActivationMode::Hold, "PivotXR activation mode mismatch");
-    Expect(pivot_profile.activation_binding.chord.size() == 2, "PivotXR activation chord size mismatch");
-    Expect(pivot_profile.activation_binding.chord[1] == "Space", "PivotXR activation binding was not resolved");
+    Expect(pivot_profile.activation_bindings[0].chord.size() == 2, "PivotXR activation chord size mismatch");
+    Expect(pivot_profile.activation_bindings[0].chord[1] == "Space", "PivotXR activation binding was not resolved");
     Expect(std::abs(pivot_profile.yaw_max_extra_degrees - 22.0) < 0.0001, "PivotXR yaw clamp mismatch");
     Expect(std::abs(pivot_profile.pitch_rotation_multiplier - 1.35) < 0.0001,
            "PivotXR pitch multiplier mismatch");
@@ -403,7 +403,7 @@ void TestPivotProfileResolution() {
     Expect(resolved.pivotxr.profiles.size() == 1, "PivotXR resolved candidate count mismatch");
     const depthxr::PivotXrResolvedProfile& dcs_profile = resolved.pivotxr.profiles[0];
     Expect(dcs_profile.activation_mode == depthxr::ActivationMode::Toggle, "PivotXR activation mode mismatch");
-    Expect(dcs_profile.activation_binding.chord[0] == "F8", "PivotXR activation binding mismatch");
+    Expect(dcs_profile.activation_bindings[0].chord[0] == "F8", "PivotXR activation binding mismatch");
     Expect(std::abs(dcs_profile.yaw_rotation_multiplier - 2.0) < 0.0001, "PivotXR yaw multiplier mismatch");
     Expect(std::abs(dcs_profile.yaw_max_extra_degrees - 60.0) < 0.0001, "PivotXR yaw clamp mismatch");
     Expect(std::abs(dcs_profile.pitch_rotation_multiplier - 1.5) < 0.0001, "PivotXR pitch multiplier mismatch");
@@ -412,8 +412,8 @@ void TestPivotProfileResolution() {
     const depthxr::ResolvedRuntimeConfig resolved_other = depthxr::ResolveRuntimeConfig(result.document, "other.exe");
     Expect(resolved_other.pivotxr.enabled, "PivotXR default profile should resolve for exe with no matching profile");
     Expect(resolved_other.pivotxr.profiles.size() == 1, "PivotXR default candidate count mismatch");
-    Expect(resolved_other.pivotxr.profiles[0].activation_binding.type == depthxr::InputBindingType::None,
-           "PivotXR default activation binding should fall back to none");
+    Expect(resolved_other.pivotxr.profiles[0].activation_bindings.empty(),
+           "PivotXR default activation bindings should fall back to an empty list");
     Expect(std::abs(resolved_other.pivotxr.profiles[0].yaw_rotation_multiplier - 1.5) < 0.0001,
            "PivotXR default yaw multiplier mismatch");
 }
@@ -443,7 +443,11 @@ void TestPivotMultiProfileResolution() {
           "applicationIds": ["dcs"],
           "enabled": true,
           "activationMode": "toggle",
-          "activationBinding": { "type": "keyboard", "chord": ["F8"] },
+          "activationBindings": [
+            { "type": "keyboard", "chord": ["F8"] },
+            { "type": "keyboard", "chord": ["F10"] },
+            { "type": "keyboard", "chord": ["F8"] }
+          ],
           "settings": { "rotationMultiplier": 1.5 }
         },
         {
@@ -451,7 +455,7 @@ void TestPivotMultiProfileResolution() {
           "name": "DCS Disabled",
           "applicationIds": ["dcs"],
           "enabled": false,
-          "activationBinding": { "type": "keyboard", "chord": ["F10"] },
+          "activationBinding": { "type": "keyboard", "chord": ["F11"] },
           "settings": { "rotationMultiplier": 3.0 }
         },
         {
@@ -460,14 +464,20 @@ void TestPivotMultiProfileResolution() {
           "applicationIds": ["dcs"],
           "enabled": true,
           "activationMode": "hold",
-          "activationBinding": { "type": "keyboard", "chord": ["F9"] },
+          "activationBindings": [
+            { "type": "keyboard", "chord": ["F8"] },
+            { "type": "keyboard", "chord": ["F9"] }
+          ],
           "settings": { "rotationMultiplier": 2.5 }
         },
         {
           "name": "DCS Shadowed",
           "applicationIds": ["dcs"],
           "enabled": true,
-          "activationBinding": { "type": "keyboard", "chord": ["F8"] },
+          "activationBindings": [
+            { "type": "keyboard", "chord": ["F8"] },
+            { "type": "keyboard", "chord": ["F10"] }
+          ],
           "settings": { "rotationMultiplier": 4.0 }
         },
         {
@@ -475,7 +485,10 @@ void TestPivotMultiProfileResolution() {
           "applicationIds": ["dcs"],
           "enabled": true,
           "activationMode": "alwaysOn",
-          "activationBinding": { "type": "keyboard", "chord": ["F8"] },
+          "activationBindings": [
+            { "type": "keyboard", "chord": ["F8"] },
+            { "type": "keyboard", "chord": ["F12"] }
+          ],
           "settings": { "rotationMultiplier": 3.0 }
         }
       ]
@@ -490,21 +503,27 @@ void TestPivotMultiProfileResolution() {
 
     const depthxr::ResolvedRuntimeConfig resolved = depthxr::ResolveRuntimeConfig(result.document, "DCS.exe");
     Expect(resolved.pivotxr.enabled, "PivotXR should be enabled when custom profiles match");
-    // Disabled and duplicate-F8 toggle profiles are skipped. The always-on
-    // profile remains eligible automatically, but its colliding optional
-    // suspend/resume binding is stripped from the resolved candidate.
+    // Disabled profiles and profiles whose entire binding list is shadowed are skipped.
+    // Individual colliding bindings are stripped while each profile's remaining
+    // independent bindings stay available.
     Expect(resolved.pivotxr.profiles.size() == 3, "PivotXR multi-profile candidate count mismatch");
+    Expect(resolved.pivotxr.profiles[0].activation_bindings.size() == 2,
+           "First candidate should retain both independent bindings and prune its duplicate");
     Expect(resolved.pivotxr.profiles[0].name == "DCS Mild", "Candidate priority order mismatch (first)");
     Expect(resolved.pivotxr.profiles[1].name == "DCS Strong", "Candidate priority order mismatch (second)");
     Expect(std::abs(resolved.pivotxr.profiles[1].yaw_rotation_multiplier - 2.5) < 0.0001,
            "Second candidate settings mismatch");
     Expect(resolved.pivotxr.profiles[1].activation_mode == depthxr::ActivationMode::Hold,
            "Second candidate activation mode mismatch");
+    Expect(resolved.pivotxr.profiles[1].activation_bindings.size() == 1 &&
+               resolved.pivotxr.profiles[1].activation_bindings[0].chord[0] == "F9",
+           "Second candidate should retain only its unshadowed activation binding");
     Expect(resolved.pivotxr.profiles[2].name == "DCS Always", "Candidate priority order mismatch (third)");
     Expect(resolved.pivotxr.profiles[2].activation_mode == depthxr::ActivationMode::AlwaysOn,
            "Shadowed always-on candidate activation mode mismatch");
-    Expect(resolved.pivotxr.profiles[2].activation_binding.type == depthxr::InputBindingType::None,
-           "Shadowed always-on suspend/resume binding should resolve to none");
+    Expect(resolved.pivotxr.profiles[2].activation_bindings.size() == 1 &&
+               resolved.pivotxr.profiles[2].activation_bindings[0].chord[0] == "F12",
+           "Always-on candidate should retain its unshadowed suspend/resume binding");
 }
 
 void TestPivotResponseModeAndAdvancedAxes() {

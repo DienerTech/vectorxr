@@ -169,13 +169,13 @@ struct PivotXrProfile {
     ProfileMode mode{ProfileMode::Custom};
     std::vector<std::string> application_ids;
     ActivationMode activation_mode{ActivationMode::Toggle};
-    InputBinding activation_binding;
+    std::vector<InputBinding> activation_bindings;
     // Optional origin bindings. Set-origin captures the current head yaw/pitch
     // as pivot's neutral forward (bind it to the same button as the game's
     // recenter so both origins stay 1:1). Release-origin restores the default
     // HMD/reference-space origin.
-    InputBinding set_origin_binding;
-    InputBinding release_origin_binding;
+    std::vector<InputBinding> set_origin_bindings;
+    std::vector<InputBinding> release_origin_bindings;
     PivotXrSettings settings;
 };
 
@@ -183,9 +183,9 @@ struct PivotXrModuleConfig {
     bool enabled{false};
     PivotXrSettings defaults;
     ActivationMode activation_mode{ActivationMode::Toggle};
-    InputBinding activation_binding;
-    InputBinding set_origin_binding;
-    InputBinding release_origin_binding;
+    std::vector<InputBinding> activation_bindings;
+    std::vector<InputBinding> set_origin_bindings;
+    std::vector<InputBinding> release_origin_bindings;
     std::vector<PivotXrProfile> profiles;
 };
 
@@ -194,9 +194,9 @@ struct PivotXrModuleConfig {
 struct PivotXrResolvedProfile {
     std::string name;
     ActivationMode activation_mode{ActivationMode::Toggle};
-    InputBinding activation_binding;
-    InputBinding set_origin_binding;
-    InputBinding release_origin_binding;
+    std::vector<InputBinding> activation_bindings;
+    std::vector<InputBinding> set_origin_bindings;
+    std::vector<InputBinding> release_origin_bindings;
     double smoothing{0.2};
     double activation_ramp_seconds{0.35};
     double yaw_rotation_multiplier{1.5};

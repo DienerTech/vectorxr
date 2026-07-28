@@ -1,16 +1,16 @@
 <script setup lang="ts">
-import BindingEditor from './BindingEditor.vue'
+import BindingListEditor from './BindingListEditor.vue'
 import type { ActivationMode, InputBinding } from '../lib/model'
 
 defineProps<{
   activationMode: ActivationMode
-  activationBinding: InputBinding
+  activationBindings: InputBinding[]
   description: string
 }>()
 
 const emit = defineEmits<{
   'update:activationMode': [value: ActivationMode]
-  'update:activationBinding': [value: InputBinding]
+  'update:activationBindings': [value: InputBinding[]]
 }>()
 
 function updateMode(value: string) {
@@ -20,14 +20,14 @@ function updateMode(value: string) {
 </script>
 
 <template>
-  <BindingEditor
-    :model-value="activationBinding"
+  <BindingListEditor
+    :model-value="activationBindings"
     label="Activation"
     :description="description"
     :none-text="activationMode === 'alwaysOn'
       ? 'No binding assigned. Pivot stays engaged for the whole session (always on with no suspend key).'
       : 'No binding assigned. Pivot will not activate until a binding is selected.'"
-    @update:model-value="$emit('update:activationBinding', $event)"
+    @update:model-value="$emit('update:activationBindings', $event)"
   >
     <template #controls>
       <label class="block">
@@ -44,5 +44,5 @@ function updateMode(value: string) {
         </select>
       </label>
     </template>
-  </BindingEditor>
+  </BindingListEditor>
 </template>

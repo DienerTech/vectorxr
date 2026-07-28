@@ -836,6 +836,47 @@ bool ParseDepthDefaults(const JsonValue::Object& object, DepthXrResolvedSettings
     return true;
 }
 
+bool ParseInputBindings(const JsonValue::Object& object,
+                        std::string_view plural_key,
+                        std::string_view legacy_key,
+                        std::vector<InputBinding>& out,
+                        std::string& error) {
+    const auto plural_it = object.find(std::string(plural_key));
+    const auto legacy_it = object.find(std::string(legacy_key));
+    if (plural_it != object.end() && legacy_it != object.end()) {
+        error = "Fields " + std::string(plural_key) + " and " + std::string(legacy_key) + " cannot both be present";
+        return false;
+    }
+
+    out.clear();
+    if (plural_it != object.end()) {
+        const JsonValue::Array* bindings = RequireArray(plural_it->second, std::string(plural_key), error);
+        if (!bindings) {
+            return false;
+        }
+        for (const JsonValue& binding_value : *bindings) {
+            InputBinding binding;
+            if (!ParseInputBinding(binding_value, binding, error)) {
+                return false;
+            }
+            if (binding.type != InputBindingType::None) {
+                out.push_back(std::move(binding));
+            }
+        }
+        return true;
+    }
+
+    if (legacy_it != object.end()) {
+        InputBinding binding;
+        if (!ParseInputBinding(legacy_it->second, binding, error)) {
+            return false;
+        }
+        if (binding.type != InputBindingType::None) {
+            out.push_back(std::move(binding));
+        }
+    }
+    return true;
+}
 bool ParseDepthBindings(const JsonValue::Object& object, DepthXrBindings& out, std::string& error) {
     static const std::unordered_set<std::string> allowed = {
         "toggleEnabled",
@@ -1325,6 +1366,9 @@ bool ParsePivotProfile(const JsonValue& value, PivotXrProfile& out, std::string&
         "mode",
         "applicationIds",
         "activationMode",
+        "activationBindings",
+        "setOriginBindings",
+        "releaseOriginBindings",
         "activationBinding",
         "setOriginBinding",
         "releaseOriginBinding",
@@ -1366,19 +1410,10 @@ bool ParsePivotProfile(const JsonValue& value, PivotXrProfile& out, std::string&
         out.activation_mode = *activation_mode;
     }
 
-    const auto binding_it = object->find("activationBinding");
-    if (binding_it != object->end() && !ParseInputBinding(binding_it->second, out.activation_binding, error)) {
-        return false;
-    }
-
-    const auto set_origin_it = object->find("setOriginBinding");
-    if (set_origin_it != object->end() && !ParseInputBinding(set_origin_it->second, out.set_origin_binding, error)) {
-        return false;
-    }
-
-    const auto release_origin_it = object->find("releaseOriginBinding");
-    if (release_origin_it != object->end() &&
-        !ParseInputBinding(release_origin_it->second, out.release_origin_binding, error)) {
+    if (!ParseInputBindings(*object, "activationBindings", "activationBinding", out.activation_bindings, error) ||
+        !ParseInputBindings(*object, "setOriginBindings", "setOriginBinding", out.set_origin_bindings, error) ||
+        !ParseInputBindings(*object, "releaseOriginBindings", "releaseOriginBinding", out.release_origin_bindings,
+                            error)) {
         return false;
     }
 
@@ -1398,6 +1433,9 @@ bool ParsePivotModule(const JsonValue::Object& object, PivotXrModuleConfig& out,
         "enabled",
         "defaults",
         "activationMode",
+        "activationBindings",
+        "setOriginBindings",
+        "releaseOriginBindings",
         "activationBinding",
         "setOriginBinding",
         "releaseOriginBinding",
@@ -1429,19 +1467,10 @@ bool ParsePivotModule(const JsonValue::Object& object, PivotXrModuleConfig& out,
         }
     }
 
-    const auto activation_binding_it = object.find("activationBinding");
-    if (activation_binding_it != object.end() && !ParseInputBinding(activation_binding_it->second, out.activation_binding, error)) {
-        return false;
-    }
-
-    const auto set_origin_it = object.find("setOriginBinding");
-    if (set_origin_it != object.end() && !ParseInputBinding(set_origin_it->second, out.set_origin_binding, error)) {
-        return false;
-    }
-
-    const auto release_origin_it = object.find("releaseOriginBinding");
-    if (release_origin_it != object.end() &&
-        !ParseInputBinding(release_origin_it->second, out.release_origin_binding, error)) {
+    if (!ParseInputBindings(object, "activationBindings", "activationBinding", out.activation_bindings, error) ||
+        !ParseInputBindings(object, "setOriginBindings", "setOriginBinding", out.set_origin_bindings, error) ||
+        !ParseInputBindings(object, "releaseOriginBindings", "releaseOriginBinding", out.release_origin_bindings,
+                            error)) {
         return false;
     }
 

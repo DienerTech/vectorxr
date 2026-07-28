@@ -92,51 +92,46 @@ function closeSubPages() {
 
 const defaultBindingWarnings = computed(() => pivotBindingConflictWarnings(
   props.config.modules.pivotxr.activationMode,
-  props.config.modules.pivotxr.activationBinding,
-  props.config.modules.pivotxr.setOriginBinding,
-  props.config.modules.pivotxr.releaseOriginBinding,
+  props.config.modules.pivotxr.activationBindings,
+  props.config.modules.pivotxr.setOriginBindings,
+  props.config.modules.pivotxr.releaseOriginBindings,
 ))
 
 const profileWarnings = computed(() => {
   const warnings = new Map<number, string[]>()
   const applicationNameById = new Map(props.applications.map((application) => [application.id, application.name]))
-
   const enabledProfiles = props.config.modules.pivotxr.profiles
     .map((profile, index) => ({ profile, index }))
     .filter(({ profile }) => profile.enabled)
+
   for (const { profile, index } of enabledProfiles) {
     const conflictMessages = pivotBindingConflictWarnings(
       profile.activationMode,
-      profile.activationBinding,
-      profile.setOriginBinding,
-      profile.releaseOriginBinding,
+      profile.activationBindings,
+      profile.setOriginBindings,
+      profile.releaseOriginBindings,
     ).map((warning) => warning.message)
     if (conflictMessages.length > 0) {
       warnings.set(index, conflictMessages)
     }
-  }
 
-  const activatableProfiles = enabledProfiles.filter(({ profile }) => profile.activationBinding.type !== 'none')
+    for (const binding of profile.activationBindings) {
+      for (const applicationId of profile.applicationIds) {
+        const owner = enabledProfiles.find((candidate) => (
+          candidate.index < index
+          && candidate.profile.applicationIds.includes(applicationId)
+          && candidate.profile.activationBindings.some((candidateBinding) => (
+            bindingsMatchRuntimeActivation(binding, candidateBinding)
+          ))
+        ))
+        if (!owner) continue
 
-  for (let i = 0; i < activatableProfiles.length; i++) {
-    for (let j = 0; j < i; j++) {
-      const a = activatableProfiles[i]
-      const b = activatableProfiles[j]
-      const labelA = bindingLabel(a.profile.activationBinding)
-
-      if (!bindingsMatchRuntimeActivation(a.profile.activationBinding, b.profile.activationBinding)) {
-        continue
-      }
-
-      for (const applicationId of a.profile.applicationIds) {
-        if (b.profile.applicationIds.includes(applicationId)) {
-          const appName = applicationNameById.get(applicationId) ?? applicationId
-          const message = a.profile.activationMode === 'alwaysOn'
-            ? `For ${appName}, binding ${labelA} is owned by the higher-priority "${b.profile.name}" (Profile ${b.index + 1}). Always On still engages automatically, but this binding cannot suspend or resume it. Reorder the profiles or pick a different binding.`
-            : `For ${appName}, binding ${labelA} is owned by the higher-priority "${b.profile.name}" (Profile ${b.index + 1}); it will not activate this profile. Reorder the profiles or pick a different binding.`
-          warnings.set(a.index, [...(warnings.get(a.index) ?? []), message])
-          break
-        }
+        const appName = applicationNameById.get(applicationId) ?? applicationId
+        const label = bindingLabel(binding)
+        const message = profile.activationMode === 'alwaysOn'
+          ? `For ${appName}, binding ${label} is owned by the higher-priority "${owner.profile.name}" (Profile ${owner.index + 1}). Always On still engages automatically, but this binding cannot suspend or resume it. Other unshadowed bindings still work.`
+          : `For ${appName}, binding ${label} is owned by the higher-priority "${owner.profile.name}" (Profile ${owner.index + 1}); this binding will not activate the profile. Other unshadowed bindings still work.`
+        warnings.set(index, [...(warnings.get(index) ?? []), message])
       }
     }
   }
@@ -220,9 +215,9 @@ const profileWarnings = computed(() => {
 
           <PivotBindingsPanel
             :activation-mode="config.modules.pivotxr.activationMode"
-            :activation-binding="config.modules.pivotxr.activationBinding"
-            :set-origin-binding="config.modules.pivotxr.setOriginBinding"
-            :release-origin-binding="config.modules.pivotxr.releaseOriginBinding"
+            :activation-bindings="config.modules.pivotxr.activationBindings"
+            :set-origin-bindings="config.modules.pivotxr.setOriginBindings"
+            :release-origin-bindings="config.modules.pivotxr.releaseOriginBindings"
             class="mb-3"
             @edit="openBindings('default')"
           />
@@ -274,9 +269,9 @@ const profileWarnings = computed(() => {
         >
           <PivotBindingsPanel
             :activation-mode="profile.activationMode"
-            :activation-binding="profile.activationBinding"
-            :set-origin-binding="profile.setOriginBinding"
-            :release-origin-binding="profile.releaseOriginBinding"
+            :activation-bindings="profile.activationBindings"
+            :set-origin-bindings="profile.setOriginBindings"
+            :release-origin-bindings="profile.releaseOriginBindings"
             @edit="openBindings(index)"
           />
 

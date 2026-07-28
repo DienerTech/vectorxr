@@ -128,6 +128,11 @@ up/down than your physical neck allows.
   activation **Binding** — a keyboard chord or a detected input device (joystick / HOTAS).
   *Always on* engages Pivot automatically without a binding. If you assign one, pressing it
   suspends and resumes automatic engagement.
+- Every Pivot action accepts multiple bindings, so keyboard chords and detected device inputs can
+  be mixed without duplicating a profile. **Set Origin** captures the current head pose as the
+  neutral seated origin; assigning it to the same input as the simulator's recenter action keeps
+  both origins aligned. **Release Origin** clears that captured origin. Set Origin and Release
+  Origin can each have multiple bindings too.
 - Tune **Yaw** and **Pitch** independently: rotation **Multiplier**, **Deadzone**, and **Max
   Extra** degrees. A shared **Smoothing** softens the motion for both axes.
 - The **Activation Ramp** (default 0.35s) eases Pivot in and out when it engages or disengages

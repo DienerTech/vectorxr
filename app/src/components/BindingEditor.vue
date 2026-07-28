@@ -17,10 +17,12 @@ const props = defineProps<{
   // their own cues (origin set/release, turbo on/off) test the right default.
   defaultActivateSound?: string
   defaultDeactivateSound?: string
+  removable?: boolean
 }>()
 
 const emit = defineEmits<{
   'update:modelValue': [value: InputBinding]
+  remove: []
 }>()
 
 type SoundPath = 'activateSound' | 'deactivateSound'
@@ -125,9 +127,19 @@ function toggleModifier(modifier: string, enabled: boolean) {
 
 <template>
   <div class="rounded-[1rem] border p-4 surface-panel-soft">
-    <div>
-      <p class="text-sm font-semibold tracking-tight">{{ label }}</p>
-      <p class="mt-1 text-sm leading-6 text-muted">{{ description }}</p>
+    <div class="flex items-start justify-between gap-3">
+      <div>
+        <p class="text-sm font-semibold tracking-tight">{{ label }}</p>
+        <p class="mt-1 text-sm leading-6 text-muted">{{ description }}</p>
+      </div>
+      <button
+        v-if="removable"
+        class="button-secondary shrink-0 rounded-[0.7rem] px-3 py-1.5 text-xs font-medium"
+        type="button"
+        @click="$emit('remove')"
+      >
+        Remove
+      </button>
     </div>
 
     <div class="mt-4 grid gap-3 sm:grid-cols-[repeat(auto-fit,minmax(150px,180px))]">

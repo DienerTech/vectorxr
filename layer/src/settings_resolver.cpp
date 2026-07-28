@@ -126,6 +126,30 @@ bool SameActivationInput(const InputBinding& lhs, const InputBinding& rhs) {
     return lhs.device_guid == rhs.device_guid && lhs.input_path == rhs.input_path;
 }
 
+std::vector<InputBinding> FilterUnclaimedActivationBindings(
+    const std::vector<InputBinding>& source,
+    const std::vector<PivotXrResolvedProfile>& earlier_profiles) {
+    std::vector<InputBinding> filtered;
+    for (const InputBinding& binding : source) {
+        if (binding.type == InputBindingType::None) {
+            continue;
+        }
+        const bool claimed_here = std::any_of(filtered.begin(), filtered.end(), [&](const InputBinding& accepted) {
+            return SameActivationInput(accepted, binding);
+        });
+        const bool claimed_earlier = std::any_of(
+            earlier_profiles.begin(), earlier_profiles.end(), [&](const PivotXrResolvedProfile& earlier) {
+                return std::any_of(earlier.activation_bindings.begin(), earlier.activation_bindings.end(),
+                                   [&](const InputBinding& earlier_binding) {
+                                       return SameActivationInput(earlier_binding, binding);
+                                   });
+            });
+        if (!claimed_here && !claimed_earlier) {
+            filtered.push_back(binding);
+        }
+    }
+    return filtered;
+}
 } // namespace
 
 PivotXrResolvedSettings ResolvePivotXrSettings(const ConfigDocument& config, std::string_view exe_name) {
@@ -142,23 +166,19 @@ PivotXrResolvedSettings ResolvePivotXrSettings(const ConfigDocument& config, std
                 continue;
             }
 
-            const bool binding_shadowed = std::any_of(
-                resolved.profiles.begin(), resolved.profiles.end(), [&](const PivotXrResolvedProfile& earlier) {
-                    return SameActivationInput(earlier.activation_binding, profile.activation_binding);
-                });
-            // A shadowed toggle/hold profile cannot be selected. Always-on
-            // participation does not depend on its optional binding, however,
-            // so retain that profile and shadow only its suspend/resume input.
-            if (binding_shadowed && profile.activation_mode != ActivationMode::AlwaysOn) {
+            std::vector<InputBinding> activation_bindings =
+                FilterUnclaimedActivationBindings(profile.activation_bindings, resolved.profiles);
+            const bool all_bindings_shadowed = !profile.activation_bindings.empty() && activation_bindings.empty();
+            if (all_bindings_shadowed && profile.activation_mode != ActivationMode::AlwaysOn) {
                 continue;
             }
 
             PivotXrResolvedProfile candidate;
             candidate.name = profile.name;
             candidate.activation_mode = profile.activation_mode;
-            candidate.activation_binding = binding_shadowed ? InputBinding{} : profile.activation_binding;
-            candidate.set_origin_binding = profile.set_origin_binding;
-            candidate.release_origin_binding = profile.release_origin_binding;
+            candidate.activation_bindings = std::move(activation_bindings);
+            candidate.set_origin_bindings = profile.set_origin_bindings;
+            candidate.release_origin_bindings = profile.release_origin_bindings;
             ApplyPivotSettings(candidate, profile.settings);
             resolved.profiles.push_back(std::move(candidate));
         }
@@ -170,9 +190,10 @@ PivotXrResolvedSettings ResolvePivotXrSettings(const ConfigDocument& config, std
         PivotXrResolvedProfile candidate;
         candidate.name = "Default";
         candidate.activation_mode = config.pivotxr.activation_mode;
-        candidate.activation_binding = config.pivotxr.activation_binding;
-        candidate.set_origin_binding = config.pivotxr.set_origin_binding;
-        candidate.release_origin_binding = config.pivotxr.release_origin_binding;
+        candidate.activation_bindings =
+            FilterUnclaimedActivationBindings(config.pivotxr.activation_bindings, {});
+        candidate.set_origin_bindings = config.pivotxr.set_origin_bindings;
+        candidate.release_origin_bindings = config.pivotxr.release_origin_bindings;
         ApplyPivotSettings(candidate, config.pivotxr.defaults);
         resolved.profiles.push_back(std::move(candidate));
     }

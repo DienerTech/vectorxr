@@ -2,7 +2,7 @@
 import { computed, onMounted, onUnmounted } from 'vue'
 
 import BindingConflictWarnings from './BindingConflictWarnings.vue'
-import BindingEditor from './BindingEditor.vue'
+import BindingListEditor from './BindingListEditor.vue'
 import PivotActivationEditor from './PivotActivationEditor.vue'
 import { pivotBindingConflictWarnings, savedBindingConflictWarnings, type ActivationMode, type InputBinding, type VectorXRConfig } from '../lib/model'
 
@@ -10,9 +10,9 @@ import { pivotBindingConflictWarnings, savedBindingConflictWarnings, type Activa
 // fields are mutated directly on the passed-in reactive object.
 interface PivotBindingsSubject {
   activationMode: ActivationMode
-  activationBinding: InputBinding
-  setOriginBinding: InputBinding
-  releaseOriginBinding: InputBinding
+  activationBindings: InputBinding[]
+  setOriginBindings: InputBinding[]
+  releaseOriginBindings: InputBinding[]
 }
 
 const props = defineProps<{
@@ -23,14 +23,14 @@ const props = defineProps<{
 }>()
 const bindingWarnings = computed(() => pivotBindingConflictWarnings(
   props.subject.activationMode,
-  props.subject.activationBinding,
-  props.subject.setOriginBinding,
-  props.subject.releaseOriginBinding,
+  props.subject.activationBindings,
+  props.subject.setOriginBindings,
+  props.subject.releaseOriginBindings,
 ))
 const globalBindingWarnings = computed(() => savedBindingConflictWarnings(props.config, [
-  props.subject.activationBinding,
-  props.subject.setOriginBinding,
-  props.subject.releaseOriginBinding,
+  ...props.subject.activationBindings,
+  ...props.subject.setOriginBindings,
+  ...props.subject.releaseOriginBindings,
 ], {
   suppressFocusOnlyConflicts: true,
 }))
@@ -84,7 +84,7 @@ onUnmounted(() => {
       <div class="mt-5 space-y-4">
         <PivotActivationEditor
           v-model:activation-mode="subject.activationMode"
-          v-model:activation-binding="subject.activationBinding"
+          v-model:activation-bindings="subject.activationBindings"
           description="Choose a keyboard shortcut, joystick button, or HAT direction that engages Pivot."
         />
 
@@ -98,17 +98,17 @@ onUnmounted(() => {
           <p class="mt-1">{{ warning.message }}</p>
         </div>
         <BindingConflictWarnings :warnings="globalBindingWarnings" />
-        <BindingEditor
-          v-model="subject.setOriginBinding"
+        <BindingListEditor
+          v-model="subject.setOriginBindings"
           label="Set Origin (optional)"
-          description="Captures the current head yaw and pitch as Pivot's neutral forward. Bind this to the same button you use to recenter the view in-game so both origins update together. Until it is pressed, Pivot uses the HMD origin."
+          description="Captures the current head pose as Pivot's neutral seated origin. Bind this to the same button you use to recenter the view in-game so both origins update together. Until it is pressed, Pivot uses the HMD origin."
           none-text="No binding assigned. Pivot rotates around the HMD origin (the default)."
           sound-mode="single"
           default-activate-sound="origin-set.wav"
         />
 
-        <BindingEditor
-          v-model="subject.releaseOriginBinding"
+        <BindingListEditor
+          v-model="subject.releaseOriginBindings"
           label="Release Origin (optional)"
           description="Clears a captured origin and returns Pivot to the HMD origin. Useful if an origin was captured while looking off-center."
           none-text="No binding assigned. A captured origin stays active until the session ends or it is recaptured."

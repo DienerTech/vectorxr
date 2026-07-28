@@ -99,6 +99,10 @@ function validateInputBinding(prefix: string, binding: InputBinding): string[] {
   return [...errors, ...validateSoundFeedback(prefix, binding)]
 }
 
+function validateInputBindings(prefix: string, bindings: InputBinding[]): string[] {
+  return bindings.flatMap((binding, index) => validateInputBinding(`${prefix}[${index}]`, binding))
+}
+
 function validatePivotXRSettings(prefix: string, settings: PivotXRSettings): string[] {
   const errors: string[] = []
 
@@ -313,9 +317,9 @@ function validatePivotXRProfile(profile: PivotXRProfileConfig, index: number, ap
     seenProfileApplicationIds.add(applicationId)
   }
 
-  errors.push(...validateInputBinding(`${prefix}activationBinding`, profile.activationBinding))
-  errors.push(...validateInputBinding(`${prefix}setOriginBinding`, profile.setOriginBinding))
-  errors.push(...validateInputBinding(`${prefix}releaseOriginBinding`, profile.releaseOriginBinding))
+  errors.push(...validateInputBindings(`${prefix}activationBindings`, profile.activationBindings))
+  errors.push(...validateInputBindings(`${prefix}setOriginBindings`, profile.setOriginBindings))
+  errors.push(...validateInputBindings(`${prefix}releaseOriginBindings`, profile.releaseOriginBindings))
   errors.push(...validatePivotXRSettings(prefix, profile.settings))
   return errors
 }
@@ -378,9 +382,9 @@ export function validateConfig(config: VectorXRConfig): string[] {
   errors.push(...validateInputBinding('modules.depthxr.bindings.toggleEnabled', config.modules.depthxr.bindings.toggleEnabled))
   errors.push(...validateInputBinding('modules.depthxr.bindings.toggleAnchor', config.modules.depthxr.bindings.toggleAnchor))
   errors.push(...validatePivotXRSettings('modules.pivotxr.defaults.', config.modules.pivotxr.defaults))
-  errors.push(...validateInputBinding('modules.pivotxr.activationBinding', config.modules.pivotxr.activationBinding))
-  errors.push(...validateInputBinding('modules.pivotxr.setOriginBinding', config.modules.pivotxr.setOriginBinding))
-  errors.push(...validateInputBinding('modules.pivotxr.releaseOriginBinding', config.modules.pivotxr.releaseOriginBinding))
+  errors.push(...validateInputBindings('modules.pivotxr.activationBindings', config.modules.pivotxr.activationBindings))
+  errors.push(...validateInputBindings('modules.pivotxr.setOriginBindings', config.modules.pivotxr.setOriginBindings))
+  errors.push(...validateInputBindings('modules.pivotxr.releaseOriginBindings', config.modules.pivotxr.releaseOriginBindings))
   errors.push(...validateQuadViewsSettings('modules.quadviews.defaults.', config.modules.quadviews.defaults))
 
   const applicationIds = new Set(config.applications.map((application) => application.id))

@@ -218,7 +218,7 @@ export function useConfigStore() {
         state.config.modules.pivotxr.defaults,
         defaultApplicationId ? [defaultApplicationId] : [],
         state.config.modules.pivotxr.activationMode,
-        state.config.modules.pivotxr.activationBinding,
+        state.config.modules.pivotxr.activationBindings,
       ),
     )
   }
@@ -311,7 +311,7 @@ export function useConfigStore() {
           state.config.modules.pivotxr.defaults,
           applicationIds,
           state.config.modules.pivotxr.activationMode,
-          state.config.modules.pivotxr.activationBinding,
+          state.config.modules.pivotxr.activationBindings,
         ),
       )
       syncPivotProfileName(state.config.modules.pivotxr.profiles.length - 1)

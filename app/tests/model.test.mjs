@@ -24,11 +24,28 @@ test('keyboard normalization preserves numpad and modifier keys', () => {
 
 test('config normalization round-trips a modified numpad chord', () => {
   const config = defaultConfig()
-  config.modules.pivotxr.activationBinding = keyboard('Ctrl', 'Numpad5')
+  config.modules.pivotxr.activationBindings = [
+    keyboard('Ctrl', 'Numpad5'),
+    keyboard('F10'),
+  ]
 
   const normalized = normalizeConfig(config)
 
-  assert.deepEqual(normalized.modules.pivotxr.activationBinding, keyboard('Ctrl', 'Numpad5'))
+  assert.deepEqual(normalized.modules.pivotxr.activationBindings, [
+    keyboard('Ctrl', 'Numpad5'),
+    keyboard('F10'),
+  ])
+})
+
+test('legacy singular Pivot bindings normalize to canonical binding lists', () => {
+  const config = defaultConfig()
+  delete config.modules.pivotxr.activationBindings
+  config.modules.pivotxr.activationBinding = keyboard('F8')
+
+  const normalized = normalizeConfig(config)
+
+  assert.deepEqual(normalized.modules.pivotxr.activationBindings, [keyboard('F8')])
+  assert.equal('activationBinding' in normalized.modules.pivotxr, false)
 })
 
 test('new Depth profiles enable Depth Lock by default', () => {
@@ -57,7 +74,7 @@ test('saved binding warnings scan across modules and profiles without blocking',
   const config = defaultConfig()
   config.modules.depthxr.bindings.toggleAnchor = keyboard('Shift', 'F8')
   config.modules.turbo.toggleBinding = keyboard('F8', 'Shift')
-  config.modules.pivotxr.activationBinding = keyboard('Shift', 'F8')
+  config.modules.pivotxr.activationBindings = [keyboard('Shift', 'F8')]
 
   const warnings = savedBindingConflictWarnings(config, [
     config.modules.depthxr.bindings.toggleAnchor,
@@ -72,12 +89,12 @@ test('saved binding warnings scan across modules and profiles without blocking',
 
 test('Pivot global warnings suppress conflicts already explained by the local warning', () => {
   const config = defaultConfig()
-  config.modules.pivotxr.activationBinding = keyboard('Shift', 'F8')
-  config.modules.pivotxr.setOriginBinding = keyboard('F8', 'Shift')
+  config.modules.pivotxr.activationBindings = [keyboard('Shift', 'F8')]
+  config.modules.pivotxr.setOriginBindings = [keyboard('F8', 'Shift')]
   const focus = [
-    config.modules.pivotxr.activationBinding,
-    config.modules.pivotxr.setOriginBinding,
-    config.modules.pivotxr.releaseOriginBinding,
+    ...config.modules.pivotxr.activationBindings,
+    ...config.modules.pivotxr.setOriginBindings,
+    ...config.modules.pivotxr.releaseOriginBindings,
   ]
 
   assert.equal(savedBindingConflictWarnings(config, focus).length, 1)
@@ -115,18 +132,22 @@ test('physical input sharing stays distinct from runtime activation arbitration'
 test('pivot binding warnings cover activation, set, and release conflicts', () => {
   const f8 = keyboard('F8')
 
-  const activationSet = pivotBindingConflictWarnings('toggle', f8, keyboard('F8'), none())
+  const activationSet = pivotBindingConflictWarnings('toggle', [f8], [keyboard('F8')], [])
   assert.equal(activationSet.length, 1)
   assert.equal(activationSet[0].title, 'Activation also sets the origin')
   assert.match(activationSet[0].message, /including deactivation/)
 
-  const activationRelease = pivotBindingConflictWarnings('hold', f8, none(), keyboard('F8'))
+  const activationRelease = pivotBindingConflictWarnings('hold', [f8], [], [keyboard('F8')])
   assert.equal(activationRelease[0].title, 'Activation also releases the origin')
 
-  const setRelease = pivotBindingConflictWarnings('hold', none(), f8, keyboard('F8'))
+  const setRelease = pivotBindingConflictWarnings('hold', [], [f8], [keyboard('F8')])
   assert.equal(setRelease[0].title, 'Set Origin is immediately canceled')
 
-  const allThree = pivotBindingConflictWarnings('toggle', f8, keyboard('F8'), keyboard('F8'))
+  const allThree = pivotBindingConflictWarnings('toggle', [f8], [keyboard('F8')], [keyboard('F8')])
   assert.equal(allThree.length, 1)
   assert.equal(allThree[0].title, 'One binding controls three conflicting actions')
+
+  const duplicateActivation = pivotBindingConflictWarnings('toggle', [f8, keyboard('F8')], [], [])
+  assert.equal(duplicateActivation.length, 1)
+  assert.equal(duplicateActivation[0].title, 'F8 is duplicated')
 })
