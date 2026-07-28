@@ -1713,6 +1713,14 @@ XrResult OpenXrLayer::OnInstanceCreated(const XrInstanceCreateInfo* create_info,
         logger_.Info("Active OpenXR runtime manifest: [" + diagnostics.active_runtime_path + "]");
         logger_.Info("Pre-instance runtime extensions seen by layer: [" + diagnostics.pre_instance_extensions +
                      "]");
+        if (diagnostics.eye_gaze_probe_structurally_unreliable) {
+            logger_.Info(
+                "DIAGNOSTIC: the completed pre-instance extension probe is structurally unreliable "
+                "(empty or missing extensions VectorXR will forward). Eye-gaze absence will be treated "
+                "as advisory and tested through the safe instance-create retry. Missing forwarded "
+                "extensions: [" +
+                diagnostics.pre_instance_missing_forwarded_extensions + "]");
+        }
         if (diagnostics.active_runtime_is_varjo && quad_views_extension_requested_ &&
             !diagnostics.runtime_advertises_varjo_quad) {
             logger_.Info(
@@ -1740,6 +1748,13 @@ XrResult OpenXrLayer::OnInstanceCreated(const XrInstanceCreateInfo* create_info,
                << EyeGazeProbeStateName(diagnostics.eye_gaze_probe_state)
                << ", probeDetail=" << diagnostics.pre_instance_extension_scan_detail
                << ", probeXrResult=" << static_cast<int>(diagnostics.pre_instance_extension_scan_result)
+               << ", probeHeuristic=" << (!diagnostics.pre_instance_extension_scan_complete
+                                               ? "not-evaluated"
+                                               : diagnostics.eye_gaze_probe_structurally_unreliable
+                                                     ? "inconsistent"
+                                                     : "credible")
+               << ", probeMissingForwardedCount="
+               << diagnostics.pre_instance_missing_forwarded_extension_count
                << ", runtimeWorkaround=" << (diagnostics.eye_gaze_probe_known_unreliable ? 1 : 0)
                << ", extensionRequest=" << extension_request
                << ", requestReason=" << EyeGazeRequestReasonName(diagnostics.eye_gaze_request_reason)

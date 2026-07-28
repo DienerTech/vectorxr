@@ -1,5 +1,6 @@
 #include "depthxr/runtime_compatibility.h"
 
+#include <algorithm>
 #include <string>
 
 namespace depthxr {
@@ -15,6 +16,32 @@ bool IsEyeGazeExtensionProbeKnownUnreliable(std::string_view active_runtime_mani
            normalized_path.find("steamxr") != std::string::npos ||
            normalized_path.find("pimax-openxr") != std::string::npos ||
            normalized_path.find("pimaxxr") != std::string::npos;
+}
+
+bool IsRuntimeExtensionProbeStructurallyUnreliable(
+    bool extension_scan_complete,
+    std::span<const std::string_view> advertised_extensions,
+    std::span<const std::string_view> forwarded_extensions) {
+    if (!extension_scan_complete) {
+        // A failed/incomplete scan is already classified as indeterminate.
+        return false;
+    }
+    if (advertised_extensions.empty()) {
+        // A usable desktop runtime necessarily exposes platform/graphics
+        // extensions. An empty lower-chain result is not credible evidence that
+        // any particular optional extension is unsupported.
+        return true;
+    }
+
+    return std::any_of(forwarded_extensions.begin(), forwarded_extensions.end(),
+                       [&](std::string_view forwarded_extension) {
+                           if (forwarded_extension.empty()) {
+                               return false;
+                           }
+                           return std::find(advertised_extensions.begin(),
+                                            advertised_extensions.end(),
+                                            forwarded_extension) == advertised_extensions.end();
+                       });
 }
 
 EyeGazeProbeState ClassifyEyeGazeProbe(bool extension_scan_complete, bool extension_advertised) {
@@ -45,6 +72,11 @@ EyeGazeRequestDecision DecideEyeGazeExtensionRequest(const EyeGazeRequestPolicyI
         // Try the extension and use the extension-specific create retry if needed.
         return {true, EyeGazeRequestReason::kProbeIndeterminate};
     }
+    if (input.pre_instance_probe_structurally_unreliable) {
+        // A completed list that is empty or omits extensions already being
+        // forwarded cannot make a trustworthy negative claim about eye gaze.
+        return {true, EyeGazeRequestReason::kProbeInconsistent};
+    }
     if (input.pre_instance_probe_known_unreliable) {
         // SteamVR with some eye-tracking drivers and PimaxXR can complete
         // enumeration without gaze, then accept it in xrCreateInstance.
@@ -73,6 +105,8 @@ std::string_view EyeGazeRequestReasonName(EyeGazeRequestReason reason) {
         return "runtime-advertised";
     case EyeGazeRequestReason::kProbeIndeterminate:
         return "probe-indeterminate";
+    case EyeGazeRequestReason::kProbeInconsistent:
+        return "probe-inconsistent";
     case EyeGazeRequestReason::kRuntimeWorkaround:
         return "runtime-workaround";
     case EyeGazeRequestReason::kNativeQuadviews:

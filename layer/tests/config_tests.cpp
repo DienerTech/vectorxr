@@ -1721,6 +1721,31 @@ void TestEyeGazeExtensionCompatibilityPolicy() {
                R"(C:\Program Files\Virtual Desktop Streamer\OpenXR\virtualdesktop-openxr.json)"),
            "VDXR should use the generic indeterminate-probe policy instead of a manifest exception");
 
+    const std::string_view d3d11_only[] = {"XR_KHR_D3D11_enable"};
+    const std::string_view ordinary_forwarded[] = {
+        "XR_KHR_D3D11_enable",
+        "XR_KHR_visibility_mask",
+        "XR_EXT_hand_tracking",
+    };
+    const std::string_view complete_advertisement[] = {
+        "XR_KHR_D3D11_enable",
+        "XR_KHR_visibility_mask",
+        "XR_EXT_hand_tracking",
+        "XR_EXT_debug_utils",
+    };
+    Expect(depthxr::IsRuntimeExtensionProbeStructurallyUnreliable(
+               true, std::span<const std::string_view>{}, ordinary_forwarded),
+           "A completed empty Pimax-style extension scan must be treated as structurally unreliable");
+    Expect(depthxr::IsRuntimeExtensionProbeStructurallyUnreliable(
+               true, d3d11_only, ordinary_forwarded),
+           "A partial scan missing extensions already being forwarded must be treated as unreliable");
+    Expect(!depthxr::IsRuntimeExtensionProbeStructurallyUnreliable(
+               true, complete_advertisement, ordinary_forwarded),
+           "A completed scan containing every forwarded extension should remain credible");
+    Expect(!depthxr::IsRuntimeExtensionProbeStructurallyUnreliable(
+               false, std::span<const std::string_view>{}, ordinary_forwarded),
+           "An incomplete scan is indeterminate and should not also be labeled structurally unreliable");
+
     Expect(depthxr::ClassifyEyeGazeProbe(false, false) == EyeGazeProbeState::kIndeterminate,
            "An extension scan that could not complete must remain indeterminate");
     Expect(depthxr::ClassifyEyeGazeProbe(false, true) == EyeGazeProbeState::kIndeterminate,
@@ -1754,6 +1779,11 @@ void TestEyeGazeExtensionCompatibilityPolicy() {
     expect_decision(input, false, EyeGazeRequestReason::kReliableNegative,
                     "A completed negative probe on an ordinary runtime should be trusted");
 
+    input.pre_instance_probe_structurally_unreliable = true;
+    expect_decision(input, true, EyeGazeRequestReason::kProbeInconsistent,
+                    "A structurally inconsistent negative should optimistically request gaze");
+
+    input.pre_instance_probe_structurally_unreliable = false;
     input.pre_instance_probe_known_unreliable = true;
     expect_decision(input, true, EyeGazeRequestReason::kRuntimeWorkaround,
                     "A completed false-negative on a known runtime should retain the workaround");
@@ -1780,6 +1810,8 @@ void TestEyeGazeExtensionCompatibilityPolicy() {
            "Probe state names must remain stable for startup diagnostics");
     Expect(depthxr::EyeGazeRequestReasonName(EyeGazeRequestReason::kProbeIndeterminate) ==
                "probe-indeterminate" &&
+               depthxr::EyeGazeRequestReasonName(EyeGazeRequestReason::kProbeInconsistent) ==
+                   "probe-inconsistent" &&
                depthxr::EyeGazeRequestReasonName(EyeGazeRequestReason::kRuntimeWorkaround) ==
                    "runtime-workaround" &&
                depthxr::EyeGazeRequestReasonName(EyeGazeRequestReason::kReliableNegative) ==

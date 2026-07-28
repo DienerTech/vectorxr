@@ -58,6 +58,7 @@ class OpenXrLayer {
         bool app_requested_varjo_foveated_rendering{false};
         bool app_requested_eye_gaze{false};
         EyeGazeProbeState eye_gaze_probe_state{EyeGazeProbeState::kIndeterminate};
+        bool eye_gaze_probe_structurally_unreliable{false};
         bool eye_gaze_probe_known_unreliable{false};
         EyeGazeRequestReason eye_gaze_request_reason{EyeGazeRequestReason::kQuadviewsNotRequested};
         bool layer_injected_eye_gaze_request{false};
@@ -83,6 +84,8 @@ class OpenXrLayer {
         XrResult pre_instance_extension_scan_result{XR_SUCCESS};
         uint32_t pre_instance_extension_count{0};
         std::string pre_instance_extensions;
+        uint32_t pre_instance_missing_forwarded_extension_count{0};
+        std::string pre_instance_missing_forwarded_extensions;
         // Authoritative fallback Varjo signal: the active runtime manifest.
         // This covers Varjo's unreliable pre-instance extension enumeration.
         bool active_runtime_is_varjo{false};
