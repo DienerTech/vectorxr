@@ -21,6 +21,7 @@
 #include <openxr/openxr.h>
 
 #include "depthxr/config_parser.h"
+#include "depthxr/pivot_step.h"
 #include "depthxr/effects.h"
 #include "depthxr/logger.h"
 #include "depthxr/quadviews_recovery.h"
@@ -634,6 +635,8 @@ class OpenXrLayer {
     // Stepped response mode: signed persistent step per axis (with hysteresis).
     int pivotxr_yaw_step_{0};
     int pivotxr_pitch_step_{0};
+    PivotStepGlideState pivotxr_yaw_step_glide_;
+    PivotStepGlideState pivotxr_pitch_step_glide_;
     // Activation envelope in [0,1]: eases the pivot effect in/out on the
     // enable/disable transition so toggling never snaps the view, independent
     // of the per-frame tracking smoothing.

@@ -314,6 +314,28 @@
         }
       }
     },
+    "pivotAxisTuning": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["rotationMultiplier", "deadzoneDegrees", "maxExtraDegrees"],
+      "properties": {
+        "rotationMultiplier": { "type": "number", "minimum": 1.0, "maximum": 3.0 },
+        "deadzoneDegrees": { "type": "number", "minimum": 0.0, "maximum": 180.0 },
+        "maxExtraDegrees": { "type": "number", "minimum": 0.0, "maximum": 180.0 }
+      }
+    },
+    "pivotStepTuning": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["deadzoneDegrees", "triggerDegrees", "amountDegrees", "hysteresisDegrees", "maxExtraDegrees"],
+      "properties": {
+        "deadzoneDegrees": { "type": "number", "minimum": 0.0, "maximum": 180.0 },
+        "triggerDegrees": { "type": "number", "minimum": 1.0, "maximum": 45.0 },
+        "amountDegrees": { "type": "number", "minimum": 0.0, "maximum": 60.0 },
+        "hysteresisDegrees": { "type": "number", "minimum": 0.0, "maximum": 20.0 },
+        "maxExtraDegrees": { "type": "number", "minimum": 0.0, "maximum": 180.0 }
+      }
+    },
     "pivotxrSettings": {
       "type": "object",
       "additionalProperties": false,
@@ -325,49 +347,45 @@
         "maxExtraYawDegrees",
         "pitchRotationMultiplier",
         "pitchDeadzoneDegrees",
-        "maxExtraPitchDegrees"
+        "maxExtraPitchDegrees",
+        "responseMode",
+        "stepGlideMode",
+        "stepGlideSeconds",
+        "yawStep",
+        "pitchStep",
+        "advancedAxes",
+        "yawLeft",
+        "yawRight",
+        "pitchUp",
+        "pitchDown",
+        "yawLeftStep",
+        "yawRightStep",
+        "pitchUpStep",
+        "pitchDownStep"
       ],
       "properties": {
-        "smoothing": {
-          "type": "number",
-          "minimum": 0.0,
-          "maximum": 1.0
-        },
-        "activationRampSeconds": {
-          "type": "number",
-          "minimum": 0.0,
-          "maximum": 2.0
-        },
-        "rotationMultiplier": {
-          "type": "number",
-          "minimum": 1.0,
-          "maximum": 3.0
-        },
-        "deadzoneDegrees": {
-          "type": "number",
-          "minimum": 0.0,
-          "maximum": 180.0
-        },
-        "maxExtraYawDegrees": {
-          "type": "number",
-          "minimum": 0.0,
-          "maximum": 180.0
-        },
-        "pitchRotationMultiplier": {
-          "type": "number",
-          "minimum": 1.0,
-          "maximum": 3.0
-        },
-        "pitchDeadzoneDegrees": {
-          "type": "number",
-          "minimum": 0.0,
-          "maximum": 90.0
-        },
-        "maxExtraPitchDegrees": {
-          "type": "number",
-          "minimum": 0.0,
-          "maximum": 180.0
-        }
+        "smoothing": { "type": "number", "minimum": 0.0, "maximum": 1.0 },
+        "activationRampSeconds": { "type": "number", "minimum": 0.0, "maximum": 2.0 },
+        "rotationMultiplier": { "type": "number", "minimum": 1.0, "maximum": 3.0 },
+        "deadzoneDegrees": { "type": "number", "minimum": 0.0, "maximum": 180.0 },
+        "maxExtraYawDegrees": { "type": "number", "minimum": 0.0, "maximum": 180.0 },
+        "pitchRotationMultiplier": { "type": "number", "minimum": 1.0, "maximum": 3.0 },
+        "pitchDeadzoneDegrees": { "type": "number", "minimum": 0.0, "maximum": 90.0 },
+        "maxExtraPitchDegrees": { "type": "number", "minimum": 0.0, "maximum": 180.0 },
+        "responseMode": { "type": "string", "enum": ["continuous", "stepped"] },
+        "stepGlideMode": { "type": "string", "enum": ["instant", "glide"] },
+        "stepGlideSeconds": { "type": "number", "minimum": 0.0, "maximum": 2.0 },
+        "yawStep": { "$ref": "#/$defs/pivotStepTuning" },
+        "pitchStep": { "$ref": "#/$defs/pivotStepTuning" },
+        "advancedAxes": { "type": "boolean" },
+        "yawLeft": { "$ref": "#/$defs/pivotAxisTuning" },
+        "yawRight": { "$ref": "#/$defs/pivotAxisTuning" },
+        "pitchUp": { "$ref": "#/$defs/pivotAxisTuning" },
+        "pitchDown": { "$ref": "#/$defs/pivotAxisTuning" },
+        "yawLeftStep": { "$ref": "#/$defs/pivotStepTuning" },
+        "yawRightStep": { "$ref": "#/$defs/pivotStepTuning" },
+        "pitchUpStep": { "$ref": "#/$defs/pivotStepTuning" },
+        "pitchDownStep": { "$ref": "#/$defs/pivotStepTuning" }
       }
     },
     "pivotxrProfile": {

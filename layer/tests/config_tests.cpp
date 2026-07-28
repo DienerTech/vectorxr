@@ -12,6 +12,7 @@
 #include "depthxr/input_devices.h"
 #include "depthxr/logger.h"
 #include "depthxr/pivot_routing.h"
+#include "depthxr/pivot_step.h"
 #include "depthxr/quadviews_recovery.h"
 #include "depthxr/quadviews_sizing.h"
 #include "depthxr/runtime_pacing.h"
@@ -568,6 +569,15 @@ void TestPivotResponseModeAndAdvancedAxes() {
           "activationBinding": { "type": "keyboard", "chord": ["F9"] },
           "settings": {
             "advancedAxes": true,
+            "responseMode": "stepped",
+            "stepGlideMode": "instant",
+            "stepGlideSeconds": 0.0,
+            "yawStep": { "deadzoneDegrees": 7.0, "triggerDegrees": 11.0, "amountDegrees": 17.0, "hysteresisDegrees": 3.0, "maxExtraDegrees": 80.0 },
+            "pitchStep": { "deadzoneDegrees": 9.0, "triggerDegrees": 13.0, "amountDegrees": 19.0, "hysteresisDegrees": 4.0, "maxExtraDegrees": 60.0 },
+            "yawLeftStep": { "amountDegrees": 21.0 },
+            "yawRightStep": { "triggerDegrees": 14.0 },
+            "pitchUpStep": { "maxExtraDegrees": 45.0 },
+            "pitchDownStep": { "deadzoneDegrees": 12.0 },
             "yawLeft": { "rotationMultiplier": 2.0, "deadzoneDegrees": 180.0, "maxExtraDegrees": 90.0 },
             "yawRight": { "rotationMultiplier": 1.2 },
             "pitchUp": { "rotationMultiplier": 1.8, "deadzoneDegrees": 90.0 },
@@ -590,9 +600,17 @@ void TestPivotResponseModeAndAdvancedAxes() {
            "alwaysOn activation mode was not parsed");
     Expect(stepped_profile.response_mode == depthxr::PivotResponseMode::Stepped,
            "Stepped response mode was not resolved");
-    Expect(std::abs(stepped_profile.step_trigger_degrees - 12.0) < 0.0001, "Step trigger mismatch");
-    Expect(std::abs(stepped_profile.step_amount_degrees - 15.0) < 0.0001, "Step amount mismatch");
-    Expect(std::abs(stepped_profile.step_hysteresis_degrees - 5.0) < 0.0001, "Step hysteresis mismatch");
+    Expect(std::abs(stepped_profile.yaw_step_positive.trigger_degrees - 12.0) < 0.0001,
+           "Legacy trigger did not migrate to yaw");
+    Expect(std::abs(stepped_profile.pitch_step_positive.trigger_degrees - 12.0) < 0.0001,
+           "Legacy trigger did not migrate to pitch");
+    Expect(std::abs(stepped_profile.yaw_step_negative.amount_degrees - 15.0) < 0.0001,
+           "Legacy amount did not migrate to both yaw directions");
+    Expect(std::abs(stepped_profile.pitch_step_negative.hysteresis_degrees - 5.0) < 0.0001,
+           "Legacy hysteresis did not migrate to both pitch directions");
+    Expect(stepped_profile.step_glide_mode == depthxr::PivotStepGlideMode::Glide &&
+               stepped_profile.step_glide_seconds > 0.0,
+           "Legacy stepped smoothing did not migrate to glide");
 
     const depthxr::ResolvedRuntimeConfig advanced = depthxr::ResolveRuntimeConfig(result.document, "MSFS.exe");
     Expect(advanced.pivotxr.profiles.size() == 1, "Advanced candidate count mismatch");
@@ -612,12 +630,104 @@ void TestPivotResponseModeAndAdvancedAxes() {
     Expect(std::abs(advanced_profile.pitch_negative.max_extra_degrees - 30.0) < 0.0001,
            "Advanced pitch-down max extra mismatch");
 
+    Expect(advanced_profile.response_mode == depthxr::PivotResponseMode::Stepped,
+           "Advanced stepped response mode mismatch");
+    Expect(advanced_profile.step_glide_mode == depthxr::PivotStepGlideMode::Instant &&
+               std::abs(advanced_profile.step_glide_seconds) < 0.0001,
+           "Canonical instant glide settings mismatch");
+    Expect(std::abs(advanced_profile.yaw_step_positive.amount_degrees - 21.0) < 0.0001 &&
+               std::abs(advanced_profile.yaw_step_positive.trigger_degrees - 11.0) < 0.0001,
+           "Yaw-left step override did not inherit the remaining basic yaw fields");
+    Expect(std::abs(advanced_profile.yaw_step_negative.trigger_degrees - 14.0) < 0.0001 &&
+               std::abs(advanced_profile.yaw_step_negative.amount_degrees - 17.0) < 0.0001,
+           "Yaw-right step override did not inherit the remaining basic yaw fields");
+    Expect(std::abs(advanced_profile.pitch_step_positive.max_extra_degrees - 45.0) < 0.0001 &&
+               std::abs(advanced_profile.pitch_step_negative.deadzone_degrees - 12.0) < 0.0001,
+           "Advanced pitch step overrides mismatch");
+
     // Symmetric profiles collapse direction tunings to the yaw/pitch values.
     Expect(std::abs(stepped_profile.yaw_positive.deadzone_degrees - 180.0) < 0.0001,
            "Symmetric collapse should mirror yaw deadzone into direction tunings");
     Expect(std::abs(stepped_profile.pitch_positive.deadzone_degrees - 90.0) < 0.0001,
            "Symmetric collapse should mirror pitch deadzone into direction tunings");
 }
+
+void TestPivotSteppedGlideMath() {
+    const auto radians = [](double degrees) {
+        return degrees * 3.14159265358979323846 / 180.0;
+    };
+    const depthxr::PivotStepTuning positive{10.0, 10.0, 15.0, 4.0, 60.0};
+    const depthxr::PivotStepTuning negative{8.0, 12.0, 25.0, 3.0, 75.0};
+
+    int step = 0;
+    double displayed = 0.0;
+    depthxr::PivotStepGlideState state;
+    depthxr::UpdatePivotSteppedExtraAngleRadians(radians(20.0), positive, negative,
+                                                 depthxr::PivotStepGlideMode::Instant, 0.0, 0.0,
+                                                 step, displayed, state);
+    Expect(step == 1 && std::abs(displayed - radians(15.0)) < 0.000001,
+           "Instant stepped response did not land exactly on its target");
+
+    depthxr::UpdatePivotSteppedExtraAngleRadians(radians(17.0), positive, negative,
+                                                 depthxr::PivotStepGlideMode::Instant, 0.0, 0.0,
+                                                 step, displayed, state);
+    Expect(step == 1, "Step hysteresis released above the bounded release threshold");
+    depthxr::UpdatePivotSteppedExtraAngleRadians(radians(15.0), positive, negative,
+                                                 depthxr::PivotStepGlideMode::Instant, 0.0, 0.0,
+                                                 step, displayed, state);
+    Expect(step == 0, "Step hysteresis did not release below its threshold");
+
+    depthxr::UpdatePivotSteppedExtraAngleRadians(radians(-20.0), positive, negative,
+                                                 depthxr::PivotStepGlideMode::Instant, 0.0, 0.0,
+                                                 step, displayed, state);
+    Expect(step == -1 && std::abs(displayed - radians(-25.0)) < 0.000001,
+           "Negative direction did not use its independent trigger and amount");
+
+    const auto glide_at = [&](double frame_seconds, int frames) {
+        int glide_step = 0;
+        double glide_displayed = 0.0;
+        depthxr::PivotStepGlideState glide_state;
+        for (int frame = 0; frame < frames; ++frame) {
+            depthxr::UpdatePivotSteppedExtraAngleRadians(radians(20.0), positive, negative,
+                                                         depthxr::PivotStepGlideMode::Glide, 0.12,
+                                                         frame_seconds, glide_step,
+                                                         glide_displayed, glide_state);
+        }
+        return glide_displayed;
+    };
+    const double sixty_hz_midpoint = glide_at(0.01, 6);
+    const double thirty_hz_midpoint = glide_at(0.02, 3);
+    Expect(std::abs(sixty_hz_midpoint - thirty_hz_midpoint) < 0.000001,
+           "Step glide changed with frame rate at the same elapsed time");
+    Expect(std::abs(glide_at(0.02, 6) - radians(15.0)) < 0.000001,
+           "Step glide did not settle exactly on target");
+
+    step = 0;
+    displayed = 0.0;
+    state = {};
+    depthxr::UpdatePivotSteppedExtraAngleRadians(radians(20.0), positive, negative,
+                                                 depthxr::PivotStepGlideMode::Glide, 0.12, 0.04,
+                                                 step, displayed, state);
+    const double before_retarget = displayed;
+    depthxr::UpdatePivotSteppedExtraAngleRadians(radians(30.0), positive, negative,
+                                                 depthxr::PivotStepGlideMode::Glide, 0.12, 0.0,
+                                                 step, displayed, state);
+    Expect(step == 2 && std::abs(displayed - before_retarget) < 0.000001 &&
+               std::abs(state.start_radians - before_retarget) < 0.000001,
+           "Mid-glide retarget did not start from the currently displayed angle");
+    double previous = displayed;
+    for (int frame = 0; frame < 6; ++frame) {
+        depthxr::UpdatePivotSteppedExtraAngleRadians(radians(30.0), positive, negative,
+                                                     depthxr::PivotStepGlideMode::Glide, 0.12, 0.02,
+                                                     step, displayed, state);
+        Expect(displayed >= previous && displayed <= radians(30.0) + 0.000001,
+               "Retargeted step glide was non-monotonic or overshot");
+        previous = displayed;
+    }
+    Expect(std::abs(displayed - radians(30.0)) < 0.000001,
+           "Retargeted step glide did not settle exactly on target");
+}
+
 
 void TestTurboModuleResolution() {
     const std::string json = R"json(
@@ -2066,6 +2176,7 @@ int main() {
     TestPivotProfileResolution();
     TestPivotMultiProfileResolution();
     TestPivotResponseModeAndAdvancedAxes();
+    TestPivotSteppedGlideMath();
     TestTurboModuleResolution();
     TestTurboPacingModeParsing();
     TestTurboModuleOptional();

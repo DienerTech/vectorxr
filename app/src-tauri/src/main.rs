@@ -1849,7 +1849,9 @@ fn play_test_sound(
 
 #[cfg(test)]
 mod tests {
-    use super::{default_config, DepthXRBindings, DepthXRSettings, PivotXRProfileConfig};
+    use super::{
+        default_config, DepthXRBindings, DepthXRSettings, PivotXRProfileConfig, PivotXRSettings,
+    };
 
     #[test]
     fn new_configs_enable_depth_anchor_by_default() {
@@ -1920,6 +1922,38 @@ mod tests {
         assert_eq!(bindings.len(), 2);
         assert_eq!(bindings[0]["chord"][0], "F8");
         assert_eq!(bindings[1]["inputPath"], "hat-1-left");
+    }
+
+    #[test]
+    fn pivot_step_settings_survive_the_config_save_round_trip() {
+        let settings: PivotXRSettings = serde_json::from_value(serde_json::json!({
+            "responseMode": "stepped",
+            "stepGlideMode": "glide",
+            "stepGlideSeconds": 0.18,
+            "yawStep": {
+                "deadzoneDegrees": 7.0,
+                "triggerDegrees": 11.0,
+                "amountDegrees": 17.0,
+                "hysteresisDegrees": 3.0,
+                "maxExtraDegrees": 80.0
+            },
+            "pitchDownStep": {
+                "deadzoneDegrees": 12.0,
+                "triggerDegrees": 16.0,
+                "amountDegrees": 22.0,
+                "hysteresisDegrees": 6.0,
+                "maxExtraDegrees": 40.0
+            }
+        }))
+        .expect("Pivot stepped settings should deserialize");
+
+        let serialized =
+            serde_json::to_value(settings).expect("Pivot stepped settings should serialize");
+        assert_eq!(serialized["responseMode"], "stepped");
+        assert_eq!(serialized["stepGlideMode"], "glide");
+        assert_eq!(serialized["stepGlideSeconds"], 0.18);
+        assert_eq!(serialized["yawStep"]["triggerDegrees"], 11.0);
+        assert_eq!(serialized["pitchDownStep"]["amountDegrees"], 22.0);
     }
 
     #[test]

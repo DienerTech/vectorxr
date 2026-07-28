@@ -87,17 +87,18 @@ void ApplyPivotSettings(PivotXrResolvedProfile& resolved, const PivotXrSettings&
     resolved.pitch_deadzone_degrees = settings.pitch_deadzone_degrees;
     resolved.pitch_max_extra_degrees = settings.pitch_max_extra_degrees;
     resolved.response_mode = settings.response_mode;
-    resolved.step_trigger_degrees = settings.step_trigger_degrees;
-    resolved.step_amount_degrees = settings.step_amount_degrees;
-    resolved.step_hysteresis_degrees = settings.step_hysteresis_degrees;
+    resolved.step_glide_mode = settings.step_glide_mode;
+    resolved.step_glide_seconds = settings.step_glide_seconds;
 
-    // Direction tunings collapse to the symmetric values unless advanced axes
-    // are enabled, so the runtime always reads one shape.
     if (settings.advanced_axes) {
         resolved.yaw_positive = settings.yaw_left;
         resolved.yaw_negative = settings.yaw_right;
         resolved.pitch_positive = settings.pitch_up;
         resolved.pitch_negative = settings.pitch_down;
+        resolved.yaw_step_positive = settings.yaw_left_step;
+        resolved.yaw_step_negative = settings.yaw_right_step;
+        resolved.pitch_step_positive = settings.pitch_up_step;
+        resolved.pitch_step_negative = settings.pitch_down_step;
     } else {
         const PivotAxisTuning yaw{settings.yaw_rotation_multiplier, settings.yaw_deadzone_degrees,
                                   settings.yaw_max_extra_degrees};
@@ -107,6 +108,10 @@ void ApplyPivotSettings(PivotXrResolvedProfile& resolved, const PivotXrSettings&
         resolved.yaw_negative = yaw;
         resolved.pitch_positive = pitch;
         resolved.pitch_negative = pitch;
+        resolved.yaw_step_positive = settings.yaw_step;
+        resolved.yaw_step_negative = settings.yaw_step;
+        resolved.pitch_step_positive = settings.pitch_step;
+        resolved.pitch_step_negative = settings.pitch_step;
     }
 }
 

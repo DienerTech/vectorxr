@@ -29,6 +29,11 @@ enum class PivotResponseMode {
     Stepped,
 };
 
+enum class PivotStepGlideMode {
+    Instant,
+    Glide,
+};
+
 enum class InputBindingType {
     None,
     Keyboard,
@@ -134,6 +139,14 @@ struct PivotAxisTuning {
     double max_extra_degrees{120.0};
 };
 
+struct PivotStepTuning {
+    double deadzone_degrees{8.0};
+    double trigger_degrees{10.0};
+    double amount_degrees{10.0};
+    double hysteresis_degrees{4.0};
+    double max_extra_degrees{120.0};
+};
+
 struct PivotXrSettings {
     // General (apply to both axes).
     double smoothing{0.2};
@@ -146,19 +159,21 @@ struct PivotXrSettings {
     double pitch_rotation_multiplier{1.5};
     double pitch_deadzone_degrees{8.0};
     double pitch_max_extra_degrees{120.0};
-    // Response shaping. Stepped mode uses the symmetric yaw/pitch deadzones as
-    // its base and adds step_amount per step_trigger of head angle beyond it.
     PivotResponseMode response_mode{PivotResponseMode::Continuous};
-    double step_trigger_degrees{10.0};
-    double step_amount_degrees{10.0};
-    double step_hysteresis_degrees{4.0};
-    // When true, continuous mode uses the four per-direction tunings below
-    // instead of the symmetric yaw/pitch values.
+    PivotStepGlideMode step_glide_mode{PivotStepGlideMode::Glide};
+    double step_glide_seconds{0.12};
+    PivotStepTuning yaw_step;
+    PivotStepTuning pitch_step;
+    // Advanced axes applies independently to Continuous and Stepped.
     bool advanced_axes{false};
     PivotAxisTuning yaw_left;
     PivotAxisTuning yaw_right;
     PivotAxisTuning pitch_up;
     PivotAxisTuning pitch_down;
+    PivotStepTuning yaw_left_step;
+    PivotStepTuning yaw_right_step;
+    PivotStepTuning pitch_up_step;
+    PivotStepTuning pitch_down_step;
 };
 
 struct PivotXrProfile {
@@ -206,16 +221,17 @@ struct PivotXrResolvedProfile {
     double pitch_deadzone_degrees{8.0};
     double pitch_max_extra_degrees{120.0};
     PivotResponseMode response_mode{PivotResponseMode::Continuous};
-    double step_trigger_degrees{10.0};
-    double step_amount_degrees{10.0};
-    double step_hysteresis_degrees{4.0};
-    // Direction-resolved tunings for continuous mode. When advanced axes are
-    // off these all mirror the symmetric yaw/pitch values. Positive = the
-    // positive rotation direction (yaw: left, pitch: up).
+    PivotStepGlideMode step_glide_mode{PivotStepGlideMode::Glide};
+    double step_glide_seconds{0.12};
+    // Direction-resolved tunings. Positive = yaw left / pitch up.
     PivotAxisTuning yaw_positive;
     PivotAxisTuning yaw_negative;
     PivotAxisTuning pitch_positive;
     PivotAxisTuning pitch_negative;
+    PivotStepTuning yaw_step_positive;
+    PivotStepTuning yaw_step_negative;
+    PivotStepTuning pitch_step_positive;
+    PivotStepTuning pitch_step_negative;
 };
 
 // Resolved at runtime for a specific executable. Several profiles may target
@@ -367,5 +383,7 @@ const char* ToString(ProfileMode mode);
 std::optional<ProfileMode> ParseProfileMode(const std::string& value);
 const char* ToString(PivotResponseMode mode);
 std::optional<PivotResponseMode> ParsePivotResponseMode(const std::string& value);
+const char* ToString(PivotStepGlideMode mode);
+std::optional<PivotStepGlideMode> ParsePivotStepGlideMode(const std::string& value);
 
 } // namespace depthxr

@@ -41,9 +41,9 @@ onUnmounted(() => {
             <span aria-hidden="true">›</span>
             <span>{{ contextLabel }}</span>
             <span aria-hidden="true">›</span>
-            <span class="font-medium" style="color: var(--app-text)">Rotation Settings</span>
+            <span class="font-medium" style="color: var(--app-text)">Motion Assist</span>
           </nav>
-          <h2 class="mt-2 text-2xl font-semibold tracking-tight">{{ contextLabel }} — Rotation Settings</h2>
+          <h2 class="mt-2 text-2xl font-semibold tracking-tight">{{ contextLabel }} — Motion Assist</h2>
           <p class="mt-1 text-sm text-muted">Press Esc or Done to return to Pivot.</p>
         </div>
         <button

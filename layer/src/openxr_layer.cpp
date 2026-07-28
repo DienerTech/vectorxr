@@ -21,6 +21,7 @@
 #include "depthxr/effects.h"
 #include "depthxr/input_devices.h"
 #include "depthxr/process_info.h"
+#include "depthxr/pivot_step.h"
 #include "depthxr/quadviews_sizing.h"
 #include "depthxr/runtime_compatibility.h"
 #include "depthxr/runtime_pacing.h"
@@ -1132,65 +1133,6 @@ double ComputeTimeBasedBlend(double smoothing, double delta_seconds) {
     return Clamp(1.0 - std::pow(clamped_smoothing, frame_scale), 0.05, 1.0);
 }
 
-// Stepped response: discrete extra rotation added per step_trigger of head
-// angle beyond the deadzone, with hysteresis so the view does not oscillate
-// when the head rests near a threshold. `current_step` is signed persistent
-// state (positive = positive rotation direction); the regular smoothing eases
-// the view between step targets.
-void ComputePivotSteppedExtraAngleRadians(double current_angle_radians,
-                                          double deadzone_degrees,
-                                          double step_trigger_degrees,
-                                          double step_amount_degrees,
-                                          double step_hysteresis_degrees,
-                                          double max_extra_degrees,
-                                          double smoothing,
-                                          double delta_seconds,
-                                          int& current_step,
-                                          double& smoothed_extra_angle_radians) {
-    const double deadzone = DegreesToRadians(std::max(0.0, deadzone_degrees));
-    // Clamp the trigger to a sane floor so a mis-set 0 cannot spin the loop.
-    const double trigger = DegreesToRadians(std::max(0.5, step_trigger_degrees));
-    const double amount = DegreesToRadians(std::max(0.0, step_amount_degrees));
-    // Hysteresis must stay below the trigger spacing or a step could re-engage
-    // the moment it releases.
-    const double hysteresis =
-        std::min(DegreesToRadians(std::max(0.0, step_hysteresis_degrees)), trigger * 0.9);
-    const double max_extra = DegreesToRadians(std::max(0.0, max_extra_degrees));
-
-    // Walk down while the head has come back inside the release threshold of
-    // the current step (crossing zero when the head swings to the other side).
-    while (current_step != 0) {
-        const int sign = current_step > 0 ? 1 : -1;
-        const double release_threshold = deadzone + std::abs(current_step) * trigger - hysteresis;
-        if (current_angle_radians * sign < release_threshold) {
-            current_step -= sign;
-        } else {
-            break;
-        }
-    }
-
-    // Walk up in the direction of the current angle.
-    {
-        const int sign = current_angle_radians >= 0.0 ? 1 : -1;
-        if (current_step == 0 || (current_step > 0) == (sign > 0)) {
-            while (current_angle_radians * sign >= deadzone + (std::abs(current_step) + 1) * trigger) {
-                current_step += sign;
-            }
-        }
-    }
-
-    double target_extra_angle = current_step * amount;
-    if (max_extra > 0.0) {
-        target_extra_angle = Clamp(target_extra_angle, -max_extra, max_extra);
-    }
-
-    const double blend = ComputeTimeBasedBlend(smoothing, delta_seconds);
-    smoothed_extra_angle_radians += (target_extra_angle - smoothed_extra_angle_radians) * blend;
-    if (current_step == 0 && NearlyZero(smoothed_extra_angle_radians)) {
-        smoothed_extra_angle_radians = 0.0;
-    }
-}
-
 double ComputePivotExtraAngleRadians(double current_angle_radians,
                                      double rotation_multiplier,
                                      double deadzone_degrees,
@@ -1362,7 +1304,15 @@ bool SamePivotAxisTuning(const PivotAxisTuning& lhs, const PivotAxisTuning& rhs)
            NearlyEqual(lhs.max_extra_degrees, rhs.max_extra_degrees);
 }
 
+bool SamePivotStepTuning(const PivotStepTuning& lhs, const PivotStepTuning& rhs) {
+    return NearlyEqual(lhs.deadzone_degrees, rhs.deadzone_degrees) &&
+           NearlyEqual(lhs.trigger_degrees, rhs.trigger_degrees) &&
+           NearlyEqual(lhs.amount_degrees, rhs.amount_degrees) &&
+           NearlyEqual(lhs.hysteresis_degrees, rhs.hysteresis_degrees) &&
+           NearlyEqual(lhs.max_extra_degrees, rhs.max_extra_degrees);
+}
 bool SamePivotResolvedProfile(const PivotXrResolvedProfile& lhs, const PivotXrResolvedProfile& rhs) {
+
     return lhs.name == rhs.name &&
            lhs.activation_mode == rhs.activation_mode &&
            SameInputBindings(lhs.activation_bindings, rhs.activation_bindings) &&
@@ -1377,13 +1327,16 @@ bool SamePivotResolvedProfile(const PivotXrResolvedProfile& lhs, const PivotXrRe
            NearlyEqual(lhs.pitch_deadzone_degrees, rhs.pitch_deadzone_degrees) &&
            NearlyEqual(lhs.pitch_max_extra_degrees, rhs.pitch_max_extra_degrees) &&
            lhs.response_mode == rhs.response_mode &&
-           NearlyEqual(lhs.step_trigger_degrees, rhs.step_trigger_degrees) &&
-           NearlyEqual(lhs.step_amount_degrees, rhs.step_amount_degrees) &&
-           NearlyEqual(lhs.step_hysteresis_degrees, rhs.step_hysteresis_degrees) &&
+           lhs.step_glide_mode == rhs.step_glide_mode &&
+           NearlyEqual(lhs.step_glide_seconds, rhs.step_glide_seconds) &&
            SamePivotAxisTuning(lhs.yaw_positive, rhs.yaw_positive) &&
            SamePivotAxisTuning(lhs.yaw_negative, rhs.yaw_negative) &&
            SamePivotAxisTuning(lhs.pitch_positive, rhs.pitch_positive) &&
-           SamePivotAxisTuning(lhs.pitch_negative, rhs.pitch_negative);
+           SamePivotAxisTuning(lhs.pitch_negative, rhs.pitch_negative) &&
+           SamePivotStepTuning(lhs.yaw_step_positive, rhs.yaw_step_positive) &&
+           SamePivotStepTuning(lhs.yaw_step_negative, rhs.yaw_step_negative) &&
+           SamePivotStepTuning(lhs.pitch_step_positive, rhs.pitch_step_positive) &&
+           SamePivotStepTuning(lhs.pitch_step_negative, rhs.pitch_step_negative);
 }
 
 bool SamePivotResolvedSettings(const PivotXrResolvedSettings& lhs, const PivotXrResolvedSettings& rhs) {
@@ -6017,6 +5970,8 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
         pivotxr_smoothed_extra_pitch_radians_ = 0.0;
         pivotxr_yaw_step_ = 0;
         pivotxr_pitch_step_ = 0;
+        pivotxr_yaw_step_glide_ = {};
+        pivotxr_pitch_step_glide_ = {};
         pivotxr_activation_gain_ = 0.0;
         pivotxr_last_smoothing_wall_time_.reset();
         const XrResult release_result = FlushDeferredSwapchainReleasesLocked("end frame");
@@ -6065,6 +6020,8 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
         pivotxr_smoothed_extra_pitch_radians_ = 0.0;
         pivotxr_yaw_step_ = 0;
         pivotxr_pitch_step_ = 0;
+        pivotxr_yaw_step_glide_ = {};
+        pivotxr_pitch_step_glide_ = {};
         pivotxr_activation_gain_ = 0.0;
         pivotxr_last_smoothing_wall_time_.reset();
     }
@@ -6861,6 +6818,8 @@ XrResult OpenXrLayer::LocateViews(XrSession session,
         pivotxr_smoothed_extra_pitch_radians_ = 0.0;
         pivotxr_yaw_step_ = 0;
         pivotxr_pitch_step_ = 0;
+        pivotxr_yaw_step_glide_ = {};
+        pivotxr_pitch_step_glide_ = {};
         pivotxr_activation_gain_ = 0.0;
         pivotxr_last_smoothing_wall_time_.reset();
     }
@@ -7626,6 +7585,8 @@ void OpenXrLayer::ResetSessionState() {
     pivotxr_smoothed_extra_pitch_radians_ = 0.0;
     pivotxr_yaw_step_ = 0;
     pivotxr_pitch_step_ = 0;
+    pivotxr_yaw_step_glide_ = {};
+    pivotxr_pitch_step_glide_ = {};
     pivotxr_activation_gain_ = 0.0;
     pivotxr_last_smoothing_wall_time_.reset();
     ResetDepthToggleState();
@@ -9211,6 +9172,8 @@ XrResult OpenXrLayer::ApplyPivotToLocatedSpace(XrSpace space,
         pivotxr_smoothed_extra_pitch_radians_ = 0.0;
         pivotxr_yaw_step_ = 0;
         pivotxr_pitch_step_ = 0;
+        pivotxr_yaw_step_glide_ = {};
+        pivotxr_pitch_step_glide_ = {};
         if (update_smoothing) {
             pivotxr_last_smoothing_wall_time_.reset();
         }
@@ -9249,26 +9212,24 @@ XrResult OpenXrLayer::ApplyPivotToLocatedSpace(XrSpace space,
         const int previous_yaw_step = pivotxr_yaw_step_;
         const int previous_pitch_step = pivotxr_pitch_step_;
         if (settings.response_mode == PivotResponseMode::Stepped) {
-            ComputePivotSteppedExtraAngleRadians(current_yaw_radians,
-                                                 settings.yaw_deadzone_degrees,
-                                                 settings.step_trigger_degrees,
-                                                 settings.step_amount_degrees,
-                                                 settings.step_hysteresis_degrees,
-                                                 settings.yaw_max_extra_degrees,
-                                                 settings.smoothing,
-                                                 delta_seconds,
-                                                 pivotxr_yaw_step_,
-                                                 pivotxr_smoothed_extra_yaw_radians_);
-            ComputePivotSteppedExtraAngleRadians(current_pitch_radians,
-                                                 settings.pitch_deadzone_degrees,
-                                                 settings.step_trigger_degrees,
-                                                 settings.step_amount_degrees,
-                                                 settings.step_hysteresis_degrees,
-                                                 settings.pitch_max_extra_degrees,
-                                                 settings.smoothing,
-                                                 delta_seconds,
-                                                 pivotxr_pitch_step_,
-                                                 pivotxr_smoothed_extra_pitch_radians_);
+            UpdatePivotSteppedExtraAngleRadians(current_yaw_radians,
+                                                settings.yaw_step_positive,
+                                                settings.yaw_step_negative,
+                                                settings.step_glide_mode,
+                                                settings.step_glide_seconds,
+                                                delta_seconds,
+                                                pivotxr_yaw_step_,
+                                                pivotxr_smoothed_extra_yaw_radians_,
+                                                pivotxr_yaw_step_glide_);
+            UpdatePivotSteppedExtraAngleRadians(current_pitch_radians,
+                                                settings.pitch_step_positive,
+                                                settings.pitch_step_negative,
+                                                settings.step_glide_mode,
+                                                settings.step_glide_seconds,
+                                                delta_seconds,
+                                                pivotxr_pitch_step_,
+                                                pivotxr_smoothed_extra_pitch_radians_,
+                                                pivotxr_pitch_step_glide_);
         } else {
             const PivotAxisTuning& yaw_tuning =
                 current_yaw_radians >= 0.0 ? settings.yaw_positive : settings.yaw_negative;
@@ -9288,6 +9249,12 @@ XrResult OpenXrLayer::ApplyPivotToLocatedSpace(XrSpace space,
                                           settings.smoothing,
                                           delta_seconds,
                                           pivotxr_smoothed_extra_pitch_radians_);
+            pivotxr_yaw_step_ = 0;
+            pivotxr_pitch_step_ = 0;
+            pivotxr_yaw_step_glide_ = {pivotxr_smoothed_extra_yaw_radians_,
+                                       pivotxr_smoothed_extra_yaw_radians_, 0.0};
+            pivotxr_pitch_step_glide_ = {pivotxr_smoothed_extra_pitch_radians_,
+                                         pivotxr_smoothed_extra_pitch_radians_, 0.0};
         }
 
         if ((pivotxr_yaw_step_ != previous_yaw_step || pivotxr_pitch_step_ != previous_pitch_step) &&
@@ -9377,9 +9344,16 @@ void OpenXrLayer::LogResolvedSettings(const ResolvedRuntimeConfig& settings) {
                << ", pitchMaxExtra=" << profile.pitch_max_extra_degrees
                << ", responseMode=" << ToString(profile.response_mode);
         if (profile.response_mode == PivotResponseMode::Stepped) {
-            stream << ", stepTrigger=" << profile.step_trigger_degrees
-                   << ", stepAmount=" << profile.step_amount_degrees
-                   << ", stepHysteresis=" << profile.step_hysteresis_degrees;
+            stream << ", stepGlide=" << ToString(profile.step_glide_mode)
+                   << ", stepGlideSeconds=" << profile.step_glide_seconds
+                   << ", yawLeftStep={trigger=" << profile.yaw_step_positive.trigger_degrees
+                   << ", amount=" << profile.yaw_step_positive.amount_degrees << "}"
+                   << ", yawRightStep={trigger=" << profile.yaw_step_negative.trigger_degrees
+                   << ", amount=" << profile.yaw_step_negative.amount_degrees << "}"
+                   << ", pitchUpStep={trigger=" << profile.pitch_step_positive.trigger_degrees
+                   << ", amount=" << profile.pitch_step_positive.amount_degrees << "}"
+                   << ", pitchDownStep={trigger=" << profile.pitch_step_negative.trigger_degrees
+                   << ", amount=" << profile.pitch_step_negative.amount_degrees << "}";
         }
         stream << ", yawLeftMultiplier=" << profile.yaw_positive.rotation_multiplier
                << ", yawRightMultiplier=" << profile.yaw_negative.rotation_multiplier
@@ -9412,6 +9386,8 @@ void OpenXrLayer::ResetPivotActivationState() {
     pivotxr_smoothed_extra_pitch_radians_ = 0.0;
     pivotxr_yaw_step_ = 0;
     pivotxr_pitch_step_ = 0;
+    pivotxr_yaw_step_glide_ = {};
+    pivotxr_pitch_step_glide_ = {};
     pivotxr_activation_gain_ = 0.0;
     pivotxr_last_smoothing_wall_time_.reset();
     pivotxr_engaged_ = false;

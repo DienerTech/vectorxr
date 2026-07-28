@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <fstream>
 #include <map>
 #include <optional>
@@ -1224,7 +1225,55 @@ bool ParsePivotAxisTuning(const JsonValue& value, const char* field, PivotAxisTu
     return true;
 }
 
+bool ParsePivotStepTuning(const JsonValue& value,
+                          const std::string& context,
+                          PivotStepTuning& out,
+                          std::string& error) {
+    const JsonValue::Object* object = RequireObject(value, context, error);
+    if (!object) {
+        return false;
+    }
+    static const std::unordered_set<std::string> allowed = {
+        "deadzoneDegrees",
+        "triggerDegrees",
+        "amountDegrees",
+        "hysteresisDegrees",
+        "maxExtraDegrees",
+    };
+    if (!CheckAllowedKeys(*object, allowed, error)) {
+        return false;
+    }
+
+    std::optional<double> deadzone;
+    std::optional<double> trigger;
+    std::optional<double> amount;
+    std::optional<double> hysteresis;
+    std::optional<double> max_extra;
+    if (!ReadOptionalNumber(*object, "deadzoneDegrees", deadzone, error) ||
+        !ReadOptionalNumber(*object, "triggerDegrees", trigger, error) ||
+        !ReadOptionalNumber(*object, "amountDegrees", amount, error) ||
+        !ReadOptionalNumber(*object, "hysteresisDegrees", hysteresis, error) ||
+        !ReadOptionalNumber(*object, "maxExtraDegrees", max_extra, error)) {
+        return false;
+    }
+    if (deadzone) out.deadzone_degrees = *deadzone;
+    if (trigger) out.trigger_degrees = *trigger;
+    if (amount) out.amount_degrees = *amount;
+    if (hysteresis) out.hysteresis_degrees = *hysteresis;
+    if (max_extra) out.max_extra_degrees = *max_extra;
+    return true;
+}
+
+double MigratedStepGlideSeconds(double smoothing) {
+    if (smoothing <= 0.0) {
+        return 0.0;
+    }
+    const double per_frame_error = std::clamp(smoothing, 0.000001, 0.95);
+    return std::clamp(std::log(0.001) / (90.0 * std::log(per_frame_error)), 0.01, 2.0);
+}
 bool ParsePivotSettings(const JsonValue::Object& object, PivotXrSettings& out, std::string& error) {
+
+
     static const std::unordered_set<std::string> allowed = {
         "smoothing",
         "activationRampSeconds",
@@ -1243,6 +1292,15 @@ bool ParsePivotSettings(const JsonValue::Object& object, PivotXrSettings& out, s
         "yawRight",
         "pitchUp",
         "pitchDown",
+        "stepGlideMode",
+        "stepGlideSeconds",
+        "yawStep",
+        "pitchStep",
+        "yawLeftStep",
+        "yawRightStep",
+        "pitchUpStep",
+        "pitchDownStep",
+        // Legacy shared step values migrate into both basic axes.
         // Legacy: per-axis smoothing collapsed into a single "smoothing".
         // Accepted but ignored so older configs still load.
         "pitchSmoothing",
@@ -1298,37 +1356,64 @@ bool ParsePivotSettings(const JsonValue::Object& object, PivotXrSettings& out, s
     }
 
     std::optional<std::string> response_mode;
-    std::optional<double> step_trigger_degrees;
-    std::optional<double> step_amount_degrees;
-    std::optional<double> step_hysteresis_degrees;
+    std::optional<std::string> step_glide_mode;
+    std::optional<double> step_glide_seconds;
+    std::optional<double> legacy_step_trigger;
+    std::optional<double> legacy_step_amount;
+    std::optional<double> legacy_step_hysteresis;
     std::optional<bool> advanced_axes;
 
     if (!ReadOptionalString(object, "responseMode", response_mode, error) ||
-        !ReadOptionalNumber(object, "stepTriggerDegrees", step_trigger_degrees, error) ||
-        !ReadOptionalNumber(object, "stepAmountDegrees", step_amount_degrees, error) ||
-        !ReadOptionalNumber(object, "stepHysteresisDegrees", step_hysteresis_degrees, error) ||
+        !ReadOptionalString(object, "stepGlideMode", step_glide_mode, error) ||
+        !ReadOptionalNumber(object, "stepGlideSeconds", step_glide_seconds, error) ||
+        !ReadOptionalNumber(object, "stepTriggerDegrees", legacy_step_trigger, error) ||
+        !ReadOptionalNumber(object, "stepAmountDegrees", legacy_step_amount, error) ||
+        !ReadOptionalNumber(object, "stepHysteresisDegrees", legacy_step_hysteresis, error) ||
         !ReadOptionalBool(object, "advancedAxes", advanced_axes, error)) {
         return false;
     }
 
-    if (response_mode.has_value()) {
+    if (response_mode) {
         const std::optional<PivotResponseMode> parsed = ParsePivotResponseMode(*response_mode);
-        if (!parsed.has_value()) {
+        if (!parsed) {
             error = "Invalid value for responseMode: " + *response_mode;
             return false;
         }
         out.response_mode = *parsed;
     }
-    if (step_trigger_degrees.has_value()) {
-        out.step_trigger_degrees = *step_trigger_degrees;
+    if (step_glide_mode) {
+        const std::optional<PivotStepGlideMode> parsed = ParsePivotStepGlideMode(*step_glide_mode);
+        if (!parsed) {
+            error = "Invalid value for stepGlideMode: " + *step_glide_mode;
+            return false;
+        }
+        out.step_glide_mode = *parsed;
+    } else {
+        out.step_glide_mode = out.smoothing <= 0.0 ? PivotStepGlideMode::Instant : PivotStepGlideMode::Glide;
     }
-    if (step_amount_degrees.has_value()) {
-        out.step_amount_degrees = *step_amount_degrees;
+    if (step_glide_seconds) {
+        out.step_glide_seconds = *step_glide_seconds;
+    } else if (!step_glide_mode) {
+        out.step_glide_seconds = MigratedStepGlideSeconds(out.smoothing);
     }
-    if (step_hysteresis_degrees.has_value()) {
-        out.step_hysteresis_degrees = *step_hysteresis_degrees;
+
+    out.yaw_step.deadzone_degrees = out.yaw_deadzone_degrees;
+    out.yaw_step.max_extra_degrees = out.yaw_max_extra_degrees;
+    out.pitch_step.deadzone_degrees = out.pitch_deadzone_degrees;
+    out.pitch_step.max_extra_degrees = out.pitch_max_extra_degrees;
+    if (legacy_step_trigger) {
+        out.yaw_step.trigger_degrees = *legacy_step_trigger;
+        out.pitch_step.trigger_degrees = *legacy_step_trigger;
     }
-    if (advanced_axes.has_value()) {
+    if (legacy_step_amount) {
+        out.yaw_step.amount_degrees = *legacy_step_amount;
+        out.pitch_step.amount_degrees = *legacy_step_amount;
+    }
+    if (legacy_step_hysteresis) {
+        out.yaw_step.hysteresis_degrees = *legacy_step_hysteresis;
+        out.pitch_step.hysteresis_degrees = *legacy_step_hysteresis;
+    }
+    if (advanced_axes) {
         out.advanced_axes = *advanced_axes;
     }
 
@@ -1350,8 +1435,44 @@ bool ParsePivotSettings(const JsonValue::Object& object, PivotXrSettings& out, s
         return false;
     }
 
+    const auto yaw_step_it = object.find("yawStep");
+    if (yaw_step_it != object.end() &&
+        !ParsePivotStepTuning(yaw_step_it->second, "yawStep", out.yaw_step, error)) {
+        return false;
+    }
+    const auto pitch_step_it = object.find("pitchStep");
+    if (pitch_step_it != object.end() &&
+        !ParsePivotStepTuning(pitch_step_it->second, "pitchStep", out.pitch_step, error)) {
+        return false;
+    }
+
+    out.yaw_left_step = out.yaw_step;
+    out.yaw_right_step = out.yaw_step;
+    out.pitch_up_step = out.pitch_step;
+    out.pitch_down_step = out.pitch_step;
+    const auto yaw_left_step_it = object.find("yawLeftStep");
+    if (yaw_left_step_it != object.end() &&
+        !ParsePivotStepTuning(yaw_left_step_it->second, "yawLeftStep", out.yaw_left_step, error)) {
+        return false;
+    }
+    const auto yaw_right_step_it = object.find("yawRightStep");
+    if (yaw_right_step_it != object.end() &&
+        !ParsePivotStepTuning(yaw_right_step_it->second, "yawRightStep", out.yaw_right_step, error)) {
+        return false;
+    }
+    const auto pitch_up_step_it = object.find("pitchUpStep");
+    if (pitch_up_step_it != object.end() &&
+        !ParsePivotStepTuning(pitch_up_step_it->second, "pitchUpStep", out.pitch_up_step, error)) {
+        return false;
+    }
+    const auto pitch_down_step_it = object.find("pitchDownStep");
+    if (pitch_down_step_it != object.end() &&
+        !ParsePivotStepTuning(pitch_down_step_it->second, "pitchDownStep", out.pitch_down_step, error)) {
+        return false;
+    }
     return true;
 }
+
 
 bool ParsePivotProfile(const JsonValue& value, PivotXrProfile& out, std::string& error) {
     const JsonValue::Object* object = RequireObject(value, "pivotProfile", error);

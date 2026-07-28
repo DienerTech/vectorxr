@@ -133,8 +133,15 @@ up/down than your physical neck allows.
   neutral seated origin; assigning it to the same input as the simulator's recenter action keeps
   both origins aligned. **Release Origin** clears that captured origin. Set Origin and Release
   Origin can each have multiple bindings too.
-- Tune **Yaw** and **Pitch** independently: rotation **Multiplier**, **Deadzone**, and **Max
-  Extra** degrees. A shared **Smoothing** softens the motion for both axes.
+- Choose **Continuous** response for multiplier-based motion, then tune **Yaw** and **Pitch**
+  independently with rotation **Multiplier**, **Deadzone**, and **Max Extra** degrees. A shared
+  **Smoothing** value softens continuous motion.
+- Choose **Stepped** response to add fixed rotation at angle thresholds. Yaw and pitch each have
+  independent **Deadzone**, **Step Trigger**, **Step Amount**, **Hysteresis**, and **Max Extra**
+  controls. **Instant** transitions land directly on each step; **Glide** uses one bounded,
+  fixed-duration transition that settles without overshoot.
+- **Advanced axes** can tune left, right, up, and down independently. Continuous and Stepped keep
+  separate directional values, so switching response modes does not discard either setup.
 - The **Activation Ramp** (default 0.35s) eases Pivot in and out when it engages or disengages
   rather than snapping the view.
 

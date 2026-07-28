@@ -1,6 +1,7 @@
 export type LogLevel = 'info' | 'debug'
 export type ActivationMode = 'toggle' | 'hold' | 'alwaysOn'
 export type PivotResponseMode = 'continuous' | 'stepped'
+export type PivotStepGlideMode = 'instant' | 'glide'
 export type QuadViewsTrackingMode = 'head' | 'eye'
 export type AppTab = 'home' | 'core' | 'registry' | 'layers' | 'about' | 'depthxr' | 'pivotxr' | 'quadviews' | 'turbo'
 export const keyboardBindingKeyGroups = [
@@ -112,6 +113,13 @@ export interface PivotAxisTuning {
   deadzoneDegrees: number
   maxExtraDegrees: number
 }
+export interface PivotStepTuning {
+  deadzoneDegrees: number
+  triggerDegrees: number
+  amountDegrees: number
+  hysteresisDegrees: number
+  maxExtraDegrees: number
+}
 
 export interface PivotXRSettings {
   smoothing: number
@@ -122,17 +130,21 @@ export interface PivotXRSettings {
   pitchRotationMultiplier: number
   pitchDeadzoneDegrees: number
   maxExtraPitchDegrees: number
-  // Response shaping: continuous multiplier or discrete steps with hysteresis.
   responseMode: PivotResponseMode
-  stepTriggerDegrees: number
-  stepAmountDegrees: number
-  stepHysteresisDegrees: number
-  // When true, continuous mode tunes each direction independently.
+  stepGlideMode: PivotStepGlideMode
+  stepGlideSeconds: number
+  yawStep: PivotStepTuning
+  pitchStep: PivotStepTuning
+  // Shared by Continuous and Stepped. Each mode keeps its own direction data.
   advancedAxes: boolean
   yawLeft: PivotAxisTuning
   yawRight: PivotAxisTuning
   pitchUp: PivotAxisTuning
   pitchDown: PivotAxisTuning
+  yawLeftStep: PivotStepTuning
+  yawRightStep: PivotStepTuning
+  pitchUpStep: PivotStepTuning
+  pitchDownStep: PivotStepTuning
 }
 
 export interface PivotXRProfileConfig {
@@ -421,6 +433,16 @@ export function defaultPivotAxisTuning(): PivotAxisTuning {
   }
 }
 
+export function defaultPivotStepTuning(): PivotStepTuning {
+  return {
+    deadzoneDegrees: 8,
+    triggerDegrees: 10,
+    amountDegrees: 10,
+    hysteresisDegrees: 4,
+    maxExtraDegrees: 120,
+  }
+}
+
 export function defaultPivotXRSettings(): PivotXRSettings {
   return {
     smoothing: 0.2,
@@ -432,14 +454,19 @@ export function defaultPivotXRSettings(): PivotXRSettings {
     pitchDeadzoneDegrees: 8,
     maxExtraPitchDegrees: 120,
     responseMode: 'continuous',
-    stepTriggerDegrees: 10,
-    stepAmountDegrees: 10,
-    stepHysteresisDegrees: 4,
+    stepGlideMode: 'glide',
+    stepGlideSeconds: 0.12,
+    yawStep: defaultPivotStepTuning(),
+    pitchStep: defaultPivotStepTuning(),
     advancedAxes: false,
     yawLeft: defaultPivotAxisTuning(),
     yawRight: defaultPivotAxisTuning(),
     pitchUp: defaultPivotAxisTuning(),
     pitchDown: defaultPivotAxisTuning(),
+    yawLeftStep: defaultPivotStepTuning(),
+    yawRightStep: defaultPivotStepTuning(),
+    pitchUpStep: defaultPivotStepTuning(),
+    pitchDownStep: defaultPivotStepTuning(),
   }
 }
 
@@ -573,7 +600,7 @@ export function createPivotProfile(
     activationBindings: normalizeInputBindings(activationBindings),
     setOriginBindings: [],
     releaseOriginBindings: [],
-    settings: { ...defaultSettings },
+    settings: normalizePivotXRSettings(defaultSettings, defaultPivotXRSettings()),
   }
 }
 
@@ -628,11 +655,57 @@ function normalizePivotAxisTuning(value: unknown, fallback: PivotAxisTuning): Pi
   }
 }
 
+function normalizePivotStepTuning(value: unknown, fallback: PivotStepTuning): PivotStepTuning {
+  const source = isRecord(value) ? value : {}
+  return {
+    deadzoneDegrees: normalizeNumber(source.deadzoneDegrees, fallback.deadzoneDegrees),
+    triggerDegrees: normalizeNumber(source.triggerDegrees, fallback.triggerDegrees),
+    amountDegrees: normalizeNumber(source.amountDegrees, fallback.amountDegrees),
+    hysteresisDegrees: normalizeNumber(source.hysteresisDegrees, fallback.hysteresisDegrees),
+    maxExtraDegrees: normalizeNumber(source.maxExtraDegrees, fallback.maxExtraDegrees),
+  }
+}
+
+function migratedStepGlideSeconds(smoothing: number): number {
+  if (smoothing <= 0) return 0
+  // Match the old 90 Hz exponential response through its 99.9% settle point.
+  const perFrameError = Math.min(Math.max(smoothing, 0.000001), 0.95)
+  const seconds = Math.log(0.001) / (90 * Math.log(perFrameError))
+  return Math.min(2, Math.max(0.01, seconds))
+}
+
 function normalizePivotXRSettings(value: unknown, fallback: PivotXRSettings): PivotXRSettings {
   const source = isRecord(value) ? value : {}
+  const smoothing = normalizeNumber(source.smoothing, fallback.smoothing)
+  const legacyTrigger = normalizeNumber(source.stepTriggerDegrees, fallback.yawStep.triggerDegrees)
+  const legacyAmount = normalizeNumber(source.stepAmountDegrees, fallback.yawStep.amountDegrees)
+  const legacyHysteresis = normalizeNumber(source.stepHysteresisDegrees, fallback.yawStep.hysteresisDegrees)
+  const yawStepFallback: PivotStepTuning = {
+    deadzoneDegrees: normalizeNumber(source.deadzoneDegrees, fallback.deadzoneDegrees),
+    triggerDegrees: legacyTrigger,
+    amountDegrees: legacyAmount,
+    hysteresisDegrees: legacyHysteresis,
+    maxExtraDegrees: normalizeNumber(source.maxExtraYawDegrees, fallback.maxExtraYawDegrees),
+  }
+  const pitchStepFallback: PivotStepTuning = {
+    deadzoneDegrees: normalizeNumber(source.pitchDeadzoneDegrees, fallback.pitchDeadzoneDegrees),
+    triggerDegrees: legacyTrigger,
+    amountDegrees: legacyAmount,
+    hysteresisDegrees: legacyHysteresis,
+    maxExtraDegrees: normalizeNumber(source.maxExtraPitchDegrees, fallback.maxExtraPitchDegrees),
+  }
+  const yawStep = normalizePivotStepTuning(source.yawStep, yawStepFallback)
+  const pitchStep = normalizePivotStepTuning(source.pitchStep, pitchStepFallback)
+  const hasCanonicalGlide = source.stepGlideMode === 'instant' || source.stepGlideMode === 'glide'
+  const stepGlideMode = hasCanonicalGlide
+    ? source.stepGlideMode as PivotStepGlideMode
+    : smoothing <= 0 ? 'instant' : 'glide'
+  const stepGlideSeconds = source.stepGlideSeconds !== undefined
+    ? normalizeNumber(source.stepGlideSeconds, fallback.stepGlideSeconds)
+    : hasCanonicalGlide ? fallback.stepGlideSeconds : migratedStepGlideSeconds(smoothing)
 
   return {
-    smoothing: normalizeNumber(source.smoothing, fallback.smoothing),
+    smoothing,
     activationRampSeconds: normalizeNumber(source.activationRampSeconds, fallback.activationRampSeconds),
     rotationMultiplier: normalizeNumber(source.rotationMultiplier, fallback.rotationMultiplier),
     deadzoneDegrees: normalizeNumber(source.deadzoneDegrees, fallback.deadzoneDegrees),
@@ -640,15 +713,22 @@ function normalizePivotXRSettings(value: unknown, fallback: PivotXRSettings): Pi
     pitchRotationMultiplier: normalizeNumber(source.pitchRotationMultiplier, fallback.pitchRotationMultiplier),
     pitchDeadzoneDegrees: normalizeNumber(source.pitchDeadzoneDegrees, fallback.pitchDeadzoneDegrees),
     maxExtraPitchDegrees: normalizeNumber(source.maxExtraPitchDegrees, fallback.maxExtraPitchDegrees),
-    responseMode: source.responseMode === 'stepped' ? 'stepped' : fallback.responseMode,
-    stepTriggerDegrees: normalizeNumber(source.stepTriggerDegrees, fallback.stepTriggerDegrees),
-    stepAmountDegrees: normalizeNumber(source.stepAmountDegrees, fallback.stepAmountDegrees),
-    stepHysteresisDegrees: normalizeNumber(source.stepHysteresisDegrees, fallback.stepHysteresisDegrees),
+    responseMode: source.responseMode === 'continuous' || source.responseMode === 'stepped'
+      ? source.responseMode
+      : fallback.responseMode,
+    stepGlideMode,
+    stepGlideSeconds,
+    yawStep,
+    pitchStep,
     advancedAxes: normalizeBoolean(source.advancedAxes, fallback.advancedAxes),
     yawLeft: normalizePivotAxisTuning(source.yawLeft, fallback.yawLeft),
     yawRight: normalizePivotAxisTuning(source.yawRight, fallback.yawRight),
     pitchUp: normalizePivotAxisTuning(source.pitchUp, fallback.pitchUp),
     pitchDown: normalizePivotAxisTuning(source.pitchDown, fallback.pitchDown),
+    yawLeftStep: normalizePivotStepTuning(source.yawLeftStep, yawStep),
+    yawRightStep: normalizePivotStepTuning(source.yawRightStep, yawStep),
+    pitchUpStep: normalizePivotStepTuning(source.pitchUpStep, pitchStep),
+    pitchDownStep: normalizePivotStepTuning(source.pitchDownStep, pitchStep),
   }
 }
 

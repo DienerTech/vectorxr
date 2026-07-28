@@ -103,6 +103,28 @@ function validateInputBindings(prefix: string, bindings: InputBinding[]): string
   return bindings.flatMap((binding, index) => validateInputBinding(`${prefix}[${index}]`, binding))
 }
 
+function validatePivotStepTuning(prefix: string, tuning: PivotXRSettings['yawStep'], deadzoneMax: number): string[] {
+  const errors: string[] = []
+  if (Number.isNaN(tuning.deadzoneDegrees) || tuning.deadzoneDegrees < 0 || tuning.deadzoneDegrees > deadzoneMax) {
+    errors.push(`${prefix}deadzoneDegrees must be between 0 and ${deadzoneMax}`)
+  }
+  if (Number.isNaN(tuning.triggerDegrees) || tuning.triggerDegrees < 1 || tuning.triggerDegrees > 45) {
+    errors.push(`${prefix}triggerDegrees must be between 1 and 45`)
+  }
+  if (Number.isNaN(tuning.amountDegrees) || tuning.amountDegrees < 0 || tuning.amountDegrees > 60) {
+    errors.push(`${prefix}amountDegrees must be between 0 and 60`)
+  }
+  if (Number.isNaN(tuning.hysteresisDegrees) || tuning.hysteresisDegrees < 0 || tuning.hysteresisDegrees > 20) {
+    errors.push(`${prefix}hysteresisDegrees must be between 0 and 20`)
+  }
+  if (tuning.hysteresisDegrees >= tuning.triggerDegrees) {
+    errors.push(`${prefix}hysteresisDegrees must be smaller than triggerDegrees`)
+  }
+  if (Number.isNaN(tuning.maxExtraDegrees) || tuning.maxExtraDegrees < 0 || tuning.maxExtraDegrees > 180) {
+    errors.push(`${prefix}maxExtraDegrees must be between 0 and 180`)
+  }
+  return errors
+}
 function validatePivotXRSettings(prefix: string, settings: PivotXRSettings): string[] {
   const errors: string[] = []
 
@@ -142,21 +164,17 @@ function validatePivotXRSettings(prefix: string, settings: PivotXRSettings): str
     errors.push(`${prefix}responseMode must be "continuous" or "stepped"`)
   }
 
-  if (Number.isNaN(settings.stepTriggerDegrees) || settings.stepTriggerDegrees < 1 || settings.stepTriggerDegrees > 45) {
-    errors.push(`${prefix}stepTriggerDegrees must be between 1 and 45`)
+  if (settings.stepGlideMode !== 'instant' && settings.stepGlideMode !== 'glide') {
+    errors.push(`${prefix}stepGlideMode must be "instant" or "glide"`)
   }
 
-  if (Number.isNaN(settings.stepAmountDegrees) || settings.stepAmountDegrees < 0 || settings.stepAmountDegrees > 60) {
-    errors.push(`${prefix}stepAmountDegrees must be between 0 and 60`)
+  const minimumGlideSeconds = settings.stepGlideMode === 'glide' ? 0.01 : 0
+  if (Number.isNaN(settings.stepGlideSeconds) || settings.stepGlideSeconds < minimumGlideSeconds || settings.stepGlideSeconds > 2) {
+    errors.push(`${prefix}stepGlideSeconds must be between ${minimumGlideSeconds} and 2`)
   }
 
-  if (Number.isNaN(settings.stepHysteresisDegrees) || settings.stepHysteresisDegrees < 0 || settings.stepHysteresisDegrees > 20) {
-    errors.push(`${prefix}stepHysteresisDegrees must be between 0 and 20`)
-  }
-
-  if (settings.stepHysteresisDegrees >= settings.stepTriggerDegrees) {
-    errors.push(`${prefix}stepHysteresisDegrees must be smaller than stepTriggerDegrees`)
-  }
+  errors.push(...validatePivotStepTuning(`${prefix}yawStep.`, settings.yawStep, 180))
+  errors.push(...validatePivotStepTuning(`${prefix}pitchStep.`, settings.pitchStep, 90))
 
   const tunings: Array<[string, typeof settings.yawLeft, number]> = [
     ['yawLeft', settings.yawLeft, 180],
@@ -174,6 +192,16 @@ function validatePivotXRSettings(prefix: string, settings: PivotXRSettings): str
     if (Number.isNaN(tuning.maxExtraDegrees) || tuning.maxExtraDegrees < 0 || tuning.maxExtraDegrees > 180) {
       errors.push(`${prefix}${name}.maxExtraDegrees must be between 0 and 180`)
     }
+  }
+
+  const stepTunings: Array<[string, typeof settings.yawStep, number]> = [
+    ['yawLeftStep', settings.yawLeftStep, 180],
+    ['yawRightStep', settings.yawRightStep, 180],
+    ['pitchUpStep', settings.pitchUpStep, 90],
+    ['pitchDownStep', settings.pitchDownStep, 90],
+  ]
+  for (const [name, tuning, deadzoneMax] of stepTunings) {
+    errors.push(...validatePivotStepTuning(`${prefix}${name}.`, tuning, deadzoneMax))
   }
 
   return errors
