@@ -44,7 +44,7 @@ function addBinding() {
 
 <template>
   <section class="rounded-[1rem] border p-4 surface-panel-soft">
-    <div class="flex flex-wrap items-start justify-between gap-3">
+    <div class="sticky top-0 z-10 flex flex-wrap items-start justify-between gap-3 rounded-[0.75rem] border p-3 shadow-panel backdrop-blur surface-panel-strong">
       <div class="min-w-0 flex-1">
         <p class="text-sm font-semibold tracking-tight">{{ label }}</p>
         <p class="mt-1 text-sm leading-6 text-muted">{{ description }}</p>

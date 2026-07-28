@@ -671,7 +671,8 @@ function migratedStepGlideSeconds(smoothing: number): number {
   // Match the old 90 Hz exponential response through its 99.9% settle point.
   const perFrameError = Math.min(Math.max(smoothing, 0.000001), 0.95)
   const seconds = Math.log(0.001) / (90 * Math.log(perFrameError))
-  return Math.min(2, Math.max(0.01, seconds))
+  const bounded = Math.min(2, Math.max(0.01, seconds))
+  return Math.round(bounded * 100) / 100
 }
 
 function normalizePivotXRSettings(value: unknown, fallback: PivotXRSettings): PivotXRSettings {
@@ -700,9 +701,10 @@ function normalizePivotXRSettings(value: unknown, fallback: PivotXRSettings): Pi
   const stepGlideMode = hasCanonicalGlide
     ? source.stepGlideMode as PivotStepGlideMode
     : smoothing <= 0 ? 'instant' : 'glide'
-  const stepGlideSeconds = source.stepGlideSeconds !== undefined
+  const rawStepGlideSeconds = source.stepGlideSeconds !== undefined
     ? normalizeNumber(source.stepGlideSeconds, fallback.stepGlideSeconds)
     : hasCanonicalGlide ? fallback.stepGlideSeconds : migratedStepGlideSeconds(smoothing)
+  const stepGlideSeconds = Math.round(rawStepGlideSeconds * 100) / 100
 
   return {
     smoothing,

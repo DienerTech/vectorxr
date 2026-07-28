@@ -7,8 +7,6 @@ import { bindingListLabel } from '../lib/model'
 defineProps<{
   activationMode: ActivationMode
   activationBindings: InputBinding[]
-  setOriginBindings: InputBinding[]
-  releaseOriginBindings: InputBinding[]
 }>()
 
 defineEmits<{
@@ -33,23 +31,6 @@ defineEmits<{
         >
           <span class="font-semibold">{{ activationMode === 'toggle' ? 'Toggle' : activationMode === 'hold' ? 'Hold' : 'Always On' }}</span>
           <span class="text-muted">{{ bindingListLabel(activationBindings) }}</span>
-        </span>
-        <span
-          class="inline-flex items-center gap-1.5 rounded-full border px-3 py-1 text-xs"
-          style="border-color: var(--app-border)"
-          title="Captures the current head pose as Pivot's neutral seated origin. Bind it to the same button as the game's recenter so both origins stay aligned."
-        >
-          <span class="font-semibold">Set Origin</span>
-          <span class="text-muted">{{ bindingListLabel(setOriginBindings) }}</span>
-        </span>
-        <span
-          v-if="releaseOriginBindings.length > 0"
-          class="inline-flex items-center gap-1.5 rounded-full border px-3 py-1 text-xs"
-          style="border-color: var(--app-border)"
-          title="Releases a captured origin and returns Pivot to the default HMD origin."
-        >
-          <span class="font-semibold">Release Origin</span>
-          <span class="text-muted">{{ bindingListLabel(releaseOriginBindings) }}</span>
         </span>
       </div>
 

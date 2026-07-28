@@ -51,10 +51,19 @@ function onAdvancedAxesChange(enabled: boolean) {
             <option value="glide">Glide</option>
           </select>
         </label>
-        <label v-if="settings.stepGlideMode === 'glide'" class="block">
+        <label class="block">
           <span class="mb-1.5 block text-sm font-medium">Duration</span>
-          <input v-model.number="settings.stepGlideSeconds" class="app-input w-full rounded-[0.75rem] px-4 py-2.5" min="0.01" max="2" step="0.01" type="number" />
-          <span class="mt-1 block text-xs text-muted">seconds, shared by every direction</span>
+          <input
+            v-if="settings.stepGlideMode === 'glide'"
+            v-model.number="settings.stepGlideSeconds"
+            class="app-input w-full rounded-[0.75rem] px-4 py-2.5"
+            min="0.01"
+            max="2"
+            step="0.01"
+            type="number"
+          />
+          <input v-else class="app-input w-full cursor-not-allowed rounded-[0.75rem] px-4 py-2.5 opacity-70" value="0.0" type="number" readonly />
+          <span class="mt-1 block text-xs text-muted">{{ settings.stepGlideMode === 'instant' ? 'seconds — Instant has no transition time' : 'seconds, shared by every direction' }}</span>
         </label>
       </div>
     </div>
@@ -70,7 +79,7 @@ function onAdvancedAxesChange(enabled: boolean) {
         <span>
           <span class="block text-sm font-medium">Advanced axes — tune each direction independently</span>
           <span class="mt-0.5 block text-sm leading-6 text-muted">
-            Give left, right, up, and down separate deadzones, triggers, amounts, hysteresis, and limits. Enabling this copies the current basic yaw and pitch values.
+            Give left, right, up, and down separate deadzones, triggers, amounts, hysteresis, and limits.
           </span>
         </span>
       </label>

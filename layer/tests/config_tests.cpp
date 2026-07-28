@@ -609,7 +609,7 @@ void TestPivotResponseModeAndAdvancedAxes() {
     Expect(std::abs(stepped_profile.pitch_step_negative.hysteresis_degrees - 5.0) < 0.0001,
            "Legacy hysteresis did not migrate to both pitch directions");
     Expect(stepped_profile.step_glide_mode == depthxr::PivotStepGlideMode::Glide &&
-               stepped_profile.step_glide_seconds > 0.0,
+               std::abs(stepped_profile.step_glide_seconds - 0.05) < 0.0001,
            "Legacy stepped smoothing did not migrate to glide");
 
     const depthxr::ResolvedRuntimeConfig advanced = depthxr::ResolveRuntimeConfig(result.document, "MSFS.exe");

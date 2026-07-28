@@ -1269,7 +1269,8 @@ double MigratedStepGlideSeconds(double smoothing) {
         return 0.0;
     }
     const double per_frame_error = std::clamp(smoothing, 0.000001, 0.95);
-    return std::clamp(std::log(0.001) / (90.0 * std::log(per_frame_error)), 0.01, 2.0);
+    const double bounded = std::clamp(std::log(0.001) / (90.0 * std::log(per_frame_error)), 0.01, 2.0);
+    return std::round(bounded * 100.0) / 100.0;
 }
 bool ParsePivotSettings(const JsonValue::Object& object, PivotXrSettings& out, std::string& error) {
 

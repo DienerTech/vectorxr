@@ -157,7 +157,7 @@ test('legacy shared stepped settings migrate into both axes and glide', () => {
   const config = defaultConfig()
   const settings = config.modules.pivotxr.defaults
   settings.responseMode = 'stepped'
-  settings.smoothing = 0.2
+  settings.smoothing = 0.4
   settings.deadzoneDegrees = 18
   settings.pitchDeadzoneDegrees = 14
   settings.maxExtraYawDegrees = 90
@@ -195,7 +195,7 @@ test('legacy shared stepped settings migrate into both axes and glide', () => {
   assert.deepEqual(migrated.pitchUpStep, migrated.pitchStep)
   assert.deepEqual(migrated.pitchDownStep, migrated.pitchStep)
   assert.equal(migrated.stepGlideMode, 'glide')
-  assert.ok(migrated.stepGlideSeconds > 0)
+  assert.equal(migrated.stepGlideSeconds, 0.08)
   assert.equal('stepTriggerDegrees' in migrated, false)
   assert.equal('stepAmountDegrees' in migrated, false)
   assert.equal('stepHysteresisDegrees' in migrated, false)
@@ -271,4 +271,13 @@ test('explicit Continuous response overrides stepped profile defaults', () => {
   const normalized = normalizeConfig(config)
 
   assert.equal(normalized.modules.pivotxr.profiles[0].settings.responseMode, 'continuous')
+})
+
+test('saved glide durations are normalized to the UI precision', () => {
+  const config = defaultConfig()
+  config.modules.pivotxr.defaults.stepGlideSeconds = 0.083764719824402
+
+  const normalized = normalizeConfig(config)
+
+  assert.equal(normalized.modules.pivotxr.defaults.stepGlideSeconds, 0.08)
 })

@@ -5,6 +5,8 @@ import PivotBindingsPage from '../PivotBindingsPage.vue'
 import PivotBindingsPanel from '../PivotBindingsPanel.vue'
 import PivotSettingsPage from '../PivotSettingsPage.vue'
 import PivotSettingsSummary from '../PivotSettingsSummary.vue'
+import PivotOriginPage from '../PivotOriginPage.vue'
+import PivotOriginPanel from '../PivotOriginPanel.vue'
 import ProfileShell from '../ProfileShell.vue'
 import type { RegisteredApplication, VectorXRConfig } from '../../lib/model'
 import { bindingLabel, bindingsMatchRuntimeActivation, pivotBindingConflictWarnings } from '../../lib/model'
@@ -40,6 +42,20 @@ const bindingsSubject = computed(() => {
 })
 
 const bindingsContextLabel = computed(() => profileContextLabel(bindingsTarget.value))
+
+const originTarget = ref<'default' | number | null>(null)
+
+const originSubject = computed(() => {
+  if (originTarget.value === null) {
+    return null
+  }
+  if (originTarget.value === 'default') {
+    return props.config.modules.pivotxr
+  }
+  return props.config.modules.pivotxr.profiles[originTarget.value] ?? null
+})
+
+const originContextLabel = computed(() => profileContextLabel(originTarget.value))
 
 // Rotation settings likewise get their own sub-page; the card shows a summary.
 const settingsTarget = ref<'default' | number | null>(null)
@@ -78,6 +94,12 @@ function openBindings(target: 'default' | number) {
   void nextTick(() => pageScroller()?.scrollTo({ top: 0 }))
 }
 
+function openOrigin(target: 'default' | number) {
+  savedScrollTop = pageScroller()?.scrollTop ?? 0
+  originTarget.value = target
+  void nextTick(() => pageScroller()?.scrollTo({ top: 0 }))
+}
+
 function openSettings(target: 'default' | number) {
   savedScrollTop = pageScroller()?.scrollTop ?? 0
   settingsTarget.value = target
@@ -87,6 +109,7 @@ function openSettings(target: 'default' | number) {
 function closeSubPages() {
   bindingsTarget.value = null
   settingsTarget.value = null
+  originTarget.value = null
   void nextTick(() => pageScroller()?.scrollTo({ top: savedScrollTop }))
 }
 
@@ -145,6 +168,13 @@ const profileWarnings = computed(() => {
     v-if="bindingsSubject"
     :subject="bindingsSubject"
     :context-label="bindingsContextLabel"
+    :config="config"
+    @close="closeSubPages"
+  />
+  <PivotOriginPage
+    v-else-if="originSubject"
+    :subject="originSubject"
+    :context-label="originContextLabel"
     :config="config"
     @close="closeSubPages"
   />
@@ -216,13 +246,18 @@ const profileWarnings = computed(() => {
           <PivotBindingsPanel
             :activation-mode="config.modules.pivotxr.activationMode"
             :activation-bindings="config.modules.pivotxr.activationBindings"
-            :set-origin-bindings="config.modules.pivotxr.setOriginBindings"
-            :release-origin-bindings="config.modules.pivotxr.releaseOriginBindings"
             class="mb-3"
             @edit="openBindings('default')"
           />
 
           <PivotSettingsSummary :settings="config.modules.pivotxr.defaults" @edit="openSettings('default')" />
+          <PivotOriginPanel
+            :set-origin-bindings="config.modules.pivotxr.setOriginBindings"
+            :release-origin-bindings="config.modules.pivotxr.releaseOriginBindings"
+            class="mt-3"
+            @edit="openOrigin('default')"
+          />
+
         </div>
         <div v-else class="mt-3 rounded-[0.9rem] border px-4 py-3 text-sm leading-6 surface-panel-strong">
           The default profile is off and has no effect — applications without an enabled custom profile get no Pivot. Enabled custom profiles below still apply to their assigned applications.
@@ -270,12 +305,17 @@ const profileWarnings = computed(() => {
           <PivotBindingsPanel
             :activation-mode="profile.activationMode"
             :activation-bindings="profile.activationBindings"
-            :set-origin-bindings="profile.setOriginBindings"
-            :release-origin-bindings="profile.releaseOriginBindings"
             @edit="openBindings(index)"
           />
 
           <PivotSettingsSummary class="mt-3" :settings="profile.settings" @edit="openSettings(index)" />
+          <PivotOriginPanel
+            :set-origin-bindings="profile.setOriginBindings"
+            :release-origin-bindings="profile.releaseOriginBindings"
+            class="mt-3"
+            @edit="openOrigin(index)"
+          />
+
         </ProfileShell>
       </TransitionGroup>
 

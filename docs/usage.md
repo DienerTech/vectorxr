@@ -96,10 +96,10 @@ The four Enhancements:
 Depth adjusts virtual eye separation and projection convergence as one binocular system. Stereo
 Depth controls perceived world scale; Convergence places the zero-parallax depth plane.
 
-- Begin with **Convergence at 0**. Move **Stereo Depth / World Scale** left for a larger, flatter
-  world or right for stronger near-field stereo and a smaller-feeling world. Nearby geometry will
-  change more visibly than the horizon. The normal Stereo Depth range is ±25%; enable its explicit
-  extended range only when you intentionally need the full ±100%.
+- Begin with **Convergence at 0**. Move **Stereo Depth / World Scale** left to increase apparent
+  scale when a cockpit feels miniaturized, or right for stronger stereo shape and a more compact
+  world. Nearby geometry changes more visibly than the horizon. The normal range is ±25%; enable
+  its explicit extended range only when you intentionally need the full ±100%.
 - Once scale feels right, adjust **Convergence / Depth Plane** in small 0.1–0.5 steps. Negative
   moves the plane farther away; positive moves it nearer. The normal control is limited to ±5 for
   comfort. Enable the explicit extended range only for an existing profile or careful testing.
@@ -107,9 +107,13 @@ Depth controls perceived world scale; Convergence places the zero-parallax depth
   projection layer is submitted, preventing the runtime from normalizing much of the pairing away.
   Compare it on and off at identical slider values; reduce intensity or disable it if comfort worsens.
 - The live **Depth Pairing Map** shows which of the four Stereo Depth/Convergence combinations is
-  active and summarizes the expected net effect. Positive Stereo Depth with negative Convergence
-  often preserves stronger relative depth while giving the scene more distance; two positive values
-  compound near-field intensity and carry the greatest fusion-strain risk.
+  active and explains both its benefit and comfort tradeoff. Negative Stereo Depth with negative
+  Convergence can create a larger, more relaxed cockpit that better matches real-world proportions;
+  positive Depth with negative Convergence keeps stronger stereo shape while giving it room;
+  negative Depth with positive Convergence combines larger scale with a near working plane; and two
+  positive values create the most compact, immediate presentation.
+- Treat per-game profiles as independent calibrations. Different titles may need different
+  quadrants—not merely small variations of one universal setting.
 - The **Depth Toggle Binding** at the top lets you toggle Depth on/off at runtime for quick A/B
   comparisons in headset.
 - Games with a **Force IPD**, virtual-IPD, stereo-separation, or
@@ -124,12 +128,12 @@ Depth controls perceived world scale; Convergence places the zero-parallax depth
 Pivot enhances head rotation for seated and flight-sim VR, letting you see further to the side or
 up/down than your physical neck allows.
 
-- In the **Activation** section, choose an **Activation Mode**. *Toggle* and *hold* require an
+- In **Bindings**, choose an **Activation Mode**. *Toggle* and *hold* require an
   activation **Binding** — a keyboard chord or a detected input device (joystick / HOTAS).
   *Always on* engages Pivot automatically without a binding. If you assign one, pressing it
   suspends and resumes automatic engagement.
-- Every Pivot action accepts multiple bindings, so keyboard chords and detected device inputs can
-  be mixed without duplicating a profile. **Set Origin** captures the current head pose as the
+- Every Pivot action accepts multiple bindings, so keyboard chords and device inputs can be mixed.
+  **Origin Controls** has its own category: **Set Origin** captures the current head pose as the
   neutral seated origin; assigning it to the same input as the simulator's recenter action keeps
   both origins aligned. **Release Origin** clears that captured origin. Set Origin and Release
   Origin can each have multiple bindings too.
