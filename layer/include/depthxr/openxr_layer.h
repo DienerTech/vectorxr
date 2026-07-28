@@ -440,6 +440,7 @@ class OpenXrLayer {
                                                  SwapchainInfo& info,
                                                  std::string_view reason);
     XrResult FlushDeferredSwapchainReleasesLocked(std::string_view reason);
+    bool PollInputBindingDown(const InputBinding& binding);
     bool ShouldLogQuadViewsDebugHeartbeat(std::optional<std::chrono::steady_clock::time_point>& last_heartbeat);
     void ResetQuadViewsDebugHeartbeatState();
     void ResetSessionState();
@@ -574,6 +575,18 @@ class OpenXrLayer {
     bool has_failed_config_timestamp_{false};
 
     Logger logger_;
+    struct InputBindingDiagnosticLogState {
+        bool failure_active{false};
+        std::string signature;
+        std::uint64_t failed_attempts{0};
+        std::uint64_t suppressed_attempts{0};
+        std::optional<std::chrono::steady_clock::time_point> last_log_time;
+    };
+    // Device bindings can be polled several times per frame across Pivot,
+    // Depth, and Turbo. Keep one bounded diagnostic stream per DirectInput
+    // device instead of flooding the session log with the same HRESULT.
+    std::mutex input_binding_diagnostic_mutex_;
+    std::unordered_map<std::string, InputBindingDiagnosticLogState> input_binding_diagnostic_states_;
     ConfigDocument config_;
     bool has_loaded_config_{false};
     uint64_t config_generation_{0};

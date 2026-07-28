@@ -1318,6 +1318,7 @@ constexpr size_t kMaxCachedDepthSubmissionFrames = 180;
 constexpr XrDuration kInternalSwapchainWaitTimeout = 100'000'000; // 100 ms
 constexpr uint32_t kPivotDiagnosticBurstCount = 8;
 constexpr uint64_t kPivotDiagnosticStride = 120;
+constexpr std::chrono::seconds kInputDeviceFailureLogInterval{10};
 // Consecutive unavailable frames before the eye-gaze focus is logged as lost.
 // Debounces sub-second dropouts (e.g. blinks, which invalidate the gaze pose for
 // ~100-400ms) so transient gaze loss does not churn the log. ~1/3s at 90Hz.
@@ -1504,6 +1505,98 @@ void OpenXrLayer::SetLayerDirectory(std::filesystem::path dll_directory) {
 void OpenXrLayer::SetNextProcAddr(PFN_xrGetInstanceProcAddr next_get_instance_proc_addr) {
     std::scoped_lock lock(mutex_);
     next_get_instance_proc_addr_ = next_get_instance_proc_addr;
+}
+
+bool OpenXrLayer::PollInputBindingDown(const InputBinding& binding) {
+    const InputBindingPollResult poll = PollInputBinding(binding);
+    if (!poll.device_poll_attempted) {
+        return poll.down;
+    }
+
+    const std::string key = binding.device_guid.empty() ? BindingLabel(binding) : binding.device_guid;
+    const auto now = std::chrono::steady_clock::now();
+    std::scoped_lock diagnostic_lock(input_binding_diagnostic_mutex_);
+    InputBindingDiagnosticLogState& state = input_binding_diagnostic_states_[key];
+
+    const auto append_result = [](std::ostringstream& stream,
+                                  std::string_view label,
+                                  std::int64_t code) {
+        stream << ", " << label << "=" << DirectInputResultName(code)
+               << "(" << FormatHex(static_cast<std::uint32_t>(code)) << ")";
+    };
+    const auto append_context = [&](std::ostringstream& stream) {
+        stream << "binding='" << BindingLabel(binding) << "'"
+               << ", guid=" << (binding.device_guid.empty() ? "none" : binding.device_guid)
+               << ", stage=" << ToString(poll.diagnostic_stage);
+        append_result(stream, "result", poll.result_code);
+        if (poll.cooperative_window != 0) {
+            stream << ", cooperativeWindow=" << FormatHex(poll.cooperative_window);
+        }
+        if (poll.reacquire_attempted) {
+            append_result(stream, "reacquireResult", poll.reacquire_result_code);
+        }
+        if (poll.retry_attempted) {
+            append_result(stream, "retryResult", poll.retry_result_code);
+        }
+    };
+
+    if (poll.diagnostic_stage != InputBindingPollStage::None && poll.recovered) {
+        std::ostringstream signature_stream;
+        signature_stream << ToString(poll.diagnostic_stage) << ":" << poll.result_code << ":"
+                         << poll.reacquire_result_code << ":" << poll.retry_result_code << ":recovered";
+        const std::string signature = signature_stream.str();
+        const bool interval_elapsed = !state.last_log_time.has_value() ||
+                                      now - *state.last_log_time >= kInputDeviceFailureLogInterval;
+        if (state.signature != signature || interval_elapsed) {
+            std::ostringstream stream;
+            stream << "Input device polling recovered during retry: ";
+            append_context(stream);
+            stream << ".";
+            logger_.Info(stream.str());
+            state.last_log_time = now;
+        }
+        state.failure_active = false;
+        state.signature = signature;
+        state.failed_attempts = 0;
+        state.suppressed_attempts = 0;
+        return poll.down;
+    }
+
+    if (poll.diagnostic_stage != InputBindingPollStage::None) {
+        std::ostringstream signature_stream;
+        signature_stream << ToString(poll.diagnostic_stage) << ":" << poll.result_code << ":"
+                         << poll.reacquire_result_code << ":" << poll.retry_result_code;
+        const std::string signature = signature_stream.str();
+        const bool changed = state.signature != signature;
+        const bool interval_elapsed = !state.last_log_time.has_value() ||
+                                      now - *state.last_log_time >= kInputDeviceFailureLogInterval;
+        state.failure_active = true;
+        ++state.failed_attempts;
+        if (changed || interval_elapsed) {
+            std::ostringstream stream;
+            stream << "Input device polling unavailable: ";
+            append_context(stream);
+            stream << ", failedAttempts=" << state.failed_attempts;
+            if (state.suppressed_attempts > 0) {
+                stream << ", suppressedRepeats=" << state.suppressed_attempts;
+            }
+            stream << ". The binding will remain inactive while VectorXR retries.";
+            logger_.Info(stream.str());
+            state.signature = signature;
+            state.last_log_time = now;
+            state.suppressed_attempts = 0;
+        } else {
+            ++state.suppressed_attempts;
+        }
+        return false;
+    }
+
+    if (state.failure_active) {
+        logger_.Info("Input device polling restored: binding='" + BindingLabel(binding) +
+                     "', failedAttempts=" + std::to_string(state.failed_attempts) + ".");
+        state = InputBindingDiagnosticLogState{};
+    }
+    return poll.down;
 }
 
 bool OpenXrLayer::CanCreateInstance() {
@@ -5530,7 +5623,7 @@ bool OpenXrLayer::IsTurboMetricsCaptureArmed(const InputBinding& binding, int so
     const bool first_poll = !turbo_metrics_binding_last_poll_time_.has_value();
     if (first_poll || now - *turbo_metrics_binding_last_poll_time_ >= kInputBindingPollInterval) {
         turbo_metrics_binding_last_poll_time_ = now;
-        turbo_metrics_binding_down_cached_ = IsInputBindingDown(binding);
+        turbo_metrics_binding_down_cached_ = PollInputBindingDown(binding);
     }
     const bool binding_down = turbo_metrics_binding_down_cached_;
     if (first_poll) {
@@ -6557,7 +6650,8 @@ XrResult OpenXrLayer::LocateViews(XrSession session,
     }
     if (resolved_settings_.pivotxr.enabled && !has_logged_pivotxr_spike_mode_) {
         std::ostringstream stream;
-        stream << "PivotXR spike is active; quad-view sessions use stereo eye-pose recomposition.";
+        stream << "PivotXR enabled; activationState=" << (pivotxr_active ? "engaged" : "idle")
+               << "; quad-view sessions use stereo eye-pose recomposition.";
         for (const PivotXrResolvedProfile& profile : resolved_settings_.pivotxr.profiles) {
             if (profile.activation_mode == ActivationMode::AlwaysOn) {
                 stream << " '" << profile.name << "' engages automatically";
@@ -7439,6 +7533,10 @@ void OpenXrLayer::CaptureInstanceFunctions() {
 }
 
 void OpenXrLayer::ResetSessionState() {
+    {
+        std::scoped_lock diagnostic_lock(input_binding_diagnostic_mutex_);
+        input_binding_diagnostic_states_.clear();
+    }
     if (varjo_native_foveation_diagnostic_.locate_calls > 0) {
         LogVarjoNativeFoveationSummaryLocked("session-teardown", true);
     }
@@ -9281,7 +9379,7 @@ void OpenXrLayer::PollDepthAnchorToggle() {
     if (first_poll || now - *depth_anchor_binding_last_poll_time_ >= kInputBindingPollInterval) {
         depth_anchor_binding_last_poll_time_ = now;
         depth_anchor_binding_down_cached_ =
-            IsInputBindingDown(resolved_settings_.depthxr_bindings.toggle_anchor);
+            PollInputBindingDown(resolved_settings_.depthxr_bindings.toggle_anchor);
     }
     const bool binding_down = depth_anchor_binding_down_cached_;
     if (first_poll) {
@@ -9344,7 +9442,7 @@ bool OpenXrLayer::IsTurboActive() {
     const bool first_poll = !turbo_binding_last_poll_time_.has_value();
     if (first_poll || now - *turbo_binding_last_poll_time_ >= kInputBindingPollInterval) {
         turbo_binding_last_poll_time_ = now;
-        turbo_binding_down_cached_ = IsInputBindingDown(resolved_settings_.turbo.toggle_binding);
+        turbo_binding_down_cached_ = PollInputBindingDown(resolved_settings_.turbo.toggle_binding);
     }
     const bool binding_down = turbo_binding_down_cached_;
     if (first_poll) {
@@ -10186,7 +10284,7 @@ bool OpenXrLayer::IsDepthXrActive() {
     const bool first_poll = !depthxr_binding_last_poll_time_.has_value();
     if (first_poll || now - *depthxr_binding_last_poll_time_ >= kInputBindingPollInterval) {
         depthxr_binding_last_poll_time_ = now;
-        depthxr_binding_down_cached_ = IsInputBindingDown(resolved_settings_.depthxr_bindings.toggle_enabled);
+        depthxr_binding_down_cached_ = PollInputBindingDown(resolved_settings_.depthxr_bindings.toggle_enabled);
     }
     const bool binding_down = depthxr_binding_down_cached_;
     if (first_poll) {
@@ -10248,10 +10346,10 @@ bool OpenXrLayer::IsPivotXrActive() {
         pivotxr_binding_last_poll_time_ = now;
         for (size_t i = 0; i < pivot.profiles.size(); ++i) {
             PivotProfileInputState& input_state = pivotxr_profile_input_states_[i];
-            input_state.down_cached = IsInputBindingDown(pivot.profiles[i].activation_binding);
-            input_state.set_origin_down_cached = IsInputBindingDown(pivot.profiles[i].set_origin_binding);
+            input_state.down_cached = PollInputBindingDown(pivot.profiles[i].activation_binding);
+            input_state.set_origin_down_cached = PollInputBindingDown(pivot.profiles[i].set_origin_binding);
             input_state.release_origin_down_cached =
-                IsInputBindingDown(pivot.profiles[i].release_origin_binding);
+                PollInputBindingDown(pivot.profiles[i].release_origin_binding);
         }
     }
 

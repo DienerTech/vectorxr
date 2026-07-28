@@ -1933,6 +1933,29 @@ void TestDeviceInputPathsAndHatDirections() {
            "HAT values near 360 degrees must wrap to up");
     Expect(!depthxr::DirectInputHatDirection(UINT32_MAX).has_value(),
            "A centered HAT must not report a pressed direction");
+
+    Expect(std::string(depthxr::ToString(depthxr::InputBindingPollStage::SetCooperativeLevel)) ==
+               "set-cooperative-level",
+           "Input diagnostics must retain the failing DirectInput setup stage");
+    Expect(std::string(depthxr::ToString(depthxr::InputBindingPollStage::GetDeviceState)) ==
+               "get-device-state",
+           "Input diagnostics must distinguish device-state reads from acquisition failures");
+
+    const depthxr::InputBindingPollResult inactive = depthxr::PollInputBinding(depthxr::InputBinding{});
+    Expect(!inactive.down && !inactive.device_poll_attempted,
+           "An unbound input must not be reported as a DirectInput polling attempt");
+
+#if defined(_WIN32)
+    depthxr::InputBinding invalid_device_binding;
+    invalid_device_binding.type = depthxr::InputBindingType::Device;
+    invalid_device_binding.device_guid = "{11111111-2222-3333-4444-555555555555}";
+    invalid_device_binding.input_path = "button-129";
+    const depthxr::InputBindingPollResult invalid_device =
+        depthxr::PollInputBinding(invalid_device_binding);
+    Expect(invalid_device.device_poll_attempted &&
+               invalid_device.diagnostic_stage == depthxr::InputBindingPollStage::ParseInputPath,
+           "Invalid device bindings must report their failing stage before touching DirectInput");
+#endif
 }
 
 void TestQuadViewsCanvasDimensionsMatchCompositionDensity() {

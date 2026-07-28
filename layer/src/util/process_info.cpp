@@ -30,10 +30,10 @@ bool ContainsAny(std::wstring_view value, std::initializer_list<std::wstring_vie
 }
 
 bool IsInteropModule(std::wstring_view lower_name) {
-    constexpr std::array<std::wstring_view, 5> graphics_modules{
-        L"dxgi.dll", L"d3d11.dll", L"d3d12.dll", L"opengl32.dll", L"openvr_api.dll"};
-    if (std::find(graphics_modules.begin(), graphics_modules.end(), lower_name) !=
-        graphics_modules.end()) {
+    constexpr std::array<std::wstring_view, 6> interop_modules{
+        L"dxgi.dll", L"d3d11.dll", L"d3d12.dll", L"opengl32.dll", L"openvr_api.dll", L"dinput8.dll"};
+    if (std::find(interop_modules.begin(), interop_modules.end(), lower_name) !=
+        interop_modules.end()) {
         return true;
     }
     if (lower_name.find(L"vectorxr") != std::wstring_view::npos) {
@@ -48,7 +48,8 @@ bool IsInteropModule(std::wstring_view lower_name) {
 bool IsInteropProcess(std::wstring_view lower_name) {
     return ContainsAny(lower_name,
                        {L"desktopxr", L"simhaptic", L"openkneeboard", L"xrnecksafer",
-                        L"virtualdesktop", L"openxr-toolkit"});
+                        L"virtualdesktop", L"openxr-toolkit", L"simapppro", L"winwing",
+                        L"joystickgremlin", L"vjoy", L"hidhide"});
 }
 #endif
 

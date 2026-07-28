@@ -26,8 +26,8 @@ struct ProcessInteropSnapshot {
 
 std::filesystem::path GetCurrentExecutablePath();
 std::string GetCurrentExecutableName();
-// Returns a deliberately bounded view of the graphics/OpenXR stack: known
-// in-process graphics hooks/API layers and known companion VR applications.
+// Returns a deliberately bounded view of the graphics/OpenXR/input stack:
+// known in-process hooks/API layers and known companion VR or input applications.
 // It never emits an unrestricted module or process list into a support log.
 ProcessInteropSnapshot GetProcessInteropSnapshot();
 
