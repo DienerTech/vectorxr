@@ -45,24 +45,38 @@ function onAdvancedAxesChange(enabled: boolean) {
       </p>
       <div class="mt-3 grid gap-3 sm:grid-cols-2">
         <label class="block">
-          <span class="mb-1.5 block text-sm font-medium">Transition</span>
-          <select v-model="settings.stepGlideMode" class="app-input w-full rounded-[0.75rem] px-4 py-2.5">
+          <span class="mb-1.5 flex items-center gap-1.5 text-sm font-medium">
+            Transition
+            <span
+              title="Choose whether each new step is applied immediately or eased in over the set duration."
+              class="cursor-help select-none text-xs text-muted"
+              >ⓘ</span
+            >
+          </span>
+          <select v-model="settings.stepGlideMode" class="app-input h-11 w-full rounded-[0.75rem] px-4 py-2.5">
             <option value="instant">Instant</option>
             <option value="glide">Glide</option>
           </select>
         </label>
         <label class="block">
-          <span class="mb-1.5 block text-sm font-medium">Duration</span>
+          <span class="mb-1.5 flex items-center gap-1.5 text-sm font-medium">
+            Duration
+            <span
+              title="How many seconds a Glide transition takes to reach its new step target. This is shared by every direction."
+              class="cursor-help select-none text-xs text-muted"
+              >ⓘ</span
+            >
+          </span>
           <input
             v-if="settings.stepGlideMode === 'glide'"
             v-model.number="settings.stepGlideSeconds"
-            class="app-input w-full rounded-[0.75rem] px-4 py-2.5"
+            class="app-input h-11 w-full rounded-[0.75rem] px-4 py-2.5"
             min="0.01"
             max="2"
             step="0.01"
             type="number"
           />
-          <input v-else class="app-input w-full cursor-not-allowed rounded-[0.75rem] px-4 py-2.5 opacity-70" value="0.0" type="number" readonly />
+          <input v-else class="app-input h-11 w-full cursor-not-allowed rounded-[0.75rem] px-4 py-2.5 opacity-70" value="0.0" type="number" readonly />
           <span class="mt-1 block text-xs text-muted">{{ settings.stepGlideMode === 'instant' ? 'seconds — Instant has no transition time' : 'seconds, shared by every direction' }}</span>
         </label>
       </div>

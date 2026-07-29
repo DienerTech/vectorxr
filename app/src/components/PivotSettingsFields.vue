@@ -67,7 +67,7 @@ function onAdvancedAxesChange(enabled: boolean) {
               >ⓘ</span
             >
           </span>
-          <select v-model="settings.responseMode" class="app-input w-full rounded-[0.75rem] px-4 py-2.5">
+          <select v-model="settings.responseMode" class="app-input h-11 w-full rounded-[0.75rem] px-4 py-2.5">
             <option value="continuous">continuous</option>
             <option value="stepped">stepped</option>
           </select>
@@ -83,7 +83,7 @@ function onAdvancedAxesChange(enabled: boolean) {
           </span>
           <input
             v-model.number="settings.smoothing"
-            class="app-input w-full rounded-[0.75rem] px-4 py-2.5"
+            class="app-input h-11 w-full rounded-[0.75rem] px-4 py-2.5"
             min="0"
             max="1"
             step="0.01"
@@ -101,7 +101,7 @@ function onAdvancedAxesChange(enabled: boolean) {
           </span>
           <input
             v-model.number="settings.activationRampSeconds"
-            class="app-input w-full rounded-[0.75rem] px-4 py-2.5"
+            class="app-input h-11 w-full rounded-[0.75rem] px-4 py-2.5"
             min="0"
             max="2"
             step="0.05"
@@ -264,7 +264,14 @@ function onAdvancedAxesChange(enabled: boolean) {
           <p class="eyebrow text-xs uppercase tracking-[0.18em]" :title="direction.hint">{{ direction.label }}</p>
           <div class="mt-3 grid gap-3">
             <label class="block">
-              <span class="mb-1.5 block text-sm font-medium">Multiplier</span>
+              <span class="mb-1.5 flex items-center gap-1.5 text-sm font-medium">
+                Multiplier
+                <span
+                  title="How much head rotation is amplified in this direction after the deadzone. 1.0 adds no extra rotation."
+                  class="cursor-help select-none text-xs text-muted"
+                  >ⓘ</span
+                >
+              </span>
               <input
                 v-model.number="axisTuning(direction.key).rotationMultiplier"
                 class="app-input w-full rounded-[0.75rem] px-3 py-2"
@@ -275,7 +282,14 @@ function onAdvancedAxesChange(enabled: boolean) {
               />
             </label>
             <label class="block">
-              <span class="mb-1.5 block text-sm font-medium">Deadzone</span>
+              <span class="mb-1.5 flex items-center gap-1.5 text-sm font-medium">
+                Deadzone
+                <span
+                  title="Head rotation in this direction that is ignored before Motion starts adding rotation."
+                  class="cursor-help select-none text-xs text-muted"
+                  >ⓘ</span
+                >
+              </span>
               <input
                 v-model.number="axisTuning(direction.key).deadzoneDegrees"
                 class="app-input w-full rounded-[0.75rem] px-3 py-2"
@@ -287,7 +301,14 @@ function onAdvancedAxesChange(enabled: boolean) {
               <span class="mt-1 block text-xs text-muted">degrees</span>
             </label>
             <label class="block">
-              <span class="mb-1.5 block text-sm font-medium">Max Extra</span>
+              <span class="mb-1.5 flex items-center gap-1.5 text-sm font-medium">
+                Max Extra
+                <span
+                  title="The most extra rotation Motion can add in this direction."
+                  class="cursor-help select-none text-xs text-muted"
+                  >ⓘ</span
+                >
+              </span>
               <input
                 v-model.number="axisTuning(direction.key).maxExtraDegrees"
                 class="app-input w-full rounded-[0.75rem] px-3 py-2"

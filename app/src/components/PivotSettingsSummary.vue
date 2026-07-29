@@ -73,7 +73,7 @@ const chips = computed(() => {
          with the bindings row's button regardless of chip wrapping. -->
     <div class="flex items-start justify-between gap-3">
       <div class="flex min-w-0 flex-1 flex-wrap items-center gap-2">
-        <p class="shrink-0 text-sm font-semibold tracking-tight">Motion Assist</p>
+        <p class="shrink-0 text-sm font-semibold tracking-tight">Motion</p>
         <span
           v-for="chip in chips"
           :key="chip.label"

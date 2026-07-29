@@ -243,14 +243,16 @@ const profileWarnings = computed(() => {
             <p class="mt-1">{{ warning.message }}</p>
           </div>
 
+          <PivotSettingsSummary
+            :settings="config.modules.pivotxr.defaults"
+            class="mb-3"
+            @edit="openSettings('default')"
+          />
           <PivotBindingsPanel
             :activation-mode="config.modules.pivotxr.activationMode"
             :activation-bindings="config.modules.pivotxr.activationBindings"
-            class="mb-3"
             @edit="openBindings('default')"
           />
-
-          <PivotSettingsSummary :settings="config.modules.pivotxr.defaults" @edit="openSettings('default')" />
           <PivotOriginPanel
             :set-origin-bindings="config.modules.pivotxr.setOriginBindings"
             :release-origin-bindings="config.modules.pivotxr.releaseOriginBindings"
@@ -302,13 +304,13 @@ const profileWarnings = computed(() => {
           @move="$emit('movePivotProfile', index, $event)"
           @sync-name="$emit('syncPivotProfileName', index)"
         >
+          <PivotSettingsSummary :settings="profile.settings" @edit="openSettings(index)" />
           <PivotBindingsPanel
             :activation-mode="profile.activationMode"
             :activation-bindings="profile.activationBindings"
+            class="mt-3"
             @edit="openBindings(index)"
           />
-
-          <PivotSettingsSummary class="mt-3" :settings="profile.settings" @edit="openSettings(index)" />
           <PivotOriginPanel
             :set-origin-bindings="profile.setOriginBindings"
             :release-origin-bindings="profile.releaseOriginBindings"
