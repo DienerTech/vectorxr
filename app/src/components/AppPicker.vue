@@ -35,5 +35,7 @@ function toggle(id: string) {
       {{ application.name }}
     </button>
   </div>
-  <p v-else class="text-sm text-muted">No applications registered yet. Add one on the Application Registry tab first.</p>
+  <p v-else class="text-sm text-muted">
+    No applications are registered. Add one from Application Registry before this profile can activate.
+  </p>
 </template>
