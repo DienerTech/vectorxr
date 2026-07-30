@@ -1975,6 +1975,17 @@ void TestTurboSteamVrQuadviewsCompatibilityPolicy() {
            "The DCS compatibility rule must not disable Turbo globally");
 }
 
+void TestQuadViewsSessionActivationPolicy() {
+    Expect(depthxr::ResolveQuadViewsSessionActive(true, std::nullopt),
+           "Quadviews should follow enabled config before a session is latched");
+    Expect(!depthxr::ResolveQuadViewsSessionActive(false, std::nullopt),
+           "Quadviews should follow disabled config before a session is latched");
+    Expect(depthxr::ResolveQuadViewsSessionActive(false, true),
+           "A live enabled Quadviews session must ignore a mid-session disable");
+    Expect(!depthxr::ResolveQuadViewsSessionActive(true, false),
+           "A live stereo session must ignore a mid-session Quadviews enable");
+}
+
 void TestQuadViewsRecoveryStabilizationPolicy() {
     Expect(depthxr::QuadViewsRecoveryStabilizationDelay("VirtualDesktopXR").count() == 250,
            "VDXR recovery should wait for focus and reference-space events to settle");
@@ -2203,6 +2214,7 @@ int main() {
     TestLoggerCollapsesDuplicateMessages();
     TestEyeGazeExtensionCompatibilityPolicy();
     TestTurboSteamVrQuadviewsCompatibilityPolicy();
+    TestQuadViewsSessionActivationPolicy();
     TestQuadViewsRecoveryStabilizationPolicy();
     TestQuadViewsRecoveryStabilizer();
     TestQuadViewsCanvasDimensionsMatchCompositionDensity();

@@ -126,7 +126,7 @@ function budgetChipClass(settings: QuadViewsSettings) {
             quad-view support to ordinary stereo games.
           </p>
           <p class="mt-2 max-w-3xl text-sm font-bold leading-6 text-muted">
-            DCS is the primary tested title. Synthesized Quadviews requires a D3D11 application with in-game quad views enabled; other titles may work only when they request the same functionality.
+            DCS is the primary tested title. Likely, but unconfirmed, D3D11 candidates include Pavlov VR, VAIL VR, The 7th Guest VR, and Kayak VR: Mirage. Each title must request quad views itself.
           </p>
           <p class="mt-1 max-w-3xl text-xs leading-5 text-muted">
             Pixel estimates compare application view rendering only; the runtime and VectorXR composite have additional GPU cost.
@@ -153,6 +153,10 @@ function budgetChipClass(settings: QuadViewsSettings) {
         </ul>
       </div>
 
+      <div class="mb-4 rounded-[0.9rem] border px-4 py-3 text-sm leading-6 chip-warning" role="note">
+        <strong>Live tuning:</strong> amber-outlined controls require a full game restart for their complete effect; unmarked controls update during play. Quadviews enable/disable changes are saved safely and deferred until the running OpenXR application exits.
+      </div>
+
       <details class="section-disclosure border-t pt-4" style="border-color: var(--app-border)" open>
         <summary class="flex flex-wrap items-center gap-2">
           <svg aria-hidden="true" class="section-chevron h-3.5 w-3.5" viewBox="0 0 20 20" fill="currentColor">
@@ -170,15 +174,26 @@ function budgetChipClass(settings: QuadViewsSettings) {
             <span class="text-xs font-semibold">{{ budgetLabel(config.modules.quadviews.defaults) }}</span>
           </span>
         </summary>
-        <label class="pill-toggle mt-3 inline-flex items-center gap-3 rounded-full px-4 py-2 text-sm font-medium">
+        <div class="mt-3 flex flex-wrap items-center gap-2">
+          <label
+            class="pill-toggle restart-required-control inline-flex items-center gap-3 rounded-full px-4 py-2 text-sm font-medium"
+            title="Saved immediately, but a running OpenXR application keeps its launch-time Quadviews state until it exits."
+          >
           <input v-model="config.modules.quadviews.enabled" class="h-4 w-4 accent-depthxr-copper" type="checkbox" />
           Default Profile {{ config.modules.quadviews.enabled ? "On" : "Off" }}
           <span
-            title="Turns the default Quadviews profile on or off for apps without an enabled custom profile."
+            title="Turning Quadviews on or off requires a full game restart. A running OpenXR session keeps its launch-time state."
             class="cursor-help select-none text-xs text-muted"
             >ⓘ</span
           >
-        </label>
+          </label>
+          <span
+            class="rounded-full px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.14em] chip-warning"
+            title="Quadviews enable/disable changes apply after the running OpenXR application exits."
+          >
+            Restart required
+          </span>
+        </div>
         <div v-if="!config.modules.quadviews.enabled" class="mt-3 rounded-[0.9rem] border px-4 py-3 text-sm leading-6 surface-panel-strong">
           The default profile is off and has no effect — applications without an enabled custom profile get no Quadviews. Enabled custom profiles below still apply to their assigned applications.
         </div>
@@ -210,6 +225,7 @@ function budgetChipClass(settings: QuadViewsSettings) {
         :profile="profile"
         :applications="applications"
         module-label="Quadviews"
+        enabled-change-note="Saved immediately, but a running OpenXR application keeps its launch-time Quadviews state until it exits."
         :warnings="profileWarnings.get(index)"
         @remove="$emit('removeQuadViewsProfile', index)"
         @sync-name="$emit('syncQuadViewsProfileName', index)"

@@ -1997,6 +1997,8 @@ XrResult OpenXrLayer::CreateSession(XrInstance instance,
     }
     ReloadConfigIfNeeded();
     RefreshResolvedSettings();
+    quadviews_session_active_ = resolved_settings_.core.enabled && resolved_settings_.quadviews.enabled;
+    deferred_quadviews_config_active_.reset();
     if (IsQuadViewsEmulationActive() &&
         resolved_settings_.quadviews.tracking_mode == QuadViewsTrackingMode::Eye) {
         const XrResult eye_gaze_result = CreateEyeGazeResources(*session);
@@ -7264,6 +7266,40 @@ void OpenXrLayer::RefreshResolvedSettings() {
 
     const ResolvedRuntimeConfig previous = resolved_settings_;
     resolved_settings_ = ResolveRuntimeConfig(config_, current_exe_name_);
+
+    const bool configured_core_active = resolved_settings_.core.enabled;
+    const bool configured_quadviews_active =
+        configured_core_active && resolved_settings_.quadviews.enabled;
+    if (active_session_ != XR_NULL_HANDLE && quadviews_session_active_.has_value() &&
+        configured_quadviews_active != *quadviews_session_active_) {
+        if (!deferred_quadviews_config_active_.has_value() ||
+            *deferred_quadviews_config_active_ != configured_quadviews_active) {
+            logger_.Info(std::string("Quadviews ") +
+                         (configured_quadviews_active ? "enable" : "disable") +
+                         " change deferred until the OpenXR application exits; this session remains " +
+                         (*quadviews_session_active_ ? "enabled." : "disabled."));
+        }
+        deferred_quadviews_config_active_ = configured_quadviews_active;
+
+        if (*quadviews_session_active_) {
+            // Keep the topology and the active profile's settings intact. A disabled
+            // custom profile can otherwise resolve to unrelated default values while
+            // its four-view session is still running.
+            resolved_settings_.quadviews = previous.quadviews;
+            if (!configured_core_active) {
+                // The suite master switch still disables every topology-safe feature.
+                // Core remains internally active only so the latched Quadviews frame
+                // path can finish the current session safely.
+                resolved_settings_.core.enabled = true;
+                resolved_settings_.depthxr.enabled = false;
+                resolved_settings_.pivotxr.enabled = false;
+                resolved_settings_.turbo.enabled = false;
+            }
+        }
+    } else {
+        deferred_quadviews_config_active_.reset();
+    }
+
     if (resolved_settings_.core.enabled && resolved_settings_.turbo.enabled) {
         // Do not disarm this flag on a live-session settings change: once a
         // Turbo pipeline has been established, Wait/Begin/End interception is
@@ -7571,6 +7607,8 @@ void OpenXrLayer::ResetSessionState() {
     varjo_native_foveation_diagnostic_ = {};
     ResetD3D11QuadViewsCompositor();
     active_session_ = XR_NULL_HANDLE;
+    quadviews_session_active_.reset();
+    deferred_quadviews_config_active_.reset();
     session_begin_wall_time_.reset();
     pending_end_frame_diagnostics_ = 0;
     pending_eye_gaze_diagnostics_ = 0;
@@ -7666,7 +7704,8 @@ void OpenXrLayer::ResetInstanceState() {
 }
 
 bool OpenXrLayer::IsQuadViewsActive() const {
-    return resolved_settings_.core.enabled && resolved_settings_.quadviews.enabled;
+    const bool configured_active = resolved_settings_.core.enabled && resolved_settings_.quadviews.enabled;
+    return ResolveQuadViewsSessionActive(configured_active, quadviews_session_active_);
 }
 
 bool OpenXrLayer::IsQuadViewsEmulationActive() const {

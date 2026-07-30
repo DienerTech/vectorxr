@@ -17,6 +17,7 @@ const props = defineProps<{
   moduleLabel: string
   warningTitle?: string
   warnings?: string[]
+  enabledChangeNote?: string
   // When set, shows priority reorder controls. Array order is priority order:
   // earlier profiles win contested bindings for a shared application.
   reorderable?: boolean
@@ -101,11 +102,19 @@ const hasNoAssignedApplications = computed(
         </div>
         <label
           class="pill-toggle inline-flex items-center gap-3 rounded-full px-4 py-2 text-sm font-medium"
-          :title="profile.enabled ? `This profile applies custom ${moduleLabel} settings to its assigned applications.` : `This profile is ignored at runtime.`"
+          :class="{ 'restart-required-control': enabledChangeNote }"
+          :title="enabledChangeNote ?? (profile.enabled ? `This profile applies custom ${moduleLabel} settings to its assigned applications.` : `This profile is ignored at runtime.`)"
         >
           <input v-model="profile.enabled" class="h-4 w-4 accent-depthxr-copper" type="checkbox" />
           {{ profile.enabled ? 'Profile On' : 'Profile Off' }}
         </label>
+        <span
+          v-if="enabledChangeNote"
+          class="rounded-full px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.14em] chip-warning"
+          :title="enabledChangeNote"
+        >
+          Restart required
+        </span>
         <button class="button-secondary rounded-[0.75rem] px-3.5 py-2 text-sm font-medium" type="button" @click="$emit('remove')">
           Remove
         </button>

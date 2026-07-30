@@ -141,4 +141,8 @@ std::chrono::milliseconds QuadViewsRecoveryStabilizationDelay(std::string_view r
     return std::chrono::milliseconds(0);
 }
 
+bool ResolveQuadViewsSessionActive(bool configured_active, std::optional<bool> session_latched_active) {
+    return session_latched_active.value_or(configured_active);
+}
+
 } // namespace depthxr

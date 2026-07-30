@@ -162,6 +162,8 @@ marked **Experimental** and currently targets **D3D11 quadview-capable apps**. E
 VectorXR module does not make an ordinary stereo game render four views: the game must request
 OpenXR quad-view rendering first. DCS is the primary tested title. Other D3D11 games may work
 only if they implement the same functionality; compatibility is not implied by D3D11 alone.
+Likely, but unconfirmed, candidates include **Pavlov VR**, **VAIL VR**, **The 7th Guest VR**,
+and **Kayak VR: Mirage**.
 
 For the recommended **DCS + synthesized VectorXR Quadviews** path, set:
 
@@ -176,6 +178,19 @@ For the recommended **DCS + synthesized VectorXR Quadviews** path, set:
   provider. Run one quadviews provider at a time.
 
 Restart DCS after changing its VR settings, the active OpenXR runtime, or API-layer state.
+
+#### Live tuning and restarts
+
+- **Fully live:** Horizontal Offset, Vertical Offset, Tracking Mode, Smoothing, Deadzone,
+  Foveate Sharpness, and Transition Thickness.
+- **Restart required for complete effect:** Focus Width, Focus Height, Focus Resolution,
+  Peripheral Resolution, and turning Quadviews or a Quadviews profile on or off. Width and height
+  move the visible focus window immediately, but DCS keeps its existing texture dimensions and
+  pixel workload until restart. Focus Resolution also keeps DCS's existing focus textures;
+  values above 100% may resize VectorXR's output canvas and cause a temporary frame-rate hitch.
+
+VectorXR now defers Quadviews enable/disable changes while an OpenXR session is active. Saving is
+safe, but the running game keeps its launch-time state until it exits.
 
 - **Focus Window** sets the size and offset of the high-detail region; **Resolution** sets
   **Foveate** (inner) and **Peripheral** (outer) resolution as a percentage of your headset's
@@ -213,8 +228,8 @@ runtime must expose eye-gaze data to the layer; otherwise head/static focus is t
 **Why did a saved setting appear to do nothing?**
 
 Confirm that the game has Quad Views enabled, the correct VectorXR profile matches its executable,
-and only one provider is active. API-layer, runtime, and in-game VR changes normally require a
-full game restart.
+and only one provider is active. Check whether the control is marked **Restart required**.
+API-layer, runtime, and in-game VR changes also require a full game restart.
 
 **What else should I disable while troubleshooting?**
 

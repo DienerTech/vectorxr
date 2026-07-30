@@ -159,6 +159,11 @@ textarea {
   color: var(--app-text-soft);
 }
 
+.restart-required-control {
+  border-color: var(--app-warning-text) !important;
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--app-warning-text) 45%, transparent);
+}
+
 /* Numeric inputs carry min/max mirroring the config validator; flag values the
    validator would reject so the failing control is findable at a glance. */
 .app-input:out-of-range,

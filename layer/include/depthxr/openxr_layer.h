@@ -944,6 +944,11 @@ class OpenXrLayer {
     // emulation on this instance.
     bool varjo_compatible_quadviews_active_{false};
     bool defer_quadviews_swapchain_releases_{false};
+    // Quadviews changes the application's view/swapchain topology. Once a session
+    // is created, keep its initial activation state until teardown so a config
+    // reload cannot remove the compositor from underneath a running title.
+    std::optional<bool> quadviews_session_active_;
+    std::optional<bool> deferred_quadviews_config_active_;
     XrSession active_session_{XR_NULL_HANDLE};
     XrSpace internal_local_space_{XR_NULL_HANDLE};
     XrSpace internal_view_space_{XR_NULL_HANDLE};
