@@ -153,8 +153,9 @@ function budgetChipClass(settings: QuadViewsSettings) {
         </ul>
       </div>
 
-      <div class="mb-4 rounded-[0.9rem] border px-4 py-3 text-sm leading-6 chip-warning" role="note">
-        <strong>Live tuning:</strong> amber-outlined controls require a full game restart for their complete effect; unmarked controls update during play. Quadviews enable/disable changes are saved safely and deferred until the running OpenXR application exits.
+      <div class="mb-4 flex items-start gap-2.5 rounded-[0.9rem] border px-4 py-3 text-sm leading-6 surface-panel-strong" role="note">
+        <span class="restart-required-mark mt-0.5" aria-hidden="true">&#8635;</span>
+        <p><strong>Restart to apply:</strong> marked fields and Quadviews on/off take full effect after the current OpenXR application exits. Unmarked controls update during play.</p>
       </div>
 
       <details class="section-disclosure border-t pt-4" style="border-color: var(--app-border)" open>
@@ -176,23 +177,16 @@ function budgetChipClass(settings: QuadViewsSettings) {
         </summary>
         <div class="mt-3 flex flex-wrap items-center gap-2">
           <label
-            class="pill-toggle restart-required-control inline-flex items-center gap-3 rounded-full px-4 py-2 text-sm font-medium"
+            class="pill-toggle inline-flex items-center gap-3 rounded-full px-4 py-2 text-sm font-medium"
             title="Saved immediately, but a running OpenXR application keeps its launch-time Quadviews state until it exits."
           >
-          <input v-model="config.modules.quadviews.enabled" class="h-4 w-4 accent-depthxr-copper" type="checkbox" />
-          Default Profile {{ config.modules.quadviews.enabled ? "On" : "Off" }}
-          <span
-            title="Turning Quadviews on or off requires a full game restart. A running OpenXR session keeps its launch-time state."
-            class="cursor-help select-none text-xs text-muted"
-            >ⓘ</span
-          >
+            <input v-model="config.modules.quadviews.enabled" class="h-4 w-4 accent-depthxr-copper" type="checkbox" />
+            Default Profile {{ config.modules.quadviews.enabled ? "On" : "Off" }}
+            <span
+              class="restart-required-mark"
+              title="Quadviews enable/disable changes apply after the running OpenXR application exits."
+            >&#8635;</span>
           </label>
-          <span
-            class="rounded-full px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.14em] chip-warning"
-            title="Quadviews enable/disable changes apply after the running OpenXR application exits."
-          >
-            Restart required
-          </span>
         </div>
         <div v-if="!config.modules.quadviews.enabled" class="mt-3 rounded-[0.9rem] border px-4 py-3 text-sm leading-6 surface-panel-strong">
           The default profile is off and has no effect — applications without an enabled custom profile get no Quadviews. Enabled custom profiles below still apply to their assigned applications.

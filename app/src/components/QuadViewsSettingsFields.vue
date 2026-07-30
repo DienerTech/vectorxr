@@ -54,7 +54,10 @@ function presetActive(preset: QuadViewsPreset) {
   <div class="space-y-3">
     <div class="flex flex-wrap items-center justify-between gap-3 rounded-[1rem] border px-4 py-3 surface-panel-soft">
       <div>
-        <p class="eyebrow text-xs uppercase tracking-[0.18em]">Vector Preset</p>
+        <p class="eyebrow flex items-center gap-1.5 text-xs uppercase tracking-[0.18em]">
+          Vector Preset
+          <span class="restart-required-mark" title="Presets include settings that require a game restart for their complete effect.">&#8635;</span>
+        </p>
         <p class="mt-1 text-xs text-muted">A strong starting point; tracking and alignment remain yours.</p>
       </div>
       <div class="flex flex-wrap gap-2">
@@ -79,16 +82,11 @@ function presetActive(preset: QuadViewsPreset) {
         <label class="block">
           <span class="mb-1.5 flex min-h-[2.5rem] items-start gap-1.5 text-sm font-medium">
             Focus Width
-            <span
-              title="The focus window moves live, but DCS keeps its existing texture width and pixel workload until restart."
-              class="cursor-help select-none text-xs text-muted"
-              >ⓘ</span
-            >
-            <span class="rounded-full px-2 py-0.5 text-[9px] font-semibold uppercase tracking-[0.12em] chip-warning" title="Full effect requires a game restart.">Restart</span>
+            <span class="restart-required-mark" title="The focus window moves live, but DCS keeps its existing texture width and pixel workload until restart.">&#8635;</span>
           </span>
           <input
             v-model.number="settings.focusHorizontalSizePercent"
-            class="app-input restart-required-control w-full rounded-[0.75rem] px-4 py-2.5"
+            class="app-input w-full rounded-[0.75rem] px-4 py-2.5"
             min="5"
             max="100"
             step="1"
@@ -99,16 +97,11 @@ function presetActive(preset: QuadViewsPreset) {
         <label class="block">
           <span class="mb-1.5 flex min-h-[2.5rem] items-start gap-1.5 text-sm font-medium">
             Focus Height
-            <span
-              title="The focus window moves live, but DCS keeps its existing texture height and pixel workload until restart."
-              class="cursor-help select-none text-xs text-muted"
-              >ⓘ</span
-            >
-            <span class="rounded-full px-2 py-0.5 text-[9px] font-semibold uppercase tracking-[0.12em] chip-warning" title="Full effect requires a game restart.">Restart</span>
+            <span class="restart-required-mark" title="The focus window moves live, but DCS keeps its existing texture height and pixel workload until restart.">&#8635;</span>
           </span>
           <input
             v-model.number="settings.focusVerticalSizePercent"
-            class="app-input restart-required-control w-full rounded-[0.75rem] px-4 py-2.5"
+            class="app-input w-full rounded-[0.75rem] px-4 py-2.5"
             min="5"
             max="100"
             step="1"
@@ -161,16 +154,11 @@ function presetActive(preset: QuadViewsPreset) {
         <label class="block">
           <span class="mb-1.5 flex min-h-[2.5rem] items-start gap-1.5 text-sm font-medium">
             Focus Resolution
-            <span
-              title="Restart required: DCS keeps its launch-time focus textures. Above 100% can resize VectorXR's output canvas and may cause a temporary frame-rate hitch."
-              class="cursor-help select-none text-xs text-muted"
-              >ⓘ</span
-            >
-            <span class="rounded-full px-2 py-0.5 text-[9px] font-semibold uppercase tracking-[0.12em] chip-warning" title="Full effect requires a game restart.">Restart</span>
+            <span class="restart-required-mark" title="Restart required: DCS keeps its launch-time focus textures. Above 100% can resize VectorXR's output canvas and may cause a temporary frame-rate hitch.">&#8635;</span>
           </span>
           <input
             :value="Math.round(settings.focusScale * 100)"
-            class="app-input restart-required-control w-full rounded-[0.75rem] px-4 py-2.5"
+            class="app-input w-full rounded-[0.75rem] px-4 py-2.5"
             min="50"
             max="200"
             step="5"
@@ -182,16 +170,11 @@ function presetActive(preset: QuadViewsPreset) {
         <label class="block">
           <span class="mb-1.5 flex min-h-[2.5rem] items-start gap-1.5 text-sm font-medium">
             Peripheral Resolution
-            <span
-              title="Restart required: DCS keeps its launch-time peripheral textures and pixel workload."
-              class="cursor-help select-none text-xs text-muted"
-              >ⓘ</span
-            >
-            <span class="rounded-full px-2 py-0.5 text-[9px] font-semibold uppercase tracking-[0.12em] chip-warning" title="Full effect requires a game restart.">Restart</span>
+            <span class="restart-required-mark" title="Restart required: DCS keeps its launch-time peripheral textures and pixel workload.">&#8635;</span>
           </span>
           <input
             :value="Math.round(settings.peripheralScale * 100)"
-            class="app-input restart-required-control w-full rounded-[0.75rem] px-4 py-2.5"
+            class="app-input w-full rounded-[0.75rem] px-4 py-2.5"
             min="10"
             max="150"
             step="5"
