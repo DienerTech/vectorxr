@@ -158,7 +158,24 @@ combination is VectorXR's signature capability — see [Why VectorXR](../README.
 ![VectorXR Quadviews tab](screenshots/quadviews.jpg)
 
 Quadviews drives foveated-style rendering, concentrating detail where you are looking. It is
-marked **Experimental** and currently targets **DX11 quadview-capable apps**.
+marked **Experimental** and currently targets **D3D11 quadview-capable apps**. Enabling the
+VectorXR module does not make an ordinary stereo game render four views: the game must request
+OpenXR quad-view rendering first. DCS is the primary tested title. Other D3D11 games may work
+only if they implement the same functionality; compatibility is not implied by D3D11 alone.
+
+For the recommended **DCS + synthesized VectorXR Quadviews** path, set:
+
+- **DCS > Options > VR > Use Quad View:** on.
+- **DCS > Options > VR > Use Eye Tracking:** on for gaze-tracked focus; otherwise VectorXR can
+  use head/static focus.
+- **VectorXR OpenXR layer:** enabled, with a Quadviews default or DCS profile enabled and saved.
+- **Pimax runtime quadviews:** off. In Pimax Play or Pimax EVO, turn **Native Pimax Quad Views**
+  off so VectorXR can provide Quadviews and keep the focus region aligned with Pivot. Native Varjo
+  Quadviews is different and remains runtime-driven.
+- **`XR_APILAYER_MBUCCHIA_quad_views_foveated`:** disabled while VectorXR is the quadviews
+  provider. Run one quadviews provider at a time.
+
+Restart DCS after changing its VR settings, the active OpenXR runtime, or API-layer state.
 
 - **Focus Window** sets the size and offset of the high-detail region; **Resolution** sets
   **Foveate** (inner) and **Peripheral** (outer) resolution as a percentage of your headset's
@@ -167,11 +184,43 @@ marked **Experimental** and currently targets **DX11 quadview-capable apps**.
   **% of stereo pixels** and is color-coded, with a "Detrimental" warning when you exceed budget.
   Watch it while tuning to keep performance positive.
 - **Tracking** controls eye-tracked focus (mode, smoothing, deadzone). Quadviews also depends on
-  OpenXR layer order — see the next section if it misbehaves.
+  the headset runtime exposing eye-gaze support. If it does not, VectorXR falls back to
+  head/static focus.
 
 Quadviews and Pivot are designed to compose: unlike running separate foveation and neck-assist
 layers, VectorXR keeps the foveated focus region aligned with your gaze while Pivot rotates the
 view. See [Why VectorXR](../README.md#why-vectorxr).
+
+### Quadviews FAQ
+
+**Can Quadviews improve any OpenXR game?**
+
+No. The game must request quad-view rendering. DCS is the main tested example. VectorXR's
+synthesized path also requires D3D11; a D3D11 renderer by itself is not enough.
+
+**Which quadviews provider should I enable?**
+
+Choose one software provider. For synthesized VectorXR Quadviews, disable Quad-Views-Foveated;
+on Pimax, also disable Native Pimax Quad Views. Native Varjo Quadviews remains runtime-driven. If
+you deliberately use Quad-Views-Foveated instead, leave the VectorXR Quadviews profile off;
+VectorXR can remain enabled for Pivot or Depth, with Quad-Views-Foveated ordered above it.
+
+**Why is the focus region following my head instead of my eyes?**
+
+Turn on **Use Eye Tracking** in DCS and eye tracking in the headset software. The active OpenXR
+runtime must expose eye-gaze data to the layer; otherwise head/static focus is the safe fallback.
+
+**Why did a saved setting appear to do nothing?**
+
+Confirm that the game has Quad Views enabled, the correct VectorXR profile matches its executable,
+and only one provider is active. API-layer, runtime, and in-game VR changes normally require a
+full game restart.
+
+**What else should I disable while troubleshooting?**
+
+Avoid overlapping features: DCS **Force IPD Distance** can mask Depth, another tool's Turbo mode
+can conflict with VectorXR Turbo, and runtime-native quadviews such as Pimax's does not currently compose with Pivot.
+Re-enable extras one at a time after the base setup works.
 
 ### Turbo
 
@@ -204,10 +253,11 @@ is the recommended one for most PCVR). For each layer you can see its name, path
 status, and you can enable, disable, reorder, or remove its registry registration. Removal asks
 for confirmation and does not delete the layer's files from disk.
 
-**Order matters.** For Pivot with quad views, the app notes that **Quad-Views-Foveated should be
-above VectorXR**. If Pivot or Quadviews isn't behaving, check VectorXR's position here relative to
-other OpenXR layers. (VectorXR's own layer currently shows as *unsigned* during the beta — that's
-expected; see the README's status section.)
+**Provider and order both matter.** When VectorXR provides Quadviews, disable
+**Quad-Views-Foveated** so the two layers do not compete. If you intentionally use
+Quad-Views-Foveated with VectorXR Pivot instead, keep the VectorXR Quadviews profile off and order
+Quad-Views-Foveated **above VectorXR**. (VectorXR's own layer currently shows as *unsigned* during
+the beta — that's expected; see the README's status section.)
 
 ## Updates
 

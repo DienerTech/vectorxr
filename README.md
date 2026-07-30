@@ -49,7 +49,15 @@ bounded step glides, activation behavior, and multiple keyboard or device bindin
 
 ![VectorXR Quadviews tab](docs/screenshots/quadviews.jpg)
 
-Quadviews configures foveated-style rendering with a live performance budget that estimates render cost before you launch a game.
+Quadviews configures foveated-style rendering with a live performance budget that estimates render cost before you launch a game. It is not a universal injector: the game must already request OpenXR quad-view rendering. DCS is the primary tested title; other D3D11 titles may work only when they implement the same quad-view functionality.
+
+For the recommended DCS + synthesized VectorXR setup:
+
+- Turn on **Use Quad View** in DCS. Turn on **Use Eye Tracking** when you want gaze-tracked focus.
+- Keep the VectorXR OpenXR layer and the relevant VectorXR Quadviews profile enabled.
+- Use one software quadviews provider at a time. Disable `XR_APILAYER_MBUCCHIA_quad_views_foveated`; on Pimax, also turn **Native Pimax Quad Views** off. Native Varjo Quadviews remains runtime-driven.
+
+See the usage guide's [Quadviews setup and FAQ](docs/usage.md#quadviews-faq) for alternative layer setups and common setup pitfalls.
 
 ### Turbo
 

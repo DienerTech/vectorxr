@@ -121,11 +121,12 @@ function budgetChipClass(settings: QuadViewsSettings) {
             <h2 class="text-2xl font-semibold tracking-tight">Quadviews</h2>
           </div>
           <p class="mt-2 max-w-3xl text-sm leading-6 text-muted">
-            Manage native quadview defaults and per-application profiles for
-            foveal and peripheral rendering.
+            Configure foveal and peripheral rendering for games that already
+            request OpenXR quad views. Enabling this module does not add
+            quad-view support to ordinary stereo games.
           </p>
           <p class="mt-2 max-w-3xl text-sm font-bold leading-6 text-muted">
-          Emulated Quadviews currently supports D3D11 OpenXR applications. Native Varjo quadviews remains runtime-driven.
+            DCS is the primary tested title. Synthesized Quadviews requires a D3D11 application with in-game quad views enabled; other titles may work only when they request the same functionality.
           </p>
           <p class="mt-1 max-w-3xl text-xs leading-5 text-muted">
             Pixel estimates compare application view rendering only; the runtime and VectorXR composite have additional GPU cost.
@@ -141,6 +142,15 @@ function budgetChipClass(settings: QuadViewsSettings) {
           </span>
           Varjo Compatibility
         </button>
+      </div>
+
+      <div class="mb-4 rounded-[0.9rem] border px-4 py-3 text-sm leading-6 surface-panel-strong">
+        <strong>Recommended DCS setup</strong>
+        <ul class="mt-1.5 list-disc space-y-1 pl-5">
+          <li><strong>Game:</strong> turn on <strong>Use Quad View</strong> and, for gaze tracking, <strong>Use Eye Tracking</strong>.</li>
+          <li><strong>Provider:</strong> enable the VectorXR layer and Quadviews profile, then disable <code>XR_APILAYER_MBUCCHIA_quad_views_foveated</code>. On Pimax, also turn Native Pimax Quad Views off. Native Varjo Quadviews remains runtime-driven.</li>
+          <li><strong>Apply:</strong> save the profile and restart DCS after changing runtime, layer, or in-game VR settings.</li>
+        </ul>
       </div>
 
       <details class="section-disclosure border-t pt-4" style="border-color: var(--app-border)" open>
@@ -266,7 +276,7 @@ function budgetChipClass(settings: QuadViewsSettings) {
           </div>
 
           <div class="rounded-[1rem] border px-4 py-4 surface-panel">
-            On headsets without native quad-view support (e.g. Quest Pro, Pimax Crystal), VectorXR Quadviews utilizes the standard emulation mode, and all settings apply. These compatibility notes apply only to Varjo runtimes.
+            On headsets without physical quad-view support through bi-panel displays (e.g. Quest Pro, Pimax Crystal), VectorXR Quadviews uses the standard emulation mode and all settings apply. These compatibility notes apply only to Varjo runtimes.
           </div>
         </div>
       </div>
