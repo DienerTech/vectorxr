@@ -1,5 +1,6 @@
 export type LogLevel = 'info' | 'debug'
 export type ActivationMode = 'toggle' | 'hold' | 'alwaysOn'
+export type PivotActivationBehavior = 'toggle' | 'hold'
 export type PivotResponseMode = 'continuous' | 'stepped'
 export type PivotStepGlideMode = 'instant' | 'glide'
 export type QuadViewsTrackingMode = 'head' | 'eye'
@@ -58,6 +59,11 @@ export interface NoneBinding {
 }
 
 export type InputBinding = NoneBinding | KeyboardBinding | DeviceBinding
+
+export interface PivotActivationBinding {
+  behavior: PivotActivationBehavior
+  binding: InputBinding
+}
 
 // Global feedback-sound settings shared by every binding's activate/deactivate cue.
 export interface SoundSettings {
@@ -154,8 +160,8 @@ export interface PivotXRProfileConfig {
   name: string
   enabled: boolean
   applicationIds: string[]
-  activationMode: ActivationMode
-  activationBindings: InputBinding[]
+  alwaysActive: boolean
+  activationBindings: PivotActivationBinding[]
   // Optional origin bindings: set-origin captures the current head yaw/pitch as
   // Pivot's neutral forward (bind it alongside the game's own recenter);
   // release-origin restores the default HMD origin.
@@ -167,8 +173,8 @@ export interface PivotXRProfileConfig {
 export interface PivotXRModuleConfig {
   enabled: boolean
   defaults: PivotXRSettings
-  activationMode: ActivationMode
-  activationBindings: InputBinding[]
+  alwaysActive: boolean
+  activationBindings: PivotActivationBinding[]
   setOriginBindings: InputBinding[]
   releaseOriginBindings: InputBinding[]
   profiles: PivotXRProfileConfig[]
@@ -533,7 +539,7 @@ export function defaultConfig(): VectorXRConfig {
       pivotxr: {
         enabled: false,
         defaults: defaultPivotXRSettings(),
-        activationMode: 'toggle',
+        alwaysActive: false,
         activationBindings: [],
         setOriginBindings: [],
         releaseOriginBindings: [],
@@ -588,16 +594,16 @@ export function newPivotProfileId(): string {
 export function createPivotProfile(
   defaultSettings: PivotXRSettings,
   applicationIds: string[] = [],
-  activationMode: ActivationMode = 'toggle',
-  activationBindings: InputBinding[] = [],
+  alwaysActive = false,
+  activationBindings: PivotActivationBinding[] = [],
 ): PivotXRProfileConfig {
   return {
     id: newPivotProfileId(),
     name: 'New Profile',
     enabled: true,
     applicationIds,
-    activationMode,
-    activationBindings: normalizeInputBindings(activationBindings),
+    alwaysActive,
+    activationBindings: normalizePivotActivationBindings(activationBindings),
     setOriginBindings: [],
     releaseOriginBindings: [],
     settings: normalizePivotXRSettings(defaultSettings, defaultPivotXRSettings()),
@@ -882,6 +888,32 @@ export function normalizeInputBindings(value: unknown, legacyValue?: unknown): I
     .filter((binding) => binding.type !== 'none')
 }
 
+export function normalizePivotActivationBindings(
+  value: unknown,
+  legacyValue?: unknown,
+  legacyMode: ActivationMode = 'toggle',
+): PivotActivationBinding[] {
+  const source = Array.isArray(value)
+    ? value
+    : value !== undefined
+      ? [value]
+      : legacyValue !== undefined
+        ? [legacyValue]
+        : []
+
+  return source.flatMap((item) => {
+    const wrapper = isRecord(item) && 'binding' in item
+    const binding = normalizeInputBinding(wrapper ? item.binding : item, defaultNoneBinding())
+    if (binding.type === 'none') return []
+    const behavior: PivotActivationBehavior = wrapper && item.behavior === 'hold'
+      ? 'hold'
+      : wrapper && item.behavior === 'toggle'
+        ? 'toggle'
+        : legacyMode === 'hold' ? 'hold' : 'toggle'
+    return [{ behavior, binding }]
+  })
+}
+
 export function bindingsShareInput(left: InputBinding, right: InputBinding): boolean {
   if (left.type === 'none' || right.type === 'none' || left.type !== right.type) {
     return false
@@ -988,13 +1020,13 @@ function savedBindingAssignments(config: VectorXRConfig): SavedBindingAssignment
   ]
 
   const pivot = config.modules.pivotxr
-  pushBindingAssignments(assignments, 'pivot.default.activate', 'Pivot Default: Activate', pivot.activationBindings)
+  pushBindingAssignments(assignments, 'pivot.default.activate', 'Pivot Default: Activate', pivot.activationBindings.map((item) => item.binding))
   pushBindingAssignments(assignments, 'pivot.default.set-origin', 'Pivot Default: Set Origin', pivot.setOriginBindings)
   pushBindingAssignments(assignments, 'pivot.default.release-origin', 'Pivot Default: Release Origin', pivot.releaseOriginBindings)
 
   pivot.profiles.forEach((profile, index) => {
     const context = profile.name.trim() || `Profile ${index + 1}`
-    pushBindingAssignments(assignments, `pivot.${profile.id}.activate`, `Pivot ${context}: Activate`, profile.activationBindings)
+    pushBindingAssignments(assignments, `pivot.${profile.id}.activate`, `Pivot ${context}: Activate`, profile.activationBindings.map((item) => item.binding))
     pushBindingAssignments(assignments, `pivot.${profile.id}.set-origin`, `Pivot ${context}: Set Origin`, profile.setOriginBindings)
     pushBindingAssignments(assignments, `pivot.${profile.id}.release-origin`, `Pivot ${context}: Release Origin`, profile.releaseOriginBindings)
   })
@@ -1069,15 +1101,16 @@ function duplicateBindingWarnings(actionLabel: string, bindings: InputBinding[])
 }
 
 export function pivotBindingConflictWarnings(
-  mode: ActivationMode,
-  activationBindings: InputBinding[],
+  alwaysActive: boolean,
+  activationBindings: PivotActivationBinding[],
   setOriginBindings: InputBinding[],
   releaseOriginBindings: InputBinding[],
 ): PivotBindingWarning[] {
-  const activationSetsOrigin = firstSharedBinding(activationBindings, setOriginBindings)
-  const activationReleasesOrigin = firstSharedBinding(activationBindings, releaseOriginBindings)
+  const physicalActivationBindings = activationBindings.map((item) => item.binding)
+  const activationSetsOrigin = firstSharedBinding(physicalActivationBindings, setOriginBindings)
+  const activationReleasesOrigin = firstSharedBinding(physicalActivationBindings, releaseOriginBindings)
   const setAlsoReleasesOrigin = firstSharedBinding(setOriginBindings, releaseOriginBindings)
-  const action = mode === 'toggle' ? 'Every Toggle press, including deactivation,' : 'Every press'
+  const action = alwaysActive ? 'Every suspend-control press' : 'Every activation-control press'
 
   if (activationSetsOrigin && activationReleasesOrigin
       && bindingsShareInput(activationSetsOrigin, activationReleasesOrigin)) {
@@ -1088,7 +1121,7 @@ export function pivotBindingConflictWarnings(
   }
 
   const warnings: PivotBindingWarning[] = [
-    ...duplicateBindingWarnings('Activation', activationBindings),
+    ...duplicateBindingWarnings(alwaysActive ? 'Suspend controls' : 'Activation', physicalActivationBindings),
     ...duplicateBindingWarnings('Set Origin', setOriginBindings),
     ...duplicateBindingWarnings('Release Origin', releaseOriginBindings),
   ]
@@ -1248,8 +1281,8 @@ function normalizeVectorXRConfig(value: unknown): VectorXRConfig {
       pivotxr: {
         enabled: normalizeBoolean(pivotxr.enabled, fallback.modules.pivotxr.enabled),
         defaults: pivotDefaults,
-        activationMode: normalizeActivationMode(pivotxr.activationMode),
-        activationBindings: normalizeInputBindings(pivotxr.activationBindings, pivotxr.activationBinding),
+        alwaysActive: normalizeBoolean(pivotxr.alwaysActive, normalizeActivationMode(pivotxr.activationMode) === 'alwaysOn'),
+        activationBindings: normalizePivotActivationBindings(pivotxr.activationBindings, pivotxr.activationBinding, normalizeActivationMode(pivotxr.activationMode)),
         setOriginBindings: normalizeInputBindings(pivotxr.setOriginBindings, pivotxr.setOriginBinding),
         releaseOriginBindings: normalizeInputBindings(pivotxr.releaseOriginBindings, pivotxr.releaseOriginBinding),
         profiles: pivotProfileValues.map((profileValue) => {
@@ -1264,8 +1297,8 @@ function normalizeVectorXRConfig(value: unknown): VectorXRConfig {
             name: normalizeString(profile.name, 'New Profile'),
             enabled: normalizeBoolean(profile.enabled, true),
             applicationIds,
-            activationMode,
-            activationBindings: normalizeInputBindings(profile.activationBindings, profile.activationBinding),
+            alwaysActive: normalizeBoolean(profile.alwaysActive, activationMode === 'alwaysOn'),
+            activationBindings: normalizePivotActivationBindings(profile.activationBindings, profile.activationBinding, activationMode),
             setOriginBindings: normalizeInputBindings(profile.setOriginBindings, profile.setOriginBinding),
             releaseOriginBindings: normalizeInputBindings(profile.releaseOriginBindings, profile.releaseOriginBinding),
             settings,

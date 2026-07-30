@@ -654,9 +654,10 @@ class OpenXrLayer {
         std::vector<BindingState> activation;
         std::vector<BindingState> set_origin;
         std::vector<BindingState> release_origin;
-        // Always-on profiles only: true after the user pressed the binding to
-        // suspend the automatic engagement.
-        bool always_on_suspended{false};
+        // Toggle controls share one latch per profile. Hold state remains
+        // per binding and is derived from the cached input state.
+        bool toggle_latched{false};
+        bool toggle_suspended{false};
     };
     std::vector<PivotProfileInputState> pivotxr_profile_input_states_;
     // Engaged profile index; retains the last-engaged profile during the

@@ -3,13 +3,13 @@ import { computed, onMounted, onUnmounted } from 'vue'
 
 import BindingConflictWarnings from './BindingConflictWarnings.vue'
 import PivotActivationEditor from './PivotActivationEditor.vue'
-import { pivotBindingConflictWarnings, savedBindingConflictWarnings, type ActivationMode, type InputBinding, type VectorXRConfig } from '../lib/model'
+import { pivotBindingConflictWarnings, savedBindingConflictWarnings, type InputBinding, type PivotActivationBinding, type VectorXRConfig } from '../lib/model'
 
 // The default module config and each pivot profile share this binding shape;
 // fields are mutated directly on the passed-in reactive object.
 interface PivotBindingsSubject {
-  activationMode: ActivationMode
-  activationBindings: InputBinding[]
+  alwaysActive: boolean
+  activationBindings: PivotActivationBinding[]
   setOriginBindings: InputBinding[]
   releaseOriginBindings: InputBinding[]
 }
@@ -21,13 +21,13 @@ const props = defineProps<{
   contextLabel: string
 }>()
 const bindingWarnings = computed(() => pivotBindingConflictWarnings(
-  props.subject.activationMode,
+  props.subject.alwaysActive,
   props.subject.activationBindings,
   props.subject.setOriginBindings,
   props.subject.releaseOriginBindings,
 ))
 const globalBindingWarnings = computed(() => savedBindingConflictWarnings(props.config, [
-  ...props.subject.activationBindings,
+  ...props.subject.activationBindings.map((item) => item.binding),
 ], {
   suppressFocusOnlyConflicts: true,
 }))
@@ -80,9 +80,9 @@ onUnmounted(() => {
 
       <div class="mt-5 space-y-4">
         <PivotActivationEditor
-          v-model:activation-mode="subject.activationMode"
+          v-model:always-active="subject.alwaysActive"
           v-model:activation-bindings="subject.activationBindings"
-          description="Choose a keyboard shortcut, joystick button, or HAT direction that engages Pivot."
+          :description="subject.alwaysActive ? 'Choose controls that temporarily suspend or toggle off Pivot.' : 'Choose controls that engage Pivot.'"
         />
 
         <div

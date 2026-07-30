@@ -38,10 +38,6 @@ fn default_log_retention_files() -> u32 {
     7
 }
 
-fn default_activation_mode() -> String {
-    "toggle".into()
-}
-
 fn default_rotation_multiplier() -> f64 {
     1.5
 }
@@ -112,6 +108,42 @@ where
         InputBindingsValue::Many(bindings) => bindings,
     };
     bindings.retain(|binding| !matches!(binding, InputBinding::None));
+    Ok(bindings)
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PivotActivationBinding {
+    behavior: String,
+    binding: InputBinding,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+enum PivotActivationEntry {
+    Canonical(PivotActivationBinding),
+    Legacy(InputBinding),
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum PivotActivationBindingsValue {
+    One(PivotActivationEntry),
+    Many(Vec<PivotActivationEntry>),
+}
+
+fn deserialize_pivot_activation_bindings<'de, D>(
+    deserializer: D,
+) -> Result<Vec<PivotActivationEntry>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = PivotActivationBindingsValue::deserialize(deserializer)?;
+    let mut bindings = match value {
+        PivotActivationBindingsValue::One(binding) => vec![binding],
+        PivotActivationBindingsValue::Many(bindings) => bindings,
+    };
+    bindings.retain(|entry| !matches!(entry, PivotActivationEntry::Legacy(InputBinding::None)));
     Ok(bindings)
 }
 
@@ -393,14 +425,16 @@ struct PivotXRProfileConfig {
     application_ids: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     r#match: Option<ProfileMatch>,
-    #[serde(default = "default_activation_mode")]
-    activation_mode: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    activation_mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    always_active: Option<bool>,
     #[serde(
         default,
         alias = "activationBinding",
-        deserialize_with = "deserialize_input_bindings"
+        deserialize_with = "deserialize_pivot_activation_bindings"
     )]
-    activation_bindings: Vec<InputBinding>,
+    activation_bindings: Vec<PivotActivationEntry>,
     #[serde(
         default,
         alias = "setOriginBinding",
@@ -424,14 +458,16 @@ struct PivotXRModuleConfig {
     enabled: bool,
     #[serde(default)]
     defaults: PivotXRSettings,
-    #[serde(default = "default_activation_mode")]
-    activation_mode: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    activation_mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    always_active: Option<bool>,
     #[serde(
         default,
         alias = "activationBinding",
-        deserialize_with = "deserialize_input_bindings"
+        deserialize_with = "deserialize_pivot_activation_bindings"
     )]
-    activation_bindings: Vec<InputBinding>,
+    activation_bindings: Vec<PivotActivationEntry>,
     #[serde(
         default,
         alias = "setOriginBinding",
@@ -453,7 +489,8 @@ impl Default for PivotXRModuleConfig {
         Self {
             enabled: false,
             defaults: PivotXRSettings::default(),
-            activation_mode: default_activation_mode(),
+            activation_mode: None,
+            always_active: Some(false),
             activation_bindings: Vec::new(),
             set_origin_bindings: Vec::new(),
             release_origin_bindings: Vec::new(),
@@ -1922,6 +1959,43 @@ mod tests {
         assert_eq!(bindings.len(), 2);
         assert_eq!(bindings[0]["chord"][0], "F8");
         assert_eq!(bindings[1]["inputPath"], "hat-1-left");
+    }
+
+    #[test]
+    fn canonical_pivot_activation_bindings_preserve_behavior_and_baseline() {
+        let profile: PivotXRProfileConfig = serde_json::from_value(serde_json::json!({
+            "name": "Mixed",
+            "alwaysActive": true,
+            "activationBindings": [
+                { "behavior": "toggle", "binding": { "type": "keyboard", "chord": ["F8"] } },
+                { "behavior": "hold", "binding": { "type": "keyboard", "chord": ["F9"] } }
+            ]
+        }))
+        .expect("Canonical Pivot bindings should deserialize");
+
+        let serialized = serde_json::to_value(profile).expect("Pivot profile should serialize");
+        assert_eq!(serialized["alwaysActive"], true);
+        assert_eq!(serialized["activationBindings"][0]["behavior"], "toggle");
+        assert_eq!(
+            serialized["activationBindings"][0]["binding"]["chord"][0],
+            "F8"
+        );
+        assert_eq!(serialized["activationBindings"][1]["behavior"], "hold");
+    }
+
+    #[test]
+    fn legacy_always_on_baseline_remains_available_for_frontend_migration() {
+        let profile: PivotXRProfileConfig = serde_json::from_value(serde_json::json!({
+            "name": "Legacy Always",
+            "activationMode": "alwaysOn",
+            "activationBindings": [{ "type": "keyboard", "chord": ["F10"] }]
+        }))
+        .expect("Legacy Always On profile should deserialize");
+
+        let serialized = serde_json::to_value(profile).expect("Pivot profile should serialize");
+        assert_eq!(serialized["activationMode"], "alwaysOn");
+        assert!(serialized.get("alwaysActive").is_none());
+        assert_eq!(serialized["activationBindings"][0]["type"], "keyboard");
     }
 
     #[test]

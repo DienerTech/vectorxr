@@ -131,26 +131,27 @@ bool SameActivationInput(const InputBinding& lhs, const InputBinding& rhs) {
     return lhs.device_guid == rhs.device_guid && lhs.input_path == rhs.input_path;
 }
 
-std::vector<InputBinding> FilterUnclaimedActivationBindings(
-    const std::vector<InputBinding>& source,
+std::vector<PivotActivationBinding> FilterUnclaimedActivationBindings(
+    const std::vector<PivotActivationBinding>& source,
     const std::vector<PivotXrResolvedProfile>& earlier_profiles) {
-    std::vector<InputBinding> filtered;
-    for (const InputBinding& binding : source) {
+    std::vector<PivotActivationBinding> filtered;
+    for (const PivotActivationBinding& activation : source) {
+        const InputBinding& binding = activation.binding;
         if (binding.type == InputBindingType::None) {
             continue;
         }
-        const bool claimed_here = std::any_of(filtered.begin(), filtered.end(), [&](const InputBinding& accepted) {
-            return SameActivationInput(accepted, binding);
+        const bool claimed_here = std::any_of(filtered.begin(), filtered.end(), [&](const PivotActivationBinding& accepted) {
+            return SameActivationInput(accepted.binding, binding);
         });
         const bool claimed_earlier = std::any_of(
             earlier_profiles.begin(), earlier_profiles.end(), [&](const PivotXrResolvedProfile& earlier) {
                 return std::any_of(earlier.activation_bindings.begin(), earlier.activation_bindings.end(),
-                                   [&](const InputBinding& earlier_binding) {
-                                       return SameActivationInput(earlier_binding, binding);
+                                   [&](const PivotActivationBinding& earlier_binding) {
+                                       return SameActivationInput(earlier_binding.binding, binding);
                                    });
             });
         if (!claimed_here && !claimed_earlier) {
-            filtered.push_back(binding);
+            filtered.push_back(activation);
         }
     }
     return filtered;
@@ -171,16 +172,16 @@ PivotXrResolvedSettings ResolvePivotXrSettings(const ConfigDocument& config, std
                 continue;
             }
 
-            std::vector<InputBinding> activation_bindings =
+            std::vector<PivotActivationBinding> activation_bindings =
                 FilterUnclaimedActivationBindings(profile.activation_bindings, resolved.profiles);
             const bool all_bindings_shadowed = !profile.activation_bindings.empty() && activation_bindings.empty();
-            if (all_bindings_shadowed && profile.activation_mode != ActivationMode::AlwaysOn) {
+            if (all_bindings_shadowed && !profile.always_active) {
                 continue;
             }
 
             PivotXrResolvedProfile candidate;
             candidate.name = profile.name;
-            candidate.activation_mode = profile.activation_mode;
+            candidate.always_active = profile.always_active;
             candidate.activation_bindings = std::move(activation_bindings);
             candidate.set_origin_bindings = profile.set_origin_bindings;
             candidate.release_origin_bindings = profile.release_origin_bindings;
@@ -194,7 +195,7 @@ PivotXrResolvedSettings ResolvePivotXrSettings(const ConfigDocument& config, std
     if (resolved.profiles.empty() && config.pivotxr.enabled) {
         PivotXrResolvedProfile candidate;
         candidate.name = "Default";
-        candidate.activation_mode = config.pivotxr.activation_mode;
+        candidate.always_active = config.pivotxr.always_active;
         candidate.activation_bindings =
             FilterUnclaimedActivationBindings(config.pivotxr.activation_bindings, {});
         candidate.set_origin_bindings = config.pivotxr.set_origin_bindings;

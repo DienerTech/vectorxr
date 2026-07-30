@@ -1298,6 +1298,8 @@ constexpr std::chrono::milliseconds kAppActionSyncFreshWindow{100};
 bool SameInputBinding(const InputBinding& lhs, const InputBinding& rhs);
 
 bool SameInputBindings(const std::vector<InputBinding>& lhs, const std::vector<InputBinding>& rhs);
+bool SamePivotActivationBindings(const std::vector<PivotActivationBinding>& lhs,
+                                 const std::vector<PivotActivationBinding>& rhs);
 bool SamePivotAxisTuning(const PivotAxisTuning& lhs, const PivotAxisTuning& rhs) {
     return NearlyEqual(lhs.rotation_multiplier, rhs.rotation_multiplier) &&
            NearlyEqual(lhs.deadzone_degrees, rhs.deadzone_degrees) &&
@@ -1314,8 +1316,8 @@ bool SamePivotStepTuning(const PivotStepTuning& lhs, const PivotStepTuning& rhs)
 bool SamePivotResolvedProfile(const PivotXrResolvedProfile& lhs, const PivotXrResolvedProfile& rhs) {
 
     return lhs.name == rhs.name &&
-           lhs.activation_mode == rhs.activation_mode &&
-           SameInputBindings(lhs.activation_bindings, rhs.activation_bindings) &&
+           lhs.always_active == rhs.always_active &&
+           SamePivotActivationBindings(lhs.activation_bindings, rhs.activation_bindings) &&
            SameInputBindings(lhs.set_origin_bindings, rhs.set_origin_bindings) &&
            SameInputBindings(lhs.release_origin_bindings, rhs.release_origin_bindings) &&
            NearlyEqual(lhs.smoothing, rhs.smoothing) &&
@@ -1414,6 +1416,17 @@ bool SameInputBindings(const std::vector<InputBinding>& lhs, const std::vector<I
     return true;
 }
 
+bool SamePivotActivationBindings(const std::vector<PivotActivationBinding>& lhs,
+                                 const std::vector<PivotActivationBinding>& rhs) {
+    if (lhs.size() != rhs.size()) return false;
+    for (size_t index = 0; index < lhs.size(); ++index) {
+        if (lhs[index].behavior != rhs[index].behavior || !SameInputBinding(lhs[index].binding, rhs[index].binding)) {
+            return false;
+        }
+    }
+    return true;
+}
+
 // True when the activation surface (candidate count, modes, bindings) is
 // unchanged, so runtime toggle/edge state can survive a config hot-reload.
 bool SamePivotActivationSet(const PivotXrResolvedSettings& lhs, const PivotXrResolvedSettings& rhs) {
@@ -1421,8 +1434,8 @@ bool SamePivotActivationSet(const PivotXrResolvedSettings& lhs, const PivotXrRes
         return false;
     }
     for (size_t i = 0; i < lhs.profiles.size(); ++i) {
-        if (lhs.profiles[i].activation_mode != rhs.profiles[i].activation_mode ||
-            !SameInputBindings(lhs.profiles[i].activation_bindings, rhs.profiles[i].activation_bindings) ||
+        if (lhs.profiles[i].always_active != rhs.profiles[i].always_active ||
+            !SamePivotActivationBindings(lhs.profiles[i].activation_bindings, rhs.profiles[i].activation_bindings) ||
             !SameInputBindings(lhs.profiles[i].set_origin_bindings, rhs.profiles[i].set_origin_bindings) ||
             !SameInputBindings(lhs.profiles[i].release_origin_bindings, rhs.profiles[i].release_origin_bindings)) {
             return false;
@@ -1455,6 +1468,16 @@ std::string BindingListLabel(const std::vector<InputBinding>& bindings) {
     for (size_t index = 0; index < bindings.size(); ++index) {
         if (index > 0) stream << " or ";
         stream << BindingLabel(bindings[index]);
+    }
+    return stream.str();
+}
+std::string BindingListLabel(const std::vector<PivotActivationBinding>& bindings) {
+    if (bindings.empty()) return "None";
+    std::ostringstream stream;
+    for (size_t index = 0; index < bindings.size(); ++index) {
+        if (index > 0) stream << " or ";
+        stream << (bindings[index].behavior == PivotActivationBehavior::Toggle ? "Toggle " : "Hold ")
+               << BindingLabel(bindings[index].binding);
     }
     return stream.str();
 }
@@ -6674,7 +6697,7 @@ XrResult OpenXrLayer::LocateViews(XrSession session,
         stream << "PivotXR enabled; activationState=" << (pivotxr_active ? "engaged" : "idle")
                << "; quad-view sessions use stereo eye-pose recomposition.";
         for (const PivotXrResolvedProfile& profile : resolved_settings_.pivotxr.profiles) {
-            if (profile.activation_mode == ActivationMode::AlwaysOn) {
+            if (profile.always_active) {
                 stream << " '" << profile.name << "' engages automatically";
                 if (!profile.activation_bindings.empty()) {
                     stream << "; press " << BindingListLabel(profile.activation_bindings) << " to suspend/resume";
@@ -6682,8 +6705,7 @@ XrResult OpenXrLayer::LocateViews(XrSession session,
                 stream << ".";
             } else {
                 stream << " Press " << BindingListLabel(profile.activation_bindings) << " to "
-                       << (profile.activation_mode == ActivationMode::Toggle ? "toggle" : "hold") << " '"
-                       << profile.name << "'.";
+                       << "engage '" << profile.name << "'.";
             }
         }
         logger_.Info(stream.str());
@@ -9369,7 +9391,7 @@ void OpenXrLayer::LogResolvedSettings(const ResolvedRuntimeConfig& settings) {
     for (size_t i = 0; i < settings.pivotxr.profiles.size(); ++i) {
         const PivotXrResolvedProfile& profile = settings.pivotxr.profiles[i];
         stream << ", pivotProfile[" << i << "]={name=" << profile.name
-               << ", activation=" << ToString(profile.activation_mode)
+               << ", baseline=" << (profile.always_active ? "alwaysActive" : "manual")
                << ", bindings=" << BindingListLabel(profile.activation_bindings)
                << ", setOriginBindings=" << BindingListLabel(profile.set_origin_bindings)
                << ", releaseOriginBindings=" << BindingListLabel(profile.release_origin_bindings)
@@ -10464,7 +10486,7 @@ bool OpenXrLayer::IsPivotXrActive() {
             const PivotXrResolvedProfile& profile = pivot.profiles[i];
             PivotProfileInputState& state = pivotxr_profile_input_states_[i];
             for (size_t binding = 0; binding < profile.activation_bindings.size(); ++binding) {
-                state.activation[binding].down_cached = PollInputBindingDown(profile.activation_bindings[binding]);
+                state.activation[binding].down_cached = PollInputBindingDown(profile.activation_bindings[binding].binding);
             }
             for (size_t binding = 0; binding < profile.set_origin_bindings.size(); ++binding) {
                 state.set_origin[binding].down_cached = PollInputBindingDown(profile.set_origin_bindings[binding]);
@@ -10560,37 +10582,62 @@ bool OpenXrLayer::IsPivotXrActive() {
                                                    L"origin-release.wav", L"origin-release.wav");
         }
 
-        const BindingTransitions activation =
-            consume_transitions(profile.activation_bindings, input_state.activation);
-        const bool is_engaged_profile = pivotxr_engaged_ && pivotxr_active_profile_index_ == i;
-        if (profile.activation_mode == ActivationMode::Toggle) {
-            if (activation.pressed) {
-                if (is_engaged_profile) {
-                    disengage(i, *activation.pressed);
-                } else {
-                    engage(i, *activation.pressed);
-                }
+        const PivotActivationBinding* toggle_pressed = nullptr;
+        const PivotActivationBinding* hold_pressed = nullptr;
+        const PivotActivationBinding* hold_released = nullptr;
+        bool any_hold_down = false;
+        for (size_t index = 0; index < profile.activation_bindings.size(); ++index) {
+            const PivotActivationBinding& activation = profile.activation_bindings[index];
+            PivotProfileInputState::BindingState& binding_state = input_state.activation[index];
+            const bool pressed = binding_state.down_cached && !binding_state.was_down;
+            const bool released = !binding_state.down_cached && binding_state.was_down;
+            if (activation.behavior == PivotActivationBehavior::Toggle) {
+                if (pressed && !toggle_pressed) toggle_pressed = &activation;
+            } else {
+                if (pressed && !hold_pressed) hold_pressed = &activation;
+                if (released && !hold_released) hold_released = &activation;
+                any_hold_down = any_hold_down || binding_state.down_cached;
             }
-        } else if (profile.activation_mode == ActivationMode::AlwaysOn) {
-            if (activation.pressed) {
-                if (is_engaged_profile) {
-                    input_state.always_on_suspended = true;
-                    logger_.Info("PivotXR always-on profile '" + profile.name +
-                                 "' suspended; it will not re-engage until resumed.");
-                    disengage(i, *activation.pressed);
+            binding_state.was_down = binding_state.down_cached;
+        }
+
+        bool is_engaged_profile = pivotxr_engaged_ && pivotxr_active_profile_index_ == i;
+        if (profile.always_active) {
+            if (toggle_pressed) {
+                input_state.toggle_suspended = !input_state.toggle_suspended;
+                if (input_state.toggle_suspended) {
+                    logger_.Info("PivotXR always-active profile '" + profile.name + "' suspended.");
+                    if (is_engaged_profile) disengage(i, toggle_pressed->binding);
                 } else {
-                    input_state.always_on_suspended = false;
-                    logger_.Info("PivotXR always-on profile '" + profile.name + "' resumed.");
-                    engage(i, *activation.pressed);
+                    logger_.Info("PivotXR always-active profile '" + profile.name + "' resumed.");
+                    if (!any_hold_down) engage(i, toggle_pressed->binding);
                 }
+                is_engaged_profile = pivotxr_engaged_ && pivotxr_active_profile_index_ == i;
+            }
+            if (hold_pressed && is_engaged_profile) {
+                disengage(i, hold_pressed->binding);
+                is_engaged_profile = false;
+            }
+            if (hold_released && !any_hold_down && !input_state.toggle_suspended && !is_engaged_profile) {
+                engage(i, hold_released->binding);
             }
         } else {
-            // Any assigned control may engage Hold mode. It disengages only
-            // after the final held control is released.
-            if (activation.pressed && !is_engaged_profile) {
-                engage(i, *activation.pressed);
-            } else if (activation.released && !activation.any_down && is_engaged_profile) {
-                disengage(i, *activation.released);
+            if (toggle_pressed) {
+                if (is_engaged_profile && input_state.toggle_latched) {
+                    input_state.toggle_latched = false;
+                    if (!any_hold_down) disengage(i, toggle_pressed->binding);
+                } else {
+                    input_state.toggle_latched = true;
+                    if (!is_engaged_profile) engage(i, toggle_pressed->binding);
+                }
+                is_engaged_profile = pivotxr_engaged_ && pivotxr_active_profile_index_ == i;
+            }
+            if (hold_pressed && !is_engaged_profile) {
+                engage(i, hold_pressed->binding);
+                is_engaged_profile = true;
+            }
+            if (hold_released && !any_hold_down && !input_state.toggle_latched && is_engaged_profile) {
+                disengage(i, hold_released->binding);
             }
         }
     }
@@ -10601,14 +10648,19 @@ bool OpenXrLayer::IsPivotXrActive() {
     // profile releases the pivot.
     if (!pivotxr_engaged_) {
         for (size_t i = 0; i < pivot.profiles.size(); ++i) {
-            if (pivot.profiles[i].activation_mode != ActivationMode::AlwaysOn ||
-                pivotxr_profile_input_states_[i].always_on_suspended) {
-                continue;
+            const PivotXrResolvedProfile& profile = pivot.profiles[i];
+            const PivotProfileInputState& input_state = pivotxr_profile_input_states_[i];
+            bool hold_suspended = false;
+            for (size_t index = 0; index < profile.activation_bindings.size(); ++index) {
+                hold_suspended = hold_suspended ||
+                    (profile.activation_bindings[index].behavior == PivotActivationBehavior::Hold &&
+                     input_state.activation[index].down_cached);
             }
+            if (!profile.always_active || input_state.toggle_suspended || hold_suspended) continue;
             pivotxr_active_profile_index_ = i;
             pivotxr_engaged_ = true;
             note_transition_diagnostics();
-            logger_.Info("PivotXR profile '" + pivot.profiles[i].name + "' engaged (always on).");
+            logger_.Info("PivotXR profile '" + profile.name + "' engaged (always active).");
             break;
         }
     }

@@ -478,7 +478,7 @@ bool ReadOptionalActivationMode(const JsonValue::Object& object,
 
     out = ParseActivationMode(it->second.AsString());
     if (!out) {
-        error = key + " must be one of: toggle, hold";
+        error = key + " must be one of: toggle, hold, alwaysOn";
         return false;
     }
     return true;
@@ -878,6 +878,59 @@ bool ParseInputBindings(const JsonValue::Object& object,
     }
     return true;
 }
+bool ParsePivotActivationBindings(const JsonValue::Object& object,
+                                  std::string_view plural_key,
+                                  std::string_view legacy_key,
+                                  ActivationMode legacy_mode,
+                                  std::vector<PivotActivationBinding>& out,
+                                  std::string& error) {
+    const auto plural_it = object.find(std::string(plural_key));
+    const auto legacy_it = object.find(std::string(legacy_key));
+    if (plural_it != object.end() && legacy_it != object.end()) {
+        error = "Fields " + std::string(plural_key) + " and " + std::string(legacy_key) + " cannot both be present";
+        return false;
+    }
+
+    auto parse_one = [&](const JsonValue& value) {
+        PivotActivationBinding activation;
+        const JsonValue::Object* wrapper = value.IsObject() ? &value.AsObject() : nullptr;
+        if (wrapper && wrapper->contains("binding")) {
+            static const std::unordered_set<std::string> allowed = {"behavior", "binding"};
+            if (!CheckAllowedKeys(*wrapper, allowed, error)) return false;
+            const auto behavior_it = wrapper->find("behavior");
+            if (behavior_it == wrapper->end() || !behavior_it->second.IsString()) {
+                error = "pivot activation behavior must be a string";
+                return false;
+            }
+            const std::string& behavior = behavior_it->second.AsString();
+            if (behavior == "toggle") activation.behavior = PivotActivationBehavior::Toggle;
+            else if (behavior == "hold") activation.behavior = PivotActivationBehavior::Hold;
+            else {
+                error = "pivot activation behavior must be one of: toggle, hold";
+                return false;
+            }
+            if (!ParseInputBinding(wrapper->at("binding"), activation.binding, error)) return false;
+        } else {
+            activation.behavior = legacy_mode == ActivationMode::Hold
+                ? PivotActivationBehavior::Hold
+                : PivotActivationBehavior::Toggle;
+            if (!ParseInputBinding(value, activation.binding, error)) return false;
+        }
+        if (activation.binding.type != InputBindingType::None) out.push_back(std::move(activation));
+        return true;
+    };
+
+    out.clear();
+    if (plural_it != object.end()) {
+        const JsonValue::Array* bindings = RequireArray(plural_it->second, std::string(plural_key), error);
+        if (!bindings) return false;
+        for (const JsonValue& value : *bindings) if (!parse_one(value)) return false;
+    } else if (legacy_it != object.end() && !parse_one(legacy_it->second)) {
+        return false;
+    }
+    return true;
+}
+
 bool ParseDepthBindings(const JsonValue::Object& object, DepthXrBindings& out, std::string& error) {
     static const std::unordered_set<std::string> allowed = {
         "toggleEnabled",
@@ -1488,6 +1541,7 @@ bool ParsePivotProfile(const JsonValue& value, PivotXrProfile& out, std::string&
         "mode",
         "applicationIds",
         "activationMode",
+        "alwaysActive",
         "activationBindings",
         "setOriginBindings",
         "releaseOriginBindings",
@@ -1515,12 +1569,14 @@ bool ParsePivotProfile(const JsonValue& value, PivotXrProfile& out, std::string&
     std::optional<bool> enabled;
     std::optional<ProfileMode> mode;
     std::optional<ActivationMode> activation_mode;
+    std::optional<bool> always_active;
 
     if (!ReadOptionalString(*object, "id", id, error) ||
         !ReadOptionalString(*object, "name", name, error) ||
         !ReadOptionalBool(*object, "enabled", enabled, error) ||
         !ReadOptionalProfileMode(*object, "mode", mode, error) ||
-        !ReadOptionalActivationMode(*object, "activationMode", activation_mode, error)) {
+        !ReadOptionalActivationMode(*object, "activationMode", activation_mode, error) ||
+        !ReadOptionalBool(*object, "alwaysActive", always_active, error)) {
         return false;
     }
 
@@ -1528,11 +1584,10 @@ bool ParsePivotProfile(const JsonValue& value, PivotXrProfile& out, std::string&
     out.name = name.value_or("New Profile");
     out.enabled = enabled.value_or(true);
     out.mode = mode.value_or(ProfileMode::Custom);
-    if (activation_mode.has_value()) {
-        out.activation_mode = *activation_mode;
-    }
+    const ActivationMode legacy_activation_mode = activation_mode.value_or(ActivationMode::Toggle);
+    out.always_active = always_active.value_or(legacy_activation_mode == ActivationMode::AlwaysOn);
 
-    if (!ParseInputBindings(*object, "activationBindings", "activationBinding", out.activation_bindings, error) ||
+    if (!ParsePivotActivationBindings(*object, "activationBindings", "activationBinding", legacy_activation_mode, out.activation_bindings, error) ||
         !ParseInputBindings(*object, "setOriginBindings", "setOriginBinding", out.set_origin_bindings, error) ||
         !ParseInputBindings(*object, "releaseOriginBindings", "releaseOriginBinding", out.release_origin_bindings,
                             error)) {
@@ -1555,6 +1610,7 @@ bool ParsePivotModule(const JsonValue::Object& object, PivotXrModuleConfig& out,
         "enabled",
         "defaults",
         "activationMode",
+        "alwaysActive",
         "activationBindings",
         "setOriginBindings",
         "releaseOriginBindings",
@@ -1570,16 +1626,17 @@ bool ParsePivotModule(const JsonValue::Object& object, PivotXrModuleConfig& out,
 
     std::optional<bool> enabled;
     std::optional<ActivationMode> activation_mode;
+    std::optional<bool> always_active;
     if (!ReadOptionalBool(object, "enabled", enabled, error) ||
-        !ReadOptionalActivationMode(object, "activationMode", activation_mode, error)) {
+        !ReadOptionalActivationMode(object, "activationMode", activation_mode, error) ||
+        !ReadOptionalBool(object, "alwaysActive", always_active, error)) {
         return false;
     }
     if (enabled.has_value()) {
         out.enabled = *enabled;
     }
-    if (activation_mode.has_value()) {
-        out.activation_mode = *activation_mode;
-    }
+    const ActivationMode legacy_activation_mode = activation_mode.value_or(ActivationMode::Toggle);
+    out.always_active = always_active.value_or(legacy_activation_mode == ActivationMode::AlwaysOn);
 
     const auto defaults_it = object.find("defaults");
     if (defaults_it != object.end()) {
@@ -1589,7 +1646,7 @@ bool ParsePivotModule(const JsonValue::Object& object, PivotXrModuleConfig& out,
         }
     }
 
-    if (!ParseInputBindings(object, "activationBindings", "activationBinding", out.activation_bindings, error) ||
+    if (!ParsePivotActivationBindings(object, "activationBindings", "activationBinding", legacy_activation_mode, out.activation_bindings, error) ||
         !ParseInputBindings(object, "setOriginBindings", "setOriginBinding", out.set_origin_bindings, error) ||
         !ParseInputBindings(object, "releaseOriginBindings", "releaseOriginBinding", out.release_origin_bindings,
                             error)) {

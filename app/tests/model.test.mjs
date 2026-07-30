@@ -14,6 +14,7 @@ import {
 
 const keyboard = (...chord) => ({ type: 'keyboard', chord })
 const none = () => ({ type: 'none' })
+const activation = (behavior, binding) => ({ behavior, binding })
 
 test('keyboard normalization preserves numpad and modifier keys', () => {
   assert.equal(normalizeKeyboardKey('numpad5', ''), 'Numpad5')
@@ -26,15 +27,15 @@ test('keyboard normalization preserves numpad and modifier keys', () => {
 test('config normalization round-trips a modified numpad chord', () => {
   const config = defaultConfig()
   config.modules.pivotxr.activationBindings = [
-    keyboard('Ctrl', 'Numpad5'),
-    keyboard('F10'),
+    activation('toggle', keyboard('Ctrl', 'Numpad5')),
+    activation('hold', keyboard('F10')),
   ]
 
   const normalized = normalizeConfig(config)
 
   assert.deepEqual(normalized.modules.pivotxr.activationBindings, [
-    keyboard('Ctrl', 'Numpad5'),
-    keyboard('F10'),
+    activation('toggle', keyboard('Ctrl', 'Numpad5')),
+    activation('hold', keyboard('F10')),
   ])
 })
 
@@ -45,8 +46,39 @@ test('legacy singular Pivot bindings normalize to canonical binding lists', () =
 
   const normalized = normalizeConfig(config)
 
-  assert.deepEqual(normalized.modules.pivotxr.activationBindings, [keyboard('F8')])
+  assert.deepEqual(normalized.modules.pivotxr.activationBindings, [activation('toggle', keyboard('F8'))])
   assert.equal('activationBinding' in normalized.modules.pivotxr, false)
+})
+
+test('legacy Pivot activation modes migrate to profile baseline and per-binding behavior', () => {
+  const holdConfig = defaultConfig()
+  delete holdConfig.modules.pivotxr.alwaysActive
+  holdConfig.modules.pivotxr.activationMode = 'hold'
+  holdConfig.modules.pivotxr.activationBindings = [keyboard('F9')]
+  const hold = normalizeConfig(holdConfig).modules.pivotxr
+  assert.equal(hold.alwaysActive, false)
+  assert.deepEqual(hold.activationBindings, [activation('hold', keyboard('F9'))])
+
+  const alwaysConfig = defaultConfig()
+  delete alwaysConfig.modules.pivotxr.alwaysActive
+  alwaysConfig.modules.pivotxr.activationMode = 'alwaysOn'
+  alwaysConfig.modules.pivotxr.activationBindings = [keyboard('F10')]
+  const always = normalizeConfig(alwaysConfig).modules.pivotxr
+  assert.equal(always.alwaysActive, true)
+  assert.deepEqual(always.activationBindings, [activation('toggle', keyboard('F10'))])
+})
+
+test('canonical Pivot activation bindings preserve mixed Toggle and Hold behavior', () => {
+  const config = defaultConfig()
+  config.modules.pivotxr.alwaysActive = true
+  config.modules.pivotxr.activationBindings = [
+    activation('toggle', keyboard('F8')),
+    activation('hold', keyboard('F9')),
+  ]
+
+  const normalized = normalizeConfig(config).modules.pivotxr
+  assert.equal(normalized.alwaysActive, true)
+  assert.deepEqual(normalized.activationBindings, config.modules.pivotxr.activationBindings)
 })
 
 test('new Depth profiles enable Depth Lock by default', () => {
@@ -75,7 +107,7 @@ test('saved binding warnings scan across modules and profiles without blocking',
   const config = defaultConfig()
   config.modules.depthxr.bindings.toggleAnchor = keyboard('Shift', 'F8')
   config.modules.turbo.toggleBinding = keyboard('F8', 'Shift')
-  config.modules.pivotxr.activationBindings = [keyboard('Shift', 'F8')]
+  config.modules.pivotxr.activationBindings = [activation('toggle', keyboard('Shift', 'F8'))]
 
   const warnings = savedBindingConflictWarnings(config, [
     config.modules.depthxr.bindings.toggleAnchor,
@@ -90,10 +122,10 @@ test('saved binding warnings scan across modules and profiles without blocking',
 
 test('Pivot global warnings suppress conflicts already explained by the local warning', () => {
   const config = defaultConfig()
-  config.modules.pivotxr.activationBindings = [keyboard('Shift', 'F8')]
+  config.modules.pivotxr.activationBindings = [activation('toggle', keyboard('Shift', 'F8'))]
   config.modules.pivotxr.setOriginBindings = [keyboard('F8', 'Shift')]
   const focus = [
-    ...config.modules.pivotxr.activationBindings,
+    ...config.modules.pivotxr.activationBindings.map((item) => item.binding),
     ...config.modules.pivotxr.setOriginBindings,
     ...config.modules.pivotxr.releaseOriginBindings,
   ]
@@ -133,22 +165,22 @@ test('physical input sharing stays distinct from runtime activation arbitration'
 test('pivot binding warnings cover activation, set, and release conflicts', () => {
   const f8 = keyboard('F8')
 
-  const activationSet = pivotBindingConflictWarnings('toggle', [f8], [keyboard('F8')], [])
+  const activationSet = pivotBindingConflictWarnings(false, [activation('toggle', f8)], [keyboard('F8')], [])
   assert.equal(activationSet.length, 1)
   assert.equal(activationSet[0].title, 'Activation also sets the origin')
-  assert.match(activationSet[0].message, /including deactivation/)
+  assert.match(activationSet[0].message, /activation-control press/)
 
-  const activationRelease = pivotBindingConflictWarnings('hold', [f8], [], [keyboard('F8')])
+  const activationRelease = pivotBindingConflictWarnings(false, [activation('hold', f8)], [], [keyboard('F8')])
   assert.equal(activationRelease[0].title, 'Activation also releases the origin')
 
-  const setRelease = pivotBindingConflictWarnings('hold', [], [f8], [keyboard('F8')])
+  const setRelease = pivotBindingConflictWarnings(false, [], [f8], [keyboard('F8')])
   assert.equal(setRelease[0].title, 'Set Origin is immediately canceled')
 
-  const allThree = pivotBindingConflictWarnings('toggle', [f8], [keyboard('F8')], [keyboard('F8')])
+  const allThree = pivotBindingConflictWarnings(false, [activation('toggle', f8)], [keyboard('F8')], [keyboard('F8')])
   assert.equal(allThree.length, 1)
   assert.equal(allThree[0].title, 'One binding controls three conflicting actions')
 
-  const duplicateActivation = pivotBindingConflictWarnings('toggle', [f8, keyboard('F8')], [], [])
+  const duplicateActivation = pivotBindingConflictWarnings(false, [activation('toggle', f8), activation('hold', keyboard('F8'))], [], [])
   assert.equal(duplicateActivation.length, 1)
   assert.equal(duplicateActivation[0].title, 'F8 is duplicated')
 })

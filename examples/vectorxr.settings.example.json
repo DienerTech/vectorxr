@@ -73,6 +73,8 @@
         "pitchUpStep": { "deadzoneDegrees": 12.0, "triggerDegrees": 10.0, "amountDegrees": 10.0, "hysteresisDegrees": 4.0, "maxExtraDegrees": 20.0 },
         "pitchDownStep": { "deadzoneDegrees": 12.0, "triggerDegrees": 10.0, "amountDegrees": 10.0, "hysteresisDegrees": 4.0, "maxExtraDegrees": 20.0 }
       },
+      "alwaysActive": false,
+      "activationBindings": [],
       "profiles": [
         {
           "name": "DCS",
@@ -80,7 +82,7 @@
           "applicationIds": [
             "dcs"
           ],
-          "activationMode": "toggle",
+          "alwaysActive": false,
           "activationBindings": [],
           "settings": {
             "smoothing": 0.2,

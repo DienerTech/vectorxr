@@ -40,7 +40,8 @@
       "type": "string",
       "enum": [
         "toggle",
-        "hold"
+        "hold",
+        "alwaysOn"
       ]
     },
     "keyboardKey": {
@@ -140,6 +141,24 @@
       "type": "array",
       "items": {
         "$ref": "#/$defs/inputBinding"
+      }
+    },
+    "pivotActivationBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["behavior", "binding"],
+      "properties": {
+        "behavior": { "type": "string", "enum": ["toggle", "hold"] },
+        "binding": { "$ref": "#/$defs/inputBinding" }
+      }
+    },
+    "pivotActivationBindings": {
+      "type": "array",
+      "items": {
+        "oneOf": [
+          { "$ref": "#/$defs/pivotActivationBinding" },
+          { "$ref": "#/$defs/inputBinding" }
+        ]
       }
     },
     "profileMatch": {
@@ -391,11 +410,14 @@
     "pivotxrProfile": {
       "type": "object",
       "additionalProperties": false,
+      "anyOf": [
+        { "required": ["alwaysActive"] },
+        { "required": ["activationMode"] }
+      ],
       "required": [
         "name",
         "enabled",
         "applicationIds",
-        "activationMode",
         "activationBindings",
         "settings"
       ],
@@ -416,10 +438,14 @@
           "uniqueItems": true
         },
         "activationMode": {
-          "$ref": "#/$defs/activationMode"
+          "$ref": "#/$defs/activationMode",
+          "deprecated": true
+        },
+        "alwaysActive": {
+          "type": "boolean"
         },
         "activationBindings": {
-          "$ref": "#/$defs/inputBindings"
+          "$ref": "#/$defs/pivotActivationBindings"
         },
         "setOriginBindings": {
           "$ref": "#/$defs/inputBindings"
@@ -448,10 +474,14 @@
           "$ref": "#/$defs/pivotxrSettings"
         },
         "activationMode": {
-          "$ref": "#/$defs/activationMode"
+          "$ref": "#/$defs/activationMode",
+          "deprecated": true
+        },
+        "alwaysActive": {
+          "type": "boolean"
         },
         "activationBindings": {
-          "$ref": "#/$defs/inputBindings"
+          "$ref": "#/$defs/pivotActivationBindings"
         },
         "setOriginBindings": {
           "$ref": "#/$defs/inputBindings"

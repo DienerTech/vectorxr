@@ -113,12 +113,17 @@ function closeSubPages() {
   void nextTick(() => pageScroller()?.scrollTo({ top: savedScrollTop }))
 }
 
-const defaultBindingWarnings = computed(() => pivotBindingConflictWarnings(
-  props.config.modules.pivotxr.activationMode,
-  props.config.modules.pivotxr.activationBindings,
-  props.config.modules.pivotxr.setOriginBindings,
-  props.config.modules.pivotxr.releaseOriginBindings,
-))
+const defaultBindingWarnings = computed(() => [
+  ...pivotBindingConflictWarnings(
+    props.config.modules.pivotxr.alwaysActive,
+    props.config.modules.pivotxr.activationBindings,
+    props.config.modules.pivotxr.setOriginBindings,
+    props.config.modules.pivotxr.releaseOriginBindings,
+  ),
+  ...(!props.config.modules.pivotxr.alwaysActive && props.config.modules.pivotxr.activationBindings.length === 0
+    ? [{ title: 'No activation binding', message: 'This manual profile cannot engage until you add a Toggle or Hold binding, or enable Always active.' }]
+    : []),
+])
 
 const profileWarnings = computed(() => {
   const warnings = new Map<number, string[]>()
@@ -128,30 +133,44 @@ const profileWarnings = computed(() => {
     .filter(({ profile }) => profile.enabled)
 
   for (const { profile, index } of enabledProfiles) {
+    if (profile.alwaysActive) {
+      for (const applicationId of profile.applicationIds) {
+        const owner = enabledProfiles.find((candidate) => candidate.index < index && candidate.profile.alwaysActive && candidate.profile.applicationIds.includes(applicationId))
+        if (owner) {
+          const appName = applicationNameById.get(applicationId) ?? applicationId
+          warnings.set(index, [...(warnings.get(index) ?? []), `Both this profile and "${owner.profile.name}" are Always active for ${appName}. The higher-priority profile engages first; use activation controls when you need predictable switching.`])
+        }
+      }
+    }
     const conflictMessages = pivotBindingConflictWarnings(
-      profile.activationMode,
+      profile.alwaysActive,
       profile.activationBindings,
       profile.setOriginBindings,
       profile.releaseOriginBindings,
     ).map((warning) => warning.message)
     if (conflictMessages.length > 0) {
-      warnings.set(index, conflictMessages)
+      warnings.set(index, [...(warnings.get(index) ?? []), ...conflictMessages])
     }
 
-    for (const binding of profile.activationBindings) {
+    if (!profile.alwaysActive && profile.activationBindings.length === 0) {
+      warnings.set(index, [...(warnings.get(index) ?? []), 'This manual profile has no activation bindings and cannot engage. Add a Toggle or Hold binding, or enable Always active.'])
+    }
+
+    for (const activationBinding of profile.activationBindings) {
+      const binding = activationBinding.binding
       for (const applicationId of profile.applicationIds) {
         const owner = enabledProfiles.find((candidate) => (
           candidate.index < index
           && candidate.profile.applicationIds.includes(applicationId)
           && candidate.profile.activationBindings.some((candidateBinding) => (
-            bindingsMatchRuntimeActivation(binding, candidateBinding)
+            bindingsMatchRuntimeActivation(binding, candidateBinding.binding)
           ))
         ))
         if (!owner) continue
 
         const appName = applicationNameById.get(applicationId) ?? applicationId
         const label = bindingLabel(binding)
-        const message = profile.activationMode === 'alwaysOn'
+        const message = profile.alwaysActive
           ? `For ${appName}, binding ${label} is owned by the higher-priority "${owner.profile.name}" (Profile ${owner.index + 1}). Always On still engages automatically, but this binding cannot suspend or resume it. Other unshadowed bindings still work.`
           : `For ${appName}, binding ${label} is owned by the higher-priority "${owner.profile.name}" (Profile ${owner.index + 1}); this binding will not activate the profile. Other unshadowed bindings still work.`
         warnings.set(index, [...(warnings.get(index) ?? []), message])
@@ -249,7 +268,7 @@ const profileWarnings = computed(() => {
             @edit="openSettings('default')"
           />
           <PivotBindingsPanel
-            :activation-mode="config.modules.pivotxr.activationMode"
+            :always-active="config.modules.pivotxr.alwaysActive"
             :activation-bindings="config.modules.pivotxr.activationBindings"
             @edit="openBindings('default')"
           />
@@ -306,7 +325,7 @@ const profileWarnings = computed(() => {
         >
           <PivotSettingsSummary :settings="profile.settings" @edit="openSettings(index)" />
           <PivotBindingsPanel
-            :activation-mode="profile.activationMode"
+            :always-active="profile.alwaysActive"
             :activation-bindings="profile.activationBindings"
             class="mt-3"
             @edit="openBindings(index)"

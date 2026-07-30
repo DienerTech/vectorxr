@@ -6,14 +6,14 @@ import BindingListEditor from './BindingListEditor.vue'
 import {
   pivotBindingConflictWarnings,
   savedBindingConflictWarnings,
-  type ActivationMode,
   type InputBinding,
+  type PivotActivationBinding,
   type VectorXRConfig,
 } from '../lib/model'
 
 interface PivotOriginSubject {
-  activationMode: ActivationMode
-  activationBindings: InputBinding[]
+  alwaysActive: boolean
+  activationBindings: PivotActivationBinding[]
   setOriginBindings: InputBinding[]
   releaseOriginBindings: InputBinding[]
 }
@@ -25,7 +25,7 @@ const props = defineProps<{
 }>()
 
 const bindingWarnings = computed(() => pivotBindingConflictWarnings(
-  props.subject.activationMode,
+  props.subject.alwaysActive,
   props.subject.activationBindings,
   props.subject.setOriginBindings,
   props.subject.releaseOriginBindings,
