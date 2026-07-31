@@ -58,7 +58,7 @@ function removeBinding(index: number) {
     </section>
 
     <section class="rounded-[1rem] border p-4 surface-panel-soft">
-      <div class="flex flex-wrap items-start justify-between gap-4">
+      <div class="sticky top-0 z-20 flex flex-wrap items-start justify-between gap-4 rounded-[0.75rem] border p-3 shadow-panel backdrop-blur surface-panel-strong">
         <div>
           <p class="text-sm font-semibold tracking-tight">{{ alwaysActive ? 'Suspend bindings' : 'Activation bindings' }}</p>
           <p class="mt-1 text-sm leading-6 text-muted">{{ description }}</p>

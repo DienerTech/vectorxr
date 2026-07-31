@@ -60,6 +60,15 @@ export interface NoneBinding {
 
 export type InputBinding = NoneBinding | KeyboardBinding | DeviceBinding
 
+// Replacing the physical input must not reset per-binding audio preferences.
+export function preserveBindingSound<T extends InputBinding>(current: InputBinding, replacement: T): T {
+  if (current.type === 'none' || replacement.type === 'none' || !current.sound) {
+    return replacement
+  }
+
+  return { ...replacement, sound: { ...current.sound } } as T
+}
+
 export interface PivotActivationBinding {
   behavior: PivotActivationBehavior
   binding: InputBinding

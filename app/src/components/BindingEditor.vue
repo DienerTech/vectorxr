@@ -3,7 +3,7 @@ import { computed, ref } from 'vue'
 
 import DeviceBindingEditor from './DeviceBindingEditor.vue'
 import { pickSoundFile, playTestSound } from '../lib/commands'
-import { defaultDeviceBinding, defaultKeyboardBinding, defaultNoneBinding, defaultSoundFeedback, keyboardBindingKeyGroups, keyboardModifierKeys, type InputBinding, type SoundFeedback } from '../lib/model'
+import { defaultDeviceBinding, defaultKeyboardBinding, defaultNoneBinding, defaultSoundFeedback, keyboardBindingKeyGroups, keyboardModifierKeys, preserveBindingSound, type InputBinding, type SoundFeedback } from '../lib/model'
 
 const props = defineProps<{
   modelValue: InputBinding
@@ -93,7 +93,7 @@ const bindingType = computed({
       return
     }
 
-    emit('update:modelValue', type === 'keyboard' ? defaultKeyboardBinding() : defaultDeviceBinding())
+    emit('update:modelValue', preserveBindingSound(props.modelValue, type === 'keyboard' ? defaultKeyboardBinding() : defaultDeviceBinding()))
   },
 })
 
@@ -105,7 +105,7 @@ const selectedPrimaryKey = computed({
     }
 
     const modifiers = props.modelValue.chord.filter((item) => keyboardModifierKeys.includes(item as never))
-    emit('update:modelValue', { type: 'keyboard', chord: [...modifiers, key] })
+    emit('update:modelValue', preserveBindingSound(props.modelValue, { type: 'keyboard', chord: [...modifiers, key] }))
   },
 })
 
@@ -120,7 +120,7 @@ function toggleModifier(modifier: string, enabled: boolean) {
     modifiers.push(modifier)
   }
 
-  emit('update:modelValue', { type: 'keyboard', chord: [...modifiers, primaryKey] })
+  emit('update:modelValue', preserveBindingSound(props.modelValue, { type: 'keyboard', chord: [...modifiers, primaryKey] }))
 }
 
 </script>

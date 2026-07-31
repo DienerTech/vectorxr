@@ -2,7 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 
 import { cancelDeviceBindingCapture, captureDeviceBinding, listInputDevices, type InputDeviceInfo } from '../lib/commands'
-import type { DeviceBinding } from '../lib/model'
+import { preserveBindingSound, type DeviceBinding } from '../lib/model'
 
 const props = defineProps<{
   modelValue: DeviceBinding
@@ -237,14 +237,14 @@ async function captureBinding() {
       return
     }
 
-    emit('update:modelValue', {
+    emit('update:modelValue', preserveBindingSound(props.modelValue, {
       type: 'device',
       deviceGuid: binding.deviceGuid,
       productGuid: binding.productGuid,
       deviceName: binding.deviceName,
       inputPath: binding.inputPath,
       inputLabel: binding.inputLabel,
-    })
+    }))
     status.value = `Captured ${binding.deviceName} / ${binding.inputLabel}.`
     void refreshDevices()
   } catch (error) {

@@ -9,12 +9,34 @@ import {
   normalizeConfig,
   normalizeKeyboardKey,
   pivotBindingConflictWarnings,
+  preserveBindingSound,
   savedBindingConflictWarnings,
 } from '../src/lib/model.ts'
 
 const keyboard = (...chord) => ({ type: 'keyboard', chord })
 const none = () => ({ type: 'none' })
 const activation = (behavior, binding) => ({ behavior, binding })
+
+test('replacing a binding input preserves sound enablement and custom files', () => {
+  const sound = {
+    enabled: true,
+    activateSound: 'C:\\sounds\\pivot-on.wav',
+    deactivateSound: 'C:\\sounds\\pivot-off.wav',
+  }
+  const current = { type: 'keyboard', chord: ['F8'], sound }
+  const replacement = {
+    type: 'device',
+    deviceGuid: '{device-guid}',
+    inputPath: 'button-41',
+    deviceName: 'Test HOTAS',
+    inputLabel: 'Button 41',
+  }
+
+  const updated = preserveBindingSound(current, replacement)
+  assert.deepEqual(updated, { ...replacement, sound })
+  assert.notEqual(updated.sound, sound)
+  assert.deepEqual(preserveBindingSound(current, none()), none())
+})
 
 test('keyboard normalization preserves numpad and modifier keys', () => {
   assert.equal(normalizeKeyboardKey('numpad5', ''), 'Numpad5')
