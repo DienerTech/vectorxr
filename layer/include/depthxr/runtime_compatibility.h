@@ -1,6 +1,8 @@
 #pragma once
 
 #include <chrono>
+#include <optional>
+#include <span>
 #include <string_view>
 
 namespace depthxr {
@@ -15,6 +17,7 @@ enum class EyeGazeRequestReason {
     kApplicationRequested,
     kRuntimeAdvertised,
     kProbeIndeterminate,
+    kProbeInconsistent,
     kRuntimeWorkaround,
     kNativeQuadviews,
     kReliableNegative,
@@ -34,10 +37,15 @@ struct EyeGazeRequestPolicyInput {
     // failed probe is indeterminate, while some known runtimes can complete the
     // probe with a false negative and still accept the extension at create time.
     EyeGazeProbeState pre_instance_probe{EyeGazeProbeState::kIndeterminate};
+    bool pre_instance_probe_structurally_unreliable{false};
     bool pre_instance_probe_known_unreliable{false};
 };
 
 bool IsEyeGazeExtensionProbeKnownUnreliable(std::string_view active_runtime_manifest_path);
+bool IsRuntimeExtensionProbeStructurallyUnreliable(
+    bool extension_scan_complete,
+    std::span<const std::string_view> advertised_extensions,
+    std::span<const std::string_view> forwarded_extensions);
 EyeGazeProbeState ClassifyEyeGazeProbe(bool extension_scan_complete, bool extension_advertised);
 EyeGazeRequestDecision DecideEyeGazeExtensionRequest(const EyeGazeRequestPolicyInput& input);
 std::string_view EyeGazeProbeStateName(EyeGazeProbeState state);
@@ -54,5 +62,6 @@ struct TurboCompatibilityInput {
 
 bool ShouldBlockTurboForSession(const TurboCompatibilityInput& input);
 std::chrono::milliseconds QuadViewsRecoveryStabilizationDelay(std::string_view runtime_name);
+bool ResolveQuadViewsSessionActive(bool configured_active, std::optional<bool> session_latched_active);
 
 } // namespace depthxr

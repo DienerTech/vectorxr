@@ -5,6 +5,8 @@ import PivotBindingsPage from '../PivotBindingsPage.vue'
 import PivotBindingsPanel from '../PivotBindingsPanel.vue'
 import PivotSettingsPage from '../PivotSettingsPage.vue'
 import PivotSettingsSummary from '../PivotSettingsSummary.vue'
+import PivotOriginPage from '../PivotOriginPage.vue'
+import PivotOriginPanel from '../PivotOriginPanel.vue'
 import ProfileShell from '../ProfileShell.vue'
 import type { RegisteredApplication, VectorXRConfig } from '../../lib/model'
 import { bindingLabel, bindingsMatchRuntimeActivation, pivotBindingConflictWarnings } from '../../lib/model'
@@ -40,6 +42,20 @@ const bindingsSubject = computed(() => {
 })
 
 const bindingsContextLabel = computed(() => profileContextLabel(bindingsTarget.value))
+
+const originTarget = ref<'default' | number | null>(null)
+
+const originSubject = computed(() => {
+  if (originTarget.value === null) {
+    return null
+  }
+  if (originTarget.value === 'default') {
+    return props.config.modules.pivotxr
+  }
+  return props.config.modules.pivotxr.profiles[originTarget.value] ?? null
+})
+
+const originContextLabel = computed(() => profileContextLabel(originTarget.value))
 
 // Rotation settings likewise get their own sub-page; the card shows a summary.
 const settingsTarget = ref<'default' | number | null>(null)
@@ -78,6 +94,12 @@ function openBindings(target: 'default' | number) {
   void nextTick(() => pageScroller()?.scrollTo({ top: 0 }))
 }
 
+function openOrigin(target: 'default' | number) {
+  savedScrollTop = pageScroller()?.scrollTop ?? 0
+  originTarget.value = target
+  void nextTick(() => pageScroller()?.scrollTo({ top: 0 }))
+}
+
 function openSettings(target: 'default' | number) {
   savedScrollTop = pageScroller()?.scrollTop ?? 0
   settingsTarget.value = target
@@ -87,56 +109,71 @@ function openSettings(target: 'default' | number) {
 function closeSubPages() {
   bindingsTarget.value = null
   settingsTarget.value = null
+  originTarget.value = null
   void nextTick(() => pageScroller()?.scrollTo({ top: savedScrollTop }))
 }
 
-const defaultBindingWarnings = computed(() => pivotBindingConflictWarnings(
-  props.config.modules.pivotxr.activationMode,
-  props.config.modules.pivotxr.activationBinding,
-  props.config.modules.pivotxr.setOriginBinding,
-  props.config.modules.pivotxr.releaseOriginBinding,
-))
+const defaultBindingWarnings = computed(() => [
+  ...pivotBindingConflictWarnings(
+    props.config.modules.pivotxr.alwaysActive,
+    props.config.modules.pivotxr.activationBindings,
+    props.config.modules.pivotxr.setOriginBindings,
+    props.config.modules.pivotxr.releaseOriginBindings,
+  ),
+  ...(!props.config.modules.pivotxr.alwaysActive && props.config.modules.pivotxr.activationBindings.length === 0
+    ? [{ title: 'No activation binding', message: 'This manual profile cannot engage until you add a Toggle or Hold binding, or enable Always active.' }]
+    : []),
+])
 
 const profileWarnings = computed(() => {
   const warnings = new Map<number, string[]>()
   const applicationNameById = new Map(props.applications.map((application) => [application.id, application.name]))
-
   const enabledProfiles = props.config.modules.pivotxr.profiles
     .map((profile, index) => ({ profile, index }))
     .filter(({ profile }) => profile.enabled)
+
   for (const { profile, index } of enabledProfiles) {
+    if (profile.alwaysActive) {
+      for (const applicationId of profile.applicationIds) {
+        const owner = enabledProfiles.find((candidate) => candidate.index < index && candidate.profile.alwaysActive && candidate.profile.applicationIds.includes(applicationId))
+        if (owner) {
+          const appName = applicationNameById.get(applicationId) ?? applicationId
+          warnings.set(index, [...(warnings.get(index) ?? []), `Both this profile and "${owner.profile.name}" are Always active for ${appName}. The higher-priority profile engages first; use activation controls when you need predictable switching.`])
+        }
+      }
+    }
     const conflictMessages = pivotBindingConflictWarnings(
-      profile.activationMode,
-      profile.activationBinding,
-      profile.setOriginBinding,
-      profile.releaseOriginBinding,
+      profile.alwaysActive,
+      profile.activationBindings,
+      profile.setOriginBindings,
+      profile.releaseOriginBindings,
     ).map((warning) => warning.message)
     if (conflictMessages.length > 0) {
-      warnings.set(index, conflictMessages)
+      warnings.set(index, [...(warnings.get(index) ?? []), ...conflictMessages])
     }
-  }
 
-  const activatableProfiles = enabledProfiles.filter(({ profile }) => profile.activationBinding.type !== 'none')
+    if (!profile.alwaysActive && profile.activationBindings.length === 0) {
+      warnings.set(index, [...(warnings.get(index) ?? []), 'This manual profile has no activation bindings and cannot engage. Add a Toggle or Hold binding, or enable Always active.'])
+    }
 
-  for (let i = 0; i < activatableProfiles.length; i++) {
-    for (let j = 0; j < i; j++) {
-      const a = activatableProfiles[i]
-      const b = activatableProfiles[j]
-      const labelA = bindingLabel(a.profile.activationBinding)
+    for (const activationBinding of profile.activationBindings) {
+      const binding = activationBinding.binding
+      for (const applicationId of profile.applicationIds) {
+        const owner = enabledProfiles.find((candidate) => (
+          candidate.index < index
+          && candidate.profile.applicationIds.includes(applicationId)
+          && candidate.profile.activationBindings.some((candidateBinding) => (
+            bindingsMatchRuntimeActivation(binding, candidateBinding.binding)
+          ))
+        ))
+        if (!owner) continue
 
-      if (!bindingsMatchRuntimeActivation(a.profile.activationBinding, b.profile.activationBinding)) {
-        continue
-      }
-
-      for (const applicationId of a.profile.applicationIds) {
-        if (b.profile.applicationIds.includes(applicationId)) {
-          const appName = applicationNameById.get(applicationId) ?? applicationId
-          const message = a.profile.activationMode === 'alwaysOn'
-            ? `For ${appName}, binding ${labelA} is owned by the higher-priority "${b.profile.name}" (Profile ${b.index + 1}). Always On still engages automatically, but this binding cannot suspend or resume it. Reorder the profiles or pick a different binding.`
-            : `For ${appName}, binding ${labelA} is owned by the higher-priority "${b.profile.name}" (Profile ${b.index + 1}); it will not activate this profile. Reorder the profiles or pick a different binding.`
-          warnings.set(a.index, [...(warnings.get(a.index) ?? []), message])
-          break
-        }
+        const appName = applicationNameById.get(applicationId) ?? applicationId
+        const label = bindingLabel(binding)
+        const message = profile.alwaysActive
+          ? `For ${appName}, binding ${label} is owned by the higher-priority "${owner.profile.name}" (Profile ${owner.index + 1}). Always On still engages automatically, but this binding cannot suspend or resume it. Other unshadowed bindings still work.`
+          : `For ${appName}, binding ${label} is owned by the higher-priority "${owner.profile.name}" (Profile ${owner.index + 1}); this binding will not activate the profile. Other unshadowed bindings still work.`
+        warnings.set(index, [...(warnings.get(index) ?? []), message])
       }
     }
   }
@@ -150,6 +187,13 @@ const profileWarnings = computed(() => {
     v-if="bindingsSubject"
     :subject="bindingsSubject"
     :context-label="bindingsContextLabel"
+    :config="config"
+    @close="closeSubPages"
+  />
+  <PivotOriginPage
+    v-else-if="originSubject"
+    :subject="originSubject"
+    :context-label="originContextLabel"
     :config="config"
     @close="closeSubPages"
   />
@@ -218,16 +262,23 @@ const profileWarnings = computed(() => {
             <p class="mt-1">{{ warning.message }}</p>
           </div>
 
-          <PivotBindingsPanel
-            :activation-mode="config.modules.pivotxr.activationMode"
-            :activation-binding="config.modules.pivotxr.activationBinding"
-            :set-origin-binding="config.modules.pivotxr.setOriginBinding"
-            :release-origin-binding="config.modules.pivotxr.releaseOriginBinding"
+          <PivotSettingsSummary
+            :settings="config.modules.pivotxr.defaults"
             class="mb-3"
+            @edit="openSettings('default')"
+          />
+          <PivotBindingsPanel
+            :always-active="config.modules.pivotxr.alwaysActive"
+            :activation-bindings="config.modules.pivotxr.activationBindings"
             @edit="openBindings('default')"
           />
+          <PivotOriginPanel
+            :set-origin-bindings="config.modules.pivotxr.setOriginBindings"
+            :release-origin-bindings="config.modules.pivotxr.releaseOriginBindings"
+            class="mt-3"
+            @edit="openOrigin('default')"
+          />
 
-          <PivotSettingsSummary :settings="config.modules.pivotxr.defaults" @edit="openSettings('default')" />
         </div>
         <div v-else class="mt-3 rounded-[0.9rem] border px-4 py-3 text-sm leading-6 surface-panel-strong">
           The default profile is off and has no effect — applications without an enabled custom profile get no Pivot. Enabled custom profiles below still apply to their assigned applications.
@@ -272,15 +323,20 @@ const profileWarnings = computed(() => {
           @move="$emit('movePivotProfile', index, $event)"
           @sync-name="$emit('syncPivotProfileName', index)"
         >
+          <PivotSettingsSummary :settings="profile.settings" @edit="openSettings(index)" />
           <PivotBindingsPanel
-            :activation-mode="profile.activationMode"
-            :activation-binding="profile.activationBinding"
-            :set-origin-binding="profile.setOriginBinding"
-            :release-origin-binding="profile.releaseOriginBinding"
+            :always-active="profile.alwaysActive"
+            :activation-bindings="profile.activationBindings"
+            class="mt-3"
             @edit="openBindings(index)"
           />
+          <PivotOriginPanel
+            :set-origin-bindings="profile.setOriginBindings"
+            :release-origin-bindings="profile.releaseOriginBindings"
+            class="mt-3"
+            @edit="openOrigin(index)"
+          />
 
-          <PivotSettingsSummary class="mt-3" :settings="profile.settings" @edit="openSettings(index)" />
         </ProfileShell>
       </TransitionGroup>
 

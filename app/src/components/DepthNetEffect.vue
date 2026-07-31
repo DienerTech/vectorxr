@@ -98,62 +98,71 @@ const netEffect = computed(() => {
     return {
       title: 'Native stereo geometry',
       description: "Neither control is shifting the application's stereo scale or depth plane.",
-      caution: 'Use this as the comfort and comparison baseline.',
+      useCase: "Use this to learn a title's authored scale and as the A/B reference for every profile.",
+      caution: 'If the native proportions already feel convincing, no correction is necessary.',
     }
   }
   if (depth > 0 && convergence > 0) {
     return {
-      title: 'Compounded near-field intensity',
-      description: 'Stronger stereo separation and a nearer, more crossed depth plane both emphasize close geometry.',
-      caution: 'Highest fusion and eye-strain risk. Increase only in very small steps.',
+      title: 'Compact scale with immediate presence',
+      description: 'Stronger stereo separation makes the world feel smaller and more dimensional, while a nearer plane brings the working area toward you.',
+      useCase: 'Useful when a cockpit feels oversized or distant and you want panels, controls, and close geometry to feel immediate.',
+      caution: 'Both controls increase near-field demand, so approach this quadrant in small steps.',
     }
   }
   if (depth > 0 && convergence < 0) {
     return {
-      title: 'Strong depth with a farther plane',
-      description: 'Stereo separation strengthens relative depth while negative convergence gives the scene more distance and breathing room.',
-      caution: 'Often a useful pairing: move Convergence only far enough to settle the stronger stereo image.',
+      title: 'Detailed stereo with comfortable placement',
+      description: 'Stronger stereo separation adds shape and presence while a farther plane gives that more compact image breathing room.',
+      useCase: 'Useful when native proportions feel too large, but positive Stereo Depth by itself makes the cockpit feel crowded.',
+      caution: 'Tune Stereo Depth first, then move the plane only far enough to make the stronger image settle naturally.',
     }
   }
   if (depth < 0 && convergence > 0) {
     return {
-      title: 'Nearer but flatter',
-      description: 'Reduced stereo separation makes the world larger and flatter while positive convergence pulls the overall depth field nearer.',
-      caution: 'Best treated as a corrective pairing; watch for crossed-eye discomfort.',
+      title: 'Larger scale with a near working plane',
+      description: 'Reduced stereo separation expands apparent world scale, while a nearer plane keeps the panel and controls visually accessible.',
+      useCase: 'Useful when a cockpit feels toy-like but its gauges or interaction area should still feel close and readable.',
+      caution: 'A strongly positive Convergence value can become tiring even when Stereo Depth is reduced.',
     }
   }
   if (depth < 0 && convergence < 0) {
     return {
-      title: 'Larger, calmer, more distant',
-      description: 'Reduced stereo separation and a farther depth plane both deemphasize close-range presence.',
-      caution: 'May improve comfort, but can remove much of the intended 3D effect.',
+      title: 'Life-sized scale with relaxed placement',
+      description: 'Reduced stereo separation increases apparent size, while a farther plane lets the cockpit surround you instead of crowding your face.',
+      useCase: 'Useful in aircraft and vehicle sims whose native camera feels miniaturized or too close; it can better match remembered real-world proportions.',
+      caution: 'The softer stereo is intentional—stop when scale feels natural rather than chasing the strongest possible 3D effect.',
     }
   }
   if (depth > 0) {
     return {
       title: 'Stronger relative stereo depth',
-      description: 'Nearby geometry separates more strongly than distant geometry, increasing presence while making the world feel smaller.',
-      caution: 'Set this first, then use small negative convergence adjustments if the scene feels too close.',
+      description: 'Nearby geometry gains separation and shape, increasing presence while making the world feel somewhat smaller.',
+      useCase: 'Useful when a title looks flat or oversized but its existing depth-plane placement already feels comfortable.',
+      caution: 'If the scene starts to crowd you, pair it with a small negative Convergence adjustment.',
     }
   }
   if (depth < 0) {
     return {
-      title: 'Larger, flatter world',
-      description: 'Reduced stereo separation softens near-field depth and increases apparent world scale.',
-      caution: 'Useful when native geometry feels miniaturized or overly intense.',
+      title: 'Larger, gentler world scale',
+      description: 'Reduced stereo separation softens near-field intensity and increases apparent world size.',
+      useCase: 'Useful when native geometry feels miniaturized, cramped, or more stereoscopically intense than the real vehicle.',
+      caution: 'Reduce only far enough to restore believable proportions and retain useful shape cues.',
     }
   }
   if (convergence > 0) {
     return {
-      title: 'Depth plane moved nearer',
-      description: "The scene's disparity field shifts in the crossed direction without changing its relative depth gradient.",
-      caution: 'Positive values can feel cross-eyed, especially with positive Stereo Depth.',
+      title: 'Working plane moved nearer',
+      description: "The scene's disparity field moves toward you without changing its relative depth gradient or overall scale.",
+      useCase: 'Useful when scale looks correct but the panel, sight, or interaction area feels visually too far away.',
+      caution: 'Positive values can feel cross-eyed, especially when paired with positive Stereo Depth.',
     }
   }
   return {
-    title: 'Depth plane moved farther',
-    description: "The scene's disparity field shifts farther away without changing its relative depth gradient.",
-    caution: 'Often pairs naturally with positive Stereo Depth, but can strengthen vection.',
+    title: 'Working plane moved farther',
+    description: "The scene's disparity field moves away without changing its relative depth gradient or overall scale.",
+    useCase: 'Useful when scale looks correct but the cockpit or near geometry feels pressed too close to your face.',
+    caution: 'Move only far enough to relax placement while keeping the scene easy to fuse.',
   }
 })
 </script>
@@ -176,7 +185,7 @@ const netEffect = computed(() => {
       </div>
       <p class="mb-2 text-center text-[10px] font-medium uppercase tracking-[0.08em] text-muted">Convergence: Nearer (+{{ mapConvergenceLimit }})</p>
       <div class="grid gap-2 sm:grid-cols-[minmax(6rem,0.32fr)_minmax(15rem,1fr)_minmax(6rem,0.32fr)] sm:items-center">
-        <p class="text-center text-[10px] font-medium uppercase tracking-[0.08em] text-muted sm:text-right">Depth: Larger &amp; Flatter (&minus;{{ mapStereoDepthLimit }}%)</p>
+        <p class="text-center text-[10px] font-medium uppercase tracking-[0.08em] text-muted sm:text-right">Depth: Larger Scale (&minus;{{ mapStereoDepthLimit }}%)</p>
         <button
           class="depth-map relative grid aspect-[1.65/1] min-h-[12rem] w-full touch-none grid-cols-2 grid-rows-2 overflow-hidden rounded-[0.8rem] border text-left"
           :class="{ dragging }"
@@ -190,19 +199,19 @@ const netEffect = computed(() => {
           @keydown="adjustFromKeyboard"
         >
           <span class="depth-quadrant border-b border-r p-3" :class="{ active: activeQuadrant === 'negative-positive' }">
-            <strong>Nearer &amp; Flatter</strong>
+            <strong>Larger Scale &middot; Near</strong>
             <small>Depth &minus; &middot; Convergence &plus;</small>
           </span>
           <span class="depth-quadrant border-b p-3" :class="{ active: activeQuadrant === 'positive-positive' }">
-            <strong>Nearer &amp; Stronger</strong>
+            <strong>Stronger Stereo &middot; Near</strong>
             <small>Depth &plus; &middot; Convergence &plus;</small>
           </span>
           <span class="depth-quadrant border-r p-3" :class="{ active: activeQuadrant === 'negative-negative' }">
-            <strong>Farther &amp; Flatter</strong>
+            <strong>Larger Scale &middot; Far</strong>
             <small>Depth &minus; &middot; Convergence &minus;</small>
           </span>
           <span class="depth-quadrant p-3" :class="{ active: activeQuadrant === 'positive-negative' }">
-            <strong>Farther &amp; Stronger</strong>
+            <strong>Stronger Stereo &middot; Far</strong>
             <small>Depth &plus; &middot; Convergence &minus;</small>
           </span>
           <span class="depth-marker" :style="markerStyle" aria-hidden="true"></span>
@@ -221,7 +230,8 @@ const netEffect = computed(() => {
       </div>
       <p class="mt-3 text-base font-semibold">{{ netEffect.title }}</p>
       <p class="mt-2 text-[13px] leading-5 text-muted">{{ netEffect.description }}</p>
-      <p class="mt-3 rounded-[0.7rem] px-3 py-2 text-[12px] leading-5 chip-warning">{{ netEffect.caution }}</p>
+      <p class="mt-3 rounded-[0.7rem] px-3 py-2 text-[12px] leading-5 surface-panel-muted"><strong>Good fit:</strong> {{ netEffect.useCase }}</p>
+      <p class="mt-3 text-[12px] leading-5 text-muted"><strong>Watch for:</strong> {{ netEffect.caution }}</p>
       <p v-if="!depthLock" class="mt-3 text-[12px] leading-5 text-muted">
         Depth Lock is off, so the runtime may reinterpret and partially normalize this combination at submission.
       </p>

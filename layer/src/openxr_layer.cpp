@@ -21,6 +21,7 @@
 #include "depthxr/effects.h"
 #include "depthxr/input_devices.h"
 #include "depthxr/process_info.h"
+#include "depthxr/pivot_step.h"
 #include "depthxr/quadviews_sizing.h"
 #include "depthxr/runtime_compatibility.h"
 #include "depthxr/runtime_pacing.h"
@@ -1088,6 +1089,28 @@ XrPosef IdentityPose() {
     return {{0.0f, 0.0f, 0.0f, 1.0f}, {0.0f, 0.0f, 0.0f}};
 }
 
+// All generated Pivot movement flows through one pose-offset composition
+// point. Motion Assist is the only producer today; Quick Views and Shoulder
+// Assist can populate their components later without creating parallel pose
+// rewrite paths. A Quick View intentionally replaces Motion Assist, while the
+// Shoulder Assist component is applied after the selected high-level behavior.
+struct PivotPoseOffsetComponents {
+    XrPosef motion_assist{IdentityPose()};
+    XrPosef quick_view{IdentityPose()};
+    XrPosef shoulder_assist{IdentityPose()};
+    bool quick_view_active{false};
+};
+
+XrPosef ComposePivotPoseOffset(const PivotPoseOffsetComponents& components) {
+    const XrPosef& high_level =
+        components.quick_view_active ? components.quick_view : components.motion_assist;
+    return MultiplyPoses(high_level, components.shoulder_assist);
+}
+
+XrPosef PoseOffsetBetween(const XrPosef& original, const XrPosef& manipulated) {
+    return MultiplyPoses(InvertPose(original), manipulated);
+}
+
 void CopyName(char* destination, size_t capacity, std::string_view value) {
     if (!destination || capacity == 0) {
         return;
@@ -1108,65 +1131,6 @@ double ComputeTimeBasedBlend(double smoothing, double delta_seconds) {
     constexpr double kReferenceFrameSeconds = 1.0 / 90.0;
     const double frame_scale = std::max(delta_seconds / kReferenceFrameSeconds, 0.0);
     return Clamp(1.0 - std::pow(clamped_smoothing, frame_scale), 0.05, 1.0);
-}
-
-// Stepped response: discrete extra rotation added per step_trigger of head
-// angle beyond the deadzone, with hysteresis so the view does not oscillate
-// when the head rests near a threshold. `current_step` is signed persistent
-// state (positive = positive rotation direction); the regular smoothing eases
-// the view between step targets.
-void ComputePivotSteppedExtraAngleRadians(double current_angle_radians,
-                                          double deadzone_degrees,
-                                          double step_trigger_degrees,
-                                          double step_amount_degrees,
-                                          double step_hysteresis_degrees,
-                                          double max_extra_degrees,
-                                          double smoothing,
-                                          double delta_seconds,
-                                          int& current_step,
-                                          double& smoothed_extra_angle_radians) {
-    const double deadzone = DegreesToRadians(std::max(0.0, deadzone_degrees));
-    // Clamp the trigger to a sane floor so a mis-set 0 cannot spin the loop.
-    const double trigger = DegreesToRadians(std::max(0.5, step_trigger_degrees));
-    const double amount = DegreesToRadians(std::max(0.0, step_amount_degrees));
-    // Hysteresis must stay below the trigger spacing or a step could re-engage
-    // the moment it releases.
-    const double hysteresis =
-        std::min(DegreesToRadians(std::max(0.0, step_hysteresis_degrees)), trigger * 0.9);
-    const double max_extra = DegreesToRadians(std::max(0.0, max_extra_degrees));
-
-    // Walk down while the head has come back inside the release threshold of
-    // the current step (crossing zero when the head swings to the other side).
-    while (current_step != 0) {
-        const int sign = current_step > 0 ? 1 : -1;
-        const double release_threshold = deadzone + std::abs(current_step) * trigger - hysteresis;
-        if (current_angle_radians * sign < release_threshold) {
-            current_step -= sign;
-        } else {
-            break;
-        }
-    }
-
-    // Walk up in the direction of the current angle.
-    {
-        const int sign = current_angle_radians >= 0.0 ? 1 : -1;
-        if (current_step == 0 || (current_step > 0) == (sign > 0)) {
-            while (current_angle_radians * sign >= deadzone + (std::abs(current_step) + 1) * trigger) {
-                current_step += sign;
-            }
-        }
-    }
-
-    double target_extra_angle = current_step * amount;
-    if (max_extra > 0.0) {
-        target_extra_angle = Clamp(target_extra_angle, -max_extra, max_extra);
-    }
-
-    const double blend = ComputeTimeBasedBlend(smoothing, delta_seconds);
-    smoothed_extra_angle_radians += (target_extra_angle - smoothed_extra_angle_radians) * blend;
-    if (current_step == 0 && NearlyZero(smoothed_extra_angle_radians)) {
-        smoothed_extra_angle_radians = 0.0;
-    }
 }
 
 double ComputePivotExtraAngleRadians(double current_angle_radians,
@@ -1318,6 +1282,7 @@ constexpr size_t kMaxCachedDepthSubmissionFrames = 180;
 constexpr XrDuration kInternalSwapchainWaitTimeout = 100'000'000; // 100 ms
 constexpr uint32_t kPivotDiagnosticBurstCount = 8;
 constexpr uint64_t kPivotDiagnosticStride = 120;
+constexpr std::chrono::seconds kInputDeviceFailureLogInterval{10};
 // Consecutive unavailable frames before the eye-gaze focus is logged as lost.
 // Debounces sub-second dropouts (e.g. blinks, which invalidate the gaze pose for
 // ~100-400ms) so transient gaze loss does not churn the log. ~1/3s at 90Hz.
@@ -1332,18 +1297,29 @@ constexpr std::chrono::milliseconds kAppActionSyncFreshWindow{100};
 
 bool SameInputBinding(const InputBinding& lhs, const InputBinding& rhs);
 
+bool SameInputBindings(const std::vector<InputBinding>& lhs, const std::vector<InputBinding>& rhs);
+bool SamePivotActivationBindings(const std::vector<PivotActivationBinding>& lhs,
+                                 const std::vector<PivotActivationBinding>& rhs);
 bool SamePivotAxisTuning(const PivotAxisTuning& lhs, const PivotAxisTuning& rhs) {
     return NearlyEqual(lhs.rotation_multiplier, rhs.rotation_multiplier) &&
            NearlyEqual(lhs.deadzone_degrees, rhs.deadzone_degrees) &&
            NearlyEqual(lhs.max_extra_degrees, rhs.max_extra_degrees);
 }
 
+bool SamePivotStepTuning(const PivotStepTuning& lhs, const PivotStepTuning& rhs) {
+    return NearlyEqual(lhs.deadzone_degrees, rhs.deadzone_degrees) &&
+           NearlyEqual(lhs.trigger_degrees, rhs.trigger_degrees) &&
+           NearlyEqual(lhs.amount_degrees, rhs.amount_degrees) &&
+           NearlyEqual(lhs.hysteresis_degrees, rhs.hysteresis_degrees) &&
+           NearlyEqual(lhs.max_extra_degrees, rhs.max_extra_degrees);
+}
 bool SamePivotResolvedProfile(const PivotXrResolvedProfile& lhs, const PivotXrResolvedProfile& rhs) {
+
     return lhs.name == rhs.name &&
-           lhs.activation_mode == rhs.activation_mode &&
-           SameInputBinding(lhs.activation_binding, rhs.activation_binding) &&
-           SameInputBinding(lhs.set_origin_binding, rhs.set_origin_binding) &&
-           SameInputBinding(lhs.release_origin_binding, rhs.release_origin_binding) &&
+           lhs.always_active == rhs.always_active &&
+           SamePivotActivationBindings(lhs.activation_bindings, rhs.activation_bindings) &&
+           SameInputBindings(lhs.set_origin_bindings, rhs.set_origin_bindings) &&
+           SameInputBindings(lhs.release_origin_bindings, rhs.release_origin_bindings) &&
            NearlyEqual(lhs.smoothing, rhs.smoothing) &&
            NearlyEqual(lhs.activation_ramp_seconds, rhs.activation_ramp_seconds) &&
            NearlyEqual(lhs.yaw_rotation_multiplier, rhs.yaw_rotation_multiplier) &&
@@ -1353,13 +1329,16 @@ bool SamePivotResolvedProfile(const PivotXrResolvedProfile& lhs, const PivotXrRe
            NearlyEqual(lhs.pitch_deadzone_degrees, rhs.pitch_deadzone_degrees) &&
            NearlyEqual(lhs.pitch_max_extra_degrees, rhs.pitch_max_extra_degrees) &&
            lhs.response_mode == rhs.response_mode &&
-           NearlyEqual(lhs.step_trigger_degrees, rhs.step_trigger_degrees) &&
-           NearlyEqual(lhs.step_amount_degrees, rhs.step_amount_degrees) &&
-           NearlyEqual(lhs.step_hysteresis_degrees, rhs.step_hysteresis_degrees) &&
+           lhs.step_glide_mode == rhs.step_glide_mode &&
+           NearlyEqual(lhs.step_glide_seconds, rhs.step_glide_seconds) &&
            SamePivotAxisTuning(lhs.yaw_positive, rhs.yaw_positive) &&
            SamePivotAxisTuning(lhs.yaw_negative, rhs.yaw_negative) &&
            SamePivotAxisTuning(lhs.pitch_positive, rhs.pitch_positive) &&
-           SamePivotAxisTuning(lhs.pitch_negative, rhs.pitch_negative);
+           SamePivotAxisTuning(lhs.pitch_negative, rhs.pitch_negative) &&
+           SamePivotStepTuning(lhs.yaw_step_positive, rhs.yaw_step_positive) &&
+           SamePivotStepTuning(lhs.yaw_step_negative, rhs.yaw_step_negative) &&
+           SamePivotStepTuning(lhs.pitch_step_positive, rhs.pitch_step_positive) &&
+           SamePivotStepTuning(lhs.pitch_step_negative, rhs.pitch_step_negative);
 }
 
 bool SamePivotResolvedSettings(const PivotXrResolvedSettings& lhs, const PivotXrResolvedSettings& rhs) {
@@ -1425,6 +1404,29 @@ bool SameInputBinding(const InputBinding& lhs, const InputBinding& rhs) {
            lhs.sound.deactivate_sound == rhs.sound.deactivate_sound;
 }
 
+bool SameInputBindings(const std::vector<InputBinding>& lhs, const std::vector<InputBinding>& rhs) {
+    if (lhs.size() != rhs.size()) {
+        return false;
+    }
+    for (size_t index = 0; index < lhs.size(); ++index) {
+        if (!SameInputBinding(lhs[index], rhs[index])) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool SamePivotActivationBindings(const std::vector<PivotActivationBinding>& lhs,
+                                 const std::vector<PivotActivationBinding>& rhs) {
+    if (lhs.size() != rhs.size()) return false;
+    for (size_t index = 0; index < lhs.size(); ++index) {
+        if (lhs[index].behavior != rhs[index].behavior || !SameInputBinding(lhs[index].binding, rhs[index].binding)) {
+            return false;
+        }
+    }
+    return true;
+}
+
 // True when the activation surface (candidate count, modes, bindings) is
 // unchanged, so runtime toggle/edge state can survive a config hot-reload.
 bool SamePivotActivationSet(const PivotXrResolvedSettings& lhs, const PivotXrResolvedSettings& rhs) {
@@ -1432,10 +1434,10 @@ bool SamePivotActivationSet(const PivotXrResolvedSettings& lhs, const PivotXrRes
         return false;
     }
     for (size_t i = 0; i < lhs.profiles.size(); ++i) {
-        if (lhs.profiles[i].activation_mode != rhs.profiles[i].activation_mode ||
-            !SameInputBinding(lhs.profiles[i].activation_binding, rhs.profiles[i].activation_binding) ||
-            !SameInputBinding(lhs.profiles[i].set_origin_binding, rhs.profiles[i].set_origin_binding) ||
-            !SameInputBinding(lhs.profiles[i].release_origin_binding, rhs.profiles[i].release_origin_binding)) {
+        if (lhs.profiles[i].always_active != rhs.profiles[i].always_active ||
+            !SamePivotActivationBindings(lhs.profiles[i].activation_bindings, rhs.profiles[i].activation_bindings) ||
+            !SameInputBindings(lhs.profiles[i].set_origin_bindings, rhs.profiles[i].set_origin_bindings) ||
+            !SameInputBindings(lhs.profiles[i].release_origin_bindings, rhs.profiles[i].release_origin_bindings)) {
             return false;
         }
     }
@@ -1458,6 +1460,28 @@ std::string BindingLabel(const InputBinding& binding) {
     }
     return stream.str();
 }
+std::string BindingListLabel(const std::vector<InputBinding>& bindings) {
+    if (bindings.empty()) {
+        return "None";
+    }
+    std::ostringstream stream;
+    for (size_t index = 0; index < bindings.size(); ++index) {
+        if (index > 0) stream << " or ";
+        stream << BindingLabel(bindings[index]);
+    }
+    return stream.str();
+}
+std::string BindingListLabel(const std::vector<PivotActivationBinding>& bindings) {
+    if (bindings.empty()) return "None";
+    std::ostringstream stream;
+    for (size_t index = 0; index < bindings.size(); ++index) {
+        if (index > 0) stream << " or ";
+        stream << (bindings[index].behavior == PivotActivationBehavior::Toggle ? "Toggle " : "Hold ")
+               << BindingLabel(bindings[index].binding);
+    }
+    return stream.str();
+}
+
 
 ConfigDocument DefaultConfig() {
     ConfigDocument document;
@@ -1504,6 +1528,98 @@ void OpenXrLayer::SetLayerDirectory(std::filesystem::path dll_directory) {
 void OpenXrLayer::SetNextProcAddr(PFN_xrGetInstanceProcAddr next_get_instance_proc_addr) {
     std::scoped_lock lock(mutex_);
     next_get_instance_proc_addr_ = next_get_instance_proc_addr;
+}
+
+bool OpenXrLayer::PollInputBindingDown(const InputBinding& binding) {
+    const InputBindingPollResult poll = PollInputBinding(binding);
+    if (!poll.device_poll_attempted) {
+        return poll.down;
+    }
+
+    const std::string key = binding.device_guid.empty() ? BindingLabel(binding) : binding.device_guid;
+    const auto now = std::chrono::steady_clock::now();
+    std::scoped_lock diagnostic_lock(input_binding_diagnostic_mutex_);
+    InputBindingDiagnosticLogState& state = input_binding_diagnostic_states_[key];
+
+    const auto append_result = [](std::ostringstream& stream,
+                                  std::string_view label,
+                                  std::int64_t code) {
+        stream << ", " << label << "=" << DirectInputResultName(code)
+               << "(" << FormatHex(static_cast<std::uint32_t>(code)) << ")";
+    };
+    const auto append_context = [&](std::ostringstream& stream) {
+        stream << "binding='" << BindingLabel(binding) << "'"
+               << ", guid=" << (binding.device_guid.empty() ? "none" : binding.device_guid)
+               << ", stage=" << ToString(poll.diagnostic_stage);
+        append_result(stream, "result", poll.result_code);
+        if (poll.cooperative_window != 0) {
+            stream << ", cooperativeWindow=" << FormatHex(poll.cooperative_window);
+        }
+        if (poll.reacquire_attempted) {
+            append_result(stream, "reacquireResult", poll.reacquire_result_code);
+        }
+        if (poll.retry_attempted) {
+            append_result(stream, "retryResult", poll.retry_result_code);
+        }
+    };
+
+    if (poll.diagnostic_stage != InputBindingPollStage::None && poll.recovered) {
+        std::ostringstream signature_stream;
+        signature_stream << ToString(poll.diagnostic_stage) << ":" << poll.result_code << ":"
+                         << poll.reacquire_result_code << ":" << poll.retry_result_code << ":recovered";
+        const std::string signature = signature_stream.str();
+        const bool interval_elapsed = !state.last_log_time.has_value() ||
+                                      now - *state.last_log_time >= kInputDeviceFailureLogInterval;
+        if (state.signature != signature || interval_elapsed) {
+            std::ostringstream stream;
+            stream << "Input device polling recovered during retry: ";
+            append_context(stream);
+            stream << ".";
+            logger_.Info(stream.str());
+            state.last_log_time = now;
+        }
+        state.failure_active = false;
+        state.signature = signature;
+        state.failed_attempts = 0;
+        state.suppressed_attempts = 0;
+        return poll.down;
+    }
+
+    if (poll.diagnostic_stage != InputBindingPollStage::None) {
+        std::ostringstream signature_stream;
+        signature_stream << ToString(poll.diagnostic_stage) << ":" << poll.result_code << ":"
+                         << poll.reacquire_result_code << ":" << poll.retry_result_code;
+        const std::string signature = signature_stream.str();
+        const bool changed = state.signature != signature;
+        const bool interval_elapsed = !state.last_log_time.has_value() ||
+                                      now - *state.last_log_time >= kInputDeviceFailureLogInterval;
+        state.failure_active = true;
+        ++state.failed_attempts;
+        if (changed || interval_elapsed) {
+            std::ostringstream stream;
+            stream << "Input device polling unavailable: ";
+            append_context(stream);
+            stream << ", failedAttempts=" << state.failed_attempts;
+            if (state.suppressed_attempts > 0) {
+                stream << ", suppressedRepeats=" << state.suppressed_attempts;
+            }
+            stream << ". The binding will remain inactive while VectorXR retries.";
+            logger_.Info(stream.str());
+            state.signature = signature;
+            state.last_log_time = now;
+            state.suppressed_attempts = 0;
+        } else {
+            ++state.suppressed_attempts;
+        }
+        return false;
+    }
+
+    if (state.failure_active) {
+        logger_.Info("Input device polling restored: binding='" + BindingLabel(binding) +
+                     "', failedAttempts=" + std::to_string(state.failed_attempts) + ".");
+        state = InputBindingDiagnosticLogState{};
+    }
+    return poll.down;
 }
 
 bool OpenXrLayer::CanCreateInstance() {
@@ -1620,6 +1736,14 @@ XrResult OpenXrLayer::OnInstanceCreated(const XrInstanceCreateInfo* create_info,
         logger_.Info("Active OpenXR runtime manifest: [" + diagnostics.active_runtime_path + "]");
         logger_.Info("Pre-instance runtime extensions seen by layer: [" + diagnostics.pre_instance_extensions +
                      "]");
+        if (diagnostics.eye_gaze_probe_structurally_unreliable) {
+            logger_.Info(
+                "DIAGNOSTIC: the completed pre-instance extension probe is structurally unreliable "
+                "(empty or missing extensions VectorXR will forward). Eye-gaze absence will be treated "
+                "as advisory and tested through the safe instance-create retry. Missing forwarded "
+                "extensions: [" +
+                diagnostics.pre_instance_missing_forwarded_extensions + "]");
+        }
         if (diagnostics.active_runtime_is_varjo && quad_views_extension_requested_ &&
             !diagnostics.runtime_advertises_varjo_quad) {
             logger_.Info(
@@ -1647,6 +1771,13 @@ XrResult OpenXrLayer::OnInstanceCreated(const XrInstanceCreateInfo* create_info,
                << EyeGazeProbeStateName(diagnostics.eye_gaze_probe_state)
                << ", probeDetail=" << diagnostics.pre_instance_extension_scan_detail
                << ", probeXrResult=" << static_cast<int>(diagnostics.pre_instance_extension_scan_result)
+               << ", probeHeuristic=" << (!diagnostics.pre_instance_extension_scan_complete
+                                               ? "not-evaluated"
+                                               : diagnostics.eye_gaze_probe_structurally_unreliable
+                                                     ? "inconsistent"
+                                                     : "credible")
+               << ", probeMissingForwardedCount="
+               << diagnostics.pre_instance_missing_forwarded_extension_count
                << ", runtimeWorkaround=" << (diagnostics.eye_gaze_probe_known_unreliable ? 1 : 0)
                << ", extensionRequest=" << extension_request
                << ", requestReason=" << EyeGazeRequestReasonName(diagnostics.eye_gaze_request_reason)
@@ -1889,6 +2020,8 @@ XrResult OpenXrLayer::CreateSession(XrInstance instance,
     }
     ReloadConfigIfNeeded();
     RefreshResolvedSettings();
+    quadviews_session_active_ = resolved_settings_.core.enabled && resolved_settings_.quadviews.enabled;
+    deferred_quadviews_config_active_.reset();
     if (IsQuadViewsEmulationActive() &&
         resolved_settings_.quadviews.tracking_mode == QuadViewsTrackingMode::Eye) {
         const XrResult eye_gaze_result = CreateEyeGazeResources(*session);
@@ -5530,7 +5663,7 @@ bool OpenXrLayer::IsTurboMetricsCaptureArmed(const InputBinding& binding, int so
     const bool first_poll = !turbo_metrics_binding_last_poll_time_.has_value();
     if (first_poll || now - *turbo_metrics_binding_last_poll_time_ >= kInputBindingPollInterval) {
         turbo_metrics_binding_last_poll_time_ = now;
-        turbo_metrics_binding_down_cached_ = IsInputBindingDown(binding);
+        turbo_metrics_binding_down_cached_ = PollInputBindingDown(binding);
     }
     const bool binding_down = turbo_metrics_binding_down_cached_;
     if (first_poll) {
@@ -5862,6 +5995,8 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
         pivotxr_smoothed_extra_pitch_radians_ = 0.0;
         pivotxr_yaw_step_ = 0;
         pivotxr_pitch_step_ = 0;
+        pivotxr_yaw_step_glide_ = {};
+        pivotxr_pitch_step_glide_ = {};
         pivotxr_activation_gain_ = 0.0;
         pivotxr_last_smoothing_wall_time_.reset();
         const XrResult release_result = FlushDeferredSwapchainReleasesLocked("end frame");
@@ -5910,6 +6045,8 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
         pivotxr_smoothed_extra_pitch_radians_ = 0.0;
         pivotxr_yaw_step_ = 0;
         pivotxr_pitch_step_ = 0;
+        pivotxr_yaw_step_glide_ = {};
+        pivotxr_pitch_step_glide_ = {};
         pivotxr_activation_gain_ = 0.0;
         pivotxr_last_smoothing_wall_time_.reset();
     }
@@ -6557,18 +6694,18 @@ XrResult OpenXrLayer::LocateViews(XrSession session,
     }
     if (resolved_settings_.pivotxr.enabled && !has_logged_pivotxr_spike_mode_) {
         std::ostringstream stream;
-        stream << "PivotXR spike is active; quad-view sessions use stereo eye-pose recomposition.";
+        stream << "PivotXR enabled; activationState=" << (pivotxr_active ? "engaged" : "idle")
+               << "; quad-view sessions use stereo eye-pose recomposition.";
         for (const PivotXrResolvedProfile& profile : resolved_settings_.pivotxr.profiles) {
-            if (profile.activation_mode == ActivationMode::AlwaysOn) {
+            if (profile.always_active) {
                 stream << " '" << profile.name << "' engages automatically";
-                if (profile.activation_binding.type != InputBindingType::None) {
-                    stream << "; press " << BindingLabel(profile.activation_binding) << " to suspend/resume";
+                if (!profile.activation_bindings.empty()) {
+                    stream << "; press " << BindingListLabel(profile.activation_bindings) << " to suspend/resume";
                 }
                 stream << ".";
             } else {
-                stream << " Press " << BindingLabel(profile.activation_binding) << " to "
-                       << (profile.activation_mode == ActivationMode::Toggle ? "toggle" : "hold") << " '"
-                       << profile.name << "'.";
+                stream << " Press " << BindingListLabel(profile.activation_bindings) << " to "
+                       << "engage '" << profile.name << "'.";
             }
         }
         logger_.Info(stream.str());
@@ -6595,13 +6732,20 @@ XrResult OpenXrLayer::LocateViews(XrSession session,
         if (XR_SUCCEEDED(origin_result) &&
             (origin_location.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT) != 0) {
             PivotOrigin origin;
+            origin.pose = origin_location.pose;
             origin.yaw_radians = ExtractPoseYawRadians(origin_location.pose);
             origin.pitch_radians = ExtractPosePitchRadians(origin_location.pose);
+            origin.capture_time = view_locate_info->displayTime;
+            origin.session = session;
+            origin.location_flags = origin_location.locationFlags;
             pivotxr_origin_ = origin;
             pivotxr_origin_capture_pending_ = false;
             std::ostringstream origin_stream;
             origin_stream << "PivotXR origin captured: yaw=" << FormatDiagnosticDouble(origin.yaw_radians)
-                          << " pitch=" << FormatDiagnosticDouble(origin.pitch_radians) << " rad.";
+                          << " pitch=" << FormatDiagnosticDouble(origin.pitch_radians)
+                          << " rad, position=(" << FormatDiagnosticDouble(origin.pose.position.x) << ", "
+                          << FormatDiagnosticDouble(origin.pose.position.y) << ", "
+                          << FormatDiagnosticDouble(origin.pose.position.z) << ").";
             logger_.Info(origin_stream.str());
         }
     }
@@ -6698,6 +6842,8 @@ XrResult OpenXrLayer::LocateViews(XrSession session,
         pivotxr_smoothed_extra_pitch_radians_ = 0.0;
         pivotxr_yaw_step_ = 0;
         pivotxr_pitch_step_ = 0;
+        pivotxr_yaw_step_glide_ = {};
+        pivotxr_pitch_step_glide_ = {};
         pivotxr_activation_gain_ = 0.0;
         pivotxr_last_smoothing_wall_time_.reset();
     }
@@ -7142,6 +7288,40 @@ void OpenXrLayer::RefreshResolvedSettings() {
 
     const ResolvedRuntimeConfig previous = resolved_settings_;
     resolved_settings_ = ResolveRuntimeConfig(config_, current_exe_name_);
+
+    const bool configured_core_active = resolved_settings_.core.enabled;
+    const bool configured_quadviews_active =
+        configured_core_active && resolved_settings_.quadviews.enabled;
+    if (active_session_ != XR_NULL_HANDLE && quadviews_session_active_.has_value() &&
+        configured_quadviews_active != *quadviews_session_active_) {
+        if (!deferred_quadviews_config_active_.has_value() ||
+            *deferred_quadviews_config_active_ != configured_quadviews_active) {
+            logger_.Info(std::string("Quadviews ") +
+                         (configured_quadviews_active ? "enable" : "disable") +
+                         " change deferred until the OpenXR application exits; this session remains " +
+                         (*quadviews_session_active_ ? "enabled." : "disabled."));
+        }
+        deferred_quadviews_config_active_ = configured_quadviews_active;
+
+        if (*quadviews_session_active_) {
+            // Keep the topology and the active profile's settings intact. A disabled
+            // custom profile can otherwise resolve to unrelated default values while
+            // its four-view session is still running.
+            resolved_settings_.quadviews = previous.quadviews;
+            if (!configured_core_active) {
+                // The suite master switch still disables every topology-safe feature.
+                // Core remains internally active only so the latched Quadviews frame
+                // path can finish the current session safely.
+                resolved_settings_.core.enabled = true;
+                resolved_settings_.depthxr.enabled = false;
+                resolved_settings_.pivotxr.enabled = false;
+                resolved_settings_.turbo.enabled = false;
+            }
+        }
+    } else {
+        deferred_quadviews_config_active_.reset();
+    }
+
     if (resolved_settings_.core.enabled && resolved_settings_.turbo.enabled) {
         // Do not disarm this flag on a live-session settings change: once a
         // Turbo pipeline has been established, Wait/Begin/End interception is
@@ -7157,7 +7337,7 @@ void OpenXrLayer::RefreshResolvedSettings() {
         ResetDepthAnchorToggleState();
     }
     if (!SamePivotActivationSet(previous.pivotxr, resolved_settings_.pivotxr)) {
-        ResetPivotActivationState();
+        ResetPivotInputStateForConfigChange();
         has_logged_pivotxr_spike_mode_ = false;
     }
     if (!SameInputBinding(previous.turbo.toggle_binding, resolved_settings_.turbo.toggle_binding) ||
@@ -7439,12 +7619,18 @@ void OpenXrLayer::CaptureInstanceFunctions() {
 }
 
 void OpenXrLayer::ResetSessionState() {
+    {
+        std::scoped_lock diagnostic_lock(input_binding_diagnostic_mutex_);
+        input_binding_diagnostic_states_.clear();
+    }
     if (varjo_native_foveation_diagnostic_.locate_calls > 0) {
         LogVarjoNativeFoveationSummaryLocked("session-teardown", true);
     }
     varjo_native_foveation_diagnostic_ = {};
     ResetD3D11QuadViewsCompositor();
     active_session_ = XR_NULL_HANDLE;
+    quadviews_session_active_.reset();
+    deferred_quadviews_config_active_.reset();
     session_begin_wall_time_.reset();
     pending_end_frame_diagnostics_ = 0;
     pending_eye_gaze_diagnostics_ = 0;
@@ -7459,6 +7645,8 @@ void OpenXrLayer::ResetSessionState() {
     pivotxr_smoothed_extra_pitch_radians_ = 0.0;
     pivotxr_yaw_step_ = 0;
     pivotxr_pitch_step_ = 0;
+    pivotxr_yaw_step_glide_ = {};
+    pivotxr_pitch_step_glide_ = {};
     pivotxr_activation_gain_ = 0.0;
     pivotxr_last_smoothing_wall_time_.reset();
     ResetDepthToggleState();
@@ -7538,7 +7726,8 @@ void OpenXrLayer::ResetInstanceState() {
 }
 
 bool OpenXrLayer::IsQuadViewsActive() const {
-    return resolved_settings_.core.enabled && resolved_settings_.quadviews.enabled;
+    const bool configured_active = resolved_settings_.core.enabled && resolved_settings_.quadviews.enabled;
+    return ResolveQuadViewsSessionActive(configured_active, quadviews_session_active_);
 }
 
 bool OpenXrLayer::IsQuadViewsEmulationActive() const {
@@ -9044,6 +9233,8 @@ XrResult OpenXrLayer::ApplyPivotToLocatedSpace(XrSpace space,
         pivotxr_smoothed_extra_pitch_radians_ = 0.0;
         pivotxr_yaw_step_ = 0;
         pivotxr_pitch_step_ = 0;
+        pivotxr_yaw_step_glide_ = {};
+        pivotxr_pitch_step_glide_ = {};
         if (update_smoothing) {
             pivotxr_last_smoothing_wall_time_.reset();
         }
@@ -9058,7 +9249,6 @@ XrResult OpenXrLayer::ApplyPivotToLocatedSpace(XrSpace space,
         return result;
     }
 
-    const XrPosef original_relation_pose = location->pose;
     const XrPosef view_pose = space_is_view ? location->pose : InvertPose(location->pose);
     const ViewOrientation orientation{
         view_pose.orientation.x,
@@ -9083,26 +9273,24 @@ XrResult OpenXrLayer::ApplyPivotToLocatedSpace(XrSpace space,
         const int previous_yaw_step = pivotxr_yaw_step_;
         const int previous_pitch_step = pivotxr_pitch_step_;
         if (settings.response_mode == PivotResponseMode::Stepped) {
-            ComputePivotSteppedExtraAngleRadians(current_yaw_radians,
-                                                 settings.yaw_deadzone_degrees,
-                                                 settings.step_trigger_degrees,
-                                                 settings.step_amount_degrees,
-                                                 settings.step_hysteresis_degrees,
-                                                 settings.yaw_max_extra_degrees,
-                                                 settings.smoothing,
-                                                 delta_seconds,
-                                                 pivotxr_yaw_step_,
-                                                 pivotxr_smoothed_extra_yaw_radians_);
-            ComputePivotSteppedExtraAngleRadians(current_pitch_radians,
-                                                 settings.pitch_deadzone_degrees,
-                                                 settings.step_trigger_degrees,
-                                                 settings.step_amount_degrees,
-                                                 settings.step_hysteresis_degrees,
-                                                 settings.pitch_max_extra_degrees,
-                                                 settings.smoothing,
-                                                 delta_seconds,
-                                                 pivotxr_pitch_step_,
-                                                 pivotxr_smoothed_extra_pitch_radians_);
+            UpdatePivotSteppedExtraAngleRadians(current_yaw_radians,
+                                                settings.yaw_step_positive,
+                                                settings.yaw_step_negative,
+                                                settings.step_glide_mode,
+                                                settings.step_glide_seconds,
+                                                delta_seconds,
+                                                pivotxr_yaw_step_,
+                                                pivotxr_smoothed_extra_yaw_radians_,
+                                                pivotxr_yaw_step_glide_);
+            UpdatePivotSteppedExtraAngleRadians(current_pitch_radians,
+                                                settings.pitch_step_positive,
+                                                settings.pitch_step_negative,
+                                                settings.step_glide_mode,
+                                                settings.step_glide_seconds,
+                                                delta_seconds,
+                                                pivotxr_pitch_step_,
+                                                pivotxr_smoothed_extra_pitch_radians_,
+                                                pivotxr_pitch_step_glide_);
         } else {
             const PivotAxisTuning& yaw_tuning =
                 current_yaw_radians >= 0.0 ? settings.yaw_positive : settings.yaw_negative;
@@ -9122,6 +9310,12 @@ XrResult OpenXrLayer::ApplyPivotToLocatedSpace(XrSpace space,
                                           settings.smoothing,
                                           delta_seconds,
                                           pivotxr_smoothed_extra_pitch_radians_);
+            pivotxr_yaw_step_ = 0;
+            pivotxr_pitch_step_ = 0;
+            pivotxr_yaw_step_glide_ = {pivotxr_smoothed_extra_yaw_radians_,
+                                       pivotxr_smoothed_extra_yaw_radians_, 0.0};
+            pivotxr_pitch_step_glide_ = {pivotxr_smoothed_extra_pitch_radians_,
+                                         pivotxr_smoothed_extra_pitch_radians_, 0.0};
         }
 
         if ((pivotxr_yaw_step_ != previous_yaw_step || pivotxr_pitch_step_ != previous_pitch_step) &&
@@ -9164,17 +9358,19 @@ XrResult OpenXrLayer::ApplyPivotToLocatedSpace(XrSpace space,
     if (applied_extra_pitch_radians) {
         *applied_extra_pitch_radians = extra_pitch_radians;
     }
-    if (NearlyZero(extra_yaw_radians) && NearlyZero(extra_pitch_radians)) {
-        return result;
+    PivotPoseOffsetComponents components;
+    if (!NearlyZero(extra_yaw_radians) || !NearlyZero(extra_pitch_radians)) {
+        const XrPosef motion_assisted_pose =
+            ApplyExtraRotationToPose(view_pose,
+                                     static_cast<float>(extra_yaw_radians),
+                                     static_cast<float>(extra_pitch_radians));
+        components.motion_assist = PoseOffsetBetween(view_pose, motion_assisted_pose);
     }
-
-    const XrPosef manipulated_pose =
-        ApplyExtraRotationToPose(view_pose,
-                                 static_cast<float>(extra_yaw_radians),
-                                 static_cast<float>(extra_pitch_radians));
+    const XrPosef composed_pose_offset = ComposePivotPoseOffset(components);
+    const XrPosef manipulated_pose = MultiplyPoses(view_pose, composed_pose_offset);
     location->pose = space_is_view ? manipulated_pose : InvertPose(manipulated_pose);
     if (applied_pose_delta && space_is_view && !base_space_is_view) {
-        *applied_pose_delta = MultiplyPoses(InvertPose(original_relation_pose), location->pose);
+        *applied_pose_delta = composed_pose_offset;
     }
     return result;
 }
@@ -9195,10 +9391,10 @@ void OpenXrLayer::LogResolvedSettings(const ResolvedRuntimeConfig& settings) {
     for (size_t i = 0; i < settings.pivotxr.profiles.size(); ++i) {
         const PivotXrResolvedProfile& profile = settings.pivotxr.profiles[i];
         stream << ", pivotProfile[" << i << "]={name=" << profile.name
-               << ", activation=" << ToString(profile.activation_mode)
-               << ", binding=" << BindingLabel(profile.activation_binding)
-               << ", setOriginBinding=" << BindingLabel(profile.set_origin_binding)
-               << ", releaseOriginBinding=" << BindingLabel(profile.release_origin_binding)
+               << ", baseline=" << (profile.always_active ? "alwaysActive" : "manual")
+               << ", bindings=" << BindingListLabel(profile.activation_bindings)
+               << ", setOriginBindings=" << BindingListLabel(profile.set_origin_bindings)
+               << ", releaseOriginBindings=" << BindingListLabel(profile.release_origin_bindings)
                << ", smoothing=" << profile.smoothing
                << ", activationRamp=" << profile.activation_ramp_seconds
                << ", yawMultiplier=" << profile.yaw_rotation_multiplier
@@ -9209,9 +9405,16 @@ void OpenXrLayer::LogResolvedSettings(const ResolvedRuntimeConfig& settings) {
                << ", pitchMaxExtra=" << profile.pitch_max_extra_degrees
                << ", responseMode=" << ToString(profile.response_mode);
         if (profile.response_mode == PivotResponseMode::Stepped) {
-            stream << ", stepTrigger=" << profile.step_trigger_degrees
-                   << ", stepAmount=" << profile.step_amount_degrees
-                   << ", stepHysteresis=" << profile.step_hysteresis_degrees;
+            stream << ", stepGlide=" << ToString(profile.step_glide_mode)
+                   << ", stepGlideSeconds=" << profile.step_glide_seconds
+                   << ", yawLeftStep={trigger=" << profile.yaw_step_positive.trigger_degrees
+                   << ", amount=" << profile.yaw_step_positive.amount_degrees << "}"
+                   << ", yawRightStep={trigger=" << profile.yaw_step_negative.trigger_degrees
+                   << ", amount=" << profile.yaw_step_negative.amount_degrees << "}"
+                   << ", pitchUpStep={trigger=" << profile.pitch_step_positive.trigger_degrees
+                   << ", amount=" << profile.pitch_step_positive.amount_degrees << "}"
+                   << ", pitchDownStep={trigger=" << profile.pitch_step_negative.trigger_degrees
+                   << ", amount=" << profile.pitch_step_negative.amount_degrees << "}";
         }
         stream << ", yawLeftMultiplier=" << profile.yaw_positive.rotation_multiplier
                << ", yawRightMultiplier=" << profile.yaw_negative.rotation_multiplier
@@ -9244,6 +9447,8 @@ void OpenXrLayer::ResetPivotActivationState() {
     pivotxr_smoothed_extra_pitch_radians_ = 0.0;
     pivotxr_yaw_step_ = 0;
     pivotxr_pitch_step_ = 0;
+    pivotxr_yaw_step_glide_ = {};
+    pivotxr_pitch_step_glide_ = {};
     pivotxr_activation_gain_ = 0.0;
     pivotxr_last_smoothing_wall_time_.reset();
     pivotxr_engaged_ = false;
@@ -9254,6 +9459,24 @@ void OpenXrLayer::ResetPivotActivationState() {
     pivotxr_binding_last_poll_time_.reset();
     pivot_diagnostic_stride_counter_ = 0;
     pivot_diagnostic_ = PivotDiagnosticState{};
+}
+
+void OpenXrLayer::ResetPivotInputStateForConfigChange() {
+    // An incompatible binding/profile edit invalidates edge state, but the
+    // displayed pose must still ease back through the existing activation
+    // envelope. Preserve the generated angles, gain, smoothing clock, and
+    // seated origin; only disarm the action and prime the new controls.
+    pivotxr_engaged_ = false;
+    pivotxr_active_profile_index_ = resolved_settings_.pivotxr.profiles.empty()
+                                        ? 0
+                                        : std::min(pivotxr_active_profile_index_,
+                                                   resolved_settings_.pivotxr.profiles.size() - 1);
+    pivotxr_profile_input_states_.clear();
+    pivotxr_origin_capture_pending_ = false;
+    pivotxr_binding_last_poll_time_.reset();
+    pending_locate_views_diagnostics_ = 5;
+    pending_end_frame_diagnostics_ = 5;
+    pending_pivot_diagnostics_ = kPivotDiagnosticBurstCount;
 }
 
 void OpenXrLayer::ResetDepthToggleState() {
@@ -9281,7 +9504,7 @@ void OpenXrLayer::PollDepthAnchorToggle() {
     if (first_poll || now - *depth_anchor_binding_last_poll_time_ >= kInputBindingPollInterval) {
         depth_anchor_binding_last_poll_time_ = now;
         depth_anchor_binding_down_cached_ =
-            IsInputBindingDown(resolved_settings_.depthxr_bindings.toggle_anchor);
+            PollInputBindingDown(resolved_settings_.depthxr_bindings.toggle_anchor);
     }
     const bool binding_down = depth_anchor_binding_down_cached_;
     if (first_poll) {
@@ -9344,7 +9567,7 @@ bool OpenXrLayer::IsTurboActive() {
     const bool first_poll = !turbo_binding_last_poll_time_.has_value();
     if (first_poll || now - *turbo_binding_last_poll_time_ >= kInputBindingPollInterval) {
         turbo_binding_last_poll_time_ = now;
-        turbo_binding_down_cached_ = IsInputBindingDown(resolved_settings_.turbo.toggle_binding);
+        turbo_binding_down_cached_ = PollInputBindingDown(resolved_settings_.turbo.toggle_binding);
     }
     const bool binding_down = turbo_binding_down_cached_;
     if (first_poll) {
@@ -10186,7 +10409,7 @@ bool OpenXrLayer::IsDepthXrActive() {
     const bool first_poll = !depthxr_binding_last_poll_time_.has_value();
     if (first_poll || now - *depthxr_binding_last_poll_time_ >= kInputBindingPollInterval) {
         depthxr_binding_last_poll_time_ = now;
-        depthxr_binding_down_cached_ = IsInputBindingDown(resolved_settings_.depthxr_bindings.toggle_enabled);
+        depthxr_binding_down_cached_ = PollInputBindingDown(resolved_settings_.depthxr_bindings.toggle_enabled);
     }
     const bool binding_down = depthxr_binding_down_cached_;
     if (first_poll) {
@@ -10233,11 +10456,24 @@ bool OpenXrLayer::IsPivotXrActive() {
     }
 
 #if defined(_WIN32)
-    // RefreshResolvedSettings resets activation state whenever the candidate
-    // set changes, so a size mismatch only happens right after such a reset.
+    // RefreshResolvedSettings resets input state whenever the candidate set
+    // changes, so a size mismatch only happens right after such a reset.
     if (pivotxr_profile_input_states_.size() != pivot.profiles.size()) {
         pivotxr_profile_input_states_.assign(pivot.profiles.size(), PivotProfileInputState{});
         pivotxr_active_profile_index_ = std::min(pivotxr_active_profile_index_, pivot.profiles.size() - 1);
+    }
+
+    for (size_t i = 0; i < pivot.profiles.size(); ++i) {
+        PivotProfileInputState& state = pivotxr_profile_input_states_[i];
+        if (state.activation.size() != pivot.profiles[i].activation_bindings.size()) {
+            state.activation.assign(pivot.profiles[i].activation_bindings.size(), {});
+        }
+        if (state.set_origin.size() != pivot.profiles[i].set_origin_bindings.size()) {
+            state.set_origin.assign(pivot.profiles[i].set_origin_bindings.size(), {});
+        }
+        if (state.release_origin.size() != pivot.profiles[i].release_origin_bindings.size()) {
+            state.release_origin.assign(pivot.profiles[i].release_origin_bindings.size(), {});
+        }
     }
 
     const auto now = std::chrono::steady_clock::now();
@@ -10247,120 +10483,161 @@ bool OpenXrLayer::IsPivotXrActive() {
     if (first_poll || now - *pivotxr_binding_last_poll_time_ >= kInputBindingPollInterval) {
         pivotxr_binding_last_poll_time_ = now;
         for (size_t i = 0; i < pivot.profiles.size(); ++i) {
-            PivotProfileInputState& input_state = pivotxr_profile_input_states_[i];
-            input_state.down_cached = IsInputBindingDown(pivot.profiles[i].activation_binding);
-            input_state.set_origin_down_cached = IsInputBindingDown(pivot.profiles[i].set_origin_binding);
-            input_state.release_origin_down_cached =
-                IsInputBindingDown(pivot.profiles[i].release_origin_binding);
+            const PivotXrResolvedProfile& profile = pivot.profiles[i];
+            PivotProfileInputState& state = pivotxr_profile_input_states_[i];
+            for (size_t binding = 0; binding < profile.activation_bindings.size(); ++binding) {
+                state.activation[binding].down_cached = PollInputBindingDown(profile.activation_bindings[binding].binding);
+            }
+            for (size_t binding = 0; binding < profile.set_origin_bindings.size(); ++binding) {
+                state.set_origin[binding].down_cached = PollInputBindingDown(profile.set_origin_bindings[binding]);
+            }
+            for (size_t binding = 0; binding < profile.release_origin_bindings.size(); ++binding) {
+                state.release_origin[binding].down_cached = PollInputBindingDown(profile.release_origin_bindings[binding]);
+            }
         }
     }
 
+    struct BindingTransitions {
+        const InputBinding* pressed{nullptr};
+        const InputBinding* released{nullptr};
+        bool any_down{false};
+    };
+    auto consume_transitions = [](const std::vector<InputBinding>& bindings,
+                                  std::vector<PivotProfileInputState::BindingState>& states) {
+        BindingTransitions transitions;
+        for (size_t index = 0; index < bindings.size(); ++index) {
+            PivotProfileInputState::BindingState& state = states[index];
+            if (state.down_cached && !state.was_down && !transitions.pressed) {
+                transitions.pressed = &bindings[index];
+            }
+            if (!state.down_cached && state.was_down && !transitions.released) {
+                transitions.released = &bindings[index];
+            }
+            transitions.any_down = transitions.any_down || state.down_cached;
+            state.was_down = state.down_cached;
+        }
+        return transitions;
+    };
+    auto prime_states = [](std::vector<PivotProfileInputState::BindingState>& states) {
+        for (PivotProfileInputState::BindingState& state : states) {
+            state.was_down = state.down_cached;
+        }
+    };
     auto note_transition_diagnostics = [&]() {
         pending_locate_views_diagnostics_ = 5;
         pending_end_frame_diagnostics_ = 5;
         pending_pivot_diagnostics_ = kPivotDiagnosticBurstCount;
     };
-    auto engage = [&](size_t index) {
+    auto engage = [&](size_t index, const InputBinding& trigger) {
         const PivotXrResolvedProfile& profile = pivot.profiles[index];
         const bool switching = pivotxr_engaged_ && pivotxr_active_profile_index_ != index;
         pivotxr_active_profile_index_ = index;
         pivotxr_engaged_ = true;
         note_transition_diagnostics();
         logger_.Info("PivotXR profile '" + profile.name + "' engaged via " +
-                     BindingLabel(profile.activation_binding) + (switching ? " (switched profile)." : "."));
-        SoundPlayer::Instance().PlayTransition(profile.activation_binding.sound, true, dll_directory_,
+                     BindingLabel(trigger) + (switching ? " (switched profile)." : "."));
+        SoundPlayer::Instance().PlayTransition(trigger.sound, true, dll_directory_,
                                                resolved_settings_.core.sound_volume);
     };
-    auto disengage = [&](size_t index) {
+    auto disengage = [&](size_t index, const InputBinding& trigger) {
         const PivotXrResolvedProfile& profile = pivot.profiles[index];
         pivotxr_engaged_ = false;
         note_transition_diagnostics();
-        logger_.Info("PivotXR profile '" + profile.name + "' disengaged via " +
-                     BindingLabel(profile.activation_binding) + ".");
-        SoundPlayer::Instance().PlayTransition(profile.activation_binding.sound, false, dll_directory_,
+        logger_.Info("PivotXR profile '" + profile.name + "' disengaged via " + BindingLabel(trigger) + ".");
+        SoundPlayer::Instance().PlayTransition(trigger.sound, false, dll_directory_,
                                                resolved_settings_.core.sound_volume);
     };
 
-    // Arbitrate across all candidates: last pressed wins. Duplicate bindings
-    // were pruned at resolve time, so at most one candidate sees a given edge.
+    // Arbitrate across all candidates: last pressed wins. The resolver prunes
+    // colliding activation bindings while retaining every independent binding.
     for (size_t i = 0; i < pivot.profiles.size(); ++i) {
+        const PivotXrResolvedProfile& profile = pivot.profiles[i];
         PivotProfileInputState& input_state = pivotxr_profile_input_states_[i];
-        const bool binding_down = input_state.down_cached;
         if (first_poll) {
-            input_state.was_down = binding_down;
-            input_state.set_origin_was_down = input_state.set_origin_down_cached;
-            input_state.release_origin_was_down = input_state.release_origin_down_cached;
+            prime_states(input_state.activation);
+            prime_states(input_state.set_origin);
+            prime_states(input_state.release_origin);
             continue;
         }
 
-        // Origin bindings act on press regardless of engagement, so the origin
-        // can be aligned (alongside the game's own recenter) before pivot is
-        // ever engaged. Capture is deferred to the xrLocateViews drive path,
-        // which has the head pose for this frame.
-        {
-            const bool down = input_state.set_origin_down_cached;
-            const bool pressed = down && !input_state.set_origin_was_down;
-            input_state.set_origin_was_down = down;
-            if (pressed) {
-                pivotxr_origin_capture_pending_ = true;
-                logger_.Info("PivotXR origin capture requested via " +
-                             BindingLabel(pivot.profiles[i].set_origin_binding) + ".");
-                SoundPlayer::Instance().PlayTransition(pivot.profiles[i].set_origin_binding.sound, true,
-                                                       dll_directory_, resolved_settings_.core.sound_volume,
-                                                       L"origin-set.wav", L"origin-set.wav");
-            }
-        }
-        {
-            const bool down = input_state.release_origin_down_cached;
-            const bool pressed = down && !input_state.release_origin_was_down;
-            input_state.release_origin_was_down = down;
-            if (pressed && (pivotxr_origin_.has_value() || pivotxr_origin_capture_pending_)) {
-                pivotxr_origin_.reset();
-                pivotxr_origin_capture_pending_ = false;
-                logger_.Info("PivotXR origin released via " +
-                             BindingLabel(pivot.profiles[i].release_origin_binding) +
-                             "; reverting to the HMD origin.");
-                SoundPlayer::Instance().PlayTransition(pivot.profiles[i].release_origin_binding.sound, true,
-                                                       dll_directory_, resolved_settings_.core.sound_volume,
-                                                       L"origin-release.wav", L"origin-release.wav");
-            }
+        const BindingTransitions set_origin =
+            consume_transitions(profile.set_origin_bindings, input_state.set_origin);
+        if (set_origin.pressed) {
+            pivotxr_origin_capture_pending_ = true;
+            logger_.Info("PivotXR origin capture requested via " + BindingLabel(*set_origin.pressed) + ".");
+            SoundPlayer::Instance().PlayTransition(set_origin.pressed->sound, true, dll_directory_,
+                                                   resolved_settings_.core.sound_volume,
+                                                   L"origin-set.wav", L"origin-set.wav");
         }
 
-        const bool was_pressed = binding_down && !input_state.was_down;
-        const bool was_released = !binding_down && input_state.was_down;
-        input_state.was_down = binding_down;
+        const BindingTransitions release_origin =
+            consume_transitions(profile.release_origin_bindings, input_state.release_origin);
+        if (release_origin.pressed && (pivotxr_origin_.has_value() || pivotxr_origin_capture_pending_)) {
+            pivotxr_origin_.reset();
+            pivotxr_origin_capture_pending_ = false;
+            logger_.Info("PivotXR origin released via " + BindingLabel(*release_origin.pressed) +
+                         "; reverting to the HMD origin.");
+            SoundPlayer::Instance().PlayTransition(release_origin.pressed->sound, true, dll_directory_,
+                                                   resolved_settings_.core.sound_volume,
+                                                   L"origin-release.wav", L"origin-release.wav");
+        }
 
-        const bool is_engaged_profile = pivotxr_engaged_ && pivotxr_active_profile_index_ == i;
-        if (pivot.profiles[i].activation_mode == ActivationMode::Toggle) {
-            if (was_pressed) {
-                if (is_engaged_profile) {
-                    disengage(i);
-                } else {
-                    engage(i);
-                }
+        const PivotActivationBinding* toggle_pressed = nullptr;
+        const PivotActivationBinding* hold_pressed = nullptr;
+        const PivotActivationBinding* hold_released = nullptr;
+        bool any_hold_down = false;
+        for (size_t index = 0; index < profile.activation_bindings.size(); ++index) {
+            const PivotActivationBinding& activation = profile.activation_bindings[index];
+            PivotProfileInputState::BindingState& binding_state = input_state.activation[index];
+            const bool pressed = binding_state.down_cached && !binding_state.was_down;
+            const bool released = !binding_state.down_cached && binding_state.was_down;
+            if (activation.behavior == PivotActivationBehavior::Toggle) {
+                if (pressed && !toggle_pressed) toggle_pressed = &activation;
+            } else {
+                if (pressed && !hold_pressed) hold_pressed = &activation;
+                if (released && !hold_released) hold_released = &activation;
+                any_hold_down = any_hold_down || binding_state.down_cached;
             }
-        } else if (pivot.profiles[i].activation_mode == ActivationMode::AlwaysOn) {
-            // Always-on profiles engage automatically (below); their binding
-            // suspends and resumes the automatic engagement.
-            if (was_pressed) {
-                if (is_engaged_profile) {
-                    input_state.always_on_suspended = true;
-                    logger_.Info("PivotXR always-on profile '" + pivot.profiles[i].name +
-                                 "' suspended; it will not re-engage until resumed.");
-                    disengage(i);
+            binding_state.was_down = binding_state.down_cached;
+        }
+
+        bool is_engaged_profile = pivotxr_engaged_ && pivotxr_active_profile_index_ == i;
+        if (profile.always_active) {
+            if (toggle_pressed) {
+                input_state.toggle_suspended = !input_state.toggle_suspended;
+                if (input_state.toggle_suspended) {
+                    logger_.Info("PivotXR always-active profile '" + profile.name + "' suspended.");
+                    if (is_engaged_profile) disengage(i, toggle_pressed->binding);
                 } else {
-                    input_state.always_on_suspended = false;
-                    logger_.Info("PivotXR always-on profile '" + pivot.profiles[i].name + "' resumed.");
-                    engage(i);
+                    logger_.Info("PivotXR always-active profile '" + profile.name + "' resumed.");
+                    if (!any_hold_down) engage(i, toggle_pressed->binding);
                 }
+                is_engaged_profile = pivotxr_engaged_ && pivotxr_active_profile_index_ == i;
+            }
+            if (hold_pressed && is_engaged_profile) {
+                disengage(i, hold_pressed->binding);
+                is_engaged_profile = false;
+            }
+            if (hold_released && !any_hold_down && !input_state.toggle_suspended && !is_engaged_profile) {
+                engage(i, hold_released->binding);
             }
         } else {
-            // Hold mode: down engages (taking over from any toggled profile),
-            // release disengages only if this profile still owns the pivot.
-            if (was_pressed) {
-                engage(i);
-            } else if (was_released && is_engaged_profile) {
-                disengage(i);
+            if (toggle_pressed) {
+                if (is_engaged_profile && input_state.toggle_latched) {
+                    input_state.toggle_latched = false;
+                    if (!any_hold_down) disengage(i, toggle_pressed->binding);
+                } else {
+                    input_state.toggle_latched = true;
+                    if (!is_engaged_profile) engage(i, toggle_pressed->binding);
+                }
+                is_engaged_profile = pivotxr_engaged_ && pivotxr_active_profile_index_ == i;
+            }
+            if (hold_pressed && !is_engaged_profile) {
+                engage(i, hold_pressed->binding);
+                is_engaged_profile = true;
+            }
+            if (hold_released && !any_hold_down && !input_state.toggle_latched && is_engaged_profile) {
+                disengage(i, hold_released->binding);
             }
         }
     }
@@ -10371,14 +10648,19 @@ bool OpenXrLayer::IsPivotXrActive() {
     // profile releases the pivot.
     if (!pivotxr_engaged_) {
         for (size_t i = 0; i < pivot.profiles.size(); ++i) {
-            if (pivot.profiles[i].activation_mode != ActivationMode::AlwaysOn ||
-                pivotxr_profile_input_states_[i].always_on_suspended) {
-                continue;
+            const PivotXrResolvedProfile& profile = pivot.profiles[i];
+            const PivotProfileInputState& input_state = pivotxr_profile_input_states_[i];
+            bool hold_suspended = false;
+            for (size_t index = 0; index < profile.activation_bindings.size(); ++index) {
+                hold_suspended = hold_suspended ||
+                    (profile.activation_bindings[index].behavior == PivotActivationBehavior::Hold &&
+                     input_state.activation[index].down_cached);
             }
+            if (!profile.always_active || input_state.toggle_suspended || hold_suspended) continue;
             pivotxr_active_profile_index_ = i;
             pivotxr_engaged_ = true;
             note_transition_diagnostics();
-            logger_.Info("PivotXR profile '" + pivot.profiles[i].name + "' engaged (always on).");
+            logger_.Info("PivotXR profile '" + profile.name + "' engaged (always active).");
             break;
         }
     }

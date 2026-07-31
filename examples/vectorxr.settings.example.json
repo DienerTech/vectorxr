@@ -57,8 +57,24 @@
         "maxExtraYawDegrees": 25.0,
         "pitchRotationMultiplier": 1.0,
         "pitchDeadzoneDegrees": 12.0,
-        "maxExtraPitchDegrees": 20.0
+        "maxExtraPitchDegrees": 20.0,
+        "responseMode": "continuous",
+        "stepGlideMode": "glide",
+        "stepGlideSeconds": 0.12,
+        "yawStep": { "deadzoneDegrees": 8.0, "triggerDegrees": 10.0, "amountDegrees": 10.0, "hysteresisDegrees": 4.0, "maxExtraDegrees": 25.0 },
+        "pitchStep": { "deadzoneDegrees": 12.0, "triggerDegrees": 10.0, "amountDegrees": 10.0, "hysteresisDegrees": 4.0, "maxExtraDegrees": 20.0 },
+        "advancedAxes": false,
+        "yawLeft": { "rotationMultiplier": 1.5, "deadzoneDegrees": 8.0, "maxExtraDegrees": 25.0 },
+        "yawRight": { "rotationMultiplier": 1.5, "deadzoneDegrees": 8.0, "maxExtraDegrees": 25.0 },
+        "pitchUp": { "rotationMultiplier": 1.0, "deadzoneDegrees": 12.0, "maxExtraDegrees": 20.0 },
+        "pitchDown": { "rotationMultiplier": 1.0, "deadzoneDegrees": 12.0, "maxExtraDegrees": 20.0 },
+        "yawLeftStep": { "deadzoneDegrees": 8.0, "triggerDegrees": 10.0, "amountDegrees": 10.0, "hysteresisDegrees": 4.0, "maxExtraDegrees": 25.0 },
+        "yawRightStep": { "deadzoneDegrees": 8.0, "triggerDegrees": 10.0, "amountDegrees": 10.0, "hysteresisDegrees": 4.0, "maxExtraDegrees": 25.0 },
+        "pitchUpStep": { "deadzoneDegrees": 12.0, "triggerDegrees": 10.0, "amountDegrees": 10.0, "hysteresisDegrees": 4.0, "maxExtraDegrees": 20.0 },
+        "pitchDownStep": { "deadzoneDegrees": 12.0, "triggerDegrees": 10.0, "amountDegrees": 10.0, "hysteresisDegrees": 4.0, "maxExtraDegrees": 20.0 }
       },
+      "alwaysActive": false,
+      "activationBindings": [],
       "profiles": [
         {
           "name": "DCS",
@@ -66,10 +82,8 @@
           "applicationIds": [
             "dcs"
           ],
-          "activationMode": "toggle",
-          "activationBinding": {
-            "type": "none"
-          },
+          "alwaysActive": false,
+          "activationBindings": [],
           "settings": {
             "smoothing": 0.2,
             "activationRampSeconds": 0.35,
@@ -78,7 +92,21 @@
             "maxExtraYawDegrees": 60.0,
             "pitchRotationMultiplier": 1.2,
             "pitchDeadzoneDegrees": 15.0,
-            "maxExtraPitchDegrees": 45.0
+            "maxExtraPitchDegrees": 45.0,
+            "responseMode": "continuous",
+            "stepGlideMode": "glide",
+            "stepGlideSeconds": 0.12,
+            "yawStep": { "deadzoneDegrees": 10.0, "triggerDegrees": 10.0, "amountDegrees": 10.0, "hysteresisDegrees": 4.0, "maxExtraDegrees": 60.0 },
+            "pitchStep": { "deadzoneDegrees": 15.0, "triggerDegrees": 10.0, "amountDegrees": 10.0, "hysteresisDegrees": 4.0, "maxExtraDegrees": 45.0 },
+            "advancedAxes": false,
+            "yawLeft": { "rotationMultiplier": 1.7, "deadzoneDegrees": 10.0, "maxExtraDegrees": 60.0 },
+            "yawRight": { "rotationMultiplier": 1.7, "deadzoneDegrees": 10.0, "maxExtraDegrees": 60.0 },
+            "pitchUp": { "rotationMultiplier": 1.2, "deadzoneDegrees": 15.0, "maxExtraDegrees": 45.0 },
+            "pitchDown": { "rotationMultiplier": 1.2, "deadzoneDegrees": 15.0, "maxExtraDegrees": 45.0 },
+            "yawLeftStep": { "deadzoneDegrees": 10.0, "triggerDegrees": 10.0, "amountDegrees": 10.0, "hysteresisDegrees": 4.0, "maxExtraDegrees": 60.0 },
+            "yawRightStep": { "deadzoneDegrees": 10.0, "triggerDegrees": 10.0, "amountDegrees": 10.0, "hysteresisDegrees": 4.0, "maxExtraDegrees": 60.0 },
+            "pitchUpStep": { "deadzoneDegrees": 15.0, "triggerDegrees": 10.0, "amountDegrees": 10.0, "hysteresisDegrees": 4.0, "maxExtraDegrees": 45.0 },
+            "pitchDownStep": { "deadzoneDegrees": 15.0, "triggerDegrees": 10.0, "amountDegrees": 10.0, "hysteresisDegrees": 4.0, "maxExtraDegrees": 45.0 }
           }
         }
       ]

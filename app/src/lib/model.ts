@@ -1,6 +1,8 @@
 export type LogLevel = 'info' | 'debug'
 export type ActivationMode = 'toggle' | 'hold' | 'alwaysOn'
+export type PivotActivationBehavior = 'toggle' | 'hold'
 export type PivotResponseMode = 'continuous' | 'stepped'
+export type PivotStepGlideMode = 'instant' | 'glide'
 export type QuadViewsTrackingMode = 'head' | 'eye'
 export type AppTab = 'home' | 'core' | 'registry' | 'layers' | 'about' | 'depthxr' | 'pivotxr' | 'quadviews' | 'turbo'
 export const keyboardBindingKeyGroups = [
@@ -58,6 +60,20 @@ export interface NoneBinding {
 
 export type InputBinding = NoneBinding | KeyboardBinding | DeviceBinding
 
+// Replacing the physical input must not reset per-binding audio preferences.
+export function preserveBindingSound<T extends InputBinding>(current: InputBinding, replacement: T): T {
+  if (current.type === 'none' || replacement.type === 'none' || !current.sound) {
+    return replacement
+  }
+
+  return { ...replacement, sound: { ...current.sound } } as T
+}
+
+export interface PivotActivationBinding {
+  behavior: PivotActivationBehavior
+  binding: InputBinding
+}
+
 // Global feedback-sound settings shared by every binding's activate/deactivate cue.
 export interface SoundSettings {
   volume: number
@@ -112,6 +128,13 @@ export interface PivotAxisTuning {
   deadzoneDegrees: number
   maxExtraDegrees: number
 }
+export interface PivotStepTuning {
+  deadzoneDegrees: number
+  triggerDegrees: number
+  amountDegrees: number
+  hysteresisDegrees: number
+  maxExtraDegrees: number
+}
 
 export interface PivotXRSettings {
   smoothing: number
@@ -122,17 +145,21 @@ export interface PivotXRSettings {
   pitchRotationMultiplier: number
   pitchDeadzoneDegrees: number
   maxExtraPitchDegrees: number
-  // Response shaping: continuous multiplier or discrete steps with hysteresis.
   responseMode: PivotResponseMode
-  stepTriggerDegrees: number
-  stepAmountDegrees: number
-  stepHysteresisDegrees: number
-  // When true, continuous mode tunes each direction independently.
+  stepGlideMode: PivotStepGlideMode
+  stepGlideSeconds: number
+  yawStep: PivotStepTuning
+  pitchStep: PivotStepTuning
+  // Shared by Continuous and Stepped. Each mode keeps its own direction data.
   advancedAxes: boolean
   yawLeft: PivotAxisTuning
   yawRight: PivotAxisTuning
   pitchUp: PivotAxisTuning
   pitchDown: PivotAxisTuning
+  yawLeftStep: PivotStepTuning
+  yawRightStep: PivotStepTuning
+  pitchUpStep: PivotStepTuning
+  pitchDownStep: PivotStepTuning
 }
 
 export interface PivotXRProfileConfig {
@@ -142,23 +169,23 @@ export interface PivotXRProfileConfig {
   name: string
   enabled: boolean
   applicationIds: string[]
-  activationMode: ActivationMode
-  activationBinding: InputBinding
+  alwaysActive: boolean
+  activationBindings: PivotActivationBinding[]
   // Optional origin bindings: set-origin captures the current head yaw/pitch as
   // Pivot's neutral forward (bind it alongside the game's own recenter);
   // release-origin restores the default HMD origin.
-  setOriginBinding: InputBinding
-  releaseOriginBinding: InputBinding
+  setOriginBindings: InputBinding[]
+  releaseOriginBindings: InputBinding[]
   settings: PivotXRSettings
 }
 
 export interface PivotXRModuleConfig {
   enabled: boolean
   defaults: PivotXRSettings
-  activationMode: ActivationMode
-  activationBinding: InputBinding
-  setOriginBinding: InputBinding
-  releaseOriginBinding: InputBinding
+  alwaysActive: boolean
+  activationBindings: PivotActivationBinding[]
+  setOriginBindings: InputBinding[]
+  releaseOriginBindings: InputBinding[]
   profiles: PivotXRProfileConfig[]
 }
 
@@ -421,6 +448,16 @@ export function defaultPivotAxisTuning(): PivotAxisTuning {
   }
 }
 
+export function defaultPivotStepTuning(): PivotStepTuning {
+  return {
+    deadzoneDegrees: 8,
+    triggerDegrees: 10,
+    amountDegrees: 10,
+    hysteresisDegrees: 4,
+    maxExtraDegrees: 120,
+  }
+}
+
 export function defaultPivotXRSettings(): PivotXRSettings {
   return {
     smoothing: 0.2,
@@ -432,14 +469,19 @@ export function defaultPivotXRSettings(): PivotXRSettings {
     pitchDeadzoneDegrees: 8,
     maxExtraPitchDegrees: 120,
     responseMode: 'continuous',
-    stepTriggerDegrees: 10,
-    stepAmountDegrees: 10,
-    stepHysteresisDegrees: 4,
+    stepGlideMode: 'glide',
+    stepGlideSeconds: 0.12,
+    yawStep: defaultPivotStepTuning(),
+    pitchStep: defaultPivotStepTuning(),
     advancedAxes: false,
     yawLeft: defaultPivotAxisTuning(),
     yawRight: defaultPivotAxisTuning(),
     pitchUp: defaultPivotAxisTuning(),
     pitchDown: defaultPivotAxisTuning(),
+    yawLeftStep: defaultPivotStepTuning(),
+    yawRightStep: defaultPivotStepTuning(),
+    pitchUpStep: defaultPivotStepTuning(),
+    pitchDownStep: defaultPivotStepTuning(),
   }
 }
 
@@ -506,10 +548,10 @@ export function defaultConfig(): VectorXRConfig {
       pivotxr: {
         enabled: false,
         defaults: defaultPivotXRSettings(),
-        activationMode: 'toggle',
-        activationBinding: defaultNoneBinding(),
-        setOriginBinding: defaultNoneBinding(),
-        releaseOriginBinding: defaultNoneBinding(),
+        alwaysActive: false,
+        activationBindings: [],
+        setOriginBindings: [],
+        releaseOriginBindings: [],
         profiles: [],
       },
       quadviews: {
@@ -561,19 +603,19 @@ export function newPivotProfileId(): string {
 export function createPivotProfile(
   defaultSettings: PivotXRSettings,
   applicationIds: string[] = [],
-  activationMode: ActivationMode = 'toggle',
-  activationBinding: InputBinding = defaultNoneBinding(),
+  alwaysActive = false,
+  activationBindings: PivotActivationBinding[] = [],
 ): PivotXRProfileConfig {
   return {
     id: newPivotProfileId(),
     name: 'New Profile',
     enabled: true,
     applicationIds,
-    activationMode,
-    activationBinding: normalizeInputBinding(activationBinding, defaultNoneBinding()),
-    setOriginBinding: defaultNoneBinding(),
-    releaseOriginBinding: defaultNoneBinding(),
-    settings: { ...defaultSettings },
+    alwaysActive,
+    activationBindings: normalizePivotActivationBindings(activationBindings),
+    setOriginBindings: [],
+    releaseOriginBindings: [],
+    settings: normalizePivotXRSettings(defaultSettings, defaultPivotXRSettings()),
   }
 }
 
@@ -628,11 +670,59 @@ function normalizePivotAxisTuning(value: unknown, fallback: PivotAxisTuning): Pi
   }
 }
 
+function normalizePivotStepTuning(value: unknown, fallback: PivotStepTuning): PivotStepTuning {
+  const source = isRecord(value) ? value : {}
+  return {
+    deadzoneDegrees: normalizeNumber(source.deadzoneDegrees, fallback.deadzoneDegrees),
+    triggerDegrees: normalizeNumber(source.triggerDegrees, fallback.triggerDegrees),
+    amountDegrees: normalizeNumber(source.amountDegrees, fallback.amountDegrees),
+    hysteresisDegrees: normalizeNumber(source.hysteresisDegrees, fallback.hysteresisDegrees),
+    maxExtraDegrees: normalizeNumber(source.maxExtraDegrees, fallback.maxExtraDegrees),
+  }
+}
+
+function migratedStepGlideSeconds(smoothing: number): number {
+  if (smoothing <= 0) return 0
+  // Match the old 90 Hz exponential response through its 99.9% settle point.
+  const perFrameError = Math.min(Math.max(smoothing, 0.000001), 0.95)
+  const seconds = Math.log(0.001) / (90 * Math.log(perFrameError))
+  const bounded = Math.min(2, Math.max(0.01, seconds))
+  return Math.round(bounded * 100) / 100
+}
+
 function normalizePivotXRSettings(value: unknown, fallback: PivotXRSettings): PivotXRSettings {
   const source = isRecord(value) ? value : {}
+  const smoothing = normalizeNumber(source.smoothing, fallback.smoothing)
+  const legacyTrigger = normalizeNumber(source.stepTriggerDegrees, fallback.yawStep.triggerDegrees)
+  const legacyAmount = normalizeNumber(source.stepAmountDegrees, fallback.yawStep.amountDegrees)
+  const legacyHysteresis = normalizeNumber(source.stepHysteresisDegrees, fallback.yawStep.hysteresisDegrees)
+  const yawStepFallback: PivotStepTuning = {
+    deadzoneDegrees: normalizeNumber(source.deadzoneDegrees, fallback.deadzoneDegrees),
+    triggerDegrees: legacyTrigger,
+    amountDegrees: legacyAmount,
+    hysteresisDegrees: legacyHysteresis,
+    maxExtraDegrees: normalizeNumber(source.maxExtraYawDegrees, fallback.maxExtraYawDegrees),
+  }
+  const pitchStepFallback: PivotStepTuning = {
+    deadzoneDegrees: normalizeNumber(source.pitchDeadzoneDegrees, fallback.pitchDeadzoneDegrees),
+    triggerDegrees: legacyTrigger,
+    amountDegrees: legacyAmount,
+    hysteresisDegrees: legacyHysteresis,
+    maxExtraDegrees: normalizeNumber(source.maxExtraPitchDegrees, fallback.maxExtraPitchDegrees),
+  }
+  const yawStep = normalizePivotStepTuning(source.yawStep, yawStepFallback)
+  const pitchStep = normalizePivotStepTuning(source.pitchStep, pitchStepFallback)
+  const hasCanonicalGlide = source.stepGlideMode === 'instant' || source.stepGlideMode === 'glide'
+  const stepGlideMode = hasCanonicalGlide
+    ? source.stepGlideMode as PivotStepGlideMode
+    : smoothing <= 0 ? 'instant' : 'glide'
+  const rawStepGlideSeconds = source.stepGlideSeconds !== undefined
+    ? normalizeNumber(source.stepGlideSeconds, fallback.stepGlideSeconds)
+    : hasCanonicalGlide ? fallback.stepGlideSeconds : migratedStepGlideSeconds(smoothing)
+  const stepGlideSeconds = Math.round(rawStepGlideSeconds * 100) / 100
 
   return {
-    smoothing: normalizeNumber(source.smoothing, fallback.smoothing),
+    smoothing,
     activationRampSeconds: normalizeNumber(source.activationRampSeconds, fallback.activationRampSeconds),
     rotationMultiplier: normalizeNumber(source.rotationMultiplier, fallback.rotationMultiplier),
     deadzoneDegrees: normalizeNumber(source.deadzoneDegrees, fallback.deadzoneDegrees),
@@ -640,15 +730,22 @@ function normalizePivotXRSettings(value: unknown, fallback: PivotXRSettings): Pi
     pitchRotationMultiplier: normalizeNumber(source.pitchRotationMultiplier, fallback.pitchRotationMultiplier),
     pitchDeadzoneDegrees: normalizeNumber(source.pitchDeadzoneDegrees, fallback.pitchDeadzoneDegrees),
     maxExtraPitchDegrees: normalizeNumber(source.maxExtraPitchDegrees, fallback.maxExtraPitchDegrees),
-    responseMode: source.responseMode === 'stepped' ? 'stepped' : fallback.responseMode,
-    stepTriggerDegrees: normalizeNumber(source.stepTriggerDegrees, fallback.stepTriggerDegrees),
-    stepAmountDegrees: normalizeNumber(source.stepAmountDegrees, fallback.stepAmountDegrees),
-    stepHysteresisDegrees: normalizeNumber(source.stepHysteresisDegrees, fallback.stepHysteresisDegrees),
+    responseMode: source.responseMode === 'continuous' || source.responseMode === 'stepped'
+      ? source.responseMode
+      : fallback.responseMode,
+    stepGlideMode,
+    stepGlideSeconds,
+    yawStep,
+    pitchStep,
     advancedAxes: normalizeBoolean(source.advancedAxes, fallback.advancedAxes),
     yawLeft: normalizePivotAxisTuning(source.yawLeft, fallback.yawLeft),
     yawRight: normalizePivotAxisTuning(source.yawRight, fallback.yawRight),
     pitchUp: normalizePivotAxisTuning(source.pitchUp, fallback.pitchUp),
     pitchDown: normalizePivotAxisTuning(source.pitchDown, fallback.pitchDown),
+    yawLeftStep: normalizePivotStepTuning(source.yawLeftStep, yawStep),
+    yawRightStep: normalizePivotStepTuning(source.yawRightStep, yawStep),
+    pitchUpStep: normalizePivotStepTuning(source.pitchUpStep, pitchStep),
+    pitchDownStep: normalizePivotStepTuning(source.pitchDownStep, pitchStep),
   }
 }
 
@@ -786,6 +883,46 @@ export function normalizeInputBinding(value: unknown, fallback: InputBinding): I
   }, sound)
 }
 
+export function normalizeInputBindings(value: unknown, legacyValue?: unknown): InputBinding[] {
+  const source = Array.isArray(value)
+    ? value
+    : value !== undefined
+      ? [value]
+      : legacyValue !== undefined
+        ? [legacyValue]
+        : []
+
+  return source
+    .map((binding) => normalizeInputBinding(binding, defaultNoneBinding()))
+    .filter((binding) => binding.type !== 'none')
+}
+
+export function normalizePivotActivationBindings(
+  value: unknown,
+  legacyValue?: unknown,
+  legacyMode: ActivationMode = 'toggle',
+): PivotActivationBinding[] {
+  const source = Array.isArray(value)
+    ? value
+    : value !== undefined
+      ? [value]
+      : legacyValue !== undefined
+        ? [legacyValue]
+        : []
+
+  return source.flatMap((item) => {
+    const wrapper = isRecord(item) && 'binding' in item
+    const binding = normalizeInputBinding(wrapper ? item.binding : item, defaultNoneBinding())
+    if (binding.type === 'none') return []
+    const behavior: PivotActivationBehavior = wrapper && item.behavior === 'hold'
+      ? 'hold'
+      : wrapper && item.behavior === 'toggle'
+        ? 'toggle'
+        : legacyMode === 'hold' ? 'hold' : 'toggle'
+    return [{ behavior, binding }]
+  })
+}
+
 export function bindingsShareInput(left: InputBinding, right: InputBinding): boolean {
   if (left.type === 'none' || right.type === 'none' || left.type !== right.type) {
     return false
@@ -849,6 +986,14 @@ export function bindingLabel(binding: InputBinding): string {
   return binding.chord.join('+')
 }
 
+export function bindingListLabel(bindings: InputBinding[]): string {
+  if (bindings.length === 0) return 'None'
+  if (bindings.length <= 2) return bindings.map(bindingLabel).join(' or ')
+
+  const remaining = bindings.length - 1
+  return `${bindingLabel(bindings[0])} or ${remaining} other${remaining === 1 ? '' : 's'}`
+}
+
 export interface PivotBindingWarning {
   title: string
   message: string
@@ -860,24 +1005,39 @@ interface SavedBindingAssignment {
   binding: InputBinding
 }
 
+function pushBindingAssignments(
+  assignments: SavedBindingAssignment[],
+  id: string,
+  label: string,
+  bindings: InputBinding[],
+) {
+  bindings.forEach((binding, index) => {
+    assignments.push({
+      id: `${id}.${index}`,
+      label: bindings.length > 1 ? `${label} (binding ${index + 1})` : label,
+      binding,
+    })
+  })
+}
+
 function savedBindingAssignments(config: VectorXRConfig): SavedBindingAssignment[] {
   const assignments: SavedBindingAssignment[] = [
     { id: 'depth.toggle', label: 'Depth: A/B toggle', binding: config.modules.depthxr.bindings.toggleEnabled },
     { id: 'depth.lock', label: 'Depth: Depth Lock A/B', binding: config.modules.depthxr.bindings.toggleAnchor },
     { id: 'turbo.toggle', label: 'Turbo: A/B toggle', binding: config.modules.turbo.toggleBinding },
     { id: 'turbo.metrics', label: 'Turbo: metrics capture', binding: config.modules.turbo.metricsBinding },
-    { id: 'pivot.default.activate', label: 'Pivot Default: Activate', binding: config.modules.pivotxr.activationBinding },
-    { id: 'pivot.default.set-origin', label: 'Pivot Default: Set Origin', binding: config.modules.pivotxr.setOriginBinding },
-    { id: 'pivot.default.release-origin', label: 'Pivot Default: Release Origin', binding: config.modules.pivotxr.releaseOriginBinding },
   ]
 
-  config.modules.pivotxr.profiles.forEach((profile, index) => {
+  const pivot = config.modules.pivotxr
+  pushBindingAssignments(assignments, 'pivot.default.activate', 'Pivot Default: Activate', pivot.activationBindings.map((item) => item.binding))
+  pushBindingAssignments(assignments, 'pivot.default.set-origin', 'Pivot Default: Set Origin', pivot.setOriginBindings)
+  pushBindingAssignments(assignments, 'pivot.default.release-origin', 'Pivot Default: Release Origin', pivot.releaseOriginBindings)
+
+  pivot.profiles.forEach((profile, index) => {
     const context = profile.name.trim() || `Profile ${index + 1}`
-    assignments.push(
-      { id: `pivot.${profile.id}.activate`, label: `Pivot ${context}: Activate`, binding: profile.activationBinding },
-      { id: `pivot.${profile.id}.set-origin`, label: `Pivot ${context}: Set Origin`, binding: profile.setOriginBinding },
-      { id: `pivot.${profile.id}.release-origin`, label: `Pivot ${context}: Release Origin`, binding: profile.releaseOriginBinding },
-    )
+    pushBindingAssignments(assignments, `pivot.${profile.id}.activate`, `Pivot ${context}: Activate`, profile.activationBindings.map((item) => item.binding))
+    pushBindingAssignments(assignments, `pivot.${profile.id}.set-origin`, `Pivot ${context}: Set Origin`, profile.setOriginBindings)
+    pushBindingAssignments(assignments, `pivot.${profile.id}.release-origin`, `Pivot ${context}: Release Origin`, profile.releaseOriginBindings)
   })
 
   return assignments
@@ -923,43 +1083,75 @@ export function savedBindingConflictWarnings(
     }))
 }
 
-export function pivotBindingConflictWarnings(
-  mode: ActivationMode,
-  activationBinding: InputBinding,
-  setOriginBinding: InputBinding,
-  releaseOriginBinding: InputBinding,
-): PivotBindingWarning[] {
-  const activationSetsOrigin = bindingsShareInput(activationBinding, setOriginBinding)
-  const activationReleasesOrigin = bindingsShareInput(activationBinding, releaseOriginBinding)
-  const setAlsoReleasesOrigin = bindingsShareInput(setOriginBinding, releaseOriginBinding)
-  const action = mode === 'toggle' ? 'Every Toggle press, including deactivation,' : 'Every press'
+function firstSharedBinding(left: InputBinding[], right: InputBinding[]): InputBinding | undefined {
+  for (const binding of left) {
+    const match = right.find((candidate) => bindingsShareInput(binding, candidate))
+    if (match) return binding
+  }
+  return undefined
+}
 
-  if (activationSetsOrigin && activationReleasesOrigin) {
+function duplicateBindingWarnings(actionLabel: string, bindings: InputBinding[]): PivotBindingWarning[] {
+  const seen = new Set<string>()
+  const warnings: PivotBindingWarning[] = []
+  for (const binding of bindings) {
+    const key = bindingInputKey(binding)
+    if (!key) continue
+    if (seen.has(key)) {
+      warnings.push({
+        title: `${bindingLabel(binding)} is duplicated`,
+        message: `${actionLabel} contains the same physical input more than once. The duplicate is redundant and only the first copy is used at runtime.`,
+      })
+    } else {
+      seen.add(key)
+    }
+  }
+  return warnings
+}
+
+export function pivotBindingConflictWarnings(
+  alwaysActive: boolean,
+  activationBindings: PivotActivationBinding[],
+  setOriginBindings: InputBinding[],
+  releaseOriginBindings: InputBinding[],
+): PivotBindingWarning[] {
+  const physicalActivationBindings = activationBindings.map((item) => item.binding)
+  const activationSetsOrigin = firstSharedBinding(physicalActivationBindings, setOriginBindings)
+  const activationReleasesOrigin = firstSharedBinding(physicalActivationBindings, releaseOriginBindings)
+  const setAlsoReleasesOrigin = firstSharedBinding(setOriginBindings, releaseOriginBindings)
+  const action = alwaysActive ? 'Every suspend-control press' : 'Every activation-control press'
+
+  if (activationSetsOrigin && activationReleasesOrigin
+      && bindingsShareInput(activationSetsOrigin, activationReleasesOrigin)) {
     return [{
       title: 'One binding controls three conflicting actions',
-      message: `Activation, Set Origin, and Release Origin all use ${bindingLabel(activationBinding)}. ${action} requests a new neutral forward and then immediately clears it, so the origin is not captured. Give Set Origin or Release Origin its own binding.`,
+      message: `Activation, Set Origin, and Release Origin all use ${bindingLabel(activationSetsOrigin)}. ${action} requests a new neutral forward and then immediately clears it, so the origin is not captured. Give Set Origin or Release Origin its own binding.`,
     }]
   }
 
-  const warnings: PivotBindingWarning[] = []
+  const warnings: PivotBindingWarning[] = [
+    ...duplicateBindingWarnings(alwaysActive ? 'Suspend controls' : 'Activation', physicalActivationBindings),
+    ...duplicateBindingWarnings('Set Origin', setOriginBindings),
+    ...duplicateBindingWarnings('Release Origin', releaseOriginBindings),
+  ]
   if (activationSetsOrigin) {
     warnings.push({
       title: 'Activation also sets the origin',
-      message: `Activation and Set Origin both use ${bindingLabel(activationBinding)}. ${action} recaptures the current head direction as Pivot's neutral forward. Keep this only if it is intentional; otherwise give Set Origin its own binding, normally your in-game recenter control.`,
+      message: `Activation and Set Origin both use ${bindingLabel(activationSetsOrigin)}. ${action} recaptures the current head direction as Pivot's neutral forward. Keep this only if it is intentional; otherwise give Set Origin its own binding, normally your in-game recenter control.`,
     })
   }
 
   if (activationReleasesOrigin) {
     warnings.push({
       title: 'Activation also releases the origin',
-      message: `Activation and Release Origin both use ${bindingLabel(activationBinding)}. ${action} clears any captured Pivot origin. Keep this only if it is intentional; otherwise give Release Origin its own binding.`,
+      message: `Activation and Release Origin both use ${bindingLabel(activationReleasesOrigin)}. ${action} clears any captured Pivot origin. Keep this only if it is intentional; otherwise give Release Origin its own binding.`,
     })
   }
 
   if (setAlsoReleasesOrigin) {
     warnings.push({
       title: 'Set Origin is immediately canceled',
-      message: `Set Origin and Release Origin both use ${bindingLabel(setOriginBinding)}. A press requests a new neutral forward and then immediately clears it, so the origin is not captured. Give one action a different binding.`,
+      message: `Set Origin and Release Origin both use ${bindingLabel(setAlsoReleasesOrigin)}. A press requests a new neutral forward and then immediately clears it, so the origin is not captured. Give one action a different binding.`,
     })
   }
 
@@ -1098,10 +1290,10 @@ function normalizeVectorXRConfig(value: unknown): VectorXRConfig {
       pivotxr: {
         enabled: normalizeBoolean(pivotxr.enabled, fallback.modules.pivotxr.enabled),
         defaults: pivotDefaults,
-        activationMode: normalizeActivationMode(pivotxr.activationMode),
-        activationBinding: normalizeInputBinding(pivotxr.activationBinding, fallback.modules.pivotxr.activationBinding),
-        setOriginBinding: normalizeInputBinding(pivotxr.setOriginBinding, defaultNoneBinding()),
-        releaseOriginBinding: normalizeInputBinding(pivotxr.releaseOriginBinding, defaultNoneBinding()),
+        alwaysActive: normalizeBoolean(pivotxr.alwaysActive, normalizeActivationMode(pivotxr.activationMode) === 'alwaysOn'),
+        activationBindings: normalizePivotActivationBindings(pivotxr.activationBindings, pivotxr.activationBinding, normalizeActivationMode(pivotxr.activationMode)),
+        setOriginBindings: normalizeInputBindings(pivotxr.setOriginBindings, pivotxr.setOriginBinding),
+        releaseOriginBindings: normalizeInputBindings(pivotxr.releaseOriginBindings, pivotxr.releaseOriginBinding),
         profiles: pivotProfileValues.map((profileValue) => {
           const profile = isRecord(profileValue) ? profileValue : {}
           const settings = normalizePivotXRSettings(profile.settings, pivotDefaults)
@@ -1114,10 +1306,10 @@ function normalizeVectorXRConfig(value: unknown): VectorXRConfig {
             name: normalizeString(profile.name, 'New Profile'),
             enabled: normalizeBoolean(profile.enabled, true),
             applicationIds,
-            activationMode,
-            activationBinding: normalizeInputBinding(profile.activationBinding, defaultNoneBinding()),
-            setOriginBinding: normalizeInputBinding(profile.setOriginBinding, defaultNoneBinding()),
-            releaseOriginBinding: normalizeInputBinding(profile.releaseOriginBinding, defaultNoneBinding()),
+            alwaysActive: normalizeBoolean(profile.alwaysActive, activationMode === 'alwaysOn'),
+            activationBindings: normalizePivotActivationBindings(profile.activationBindings, profile.activationBinding, activationMode),
+            setOriginBindings: normalizeInputBindings(profile.setOriginBindings, profile.setOriginBinding),
+            releaseOriginBindings: normalizeInputBindings(profile.releaseOriginBindings, profile.releaseOriginBinding),
             settings,
           }
         }),

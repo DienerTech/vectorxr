@@ -635,6 +635,36 @@ XrResult XRAPI_CALL xrCreateApiLayerInstance(const XrInstanceCreateInfo* instanc
         diagnostics.eye_gaze_probe_state = ClassifyEyeGazeProbe(
             extension_scan.complete,
             extension_scan.Contains(XR_EXT_EYE_GAZE_INTERACTION_EXTENSION_NAME));
+
+        std::vector<std::string_view> advertised_extensions;
+        advertised_extensions.reserve(extension_scan.names.size());
+        for (const std::string& extension_name : extension_scan.names) {
+            advertised_extensions.emplace_back(extension_name);
+        }
+
+        std::vector<std::string_view> corroborating_forwarded_extensions;
+        corroborating_forwarded_extensions.reserve(base_downstream_extensions.size());
+        for (const char* extension_name : base_downstream_extensions) {
+            if (!extension_name ||
+                std::string_view(extension_name) == XR_EXT_EYE_GAZE_INTERACTION_EXTENSION_NAME) {
+                continue;
+            }
+            corroborating_forwarded_extensions.emplace_back(extension_name);
+            if (extension_scan.complete && !extension_scan.Contains(extension_name)) {
+                if (!diagnostics.pre_instance_missing_forwarded_extensions.empty()) {
+                    diagnostics.pre_instance_missing_forwarded_extensions += ' ';
+                }
+                diagnostics.pre_instance_missing_forwarded_extensions += extension_name;
+                ++diagnostics.pre_instance_missing_forwarded_extension_count;
+            }
+        }
+
+        diagnostics.eye_gaze_probe_structurally_unreliable =
+            diagnostics.eye_gaze_probe_state == EyeGazeProbeState::kAbsent &&
+            IsRuntimeExtensionProbeStructurallyUnreliable(
+                extension_scan.complete,
+                advertised_extensions,
+                corroborating_forwarded_extensions);
     }
 
     std::vector<const char*> first_downstream_extensions = base_downstream_extensions;
@@ -645,6 +675,7 @@ XrResult XRAPI_CALL xrCreateApiLayerInstance(const XrInstanceCreateInfo* instanc
         forward_varjo_quad_extensions,
         ExtensionListContains(first_downstream_extensions, XR_EXT_EYE_GAZE_INTERACTION_EXTENSION_NAME),
         diagnostics.eye_gaze_probe_state,
+        diagnostics.eye_gaze_probe_structurally_unreliable,
         diagnostics.eye_gaze_probe_known_unreliable,
     });
     diagnostics.eye_gaze_request_reason = eye_gaze_request.reason;

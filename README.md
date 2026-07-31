@@ -42,13 +42,22 @@ Depth profiles tune world scale and the convergence plane globally or per applic
 
 ![VectorXR Pivot tab](docs/screenshots/pivot.jpg)
 
-Pivot profiles configure enhanced yaw and pitch rotation, activation behavior, smoothing, deadzones, and keyboard or device bindings.
+Pivot profiles configure continuous or stepped yaw and pitch assistance, per-direction tuning,
+bounded step glides, activation behavior, and multiple keyboard or device bindings.
 
 ### Quadviews
 
 ![VectorXR Quadviews tab](docs/screenshots/quadviews.jpg)
 
-Quadviews configures foveated-style rendering with a live performance budget that estimates render cost before you launch a game.
+Quadviews configures foveated-style rendering with a live performance budget that estimates render cost before you launch a game. It is not a universal injector: the game must already request OpenXR quad-view rendering. DCS is the primary tested title; other D3D11 titles may work only when they implement the same quad-view functionality. Likely, but unconfirmed, candidates include **Pavlov VR**, **VAIL VR**, **The 7th Guest VR**, and **Kayak VR: Mirage**.
+
+For the recommended DCS + synthesized VectorXR setup:
+
+- Turn on **Use Quad View** in DCS. Turn on **Use Eye Tracking** when you want gaze-tracked focus.
+- Keep the VectorXR OpenXR layer and the relevant VectorXR Quadviews profile enabled.
+- Use one software quadviews provider at a time. Disable `XR_APILAYER_MBUCCHIA_quad_views_foveated`; on Pimax, also turn **Native Pimax Quad Views** off. Native Varjo Quadviews remains runtime-driven.
+
+Controls marked **Restart required** can be saved during play, but DCS must be fully restarted for their complete effect. See the usage guide's [live-update reference and Quadviews FAQ](docs/usage.md#live-tuning-and-restarts) for details, alternative layer setups, and common setup pitfalls.
 
 ### Turbo
 

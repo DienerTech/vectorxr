@@ -12,6 +12,7 @@
 #include "depthxr/input_devices.h"
 #include "depthxr/logger.h"
 #include "depthxr/pivot_routing.h"
+#include "depthxr/pivot_step.h"
 #include "depthxr/quadviews_recovery.h"
 #include "depthxr/quadviews_sizing.h"
 #include "depthxr/runtime_pacing.h"
@@ -143,11 +144,51 @@ void TestParseConfig() {
     Expect(result.document.depthxr.profiles.size() == 1, "DepthXR profile count mismatch");
     Expect(result.document.depthxr.profiles[0].application_ids[0] == "game", "DepthXR profile application id mismatch");
     Expect(result.document.pivotxr.profiles.size() == 1, "PivotXR profile count mismatch");
-    Expect(result.document.pivotxr.profiles[0].activation_binding.chord[0] == "F8", "PivotXR profile activation binding mismatch");
+    Expect(result.document.pivotxr.profiles[0].activation_bindings[0].binding.chord[0] == "F8", "PivotXR profile activation binding mismatch");
     Expect(std::abs(result.document.pivotxr.profiles[0].settings.yaw_max_extra_degrees - 30.0) < 0.0001,
            "PivotXR profile yaw clamp mismatch");
     Expect(std::abs(result.document.pivotxr.profiles[0].settings.pitch_rotation_multiplier - 1.2) < 0.0001,
            "PivotXR profile pitch multiplier mismatch");
+}
+
+void TestPivotActivationBindingModel() {
+    const std::string json = R"json(
+{
+  "version": 3,
+  "core": { "enabled": true, "logLevel": "info", "logRetentionFiles": 7 },
+  "applications": [],
+  "modules": {
+    "depthxr": {},
+    "pivotxr": {
+      "enabled": true,
+      "alwaysActive": true,
+      "activationBindings": [
+        {
+          "behavior": "toggle",
+          "binding": { "type": "keyboard", "chord": ["F8"] }
+        },
+        {
+          "behavior": "hold",
+          "binding": { "type": "keyboard", "chord": ["F9"] }
+        }
+      ],
+      "profiles": []
+    }
+  }
+}
+)json";
+
+    const depthxr::ParseResult result = depthxr::ParseConfig(json);
+    Expect(result.ok, "Config parser rejected per-binding Pivot activation model: " + result.error);
+    Expect(result.document.pivotxr.always_active, "Pivot always-active baseline was not parsed");
+    Expect(result.document.pivotxr.activation_bindings.size() == 2,
+           "Pivot mixed activation binding count mismatch");
+    Expect(result.document.pivotxr.activation_bindings[0].behavior == depthxr::PivotActivationBehavior::Toggle &&
+               result.document.pivotxr.activation_bindings[0].binding.chord[0] == "F8",
+           "Pivot Toggle binding was not parsed");
+    Expect(result.document.pivotxr.activation_bindings[1].behavior == depthxr::PivotActivationBehavior::Hold &&
+               result.document.pivotxr.activation_bindings[1].binding.chord[0] == "F9",
+           "Pivot Hold binding was not parsed");
 }
 
 void TestLogLevelCompatibility() {
@@ -261,9 +302,9 @@ void TestResolveRuntimeConfig() {
     Expect(resolved.pivotxr.enabled, "PivotXR module enable was not resolved");
     Expect(resolved.pivotxr.profiles.size() == 1, "PivotXR resolved candidate count mismatch");
     const depthxr::PivotXrResolvedProfile& pivot_profile = resolved.pivotxr.profiles[0];
-    Expect(pivot_profile.activation_mode == depthxr::ActivationMode::Hold, "PivotXR activation mode mismatch");
-    Expect(pivot_profile.activation_binding.chord.size() == 2, "PivotXR activation chord size mismatch");
-    Expect(pivot_profile.activation_binding.chord[1] == "Space", "PivotXR activation binding was not resolved");
+    Expect(!pivot_profile.always_active && pivot_profile.activation_bindings[0].behavior == depthxr::PivotActivationBehavior::Hold, "PivotXR activation mode mismatch");
+    Expect(pivot_profile.activation_bindings[0].binding.chord.size() == 2, "PivotXR activation chord size mismatch");
+    Expect(pivot_profile.activation_bindings[0].binding.chord[1] == "Space", "PivotXR activation binding was not resolved");
     Expect(std::abs(pivot_profile.yaw_max_extra_degrees - 22.0) < 0.0001, "PivotXR yaw clamp mismatch");
     Expect(std::abs(pivot_profile.pitch_rotation_multiplier - 1.35) < 0.0001,
            "PivotXR pitch multiplier mismatch");
@@ -402,8 +443,8 @@ void TestPivotProfileResolution() {
     Expect(resolved.pivotxr.enabled, "PivotXR should be enabled for DCS");
     Expect(resolved.pivotxr.profiles.size() == 1, "PivotXR resolved candidate count mismatch");
     const depthxr::PivotXrResolvedProfile& dcs_profile = resolved.pivotxr.profiles[0];
-    Expect(dcs_profile.activation_mode == depthxr::ActivationMode::Toggle, "PivotXR activation mode mismatch");
-    Expect(dcs_profile.activation_binding.chord[0] == "F8", "PivotXR activation binding mismatch");
+    Expect(!dcs_profile.always_active && dcs_profile.activation_bindings[0].behavior == depthxr::PivotActivationBehavior::Toggle, "PivotXR activation mode mismatch");
+    Expect(dcs_profile.activation_bindings[0].binding.chord[0] == "F8", "PivotXR activation binding mismatch");
     Expect(std::abs(dcs_profile.yaw_rotation_multiplier - 2.0) < 0.0001, "PivotXR yaw multiplier mismatch");
     Expect(std::abs(dcs_profile.yaw_max_extra_degrees - 60.0) < 0.0001, "PivotXR yaw clamp mismatch");
     Expect(std::abs(dcs_profile.pitch_rotation_multiplier - 1.5) < 0.0001, "PivotXR pitch multiplier mismatch");
@@ -412,8 +453,8 @@ void TestPivotProfileResolution() {
     const depthxr::ResolvedRuntimeConfig resolved_other = depthxr::ResolveRuntimeConfig(result.document, "other.exe");
     Expect(resolved_other.pivotxr.enabled, "PivotXR default profile should resolve for exe with no matching profile");
     Expect(resolved_other.pivotxr.profiles.size() == 1, "PivotXR default candidate count mismatch");
-    Expect(resolved_other.pivotxr.profiles[0].activation_binding.type == depthxr::InputBindingType::None,
-           "PivotXR default activation binding should fall back to none");
+    Expect(resolved_other.pivotxr.profiles[0].activation_bindings.empty(),
+           "PivotXR default activation bindings should fall back to an empty list");
     Expect(std::abs(resolved_other.pivotxr.profiles[0].yaw_rotation_multiplier - 1.5) < 0.0001,
            "PivotXR default yaw multiplier mismatch");
 }
@@ -443,7 +484,11 @@ void TestPivotMultiProfileResolution() {
           "applicationIds": ["dcs"],
           "enabled": true,
           "activationMode": "toggle",
-          "activationBinding": { "type": "keyboard", "chord": ["F8"] },
+          "activationBindings": [
+            { "type": "keyboard", "chord": ["F8"] },
+            { "type": "keyboard", "chord": ["F10"] },
+            { "type": "keyboard", "chord": ["F8"] }
+          ],
           "settings": { "rotationMultiplier": 1.5 }
         },
         {
@@ -451,7 +496,7 @@ void TestPivotMultiProfileResolution() {
           "name": "DCS Disabled",
           "applicationIds": ["dcs"],
           "enabled": false,
-          "activationBinding": { "type": "keyboard", "chord": ["F10"] },
+          "activationBinding": { "type": "keyboard", "chord": ["F11"] },
           "settings": { "rotationMultiplier": 3.0 }
         },
         {
@@ -460,14 +505,20 @@ void TestPivotMultiProfileResolution() {
           "applicationIds": ["dcs"],
           "enabled": true,
           "activationMode": "hold",
-          "activationBinding": { "type": "keyboard", "chord": ["F9"] },
+          "activationBindings": [
+            { "type": "keyboard", "chord": ["F8"] },
+            { "type": "keyboard", "chord": ["F9"] }
+          ],
           "settings": { "rotationMultiplier": 2.5 }
         },
         {
           "name": "DCS Shadowed",
           "applicationIds": ["dcs"],
           "enabled": true,
-          "activationBinding": { "type": "keyboard", "chord": ["F8"] },
+          "activationBindings": [
+            { "type": "keyboard", "chord": ["F8"] },
+            { "type": "keyboard", "chord": ["F10"] }
+          ],
           "settings": { "rotationMultiplier": 4.0 }
         },
         {
@@ -475,7 +526,10 @@ void TestPivotMultiProfileResolution() {
           "applicationIds": ["dcs"],
           "enabled": true,
           "activationMode": "alwaysOn",
-          "activationBinding": { "type": "keyboard", "chord": ["F8"] },
+          "activationBindings": [
+            { "type": "keyboard", "chord": ["F8"] },
+            { "type": "keyboard", "chord": ["F12"] }
+          ],
           "settings": { "rotationMultiplier": 3.0 }
         }
       ]
@@ -490,21 +544,27 @@ void TestPivotMultiProfileResolution() {
 
     const depthxr::ResolvedRuntimeConfig resolved = depthxr::ResolveRuntimeConfig(result.document, "DCS.exe");
     Expect(resolved.pivotxr.enabled, "PivotXR should be enabled when custom profiles match");
-    // Disabled and duplicate-F8 toggle profiles are skipped. The always-on
-    // profile remains eligible automatically, but its colliding optional
-    // suspend/resume binding is stripped from the resolved candidate.
+    // Disabled profiles and profiles whose entire binding list is shadowed are skipped.
+    // Individual colliding bindings are stripped while each profile's remaining
+    // independent bindings stay available.
     Expect(resolved.pivotxr.profiles.size() == 3, "PivotXR multi-profile candidate count mismatch");
+    Expect(resolved.pivotxr.profiles[0].activation_bindings.size() == 2,
+           "First candidate should retain both independent bindings and prune its duplicate");
     Expect(resolved.pivotxr.profiles[0].name == "DCS Mild", "Candidate priority order mismatch (first)");
     Expect(resolved.pivotxr.profiles[1].name == "DCS Strong", "Candidate priority order mismatch (second)");
     Expect(std::abs(resolved.pivotxr.profiles[1].yaw_rotation_multiplier - 2.5) < 0.0001,
            "Second candidate settings mismatch");
-    Expect(resolved.pivotxr.profiles[1].activation_mode == depthxr::ActivationMode::Hold,
+    Expect(!resolved.pivotxr.profiles[1].always_active && resolved.pivotxr.profiles[1].activation_bindings[0].behavior == depthxr::PivotActivationBehavior::Hold,
            "Second candidate activation mode mismatch");
+    Expect(resolved.pivotxr.profiles[1].activation_bindings.size() == 1 &&
+               resolved.pivotxr.profiles[1].activation_bindings[0].binding.chord[0] == "F9",
+           "Second candidate should retain only its unshadowed activation binding");
     Expect(resolved.pivotxr.profiles[2].name == "DCS Always", "Candidate priority order mismatch (third)");
-    Expect(resolved.pivotxr.profiles[2].activation_mode == depthxr::ActivationMode::AlwaysOn,
+    Expect(resolved.pivotxr.profiles[2].always_active,
            "Shadowed always-on candidate activation mode mismatch");
-    Expect(resolved.pivotxr.profiles[2].activation_binding.type == depthxr::InputBindingType::None,
-           "Shadowed always-on suspend/resume binding should resolve to none");
+    Expect(resolved.pivotxr.profiles[2].activation_bindings.size() == 1 &&
+               resolved.pivotxr.profiles[2].activation_bindings[0].binding.chord[0] == "F12",
+           "Always-on candidate should retain its unshadowed suspend/resume binding");
 }
 
 void TestPivotResponseModeAndAdvancedAxes() {
@@ -549,6 +609,15 @@ void TestPivotResponseModeAndAdvancedAxes() {
           "activationBinding": { "type": "keyboard", "chord": ["F9"] },
           "settings": {
             "advancedAxes": true,
+            "responseMode": "stepped",
+            "stepGlideMode": "instant",
+            "stepGlideSeconds": 0.0,
+            "yawStep": { "deadzoneDegrees": 7.0, "triggerDegrees": 11.0, "amountDegrees": 17.0, "hysteresisDegrees": 3.0, "maxExtraDegrees": 80.0 },
+            "pitchStep": { "deadzoneDegrees": 9.0, "triggerDegrees": 13.0, "amountDegrees": 19.0, "hysteresisDegrees": 4.0, "maxExtraDegrees": 60.0 },
+            "yawLeftStep": { "amountDegrees": 21.0 },
+            "yawRightStep": { "triggerDegrees": 14.0 },
+            "pitchUpStep": { "maxExtraDegrees": 45.0 },
+            "pitchDownStep": { "deadzoneDegrees": 12.0 },
             "yawLeft": { "rotationMultiplier": 2.0, "deadzoneDegrees": 180.0, "maxExtraDegrees": 90.0 },
             "yawRight": { "rotationMultiplier": 1.2 },
             "pitchUp": { "rotationMultiplier": 1.8, "deadzoneDegrees": 90.0 },
@@ -567,13 +636,21 @@ void TestPivotResponseModeAndAdvancedAxes() {
     const depthxr::ResolvedRuntimeConfig stepped = depthxr::ResolveRuntimeConfig(result.document, "DCS.exe");
     Expect(stepped.pivotxr.profiles.size() == 1, "Stepped candidate count mismatch");
     const depthxr::PivotXrResolvedProfile& stepped_profile = stepped.pivotxr.profiles[0];
-    Expect(stepped_profile.activation_mode == depthxr::ActivationMode::AlwaysOn,
+    Expect(stepped_profile.always_active,
            "alwaysOn activation mode was not parsed");
     Expect(stepped_profile.response_mode == depthxr::PivotResponseMode::Stepped,
            "Stepped response mode was not resolved");
-    Expect(std::abs(stepped_profile.step_trigger_degrees - 12.0) < 0.0001, "Step trigger mismatch");
-    Expect(std::abs(stepped_profile.step_amount_degrees - 15.0) < 0.0001, "Step amount mismatch");
-    Expect(std::abs(stepped_profile.step_hysteresis_degrees - 5.0) < 0.0001, "Step hysteresis mismatch");
+    Expect(std::abs(stepped_profile.yaw_step_positive.trigger_degrees - 12.0) < 0.0001,
+           "Legacy trigger did not migrate to yaw");
+    Expect(std::abs(stepped_profile.pitch_step_positive.trigger_degrees - 12.0) < 0.0001,
+           "Legacy trigger did not migrate to pitch");
+    Expect(std::abs(stepped_profile.yaw_step_negative.amount_degrees - 15.0) < 0.0001,
+           "Legacy amount did not migrate to both yaw directions");
+    Expect(std::abs(stepped_profile.pitch_step_negative.hysteresis_degrees - 5.0) < 0.0001,
+           "Legacy hysteresis did not migrate to both pitch directions");
+    Expect(stepped_profile.step_glide_mode == depthxr::PivotStepGlideMode::Glide &&
+               std::abs(stepped_profile.step_glide_seconds - 0.05) < 0.0001,
+           "Legacy stepped smoothing did not migrate to glide");
 
     const depthxr::ResolvedRuntimeConfig advanced = depthxr::ResolveRuntimeConfig(result.document, "MSFS.exe");
     Expect(advanced.pivotxr.profiles.size() == 1, "Advanced candidate count mismatch");
@@ -593,12 +670,104 @@ void TestPivotResponseModeAndAdvancedAxes() {
     Expect(std::abs(advanced_profile.pitch_negative.max_extra_degrees - 30.0) < 0.0001,
            "Advanced pitch-down max extra mismatch");
 
+    Expect(advanced_profile.response_mode == depthxr::PivotResponseMode::Stepped,
+           "Advanced stepped response mode mismatch");
+    Expect(advanced_profile.step_glide_mode == depthxr::PivotStepGlideMode::Instant &&
+               std::abs(advanced_profile.step_glide_seconds) < 0.0001,
+           "Canonical instant glide settings mismatch");
+    Expect(std::abs(advanced_profile.yaw_step_positive.amount_degrees - 21.0) < 0.0001 &&
+               std::abs(advanced_profile.yaw_step_positive.trigger_degrees - 11.0) < 0.0001,
+           "Yaw-left step override did not inherit the remaining basic yaw fields");
+    Expect(std::abs(advanced_profile.yaw_step_negative.trigger_degrees - 14.0) < 0.0001 &&
+               std::abs(advanced_profile.yaw_step_negative.amount_degrees - 17.0) < 0.0001,
+           "Yaw-right step override did not inherit the remaining basic yaw fields");
+    Expect(std::abs(advanced_profile.pitch_step_positive.max_extra_degrees - 45.0) < 0.0001 &&
+               std::abs(advanced_profile.pitch_step_negative.deadzone_degrees - 12.0) < 0.0001,
+           "Advanced pitch step overrides mismatch");
+
     // Symmetric profiles collapse direction tunings to the yaw/pitch values.
     Expect(std::abs(stepped_profile.yaw_positive.deadzone_degrees - 180.0) < 0.0001,
            "Symmetric collapse should mirror yaw deadzone into direction tunings");
     Expect(std::abs(stepped_profile.pitch_positive.deadzone_degrees - 90.0) < 0.0001,
            "Symmetric collapse should mirror pitch deadzone into direction tunings");
 }
+
+void TestPivotSteppedGlideMath() {
+    const auto radians = [](double degrees) {
+        return degrees * 3.14159265358979323846 / 180.0;
+    };
+    const depthxr::PivotStepTuning positive{10.0, 10.0, 15.0, 4.0, 60.0};
+    const depthxr::PivotStepTuning negative{8.0, 12.0, 25.0, 3.0, 75.0};
+
+    int step = 0;
+    double displayed = 0.0;
+    depthxr::PivotStepGlideState state;
+    depthxr::UpdatePivotSteppedExtraAngleRadians(radians(20.0), positive, negative,
+                                                 depthxr::PivotStepGlideMode::Instant, 0.0, 0.0,
+                                                 step, displayed, state);
+    Expect(step == 1 && std::abs(displayed - radians(15.0)) < 0.000001,
+           "Instant stepped response did not land exactly on its target");
+
+    depthxr::UpdatePivotSteppedExtraAngleRadians(radians(17.0), positive, negative,
+                                                 depthxr::PivotStepGlideMode::Instant, 0.0, 0.0,
+                                                 step, displayed, state);
+    Expect(step == 1, "Step hysteresis released above the bounded release threshold");
+    depthxr::UpdatePivotSteppedExtraAngleRadians(radians(15.0), positive, negative,
+                                                 depthxr::PivotStepGlideMode::Instant, 0.0, 0.0,
+                                                 step, displayed, state);
+    Expect(step == 0, "Step hysteresis did not release below its threshold");
+
+    depthxr::UpdatePivotSteppedExtraAngleRadians(radians(-20.0), positive, negative,
+                                                 depthxr::PivotStepGlideMode::Instant, 0.0, 0.0,
+                                                 step, displayed, state);
+    Expect(step == -1 && std::abs(displayed - radians(-25.0)) < 0.000001,
+           "Negative direction did not use its independent trigger and amount");
+
+    const auto glide_at = [&](double frame_seconds, int frames) {
+        int glide_step = 0;
+        double glide_displayed = 0.0;
+        depthxr::PivotStepGlideState glide_state;
+        for (int frame = 0; frame < frames; ++frame) {
+            depthxr::UpdatePivotSteppedExtraAngleRadians(radians(20.0), positive, negative,
+                                                         depthxr::PivotStepGlideMode::Glide, 0.12,
+                                                         frame_seconds, glide_step,
+                                                         glide_displayed, glide_state);
+        }
+        return glide_displayed;
+    };
+    const double sixty_hz_midpoint = glide_at(0.01, 6);
+    const double thirty_hz_midpoint = glide_at(0.02, 3);
+    Expect(std::abs(sixty_hz_midpoint - thirty_hz_midpoint) < 0.000001,
+           "Step glide changed with frame rate at the same elapsed time");
+    Expect(std::abs(glide_at(0.02, 6) - radians(15.0)) < 0.000001,
+           "Step glide did not settle exactly on target");
+
+    step = 0;
+    displayed = 0.0;
+    state = {};
+    depthxr::UpdatePivotSteppedExtraAngleRadians(radians(20.0), positive, negative,
+                                                 depthxr::PivotStepGlideMode::Glide, 0.12, 0.04,
+                                                 step, displayed, state);
+    const double before_retarget = displayed;
+    depthxr::UpdatePivotSteppedExtraAngleRadians(radians(30.0), positive, negative,
+                                                 depthxr::PivotStepGlideMode::Glide, 0.12, 0.0,
+                                                 step, displayed, state);
+    Expect(step == 2 && std::abs(displayed - before_retarget) < 0.000001 &&
+               std::abs(state.start_radians - before_retarget) < 0.000001,
+           "Mid-glide retarget did not start from the currently displayed angle");
+    double previous = displayed;
+    for (int frame = 0; frame < 6; ++frame) {
+        depthxr::UpdatePivotSteppedExtraAngleRadians(radians(30.0), positive, negative,
+                                                     depthxr::PivotStepGlideMode::Glide, 0.12, 0.02,
+                                                     step, displayed, state);
+        Expect(displayed >= previous && displayed <= radians(30.0) + 0.000001,
+               "Retargeted step glide was non-monotonic or overshot");
+        previous = displayed;
+    }
+    Expect(std::abs(displayed - radians(30.0)) < 0.000001,
+           "Retargeted step glide did not settle exactly on target");
+}
+
 
 void TestTurboModuleResolution() {
     const std::string json = R"json(
@@ -1107,7 +1276,7 @@ void TestEnabledProfileOverridesDisabledDefault() {
            "DepthXR custom profile should override disabled default");
     Expect(resolved.pivotxr.enabled, "Enabled custom profile should turn PivotXR on when default is off");
     Expect(resolved.pivotxr.profiles.size() == 1, "PivotXR opt-in candidate count mismatch");
-    Expect(resolved.pivotxr.profiles[0].activation_mode == depthxr::ActivationMode::Hold,
+    Expect(!resolved.pivotxr.profiles[0].always_active && resolved.pivotxr.profiles[0].activation_bindings[0].behavior == depthxr::PivotActivationBehavior::Hold,
            "PivotXR custom profile activation mode mismatch");
     Expect(std::abs(resolved.pivotxr.profiles[0].yaw_rotation_multiplier - 2.1) < 0.0001,
            "PivotXR custom profile should override disabled default");
@@ -1721,6 +1890,31 @@ void TestEyeGazeExtensionCompatibilityPolicy() {
                R"(C:\Program Files\Virtual Desktop Streamer\OpenXR\virtualdesktop-openxr.json)"),
            "VDXR should use the generic indeterminate-probe policy instead of a manifest exception");
 
+    const std::string_view d3d11_only[] = {"XR_KHR_D3D11_enable"};
+    const std::string_view ordinary_forwarded[] = {
+        "XR_KHR_D3D11_enable",
+        "XR_KHR_visibility_mask",
+        "XR_EXT_hand_tracking",
+    };
+    const std::string_view complete_advertisement[] = {
+        "XR_KHR_D3D11_enable",
+        "XR_KHR_visibility_mask",
+        "XR_EXT_hand_tracking",
+        "XR_EXT_debug_utils",
+    };
+    Expect(depthxr::IsRuntimeExtensionProbeStructurallyUnreliable(
+               true, std::span<const std::string_view>{}, ordinary_forwarded),
+           "A completed empty Pimax-style extension scan must be treated as structurally unreliable");
+    Expect(depthxr::IsRuntimeExtensionProbeStructurallyUnreliable(
+               true, d3d11_only, ordinary_forwarded),
+           "A partial scan missing extensions already being forwarded must be treated as unreliable");
+    Expect(!depthxr::IsRuntimeExtensionProbeStructurallyUnreliable(
+               true, complete_advertisement, ordinary_forwarded),
+           "A completed scan containing every forwarded extension should remain credible");
+    Expect(!depthxr::IsRuntimeExtensionProbeStructurallyUnreliable(
+               false, std::span<const std::string_view>{}, ordinary_forwarded),
+           "An incomplete scan is indeterminate and should not also be labeled structurally unreliable");
+
     Expect(depthxr::ClassifyEyeGazeProbe(false, false) == EyeGazeProbeState::kIndeterminate,
            "An extension scan that could not complete must remain indeterminate");
     Expect(depthxr::ClassifyEyeGazeProbe(false, true) == EyeGazeProbeState::kIndeterminate,
@@ -1754,6 +1948,11 @@ void TestEyeGazeExtensionCompatibilityPolicy() {
     expect_decision(input, false, EyeGazeRequestReason::kReliableNegative,
                     "A completed negative probe on an ordinary runtime should be trusted");
 
+    input.pre_instance_probe_structurally_unreliable = true;
+    expect_decision(input, true, EyeGazeRequestReason::kProbeInconsistent,
+                    "A structurally inconsistent negative should optimistically request gaze");
+
+    input.pre_instance_probe_structurally_unreliable = false;
     input.pre_instance_probe_known_unreliable = true;
     expect_decision(input, true, EyeGazeRequestReason::kRuntimeWorkaround,
                     "A completed false-negative on a known runtime should retain the workaround");
@@ -1780,6 +1979,8 @@ void TestEyeGazeExtensionCompatibilityPolicy() {
            "Probe state names must remain stable for startup diagnostics");
     Expect(depthxr::EyeGazeRequestReasonName(EyeGazeRequestReason::kProbeIndeterminate) ==
                "probe-indeterminate" &&
+               depthxr::EyeGazeRequestReasonName(EyeGazeRequestReason::kProbeInconsistent) ==
+                   "probe-inconsistent" &&
                depthxr::EyeGazeRequestReasonName(EyeGazeRequestReason::kRuntimeWorkaround) ==
                    "runtime-workaround" &&
                depthxr::EyeGazeRequestReasonName(EyeGazeRequestReason::kReliableNegative) ==
@@ -1812,6 +2013,17 @@ void TestTurboSteamVrQuadviewsCompatibilityPolicy() {
     psvr2.executable_name = "FlightSimulator.exe";
     Expect(!depthxr::ShouldBlockTurboForSession(psvr2),
            "The DCS compatibility rule must not disable Turbo globally");
+}
+
+void TestQuadViewsSessionActivationPolicy() {
+    Expect(depthxr::ResolveQuadViewsSessionActive(true, std::nullopt),
+           "Quadviews should follow enabled config before a session is latched");
+    Expect(!depthxr::ResolveQuadViewsSessionActive(false, std::nullopt),
+           "Quadviews should follow disabled config before a session is latched");
+    Expect(depthxr::ResolveQuadViewsSessionActive(false, true),
+           "A live enabled Quadviews session must ignore a mid-session disable");
+    Expect(!depthxr::ResolveQuadViewsSessionActive(true, false),
+           "A live stereo session must ignore a mid-session Quadviews enable");
 }
 
 void TestQuadViewsRecoveryStabilizationPolicy() {
@@ -1933,6 +2145,29 @@ void TestDeviceInputPathsAndHatDirections() {
            "HAT values near 360 degrees must wrap to up");
     Expect(!depthxr::DirectInputHatDirection(UINT32_MAX).has_value(),
            "A centered HAT must not report a pressed direction");
+
+    Expect(std::string(depthxr::ToString(depthxr::InputBindingPollStage::SetCooperativeLevel)) ==
+               "set-cooperative-level",
+           "Input diagnostics must retain the failing DirectInput setup stage");
+    Expect(std::string(depthxr::ToString(depthxr::InputBindingPollStage::GetDeviceState)) ==
+               "get-device-state",
+           "Input diagnostics must distinguish device-state reads from acquisition failures");
+
+    const depthxr::InputBindingPollResult inactive = depthxr::PollInputBinding(depthxr::InputBinding{});
+    Expect(!inactive.down && !inactive.device_poll_attempted,
+           "An unbound input must not be reported as a DirectInput polling attempt");
+
+#if defined(_WIN32)
+    depthxr::InputBinding invalid_device_binding;
+    invalid_device_binding.type = depthxr::InputBindingType::Device;
+    invalid_device_binding.device_guid = "{11111111-2222-3333-4444-555555555555}";
+    invalid_device_binding.input_path = "button-129";
+    const depthxr::InputBindingPollResult invalid_device =
+        depthxr::PollInputBinding(invalid_device_binding);
+    Expect(invalid_device.device_poll_attempted &&
+               invalid_device.diagnostic_stage == depthxr::InputBindingPollStage::ParseInputPath,
+           "Invalid device bindings must report their failing stage before touching DirectInput");
+#endif
 }
 
 void TestQuadViewsCanvasDimensionsMatchCompositionDensity() {
@@ -1986,12 +2221,14 @@ void TestSwapchainImageQueuePreservesFifo() {
 
 int main() {
     TestParseConfig();
+    TestPivotActivationBindingModel();
     TestLogLevelCompatibility();
     TestResolveRuntimeConfig();
     TestDisabledProfileFallsBackToDefaults();
     TestPivotProfileResolution();
     TestPivotMultiProfileResolution();
     TestPivotResponseModeAndAdvancedAxes();
+    TestPivotSteppedGlideMath();
     TestTurboModuleResolution();
     TestTurboPacingModeParsing();
     TestTurboModuleOptional();
@@ -2018,6 +2255,7 @@ int main() {
     TestLoggerCollapsesDuplicateMessages();
     TestEyeGazeExtensionCompatibilityPolicy();
     TestTurboSteamVrQuadviewsCompatibilityPolicy();
+    TestQuadViewsSessionActivationPolicy();
     TestQuadViewsRecoveryStabilizationPolicy();
     TestQuadViewsRecoveryStabilizer();
     TestQuadViewsCanvasDimensionsMatchCompositionDensity();

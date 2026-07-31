@@ -2,12 +2,16 @@
 import { computed, onMounted, onUnmounted } from 'vue'
 
 import BindingConflictWarnings from './BindingConflictWarnings.vue'
-import PivotActivationEditor from './PivotActivationEditor.vue'
-import { pivotBindingConflictWarnings, savedBindingConflictWarnings, type InputBinding, type PivotActivationBinding, type VectorXRConfig } from '../lib/model'
+import BindingListEditor from './BindingListEditor.vue'
+import {
+  pivotBindingConflictWarnings,
+  savedBindingConflictWarnings,
+  type InputBinding,
+  type PivotActivationBinding,
+  type VectorXRConfig,
+} from '../lib/model'
 
-// The default module config and each pivot profile share this binding shape;
-// fields are mutated directly on the passed-in reactive object.
-interface PivotBindingsSubject {
+interface PivotOriginSubject {
   alwaysActive: boolean
   activationBindings: PivotActivationBinding[]
   setOriginBindings: InputBinding[]
@@ -15,11 +19,11 @@ interface PivotBindingsSubject {
 }
 
 const props = defineProps<{
-  subject: PivotBindingsSubject
+  subject: PivotOriginSubject
   config: VectorXRConfig
-  // Names the profile in the breadcrumb/title, e.g. "Default Profile" or "DCS".
   contextLabel: string
 }>()
+
 const bindingWarnings = computed(() => pivotBindingConflictWarnings(
   props.subject.alwaysActive,
   props.subject.activationBindings,
@@ -27,7 +31,8 @@ const bindingWarnings = computed(() => pivotBindingConflictWarnings(
   props.subject.releaseOriginBindings,
 ))
 const globalBindingWarnings = computed(() => savedBindingConflictWarnings(props.config, [
-  ...props.subject.activationBindings.map((item) => item.binding),
+  ...props.subject.setOriginBindings,
+  ...props.subject.releaseOriginBindings,
 ], {
   suppressFocusOnlyConflicts: true,
 }))
@@ -37,18 +42,11 @@ const emit = defineEmits<{
 }>()
 
 function onKeydown(event: KeyboardEvent) {
-  if (event.key === 'Escape') {
-    emit('close')
-  }
+  if (event.key === 'Escape') emit('close')
 }
 
-onMounted(() => {
-  window.addEventListener('keydown', onKeydown)
-})
-
-onUnmounted(() => {
-  window.removeEventListener('keydown', onKeydown)
-})
+onMounted(() => window.addEventListener('keydown', onKeydown))
+onUnmounted(() => window.removeEventListener('keydown', onKeydown))
 </script>
 
 <template>
@@ -61,15 +59,15 @@ onUnmounted(() => {
             <span aria-hidden="true">›</span>
             <span>{{ contextLabel }}</span>
             <span aria-hidden="true">›</span>
-            <span class="font-medium" style="color: var(--app-text)">Bindings</span>
+            <span class="font-medium" style="color: var(--app-text)">Origin Controls</span>
           </nav>
-          <h2 class="mt-2 text-2xl font-semibold tracking-tight">{{ contextLabel }} — Bindings</h2>
-          <p class="mt-1 text-sm text-muted">Press Esc or Done to return to Pivot.</p>
+          <h2 class="mt-2 text-2xl font-semibold tracking-tight">{{ contextLabel }} — Origin Controls</h2>
+          <p class="mt-1 text-sm text-muted">Keep Pivot's neutral pose aligned with the simulator's recenter position.</p>
         </div>
         <button
           class="button-secondary inline-flex h-9 w-9 items-center justify-center rounded-[0.75rem]"
           type="button"
-          aria-label="Close bindings and return to Pivot"
+          aria-label="Close origin controls and return to Pivot"
           @click="$emit('close')"
         >
           <svg aria-hidden="true" class="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
@@ -79,12 +77,6 @@ onUnmounted(() => {
       </div>
 
       <div class="mt-5 space-y-4">
-        <PivotActivationEditor
-          v-model:always-active="subject.alwaysActive"
-          v-model:activation-bindings="subject.activationBindings"
-          :description="subject.alwaysActive ? 'Choose controls that temporarily suspend or toggle off Pivot.' : 'Choose controls that engage Pivot.'"
-        />
-
         <div
           v-for="warning in bindingWarnings"
           :key="warning.title"
@@ -95,6 +87,24 @@ onUnmounted(() => {
           <p class="mt-1">{{ warning.message }}</p>
         </div>
         <BindingConflictWarnings :warnings="globalBindingWarnings" />
+
+        <BindingListEditor
+          v-model="subject.setOriginBindings"
+          label="Set Origin (optional)"
+          description="Captures the current head pose as Pivot's neutral seated origin. Bind this to the same control you use to recenter the view in-game so both origins update together."
+          none-text="No binding assigned. Pivot rotates around the HMD origin."
+          sound-mode="single"
+          default-activate-sound="origin-set.wav"
+        />
+
+        <BindingListEditor
+          v-model="subject.releaseOriginBindings"
+          label="Release Origin (optional)"
+          description="Clears a captured origin and returns Pivot to the HMD origin. Useful if an origin was captured while looking off-center."
+          none-text="No binding assigned. A captured origin stays active until the session ends or it is recaptured."
+          sound-mode="single"
+          default-activate-sound="origin-release.wav"
+        />
       </div>
 
       <div class="mt-5 flex justify-end border-t pt-4" style="border-color: var(--app-border)">

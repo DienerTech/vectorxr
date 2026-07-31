@@ -126,21 +126,21 @@ const profileWarnings = computed(() => {
           <p class="eyebrow text-[10px] font-semibold uppercase tracking-[0.18em]">Step 1: Set scale</p>
           <p class="mt-2 text-sm font-semibold">Stereo Depth</p>
           <p class="mt-1 text-[13px] leading-5 text-muted">
-            Left makes the world feel larger and flatter. Right strengthens stereo parallax and can make the world feel smaller. Nearby geometry changes most.
+            Left increases apparent world scale and can restore life-sized proportions when a cockpit feels miniaturized. Right strengthens stereo shape and presence when a title looks too flat or oversized. Nearby geometry changes most.
           </p>
         </div>
         <div class="rounded-[1rem] border p-4 surface-panel-strong">
           <p class="eyebrow text-[10px] font-semibold uppercase tracking-[0.18em]">Step 2: Place depth</p>
           <p class="mt-2 text-sm font-semibold">Convergence Plane</p>
           <p class="mt-1 text-[13px] leading-5 text-muted">
-            Leave this at zero while setting scale. Then use tiny steps: left moves the plane farther, right moves it nearer. Either extreme can make fusion uncomfortable.
+            Leave this at zero while judging scale, then place the working plane with small steps. Left gives a crowded cockpit more breathing room; right brings a distant panel, sight, or interaction area nearer.
           </p>
         </div>
         <div class="rounded-[1rem] border p-4 surface-panel-strong">
           <p class="eyebrow text-[10px] font-semibold uppercase tracking-[0.18em]">Step 3: Compare</p>
           <p class="mt-2 text-sm font-semibold">Tune as a pair</p>
           <p class="mt-1 text-[13px] leading-5 text-muted">
-            Find scale first, then use Convergence only to settle the scene. During A/B tests, pause between rapid changes and stop at the first sign of eye strain, double vision, or a hard-to-fuse horizon.
+            Treat each game profile as its own visual calibration—different camera geometry may call for entirely different pairings, not mild variations. A/B against native geometry and stop at the first sign of eye strain or difficult fusion.
           </p>
         </div>
       </div>

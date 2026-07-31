@@ -18,15 +18,25 @@ const chips = computed(() => {
   const result: Array<{ label: string; value: string; title: string }> = []
 
   if (settings.responseMode === 'stepped') {
+    if (settings.advancedAxes) {
+      result.push({
+        label: 'Stepped · Advanced',
+        value: '4 directions',
+        title: `Independent yaw-left, yaw-right, pitch-up, and pitch-down step tuning.`,
+      })
+    } else {
+      result.push({
+        label: 'Stepped',
+        value: `Y ${settings.yawStep.triggerDegrees}° → +${settings.yawStep.amountDegrees}° · P ${settings.pitchStep.triggerDegrees}° → +${settings.pitchStep.amountDegrees}°`,
+        title: `Yaw and pitch use independent trigger, amount, hysteresis, deadzone, and maximum values.`,
+      })
+    }
     result.push({
-      label: 'Stepped',
-      value: `${settings.stepTriggerDegrees}° → +${settings.stepAmountDegrees}°`,
-      title: `Every ${settings.stepTriggerDegrees}° of head rotation past the deadzone adds ${settings.stepAmountDegrees}° of view rotation (hysteresis ${settings.stepHysteresisDegrees}°).`,
-    })
-    result.push({
-      label: 'Deadzone',
-      value: `${settings.deadzoneDegrees}° / ${settings.pitchDeadzoneDegrees}°`,
-      title: `Yaw ${settings.deadzoneDegrees}°, pitch ${settings.pitchDeadzoneDegrees}° before the first step threshold.`,
+      label: 'Step Glide',
+      value: settings.stepGlideMode === 'instant' ? 'Instant' : `${settings.stepGlideSeconds}s`,
+      title: settings.stepGlideMode === 'instant'
+        ? 'Each step is applied immediately.'
+        : `Each step reaches its target in ${settings.stepGlideSeconds}s without overshoot.`,
     })
   } else if (settings.advancedAxes) {
     result.push({
@@ -48,9 +58,9 @@ const chips = computed(() => {
   }
 
   result.push({
-    label: 'Smoothing',
-    value: `${settings.smoothing}`,
-    title: `Tracking smoothing ${settings.smoothing}; activation ramp ${settings.activationRampSeconds}s.`,
+    label: settings.responseMode === 'stepped' ? 'Activation Ramp' : 'Smoothing',
+    value: settings.responseMode === 'stepped' ? `${settings.activationRampSeconds}s` : `${settings.smoothing}`,
+    title: settings.responseMode === 'stepped' ? 'Pivot activation and release ramp.' : `Tracking smoothing ${settings.smoothing}; activation ramp ${settings.activationRampSeconds}s.`,
   })
 
   return result
@@ -63,7 +73,7 @@ const chips = computed(() => {
          with the bindings row's button regardless of chip wrapping. -->
     <div class="flex items-start justify-between gap-3">
       <div class="flex min-w-0 flex-1 flex-wrap items-center gap-2">
-        <p class="shrink-0 text-sm font-semibold tracking-tight">Rotation</p>
+        <p class="shrink-0 text-sm font-semibold tracking-tight">Motion</p>
         <span
           v-for="chip in chips"
           :key="chip.label"

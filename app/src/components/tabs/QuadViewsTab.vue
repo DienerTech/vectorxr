@@ -121,11 +121,12 @@ function budgetChipClass(settings: QuadViewsSettings) {
             <h2 class="text-2xl font-semibold tracking-tight">Quadviews</h2>
           </div>
           <p class="mt-2 max-w-3xl text-sm leading-6 text-muted">
-            Manage native quadview defaults and per-application profiles for
-            foveal and peripheral rendering.
+            Configure foveal and peripheral rendering for games that already
+            request OpenXR quad views. Enabling this module does not add
+            quad-view support to ordinary stereo games.
           </p>
           <p class="mt-2 max-w-3xl text-sm font-bold leading-6 text-muted">
-          Emulated Quadviews currently supports D3D11 OpenXR applications. Native Varjo quadviews remains runtime-driven.
+            DCS is the primary tested title. Likely, but unconfirmed, D3D11 candidates include Pavlov VR, VAIL VR, The 7th Guest VR, and Kayak VR: Mirage. Each title must request quad views itself.
           </p>
           <p class="mt-1 max-w-3xl text-xs leading-5 text-muted">
             Pixel estimates compare application view rendering only; the runtime and VectorXR composite have additional GPU cost.
@@ -141,6 +142,20 @@ function budgetChipClass(settings: QuadViewsSettings) {
           </span>
           Varjo Compatibility
         </button>
+      </div>
+
+      <div class="mb-4 rounded-[0.9rem] border px-4 py-3 text-sm leading-6 surface-panel-strong">
+        <strong>Recommended DCS setup</strong>
+        <ul class="mt-1.5 list-disc space-y-1 pl-5">
+          <li><strong>Game:</strong> turn on <strong>Use Quad View</strong> and, for gaze tracking, <strong>Use Eye Tracking</strong>.</li>
+          <li><strong>Provider:</strong> enable the VectorXR layer and Quadviews profile, then disable <code>XR_APILAYER_MBUCCHIA_quad_views_foveated</code>. On Pimax, also turn Native Pimax Quad Views off. Native Varjo Quadviews remains runtime-driven.</li>
+          <li><strong>Apply:</strong> save the profile and restart DCS after changing runtime, layer, or in-game VR settings.</li>
+        </ul>
+      </div>
+
+      <div class="mb-4 flex items-start gap-2.5 rounded-[0.9rem] border px-4 py-3 text-sm leading-6 surface-panel-strong" role="note">
+        <span class="restart-required-mark mt-0.5" aria-hidden="true">&#8635;</span>
+        <p><strong>Restart to apply:</strong> marked fields and Quadviews on/off take full effect after the current OpenXR application exits. Unmarked controls update during play.</p>
       </div>
 
       <details class="section-disclosure border-t pt-4" style="border-color: var(--app-border)" open>
@@ -160,15 +175,19 @@ function budgetChipClass(settings: QuadViewsSettings) {
             <span class="text-xs font-semibold">{{ budgetLabel(config.modules.quadviews.defaults) }}</span>
           </span>
         </summary>
-        <label class="pill-toggle mt-3 inline-flex items-center gap-3 rounded-full px-4 py-2 text-sm font-medium">
-          <input v-model="config.modules.quadviews.enabled" class="h-4 w-4 accent-depthxr-copper" type="checkbox" />
-          Default Profile {{ config.modules.quadviews.enabled ? "On" : "Off" }}
-          <span
-            title="Turns the default Quadviews profile on or off for apps without an enabled custom profile."
-            class="cursor-help select-none text-xs text-muted"
-            >ⓘ</span
+        <div class="mt-3 flex flex-wrap items-center gap-2">
+          <label
+            class="pill-toggle inline-flex items-center gap-3 rounded-full px-4 py-2 text-sm font-medium"
+            title="Saved immediately, but a running OpenXR application keeps its launch-time Quadviews state until it exits."
           >
-        </label>
+            <input v-model="config.modules.quadviews.enabled" class="h-4 w-4 accent-depthxr-copper" type="checkbox" />
+            Default Profile {{ config.modules.quadviews.enabled ? "On" : "Off" }}
+            <span
+              class="restart-required-mark"
+              title="Quadviews enable/disable changes apply after the running OpenXR application exits."
+            >&#8635;</span>
+          </label>
+        </div>
         <div v-if="!config.modules.quadviews.enabled" class="mt-3 rounded-[0.9rem] border px-4 py-3 text-sm leading-6 surface-panel-strong">
           The default profile is off and has no effect — applications without an enabled custom profile get no Quadviews. Enabled custom profiles below still apply to their assigned applications.
         </div>
@@ -200,6 +219,7 @@ function budgetChipClass(settings: QuadViewsSettings) {
         :profile="profile"
         :applications="applications"
         module-label="Quadviews"
+        enabled-change-note="Saved immediately, but a running OpenXR application keeps its launch-time Quadviews state until it exits."
         :warnings="profileWarnings.get(index)"
         @remove="$emit('removeQuadViewsProfile', index)"
         @sync-name="$emit('syncQuadViewsProfileName', index)"
@@ -266,7 +286,7 @@ function budgetChipClass(settings: QuadViewsSettings) {
           </div>
 
           <div class="rounded-[1rem] border px-4 py-4 surface-panel">
-            On headsets without native quad-view support (e.g. Quest Pro, Pimax Crystal), VectorXR Quadviews utilizes the standard emulation mode, and all settings apply. These compatibility notes apply only to Varjo runtimes.
+            On headsets without physical quad-view support through bi-panel displays (e.g. Quest Pro, Pimax Crystal), VectorXR Quadviews uses the standard emulation mode and all settings apply. These compatibility notes apply only to Varjo runtimes.
           </div>
         </div>
       </div>

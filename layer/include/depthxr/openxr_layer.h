@@ -21,6 +21,7 @@
 #include <openxr/openxr.h>
 
 #include "depthxr/config_parser.h"
+#include "depthxr/pivot_step.h"
 #include "depthxr/effects.h"
 #include "depthxr/logger.h"
 #include "depthxr/quadviews_recovery.h"
@@ -58,6 +59,7 @@ class OpenXrLayer {
         bool app_requested_varjo_foveated_rendering{false};
         bool app_requested_eye_gaze{false};
         EyeGazeProbeState eye_gaze_probe_state{EyeGazeProbeState::kIndeterminate};
+        bool eye_gaze_probe_structurally_unreliable{false};
         bool eye_gaze_probe_known_unreliable{false};
         EyeGazeRequestReason eye_gaze_request_reason{EyeGazeRequestReason::kQuadviewsNotRequested};
         bool layer_injected_eye_gaze_request{false};
@@ -83,6 +85,8 @@ class OpenXrLayer {
         XrResult pre_instance_extension_scan_result{XR_SUCCESS};
         uint32_t pre_instance_extension_count{0};
         std::string pre_instance_extensions;
+        uint32_t pre_instance_missing_forwarded_extension_count{0};
+        std::string pre_instance_missing_forwarded_extensions;
         // Authoritative fallback Varjo signal: the active runtime manifest.
         // This covers Varjo's unreliable pre-instance extension enumeration.
         bool active_runtime_is_varjo{false};
@@ -364,6 +368,7 @@ class OpenXrLayer {
     void ConfigWatcherLoop();
     void PollConfigFile();
     void RefreshResolvedSettings();
+    void ResetPivotInputStateForConfigChange();
     void CaptureInstanceFunctions();
     void LogResolvedSettings(const ResolvedRuntimeConfig& settings);
     void ResetPivotActivationState();
@@ -440,6 +445,7 @@ class OpenXrLayer {
                                                  SwapchainInfo& info,
                                                  std::string_view reason);
     XrResult FlushDeferredSwapchainReleasesLocked(std::string_view reason);
+    bool PollInputBindingDown(const InputBinding& binding);
     bool ShouldLogQuadViewsDebugHeartbeat(std::optional<std::chrono::steady_clock::time_point>& last_heartbeat);
     void ResetQuadViewsDebugHeartbeatState();
     void ResetSessionState();
@@ -574,6 +580,18 @@ class OpenXrLayer {
     bool has_failed_config_timestamp_{false};
 
     Logger logger_;
+    struct InputBindingDiagnosticLogState {
+        bool failure_active{false};
+        std::string signature;
+        std::uint64_t failed_attempts{0};
+        std::uint64_t suppressed_attempts{0};
+        std::optional<std::chrono::steady_clock::time_point> last_log_time;
+    };
+    // Device bindings can be polled several times per frame across Pivot,
+    // Depth, and Turbo. Keep one bounded diagnostic stream per DirectInput
+    // device instead of flooding the session log with the same HRESULT.
+    std::mutex input_binding_diagnostic_mutex_;
+    std::unordered_map<std::string, InputBindingDiagnosticLogState> input_binding_diagnostic_states_;
     ConfigDocument config_;
     bool has_loaded_config_{false};
     uint64_t config_generation_{0};
@@ -617,6 +635,8 @@ class OpenXrLayer {
     // Stepped response mode: signed persistent step per axis (with hysteresis).
     int pivotxr_yaw_step_{0};
     int pivotxr_pitch_step_{0};
+    PivotStepGlideState pivotxr_yaw_step_glide_;
+    PivotStepGlideState pivotxr_pitch_step_glide_;
     // Activation envelope in [0,1]: eases the pivot effect in/out on the
     // enable/disable transition so toggling never snaps the view, independent
     // of the per-frame tracking smoothing.
@@ -627,29 +647,35 @@ class OpenXrLayer {
     // pressing another candidate's binding retargets the engaged profile and
     // the activation envelope carries the view across the switch.
     struct PivotProfileInputState {
-        bool was_down{false};
-        bool down_cached{false};
-        bool set_origin_was_down{false};
-        bool set_origin_down_cached{false};
-        bool release_origin_was_down{false};
-        bool release_origin_down_cached{false};
-        // Always-on profiles only: true after the user pressed the binding to
-        // suspend the automatic engagement.
-        bool always_on_suspended{false};
+        struct BindingState {
+            bool was_down{false};
+            bool down_cached{false};
+        };
+        std::vector<BindingState> activation;
+        std::vector<BindingState> set_origin;
+        std::vector<BindingState> release_origin;
+        // Toggle controls share one latch per profile. Hold state remains
+        // per binding and is derived from the cached input state.
+        bool toggle_latched{false};
+        bool toggle_suspended{false};
     };
     std::vector<PivotProfileInputState> pivotxr_profile_input_states_;
     // Engaged profile index; retains the last-engaged profile during the
     // release ramp so the easing keeps using that profile's settings.
     size_t pivotxr_active_profile_index_{0};
     bool pivotxr_engaged_{false};
-    // Optional captured pivot origin: head yaw/pitch (radians) in the app's
-    // reference space at the moment the set-origin binding fired. Empty means
-    // the default HMD/reference-space origin. Capture happens on the
-    // xrLocateViews drive path so the pose shares the frame's displayTime
-    // pipeline with the pivot drive.
+    // Optional full seated origin in the app's reference space. Motion Assist
+    // currently consumes yaw/pitch, while the complete pose, capture time, and
+    // session identity establish the stable positional reference required by
+    // future Quick Views. Capture happens on the xrLocateViews drive path so
+    // it shares the frame's displayTime pipeline with the pivot drive.
     struct PivotOrigin {
+        XrPosef pose{{0.0f, 0.0f, 0.0f, 1.0f}, {0.0f, 0.0f, 0.0f}};
         double yaw_radians{0.0};
         double pitch_radians{0.0};
+        XrTime capture_time{0};
+        XrSession session{XR_NULL_HANDLE};
+        XrSpaceLocationFlags location_flags{0};
     };
     std::optional<PivotOrigin> pivotxr_origin_;
     bool pivotxr_origin_capture_pending_{false};
@@ -919,6 +945,11 @@ class OpenXrLayer {
     // emulation on this instance.
     bool varjo_compatible_quadviews_active_{false};
     bool defer_quadviews_swapchain_releases_{false};
+    // Quadviews changes the application's view/swapchain topology. Once a session
+    // is created, keep its initial activation state until teardown so a config
+    // reload cannot remove the compositor from underneath a running title.
+    std::optional<bool> quadviews_session_active_;
+    std::optional<bool> deferred_quadviews_config_active_;
     XrSession active_session_{XR_NULL_HANDLE};
     XrSpace internal_local_space_{XR_NULL_HANDLE};
     XrSpace internal_view_space_{XR_NULL_HANDLE};

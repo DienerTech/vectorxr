@@ -3,7 +3,7 @@ import { computed, ref } from 'vue'
 
 import DeviceBindingEditor from './DeviceBindingEditor.vue'
 import { pickSoundFile, playTestSound } from '../lib/commands'
-import { defaultDeviceBinding, defaultKeyboardBinding, defaultNoneBinding, defaultSoundFeedback, keyboardBindingKeyGroups, keyboardModifierKeys, type InputBinding, type SoundFeedback } from '../lib/model'
+import { defaultDeviceBinding, defaultKeyboardBinding, defaultNoneBinding, defaultSoundFeedback, keyboardBindingKeyGroups, keyboardModifierKeys, preserveBindingSound, type InputBinding, type SoundFeedback } from '../lib/model'
 
 const props = defineProps<{
   modelValue: InputBinding
@@ -17,10 +17,12 @@ const props = defineProps<{
   // their own cues (origin set/release, turbo on/off) test the right default.
   defaultActivateSound?: string
   defaultDeactivateSound?: string
+  removable?: boolean
 }>()
 
 const emit = defineEmits<{
   'update:modelValue': [value: InputBinding]
+  remove: []
 }>()
 
 type SoundPath = 'activateSound' | 'deactivateSound'
@@ -91,7 +93,7 @@ const bindingType = computed({
       return
     }
 
-    emit('update:modelValue', type === 'keyboard' ? defaultKeyboardBinding() : defaultDeviceBinding())
+    emit('update:modelValue', preserveBindingSound(props.modelValue, type === 'keyboard' ? defaultKeyboardBinding() : defaultDeviceBinding()))
   },
 })
 
@@ -103,7 +105,7 @@ const selectedPrimaryKey = computed({
     }
 
     const modifiers = props.modelValue.chord.filter((item) => keyboardModifierKeys.includes(item as never))
-    emit('update:modelValue', { type: 'keyboard', chord: [...modifiers, key] })
+    emit('update:modelValue', preserveBindingSound(props.modelValue, { type: 'keyboard', chord: [...modifiers, key] }))
   },
 })
 
@@ -118,16 +120,26 @@ function toggleModifier(modifier: string, enabled: boolean) {
     modifiers.push(modifier)
   }
 
-  emit('update:modelValue', { type: 'keyboard', chord: [...modifiers, primaryKey] })
+  emit('update:modelValue', preserveBindingSound(props.modelValue, { type: 'keyboard', chord: [...modifiers, primaryKey] }))
 }
 
 </script>
 
 <template>
   <div class="rounded-[1rem] border p-4 surface-panel-soft">
-    <div>
-      <p class="text-sm font-semibold tracking-tight">{{ label }}</p>
-      <p class="mt-1 text-sm leading-6 text-muted">{{ description }}</p>
+    <div class="flex items-start justify-between gap-3">
+      <div>
+        <p class="text-sm font-semibold tracking-tight">{{ label }}</p>
+        <p class="mt-1 text-sm leading-6 text-muted">{{ description }}</p>
+      </div>
+      <button
+        v-if="removable"
+        class="button-secondary shrink-0 rounded-[0.7rem] px-3 py-1.5 text-xs font-medium"
+        type="button"
+        @click="$emit('remove')"
+      >
+        Remove
+      </button>
     </div>
 
     <div class="mt-4 grid gap-3 sm:grid-cols-[repeat(auto-fit,minmax(150px,180px))]">

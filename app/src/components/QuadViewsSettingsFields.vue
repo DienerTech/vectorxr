@@ -54,7 +54,10 @@ function presetActive(preset: QuadViewsPreset) {
   <div class="space-y-3">
     <div class="flex flex-wrap items-center justify-between gap-3 rounded-[1rem] border px-4 py-3 surface-panel-soft">
       <div>
-        <p class="eyebrow text-xs uppercase tracking-[0.18em]">Vector Preset</p>
+        <p class="eyebrow flex items-center gap-1.5 text-xs uppercase tracking-[0.18em]">
+          Vector Preset
+          <span class="restart-required-mark" title="Presets include settings that require a game restart for their complete effect.">&#8635;</span>
+        </p>
         <p class="mt-1 text-xs text-muted">A strong starting point; tracking and alignment remain yours.</p>
       </div>
       <div class="flex flex-wrap gap-2">
@@ -64,6 +67,7 @@ function presetActive(preset: QuadViewsPreset) {
           class="rounded-[0.65rem] border px-3 py-1.5 text-xs font-semibold capitalize"
           :class="presetActive(preset) ? 'button-accent' : 'button-secondary'"
           type="button"
+          title="Presets change focus dimensions and resolution, so their complete effect requires a game restart."
           @click="applyPreset(preset)"
         >
           {{ preset }}
@@ -78,11 +82,7 @@ function presetActive(preset: QuadViewsPreset) {
         <label class="block">
           <span class="mb-1.5 flex min-h-[2.5rem] items-start gap-1.5 text-sm font-medium">
             Focus Width
-            <span
-              title="Width of the high-detail focus area as a percent of the projected eye view. Larger values sharpen more of the screen but cost more GPU time."
-              class="cursor-help select-none text-xs text-muted"
-              >ⓘ</span
-            >
+            <span class="restart-required-mark" title="The focus window moves live, but DCS keeps its existing texture width and pixel workload until restart.">&#8635;</span>
           </span>
           <input
             v-model.number="settings.focusHorizontalSizePercent"
@@ -97,11 +97,7 @@ function presetActive(preset: QuadViewsPreset) {
         <label class="block">
           <span class="mb-1.5 flex min-h-[2.5rem] items-start gap-1.5 text-sm font-medium">
             Focus Height
-            <span
-              title="Height of the high-detail focus area as a percent of the projected eye view. Larger values are more forgiving but reduce the performance gain."
-              class="cursor-help select-none text-xs text-muted"
-              >ⓘ</span
-            >
+            <span class="restart-required-mark" title="The focus window moves live, but DCS keeps its existing texture height and pixel workload until restart.">&#8635;</span>
           </span>
           <input
             v-model.number="settings.focusVerticalSizePercent"
@@ -157,12 +153,8 @@ function presetActive(preset: QuadViewsPreset) {
       <div class="mt-3 grid gap-3 sm:grid-cols-2">
         <label class="block">
           <span class="mb-1.5 flex min-h-[2.5rem] items-start gap-1.5 text-sm font-medium">
-            Foveate Resolution
-            <span
-              title="Render resolution of the high-detail focus views, as a percent of your headset's native resolution (100% = HMD default). Above 100% supersamples the center for extra sharpness at higher GPU cost."
-              class="cursor-help select-none text-xs text-muted"
-              >ⓘ</span
-            >
+            Focus Resolution
+            <span class="restart-required-mark" title="Restart required: DCS keeps its launch-time focus textures. Above 100% can resize VectorXR's output canvas and may cause a temporary frame-rate hitch.">&#8635;</span>
           </span>
           <input
             :value="Math.round(settings.focusScale * 100)"
@@ -178,11 +170,7 @@ function presetActive(preset: QuadViewsPreset) {
         <label class="block">
           <span class="mb-1.5 flex min-h-[2.5rem] items-start gap-1.5 text-sm font-medium">
             Peripheral Resolution
-            <span
-              title="Render resolution of the outer peripheral views, as a percent of your headset's native resolution (100% = HMD default). Lower values boost frames but soften the edges."
-              class="cursor-help select-none text-xs text-muted"
-              >ⓘ</span
-            >
+            <span class="restart-required-mark" title="Restart required: DCS keeps its launch-time peripheral textures and pixel workload.">&#8635;</span>
           </span>
           <input
             :value="Math.round(settings.peripheralScale * 100)"

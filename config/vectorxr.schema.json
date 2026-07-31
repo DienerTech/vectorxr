@@ -40,7 +40,8 @@
       "type": "string",
       "enum": [
         "toggle",
-        "hold"
+        "hold",
+        "alwaysOn"
       ]
     },
     "keyboardKey": {
@@ -135,6 +136,30 @@
           }
         }
       ]
+    },
+    "inputBindings": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/inputBinding"
+      }
+    },
+    "pivotActivationBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["behavior", "binding"],
+      "properties": {
+        "behavior": { "type": "string", "enum": ["toggle", "hold"] },
+        "binding": { "$ref": "#/$defs/inputBinding" }
+      }
+    },
+    "pivotActivationBindings": {
+      "type": "array",
+      "items": {
+        "oneOf": [
+          { "$ref": "#/$defs/pivotActivationBinding" },
+          { "$ref": "#/$defs/inputBinding" }
+        ]
+      }
     },
     "profileMatch": {
       "type": "object",
@@ -308,6 +333,28 @@
         }
       }
     },
+    "pivotAxisTuning": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["rotationMultiplier", "deadzoneDegrees", "maxExtraDegrees"],
+      "properties": {
+        "rotationMultiplier": { "type": "number", "minimum": 1.0, "maximum": 3.0 },
+        "deadzoneDegrees": { "type": "number", "minimum": 0.0, "maximum": 180.0 },
+        "maxExtraDegrees": { "type": "number", "minimum": 0.0, "maximum": 180.0 }
+      }
+    },
+    "pivotStepTuning": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["deadzoneDegrees", "triggerDegrees", "amountDegrees", "hysteresisDegrees", "maxExtraDegrees"],
+      "properties": {
+        "deadzoneDegrees": { "type": "number", "minimum": 0.0, "maximum": 180.0 },
+        "triggerDegrees": { "type": "number", "minimum": 1.0, "maximum": 45.0 },
+        "amountDegrees": { "type": "number", "minimum": 0.0, "maximum": 60.0 },
+        "hysteresisDegrees": { "type": "number", "minimum": 0.0, "maximum": 20.0 },
+        "maxExtraDegrees": { "type": "number", "minimum": 0.0, "maximum": 180.0 }
+      }
+    },
     "pivotxrSettings": {
       "type": "object",
       "additionalProperties": false,
@@ -319,60 +366,59 @@
         "maxExtraYawDegrees",
         "pitchRotationMultiplier",
         "pitchDeadzoneDegrees",
-        "maxExtraPitchDegrees"
+        "maxExtraPitchDegrees",
+        "responseMode",
+        "stepGlideMode",
+        "stepGlideSeconds",
+        "yawStep",
+        "pitchStep",
+        "advancedAxes",
+        "yawLeft",
+        "yawRight",
+        "pitchUp",
+        "pitchDown",
+        "yawLeftStep",
+        "yawRightStep",
+        "pitchUpStep",
+        "pitchDownStep"
       ],
       "properties": {
-        "smoothing": {
-          "type": "number",
-          "minimum": 0.0,
-          "maximum": 1.0
-        },
-        "activationRampSeconds": {
-          "type": "number",
-          "minimum": 0.0,
-          "maximum": 2.0
-        },
-        "rotationMultiplier": {
-          "type": "number",
-          "minimum": 1.0,
-          "maximum": 3.0
-        },
-        "deadzoneDegrees": {
-          "type": "number",
-          "minimum": 0.0,
-          "maximum": 180.0
-        },
-        "maxExtraYawDegrees": {
-          "type": "number",
-          "minimum": 0.0,
-          "maximum": 180.0
-        },
-        "pitchRotationMultiplier": {
-          "type": "number",
-          "minimum": 1.0,
-          "maximum": 3.0
-        },
-        "pitchDeadzoneDegrees": {
-          "type": "number",
-          "minimum": 0.0,
-          "maximum": 90.0
-        },
-        "maxExtraPitchDegrees": {
-          "type": "number",
-          "minimum": 0.0,
-          "maximum": 180.0
-        }
+        "smoothing": { "type": "number", "minimum": 0.0, "maximum": 1.0 },
+        "activationRampSeconds": { "type": "number", "minimum": 0.0, "maximum": 2.0 },
+        "rotationMultiplier": { "type": "number", "minimum": 1.0, "maximum": 3.0 },
+        "deadzoneDegrees": { "type": "number", "minimum": 0.0, "maximum": 180.0 },
+        "maxExtraYawDegrees": { "type": "number", "minimum": 0.0, "maximum": 180.0 },
+        "pitchRotationMultiplier": { "type": "number", "minimum": 1.0, "maximum": 3.0 },
+        "pitchDeadzoneDegrees": { "type": "number", "minimum": 0.0, "maximum": 90.0 },
+        "maxExtraPitchDegrees": { "type": "number", "minimum": 0.0, "maximum": 180.0 },
+        "responseMode": { "type": "string", "enum": ["continuous", "stepped"] },
+        "stepGlideMode": { "type": "string", "enum": ["instant", "glide"] },
+        "stepGlideSeconds": { "type": "number", "minimum": 0.0, "maximum": 2.0 },
+        "yawStep": { "$ref": "#/$defs/pivotStepTuning" },
+        "pitchStep": { "$ref": "#/$defs/pivotStepTuning" },
+        "advancedAxes": { "type": "boolean" },
+        "yawLeft": { "$ref": "#/$defs/pivotAxisTuning" },
+        "yawRight": { "$ref": "#/$defs/pivotAxisTuning" },
+        "pitchUp": { "$ref": "#/$defs/pivotAxisTuning" },
+        "pitchDown": { "$ref": "#/$defs/pivotAxisTuning" },
+        "yawLeftStep": { "$ref": "#/$defs/pivotStepTuning" },
+        "yawRightStep": { "$ref": "#/$defs/pivotStepTuning" },
+        "pitchUpStep": { "$ref": "#/$defs/pivotStepTuning" },
+        "pitchDownStep": { "$ref": "#/$defs/pivotStepTuning" }
       }
     },
     "pivotxrProfile": {
       "type": "object",
       "additionalProperties": false,
+      "anyOf": [
+        { "required": ["alwaysActive"] },
+        { "required": ["activationMode"] }
+      ],
       "required": [
         "name",
         "enabled",
         "applicationIds",
-        "activationMode",
-        "activationBinding",
+        "activationBindings",
         "settings"
       ],
       "properties": {
@@ -392,10 +438,20 @@
           "uniqueItems": true
         },
         "activationMode": {
-          "$ref": "#/$defs/activationMode"
+          "$ref": "#/$defs/activationMode",
+          "deprecated": true
         },
-        "activationBinding": {
-          "$ref": "#/$defs/inputBinding"
+        "alwaysActive": {
+          "type": "boolean"
+        },
+        "activationBindings": {
+          "$ref": "#/$defs/pivotActivationBindings"
+        },
+        "setOriginBindings": {
+          "$ref": "#/$defs/inputBindings"
+        },
+        "releaseOriginBindings": {
+          "$ref": "#/$defs/inputBindings"
         },
         "settings": {
           "$ref": "#/$defs/pivotxrSettings"
@@ -418,10 +474,20 @@
           "$ref": "#/$defs/pivotxrSettings"
         },
         "activationMode": {
-          "$ref": "#/$defs/activationMode"
+          "$ref": "#/$defs/activationMode",
+          "deprecated": true
         },
-        "activationBinding": {
-          "$ref": "#/$defs/inputBinding"
+        "alwaysActive": {
+          "type": "boolean"
+        },
+        "activationBindings": {
+          "$ref": "#/$defs/pivotActivationBindings"
+        },
+        "setOriginBindings": {
+          "$ref": "#/$defs/inputBindings"
+        },
+        "releaseOriginBindings": {
+          "$ref": "#/$defs/inputBindings"
         },
         "profiles": {
           "type": "array",

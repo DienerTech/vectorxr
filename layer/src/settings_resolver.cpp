@@ -87,17 +87,18 @@ void ApplyPivotSettings(PivotXrResolvedProfile& resolved, const PivotXrSettings&
     resolved.pitch_deadzone_degrees = settings.pitch_deadzone_degrees;
     resolved.pitch_max_extra_degrees = settings.pitch_max_extra_degrees;
     resolved.response_mode = settings.response_mode;
-    resolved.step_trigger_degrees = settings.step_trigger_degrees;
-    resolved.step_amount_degrees = settings.step_amount_degrees;
-    resolved.step_hysteresis_degrees = settings.step_hysteresis_degrees;
+    resolved.step_glide_mode = settings.step_glide_mode;
+    resolved.step_glide_seconds = settings.step_glide_seconds;
 
-    // Direction tunings collapse to the symmetric values unless advanced axes
-    // are enabled, so the runtime always reads one shape.
     if (settings.advanced_axes) {
         resolved.yaw_positive = settings.yaw_left;
         resolved.yaw_negative = settings.yaw_right;
         resolved.pitch_positive = settings.pitch_up;
         resolved.pitch_negative = settings.pitch_down;
+        resolved.yaw_step_positive = settings.yaw_left_step;
+        resolved.yaw_step_negative = settings.yaw_right_step;
+        resolved.pitch_step_positive = settings.pitch_up_step;
+        resolved.pitch_step_negative = settings.pitch_down_step;
     } else {
         const PivotAxisTuning yaw{settings.yaw_rotation_multiplier, settings.yaw_deadzone_degrees,
                                   settings.yaw_max_extra_degrees};
@@ -107,6 +108,10 @@ void ApplyPivotSettings(PivotXrResolvedProfile& resolved, const PivotXrSettings&
         resolved.yaw_negative = yaw;
         resolved.pitch_positive = pitch;
         resolved.pitch_negative = pitch;
+        resolved.yaw_step_positive = settings.yaw_step;
+        resolved.yaw_step_negative = settings.yaw_step;
+        resolved.pitch_step_positive = settings.pitch_step;
+        resolved.pitch_step_negative = settings.pitch_step;
     }
 }
 
@@ -126,6 +131,31 @@ bool SameActivationInput(const InputBinding& lhs, const InputBinding& rhs) {
     return lhs.device_guid == rhs.device_guid && lhs.input_path == rhs.input_path;
 }
 
+std::vector<PivotActivationBinding> FilterUnclaimedActivationBindings(
+    const std::vector<PivotActivationBinding>& source,
+    const std::vector<PivotXrResolvedProfile>& earlier_profiles) {
+    std::vector<PivotActivationBinding> filtered;
+    for (const PivotActivationBinding& activation : source) {
+        const InputBinding& binding = activation.binding;
+        if (binding.type == InputBindingType::None) {
+            continue;
+        }
+        const bool claimed_here = std::any_of(filtered.begin(), filtered.end(), [&](const PivotActivationBinding& accepted) {
+            return SameActivationInput(accepted.binding, binding);
+        });
+        const bool claimed_earlier = std::any_of(
+            earlier_profiles.begin(), earlier_profiles.end(), [&](const PivotXrResolvedProfile& earlier) {
+                return std::any_of(earlier.activation_bindings.begin(), earlier.activation_bindings.end(),
+                                   [&](const PivotActivationBinding& earlier_binding) {
+                                       return SameActivationInput(earlier_binding.binding, binding);
+                                   });
+            });
+        if (!claimed_here && !claimed_earlier) {
+            filtered.push_back(activation);
+        }
+    }
+    return filtered;
+}
 } // namespace
 
 PivotXrResolvedSettings ResolvePivotXrSettings(const ConfigDocument& config, std::string_view exe_name) {
@@ -142,23 +172,19 @@ PivotXrResolvedSettings ResolvePivotXrSettings(const ConfigDocument& config, std
                 continue;
             }
 
-            const bool binding_shadowed = std::any_of(
-                resolved.profiles.begin(), resolved.profiles.end(), [&](const PivotXrResolvedProfile& earlier) {
-                    return SameActivationInput(earlier.activation_binding, profile.activation_binding);
-                });
-            // A shadowed toggle/hold profile cannot be selected. Always-on
-            // participation does not depend on its optional binding, however,
-            // so retain that profile and shadow only its suspend/resume input.
-            if (binding_shadowed && profile.activation_mode != ActivationMode::AlwaysOn) {
+            std::vector<PivotActivationBinding> activation_bindings =
+                FilterUnclaimedActivationBindings(profile.activation_bindings, resolved.profiles);
+            const bool all_bindings_shadowed = !profile.activation_bindings.empty() && activation_bindings.empty();
+            if (all_bindings_shadowed && !profile.always_active) {
                 continue;
             }
 
             PivotXrResolvedProfile candidate;
             candidate.name = profile.name;
-            candidate.activation_mode = profile.activation_mode;
-            candidate.activation_binding = binding_shadowed ? InputBinding{} : profile.activation_binding;
-            candidate.set_origin_binding = profile.set_origin_binding;
-            candidate.release_origin_binding = profile.release_origin_binding;
+            candidate.always_active = profile.always_active;
+            candidate.activation_bindings = std::move(activation_bindings);
+            candidate.set_origin_bindings = profile.set_origin_bindings;
+            candidate.release_origin_bindings = profile.release_origin_bindings;
             ApplyPivotSettings(candidate, profile.settings);
             resolved.profiles.push_back(std::move(candidate));
         }
@@ -169,10 +195,11 @@ PivotXrResolvedSettings ResolvePivotXrSettings(const ConfigDocument& config, std
     if (resolved.profiles.empty() && config.pivotxr.enabled) {
         PivotXrResolvedProfile candidate;
         candidate.name = "Default";
-        candidate.activation_mode = config.pivotxr.activation_mode;
-        candidate.activation_binding = config.pivotxr.activation_binding;
-        candidate.set_origin_binding = config.pivotxr.set_origin_binding;
-        candidate.release_origin_binding = config.pivotxr.release_origin_binding;
+        candidate.always_active = config.pivotxr.always_active;
+        candidate.activation_bindings =
+            FilterUnclaimedActivationBindings(config.pivotxr.activation_bindings, {});
+        candidate.set_origin_bindings = config.pivotxr.set_origin_bindings;
+        candidate.release_origin_bindings = config.pivotxr.release_origin_bindings;
         ApplyPivotSettings(candidate, config.pivotxr.defaults);
         resolved.profiles.push_back(std::move(candidate));
     }

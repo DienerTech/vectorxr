@@ -159,12 +159,39 @@ textarea {
   color: var(--app-text-soft);
 }
 
+.restart-required-mark {
+  align-items: center;
+  background: var(--app-surface-strong);
+  border: 1px solid var(--app-border);
+  border-radius: 9999px;
+  color: var(--app-text-soft);
+  display: inline-flex;
+  flex: 0 0 auto;
+  font-size: 0.68rem;
+  height: 1.15rem;
+  justify-content: center;
+  line-height: 1;
+  width: 1.15rem;
+}
+
+.pill-toggle .restart-required-mark {
+  background: transparent;
+  border-color: currentColor;
+  color: inherit;
+  opacity: 0.65;
+}
+
 /* Numeric inputs carry min/max mirroring the config validator; flag values the
    validator would reject so the failing control is findable at a glance. */
 .app-input:out-of-range,
-.app-input:invalid {
+.app-input:invalid,
+.app-input-error {
   border-color: #ef4444;
   box-shadow: 0 0 0 1px rgba(239, 68, 68, 0.55);
+}
+
+.text-input-error {
+  color: #ef4444;
 }
 
 .app-readonly-field {

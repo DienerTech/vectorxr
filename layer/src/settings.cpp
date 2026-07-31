@@ -112,6 +112,28 @@ std::optional<PivotResponseMode> ParsePivotResponseMode(const std::string& value
     return std::nullopt;
 }
 
+const char* ToString(PivotStepGlideMode mode) {
+    switch (mode) {
+    case PivotStepGlideMode::Instant:
+        return "instant";
+    case PivotStepGlideMode::Glide:
+        return "glide";
+    default:
+        return "glide";
+    }
+}
+
+std::optional<PivotStepGlideMode> ParsePivotStepGlideMode(const std::string& value) {
+    const std::string normalized = NormalizeValue(value);
+    if (normalized == "instant") {
+        return PivotStepGlideMode::Instant;
+    }
+    if (normalized == "glide") {
+        return PivotStepGlideMode::Glide;
+    }
+    return std::nullopt;
+}
+
 std::optional<std::string> ParseActivationKey(const std::string& value) {
     const std::string trimmed = TrimWhitespace(value);
     if (trimmed.empty()) {

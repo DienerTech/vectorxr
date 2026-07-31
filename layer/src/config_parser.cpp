@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <fstream>
 #include <map>
 #include <optional>
@@ -477,7 +478,7 @@ bool ReadOptionalActivationMode(const JsonValue::Object& object,
 
     out = ParseActivationMode(it->second.AsString());
     if (!out) {
-        error = key + " must be one of: toggle, hold";
+        error = key + " must be one of: toggle, hold, alwaysOn";
         return false;
     }
     return true;
@@ -836,6 +837,100 @@ bool ParseDepthDefaults(const JsonValue::Object& object, DepthXrResolvedSettings
     return true;
 }
 
+bool ParseInputBindings(const JsonValue::Object& object,
+                        std::string_view plural_key,
+                        std::string_view legacy_key,
+                        std::vector<InputBinding>& out,
+                        std::string& error) {
+    const auto plural_it = object.find(std::string(plural_key));
+    const auto legacy_it = object.find(std::string(legacy_key));
+    if (plural_it != object.end() && legacy_it != object.end()) {
+        error = "Fields " + std::string(plural_key) + " and " + std::string(legacy_key) + " cannot both be present";
+        return false;
+    }
+
+    out.clear();
+    if (plural_it != object.end()) {
+        const JsonValue::Array* bindings = RequireArray(plural_it->second, std::string(plural_key), error);
+        if (!bindings) {
+            return false;
+        }
+        for (const JsonValue& binding_value : *bindings) {
+            InputBinding binding;
+            if (!ParseInputBinding(binding_value, binding, error)) {
+                return false;
+            }
+            if (binding.type != InputBindingType::None) {
+                out.push_back(std::move(binding));
+            }
+        }
+        return true;
+    }
+
+    if (legacy_it != object.end()) {
+        InputBinding binding;
+        if (!ParseInputBinding(legacy_it->second, binding, error)) {
+            return false;
+        }
+        if (binding.type != InputBindingType::None) {
+            out.push_back(std::move(binding));
+        }
+    }
+    return true;
+}
+bool ParsePivotActivationBindings(const JsonValue::Object& object,
+                                  std::string_view plural_key,
+                                  std::string_view legacy_key,
+                                  ActivationMode legacy_mode,
+                                  std::vector<PivotActivationBinding>& out,
+                                  std::string& error) {
+    const auto plural_it = object.find(std::string(plural_key));
+    const auto legacy_it = object.find(std::string(legacy_key));
+    if (plural_it != object.end() && legacy_it != object.end()) {
+        error = "Fields " + std::string(plural_key) + " and " + std::string(legacy_key) + " cannot both be present";
+        return false;
+    }
+
+    auto parse_one = [&](const JsonValue& value) {
+        PivotActivationBinding activation;
+        const JsonValue::Object* wrapper = value.IsObject() ? &value.AsObject() : nullptr;
+        if (wrapper && wrapper->contains("binding")) {
+            static const std::unordered_set<std::string> allowed = {"behavior", "binding"};
+            if (!CheckAllowedKeys(*wrapper, allowed, error)) return false;
+            const auto behavior_it = wrapper->find("behavior");
+            if (behavior_it == wrapper->end() || !behavior_it->second.IsString()) {
+                error = "pivot activation behavior must be a string";
+                return false;
+            }
+            const std::string& behavior = behavior_it->second.AsString();
+            if (behavior == "toggle") activation.behavior = PivotActivationBehavior::Toggle;
+            else if (behavior == "hold") activation.behavior = PivotActivationBehavior::Hold;
+            else {
+                error = "pivot activation behavior must be one of: toggle, hold";
+                return false;
+            }
+            if (!ParseInputBinding(wrapper->at("binding"), activation.binding, error)) return false;
+        } else {
+            activation.behavior = legacy_mode == ActivationMode::Hold
+                ? PivotActivationBehavior::Hold
+                : PivotActivationBehavior::Toggle;
+            if (!ParseInputBinding(value, activation.binding, error)) return false;
+        }
+        if (activation.binding.type != InputBindingType::None) out.push_back(std::move(activation));
+        return true;
+    };
+
+    out.clear();
+    if (plural_it != object.end()) {
+        const JsonValue::Array* bindings = RequireArray(plural_it->second, std::string(plural_key), error);
+        if (!bindings) return false;
+        for (const JsonValue& value : *bindings) if (!parse_one(value)) return false;
+    } else if (legacy_it != object.end() && !parse_one(legacy_it->second)) {
+        return false;
+    }
+    return true;
+}
+
 bool ParseDepthBindings(const JsonValue::Object& object, DepthXrBindings& out, std::string& error) {
     static const std::unordered_set<std::string> allowed = {
         "toggleEnabled",
@@ -1183,7 +1278,56 @@ bool ParsePivotAxisTuning(const JsonValue& value, const char* field, PivotAxisTu
     return true;
 }
 
+bool ParsePivotStepTuning(const JsonValue& value,
+                          const std::string& context,
+                          PivotStepTuning& out,
+                          std::string& error) {
+    const JsonValue::Object* object = RequireObject(value, context, error);
+    if (!object) {
+        return false;
+    }
+    static const std::unordered_set<std::string> allowed = {
+        "deadzoneDegrees",
+        "triggerDegrees",
+        "amountDegrees",
+        "hysteresisDegrees",
+        "maxExtraDegrees",
+    };
+    if (!CheckAllowedKeys(*object, allowed, error)) {
+        return false;
+    }
+
+    std::optional<double> deadzone;
+    std::optional<double> trigger;
+    std::optional<double> amount;
+    std::optional<double> hysteresis;
+    std::optional<double> max_extra;
+    if (!ReadOptionalNumber(*object, "deadzoneDegrees", deadzone, error) ||
+        !ReadOptionalNumber(*object, "triggerDegrees", trigger, error) ||
+        !ReadOptionalNumber(*object, "amountDegrees", amount, error) ||
+        !ReadOptionalNumber(*object, "hysteresisDegrees", hysteresis, error) ||
+        !ReadOptionalNumber(*object, "maxExtraDegrees", max_extra, error)) {
+        return false;
+    }
+    if (deadzone) out.deadzone_degrees = *deadzone;
+    if (trigger) out.trigger_degrees = *trigger;
+    if (amount) out.amount_degrees = *amount;
+    if (hysteresis) out.hysteresis_degrees = *hysteresis;
+    if (max_extra) out.max_extra_degrees = *max_extra;
+    return true;
+}
+
+double MigratedStepGlideSeconds(double smoothing) {
+    if (smoothing <= 0.0) {
+        return 0.0;
+    }
+    const double per_frame_error = std::clamp(smoothing, 0.000001, 0.95);
+    const double bounded = std::clamp(std::log(0.001) / (90.0 * std::log(per_frame_error)), 0.01, 2.0);
+    return std::round(bounded * 100.0) / 100.0;
+}
 bool ParsePivotSettings(const JsonValue::Object& object, PivotXrSettings& out, std::string& error) {
+
+
     static const std::unordered_set<std::string> allowed = {
         "smoothing",
         "activationRampSeconds",
@@ -1202,6 +1346,15 @@ bool ParsePivotSettings(const JsonValue::Object& object, PivotXrSettings& out, s
         "yawRight",
         "pitchUp",
         "pitchDown",
+        "stepGlideMode",
+        "stepGlideSeconds",
+        "yawStep",
+        "pitchStep",
+        "yawLeftStep",
+        "yawRightStep",
+        "pitchUpStep",
+        "pitchDownStep",
+        // Legacy shared step values migrate into both basic axes.
         // Legacy: per-axis smoothing collapsed into a single "smoothing".
         // Accepted but ignored so older configs still load.
         "pitchSmoothing",
@@ -1257,37 +1410,64 @@ bool ParsePivotSettings(const JsonValue::Object& object, PivotXrSettings& out, s
     }
 
     std::optional<std::string> response_mode;
-    std::optional<double> step_trigger_degrees;
-    std::optional<double> step_amount_degrees;
-    std::optional<double> step_hysteresis_degrees;
+    std::optional<std::string> step_glide_mode;
+    std::optional<double> step_glide_seconds;
+    std::optional<double> legacy_step_trigger;
+    std::optional<double> legacy_step_amount;
+    std::optional<double> legacy_step_hysteresis;
     std::optional<bool> advanced_axes;
 
     if (!ReadOptionalString(object, "responseMode", response_mode, error) ||
-        !ReadOptionalNumber(object, "stepTriggerDegrees", step_trigger_degrees, error) ||
-        !ReadOptionalNumber(object, "stepAmountDegrees", step_amount_degrees, error) ||
-        !ReadOptionalNumber(object, "stepHysteresisDegrees", step_hysteresis_degrees, error) ||
+        !ReadOptionalString(object, "stepGlideMode", step_glide_mode, error) ||
+        !ReadOptionalNumber(object, "stepGlideSeconds", step_glide_seconds, error) ||
+        !ReadOptionalNumber(object, "stepTriggerDegrees", legacy_step_trigger, error) ||
+        !ReadOptionalNumber(object, "stepAmountDegrees", legacy_step_amount, error) ||
+        !ReadOptionalNumber(object, "stepHysteresisDegrees", legacy_step_hysteresis, error) ||
         !ReadOptionalBool(object, "advancedAxes", advanced_axes, error)) {
         return false;
     }
 
-    if (response_mode.has_value()) {
+    if (response_mode) {
         const std::optional<PivotResponseMode> parsed = ParsePivotResponseMode(*response_mode);
-        if (!parsed.has_value()) {
+        if (!parsed) {
             error = "Invalid value for responseMode: " + *response_mode;
             return false;
         }
         out.response_mode = *parsed;
     }
-    if (step_trigger_degrees.has_value()) {
-        out.step_trigger_degrees = *step_trigger_degrees;
+    if (step_glide_mode) {
+        const std::optional<PivotStepGlideMode> parsed = ParsePivotStepGlideMode(*step_glide_mode);
+        if (!parsed) {
+            error = "Invalid value for stepGlideMode: " + *step_glide_mode;
+            return false;
+        }
+        out.step_glide_mode = *parsed;
+    } else {
+        out.step_glide_mode = out.smoothing <= 0.0 ? PivotStepGlideMode::Instant : PivotStepGlideMode::Glide;
     }
-    if (step_amount_degrees.has_value()) {
-        out.step_amount_degrees = *step_amount_degrees;
+    if (step_glide_seconds) {
+        out.step_glide_seconds = *step_glide_seconds;
+    } else if (!step_glide_mode) {
+        out.step_glide_seconds = MigratedStepGlideSeconds(out.smoothing);
     }
-    if (step_hysteresis_degrees.has_value()) {
-        out.step_hysteresis_degrees = *step_hysteresis_degrees;
+
+    out.yaw_step.deadzone_degrees = out.yaw_deadzone_degrees;
+    out.yaw_step.max_extra_degrees = out.yaw_max_extra_degrees;
+    out.pitch_step.deadzone_degrees = out.pitch_deadzone_degrees;
+    out.pitch_step.max_extra_degrees = out.pitch_max_extra_degrees;
+    if (legacy_step_trigger) {
+        out.yaw_step.trigger_degrees = *legacy_step_trigger;
+        out.pitch_step.trigger_degrees = *legacy_step_trigger;
     }
-    if (advanced_axes.has_value()) {
+    if (legacy_step_amount) {
+        out.yaw_step.amount_degrees = *legacy_step_amount;
+        out.pitch_step.amount_degrees = *legacy_step_amount;
+    }
+    if (legacy_step_hysteresis) {
+        out.yaw_step.hysteresis_degrees = *legacy_step_hysteresis;
+        out.pitch_step.hysteresis_degrees = *legacy_step_hysteresis;
+    }
+    if (advanced_axes) {
         out.advanced_axes = *advanced_axes;
     }
 
@@ -1309,8 +1489,44 @@ bool ParsePivotSettings(const JsonValue::Object& object, PivotXrSettings& out, s
         return false;
     }
 
+    const auto yaw_step_it = object.find("yawStep");
+    if (yaw_step_it != object.end() &&
+        !ParsePivotStepTuning(yaw_step_it->second, "yawStep", out.yaw_step, error)) {
+        return false;
+    }
+    const auto pitch_step_it = object.find("pitchStep");
+    if (pitch_step_it != object.end() &&
+        !ParsePivotStepTuning(pitch_step_it->second, "pitchStep", out.pitch_step, error)) {
+        return false;
+    }
+
+    out.yaw_left_step = out.yaw_step;
+    out.yaw_right_step = out.yaw_step;
+    out.pitch_up_step = out.pitch_step;
+    out.pitch_down_step = out.pitch_step;
+    const auto yaw_left_step_it = object.find("yawLeftStep");
+    if (yaw_left_step_it != object.end() &&
+        !ParsePivotStepTuning(yaw_left_step_it->second, "yawLeftStep", out.yaw_left_step, error)) {
+        return false;
+    }
+    const auto yaw_right_step_it = object.find("yawRightStep");
+    if (yaw_right_step_it != object.end() &&
+        !ParsePivotStepTuning(yaw_right_step_it->second, "yawRightStep", out.yaw_right_step, error)) {
+        return false;
+    }
+    const auto pitch_up_step_it = object.find("pitchUpStep");
+    if (pitch_up_step_it != object.end() &&
+        !ParsePivotStepTuning(pitch_up_step_it->second, "pitchUpStep", out.pitch_up_step, error)) {
+        return false;
+    }
+    const auto pitch_down_step_it = object.find("pitchDownStep");
+    if (pitch_down_step_it != object.end() &&
+        !ParsePivotStepTuning(pitch_down_step_it->second, "pitchDownStep", out.pitch_down_step, error)) {
+        return false;
+    }
     return true;
 }
+
 
 bool ParsePivotProfile(const JsonValue& value, PivotXrProfile& out, std::string& error) {
     const JsonValue::Object* object = RequireObject(value, "pivotProfile", error);
@@ -1325,6 +1541,10 @@ bool ParsePivotProfile(const JsonValue& value, PivotXrProfile& out, std::string&
         "mode",
         "applicationIds",
         "activationMode",
+        "alwaysActive",
+        "activationBindings",
+        "setOriginBindings",
+        "releaseOriginBindings",
         "activationBinding",
         "setOriginBinding",
         "releaseOriginBinding",
@@ -1349,12 +1569,14 @@ bool ParsePivotProfile(const JsonValue& value, PivotXrProfile& out, std::string&
     std::optional<bool> enabled;
     std::optional<ProfileMode> mode;
     std::optional<ActivationMode> activation_mode;
+    std::optional<bool> always_active;
 
     if (!ReadOptionalString(*object, "id", id, error) ||
         !ReadOptionalString(*object, "name", name, error) ||
         !ReadOptionalBool(*object, "enabled", enabled, error) ||
         !ReadOptionalProfileMode(*object, "mode", mode, error) ||
-        !ReadOptionalActivationMode(*object, "activationMode", activation_mode, error)) {
+        !ReadOptionalActivationMode(*object, "activationMode", activation_mode, error) ||
+        !ReadOptionalBool(*object, "alwaysActive", always_active, error)) {
         return false;
     }
 
@@ -1362,23 +1584,13 @@ bool ParsePivotProfile(const JsonValue& value, PivotXrProfile& out, std::string&
     out.name = name.value_or("New Profile");
     out.enabled = enabled.value_or(true);
     out.mode = mode.value_or(ProfileMode::Custom);
-    if (activation_mode.has_value()) {
-        out.activation_mode = *activation_mode;
-    }
+    const ActivationMode legacy_activation_mode = activation_mode.value_or(ActivationMode::Toggle);
+    out.always_active = always_active.value_or(legacy_activation_mode == ActivationMode::AlwaysOn);
 
-    const auto binding_it = object->find("activationBinding");
-    if (binding_it != object->end() && !ParseInputBinding(binding_it->second, out.activation_binding, error)) {
-        return false;
-    }
-
-    const auto set_origin_it = object->find("setOriginBinding");
-    if (set_origin_it != object->end() && !ParseInputBinding(set_origin_it->second, out.set_origin_binding, error)) {
-        return false;
-    }
-
-    const auto release_origin_it = object->find("releaseOriginBinding");
-    if (release_origin_it != object->end() &&
-        !ParseInputBinding(release_origin_it->second, out.release_origin_binding, error)) {
+    if (!ParsePivotActivationBindings(*object, "activationBindings", "activationBinding", legacy_activation_mode, out.activation_bindings, error) ||
+        !ParseInputBindings(*object, "setOriginBindings", "setOriginBinding", out.set_origin_bindings, error) ||
+        !ParseInputBindings(*object, "releaseOriginBindings", "releaseOriginBinding", out.release_origin_bindings,
+                            error)) {
         return false;
     }
 
@@ -1398,6 +1610,10 @@ bool ParsePivotModule(const JsonValue::Object& object, PivotXrModuleConfig& out,
         "enabled",
         "defaults",
         "activationMode",
+        "alwaysActive",
+        "activationBindings",
+        "setOriginBindings",
+        "releaseOriginBindings",
         "activationBinding",
         "setOriginBinding",
         "releaseOriginBinding",
@@ -1410,16 +1626,17 @@ bool ParsePivotModule(const JsonValue::Object& object, PivotXrModuleConfig& out,
 
     std::optional<bool> enabled;
     std::optional<ActivationMode> activation_mode;
+    std::optional<bool> always_active;
     if (!ReadOptionalBool(object, "enabled", enabled, error) ||
-        !ReadOptionalActivationMode(object, "activationMode", activation_mode, error)) {
+        !ReadOptionalActivationMode(object, "activationMode", activation_mode, error) ||
+        !ReadOptionalBool(object, "alwaysActive", always_active, error)) {
         return false;
     }
     if (enabled.has_value()) {
         out.enabled = *enabled;
     }
-    if (activation_mode.has_value()) {
-        out.activation_mode = *activation_mode;
-    }
+    const ActivationMode legacy_activation_mode = activation_mode.value_or(ActivationMode::Toggle);
+    out.always_active = always_active.value_or(legacy_activation_mode == ActivationMode::AlwaysOn);
 
     const auto defaults_it = object.find("defaults");
     if (defaults_it != object.end()) {
@@ -1429,19 +1646,10 @@ bool ParsePivotModule(const JsonValue::Object& object, PivotXrModuleConfig& out,
         }
     }
 
-    const auto activation_binding_it = object.find("activationBinding");
-    if (activation_binding_it != object.end() && !ParseInputBinding(activation_binding_it->second, out.activation_binding, error)) {
-        return false;
-    }
-
-    const auto set_origin_it = object.find("setOriginBinding");
-    if (set_origin_it != object.end() && !ParseInputBinding(set_origin_it->second, out.set_origin_binding, error)) {
-        return false;
-    }
-
-    const auto release_origin_it = object.find("releaseOriginBinding");
-    if (release_origin_it != object.end() &&
-        !ParseInputBinding(release_origin_it->second, out.release_origin_binding, error)) {
+    if (!ParsePivotActivationBindings(object, "activationBindings", "activationBinding", legacy_activation_mode, out.activation_bindings, error) ||
+        !ParseInputBindings(object, "setOriginBindings", "setOriginBinding", out.set_origin_bindings, error) ||
+        !ParseInputBindings(object, "releaseOriginBindings", "releaseOriginBinding", out.release_origin_bindings,
+                            error)) {
         return false;
     }
 

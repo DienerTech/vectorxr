@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { computed, ref } from 'vue'
 
 import AppPicker from './AppPicker.vue'
 import type { RegisteredApplication } from '../lib/model'
@@ -17,6 +17,7 @@ const props = defineProps<{
   moduleLabel: string
   warningTitle?: string
   warnings?: string[]
+  enabledChangeNote?: string
   // When set, shows priority reorder controls. Array order is priority order:
   // earlier profiles win contested bindings for a shared application.
   reorderable?: boolean
@@ -30,10 +31,17 @@ defineEmits<{
 }>()
 
 const editingName = ref(false)
+const hasNoAssignedApplications = computed(
+  () => props.profile.enabled && props.profile.applicationIds.length === 0,
+)
 </script>
 
 <template>
-  <article class="rounded-[1rem] border p-4 shadow-panel transition" :class="profile.enabled ? 'surface-panel' : 'surface-panel-soft opacity-60'">
+  <article
+    class="rounded-[1rem] border p-4 shadow-panel transition"
+    :class="profile.enabled ? 'surface-panel' : 'surface-panel-soft opacity-60'"
+    :style="hasNoAssignedApplications ? { borderColor: 'var(--app-warning-text)' } : undefined"
+  >
     <div class="mb-3 flex flex-wrap items-center justify-between gap-3">
       <div class="flex flex-wrap items-center gap-2">
         <p class="eyebrow text-xs uppercase tracking-[0.24em]">Profile {{ index + 1 }}</p>
@@ -58,6 +66,12 @@ const editingName = ref(false)
             <path d="M13.92 2.87a2.2 2.2 0 0 1 3.11 3.11l-.72.72-3.11-3.11.72-.72Zm-1.7 1.7 3.11 3.11-8.7 8.7-3.44.33.33-3.44 8.7-8.7Z" />
           </svg>
         </button>
+        <span
+          v-if="hasNoAssignedApplications"
+          class="rounded-full px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.14em] chip-warning"
+        >
+          No applications
+        </span>
         <slot name="badges" />
       </div>
 
@@ -88,10 +102,11 @@ const editingName = ref(false)
         </div>
         <label
           class="pill-toggle inline-flex items-center gap-3 rounded-full px-4 py-2 text-sm font-medium"
-          :title="profile.enabled ? `This profile applies custom ${moduleLabel} settings to its assigned applications.` : `This profile is ignored at runtime.`"
+          :title="enabledChangeNote ?? (profile.enabled ? `This profile applies custom ${moduleLabel} settings to its assigned applications.` : `This profile is ignored at runtime.`)"
         >
           <input v-model="profile.enabled" class="h-4 w-4 accent-depthxr-copper" type="checkbox" />
           {{ profile.enabled ? 'Profile On' : 'Profile Off' }}
+          <span v-if="enabledChangeNote" class="restart-required-mark" :title="enabledChangeNote">&#8635;</span>
         </label>
         <button class="button-secondary rounded-[0.75rem] px-3.5 py-2 text-sm font-medium" type="button" @click="$emit('remove')">
           Remove
@@ -126,6 +141,18 @@ const editingName = ref(false)
         @change="$emit('syncName')"
       />
     </label>
+
+    <div
+      v-if="hasNoAssignedApplications"
+      class="mt-3 rounded-[0.9rem] border px-4 py-3 text-sm leading-6 chip-warning"
+      style="border-color: var(--app-border)"
+      role="note"
+    >
+      <p class="font-medium">This profile will not activate</p>
+      <p class="mt-1">
+        This enabled profile is not assigned to any applications. Select at least one application or turn the profile off.
+      </p>
+    </div>
 
     <div v-if="!profile.enabled" class="mt-3 rounded-[0.9rem] border px-4 py-3 text-sm leading-6 surface-panel-strong">
       This profile is off and has no effect. Its applications fall back to the default {{ moduleLabel }} profile.
