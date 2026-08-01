@@ -13,6 +13,7 @@
 #include "depthxr/logger.h"
 #include "depthxr/pivot_routing.h"
 #include "depthxr/pivot_step.h"
+#include "depthxr/pivot_view.h"
 #include "depthxr/quadviews_recovery.h"
 #include "depthxr/quadviews_sizing.h"
 #include "depthxr/runtime_pacing.h"
@@ -690,6 +691,114 @@ void TestPivotResponseModeAndAdvancedAxes() {
            "Symmetric collapse should mirror yaw deadzone into direction tunings");
     Expect(std::abs(stepped_profile.pitch_positive.deadzone_degrees - 90.0) < 0.0001,
            "Symmetric collapse should mirror pitch deadzone into direction tunings");
+}
+
+void TestPivotViewControlsParsingAndResolution() {
+    const std::string json = R"json(
+{
+  "version": 3,
+  "core": { "enabled": true, "logLevel": "info", "logRetentionFiles": 7 },
+  "applications": [
+    { "id": "dcs", "name": "DCS", "enabled": true, "match": { "exe": "DCS.exe" } }
+  ],
+  "modules": {
+    "depthxr": {},
+    "pivotxr": {
+      "enabled": false,
+      "profiles": [
+        {
+          "id": "accessible-views",
+          "name": "Accessible Views",
+          "applicationIds": ["dcs"],
+          "enabled": true,
+          "alwaysActive": false,
+          "activationBindings": [],
+          "viewControls": {
+            "nudges": {
+              "yawStepDegrees": 35.0,
+              "pitchStepDegrees": 15.0,
+              "transitionSeconds": 0.2,
+              "yawLeftBindings": [{ "type": "keyboard", "chord": ["Q"] }],
+              "yawRightBindings": [],
+              "pitchUpBindings": [],
+              "pitchDownBindings": [],
+              "centerBindings": [{ "type": "keyboard", "chord": ["C"] }]
+            },
+            "quickViews": [
+              {
+                "id": "check-six",
+                "name": "Check Six",
+                "yawDegrees": 180.0,
+                "pitchDegrees": 10.0,
+                "positionRightCm": 2.0,
+                "positionUpCm": 3.0,
+                "positionForwardCm": 4.0,
+                "transitionSeconds": 0.25,
+                "turnDirection": "left",
+                "activationBindings": [
+                  {
+                    "behavior": "hold",
+                    "binding": { "type": "keyboard", "chord": ["F9"] }
+                  }
+                ]
+              }
+            ]
+          },
+          "settings": {}
+        }
+      ]
+    }
+  }
+}
+)json";
+
+    const depthxr::ParseResult result = depthxr::ParseConfig(json);
+    Expect(result.ok, "Config parser rejected Pivot View Controls: " + result.error);
+    const depthxr::PivotViewControls& parsed =
+        result.document.pivotxr.profiles[0].view_controls;
+    Expect(std::abs(parsed.nudges.yaw_step_degrees - 35.0) < 0.0001,
+           "Pivot nudge yaw step mismatch");
+    Expect(parsed.nudges.yaw_left_bindings[0].chord[0] == "Q" &&
+               parsed.nudges.center_bindings[0].chord[0] == "C",
+           "Pivot nudge bindings mismatch");
+    Expect(parsed.quick_views.size() == 1 && parsed.quick_views[0].id == "check-six",
+           "Pivot Quick View identity mismatch");
+    Expect(parsed.quick_views[0].turn_direction == depthxr::PivotQuickViewTurnDirection::Left &&
+               parsed.quick_views[0].activation_bindings[0].behavior ==
+                   depthxr::PivotActivationBehavior::Hold,
+           "Pivot Quick View activation mismatch");
+
+    const depthxr::ResolvedRuntimeConfig resolved =
+        depthxr::ResolveRuntimeConfig(result.document, "DCS.exe");
+    Expect(resolved.pivotxr.enabled && resolved.pivotxr.profiles.size() == 1,
+           "A profile with View Control bindings must resolve without Motion Assist activation");
+    Expect(resolved.pivotxr.profiles[0].view_controls.quick_views[0].position_forward_cm == 4.0,
+           "Resolved Pivot Quick View position mismatch");
+}
+
+void TestPivotViewTransitionMath() {
+    depthxr::PivotViewTransitionState state;
+    depthxr::PivotViewOffset target{1.0, -0.5, 0.1, 0.2, -0.3};
+    depthxr::RetargetPivotViewTransition(target, 0.2, state);
+    Expect(state.active && depthxr::PivotViewOffsetNearlyZero(state.current),
+           "Pivot View transition did not begin at the current offset");
+
+    depthxr::UpdatePivotViewTransition(0.1, state);
+    Expect(std::abs(state.current.yaw_radians - 0.5) < 0.0001 &&
+               std::abs(state.current.right_meters - 0.05) < 0.0001,
+           "Pivot View smoothstep midpoint mismatch");
+
+    const depthxr::PivotViewOffset midpoint = state.current;
+    depthxr::RetargetPivotViewTransition({}, 0.1, state);
+    Expect(depthxr::PivotViewOffsetNearlyEqual(state.start, midpoint),
+           "Pivot View retarget did not preserve the in-flight position");
+    depthxr::UpdatePivotViewTransition(0.1, state);
+    Expect(!state.active && depthxr::PivotViewOffsetNearlyZero(state.current),
+           "Pivot View transition did not settle exactly on its target");
+
+    depthxr::RetargetPivotViewTransition(target, 0.0, state);
+    Expect(!state.active && depthxr::PivotViewOffsetNearlyEqual(state.current, target),
+           "A zero-duration Pivot View transition must apply instantly");
 }
 
 void TestPivotSteppedGlideMath() {
@@ -2228,6 +2337,8 @@ int main() {
     TestPivotProfileResolution();
     TestPivotMultiProfileResolution();
     TestPivotResponseModeAndAdvancedAxes();
+    TestPivotViewControlsParsingAndResolution();
+    TestPivotViewTransitionMath();
     TestPivotSteppedGlideMath();
     TestTurboModuleResolution();
     TestTurboPacingModeParsing();

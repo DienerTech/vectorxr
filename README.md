@@ -43,7 +43,9 @@ Depth profiles tune world scale and the convergence plane globally or per applic
 ![VectorXR Pivot tab](docs/screenshots/pivot.jpg)
 
 Pivot profiles configure continuous or stepped yaw and pitch assistance, per-direction tuning,
-bounded step glides, activation behavior, and multiple keyboard or device bindings.
+bounded step glides, activation behavior, and multiple keyboard or device bindings. Accessible
+View Controls add accumulating fixed-step yaw/pitch nudges and unlimited named Quick Views with
+Hold or Toggle behavior, smooth transitions, and optional origin-relative position offsets.
 
 ### Quadviews
 

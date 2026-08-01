@@ -449,6 +449,8 @@ struct PivotXRProfileConfig {
     release_origin_bindings: Vec<InputBinding>,
     #[serde(default)]
     settings: PivotXRSettings,
+    #[serde(default)]
+    view_controls: serde_json::Map<String, serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -481,6 +483,8 @@ struct PivotXRModuleConfig {
     )]
     release_origin_bindings: Vec<InputBinding>,
     #[serde(default)]
+    view_controls: serde_json::Map<String, serde_json::Value>,
+    #[serde(default)]
     profiles: Vec<PivotXRProfileConfig>,
 }
 
@@ -494,6 +498,7 @@ impl Default for PivotXRModuleConfig {
             activation_bindings: Vec::new(),
             set_origin_bindings: Vec::new(),
             release_origin_bindings: Vec::new(),
+            view_controls: serde_json::Map::new(),
             profiles: Vec::new(),
         }
     }
@@ -2028,6 +2033,47 @@ mod tests {
         assert_eq!(serialized["stepGlideSeconds"], 0.18);
         assert_eq!(serialized["yawStep"]["triggerDegrees"], 11.0);
         assert_eq!(serialized["pitchDownStep"]["amountDegrees"], 22.0);
+    }
+
+    #[test]
+    fn pivot_view_controls_survive_the_config_save_round_trip() {
+        let profile: PivotXRProfileConfig = serde_json::from_value(serde_json::json!({
+            "name": "Accessible Views",
+            "viewControls": {
+                "nudges": {
+                    "yawStepDegrees": 30.0,
+                    "pitchStepDegrees": 20.0,
+                    "transitionSeconds": 0.12,
+                    "yawLeftBindings": [{ "type": "keyboard", "chord": ["Q"] }],
+                    "yawRightBindings": [],
+                    "pitchUpBindings": [],
+                    "pitchDownBindings": [],
+                    "centerBindings": []
+                },
+                "quickViews": [{
+                    "id": "check-six",
+                    "name": "Check Six",
+                    "yawDegrees": 180.0,
+                    "pitchDegrees": 0.0,
+                    "positionRightCm": 0.0,
+                    "positionUpCm": 0.0,
+                    "positionForwardCm": 0.0,
+                    "transitionSeconds": 0.18,
+                    "turnDirection": "right",
+                    "activationBindings": [{
+                        "behavior": "toggle",
+                        "binding": { "type": "keyboard", "chord": ["F9"] }
+                    }]
+                }]
+            }
+        }))
+        .expect("Pivot View Controls should deserialize");
+
+        let serialized = serde_json::to_value(profile).expect("Pivot profile should serialize");
+        assert_eq!(serialized["viewControls"]["nudges"]["yawStepDegrees"], 30.0);
+        assert_eq!(serialized["viewControls"]["nudges"]["yawLeftBindings"][0]["chord"][0], "Q");
+        assert_eq!(serialized["viewControls"]["quickViews"][0]["name"], "Check Six");
+        assert_eq!(serialized["viewControls"]["quickViews"][0]["activationBindings"][0]["behavior"], "toggle");
     }
 
     #[test]

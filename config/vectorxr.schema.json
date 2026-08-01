@@ -407,6 +407,56 @@
         "pitchDownStep": { "$ref": "#/$defs/pivotStepTuning" }
       }
     },
+    "pivotNudgeSettings": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "yawStepDegrees", "pitchStepDegrees", "transitionSeconds",
+        "yawLeftBindings", "yawRightBindings", "pitchUpBindings", "pitchDownBindings", "centerBindings"
+      ],
+      "properties": {
+        "yawStepDegrees": { "type": "number", "minimum": 1.0, "maximum": 90.0 },
+        "pitchStepDegrees": { "type": "number", "minimum": 1.0, "maximum": 60.0 },
+        "transitionSeconds": { "type": "number", "minimum": 0.0, "maximum": 2.0 },
+        "yawLeftBindings": { "$ref": "#/$defs/inputBindings" },
+        "yawRightBindings": { "$ref": "#/$defs/inputBindings" },
+        "pitchUpBindings": { "$ref": "#/$defs/inputBindings" },
+        "pitchDownBindings": { "$ref": "#/$defs/inputBindings" },
+        "centerBindings": { "$ref": "#/$defs/inputBindings" }
+      }
+    },
+    "pivotQuickView": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id", "name", "yawDegrees", "pitchDegrees", "positionRightCm", "positionUpCm",
+        "positionForwardCm", "transitionSeconds", "turnDirection", "activationBindings"
+      ],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "name": { "type": "string", "minLength": 1 },
+        "yawDegrees": { "type": "number", "minimum": -180.0, "maximum": 180.0 },
+        "pitchDegrees": { "type": "number", "minimum": -85.0, "maximum": 85.0 },
+        "positionRightCm": { "type": "number", "minimum": -100.0, "maximum": 100.0 },
+        "positionUpCm": { "type": "number", "minimum": -100.0, "maximum": 100.0 },
+        "positionForwardCm": { "type": "number", "minimum": -100.0, "maximum": 100.0 },
+        "transitionSeconds": { "type": "number", "minimum": 0.0, "maximum": 2.0 },
+        "turnDirection": { "type": "string", "enum": ["left", "right"] },
+        "activationBindings": { "$ref": "#/$defs/pivotActivationBindings" }
+      }
+    },
+    "pivotViewControls": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["nudges", "quickViews"],
+      "properties": {
+        "nudges": { "$ref": "#/$defs/pivotNudgeSettings" },
+        "quickViews": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/pivotQuickView" }
+        }
+      }
+    },
     "pivotxrProfile": {
       "type": "object",
       "additionalProperties": false,
@@ -419,6 +469,7 @@
         "enabled",
         "applicationIds",
         "activationBindings",
+        "viewControls",
         "settings"
       ],
       "properties": {
@@ -453,6 +504,9 @@
         "releaseOriginBindings": {
           "$ref": "#/$defs/inputBindings"
         },
+        "viewControls": {
+          "$ref": "#/$defs/pivotViewControls"
+        },
         "settings": {
           "$ref": "#/$defs/pivotxrSettings"
         }
@@ -464,6 +518,7 @@
       "required": [
         "enabled",
         "defaults",
+        "viewControls",
         "profiles"
       ],
       "properties": {
@@ -488,6 +543,9 @@
         },
         "releaseOriginBindings": {
           "$ref": "#/$defs/inputBindings"
+        },
+        "viewControls": {
+          "$ref": "#/$defs/pivotViewControls"
         },
         "profiles": {
           "type": "array",

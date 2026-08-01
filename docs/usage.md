@@ -128,7 +128,7 @@ Depth controls perceived world scale; Convergence places the zero-parallax depth
 Pivot enhances head rotation for seated and flight-sim VR, letting you see further to the side or
 up/down than your physical neck allows.
 
-- In **Bindings**, choose an **Activation Mode**. *Toggle* and *hold* require an
+- In **Activation**, choose an **Activation Mode**. *Toggle* and *hold* require an
   activation **Binding** — a keyboard chord or a detected input device (joystick / HOTAS).
   *Always on* engages Pivot automatically without a binding. If you assign one, pressing it
   suspends and resumes automatic engagement.
@@ -137,6 +137,18 @@ up/down than your physical neck allows.
   neutral seated origin; assigning it to the same input as the simulator's recenter action keeps
   both origins aligned. **Release Origin** clears that captured origin. Set Origin and Release
   Origin can each have multiple bindings too.
+- **View Controls > Rotation Nudges** adds a fixed yaw or pitch amount each time its binding is
+  pressed. Left/right and up/down accumulate and can undo each other; **Center Manual Offset**
+  returns both axes to zero. Nudge steps have a shared transition time (zero is instant), combine
+  with normal Motion Assist, and are guarded to ±180° yaw and ±85° pitch.
+- **View Controls > Quick Views** creates any number of named origin-relative views. Each view has
+  yaw, pitch, transition time, optional right/up/forward position offsets, and one or more
+  independently configured **Hold** or **Toggle** bindings. The four-view preset creates Look Left,
+  Look Right, High 12, and Check Six as a starting point. A 180° view also lets you choose whether
+  its transition travels left or right.
+- A Quick View temporarily overrides Motion Assist and accumulated nudges while active, but keeps
+  natural HMD tracking 1:1 around the target. Leaving it smoothly returns to the underlying
+  Motion Assist/nudge state. View Controls work even when Motion Assist itself is not activated.
 - Choose **Continuous** response for multiplier-based motion, then tune **Yaw** and **Pitch**
   independently with rotation **Multiplier**, **Deadzone**, and **Max Extra** degrees. A shared
   **Smoothing** value softens continuous motion.

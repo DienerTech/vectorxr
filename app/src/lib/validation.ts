@@ -1,4 +1,4 @@
-import type { CoreConfig, DepthXRProfileConfig, DepthXRSettings, InputBinding, PivotXRProfileConfig, PivotXRSettings, QuadViewsProfileConfig, QuadViewsSettings, RegisteredApplication, VectorXRConfig } from './model'
+import type { CoreConfig, DepthXRProfileConfig, DepthXRSettings, InputBinding, PivotViewControls, PivotXRProfileConfig, PivotXRSettings, QuadViewsProfileConfig, QuadViewsSettings, RegisteredApplication, VectorXRConfig } from './model'
 
 function validateCoreConfig(core: CoreConfig): string[] {
   const errors: string[] = []
@@ -207,6 +207,41 @@ function validatePivotXRSettings(prefix: string, settings: PivotXRSettings): str
   return errors
 }
 
+function validatePivotViewControls(prefix: string, controls: PivotViewControls): string[] {
+  const errors: string[] = []
+  const nudges = controls.nudges
+  if (!Number.isFinite(nudges.yawStepDegrees) || nudges.yawStepDegrees < 1 || nudges.yawStepDegrees > 90) errors.push(`${prefix}nudges.yawStepDegrees must be between 1 and 90`)
+  if (!Number.isFinite(nudges.pitchStepDegrees) || nudges.pitchStepDegrees < 1 || nudges.pitchStepDegrees > 60) errors.push(`${prefix}nudges.pitchStepDegrees must be between 1 and 60`)
+  if (!Number.isFinite(nudges.transitionSeconds) || nudges.transitionSeconds < 0 || nudges.transitionSeconds > 2) errors.push(`${prefix}nudges.transitionSeconds must be between 0 and 2`)
+  errors.push(...validateInputBindings(`${prefix}nudges.yawLeftBindings`, nudges.yawLeftBindings))
+  errors.push(...validateInputBindings(`${prefix}nudges.yawRightBindings`, nudges.yawRightBindings))
+  errors.push(...validateInputBindings(`${prefix}nudges.pitchUpBindings`, nudges.pitchUpBindings))
+  errors.push(...validateInputBindings(`${prefix}nudges.pitchDownBindings`, nudges.pitchDownBindings))
+  errors.push(...validateInputBindings(`${prefix}nudges.centerBindings`, nudges.centerBindings))
+
+  const ids = new Set<string>()
+  controls.quickViews.forEach((view, index) => {
+    const viewPrefix = `${prefix}quickViews[${index}].`
+    if (!view.id.trim()) errors.push(`${viewPrefix}id is required`)
+    if (ids.has(view.id)) errors.push(`${viewPrefix}id duplicates another Quick View`)
+    ids.add(view.id)
+    if (!view.name.trim()) errors.push(`${viewPrefix}name is required`)
+    if (!Number.isFinite(view.yawDegrees) || view.yawDegrees < -180 || view.yawDegrees > 180) errors.push(`${viewPrefix}yawDegrees must be between -180 and 180`)
+    if (!Number.isFinite(view.pitchDegrees) || view.pitchDegrees < -85 || view.pitchDegrees > 85) errors.push(`${viewPrefix}pitchDegrees must be between -85 and 85`)
+    if (!Number.isFinite(view.transitionSeconds) || view.transitionSeconds < 0 || view.transitionSeconds > 2) errors.push(`${viewPrefix}transitionSeconds must be between 0 and 2`)
+    const positions: Array<[string, number]> = [
+      ['positionRightCm', view.positionRightCm],
+      ['positionUpCm', view.positionUpCm],
+      ['positionForwardCm', view.positionForwardCm],
+    ]
+    positions.forEach(([name, value]) => {
+      if (!Number.isFinite(value) || value < -100 || value > 100) errors.push(`${viewPrefix}${name} must be between -100 and 100`)
+    })
+    errors.push(...validateInputBindings(`${viewPrefix}activationBindings`, view.activationBindings.map((item) => item.binding)))
+  })
+  return errors
+}
+
 function validateQuadViewsSettings(prefix: string, settings: QuadViewsSettings): string[] {
   const errors: string[] = []
   const bounded = [
@@ -349,6 +384,7 @@ function validatePivotXRProfile(profile: PivotXRProfileConfig, index: number, ap
   errors.push(...validateInputBindings(`${prefix}setOriginBindings`, profile.setOriginBindings))
   errors.push(...validateInputBindings(`${prefix}releaseOriginBindings`, profile.releaseOriginBindings))
   errors.push(...validatePivotXRSettings(prefix, profile.settings))
+  errors.push(...validatePivotViewControls(`${prefix}viewControls.`, profile.viewControls))
   return errors
 }
 
@@ -413,6 +449,7 @@ export function validateConfig(config: VectorXRConfig): string[] {
   errors.push(...validateInputBindings('modules.pivotxr.activationBindings', config.modules.pivotxr.activationBindings.map((item) => item.binding)))
   errors.push(...validateInputBindings('modules.pivotxr.setOriginBindings', config.modules.pivotxr.setOriginBindings))
   errors.push(...validateInputBindings('modules.pivotxr.releaseOriginBindings', config.modules.pivotxr.releaseOriginBindings))
+  errors.push(...validatePivotViewControls('modules.pivotxr.viewControls.', config.modules.pivotxr.viewControls))
   errors.push(...validateQuadViewsSettings('modules.quadviews.defaults.', config.modules.quadviews.defaults))
 
   const applicationIds = new Set(config.applications.map((application) => application.id))

@@ -1527,6 +1527,107 @@ bool ParsePivotSettings(const JsonValue::Object& object, PivotXrSettings& out, s
     return true;
 }
 
+bool ParsePivotNudgeSettings(const JsonValue& value, PivotNudgeSettings& out, std::string& error) {
+    const JsonValue::Object* object = RequireObject(value, "pivot nudges", error);
+    if (!object) return false;
+    static const std::unordered_set<std::string> allowed = {
+        "yawStepDegrees", "pitchStepDegrees", "transitionSeconds",
+        "yawLeftBindings", "yawRightBindings", "pitchUpBindings", "pitchDownBindings", "centerBindings",
+    };
+    if (!CheckAllowedKeys(*object, allowed, error)) return false;
+
+    std::optional<double> yaw_step;
+    std::optional<double> pitch_step;
+    std::optional<double> transition;
+    if (!ReadOptionalNumber(*object, "yawStepDegrees", yaw_step, error) ||
+        !ReadOptionalNumber(*object, "pitchStepDegrees", pitch_step, error) ||
+        !ReadOptionalNumber(*object, "transitionSeconds", transition, error)) {
+        return false;
+    }
+    if (yaw_step) out.yaw_step_degrees = *yaw_step;
+    if (pitch_step) out.pitch_step_degrees = *pitch_step;
+    if (transition) out.transition_seconds = *transition;
+
+    return ParseInputBindings(*object, "yawLeftBindings", "yawLeftBinding", out.yaw_left_bindings, error) &&
+           ParseInputBindings(*object, "yawRightBindings", "yawRightBinding", out.yaw_right_bindings, error) &&
+           ParseInputBindings(*object, "pitchUpBindings", "pitchUpBinding", out.pitch_up_bindings, error) &&
+           ParseInputBindings(*object, "pitchDownBindings", "pitchDownBinding", out.pitch_down_bindings, error) &&
+           ParseInputBindings(*object, "centerBindings", "centerBinding", out.center_bindings, error);
+}
+
+bool ParsePivotQuickView(const JsonValue& value, PivotQuickView& out, std::string& error) {
+    const JsonValue::Object* object = RequireObject(value, "pivot quick view", error);
+    if (!object) return false;
+    static const std::unordered_set<std::string> allowed = {
+        "id", "name", "yawDegrees", "pitchDegrees", "positionRightCm", "positionUpCm",
+        "positionForwardCm", "transitionSeconds", "turnDirection", "activationBindings",
+    };
+    if (!CheckAllowedKeys(*object, allowed, error)) return false;
+
+    std::optional<std::string> id;
+    std::optional<std::string> name;
+    std::optional<std::string> turn_direction;
+    std::optional<double> yaw;
+    std::optional<double> pitch;
+    std::optional<double> right;
+    std::optional<double> up;
+    std::optional<double> forward;
+    std::optional<double> transition;
+    if (!ReadOptionalString(*object, "id", id, error) ||
+        !ReadOptionalString(*object, "name", name, error) ||
+        !ReadOptionalString(*object, "turnDirection", turn_direction, error) ||
+        !ReadOptionalNumber(*object, "yawDegrees", yaw, error) ||
+        !ReadOptionalNumber(*object, "pitchDegrees", pitch, error) ||
+        !ReadOptionalNumber(*object, "positionRightCm", right, error) ||
+        !ReadOptionalNumber(*object, "positionUpCm", up, error) ||
+        !ReadOptionalNumber(*object, "positionForwardCm", forward, error) ||
+        !ReadOptionalNumber(*object, "transitionSeconds", transition, error)) {
+        return false;
+    }
+    out.id = id.value_or("");
+    out.name = name.value_or("Quick View");
+    if (yaw) out.yaw_degrees = *yaw;
+    if (pitch) out.pitch_degrees = *pitch;
+    if (right) out.position_right_cm = *right;
+    if (up) out.position_up_cm = *up;
+    if (forward) out.position_forward_cm = *forward;
+    if (transition) out.transition_seconds = *transition;
+    if (turn_direction) {
+        if (*turn_direction == "left") out.turn_direction = PivotQuickViewTurnDirection::Left;
+        else if (*turn_direction == "right") out.turn_direction = PivotQuickViewTurnDirection::Right;
+        else {
+            error = "pivot quick view turnDirection must be one of: left, right";
+            return false;
+        }
+    }
+    return ParsePivotActivationBindings(*object, "activationBindings", "activationBinding",
+                                        ActivationMode::Toggle, out.activation_bindings, error);
+}
+
+bool ParsePivotViewControls(const JsonValue& value, PivotViewControls& out, std::string& error) {
+    const JsonValue::Object* object = RequireObject(value, "pivot viewControls", error);
+    if (!object) return false;
+    static const std::unordered_set<std::string> allowed = {"nudges", "quickViews"};
+    if (!CheckAllowedKeys(*object, allowed, error)) return false;
+
+    const auto nudges_it = object->find("nudges");
+    if (nudges_it != object->end() && !ParsePivotNudgeSettings(nudges_it->second, out.nudges, error)) {
+        return false;
+    }
+    const auto quick_views_it = object->find("quickViews");
+    if (quick_views_it != object->end()) {
+        const JsonValue::Array* quick_views = RequireArray(quick_views_it->second, "quickViews", error);
+        if (!quick_views) return false;
+        out.quick_views.clear();
+        for (const JsonValue& quick_view_value : *quick_views) {
+            PivotQuickView quick_view;
+            if (!ParsePivotQuickView(quick_view_value, quick_view, error)) return false;
+            out.quick_views.push_back(std::move(quick_view));
+        }
+    }
+    return true;
+}
+
 
 bool ParsePivotProfile(const JsonValue& value, PivotXrProfile& out, std::string& error) {
     const JsonValue::Object* object = RequireObject(value, "pivotProfile", error);
@@ -1548,6 +1649,7 @@ bool ParsePivotProfile(const JsonValue& value, PivotXrProfile& out, std::string&
         "activationBinding",
         "setOriginBinding",
         "releaseOriginBinding",
+        "viewControls",
         "settings",
     };
 
@@ -1594,6 +1696,12 @@ bool ParsePivotProfile(const JsonValue& value, PivotXrProfile& out, std::string&
         return false;
     }
 
+    const auto view_controls_it = object->find("viewControls");
+    if (view_controls_it != object->end() &&
+        !ParsePivotViewControls(view_controls_it->second, out.view_controls, error)) {
+        return false;
+    }
+
     const auto settings_it = object->find("settings");
     if (settings_it != object->end()) {
         const JsonValue::Object* settings_object = RequireObject(settings_it->second, "pivotProfile.settings", error);
@@ -1617,6 +1725,7 @@ bool ParsePivotModule(const JsonValue::Object& object, PivotXrModuleConfig& out,
         "activationBinding",
         "setOriginBinding",
         "releaseOriginBinding",
+        "viewControls",
         "profiles",
     };
 
@@ -1650,6 +1759,12 @@ bool ParsePivotModule(const JsonValue::Object& object, PivotXrModuleConfig& out,
         !ParseInputBindings(object, "setOriginBindings", "setOriginBinding", out.set_origin_bindings, error) ||
         !ParseInputBindings(object, "releaseOriginBindings", "releaseOriginBinding", out.release_origin_bindings,
                             error)) {
+        return false;
+    }
+
+    const auto view_controls_it = object.find("viewControls");
+    if (view_controls_it != object.end() &&
+        !ParsePivotViewControls(view_controls_it->second, out.view_controls, error)) {
         return false;
     }
 

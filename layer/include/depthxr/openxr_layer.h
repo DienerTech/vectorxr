@@ -22,6 +22,7 @@
 
 #include "depthxr/config_parser.h"
 #include "depthxr/pivot_step.h"
+#include "depthxr/pivot_view.h"
 #include "depthxr/effects.h"
 #include "depthxr/logger.h"
 #include "depthxr/quadviews_recovery.h"
@@ -654,6 +655,16 @@ class OpenXrLayer {
         std::vector<BindingState> activation;
         std::vector<BindingState> set_origin;
         std::vector<BindingState> release_origin;
+        std::vector<BindingState> nudge_yaw_left;
+        std::vector<BindingState> nudge_yaw_right;
+        std::vector<BindingState> nudge_pitch_up;
+        std::vector<BindingState> nudge_pitch_down;
+        std::vector<BindingState> nudge_center;
+        struct QuickViewState {
+            std::vector<BindingState> activation;
+            bool toggle_latched{false};
+        };
+        std::vector<QuickViewState> quick_views;
         // Toggle controls share one latch per profile. Hold state remains
         // per binding and is derived from the cached input state.
         bool toggle_latched{false};
@@ -664,6 +675,12 @@ class OpenXrLayer {
     // release ramp so the easing keeps using that profile's settings.
     size_t pivotxr_active_profile_index_{0};
     bool pivotxr_engaged_{false};
+    PivotViewTransitionState pivotxr_manual_view_transition_;
+    PivotViewTransitionState pivotxr_quick_view_transition_;
+    bool pivotxr_quick_view_active_{false};
+    bool pivotxr_quick_view_transitioning_{false};
+    size_t pivotxr_quick_view_profile_index_{0};
+    size_t pivotxr_quick_view_index_{0};
     // Optional full seated origin in the app's reference space. Motion Assist
     // currently consumes yaw/pitch, while the complete pose, capture time, and
     // session identity establish the stable positional reference required by

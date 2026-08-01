@@ -4,6 +4,7 @@ import test from 'node:test'
 import {
   bindingsMatchRuntimeActivation,
   bindingsShareInput,
+  createPivotQuickView,
   defaultConfig,
   createPivotProfile,
   normalizeConfig,
@@ -334,4 +335,65 @@ test('saved glide durations are normalized to the UI precision', () => {
   const normalized = normalizeConfig(config)
 
   assert.equal(normalized.modules.pivotxr.defaults.stepGlideSeconds, 0.08)
+})
+
+test('new Pivot view controls are inert until bindings are assigned', () => {
+  const controls = defaultConfig().modules.pivotxr.viewControls
+  assert.equal(controls.nudges.yawStepDegrees, 30)
+  assert.equal(controls.nudges.pitchStepDegrees, 20)
+  assert.equal(controls.nudges.transitionSeconds, 0.12)
+  assert.deepEqual(controls.nudges.yawLeftBindings, [])
+  assert.deepEqual(controls.quickViews, [])
+})
+
+test('Pivot view controls normalize nudges and Quick Views canonically', () => {
+  const config = defaultConfig()
+  const controls = config.modules.pivotxr.viewControls
+  controls.nudges.yawStepDegrees = 35
+  controls.nudges.yawLeftBindings = [keyboard('F6')]
+  const quickView = createPivotQuickView('Check Six')
+  quickView.yawDegrees = 180
+  quickView.turnDirection = 'left'
+  quickView.positionRightCm = 8
+  quickView.activationBindings = [activation('hold', keyboard('F7'))]
+  controls.quickViews.push(quickView)
+
+  const normalized = normalizeConfig(config).modules.pivotxr.viewControls
+  assert.equal(normalized.nudges.yawStepDegrees, 35)
+  assert.deepEqual(normalized.nudges.yawLeftBindings, [keyboard('F6')])
+  assert.equal(normalized.quickViews[0].name, 'Check Six')
+  assert.equal(normalized.quickViews[0].yawDegrees, 180)
+  assert.equal(normalized.quickViews[0].turnDirection, 'left')
+  assert.equal(normalized.quickViews[0].positionRightCm, 8)
+  assert.deepEqual(normalized.quickViews[0].activationBindings, [activation('hold', keyboard('F7'))])
+})
+
+test('new Pivot profiles own independent View Controls and Quick Views', () => {
+  const config = defaultConfig()
+  config.modules.pivotxr.viewControls.quickViews.push(createPivotQuickView('Left Console'))
+  const profile = createPivotProfile(
+    config.modules.pivotxr.defaults,
+    [],
+    false,
+    [],
+    config.modules.pivotxr.viewControls,
+  )
+  profile.viewControls.nudges.yawStepDegrees = 45
+  profile.viewControls.quickViews[0].name = 'Changed'
+
+  assert.equal(config.modules.pivotxr.viewControls.nudges.yawStepDegrees, 30)
+  assert.equal(config.modules.pivotxr.viewControls.quickViews[0].name, 'Left Console')
+})
+
+test('saved binding warnings include nudge and Quick View actions', () => {
+  const config = defaultConfig()
+  config.modules.pivotxr.viewControls.nudges.yawLeftBindings = [keyboard('F6')]
+  const quickView = createPivotQuickView('Check Six')
+  quickView.activationBindings = [activation('hold', keyboard('F6'))]
+  config.modules.pivotxr.viewControls.quickViews = [quickView]
+
+  const warnings = savedBindingConflictWarnings(config, [quickView.activationBindings[0].binding])
+  assert.equal(warnings.length, 1)
+  assert.match(warnings[0].message, /Nudge Left/)
+  assert.match(warnings[0].message, /Check Six/)
 })

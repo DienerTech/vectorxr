@@ -156,6 +156,19 @@ std::vector<PivotActivationBinding> FilterUnclaimedActivationBindings(
     }
     return filtered;
 }
+
+bool HasViewControlBindings(const PivotViewControls& controls) {
+    const PivotNudgeSettings& nudges = controls.nudges;
+    if (!nudges.yaw_left_bindings.empty() || !nudges.yaw_right_bindings.empty() ||
+        !nudges.pitch_up_bindings.empty() || !nudges.pitch_down_bindings.empty() ||
+        !nudges.center_bindings.empty()) {
+        return true;
+    }
+    return std::any_of(controls.quick_views.begin(), controls.quick_views.end(),
+                       [](const PivotQuickView& quick_view) {
+                           return !quick_view.activation_bindings.empty();
+                       });
+}
 } // namespace
 
 PivotXrResolvedSettings ResolvePivotXrSettings(const ConfigDocument& config, std::string_view exe_name) {
@@ -175,7 +188,8 @@ PivotXrResolvedSettings ResolvePivotXrSettings(const ConfigDocument& config, std
             std::vector<PivotActivationBinding> activation_bindings =
                 FilterUnclaimedActivationBindings(profile.activation_bindings, resolved.profiles);
             const bool all_bindings_shadowed = !profile.activation_bindings.empty() && activation_bindings.empty();
-            if (all_bindings_shadowed && !profile.always_active) {
+            if (all_bindings_shadowed && !profile.always_active &&
+                !HasViewControlBindings(profile.view_controls)) {
                 continue;
             }
 
@@ -185,6 +199,7 @@ PivotXrResolvedSettings ResolvePivotXrSettings(const ConfigDocument& config, std
             candidate.activation_bindings = std::move(activation_bindings);
             candidate.set_origin_bindings = profile.set_origin_bindings;
             candidate.release_origin_bindings = profile.release_origin_bindings;
+            candidate.view_controls = profile.view_controls;
             ApplyPivotSettings(candidate, profile.settings);
             resolved.profiles.push_back(std::move(candidate));
         }
@@ -200,6 +215,7 @@ PivotXrResolvedSettings ResolvePivotXrSettings(const ConfigDocument& config, std
             FilterUnclaimedActivationBindings(config.pivotxr.activation_bindings, {});
         candidate.set_origin_bindings = config.pivotxr.set_origin_bindings;
         candidate.release_origin_bindings = config.pivotxr.release_origin_bindings;
+        candidate.view_controls = config.pivotxr.view_controls;
         ApplyPivotSettings(candidate, config.pivotxr.defaults);
         resolved.profiles.push_back(std::move(candidate));
     }

@@ -7,6 +7,8 @@ import PivotSettingsPage from '../PivotSettingsPage.vue'
 import PivotSettingsSummary from '../PivotSettingsSummary.vue'
 import PivotOriginPage from '../PivotOriginPage.vue'
 import PivotOriginPanel from '../PivotOriginPanel.vue'
+import PivotViewControlsPage from '../PivotViewControlsPage.vue'
+import PivotViewControlsPanel from '../PivotViewControlsPanel.vue'
 import ProfileShell from '../ProfileShell.vue'
 import type { RegisteredApplication, VectorXRConfig } from '../../lib/model'
 import { bindingLabel, bindingsMatchRuntimeActivation, pivotBindingConflictWarnings } from '../../lib/model'
@@ -72,6 +74,14 @@ const settingsSubject = computed(() => {
 
 const settingsContextLabel = computed(() => profileContextLabel(settingsTarget.value))
 
+const viewControlsTarget = ref<'default' | number | null>(null)
+const viewControlsSubject = computed(() => {
+  if (viewControlsTarget.value === null) return null
+  if (viewControlsTarget.value === 'default') return props.config.modules.pivotxr
+  return props.config.modules.pivotxr.profiles[viewControlsTarget.value] ?? null
+})
+const viewControlsContextLabel = computed(() => profileContextLabel(viewControlsTarget.value))
+
 function profileContextLabel(target: 'default' | number | null): string {
   if (target === 'default' || target === null) {
     return 'Default Profile'
@@ -106,10 +116,17 @@ function openSettings(target: 'default' | number) {
   void nextTick(() => pageScroller()?.scrollTo({ top: 0 }))
 }
 
+function openViewControls(target: 'default' | number) {
+  savedScrollTop = pageScroller()?.scrollTop ?? 0
+  viewControlsTarget.value = target
+  void nextTick(() => pageScroller()?.scrollTo({ top: 0 }))
+}
+
 function closeSubPages() {
   bindingsTarget.value = null
   settingsTarget.value = null
   originTarget.value = null
+  viewControlsTarget.value = null
   void nextTick(() => pageScroller()?.scrollTo({ top: savedScrollTop }))
 }
 
@@ -121,7 +138,7 @@ const defaultBindingWarnings = computed(() => [
     props.config.modules.pivotxr.releaseOriginBindings,
   ),
   ...(!props.config.modules.pivotxr.alwaysActive && props.config.modules.pivotxr.activationBindings.length === 0
-    ? [{ title: 'No activation binding', message: 'This manual profile cannot engage until you add a Toggle or Hold binding, or enable Always active.' }]
+    ? [{ title: 'No Motion Assist activation', message: 'Motion Assist will remain off until you add a Toggle or Hold binding, or enable Always active. View Controls with bindings still work.' }]
     : []),
 ])
 
@@ -153,7 +170,7 @@ const profileWarnings = computed(() => {
     }
 
     if (!profile.alwaysActive && profile.activationBindings.length === 0) {
-      warnings.set(index, [...(warnings.get(index) ?? []), 'This manual profile has no activation bindings and cannot engage. Add a Toggle or Hold binding, or enable Always active.'])
+      warnings.set(index, [...(warnings.get(index) ?? []), 'Motion Assist has no activation bindings and will remain off. Add a Toggle or Hold binding, or enable Always active. View Controls with bindings still work.'])
     }
 
     for (const activationBinding of profile.activationBindings) {
@@ -194,6 +211,13 @@ const profileWarnings = computed(() => {
     v-else-if="originSubject"
     :subject="originSubject"
     :context-label="originContextLabel"
+    :config="config"
+    @close="closeSubPages"
+  />
+  <PivotViewControlsPage
+    v-else-if="viewControlsSubject"
+    :subject="viewControlsSubject"
+    :context-label="viewControlsContextLabel"
     :config="config"
     @close="closeSubPages"
   />
@@ -267,6 +291,11 @@ const profileWarnings = computed(() => {
             class="mb-3"
             @edit="openSettings('default')"
           />
+          <PivotViewControlsPanel
+            :view-controls="config.modules.pivotxr.viewControls"
+            class="mb-3"
+            @edit="openViewControls('default')"
+          />
           <PivotBindingsPanel
             :always-active="config.modules.pivotxr.alwaysActive"
             :activation-bindings="config.modules.pivotxr.activationBindings"
@@ -324,6 +353,11 @@ const profileWarnings = computed(() => {
           @sync-name="$emit('syncPivotProfileName', index)"
         >
           <PivotSettingsSummary :settings="profile.settings" @edit="openSettings(index)" />
+          <PivotViewControlsPanel
+            :view-controls="profile.viewControls"
+            class="mt-3"
+            @edit="openViewControls(index)"
+          />
           <PivotBindingsPanel
             :always-active="profile.alwaysActive"
             :activation-bindings="profile.activationBindings"
@@ -406,7 +440,7 @@ const profileWarnings = computed(() => {
           </div>
 
           <div class="rounded-[1rem] border px-4 py-4 surface-panel">
-            The best fix: assign the optional <strong>Set Origin</strong> binding (under Edit Bindings) to the same button you use to recenter the view in-game. Every recenter then updates both origins together, so they can never drift apart.
+            The best fix: assign the optional <strong>Set Origin</strong> binding (under Origin Controls) to the same button you use to recenter the view in-game. Every recenter then updates both origins together, so they can never drift apart.
           </div>
 
           <div class="rounded-[1rem] border px-4 py-4 surface-panel">

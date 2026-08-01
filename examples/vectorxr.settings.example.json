@@ -75,6 +75,19 @@
       },
       "alwaysActive": false,
       "activationBindings": [],
+      "viewControls": {
+        "nudges": {
+          "yawStepDegrees": 30.0,
+          "pitchStepDegrees": 20.0,
+          "transitionSeconds": 0.12,
+          "yawLeftBindings": [],
+          "yawRightBindings": [],
+          "pitchUpBindings": [],
+          "pitchDownBindings": [],
+          "centerBindings": []
+        },
+        "quickViews": []
+      },
       "profiles": [
         {
           "name": "DCS",
@@ -84,6 +97,19 @@
           ],
           "alwaysActive": false,
           "activationBindings": [],
+          "viewControls": {
+            "nudges": {
+              "yawStepDegrees": 30.0,
+              "pitchStepDegrees": 20.0,
+              "transitionSeconds": 0.12,
+              "yawLeftBindings": [],
+              "yawRightBindings": [],
+              "pitchUpBindings": [],
+              "pitchDownBindings": [],
+              "centerBindings": []
+            },
+            "quickViews": []
+          },
           "settings": {
             "smoothing": 0.2,
             "activationRampSeconds": 0.35,
