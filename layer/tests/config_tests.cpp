@@ -1211,6 +1211,7 @@ void TestQuadViewsProfileResolution() {
     },
     "quadviews": {
       "enabled": true,
+      "diagnosticVisualizationBinding": { "type": "keyboard", "chord": ["Ctrl", "F8"] },
       "defaults": {
         "trackingMode": "eye",
         "focusHorizontalSizePercent": 32.0,
@@ -1254,6 +1255,9 @@ void TestQuadViewsProfileResolution() {
 
     const depthxr::ResolvedRuntimeConfig resolved = depthxr::ResolveRuntimeConfig(result.document, "DCS.exe");
     Expect(resolved.quadviews.enabled, "Quadviews module enable was not resolved");
+    Expect(resolved.quadviews.diagnostic_visualization_binding.type == depthxr::InputBindingType::Keyboard &&
+               resolved.quadviews.diagnostic_visualization_binding.chord.size() == 2,
+           "Quadviews diagnostic visualization binding mismatch");
     Expect(resolved.quadviews.tracking_mode == depthxr::QuadViewsTrackingMode::Eye,
            "Quadviews profile tracking mode mismatch");
     Expect(std::abs(resolved.quadviews.focus_horizontal_size_percent - 34.0) < 0.0001,
@@ -1981,6 +1985,14 @@ void TestD3D11SharpenShaderRegression() {
         ExpectShaderCompiles(shader, "VSMain", "vs_5_0", function_marker + " vertex shader");
         ExpectShaderCompiles(shader, "PSMain", "ps_5_0", function_marker + " pixel shader");
     }
+
+    const std::string compositor =
+        ExtractRawShaderSource(source_file, "const char* D3D11QuadViewsShaderSource()");
+    Expect(compositor.find("saturate(blendParams.z) * edgeAlpha") != std::string::npos,
+           "Quadviews compositor sharpening no longer ramps with the focus feather");
+    Expect(compositor.find("diagnosticParams.x < 0.5") != std::string::npos &&
+               compositor.find("rawGazeMarker") != std::string::npos,
+           "Quadviews compositor diagnostic visualization is missing");
 }
 #endif
 

@@ -244,6 +244,7 @@ export interface QuadViewsProfileConfig {
 
 export interface QuadViewsModuleConfig {
   enabled: boolean
+  diagnosticVisualizationBinding: InputBinding
   defaults: QuadViewsSettings
   profiles: QuadViewsProfileConfig[]
 }
@@ -628,6 +629,7 @@ export function defaultConfig(): VectorXRConfig {
       },
       quadviews: {
         enabled: false,
+        diagnosticVisualizationBinding: defaultNoneBinding(),
         defaults: defaultQuadViewsSettings(),
         profiles: [],
       },
@@ -1148,6 +1150,7 @@ function savedBindingAssignments(config: VectorXRConfig): SavedBindingAssignment
   const assignments: SavedBindingAssignment[] = [
     { id: 'depth.toggle', label: 'Depth: A/B toggle', binding: config.modules.depthxr.bindings.toggleEnabled },
     { id: 'depth.lock', label: 'Depth: Depth Lock A/B', binding: config.modules.depthxr.bindings.toggleAnchor },
+    { id: 'quadviews.diagnostics', label: 'Quadviews: diagnostic visualization', binding: config.modules.quadviews.diagnosticVisualizationBinding },
     { id: 'turbo.toggle', label: 'Turbo: A/B toggle', binding: config.modules.turbo.toggleBinding },
     { id: 'turbo.metrics', label: 'Turbo: metrics capture', binding: config.modules.turbo.metricsBinding },
   ]
@@ -1459,6 +1462,10 @@ function normalizeVectorXRConfig(value: unknown): VectorXRConfig {
       },
       quadviews: {
         enabled: normalizeBoolean(quadviews.enabled, fallback.modules.quadviews.enabled),
+        diagnosticVisualizationBinding: normalizeInputBinding(
+          quadviews.diagnosticVisualizationBinding,
+          fallback.modules.quadviews.diagnosticVisualizationBinding,
+        ),
         defaults: quadViewsDefaults,
         profiles: quadViewsProfileValues.map((profileValue) => {
           const profile = isRecord(profileValue) ? profileValue : {}

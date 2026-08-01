@@ -669,12 +669,16 @@
       "additionalProperties": false,
       "required": [
         "enabled",
+        "diagnosticVisualizationBinding",
         "defaults",
         "profiles"
       ],
       "properties": {
         "enabled": {
           "type": "boolean"
+        },
+        "diagnosticVisualizationBinding": {
+          "$ref": "#/$defs/inputBinding"
         },
         "defaults": {
           "$ref": "#/$defs/quadviewsSettings"

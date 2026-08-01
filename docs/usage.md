@@ -214,6 +214,21 @@ safe, but the running game keeps its launch-time state until it exits.
   the headset runtime exposing eye-gaze support. If it does not, VectorXR falls back to
   head/static focus.
 
+#### Diagnostic visualization
+
+Assign the **Visualization toggle** in the Quadviews tab, then press it in-game to show or hide
+the calibration view. The visualization starts hidden each OpenXR session and labels the rendered
+regions and tracking pipeline with color:
+
+- Blue tint: peripheral image; amber tint: blended transition band.
+- Green focus outline: focus window with tracking available; red: eye tracking unavailable and
+  VectorXR is holding or returning from the last valid gaze.
+- White cross: head-forward center; magenta ring: configured horizontal/vertical offset.
+- Cyan ring: raw eye gaze; yellow cross: gaze after deadzone and smoothing.
+
+The diagnostic view is available only for VectorXR's synthesized D3D11 Quadviews compositor. It is
+not currently supported on Varjo headsets, where the Varjo runtime owns native composition.
+
 Quadviews and Pivot are designed to compose: unlike running separate foveation and neck-assist
 layers, VectorXR keeps the foveated focus region aligned with your gaze while Pivot rotates the
 view. See [Why VectorXR](../README.md#why-vectorxr).

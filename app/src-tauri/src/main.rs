@@ -569,6 +569,8 @@ struct QuadViewsProfileConfig {
 struct QuadViewsModuleConfig {
     #[serde(default = "default_false")]
     enabled: bool,
+    #[serde(default = "default_activation_binding")]
+    diagnostic_visualization_binding: InputBinding,
     #[serde(default)]
     defaults: QuadViewsSettings,
     #[serde(default)]
@@ -579,6 +581,7 @@ impl Default for QuadViewsModuleConfig {
     fn default() -> Self {
         Self {
             enabled: false,
+            diagnostic_visualization_binding: InputBinding::None,
             defaults: QuadViewsSettings::default(),
             profiles: Vec::new(),
         }

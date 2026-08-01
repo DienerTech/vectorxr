@@ -315,12 +315,16 @@ struct QuadViewsProfile {
 
 struct QuadViewsModuleConfig {
     bool enabled{false};
+    // Optional in-session toggle for the synthesized-compositor diagnostic view.
+    // The visualization itself always starts hidden for each OpenXR session.
+    InputBinding diagnostic_visualization_binding;
     QuadViewsSettings defaults;
     std::vector<QuadViewsProfile> profiles;
 };
 
 struct QuadViewsResolvedSettings : QuadViewsSettings {
     bool enabled{false};
+    InputBinding diagnostic_visualization_binding;
 };
 
 // Turbo mode: overrides runtime frame pacing (one frame of pipelining).

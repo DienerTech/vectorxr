@@ -565,6 +565,10 @@ struct FocusRectConstants {
     float focus_texel[4];
     float peripheral_src_rect[4];
     float focus_src_rect[4];
+    float diagnostic_params[4];
+    float output_texel[4];
+    float gaze_markers[4];
+    float reference_markers[4];
 };
 
 FocusRectConstants BuildFocusRectConstants(const XrFovf& full_fov,
@@ -623,6 +627,21 @@ FocusRectConstants BuildFocusRectConstants(const XrFovf& full_fov,
     return constants;
 }
 
+std::array<float, 2> ProjectViewAnglesToUv(const XrFovf& full_fov,
+                                           double yaw_radians,
+                                           double pitch_radians) {
+    const double left = std::tan(full_fov.angleLeft);
+    const double right = std::tan(full_fov.angleRight);
+    const double down = std::tan(full_fov.angleDown);
+    const double up = std::tan(full_fov.angleUp);
+    const double width = std::max(0.0001, right - left);
+    const double height = std::max(0.0001, up - down);
+    return {
+        static_cast<float>((std::tan(yaw_radians) - left) / width),
+        static_cast<float>((up - std::tan(pitch_radians)) / height),
+    };
+}
+
 const char* D3D11QuadViewsShaderSource() {
     return R"(
 cbuffer QuadViewsConstants : register(b0) {
@@ -631,6 +650,10 @@ cbuffer QuadViewsConstants : register(b0) {
     float4 focusTexel;
     float4 peripheralSrcRect;
     float4 focusSrcRect;
+    float4 diagnosticParams;
+    float4 outputTexel;
+    float4 gazeMarkers;
+    float4 referenceMarkers;
 };
 
 Texture2D peripheralTexture : register(t0);
@@ -660,6 +683,42 @@ VSOut VSMain(uint vertexId : SV_VertexID) {
     return output;
 }
 
+float RectOutlineMask(float2 uv, float2 rectMin, float2 rectMax, float thicknessPixels) {
+    float2 pixelSize = max(outputTexel.xy, float2(0.000001, 0.000001));
+    float2 center = (rectMin + rectMax) * 0.5;
+    float2 halfSizePixels = max((rectMax - rectMin) * 0.5 / pixelSize, float2(0.0, 0.0));
+    float2 pointPixels = (uv - center) / pixelSize;
+    float2 q = abs(pointPixels) - halfSizePixels;
+    float signedDistance = length(max(q, 0.0)) + min(max(q.x, q.y), 0.0);
+    return 1.0 - smoothstep(thicknessPixels, thicknessPixels + 1.0, abs(signedDistance));
+}
+
+float CrossMask(float2 uv, float2 center, float lengthPixels, float thicknessPixels) {
+    float2 deltaPixels = abs((uv - center) / max(outputTexel.xy, float2(0.000001, 0.000001)));
+    float horizontal = (1.0 - smoothstep(thicknessPixels, thicknessPixels + 1.0, deltaPixels.y)) *
+                       (1.0 - smoothstep(lengthPixels, lengthPixels + 1.0, deltaPixels.x));
+    float vertical = (1.0 - smoothstep(thicknessPixels, thicknessPixels + 1.0, deltaPixels.x)) *
+                     (1.0 - smoothstep(lengthPixels, lengthPixels + 1.0, deltaPixels.y));
+    return max(horizontal, vertical);
+}
+
+float RingMask(float2 uv, float2 center, float radiusPixels, float thicknessPixels) {
+    float2 deltaPixels = (uv - center) / max(outputTexel.xy, float2(0.000001, 0.000001));
+    float ringDistance = abs(length(deltaPixels) - radiusPixels);
+    return 1.0 - smoothstep(thicknessPixels, thicknessPixels + 1.0, ringDistance);
+}
+
+float SegmentMask(float2 uv, float2 start, float2 end, float thicknessPixels) {
+    float2 pixelSize = max(outputTexel.xy, float2(0.000001, 0.000001));
+    float2 offsetPixels = (uv - start) / pixelSize;
+    float2 segment = (end - start) / pixelSize;
+    float segmentLengthSquared = max(dot(segment, segment), 0.0001);
+    float along = saturate(dot(offsetPixels, segment) / segmentLengthSquared);
+    float distancePixels = length(offsetPixels - segment * along);
+    return 1.0 - smoothstep(thicknessPixels, thicknessPixels + 1.0, distancePixels);
+}
+
+
 float4 PSMain(VSOut input) : SV_Target {
     float2 uv = saturate(input.uv);
     float2 peripheralUv = peripheralSrcRect.xy + uv * peripheralSrcRect.zw;
@@ -667,44 +726,78 @@ float4 PSMain(VSOut input) : SV_Target {
 
     float2 inside = step(focusRect.xy, uv) * step(uv, focusRect.zw);
     float inRect = inside.x * inside.y;
-    if (inRect < 0.5) {
-        return peripheral;
+    float edgeAlpha = 0.0;
+    float4 composed = peripheral;
+
+    if (inRect >= 0.5) {
+        float2 distToEdge = min(uv - focusRect.xy, focusRect.zw - uv);
+        edgeAlpha = saturate(min(distToEdge.x / max(blendParams.x, 0.0001),
+                                 distToEdge.y / max(blendParams.y, 0.0001)));
+        edgeAlpha = edgeAlpha * edgeAlpha * (3.0 - 2.0 * edgeAlpha);
+
+        float2 focusUv = saturate((uv - focusRect.xy) / max(focusRect.zw - focusRect.xy, float2(0.0001, 0.0001)));
+        float2 focusSampleUv = focusSrcRect.xy + focusUv * focusSrcRect.zw;
+        float2 focusSampleMin = focusSrcRect.xy;
+        float2 focusSampleMax = focusSrcRect.xy + focusSrcRect.zw;
+        float4 focus = focusTexture.Sample(linearSampler, focusSampleUv);
+        // Sharpening follows the same smooth transition as the focus image. This prevents
+        // maximum local contrast from appearing at the first pixels of the feather.
+        float sharpenAmount = saturate(blendParams.z) * edgeAlpha;
+        if (sharpenAmount > 0.001) {
+            // Sample neighbors at output-pixel spacing (focusTexel.zw is one output pixel expressed
+            // in focus-UV), not focus-texel spacing. The focus texture is minified into the focus
+            // rect, so a focus-texel-scale unsharp mask synthesizes detail that the resample averages
+            // away; output-space offsets target the frequencies the user actually sees.
+            float2 off = focusTexel.zw * focusSrcRect.zw;
+            float3 n = focusTexture.Sample(linearSampler, clamp(focusSampleUv + float2(0.0, -off.y), focusSampleMin, focusSampleMax)).rgb;
+            float3 s = focusTexture.Sample(linearSampler, clamp(focusSampleUv + float2(0.0,  off.y), focusSampleMin, focusSampleMax)).rgb;
+            float3 e = focusTexture.Sample(linearSampler, clamp(focusSampleUv + float2( off.x, 0.0), focusSampleMin, focusSampleMax)).rgb;
+            float3 w = focusTexture.Sample(linearSampler, clamp(focusSampleUv + float2(-off.x, 0.0), focusSampleMin, focusSampleMax)).rgb;
+            float3 avg = (n + s + e + w) * 0.25;
+            float3 lo = min(focus.rgb, min(min(n, s), min(e, w)));
+            float3 hi = max(focus.rgb, max(max(n, s), max(e, w)));
+            float3 localRange = max(hi - lo, float3(1.0 / 255.0, 1.0 / 255.0, 1.0 / 255.0));
+            float3 detail = (focus.rgb - avg) * (sharpenAmount * 2.0);
+            detail = clamp(detail, -localRange * 0.5, localRange * 0.5);
+            focus.rgb = saturate(focus.rgb + detail);
+        }
+        composed = lerp(peripheral, focus, edgeAlpha);
     }
 
-    float2 focusUv = saturate((uv - focusRect.xy) / max(focusRect.zw - focusRect.xy, float2(0.0001, 0.0001)));
-    float2 focusSampleUv = focusSrcRect.xy + focusUv * focusSrcRect.zw;
-    float2 focusSampleMin = focusSrcRect.xy;
-    float2 focusSampleMax = focusSrcRect.xy + focusSrcRect.zw;
-    float4 focus = focusTexture.Sample(linearSampler, focusSampleUv);
-    float sharpenAmount = saturate(blendParams.z);
-    if (sharpenAmount > 0.001) {
-        // Sample neighbors at output-pixel spacing (focusTexel.zw is one output pixel expressed
-        // in focus-UV), not focus-texel spacing. The focus texture is minified into the focus
-        // rect, so a focus-texel-scale unsharp mask synthesizes detail that the resample averages
-        // away; output-space offsets target the frequencies the user actually sees.
-        float2 off = focusTexel.zw * focusSrcRect.zw;
-        float3 n = focusTexture.Sample(linearSampler, clamp(focusSampleUv + float2(0.0, -off.y), focusSampleMin, focusSampleMax)).rgb;
-        float3 s = focusTexture.Sample(linearSampler, clamp(focusSampleUv + float2(0.0,  off.y), focusSampleMin, focusSampleMax)).rgb;
-        float3 e = focusTexture.Sample(linearSampler, clamp(focusSampleUv + float2( off.x, 0.0), focusSampleMin, focusSampleMax)).rgb;
-        float3 w = focusTexture.Sample(linearSampler, clamp(focusSampleUv + float2(-off.x, 0.0), focusSampleMin, focusSampleMax)).rgb;
-        float3 avg = (n + s + e + w) * 0.25;
-        // Bound the added high-frequency detail relative to the local contrast range. The old
-        // min/max clamp included the center sample, which forced local maxima/minima straight
-        // back to their original value and cancelled nearly all visible sharpening at edges.
-        // A 2x gain gives the 0-100 slider a useful range while the half-range limiter keeps
-        // bright cockpit text and MFD edges from developing unbounded halos.
-        float3 lo = min(focus.rgb, min(min(n, s), min(e, w)));
-        float3 hi = max(focus.rgb, max(max(n, s), max(e, w)));
-        float3 localRange = max(hi - lo, float3(1.0 / 255.0, 1.0 / 255.0, 1.0 / 255.0));
-        float3 detail = (focus.rgb - avg) * (sharpenAmount * 2.0);
-        detail = clamp(detail, -localRange * 0.5, localRange * 0.5);
-        focus.rgb = saturate(focus.rgb + detail);
+    if (diagnosticParams.x < 0.5) {
+        return composed;
     }
 
-    float2 distToEdge = min(uv - focusRect.xy, focusRect.zw - uv);
-    float edgeAlpha = saturate(min(distToEdge.x / max(blendParams.x, 0.0001), distToEdge.y / max(blendParams.y, 0.0001)));
-    edgeAlpha = edgeAlpha * edgeAlpha * (3.0 - 2.0 * edgeAlpha);
-    return lerp(peripheral, focus, edgeAlpha);
+    float transition = inRect * (1.0 - step(0.999, edgeAlpha));
+    float3 zoneColor = inRect < 0.5 ? float3(0.08, 0.28, 0.95) :
+                       (transition > 0.5 ? float3(1.0, 0.55, 0.04) : float3(0.08, 0.85, 0.28));
+    float zoneStrength = inRect < 0.5 ? 0.13 : (transition > 0.5 ? 0.20 : 0.055);
+    composed.rgb = lerp(composed.rgb, zoneColor, zoneStrength);
+
+    float trackingUnavailable = diagnosticParams.y * (1.0 - diagnosticParams.z);
+    float3 focusOutlineColor = lerp(float3(0.15, 1.0, 0.3), float3(1.0, 0.08, 0.05), trackingUnavailable);
+    float focusOutline = RectOutlineMask(uv, focusRect.xy, focusRect.zw, 2.0);
+    composed.rgb = lerp(composed.rgb, focusOutlineColor, focusOutline);
+
+    float2 innerMin = min(focusRect.xy + blendParams.xy, focusRect.zw);
+    float2 innerMax = max(focusRect.zw - blendParams.xy, focusRect.xy);
+    float innerOutline = RectOutlineMask(uv, innerMin, innerMax, 1.25) *
+                         step(outputTexel.x * 2.0, blendParams.x) * step(outputTexel.y * 2.0, blendParams.y);
+    composed.rgb = lerp(composed.rgb, float3(1.0, 0.65, 0.05), innerOutline * 0.9);
+
+    float2 offsetCorner = float2(referenceMarkers.z, referenceMarkers.y);
+    float offsetAxes = max(SegmentMask(uv, referenceMarkers.xy, offsetCorner, 1.0),
+                           SegmentMask(uv, offsetCorner, referenceMarkers.zw, 1.0));
+    float headMarker = CrossMask(uv, referenceMarkers.xy, 14.0, 1.5);
+    float offsetMarker = RingMask(uv, referenceMarkers.zw, 12.0, 1.5);
+    float rawGazeMarker = RingMask(uv, gazeMarkers.xy, 7.0, 1.75) * diagnosticParams.z;
+    float smoothedGazeMarker = CrossMask(uv, gazeMarkers.zw, 8.0, 1.5) * diagnosticParams.z;
+    composed.rgb = lerp(composed.rgb, float3(1.0, 0.1, 0.85), offsetAxes * 0.8);
+    composed.rgb = lerp(composed.rgb, float3(1.0, 1.0, 1.0), headMarker);
+    composed.rgb = lerp(composed.rgb, float3(1.0, 0.1, 0.85), offsetMarker);
+    composed.rgb = lerp(composed.rgb, float3(0.0, 0.95, 1.0), rawGazeMarker);
+    composed.rgb = lerp(composed.rgb, float3(1.0, 0.95, 0.05), smoothedGazeMarker);
+    return composed;
 }
 )";
 }
@@ -1412,6 +1505,7 @@ bool SameSettings(const ResolvedRuntimeConfig& lhs, const ResolvedRuntimeConfig&
            lhs.turbo.metrics_mode == rhs.turbo.metrics_mode &&
            SameInputBinding(lhs.turbo.metrics_binding, rhs.turbo.metrics_binding) &&
            lhs.quadviews.enabled == rhs.quadviews.enabled &&
+           SameInputBinding(lhs.quadviews.diagnostic_visualization_binding, rhs.quadviews.diagnostic_visualization_binding) &&
            lhs.quadviews.tracking_mode == rhs.quadviews.tracking_mode &&
            NearlyEqual(lhs.quadviews.focus_horizontal_size_percent, rhs.quadviews.focus_horizontal_size_percent) &&
            NearlyEqual(lhs.quadviews.focus_vertical_size_percent, rhs.quadviews.focus_vertical_size_percent) &&
@@ -4104,6 +4198,36 @@ bool OpenXrLayer::ComposeQuadViewsD3D11(const XrCompositionLayerProjection* sour
                                                                focus_content_height,
                                                                resolved_settings_.quadviews.transition_thickness_percent,
                                                                resolved_settings_.quadviews.foveate_sharpness);
+
+        const bool eye_tracking_mode =
+            resolved_settings_.quadviews.tracking_mode == QuadViewsTrackingMode::Eye;
+        const XrTime diagnostic_time = has_cached_fovs ? matched_quadviews_fov_time : display_time;
+        const bool raw_gaze_valid = eye_tracking_mode && quadviews_raw_focus_valid_ &&
+                                    quadviews_raw_focus_time_ == diagnostic_time;
+        constants.diagnostic_params[0] = quadviews_diagnostic_visualization_enabled_ ? 1.0f : 0.0f;
+        constants.diagnostic_params[1] = eye_tracking_mode ? 1.0f : 0.0f;
+        constants.diagnostic_params[2] = raw_gaze_valid ? 1.0f : 0.0f;
+        constants.output_texel[0] = 1.0f / static_cast<float>(std::max<uint32_t>(1, target.width));
+        constants.output_texel[1] = 1.0f / static_cast<float>(std::max<uint32_t>(1, target.height));
+
+        const std::array<float, 2> raw_gaze_uv = ProjectViewAnglesToUv(
+            full_fov, quadviews_raw_focus_yaw_radians_, quadviews_raw_focus_pitch_radians_);
+        const std::array<float, 2> smoothed_gaze_uv = ProjectViewAnglesToUv(
+            full_fov, quadviews_smoothed_focus_yaw_radians_, quadviews_smoothed_focus_pitch_radians_);
+        const std::array<float, 2> head_center_uv = ProjectViewAnglesToUv(full_fov, 0.0, 0.0);
+        const std::array<float, 2> configured_offset_uv = ProjectViewAnglesToUv(
+            full_fov,
+            DegreesToRadians(resolved_settings_.quadviews.horizontal_offset_degrees),
+            DegreesToRadians(resolved_settings_.quadviews.vertical_offset_degrees));
+        constants.gaze_markers[0] = raw_gaze_uv[0];
+        constants.gaze_markers[1] = raw_gaze_uv[1];
+        constants.gaze_markers[2] = smoothed_gaze_uv[0];
+        constants.gaze_markers[3] = smoothed_gaze_uv[1];
+        constants.reference_markers[0] = head_center_uv[0];
+        constants.reference_markers[1] = head_center_uv[1];
+        constants.reference_markers[2] = configured_offset_uv[0];
+        constants.reference_markers[3] = configured_offset_uv[1];
+
         const auto set_source_rect = [](float (&destination)[4],
                                         const XrSwapchainSubImage& sub_image,
                                         const SwapchainInfo& swapchain) {
@@ -6022,6 +6146,12 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
     }
     ReloadConfigIfNeeded();
     RefreshResolvedSettings();
+    if (IsQuadViewsEmulationActive()) {
+        PollQuadViewsDiagnosticVisualizationToggle();
+    } else {
+        ResetQuadViewsDiagnosticVisualizationState();
+    }
+
     if (!resolved_settings_.core.enabled) {
         cached_pivot_pose_deltas_.clear();
         cached_depth_submission_geometry_.clear();
@@ -7386,6 +7516,10 @@ void OpenXrLayer::RefreshResolvedSettings() {
         previous.turbo.enabled != resolved_settings_.turbo.enabled) {
         ResetTurboToggleState();
     }
+    if (!SameInputBinding(previous.quadviews.diagnostic_visualization_binding,
+                          resolved_settings_.quadviews.diagnostic_visualization_binding)) {
+        ResetQuadViewsDiagnosticVisualizationState();
+    }
     if (!SameInputBinding(previous.turbo.metrics_binding, resolved_settings_.turbo.metrics_binding) ||
         previous.turbo.metrics_mode != resolved_settings_.turbo.metrics_mode) {
         // Re-prime the capture binding's edge detector; a mode change also
@@ -7692,6 +7826,7 @@ void OpenXrLayer::ResetSessionState() {
     pivotxr_activation_gain_ = 0.0;
     pivotxr_last_smoothing_wall_time_.reset();
     ResetDepthToggleState();
+    ResetQuadViewsDiagnosticVisualizationState();
     ResetTurboToggleState();
     ResetTurboFrameState();
     internal_local_space_ = XR_NULL_HANDLE;
@@ -7716,6 +7851,10 @@ void OpenXrLayer::ResetSessionState() {
     eye_gaze_unavailable_streak_ = 0;
     quadviews_smoothed_focus_yaw_radians_ = 0.0;
     quadviews_smoothed_focus_pitch_radians_ = 0.0;
+    quadviews_raw_focus_yaw_radians_ = 0.0;
+    quadviews_raw_focus_pitch_radians_ = 0.0;
+    quadviews_raw_focus_time_ = 0;
+    quadviews_raw_focus_valid_ = false;
     quadviews_last_focus_smoothing_wall_time_.reset();
     quadviews_last_valid_gaze_wall_time_.reset();
     quadviews_eye_gaze_loss_started_wall_time_.reset();
@@ -7946,6 +8085,8 @@ bool OpenXrLayer::LocateEyeGazeFocusOffsets(XrSession session,
 
     *yaw_radians = 0.0;
     *pitch_radians = 0.0;
+    quadviews_raw_focus_time_ = time;
+    quadviews_raw_focus_valid_ = false;
 
     // Probe the runtime's current interaction profile for /user/eyes_ext. When our eye-gaze
     // action reports isActive=0, this reveals *why*: "none" means the runtime never bound the
@@ -8110,6 +8251,10 @@ bool OpenXrLayer::LocateEyeGazeFocusOffsets(XrSession session,
     const double euler_pitch = ExtractPitchRadians(diagnostic_orientation);
     double target_yaw = gaze_ray_angles.yaw_radians;
     double target_pitch = gaze_ray_angles.pitch_radians;
+    quadviews_raw_focus_yaw_radians_ = target_yaw;
+    quadviews_raw_focus_pitch_radians_ = target_pitch;
+    quadviews_raw_focus_valid_ = true;
+
     const double deadzone_radians = DegreesToRadians(std::max(0.0, settings.gaze_deadzone_degrees));
     if (std::abs(target_yaw) < deadzone_radians) {
         target_yaw = 0.0;
@@ -9516,6 +9661,7 @@ void OpenXrLayer::LogResolvedSettings(const ResolvedRuntimeConfig& settings) {
            << ", turboMetricsMode=" << ToString(settings.turbo.metrics_mode)
            << ", turboMetricsBinding=" << BindingLabel(settings.turbo.metrics_binding)
            << ", quadviewsEnabled=" << settings.quadviews.enabled
+           << ", quadviewsDiagnosticVisualizationBinding=" << BindingLabel(settings.quadviews.diagnostic_visualization_binding)
            << ", quadviewsTrackingMode=" << ToString(settings.quadviews.tracking_mode)
            << ", quadviewsFocusHorizontalSizePercent=" << settings.quadviews.focus_horizontal_size_percent
            << ", quadviewsFocusVerticalSizePercent=" << settings.quadviews.focus_vertical_size_percent
@@ -9577,6 +9723,53 @@ void OpenXrLayer::ResetPivotInputStateForConfigChange() {
     pending_locate_views_diagnostics_ = 5;
     pending_end_frame_diagnostics_ = 5;
     pending_pivot_diagnostics_ = kPivotDiagnosticBurstCount;
+}
+
+void OpenXrLayer::ResetQuadViewsDiagnosticVisualizationState() {
+    quadviews_diagnostic_visualization_enabled_ = false;
+    quadviews_diagnostic_visualization_binding_was_down_ = false;
+    quadviews_diagnostic_visualization_binding_last_poll_time_.reset();
+    quadviews_diagnostic_visualization_binding_down_cached_ = false;
+}
+
+void OpenXrLayer::PollQuadViewsDiagnosticVisualizationToggle() {
+#if defined(_WIN32)
+    const InputBinding& binding = resolved_settings_.quadviews.diagnostic_visualization_binding;
+    if (binding.type == InputBindingType::None) {
+        return;
+    }
+
+    const auto now = std::chrono::steady_clock::now();
+    const bool first_poll = !quadviews_diagnostic_visualization_binding_last_poll_time_.has_value();
+    if (first_poll ||
+        now - *quadviews_diagnostic_visualization_binding_last_poll_time_ >= kInputBindingPollInterval) {
+        quadviews_diagnostic_visualization_binding_last_poll_time_ = now;
+        quadviews_diagnostic_visualization_binding_down_cached_ = PollInputBindingDown(binding);
+    }
+
+    const bool binding_down = quadviews_diagnostic_visualization_binding_down_cached_;
+    if (first_poll) {
+        // Prime the edge detector so the key/button used while assigning the
+        // binding cannot make the visualization appear immediately.
+        quadviews_diagnostic_visualization_binding_was_down_ = binding_down;
+        return;
+    }
+
+    const bool was_pressed = binding_down && !quadviews_diagnostic_visualization_binding_was_down_;
+    quadviews_diagnostic_visualization_binding_was_down_ = binding_down;
+    if (!was_pressed) {
+        return;
+    }
+
+    quadviews_diagnostic_visualization_enabled_ = !quadviews_diagnostic_visualization_enabled_;
+    logger_.Info(std::string("Quadviews diagnostic visualization ") +
+                 (quadviews_diagnostic_visualization_enabled_ ? "shown" : "hidden") +
+                 " via " + BindingLabel(binding) + ".");
+    SoundPlayer::Instance().PlayTransition(binding.sound,
+                                           quadviews_diagnostic_visualization_enabled_,
+                                           dll_directory_,
+                                           resolved_settings_.core.sound_volume);
+#endif
 }
 
 void OpenXrLayer::ResetDepthToggleState() {

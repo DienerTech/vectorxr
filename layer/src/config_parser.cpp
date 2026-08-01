@@ -1923,6 +1923,7 @@ bool ParseQuadViewsProfile(const JsonValue& value, QuadViewsProfile& out, std::s
 bool ParseQuadViewsModule(const JsonValue::Object& object, QuadViewsModuleConfig& out, std::string& error) {
     static const std::unordered_set<std::string> allowed = {
         "enabled",
+        "diagnosticVisualizationBinding",
         "defaults",
         "profiles",
     };
@@ -1937,6 +1938,12 @@ bool ParseQuadViewsModule(const JsonValue::Object& object, QuadViewsModuleConfig
     }
     if (enabled.has_value()) {
         out.enabled = *enabled;
+    }
+
+    const auto diagnostic_binding_it = object.find("diagnosticVisualizationBinding");
+    if (diagnostic_binding_it != object.end() &&
+        !ParseInputBinding(diagnostic_binding_it->second, out.diagnostic_visualization_binding, error)) {
+        return false;
     }
 
     const auto defaults_it = object.find("defaults");

@@ -446,6 +446,8 @@ class OpenXrLayer {
                                                  SwapchainInfo& info,
                                                  std::string_view reason);
     XrResult FlushDeferredSwapchainReleasesLocked(std::string_view reason);
+    void PollQuadViewsDiagnosticVisualizationToggle();
+    void ResetQuadViewsDiagnosticVisualizationState();
     bool PollInputBindingDown(const InputBinding& binding);
     bool ShouldLogQuadViewsDebugHeartbeat(std::optional<std::chrono::steady_clock::time_point>& last_heartbeat);
     void ResetQuadViewsDebugHeartbeatState();
@@ -989,6 +991,17 @@ class OpenXrLayer {
     bool has_logged_eye_gaze_focus_unavailable_{false};
     uint32_t eye_gaze_unavailable_streak_{0};
     double quadviews_smoothed_focus_yaw_radians_{0.0};
+    double quadviews_raw_focus_yaw_radians_{0.0};
+    double quadviews_raw_focus_pitch_radians_{0.0};
+    XrTime quadviews_raw_focus_time_{0};
+    bool quadviews_raw_focus_valid_{false};
+    // Synthesized-compositor diagnostic visualization. It deliberately starts
+    // hidden every session and can only be changed through its optional binding.
+    bool quadviews_diagnostic_visualization_enabled_{false};
+    bool quadviews_diagnostic_visualization_binding_was_down_{false};
+    std::optional<std::chrono::steady_clock::time_point>
+        quadviews_diagnostic_visualization_binding_last_poll_time_;
+    bool quadviews_diagnostic_visualization_binding_down_cached_{false};
     double quadviews_smoothed_focus_pitch_radians_{0.0};
     std::optional<std::chrono::steady_clock::time_point> quadviews_last_focus_smoothing_wall_time_;
     std::optional<std::chrono::steady_clock::time_point> quadviews_last_valid_gaze_wall_time_;

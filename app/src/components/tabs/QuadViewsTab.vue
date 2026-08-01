@@ -1,15 +1,20 @@
 <script setup lang="ts">
-import { computed, ref } from "vue";
+import { computed, nextTick, ref } from "vue";
 
-const varjoCompatibilityInfoOpen = ref(false);
-
+import ModuleBindingPage from "../ModuleBindingPage.vue";
+import ModuleBindingPanel from "../ModuleBindingPanel.vue";
 import ProfileShell from "../ProfileShell.vue";
 import QuadViewsSettingsFields from "../QuadViewsSettingsFields.vue";
-import type {
-  QuadViewsSettings,
-  RegisteredApplication,
-  VectorXRConfig,
+import {
+  savedBindingConflictWarnings,
+  type QuadViewsSettings,
+  type RegisteredApplication,
+  type VectorXRConfig,
 } from "../../lib/model";
+
+const varjoCompatibilityInfoOpen = ref(false);
+const bindingSubPageOpen = ref(false);
+let savedScrollTop = 0;
 
 const props = defineProps<{
   config: VectorXRConfig;
@@ -21,6 +26,25 @@ defineEmits<{
   removeQuadViewsProfile: [index: number];
   syncQuadViewsProfileName: [index: number];
 }>();
+
+const diagnosticBindingWarnings = computed(() => savedBindingConflictWarnings(props.config, [
+  props.config.modules.quadviews.diagnosticVisualizationBinding,
+]));
+
+function pageScroller(): Element | null {
+  return document.querySelector('main section.overflow-y-auto');
+}
+
+function openDiagnosticBinding() {
+  savedScrollTop = pageScroller()?.scrollTop ?? 0;
+  bindingSubPageOpen.value = true;
+  void nextTick(() => pageScroller()?.scrollTo({ top: 0 }));
+}
+
+function closeDiagnosticBinding() {
+  bindingSubPageOpen.value = false;
+  void nextTick(() => pageScroller()?.scrollTo({ top: savedScrollTop }));
+}
 
 const profileWarnings = computed(() => {
   const warnings = new Map<number, string[]>();
@@ -111,7 +135,18 @@ function budgetChipClass(settings: QuadViewsSettings) {
 </script>
 
 <template>
-  <div class="space-y-4">
+  <ModuleBindingPage
+    v-if="bindingSubPageOpen"
+    module-label="Quadviews"
+    :binding="config.modules.quadviews.diagnosticVisualizationBinding"
+    label="Diagnostic Visualization Toggle"
+    description="Show or hide the Quadviews calibration view while in-game. It starts hidden each session and is available only when VectorXR synthesizes Quadviews through its D3D11 compositor."
+    none-text="No binding assigned. The diagnostic visualization remains hidden."
+    :warnings="diagnosticBindingWarnings"
+    @update:binding="config.modules.quadviews.diagnosticVisualizationBinding = $event"
+    @close="closeDiagnosticBinding"
+  />
+  <div v-else class="space-y-4">
     <article
       class="rounded-[1.25rem] border p-5 shadow-panel backdrop-blur surface-panel"
     >
@@ -156,6 +191,24 @@ function budgetChipClass(settings: QuadViewsSettings) {
       <div class="mb-4 flex items-start gap-2.5 rounded-[0.9rem] border px-4 py-3 text-sm leading-6 surface-panel-strong" role="note">
         <span class="restart-required-mark mt-0.5" aria-hidden="true">&#8635;</span>
         <p><strong>Restart to apply:</strong> marked fields and Quadviews on/off take full effect after the current OpenXR application exits. Unmarked controls update during play.</p>
+      </div>
+
+      <div class="mb-4 space-y-3 rounded-[1rem] border p-4 surface-panel-soft">
+        <div>
+          <p class="eyebrow text-xs uppercase tracking-[0.18em]">In-headset diagnostics</p>
+          <p class="mt-1 text-sm leading-6 text-muted">
+            Visualize the peripheral area, transition band, focus window, head center, configured offset, and raw versus smoothed gaze. The focus outline turns red while eye tracking is unavailable.
+          </p>
+        </div>
+        <ModuleBindingPanel
+          heading="Visualization toggle"
+          :binding="config.modules.quadviews.diagnosticVisualizationBinding"
+          hint="The visualization starts hidden each OpenXR session."
+          @edit="openDiagnosticBinding"
+        />
+        <p class="text-xs leading-5 text-muted">
+          Colors: blue = peripheral, amber = transition, green/red = focus boundary, white = head center, magenta = configured offset, cyan = raw gaze, yellow = smoothed gaze.
+        </p>
       </div>
 
       <details class="section-disclosure border-t pt-4" style="border-color: var(--app-border)" open>
@@ -280,6 +333,7 @@ function budgetChipClass(settings: QuadViewsSettings) {
                   <li>Focus Size &amp; Transition Thickness</li>
                   <li>Horizontal &amp; Vertical Offset</li>
                   <li>Gaze Smoothing &amp; Deadzone</li>
+                  <li>Diagnostic Visualization</li>
                 </ul>
               </div>
             </div>
@@ -287,6 +341,10 @@ function budgetChipClass(settings: QuadViewsSettings) {
 
           <div class="rounded-[1rem] border px-4 py-4 surface-panel">
             On headsets without physical quad-view support through bi-panel displays (e.g. Quest Pro, Pimax Crystal), VectorXR Quadviews uses the standard emulation mode and all settings apply. These compatibility notes apply only to Varjo runtimes.
+          </div>
+
+          <div class="rounded-[1rem] border px-4 py-4 surface-panel" role="note">
+            <strong>Diagnostic visualization is not currently supported on Varjo headsets.</strong> Varjo's runtime owns the native quad-view composition, so VectorXR's synthesized D3D11 compositor does not run there.
           </div>
         </div>
       </div>

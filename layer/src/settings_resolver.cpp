@@ -259,6 +259,7 @@ void ApplyQuadViewsSettings(QuadViewsResolvedSettings& resolved, const QuadViews
 QuadViewsResolvedSettings ResolveQuadViewsSettings(const ConfigDocument& config, std::string_view exe_name) {
     QuadViewsResolvedSettings resolved;
     resolved.enabled = config.quadviews.enabled;
+    resolved.diagnostic_visualization_binding = config.quadviews.diagnostic_visualization_binding;
     ApplyQuadViewsSettings(resolved, config.quadviews.defaults);
 
     const QuadViewsProfile* profile = FindMatchingQuadViewsProfile(config, exe_name);

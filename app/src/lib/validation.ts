@@ -451,6 +451,7 @@ export function validateConfig(config: VectorXRConfig): string[] {
   errors.push(...validateInputBindings('modules.pivotxr.releaseOriginBindings', config.modules.pivotxr.releaseOriginBindings))
   errors.push(...validatePivotViewControls('modules.pivotxr.viewControls.', config.modules.pivotxr.viewControls))
   errors.push(...validateQuadViewsSettings('modules.quadviews.defaults.', config.modules.quadviews.defaults))
+  errors.push(...validateInputBinding('modules.quadviews.diagnosticVisualizationBinding', config.modules.quadviews.diagnosticVisualizationBinding))
 
   const applicationIds = new Set(config.applications.map((application) => application.id))
 

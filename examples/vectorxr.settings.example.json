@@ -139,6 +139,7 @@
     },
     "quadviews": {
       "enabled": false,
+      "diagnosticVisualizationBinding": { "type": "none" },
       "defaults": {
         "trackingMode": "eye",
         "focusHorizontalSizePercent": 40.0,
