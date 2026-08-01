@@ -5,6 +5,7 @@ add_library(
     src/input_devices.cpp
     src/quadviews_sizing.cpp
     src/runtime_pacing.cpp
+    src/runtime_relay.cpp
     src/runtime_compatibility.cpp
     src/seen_apps.cpp
     src/turbo_metrics.cpp

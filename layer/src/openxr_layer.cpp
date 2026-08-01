@@ -2150,6 +2150,13 @@ XrResult OpenXrLayer::CreateSession(XrInstance instance,
     ReloadConfigIfNeeded();
     RefreshResolvedSettings();
     quadviews_session_active_ = resolved_settings_.core.enabled && resolved_settings_.quadviews.enabled;
+    if (runtime_relay_root_.empty()) runtime_relay_root_ = ResolveRuntimeRelayRoot();
+    runtime_relay_session_id_ = std::to_string(GetCurrentProcessId()) + "-" +
+        std::to_string(RuntimeRelayUnixMilliseconds()) + "-" +
+        std::to_string(++runtime_relay_session_sequence_);
+    runtime_relay_last_applied_revision_ = 0;
+    runtime_relay_acknowledged_revision_ = 0;
+    runtime_relay_status_dirty_.store(true, std::memory_order_release);
     deferred_quadviews_config_active_.reset();
     if (IsQuadViewsEmulationActive() &&
         resolved_settings_.quadviews.tracking_mode == QuadViewsTrackingMode::Eye) {
@@ -7358,6 +7365,29 @@ void OpenXrLayer::StopConfigWatcher() {
     if (config_watcher_thread_.joinable()) {
         config_watcher_thread_.join();
     }
+
+    // A normal instance teardown stops the watcher before ResetSessionState,
+    // so remove this process's relay files here as well. Crashes can still
+    // leave files behind; the app rejects them once their heartbeat is stale.
+    std::filesystem::path relay_root;
+    std::vector<std::string> relay_session_ids;
+    {
+        std::scoped_lock lock(mutex_);
+        relay_root = runtime_relay_root_;
+        relay_session_ids.swap(runtime_relay_sessions_to_remove_);
+        if (!runtime_relay_session_id_.empty()) {
+            relay_session_ids.push_back(std::move(runtime_relay_session_id_));
+        }
+        runtime_relay_last_applied_revision_ = 0;
+        runtime_relay_acknowledged_revision_ = 0;
+        runtime_relay_status_dirty_.store(false, std::memory_order_release);
+    }
+    for (const std::string& relay_session_id : relay_session_ids) {
+        std::error_code ec;
+        std::filesystem::remove(RuntimeStatusPath(relay_root, relay_session_id), ec);
+        ec.clear();
+        std::filesystem::remove(RuntimeControlPath(relay_root, relay_session_id), ec);
+    }
 }
 
 void OpenXrLayer::ConfigWatcherLoop() {
@@ -7371,6 +7401,7 @@ void OpenXrLayer::ConfigWatcherLoop() {
             }
         }
         PollConfigFile();
+        PollRuntimeRelay();
     }
 }
 
@@ -7795,6 +7826,13 @@ void OpenXrLayer::CaptureInstanceFunctions() {
 }
 
 void OpenXrLayer::ResetSessionState() {
+    if (!runtime_relay_session_id_.empty()) {
+        runtime_relay_sessions_to_remove_.push_back(runtime_relay_session_id_);
+        runtime_relay_session_id_.clear();
+        runtime_relay_last_applied_revision_ = 0;
+        runtime_relay_acknowledged_revision_ = 0;
+        runtime_relay_status_dirty_.store(false, std::memory_order_release);
+    }
     {
         std::scoped_lock diagnostic_lock(input_binding_diagnostic_mutex_);
         input_binding_diagnostic_states_.clear();
@@ -9762,6 +9800,7 @@ void OpenXrLayer::PollQuadViewsDiagnosticVisualizationToggle() {
     }
 
     quadviews_diagnostic_visualization_enabled_ = !quadviews_diagnostic_visualization_enabled_;
+    runtime_relay_status_dirty_.store(true, std::memory_order_release);
     logger_.Info(std::string("Quadviews diagnostic visualization ") +
                  (quadviews_diagnostic_visualization_enabled_ ? "shown" : "hidden") +
                  " via " + BindingLabel(binding) + ".");
@@ -11182,4 +11221,80 @@ bool OpenXrLayer::IsPivotXrActive() {
 #endif
 }
 
+void OpenXrLayer::PollRuntimeRelay() {
+    std::vector<std::string> sessions_to_remove;
+    std::filesystem::path root;
+    std::string session_id;
+    {
+        std::scoped_lock lock(mutex_);
+        root = runtime_relay_root_;
+        session_id = runtime_relay_session_id_;
+        sessions_to_remove.swap(runtime_relay_sessions_to_remove_);
+    }
+
+    std::error_code ec;
+    for (const std::string& stale_session_id : sessions_to_remove) {
+        std::filesystem::remove(RuntimeStatusPath(root, stale_session_id), ec);
+        ec.clear();
+        std::filesystem::remove(RuntimeControlPath(root, stale_session_id), ec);
+        ec.clear();
+    }
+    if (root.empty() || session_id.empty()) return;
+
+    RuntimeControlDocument control;
+    std::string control_error;
+    const bool has_control = ReadRuntimeControl(RuntimeControlPath(root, session_id), &control, &control_error);
+    bool state_changed = false;
+    bool command_applied = false;
+    if (has_control && control.target_session_id == session_id &&
+        control.expires_at_unix_milliseconds >= RuntimeRelayUnixMilliseconds()) {
+        std::scoped_lock lock(mutex_);
+        const bool available = runtime_relay_session_id_ == session_id &&
+            active_session_ != XR_NULL_HANDLE && IsQuadViewsEmulationActive() &&
+            d3d11_quadviews_compositor_.context != nullptr;
+        if (available && control.revision > runtime_relay_last_applied_revision_ &&
+            control.quadviews_diagnostic_visualization.has_value()) {
+            runtime_relay_last_applied_revision_ = control.revision;
+            runtime_relay_acknowledged_revision_ = control.revision;
+            const bool desired = *control.quadviews_diagnostic_visualization;
+            state_changed = quadviews_diagnostic_visualization_enabled_ != desired;
+            quadviews_diagnostic_visualization_enabled_ = desired;
+            command_applied = true;
+            runtime_relay_status_dirty_.store(true, std::memory_order_release);
+        }
+    }
+
+    if (command_applied && state_changed) {
+        logger_.Info(std::string("Quadviews diagnostic visualization ") +
+                     (*control.quadviews_diagnostic_visualization ? "shown" : "hidden") +
+                     " via the VectorXR app.");
+    }
+
+    const auto now = std::chrono::steady_clock::now();
+    const bool heartbeat_due = !runtime_relay_last_status_write_.has_value() ||
+        now - *runtime_relay_last_status_write_ >= std::chrono::seconds(1);
+    if (!heartbeat_due && !runtime_relay_status_dirty_.exchange(false, std::memory_order_acq_rel)) return;
+
+    RuntimeStatusDocument status;
+    {
+        std::scoped_lock lock(mutex_);
+        if (runtime_relay_session_id_ != session_id || active_session_ == XR_NULL_HANDLE) return;
+        status.session_id = session_id;
+        status.process_id = GetCurrentProcessId();
+        status.application = current_exe_name_;
+        status.updated_at_unix_milliseconds = RuntimeRelayUnixMilliseconds();
+        status.acknowledged_revision = runtime_relay_acknowledged_revision_;
+        status.quadviews_diagnostic_visualization_available =
+            IsQuadViewsEmulationActive() && d3d11_quadviews_compositor_.context != nullptr;
+        status.quadviews_diagnostic_visualization_enabled = quadviews_diagnostic_visualization_enabled_;
+    }
+
+    std::string status_error;
+    if (WriteRuntimeStatus(RuntimeStatusPath(root, session_id), status, &status_error)) {
+        runtime_relay_last_status_write_ = now;
+        runtime_relay_status_dirty_.store(false, std::memory_order_release);
+    } else {
+        runtime_relay_status_dirty_.store(true, std::memory_order_release);
+    }
+}
 } // namespace depthxr

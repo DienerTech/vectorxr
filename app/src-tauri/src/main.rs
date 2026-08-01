@@ -5,6 +5,8 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
 mod input_devices;
@@ -849,6 +851,56 @@ struct TurboMetricsEnvelope {
     sessions: Vec<TurboMetricsSession>,
 }
 
+const RUNTIME_RELAY_PROTOCOL_VERSION: u32 = 1;
+const RUNTIME_STATUS_FRESHNESS_MILLISECONDS: u64 = 3_500;
+static RUNTIME_CONTROL_REVISION: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct RuntimeCapabilities {
+    #[serde(default)]
+    quadviews_diagnostic_visualization: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct RuntimeState {
+    #[serde(default)]
+    quadviews_diagnostic_visualization: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RuntimeStatusDocument {
+    protocol_version: u32,
+    session_id: String,
+    process_id: u32,
+    application: String,
+    updated_at_unix_milliseconds: u64,
+    #[serde(default)]
+    acknowledged_revision: u64,
+    #[serde(default)]
+    capabilities: RuntimeCapabilities,
+    #[serde(default)]
+    state: RuntimeState,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RuntimeStatusEnvelope {
+    sessions: Vec<RuntimeStatusDocument>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RuntimeControlDocument {
+    protocol_version: u32,
+    target_session_id: String,
+    revision: u64,
+    expires_at_unix_milliseconds: u64,
+    desired: RuntimeState,
+}
+
 fn default_config() -> VectorXRConfig {
     VectorXRConfig {
         version: 3,
@@ -1182,6 +1234,30 @@ fn resolve_turbo_metrics_path() -> PathBuf {
         .unwrap_or_else(|_| PathBuf::from("."))
         .join("config")
         .join("turbo-metrics.json")
+}
+
+fn resolve_runtime_relay_root() -> PathBuf {
+    if let Ok(env_path) = env::var("VECTORXR_RUNTIME_RELAY_PATH") {
+        if !env_path.trim().is_empty() {
+            return PathBuf::from(env_path);
+        }
+    }
+    #[cfg(target_os = "windows")]
+    if let Ok(local_app_data) = env::var("LOCALAPPDATA") {
+        return PathBuf::from(local_app_data)
+            .join("VectorXR")
+            .join("runtime");
+    }
+    env::current_dir()
+        .unwrap_or_else(|_| PathBuf::from("."))
+        .join("runtime")
+}
+
+fn unix_milliseconds() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or_default()
 }
 
 fn read_turbo_metrics_document(path: &Path) -> TurboMetricsDocument {
@@ -1718,6 +1794,96 @@ fn clear_turbo_metrics() -> Result<TurboMetricsEnvelope, String> {
     })
 }
 
+fn read_live_runtime_statuses() -> Vec<RuntimeStatusDocument> {
+    let status_directory = resolve_runtime_relay_root().join("status");
+    let Ok(entries) = fs::read_dir(status_directory) else {
+        return Vec::new();
+    };
+    let now = unix_milliseconds();
+    let mut sessions = entries
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let path = entry.path();
+            if path.extension().and_then(|value| value.to_str()) != Some("json") {
+                return None;
+            }
+            let content = fs::read_to_string(&path).ok()?;
+            let status = serde_json::from_str::<RuntimeStatusDocument>(&content).ok()?;
+            let file_session_id = path.file_stem()?.to_str()?;
+            let age = now.saturating_sub(status.updated_at_unix_milliseconds);
+            if status.protocol_version != RUNTIME_RELAY_PROTOCOL_VERSION
+                || status.session_id != file_session_id
+                || age > RUNTIME_STATUS_FRESHNESS_MILLISECONDS
+                || status.updated_at_unix_milliseconds > now.saturating_add(2_000)
+            {
+                return None;
+            }
+            Some(status)
+        })
+        .collect::<Vec<_>>();
+    sessions.sort_by(|lhs, rhs| {
+        rhs.updated_at_unix_milliseconds
+            .cmp(&lhs.updated_at_unix_milliseconds)
+    });
+    sessions
+}
+
+#[tauri::command]
+fn load_runtime_status() -> Result<RuntimeStatusEnvelope, String> {
+    Ok(RuntimeStatusEnvelope {
+        sessions: read_live_runtime_statuses(),
+    })
+}
+
+#[tauri::command]
+fn set_runtime_quadviews_diagnostic_visualization(
+    session_id: String,
+    enabled: bool,
+) -> Result<u64, String> {
+    if session_id.is_empty()
+        || !session_id.chars().all(|character| {
+            character.is_ascii_alphanumeric()
+                || character == '-'
+                || character == '_'
+                || character == '.'
+        })
+    {
+        return Err("Invalid runtime session id".into());
+    }
+    let session = read_live_runtime_statuses()
+        .into_iter()
+        .find(|status| status.session_id == session_id)
+        .ok_or_else(|| "The OpenXR session is no longer active".to_string())?;
+    if !session.capabilities.quadviews_diagnostic_visualization {
+        return Err("Diagnostic visualization is unavailable for this OpenXR session".into());
+    }
+
+    let now = unix_milliseconds();
+    // Keep revisions exactly representable in JavaScript while reducing
+    // collisions between multiple VectorXR app processes.
+    let revision_floor = now.saturating_mul(1_000) + u64::from(std::process::id() % 1_000);
+    let revision = RUNTIME_CONTROL_REVISION
+        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |previous| {
+            Some(previous.saturating_add(1).max(revision_floor))
+        })
+        .map(|previous| previous.saturating_add(1).max(revision_floor)).unwrap_or(revision_floor);
+    let control = RuntimeControlDocument {
+        protocol_version: RUNTIME_RELAY_PROTOCOL_VERSION,
+        target_session_id: session_id.clone(),
+        revision,
+        expires_at_unix_milliseconds: now.saturating_add(5_000),
+        desired: RuntimeState {
+            quadviews_diagnostic_visualization: enabled,
+        },
+    };
+    let content = serde_json::to_string_pretty(&control).map_err(|error| error.to_string())?;
+    let path = resolve_runtime_relay_root()
+        .join("control")
+        .join(format!("{session_id}.json"));
+    write_text_safely(&path, &content)?;
+    Ok(revision)
+}
+
 #[tauri::command]
 fn load_openxr_layers() -> Result<openxr_layers::OpenXrLayerSnapshot, String> {
     openxr_layers::load_openxr_layers()
@@ -2119,6 +2285,8 @@ fn main() {
             clear_runtime_pacing_observation,
             load_turbo_metrics,
             clear_turbo_metrics,
+            load_runtime_status,
+            set_runtime_quadviews_diagnostic_visualization,
             list_input_devices,
             capture_device_binding,
             cancel_device_binding_capture,

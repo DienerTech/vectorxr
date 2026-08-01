@@ -17,6 +17,7 @@
 #include "depthxr/quadviews_recovery.h"
 #include "depthxr/quadviews_sizing.h"
 #include "depthxr/runtime_pacing.h"
+#include "depthxr/runtime_relay.h"
 #include "depthxr/runtime_compatibility.h"
 #include "depthxr/seen_apps.h"
 #include "depthxr/settings_resolver.h"
@@ -1735,6 +1736,55 @@ void TestRuntimePacingObservationRoundTrip() {
     std::filesystem::remove_all(test_directory, error);
 }
 
+void TestRuntimeRelayControlAndStatusRoundTrip() {
+    const std::filesystem::path test_directory =
+        std::filesystem::current_path() / "build" / "vectorxr-test-runtime-relay";
+    std::error_code filesystem_error;
+    std::filesystem::remove_all(test_directory, filesystem_error);
+    std::filesystem::create_directories(test_directory / "control", filesystem_error);
+    Expect(!filesystem_error, "Failed to create runtime-relay test directory");
+
+    const std::string session_id = "4242-1000-1";
+    const std::filesystem::path control_path = depthxr::RuntimeControlPath(test_directory, session_id);
+    {
+        std::ofstream stream(control_path, std::ios::trunc);
+        stream << "{\n"
+               << "  \"protocolVersion\": 1,\n"
+               << "  \"targetSessionId\": \"" << session_id << "\",\n"
+               << "  \"revision\": 17,\n"
+               << "  \"expiresAtUnixMilliseconds\": 9999999999999,\n"
+               << "  \"desired\": { \"quadviewsDiagnosticVisualization\": true }\n"
+               << "}\n";
+    }
+
+    depthxr::RuntimeControlDocument control;
+    std::string relay_error;
+    Expect(depthxr::ReadRuntimeControl(control_path, &control, &relay_error),
+           "Failed to parse runtime control: " + relay_error);
+    Expect(control.target_session_id == session_id, "Runtime control session target mismatch");
+    Expect(control.revision == 17, "Runtime control revision mismatch");
+    Expect(control.quadviews_diagnostic_visualization.value_or(false),
+           "Runtime control desired state mismatch");
+
+    depthxr::RuntimeStatusDocument status;
+    status.session_id = session_id;
+    status.process_id = 4242;
+    status.application = "DCS.exe";
+    status.updated_at_unix_milliseconds = 1000;
+    status.acknowledged_revision = 17;
+    status.quadviews_diagnostic_visualization_available = true;
+    status.quadviews_diagnostic_visualization_enabled = true;
+    const std::filesystem::path status_path = depthxr::RuntimeStatusPath(test_directory, session_id);
+    Expect(depthxr::WriteRuntimeStatus(status_path, status, &relay_error),
+           "Failed to write runtime status: " + relay_error);
+    std::ifstream status_stream(status_path);
+    std::ostringstream status_content;
+    status_content << status_stream.rdbuf();
+    Expect(status_content.str().find("\"acknowledgedRevision\": 17") != std::string::npos,
+           "Runtime status acknowledgement was not serialized");
+    std::filesystem::remove_all(test_directory, filesystem_error);
+}
+
 void TestQuadViewStereoBoostKeepsInsetViewsInSync() {
     depthxr::ViewAdjustmentData views[4] = {
         {{-0.03, 0.0, 0.01}, {-1.0, 0.8, 0.9, -0.9}},
@@ -2368,6 +2418,7 @@ int main() {
     TestExeMatch();
     TestSeenAppObservationRecording();
     TestRuntimePacingObservationRoundTrip();
+    TestRuntimeRelayControlAndStatusRoundTrip();
     TestQuadViewStereoBoostKeepsInsetViewsInSync();
     TestStereoBoostScalesRotatedEyeBaseline();
     TestQuadViewConvergenceKeepsInsetOffsetsAligned();

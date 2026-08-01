@@ -28,6 +28,7 @@
 #include "depthxr/quadviews_recovery.h"
 #include "depthxr/runtime_compatibility.h"
 #include "depthxr/runtime_pacing.h"
+#include "depthxr/runtime_relay.h"
 #include "depthxr/settings_resolver.h"
 #include "depthxr/swapchain_state.h"
 
@@ -370,6 +371,7 @@ class OpenXrLayer {
     void PollConfigFile();
     void RefreshResolvedSettings();
     void ResetPivotInputStateForConfigChange();
+    void PollRuntimeRelay();
     void CaptureInstanceFunctions();
     void LogResolvedSettings(const ResolvedRuntimeConfig& settings);
     void ResetPivotActivationState();
@@ -609,6 +611,18 @@ class OpenXrLayer {
     std::mutex config_watcher_mutex_;
     std::condition_variable config_watcher_cv_;
     bool config_watcher_stop_{false};
+
+    // Versioned, session-targeted app<->layer relay. The watcher owns all
+    // filesystem I/O; frame paths only update in-memory state and a dirty bit.
+    std::filesystem::path runtime_relay_root_;
+    std::string runtime_relay_session_id_;
+    std::vector<std::string> runtime_relay_sessions_to_remove_;
+    std::uint64_t runtime_relay_session_sequence_{0};
+    std::uint64_t runtime_relay_last_applied_revision_{0};
+    std::uint64_t runtime_relay_acknowledged_revision_{0};
+    std::atomic<bool> runtime_relay_status_dirty_{false};
+    std::optional<std::chrono::steady_clock::time_point> runtime_relay_last_status_write_;
+
     std::string runtime_name_;
     std::string system_name_;
     uint32_t system_vendor_id_{0};

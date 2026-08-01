@@ -1,5 +1,11 @@
 <script setup lang="ts">
-import { computed, nextTick, ref } from "vue";
+import { computed, nextTick, onMounted, onUnmounted, ref } from "vue";
+
+import {
+  loadRuntimeStatus,
+  setRuntimeQuadViewsDiagnosticVisualization,
+  type RuntimeStatusSession,
+} from "../../lib/commands";
 
 import ModuleBindingPage from "../ModuleBindingPage.vue";
 import ModuleBindingPanel from "../ModuleBindingPanel.vue";
@@ -15,6 +21,10 @@ import {
 const varjoCompatibilityInfoOpen = ref(false);
 const bindingSubPageOpen = ref(false);
 let savedScrollTop = 0;
+const runtimeSessions = ref<RuntimeStatusSession[]>([]);
+const runtimeStatusError = ref("");
+const runtimeCommandPending = ref(false);
+let runtimeStatusPoll: number | undefined;
 
 const props = defineProps<{
   config: VectorXRConfig;
@@ -45,6 +55,65 @@ function closeDiagnosticBinding() {
   bindingSubPageOpen.value = false;
   void nextTick(() => pageScroller()?.scrollTo({ top: savedScrollTop }));
 }
+
+const diagnosticRuntime = computed(() =>
+  runtimeSessions.value.find((session) => session.capabilities.quadviewsDiagnosticVisualization),
+);
+
+const diagnosticRuntimeSummary = computed(() => {
+  const session = diagnosticRuntime.value;
+  if (session) {
+    return `${session.state.quadviewsDiagnosticVisualization ? "Shown" : "Hidden"} in ${session.application}`;
+  }
+  if (runtimeSessions.value.length > 0) {
+    return "Unavailable in the active OpenXR session";
+  }
+  return "No active synthesized Quadviews session";
+});
+
+async function refreshRuntimeStatus() {
+  try {
+    runtimeSessions.value = (await loadRuntimeStatus()).sessions;
+    runtimeStatusError.value = "";
+  } catch (error) {
+    runtimeStatusError.value = error instanceof Error ? error.message : "Unable to read runtime status";
+  }
+}
+
+async function setDiagnosticVisualization() {
+  const session = diagnosticRuntime.value;
+  if (!session || runtimeCommandPending.value) return;
+
+  const desired = !session.state.quadviewsDiagnosticVisualization;
+  runtimeCommandPending.value = true;
+  runtimeStatusError.value = "";
+  try {
+    const revision = await setRuntimeQuadViewsDiagnosticVisualization(session.sessionId, desired);
+    for (let attempt = 0; attempt < 12; attempt += 1) {
+      await new Promise<void>((resolve) => window.setTimeout(resolve, 150));
+      await refreshRuntimeStatus();
+      const updated = runtimeSessions.value.find((candidate) => candidate.sessionId === session.sessionId);
+      if (updated && updated.acknowledgedRevision >= revision &&
+          updated.state.quadviewsDiagnosticVisualization === desired) {
+        return;
+      }
+    }
+    throw new Error("The OpenXR session did not acknowledge the control request");
+  } catch (error) {
+    runtimeStatusError.value = error instanceof Error ? error.message : "Unable to control the visualization";
+  } finally {
+    runtimeCommandPending.value = false;
+  }
+}
+
+onMounted(() => {
+  void refreshRuntimeStatus();
+  runtimeStatusPoll = window.setInterval(() => void refreshRuntimeStatus(), 1_000);
+});
+
+onUnmounted(() => {
+  if (runtimeStatusPoll !== undefined) window.clearInterval(runtimeStatusPoll);
+});
 
 const profileWarnings = computed(() => {
   const warnings = new Map<number, string[]>();
@@ -141,7 +210,7 @@ function budgetChipClass(settings: QuadViewsSettings) {
     :binding="config.modules.quadviews.diagnosticVisualizationBinding"
     label="Diagnostic Visualization Toggle"
     description="Show or hide the Quadviews calibration view while in-game. It starts hidden each session and is available only when VectorXR synthesizes Quadviews through its D3D11 compositor."
-    none-text="No binding assigned. The diagnostic visualization remains hidden."
+    none-text="No in-headset shortcut assigned. You can still control the visualization from the Quadviews page."
     :warnings="diagnosticBindingWarnings"
     @update:binding="config.modules.quadviews.diagnosticVisualizationBinding = $event"
     @close="closeDiagnosticBinding"
@@ -200,12 +269,35 @@ function budgetChipClass(settings: QuadViewsSettings) {
             Visualize the peripheral area, transition band, focus window, head center, configured offset, and raw versus smoothed gaze. The focus outline turns red while eye tracking is unavailable.
           </p>
         </div>
-        <ModuleBindingPanel
-          heading="Visualization toggle"
-          :binding="config.modules.quadviews.diagnosticVisualizationBinding"
-          hint="The visualization starts hidden each OpenXR session."
-          @edit="openDiagnosticBinding"
-        />
+        <div class="grid gap-3 lg:grid-cols-[minmax(0,1fr)_minmax(19rem,0.8fr)]">
+          <div class="rounded-[0.9rem] border p-4 surface-panel-strong">
+            <div class="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <p class="text-sm font-semibold">Session control</p>
+                <p class="mt-1 text-xs leading-5 text-muted">{{ diagnosticRuntimeSummary }}</p>
+              </div>
+              <button
+                class="button-secondary rounded-[0.75rem] px-4 py-2 text-sm font-medium"
+                type="button"
+                :disabled="!diagnosticRuntime || runtimeCommandPending"
+                @click="setDiagnosticVisualization"
+              >
+                {{ runtimeCommandPending
+                  ? "Applying..."
+                  : diagnosticRuntime?.state.quadviewsDiagnosticVisualization
+                    ? "Hide visualization"
+                    : "Show visualization" }}
+              </button>
+            </div>
+            <p v-if="runtimeStatusError" class="mt-2 text-xs chip-danger">{{ runtimeStatusError }}</p>
+          </div>
+          <ModuleBindingPanel
+            heading="In-headset shortcut"
+            :binding="config.modules.quadviews.diagnosticVisualizationBinding"
+            hint="Optional. The visualization starts hidden each OpenXR session."
+            @edit="openDiagnosticBinding"
+          />
+        </div>
         <p class="text-xs leading-5 text-muted">
           Colors: blue = peripheral, amber = transition, green/red = focus boundary, white = head center, magenta = configured offset, cyan = raw gaze, yellow = smoothed gaze.
         </p>

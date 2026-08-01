@@ -373,6 +373,41 @@ export async function clearTurboMetrics(): Promise<TurboMetricsEnvelope> {
   return invoke<TurboMetricsEnvelope>('clear_turbo_metrics')
 }
 
+export interface RuntimeStatusSession {
+  protocolVersion: number
+  sessionId: string
+  processId: number
+  application: string
+  updatedAtUnixMilliseconds: number
+  acknowledgedRevision: number
+  capabilities: { quadviewsDiagnosticVisualization: boolean }
+  state: { quadviewsDiagnosticVisualization: boolean }
+}
+
+export interface RuntimeStatusEnvelope {
+  sessions: RuntimeStatusSession[]
+}
+
+export async function loadRuntimeStatus(): Promise<RuntimeStatusEnvelope> {
+  if (!tauriAvailable()) {
+    return { sessions: [] }
+  }
+  return invoke<RuntimeStatusEnvelope>('load_runtime_status')
+}
+
+export async function setRuntimeQuadViewsDiagnosticVisualization(
+  sessionId: string,
+  enabled: boolean,
+): Promise<number> {
+  if (!tauriAvailable()) {
+    return 0
+  }
+  return invoke<number>('set_runtime_quadviews_diagnostic_visualization', {
+    sessionId,
+    enabled,
+  })
+}
+
 export async function loadOpenXrLayers(): Promise<OpenXrLayerSnapshot> {
   if (!tauriAvailable()) {
     return {
