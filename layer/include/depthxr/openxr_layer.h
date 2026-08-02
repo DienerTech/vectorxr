@@ -21,6 +21,7 @@
 #include <openxr/openxr.h>
 
 #include "depthxr/config_parser.h"
+#include "depthxr/delayed_action_set_attachment.h"
 #include "depthxr/pivot_step.h"
 #include "depthxr/pivot_view.h"
 #include "depthxr/effects.h"
@@ -466,6 +467,7 @@ class OpenXrLayer {
                                   XrSpaceLocationFlags* location_flags);
     XrResult CreateEyeGazeResources(XrSession session);
     void DestroyEyeGazeResources();
+    void TryAttachEyeGazeActionSetFallback(XrSession session);
     bool LocateEyeGazeFocusOffsets(XrSession session,
                                    XrSpace base_space,
                                    XrTime time,
@@ -1000,7 +1002,7 @@ class OpenXrLayer {
     XrPath eye_gaze_interaction_profile_path_{XR_NULL_PATH};
     XrPath eye_gaze_pose_path_{XR_NULL_PATH};
     bool eye_gaze_resources_ready_{false};
-    bool eye_gaze_action_set_attached_{false};
+    DelayedActionSetAttachment<XrActionSet> eye_gaze_action_set_attachment_;
     bool has_logged_eye_gaze_focus_active_{false};
     bool has_logged_eye_gaze_focus_unavailable_{false};
     uint32_t eye_gaze_unavailable_streak_{0};
