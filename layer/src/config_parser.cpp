@@ -1527,6 +1527,23 @@ bool ParsePivotSettings(const JsonValue::Object& object, PivotXrSettings& out, s
     return true;
 }
 
+bool ParsePivotProfileBehavior(const std::string& value, PivotProfileBehavior& out, std::string& error) {
+    if (value == "legacyHybrid") {
+        out = PivotProfileBehavior::LegacyHybrid;
+        return true;
+    }
+    if (value == "enhancedMotion") {
+        out = PivotProfileBehavior::EnhancedMotion;
+        return true;
+    }
+    if (value == "snapViews") {
+        out = PivotProfileBehavior::SnapViews;
+        return true;
+    }
+    error = "pivot behavior must be one of: enhancedMotion, snapViews, legacyHybrid";
+    return false;
+}
+
 bool ParsePivotNudgeSettings(const JsonValue& value, PivotNudgeSettings& out, std::string& error) {
     const JsonValue::Object* object = RequireObject(value, "pivot nudges", error);
     if (!object) return false;
@@ -1553,6 +1570,32 @@ bool ParsePivotNudgeSettings(const JsonValue& value, PivotNudgeSettings& out, st
            ParseInputBindings(*object, "pitchUpBindings", "pitchUpBinding", out.pitch_up_bindings, error) &&
            ParseInputBindings(*object, "pitchDownBindings", "pitchDownBinding", out.pitch_down_bindings, error) &&
            ParseInputBindings(*object, "centerBindings", "centerBinding", out.center_bindings, error);
+}
+
+bool ParsePivotNudgeSet(const JsonValue& value, PivotNudgeSet& out, std::string& error) {
+    const JsonValue::Object* object = RequireObject(value, "pivot nudge set", error);
+    if (!object) return false;
+    static const std::unordered_set<std::string> allowed = {"id", "name", "settings"};
+    if (!CheckAllowedKeys(*object, allowed, error)) return false;
+
+    std::optional<std::string> id;
+    std::optional<std::string> name;
+    if (!ReadOptionalString(*object, "id", id, error) ||
+        !ReadOptionalString(*object, "name", name, error)) {
+        return false;
+    }
+    if (!id.has_value() || id->empty()) {
+        error = "pivot nudge set id must not be empty";
+        return false;
+    }
+    out.id = *id;
+    out.name = name.value_or("Nudge Set");
+    const auto settings_it = object->find("settings");
+    if (settings_it != object->end() &&
+        !ParsePivotNudgeSettings(settings_it->second, out.settings, error)) {
+        return false;
+    }
+    return true;
 }
 
 bool ParsePivotQuickView(const JsonValue& value, PivotQuickView& out, std::string& error) {
@@ -1640,6 +1683,8 @@ bool ParsePivotProfile(const JsonValue& value, PivotXrProfile& out, std::string&
         "name",
         "enabled",
         "mode",
+        "behavior",
+        "nudgeSetId",
         "applicationIds",
         "activationMode",
         "alwaysActive",
@@ -1668,6 +1713,8 @@ bool ParsePivotProfile(const JsonValue& value, PivotXrProfile& out, std::string&
 
     std::optional<std::string> id;
     std::optional<std::string> name;
+    std::optional<std::string> behavior;
+    std::optional<std::string> nudge_set_id;
     std::optional<bool> enabled;
     std::optional<ProfileMode> mode;
     std::optional<ActivationMode> activation_mode;
@@ -1675,6 +1722,8 @@ bool ParsePivotProfile(const JsonValue& value, PivotXrProfile& out, std::string&
 
     if (!ReadOptionalString(*object, "id", id, error) ||
         !ReadOptionalString(*object, "name", name, error) ||
+        !ReadOptionalString(*object, "behavior", behavior, error) ||
+        !ReadOptionalString(*object, "nudgeSetId", nudge_set_id, error) ||
         !ReadOptionalBool(*object, "enabled", enabled, error) ||
         !ReadOptionalProfileMode(*object, "mode", mode, error) ||
         !ReadOptionalActivationMode(*object, "activationMode", activation_mode, error) ||
@@ -1686,6 +1735,10 @@ bool ParsePivotProfile(const JsonValue& value, PivotXrProfile& out, std::string&
     out.name = name.value_or("New Profile");
     out.enabled = enabled.value_or(true);
     out.mode = mode.value_or(ProfileMode::Custom);
+    if (behavior.has_value() && !ParsePivotProfileBehavior(*behavior, out.behavior, error)) {
+        return false;
+    }
+    out.nudge_set_id = nudge_set_id.value_or("");
     const ActivationMode legacy_activation_mode = activation_mode.value_or(ActivationMode::Toggle);
     out.always_active = always_active.value_or(legacy_activation_mode == ActivationMode::AlwaysOn);
 
@@ -1717,6 +1770,9 @@ bool ParsePivotModule(const JsonValue::Object& object, PivotXrModuleConfig& out,
     static const std::unordered_set<std::string> allowed = {
         "enabled",
         "defaults",
+        "behavior",
+        "nudgeSetId",
+        "nudgeSets",
         "activationMode",
         "alwaysActive",
         "activationBindings",
@@ -1734,9 +1790,13 @@ bool ParsePivotModule(const JsonValue::Object& object, PivotXrModuleConfig& out,
     }
 
     std::optional<bool> enabled;
+    std::optional<std::string> behavior;
+    std::optional<std::string> nudge_set_id;
     std::optional<ActivationMode> activation_mode;
     std::optional<bool> always_active;
     if (!ReadOptionalBool(object, "enabled", enabled, error) ||
+        !ReadOptionalString(object, "behavior", behavior, error) ||
+        !ReadOptionalString(object, "nudgeSetId", nudge_set_id, error) ||
         !ReadOptionalActivationMode(object, "activationMode", activation_mode, error) ||
         !ReadOptionalBool(object, "alwaysActive", always_active, error)) {
         return false;
@@ -1744,6 +1804,11 @@ bool ParsePivotModule(const JsonValue::Object& object, PivotXrModuleConfig& out,
     if (enabled.has_value()) {
         out.enabled = *enabled;
     }
+    if (behavior.has_value() && !ParsePivotProfileBehavior(*behavior, out.behavior, error)) {
+        return false;
+    }
+    out.nudge_set_id = nudge_set_id.value_or("");
+
     const ActivationMode legacy_activation_mode = activation_mode.value_or(ActivationMode::Toggle);
     out.always_active = always_active.value_or(legacy_activation_mode == ActivationMode::AlwaysOn);
 
@@ -1766,6 +1831,22 @@ bool ParsePivotModule(const JsonValue::Object& object, PivotXrModuleConfig& out,
     if (view_controls_it != object.end() &&
         !ParsePivotViewControls(view_controls_it->second, out.view_controls, error)) {
         return false;
+    }
+
+    const auto nudge_sets_it = object.find("nudgeSets");
+    if (nudge_sets_it != object.end()) {
+        const JsonValue::Array* nudge_sets = RequireArray(nudge_sets_it->second, "pivotxr.nudgeSets", error);
+        if (!nudge_sets) {
+            return false;
+        }
+        out.nudge_sets.clear();
+        for (const JsonValue& nudge_set_value : *nudge_sets) {
+            PivotNudgeSet nudge_set;
+            if (!ParsePivotNudgeSet(nudge_set_value, nudge_set, error)) {
+                return false;
+            }
+            out.nudge_sets.push_back(std::move(nudge_set));
+        }
     }
 
     const auto profiles_it = object.find("profiles");

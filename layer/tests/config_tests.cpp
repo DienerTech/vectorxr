@@ -706,12 +706,24 @@ void TestPivotViewControlsParsingAndResolution() {
     "depthxr": {},
     "pivotxr": {
       "enabled": false,
+      "nudgeSets": [
+        {
+          "id": "shared-hat",
+          "name": "Shared HAT",
+          "settings": {
+            "yawStepDegrees": 12.0,
+            "yawLeftBindings": [{ "type": "keyboard", "chord": ["Q"] }]
+          }
+        }
+      ],
       "profiles": [
         {
           "id": "accessible-views",
           "name": "Accessible Views",
           "applicationIds": ["dcs"],
           "enabled": true,
+          "behavior": "snapViews",
+          "nudgeSetId": "shared-hat",
           "alwaysActive": false,
           "activationBindings": [],
           "viewControls": {
@@ -775,6 +787,11 @@ void TestPivotViewControlsParsingAndResolution() {
            "A profile with View Control bindings must resolve without Motion Assist activation");
     Expect(resolved.pivotxr.profiles[0].view_controls.quick_views[0].position_forward_cm == 4.0,
            "Resolved Pivot Quick View position mismatch");
+    Expect(resolved.pivotxr.profiles[0].behavior == depthxr::PivotProfileBehavior::SnapViews &&
+               resolved.pivotxr.profiles[0].nudge_set_id == "shared-hat",
+           "Resolved Pivot profile behavior or Nudge Set identity mismatch");
+    Expect(std::abs(resolved.pivotxr.profiles[0].view_controls.nudges.yaw_step_degrees - 12.0) < 0.0001,
+           "Linked Nudge Set did not override legacy inline nudge settings");
 }
 
 void TestPivotViewTransitionMath() {

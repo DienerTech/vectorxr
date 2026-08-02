@@ -202,6 +202,18 @@ struct PivotNudgeSettings {
     std::vector<InputBinding> center_bindings;
 };
 
+struct PivotNudgeSet {
+    std::string id;
+    std::string name;
+    PivotNudgeSettings settings;
+};
+
+enum class PivotProfileBehavior {
+    LegacyHybrid,
+    EnhancedMotion,
+    SnapViews,
+};
+
 struct PivotQuickView {
     std::string id;
     std::string name;
@@ -226,6 +238,8 @@ struct PivotXrProfile {
     std::string name;
     bool enabled{true};
     ProfileMode mode{ProfileMode::Custom};
+    PivotProfileBehavior behavior{PivotProfileBehavior::LegacyHybrid};
+    std::string nudge_set_id;
     std::vector<std::string> application_ids;
     bool always_active{false};
     std::vector<PivotActivationBinding> activation_bindings;
@@ -242,6 +256,9 @@ struct PivotXrProfile {
 struct PivotXrModuleConfig {
     bool enabled{false};
     PivotXrSettings defaults;
+    PivotProfileBehavior behavior{PivotProfileBehavior::LegacyHybrid};
+    std::string nudge_set_id;
+    std::vector<PivotNudgeSet> nudge_sets;
     bool always_active{false};
     std::vector<PivotActivationBinding> activation_bindings;
     std::vector<InputBinding> set_origin_bindings;
@@ -254,6 +271,8 @@ struct PivotXrModuleConfig {
 // matched profile (or the module defaults when nothing matches).
 struct PivotXrResolvedProfile {
     std::string name;
+    PivotProfileBehavior behavior{PivotProfileBehavior::LegacyHybrid};
+    std::string nudge_set_id;
     bool always_active{false};
     std::vector<PivotActivationBinding> activation_bindings;
     std::vector<InputBinding> set_origin_bindings;

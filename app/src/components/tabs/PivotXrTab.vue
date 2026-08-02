@@ -3,6 +3,8 @@ import { computed, nextTick, ref } from 'vue'
 
 import PivotBindingsPage from '../PivotBindingsPage.vue'
 import PivotBindingsPanel from '../PivotBindingsPanel.vue'
+import PivotBehaviorPanel from '../PivotBehaviorPanel.vue'
+import PivotNudgeSetPage from '../PivotNudgeSetPage.vue'
 import PivotSettingsPage from '../PivotSettingsPage.vue'
 import PivotSettingsSummary from '../PivotSettingsSummary.vue'
 import PivotOriginPage from '../PivotOriginPage.vue'
@@ -11,7 +13,7 @@ import PivotViewControlsPage from '../PivotViewControlsPage.vue'
 import PivotViewControlsPanel from '../PivotViewControlsPanel.vue'
 import ProfileShell from '../ProfileShell.vue'
 import type { RegisteredApplication, VectorXRConfig } from '../../lib/model'
-import { bindingLabel, bindingsMatchRuntimeActivation, pivotBindingConflictWarnings } from '../../lib/model'
+import { bindingLabel, bindingsMatchRuntimeActivation, createPivotNudgeSet, pivotBindingConflictWarnings } from '../../lib/model'
 
 const props = defineProps<{
   config: VectorXRConfig
@@ -82,6 +84,28 @@ const viewControlsSubject = computed(() => {
 })
 const viewControlsContextLabel = computed(() => profileContextLabel(viewControlsTarget.value))
 
+const nudgeSetTarget = ref<string | null>(null)
+const activeNudgeSet = computed(() => props.config.modules.pivotxr.nudgeSets.find((set) => set.id === nudgeSetTarget.value) ?? null)
+const activeNudgeSetUsage = computed(() => {
+  if (!activeNudgeSet.value) return 0
+  const id = activeNudgeSet.value.id
+  return Number(props.config.modules.pivotxr.nudgeSetId === id)
+    + props.config.modules.pivotxr.profiles.filter((profile) => profile.nudgeSetId === id).length
+})
+
+function openNudgeSet(id: string) {
+  savedScrollTop = pageScroller()?.scrollTop ?? 0
+  nudgeSetTarget.value = id
+  void nextTick(() => pageScroller()?.scrollTo({ top: 0 }))
+}
+
+function addNudgeSet(subject: { nudgeSetId: string }) {
+  const source = props.config.modules.pivotxr.nudgeSets.find((set) => set.id === subject.nudgeSetId)
+  const set = createPivotNudgeSet(`${source?.name ?? 'Nudge Set'} Copy`, source?.settings)
+  props.config.modules.pivotxr.nudgeSets.push(set)
+  subject.nudgeSetId = set.id
+  openNudgeSet(set.id)
+}
 function profileContextLabel(target: 'default' | number | null): string {
   if (target === 'default' || target === null) {
     return 'Default Profile'
@@ -127,6 +151,7 @@ function closeSubPages() {
   settingsTarget.value = null
   originTarget.value = null
   viewControlsTarget.value = null
+  nudgeSetTarget.value = null
   void nextTick(() => pageScroller()?.scrollTo({ top: savedScrollTop }))
 }
 
@@ -137,8 +162,8 @@ const defaultBindingWarnings = computed(() => [
     props.config.modules.pivotxr.setOriginBindings,
     props.config.modules.pivotxr.releaseOriginBindings,
   ),
-  ...(!props.config.modules.pivotxr.alwaysActive && props.config.modules.pivotxr.activationBindings.length === 0
-    ? [{ title: 'No Motion Assist activation', message: 'Motion Assist will remain off until you add a Toggle or Hold binding, or enable Always active. View Controls with bindings still work.' }]
+  ...(props.config.modules.pivotxr.behavior !== 'snapViews' && !props.config.modules.pivotxr.alwaysActive && props.config.modules.pivotxr.activationBindings.length === 0
+    ? [{ title: 'No Motion Assist activation', message: 'Motion Assist will remain off until you add a Toggle or Hold binding, or enable Always active. Snap View bindings still work.' }]
     : []),
 ])
 
@@ -169,8 +194,8 @@ const profileWarnings = computed(() => {
       warnings.set(index, [...(warnings.get(index) ?? []), ...conflictMessages])
     }
 
-    if (!profile.alwaysActive && profile.activationBindings.length === 0) {
-      warnings.set(index, [...(warnings.get(index) ?? []), 'Motion Assist has no activation bindings and will remain off. Add a Toggle or Hold binding, or enable Always active. View Controls with bindings still work.'])
+    if (profile.behavior !== 'snapViews' && !profile.alwaysActive && profile.activationBindings.length === 0) {
+      warnings.set(index, [...(warnings.get(index) ?? []), 'Motion Assist has no activation bindings and will remain off. Add a Toggle or Hold binding, or enable Always active. Snap View bindings still work.'])
     }
 
     for (const activationBinding of profile.activationBindings) {
@@ -212,6 +237,12 @@ const profileWarnings = computed(() => {
     :subject="originSubject"
     :context-label="originContextLabel"
     :config="config"
+    @close="closeSubPages"
+  />
+  <PivotNudgeSetPage
+    v-else-if="activeNudgeSet"
+    :nudge-set="activeNudgeSet"
+    :usage-count="activeNudgeSetUsage"
     @close="closeSubPages"
   />
   <PivotViewControlsPage
@@ -286,12 +317,21 @@ const profileWarnings = computed(() => {
             <p class="mt-1">{{ warning.message }}</p>
           </div>
 
+          <PivotBehaviorPanel
+            :subject="config.modules.pivotxr"
+            :nudge-sets="config.modules.pivotxr.nudgeSets"
+            class="mb-3"
+            @edit-nudges="openNudgeSet"
+            @add-nudge-set="addNudgeSet(config.modules.pivotxr)"
+          />
           <PivotSettingsSummary
+            v-if="config.modules.pivotxr.behavior !== 'snapViews'"
             :settings="config.modules.pivotxr.defaults"
             class="mb-3"
             @edit="openSettings('default')"
           />
           <PivotViewControlsPanel
+            v-if="config.modules.pivotxr.behavior !== 'enhancedMotion'"
             :view-controls="config.modules.pivotxr.viewControls"
             class="mb-3"
             @edit="openViewControls('default')"
@@ -352,8 +392,15 @@ const profileWarnings = computed(() => {
           @move="$emit('movePivotProfile', index, $event)"
           @sync-name="$emit('syncPivotProfileName', index)"
         >
-          <PivotSettingsSummary :settings="profile.settings" @edit="openSettings(index)" />
+          <PivotBehaviorPanel
+            :subject="profile"
+            :nudge-sets="config.modules.pivotxr.nudgeSets"
+            @edit-nudges="openNudgeSet"
+            @add-nudge-set="addNudgeSet(profile)"
+          />
+          <PivotSettingsSummary v-if="profile.behavior !== 'snapViews'" class="mt-3" :settings="profile.settings" @edit="openSettings(index)" />
           <PivotViewControlsPanel
+            v-if="profile.behavior !== 'enhancedMotion'"
             :view-controls="profile.viewControls"
             class="mt-3"
             @edit="openViewControls(index)"

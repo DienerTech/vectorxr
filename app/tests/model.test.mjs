@@ -385,9 +385,28 @@ test('new Pivot profiles own independent View Controls and Quick Views', () => {
   assert.equal(config.modules.pivotxr.viewControls.quickViews[0].name, 'Left Console')
 })
 
+test('legacy mixed Pivot profiles split into linked motion and Snap View profiles', () => {
+  const config = defaultConfig()
+  const profile = createPivotProfile(config.modules.pivotxr.defaults, ['dcs'])
+  profile.viewControls.quickViews = [createPivotQuickView('Check Six')]
+  delete profile.behavior
+  delete profile.nudgeSetId
+  config.modules.pivotxr.profiles = [profile]
+  delete config.modules.pivotxr.nudgeSets
+  delete config.modules.pivotxr.nudgeSetId
+
+  const normalized = normalizeConfig(config).modules.pivotxr
+  assert.equal(normalized.profiles.length, 2)
+  assert.equal(normalized.profiles[0].behavior, 'enhancedMotion')
+  assert.equal(normalized.profiles[0].viewControls.quickViews.length, 0)
+  assert.equal(normalized.profiles[1].behavior, 'snapViews')
+  assert.equal(normalized.profiles[1].viewControls.quickViews[0].name, 'Check Six')
+  assert.equal(normalized.profiles[0].nudgeSetId, normalized.profiles[1].nudgeSetId)
+  assert.equal(normalized.nudgeSets.length, 1)
+})
 test('saved binding warnings include nudge and Quick View actions', () => {
   const config = defaultConfig()
-  config.modules.pivotxr.viewControls.nudges.yawLeftBindings = [keyboard('F6')]
+  config.modules.pivotxr.nudgeSets[0].settings.yawLeftBindings = [keyboard('F6')]
   const quickView = createPivotQuickView('Check Six')
   quickView.activationBindings = [activation('hold', keyboard('F6'))]
   config.modules.pivotxr.viewControls.quickViews = [quickView]

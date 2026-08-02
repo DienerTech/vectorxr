@@ -3,12 +3,10 @@ import { computed, onMounted, onUnmounted, ref } from 'vue'
 
 import BindingConflictWarnings from './BindingConflictWarnings.vue'
 import BindingEditor from './BindingEditor.vue'
-import BindingListEditor from './BindingListEditor.vue'
 import {
   createPivotQuickView,
   defaultKeyboardBinding,
   newPivotQuickViewId,
-  pivotViewControlBindings,
   savedBindingConflictWarnings,
   type InputBinding,
   type PivotActivationBehavior,
@@ -33,7 +31,7 @@ const editingView = computed(() => editingIndex.value === null
   : props.subject.viewControls.quickViews[editingIndex.value] ?? null)
 const globalWarnings = computed(() => savedBindingConflictWarnings(
   props.config,
-  pivotViewControlBindings(props.subject.viewControls),
+  props.subject.viewControls.quickViews.flatMap((view) => view.activationBindings.map((item) => item.binding)),
   { suppressFocusOnlyConflicts: true },
 ))
 
@@ -116,24 +114,24 @@ function updateQuickViewBehavior(view: PivotQuickView, index: number, behavior: 
             <span>{{ contextLabel }}</span>
             <template v-if="editingView">
               <span aria-hidden="true">›</span>
-              <button class="underline-offset-2 hover:underline" type="button" @click="editingIndex = null">View Controls</button>
+              <button class="underline-offset-2 hover:underline" type="button" @click="editingIndex = null">Snap Views</button>
               <span aria-hidden="true">›</span>
               <span class="font-medium" style="color: var(--app-text)">{{ editingView.name }}</span>
             </template>
             <template v-else>
               <span aria-hidden="true">›</span>
-              <span class="font-medium" style="color: var(--app-text)">View Controls</span>
+              <span class="font-medium" style="color: var(--app-text)">Snap Views</span>
             </template>
           </nav>
           <h2 class="mt-2 text-2xl font-semibold tracking-tight">
-            {{ editingView ? `Edit ${editingView.name}` : `${contextLabel} — View Controls` }}
+            {{ editingView ? `Edit ${editingView.name}` : `${contextLabel} — Snap Views` }}
           </h2>
           <p class="mt-1 text-sm text-muted">Press Esc or Done to return.</p>
         </div>
         <button
           class="button-secondary inline-flex h-9 w-9 items-center justify-center rounded-[0.75rem]"
           type="button"
-          :aria-label="editingView ? 'Return to View Controls' : 'Return to Pivot'"
+          :aria-label="editingView ? 'Return to Snap Views' : 'Return to Pivot'"
           @click="editingView ? editingIndex = null : $emit('close')"
         >
           <svg aria-hidden="true" class="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
@@ -207,23 +205,7 @@ function updateQuickViewBehavior(view: PivotQuickView, index: number, behavior: 
 
       <template v-else>
         <div class="mt-5 space-y-5">
-          <section>
-            <div class="mb-3"><h3 class="text-lg font-semibold tracking-tight">Rotation Nudges</h3><p class="mt-1 text-sm leading-6 text-muted">Each press adds one fixed step. Opposite actions undo it; Center Manual Offset returns both axes to zero.</p></div>
-            <div class="mb-4 grid gap-4 rounded-[1rem] border p-4 surface-panel-soft md:grid-cols-3">
-              <label class="block"><span class="mb-1.5 block text-sm font-medium">Yaw step</span><div class="flex items-center gap-2"><input v-model.number="subject.viewControls.nudges.yawStepDegrees" class="app-input w-full rounded-[0.75rem] px-4 py-2.5" type="number" min="1" max="90" step="1" /><span class="text-sm text-muted">°</span></div></label>
-              <label class="block"><span class="mb-1.5 block text-sm font-medium">Pitch step</span><div class="flex items-center gap-2"><input v-model.number="subject.viewControls.nudges.pitchStepDegrees" class="app-input w-full rounded-[0.75rem] px-4 py-2.5" type="number" min="1" max="60" step="1" /><span class="text-sm text-muted">°</span></div></label>
-              <label class="block"><span class="mb-1.5 block text-sm font-medium">Transition</span><div class="flex items-center gap-2"><input v-model.number="subject.viewControls.nudges.transitionSeconds" class="app-input w-full rounded-[0.75rem] px-4 py-2.5" type="number" min="0" max="2" step="0.01" /><span class="text-sm text-muted">s</span></div></label>
-            </div>
-            <div class="space-y-3">
-              <BindingListEditor v-model="subject.viewControls.nudges.yawLeftBindings" label="Yaw Left" description="Add one yaw step to the left." sound-mode="single" />
-              <BindingListEditor v-model="subject.viewControls.nudges.yawRightBindings" label="Yaw Right" description="Add one yaw step to the right." sound-mode="single" />
-              <BindingListEditor v-model="subject.viewControls.nudges.pitchUpBindings" label="Pitch Up" description="Add one pitch step upward." sound-mode="single" />
-              <BindingListEditor v-model="subject.viewControls.nudges.pitchDownBindings" label="Pitch Down" description="Add one pitch step downward." sound-mode="single" />
-              <BindingListEditor v-model="subject.viewControls.nudges.centerBindings" label="Center Manual Offset" description="Return accumulated yaw and pitch nudges to zero." sound-mode="single" />
-            </div>
-          </section>
-
-          <section class="border-t pt-5" style="border-color: var(--app-border)">
+          <section style="border-color: var(--app-border)">
             <div class="sticky top-0 z-20 mb-3 flex flex-wrap items-center justify-between gap-3 rounded-[1rem] border px-4 py-3 shadow-panel backdrop-blur surface-panel-strong">
               <div><h3 class="text-lg font-semibold tracking-tight">Quick Views</h3><p class="mt-1 text-sm text-muted">Named poses relative to the Pivot origin, with 1:1 natural head tracking around the target.</p></div>
               <div class="flex flex-wrap gap-2"><button class="button-secondary rounded-[0.75rem] px-4 py-2 text-sm font-medium" type="button" @click="addPreset">Create 4-view preset</button><button class="button-accent rounded-[0.75rem] px-4 py-2 text-sm font-medium" type="button" @click="addQuickView">Add Quick View</button></div>

@@ -699,6 +699,8 @@ class OpenXrLayer {
     bool pivotxr_quick_view_transitioning_{false};
     size_t pivotxr_quick_view_profile_index_{0};
     size_t pivotxr_quick_view_index_{0};
+    size_t pivotxr_quick_view_return_profile_index_{0};
+    bool pivotxr_quick_view_return_engaged_{false};
     // Optional full seated origin in the app's reference space. Motion Assist
     // currently consumes yaw/pitch, while the complete pose, capture time, and
     // session identity establish the stable positional reference required by

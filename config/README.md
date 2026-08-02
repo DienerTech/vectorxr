@@ -9,6 +9,6 @@ The current file format supports:
 - local seen-app tracking preference
 - module-specific settings under `modules`
 - Depth defaults and per-application overrides
-- Pivot defaults including activation mode and shared activation bindings
+- Pivot behavior profiles (`enhancedMotion` or `snapViews`), shared activation bindings, and reusable linked Nudge Sets
 
 Config v3 moves executable matching into the shared application registry so profiles can target reusable app ids.

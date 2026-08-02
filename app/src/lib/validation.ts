@@ -207,17 +207,21 @@ function validatePivotXRSettings(prefix: string, settings: PivotXRSettings): str
   return errors
 }
 
-function validatePivotViewControls(prefix: string, controls: PivotViewControls): string[] {
+function validatePivotNudgeSettings(prefix: string, nudges: PivotViewControls['nudges']): string[] {
   const errors: string[] = []
-  const nudges = controls.nudges
-  if (!Number.isFinite(nudges.yawStepDegrees) || nudges.yawStepDegrees < 1 || nudges.yawStepDegrees > 90) errors.push(`${prefix}nudges.yawStepDegrees must be between 1 and 90`)
-  if (!Number.isFinite(nudges.pitchStepDegrees) || nudges.pitchStepDegrees < 1 || nudges.pitchStepDegrees > 60) errors.push(`${prefix}nudges.pitchStepDegrees must be between 1 and 60`)
-  if (!Number.isFinite(nudges.transitionSeconds) || nudges.transitionSeconds < 0 || nudges.transitionSeconds > 2) errors.push(`${prefix}nudges.transitionSeconds must be between 0 and 2`)
-  errors.push(...validateInputBindings(`${prefix}nudges.yawLeftBindings`, nudges.yawLeftBindings))
-  errors.push(...validateInputBindings(`${prefix}nudges.yawRightBindings`, nudges.yawRightBindings))
-  errors.push(...validateInputBindings(`${prefix}nudges.pitchUpBindings`, nudges.pitchUpBindings))
-  errors.push(...validateInputBindings(`${prefix}nudges.pitchDownBindings`, nudges.pitchDownBindings))
-  errors.push(...validateInputBindings(`${prefix}nudges.centerBindings`, nudges.centerBindings))
+  if (!Number.isFinite(nudges.yawStepDegrees) || nudges.yawStepDegrees < 1 || nudges.yawStepDegrees > 90) errors.push(`${prefix}yawStepDegrees must be between 1 and 90`)
+  if (!Number.isFinite(nudges.pitchStepDegrees) || nudges.pitchStepDegrees < 1 || nudges.pitchStepDegrees > 60) errors.push(`${prefix}pitchStepDegrees must be between 1 and 60`)
+  if (!Number.isFinite(nudges.transitionSeconds) || nudges.transitionSeconds < 0 || nudges.transitionSeconds > 2) errors.push(`${prefix}transitionSeconds must be between 0 and 2`)
+  errors.push(...validateInputBindings(`${prefix}yawLeftBindings`, nudges.yawLeftBindings))
+  errors.push(...validateInputBindings(`${prefix}yawRightBindings`, nudges.yawRightBindings))
+  errors.push(...validateInputBindings(`${prefix}pitchUpBindings`, nudges.pitchUpBindings))
+  errors.push(...validateInputBindings(`${prefix}pitchDownBindings`, nudges.pitchDownBindings))
+  errors.push(...validateInputBindings(`${prefix}centerBindings`, nudges.centerBindings))
+  return errors
+}
+
+function validatePivotViewControls(prefix: string, controls: PivotViewControls): string[] {
+  const errors = validatePivotNudgeSettings(`${prefix}nudges.`, controls.nudges)
 
   const ids = new Set<string>()
   controls.quickViews.forEach((view, index) => {
@@ -450,6 +454,23 @@ export function validateConfig(config: VectorXRConfig): string[] {
   errors.push(...validateInputBindings('modules.pivotxr.setOriginBindings', config.modules.pivotxr.setOriginBindings))
   errors.push(...validateInputBindings('modules.pivotxr.releaseOriginBindings', config.modules.pivotxr.releaseOriginBindings))
   errors.push(...validatePivotViewControls('modules.pivotxr.viewControls.', config.modules.pivotxr.viewControls))
+  const nudgeSetIds = new Set<string>()
+  config.modules.pivotxr.nudgeSets.forEach((set, index) => {
+    const prefix = `modules.pivotxr.nudgeSets[${index}].`
+    if (!set.id.trim()) errors.push(`${prefix}id is required`)
+    if (nudgeSetIds.has(set.id)) errors.push(`${prefix}id duplicates another Nudge Set`)
+    nudgeSetIds.add(set.id)
+    if (!set.name.trim()) errors.push(`${prefix}name is required`)
+    errors.push(...validatePivotNudgeSettings(`${prefix}settings.`, set.settings))
+  })
+  if (!nudgeSetIds.has(config.modules.pivotxr.nudgeSetId)) {
+    errors.push('modules.pivotxr.nudgeSetId references an unknown Nudge Set')
+  }
+  config.modules.pivotxr.profiles.forEach((profile, index) => {
+    if (!nudgeSetIds.has(profile.nudgeSetId)) {
+      errors.push(`modules.pivotxr.profiles[${index}].nudgeSetId references an unknown Nudge Set`)
+    }
+  })
   errors.push(...validateQuadViewsSettings('modules.quadviews.defaults.', config.modules.quadviews.defaults))
   errors.push(...validateInputBinding('modules.quadviews.diagnosticVisualizationBinding', config.modules.quadviews.diagnosticVisualizationBinding))
 
