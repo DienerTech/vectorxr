@@ -9,6 +9,8 @@ import PivotSettingsPage from '../PivotSettingsPage.vue'
 import PivotSettingsSummary from '../PivotSettingsSummary.vue'
 import PivotOriginPage from '../PivotOriginPage.vue'
 import PivotOriginPanel from '../PivotOriginPanel.vue'
+import PivotSnapBindingsPage from '../PivotSnapBindingsPage.vue'
+import PivotSnapBindingsPanel from '../PivotSnapBindingsPanel.vue'
 import PivotViewControlsPage from '../PivotViewControlsPage.vue'
 import PivotViewControlsPanel from '../PivotViewControlsPanel.vue'
 import ProfileShell from '../ProfileShell.vue'
@@ -84,6 +86,14 @@ const viewControlsSubject = computed(() => {
 })
 const viewControlsContextLabel = computed(() => profileContextLabel(viewControlsTarget.value))
 
+const snapBindingsTarget = ref<'default' | number | null>(null)
+const snapBindingsSubject = computed(() => {
+  if (snapBindingsTarget.value === null) return null
+  if (snapBindingsTarget.value === 'default') return props.config.modules.pivotxr.viewControls
+  return props.config.modules.pivotxr.profiles[snapBindingsTarget.value]?.viewControls ?? null
+})
+const snapBindingsContextLabel = computed(() => profileContextLabel(snapBindingsTarget.value))
+
 const nudgeSetTarget = ref<string | null>(null)
 const activeNudgeSet = computed(() => props.config.modules.pivotxr.nudgeSets.find((set) => set.id === nudgeSetTarget.value) ?? null)
 const activeNudgeSetUsage = computed(() => {
@@ -105,6 +115,21 @@ function addNudgeSet(subject: { nudgeSetId: string }) {
   props.config.modules.pivotxr.nudgeSets.push(set)
   subject.nudgeSetId = set.id
   openNudgeSet(set.id)
+}
+
+function deleteNudgeSet(id: string) {
+  const sets = props.config.modules.pivotxr.nudgeSets
+  if (sets.length <= 1) return
+  const index = sets.findIndex((set) => set.id === id)
+  if (index < 0) return
+  const fallback = sets.find((set) => set.id !== id)
+  if (!fallback) return
+  if (props.config.modules.pivotxr.nudgeSetId === id) props.config.modules.pivotxr.nudgeSetId = fallback.id
+  for (const profile of props.config.modules.pivotxr.profiles) {
+    if (profile.nudgeSetId === id) profile.nudgeSetId = fallback.id
+  }
+  sets.splice(index, 1)
+  closeSubPages()
 }
 function profileContextLabel(target: 'default' | number | null): string {
   if (target === 'default' || target === null) {
@@ -146,19 +171,26 @@ function openViewControls(target: 'default' | number) {
   void nextTick(() => pageScroller()?.scrollTo({ top: 0 }))
 }
 
+function openSnapBindings(target: 'default' | number) {
+  savedScrollTop = pageScroller()?.scrollTop ?? 0
+  snapBindingsTarget.value = target
+  void nextTick(() => pageScroller()?.scrollTo({ top: 0 }))
+}
+
 function closeSubPages() {
   bindingsTarget.value = null
   settingsTarget.value = null
   originTarget.value = null
   viewControlsTarget.value = null
+  snapBindingsTarget.value = null
   nudgeSetTarget.value = null
   void nextTick(() => pageScroller()?.scrollTo({ top: savedScrollTop }))
 }
 
 const defaultBindingWarnings = computed(() => [
   ...pivotBindingConflictWarnings(
-    props.config.modules.pivotxr.alwaysActive,
-    props.config.modules.pivotxr.activationBindings,
+    props.config.modules.pivotxr.behavior === 'snapViews' ? false : props.config.modules.pivotxr.alwaysActive,
+    props.config.modules.pivotxr.behavior === 'snapViews' ? [] : props.config.modules.pivotxr.activationBindings,
     props.config.modules.pivotxr.setOriginBindings,
     props.config.modules.pivotxr.releaseOriginBindings,
   ),
@@ -185,8 +217,8 @@ const profileWarnings = computed(() => {
       }
     }
     const conflictMessages = pivotBindingConflictWarnings(
-      profile.alwaysActive,
-      profile.activationBindings,
+      profile.behavior === 'snapViews' ? false : profile.alwaysActive,
+      profile.behavior === 'snapViews' ? [] : profile.activationBindings,
       profile.setOriginBindings,
       profile.releaseOriginBindings,
     ).map((warning) => warning.message)
@@ -198,7 +230,7 @@ const profileWarnings = computed(() => {
       warnings.set(index, [...(warnings.get(index) ?? []), 'Motion Assist has no activation bindings and will remain off. Add a Toggle or Hold binding, or enable Always active. Snap View bindings still work.'])
     }
 
-    for (const activationBinding of profile.activationBindings) {
+    for (const activationBinding of profile.behavior === 'snapViews' ? [] : profile.activationBindings) {
       const binding = activationBinding.binding
       for (const applicationId of profile.applicationIds) {
         const owner = enabledProfiles.find((candidate) => (
@@ -225,8 +257,15 @@ const profileWarnings = computed(() => {
 </script>
 
 <template>
+  <PivotSnapBindingsPage
+    v-if="snapBindingsSubject"
+    :view-controls="snapBindingsSubject"
+    :context-label="snapBindingsContextLabel"
+    :config="config"
+    @close="closeSubPages"
+  />
   <PivotBindingsPage
-    v-if="bindingsSubject"
+    v-else-if="bindingsSubject"
     :subject="bindingsSubject"
     :context-label="bindingsContextLabel"
     :config="config"
@@ -243,6 +282,8 @@ const profileWarnings = computed(() => {
     v-else-if="activeNudgeSet"
     :nudge-set="activeNudgeSet"
     :usage-count="activeNudgeSetUsage"
+    :can-delete="config.modules.pivotxr.nudgeSets.length > 1"
+    @delete="deleteNudgeSet(activeNudgeSet.id)"
     @close="closeSubPages"
   />
   <PivotViewControlsPage
@@ -337,9 +378,15 @@ const profileWarnings = computed(() => {
             @edit="openViewControls('default')"
           />
           <PivotBindingsPanel
+            v-if="config.modules.pivotxr.behavior !== 'snapViews'"
             :always-active="config.modules.pivotxr.alwaysActive"
             :activation-bindings="config.modules.pivotxr.activationBindings"
             @edit="openBindings('default')"
+          />
+          <PivotSnapBindingsPanel
+            v-else
+            :view-controls="config.modules.pivotxr.viewControls"
+            @edit="openSnapBindings('default')"
           />
           <PivotOriginPanel
             :set-origin-bindings="config.modules.pivotxr.setOriginBindings"
@@ -406,10 +453,17 @@ const profileWarnings = computed(() => {
             @edit="openViewControls(index)"
           />
           <PivotBindingsPanel
+            v-if="profile.behavior !== 'snapViews'"
             :always-active="profile.alwaysActive"
             :activation-bindings="profile.activationBindings"
             class="mt-3"
             @edit="openBindings(index)"
+          />
+          <PivotSnapBindingsPanel
+            v-else
+            :view-controls="profile.viewControls"
+            class="mt-3"
+            @edit="openSnapBindings(index)"
           />
           <PivotOriginPanel
             :set-origin-bindings="profile.setOriginBindings"

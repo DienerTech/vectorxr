@@ -13,6 +13,7 @@ import {
   preserveBindingSound,
   savedBindingConflictWarnings,
 } from '../src/lib/model.ts'
+import { validateConfig } from '../src/lib/validation.ts'
 
 const keyboard = (...chord) => ({ type: 'keyboard', chord })
 const none = () => ({ type: 'none' })
@@ -183,6 +184,34 @@ test('physical input sharing stays distinct from runtime activation arbitration'
   const hatRight = { type: 'device', deviceGuid: '{ABC}', inputPath: 'hat-1-right' }
   assert.equal(bindingsShareInput(hatLeft, sameHatLeft), true)
   assert.equal(bindingsShareInput(hatLeft, hatRight), false)
+})
+
+test('Snap View HAT bindings pass save validation', () => {
+  const directions = ['up', 'up-right', 'right', 'down-right', 'down', 'down-left', 'left', 'up-left']
+
+  for (const direction of directions) {
+    const config = defaultConfig()
+    const quickView = createPivotQuickView('HAT View')
+    quickView.activationBindings = [activation('hold', {
+      type: 'device',
+      deviceGuid: '{TEST-HOTAS}',
+      inputPath: `hat-4-${direction}`,
+      inputLabel: `HAT 4 ${direction}`,
+    })]
+    config.modules.pivotxr.viewControls.quickViews.push(quickView)
+
+    assert.deepEqual(validateConfig(config), [], `expected ${direction} to be accepted`)
+  }
+
+  const invalid = defaultConfig()
+  const invalidView = createPivotQuickView('Invalid HAT View')
+  invalidView.activationBindings = [activation('hold', {
+    type: 'device',
+    deviceGuid: '{TEST-HOTAS}',
+    inputPath: 'hat-5-up',
+  })]
+  invalid.modules.pivotxr.viewControls.quickViews.push(invalidView)
+  assert.match(validateConfig(invalid).join('\n'), /hat-1 through hat-4/)
 })
 
 test('pivot binding warnings cover activation, set, and release conflicts', () => {
@@ -385,7 +414,7 @@ test('new Pivot profiles own independent View Controls and Quick Views', () => {
   assert.equal(config.modules.pivotxr.viewControls.quickViews[0].name, 'Left Console')
 })
 
-test('legacy mixed Pivot profiles split into linked motion and Snap View profiles', () => {
+test('pre-Snap Pivot profiles normalize to Enhanced Motion without creating another profile', () => {
   const config = defaultConfig()
   const profile = createPivotProfile(config.modules.pivotxr.defaults, ['dcs'])
   profile.viewControls.quickViews = [createPivotQuickView('Check Six')]
@@ -396,12 +425,9 @@ test('legacy mixed Pivot profiles split into linked motion and Snap View profile
   delete config.modules.pivotxr.nudgeSetId
 
   const normalized = normalizeConfig(config).modules.pivotxr
-  assert.equal(normalized.profiles.length, 2)
+  assert.equal(normalized.profiles.length, 1)
   assert.equal(normalized.profiles[0].behavior, 'enhancedMotion')
-  assert.equal(normalized.profiles[0].viewControls.quickViews.length, 0)
-  assert.equal(normalized.profiles[1].behavior, 'snapViews')
-  assert.equal(normalized.profiles[1].viewControls.quickViews[0].name, 'Check Six')
-  assert.equal(normalized.profiles[0].nudgeSetId, normalized.profiles[1].nudgeSetId)
+  assert.equal(normalized.profiles[0].viewControls.quickViews[0].name, 'Check Six')
   assert.equal(normalized.nudgeSets.length, 1)
 })
 test('saved binding warnings include nudge and Quick View actions', () => {

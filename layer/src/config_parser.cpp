@@ -1528,10 +1528,7 @@ bool ParsePivotSettings(const JsonValue::Object& object, PivotXrSettings& out, s
 }
 
 bool ParsePivotProfileBehavior(const std::string& value, PivotProfileBehavior& out, std::string& error) {
-    if (value == "legacyHybrid") {
-        out = PivotProfileBehavior::LegacyHybrid;
-        return true;
-    }
+
     if (value == "enhancedMotion") {
         out = PivotProfileBehavior::EnhancedMotion;
         return true;
@@ -1540,7 +1537,7 @@ bool ParsePivotProfileBehavior(const std::string& value, PivotProfileBehavior& o
         out = PivotProfileBehavior::SnapViews;
         return true;
     }
-    error = "pivot behavior must be one of: enhancedMotion, snapViews, legacyHybrid";
+    error = "pivot behavior must be one of: enhancedMotion, snapViews";
     return false;
 }
 

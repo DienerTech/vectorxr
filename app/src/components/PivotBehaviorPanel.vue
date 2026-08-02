@@ -27,12 +27,12 @@ const selectedSet = computed(() => props.nudgeSets.find((set) => set.id === prop
       <label class="block">
         <span class="mb-1.5 block text-sm font-semibold">Profile behavior</span>
         <select v-model="subject.behavior" class="app-input w-full rounded-[0.75rem] px-4 py-2.5">
-          <option v-if="subject.behavior === 'legacyHybrid'" value="legacyHybrid" disabled>Legacy mixed behavior</option>
+
           <option value="enhancedMotion">Enhanced Motion</option>
           <option value="snapViews">Snap Views</option>
         </select>
         <span class="mt-1 block text-xs text-muted">
-          {{ subject.behavior === 'enhancedMotion' ? 'Amplifies natural head rotation.' : subject.behavior === 'snapViews' ? 'Bindings select fixed poses relative to the Pivot origin.' : 'Legacy profile uses both behaviors. Choose a single behavior when you are ready to migrate it.' }}
+          {{ subject.behavior === 'enhancedMotion' ? 'Amplifies natural head rotation.' : 'Bindings select fixed poses relative to the Pivot origin.' }}
         </span>
       </label>
 

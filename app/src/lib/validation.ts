@@ -55,6 +55,8 @@ function validateSoundFeedback(prefix: string, binding: InputBinding): string[] 
   return errors
 }
 
+const deviceInputPathPattern = /^(?:button-([1-9]|[1-9][0-9]|1[0-1][0-9]|12[0-8])|hat-[1-4]-(up|up-right|right|down-right|down|down-left|left|up-left))$/
+
 function validateInputBinding(prefix: string, binding: InputBinding): string[] {
   const errors: string[] = []
 
@@ -92,8 +94,8 @@ function validateInputBinding(prefix: string, binding: InputBinding): string[] {
 
   if (!binding.inputPath.trim()) {
     errors.push(`${prefix}.inputPath is required`)
-  } else if (!/^button-([1-9]|[1-9][0-9]|1[0-1][0-9]|12[0-8])$/.test(binding.inputPath.trim())) {
-    errors.push(`${prefix}.inputPath must use button-1 through button-128`)
+  } else if (!deviceInputPathPattern.test(binding.inputPath.trim())) {
+    errors.push(`${prefix}.inputPath must use button-1 through button-128 or hat-1 through hat-4 with a supported direction`)
   }
 
   return [...errors, ...validateSoundFeedback(prefix, binding)]

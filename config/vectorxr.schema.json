@@ -119,7 +119,7 @@
             },
             "inputPath": {
               "type": "string",
-              "pattern": "^button-([1-9]|[1-9][0-9]|1[0-1][0-9]|12[0-8])$"
+              "pattern": "^(button-([1-9]|[1-9][0-9]|1[0-1][0-9]|12[0-8])|hat-[1-4]-(up|up-right|right|down-right|down|down-left|left|up-left))$"
             },
             "productGuid": {
               "type": "string"
@@ -487,7 +487,7 @@
           "type": "string",
           "minLength": 1
         },
-        "behavior": { "type": "string", "enum": ["enhancedMotion", "snapViews", "legacyHybrid"] },
+        "behavior": { "type": "string", "enum": ["enhancedMotion", "snapViews"] },
         "nudgeSetId": { "type": "string", "minLength": 1 },
         "enabled": {
           "type": "boolean"
@@ -540,7 +540,7 @@
         "defaults": {
           "$ref": "#/$defs/pivotxrSettings"
         },
-        "behavior": { "type": "string", "enum": ["enhancedMotion", "snapViews", "legacyHybrid"] },
+        "behavior": { "type": "string", "enum": ["enhancedMotion", "snapViews"] },
         "nudgeSetId": { "type": "string", "minLength": 1 },
         "nudgeSets": { "type": "array", "items": { "$ref": "#/$defs/pivotNudgeSet" } },
         "activationMode": {

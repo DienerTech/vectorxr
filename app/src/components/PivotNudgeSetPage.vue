@@ -2,13 +2,25 @@
 import { onMounted, onUnmounted } from 'vue'
 
 import BindingListEditor from './BindingListEditor.vue'
-import type { PivotNudgeSet } from '../lib/model'
+import { defaultPivotNudgeSettings, type PivotNudgeSet } from '../lib/model'
 
 const props = defineProps<{
   nudgeSet: PivotNudgeSet
   usageCount: number
+  canDelete: boolean
 }>()
-const emit = defineEmits<{ close: [] }>()
+const emit = defineEmits<{ close: []; delete: [] }>()
+
+function resetToDefaults() {
+  if (!window.confirm('Reset movement values and remove every binding from this nudge set?')) return
+  props.nudgeSet.settings = defaultPivotNudgeSettings()
+}
+
+function deleteSet() {
+  if (!props.canDelete) return
+  if (!window.confirm(`Delete "${props.nudgeSet.name}"? Profiles using it will switch to another nudge set.`)) return
+  emit('delete')
+}
 
 function onKeydown(event: KeyboardEvent) {
   if (event.key === 'Escape') emit('close')
@@ -54,7 +66,19 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
       </section>
     </div>
 
-    <div class="mt-5 flex justify-end border-t pt-4" style="border-color: var(--app-border)">
+    <div class="mt-5 flex flex-wrap items-center justify-between gap-3 border-t pt-4" style="border-color: var(--app-border)">
+      <div class="flex flex-wrap gap-2">
+        <button class="button-secondary rounded-[0.75rem] px-4 py-2.5 text-sm font-medium" type="button" @click="resetToDefaults">Reset to Defaults</button>
+        <button
+          class="button-secondary rounded-[0.75rem] px-4 py-2.5 text-sm font-medium"
+          type="button"
+          :disabled="!canDelete"
+          :title="canDelete ? 'Delete this nudge set' : 'At least one nudge set is required'"
+          @click="deleteSet"
+        >
+          Delete Nudge Set
+        </button>
+      </div>
       <button class="button-accent rounded-[0.75rem] px-6 py-2.5 text-sm font-medium" type="button" @click="emit('close')">Done</button>
     </div>
   </article>

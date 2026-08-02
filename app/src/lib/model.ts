@@ -4,7 +4,7 @@ export type PivotActivationBehavior = 'toggle' | 'hold'
 export type PivotResponseMode = 'continuous' | 'stepped'
 export type PivotStepGlideMode = 'instant' | 'glide'
 export type PivotQuickViewTurnDirection = 'left' | 'right'
-export type PivotProfileBehavior = 'enhancedMotion' | 'snapViews' | 'legacyHybrid'
+export type PivotProfileBehavior = 'enhancedMotion' | 'snapViews'
 export type QuadViewsTrackingMode = 'head' | 'eye'
 export type AppTab = 'home' | 'core' | 'registry' | 'layers' | 'about' | 'depthxr' | 'pivotxr' | 'quadviews' | 'turbo'
 export const keyboardBindingKeyGroups = [
@@ -1472,7 +1472,7 @@ function normalizeVectorXRConfig(value: unknown): VectorXRConfig {
       pivotxr: {
         enabled: normalizeBoolean(pivotxr.enabled, fallback.modules.pivotxr.enabled),
         defaults: pivotDefaults,
-        behavior: pivotxr.behavior === 'snapViews' ? 'snapViews' : pivotxr.behavior === 'enhancedMotion' ? 'enhancedMotion' : pivotViewControls.quickViews.length > 0 ? 'legacyHybrid' : 'enhancedMotion',
+        behavior: pivotxr.behavior === 'snapViews' ? 'snapViews' : 'enhancedMotion',
         nudgeSetId: defaultNudgeSetId,
         nudgeSets: pivotNudgeSets,
         alwaysActive: normalizeBoolean(pivotxr.alwaysActive, normalizeActivationMode(pivotxr.activationMode) === 'alwaysOn'),
@@ -1480,7 +1480,7 @@ function normalizeVectorXRConfig(value: unknown): VectorXRConfig {
         setOriginBindings: normalizeInputBindings(pivotxr.setOriginBindings, pivotxr.setOriginBinding),
         releaseOriginBindings: normalizeInputBindings(pivotxr.releaseOriginBindings, pivotxr.releaseOriginBinding),
         viewControls: pivotViewControls,
-        profiles: pivotProfileValues.flatMap((profileValue) => {
+        profiles: pivotProfileValues.map((profileValue) => {
           const profile = isRecord(profileValue) ? profileValue : {}
           const settings = normalizePivotXRSettings(profile.settings, pivotDefaults)
           const applicationIds = applicationIdsFromProfile(profile, applications)
@@ -1510,22 +1510,7 @@ function normalizeVectorXRConfig(value: unknown): VectorXRConfig {
             settings,
             viewControls,
           }
-          const hasExplicitBehavior = profile.behavior === 'enhancedMotion' || profile.behavior === 'snapViews'
-          if (hasExplicitBehavior || viewControls.quickViews.length === 0) return [normalized]
-
-          return [
-            { ...normalized, viewControls: { ...viewControls, quickViews: [] } },
-            {
-              ...normalized,
-              id: `${id}-snap-views`,
-              name: `${normalized.name} Snap Views`,
-              behavior: 'snapViews',
-              alwaysActive: false,
-              activationBindings: [],
-              setOriginBindings: [],
-              releaseOriginBindings: [],
-            },
-          ]
+          return normalized
         }),
       },
       quadviews: {

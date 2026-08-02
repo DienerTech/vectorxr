@@ -209,7 +209,6 @@ struct PivotNudgeSet {
 };
 
 enum class PivotProfileBehavior {
-    LegacyHybrid,
     EnhancedMotion,
     SnapViews,
 };
@@ -238,7 +237,7 @@ struct PivotXrProfile {
     std::string name;
     bool enabled{true};
     ProfileMode mode{ProfileMode::Custom};
-    PivotProfileBehavior behavior{PivotProfileBehavior::LegacyHybrid};
+    PivotProfileBehavior behavior{PivotProfileBehavior::EnhancedMotion};
     std::string nudge_set_id;
     std::vector<std::string> application_ids;
     bool always_active{false};
@@ -256,7 +255,7 @@ struct PivotXrProfile {
 struct PivotXrModuleConfig {
     bool enabled{false};
     PivotXrSettings defaults;
-    PivotProfileBehavior behavior{PivotProfileBehavior::LegacyHybrid};
+    PivotProfileBehavior behavior{PivotProfileBehavior::EnhancedMotion};
     std::string nudge_set_id;
     std::vector<PivotNudgeSet> nudge_sets;
     bool always_active{false};
@@ -271,7 +270,7 @@ struct PivotXrModuleConfig {
 // matched profile (or the module defaults when nothing matches).
 struct PivotXrResolvedProfile {
     std::string name;
-    PivotProfileBehavior behavior{PivotProfileBehavior::LegacyHybrid};
+    PivotProfileBehavior behavior{PivotProfileBehavior::EnhancedMotion};
     std::string nudge_set_id;
     bool always_active{false};
     std::vector<PivotActivationBinding> activation_bindings;

@@ -12,9 +12,9 @@ const bindingCount = computed(() => props.viewControls.quickViews.reduce((total,
 <template>
   <div class="rounded-[1rem] border p-4 surface-panel-soft">
     <div class="flex flex-wrap items-start justify-between gap-3">
-      <div class="min-w-0 flex-1">
-        <p class="text-sm font-semibold tracking-tight">Snap Views</p>
-        <div class="mt-2 flex flex-wrap gap-2">
+      <div class="flex min-w-0 flex-1 flex-wrap items-center gap-2">
+        <p class="shrink-0 text-sm font-semibold tracking-tight">Snap Views</p>
+        <div class="flex flex-wrap gap-2">
           <span class="inline-flex items-center rounded-full border px-3 py-1 text-xs" style="border-color: var(--app-border)">
             {{ viewControls.quickViews.length }} view{{ viewControls.quickViews.length === 1 ? '' : 's' }}
           </span>
@@ -23,7 +23,7 @@ const bindingCount = computed(() => props.viewControls.quickViews.reduce((total,
           </span>
         </div>
       </div>
-      <button class="button-secondary shrink-0 rounded-[0.75rem] px-4 py-2 text-sm font-medium" type="button" @click="$emit('edit')">
+      <button class="button-secondary w-40 shrink-0 rounded-[0.75rem] px-4 py-2 text-center text-sm font-medium" type="button" @click="$emit('edit')">
         Edit Snap Views…
       </button>
     </div>

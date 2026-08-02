@@ -33,7 +33,7 @@ defineEmits<{ edit: [] }>()
           {{ alwaysActive ? 'No suspend controls' : 'No activation controls' }}
         </span>
       </div>
-      <button class="button-secondary shrink-0 rounded-[0.75rem] px-4 py-2 text-sm font-medium" type="button" @click="$emit('edit')">
+      <button class="button-secondary w-40 shrink-0 rounded-[0.75rem] px-4 py-2 text-center text-sm font-medium" type="button" @click="$emit('edit')">
         Edit Activation...
       </button>
     </div>
