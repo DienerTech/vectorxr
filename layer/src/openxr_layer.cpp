@@ -2359,23 +2359,28 @@ XrResult OpenXrLayer::AttachSessionActionSets(XrSession session, const XrSession
     }
 
     XrSessionActionSetsAttachInfo downstream_attach_info = *attach_info;
-    std::vector<XrActionSet> action_sets;
+    DelayedActionSetAttachment<XrActionSet>::Attempt attachment_attempt;
+    bool attachment_attempt_prepared = false;
     bool appended_eye_gaze_set = false;
     {
         std::scoped_lock lock(mutex_);
-        if (session == active_session_ && eye_gaze_resources_ready_ &&
-            quadviews_action_set_ != XR_NULL_HANDLE &&
+        if (session == active_session_ &&
             (attach_info->countActionSets == 0 || attach_info->actionSets)) {
+            std::span<const XrActionSet> application_action_sets;
             if (attach_info->countActionSets > 0 && attach_info->actionSets) {
-                action_sets.assign(attach_info->actionSets,
-                                   attach_info->actionSets + attach_info->countActionSets);
+                application_action_sets =
+                    std::span<const XrActionSet>(attach_info->actionSets, attach_info->countActionSets);
             }
-            if (std::find(action_sets.begin(), action_sets.end(), quadviews_action_set_) == action_sets.end()) {
-                action_sets.push_back(quadviews_action_set_);
-                appended_eye_gaze_set = true;
-            }
-            downstream_attach_info.countActionSets = static_cast<uint32_t>(action_sets.size());
-            downstream_attach_info.actionSets = action_sets.data();
+            attachment_attempt =
+                eye_gaze_action_set_attachment_.PrepareApplicationAttachment(application_action_sets);
+            attachment_attempt_prepared = true;
+            appended_eye_gaze_set = attachment_attempt.includes_private_action_set &&
+                                    attachment_attempt.action_sets.size() > attach_info->countActionSets;
+            downstream_attach_info.countActionSets =
+                static_cast<uint32_t>(attachment_attempt.action_sets.size());
+            downstream_attach_info.actionSets = attachment_attempt.action_sets.empty()
+                                                     ? nullptr
+                                                     : attachment_attempt.action_sets.data();
         }
     }
 
@@ -2384,6 +2389,12 @@ XrResult OpenXrLayer::AttachSessionActionSets(XrSession session, const XrSession
                  ", appendedEyeGazeSet=" + (appended_eye_gaze_set ? "1" : "0"));
 
     const XrResult result = next_attach_session_action_sets_(session, &downstream_attach_info);
+    if (attachment_attempt_prepared) {
+        std::scoped_lock lock(mutex_);
+        if (session == active_session_) {
+            eye_gaze_action_set_attachment_.CompleteAttachment(attachment_attempt, XR_SUCCEEDED(result));
+        }
+    }
     if (XR_FAILED(result)) {
         logger_.Error("xrAttachSessionActionSets failed downstream: result=" +
                       std::to_string(static_cast<int>(result)));
@@ -2392,13 +2403,52 @@ XrResult OpenXrLayer::AttachSessionActionSets(XrSession session, const XrSession
     if (appended_eye_gaze_set) {
         std::scoped_lock lock(mutex_);
         if (session == active_session_) {
-            eye_gaze_action_set_attached_ = true;
             pending_eye_gaze_diagnostics_ = std::max(pending_eye_gaze_diagnostics_, 20u);
             pending_eye_gaze_sync_diagnostics_ = std::max(pending_eye_gaze_sync_diagnostics_, 20u);
             logger_.Info("Attached VectorXR eye-gaze action set for quadviews.");
         }
     }
     return result;
+}
+
+void OpenXrLayer::TryAttachEyeGazeActionSetFallback(XrSession session) {
+    std::optional<DelayedActionSetAttachment<XrActionSet>::Attempt> attachment_attempt;
+    std::uint64_t completed_frames = 0;
+    {
+        std::scoped_lock lock(mutex_);
+        if (session != active_session_ || !eye_gaze_resources_ready_ ||
+            !next_attach_session_action_sets_) {
+            return;
+        }
+        attachment_attempt = eye_gaze_action_set_attachment_.PrepareFallbackAttachment();
+        completed_frames = eye_gaze_action_set_attachment_.CompletedFrames();
+    }
+    if (!attachment_attempt.has_value()) {
+        return;
+    }
+
+    XrSessionActionSetsAttachInfo attach_info{XR_TYPE_SESSION_ACTION_SETS_ATTACH_INFO};
+    attach_info.countActionSets = static_cast<uint32_t>(attachment_attempt->action_sets.size());
+    attach_info.actionSets = attachment_attempt->action_sets.data();
+    const XrResult result = next_attach_session_action_sets_(session, &attach_info);
+    {
+        std::scoped_lock lock(mutex_);
+        if (session == active_session_) {
+            eye_gaze_action_set_attachment_.CompleteAttachment(*attachment_attempt, XR_SUCCEEDED(result));
+            if (XR_SUCCEEDED(result)) {
+                pending_eye_gaze_diagnostics_ = std::max(pending_eye_gaze_diagnostics_, 20u);
+                pending_eye_gaze_sync_diagnostics_ = std::max(pending_eye_gaze_sync_diagnostics_, 20u);
+            }
+        }
+    }
+    if (XR_SUCCEEDED(result)) {
+        logger_.Info("Attached VectorXR eye-gaze action set after the application did not use the OpenXR "
+                     "action system for " + std::to_string(completed_frames) + " frames.");
+    } else {
+        logger_.Error("VectorXR eye-gaze fallback action-set attachment failed: result=" +
+                      std::to_string(static_cast<int>(result)) +
+                      "; quadviews will continue with head/static focus offsets.");
+    }
 }
 
 XrResult OpenXrLayer::SyncActions(XrSession session, const XrActionsSyncInfo* sync_info) {
@@ -2412,7 +2462,8 @@ XrResult OpenXrLayer::SyncActions(XrSession session, const XrActionsSyncInfo* sy
     uint32_t submitted_action_set_count = sync_info->countActiveActionSets;
     {
         std::scoped_lock lock(mutex_);
-        if (session == active_session_ && eye_gaze_resources_ready_ && eye_gaze_action_set_attached_ &&
+        if (session == active_session_ && eye_gaze_resources_ready_ &&
+            eye_gaze_action_set_attachment_.PrivateActionSetAttached() &&
             quadviews_action_set_ != XR_NULL_HANDLE &&
             (sync_info->countActiveActionSets == 0 || sync_info->activeActionSets)) {
             if (sync_info->countActiveActionSets > 0 && sync_info->activeActionSets) {
@@ -2447,7 +2498,8 @@ XrResult OpenXrLayer::SyncActions(XrSession session, const XrActionsSyncInfo* sy
                           ", appActionSets=" + std::to_string(sync_info->countActiveActionSets) +
                           ", submittedActionSets=" + std::to_string(submitted_action_set_count) +
                           ", appended=" + std::to_string(appended_eye_gaze_active_set) +
-                          ", actionSetAttached=" + std::to_string(eye_gaze_action_set_attached_));
+                          ", actionSetAttached=" +
+                              std::to_string(eye_gaze_action_set_attachment_.PrivateActionSetAttached()));
             --pending_eye_gaze_sync_diagnostics_;
         }
     }
@@ -4694,6 +4746,14 @@ XrResult OpenXrLayer::WaitFrame(XrSession session,
 }
 
 XrResult OpenXrLayer::BeginFrame(XrSession session, const XrFrameBeginInfo* frame_begin_info) {
+    {
+        std::scoped_lock lock(mutex_);
+        if (session == active_session_) {
+            eye_gaze_action_set_attachment_.NoteFrameBoundary();
+        }
+    }
+    TryAttachEyeGazeActionSetFallback(session);
+
     if (!turbo_frame_interception_required_.load(std::memory_order_acquire)) {
         return next_begin_frame_(session, frame_begin_info);
     }
@@ -7883,7 +7943,7 @@ void OpenXrLayer::ResetSessionState() {
     eye_gaze_interaction_profile_path_ = XR_NULL_PATH;
     eye_gaze_pose_path_ = XR_NULL_PATH;
     eye_gaze_resources_ready_ = false;
-    eye_gaze_action_set_attached_ = false;
+    eye_gaze_action_set_attachment_.Reset();
     has_logged_eye_gaze_focus_active_ = false;
     has_logged_eye_gaze_focus_unavailable_ = false;
     eye_gaze_unavailable_streak_ = 0;
@@ -8063,7 +8123,7 @@ XrResult OpenXrLayer::CreateEyeGazeResources(XrSession session) {
     }
 
     eye_gaze_resources_ready_ = true;
-    eye_gaze_action_set_attached_ = false;
+    eye_gaze_action_set_attachment_.SetPrivateActionSet(quadviews_action_set_);
     has_logged_eye_gaze_focus_active_ = false;
     has_logged_eye_gaze_focus_unavailable_ = false;
     eye_gaze_unavailable_streak_ = 0;
@@ -8086,7 +8146,7 @@ void OpenXrLayer::DestroyEyeGazeResources() {
     eye_gaze_interaction_profile_path_ = XR_NULL_PATH;
     eye_gaze_pose_path_ = XR_NULL_PATH;
     eye_gaze_resources_ready_ = false;
-    eye_gaze_action_set_attached_ = false;
+    eye_gaze_action_set_attachment_.ClearPrivateActionSet();
     has_logged_eye_gaze_focus_active_ = false;
     has_logged_eye_gaze_focus_unavailable_ = false;
     eye_gaze_unavailable_streak_ = 0;
@@ -8180,7 +8240,8 @@ bool OpenXrLayer::LocateEyeGazeFocusOffsets(XrSession session,
             if (eye_gaze_unavailable_streak_ >= kEyeGazeUnavailableLogThreshold) {
                 logger_.Info("Quadviews eye-gaze focus unavailable; using head/static focus offsets. reason=" + reason +
                              ", resourcesReady=" + std::to_string(eye_gaze_resources_ready_) +
-                             ", actionSetAttached=" + std::to_string(eye_gaze_action_set_attached_));
+                             ", actionSetAttached=" +
+                                 std::to_string(eye_gaze_action_set_attachment_.PrivateActionSetAttached()));
                 has_logged_eye_gaze_focus_unavailable_ = true;
                 has_logged_eye_gaze_focus_active_ = false;
             }
@@ -8192,7 +8253,8 @@ bool OpenXrLayer::LocateEyeGazeFocusOffsets(XrSession session,
         if (should_log_unavailable_debug) {
             logger_.Debug("Quadviews eye-gaze focus unavailable: " + reason +
                           ", resourcesReady=" + std::to_string(eye_gaze_resources_ready_) +
-                          ", actionSetAttached=" + std::to_string(eye_gaze_action_set_attached_) +
+                          ", actionSetAttached=" +
+                              std::to_string(eye_gaze_action_set_attachment_.PrivateActionSetAttached()) +
                           ", eyeInteractionProfile=" + describe_eye_profile() +
                           ", eyeGazeExtEnabled=" + std::to_string(eye_gaze_extension_enabled_) +
                           ", unavailableStreak=" + std::to_string(eye_gaze_unavailable_streak_));
@@ -8217,7 +8279,8 @@ bool OpenXrLayer::LocateEyeGazeFocusOffsets(XrSession session,
         log_eye_gaze_diagnostic("base space is null");
         return false;
     }
-    if (!eye_gaze_resources_ready_ || !eye_gaze_action_set_attached_ ||
+    if (!eye_gaze_resources_ready_ ||
+        !eye_gaze_action_set_attachment_.PrivateActionSetAttached() ||
         quadviews_eye_gaze_action_ == XR_NULL_HANDLE || quadviews_eye_gaze_space_ == XR_NULL_HANDLE) {
         log_eye_gaze_diagnostic("eye-gaze action resources are not ready");
         return false;
