@@ -10,6 +10,7 @@ import {
 import ModuleBindingPage from "../ModuleBindingPage.vue";
 import ModuleBindingPanel from "../ModuleBindingPanel.vue";
 import ProfileShell from "../ProfileShell.vue";
+import QuadViewsOverlayGuide from "../QuadViewsOverlayGuide.vue";
 import QuadViewsSettingsFields from "../QuadViewsSettingsFields.vue";
 import {
   savedBindingConflictWarnings,
@@ -19,6 +20,7 @@ import {
 } from "../../lib/model";
 
 const varjoCompatibilityInfoOpen = ref(false);
+const overlayGuideOpen = ref(false);
 const bindingSubPageOpen = ref(false);
 let savedScrollTop = 0;
 const runtimeSessions = ref<RuntimeStatusSession[]>([]);
@@ -263,11 +265,19 @@ function budgetChipClass(settings: QuadViewsSettings) {
       </div>
 
       <div class="mb-4 space-y-3 rounded-[1rem] border p-4 surface-panel-soft">
-        <div>
-          <p class="eyebrow text-xs uppercase tracking-[0.18em]">In-headset diagnostics</p>
-          <p class="mt-1 text-sm leading-6 text-muted">
-            Visualize the peripheral area, transition band, focus window, head center, configured offset, and raw versus smoothed gaze. The focus outline turns red while eye tracking is unavailable.
-          </p>
+        <div class="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <p class="eyebrow text-xs uppercase tracking-[0.18em]">In-headset diagnostics</p>
+            <p class="mt-1 max-w-3xl text-sm leading-6 text-muted">
+              See render zones, focus alignment, gaze filtering, and tracking availability while you tune Quadviews.
+            </p>
+          </div>
+          <button class="button-secondary inline-flex items-center gap-2 rounded-[0.75rem] px-3.5 py-2 text-sm font-semibold" type="button" @click="overlayGuideOpen = true">
+            <svg aria-hidden="true" class="h-4 w-4" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8">
+              <path d="M10 2.5a7.5 7.5 0 1 0 0 15 7.5 7.5 0 0 0 0-15Zm0 4v4.25m0 2.75v.1" stroke-linecap="round" />
+            </svg>
+            How to read the overlay
+          </button>
         </div>
         <div class="grid gap-3 lg:grid-cols-[minmax(0,1fr)_minmax(19rem,0.8fr)]">
           <div class="rounded-[0.9rem] border p-4 surface-panel-strong">
@@ -298,9 +308,7 @@ function budgetChipClass(settings: QuadViewsSettings) {
             @edit="openDiagnosticBinding"
           />
         </div>
-        <p class="text-xs leading-5 text-muted">
-          Colors: blue = peripheral, amber = transition, green/red = focus boundary, white = head center, magenta = configured offset, cyan = raw gaze, yellow = smoothed gaze.
-        </p>
+        <p class="text-xs leading-5 text-muted">New to the visualization? The interactive guide explains each shape and maps common symptoms to the setting that controls them.</p>
       </div>
 
       <details class="section-disclosure border-t pt-4" style="border-color: var(--app-border)" open>
@@ -390,6 +398,8 @@ function budgetChipClass(settings: QuadViewsSettings) {
         specific application.
       </div>
     </section>
+
+    <QuadViewsOverlayGuide :open="overlayGuideOpen" @close="overlayGuideOpen = false" />
 
     <div v-if="varjoCompatibilityInfoOpen" class="fixed inset-0 z-50 flex items-center justify-center bg-black/45 px-4 py-6 backdrop-blur-sm">
       <div class="w-full max-w-[720px] rounded-[1.25rem] border p-5 surface-panel-strong">
