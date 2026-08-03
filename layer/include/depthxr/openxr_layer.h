@@ -693,13 +693,14 @@ class OpenXrLayer {
     // release ramp so the easing keeps using that profile's settings.
     size_t pivotxr_active_profile_index_{0};
     bool pivotxr_engaged_{false};
+    // Independent Nudge Sets contribute to the global transition; active-only
+    // Nudge Sets use the profile transition and are cleared on profile release.
     PivotViewTransitionState pivotxr_manual_view_transition_;
+    PivotViewTransitionState pivotxr_profile_view_transition_;
     PivotViewTransitionState pivotxr_quick_view_transition_;
     bool pivotxr_quick_view_retarget_pending_{false};
     PivotViewOffset pivotxr_quick_view_pending_pose_;
     double pivotxr_quick_view_pending_duration_seconds_{0.0};
-    PivotSnapTurnPreference pivotxr_quick_view_pending_turn_preference_{
-        PivotSnapTurnPreference::Shortest};
     bool pivotxr_quick_view_active_{false};
     bool pivotxr_quick_view_transitioning_{false};
     size_t pivotxr_quick_view_profile_index_{0};

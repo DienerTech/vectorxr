@@ -214,7 +214,6 @@ PivotXrResolvedSettings ResolvePivotXrSettings(const ConfigDocument& config, std
             PivotXrResolvedProfile candidate;
             candidate.name = profile.name;
             candidate.behavior = profile.behavior;
-            candidate.snap_turn_preference = profile.snap_turn_preference;
             candidate.nudge_set_id = profile.nudge_set_id;
             const PivotNudgeSet* nudge_set =
                 FindPivotNudgeSet(config.pivotxr, profile.nudge_set_id);
@@ -236,7 +235,6 @@ PivotXrResolvedSettings ResolvePivotXrSettings(const ConfigDocument& config, std
         PivotXrResolvedProfile candidate;
         candidate.name = "Default";
         candidate.behavior = config.pivotxr.behavior;
-        candidate.snap_turn_preference = config.pivotxr.snap_turn_preference;
         candidate.nudge_set_id = config.pivotxr.nudge_set_id;
         const PivotNudgeSet* nudge_set =
             FindPivotNudgeSet(config.pivotxr, config.pivotxr.nudge_set_id);

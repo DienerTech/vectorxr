@@ -1,11 +1,10 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 
-import type { PivotNudgeSet, PivotProfileBehavior, PivotSnapTurnPreference } from '../lib/model'
+import type { PivotNudgeSet, PivotProfileBehavior } from '../lib/model'
 
 interface PivotBehaviorSubject {
   behavior: PivotProfileBehavior
-  snapTurnPreference: PivotSnapTurnPreference
   nudgeSetId: string
 }
 
@@ -49,15 +48,6 @@ const selectedSet = computed(() => props.nudgeSets.find((set) => set.id === prop
         <span class="mt-1 block text-xs text-muted">Applied after the active behavior; linked edits update every profile using this set.</span>
       </div>
 
-      <label v-if="subject.behavior === 'snapViews'" class="block">
-        <span class="mb-1.5 block text-sm font-semibold">Snap travel</span>
-        <select v-model="subject.snapTurnPreference" class="app-input w-full rounded-[0.75rem] px-4 py-2.5">
-          <option value="shortest">Shortest path</option>
-          <option value="left">Prefer left</option>
-          <option value="right">Prefer right</option>
-        </select>
-        <span class="mt-1 block text-xs text-muted">All paths are shortest; the preference only resolves an exact 180-degree tie.</span>
-      </label>
 
       <div v-if="selectedSet" class="rounded-[0.75rem] border px-3 py-2.5 text-sm surface-panel-strong">
         <span class="block font-semibold">{{ selectedSet.allowWhileInactive ? 'Nudges remain available while Pivot is inactive' : 'Nudges follow the active profile' }}</span>

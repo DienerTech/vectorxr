@@ -1541,16 +1541,10 @@ bool ParsePivotProfileBehavior(const std::string& value, PivotProfileBehavior& o
     return false;
 }
 
-bool ParsePivotSnapTurnPreference(const std::string& value, PivotSnapTurnPreference& out,
-                                  std::string& error) {
-    if (value == "shortest") out = PivotSnapTurnPreference::Shortest;
-    else if (value == "left") out = PivotSnapTurnPreference::Left;
-    else if (value == "right") out = PivotSnapTurnPreference::Right;
-    else {
-        error = "pivot snapTurnPreference must be one of: shortest, left, right";
-        return false;
-    }
-    return true;
+bool ValidateLegacyPivotSnapTurnPreference(const std::string& value, std::string& error) {
+    if (value == "shortest" || value == "left" || value == "right") return true;
+    error = "legacy pivot snapTurnPreference must be one of: shortest, left, right";
+    return false;
 }
 
 bool ParsePivotNudgeSettings(const JsonValue& value, PivotNudgeSettings& out, std::string& error) {
@@ -1756,8 +1750,10 @@ bool ParsePivotProfile(const JsonValue& value, PivotXrProfile& out, std::string&
     if (behavior.has_value() && !ParsePivotProfileBehavior(*behavior, out.behavior, error)) {
         return false;
     }
+    // Accepted for configs saved during the Snap travel prototype. Snap Views
+    // now always take the shortest path, so the value is validated then ignored.
     if (snap_turn_preference &&
-        !ParsePivotSnapTurnPreference(*snap_turn_preference, out.snap_turn_preference, error)) {
+        !ValidateLegacyPivotSnapTurnPreference(*snap_turn_preference, error)) {
         return false;
     }
     out.nudge_set_id = nudge_set_id.value_or("");
@@ -1836,8 +1832,10 @@ bool ParsePivotModule(const JsonValue::Object& object, PivotXrModuleConfig& out,
     if (behavior.has_value() && !ParsePivotProfileBehavior(*behavior, out.behavior, error)) {
         return false;
     }
+    // Accepted for configs saved during the Snap travel prototype. Snap Views
+    // now always take the shortest path, so the value is validated then ignored.
     if (snap_turn_preference &&
-        !ParsePivotSnapTurnPreference(*snap_turn_preference, out.snap_turn_preference, error)) {
+        !ValidateLegacyPivotSnapTurnPreference(*snap_turn_preference, error)) {
         return false;
     }
     out.nudge_set_id = nudge_set_id.value_or("");

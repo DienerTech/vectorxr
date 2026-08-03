@@ -373,7 +373,6 @@ test('new Pivot view controls are inert until bindings are assigned', () => {
   assert.equal(controls.nudges.transitionSeconds, 0.12)
   assert.deepEqual(controls.nudges.yawLeftBindings, [])
   assert.deepEqual(controls.quickViews, [])
-  assert.equal(defaultConfig().modules.pivotxr.snapTurnPreference, 'shortest')
   assert.equal(defaultConfig().modules.pivotxr.nudgeSets[0].allowWhileInactive, false)
 })
 
@@ -407,7 +406,6 @@ test('new Pivot profiles own independent View Controls and Quick Views', () => {
     [],
     config.modules.pivotxr.viewControls,
   )
-  assert.equal(profile.snapTurnPreference, 'shortest')
   assert.equal(config.modules.pivotxr.nudgeSets[0].allowWhileInactive, false)
   profile.viewControls.nudges.yawStepDegrees = 45
   profile.viewControls.quickViews[0].name = 'Changed'

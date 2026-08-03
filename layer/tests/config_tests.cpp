@@ -789,8 +789,6 @@ void TestPivotViewControlsParsingAndResolution() {
     Expect(resolved.pivotxr.profiles[0].view_controls.quick_views[0].position_forward_cm == 4.0,
            "Resolved Pivot Quick View position mismatch");
     Expect(resolved.pivotxr.profiles[0].behavior == depthxr::PivotProfileBehavior::SnapViews &&
-               resolved.pivotxr.profiles[0].snap_turn_preference ==
-                   depthxr::PivotSnapTurnPreference::Left &&
                resolved.pivotxr.profiles[0].allow_inactive_nudges &&
                resolved.pivotxr.profiles[0].nudge_set_id == "shared-hat",
            "Resolved Pivot profile behavior or view-control policy mismatch");

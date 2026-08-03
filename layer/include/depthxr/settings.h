@@ -186,12 +186,6 @@ struct PivotActivationBinding {
     InputBinding binding;
 };
 
-enum class PivotSnapTurnPreference {
-    Shortest,
-    Left,
-    Right,
-};
-
 struct PivotNudgeSettings {
     double yaw_step_degrees{30.0};
     double pitch_step_degrees{20.0};
@@ -239,7 +233,6 @@ struct PivotXrProfile {
     bool enabled{true};
     ProfileMode mode{ProfileMode::Custom};
     PivotProfileBehavior behavior{PivotProfileBehavior::EnhancedMotion};
-    PivotSnapTurnPreference snap_turn_preference{PivotSnapTurnPreference::Shortest};
     std::string nudge_set_id;
     bool allow_inactive_nudges{false};
     std::vector<std::string> application_ids;
@@ -259,7 +252,6 @@ struct PivotXrModuleConfig {
     bool enabled{false};
     PivotXrSettings defaults;
     PivotProfileBehavior behavior{PivotProfileBehavior::EnhancedMotion};
-    PivotSnapTurnPreference snap_turn_preference{PivotSnapTurnPreference::Shortest};
     std::string nudge_set_id;
     std::vector<PivotNudgeSet> nudge_sets;
     bool allow_inactive_nudges{false};
@@ -276,7 +268,6 @@ struct PivotXrModuleConfig {
 struct PivotXrResolvedProfile {
     std::string name;
     PivotProfileBehavior behavior{PivotProfileBehavior::EnhancedMotion};
-    PivotSnapTurnPreference snap_turn_preference{PivotSnapTurnPreference::Shortest};
     std::string nudge_set_id;
     bool allow_inactive_nudges{false};
     bool always_active{false};

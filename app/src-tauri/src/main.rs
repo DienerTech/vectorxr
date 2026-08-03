@@ -431,8 +431,8 @@ struct PivotXRProfileConfig {
     application_ids: Vec<String>,
     #[serde(default = "default_pivot_profile_behavior")]
     behavior: String,
-    #[serde(default)]
-    snap_turn_preference: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    snap_turn_preference: Option<String>,
     #[serde(default)]
     nudge_set_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -476,8 +476,8 @@ struct PivotXRModuleConfig {
     defaults: PivotXRSettings,
     #[serde(default = "default_pivot_profile_behavior")]
     behavior: String,
-    #[serde(default)]
-    snap_turn_preference: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    snap_turn_preference: Option<String>,
     #[serde(default)]
     nudge_set_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -518,7 +518,7 @@ impl Default for PivotXRModuleConfig {
             enabled: false,
             defaults: PivotXRSettings::default(),
             behavior: default_pivot_profile_behavior(),
-            snap_turn_preference: String::new(),
+            snap_turn_preference: None,
             nudge_set_id: String::new(),
             nudge_sets: Vec::new(),
             allow_inactive_nudges: None,
