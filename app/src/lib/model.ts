@@ -3,7 +3,7 @@ export type ActivationMode = 'toggle' | 'hold' | 'alwaysOn'
 export type PivotActivationBehavior = 'toggle' | 'hold'
 export type PivotResponseMode = 'continuous' | 'stepped'
 export type PivotStepGlideMode = 'instant' | 'glide'
-export type PivotQuickViewTurnDirection = 'left' | 'right'
+export type PivotSnapTurnPreference = 'shortest' | 'left' | 'right'
 export type PivotProfileBehavior = 'enhancedMotion' | 'snapViews'
 export type QuadViewsTrackingMode = 'head' | 'eye'
 export type AppTab = 'home' | 'core' | 'registry' | 'layers' | 'about' | 'depthxr' | 'pivotxr' | 'quadviews' | 'turbo'
@@ -90,6 +90,7 @@ export interface PivotNudgeSettings {
 export interface PivotNudgeSet {
   id: string
   name: string
+  allowWhileInactive: boolean
   settings: PivotNudgeSettings
 }
 
@@ -102,7 +103,6 @@ export interface PivotQuickView {
   positionUpCm: number
   positionForwardCm: number
   transitionSeconds: number
-  turnDirection: PivotQuickViewTurnDirection
   activationBindings: PivotActivationBinding[]
 }
 
@@ -207,6 +207,7 @@ export interface PivotXRProfileConfig {
   enabled: boolean
   applicationIds: string[]
   behavior: PivotProfileBehavior
+  snapTurnPreference: PivotSnapTurnPreference
   nudgeSetId: string
   alwaysActive: boolean
   activationBindings: PivotActivationBinding[]
@@ -223,6 +224,7 @@ export interface PivotXRModuleConfig {
   enabled: boolean
   defaults: PivotXRSettings
   behavior: PivotProfileBehavior
+  snapTurnPreference: PivotSnapTurnPreference
   nudgeSetId: string
   nudgeSets: PivotNudgeSet[]
   alwaysActive: boolean
@@ -547,10 +549,11 @@ export function newPivotNudgeSetId(): string {
   return `pivot-nudges-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
 }
 
-export function createPivotNudgeSet(name = 'Standard Nudges', settings = defaultPivotNudgeSettings()): PivotNudgeSet {
+export function createPivotNudgeSet(name = 'Standard Nudges', settings = defaultPivotNudgeSettings(), allowWhileInactive = false): PivotNudgeSet {
   return {
     id: newPivotNudgeSetId(),
     name,
+    allowWhileInactive,
     settings: normalizePivotNudgeSettings(settings, defaultPivotNudgeSettings()),
   }
 }
@@ -569,7 +572,6 @@ export function createPivotQuickView(name = 'New Quick View'): PivotQuickView {
     positionUpCm: 0,
     positionForwardCm: 0,
     transitionSeconds: 0.18,
-    turnDirection: 'right',
     activationBindings: [],
   }
 }
@@ -645,8 +647,9 @@ export function defaultConfig(): VectorXRConfig {
         enabled: false,
         defaults: defaultPivotXRSettings(),
         behavior: 'enhancedMotion',
+        snapTurnPreference: 'shortest',
         nudgeSetId: 'pivot-nudges-standard',
-        nudgeSets: [{ id: 'pivot-nudges-standard', name: 'Standard Nudges', settings: defaultPivotNudgeSettings() }],
+        nudgeSets: [{ id: 'pivot-nudges-standard', name: 'Standard Nudges', allowWhileInactive: false, settings: defaultPivotNudgeSettings() }],
         alwaysActive: false,
         activationBindings: [],
         setOriginBindings: [],
@@ -716,6 +719,7 @@ export function createPivotProfile(
     enabled: true,
     applicationIds,
     behavior,
+    snapTurnPreference: 'shortest',
     nudgeSetId,
     alwaysActive,
     activationBindings: normalizePivotActivationBindings(activationBindings),
@@ -881,7 +885,6 @@ function normalizePivotQuickView(value: unknown, fallbackName: string): PivotQui
     positionUpCm: normalizeNumber(source.positionUpCm, 0),
     positionForwardCm: normalizeNumber(source.positionForwardCm, 0),
     transitionSeconds: normalizeNumber(source.transitionSeconds, 0.18),
-    turnDirection: source.turnDirection === 'left' ? 'left' : 'right',
     activationBindings: normalizePivotActivationBindings(source.activationBindings),
   }
 }
@@ -1420,16 +1423,21 @@ function normalizeVectorXRConfig(value: unknown): VectorXRConfig {
     return {
       id: normalizeString(set.id, `pivot-nudges-${index + 1}`),
       name: normalizeString(set.name, `Nudge Set ${index + 1}`),
+      allowWhileInactive: normalizeBoolean(set.allowWhileInactive, false),
       settings: normalizePivotNudgeSettings(set.settings, defaultPivotNudgeSettings()),
     }
   })
   if (pivotNudgeSets.length === 0) {
-    pivotNudgeSets.push({ id: 'pivot-nudges-standard', name: 'Standard Nudges', settings: pivotViewControls.nudges })
+    pivotNudgeSets.push({ id: 'pivot-nudges-standard', name: 'Standard Nudges', allowWhileInactive: false, settings: pivotViewControls.nudges })
   }
   const requestedDefaultNudgeSetId = normalizeString(pivotxr.nudgeSetId, '')
   const defaultNudgeSetId = pivotNudgeSets.some((set) => set.id === requestedDefaultNudgeSetId)
     ? requestedDefaultNudgeSetId
     : pivotNudgeSets[0].id
+  if (normalizeBoolean(pivotxr.allowInactiveNudges, false)) {
+    const defaultSet = pivotNudgeSets.find((set) => set.id === defaultNudgeSetId)
+    if (defaultSet) defaultSet.allowWhileInactive = true
+  }
   const quadViewsDefaults = normalizeQuadViewsSettings(quadviews.defaults, fallback.modules.quadviews.defaults)
 
   return {
@@ -1473,6 +1481,7 @@ function normalizeVectorXRConfig(value: unknown): VectorXRConfig {
         enabled: normalizeBoolean(pivotxr.enabled, fallback.modules.pivotxr.enabled),
         defaults: pivotDefaults,
         behavior: pivotxr.behavior === 'snapViews' ? 'snapViews' : 'enhancedMotion',
+        snapTurnPreference: pivotxr.snapTurnPreference === 'left' || pivotxr.snapTurnPreference === 'right' ? pivotxr.snapTurnPreference : 'shortest',
         nudgeSetId: defaultNudgeSetId,
         nudgeSets: pivotNudgeSets,
         alwaysActive: normalizeBoolean(pivotxr.alwaysActive, normalizeActivationMode(pivotxr.activationMode) === 'alwaysOn'),
@@ -1492,8 +1501,13 @@ function normalizeVectorXRConfig(value: unknown): VectorXRConfig {
             const sharesDefault = JSON.stringify(viewControls.nudges) === JSON.stringify(pivotViewControls.nudges)
             nudgeSetId = sharesDefault ? defaultNudgeSetId : `${id}-nudges`
             if (!sharesDefault) {
-              pivotNudgeSets.push({ id: nudgeSetId, name: `${normalizeString(profile.name, 'Profile')} Nudges`, settings: viewControls.nudges })
+              pivotNudgeSets.push({ id: nudgeSetId, name: `${normalizeString(profile.name, 'Profile')} Nudges`, allowWhileInactive: false, settings: viewControls.nudges })
             }
+          }
+
+          if (normalizeBoolean(profile.allowInactiveNudges, false)) {
+            const legacySet = pivotNudgeSets.find((set) => set.id === nudgeSetId)
+            if (legacySet) legacySet.allowWhileInactive = true
           }
 
           const normalized: PivotXRProfileConfig = {
@@ -1502,6 +1516,7 @@ function normalizeVectorXRConfig(value: unknown): VectorXRConfig {
             enabled: normalizeBoolean(profile.enabled, true),
             applicationIds,
             behavior: profile.behavior === 'snapViews' ? 'snapViews' : 'enhancedMotion',
+            snapTurnPreference: profile.snapTurnPreference === 'left' || profile.snapTurnPreference === 'right' ? profile.snapTurnPreference : 'shortest',
             nudgeSetId,
             alwaysActive: normalizeBoolean(profile.alwaysActive, activationMode === 'alwaysOn'),
             activationBindings: normalizePivotActivationBindings(profile.activationBindings, profile.activationBinding, activationMode),

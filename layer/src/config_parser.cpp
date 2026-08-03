@@ -1541,6 +1541,18 @@ bool ParsePivotProfileBehavior(const std::string& value, PivotProfileBehavior& o
     return false;
 }
 
+bool ParsePivotSnapTurnPreference(const std::string& value, PivotSnapTurnPreference& out,
+                                  std::string& error) {
+    if (value == "shortest") out = PivotSnapTurnPreference::Shortest;
+    else if (value == "left") out = PivotSnapTurnPreference::Left;
+    else if (value == "right") out = PivotSnapTurnPreference::Right;
+    else {
+        error = "pivot snapTurnPreference must be one of: shortest, left, right";
+        return false;
+    }
+    return true;
+}
+
 bool ParsePivotNudgeSettings(const JsonValue& value, PivotNudgeSettings& out, std::string& error) {
     const JsonValue::Object* object = RequireObject(value, "pivot nudges", error);
     if (!object) return false;
@@ -1572,13 +1584,17 @@ bool ParsePivotNudgeSettings(const JsonValue& value, PivotNudgeSettings& out, st
 bool ParsePivotNudgeSet(const JsonValue& value, PivotNudgeSet& out, std::string& error) {
     const JsonValue::Object* object = RequireObject(value, "pivot nudge set", error);
     if (!object) return false;
-    static const std::unordered_set<std::string> allowed = {"id", "name", "settings"};
+    static const std::unordered_set<std::string> allowed = {
+        "id", "name", "allowWhileInactive", "settings",
+    };
     if (!CheckAllowedKeys(*object, allowed, error)) return false;
 
     std::optional<std::string> id;
     std::optional<std::string> name;
+    std::optional<bool> allow_while_inactive;
     if (!ReadOptionalString(*object, "id", id, error) ||
-        !ReadOptionalString(*object, "name", name, error)) {
+        !ReadOptionalString(*object, "name", name, error) ||
+        !ReadOptionalBool(*object, "allowWhileInactive", allow_while_inactive, error)) {
         return false;
     }
     if (!id.has_value() || id->empty()) {
@@ -1587,6 +1603,7 @@ bool ParsePivotNudgeSet(const JsonValue& value, PivotNudgeSet& out, std::string&
     }
     out.id = *id;
     out.name = name.value_or("Nudge Set");
+    out.allow_while_inactive = allow_while_inactive.value_or(false);
     const auto settings_it = object->find("settings");
     if (settings_it != object->end() &&
         !ParsePivotNudgeSettings(settings_it->second, out.settings, error)) {
@@ -1632,13 +1649,11 @@ bool ParsePivotQuickView(const JsonValue& value, PivotQuickView& out, std::strin
     if (up) out.position_up_cm = *up;
     if (forward) out.position_forward_cm = *forward;
     if (transition) out.transition_seconds = *transition;
-    if (turn_direction) {
-        if (*turn_direction == "left") out.turn_direction = PivotQuickViewTurnDirection::Left;
-        else if (*turn_direction == "right") out.turn_direction = PivotQuickViewTurnDirection::Right;
-        else {
-            error = "pivot quick view turnDirection must be one of: left, right";
-            return false;
-        }
+    // Accepted for configs saved by the first Snap Views prototype. Travel
+    // policy now belongs to the profile, so this per-view value is ignored.
+    if (turn_direction && *turn_direction != "left" && *turn_direction != "right") {
+        error = "legacy pivot quick view turnDirection must be one of: left, right";
+        return false;
     }
     return ParsePivotActivationBindings(*object, "activationBindings", "activationBinding",
                                         ActivationMode::Toggle, out.activation_bindings, error);
@@ -1681,7 +1696,9 @@ bool ParsePivotProfile(const JsonValue& value, PivotXrProfile& out, std::string&
         "enabled",
         "mode",
         "behavior",
+        "snapTurnPreference",
         "nudgeSetId",
+        "allowInactiveNudges",
         "applicationIds",
         "activationMode",
         "alwaysActive",
@@ -1711,7 +1728,9 @@ bool ParsePivotProfile(const JsonValue& value, PivotXrProfile& out, std::string&
     std::optional<std::string> id;
     std::optional<std::string> name;
     std::optional<std::string> behavior;
+    std::optional<std::string> snap_turn_preference;
     std::optional<std::string> nudge_set_id;
+    std::optional<bool> allow_inactive_nudges;
     std::optional<bool> enabled;
     std::optional<ProfileMode> mode;
     std::optional<ActivationMode> activation_mode;
@@ -1720,7 +1739,9 @@ bool ParsePivotProfile(const JsonValue& value, PivotXrProfile& out, std::string&
     if (!ReadOptionalString(*object, "id", id, error) ||
         !ReadOptionalString(*object, "name", name, error) ||
         !ReadOptionalString(*object, "behavior", behavior, error) ||
+        !ReadOptionalString(*object, "snapTurnPreference", snap_turn_preference, error) ||
         !ReadOptionalString(*object, "nudgeSetId", nudge_set_id, error) ||
+        !ReadOptionalBool(*object, "allowInactiveNudges", allow_inactive_nudges, error) ||
         !ReadOptionalBool(*object, "enabled", enabled, error) ||
         !ReadOptionalProfileMode(*object, "mode", mode, error) ||
         !ReadOptionalActivationMode(*object, "activationMode", activation_mode, error) ||
@@ -1735,7 +1756,12 @@ bool ParsePivotProfile(const JsonValue& value, PivotXrProfile& out, std::string&
     if (behavior.has_value() && !ParsePivotProfileBehavior(*behavior, out.behavior, error)) {
         return false;
     }
+    if (snap_turn_preference &&
+        !ParsePivotSnapTurnPreference(*snap_turn_preference, out.snap_turn_preference, error)) {
+        return false;
+    }
     out.nudge_set_id = nudge_set_id.value_or("");
+    out.allow_inactive_nudges = allow_inactive_nudges.value_or(false);
     const ActivationMode legacy_activation_mode = activation_mode.value_or(ActivationMode::Toggle);
     out.always_active = always_active.value_or(legacy_activation_mode == ActivationMode::AlwaysOn);
 
@@ -1768,8 +1794,10 @@ bool ParsePivotModule(const JsonValue::Object& object, PivotXrModuleConfig& out,
         "enabled",
         "defaults",
         "behavior",
+        "snapTurnPreference",
         "nudgeSetId",
         "nudgeSets",
+        "allowInactiveNudges",
         "activationMode",
         "alwaysActive",
         "activationBindings",
@@ -1788,12 +1816,16 @@ bool ParsePivotModule(const JsonValue::Object& object, PivotXrModuleConfig& out,
 
     std::optional<bool> enabled;
     std::optional<std::string> behavior;
+    std::optional<std::string> snap_turn_preference;
     std::optional<std::string> nudge_set_id;
+    std::optional<bool> allow_inactive_nudges;
     std::optional<ActivationMode> activation_mode;
     std::optional<bool> always_active;
     if (!ReadOptionalBool(object, "enabled", enabled, error) ||
         !ReadOptionalString(object, "behavior", behavior, error) ||
+        !ReadOptionalString(object, "snapTurnPreference", snap_turn_preference, error) ||
         !ReadOptionalString(object, "nudgeSetId", nudge_set_id, error) ||
+        !ReadOptionalBool(object, "allowInactiveNudges", allow_inactive_nudges, error) ||
         !ReadOptionalActivationMode(object, "activationMode", activation_mode, error) ||
         !ReadOptionalBool(object, "alwaysActive", always_active, error)) {
         return false;
@@ -1804,7 +1836,12 @@ bool ParsePivotModule(const JsonValue::Object& object, PivotXrModuleConfig& out,
     if (behavior.has_value() && !ParsePivotProfileBehavior(*behavior, out.behavior, error)) {
         return false;
     }
+    if (snap_turn_preference &&
+        !ParsePivotSnapTurnPreference(*snap_turn_preference, out.snap_turn_preference, error)) {
+        return false;
+    }
     out.nudge_set_id = nudge_set_id.value_or("");
+    out.allow_inactive_nudges = allow_inactive_nudges.value_or(false);
 
     const ActivationMode legacy_activation_mode = activation_mode.value_or(ActivationMode::Toggle);
     out.always_active = always_active.value_or(legacy_activation_mode == ActivationMode::AlwaysOn);

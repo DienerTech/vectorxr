@@ -111,7 +111,7 @@ function openNudgeSet(id: string) {
 
 function addNudgeSet(subject: { nudgeSetId: string }) {
   const source = props.config.modules.pivotxr.nudgeSets.find((set) => set.id === subject.nudgeSetId)
-  const set = createPivotNudgeSet(`${source?.name ?? 'Nudge Set'} Copy`, source?.settings)
+  const set = createPivotNudgeSet(`${source?.name ?? 'Nudge Set'} Copy`, source?.settings, source?.allowWhileInactive ?? false)
   props.config.modules.pivotxr.nudgeSets.push(set)
   subject.nudgeSetId = set.id
   openNudgeSet(set.id)

@@ -710,6 +710,7 @@ void TestPivotViewControlsParsingAndResolution() {
         {
           "id": "shared-hat",
           "name": "Shared HAT",
+          "allowWhileInactive": true,
           "settings": {
             "yawStepDegrees": 12.0,
             "yawLeftBindings": [{ "type": "keyboard", "chord": ["Q"] }]
@@ -723,6 +724,7 @@ void TestPivotViewControlsParsingAndResolution() {
           "applicationIds": ["dcs"],
           "enabled": true,
           "behavior": "snapViews",
+          "snapTurnPreference": "left",
           "nudgeSetId": "shared-hat",
           "alwaysActive": false,
           "activationBindings": [],
@@ -747,7 +749,6 @@ void TestPivotViewControlsParsingAndResolution() {
                 "positionUpCm": 3.0,
                 "positionForwardCm": 4.0,
                 "transitionSeconds": 0.25,
-                "turnDirection": "left",
                 "activationBindings": [
                   {
                     "behavior": "hold",
@@ -769,16 +770,16 @@ void TestPivotViewControlsParsingAndResolution() {
     Expect(result.ok, "Config parser rejected Pivot View Controls: " + result.error);
     const depthxr::PivotViewControls& parsed =
         result.document.pivotxr.profiles[0].view_controls;
-    Expect(std::abs(parsed.nudges.yaw_step_degrees - 35.0) < 0.0001,
-           "Pivot nudge yaw step mismatch");
+    Expect(std::abs(parsed.nudges.yaw_step_degrees - 35.0) < 0.0001 &&
+               result.document.pivotxr.nudge_sets[0].allow_while_inactive,
+           "Pivot nudge settings or inactive policy mismatch");
     Expect(parsed.nudges.yaw_left_bindings[0].chord[0] == "Q" &&
                parsed.nudges.center_bindings[0].chord[0] == "C",
            "Pivot nudge bindings mismatch");
     Expect(parsed.quick_views.size() == 1 && parsed.quick_views[0].id == "check-six",
            "Pivot Quick View identity mismatch");
-    Expect(parsed.quick_views[0].turn_direction == depthxr::PivotQuickViewTurnDirection::Left &&
-               parsed.quick_views[0].activation_bindings[0].behavior ==
-                   depthxr::PivotActivationBehavior::Hold,
+    Expect(parsed.quick_views[0].activation_bindings[0].behavior ==
+               depthxr::PivotActivationBehavior::Hold,
            "Pivot Quick View activation mismatch");
 
     const depthxr::ResolvedRuntimeConfig resolved =
@@ -788,8 +789,11 @@ void TestPivotViewControlsParsingAndResolution() {
     Expect(resolved.pivotxr.profiles[0].view_controls.quick_views[0].position_forward_cm == 4.0,
            "Resolved Pivot Quick View position mismatch");
     Expect(resolved.pivotxr.profiles[0].behavior == depthxr::PivotProfileBehavior::SnapViews &&
+               resolved.pivotxr.profiles[0].snap_turn_preference ==
+                   depthxr::PivotSnapTurnPreference::Left &&
+               resolved.pivotxr.profiles[0].allow_inactive_nudges &&
                resolved.pivotxr.profiles[0].nudge_set_id == "shared-hat",
-           "Resolved Pivot profile behavior or Nudge Set identity mismatch");
+           "Resolved Pivot profile behavior or view-control policy mismatch");
     Expect(std::abs(resolved.pivotxr.profiles[0].view_controls.nudges.yaw_step_degrees - 12.0) < 0.0001,
            "Linked Nudge Set did not override legacy inline nudge settings");
 }

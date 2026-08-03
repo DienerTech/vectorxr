@@ -157,13 +157,19 @@ std::vector<PivotActivationBinding> FilterUnclaimedActivationBindings(
     return filtered;
 }
 
+const PivotNudgeSet* FindPivotNudgeSet(const PivotXrModuleConfig& module,
+                                           const std::string& nudge_set_id) {
+    if (nudge_set_id.empty()) return nullptr;
+    const auto found = std::find_if(module.nudge_sets.begin(), module.nudge_sets.end(),
+                                    [&](const PivotNudgeSet& set) { return set.id == nudge_set_id; });
+    return found == module.nudge_sets.end() ? nullptr : &*found;
+}
+
 PivotNudgeSettings ResolvePivotNudges(const PivotXrModuleConfig& module,
                                       const std::string& nudge_set_id,
                                       const PivotNudgeSettings& legacy) {
-    if (nudge_set_id.empty()) return legacy;
-    const auto found = std::find_if(module.nudge_sets.begin(), module.nudge_sets.end(),
-                                    [&](const PivotNudgeSet& set) { return set.id == nudge_set_id; });
-    return found == module.nudge_sets.end() ? legacy : found->settings;
+    const PivotNudgeSet* set = FindPivotNudgeSet(module, nudge_set_id);
+    return set ? set->settings : legacy;
 }
 
 bool HasViewControlBindings(const PivotViewControls& controls) {
@@ -208,7 +214,12 @@ PivotXrResolvedSettings ResolvePivotXrSettings(const ConfigDocument& config, std
             PivotXrResolvedProfile candidate;
             candidate.name = profile.name;
             candidate.behavior = profile.behavior;
+            candidate.snap_turn_preference = profile.snap_turn_preference;
             candidate.nudge_set_id = profile.nudge_set_id;
+            const PivotNudgeSet* nudge_set =
+                FindPivotNudgeSet(config.pivotxr, profile.nudge_set_id);
+            candidate.allow_inactive_nudges =
+                nudge_set ? nudge_set->allow_while_inactive : profile.allow_inactive_nudges;
             candidate.always_active = profile.always_active;
             candidate.activation_bindings = std::move(activation_bindings);
             candidate.set_origin_bindings = profile.set_origin_bindings;
@@ -225,7 +236,12 @@ PivotXrResolvedSettings ResolvePivotXrSettings(const ConfigDocument& config, std
         PivotXrResolvedProfile candidate;
         candidate.name = "Default";
         candidate.behavior = config.pivotxr.behavior;
+        candidate.snap_turn_preference = config.pivotxr.snap_turn_preference;
         candidate.nudge_set_id = config.pivotxr.nudge_set_id;
+        const PivotNudgeSet* nudge_set =
+            FindPivotNudgeSet(config.pivotxr, config.pivotxr.nudge_set_id);
+        candidate.allow_inactive_nudges =
+            nudge_set ? nudge_set->allow_while_inactive : config.pivotxr.allow_inactive_nudges;
         candidate.always_active = config.pivotxr.always_active;
         candidate.activation_bindings =
             FilterUnclaimedActivationBindings(config.pivotxr.activation_bindings, {});

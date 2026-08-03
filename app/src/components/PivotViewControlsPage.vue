@@ -49,11 +49,11 @@ function addQuickView() {
 }
 
 function addPreset() {
-  const presets: Array<Pick<PivotQuickView, 'name' | 'yawDegrees' | 'pitchDegrees' | 'turnDirection'>> = [
-    { name: 'Look Left', yawDegrees: -90, pitchDegrees: 0, turnDirection: 'left' },
-    { name: 'Look Right', yawDegrees: 90, pitchDegrees: 0, turnDirection: 'right' },
-    { name: 'High 12', yawDegrees: 0, pitchDegrees: 35, turnDirection: 'right' },
-    { name: 'Check Six', yawDegrees: 180, pitchDegrees: 0, turnDirection: 'right' },
+  const presets: Array<Pick<PivotQuickView, 'name' | 'yawDegrees' | 'pitchDegrees'>> = [
+    { name: 'Look Left', yawDegrees: -90, pitchDegrees: 0 },
+    { name: 'Look Right', yawDegrees: 90, pitchDegrees: 0 },
+    { name: 'High 12', yawDegrees: 0, pitchDegrees: 35 },
+    { name: 'Check Six', yawDegrees: 180, pitchDegrees: 0 },
   ]
   props.subject.viewControls.quickViews.push(...presets.map((preset) => ({
     ...createPivotQuickView(preset.name),
@@ -160,10 +160,6 @@ function updateQuickViewBehavior(view: PivotQuickView, index: number, behavior: 
               <label class="block">
                 <span class="mb-1.5 block text-sm font-medium">Transition</span>
                 <div class="flex items-center gap-2"><input v-model.number="editingView.transitionSeconds" class="app-input w-full rounded-[0.75rem] px-4 py-2.5" type="number" min="0" max="2" step="0.01" /><span class="text-sm text-muted">s</span></div>
-              </label>
-              <label v-if="Math.abs(editingView.yawDegrees) === 180" class="block">
-                <span class="mb-1.5 block text-sm font-medium">Travel to 180°</span>
-                <select v-model="editingView.turnDirection" class="app-input w-full rounded-[0.75rem] px-4 py-2.5"><option value="right">Turn right</option><option value="left">Turn left</option></select>
               </label>
             </div>
             <div class="mt-5 border-t pt-4" style="border-color: var(--app-border)">

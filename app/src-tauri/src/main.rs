@@ -432,7 +432,11 @@ struct PivotXRProfileConfig {
     #[serde(default = "default_pivot_profile_behavior")]
     behavior: String,
     #[serde(default)]
+    snap_turn_preference: String,
+    #[serde(default)]
     nudge_set_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    allow_inactive_nudges: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     r#match: Option<ProfileMatch>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -473,7 +477,11 @@ struct PivotXRModuleConfig {
     #[serde(default = "default_pivot_profile_behavior")]
     behavior: String,
     #[serde(default)]
+    snap_turn_preference: String,
+    #[serde(default)]
     nudge_set_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    allow_inactive_nudges: Option<bool>,
     #[serde(default)]
     nudge_sets: Vec<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -510,8 +518,10 @@ impl Default for PivotXRModuleConfig {
             enabled: false,
             defaults: PivotXRSettings::default(),
             behavior: default_pivot_profile_behavior(),
+            snap_turn_preference: String::new(),
             nudge_set_id: String::new(),
             nudge_sets: Vec::new(),
+            allow_inactive_nudges: None,
             activation_mode: None,
             always_active: Some(false),
             activation_bindings: Vec::new(),
@@ -2227,10 +2237,12 @@ mod tests {
         let pivot: PivotXRModuleConfig = serde_json::from_value(serde_json::json!({
             "enabled": true,
             "behavior": "snapViews",
+            "snapTurnPreference": "right",
             "nudgeSetId": "shared-hat",
             "nudgeSets": [{
                 "id": "shared-hat",
                 "name": "Shared HAT",
+                "allowWhileInactive": true,
                 "settings": {
                     "yawStepDegrees": 30.0,
                     "pitchStepDegrees": 20.0,
@@ -2245,6 +2257,7 @@ mod tests {
             "profiles": [{
                 "name": "Accessible Views",
                 "behavior": "snapViews",
+                "snapTurnPreference": "left",
                 "nudgeSetId": "shared-hat",
                 "viewControls": {
                 "nudges": {
@@ -2278,12 +2291,15 @@ mod tests {
 
         let serialized = serde_json::to_value(pivot).expect("Pivot configuration should serialize");
         assert_eq!(serialized["behavior"], "snapViews");
+        assert_eq!(serialized["snapTurnPreference"], "right");
         assert_eq!(serialized["nudgeSetId"], "shared-hat");
+        assert_eq!(serialized["nudgeSets"][0]["allowWhileInactive"], true);
         assert_eq!(
             serialized["nudgeSets"][0]["settings"]["yawLeftBindings"][0]["chord"][0],
             "Q"
         );
         assert_eq!(serialized["profiles"][0]["behavior"], "snapViews");
+        assert_eq!(serialized["profiles"][0]["snapTurnPreference"], "left");
         assert_eq!(serialized["profiles"][0]["nudgeSetId"], "shared-hat");
         assert_eq!(
             serialized["profiles"][0]["viewControls"]["nudges"]["yawStepDegrees"],

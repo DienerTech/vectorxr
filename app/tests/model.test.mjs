@@ -373,6 +373,8 @@ test('new Pivot view controls are inert until bindings are assigned', () => {
   assert.equal(controls.nudges.transitionSeconds, 0.12)
   assert.deepEqual(controls.nudges.yawLeftBindings, [])
   assert.deepEqual(controls.quickViews, [])
+  assert.equal(defaultConfig().modules.pivotxr.snapTurnPreference, 'shortest')
+  assert.equal(defaultConfig().modules.pivotxr.nudgeSets[0].allowWhileInactive, false)
 })
 
 test('Pivot view controls normalize nudges and Quick Views canonically', () => {
@@ -382,7 +384,6 @@ test('Pivot view controls normalize nudges and Quick Views canonically', () => {
   controls.nudges.yawLeftBindings = [keyboard('F6')]
   const quickView = createPivotQuickView('Check Six')
   quickView.yawDegrees = 180
-  quickView.turnDirection = 'left'
   quickView.positionRightCm = 8
   quickView.activationBindings = [activation('hold', keyboard('F7'))]
   controls.quickViews.push(quickView)
@@ -392,7 +393,6 @@ test('Pivot view controls normalize nudges and Quick Views canonically', () => {
   assert.deepEqual(normalized.nudges.yawLeftBindings, [keyboard('F6')])
   assert.equal(normalized.quickViews[0].name, 'Check Six')
   assert.equal(normalized.quickViews[0].yawDegrees, 180)
-  assert.equal(normalized.quickViews[0].turnDirection, 'left')
   assert.equal(normalized.quickViews[0].positionRightCm, 8)
   assert.deepEqual(normalized.quickViews[0].activationBindings, [activation('hold', keyboard('F7'))])
 })
@@ -407,6 +407,8 @@ test('new Pivot profiles own independent View Controls and Quick Views', () => {
     [],
     config.modules.pivotxr.viewControls,
   )
+  assert.equal(profile.snapTurnPreference, 'shortest')
+  assert.equal(config.modules.pivotxr.nudgeSets[0].allowWhileInactive, false)
   profile.viewControls.nudges.yawStepDegrees = 45
   profile.viewControls.quickViews[0].name = 'Changed'
 
@@ -420,6 +422,7 @@ test('pre-Snap Pivot profiles normalize to Enhanced Motion without creating anot
   profile.viewControls.quickViews = [createPivotQuickView('Check Six')]
   delete profile.behavior
   delete profile.nudgeSetId
+  profile.allowInactiveNudges = true
   config.modules.pivotxr.profiles = [profile]
   delete config.modules.pivotxr.nudgeSets
   delete config.modules.pivotxr.nudgeSetId
@@ -429,6 +432,8 @@ test('pre-Snap Pivot profiles normalize to Enhanced Motion without creating anot
   assert.equal(normalized.profiles[0].behavior, 'enhancedMotion')
   assert.equal(normalized.profiles[0].viewControls.quickViews[0].name, 'Check Six')
   assert.equal(normalized.nudgeSets.length, 1)
+  assert.equal(normalized.nudgeSets[0].allowWhileInactive, true)
+  assert.equal('allowInactiveNudges' in normalized.profiles[0], false)
 })
 test('saved binding warnings include nudge and Quick View actions', () => {
   const config = defaultConfig()

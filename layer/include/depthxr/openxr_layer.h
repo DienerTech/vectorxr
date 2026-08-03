@@ -695,6 +695,11 @@ class OpenXrLayer {
     bool pivotxr_engaged_{false};
     PivotViewTransitionState pivotxr_manual_view_transition_;
     PivotViewTransitionState pivotxr_quick_view_transition_;
+    bool pivotxr_quick_view_retarget_pending_{false};
+    PivotViewOffset pivotxr_quick_view_pending_pose_;
+    double pivotxr_quick_view_pending_duration_seconds_{0.0};
+    PivotSnapTurnPreference pivotxr_quick_view_pending_turn_preference_{
+        PivotSnapTurnPreference::Shortest};
     bool pivotxr_quick_view_active_{false};
     bool pivotxr_quick_view_transitioning_{false};
     size_t pivotxr_quick_view_profile_index_{0};

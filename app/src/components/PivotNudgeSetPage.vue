@@ -50,6 +50,13 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
           <span class="mb-1.5 block text-sm font-medium">Set name</span>
           <input v-model="nudgeSet.name" class="app-input w-full rounded-[0.75rem] px-4 py-2.5" type="text" />
         </label>
+        <label class="mt-4 flex items-start gap-3 rounded-[0.75rem] border p-3 surface-panel-strong">
+          <input v-model="nudgeSet.allowWhileInactive" class="mt-1 h-4 w-4" type="checkbox" />
+          <span>
+            <span class="block text-sm font-semibold">Allow while Pivot is inactive</span>
+            <span class="mt-1 block text-xs text-muted">These bindings can adjust and retain the global view offset even when no linked profile is engaged.</span>
+          </span>
+        </label>
         <div class="mt-4 grid gap-4 md:grid-cols-3">
           <label class="block"><span class="mb-1.5 block text-sm font-medium">Yaw step</span><div class="flex items-center gap-2"><input v-model.number="nudgeSet.settings.yawStepDegrees" class="app-input w-full rounded-[0.75rem] px-4 py-2.5" type="number" min="1" max="90" step="1" /><span class="text-sm text-muted">°</span></div></label>
           <label class="block"><span class="mb-1.5 block text-sm font-medium">Pitch step</span><div class="flex items-center gap-2"><input v-model.number="nudgeSet.settings.pitchStepDegrees" class="app-input w-full rounded-[0.75rem] px-4 py-2.5" type="number" min="1" max="60" step="1" /><span class="text-sm text-muted">°</span></div></label>

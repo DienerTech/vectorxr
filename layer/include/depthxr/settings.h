@@ -186,7 +186,8 @@ struct PivotActivationBinding {
     InputBinding binding;
 };
 
-enum class PivotQuickViewTurnDirection {
+enum class PivotSnapTurnPreference {
+    Shortest,
     Left,
     Right,
 };
@@ -205,6 +206,7 @@ struct PivotNudgeSettings {
 struct PivotNudgeSet {
     std::string id;
     std::string name;
+    bool allow_while_inactive{false};
     PivotNudgeSettings settings;
 };
 
@@ -222,7 +224,6 @@ struct PivotQuickView {
     double position_up_cm{0.0};
     double position_forward_cm{0.0};
     double transition_seconds{0.18};
-    PivotQuickViewTurnDirection turn_direction{PivotQuickViewTurnDirection::Right};
     std::vector<PivotActivationBinding> activation_bindings;
 };
 
@@ -238,7 +239,9 @@ struct PivotXrProfile {
     bool enabled{true};
     ProfileMode mode{ProfileMode::Custom};
     PivotProfileBehavior behavior{PivotProfileBehavior::EnhancedMotion};
+    PivotSnapTurnPreference snap_turn_preference{PivotSnapTurnPreference::Shortest};
     std::string nudge_set_id;
+    bool allow_inactive_nudges{false};
     std::vector<std::string> application_ids;
     bool always_active{false};
     std::vector<PivotActivationBinding> activation_bindings;
@@ -256,8 +259,10 @@ struct PivotXrModuleConfig {
     bool enabled{false};
     PivotXrSettings defaults;
     PivotProfileBehavior behavior{PivotProfileBehavior::EnhancedMotion};
+    PivotSnapTurnPreference snap_turn_preference{PivotSnapTurnPreference::Shortest};
     std::string nudge_set_id;
     std::vector<PivotNudgeSet> nudge_sets;
+    bool allow_inactive_nudges{false};
     bool always_active{false};
     std::vector<PivotActivationBinding> activation_bindings;
     std::vector<InputBinding> set_origin_bindings;
@@ -271,7 +276,9 @@ struct PivotXrModuleConfig {
 struct PivotXrResolvedProfile {
     std::string name;
     PivotProfileBehavior behavior{PivotProfileBehavior::EnhancedMotion};
+    PivotSnapTurnPreference snap_turn_preference{PivotSnapTurnPreference::Shortest};
     std::string nudge_set_id;
+    bool allow_inactive_nudges{false};
     bool always_active{false};
     std::vector<PivotActivationBinding> activation_bindings;
     std::vector<InputBinding> set_origin_bindings;
