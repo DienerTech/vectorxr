@@ -414,6 +414,10 @@ impl Default for PivotXRSettings {
     }
 }
 
+fn default_pivot_profile_behavior() -> String {
+    "enhancedMotion".into()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct PivotXRProfileConfig {
@@ -425,6 +429,10 @@ struct PivotXRProfileConfig {
     enabled: bool,
     #[serde(default)]
     application_ids: Vec<String>,
+    #[serde(default = "default_pivot_profile_behavior")]
+    behavior: String,
+    #[serde(default)]
+    nudge_set_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     r#match: Option<ProfileMatch>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -462,6 +470,12 @@ struct PivotXRModuleConfig {
     enabled: bool,
     #[serde(default)]
     defaults: PivotXRSettings,
+    #[serde(default = "default_pivot_profile_behavior")]
+    behavior: String,
+    #[serde(default)]
+    nudge_set_id: String,
+    #[serde(default)]
+    nudge_sets: Vec<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     activation_mode: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -495,6 +509,9 @@ impl Default for PivotXRModuleConfig {
         Self {
             enabled: false,
             defaults: PivotXRSettings::default(),
+            behavior: default_pivot_profile_behavior(),
+            nudge_set_id: String::new(),
+            nudge_sets: Vec::new(),
             activation_mode: None,
             always_active: Some(false),
             activation_bindings: Vec::new(),
@@ -2061,7 +2078,8 @@ fn play_test_sound(
 #[cfg(test)]
 mod tests {
     use super::{
-        default_config, DepthXRBindings, DepthXRSettings, PivotXRProfileConfig, PivotXRSettings,
+        default_config, DepthXRBindings, DepthXRSettings, PivotXRModuleConfig, PivotXRProfileConfig,
+        PivotXRSettings,
     };
 
     #[test]
@@ -2205,10 +2223,30 @@ mod tests {
     }
 
     #[test]
-    fn pivot_view_controls_survive_the_config_save_round_trip() {
-        let profile: PivotXRProfileConfig = serde_json::from_value(serde_json::json!({
-            "name": "Accessible Views",
-            "viewControls": {
+    fn pivot_behavior_nudges_and_view_controls_survive_the_config_save_round_trip() {
+        let pivot: PivotXRModuleConfig = serde_json::from_value(serde_json::json!({
+            "enabled": true,
+            "behavior": "snapViews",
+            "nudgeSetId": "shared-hat",
+            "nudgeSets": [{
+                "id": "shared-hat",
+                "name": "Shared HAT",
+                "settings": {
+                    "yawStepDegrees": 30.0,
+                    "pitchStepDegrees": 20.0,
+                    "transitionSeconds": 0.12,
+                    "yawLeftBindings": [{ "type": "keyboard", "chord": ["Q"] }],
+                    "yawRightBindings": [],
+                    "pitchUpBindings": [],
+                    "pitchDownBindings": [],
+                    "centerBindings": []
+                }
+            }],
+            "profiles": [{
+                "name": "Accessible Views",
+                "behavior": "snapViews",
+                "nudgeSetId": "shared-hat",
+                "viewControls": {
                 "nudges": {
                     "yawStepDegrees": 30.0,
                     "pitchStepDegrees": 20.0,
@@ -2234,15 +2272,36 @@ mod tests {
                         "binding": { "type": "keyboard", "chord": ["F9"] }
                     }]
                 }]
-            }
+            }}]
         }))
-        .expect("Pivot View Controls should deserialize");
+        .expect("Pivot configuration should deserialize");
 
-        let serialized = serde_json::to_value(profile).expect("Pivot profile should serialize");
-        assert_eq!(serialized["viewControls"]["nudges"]["yawStepDegrees"], 30.0);
-        assert_eq!(serialized["viewControls"]["nudges"]["yawLeftBindings"][0]["chord"][0], "Q");
-        assert_eq!(serialized["viewControls"]["quickViews"][0]["name"], "Check Six");
-        assert_eq!(serialized["viewControls"]["quickViews"][0]["activationBindings"][0]["behavior"], "toggle");
+        let serialized = serde_json::to_value(pivot).expect("Pivot configuration should serialize");
+        assert_eq!(serialized["behavior"], "snapViews");
+        assert_eq!(serialized["nudgeSetId"], "shared-hat");
+        assert_eq!(
+            serialized["nudgeSets"][0]["settings"]["yawLeftBindings"][0]["chord"][0],
+            "Q"
+        );
+        assert_eq!(serialized["profiles"][0]["behavior"], "snapViews");
+        assert_eq!(serialized["profiles"][0]["nudgeSetId"], "shared-hat");
+        assert_eq!(
+            serialized["profiles"][0]["viewControls"]["nudges"]["yawStepDegrees"],
+            30.0
+        );
+        assert_eq!(
+            serialized["profiles"][0]["viewControls"]["nudges"]["yawLeftBindings"][0]["chord"][0],
+            "Q"
+        );
+        assert_eq!(
+            serialized["profiles"][0]["viewControls"]["quickViews"][0]["name"],
+            "Check Six"
+        );
+        assert_eq!(
+            serialized["profiles"][0]["viewControls"]["quickViews"][0]["activationBindings"][0]
+                ["behavior"],
+            "toggle"
+        );
     }
 
     #[test]

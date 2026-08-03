@@ -1,7 +1,15 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 
-import { cancelDeviceBindingCapture, captureDeviceBinding, listInputDevices, type InputDeviceInfo } from '../lib/commands'
+import { cancelDeviceBindingCapture, captureDeviceBinding, type InputDeviceInfo } from '../lib/commands'
+import {
+  inputDeviceDiscovery,
+  pauseInputDeviceDiscovery,
+  refreshInputDevices,
+  resumeInputDeviceDiscovery,
+  startInputDeviceDiscovery,
+  stopInputDeviceDiscovery,
+} from '../lib/inputDeviceDiscovery'
 import { preserveBindingSound, type DeviceBinding } from '../lib/model'
 
 const props = defineProps<{
@@ -12,26 +20,27 @@ const emit = defineEmits<{
   'update:modelValue': [value: DeviceBinding]
 }>()
 
-const devices = ref<InputDeviceInfo[]>([])
-const loading = ref(false)
+const {
+  devices,
+  loading,
+  hasCompletedInitialScan,
+  lastRefreshFailed,
+  lastRefreshError,
+} = inputDeviceDiscovery
 const capturing = ref(false)
 const canCancelCapture = ref(false)
 const cancelRequested = ref(false)
 const captureSecondsRemaining = ref(0)
 const status = ref('')
 const metadataOpen = ref(false)
-const hasCompletedInitialScan = ref(false)
-const lastRefreshFailed = ref(false)
 
-const DEVICE_REFRESH_INTERVAL_MS = 2_000
 const CAPTURE_TIMEOUT_MS = 15_000
 const CAPTURE_CANCEL_DEBOUNCE_MS = 1_000
 
-let refreshIntervalId: ReturnType<typeof window.setInterval> | null = null
+
 let captureCountdownIntervalId: ReturnType<typeof window.setInterval> | null = null
 let captureCancelDelayId: ReturnType<typeof window.setTimeout> | null = null
 let captureDeadline = 0
-let refreshInFlight = false
 
 const selectedDevice = computed(() => devices.value.find((device) => device.deviceGuid === props.modelValue.deviceGuid) ?? null)
 const hasBoundDevice = computed(() => props.modelValue.deviceGuid.trim().length > 0)
@@ -62,14 +71,13 @@ const captureButtonLabel = computed(() => {
 })
 
 onMounted(() => {
-  void refreshDevices()
-  startRefreshPolling()
+  void startInputDeviceDiscovery().then(() => updateRefreshStatus())
   window.addEventListener('keydown', onKeydown, true)
 })
 
 onBeforeUnmount(() => {
   window.removeEventListener('keydown', onKeydown, true)
-  stopRefreshPolling()
+  stopInputDeviceDiscovery()
   stopCaptureUi()
   if (capturing.value) {
     void cancelDeviceBindingCapture()
@@ -101,28 +109,6 @@ function deviceCapabilityLabel(device: InputDeviceInfo) {
   return `${buttons}, ${hats}`
 }
 
-function startRefreshPolling() {
-  if (refreshIntervalId !== null) {
-    return
-  }
-
-  refreshIntervalId = window.setInterval(() => {
-    if (capturing.value) {
-      return
-    }
-
-    void refreshDevices({ silent: true })
-  }, DEVICE_REFRESH_INTERVAL_MS)
-}
-
-function stopRefreshPolling() {
-  if (refreshIntervalId === null) {
-    return
-  }
-
-  window.clearInterval(refreshIntervalId)
-  refreshIntervalId = null
-}
 
 function updateCaptureCountdown() {
   captureSecondsRemaining.value = Math.max(0, Math.ceil((captureDeadline - Date.now()) / 1_000))
@@ -185,38 +171,15 @@ async function cancelCapture() {
   }
 }
 
+function updateRefreshStatus() {
+  if (lastRefreshFailed.value) status.value = lastRefreshError.value
+  else if (devices.value.length === 0) status.value = 'No joystick devices found.'
+}
+
 async function refreshDevices(options: { silent?: boolean } = {}) {
-  if (refreshInFlight) {
-    return
-  }
-
-  refreshInFlight = true
-  const shouldShowLoading = !options.silent
-  if (shouldShowLoading) {
-    loading.value = true
-  }
-  if (!options.silent) {
-    status.value = ''
-  }
-
-  try {
-    devices.value = await listInputDevices()
-    lastRefreshFailed.value = false
-    if (devices.value.length === 0 && !options.silent) {
-      status.value = 'No joystick devices found.'
-    }
-  } catch (error) {
-    lastRefreshFailed.value = true
-    if (!options.silent) {
-      status.value = error instanceof Error ? error.message : 'Failed to list joystick devices.'
-    }
-  } finally {
-    hasCompletedInitialScan.value = true
-    if (shouldShowLoading) {
-      loading.value = false
-    }
-    refreshInFlight = false
-  }
+  if (!options.silent) status.value = ''
+  await refreshInputDevices({ showLoading: !options.silent })
+  if (!options.silent) updateRefreshStatus()
 }
 
 async function captureBinding() {
@@ -225,6 +188,7 @@ async function captureBinding() {
   }
 
   capturing.value = true
+  pauseInputDeviceDiscovery()
   startCaptureUi()
   status.value = 'Listening for a joystick button or HAT direction. Press Escape to cancel; capture stops automatically after 15 seconds.'
 
@@ -246,11 +210,12 @@ async function captureBinding() {
       inputLabel: binding.inputLabel,
     }))
     status.value = `Captured ${binding.deviceName} / ${binding.inputLabel}.`
-    void refreshDevices()
   } catch (error) {
     status.value = error instanceof Error ? error.message : 'Failed to capture joystick input.'
   } finally {
     capturing.value = false
+    resumeInputDeviceDiscovery()
+    void refreshInputDevices()
     stopCaptureUi()
     cancelRequested.value = false
   }
