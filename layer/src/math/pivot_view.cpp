@@ -38,6 +38,24 @@ bool PivotViewOffsetNearlyZero(const PivotViewOffset& offset, double epsilon) {
     return PivotViewOffsetNearlyEqual(offset, {}, epsilon);
 }
 
+double AdvancePivotActivationGain(double current_gain,
+                                  bool engaged,
+                                  bool suspended,
+                                  double ramp_seconds,
+                                  double delta_seconds) {
+    current_gain = std::clamp(current_gain, 0.0, 1.0);
+    if (suspended) return current_gain;
+
+    const double target_gain = engaged ? 1.0 : 0.0;
+    if (ramp_seconds <= 0.0) return target_gain;
+
+    const double step = std::max(0.0, delta_seconds) / ramp_seconds;
+    if (target_gain > current_gain) {
+        return std::min(target_gain, current_gain + step);
+    }
+    return std::max(target_gain, current_gain - step);
+}
+
 void RetargetPivotViewTransition(const PivotViewOffset& target,
                                  double duration_seconds,
                                  PivotViewTransitionState& state) {

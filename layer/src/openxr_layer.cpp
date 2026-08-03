@@ -9500,18 +9500,20 @@ XrResult OpenXrLayer::ApplyPivotToLocatedSpace(XrSpace space,
         }
         pivotxr_last_smoothing_wall_time_ = now;
 
-        const double target_gain = pivotxr_engaged_ ? 1.0 : 0.0;
-        const double ramp_seconds = settings.activation_ramp_seconds;
-        if (ramp_seconds <= 0.0) {
-            pivotxr_activation_gain_ = target_gain;
-        } else if (delta_seconds > 0.0) {
-            const double step = delta_seconds / ramp_seconds;
-            if (target_gain > pivotxr_activation_gain_) {
-                pivotxr_activation_gain_ = std::min(target_gain, pivotxr_activation_gain_ + step);
-            } else {
-                pivotxr_activation_gain_ = std::max(target_gain, pivotxr_activation_gain_ - step);
-            }
-        }
+        // A Quick View temporarily replaces the active motion transform. Keep
+        // the underlying activation envelope fixed until its return transition
+        // hands off at that same transform, avoiding a reverse-then-forward bounce.
+        const bool returns_to_engaged_motion = pivotxr_quick_view_return_engaged_ &&
+            pivotxr_quick_view_return_profile_index_ < resolved_settings_.pivotxr.profiles.size() &&
+            resolved_settings_.pivotxr.profiles[pivotxr_quick_view_return_profile_index_].behavior ==
+                PivotProfileBehavior::EnhancedMotion;
+        const bool suspend_activation_gain = returns_to_engaged_motion &&
+            (pivotxr_quick_view_active_ || pivotxr_quick_view_transitioning_ ||
+             pivotxr_quick_view_transition_.active);
+        pivotxr_activation_gain_ = AdvancePivotActivationGain(
+            pivotxr_activation_gain_, pivotxr_engaged_, suspend_activation_gain,
+            settings.activation_ramp_seconds, delta_seconds);
+
     }
 
     // Fully release once the envelope has closed and the pivot is no longer

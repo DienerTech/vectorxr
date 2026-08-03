@@ -797,6 +797,16 @@ void TestPivotViewControlsParsingAndResolution() {
 }
 
 void TestPivotViewTransitionMath() {
+    double activation_gain = depthxr::AdvancePivotActivationGain(0.65, false, true, 0.2, 1.0);
+    Expect(std::abs(activation_gain - 0.65) < 0.0001,
+           "A Quick View override must freeze the suspended motion activation gain");
+    activation_gain = depthxr::AdvancePivotActivationGain(activation_gain, true, true, 0.2, 1.0);
+    Expect(std::abs(activation_gain - 0.65) < 0.0001,
+           "A Quick View return must preserve its motion handoff gain");
+    activation_gain = depthxr::AdvancePivotActivationGain(activation_gain, true, false, 0.2, 0.05);
+    Expect(std::abs(activation_gain - 0.9) < 0.0001,
+           "Motion activation must resume after the Quick View handoff");
+
     depthxr::PivotViewTransitionState state;
     depthxr::PivotViewOffset target{1.0, -0.5, 0.1, 0.2, -0.3};
     depthxr::RetargetPivotViewTransition(target, 0.2, state);
