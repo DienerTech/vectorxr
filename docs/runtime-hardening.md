@@ -42,6 +42,9 @@ while making unsupported paths explicit and frame ownership deterministic.
 - VectorXR still owns one instance/session state object. Additional instances or
   sessions are rejected safely instead of overwriting the active dispatch state;
   a full handle-to-instance dispatch map is future architectural work.
-- A deterministic mock OpenXR runtime should be added for end-to-end frame-loop
+- A deterministic action-set harness covers the eye-gaze attachment lifecycle:
+  application injection, the actionless-app grace-period fallback, downstream
+  rejection, and prevention of a second irreversible session attachment.
+- A full mock OpenXR runtime remains future work for broader end-to-end frame-loop
   ordering tests. Pure swapchain FIFO behavior is covered in the current native
   test executable.

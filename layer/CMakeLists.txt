@@ -157,4 +157,11 @@ if(DEPTHXR_BUILD_TESTS)
         )
     endif()
     add_test(NAME depthxr_layer_tests COMMAND depthxr_layer_tests)
+
+    add_executable(
+        depthxr_action_set_attachment_tests
+        tests/action_set_attachment_tests.cpp
+    )
+    target_include_directories(depthxr_action_set_attachment_tests PRIVATE include)
+    add_test(NAME depthxr_action_set_attachment_tests COMMAND depthxr_action_set_attachment_tests)
 endif()
