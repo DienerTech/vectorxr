@@ -3,14 +3,12 @@
     "version": "0.15.1",
     "date": "2026-08-03",
     "title": "Eye Tracking Compatibility Fix",
-    "summary": "Restores Quadviews eye tracking in actionless OpenXR applications when hand-tracking or other API layers are active.",
+    "summary": "Fixes OpenXR action-set attachment handling that could leave Quadviews eye tracking inactive in DCS.",
     "items": [
       {
         "html": "<strong>Eye tracking compatibility</strong>",
         "items": [
-          "Attaches VectorXR's private eye-gaze action set after a short grace period when an application, such as DCS, does not use the OpenXR action system itself.",
-          "Preserves application and third-party layer action sets when the normal attachment path is used, while preventing a second irreversible session attachment.",
-          "Adds a deterministic action-set harness covering actionless applications, late application attachment, missing resources, runtime rejection, and duplicate-attachment prevention."
+          "Restores Quadviews eye tracking when DCS is used with additional OpenXR API layers, including hand-tracked cockpit controls."
         ]
       }
     ]
