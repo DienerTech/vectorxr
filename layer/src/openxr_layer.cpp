@@ -6233,6 +6233,7 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
         pivotxr_pitch_step_glide_ = {};
         pivotxr_activation_gain_ = 0.0;
         pivotxr_last_smoothing_wall_time_.reset();
+        ResetPivotPoseDeltaContinuityState();
         const XrResult release_result = FlushDeferredSwapchainReleasesLocked("end frame");
         PrunePivotPoseDeltas(frame_end_info->displayTime);
         PruneDepthSubmissionGeometry(frame_end_info->displayTime);
@@ -6283,6 +6284,7 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
         pivotxr_pitch_step_glide_ = {};
         pivotxr_activation_gain_ = 0.0;
         pivotxr_last_smoothing_wall_time_.reset();
+        ResetPivotPoseDeltaContinuityState();
     }
     if (!resolved_settings_.depthxr.enabled || !depthxr_toggle_enabled_ ||
         !depth_anchor_active_) {
@@ -6291,8 +6293,75 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
 
     XrPosef pose_delta = IdentityPose();
     XrTime matched_time = 0;
-    const bool has_pose_delta = resolved_settings_.pivotxr.enabled &&
-                                FindPivotPoseDelta(frame_end_info->displayTime, &pose_delta, &matched_time);
+
+    const bool pivot_pose_continuity_active =
+        resolved_settings_.pivotxr.enabled &&
+        (pivotxr_engaged_ ||
+         pivotxr_activation_gain_ > kPivotActivationGainEpsilon ||
+         pivotxr_quick_view_active_ ||
+         pivotxr_quick_view_transitioning_ ||
+         pivotxr_quick_view_transition_.active);
+    const std::size_t misses_before_lookup = pivotxr_consecutive_pose_delta_misses_;
+    const PivotPoseDeltaSelection pose_delta_selection = resolved_settings_.pivotxr.enabled
+        ? ResolvePivotPoseDeltaValue(cached_pivot_pose_deltas_,
+                                     frame_end_info->displayTime,
+                                     IdentityPose(),
+                                     pivot_pose_continuity_active,
+                                     &pivotxr_last_matched_pose_delta_,
+                                     &pivotxr_consecutive_pose_delta_misses_,
+                                     &pose_delta,
+                                     &matched_time)
+        : PivotPoseDeltaSelection::None;
+    const bool has_pose_delta = pose_delta_selection != PivotPoseDeltaSelection::None;
+
+    if (pivot_pose_continuity_active) {
+        const XrTime nearest_delta_ns = matched_time == 0
+            ? 0
+            : (matched_time > frame_end_info->displayTime
+                   ? matched_time - frame_end_info->displayTime
+                   : frame_end_info->displayTime - matched_time);
+        if (pose_delta_selection == PivotPoseDeltaSelection::HeldPrevious ||
+            pose_delta_selection == PivotPoseDeltaSelection::None) {
+            pending_locate_views_diagnostics_ =
+                std::max<uint32_t>(pending_locate_views_diagnostics_, 5);
+            pending_end_frame_diagnostics_ =
+                std::max<uint32_t>(pending_end_frame_diagnostics_, 5);
+            pending_pivot_diagnostics_ =
+                std::max<uint32_t>(pending_pivot_diagnostics_, kPivotDiagnosticBurstCount);
+            std::ostringstream stream;
+            stream << "PivotXR pose-delta continuity miss: frameTime="
+                   << frame_end_info->displayTime
+                   << ", nearestCachedTime=" << matched_time
+                   << ", nearestDeltaMs="
+                   << FormatDiagnosticDouble(static_cast<double>(nearest_delta_ns) / 1'000'000.0)
+                   << ", matchWindowMs="
+                   << FormatDiagnosticDouble(
+                          static_cast<double>(kPivotPoseDeltaMatchWindow) / 1'000'000.0)
+                   << ", cachedDeltas=" << cached_pivot_pose_deltas_.size()
+                   << ", consecutiveMisses=" << pivotxr_consecutive_pose_delta_misses_
+                   << ", fallback="
+                   << (pose_delta_selection == PivotPoseDeltaSelection::HeldPrevious
+                           ? "held_previous"
+                           : "identity")
+                   << ", pivotEngaged=" << (pivotxr_engaged_ ? "true" : "false")
+                   << ", activationGain=" << FormatDiagnosticDouble(pivotxr_activation_gain_)
+                   << ", selectedYaw="
+                   << FormatDiagnosticDouble(ExtractPoseYawRadians(pose_delta))
+                   << ", selectedPitch="
+                   << FormatDiagnosticDouble(ExtractPosePitchRadians(pose_delta));
+            logger_.Info(stream.str());
+        } else if (misses_before_lookup > 0) {
+            std::ostringstream stream;
+            stream << "PivotXR pose-delta continuity recovered: frameTime="
+                   << frame_end_info->displayTime
+                   << ", matchedTime=" << matched_time
+                   << ", matchedDeltaMs="
+                   << FormatDiagnosticDouble(static_cast<double>(nearest_delta_ns) / 1'000'000.0)
+                   << ", priorConsecutiveMisses=" << misses_before_lookup
+                   << ", cachedDeltas=" << cached_pivot_pose_deltas_.size();
+            logger_.Info(stream.str());
+        }
+    }
     const bool has_non_identity_delta =
         has_pose_delta && (!NearlyZero(pose_delta.orientation.x) || !NearlyZero(pose_delta.orientation.y) ||
                            !NearlyZero(pose_delta.orientation.z) || !NearlyEqual(pose_delta.orientation.w, 1.0f) ||
@@ -7087,6 +7156,7 @@ XrResult OpenXrLayer::LocateViews(XrSession session,
         pivotxr_pitch_step_glide_ = {};
         pivotxr_activation_gain_ = 0.0;
         pivotxr_last_smoothing_wall_time_.reset();
+        ResetPivotPoseDeltaContinuityState();
     }
 
     const bool depth_geometry_adjusted =
@@ -9807,7 +9877,13 @@ void OpenXrLayer::LogResolvedSettings(const ResolvedRuntimeConfig& settings) {
     logger_.Debug(stream.str());
 }
 
+void OpenXrLayer::ResetPivotPoseDeltaContinuityState() {
+    pivotxr_last_matched_pose_delta_.reset();
+    pivotxr_consecutive_pose_delta_misses_ = 0;
+}
+
 void OpenXrLayer::ResetPivotActivationState() {
+    ResetPivotPoseDeltaContinuityState();
     pivotxr_smoothed_extra_yaw_radians_ = 0.0;
     pivotxr_smoothed_extra_pitch_radians_ = 0.0;
     pivotxr_yaw_step_ = 0;

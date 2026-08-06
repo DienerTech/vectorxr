@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <iterator>
 #include <map>
+#include <optional>
 
 namespace depthxr {
 
@@ -17,6 +18,13 @@ constexpr bool ShouldDrivePivotFromLocateViews(bool has_locate_info,
 
 inline constexpr std::int64_t kPivotPoseDeltaMatchWindow = 5'000'000;
 inline constexpr std::size_t kPivotPoseDeltaMaxEntries = 180;
+inline constexpr std::size_t kPivotPoseDeltaMaxHeldMisses = 1;
+
+enum class PivotPoseDeltaSelection {
+    None,
+    Matched,
+    HeldPrevious,
+};
 
 template <typename Time, typename Pose>
 void CachePivotPoseDeltaValue(std::map<Time, Pose>& cache, Time time, const Pose& pose_delta) {
@@ -70,6 +78,51 @@ bool FindPivotPoseDeltaValue(const std::map<Time, Pose>& cache,
     *pose_delta = best->second;
     *matched_time = best->first;
     return true;
+}
+
+// A missing EndFrame lookup must not remove an otherwise valid Pivot
+// correction for a single frame. Keep this deliberately bounded: one miss can
+// reuse the last matched delta, while a second miss falls back to identity so a
+// stale correction can never be held indefinitely.
+template <typename Time, typename Pose>
+PivotPoseDeltaSelection ResolvePivotPoseDeltaValue(
+    const std::map<Time, Pose>& cache,
+    Time time,
+    const Pose& fallback,
+    bool allow_held_previous,
+    std::optional<Pose>* held_pose_delta,
+    std::size_t* consecutive_misses,
+    Pose* pose_delta,
+    Time* matched_time) {
+    if (!held_pose_delta || !consecutive_misses || !pose_delta || !matched_time) {
+        return PivotPoseDeltaSelection::None;
+    }
+
+    if (FindPivotPoseDeltaValue(cache, time, fallback, pose_delta, matched_time)) {
+        *consecutive_misses = 0;
+        if (allow_held_previous) {
+            *held_pose_delta = *pose_delta;
+        } else {
+            held_pose_delta->reset();
+        }
+        return PivotPoseDeltaSelection::Matched;
+    }
+
+    if (!allow_held_previous) {
+        held_pose_delta->reset();
+        *consecutive_misses = 0;
+        return PivotPoseDeltaSelection::None;
+    }
+
+    ++(*consecutive_misses);
+    if (held_pose_delta->has_value() &&
+        *consecutive_misses <= kPivotPoseDeltaMaxHeldMisses) {
+        *pose_delta = held_pose_delta->value();
+        return PivotPoseDeltaSelection::HeldPrevious;
+    }
+
+    *pose_delta = fallback;
+    return PivotPoseDeltaSelection::None;
 }
 
 template <typename Time, typename Pose>

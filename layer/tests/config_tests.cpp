@@ -2299,6 +2299,46 @@ void TestPivotLocateViewsRouting() {
                pose_deltas, static_cast<Time>(300), 0, &pose_delta, &matched_time) &&
                pose_delta == 0 && matched_time == 0,
            "A VIEW-only frame must not reuse a pruned pose delta");
+
+    const Time frame = 1'000'000'000;
+    pose_deltas.clear();
+    depthxr::CachePivotPoseDeltaValue(pose_deltas, frame, 42);
+    std::optional<int> held_pose_delta;
+    std::size_t consecutive_misses = 0;
+    Expect(depthxr::ResolvePivotPoseDeltaValue(
+               pose_deltas, frame, 0, true, &held_pose_delta,
+               &consecutive_misses, &pose_delta, &matched_time) ==
+               depthxr::PivotPoseDeltaSelection::Matched &&
+               pose_delta == 42 && held_pose_delta == 42 && consecutive_misses == 0,
+           "A matched Pivot delta must arm one-frame continuity");
+
+    const Time missed_frame = frame + depthxr::kPivotPoseDeltaMatchWindow + 1;
+    Expect(depthxr::ResolvePivotPoseDeltaValue(
+               pose_deltas, missed_frame, 0, true, &held_pose_delta,
+               &consecutive_misses, &pose_delta, &matched_time) ==
+               depthxr::PivotPoseDeltaSelection::HeldPrevious &&
+               pose_delta == 42 && consecutive_misses == 1,
+           "The first cache miss must reuse the last matched Pivot delta");
+    Expect(depthxr::ResolvePivotPoseDeltaValue(
+               pose_deltas, missed_frame + 1, 0, true, &held_pose_delta,
+               &consecutive_misses, &pose_delta, &matched_time) ==
+               depthxr::PivotPoseDeltaSelection::None &&
+               pose_delta == 0 && consecutive_misses == 2,
+           "A repeated cache miss must stop holding a stale Pivot delta");
+
+    depthxr::CachePivotPoseDeltaValue(pose_deltas, missed_frame + 2, 84);
+    Expect(depthxr::ResolvePivotPoseDeltaValue(
+               pose_deltas, missed_frame + 2, 0, true, &held_pose_delta,
+               &consecutive_misses, &pose_delta, &matched_time) ==
+               depthxr::PivotPoseDeltaSelection::Matched &&
+               pose_delta == 84 && consecutive_misses == 0,
+           "A recovered match must reset the continuity miss budget");
+    Expect(depthxr::ResolvePivotPoseDeltaValue(
+               pose_deltas, missed_frame + 3, 0, false, &held_pose_delta,
+               &consecutive_misses, &pose_delta, &matched_time) ==
+               depthxr::PivotPoseDeltaSelection::Matched &&
+               !held_pose_delta.has_value() && consecutive_misses == 0,
+           "Inactive Pivot routing must disarm the held correction");
 }
 
 void TestNumpadActivationKeys() {

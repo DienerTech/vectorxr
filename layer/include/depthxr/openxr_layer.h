@@ -376,6 +376,7 @@ class OpenXrLayer {
     void CaptureInstanceFunctions();
     void LogResolvedSettings(const ResolvedRuntimeConfig& settings);
     void ResetPivotActivationState();
+    void ResetPivotPoseDeltaContinuityState();
     void ResetDepthToggleState();
     void ResetDepthAnchorToggleState();
     void PollDepthAnchorToggle();
@@ -661,6 +662,10 @@ class OpenXrLayer {
     // of the per-frame tracking smoothing.
     double pivotxr_activation_gain_{0.0};
     std::optional<std::chrono::steady_clock::time_point> pivotxr_last_smoothing_wall_time_;
+    // EndFrame can occasionally arrive without a matching LocateViews cache
+    // entry. Bridge one such miss so amplified poses do not flash to identity.
+    std::optional<XrPosef> pivotxr_last_matched_pose_delta_;
+    std::size_t pivotxr_consecutive_pose_delta_misses_{0};
     // Per resolved-profile input edge state, index-aligned with
     // resolved_settings_.pivotxr.profiles. Arbitration is last-pressed-wins:
     // pressing another candidate's binding retargets the engaged profile and
