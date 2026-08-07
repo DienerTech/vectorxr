@@ -43,9 +43,10 @@ Depth profiles tune world scale and the convergence plane globally or per applic
 ![VectorXR Pivot tab](docs/screenshots/pivot.jpg)
 
 Pivot profiles configure continuous or stepped yaw and pitch assistance, per-direction tuning,
-bounded step glides, activation behavior, and multiple keyboard or device bindings. Accessible
-View Controls add accumulating fixed-step yaw/pitch nudges and unlimited named Quick Views with
-Hold or Toggle behavior, smooth transitions, and optional origin-relative position offsets.
+bounded step glides, activation behavior, and multiple keyboard or device bindings. Snap Views add
+named origin-relative poses with Hold or Toggle behavior, smooth transitions, and optional position
+offsets. Reusable Nudge Sets provide accumulating fixed-step yaw/pitch controls. See the
+[Snap View and Nudge setup guide](docs/usage.md#setting-up-snap-views).
 
 ### Quadviews
 
@@ -61,6 +62,9 @@ For the recommended DCS + synthesized VectorXR setup:
 
 Controls marked **Restart required** can be saved during play, but DCS must be fully restarted for their complete effect. See the usage guide's [live-update reference and Quadviews FAQ](docs/usage.md#live-tuning-and-restarts) for details, alternative layer setups, and common setup pitfalls.
 
+The in-headset diagnostic overlay now has a live session control and an interactive guide for
+reading render zones, focus alignment, gaze filtering, and tracking availability. See
+[Diagnostic visualization](docs/usage.md#diagnostic-visualization).
 ### Turbo
 
 ![VectorXR Turbo tab](docs/screenshots/turbo.jpg)

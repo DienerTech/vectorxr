@@ -128,27 +128,20 @@ Depth controls perceived world scale; Convergence places the zero-parallax depth
 Pivot enhances head rotation for seated and flight-sim VR, letting you see further to the side or
 up/down than your physical neck allows.
 
-- In **Activation**, choose an **Activation Mode**. *Toggle* and *hold* require an
-  activation **Binding** — a keyboard chord or a detected input device (joystick / HOTAS).
-  *Always on* engages Pivot automatically without a binding. If you assign one, pressing it
-  suspends and resumes automatic engagement.
+- Choose a **Profile behavior** for each enabled profile. **Enhanced Motion** amplifies natural
+  head rotation with Continuous or Stepped response tuning. **Snap Views** uses bindings to select
+  named, fixed poses relative to the captured Pivot origin.
+- For **Enhanced Motion**, open **Activation** and choose an activation mode. *Toggle* and *Hold*
+  require a keyboard, joystick, or HOTAS binding. *Always On* engages automatically; an optional
+  activation binding suspends and resumes that automatic engagement.
 - Every Pivot action accepts multiple bindings, so keyboard chords and device inputs can be mixed.
   **Origin Controls** has its own category: **Set Origin** captures the current head pose as the
   neutral seated origin; assigning it to the same input as the simulator's recenter action keeps
   both origins aligned. **Release Origin** clears that captured origin. Set Origin and Release
   Origin can each have multiple bindings too.
-- **View Controls > Rotation Nudges** adds a fixed yaw or pitch amount each time its binding is
-  pressed. Left/right and up/down accumulate and can undo each other; **Center Manual Offset**
-  returns both axes to zero. Nudge steps have a shared transition time (zero is instant), combine
-  with normal Motion Assist, and are guarded to ±180° yaw and ±85° pitch.
-- **View Controls > Quick Views** creates any number of named origin-relative views. Each view has
-  yaw, pitch, transition time, optional right/up/forward position offsets, and one or more
-  independently configured **Hold** or **Toggle** bindings. The four-view preset creates Look Left,
-  Look Right, High 12, and Check Six as a starting point. A 180° view also lets you choose whether
-  its transition travels left or right.
-- A Quick View temporarily overrides Motion Assist and accumulated nudges while active, but keeps
-  natural HMD tracking 1:1 around the target. Leaving it smoothly returns to the underlying
-  Motion Assist/nudge state. View Controls work even when Motion Assist itself is not activated.
+- Select a **Nudge Set** to layer reusable fixed-step yaw and pitch adjustments after the profile's
+  main behavior. A linked set can be shared by several profiles, while **Copy** creates an
+  independent starting point for different bindings or step sizes.
 - Choose **Continuous** response for multiplier-based motion, then tune **Yaw** and **Pitch**
   independently with rotation **Multiplier**, **Deadzone**, and **Max Extra** degrees. A shared
   **Smoothing** value softens continuous motion.
@@ -161,6 +154,70 @@ up/down than your physical neck allows.
 - The **Activation Ramp** (default 0.35s) eases Pivot in and out when it engages or disengages
   rather than snapping the view.
 
+#### Setting up Snap Views
+
+![Pivot Snap Views list with the four-view preset](screenshots/pivot-snap-views.jpg)
+
+1. Enable the default Pivot profile, or add and enable a custom application profile.
+2. Set **Profile behavior** to **Snap Views**, then choose **Edit Snap Views**.
+3. Select **Create 4-view preset** for Look Left, Look Right, High 12, and Check Six, or use
+   **Add Quick View** to build your own list.
+4. Edit each view to set yaw, pitch, transition time, and optional right/left, up/down, and
+   forward/back position offsets. Negative yaw turns left; positive yaw turns right.
+5. Add at least one binding to every view you want to use. **Hold** returns when released;
+   **Toggle** stays active until pressed again or another Snap View takes over.
+6. Configure **Set Origin** under Origin Controls and align it with the simulator's recenter action.
+   Snap View poses and position offsets are measured from that captured origin.
+7. Save the configuration, enter VR, set the origin, and test the views from a comfortable seated
+   posture. Reorder the list when binding priority or presentation order needs to be clearer.
+
+![Editing a Pivot Snap View](screenshots/pivot-snap-view-editor.jpg)
+
+Snap Views keep natural head rotation and translation at 1:1 around the selected pose; they do not
+lock the headset. A Snap View temporarily replaces Enhanced Motion and the accumulated nudge offset.
+Leaving the view returns smoothly to the underlying state. A view with no binding is inert.
+
+#### Setting up Nudges
+
+![Editing the Standard Nudges set](screenshots/pivot-nudges.jpg)
+
+1. Select **Standard Nudges** in the profile's **Nudge Set** menu, or choose **Copy** when the
+   profile needs its own steps or bindings.
+2. Choose **Edit**, set the yaw step, pitch step, and transition duration, then add bindings for
+   Yaw Left, Yaw Right, Pitch Up, Pitch Down, and Center Nudge Offset.
+3. Leave **Allow while Pivot is inactive** off when nudges should follow the linked profile. Turn it
+   on when those bindings should maintain a global view offset even with no linked profile engaged.
+4. Save and test. Directional presses accumulate and oppose one another; **Center Nudge Offset**
+   clears the accumulated yaw and pitch. Offsets are limited to ±180° yaw and ±85° pitch.
+
+Editing a shared Nudge Set updates every profile linked to it. Nudges are applied after Enhanced
+Motion, but a selected Snap View temporarily takes priority over the accumulated offset.
+
+### Pivot FAQ
+
+**Why does my Snap View do nothing?**
+
+Enable the containing profile, give the view at least one binding, save, and confirm that the
+profile targets the running application. Capture an origin before relying on position offsets.
+
+**Should I use Hold or Toggle?**
+
+Use **Hold** for a temporary glance that returns as soon as the control is released. Use **Toggle**
+when you want to stay in the view hands-free; press it again or select another Snap View to leave.
+
+**Does a Snap View lock my head?**
+
+No. It moves the origin-relative target while preserving 1:1 natural head motion around it.
+
+**Why do nudges stop when Pivot disengages?**
+
+That is the default safety behavior. Edit the Nudge Set and enable **Allow while Pivot is inactive**
+if its bindings should adjust and retain the global offset without an active linked profile.
+
+**Should profiles share a Nudge Set?**
+
+Share one when the same step sizes and bindings should apply everywhere. Use **Copy** before editing
+when a profile needs independent controls; linked edits intentionally affect every user of a set.
 Pivot and Quadviews are built to work together: because VectorXR computes both in one layer, the
 foveated focus region stays locked to your gaze even while Pivot rotates your view. This
 combination is VectorXR's signature capability — see [Why VectorXR](../README.md#why-vectorxr).
@@ -216,9 +273,18 @@ safe, but the running game keeps its launch-time state until it exits.
 
 #### Diagnostic visualization
 
-Assign the **Visualization toggle** in the Quadviews tab, then press it in-game to show or hide
-the calibration view. The visualization starts hidden each OpenXR session and labels the rendered
-regions and tracking pipeline with color:
+![Quadviews diagnostic overlay guide](screenshots/quadviews-overlay-guide.jpg)
+
+The **In-headset diagnostics** card provides two ways to control the calibration view:
+
+- Assign an **In-headset shortcut** and press it in-game to toggle the visualization.
+- While a synthesized Quadviews session is active, use **Show visualization** or **Hide
+  visualization** in the VectorXR app for live control. **No active synthesized Quadviews session**
+  means there is not currently a compatible session for the app to control.
+
+The visualization starts hidden each OpenXR session. Select **How to read the overlay** for an
+interactive field guide that maps the picture and common symptoms to the relevant settings. The
+in-headset view labels the rendered regions and tracking pipeline with color:
 
 - Blue tint: peripheral image; amber tint: blended transition band.
 - Green focus outline: focus window with tracking available; red: eye tracking unavailable and
@@ -258,6 +324,11 @@ Confirm that the game has Quad Views enabled, the correct VectorXR profile match
 and only one provider is active. Check whether the control is marked **Restart required**.
 API-layer, runtime, and in-game VR changes also require a full game restart.
 
+**Why is Show visualization unavailable?**
+
+Live app control requires an active VectorXR synthesized D3D11 Quadviews session. Start a compatible
+quad-view application with the VectorXR profile enabled. Native Varjo composition does not expose
+this visualization; the saved in-headset shortcut also begins each new session with the overlay off.
 **What else should I disable while troubleshooting?**
 
 Avoid overlapping features: DCS **Force IPD Distance** can mask Depth, another tool's Turbo mode
