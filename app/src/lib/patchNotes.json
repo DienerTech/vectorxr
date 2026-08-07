@@ -1,5 +1,19 @@
 [
   {
+    "version": "0.15.1",
+    "date": "2026-08-03",
+    "title": "Eye Tracking Compatibility Fix",
+    "summary": "Fixes OpenXR action-set attachment handling that could leave Quadviews eye tracking inactive in DCS.",
+    "items": [
+      {
+        "html": "<strong>Eye tracking compatibility</strong>",
+        "items": [
+          "Restores Quadviews eye tracking when DCS is used with additional OpenXR API layers, including hand-tracked cockpit controls."
+        ]
+      }
+    ]
+  },
+  {
     "version": "0.15.0",
     "date": "2026-07-30",
     "title": "Pivot Controls and Stepped Motion",
