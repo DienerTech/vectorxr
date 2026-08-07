@@ -159,6 +159,19 @@ textarea {
   color: var(--app-text-soft);
 }
 
+.manual-input-select {
+  color-scheme: light;
+}
+
+:root[data-theme='dark'] .manual-input-select {
+  color-scheme: dark;
+}
+
+.manual-input-select option {
+  background: var(--app-surface-strong);
+  color: var(--app-text);
+}
+
 .restart-required-mark {
   align-items: center;
   background: var(--app-surface-strong);

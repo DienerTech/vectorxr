@@ -314,7 +314,7 @@ function assignManualInput(inputPath: string) {
         >
           <select
             v-if="manualInputOpen"
-            class="min-w-0 flex-1 bg-transparent px-3 py-2 outline-none"
+            class="app-input manual-input-select min-w-0 flex-1 self-stretch rounded-[0.55rem] border-0 px-3 py-1.5 outline-none"
             :value="modelValue.inputPath"
             aria-label="Choose joystick input manually"
             @change="assignManualInput(($event.target as HTMLSelectElement).value)"
