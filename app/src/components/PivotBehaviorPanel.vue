@@ -46,7 +46,7 @@ const selectedSet = computed(() => props.nudgeSets.find((set) => set.id === prop
             <option v-for="set in nudgeSets" :key="set.id" :value="set.id">{{ set.name }}</option>
           </select>
           <button v-if="selectedSet" class="button-secondary shrink-0 rounded-[0.75rem] px-3 py-2 text-sm" type="button" @click="emit('editNudges', selectedSet.id)">Edit</button>
-          <button class="button-secondary shrink-0 rounded-[0.75rem] px-3 py-2 text-sm" type="button" @click="emit('addNudgeSet')">Copy</button>
+          <button class="button-secondary shrink-0 rounded-[0.75rem] px-3 py-2 text-sm" type="button" @click="emit('addNudgeSet')">{{ selectedSet ? 'Copy' : 'New' }}</button>
         </div>
         <span class="mt-1 block text-xs text-muted">
           {{ selectedSet ? 'Applied after the active behavior; linked edits update every profile using this set.' : 'Nudges are disabled for this profile.' }}

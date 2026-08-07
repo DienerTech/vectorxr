@@ -77,7 +77,7 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
       <div class="flex flex-wrap gap-2">
         <button class="button-secondary rounded-[0.75rem] px-4 py-2.5 text-sm font-medium" type="button" @click="resetToDefaults">Reset to Defaults</button>
         <button
-          class="button-secondary rounded-[0.75rem] px-4 py-2.5 text-sm font-medium"
+          class="button-danger rounded-[0.75rem] px-4 py-2.5 text-sm font-medium transition disabled:cursor-not-allowed disabled:opacity-50"
           type="button"
           :disabled="!canDelete"
           :title="canDelete ? 'Delete this nudge set' : 'At least one nudge set is required'"
