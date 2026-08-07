@@ -460,16 +460,17 @@ export function validateConfig(config: VectorXRConfig): string[] {
   config.modules.pivotxr.nudgeSets.forEach((set, index) => {
     const prefix = `modules.pivotxr.nudgeSets[${index}].`
     if (!set.id.trim()) errors.push(`${prefix}id is required`)
+    if (set.id === 'none') errors.push(`${prefix}id uses the reserved None selection`)
     if (nudgeSetIds.has(set.id)) errors.push(`${prefix}id duplicates another Nudge Set`)
     nudgeSetIds.add(set.id)
     if (!set.name.trim()) errors.push(`${prefix}name is required`)
     errors.push(...validatePivotNudgeSettings(`${prefix}settings.`, set.settings))
   })
-  if (!nudgeSetIds.has(config.modules.pivotxr.nudgeSetId)) {
+  if (config.modules.pivotxr.nudgeSetId !== 'none' && !nudgeSetIds.has(config.modules.pivotxr.nudgeSetId)) {
     errors.push('modules.pivotxr.nudgeSetId references an unknown Nudge Set')
   }
   config.modules.pivotxr.profiles.forEach((profile, index) => {
-    if (!nudgeSetIds.has(profile.nudgeSetId)) {
+    if (profile.nudgeSetId !== 'none' && !nudgeSetIds.has(profile.nudgeSetId)) {
       errors.push(`modules.pivotxr.profiles[${index}].nudgeSetId references an unknown Nudge Set`)
     }
   })

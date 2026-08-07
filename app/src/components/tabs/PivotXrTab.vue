@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, ref } from 'vue'
 
+import DefaultProfileExclusions from '../DefaultProfileExclusions.vue'
 import PivotBindingsPage from '../PivotBindingsPage.vue'
 import PivotBindingsPanel from '../PivotBindingsPanel.vue'
 import PivotBehaviorPanel from '../PivotBehaviorPanel.vue'
@@ -254,6 +255,11 @@ const profileWarnings = computed(() => {
 
   return warnings
 })
+const profileOverviewWarningIndexes = computed(() => new Set(
+  [...profileWarnings.value.entries()]
+    .filter(([, messages]) => messages.some((message) => /owned by the higher-priority|same physical input|Both this profile/.test(message)))
+    .map(([index]) => index),
+))
 </script>
 
 <template>
@@ -346,6 +352,11 @@ const profileWarnings = computed(() => {
           <input v-model="config.modules.pivotxr.enabled" class="h-4 w-4 accent-depthxr-copper" type="checkbox" />
           Default Profile {{ config.modules.pivotxr.enabled ? 'On' : 'Off' }}
         </label>
+        <DefaultProfileExclusions
+          class="ml-2 mt-3"
+          :applications="applications"
+          :profiles="config.modules.pivotxr.profiles"
+        />
 
         <div v-if="config.modules.pivotxr.enabled" class="mt-3">
           <div
@@ -439,6 +450,11 @@ const profileWarnings = computed(() => {
           @move="$emit('movePivotProfile', index, $event)"
           @sync-name="$emit('syncPivotProfileName', index)"
         >
+          <template #badges>
+            <span v-if="profileOverviewWarningIndexes.has(index)" class="rounded-full px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.14em] chip-warning">
+              Activation overlap
+            </span>
+          </template>
           <PivotBehaviorPanel
             :subject="profile"
             :nudge-sets="config.modules.pivotxr.nudgeSets"

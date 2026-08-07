@@ -1426,9 +1426,11 @@ function normalizeVectorXRConfig(value: unknown): VectorXRConfig {
     pivotNudgeSets.push({ id: 'pivot-nudges-standard', name: 'Standard Nudges', allowWhileInactive: false, settings: pivotViewControls.nudges })
   }
   const requestedDefaultNudgeSetId = normalizeString(pivotxr.nudgeSetId, '')
-  const defaultNudgeSetId = pivotNudgeSets.some((set) => set.id === requestedDefaultNudgeSetId)
-    ? requestedDefaultNudgeSetId
-    : pivotNudgeSets[0].id
+  const defaultNudgeSetId = requestedDefaultNudgeSetId === 'none'
+    ? 'none'
+    : pivotNudgeSets.some((set) => set.id === requestedDefaultNudgeSetId)
+      ? requestedDefaultNudgeSetId
+      : pivotNudgeSets[0].id
   if (normalizeBoolean(pivotxr.allowInactiveNudges, false)) {
     const defaultSet = pivotNudgeSets.find((set) => set.id === defaultNudgeSetId)
     if (defaultSet) defaultSet.allowWhileInactive = true
@@ -1491,7 +1493,7 @@ function normalizeVectorXRConfig(value: unknown): VectorXRConfig {
           const id = normalizeString(profile.id, '').trim() || newPivotProfileId()
           const viewControls = normalizePivotViewControls(profile.viewControls, pivotViewControls)
           let nudgeSetId = normalizeString(profile.nudgeSetId, '').trim()
-          if (!pivotNudgeSets.some((set) => set.id === nudgeSetId)) {
+          if (nudgeSetId !== 'none' && !pivotNudgeSets.some((set) => set.id === nudgeSetId)) {
             const sharesDefault = JSON.stringify(viewControls.nudges) === JSON.stringify(pivotViewControls.nudges)
             nudgeSetId = sharesDefault ? defaultNudgeSetId : `${id}-nudges`
             if (!sharesDefault) {

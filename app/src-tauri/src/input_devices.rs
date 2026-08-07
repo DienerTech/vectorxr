@@ -130,12 +130,18 @@ mod platform {
     pub fn capture_device_binding_platform(
         timeout_ms: Option<u64>,
         capture_id: u64,
+        selected_device_guid: &str,
     ) -> Result<Option<CapturedDeviceBinding>, String> {
         let direct_input = create_direct_input()?;
         let instances = enumerate_instances(&direct_input)?;
         let mut devices = Vec::new();
 
         for instance in instances {
+            let device_guid = format_guid(&instance.device_guid);
+            if !device_guid.eq_ignore_ascii_case(selected_device_guid) {
+                continue;
+            }
+
             if !capture_is_active(capture_id) {
                 return Ok(None);
             }
@@ -163,7 +169,7 @@ mod platform {
             let suppressed_hats = active_hat_mask(&previous_state.hats, hat_count);
             devices.push(CaptureDevice {
                 info: InputDeviceInfo {
-                    device_guid: format_guid(&instance.device_guid),
+                    device_guid,
                     product_guid: format_guid(&instance.product_guid),
                     device_name: instance.device_name,
                     product_name: instance.product_name,
@@ -181,7 +187,8 @@ mod platform {
 
         if devices.is_empty() {
             return Err(
-                "No DirectInput joystick devices with buttons or HAT switches were found".into(),
+                "The selected joystick is disconnected or has no bindable buttons or HAT switches"
+                    .into(),
             );
         }
 
@@ -553,6 +560,7 @@ mod platform {
     pub fn capture_device_binding_platform(
         _timeout_ms: Option<u64>,
         _capture_id: u64,
+        _selected_device_guid: &str,
     ) -> Result<Option<CapturedDeviceBinding>, String> {
         Err("Joystick binding capture is only available on Windows".into())
     }
@@ -563,12 +571,18 @@ pub use platform::list_input_devices;
 pub fn capture_device_binding(
     timeout_ms: Option<u64>,
     capture_id: u64,
+    selected_device_guid: String,
 ) -> Result<Option<CapturedDeviceBinding>, String> {
     if !capture_is_active(capture_id) {
         return Ok(None);
     }
+    if selected_device_guid.trim().is_empty() {
+        finish_capture(capture_id);
+        return Err("Select a joystick before capturing an input".into());
+    }
 
-    let result = platform::capture_device_binding_platform(timeout_ms, capture_id);
+    let result =
+        platform::capture_device_binding_platform(timeout_ms, capture_id, &selected_device_guid);
     finish_capture(capture_id);
     result
 }

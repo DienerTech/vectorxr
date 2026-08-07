@@ -7,6 +7,7 @@ import {
   type RuntimeStatusSession,
 } from "../../lib/commands";
 
+import DefaultProfileExclusions from "../DefaultProfileExclusions.vue";
 import ModuleBindingPage from "../ModuleBindingPage.vue";
 import ModuleBindingPanel from "../ModuleBindingPanel.vue";
 import ProfileShell from "../ProfileShell.vue";
@@ -340,6 +341,10 @@ function budgetChipClass(settings: QuadViewsSettings) {
               title="Quadviews enable/disable changes apply after the running OpenXR application exits."
             >&#8635;</span>
           </label>
+          <DefaultProfileExclusions
+            :applications="applications"
+            :profiles="config.modules.quadviews.profiles"
+          />
         </div>
         <div v-if="!config.modules.quadviews.enabled" class="mt-3 rounded-[0.9rem] border px-4 py-3 text-sm leading-6 surface-panel-strong">
           The default profile is off and has no effect — applications without an enabled custom profile get no Quadviews. Enabled custom profiles below still apply to their assigned applications.

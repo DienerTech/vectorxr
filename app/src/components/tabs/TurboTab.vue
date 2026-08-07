@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, ref } from 'vue'
 
+import DefaultProfileExclusions from '../DefaultProfileExclusions.vue'
 import ModuleBindingPage from '../ModuleBindingPage.vue'
 import ModuleBindingPanel from '../ModuleBindingPanel.vue'
 import ProfileShell from '../ProfileShell.vue'
@@ -224,10 +225,16 @@ function closeSubPage() {
                   : 'Turbo stays off unless an enabled custom profile turns it on.' }}
               </p>
             </div>
-            <label class="pill-toggle inline-flex items-center gap-3 rounded-full px-4 py-2 text-sm font-medium">
-              <input v-model="config.modules.turbo.enabled" class="h-4 w-4 accent-depthxr-copper" type="checkbox" />
-              Default {{ config.modules.turbo.enabled ? 'On' : 'Off' }}
-            </label>
+            <div class="flex flex-wrap items-center justify-end gap-2">
+              <DefaultProfileExclusions
+                :applications="applications"
+                :profiles="config.modules.turbo.profiles"
+              />
+              <label class="pill-toggle inline-flex items-center gap-3 rounded-full px-4 py-2 text-sm font-medium">
+                <input v-model="config.modules.turbo.enabled" class="h-4 w-4 accent-depthxr-copper" type="checkbox" />
+                Default {{ config.modules.turbo.enabled ? 'On' : 'Off' }}
+              </label>
+            </div>
           </div>
         </div>
 

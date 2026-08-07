@@ -231,12 +231,12 @@ export async function listInputDevices(): Promise<InputDeviceInfo[]> {
   return invoke<InputDeviceInfo[]>('list_input_devices')
 }
 
-export async function captureDeviceBinding(timeoutMs = 15_000): Promise<CapturedDeviceBinding | null> {
+export async function captureDeviceBinding(deviceGuid: string, timeoutMs = 15_000): Promise<CapturedDeviceBinding | null> {
   if (!tauriAvailable()) {
     return null
   }
 
-  return invoke<CapturedDeviceBinding | null>('capture_device_binding', { timeoutMs })
+  return invoke<CapturedDeviceBinding | null>('capture_device_binding', { deviceGuid, timeoutMs })
 }
 
 export async function cancelDeviceBindingCapture(): Promise<void> {

@@ -1588,10 +1588,11 @@ fn list_input_devices() -> Result<Vec<input_devices::InputDeviceInfo>, String> {
 #[tauri::command]
 async fn capture_device_binding(
     timeout_ms: Option<u64>,
+    device_guid: String,
 ) -> Result<Option<input_devices::CapturedDeviceBinding>, String> {
     let capture_id = input_devices::begin_device_binding_capture();
     tauri::async_runtime::spawn_blocking(move || {
-        input_devices::capture_device_binding(timeout_ms, capture_id)
+        input_devices::capture_device_binding(timeout_ms, capture_id, device_guid)
     })
     .await
     .map_err(|error| format!("Device binding capture task failed: {error}"))?

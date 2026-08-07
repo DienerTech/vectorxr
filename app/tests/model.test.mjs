@@ -445,3 +445,16 @@ test('saved binding warnings include nudge and Quick View actions', () => {
   assert.match(warnings[0].message, /Nudge Left/)
   assert.match(warnings[0].message, /Check Six/)
 })
+
+test('Pivot profiles preserve and validate the None nudge selection', () => {
+  const config = defaultConfig()
+  config.modules.pivotxr.nudgeSetId = 'none'
+  const profile = createPivotProfile(config.modules.pivotxr.defaults)
+  profile.nudgeSetId = 'none'
+  config.modules.pivotxr.profiles = [profile]
+
+  const normalized = normalizeConfig(config)
+  assert.equal(normalized.modules.pivotxr.nudgeSetId, 'none')
+  assert.equal(normalized.modules.pivotxr.profiles[0].nudgeSetId, 'none')
+  assert.deepEqual(validateConfig(normalized), [])
+})

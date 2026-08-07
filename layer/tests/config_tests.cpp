@@ -766,7 +766,7 @@ void TestPivotViewControlsParsingAndResolution() {
 }
 )json";
 
-    const depthxr::ParseResult result = depthxr::ParseConfig(json);
+    depthxr::ParseResult result = depthxr::ParseConfig(json);
     Expect(result.ok, "Config parser rejected Pivot View Controls: " + result.error);
     const depthxr::PivotViewControls& parsed =
         result.document.pivotxr.profiles[0].view_controls;
@@ -794,6 +794,15 @@ void TestPivotViewControlsParsingAndResolution() {
            "Resolved Pivot profile behavior or view-control policy mismatch");
     Expect(std::abs(resolved.pivotxr.profiles[0].view_controls.nudges.yaw_step_degrees - 12.0) < 0.0001,
            "Linked Nudge Set did not override legacy inline nudge settings");
+
+    result.document.pivotxr.profiles[0].nudge_set_id = "none";
+    const depthxr::ResolvedRuntimeConfig nudges_disabled =
+        depthxr::ResolveRuntimeConfig(result.document, "DCS.exe");
+    const depthxr::PivotNudgeSettings& disabled_nudges =
+        nudges_disabled.pivotxr.profiles[0].view_controls.nudges;
+    Expect(disabled_nudges.yaw_left_bindings.empty() &&
+               disabled_nudges.center_bindings.empty(),
+           "The reserved none Nudge Set id must disable all profile nudges");
 }
 
 void TestPivotViewTransitionMath() {

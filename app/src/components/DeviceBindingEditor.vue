@@ -33,6 +33,7 @@ const cancelRequested = ref(false)
 const captureSecondsRemaining = ref(0)
 const status = ref('')
 const metadataOpen = ref(false)
+const manualInputOpen = ref(false)
 
 const CAPTURE_TIMEOUT_MS = 15_000
 const CAPTURE_CANCEL_DEBOUNCE_MS = 1_000
@@ -43,6 +44,31 @@ let captureCancelDelayId: ReturnType<typeof window.setTimeout> | null = null
 let captureDeadline = 0
 
 const selectedDevice = computed(() => devices.value.find((device) => device.deviceGuid === props.modelValue.deviceGuid) ?? null)
+const hatDirections = [
+  ['up', 'Up'],
+  ['up-right', 'Up Right'],
+  ['right', 'Right'],
+  ['down-right', 'Down Right'],
+  ['down', 'Down'],
+  ['down-left', 'Down Left'],
+  ['left', 'Left'],
+  ['up-left', 'Up Left'],
+] as const
+const manualInputOptions = computed(() => {
+  const device = selectedDevice.value
+  if (!device) return []
+
+  const options = Array.from({ length: device.buttonCount }, (_, index) => ({
+    path: `button-${index + 1}`,
+    label: `Button ${index + 1}`,
+  }))
+  for (let hatIndex = 1; hatIndex <= device.hatCount; hatIndex += 1) {
+    for (const [path, label] of hatDirections) {
+      options.push({ path: `hat-${hatIndex}-${path}`, label: `HAT ${hatIndex} ${label}` })
+    }
+  }
+  return options
+})
 const hasBoundDevice = computed(() => props.modelValue.deviceGuid.trim().length > 0)
 const isBoundDeviceDisconnected = computed(() => (
   hasCompletedInitialScan.value &&
@@ -186,14 +212,20 @@ async function captureBinding() {
   if (capturing.value) {
     return
   }
+  const device = selectedDevice.value
+  if (!device) {
+    status.value = 'Select a connected joystick before capturing an input.'
+    return
+  }
 
   capturing.value = true
+  manualInputOpen.value = false
   pauseInputDeviceDiscovery()
   startCaptureUi()
-  status.value = 'Listening for a joystick button or HAT direction. Press Escape to cancel; capture stops automatically after 15 seconds.'
+  status.value = `Listening only to ${device.deviceName}. Press Escape to cancel; capture stops automatically after 15 seconds.`
 
   try {
-    const binding = await captureDeviceBinding(CAPTURE_TIMEOUT_MS)
+    const binding = await captureDeviceBinding(device.deviceGuid, CAPTURE_TIMEOUT_MS)
     if (!binding) {
       status.value = cancelRequested.value
         ? 'Input capture canceled.'
@@ -223,18 +255,39 @@ async function captureBinding() {
 
 function selectDevice(deviceGuid: string) {
   const device = devices.value.find((entry) => entry.deviceGuid === deviceGuid)
+  manualInputOpen.value = false
   emit('update:modelValue', {
     ...props.modelValue,
     deviceGuid,
-    productGuid: device?.productGuid ?? props.modelValue.productGuid ?? '',
-    deviceName: device?.deviceName ?? props.modelValue.deviceName ?? '',
+    productGuid: device?.productGuid ?? '',
+    deviceName: device?.deviceName ?? '',
+    inputPath: '',
+    inputLabel: '',
   })
+  status.value = device ? `Selected ${device.deviceName}. Capture or choose an input manually.` : ''
+}
+
+function assignManualInput(inputPath: string) {
+  const device = selectedDevice.value
+  const input = manualInputOptions.value.find((option) => option.path === inputPath)
+  if (!device || !input) return
+
+  emit('update:modelValue', preserveBindingSound(props.modelValue, {
+    type: 'device',
+    deviceGuid: device.deviceGuid,
+    productGuid: device.productGuid,
+    deviceName: device.deviceName,
+    inputPath: input.path,
+    inputLabel: input.label,
+  }))
+  manualInputOpen.value = false
+  status.value = `Assigned ${device.deviceName} / ${input.label} manually.`
 }
 </script>
 
 <template>
   <div class="mt-4 space-y-3">
-    <div class="grid gap-3 lg:grid-cols-[minmax(260px,480px)_minmax(180px,240px)]">
+    <div class="grid gap-3 lg:grid-cols-[minmax(260px,480px)_minmax(260px,360px)]">
       <label class="block min-w-0">
         <span class="mb-1.5 block text-sm font-medium">Joystick Device</span>
         <select
@@ -255,8 +308,32 @@ function selectDevice(deviceGuid: string) {
 
       <div>
         <span class="mb-1.5 block text-sm font-medium">Assigned Input</span>
-        <div class="app-readonly-field flex h-11 items-center rounded-[0.75rem] px-4 py-2.5 text-sm" aria-readonly="true">
-          {{ inputLabel }}
+        <div
+          class="app-readonly-field flex h-11 min-w-0 items-center rounded-[0.75rem] p-1 text-sm"
+          :aria-readonly="manualInputOpen ? undefined : 'true'"
+        >
+          <select
+            v-if="manualInputOpen"
+            class="min-w-0 flex-1 bg-transparent px-3 py-2 outline-none"
+            :value="modelValue.inputPath"
+            aria-label="Choose joystick input manually"
+            @change="assignManualInput(($event.target as HTMLSelectElement).value)"
+          >
+            <option value="">Select an input...</option>
+            <option v-for="input in manualInputOptions" :key="input.path" :value="input.path">
+              {{ input.label }}
+            </option>
+          </select>
+          <span v-else class="min-w-0 flex-1 truncate px-3">{{ inputLabel }}</span>
+          <button
+            class="button-secondary shrink-0 rounded-[0.55rem] px-2.5 py-1.5 text-xs font-medium disabled:cursor-not-allowed disabled:opacity-50"
+            type="button"
+            :disabled="!selectedDevice || capturing"
+            :title="selectedDevice ? 'Choose a button or HAT direction without listening for input.' : 'Select a connected joystick first.'"
+            @click="manualInputOpen = !manualInputOpen"
+          >
+            {{ manualInputOpen ? 'Close' : 'Manual' }}
+          </button>
         </div>
       </div>
     </div>
@@ -283,7 +360,7 @@ function selectDevice(deviceGuid: string) {
       <button
         class="rounded-[0.75rem] px-4 py-2 text-sm font-medium transition disabled:cursor-not-allowed disabled:opacity-50"
         :class="capturing && canCancelCapture ? 'button-secondary' : 'button-accent'"
-        :disabled="capturing && !canCancelCapture"
+        :disabled="(!capturing && !selectedDevice) || (capturing && !canCancelCapture)"
         type="button"
         @click="capturing ? void cancelCapture() : void captureBinding()"
       >

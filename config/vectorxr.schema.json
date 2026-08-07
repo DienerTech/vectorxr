@@ -488,7 +488,7 @@
           "minLength": 1
         },
         "behavior": { "type": "string", "enum": ["enhancedMotion", "snapViews"] },
-        "nudgeSetId": { "type": "string", "minLength": 1 },
+        "nudgeSetId": { "type": "string", "minLength": 1, "description": "Nudge Set id, or 'none' to disable nudges for this profile." },
         "enabled": {
           "type": "boolean"
         },
@@ -541,7 +541,7 @@
           "$ref": "#/$defs/pivotxrSettings"
         },
         "behavior": { "type": "string", "enum": ["enhancedMotion", "snapViews"] },
-        "nudgeSetId": { "type": "string", "minLength": 1 },
+        "nudgeSetId": { "type": "string", "minLength": 1, "description": "Nudge Set id, or 'none' to disable nudges for the default profile." },
         "nudgeSets": { "type": "array", "items": { "$ref": "#/$defs/pivotNudgeSet" } },
         "activationMode": {
           "$ref": "#/$defs/activationMode",

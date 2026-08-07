@@ -168,6 +168,9 @@ const PivotNudgeSet* FindPivotNudgeSet(const PivotXrModuleConfig& module,
 PivotNudgeSettings ResolvePivotNudges(const PivotXrModuleConfig& module,
                                       const std::string& nudge_set_id,
                                       const PivotNudgeSettings& legacy) {
+    if (nudge_set_id == "none") {
+        return {};
+    }
     const PivotNudgeSet* set = FindPivotNudgeSet(module, nudge_set_id);
     return set ? set->settings : legacy;
 }

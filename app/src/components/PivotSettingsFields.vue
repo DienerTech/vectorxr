@@ -115,6 +115,23 @@ function onAdvancedAxesChange(enabled: boolean) {
     <!-- Stepped response: independent yaw/pitch or per-direction tuning -->
     <PivotSteppedSettings v-if="settings.responseMode === 'stepped'" :settings="settings" />
 
+    <div v-if="settings.responseMode === 'continuous'" class="rounded-[1rem] border p-4 surface-panel-soft">
+      <label class="flex items-start gap-2.5">
+        <input
+          v-model="settings.advancedAxes"
+          class="mt-0.5 h-4 w-4 accent-depthxr-copper"
+          type="checkbox"
+          @change="onAdvancedAxesChange(($event.target as HTMLInputElement).checked)"
+        />
+        <span>
+          <span class="block text-sm font-medium">Advanced axes &mdash; tune each direction independently</span>
+          <span class="mt-0.5 block text-sm leading-6 text-muted">
+            Separate multiplier, deadzone, and cap for looking left, right, up, and down. Enabling this starts each direction from your current yaw/pitch values.
+          </span>
+        </span>
+      </label>
+    </div>
+
     <!-- Yaw + Pitch (symmetric continuous, or stepped limits) -->
     <div v-if="settings.responseMode === 'continuous' && !settings.advancedAxes" class="grid gap-3 md:grid-cols-2">
       <div class="rounded-[1rem] border p-4 surface-panel-soft">
@@ -243,8 +260,8 @@ function onAdvancedAxesChange(enabled: boolean) {
     </div>
 
     <!-- Advanced per-direction axes (continuous mode only) -->
-    <div v-if="settings.responseMode === 'continuous'" class="rounded-[1rem] border p-4 surface-panel-soft">
-      <label class="flex items-start gap-2.5">
+    <div v-if="settings.responseMode === 'continuous' && settings.advancedAxes" class="rounded-[1rem] border p-4 surface-panel-soft">
+      <label class="hidden">
         <input
           v-model="settings.advancedAxes"
           class="mt-0.5 h-4 w-4 accent-depthxr-copper"
@@ -259,7 +276,7 @@ function onAdvancedAxesChange(enabled: boolean) {
         </span>
       </label>
 
-      <div v-if="settings.advancedAxes" class="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+      <div class="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
         <div v-for="direction in advancedDirections" :key="direction.key" class="rounded-[0.9rem] border p-3 surface-panel">
           <p class="eyebrow text-xs uppercase tracking-[0.18em]" :title="direction.hint">{{ direction.label }}</p>
           <div class="mt-3 grid gap-3">

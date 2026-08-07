@@ -3,6 +3,8 @@ import { computed } from 'vue'
 
 import type { PivotNudgeSet, PivotProfileBehavior } from '../lib/model'
 
+const NO_NUDGE_SET_ID = 'none'
+
 interface PivotBehaviorSubject {
   behavior: PivotProfileBehavior
   nudgeSetId: string
@@ -40,12 +42,15 @@ const selectedSet = computed(() => props.nudgeSets.find((set) => set.id === prop
         <span class="mb-1.5 block text-sm font-semibold">Nudge Set</span>
         <div class="flex gap-2">
           <select v-model="subject.nudgeSetId" class="app-input min-w-0 flex-1 rounded-[0.75rem] px-4 py-2.5">
+            <option :value="NO_NUDGE_SET_ID">None</option>
             <option v-for="set in nudgeSets" :key="set.id" :value="set.id">{{ set.name }}</option>
           </select>
           <button v-if="selectedSet" class="button-secondary shrink-0 rounded-[0.75rem] px-3 py-2 text-sm" type="button" @click="emit('editNudges', selectedSet.id)">Edit</button>
           <button class="button-secondary shrink-0 rounded-[0.75rem] px-3 py-2 text-sm" type="button" @click="emit('addNudgeSet')">Copy</button>
         </div>
-        <span class="mt-1 block text-xs text-muted">Applied after the active behavior; linked edits update every profile using this set.</span>
+        <span class="mt-1 block text-xs text-muted">
+          {{ selectedSet ? 'Applied after the active behavior; linked edits update every profile using this set.' : 'Nudges are disabled for this profile.' }}
+        </span>
       </div>
 
 
