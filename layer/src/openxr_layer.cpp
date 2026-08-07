@@ -22,6 +22,7 @@
 #include "depthxr/input_devices.h"
 #include "depthxr/process_info.h"
 #include "depthxr/pivot_step.h"
+#include "depthxr/pivot_view.h"
 #include "depthxr/quadviews_sizing.h"
 #include "depthxr/runtime_compatibility.h"
 #include "depthxr/runtime_pacing.h"
@@ -564,6 +565,10 @@ struct FocusRectConstants {
     float focus_texel[4];
     float peripheral_src_rect[4];
     float focus_src_rect[4];
+    float diagnostic_params[4];
+    float output_texel[4];
+    float gaze_markers[4];
+    float reference_markers[4];
 };
 
 FocusRectConstants BuildFocusRectConstants(const XrFovf& full_fov,
@@ -622,6 +627,21 @@ FocusRectConstants BuildFocusRectConstants(const XrFovf& full_fov,
     return constants;
 }
 
+std::array<float, 2> ProjectViewAnglesToUv(const XrFovf& full_fov,
+                                           double yaw_radians,
+                                           double pitch_radians) {
+    const double left = std::tan(full_fov.angleLeft);
+    const double right = std::tan(full_fov.angleRight);
+    const double down = std::tan(full_fov.angleDown);
+    const double up = std::tan(full_fov.angleUp);
+    const double width = std::max(0.0001, right - left);
+    const double height = std::max(0.0001, up - down);
+    return {
+        static_cast<float>((std::tan(yaw_radians) - left) / width),
+        static_cast<float>((up - std::tan(pitch_radians)) / height),
+    };
+}
+
 const char* D3D11QuadViewsShaderSource() {
     return R"(
 cbuffer QuadViewsConstants : register(b0) {
@@ -630,6 +650,10 @@ cbuffer QuadViewsConstants : register(b0) {
     float4 focusTexel;
     float4 peripheralSrcRect;
     float4 focusSrcRect;
+    float4 diagnosticParams;
+    float4 outputTexel;
+    float4 gazeMarkers;
+    float4 referenceMarkers;
 };
 
 Texture2D peripheralTexture : register(t0);
@@ -659,6 +683,42 @@ VSOut VSMain(uint vertexId : SV_VertexID) {
     return output;
 }
 
+float RectOutlineMask(float2 uv, float2 rectMin, float2 rectMax, float thicknessPixels) {
+    float2 pixelSize = max(outputTexel.xy, float2(0.000001, 0.000001));
+    float2 center = (rectMin + rectMax) * 0.5;
+    float2 halfSizePixels = max((rectMax - rectMin) * 0.5 / pixelSize, float2(0.0, 0.0));
+    float2 pointPixels = (uv - center) / pixelSize;
+    float2 q = abs(pointPixels) - halfSizePixels;
+    float signedDistance = length(max(q, 0.0)) + min(max(q.x, q.y), 0.0);
+    return 1.0 - smoothstep(thicknessPixels, thicknessPixels + 1.0, abs(signedDistance));
+}
+
+float CrossMask(float2 uv, float2 center, float lengthPixels, float thicknessPixels) {
+    float2 deltaPixels = abs((uv - center) / max(outputTexel.xy, float2(0.000001, 0.000001)));
+    float horizontal = (1.0 - smoothstep(thicknessPixels, thicknessPixels + 1.0, deltaPixels.y)) *
+                       (1.0 - smoothstep(lengthPixels, lengthPixels + 1.0, deltaPixels.x));
+    float vertical = (1.0 - smoothstep(thicknessPixels, thicknessPixels + 1.0, deltaPixels.x)) *
+                     (1.0 - smoothstep(lengthPixels, lengthPixels + 1.0, deltaPixels.y));
+    return max(horizontal, vertical);
+}
+
+float RingMask(float2 uv, float2 center, float radiusPixels, float thicknessPixels) {
+    float2 deltaPixels = (uv - center) / max(outputTexel.xy, float2(0.000001, 0.000001));
+    float ringDistance = abs(length(deltaPixels) - radiusPixels);
+    return 1.0 - smoothstep(thicknessPixels, thicknessPixels + 1.0, ringDistance);
+}
+
+float SegmentMask(float2 uv, float2 start, float2 end, float thicknessPixels) {
+    float2 pixelSize = max(outputTexel.xy, float2(0.000001, 0.000001));
+    float2 offsetPixels = (uv - start) / pixelSize;
+    float2 segment = (end - start) / pixelSize;
+    float segmentLengthSquared = max(dot(segment, segment), 0.0001);
+    float along = saturate(dot(offsetPixels, segment) / segmentLengthSquared);
+    float distancePixels = length(offsetPixels - segment * along);
+    return 1.0 - smoothstep(thicknessPixels, thicknessPixels + 1.0, distancePixels);
+}
+
+
 float4 PSMain(VSOut input) : SV_Target {
     float2 uv = saturate(input.uv);
     float2 peripheralUv = peripheralSrcRect.xy + uv * peripheralSrcRect.zw;
@@ -666,44 +726,78 @@ float4 PSMain(VSOut input) : SV_Target {
 
     float2 inside = step(focusRect.xy, uv) * step(uv, focusRect.zw);
     float inRect = inside.x * inside.y;
-    if (inRect < 0.5) {
-        return peripheral;
+    float edgeAlpha = 0.0;
+    float4 composed = peripheral;
+
+    if (inRect >= 0.5) {
+        float2 distToEdge = min(uv - focusRect.xy, focusRect.zw - uv);
+        edgeAlpha = saturate(min(distToEdge.x / max(blendParams.x, 0.0001),
+                                 distToEdge.y / max(blendParams.y, 0.0001)));
+        edgeAlpha = edgeAlpha * edgeAlpha * (3.0 - 2.0 * edgeAlpha);
+
+        float2 focusUv = saturate((uv - focusRect.xy) / max(focusRect.zw - focusRect.xy, float2(0.0001, 0.0001)));
+        float2 focusSampleUv = focusSrcRect.xy + focusUv * focusSrcRect.zw;
+        float2 focusSampleMin = focusSrcRect.xy;
+        float2 focusSampleMax = focusSrcRect.xy + focusSrcRect.zw;
+        float4 focus = focusTexture.Sample(linearSampler, focusSampleUv);
+        // Sharpening follows the same smooth transition as the focus image. This prevents
+        // maximum local contrast from appearing at the first pixels of the feather.
+        float sharpenAmount = saturate(blendParams.z) * edgeAlpha;
+        if (sharpenAmount > 0.001) {
+            // Sample neighbors at output-pixel spacing (focusTexel.zw is one output pixel expressed
+            // in focus-UV), not focus-texel spacing. The focus texture is minified into the focus
+            // rect, so a focus-texel-scale unsharp mask synthesizes detail that the resample averages
+            // away; output-space offsets target the frequencies the user actually sees.
+            float2 off = focusTexel.zw * focusSrcRect.zw;
+            float3 n = focusTexture.Sample(linearSampler, clamp(focusSampleUv + float2(0.0, -off.y), focusSampleMin, focusSampleMax)).rgb;
+            float3 s = focusTexture.Sample(linearSampler, clamp(focusSampleUv + float2(0.0,  off.y), focusSampleMin, focusSampleMax)).rgb;
+            float3 e = focusTexture.Sample(linearSampler, clamp(focusSampleUv + float2( off.x, 0.0), focusSampleMin, focusSampleMax)).rgb;
+            float3 w = focusTexture.Sample(linearSampler, clamp(focusSampleUv + float2(-off.x, 0.0), focusSampleMin, focusSampleMax)).rgb;
+            float3 avg = (n + s + e + w) * 0.25;
+            float3 lo = min(focus.rgb, min(min(n, s), min(e, w)));
+            float3 hi = max(focus.rgb, max(max(n, s), max(e, w)));
+            float3 localRange = max(hi - lo, float3(1.0 / 255.0, 1.0 / 255.0, 1.0 / 255.0));
+            float3 detail = (focus.rgb - avg) * (sharpenAmount * 2.0);
+            detail = clamp(detail, -localRange * 0.5, localRange * 0.5);
+            focus.rgb = saturate(focus.rgb + detail);
+        }
+        composed = lerp(peripheral, focus, edgeAlpha);
     }
 
-    float2 focusUv = saturate((uv - focusRect.xy) / max(focusRect.zw - focusRect.xy, float2(0.0001, 0.0001)));
-    float2 focusSampleUv = focusSrcRect.xy + focusUv * focusSrcRect.zw;
-    float2 focusSampleMin = focusSrcRect.xy;
-    float2 focusSampleMax = focusSrcRect.xy + focusSrcRect.zw;
-    float4 focus = focusTexture.Sample(linearSampler, focusSampleUv);
-    float sharpenAmount = saturate(blendParams.z);
-    if (sharpenAmount > 0.001) {
-        // Sample neighbors at output-pixel spacing (focusTexel.zw is one output pixel expressed
-        // in focus-UV), not focus-texel spacing. The focus texture is minified into the focus
-        // rect, so a focus-texel-scale unsharp mask synthesizes detail that the resample averages
-        // away; output-space offsets target the frequencies the user actually sees.
-        float2 off = focusTexel.zw * focusSrcRect.zw;
-        float3 n = focusTexture.Sample(linearSampler, clamp(focusSampleUv + float2(0.0, -off.y), focusSampleMin, focusSampleMax)).rgb;
-        float3 s = focusTexture.Sample(linearSampler, clamp(focusSampleUv + float2(0.0,  off.y), focusSampleMin, focusSampleMax)).rgb;
-        float3 e = focusTexture.Sample(linearSampler, clamp(focusSampleUv + float2( off.x, 0.0), focusSampleMin, focusSampleMax)).rgb;
-        float3 w = focusTexture.Sample(linearSampler, clamp(focusSampleUv + float2(-off.x, 0.0), focusSampleMin, focusSampleMax)).rgb;
-        float3 avg = (n + s + e + w) * 0.25;
-        // Bound the added high-frequency detail relative to the local contrast range. The old
-        // min/max clamp included the center sample, which forced local maxima/minima straight
-        // back to their original value and cancelled nearly all visible sharpening at edges.
-        // A 2x gain gives the 0-100 slider a useful range while the half-range limiter keeps
-        // bright cockpit text and MFD edges from developing unbounded halos.
-        float3 lo = min(focus.rgb, min(min(n, s), min(e, w)));
-        float3 hi = max(focus.rgb, max(max(n, s), max(e, w)));
-        float3 localRange = max(hi - lo, float3(1.0 / 255.0, 1.0 / 255.0, 1.0 / 255.0));
-        float3 detail = (focus.rgb - avg) * (sharpenAmount * 2.0);
-        detail = clamp(detail, -localRange * 0.5, localRange * 0.5);
-        focus.rgb = saturate(focus.rgb + detail);
+    if (diagnosticParams.x < 0.5) {
+        return composed;
     }
 
-    float2 distToEdge = min(uv - focusRect.xy, focusRect.zw - uv);
-    float edgeAlpha = saturate(min(distToEdge.x / max(blendParams.x, 0.0001), distToEdge.y / max(blendParams.y, 0.0001)));
-    edgeAlpha = edgeAlpha * edgeAlpha * (3.0 - 2.0 * edgeAlpha);
-    return lerp(peripheral, focus, edgeAlpha);
+    float transition = inRect * (1.0 - step(0.999, edgeAlpha));
+    float3 zoneColor = inRect < 0.5 ? float3(0.08, 0.28, 0.95) :
+                       (transition > 0.5 ? float3(1.0, 0.55, 0.04) : float3(0.08, 0.85, 0.28));
+    float zoneStrength = inRect < 0.5 ? 0.13 : (transition > 0.5 ? 0.20 : 0.055);
+    composed.rgb = lerp(composed.rgb, zoneColor, zoneStrength);
+
+    float trackingUnavailable = diagnosticParams.y * (1.0 - diagnosticParams.z);
+    float3 focusOutlineColor = lerp(float3(0.15, 1.0, 0.3), float3(1.0, 0.08, 0.05), trackingUnavailable);
+    float focusOutline = RectOutlineMask(uv, focusRect.xy, focusRect.zw, 2.0);
+    composed.rgb = lerp(composed.rgb, focusOutlineColor, focusOutline);
+
+    float2 innerMin = min(focusRect.xy + blendParams.xy, focusRect.zw);
+    float2 innerMax = max(focusRect.zw - blendParams.xy, focusRect.xy);
+    float innerOutline = RectOutlineMask(uv, innerMin, innerMax, 1.25) *
+                         step(outputTexel.x * 2.0, blendParams.x) * step(outputTexel.y * 2.0, blendParams.y);
+    composed.rgb = lerp(composed.rgb, float3(1.0, 0.65, 0.05), innerOutline * 0.9);
+
+    float2 offsetCorner = float2(referenceMarkers.z, referenceMarkers.y);
+    float offsetAxes = max(SegmentMask(uv, referenceMarkers.xy, offsetCorner, 1.0),
+                           SegmentMask(uv, offsetCorner, referenceMarkers.zw, 1.0));
+    float headMarker = CrossMask(uv, referenceMarkers.xy, 14.0, 1.5);
+    float offsetMarker = RingMask(uv, referenceMarkers.zw, 12.0, 1.5);
+    float rawGazeMarker = RingMask(uv, gazeMarkers.xy, 7.0, 1.75) * diagnosticParams.z;
+    float smoothedGazeMarker = CrossMask(uv, gazeMarkers.zw, 8.0, 1.5) * diagnosticParams.z;
+    composed.rgb = lerp(composed.rgb, float3(1.0, 0.1, 0.85), offsetAxes * 0.8);
+    composed.rgb = lerp(composed.rgb, float3(1.0, 1.0, 1.0), headMarker);
+    composed.rgb = lerp(composed.rgb, float3(1.0, 0.1, 0.85), offsetMarker);
+    composed.rgb = lerp(composed.rgb, float3(0.0, 0.95, 1.0), rawGazeMarker);
+    composed.rgb = lerp(composed.rgb, float3(1.0, 0.95, 0.05), smoothedGazeMarker);
+    return composed;
 }
 )";
 }
@@ -1090,8 +1184,8 @@ XrPosef IdentityPose() {
 }
 
 // All generated Pivot movement flows through one pose-offset composition
-// point. Motion Assist is the only producer today; Quick Views and Shoulder
-// Assist can populate their components later without creating parallel pose
+// point. Motion Assist/manual nudges and Quick Views populate mutually
+// exclusive components without creating parallel pose
 // rewrite paths. A Quick View intentionally replaces Motion Assist, while the
 // Shoulder Assist component is applied after the selected high-level behavior.
 struct PivotPoseOffsetComponents {
@@ -1313,13 +1407,48 @@ bool SamePivotStepTuning(const PivotStepTuning& lhs, const PivotStepTuning& rhs)
            NearlyEqual(lhs.hysteresis_degrees, rhs.hysteresis_degrees) &&
            NearlyEqual(lhs.max_extra_degrees, rhs.max_extra_degrees);
 }
+
+bool SamePivotViewControls(const PivotViewControls& lhs, const PivotViewControls& rhs) {
+    const PivotNudgeSettings& a = lhs.nudges;
+    const PivotNudgeSettings& b = rhs.nudges;
+    if (!NearlyEqual(a.yaw_step_degrees, b.yaw_step_degrees) ||
+        !NearlyEqual(a.pitch_step_degrees, b.pitch_step_degrees) ||
+        !NearlyEqual(a.transition_seconds, b.transition_seconds) ||
+        !SameInputBindings(a.yaw_left_bindings, b.yaw_left_bindings) ||
+        !SameInputBindings(a.yaw_right_bindings, b.yaw_right_bindings) ||
+        !SameInputBindings(a.pitch_up_bindings, b.pitch_up_bindings) ||
+        !SameInputBindings(a.pitch_down_bindings, b.pitch_down_bindings) ||
+        !SameInputBindings(a.center_bindings, b.center_bindings) ||
+        lhs.quick_views.size() != rhs.quick_views.size()) {
+        return false;
+    }
+    for (size_t i = 0; i < lhs.quick_views.size(); ++i) {
+        const PivotQuickView& left = lhs.quick_views[i];
+        const PivotQuickView& right = rhs.quick_views[i];
+        if (left.id != right.id || left.name != right.name ||
+            !NearlyEqual(left.yaw_degrees, right.yaw_degrees) ||
+            !NearlyEqual(left.pitch_degrees, right.pitch_degrees) ||
+            !NearlyEqual(left.position_right_cm, right.position_right_cm) ||
+            !NearlyEqual(left.position_up_cm, right.position_up_cm) ||
+            !NearlyEqual(left.position_forward_cm, right.position_forward_cm) ||
+            !NearlyEqual(left.transition_seconds, right.transition_seconds) ||
+            !SamePivotActivationBindings(left.activation_bindings, right.activation_bindings)) {
+            return false;
+        }
+    }
+    return true;
+}
 bool SamePivotResolvedProfile(const PivotXrResolvedProfile& lhs, const PivotXrResolvedProfile& rhs) {
 
     return lhs.name == rhs.name &&
+           lhs.behavior == rhs.behavior &&
+           lhs.nudge_set_id == rhs.nudge_set_id &&
+           lhs.allow_inactive_nudges == rhs.allow_inactive_nudges &&
            lhs.always_active == rhs.always_active &&
            SamePivotActivationBindings(lhs.activation_bindings, rhs.activation_bindings) &&
            SameInputBindings(lhs.set_origin_bindings, rhs.set_origin_bindings) &&
            SameInputBindings(lhs.release_origin_bindings, rhs.release_origin_bindings) &&
+           SamePivotViewControls(lhs.view_controls, rhs.view_controls) &&
            NearlyEqual(lhs.smoothing, rhs.smoothing) &&
            NearlyEqual(lhs.activation_ramp_seconds, rhs.activation_ramp_seconds) &&
            NearlyEqual(lhs.yaw_rotation_multiplier, rhs.yaw_rotation_multiplier) &&
@@ -1378,6 +1507,7 @@ bool SameSettings(const ResolvedRuntimeConfig& lhs, const ResolvedRuntimeConfig&
            lhs.turbo.metrics_mode == rhs.turbo.metrics_mode &&
            SameInputBinding(lhs.turbo.metrics_binding, rhs.turbo.metrics_binding) &&
            lhs.quadviews.enabled == rhs.quadviews.enabled &&
+           SameInputBinding(lhs.quadviews.diagnostic_visualization_binding, rhs.quadviews.diagnostic_visualization_binding) &&
            lhs.quadviews.tracking_mode == rhs.quadviews.tracking_mode &&
            NearlyEqual(lhs.quadviews.focus_horizontal_size_percent, rhs.quadviews.focus_horizontal_size_percent) &&
            NearlyEqual(lhs.quadviews.focus_vertical_size_percent, rhs.quadviews.focus_vertical_size_percent) &&
@@ -1427,8 +1557,8 @@ bool SamePivotActivationBindings(const std::vector<PivotActivationBinding>& lhs,
     return true;
 }
 
-// True when the activation surface (candidate count, modes, bindings) is
-// unchanged, so runtime toggle/edge state can survive a config hot-reload.
+// True when the action surface (candidate count, modes, bindings, and View
+// Controls) is unchanged, so runtime edge state can survive a config hot-reload.
 bool SamePivotActivationSet(const PivotXrResolvedSettings& lhs, const PivotXrResolvedSettings& rhs) {
     if (lhs.enabled != rhs.enabled || lhs.profiles.size() != rhs.profiles.size()) {
         return false;
@@ -1437,7 +1567,8 @@ bool SamePivotActivationSet(const PivotXrResolvedSettings& lhs, const PivotXrRes
         if (lhs.profiles[i].always_active != rhs.profiles[i].always_active ||
             !SamePivotActivationBindings(lhs.profiles[i].activation_bindings, rhs.profiles[i].activation_bindings) ||
             !SameInputBindings(lhs.profiles[i].set_origin_bindings, rhs.profiles[i].set_origin_bindings) ||
-            !SameInputBindings(lhs.profiles[i].release_origin_bindings, rhs.profiles[i].release_origin_bindings)) {
+            !SameInputBindings(lhs.profiles[i].release_origin_bindings, rhs.profiles[i].release_origin_bindings) ||
+            !SamePivotViewControls(lhs.profiles[i].view_controls, rhs.profiles[i].view_controls)) {
             return false;
         }
     }
@@ -2021,6 +2152,13 @@ XrResult OpenXrLayer::CreateSession(XrInstance instance,
     ReloadConfigIfNeeded();
     RefreshResolvedSettings();
     quadviews_session_active_ = resolved_settings_.core.enabled && resolved_settings_.quadviews.enabled;
+    if (runtime_relay_root_.empty()) runtime_relay_root_ = ResolveRuntimeRelayRoot();
+    runtime_relay_session_id_ = std::to_string(GetCurrentProcessId()) + "-" +
+        std::to_string(RuntimeRelayUnixMilliseconds()) + "-" +
+        std::to_string(++runtime_relay_session_sequence_);
+    runtime_relay_last_applied_revision_ = 0;
+    runtime_relay_acknowledged_revision_ = 0;
+    runtime_relay_status_dirty_.store(true, std::memory_order_release);
     deferred_quadviews_config_active_.reset();
     if (IsQuadViewsEmulationActive() &&
         resolved_settings_.quadviews.tracking_mode == QuadViewsTrackingMode::Eye) {
@@ -4121,6 +4259,36 @@ bool OpenXrLayer::ComposeQuadViewsD3D11(const XrCompositionLayerProjection* sour
                                                                focus_content_height,
                                                                resolved_settings_.quadviews.transition_thickness_percent,
                                                                resolved_settings_.quadviews.foveate_sharpness);
+
+        const bool eye_tracking_mode =
+            resolved_settings_.quadviews.tracking_mode == QuadViewsTrackingMode::Eye;
+        const XrTime diagnostic_time = has_cached_fovs ? matched_quadviews_fov_time : display_time;
+        const bool raw_gaze_valid = eye_tracking_mode && quadviews_raw_focus_valid_ &&
+                                    quadviews_raw_focus_time_ == diagnostic_time;
+        constants.diagnostic_params[0] = quadviews_diagnostic_visualization_enabled_ ? 1.0f : 0.0f;
+        constants.diagnostic_params[1] = eye_tracking_mode ? 1.0f : 0.0f;
+        constants.diagnostic_params[2] = raw_gaze_valid ? 1.0f : 0.0f;
+        constants.output_texel[0] = 1.0f / static_cast<float>(std::max<uint32_t>(1, target.width));
+        constants.output_texel[1] = 1.0f / static_cast<float>(std::max<uint32_t>(1, target.height));
+
+        const std::array<float, 2> raw_gaze_uv = ProjectViewAnglesToUv(
+            full_fov, quadviews_raw_focus_yaw_radians_, quadviews_raw_focus_pitch_radians_);
+        const std::array<float, 2> smoothed_gaze_uv = ProjectViewAnglesToUv(
+            full_fov, quadviews_smoothed_focus_yaw_radians_, quadviews_smoothed_focus_pitch_radians_);
+        const std::array<float, 2> head_center_uv = ProjectViewAnglesToUv(full_fov, 0.0, 0.0);
+        const std::array<float, 2> configured_offset_uv = ProjectViewAnglesToUv(
+            full_fov,
+            DegreesToRadians(resolved_settings_.quadviews.horizontal_offset_degrees),
+            DegreesToRadians(resolved_settings_.quadviews.vertical_offset_degrees));
+        constants.gaze_markers[0] = raw_gaze_uv[0];
+        constants.gaze_markers[1] = raw_gaze_uv[1];
+        constants.gaze_markers[2] = smoothed_gaze_uv[0];
+        constants.gaze_markers[3] = smoothed_gaze_uv[1];
+        constants.reference_markers[0] = head_center_uv[0];
+        constants.reference_markers[1] = head_center_uv[1];
+        constants.reference_markers[2] = configured_offset_uv[0];
+        constants.reference_markers[3] = configured_offset_uv[1];
+
         const auto set_source_rect = [](float (&destination)[4],
                                         const XrSwapchainSubImage& sub_image,
                                         const SwapchainInfo& swapchain) {
@@ -6047,6 +6215,12 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
     }
     ReloadConfigIfNeeded();
     RefreshResolvedSettings();
+    if (IsQuadViewsEmulationActive()) {
+        PollQuadViewsDiagnosticVisualizationToggle();
+    } else {
+        ResetQuadViewsDiagnosticVisualizationState();
+    }
+
     if (!resolved_settings_.core.enabled) {
         cached_pivot_pose_deltas_.clear();
         cached_depth_submission_geometry_.clear();
@@ -6059,6 +6233,7 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
         pivotxr_pitch_step_glide_ = {};
         pivotxr_activation_gain_ = 0.0;
         pivotxr_last_smoothing_wall_time_.reset();
+        ResetPivotPoseDeltaContinuityState();
         const XrResult release_result = FlushDeferredSwapchainReleasesLocked("end frame");
         PrunePivotPoseDeltas(frame_end_info->displayTime);
         PruneDepthSubmissionGeometry(frame_end_info->displayTime);
@@ -6109,6 +6284,7 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
         pivotxr_pitch_step_glide_ = {};
         pivotxr_activation_gain_ = 0.0;
         pivotxr_last_smoothing_wall_time_.reset();
+        ResetPivotPoseDeltaContinuityState();
     }
     if (!resolved_settings_.depthxr.enabled || !depthxr_toggle_enabled_ ||
         !depth_anchor_active_) {
@@ -6117,8 +6293,75 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
 
     XrPosef pose_delta = IdentityPose();
     XrTime matched_time = 0;
-    const bool has_pose_delta = resolved_settings_.pivotxr.enabled &&
-                                FindPivotPoseDelta(frame_end_info->displayTime, &pose_delta, &matched_time);
+
+    const bool pivot_pose_continuity_active =
+        resolved_settings_.pivotxr.enabled &&
+        (pivotxr_engaged_ ||
+         pivotxr_activation_gain_ > kPivotActivationGainEpsilon ||
+         pivotxr_quick_view_active_ ||
+         pivotxr_quick_view_transitioning_ ||
+         pivotxr_quick_view_transition_.active);
+    const std::size_t misses_before_lookup = pivotxr_consecutive_pose_delta_misses_;
+    const PivotPoseDeltaSelection pose_delta_selection = resolved_settings_.pivotxr.enabled
+        ? ResolvePivotPoseDeltaValue(cached_pivot_pose_deltas_,
+                                     frame_end_info->displayTime,
+                                     IdentityPose(),
+                                     pivot_pose_continuity_active,
+                                     &pivotxr_last_matched_pose_delta_,
+                                     &pivotxr_consecutive_pose_delta_misses_,
+                                     &pose_delta,
+                                     &matched_time)
+        : PivotPoseDeltaSelection::None;
+    const bool has_pose_delta = pose_delta_selection != PivotPoseDeltaSelection::None;
+
+    if (pivot_pose_continuity_active) {
+        const XrTime nearest_delta_ns = matched_time == 0
+            ? 0
+            : (matched_time > frame_end_info->displayTime
+                   ? matched_time - frame_end_info->displayTime
+                   : frame_end_info->displayTime - matched_time);
+        if (pose_delta_selection == PivotPoseDeltaSelection::HeldPrevious ||
+            pose_delta_selection == PivotPoseDeltaSelection::None) {
+            pending_locate_views_diagnostics_ =
+                std::max<uint32_t>(pending_locate_views_diagnostics_, 5);
+            pending_end_frame_diagnostics_ =
+                std::max<uint32_t>(pending_end_frame_diagnostics_, 5);
+            pending_pivot_diagnostics_ =
+                std::max<uint32_t>(pending_pivot_diagnostics_, kPivotDiagnosticBurstCount);
+            std::ostringstream stream;
+            stream << "PivotXR pose-delta continuity miss: frameTime="
+                   << frame_end_info->displayTime
+                   << ", nearestCachedTime=" << matched_time
+                   << ", nearestDeltaMs="
+                   << FormatDiagnosticDouble(static_cast<double>(nearest_delta_ns) / 1'000'000.0)
+                   << ", matchWindowMs="
+                   << FormatDiagnosticDouble(
+                          static_cast<double>(kPivotPoseDeltaMatchWindow) / 1'000'000.0)
+                   << ", cachedDeltas=" << cached_pivot_pose_deltas_.size()
+                   << ", consecutiveMisses=" << pivotxr_consecutive_pose_delta_misses_
+                   << ", fallback="
+                   << (pose_delta_selection == PivotPoseDeltaSelection::HeldPrevious
+                           ? "held_previous"
+                           : "identity")
+                   << ", pivotEngaged=" << (pivotxr_engaged_ ? "true" : "false")
+                   << ", activationGain=" << FormatDiagnosticDouble(pivotxr_activation_gain_)
+                   << ", selectedYaw="
+                   << FormatDiagnosticDouble(ExtractPoseYawRadians(pose_delta))
+                   << ", selectedPitch="
+                   << FormatDiagnosticDouble(ExtractPosePitchRadians(pose_delta));
+            logger_.Info(stream.str());
+        } else if (misses_before_lookup > 0) {
+            std::ostringstream stream;
+            stream << "PivotXR pose-delta continuity recovered: frameTime="
+                   << frame_end_info->displayTime
+                   << ", matchedTime=" << matched_time
+                   << ", matchedDeltaMs="
+                   << FormatDiagnosticDouble(static_cast<double>(nearest_delta_ns) / 1'000'000.0)
+                   << ", priorConsecutiveMisses=" << misses_before_lookup
+                   << ", cachedDeltas=" << cached_pivot_pose_deltas_.size();
+            logger_.Info(stream.str());
+        }
+    }
     const bool has_non_identity_delta =
         has_pose_delta && (!NearlyZero(pose_delta.orientation.x) || !NearlyZero(pose_delta.orientation.y) ||
                            !NearlyZero(pose_delta.orientation.z) || !NearlyEqual(pose_delta.orientation.w, 1.0f) ||
@@ -6846,7 +7089,14 @@ XrResult OpenXrLayer::LocateViews(XrSession session,
                 return derived || EnsureEyeOffsets(
                                       session, offset_view_configuration, internal_locate_time, offset_count);
             };
-            if (NearlyZero(applied_extra_yaw_radians) && NearlyZero(applied_extra_pitch_radians)) {
+            const bool identity_pose_delta =
+                NearlyZero(applied_pose_delta.orientation.x) &&
+                NearlyZero(applied_pose_delta.orientation.y) &&
+                NearlyZero(applied_pose_delta.orientation.z) &&
+                NearlyEqual(applied_pose_delta.orientation.w, 1.0f) &&
+                NearlyZero(applied_pose_delta.position.x) && NearlyZero(applied_pose_delta.position.y) &&
+                NearlyZero(applied_pose_delta.position.z);
+            if (identity_pose_delta) {
                 pivot_diagnostic_.recomposition_mode = "identity";
                 pivot_diagnostic_.has_eye_offsets = false;
                 CachePivotPoseDelta(view_locate_info->displayTime, IdentityPose());
@@ -6906,6 +7156,7 @@ XrResult OpenXrLayer::LocateViews(XrSession session,
         pivotxr_pitch_step_glide_ = {};
         pivotxr_activation_gain_ = 0.0;
         pivotxr_last_smoothing_wall_time_.reset();
+        ResetPivotPoseDeltaContinuityState();
     }
 
     const bool depth_geometry_adjusted =
@@ -7246,6 +7497,29 @@ void OpenXrLayer::StopConfigWatcher() {
     if (config_watcher_thread_.joinable()) {
         config_watcher_thread_.join();
     }
+
+    // A normal instance teardown stops the watcher before ResetSessionState,
+    // so remove this process's relay files here as well. Crashes can still
+    // leave files behind; the app rejects them once their heartbeat is stale.
+    std::filesystem::path relay_root;
+    std::vector<std::string> relay_session_ids;
+    {
+        std::scoped_lock lock(mutex_);
+        relay_root = runtime_relay_root_;
+        relay_session_ids.swap(runtime_relay_sessions_to_remove_);
+        if (!runtime_relay_session_id_.empty()) {
+            relay_session_ids.push_back(std::move(runtime_relay_session_id_));
+        }
+        runtime_relay_last_applied_revision_ = 0;
+        runtime_relay_acknowledged_revision_ = 0;
+        runtime_relay_status_dirty_.store(false, std::memory_order_release);
+    }
+    for (const std::string& relay_session_id : relay_session_ids) {
+        std::error_code ec;
+        std::filesystem::remove(RuntimeStatusPath(relay_root, relay_session_id), ec);
+        ec.clear();
+        std::filesystem::remove(RuntimeControlPath(relay_root, relay_session_id), ec);
+    }
 }
 
 void OpenXrLayer::ConfigWatcherLoop() {
@@ -7259,6 +7533,7 @@ void OpenXrLayer::ConfigWatcherLoop() {
             }
         }
         PollConfigFile();
+        PollRuntimeRelay();
     }
 }
 
@@ -7403,6 +7678,10 @@ void OpenXrLayer::RefreshResolvedSettings() {
     if (!SameInputBinding(previous.turbo.toggle_binding, resolved_settings_.turbo.toggle_binding) ||
         previous.turbo.enabled != resolved_settings_.turbo.enabled) {
         ResetTurboToggleState();
+    }
+    if (!SameInputBinding(previous.quadviews.diagnostic_visualization_binding,
+                          resolved_settings_.quadviews.diagnostic_visualization_binding)) {
+        ResetQuadViewsDiagnosticVisualizationState();
     }
     if (!SameInputBinding(previous.turbo.metrics_binding, resolved_settings_.turbo.metrics_binding) ||
         previous.turbo.metrics_mode != resolved_settings_.turbo.metrics_mode) {
@@ -7679,6 +7958,13 @@ void OpenXrLayer::CaptureInstanceFunctions() {
 }
 
 void OpenXrLayer::ResetSessionState() {
+    if (!runtime_relay_session_id_.empty()) {
+        runtime_relay_sessions_to_remove_.push_back(runtime_relay_session_id_);
+        runtime_relay_session_id_.clear();
+        runtime_relay_last_applied_revision_ = 0;
+        runtime_relay_acknowledged_revision_ = 0;
+        runtime_relay_status_dirty_.store(false, std::memory_order_release);
+    }
     {
         std::scoped_lock diagnostic_lock(input_binding_diagnostic_mutex_);
         input_binding_diagnostic_states_.clear();
@@ -7710,6 +7996,7 @@ void OpenXrLayer::ResetSessionState() {
     pivotxr_activation_gain_ = 0.0;
     pivotxr_last_smoothing_wall_time_.reset();
     ResetDepthToggleState();
+    ResetQuadViewsDiagnosticVisualizationState();
     ResetTurboToggleState();
     ResetTurboFrameState();
     internal_local_space_ = XR_NULL_HANDLE;
@@ -7734,6 +8021,10 @@ void OpenXrLayer::ResetSessionState() {
     eye_gaze_unavailable_streak_ = 0;
     quadviews_smoothed_focus_yaw_radians_ = 0.0;
     quadviews_smoothed_focus_pitch_radians_ = 0.0;
+    quadviews_raw_focus_yaw_radians_ = 0.0;
+    quadviews_raw_focus_pitch_radians_ = 0.0;
+    quadviews_raw_focus_time_ = 0;
+    quadviews_raw_focus_valid_ = false;
     quadviews_last_focus_smoothing_wall_time_.reset();
     quadviews_last_valid_gaze_wall_time_.reset();
     quadviews_eye_gaze_loss_started_wall_time_.reset();
@@ -7964,6 +8255,8 @@ bool OpenXrLayer::LocateEyeGazeFocusOffsets(XrSession session,
 
     *yaw_radians = 0.0;
     *pitch_radians = 0.0;
+    quadviews_raw_focus_time_ = time;
+    quadviews_raw_focus_valid_ = false;
 
     // Probe the runtime's current interaction profile for /user/eyes_ext. When our eye-gaze
     // action reports isActive=0, this reveals *why*: "none" means the runtime never bound the
@@ -8131,6 +8424,10 @@ bool OpenXrLayer::LocateEyeGazeFocusOffsets(XrSession session,
     const double euler_pitch = ExtractPitchRadians(diagnostic_orientation);
     double target_yaw = gaze_ray_angles.yaw_radians;
     double target_pitch = gaze_ray_angles.pitch_radians;
+    quadviews_raw_focus_yaw_radians_ = target_yaw;
+    quadviews_raw_focus_pitch_radians_ = target_pitch;
+    quadviews_raw_focus_valid_ = true;
+
     const double deadzone_radians = DegreesToRadians(std::max(0.0, settings.gaze_deadzone_degrees));
     if (std::abs(target_yaw) < deadzone_radians) {
         target_yaw = 0.0;
@@ -9273,18 +9570,20 @@ XrResult OpenXrLayer::ApplyPivotToLocatedSpace(XrSpace space,
         }
         pivotxr_last_smoothing_wall_time_ = now;
 
-        const double target_gain = pivotxr_active ? 1.0 : 0.0;
-        const double ramp_seconds = settings.activation_ramp_seconds;
-        if (ramp_seconds <= 0.0) {
-            pivotxr_activation_gain_ = target_gain;
-        } else if (delta_seconds > 0.0) {
-            const double step = delta_seconds / ramp_seconds;
-            if (target_gain > pivotxr_activation_gain_) {
-                pivotxr_activation_gain_ = std::min(target_gain, pivotxr_activation_gain_ + step);
-            } else {
-                pivotxr_activation_gain_ = std::max(target_gain, pivotxr_activation_gain_ - step);
-            }
-        }
+        // A Quick View temporarily replaces the active motion transform. Keep
+        // the underlying activation envelope fixed until its return transition
+        // hands off at that same transform, avoiding a reverse-then-forward bounce.
+        const bool returns_to_engaged_motion = pivotxr_quick_view_return_engaged_ &&
+            pivotxr_quick_view_return_profile_index_ < resolved_settings_.pivotxr.profiles.size() &&
+            resolved_settings_.pivotxr.profiles[pivotxr_quick_view_return_profile_index_].behavior ==
+                PivotProfileBehavior::EnhancedMotion;
+        const bool suspend_activation_gain = returns_to_engaged_motion &&
+            (pivotxr_quick_view_active_ || pivotxr_quick_view_transitioning_ ||
+             pivotxr_quick_view_transition_.active);
+        pivotxr_activation_gain_ = AdvancePivotActivationGain(
+            pivotxr_activation_gain_, pivotxr_engaged_, suspend_activation_gain,
+            settings.activation_ramp_seconds, delta_seconds);
+
     }
 
     // Fully release once the envelope has closed and the pivot is no longer
@@ -9329,10 +9628,40 @@ XrResult OpenXrLayer::ApplyPivotToLocatedSpace(XrSpace space,
         current_pitch_radians = current_pitch_radians - pivotxr_origin_->pitch_radians;
     }
 
+    if (update_smoothing) {
+        UpdatePivotViewTransition(delta_seconds, pivotxr_manual_view_transition_);
+        UpdatePivotViewTransition(delta_seconds, pivotxr_profile_view_transition_);
+        if (pivotxr_quick_view_retarget_pending_) {
+            PivotViewOffset target = pivotxr_quick_view_pending_pose_;
+            const double canonical_yaw_offset =
+                target.yaw_radians - current_yaw_radians;
+            double yaw_delta = WrapRadians(
+                canonical_yaw_offset - pivotxr_quick_view_transition_.current.yaw_radians);
+            target.yaw_radians =
+                pivotxr_quick_view_transition_.current.yaw_radians + yaw_delta;
+            target.pitch_radians = std::clamp(
+                target.pitch_radians - current_pitch_radians,
+                DegreesToRadians(-85.0), DegreesToRadians(85.0));
+            RetargetPivotViewTransition(
+                target, pivotxr_quick_view_pending_duration_seconds_,
+                pivotxr_quick_view_transition_);
+            pivotxr_quick_view_retarget_pending_ = false;
+        }
+        UpdatePivotViewTransition(delta_seconds, pivotxr_quick_view_transition_);
+        if (!pivotxr_quick_view_active_ && pivotxr_quick_view_transitioning_ &&
+            !pivotxr_quick_view_transition_.active) {
+            pivotxr_quick_view_transitioning_ = false;
+        }
+    }
+    const bool quick_view_override = pivotxr_quick_view_active_ ||
+                                     pivotxr_quick_view_transitioning_ ||
+                                     pivotxr_quick_view_transition_.active;
+
     // Track the steady-state pivot amount only while actively engaged. During
     // the release ramp it is frozen and the envelope eases the applied angle to
     // zero, avoiding any snap on toggle-off.
-    if (update_smoothing && pivotxr_active) {
+    if (update_smoothing && pivotxr_engaged_ && !quick_view_override &&
+        settings.behavior != PivotProfileBehavior::SnapViews) {
         const int previous_yaw_step = pivotxr_yaw_step_;
         const int previous_pitch_step = pivotxr_pitch_step_;
         if (settings.response_mode == PivotResponseMode::Stepped) {
@@ -9393,13 +9722,33 @@ XrResult OpenXrLayer::ApplyPivotToLocatedSpace(XrSpace space,
     }
 
     const double eased_gain = SmoothStep(pivotxr_activation_gain_);
-    const double extra_yaw_radians = pivotxr_smoothed_extra_yaw_radians_ * eased_gain;
-    const double extra_pitch_radians = pivotxr_smoothed_extra_pitch_radians_ * eased_gain;
+    PivotViewOffset applied_view_offset;
+    if (quick_view_override) {
+        applied_view_offset = pivotxr_quick_view_transition_.current;
+        applied_view_offset.yaw_radians += pivotxr_manual_view_transition_.current.yaw_radians +
+                                           pivotxr_profile_view_transition_.current.yaw_radians;
+        applied_view_offset.pitch_radians += pivotxr_manual_view_transition_.current.pitch_radians +
+                                             pivotxr_profile_view_transition_.current.pitch_radians;
+    } else {
+        applied_view_offset = pivotxr_manual_view_transition_.current;
+        applied_view_offset.yaw_radians += pivotxr_profile_view_transition_.current.yaw_radians;
+        applied_view_offset.pitch_radians += pivotxr_profile_view_transition_.current.pitch_radians;
+        if (settings.behavior != PivotProfileBehavior::SnapViews) {
+            applied_view_offset.yaw_radians += pivotxr_smoothed_extra_yaw_radians_ * eased_gain;
+            applied_view_offset.pitch_radians += pivotxr_smoothed_extra_pitch_radians_ * eased_gain;
+        }
+    }
+    constexpr double kPi = 3.14159265358979323846;
+    const double extra_yaw_radians =
+        std::clamp(applied_view_offset.yaw_radians, -kPi, kPi);
+    const double extra_pitch_radians =
+        std::clamp(applied_view_offset.pitch_radians,
+                   DegreesToRadians(-85.0), DegreesToRadians(85.0));
     if (update_smoothing) {
         pivot_diagnostic_.has_view_pose = true;
         pivot_diagnostic_.view_time = time;
         pivot_diagnostic_.view_location_flags = location->locationFlags;
-        pivot_diagnostic_.pivot_active = pivotxr_active;
+        pivot_diagnostic_.pivot_active = pivotxr_engaged_;
         pivot_diagnostic_.space_is_view = space_is_view;
         pivot_diagnostic_.base_space_is_view = base_space_is_view;
         pivot_diagnostic_.raw_yaw_radians = current_yaw_radians;
@@ -9421,13 +9770,31 @@ XrResult OpenXrLayer::ApplyPivotToLocatedSpace(XrSpace space,
     if (applied_extra_pitch_radians) {
         *applied_extra_pitch_radians = extra_pitch_radians;
     }
+    XrPosef selected_pose = ApplyExtraRotationToPose(
+        view_pose, static_cast<float>(extra_yaw_radians), static_cast<float>(extra_pitch_radians));
+    if (!NearlyZero(applied_view_offset.right_meters) ||
+        !NearlyZero(applied_view_offset.up_meters) ||
+        !NearlyZero(applied_view_offset.forward_meters)) {
+        const XrVector3f origin_relative{
+            static_cast<float>(applied_view_offset.right_meters),
+            static_cast<float>(applied_view_offset.up_meters),
+            static_cast<float>(-applied_view_offset.forward_meters),
+        };
+        const XrQuaternionf origin_orientation = pivotxr_origin_
+            ? pivotxr_origin_->pose.orientation
+            : XrQuaternionf{0.0f, 0.0f, 0.0f, 1.0f};
+        const XrVector3f translated = RotateVector(origin_orientation, origin_relative);
+        selected_pose.position.x += translated.x;
+        selected_pose.position.y += translated.y;
+        selected_pose.position.z += translated.z;
+    }
     PivotPoseOffsetComponents components;
-    if (!NearlyZero(extra_yaw_radians) || !NearlyZero(extra_pitch_radians)) {
-        const XrPosef motion_assisted_pose =
-            ApplyExtraRotationToPose(view_pose,
-                                     static_cast<float>(extra_yaw_radians),
-                                     static_cast<float>(extra_pitch_radians));
-        components.motion_assist = PoseOffsetBetween(view_pose, motion_assisted_pose);
+    const XrPosef selected_offset = PoseOffsetBetween(view_pose, selected_pose);
+    if (quick_view_override) {
+        components.quick_view = selected_offset;
+        components.quick_view_active = true;
+    } else {
+        components.motion_assist = selected_offset;
     }
     const XrPosef composed_pose_offset = ComposePivotPoseOffset(components);
     const XrPosef manipulated_pose = MultiplyPoses(view_pose, composed_pose_offset);
@@ -9458,6 +9825,10 @@ void OpenXrLayer::LogResolvedSettings(const ResolvedRuntimeConfig& settings) {
                << ", bindings=" << BindingListLabel(profile.activation_bindings)
                << ", setOriginBindings=" << BindingListLabel(profile.set_origin_bindings)
                << ", releaseOriginBindings=" << BindingListLabel(profile.release_origin_bindings)
+               << ", nudgeBindingCount=" << (profile.view_controls.nudges.yaw_left_bindings.size() +
+                                                profile.view_controls.nudges.yaw_right_bindings.size() + profile.view_controls.nudges.pitch_up_bindings.size() +
+                                                profile.view_controls.nudges.pitch_down_bindings.size() + profile.view_controls.nudges.center_bindings.size())
+               << ", quickViewCount=" << profile.view_controls.quick_views.size()
                << ", smoothing=" << profile.smoothing
                << ", activationRamp=" << profile.activation_ramp_seconds
                << ", yawMultiplier=" << profile.yaw_rotation_multiplier
@@ -9491,6 +9862,7 @@ void OpenXrLayer::LogResolvedSettings(const ResolvedRuntimeConfig& settings) {
            << ", turboMetricsMode=" << ToString(settings.turbo.metrics_mode)
            << ", turboMetricsBinding=" << BindingLabel(settings.turbo.metrics_binding)
            << ", quadviewsEnabled=" << settings.quadviews.enabled
+           << ", quadviewsDiagnosticVisualizationBinding=" << BindingLabel(settings.quadviews.diagnostic_visualization_binding)
            << ", quadviewsTrackingMode=" << ToString(settings.quadviews.tracking_mode)
            << ", quadviewsFocusHorizontalSizePercent=" << settings.quadviews.focus_horizontal_size_percent
            << ", quadviewsFocusVerticalSizePercent=" << settings.quadviews.focus_vertical_size_percent
@@ -9505,7 +9877,13 @@ void OpenXrLayer::LogResolvedSettings(const ResolvedRuntimeConfig& settings) {
     logger_.Debug(stream.str());
 }
 
+void OpenXrLayer::ResetPivotPoseDeltaContinuityState() {
+    pivotxr_last_matched_pose_delta_.reset();
+    pivotxr_consecutive_pose_delta_misses_ = 0;
+}
+
 void OpenXrLayer::ResetPivotActivationState() {
+    ResetPivotPoseDeltaContinuityState();
     pivotxr_smoothed_extra_yaw_radians_ = 0.0;
     pivotxr_smoothed_extra_pitch_radians_ = 0.0;
     pivotxr_yaw_step_ = 0;
@@ -9517,6 +9895,14 @@ void OpenXrLayer::ResetPivotActivationState() {
     pivotxr_engaged_ = false;
     pivotxr_active_profile_index_ = 0;
     pivotxr_profile_input_states_.clear();
+    pivotxr_manual_view_transition_ = {};
+    pivotxr_profile_view_transition_ = {};
+    pivotxr_quick_view_transition_ = {};
+    pivotxr_quick_view_retarget_pending_ = false;
+    pivotxr_quick_view_active_ = false;
+    pivotxr_quick_view_transitioning_ = false;
+    pivotxr_quick_view_profile_index_ = 0;
+    pivotxr_quick_view_index_ = 0;
     pivotxr_origin_.reset();
     pivotxr_origin_capture_pending_ = false;
     pivotxr_binding_last_poll_time_.reset();
@@ -9535,11 +9921,67 @@ void OpenXrLayer::ResetPivotInputStateForConfigChange() {
                                         : std::min(pivotxr_active_profile_index_,
                                                    resolved_settings_.pivotxr.profiles.size() - 1);
     pivotxr_profile_input_states_.clear();
+    pivotxr_manual_view_transition_ = {};
+    pivotxr_profile_view_transition_ = {};
+    pivotxr_quick_view_transition_ = {};
+    pivotxr_quick_view_retarget_pending_ = false;
+    pivotxr_quick_view_active_ = false;
+    pivotxr_quick_view_transitioning_ = false;
+    pivotxr_quick_view_profile_index_ = 0;
+    pivotxr_quick_view_index_ = 0;
     pivotxr_origin_capture_pending_ = false;
     pivotxr_binding_last_poll_time_.reset();
     pending_locate_views_diagnostics_ = 5;
     pending_end_frame_diagnostics_ = 5;
     pending_pivot_diagnostics_ = kPivotDiagnosticBurstCount;
+}
+
+void OpenXrLayer::ResetQuadViewsDiagnosticVisualizationState() {
+    quadviews_diagnostic_visualization_enabled_ = false;
+    quadviews_diagnostic_visualization_binding_was_down_ = false;
+    quadviews_diagnostic_visualization_binding_last_poll_time_.reset();
+    quadviews_diagnostic_visualization_binding_down_cached_ = false;
+}
+
+void OpenXrLayer::PollQuadViewsDiagnosticVisualizationToggle() {
+#if defined(_WIN32)
+    const InputBinding& binding = resolved_settings_.quadviews.diagnostic_visualization_binding;
+    if (binding.type == InputBindingType::None) {
+        return;
+    }
+
+    const auto now = std::chrono::steady_clock::now();
+    const bool first_poll = !quadviews_diagnostic_visualization_binding_last_poll_time_.has_value();
+    if (first_poll ||
+        now - *quadviews_diagnostic_visualization_binding_last_poll_time_ >= kInputBindingPollInterval) {
+        quadviews_diagnostic_visualization_binding_last_poll_time_ = now;
+        quadviews_diagnostic_visualization_binding_down_cached_ = PollInputBindingDown(binding);
+    }
+
+    const bool binding_down = quadviews_diagnostic_visualization_binding_down_cached_;
+    if (first_poll) {
+        // Prime the edge detector so the key/button used while assigning the
+        // binding cannot make the visualization appear immediately.
+        quadviews_diagnostic_visualization_binding_was_down_ = binding_down;
+        return;
+    }
+
+    const bool was_pressed = binding_down && !quadviews_diagnostic_visualization_binding_was_down_;
+    quadviews_diagnostic_visualization_binding_was_down_ = binding_down;
+    if (!was_pressed) {
+        return;
+    }
+
+    quadviews_diagnostic_visualization_enabled_ = !quadviews_diagnostic_visualization_enabled_;
+    runtime_relay_status_dirty_.store(true, std::memory_order_release);
+    logger_.Info(std::string("Quadviews diagnostic visualization ") +
+                 (quadviews_diagnostic_visualization_enabled_ ? "shown" : "hidden") +
+                 " via " + BindingLabel(binding) + ".");
+    SoundPlayer::Instance().PlayTransition(binding.sound,
+                                           quadviews_diagnostic_visualization_enabled_,
+                                           dll_directory_,
+                                           resolved_settings_.core.sound_volume);
+#endif
 }
 
 void OpenXrLayer::ResetDepthToggleState() {
@@ -10537,6 +10979,26 @@ bool OpenXrLayer::IsPivotXrActive() {
         if (state.release_origin.size() != pivot.profiles[i].release_origin_bindings.size()) {
             state.release_origin.assign(pivot.profiles[i].release_origin_bindings.size(), {});
         }
+        const PivotNudgeSettings& nudges = pivot.profiles[i].view_controls.nudges;
+        if (state.nudge_yaw_left.size() != nudges.yaw_left_bindings.size())
+            state.nudge_yaw_left.assign(nudges.yaw_left_bindings.size(), {});
+        if (state.nudge_yaw_right.size() != nudges.yaw_right_bindings.size())
+            state.nudge_yaw_right.assign(nudges.yaw_right_bindings.size(), {});
+        if (state.nudge_pitch_up.size() != nudges.pitch_up_bindings.size())
+            state.nudge_pitch_up.assign(nudges.pitch_up_bindings.size(), {});
+        if (state.nudge_pitch_down.size() != nudges.pitch_down_bindings.size())
+            state.nudge_pitch_down.assign(nudges.pitch_down_bindings.size(), {});
+        if (state.nudge_center.size() != nudges.center_bindings.size())
+            state.nudge_center.assign(nudges.center_bindings.size(), {});
+        const auto& quick_views = pivot.profiles[i].view_controls.quick_views;
+        if (state.quick_views.size() != quick_views.size()) {
+            state.quick_views.assign(quick_views.size(), {});
+        }
+        for (size_t view = 0; view < quick_views.size(); ++view) {
+            if (state.quick_views[view].activation.size() != quick_views[view].activation_bindings.size()) {
+                state.quick_views[view].activation.assign(quick_views[view].activation_bindings.size(), {});
+            }
+        }
     }
 
     const auto now = std::chrono::steady_clock::now();
@@ -10556,6 +11018,26 @@ bool OpenXrLayer::IsPivotXrActive() {
             }
             for (size_t binding = 0; binding < profile.release_origin_bindings.size(); ++binding) {
                 state.release_origin[binding].down_cached = PollInputBindingDown(profile.release_origin_bindings[binding]);
+            }
+            const PivotNudgeSettings& nudges = profile.view_controls.nudges;
+            auto poll_bindings = [&](const std::vector<InputBinding>& bindings,
+                                     std::vector<PivotProfileInputState::BindingState>& states) {
+                for (size_t binding = 0; binding < bindings.size(); ++binding) {
+                    states[binding].down_cached = PollInputBindingDown(bindings[binding]);
+                }
+            };
+            poll_bindings(nudges.yaw_left_bindings, state.nudge_yaw_left);
+            poll_bindings(nudges.yaw_right_bindings, state.nudge_yaw_right);
+            poll_bindings(nudges.pitch_up_bindings, state.nudge_pitch_up);
+            poll_bindings(nudges.pitch_down_bindings, state.nudge_pitch_down);
+            poll_bindings(nudges.center_bindings, state.nudge_center);
+            for (size_t view = 0; view < profile.view_controls.quick_views.size(); ++view) {
+                const PivotQuickView& quick_view = profile.view_controls.quick_views[view];
+                auto& view_state = state.quick_views[view];
+                for (size_t binding = 0; binding < quick_view.activation_bindings.size(); ++binding) {
+                    view_state.activation[binding].down_cached =
+                        PollInputBindingDown(quick_view.activation_bindings[binding].binding);
+                }
             }
         }
     }
@@ -10591,9 +11073,18 @@ bool OpenXrLayer::IsPivotXrActive() {
         pending_end_frame_diagnostics_ = 5;
         pending_pivot_diagnostics_ = kPivotDiagnosticBurstCount;
     };
+    auto shares_nudge_set = [&](size_t lhs, size_t rhs) {
+        if (lhs >= pivot.profiles.size() || rhs >= pivot.profiles.size()) return false;
+        const std::string& left = pivot.profiles[lhs].nudge_set_id;
+        return !left.empty() && left == pivot.profiles[rhs].nudge_set_id;
+    };
     auto engage = [&](size_t index, const InputBinding& trigger) {
         const PivotXrResolvedProfile& profile = pivot.profiles[index];
         const bool switching = pivotxr_engaged_ && pivotxr_active_profile_index_ != index;
+        if (pivotxr_active_profile_index_ != index &&
+            !shares_nudge_set(pivotxr_active_profile_index_, index)) {
+            pivotxr_profile_view_transition_ = {};
+        }
         pivotxr_active_profile_index_ = index;
         pivotxr_engaged_ = true;
         note_transition_diagnostics();
@@ -10605,21 +11096,160 @@ bool OpenXrLayer::IsPivotXrActive() {
     auto disengage = [&](size_t index, const InputBinding& trigger) {
         const PivotXrResolvedProfile& profile = pivot.profiles[index];
         pivotxr_engaged_ = false;
+        pivotxr_profile_view_transition_ = {};
         note_transition_diagnostics();
         logger_.Info("PivotXR profile '" + profile.name + "' disengaged via " + BindingLabel(trigger) + ".");
         SoundPlayer::Instance().PlayTransition(trigger.sound, false, dll_directory_,
                                                resolved_settings_.core.sound_volume);
     };
+    auto motion_view_offset = [&]() {
+        PivotViewOffset offset;
+        const double gain = SmoothStep(pivotxr_activation_gain_);
+        offset.yaw_radians = pivotxr_smoothed_extra_yaw_radians_ * gain;
+        offset.pitch_radians = pivotxr_smoothed_extra_pitch_radians_ * gain;
+        constexpr double kPi = 3.14159265358979323846;
+        offset.yaw_radians = std::clamp(offset.yaw_radians, -kPi, kPi);
+        offset.pitch_radians = std::clamp(offset.pitch_radians,
+                                          DegreesToRadians(-85.0), DegreesToRadians(85.0));
+        return offset;
+    };
+    auto high_level_view_offset = [&]() {
+        return ActivePivotProfile().behavior != PivotProfileBehavior::SnapViews
+            ? motion_view_offset()
+            : PivotViewOffset{};
+    };
+    auto select_view_profile = [&](size_t index) {
+        if (pivotxr_active_profile_index_ != index) {
+            if (!shares_nudge_set(pivotxr_active_profile_index_, index)) {
+                pivotxr_profile_view_transition_ = {};
+            }
+            if (pivotxr_engaged_) pivotxr_engaged_ = false;
+            pivotxr_active_profile_index_ = index;
+        }
+    };
+    auto apply_nudge = [&](size_t index, const InputBinding& trigger,
+                           double yaw_delta, double pitch_delta, bool center) {
+        const PivotXrResolvedProfile& profile = pivot.profiles[index];
+        const double duration = profile.view_controls.nudges.transition_seconds;
+        if (center) {
+            RetargetPivotViewTransition({}, duration, pivotxr_manual_view_transition_);
+            RetargetPivotViewTransition({}, duration, pivotxr_profile_view_transition_);
+        } else {
+            PivotViewTransitionState& transition = profile.allow_inactive_nudges
+                ? pivotxr_manual_view_transition_
+                : pivotxr_profile_view_transition_;
+            PivotViewOffset target = transition.target;
+            constexpr double kPi = 3.14159265358979323846;
+            target.yaw_radians = std::clamp(target.yaw_radians + yaw_delta, -kPi, kPi);
+            target.pitch_radians = std::clamp(target.pitch_radians + pitch_delta,
+                                              DegreesToRadians(-85.0), DegreesToRadians(85.0));
+            RetargetPivotViewTransition(target, duration, transition);
+        }
+        note_transition_diagnostics();
+        logger_.Info("PivotXR profile '" + pivot.profiles[index].name + "' " +
+                     (center ? "manual view offset centered" : "view nudged") +
+                     " via " + BindingLabel(trigger) + ".");
+        SoundPlayer::Instance().PlayTransition(trigger.sound, true, dll_directory_,
+                                               resolved_settings_.core.sound_volume);
+    };
+    auto activate_quick_view = [&](size_t profile_index, size_t view_index,
+                                   const PivotActivationBinding& trigger) {
+        if (!pivotxr_quick_view_active_ && !pivotxr_quick_view_transitioning_) {
+            pivotxr_quick_view_return_profile_index_ = pivotxr_active_profile_index_;
+            pivotxr_quick_view_return_engaged_ = pivotxr_engaged_;
+            pivotxr_quick_view_transition_.current = high_level_view_offset();
+            pivotxr_quick_view_transition_.target = pivotxr_quick_view_transition_.current;
+        }
+        select_view_profile(profile_index);
+        const PivotXrResolvedProfile& profile = pivot.profiles[profile_index];
+        const PivotQuickView& quick_view = profile.view_controls.quick_views[view_index];
+        pivotxr_quick_view_pending_pose_ = {
+            DegreesToRadians(-std::clamp(quick_view.yaw_degrees, -180.0, 180.0)),
+            DegreesToRadians(std::clamp(quick_view.pitch_degrees, -85.0, 85.0)),
+            quick_view.position_right_cm / 100.0,
+            quick_view.position_up_cm / 100.0,
+            quick_view.position_forward_cm / 100.0,
+        };
+        pivotxr_quick_view_pending_duration_seconds_ = quick_view.transition_seconds;
+        pivotxr_quick_view_retarget_pending_ = true;
+        pivotxr_quick_view_active_ = true;
+        pivotxr_quick_view_transitioning_ = true;
+        pivotxr_quick_view_profile_index_ = profile_index;
+        pivotxr_quick_view_index_ = view_index;
+        note_transition_diagnostics();
+        logger_.Info("PivotXR Quick View '" + quick_view.name + "' activated via " +
+                     BindingLabel(trigger.binding) + ".");
+        SoundPlayer::Instance().PlayTransition(trigger.binding.sound, true, dll_directory_,
+                                               resolved_settings_.core.sound_volume);
+    };
+    auto deactivate_quick_view = [&](const PivotQuickView& quick_view, const InputBinding& trigger) {
+        pivotxr_quick_view_retarget_pending_ = false;
+        PivotViewOffset return_offset;
+        if (pivotxr_quick_view_return_profile_index_ < pivot.profiles.size() &&
+            pivot.profiles[pivotxr_quick_view_return_profile_index_].behavior !=
+                PivotProfileBehavior::SnapViews && pivotxr_quick_view_return_engaged_) {
+            return_offset = motion_view_offset();
+        }
+        const bool returns_to_active_motion =
+            pivotxr_quick_view_return_profile_index_ < pivot.profiles.size() &&
+            pivotxr_quick_view_return_engaged_ &&
+            pivot.profiles[pivotxr_quick_view_return_profile_index_].behavior ==
+                PivotProfileBehavior::EnhancedMotion;
+        const double return_yaw_delta = WrapRadians(
+            return_offset.yaw_radians - pivotxr_quick_view_transition_.current.yaw_radians);
+        return_offset.yaw_radians =
+            pivotxr_quick_view_transition_.current.yaw_radians + return_yaw_delta;
+        RetargetPivotViewTransition(return_offset, quick_view.transition_seconds,
+                                    pivotxr_quick_view_transition_);
+        if (!shares_nudge_set(pivotxr_active_profile_index_, pivotxr_quick_view_return_profile_index_) ||
+            !returns_to_active_motion) {
+            pivotxr_profile_view_transition_ = {};
+        }
+        pivotxr_active_profile_index_ = pivotxr_quick_view_return_profile_index_;
+        pivotxr_engaged_ = pivotxr_quick_view_return_engaged_;
+        pivotxr_quick_view_active_ = false;
+        pivotxr_quick_view_transitioning_ = pivotxr_quick_view_transition_.active;
+        note_transition_diagnostics();
+        logger_.Info("PivotXR Quick View '" + quick_view.name + "' released via " +
+                     BindingLabel(trigger) + ".");
+        SoundPlayer::Instance().PlayTransition(trigger.sound, false, dll_directory_,
+                                               resolved_settings_.core.sound_volume);
+    };
+    std::vector<InputBinding> claimed_view_inputs;
+    std::vector<std::string> polled_nudge_sets;
+    auto claim_view_input = [&](const InputBinding& binding) {
+        if (std::any_of(claimed_view_inputs.begin(), claimed_view_inputs.end(),
+                        [&](const InputBinding& claimed) { return SameInputBinding(claimed, binding); })) {
+            return false;
+        }
+        claimed_view_inputs.push_back(binding);
+        return true;
+    };
 
     // Arbitrate across all candidates: last pressed wins. The resolver prunes
     // colliding activation bindings while retaining every independent binding.
-    for (size_t i = 0; i < pivot.profiles.size(); ++i) {
+    std::vector<size_t> profile_input_order;
+    if (pivotxr_active_profile_index_ < pivot.profiles.size()) {
+        profile_input_order.push_back(pivotxr_active_profile_index_);
+    }
+    for (size_t index = 0; index < pivot.profiles.size(); ++index) {
+        if (index != pivotxr_active_profile_index_) profile_input_order.push_back(index);
+    }
+    for (size_t i : profile_input_order) {
         const PivotXrResolvedProfile& profile = pivot.profiles[i];
         PivotProfileInputState& input_state = pivotxr_profile_input_states_[i];
         if (first_poll) {
             prime_states(input_state.activation);
             prime_states(input_state.set_origin);
             prime_states(input_state.release_origin);
+            prime_states(input_state.nudge_yaw_left);
+            prime_states(input_state.nudge_yaw_right);
+            prime_states(input_state.nudge_pitch_up);
+            prime_states(input_state.nudge_pitch_down);
+            prime_states(input_state.nudge_center);
+            for (auto& quick_view : input_state.quick_views) {
+                prime_states(quick_view.activation);
+            }
             continue;
         }
 
@@ -10627,6 +11257,12 @@ bool OpenXrLayer::IsPivotXrActive() {
             consume_transitions(profile.set_origin_bindings, input_state.set_origin);
         if (set_origin.pressed) {
             pivotxr_origin_capture_pending_ = true;
+            pivotxr_manual_view_transition_ = {};
+            pivotxr_profile_view_transition_ = {};
+            pivotxr_quick_view_transition_ = {};
+            pivotxr_quick_view_retarget_pending_ = false;
+            pivotxr_quick_view_active_ = false;
+            pivotxr_quick_view_transitioning_ = false;
             logger_.Info("PivotXR origin capture requested via " + BindingLabel(*set_origin.pressed) + ".");
             SoundPlayer::Instance().PlayTransition(set_origin.pressed->sound, true, dll_directory_,
                                                    resolved_settings_.core.sound_volume,
@@ -10638,11 +11274,87 @@ bool OpenXrLayer::IsPivotXrActive() {
         if (release_origin.pressed && (pivotxr_origin_.has_value() || pivotxr_origin_capture_pending_)) {
             pivotxr_origin_.reset();
             pivotxr_origin_capture_pending_ = false;
+            pivotxr_manual_view_transition_ = {};
+            pivotxr_profile_view_transition_ = {};
+            pivotxr_quick_view_transition_ = {};
+            pivotxr_quick_view_retarget_pending_ = false;
+            pivotxr_quick_view_active_ = false;
+            pivotxr_quick_view_transitioning_ = false;
             logger_.Info("PivotXR origin released via " + BindingLabel(*release_origin.pressed) +
                          "; reverting to the HMD origin.");
             SoundPlayer::Instance().PlayTransition(release_origin.pressed->sound, true, dll_directory_,
                                                    resolved_settings_.core.sound_volume,
                                                    L"origin-release.wav", L"origin-release.wav");
+        }
+
+        const PivotNudgeSettings& nudges = profile.view_controls.nudges;
+        const BindingTransitions yaw_left = consume_transitions(nudges.yaw_left_bindings, input_state.nudge_yaw_left);
+        const BindingTransitions yaw_right = consume_transitions(nudges.yaw_right_bindings, input_state.nudge_yaw_right);
+        const BindingTransitions pitch_up = consume_transitions(nudges.pitch_up_bindings, input_state.nudge_pitch_up);
+        const BindingTransitions pitch_down = consume_transitions(nudges.pitch_down_bindings, input_state.nudge_pitch_down);
+        const BindingTransitions center = consume_transitions(nudges.center_bindings, input_state.nudge_center);
+        bool nudge_set_input_owner = true;
+        if (!profile.nudge_set_id.empty()) {
+            nudge_set_input_owner =
+                std::find(polled_nudge_sets.begin(), polled_nudge_sets.end(),
+                          profile.nudge_set_id) == polled_nudge_sets.end();
+            if (nudge_set_input_owner) polled_nudge_sets.push_back(profile.nudge_set_id);
+        }
+        const bool behavior_active =
+            (profile.behavior == PivotProfileBehavior::EnhancedMotion &&
+             pivotxr_engaged_ && pivotxr_active_profile_index_ == i) ||
+            (profile.behavior == PivotProfileBehavior::SnapViews &&
+             pivotxr_quick_view_active_ && pivotxr_quick_view_profile_index_ == i);
+        const bool directional_nudges_enabled =
+            nudge_set_input_owner && (behavior_active || profile.allow_inactive_nudges);
+        if (directional_nudges_enabled && yaw_left.pressed && claim_view_input(*yaw_left.pressed)) apply_nudge(i, *yaw_left.pressed, DegreesToRadians(nudges.yaw_step_degrees), 0.0, false);
+        if (directional_nudges_enabled && yaw_right.pressed && claim_view_input(*yaw_right.pressed)) apply_nudge(i, *yaw_right.pressed, -DegreesToRadians(nudges.yaw_step_degrees), 0.0, false);
+        if (directional_nudges_enabled && pitch_up.pressed && claim_view_input(*pitch_up.pressed)) apply_nudge(i, *pitch_up.pressed, 0.0, DegreesToRadians(nudges.pitch_step_degrees), false);
+        if (directional_nudges_enabled && pitch_down.pressed && claim_view_input(*pitch_down.pressed)) apply_nudge(i, *pitch_down.pressed, 0.0, -DegreesToRadians(nudges.pitch_step_degrees), false);
+        if (nudge_set_input_owner && center.pressed && claim_view_input(*center.pressed)) apply_nudge(i, *center.pressed, 0.0, 0.0, true);
+
+        if (profile.behavior != PivotProfileBehavior::EnhancedMotion) for (size_t view_index = 0; view_index < profile.view_controls.quick_views.size(); ++view_index) {
+            const PivotQuickView& quick_view = profile.view_controls.quick_views[view_index];
+            auto& view_state = input_state.quick_views[view_index];
+            const PivotActivationBinding* toggle_pressed = nullptr;
+            const PivotActivationBinding* hold_pressed = nullptr;
+            const PivotActivationBinding* hold_released = nullptr;
+            bool any_hold_down = false;
+            for (size_t binding = 0; binding < quick_view.activation_bindings.size(); ++binding) {
+                const PivotActivationBinding& activation = quick_view.activation_bindings[binding];
+                auto& binding_state = view_state.activation[binding];
+                const bool pressed = binding_state.down_cached && !binding_state.was_down;
+                const bool released = !binding_state.down_cached && binding_state.was_down;
+                if (activation.behavior == PivotActivationBehavior::Toggle) {
+                    if (pressed && !toggle_pressed) toggle_pressed = &activation;
+                } else {
+                    if (pressed && !hold_pressed) hold_pressed = &activation;
+                    if (released && !hold_released) hold_released = &activation;
+                    any_hold_down = any_hold_down || binding_state.down_cached;
+                }
+                binding_state.was_down = binding_state.down_cached;
+            }
+            const bool this_view_active = pivotxr_quick_view_active_ &&
+                pivotxr_quick_view_profile_index_ == i && pivotxr_quick_view_index_ == view_index;
+            if (toggle_pressed && claim_view_input(toggle_pressed->binding)) {
+                if (this_view_active && view_state.toggle_latched) {
+                    view_state.toggle_latched = false;
+                    deactivate_quick_view(quick_view, toggle_pressed->binding);
+                } else {
+                    for (auto& profile_state : pivotxr_profile_input_states_)
+                        for (auto& candidate : profile_state.quick_views) candidate.toggle_latched = false;
+                    view_state.toggle_latched = true;
+                    activate_quick_view(i, view_index, *toggle_pressed);
+                }
+            }
+            if (hold_pressed && claim_view_input(hold_pressed->binding)) {
+                activate_quick_view(i, view_index, *hold_pressed);
+            }
+            const bool active_after_press = pivotxr_quick_view_active_ &&
+                pivotxr_quick_view_profile_index_ == i && pivotxr_quick_view_index_ == view_index;
+            if (hold_released && !any_hold_down && !view_state.toggle_latched && active_after_press) {
+                deactivate_quick_view(quick_view, hold_released->binding);
+            }
         }
 
         const PivotActivationBinding* toggle_pressed = nullptr;
@@ -10704,6 +11416,16 @@ bool OpenXrLayer::IsPivotXrActive() {
             }
         }
     }
+    const bool manual_view_active = pivotxr_manual_view_transition_.active ||
+                                    pivotxr_profile_view_transition_.active ||
+                                    !PivotViewOffsetNearlyZero(pivotxr_manual_view_transition_.current) ||
+                                    !PivotViewOffsetNearlyZero(pivotxr_manual_view_transition_.target) ||
+                                    !PivotViewOffsetNearlyZero(pivotxr_profile_view_transition_.current) ||
+                                    !PivotViewOffsetNearlyZero(pivotxr_profile_view_transition_.target);
+    const bool quick_view_effect_active = pivotxr_quick_view_active_ ||
+                                          pivotxr_quick_view_transitioning_ ||
+                                          pivotxr_quick_view_transition_.active;
+    const bool view_controls_active = manual_view_active || quick_view_effect_active;
 
     // Automatic engagement: when nothing is engaged, the first non-suspended
     // always-on candidate takes over. Silent (no binding sound) because this is
@@ -10711,6 +11433,7 @@ bool OpenXrLayer::IsPivotXrActive() {
     // profile releases the pivot.
     if (!pivotxr_engaged_) {
         for (size_t i = 0; i < pivot.profiles.size(); ++i) {
+            if (view_controls_active && pivotxr_active_profile_index_ != i) continue;
             const PivotXrResolvedProfile& profile = pivot.profiles[i];
             const PivotProfileInputState& input_state = pivotxr_profile_input_states_[i];
             bool hold_suspended = false;
@@ -10720,6 +11443,10 @@ bool OpenXrLayer::IsPivotXrActive() {
                      input_state.activation[index].down_cached);
             }
             if (!profile.always_active || input_state.toggle_suspended || hold_suspended) continue;
+            if (pivotxr_active_profile_index_ != i &&
+                !shares_nudge_set(pivotxr_active_profile_index_, i)) {
+                pivotxr_profile_view_transition_ = {};
+            }
             pivotxr_active_profile_index_ = i;
             pivotxr_engaged_ = true;
             note_transition_diagnostics();
@@ -10728,10 +11455,86 @@ bool OpenXrLayer::IsPivotXrActive() {
         }
     }
 
-    return pivotxr_engaged_;
+    return pivotxr_engaged_ || view_controls_active;
 #else
     return pivot.enabled;
 #endif
 }
 
+void OpenXrLayer::PollRuntimeRelay() {
+    std::vector<std::string> sessions_to_remove;
+    std::filesystem::path root;
+    std::string session_id;
+    {
+        std::scoped_lock lock(mutex_);
+        root = runtime_relay_root_;
+        session_id = runtime_relay_session_id_;
+        sessions_to_remove.swap(runtime_relay_sessions_to_remove_);
+    }
+
+    std::error_code ec;
+    for (const std::string& stale_session_id : sessions_to_remove) {
+        std::filesystem::remove(RuntimeStatusPath(root, stale_session_id), ec);
+        ec.clear();
+        std::filesystem::remove(RuntimeControlPath(root, stale_session_id), ec);
+        ec.clear();
+    }
+    if (root.empty() || session_id.empty()) return;
+
+    RuntimeControlDocument control;
+    std::string control_error;
+    const bool has_control = ReadRuntimeControl(RuntimeControlPath(root, session_id), &control, &control_error);
+    bool state_changed = false;
+    bool command_applied = false;
+    if (has_control && control.target_session_id == session_id &&
+        control.expires_at_unix_milliseconds >= RuntimeRelayUnixMilliseconds()) {
+        std::scoped_lock lock(mutex_);
+        const bool available = runtime_relay_session_id_ == session_id &&
+            active_session_ != XR_NULL_HANDLE && IsQuadViewsEmulationActive() &&
+            d3d11_quadviews_compositor_.context != nullptr;
+        if (available && control.revision > runtime_relay_last_applied_revision_ &&
+            control.quadviews_diagnostic_visualization.has_value()) {
+            runtime_relay_last_applied_revision_ = control.revision;
+            runtime_relay_acknowledged_revision_ = control.revision;
+            const bool desired = *control.quadviews_diagnostic_visualization;
+            state_changed = quadviews_diagnostic_visualization_enabled_ != desired;
+            quadviews_diagnostic_visualization_enabled_ = desired;
+            command_applied = true;
+            runtime_relay_status_dirty_.store(true, std::memory_order_release);
+        }
+    }
+
+    if (command_applied && state_changed) {
+        logger_.Info(std::string("Quadviews diagnostic visualization ") +
+                     (*control.quadviews_diagnostic_visualization ? "shown" : "hidden") +
+                     " via the VectorXR app.");
+    }
+
+    const auto now = std::chrono::steady_clock::now();
+    const bool heartbeat_due = !runtime_relay_last_status_write_.has_value() ||
+        now - *runtime_relay_last_status_write_ >= std::chrono::seconds(1);
+    if (!heartbeat_due && !runtime_relay_status_dirty_.exchange(false, std::memory_order_acq_rel)) return;
+
+    RuntimeStatusDocument status;
+    {
+        std::scoped_lock lock(mutex_);
+        if (runtime_relay_session_id_ != session_id || active_session_ == XR_NULL_HANDLE) return;
+        status.session_id = session_id;
+        status.process_id = GetCurrentProcessId();
+        status.application = current_exe_name_;
+        status.updated_at_unix_milliseconds = RuntimeRelayUnixMilliseconds();
+        status.acknowledged_revision = runtime_relay_acknowledged_revision_;
+        status.quadviews_diagnostic_visualization_available =
+            IsQuadViewsEmulationActive() && d3d11_quadviews_compositor_.context != nullptr;
+        status.quadviews_diagnostic_visualization_enabled = quadviews_diagnostic_visualization_enabled_;
+    }
+
+    std::string status_error;
+    if (WriteRuntimeStatus(RuntimeStatusPath(root, session_id), status, &status_error)) {
+        runtime_relay_last_status_write_ = now;
+        runtime_relay_status_dirty_.store(false, std::memory_order_release);
+    } else {
+        runtime_relay_status_dirty_.store(true, std::memory_order_release);
+    }
+}
 } // namespace depthxr

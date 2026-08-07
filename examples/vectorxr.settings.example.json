@@ -49,6 +49,24 @@
     },
     "pivotxr": {
       "enabled": false,
+      "behavior": "enhancedMotion",
+      "nudgeSetId": "standard-hat",
+      "nudgeSets": [
+        {
+          "id": "standard-hat",
+          "name": "Standard HAT Nudges",
+          "settings": {
+            "yawStepDegrees": 30.0,
+            "pitchStepDegrees": 20.0,
+            "transitionSeconds": 0.12,
+            "yawLeftBindings": [],
+            "yawRightBindings": [],
+            "pitchUpBindings": [],
+            "pitchDownBindings": [],
+            "centerBindings": []
+          }
+        }
+      ],
       "defaults": {
         "smoothing": 0.2,
         "activationRampSeconds": 0.35,
@@ -75,15 +93,43 @@
       },
       "alwaysActive": false,
       "activationBindings": [],
+      "viewControls": {
+        "nudges": {
+          "yawStepDegrees": 30.0,
+          "pitchStepDegrees": 20.0,
+          "transitionSeconds": 0.12,
+          "yawLeftBindings": [],
+          "yawRightBindings": [],
+          "pitchUpBindings": [],
+          "pitchDownBindings": [],
+          "centerBindings": []
+        },
+        "quickViews": []
+      },
       "profiles": [
         {
           "name": "DCS",
           "enabled": true,
+          "behavior": "enhancedMotion",
+          "nudgeSetId": "standard-hat",
           "applicationIds": [
             "dcs"
           ],
           "alwaysActive": false,
           "activationBindings": [],
+          "viewControls": {
+            "nudges": {
+              "yawStepDegrees": 30.0,
+              "pitchStepDegrees": 20.0,
+              "transitionSeconds": 0.12,
+              "yawLeftBindings": [],
+              "yawRightBindings": [],
+              "pitchUpBindings": [],
+              "pitchDownBindings": [],
+              "centerBindings": []
+            },
+            "quickViews": []
+          },
           "settings": {
             "smoothing": 0.2,
             "activationRampSeconds": 0.35,
@@ -113,6 +159,7 @@
     },
     "quadviews": {
       "enabled": false,
+      "diagnosticVisualizationBinding": { "type": "none" },
       "defaults": {
         "trackingMode": "eye",
         "focusHorizontalSizePercent": 40.0,

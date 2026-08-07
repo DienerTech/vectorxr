@@ -156,6 +156,37 @@ std::vector<PivotActivationBinding> FilterUnclaimedActivationBindings(
     }
     return filtered;
 }
+
+const PivotNudgeSet* FindPivotNudgeSet(const PivotXrModuleConfig& module,
+                                           const std::string& nudge_set_id) {
+    if (nudge_set_id.empty()) return nullptr;
+    const auto found = std::find_if(module.nudge_sets.begin(), module.nudge_sets.end(),
+                                    [&](const PivotNudgeSet& set) { return set.id == nudge_set_id; });
+    return found == module.nudge_sets.end() ? nullptr : &*found;
+}
+
+PivotNudgeSettings ResolvePivotNudges(const PivotXrModuleConfig& module,
+                                      const std::string& nudge_set_id,
+                                      const PivotNudgeSettings& legacy) {
+    if (nudge_set_id == "none") {
+        return {};
+    }
+    const PivotNudgeSet* set = FindPivotNudgeSet(module, nudge_set_id);
+    return set ? set->settings : legacy;
+}
+
+bool HasViewControlBindings(const PivotViewControls& controls) {
+    const PivotNudgeSettings& nudges = controls.nudges;
+    if (!nudges.yaw_left_bindings.empty() || !nudges.yaw_right_bindings.empty() ||
+        !nudges.pitch_up_bindings.empty() || !nudges.pitch_down_bindings.empty() ||
+        !nudges.center_bindings.empty()) {
+        return true;
+    }
+    return std::any_of(controls.quick_views.begin(), controls.quick_views.end(),
+                       [](const PivotQuickView& quick_view) {
+                           return !quick_view.activation_bindings.empty();
+                       });
+}
 } // namespace
 
 PivotXrResolvedSettings ResolvePivotXrSettings(const ConfigDocument& config, std::string_view exe_name) {
@@ -174,17 +205,28 @@ PivotXrResolvedSettings ResolvePivotXrSettings(const ConfigDocument& config, std
 
             std::vector<PivotActivationBinding> activation_bindings =
                 FilterUnclaimedActivationBindings(profile.activation_bindings, resolved.profiles);
+            PivotViewControls view_controls = profile.view_controls;
+            view_controls.nudges = ResolvePivotNudges(config.pivotxr, profile.nudge_set_id,
+                                                       profile.view_controls.nudges);
             const bool all_bindings_shadowed = !profile.activation_bindings.empty() && activation_bindings.empty();
-            if (all_bindings_shadowed && !profile.always_active) {
+            if (all_bindings_shadowed && !profile.always_active &&
+                !HasViewControlBindings(view_controls)) {
                 continue;
             }
 
             PivotXrResolvedProfile candidate;
             candidate.name = profile.name;
+            candidate.behavior = profile.behavior;
+            candidate.nudge_set_id = profile.nudge_set_id;
+            const PivotNudgeSet* nudge_set =
+                FindPivotNudgeSet(config.pivotxr, profile.nudge_set_id);
+            candidate.allow_inactive_nudges =
+                nudge_set ? nudge_set->allow_while_inactive : profile.allow_inactive_nudges;
             candidate.always_active = profile.always_active;
             candidate.activation_bindings = std::move(activation_bindings);
             candidate.set_origin_bindings = profile.set_origin_bindings;
             candidate.release_origin_bindings = profile.release_origin_bindings;
+            candidate.view_controls = std::move(view_controls);
             ApplyPivotSettings(candidate, profile.settings);
             resolved.profiles.push_back(std::move(candidate));
         }
@@ -195,11 +237,20 @@ PivotXrResolvedSettings ResolvePivotXrSettings(const ConfigDocument& config, std
     if (resolved.profiles.empty() && config.pivotxr.enabled) {
         PivotXrResolvedProfile candidate;
         candidate.name = "Default";
+        candidate.behavior = config.pivotxr.behavior;
+        candidate.nudge_set_id = config.pivotxr.nudge_set_id;
+        const PivotNudgeSet* nudge_set =
+            FindPivotNudgeSet(config.pivotxr, config.pivotxr.nudge_set_id);
+        candidate.allow_inactive_nudges =
+            nudge_set ? nudge_set->allow_while_inactive : config.pivotxr.allow_inactive_nudges;
         candidate.always_active = config.pivotxr.always_active;
         candidate.activation_bindings =
             FilterUnclaimedActivationBindings(config.pivotxr.activation_bindings, {});
         candidate.set_origin_bindings = config.pivotxr.set_origin_bindings;
         candidate.release_origin_bindings = config.pivotxr.release_origin_bindings;
+        candidate.view_controls = config.pivotxr.view_controls;
+        candidate.view_controls.nudges = ResolvePivotNudges(config.pivotxr, config.pivotxr.nudge_set_id,
+                                                             config.pivotxr.view_controls.nudges);
         ApplyPivotSettings(candidate, config.pivotxr.defaults);
         resolved.profiles.push_back(std::move(candidate));
     }
@@ -243,6 +294,7 @@ void ApplyQuadViewsSettings(QuadViewsResolvedSettings& resolved, const QuadViews
 QuadViewsResolvedSettings ResolveQuadViewsSettings(const ConfigDocument& config, std::string_view exe_name) {
     QuadViewsResolvedSettings resolved;
     resolved.enabled = config.quadviews.enabled;
+    resolved.diagnostic_visualization_binding = config.quadviews.diagnostic_visualization_binding;
     ApplyQuadViewsSettings(resolved, config.quadviews.defaults);
 
     const QuadViewsProfile* profile = FindMatchingQuadViewsProfile(config, exe_name);

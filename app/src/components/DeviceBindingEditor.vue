@@ -1,7 +1,15 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 
-import { cancelDeviceBindingCapture, captureDeviceBinding, listInputDevices, type InputDeviceInfo } from '../lib/commands'
+import { cancelDeviceBindingCapture, captureDeviceBinding, type InputDeviceInfo } from '../lib/commands'
+import {
+  inputDeviceDiscovery,
+  pauseInputDeviceDiscovery,
+  refreshInputDevices,
+  resumeInputDeviceDiscovery,
+  startInputDeviceDiscovery,
+  stopInputDeviceDiscovery,
+} from '../lib/inputDeviceDiscovery'
 import { preserveBindingSound, type DeviceBinding } from '../lib/model'
 
 const props = defineProps<{
@@ -12,28 +20,55 @@ const emit = defineEmits<{
   'update:modelValue': [value: DeviceBinding]
 }>()
 
-const devices = ref<InputDeviceInfo[]>([])
-const loading = ref(false)
+const {
+  devices,
+  loading,
+  hasCompletedInitialScan,
+  lastRefreshFailed,
+  lastRefreshError,
+} = inputDeviceDiscovery
 const capturing = ref(false)
 const canCancelCapture = ref(false)
 const cancelRequested = ref(false)
 const captureSecondsRemaining = ref(0)
 const status = ref('')
 const metadataOpen = ref(false)
-const hasCompletedInitialScan = ref(false)
-const lastRefreshFailed = ref(false)
+const manualInputOpen = ref(false)
 
-const DEVICE_REFRESH_INTERVAL_MS = 2_000
 const CAPTURE_TIMEOUT_MS = 15_000
 const CAPTURE_CANCEL_DEBOUNCE_MS = 1_000
 
-let refreshIntervalId: ReturnType<typeof window.setInterval> | null = null
+
 let captureCountdownIntervalId: ReturnType<typeof window.setInterval> | null = null
 let captureCancelDelayId: ReturnType<typeof window.setTimeout> | null = null
 let captureDeadline = 0
-let refreshInFlight = false
 
 const selectedDevice = computed(() => devices.value.find((device) => device.deviceGuid === props.modelValue.deviceGuid) ?? null)
+const hatDirections = [
+  ['up', 'Up'],
+  ['up-right', 'Up Right'],
+  ['right', 'Right'],
+  ['down-right', 'Down Right'],
+  ['down', 'Down'],
+  ['down-left', 'Down Left'],
+  ['left', 'Left'],
+  ['up-left', 'Up Left'],
+] as const
+const manualInputOptions = computed(() => {
+  const device = selectedDevice.value
+  if (!device) return []
+
+  const options = Array.from({ length: device.buttonCount }, (_, index) => ({
+    path: `button-${index + 1}`,
+    label: `Button ${index + 1}`,
+  }))
+  for (let hatIndex = 1; hatIndex <= device.hatCount; hatIndex += 1) {
+    for (const [path, label] of hatDirections) {
+      options.push({ path: `hat-${hatIndex}-${path}`, label: `HAT ${hatIndex} ${label}` })
+    }
+  }
+  return options
+})
 const hasBoundDevice = computed(() => props.modelValue.deviceGuid.trim().length > 0)
 const isBoundDeviceDisconnected = computed(() => (
   hasCompletedInitialScan.value &&
@@ -62,14 +97,13 @@ const captureButtonLabel = computed(() => {
 })
 
 onMounted(() => {
-  void refreshDevices()
-  startRefreshPolling()
+  void startInputDeviceDiscovery().then(() => updateRefreshStatus())
   window.addEventListener('keydown', onKeydown, true)
 })
 
 onBeforeUnmount(() => {
   window.removeEventListener('keydown', onKeydown, true)
-  stopRefreshPolling()
+  stopInputDeviceDiscovery()
   stopCaptureUi()
   if (capturing.value) {
     void cancelDeviceBindingCapture()
@@ -101,28 +135,6 @@ function deviceCapabilityLabel(device: InputDeviceInfo) {
   return `${buttons}, ${hats}`
 }
 
-function startRefreshPolling() {
-  if (refreshIntervalId !== null) {
-    return
-  }
-
-  refreshIntervalId = window.setInterval(() => {
-    if (capturing.value) {
-      return
-    }
-
-    void refreshDevices({ silent: true })
-  }, DEVICE_REFRESH_INTERVAL_MS)
-}
-
-function stopRefreshPolling() {
-  if (refreshIntervalId === null) {
-    return
-  }
-
-  window.clearInterval(refreshIntervalId)
-  refreshIntervalId = null
-}
 
 function updateCaptureCountdown() {
   captureSecondsRemaining.value = Math.max(0, Math.ceil((captureDeadline - Date.now()) / 1_000))
@@ -185,51 +197,35 @@ async function cancelCapture() {
   }
 }
 
+function updateRefreshStatus() {
+  if (lastRefreshFailed.value) status.value = lastRefreshError.value
+  else if (devices.value.length === 0) status.value = 'No joystick devices found.'
+}
+
 async function refreshDevices(options: { silent?: boolean } = {}) {
-  if (refreshInFlight) {
-    return
-  }
-
-  refreshInFlight = true
-  const shouldShowLoading = !options.silent
-  if (shouldShowLoading) {
-    loading.value = true
-  }
-  if (!options.silent) {
-    status.value = ''
-  }
-
-  try {
-    devices.value = await listInputDevices()
-    lastRefreshFailed.value = false
-    if (devices.value.length === 0 && !options.silent) {
-      status.value = 'No joystick devices found.'
-    }
-  } catch (error) {
-    lastRefreshFailed.value = true
-    if (!options.silent) {
-      status.value = error instanceof Error ? error.message : 'Failed to list joystick devices.'
-    }
-  } finally {
-    hasCompletedInitialScan.value = true
-    if (shouldShowLoading) {
-      loading.value = false
-    }
-    refreshInFlight = false
-  }
+  if (!options.silent) status.value = ''
+  await refreshInputDevices({ showLoading: !options.silent })
+  if (!options.silent) updateRefreshStatus()
 }
 
 async function captureBinding() {
   if (capturing.value) {
     return
   }
+  const device = selectedDevice.value
+  if (!device) {
+    status.value = 'Select a connected joystick before capturing an input.'
+    return
+  }
 
   capturing.value = true
+  manualInputOpen.value = false
+  pauseInputDeviceDiscovery()
   startCaptureUi()
-  status.value = 'Listening for a joystick button or HAT direction. Press Escape to cancel; capture stops automatically after 15 seconds.'
+  status.value = `Listening only to ${device.deviceName}. Press Escape to cancel; capture stops automatically after 15 seconds.`
 
   try {
-    const binding = await captureDeviceBinding(CAPTURE_TIMEOUT_MS)
+    const binding = await captureDeviceBinding(device.deviceGuid, CAPTURE_TIMEOUT_MS)
     if (!binding) {
       status.value = cancelRequested.value
         ? 'Input capture canceled.'
@@ -246,11 +242,12 @@ async function captureBinding() {
       inputLabel: binding.inputLabel,
     }))
     status.value = `Captured ${binding.deviceName} / ${binding.inputLabel}.`
-    void refreshDevices()
   } catch (error) {
     status.value = error instanceof Error ? error.message : 'Failed to capture joystick input.'
   } finally {
     capturing.value = false
+    resumeInputDeviceDiscovery()
+    void refreshInputDevices()
     stopCaptureUi()
     cancelRequested.value = false
   }
@@ -258,18 +255,39 @@ async function captureBinding() {
 
 function selectDevice(deviceGuid: string) {
   const device = devices.value.find((entry) => entry.deviceGuid === deviceGuid)
+  manualInputOpen.value = false
   emit('update:modelValue', {
     ...props.modelValue,
     deviceGuid,
-    productGuid: device?.productGuid ?? props.modelValue.productGuid ?? '',
-    deviceName: device?.deviceName ?? props.modelValue.deviceName ?? '',
+    productGuid: device?.productGuid ?? '',
+    deviceName: device?.deviceName ?? '',
+    inputPath: '',
+    inputLabel: '',
   })
+  status.value = device ? `Selected ${device.deviceName}. Capture or choose an input manually.` : ''
+}
+
+function assignManualInput(inputPath: string) {
+  const device = selectedDevice.value
+  const input = manualInputOptions.value.find((option) => option.path === inputPath)
+  if (!device || !input) return
+
+  emit('update:modelValue', preserveBindingSound(props.modelValue, {
+    type: 'device',
+    deviceGuid: device.deviceGuid,
+    productGuid: device.productGuid,
+    deviceName: device.deviceName,
+    inputPath: input.path,
+    inputLabel: input.label,
+  }))
+  manualInputOpen.value = false
+  status.value = `Assigned ${device.deviceName} / ${input.label} manually.`
 }
 </script>
 
 <template>
   <div class="mt-4 space-y-3">
-    <div class="grid gap-3 lg:grid-cols-[minmax(260px,480px)_minmax(180px,240px)]">
+    <div class="grid gap-3 lg:grid-cols-[minmax(260px,480px)_minmax(260px,360px)]">
       <label class="block min-w-0">
         <span class="mb-1.5 block text-sm font-medium">Joystick Device</span>
         <select
@@ -290,8 +308,32 @@ function selectDevice(deviceGuid: string) {
 
       <div>
         <span class="mb-1.5 block text-sm font-medium">Assigned Input</span>
-        <div class="app-readonly-field flex h-11 items-center rounded-[0.75rem] px-4 py-2.5 text-sm" aria-readonly="true">
-          {{ inputLabel }}
+        <div
+          class="app-readonly-field flex h-11 min-w-0 items-center rounded-[0.75rem] p-1 text-sm"
+          :aria-readonly="manualInputOpen ? undefined : 'true'"
+        >
+          <select
+            v-if="manualInputOpen"
+            class="app-input manual-input-select min-w-0 flex-1 self-stretch rounded-[0.55rem] border-0 px-3 py-1.5 outline-none"
+            :value="modelValue.inputPath"
+            aria-label="Choose joystick input manually"
+            @change="assignManualInput(($event.target as HTMLSelectElement).value)"
+          >
+            <option value="">Select an input...</option>
+            <option v-for="input in manualInputOptions" :key="input.path" :value="input.path">
+              {{ input.label }}
+            </option>
+          </select>
+          <span v-else class="min-w-0 flex-1 truncate px-3">{{ inputLabel }}</span>
+          <button
+            class="button-secondary shrink-0 rounded-[0.55rem] px-2.5 py-1.5 text-xs font-medium disabled:cursor-not-allowed disabled:opacity-50"
+            type="button"
+            :disabled="!selectedDevice || capturing"
+            :title="selectedDevice ? 'Choose a button or HAT direction without listening for input.' : 'Select a connected joystick first.'"
+            @click="manualInputOpen = !manualInputOpen"
+          >
+            {{ manualInputOpen ? 'Close' : 'Manual' }}
+          </button>
         </div>
       </div>
     </div>
@@ -318,7 +360,7 @@ function selectDevice(deviceGuid: string) {
       <button
         class="rounded-[0.75rem] px-4 py-2 text-sm font-medium transition disabled:cursor-not-allowed disabled:opacity-50"
         :class="capturing && canCancelCapture ? 'button-secondary' : 'button-accent'"
-        :disabled="capturing && !canCancelCapture"
+        :disabled="(!capturing && !selectedDevice) || (capturing && !canCancelCapture)"
         type="button"
         @click="capturing ? void cancelCapture() : void captureBinding()"
       >

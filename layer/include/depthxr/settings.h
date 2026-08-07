@@ -186,12 +186,55 @@ struct PivotActivationBinding {
     InputBinding binding;
 };
 
+struct PivotNudgeSettings {
+    double yaw_step_degrees{30.0};
+    double pitch_step_degrees{20.0};
+    double transition_seconds{0.12};
+    std::vector<InputBinding> yaw_left_bindings;
+    std::vector<InputBinding> yaw_right_bindings;
+    std::vector<InputBinding> pitch_up_bindings;
+    std::vector<InputBinding> pitch_down_bindings;
+    std::vector<InputBinding> center_bindings;
+};
+
+struct PivotNudgeSet {
+    std::string id;
+    std::string name;
+    bool allow_while_inactive{false};
+    PivotNudgeSettings settings;
+};
+
+enum class PivotProfileBehavior {
+    EnhancedMotion,
+    SnapViews,
+};
+
+struct PivotQuickView {
+    std::string id;
+    std::string name;
+    double yaw_degrees{0.0};
+    double pitch_degrees{0.0};
+    double position_right_cm{0.0};
+    double position_up_cm{0.0};
+    double position_forward_cm{0.0};
+    double transition_seconds{0.18};
+    std::vector<PivotActivationBinding> activation_bindings;
+};
+
+struct PivotViewControls {
+    PivotNudgeSettings nudges;
+    std::vector<PivotQuickView> quick_views;
+};
+
 struct PivotXrProfile {
     // Stable identifier assigned by the UI; optional in hand-written configs.
     std::string id;
     std::string name;
     bool enabled{true};
     ProfileMode mode{ProfileMode::Custom};
+    PivotProfileBehavior behavior{PivotProfileBehavior::EnhancedMotion};
+    std::string nudge_set_id;
+    bool allow_inactive_nudges{false};
     std::vector<std::string> application_ids;
     bool always_active{false};
     std::vector<PivotActivationBinding> activation_bindings;
@@ -202,15 +245,21 @@ struct PivotXrProfile {
     std::vector<InputBinding> set_origin_bindings;
     std::vector<InputBinding> release_origin_bindings;
     PivotXrSettings settings;
+    PivotViewControls view_controls;
 };
 
 struct PivotXrModuleConfig {
     bool enabled{false};
     PivotXrSettings defaults;
+    PivotProfileBehavior behavior{PivotProfileBehavior::EnhancedMotion};
+    std::string nudge_set_id;
+    std::vector<PivotNudgeSet> nudge_sets;
+    bool allow_inactive_nudges{false};
     bool always_active{false};
     std::vector<PivotActivationBinding> activation_bindings;
     std::vector<InputBinding> set_origin_bindings;
     std::vector<InputBinding> release_origin_bindings;
+    PivotViewControls view_controls;
     std::vector<PivotXrProfile> profiles;
 };
 
@@ -218,10 +267,14 @@ struct PivotXrModuleConfig {
 // matched profile (or the module defaults when nothing matches).
 struct PivotXrResolvedProfile {
     std::string name;
+    PivotProfileBehavior behavior{PivotProfileBehavior::EnhancedMotion};
+    std::string nudge_set_id;
+    bool allow_inactive_nudges{false};
     bool always_active{false};
     std::vector<PivotActivationBinding> activation_bindings;
     std::vector<InputBinding> set_origin_bindings;
     std::vector<InputBinding> release_origin_bindings;
+    PivotViewControls view_controls;
     double smoothing{0.2};
     double activation_ramp_seconds{0.35};
     double yaw_rotation_multiplier{1.5};
@@ -278,12 +331,16 @@ struct QuadViewsProfile {
 
 struct QuadViewsModuleConfig {
     bool enabled{false};
+    // Optional in-session toggle for the synthesized-compositor diagnostic view.
+    // The visualization itself always starts hidden for each OpenXR session.
+    InputBinding diagnostic_visualization_binding;
     QuadViewsSettings defaults;
     std::vector<QuadViewsProfile> profiles;
 };
 
 struct QuadViewsResolvedSettings : QuadViewsSettings {
     bool enabled{false};
+    InputBinding diagnostic_visualization_binding;
 };
 
 // Turbo mode: overrides runtime frame pacing (one frame of pipelining).

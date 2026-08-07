@@ -4,6 +4,7 @@ import test from 'node:test'
 import {
   bindingsMatchRuntimeActivation,
   bindingsShareInput,
+  createPivotQuickView,
   defaultConfig,
   createPivotProfile,
   normalizeConfig,
@@ -12,6 +13,7 @@ import {
   preserveBindingSound,
   savedBindingConflictWarnings,
 } from '../src/lib/model.ts'
+import { validateConfig } from '../src/lib/validation.ts'
 
 const keyboard = (...chord) => ({ type: 'keyboard', chord })
 const none = () => ({ type: 'none' })
@@ -184,6 +186,34 @@ test('physical input sharing stays distinct from runtime activation arbitration'
   assert.equal(bindingsShareInput(hatLeft, hatRight), false)
 })
 
+test('Snap View HAT bindings pass save validation', () => {
+  const directions = ['up', 'up-right', 'right', 'down-right', 'down', 'down-left', 'left', 'up-left']
+
+  for (const direction of directions) {
+    const config = defaultConfig()
+    const quickView = createPivotQuickView('HAT View')
+    quickView.activationBindings = [activation('hold', {
+      type: 'device',
+      deviceGuid: '{TEST-HOTAS}',
+      inputPath: `hat-4-${direction}`,
+      inputLabel: `HAT 4 ${direction}`,
+    })]
+    config.modules.pivotxr.viewControls.quickViews.push(quickView)
+
+    assert.deepEqual(validateConfig(config), [], `expected ${direction} to be accepted`)
+  }
+
+  const invalid = defaultConfig()
+  const invalidView = createPivotQuickView('Invalid HAT View')
+  invalidView.activationBindings = [activation('hold', {
+    type: 'device',
+    deviceGuid: '{TEST-HOTAS}',
+    inputPath: 'hat-5-up',
+  })]
+  invalid.modules.pivotxr.viewControls.quickViews.push(invalidView)
+  assert.match(validateConfig(invalid).join('\n'), /hat-1 through hat-4/)
+})
+
 test('pivot binding warnings cover activation, set, and release conflicts', () => {
   const f8 = keyboard('F8')
 
@@ -334,4 +364,203 @@ test('saved glide durations are normalized to the UI precision', () => {
   const normalized = normalizeConfig(config)
 
   assert.equal(normalized.modules.pivotxr.defaults.stepGlideSeconds, 0.08)
+})
+
+test('new Pivot view controls are inert until bindings are assigned', () => {
+  const controls = defaultConfig().modules.pivotxr.viewControls
+  assert.equal(controls.nudges.yawStepDegrees, 30)
+  assert.equal(controls.nudges.pitchStepDegrees, 20)
+  assert.equal(controls.nudges.transitionSeconds, 0.12)
+  assert.deepEqual(controls.nudges.yawLeftBindings, [])
+  assert.deepEqual(controls.quickViews, [])
+  assert.equal(defaultConfig().modules.pivotxr.nudgeSets[0].allowWhileInactive, false)
+})
+
+test('Pivot view controls normalize nudges and Quick Views canonically', () => {
+  const config = defaultConfig()
+  const controls = config.modules.pivotxr.viewControls
+  controls.nudges.yawStepDegrees = 35
+  controls.nudges.yawLeftBindings = [keyboard('F6')]
+  const quickView = createPivotQuickView('Check Six')
+  quickView.yawDegrees = 180
+  quickView.positionRightCm = 8
+  quickView.activationBindings = [activation('hold', keyboard('F7'))]
+  controls.quickViews.push(quickView)
+
+  const normalized = normalizeConfig(config).modules.pivotxr.viewControls
+  assert.equal(normalized.nudges.yawStepDegrees, 35)
+  assert.deepEqual(normalized.nudges.yawLeftBindings, [keyboard('F6')])
+  assert.equal(normalized.quickViews[0].name, 'Check Six')
+  assert.equal(normalized.quickViews[0].yawDegrees, 180)
+  assert.equal(normalized.quickViews[0].positionRightCm, 8)
+  assert.deepEqual(normalized.quickViews[0].activationBindings, [activation('hold', keyboard('F7'))])
+})
+
+test('new Pivot profiles own independent View Controls and Quick Views', () => {
+  const config = defaultConfig()
+  config.modules.pivotxr.viewControls.quickViews.push(createPivotQuickView('Left Console'))
+  const profile = createPivotProfile(
+    config.modules.pivotxr.defaults,
+    [],
+    false,
+    [],
+    config.modules.pivotxr.viewControls,
+  )
+  assert.equal(config.modules.pivotxr.nudgeSets[0].allowWhileInactive, false)
+  profile.viewControls.nudges.yawStepDegrees = 45
+  profile.viewControls.quickViews[0].name = 'Changed'
+
+  assert.equal(config.modules.pivotxr.viewControls.nudges.yawStepDegrees, 30)
+  assert.equal(config.modules.pivotxr.viewControls.quickViews[0].name, 'Left Console')
+})
+
+test('pre-Snap Pivot profiles normalize to Enhanced Motion without creating another profile', () => {
+  const config = defaultConfig()
+  const profile = createPivotProfile(config.modules.pivotxr.defaults, ['dcs'])
+  profile.viewControls.quickViews = [createPivotQuickView('Check Six')]
+  delete profile.behavior
+  delete profile.nudgeSetId
+  profile.allowInactiveNudges = true
+  config.modules.pivotxr.profiles = [profile]
+  delete config.modules.pivotxr.nudgeSets
+  delete config.modules.pivotxr.nudgeSetId
+
+  const normalized = normalizeConfig(config).modules.pivotxr
+  assert.equal(normalized.profiles.length, 1)
+  assert.equal(normalized.profiles[0].behavior, 'enhancedMotion')
+  assert.equal(normalized.profiles[0].viewControls.quickViews[0].name, 'Check Six')
+  assert.equal(normalized.nudgeSets.length, 1)
+  assert.equal(normalized.nudgeSets[0].allowWhileInactive, true)
+  assert.equal('allowInactiveNudges' in normalized.profiles[0], false)
+})
+test('saved binding warnings include nudge and Quick View actions', () => {
+  const config = defaultConfig()
+  config.modules.pivotxr.nudgeSets[0].settings.yawLeftBindings = [keyboard('F6')]
+  const quickView = createPivotQuickView('Check Six')
+  quickView.activationBindings = [activation('hold', keyboard('F6'))]
+  config.modules.pivotxr.viewControls.quickViews = [quickView]
+
+  const warnings = savedBindingConflictWarnings(config, [quickView.activationBindings[0].binding])
+  assert.equal(warnings.length, 1)
+  assert.match(warnings[0].message, /Nudge Left/)
+  assert.match(warnings[0].message, /Check Six/)
+})
+
+test('Pivot profiles preserve and validate the None nudge selection', () => {
+  const config = defaultConfig()
+  config.modules.pivotxr.nudgeSetId = 'none'
+  const profile = createPivotProfile(config.modules.pivotxr.defaults)
+  profile.nudgeSetId = 'none'
+  config.modules.pivotxr.profiles = [profile]
+
+  const normalized = normalizeConfig(config)
+  assert.equal(normalized.modules.pivotxr.nudgeSetId, 'none')
+  assert.equal(normalized.modules.pivotxr.profiles[0].nudgeSetId, 'none')
+  assert.deepEqual(validateConfig(normalized), [])
+})
+
+test('0.15 and 0.15.1 configs preserve existing settings, profiles, and bindings', () => {
+  const legacy = defaultConfig()
+  legacy.core = {
+    enabled: true,
+    logLevel: 'debug',
+    logRetentionFiles: 17,
+    trackSeenApps: false,
+    sound: { volume: 63 },
+  }
+  legacy.applications = [{
+    id: 'dcs-world',
+    name: 'DCS World',
+    enabled: true,
+    match: { exe: 'DCS.exe' },
+  }]
+
+  legacy.modules.depthxr.enabled = true
+  legacy.modules.depthxr.defaults = { stereoBoost: 1.37, convergence: -0.22, depthAnchor: true }
+  legacy.modules.depthxr.bindings.toggleEnabled = keyboard('Ctrl', 'F8')
+  legacy.modules.depthxr.bindings.toggleAnchor = keyboard('Alt', 'F8')
+  legacy.modules.depthxr.profiles = [{
+    name: 'DCS Depth',
+    enabled: true,
+    applicationIds: ['dcs-world'],
+    settings: { stereoBoost: 1.61, convergence: 0.18, depthAnchor: false },
+  }]
+
+  const deviceBinding = {
+    type: 'device',
+    deviceGuid: '{LEGACY-HOTAS}',
+    productGuid: '{LEGACY-PRODUCT}',
+    deviceName: 'Legacy HOTAS',
+    inputPath: 'button-12',
+    inputLabel: 'Button 12',
+    sound: {
+      enabled: true,
+      activateSound: 'C:\\sounds\\pivot-on.wav',
+      deactivateSound: 'C:\\sounds\\pivot-off.wav',
+    },
+  }
+  legacy.modules.pivotxr.enabled = true
+  legacy.modules.pivotxr.defaults.responseMode = 'stepped'
+  legacy.modules.pivotxr.defaults.activationRampSeconds = 0.27
+  legacy.modules.pivotxr.defaults.yawLeftStep.amountDegrees = 23
+  legacy.modules.pivotxr.alwaysActive = true
+  legacy.modules.pivotxr.activationBindings = [activation('hold', deviceBinding)]
+  legacy.modules.pivotxr.setOriginBindings = [keyboard('Ctrl', 'Numpad5')]
+  legacy.modules.pivotxr.releaseOriginBindings = [keyboard('Ctrl', 'Numpad0')]
+  const pivotProfile = createPivotProfile(
+    legacy.modules.pivotxr.defaults,
+    ['dcs-world'],
+    false,
+    [activation('toggle', keyboard('F9'))],
+  )
+  pivotProfile.id = 'legacy-pivot-profile'
+  pivotProfile.name = 'DCS Pivot'
+  pivotProfile.settings.pitchDown.rotationMultiplier = 2.4
+  pivotProfile.setOriginBindings = [keyboard('F10')]
+  pivotProfile.releaseOriginBindings = [keyboard('F11')]
+  delete pivotProfile.behavior
+  delete pivotProfile.nudgeSetId
+  delete pivotProfile.viewControls
+  legacy.modules.pivotxr.profiles = [pivotProfile]
+  delete legacy.modules.pivotxr.behavior
+  delete legacy.modules.pivotxr.nudgeSetId
+  delete legacy.modules.pivotxr.nudgeSets
+  delete legacy.modules.pivotxr.viewControls
+
+  legacy.modules.quadviews.enabled = true
+  legacy.modules.quadviews.defaults.focusScale = 1.42
+  legacy.modules.quadviews.profiles = [{
+    name: 'DCS Quadviews',
+    enabled: true,
+    applicationIds: ['dcs-world'],
+    settings: { ...legacy.modules.quadviews.defaults, peripheralScale: 0.44 },
+  }]
+  delete legacy.modules.quadviews.diagnosticVisualizationBinding
+
+  legacy.modules.turbo.enabled = true
+  legacy.modules.turbo.toggleBinding = keyboard('Shift', 'F12')
+  legacy.modules.turbo.pacingMode = 'auto'
+  legacy.modules.turbo.runtimePins = { Oculus: 'sequenced' }
+  legacy.modules.turbo.metricsMode = 'binding'
+  legacy.modules.turbo.metricsBinding = keyboard('F7')
+  legacy.modules.turbo.profiles = [{ id: 'dcs-turbo', name: 'DCS Turbo', enabled: true, applicationIds: ['dcs-world'] }]
+
+  const normalized = normalizeConfig(legacy)
+  assert.deepEqual(normalized.core, legacy.core)
+  assert.deepEqual(normalized.applications, legacy.applications)
+  assert.deepEqual(normalized.modules.depthxr, legacy.modules.depthxr)
+  assert.deepEqual(normalized.modules.pivotxr.defaults, legacy.modules.pivotxr.defaults)
+  assert.deepEqual(normalized.modules.pivotxr.activationBindings, legacy.modules.pivotxr.activationBindings)
+  assert.deepEqual(normalized.modules.pivotxr.setOriginBindings, legacy.modules.pivotxr.setOriginBindings)
+  assert.deepEqual(normalized.modules.pivotxr.releaseOriginBindings, legacy.modules.pivotxr.releaseOriginBindings)
+  assert.deepEqual(normalized.modules.pivotxr.profiles[0].settings, legacy.modules.pivotxr.profiles[0].settings)
+  assert.deepEqual(normalized.modules.pivotxr.profiles[0].activationBindings, legacy.modules.pivotxr.profiles[0].activationBindings)
+  assert.deepEqual(normalized.modules.quadviews.defaults, legacy.modules.quadviews.defaults)
+  assert.deepEqual(normalized.modules.quadviews.profiles, legacy.modules.quadviews.profiles)
+  assert.deepEqual(normalized.modules.turbo, legacy.modules.turbo)
+  assert.deepEqual(normalized.modules.pivotxr.viewControls.quickViews, [])
+  assert.deepEqual(normalized.modules.pivotxr.nudgeSets[0].settings.yawLeftBindings, [])
+  assert.deepEqual(normalized.modules.quadviews.diagnosticVisualizationBinding, none())
+  assert.deepEqual(validateConfig(normalized), [])
+  assert.deepEqual(normalizeConfig(normalized), normalized)
 })

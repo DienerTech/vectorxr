@@ -5,6 +5,8 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
 mod input_devices;
@@ -412,6 +414,10 @@ impl Default for PivotXRSettings {
     }
 }
 
+fn default_pivot_profile_behavior() -> String {
+    "enhancedMotion".into()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct PivotXRProfileConfig {
@@ -423,6 +429,14 @@ struct PivotXRProfileConfig {
     enabled: bool,
     #[serde(default)]
     application_ids: Vec<String>,
+    #[serde(default = "default_pivot_profile_behavior")]
+    behavior: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    snap_turn_preference: Option<String>,
+    #[serde(default)]
+    nudge_set_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    allow_inactive_nudges: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     r#match: Option<ProfileMatch>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -449,6 +463,8 @@ struct PivotXRProfileConfig {
     release_origin_bindings: Vec<InputBinding>,
     #[serde(default)]
     settings: PivotXRSettings,
+    #[serde(default)]
+    view_controls: serde_json::Map<String, serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -458,6 +474,16 @@ struct PivotXRModuleConfig {
     enabled: bool,
     #[serde(default)]
     defaults: PivotXRSettings,
+    #[serde(default = "default_pivot_profile_behavior")]
+    behavior: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    snap_turn_preference: Option<String>,
+    #[serde(default)]
+    nudge_set_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    allow_inactive_nudges: Option<bool>,
+    #[serde(default)]
+    nudge_sets: Vec<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     activation_mode: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -481,6 +507,8 @@ struct PivotXRModuleConfig {
     )]
     release_origin_bindings: Vec<InputBinding>,
     #[serde(default)]
+    view_controls: serde_json::Map<String, serde_json::Value>,
+    #[serde(default)]
     profiles: Vec<PivotXRProfileConfig>,
 }
 
@@ -489,11 +517,17 @@ impl Default for PivotXRModuleConfig {
         Self {
             enabled: false,
             defaults: PivotXRSettings::default(),
+            behavior: default_pivot_profile_behavior(),
+            snap_turn_preference: None,
+            nudge_set_id: String::new(),
+            nudge_sets: Vec::new(),
+            allow_inactive_nudges: None,
             activation_mode: None,
             always_active: Some(false),
             activation_bindings: Vec::new(),
             set_origin_bindings: Vec::new(),
             release_origin_bindings: Vec::new(),
+            view_controls: serde_json::Map::new(),
             profiles: Vec::new(),
         }
     }
@@ -564,6 +598,8 @@ struct QuadViewsProfileConfig {
 struct QuadViewsModuleConfig {
     #[serde(default = "default_false")]
     enabled: bool,
+    #[serde(default = "default_activation_binding")]
+    diagnostic_visualization_binding: InputBinding,
     #[serde(default)]
     defaults: QuadViewsSettings,
     #[serde(default)]
@@ -574,6 +610,7 @@ impl Default for QuadViewsModuleConfig {
     fn default() -> Self {
         Self {
             enabled: false,
+            diagnostic_visualization_binding: InputBinding::None,
             defaults: QuadViewsSettings::default(),
             profiles: Vec::new(),
         }
@@ -839,6 +876,56 @@ struct TurboMetricsDocument {
 struct TurboMetricsEnvelope {
     path: String,
     sessions: Vec<TurboMetricsSession>,
+}
+
+const RUNTIME_RELAY_PROTOCOL_VERSION: u32 = 1;
+const RUNTIME_STATUS_FRESHNESS_MILLISECONDS: u64 = 3_500;
+static RUNTIME_CONTROL_REVISION: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct RuntimeCapabilities {
+    #[serde(default)]
+    quadviews_diagnostic_visualization: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct RuntimeState {
+    #[serde(default)]
+    quadviews_diagnostic_visualization: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RuntimeStatusDocument {
+    protocol_version: u32,
+    session_id: String,
+    process_id: u32,
+    application: String,
+    updated_at_unix_milliseconds: u64,
+    #[serde(default)]
+    acknowledged_revision: u64,
+    #[serde(default)]
+    capabilities: RuntimeCapabilities,
+    #[serde(default)]
+    state: RuntimeState,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RuntimeStatusEnvelope {
+    sessions: Vec<RuntimeStatusDocument>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RuntimeControlDocument {
+    protocol_version: u32,
+    target_session_id: String,
+    revision: u64,
+    expires_at_unix_milliseconds: u64,
+    desired: RuntimeState,
 }
 
 fn default_config() -> VectorXRConfig {
@@ -1176,6 +1263,30 @@ fn resolve_turbo_metrics_path() -> PathBuf {
         .join("turbo-metrics.json")
 }
 
+fn resolve_runtime_relay_root() -> PathBuf {
+    if let Ok(env_path) = env::var("VECTORXR_RUNTIME_RELAY_PATH") {
+        if !env_path.trim().is_empty() {
+            return PathBuf::from(env_path);
+        }
+    }
+    #[cfg(target_os = "windows")]
+    if let Ok(local_app_data) = env::var("LOCALAPPDATA") {
+        return PathBuf::from(local_app_data)
+            .join("VectorXR")
+            .join("runtime");
+    }
+    env::current_dir()
+        .unwrap_or_else(|_| PathBuf::from("."))
+        .join("runtime")
+}
+
+fn unix_milliseconds() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or_default()
+}
+
 fn read_turbo_metrics_document(path: &Path) -> TurboMetricsDocument {
     if !path.exists() {
         return TurboMetricsDocument {
@@ -1265,6 +1376,42 @@ fn write_text_safely(path: &Path, content: &str) -> Result<(), String> {
             }
         }
     }
+}
+
+fn config_backup_path(path: &Path) -> PathBuf {
+    let stem = path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("settings");
+    let extension = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(|value| format!(".{value}"))
+        .unwrap_or_default();
+    path.with_file_name(format!("{stem}.backup{extension}"))
+}
+
+// Keep the exact config that predates the first 0.16 save. The backup is
+// deliberately write-once so later saves cannot replace the user's migration
+// recovery point with an already-normalized document.
+fn ensure_config_backup(path: &Path) -> Result<(), String> {
+    if !path.exists() {
+        return Ok(());
+    }
+
+    let backup_path = config_backup_path(path);
+    if backup_path.exists() {
+        return Ok(());
+    }
+
+    ensure_parent(&backup_path)?;
+    fs::copy(path, &backup_path).map_err(|error| {
+        format!(
+            "Unable to preserve the existing config at {}: {error}",
+            backup_path.to_string_lossy()
+        )
+    })?;
+    Ok(())
 }
 
 fn normalize_exe_display(value: &str) -> String {
@@ -1441,6 +1588,7 @@ fn save_config(config: VectorXRConfig) -> Result<String, String> {
 
     let content = serde_json::to_string_pretty(&normalize_config(config))
         .map_err(|error| error.to_string())?;
+    ensure_config_backup(&path)?;
     write_text_safely(&path, &content)?;
     Ok(path.to_string_lossy().into_owned())
 }
@@ -1453,6 +1601,7 @@ fn reset_stored_data() -> Result<ResetStoredDataEnvelope, String> {
 
     let config_content =
         serde_json::to_string_pretty(&config).map_err(|error| error.to_string())?;
+    ensure_config_backup(&config_path)?;
     write_text_safely(&config_path, &config_content)?;
 
     let seen_apps_content = serde_json::to_string_pretty(&SeenAppsDocument {
@@ -1477,10 +1626,11 @@ fn list_input_devices() -> Result<Vec<input_devices::InputDeviceInfo>, String> {
 #[tauri::command]
 async fn capture_device_binding(
     timeout_ms: Option<u64>,
+    device_guid: String,
 ) -> Result<Option<input_devices::CapturedDeviceBinding>, String> {
     let capture_id = input_devices::begin_device_binding_capture();
     tauri::async_runtime::spawn_blocking(move || {
-        input_devices::capture_device_binding(timeout_ms, capture_id)
+        input_devices::capture_device_binding(timeout_ms, capture_id, device_guid)
     })
     .await
     .map_err(|error| format!("Device binding capture task failed: {error}"))?
@@ -1710,6 +1860,97 @@ fn clear_turbo_metrics() -> Result<TurboMetricsEnvelope, String> {
     })
 }
 
+fn read_live_runtime_statuses() -> Vec<RuntimeStatusDocument> {
+    let status_directory = resolve_runtime_relay_root().join("status");
+    let Ok(entries) = fs::read_dir(status_directory) else {
+        return Vec::new();
+    };
+    let now = unix_milliseconds();
+    let mut sessions = entries
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let path = entry.path();
+            if path.extension().and_then(|value| value.to_str()) != Some("json") {
+                return None;
+            }
+            let content = fs::read_to_string(&path).ok()?;
+            let status = serde_json::from_str::<RuntimeStatusDocument>(&content).ok()?;
+            let file_session_id = path.file_stem()?.to_str()?;
+            let age = now.saturating_sub(status.updated_at_unix_milliseconds);
+            if status.protocol_version != RUNTIME_RELAY_PROTOCOL_VERSION
+                || status.session_id != file_session_id
+                || age > RUNTIME_STATUS_FRESHNESS_MILLISECONDS
+                || status.updated_at_unix_milliseconds > now.saturating_add(2_000)
+            {
+                return None;
+            }
+            Some(status)
+        })
+        .collect::<Vec<_>>();
+    sessions.sort_by(|lhs, rhs| {
+        rhs.updated_at_unix_milliseconds
+            .cmp(&lhs.updated_at_unix_milliseconds)
+    });
+    sessions
+}
+
+#[tauri::command]
+fn load_runtime_status() -> Result<RuntimeStatusEnvelope, String> {
+    Ok(RuntimeStatusEnvelope {
+        sessions: read_live_runtime_statuses(),
+    })
+}
+
+#[tauri::command]
+fn set_runtime_quadviews_diagnostic_visualization(
+    session_id: String,
+    enabled: bool,
+) -> Result<u64, String> {
+    if session_id.is_empty()
+        || !session_id.chars().all(|character| {
+            character.is_ascii_alphanumeric()
+                || character == '-'
+                || character == '_'
+                || character == '.'
+        })
+    {
+        return Err("Invalid runtime session id".into());
+    }
+    let session = read_live_runtime_statuses()
+        .into_iter()
+        .find(|status| status.session_id == session_id)
+        .ok_or_else(|| "The OpenXR session is no longer active".to_string())?;
+    if !session.capabilities.quadviews_diagnostic_visualization {
+        return Err("Diagnostic visualization is unavailable for this OpenXR session".into());
+    }
+
+    let now = unix_milliseconds();
+    // Keep revisions exactly representable in JavaScript while reducing
+    // collisions between multiple VectorXR app processes.
+    let revision_floor = now.saturating_mul(1_000) + u64::from(std::process::id() % 1_000);
+    let revision = RUNTIME_CONTROL_REVISION
+        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |previous| {
+            Some(previous.saturating_add(1).max(revision_floor))
+        })
+        .map(|previous| previous.saturating_add(1).max(revision_floor))
+        .unwrap_or(revision_floor);
+    let control = RuntimeControlDocument {
+        protocol_version: RUNTIME_RELAY_PROTOCOL_VERSION,
+        target_session_id: session_id.clone(),
+        revision,
+        expires_at_unix_milliseconds: now.saturating_add(5_000),
+        desired: RuntimeState {
+            quadviews_diagnostic_visualization: enabled,
+        },
+    };
+    let content = serde_json::to_string_pretty(&control).map_err(|error| error.to_string())?;
+    let path = resolve_runtime_relay_root()
+        .join("control")
+        .join(format!("{session_id}.json"));
+    write_text_safely(&path, &content)?;
+    Ok(revision)
+}
+
 #[tauri::command]
 fn load_openxr_layers() -> Result<openxr_layers::OpenXrLayerSnapshot, String> {
     openxr_layers::load_openxr_layers()
@@ -1887,8 +2128,41 @@ fn play_test_sound(
 #[cfg(test)]
 mod tests {
     use super::{
-        default_config, DepthXRBindings, DepthXRSettings, PivotXRProfileConfig, PivotXRSettings,
+        config_backup_path, default_config, ensure_config_backup, DepthXRBindings, DepthXRSettings,
+        PivotXRModuleConfig, PivotXRProfileConfig, PivotXRSettings,
     };
+
+    #[test]
+    fn config_backup_preserves_the_pre_migration_document() {
+        let suffix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time should be after the Unix epoch")
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "vectorxr-config-backup-{}-{suffix}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&directory).expect("temporary directory should be created");
+        let config_path = directory.join("settings.json");
+        std::fs::write(&config_path, "pre-0.16 config")
+            .expect("legacy config fixture should be written");
+
+        ensure_config_backup(&config_path).expect("the first backup should succeed");
+        let backup_path = config_backup_path(&config_path);
+        assert_eq!(
+            std::fs::read_to_string(&backup_path).expect("backup should be readable"),
+            "pre-0.16 config"
+        );
+
+        std::fs::write(&config_path, "normalized 0.16 config")
+            .expect("updated config fixture should be written");
+        ensure_config_backup(&config_path).expect("an existing backup should be retained");
+        assert_eq!(
+            std::fs::read_to_string(&backup_path).expect("backup should still be readable"),
+            "pre-0.16 config"
+        );
+        std::fs::remove_dir_all(directory).expect("temporary directory should be removed");
+    }
 
     #[test]
     fn new_configs_enable_depth_anchor_by_default() {
@@ -2031,6 +2305,94 @@ mod tests {
     }
 
     #[test]
+    fn pivot_behavior_nudges_and_view_controls_survive_the_config_save_round_trip() {
+        let pivot: PivotXRModuleConfig = serde_json::from_value(serde_json::json!({
+            "enabled": true,
+            "behavior": "snapViews",
+            "snapTurnPreference": "right",
+            "nudgeSetId": "shared-hat",
+            "nudgeSets": [{
+                "id": "shared-hat",
+                "name": "Shared HAT",
+                "allowWhileInactive": true,
+                "settings": {
+                    "yawStepDegrees": 30.0,
+                    "pitchStepDegrees": 20.0,
+                    "transitionSeconds": 0.12,
+                    "yawLeftBindings": [{ "type": "keyboard", "chord": ["Q"] }],
+                    "yawRightBindings": [],
+                    "pitchUpBindings": [],
+                    "pitchDownBindings": [],
+                    "centerBindings": []
+                }
+            }],
+            "profiles": [{
+                "name": "Accessible Views",
+                "behavior": "snapViews",
+                "snapTurnPreference": "left",
+                "nudgeSetId": "shared-hat",
+                "viewControls": {
+                "nudges": {
+                    "yawStepDegrees": 30.0,
+                    "pitchStepDegrees": 20.0,
+                    "transitionSeconds": 0.12,
+                    "yawLeftBindings": [{ "type": "keyboard", "chord": ["Q"] }],
+                    "yawRightBindings": [],
+                    "pitchUpBindings": [],
+                    "pitchDownBindings": [],
+                    "centerBindings": []
+                },
+                "quickViews": [{
+                    "id": "check-six",
+                    "name": "Check Six",
+                    "yawDegrees": 180.0,
+                    "pitchDegrees": 0.0,
+                    "positionRightCm": 0.0,
+                    "positionUpCm": 0.0,
+                    "positionForwardCm": 0.0,
+                    "transitionSeconds": 0.18,
+                    "turnDirection": "right",
+                    "activationBindings": [{
+                        "behavior": "toggle",
+                        "binding": { "type": "keyboard", "chord": ["F9"] }
+                    }]
+                }]
+            }}]
+        }))
+        .expect("Pivot configuration should deserialize");
+
+        let serialized = serde_json::to_value(pivot).expect("Pivot configuration should serialize");
+        assert_eq!(serialized["behavior"], "snapViews");
+        assert_eq!(serialized["snapTurnPreference"], "right");
+        assert_eq!(serialized["nudgeSetId"], "shared-hat");
+        assert_eq!(serialized["nudgeSets"][0]["allowWhileInactive"], true);
+        assert_eq!(
+            serialized["nudgeSets"][0]["settings"]["yawLeftBindings"][0]["chord"][0],
+            "Q"
+        );
+        assert_eq!(serialized["profiles"][0]["behavior"], "snapViews");
+        assert_eq!(serialized["profiles"][0]["snapTurnPreference"], "left");
+        assert_eq!(serialized["profiles"][0]["nudgeSetId"], "shared-hat");
+        assert_eq!(
+            serialized["profiles"][0]["viewControls"]["nudges"]["yawStepDegrees"],
+            30.0
+        );
+        assert_eq!(
+            serialized["profiles"][0]["viewControls"]["nudges"]["yawLeftBindings"][0]["chord"][0],
+            "Q"
+        );
+        assert_eq!(
+            serialized["profiles"][0]["viewControls"]["quickViews"][0]["name"],
+            "Check Six"
+        );
+        assert_eq!(
+            serialized["profiles"][0]["viewControls"]["quickViews"][0]["activationBindings"][0]
+                ["behavior"],
+            "toggle"
+        );
+    }
+
+    #[test]
     fn depth_anchor_toggle_binding_survives_the_config_save_round_trip() {
         let bindings: DepthXRBindings = serde_json::from_value(serde_json::json!({
             "toggleEnabled": { "type": "none" },
@@ -2070,6 +2432,8 @@ fn main() {
             clear_runtime_pacing_observation,
             load_turbo_metrics,
             clear_turbo_metrics,
+            load_runtime_status,
+            set_runtime_quadviews_diagnostic_visualization,
             list_input_devices,
             capture_device_binding,
             cancel_device_binding_capture,

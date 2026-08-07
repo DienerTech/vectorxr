@@ -14,7 +14,7 @@ defineEmits<{ edit: [] }>()
   <div class="rounded-[1rem] border p-4 surface-panel-soft">
     <div class="flex items-start justify-between gap-3">
       <div class="grid min-w-0 flex-1 grid-cols-[auto_auto_minmax(0,1fr)] items-start gap-2">
-        <p class="pt-1 text-sm font-semibold tracking-tight">Bindings</p>
+        <p class="pt-1 text-sm font-semibold tracking-tight">Activation</p>
         <span class="inline-flex items-center rounded-full border px-3 py-1 text-xs font-semibold" style="border-color: var(--app-border)">
           {{ alwaysActive ? 'Always active' : 'Manual' }}
         </span>
@@ -33,8 +33,8 @@ defineEmits<{ edit: [] }>()
           {{ alwaysActive ? 'No suspend controls' : 'No activation controls' }}
         </span>
       </div>
-      <button class="button-secondary shrink-0 rounded-[0.75rem] px-4 py-2 text-sm font-medium" type="button" @click="$emit('edit')">
-        Edit Bindings...
+      <button class="button-secondary w-40 shrink-0 rounded-[0.75rem] px-4 py-2 text-center text-sm font-medium" type="button" @click="$emit('edit')">
+        Edit Activation...
       </button>
     </div>
   </div>

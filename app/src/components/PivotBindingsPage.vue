@@ -61,15 +61,15 @@ onUnmounted(() => {
             <span aria-hidden="true">›</span>
             <span>{{ contextLabel }}</span>
             <span aria-hidden="true">›</span>
-            <span class="font-medium" style="color: var(--app-text)">Bindings</span>
+            <span class="font-medium" style="color: var(--app-text)">Activation</span>
           </nav>
-          <h2 class="mt-2 text-2xl font-semibold tracking-tight">{{ contextLabel }} — Bindings</h2>
+          <h2 class="mt-2 text-2xl font-semibold tracking-tight">{{ contextLabel }} — Activation</h2>
           <p class="mt-1 text-sm text-muted">Press Esc or Done to return to Pivot.</p>
         </div>
         <button
           class="button-secondary inline-flex h-9 w-9 items-center justify-center rounded-[0.75rem]"
           type="button"
-          aria-label="Close bindings and return to Pivot"
+          aria-label="Close activation and return to Pivot"
           @click="$emit('close')"
         >
           <svg aria-hidden="true" class="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">

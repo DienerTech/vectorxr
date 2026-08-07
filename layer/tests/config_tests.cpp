@@ -13,9 +13,11 @@
 #include "depthxr/logger.h"
 #include "depthxr/pivot_routing.h"
 #include "depthxr/pivot_step.h"
+#include "depthxr/pivot_view.h"
 #include "depthxr/quadviews_recovery.h"
 #include "depthxr/quadviews_sizing.h"
 #include "depthxr/runtime_pacing.h"
+#include "depthxr/runtime_relay.h"
 #include "depthxr/runtime_compatibility.h"
 #include "depthxr/seen_apps.h"
 #include "depthxr/settings_resolver.h"
@@ -692,6 +694,152 @@ void TestPivotResponseModeAndAdvancedAxes() {
            "Symmetric collapse should mirror pitch deadzone into direction tunings");
 }
 
+void TestPivotViewControlsParsingAndResolution() {
+    const std::string json = R"json(
+{
+  "version": 3,
+  "core": { "enabled": true, "logLevel": "info", "logRetentionFiles": 7 },
+  "applications": [
+    { "id": "dcs", "name": "DCS", "enabled": true, "match": { "exe": "DCS.exe" } }
+  ],
+  "modules": {
+    "depthxr": {},
+    "pivotxr": {
+      "enabled": false,
+      "nudgeSets": [
+        {
+          "id": "shared-hat",
+          "name": "Shared HAT",
+          "allowWhileInactive": true,
+          "settings": {
+            "yawStepDegrees": 12.0,
+            "yawLeftBindings": [{ "type": "keyboard", "chord": ["Q"] }]
+          }
+        }
+      ],
+      "profiles": [
+        {
+          "id": "accessible-views",
+          "name": "Accessible Views",
+          "applicationIds": ["dcs"],
+          "enabled": true,
+          "behavior": "snapViews",
+          "snapTurnPreference": "left",
+          "nudgeSetId": "shared-hat",
+          "alwaysActive": false,
+          "activationBindings": [],
+          "viewControls": {
+            "nudges": {
+              "yawStepDegrees": 35.0,
+              "pitchStepDegrees": 15.0,
+              "transitionSeconds": 0.2,
+              "yawLeftBindings": [{ "type": "keyboard", "chord": ["Q"] }],
+              "yawRightBindings": [],
+              "pitchUpBindings": [],
+              "pitchDownBindings": [],
+              "centerBindings": [{ "type": "keyboard", "chord": ["C"] }]
+            },
+            "quickViews": [
+              {
+                "id": "check-six",
+                "name": "Check Six",
+                "yawDegrees": 180.0,
+                "pitchDegrees": 10.0,
+                "positionRightCm": 2.0,
+                "positionUpCm": 3.0,
+                "positionForwardCm": 4.0,
+                "transitionSeconds": 0.25,
+                "activationBindings": [
+                  {
+                    "behavior": "hold",
+                    "binding": { "type": "keyboard", "chord": ["F9"] }
+                  }
+                ]
+              }
+            ]
+          },
+          "settings": {}
+        }
+      ]
+    }
+  }
+}
+)json";
+
+    depthxr::ParseResult result = depthxr::ParseConfig(json);
+    Expect(result.ok, "Config parser rejected Pivot View Controls: " + result.error);
+    const depthxr::PivotViewControls& parsed =
+        result.document.pivotxr.profiles[0].view_controls;
+    Expect(std::abs(parsed.nudges.yaw_step_degrees - 35.0) < 0.0001 &&
+               result.document.pivotxr.nudge_sets[0].allow_while_inactive,
+           "Pivot nudge settings or inactive policy mismatch");
+    Expect(parsed.nudges.yaw_left_bindings[0].chord[0] == "Q" &&
+               parsed.nudges.center_bindings[0].chord[0] == "C",
+           "Pivot nudge bindings mismatch");
+    Expect(parsed.quick_views.size() == 1 && parsed.quick_views[0].id == "check-six",
+           "Pivot Quick View identity mismatch");
+    Expect(parsed.quick_views[0].activation_bindings[0].behavior ==
+               depthxr::PivotActivationBehavior::Hold,
+           "Pivot Quick View activation mismatch");
+
+    const depthxr::ResolvedRuntimeConfig resolved =
+        depthxr::ResolveRuntimeConfig(result.document, "DCS.exe");
+    Expect(resolved.pivotxr.enabled && resolved.pivotxr.profiles.size() == 1,
+           "A profile with View Control bindings must resolve without Motion Assist activation");
+    Expect(resolved.pivotxr.profiles[0].view_controls.quick_views[0].position_forward_cm == 4.0,
+           "Resolved Pivot Quick View position mismatch");
+    Expect(resolved.pivotxr.profiles[0].behavior == depthxr::PivotProfileBehavior::SnapViews &&
+               resolved.pivotxr.profiles[0].allow_inactive_nudges &&
+               resolved.pivotxr.profiles[0].nudge_set_id == "shared-hat",
+           "Resolved Pivot profile behavior or view-control policy mismatch");
+    Expect(std::abs(resolved.pivotxr.profiles[0].view_controls.nudges.yaw_step_degrees - 12.0) < 0.0001,
+           "Linked Nudge Set did not override legacy inline nudge settings");
+
+    result.document.pivotxr.profiles[0].nudge_set_id = "none";
+    const depthxr::ResolvedRuntimeConfig nudges_disabled =
+        depthxr::ResolveRuntimeConfig(result.document, "DCS.exe");
+    const depthxr::PivotNudgeSettings& disabled_nudges =
+        nudges_disabled.pivotxr.profiles[0].view_controls.nudges;
+    Expect(disabled_nudges.yaw_left_bindings.empty() &&
+               disabled_nudges.center_bindings.empty(),
+           "The reserved none Nudge Set id must disable all profile nudges");
+}
+
+void TestPivotViewTransitionMath() {
+    double activation_gain = depthxr::AdvancePivotActivationGain(0.65, false, true, 0.2, 1.0);
+    Expect(std::abs(activation_gain - 0.65) < 0.0001,
+           "A Quick View override must freeze the suspended motion activation gain");
+    activation_gain = depthxr::AdvancePivotActivationGain(activation_gain, true, true, 0.2, 1.0);
+    Expect(std::abs(activation_gain - 0.65) < 0.0001,
+           "A Quick View return must preserve its motion handoff gain");
+    activation_gain = depthxr::AdvancePivotActivationGain(activation_gain, true, false, 0.2, 0.05);
+    Expect(std::abs(activation_gain - 0.9) < 0.0001,
+           "Motion activation must resume after the Quick View handoff");
+
+    depthxr::PivotViewTransitionState state;
+    depthxr::PivotViewOffset target{1.0, -0.5, 0.1, 0.2, -0.3};
+    depthxr::RetargetPivotViewTransition(target, 0.2, state);
+    Expect(state.active && depthxr::PivotViewOffsetNearlyZero(state.current),
+           "Pivot View transition did not begin at the current offset");
+
+    depthxr::UpdatePivotViewTransition(0.1, state);
+    Expect(std::abs(state.current.yaw_radians - 0.5) < 0.0001 &&
+               std::abs(state.current.right_meters - 0.05) < 0.0001,
+           "Pivot View smoothstep midpoint mismatch");
+
+    const depthxr::PivotViewOffset midpoint = state.current;
+    depthxr::RetargetPivotViewTransition({}, 0.1, state);
+    Expect(depthxr::PivotViewOffsetNearlyEqual(state.start, midpoint),
+           "Pivot View retarget did not preserve the in-flight position");
+    depthxr::UpdatePivotViewTransition(0.1, state);
+    Expect(!state.active && depthxr::PivotViewOffsetNearlyZero(state.current),
+           "Pivot View transition did not settle exactly on its target");
+
+    depthxr::RetargetPivotViewTransition(target, 0.0, state);
+    Expect(!state.active && depthxr::PivotViewOffsetNearlyEqual(state.current, target),
+           "A zero-duration Pivot View transition must apply instantly");
+}
+
 void TestPivotSteppedGlideMath() {
     const auto radians = [](double degrees) {
         return degrees * 3.14159265358979323846 / 180.0;
@@ -1102,6 +1250,7 @@ void TestQuadViewsProfileResolution() {
     },
     "quadviews": {
       "enabled": true,
+      "diagnosticVisualizationBinding": { "type": "keyboard", "chord": ["Ctrl", "F8"] },
       "defaults": {
         "trackingMode": "eye",
         "focusHorizontalSizePercent": 32.0,
@@ -1145,6 +1294,9 @@ void TestQuadViewsProfileResolution() {
 
     const depthxr::ResolvedRuntimeConfig resolved = depthxr::ResolveRuntimeConfig(result.document, "DCS.exe");
     Expect(resolved.quadviews.enabled, "Quadviews module enable was not resolved");
+    Expect(resolved.quadviews.diagnostic_visualization_binding.type == depthxr::InputBindingType::Keyboard &&
+               resolved.quadviews.diagnostic_visualization_binding.chord.size() == 2,
+           "Quadviews diagnostic visualization binding mismatch");
     Expect(resolved.quadviews.tracking_mode == depthxr::QuadViewsTrackingMode::Eye,
            "Quadviews profile tracking mode mismatch");
     Expect(std::abs(resolved.quadviews.focus_horizontal_size_percent - 34.0) < 0.0001,
@@ -1622,6 +1774,55 @@ void TestRuntimePacingObservationRoundTrip() {
     std::filesystem::remove_all(test_directory, error);
 }
 
+void TestRuntimeRelayControlAndStatusRoundTrip() {
+    const std::filesystem::path test_directory =
+        std::filesystem::current_path() / "build" / "vectorxr-test-runtime-relay";
+    std::error_code filesystem_error;
+    std::filesystem::remove_all(test_directory, filesystem_error);
+    std::filesystem::create_directories(test_directory / "control", filesystem_error);
+    Expect(!filesystem_error, "Failed to create runtime-relay test directory");
+
+    const std::string session_id = "4242-1000-1";
+    const std::filesystem::path control_path = depthxr::RuntimeControlPath(test_directory, session_id);
+    {
+        std::ofstream stream(control_path, std::ios::trunc);
+        stream << "{\n"
+               << "  \"protocolVersion\": 1,\n"
+               << "  \"targetSessionId\": \"" << session_id << "\",\n"
+               << "  \"revision\": 17,\n"
+               << "  \"expiresAtUnixMilliseconds\": 9999999999999,\n"
+               << "  \"desired\": { \"quadviewsDiagnosticVisualization\": true }\n"
+               << "}\n";
+    }
+
+    depthxr::RuntimeControlDocument control;
+    std::string relay_error;
+    Expect(depthxr::ReadRuntimeControl(control_path, &control, &relay_error),
+           "Failed to parse runtime control: " + relay_error);
+    Expect(control.target_session_id == session_id, "Runtime control session target mismatch");
+    Expect(control.revision == 17, "Runtime control revision mismatch");
+    Expect(control.quadviews_diagnostic_visualization.value_or(false),
+           "Runtime control desired state mismatch");
+
+    depthxr::RuntimeStatusDocument status;
+    status.session_id = session_id;
+    status.process_id = 4242;
+    status.application = "DCS.exe";
+    status.updated_at_unix_milliseconds = 1000;
+    status.acknowledged_revision = 17;
+    status.quadviews_diagnostic_visualization_available = true;
+    status.quadviews_diagnostic_visualization_enabled = true;
+    const std::filesystem::path status_path = depthxr::RuntimeStatusPath(test_directory, session_id);
+    Expect(depthxr::WriteRuntimeStatus(status_path, status, &relay_error),
+           "Failed to write runtime status: " + relay_error);
+    std::ifstream status_stream(status_path);
+    std::ostringstream status_content;
+    status_content << status_stream.rdbuf();
+    Expect(status_content.str().find("\"acknowledgedRevision\": 17") != std::string::npos,
+           "Runtime status acknowledgement was not serialized");
+    std::filesystem::remove_all(test_directory, filesystem_error);
+}
+
 void TestQuadViewStereoBoostKeepsInsetViewsInSync() {
     depthxr::ViewAdjustmentData views[4] = {
         {{-0.03, 0.0, 0.01}, {-1.0, 0.8, 0.9, -0.9}},
@@ -1872,6 +2073,14 @@ void TestD3D11SharpenShaderRegression() {
         ExpectShaderCompiles(shader, "VSMain", "vs_5_0", function_marker + " vertex shader");
         ExpectShaderCompiles(shader, "PSMain", "ps_5_0", function_marker + " pixel shader");
     }
+
+    const std::string compositor =
+        ExtractRawShaderSource(source_file, "const char* D3D11QuadViewsShaderSource()");
+    Expect(compositor.find("saturate(blendParams.z) * edgeAlpha") != std::string::npos,
+           "Quadviews compositor sharpening no longer ramps with the focus feather");
+    Expect(compositor.find("diagnosticParams.x < 0.5") != std::string::npos &&
+               compositor.find("rawGazeMarker") != std::string::npos,
+           "Quadviews compositor diagnostic visualization is missing");
 }
 #endif
 
@@ -2099,6 +2308,46 @@ void TestPivotLocateViewsRouting() {
                pose_deltas, static_cast<Time>(300), 0, &pose_delta, &matched_time) &&
                pose_delta == 0 && matched_time == 0,
            "A VIEW-only frame must not reuse a pruned pose delta");
+
+    const Time frame = 1'000'000'000;
+    pose_deltas.clear();
+    depthxr::CachePivotPoseDeltaValue(pose_deltas, frame, 42);
+    std::optional<int> held_pose_delta;
+    std::size_t consecutive_misses = 0;
+    Expect(depthxr::ResolvePivotPoseDeltaValue(
+               pose_deltas, frame, 0, true, &held_pose_delta,
+               &consecutive_misses, &pose_delta, &matched_time) ==
+               depthxr::PivotPoseDeltaSelection::Matched &&
+               pose_delta == 42 && held_pose_delta == 42 && consecutive_misses == 0,
+           "A matched Pivot delta must arm one-frame continuity");
+
+    const Time missed_frame = frame + depthxr::kPivotPoseDeltaMatchWindow + 1;
+    Expect(depthxr::ResolvePivotPoseDeltaValue(
+               pose_deltas, missed_frame, 0, true, &held_pose_delta,
+               &consecutive_misses, &pose_delta, &matched_time) ==
+               depthxr::PivotPoseDeltaSelection::HeldPrevious &&
+               pose_delta == 42 && consecutive_misses == 1,
+           "The first cache miss must reuse the last matched Pivot delta");
+    Expect(depthxr::ResolvePivotPoseDeltaValue(
+               pose_deltas, missed_frame + 1, 0, true, &held_pose_delta,
+               &consecutive_misses, &pose_delta, &matched_time) ==
+               depthxr::PivotPoseDeltaSelection::None &&
+               pose_delta == 0 && consecutive_misses == 2,
+           "A repeated cache miss must stop holding a stale Pivot delta");
+
+    depthxr::CachePivotPoseDeltaValue(pose_deltas, missed_frame + 2, 84);
+    Expect(depthxr::ResolvePivotPoseDeltaValue(
+               pose_deltas, missed_frame + 2, 0, true, &held_pose_delta,
+               &consecutive_misses, &pose_delta, &matched_time) ==
+               depthxr::PivotPoseDeltaSelection::Matched &&
+               pose_delta == 84 && consecutive_misses == 0,
+           "A recovered match must reset the continuity miss budget");
+    Expect(depthxr::ResolvePivotPoseDeltaValue(
+               pose_deltas, missed_frame + 3, 0, false, &held_pose_delta,
+               &consecutive_misses, &pose_delta, &matched_time) ==
+               depthxr::PivotPoseDeltaSelection::Matched &&
+               !held_pose_delta.has_value() && consecutive_misses == 0,
+           "Inactive Pivot routing must disarm the held correction");
 }
 
 void TestNumpadActivationKeys() {
@@ -2228,6 +2477,8 @@ int main() {
     TestPivotProfileResolution();
     TestPivotMultiProfileResolution();
     TestPivotResponseModeAndAdvancedAxes();
+    TestPivotViewControlsParsingAndResolution();
+    TestPivotViewTransitionMath();
     TestPivotSteppedGlideMath();
     TestTurboModuleResolution();
     TestTurboPacingModeParsing();
@@ -2245,6 +2496,7 @@ int main() {
     TestExeMatch();
     TestSeenAppObservationRecording();
     TestRuntimePacingObservationRoundTrip();
+    TestRuntimeRelayControlAndStatusRoundTrip();
     TestQuadViewStereoBoostKeepsInsetViewsInSync();
     TestStereoBoostScalesRotatedEyeBaseline();
     TestQuadViewConvergenceKeepsInsetOffsetsAligned();

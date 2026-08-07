@@ -231,12 +231,12 @@ export async function listInputDevices(): Promise<InputDeviceInfo[]> {
   return invoke<InputDeviceInfo[]>('list_input_devices')
 }
 
-export async function captureDeviceBinding(timeoutMs = 15_000): Promise<CapturedDeviceBinding | null> {
+export async function captureDeviceBinding(deviceGuid: string, timeoutMs = 15_000): Promise<CapturedDeviceBinding | null> {
   if (!tauriAvailable()) {
     return null
   }
 
-  return invoke<CapturedDeviceBinding | null>('capture_device_binding', { timeoutMs })
+  return invoke<CapturedDeviceBinding | null>('capture_device_binding', { deviceGuid, timeoutMs })
 }
 
 export async function cancelDeviceBindingCapture(): Promise<void> {
@@ -371,6 +371,41 @@ export async function clearTurboMetrics(): Promise<TurboMetricsEnvelope> {
   }
 
   return invoke<TurboMetricsEnvelope>('clear_turbo_metrics')
+}
+
+export interface RuntimeStatusSession {
+  protocolVersion: number
+  sessionId: string
+  processId: number
+  application: string
+  updatedAtUnixMilliseconds: number
+  acknowledgedRevision: number
+  capabilities: { quadviewsDiagnosticVisualization: boolean }
+  state: { quadviewsDiagnosticVisualization: boolean }
+}
+
+export interface RuntimeStatusEnvelope {
+  sessions: RuntimeStatusSession[]
+}
+
+export async function loadRuntimeStatus(): Promise<RuntimeStatusEnvelope> {
+  if (!tauriAvailable()) {
+    return { sessions: [] }
+  }
+  return invoke<RuntimeStatusEnvelope>('load_runtime_status')
+}
+
+export async function setRuntimeQuadViewsDiagnosticVisualization(
+  sessionId: string,
+  enabled: boolean,
+): Promise<number> {
+  if (!tauriAvailable()) {
+    return 0
+  }
+  return invoke<number>('set_runtime_quadviews_diagnostic_visualization', {
+    sessionId,
+    enabled,
+  })
 }
 
 export async function loadOpenXrLayers(): Promise<OpenXrLayerSnapshot> {

@@ -23,11 +23,13 @@
 #include "depthxr/config_parser.h"
 #include "depthxr/delayed_action_set_attachment.h"
 #include "depthxr/pivot_step.h"
+#include "depthxr/pivot_view.h"
 #include "depthxr/effects.h"
 #include "depthxr/logger.h"
 #include "depthxr/quadviews_recovery.h"
 #include "depthxr/runtime_compatibility.h"
 #include "depthxr/runtime_pacing.h"
+#include "depthxr/runtime_relay.h"
 #include "depthxr/settings_resolver.h"
 #include "depthxr/swapchain_state.h"
 
@@ -370,9 +372,11 @@ class OpenXrLayer {
     void PollConfigFile();
     void RefreshResolvedSettings();
     void ResetPivotInputStateForConfigChange();
+    void PollRuntimeRelay();
     void CaptureInstanceFunctions();
     void LogResolvedSettings(const ResolvedRuntimeConfig& settings);
     void ResetPivotActivationState();
+    void ResetPivotPoseDeltaContinuityState();
     void ResetDepthToggleState();
     void ResetDepthAnchorToggleState();
     void PollDepthAnchorToggle();
@@ -446,6 +450,8 @@ class OpenXrLayer {
                                                  SwapchainInfo& info,
                                                  std::string_view reason);
     XrResult FlushDeferredSwapchainReleasesLocked(std::string_view reason);
+    void PollQuadViewsDiagnosticVisualizationToggle();
+    void ResetQuadViewsDiagnosticVisualizationState();
     bool PollInputBindingDown(const InputBinding& binding);
     bool ShouldLogQuadViewsDebugHeartbeat(std::optional<std::chrono::steady_clock::time_point>& last_heartbeat);
     void ResetQuadViewsDebugHeartbeatState();
@@ -608,6 +614,18 @@ class OpenXrLayer {
     std::mutex config_watcher_mutex_;
     std::condition_variable config_watcher_cv_;
     bool config_watcher_stop_{false};
+
+    // Versioned, session-targeted app<->layer relay. The watcher owns all
+    // filesystem I/O; frame paths only update in-memory state and a dirty bit.
+    std::filesystem::path runtime_relay_root_;
+    std::string runtime_relay_session_id_;
+    std::vector<std::string> runtime_relay_sessions_to_remove_;
+    std::uint64_t runtime_relay_session_sequence_{0};
+    std::uint64_t runtime_relay_last_applied_revision_{0};
+    std::uint64_t runtime_relay_acknowledged_revision_{0};
+    std::atomic<bool> runtime_relay_status_dirty_{false};
+    std::optional<std::chrono::steady_clock::time_point> runtime_relay_last_status_write_;
+
     std::string runtime_name_;
     std::string system_name_;
     uint32_t system_vendor_id_{0};
@@ -644,6 +662,10 @@ class OpenXrLayer {
     // of the per-frame tracking smoothing.
     double pivotxr_activation_gain_{0.0};
     std::optional<std::chrono::steady_clock::time_point> pivotxr_last_smoothing_wall_time_;
+    // EndFrame can occasionally arrive without a matching LocateViews cache
+    // entry. Bridge one such miss so amplified poses do not flash to identity.
+    std::optional<XrPosef> pivotxr_last_matched_pose_delta_;
+    std::size_t pivotxr_consecutive_pose_delta_misses_{0};
     // Per resolved-profile input edge state, index-aligned with
     // resolved_settings_.pivotxr.profiles. Arbitration is last-pressed-wins:
     // pressing another candidate's binding retargets the engaged profile and
@@ -656,6 +678,16 @@ class OpenXrLayer {
         std::vector<BindingState> activation;
         std::vector<BindingState> set_origin;
         std::vector<BindingState> release_origin;
+        std::vector<BindingState> nudge_yaw_left;
+        std::vector<BindingState> nudge_yaw_right;
+        std::vector<BindingState> nudge_pitch_up;
+        std::vector<BindingState> nudge_pitch_down;
+        std::vector<BindingState> nudge_center;
+        struct QuickViewState {
+            std::vector<BindingState> activation;
+            bool toggle_latched{false};
+        };
+        std::vector<QuickViewState> quick_views;
         // Toggle controls share one latch per profile. Hold state remains
         // per binding and is derived from the cached input state.
         bool toggle_latched{false};
@@ -666,6 +698,20 @@ class OpenXrLayer {
     // release ramp so the easing keeps using that profile's settings.
     size_t pivotxr_active_profile_index_{0};
     bool pivotxr_engaged_{false};
+    // Independent Nudge Sets contribute to the global transition; active-only
+    // Nudge Sets use the profile transition and are cleared on profile release.
+    PivotViewTransitionState pivotxr_manual_view_transition_;
+    PivotViewTransitionState pivotxr_profile_view_transition_;
+    PivotViewTransitionState pivotxr_quick_view_transition_;
+    bool pivotxr_quick_view_retarget_pending_{false};
+    PivotViewOffset pivotxr_quick_view_pending_pose_;
+    double pivotxr_quick_view_pending_duration_seconds_{0.0};
+    bool pivotxr_quick_view_active_{false};
+    bool pivotxr_quick_view_transitioning_{false};
+    size_t pivotxr_quick_view_profile_index_{0};
+    size_t pivotxr_quick_view_index_{0};
+    size_t pivotxr_quick_view_return_profile_index_{0};
+    bool pivotxr_quick_view_return_engaged_{false};
     // Optional full seated origin in the app's reference space. Motion Assist
     // currently consumes yaw/pitch, while the complete pose, capture time, and
     // session identity establish the stable positional reference required by
@@ -974,6 +1020,17 @@ class OpenXrLayer {
     bool has_logged_eye_gaze_focus_unavailable_{false};
     uint32_t eye_gaze_unavailable_streak_{0};
     double quadviews_smoothed_focus_yaw_radians_{0.0};
+    double quadviews_raw_focus_yaw_radians_{0.0};
+    double quadviews_raw_focus_pitch_radians_{0.0};
+    XrTime quadviews_raw_focus_time_{0};
+    bool quadviews_raw_focus_valid_{false};
+    // Synthesized-compositor diagnostic visualization. It deliberately starts
+    // hidden every session and can only be changed through its optional binding.
+    bool quadviews_diagnostic_visualization_enabled_{false};
+    bool quadviews_diagnostic_visualization_binding_was_down_{false};
+    std::optional<std::chrono::steady_clock::time_point>
+        quadviews_diagnostic_visualization_binding_last_poll_time_;
+    bool quadviews_diagnostic_visualization_binding_down_cached_{false};
     double quadviews_smoothed_focus_pitch_radians_{0.0};
     std::optional<std::chrono::steady_clock::time_point> quadviews_last_focus_smoothing_wall_time_;
     std::optional<std::chrono::steady_clock::time_point> quadviews_last_valid_gaze_wall_time_;

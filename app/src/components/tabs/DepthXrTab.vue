@@ -2,6 +2,7 @@
 import { computed, nextTick, reactive, ref } from 'vue'
 
 import ConvergenceField from '../ConvergenceField.vue'
+import DefaultProfileExclusions from '../DefaultProfileExclusions.vue'
 import DepthAnchorField from '../DepthAnchorField.vue'
 import DepthBindingsPage from '../DepthBindingsPage.vue'
 import DepthNetEffect from '../DepthNetEffect.vue'
@@ -191,6 +192,11 @@ const profileWarnings = computed(() => {
           <input v-model="config.modules.depthxr.enabled" class="h-4 w-4 accent-depthxr-copper" type="checkbox" />
           Default Profile {{ config.modules.depthxr.enabled ? 'On' : 'Off' }}
         </label>
+        <DefaultProfileExclusions
+          class="ml-2 mt-3"
+          :applications="applications"
+          :profiles="config.modules.depthxr.profiles"
+        />
         <div v-if="!config.modules.depthxr.enabled" class="mt-3 rounded-[0.9rem] border px-4 py-3 text-sm leading-6 surface-panel-strong">
           The default profile is off and has no effect — applications without an enabled custom profile get no Depth adjustment. Enabled custom profiles below still apply to their assigned applications.
         </div>

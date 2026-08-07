@@ -3,6 +3,7 @@ export type ActivationMode = 'toggle' | 'hold' | 'alwaysOn'
 export type PivotActivationBehavior = 'toggle' | 'hold'
 export type PivotResponseMode = 'continuous' | 'stepped'
 export type PivotStepGlideMode = 'instant' | 'glide'
+export type PivotProfileBehavior = 'enhancedMotion' | 'snapViews'
 export type QuadViewsTrackingMode = 'head' | 'eye'
 export type AppTab = 'home' | 'core' | 'registry' | 'layers' | 'about' | 'depthxr' | 'pivotxr' | 'quadviews' | 'turbo'
 export const keyboardBindingKeyGroups = [
@@ -72,6 +73,41 @@ export function preserveBindingSound<T extends InputBinding>(current: InputBindi
 export interface PivotActivationBinding {
   behavior: PivotActivationBehavior
   binding: InputBinding
+}
+
+export interface PivotNudgeSettings {
+  yawStepDegrees: number
+  pitchStepDegrees: number
+  transitionSeconds: number
+  yawLeftBindings: InputBinding[]
+  yawRightBindings: InputBinding[]
+  pitchUpBindings: InputBinding[]
+  pitchDownBindings: InputBinding[]
+  centerBindings: InputBinding[]
+}
+
+export interface PivotNudgeSet {
+  id: string
+  name: string
+  allowWhileInactive: boolean
+  settings: PivotNudgeSettings
+}
+
+export interface PivotQuickView {
+  id: string
+  name: string
+  yawDegrees: number
+  pitchDegrees: number
+  positionRightCm: number
+  positionUpCm: number
+  positionForwardCm: number
+  transitionSeconds: number
+  activationBindings: PivotActivationBinding[]
+}
+
+export interface PivotViewControls {
+  nudges: PivotNudgeSettings
+  quickViews: PivotQuickView[]
 }
 
 // Global feedback-sound settings shared by every binding's activate/deactivate cue.
@@ -169,6 +205,8 @@ export interface PivotXRProfileConfig {
   name: string
   enabled: boolean
   applicationIds: string[]
+  behavior: PivotProfileBehavior
+  nudgeSetId: string
   alwaysActive: boolean
   activationBindings: PivotActivationBinding[]
   // Optional origin bindings: set-origin captures the current head yaw/pitch as
@@ -177,15 +215,20 @@ export interface PivotXRProfileConfig {
   setOriginBindings: InputBinding[]
   releaseOriginBindings: InputBinding[]
   settings: PivotXRSettings
+  viewControls: PivotViewControls
 }
 
 export interface PivotXRModuleConfig {
   enabled: boolean
   defaults: PivotXRSettings
+  behavior: PivotProfileBehavior
+  nudgeSetId: string
+  nudgeSets: PivotNudgeSet[]
   alwaysActive: boolean
   activationBindings: PivotActivationBinding[]
   setOriginBindings: InputBinding[]
   releaseOriginBindings: InputBinding[]
+  viewControls: PivotViewControls
   profiles: PivotXRProfileConfig[]
 }
 
@@ -212,6 +255,7 @@ export interface QuadViewsProfileConfig {
 
 export interface QuadViewsModuleConfig {
   enabled: boolean
+  diagnosticVisualizationBinding: InputBinding
   defaults: QuadViewsSettings
   profiles: QuadViewsProfileConfig[]
 }
@@ -485,6 +529,57 @@ export function defaultPivotXRSettings(): PivotXRSettings {
   }
 }
 
+export function defaultPivotNudgeSettings(): PivotNudgeSettings {
+  return {
+    yawStepDegrees: 30,
+    pitchStepDegrees: 20,
+    transitionSeconds: 0.12,
+    yawLeftBindings: [],
+    yawRightBindings: [],
+    pitchUpBindings: [],
+    pitchDownBindings: [],
+    centerBindings: [],
+  }
+}
+
+export function newPivotNudgeSetId(): string {
+  return `pivot-nudges-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
+}
+
+export function createPivotNudgeSet(name = 'Standard Nudges', settings = defaultPivotNudgeSettings(), allowWhileInactive = false): PivotNudgeSet {
+  return {
+    id: newPivotNudgeSetId(),
+    name,
+    allowWhileInactive,
+    settings: normalizePivotNudgeSettings(settings, defaultPivotNudgeSettings()),
+  }
+}
+
+export function newPivotQuickViewId(): string {
+  return `pivot-view-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
+}
+
+export function createPivotQuickView(name = 'New Quick View'): PivotQuickView {
+  return {
+    id: newPivotQuickViewId(),
+    name,
+    yawDegrees: 0,
+    pitchDegrees: 0,
+    positionRightCm: 0,
+    positionUpCm: 0,
+    positionForwardCm: 0,
+    transitionSeconds: 0.18,
+    activationBindings: [],
+  }
+}
+
+export function defaultPivotViewControls(): PivotViewControls {
+  return {
+    nudges: defaultPivotNudgeSettings(),
+    quickViews: [],
+  }
+}
+
 export function defaultQuadViewsSettings(): QuadViewsSettings {
   return {
     trackingMode: 'eye',
@@ -548,14 +643,19 @@ export function defaultConfig(): VectorXRConfig {
       pivotxr: {
         enabled: false,
         defaults: defaultPivotXRSettings(),
+        behavior: 'enhancedMotion',
+        nudgeSetId: 'pivot-nudges-standard',
+        nudgeSets: [{ id: 'pivot-nudges-standard', name: 'Standard Nudges', allowWhileInactive: false, settings: defaultPivotNudgeSettings() }],
         alwaysActive: false,
         activationBindings: [],
         setOriginBindings: [],
         releaseOriginBindings: [],
+        viewControls: defaultPivotViewControls(),
         profiles: [],
       },
       quadviews: {
         enabled: false,
+        diagnosticVisualizationBinding: defaultNoneBinding(),
         defaults: defaultQuadViewsSettings(),
         profiles: [],
       },
@@ -605,17 +705,23 @@ export function createPivotProfile(
   applicationIds: string[] = [],
   alwaysActive = false,
   activationBindings: PivotActivationBinding[] = [],
+  defaultViewControls: PivotViewControls = defaultPivotViewControls(),
+  behavior: PivotProfileBehavior = 'enhancedMotion',
+  nudgeSetId = 'pivot-nudges-standard',
 ): PivotXRProfileConfig {
   return {
     id: newPivotProfileId(),
     name: 'New Profile',
     enabled: true,
     applicationIds,
+    behavior,
+    nudgeSetId,
     alwaysActive,
     activationBindings: normalizePivotActivationBindings(activationBindings),
     setOriginBindings: [],
     releaseOriginBindings: [],
     settings: normalizePivotXRSettings(defaultSettings, defaultPivotXRSettings()),
+    viewControls: normalizePivotViewControls(defaultViewControls, defaultPivotViewControls()),
   }
 }
 
@@ -746,6 +852,44 @@ function normalizePivotXRSettings(value: unknown, fallback: PivotXRSettings): Pi
     yawRightStep: normalizePivotStepTuning(source.yawRightStep, yawStep),
     pitchUpStep: normalizePivotStepTuning(source.pitchUpStep, pitchStep),
     pitchDownStep: normalizePivotStepTuning(source.pitchDownStep, pitchStep),
+  }
+}
+
+function normalizePivotNudgeSettings(value: unknown, fallback: PivotNudgeSettings): PivotNudgeSettings {
+  const source = isRecord(value) ? value : {}
+  return {
+    yawStepDegrees: normalizeNumber(source.yawStepDegrees, fallback.yawStepDegrees),
+    pitchStepDegrees: normalizeNumber(source.pitchStepDegrees, fallback.pitchStepDegrees),
+    transitionSeconds: normalizeNumber(source.transitionSeconds, fallback.transitionSeconds),
+    yawLeftBindings: normalizeInputBindings(source.yawLeftBindings ?? fallback.yawLeftBindings),
+    yawRightBindings: normalizeInputBindings(source.yawRightBindings ?? fallback.yawRightBindings),
+    pitchUpBindings: normalizeInputBindings(source.pitchUpBindings ?? fallback.pitchUpBindings),
+    pitchDownBindings: normalizeInputBindings(source.pitchDownBindings ?? fallback.pitchDownBindings),
+    centerBindings: normalizeInputBindings(source.centerBindings ?? fallback.centerBindings),
+  }
+}
+
+function normalizePivotQuickView(value: unknown, fallbackName: string): PivotQuickView {
+  const source = isRecord(value) ? value : {}
+  return {
+    id: normalizeString(source.id, '').trim() || newPivotQuickViewId(),
+    name: normalizeString(source.name, fallbackName),
+    yawDegrees: normalizeNumber(source.yawDegrees, 0),
+    pitchDegrees: normalizeNumber(source.pitchDegrees, 0),
+    positionRightCm: normalizeNumber(source.positionRightCm, 0),
+    positionUpCm: normalizeNumber(source.positionUpCm, 0),
+    positionForwardCm: normalizeNumber(source.positionForwardCm, 0),
+    transitionSeconds: normalizeNumber(source.transitionSeconds, 0.18),
+    activationBindings: normalizePivotActivationBindings(source.activationBindings),
+  }
+}
+
+function normalizePivotViewControls(value: unknown, fallback: PivotViewControls): PivotViewControls {
+  const source = isRecord(value) ? value : {}
+  const quickViews = Array.isArray(source.quickViews) ? source.quickViews : fallback.quickViews
+  return {
+    nudges: normalizePivotNudgeSettings(source.nudges, fallback.nudges),
+    quickViews: quickViews.map((quickView, index) => normalizePivotQuickView(quickView, `Quick View ${index + 1}`)),
   }
 }
 
@@ -1020,24 +1164,43 @@ function pushBindingAssignments(
   })
 }
 
+
 function savedBindingAssignments(config: VectorXRConfig): SavedBindingAssignment[] {
   const assignments: SavedBindingAssignment[] = [
     { id: 'depth.toggle', label: 'Depth: A/B toggle', binding: config.modules.depthxr.bindings.toggleEnabled },
     { id: 'depth.lock', label: 'Depth: Depth Lock A/B', binding: config.modules.depthxr.bindings.toggleAnchor },
+    { id: 'quadviews.diagnostics', label: 'Quadviews: diagnostic visualization', binding: config.modules.quadviews.diagnosticVisualizationBinding },
     { id: 'turbo.toggle', label: 'Turbo: A/B toggle', binding: config.modules.turbo.toggleBinding },
     { id: 'turbo.metrics', label: 'Turbo: metrics capture', binding: config.modules.turbo.metricsBinding },
   ]
 
   const pivot = config.modules.pivotxr
+  pivot.nudgeSets.forEach((set) => {
+    const prefix = `pivot.nudge-set.${set.id}`
+    const label = `Pivot ${set.name}`
+    pushBindingAssignments(assignments, `${prefix}.left`, `${label}: Nudge Left`, set.settings.yawLeftBindings)
+    pushBindingAssignments(assignments, `${prefix}.right`, `${label}: Nudge Right`, set.settings.yawRightBindings)
+    pushBindingAssignments(assignments, `${prefix}.up`, `${label}: Nudge Up`, set.settings.pitchUpBindings)
+    pushBindingAssignments(assignments, `${prefix}.down`, `${label}: Nudge Down`, set.settings.pitchDownBindings)
+    pushBindingAssignments(assignments, `${prefix}.center`, `${label}: Center Nudge Offset`, set.settings.centerBindings)
+  })
   pushBindingAssignments(assignments, 'pivot.default.activate', 'Pivot Default: Activate', pivot.activationBindings.map((item) => item.binding))
   pushBindingAssignments(assignments, 'pivot.default.set-origin', 'Pivot Default: Set Origin', pivot.setOriginBindings)
   pushBindingAssignments(assignments, 'pivot.default.release-origin', 'Pivot Default: Release Origin', pivot.releaseOriginBindings)
+
+  pivot.viewControls.quickViews.forEach((quickView) => {
+    pushBindingAssignments(assignments, `pivot.default.quick-view.${quickView.id}`, `Pivot Default: ${quickView.name}`, quickView.activationBindings.map((item) => item.binding))
+  })
 
   pivot.profiles.forEach((profile, index) => {
     const context = profile.name.trim() || `Profile ${index + 1}`
     pushBindingAssignments(assignments, `pivot.${profile.id}.activate`, `Pivot ${context}: Activate`, profile.activationBindings.map((item) => item.binding))
     pushBindingAssignments(assignments, `pivot.${profile.id}.set-origin`, `Pivot ${context}: Set Origin`, profile.setOriginBindings)
     pushBindingAssignments(assignments, `pivot.${profile.id}.release-origin`, `Pivot ${context}: Release Origin`, profile.releaseOriginBindings)
+
+    profile.viewControls.quickViews.forEach((quickView) => {
+      pushBindingAssignments(assignments, `pivot.${profile.id}.quick-view.${quickView.id}`, `Pivot ${context}: ${quickView.name}`, quickView.activationBindings.map((item) => item.binding))
+    })
   })
 
   return assignments
@@ -1248,6 +1411,30 @@ function normalizeVectorXRConfig(value: unknown): VectorXRConfig {
   })
 
   const pivotDefaults = normalizePivotXRSettings(pivotxr.defaults, fallback.modules.pivotxr.defaults)
+  const pivotViewControls = normalizePivotViewControls(pivotxr.viewControls, fallback.modules.pivotxr.viewControls)
+  const nudgeSetValues = Array.isArray(pivotxr.nudgeSets) ? pivotxr.nudgeSets : []
+  const pivotNudgeSets: PivotNudgeSet[] = nudgeSetValues.map((value, index) => {
+    const set = isRecord(value) ? value : {}
+    return {
+      id: normalizeString(set.id, `pivot-nudges-${index + 1}`),
+      name: normalizeString(set.name, `Nudge Set ${index + 1}`),
+      allowWhileInactive: normalizeBoolean(set.allowWhileInactive, false),
+      settings: normalizePivotNudgeSettings(set.settings, defaultPivotNudgeSettings()),
+    }
+  })
+  if (pivotNudgeSets.length === 0) {
+    pivotNudgeSets.push({ id: 'pivot-nudges-standard', name: 'Standard Nudges', allowWhileInactive: false, settings: pivotViewControls.nudges })
+  }
+  const requestedDefaultNudgeSetId = normalizeString(pivotxr.nudgeSetId, '')
+  const defaultNudgeSetId = requestedDefaultNudgeSetId === 'none'
+    ? 'none'
+    : pivotNudgeSets.some((set) => set.id === requestedDefaultNudgeSetId)
+      ? requestedDefaultNudgeSetId
+      : pivotNudgeSets[0].id
+  if (normalizeBoolean(pivotxr.allowInactiveNudges, false)) {
+    const defaultSet = pivotNudgeSets.find((set) => set.id === defaultNudgeSetId)
+    if (defaultSet) defaultSet.allowWhileInactive = true
+  }
   const quadViewsDefaults = normalizeQuadViewsSettings(quadviews.defaults, fallback.modules.quadviews.defaults)
 
   return {
@@ -1290,32 +1477,58 @@ function normalizeVectorXRConfig(value: unknown): VectorXRConfig {
       pivotxr: {
         enabled: normalizeBoolean(pivotxr.enabled, fallback.modules.pivotxr.enabled),
         defaults: pivotDefaults,
+        behavior: pivotxr.behavior === 'snapViews' ? 'snapViews' : 'enhancedMotion',
+        nudgeSetId: defaultNudgeSetId,
+        nudgeSets: pivotNudgeSets,
         alwaysActive: normalizeBoolean(pivotxr.alwaysActive, normalizeActivationMode(pivotxr.activationMode) === 'alwaysOn'),
         activationBindings: normalizePivotActivationBindings(pivotxr.activationBindings, pivotxr.activationBinding, normalizeActivationMode(pivotxr.activationMode)),
         setOriginBindings: normalizeInputBindings(pivotxr.setOriginBindings, pivotxr.setOriginBinding),
         releaseOriginBindings: normalizeInputBindings(pivotxr.releaseOriginBindings, pivotxr.releaseOriginBinding),
+        viewControls: pivotViewControls,
         profiles: pivotProfileValues.map((profileValue) => {
           const profile = isRecord(profileValue) ? profileValue : {}
           const settings = normalizePivotXRSettings(profile.settings, pivotDefaults)
           const applicationIds = applicationIdsFromProfile(profile, applications)
           const activationMode = normalizeActivationMode(profile.activationMode)
           const id = normalizeString(profile.id, '').trim() || newPivotProfileId()
+          const viewControls = normalizePivotViewControls(profile.viewControls, pivotViewControls)
+          let nudgeSetId = normalizeString(profile.nudgeSetId, '').trim()
+          if (nudgeSetId !== 'none' && !pivotNudgeSets.some((set) => set.id === nudgeSetId)) {
+            const sharesDefault = JSON.stringify(viewControls.nudges) === JSON.stringify(pivotViewControls.nudges)
+            nudgeSetId = sharesDefault ? defaultNudgeSetId : `${id}-nudges`
+            if (!sharesDefault) {
+              pivotNudgeSets.push({ id: nudgeSetId, name: `${normalizeString(profile.name, 'Profile')} Nudges`, allowWhileInactive: false, settings: viewControls.nudges })
+            }
+          }
 
-          return {
+          if (normalizeBoolean(profile.allowInactiveNudges, false)) {
+            const legacySet = pivotNudgeSets.find((set) => set.id === nudgeSetId)
+            if (legacySet) legacySet.allowWhileInactive = true
+          }
+
+          const normalized: PivotXRProfileConfig = {
             id,
             name: normalizeString(profile.name, 'New Profile'),
             enabled: normalizeBoolean(profile.enabled, true),
             applicationIds,
+            behavior: profile.behavior === 'snapViews' ? 'snapViews' : 'enhancedMotion',
+            nudgeSetId,
             alwaysActive: normalizeBoolean(profile.alwaysActive, activationMode === 'alwaysOn'),
             activationBindings: normalizePivotActivationBindings(profile.activationBindings, profile.activationBinding, activationMode),
             setOriginBindings: normalizeInputBindings(profile.setOriginBindings, profile.setOriginBinding),
             releaseOriginBindings: normalizeInputBindings(profile.releaseOriginBindings, profile.releaseOriginBinding),
             settings,
+            viewControls,
           }
+          return normalized
         }),
       },
       quadviews: {
         enabled: normalizeBoolean(quadviews.enabled, fallback.modules.quadviews.enabled),
+        diagnosticVisualizationBinding: normalizeInputBinding(
+          quadviews.diagnosticVisualizationBinding,
+          fallback.modules.quadviews.diagnosticVisualizationBinding,
+        ),
         defaults: quadViewsDefaults,
         profiles: quadViewsProfileValues.map((profileValue) => {
           const profile = isRecord(profileValue) ? profileValue : {}
