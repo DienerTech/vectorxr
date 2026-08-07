@@ -1378,6 +1378,42 @@ fn write_text_safely(path: &Path, content: &str) -> Result<(), String> {
     }
 }
 
+fn config_backup_path(path: &Path) -> PathBuf {
+    let stem = path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("settings");
+    let extension = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(|value| format!(".{value}"))
+        .unwrap_or_default();
+    path.with_file_name(format!("{stem}.backup{extension}"))
+}
+
+// Keep the exact config that predates the first 0.16 save. The backup is
+// deliberately write-once so later saves cannot replace the user's migration
+// recovery point with an already-normalized document.
+fn ensure_config_backup(path: &Path) -> Result<(), String> {
+    if !path.exists() {
+        return Ok(());
+    }
+
+    let backup_path = config_backup_path(path);
+    if backup_path.exists() {
+        return Ok(());
+    }
+
+    ensure_parent(&backup_path)?;
+    fs::copy(path, &backup_path).map_err(|error| {
+        format!(
+            "Unable to preserve the existing config at {}: {error}",
+            backup_path.to_string_lossy()
+        )
+    })?;
+    Ok(())
+}
+
 fn normalize_exe_display(value: &str) -> String {
     value
         .rsplit(['/', '\\'])
@@ -1552,6 +1588,7 @@ fn save_config(config: VectorXRConfig) -> Result<String, String> {
 
     let content = serde_json::to_string_pretty(&normalize_config(config))
         .map_err(|error| error.to_string())?;
+    ensure_config_backup(&path)?;
     write_text_safely(&path, &content)?;
     Ok(path.to_string_lossy().into_owned())
 }
@@ -1564,6 +1601,7 @@ fn reset_stored_data() -> Result<ResetStoredDataEnvelope, String> {
 
     let config_content =
         serde_json::to_string_pretty(&config).map_err(|error| error.to_string())?;
+    ensure_config_backup(&config_path)?;
     write_text_safely(&config_path, &config_content)?;
 
     let seen_apps_content = serde_json::to_string_pretty(&SeenAppsDocument {
@@ -1894,7 +1932,8 @@ fn set_runtime_quadviews_diagnostic_visualization(
         .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |previous| {
             Some(previous.saturating_add(1).max(revision_floor))
         })
-        .map(|previous| previous.saturating_add(1).max(revision_floor)).unwrap_or(revision_floor);
+        .map(|previous| previous.saturating_add(1).max(revision_floor))
+        .unwrap_or(revision_floor);
     let control = RuntimeControlDocument {
         protocol_version: RUNTIME_RELAY_PROTOCOL_VERSION,
         target_session_id: session_id.clone(),
@@ -2089,9 +2128,41 @@ fn play_test_sound(
 #[cfg(test)]
 mod tests {
     use super::{
-        default_config, DepthXRBindings, DepthXRSettings, PivotXRModuleConfig, PivotXRProfileConfig,
-        PivotXRSettings,
+        config_backup_path, default_config, ensure_config_backup, DepthXRBindings, DepthXRSettings,
+        PivotXRModuleConfig, PivotXRProfileConfig, PivotXRSettings,
     };
+
+    #[test]
+    fn config_backup_preserves_the_pre_migration_document() {
+        let suffix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time should be after the Unix epoch")
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "vectorxr-config-backup-{}-{suffix}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&directory).expect("temporary directory should be created");
+        let config_path = directory.join("settings.json");
+        std::fs::write(&config_path, "pre-0.16 config")
+            .expect("legacy config fixture should be written");
+
+        ensure_config_backup(&config_path).expect("the first backup should succeed");
+        let backup_path = config_backup_path(&config_path);
+        assert_eq!(
+            std::fs::read_to_string(&backup_path).expect("backup should be readable"),
+            "pre-0.16 config"
+        );
+
+        std::fs::write(&config_path, "normalized 0.16 config")
+            .expect("updated config fixture should be written");
+        ensure_config_backup(&config_path).expect("an existing backup should be retained");
+        assert_eq!(
+            std::fs::read_to_string(&backup_path).expect("backup should still be readable"),
+            "pre-0.16 config"
+        );
+        std::fs::remove_dir_all(directory).expect("temporary directory should be removed");
+    }
 
     #[test]
     fn new_configs_enable_depth_anchor_by_default() {

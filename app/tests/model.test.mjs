@@ -458,3 +458,109 @@ test('Pivot profiles preserve and validate the None nudge selection', () => {
   assert.equal(normalized.modules.pivotxr.profiles[0].nudgeSetId, 'none')
   assert.deepEqual(validateConfig(normalized), [])
 })
+
+test('0.15 and 0.15.1 configs preserve existing settings, profiles, and bindings', () => {
+  const legacy = defaultConfig()
+  legacy.core = {
+    enabled: true,
+    logLevel: 'debug',
+    logRetentionFiles: 17,
+    trackSeenApps: false,
+    sound: { volume: 63 },
+  }
+  legacy.applications = [{
+    id: 'dcs-world',
+    name: 'DCS World',
+    enabled: true,
+    match: { exe: 'DCS.exe' },
+  }]
+
+  legacy.modules.depthxr.enabled = true
+  legacy.modules.depthxr.defaults = { stereoBoost: 1.37, convergence: -0.22, depthAnchor: true }
+  legacy.modules.depthxr.bindings.toggleEnabled = keyboard('Ctrl', 'F8')
+  legacy.modules.depthxr.bindings.toggleAnchor = keyboard('Alt', 'F8')
+  legacy.modules.depthxr.profiles = [{
+    name: 'DCS Depth',
+    enabled: true,
+    applicationIds: ['dcs-world'],
+    settings: { stereoBoost: 1.61, convergence: 0.18, depthAnchor: false },
+  }]
+
+  const deviceBinding = {
+    type: 'device',
+    deviceGuid: '{LEGACY-HOTAS}',
+    productGuid: '{LEGACY-PRODUCT}',
+    deviceName: 'Legacy HOTAS',
+    inputPath: 'button-12',
+    inputLabel: 'Button 12',
+    sound: {
+      enabled: true,
+      activateSound: 'C:\\sounds\\pivot-on.wav',
+      deactivateSound: 'C:\\sounds\\pivot-off.wav',
+    },
+  }
+  legacy.modules.pivotxr.enabled = true
+  legacy.modules.pivotxr.defaults.responseMode = 'stepped'
+  legacy.modules.pivotxr.defaults.activationRampSeconds = 0.27
+  legacy.modules.pivotxr.defaults.yawLeftStep.amountDegrees = 23
+  legacy.modules.pivotxr.alwaysActive = true
+  legacy.modules.pivotxr.activationBindings = [activation('hold', deviceBinding)]
+  legacy.modules.pivotxr.setOriginBindings = [keyboard('Ctrl', 'Numpad5')]
+  legacy.modules.pivotxr.releaseOriginBindings = [keyboard('Ctrl', 'Numpad0')]
+  const pivotProfile = createPivotProfile(
+    legacy.modules.pivotxr.defaults,
+    ['dcs-world'],
+    false,
+    [activation('toggle', keyboard('F9'))],
+  )
+  pivotProfile.id = 'legacy-pivot-profile'
+  pivotProfile.name = 'DCS Pivot'
+  pivotProfile.settings.pitchDown.rotationMultiplier = 2.4
+  pivotProfile.setOriginBindings = [keyboard('F10')]
+  pivotProfile.releaseOriginBindings = [keyboard('F11')]
+  delete pivotProfile.behavior
+  delete pivotProfile.nudgeSetId
+  delete pivotProfile.viewControls
+  legacy.modules.pivotxr.profiles = [pivotProfile]
+  delete legacy.modules.pivotxr.behavior
+  delete legacy.modules.pivotxr.nudgeSetId
+  delete legacy.modules.pivotxr.nudgeSets
+  delete legacy.modules.pivotxr.viewControls
+
+  legacy.modules.quadviews.enabled = true
+  legacy.modules.quadviews.defaults.focusScale = 1.42
+  legacy.modules.quadviews.profiles = [{
+    name: 'DCS Quadviews',
+    enabled: true,
+    applicationIds: ['dcs-world'],
+    settings: { ...legacy.modules.quadviews.defaults, peripheralScale: 0.44 },
+  }]
+  delete legacy.modules.quadviews.diagnosticVisualizationBinding
+
+  legacy.modules.turbo.enabled = true
+  legacy.modules.turbo.toggleBinding = keyboard('Shift', 'F12')
+  legacy.modules.turbo.pacingMode = 'auto'
+  legacy.modules.turbo.runtimePins = { Oculus: 'sequenced' }
+  legacy.modules.turbo.metricsMode = 'binding'
+  legacy.modules.turbo.metricsBinding = keyboard('F7')
+  legacy.modules.turbo.profiles = [{ id: 'dcs-turbo', name: 'DCS Turbo', enabled: true, applicationIds: ['dcs-world'] }]
+
+  const normalized = normalizeConfig(legacy)
+  assert.deepEqual(normalized.core, legacy.core)
+  assert.deepEqual(normalized.applications, legacy.applications)
+  assert.deepEqual(normalized.modules.depthxr, legacy.modules.depthxr)
+  assert.deepEqual(normalized.modules.pivotxr.defaults, legacy.modules.pivotxr.defaults)
+  assert.deepEqual(normalized.modules.pivotxr.activationBindings, legacy.modules.pivotxr.activationBindings)
+  assert.deepEqual(normalized.modules.pivotxr.setOriginBindings, legacy.modules.pivotxr.setOriginBindings)
+  assert.deepEqual(normalized.modules.pivotxr.releaseOriginBindings, legacy.modules.pivotxr.releaseOriginBindings)
+  assert.deepEqual(normalized.modules.pivotxr.profiles[0].settings, legacy.modules.pivotxr.profiles[0].settings)
+  assert.deepEqual(normalized.modules.pivotxr.profiles[0].activationBindings, legacy.modules.pivotxr.profiles[0].activationBindings)
+  assert.deepEqual(normalized.modules.quadviews.defaults, legacy.modules.quadviews.defaults)
+  assert.deepEqual(normalized.modules.quadviews.profiles, legacy.modules.quadviews.profiles)
+  assert.deepEqual(normalized.modules.turbo, legacy.modules.turbo)
+  assert.deepEqual(normalized.modules.pivotxr.viewControls.quickViews, [])
+  assert.deepEqual(normalized.modules.pivotxr.nudgeSets[0].settings.yawLeftBindings, [])
+  assert.deepEqual(normalized.modules.quadviews.diagnosticVisualizationBinding, none())
+  assert.deepEqual(validateConfig(normalized), [])
+  assert.deepEqual(normalizeConfig(normalized), normalized)
+})

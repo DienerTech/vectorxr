@@ -428,18 +428,20 @@
     "pivotNudgeSet": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["id", "name", "settings"],
+      "required": ["id", "name", "allowWhileInactive", "settings"],
       "properties": {
         "id": { "type": "string", "minLength": 1 },
         "name": { "type": "string", "minLength": 1 },
+        "allowWhileInactive": { "type": "boolean" },
         "settings": { "$ref": "#/$defs/pivotNudgeSettings" }
       }
-    },    "pivotQuickView": {
+    },
+    "pivotQuickView": {
       "type": "object",
       "additionalProperties": false,
       "required": [
         "id", "name", "yawDegrees", "pitchDegrees", "positionRightCm", "positionUpCm",
-        "positionForwardCm", "transitionSeconds", "turnDirection", "activationBindings"
+        "positionForwardCm", "transitionSeconds", "activationBindings"
       ],
       "properties": {
         "id": { "type": "string", "minLength": 1 },
