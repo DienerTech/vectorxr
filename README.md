@@ -208,6 +208,7 @@ Patch-note summaries and item text support the attribute-free inline tags `<stro
 - `docs/`: architecture notes, the usage guide, and screenshots
 - `examples/`: sample settings
 - `scripts/`: Windows build, install, staging, and release helpers
+- [`docs/openxr-cts.md`](docs/openxr-cts.md): pinned Khronos CTS harness and the required runtime/VectorXR A/B procedure
 
 ## Acknowledgments
 
