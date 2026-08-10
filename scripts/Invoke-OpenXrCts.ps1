@@ -1,12 +1,14 @@
 [CmdletBinding()]
 param(
-    [ValidateSet("Pivot", "QuadViews", "Composition", "Automated")]
+    [ValidateSet("Pivot", "PivotInteractive", "QuadViews", "Composition", "Automated")]
     [string]$Suite = "Pivot",
 
     [ValidateSet("D3D11", "D3D12", "Vulkan", "Vulkan2", "OpenGL")]
     [string]$GraphicsPlugin = "D3D11",
 
     [string]$RunLabel = "manual",
+    [ValidateSet("Auto", "Any", "Enabled", "Disabled")]
+    [string]$ExpectedLayerState = "Auto",
     [string]$CtsCacheDir,
     [string]$ResultsDir,
     [string]$CompareTo,
@@ -41,9 +43,13 @@ $CtsCacheDir = [System.IO.Path]::GetFullPath($CtsCacheDir)
 $ResultsDir = [System.IO.Path]::GetFullPath($ResultsDir)
 
 $suiteSpecs = @{
-    # These exercise the contract between xrLocateViews, xrLocateSpace, spaces
-    # attached to compositor layers, and poses submitted through xrEndFrame.
-    Pivot = "xrLocateSpace_xrLocateViews,XrCompositionLayerQuad,QuadPoses,QuadHands,QuadProjectionQuad,ProjectionQuadProjection,SpaceOffsets"
+    # The first three are fully automatic assertions. The composition scenes
+    # are rendered for a short period and then auto-skipped: this exercises the
+    # relevant API paths without pretending software can judge the image.
+    Pivot = "xrLocateSpace,xrLocateSpace_xrLocateViews,XrCompositionLayerQuad,QuadPoses,QuadHands,QuadProjectionQuad,ProjectionQuadProjection"
+
+    # Full human-evaluated form, including the no-auto SpaceOffsets scenario.
+    PivotInteractive = "xrLocateSpace,xrLocateSpace_xrLocateViews,XrCompositionLayerQuad,QuadPoses,QuadHands,QuadProjectionQuad,ProjectionQuadProjection,SpaceOffsets"
 
     # The extension form and the OpenXR 1.1 promoted names are both selected.
     QuadViews = "XR_VARJO_quad_views*,StereoWithFoveatedInset*"
@@ -55,6 +61,28 @@ $suiteSpecs = @{
     # API layers can affect behavior outside the feature they intend to change.
     Automated = "exclude:[interactive]"
 }
+
+$suiteDefaultArguments = @{
+    Pivot = @("--autoSkipTimeout", "3000")
+    PivotInteractive = @()
+    QuadViews = @()
+    Composition = @()
+    Automated = @()
+}
+
+# Keep the focused Pivot cases in separate processes. Some runtimes do not
+# recover cleanly when an interactive composition session is auto-skipped, and
+# a native crash in one CTS case would otherwise prevent every later case from
+# producing a baseline result.
+$pivotPhases = @(
+    [ordered]@{ name = "xrLocateSpace"; spec = "xrLocateSpace"; arguments = @() },
+    [ordered]@{ name = "xrLocateSpace_xrLocateViews"; spec = "xrLocateSpace_xrLocateViews"; arguments = @() },
+    [ordered]@{ name = "XrCompositionLayerQuad"; spec = "XrCompositionLayerQuad"; arguments = @() },
+    [ordered]@{ name = "QuadPoses"; spec = "QuadPoses"; arguments = @("--autoSkipTimeout", "3000") },
+    [ordered]@{ name = "QuadHands"; spec = "QuadHands"; arguments = @("--autoSkipTimeout", "3000") },
+    [ordered]@{ name = "QuadProjectionQuad"; spec = "QuadProjectionQuad"; arguments = @("--autoSkipTimeout", "3000") },
+    [ordered]@{ name = "ProjectionQuadProjection"; spec = "ProjectionQuadProjection"; arguments = @("--autoSkipTimeout", "3000") }
+)
 
 function Assert-PathWithinDirectory {
     param(
@@ -213,32 +241,40 @@ function Get-GitMetadata {
 }
 
 function Get-CtsOutcomes {
-    param([Parameter(Mandatory = $true)][string]$XmlPath)
+    param([Parameter(Mandatory = $true)][string[]]$XmlPath)
 
-    [xml]$document = Get-Content -LiteralPath $XmlPath -Raw
     $outcomes = @{}
-    $testCases = $document.SelectNodes("//*[local-name()='testcase']")
-    foreach ($testCase in $testCases) {
-        $key = "$($testCase.classname)::$($testCase.name)"
-        $outcome = "passed"
-        if ($testCase.SelectSingleNode(".//*[local-name()='error']")) {
-            $outcome = "error"
+    foreach ($resultFile in $XmlPath) {
+        [xml]$document = Get-Content -LiteralPath $resultFile -Raw
+        $testCases = $document.SelectNodes("//*[local-name()='testcase']")
+        foreach ($testCase in $testCases) {
+            $key = "$($testCase.classname)::$($testCase.name)"
+            $outcome = "passed"
+            if ($testCase.SelectSingleNode(".//*[local-name()='error']")) {
+                $outcome = "error"
+            }
+            elseif ($testCase.SelectSingleNode(".//*[local-name()='failure']")) {
+                $outcome = "failed"
+            }
+            elseif ($testCase.SelectSingleNode(".//*[local-name()='skipped']")) {
+                $outcome = "skipped"
+            }
+            else {
+                $warning = $testCase.SelectSingleNode(".//*[local-name()='warning']")
+                if ($warning -and $warning.InnerText -match "User-specified timeout reached") {
+                    $outcome = "auto-skipped"
+                }
+                elseif ($warning) {
+                    $outcome = "warning"
+                }
+            }
+            $outcomes[$key] = $outcome
         }
-        elseif ($testCase.SelectSingleNode(".//*[local-name()='failure']")) {
-            $outcome = "failed"
-        }
-        elseif ($testCase.SelectSingleNode(".//*[local-name()='skipped']")) {
-            $outcome = "skipped"
-        }
-        elseif ($testCase.SelectSingleNode(".//*[local-name()='warning']")) {
-            $outcome = "warning"
-        }
-        $outcomes[$key] = $outcome
     }
     return $outcomes
 }
 
-function Resolve-ResultXmlPath {
+function Resolve-ResultXmlPaths {
     param([Parameter(Mandatory = $true)][string]$Path)
 
     $resolved = [System.IO.Path]::GetFullPath($Path)
@@ -246,9 +282,9 @@ function Resolve-ResultXmlPath {
         return $resolved
     }
     if (Test-Path -LiteralPath $resolved -PathType Container) {
-        $candidate = Get-ChildItem -LiteralPath $resolved -Filter "results.xml" -File | Select-Object -First 1
-        if ($candidate) {
-            return $candidate.FullName
+        $candidates = @(Get-ChildItem -LiteralPath $resolved -Filter "results*.xml" -File | Sort-Object Name)
+        if ($candidates.Count -gt 0) {
+            return @($candidates.FullName)
         }
     }
     throw "Could not find a CTS results XML file at '$Path'."
@@ -257,11 +293,11 @@ function Resolve-ResultXmlPath {
 function Write-Comparison {
     param(
         [Parameter(Mandatory = $true)][string]$BaselinePath,
-        [Parameter(Mandatory = $true)][string]$CurrentPath,
+        [Parameter(Mandatory = $true)][string[]]$CurrentPath,
         [Parameter(Mandatory = $true)][string]$OutputDirectory
     )
 
-    $baselineXml = Resolve-ResultXmlPath -Path $BaselinePath
+    $baselineXml = @(Resolve-ResultXmlPaths -Path $BaselinePath)
     $baseline = Get-CtsOutcomes -XmlPath $baselineXml
     $current = Get-CtsOutcomes -XmlPath $CurrentPath
     $regressions = @()
@@ -277,17 +313,17 @@ function Write-Comparison {
         }
         $entry = [ordered]@{ test = $key; baseline = $before; current = $after }
         $changed += $entry
-        if (($before -in @("passed", "warning", "skipped")) -and ($after -in @("failed", "error", "missing"))) {
+        if (($before -in @("passed", "warning", "skipped", "auto-skipped")) -and ($after -in @("failed", "error", "missing"))) {
             $regressions += $entry
         }
-        elseif (($before -in @("failed", "error", "missing")) -and ($after -in @("passed", "warning", "skipped"))) {
+        elseif (($before -in @("failed", "error", "missing")) -and ($after -in @("passed", "warning", "skipped", "auto-skipped"))) {
             $improvements += $entry
         }
     }
 
     $comparison = [ordered]@{
-        baseline = $baselineXml
-        current = $CurrentPath
+        baseline = @($baselineXml)
+        current = @($CurrentPath)
         regressionCount = $regressions.Count
         improvementCount = $improvements.Count
         changedCount = $changed.Count
@@ -316,22 +352,50 @@ if ([string]::IsNullOrWhiteSpace($safeLabel)) {
 }
 $timestamp = Get-Date -Format "yyyyMMdd-HHmmss"
 $runDirectory = Join-Path $ResultsDir "$timestamp-$safeLabel-$($Suite.ToLowerInvariant())-$($GraphicsPlugin.ToLowerInvariant())"
-$resultsXml = Join-Path $runDirectory "results.xml"
-$consoleLog = Join-Path $runDirectory "console.log"
 $metadataPath = Join-Path $runDirectory "metadata.json"
-$prematureExitGuard = Join-Path $runDirectory "premature-exit.guard"
 
-$ctsArguments = @(
-    $testSpec,
-    "-G", $GraphicsPlugin,
-    "--reporter", "ctsxml::out=$resultsXml",
-    "--reporter", "console",
-    "--premature-exit-guard-file", $prematureExitGuard
-)
-$ctsArguments += $AdditionalArguments
+if ($Suite -eq "Pivot") {
+    $phases = @($pivotPhases)
+}
+else {
+    $phases = @([ordered]@{
+        name = $Suite
+        spec = $testSpec
+        arguments = @($suiteDefaultArguments[$Suite])
+    })
+}
+
+$phasePlans = @()
+for ($phaseIndex = 0; $phaseIndex -lt $phases.Count; $phaseIndex++) {
+    $phase = $phases[$phaseIndex]
+    $phaseNumber = $phaseIndex + 1
+    $safePhaseName = ($phase.name -replace '[^A-Za-z0-9._-]', '-').ToLowerInvariant()
+    $resultsXml = Join-Path $runDirectory ("results-{0:D2}-{1}.xml" -f $phaseNumber, $safePhaseName)
+    $prematureExitGuard = Join-Path $runDirectory ("premature-exit-{0:D2}-{1}.guard" -f $phaseNumber, $safePhaseName)
+    $ctsArguments = @(
+        $phase.spec,
+        "-G", $GraphicsPlugin,
+        # Meta Link and some simulator-backed runtimes can report that no HMD
+        # system is available while the headset/session is still waking up.
+        "--pollGetSystem",
+        "--reporter", "ctsxml::out=$resultsXml",
+        "--reporter", "console",
+        "--premature-exit-guard-file", $prematureExitGuard
+    )
+    $ctsArguments += @($phase.arguments)
+    $ctsArguments += $AdditionalArguments
+    $phasePlans += [ordered]@{
+        name = $phase.name
+        spec = $phase.spec
+        resultsXml = $resultsXml
+        prematureExitGuard = $prematureExitGuard
+        arguments = @($ctsArguments)
+        command = @($conformanceCli) + $ctsArguments
+    }
+}
 
 $metadata = [ordered]@{
-    schemaVersion = 1
+    schemaVersion = 2
     runLabel = $RunLabel
     suite = $Suite
     testSpec = $testSpec
@@ -339,14 +403,20 @@ $metadata = [ordered]@{
     ctsVersion = $ctsVersion
     ctsReleaseTag = $ctsReleaseTag
     ctsArchiveSha256 = $ctsArchiveSha256
-    command = @($conformanceCli) + $ctsArguments
+    commands = @($phasePlans | ForEach-Object {
+        [ordered]@{
+            phase = $_.name
+            executable = $conformanceCli
+            arguments = @($_.arguments)
+        }
+    })
     activeRuntime = Get-ActiveRuntimeMetadata
     vectorXrLayerRegistrations = @(Get-VectorXrLayerRegistrations)
+    expectedLayerState = $ExpectedLayerState
     vectorXrSource = Get-GitMetadata
     startedAt = (Get-Date).ToString("o")
     completedAt = $null
-    processExitCode = $null
-    prematureExit = $null
+    invocations = @()
 }
 
 Write-Host "Suite: $Suite"
@@ -354,64 +424,151 @@ Write-Host "Test selection: $testSpec"
 Write-Host "Graphics plugin: $GraphicsPlugin"
 Write-Host "Run label: $RunLabel"
 Write-Host "Results: $runDirectory"
+if ($Suite -eq "Pivot") {
+    Write-Host "Mode: hands-off; interactive composition scenes auto-skip after 3 seconds."
+}
+
+$runtimeName = $null
+if ($metadata.activeRuntime.manifest -and $metadata.activeRuntime.manifest.runtime) {
+    $runtimeName = $metadata.activeRuntime.manifest.runtime.name
+}
+if (-not $runtimeName) {
+    $runtimeName = "Unknown runtime"
+}
+Write-Host "Active runtime: $runtimeName ($($metadata.activeRuntime.manifestPath))"
+
+$enabledLayerRegistrations = @($metadata.vectorXrLayerRegistrations | Where-Object { $_.enabled })
+$layerEnabled = $enabledLayerRegistrations.Count -gt 0
+$layerStateLabel = if ($layerEnabled) { "enabled" } else { "disabled or not registered" }
+Write-Host "VectorXR implicit layer: $layerStateLabel"
+
+$effectiveExpectedLayerState = $ExpectedLayerState
+if ($effectiveExpectedLayerState -eq "Auto") {
+    if ($RunLabel -match "(?i)baseline") {
+        $effectiveExpectedLayerState = "Disabled"
+    }
+    else {
+        $effectiveExpectedLayerState = "Any"
+    }
+}
+$metadata.effectiveExpectedLayerState = $effectiveExpectedLayerState
+
+$layerStateError = $null
+if ($effectiveExpectedLayerState -eq "Disabled" -and $layerEnabled) {
+    $registeredPaths = @($enabledLayerRegistrations | ForEach-Object { $_.manifestPath }) -join ", "
+    $layerStateError = "This run expects VectorXR to be disabled, but its implicit layer is enabled: $registeredPaths"
+}
+elseif ($effectiveExpectedLayerState -eq "Enabled" -and -not $layerEnabled) {
+    $layerStateError = "This run expects VectorXR to be enabled, but no enabled implicit-layer registration was found."
+}
 
 if ($Plan) {
+    if ($layerStateError) {
+        Write-Warning $layerStateError
+    }
+    foreach ($phasePlan in $phasePlans) {
+        Write-Host "Command [$($phasePlan.name)]: $conformanceCli $($phasePlan.arguments -join ' ')"
+    }
     Write-Host "Plan only; CTS was not launched."
     return
+}
+
+if ($layerStateError) {
+    throw $layerStateError
+}
+
+if ($Suite -eq "Pivot") {
+    Write-Host "Launching hands-off CTS run. Keep the headset active; no controller pass/fail input is required."
+}
+else {
+    Write-Host "Launching CTS. Put on the headset and follow its instructions."
+    Write-Host "Interactive cases wait for controller pass/fail input; press Ctrl+C to cancel if the headset shows no CTS content."
 }
 
 New-Item -ItemType Directory -Force -Path $runDirectory | Out-Null
 $metadata | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $metadataPath -Encoding UTF8
 
-$processExitCode = $null
+$phaseResults = @()
+$savedErrorActionPreference = $ErrorActionPreference
 Push-Location (Split-Path -Parent $conformanceCli)
 try {
-    & $conformanceCli @ctsArguments 2>&1 | Tee-Object -FilePath $consoleLog
-    $processExitCode = $LASTEXITCODE
+    # Keep the native process attached directly to the console. Piping through
+    # Tee-Object makes the CTS C++ streams block-buffered, hiding its startup
+    # and interactive progress until the process exits.
+    # CTS and its validation layer also write conformance diagnostics to
+    # stderr. They are test evidence, not PowerShell exceptions; keep them
+    # visible and use the native exit code/result XML to judge the run.
+    $ErrorActionPreference = "Continue"
+    foreach ($phasePlan in $phasePlans) {
+        Write-Host ""
+        Write-Host "--- CTS phase: $($phasePlan.name) ---"
+        $phaseStartedAt = (Get-Date).ToString("o")
+        & $conformanceCli @($phasePlan.arguments)
+        $processExitCode = $LASTEXITCODE
+        $prematureExit = Test-Path -LiteralPath $phasePlan.prematureExitGuard
+        $producedResults = Test-Path -LiteralPath $phasePlan.resultsXml -PathType Leaf
+        $phaseResults += [ordered]@{
+            name = $phasePlan.name
+            spec = $phasePlan.spec
+            resultsXml = $phasePlan.resultsXml
+            startedAt = $phaseStartedAt
+            completedAt = (Get-Date).ToString("o")
+            processExitCode = $processExitCode
+            prematureExit = $prematureExit
+            producedResults = $producedResults
+        }
+        if ($processExitCode -ne 0 -or $prematureExit) {
+            Write-Warning "CTS phase '$($phasePlan.name)' exited abnormally (exit code $processExitCode). Continuing with the remaining isolated phases."
+        }
+    }
 }
 finally {
+    $ErrorActionPreference = $savedErrorActionPreference
     Pop-Location
 }
 
 $metadata.completedAt = (Get-Date).ToString("o")
-$metadata.processExitCode = $processExitCode
-$metadata.prematureExit = Test-Path -LiteralPath $prematureExitGuard
+$metadata.invocations = @($phaseResults)
 $metadata | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $metadataPath -Encoding UTF8
 
-if (-not (Test-Path -LiteralPath $resultsXml -PathType Leaf)) {
-    throw "CTS did not produce results.xml. See $consoleLog"
+$resultXmlPaths = @($phaseResults | Where-Object { $_.producedResults } | ForEach-Object { $_.resultsXml })
+$missingResultPhases = @($phaseResults | Where-Object { -not $_.producedResults })
+if ($resultXmlPaths.Count -eq 0) {
+    throw "CTS did not produce any result XML. Verify that $runtimeName exposes an awake HMD and review the terminal output above."
 }
 
-$outcomes = Get-CtsOutcomes -XmlPath $resultsXml
+$outcomes = Get-CtsOutcomes -XmlPath $resultXmlPaths
 $failedCount = @($outcomes.Values | Where-Object { $_ -in @("failed", "error") }).Count
 $warningCount = @($outcomes.Values | Where-Object { $_ -eq "warning" }).Count
 $skippedCount = @($outcomes.Values | Where-Object { $_ -eq "skipped" }).Count
+$autoSkippedCount = @($outcomes.Values | Where-Object { $_ -eq "auto-skipped" }).Count
 $summary = [ordered]@{
     total = $outcomes.Count
     failedOrErrored = $failedCount
     warnings = $warningCount
     skipped = $skippedCount
+    autoSkipped = $autoSkippedCount
+    abnormalProcessExits = @($phaseResults | Where-Object { $_.processExitCode -ne 0 -or $_.prematureExit }).Count
+    missingResultPhases = $missingResultPhases.Count
     passed = @($outcomes.Values | Where-Object { $_ -eq "passed" }).Count
 }
 $summary | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $runDirectory "summary.json") -Encoding UTF8
 
-Write-Host "CTS result summary: $($summary.passed) passed, $failedCount failed/errored, $warningCount warning, $skippedCount skipped."
-Write-Host "Result XML: $resultsXml"
+Write-Host "CTS result summary: $($summary.passed) passed, $failedCount failed/errored, $autoSkippedCount auto-skipped, $warningCount warning, $skippedCount skipped."
+Write-Host "Result XML files: $($resultXmlPaths -join ', ')"
 
 $comparison = $null
 if ($CompareTo) {
-    $comparison = Write-Comparison -BaselinePath $CompareTo -CurrentPath $resultsXml -OutputDirectory $runDirectory
+    $comparison = Write-Comparison -BaselinePath $CompareTo -CurrentPath $resultXmlPaths -OutputDirectory $runDirectory
 }
 
-if ($metadata.prematureExit) {
-    throw "CTS did not exit cleanly; the premature-exit guard remains at $prematureExitGuard"
-}
-if ($processExitCode -ne 0) {
-    throw "CTS process exited with code $processExitCode. See $consoleLog"
-}
 if ($comparison -and $comparison.regressionCount -gt 0) {
     throw "CTS comparison found $($comparison.regressionCount) regression(s). See $($runDirectory)\comparison.json"
 }
 if ($failedCount -gt 0 -and -not $CompareTo) {
     Write-Warning "CTS reported $failedCount failure(s). Establish a runtime baseline and use -CompareTo before attributing them to VectorXR."
+}
+if ($missingResultPhases.Count -gt 0) {
+    $missingNames = @($missingResultPhases | ForEach-Object { $_.name }) -join ", "
+    throw "CTS produced no result XML for $($missingResultPhases.Count) phase(s): $missingNames"
 }
