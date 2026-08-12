@@ -1,21 +1,38 @@
 name: Release
 
 on:
+  workflow_dispatch:
   push:
     tags:
       - "v*.*.*"
 
 permissions:
   contents: write
+  id-token: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   windows-installer:
     name: Build Windows installer
     runs-on: windows-2022
+    environment: release
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Verify tagged commit belongs to master
+        shell: pwsh
+        run: |
+          git merge-base --is-ancestor $env:GITHUB_SHA refs/remotes/origin/master
+          if ($LASTEXITCODE -ne 0) {
+            throw "Release tag must point to a commit contained in master."
+          }
 
       - name: Set up Node
         uses: actions/setup-node@v4
@@ -28,6 +45,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Verify tag matches app versions
+        if: github.event_name == 'push'
         shell: pwsh
         run: ./scripts/Assert-VersionMatchesTag.ps1 -TagName "${{ github.ref_name }}"
 
@@ -50,11 +68,125 @@ jobs:
           $env:VCPKG_ROOT = $vcpkgRoot
           & "$vcpkgRoot\vcpkg.exe" install openxr-loader:x64-windows
 
-      - name: Build installer
+      - name: Build and stage OpenXR layer
+        shell: pwsh
+        run: |
+          ./scripts/Build-Layer.ps1
+          ./scripts/Stage-ReleasePayload.ps1
+
+      - name: Build VectorXR app without installer
         working-directory: app
-        run: npm run installer:build
+        run: npm run tauri:build -- --no-bundle
+
+      - name: Validate signing configuration
+        shell: pwsh
+        env:
+          AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+          AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          AZURE_SIGNING_ENDPOINT: ${{ vars.AZURE_SIGNING_ENDPOINT }}
+          AZURE_SIGNING_ACCOUNT: ${{ vars.AZURE_SIGNING_ACCOUNT }}
+          AZURE_CERTIFICATE_PROFILE: ${{ vars.AZURE_CERTIFICATE_PROFILE }}
+        run: |
+          $required = @(
+            "AZURE_CLIENT_ID",
+            "AZURE_TENANT_ID",
+            "AZURE_SUBSCRIPTION_ID",
+            "AZURE_SIGNING_ENDPOINT",
+            "AZURE_SIGNING_ACCOUNT",
+            "AZURE_CERTIFICATE_PROFILE"
+          )
+
+          foreach ($name in $required) {
+            if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($name))) {
+              throw "Required release-environment variable '$name' is not configured."
+            }
+          }
+
+      - name: Log in to Azure with GitHub OIDC
+        uses: azure/login@v3
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Sign VectorXR app and OpenXR layer
+        uses: azure/artifact-signing-action@v2
+        with:
+          endpoint: ${{ vars.AZURE_SIGNING_ENDPOINT }}
+          signing-account-name: ${{ vars.AZURE_SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ vars.AZURE_CERTIFICATE_PROFILE }}
+          files: |
+            ${{ github.workspace }}\app\src-tauri\target\release\vectorxr-app.exe
+            ${{ github.workspace }}\app\src-tauri\resources\vectorxr-layer\XR_APILAYER_DIENERTECH_VECTORXR.dll
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+          description: VectorXR
+          description-url: https://github.com/DienerTech/vectorxr
+
+      - name: Verify signed app payload
+        shell: pwsh
+        run: |
+          $files = @(
+            "app/src-tauri/target/release/vectorxr-app.exe",
+            "app/src-tauri/resources/vectorxr-layer/XR_APILAYER_DIENERTECH_VECTORXR.dll"
+          )
+
+          foreach ($file in $files) {
+            $signature = Get-AuthenticodeSignature -LiteralPath $file
+            Write-Host "$file : $($signature.Status) : $($signature.SignerCertificate.Subject)"
+            if ($signature.Status -ne "Valid") {
+              throw "Invalid Authenticode signature for '$file': $($signature.Status)."
+            }
+          }
+
+      - name: Build NSIS installer
+        working-directory: app
+        run: npm run tauri:bundle -- --bundles nsis
+
+      - name: Sign NSIS installer
+        uses: azure/artifact-signing-action@v2
+        with:
+          endpoint: ${{ vars.AZURE_SIGNING_ENDPOINT }}
+          signing-account-name: ${{ vars.AZURE_SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ vars.AZURE_CERTIFICATE_PROFILE }}
+          files-folder: ${{ github.workspace }}\app\src-tauri\target\release\bundle\nsis
+          files-folder-filter: exe
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+          description: VectorXR Setup
+          description-url: https://github.com/DienerTech/vectorxr
+
+      - name: Verify signed installer
+        shell: pwsh
+        run: |
+          $installers = @(Get-ChildItem -Path "app/src-tauri/target/release/bundle/nsis" -Filter "*.exe")
+          if ($installers.Count -ne 1) {
+            throw "Expected exactly one NSIS installer, found $($installers.Count)."
+          }
+
+          $signature = Get-AuthenticodeSignature -LiteralPath $installers[0].FullName
+          Write-Host "$($installers[0].Name) : $($signature.Status) : $($signature.SignerCertificate.Subject)"
+          if ($signature.Status -ne "Valid") {
+            throw "Invalid Authenticode signature for '$($installers[0].Name)': $($signature.Status)."
+          }
+
+      - name: Upload signing smoke-test artifacts
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@v4
+        with:
+          name: VectorXR-signing-smoke-${{ github.sha }}
+          path: |
+            app/src-tauri/target/release/vectorxr-app.exe
+            app/src-tauri/resources/vectorxr-layer/XR_APILAYER_DIENERTECH_VECTORXR.dll
+            app/src-tauri/target/release/bundle/nsis/*.exe
+          if-no-files-found: error
+          retention-days: 7
 
       - name: Prepare release assets
+        if: github.event_name == 'push'
         shell: pwsh
         run: |
           $tag = "${{ github.ref_name }}"
@@ -75,6 +207,7 @@ jobs:
           "$($hash.Hash.ToLowerInvariant())  $installerName" | Set-Content -LiteralPath "$installerPath.sha256" -Encoding ascii
 
       - name: Publish GitHub release
+        if: github.event_name == 'push'
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}

@@ -44,10 +44,10 @@ test('legacy and current patch notes use organized nested sections', () => {
     assert.ok(entry.items.every((item) => typeof item !== 'string'), `${entry.version} has an ungrouped top-level item`)
   }
 
-  assert.equal(patchNotes[0].version, '0.16.0')
-  assert.equal(patchNotes[0].title, 'Snap Views, Nudges, and Quadviews Diagnostics')
-  assert.match(patchNotes[0].summary, /Pivot/)
-  assert.match(JSON.stringify(patchNotes[0].items), /Quadviews/)
+  assert.equal(patchNotes[0].version, '0.16.1')
+  assert.equal(patchNotes[0].title, 'Signed Windows Releases')
+  assert.match(patchNotes[0].summary, /signatures/)
+  assert.match(JSON.stringify(patchNotes[0].items), /OpenXR API layer/)
   const maxDepth = Math.max(
     ...patchNotes[0].items.map((item, index) => assertItem(item, `latest.items[${index}]`)),
   )
