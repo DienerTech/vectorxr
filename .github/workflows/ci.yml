@@ -1,0 +1,79 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - master
+
+permissions:
+  contents: read
+
+jobs:
+  app:
+    name: App tests and build
+    runs-on: windows-2022
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Checkout pinned vcpkg registry
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: microsoft/vcpkg
+          ref: aae277acf4e7de287ddb5e208b5316614de6aad7
+          path: .vcpkg
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+        with:
+          toolchain: 1.94.1
+
+      - name: Install OpenXR loader
+        shell: pwsh
+        run: |
+          $vcpkgRoot = Join-Path $env:GITHUB_WORKSPACE ".vcpkg"
+          & "$vcpkgRoot\bootstrap-vcpkg.bat" -disableMetrics
+          if ($LASTEXITCODE -ne 0) {
+            throw "Failed to bootstrap the pinned vcpkg registry."
+          }
+
+          "VCPKG_ROOT=$vcpkgRoot" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          $env:VCPKG_ROOT = $vcpkgRoot
+          & "$vcpkgRoot\vcpkg.exe" install openxr-loader:x64-windows
+          if ($LASTEXITCODE -ne 0) {
+            throw "Failed to install the pinned OpenXR loader dependency."
+          }
+
+      - name: Install dependencies
+        working-directory: app
+        run: npm ci
+
+      - name: Test app model
+        working-directory: app
+        run: npm test
+
+      - name: Build app frontend
+        working-directory: app
+        run: npm run build
+
+      - name: Build and test OpenXR layer
+        shell: pwsh
+        run: |
+          ./scripts/Build-Layer.ps1
+          ./scripts/Stage-ReleasePayload.ps1
+
+      - name: Check Tauri app
+        working-directory: app/src-tauri
+        run: cargo check --locked

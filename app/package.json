@@ -1,7 +1,7 @@
 {
   "name": "vectorxr-app",
   "private": true,
-  "version": "0.16.0",
+  "version": "0.16.1",
   "license": "MPL-2.0",
   "type": "module",
   "scripts": {
@@ -12,6 +12,7 @@
     "icons:generate": "powershell -ExecutionPolicy Bypass -File ../scripts/Generate-TauriIcons.ps1",
     "tauri:dev": "tauri dev",
     "tauri:build": "tauri build",
+    "tauri:bundle": "tauri bundle",
     "installer:build": "powershell -ExecutionPolicy Bypass -File ../scripts/Build-Installer.ps1"
   },
   "dependencies": {

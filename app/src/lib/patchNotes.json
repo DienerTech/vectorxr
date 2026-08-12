@@ -1,5 +1,29 @@
 [
   {
+    "version": "0.16.1",
+    "date": "2026-08-11",
+    "title": "Signed Windows Releases",
+    "summary": "Adds verified DienerTech code signatures to VectorXR's Windows application, OpenXR layer, and installer.",
+    "items": [
+      {
+        "html": "<strong>Verified Windows publisher</strong>",
+        "items": [
+          "Signs the VectorXR configuration application and OpenXR API layer DLL as DienerTech LLC using Azure Artifact Signing.",
+          "Signs the final NSIS installer after it contains the signed application and layer payload.",
+          "Applies RFC 3161 timestamps so Windows can continue validating each signature after its short-lived signing certificate rotates."
+        ]
+      },
+      {
+        "html": "<strong>Protected release pipeline</strong>",
+        "items": [
+          "Uses passwordless GitHub workload identity federation, keeping private signing keys and reusable Azure credentials out of the repository.",
+          "Restricts signing authority to the VectorXR certificate profile and release environment.",
+          "Verifies every Authenticode signature before generating checksums or publishing release assets, and rejects release tags outside the master branch history."
+        ]
+      }
+    ]
+  },
+  {
     "version": "0.16.0",
     "date": "2026-08-06",
     "title": "Snap Views, Nudges, and Quadviews Diagnostics",

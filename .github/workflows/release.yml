@@ -1,33 +1,64 @@
 name: Release
 
 on:
+  workflow_dispatch:
   push:
     tags:
       - "v*.*.*"
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   windows-installer:
     name: Build Windows installer
     runs-on: windows-2022
+    environment: release
+    permissions:
+      contents: read
+      id-token: write
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Checkout pinned vcpkg registry
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: microsoft/vcpkg
+          ref: aae277acf4e7de287ddb5e208b5316614de6aad7
+          path: .vcpkg
+          persist-credentials: false
+
+      - name: Verify tagged commit belongs to master
+        shell: pwsh
+        run: |
+          git merge-base --is-ancestor $env:GITHUB_SHA refs/remotes/origin/master
+          if ($LASTEXITCODE -ne 0) {
+            throw "Release tag must point to a commit contained in master."
+          }
 
       - name: Set up Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
           cache: npm
           cache-dependency-path: app/package-lock.json
 
       - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+        with:
+          toolchain: 1.94.1
 
       - name: Verify tag matches app versions
+        if: github.event_name == 'push'
         shell: pwsh
         run: ./scripts/Assert-VersionMatchesTag.ps1 -TagName "${{ github.ref_name }}"
 
@@ -42,19 +73,156 @@ jobs:
       - name: Install OpenXR loader
         shell: pwsh
         run: |
-          $vcpkgRoot = $env:VCPKG_INSTALLATION_ROOT
-          if (-not $vcpkgRoot) {
-            $vcpkgRoot = "C:\vcpkg"
+          $vcpkgRoot = Join-Path $env:GITHUB_WORKSPACE ".vcpkg"
+          & "$vcpkgRoot\bootstrap-vcpkg.bat" -disableMetrics
+          if ($LASTEXITCODE -ne 0) {
+            throw "Failed to bootstrap the pinned vcpkg registry."
           }
 
+          "VCPKG_ROOT=$vcpkgRoot" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           $env:VCPKG_ROOT = $vcpkgRoot
           & "$vcpkgRoot\vcpkg.exe" install openxr-loader:x64-windows
+          if ($LASTEXITCODE -ne 0) {
+            throw "Failed to install the pinned OpenXR loader dependency."
+          }
 
-      - name: Build installer
+      - name: Build and stage OpenXR layer
+        shell: pwsh
+        run: |
+          ./scripts/Build-Layer.ps1
+          ./scripts/Stage-ReleasePayload.ps1
+
+      - name: Build VectorXR app without installer
         working-directory: app
-        run: npm run installer:build
+        run: npm run tauri:build -- --no-bundle
+
+      - name: Validate signing configuration
+        shell: pwsh
+        env:
+          AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+          AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          AZURE_SIGNING_ENDPOINT: ${{ vars.AZURE_SIGNING_ENDPOINT }}
+          AZURE_SIGNING_ACCOUNT: ${{ vars.AZURE_SIGNING_ACCOUNT }}
+          AZURE_CERTIFICATE_PROFILE: ${{ vars.AZURE_CERTIFICATE_PROFILE }}
+        run: |
+          $required = @(
+            "AZURE_CLIENT_ID",
+            "AZURE_TENANT_ID",
+            "AZURE_SUBSCRIPTION_ID",
+            "AZURE_SIGNING_ENDPOINT",
+            "AZURE_SIGNING_ACCOUNT",
+            "AZURE_CERTIFICATE_PROFILE"
+          )
+
+          foreach ($name in $required) {
+            if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($name))) {
+              throw "Required release-environment variable '$name' is not configured."
+            }
+          }
+
+      - name: Log in to Azure with GitHub OIDC
+        uses: azure/login@f5d393ae46f8fde4be8b75f32e3fc50e654ad0ca # v3
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Sign VectorXR app and OpenXR layer
+        uses: azure/artifact-signing-action@c7ab2a863ab5f9a846ddb8265964877ef296ee82 # v2
+        with:
+          endpoint: ${{ vars.AZURE_SIGNING_ENDPOINT }}
+          signing-account-name: ${{ vars.AZURE_SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ vars.AZURE_CERTIFICATE_PROFILE }}
+          files: |
+            ${{ github.workspace }}\app\src-tauri\target\release\vectorxr-app.exe
+            ${{ github.workspace }}\app\src-tauri\resources\vectorxr-layer\XR_APILAYER_DIENERTECH_VECTORXR.dll
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+          description: VectorXR
+          description-url: https://github.com/DienerTech/vectorxr
+
+      - name: Verify signed app payload
+        shell: pwsh
+        run: |
+          $files = @(
+            "app/src-tauri/target/release/vectorxr-app.exe",
+            "app/src-tauri/resources/vectorxr-layer/XR_APILAYER_DIENERTECH_VECTORXR.dll"
+          )
+
+          foreach ($file in $files) {
+            $signature = Get-AuthenticodeSignature -LiteralPath $file
+            Write-Host "$file : $($signature.Status) : $($signature.SignerCertificate.Subject)"
+            if ($signature.Status -ne "Valid") {
+              throw "Invalid Authenticode signature for '$file': $($signature.Status)."
+            }
+
+            if ($signature.SignerCertificate.Subject -notmatch '(^|,\s*)CN=DienerTech LLC(,|$)' -or
+                $signature.SignerCertificate.Subject -notmatch '(^|,\s*)O=DienerTech LLC(,|$)') {
+              throw "Unexpected Authenticode publisher for '$file': $($signature.SignerCertificate.Subject)."
+            }
+
+            if (-not $signature.TimeStamperCertificate) {
+              throw "The Authenticode signature for '$file' does not contain a trusted timestamp."
+            }
+          }
+
+      - name: Build NSIS installer
+        working-directory: app
+        run: npm run tauri:bundle -- --bundles nsis
+
+      - name: Sign NSIS installer
+        uses: azure/artifact-signing-action@c7ab2a863ab5f9a846ddb8265964877ef296ee82 # v2
+        with:
+          endpoint: ${{ vars.AZURE_SIGNING_ENDPOINT }}
+          signing-account-name: ${{ vars.AZURE_SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ vars.AZURE_CERTIFICATE_PROFILE }}
+          files-folder: ${{ github.workspace }}\app\src-tauri\target\release\bundle\nsis
+          files-folder-filter: exe
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+          description: VectorXR Setup
+          description-url: https://github.com/DienerTech/vectorxr
+
+      - name: Verify signed installer
+        shell: pwsh
+        run: |
+          $installers = @(Get-ChildItem -Path "app/src-tauri/target/release/bundle/nsis" -Filter "*.exe")
+          if ($installers.Count -ne 1) {
+            throw "Expected exactly one NSIS installer, found $($installers.Count)."
+          }
+
+          $signature = Get-AuthenticodeSignature -LiteralPath $installers[0].FullName
+          Write-Host "$($installers[0].Name) : $($signature.Status) : $($signature.SignerCertificate.Subject)"
+          if ($signature.Status -ne "Valid") {
+            throw "Invalid Authenticode signature for '$($installers[0].Name)': $($signature.Status)."
+          }
+
+          if ($signature.SignerCertificate.Subject -notmatch '(^|,\s*)CN=DienerTech LLC(,|$)' -or
+              $signature.SignerCertificate.Subject -notmatch '(^|,\s*)O=DienerTech LLC(,|$)') {
+            throw "Unexpected Authenticode publisher for '$($installers[0].Name)': $($signature.SignerCertificate.Subject)."
+          }
+
+          if (-not $signature.TimeStamperCertificate) {
+            throw "The Authenticode signature for '$($installers[0].Name)' does not contain a trusted timestamp."
+          }
+
+      - name: Upload signing smoke-test artifacts
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: VectorXR-signing-smoke-${{ github.sha }}
+          path: |
+            app/src-tauri/target/release/vectorxr-app.exe
+            app/src-tauri/resources/vectorxr-layer/XR_APILAYER_DIENERTECH_VECTORXR.dll
+            app/src-tauri/target/release/bundle/nsis/*.exe
+          if-no-files-found: error
+          retention-days: 7
 
       - name: Prepare release assets
+        if: github.event_name == 'push'
         shell: pwsh
         run: |
           $tag = "${{ github.ref_name }}"
@@ -74,34 +242,55 @@ jobs:
           $hash = Get-FileHash -LiteralPath $installerPath -Algorithm SHA256
           "$($hash.Hash.ToLowerInvariant())  $installerName" | Set-Content -LiteralPath "$installerPath.sha256" -Encoding ascii
 
-      - name: Publish GitHub release
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          $tag = "${{ github.ref_name }}"
           $notesPath = Join-Path $env:GITHUB_WORKSPACE "release/notes/$tag.md"
           if (-not (Test-Path -LiteralPath $notesPath -PathType Leaf)) {
             throw "Release notes were not found at $notesPath."
           }
 
-          $assets = Get-ChildItem -Path "release-assets" -File | ForEach-Object { $_.FullName }
+          Copy-Item -LiteralPath $notesPath -Destination (Join-Path $releaseDir "release-notes.md")
+
+      - name: Upload signed release payload
+        if: github.event_name == 'push'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: VectorXR-release-${{ github.sha }}
+          path: release-assets
+          if-no-files-found: error
+          retention-days: 7
+
+  publish-release:
+    name: Publish GitHub release
+    if: github.event_name == 'push'
+    needs: windows-installer
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download signed release payload
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: VectorXR-release-${{ github.sha }}
+          path: release-assets
+
+      - name: Publish immutable GitHub release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $notesPath = Join-Path $env:GITHUB_WORKSPACE "release-assets/release-notes.md"
+
           gh release view $tag *> $null
-          $releaseExists = $LASTEXITCODE -eq 0
+          if ($LASTEXITCODE -eq 0) {
+            throw "Release $tag already exists; refusing to replace its metadata or assets."
+          }
 
-          if ($releaseExists) {
-            gh release edit $tag --title "VectorXR $tag" --notes-file $notesPath
-            if ($LASTEXITCODE -ne 0) {
-              throw "Failed to update release metadata for $tag."
-            }
+          $assets = Get-ChildItem -Path "release-assets" -File |
+            Where-Object { $_.Name -ne "release-notes.md" } |
+            ForEach-Object { $_.FullName }
 
-            gh release upload $tag @assets --clobber
-            if ($LASTEXITCODE -ne 0) {
-              throw "Failed to upload release assets for $tag."
-            }
-          } else {
-            gh release create $tag @assets --verify-tag --title "VectorXR $tag" --notes-file $notesPath
-            if ($LASTEXITCODE -ne 0) {
-              throw "Failed to create release $tag."
-            }
+          gh release create $tag @assets --verify-tag --title "VectorXR $tag" --notes-file $notesPath
+          if ($LASTEXITCODE -ne 0) {
+            throw "Failed to create release $tag."
           }
