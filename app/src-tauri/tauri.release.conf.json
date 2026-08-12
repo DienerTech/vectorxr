@@ -10,7 +10,7 @@
           "-ExecutionPolicy",
           "Bypass",
           "-File",
-          "../scripts/Sign-TauriArtifact.ps1",
+          "../../scripts/Sign-TauriArtifact.ps1",
           "%1"
         ]
       }
