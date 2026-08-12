@@ -177,9 +177,6 @@ jobs:
           AZURE_SIGNING_ACCOUNT: ${{ vars.AZURE_SIGNING_ACCOUNT }}
           AZURE_CERTIFICATE_PROFILE: ${{ vars.AZURE_CERTIFICATE_PROFILE }}
         run: |
-          if (-not (Get-Module ArtifactSigning -ListAvailable -RequiredVersion "0.1.8")) {
-            throw "ArtifactSigning 0.1.8 was not installed by the layer-signing step."
-          }
           npm run tauri:bundle -- --bundles nsis --config src-tauri/tauri.release.conf.json
 
       # Tauri signs its patched installer payload and generated uninstaller.
