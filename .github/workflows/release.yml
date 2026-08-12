@@ -38,6 +38,7 @@ jobs:
           persist-credentials: false
 
       - name: Verify tagged commit belongs to master
+        if: github.event_name == 'push'
         shell: pwsh
         run: |
           git merge-base --is-ancestor $env:GITHUB_SHA refs/remotes/origin/master
