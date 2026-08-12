@@ -300,6 +300,7 @@ jobs:
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         run: |
           $tag = "${{ github.ref_name }}"
           $notesPath = Join-Path $env:GITHUB_WORKSPACE "release-assets/release-notes.md"
