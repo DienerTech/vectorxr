@@ -38,6 +38,7 @@ jobs:
           persist-credentials: false
 
       - name: Verify tagged commit belongs to master
+        if: github.event_name == 'push'
         shell: pwsh
         run: |
           git merge-base --is-ancestor $env:GITHUB_SHA refs/remotes/origin/master
@@ -128,14 +129,15 @@ jobs:
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
 
-      - name: Sign VectorXR app and OpenXR layer
+      # This also installs the pinned ArtifactSigning PowerShell module used by
+      # Tauri's signCommand later in the job.
+      - name: Sign OpenXR layer
         uses: azure/artifact-signing-action@c7ab2a863ab5f9a846ddb8265964877ef296ee82 # v2
         with:
           endpoint: ${{ vars.AZURE_SIGNING_ENDPOINT }}
           signing-account-name: ${{ vars.AZURE_SIGNING_ACCOUNT }}
           certificate-profile-name: ${{ vars.AZURE_CERTIFICATE_PROFILE }}
           files: |
-            ${{ github.workspace }}\app\src-tauri\target\release\vectorxr-app.exe
             ${{ github.workspace }}\app\src-tauri\resources\vectorxr-layer\XR_APILAYER_DIENERTECH_VECTORXR.dll
           file-digest: SHA256
           timestamp-rfc3161: http://timestamp.acs.microsoft.com
@@ -143,11 +145,10 @@ jobs:
           description: VectorXR
           description-url: https://github.com/DienerTech/vectorxr
 
-      - name: Verify signed app payload
+      - name: Verify signed OpenXR layer
         shell: pwsh
         run: |
           $files = @(
-            "app/src-tauri/target/release/vectorxr-app.exe",
             "app/src-tauri/resources/vectorxr-layer/XR_APILAYER_DIENERTECH_VECTORXR.dll"
           )
 
@@ -170,23 +171,37 @@ jobs:
 
       - name: Build NSIS installer
         working-directory: app
-        run: npm run tauri:bundle -- --bundles nsis
+        shell: pwsh
+        env:
+          AZURE_SIGNING_ENDPOINT: ${{ vars.AZURE_SIGNING_ENDPOINT }}
+          AZURE_SIGNING_ACCOUNT: ${{ vars.AZURE_SIGNING_ACCOUNT }}
+          AZURE_CERTIFICATE_PROFILE: ${{ vars.AZURE_CERTIFICATE_PROFILE }}
+        run: |
+          try {
+            npm run tauri:bundle -- --bundles nsis --config src-tauri/tauri.release.conf.json
+            if ($LASTEXITCODE -ne 0) {
+              throw "Tauri bundle failed with exit code $LASTEXITCODE."
+            }
+          } finally {
+            $signingLog = Join-Path $env:RUNNER_TEMP "vectorxr-tauri-signing.log"
+            if (Test-Path -LiteralPath $signingLog) {
+              Write-Host "Tauri signing log:"
+              Get-Content -LiteralPath $signingLog
+            }
+          }
 
-      - name: Sign NSIS installer
-        uses: azure/artifact-signing-action@c7ab2a863ab5f9a846ddb8265964877ef296ee82 # v2
-        with:
-          endpoint: ${{ vars.AZURE_SIGNING_ENDPOINT }}
-          signing-account-name: ${{ vars.AZURE_SIGNING_ACCOUNT }}
-          certificate-profile-name: ${{ vars.AZURE_CERTIFICATE_PROFILE }}
-          files-folder: ${{ github.workspace }}\app\src-tauri\target\release\bundle\nsis
-          files-folder-filter: exe
-          file-digest: SHA256
-          timestamp-rfc3161: http://timestamp.acs.microsoft.com
-          timestamp-digest: SHA256
-          description: VectorXR Setup
-          description-url: https://github.com/DienerTech/vectorxr
+      # Tauri signs its patched installer payload and generated uninstaller.
+      # Sign the separate standalone binary only after bundling so no later
+      # packaging operation can invalidate its signature.
+      - name: Sign standalone VectorXR app
+        shell: pwsh
+        env:
+          AZURE_SIGNING_ENDPOINT: ${{ vars.AZURE_SIGNING_ENDPOINT }}
+          AZURE_SIGNING_ACCOUNT: ${{ vars.AZURE_SIGNING_ACCOUNT }}
+          AZURE_CERTIFICATE_PROFILE: ${{ vars.AZURE_CERTIFICATE_PROFILE }}
+        run: ./scripts/Sign-TauriArtifact.ps1 "app/src-tauri/target/release/vectorxr-app.exe"
 
-      - name: Verify signed installer
+      - name: Verify signed release payload
         shell: pwsh
         run: |
           $installers = @(Get-ChildItem -Path "app/src-tauri/target/release/bundle/nsis" -Filter "*.exe")
@@ -194,19 +209,27 @@ jobs:
             throw "Expected exactly one NSIS installer, found $($installers.Count)."
           }
 
-          $signature = Get-AuthenticodeSignature -LiteralPath $installers[0].FullName
-          Write-Host "$($installers[0].Name) : $($signature.Status) : $($signature.SignerCertificate.Subject)"
-          if ($signature.Status -ne "Valid") {
-            throw "Invalid Authenticode signature for '$($installers[0].Name)': $($signature.Status)."
-          }
+          $files = @(
+            "app/src-tauri/target/release/vectorxr-app.exe",
+            "app/src-tauri/resources/vectorxr-layer/XR_APILAYER_DIENERTECH_VECTORXR.dll",
+            $installers[0].FullName
+          )
 
-          if ($signature.SignerCertificate.Subject -notmatch '(^|,\s*)CN=DienerTech LLC(,|$)' -or
-              $signature.SignerCertificate.Subject -notmatch '(^|,\s*)O=DienerTech LLC(,|$)') {
-            throw "Unexpected Authenticode publisher for '$($installers[0].Name)': $($signature.SignerCertificate.Subject)."
-          }
+          foreach ($file in $files) {
+            $signature = Get-AuthenticodeSignature -LiteralPath $file
+            Write-Host "$file : $($signature.Status) : $($signature.SignerCertificate.Subject)"
+            if ($signature.Status -ne "Valid") {
+              throw "Invalid Authenticode signature for '$file': $($signature.Status)."
+            }
 
-          if (-not $signature.TimeStamperCertificate) {
-            throw "The Authenticode signature for '$($installers[0].Name)' does not contain a trusted timestamp."
+            if ($signature.SignerCertificate.Subject -notmatch '(^|,\s*)CN=DienerTech LLC(,|$)' -or
+                $signature.SignerCertificate.Subject -notmatch '(^|,\s*)O=DienerTech LLC(,|$)') {
+              throw "Unexpected Authenticode publisher for '$file': $($signature.SignerCertificate.Subject)."
+            }
+
+            if (-not $signature.TimeStamperCertificate) {
+              throw "The Authenticode signature for '$file' does not contain a trusted timestamp."
+            }
           }
 
       - name: Upload signing smoke-test artifacts
