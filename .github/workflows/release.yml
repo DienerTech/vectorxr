@@ -177,7 +177,18 @@ jobs:
           AZURE_SIGNING_ACCOUNT: ${{ vars.AZURE_SIGNING_ACCOUNT }}
           AZURE_CERTIFICATE_PROFILE: ${{ vars.AZURE_CERTIFICATE_PROFILE }}
         run: |
-          npm run tauri:bundle -- --bundles nsis --config src-tauri/tauri.release.conf.json
+          try {
+            npm run tauri:bundle -- --bundles nsis --config src-tauri/tauri.release.conf.json
+            if ($LASTEXITCODE -ne 0) {
+              throw "Tauri bundle failed with exit code $LASTEXITCODE."
+            }
+          } finally {
+            $signingLog = Join-Path $env:RUNNER_TEMP "vectorxr-tauri-signing.log"
+            if (Test-Path -LiteralPath $signingLog) {
+              Write-Host "Tauri signing log:"
+              Get-Content -LiteralPath $signingLog
+            }
+          }
 
       # Tauri signs its patched installer payload and generated uninstaller.
       # Sign the separate standalone binary only after bundling so no later
