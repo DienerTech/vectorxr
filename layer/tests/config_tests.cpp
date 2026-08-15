@@ -14,6 +14,7 @@
 #include "depthxr/pivot_routing.h"
 #include "depthxr/pivot_step.h"
 #include "depthxr/pivot_view.h"
+#include "depthxr/quadviews_frame_cache.h"
 #include "depthxr/quadviews_recovery.h"
 #include "depthxr/quadviews_sizing.h"
 #include "depthxr/runtime_pacing.h"
@@ -2266,6 +2267,45 @@ void TestQuadViewsRecoveryStabilizer() {
     Expect(stabilizer.Ready(start), "Other runtimes must retain immediate recovery");
 }
 
+void TestQuadViewsFrameCacheKeepsGazeWithLocatedFrame() {
+    struct Frame {
+        bool gaze_valid{false};
+        double raw_yaw{0.0};
+        double smoothed_yaw{0.0};
+    };
+
+    depthxr::QuadViewsFrameCache<Frame> cache;
+    cache.Store(1'000, Frame{true, 0.10, 0.08}, 180);
+    // A later locate must not replace the gaze diagnostics associated with an
+    // older frame that the application submits afterward.
+    cache.Store(2'000, Frame{false, 0.40, 0.30}, 180);
+
+    Frame selected;
+    std::int64_t matched_time = 0;
+    Expect(cache.FindNearest(1'000, 100, &selected, &matched_time),
+           "Exact Quadviews frame-cache lookup should succeed");
+    Expect(matched_time == 1'000 && selected.gaze_valid &&
+               std::abs(selected.raw_yaw - 0.10) < 0.0001 &&
+               std::abs(selected.smoothed_yaw - 0.08) < 0.0001,
+           "Quadviews frame cache must return the gaze snapshot stored with the submitted frame");
+
+    Expect(cache.FindNearest(1'040, 50, &selected, &matched_time) && matched_time == 1'000 &&
+               selected.gaze_valid,
+           "Nearest Quadviews frame lookup should preserve the matched frame's gaze validity");
+    Expect(!cache.FindNearest(1'500, 100, &selected, &matched_time) && matched_time == 1'000,
+           "Quadviews frame lookup should reject a nearest frame outside the match window");
+
+    cache.Store(3'000, Frame{true, 0.50, 0.45}, 2);
+    Expect(cache.Size() == 2,
+           "Quadviews frame cache should enforce its bounded retention count");
+    Expect(!cache.FindNearest(1'000, 0, &selected, &matched_time),
+           "Quadviews frame cache should discard the oldest frame when retention is exceeded");
+
+    cache.PruneThrough(2'000);
+    Expect(cache.Size() == 1 && cache.FindNearest(3'000, 0, &selected, &matched_time),
+           "Quadviews frame cache should prune submitted frames while keeping future frames");
+}
+
 void TestPivotLocateViewsRouting() {
     Expect(depthxr::ShouldDrivePivotFromLocateViews(true, false),
            "A world-space xrLocateViews query must drive Pivot frame state");
@@ -2510,6 +2550,7 @@ int main() {
     TestQuadViewsSessionActivationPolicy();
     TestQuadViewsRecoveryStabilizationPolicy();
     TestQuadViewsRecoveryStabilizer();
+    TestQuadViewsFrameCacheKeepsGazeWithLocatedFrame();
     TestQuadViewsCanvasDimensionsMatchCompositionDensity();
     TestPivotLocateViewsRouting();
     TestNumpadActivationKeys();

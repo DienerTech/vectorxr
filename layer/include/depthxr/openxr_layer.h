@@ -26,6 +26,7 @@
 #include "depthxr/pivot_view.h"
 #include "depthxr/effects.h"
 #include "depthxr/logger.h"
+#include "depthxr/quadviews_frame_cache.h"
 #include "depthxr/quadviews_recovery.h"
 #include "depthxr/runtime_compatibility.h"
 #include "depthxr/runtime_pacing.h"
@@ -495,6 +496,17 @@ class OpenXrLayer {
         std::vector<XrFovf> native_fovs;
         std::vector<XrFovf> render_fovs;
     };
+    struct QuadViewsGazeDiagnostic {
+        bool valid{false};
+        double raw_yaw_radians{0.0};
+        double raw_pitch_radians{0.0};
+        double smoothed_yaw_radians{0.0};
+        double smoothed_pitch_radians{0.0};
+    };
+    struct QuadViewsFrameState {
+        std::array<XrFovf, 4> fovs{};
+        QuadViewsGazeDiagnostic gaze;
+    };
     void CachePivotPoseDelta(XrTime time, const XrPosef& pose_delta);
     bool FindPivotPoseDelta(XrTime time, XrPosef* pose_delta, XrTime* matched_time) const;
     void PrunePivotPoseDeltas(XrTime time);
@@ -515,9 +527,11 @@ class OpenXrLayer {
                                             const DepthSubmissionGeometry& geometry,
                                             const XrPosef& reverse_pose_delta,
                                             bool has_reverse_pose_delta) const;
-    void CacheQuadViewsFovs(XrTime time, std::span<const XrView> views);
-    bool FindQuadViewsFovs(XrTime time, std::array<XrFovf, 4>* fovs, XrTime* matched_time) const;
-    void PruneQuadViewsFovs(XrTime time);
+    void CacheQuadViewsFrame(XrTime time,
+                             std::span<const XrView> views,
+                             const QuadViewsGazeDiagnostic& gaze);
+    bool FindQuadViewsFrame(XrTime time, QuadViewsFrameState* frame, XrTime* matched_time) const;
+    void PruneQuadViewsFrames(XrTime time);
     bool IsTrackedViewSpace(XrSpace space) const;
     XrResult LocateRuntimeViews(XrSession session,
                                 const XrViewLocateInfo* view_locate_info,
@@ -525,7 +539,8 @@ class OpenXrLayer {
                                 uint32_t view_capacity_input,
                                 uint32_t* view_count_output,
                                 XrView* views,
-                                bool* synthesized_quad_views);
+                                bool* synthesized_quad_views,
+                                QuadViewsGazeDiagnostic* gaze_diagnostic);
     void RecordVarjoNativeLocateDiagnostics(const XrViewLocateInfo* view_locate_info,
                                             bool vector_request_injected,
                                             bool rendering_gaze_queried,
@@ -1091,7 +1106,7 @@ class OpenXrLayer {
     std::vector<const XrCompositionLayerBaseHeader*> end_frame_layers_scratch_;
     std::map<XrTime, XrPosef> cached_pivot_pose_deltas_;
     std::map<XrTime, std::vector<DepthSubmissionGeometry>> cached_depth_submission_geometry_;
-    std::map<XrTime, std::array<XrFovf, 4>> cached_quadviews_fovs_;
+    QuadViewsFrameCache<QuadViewsFrameState> cached_quadviews_frames_;
     std::unordered_map<XrSwapchain, SwapchainInfo> tracked_swapchains_;
     D3D11QuadViewsCompositor d3d11_quadviews_compositor_;
     D3D11FocusSharpen d3d11_focus_sharpen_;

@@ -2337,7 +2337,7 @@ XrResult OpenXrLayer::EndSession(XrSession session) {
         cached_eye_offsets_display_time_ = 0;
         cached_pivot_pose_deltas_.clear();
         cached_depth_submission_geometry_.clear();
-        cached_quadviews_fovs_.clear();
+        cached_quadviews_frames_.Clear();
         last_app_action_sync_time_.reset();
         last_eye_gaze_self_sync_time_.reset();
         quadviews_smoothed_focus_yaw_radians_ = 0.0;
@@ -3913,9 +3913,22 @@ bool OpenXrLayer::ComposeQuadViewsD3D11(const XrCompositionLayerProjection* sour
         return false;
     }
 
-    std::array<XrFovf, 4> cached_fovs{};
+    QuadViewsFrameState cached_frame{};
     XrTime matched_quadviews_fov_time = 0;
-    const bool has_cached_fovs = FindQuadViewsFovs(display_time, &cached_fovs, &matched_quadviews_fov_time);
+    const bool has_cached_fovs =
+        FindQuadViewsFrame(display_time, &cached_frame, &matched_quadviews_fov_time);
+    QuadViewsGazeDiagnostic gaze_diagnostic{};
+    if (has_cached_fovs) {
+        gaze_diagnostic = cached_frame.gaze;
+    } else if (quadviews_raw_focus_valid_ && quadviews_raw_focus_time_ == display_time) {
+        // A missing FOV cache is unusual, but retain an exact-time fallback for
+        // startup frames instead of pairing the submission with a newer locate.
+        gaze_diagnostic.valid = true;
+        gaze_diagnostic.raw_yaw_radians = quadviews_raw_focus_yaw_radians_;
+        gaze_diagnostic.raw_pitch_radians = quadviews_raw_focus_pitch_radians_;
+        gaze_diagnostic.smoothed_yaw_radians = quadviews_smoothed_focus_yaw_radians_;
+        gaze_diagnostic.smoothed_pitch_radians = quadviews_smoothed_focus_pitch_radians_;
+    }
 
     struct SavedD3D11State {
         ID3D11RenderTargetView* render_targets[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT]{};
@@ -4244,8 +4257,9 @@ bool OpenXrLayer::ComposeQuadViewsD3D11(const XrCompositionLayerProjection* sour
         context->PSSetShaderResources(0, 2, resources);
         context->PSSetSamplers(0, 1, &d3d11_quadviews_compositor_.sampler);
 
-        const XrFovf& full_fov = has_cached_fovs ? cached_fovs[eye] : source_layer->views[eye].fov;
-        const XrFovf& focus_fov = has_cached_fovs ? cached_fovs[eye + 2] : source_layer->views[eye + 2].fov;
+        const XrFovf& full_fov = has_cached_fovs ? cached_frame.fovs[eye] : source_layer->views[eye].fov;
+        const XrFovf& focus_fov =
+            has_cached_fovs ? cached_frame.fovs[eye + 2] : source_layer->views[eye + 2].fov;
         const XrSwapchainSubImage& peripheral_sub_image = source_layer->views[eye].subImage;
         const XrSwapchainSubImage& focus_sub_image = source_layer->views[eye + 2].subImage;
         const uint32_t focus_content_width =
@@ -4263,9 +4277,7 @@ bool OpenXrLayer::ComposeQuadViewsD3D11(const XrCompositionLayerProjection* sour
 
         const bool eye_tracking_mode =
             resolved_settings_.quadviews.tracking_mode == QuadViewsTrackingMode::Eye;
-        const XrTime diagnostic_time = has_cached_fovs ? matched_quadviews_fov_time : display_time;
-        const bool raw_gaze_valid = eye_tracking_mode && quadviews_raw_focus_valid_ &&
-                                    quadviews_raw_focus_time_ == diagnostic_time;
+        const bool raw_gaze_valid = eye_tracking_mode && gaze_diagnostic.valid;
         constants.diagnostic_params[0] = quadviews_diagnostic_visualization_enabled_ ? 1.0f : 0.0f;
         constants.diagnostic_params[1] = eye_tracking_mode ? 1.0f : 0.0f;
         constants.diagnostic_params[2] = raw_gaze_valid ? 1.0f : 0.0f;
@@ -4273,9 +4285,9 @@ bool OpenXrLayer::ComposeQuadViewsD3D11(const XrCompositionLayerProjection* sour
         constants.output_texel[1] = 1.0f / static_cast<float>(std::max<uint32_t>(1, target.height));
 
         const std::array<float, 2> raw_gaze_uv = ProjectViewAnglesToUv(
-            full_fov, quadviews_raw_focus_yaw_radians_, quadviews_raw_focus_pitch_radians_);
+            full_fov, gaze_diagnostic.raw_yaw_radians, gaze_diagnostic.raw_pitch_radians);
         const std::array<float, 2> smoothed_gaze_uv = ProjectViewAnglesToUv(
-            full_fov, quadviews_smoothed_focus_yaw_radians_, quadviews_smoothed_focus_pitch_radians_);
+            full_fov, gaze_diagnostic.smoothed_yaw_radians, gaze_diagnostic.smoothed_pitch_radians);
         const std::array<float, 2> head_center_uv = ProjectViewAnglesToUv(full_fov, 0.0, 0.0);
         const std::array<float, 2> configured_offset_uv = ProjectViewAnglesToUv(
             full_fov,
@@ -4517,7 +4529,7 @@ bool OpenXrLayer::ComposeQuadViewsD3D11(const XrCompositionLayerProjection* sour
             (*composed_views)[eye].pose = MultiplyPoses((*composed_views)[eye].pose, reverse_delta);
         }
         if (has_cached_fovs) {
-            (*composed_views)[eye].fov = cached_fovs[eye];
+            (*composed_views)[eye].fov = cached_frame.fovs[eye];
         }
         QuadViewsCompositionTarget& target = d3d11_quadviews_compositor_.targets[eye];
         (*composed_views)[eye].subImage.swapchain = target.swapchain;
@@ -6400,7 +6412,7 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
     if (!resolved_settings_.core.enabled) {
         cached_pivot_pose_deltas_.clear();
         cached_depth_submission_geometry_.clear();
-        cached_quadviews_fovs_.clear();
+        cached_quadviews_frames_.Clear();
         pivotxr_smoothed_extra_yaw_radians_ = 0.0;
         pivotxr_smoothed_extra_pitch_radians_ = 0.0;
         pivotxr_yaw_step_ = 0;
@@ -6413,7 +6425,7 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
         const XrResult release_result = FlushDeferredSwapchainReleasesLocked("end frame");
         PrunePivotPoseDeltas(frame_end_info->displayTime);
         PruneDepthSubmissionGeometry(frame_end_info->displayTime);
-        PruneQuadViewsFovs(frame_end_info->displayTime);
+        PruneQuadViewsFrames(frame_end_info->displayTime);
         if (XR_FAILED(release_result)) {
             return release_result;
         }
@@ -6703,7 +6715,7 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
         const XrResult release_result = FlushDeferredSwapchainReleasesLocked("end frame");
         PrunePivotPoseDeltas(frame_end_info->displayTime);
         PruneDepthSubmissionGeometry(frame_end_info->displayTime);
-        PruneQuadViewsFovs(frame_end_info->displayTime);
+        PruneQuadViewsFrames(frame_end_info->displayTime);
         if (XR_FAILED(release_result)) {
             return release_result;
         }
@@ -6875,7 +6887,7 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
     const XrResult release_result = FlushDeferredSwapchainReleasesLocked("end frame");
     PrunePivotPoseDeltas(frame_end_info->displayTime);
     PruneDepthSubmissionGeometry(frame_end_info->displayTime);
-    PruneQuadViewsFovs(frame_end_info->displayTime);
+    PruneQuadViewsFrames(frame_end_info->displayTime);
     if (XR_FAILED(release_result)) {
         return release_result;
     }
@@ -7083,8 +7095,16 @@ XrResult OpenXrLayer::LocateViews(XrSession session,
                                   uint32_t* view_count_output,
                                   XrView* views) {
     bool synthesized_quad_views = false;
+    QuadViewsGazeDiagnostic gaze_diagnostic{};
     const XrResult result = LocateRuntimeViews(
-        session, view_locate_info, view_state, view_capacity_input, view_count_output, views, &synthesized_quad_views);
+        session,
+        view_locate_info,
+        view_state,
+        view_capacity_input,
+        view_count_output,
+        views,
+        &synthesized_quad_views,
+        &gaze_diagnostic);
 
     if (XR_FAILED(result) || !views || !view_count_output) {
         return result;
@@ -7375,7 +7395,8 @@ XrResult OpenXrLayer::LocateViews(XrSession session,
         views[i].fov.angleDown = static_cast<float>(adjusted_views[i].fov.angle_down);
     }
     if (view_locate_info && IsQuadViewConfiguration(view_configuration_type) && count >= 4) {
-        CacheQuadViewsFovs(view_locate_info->displayTime, std::span<const XrView>(views, count));
+        CacheQuadViewsFrame(
+            view_locate_info->displayTime, std::span<const XrView>(views, count), gaze_diagnostic);
     }
 
     const XrTime locate_time = view_locate_info ? view_locate_info->displayTime : 0;
@@ -8222,7 +8243,7 @@ void OpenXrLayer::ResetSessionState() {
     cached_eye_offsets_display_time_ = 0;
     cached_pivot_pose_deltas_.clear();
     cached_depth_submission_geometry_.clear();
-    cached_quadviews_fovs_.clear();
+    cached_quadviews_frames_.Clear();
     last_app_action_sync_time_.reset();
     last_eye_gaze_self_sync_time_.reset();
     ResetSwapchainState();
@@ -8738,7 +8759,7 @@ void OpenXrLayer::DestroyInternalReferenceSpaces() {
         cached_eye_offsets_display_time_ = 0;
         cached_pivot_pose_deltas_.clear();
         cached_depth_submission_geometry_.clear();
-        cached_quadviews_fovs_.clear();
+        cached_quadviews_frames_.Clear();
         return;
     }
 
@@ -8767,7 +8788,7 @@ void OpenXrLayer::DestroyInternalReferenceSpaces() {
     cached_eye_offsets_display_time_ = 0;
     cached_pivot_pose_deltas_.clear();
     cached_depth_submission_geometry_.clear();
-    cached_quadviews_fovs_.clear();
+    cached_quadviews_frames_.Clear();
 }
 
 XrResult OpenXrLayer::CreateVarjoNativeFoveationResources(XrSession session) {
@@ -9184,67 +9205,37 @@ uint32_t OpenXrLayer::RestoreDepthSubmissionGeometry(
     return restored_views;
 }
 
-void OpenXrLayer::CacheQuadViewsFovs(XrTime time, std::span<const XrView> views) {
+void OpenXrLayer::CacheQuadViewsFrame(XrTime time,
+                                      std::span<const XrView> views,
+                                      const QuadViewsGazeDiagnostic& gaze) {
     if (time == 0 || views.size() < 4) {
         return;
     }
 
-    std::array<XrFovf, 4> fovs{};
-    for (uint32_t i = 0; i < fovs.size(); ++i) {
-        fovs[i] = views[i].fov;
+    QuadViewsFrameState frame;
+    for (uint32_t i = 0; i < frame.fovs.size(); ++i) {
+        frame.fovs[i] = views[i].fov;
     }
-    cached_quadviews_fovs_[time] = fovs;
-    while (cached_quadviews_fovs_.size() > kMaxCachedQuadViewsFovFrames) {
-        cached_quadviews_fovs_.erase(cached_quadviews_fovs_.begin());
-    }
+    frame.gaze = gaze;
+    cached_quadviews_frames_.Store(time, frame, kMaxCachedQuadViewsFovFrames);
 }
 
-bool OpenXrLayer::FindQuadViewsFovs(XrTime time, std::array<XrFovf, 4>* fovs, XrTime* matched_time) const {
-    if (!fovs || !matched_time) {
+bool OpenXrLayer::FindQuadViewsFrame(XrTime time,
+                                     QuadViewsFrameState* frame,
+                                     XrTime* matched_time) const {
+    if (!frame || !matched_time) {
         return false;
     }
 
-    if (cached_quadviews_fovs_.empty()) {
-        *matched_time = 0;
-        return false;
-    }
-
-    auto exact = cached_quadviews_fovs_.find(time);
-    if (exact != cached_quadviews_fovs_.end()) {
-        *fovs = exact->second;
-        *matched_time = exact->first;
-        return true;
-    }
-
-    auto upper = cached_quadviews_fovs_.lower_bound(time);
-    std::map<XrTime, std::array<XrFovf, 4>>::const_iterator best;
-    if (upper == cached_quadviews_fovs_.begin()) {
-        best = upper;
-    } else if (upper == cached_quadviews_fovs_.end()) {
-        best = std::prev(upper);
-    } else {
-        auto lower = std::prev(upper);
-        best = (time - lower->first <= upper->first - time) ? lower : upper;
-    }
-
-    const XrTime match_delta = best->first > time ? best->first - time : time - best->first;
-    if (match_delta > kMaxQuadViewsFovMatchWindow) {
-        *matched_time = best->first;
-        return false;
-    }
-
-    *fovs = best->second;
-    *matched_time = best->first;
-    return true;
+    std::int64_t cache_matched_time = 0;
+    const bool found = cached_quadviews_frames_.FindNearest(
+        time, kMaxQuadViewsFovMatchWindow, frame, &cache_matched_time);
+    *matched_time = cache_matched_time;
+    return found;
 }
 
-void OpenXrLayer::PruneQuadViewsFovs(XrTime time) {
-    auto keep_from = cached_quadviews_fovs_.upper_bound(time);
-    if (keep_from == cached_quadviews_fovs_.begin()) {
-        return;
-    }
-
-    cached_quadviews_fovs_.erase(cached_quadviews_fovs_.begin(), keep_from);
+void OpenXrLayer::PruneQuadViewsFrames(XrTime time) {
+    cached_quadviews_frames_.PruneThrough(time);
 }
 
 bool OpenXrLayer::IsTrackedViewSpace(XrSpace space) const {
@@ -9447,9 +9438,13 @@ XrResult OpenXrLayer::LocateRuntimeViews(XrSession session,
                                          uint32_t view_capacity_input,
                                          uint32_t* view_count_output,
                                          XrView* views,
-                                         bool* synthesized_quad_views) {
+                                         bool* synthesized_quad_views,
+                                         QuadViewsGazeDiagnostic* gaze_diagnostic) {
     if (synthesized_quad_views) {
         *synthesized_quad_views = false;
+    }
+    if (gaze_diagnostic) {
+        *gaze_diagnostic = {};
     }
 
     bool quadviews_emulation_active = false;
@@ -9618,6 +9613,13 @@ XrResult OpenXrLayer::LocateRuntimeViews(XrSession session,
             quadviews_last_focus_smoothing_wall_time_ = now;
             focus_yaw_radians = quadviews_smoothed_focus_yaw_radians_;
             focus_pitch_radians = quadviews_smoothed_focus_pitch_radians_;
+        }
+        if (gaze_diagnostic) {
+            gaze_diagnostic->valid = has_eye_focus && quadviews_raw_focus_valid_;
+            gaze_diagnostic->raw_yaw_radians = quadviews_raw_focus_yaw_radians_;
+            gaze_diagnostic->raw_pitch_radians = quadviews_raw_focus_pitch_radians_;
+            gaze_diagnostic->smoothed_yaw_radians = focus_yaw_radians;
+            gaze_diagnostic->smoothed_pitch_radians = focus_pitch_radians;
         }
     }
 
