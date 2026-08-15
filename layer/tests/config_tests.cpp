@@ -1,3 +1,4 @@
+#include <array>
 #include <cmath>
 #include <cstdlib>
 #include <filesystem>
@@ -2330,9 +2331,10 @@ void TestPivotLocateViewsRouting() {
     };
 
     record_locate_result(false, 100, 42);
+    record_locate_result(false, 100, 99);
     record_locate_result(true, 100, 0);
     expect_delta(100, 42,
-                 "A later VIEW-relative query must not overwrite the world-space frame delta");
+                 "Repeated same-time queries must reuse the first logical Pivot frame delta");
 
     pose_deltas.clear();
     record_locate_result(true, 200, 0);
@@ -2388,6 +2390,116 @@ void TestPivotLocateViewsRouting() {
                depthxr::PivotPoseDeltaSelection::Matched &&
                !held_pose_delta.has_value() && consecutive_misses == 0,
            "Inactive Pivot routing must disarm the held correction");
+}
+
+void TestPivotPoseDeltaSpaceReexpression() {
+    using Matrix = std::array<double, 9>;
+    using Vector = std::array<double, 3>;
+    const auto multiply = [](const Matrix& lhs, const Matrix& rhs) {
+        Matrix result{};
+        for (size_t row = 0; row < 3; ++row) {
+            for (size_t column = 0; column < 3; ++column) {
+                for (size_t inner = 0; inner < 3; ++inner) {
+                    result[row * 3 + column] +=
+                        lhs[row * 3 + inner] * rhs[inner * 3 + column];
+                }
+            }
+        }
+        return result;
+    };
+    const auto inverse_rotation = [](const Matrix& matrix) {
+        return Matrix{
+            matrix[0], matrix[3], matrix[6],
+            matrix[1], matrix[4], matrix[7],
+            matrix[2], matrix[5], matrix[8],
+        };
+    };
+    const auto transform = [](const Matrix& matrix, const Vector& vector) {
+        return Vector{
+            matrix[0] * vector[0] + matrix[1] * vector[1] + matrix[2] * vector[2],
+            matrix[3] * vector[0] + matrix[4] * vector[1] + matrix[5] * vector[2],
+            matrix[6] * vector[0] + matrix[7] * vector[1] + matrix[8] * vector[2],
+        };
+    };
+    const auto nearly_equal = [](const Vector& lhs, const Vector& rhs) {
+        for (size_t index = 0; index < lhs.size(); ++index) {
+            if (std::abs(lhs[index] - rhs[index]) > 0.000001) {
+                return false;
+            }
+        }
+        return true;
+    };
+    const auto yaw = [](double radians) {
+        const double cosine = std::cos(radians);
+        const double sine = std::sin(radians);
+        return Matrix{
+            cosine, 0.0, sine,
+            0.0, 1.0, 0.0,
+            -sine, 0.0, cosine,
+        };
+    };
+    const auto pitch = [](double radians) {
+        const double cosine = std::cos(radians);
+        const double sine = std::sin(radians);
+        return Matrix{
+            1.0, 0.0, 0.0,
+            0.0, cosine, -sine,
+            0.0, sine, cosine,
+        };
+    };
+
+    constexpr double kPi = 3.14159265358979323846;
+    const Matrix source_in_target = yaw(-112.0 * kPi / 180.0);
+    const Matrix source_pitch_delta = pitch(30.0 * kPi / 180.0);
+    const Matrix target_delta = depthxr::ReexpressPivotPoseDelta(
+        source_pitch_delta, source_in_target, multiply, inverse_rotation);
+    const Vector source_vector{0.2, 0.7, -0.4};
+
+    // Conjugation must make applying the delta before or after the coordinate
+    // change equivalent. A raw source-space pitch fails this property when the
+    // spaces differ by yaw (the IL-2 diagonal-roll signature).
+    const Vector expected = transform(
+        source_in_target, transform(source_pitch_delta, source_vector));
+    const Vector converted = transform(
+        target_delta, transform(source_in_target, source_vector));
+    const Vector unconverted = transform(
+        source_pitch_delta, transform(source_in_target, source_vector));
+    Expect(nearly_equal(converted, expected),
+           "A Pivot delta must be conjugated into the projection layer's space");
+    Expect(!nearly_equal(unconverted, expected),
+           "Applying an unconverted pitch across yawed spaces must expose the regression test");
+
+    // Repeat the group property with a homogeneous 2D rigid transform so the
+    // positional part of a Pivot/neck offset is covered as well as rotation.
+    const auto rigid_2d = [](double radians, double x, double y) {
+        const double cosine = std::cos(radians);
+        const double sine = std::sin(radians);
+        return Matrix{
+            cosine, -sine, x,
+            sine, cosine, y,
+            0.0, 0.0, 1.0,
+        };
+    };
+    const auto inverse_rigid_2d = [](const Matrix& matrix) {
+        const double inverse_x = -(matrix[0] * matrix[2] + matrix[3] * matrix[5]);
+        const double inverse_y = -(matrix[1] * matrix[2] + matrix[4] * matrix[5]);
+        return Matrix{
+            matrix[0], matrix[3], inverse_x,
+            matrix[1], matrix[4], inverse_y,
+            0.0, 0.0, 1.0,
+        };
+    };
+    const Matrix source_pose_in_target = rigid_2d(-1.2, 1.4, -0.6);
+    const Matrix source_rigid_delta = rigid_2d(0.4, 0.25, -0.1);
+    const Matrix target_rigid_delta = depthxr::ReexpressPivotPoseDelta(
+        source_rigid_delta, source_pose_in_target, multiply, inverse_rigid_2d);
+    const Vector source_point{0.3, -0.8, 1.0};
+    const Vector rigid_expected = transform(
+        source_pose_in_target, transform(source_rigid_delta, source_point));
+    const Vector rigid_converted = transform(
+        target_rigid_delta, transform(source_pose_in_target, source_point));
+    Expect(nearly_equal(rigid_converted, rigid_expected),
+           "A full rigid Pivot delta must preserve rotation and translation across spaces");
 }
 
 void TestNumpadActivationKeys() {
@@ -2553,6 +2665,7 @@ int main() {
     TestQuadViewsFrameCacheKeepsGazeWithLocatedFrame();
     TestQuadViewsCanvasDimensionsMatchCompositionDensity();
     TestPivotLocateViewsRouting();
+    TestPivotPoseDeltaSpaceReexpression();
     TestNumpadActivationKeys();
     TestDeviceInputPathsAndHatDirections();
 #ifdef _WIN32
