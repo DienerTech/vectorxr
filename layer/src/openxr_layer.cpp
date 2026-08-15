@@ -2293,7 +2293,8 @@ XrResult OpenXrLayer::EndSession(XrSession session) {
     }
 
     if (begin_pending_frame) {
-        const XrResult begin_result = next_begin_frame_(session, nullptr);
+        const XrFrameBeginInfo begin_info{XR_TYPE_FRAME_BEGIN_INFO};
+        const XrResult begin_result = next_begin_frame_(session, &begin_info);
         if (XR_FAILED(begin_result)) {
             logger_.Info("Session end: unable to balance Turbo's pending xrBeginFrame, result=" +
                          std::to_string(static_cast<int>(begin_result)) + ".");
@@ -4548,6 +4549,10 @@ bool OpenXrLayer::ComposeQuadViewsD3D11(const XrCompositionLayerProjection* sour
 XrResult OpenXrLayer::WaitFrame(XrSession session,
                                 const XrFrameWaitInfo* frame_wait_info,
                                 XrFrameState* frame_state) {
+    if (!frame_state || (frame_wait_info && frame_wait_info->type != XR_TYPE_FRAME_WAIT_INFO) ||
+        frame_state->type != XR_TYPE_FRAME_STATE) {
+        return XR_ERROR_VALIDATION_FAILURE;
+    }
     if (!turbo_frame_interception_required_.load(std::memory_order_acquire)) {
         if (!frame_pacing_debug_enabled_.load(std::memory_order_relaxed)) {
             return next_wait_frame_(session, frame_wait_info, frame_state);
@@ -4574,13 +4579,11 @@ XrResult OpenXrLayer::WaitFrame(XrSession session,
         }
         return result;
     }
-    if (!frame_state) {
-        return next_wait_frame_(session, frame_wait_info, frame_state);
-    }
-
     {
         std::unique_lock lock(turbo_mutex_);
-        const bool wait_pipelined = turbo_async_wait_.valid();
+        bool wait_pipelined = turbo_async_wait_.valid();
+        bool async_handoff = turbo_async_handoff_active_;
+        bool async_interception_cancelled = false;
         // Fabricate while a pipelined wait is outstanding (async pacing) or
         // the sequenced pipeline is established — in both cases the runtime
         // already owns this frame's pacing and this wait must never reach it.
@@ -4588,8 +4591,18 @@ XrResult OpenXrLayer::WaitFrame(XrSession session,
         // DCS calls xrWaitFrame concurrently with xrEndFrame, and any gap
         // here would let that wait reach the runtime alongside our own
         // (hardlock).
-        if (wait_pipelined || turbo_seq_state_ == TurboSequencedState::kActive) {
-            if (!wait_pipelined && !turbo_valve_open_) {
+        if (wait_pipelined || async_handoff || turbo_seq_state_ == TurboSequencedState::kActive) {
+            if (async_handoff) {
+                ++turbo_async_handoff_wait_intercepts_;
+                if (turbo_async_handoff_debug_log_budget_ > 0 && logger_.IsDebugEnabled()) {
+                    --turbo_async_handoff_debug_log_budget_;
+                    logger_.Debug("Turbo-diag: app xrWaitFrame intercepted by async handoff shield; "
+                                  "generation=" + std::to_string(turbo_async_wait_generation_) +
+                                  ", futurePublished=" + (wait_pipelined ? "1" : "0") +
+                                  ", alreadyPolled=" + (turbo_async_wait_polled_ ? "1" : "0") + ".");
+                }
+            }
+            if (!wait_pipelined && !async_handoff && !turbo_valve_open_) {
                 // Valve closed (turbo toggled off / suspended): re-couple the
                 // app to genuine runtime pacing without touching the pipeline
                 // topology — block until the next pre-wait posts a pacing
@@ -4621,65 +4634,101 @@ XrResult OpenXrLayer::WaitFrame(XrSession session,
                                   "ms, token=" + std::to_string(consumed_token ? 1 : 0));
                 }
             }
-            if (wait_pipelined) {
+            if (wait_pipelined || async_handoff) {
                 bool mark_wait_polled = true;
                 if (turbo_async_wait_polled_) {
                     // Second poll while pipelined: only one frame of
                     // pipelining is allowed, so now we must wait for the real
-                    // frame. Keep a shared snapshot: EndFrame may retire the
-                    // member while this app thread is blocked.
-                    const std::shared_future<void> pending_wait = turbo_async_wait_;
-                    const std::uint64_t pending_generation = turbo_async_wait_generation_;
-                    lock.unlock();
-                    pending_wait.wait();
-                    lock.lock();
-                    if (pending_generation != turbo_async_wait_generation_) {
-                        // EndFrame already retired this wait and may have
-                        // launched the following one. Do not mark that newer
-                        // wait as having been polled by this older call.
-                        mark_wait_polled = false;
+                    // frame. If EndFrame has pre-armed the handoff but not yet
+                    // published the worker future, first wait for publication
+                    // (or cancellation after a failed submit).
+                    if (!wait_pipelined && async_handoff) {
+                        ++turbo_async_handoff_second_poll_blocks_;
+                        if (turbo_async_handoff_debug_log_budget_ > 0 && logger_.IsDebugEnabled()) {
+                            --turbo_async_handoff_debug_log_budget_;
+                            logger_.Debug("Turbo-diag: second app xrWaitFrame waiting for async handoff "
+                                          "publication; generation=" +
+                                          std::to_string(turbo_async_wait_generation_) + ".");
+                        }
+                        turbo_async_handoff_cv_.wait(lock, [this] {
+                            return !turbo_async_handoff_active_ || turbo_async_wait_.valid();
+                        });
+                        wait_pipelined = turbo_async_wait_.valid();
+                        async_handoff = turbo_async_handoff_active_;
+                        if (!wait_pipelined && !async_handoff) {
+                            async_interception_cancelled = true;
+                            mark_wait_polled = false;
+                            if (turbo_async_handoff_debug_log_budget_ > 0 && logger_.IsDebugEnabled()) {
+                                --turbo_async_handoff_debug_log_budget_;
+                                logger_.Debug("Turbo-diag: async handoff cancelled while a second app "
+                                              "xrWaitFrame waited; returning to runtime pass-through.");
+                            }
+                        }
+                    }
+
+                    if (wait_pipelined) {
+                        // Keep a shared snapshot: EndFrame may retire the
+                        // member while this app thread is blocked.
+                        const std::shared_future<void> pending_wait = turbo_async_wait_;
+                        const std::uint64_t pending_generation = turbo_async_wait_generation_;
+                        lock.unlock();
+                        pending_wait.wait();
+                        lock.lock();
+                        if (pending_generation != turbo_async_wait_generation_) {
+                            // EndFrame already retired this wait and may have
+                            // launched the following one. Do not mark that newer
+                            // wait as having been polled by this older call.
+                            mark_wait_polled = false;
+                        }
                     }
                 }
-                if (mark_wait_polled) {
+                if (!async_interception_cancelled && mark_wait_polled) {
                     turbo_async_wait_polled_ = true;
                 }
             }
 
-            const auto now = std::chrono::steady_clock::now();
-            XrTime predicted = turbo_last_predicted_display_time_;
-            if (wait_pipelined && !turbo_async_wait_completed_ &&
-                turbo_last_wait_frame_wall_time_.has_value()) {
-                // Async wait still in flight: extrapolate by the wall-clock
-                // delta between the app's waits. (Sequenced pacing never needs
-                // this — its wait completed before EndFrame returned, so the
-                // recorded timing is already this frame's real timing.)
-                predicted += std::chrono::duration_cast<std::chrono::nanoseconds>(
-                                 now - *turbo_last_wait_frame_wall_time_)
-                                 .count();
-            }
-            turbo_last_wait_frame_wall_time_ = now;
+            if (async_interception_cancelled) {
+                // The downstream submit failed and EndFrame cancelled the
+                // pre-publication shield. This call has not fabricated a frame,
+                // so it can safely resume normal runtime pacing below.
+            } else {
+                const auto now = std::chrono::steady_clock::now();
+                XrTime predicted = turbo_last_predicted_display_time_;
+                if ((wait_pipelined || async_handoff) && !turbo_async_wait_completed_ &&
+                    turbo_last_wait_frame_wall_time_.has_value()) {
+                    // Async wait still in flight: extrapolate by the wall-clock
+                    // delta between the app's waits. (Sequenced pacing never needs
+                    // this — its wait completed before EndFrame returned, so the
+                    // recorded timing is already this frame's real timing.)
+                    predicted += std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                     now - *turbo_last_wait_frame_wall_time_)
+                                     .count();
+                }
+                turbo_last_wait_frame_wall_time_ = now;
 
-            // The spec requires predictedDisplayTime to increase monotonically.
-            // When the app polls twice for one pipelined frame (DCS menu does),
-            // step the second return forward by a display period rather than
-            // 1ns — two frames "predicted" for the same instant confuse the
-            // app's pose prediction and animation timing.
-            const XrTime min_step =
-                turbo_last_predicted_display_period_ > 0 ? turbo_last_predicted_display_period_ : 1;
-            frame_state->predictedDisplayTime =
-                std::max(predicted, turbo_max_returned_display_time_ + min_step);
-            frame_state->predictedDisplayPeriod = turbo_last_predicted_display_period_;
-            frame_state->shouldRender = turbo_last_should_render_ ? XR_TRUE : XR_FALSE;
-            turbo_max_returned_display_time_ = frame_state->predictedDisplayTime;
-            ++pacing_fabricated_waits_;
-            ++turbo_metrics_fabricated_pending_;
-            if (turbo_fabricated_wait_log_budget_ > 0 && logger_.IsDebugEnabled()) {
-                --turbo_fabricated_wait_log_budget_;
-                logger_.Debug("Turbo: fabricated xrWaitFrame return, predictedDisplayTime=" +
-                              std::to_string(frame_state->predictedDisplayTime) +
-                              ", asyncWaitCompleted=" + (turbo_async_wait_completed_ ? "1" : "0"));
+                // The spec requires predictedDisplayTime to increase monotonically.
+                // When the app polls twice for one pipelined frame (DCS menu does),
+                // step the second return forward by a display period rather than
+                // 1ns — two frames "predicted" for the same instant confuse the
+                // app's pose prediction and animation timing.
+                const XrTime min_step =
+                    turbo_last_predicted_display_period_ > 0 ? turbo_last_predicted_display_period_ : 1;
+                frame_state->predictedDisplayTime =
+                    std::max(predicted, turbo_max_returned_display_time_ + min_step);
+                frame_state->predictedDisplayPeriod = turbo_last_predicted_display_period_;
+                frame_state->shouldRender = turbo_last_should_render_ ? XR_TRUE : XR_FALSE;
+                turbo_max_returned_display_time_ = frame_state->predictedDisplayTime;
+                ++pacing_fabricated_waits_;
+                ++turbo_metrics_fabricated_pending_;
+                if (turbo_fabricated_wait_log_budget_ > 0 && logger_.IsDebugEnabled()) {
+                    --turbo_fabricated_wait_log_budget_;
+                    logger_.Debug("Turbo: fabricated xrWaitFrame return, predictedDisplayTime=" +
+                                  std::to_string(frame_state->predictedDisplayTime) +
+                                  ", asyncWaitCompleted=" + (turbo_async_wait_completed_ ? "1" : "0") +
+                                  ", asyncHandoff=" + (async_handoff ? "1" : "0"));
+                }
+                return XR_SUCCESS;
             }
-            return XR_SUCCESS;
         }
     }
 
@@ -4748,6 +4797,9 @@ XrResult OpenXrLayer::WaitFrame(XrSession session,
 }
 
 XrResult OpenXrLayer::BeginFrame(XrSession session, const XrFrameBeginInfo* frame_begin_info) {
+    if (frame_begin_info && frame_begin_info->type != XR_TYPE_FRAME_BEGIN_INFO) {
+        return XR_ERROR_VALIDATION_FAILURE;
+    }
     {
         std::scoped_lock lock(mutex_);
         if (session == active_session_) {
@@ -4782,10 +4834,20 @@ XrResult OpenXrLayer::BeginFrame(XrSession session, const XrFrameBeginInfo* fram
                 --turbo_seq_debug_log_budget_;
                 logger_.Debug("Turbo-diag: owed xrBeginFrame passing through to the runtime.");
             }
-        } else if (turbo_async_wait_.valid() || turbo_seq_state_ == TurboSequencedState::kActive) {
+        } else if (turbo_async_wait_.valid() || turbo_async_handoff_active_ ||
+                   turbo_seq_state_ == TurboSequencedState::kActive) {
             // Async pacing: deferred into ForwardEndFrame once the async wait
             // resolves. Sequenced pacing: the frame was pre-begun inside the
             // previous EndFrame (or will be compensated there).
+            if (turbo_async_handoff_active_) {
+                ++turbo_async_handoff_begin_intercepts_;
+                if (turbo_async_handoff_debug_log_budget_ > 0 && logger_.IsDebugEnabled()) {
+                    --turbo_async_handoff_debug_log_budget_;
+                    logger_.Debug("Turbo-diag: app xrBeginFrame intercepted by async handoff shield; "
+                                  "generation=" + std::to_string(turbo_async_wait_generation_) +
+                                  ", futurePublished=" + (turbo_async_wait_.valid() ? "1" : "0") + ".");
+                }
+            }
             return XR_SUCCESS;
         } else if (turbo_seq_state_ == TurboSequencedState::kEngaging &&
                    turbo_seq_debug_log_budget_ > 0 && logger_.IsDebugEnabled()) {
@@ -4967,7 +5029,7 @@ XrResult OpenXrLayer::ForwardEndFrame(XrSession session,
     bool pipeline_established = false;
     {
         std::scoped_lock lock(turbo_mutex_);
-        pipeline_established = turbo_async_wait_.valid() ||
+        pipeline_established = turbo_async_wait_.valid() || turbo_async_handoff_active_ ||
                                turbo_seq_state_ == TurboSequencedState::kActive ||
                                turbo_seq_state_ == TurboSequencedState::kEngaging;
     }
@@ -5038,6 +5100,14 @@ XrResult OpenXrLayer::ForwardEndFrame(XrSession session,
         seq_state = turbo_seq_state_;
         begin_owed = turbo_begin_owed_;
         valve_open = turbo_valve_open_;
+        if (!has_pending_wait && turbo_engaged && turbo_pacing_mode_ == TurboPacingMode::kAsync &&
+            seq_state == TurboSequencedState::kInactive) {
+            // Pre-arm before the runtime submit. DCS may issue its next app
+            // wait concurrently with this EndFrame; it must see interception
+            // even though the worker's real wait cannot start until EndFrame
+            // has returned downstream.
+            ArmTurboAsyncHandoffLocked("pre-submit async establishment");
+        }
         // From here until the runtime xrEndFrame returns, an owed
         // establishment begin arriving on another thread is deferred rather
         // than forwarded (Begin(N+1) must never reach the runtime before
@@ -5048,6 +5118,7 @@ XrResult OpenXrLayer::ForwardEndFrame(XrSession session,
         std::scoped_lock lock(turbo_mutex_);
         turbo_end_frame_in_flight_ = false;
         turbo_begin_deferred_ = false;
+        CancelTurboAsyncHandoffLocked("frame forwarding aborted before submit");
     };
     if (TurboSequencedDebugTick()) {
         logger_.Debug("Turbo-diag: pre-submit snapshot: engaged=" + std::to_string(turbo_engaged ? 1 : 0) +
@@ -5088,6 +5159,13 @@ XrResult OpenXrLayer::ForwardEndFrame(XrSession session,
             if (ready && pending_async_generation == turbo_async_wait_generation_) {
                 async_wait_result = turbo_async_wait_result_;
                 turbo_async_wait_ = {};
+                if (turbo_engaged && turbo_pacing_mode_ == TurboPacingMode::kAsync &&
+                    turbo_seq_state_ == TurboSequencedState::kInactive) {
+                    // Retire and arm atomically under turbo_mutex_: an app
+                    // WaitFrame can observe the old future or the shield, but
+                    // never a pass-through gap between them.
+                    ArmTurboAsyncHandoffLocked("completed async wait retired before submit");
+                }
             }
         }
         if (ready && XR_FAILED(async_wait_result)) {
@@ -5111,7 +5189,8 @@ XrResult OpenXrLayer::ForwardEndFrame(XrSession session,
         if (!frame_begun) {
             // Deferred xrBeginFrame for the pipelined frame. Errors pass
             // through (e.g. the session state machine advanced under us).
-            const XrResult begin_result = next_begin_frame_(session, nullptr);
+            const XrFrameBeginInfo begin_info{XR_TYPE_FRAME_BEGIN_INFO};
+            const XrResult begin_result = next_begin_frame_(session, &begin_info);
             if (XR_FAILED(begin_result)) {
                 logger_.Error("Turbo: deferred xrBeginFrame failed with " +
                               std::to_string(static_cast<int>(begin_result)));
@@ -5138,11 +5217,12 @@ XrResult OpenXrLayer::ForwardEndFrame(XrSession session,
             logger_.Debug("Turbo-diag: compensation xrWaitFrame starting (frame thread).");
         }
         XrFrameState frame_state{XR_TYPE_FRAME_STATE};
+        const XrFrameWaitInfo wait_info{XR_TYPE_FRAME_WAIT_INFO};
         const auto comp_start = std::chrono::steady_clock::now();
         XrResult comp_result = XR_SUCCESS;
         {
             std::scoped_lock wait_lock(turbo_runtime_wait_mutex_);
-            comp_result = next_wait_frame_(session, nullptr, &frame_state);
+            comp_result = next_wait_frame_(session, &wait_info, &frame_state);
         }
         const double comp_ms =
             std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - comp_start)
@@ -5160,7 +5240,8 @@ XrResult OpenXrLayer::ForwardEndFrame(XrSession session,
                 turbo_last_should_render_ = frame_state.shouldRender == XR_TRUE;
                 NoteTurboShouldRenderLocked(turbo_last_should_render_);
             }
-            const XrResult begin_result = next_begin_frame_(session, nullptr);
+            const XrFrameBeginInfo begin_info{XR_TYPE_FRAME_BEGIN_INFO};
+            const XrResult begin_result = next_begin_frame_(session, &begin_info);
             if (XR_FAILED(begin_result)) {
                 logger_.Error("Turbo: compensation xrBeginFrame failed with " +
                               std::to_string(static_cast<int>(begin_result)));
@@ -5265,11 +5346,12 @@ XrResult OpenXrLayer::ForwardEndFrame(XrSession session,
                     logger_.Debug("Turbo: sequenced wait+begin starting (frame thread).");
                 }
                 XrFrameState frame_state{XR_TYPE_FRAME_STATE};
+                const XrFrameWaitInfo wait_info{XR_TYPE_FRAME_WAIT_INFO};
                 const auto wait_start = std::chrono::steady_clock::now();
                 XrResult wait_result = XR_SUCCESS;
                 {
                     std::scoped_lock wait_lock(turbo_runtime_wait_mutex_);
-                    wait_result = next_wait_frame_(session, nullptr, &frame_state);
+                    wait_result = next_wait_frame_(session, &wait_info, &frame_state);
                 }
                 const double wait_ms =
                     std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() -
@@ -5298,7 +5380,8 @@ XrResult OpenXrLayer::ForwardEndFrame(XrSession session,
                         turbo_pacing_tokens_ = 1;
                         turbo_valve_cv_.notify_all();
                     }
-                    const XrResult begin_result = next_begin_frame_(session, nullptr);
+                    const XrFrameBeginInfo begin_info{XR_TYPE_FRAME_BEGIN_INFO};
+                    const XrResult begin_result = next_begin_frame_(session, &begin_info);
                     if (XR_SUCCEEDED(begin_result)) {
                         std::scoped_lock lock(turbo_mutex_);
                         turbo_frame_begun_ = true;
@@ -5335,19 +5418,24 @@ XrResult OpenXrLayer::ForwardEndFrame(XrSession session,
                 if (!turbo_pipelining_logged_) {
                     logger_.Info("Turbo: frame pipelining engaged (async pacing); the app's xrWaitFrame "
                                  "is now decoupled from runtime pacing.");
+                    logger_.Info("Turbo: async frame handoffs are gap-shielded for applications that overlap "
+                                 "xrWaitFrame with xrEndFrame.");
                     logger_.Info("Turbo compatibility notice: frame pipelining can prevent runtime "
                                  "reprojection or frame synthesis (including SteamVR Motion Smoothing). "
                                  "Disable Turbo first if presentation becomes unstable.");
                     turbo_pipelining_logged_ = true;
                     turbo_fabricated_wait_log_budget_ = 5;
                 }
-                turbo_async_wait_polled_ = false;
-                turbo_async_wait_completed_ = false;
+                if (!turbo_async_handoff_active_) {
+                    // Defensive recovery only: the normal path arms before
+                    // xrEndFrame, where an overlapping app wait can see it.
+                    ArmTurboAsyncHandoffLocked("post-submit async recovery");
+                }
                 turbo_async_wait_result_ = XR_SUCCESS;
-                ++turbo_async_wait_generation_;
                 EnsureTurboAsyncWorkerLocked();
                 turbo_async_job_completion_ = std::make_shared<std::promise<void>>();
                 turbo_async_wait_ = turbo_async_job_completion_->get_future().share();
+                PublishTurboAsyncHandoffLocked();
                 turbo_async_job_session_ = session;
                 turbo_async_job_pending_ = true;
                 turbo_async_worker_cv_.notify_one();
@@ -5366,6 +5454,7 @@ XrResult OpenXrLayer::ForwardEndFrame(XrSession session,
             // not-yet-established handshake is dropped, and the async
             // drain-out is logged.
             std::scoped_lock lock(turbo_mutex_);
+            CancelTurboAsyncHandoffLocked("turbo disengaged before async publication");
             if (turbo_seq_state_ == TurboSequencedState::kEngaging) {
                 // Nothing was pipelined yet; drop the handshake request.
                 turbo_seq_state_ = TurboSequencedState::kInactive;
@@ -5380,6 +5469,9 @@ XrResult OpenXrLayer::ForwardEndFrame(XrSession session,
                 turbo_pipelining_logged_ = false;
             }
         }
+    } else {
+        std::scoped_lock lock(turbo_mutex_);
+        CancelTurboAsyncHandoffLocked("runtime xrEndFrame failed");
     }
 
     // The submit is down; release the owed-begin deferral window. If the
@@ -5400,7 +5492,8 @@ XrResult OpenXrLayer::ForwardEndFrame(XrSession session,
         if (TurboSequencedDebugTick()) {
             logger_.Debug("Turbo-diag: issuing deferred establishment xrBeginFrame (frame thread).");
         }
-        const XrResult begin_result = next_begin_frame_(session, nullptr);
+        const XrFrameBeginInfo begin_info{XR_TYPE_FRAME_BEGIN_INFO};
+        const XrResult begin_result = next_begin_frame_(session, &begin_info);
         if (XR_SUCCEEDED(begin_result)) {
             std::scoped_lock lock(turbo_mutex_);
             turbo_frame_begun_ = true;
@@ -5729,6 +5822,12 @@ void OpenXrLayer::RecordFramePacing(std::chrono::steady_clock::time_point frame_
         double submit_delta_min_periods = 0.0;
         double submit_delta_max_periods = 0.0;
         uint32_t submit_delta_samples = 0;
+        std::uint64_t async_handoff_armed = 0;
+        std::uint64_t async_handoff_waits = 0;
+        std::uint64_t async_handoff_begins = 0;
+        std::uint64_t async_handoff_second_poll_blocks = 0;
+        std::uint64_t async_handoff_cancellations = 0;
+        bool async_handoff_active = false;
         {
             std::scoped_lock lock(turbo_mutex_);
             wait_sum_ms = pacing_wait_sum_ms_;
@@ -5739,6 +5838,12 @@ void OpenXrLayer::RecordFramePacing(std::chrono::steady_clock::time_point frame_
             submit_delta_min_periods = pacing_submit_delta_min_periods_;
             submit_delta_max_periods = pacing_submit_delta_max_periods_;
             submit_delta_samples = pacing_submit_delta_samples_;
+            async_handoff_armed = turbo_async_handoff_armed_total_;
+            async_handoff_waits = turbo_async_handoff_wait_intercepts_;
+            async_handoff_begins = turbo_async_handoff_begin_intercepts_;
+            async_handoff_second_poll_blocks = turbo_async_handoff_second_poll_blocks_;
+            async_handoff_cancellations = turbo_async_handoff_cancellations_;
+            async_handoff_active = turbo_async_handoff_active_;
             pacing_submit_delta_sum_periods_ = 0.0;
             pacing_submit_delta_min_periods_ = 0.0;
             pacing_submit_delta_max_periods_ = 0.0;
@@ -5772,6 +5877,12 @@ void OpenXrLayer::RecordFramePacing(std::chrono::steady_clock::time_point frame_
             stream << "n/a";
         }
         stream << ", fabricatedWaits=" << fabricated_waits;
+        if (turbo_pacing_mode_ == TurboPacingMode::kAsync || async_handoff_armed > 0) {
+            stream << ", asyncHandoff active/armed/waits/begins/secondPollBlocks/cancels="
+                   << (async_handoff_active ? 1 : 0) << "/" << async_handoff_armed << "/"
+                   << async_handoff_waits << "/" << async_handoff_begins << "/"
+                   << async_handoff_second_poll_blocks << "/" << async_handoff_cancellations;
+        }
         if (submit_delta_samples > 0) {
             stream << ", submittedDisplayTimeVsLatestWait avg/min/max="
                    << FormatDiagnosticDouble(submit_delta_sum_periods / submit_delta_samples) << "/"
@@ -6039,6 +6150,62 @@ void OpenXrLayer::ResetTurboMetricsState() {
     turbo_metrics_fabricated_pending_ = 0;
 }
 
+void OpenXrLayer::ArmTurboAsyncHandoffLocked(const char* reason) {
+    if (turbo_async_handoff_active_) {
+        return;
+    }
+    turbo_async_handoff_active_ = true;
+    turbo_async_wait_polled_ = false;
+    turbo_async_wait_completed_ = false;
+    ++turbo_async_wait_generation_;
+    ++turbo_async_handoff_armed_total_;
+    if (turbo_async_handoff_armed_total_ == 1) {
+        // Capture establishment and the first several steady-state handoffs,
+        // then rely on the five-second aggregate so debug logging cannot turn
+        // into a per-frame pacing cost.
+        turbo_async_handoff_debug_log_budget_ = 64;
+    }
+    if (logger_.IsDebugEnabled() && turbo_async_handoff_debug_log_budget_ > 0) {
+        --turbo_async_handoff_debug_log_budget_;
+        logger_.Debug("Turbo-diag: async handoff shield armed; reason=" +
+                      std::string(reason ? reason : "unknown") +
+                      ", generation=" + std::to_string(turbo_async_wait_generation_) +
+                      ", armedTotal=" + std::to_string(turbo_async_handoff_armed_total_) + ".");
+    }
+}
+
+void OpenXrLayer::PublishTurboAsyncHandoffLocked() {
+    if (!turbo_async_handoff_active_) {
+        return;
+    }
+    if (!turbo_async_wait_.valid()) {
+        CancelTurboAsyncHandoffLocked("publication missing worker future");
+        return;
+    }
+    turbo_async_handoff_active_ = false;
+    turbo_async_handoff_cv_.notify_all();
+    if (logger_.IsDebugEnabled() && turbo_async_handoff_debug_log_budget_ > 0) {
+        --turbo_async_handoff_debug_log_budget_;
+        logger_.Debug("Turbo-diag: async handoff published runtime wait; generation=" +
+                      std::to_string(turbo_async_wait_generation_) +
+                      ", interceptedWaits=" + std::to_string(turbo_async_handoff_wait_intercepts_) +
+                      ", interceptedBegins=" + std::to_string(turbo_async_handoff_begin_intercepts_) + ".");
+    }
+}
+
+void OpenXrLayer::CancelTurboAsyncHandoffLocked(const char* reason) {
+    if (!turbo_async_handoff_active_) {
+        return;
+    }
+    turbo_async_handoff_active_ = false;
+    ++turbo_async_handoff_cancellations_;
+    turbo_async_handoff_cv_.notify_all();
+    logger_.Info("Turbo: async handoff shield cancelled; reason=" +
+                 std::string(reason ? reason : "unknown") +
+                 ", generation=" + std::to_string(turbo_async_wait_generation_) +
+                 ", cancellations=" + std::to_string(turbo_async_handoff_cancellations_) + ".");
+}
+
 void OpenXrLayer::EnsureTurboAsyncWorkerLocked() {
     if (turbo_async_worker_.joinable()) {
         return;
@@ -6065,10 +6232,11 @@ void OpenXrLayer::TurboAsyncWorkerLoop() {
         }
 
         XrFrameState frame_state{XR_TYPE_FRAME_STATE};
+        const XrFrameWaitInfo wait_info{XR_TYPE_FRAME_WAIT_INFO};
         XrResult wait_result = XR_SUCCESS;
         {
             std::scoped_lock wait_lock(turbo_runtime_wait_mutex_);
-            wait_result = next_wait_frame_(session, nullptr, &frame_state);
+            wait_result = next_wait_frame_(session, &wait_info, &frame_state);
         }
         {
             std::scoped_lock state_lock(turbo_mutex_);
@@ -6160,6 +6328,14 @@ void OpenXrLayer::ResetTurboFrameState() {
     pacing_submit_delta_min_periods_ = 0.0;
     pacing_submit_delta_max_periods_ = 0.0;
     pacing_submit_delta_samples_ = 0;
+    turbo_async_handoff_active_ = false;
+    turbo_async_handoff_armed_total_ = 0;
+    turbo_async_handoff_wait_intercepts_ = 0;
+    turbo_async_handoff_begin_intercepts_ = 0;
+    turbo_async_handoff_second_poll_blocks_ = 0;
+    turbo_async_handoff_cancellations_ = 0;
+    turbo_async_handoff_debug_log_budget_ = 0;
+    turbo_async_handoff_cv_.notify_all();
     turbo_async_wait_ = {};
     ++turbo_async_wait_generation_;
     turbo_async_wait_polled_ = false;
@@ -6197,7 +6373,7 @@ void OpenXrLayer::ResetTurboFrameState() {
 }
 
 XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_end_info) {
-    if (!frame_end_info) {
+    if (!frame_end_info || frame_end_info->type != XR_TYPE_FRAME_END_INFO) {
         return XR_ERROR_VALIDATION_FAILURE;
     }
 

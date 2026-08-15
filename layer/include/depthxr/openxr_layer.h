@@ -408,6 +408,9 @@ class OpenXrLayer {
                              const XrFrameEndInfo* frame_end_info,
                              std::unique_lock<std::mutex>& config_lock);
     void ObserveCompositionLayerTopology(const XrFrameEndInfo* frame_end_info);
+    void ArmTurboAsyncHandoffLocked(const char* reason);
+    void PublishTurboAsyncHandoffLocked();
+    void CancelTurboAsyncHandoffLocked(const char* reason);
     void EnsureTurboAsyncWorkerLocked();
     void StopTurboAsyncWorker();
     void TurboAsyncWorkerLoop();
@@ -754,6 +757,22 @@ class OpenXrLayer {
     std::atomic<bool> turbo_frame_interception_required_{false};
     std::mutex turbo_mutex_;
     std::condition_variable turbo_async_worker_cv_;
+    // Async pacing must never expose a pass-through gap between retiring one
+    // runtime wait and publishing the next. DCS can call xrWaitFrame from its
+    // sim thread while xrEndFrame is still running on the render thread; if
+    // that app wait reaches the runtime during the gap, the replacement worker
+    // issues a second real wait and runtimes such as Virtual Desktop's Oculus
+    // compatibility path interlock until the slipped wait receives a Begin.
+    // The handoff shield keeps app Wait/Begin calls fabricated across that
+    // drain -> Begin -> End -> replacement-publication window.
+    std::condition_variable turbo_async_handoff_cv_;
+    bool turbo_async_handoff_active_{false};
+    std::uint64_t turbo_async_handoff_armed_total_{0};
+    std::uint64_t turbo_async_handoff_wait_intercepts_{0};
+    std::uint64_t turbo_async_handoff_begin_intercepts_{0};
+    std::uint64_t turbo_async_handoff_second_poll_blocks_{0};
+    std::uint64_t turbo_async_handoff_cancellations_{0};
+    int turbo_async_handoff_debug_log_budget_{0};
     std::thread turbo_async_worker_;
     bool turbo_async_worker_stop_{false};
     bool turbo_async_job_pending_{false};
