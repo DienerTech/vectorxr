@@ -142,6 +142,39 @@ if(WIN32 AND DEPTHXR_BUILD_LAYER)
                 ${CMAKE_CURRENT_SOURCE_DIR}/assets/sounds/depth-lock-off.wav
                 $<TARGET_FILE_DIR:XR_APILAYER_DIENERTECH_VECTORXR>/sounds/
     )
+
+    if(DEPTHXR_BUILD_TESTS)
+        # Compile the real frame-loop implementation into a dedicated fake-runtime
+        # harness. DEPTHXR_TESTING only grants the harness state setup/inspection
+        # access; no test hooks are present in the shipping layer target.
+        add_executable(
+            depthxr_turbo_frame_tests
+            tests/turbo_frame_tests.cpp
+            src/openxr_layer.cpp
+        )
+        target_include_directories(depthxr_turbo_frame_tests PRIVATE include)
+        target_link_libraries(
+            depthxr_turbo_frame_tests
+            PRIVATE
+            depthxr_core
+            OpenXR::openxr_loader
+            d3d11
+            d3dcompiler
+            dxgi
+            shlwapi
+        )
+        target_compile_definitions(
+            depthxr_turbo_frame_tests
+            PRIVATE
+            DEPTHXR_TESTING
+            WIN32_LEAN_AND_MEAN
+            NOMINMAX
+            XR_USE_GRAPHICS_API_D3D11
+            VECTORXR_VERSION="${_vectorxr_version}"
+        )
+        add_test(NAME depthxr_turbo_frame_tests COMMAND depthxr_turbo_frame_tests)
+        set_tests_properties(depthxr_turbo_frame_tests PROPERTIES TIMEOUT 15)
+    endif()
 endif()
 
 if(DEPTHXR_BUILD_TESTS)

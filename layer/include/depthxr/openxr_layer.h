@@ -50,6 +50,10 @@ struct ID3D11VertexShader;
 
 namespace depthxr {
 
+#if defined(DEPTHXR_TESTING)
+class TurboFrameTestPeer;
+#endif
+
 class OpenXrLayer {
   public:
     static OpenXrLayer& Instance();
@@ -178,6 +182,10 @@ class OpenXrLayer {
                          XrView* views);
 
   private:
+#if defined(DEPTHXR_TESTING)
+    friend class TurboFrameTestPeer;
+#endif
+
     OpenXrLayer() = default;
     ~OpenXrLayer();
 
