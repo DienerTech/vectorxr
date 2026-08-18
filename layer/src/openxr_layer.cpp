@@ -1689,6 +1689,12 @@ void OpenXrLayer::SetNextProcAddr(PFN_xrGetInstanceProcAddr next_get_instance_pr
 
 bool OpenXrLayer::PollInputBindingDown(const InputBinding& binding) {
     const InputBindingPollResult poll = PollInputBinding(binding);
+    if (poll.device_retry_deferred) {
+        // The first real failure already recorded the unavailable-device
+        // diagnostic. Keep deferred bindings entirely off Logger's mutex and
+        // string-formatting path until the per-device reconnect deadline.
+        return false;
+    }
     if (!poll.device_poll_attempted) {
         return poll.down;
     }
@@ -1717,6 +1723,9 @@ bool OpenXrLayer::PollInputBindingDown(const InputBinding& binding) {
         }
         if (poll.retry_attempted) {
             append_result(stream, "retryResult", poll.retry_result_code);
+        }
+        if (poll.device_retry_delay_ms > 0) {
+            stream << ", nextReconnectInMs=" << poll.device_retry_delay_ms;
         }
     };
 
@@ -1751,7 +1760,9 @@ bool OpenXrLayer::PollInputBindingDown(const InputBinding& binding) {
         const bool interval_elapsed = !state.last_log_time.has_value() ||
                                       now - *state.last_log_time >= kInputDeviceFailureLogInterval;
         state.failure_active = true;
-        ++state.failed_attempts;
+        if (!poll.device_retry_deferred) {
+            ++state.failed_attempts;
+        }
         if (changed || interval_elapsed) {
             std::ostringstream stream;
             stream << "Input device polling unavailable: ";
@@ -1760,7 +1771,7 @@ bool OpenXrLayer::PollInputBindingDown(const InputBinding& binding) {
             if (state.suppressed_attempts > 0) {
                 stream << ", suppressedRepeats=" << state.suppressed_attempts;
             }
-            stream << ". The binding will remain inactive while VectorXR retries.";
+            stream << ". The binding will remain inactive while VectorXR retries with reconnect backoff.";
             logger_.Info(stream.str());
             state.signature = signature;
             state.last_log_time = now;

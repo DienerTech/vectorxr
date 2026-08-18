@@ -1,4 +1,5 @@
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <cstdlib>
 #include <filesystem>
@@ -2568,7 +2569,87 @@ void TestDeviceInputPathsAndHatDirections() {
     Expect(invalid_device.device_poll_attempted &&
                invalid_device.diagnostic_stage == depthxr::InputBindingPollStage::ParseInputPath,
            "Invalid device bindings must report their failing stage before touching DirectInput");
+
+    depthxr::InputBinding missing_device_binding;
+    missing_device_binding.type = depthxr::InputBindingType::Device;
+    missing_device_binding.device_guid = "{11111111-2222-3333-4444-555555555555}";
+    missing_device_binding.input_path = "button-1";
+    const depthxr::InputBindingPollResult first_missing_device =
+        depthxr::PollInputBinding(missing_device_binding);
+    const depthxr::InputBindingPollResult repeated_missing_device =
+        depthxr::PollInputBinding(missing_device_binding);
+    Expect(first_missing_device.device_poll_attempted &&
+               !first_missing_device.device_retry_deferred &&
+               first_missing_device.diagnostic_stage != depthxr::InputBindingPollStage::None &&
+               first_missing_device.device_retry_delay_ms >= 250,
+           "The first missing-device poll must record a real DirectInput failure and reconnect deadline");
+    Expect(repeated_missing_device.device_retry_deferred &&
+               repeated_missing_device.diagnostic_stage == first_missing_device.diagnostic_stage &&
+               repeated_missing_device.result_code == first_missing_device.result_code,
+           "A repeated missing-device binding must reuse the failure without touching DirectInput");
 #endif
+}
+
+void TestInputDeviceRetryBackoff() {
+    using Backoff = depthxr::InputDeviceRetryBackoff;
+    using namespace std::chrono_literals;
+
+    Backoff backoff(100ms, 400ms);
+    const std::wstring foxtrot = L"{foxtrot-guid}";
+    const std::wstring throttle = L"{throttle-guid}";
+    const Backoff::TimePoint start{};
+
+    Expect(backoff.ShouldAttempt(foxtrot, start),
+           "A device with no failure history must be polled immediately");
+    Expect(backoff.RecordFailure(foxtrot, start) == 100ms &&
+               backoff.ConsecutiveFailures(foxtrot) == 1,
+           "The first unavailable-device retry must use the initial delay");
+    Expect(!backoff.ShouldAttempt(foxtrot, start + 99ms) &&
+               backoff.RetryDelayRemaining(foxtrot, start + 40ms) == 60ms,
+           "Bindings for one unavailable device must share its retry window");
+    Expect(backoff.ShouldAttempt(foxtrot, start + 100ms),
+           "An unavailable device must become eligible at its reconnect deadline");
+    Expect(backoff.ShouldAttempt(throttle, start + 50ms),
+           "One unavailable device must not delay a different device");
+
+    Expect(backoff.RecordFailure(foxtrot, start + 100ms) == 200ms &&
+               backoff.RecordFailure(foxtrot, start + 300ms) == 400ms &&
+               backoff.RecordFailure(foxtrot, start + 700ms) == 400ms,
+           "Repeated reconnect failures must double to, but never exceed, the cap");
+    Expect(!backoff.ShouldAttempt(foxtrot, start + 1099ms) &&
+               backoff.ShouldAttempt(foxtrot, start + 1100ms),
+           "The capped retry window must remain deterministic");
+
+    backoff.RecordSuccess(foxtrot);
+    Expect(backoff.ShouldAttempt(foxtrot, start + 701ms) &&
+               backoff.ConsecutiveFailures(foxtrot) == 0 &&
+               backoff.RetryDelayRemaining(foxtrot, start + 701ms) == 0ms,
+           "A successful device read must clear reconnect backoff immediately");
+
+    Backoff clamped(0ms, 0ms);
+    Expect(clamped.RecordFailure(foxtrot, start) == 1ms,
+           "A misconfigured reconnect policy must retain a nonzero retry delay");
+
+    // Model ten Pivot bindings sharing one unplugged controller at the layer's
+    // 30ms polling interval. Before the negative cache this produced roughly
+    // 3,340 DirectInput setup attempts in ten seconds; the production policy
+    // should permit only the bounded reconnect probes.
+    Backoff production_policy;
+    std::size_t device_attempts = 0;
+    std::size_t deferred_bindings = 0;
+    for (int tick = 0; tick <= 333; ++tick) {
+        const Backoff::TimePoint now = start + tick * 30ms;
+        for (int binding = 0; binding < 10; ++binding) {
+            if (production_policy.ShouldAttempt(foxtrot, now)) {
+                ++device_attempts;
+                production_policy.RecordFailure(foxtrot, now);
+            } else {
+                ++deferred_bindings;
+            }
+        }
+    }
+    Expect(device_attempts <= 8 && deferred_bindings > 3'300,
+           "Reconnect backoff must collapse an unplugged multi-binding input storm");
 }
 
 void TestQuadViewsCanvasDimensionsMatchCompositionDensity() {
@@ -2668,6 +2749,7 @@ int main() {
     TestPivotPoseDeltaSpaceReexpression();
     TestNumpadActivationKeys();
     TestDeviceInputPathsAndHatDirections();
+    TestInputDeviceRetryBackoff();
 #ifdef _WIN32
     TestD3D11SharpenShaderRegression();
 #endif
