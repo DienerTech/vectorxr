@@ -1,3 +1,5 @@
+#include <array>
+#include <chrono>
 #include <cmath>
 #include <cstdlib>
 #include <filesystem>
@@ -14,6 +16,7 @@
 #include "depthxr/pivot_routing.h"
 #include "depthxr/pivot_step.h"
 #include "depthxr/pivot_view.h"
+#include "depthxr/quadviews_frame_cache.h"
 #include "depthxr/quadviews_recovery.h"
 #include "depthxr/quadviews_sizing.h"
 #include "depthxr/runtime_pacing.h"
@@ -2266,6 +2269,45 @@ void TestQuadViewsRecoveryStabilizer() {
     Expect(stabilizer.Ready(start), "Other runtimes must retain immediate recovery");
 }
 
+void TestQuadViewsFrameCacheKeepsGazeWithLocatedFrame() {
+    struct Frame {
+        bool gaze_valid{false};
+        double raw_yaw{0.0};
+        double smoothed_yaw{0.0};
+    };
+
+    depthxr::QuadViewsFrameCache<Frame> cache;
+    cache.Store(1'000, Frame{true, 0.10, 0.08}, 180);
+    // A later locate must not replace the gaze diagnostics associated with an
+    // older frame that the application submits afterward.
+    cache.Store(2'000, Frame{false, 0.40, 0.30}, 180);
+
+    Frame selected;
+    std::int64_t matched_time = 0;
+    Expect(cache.FindNearest(1'000, 100, &selected, &matched_time),
+           "Exact Quadviews frame-cache lookup should succeed");
+    Expect(matched_time == 1'000 && selected.gaze_valid &&
+               std::abs(selected.raw_yaw - 0.10) < 0.0001 &&
+               std::abs(selected.smoothed_yaw - 0.08) < 0.0001,
+           "Quadviews frame cache must return the gaze snapshot stored with the submitted frame");
+
+    Expect(cache.FindNearest(1'040, 50, &selected, &matched_time) && matched_time == 1'000 &&
+               selected.gaze_valid,
+           "Nearest Quadviews frame lookup should preserve the matched frame's gaze validity");
+    Expect(!cache.FindNearest(1'500, 100, &selected, &matched_time) && matched_time == 1'000,
+           "Quadviews frame lookup should reject a nearest frame outside the match window");
+
+    cache.Store(3'000, Frame{true, 0.50, 0.45}, 2);
+    Expect(cache.Size() == 2,
+           "Quadviews frame cache should enforce its bounded retention count");
+    Expect(!cache.FindNearest(1'000, 0, &selected, &matched_time),
+           "Quadviews frame cache should discard the oldest frame when retention is exceeded");
+
+    cache.PruneThrough(2'000);
+    Expect(cache.Size() == 1 && cache.FindNearest(3'000, 0, &selected, &matched_time),
+           "Quadviews frame cache should prune submitted frames while keeping future frames");
+}
+
 void TestPivotLocateViewsRouting() {
     Expect(depthxr::ShouldDrivePivotFromLocateViews(true, false),
            "A world-space xrLocateViews query must drive Pivot frame state");
@@ -2290,9 +2332,10 @@ void TestPivotLocateViewsRouting() {
     };
 
     record_locate_result(false, 100, 42);
+    record_locate_result(false, 100, 99);
     record_locate_result(true, 100, 0);
     expect_delta(100, 42,
-                 "A later VIEW-relative query must not overwrite the world-space frame delta");
+                 "Repeated same-time queries must reuse the first logical Pivot frame delta");
 
     pose_deltas.clear();
     record_locate_result(true, 200, 0);
@@ -2348,6 +2391,116 @@ void TestPivotLocateViewsRouting() {
                depthxr::PivotPoseDeltaSelection::Matched &&
                !held_pose_delta.has_value() && consecutive_misses == 0,
            "Inactive Pivot routing must disarm the held correction");
+}
+
+void TestPivotPoseDeltaSpaceReexpression() {
+    using Matrix = std::array<double, 9>;
+    using Vector = std::array<double, 3>;
+    const auto multiply = [](const Matrix& lhs, const Matrix& rhs) {
+        Matrix result{};
+        for (size_t row = 0; row < 3; ++row) {
+            for (size_t column = 0; column < 3; ++column) {
+                for (size_t inner = 0; inner < 3; ++inner) {
+                    result[row * 3 + column] +=
+                        lhs[row * 3 + inner] * rhs[inner * 3 + column];
+                }
+            }
+        }
+        return result;
+    };
+    const auto inverse_rotation = [](const Matrix& matrix) {
+        return Matrix{
+            matrix[0], matrix[3], matrix[6],
+            matrix[1], matrix[4], matrix[7],
+            matrix[2], matrix[5], matrix[8],
+        };
+    };
+    const auto transform = [](const Matrix& matrix, const Vector& vector) {
+        return Vector{
+            matrix[0] * vector[0] + matrix[1] * vector[1] + matrix[2] * vector[2],
+            matrix[3] * vector[0] + matrix[4] * vector[1] + matrix[5] * vector[2],
+            matrix[6] * vector[0] + matrix[7] * vector[1] + matrix[8] * vector[2],
+        };
+    };
+    const auto nearly_equal = [](const Vector& lhs, const Vector& rhs) {
+        for (size_t index = 0; index < lhs.size(); ++index) {
+            if (std::abs(lhs[index] - rhs[index]) > 0.000001) {
+                return false;
+            }
+        }
+        return true;
+    };
+    const auto yaw = [](double radians) {
+        const double cosine = std::cos(radians);
+        const double sine = std::sin(radians);
+        return Matrix{
+            cosine, 0.0, sine,
+            0.0, 1.0, 0.0,
+            -sine, 0.0, cosine,
+        };
+    };
+    const auto pitch = [](double radians) {
+        const double cosine = std::cos(radians);
+        const double sine = std::sin(radians);
+        return Matrix{
+            1.0, 0.0, 0.0,
+            0.0, cosine, -sine,
+            0.0, sine, cosine,
+        };
+    };
+
+    constexpr double kPi = 3.14159265358979323846;
+    const Matrix source_in_target = yaw(-112.0 * kPi / 180.0);
+    const Matrix source_pitch_delta = pitch(30.0 * kPi / 180.0);
+    const Matrix target_delta = depthxr::ReexpressPivotPoseDelta(
+        source_pitch_delta, source_in_target, multiply, inverse_rotation);
+    const Vector source_vector{0.2, 0.7, -0.4};
+
+    // Conjugation must make applying the delta before or after the coordinate
+    // change equivalent. A raw source-space pitch fails this property when the
+    // spaces differ by yaw (the IL-2 diagonal-roll signature).
+    const Vector expected = transform(
+        source_in_target, transform(source_pitch_delta, source_vector));
+    const Vector converted = transform(
+        target_delta, transform(source_in_target, source_vector));
+    const Vector unconverted = transform(
+        source_pitch_delta, transform(source_in_target, source_vector));
+    Expect(nearly_equal(converted, expected),
+           "A Pivot delta must be conjugated into the projection layer's space");
+    Expect(!nearly_equal(unconverted, expected),
+           "Applying an unconverted pitch across yawed spaces must expose the regression test");
+
+    // Repeat the group property with a homogeneous 2D rigid transform so the
+    // positional part of a Pivot/neck offset is covered as well as rotation.
+    const auto rigid_2d = [](double radians, double x, double y) {
+        const double cosine = std::cos(radians);
+        const double sine = std::sin(radians);
+        return Matrix{
+            cosine, -sine, x,
+            sine, cosine, y,
+            0.0, 0.0, 1.0,
+        };
+    };
+    const auto inverse_rigid_2d = [](const Matrix& matrix) {
+        const double inverse_x = -(matrix[0] * matrix[2] + matrix[3] * matrix[5]);
+        const double inverse_y = -(matrix[1] * matrix[2] + matrix[4] * matrix[5]);
+        return Matrix{
+            matrix[0], matrix[3], inverse_x,
+            matrix[1], matrix[4], inverse_y,
+            0.0, 0.0, 1.0,
+        };
+    };
+    const Matrix source_pose_in_target = rigid_2d(-1.2, 1.4, -0.6);
+    const Matrix source_rigid_delta = rigid_2d(0.4, 0.25, -0.1);
+    const Matrix target_rigid_delta = depthxr::ReexpressPivotPoseDelta(
+        source_rigid_delta, source_pose_in_target, multiply, inverse_rigid_2d);
+    const Vector source_point{0.3, -0.8, 1.0};
+    const Vector rigid_expected = transform(
+        source_pose_in_target, transform(source_rigid_delta, source_point));
+    const Vector rigid_converted = transform(
+        target_rigid_delta, transform(source_pose_in_target, source_point));
+    Expect(nearly_equal(rigid_converted, rigid_expected),
+           "A full rigid Pivot delta must preserve rotation and translation across spaces");
 }
 
 void TestNumpadActivationKeys() {
@@ -2416,7 +2569,87 @@ void TestDeviceInputPathsAndHatDirections() {
     Expect(invalid_device.device_poll_attempted &&
                invalid_device.diagnostic_stage == depthxr::InputBindingPollStage::ParseInputPath,
            "Invalid device bindings must report their failing stage before touching DirectInput");
+
+    depthxr::InputBinding missing_device_binding;
+    missing_device_binding.type = depthxr::InputBindingType::Device;
+    missing_device_binding.device_guid = "{11111111-2222-3333-4444-555555555555}";
+    missing_device_binding.input_path = "button-1";
+    const depthxr::InputBindingPollResult first_missing_device =
+        depthxr::PollInputBinding(missing_device_binding);
+    const depthxr::InputBindingPollResult repeated_missing_device =
+        depthxr::PollInputBinding(missing_device_binding);
+    Expect(first_missing_device.device_poll_attempted &&
+               !first_missing_device.device_retry_deferred &&
+               first_missing_device.diagnostic_stage != depthxr::InputBindingPollStage::None &&
+               first_missing_device.device_retry_delay_ms >= 250,
+           "The first missing-device poll must record a real DirectInput failure and reconnect deadline");
+    Expect(repeated_missing_device.device_retry_deferred &&
+               repeated_missing_device.diagnostic_stage == first_missing_device.diagnostic_stage &&
+               repeated_missing_device.result_code == first_missing_device.result_code,
+           "A repeated missing-device binding must reuse the failure without touching DirectInput");
 #endif
+}
+
+void TestInputDeviceRetryBackoff() {
+    using Backoff = depthxr::InputDeviceRetryBackoff;
+    using namespace std::chrono_literals;
+
+    Backoff backoff(100ms, 400ms);
+    const std::wstring foxtrot = L"{foxtrot-guid}";
+    const std::wstring throttle = L"{throttle-guid}";
+    const Backoff::TimePoint start{};
+
+    Expect(backoff.ShouldAttempt(foxtrot, start),
+           "A device with no failure history must be polled immediately");
+    Expect(backoff.RecordFailure(foxtrot, start) == 100ms &&
+               backoff.ConsecutiveFailures(foxtrot) == 1,
+           "The first unavailable-device retry must use the initial delay");
+    Expect(!backoff.ShouldAttempt(foxtrot, start + 99ms) &&
+               backoff.RetryDelayRemaining(foxtrot, start + 40ms) == 60ms,
+           "Bindings for one unavailable device must share its retry window");
+    Expect(backoff.ShouldAttempt(foxtrot, start + 100ms),
+           "An unavailable device must become eligible at its reconnect deadline");
+    Expect(backoff.ShouldAttempt(throttle, start + 50ms),
+           "One unavailable device must not delay a different device");
+
+    Expect(backoff.RecordFailure(foxtrot, start + 100ms) == 200ms &&
+               backoff.RecordFailure(foxtrot, start + 300ms) == 400ms &&
+               backoff.RecordFailure(foxtrot, start + 700ms) == 400ms,
+           "Repeated reconnect failures must double to, but never exceed, the cap");
+    Expect(!backoff.ShouldAttempt(foxtrot, start + 1099ms) &&
+               backoff.ShouldAttempt(foxtrot, start + 1100ms),
+           "The capped retry window must remain deterministic");
+
+    backoff.RecordSuccess(foxtrot);
+    Expect(backoff.ShouldAttempt(foxtrot, start + 701ms) &&
+               backoff.ConsecutiveFailures(foxtrot) == 0 &&
+               backoff.RetryDelayRemaining(foxtrot, start + 701ms) == 0ms,
+           "A successful device read must clear reconnect backoff immediately");
+
+    Backoff clamped(0ms, 0ms);
+    Expect(clamped.RecordFailure(foxtrot, start) == 1ms,
+           "A misconfigured reconnect policy must retain a nonzero retry delay");
+
+    // Model ten Pivot bindings sharing one unplugged controller at the layer's
+    // 30ms polling interval. Before the negative cache this produced roughly
+    // 3,340 DirectInput setup attempts in ten seconds; the production policy
+    // should permit only the bounded reconnect probes.
+    Backoff production_policy;
+    std::size_t device_attempts = 0;
+    std::size_t deferred_bindings = 0;
+    for (int tick = 0; tick <= 333; ++tick) {
+        const Backoff::TimePoint now = start + tick * 30ms;
+        for (int binding = 0; binding < 10; ++binding) {
+            if (production_policy.ShouldAttempt(foxtrot, now)) {
+                ++device_attempts;
+                production_policy.RecordFailure(foxtrot, now);
+            } else {
+                ++deferred_bindings;
+            }
+        }
+    }
+    Expect(device_attempts <= 8 && deferred_bindings > 3'300,
+           "Reconnect backoff must collapse an unplugged multi-binding input storm");
 }
 
 void TestQuadViewsCanvasDimensionsMatchCompositionDensity() {
@@ -2510,10 +2743,13 @@ int main() {
     TestQuadViewsSessionActivationPolicy();
     TestQuadViewsRecoveryStabilizationPolicy();
     TestQuadViewsRecoveryStabilizer();
+    TestQuadViewsFrameCacheKeepsGazeWithLocatedFrame();
     TestQuadViewsCanvasDimensionsMatchCompositionDensity();
     TestPivotLocateViewsRouting();
+    TestPivotPoseDeltaSpaceReexpression();
     TestNumpadActivationKeys();
     TestDeviceInputPathsAndHatDirections();
+    TestInputDeviceRetryBackoff();
 #ifdef _WIN32
     TestD3D11SharpenShaderRegression();
 #endif

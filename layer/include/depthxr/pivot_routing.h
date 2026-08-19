@@ -26,12 +26,31 @@ enum class PivotPoseDeltaSelection {
     HeldPrevious,
 };
 
+// A display time identifies one logical Pivot update. Keep the first
+// world-space result for that time so repeated xrLocateViews calls cannot
+// advance smoothing or make the eventual correction depend on call order.
 template <typename Time, typename Pose>
-void CachePivotPoseDeltaValue(std::map<Time, Pose>& cache, Time time, const Pose& pose_delta) {
-    cache[time] = pose_delta;
+bool CachePivotPoseDeltaValue(std::map<Time, Pose>& cache, Time time, const Pose& pose_delta) {
+    const bool inserted = cache.try_emplace(time, pose_delta).second;
     while (cache.size() > kPivotPoseDeltaMaxEntries) {
         cache.erase(cache.begin());
     }
+    return inserted;
+}
+
+// Re-express a rigid pose delta from one coordinate space into another. The
+// caller supplies conventional pose composition (lhs * rhs) and inversion so
+// this routing helper remains independent of the OpenXR SDK types.
+//
+// If source_in_target maps source-space poses into target space, a delta D is
+// represented in target space by source_in_target * D * inverse(source_in_target).
+template <typename Pose, typename Compose, typename Invert>
+Pose ReexpressPivotPoseDelta(const Pose& pose_delta_in_source,
+                             const Pose& source_in_target,
+                             Compose compose,
+                             Invert invert) {
+    return compose(compose(source_in_target, pose_delta_in_source),
+                   invert(source_in_target));
 }
 
 template <typename Time, typename Pose>

@@ -167,6 +167,53 @@ const char* DirectInputResultName(std::int64_t result_code) {
     return "unknown";
 }
 
+InputDeviceRetryBackoff::InputDeviceRetryBackoff(
+    std::chrono::milliseconds initial_delay,
+    std::chrono::milliseconds maximum_delay)
+    : initial_delay_(std::max(initial_delay, std::chrono::milliseconds{1})),
+      maximum_delay_(std::max(maximum_delay, initial_delay_)) {}
+
+bool InputDeviceRetryBackoff::ShouldAttempt(const std::wstring& device_key,
+                                            TimePoint now) const {
+    const auto entry = entries_.find(device_key);
+    return entry == entries_.end() || now >= entry->second.retry_after;
+}
+
+std::chrono::milliseconds InputDeviceRetryBackoff::RecordFailure(
+    const std::wstring& device_key,
+    TimePoint now) {
+    Entry& entry = entries_[device_key];
+    if (entry.consecutive_failures == 0) {
+        entry.delay = initial_delay_;
+    } else {
+        entry.delay = std::min(entry.delay * 2, maximum_delay_);
+    }
+    ++entry.consecutive_failures;
+    entry.retry_after = now + entry.delay;
+    return entry.delay;
+}
+
+void InputDeviceRetryBackoff::RecordSuccess(const std::wstring& device_key) {
+    entries_.erase(device_key);
+}
+
+std::chrono::milliseconds InputDeviceRetryBackoff::RetryDelayRemaining(
+    const std::wstring& device_key,
+    TimePoint now) const {
+    const auto entry = entries_.find(device_key);
+    if (entry == entries_.end() || now >= entry->second.retry_after) {
+        return std::chrono::milliseconds{0};
+    }
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+        entry->second.retry_after - now);
+}
+
+std::size_t InputDeviceRetryBackoff::ConsecutiveFailures(
+    const std::wstring& device_key) const {
+    const auto entry = entries_.find(device_key);
+    return entry == entries_.end() ? 0 : entry->second.consecutive_failures;
+}
+
 namespace {
 
 #if defined(_WIN32)
@@ -339,8 +386,35 @@ class DirectInputPoller {
             return result;
         }
 
+        // A missing HID can make DirectInput setup/reacquisition surprisingly
+        // expensive. Without a negative cache, every binding for the same
+        // unplugged device retries here every 30ms on the OpenXR frame path.
+        // Return the last inactive diagnostic until this device's reconnect
+        // deadline, then permit one new attempt for all of its bindings.
+        if (!retry_backoff_.ShouldAttempt(cache_key, now)) {
+            if (const auto failure = failure_diagnostics_.find(cache_key);
+                failure != failure_diagnostics_.end()) {
+                result = failure->second;
+            }
+            result.down = false;
+            result.device_poll_attempted = true;
+            result.device_retry_deferred = true;
+            result.device_retry_delay_ms =
+                retry_backoff_.RetryDelayRemaining(cache_key, now).count();
+            return result;
+        }
+
+        const auto cache_failure = [&] {
+            result.down = false;
+            result.device_retry_deferred = false;
+            result.device_retry_delay_ms =
+                retry_backoff_.RecordFailure(cache_key, InputDeviceRetryBackoff::Clock::now()).count();
+            failure_diagnostics_[cache_key] = result;
+        };
+
         IDirectInputDevice8W* device = GetOrCreateDevice(binding.device_guid, result);
         if (!device) {
+            cache_failure();
             return result;
         }
 
@@ -349,8 +423,12 @@ class DirectInputPoller {
         cached.valid = ReadState(device, cached.state, result);
         if (!cached.valid) {
             DropDevice(binding.device_guid);
+            cache_failure();
             return result;
         }
+
+        retry_backoff_.RecordSuccess(cache_key);
+        failure_diagnostics_.erase(cache_key);
 
         if (result.diagnostic_stage != InputBindingPollStage::None) {
             result.recovered = true;
@@ -527,8 +605,10 @@ class DirectInputPoller {
 
     IDirectInput8W* direct_input_{nullptr};
     std::mutex mutex_;
+    InputDeviceRetryBackoff retry_backoff_;
     std::unordered_map<std::wstring, IDirectInputDevice8W*> devices_;
     std::unordered_map<std::wstring, CachedDeviceState> state_cache_;
+    std::unordered_map<std::wstring, InputBindingPollResult> failure_diagnostics_;
 };
 
 DirectInputPoller& Poller() {

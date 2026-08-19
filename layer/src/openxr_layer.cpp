@@ -1021,6 +1021,13 @@ double ExtractPosePitchRadians(const XrPosef& pose) {
     return ExtractPitchRadians(ToViewOrientation(pose.orientation));
 }
 
+double ExtractPoseRollRadians(const XrPosef& pose) {
+    const XrQuaternionf& orientation = pose.orientation;
+    return std::atan2(
+        2.0 * (orientation.w * orientation.z + orientation.x * orientation.y),
+        1.0 - 2.0 * (orientation.z * orientation.z + orientation.x * orientation.x));
+}
+
 // Wraps an angle to [-pi, pi]; origin-relative yaw deltas must not jump when
 // the raw yaw crosses the +/-pi seam.
 double WrapRadians(double angle) {
@@ -1181,6 +1188,25 @@ XrPosef ApplyExtraRotationToPose(const XrPosef& pose, float extra_yaw_radians, f
 
 XrPosef IdentityPose() {
     return {{0.0f, 0.0f, 0.0f, 1.0f}, {0.0f, 0.0f, 0.0f}};
+}
+
+bool IsIdentityPose(const XrPosef& pose) {
+    return NearlyZero(pose.orientation.x) && NearlyZero(pose.orientation.y) &&
+           NearlyZero(pose.orientation.z) && NearlyEqual(pose.orientation.w, 1.0f) &&
+           NearlyZero(pose.position.x) && NearlyZero(pose.position.y) &&
+           NearlyZero(pose.position.z);
+}
+
+// MultiplyPoses uses (local, parent) argument order. Adapt it to conventional
+// lhs * rhs composition for the coordinate-space conjugation helper.
+XrPosef ComposePoses(const XrPosef& lhs, const XrPosef& rhs) {
+    return MultiplyPoses(rhs, lhs);
+}
+
+XrPosef ReexpressPoseDelta(const XrPosef& pose_delta_in_source,
+                           const XrPosef& source_in_target) {
+    return ReexpressPivotPoseDelta(
+        pose_delta_in_source, source_in_target, ComposePoses, InvertPose);
 }
 
 // All generated Pivot movement flows through one pose-offset composition
@@ -1663,6 +1689,12 @@ void OpenXrLayer::SetNextProcAddr(PFN_xrGetInstanceProcAddr next_get_instance_pr
 
 bool OpenXrLayer::PollInputBindingDown(const InputBinding& binding) {
     const InputBindingPollResult poll = PollInputBinding(binding);
+    if (poll.device_retry_deferred) {
+        // The first real failure already recorded the unavailable-device
+        // diagnostic. Keep deferred bindings entirely off Logger's mutex and
+        // string-formatting path until the per-device reconnect deadline.
+        return false;
+    }
     if (!poll.device_poll_attempted) {
         return poll.down;
     }
@@ -1691,6 +1723,9 @@ bool OpenXrLayer::PollInputBindingDown(const InputBinding& binding) {
         }
         if (poll.retry_attempted) {
             append_result(stream, "retryResult", poll.retry_result_code);
+        }
+        if (poll.device_retry_delay_ms > 0) {
+            stream << ", nextReconnectInMs=" << poll.device_retry_delay_ms;
         }
     };
 
@@ -1725,7 +1760,9 @@ bool OpenXrLayer::PollInputBindingDown(const InputBinding& binding) {
         const bool interval_elapsed = !state.last_log_time.has_value() ||
                                       now - *state.last_log_time >= kInputDeviceFailureLogInterval;
         state.failure_active = true;
-        ++state.failed_attempts;
+        if (!poll.device_retry_deferred) {
+            ++state.failed_attempts;
+        }
         if (changed || interval_elapsed) {
             std::ostringstream stream;
             stream << "Input device polling unavailable: ";
@@ -1734,7 +1771,7 @@ bool OpenXrLayer::PollInputBindingDown(const InputBinding& binding) {
             if (state.suppressed_attempts > 0) {
                 stream << ", suppressedRepeats=" << state.suppressed_attempts;
             }
-            stream << ". The binding will remain inactive while VectorXR retries.";
+            stream << ". The binding will remain inactive while VectorXR retries with reconnect backoff.";
             logger_.Info(stream.str());
             state.signature = signature;
             state.last_log_time = now;
@@ -2293,7 +2330,8 @@ XrResult OpenXrLayer::EndSession(XrSession session) {
     }
 
     if (begin_pending_frame) {
-        const XrResult begin_result = next_begin_frame_(session, nullptr);
+        const XrFrameBeginInfo begin_info{XR_TYPE_FRAME_BEGIN_INFO};
+        const XrResult begin_result = next_begin_frame_(session, &begin_info);
         if (XR_FAILED(begin_result)) {
             logger_.Info("Session end: unable to balance Turbo's pending xrBeginFrame, result=" +
                          std::to_string(static_cast<int>(begin_result)) + ".");
@@ -2335,8 +2373,10 @@ XrResult OpenXrLayer::EndSession(XrSession session) {
         cached_eye_offset_poses_.clear();
         cached_eye_offsets_display_time_ = 0;
         cached_pivot_pose_deltas_.clear();
+        logged_pivot_space_conversions_.clear();
+        failed_pivot_space_conversions_.clear();
         cached_depth_submission_geometry_.clear();
-        cached_quadviews_fovs_.clear();
+        cached_quadviews_frames_.Clear();
         last_app_action_sync_time_.reset();
         last_eye_gaze_self_sync_time_.reset();
         quadviews_smoothed_focus_yaw_radians_ = 0.0;
@@ -3912,9 +3952,22 @@ bool OpenXrLayer::ComposeQuadViewsD3D11(const XrCompositionLayerProjection* sour
         return false;
     }
 
-    std::array<XrFovf, 4> cached_fovs{};
+    QuadViewsFrameState cached_frame{};
     XrTime matched_quadviews_fov_time = 0;
-    const bool has_cached_fovs = FindQuadViewsFovs(display_time, &cached_fovs, &matched_quadviews_fov_time);
+    const bool has_cached_fovs =
+        FindQuadViewsFrame(display_time, &cached_frame, &matched_quadviews_fov_time);
+    QuadViewsGazeDiagnostic gaze_diagnostic{};
+    if (has_cached_fovs) {
+        gaze_diagnostic = cached_frame.gaze;
+    } else if (quadviews_raw_focus_valid_ && quadviews_raw_focus_time_ == display_time) {
+        // A missing FOV cache is unusual, but retain an exact-time fallback for
+        // startup frames instead of pairing the submission with a newer locate.
+        gaze_diagnostic.valid = true;
+        gaze_diagnostic.raw_yaw_radians = quadviews_raw_focus_yaw_radians_;
+        gaze_diagnostic.raw_pitch_radians = quadviews_raw_focus_pitch_radians_;
+        gaze_diagnostic.smoothed_yaw_radians = quadviews_smoothed_focus_yaw_radians_;
+        gaze_diagnostic.smoothed_pitch_radians = quadviews_smoothed_focus_pitch_radians_;
+    }
 
     struct SavedD3D11State {
         ID3D11RenderTargetView* render_targets[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT]{};
@@ -4243,8 +4296,9 @@ bool OpenXrLayer::ComposeQuadViewsD3D11(const XrCompositionLayerProjection* sour
         context->PSSetShaderResources(0, 2, resources);
         context->PSSetSamplers(0, 1, &d3d11_quadviews_compositor_.sampler);
 
-        const XrFovf& full_fov = has_cached_fovs ? cached_fovs[eye] : source_layer->views[eye].fov;
-        const XrFovf& focus_fov = has_cached_fovs ? cached_fovs[eye + 2] : source_layer->views[eye + 2].fov;
+        const XrFovf& full_fov = has_cached_fovs ? cached_frame.fovs[eye] : source_layer->views[eye].fov;
+        const XrFovf& focus_fov =
+            has_cached_fovs ? cached_frame.fovs[eye + 2] : source_layer->views[eye + 2].fov;
         const XrSwapchainSubImage& peripheral_sub_image = source_layer->views[eye].subImage;
         const XrSwapchainSubImage& focus_sub_image = source_layer->views[eye + 2].subImage;
         const uint32_t focus_content_width =
@@ -4262,9 +4316,7 @@ bool OpenXrLayer::ComposeQuadViewsD3D11(const XrCompositionLayerProjection* sour
 
         const bool eye_tracking_mode =
             resolved_settings_.quadviews.tracking_mode == QuadViewsTrackingMode::Eye;
-        const XrTime diagnostic_time = has_cached_fovs ? matched_quadviews_fov_time : display_time;
-        const bool raw_gaze_valid = eye_tracking_mode && quadviews_raw_focus_valid_ &&
-                                    quadviews_raw_focus_time_ == diagnostic_time;
+        const bool raw_gaze_valid = eye_tracking_mode && gaze_diagnostic.valid;
         constants.diagnostic_params[0] = quadviews_diagnostic_visualization_enabled_ ? 1.0f : 0.0f;
         constants.diagnostic_params[1] = eye_tracking_mode ? 1.0f : 0.0f;
         constants.diagnostic_params[2] = raw_gaze_valid ? 1.0f : 0.0f;
@@ -4272,9 +4324,9 @@ bool OpenXrLayer::ComposeQuadViewsD3D11(const XrCompositionLayerProjection* sour
         constants.output_texel[1] = 1.0f / static_cast<float>(std::max<uint32_t>(1, target.height));
 
         const std::array<float, 2> raw_gaze_uv = ProjectViewAnglesToUv(
-            full_fov, quadviews_raw_focus_yaw_radians_, quadviews_raw_focus_pitch_radians_);
+            full_fov, gaze_diagnostic.raw_yaw_radians, gaze_diagnostic.raw_pitch_radians);
         const std::array<float, 2> smoothed_gaze_uv = ProjectViewAnglesToUv(
-            full_fov, quadviews_smoothed_focus_yaw_radians_, quadviews_smoothed_focus_pitch_radians_);
+            full_fov, gaze_diagnostic.smoothed_yaw_radians, gaze_diagnostic.smoothed_pitch_radians);
         const std::array<float, 2> head_center_uv = ProjectViewAnglesToUv(full_fov, 0.0, 0.0);
         const std::array<float, 2> configured_offset_uv = ProjectViewAnglesToUv(
             full_fov,
@@ -4516,7 +4568,7 @@ bool OpenXrLayer::ComposeQuadViewsD3D11(const XrCompositionLayerProjection* sour
             (*composed_views)[eye].pose = MultiplyPoses((*composed_views)[eye].pose, reverse_delta);
         }
         if (has_cached_fovs) {
-            (*composed_views)[eye].fov = cached_fovs[eye];
+            (*composed_views)[eye].fov = cached_frame.fovs[eye];
         }
         QuadViewsCompositionTarget& target = d3d11_quadviews_compositor_.targets[eye];
         (*composed_views)[eye].subImage.swapchain = target.swapchain;
@@ -4548,6 +4600,10 @@ bool OpenXrLayer::ComposeQuadViewsD3D11(const XrCompositionLayerProjection* sour
 XrResult OpenXrLayer::WaitFrame(XrSession session,
                                 const XrFrameWaitInfo* frame_wait_info,
                                 XrFrameState* frame_state) {
+    if (!frame_state || (frame_wait_info && frame_wait_info->type != XR_TYPE_FRAME_WAIT_INFO) ||
+        frame_state->type != XR_TYPE_FRAME_STATE) {
+        return XR_ERROR_VALIDATION_FAILURE;
+    }
     if (!turbo_frame_interception_required_.load(std::memory_order_acquire)) {
         if (!frame_pacing_debug_enabled_.load(std::memory_order_relaxed)) {
             return next_wait_frame_(session, frame_wait_info, frame_state);
@@ -4574,13 +4630,11 @@ XrResult OpenXrLayer::WaitFrame(XrSession session,
         }
         return result;
     }
-    if (!frame_state) {
-        return next_wait_frame_(session, frame_wait_info, frame_state);
-    }
-
     {
         std::unique_lock lock(turbo_mutex_);
-        const bool wait_pipelined = turbo_async_wait_.valid();
+        bool wait_pipelined = turbo_async_wait_.valid();
+        bool async_handoff = turbo_async_handoff_active_;
+        bool async_interception_cancelled = false;
         // Fabricate while a pipelined wait is outstanding (async pacing) or
         // the sequenced pipeline is established — in both cases the runtime
         // already owns this frame's pacing and this wait must never reach it.
@@ -4588,8 +4642,18 @@ XrResult OpenXrLayer::WaitFrame(XrSession session,
         // DCS calls xrWaitFrame concurrently with xrEndFrame, and any gap
         // here would let that wait reach the runtime alongside our own
         // (hardlock).
-        if (wait_pipelined || turbo_seq_state_ == TurboSequencedState::kActive) {
-            if (!wait_pipelined && !turbo_valve_open_) {
+        if (wait_pipelined || async_handoff || turbo_seq_state_ == TurboSequencedState::kActive) {
+            if (async_handoff) {
+                ++turbo_async_handoff_wait_intercepts_;
+                if (turbo_async_handoff_debug_log_budget_ > 0 && logger_.IsDebugEnabled()) {
+                    --turbo_async_handoff_debug_log_budget_;
+                    logger_.Debug("Turbo-diag: app xrWaitFrame intercepted by async handoff shield; "
+                                  "generation=" + std::to_string(turbo_async_wait_generation_) +
+                                  ", futurePublished=" + (wait_pipelined ? "1" : "0") +
+                                  ", alreadyPolled=" + (turbo_async_wait_polled_ ? "1" : "0") + ".");
+                }
+            }
+            if (!wait_pipelined && !async_handoff && !turbo_valve_open_) {
                 // Valve closed (turbo toggled off / suspended): re-couple the
                 // app to genuine runtime pacing without touching the pipeline
                 // topology — block until the next pre-wait posts a pacing
@@ -4621,65 +4685,101 @@ XrResult OpenXrLayer::WaitFrame(XrSession session,
                                   "ms, token=" + std::to_string(consumed_token ? 1 : 0));
                 }
             }
-            if (wait_pipelined) {
+            if (wait_pipelined || async_handoff) {
                 bool mark_wait_polled = true;
                 if (turbo_async_wait_polled_) {
                     // Second poll while pipelined: only one frame of
                     // pipelining is allowed, so now we must wait for the real
-                    // frame. Keep a shared snapshot: EndFrame may retire the
-                    // member while this app thread is blocked.
-                    const std::shared_future<void> pending_wait = turbo_async_wait_;
-                    const std::uint64_t pending_generation = turbo_async_wait_generation_;
-                    lock.unlock();
-                    pending_wait.wait();
-                    lock.lock();
-                    if (pending_generation != turbo_async_wait_generation_) {
-                        // EndFrame already retired this wait and may have
-                        // launched the following one. Do not mark that newer
-                        // wait as having been polled by this older call.
-                        mark_wait_polled = false;
+                    // frame. If EndFrame has pre-armed the handoff but not yet
+                    // published the worker future, first wait for publication
+                    // (or cancellation after a failed submit).
+                    if (!wait_pipelined && async_handoff) {
+                        ++turbo_async_handoff_second_poll_blocks_;
+                        if (turbo_async_handoff_debug_log_budget_ > 0 && logger_.IsDebugEnabled()) {
+                            --turbo_async_handoff_debug_log_budget_;
+                            logger_.Debug("Turbo-diag: second app xrWaitFrame waiting for async handoff "
+                                          "publication; generation=" +
+                                          std::to_string(turbo_async_wait_generation_) + ".");
+                        }
+                        turbo_async_handoff_cv_.wait(lock, [this] {
+                            return !turbo_async_handoff_active_ || turbo_async_wait_.valid();
+                        });
+                        wait_pipelined = turbo_async_wait_.valid();
+                        async_handoff = turbo_async_handoff_active_;
+                        if (!wait_pipelined && !async_handoff) {
+                            async_interception_cancelled = true;
+                            mark_wait_polled = false;
+                            if (turbo_async_handoff_debug_log_budget_ > 0 && logger_.IsDebugEnabled()) {
+                                --turbo_async_handoff_debug_log_budget_;
+                                logger_.Debug("Turbo-diag: async handoff cancelled while a second app "
+                                              "xrWaitFrame waited; returning to runtime pass-through.");
+                            }
+                        }
+                    }
+
+                    if (wait_pipelined) {
+                        // Keep a shared snapshot: EndFrame may retire the
+                        // member while this app thread is blocked.
+                        const std::shared_future<void> pending_wait = turbo_async_wait_;
+                        const std::uint64_t pending_generation = turbo_async_wait_generation_;
+                        lock.unlock();
+                        pending_wait.wait();
+                        lock.lock();
+                        if (pending_generation != turbo_async_wait_generation_) {
+                            // EndFrame already retired this wait and may have
+                            // launched the following one. Do not mark that newer
+                            // wait as having been polled by this older call.
+                            mark_wait_polled = false;
+                        }
                     }
                 }
-                if (mark_wait_polled) {
+                if (!async_interception_cancelled && mark_wait_polled) {
                     turbo_async_wait_polled_ = true;
                 }
             }
 
-            const auto now = std::chrono::steady_clock::now();
-            XrTime predicted = turbo_last_predicted_display_time_;
-            if (wait_pipelined && !turbo_async_wait_completed_ &&
-                turbo_last_wait_frame_wall_time_.has_value()) {
-                // Async wait still in flight: extrapolate by the wall-clock
-                // delta between the app's waits. (Sequenced pacing never needs
-                // this — its wait completed before EndFrame returned, so the
-                // recorded timing is already this frame's real timing.)
-                predicted += std::chrono::duration_cast<std::chrono::nanoseconds>(
-                                 now - *turbo_last_wait_frame_wall_time_)
-                                 .count();
-            }
-            turbo_last_wait_frame_wall_time_ = now;
+            if (async_interception_cancelled) {
+                // The downstream submit failed and EndFrame cancelled the
+                // pre-publication shield. This call has not fabricated a frame,
+                // so it can safely resume normal runtime pacing below.
+            } else {
+                const auto now = std::chrono::steady_clock::now();
+                XrTime predicted = turbo_last_predicted_display_time_;
+                if ((wait_pipelined || async_handoff) && !turbo_async_wait_completed_ &&
+                    turbo_last_wait_frame_wall_time_.has_value()) {
+                    // Async wait still in flight: extrapolate by the wall-clock
+                    // delta between the app's waits. (Sequenced pacing never needs
+                    // this — its wait completed before EndFrame returned, so the
+                    // recorded timing is already this frame's real timing.)
+                    predicted += std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                     now - *turbo_last_wait_frame_wall_time_)
+                                     .count();
+                }
+                turbo_last_wait_frame_wall_time_ = now;
 
-            // The spec requires predictedDisplayTime to increase monotonically.
-            // When the app polls twice for one pipelined frame (DCS menu does),
-            // step the second return forward by a display period rather than
-            // 1ns — two frames "predicted" for the same instant confuse the
-            // app's pose prediction and animation timing.
-            const XrTime min_step =
-                turbo_last_predicted_display_period_ > 0 ? turbo_last_predicted_display_period_ : 1;
-            frame_state->predictedDisplayTime =
-                std::max(predicted, turbo_max_returned_display_time_ + min_step);
-            frame_state->predictedDisplayPeriod = turbo_last_predicted_display_period_;
-            frame_state->shouldRender = turbo_last_should_render_ ? XR_TRUE : XR_FALSE;
-            turbo_max_returned_display_time_ = frame_state->predictedDisplayTime;
-            ++pacing_fabricated_waits_;
-            ++turbo_metrics_fabricated_pending_;
-            if (turbo_fabricated_wait_log_budget_ > 0 && logger_.IsDebugEnabled()) {
-                --turbo_fabricated_wait_log_budget_;
-                logger_.Debug("Turbo: fabricated xrWaitFrame return, predictedDisplayTime=" +
-                              std::to_string(frame_state->predictedDisplayTime) +
-                              ", asyncWaitCompleted=" + (turbo_async_wait_completed_ ? "1" : "0"));
+                // The spec requires predictedDisplayTime to increase monotonically.
+                // When the app polls twice for one pipelined frame (DCS menu does),
+                // step the second return forward by a display period rather than
+                // 1ns — two frames "predicted" for the same instant confuse the
+                // app's pose prediction and animation timing.
+                const XrTime min_step =
+                    turbo_last_predicted_display_period_ > 0 ? turbo_last_predicted_display_period_ : 1;
+                frame_state->predictedDisplayTime =
+                    std::max(predicted, turbo_max_returned_display_time_ + min_step);
+                frame_state->predictedDisplayPeriod = turbo_last_predicted_display_period_;
+                frame_state->shouldRender = turbo_last_should_render_ ? XR_TRUE : XR_FALSE;
+                turbo_max_returned_display_time_ = frame_state->predictedDisplayTime;
+                ++pacing_fabricated_waits_;
+                ++turbo_metrics_fabricated_pending_;
+                if (turbo_fabricated_wait_log_budget_ > 0 && logger_.IsDebugEnabled()) {
+                    --turbo_fabricated_wait_log_budget_;
+                    logger_.Debug("Turbo: fabricated xrWaitFrame return, predictedDisplayTime=" +
+                                  std::to_string(frame_state->predictedDisplayTime) +
+                                  ", asyncWaitCompleted=" + (turbo_async_wait_completed_ ? "1" : "0") +
+                                  ", asyncHandoff=" + (async_handoff ? "1" : "0"));
+                }
+                return XR_SUCCESS;
             }
-            return XR_SUCCESS;
         }
     }
 
@@ -4748,6 +4848,9 @@ XrResult OpenXrLayer::WaitFrame(XrSession session,
 }
 
 XrResult OpenXrLayer::BeginFrame(XrSession session, const XrFrameBeginInfo* frame_begin_info) {
+    if (frame_begin_info && frame_begin_info->type != XR_TYPE_FRAME_BEGIN_INFO) {
+        return XR_ERROR_VALIDATION_FAILURE;
+    }
     {
         std::scoped_lock lock(mutex_);
         if (session == active_session_) {
@@ -4782,10 +4885,20 @@ XrResult OpenXrLayer::BeginFrame(XrSession session, const XrFrameBeginInfo* fram
                 --turbo_seq_debug_log_budget_;
                 logger_.Debug("Turbo-diag: owed xrBeginFrame passing through to the runtime.");
             }
-        } else if (turbo_async_wait_.valid() || turbo_seq_state_ == TurboSequencedState::kActive) {
+        } else if (turbo_async_wait_.valid() || turbo_async_handoff_active_ ||
+                   turbo_seq_state_ == TurboSequencedState::kActive) {
             // Async pacing: deferred into ForwardEndFrame once the async wait
             // resolves. Sequenced pacing: the frame was pre-begun inside the
             // previous EndFrame (or will be compensated there).
+            if (turbo_async_handoff_active_) {
+                ++turbo_async_handoff_begin_intercepts_;
+                if (turbo_async_handoff_debug_log_budget_ > 0 && logger_.IsDebugEnabled()) {
+                    --turbo_async_handoff_debug_log_budget_;
+                    logger_.Debug("Turbo-diag: app xrBeginFrame intercepted by async handoff shield; "
+                                  "generation=" + std::to_string(turbo_async_wait_generation_) +
+                                  ", futurePublished=" + (turbo_async_wait_.valid() ? "1" : "0") + ".");
+                }
+            }
             return XR_SUCCESS;
         } else if (turbo_seq_state_ == TurboSequencedState::kEngaging &&
                    turbo_seq_debug_log_budget_ > 0 && logger_.IsDebugEnabled()) {
@@ -4967,7 +5080,7 @@ XrResult OpenXrLayer::ForwardEndFrame(XrSession session,
     bool pipeline_established = false;
     {
         std::scoped_lock lock(turbo_mutex_);
-        pipeline_established = turbo_async_wait_.valid() ||
+        pipeline_established = turbo_async_wait_.valid() || turbo_async_handoff_active_ ||
                                turbo_seq_state_ == TurboSequencedState::kActive ||
                                turbo_seq_state_ == TurboSequencedState::kEngaging;
     }
@@ -5038,6 +5151,14 @@ XrResult OpenXrLayer::ForwardEndFrame(XrSession session,
         seq_state = turbo_seq_state_;
         begin_owed = turbo_begin_owed_;
         valve_open = turbo_valve_open_;
+        if (!has_pending_wait && turbo_engaged && turbo_pacing_mode_ == TurboPacingMode::kAsync &&
+            seq_state == TurboSequencedState::kInactive) {
+            // Pre-arm before the runtime submit. DCS may issue its next app
+            // wait concurrently with this EndFrame; it must see interception
+            // even though the worker's real wait cannot start until EndFrame
+            // has returned downstream.
+            ArmTurboAsyncHandoffLocked("pre-submit async establishment");
+        }
         // From here until the runtime xrEndFrame returns, an owed
         // establishment begin arriving on another thread is deferred rather
         // than forwarded (Begin(N+1) must never reach the runtime before
@@ -5048,6 +5169,7 @@ XrResult OpenXrLayer::ForwardEndFrame(XrSession session,
         std::scoped_lock lock(turbo_mutex_);
         turbo_end_frame_in_flight_ = false;
         turbo_begin_deferred_ = false;
+        CancelTurboAsyncHandoffLocked("frame forwarding aborted before submit");
     };
     if (TurboSequencedDebugTick()) {
         logger_.Debug("Turbo-diag: pre-submit snapshot: engaged=" + std::to_string(turbo_engaged ? 1 : 0) +
@@ -5088,6 +5210,13 @@ XrResult OpenXrLayer::ForwardEndFrame(XrSession session,
             if (ready && pending_async_generation == turbo_async_wait_generation_) {
                 async_wait_result = turbo_async_wait_result_;
                 turbo_async_wait_ = {};
+                if (turbo_engaged && turbo_pacing_mode_ == TurboPacingMode::kAsync &&
+                    turbo_seq_state_ == TurboSequencedState::kInactive) {
+                    // Retire and arm atomically under turbo_mutex_: an app
+                    // WaitFrame can observe the old future or the shield, but
+                    // never a pass-through gap between them.
+                    ArmTurboAsyncHandoffLocked("completed async wait retired before submit");
+                }
             }
         }
         if (ready && XR_FAILED(async_wait_result)) {
@@ -5111,7 +5240,8 @@ XrResult OpenXrLayer::ForwardEndFrame(XrSession session,
         if (!frame_begun) {
             // Deferred xrBeginFrame for the pipelined frame. Errors pass
             // through (e.g. the session state machine advanced under us).
-            const XrResult begin_result = next_begin_frame_(session, nullptr);
+            const XrFrameBeginInfo begin_info{XR_TYPE_FRAME_BEGIN_INFO};
+            const XrResult begin_result = next_begin_frame_(session, &begin_info);
             if (XR_FAILED(begin_result)) {
                 logger_.Error("Turbo: deferred xrBeginFrame failed with " +
                               std::to_string(static_cast<int>(begin_result)));
@@ -5138,11 +5268,12 @@ XrResult OpenXrLayer::ForwardEndFrame(XrSession session,
             logger_.Debug("Turbo-diag: compensation xrWaitFrame starting (frame thread).");
         }
         XrFrameState frame_state{XR_TYPE_FRAME_STATE};
+        const XrFrameWaitInfo wait_info{XR_TYPE_FRAME_WAIT_INFO};
         const auto comp_start = std::chrono::steady_clock::now();
         XrResult comp_result = XR_SUCCESS;
         {
             std::scoped_lock wait_lock(turbo_runtime_wait_mutex_);
-            comp_result = next_wait_frame_(session, nullptr, &frame_state);
+            comp_result = next_wait_frame_(session, &wait_info, &frame_state);
         }
         const double comp_ms =
             std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - comp_start)
@@ -5160,7 +5291,8 @@ XrResult OpenXrLayer::ForwardEndFrame(XrSession session,
                 turbo_last_should_render_ = frame_state.shouldRender == XR_TRUE;
                 NoteTurboShouldRenderLocked(turbo_last_should_render_);
             }
-            const XrResult begin_result = next_begin_frame_(session, nullptr);
+            const XrFrameBeginInfo begin_info{XR_TYPE_FRAME_BEGIN_INFO};
+            const XrResult begin_result = next_begin_frame_(session, &begin_info);
             if (XR_FAILED(begin_result)) {
                 logger_.Error("Turbo: compensation xrBeginFrame failed with " +
                               std::to_string(static_cast<int>(begin_result)));
@@ -5265,11 +5397,12 @@ XrResult OpenXrLayer::ForwardEndFrame(XrSession session,
                     logger_.Debug("Turbo: sequenced wait+begin starting (frame thread).");
                 }
                 XrFrameState frame_state{XR_TYPE_FRAME_STATE};
+                const XrFrameWaitInfo wait_info{XR_TYPE_FRAME_WAIT_INFO};
                 const auto wait_start = std::chrono::steady_clock::now();
                 XrResult wait_result = XR_SUCCESS;
                 {
                     std::scoped_lock wait_lock(turbo_runtime_wait_mutex_);
-                    wait_result = next_wait_frame_(session, nullptr, &frame_state);
+                    wait_result = next_wait_frame_(session, &wait_info, &frame_state);
                 }
                 const double wait_ms =
                     std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() -
@@ -5298,7 +5431,8 @@ XrResult OpenXrLayer::ForwardEndFrame(XrSession session,
                         turbo_pacing_tokens_ = 1;
                         turbo_valve_cv_.notify_all();
                     }
-                    const XrResult begin_result = next_begin_frame_(session, nullptr);
+                    const XrFrameBeginInfo begin_info{XR_TYPE_FRAME_BEGIN_INFO};
+                    const XrResult begin_result = next_begin_frame_(session, &begin_info);
                     if (XR_SUCCEEDED(begin_result)) {
                         std::scoped_lock lock(turbo_mutex_);
                         turbo_frame_begun_ = true;
@@ -5335,19 +5469,24 @@ XrResult OpenXrLayer::ForwardEndFrame(XrSession session,
                 if (!turbo_pipelining_logged_) {
                     logger_.Info("Turbo: frame pipelining engaged (async pacing); the app's xrWaitFrame "
                                  "is now decoupled from runtime pacing.");
+                    logger_.Info("Turbo: async frame handoffs are gap-shielded for applications that overlap "
+                                 "xrWaitFrame with xrEndFrame.");
                     logger_.Info("Turbo compatibility notice: frame pipelining can prevent runtime "
                                  "reprojection or frame synthesis (including SteamVR Motion Smoothing). "
                                  "Disable Turbo first if presentation becomes unstable.");
                     turbo_pipelining_logged_ = true;
                     turbo_fabricated_wait_log_budget_ = 5;
                 }
-                turbo_async_wait_polled_ = false;
-                turbo_async_wait_completed_ = false;
+                if (!turbo_async_handoff_active_) {
+                    // Defensive recovery only: the normal path arms before
+                    // xrEndFrame, where an overlapping app wait can see it.
+                    ArmTurboAsyncHandoffLocked("post-submit async recovery");
+                }
                 turbo_async_wait_result_ = XR_SUCCESS;
-                ++turbo_async_wait_generation_;
                 EnsureTurboAsyncWorkerLocked();
                 turbo_async_job_completion_ = std::make_shared<std::promise<void>>();
                 turbo_async_wait_ = turbo_async_job_completion_->get_future().share();
+                PublishTurboAsyncHandoffLocked();
                 turbo_async_job_session_ = session;
                 turbo_async_job_pending_ = true;
                 turbo_async_worker_cv_.notify_one();
@@ -5366,6 +5505,7 @@ XrResult OpenXrLayer::ForwardEndFrame(XrSession session,
             // not-yet-established handshake is dropped, and the async
             // drain-out is logged.
             std::scoped_lock lock(turbo_mutex_);
+            CancelTurboAsyncHandoffLocked("turbo disengaged before async publication");
             if (turbo_seq_state_ == TurboSequencedState::kEngaging) {
                 // Nothing was pipelined yet; drop the handshake request.
                 turbo_seq_state_ = TurboSequencedState::kInactive;
@@ -5380,6 +5520,9 @@ XrResult OpenXrLayer::ForwardEndFrame(XrSession session,
                 turbo_pipelining_logged_ = false;
             }
         }
+    } else {
+        std::scoped_lock lock(turbo_mutex_);
+        CancelTurboAsyncHandoffLocked("runtime xrEndFrame failed");
     }
 
     // The submit is down; release the owed-begin deferral window. If the
@@ -5400,7 +5543,8 @@ XrResult OpenXrLayer::ForwardEndFrame(XrSession session,
         if (TurboSequencedDebugTick()) {
             logger_.Debug("Turbo-diag: issuing deferred establishment xrBeginFrame (frame thread).");
         }
-        const XrResult begin_result = next_begin_frame_(session, nullptr);
+        const XrFrameBeginInfo begin_info{XR_TYPE_FRAME_BEGIN_INFO};
+        const XrResult begin_result = next_begin_frame_(session, &begin_info);
         if (XR_SUCCEEDED(begin_result)) {
             std::scoped_lock lock(turbo_mutex_);
             turbo_frame_begun_ = true;
@@ -5729,6 +5873,12 @@ void OpenXrLayer::RecordFramePacing(std::chrono::steady_clock::time_point frame_
         double submit_delta_min_periods = 0.0;
         double submit_delta_max_periods = 0.0;
         uint32_t submit_delta_samples = 0;
+        std::uint64_t async_handoff_armed = 0;
+        std::uint64_t async_handoff_waits = 0;
+        std::uint64_t async_handoff_begins = 0;
+        std::uint64_t async_handoff_second_poll_blocks = 0;
+        std::uint64_t async_handoff_cancellations = 0;
+        bool async_handoff_active = false;
         {
             std::scoped_lock lock(turbo_mutex_);
             wait_sum_ms = pacing_wait_sum_ms_;
@@ -5739,6 +5889,12 @@ void OpenXrLayer::RecordFramePacing(std::chrono::steady_clock::time_point frame_
             submit_delta_min_periods = pacing_submit_delta_min_periods_;
             submit_delta_max_periods = pacing_submit_delta_max_periods_;
             submit_delta_samples = pacing_submit_delta_samples_;
+            async_handoff_armed = turbo_async_handoff_armed_total_;
+            async_handoff_waits = turbo_async_handoff_wait_intercepts_;
+            async_handoff_begins = turbo_async_handoff_begin_intercepts_;
+            async_handoff_second_poll_blocks = turbo_async_handoff_second_poll_blocks_;
+            async_handoff_cancellations = turbo_async_handoff_cancellations_;
+            async_handoff_active = turbo_async_handoff_active_;
             pacing_submit_delta_sum_periods_ = 0.0;
             pacing_submit_delta_min_periods_ = 0.0;
             pacing_submit_delta_max_periods_ = 0.0;
@@ -5772,6 +5928,12 @@ void OpenXrLayer::RecordFramePacing(std::chrono::steady_clock::time_point frame_
             stream << "n/a";
         }
         stream << ", fabricatedWaits=" << fabricated_waits;
+        if (turbo_pacing_mode_ == TurboPacingMode::kAsync || async_handoff_armed > 0) {
+            stream << ", asyncHandoff active/armed/waits/begins/secondPollBlocks/cancels="
+                   << (async_handoff_active ? 1 : 0) << "/" << async_handoff_armed << "/"
+                   << async_handoff_waits << "/" << async_handoff_begins << "/"
+                   << async_handoff_second_poll_blocks << "/" << async_handoff_cancellations;
+        }
         if (submit_delta_samples > 0) {
             stream << ", submittedDisplayTimeVsLatestWait avg/min/max="
                    << FormatDiagnosticDouble(submit_delta_sum_periods / submit_delta_samples) << "/"
@@ -6039,6 +6201,62 @@ void OpenXrLayer::ResetTurboMetricsState() {
     turbo_metrics_fabricated_pending_ = 0;
 }
 
+void OpenXrLayer::ArmTurboAsyncHandoffLocked(const char* reason) {
+    if (turbo_async_handoff_active_) {
+        return;
+    }
+    turbo_async_handoff_active_ = true;
+    turbo_async_wait_polled_ = false;
+    turbo_async_wait_completed_ = false;
+    ++turbo_async_wait_generation_;
+    ++turbo_async_handoff_armed_total_;
+    if (turbo_async_handoff_armed_total_ == 1) {
+        // Capture establishment and the first several steady-state handoffs,
+        // then rely on the five-second aggregate so debug logging cannot turn
+        // into a per-frame pacing cost.
+        turbo_async_handoff_debug_log_budget_ = 64;
+    }
+    if (logger_.IsDebugEnabled() && turbo_async_handoff_debug_log_budget_ > 0) {
+        --turbo_async_handoff_debug_log_budget_;
+        logger_.Debug("Turbo-diag: async handoff shield armed; reason=" +
+                      std::string(reason ? reason : "unknown") +
+                      ", generation=" + std::to_string(turbo_async_wait_generation_) +
+                      ", armedTotal=" + std::to_string(turbo_async_handoff_armed_total_) + ".");
+    }
+}
+
+void OpenXrLayer::PublishTurboAsyncHandoffLocked() {
+    if (!turbo_async_handoff_active_) {
+        return;
+    }
+    if (!turbo_async_wait_.valid()) {
+        CancelTurboAsyncHandoffLocked("publication missing worker future");
+        return;
+    }
+    turbo_async_handoff_active_ = false;
+    turbo_async_handoff_cv_.notify_all();
+    if (logger_.IsDebugEnabled() && turbo_async_handoff_debug_log_budget_ > 0) {
+        --turbo_async_handoff_debug_log_budget_;
+        logger_.Debug("Turbo-diag: async handoff published runtime wait; generation=" +
+                      std::to_string(turbo_async_wait_generation_) +
+                      ", interceptedWaits=" + std::to_string(turbo_async_handoff_wait_intercepts_) +
+                      ", interceptedBegins=" + std::to_string(turbo_async_handoff_begin_intercepts_) + ".");
+    }
+}
+
+void OpenXrLayer::CancelTurboAsyncHandoffLocked(const char* reason) {
+    if (!turbo_async_handoff_active_) {
+        return;
+    }
+    turbo_async_handoff_active_ = false;
+    ++turbo_async_handoff_cancellations_;
+    turbo_async_handoff_cv_.notify_all();
+    logger_.Info("Turbo: async handoff shield cancelled; reason=" +
+                 std::string(reason ? reason : "unknown") +
+                 ", generation=" + std::to_string(turbo_async_wait_generation_) +
+                 ", cancellations=" + std::to_string(turbo_async_handoff_cancellations_) + ".");
+}
+
 void OpenXrLayer::EnsureTurboAsyncWorkerLocked() {
     if (turbo_async_worker_.joinable()) {
         return;
@@ -6065,10 +6283,11 @@ void OpenXrLayer::TurboAsyncWorkerLoop() {
         }
 
         XrFrameState frame_state{XR_TYPE_FRAME_STATE};
+        const XrFrameWaitInfo wait_info{XR_TYPE_FRAME_WAIT_INFO};
         XrResult wait_result = XR_SUCCESS;
         {
             std::scoped_lock wait_lock(turbo_runtime_wait_mutex_);
-            wait_result = next_wait_frame_(session, nullptr, &frame_state);
+            wait_result = next_wait_frame_(session, &wait_info, &frame_state);
         }
         {
             std::scoped_lock state_lock(turbo_mutex_);
@@ -6160,6 +6379,14 @@ void OpenXrLayer::ResetTurboFrameState() {
     pacing_submit_delta_min_periods_ = 0.0;
     pacing_submit_delta_max_periods_ = 0.0;
     pacing_submit_delta_samples_ = 0;
+    turbo_async_handoff_active_ = false;
+    turbo_async_handoff_armed_total_ = 0;
+    turbo_async_handoff_wait_intercepts_ = 0;
+    turbo_async_handoff_begin_intercepts_ = 0;
+    turbo_async_handoff_second_poll_blocks_ = 0;
+    turbo_async_handoff_cancellations_ = 0;
+    turbo_async_handoff_debug_log_budget_ = 0;
+    turbo_async_handoff_cv_.notify_all();
     turbo_async_wait_ = {};
     ++turbo_async_wait_generation_;
     turbo_async_wait_polled_ = false;
@@ -6197,7 +6424,7 @@ void OpenXrLayer::ResetTurboFrameState() {
 }
 
 XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_end_info) {
-    if (!frame_end_info) {
+    if (!frame_end_info || frame_end_info->type != XR_TYPE_FRAME_END_INFO) {
         return XR_ERROR_VALIDATION_FAILURE;
     }
 
@@ -6224,7 +6451,7 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
     if (!resolved_settings_.core.enabled) {
         cached_pivot_pose_deltas_.clear();
         cached_depth_submission_geometry_.clear();
-        cached_quadviews_fovs_.clear();
+        cached_quadviews_frames_.Clear();
         pivotxr_smoothed_extra_yaw_radians_ = 0.0;
         pivotxr_smoothed_extra_pitch_radians_ = 0.0;
         pivotxr_yaw_step_ = 0;
@@ -6237,7 +6464,7 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
         const XrResult release_result = FlushDeferredSwapchainReleasesLocked("end frame");
         PrunePivotPoseDeltas(frame_end_info->displayTime);
         PruneDepthSubmissionGeometry(frame_end_info->displayTime);
-        PruneQuadViewsFovs(frame_end_info->displayTime);
+        PruneQuadViewsFrames(frame_end_info->displayTime);
         if (XR_FAILED(release_result)) {
             return release_result;
         }
@@ -6291,7 +6518,7 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
         cached_depth_submission_geometry_.clear();
     }
 
-    XrPosef pose_delta = IdentityPose();
+    PivotPoseDeltaFrame pose_delta_frame;
     XrTime matched_time = 0;
 
     const bool pivot_pose_continuity_active =
@@ -6305,14 +6532,15 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
     const PivotPoseDeltaSelection pose_delta_selection = resolved_settings_.pivotxr.enabled
         ? ResolvePivotPoseDeltaValue(cached_pivot_pose_deltas_,
                                      frame_end_info->displayTime,
-                                     IdentityPose(),
+                                     PivotPoseDeltaFrame{},
                                      pivot_pose_continuity_active,
                                      &pivotxr_last_matched_pose_delta_,
                                      &pivotxr_consecutive_pose_delta_misses_,
-                                     &pose_delta,
+                                     &pose_delta_frame,
                                      &matched_time)
         : PivotPoseDeltaSelection::None;
     const bool has_pose_delta = pose_delta_selection != PivotPoseDeltaSelection::None;
+    const XrPosef& canonical_pose_delta = pose_delta_frame.canonical_view_pose_delta;
 
     if (pivot_pose_continuity_active) {
         const XrTime nearest_delta_ns = matched_time == 0
@@ -6346,9 +6574,14 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
                    << ", pivotEngaged=" << (pivotxr_engaged_ ? "true" : "false")
                    << ", activationGain=" << FormatDiagnosticDouble(pivotxr_activation_gain_)
                    << ", selectedYaw="
-                   << FormatDiagnosticDouble(ExtractPoseYawRadians(pose_delta))
+                   << FormatDiagnosticDouble(ExtractPoseYawRadians(canonical_pose_delta))
                    << ", selectedPitch="
-                   << FormatDiagnosticDouble(ExtractPosePitchRadians(pose_delta));
+                   << FormatDiagnosticDouble(ExtractPosePitchRadians(canonical_pose_delta))
+                   << ", selectedRoll="
+                   << FormatDiagnosticDouble(ExtractPoseRollRadians(canonical_pose_delta))
+                   << ", sourceSpace=" << DescribeSpace(pose_delta_frame.source_space)
+                   << ", cachedSpaceExpressions="
+                   << pose_delta_frame.space_pose_delta_count;
             logger_.Info(stream.str());
         } else if (misses_before_lookup > 0) {
             std::ostringstream stream;
@@ -6363,10 +6596,7 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
         }
     }
     const bool has_non_identity_delta =
-        has_pose_delta && (!NearlyZero(pose_delta.orientation.x) || !NearlyZero(pose_delta.orientation.y) ||
-                           !NearlyZero(pose_delta.orientation.z) || !NearlyEqual(pose_delta.orientation.w, 1.0f) ||
-                           !NearlyZero(pose_delta.position.x) || !NearlyZero(pose_delta.position.y) ||
-                           !NearlyZero(pose_delta.position.z));
+        has_pose_delta && !IsIdentityPose(canonical_pose_delta);
 
     auto find_depth_submission_geometry_for_layer =
         [&](const XrCompositionLayerProjection* projection_layer,
@@ -6527,7 +6757,7 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
         const XrResult release_result = FlushDeferredSwapchainReleasesLocked("end frame");
         PrunePivotPoseDeltas(frame_end_info->displayTime);
         PruneDepthSubmissionGeometry(frame_end_info->displayTime);
-        PruneQuadViewsFovs(frame_end_info->displayTime);
+        PruneQuadViewsFrames(frame_end_info->displayTime);
         if (XR_FAILED(release_result)) {
             return release_result;
         }
@@ -6535,7 +6765,158 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
         return ForwardEndFrame(session, frame_end_info, lock);
     }
 
-    const XrPosef reverse_delta = InvertPose(pose_delta);
+    std::vector<ResolvedPivotSpaceDelta>& resolved_pivot_space_deltas =
+        end_frame_pivot_space_deltas_scratch_;
+    resolved_pivot_space_deltas.clear();
+    resolved_pivot_space_deltas.reserve(frame_end_info->layerCount);
+    uint32_t pivot_space_relation_query_count = 0;
+    uint32_t pivot_space_conversion_count = 0;
+    uint32_t pivot_space_conversion_failure_count = 0;
+    const XrSpace canonical_view_space = internal_view_space_;
+    const XrTime pivot_conversion_time = ClampInternalLocateTime(frame_end_info->displayTime);
+
+    auto resolve_pivot_delta_for_space = [&](XrSpace target_space) -> const ResolvedPivotSpaceDelta& {
+        const auto existing = std::find_if(
+            resolved_pivot_space_deltas.begin(), resolved_pivot_space_deltas.end(),
+            [target_space](const ResolvedPivotSpaceDelta& candidate) {
+                return candidate.space == target_space;
+            });
+        if (existing != resolved_pivot_space_deltas.end()) {
+            return *existing;
+        }
+
+        ResolvedPivotSpaceDelta resolved;
+        resolved.space = target_space;
+        if (!has_pose_delta || !has_non_identity_delta) {
+            resolved.available = has_pose_delta;
+            resolved.mode = has_pose_delta ? "canonical_identity" : "none";
+        } else if (FindPivotPoseDeltaForSpace(pose_delta_frame, target_space, &resolved.forward)) {
+            resolved.available = true;
+            resolved.mode = target_space == pose_delta_frame.source_space
+                ? "source_exact"
+                : "located_views_cache";
+        } else if (target_space == canonical_view_space &&
+                   canonical_view_space != XR_NULL_HANDLE) {
+            resolved.forward = canonical_pose_delta;
+            resolved.available = true;
+            resolved.mode = "canonical_view_exact";
+        } else if (target_space != XR_NULL_HANDLE &&
+                   canonical_view_space != XR_NULL_HANDLE && next_locate_space_) {
+            XrSpaceLocation canonical_in_target{XR_TYPE_SPACE_LOCATION};
+            const auto locate_started = std::chrono::steady_clock::now();
+            // Runtimes may block xrLocateSpace while prediction advances. Do
+            // not hold the layer configuration lock across that downstream
+            // call (notably important for DCS and sequenced Turbo pacing).
+            lock.unlock();
+            resolved.locate_result = next_locate_space_(
+                canonical_view_space, target_space, pivot_conversion_time, &canonical_in_target);
+            lock.lock();
+            resolved.locate_duration_us = std::chrono::duration<double, std::micro>(
+                std::chrono::steady_clock::now() - locate_started).count();
+            resolved.location_flags = canonical_in_target.locationFlags;
+            ++pivot_space_relation_query_count;
+            constexpr XrSpaceLocationFlags kPoseValid =
+                XR_SPACE_LOCATION_ORIENTATION_VALID_BIT | XR_SPACE_LOCATION_POSITION_VALID_BIT;
+            if (XR_SUCCEEDED(resolved.locate_result) &&
+                (canonical_in_target.locationFlags & kPoseValid) == kPoseValid) {
+                resolved.forward = ReexpressPoseDelta(
+                    canonical_pose_delta, canonical_in_target.pose);
+                resolved.available = true;
+                resolved.mode = "canonical_view_locate";
+                CachePivotPoseDeltaForSpace(
+                    pose_delta_frame, target_space, resolved.forward);
+                ++pivot_space_conversion_count;
+            } else {
+                resolved.mode = "conversion_failed";
+                ++pivot_space_conversion_failure_count;
+            }
+        } else {
+            resolved.mode = "conversion_unavailable";
+            ++pivot_space_conversion_failure_count;
+        }
+
+        resolved.non_identity = resolved.available && !IsIdentityPose(resolved.forward);
+        if (resolved.non_identity) {
+            resolved.reverse = InvertPose(resolved.forward);
+        }
+
+        const bool cross_space = target_space != pose_delta_frame.source_space;
+        if (has_non_identity_delta && cross_space && resolved.available) {
+            const bool recovered = failed_pivot_space_conversions_.erase(target_space) > 0;
+            const bool first_observation =
+                logged_pivot_space_conversions_.insert(target_space).second;
+            if (recovered || first_observation) {
+                std::ostringstream stream;
+                stream << "PivotXR space-aware projection correction "
+                       << (recovered ? "recovered" : "active")
+                       << ": frameTime=" << frame_end_info->displayTime
+                       << ", matchedTime=" << matched_time
+                       << ", sourceSpace=" << DescribeSpace(pose_delta_frame.source_space)
+                       << ", projectionSpace=" << DescribeSpace(target_space)
+                       << ", canonicalSpace=" << DescribeSpace(canonical_view_space)
+                       << ", resolution=" << resolved.mode
+                       << ", deltaYaw=" << FormatDiagnosticDouble(ExtractPoseYawRadians(resolved.forward))
+                       << ", deltaPitch=" << FormatDiagnosticDouble(ExtractPosePitchRadians(resolved.forward))
+                       << ", deltaRoll=" << FormatDiagnosticDouble(ExtractPoseRollRadians(resolved.forward))
+                       << ", deltaPosition=(" << FormatDiagnosticDouble(resolved.forward.position.x) << ", "
+                       << FormatDiagnosticDouble(resolved.forward.position.y) << ", "
+                       << FormatDiagnosticDouble(resolved.forward.position.z) << ").";
+                logger_.Info(stream.str());
+            }
+        } else if (has_non_identity_delta && !resolved.available) {
+            const bool first_failure =
+                failed_pivot_space_conversions_.insert(target_space).second;
+            pending_locate_views_diagnostics_ =
+                std::max<uint32_t>(pending_locate_views_diagnostics_, 5);
+            pending_end_frame_diagnostics_ =
+                std::max<uint32_t>(pending_end_frame_diagnostics_, 5);
+            if (first_failure) {
+                std::ostringstream stream;
+                stream << "PivotXR projection-space conversion failed; leaving this projection layer's pose unchanged: "
+                       << "frameTime=" << frame_end_info->displayTime
+                       << ", matchedTime=" << matched_time
+                       << ", sourceSpace=" << DescribeSpace(pose_delta_frame.source_space)
+                       << ", projectionSpace=" << DescribeSpace(target_space)
+                       << ", canonicalSpace=" << DescribeSpace(canonical_view_space)
+                       << ", resolution=" << resolved.mode
+                       << ", locateResult=" << static_cast<int>(resolved.locate_result)
+                       << ", locationFlags="
+                       << FormatHex(static_cast<uint64_t>(resolved.location_flags)) << ".";
+                logger_.Info(stream.str());
+            }
+        }
+
+        if (should_log_end_frame_diagnostic && has_pose_delta) {
+            std::ostringstream stream;
+            stream << "PivotXR projection-space diagnostic: frameTime="
+                   << frame_end_info->displayTime
+                   << ", matchedTime=" << matched_time
+                   << ", sourceSpace=" << DescribeSpace(pose_delta_frame.source_space)
+                   << ", projectionSpace=" << DescribeSpace(target_space)
+                   << ", canonicalSpace=" << DescribeSpace(canonical_view_space)
+                   << ", resolution=" << resolved.mode
+                   << ", available=" << resolved.available
+                   << ", nonIdentity=" << resolved.non_identity
+                   << ", locateResult=" << static_cast<int>(resolved.locate_result)
+                   << ", locationFlags=" << FormatHex(static_cast<uint64_t>(resolved.location_flags))
+                   << ", locateDurationUs=" << FormatDiagnosticDouble(resolved.locate_duration_us)
+                   << ", forwardQuat=(" << FormatDiagnosticDouble(resolved.forward.orientation.x) << ", "
+                   << FormatDiagnosticDouble(resolved.forward.orientation.y) << ", "
+                   << FormatDiagnosticDouble(resolved.forward.orientation.z) << ", "
+                   << FormatDiagnosticDouble(resolved.forward.orientation.w) << ")"
+                   << ", forwardYaw=" << FormatDiagnosticDouble(ExtractPoseYawRadians(resolved.forward))
+                   << ", forwardPitch=" << FormatDiagnosticDouble(ExtractPosePitchRadians(resolved.forward))
+                   << ", forwardRoll=" << FormatDiagnosticDouble(ExtractPoseRollRadians(resolved.forward))
+                   << ", forwardPosition=(" << FormatDiagnosticDouble(resolved.forward.position.x) << ", "
+                   << FormatDiagnosticDouble(resolved.forward.position.y) << ", "
+                   << FormatDiagnosticDouble(resolved.forward.position.z) << ")";
+            logger_.Debug(stream.str());
+        }
+
+        resolved_pivot_space_deltas.push_back(std::move(resolved));
+        return resolved_pivot_space_deltas.back();
+    };
+
     std::vector<std::vector<XrCompositionLayerProjectionView>>& adjusted_projection_views =
         end_frame_projection_views_scratch_;
     std::vector<XrCompositionLayerProjection>& adjusted_projection_layers = end_frame_projection_layers_scratch_;
@@ -6557,11 +6938,13 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
     auto append_projection_layer = [&](const XrCompositionLayerProjection* projection_layer,
                                        uint32_t first_view,
                                        uint32_t view_count,
+                                       const XrPosef& reverse_delta,
+                                       bool has_layer_pose_delta,
                                        XrCompositionLayerFlags extra_layer_flags = 0) {
         adjusted_projection_views.emplace_back(projection_layer->views + first_view,
                                                projection_layer->views + first_view + view_count);
         for (XrCompositionLayerProjectionView& projection_view : adjusted_projection_views.back()) {
-            if (has_non_identity_delta) {
+            if (has_layer_pose_delta) {
                 projection_view.pose = MultiplyPoses(projection_view.pose, reverse_delta);
             }
         }
@@ -6572,7 +6955,7 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
                 first_view,
                 *layer_geometry,
                 reverse_delta,
-                has_non_identity_delta);
+                has_layer_pose_delta);
         }
 
         adjusted_projection_layers.push_back(*projection_layer);
@@ -6599,6 +6982,8 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
             adjusted_layers.push_back(base_header);
             continue;
         }
+        const ResolvedPivotSpaceDelta& layer_pivot_delta =
+            resolve_pivot_delta_for_space(projection_layer->space);
 
         for (uint32_t view_index = 0; view_index < projection_layer->viewCount; ++view_index) {
             const XrSwapchain referenced_swapchain = projection_layer->views[view_index].subImage.swapchain;
@@ -6616,8 +7001,8 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
             adjusted_projection_layers.emplace_back();
             if (ComposeQuadViewsD3D11(projection_layer,
                                       frame_end_info->displayTime,
-                                      reverse_delta,
-                                      has_non_identity_delta,
+                                      layer_pivot_delta.reverse,
+                                      layer_pivot_delta.non_identity,
                                       &adjusted_projection_layers.back(),
                                       &adjusted_projection_views.back())) {
                 if (const DepthSubmissionGeometry* layer_geometry =
@@ -6626,8 +7011,8 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
                         std::span<XrCompositionLayerProjectionView>(adjusted_projection_views.back()),
                         0,
                         *layer_geometry,
-                        reverse_delta,
-                        has_non_identity_delta);
+                        layer_pivot_delta.reverse,
+                        layer_pivot_delta.non_identity);
                 }
                 adjusted_layers.push_back(
                     reinterpret_cast<const XrCompositionLayerBaseHeader*>(&adjusted_projection_layers.back()));
@@ -6646,14 +7031,24 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
             // reversed painter ordering while we build the native compositor.
             constexpr XrCompositionLayerFlags kFovealBlendFlags =
                 XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT | XR_COMPOSITION_LAYER_UNPREMULTIPLIED_ALPHA_BIT;
-            append_projection_layer(projection_layer, 2, 2, kFovealBlendFlags);
-            append_projection_layer(projection_layer, 0, 2);
-            append_projection_layer(projection_layer, 2, 2, kFovealBlendFlags);
+            append_projection_layer(projection_layer, 2, 2,
+                                    layer_pivot_delta.reverse,
+                                    layer_pivot_delta.non_identity,
+                                    kFovealBlendFlags);
+            append_projection_layer(projection_layer, 0, 2,
+                                    layer_pivot_delta.reverse,
+                                    layer_pivot_delta.non_identity);
+            append_projection_layer(projection_layer, 2, 2,
+                                    layer_pivot_delta.reverse,
+                                    layer_pivot_delta.non_identity,
+                                    kFovealBlendFlags);
             ++split_quad_projection_layer_count;
             continue;
         }
 
-        append_projection_layer(projection_layer, 0, projection_layer->viewCount);
+        append_projection_layer(projection_layer, 0, projection_layer->viewCount,
+                                layer_pivot_delta.reverse,
+                                layer_pivot_delta.non_identity);
         // Varjo compatible quadviews: sharpen the runtime's focus views in place when
         // foveate_sharpness > 0. No-op (pure passthrough) when sharpness is 0 or the
         // layer is not a native quad projection.
@@ -6666,12 +7061,6 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
     adjusted_frame_end_info.layerCount = static_cast<uint32_t>(adjusted_layers.size());
     adjusted_frame_end_info.layers = adjusted_layers.data();
     if (should_log_end_frame_diagnostic) {
-        const ViewOrientation delta_orientation{
-            pose_delta.orientation.x,
-            pose_delta.orientation.y,
-            pose_delta.orientation.z,
-            pose_delta.orientation.w,
-        };
         std::ostringstream stream;
         stream << "EndFrame projection rewrite applied: frameTime=" << frame_end_info->displayTime
                << ", matchedTime=" << matched_time
@@ -6679,8 +7068,19 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
                << ", depthAnchorMatchedTime=" << matched_depth_submission_time
                << ", depthAnchorMatchedDeltaNs="
                << (matched_depth_submission_time - frame_end_info->displayTime)
-               << ", poseDeltaYaw=" << FormatDiagnosticDouble(ExtractYawRadians(delta_orientation))
-               << ", poseDeltaPitch=" << FormatDiagnosticDouble(ExtractPitchRadians(delta_orientation))
+               << ", canonicalSpace=" << DescribeSpace(canonical_view_space)
+               << ", sourceSpace=" << DescribeSpace(pose_delta_frame.source_space)
+               << ", canonicalDeltaYaw="
+               << FormatDiagnosticDouble(ExtractPoseYawRadians(canonical_pose_delta))
+               << ", canonicalDeltaPitch="
+               << FormatDiagnosticDouble(ExtractPosePitchRadians(canonical_pose_delta))
+               << ", canonicalDeltaRoll="
+               << FormatDiagnosticDouble(ExtractPoseRollRadians(canonical_pose_delta))
+               << ", cachedSpaceExpressions=" << pose_delta_frame.space_pose_delta_count
+               << ", resolvedProjectionSpaces=" << resolved_pivot_space_deltas.size()
+               << ", spaceRelationQueries=" << pivot_space_relation_query_count
+               << ", spaceConversions=" << pivot_space_conversion_count
+               << ", spaceConversionFailures=" << pivot_space_conversion_failure_count
                << ", projectionLayers=" << corrected_projection_layer_count
                << ", projectionViews=" << corrected_projection_view_count
                << ", depthAnchorRestoredViews=" << depth_anchor_restored_view_count
@@ -6699,7 +7099,7 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
     const XrResult release_result = FlushDeferredSwapchainReleasesLocked("end frame");
     PrunePivotPoseDeltas(frame_end_info->displayTime);
     PruneDepthSubmissionGeometry(frame_end_info->displayTime);
-    PruneQuadViewsFovs(frame_end_info->displayTime);
+    PruneQuadViewsFrames(frame_end_info->displayTime);
     if (XR_FAILED(release_result)) {
         return release_result;
     }
@@ -6907,8 +7307,16 @@ XrResult OpenXrLayer::LocateViews(XrSession session,
                                   uint32_t* view_count_output,
                                   XrView* views) {
     bool synthesized_quad_views = false;
+    QuadViewsGazeDiagnostic gaze_diagnostic{};
     const XrResult result = LocateRuntimeViews(
-        session, view_locate_info, view_state, view_capacity_input, view_count_output, views, &synthesized_quad_views);
+        session,
+        view_locate_info,
+        view_state,
+        view_capacity_input,
+        view_count_output,
+        views,
+        &synthesized_quad_views,
+        &gaze_diagnostic);
 
     if (XR_FAILED(result) || !views || !view_count_output) {
         return result;
@@ -6998,7 +7406,8 @@ XrResult OpenXrLayer::LocateViews(XrSession session,
     if (resolved_settings_.pivotxr.enabled && !has_logged_pivotxr_spike_mode_) {
         std::ostringstream stream;
         stream << "PivotXR enabled; activationState=" << (pivotxr_active ? "engaged" : "idle")
-               << "; quad-view sessions use stereo eye-pose recomposition.";
+               << "; canonicalFrame=VIEW(internal); spaceAwareProjectionCorrection=enabled; "
+                  "quad-view sessions use stereo eye-pose recomposition.";
         for (const PivotXrResolvedProfile& profile : resolved_settings_.pivotxr.profiles) {
             if (profile.always_active) {
                 stream << " '" << profile.name << "' engages automatically";
@@ -7026,6 +7435,9 @@ XrResult OpenXrLayer::LocateViews(XrSession session,
     // call, otherwise they would capture an identity origin.
     const XrTime internal_locate_time =
         view_locate_info ? ClampInternalLocateTime(view_locate_info->displayTime) : 0;
+    bool pivot_frame_reused = false;
+    bool pivot_frame_cached = false;
+    XrSpace pivot_frame_source_space = XR_NULL_HANDLE;
 
     if (pivotxr_origin_capture_pending_ && resolved_settings_.pivotxr.enabled &&
         internal_view_space_ != XR_NULL_HANDLE && pivot_drive_query) {
@@ -7048,7 +7460,11 @@ XrResult OpenXrLayer::LocateViews(XrSession session,
                           << " pitch=" << FormatDiagnosticDouble(origin.pitch_radians)
                           << " rad, position=(" << FormatDiagnosticDouble(origin.pose.position.x) << ", "
                           << FormatDiagnosticDouble(origin.pose.position.y) << ", "
-                          << FormatDiagnosticDouble(origin.pose.position.z) << ").";
+                          << FormatDiagnosticDouble(origin.pose.position.z) << ")"
+                          << ", frameTime=" << origin.capture_time
+                          << ", baseSpace=" << DescribeSpace(view_locate_info->space)
+                          << ", locationFlags="
+                          << FormatHex(static_cast<uint64_t>(origin.location_flags)) << ".";
             logger_.Info(origin_stream.str());
         }
     }
@@ -7064,15 +7480,32 @@ XrResult OpenXrLayer::LocateViews(XrSession session,
             internal_view_space_, view_locate_info->space, internal_locate_time, &pivot_view_location);
         if (XR_SUCCEEDED(pivot_result)) {
             runtime_view_pose = pivot_view_location.pose;
-            pivot_result = ApplyPivotToLocatedSpace(internal_view_space_,
-                                                     view_locate_info->space,
-                                                     internal_locate_time,
-                                                     pivotxr_active,
-                                                     &pivot_view_location,
-                                                     &applied_extra_yaw_radians,
-                                                     &applied_extra_pitch_radians,
-                                                     &applied_pose_delta,
-                                                     true);
+            const auto existing_frame =
+                cached_pivot_pose_deltas_.find(view_locate_info->displayTime);
+            if (existing_frame != cached_pivot_pose_deltas_.end()) {
+                // Repeated world-space queries for one predicted display time
+                // reuse the first logical Pivot update. VIEW-in-base is already
+                // available from the runtime locate above, so the canonical
+                // VIEW-space delta can be expressed in this base without an
+                // additional runtime call.
+                applied_pose_delta = ReexpressPoseDelta(
+                    existing_frame->second.canonical_view_pose_delta, runtime_view_pose);
+                pivot_view_location.pose = MultiplyPoses(runtime_view_pose, applied_pose_delta);
+                applied_extra_yaw_radians = pivot_diagnostic_.eased_extra_yaw_radians;
+                applied_extra_pitch_radians = pivot_diagnostic_.eased_extra_pitch_radians;
+                pivot_frame_reused = true;
+                pivot_frame_source_space = existing_frame->second.source_space;
+            } else {
+                pivot_result = ApplyPivotToLocatedSpace(internal_view_space_,
+                                                         view_locate_info->space,
+                                                         internal_locate_time,
+                                                         pivotxr_active,
+                                                         &pivot_view_location,
+                                                         &applied_extra_yaw_radians,
+                                                         &applied_extra_pitch_radians,
+                                                         &applied_pose_delta,
+                                                         true);
+            }
         }
         if (XR_SUCCEEDED(pivot_result)) {
             const auto ensure_eye_offsets = [&](XrViewConfigurationType offset_view_configuration,
@@ -7089,17 +7522,26 @@ XrResult OpenXrLayer::LocateViews(XrSession session,
                 return derived || EnsureEyeOffsets(
                                       session, offset_view_configuration, internal_locate_time, offset_count);
             };
-            const bool identity_pose_delta =
-                NearlyZero(applied_pose_delta.orientation.x) &&
-                NearlyZero(applied_pose_delta.orientation.y) &&
-                NearlyZero(applied_pose_delta.orientation.z) &&
-                NearlyEqual(applied_pose_delta.orientation.w, 1.0f) &&
-                NearlyZero(applied_pose_delta.position.x) && NearlyZero(applied_pose_delta.position.y) &&
-                NearlyZero(applied_pose_delta.position.z);
+            auto cache_applied_pose_delta = [&](const XrPosef& pose_delta) {
+                if (pivot_frame_reused) {
+                    auto frame = cached_pivot_pose_deltas_.find(view_locate_info->displayTime);
+                    if (frame != cached_pivot_pose_deltas_.end()) {
+                        CachePivotPoseDeltaForSpace(
+                            frame->second, view_locate_info->space, pose_delta);
+                    }
+                    return;
+                }
+                pivot_frame_cached = CachePivotPoseDelta(view_locate_info->displayTime,
+                                                          view_locate_info->space,
+                                                          pose_delta,
+                                                          runtime_view_pose);
+                pivot_frame_source_space = view_locate_info->space;
+            };
+            const bool identity_pose_delta = IsIdentityPose(applied_pose_delta);
             if (identity_pose_delta) {
                 pivot_diagnostic_.recomposition_mode = "identity";
                 pivot_diagnostic_.has_eye_offsets = false;
-                CachePivotPoseDelta(view_locate_info->displayTime, IdentityPose());
+                cache_applied_pose_delta(IdentityPose());
             } else if (IsQuadViewConfiguration(view_configuration_type) &&
                        ensure_eye_offsets(varjo_compatible_quadviews_active_
                                               ? view_configuration_type
@@ -7107,7 +7549,7 @@ XrResult OpenXrLayer::LocateViews(XrSession session,
                                           varjo_compatible_quadviews_active_ ? count : 2)) {
                 pivot_diagnostic_.recomposition_mode =
                     varjo_compatible_quadviews_active_ ? "quad_native_eye_offsets" : "quad_from_stereo_eye_offsets";
-                CachePivotPoseDelta(view_locate_info->displayTime, applied_pose_delta);
+                cache_applied_pose_delta(applied_pose_delta);
                 for (uint32_t i = 0; i < count; ++i) {
                     // Native: one offset per view. Emulation: focus views (2/3) reuse the
                     // same eye offset as their peripheral counterpart (i % 2).
@@ -7125,7 +7567,7 @@ XrResult OpenXrLayer::LocateViews(XrSession session,
             } else if (!IsQuadViewConfiguration(view_configuration_type) &&
                        ensure_eye_offsets(view_configuration_type, count)) {
                 pivot_diagnostic_.recomposition_mode = "stereo_eye_offsets";
-                CachePivotPoseDelta(view_locate_info->displayTime, applied_pose_delta);
+                cache_applied_pose_delta(applied_pose_delta);
                 for (uint32_t i = 0; i < count; ++i) {
                     const XrPosef recomposed_pose =
                         MultiplyPoses(cached_eye_offset_poses_[i], pivot_view_location.pose);
@@ -7140,7 +7582,7 @@ XrResult OpenXrLayer::LocateViews(XrSession session,
             } else {
                 pivot_diagnostic_.recomposition_mode = "eye_offset_capture_failed";
                 pivot_diagnostic_.has_eye_offsets = false;
-                CachePivotPoseDelta(view_locate_info->displayTime, IdentityPose());
+                cache_applied_pose_delta(IdentityPose());
             }
             // LocateSpaceWithPivot owns the steady-state smoothed angles and the
             // activation envelope; do not write the eased output back onto them.
@@ -7199,7 +7641,8 @@ XrResult OpenXrLayer::LocateViews(XrSession session,
         views[i].fov.angleDown = static_cast<float>(adjusted_views[i].fov.angle_down);
     }
     if (view_locate_info && IsQuadViewConfiguration(view_configuration_type) && count >= 4) {
-        CacheQuadViewsFovs(view_locate_info->displayTime, std::span<const XrView>(views, count));
+        CacheQuadViewsFrame(
+            view_locate_info->displayTime, std::span<const XrView>(views, count), gaze_diagnostic);
     }
 
     const XrTime locate_time = view_locate_info ? view_locate_info->displayTime : 0;
@@ -7282,6 +7725,12 @@ XrResult OpenXrLayer::LocateViews(XrSession session,
                    << ", pivotExtraYawRadians=" << FormatDiagnosticDouble(pivotxr_smoothed_extra_yaw_radians_)
                    << ", pivotExtraPitchRadians=" << FormatDiagnosticDouble(pivotxr_smoothed_extra_pitch_radians_)
                    << ", pivotActivationGain=" << FormatDiagnosticDouble(pivotxr_activation_gain_)
+                   << ", pivotDriveQuery=" << pivot_drive_query
+                   << ", pivotFrameReused=" << pivot_frame_reused
+                   << ", pivotFrameCached=" << pivot_frame_cached
+                   << ", pivotBaseSpace="
+                   << DescribeSpace(view_locate_info ? view_locate_info->space : XR_NULL_HANDLE)
+                   << ", pivotFrameSourceSpace=" << DescribeSpace(pivot_frame_source_space)
                    << ", leftYawDelta=" << FormatDiagnosticDouble(left_yaw_delta)
                    << ", rightYawDelta=" << FormatDiagnosticDouble(right_yaw_delta)
                    << ", leftInsetYawDelta=" << FormatDiagnosticDouble(left_inset_yaw_delta)
@@ -7336,6 +7785,12 @@ XrResult OpenXrLayer::LocateViews(XrSession session,
                    << ", recomposition=" << pivot_diagnostic_.recomposition_mode
                    << ", pivotActive=" << pivot_diagnostic_.pivot_active
                    << ", envelopeEngaged=" << pivotxr_envelope_engaged
+                   << ", driveQuery=" << pivot_drive_query
+                   << ", logicalFrameReused=" << pivot_frame_reused
+                   << ", logicalFrameCached=" << pivot_frame_cached
+                   << ", locateBaseSpace="
+                   << DescribeSpace(view_locate_info ? view_locate_info->space : XR_NULL_HANDLE)
+                   << ", logicalFrameSourceSpace=" << DescribeSpace(pivot_frame_source_space)
                    << ", viewPoseFresh=" << view_pose_fresh
                    << ", rawYaw=" << FormatDiagnosticDouble(pivot_diagnostic_.raw_yaw_radians)
                    << ", rawPitch=" << FormatDiagnosticDouble(pivot_diagnostic_.raw_pitch_radians)
@@ -7402,6 +7857,31 @@ XrResult OpenXrLayer::DestroySpace(XrSpace space) {
     const XrResult result = next_destroy_space_(space);
     if (XR_SUCCEEDED(result)) {
         std::scoped_lock lock(mutex_);
+        const auto remove_space_from_frame = [space](PivotPoseDeltaFrame& frame) {
+            for (std::size_t index = 0; index < frame.space_pose_delta_count;) {
+                if (frame.space_pose_deltas[index].space != space) {
+                    ++index;
+                    continue;
+                }
+                for (std::size_t move = index + 1;
+                     move < frame.space_pose_delta_count; ++move) {
+                    frame.space_pose_deltas[move - 1] = frame.space_pose_deltas[move];
+                }
+                --frame.space_pose_delta_count;
+            }
+            if (frame.source_space == space) {
+                frame.source_space = XR_NULL_HANDLE;
+            }
+        };
+        for (auto& [time, frame] : cached_pivot_pose_deltas_) {
+            (void)time;
+            remove_space_from_frame(frame);
+        }
+        if (pivotxr_last_matched_pose_delta_) {
+            remove_space_from_frame(*pivotxr_last_matched_pose_delta_);
+        }
+        logged_pivot_space_conversions_.erase(space);
+        failed_pivot_space_conversions_.erase(space);
         tracked_view_spaces_.erase(space);
         tracked_local_spaces_.erase(space);
         tracked_stage_spaces_.erase(space);
@@ -8045,8 +8525,10 @@ void OpenXrLayer::ResetSessionState() {
     cached_eye_offset_poses_.clear();
     cached_eye_offsets_display_time_ = 0;
     cached_pivot_pose_deltas_.clear();
+    logged_pivot_space_conversions_.clear();
+    failed_pivot_space_conversions_.clear();
     cached_depth_submission_geometry_.clear();
-    cached_quadviews_fovs_.clear();
+    cached_quadviews_frames_.Clear();
     last_app_action_sync_time_.reset();
     last_eye_gaze_self_sync_time_.reset();
     ResetSwapchainState();
@@ -8561,8 +9043,10 @@ void OpenXrLayer::DestroyInternalReferenceSpaces() {
         cached_eye_offset_poses_.clear();
         cached_eye_offsets_display_time_ = 0;
         cached_pivot_pose_deltas_.clear();
+        logged_pivot_space_conversions_.clear();
+        failed_pivot_space_conversions_.clear();
         cached_depth_submission_geometry_.clear();
-        cached_quadviews_fovs_.clear();
+        cached_quadviews_frames_.Clear();
         return;
     }
 
@@ -8590,8 +9074,10 @@ void OpenXrLayer::DestroyInternalReferenceSpaces() {
     cached_eye_offset_poses_.clear();
     cached_eye_offsets_display_time_ = 0;
     cached_pivot_pose_deltas_.clear();
+    logged_pivot_space_conversions_.clear();
+    failed_pivot_space_conversions_.clear();
     cached_depth_submission_geometry_.clear();
-    cached_quadviews_fovs_.clear();
+    cached_quadviews_frames_.Clear();
 }
 
 XrResult OpenXrLayer::CreateVarjoNativeFoveationResources(XrSession session) {
@@ -8809,20 +9295,81 @@ bool OpenXrLayer::EnsureEyeOffsets(XrSession session,
     return true;
 }
 
-void OpenXrLayer::CachePivotPoseDelta(XrTime time, const XrPosef& pose_delta) {
-    CachePivotPoseDeltaValue(cached_pivot_pose_deltas_, time, pose_delta);
+bool OpenXrLayer::CachePivotPoseDelta(XrTime time,
+                                      XrSpace source_space,
+                                      const XrPosef& source_pose_delta,
+                                      const XrPosef& view_pose_in_source) {
+    if (time == 0 || source_space == XR_NULL_HANDLE) {
+        return false;
+    }
+
+    PivotPoseDeltaFrame frame;
+    frame.source_space = source_space;
+    // The runtime has already given us VIEW-in-source for the Pivot drive.
+    // Its inverse is source-in-VIEW, so this conjugation produces a durable
+    // frame-canonical delta without another runtime locate.
+    frame.canonical_view_pose_delta =
+        ReexpressPoseDelta(source_pose_delta, InvertPose(view_pose_in_source));
+    frame.space_pose_deltas[0] = {source_space, source_pose_delta};
+    frame.space_pose_delta_count = 1;
+    return CachePivotPoseDeltaValue(cached_pivot_pose_deltas_, time, frame);
 }
 
-bool OpenXrLayer::FindPivotPoseDelta(XrTime time, XrPosef* pose_delta, XrTime* matched_time) const {
-    return FindPivotPoseDeltaValue(cached_pivot_pose_deltas_,
-                                   time,
-                                   IdentityPose(),
-                                   pose_delta,
-                                   matched_time);
+bool OpenXrLayer::FindPivotPoseDeltaForSpace(const PivotPoseDeltaFrame& frame,
+                                             XrSpace space,
+                                             XrPosef* pose_delta) const {
+    if (!pose_delta || space == XR_NULL_HANDLE) {
+        return false;
+    }
+    for (std::size_t index = 0; index < frame.space_pose_delta_count; ++index) {
+        if (frame.space_pose_deltas[index].space == space) {
+            *pose_delta = frame.space_pose_deltas[index].pose_delta;
+            return true;
+        }
+    }
+    return false;
+}
+
+void OpenXrLayer::CachePivotPoseDeltaForSpace(PivotPoseDeltaFrame& frame,
+                                              XrSpace space,
+                                              const XrPosef& pose_delta) const {
+    if (space == XR_NULL_HANDLE) {
+        return;
+    }
+    for (std::size_t index = 0; index < frame.space_pose_delta_count; ++index) {
+        if (frame.space_pose_deltas[index].space == space) {
+            frame.space_pose_deltas[index].pose_delta = pose_delta;
+            return;
+        }
+    }
+    if (frame.space_pose_delta_count < frame.space_pose_deltas.size()) {
+        frame.space_pose_deltas[frame.space_pose_delta_count++] = {space, pose_delta};
+    }
 }
 
 void OpenXrLayer::PrunePivotPoseDeltas(XrTime time) {
     PrunePivotPoseDeltaValues(cached_pivot_pose_deltas_, time);
+}
+
+std::string OpenXrLayer::DescribeSpace(XrSpace space) const {
+    std::string label = "UNKNOWN";
+    if (space == XR_NULL_HANDLE) {
+        return "NULL";
+    }
+    if (space == internal_view_space_) {
+        label = "VIEW(internal)";
+    } else if (space == internal_local_space_) {
+        label = "LOCAL(internal)";
+    } else if (space == internal_stage_space_) {
+        label = "STAGE(internal)";
+    } else if (tracked_view_spaces_.contains(space)) {
+        label = "VIEW";
+    } else if (tracked_local_spaces_.contains(space)) {
+        label = "LOCAL";
+    } else if (tracked_stage_spaces_.contains(space)) {
+        label = "STAGE";
+    }
+    return label + "(" + FormatHex(reinterpret_cast<uintptr_t>(space)) + ")";
 }
 
 void OpenXrLayer::CacheDepthSubmissionGeometry(
@@ -9008,67 +9555,37 @@ uint32_t OpenXrLayer::RestoreDepthSubmissionGeometry(
     return restored_views;
 }
 
-void OpenXrLayer::CacheQuadViewsFovs(XrTime time, std::span<const XrView> views) {
+void OpenXrLayer::CacheQuadViewsFrame(XrTime time,
+                                      std::span<const XrView> views,
+                                      const QuadViewsGazeDiagnostic& gaze) {
     if (time == 0 || views.size() < 4) {
         return;
     }
 
-    std::array<XrFovf, 4> fovs{};
-    for (uint32_t i = 0; i < fovs.size(); ++i) {
-        fovs[i] = views[i].fov;
+    QuadViewsFrameState frame;
+    for (uint32_t i = 0; i < frame.fovs.size(); ++i) {
+        frame.fovs[i] = views[i].fov;
     }
-    cached_quadviews_fovs_[time] = fovs;
-    while (cached_quadviews_fovs_.size() > kMaxCachedQuadViewsFovFrames) {
-        cached_quadviews_fovs_.erase(cached_quadviews_fovs_.begin());
-    }
+    frame.gaze = gaze;
+    cached_quadviews_frames_.Store(time, frame, kMaxCachedQuadViewsFovFrames);
 }
 
-bool OpenXrLayer::FindQuadViewsFovs(XrTime time, std::array<XrFovf, 4>* fovs, XrTime* matched_time) const {
-    if (!fovs || !matched_time) {
+bool OpenXrLayer::FindQuadViewsFrame(XrTime time,
+                                     QuadViewsFrameState* frame,
+                                     XrTime* matched_time) const {
+    if (!frame || !matched_time) {
         return false;
     }
 
-    if (cached_quadviews_fovs_.empty()) {
-        *matched_time = 0;
-        return false;
-    }
-
-    auto exact = cached_quadviews_fovs_.find(time);
-    if (exact != cached_quadviews_fovs_.end()) {
-        *fovs = exact->second;
-        *matched_time = exact->first;
-        return true;
-    }
-
-    auto upper = cached_quadviews_fovs_.lower_bound(time);
-    std::map<XrTime, std::array<XrFovf, 4>>::const_iterator best;
-    if (upper == cached_quadviews_fovs_.begin()) {
-        best = upper;
-    } else if (upper == cached_quadviews_fovs_.end()) {
-        best = std::prev(upper);
-    } else {
-        auto lower = std::prev(upper);
-        best = (time - lower->first <= upper->first - time) ? lower : upper;
-    }
-
-    const XrTime match_delta = best->first > time ? best->first - time : time - best->first;
-    if (match_delta > kMaxQuadViewsFovMatchWindow) {
-        *matched_time = best->first;
-        return false;
-    }
-
-    *fovs = best->second;
-    *matched_time = best->first;
-    return true;
+    std::int64_t cache_matched_time = 0;
+    const bool found = cached_quadviews_frames_.FindNearest(
+        time, kMaxQuadViewsFovMatchWindow, frame, &cache_matched_time);
+    *matched_time = cache_matched_time;
+    return found;
 }
 
-void OpenXrLayer::PruneQuadViewsFovs(XrTime time) {
-    auto keep_from = cached_quadviews_fovs_.upper_bound(time);
-    if (keep_from == cached_quadviews_fovs_.begin()) {
-        return;
-    }
-
-    cached_quadviews_fovs_.erase(cached_quadviews_fovs_.begin(), keep_from);
+void OpenXrLayer::PruneQuadViewsFrames(XrTime time) {
+    cached_quadviews_frames_.PruneThrough(time);
 }
 
 bool OpenXrLayer::IsTrackedViewSpace(XrSpace space) const {
@@ -9271,9 +9788,13 @@ XrResult OpenXrLayer::LocateRuntimeViews(XrSession session,
                                          uint32_t view_capacity_input,
                                          uint32_t* view_count_output,
                                          XrView* views,
-                                         bool* synthesized_quad_views) {
+                                         bool* synthesized_quad_views,
+                                         QuadViewsGazeDiagnostic* gaze_diagnostic) {
     if (synthesized_quad_views) {
         *synthesized_quad_views = false;
+    }
+    if (gaze_diagnostic) {
+        *gaze_diagnostic = {};
     }
 
     bool quadviews_emulation_active = false;
@@ -9442,6 +9963,13 @@ XrResult OpenXrLayer::LocateRuntimeViews(XrSession session,
             quadviews_last_focus_smoothing_wall_time_ = now;
             focus_yaw_radians = quadviews_smoothed_focus_yaw_radians_;
             focus_pitch_radians = quadviews_smoothed_focus_pitch_radians_;
+        }
+        if (gaze_diagnostic) {
+            gaze_diagnostic->valid = has_eye_focus && quadviews_raw_focus_valid_;
+            gaze_diagnostic->raw_yaw_radians = quadviews_raw_focus_yaw_radians_;
+            gaze_diagnostic->raw_pitch_radians = quadviews_raw_focus_pitch_radians_;
+            gaze_diagnostic->smoothed_yaw_radians = focus_yaw_radians;
+            gaze_diagnostic->smoothed_pitch_radians = focus_pitch_radians;
         }
     }
 

@@ -26,6 +26,7 @@
 #include "depthxr/pivot_view.h"
 #include "depthxr/effects.h"
 #include "depthxr/logger.h"
+#include "depthxr/quadviews_frame_cache.h"
 #include "depthxr/quadviews_recovery.h"
 #include "depthxr/runtime_compatibility.h"
 #include "depthxr/runtime_pacing.h"
@@ -48,6 +49,10 @@ struct ID3D11Texture2D;
 struct ID3D11VertexShader;
 
 namespace depthxr {
+
+#if defined(DEPTHXR_TESTING)
+class TurboFrameTestPeer;
+#endif
 
 class OpenXrLayer {
   public:
@@ -177,6 +182,10 @@ class OpenXrLayer {
                          XrView* views);
 
   private:
+#if defined(DEPTHXR_TESTING)
+    friend class TurboFrameTestPeer;
+#endif
+
     OpenXrLayer() = default;
     ~OpenXrLayer();
 
@@ -408,6 +417,9 @@ class OpenXrLayer {
                              const XrFrameEndInfo* frame_end_info,
                              std::unique_lock<std::mutex>& config_lock);
     void ObserveCompositionLayerTopology(const XrFrameEndInfo* frame_end_info);
+    void ArmTurboAsyncHandoffLocked(const char* reason);
+    void PublishTurboAsyncHandoffLocked();
+    void CancelTurboAsyncHandoffLocked(const char* reason);
     void EnsureTurboAsyncWorkerLocked();
     void StopTurboAsyncWorker();
     void TurboAsyncWorkerLoop();
@@ -492,9 +504,58 @@ class OpenXrLayer {
         std::vector<XrFovf> native_fovs;
         std::vector<XrFovf> render_fovs;
     };
-    void CachePivotPoseDelta(XrTime time, const XrPosef& pose_delta);
-    bool FindPivotPoseDelta(XrTime time, XrPosef* pose_delta, XrTime* matched_time) const;
+    struct QuadViewsGazeDiagnostic {
+        bool valid{false};
+        double raw_yaw_radians{0.0};
+        double raw_pitch_radians{0.0};
+        double smoothed_yaw_radians{0.0};
+        double smoothed_pitch_radians{0.0};
+    };
+    struct QuadViewsFrameState {
+        std::array<XrFovf, 4> fovs{};
+        QuadViewsGazeDiagnostic gaze;
+    };
+    struct PivotSpacePoseDelta {
+        XrSpace space{XR_NULL_HANDLE};
+        XrPosef pose_delta{{0.0f, 0.0f, 0.0f, 1.0f}, {0.0f, 0.0f, 0.0f}};
+    };
+    struct PivotPoseDeltaFrame {
+        // The VIEW-space representation is the frame's canonical logical
+        // Pivot update. Per-space values are derived from it and never drive
+        // smoothing a second time.
+        XrPosef canonical_view_pose_delta{{0.0f, 0.0f, 0.0f, 1.0f},
+                                          {0.0f, 0.0f, 0.0f}};
+        XrSpace source_space{XR_NULL_HANDLE};
+        // OpenXR applications normally submit one projection space. Keep a
+        // small fixed cache for multi-query/multi-layer games so frame records
+        // and one-frame continuity never allocate on the hot path.
+        static constexpr std::size_t kMaxSpacePoseDeltas = 8;
+        std::array<PivotSpacePoseDelta, kMaxSpacePoseDeltas> space_pose_deltas{};
+        std::size_t space_pose_delta_count{0};
+    };
+    struct ResolvedPivotSpaceDelta {
+        XrSpace space{XR_NULL_HANDLE};
+        XrPosef forward{{0.0f, 0.0f, 0.0f, 1.0f}, {0.0f, 0.0f, 0.0f}};
+        XrPosef reverse{{0.0f, 0.0f, 0.0f, 1.0f}, {0.0f, 0.0f, 0.0f}};
+        XrResult locate_result{XR_SUCCESS};
+        XrSpaceLocationFlags location_flags{0};
+        double locate_duration_us{0.0};
+        bool available{false};
+        bool non_identity{false};
+        std::string_view mode{"none"};
+    };
+    bool CachePivotPoseDelta(XrTime time,
+                             XrSpace source_space,
+                             const XrPosef& source_pose_delta,
+                             const XrPosef& view_pose_in_source);
+    bool FindPivotPoseDeltaForSpace(const PivotPoseDeltaFrame& frame,
+                                    XrSpace space,
+                                    XrPosef* pose_delta) const;
+    void CachePivotPoseDeltaForSpace(PivotPoseDeltaFrame& frame,
+                                     XrSpace space,
+                                     const XrPosef& pose_delta) const;
     void PrunePivotPoseDeltas(XrTime time);
+    std::string DescribeSpace(XrSpace space) const;
     void CacheDepthSubmissionGeometry(XrTime time,
                                       XrSpace space,
                                       XrViewConfigurationType view_configuration_type,
@@ -512,9 +573,11 @@ class OpenXrLayer {
                                             const DepthSubmissionGeometry& geometry,
                                             const XrPosef& reverse_pose_delta,
                                             bool has_reverse_pose_delta) const;
-    void CacheQuadViewsFovs(XrTime time, std::span<const XrView> views);
-    bool FindQuadViewsFovs(XrTime time, std::array<XrFovf, 4>* fovs, XrTime* matched_time) const;
-    void PruneQuadViewsFovs(XrTime time);
+    void CacheQuadViewsFrame(XrTime time,
+                             std::span<const XrView> views,
+                             const QuadViewsGazeDiagnostic& gaze);
+    bool FindQuadViewsFrame(XrTime time, QuadViewsFrameState* frame, XrTime* matched_time) const;
+    void PruneQuadViewsFrames(XrTime time);
     bool IsTrackedViewSpace(XrSpace space) const;
     XrResult LocateRuntimeViews(XrSession session,
                                 const XrViewLocateInfo* view_locate_info,
@@ -522,7 +585,8 @@ class OpenXrLayer {
                                 uint32_t view_capacity_input,
                                 uint32_t* view_count_output,
                                 XrView* views,
-                                bool* synthesized_quad_views);
+                                bool* synthesized_quad_views,
+                                QuadViewsGazeDiagnostic* gaze_diagnostic);
     void RecordVarjoNativeLocateDiagnostics(const XrViewLocateInfo* view_locate_info,
                                             bool vector_request_injected,
                                             bool rendering_gaze_queried,
@@ -664,7 +728,7 @@ class OpenXrLayer {
     std::optional<std::chrono::steady_clock::time_point> pivotxr_last_smoothing_wall_time_;
     // EndFrame can occasionally arrive without a matching LocateViews cache
     // entry. Bridge one such miss so amplified poses do not flash to identity.
-    std::optional<XrPosef> pivotxr_last_matched_pose_delta_;
+    std::optional<PivotPoseDeltaFrame> pivotxr_last_matched_pose_delta_;
     std::size_t pivotxr_consecutive_pose_delta_misses_{0};
     // Per resolved-profile input edge state, index-aligned with
     // resolved_settings_.pivotxr.profiles. Arbitration is last-pressed-wins:
@@ -754,6 +818,22 @@ class OpenXrLayer {
     std::atomic<bool> turbo_frame_interception_required_{false};
     std::mutex turbo_mutex_;
     std::condition_variable turbo_async_worker_cv_;
+    // Async pacing must never expose a pass-through gap between retiring one
+    // runtime wait and publishing the next. DCS can call xrWaitFrame from its
+    // sim thread while xrEndFrame is still running on the render thread; if
+    // that app wait reaches the runtime during the gap, the replacement worker
+    // issues a second real wait and runtimes such as Virtual Desktop's Oculus
+    // compatibility path interlock until the slipped wait receives a Begin.
+    // The handoff shield keeps app Wait/Begin calls fabricated across that
+    // drain -> Begin -> End -> replacement-publication window.
+    std::condition_variable turbo_async_handoff_cv_;
+    bool turbo_async_handoff_active_{false};
+    std::uint64_t turbo_async_handoff_armed_total_{0};
+    std::uint64_t turbo_async_handoff_wait_intercepts_{0};
+    std::uint64_t turbo_async_handoff_begin_intercepts_{0};
+    std::uint64_t turbo_async_handoff_second_poll_blocks_{0};
+    std::uint64_t turbo_async_handoff_cancellations_{0};
+    int turbo_async_handoff_debug_log_budget_{0};
     std::thread turbo_async_worker_;
     bool turbo_async_worker_stop_{false};
     bool turbo_async_job_pending_{false};
@@ -1070,9 +1150,14 @@ class OpenXrLayer {
     std::vector<std::vector<XrCompositionLayerProjectionView>> end_frame_projection_views_scratch_;
     std::vector<XrCompositionLayerProjection> end_frame_projection_layers_scratch_;
     std::vector<const XrCompositionLayerBaseHeader*> end_frame_layers_scratch_;
-    std::map<XrTime, XrPosef> cached_pivot_pose_deltas_;
+    std::vector<ResolvedPivotSpaceDelta> end_frame_pivot_space_deltas_scratch_;
+    std::map<XrTime, PivotPoseDeltaFrame> cached_pivot_pose_deltas_;
+    // Info-level breadcrumbs are emitted once per submitted space, while
+    // debug diagnostics retain per-frame details without spamming normal logs.
+    std::unordered_set<XrSpace> logged_pivot_space_conversions_;
+    std::unordered_set<XrSpace> failed_pivot_space_conversions_;
     std::map<XrTime, std::vector<DepthSubmissionGeometry>> cached_depth_submission_geometry_;
-    std::map<XrTime, std::array<XrFovf, 4>> cached_quadviews_fovs_;
+    QuadViewsFrameCache<QuadViewsFrameState> cached_quadviews_frames_;
     std::unordered_map<XrSwapchain, SwapchainInfo> tracked_swapchains_;
     D3D11QuadViewsCompositor d3d11_quadviews_compositor_;
     D3D11FocusSharpen d3d11_focus_sharpen_;

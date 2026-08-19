@@ -209,6 +209,10 @@ Patch-note summaries and item text support the attribute-free inline tags `<stro
 - `examples/`: sample settings
 - `scripts/`: Windows build, install, staging, and release helpers
 
+An opt-in real-runtime OpenXR diagnostic client is also available for
+deterministic Pivot reference-space and Turbo frame-threading tests. See the
+[hardware probe guide](docs/hardware-probe.md).
+
 ## Acknowledgments
 
 VectorXR exists in the wider OpenXR community, and several open source projects helped shape it.
