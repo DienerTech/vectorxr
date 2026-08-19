@@ -219,6 +219,95 @@ bool NearlyIdentity(const XrPosef& pose) {
            NearlyEqual(pose.position.z, 0.0f);
 }
 
+bool IsTypelessFormat(DXGI_FORMAT format) {
+    switch (format) {
+    case DXGI_FORMAT_R8G8B8A8_TYPELESS:
+    case DXGI_FORMAT_B8G8R8A8_TYPELESS:
+    case DXGI_FORMAT_B8G8R8X8_TYPELESS:
+    case DXGI_FORMAT_R10G10B10A2_TYPELESS:
+    case DXGI_FORMAT_R16G16B16A16_TYPELESS:
+    case DXGI_FORMAT_R16G16_TYPELESS:
+    case DXGI_FORMAT_R32_TYPELESS:
+        return true;
+    default:
+        return false;
+    }
+}
+
+DXGI_FORMAT ResolveRenderTargetFormat(DXGI_FORMAT texture_format,
+                                      int64_t requested_format) {
+    if (!IsTypelessFormat(texture_format)) {
+        return texture_format;
+    }
+    const DXGI_FORMAT requested = static_cast<DXGI_FORMAT>(requested_format);
+    if (requested != DXGI_FORMAT_UNKNOWN && !IsTypelessFormat(requested)) {
+        return requested;
+    }
+    switch (texture_format) {
+    case DXGI_FORMAT_R8G8B8A8_TYPELESS:
+        return DXGI_FORMAT_R8G8B8A8_UNORM;
+    case DXGI_FORMAT_B8G8R8A8_TYPELESS:
+        return DXGI_FORMAT_B8G8R8A8_UNORM;
+    case DXGI_FORMAT_B8G8R8X8_TYPELESS:
+        return DXGI_FORMAT_B8G8R8X8_UNORM;
+    case DXGI_FORMAT_R10G10B10A2_TYPELESS:
+        return DXGI_FORMAT_R10G10B10A2_UNORM;
+    case DXGI_FORMAT_R16G16B16A16_TYPELESS:
+        return DXGI_FORMAT_R16G16B16A16_FLOAT;
+    case DXGI_FORMAT_R16G16_TYPELESS:
+        return DXGI_FORMAT_R16G16_UNORM;
+    case DXGI_FORMAT_R32_TYPELESS:
+        return DXGI_FORMAT_R32_FLOAT;
+    default:
+        return texture_format;
+    }
+}
+
+void CreateSwapchainRenderTarget(ID3D11Device* device,
+                                 ID3D11Texture2D* texture,
+                                 int64_t requested_format,
+                                 ID3D11RenderTargetView** render_target) {
+    D3D11_TEXTURE2D_DESC texture_desc{};
+    texture->GetDesc(&texture_desc);
+
+    D3D11_RENDER_TARGET_VIEW_DESC view_desc{};
+    view_desc.Format = ResolveRenderTargetFormat(
+        texture_desc.Format, requested_format);
+    if (texture_desc.SampleDesc.Count > 1 && texture_desc.ArraySize > 1) {
+        view_desc.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2DMSARRAY;
+        view_desc.Texture2DMSArray.FirstArraySlice = 0;
+        view_desc.Texture2DMSArray.ArraySize = 1;
+    } else if (texture_desc.SampleDesc.Count > 1) {
+        view_desc.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2DMS;
+    } else if (texture_desc.ArraySize > 1) {
+        view_desc.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2DARRAY;
+        view_desc.Texture2DArray.MipSlice = 0;
+        view_desc.Texture2DArray.FirstArraySlice = 0;
+        view_desc.Texture2DArray.ArraySize = 1;
+    } else {
+        view_desc.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D;
+        view_desc.Texture2D.MipSlice = 0;
+    }
+
+    const HRESULT result = device->CreateRenderTargetView(
+        texture, &view_desc, render_target);
+    if (FAILED(result)) {
+        std::ostringstream stream;
+        stream << "CreateRenderTargetView failed with HRESULT 0x" << std::hex
+               << static_cast<uint32_t>(result) << std::dec
+               << "; requestedFormat=" << requested_format
+               << ", texture={size=" << texture_desc.Width << "x" << texture_desc.Height
+               << ", mips=" << texture_desc.MipLevels
+               << ", array=" << texture_desc.ArraySize
+               << ", format=" << static_cast<uint32_t>(texture_desc.Format)
+               << ", samples=" << texture_desc.SampleDesc.Count
+               << ", bindFlags=0x" << std::hex << texture_desc.BindFlags << std::dec
+               << "}, viewFormat=" << static_cast<uint32_t>(view_desc.Format)
+               << ", viewDimension=" << static_cast<uint32_t>(view_desc.ViewDimension);
+        throw std::runtime_error(stream.str());
+    }
+}
+
 void RunSelfTest() {
     constexpr float kPi = 3.14159265358979323846f;
     const float half_yaw = 0.5f * kPi / 2.0f;
@@ -235,6 +324,18 @@ void RunSelfTest() {
     const XrPosef error = ComposePose(InvertPose(view), round_trip);
     if (!NearlyIdentity(error)) {
         throw std::runtime_error("pose composition round-trip failed");
+    }
+    if (ResolveRenderTargetFormat(
+            DXGI_FORMAT_R8G8B8A8_TYPELESS,
+            DXGI_FORMAT_R8G8B8A8_UNORM_SRGB) !=
+        DXGI_FORMAT_R8G8B8A8_UNORM_SRGB) {
+        throw std::runtime_error("typeless swapchain RTV format resolution failed");
+    }
+    if (ResolveRenderTargetFormat(
+            DXGI_FORMAT_B8G8R8A8_UNORM,
+            DXGI_FORMAT_R8G8B8A8_UNORM) !=
+        DXGI_FORMAT_B8G8R8A8_UNORM) {
+        throw std::runtime_error("typed swapchain RTV format preservation failed");
     }
     std::cout << "vectorxr_hardware_probe self-test passed\n";
 }
@@ -844,10 +945,9 @@ private:
                     "xrEnumerateSwapchainImages");
             swapchain.render_targets.resize(image_count);
             for (uint32_t image = 0; image < image_count; ++image) {
-                ThrowIfFailed(device_->CreateRenderTargetView(
-                                  swapchain.images[image].texture, nullptr,
-                                  &swapchain.render_targets[image]),
-                              "CreateRenderTargetView");
+                CreateSwapchainRenderTarget(
+                    device_.Get(), swapchain.images[image].texture,
+                    swapchain.format, &swapchain.render_targets[image]);
             }
 
             D3D11_TEXTURE2D_DESC depth_desc{};
