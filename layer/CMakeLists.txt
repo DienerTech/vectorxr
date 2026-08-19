@@ -143,6 +143,47 @@ if(WIN32 AND DEPTHXR_BUILD_LAYER)
                 $<TARGET_FILE_DIR:XR_APILAYER_DIENERTECH_VECTORXR>/sounds/
     )
 
+    if(DEPTHXR_BUILD_HARDWARE_PROBES)
+        add_executable(
+            vectorxr_hardware_probe
+            tools/pivot_space_probe.cpp
+        )
+        target_link_libraries(
+            vectorxr_hardware_probe
+            PRIVATE
+            OpenXR::openxr_loader
+            d3d11
+            d3dcompiler
+            dxgi
+        )
+        target_compile_definitions(
+            vectorxr_hardware_probe
+            PRIVATE
+            WIN32_LEAN_AND_MEAN
+            NOMINMAX
+            XR_USE_PLATFORM_WIN32
+            XR_USE_GRAPHICS_API_D3D11
+        )
+        if(MSVC)
+            target_compile_options(vectorxr_hardware_probe PRIVATE /W4 /permissive-)
+        endif()
+        add_custom_command(
+            TARGET vectorxr_hardware_probe
+            POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    $<TARGET_FILE:OpenXR::openxr_loader>
+                    $<TARGET_FILE_DIR:vectorxr_hardware_probe>
+        )
+
+        if(DEPTHXR_BUILD_TESTS)
+            add_test(
+                NAME vectorxr_hardware_probe_self_test
+                COMMAND vectorxr_hardware_probe --self-test
+            )
+            set_tests_properties(vectorxr_hardware_probe_self_test PROPERTIES TIMEOUT 10)
+        endif()
+    endif()
+
     if(DEPTHXR_BUILD_TESTS)
         # Compile the real frame-loop implementation into a dedicated fake-runtime
         # harness. DEPTHXR_TESTING only grants the harness state setup/inspection

@@ -4,6 +4,7 @@ project(VectorXR VERSION 0.5.0 LANGUAGES CXX)
 
 option(DEPTHXR_BUILD_LAYER "Build the Windows OpenXR API layer" ON)
 option(DEPTHXR_BUILD_TESTS "Build VectorXR layer tests" ON)
+option(DEPTHXR_BUILD_HARDWARE_PROBES "Build opt-in real-runtime OpenXR diagnostic clients" OFF)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
