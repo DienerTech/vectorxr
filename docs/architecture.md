@@ -20,6 +20,7 @@ The app presents product modules:
 - `Depth` feature editing (internal id `depthxr`)
 - `Pivot` feature editing (internal id `pivotxr`)
 - `Quadviews` feature editing
+- `Turbo` frame pacing, runtime strategy selection, diagnostics, and Safety controls
 
 This "module" concept is a product and config boundary, not a separate runtime ownership boundary. User-facing labels are display-first (`Depth`, `Pivot`); internal ids, config keys, and C++ namespaces stay `depthxr`/`pivotxr`.
 

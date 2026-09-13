@@ -1,7 +1,7 @@
 # Using VectorXR
 
-This guide walks you through VectorXR from a fresh install — nothing registered, nothing
-turned on — to a working per-game setup. For install steps and the project overview, see the
+This guide walks you through VectorXR from a fresh install to a working per-game setup.
+For install steps and the project overview, see the
 [README](../README.md).
 
 VectorXR has two parts working together:
@@ -16,17 +16,18 @@ config file directly. Settings are stored locally under `%LOCALAPPDATA%\VectorXR
 
 ![VectorXR Home tab on first run](screenshots/home.jpg)
 
-On a clean install, the **Home** tab is a status dashboard and everything is off:
+The **Home** tab is a status dashboard:
 
-- The **Runtime Enabled** and **Layer Enabled** pills (top right) confirm the OpenXR layer is
-  registered and ready for the next VR app launch. **System Health** summarizes the same thing.
+- **System Health** shows whether the runtime is enabled and the VectorXR layer is registered.
+  Use **View Health** for details or **Export Debug** to collect a support ZIP.
 - The **Active overview** lists the four Enhancements — **Quadviews**, **Turbo**, **Pivot**, and
-  **Depth**. On first run each shows *Default Profile: Disabled*, *Custom Profiles: 0 / 0
-  enabled*, and *Status: Inactive*. That is expected — you haven't configured anything yet.
+  **Depth**, including the default profile and enabled custom-profile counts. These summarize
+  your configuration; an Active badge does not mean a VR application is currently running.
 - The left sidebar holds app sections (Home, Settings, Application Registry, OpenXR Layers,
   About) and the four Enhancements, each with its own on/off toggle.
 - The bar at the bottom is the **save bar**. Changes you make are staged until you click **Save
   Changes** (or **Discard**). Watch this bar — nothing you change takes effect until it's saved.
+- **Community & Announcements** provides access to the DienerTech Discord and Ko-fi support.
 
 ## How VectorXR decides what to apply
 
@@ -251,7 +252,7 @@ Restart DCS after changing its VR settings, the active OpenXR runtime, or API-la
 #### Live tuning and restarts
 
 - **Fully live:** Horizontal Offset, Vertical Offset, Tracking Mode, Smoothing, Deadzone,
-  Foveate Sharpness, and Transition Thickness.
+  Eye Tracking Correction, Foveate Sharpness, and Transition Thickness.
 - **Restart required for complete effect:** Focus Width, Focus Height, Focus Resolution,
   Peripheral Resolution, and turning Quadviews or a Quadviews profile on or off. Width and height
   move the visible focus window immediately, but DCS keeps its existing texture dimensions and
@@ -270,6 +271,17 @@ safe, but the running game keeps its launch-time state until it exits.
 - **Tracking** controls eye-tracked focus (mode, smoothing, deadzone). Quadviews also depends on
   the headset runtime exposing eye-gaze support. If it does not, VectorXR falls back to
   head/static focus.
+
+#### Eye-tracking correction and dimensions
+
+Leave **Eye Tracking Correction** on **Default** when gaze follows your eyes correctly.
+Try **Flip Z Only** if the focus region moves backwards on your setup. Save the change and
+check gaze direction in the diagnostic visualization before tuning offsets or smoothing.
+
+While a Quadviews game is running, hover the **Dimensions** indicator beside estimated
+savings to see submitted peripheral and focus resolutions and allocated texture sizes.
+These readings describe the current session, not previous runs or unsaved settings.
+Resolution changes may require a game restart before the measured sizes change.
 
 #### Diagnostic visualization
 
@@ -343,54 +355,106 @@ Re-enable extras one at a time after the base setup works.
 
 ### Turbo
 
-![VectorXR Turbo tab](screenshots/turbo.jpg)
+![VectorXR 0.17 Turbo controls with Safety enabled and the default profile off](screenshots/turbo.jpg)
 
 Turbo is an opt-in frame-pacing override for games whose main thread is being held back by the
 OpenXR runtime's wait behavior. It is compatibility-sensitive, so keep the default profile off
 and enable it only for applications where an in-headset A/B comparison demonstrates a benefit.
 
-- Leave **Strategy** on **Auto** unless troubleshooting. VectorXR selects an async or sequenced
-  path for the active runtime and remembers safe results.
-- Use the **In-game Turbo Toggle** for immediate comparisons in the same scene.
-- **Runtime Behavior** shows the selected strategy and saved per-runtime pacing history.
-- **Performance Diagnostics** captures per-strategy FPS, frame-time, low-percentile, and
-  pacing-wait metrics so the comparison is based on measured behavior.
-- Do not combine Turbo with another frame-pacing override such as OpenXR Toolkit Turbo Mode.
-  Disable Turbo first if you see a Waiting overlay, black frames, persistent stutter, broken
-  reprojection, or a crash.
+#### Set up Turbo for a game
 
-**Automatic Turbo recovery** is on by default. An interrupted Turbo session or
-repeated frame submission failures disables Turbo on the next launch for the
-same application and runtime setup. The Turbo page shows current status and
-previous interruptions. Use your in-game Turbo toggle to retry. Switching this
-setting off bypasses recovery, including previous interruptions; the live pacing
-fallback stays active. An unrelated crash or forced exit can trigger recovery.
-Close and relaunch a stuck game: recovery cannot unblock a driver call in flight.
+1. Register the game's executable in **Application Registry**.
+2. On **Turbo**, leave **Default Profile** off and add an enabled **Custom Profile** for
+   that application. Default On applies Turbo to applications without a custom profile.
+3. Keep **Turbo Safety** enabled. Open **Runtime Behavior** and leave **Mode** on
+   **Auto (recommended)**.
+4. Use **In-game Turbo Toggle > Edit Binding…** to assign a keyboard or controller control,
+   then click **Save Changes**. The binding works only where Turbo is enabled in the
+   application's profile; it can also retry after a safety block or suspension.
+5. Launch the game and compare Turbo on/off in the same scene. Use **Performance Diagnostics**
+   to compare FPS, frame times, and pacing waits alongside what you see in the headset.
 
-Open **Turbo Safety** to inspect blocked setups and fault details. **Clear & retest**
-clears a block and its runtime's learned decision while retaining faults; relaunch in
-Auto without a manual override for a fresh test. **Clear Logs** removes fault history
-without unblocking any setup or changing pacing decisions. Custom Turbo profiles can
-bypass safety for their selected applications.
+Do not combine VectorXR Turbo with another pacing override such as OpenXR Toolkit Turbo Mode.
+Turn Turbo off if you see a Waiting overlay, black frames, persistent stutter, or broken
+reprojection. A mid-session toggle can briefly hitch while timing resynchronizes.
 
-**Export Debug Information** includes Turbo metrics, pacing decisions, safety records,
-live and saved runtime diagnostics, current and saved settings, and retained VectorXR
-logs. Raw capture is limited to 8 MiB per file and 64 MiB total; the ZIP inventory lists
-any unavailable or limited files. Export before clearing history if you need those
-faults for troubleshooting.
+#### Runtime Behavior
 
-SteamVR with synthesized Quadviews is available for testing in 0.17.0. Disable
-SteamVR Motion Smoothing while comparing Turbo, and check both performance and
-presentation. No blanket app/runtime restriction establishes compatibility.
+![Turbo Runtime Behavior with automatic strategy selection](screenshots/turbo-runtime-behavior.jpg)
 
-While a Quadviews game is running, hover the Dimensions indicator beside estimated
-savings to see submitted peripheral and focus resolutions and allocated texture
-sizes. Readings are available only for the current session, not previous runs.
-Saved resolution changes may require a game restart; the measured sizes describe
-the running game, not a preview of unsaved settings.
+**Auto** starts with **Async**, which overlaps the runtime wait with game work. If Async
+stalls or repeatedly rejects frames, Auto tries **Sequenced**, which supports runtimes
+that need waiting and submission to remain together. A strategy is remembered after
+**60 seconds of stable play**. There are no built-in runtime/headset strategy mappings.
 
-When you're happy, click **Save Changes** in the bottom bar. Back on **Home**, the Active
-overview will now show that Enhancement as **Active** for your app.
+**Runtime Decisions** shows learned results and per-runtime overrides. Leave overrides
+on Auto for discovery; forced Async or Sequenced and manual runtime pins take precedence.
+A full strategy retest needs a relaunch in Auto without a manual override. An established
+Sequenced session keeps that strategy until relaunch even if you change the setting.
+
+#### SteamVR activation in 0.17
+
+The previous VectorXR activation restriction for **DCS + SteamVR + synthesized Quadviews**
+has been removed. This setup can now engage Turbo and use the same Auto strategy selection
+and Safety controls as other setups.
+
+This removes an application/runtime restriction, not a runtime-enforced FPS cap. Turbo
+still depends on the game, headset, driver, and runtime. Disable **SteamVR Motion Smoothing**
+when testing and compare both frame times and presentation. Other reprojection systems,
+including ASW, may also conflict with Turbo's timing.
+
+#### Turbo Safety
+
+![Turbo Safety page with automatic protection and blocked setups](screenshots/turbo-safety.jpg)
+
+Open **Turbo Safety…** from the Turbo page. The **Enabled/Disabled** switch appears both
+there and under **Automatic protection** on the Safety page; both edit the same global
+setting. Protection is enabled by default. Click **Save Changes** after changing it.
+
+An interrupted session or repeated runtime fault can hold Turbo off for the same application
+and runtime setup, including its headset and graphics configuration. Turbo remains enabled
+in the profile so the in-game binding can retry it. A forced exit or unrelated crash can
+also leave an interrupted-session record; a block does not prove Turbo caused a crash.
+
+The page shows live Turbo status when a game is running, **Blocked setups**, and a separate
+**Fault log**. The overview's block/fault counts describe recorded history, not whether Turbo
+is currently rendering frames. A block marked **Bypassed** is retained but is not enforced
+by the saved global or per-profile Safety settings.
+
+| Control | What it changes |
+| --- | --- |
+| In-game Turbo toggle | Retries Turbo for the running application after a block or suspension. A full strategy retest still requires relaunching. |
+| **Details** | Opens the fault reason, recorded time, pacing mode, runtime, headset, graphics API, and process ID where available. |
+| **Clear & retest** | Clears the selected setup's block and its runtime's learned pacing decision, while retaining fault history. Relaunch in Auto without a manual override to test Async and then Sequenced if needed. |
+| **Clear Logs** | Removes recorded fault history. It does **not** clear safety blocks or learned pacing decisions. The button is disabled when there are no faults. |
+| Global **Turbo Safety: Disabled** | Bypasses persistent protection, including previous blocks. Live pacing fallback can still suspend a failing session. Save to apply. |
+
+Retry only after the session is stable. If the game is stuck, close and relaunch it;
+Safety cannot unblock a driver call already in flight.
+
+#### Per-application Safety override
+
+![Example DCS Turbo profile with its Safety bypass left unchecked](screenshots/turbo-profile-safety.jpg)
+
+For an application-specific exception, open its custom Turbo profile and check
+**Turbo Safety override > Disable safety for this profile**, then **Save Changes**.
+Leave this unchecked to use the global protection setting. The bypass applies only to
+that profile's applications; it does not turn off live pacing fallback or delete history.
+The screenshot shows an example DCS profile with protection retained.
+
+#### Fault logs and support exports
+
+![Turbo Safety fault log and Clear Logs control with no faults recorded](screenshots/turbo-safety-fault-log.jpg)
+
+Faults remain available after a retry. For an unclean exit, the recorded timestamp is the
+last Safety marker, not a confirmed crash time. The screenshots show an empty history;
+recorded faults add rows with **Details** controls.
+
+Before clearing logs, use **Home > Export Debug** to save an **Export Debug Information** ZIP
+when reporting a problem. It includes Turbo metrics, pacing decisions, safety records,
+live and saved runtime diagnostics, current and saved settings, and retained VectorXR logs.
+Raw capture is limited to 8 MiB per file and 64 MiB total; the ZIP inventory lists any
+unavailable or limited files. Review the ZIP for private information before sharing it.
 
 ## OpenXR layer management
 
@@ -407,8 +471,8 @@ for confirmation and does not delete the layer's files from disk.
 **Provider and order both matter.** When VectorXR provides Quadviews, disable
 **Quad-Views-Foveated** so the two layers do not compete. If you intentionally use
 Quad-Views-Foveated with VectorXR Pivot instead, keep the VectorXR Quadviews profile off and order
-Quad-Views-Foveated **above VectorXR**. (VectorXR's own layer currently shows as *unsigned* during
-the beta — that's expected; see the README's status section.)
+Quad-Views-Foveated **above VectorXR**. Official release builds are signed by **DienerTech LLC**;
+local source builds may be unsigned. Signature status is shown after requesting verification.
 
 ## Updates
 
@@ -418,6 +482,11 @@ The **About** tab shows project info, support links, the latest patch notes, and
 status** panel that checks GitHub for the newest published release. VectorXR does not auto-download
 updates — install them manually from
 [GitHub Releases](https://github.com/DienerTech/vectorxr/releases/latest).
+
+**Join Discord** on Home and About loads the current DienerTech invitation online. The
+button shows a loading state and stays disabled if the invitation is unavailable or the
+request fails. Use **Retry** after reconnecting. The optional **VectorXR Updates** role in
+Discord's **welcome-and-rules** channel lets you opt into release notifications.
 
 ## Disabling or removing VectorXR
 
