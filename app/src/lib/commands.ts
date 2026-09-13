@@ -373,7 +373,31 @@ export async function clearTurboMetrics(): Promise<TurboMetricsEnvelope> {
   return invoke<TurboMetricsEnvelope>('clear_turbo_metrics')
 }
 
+export interface QuadViewDimensions {
+  width: number
+  height: number
+  allocatedWidth: number
+  allocatedHeight: number
+}
+
+export interface TurboRecoveryRecord {
+  runtimeVersion?: string
+  systemName?: string
+  graphicsApi?: string
+  processId?: number
+  processCreated?: string
+  application: string
+  runtime: string
+  mode: string
+  reason: string
+  state: string
+  fingerprint: string
+  updatedAtUnixMilliseconds: number
+}
+
 export interface RuntimeStatusSession {
+  quadviewsDimensions?: QuadViewDimensions[]
+  quadviewsDimensionsAt?: number
   protocolVersion: number
   sessionId: string
   processId: number
@@ -381,18 +405,39 @@ export interface RuntimeStatusSession {
   updatedAtUnixMilliseconds: number
   acknowledgedRevision: number
   capabilities: { quadviewsDiagnosticVisualization: boolean }
-  state: { quadviewsDiagnosticVisualization: boolean }
+  state: { quadviewsDiagnosticVisualization: boolean; turboState?: string; turboReason?: string }
 }
 
 export interface RuntimeStatusEnvelope {
+  faults: TurboRecoveryRecord[]
+  recovery: TurboRecoveryRecord[]
   sessions: RuntimeStatusSession[]
 }
 
 export async function loadRuntimeStatus(): Promise<RuntimeStatusEnvelope> {
   if (!tauriAvailable()) {
-    return { sessions: [] }
+    return { sessions: [], recovery: [], faults: [] }
   }
-  return invoke<RuntimeStatusEnvelope>('load_runtime_status')
+  const status = await invoke<RuntimeStatusEnvelope>('load_runtime_status')
+  return { ...status, faults: status.faults ?? [] }
+}
+
+export async function clearTurboSafetyBlock(fingerprint: string): Promise<void> {
+  if (tauriAvailable()) await invoke('clear_turbo_safety_block', { fingerprint })
+}
+
+export async function clearTurboFaultLogs(): Promise<void> {
+  if (tauriAvailable()) await invoke('clear_turbo_fault_logs')
+}
+
+export interface DebugSourceSnapshot {
+  files: { archivePath: string; sourcePath: string; content: string | null; originalBytes: number; truncated: boolean; error: string | null }[]
+  warnings: string[]
+}
+
+export async function loadDebugSources(): Promise<DebugSourceSnapshot> {
+  if (!tauriAvailable()) return { files: [], warnings: ['Raw diagnostic files are available only in the desktop app.'] }
+  return invoke<DebugSourceSnapshot>('load_debug_sources')
 }
 
 export async function setRuntimeQuadViewsDiagnosticVisualization(
@@ -408,7 +453,7 @@ export async function setRuntimeQuadViewsDiagnosticVisualization(
   })
 }
 
-export async function loadOpenXrLayers(): Promise<OpenXrLayerSnapshot> {
+export async function loadOpenXrLayers(includeSignatures = false): Promise<OpenXrLayerSnapshot> {
   if (!tauriAvailable()) {
     return {
       slices: [
@@ -425,7 +470,7 @@ export async function loadOpenXrLayers(): Promise<OpenXrLayerSnapshot> {
     }
   }
 
-  return invoke<OpenXrLayerSnapshot>('load_openxr_layers')
+  return invoke<OpenXrLayerSnapshot>('load_openxr_layers', { includeSignatures })
 }
 
 export async function ensureOpenXrLayerElevation(): Promise<void> {

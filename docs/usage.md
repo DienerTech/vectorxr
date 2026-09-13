@@ -318,6 +318,12 @@ VectorXR can remain enabled for Pivot or Depth, with Quad-Views-Foveated ordered
 Turn on **Use Eye Tracking** in DCS and eye tracking in the headset software. The active OpenXR
 runtime must expose eye-gaze data to the layer; otherwise head/static focus is the safe fallback.
 
+**Why does eye-tracked focus move backwards?**
+
+Try **Eye Tracking Correction → Flip Z Only** in the matching Quadviews profile.
+This changes how backwards-facing driver gaze rays are corrected. **Default**
+preserves the existing behavior; leave it selected when gaze movement is correct.
+
 **Why did a saved setting appear to do nothing?**
 
 Confirm that the game has Quad Views enabled, the correct VectorXR profile matches its executable,
@@ -353,6 +359,36 @@ and enable it only for applications where an in-headset A/B comparison demonstra
   Disable Turbo first if you see a Waiting overlay, black frames, persistent stutter, broken
   reprojection, or a crash.
 
+**Automatic Turbo recovery** is on by default. An interrupted Turbo session or
+repeated frame submission failures disables Turbo on the next launch for the
+same application and runtime setup. The Turbo page shows current status and
+previous interruptions. Use your in-game Turbo toggle to retry. Switching this
+setting off bypasses recovery, including previous interruptions; the live pacing
+fallback stays active. An unrelated crash or forced exit can trigger recovery.
+Close and relaunch a stuck game: recovery cannot unblock a driver call in flight.
+
+Open **Turbo Safety** to inspect blocked setups and fault details. **Clear & retest**
+clears a block and its runtime's learned decision while retaining faults; relaunch in
+Auto without a manual override for a fresh test. **Clear Logs** removes fault history
+without unblocking any setup or changing pacing decisions. Custom Turbo profiles can
+bypass safety for their selected applications.
+
+**Export Debug Information** includes Turbo metrics, pacing decisions, safety records,
+live and saved runtime diagnostics, current and saved settings, and retained VectorXR
+logs. Raw capture is limited to 8 MiB per file and 64 MiB total; the ZIP inventory lists
+any unavailable or limited files. Export before clearing history if you need those
+faults for troubleshooting.
+
+SteamVR with synthesized Quadviews is available for testing in 0.17.0. Disable
+SteamVR Motion Smoothing while comparing Turbo, and check both performance and
+presentation. No blanket app/runtime restriction establishes compatibility.
+
+While a Quadviews game is running, hover the Dimensions indicator beside estimated
+savings to see submitted peripheral and focus resolutions and allocated texture
+sizes. Readings are available only for the current session, not previous runs.
+Saved resolution changes may require a game restart; the measured sizes describe
+the running game, not a preview of unsaved settings.
+
 When you're happy, click **Save Changes** in the bottom bar. Back on **Home**, the Active
 overview will now show that Enhancement as **Active** for your app.
 
@@ -363,7 +399,9 @@ overview will now show that Enhancement as **Active** for your app.
 The **OpenXR Layers** tab manages the implicit API layers installed on your system across the
 four Windows registry slices (Machine-wide / Per-user × 64-bit / 32-bit — *Machine-wide 64-bit*
 is the recommended one for most PCVR). For each layer you can see its name, path, and signature
-status, and you can enable, disable, reorder, or remove its registry registration. Removal asks
+status, and you can enable, disable, reorder, or remove its registry registration.
+Signature verification is optional: Refresh on this page requests it, with a
+four-second limit per binary; startup readiness does not wait for verification. Removal asks
 for confirmation and does not delete the layer's files from disk.
 
 **Provider and order both matter.** When VectorXR provides Quadviews, disable

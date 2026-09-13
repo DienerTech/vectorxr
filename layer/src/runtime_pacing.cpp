@@ -126,6 +126,7 @@ std::string SerializeObservations(const std::vector<RuntimePacingObservation>& o
     for (size_t i = 0; i < observations.size(); ++i) {
         const RuntimePacingObservation& observation = observations[i];
         stream << "    {\n";
+        stream << "      \"testStartedAt\": " << observation.test_started_at << ",\n";
         stream << "      \"runtimeName\": \"" << EscapeJsonString(observation.runtime_name) << "\",\n";
         stream << "      \"runtimeVersion\": \"" << EscapeJsonString(observation.runtime_version) << "\",\n";
         stream << "      \"systemName\": \"" << EscapeJsonString(observation.system_name) << "\",\n";
@@ -251,6 +252,7 @@ std::vector<RuntimePacingObservation> ReadRuntimePacingObservations(const std::f
          ++it) {
         const std::string object = it->str();
         RuntimePacingObservation observation;
+        observation.test_started_at = ExtractInteger(object, "testStartedAt", 0);
         observation.runtime_name = ExtractString(object, "runtimeName");
         if (observation.runtime_name.empty()) {
             continue;
@@ -272,12 +274,27 @@ std::vector<RuntimePacingObservation> ReadRuntimePacingObservations(const std::f
     return observations;
 }
 
+std::uint64_t RuntimeRetestTime(const std::filesystem::path& path, const std::string& runtime) {
+    static constexpr char hex[] = "0123456789abcdef";
+    std::string name;
+    for (unsigned char c : runtime) { name += hex[c >> 4]; name += hex[c & 15]; }
+    const auto reset = path.parent_path() / "runtime-pacing-resets" / (name + ".txt");
+    std::error_code ec;
+    if (!std::filesystem::exists(reset, ec)) return ec ? UINT64_MAX : 0;
+    std::ifstream stream(reset);
+    std::uint64_t value = 0;
+    return stream >> value ? value : UINT64_MAX;
+}
+
 std::optional<RuntimePacingObservation> FindRuntimePacingObservation(const std::filesystem::path& path,
                                                                      const std::string& runtime_name,
                                                                      const std::string& system_name,
                                                                      std::uint32_t vendor_id,
                                                                      const std::string& graphics_api) {
     for (RuntimePacingObservation& observation : ReadRuntimePacingObservations(path)) {
+        if (!observation.test_started_at || observation.test_started_at <= RuntimeRetestTime(path, runtime_name) ||
+            observation.source != "discovered" || observation.stable_seconds < 60 ||
+            observation.mode == TurboPacingMode::kUnsupported) continue;
         const bool runtime_matches = observation.runtime_name == runtime_name;
         const bool fingerprint_requested = !system_name.empty() || vendor_id != 0 || !graphics_api.empty();
         const bool fingerprint_matches = observation.system_name == system_name &&
@@ -296,6 +313,8 @@ bool RecordRuntimePacingObservation(const std::filesystem::path& path,
     if (observation.runtime_name.empty()) {
         return true;
     }
+    // A still-running session must not repopulate a decision the user cleared.
+    if (observation.test_started_at <= RuntimeRetestTime(path, observation.runtime_name)) return true;
 
     std::vector<RuntimePacingObservation> observations = ReadRuntimePacingObservations(path);
     auto existing = std::find_if(observations.begin(), observations.end(),

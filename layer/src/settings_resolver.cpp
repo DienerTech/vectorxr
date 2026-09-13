@@ -278,6 +278,7 @@ const QuadViewsProfile* FindMatchingQuadViewsProfile(const ConfigDocument& confi
 }
 
 void ApplyQuadViewsSettings(QuadViewsResolvedSettings& resolved, const QuadViewsSettings& settings) {
+    resolved.eye_tracking_correction = settings.eye_tracking_correction;
     resolved.tracking_mode = settings.tracking_mode;
     resolved.focus_horizontal_size_percent = settings.focus_horizontal_size_percent;
     resolved.focus_vertical_size_percent = settings.focus_vertical_size_percent;
@@ -309,6 +310,7 @@ QuadViewsResolvedSettings ResolveQuadViewsSettings(const ConfigDocument& config,
 TurboResolvedSettings ResolveTurboSettings(const ConfigDocument& config, std::string_view exe_name) {
     TurboResolvedSettings resolved;
     resolved.enabled = config.turbo.enabled;
+    resolved.interrupted_session_recovery = config.turbo.interrupted_session_recovery;
     resolved.toggle_binding = config.turbo.toggle_binding;
     resolved.pacing_mode = config.turbo.pacing_mode;
     resolved.runtime_pins = config.turbo.runtime_pins;
@@ -324,6 +326,7 @@ TurboResolvedSettings ResolveTurboSettings(const ConfigDocument& config, std::st
             if (std::find(profile.application_ids.begin(), profile.application_ids.end(), application->id) !=
                 profile.application_ids.end()) {
                 resolved.enabled = true;
+                resolved.interrupted_session_recovery = resolved.interrupted_session_recovery && !profile.disable_safety;
                 break;
             }
         }

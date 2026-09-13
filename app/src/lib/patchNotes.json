@@ -1,5 +1,50 @@
 [
   {
+    "version": "0.17.0",
+    "date": "2026-09-12",
+    "title": "Turbo Safety, Eye Tracking Correction, and Better Diagnostics",
+    "summary": "Introduces Turbo Safety, improves automatic pacing and diagnostics, adds Quadviews eye-tracking correction, and welcomes the DienerTech Discord community.",
+    "items": [
+      {
+        "html": "<strong>Turbo</strong>",
+        "items": [
+          "Introduces Turbo Safety to protect against interrupted sessions and repeated runtime faults. Review faults, retry blocked setups, or clear history from one page. Protection is on by default and can be disabled globally or per custom profile.",
+          "Improves frame prediction timing and recovery from pacing failures. Use the in-game Turbo toggle to retry after a safety stop.",
+          "Auto now tests Async first, tries Sequenced when needed, and remembers a strategy after 60 seconds of stable play.",
+          "Opens Turbo testing to DCS with SteamVR and synthesized Quadviews. Results still depend on your headset and runtime setup."
+        ]
+      },
+      {
+        "html": "<strong>Quadviews</strong>",
+        "items": [
+          "Adds optional Flip Z Only eye-tracking correction for setups where the focus region moves backwards. Leave it on Default if tracking already works correctly.",
+          "Shows submitted peripheral and focus resolutions in the Dimensions tooltip while a Quadviews game is running."
+        ]
+      },
+      {
+        "html": "<strong>Status and diagnostics</strong>",
+        "items": [
+          "Keeps useful Turbo performance comparisons visible after a brief game relaunch.",
+          "Expands debug exports with fuller logs, Turbo performance and safety data, settings, and runtime diagnostics for easier troubleshooting.",
+          "Keeps startup health checks responsive while layer signatures are checked in the background."
+        ]
+      },
+      {
+        "html": "<strong>Community</strong>",
+        "items": [
+          "The DienerTech Discord is live! Join the community to share setups, compare results, and follow VectorXR news.",
+          "Introduces Community & Announcements on Home, with access to Discord and Ko-fi support."
+        ]
+      },
+      {
+        "html": "<strong>Installation</strong>",
+        "items": [
+          "Prevents duplicate VectorXR layers from loading when installing alongside a development build."
+        ]
+      }
+    ]
+  },
+  {
     "version": "0.16.2",
     "date": "2026-08-18",
     "title": "Smoother Turbo and More Reliable Pivot",

@@ -52,15 +52,7 @@ std::string_view EyeGazeProbeStateName(EyeGazeProbeState state);
 std::string_view EyeGazeRequestReasonName(EyeGazeRequestReason reason);
 bool ShouldRetryWithoutInjectedEyeGaze(bool injected_request, bool extension_related_failure);
 
-struct TurboCompatibilityInput {
-    std::string_view executable_name;
-    std::string_view runtime_name;
-    bool quadviews_active{false};
-    bool native_quadviews_active{false};
-    bool app_requested_quadviews_extensions{false};
-};
 
-bool ShouldBlockTurboForSession(const TurboCompatibilityInput& input);
 std::chrono::milliseconds QuadViewsRecoveryStabilizationDelay(std::string_view runtime_name);
 bool ResolveQuadViewsSessionActive(bool configured_active, std::optional<bool> session_latched_active);
 

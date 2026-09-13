@@ -65,6 +65,9 @@ class TurboFrameTestPeer {
             layer.quad_views_extension_requested_ = false;
             layer.varjo_foveated_rendering_extension_requested_ = false;
             layer.turbo_toggle_enabled_ = true;
+            layer.turbo_runtime_error_streak_.store(0);
+            layer.turbo_effective_active_.store(false);
+            layer.turbo_recovery_blocked_.store(false);
             layer.turbo_binding_last_poll_time_ = std::chrono::steady_clock::now();
             layer.turbo_binding_down_cached_ = false;
             layer.turbo_pacing_mode_ = mode;
@@ -131,6 +134,14 @@ class TurboFrameTestPeer {
         return static_cast<int>(OpenXrLayer::TurboSequencedState::kEngaging);
     }
 
+    static void StalePrediction() {
+        auto& layer = Layer();
+        std::scoped_lock lock(layer.turbo_mutex_);
+        layer.turbo_last_predicted_display_time_ = 10'000'000'000;
+        layer.turbo_max_returned_display_time_ = 20'000'000'000;
+        layer.turbo_last_wait_frame_wall_time_ = std::chrono::steady_clock::now() + 1h;
+    }
+
     static int ActiveState() {
         return static_cast<int>(OpenXrLayer::TurboSequencedState::kActive);
     }
@@ -165,6 +176,36 @@ class TurboFrameTestPeer {
 
     static bool AutoSuspended() {
         return Layer().turbo_auto_suspended_.load(std::memory_order_relaxed);
+    }
+
+    static void BeforeFirstEngagement() {
+        auto& layer = Layer();
+        layer.turbo_cadence_ready_ = false;
+        layer.turbo_cadence_healthy_streak_ = 0;
+        layer.session_begin_wall_time_ = std::chrono::steady_clock::now();
+    }
+
+    static void BeginStabilityCheck() {
+        auto& layer = Layer();
+        layer.turbo_pacing_verdict_pending_ = true;
+        layer.turbo_stable_accumulated_ms_ = 59000.0;
+        layer.runtime_name_.clear(); // Never write a real pacing sidecar from this test.
+    }
+
+    static bool StillProbingAfterAnotherSecond() {
+        auto& layer = Layer();
+        layer.NoteTurboPacingStableFrame(1000.0);
+        return layer.turbo_pacing_verdict_pending_;
+    }
+
+    static void ResolveAuto(const std::string& runtime, const std::string& system) {
+        auto& layer = Layer();
+        layer.runtime_name_ = runtime;
+        layer.system_name_ = system;
+        layer.resolved_settings_.turbo.pacing_mode = TurboPacingSetting::kAuto;
+        layer.resolved_settings_.turbo.runtime_pins.clear();
+        layer.ResolveTurboPacingModeLocked();
+        layer.runtime_name_.clear();
     }
 };
 
@@ -570,6 +611,83 @@ void TestSequencedHandshakeAndSteadyStateOrdering() {
            "Sequenced runtime ordering was not End -> Wait -> Begin in steady state");
     Expect(runtime.MaxConcurrentWaits() == 1 && runtime.ValidStructs(),
            "Sequenced mode duplicated a runtime wait or sent malformed frame structures");
+    depthxr::TurboFrameTestPeer::StalePrediction();
+    XrFrameState stale_state{XR_TYPE_FRAME_STATE};
+    Expect(AppWait(&stale_state) == XR_SUCCESS && stale_state.predictedDisplayTime == 20'000'000'001,
+           "Cached prediction should use the minimum monotonic correction, not add a refresh period");
+    Expect(stale_state.predictedDisplayPeriod == 11'111'111 && stale_state.shouldRender == XR_TRUE,
+           "Prediction correction must retain runtime period and shouldRender");
+}
+
+void TestRepeatedSubmissionFailuresSuspend() {
+    FakeRuntime runtime;
+    TurboHarness harness(runtime, depthxr::TurboPacingMode::kAsync);
+    const auto end_info = FrameEndInfo();
+    runtime.SetEndResult(XR_ERROR_TIME_INVALID);
+    for (int i = 0; i < 3; ++i) {
+        Expect(depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &end_info) == XR_ERROR_TIME_INVALID,
+               "Submission errors must be returned to the app");
+        Expect(depthxr::TurboFrameTestPeer::AutoSuspended() == (i == 2),
+               "Submission breaker must trip at three consecutive errors");
+    }
+    Expect(!depthxr::TurboFrameTestPeer::Handoff().wait_valid && runtime.WaitCalls() == 0,
+           "Failed submissions must not start an async worker wait");
+}
+
+void TestStartupFailuresDoNotQuarantineTurbo() {
+    FakeRuntime runtime;
+    TurboHarness harness(runtime, depthxr::TurboPacingMode::kAsync);
+    depthxr::TurboFrameTestPeer::BeforeFirstEngagement();
+    runtime.SetEndResult(XR_ERROR_TIME_INVALID);
+    const auto end_info = FrameEndInfo();
+    for (int i = 0; i < 3; ++i) {
+        Expect(depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &end_info) == XR_ERROR_TIME_INVALID,
+               "Startup submission errors must still reach the app");
+    }
+    Expect(!depthxr::TurboFrameTestPeer::AutoSuspended(),
+           "Startup errors before Turbo engages must not create a Turbo safety failure");
+    Expect(runtime.WaitCalls() == 0, "Startup test must not have started a Turbo pipeline");
+}
+
+void TestSubmissionFailureRestartsStabilityWindow() {
+    FakeRuntime runtime;
+    TurboHarness harness(runtime, depthxr::TurboPacingMode::kAsync);
+    depthxr::TurboFrameTestPeer::BeginStabilityCheck();
+    runtime.SetEndResult(XR_ERROR_TIME_INVALID);
+    const auto end_info = FrameEndInfo();
+    depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &end_info);
+    Expect(depthxr::TurboFrameTestPeer::StillProbingAfterAnotherSecond(),
+           "A failed submission must restart the 60-second stability window");
+}
+
+void TestAutoSubmissionErrorsTryBothModes() {
+    FakeRuntime runtime;
+    TurboHarness harness(runtime, depthxr::TurboPacingMode::kAsync);
+    depthxr::TurboFrameTestPeer::SetPolicy(depthxr::TurboPacingMode::kAsync, depthxr::TurboFrameTestPeer::Source::kProbing);
+    const auto end_info = FrameEndInfo();
+    runtime.SetEndResult(XR_ERROR_TIME_INVALID);
+    for (int i = 0; i < 3; ++i)
+        depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &end_info);
+    Expect(!depthxr::TurboFrameTestPeer::AutoSuspended(), "Auto must try Sequenced after Async submission errors");
+    Expect(depthxr::TurboFrameTestPeer::PacingMode() == depthxr::TurboPacingMode::kSequenced, "Auto failed to switch strategy");
+    Expect(depthxr::TurboFrameTestPeer::SequencedState() == depthxr::TurboFrameTestPeer::EngagingState(),
+           "Rejected Async submissions must still establish the Sequenced handshake");
+    XrFrameState state{XR_TYPE_FRAME_STATE};
+    Expect(AppWait(&state) == XR_SUCCESS && AppBegin() == XR_SUCCESS, "Sequenced retry handshake failed");
+    for (int i = 0; i < 3; ++i) {
+        depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &end_info);
+        Expect(depthxr::TurboFrameTestPeer::AutoSuspended() == (i == 2), "Sequenced must get its own three-error budget");
+    }
+}
+
+void TestAutoHasNoRuntimeMappings() {
+    FakeRuntime runtime;
+    TurboHarness harness(runtime, depthxr::TurboPacingMode::kAsync);
+    for (const auto* name : {"Pimax OpenXR", "SteamVR/OpenXR", "Oculus", "Varjo", "Unlisted runtime"}) {
+        depthxr::TurboFrameTestPeer::ResolveAuto(name, "test-only aapvr Crystal headset");
+        Expect(depthxr::TurboFrameTestPeer::PacingMode() == depthxr::TurboPacingMode::kAsync,
+               "Every untested setup must start Async regardless of runtime/headset name");
+    }
 }
 
 void TestSubmissionInterlockFallsBackThenSuspends() {
@@ -635,10 +753,15 @@ void TestSubmissionInterlockFallsBackThenSuspends() {
 } // namespace
 
 int main() {
+    TestStartupFailuresDoNotQuarantineTurbo();
+    TestSubmissionFailureRestartsStabilityWindow();
     TestAsyncHandoffCoversEndFrameWindow();
     TestAsyncSecondPollWaitsForPublishedRuntimeWait();
     TestAsyncSubmitFailureCancelsHandoff();
     TestSequencedHandshakeAndSteadyStateOrdering();
+    TestRepeatedSubmissionFailuresSuspend();
+    TestAutoSubmissionErrorsTryBothModes();
+    TestAutoHasNoRuntimeMappings();
     TestSubmissionInterlockFallsBackThenSuspends();
     std::cout << "depthxr_turbo_frame_tests passed\n";
     return 0;

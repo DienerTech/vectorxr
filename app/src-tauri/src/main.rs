@@ -9,6 +9,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
+mod debug_sources;
 mod input_devices;
 mod openxr_layers;
 
@@ -533,9 +534,15 @@ impl Default for PivotXRModuleConfig {
     }
 }
 
+fn default_eye_tracking_correction() -> String {
+    "default".to_owned()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct QuadViewsSettings {
+    #[serde(default = "default_eye_tracking_correction")]
+    eye_tracking_correction: String,
     #[serde(default = "default_quadviews_tracking_mode")]
     tracking_mode: String,
     #[serde(default = "default_focus_horizontal_size_percent")]
@@ -563,6 +570,7 @@ struct QuadViewsSettings {
 impl Default for QuadViewsSettings {
     fn default() -> Self {
         Self {
+            eye_tracking_correction: default_eye_tracking_correction(),
             tracking_mode: default_quadviews_tracking_mode(),
             focus_horizontal_size_percent: default_focus_horizontal_size_percent(),
             focus_vertical_size_percent: default_focus_vertical_size_percent(),
@@ -621,6 +629,8 @@ impl Default for QuadViewsModuleConfig {
 #[serde(rename_all = "camelCase")]
 struct TurboProfileConfig {
     #[serde(default)]
+    disable_safety: bool,
+    #[serde(default)]
     id: String,
     #[serde(default)]
     name: String,
@@ -633,6 +643,8 @@ struct TurboProfileConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct TurboModuleConfig {
+    #[serde(default = "default_true")]
+    interrupted_session_recovery: bool,
     #[serde(default = "default_false")]
     enabled: bool,
     #[serde(default = "default_activation_binding")]
@@ -660,6 +672,7 @@ fn default_turbo_metrics_mode() -> String {
 impl Default for TurboModuleConfig {
     fn default() -> Self {
         Self {
+            interrupted_session_recovery: true,
             enabled: false,
             toggle_binding: default_activation_binding(),
             pacing_mode: default_turbo_pacing_mode(),
@@ -766,6 +779,8 @@ fn default_seen_apps_version() -> u32 {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct RuntimePacingObservation {
+    #[serde(default)]
+    test_started_at: u64,
     #[serde(default)]
     runtime_name: String,
     #[serde(default)]
@@ -893,12 +908,20 @@ struct RuntimeCapabilities {
 #[serde(rename_all = "camelCase")]
 struct RuntimeState {
     #[serde(default)]
+    turbo_state: String,
+    #[serde(default)]
+    turbo_reason: String,
+    #[serde(default)]
     quadviews_diagnostic_visualization: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct RuntimeStatusDocument {
+    #[serde(default)]
+    quadviews_dimensions: Vec<QuadViewDimensions>,
+    #[serde(default)]
+    quadviews_dimensions_at: u64,
     protocol_version: u32,
     session_id: String,
     process_id: u32,
@@ -912,9 +935,20 @@ struct RuntimeStatusDocument {
     state: RuntimeState,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct QuadViewDimensions {
+    width: u32,
+    height: u32,
+    allocated_width: u32,
+    allocated_height: u32,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct RuntimeStatusEnvelope {
+    faults: Vec<serde_json::Value>,
+    recovery: Vec<serde_json::Value>,
     sessions: Vec<RuntimeStatusDocument>,
 }
 
@@ -1310,13 +1344,39 @@ fn read_runtime_pacing_document(path: &Path) -> RuntimePacingDocument {
             observations: Vec::new(),
         };
     }
-    fs::read_to_string(path)
+    let mut document = fs::read_to_string(path)
         .ok()
         .and_then(|content| serde_json::from_str::<RuntimePacingDocument>(&content).ok())
         .unwrap_or_else(|| RuntimePacingDocument {
             version: 1,
             observations: Vec::new(),
-        })
+        });
+    document.observations.retain(|observation| {
+        let name: String = observation
+            .runtime_name
+            .as_bytes()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        let reset_path = path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join("runtime-pacing-resets")
+            .join(format!("{name}.txt"));
+        let reset = if reset_path.exists() {
+            fs::read_to_string(reset_path)
+                .ok()
+                .and_then(|text| text.trim().parse::<u64>().ok())
+                .unwrap_or(u64::MAX)
+        } else {
+            0
+        };
+        observation.test_started_at > reset
+            && observation.source == "discovered"
+            && observation.stable_seconds >= 60
+            && (observation.mode == "async" || observation.mode == "sequenced")
+    });
+    document
 }
 
 fn ensure_parent(path: &Path) -> Result<(), String> {
@@ -1549,21 +1609,28 @@ fn log_series_paths(base_path: &Path) -> Result<Vec<PathBuf>, String> {
 }
 
 fn read_log_preview(path: &Path) -> String {
-    const MAX_BYTES: usize = 120_000;
-
-    let Ok(content) = fs::read_to_string(path) else {
-        return "Unable to read this log file.".into();
+    use std::io::{Read, Seek, SeekFrom};
+    const MAX_BYTES: u64 = 120_000;
+    let read_tail = || -> std::io::Result<(bool, Vec<u8>)> {
+        let mut file = fs::File::open(path)?;
+        let length = file.metadata()?.len();
+        file.seek(SeekFrom::Start(length.saturating_sub(MAX_BYTES)))?;
+        let mut bytes = Vec::new();
+        file.take(MAX_BYTES).read_to_end(&mut bytes)?;
+        Ok((length > MAX_BYTES, bytes))
     };
-
-    if content.len() <= MAX_BYTES {
-        return content;
+    match read_tail() {
+        Ok((truncated, bytes)) => format!(
+            "{}{}",
+            if truncated {
+                "... truncated to the most recent log output ...\n"
+            } else {
+                ""
+            },
+            String::from_utf8_lossy(&bytes)
+        ),
+        Err(_) => "Unable to read this log file.".into(),
     }
-
-    let start = content.len().saturating_sub(MAX_BYTES);
-    format!(
-        "... truncated to the most recent log output ...\n{}",
-        &content[start..]
-    )
 }
 
 #[tauri::command]
@@ -1642,7 +1709,13 @@ fn cancel_device_binding_capture() {
 }
 
 #[tauri::command]
-fn load_log_snapshot() -> Result<LogSnapshot, String> {
+async fn load_log_snapshot() -> Result<LogSnapshot, String> {
+    tauri::async_runtime::spawn_blocking(read_log_snapshot)
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+fn read_log_snapshot() -> Result<LogSnapshot, String> {
     let base_path = resolve_log_path();
     let directory = base_path
         .parent()
@@ -1819,13 +1892,25 @@ fn load_runtime_pacing() -> Result<RuntimePacingEnvelope, String> {
 // at the next session. Leaves other runtimes' verdicts intact.
 #[tauri::command]
 fn clear_runtime_pacing_observation(runtime_name: String) -> Result<RuntimePacingEnvelope, String> {
+    let _guard = TURBO_SAFETY_IO.lock().map_err(|error| error.to_string())?;
     let path = resolve_runtime_pacing_path();
+    request_runtime_retest(&path, &runtime_name)?;
     let mut document = read_runtime_pacing_document(&path);
     document
         .observations
         .retain(|observation| observation.runtime_name != runtime_name);
     let content = serde_json::to_string_pretty(&document).map_err(|error| error.to_string())?;
     write_text_safely(&path, &content)?;
+    for record in read_turbo_recovery() {
+        if record["runtime"].as_str() == Some(runtime_name.as_str()) {
+            if let Some(fingerprint) = record["fingerprint"].as_str() {
+                clear_turbo_safety_at(
+                    &resolve_runtime_relay_root().join("turbo-recovery"),
+                    fingerprint,
+                )?;
+            }
+        }
+    }
     Ok(RuntimePacingEnvelope {
         path: path.to_string_lossy().into_owned(),
         observations: document.observations,
@@ -1858,6 +1943,295 @@ fn clear_turbo_metrics() -> Result<TurboMetricsEnvelope, String> {
         path: path.to_string_lossy().into_owned(),
         sessions: document.sessions,
     })
+}
+
+fn recovery_process_alive(pid: u32, created: &str) -> bool {
+    #[cfg(windows)]
+    unsafe {
+        use windows::Win32::Foundation::{CloseHandle, FILETIME, WAIT_OBJECT_0};
+        use windows::Win32::System::Threading::{
+            GetProcessTimes, OpenProcess, WaitForSingleObject, PROCESS_QUERY_LIMITED_INFORMATION,
+            PROCESS_SYNCHRONIZE,
+        };
+        let process = match OpenProcess(
+            PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE,
+            false,
+            pid,
+        ) {
+            Ok(process) => process,
+            Err(error) => return error.code().0 as u32 != 0x80070057,
+        };
+        let mut start = FILETIME::default();
+        let mut exited = FILETIME::default();
+        let mut kernel = FILETIME::default();
+        let mut user = FILETIME::default();
+        let known =
+            GetProcessTimes(process, &mut start, &mut exited, &mut kernel, &mut user).is_ok();
+        let wait = WaitForSingleObject(process, 0);
+        let _ = CloseHandle(process);
+        let actual = ((start.dwHighDateTime as u64) << 32) | start.dwLowDateTime as u64;
+        let expected = created.parse::<u64>().unwrap_or(0);
+        return wait != WAIT_OBJECT_0 && (!known || expected == 0 || actual == expected);
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (pid, created);
+        true
+    }
+}
+
+fn archive_turbo_fault(path: &std::path::Path, value: &serde_json::Value) -> Result<(), String> {
+    let root = path
+        .parent()
+        .ok_or("Missing recovery directory")?
+        .join("faults");
+    fs::create_dir_all(&root).map_err(|error| error.to_string())?;
+    let stem = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .ok_or("Invalid record name")?;
+    let timestamp = value["updatedAtUnixMilliseconds"]
+        .as_u64()
+        .ok_or("Missing fault time")?;
+    let destination = root.join(format!("{stem}-{timestamp}.json"));
+    if root
+        .parent()
+        .unwrap()
+        .join("faults-cleared")
+        .join(format!("{stem}-{timestamp}.txt"))
+        .exists()
+    {
+        return Ok(());
+    }
+    if !destination.exists() {
+        // Publish a complete document so polling readers never see partial JSON.
+        let temporary = destination.with_extension("tmp");
+        fs::write(
+            &temporary,
+            serde_json::to_vec(value).map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| error.to_string())?;
+        fs::rename(&temporary, &destination).map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
+fn is_turbo_interruption(value: &serde_json::Value) -> bool {
+    if value["version"].as_u64() != Some(1) {
+        return false;
+    }
+    match value["state"].as_str() {
+        Some("failed") => true,
+        Some("armed") => {
+            let Some(pid) = value["processId"]
+                .as_u64()
+                .and_then(|n| u32::try_from(n).ok())
+            else {
+                return false;
+            };
+            let Some(created) = value["processCreated"].as_str() else {
+                return false;
+            };
+            !recovery_process_alive(pid, created)
+        }
+        _ => false,
+    }
+}
+
+static TURBO_SAFETY_IO: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[tauri::command]
+async fn load_debug_sources() -> Result<debug_sources::DebugSourceSnapshot, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let _guard = TURBO_SAFETY_IO
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        debug_sources::collect()
+    })
+    .await
+    .map_err(|error| error.to_string())
+}
+
+fn clear_turbo_fault_logs_at(root: &Path) -> Result<(), String> {
+    let directory = root.join("faults");
+    if !directory.exists() {
+        return Ok(());
+    }
+    fs::create_dir_all(root.join("faults-cleared")).map_err(|error| error.to_string())?;
+    for entry in fs::read_dir(directory).map_err(|error| error.to_string())? {
+        let entry = entry.map_err(|error| error.to_string())?;
+        if !entry
+            .file_type()
+            .map_err(|error| error.to_string())?
+            .is_file()
+            || entry.path().extension().and_then(|s| s.to_str()) != Some("json")
+        {
+            continue;
+        }
+        // Mark only this archived event: a live session can crash later even
+        // when its last armed timestamp predates the clear operation.
+        let marker = root
+            .join("faults-cleared")
+            .join(entry.file_name())
+            .with_extension("txt");
+        write_text_safely(&marker, "")?;
+        match fs::remove_file(entry.path()) {
+            Ok(()) => (),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
+            Err(error) => return Err(error.to_string()),
+        }
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn clear_turbo_fault_logs() -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let _guard = TURBO_SAFETY_IO.lock().map_err(|error| error.to_string())?;
+        read_turbo_recovery();
+        clear_turbo_fault_logs_at(&resolve_runtime_relay_root().join("turbo-recovery"))
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+fn read_turbo_faults() -> Vec<serde_json::Value> {
+    let cleared = resolve_runtime_relay_root().join("turbo-recovery/faults-cleared");
+    let Ok(entries) = fs::read_dir(resolve_runtime_relay_root().join("turbo-recovery/faults"))
+    else {
+        return Vec::new();
+    };
+    let mut faults: Vec<serde_json::Value> = entries
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            if entry.path().extension().and_then(|s| s.to_str()) != Some("json")
+                || entry.metadata().ok()?.len() > 32 * 1024
+                || cleared
+                    .join(entry.file_name())
+                    .with_extension("txt")
+                    .exists()
+            {
+                return None;
+            }
+            let value: serde_json::Value =
+                serde_json::from_slice(&fs::read(entry.path()).ok()?).ok()?;
+            (value["version"].as_u64() == Some(1)).then_some(value)
+        })
+        .collect();
+    faults.sort_by_key(|value| {
+        std::cmp::Reverse(value["updatedAtUnixMilliseconds"].as_u64().unwrap_or(0))
+    });
+    faults
+}
+
+fn request_runtime_retest(pacing_path: &std::path::Path, runtime: &str) -> Result<(), String> {
+    let name: String = runtime
+        .as_bytes()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    let directory = pacing_path
+        .parent()
+        .ok_or("Missing pacing directory")?
+        .join("runtime-pacing-resets");
+    fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
+    write_text_safely(
+        &directory.join(format!("{name}.txt")),
+        &unix_milliseconds().to_string(),
+    )
+}
+
+fn clear_turbo_safety_at(root: &std::path::Path, fingerprint: &str) -> Result<(), String> {
+    if !root.exists() {
+        return Ok(());
+    }
+    for entry in fs::read_dir(root).map_err(|error| error.to_string())? {
+        let entry = entry.map_err(|error| error.to_string())?;
+        if entry.path().extension().and_then(|s| s.to_str()) != Some("json") {
+            continue;
+        }
+        if entry.metadata().map_err(|error| error.to_string())?.len() > 32 * 1024 {
+            continue;
+        }
+        let Ok(value) = serde_json::from_slice::<serde_json::Value>(
+            &fs::read(entry.path()).map_err(|error| error.to_string())?,
+        ) else {
+            continue;
+        };
+        if value["fingerprint"].as_str() != Some(fingerprint) || !is_turbo_interruption(&value) {
+            continue;
+        }
+        archive_turbo_fault(&entry.path(), &value)?;
+        fs::remove_file(entry.path()).map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn clear_turbo_safety_block(fingerprint: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = TURBO_SAFETY_IO.lock().map_err(|error| error.to_string())?;
+        let path = resolve_runtime_pacing_path();
+        let mut document = read_runtime_pacing_document(&path);
+        for record in read_turbo_recovery()
+            .iter()
+            .filter(|record| record["fingerprint"].as_str() == Some(fingerprint.as_str()))
+        {
+            if let Some(runtime) = record["runtime"].as_str() {
+                request_runtime_retest(&path, runtime)?;
+                document
+                    .observations
+                    .retain(|observation| observation.runtime_name != runtime);
+            }
+        }
+        write_text_safely(
+            &path,
+            &serde_json::to_string_pretty(&document).map_err(|error| error.to_string())?,
+        )?;
+        clear_turbo_safety_at(
+            &resolve_runtime_relay_root().join("turbo-recovery"),
+            &fingerprint,
+        )
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+fn read_turbo_recovery() -> Vec<serde_json::Value> {
+    let Ok(entries) = fs::read_dir(resolve_runtime_relay_root().join("turbo-recovery")) else {
+        return Vec::new();
+    };
+    let mut records: Vec<serde_json::Value> = entries
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            if entry.path().extension().and_then(|s| s.to_str()) != Some("json")
+                || entry.metadata().ok()?.len() > 32 * 1024
+            {
+                return None;
+            }
+            let value: serde_json::Value =
+                serde_json::from_str(&fs::read_to_string(entry.path()).ok()?).ok()?;
+            if value.get("version")?.as_u64()? != 1 {
+                return None;
+            }
+            let state = value.get("state")?.as_str()?;
+            let pid = u32::try_from(value.get("processId")?.as_u64()?).ok()?;
+            let created = value.get("processCreated")?.as_str()?;
+            if state != "failed" && (state != "armed" || recovery_process_alive(pid, created)) {
+                return None;
+            }
+            let _ = archive_turbo_fault(&entry.path(), &value);
+            Some(value)
+        })
+        .collect();
+    records.sort_by_key(|v| {
+        std::cmp::Reverse(
+            v.get("updatedAtUnixMilliseconds")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0),
+        )
+    });
+    records
 }
 
 fn read_live_runtime_statuses() -> Vec<RuntimeStatusDocument> {
@@ -1895,10 +2269,20 @@ fn read_live_runtime_statuses() -> Vec<RuntimeStatusDocument> {
 }
 
 #[tauri::command]
-fn load_runtime_status() -> Result<RuntimeStatusEnvelope, String> {
-    Ok(RuntimeStatusEnvelope {
-        sessions: read_live_runtime_statuses(),
+async fn load_runtime_status() -> Result<RuntimeStatusEnvelope, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let _guard = TURBO_SAFETY_IO
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let recovery = read_turbo_recovery();
+        RuntimeStatusEnvelope {
+            sessions: read_live_runtime_statuses(),
+            recovery,
+            faults: read_turbo_faults(),
+        }
     })
+    .await
+    .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -1941,6 +2325,7 @@ fn set_runtime_quadviews_diagnostic_visualization(
         expires_at_unix_milliseconds: now.saturating_add(5_000),
         desired: RuntimeState {
             quadviews_diagnostic_visualization: enabled,
+            ..Default::default()
         },
     };
     let content = serde_json::to_string_pretty(&control).map_err(|error| error.to_string())?;
@@ -1952,8 +2337,14 @@ fn set_runtime_quadviews_diagnostic_visualization(
 }
 
 #[tauri::command]
-fn load_openxr_layers() -> Result<openxr_layers::OpenXrLayerSnapshot, String> {
-    openxr_layers::load_openxr_layers()
+async fn load_openxr_layers(
+    include_signatures: Option<bool>,
+) -> Result<openxr_layers::OpenXrLayerSnapshot, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        openxr_layers::load_openxr_layers_with_signatures(include_signatures.unwrap_or(false))
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -2127,6 +2518,189 @@ fn play_test_sound(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn runtime_retest_invalidates_legacy_and_late_session_results() {
+        let root = std::env::temp_dir().join(format!(
+            "vectorxr-retest-{}-{}",
+            std::process::id(),
+            super::unix_milliseconds()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("runtime-pacing.json");
+        let tested = serde_json::json!({"runtimeName":"SteamVR/OpenXR","mode":"async","source":"discovered","testStartedAt":1,"stableSeconds":60});
+        let preset = serde_json::json!({"runtimeName":"Pimax OpenXR","mode":"sequenced","source":"preset","testStartedAt":1,"stableSeconds":60});
+        std::fs::write(
+            &path,
+            serde_json::json!({"version":2,"observations":[tested.clone(),preset]}).to_string(),
+        )
+        .unwrap();
+        assert_eq!(
+            super::read_runtime_pacing_document(&path)
+                .observations
+                .len(),
+            1
+        );
+        super::request_runtime_retest(&path, "SteamVR/OpenXR").unwrap();
+        // Even a stale writer replacing the JSON after reset cannot revive it.
+        std::fs::write(
+            &path,
+            serde_json::json!({"version":2,"observations":[tested.clone()]}).to_string(),
+        )
+        .unwrap();
+        assert!(super::read_runtime_pacing_document(&path)
+            .observations
+            .is_empty());
+        let mut fresh = tested;
+        fresh["testStartedAt"] = (super::unix_milliseconds() + 1).into();
+        std::fs::write(
+            &path,
+            serde_json::json!({"version":2,"observations":[fresh]}).to_string(),
+        )
+        .unwrap();
+        assert_eq!(
+            super::read_runtime_pacing_document(&path)
+                .observations
+                .len(),
+            1
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn safety_clear_preserves_history_and_other_setups() {
+        let root = std::env::temp_dir().join(format!(
+            "vectorxr-safety-clear-{}-{}",
+            std::process::id(),
+            super::unix_milliseconds()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let failed = serde_json::json!({"version":1,"state":"failed","fingerprint":"dcs","application":"DCS.exe","processId":0,"processCreated":"0","updatedAtUnixMilliseconds":42});
+        let mut other = failed.clone();
+        other["fingerprint"] = "other".into();
+        std::fs::write(root.join("dcs.json"), failed.to_string()).unwrap();
+        std::fs::write(root.join("other.json"), other.to_string()).unwrap();
+        let live = serde_json::json!({"version":1,"state":"armed","fingerprint":"dcs","processId":std::process::id(),"processCreated":"0","updatedAtUnixMilliseconds":43});
+        std::fs::write(root.join("live.json"), live.to_string()).unwrap();
+        super::clear_turbo_safety_at(&root, "dcs").unwrap();
+        assert!(!root.join("dcs.json").exists());
+        assert!(root.join("other.json").exists());
+        assert!(root.join("live.json").exists());
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(
+                &std::fs::read(root.join("faults/dcs-42.json")).unwrap()
+            )
+            .unwrap(),
+            failed
+        );
+        super::clear_turbo_safety_at(&root, "dcs").unwrap();
+        assert_eq!(std::fs::read_dir(root.join("faults")).unwrap().count(), 1);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn fault_log_clear_preserves_blocks_and_does_not_hide_later_crashes() {
+        let root = std::env::temp_dir().join(format!(
+            "vectorxr-fault-clear-{}-{}",
+            std::process::id(),
+            super::unix_milliseconds()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let failed = serde_json::json!({"version":1,"state":"failed","fingerprint":"dcs","updatedAtUnixMilliseconds":42});
+        let live = serde_json::json!({"version":1,"state":"armed","fingerprint":"live","updatedAtUnixMilliseconds":40});
+        std::fs::write(root.join("dcs.json"), failed.to_string()).unwrap();
+        std::fs::write(root.join("live.json"), live.to_string()).unwrap();
+        super::archive_turbo_fault(&root.join("dcs.json"), &failed).unwrap();
+        super::clear_turbo_fault_logs_at(&root).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(root.join("dcs.json")).unwrap(),
+            failed.to_string()
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("live.json")).unwrap(),
+            live.to_string()
+        );
+        assert_eq!(std::fs::read_dir(root.join("faults")).unwrap().count(), 0);
+        // Polling and Clear & retest must not restore a cleared fault.
+        super::archive_turbo_fault(&root.join("dcs.json"), &failed).unwrap();
+        assert_eq!(std::fs::read_dir(root.join("faults")).unwrap().count(), 0);
+        super::clear_turbo_safety_at(&root, "dcs").unwrap();
+        assert_eq!(std::fs::read_dir(root.join("faults")).unwrap().count(), 0);
+        // A later process death still records its older armed marker.
+        super::archive_turbo_fault(&root.join("live.json"), &live).unwrap();
+        assert!(root.join("faults/live-40.json").exists());
+        let mut fresh = failed;
+        fresh["updatedAtUnixMilliseconds"] = 43.into();
+        super::archive_turbo_fault(&root.join("dcs.json"), &fresh).unwrap();
+        assert!(root.join("faults/dcs-43.json").exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn turbo_profile_safety_override_round_trips() {
+        let old: super::TurboProfileConfig = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert!(!old.disable_safety);
+        let profile: super::TurboProfileConfig =
+            serde_json::from_value(serde_json::json!({"disableSafety":true})).unwrap();
+        assert_eq!(
+            serde_json::to_value(profile).unwrap()["disableSafety"],
+            true
+        );
+    }
+
+    #[test]
+    fn turbo_recovery_defaults_on_and_preserves_opt_out() {
+        let old: super::TurboModuleConfig =
+            serde_json::from_value(serde_json::json!({ "enabled": true })).unwrap();
+        assert!(old.interrupted_session_recovery);
+        let mut config = super::default_config();
+        config.modules.turbo.interrupted_session_recovery = false;
+        let saved = serde_json::to_value(&config).unwrap();
+        assert_eq!(
+            saved["modules"]["turbo"]["interruptedSessionRecovery"],
+            false
+        );
+        let restored: super::VectorXRConfig = serde_json::from_value(saved).unwrap();
+        assert!(!restored.modules.turbo.interrupted_session_recovery);
+    }
+
+    #[test]
+    fn log_preview_bounds_reads_and_accepts_split_unicode() {
+        let path =
+            std::env::temp_dir().join(format!("vectorxr-unicode-tail-{}.log", std::process::id()));
+        let content = "€".repeat(50_000) + "x";
+        std::fs::write(&path, content).unwrap();
+        let preview = super::read_log_preview(&path);
+        assert!(preview.starts_with("... truncated"));
+        assert!(preview.ends_with('x'));
+        assert!(preview.len() < 120_100);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn runtime_status_accepts_old_and_new_protocol_fields() {
+        let mut value = serde_json::json!({
+            "protocolVersion": 1, "sessionId": "test", "processId": 1,
+            "application": "DCS.exe", "updatedAtUnixMilliseconds": 1,
+            "acknowledgedRevision": 0,
+            "capabilities": { "quadviewsDiagnosticVisualization": true },
+            "state": { "quadviewsDiagnosticVisualization": false }
+        });
+        let old: super::RuntimeStatusDocument = serde_json::from_value(value.clone()).unwrap();
+        assert!(old.quadviews_dimensions.is_empty());
+        value["state"]["turboState"] = "recovery-disabled".into();
+        value["state"]["turboReason"] = "Previous interruption".into();
+        value["quadviewsDimensions"] = serde_json::json!([{"width": 1000, "height": 900, "allocatedWidth": 1200, "allocatedHeight": 1000}]);
+        let current: super::RuntimeStatusDocument = serde_json::from_value(value).unwrap();
+        assert_eq!(current.state.turbo_state, "recovery-disabled");
+        assert_eq!(current.quadviews_dimensions[0].allocated_width, 1200);
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn recovery_does_not_mistake_a_live_process_for_a_crash() {
+        assert!(super::recovery_process_alive(std::process::id(), "0"));
+        assert!(!super::recovery_process_alive(u32::MAX - 1, "0"));
+    }
     use super::{
         config_backup_path, default_config, ensure_config_backup, DepthXRBindings, DepthXRSettings,
         PivotXRModuleConfig, PivotXRProfileConfig, PivotXRSettings,
@@ -2433,6 +3007,9 @@ fn main() {
             load_turbo_metrics,
             clear_turbo_metrics,
             load_runtime_status,
+            clear_turbo_safety_block,
+            clear_turbo_fault_logs,
+            load_debug_sources,
             set_runtime_quadviews_diagnostic_visualization,
             list_input_devices,
             capture_device_binding,

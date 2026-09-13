@@ -31,6 +31,7 @@
 #include "depthxr/runtime_compatibility.h"
 #include "depthxr/runtime_pacing.h"
 #include "depthxr/runtime_relay.h"
+#include "depthxr/turbo_recovery.h"
 #include "depthxr/settings_resolver.h"
 #include "depthxr/swapchain_state.h"
 
@@ -681,6 +682,8 @@ class OpenXrLayer {
 
     // Versioned, session-targeted app<->layer relay. The watcher owns all
     // filesystem I/O; frame paths only update in-memory state and a dirty bit.
+    std::vector<QuadViewDimensions> quadviews_dimensions_; // mutex_
+    std::uint64_t quadviews_dimensions_at_{0};
     std::filesystem::path runtime_relay_root_;
     std::string runtime_relay_session_id_;
     std::vector<std::string> runtime_relay_sessions_to_remove_;
@@ -858,7 +861,13 @@ class OpenXrLayer {
     std::optional<std::chrono::steady_clock::time_point> turbo_binding_last_poll_time_;
     bool turbo_binding_down_cached_{false};
     bool has_logged_turbo_varjo_note_{false};
-    bool has_logged_turbo_session_compatibility_block_{false};
+    TurboRecoveryGuard turbo_recovery_; // mutex_ (config lock)
+    bool turbo_recovery_retry_requested_{false};
+    std::atomic<bool> turbo_recovery_blocked_{false};
+    std::atomic<int> turbo_runtime_error_streak_{0};
+    std::atomic<bool> turbo_effective_active_{false};
+    std::atomic<bool> turbo_effective_async_{false};
+    void NoteTurboRuntimeFailure(XrResult result, XrTime submitted_display_time);
     // Info once per pipelining engage/release cycle; small Debug budget for the
     // first fabricated xrWaitFrame returns of each cycle.
     bool turbo_pipelining_logged_{false};
@@ -878,7 +887,9 @@ class OpenXrLayer {
     // forced by settings, pinned per runtime, seeded from the known-runtime
     // table, read back from a recorded sidecar verdict, probing an unknown
     // runtime, or the in-session fallback after async tripped.
-    enum class TurboPacingSource { kForced, kPinned, kPreset, kDiscovered, kProbing, kFallback };
+    enum class TurboPacingSource { kForced, kPinned, kDiscovered, kProbing, kFallback };
+    std::uint64_t turbo_test_started_at_{0};
+    bool TryTurboAutoFallbackLocked(const std::string& reason);
     // Frame-submission-thread only (resolved under the config lock at
     // EndFrame, consumed after it is released); the sequenced state machine
     // below is turbo_mutex_-guarded because WaitFrame/BeginFrame consult it.

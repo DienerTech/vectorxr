@@ -13,6 +13,7 @@ import ModuleBindingPanel from "../ModuleBindingPanel.vue";
 import ProfileShell from "../ProfileShell.vue";
 import QuadViewsOverlayGuide from "../QuadViewsOverlayGuide.vue";
 import QuadViewsSettingsFields from "../QuadViewsSettingsFields.vue";
+import QuadViewsDimensions from "../QuadViewsDimensions.vue";
 import {
   savedBindingConflictWarnings,
   type QuadViewsSettings,
@@ -63,6 +64,15 @@ const diagnosticRuntime = computed(() =>
   runtimeSessions.value.find((session) => session.capabilities.quadviewsDiagnosticVisualization),
 );
 
+function dimensionSessions(profileIndex: number) {
+  return runtimeSessions.value.filter((session) => {
+    if (session.quadviewsDimensions?.length !== 4) return false;
+    const application = props.applications.find((app) => app.enabled && app.match.exe.toLowerCase() === session.application.toLowerCase());
+    const index = application ? props.config.modules.quadviews.profiles.findIndex((profile) => profile.enabled && profile.applicationIds.includes(application.id)) : -1;
+    return index === profileIndex;
+  });
+}
+
 const diagnosticRuntimeSummary = computed(() => {
   const session = diagnosticRuntime.value;
   if (session) {
@@ -79,6 +89,7 @@ async function refreshRuntimeStatus() {
     runtimeSessions.value = (await loadRuntimeStatus()).sessions;
     runtimeStatusError.value = "";
   } catch (error) {
+    runtimeSessions.value = [];
     runtimeStatusError.value = error instanceof Error ? error.message : "Unable to read runtime status";
   }
 }
@@ -319,7 +330,7 @@ function budgetChipClass(settings: QuadViewsSettings) {
           </svg>
           <span class="eyebrow text-xs font-semibold uppercase tracking-[0.24em]">Default Profile</span>
           <span class="text-xs text-muted">Applies to applications without an enabled custom profile</span>
-          <span class="ml-auto flex items-center gap-2">
+          <span class="ml-auto flex flex-wrap items-center gap-2">
             <span
               class="rounded-full px-2.5 py-1 text-xs font-semibold uppercase tracking-[0.14em]"
               :class="budgetChipClass(config.modules.quadviews.defaults)"
@@ -327,6 +338,7 @@ function budgetChipClass(settings: QuadViewsSettings) {
               {{ budgetTone(config.modules.quadviews.defaults) }}
             </span>
             <span class="text-xs font-semibold">{{ budgetLabel(config.modules.quadviews.defaults) }}</span>
+            <QuadViewsDimensions :sessions="dimensionSessions(-1)" />
           </span>
         </summary>
         <div class="mt-3 flex flex-wrap items-center gap-2">
@@ -390,6 +402,7 @@ function budgetChipClass(settings: QuadViewsSettings) {
             >{{ budgetTone(profile.settings) }}</span
           >
           <span v-if="profile.enabled" class="text-xs font-semibold">{{ budgetLabel(profile.settings) }}</span>
+          <QuadViewsDimensions v-if="profile.enabled" :sessions="dimensionSessions(index)" />
         </template>
 
         <QuadViewsSettingsFields :settings="profile.settings" />

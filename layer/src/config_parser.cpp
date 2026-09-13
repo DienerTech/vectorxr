@@ -1097,6 +1097,7 @@ bool ParseTurboProfile(const JsonValue& value, TurboProfile& out, std::string& e
     }
 
     static const std::unordered_set<std::string> allowed = {
+        "disableSafety",
         "id",
         "name",
         "enabled",
@@ -1108,6 +1109,9 @@ bool ParseTurboProfile(const JsonValue& value, TurboProfile& out, std::string& e
         return false;
     }
 
+    std::optional<bool> disable_safety;
+    if (!ReadOptionalBool(*object, "disableSafety", disable_safety, error)) return false;
+    out.disable_safety = disable_safety.value_or(false);
     const auto application_ids_it = object->find("applicationIds");
     if (application_ids_it == object->end()) {
         error = "Missing required field: turboProfile.applicationIds";
@@ -1138,7 +1142,11 @@ bool ParseTurboProfile(const JsonValue& value, TurboProfile& out, std::string& e
 }
 
 bool ParseTurboModule(const JsonValue::Object& object, TurboModuleConfig& out, std::string& error) {
+    std::optional<bool> recovery;
+    if (!ReadOptionalBool(object, "interruptedSessionRecovery", recovery, error)) return false;
+    out.interrupted_session_recovery = recovery.value_or(true);
     static const std::unordered_set<std::string> allowed = {
+        "interruptedSessionRecovery",
         "enabled",
         "toggleBinding",
         "pacingMode",
@@ -1902,6 +1910,7 @@ bool ParsePivotModule(const JsonValue::Object& object, PivotXrModuleConfig& out,
 
 bool ParseQuadViewsSettings(const JsonValue::Object& object, QuadViewsSettings& out, std::string& error) {
     static const std::unordered_set<std::string> allowed = {
+        "eyeTrackingCorrection",
         "trackingMode",
         "focusHorizontalSizePercent",
         "focusVerticalSizePercent",
@@ -1919,6 +1928,7 @@ bool ParseQuadViewsSettings(const JsonValue::Object& object, QuadViewsSettings& 
         return false;
     }
 
+    std::optional<std::string> eye_tracking_correction;
     std::optional<QuadViewsTrackingMode> tracking_mode;
     std::optional<double> focus_horizontal_size_percent;
     std::optional<double> focus_vertical_size_percent;
@@ -1931,7 +1941,8 @@ bool ParseQuadViewsSettings(const JsonValue::Object& object, QuadViewsSettings& 
     std::optional<double> gaze_smoothing;
     std::optional<double> gaze_deadzone_degrees;
 
-    if (!ReadOptionalQuadViewsTrackingMode(object, "trackingMode", tracking_mode, error) ||
+    if (!ReadOptionalString(object, "eyeTrackingCorrection", eye_tracking_correction, error) ||
+        !ReadOptionalQuadViewsTrackingMode(object, "trackingMode", tracking_mode, error) ||
         !ReadOptionalNumber(object, "focusHorizontalSizePercent", focus_horizontal_size_percent, error) ||
         !ReadOptionalNumber(object, "focusVerticalSizePercent", focus_vertical_size_percent, error) ||
         !ReadOptionalNumber(object, "focusScale", focus_scale, error) ||
@@ -1945,6 +1956,13 @@ bool ParseQuadViewsSettings(const JsonValue::Object& object, QuadViewsSettings& 
         return false;
     }
 
+    if (eye_tracking_correction.has_value()) {
+        if (*eye_tracking_correction != "default" && *eye_tracking_correction != "flip-z") {
+            error = "eyeTrackingCorrection must be default or flip-z";
+            return false;
+        }
+        out.eye_tracking_correction = *eye_tracking_correction;
+    }
     if (tracking_mode.has_value()) {
         out.tracking_mode = *tracking_mode;
     }

@@ -4,6 +4,7 @@ import { computed, onMounted } from 'vue'
 import { openExternalUrl } from '../../lib/commands'
 import { formatPatchNoteInlineHtml, type PatchNoteEntry } from '../../lib/patchNotes'
 import { useUpdateStore } from '../../stores/updateStore'
+import DiscordJoinButton from '../DiscordJoinButton.vue'
 
 const props = defineProps<{
   latestPatch: PatchNoteEntry
@@ -148,6 +149,7 @@ onMounted(() => {
           >
             GitHub
           </button>
+          <DiscordJoinButton />
         </div>
       </article>
 

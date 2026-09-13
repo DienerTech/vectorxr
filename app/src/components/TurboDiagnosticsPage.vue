@@ -2,6 +2,7 @@
 import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue'
 
 import ModuleBindingPage from './ModuleBindingPage.vue'
+import { preferredTurboSession } from '../lib/turboDiagnostics'
 import ModuleBindingPanel from './ModuleBindingPanel.vue'
 import { savedBindingConflictWarnings, type TurboMetricsBucket, type TurboMetricsSession, type VectorXRConfig } from '../lib/model'
 
@@ -42,7 +43,7 @@ const selectedSession = computed<TurboMetricsSession | null>(() => {
   if (props.turboMetrics.length === 0) {
     return null
   }
-  return props.turboMetrics.find((session) => session.sessionId === selectedSessionId.value) ?? props.turboMetrics[0]
+  return preferredTurboSession(props.turboMetrics, selectedSessionId.value)
 })
 
 function formatSessionLabel(session: TurboMetricsSession): string {

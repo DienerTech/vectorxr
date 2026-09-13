@@ -1,4 +1,4 @@
-import type { ActiveRuntimeInfo, LogSnapshot, OpenXrLayerSnapshot, SeenApplication } from './commands'
+import type { ActiveRuntimeInfo, DebugSourceSnapshot, LogSnapshot, OpenXrLayerSnapshot, SeenApplication, RuntimeStatusEnvelope } from './commands'
 import type { HealthSummary } from './health'
 import type { RuntimePacingObservation, TurboMetricsSession, VectorXRConfig } from './model'
 
@@ -24,11 +24,15 @@ interface DebugPackageInput {
   configPath: string
   seenAppsPath: string
   config: VectorXRConfig
+  unsavedChanges: boolean
+  debugSources: DebugSourceSnapshot
+  collectionErrors: string[]
   seenApps: SeenApplication[]
   runtimePacingPath: string
   runtimePacing: RuntimePacingObservation[]
   turboMetricsPath: string
   turboMetrics: TurboMetricsSession[]
+  runtimeStatus: RuntimeStatusEnvelope | { error: string }
   activeRuntime: ActiveRuntimeInfo | null
   logSnapshot: LogSnapshot | null
   openXrLayerSnapshot: OpenXrLayerSnapshot | null
@@ -96,13 +100,15 @@ function stringEntry(path: string, content: unknown): ZipEntry {
 }
 
 function createZip(entries: ZipEntry[]): Blob {
-  const output: number[] = []
+  const parts: BlobPart[] = []
+  let offset = 0
   const centralDirectory: number[] = []
   const timestamp = dosDateTime(new Date())
 
   for (const entry of entries) {
+    const output: number[] = []
     const nameBytes = textEncoder.encode(entry.path)
-    const localHeaderOffset = output.length
+    const localHeaderOffset = offset
 
     writeUint32(output, 0x04034b50)
     writeUint16(output, 20)
@@ -116,7 +122,8 @@ function createZip(entries: ZipEntry[]): Blob {
     writeUint16(output, nameBytes.length)
     writeUint16(output, 0)
     pushBytes(output, nameBytes)
-    pushBytes(output, entry.bytes)
+    parts.push(new Uint8Array(output), new Uint8Array(entry.bytes))
+    offset += output.length + entry.bytes.length
 
     writeUint32(centralDirectory, 0x02014b50)
     writeUint16(centralDirectory, 20)
@@ -138,7 +145,8 @@ function createZip(entries: ZipEntry[]): Blob {
     pushBytes(centralDirectory, nameBytes)
   }
 
-  const centralDirectoryOffset = output.length
+  const centralDirectoryOffset = offset
+  const output: number[] = []
   pushBytes(output, new Uint8Array(centralDirectory))
   writeUint32(output, 0x06054b50)
   writeUint16(output, 0)
@@ -149,7 +157,8 @@ function createZip(entries: ZipEntry[]): Blob {
   writeUint32(output, centralDirectoryOffset)
   writeUint16(output, 0)
 
-  return new Blob([new Uint8Array(output)], { type: 'application/zip' })
+  parts.push(new Uint8Array(output))
+  return new Blob(parts, { type: 'application/zip' })
 }
 
 function reportText(input: DebugPackageInput): string {
@@ -168,14 +177,20 @@ function reportText(input: DebugPackageInput): string {
     `Seen apps path: ${input.seenAppsPath || 'unknown'}`,
     `Log directory: ${input.logSnapshot?.directory || 'unknown'}`,
     `Active log: ${input.logSnapshot?.activePath || 'unknown'}`,
+    '',
+    'settings.json contains the current UI settings; raw/settings.json contains the saved file used by the layer.',
+    `Unsaved UI changes: ${input.unsavedChanges ? 'yes' : 'no'}`,
+    'runtime-status.json includes live sessions, safety blocks, and recorded Turbo faults.',
+    'runtime-pacing.json and turbo-metrics.json contain interpreted pacing and metric data.',
+    'raw/ includes unfiltered saved data, runtime status/control files (including stale sessions), recovery markers, fault archives, and pacing reset markers.',
+    'logs/ includes all retained VectorXR log files, subject to capture limits.',
+    'Raw capture limits: 8 MiB per file and 64 MiB total. Oversized logs keep their tail; oversized JSON files are omitted intact.',
+    'diagnostic-sources.json lists source paths, original sizes, truncation, missing/unreadable files, and collection errors.',
+    'Files are captured during export; live runtime writers may update them between reads. Cleared logs and disabled metric captures cannot be recovered.',
+    ...input.collectionErrors.map((error) => `Collection error: ${error}`),
   ]
 
   return `${lines.join('\n')}\n`
-}
-
-function safeLogName(name: string, index: number): string {
-  const normalized = name.replace(/[^\w.-]+/g, '-').replace(/^-+|-+$/g, '')
-  return normalized || `log-${index + 1}.txt`
 }
 
 function timestampName(): string {
@@ -200,7 +215,14 @@ export function createDebugPackage(input: DebugPackageInput): Blob {
   const entries: ZipEntry[] = [
     stringEntry('README.txt', reportText(input)),
     stringEntry('health-summary.json', input.healthSummary),
+    stringEntry('runtime-status.json', input.runtimeStatus),
     stringEntry('settings.json', input.config),
+    stringEntry('diagnostic-sources.json', {
+      files: input.debugSources.files.map(({ content, ...metadata }) => ({ ...metadata, included: content !== null })),
+      warnings: input.debugSources.warnings,
+      collectionErrors: input.collectionErrors,
+      unsavedChanges: input.unsavedChanges,
+    }),
     stringEntry('seen-apps.json', {
       path: input.seenAppsPath,
       observations: input.seenApps,
@@ -225,8 +247,8 @@ export function createDebugPackage(input: DebugPackageInput): Blob {
     }),
   ]
 
-  input.logSnapshot?.files.forEach((file, index) => {
-    entries.push(stringEntry(`logs/${safeLogName(file.name, index)}`, file.content))
+  input.debugSources.files.forEach((file) => {
+    if (file.content !== null) entries.push(stringEntry(file.archivePath, file.content))
   })
 
   return createZip(entries)

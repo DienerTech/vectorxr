@@ -596,6 +596,10 @@
         "gazeDeadzoneDegrees"
       ],
       "properties": {
+        "eyeTrackingCorrection": {
+          "enum": ["default", "flip-z"],
+          "default": "default"
+        },
         "trackingMode": {
           "$ref": "#/$defs/quadviewsTrackingMode"
         },
@@ -708,6 +712,71 @@
         }
       }
     },
+    "turboModule": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "interruptedSessionRecovery": {
+          "type": "boolean",
+          "default": true
+        },
+        "toggleBinding": {
+          "$ref": "#/$defs/inputBinding"
+        },
+        "metricsBinding": {
+          "$ref": "#/$defs/inputBinding"
+        },
+        "pacingMode": {
+          "enum": [
+            "auto",
+            "async",
+            "sequenced"
+          ]
+        },
+        "metricsMode": {
+          "enum": [
+            "off",
+            "always",
+            "binding"
+          ]
+        },
+        "runtimePins": {
+          "type": "object",
+          "additionalProperties": {
+            "enum": [
+              "async",
+              "sequenced"
+            ]
+          }
+        },
+        "profiles": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "id": { "type": "string" },
+              "disableSafety": { "type": "boolean", "default": false },
+              "name": {
+                "type": "string"
+              },
+              "enabled": {
+                "type": "boolean"
+              },
+              "applicationIds": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "modules": {
       "type": "object",
       "additionalProperties": false,
@@ -723,6 +792,7 @@
         "pivotxr": {
           "$ref": "#/$defs/pivotxrModule"
         },
+        "turbo": { "$ref": "#/$defs/turboModule" },
         "quadviews": {
           "$ref": "#/$defs/quadviewsModule"
         }

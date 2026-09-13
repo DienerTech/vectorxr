@@ -15,14 +15,14 @@ namespace depthxr {
 // Settings carry user intent (pacing mode, pins); this file carries what Auto
 // actually learned, so the two never race over settings.json.
 struct RuntimePacingObservation {
+    std::uint64_t test_started_at{0};
     std::string runtime_name;
     std::string runtime_version;
     std::string system_name;
     std::uint32_t vendor_id{0};
     std::string graphics_api;
     TurboPacingMode mode{TurboPacingMode::kAsync};
-    // "preset" (seed table, never probed) or "discovered" (probed and
-    // confirmed stable, or the fallback verdict after a probe failure).
+    // Only "discovered" records with a completed stability window are reused.
     std::string source;
     std::string layer_version;
     std::int64_t first_used_unix_seconds{0};

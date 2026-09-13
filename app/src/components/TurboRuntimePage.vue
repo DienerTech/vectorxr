@@ -17,15 +17,6 @@ const emit = defineEmits<{
 
 const pacingForced = computed(() => props.config.modules.turbo.pacingMode !== 'auto')
 
-const steamVrActive = computed(() => {
-  const active = props.activeRuntime
-  if (!active) {
-    return false
-  }
-  const identity = `${active.name} ${active.manifestPath}`.toLowerCase()
-  return identity.includes('steamvr') || identity.includes('steamxr')
-})
-
 interface PacingRow {
   runtimeName: string
   runtimeVersion: string
@@ -39,11 +30,6 @@ interface PacingRow {
 }
 
 const genericTokens = new Set(['openxr', 'runtime', 'windows', 'program', 'files'])
-
-function isSteamVrRuntime(runtimeName: string): boolean {
-  const normalized = runtimeName.toLowerCase()
-  return normalized.includes('steamvr') || normalized.includes('steamxr')
-}
 
 function matchesActiveRuntime(runtimeName: string): boolean {
   const active = props.activeRuntime
@@ -148,9 +134,6 @@ function rowBadge(row: PacingRow): string {
   if (row.mode === 'unsupported') {
     return 'Suspended'
   }
-  if (row.source === 'preset') {
-    return 'Preset'
-  }
   if (row.source === 'discovered') {
     return 'Discovered'
   }
@@ -198,26 +181,12 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
         </button>
       </div>
 
-      <div
-        class="mt-5 rounded-[0.9rem] border px-4 py-3 text-sm leading-6"
-        :class="steamVrActive ? 'chip-danger' : 'chip-warning'"
-        style="border-color: var(--app-border)"
-        role="note"
-      >
-        <template v-if="steamVrActive">
-          <strong>SteamVR detected:</strong> Turbo prevents Motion Smoothing. DCS with synthesized Quadviews is hard-blocked from Turbo because SteamVR can reject its pipelined display times. A manual strategy cannot override that safety block.
-        </template>
-        <template v-else>
-          <strong>Compatibility boundary:</strong> Auto chooses between supported pacing strategies and suspends repeated stalls, but Turbo may still conflict with runtime reprojection, frame synthesis, or a headset driver's presentation behavior.
-        </template>
-      </div>
-
       <section class="mt-5 rounded-[1rem] border p-4 surface-panel-soft">
         <div class="flex flex-wrap items-start justify-between gap-4">
           <div class="max-w-2xl">
             <p class="text-sm font-semibold tracking-tight">Pacing strategy</p>
             <p class="mt-1 text-sm leading-6 text-muted">
-              Auto tests the safe strategy, remembers the result for this runtime and headset, and adapts if the runtime cannot keep pace.
+              Auto starts with Async and tries Sequenced if Async stalls or repeatedly rejects frames. A strategy is remembered after 60 seconds of stable play. There are no built-in runtime or headset mappings; explicit manual overrides still apply.
             </p>
           </div>
           <label class="flex items-center gap-3 text-sm font-medium">
@@ -243,7 +212,7 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
             <strong>Automatic protection is active.</strong> Async overlaps the runtime wait with game work; Sequenced supports runtimes that require wait and submission to remain interlocked.
           </template>
           <template v-else>
-            <strong>Manual override is active.</strong> This strategy is forced wherever Turbo is permitted. Discovery and per-runtime decisions below are paused; hard compatibility blocks remain active, and repeated pacing stalls still suspend Turbo.
+            <strong>Manual override is active.</strong> Only the selected strategy runs. Automatic discovery is paused; Turbo Safety and live fault suspension still apply.
           </template>
         </div>
       </section>
@@ -285,7 +254,6 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
                   <span :class="row.isActive ? 'font-semibold' : ''">{{ row.runtimeName }}</span>
                   <span v-if="row.runtimeVersion" class="ml-1 text-xs text-muted">{{ row.runtimeVersion }}</span>
                   <span v-if="row.isActive" class="ml-2 rounded-full border px-2 py-0.5 text-[0.65rem] uppercase tracking-wide" style="border-color: var(--app-border)">Active</span>
-                  <span v-if="isSteamVrRuntime(row.runtimeName)" class="mt-1 block w-fit rounded-full px-2 py-0.5 text-[0.65rem] font-semibold uppercase tracking-wide chip-warning">No Motion Smoothing</span>
                   <span v-if="row.systemName || row.graphicsApi" class="mt-0.5 block text-xs text-muted">
                     {{ row.systemName || 'Unknown headset' }}<template v-if="row.graphicsApi"> · {{ row.graphicsApi }}</template>
                   </span>
@@ -312,10 +280,10 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
                     v-if="row.source"
                     class="button-secondary rounded-[0.5rem] px-2.5 py-1 text-xs"
                     type="button"
-                    title="Forget this decision so Auto tests the runtime again"
+                    title="Clear this runtime's learned decisions and safety blocks. Relaunch the game in Auto without a manual override to test Async, then Sequenced if needed."
                     @click="emit('rediscoverRuntime', row.runtimeName)"
                   >
-                    Test again
+                    Clear &amp; retest
                   </button>
                 </td>
               </tr>
@@ -327,7 +295,7 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
           Runtime decisions are inactive while a global manual override is selected.
         </p>
         <p v-else-if="activeRuntimeLabel && !activeRuntimeHasRow && pacingRows.length > 0" class="mt-2 text-xs text-muted">
-          Auto will test {{ activeRuntimeLabel }} during the next Turbo session.
+          Auto will test {{ activeRuntimeLabel }} during the next Turbo session, starting with Async.
         </p>
       </section>
 

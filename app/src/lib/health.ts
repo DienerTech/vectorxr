@@ -5,6 +5,7 @@ export type HealthCheckState = 'pass' | 'warn' | 'fail' | 'info'
 export type HealthOverallState = 'ready' | 'attention' | 'inactive' | 'unknown'
 
 export interface HealthCheckItem {
+  loading?: boolean
   id: string
   label: string
   state: HealthCheckState
@@ -12,6 +13,7 @@ export interface HealthCheckItem {
 }
 
 export interface HealthSummary {
+  loading: boolean
   overall: HealthOverallState
   label: string
   description: string
@@ -130,10 +132,11 @@ export function buildHealthSummary(input: BuildHealthSummaryInput): HealthSummar
         : 'VectorXR is still collecting system status.'
 
   return {
+    loading: input.openXrLayersLoading,
     overall,
     label,
     description,
-    checks,
+    checks: checks.map(check => ({ ...check, loading: input.openXrLayersLoading && check.id.startsWith('layer-') })),
     vectorXrLayer,
     lastSeenApp,
   }

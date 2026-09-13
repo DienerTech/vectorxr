@@ -1,8 +1,22 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
+import HealthLoading from '../HealthLoading.vue'
+import DiscordJoinButton from '../DiscordJoinButton.vue'
 
 import type { OpenXrLayerEntry, OpenXrLayerSnapshot } from '../../lib/commands'
+import { openExternalUrl } from '../../lib/commands'
 import type { AppTab, ModuleId, VectorXRConfig } from '../../lib/model'
+
+const supportLinkError = ref('')
+
+async function openSupport() {
+  try {
+    await openExternalUrl('https://ko-fi.com/dienertech')
+    supportLinkError.value = ''
+  } catch {
+    supportLinkError.value = 'Could not open the browser. Visit ko-fi.com/dienertech to support VectorXR.'
+  }
+}
 
 const props = defineProps<{
   config: VectorXRConfig
@@ -99,6 +113,7 @@ const activeEnhancementCount = computed(() => enhancementRows.value.filter((row)
 
 <template>
   <div class="space-y-5">
+
     <article class="rounded-[1.25rem] border p-5 shadow-panel backdrop-blur surface-panel">
       <div class="flex flex-wrap items-center justify-between gap-3">
         <p class="eyebrow text-xs uppercase tracking-[0.24em]">System Health</p>
@@ -115,7 +130,8 @@ const activeEnhancementCount = computed(() => enhancementRows.value.filter((row)
             :class="vectorXrLayerStatusClass"
             :title="vectorXrLayerStatusDescription"
           >
-            {{ vectorXrLayerStatusLabel }}
+            <HealthLoading v-if="openXrLayersLoading" />
+            <template v-else>{{ vectorXrLayerStatusLabel }}</template>
           </span>
         </div>
       </div>
@@ -181,6 +197,23 @@ const activeEnhancementCount = computed(() => enhancementRows.value.filter((row)
       </div>
 
       <p class="mt-3 text-xs text-soft">Select an Enhancement to open its settings.</p>
+    </article>
+    <article class="rounded-[1.25rem] border px-5 py-4 shadow-panel surface-panel">
+      <p class="eyebrow text-xs uppercase tracking-[0.24em]">Community &amp; announcements</p>
+      <h2 class="mt-1 text-lg font-semibold">Help shape VectorXR</h2>
+      <div class="mt-2 grid gap-4 sm:grid-cols-2">
+        <div>
+          <h3 class="font-semibold">DienerTech Discord</h3>
+          <p class="mt-1 text-sm leading-5 text-muted">Share your setup, compare results, and catch the latest VectorXR announcements.</p>
+          <DiscordJoinButton class="mt-2" button-class="rounded-[0.65rem] px-3 py-1.5 text-sm font-medium" />
+        </div>
+        <div>
+          <h3 class="font-semibold">Support development</h3>
+          <p class="mt-1 text-sm leading-5 text-muted">Help support the project by contributing to VectorXR on Ko-fi. All support helps fund the future of VectorXR!</p>
+          <button class="button-accent mt-2 rounded-[0.65rem] px-3 py-1.5 text-sm font-medium" type="button" @click="openSupport">Support VectorXR on Ko-fi ↗</button>
+          <p v-if="supportLinkError" role="status" class="mt-2 text-xs text-muted">{{ supportLinkError }}</p>
+        </div>
+      </div>
     </article>
   </div>
 </template>

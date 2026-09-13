@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { computed, nextTick, ref } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue'
+import { clearTurboFaultLogs, clearTurboSafetyBlock, loadRuntimeStatus, type RuntimeStatusEnvelope } from '../../lib/commands'
 
 import DefaultProfileExclusions from '../DefaultProfileExclusions.vue'
 import ModuleBindingPage from '../ModuleBindingPage.vue'
@@ -7,6 +8,9 @@ import ModuleBindingPanel from '../ModuleBindingPanel.vue'
 import ProfileShell from '../ProfileShell.vue'
 import TurboDiagnosticsPage from '../TurboDiagnosticsPage.vue'
 import TurboRuntimePage from '../TurboRuntimePage.vue'
+import TurboSafetyPage from '../TurboSafetyPage.vue'
+import TurboSafetyToggle from '../TurboSafetyToggle.vue'
+import { turboSafetyBlocks } from '../../lib/turboSafety'
 import type { ActiveRuntimeInfo, OpenXrLayerSnapshot } from '../../lib/commands'
 import {
   savedBindingConflictWarnings,
@@ -18,6 +22,7 @@ import {
 
 const props = defineProps<{
   config: VectorXRConfig
+  savedConfig: VectorXRConfig
   applications: RegisteredApplication[]
   runtimePacing: RuntimePacingObservation[]
   activeRuntime: ActiveRuntimeInfo | null
@@ -34,8 +39,60 @@ const emit = defineEmits<{
 }>()
 
 const howItWorksOpen = ref(false)
+const runtimeStatus = ref<RuntimeStatusEnvelope>({ sessions: [], recovery: [], faults: [] })
+const recoveryError = ref('')
+const clearing = ref<string | null>(null)
+const clearingLogs = ref(false)
+let recoveryRevision = 0
+const safetyBlocks = computed(() => turboSafetyBlocks(runtimeStatus.value.recovery))
+async function clearSafety(fingerprint: string) {
+  if (clearing.value !== null || clearingLogs.value) return
+  ++recoveryRevision
+  clearing.value = fingerprint
+  try {
+    await clearTurboSafetyBlock(fingerprint)
+    runtimeStatus.value = await loadRuntimeStatus()
+    recoveryError.value = ''
+  } catch (error) {
+    recoveryError.value = error instanceof Error ? error.message : String(error)
+  } finally { clearing.value = null }
+}
+async function clearFaultLogs() {
+  if (clearing.value !== null || clearingLogs.value) return
+  ++recoveryRevision
+  clearingLogs.value = true
+  try {
+    await clearTurboFaultLogs()
+    runtimeStatus.value = await loadRuntimeStatus()
+    recoveryError.value = ''
+  } catch (error) {
+    recoveryError.value = error instanceof Error ? error.message : String(error)
+  } finally { clearingLogs.value = false }
+}
+let recoveryPoll: ReturnType<typeof setTimeout> | undefined
+let disposed = false
+async function refreshRecovery() {
+  const revision = recoveryRevision
+  try {
+    if (clearing.value !== null || clearingLogs.value) return
+    const status = await loadRuntimeStatus()
+    if (revision === recoveryRevision) {
+      runtimeStatus.value = status
+      recoveryError.value = ''
+    }
+  } catch {
+    if (revision === recoveryRevision) {
+      runtimeStatus.value.sessions = []
+      recoveryError.value = 'Recovery status is unavailable. Your saved safety setting still applies.'
+    }
+  } finally {
+    if (!disposed) recoveryPoll = setTimeout(refreshRecovery, 2000)
+  }
+}
+onMounted(() => void refreshRecovery())
+onUnmounted(() => { disposed = true; clearTimeout(recoveryPoll) })
 const bindingSubPageOpen = ref(false)
-const activeSubPage = ref<'runtime' | 'diagnostics' | null>(null)
+const activeSubPage = ref<'runtime' | 'diagnostics' | 'safety' | null>(null)
 let savedScrollTop = 0
 const toggleBindingWarnings = computed(() => savedBindingConflictWarnings(props.config, [
   props.config.modules.turbo.toggleBinding,
@@ -45,15 +102,6 @@ const toggleBindingWarnings = computed(() => savedBindingConflictWarnings(props.
 const turboInUse = computed(
   () => props.config.modules.turbo.enabled || props.config.modules.turbo.profiles.some((profile) => profile.enabled),
 )
-
-const steamVrActive = computed(() => {
-  const runtime = props.activeRuntime
-  if (!runtime) {
-    return false
-  }
-  const identity = `${runtime.name} ${runtime.manifestPath}`.toLowerCase()
-  return identity.includes('steamvr') || identity.includes('steamxr')
-})
 
 const toolkitConflict = computed(() => {
   if (!turboInUse.value) {
@@ -111,7 +159,7 @@ function pageScroller(): Element | null {
   return document.querySelector('main section.overflow-y-auto')
 }
 
-function openSubPage(page: 'runtime' | 'diagnostics') {
+function openSubPage(page: 'runtime' | 'diagnostics' | 'safety') {
   savedScrollTop = pageScroller()?.scrollTop ?? 0
   activeSubPage.value = page
   void nextTick(() => pageScroller()?.scrollTo({ top: 0 }))
@@ -136,8 +184,8 @@ function closeSubPage() {
     module-label="Turbo"
     :binding="config.modules.turbo.toggleBinding"
     label="Turbo Toggle Binding"
-    description="Flip Turbo on and off while in-game to compare fps and frame feel directly—and to disable it immediately if presentation breaks. Turbo starts enabled whenever it applies to the running application. Switching it mid-session can cause a brief re-synchronization hitch."
-    none-text="No binding assigned. Turbo stays on for applications it applies to."
+    description="Flip Turbo on and off while in-game to compare fps and frame feel directly—and to disable it immediately if presentation breaks. The binding requires Turbo to be enabled for the application in its profile. It can also retry Turbo when recovery has blocked it or pacing trouble has suspended it. Switching it mid-session can cause a brief re-synchronization hitch."
+    none-text="No binding assigned. Turbo starts automatically where enabled, unless recovery or pacing protection blocks it."
     default-activate-sound="turbo-on.wav"
     default-deactivate-sound="turbo-off.wav"
     :warnings="toggleBindingWarnings"
@@ -151,6 +199,11 @@ function closeSubPage() {
     :active-runtime="activeRuntime"
     @rediscover-runtime="emit('rediscoverRuntime', $event)"
     @close="closeSubPage"
+  />
+  <TurboSafetyPage
+    v-else-if="activeSubPage === 'safety'"
+    :config="config" :saved-config="savedConfig" :status="runtimeStatus" :error="recoveryError" :clearing="clearing"
+    :clearing-logs="clearingLogs" @clear-logs="clearFaultLogs" @clear="clearSafety" @close="closeSubPage"
   />
   <TurboDiagnosticsPage
     v-else-if="activeSubPage === 'diagnostics'"
@@ -182,26 +235,6 @@ function closeSubPage() {
       </div>
 
       <div
-        class="mb-5 rounded-[0.9rem] border px-4 py-3 text-sm leading-6"
-        :class="steamVrActive && turboInUse ? 'chip-danger' : 'chip-warning'"
-        style="border-color: var(--app-border)"
-        role="note"
-      >
-        <p class="font-semibold">
-          {{ steamVrActive ? 'SteamVR Motion Smoothing conflict' : 'Compatibility-sensitive feature' }}
-        </p>
-        <p v-if="steamVrActive" class="mt-1">
-          Turbo and SteamVR Motion Smoothing cannot be used together. VectorXR blocks Turbo automatically for DCS with synthesized Quadviews; in other SteamVR applications, choose either Turbo or Motion Smoothing—not both.
-        </p>
-        <p v-else class="mt-1">
-          Turbo changes OpenXR frame timing and can interfere with runtime reprojection or presentation. Keep the default off and enable it per application. If you see a Waiting overlay, black frames, persistent stutter, broken reprojection, or a crash, disable Turbo first.
-        </p>
-        <p class="mt-1 text-xs opacity-90">
-          Auto reduces pacing risk, but no strategy can guarantee compatibility with every runtime, headset driver, or frame-synthesis mode.
-        </p>
-      </div>
-
-      <div
         v-if="toolkitConflict"
         class="mb-5 rounded-[0.9rem] border px-4 py-3 text-sm leading-6 chip-warning"
         style="border-color: var(--app-border)"
@@ -213,6 +246,19 @@ function closeSubPage() {
         <div class="mb-3">
           <p class="eyebrow text-xs font-semibold uppercase tracking-[0.24em]">Essentials</p>
           <p class="mt-1 text-sm text-muted">Turn Turbo on broadly, or leave the default off and enable only the applications that benefit.</p>
+        </div>
+        <div class="mb-3 rounded-[1rem] border p-4 surface-panel-soft">
+          <div class="flex flex-wrap items-center justify-between gap-3">
+            <div><h3 class="text-base font-semibold tracking-tight">Turbo Safety</h3>
+              <p class="mt-1 text-sm text-muted">Holds Turbo off after an interrupted session or repeated runtime fault. The in-game binding can retry it.</p>
+            </div>
+            <TurboSafetyToggle v-model="config.modules.turbo.interruptedSessionRecovery" />
+          </div>
+          <div class="mt-3 flex flex-wrap items-center justify-between gap-3">
+            <p class="rounded-full px-3 py-1 text-xs" :class="safetyBlocks.length ? 'chip-warning' : 'chip-idle'">{{ safetyBlocks.length }} recorded {{ safetyBlocks.length === 1 ? 'block' : 'blocks' }} · {{ runtimeStatus.faults.length }} {{ runtimeStatus.faults.length === 1 ? 'fault' : 'faults' }}</p>
+            <button type="button" class="button-secondary rounded-[0.75rem] px-4 py-2 text-sm font-medium" @click="openSubPage('safety')">Turbo Safety…</button>
+          </div>
+          <p v-if="recoveryError" class="mt-2 text-xs chip-danger" role="status">{{ recoveryError }}</p>
         </div>
 
         <div class="rounded-[1rem] border p-4 surface-panel-soft">
@@ -331,6 +377,12 @@ function closeSubPage() {
         <div class="rounded-[0.9rem] border px-4 py-3 text-sm leading-6 surface-panel-strong">
           Turbo is on for this profile's applications. Runtime behavior remains automatic unless you changed it on the Runtime Behavior page.
         </div>
+        <div class="mt-3 flex flex-wrap items-center justify-between gap-3 rounded-[0.9rem] border p-4 surface-panel-soft">
+          <div class="max-w-xl"><h4 class="text-sm font-semibold">Turbo Safety override</h4><p class="mt-1 text-sm text-muted">Bypass persistent safety blocks for these applications. Live pacing fallback still suspends a failing session; use the binding to retry.</p></div>
+          <label class="pill-toggle inline-flex items-center gap-3 rounded-full px-4 py-2 text-sm font-medium">
+            <input v-model="profile.disableSafety" type="checkbox" class="h-4 w-4 accent-depthxr-copper" /> Disable safety for this profile
+          </label>
+        </div>
       </ProfileShell>
 
       <div
@@ -368,14 +420,14 @@ function closeSubPage() {
               Turbo is a targeted fix, not a general boost. It helps only when runtime pacing holds fps below what the hardware can deliver, and it cannot remove a runtime-enforced framerate lock. Use Performance Diagnostics with the in-game toggle to measure each title.
             </div>
             <div class="rounded-[1rem] border px-4 py-3 chip-warning" style="border-color: var(--app-border)">
-              <strong>Known incompatibility:</strong> Turbo prevents SteamVR Motion Smoothing and may interfere with other runtime reprojection systems such as ASW. Frame-time prediction may also be less accurate, and switching Turbo mid-session can briefly hitch while the pipeline re-synchronizes.
+              <strong>Reprojection compatibility:</strong> Turbo can interfere with SteamVR Motion Smoothing and other reprojection systems such as ASW. Disable Motion Smoothing when testing Turbo. Frame-time prediction may be less accurate, and switching Turbo mid-session can briefly hitch while the pipeline re-synchronizes.
             </div>
           </section>
 
           <section class="space-y-3">
             <p class="eyebrow text-xs font-semibold uppercase tracking-[0.24em]">Safety net</p>
             <div class="rounded-[1rem] border px-4 py-3 chip-warning" style="border-color: var(--app-border)">
-              If pacing stalls even after Auto adapts, Turbo suspends itself for that session and remembers the runtime as unsupported so the stutter does not replay at launch. This catches pacing stalls—not every visual or driver failure. Disable Turbo first whenever presentation breaks; use the in-game toggle to retry only after the session is stable.
+              If pacing stalls even after Auto adapts, Turbo suspends itself for that session. With Turbo Safety enabled, the application and runtime setup stays blocked until you clear it or retry with the binding. Fault details remain on the Turbo Safety page. This catches pacing stalls, not every visual or driver failure; retry only after the session is stable.
             </div>
           </section>
         </div>
