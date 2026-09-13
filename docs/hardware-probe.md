@@ -120,7 +120,9 @@ on the next frame is recorded separately from a sustained routing failure.
 To exercise VectorXR's async handoff shield:
 
 1. Fully close any active OpenXR application.
-2. Force **Turbo > Frame Pacing > Async** in VectorXR.
+2. Choose **Turbo > Runtime Behavior > Mode > Async — always** in VectorXR, enable Turbo
+   for the probe application, and save the settings. If a Safety block exists, inspect it
+   on **Turbo Safety** and clear it before relaunching the probe.
 3. Run a cross-space mode with threaded waiting:
 
 ```powershell
@@ -142,7 +144,8 @@ cancellations. PiOpenXR is known to interlock an off-thread `xrWaitFrame` with
 submission, so forced Async may produce approximately 250 ms stalls and
 auto-suspend after five drain timeouts. That outcome still exercises the
 handoff and safety path, but it does not establish that sustained Async is
-compatible with that driver. Restore Frame Pacing to **Auto** after the test.
+compatible with that driver. Restore **Runtime Behavior > Mode** to **Auto (recommended)**
+and save after the test.
 
 ## What this probe does not prove
 
@@ -153,4 +156,3 @@ compatible with that driver. Restore Frame Pacing to **Auto** after the test.
 - The probe reports errors from its own OpenXR calls, while VectorXR's routing
   verdict remains in the corresponding `%LOCALAPPDATA%\VectorXR\logs` file.
 - The probe does not change VectorXR settings, bindings, or runtime selection.
-

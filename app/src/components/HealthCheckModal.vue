@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed } from 'vue'
+import HealthLoading from './HealthLoading.vue'
 
 import { healthChipClass, type HealthCheckItem, type HealthSummary } from '../lib/health'
 
@@ -38,7 +39,8 @@ const hasOddCheckCount = computed(() => props.summary.checks.length % 2 === 1)
           <div class="mt-2 flex flex-wrap items-center gap-3">
             <h2 class="text-2xl font-semibold tracking-tight">Health Check</h2>
             <span class="rounded-full px-3 py-1 text-xs font-semibold uppercase tracking-[0.16em]" :class="healthChipClass(summary.overall)">
-              {{ summary.label }}
+              <HealthLoading v-if="summary.loading" />
+              <template v-else>{{ summary.label }}</template>
             </span>
           </div>
           <p class="mt-2 max-w-2xl text-sm leading-6 text-muted">{{ summary.description }}</p>
@@ -64,7 +66,8 @@ const hasOddCheckCount = computed(() => props.summary.checks.length % 2 === 1)
                 <p class="mt-1 text-xs leading-5 text-muted">{{ check.detail }}</p>
               </div>
               <span class="min-w-[4.5rem] shrink-0 rounded-full px-2.5 py-1 text-center text-xs font-semibold uppercase tracking-[0.14em]" :class="checkClass(check)">
-                {{ check.state }}
+                <HealthLoading v-if="check.loading" />
+                <template v-else>{{ check.state }}</template>
               </span>
             </div>
           </article>

@@ -225,9 +225,9 @@ function presetActive(preset: QuadViewsPreset) {
 
     <div class="rounded-[1rem] border p-4 surface-panel-soft">
       <p class="eyebrow text-xs uppercase tracking-[0.18em]">Tracking</p>
-      <div class="mt-3 grid gap-3">
+      <div class="mt-2 grid gap-2">
         <label class="block">
-          <span class="mb-1.5 flex min-h-[2.5rem] items-start gap-1.5 text-sm font-medium">
+          <span class="mb-1 flex items-center gap-1.5 text-sm font-medium">
             Mode
             <span
               title="Chooses whether the focus area follows head direction or eye gaze when eye tracking is available."
@@ -237,14 +237,24 @@ function presetActive(preset: QuadViewsPreset) {
           </span>
           <select
             v-model="settings.trackingMode"
-            class="app-input w-full rounded-[0.75rem] px-4 py-2.5"
+            class="app-input w-full rounded-[0.75rem] px-3 py-2"
           >
             <option value="head">Head tracked</option>
             <option value="eye">Eye tracked</option>
           </select>
         </label>
         <label class="block">
-          <span class="mb-1.5 flex min-h-[2.5rem] items-start gap-1.5 text-sm font-medium">
+          <span class="mb-1 flex items-center gap-1.5 text-sm font-medium">
+            Eye Tracking Correction
+            <span title="Use Default unless eye tracking feels backwards; then try Flip Z Only." class="cursor-help select-none text-xs text-muted">ⓘ</span>
+          </span>
+          <select v-model="settings.eyeTrackingCorrection" class="app-input w-full rounded-[0.75rem] px-3 py-2">
+            <option value="default">Default</option>
+            <option value="flip-z">Flip Z Only</option>
+          </select>
+        </label>
+        <label class="block">
+          <span class="mb-1 flex items-center gap-1.5 text-sm font-medium">
             Smoothing
             <span
               title="Softens focus-area movement. 0 is instant; higher values reduce jitter but add lag."
@@ -254,7 +264,7 @@ function presetActive(preset: QuadViewsPreset) {
           </span>
           <input
             v-model.number="settings.gazeSmoothing"
-            class="app-input w-full rounded-[0.75rem] px-4 py-2.5"
+            class="app-input w-full rounded-[0.75rem] px-3 py-2"
             min="0"
             max="1"
             step="0.01"
@@ -262,7 +272,7 @@ function presetActive(preset: QuadViewsPreset) {
           />
         </label>
         <label class="block">
-          <span class="mb-1.5 flex min-h-[2.5rem] items-start gap-1.5 text-sm font-medium">
+          <span class="mb-1 flex items-center gap-1.5 text-sm font-medium">
             Deadzone
             <span
               title="Small gaze movements ignored before the focus area moves. Useful for reducing shimmer near center."
@@ -272,7 +282,7 @@ function presetActive(preset: QuadViewsPreset) {
           </span>
           <input
             v-model.number="settings.gazeDeadzoneDegrees"
-            class="app-input w-full rounded-[0.75rem] px-4 py-2.5"
+            class="app-input w-full rounded-[0.75rem] px-3 py-2"
             min="0"
             max="10"
             step="0.1"

@@ -17,7 +17,7 @@ import OpenXrLayersTab from './components/tabs/OpenXrLayersTab.vue'
 import PivotXrTab from './components/tabs/PivotXrTab.vue'
 import QuadViewsTab from './components/tabs/QuadViewsTab.vue'
 import TurboTab from './components/tabs/TurboTab.vue'
-import { exportConfigFile, loadLogSnapshot, loadOpenXrLayers, type LogSnapshot, type OpenXrLayerSnapshot } from './lib/commands'
+import { exportConfigFile, loadDebugSources, loadLogSnapshot, loadOpenXrLayers, loadRuntimeStatus, loadSeenApps, loadRuntimePacing, loadTurboMetrics, type LogSnapshot, type OpenXrLayerSnapshot } from './lib/commands'
 import { createDebugPackage, saveDebugPackage } from './lib/debugPackage'
 import { buildHealthSummary } from './lib/health'
 import { moduleStateForApplication, normalizeConfig, type ModuleId, type VectorXRConfig } from './lib/model'
@@ -233,15 +233,23 @@ async function refreshLogs() {
   }
 }
 
-async function refreshOpenXrLayers() {
+let layerRefreshRevision = 0
+async function refreshOpenXrLayers(includeSignatures = false) {
+  const revision = ++layerRefreshRevision
   openXrLayersLoading.value = true
 
   try {
-    openXrLayerSnapshot.value = await loadOpenXrLayers()
+    if (!includeSignatures) {
+      const initial = await loadOpenXrLayers(false)
+      if (revision !== layerRefreshRevision) return
+      openXrLayerSnapshot.value = initial
+    }
+    const complete = await loadOpenXrLayers(true)
+    if (revision === layerRefreshRevision) openXrLayerSnapshot.value = complete
   } catch (error) {
-    store.state.status = error instanceof Error ? error.message : 'Failed to load OpenXR layer status'
+    if (revision === layerRefreshRevision) store.state.status = error instanceof Error ? error.message : 'Failed to load OpenXR layer status'
   } finally {
-    openXrLayersLoading.value = false
+    if (revision === layerRefreshRevision) openXrLayersLoading.value = false
   }
 }
 
@@ -268,18 +276,43 @@ async function exportDebugInformation() {
   debugExporting.value = true
 
   try {
-    await Promise.all([refreshLogs(), refreshOpenXrLayers(), store.refreshSeenApps(), store.refreshRuntimePacing(), store.refreshTurboMetrics()])
+    const collectionErrors: string[] = []
+    async function capture<T>(label: string, request: Promise<T>, fallback: T): Promise<T> {
+      try { return await request } catch (error) {
+        collectionErrors.push(`${label}: ${String(error)}`)
+        return fallback
+      }
+    }
+    const [seenApps, pacing, metrics, runtimeStatus, layers, logs, debugSources] = await Promise.all([
+      capture('Seen apps', loadSeenApps(), { path: '', observations: [] }),
+      capture('Runtime pacing', loadRuntimePacing(), { path: '', observations: [], activeRuntime: null }),
+      capture('Turbo metrics', loadTurboMetrics(), { path: '', sessions: [] }),
+      loadRuntimeStatus().catch((error) => {
+        const message = `Runtime status: ${String(error)}`
+        collectionErrors.push(message)
+        return { error: message }
+      }),
+      capture('OpenXR layers', loadOpenXrLayers(true), null),
+      capture('Log preview', loadLogSnapshot(), null),
+      capture('Raw diagnostic files', loadDebugSources(), { files: [], warnings: [] }),
+    ])
+    openXrLayerSnapshot.value = layers
+    logSnapshot.value = logs
     const packageBlob = createDebugPackage({
+      runtimeStatus,
+      debugSources,
+      collectionErrors,
+      unsavedChanges: dirty.value,
       appVersion: latestPatch.version,
       configPath: store.state.path,
-      seenAppsPath: store.state.seenAppsPath,
+      seenAppsPath: seenApps.path,
       config: store.state.config,
-      seenApps: store.state.seenApps,
-      runtimePacingPath: store.state.runtimePacingPath,
-      runtimePacing: store.state.runtimePacing,
-      turboMetricsPath: store.state.turboMetricsPath,
-      turboMetrics: store.state.turboMetrics,
-      activeRuntime: store.state.activeRuntime,
+      seenApps: seenApps.observations,
+      runtimePacingPath: pacing.path,
+      runtimePacing: pacing.observations,
+      turboMetricsPath: metrics.path,
+      turboMetrics: metrics.sessions,
+      activeRuntime: pacing.activeRuntime,
       logSnapshot: logSnapshot.value,
       openXrLayerSnapshot: openXrLayerSnapshot.value,
       healthSummary: healthSummary.value,
@@ -423,9 +456,9 @@ async function confirmResetConfig() {
           :loading="openXrLayersLoading"
           :machine-writes-unlocked="openXrMachineWritesUnlocked"
           :turbo-in-use="turboInUse"
-          @refresh="refreshOpenXrLayers"
+          @refresh="refreshOpenXrLayers(true)"
           @machine-writes-unlocked="openXrMachineWritesUnlocked = $event"
-          @snapshot-updated="openXrLayerSnapshot = $event"
+          @snapshot-updated="openXrLayerSnapshot = $event; refreshOpenXrLayers(true)"
           @status="store.state.status = $event"
         />
         <AboutTab
@@ -444,6 +477,7 @@ async function confirmResetConfig() {
         <TurboTab
           v-else-if="store.state.activeTab === 'turbo'"
           :config="store.state.config"
+          :saved-config="store.state.originalConfig"
           :applications="store.state.config.applications"
           :runtime-pacing="store.state.runtimePacing"
           :active-runtime="store.state.activeRuntime"

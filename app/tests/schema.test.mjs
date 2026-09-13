@@ -2,9 +2,23 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import test from 'node:test'
 
-import { createPivotQuickView, defaultConfig } from '../src/lib/model.ts'
+import { createPivotQuickView, createTurboProfile, defaultConfig } from '../src/lib/model.ts'
 
 const schema = JSON.parse(readFileSync(new URL('../../config/vectorxr.schema.json', import.meta.url), 'utf8'))
+
+test('schema accepts generated Quadviews settings and both eye correction modes', () => {
+  const definition = schema.$defs.quadviewsSettings
+  assertSchemaDescribesObject(definition, defaultConfig().modules.quadviews.defaults)
+  assert.deepEqual(definition.properties.eyeTrackingCorrection.enum, ['default', 'flip-z'])
+  assert.equal(definition.properties.eyeTrackingCorrection.default, 'default')
+})
+
+test('schema permits Turbo settings and defaults interrupted-session recovery on', () => {
+  assertSchemaDescribesObject(schema.$defs.turboModule, defaultConfig().modules.turbo)
+  assertSchemaDescribesObject(schema.$defs.turboModule.properties.profiles.items, createTurboProfile())
+  assert.equal(schema.$defs.turboModule.properties.interruptedSessionRecovery.default, true)
+  assert.ok('turbo' in schema.$defs.modules.properties)
+})
 
 function assertSchemaDescribesObject(definition, value) {
   const valueKeys = Object.keys(value)

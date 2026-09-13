@@ -29,16 +29,23 @@ defineEmits<{
       <section class="mt-5 rounded-[1rem] border p-4 surface-panel-soft">
         <p class="text-sm font-semibold tracking-tight">Included</p>
         <div class="mt-3 grid gap-2 text-sm leading-6 md:grid-cols-2">
-          <span>Current settings JSON</span>
+          <span>Current and saved settings JSON</span>
           <span>Seen OpenXR apps</span>
-          <span>Recent VectorXR logs</span>
+          <span>Retained VectorXR logs</span>
           <span>OpenXR layer snapshot</span>
           <span>Health check summary</span>
           <span>App version and relevant paths</span>
+          <span>Turbo metrics and pacing decisions</span>
+          <span>Turbo safety blocks and fault history</span>
+          <span>Live and saved runtime diagnostics</span>
+          <span>File inventory and collection errors</span>
         </div>
       </section>
 
       <p class="mt-4 text-xs leading-5 text-muted">
+        Raw files are limited to 8 MiB each and 64 MiB total. Larger logs include their latest output; omitted or limited files are listed in the ZIP. Cleared history and metrics that were not recorded are unavailable.
+      </p>
+      <p class="mt-2 text-xs leading-5 text-muted">
         The package may include local file paths and game executable names. It does not include system environment variables or unrelated files.
       </p>
 

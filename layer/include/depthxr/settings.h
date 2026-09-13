@@ -308,6 +308,7 @@ struct PivotXrResolvedSettings {
 };
 
 struct QuadViewsSettings {
+    std::string eye_tracking_correction{"default"};
     QuadViewsTrackingMode tracking_mode{QuadViewsTrackingMode::Eye};
     double focus_horizontal_size_percent{40.0};
     double focus_vertical_size_percent{40.0};
@@ -346,6 +347,7 @@ struct QuadViewsResolvedSettings : QuadViewsSettings {
 // Turbo mode: overrides runtime frame pacing (one frame of pipelining).
 // Binary per application — profiles carry no settings.
 struct TurboProfile {
+    bool disable_safety{false};
     std::string id;
     std::string name;
     bool enabled{true};
@@ -389,6 +391,7 @@ enum class TurboMetricsMode {
 
 struct TurboModuleConfig {
     bool enabled{false};
+    bool interrupted_session_recovery{true};
     // Optional in-session A/B toggle, mirroring the Depth toggle binding.
     InputBinding toggle_binding;
     TurboPacingSetting pacing_mode{TurboPacingSetting::kAuto};
@@ -403,6 +406,7 @@ struct TurboModuleConfig {
 
 struct TurboResolvedSettings {
     bool enabled{false};
+    bool interrupted_session_recovery{true};
     InputBinding toggle_binding;
     TurboPacingSetting pacing_mode{TurboPacingSetting::kAuto};
     std::vector<std::pair<std::string, TurboPacingMode>> runtime_pins;

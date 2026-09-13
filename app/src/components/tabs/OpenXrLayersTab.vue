@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from 'vue'
+import HealthLoading from '../HealthLoading.vue'
 
 import {
   deleteOpenXrLayer,
@@ -68,6 +69,11 @@ const toolkitTurboWarning = computed(() => {
 })
 
 watch(() => props.snapshot, (value) => {
+  if (selectedLayer.value && value) {
+    const selected = selectedLayer.value
+    selectedLayer.value = value.slices.flatMap(slice => slice.layers).find(layer =>
+      layer.slice === selected.slice && layer.manifestPath === selected.manifestPath) ?? null
+  }
   if (value && !value.slices.some((slice) => slice.id === activeSliceId.value)) {
     activeSliceId.value = 'hklm64'
   }
@@ -576,7 +582,8 @@ function signatureGuidance(layer: OpenXrLayerEntry): string {
                         :class="signatureChipClass(layer.signatureStatus)"
                         :title="signatureTooltip(layer)"
                       >
-                        {{ signatureLabel(layer.signatureStatus) }}
+                        <HealthLoading v-if="loading" />
+                        <template v-else>{{ signatureLabel(layer.signatureStatus) }}</template>
                       </span>
                       <span
                         v-if="layer.isVectorXr"
@@ -676,7 +683,8 @@ function signatureGuidance(layer: OpenXrLayerEntry): string {
                 :class="signatureChipClass(selectedLayer.signatureStatus)"
                 :title="signatureTooltip(selectedLayer)"
               >
-                {{ signatureLabel(selectedLayer.signatureStatus) }}
+                <HealthLoading v-if="loading" />
+                <template v-else>{{ signatureLabel(selectedLayer.signatureStatus) }}</template>
               </span>
               <button
                 v-if="selectedLayer.libraryPath"
@@ -694,11 +702,12 @@ function signatureGuidance(layer: OpenXrLayerEntry): string {
           <p class="text-xs font-semibold uppercase tracking-[0.16em] text-soft">Binary Signature</p>
           <div class="mt-2 flex flex-wrap items-center gap-2">
             <span class="rounded-full px-3 py-1 text-xs font-semibold uppercase tracking-[0.16em]" :class="signatureChipClass(selectedLayer.signatureStatus)">
-              {{ signatureLabel(selectedLayer.signatureStatus) }}
+              <HealthLoading v-if="loading" />
+              <template v-else>{{ signatureLabel(selectedLayer.signatureStatus) }}</template>
             </span>
-            <span class="text-sm leading-6 text-muted">{{ signatureGuidance(selectedLayer) }}</span>
+            <span v-if="!loading" class="text-sm leading-6 text-muted">{{ signatureGuidance(selectedLayer) }}</span>
           </div>
-          <p class="mt-2 text-xs leading-5 text-muted">Windows status: {{ selectedLayer.signatureStatusDescription }}</p>
+          <p v-if="!loading" class="mt-2 text-xs leading-5 text-muted">Windows status: {{ selectedLayer.signatureStatusDescription }}</p>
           <dl class="mt-3 grid gap-2 text-xs md:grid-cols-2">
             <div v-if="selectedLayer.signatureSignerNotBefore || selectedLayer.signatureSignerNotAfter" class="min-w-0 md:col-span-2">
               <dt class="font-semibold uppercase tracking-[0.14em] text-soft">Certificate Validity</dt>

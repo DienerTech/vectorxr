@@ -123,10 +123,6 @@ bool ShouldRetryWithoutInjectedEyeGaze(bool injected_request, bool extension_rel
     return injected_request && extension_related_failure;
 }
 
-bool ShouldBlockTurboForSession(const TurboCompatibilityInput& input) {
-    return input.executable_name == "DCS.exe" && input.runtime_name.find("SteamVR") != std::string_view::npos &&
-           input.quadviews_active && !input.native_quadviews_active && input.app_requested_quadviews_extensions;
-}
 
 std::chrono::milliseconds QuadViewsRecoveryStabilizationDelay(std::string_view runtime_name) {
     std::string normalized_name;

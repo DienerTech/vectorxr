@@ -1,6 +1,6 @@
 [package]
 name = "vectorxr-app"
-version = "0.16.2"
+version = "0.17.0"
 description = "VectorXR configuration app"
 authors = ["mdiener"]
 edition = "2021"
@@ -22,4 +22,5 @@ windows = { version = "0.61.3", features = [
   "Win32_Media_Audio",
   "Win32_System_LibraryLoader",
   "Win32_System_Registry",
+  "Win32_System_Threading",
 ] }

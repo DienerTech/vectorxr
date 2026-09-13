@@ -193,9 +193,15 @@ const SLICES: [SliceDefinition; 4] = [
 ];
 
 pub fn load_openxr_layers() -> Result<OpenXrLayerSnapshot, String> {
+    load_openxr_layers_with_signatures(false)
+}
+
+pub fn load_openxr_layers_with_signatures(
+    include_signatures: bool,
+) -> Result<OpenXrLayerSnapshot, String> {
     let slices = SLICES
         .iter()
-        .map(read_slice)
+        .map(|definition| read_slice(definition, include_signatures))
         .collect::<Result<Vec<_>, _>>()?;
 
     Ok(OpenXrLayerSnapshot { slices })
@@ -267,12 +273,17 @@ pub fn delete_openxr_layer(
     load_openxr_layers()
 }
 
-fn read_slice(definition: &SliceDefinition) -> Result<OpenXrLayerRegistrySlice, String> {
+fn read_slice(
+    definition: &SliceDefinition,
+    include_signatures: bool,
+) -> Result<OpenXrLayerRegistrySlice, String> {
     let registry_values = read_registry_values(definition)?;
     let layers = registry_values
         .iter()
         .enumerate()
-        .map(|(index, value)| layer_entry_from_registry_value(definition, value, index + 1))
+        .map(|(index, value)| {
+            layer_entry_from_registry_value(definition, value, index + 1, include_signatures)
+        })
         .collect();
 
     Ok(OpenXrLayerRegistrySlice {
@@ -290,6 +301,7 @@ fn layer_entry_from_registry_value(
     definition: &SliceDefinition,
     value: &RegistryValue,
     order: usize,
+    include_signatures: bool,
 ) -> OpenXrLayerEntry {
     let manifest_path = value.name.clone();
     let enabled = value.value == 0;
@@ -313,7 +325,7 @@ fn layer_entry_from_registry_value(
         .is_some_and(|path| Path::new(path).exists());
     let signature_info = library_path
         .as_ref()
-        .filter(|_| library_exists)
+        .filter(|_| library_exists && include_signatures)
         .map(|path| signature_info(path))
         .unwrap_or_else(SignatureInfo::unknown);
     let is_vector_xr = layer_name.to_ascii_lowercase().contains("vectorxr")
@@ -433,6 +445,63 @@ fn registry_path_label(definition: &SliceDefinition) -> String {
 
 fn escape_powershell_single_quoted(value: &str) -> String {
     value.replace('\'', "''")
+}
+
+fn run_signature_powershell(script: &str) -> Result<String, String> {
+    use std::io::Read;
+    let mut command = Command::new("powershell.exe");
+    command
+        .args(["-NoProfile", "-NonInteractive", "-Command", script])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    #[cfg(windows)]
+    command.creation_flags(CREATE_NO_WINDOW);
+    let mut child = command.spawn().map_err(|error| error.to_string())?;
+    let mut stdout = child.stdout.take().ok_or("Missing signature output")?;
+    let reader = std::thread::spawn(move || {
+        let mut output = Vec::new();
+        let mut chunk = [0u8; 4096];
+        while let Ok(count) = stdout.read(&mut chunk) {
+            if count == 0 {
+                break;
+            }
+            if output.len() + count <= 65536 {
+                output.extend_from_slice(&chunk[..count]);
+            }
+        }
+        output
+    });
+    let start = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let output = reader.join().map_err(|_| "Signature reader failed")?;
+                return if status.success() {
+                    Ok(String::from_utf8_lossy(&output).into_owned())
+                } else {
+                    Err("Signature check failed".into())
+                };
+            }
+            Ok(None) if start.elapsed() < Duration::from_secs(4) => {
+                std::thread::sleep(Duration::from_millis(20))
+            }
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err("Signature check timed out".into());
+            }
+        }
+    }
+}
+
+#[test]
+#[cfg(windows)]
+fn signature_process_is_bounded_when_it_hangs() {
+    let start = Instant::now();
+    let result = run_signature_powershell("Start-Sleep -Seconds 30");
+    assert_eq!(result.unwrap_err(), "Signature check timed out");
+    assert!(start.elapsed() < Duration::from_secs(8));
 }
 
 fn run_powershell(script: &str) -> Result<String, String> {
@@ -1083,7 +1152,7 @@ $signature = Get-AuthenticodeSignature -LiteralPath '{path}'
         path = escape_powershell_single_quoted(path),
     );
 
-    let Ok(output) = run_powershell(&script) else {
+    let Ok(output) = run_signature_powershell(&script) else {
         return SignatureInfo::unknown();
     };
     let Ok(raw) = serde_json::from_str::<RawSignatureInfo>(&output) else {

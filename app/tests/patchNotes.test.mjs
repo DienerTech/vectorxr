@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import test from 'node:test'
 
 import {
@@ -44,10 +45,8 @@ test('legacy and current patch notes use organized nested sections', () => {
     assert.ok(entry.items.every((item) => typeof item !== 'string'), `${entry.version} has an ungrouped top-level item`)
   }
 
-  assert.equal(patchNotes[0].version, '0.16.2')
-  assert.equal(patchNotes[0].title, 'Smoother Turbo and More Reliable Pivot')
-  assert.match(patchNotes[0].summary, /DCS/)
-  assert.match(JSON.stringify(patchNotes[0].items), /headset test utility/)
+  const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'))
+  assert.equal(patchNotes[0].version, pkg.version)
   const maxDepth = Math.max(
     ...patchNotes[0].items.map((item, index) => assertItem(item, `latest.items[${index}]`)),
   )

@@ -4,6 +4,7 @@
 #include <filesystem>
 #include <optional>
 #include <string>
+#include <vector>
 
 namespace depthxr {
 
@@ -17,7 +18,16 @@ struct RuntimeControlDocument {
     std::optional<bool> quadviews_diagnostic_visualization;
 };
 
+struct QuadViewDimensions {
+    std::uint32_t width{0}, height{0}, allocated_width{0}, allocated_height{0};
+    bool operator==(const QuadViewDimensions&) const = default;
+};
+
 struct RuntimeStatusDocument {
+    std::string turbo_state;
+    std::string turbo_reason;
+    std::vector<QuadViewDimensions> quadviews_dimensions;
+    std::uint64_t quadviews_dimensions_at{0};
     std::string session_id;
     std::uint32_t process_id{0};
     std::string application;

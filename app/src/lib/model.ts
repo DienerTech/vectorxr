@@ -233,6 +233,7 @@ export interface PivotXRModuleConfig {
 }
 
 export interface QuadViewsSettings {
+  eyeTrackingCorrection: 'default' | 'flip-z'
   trackingMode: QuadViewsTrackingMode
   focusHorizontalSizePercent: number
   focusVerticalSizePercent: number
@@ -261,12 +262,13 @@ export interface QuadViewsModuleConfig {
 }
 
 // Turbo mode: overrides runtime frame pacing. Binary per application —
-// profiles carry no settings, only which applications they enable turbo for.
+// profiles enable Turbo for applications and may opt out of persistent safety blocks.
 export interface TurboProfileConfig {
   id: string
   name: string
   enabled: boolean
   applicationIds: string[]
+  disableSafety: boolean
 }
 
 // How turbo sequences the real xrWaitFrame against the frame submit.
@@ -286,6 +288,7 @@ export type TurboMetricsMode = 'off' | 'always' | 'binding'
 
 export interface TurboModuleConfig {
   enabled: boolean
+  interruptedSessionRecovery: boolean
   toggleBinding: InputBinding
   pacingMode: TurboPacingSetting
   // Per-runtime user overrides keyed by the exact OpenXR runtime name.
@@ -299,6 +302,7 @@ export interface TurboModuleConfig {
 // One row of the layer-written runtime-pacing.json sidecar: what Auto pacing
 // learned about a runtime. Read-only facts; user intent lives in the config.
 export interface RuntimePacingObservation {
+  testStartedAt?: number
   runtimeName: string
   runtimeVersion: string
   systemName: string
@@ -582,6 +586,7 @@ export function defaultPivotViewControls(): PivotViewControls {
 
 export function defaultQuadViewsSettings(): QuadViewsSettings {
   return {
+    eyeTrackingCorrection: 'default',
     trackingMode: 'eye',
     focusHorizontalSizePercent: 40,
     focusVerticalSizePercent: 40,
@@ -662,6 +667,7 @@ export function defaultConfig(): VectorXRConfig {
       turbo: {
         enabled: false,
         toggleBinding: defaultNoneBinding(),
+        interruptedSessionRecovery: true,
         pacingMode: 'auto',
         runtimePins: {},
         metricsMode: 'always',
@@ -740,6 +746,7 @@ export function newTurboProfileId(): string {
 
 export function createTurboProfile(applicationIds: string[] = []): TurboProfileConfig {
   return {
+    disableSafety: false,
     id: newTurboProfileId(),
     name: 'New Profile',
     enabled: true,
@@ -908,6 +915,7 @@ function normalizeQuadViewsSettings(value: unknown, fallback: QuadViewsSettings)
   const source = isRecord(value) ? value : {}
 
   return {
+    eyeTrackingCorrection: source.eyeTrackingCorrection === 'flip-z' ? 'flip-z' : source.eyeTrackingCorrection === 'default' ? 'default' : fallback.eyeTrackingCorrection,
     trackingMode: normalizeQuadViewsTrackingMode(source.trackingMode, fallback.trackingMode),
     focusHorizontalSizePercent: normalizeNumber(source.focusHorizontalSizePercent, fallback.focusHorizontalSizePercent),
     focusVerticalSizePercent: normalizeNumber(source.focusVerticalSizePercent, fallback.focusVerticalSizePercent),
@@ -1546,6 +1554,7 @@ function normalizeVectorXRConfig(value: unknown): VectorXRConfig {
       turbo: {
         enabled: normalizeBoolean(turbo.enabled, fallback.modules.turbo.enabled),
         toggleBinding: normalizeInputBinding(turbo.toggleBinding, fallback.modules.turbo.toggleBinding),
+        interruptedSessionRecovery: typeof turbo.interruptedSessionRecovery === 'boolean' ? turbo.interruptedSessionRecovery : true,
         pacingMode: normalizeTurboPacingSetting(turbo.pacingMode),
         runtimePins: normalizeTurboRuntimePins(turbo.runtimePins),
         metricsMode: normalizeTurboMetricsMode(turbo.metricsMode),
@@ -1556,6 +1565,7 @@ function normalizeVectorXRConfig(value: unknown): VectorXRConfig {
           const id = normalizeString(profile.id, '').trim() || newTurboProfileId()
 
           return {
+            disableSafety: normalizeBoolean(profile.disableSafety, false),
             id,
             name: normalizeString(profile.name, 'New Profile'),
             enabled: normalizeBoolean(profile.enabled, true),

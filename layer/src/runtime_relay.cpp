@@ -156,8 +156,18 @@ bool WriteRuntimeStatus(const std::filesystem::path& path, const RuntimeStatusDo
            << "  \"updatedAtUnixMilliseconds\": " << document.updated_at_unix_milliseconds << ",\n"
            << "  \"acknowledgedRevision\": " << document.acknowledged_revision << ",\n"
            << "  \"capabilities\": { \"quadviewsDiagnosticVisualization\": " << (document.quadviews_diagnostic_visualization_available ? "true" : "false") << " },\n"
-           << "  \"state\": { \"quadviewsDiagnosticVisualization\": " << (document.quadviews_diagnostic_visualization_enabled ? "true" : "false") << " }\n"
-           << "}\n";
+           << "  \"state\": { \"quadviewsDiagnosticVisualization\": " << (document.quadviews_diagnostic_visualization_enabled ? "true" : "false")
+           << ", \"turboState\": \"" << EscapeJson(document.turbo_state)
+           << "\", \"turboReason\": \"" << EscapeJson(document.turbo_reason) << "\" },\n"
+           << "  \"quadviewsDimensionsAt\": " << document.quadviews_dimensions_at << ",\n"
+           << "  \"quadviewsDimensions\": [";
+    for (std::size_t i = 0; i < document.quadviews_dimensions.size(); ++i) {
+        const auto& view = document.quadviews_dimensions[i];
+        if (i) stream << ",";
+        stream << "{\"width\":" << view.width << ",\"height\":" << view.height
+               << ",\"allocatedWidth\":" << view.allocated_width << ",\"allocatedHeight\":" << view.allocated_height << "}";
+    }
+    stream << "]\n}\n";
     return WriteAtomically(path, stream.str(), error);
 }
 

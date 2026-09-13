@@ -67,9 +67,24 @@ reading render zones, focus alignment, gaze filtering, and tracking availability
 [Diagnostic visualization](docs/usage.md#diagnostic-visualization).
 ### Turbo
 
-![VectorXR Turbo tab](docs/screenshots/turbo.jpg)
+![VectorXR Turbo controls with Safety enabled](docs/screenshots/turbo.jpg)
 
 Turbo provides an opt-in per-application frame-pacing override, automatic runtime strategy selection, in-headset A/B controls, and performance diagnostics.
+
+Auto tries Async first, falls back to Sequenced when needed, and remembers a strategy after
+60 seconds of stable play. Version 0.17 removes the previous DCS + SteamVR + synthesized
+Quadviews activation restriction. Disable SteamVR Motion Smoothing when comparing Turbo;
+this change does not remove runtime-enforced FPS caps.
+
+### Turbo Safety
+
+![VectorXR Turbo Safety page](docs/screenshots/turbo-safety.jpg)
+
+Turbo Safety is on by default and can hold Turbo off after an interrupted session or repeated
+runtime fault. Inspect blocked setups and fault details, retry in-game, or use **Clear & retest**
+for a fresh strategy test. **Clear Logs** clears fault history while preserving blocks and
+learned pacing decisions. Global and per-profile controls let you bypass persistent protection.
+See the [Turbo setup and Safety guide](docs/usage.md#turbo) for the controls and save/relaunch behavior.
 
 ### Application Registry
 
@@ -136,7 +151,9 @@ Beta means it is ready to use day-to-day, but it is young and has had limited re
 
 Feedback and bug reports are welcome — that is what this stage is for.
 
-The road to a 1.0 release includes Windows binary code signing (current builds are unsigned, so the installer will show a SmartScreen warning), broader cross-runtime testing, and a few packaging items.
+Official Windows releases include an app, OpenXR layer, and installer signed by **DienerTech LLC**.
+Local source builds may be unsigned. Broader cross-runtime testing and packaging improvements
+remain part of the road to 1.0.
 
 ## Build From Source
 
@@ -144,14 +161,16 @@ VectorXR is Windows-focused and expects:
 
 - Visual Studio with Desktop C++ tools
 - CMake 3.28+
-- Node.js 20+
+- Node.js 22+ (CI uses Node.js 22)
 - Rust toolchain with `cargo`
 - Tauri 2 prerequisites for Windows
 - Download the OpenXR SDK from [KhronosGroup](https://github.com/KhronosGroup/OpenXR-SDK/releases)
 - VectorXR needs either an OpenXR SDK that provides `OpenXRConfig.cmake`, or a local `OpenXR.Loader.*.nupkg` package in the repository root
 
 
-The local `OpenXR.Loader.*.nupkg` package is intentionally not tracked in source control. The GitHub release workflow restores the pinned NuGet package during CI before building the layer.
+The local `OpenXR.Loader.*.nupkg` package is intentionally not tracked in source control.
+CI and the GitHub release workflow install the OpenXR loader from a pinned vcpkg registry
+before building the layer.
 
 Install app dependencies:
 

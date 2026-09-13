@@ -9,6 +9,7 @@ add_library(
     src/runtime_compatibility.cpp
     src/seen_apps.cpp
     src/turbo_metrics.cpp
+    src/turbo_recovery.cpp
     src/settings.cpp
     src/sound_player.cpp
     src/settings_resolver.cpp
@@ -233,6 +234,10 @@ if(DEPTHXR_BUILD_TESTS)
         )
     endif()
     add_test(NAME depthxr_layer_tests COMMAND depthxr_layer_tests)
+    add_executable(depthxr_turbo_recovery_tests tests/turbo_recovery_tests.cpp)
+    target_link_libraries(depthxr_turbo_recovery_tests PRIVATE depthxr_core)
+    add_test(NAME depthxr_turbo_recovery_tests COMMAND depthxr_turbo_recovery_tests)
+    set_tests_properties(depthxr_turbo_recovery_tests PROPERTIES TIMEOUT 10)
 
     add_executable(
         depthxr_action_set_attachment_tests

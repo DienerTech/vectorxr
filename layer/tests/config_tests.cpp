@@ -958,6 +958,17 @@ void TestTurboModuleResolution() {
 
     const depthxr::ResolvedRuntimeConfig resolved_other = depthxr::ResolveRuntimeConfig(result.document, "other.exe");
     Expect(!resolved_other.turbo.enabled, "Turbo default-off should not apply to unmatched applications");
+    std::string opted_out = json;
+    opted_out.insert(opted_out.find("\"id\": \"turbo-dcs\""), "\"disableSafety\": true, ");
+    auto safety = depthxr::ParseConfig(opted_out);
+    Expect(safety.ok, "Profile safety override should parse");
+    Expect(!depthxr::ResolveRuntimeConfig(safety.document, "DCS.exe").turbo.interrupted_session_recovery,
+           "Matched profile can disable safety");
+    Expect(depthxr::ResolveRuntimeConfig(safety.document, "other.exe").turbo.interrupted_session_recovery,
+           "Profile opt-out must not disable protection for unrelated applications");
+    safety.document.turbo.profiles[0].enabled = false;
+    Expect(depthxr::ResolveRuntimeConfig(safety.document, "DCS.exe").turbo.interrupted_session_recovery,
+           "Disabled profiles cannot opt out of safety");
 }
 
 void TestTurboPacingModeParsing() {
@@ -987,6 +998,14 @@ void TestTurboPacingModeParsing() {
 
     const depthxr::ParseResult result = depthxr::ParseConfig(json);
     Expect(result.ok, "Config parser rejected turbo pacing config: " + result.error);
+    Expect(result.document.turbo.interrupted_session_recovery, "Older configs should default recovery on");
+    std::string recovery_off = json;
+    recovery_off.insert(recovery_off.find("\"pacingMode\""), "\"interruptedSessionRecovery\": false, ");
+    const auto recovery_result = depthxr::ParseConfig(recovery_off);
+    Expect(recovery_result.ok && !recovery_result.document.turbo.interrupted_session_recovery,
+           "Recovery opt-out should parse");
+    Expect(!depthxr::ResolveRuntimeConfig(recovery_result.document, "any.exe").turbo.interrupted_session_recovery,
+           "Recovery opt-out must reach resolved settings");
     Expect(result.document.turbo.pacing_mode == depthxr::TurboPacingSetting::kAuto,
            "Turbo pacing mode should parse auto");
     Expect(result.document.turbo.runtime_pins.size() == 2, "Turbo runtime pin count mismatch");
@@ -1274,6 +1293,7 @@ void TestQuadViewsProfileResolution() {
           "enabled": true,
           "settings": {
             "trackingMode": "eye",
+            "eyeTrackingCorrection": "flip-z",
             "focusHorizontalSizePercent": 34.0,
             "focusVerticalSizePercent": 30.0,
             "focusScale": 1.2,
@@ -1297,6 +1317,12 @@ void TestQuadViewsProfileResolution() {
 
     const depthxr::ResolvedRuntimeConfig resolved = depthxr::ResolveRuntimeConfig(result.document, "DCS.exe");
     Expect(resolved.quadviews.enabled, "Quadviews module enable was not resolved");
+    Expect(resolved.quadviews.eye_tracking_correction == "flip-z", "Quadviews correction profile override lost");
+    Expect(depthxr::ResolveRuntimeConfig(result.document, "other.exe").quadviews.eye_tracking_correction == "default",
+           "Legacy Quadviews settings must retain full-direction correction");
+    std::string invalid_correction = json;
+    invalid_correction.replace(invalid_correction.find("flip-z"), 6, "invalid");
+    Expect(!depthxr::ParseConfig(invalid_correction).ok, "Invalid eye tracking correction accepted");
     Expect(resolved.quadviews.diagnostic_visualization_binding.type == depthxr::InputBindingType::Keyboard &&
                resolved.quadviews.diagnostic_visualization_binding.chord.size() == 2,
            "Quadviews diagnostic visualization binding mismatch");
@@ -1713,6 +1739,7 @@ void TestRuntimePacingObservationRoundTrip() {
     std::string record_error;
 
     depthxr::RuntimePacingObservation first;
+    first.test_started_at = 1000;
     first.runtime_name = "Oculus";
     first.runtime_version = "1.205.0";
     first.system_name = "Quest 3";
@@ -1728,6 +1755,7 @@ void TestRuntimePacingObservationRoundTrip() {
     Expect(recorded, "Failed to record first runtime pacing observation: " + record_error);
 
     depthxr::RuntimePacingObservation second;
+    second.test_started_at = 1000;
     second.runtime_name = "SteamVR/OpenXR";
     second.mode = depthxr::TurboPacingMode::kAsync;
     second.source = "preset";
@@ -1768,8 +1796,17 @@ void TestRuntimePacingObservationRoundTrip() {
     Expect(crystal.has_value(), "Second headset fingerprint was collapsed into the first");
 
     const auto steam = depthxr::FindRuntimePacingObservation(path, "SteamVR/OpenXR");
-    Expect(steam.has_value(), "SteamVR runtime pacing observation missing");
-    Expect(steam->mode == depthxr::TurboPacingMode::kAsync, "SteamVR mode mismatch");
+    Expect(!steam.has_value(), "Legacy presets must not influence Auto");
+    const auto reset_dir = test_directory / "runtime-pacing-resets";
+    std::filesystem::create_directories(reset_dir);
+    std::ofstream(reset_dir / "4f63756c7573.txt") << "2000";
+    Expect(!depthxr::FindRuntimePacingObservation(path, "Oculus"), "A cleared decision must not be reused");
+    first.last_used_unix_seconds = 400;
+    Expect(depthxr::RecordRuntimePacingObservation(path, first, &record_error), "Stale writes should be ignored cleanly");
+    Expect(!depthxr::FindRuntimePacingObservation(path, "Oculus"), "A running session must not undo a reset");
+    first.test_started_at = 3000;
+    Expect(depthxr::RecordRuntimePacingObservation(path, first, &record_error), "Fresh retest should persist");
+    Expect(depthxr::FindRuntimePacingObservation(path, "Oculus").has_value(), "A fresh successful retest should be reusable");
 
     Expect(!depthxr::FindRuntimePacingObservation(path, "Varjo").has_value(),
            "Unknown runtime should have no observation");
@@ -2207,25 +2244,6 @@ void TestEyeGazeExtensionCompatibilityPolicy() {
            "Application-owned extension failures must not be retried behind its back");
 }
 
-void TestTurboSteamVrQuadviewsCompatibilityPolicy() {
-    depthxr::TurboCompatibilityInput psvr2{
-        "DCS.exe", "SteamVR/OpenXR", true, false, true,
-    };
-    Expect(depthxr::ShouldBlockTurboForSession(psvr2),
-           "DCS synthesized quadviews on SteamVR must keep runtime display times pass-through");
-
-    psvr2.native_quadviews_active = true;
-    Expect(!depthxr::ShouldBlockTurboForSession(psvr2),
-           "Native quadviews should not inherit the SteamVR compositor compatibility block");
-    psvr2.native_quadviews_active = false;
-    psvr2.quadviews_active = false;
-    Expect(!depthxr::ShouldBlockTurboForSession(psvr2),
-           "Stereo DCS sessions should retain normal Turbo behavior");
-    psvr2.quadviews_active = true;
-    psvr2.executable_name = "FlightSimulator.exe";
-    Expect(!depthxr::ShouldBlockTurboForSession(psvr2),
-           "The DCS compatibility rule must not disable Turbo globally");
-}
 
 void TestQuadViewsSessionActivationPolicy() {
     Expect(depthxr::ResolveQuadViewsSessionActive(true, std::nullopt),
@@ -2739,7 +2757,6 @@ int main() {
     TestSwapchainImageQueuePreservesFifo();
     TestLoggerCollapsesDuplicateMessages();
     TestEyeGazeExtensionCompatibilityPolicy();
-    TestTurboSteamVrQuadviewsCompatibilityPolicy();
     TestQuadViewsSessionActivationPolicy();
     TestQuadViewsRecoveryStabilizationPolicy();
     TestQuadViewsRecoveryStabilizer();
