@@ -26,6 +26,7 @@
 #include "depthxr/settings_resolver.h"
 #include "depthxr/swapchain_state.h"
 #include "depthxr/turbo_metrics.h"
+#include "depthxr/turbo_trace.h"
 
 #ifdef _WIN32
 #include <d3dcompiler.h>
@@ -37,6 +38,37 @@ void Expect(bool condition, const std::string& message) {
     if (!condition) {
         std::cerr << message << '\n';
         std::exit(1);
+    }
+}
+
+void TestTurboExperimentalConfig() {
+    const auto parse = [](const std::string& turbo) {
+        return depthxr::ParseConfig(R"({"version":3,"core":{"enabled":true,"logLevel":"info","logRetentionFiles":7},
+          "applications":[{"id":"dcs","name":"DCS","enabled":true,"match":{"exe":"DCS.exe"}}],
+          "modules":{"depthxr":{"enabled":false,"defaults":{"stereoBoost":1,"convergence":0},"bindings":{"toggleEnabled":{"type":"none"}},"profiles":[]},
+          "pivotxr":{"enabled":false,"defaults":{},"profiles":[]},"turbo":)" + turbo + "}}");
+    };
+    const auto legacy = parse(R"({"enabled":true})");
+    Expect(legacy.ok && !legacy.document.turbo.experimental.enabled &&
+        legacy.document.turbo.experimental.prediction_percent == 100, "Legacy Turbo timing must remain neutral: " + legacy.error);
+    const auto configured = parse(R"({"enabled":true,"experimental":{"enabled":true,"applicationIds":["dcs"],
+      "waitForSubmit":true,"sampleAtEntry":true,"predictionPercent":75,"frameLimit":45,"timingTrace":true}})");
+    Expect(configured.ok, "Valid experimental config rejected: " + configured.error);
+    const auto dcs = depthxr::ResolveTurboSettings(configured.document, "DCS.exe");
+    const auto other = depthxr::ResolveTurboSettings(configured.document, "Other.exe");
+    Expect(dcs.experimental.enabled && dcs.experimental.timing_trace && dcs.experimental.wait_for_submit &&
+           dcs.experimental.sample_at_entry && dcs.experimental.frame_limit == 45 &&
+           dcs.experimental.prediction_percent == 75, "Selected application's experimental settings were lost");
+    Expect(!other.experimental.enabled && !other.experimental.timing_trace, "Experiments escaped the application allowlist");
+    auto disabled = configured.document;
+    disabled.applications[0].enabled = false;
+    Expect(!depthxr::ResolveTurboSettings(disabled, "DCS.exe").experimental.enabled,
+           "Disabled registered application enabled experiments");
+    for (const std::string& fields : {R"("predictionPercent":49)", R"("predictionPercent":101)",
+         R"("predictionPercent":75.5)", R"("frameLimit":1)", R"("frameLimit":241)", R"("frameLimit":45.5)",
+         R"("waitForSubmit":"yes")", R"("unknown":true)"}) {
+        const auto invalid = parse("{\"experimental\":{" + fields + "}}");
+        Expect(!invalid.ok, "Invalid experimental settings accepted: " + fields);
     }
 }
 
@@ -1145,6 +1177,7 @@ void TestTurboMetricsSessionRoundTrip() {
     session.runtime_name = "PiOpenXR";
     session.layer_version = "0.12.1";
     session.collection_mode = "binding";
+    session.timing_configuration = "Experimental Async; cap=45; trace=on";
     session.live = true;
     session.started_unix_seconds = 1000;
     session.updated_unix_seconds = 1015;
@@ -1186,6 +1219,8 @@ void TestTurboMetricsSessionRoundTrip() {
 
     auto sessions = depthxr::ReadTurboMetricsSessions(path);
     Expect(sessions.size() == 1, "Turbo metrics session upsert should not duplicate");
+    Expect(sessions[0].timing_configuration == session.timing_configuration,
+           "Metrics lost the session's experimental timing label");
     Expect(sessions[0].session_id == "DCS.exe-1000", "Turbo metrics session id mismatch");
     Expect(sessions[0].app_name == "DCS.exe", "Turbo metrics app name mismatch");
     Expect(sessions[0].runtime_name == "PiOpenXR", "Turbo metrics runtime name mismatch");
@@ -2015,6 +2050,42 @@ void TestPivotYawNoOpInsideDeadzone() {
     Expect(std::abs(smoothed_extra_yaw) < 0.0001, "PivotXR should not accumulate extra yaw inside the deadzone");
 }
 
+void TestTurboTraceBoundedAndDrained() {
+    const auto directory = std::filesystem::current_path() / "build" / "vectorxr-test-turbo-trace";
+    std::filesystem::create_directories(directory);
+    std::filesystem::path log_path;
+    {
+        depthxr::Logger logger;
+        logger.Initialize(directory / "trace.log");
+        log_path = logger.ActiveLogPath();
+        depthxr::TurboTimingTrace trace;
+        trace.Record("disabled");
+        Expect(!trace.Enabled() && trace.NextId() == 0, "Disabled trace must be inert");
+        trace.Start(logger);
+        trace.Record("test.first", trace.NextId(), 11, 22, 33);
+        for (int i = 0; i < 40000; ++i) {
+            if (i % 1000 == 0) trace.Burst();
+            trace.Record("test.event", trace.NextId(), i);
+        }
+        trace.Stop();
+        Expect(!trace.Enabled(), "Stopping trace left it active");
+        trace.Record("after.stop");
+    }
+    std::ifstream input(log_path);
+    std::string line;
+    std::size_t events = 0;
+    bool first = false;
+    while (std::getline(input, line)) {
+        if (line.find("Turbo-trace ns=") != std::string::npos) ++events;
+        first = first || line.find("event=test.first a=11 b=22 c=33") != std::string::npos;
+        Expect(line.find("event=disabled") == std::string::npos && line.find("event=after.stop") == std::string::npos,
+               "Disabled tracing wrote events");
+    }
+    Expect(first && events > 0 && events <= 30000, "Trace lost its first event, failed to drain, or exceeded its budget");
+    input.close();
+    std::filesystem::remove(log_path);
+}
+
 void TestLoggerCollapsesDuplicateMessages() {
     const std::filesystem::path test_directory =
         std::filesystem::current_path() / "build" / "vectorxr-test-logger-duplicate-collapse";
@@ -2720,6 +2791,7 @@ void TestSwapchainImageQueuePreservesFifo() {
 } // namespace
 
 int main() {
+    TestTurboExperimentalConfig();
     TestParseConfig();
     TestPivotActivationBindingModel();
     TestLogLevelCompatibility();
@@ -2756,6 +2828,7 @@ int main() {
     TestPivotYawNoOpInsideDeadzone();
     TestSwapchainImageQueuePreservesFifo();
     TestLoggerCollapsesDuplicateMessages();
+    TestTurboTraceBoundedAndDrained();
     TestEyeGazeExtensionCompatibilityPolicy();
     TestQuadViewsSessionActivationPolicy();
     TestQuadViewsRecoveryStabilizationPolicy();

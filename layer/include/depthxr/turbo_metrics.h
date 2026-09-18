@@ -45,6 +45,7 @@ struct TurboMetricsSession {
     std::string layer_version;
     // "always" or "binding" — how capture was gated when recording.
     std::string collection_mode;
+    std::string timing_configuration; // session-latched experiment and trace settings
     // True while the session is still running (the layer flushes
     // periodically); the final flush at session teardown clears it.
     bool live{false};

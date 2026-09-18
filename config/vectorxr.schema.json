@@ -716,6 +716,53 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
+        "experimental": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": false
+            },
+            "applicationIds": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "waitForSubmit": {
+              "type": "boolean",
+              "default": false
+            },
+            "sampleAtEntry": {
+              "type": "boolean",
+              "default": false
+            },
+            "predictionPercent": {
+              "type": "integer",
+              "minimum": 50,
+              "maximum": 100,
+              "default": 100
+            },
+            "frameLimit": {
+              "type": "integer",
+              "anyOf": [
+                {
+                  "const": 0
+                },
+                {
+                  "minimum": 20,
+                  "maximum": 240
+                }
+              ],
+              "default": 0
+            },
+            "timingTrace": {
+              "type": "boolean",
+              "default": false
+            }
+          }
+        },
         "enabled": {
           "type": "boolean"
         },

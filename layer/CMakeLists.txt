@@ -8,6 +8,7 @@ add_library(
     src/runtime_relay.cpp
     src/runtime_compatibility.cpp
     src/seen_apps.cpp
+    src/turbo_trace.cpp
     src/turbo_metrics.cpp
     src/turbo_recovery.cpp
     src/settings.cpp

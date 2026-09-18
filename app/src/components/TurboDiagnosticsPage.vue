@@ -277,6 +277,10 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
             </select>
           </label>
 
+          <p v-if="selectedSession?.timingConfiguration" class="mb-4 rounded-xl border p-3 text-sm surface-panel-soft">
+            {{ selectedSession.timingConfiguration }}
+          </p>
+          <p class="mb-4 text-xs text-muted">Results accumulate within a session. Use a fresh launch for each condition; these figures do not measure ASW activity or headset presentation.</p>
           <div v-if="comparisons.length > 0" class="grid gap-3 md:grid-cols-2">
             <article
               v-for="comparison in comparisons"

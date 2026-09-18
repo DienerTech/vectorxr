@@ -389,6 +389,17 @@ enum class TurboMetricsMode {
     kBinding,
 };
 
+// Session-latched, application-scoped experiments. Defaults preserve production timing.
+struct TurboExperimentalSettings {
+    bool enabled{false};
+    std::vector<std::string> application_ids;
+    bool wait_for_submit{false};
+    bool sample_at_entry{false};
+    int prediction_percent{100};
+    int frame_limit{0};
+    bool timing_trace{false};
+};
+
 struct TurboModuleConfig {
     bool enabled{false};
     bool interrupted_session_recovery{true};
@@ -398,6 +409,7 @@ struct TurboModuleConfig {
     // Per-runtime user overrides, keyed by exact xrGetInstanceProperties
     // runtimeName. Only consulted when pacing_mode is kAuto.
     std::vector<std::pair<std::string, TurboPacingMode>> runtime_pins;
+    TurboExperimentalSettings experimental;
     TurboMetricsMode metrics_mode{TurboMetricsMode::kAlways};
     // Begin/end metric capture while in-game (kBinding mode only).
     InputBinding metrics_binding;
@@ -410,6 +422,7 @@ struct TurboResolvedSettings {
     InputBinding toggle_binding;
     TurboPacingSetting pacing_mode{TurboPacingSetting::kAuto};
     std::vector<std::pair<std::string, TurboPacingMode>> runtime_pins;
+    TurboExperimentalSettings experimental;
     TurboMetricsMode metrics_mode{TurboMetricsMode::kAlways};
     InputBinding metrics_binding;
 };

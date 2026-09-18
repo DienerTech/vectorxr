@@ -683,6 +683,16 @@ XrResult XRAPI_CALL xrCreateApiLayerInstance(const XrInstanceCreateInfo* instanc
     if (diagnostics.layer_injected_eye_gaze_request) {
         first_downstream_extensions.push_back(XR_EXT_EYE_GAZE_INTERACTION_EXTENSION_NAME);
     }
+    constexpr const char* turbo_clock_extension = "XR_KHR_win32_convert_performance_counter_time";
+    bool injected_turbo_clock = false;
+    if (OpenXrLayer::Instance().WantsTurboClockConversion() &&
+        !ExtensionListContains(first_downstream_extensions, turbo_clock_extension)) {
+        const auto clock_scan = ScanRuntimeInstanceExtensions(next_info->nextGetInstanceProcAddr);
+        if (clock_scan.Contains(turbo_clock_extension)) {
+            first_downstream_extensions.push_back(turbo_clock_extension);
+            injected_turbo_clock = true;
+        }
+    }
     diagnostics.first_downstream_extension_count = static_cast<uint32_t>(first_downstream_extensions.size());
 
     XrInstanceCreateInfo downstream_create_info = *instance_create_info;
@@ -692,6 +702,19 @@ XrResult XRAPI_CALL xrCreateApiLayerInstance(const XrInstanceCreateInfo* instanc
 
     XrResult result = next_info->nextCreateApiLayerInstance(&downstream_create_info, &chain_info, instance);
     diagnostics.first_create_result = result;
+
+    // An optional experimental clock must never make an otherwise valid app
+    // fail instance creation when a runtime misadvertises its extensions.
+    if (injected_turbo_clock &&
+        (result == XR_ERROR_EXTENSION_NOT_PRESENT || result == XR_ERROR_EXTENSION_DEPENDENCY_NOT_ENABLED)) {
+        first_downstream_extensions.pop_back();
+        downstream_create_info.enabledExtensionCount = static_cast<uint32_t>(first_downstream_extensions.size());
+        downstream_create_info.enabledExtensionNames = first_downstream_extensions.empty() ? nullptr : first_downstream_extensions.data();
+        *instance = XR_NULL_HANDLE;
+        chain_info = *layer_info;
+        chain_info.nextInfo = next_info->next;
+        result = next_info->nextCreateApiLayerInstance(&downstream_create_info, &chain_info, instance);
+    }
 
     const std::vector<const char*>* successful_downstream_extensions = &first_downstream_extensions;
     const bool eye_gaze_extension_related_failure =
@@ -723,6 +746,8 @@ XrResult XRAPI_CALL xrCreateApiLayerInstance(const XrInstanceCreateInfo* instanc
     const bool eye_gaze_extension_enabled = ExtensionListContains(
         *successful_downstream_extensions, XR_EXT_EYE_GAZE_INTERACTION_EXTENSION_NAME);
 
+    diagnostics.turbo_clock_enabled =
+        ExtensionListContains(*successful_downstream_extensions, turbo_clock_extension);
     return OpenXrLayer::Instance().OnInstanceCreated(
         instance_create_info, *instance, eye_gaze_extension_enabled, diagnostics);
 }

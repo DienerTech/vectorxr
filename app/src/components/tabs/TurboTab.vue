@@ -6,6 +6,7 @@ import DefaultProfileExclusions from '../DefaultProfileExclusions.vue'
 import ModuleBindingPage from '../ModuleBindingPage.vue'
 import ModuleBindingPanel from '../ModuleBindingPanel.vue'
 import ProfileShell from '../ProfileShell.vue'
+import TurboExperimentalPage from '../TurboExperimentalPage.vue'
 import TurboDiagnosticsPage from '../TurboDiagnosticsPage.vue'
 import TurboRuntimePage from '../TurboRuntimePage.vue'
 import TurboSafetyPage from '../TurboSafetyPage.vue'
@@ -92,7 +93,7 @@ async function refreshRecovery() {
 onMounted(() => void refreshRecovery())
 onUnmounted(() => { disposed = true; clearTimeout(recoveryPoll) })
 const bindingSubPageOpen = ref(false)
-const activeSubPage = ref<'runtime' | 'diagnostics' | 'safety' | null>(null)
+const activeSubPage = ref<'runtime' | 'diagnostics' | 'safety' | 'experimental' | null>(null)
 let savedScrollTop = 0
 const toggleBindingWarnings = computed(() => savedBindingConflictWarnings(props.config, [
   props.config.modules.turbo.toggleBinding,
@@ -159,7 +160,7 @@ function pageScroller(): Element | null {
   return document.querySelector('main section.overflow-y-auto')
 }
 
-function openSubPage(page: 'runtime' | 'diagnostics' | 'safety') {
+function openSubPage(page: 'runtime' | 'diagnostics' | 'safety' | 'experimental') {
   savedScrollTop = pageScroller()?.scrollTop ?? 0
   activeSubPage.value = page
   void nextTick(() => pageScroller()?.scrollTo({ top: 0 }))
@@ -204,6 +205,10 @@ function closeSubPage() {
     v-else-if="activeSubPage === 'safety'"
     :config="config" :saved-config="savedConfig" :status="runtimeStatus" :error="recoveryError" :clearing="clearing"
     :clearing-logs="clearingLogs" @clear-logs="clearFaultLogs" @clear="clearSafety" @close="closeSubPage"
+  />
+  <TurboExperimentalPage
+    v-else-if="activeSubPage === 'experimental'"
+    :config="config" :applications="applications" @close="closeSubPage"
   />
   <TurboDiagnosticsPage
     v-else-if="activeSubPage === 'diagnostics'"
@@ -299,6 +304,12 @@ function closeSubPage() {
           <p class="mt-1 text-sm text-muted">These tools are here when you need them, without getting between you and the basic setup.</p>
         </div>
 
+        <div class="mb-3 flex flex-wrap items-center justify-between gap-3 rounded-xl border p-4 surface-panel-soft">
+          <div><h3 class="font-semibold">Experimental timing</h3>
+            <p class="mt-1 text-sm text-muted">Optional timing comparisons and detailed logs for selected applications. Requires relaunch.</p>
+          </div>
+          <button type="button" class="button-secondary rounded-xl px-4 py-2 text-sm" @click="openSubPage('experimental')">{{ config.modules.turbo.experimental.enabled ? 'Experiments enabled' : 'Open experiments' }} →</button>
+        </div>
         <div class="grid gap-3 md:grid-cols-2">
           <button
             class="group rounded-[1rem] border p-4 text-left transition surface-panel-soft hover:-translate-y-0.5 hover:shadow-panel"

@@ -32,6 +32,7 @@
 #include "depthxr/runtime_pacing.h"
 #include "depthxr/runtime_relay.h"
 #include "depthxr/turbo_recovery.h"
+#include "depthxr/turbo_trace.h"
 #include "depthxr/settings_resolver.h"
 #include "depthxr/swapchain_state.h"
 
@@ -64,6 +65,7 @@ class OpenXrLayer {
     bool CanCreateInstance();
 
     struct InstanceCreateDiagnostics {
+        bool turbo_clock_enabled{false};
         bool app_requested_quad_views{false};
         bool app_requested_varjo_foveated_rendering{false};
         bool app_requested_eye_gaze{false};
@@ -107,6 +109,8 @@ class OpenXrLayer {
     // (loads config lazily). Does not consider runtime capability — the caller
     // pairs this with a runtime extension probe.
     bool IsVarjoCompatibleQuadviewsEligible();
+    bool WantsTurboClockConversion();
+
 
     XrResult OnInstanceCreated(const XrInstanceCreateInfo* create_info,
                                XrInstance instance,
@@ -653,6 +657,20 @@ class OpenXrLayer {
     bool has_failed_config_timestamp_{false};
 
     Logger logger_;
+    TurboTimingTrace turbo_trace_; // destroyed before logger_
+    // Immutable between BeginSession and teardown; live edits apply next session.
+    TurboExperimentalSettings turbo_experiment_;
+    bool turbo_clock_enabled_{false};
+    PFN_xrVoidFunction turbo_convert_counter_time_{nullptr};
+    std::optional<std::chrono::steady_clock::time_point> turbo_limit_last_wait_;
+    bool turbo_trace_last_engaged_{false};
+    XrResult TraceRuntimeWaitFrame(XrSession, const XrFrameWaitInfo*, XrFrameState*);
+    XrResult TraceRuntimeBeginFrame(XrSession, const XrFrameBeginInfo*);
+    XrResult TraceRuntimeEndFrame(XrSession, const XrFrameEndInfo*);
+    XrTime TurboClockNow();
+    void ConfigureTurboExperiment();
+    std::string TurboTimingConfiguration() const;
+
     struct InputBindingDiagnosticLogState {
         bool failure_active{false};
         std::string signature;

@@ -10,6 +10,7 @@
 #include <string>
 #include <thread>
 #include <vector>
+#include <Windows.h>
 
 #include "depthxr/openxr_layer.h"
 
@@ -96,6 +97,45 @@ class TurboFrameTestPeer {
         }
         layer.turbo_frame_interception_required_.store(true, std::memory_order_release);
     }
+
+    static void Experiment(bool wait_for_submit = false, bool entry = false, int prediction = 100, int limit = 0) {
+        auto& layer = Layer();
+        layer.turbo_experiment_.enabled = true;
+        layer.turbo_experiment_.wait_for_submit = wait_for_submit;
+        layer.turbo_experiment_.sample_at_entry = entry;
+        layer.turbo_experiment_.prediction_percent = prediction;
+        layer.turbo_experiment_.frame_limit = limit;
+        layer.turbo_effective_active_.store(true);
+        layer.turbo_effective_async_.store(true);
+    }
+
+    static XrResult XRAPI_CALL Clock(XrInstance, const LARGE_INTEGER*, XrTime* time) {
+        *time = 10'000'000'000;
+        return XR_SUCCESS;
+    }
+
+    static void PredictionFixture(bool clock) {
+        auto& layer = Layer();
+        std::scoped_lock lock(layer.turbo_mutex_);
+        std::promise<void> ready;
+        ready.set_value();
+        layer.turbo_async_wait_ = ready.get_future().share();
+        layer.turbo_async_wait_completed_ = true;
+        layer.turbo_async_wait_polled_ = false;
+        layer.turbo_last_predicted_display_time_ = 10'020'000'000;
+        layer.turbo_max_returned_display_time_ = 10'000'000'000;
+        layer.turbo_convert_counter_time_ = clock ? reinterpret_cast<PFN_xrVoidFunction>(&Clock) : nullptr;
+    }
+
+    static bool IsForced() { return Layer().turbo_pacing_source_ == OpenXrLayer::TurboPacingSource::kForced; }
+    static void DisableEffectiveTurbo() { Layer().turbo_effective_active_.store(false); }
+    static double PredictionSampleAgeMs() {
+        auto& layer = Layer();
+        std::scoped_lock lock(layer.turbo_mutex_);
+        return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() -
+            *layer.turbo_last_wait_frame_wall_time_).count();
+    }
+    static bool LimiterReset() { return !Layer().turbo_limit_last_wait_.has_value(); }
 
     static void Cleanup() {
         OpenXrLayer& layer = Layer();
@@ -690,6 +730,68 @@ void TestAutoHasNoRuntimeMappings() {
     }
 }
 
+void TestExperimentalSubmitGate(bool release_before_timeout, bool failed_submit = false, bool sample_at_entry = false) {
+    FakeRuntime runtime;
+    runtime.BlockEnd();
+    if (failed_submit) runtime.SetEndResult(XR_ERROR_RUNTIME_FAILURE);
+    TurboHarness harness(runtime, depthxr::TurboPacingMode::kAsync);
+    depthxr::TurboFrameTestPeer::Experiment(true, sample_at_entry);
+    const auto end_info = FrameEndInfo();
+    auto end = std::async(std::launch::async, [&] {
+        return depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &end_info);
+    });
+    Expect(runtime.WaitForEndEntered(1), "Experimental submit did not reach runtime");
+    auto wait = std::async(std::launch::async, [] {
+        XrFrameState state{XR_TYPE_FRAME_STATE};
+        return AppWait(&state);
+    });
+    Expect(wait.wait_for(10ms) == std::future_status::timeout,
+           "Experimental app wait did not wait behind submission");
+    if (release_before_timeout) runtime.ReleaseEnd();
+    Expect(wait.wait_for(2s) == std::future_status::ready && wait.get() == XR_SUCCESS,
+           "Experimental app wait deadlocked or failed");
+    if (!release_before_timeout) {
+        if (sample_at_entry) Expect(depthxr::TurboFrameTestPeer::PredictionSampleAgeMs() >= 40,
+                                   "Entry sampling accidentally included the submission gate wait");
+        Expect(runtime.WaitCalls() == 0, "Gate timeout bypassed the handoff and duplicated a real wait");
+        runtime.ReleaseEnd();
+    }
+    Expect(end.wait_for(2s) == std::future_status::ready &&
+           end.get() == (failed_submit ? XR_ERROR_RUNTIME_FAILURE : XR_SUCCESS), "Experimental submit failed");
+    Expect(runtime.WaitForWaitExited(1) && runtime.MaxConcurrentWaits() == 1,
+           "Experimental gate allowed duplicate runtime waits");
+}
+
+void TestExperimentalPredictionAndLimiter() {
+    FakeRuntime runtime;
+    TurboHarness harness(runtime, depthxr::TurboPacingMode::kAsync);
+    depthxr::TurboFrameTestPeer::Experiment(false, false, 50);
+    depthxr::TurboFrameTestPeer::PredictionFixture(true);
+    XrFrameState state{XR_TYPE_FRAME_STATE};
+    Expect(AppWait(&state) == XR_SUCCESS && state.predictedDisplayTime == 10'010'000'000,
+           "Prediction dampening did not use runtime clock horizon");
+    Expect(state.predictedDisplayPeriod == 11'111'111 && state.shouldRender == XR_TRUE,
+           "Prediction dampening altered runtime period or visibility");
+    const auto previous = state.predictedDisplayTime;
+    Expect(AppWait(&state) == XR_SUCCESS && state.predictedDisplayTime == previous + 1,
+           "Dampening broke monotonic predictions");
+    depthxr::TurboFrameTestPeer::PredictionFixture(false);
+    Expect(AppWait(&state) == XR_SUCCESS && state.predictedDisplayTime == 10'020'000'000,
+           "Missing clock conversion must preserve runtime prediction");
+    depthxr::TurboFrameTestPeer::Experiment(false, false, 100, 20);
+    Expect(AppWait(&state) == XR_SUCCESS, "Limiter first wait failed");
+    const auto start = std::chrono::steady_clock::now();
+    Expect(AppWait(&state) == XR_SUCCESS && std::chrono::steady_clock::now() - start >= 40ms,
+           "Experimental cap did not limit app frame cadence");
+    depthxr::TurboFrameTestPeer::DisableEffectiveTurbo();
+    Expect(AppWait(&state) == XR_SUCCESS, "Turbo-off wait with configured limiter failed");
+    Expect(depthxr::TurboFrameTestPeer::LimiterReset(), "Experimental limiter remained armed after Turbo was disabled");
+    depthxr::TurboFrameTestPeer::ResolveAuto("Experiment test", "Test headset");
+    Expect(depthxr::TurboFrameTestPeer::IsForced() &&
+           depthxr::TurboFrameTestPeer::PacingMode() == depthxr::TurboPacingMode::kAsync,
+           "Experimental session must bypass Auto discovery");
+}
+
 void TestSubmissionInterlockFallsBackThenSuspends() {
     FakeRuntime runtime;
     runtime.BlockWait();
@@ -753,6 +855,11 @@ void TestSubmissionInterlockFallsBackThenSuspends() {
 } // namespace
 
 int main() {
+    TestExperimentalSubmitGate(true);
+    TestExperimentalSubmitGate(false);
+    TestExperimentalSubmitGate(false, false, true);
+    TestExperimentalSubmitGate(true, true);
+    TestExperimentalPredictionAndLimiter();
     TestStartupFailuresDoNotQuarantineTurbo();
     TestSubmissionFailureRestartsStabilityWindow();
     TestAsyncHandoffCoversEndFrameWindow();

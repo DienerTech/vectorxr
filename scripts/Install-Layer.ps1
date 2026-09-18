@@ -32,8 +32,9 @@ if (-not (Test-Path $ManifestPath)) {
 
 Write-Host "Installing OpenXR layer manifest from $ManifestPath"
 
-Start-Process -FilePath powershell.exe -Verb RunAs -Wait -ArgumentList @"
+$installProcess = Start-Process -FilePath powershell.exe -Verb RunAs -WindowStyle Hidden -Wait -PassThru -ArgumentList @"
   & {
+    `$ErrorActionPreference = 'Stop'
     if (-not (Test-Path '$RegistryPath')) {
       New-Item -Path '$RegistryPath' -Force | Out-Null
     }
@@ -54,3 +55,7 @@ Start-Process -FilePath powershell.exe -Verb RunAs -Wait -ArgumentList @"
     Remove-ItemProperty -Path '$RegistryPath' -Name '$LegacyManifestPath' -Force -ErrorAction SilentlyContinue | Out-Null
   }
 "@
+
+if ($installProcess.ExitCode -ne 0) {
+    throw "Layer registration failed (exit code $($installProcess.ExitCode))."
+}

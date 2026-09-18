@@ -643,6 +643,8 @@ struct TurboProfileConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct TurboModuleConfig {
+    #[serde(default)]
+    experimental: TurboExperimentalSettings,
     #[serde(default = "default_true")]
     interrupted_session_recovery: bool,
     #[serde(default = "default_false")]
@@ -661,6 +663,25 @@ struct TurboModuleConfig {
     profiles: Vec<TurboProfileConfig>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+struct TurboExperimentalSettings {
+    enabled: bool,
+    application_ids: Vec<String>,
+    wait_for_submit: bool,
+    sample_at_entry: bool,
+    prediction_percent: u32,
+    frame_limit: u32,
+    timing_trace: bool,
+}
+
+impl Default for TurboExperimentalSettings {
+    fn default() -> Self {
+        Self { enabled: false, application_ids: Vec::new(), wait_for_submit: false,
+            sample_at_entry: false, prediction_percent: 100, frame_limit: 0, timing_trace: false }
+    }
+}
+
 fn default_turbo_pacing_mode() -> String {
     "auto".into()
 }
@@ -675,6 +696,7 @@ impl Default for TurboModuleConfig {
             interrupted_session_recovery: true,
             enabled: false,
             toggle_binding: default_activation_binding(),
+            experimental: TurboExperimentalSettings::default(),
             pacing_mode: default_turbo_pacing_mode(),
             runtime_pins: std::collections::BTreeMap::new(),
             metrics_mode: default_turbo_metrics_mode(),
@@ -857,6 +879,8 @@ struct TurboMetricsBucket {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct TurboMetricsSession {
+    #[serde(default)]
+    timing_configuration: String,
     #[serde(default)]
     session_id: String,
     #[serde(default)]
@@ -2645,6 +2669,25 @@ mod tests {
             serde_json::to_value(profile).unwrap()["disableSafety"],
             true
         );
+    }
+
+    #[test]
+    fn turbo_experiments_survive_backend_round_trip() {
+        let defaults: super::TurboModuleConfig = serde_json::from_str("{}").unwrap();
+        assert!(!defaults.experimental.enabled);
+        assert!(defaults.experimental.application_ids.is_empty());
+        assert_eq!(defaults.experimental.prediction_percent, 100);
+        let input = serde_json::json!({"experimental": {
+            "enabled": true, "applicationIds": ["dcs"], "waitForSubmit": true,
+            "sampleAtEntry": true, "predictionPercent": 75, "frameLimit": 45, "timingTrace": true
+        }});
+        let config: super::TurboModuleConfig = serde_json::from_value(input.clone()).unwrap();
+        let output = serde_json::to_value(config).unwrap();
+        assert_eq!(output["experimental"], input["experimental"]);
+        let session: super::TurboMetricsSession = serde_json::from_value(serde_json::json!({
+            "timingConfiguration": "Experimental Async; cap=45"
+        })).unwrap();
+        assert_eq!(serde_json::to_value(session).unwrap()["timingConfiguration"], "Experimental Async; cap=45");
     }
 
     #[test]

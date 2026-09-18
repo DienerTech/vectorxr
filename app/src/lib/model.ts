@@ -286,7 +286,38 @@ export type TurboPacingSetting = 'auto' | TurboPacingMode
 // armed (cuts loading screens/menus out of the data), 'off' never.
 export type TurboMetricsMode = 'off' | 'always' | 'binding'
 
+export interface TurboExperimentalSettings {
+  enabled: boolean
+  applicationIds: string[]
+  waitForSubmit: boolean
+  sampleAtEntry: boolean
+  predictionPercent: number
+  frameLimit: number
+  timingTrace: boolean
+}
+
+export function defaultTurboExperimental(): TurboExperimentalSettings {
+  return { enabled: false, applicationIds: [], waitForSubmit: false, sampleAtEntry: false,
+    predictionPercent: 100, frameLimit: 0, timingTrace: false }
+}
+
+export function normalizeTurboExperimental(value: unknown): TurboExperimentalSettings {
+  const input = isRecord(value) ? value : {}
+  const integer = (value: unknown, min: number, max: number, fallback: number) =>
+    typeof value === 'number' && Number.isInteger(value) && value >= min && value <= max ? value : fallback
+  return {
+    enabled: input.enabled === true,
+    applicationIds: Array.isArray(input.applicationIds) ? [...new Set(input.applicationIds.filter((id): id is string => typeof id === 'string' && id.length > 0))] : [],
+    waitForSubmit: input.waitForSubmit === true,
+    sampleAtEntry: input.sampleAtEntry === true,
+    predictionPercent: integer(input.predictionPercent, 50, 100, 100),
+    frameLimit: integer(input.frameLimit, 20, 240, 0),
+    timingTrace: input.timingTrace === true,
+  }
+}
+
 export interface TurboModuleConfig {
+  experimental: TurboExperimentalSettings
   enabled: boolean
   interruptedSessionRecovery: boolean
   toggleBinding: InputBinding
@@ -336,6 +367,7 @@ export interface TurboMetricsBucket {
 // One capture session from the layer-written turbo-metrics.json sidecar.
 // Sessions arrive newest-first with a small retention cap.
 export interface TurboMetricsSession {
+  timingConfiguration?: string
   sessionId: string
   appName: string
   runtimeName: string
@@ -668,6 +700,7 @@ export function defaultConfig(): VectorXRConfig {
         enabled: false,
         toggleBinding: defaultNoneBinding(),
         interruptedSessionRecovery: true,
+        experimental: defaultTurboExperimental(),
         pacingMode: 'auto',
         runtimePins: {},
         metricsMode: 'always',
@@ -1555,6 +1588,7 @@ function normalizeVectorXRConfig(value: unknown): VectorXRConfig {
         enabled: normalizeBoolean(turbo.enabled, fallback.modules.turbo.enabled),
         toggleBinding: normalizeInputBinding(turbo.toggleBinding, fallback.modules.turbo.toggleBinding),
         interruptedSessionRecovery: typeof turbo.interruptedSessionRecovery === 'boolean' ? turbo.interruptedSessionRecovery : true,
+        experimental: normalizeTurboExperimental(turbo.experimental),
         pacingMode: normalizeTurboPacingSetting(turbo.pacingMode),
         runtimePins: normalizeTurboRuntimePins(turbo.runtimePins),
         metricsMode: normalizeTurboMetricsMode(turbo.metricsMode),

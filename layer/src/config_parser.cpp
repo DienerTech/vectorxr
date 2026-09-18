@@ -1141,12 +1141,40 @@ bool ParseTurboProfile(const JsonValue& value, TurboProfile& out, std::string& e
     return true;
 }
 
+bool ParseTurboExperimental(const JsonValue::Object& object, TurboExperimentalSettings& out, std::string& error) {
+    if (!CheckAllowedKeys(object, {"enabled", "applicationIds", "waitForSubmit", "sampleAtEntry",
+                                  "predictionPercent", "frameLimit", "timingTrace"}, error)) return false;
+    for (auto [key, target] : {std::pair{"enabled", &out.enabled}, {"waitForSubmit", &out.wait_for_submit},
+                              {"sampleAtEntry", &out.sample_at_entry}, {"timingTrace", &out.timing_trace}}) {
+        std::optional<bool> value;
+        if (!ReadOptionalBool(object, key, value, error)) return false;
+        if (value) *target = *value;
+    }
+    const auto ids = object.find("applicationIds");
+    if (ids != object.end() && !ParseStringArray(ids->second, "turbo.experimental.applicationIds", out.application_ids, error)) return false;
+    for (auto [key, target] : {std::pair{"predictionPercent", &out.prediction_percent}, {"frameLimit", &out.frame_limit}}) {
+        std::optional<double> value;
+        if (!ReadOptionalNumber(object, key, value, error)) return false;
+        if (!value) continue;
+        const bool prediction = std::string_view(key) == "predictionPercent";
+        if (!std::isfinite(*value) || std::floor(*value) != *value ||
+            (prediction ? (*value < 50 || *value > 100) : (*value != 0 && (*value < 20 || *value > 240)))) {
+            error = std::string("turbo.experimental.") + key +
+                (prediction ? " must be an integer from 50 to 100" : " must be 0 (off) or an integer from 20 to 240");
+            return false;
+        }
+        *target = static_cast<int>(*value);
+    }
+    return true;
+}
+
 bool ParseTurboModule(const JsonValue::Object& object, TurboModuleConfig& out, std::string& error) {
     std::optional<bool> recovery;
     if (!ReadOptionalBool(object, "interruptedSessionRecovery", recovery, error)) return false;
     out.interrupted_session_recovery = recovery.value_or(true);
     static const std::unordered_set<std::string> allowed = {
         "interruptedSessionRecovery",
+        "experimental",
         "enabled",
         "toggleBinding",
         "pacingMode",
@@ -1166,6 +1194,12 @@ bool ParseTurboModule(const JsonValue::Object& object, TurboModuleConfig& out, s
     }
     if (enabled.has_value()) {
         out.enabled = *enabled;
+    }
+
+    const auto experiment = object.find("experimental");
+    if (experiment != object.end()) {
+        const auto* settings = RequireObject(experiment->second, "turbo.experimental", error);
+        if (!settings || !ParseTurboExperimental(*settings, out.experimental, error)) return false;
     }
 
     // Optional: absent in configs written before pacing modes existed.

@@ -318,6 +318,11 @@ TurboResolvedSettings ResolveTurboSettings(const ConfigDocument& config, std::st
     resolved.metrics_binding = config.turbo.metrics_binding;
 
     const RegisteredApplication* application = FindMatchingApplication(config, exe_name);
+    const auto& experiment = config.turbo.experimental;
+    if (application && application->enabled && std::find(experiment.application_ids.begin(), experiment.application_ids.end(),
+                                 application->id) != experiment.application_ids.end()) {
+        resolved.experimental = experiment;
+    }
     if (application) {
         for (const TurboProfile& profile : config.turbo.profiles) {
             if (!profile.enabled) {

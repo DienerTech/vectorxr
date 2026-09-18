@@ -497,6 +497,13 @@ export function validateConfig(config: VectorXRConfig): string[] {
   errors.push(...validateQuadViewsProfileConflicts(config.modules.quadviews.profiles))
 
   errors.push(...validateInputBinding('modules.turbo.toggleBinding', config.modules.turbo.toggleBinding))
+  const experiment = config.modules.turbo.experimental
+  if (!Number.isInteger(experiment.predictionPercent) || experiment.predictionPercent < 50 || experiment.predictionPercent > 100) {
+    errors.push('Turbo experimental prediction dampening must be an integer from 50 to 100')
+  }
+  if (!Number.isInteger(experiment.frameLimit) || (experiment.frameLimit !== 0 && (experiment.frameLimit < 20 || experiment.frameLimit > 240))) {
+    errors.push('Turbo experimental frame cap must be 0 (off) or an integer from 20 to 240')
+  }
   config.modules.turbo.profiles.forEach((profile, index) => {
     const prefix = `modules.turbo.profiles[${index}].`
     if (!profile.name.trim()) {
