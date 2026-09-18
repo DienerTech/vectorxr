@@ -56,10 +56,10 @@ void TestTurboExperimentalConfig() {
     Expect(configured.ok, "Valid experimental config rejected: " + configured.error);
     const auto dcs = depthxr::ResolveTurboSettings(configured.document, "DCS.exe");
     const auto other = depthxr::ResolveTurboSettings(configured.document, "Other.exe");
-    Expect(dcs.experimental.enabled && dcs.experimental.timing_trace && dcs.experimental.wait_for_submit &&
+    Expect(dcs.experimental.enabled && dcs.experimental.wait_for_submit &&
            dcs.experimental.sample_at_entry && dcs.experimental.frame_limit == 45 &&
            dcs.experimental.prediction_percent == 75, "Selected application's experimental settings were lost");
-    Expect(!other.experimental.enabled && !other.experimental.timing_trace, "Experiments escaped the application allowlist");
+    Expect(!other.experimental.enabled, "Experiments escaped the application allowlist");
     auto disabled = configured.document;
     disabled.applications[0].enabled = false;
     Expect(!depthxr::ResolveTurboSettings(disabled, "DCS.exe").experimental.enabled,
@@ -2057,6 +2057,7 @@ void TestTurboTraceBoundedAndDrained() {
     {
         depthxr::Logger logger;
         logger.Initialize(directory / "trace.log");
+        logger.SetLevel(depthxr::LogLevel::Debug);
         log_path = logger.ActiveLogPath();
         depthxr::TurboTimingTrace trace;
         trace.Record("disabled");
@@ -2070,6 +2071,8 @@ void TestTurboTraceBoundedAndDrained() {
         trace.Stop();
         Expect(!trace.Enabled(), "Stopping trace left it active");
         trace.Record("after.stop");
+        trace.SetDebugEnabled(logger, true);
+        Expect(!trace.Enabled(), "Log-level update restarted an ended session");
     }
     std::ifstream input(log_path);
     std::string line;
@@ -2082,6 +2085,47 @@ void TestTurboTraceBoundedAndDrained() {
                "Disabled tracing wrote events");
     }
     Expect(first && events > 0 && events <= 30000, "Trace lost its first event, failed to drain, or exceeded its budget");
+    input.close();
+    std::filesystem::remove(log_path);
+}
+
+void TestTurboTraceFollowsDebugLevel() {
+    const auto directory = std::filesystem::current_path() / "build" / "vectorxr-test-turbo-trace";
+    std::filesystem::create_directories(directory);
+    std::filesystem::path log_path;
+    {
+        depthxr::Logger logger;
+        logger.Initialize(directory / "level.log");
+        log_path = logger.ActiveLogPath();
+        depthxr::TurboTimingTrace trace;
+        trace.Start(logger);
+        Expect(!trace.Enabled(), "Info logging unexpectedly enabled detailed timing");
+        trace.Record("info.only");
+        logger.SetLevel(depthxr::LogLevel::Debug);
+        trace.SetDebugEnabled(logger, true);
+        Expect(trace.Enabled(), "Debug did not enable detailed timing in the live session");
+        const auto first_id = trace.NextId();
+        logger.SetLevel(depthxr::LogLevel::Info);
+        trace.SetDebugEnabled(logger, false);
+        Expect(!trace.Enabled() && !trace.Capturing(), "Info did not pause detailed timing");
+        trace.Record("info.paused");
+        logger.SetLevel(depthxr::LogLevel::Debug);
+        trace.SetDebugEnabled(logger, true);
+        Expect(trace.NextId() > first_id, "Resuming Debug reset the session correlation IDs");
+        trace.Record("debug.resumed");
+        trace.Stop();
+    }
+    std::ifstream input(log_path);
+    std::string line;
+    bool resumed = false;
+    while (std::getline(input, line)) {
+        resumed = resumed || line.find("event=debug.resumed") != std::string::npos;
+        Expect(line.find("event=info.") == std::string::npos, "Info interval leaked detailed timing");
+        if (line.find("Turbo-trace ns=") != std::string::npos) {
+            Expect(line.find("[debug]") != std::string::npos, "Timing trace was not a Debug-level record");
+        }
+    }
+    Expect(resumed, "Resumed Debug trace did not drain");
     input.close();
     std::filesystem::remove(log_path);
 }
@@ -2829,6 +2873,7 @@ int main() {
     TestSwapchainImageQueuePreservesFifo();
     TestLoggerCollapsesDuplicateMessages();
     TestTurboTraceBoundedAndDrained();
+    TestTurboTraceFollowsDebugLevel();
     TestEyeGazeExtensionCompatibilityPolicy();
     TestQuadViewsSessionActivationPolicy();
     TestQuadViewsRecoveryStabilizationPolicy();

@@ -397,7 +397,6 @@ struct TurboExperimentalSettings {
     bool sample_at_entry{false};
     int prediction_percent{100};
     int frame_limit{0};
-    bool timing_trace{false};
 };
 
 struct TurboModuleConfig {

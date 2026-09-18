@@ -293,12 +293,16 @@ export interface TurboExperimentalSettings {
   sampleAtEntry: boolean
   predictionPercent: number
   frameLimit: number
-  timingTrace: boolean
 }
 
 export function defaultTurboExperimental(): TurboExperimentalSettings {
   return { enabled: false, applicationIds: [], waitForSubmit: false, sampleAtEntry: false,
-    predictionPercent: 100, frameLimit: 0, timingTrace: false }
+    predictionPercent: 100, frameLimit: 0 }
+}
+
+export function toolkitInspiredTurboExperimental(applicationIds: string[]): TurboExperimentalSettings {
+  return { ...defaultTurboExperimental(), applicationIds: [...applicationIds], enabled: true,
+    waitForSubmit: true, sampleAtEntry: true }
 }
 
 export function normalizeTurboExperimental(value: unknown): TurboExperimentalSettings {
@@ -312,7 +316,6 @@ export function normalizeTurboExperimental(value: unknown): TurboExperimentalSet
     sampleAtEntry: input.sampleAtEntry === true,
     predictionPercent: integer(input.predictionPercent, 50, 100, 100),
     frameLimit: integer(input.frameLimit, 20, 240, 0),
-    timingTrace: input.timingTrace === true,
   }
 }
 

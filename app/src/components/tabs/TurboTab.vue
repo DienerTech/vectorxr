@@ -104,6 +104,13 @@ const turboInUse = computed(
   () => props.config.modules.turbo.enabled || props.config.modules.turbo.profiles.some((profile) => profile.enabled),
 )
 
+const experimentalScope = computed(() => {
+  const selected = props.applications.filter(application => application.enabled &&
+    props.config.modules.turbo.experimental.applicationIds.includes(application.id))
+  if (!selected.length) return 'No enabled applications selected. Choose applications in Configure experiments.'
+  return `Selected applications: ${selected.map(application => application.name).join(', ')}.`
+})
+
 const toolkitConflict = computed(() => {
   if (!turboInUse.value) {
     return false
@@ -305,10 +312,17 @@ function closeSubPage() {
         </div>
 
         <div class="mb-3 flex flex-wrap items-center justify-between gap-3 rounded-xl border p-4 surface-panel-soft">
-          <div><h3 class="font-semibold">Experimental timing</h3>
-            <p class="mt-1 text-sm text-muted">Optional timing comparisons and detailed logs for selected applications. Requires relaunch.</p>
+          <div class="min-w-0 flex-1"><h3 class="font-semibold">Experimental timing</h3>
+            <p class="mt-1 text-sm text-muted">{{ config.modules.turbo.experimental.enabled ? experimentalScope : 'Off — normal Turbo timing.' }}</p>
+            <p class="mt-1 text-sm text-muted">Save and relaunch the VR application to apply changes.</p>
           </div>
-          <button type="button" class="button-secondary rounded-xl px-4 py-2 text-sm" @click="openSubPage('experimental')">{{ config.modules.turbo.experimental.enabled ? 'Experiments enabled' : 'Open experiments' }} →</button>
+          <div class="flex flex-wrap items-center gap-3">
+            <label class="pill-toggle inline-flex items-center gap-3 rounded-full px-4 py-2 text-sm font-medium">
+              <input v-model="config.modules.turbo.experimental.enabled" class="h-4 w-4 accent-depthxr-copper" type="checkbox" />
+              Timing experiments {{ config.modules.turbo.experimental.enabled ? 'On' : 'Off' }}
+            </label>
+            <button type="button" class="button-secondary rounded-xl px-4 py-2 text-sm" @click="openSubPage('experimental')">Configure experiments →</button>
+          </div>
         </div>
         <div class="grid gap-3 md:grid-cols-2">
           <button

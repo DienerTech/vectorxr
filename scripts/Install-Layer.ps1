@@ -30,6 +30,19 @@ if (-not (Test-Path $ManifestPath)) {
     throw "Manifest not found at '$ManifestPath'. Build the layer first or pass -ManifestPath explicitly."
 }
 
+$existingKey = Get-Item -LiteralPath $RegistryPath -ErrorAction SilentlyContinue
+if ($existingKey -and $existingKey.GetValue($ManifestPath, $null) -eq 0) {
+    $competingRegistrations = @($existingKey.Property | Where-Object {
+        $_ -ne $ManifestPath -and
+        [System.IO.Path]::GetFileName($_) -ieq 'XR_APILAYER_DIENERTECH_VECTORXR.json' -and
+        $existingKey.GetValue($_, $null) -eq 0
+    })
+    if ($competingRegistrations.Count -eq 0 -and $existingKey.GetValue($LegacyManifestPath, $null) -ne 0) {
+        Write-Host "Release manifest already enabled at $ManifestPath; rebuilt DLL is active for new VR processes."
+        return
+    }
+}
+
 Write-Host "Installing OpenXR layer manifest from $ManifestPath"
 
 $installProcess = Start-Process -FilePath powershell.exe -Verb RunAs -WindowStyle Hidden -Wait -PassThru -ArgumentList @"

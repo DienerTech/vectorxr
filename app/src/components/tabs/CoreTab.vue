@@ -95,7 +95,7 @@ async function previewSoundVolume() {
           <span class="mb-1.5 flex items-center gap-1.5 text-sm font-medium">
             Log Level
             <span
-              title="Info writes normal operational messages and errors. Debug adds verbose diagnostics."
+              title="Info writes normal operational messages and errors. Debug adds verbose diagnostics, including bounded Turbo frame-timing traces. Logging changes apply live; launch the VR app with Debug enabled for runtime clock measurements."
               class="cursor-help select-none text-xs text-muted"
               >ⓘ</span
             >

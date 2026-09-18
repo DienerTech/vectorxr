@@ -4604,6 +4604,7 @@ XrResult OpenXrLayer::TraceRuntimeWaitFrame(XrSession session, const XrFrameWait
     const auto id = turbo_trace_.NextId();
     turbo_trace_.Record("runtime.wait.enter", id);
     const auto result = next_wait_frame_(session, info, state);
+    if (XR_FAILED(result)) turbo_trace_.Burst();
     turbo_trace_.Record("runtime.wait.return", id, XR_SUCCEEDED(result) ? state->predictedDisplayTime : 0,
                         XR_SUCCEEDED(result) ? state->predictedDisplayPeriod : 0, result);
     if (XR_SUCCEEDED(result) && turbo_trace_.Capturing()) turbo_trace_.Record("runtime.wait.state", id, state->shouldRender, TurboClockNow());
@@ -4615,6 +4616,7 @@ XrResult OpenXrLayer::TraceRuntimeBeginFrame(XrSession session, const XrFrameBeg
     const auto id = turbo_trace_.NextId();
     turbo_trace_.Record("runtime.begin.enter", id);
     const auto result = next_begin_frame_(session, info);
+    if (XR_FAILED(result)) turbo_trace_.Burst();
     turbo_trace_.Record("runtime.begin.return", id, result);
     return result;
 }
@@ -4623,7 +4625,12 @@ XrResult OpenXrLayer::TraceRuntimeEndFrame(XrSession session, const XrFrameEndIn
     if (!turbo_trace_.Enabled()) return next_end_frame_(session, info);
     const auto id = turbo_trace_.NextId();
     turbo_trace_.Record("submit.enter", id, info->displayTime, info->layerCount);
+    if (turbo_trace_.Capturing()) {
+        const XrTime clock_now = TurboClockNow();
+        turbo_trace_.Record("submit.clock", id, clock_now, clock_now > 0 ? info->displayTime - clock_now : 0);
+    }
     const auto result = next_end_frame_(session, info);
+    if (XR_FAILED(result)) turbo_trace_.Burst();
     turbo_trace_.Record("submit.return", id, result);
     return result;
 }
@@ -4633,7 +4640,7 @@ bool OpenXrLayer::WantsTurboClockConversion() {
     if (!parsed.ok) return false;
     const auto settings = ResolveTurboSettings(parsed.document, GetCurrentExecutableName());
     return parsed.document.core.enabled &&
-        (settings.experimental.timing_trace ||
+        (parsed.document.core.log_level == LogLevel::Debug ||
          (settings.experimental.enabled && settings.experimental.prediction_percent != 100));
 }
 
@@ -4653,7 +4660,7 @@ std::string OpenXrLayer::TurboTimingConfiguration() const {
           "; prediction=" + std::to_string(turbo_experiment_.prediction_percent) + "%" +
           "; clock=" + (turbo_convert_counter_time_ ? "available" : "unavailable") +
           "; cap=" + std::to_string(turbo_experiment_.frame_limit)
-        : std::string("Normal timing")) + "; trace=" + (turbo_experiment_.timing_trace ? "on" : "off");
+        : std::string("Normal timing")) + "; trace=controlled by live Debug log level";
 }
 
 void OpenXrLayer::ConfigureTurboExperiment() {
@@ -4677,14 +4684,13 @@ void OpenXrLayer::ConfigureTurboExperiment() {
         ", sampleAtEntry=" + std::to_string(turbo_experiment_.sample_at_entry) +
         ", predictionPercent=" + std::to_string(turbo_experiment_.prediction_percent) +
         ", frameLimit=" + std::to_string(turbo_experiment_.frame_limit) +
-        ", timingTrace=" + std::to_string(turbo_experiment_.timing_trace) +
         ", runtimeClock=" + std::to_string(turbo_convert_counter_time_ != nullptr) +
         ", pacing=" + (turbo_experiment_.enabled ? std::string("experimental-async") : ToString(resolved_settings_.turbo.pacing_mode)) +
         ", metrics=" + ToString(resolved_settings_.turbo.metrics_mode) + "; changes require a new session.");
     if (turbo_experiment_.enabled && turbo_experiment_.prediction_percent != 100 && !turbo_convert_counter_time_) {
         logger_.Info("Turbo experiment: runtime clock conversion unavailable; prediction dampening will be bypassed.");
     }
-    if (turbo_experiment_.timing_trace) turbo_trace_.Start(logger_);
+    turbo_trace_.Start(logger_);
 }
 
 // Turbo mode frame loop. The runtime always sees a conformant
@@ -4835,9 +4841,11 @@ XrResult OpenXrLayer::WaitFrame(XrSession session,
                                           "publication; generation=" +
                                           std::to_string(turbo_async_wait_generation_) + ".");
                         }
+                        turbo_trace_.Record("poll.handoff.enter", trace_id, turbo_async_wait_generation_);
                         turbo_async_handoff_cv_.wait(lock, [this] {
                             return !turbo_async_handoff_active_ || turbo_async_wait_.valid();
                         });
+                        turbo_trace_.Record("poll.handoff.return", trace_id, turbo_async_wait_generation_);
                         wait_pipelined = turbo_async_wait_.valid();
                         async_handoff = turbo_async_handoff_active_;
                         if (!wait_pipelined && !async_handoff) {
@@ -4857,7 +4865,9 @@ XrResult OpenXrLayer::WaitFrame(XrSession session,
                         const std::shared_future<void> pending_wait = turbo_async_wait_;
                         const std::uint64_t pending_generation = turbo_async_wait_generation_;
                         lock.unlock();
+                        turbo_trace_.Record("poll.worker.enter", trace_id, pending_generation);
                         pending_wait.wait();
+                        turbo_trace_.Record("poll.worker.return", trace_id, pending_generation);
                         lock.lock();
                         if (pending_generation != turbo_async_wait_generation_) {
                             // EndFrame already retired this wait and may have
@@ -4892,6 +4902,7 @@ XrResult OpenXrLayer::WaitFrame(XrSession session,
                 }
                 turbo_last_wait_frame_wall_time_ = now;
 
+                const XrTime extrapolated_prediction = predicted;
                 if (experimental_active && turbo_experiment_.prediction_percent != 100) {
                     const XrTime clock_now = TurboClockNow();
                     if (clock_now > 0 && predicted > clock_now) {
@@ -4908,6 +4919,10 @@ XrResult OpenXrLayer::WaitFrame(XrSession session,
                 frame_state->predictedDisplayPeriod = turbo_last_predicted_display_period_;
                 frame_state->shouldRender = turbo_last_should_render_ ? XR_TRUE : XR_FALSE;
                 turbo_max_returned_display_time_ = frame_state->predictedDisplayTime;
+                turbo_trace_.Record("predict.adjust", trace_id, extrapolated_prediction, predicted,
+                                    frame_state->predictedDisplayTime - predicted);
+                turbo_trace_.Record("predict.state", trace_id, turbo_async_wait_completed_, async_handoff,
+                                    static_cast<int>(turbo_pacing_mode_));
                 turbo_trace_.Record("predict", trace_id, turbo_last_predicted_display_time_,
                                     frame_state->predictedDisplayTime, turbo_async_wait_generation_);
                 turbo_trace_.Record("wait.return", trace_id, frame_state->predictedDisplayTime,
@@ -5347,8 +5362,11 @@ XrResult OpenXrLayer::ForwardEndFrame(XrSession session,
             logger_.Debug("Turbo-diag: async drain starting (250ms cap).");
         }
         const auto drain_start = std::chrono::steady_clock::now();
+        turbo_trace_.Record("drain.enter", pending_async_generation);
         const bool ready =
             pending_async_wait.wait_for(kTurboDrainTimeout) == std::future_status::ready;
+        if (!ready) turbo_trace_.Burst();
+        turbo_trace_.Record("drain.return", pending_async_generation, ready);
         const double drain_ms =
             std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - drain_start)
                 .count();
@@ -5654,6 +5672,7 @@ XrResult OpenXrLayer::ForwardEndFrame(XrSession session,
                 PublishTurboAsyncHandoffLocked();
                 turbo_async_job_session_ = session;
                 turbo_async_job_pending_ = true;
+                turbo_trace_.Record("worker.queued", turbo_async_wait_generation_);
                 turbo_async_worker_cv_.notify_one();
             }
         }
@@ -6447,6 +6466,8 @@ void OpenXrLayer::CancelTurboAsyncHandoffLocked(const char* reason) {
     }
     turbo_async_handoff_active_ = false;
     ++turbo_async_handoff_cancellations_;
+    turbo_trace_.Burst();
+    turbo_trace_.Record("handoff.cancel", turbo_async_wait_generation_);
     turbo_async_handoff_cv_.notify_all();
     logger_.Info("Turbo: async handoff shield cancelled; reason=" +
                  std::string(reason ? reason : "unknown") +
@@ -6504,6 +6525,7 @@ void OpenXrLayer::TurboAsyncWorkerLoop() {
             turbo_async_wait_result_ = wait_result;
             turbo_async_wait_completed_ = true;
         }
+        turbo_trace_.Record("worker.ready", generation, wait_result);
         if (completion) {
             completion->set_value();
         }
@@ -8409,6 +8431,7 @@ void OpenXrLayer::RefreshResolvedSettings() {
     frame_pacing_debug_enabled_.store(resolved_settings_.core.log_level == LogLevel::Debug,
                                       std::memory_order_relaxed);
     logger_.SetLevel(resolved_settings_.core.log_level);
+    turbo_trace_.SetDebugEnabled(logger_, resolved_settings_.core.log_level == LogLevel::Debug);
     logger_.SetRetentionFiles(resolved_settings_.core.log_retention_files);
     if (!last_logged_settings_ || !SameSettings(*last_logged_settings_, resolved_settings_)) {
         LogResolvedSettings(resolved_settings_);

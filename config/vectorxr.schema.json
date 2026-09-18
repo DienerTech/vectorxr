@@ -759,7 +759,8 @@
             },
             "timingTrace": {
               "type": "boolean",
-              "default": false
+              "deprecated": true,
+              "description": "Legacy field, ignored. Detailed Turbo traces follow core.logLevel=debug."
             }
           }
         },

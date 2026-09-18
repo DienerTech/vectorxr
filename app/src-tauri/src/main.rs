@@ -672,13 +672,12 @@ struct TurboExperimentalSettings {
     sample_at_entry: bool,
     prediction_percent: u32,
     frame_limit: u32,
-    timing_trace: bool,
 }
 
 impl Default for TurboExperimentalSettings {
     fn default() -> Self {
         Self { enabled: false, application_ids: Vec::new(), wait_for_submit: false,
-            sample_at_entry: false, prediction_percent: 100, frame_limit: 0, timing_trace: false }
+            sample_at_entry: false, prediction_percent: 100, frame_limit: 0 }
     }
 }
 
@@ -2679,7 +2678,7 @@ mod tests {
         assert_eq!(defaults.experimental.prediction_percent, 100);
         let input = serde_json::json!({"experimental": {
             "enabled": true, "applicationIds": ["dcs"], "waitForSubmit": true,
-            "sampleAtEntry": true, "predictionPercent": 75, "frameLimit": 45, "timingTrace": true
+            "sampleAtEntry": true, "predictionPercent": 75, "frameLimit": 45
         }});
         let config: super::TurboModuleConfig = serde_json::from_value(input.clone()).unwrap();
         let output = serde_json::to_value(config).unwrap();

@@ -1145,11 +1145,13 @@ bool ParseTurboExperimental(const JsonValue::Object& object, TurboExperimentalSe
     if (!CheckAllowedKeys(object, {"enabled", "applicationIds", "waitForSubmit", "sampleAtEntry",
                                   "predictionPercent", "frameLimit", "timingTrace"}, error)) return false;
     for (auto [key, target] : {std::pair{"enabled", &out.enabled}, {"waitForSubmit", &out.wait_for_submit},
-                              {"sampleAtEntry", &out.sample_at_entry}, {"timingTrace", &out.timing_trace}}) {
+                              {"sampleAtEntry", &out.sample_at_entry}}) {
         std::optional<bool> value;
         if (!ReadOptionalBool(object, key, value, error)) return false;
         if (value) *target = *value;
     }
+    std::optional<bool> legacy_trace;
+    if (!ReadOptionalBool(object, "timingTrace", legacy_trace, error)) return false;
     const auto ids = object.find("applicationIds");
     if (ids != object.end() && !ParseStringArray(ids->second, "turbo.experimental.applicationIds", out.application_ids, error)) return false;
     for (auto [key, target] : {std::pair{"predictionPercent", &out.prediction_percent}, {"frameLimit", &out.frame_limit}}) {
