@@ -2037,6 +2037,7 @@ XrResult OpenXrLayer::DestroyInstance(XrInstance instance) {
 
     std::scoped_lock lock(mutex_);
 
+    osd_.Shutdown();
     DestroyEyeGazeResources();
     DestroyVarjoNativeFoveationResources();
     DestroyInternalReferenceSpaces();
@@ -2162,6 +2163,14 @@ XrResult OpenXrLayer::CreateSession(XrInstance instance,
     } else {
         logger_.Info("D3D11 graphics binding not detected; synthesized quadviews is unavailable for this session.");
     }
+    XrSystemProperties osd_system{XR_TYPE_SYSTEM_PROPERTIES};
+    const bool osd_limits = create_info && next_get_system_properties_ &&
+        XR_SUCCEEDED(next_get_system_properties_(instance, create_info->systemId, &osd_system));
+    osd_.Initialize(*session, d3d11_binding ? d3d11_binding->device : nullptr,
+        osd_limits ? osd_system.graphicsProperties.maxLayerCount : 0,
+        {next_enumerate_swapchain_formats_, next_create_swapchain_, next_enumerate_swapchain_images_,
+         next_acquire_swapchain_image_, next_wait_swapchain_image_, next_release_swapchain_image_,
+         next_destroy_swapchain_, next_create_reference_space_, next_destroy_space_});
     const XrResult internal_result = CreateInternalReferenceSpaces(*session);
     if (XR_FAILED(internal_result)) {
         logger_.Error("Failed to create one or more internal reference spaces; PivotXR will degrade for this session.");
@@ -2197,6 +2206,7 @@ XrResult OpenXrLayer::DestroySession(XrSession session) {
     {
         std::scoped_lock lock(mutex_);
         if (session == active_session_) {
+            osd_.Shutdown();
             DestroyEyeGazeResources();
             DestroyVarjoNativeFoveationResources();
             DestroyInternalReferenceSpaces();
@@ -2260,6 +2270,8 @@ XrResult OpenXrLayer::BeginSession(XrSession session, const XrSessionBeginInfo* 
     }
     active_session_ = session;
     session_begin_wall_time_ = std::chrono::steady_clock::now();
+    osd_.ResetPresentation();
+    osd_last_input_poll_.reset();
     ConfigureTurboExperiment();
     TurboRecoveryRecord recovery_identity;
     turbo_test_started_at_ = RuntimeRelayUnixMilliseconds();
@@ -4600,13 +4612,19 @@ bool OpenXrLayer::ComposeQuadViewsD3D11(const XrCompositionLayerProjection* sour
 }
 
 XrResult OpenXrLayer::TraceRuntimeWaitFrame(XrSession session, const XrFrameWaitInfo* info, XrFrameState* state) {
-    if (!turbo_trace_.Enabled()) return next_wait_frame_(session, info, state);
+    if (!turbo_trace_.Enabled()) {
+        const auto result=next_wait_frame_(session, info, state);
+        if (XR_SUCCEEDED(result) && state)
+            osd_should_render_.store(state->shouldRender == XR_TRUE, std::memory_order_relaxed);
+        return result;
+    }
     const auto id = turbo_trace_.NextId();
     turbo_trace_.Record("runtime.wait.enter", id);
     const auto result = next_wait_frame_(session, info, state);
     if (XR_FAILED(result)) turbo_trace_.Burst();
     turbo_trace_.Record("runtime.wait.return", id, XR_SUCCEEDED(result) ? state->predictedDisplayTime : 0,
                         XR_SUCCEEDED(result) ? state->predictedDisplayPeriod : 0, result);
+    if (XR_SUCCEEDED(result) && state) osd_should_render_.store(state->shouldRender == XR_TRUE, std::memory_order_relaxed);
     if (XR_SUCCEEDED(result) && turbo_trace_.Capturing()) turbo_trace_.Record("runtime.wait.state", id, state->shouldRender, TurboClockNow());
     return result;
 }
@@ -4622,14 +4640,35 @@ XrResult OpenXrLayer::TraceRuntimeBeginFrame(XrSession session, const XrFrameBeg
 }
 
 XrResult OpenXrLayer::TraceRuntimeEndFrame(XrSession session, const XrFrameEndInfo* info) {
-    if (!turbo_trace_.Enabled()) return next_end_frame_(session, info);
+    XrFrameEndInfo with_osd{};
+    std::vector<const XrCompositionLayerBaseHeader*> layers;
+    if (info && osd_monitoring_.load(std::memory_order_relaxed)) {
+        if (const auto* overlay=osd_.Append(*info, osd_should_render_.load(std::memory_order_relaxed))) {
+            with_osd=*info;
+            layers.assign(info->layers, info->layers+info->layerCount);
+            layers.push_back(overlay);
+            with_osd.layerCount=static_cast<std::uint32_t>(layers.size()); with_osd.layers=layers.data();
+            info=&with_osd;
+        }
+    }
+    const auto submit=[&] {
+        const auto result=next_end_frame_(session,info);
+        if (!layers.empty() && XR_FAILED(result)) {
+            // Never retry xrEndFrame: a failing runtime may already consume it.
+            // Remove the optional overlay from subsequent submissions instead.
+            osd_.SubmissionFailed(result);
+            logger_.Error("OSD disabled after frame submission failed: result="+std::to_string(result));
+        }
+        return result;
+    };
+    if (!turbo_trace_.Enabled()) return submit();
     const auto id = turbo_trace_.NextId();
     turbo_trace_.Record("submit.enter", id, info->displayTime, info->layerCount);
     if (turbo_trace_.Capturing()) {
         const XrTime clock_now = TurboClockNow();
         turbo_trace_.Record("submit.clock", id, clock_now, clock_now > 0 ? info->displayTime - clock_now : 0);
     }
-    const auto result = next_end_frame_(session, info);
+    const auto result = submit();
     if (XR_FAILED(result)) turbo_trace_.Burst();
     turbo_trace_.Record("submit.return", id, result);
     return result;
@@ -6668,6 +6707,7 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
     }
     ReloadConfigIfNeeded();
     RefreshResolvedSettings();
+    PrepareOsd();
     // Capture application-submitted rectangles before synthesized Quadviews
     // rewrites them into two runtime views. Report allocated sizes separately.
     if (frame_end_info && frame_end_info->layers) {
@@ -8338,6 +8378,45 @@ void OpenXrLayer::PollConfigFile() {
     }
 }
 
+void OpenXrLayer::PrepareOsd() {
+    const auto& settings=resolved_settings_.core.osd;
+    if (!settings.enabled && !osd_was_enabled_) return;
+    osd_was_enabled_=settings.enabled;
+    // OSD remains available when enhancements are off, so it can explain state.
+    if (settings.enabled) {
+        const auto now=std::chrono::steady_clock::now();
+        if (!osd_last_input_poll_ || now-*osd_last_input_poll_>=kInputBindingPollInterval) {
+            osd_last_input_poll_=now;
+            osd_toggle_down_=PollInputBindingDown(settings.toggle_binding);
+            osd_cycle_down_=PollInputBindingDown(settings.cycle_binding);
+        }
+    }
+    OsdSnapshot snapshot;
+    if (settings.enabled) {
+        snapshot.application=current_exe_name_; snapshot.runtime=runtime_name_;
+        snapshot.turbo=turbo_recovery_blocked_.load()?"Recovery disabled":turbo_auto_suspended_.load()?"Suspended":
+            turbo_effective_active_.load()?(turbo_effective_async_.load()?"Async":"Sequenced"):
+            (resolved_settings_.turbo.enabled && turbo_toggle_enabled_ && resolved_settings_.core.enabled)?"Waiting":"Off";
+        snapshot.experimental=turbo_experiment_.enabled;
+        auto add=[&](const char* name) { if (!snapshot.modules.empty()) snapshot.modules+="  /  "; snapshot.modules+=name; };
+        if (resolved_settings_.core.enabled && resolved_settings_.depthxr.enabled && depthxr_toggle_enabled_) add("Depth");
+        if (resolved_settings_.core.enabled && resolved_settings_.pivotxr.enabled) add("Pivot");
+        if (quadviews_session_active_.value_or(false)) add("Quadviews");
+        if (snapshot.modules.empty()) snapshot.modules="Off";
+        const auto& e=resolved_settings_.turbo.experimental;
+        if (e.enabled!=turbo_experiment_.enabled || (e.enabled &&
+            (e.wait_for_submit!=turbo_experiment_.wait_for_submit || e.sample_at_entry!=turbo_experiment_.sample_at_entry ||
+             e.prediction_percent!=turbo_experiment_.prediction_percent || e.frame_limit!=turbo_experiment_.frame_limit)))
+            snapshot.restart="Turbo experiments";
+        if (deferred_quadviews_config_active_) snapshot.restart+=(snapshot.restart.empty()?"":" + ")+std::string("Quadviews");
+    }
+    const auto before=osd_.Status();
+    osd_.Prepare(settings, std::move(snapshot), osd_toggle_down_, osd_cycle_down_);
+    const auto after=osd_.Status();
+    if (before.compact!=after.compact) SoundPlayer::Instance().PlayTransition(settings.cycle_binding.sound,after.compact,dll_directory_,resolved_settings_.core.sound_volume);
+    if (before.shown!=after.shown) SoundPlayer::Instance().PlayTransition(settings.toggle_binding.sound,after.shown,dll_directory_,resolved_settings_.core.sound_volume);
+}
+
 void OpenXrLayer::RefreshResolvedSettings() {
     // Re-resolving settings is expensive (string compares, copies, logging
     // checks); the result only changes when the config document or the active
@@ -8354,6 +8433,8 @@ void OpenXrLayer::RefreshResolvedSettings() {
     const ResolvedRuntimeConfig previous = resolved_settings_;
     resolved_settings_ = ResolveRuntimeConfig(config_, current_exe_name_);
 
+    osd_monitoring_.store(resolved_settings_.core.osd.enabled, std::memory_order_relaxed);
+    osd_last_input_poll_.reset();
     const bool configured_core_active = resolved_settings_.core.enabled;
     const bool configured_quadviews_active =
         configured_core_active && resolved_settings_.quadviews.enabled;
@@ -8689,6 +8770,11 @@ void OpenXrLayer::CaptureInstanceFunctions() {
 }
 
 void OpenXrLayer::ResetSessionState() {
+    osd_.Shutdown();
+    osd_monitoring_.store(false);
+    osd_should_render_.store(true);
+    osd_last_input_poll_.reset();
+    osd_toggle_down_=false; osd_cycle_down_=false; osd_was_enabled_=false;
     if (!runtime_relay_session_id_.empty()) {
         runtime_relay_sessions_to_remove_.push_back(runtime_relay_session_id_);
         runtime_relay_session_id_.clear();
@@ -12314,6 +12400,9 @@ void OpenXrLayer::PollRuntimeRelay() {
             turbo_auto_suspended_.load() ? "suspended" :
             turbo_effective_active_.load() ? (turbo_effective_async_.load() ? "async" : "sequenced") :
             (resolved_settings_.core.enabled && resolved_settings_.turbo.enabled && turbo_toggle_enabled_) ? "waiting" : "off";
+        const auto overlay=osd_.Status();
+        status.osd_available=overlay.available; status.osd_visible=overlay.visible;
+        status.osd_compact=overlay.compact; status.osd_message=overlay.message;
         status.turbo_reason = turbo_recovery_.Reason();
         if (status.turbo_reason.empty() && turbo_auto_suspended_.load())
             status.turbo_reason = "Runtime pacing repeatedly stalled. Use the Turbo toggle to retry.";

@@ -200,6 +200,94 @@
         }
       }
     },
+    "osdSettings": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": false
+        },
+        "visibleOnStart": {
+          "type": "boolean",
+          "default": true
+        },
+        "compact": {
+          "type": "boolean",
+          "default": false
+        },
+        "showGraph": {
+          "type": "boolean",
+          "default": true
+        },
+        "showRuntime": {
+          "type": "boolean",
+          "default": true
+        },
+        "showTurbo": {
+          "type": "boolean",
+          "default": true
+        },
+        "showModules": {
+          "type": "boolean",
+          "default": true
+        },
+        "showClock": {
+          "type": "boolean",
+          "default": true
+        },
+        "horizontalDegrees": {
+          "type": "number",
+          "minimum": -40,
+          "maximum": 40,
+          "default": 20
+        },
+        "verticalDegrees": {
+          "type": "number",
+          "minimum": -35,
+          "maximum": 35,
+          "default": -12
+        },
+        "distanceMeters": {
+          "type": "number",
+          "minimum": 0.5,
+          "maximum": 3,
+          "default": 1.2
+        },
+        "scale": {
+          "type": "number",
+          "minimum": 50,
+          "maximum": 150,
+          "default": 100
+        },
+        "opacity": {
+          "type": "integer",
+          "minimum": 30,
+          "maximum": 100,
+          "default": 90
+        },
+        "updateHz": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 20,
+          "default": 5
+        },
+        "accent": {
+          "enum": [
+            "teal",
+            "copper",
+            "blue"
+          ],
+          "default": "teal"
+        },
+        "toggleBinding": {
+          "$ref": "#/$defs/inputBinding"
+        },
+        "cycleBinding": {
+          "$ref": "#/$defs/inputBinding"
+        }
+      }
+    },
     "core": {
       "type": "object",
       "additionalProperties": false,
@@ -210,6 +298,7 @@
         "trackSeenApps"
       ],
       "properties": {
+        "osd": { "$ref": "#/$defs/osdSettings" },
         "enabled": {
           "type": "boolean"
         },

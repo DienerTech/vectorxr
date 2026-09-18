@@ -3,6 +3,16 @@ import type { CoreConfig, DepthXRProfileConfig, DepthXRSettings, InputBinding, P
 function validateCoreConfig(core: CoreConfig): string[] {
   const errors: string[] = []
 
+  for (const [name, low, high] of [
+    ['horizontalDegrees', -40, 40], ['verticalDegrees', -35, 35], ['distanceMeters', .5, 3],
+    ['scale', 50, 150], ['opacity', 30, 100], ['updateHz', 1, 20],
+  ] as const) {
+    const value = core.osd[name]
+    if (!Number.isFinite(value) || value < low || value > high ||
+        ((name === 'opacity' || name === 'updateHz') && !Number.isInteger(value))) errors.push(`OSD ${name} must be between ${low} and ${high}`)
+  }
+  errors.push(...validateInputBinding('core.osd.toggleBinding', core.osd.toggleBinding), ...validateInputBinding('core.osd.cycleBinding', core.osd.cycleBinding))
+
   if (!Number.isInteger(core.logRetentionFiles) || core.logRetentionFiles < 1 || core.logRetentionFiles > 50) {
     errors.push('core.logRetentionFiles must be an integer between 1 and 50')
   }

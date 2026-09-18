@@ -693,12 +693,62 @@ bool CheckAllowedKeys(const JsonValue::Object& object,
     return true;
 }
 
+bool ParseOsdSettings(const JsonValue::Object& object, OsdSettings& out, std::string& error) {
+    if (!CheckAllowedKeys(object, {"enabled", "visibleOnStart", "compact", "horizontalDegrees", "verticalDegrees",
+        "distanceMeters", "scale", "opacity", "updateHz", "showGraph", "showRuntime", "showTurbo", "showModules",
+        "showClock", "accent", "toggleBinding", "cycleBinding"}, error)) return false;
+    for (const auto& [key, target] : {std::pair{"enabled", &out.enabled}, {"visibleOnStart", &out.visible_on_start},
+        {"compact", &out.compact}, {"showGraph", &out.show_graph}, {"showRuntime", &out.show_runtime},
+        {"showTurbo", &out.show_turbo}, {"showModules", &out.show_modules}, {"showClock", &out.show_clock}}) {
+        std::optional<bool> value;
+        if (!ReadOptionalBool(object, key, value, error)) return false;
+        if (value) *target = *value;
+    }
+    const auto number = [&](const char* key, double& target, double low, double high) {
+        std::optional<double> value;
+        if (!ReadOptionalNumber(object, key, value, error)) return false;
+        if (value) {
+            if (!std::isfinite(*value) || *value < low || *value > high) {
+                error = std::string("core.osd.") + key + " is out of range"; return false;
+            }
+            target = *value;
+        }
+        return true;
+    };
+    if (!number("horizontalDegrees", out.horizontal_degrees, -40, 40) ||
+        !number("verticalDegrees", out.vertical_degrees, -35, 35) ||
+        !number("distanceMeters", out.distance_meters, 0.5, 3) || !number("scale", out.scale, 50, 150)) return false;
+    for (const auto& [key, target] : {std::pair{"opacity", &out.opacity}, {"updateHz", &out.update_hz}}) {
+        std::optional<double> value;
+        if (!ReadOptionalNumber(object, key, value, error)) return false;
+        const int low = std::string_view(key) == "opacity" ? 30 : 1;
+        const int high = std::string_view(key) == "opacity" ? 100 : 20;
+        if (value) {
+            if (!std::isfinite(*value) || std::floor(*value) != *value || *value < low || *value > high) {
+                error = std::string("core.osd.") + key + " must be an integer in range"; return false;
+            }
+            *target = static_cast<int>(*value);
+        }
+    }
+    std::optional<std::string> accent;
+    if (!ReadOptionalString(object, "accent", accent, error)) return false;
+    if (accent) {
+        if (*accent != "teal" && *accent != "copper" && *accent != "blue") { error = "Invalid core.osd.accent"; return false; }
+        out.accent = *accent;
+    }
+    for (const auto& [key, target] : {std::pair{"toggleBinding", &out.toggle_binding}, {"cycleBinding", &out.cycle_binding}}) {
+        if (const auto it = object.find(key); it != object.end() && !ParseInputBinding(it->second, *target, error)) return false;
+    }
+    return true;
+}
+
 bool ParseCoreSettings(const JsonValue::Object& object, CoreSettings& out, std::string& error) {
     static const std::unordered_set<std::string> allowed = {
         "enabled",
         "logLevel",
         "logRetentionFiles",
         "trackSeenApps",
+        "osd",
         "sound",
     };
 
@@ -731,6 +781,10 @@ bool ParseCoreSettings(const JsonValue::Object& object, CoreSettings& out, std::
         out.track_seen_apps = *track_seen_apps;
     }
 
+    if (const auto it = object.find("osd"); it != object.end()) {
+        const auto* osd = RequireObject(it->second, "core.osd", error);
+        if (!osd || !ParseOsdSettings(*osd, out.osd, error)) return false;
+    }
     if (const auto sound_it = object.find("sound"); sound_it != object.end()) {
         const JsonValue::Object* sound_object = RequireObject(sound_it->second, "core.sound", error);
         if (!sound_object) {

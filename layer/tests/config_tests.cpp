@@ -41,6 +41,30 @@ void Expect(bool condition, const std::string& message) {
     }
 }
 
+void TestOsdConfig() {
+    const auto parse=[](const std::string& osd) {
+        return depthxr::ParseConfig(R"({"version":3,"core":{"enabled":true,"logLevel":"info","osd":)"+osd+R"(},"applications":[],"modules":{"depthxr":{"enabled":false,"defaults":{"stereoBoost":1,"convergence":0},"bindings":{"toggleEnabled":{"type":"none"}},"profiles":[]},"pivotxr":{"enabled":false,"defaults":{},"profiles":[]}}})");
+    };
+    const auto defaults=parse("{}");
+    Expect(defaults.ok && !defaults.document.core.osd.enabled && defaults.document.core.osd.update_hz==5,
+           "OSD default compatibility failed: "+defaults.error);
+    const auto configured=parse(R"({"enabled":true,"visibleOnStart":false,"compact":true,"horizontalDegrees":-40,
+      "verticalDegrees":35,"distanceMeters":0.5,"scale":150,"opacity":30,"updateHz":20,"showGraph":false,
+      "showRuntime":false,"showTurbo":false,"showModules":false,"showClock":false,"accent":"blue",
+      "toggleBinding":{"type":"keyboard","chord":["Ctrl","F10"]},"cycleBinding":{"type":"none"}})");
+    Expect(configured.ok,"Valid OSD rejected: "+configured.error);
+    const auto& osd=configured.document.core.osd;
+    Expect(osd.enabled && !osd.visible_on_start && osd.compact && osd.horizontal_degrees==-40 &&
+           osd.vertical_degrees==35 && osd.distance_meters==.5 && osd.scale==150 && osd.opacity==30 &&
+           osd.update_hz==20 && !osd.show_graph && !osd.show_runtime && !osd.show_turbo && !osd.show_modules &&
+           !osd.show_clock && osd.accent=="blue" && osd.toggle_binding.chord.size()==2 &&
+           osd.cycle_binding.type==depthxr::InputBindingType::None,"OSD fields were dropped");
+    for(const std::string& fields:{R"("horizontalDegrees":41)",R"("verticalDegrees":-36)",R"("distanceMeters":0)",
+      R"("scale":49)",R"("opacity":101)",R"("updateHz":0)",R"("updateHz":5.5)",R"("enabled":"true")",
+      R"("showClock":1)",R"("accent":"red")",R"("unknown":true)"})
+        Expect(!parse("{"+fields+"}").ok,"Invalid OSD accepted: "+fields);
+}
+
 void TestTurboExperimentalConfig() {
     const auto parse = [](const std::string& turbo) {
         return depthxr::ParseConfig(R"({"version":3,"core":{"enabled":true,"logLevel":"info","logRetentionFiles":7},
@@ -2835,6 +2859,7 @@ void TestSwapchainImageQueuePreservesFifo() {
 } // namespace
 
 int main() {
+    TestOsdConfig();
     TestTurboExperimentalConfig();
     TestParseConfig();
     TestPivotActivationBindingModel();

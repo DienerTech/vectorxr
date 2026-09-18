@@ -76,6 +76,12 @@ if(WIN32 AND DEPTHXR_BUILD_LAYER)
         endif()
     endif()
 
+    add_library(depthxr_osd STATIC src/osd_renderer.cpp)
+    target_include_directories(depthxr_osd PUBLIC include)
+    target_compile_features(depthxr_osd PUBLIC cxx_std_20)
+    target_compile_definitions(depthxr_osd PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX XR_USE_GRAPHICS_API_D3D11)
+    target_link_libraries(depthxr_osd PUBLIC OpenXR::openxr_loader d3d11 gdi32)
+
     add_library(
         XR_APILAYER_DIENERTECH_VECTORXR
         SHARED
@@ -89,6 +95,7 @@ if(WIN32 AND DEPTHXR_BUILD_LAYER)
         XR_APILAYER_DIENERTECH_VECTORXR
         PRIVATE
         depthxr_core
+        depthxr_osd
         OpenXR::openxr_loader
         d3d11
         d3dcompiler
@@ -187,6 +194,12 @@ if(WIN32 AND DEPTHXR_BUILD_LAYER)
     endif()
 
     if(DEPTHXR_BUILD_TESTS)
+        add_executable(depthxr_osd_tests tests/osd_tests.cpp)
+        target_link_libraries(depthxr_osd_tests PRIVATE depthxr_osd)
+        target_compile_definitions(depthxr_osd_tests PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX XR_USE_GRAPHICS_API_D3D11)
+        add_test(NAME depthxr_osd_tests COMMAND depthxr_osd_tests)
+        set_tests_properties(depthxr_osd_tests PROPERTIES TIMEOUT 20)
+
         # Compile the real frame-loop implementation into a dedicated fake-runtime
         # harness. DEPTHXR_TESTING only grants the harness state setup/inspection
         # access; no test hooks are present in the shipping layer target.
@@ -200,6 +213,7 @@ if(WIN32 AND DEPTHXR_BUILD_LAYER)
             depthxr_turbo_frame_tests
             PRIVATE
             depthxr_core
+            depthxr_osd
             OpenXR::openxr_loader
             d3d11
             d3dcompiler

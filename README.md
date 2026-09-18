@@ -16,6 +16,7 @@ Developed by DienerTech LLC.
 - Configure enhanced yaw and pitch rotation through the Pivot module.
 - Drive foveated-style rendering with a visible performance budget through the Quadviews module.
 - Override OpenXR runtime frame pacing per application with Turbo and compare strategies using built-in diagnostics.
+- Monitor application frame times, Turbo state, and enhancements with an experimental, configurable [in-headset OSD](docs/usage.md#on-screen-display) for D3D11 games.
 - Create per-application profiles so different OpenXR games can use different settings.
 - Track OpenXR apps VectorXR has seen and register them as profile targets.
 - Bind feature toggles to keyboard shortcuts or detected input devices.

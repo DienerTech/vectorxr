@@ -456,6 +456,58 @@ live and saved runtime diagnostics, current and saved settings, and retained Vec
 Raw capture is limited to 8 MiB per file and 64 MiB total; the ZIP inventory lists any
 unavailable or limited files. Review the ZIP for private information before sharing it.
 
+## On-screen display
+
+The experimental **On-screen display** page adds a head-following information panel
+inside Direct3D 11 OpenXR applications. It works with stereo and Quadviews submissions
+and is off by default. VectorXR must be registered and loaded by the application;
+relaunch the application after updating the layer DLL.
+
+1. Open **On-screen display**, enable the OSD, and choose **Flight deck**, **Minimal**,
+   or **Performance** as a starting layout.
+2. Drag the preview to place the panel, or adjust the horizontal and vertical sliders.
+   Positive horizontal angles move right; positive vertical angles move up.
+3. Choose content, size, opacity, accent, and viewing distance, then **Save Changes**.
+   The preview uses illustrative values and approximate placement, not headset telemetry.
+4. In the game, press **Ctrl+Alt+F10** to show or hide the display and **Ctrl+Alt+F11**
+   to switch between compact and detailed layouts. Both bindings can be reassigned to
+   keyboard chords, joystick buttons, or hat directions, with optional sound feedback.
+
+Every setting on this page applies live after Save, including enabling the OSD in an
+already running application. Visibility and layout changes made with bindings last for
+the current session; the next session uses the saved starting settings. Changing the
+automatic visibility option also updates visibility in the current session. The OSD
+can remain visible when the VectorXR enhancement master switch is off; disable it on
+its own page when you want no overlay.
+
+The compact layout shows application FPS, average application frame interval, P95 frame
+interval, application name, and the optional local clock. The detailed layout can add
+a frame-time graph, runtime name, effective Turbo state, and enabled enhancements.
+Pending changes to Turbo experiments or Quadviews activation appear as a restart notice
+in the detailed layout. Other settings retain the live/restart behavior described on
+their respective pages; this notice is not an exhaustive list of every restart-sensitive
+setting. Settings editing remains in the desktop app.
+
+**What the numbers mean:** the OSD samples the time between application `xrEndFrame`
+calls over the last 120 frames. FPS is calculated from the average interval; P95 is
+the 95th-percentile interval. Lower, steadier frame times generally indicate smoother
+application cadence. These numbers do not measure GPU execution, compositor FPS, or
+reprojection. Turbo can make application cadence differ from the headset refresh rate.
+Pauses longer than one second reset the history.
+
+Panel refresh is independent of frame sampling. The default **5 Hz** redraw rate keeps
+the information readable without updating the text every frame; 1–20 Hz is available.
+Drawing runs on a background worker. The panel occupies its own composition layer,
+so it stays independent of application resolution and foveation. Viewing distance changes
+its stereo depth while preserving its apparent size. The panel follows the headset,
+not the world, and does not appear in every game's desktop mirror.
+
+**Compatibility:** this first version requires D3D11 and a runtime-provided sRGB swapchain
+format. D3D12, Vulkan, and OpenGL are not supported. The panel is omitted while the
+runtime requests no rendering, on empty submissions, or when the application uses every
+available composition layer. The **VR session** area reports availability and errors.
+If an overlay resource or submission fails, disable and re-enable the OSD to retry.
+
 ## OpenXR layer management
 
 ![VectorXR OpenXR Layer Manager tab](screenshots/openxr-layer-manager.jpg)

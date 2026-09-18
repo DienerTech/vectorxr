@@ -73,7 +73,28 @@ struct InputBinding {
     SoundFeedback sound;
 };
 
+struct OsdSettings {
+    bool enabled{false};
+    bool visible_on_start{true};
+    bool compact{false};
+    double horizontal_degrees{20.0};
+    double vertical_degrees{-12.0};
+    double distance_meters{1.2};
+    double scale{100.0};
+    int opacity{90};
+    int update_hz{5};
+    bool show_graph{true};
+    bool show_runtime{true};
+    bool show_turbo{true};
+    bool show_modules{true};
+    bool show_clock{true};
+    std::string accent{"teal"};
+    InputBinding toggle_binding{InputBindingType::Keyboard, {"Ctrl", "Alt", "F10"}};
+    InputBinding cycle_binding{InputBindingType::Keyboard, {"Ctrl", "Alt", "F11"}};
+};
+
 struct CoreSettings {
+    OsdSettings osd;
     bool enabled{true};
     LogLevel log_level{LogLevel::Info};
     int log_retention_files{7};

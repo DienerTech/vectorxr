@@ -5,7 +5,7 @@ export type PivotResponseMode = 'continuous' | 'stepped'
 export type PivotStepGlideMode = 'instant' | 'glide'
 export type PivotProfileBehavior = 'enhancedMotion' | 'snapViews'
 export type QuadViewsTrackingMode = 'head' | 'eye'
-export type AppTab = 'home' | 'core' | 'registry' | 'layers' | 'about' | 'depthxr' | 'pivotxr' | 'quadviews' | 'turbo'
+export type AppTab = 'osd' | 'home' | 'core' | 'registry' | 'layers' | 'about' | 'depthxr' | 'pivotxr' | 'quadviews' | 'turbo'
 export const keyboardBindingKeyGroups = [
   {
     label: 'Function Keys',
@@ -115,7 +115,56 @@ export interface SoundSettings {
   volume: number
 }
 
+export interface OsdSettings {
+  enabled: boolean
+  visibleOnStart: boolean
+  compact: boolean
+  horizontalDegrees: number
+  verticalDegrees: number
+  distanceMeters: number
+  scale: number
+  opacity: number
+  updateHz: number
+  showGraph: boolean
+  showRuntime: boolean
+  showTurbo: boolean
+  showModules: boolean
+  showClock: boolean
+  accent: 'teal' | 'copper' | 'blue'
+  toggleBinding: InputBinding
+  cycleBinding: InputBinding
+}
+
+export function defaultOsdSettings(): OsdSettings {
+  return { enabled: false, visibleOnStart: true, compact: false,
+    horizontalDegrees: 20, verticalDegrees: -12, distanceMeters: 1.2, scale: 100, opacity: 90, updateHz: 5,
+    showGraph: true, showRuntime: true, showTurbo: true, showModules: true, showClock: true, accent: 'teal',
+    toggleBinding: { type: 'keyboard', chord: ['Ctrl', 'Alt', 'F10'] },
+    cycleBinding: { type: 'keyboard', chord: ['Ctrl', 'Alt', 'F11'] } }
+}
+
+export function normalizeOsdSettings(value: unknown): OsdSettings {
+  const input = isRecord(value) ? value : {}
+  const fallback = defaultOsdSettings()
+  const number = (key: keyof OsdSettings, low: number, high: number, integer = false): number => {
+    const value = input[key]
+    return typeof value === 'number' && Number.isFinite(value) && value >= low && value <= high &&
+      (!integer || Number.isInteger(value)) ? value : fallback[key] as number
+  }
+  return { ...fallback,
+    ...Object.fromEntries(['enabled', 'visibleOnStart', 'compact', 'showGraph', 'showRuntime', 'showTurbo', 'showModules', 'showClock']
+      .map(key => [key, typeof input[key] === 'boolean' ? input[key] : fallback[key as keyof OsdSettings]])),
+    horizontalDegrees: number('horizontalDegrees', -40, 40), verticalDegrees: number('verticalDegrees', -35, 35),
+    distanceMeters: number('distanceMeters', .5, 3), scale: number('scale', 50, 150),
+    opacity: number('opacity', 30, 100, true), updateHz: number('updateHz', 1, 20, true),
+    accent: input.accent === 'copper' || input.accent === 'blue' ? input.accent : 'teal',
+    toggleBinding: normalizeInputBinding(input.toggleBinding, fallback.toggleBinding),
+    cycleBinding: normalizeInputBinding(input.cycleBinding, fallback.cycleBinding),
+  }
+}
+
 export interface CoreConfig {
+  osd: OsdSettings
   enabled: boolean
   logLevel: LogLevel
   logRetentionFiles: number
@@ -457,6 +506,7 @@ export function defaultCoreConfig(): CoreConfig {
     logRetentionFiles: 7,
     trackSeenApps: true,
     sound: { volume: 100 },
+    osd: defaultOsdSettings(),
   }
 }
 
@@ -1213,6 +1263,8 @@ function savedBindingAssignments(config: VectorXRConfig): SavedBindingAssignment
   const assignments: SavedBindingAssignment[] = [
     { id: 'depth.toggle', label: 'Depth: A/B toggle', binding: config.modules.depthxr.bindings.toggleEnabled },
     { id: 'depth.lock', label: 'Depth: Depth Lock A/B', binding: config.modules.depthxr.bindings.toggleAnchor },
+    { id: 'osd.toggle', label: 'OSD: show/hide', binding: config.core.osd.toggleBinding },
+    { id: 'osd.cycle', label: 'OSD: switch layout', binding: config.core.osd.cycleBinding },
     { id: 'quadviews.diagnostics', label: 'Quadviews: diagnostic visualization', binding: config.modules.quadviews.diagnosticVisualizationBinding },
     { id: 'turbo.toggle', label: 'Turbo: A/B toggle', binding: config.modules.turbo.toggleBinding },
     { id: 'turbo.metrics', label: 'Turbo: metrics capture', binding: config.modules.turbo.metricsBinding },
@@ -1489,6 +1541,7 @@ function normalizeVectorXRConfig(value: unknown): VectorXRConfig {
       logRetentionFiles: normalizeNumber(core.logRetentionFiles, fallback.core.logRetentionFiles),
       trackSeenApps: normalizeBoolean(core.trackSeenApps, fallback.core.trackSeenApps),
       sound: { volume: normalizeVolume(isRecord(core.sound) ? core.sound.volume : undefined) },
+      osd: normalizeOsdSettings(core.osd),
     },
     applications,
     modules: {

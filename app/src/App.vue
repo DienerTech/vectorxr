@@ -11,6 +11,7 @@ import SidebarNav from './components/SidebarNav.vue'
 import StickySaveBar from './components/StickySaveBar.vue'
 import AboutTab from './components/tabs/AboutTab.vue'
 import CoreTab from './components/tabs/CoreTab.vue'
+import OsdTab from './components/tabs/OsdTab.vue'
 import DepthXrTab from './components/tabs/DepthXrTab.vue'
 import HomeTab from './components/tabs/HomeTab.vue'
 import OpenXrLayersTab from './components/tabs/OpenXrLayersTab.vue'
@@ -89,6 +90,12 @@ const tabs = computed(() => [
     label: 'Settings',
     subtitle: 'Runtime, logging, theme, and config',
     status: store.state.config.core.enabled ? 'Suite on' : 'Suite off',
+  },
+  {
+    id: 'osd' as const,
+    label: 'On-screen display',
+    subtitle: 'Headset display, placement, and bindings',
+    status: store.state.config.core.osd.enabled ? 'Enabled' : 'Disabled',
   },
   {
     id: 'registry' as const,
@@ -437,6 +444,7 @@ async function confirmResetConfig() {
           @reset-config="confirmResetConfig"
           @update:theme-preference="themePreference = $event"
         />
+        <OsdTab v-else-if="store.state.activeTab === 'osd'" :config="store.state.config" />
         <AppRegistryEditor
           v-else-if="store.state.activeTab === 'registry'"
           :config="store.state.config"

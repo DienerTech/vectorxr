@@ -404,8 +404,8 @@ export interface RuntimeStatusSession {
   application: string
   updatedAtUnixMilliseconds: number
   acknowledgedRevision: number
-  capabilities: { quadviewsDiagnosticVisualization: boolean }
-  state: { quadviewsDiagnosticVisualization: boolean; turboState?: string; turboReason?: string }
+  capabilities: { quadviewsDiagnosticVisualization: boolean; osd?: boolean }
+  state: { osdVisible?: boolean; osdCompact?: boolean; osdMessage?: string; quadviewsDiagnosticVisualization: boolean; turboState?: string; turboReason?: string }
 }
 
 export interface RuntimeStatusEnvelope {

@@ -31,6 +31,7 @@
 #include "depthxr/runtime_compatibility.h"
 #include "depthxr/runtime_pacing.h"
 #include "depthxr/runtime_relay.h"
+#include "depthxr/osd_renderer.h"
 #include "depthxr/turbo_recovery.h"
 #include "depthxr/turbo_trace.h"
 #include "depthxr/settings_resolver.h"
@@ -659,6 +660,12 @@ class OpenXrLayer {
     Logger logger_;
     TurboTimingTrace turbo_trace_; // destroyed before logger_
     // Immutable between BeginSession and teardown; live edits apply next session.
+    OsdRenderer osd_;
+    std::atomic<bool> osd_monitoring_{false};
+    std::atomic<bool> osd_should_render_{true};
+    std::optional<std::chrono::steady_clock::time_point> osd_last_input_poll_;
+    bool osd_toggle_down_{false}, osd_cycle_down_{false}, osd_was_enabled_{false};
+    void PrepareOsd();
     TurboExperimentalSettings turbo_experiment_;
     bool turbo_clock_enabled_{false};
     PFN_xrVoidFunction turbo_convert_counter_time_{nullptr};

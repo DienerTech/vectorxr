@@ -546,7 +546,7 @@ test('0.15 and 0.15.1 configs preserve existing settings, profiles, and bindings
   legacy.modules.turbo.profiles = [{ id: 'dcs-turbo', name: 'DCS Turbo', enabled: true, applicationIds: ['dcs-world'] }]
 
   const normalized = normalizeConfig(legacy)
-  assert.deepEqual(normalized.core, legacy.core)
+  assert.deepEqual(normalized.core, { ...legacy.core, osd: defaultConfig().core.osd })
   assert.deepEqual(normalized.applications, legacy.applications)
   assert.deepEqual(normalized.modules.depthxr, legacy.modules.depthxr)
   assert.deepEqual(normalized.modules.pivotxr.defaults, legacy.modules.pivotxr.defaults)
