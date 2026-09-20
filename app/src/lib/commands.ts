@@ -123,6 +123,7 @@ export interface OpenXrLayerRegistrySlice {
 }
 
 export interface OpenXrLayerSnapshot {
+  processElevated: boolean
   slices: OpenXrLayerRegistrySlice[]
 }
 
@@ -456,6 +457,7 @@ export async function setRuntimeQuadViewsDiagnosticVisualization(
 export async function loadOpenXrLayers(includeSignatures = false): Promise<OpenXrLayerSnapshot> {
   if (!tauriAvailable()) {
     return {
+      processElevated: false,
       slices: [
         {
           id: 'hklm64',
