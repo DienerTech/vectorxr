@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <future>
+#include <filesystem>
 #include <iostream>
 #include <mutex>
 #include <string>
@@ -13,6 +14,7 @@
 #include <Windows.h>
 
 #include "depthxr/openxr_layer.h"
+#include "depthxr/turbo_metrics.h"
 
 using namespace std::chrono_literals;
 
@@ -129,6 +131,57 @@ class TurboFrameTestPeer {
 
     static bool IsForced() { return Layer().turbo_pacing_source_ == OpenXrLayer::TurboPacingSource::kForced; }
     static void DisableEffectiveTurbo() { Layer().turbo_effective_active_.store(false); }
+    static void Toggle(bool enabled) { Layer().turbo_toggle_enabled_ = enabled; }
+    static void MetricsFrame(bool capturing) {
+        Layer().RecordTurboMetricsFrame(false, 0.0, false,
+            capturing ? TurboMetricsMode::kAlways : TurboMetricsMode::kOff, {}, true, 0);
+    }
+    static void ResetMetrics() { Layer().ResetTurboMetricsState(); }
+    static void WaitMetrics() {
+        if (Layer().turbo_metrics_write_future_.valid()) Layer().turbo_metrics_write_future_.wait();
+    }
+    static void BlockMetricsWriter(std::shared_future<void> gate) {
+        auto& layer = Layer();
+        auto previous = std::move(layer.turbo_metrics_write_future_);
+        layer.turbo_metrics_write_future_ = std::async(std::launch::async,
+            [previous = std::move(previous), gate]() mutable {
+                if (previous.valid()) previous.wait();
+                gate.wait();
+            });
+    }
+    static void FlushMetrics() { Layer().FlushTurboMetrics(false); }
+    static bool OsdStateTransitions() {
+        auto& layer=Layer();
+        layer.resolved_settings_={}; layer.resolved_settings_.core.enabled=true;
+        layer.resolved_settings_.turbo.enabled=false;
+        layer.turbo_toggle_enabled_=true; layer.turbo_recovery_blocked_=false;
+        layer.turbo_auto_suspended_=false; layer.turbo_effective_active_=false;
+        bool ok=layer.BuildOsdSnapshot().turbo=="Disabled";
+        layer.resolved_settings_.turbo.enabled=true; layer.turbo_toggle_enabled_=false;
+        auto snapshot=layer.BuildOsdSnapshot();
+        ok=ok && snapshot.turbo=="Enabled / Off" && snapshot.modules.find("Turbo")!=std::string::npos;
+        layer.turbo_toggle_enabled_=true; layer.turbo_effective_active_=true; layer.turbo_effective_async_=true;
+        ok=ok && layer.BuildOsdSnapshot().turbo=="Async";
+        layer.turbo_metrics_active_.store(true);
+        ok=ok && layer.BuildOsdSnapshot().turbo=="Async / Analyzing";
+        layer.turbo_toggle_enabled_=false;
+        ok=ok && layer.BuildOsdSnapshot().turbo=="Enabled / Off / Analyzing";
+        layer.turbo_metrics_active_.store(false); layer.turbo_toggle_enabled_=true;
+
+        layer.resolved_settings_.pivotxr.enabled=true;
+        PivotXrResolvedProfile profile; profile.name="DCS Stepped";
+        layer.resolved_settings_.pivotxr.profiles={profile}; layer.pivotxr_active_profile_index_=0;
+        layer.pivotxr_engaged_=true; layer.pivotxr_quick_view_active_=false; layer.pivotxr_quick_view_transitioning_=false;
+        layer.pivotxr_manual_view_transition_={}; layer.pivotxr_profile_view_transition_={};
+        layer.pivotxr_profile_view_transition_.current.yaw_radians=.1;
+        ok=ok && layer.BuildOsdSnapshot().pivot=="DCS Stepped Applied, Nudges Applied";
+        layer.pivotxr_engaged_=false; layer.pivotxr_profile_view_transition_={};
+        ok=ok && layer.BuildOsdSnapshot().pivot=="Pivot ready";
+        layer.pivotxr_engaged_=true; layer.resolved_settings_.pivotxr.enabled=false;
+        ok=ok && layer.BuildOsdSnapshot().pivot=="Disabled";
+        layer.pivotxr_engaged_=false;
+        return ok;
+    }
     static double PredictionSampleAgeMs() {
         auto& layer = Layer();
         std::scoped_lock lock(layer.turbo_mutex_);
@@ -293,6 +346,7 @@ class FakeRuntime {
         runtime.cv_.wait(lock, [&runtime] { return runtime.wait_released_; });
         const XrResult result = runtime.wait_result_;
         if (XR_SUCCEEDED(result) && frame_state) {
+            ++runtime.wait_tokens_;
             runtime.next_display_time_ += runtime.display_period_;
             frame_state->predictedDisplayTime = runtime.next_display_time_;
             frame_state->predictedDisplayPeriod = runtime.display_period_;
@@ -312,6 +366,11 @@ class FakeRuntime {
         runtime.calls_.push_back(RuntimeCall::kBegin);
         ++runtime.begin_calls_;
         runtime.cv_.notify_all();
+        if (runtime.strict_order_) {
+            if (!runtime.wait_tokens_ || runtime.frame_open_) return XR_ERROR_CALL_ORDER_INVALID;
+            --runtime.wait_tokens_;
+            runtime.frame_open_ = true;
+        }
         return runtime.begin_result_;
     }
 
@@ -322,6 +381,10 @@ class FakeRuntime {
                                  frame_end_info->type == XR_TYPE_FRAME_END_INFO;
         runtime.calls_.push_back(RuntimeCall::kEnd);
         ++runtime.end_entered_;
+        if (runtime.strict_order_) {
+            if (!runtime.frame_open_) return XR_ERROR_CALL_ORDER_INVALID;
+            runtime.frame_open_ = false;
+        }
         if (runtime.release_wait_on_next_end_) {
             runtime.release_wait_on_next_end_ = false;
             runtime.wait_released_ = true;
@@ -337,6 +400,8 @@ class FakeRuntime {
         std::scoped_lock lock(mutex_);
         end_released_ = false;
     }
+
+    void StrictOrder() { strict_order_ = true; }
 
     void ReleaseEnd() {
         std::scoped_lock lock(mutex_);
@@ -431,6 +496,8 @@ class FakeRuntime {
     bool wait_released_{true};
     bool release_wait_on_next_end_{false};
     bool valid_structs_{true};
+    bool strict_order_{false}, frame_open_{true};
+    int wait_tokens_{0};
     int wait_entered_{0};
     int wait_exited_{0};
     int begin_calls_{0};
@@ -493,6 +560,94 @@ bool WaitForSecondPollBlock() {
         std::this_thread::sleep_for(1ms);
     }
     return false;
+}
+
+void TestAsyncTogglePreservesQueuedFrame(bool experimental) {
+    FakeRuntime runtime;
+    runtime.StrictOrder();
+    TurboHarness harness(runtime, depthxr::TurboPacingMode::kAsync);
+    if (experimental) depthxr::TurboFrameTestPeer::Experiment(true, true);
+    const auto end_info = FrameEndInfo();
+    Expect(depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &end_info) == XR_SUCCESS,
+           "Toggle test could not establish async pacing");
+    Expect(runtime.WaitForWaitExited(1), "Initial worker wait did not complete");
+    XrFrameState state{XR_TYPE_FRAME_STATE};
+    Expect(AppWait(&state) == XR_SUCCESS && AppBegin() == XR_SUCCESS,
+           "First virtual frame failed");
+    // A legal pipelined application can wait for N+1 before it submits N.
+    // Its Begin(N+1) arrives AFTER Turbo is switched off and N is submitted.
+    Expect(AppWait(&state) == XR_SUCCESS, "Queued app wait failed");
+    for (int cycle = 0; cycle < 4; ++cycle) {
+        Expect(runtime.WaitForWaitExited(1 + cycle * 2), "Previous runtime wait did not complete");
+        depthxr::TurboFrameTestPeer::Toggle(false);
+        runtime.BlockWait();
+        const int before = runtime.WaitCalls();
+        Expect(depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &end_info) == XR_SUCCESS,
+               "Off transition violated runtime frame order");
+        // Previously the pipeline was removed here: this forwarded a begin
+        // without a completed runtime wait and returned -37 in MSFS and DCS.
+        Expect(AppBegin() == XR_SUCCESS, "Queued begin lost its wait at the off transition");
+        Expect(runtime.WaitForWaitEntered(before + 1), "Off transition lost runtime pacing ownership");
+        auto next_wait = std::async(std::launch::async, [] {
+            XrFrameState next{XR_TYPE_FRAME_STATE}; return AppWait(&next);
+        });
+        Expect(next_wait.wait_for(30ms) == std::future_status::timeout,
+               "Turbo off still allowed the app to run ahead of the blocked runtime");
+        runtime.ReleaseWait();
+        Expect(next_wait.wait_for(2s) == std::future_status::ready && next_wait.get() == XR_SUCCESS,
+               "Re-coupled wait did not resume");
+        depthxr::TurboFrameTestPeer::Toggle(true);
+        Expect(depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &end_info) == XR_SUCCESS,
+               "On transition violated runtime frame order");
+        Expect(AppBegin() == XR_SUCCESS && AppWait(&state) == XR_SUCCESS,
+               "Re-enabled pipeline lost its queued frame");
+    }
+    Expect(runtime.MaxConcurrentWaits() == 1, "Toggle duplicated a runtime wait");
+}
+
+void TestMetricsPauseFlushesWithoutAnotherFrame() {
+    FakeRuntime runtime;
+    TurboHarness harness(runtime, depthxr::TurboPacingMode::kAsync);
+    const auto path = std::filesystem::temp_directory_path() /
+        ("vectorxr-pause-test-" + std::to_string(GetCurrentProcessId()) + ".json");
+    const char* old = std::getenv("VECTORXR_TURBO_METRICS_PATH");
+    const std::string previous_path = old ? old : "";
+    _putenv_s("VECTORXR_TURBO_METRICS_PATH", path.string().c_str());
+    depthxr::TurboFrameTestPeer::ResetMetrics();
+    depthxr::TurboFrameTestPeer::MetricsFrame(true);
+    depthxr::TurboFrameTestPeer::MetricsFrame(true);
+    depthxr::TurboFrameTestPeer::FlushMetrics();
+    depthxr::TurboFrameTestPeer::WaitMetrics();
+    auto sessions = depthxr::ReadTurboMetricsSessions(path);
+    Expect(sessions.size() == 1 && sessions[0].live && sessions[0].buckets[0].frames == 1,
+           "Initial capture snapshot was not live");
+    const auto id = sessions[0].session_id;
+    std::promise<void> release;
+    depthxr::TurboFrameTestPeer::BlockMetricsWriter(release.get_future().share());
+    depthxr::TurboFrameTestPeer::MetricsFrame(true);
+    auto paused = std::async(std::launch::async, [] { depthxr::TurboFrameTestPeer::MetricsFrame(false); });
+    Expect(paused.wait_for(100ms) == std::future_status::ready,
+           "Pausing blocked on a busy metrics writer");
+    paused.get();
+    release.set_value();
+    depthxr::TurboFrameTestPeer::WaitMetrics(); // No subsequent application frame.
+    sessions = depthxr::ReadTurboMetricsSessions(path);
+    Expect(sessions.size() == 1 && !sessions[0].live && sessions[0].buckets[0].frames == 2,
+           "Pause lost the tail or left the session live");
+    std::this_thread::sleep_for(10ms);
+    depthxr::TurboFrameTestPeer::MetricsFrame(true);
+    depthxr::TurboFrameTestPeer::WaitMetrics();
+    sessions = depthxr::ReadTurboMetricsSessions(path);
+    Expect(sessions[0].live && sessions[0].session_id == id && sessions[0].buckets[0].frames == 2,
+           "Resume changed sessions, counted paused time, or failed to restore live status");
+    depthxr::TurboFrameTestPeer::MetricsFrame(true);
+    depthxr::TurboFrameTestPeer::MetricsFrame(false);
+    depthxr::TurboFrameTestPeer::ResetMetrics();
+    sessions = depthxr::ReadTurboMetricsSessions(path);
+    Expect(!sessions[0].live && sessions[0].buckets[0].frames == 3,
+           "Final shutdown was overwritten by a stale capture snapshot");
+    std::filesystem::remove(path);
+    _putenv_s("VECTORXR_TURBO_METRICS_PATH", previous_path.c_str());
 }
 
 void TestAsyncHandoffCoversEndFrameWindow() {
@@ -855,6 +1010,9 @@ void TestSubmissionInterlockFallsBackThenSuspends() {
 } // namespace
 
 int main() {
+    TestAsyncTogglePreservesQueuedFrame(false);
+    TestAsyncTogglePreservesQueuedFrame(true);
+    TestMetricsPauseFlushesWithoutAnotherFrame();
     TestExperimentalSubmitGate(true);
     TestExperimentalSubmitGate(false);
     TestExperimentalSubmitGate(false, false, true);
@@ -870,6 +1028,7 @@ int main() {
     TestAutoSubmissionErrorsTryBothModes();
     TestAutoHasNoRuntimeMappings();
     TestSubmissionInterlockFallsBackThenSuspends();
+    Expect(depthxr::TurboFrameTestPeer::OsdStateTransitions(), "OSD lost enabled/off Turbo or applied/ready/disabled Pivot state");
     std::cout << "depthxr_turbo_frame_tests passed\n";
     return 0;
 }

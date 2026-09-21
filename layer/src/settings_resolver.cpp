@@ -331,6 +331,8 @@ TurboResolvedSettings ResolveTurboSettings(const ConfigDocument& config, std::st
             if (std::find(profile.application_ids.begin(), profile.application_ids.end(), application->id) !=
                 profile.application_ids.end()) {
                 resolved.enabled = true;
+                resolved.profile_name=profile.name;
+                if(profile.experimental)resolved.experimental=*profile.experimental;
                 resolved.interrupted_session_recovery = resolved.interrupted_session_recovery && !profile.disable_safety;
                 break;
             }

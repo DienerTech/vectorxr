@@ -190,6 +190,7 @@ class OpenXrLayer {
   private:
 #if defined(DEPTHXR_TESTING)
     friend class TurboFrameTestPeer;
+    friend class PivotPoseTestPeer;
 #endif
 
     OpenXrLayer() = default;
@@ -453,7 +454,7 @@ class OpenXrLayer {
                                  bool metrics_available,
                                  int sound_volume);
     bool IsTurboMetricsCaptureArmed(const InputBinding& binding, int sound_volume);
-    void FlushTurboMetrics(bool final_flush);
+    void FlushTurboMetrics(bool final_flush, bool queue_after_pending = false);
     void ResetTurboMetricsState();
     // Logs shouldRender changes (turbo_mutex_ held by caller). A silent
     // shouldRender=false is one of the ways an app goes black while its
@@ -661,10 +662,13 @@ class OpenXrLayer {
     TurboTimingTrace turbo_trace_; // destroyed before logger_
     // Immutable between BeginSession and teardown; live edits apply next session.
     OsdRenderer osd_;
+    std::atomic<bool> osd_vulkan_{false}, turbo_metrics_active_{false};
+    std::mutex osd_vulkan_queue_mutex_;
     std::atomic<bool> osd_monitoring_{false};
     std::atomic<bool> osd_should_render_{true};
     std::optional<std::chrono::steady_clock::time_point> osd_last_input_poll_;
     bool osd_toggle_down_{false}, osd_cycle_down_{false}, osd_was_enabled_{false};
+    OsdSnapshot BuildOsdSnapshot() const;
     void PrepareOsd();
     TurboExperimentalSettings turbo_experiment_;
     bool turbo_clock_enabled_{false};
@@ -804,11 +808,9 @@ class OpenXrLayer {
     size_t pivotxr_quick_view_index_{0};
     size_t pivotxr_quick_view_return_profile_index_{0};
     bool pivotxr_quick_view_return_engaged_{false};
-    // Optional full seated origin in the app's reference space. Motion Assist
-    // currently consumes yaw/pitch, while the complete pose, capture time, and
-    // session identity establish the stable positional reference required by
-    // future Quick Views. Capture happens on the xrLocateViews drive path so
-    // it shares the frame's displayTime pipeline with the pivot drive.
+    // Optional full seated origin in the app's reference space. Its position
+    // anchors translation for every Pivot mode. Capture happens on the
+    // xrLocateViews drive path and shares the pivot drive's displayTime.
     struct PivotOrigin {
         XrPosef pose{{0.0f, 0.0f, 0.0f, 1.0f}, {0.0f, 0.0f, 0.0f}};
         double yaw_radians{0.0};
@@ -819,6 +821,13 @@ class OpenXrLayer {
     };
     std::optional<PivotOrigin> pivotxr_origin_;
     bool pivotxr_origin_capture_pending_{false};
+    struct PivotTranslationAnchor {
+        XrVector3f position;
+        XrSpace space{XR_NULL_HANDLE};
+    };
+    // Without Set Origin, capture once per engagement, never once per frame:
+    // repeatedly anchoring at the moving head would cancel the rotated lean.
+    std::optional<PivotTranslationAnchor> pivotxr_translation_anchor_;
     bool depthxr_toggle_enabled_{true};
     bool depthxr_toggle_binding_was_down_{false};
     std::optional<std::chrono::steady_clock::time_point> pivotxr_binding_last_poll_time_;
@@ -1007,7 +1016,8 @@ class OpenXrLayer {
                                       double* applied_extra_yaw_radians,
                                       double* applied_extra_pitch_radians,
                                       XrPosef* applied_pose_delta,
-                                      bool update_smoothing);
+                                      bool update_smoothing,
+                                      const XrSpaceLocation* anchor_space_in_reference = nullptr);
     // The pacing valve (turbo_mutex_): with the pipeline structural, the
     // turbo toggle only flips this. Open: app waits fabricate instantly
     // (decoupled). Closed: app waits block consuming a pacing token — one is

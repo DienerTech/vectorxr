@@ -278,6 +278,11 @@ struct OsdSettings {
     show_turbo: bool,
     show_modules: bool,
     show_clock: bool,
+    show_pivot: bool,
+    clock_format: String,
+    body_order: Vec<String>,
+    custom_color: String,
+    custom_presets: Vec<serde_json::Value>,
     accent: String,
     toggle_binding: InputBinding,
     cycle_binding: InputBinding,
@@ -304,6 +309,11 @@ impl Default for OsdSettings {
             show_turbo: true,
             show_modules: true,
             show_clock: true,
+            show_pivot: true,
+            clock_format: "24".into(),
+            body_order: vec!["graph".into(), "turbo".into(), "pivot".into(), "modules".into()],
+            custom_color: "#51ddbd".into(),
+            custom_presets: vec![],
             accent: "teal".into(),
             toggle_binding: binding("F10"),
             cycle_binding: binding("F11"),
@@ -681,6 +691,8 @@ impl Default for QuadViewsModuleConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct TurboProfileConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    experimental: Option<TurboExperimentalSettings>,
     #[serde(default)]
     disable_safety: bool,
     #[serde(default)]
@@ -2611,6 +2623,8 @@ mod tests {
             "horizontalDegrees":-30.0,"verticalDegrees":15.0,"distanceMeters":2.0,"scale":75.0,
             "opacity":70,"updateHz":10,"showGraph":false,"showRuntime":false,"showTurbo":false,
             "showModules":false,"showClock":false,"accent":"blue","toggleBinding":{"type":"none"},
+            "showPivot":false,"clockFormat":"12","customColor":"#aB12Ef","bodyOrder":["pivot","turbo","modules","graph"],
+            "customPresets":[{"name":"Small cockpit","settings":{"scale":25,"accent":"custom","customColor":"#aB12Ef"}}],
             "cycleBinding":{"type":"keyboard","chord":["Ctrl","F11"]}});
         let osd: super::OsdSettings = serde_json::from_value(input.clone()).unwrap();
         let output = serde_json::to_value(osd).unwrap();
@@ -2762,6 +2776,16 @@ mod tests {
         let config: super::TurboModuleConfig = serde_json::from_value(input.clone()).unwrap();
         let output = serde_json::to_value(config).unwrap();
         assert_eq!(output["experimental"], input["experimental"]);
+        let profiles = serde_json::json!({"profiles": [
+            {"id":"dcs","name":"DCS","enabled":true,"applicationIds":["dcs"],"experimental": {
+                "enabled":true,"waitForSubmit":true,"sampleAtEntry":true,"predictionPercent":90,"frameLimit":45
+            }}
+        ]});
+        let migrated: super::TurboModuleConfig = serde_json::from_value(profiles).unwrap();
+        let saved=serde_json::to_value(migrated).unwrap();
+        assert_eq!(saved["profiles"][0]["experimental"]["predictionPercent"],90);
+        assert_eq!(saved["profiles"][0]["experimental"]["enabled"],true);
+
         let session: super::TurboMetricsSession = serde_json::from_value(serde_json::json!({
             "timingConfiguration": "Experimental Async; cap=45"
         })).unwrap();

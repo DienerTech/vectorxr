@@ -1,6 +1,8 @@
 #pragma once
 
 #include <atomic>
+#include <array>
+#include <memory>
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
@@ -12,12 +14,26 @@
 #include <vector>
 #include <openxr/openxr.h>
 #include "depthxr/settings.h"
+#include "depthxr/osd_graphics.h"
 
 struct ID3D11Device;
 struct ID3D11DeviceContext;
 struct ID3D11Texture2D;
 
 namespace depthxr {
+class Logger;
+
+struct OsdMetric {
+    std::uint64_t count{};
+    double sum{}, maximum{};
+    std::array<std::uint64_t, 256> histogram{};
+    void Add(double ms);
+    double P95Upper() const;
+};
+struct OsdMeasurements {
+    OsdMetric prepare, append, raster, acquire, wait, upload, release, submit, cadence, age;
+    std::uint64_t submitted{}, refreshed{}, no_render{}, layer_limit{}, image_timeouts{}, upload_busy{}, worker_busy{}, failures{}, frame_rejections{};
+};
 
 struct OsdDispatch {
     PFN_xrEnumerateSwapchainFormats formats{};
@@ -34,6 +50,7 @@ struct OsdDispatch {
 struct OsdSnapshot {
     std::string application, runtime, turbo, modules, restart;
     bool experimental{false};
+    std::string pivot;
 };
 
 struct OsdStatus {
@@ -52,8 +69,11 @@ struct OsdTelemetry {
 
 struct OsdBitmap {
     static constexpr int width = 960;
+    static constexpr int texture_height = 768;
     int height{};
     std::vector<std::uint32_t> pixels;
+    double raster_ms{};
+    bool Valid() const { return height>0 && height<=texture_height && pixels.size()==static_cast<std::size_t>(width)*height; }
 };
 
 // Produces premultiplied sRGB pixels for an sRGB OpenXR swapchain.
@@ -63,6 +83,11 @@ class OsdRenderer {
   public:
     ~OsdRenderer();
     void Initialize(XrSession, ID3D11Device*, std::uint32_t max_layers, OsdDispatch);
+    void InitializeGraphics(XrSession, const void* binding_chain, std::uint32_t max_layers, OsdDispatch, Logger*, std::string identity);
+    std::string GraphicsApi() const;
+    void RecordPrepare(double ms);
+    void RecordSubmit(double ms);
+    void ReportDiagnostics(bool final = false);
     void Shutdown();
     void ResetPresentation();
     void SubmissionFailed(XrResult);
@@ -76,16 +101,18 @@ class OsdRenderer {
     bool CreateResources();
     void Fail(const char* operation, XrResult result);
     void RasterWorker();
+    void Event(bool error, std::string message);
+    std::vector<std::pair<LogLevel,std::string>> CollectDiagnosticsLocked(bool final);
+    std::size_t Mode() const;
     mutable std::mutex mutex_;
     XrSession session_{XR_NULL_HANDLE};
     XrSwapchain swapchain_{XR_NULL_HANDLE};
     XrSpace space_{XR_NULL_HANDLE};
-    ID3D11Device* device_{};
-    ID3D11DeviceContext* context_{};
+    std::unique_ptr<OsdGraphics> graphics_;
     OsdDispatch api_;
     std::uint32_t max_layers_{};
-    std::vector<ID3D11Texture2D*> images_;
     std::optional<std::uint32_t> acquired_;
+    bool acquired_waited_{};
     bool rgba_{false}, ready_{false}, failed_{false}, configured_{false};
     bool visible_{true}, compact_{false}, toggle_down_{false}, cycle_down_{false}, primed_{false};
     OsdSettings settings_;
@@ -94,8 +121,9 @@ class OsdRenderer {
     OsdStatus status_;
     int image_height_{};
     std::chrono::steady_clock::time_point updated_{};
+    std::chrono::steady_clock::time_point image_updated_{};
     XrCompositionLayerQuad quad_{XR_TYPE_COMPOSITION_LAYER_QUAD};
-    // This worker touches only CPU pixels. OpenXR and D3D11 remain on the
+    // This worker touches only CPU pixels. OpenXR and graphics uploads remain on the
     // application thread. No frame waits for text drawing or font setup.
     struct RasterRequest {
         OsdSettings settings;
@@ -109,5 +137,12 @@ class OsdRenderer {
     bool raster_stop_{false}, raster_requested_{false};
     std::optional<RasterRequest> raster_request_;
     std::optional<OsdBitmap> raster_completed_, upload_;
+    Logger* logger_{};
+    std::string identity_;
+    std::array<OsdMeasurements, 3> measurements_{};
+    std::deque<std::pair<bool,std::string>> events_;
+    std::uint64_t dropped_events_{};
+    std::chrono::steady_clock::time_point report_start_{}, cadence_last_{};
+    std::size_t cadence_mode_{3};
 };
 } // namespace depthxr

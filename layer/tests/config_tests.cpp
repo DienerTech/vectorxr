@@ -53,6 +53,11 @@ void TestOsdConfig() {
       "showRuntime":false,"showTurbo":false,"showModules":false,"showClock":false,"accent":"blue",
       "toggleBinding":{"type":"keyboard","chord":["Ctrl","F10"]},"cycleBinding":{"type":"none"}})");
     Expect(configured.ok,"Valid OSD rejected: "+configured.error);
+    const auto custom=parse(R"({"scale":25,"showPivot":true,"clockFormat":"12","accent":"custom","customColor":"#aB12Ef","bodyOrder":["pivot","turbo","graph","modules"],"customPresets":[{"name":"Small cockpit","settings":{"scale":25,"accent":"rose","showPivot":false}}]})");
+    Expect(custom.ok && custom.document.core.osd.scale==25 && custom.document.core.osd.clock_format=="12" &&
+           custom.document.core.osd.custom_color=="#aB12Ef" && custom.document.core.osd.body_order.front()=="pivot","Custom OSD configuration rejected: "+custom.error);
+    for (const auto& bad:{R"({"customColor":"#zzzzzz"})",R"({"bodyOrder":["graph","graph"]})",R"({"clockFormat":"13"})",R"({"customPresets":[{"name":"Bad","settings":{"customPresets":[]}}]})"})
+        Expect(!parse(bad).ok,"Malformed OSD layout accepted");
     const auto& osd=configured.document.core.osd;
     Expect(osd.enabled && !osd.visible_on_start && osd.compact && osd.horizontal_degrees==-40 &&
            osd.vertical_degrees==35 && osd.distance_meters==.5 && osd.scale==150 && osd.opacity==30 &&
@@ -60,7 +65,7 @@ void TestOsdConfig() {
            !osd.show_clock && osd.accent=="blue" && osd.toggle_binding.chord.size()==2 &&
            osd.cycle_binding.type==depthxr::InputBindingType::None,"OSD fields were dropped");
     for(const std::string& fields:{R"("horizontalDegrees":41)",R"("verticalDegrees":-36)",R"("distanceMeters":0)",
-      R"("scale":49)",R"("opacity":101)",R"("updateHz":0)",R"("updateHz":5.5)",R"("enabled":"true")",
+      R"("scale":24)",R"("opacity":101)",R"("updateHz":0)",R"("updateHz":5.5)",R"("enabled":"true")",
       R"("showClock":1)",R"("accent":"red")",R"("unknown":true)"})
         Expect(!parse("{"+fields+"}").ok,"Invalid OSD accepted: "+fields);
 }
@@ -88,6 +93,18 @@ void TestTurboExperimentalConfig() {
     disabled.applications[0].enabled = false;
     Expect(!depthxr::ResolveTurboSettings(disabled, "DCS.exe").experimental.enabled,
            "Disabled registered application enabled experiments");
+    auto profiles=parse(R"({"enabled":false,"profiles":[
+      {"id":"first","name":"Toolkit","enabled":true,"applicationIds":["dcs"],"experimental":{"enabled":true,"waitForSubmit":true,"sampleAtEntry":true}},
+      {"id":"second","name":"Custom","enabled":true,"applicationIds":["dcs"],"experimental":{"enabled":true,"predictionPercent":80,"frameLimit":45}}]})");
+    Expect(profiles.ok,"Profile timing parse failed: "+profiles.error);
+    auto selected=depthxr::ResolveTurboSettings(profiles.document,"DCS.exe");
+    Expect(selected.enabled && selected.experimental.enabled && selected.experimental.wait_for_submit && selected.profile_name=="Toolkit", "First profile timing not selected");
+    profiles.document.turbo.profiles[0].enabled=false;
+    selected=depthxr::ResolveTurboSettings(profiles.document,"DCS.exe");
+    Expect(selected.experimental.prediction_percent==80 && selected.experimental.frame_limit==45 && selected.profile_name=="Custom", "Independent profile settings lost");
+    profiles.document.turbo.profiles[1].experimental=depthxr::TurboExperimentalSettings{};
+    Expect(!depthxr::ResolveTurboSettings(profiles.document,"DCS.exe").experimental.enabled,"Normal profile did not disable experiments");
+    Expect(!parse(R"({"profiles":[{"name":"Bad","applicationIds":["dcs"],"experimental":{"predictionPercent":200}}]})").ok,"Bad profile timing accepted");
     for (const std::string& fields : {R"("predictionPercent":49)", R"("predictionPercent":101)",
          R"("predictionPercent":75.5)", R"("frameLimit":1)", R"("frameLimit":241)", R"("frameLimit":45.5)",
          R"("waitForSubmit":"yes")", R"("unknown":true)"}) {

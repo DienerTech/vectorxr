@@ -5,13 +5,17 @@ function validateCoreConfig(core: CoreConfig): string[] {
 
   for (const [name, low, high] of [
     ['horizontalDegrees', -40, 40], ['verticalDegrees', -35, 35], ['distanceMeters', .5, 3],
-    ['scale', 50, 150], ['opacity', 30, 100], ['updateHz', 1, 20],
+    ['scale', 25, 150], ['opacity', 30, 100], ['updateHz', 1, 20],
   ] as const) {
     const value = core.osd[name]
     if (!Number.isFinite(value) || value < low || value > high ||
         ((name === 'opacity' || name === 'updateHz') && !Number.isInteger(value))) errors.push(`OSD ${name} must be between ${low} and ${high}`)
   }
   errors.push(...validateInputBinding('core.osd.toggleBinding', core.osd.toggleBinding), ...validateInputBinding('core.osd.cycleBinding', core.osd.cycleBinding))
+  if (!/^#[0-9a-f]{6}$/i.test(core.osd.customColor)) errors.push('OSD custom color must be a six-digit hex color')
+  if (!['teal', 'copper', 'blue', 'violet', 'rose', 'custom'].includes(core.osd.accent)) errors.push('OSD accent is invalid')
+  if (!['12', '24'].includes(core.osd.clockFormat)) errors.push('OSD clock format must be 12 or 24 hour')
+  if (core.osd.bodyOrder.length !== 4 || new Set(core.osd.bodyOrder).size !== 4 || core.osd.bodyOrder.some(row => !['graph', 'turbo', 'pivot', 'modules'].includes(row))) errors.push('OSD body order must contain each row once')
 
   if (!Number.isInteger(core.logRetentionFiles) || core.logRetentionFiles < 1 || core.logRetentionFiles > 50) {
     errors.push('core.logRetentionFiles must be an integer between 1 and 50')
@@ -507,12 +511,13 @@ export function validateConfig(config: VectorXRConfig): string[] {
   errors.push(...validateQuadViewsProfileConflicts(config.modules.quadviews.profiles))
 
   errors.push(...validateInputBinding('modules.turbo.toggleBinding', config.modules.turbo.toggleBinding))
-  const experiment = config.modules.turbo.experimental
+  for (const experiment of [config.modules.turbo.experimental, ...config.modules.turbo.profiles.map(profile => profile.experimental)]) {
   if (!Number.isInteger(experiment.predictionPercent) || experiment.predictionPercent < 50 || experiment.predictionPercent > 100) {
     errors.push('Turbo experimental prediction dampening must be an integer from 50 to 100')
   }
   if (!Number.isInteger(experiment.frameLimit) || (experiment.frameLimit !== 0 && (experiment.frameLimit < 20 || experiment.frameLimit > 240))) {
     errors.push('Turbo experimental frame cap must be 0 (off) or an integer from 20 to 240')
+  }
   }
   config.modules.turbo.profiles.forEach((profile, index) => {
     const prefix = `modules.turbo.profiles[${index}].`

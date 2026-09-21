@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { readFileSync } from 'node:fs'
-import { defaultConfig, defaultOsdSettings, normalizeConfig, normalizeOsdSettings, savedBindingConflictWarnings } from '../src/lib/model.ts'
+import { defaultConfig, defaultOsdSettings, normalizeConfig, normalizeOsdSettings, osdLayout, savedBindingConflictWarnings } from '../src/lib/model.ts'
 import { validateConfig } from '../src/lib/validation.ts'
 
 test('old configs keep OSD off and acquire independent default bindings', () => {
@@ -43,6 +43,21 @@ test('OSD bindings participate in global binding conflicts', () => {
   const config = defaultConfig()
   config.core.osd.cycleBinding = structuredClone(config.core.osd.toggleBinding)
   assert.ok(savedBindingConflictWarnings(config, [config.core.osd.toggleBinding]).length > 0)
+})
+
+test('custom layouts retain small sizes, row order and colors without capturing controls or recursive presets', () => {
+  const osd = defaultOsdSettings()
+  Object.assign(osd, { enabled: true, scale: 25, accent: 'custom', customColor: '#aB12Ef', clockFormat: '12', bodyOrder: ['pivot', 'modules', 'graph', 'turbo'] })
+  const layout = osdLayout(osd)
+  osd.customPresets.push({ name: 'Small cockpit', settings: layout })
+  osd.bodyOrder.reverse()
+  assert.deepEqual(layout.bodyOrder, ['pivot', 'modules', 'graph', 'turbo'])
+  for (const key of ['enabled', 'visibleOnStart', 'toggleBinding', 'cycleBinding', 'customPresets']) assert.ok(!(key in layout))
+  assert.deepEqual(normalizeOsdSettings(JSON.parse(JSON.stringify(osd))), osd)
+  assert.deepEqual(normalizeOsdSettings({ bodyOrder: ['pivot', 'pivot', 'unknown', 'turbo'] }).bodyOrder, ['pivot', 'turbo', 'graph', 'modules'])
+  assert.equal(normalizeOsdSettings({ accent: 'toString' }).accent, 'teal')
+  const config = defaultConfig(); config.core.osd = osd
+  assert.deepEqual(validateConfig(config), [])
 })
 
 test('public schema describes every OSD field and keeps it optional for old configs', () => {

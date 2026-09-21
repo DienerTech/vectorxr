@@ -6,7 +6,8 @@ import DefaultProfileExclusions from '../DefaultProfileExclusions.vue'
 import ModuleBindingPage from '../ModuleBindingPage.vue'
 import ModuleBindingPanel from '../ModuleBindingPanel.vue'
 import ProfileShell from '../ProfileShell.vue'
-import TurboExperimentalPage from '../TurboExperimentalPage.vue'
+import TurboProfileTiming from '../TurboProfileTiming.vue'
+import { defaultTurboExperimental } from '../../lib/model'
 import TurboDiagnosticsPage from '../TurboDiagnosticsPage.vue'
 import TurboRuntimePage from '../TurboRuntimePage.vue'
 import TurboSafetyPage from '../TurboSafetyPage.vue'
@@ -93,7 +94,7 @@ async function refreshRecovery() {
 onMounted(() => void refreshRecovery())
 onUnmounted(() => { disposed = true; clearTimeout(recoveryPoll) })
 const bindingSubPageOpen = ref(false)
-const activeSubPage = ref<'runtime' | 'diagnostics' | 'safety' | 'experimental' | null>(null)
+const activeSubPage = ref<'runtime' | 'diagnostics' | 'safety' | null>(null)
 let savedScrollTop = 0
 const toggleBindingWarnings = computed(() => savedBindingConflictWarnings(props.config, [
   props.config.modules.turbo.toggleBinding,
@@ -104,12 +105,7 @@ const turboInUse = computed(
   () => props.config.modules.turbo.enabled || props.config.modules.turbo.profiles.some((profile) => profile.enabled),
 )
 
-const experimentalScope = computed(() => {
-  const selected = props.applications.filter(application => application.enabled &&
-    props.config.modules.turbo.experimental.applicationIds.includes(application.id))
-  if (!selected.length) return 'No enabled applications selected. Choose applications in Configure experiments.'
-  return `Selected applications: ${selected.map(application => application.name).join(', ')}.`
-})
+
 
 const toolkitConflict = computed(() => {
   if (!turboInUse.value) {
@@ -167,7 +163,7 @@ function pageScroller(): Element | null {
   return document.querySelector('main section.overflow-y-auto')
 }
 
-function openSubPage(page: 'runtime' | 'diagnostics' | 'safety' | 'experimental') {
+function openSubPage(page: 'runtime' | 'diagnostics' | 'safety') {
   savedScrollTop = pageScroller()?.scrollTop ?? 0
   activeSubPage.value = page
   void nextTick(() => pageScroller()?.scrollTo({ top: 0 }))
@@ -213,10 +209,7 @@ function closeSubPage() {
     :config="config" :saved-config="savedConfig" :status="runtimeStatus" :error="recoveryError" :clearing="clearing"
     :clearing-logs="clearingLogs" @clear-logs="clearFaultLogs" @clear="clearSafety" @close="closeSubPage"
   />
-  <TurboExperimentalPage
-    v-else-if="activeSubPage === 'experimental'"
-    :config="config" :applications="applications" @close="closeSubPage"
-  />
+
   <TurboDiagnosticsPage
     v-else-if="activeSubPage === 'diagnostics'"
     :config="config"
@@ -257,7 +250,7 @@ function closeSubPage() {
       <section class="border-t pt-4" style="border-color: var(--app-border)">
         <div class="mb-3">
           <p class="eyebrow text-xs font-semibold uppercase tracking-[0.24em]">Essentials</p>
-          <p class="mt-1 text-sm text-muted">Turn Turbo on broadly, or leave the default off and enable only the applications that benefit.</p>
+          <p class="mt-1 text-sm text-muted">Turn Turbo on broadly, or leave the default off and enable only the applications that benefit. Save applies enablement live; use the binding to switch off/on in the running game. Experimental timing changes still need a relaunch.</p>
         </div>
         <div class="mb-3 rounded-[1rem] border p-4 surface-panel-soft">
           <div class="flex flex-wrap items-center justify-between gap-3">
@@ -311,19 +304,6 @@ function closeSubPage() {
           <p class="mt-1 text-sm text-muted">These tools are here when you need them, without getting between you and the basic setup.</p>
         </div>
 
-        <div class="mb-3 flex flex-wrap items-center justify-between gap-3 rounded-xl border p-4 surface-panel-soft">
-          <div class="min-w-0 flex-1"><h3 class="font-semibold">Experimental timing</h3>
-            <p class="mt-1 text-sm text-muted">{{ config.modules.turbo.experimental.enabled ? experimentalScope : 'Off — normal Turbo timing.' }}</p>
-            <p class="mt-1 text-sm text-muted">Save and relaunch the VR application to apply changes.</p>
-          </div>
-          <div class="flex flex-wrap items-center gap-3">
-            <label class="pill-toggle inline-flex items-center gap-3 rounded-full px-4 py-2 text-sm font-medium">
-              <input v-model="config.modules.turbo.experimental.enabled" class="h-4 w-4 accent-depthxr-copper" type="checkbox" />
-              Timing experiments {{ config.modules.turbo.experimental.enabled ? 'On' : 'Off' }}
-            </label>
-            <button type="button" class="button-secondary rounded-xl px-4 py-2 text-sm" @click="openSubPage('experimental')">Configure experiments →</button>
-          </div>
-        </div>
         <div class="grid gap-3 md:grid-cols-2">
           <button
             class="group rounded-[1rem] border p-4 text-left transition surface-panel-soft hover:-translate-y-0.5 hover:shadow-panel"
@@ -374,7 +354,7 @@ function closeSubPage() {
       <div class="sticky top-0 z-20 flex flex-wrap items-center justify-between gap-3 rounded-[1rem] border px-4 py-3 shadow-panel backdrop-blur surface-panel-strong">
         <div>
           <h2 class="text-lg font-semibold tracking-tight">Custom Profiles</h2>
-          <p class="text-sm text-muted">Enable Turbo for selected applications while leaving the default off.</p>
+          <p class="text-sm text-muted">Choose applications and timing per profile. If enabled profiles overlap, the first matching profile takes priority.</p>
         </div>
         <button
           class="button-accent rounded-[0.75rem] px-5 py-2.5 text-sm font-medium"
@@ -399,8 +379,10 @@ function closeSubPage() {
         @remove="$emit('removeTurboProfile', index)"
         @sync-name="$emit('syncTurboProfileName', index)"
       >
-        <div class="rounded-[0.9rem] border px-4 py-3 text-sm leading-6 surface-panel-strong">
-          Turbo is on for this profile's applications. Runtime behavior remains automatic unless you changed it on the Runtime Behavior page.
+        <TurboProfileTiming v-model="profile.experimental" />
+        <div v-if="config.modules.turbo.experimental.enabled && !config.modules.turbo.experimental.applicationIds.length" class="mt-3 rounded-lg border p-3 text-sm chip-warning">
+          Previous experimental settings were saved without an application assignment.
+          <button class="button-secondary ml-2 rounded-lg px-3 py-2 text-xs" @click="profile.experimental = { ...config.modules.turbo.experimental, applicationIds: [] }; config.modules.turbo.experimental = defaultTurboExperimental()">Use saved timing in this profile</button>
         </div>
         <div class="mt-3 flex flex-wrap items-center justify-between gap-3 rounded-[0.9rem] border p-4 surface-panel-soft">
           <div class="max-w-xl"><h4 class="text-sm font-semibold">Turbo Safety override</h4><p class="mt-1 text-sm text-muted">Bypass persistent safety blocks for these applications. Live pacing fallback still suspends a failing session; use the binding to retry.</p></div>

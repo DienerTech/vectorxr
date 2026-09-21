@@ -696,10 +696,10 @@ bool CheckAllowedKeys(const JsonValue::Object& object,
 bool ParseOsdSettings(const JsonValue::Object& object, OsdSettings& out, std::string& error) {
     if (!CheckAllowedKeys(object, {"enabled", "visibleOnStart", "compact", "horizontalDegrees", "verticalDegrees",
         "distanceMeters", "scale", "opacity", "updateHz", "showGraph", "showRuntime", "showTurbo", "showModules",
-        "showClock", "accent", "toggleBinding", "cycleBinding"}, error)) return false;
+        "showClock", "showPivot", "clockFormat", "bodyOrder", "customColor", "customPresets", "accent", "toggleBinding", "cycleBinding"}, error)) return false;
     for (const auto& [key, target] : {std::pair{"enabled", &out.enabled}, {"visibleOnStart", &out.visible_on_start},
         {"compact", &out.compact}, {"showGraph", &out.show_graph}, {"showRuntime", &out.show_runtime},
-        {"showTurbo", &out.show_turbo}, {"showModules", &out.show_modules}, {"showClock", &out.show_clock}}) {
+        {"showTurbo", &out.show_turbo}, {"showModules", &out.show_modules}, {"showClock", &out.show_clock}, {"showPivot", &out.show_pivot}}) {
         std::optional<bool> value;
         if (!ReadOptionalBool(object, key, value, error)) return false;
         if (value) *target = *value;
@@ -717,7 +717,7 @@ bool ParseOsdSettings(const JsonValue::Object& object, OsdSettings& out, std::st
     };
     if (!number("horizontalDegrees", out.horizontal_degrees, -40, 40) ||
         !number("verticalDegrees", out.vertical_degrees, -35, 35) ||
-        !number("distanceMeters", out.distance_meters, 0.5, 3) || !number("scale", out.scale, 50, 150)) return false;
+        !number("distanceMeters", out.distance_meters, 0.5, 3) || !number("scale", out.scale, 25, 150)) return false;
     for (const auto& [key, target] : {std::pair{"opacity", &out.opacity}, {"updateHz", &out.update_hz}}) {
         std::optional<double> value;
         if (!ReadOptionalNumber(object, key, value, error)) return false;
@@ -733,8 +733,52 @@ bool ParseOsdSettings(const JsonValue::Object& object, OsdSettings& out, std::st
     std::optional<std::string> accent;
     if (!ReadOptionalString(object, "accent", accent, error)) return false;
     if (accent) {
-        if (*accent != "teal" && *accent != "copper" && *accent != "blue") { error = "Invalid core.osd.accent"; return false; }
+        if (*accent != "teal" && *accent != "copper" && *accent != "blue" && *accent != "violet" && *accent != "rose" && *accent != "custom") { error = "Invalid core.osd.accent"; return false; }
         out.accent = *accent;
+    }
+    std::optional<std::string> color, clock;
+    if (!ReadOptionalString(object, "customColor", color, error) || !ReadOptionalString(object, "clockFormat", clock, error)) return false;
+    if (color) {
+        if (color->size()!=7 || (*color)[0]!='#' || color->find_first_not_of("0123456789abcdefABCDEF",1)!=std::string::npos) {
+            error="Invalid core.osd.customColor"; return false;
+        }
+        out.custom_color=*color;
+    }
+    if (clock) {
+        if (*clock!="12" && *clock!="24") { error="Invalid core.osd.clockFormat"; return false; }
+        out.clock_format=*clock;
+    }
+    if (const auto it=object.find("bodyOrder"); it!=object.end()) {
+        const auto* rows=RequireArray(it->second,"core.osd.bodyOrder",error);
+        if (!rows) return false;
+        std::vector<std::string> order;
+        for (const auto& row:*rows) {
+            const auto* name=row.IsString()?&row.AsString():nullptr;
+            if (!name || (*name!="graph" && *name!="turbo" && *name!="pivot" && *name!="modules") ||
+                std::find(order.begin(),order.end(),*name)!=order.end()) { error="Invalid core.osd.bodyOrder"; return false; }
+            order.push_back(*name);
+        }
+        for (const auto& name:out.body_order) if (std::find(order.begin(),order.end(),name)==order.end()) order.push_back(name);
+        out.body_order=std::move(order);
+    }
+    // Saved layouts belong to the desktop UI; validate them without carrying them into the frame path.
+    if (const auto it=object.find("customPresets"); it!=object.end()) {
+        const auto* presets=RequireArray(it->second,"core.osd.customPresets",error);
+        if (!presets || presets->size()>50) { error="Invalid core.osd.customPresets"; return false; }
+        for (const auto& preset:*presets) {
+            const auto* entry=RequireObject(preset,"OSD preset",error);
+            if (!entry || !CheckAllowedKeys(*entry,{"name","settings"},error)) return false;
+            std::optional<std::string> name;
+            if (!ReadOptionalString(*entry,"name",name,error) || !name || name->empty() || name->size()>240) { error="Invalid OSD preset name"; return false; }
+            const auto layout=entry->find("settings");
+            if (layout==entry->end()) { error="Missing OSD preset settings"; return false; }
+            const auto* values=RequireObject(layout->second,"OSD preset settings",error);
+            if (!values) return false;
+            for (const auto* key:{"customPresets","enabled","visibleOnStart","toggleBinding","cycleBinding"})
+                if (values->count(key)) { error="OSD presets may only contain layout settings"; return false; }
+            OsdSettings checked;
+            if (!ParseOsdSettings(*values,checked,error)) return false;
+        }
     }
     for (const auto& [key, target] : {std::pair{"toggleBinding", &out.toggle_binding}, {"cycleBinding", &out.cycle_binding}}) {
         if (const auto it = object.find(key); it != object.end() && !ParseInputBinding(it->second, *target, error)) return false;
@@ -1144,6 +1188,8 @@ bool ParseDepthModule(const JsonValue::Object& object,
     return true;
 }
 
+bool ParseTurboExperimental(const JsonValue::Object&, TurboExperimentalSettings&, std::string&);
+
 bool ParseTurboProfile(const JsonValue& value, TurboProfile& out, std::string& error) {
     const JsonValue::Object* object = RequireObject(value, "turboProfile", error);
     if (!object) {
@@ -1151,6 +1197,7 @@ bool ParseTurboProfile(const JsonValue& value, TurboProfile& out, std::string& e
     }
 
     static const std::unordered_set<std::string> allowed = {
+        "experimental",
         "disableSafety",
         "id",
         "name",
@@ -1163,6 +1210,12 @@ bool ParseTurboProfile(const JsonValue& value, TurboProfile& out, std::string& e
         return false;
     }
 
+    if (const auto it=object->find("experimental");it!=object->end()){
+        const auto* settings=RequireObject(it->second,"turboProfile.experimental",error);
+        TurboExperimentalSettings parsed;
+        if(!settings || !ParseTurboExperimental(*settings,parsed,error))return false;
+        parsed.application_ids.clear();out.experimental=std::move(parsed);
+    }
     std::optional<bool> disable_safety;
     if (!ReadOptionalBool(*object, "disableSafety", disable_safety, error)) return false;
     out.disable_safety = disable_safety.value_or(false);

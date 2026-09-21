@@ -1142,7 +1142,8 @@ XrPosef InvertPose(const XrPosef& pose) {
     return {inverse_orientation, inverse_position};
 }
 
-XrPosef ApplyExtraRotationToPose(const XrPosef& pose, float extra_yaw_radians, float extra_pitch_radians) {
+XrPosef ApplyExtraRotationToPose(const XrPosef& pose, float extra_yaw_radians, float extra_pitch_radians,
+                               const XrVector3f* translation_anchor = nullptr) {
     if (NearlyZero(extra_yaw_radians) && NearlyZero(extra_pitch_radians)) {
         return pose;
     }
@@ -1158,9 +1159,22 @@ XrPosef ApplyExtraRotationToPose(const XrPosef& pose, float extra_yaw_radians, f
         MultiplyQuaternion(YawQuaternion(heading_radians + extra_yaw_radians),
                            MultiplyQuaternion(PitchQuaternion(extra_pitch_radians),
                                               YawQuaternion(-heading_radians))));
+    XrVector3f position = pose.position;
+    if (translation_anchor) {
+        // Turn the whole tracked displacement, not just the orientation. Keep
+        // the seated anchor fixed; rotating absolute room coordinates would
+        // orbit the camera around the runtime's origin (often the floor).
+        const XrVector3f displacement{position.x - translation_anchor->x,
+                                     position.y - translation_anchor->y,
+                                     position.z - translation_anchor->z};
+        const XrVector3f rotated = RotateVector(extra_rotation, displacement);
+        position = {translation_anchor->x + rotated.x,
+                    translation_anchor->y + rotated.y,
+                    translation_anchor->z + rotated.z};
+    }
     return {
         NormalizeQuaternion(MultiplyQuaternion(extra_rotation, pose.orientation)),
-        pose.position,
+        position,
     };
 }
 
@@ -1792,6 +1806,8 @@ XrResult OpenXrLayer::OnInstanceCreated(const XrInstanceCreateInfo* create_info,
 
     current_exe_name_ = GetCurrentExecutableName();
     logger_.Info(std::string("VectorXR layer version: ") + VECTORXR_VERSION);
+    logger_.Info(std::string("VectorXR layer build: ") + __DATE__ + " " + __TIME__ +
+                 "; async-off=recoupled; metrics-pause=queued");
     logger_.Info("VectorXR attached to process: " + current_exe_name_);
     {
         const ProcessInteropSnapshot interop = GetProcessInteropSnapshot();
@@ -2166,11 +2182,13 @@ XrResult OpenXrLayer::CreateSession(XrInstance instance,
     XrSystemProperties osd_system{XR_TYPE_SYSTEM_PROPERTIES};
     const bool osd_limits = create_info && next_get_system_properties_ &&
         XR_SUCCEEDED(next_get_system_properties_(instance, create_info->systemId, &osd_system));
-    osd_.Initialize(*session, d3d11_binding ? d3d11_binding->device : nullptr,
+    osd_.InitializeGraphics(*session, create_info ? create_info->next : nullptr,
         osd_limits ? osd_system.graphicsProperties.maxLayerCount : 0,
         {next_enumerate_swapchain_formats_, next_create_swapchain_, next_enumerate_swapchain_images_,
          next_acquire_swapchain_image_, next_wait_swapchain_image_, next_release_swapchain_image_,
-         next_destroy_swapchain_, next_create_reference_space_, next_destroy_space_});
+         next_destroy_swapchain_, next_create_reference_space_, next_destroy_space_}, &logger_, "application="+current_exe_name_+" runtime="+runtime_name_);
+    graphics_api_=osd_.GraphicsApi();
+    osd_vulkan_.store(graphics_api_=="Vulkan");
     const XrResult internal_result = CreateInternalReferenceSpaces(*session);
     if (XR_FAILED(internal_result)) {
         logger_.Error("Failed to create one or more internal reference spaces; PivotXR will degrade for this session.");
@@ -4630,6 +4648,8 @@ XrResult OpenXrLayer::TraceRuntimeWaitFrame(XrSession session, const XrFrameWait
 }
 
 XrResult OpenXrLayer::TraceRuntimeBeginFrame(XrSession session, const XrFrameBeginInfo* info) {
+    std::unique_lock queue_lock(osd_vulkan_queue_mutex_,std::defer_lock);
+    if(osd_vulkan_.load())queue_lock.lock();
     if (!turbo_trace_.Enabled()) return next_begin_frame_(session, info);
     const auto id = turbo_trace_.NextId();
     turbo_trace_.Record("runtime.begin.enter", id);
@@ -4640,6 +4660,8 @@ XrResult OpenXrLayer::TraceRuntimeBeginFrame(XrSession session, const XrFrameBeg
 }
 
 XrResult OpenXrLayer::TraceRuntimeEndFrame(XrSession session, const XrFrameEndInfo* info) {
+    std::unique_lock queue_lock(osd_vulkan_queue_mutex_,std::defer_lock);
+    if(osd_vulkan_.load())queue_lock.lock();
     XrFrameEndInfo with_osd{};
     std::vector<const XrCompositionLayerBaseHeader*> layers;
     if (info && osd_monitoring_.load(std::memory_order_relaxed)) {
@@ -4652,12 +4674,14 @@ XrResult OpenXrLayer::TraceRuntimeEndFrame(XrSession session, const XrFrameEndIn
         }
     }
     const auto submit=[&] {
+        const auto submit_start=std::chrono::steady_clock::now();
         const auto result=next_end_frame_(session,info);
+        osd_.RecordSubmit(std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-submit_start).count());
         if (!layers.empty() && XR_FAILED(result)) {
             // Never retry xrEndFrame: a failing runtime may already consume it.
-            // Remove the optional overlay from subsequent submissions instead.
+            // Let the renderer distinguish a frame-order/timestamp rejection
+            // from an actual overlay failure.
             osd_.SubmissionFailed(result);
-            logger_.Error("OSD disabled after frame submission failed: result="+std::to_string(result));
         }
         return result;
     };
@@ -4718,6 +4742,7 @@ void OpenXrLayer::ConfigureTurboExperiment() {
         turbo_pacing_verdict_pending_ = false;
     }
     logger_.Info("Turbo session settings: application=" + current_exe_name_ +
+        ", profile=" + resolved_settings_.turbo.profile_name +
         ", experimental=" + std::to_string(turbo_experiment_.enabled) +
         ", waitForSubmit=" + std::to_string(turbo_experiment_.wait_for_submit) +
         ", sampleAtEntry=" + std::to_string(turbo_experiment_.sample_at_entry) +
@@ -4866,7 +4891,7 @@ XrResult OpenXrLayer::WaitFrame(XrSession session,
             }
             if (wait_pipelined || async_handoff) {
                 bool mark_wait_polled = true;
-                if (turbo_async_wait_polled_) {
+                if (turbo_async_wait_polled_ || !turbo_valve_open_) {
                     // Second poll while pipelined: only one frame of
                     // pipelining is allowed, so now we must wait for the real
                     // frame. If EndFrame has pre-armed the handoff but not yet
@@ -4903,11 +4928,24 @@ XrResult OpenXrLayer::WaitFrame(XrSession session,
                         // member while this app thread is blocked.
                         const std::shared_future<void> pending_wait = turbo_async_wait_;
                         const std::uint64_t pending_generation = turbo_async_wait_generation_;
+                        const bool recouple = !turbo_valve_open_;
+                        const auto poll_start = std::chrono::steady_clock::now();
                         lock.unlock();
                         turbo_trace_.Record("poll.worker.enter", trace_id, pending_generation);
-                        pending_wait.wait();
+                        if (!recouple) {
+                            pending_wait.wait();
+                        } else {
+                            // Keep ownership of waits/begins stable when Turbo
+                            // is switched off, but re-couple the app to runtime
+                            // pacing. Bound this for submit-interlocked runtimes.
+                            pending_wait.wait_for(std::chrono::milliseconds(100));
+                        }
                         turbo_trace_.Record("poll.worker.return", trace_id, pending_generation);
                         lock.lock();
+                        if (recouple) {
+                            turbo_metrics_wait_pending_ms_ += std::chrono::duration<double, std::milli>(
+                                std::chrono::steady_clock::now() - poll_start).count();
+                        }
                         if (pending_generation != turbo_async_wait_generation_) {
                             // EndFrame already retired this wait and may have
                             // launched the following one. Do not mark that newer
@@ -5338,6 +5376,7 @@ XrResult OpenXrLayer::ForwardEndFrame(XrSession session,
     const auto pacing_start = std::chrono::steady_clock::now();
 
     bool has_pending_wait = false;
+    bool keep_async_pipeline = false;
     bool frame_begun = false;
     bool begin_owed = false;
     bool valve_open = false;
@@ -5356,6 +5395,17 @@ XrResult OpenXrLayer::ForwardEndFrame(XrSession session,
         frame_begun = turbo_frame_begun_;
         turbo_frame_begun_ = false;
         seq_state = turbo_seq_state_;
+        keep_async_pipeline = turbo_pacing_mode_ == TurboPacingMode::kAsync &&
+            seq_state == TurboSequencedState::kInactive &&
+            (turbo_engaged || has_pending_wait || turbo_async_handoff_active_);
+        if (keep_async_pipeline) {
+            if (turbo_valve_open_ != turbo_engaged) {
+                logger_.Info(turbo_engaged
+                    ? "Turbo: async pacing decoupled; frame ownership preserved."
+                    : "Turbo: async pacing re-coupled; frame ownership preserved.");
+            }
+            turbo_valve_open_ = turbo_engaged;
+        }
         begin_owed = turbo_begin_owed_;
         valve_open = turbo_valve_open_;
         if (!has_pending_wait && turbo_engaged && turbo_pacing_mode_ == TurboPacingMode::kAsync &&
@@ -5420,7 +5470,7 @@ XrResult OpenXrLayer::ForwardEndFrame(XrSession session,
             if (ready && pending_async_generation == turbo_async_wait_generation_) {
                 async_wait_result = turbo_async_wait_result_;
                 turbo_async_wait_ = {};
-                if (turbo_engaged && turbo_pacing_mode_ == TurboPacingMode::kAsync &&
+                if (keep_async_pipeline && turbo_pacing_mode_ == TurboPacingMode::kAsync &&
                     turbo_seq_state_ == TurboSequencedState::kInactive) {
                     // Retire and arm atomically under turbo_mutex_: an app
                     // WaitFrame can observe the old future or the shield, but
@@ -5683,7 +5733,7 @@ XrResult OpenXrLayer::ForwardEndFrame(XrSession session,
                                   "; keeping previous frame timing.");
                 }
             }
-        } else if (turbo_engaged) {
+        } else if (turbo_engaged || keep_async_pipeline) {
             // Async pacing: background-thread wait, drained at the next
             // EndFrame.
             std::scoped_lock lock(turbo_mutex_);
@@ -5722,13 +5772,15 @@ XrResult OpenXrLayer::ForwardEndFrame(XrSession session,
         }
 
         if (!turbo_engaged) {
-            // Turbo off/suspended. The structural sequenced pipeline stays up
-            // (the valve above already closed — tearing the pipeline down and
-            // re-establishing it wedges PiOpenXR's per-thread pacing); only a
-            // not-yet-established handshake is dropped, and the async
-            // drain-out is logged.
+            // Both established pipelines retain runtime frame ownership while
+            // their valve restores app-visible pacing. A fabricated app wait
+            // can already be queued on another thread when the toggle changes;
+            // removing interception here would forward its unmatched begin.
+            // Only an unestablished handshake can be discarded safely.
             std::scoped_lock lock(turbo_mutex_);
-            CancelTurboAsyncHandoffLocked("turbo disengaged before async publication");
+            if (!keep_async_pipeline) {
+                CancelTurboAsyncHandoffLocked("turbo disengaged before async publication");
+            }
             if (turbo_seq_state_ == TurboSequencedState::kEngaging) {
                 // Nothing was pipelined yet; drop the handshake request.
                 turbo_seq_state_ = TurboSequencedState::kInactive;
@@ -6238,11 +6290,20 @@ void OpenXrLayer::RecordTurboMetricsFrame(bool turbo_engaged,
         (metrics_mode == TurboMetricsMode::kAlways ||
          (metrics_mode == TurboMetricsMode::kBinding &&
           IsTurboMetricsCaptureArmed(metrics_binding, sound_volume)));
+    turbo_metrics_active_.store(capturing);
     if (!capturing) {
+        if (turbo_metrics_was_capturing_) {
+            // Queue the entire tail even if a periodic write is still busy.
+            // No later EndFrame or clean application shutdown is required.
+            turbo_metrics_dirty_ = true;
+            FlushTurboMetrics(false, true);
+            logger_.Info("Turbo metrics: paused capture snapshot queued (live=false).");
+        }
         turbo_metrics_was_capturing_ = false;
         return;
     }
 
+    const bool resuming = !turbo_metrics_was_capturing_ && !turbo_metrics_session_id_.empty();
     const auto now = std::chrono::steady_clock::now();
     if (turbo_metrics_session_id_.empty()) {
         const auto system_now = std::chrono::system_clock::now().time_since_epoch();
@@ -6287,7 +6348,10 @@ void OpenXrLayer::RecordTurboMetricsFrame(bool turbo_engaged,
     turbo_metrics_dirty_ = true;
 
     constexpr std::chrono::seconds kMetricsFlushInterval{15};
-    if (!turbo_metrics_last_flush_time_.has_value()) {
+    if (resuming) {
+        FlushTurboMetrics(false, true);
+        turbo_metrics_last_flush_time_ = now;
+    } else if (!turbo_metrics_last_flush_time_.has_value()) {
         turbo_metrics_last_flush_time_ = now;
     } else if (now - *turbo_metrics_last_flush_time_ >= kMetricsFlushInterval) {
         FlushTurboMetrics(false);
@@ -6328,7 +6392,7 @@ bool OpenXrLayer::IsTurboMetricsCaptureArmed(const InputBinding& binding, int so
     return turbo_metrics_capture_armed_;
 }
 
-void OpenXrLayer::FlushTurboMetrics(bool final_flush) {
+void OpenXrLayer::FlushTurboMetrics(bool final_flush, bool queue_after_pending) {
     if (turbo_metrics_session_id_.empty() || (!turbo_metrics_dirty_ && !final_flush)) {
         return;
     }
@@ -6340,7 +6404,7 @@ void OpenXrLayer::FlushTurboMetrics(bool final_flush) {
     session.layer_version = VECTORXR_VERSION;
     session.collection_mode = ToString(turbo_metrics_collection_mode_);
     session.timing_configuration = TurboTimingConfiguration();
-    session.live = !final_flush;
+    session.live = !final_flush && turbo_metrics_active_.load();
     session.started_unix_seconds = turbo_metrics_started_unix_seconds_;
     session.updated_unix_seconds =
         std::chrono::duration_cast<std::chrono::seconds>(
@@ -6395,14 +6459,19 @@ void OpenXrLayer::FlushTurboMetrics(bool final_flush) {
         // Never block the frame thread on the filesystem: skip this flush if
         // the previous async write is still in flight (data stays dirty and
         // rides the next interval).
-        if (turbo_metrics_write_future_.valid() &&
+        if (!queue_after_pending && turbo_metrics_write_future_.valid() &&
             turbo_metrics_write_future_.wait_for(std::chrono::seconds(0)) !=
                 std::future_status::ready) {
             return;
         }
+        // Move the old future into the new worker before replacing it: destroying
+        // an unfinished std::async future on the frame thread would block it.
+        auto previous = std::move(turbo_metrics_write_future_);
         turbo_metrics_write_future_ =
             std::async(std::launch::async,
-                       [this, path = ResolveTurboMetricsPath(), snapshot = std::move(session)] {
+                       [this, path = ResolveTurboMetricsPath(), snapshot = std::move(session),
+                        previous = std::move(previous)]() mutable {
+                           if (previous.valid()) previous.wait();
                            std::string error;
                            if (!RecordTurboMetricsSession(path, snapshot, &error)) {
                                logger_.Info("Turbo metrics: background session write failed: " + error);
@@ -7547,6 +7616,9 @@ XrResult OpenXrLayer::CreateReferenceSpace(XrSession session,
 XrResult OpenXrLayer::LocateSpace(XrSpace space, XrSpace base_space, XrTime time, XrSpaceLocation* location) {
     bool pivotxr_active = false;
     bool pivot_processing_required = false;
+    XrSpace anchor_space = XR_NULL_HANDLE;
+    XrSpace reference_space = XR_NULL_HANDLE;
+    XrTime anchor_locate_time = time;
     {
         std::scoped_lock lock(mutex_);
         ReloadConfigIfNeeded();
@@ -7555,6 +7627,12 @@ XrResult OpenXrLayer::LocateSpace(XrSpace space, XrSpace base_space, XrTime time
             pivotxr_active = IsPivotXrActive();
             pivot_processing_required =
                 pivotxr_active || pivotxr_activation_gain_ > kPivotActivationGainEpsilon;
+            if (pivot_processing_required && pivotxr_translation_anchor_ &&
+                IsTrackedViewSpace(space) != IsTrackedViewSpace(base_space)) {
+                reference_space = IsTrackedViewSpace(space) ? base_space : space;
+                anchor_space = pivotxr_translation_anchor_->space;
+                anchor_locate_time = ClampInternalLocateTime(time);
+            }
         }
     }
 
@@ -7585,9 +7663,17 @@ XrResult OpenXrLayer::LocateSpace(XrSpace space, XrSpace base_space, XrTime time
         return result;
     }
 
+    XrSpaceLocation anchor_relation{XR_TYPE_SPACE_LOCATION};
+    if (anchor_space != XR_NULL_HANDLE && anchor_space != reference_space) {
+        if (XR_FAILED(next_locate_space_(anchor_space, reference_space, anchor_locate_time, &anchor_relation))) {
+            anchor_relation.locationFlags = 0;
+        }
+    }
     std::scoped_lock lock(mutex_);
+    const bool same_anchor_space = pivotxr_translation_anchor_ &&
+        pivotxr_translation_anchor_->space == anchor_space;
     return ApplyPivotToLocatedSpace(space, base_space, time, pivotxr_active, location, nullptr,
-                                    nullptr, nullptr, false);
+                                    nullptr, nullptr, false, same_anchor_space ? &anchor_relation : nullptr);
 }
 
 XrResult OpenXrLayer::LocateViews(XrSession session,
@@ -7744,6 +7830,11 @@ XrResult OpenXrLayer::LocateViews(XrSession session,
             origin.session = session;
             origin.location_flags = origin_location.locationFlags;
             pivotxr_origin_ = origin;
+            pivotxr_translation_anchor_.reset();
+            if ((origin_location.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT) != 0) {
+                pivotxr_translation_anchor_ = PivotTranslationAnchor{
+                    origin.pose.position, view_locate_info->space};
+            }
             pivotxr_origin_capture_pending_ = false;
             std::ostringstream origin_stream;
             origin_stream << "PivotXR origin captured: yaw=" << FormatDiagnosticDouble(origin.yaw_radians)
@@ -7880,6 +7971,7 @@ XrResult OpenXrLayer::LocateViews(XrSession session,
             pivot_diagnostic_.recomposition_mode = "locate_space_failed";
         }
     } else if (!pivotxr_envelope_engaged) {
+        if (!pivotxr_origin_) pivotxr_translation_anchor_.reset();
         pivotxr_smoothed_extra_yaw_radians_ = 0.0;
         pivotxr_smoothed_extra_pitch_radians_ = 0.0;
         pivotxr_yaw_step_ = 0;
@@ -8175,6 +8267,9 @@ XrResult OpenXrLayer::DestroySpace(XrSpace space) {
         tracked_view_spaces_.erase(space);
         tracked_local_spaces_.erase(space);
         tracked_stage_spaces_.erase(space);
+        if (pivotxr_translation_anchor_ && pivotxr_translation_anchor_->space == space) {
+            pivotxr_translation_anchor_.reset();
+        }
         if (space == internal_view_space_) {
             internal_view_space_ = XR_NULL_HANDLE;
         }
@@ -8378,9 +8473,50 @@ void OpenXrLayer::PollConfigFile() {
     }
 }
 
+OsdSnapshot OpenXrLayer::BuildOsdSnapshot() const {
+    OsdSnapshot snapshot;
+    snapshot.application=current_exe_name_; snapshot.runtime=runtime_name_;
+    const bool turbo_enabled=resolved_settings_.turbo.enabled && resolved_settings_.core.enabled;
+    snapshot.turbo=!turbo_enabled?"Disabled":!turbo_toggle_enabled_?"Enabled / Off":
+        turbo_recovery_blocked_.load()?"Recovery blocked":turbo_auto_suspended_.load()?"Suspended":
+        turbo_effective_active_.load()?(turbo_effective_async_.load()?"Async":"Sequenced"):
+        "Enabled / Waiting";
+    if(turbo_metrics_active_.load())snapshot.turbo+=" / Analyzing";
+    snapshot.experimental=turbo_experiment_.enabled;
+    auto add=[&](const char* name) { if (!snapshot.modules.empty()) snapshot.modules+="  /  "; snapshot.modules+=name; };
+    if (resolved_settings_.core.enabled && resolved_settings_.depthxr.enabled && depthxr_toggle_enabled_) add("Depth");
+    if (resolved_settings_.core.enabled && resolved_settings_.pivotxr.enabled) add("Pivot");
+    if (turbo_enabled) add("Turbo");
+    if (quadviews_session_active_.value_or(false)) add("Quadviews");
+    if (snapshot.modules.empty()) snapshot.modules="Off";
+    snapshot.pivot="Disabled";
+    if (resolved_settings_.core.enabled && resolved_settings_.pivotxr.enabled) {
+        snapshot.pivot="Pivot ready";
+        const auto& profiles=resolved_settings_.pivotxr.profiles;
+        const bool quick=pivotxr_quick_view_active_ || pivotxr_quick_view_transitioning_;
+        const auto index=quick?pivotxr_quick_view_profile_index_:pivotxr_active_profile_index_;
+        if ((pivotxr_engaged_ || quick) && index<profiles.size()) snapshot.pivot=profiles[index].name+" Applied";
+        const bool nudged=!PivotViewOffsetNearlyZero(pivotxr_manual_view_transition_.current) ||
+            !PivotViewOffsetNearlyZero(pivotxr_manual_view_transition_.target) ||
+            !PivotViewOffsetNearlyZero(pivotxr_profile_view_transition_.current) ||
+            !PivotViewOffsetNearlyZero(pivotxr_profile_view_transition_.target);
+        if (nudged) snapshot.pivot+=(snapshot.pivot=="Pivot ready"?" / ":", ")+std::string("Nudges Applied");
+        if (quick) snapshot.pivot+=", Quick View Applied";
+    }
+    const auto& e=resolved_settings_.turbo.experimental;
+    if (e.enabled!=turbo_experiment_.enabled || (e.enabled &&
+        (e.wait_for_submit!=turbo_experiment_.wait_for_submit || e.sample_at_entry!=turbo_experiment_.sample_at_entry ||
+         e.prediction_percent!=turbo_experiment_.prediction_percent || e.frame_limit!=turbo_experiment_.frame_limit)))
+        snapshot.restart="Turbo experiments";
+    if (deferred_quadviews_config_active_) snapshot.restart+=(snapshot.restart.empty()?"":" + ")+std::string("Quadviews");
+    return snapshot;
+}
+
 void OpenXrLayer::PrepareOsd() {
+    const auto prepare_start=std::chrono::steady_clock::now();
+    const auto record=[&]{osd_.RecordPrepare(std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-prepare_start).count());};
     const auto& settings=resolved_settings_.core.osd;
-    if (!settings.enabled && !osd_was_enabled_) return;
+    if (!settings.enabled && !osd_was_enabled_) {record();return;}
     osd_was_enabled_=settings.enabled;
     // OSD remains available when enhancements are off, so it can explain state.
     if (settings.enabled) {
@@ -8391,28 +8527,11 @@ void OpenXrLayer::PrepareOsd() {
             osd_cycle_down_=PollInputBindingDown(settings.cycle_binding);
         }
     }
-    OsdSnapshot snapshot;
-    if (settings.enabled) {
-        snapshot.application=current_exe_name_; snapshot.runtime=runtime_name_;
-        snapshot.turbo=turbo_recovery_blocked_.load()?"Recovery disabled":turbo_auto_suspended_.load()?"Suspended":
-            turbo_effective_active_.load()?(turbo_effective_async_.load()?"Async":"Sequenced"):
-            (resolved_settings_.turbo.enabled && turbo_toggle_enabled_ && resolved_settings_.core.enabled)?"Waiting":"Off";
-        snapshot.experimental=turbo_experiment_.enabled;
-        auto add=[&](const char* name) { if (!snapshot.modules.empty()) snapshot.modules+="  /  "; snapshot.modules+=name; };
-        if (resolved_settings_.core.enabled && resolved_settings_.depthxr.enabled && depthxr_toggle_enabled_) add("Depth");
-        if (resolved_settings_.core.enabled && resolved_settings_.pivotxr.enabled) add("Pivot");
-        if (quadviews_session_active_.value_or(false)) add("Quadviews");
-        if (snapshot.modules.empty()) snapshot.modules="Off";
-        const auto& e=resolved_settings_.turbo.experimental;
-        if (e.enabled!=turbo_experiment_.enabled || (e.enabled &&
-            (e.wait_for_submit!=turbo_experiment_.wait_for_submit || e.sample_at_entry!=turbo_experiment_.sample_at_entry ||
-             e.prediction_percent!=turbo_experiment_.prediction_percent || e.frame_limit!=turbo_experiment_.frame_limit)))
-            snapshot.restart="Turbo experiments";
-        if (deferred_quadviews_config_active_) snapshot.restart+=(snapshot.restart.empty()?"":" + ")+std::string("Quadviews");
-    }
+    auto snapshot=settings.enabled?BuildOsdSnapshot():OsdSnapshot{};
     const auto before=osd_.Status();
     osd_.Prepare(settings, std::move(snapshot), osd_toggle_down_, osd_cycle_down_);
     const auto after=osd_.Status();
+    record();
     if (before.compact!=after.compact) SoundPlayer::Instance().PlayTransition(settings.cycle_binding.sound,after.compact,dll_directory_,resolved_settings_.core.sound_volume);
     if (before.shown!=after.shown) SoundPlayer::Instance().PlayTransition(settings.toggle_binding.sound,after.shown,dll_directory_,resolved_settings_.core.sound_volume);
 }
@@ -8774,7 +8893,7 @@ void OpenXrLayer::ResetSessionState() {
     osd_monitoring_.store(false);
     osd_should_render_.store(true);
     osd_last_input_poll_.reset();
-    osd_toggle_down_=false; osd_cycle_down_=false; osd_was_enabled_=false;
+    osd_toggle_down_=false; osd_cycle_down_=false; osd_was_enabled_=false;osd_vulkan_.store(false);turbo_metrics_active_.store(false);
     if (!runtime_relay_session_id_.empty()) {
         runtime_relay_sessions_to_remove_.push_back(runtime_relay_session_id_);
         runtime_relay_session_id_.clear();
@@ -10399,7 +10518,8 @@ XrResult OpenXrLayer::ApplyPivotToLocatedSpace(XrSpace space,
                                                double* applied_extra_yaw_radians,
                                                double* applied_extra_pitch_radians,
                                                XrPosef* applied_pose_delta,
-                                               bool update_smoothing) {
+                                               bool update_smoothing,
+                                               const XrSpaceLocation* anchor_space_in_reference) {
     const XrResult result = XR_SUCCESS;
     if (applied_pose_delta) {
         *applied_pose_delta = IdentityPose();
@@ -10415,6 +10535,7 @@ XrResult OpenXrLayer::ApplyPivotToLocatedSpace(XrSpace space,
 
     if (!resolved_settings_.pivotxr.enabled) {
         pivotxr_activation_gain_ = 0.0;
+        pivotxr_translation_anchor_.reset();
         clear_extra_outputs();
         return result;
     }
@@ -10456,6 +10577,7 @@ XrResult OpenXrLayer::ApplyPivotToLocatedSpace(XrSpace space,
     // engaged. While the envelope is still open we keep applying the (eased)
     // pivot so toggling off releases the view smoothly.
     if (!pivotxr_active && pivotxr_activation_gain_ <= kPivotActivationGainEpsilon) {
+        if (!pivotxr_origin_) pivotxr_translation_anchor_.reset();
         pivotxr_activation_gain_ = 0.0;
         pivotxr_smoothed_extra_yaw_radians_ = 0.0;
         pivotxr_smoothed_extra_pitch_radians_ = 0.0;
@@ -10477,7 +10599,17 @@ XrResult OpenXrLayer::ApplyPivotToLocatedSpace(XrSpace space,
         return result;
     }
 
+    if ((location->locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT) == 0) {
+        clear_extra_outputs();
+        return result;
+    }
+
     const XrPosef view_pose = space_is_view ? location->pose : InvertPose(location->pose);
+    const XrSpace reference_space = space_is_view ? base_space : space;
+    const bool position_valid = (location->locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT) != 0;
+    if (update_smoothing && position_valid && !pivotxr_translation_anchor_) {
+        pivotxr_translation_anchor_ = PivotTranslationAnchor{view_pose.position, reference_space};
+    }
     const ViewOrientation orientation{
         view_pose.orientation.x,
         view_pose.orientation.y,
@@ -10606,7 +10738,8 @@ XrResult OpenXrLayer::ApplyPivotToLocatedSpace(XrSpace space,
     }
     constexpr double kPi = 3.14159265358979323846;
     const double extra_yaw_radians =
-        std::clamp(applied_view_offset.yaw_radians, -kPi, kPi);
+        quick_view_override ? WrapRadians(applied_view_offset.yaw_radians)
+                            : std::clamp(applied_view_offset.yaw_radians, -kPi, kPi);
     const double extra_pitch_radians =
         std::clamp(applied_view_offset.pitch_radians,
                    DegreesToRadians(-85.0), DegreesToRadians(85.0));
@@ -10636,8 +10769,37 @@ XrResult OpenXrLayer::ApplyPivotToLocatedSpace(XrSpace space,
     if (applied_extra_pitch_radians) {
         *applied_extra_pitch_radians = extra_pitch_radians;
     }
+    std::optional<XrVector3f> translation_anchor;
+    if (position_valid && pivotxr_translation_anchor_) {
+        const auto& anchor = *pivotxr_translation_anchor_;
+        if (anchor.space == reference_space) {
+            translation_anchor = anchor.position;
+        } else {
+            // Like the submission-space conversion, this internal reference
+            // relation must use the known runtime horizon, never a fabricated
+            // future Turbo time that could block while holding mutex_.
+            XrSpaceLocation located_relation{XR_TYPE_SPACE_LOCATION};
+            // xrLocateSpace supplies this relation from outside mutex_. Only
+            // the xrLocateViews drive path may perform the internal lookup.
+            if (!anchor_space_in_reference && update_smoothing && next_locate_space_) {
+                if (XR_SUCCEEDED(next_locate_space_(anchor.space, reference_space,
+                    ClampInternalLocateTime(time), &located_relation))) {
+                    anchor_space_in_reference = &located_relation;
+                }
+            }
+            constexpr XrSpaceLocationFlags valid_pose =
+                XR_SPACE_LOCATION_ORIENTATION_VALID_BIT | XR_SPACE_LOCATION_POSITION_VALID_BIT;
+            if (anchor_space_in_reference &&
+                (anchor_space_in_reference->locationFlags & valid_pose) == valid_pose) {
+                XrPosef anchor_pose = IdentityPose();
+                anchor_pose.position = anchor.position;
+                translation_anchor = MultiplyPoses(anchor_pose, anchor_space_in_reference->pose).position;
+            }
+        }
+    }
     XrPosef selected_pose = ApplyExtraRotationToPose(
-        view_pose, static_cast<float>(extra_yaw_radians), static_cast<float>(extra_pitch_radians));
+        view_pose, static_cast<float>(extra_yaw_radians), static_cast<float>(extra_pitch_radians),
+        translation_anchor ? &*translation_anchor : nullptr);
     if (!NearlyZero(applied_view_offset.right_meters) ||
         !NearlyZero(applied_view_offset.up_meters) ||
         !NearlyZero(applied_view_offset.forward_meters)) {
@@ -10771,6 +10933,7 @@ void OpenXrLayer::ResetPivotActivationState() {
     pivotxr_quick_view_index_ = 0;
     pivotxr_origin_.reset();
     pivotxr_origin_capture_pending_ = false;
+    pivotxr_translation_anchor_.reset();
     pivotxr_binding_last_poll_time_.reset();
     pivot_diagnostic_stride_counter_ = 0;
     pivot_diagnostic_ = PivotDiagnosticState{};
@@ -12146,6 +12309,7 @@ bool OpenXrLayer::IsPivotXrActive() {
         if (release_origin.pressed && (pivotxr_origin_.has_value() || pivotxr_origin_capture_pending_)) {
             pivotxr_origin_.reset();
             pivotxr_origin_capture_pending_ = false;
+            pivotxr_translation_anchor_.reset();
             pivotxr_manual_view_transition_ = {};
             pivotxr_profile_view_transition_ = {};
             pivotxr_quick_view_transition_ = {};
@@ -12387,6 +12551,7 @@ void OpenXrLayer::PollRuntimeRelay() {
         now - *runtime_relay_last_status_write_ >= std::chrono::seconds(1);
     if (!heartbeat_due && !runtime_relay_status_dirty_.exchange(false, std::memory_order_acq_rel)) return;
 
+    osd_.ReportDiagnostics();
     RuntimeStatusDocument status;
     {
         std::scoped_lock lock(mutex_);

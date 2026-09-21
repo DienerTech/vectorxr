@@ -93,7 +93,7 @@ const tabs = computed(() => [
   },
   {
     id: 'osd' as const,
-    label: 'On-screen display',
+    label: 'On-Screen Display',
     subtitle: 'Headset display, placement, and bindings',
     status: store.state.config.core.osd.enabled ? 'Enabled' : 'Disabled',
   },
@@ -444,7 +444,7 @@ async function confirmResetConfig() {
           @reset-config="confirmResetConfig"
           @update:theme-preference="themePreference = $event"
         />
-        <OsdTab v-else-if="store.state.activeTab === 'osd'" :config="store.state.config" />
+        <OsdTab v-else-if="store.state.activeTab === 'osd'" :config="store.state.config" :saved-config="store.state.originalConfig" />
         <AppRegistryEditor
           v-else-if="store.state.activeTab === 'registry'"
           :config="store.state.config"

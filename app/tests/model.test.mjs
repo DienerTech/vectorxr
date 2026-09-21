@@ -559,7 +559,7 @@ test('0.15 and 0.15.1 configs preserve existing settings, profiles, and bindings
   assert.deepEqual(normalized.modules.quadviews.profiles, legacy.modules.quadviews.profiles)
   assert.deepEqual(normalized.modules.turbo, {
     ...legacy.modules.turbo,
-    profiles: legacy.modules.turbo.profiles.map(profile => ({ ...profile, disableSafety: false })),
+    profiles: legacy.modules.turbo.profiles.map(profile => ({ ...profile, disableSafety: false, experimental: defaultConfig().modules.turbo.experimental })),
   })
   assert.deepEqual(normalized.modules.pivotxr.viewControls.quickViews, [])
   assert.deepEqual(normalized.modules.pivotxr.nudgeSets[0].settings.yawLeftBindings, [])

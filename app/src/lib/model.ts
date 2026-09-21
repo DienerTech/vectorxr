@@ -115,6 +115,17 @@ export interface SoundSettings {
   volume: number
 }
 
+export const osdBodyRows = ['graph', 'turbo', 'pivot', 'modules'] as const
+export type OsdBodyRow = typeof osdBodyRows[number]
+export type OsdLayout = Omit<OsdSettings, 'enabled' | 'visibleOnStart' | 'toggleBinding' | 'cycleBinding' | 'customPresets'>
+export interface OsdPreset { name: string; settings: OsdLayout }
+export const osdAccentColors = { teal: '#51ddbd', copper: '#f5ae78', blue: '#6facff', violet: '#bd9aff', rose: '#ff91b2' } as const
+
+export function osdLayout(settings: OsdSettings): OsdLayout {
+  const { enabled, visibleOnStart, toggleBinding, cycleBinding, customPresets, ...layout } = settings
+  return { ...layout, bodyOrder: [...layout.bodyOrder] }
+}
+
 export interface OsdSettings {
   enabled: boolean
   visibleOnStart: boolean
@@ -130,7 +141,12 @@ export interface OsdSettings {
   showTurbo: boolean
   showModules: boolean
   showClock: boolean
-  accent: 'teal' | 'copper' | 'blue'
+  showPivot: boolean
+  clockFormat: '12' | '24'
+  bodyOrder: OsdBodyRow[]
+  accent: keyof typeof osdAccentColors | 'custom'
+  customColor: string
+  customPresets: OsdPreset[]
   toggleBinding: InputBinding
   cycleBinding: InputBinding
 }
@@ -138,7 +154,8 @@ export interface OsdSettings {
 export function defaultOsdSettings(): OsdSettings {
   return { enabled: false, visibleOnStart: true, compact: false,
     horizontalDegrees: 20, verticalDegrees: -12, distanceMeters: 1.2, scale: 100, opacity: 90, updateHz: 5,
-    showGraph: true, showRuntime: true, showTurbo: true, showModules: true, showClock: true, accent: 'teal',
+    showGraph: true, showRuntime: true, showTurbo: true, showModules: true, showClock: true, showPivot: true,
+    clockFormat: '24', bodyOrder: [...osdBodyRows], accent: 'teal', customColor: '#51ddbd', customPresets: [],
     toggleBinding: { type: 'keyboard', chord: ['Ctrl', 'Alt', 'F10'] },
     cycleBinding: { type: 'keyboard', chord: ['Ctrl', 'Alt', 'F11'] } }
 }
@@ -152,12 +169,17 @@ export function normalizeOsdSettings(value: unknown): OsdSettings {
       (!integer || Number.isInteger(value)) ? value : fallback[key] as number
   }
   return { ...fallback,
-    ...Object.fromEntries(['enabled', 'visibleOnStart', 'compact', 'showGraph', 'showRuntime', 'showTurbo', 'showModules', 'showClock']
+    ...Object.fromEntries(['enabled', 'visibleOnStart', 'compact', 'showGraph', 'showRuntime', 'showTurbo', 'showModules', 'showClock', 'showPivot']
       .map(key => [key, typeof input[key] === 'boolean' ? input[key] : fallback[key as keyof OsdSettings]])),
     horizontalDegrees: number('horizontalDegrees', -40, 40), verticalDegrees: number('verticalDegrees', -35, 35),
-    distanceMeters: number('distanceMeters', .5, 3), scale: number('scale', 50, 150),
+    distanceMeters: number('distanceMeters', .5, 3), scale: number('scale', 25, 150),
     opacity: number('opacity', 30, 100, true), updateHz: number('updateHz', 1, 20, true),
-    accent: input.accent === 'copper' || input.accent === 'blue' ? input.accent : 'teal',
+    accent: typeof input.accent === 'string' && (Object.prototype.hasOwnProperty.call(osdAccentColors, input.accent) || input.accent === 'custom') ? input.accent as OsdSettings['accent'] : 'teal',
+    customColor: typeof input.customColor === 'string' && /^#[0-9a-f]{6}$/i.test(input.customColor) ? input.customColor : fallback.customColor,
+    clockFormat: input.clockFormat === '12' ? '12' : '24',
+    bodyOrder: [...new Set([...(Array.isArray(input.bodyOrder) ? input.bodyOrder.filter((row): row is OsdBodyRow => osdBodyRows.includes(row)) : []), ...osdBodyRows])],
+    customPresets: Array.isArray(input.customPresets) ? input.customPresets.filter(item => isRecord(item) && typeof item.name === 'string' && item.name.trim() && isRecord(item.settings)).slice(0, 50)
+      .map(item => ({ name: item.name.trim().slice(0, 60), settings: osdLayout(normalizeOsdSettings({ ...item.settings, customPresets: [] })) })) : [],
     toggleBinding: normalizeInputBinding(input.toggleBinding, fallback.toggleBinding),
     cycleBinding: normalizeInputBinding(input.cycleBinding, fallback.cycleBinding),
   }
@@ -313,6 +335,7 @@ export interface QuadViewsModuleConfig {
 // Turbo mode: overrides runtime frame pacing. Binary per application —
 // profiles enable Turbo for applications and may opt out of persistent safety blocks.
 export interface TurboProfileConfig {
+  experimental: TurboExperimentalSettings
   id: string
   name: string
   enabled: boolean
@@ -349,7 +372,7 @@ export function defaultTurboExperimental(): TurboExperimentalSettings {
     predictionPercent: 100, frameLimit: 0 }
 }
 
-export function toolkitInspiredTurboExperimental(applicationIds: string[]): TurboExperimentalSettings {
+export function toolkitInspiredTurboExperimental(applicationIds: string[] = []): TurboExperimentalSettings {
   return { ...defaultTurboExperimental(), applicationIds: [...applicationIds], enabled: true,
     waitForSubmit: true, sampleAtEntry: true }
 }
@@ -833,6 +856,7 @@ export function newTurboProfileId(): string {
 export function createTurboProfile(applicationIds: string[] = []): TurboProfileConfig {
   return {
     disableSafety: false,
+    experimental: defaultTurboExperimental(),
     id: newTurboProfileId(),
     name: 'New Profile',
     enabled: true,
@@ -1499,6 +1523,7 @@ function normalizeVectorXRConfig(value: unknown): VectorXRConfig {
   const pivotProfileValues = Array.isArray(pivotxr.profiles) ? pivotxr.profiles : []
   const quadViewsProfileValues = Array.isArray(quadviews.profiles) ? quadviews.profiles : []
   const turboProfileValues = Array.isArray(turbo.profiles) ? turbo.profiles : []
+  const legacyTurboExperimental = normalizeTurboExperimental(turbo.experimental)
   const applicationValues = Array.isArray(source.applications) ? source.applications : []
   const applications: RegisteredApplication[] = []
 
@@ -1644,24 +1669,39 @@ function normalizeVectorXRConfig(value: unknown): VectorXRConfig {
         enabled: normalizeBoolean(turbo.enabled, fallback.modules.turbo.enabled),
         toggleBinding: normalizeInputBinding(turbo.toggleBinding, fallback.modules.turbo.toggleBinding),
         interruptedSessionRecovery: typeof turbo.interruptedSessionRecovery === 'boolean' ? turbo.interruptedSessionRecovery : true,
-        experimental: normalizeTurboExperimental(turbo.experimental),
+        // Consume old assignments after migration so deleting a profile cannot
+        // resurrect it. Preserve unassigned/orphaned values for explicit reuse.
+        experimental: legacyTurboExperimental.applicationIds.length && legacyTurboExperimental.applicationIds.every(id => applications.some(app => app.id === id))
+          ? defaultTurboExperimental() : { ...legacyTurboExperimental, applicationIds: [] },
         pacingMode: normalizeTurboPacingSetting(turbo.pacingMode),
         runtimePins: normalizeTurboRuntimePins(turbo.runtimePins),
         metricsMode: normalizeTurboMetricsMode(turbo.metricsMode),
         metricsBinding: normalizeInputBinding(turbo.metricsBinding, fallback.modules.turbo.metricsBinding),
-        profiles: turboProfileValues.map((profileValue) => {
+        profiles: turboProfileValues.flatMap((profileValue) => {
           const profile = isRecord(profileValue) ? profileValue : {}
           const applicationIds = applicationIdsFromProfile(profile, applications)
           const id = normalizeString(profile.id, '').trim() || newTurboProfileId()
 
-          return {
+          const base = {
+            experimental: { ...normalizeTurboExperimental(profile.experimental), applicationIds: [] },
             disableSafety: normalizeBoolean(profile.disableSafety, false),
             id,
             name: normalizeString(profile.name, 'New Profile'),
             enabled: normalizeBoolean(profile.enabled, true),
             applicationIds,
           }
-        }),
+          if (isRecord(profile.experimental)) return [base]
+          const legacy = legacyTurboExperimental
+          const scoped = applicationIds.filter(id => legacy.applicationIds.includes(id))
+          if (!scoped.length) return [base]
+          const migrated = { ...base, experimental: { ...legacy, applicationIds: [] }, applicationIds: scoped }
+          const remaining = applicationIds.filter(id => !scoped.includes(id))
+          return remaining.length ? [{ ...base, applicationIds: remaining }, { ...migrated, id: newTurboProfileId(), name: `${base.name} timing` }] : [migrated]
+
+        }).concat(legacyTurboExperimental.applicationIds
+          .filter(id => applications.some(app => app.id === id) && !turboProfileValues.some(value => isRecord(value) && applicationIdsFromProfile(value, applications).includes(id)))
+          .map(id => ({ ...createTurboProfile([id]), name: `${applications.find(app => app.id === id)?.name ?? id} timing`,
+            enabled: normalizeBoolean(turbo.enabled, false), experimental: { ...legacyTurboExperimental, applicationIds: [] } }))),
       },
     },
   }

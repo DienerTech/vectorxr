@@ -88,7 +88,11 @@ struct OsdSettings {
     bool show_turbo{true};
     bool show_modules{true};
     bool show_clock{true};
+    bool show_pivot{true};
+    std::string clock_format{"24"};
+    std::vector<std::string> body_order{"graph", "turbo", "pivot", "modules"};
     std::string accent{"teal"};
+    std::string custom_color{"#51ddbd"};
     InputBinding toggle_binding{InputBindingType::Keyboard, {"Ctrl", "Alt", "F10"}};
     InputBinding cycle_binding{InputBindingType::Keyboard, {"Ctrl", "Alt", "F11"}};
 };
@@ -365,8 +369,18 @@ struct QuadViewsResolvedSettings : QuadViewsSettings {
     InputBinding diagnostic_visualization_binding;
 };
 
+// Session-latched, profile-scoped experiments. Defaults preserve production timing.
+struct TurboExperimentalSettings {
+    bool enabled{false};
+    std::vector<std::string> application_ids;
+    bool wait_for_submit{false};
+    bool sample_at_entry{false};
+    int prediction_percent{100};
+    int frame_limit{0};
+};
+
 // Turbo mode: overrides runtime frame pacing (one frame of pipelining).
-// Binary per application — profiles carry no settings.
+// First matching enabled profile owns timing choices.
 struct TurboProfile {
     bool disable_safety{false};
     std::string id;
@@ -374,6 +388,7 @@ struct TurboProfile {
     bool enabled{true};
     ProfileMode mode{ProfileMode::Custom};
     std::vector<std::string> application_ids;
+    std::optional<TurboExperimentalSettings> experimental;
 };
 
 // How the real xrWaitFrame is sequenced against the frame submit.
@@ -410,16 +425,6 @@ enum class TurboMetricsMode {
     kBinding,
 };
 
-// Session-latched, application-scoped experiments. Defaults preserve production timing.
-struct TurboExperimentalSettings {
-    bool enabled{false};
-    std::vector<std::string> application_ids;
-    bool wait_for_submit{false};
-    bool sample_at_entry{false};
-    int prediction_percent{100};
-    int frame_limit{0};
-};
-
 struct TurboModuleConfig {
     bool enabled{false};
     bool interrupted_session_recovery{true};
@@ -437,6 +442,7 @@ struct TurboModuleConfig {
 };
 
 struct TurboResolvedSettings {
+    std::string profile_name;
     bool enabled{false};
     bool interrupted_session_recovery{true};
     InputBinding toggle_binding;

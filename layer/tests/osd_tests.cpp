@@ -1,6 +1,7 @@
 #include <windows.h>
 #include <d3d11.h>
 #include "depthxr/osd_renderer.h"
+#include "depthxr/logger.h"
 #include <openxr/openxr_platform.h>
 #include <cmath>
 #include <cstdlib>
@@ -50,6 +51,17 @@ const XrCompositionLayerBaseHeader* WaitVisible(OsdRenderer& renderer, const XrF
     return nullptr;
 }
 const OsdDispatch dispatch{Formats,Create,Images,Acquire,Wait,Release,Destroy,Space,DestroySpace};
+void CheckUnusedTextureRows(int height) {
+    D3D11_TEXTURE2D_DESC desc{};textures[0]->GetDesc(&desc);
+    desc.Usage=D3D11_USAGE_STAGING;desc.BindFlags=0;desc.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
+    ID3D11Texture2D* readback{};
+    Check(SUCCEEDED(device->CreateTexture2D(&desc,nullptr,&readback)),"D3D11 readback allocation failed");
+    context->CopyResource(readback,textures[0]);D3D11_MAPPED_SUBRESOURCE mapped{};
+    Check(SUCCEEDED(context->Map(readback,0,D3D11_MAP_READ,0,&mapped)),"D3D11 readback map failed");
+    for(int y=height;y<OsdBitmap::texture_height;++y)for(int x=0;x<OsdBitmap::width;++x)
+        Check(reinterpret_cast<const std::uint32_t*>(static_cast<const char*>(mapped.pData)+y*mapped.RowPitch)[x]==0,"D3D11 stale pixels outside the OSD rect");
+    context->Unmap(readback,0);readback->Release();
+}
 const XrSession session=reinterpret_cast<XrSession>(1);
 OsdSnapshot Snapshot() { return {"FlightSimulator.exe","SteamVR / OpenXR","Async","Depth  /  Pivot  /  Quadviews","Turbo experiments",true}; }
 void WriteBitmap(const char* path, const OsdBitmap& bitmap) {
@@ -72,9 +84,41 @@ int main(int argc, char** argv) {
         Check(bitmap.height<=768 && bitmap.pixels.size()==static_cast<std::size_t>(960*bitmap.height),"Invalid raster bounds");
         Check((bitmap.pixels[0]>>24)==0 && (bitmap.pixels[100*960+100]>>24)==255,"Rounded panel alpha incorrect");
         const auto rgba=RasterizeOsd(settings,false,Snapshot(),stats,true);
-        const auto bgraPixel=bitmap.pixels[90*960+3], rgbaPixel=rgba.pixels[90*960+3];
+        const auto bgraPixel=bitmap.pixels[90*960+10], rgbaPixel=rgba.pixels[90*960+10];
         Check((bgraPixel&255)==((rgbaPixel>>16)&255) && ((bgraPixel>>16)&255)==(rgbaPixel&255),"RGBA channel conversion incorrect");
         if(argc>1) WriteBitmap(argv[1],bitmap);
+        settings.accent="custom"; settings.custom_color="#123456";
+        settings.body_order={"pivot","modules","turbo","graph"};
+        const auto reordered=RasterizeOsd(settings,false,Snapshot(),stats,false);
+        bool custom_accent=false;
+        for(const auto pixel:reordered.pixels)custom_accent|=(pixel&0xffffff)==0x123456;
+        Check(custom_accent,"Custom accent did not reach the raster");
+        Check((reordered.pixels[90*960+20]&0xffffff)==0x0d141f,"Colored accent stripe remains at the panel edge");
+        // Every compositor sampling boundary must see transparent black in both
+        // channel orders, both layouts, and translucent panels.
+        for(bool compact:{false,true})for(bool use_rgba:{false,true})for(int opacity:{25,90,100}) {
+            settings.opacity=opacity;
+            const auto edged=RasterizeOsd(settings,compact,Snapshot(),stats,use_rgba);
+            const auto feather=edged.pixels[90*960+6];
+            Check((feather&255)==((feather>>8)&255) && (feather&255)==((feather>>16)&255),"OSD feather has a color tint");
+            Check((feather>>24)>0 && (feather>>24)<static_cast<unsigned>(255*opacity/100),"OSD alpha edge is not feathered");
+            for(int d=0;d<16;++d) {
+                const auto top=edged.pixels[d*960+480];
+                const auto bottom=edged.pixels[(edged.height-1-d)*960+480];
+                const auto left=edged.pixels[(edged.height/2)*960+d];
+                const auto right=edged.pixels[(edged.height/2)*960+959-d];
+                Check(top==bottom && top==left && top==right,"OSD raster has different colors/alpha on opposing edges");
+            }
+            for(int y=0;y<edged.height;++y)for(int x=0;x<OsdBitmap::width;++x)
+                if(x<3 || y<3 || x>=OsdBitmap::width-3 || y>=edged.height-3)
+                    Check(edged.pixels[y*OsdBitmap::width+x]==0,"OSD edge contains color or alpha that can bleed into the scene");
+        }
+        settings.opacity=100;
+        Check(reordered.height==bitmap.height,"Reordering changed panel proportions");
+        Check((reordered.pixels[195*960+31]&0xffffff)!=(bitmap.pixels[195*960+31]&0xffffff),"Body order did not move the graph");
+        auto long_names=Snapshot(); long_names.application=std::string(150,'W'); long_names.runtime=std::string(150,'W');
+        const auto header=RasterizeOsd(settings,true,long_names,stats,false);
+        Check(header.height==180,"Runtime name must fit within compact header");
         std::cout<<"Two rasters (includes initial LUT): "<<std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count()<<" ms\n";
         stats.Tick(now+std::chrono::seconds(2)); Check(stats.samples.empty(),"Paused session polluted frame history");
         for(int i=0;i<140;++i) stats.Tick(now+std::chrono::seconds(3)+std::chrono::milliseconds(i*11));
@@ -105,6 +149,10 @@ int main(int argc, char** argv) {
         const auto* quad=reinterpret_cast<const XrCompositionLayerQuad*>(layer);
         Check(quad->space==reinterpret_cast<XrSpace>(3) && quad->pose.position.x>0 && quad->pose.position.y<0 && quad->pose.position.z<0,"Head-relative pose incorrect");
         Check(quad->layerFlags==XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT && quad->eyeVisibility==XR_EYE_VISIBILITY_BOTH,"Quad blend or eye visibility incorrect");
+        Check(quad->subImage.imageRect.offset.x==1 && quad->subImage.imageRect.offset.y==1 &&
+            quad->subImage.imageRect.extent.width==958 && quad->subImage.imageRect.extent.height>0 &&
+            quad->subImage.imageRect.extent.height+2<768,"OSD sampling rect is missing its initialized guard pixels");
+        CheckUnusedTextureRows(quad->subImage.imageRect.extent.height+2);
         Check(frame.layerCount==1 && frame.layers==&original,"Application submission was modified");
         Check(renderer.Append(frame,true) && acquires==1,"Unchanged panel was uploaded again before refresh deadline");
         frame.layerCount=4; Check(!renderer.Append(frame,true),"Exceeded runtime layer count");
@@ -120,6 +168,16 @@ int main(int argc, char** argv) {
         settings.enabled=true; settings.compact=false; settings.horizontal_degrees=-30; renderer.Prepare(settings,Snapshot(),false,false);
         quad=reinterpret_cast<const XrCompositionLayerQuad*>(renderer.Append(frame,true));
         Check(quad && !renderer.Status().compact && quad->pose.position.x<0,"Live enable did not restore saved layout/position");
+        settings.scale=25; settings.distance_meters=2;
+        renderer.Prepare(settings,Snapshot(),false,false);
+        quad=reinterpret_cast<const XrCompositionLayerQuad*>(renderer.Append(frame,true));
+        Check(quad && std::abs(quad->size.width-.275f)<.0001f,"25 percent angular size was not applied");
+        const auto resources_before_rejection=creates;
+        for(const auto rejected:{XR_ERROR_CALL_ORDER_INVALID,XR_ERROR_TIME_INVALID}) {
+            renderer.SubmissionFailed(rejected);
+            Check(renderer.Append(frame,true)!=nullptr,"Transient frame rejection permanently disabled the OSD");
+            Check(creates==resources_before_rejection,"Transient frame rejection recreated healthy OSD resources");
+        }
         renderer.SubmissionFailed(XR_ERROR_LAYER_INVALID);
         Check(!renderer.Append(frame,true),"Failed submission was repeated");
         renderer.ResetPresentation();
@@ -140,6 +198,37 @@ int main(int argc, char** argv) {
         renderer.Prepare(settings,Snapshot(),false,false);
         Check(!renderer.Append(frame,true) && !renderer.Status().available,"Unsupported graphics API was not isolated");
     }
+    for(auto level:{LogLevel::Info,LogLevel::Debug}) {
+        std::filesystem::path log;
+        {
+            Logger logger;logger.Initialize((std::filesystem::temp_directory_path()/"vectorxr-osd-tests")/(level==LogLevel::Info?"vectorxr-osd-info.log":"vectorxr-osd-debug.log"));logger.SetLevel(level);log=logger.ActiveLogPath();
+            OsdRenderer renderer;XrGraphicsBindingD3D11KHR binding{XR_TYPE_GRAPHICS_BINDING_D3D11_KHR};binding.device=device;
+            renderer.InitializeGraphics(session,&binding,4,dispatch,&logger,"test-session");
+            auto settings=OsdSettings{};renderer.Prepare(settings,Snapshot(),false,false);renderer.RecordPrepare(.1);
+            settings.enabled=true;renderer.Prepare(settings,Snapshot(),false,false);renderer.RecordPrepare(.2);renderer.RecordSubmit(.3);
+            unsupported=false;
+            const XrCompositionLayerProjection diagnostic_projection{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
+            const auto* diagnostic_layer=reinterpret_cast<const XrCompositionLayerBaseHeader*>(&diagnostic_projection);
+            XrFrameEndInfo diagnostic_frame{XR_TYPE_FRAME_END_INFO};
+            diagnostic_frame.layerCount=1;diagnostic_frame.layers=&diagnostic_layer;
+            Check(WaitVisible(renderer,diagnostic_frame),"Diagnostic image was not produced");
+            renderer.SubmissionFailed(XR_ERROR_CALL_ORDER_INVALID);
+            renderer.SubmissionFailed(XR_ERROR_TIME_INVALID);
+            renderer.SubmissionFailed(XR_ERROR_LAYER_INVALID);renderer.ReportDiagnostics(true);
+        }
+        std::ifstream file(log);std::string text((std::istreambuf_iterator<char>(file)),{});
+        Check(text.find("OSD initialize")==std::string::npos && text.find("test-session initialize")!=std::string::npos,"OSD session identity missing");
+        Check(text.find("XR_ERROR_LAYER_INVALID")!=std::string::npos && text.find("OSD summary")!=std::string::npos,"OSD failure or summary missing");
+        Check(text.find("preserving OSD for subsequent frames")!=std::string::npos && text.find("frameRejections=2")!=std::string::npos,"Transient OSD rejection diagnostics missing");
+        Check(text.find("mode=disabled")!=std::string::npos && text.find("mode=visible")!=std::string::npos,"OSD baselines not separated");
+        Check((text.find("OSD detail")!=std::string::npos)==(level==LogLevel::Debug),"OSD detail log level incorrect");
+        Check((text.find("OSD source edges")!=std::string::npos)==(level==LogLevel::Debug),"OSD source diagnostic log level incorrect");
+        if(level==LogLevel::Debug)Check(text.find("nonzeroGuardPixels=0")!=std::string::npos &&
+            text.find("top[")!=std::string::npos && text.find("bottom[")!=std::string::npos &&
+            text.find("left[")!=std::string::npos && text.find("right[")!=std::string::npos,
+            "OSD source edge strips or transparent guard evidence missing");
+    }
+    { OsdMetric metric; for(int i=0;i<100;++i)metric.Add(i<95?.11:20);Check(metric.count==100&&std::abs(metric.P95Upper()-.15)<.001&&metric.maximum==20,"OSD bounded metric histogram incorrect"); }
     context->Release(); device->Release();
     std::cout<<"OSD telemetry, rasterization, bindings, live settings, and swapchain lifecycle passed.\n";
 }
