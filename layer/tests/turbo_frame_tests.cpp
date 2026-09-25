@@ -182,6 +182,55 @@ class TurboFrameTestPeer {
         layer.pivotxr_engaged_=false;
         return ok;
     }
+    inline static XrTime osd_locate_time{};
+    inline static std::vector<XrSwapchain> osd_releases;
+    inline static bool osd_release_failure{};
+    static XrResult XRAPI_CALL LocateOsd(XrSpace,XrSpace,XrTime time,XrSpaceLocation* location) {
+        osd_locate_time=time;
+        location->locationFlags=XR_SPACE_LOCATION_POSITION_VALID_BIT|XR_SPACE_LOCATION_ORIENTATION_VALID_BIT;
+        location->pose.orientation.w=1;
+        return XR_SUCCESS;
+    }
+    static XrResult XRAPI_CALL ReleaseOsd(XrSwapchain swapchain,const XrSwapchainImageReleaseInfo*) {
+        osd_releases.push_back(swapchain);
+        return osd_release_failure && osd_releases.size()==1?XR_ERROR_RUNTIME_FAILURE:XR_SUCCESS;
+    }
+    static bool OsdLatePoseAndRelease() {
+        auto& layer=Layer();
+        const auto old_locate=layer.next_locate_space_;
+        const auto old_release=layer.next_release_swapchain_image_;
+        layer.next_locate_space_=&LocateOsd;layer.next_release_swapchain_image_=&ReleaseOsd;
+        layer.osd_should_render_=true;
+        // Use a later runtime prediction than the rendered frame. No GPU source
+        // is supplied: this also exercises setup failure without leaking images.
+        layer.turbo_last_predicted_display_time_=30'000'000'000;
+        const XrSwapchain left=reinterpret_cast<XrSwapchain>(0x3456),right=reinterpret_cast<XrSwapchain>(0x4567);
+        auto queue=[&] {
+            OpenXrLayer::PendingOsdComposite pending;
+            pending.frame_time=20'000'000'000;pending.swapchains={left,right};
+            pending.quad.size={1,1};pending.quad.pose.orientation.w=1;
+            pending.quad.pose.position.z=-1;
+            layer.pending_osd_composite_=std::move(pending);
+            osd_locate_time=0;osd_releases.clear();
+        };
+        XrFrameEndInfo frame{XR_TYPE_FRAME_END_INFO};frame.displayTime=20'000'000'000;frame.layerCount=1;
+        bool drawn=false,ok=true;
+        queue();
+        ok=layer.FinishOsdComposite(&frame,drawn)==XR_SUCCESS && !drawn &&
+            osd_locate_time==30'000'000'000 && frame.displayTime==20'000'000'000 &&
+            osd_releases==std::vector<XrSwapchain>{left,right} && !layer.pending_osd_composite_;
+        layer.ReleasePendingOsdImages();
+        ok=ok && osd_releases.size()==2;
+        queue();frame.displayTime++;
+        ok=ok && layer.FinishOsdComposite(&frame,drawn)==XR_SUCCESS && !drawn &&
+            osd_locate_time==0 && osd_releases.size()==2;
+        queue();osd_release_failure=true;
+        ok=ok && layer.ReleasePendingOsdImages()==XR_ERROR_RUNTIME_FAILURE &&
+            osd_releases==std::vector<XrSwapchain>{left,right} && !layer.pending_osd_composite_;
+        osd_release_failure=false;
+        layer.next_locate_space_=old_locate;layer.next_release_swapchain_image_=old_release;
+        return ok;
+    }
     static double PredictionSampleAgeMs() {
         auto& layer = Layer();
         std::scoped_lock lock(layer.turbo_mutex_);
@@ -1029,6 +1078,7 @@ int main() {
     TestAutoHasNoRuntimeMappings();
     TestSubmissionInterlockFallsBackThenSuspends();
     Expect(depthxr::TurboFrameTestPeer::OsdStateTransitions(), "OSD lost enabled/off Turbo or applied/ready/disabled Pivot state");
+    Expect(depthxr::TurboFrameTestPeer::OsdLatePoseAndRelease(), "OSD late prediction or deferred-image cleanup failed");
     std::cout << "depthxr_turbo_frame_tests passed\n";
     return 0;
 }

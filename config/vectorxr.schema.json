@@ -235,6 +235,14 @@
           "type": "boolean",
           "default": true
         },
+        "showBrand": {
+          "type": "boolean",
+          "default": true
+        },
+        "showApp": {
+          "type": "boolean",
+          "default": true
+        },
         "showRuntime": {
           "type": "boolean",
           "default": true
@@ -304,6 +312,35 @@
         "cycleBinding": {
           "$ref": "#/$defs/inputBinding"
         },
+        "compactShowBrand": {
+          "type": "boolean",
+          "default": true
+        },
+        "compactShowApp": {
+          "type": "boolean",
+          "default": true
+        },
+        "compactMetrics": {
+          "type": "string",
+          "enum": ["all", "fps", "frameTime", "none"],
+          "default": "all"
+        },
+        "compactShowRuntime": {
+          "type": "boolean",
+          "description": "Show the runtime in compact mode. Defaults to true."
+        },
+        "compactShowClock": {
+          "type": "boolean",
+          "description": "Show the clock in compact mode. Defaults to true."
+        },
+        "compactShowTurbo": {
+          "type": "boolean",
+          "description": "Show Turbo in the compact status row. Defaults to false."
+        },
+        "compactShowPivot": {
+          "type": "boolean",
+          "description": "Show Pivot in the compact status row. Defaults to false."
+        },
         "showPivot": {
           "type": "boolean",
           "default": true
@@ -365,6 +402,14 @@
                     "default": false
                   },
                   "showGraph": {
+                    "type": "boolean",
+                    "default": true
+                  },
+                  "showBrand": {
+                    "type": "boolean",
+                    "default": true
+                  },
+                  "showApp": {
                     "type": "boolean",
                     "default": true
                   },
@@ -430,6 +475,35 @@
                       "custom"
                     ],
                     "default": "teal"
+                  },
+                  "compactShowBrand": {
+                    "type": "boolean",
+                    "default": true
+                  },
+                  "compactShowApp": {
+                    "type": "boolean",
+                    "default": true
+                  },
+                  "compactMetrics": {
+                    "type": "string",
+                    "enum": ["all", "fps", "frameTime", "none"],
+                    "default": "all"
+                  },
+                  "compactShowRuntime": {
+                    "type": "boolean",
+                    "description": "Show the runtime in compact mode. Defaults to true."
+                  },
+                  "compactShowClock": {
+                    "type": "boolean",
+                    "description": "Show the clock in compact mode. Defaults to true."
+                  },
+                  "compactShowTurbo": {
+                    "type": "boolean",
+                    "description": "Show Turbo in the compact status row. Defaults to false."
+                  },
+                  "compactShowPivot": {
+                    "type": "boolean",
+                    "description": "Show Pivot in the compact status row. Defaults to false."
                   },
                   "showPivot": {
                     "type": "boolean",

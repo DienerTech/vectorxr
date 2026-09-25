@@ -138,10 +138,19 @@ export interface OsdSettings {
   updateHz: number
   showGraph: boolean
   showRuntime: boolean
+  showBrand: boolean
+  showApp: boolean
   showTurbo: boolean
   showModules: boolean
   showClock: boolean
   showPivot: boolean
+  compactShowRuntime: boolean
+  compactShowBrand: boolean
+  compactShowApp: boolean
+  compactMetrics: 'all' | 'fps' | 'frameTime' | 'none'
+  compactShowClock: boolean
+  compactShowTurbo: boolean
+  compactShowPivot: boolean
   clockFormat: '12' | '24'
   bodyOrder: OsdBodyRow[]
   accent: keyof typeof osdAccentColors | 'custom'
@@ -155,6 +164,9 @@ export function defaultOsdSettings(): OsdSettings {
   return { enabled: false, visibleOnStart: true, compact: false,
     horizontalDegrees: 20, verticalDegrees: -12, distanceMeters: 1.2, scale: 100, opacity: 90, updateHz: 5,
     showGraph: true, showRuntime: true, showTurbo: true, showModules: true, showClock: true, showPivot: true,
+    showBrand: true, showApp: true,
+    compactShowRuntime: true, compactShowClock: true, compactShowTurbo: false, compactShowPivot: false,
+    compactShowBrand: true, compactShowApp: true, compactMetrics: 'all',
     clockFormat: '24', bodyOrder: [...osdBodyRows], accent: 'teal', customColor: '#51ddbd', customPresets: [],
     toggleBinding: { type: 'keyboard', chord: ['Ctrl', 'Alt', 'F10'] },
     cycleBinding: { type: 'keyboard', chord: ['Ctrl', 'Alt', 'F11'] } }
@@ -169,8 +181,9 @@ export function normalizeOsdSettings(value: unknown): OsdSettings {
       (!integer || Number.isInteger(value)) ? value : fallback[key] as number
   }
   return { ...fallback,
-    ...Object.fromEntries(['enabled', 'visibleOnStart', 'compact', 'showGraph', 'showRuntime', 'showTurbo', 'showModules', 'showClock', 'showPivot']
+    ...Object.fromEntries(['enabled', 'visibleOnStart', 'compact', 'showGraph', 'showRuntime', 'showBrand', 'showApp', 'showTurbo', 'showModules', 'showClock', 'showPivot', 'compactShowRuntime', 'compactShowClock', 'compactShowTurbo', 'compactShowPivot', 'compactShowBrand', 'compactShowApp']
       .map(key => [key, typeof input[key] === 'boolean' ? input[key] : fallback[key as keyof OsdSettings]])),
+    compactMetrics: ['all', 'fps', 'frameTime', 'none'].includes(input.compactMetrics as string) ? input.compactMetrics as OsdSettings['compactMetrics'] : 'all',
     horizontalDegrees: number('horizontalDegrees', -40, 40), verticalDegrees: number('verticalDegrees', -35, 35),
     distanceMeters: number('distanceMeters', .5, 3), scale: number('scale', 25, 150),
     opacity: number('opacity', 30, 100, true), updateHz: number('updateHz', 1, 20, true),

@@ -51,6 +51,7 @@ struct OsdSnapshot {
     std::string application, runtime, turbo, modules, restart;
     bool experimental{false};
     std::string pivot;
+    std::string compact_pivot;
 };
 
 struct OsdStatus {
@@ -70,11 +71,19 @@ struct OsdTelemetry {
 struct OsdBitmap {
     static constexpr int width = 960;
     static constexpr int texture_height = 768;
+    int content_width{width};
     int height{};
     std::vector<std::uint32_t> pixels;
     double raster_ms{};
-    bool Valid() const { return height>0 && height<=texture_height && pixels.size()==static_cast<std::size_t>(width)*height; }
+    bool Valid() const { return content_width>2 && content_width<=width && height>2 && height<=texture_height && pixels.size()==static_cast<std::size_t>(width)*height; }
 };
+
+struct OsdCompactLayout {
+    int width{240}, height{}, header_y{-1}, metrics_y{-1}, status_y{-1}, turbo_y{-1}, pivot_y{-1};
+    std::array<int,4> header_x{-1,-1,-1,-1};
+    bool fps{}, frame_time{}, empty{};
+};
+OsdCompactLayout CompactOsdLayout(const OsdSettings&);
 
 // Produces premultiplied sRGB pixels for an sRGB OpenXR swapchain.
 OsdBitmap RasterizeOsd(const OsdSettings&, bool compact, const OsdSnapshot&, const OsdTelemetry&, bool rgba);
@@ -96,6 +105,7 @@ class OsdRenderer {
     // Only called on the application's end-frame thread, after game-layer transforms.
     const XrCompositionLayerBaseHeader* Append(const XrFrameEndInfo&, bool should_render);
     OsdStatus Status() const;
+    std::shared_ptr<const OsdBitmap> PresentedBitmap(bool& rgba) const;
   private:
     void ShutdownLocked();
     bool CreateResources();
@@ -120,6 +130,7 @@ class OsdRenderer {
     OsdTelemetry telemetry_;
     OsdStatus status_;
     int image_height_{};
+    int image_width_{OsdBitmap::width};
     std::chrono::steady_clock::time_point updated_{};
     std::chrono::steady_clock::time_point image_updated_{};
     XrCompositionLayerQuad quad_{XR_TYPE_COMPOSITION_LAYER_QUAD};
@@ -136,6 +147,7 @@ class OsdRenderer {
     std::condition_variable raster_cv_;
     bool raster_stop_{false}, raster_requested_{false};
     std::optional<RasterRequest> raster_request_;
+    std::shared_ptr<const OsdBitmap> presented_bitmap_;
     std::optional<OsdBitmap> raster_completed_, upload_;
     Logger* logger_{};
     std::string identity_;

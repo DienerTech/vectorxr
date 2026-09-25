@@ -15,6 +15,7 @@ function validateCoreConfig(core: CoreConfig): string[] {
   if (!/^#[0-9a-f]{6}$/i.test(core.osd.customColor)) errors.push('OSD custom color must be a six-digit hex color')
   if (!['teal', 'copper', 'blue', 'violet', 'rose', 'custom'].includes(core.osd.accent)) errors.push('OSD accent is invalid')
   if (!['12', '24'].includes(core.osd.clockFormat)) errors.push('OSD clock format must be 12 or 24 hour')
+  if (!['all', 'fps', 'frameTime', 'none'].includes(core.osd.compactMetrics)) errors.push('OSD compact performance selection is invalid')
   if (core.osd.bodyOrder.length !== 4 || new Set(core.osd.bodyOrder).size !== 4 || core.osd.bodyOrder.some(row => !['graph', 'turbo', 'pivot', 'modules'].includes(row))) errors.push('OSD body order must contain each row once')
 
   if (!Number.isInteger(core.logRetentionFiles) || core.logRetentionFiles < 1 || core.logRetentionFiles > 50) {

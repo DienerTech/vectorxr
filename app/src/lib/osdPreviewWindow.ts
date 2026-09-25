@@ -3,7 +3,7 @@ import { isTauri } from '@tauri-apps/api/core'
 import { WebviewWindow } from '@tauri-apps/api/webviewWindow'
 import { osdLayout, type OsdSettings } from './model'
 
-export function useOsdPreviewWindow(settings: Ref<OsdSettings>) {
+export function useOsdPreviewWindow(settings: Ref<OsdSettings>, compact: Ref<boolean>, legible: Ref<boolean>) {
   const opened = ref(false)
   const error = ref('')
   const channelId = `osd-preview-${crypto.randomUUID()}`
@@ -11,16 +11,18 @@ export function useOsdPreviewWindow(settings: Ref<OsdSettings>) {
   let nativeWindow: WebviewWindow | null = null
   let browserWindow: Window | null = null
   let disposed = false
-  const publish = () => channel.postMessage({ type: 'settings', settings: osdLayout(settings.value), theme: document.documentElement.dataset.theme })
+  const publish = () => channel.postMessage({ type: 'settings', settings: { ...osdLayout(settings.value), compact: compact.value }, legible: legible.value, theme: document.documentElement.dataset.theme })
   channel.onmessage = ({ data }) => {
     if (data?.type === 'ready') publish()
+    if (data?.type === 'view' && typeof data.legible === 'boolean') legible.value = data.legible
+    if (data?.type === 'view' && typeof data.compact === 'boolean') compact.value = data.compact
     if (data?.type === 'closed') { opened.value = false; nativeWindow = null; browserWindow = null }
     if (data?.type === 'position' && Number.isFinite(data.horizontal) && Number.isFinite(data.vertical)) {
       settings.value.horizontalDegrees = Math.round(Math.max(-40, Math.min(40, data.horizontal)))
       settings.value.verticalDegrees = Math.round(Math.max(-35, Math.min(35, data.vertical)))
     }
   }
-  watch(settings, publish, { deep: true })
+  watch([settings, compact, legible], publish, { deep: true })
   const themeObserver = new MutationObserver(publish)
   themeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] })
   function close() {

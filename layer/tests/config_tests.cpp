@@ -59,6 +59,21 @@ void TestOsdConfig() {
     for (const auto& bad:{R"({"customColor":"#zzzzzz"})",R"({"bodyOrder":["graph","graph"]})",R"({"clockFormat":"13"})",R"({"customPresets":[{"name":"Bad","settings":{"customPresets":[]}}]})"})
         Expect(!parse(bad).ok,"Malformed OSD layout accepted");
     const auto& osd=configured.document.core.osd;
+    Expect(osd.compact_show_runtime && osd.compact_show_clock && !osd.compact_show_turbo && !osd.compact_show_pivot,
+           "Independent compact defaults were not preserved");
+    const auto compact=parse(R"({"showRuntime":false,"showClock":false,"showTurbo":false,"showPivot":false,"compactShowRuntime":true,"compactShowClock":true,"compactShowTurbo":true,"compactShowPivot":true})");
+    Expect(compact.ok && compact.document.core.osd.compact_show_runtime && compact.document.core.osd.compact_show_clock &&
+           compact.document.core.osd.compact_show_turbo && compact.document.core.osd.compact_show_pivot &&
+           !compact.document.core.osd.show_turbo && !compact.document.core.osd.show_pivot,"Independent compact settings were dropped");
+    for (const auto* key:{"compactShowRuntime","compactShowClock","compactShowTurbo","compactShowPivot"})
+        Expect(!parse(std::string("{\"")+key+"\":1}").ok,"Invalid compact flag accepted");
+    const auto micro=parse(R"({"compactMetrics":"fps","compactShowBrand":false,"compactShowApp":false,"compactShowClock":false,"compactShowRuntime":false})");
+    Expect(micro.ok && micro.document.core.osd.compact_metrics=="fps" && !micro.document.core.osd.compact_show_brand && !micro.document.core.osd.compact_show_app,"Micro settings were dropped");
+    Expect(!parse(R"({"compactMetrics":"bad"})").ok,"Unknown compact metrics accepted");
+    const auto no_header=parse(R"({"showBrand":false,"showApp":false,"showRuntime":false,"showClock":false})");
+    Expect(no_header.ok && !no_header.document.core.osd.show_brand && !no_header.document.core.osd.show_app &&
+           !no_header.document.core.osd.show_runtime && !no_header.document.core.osd.show_clock,"Expanded header choices were dropped");
+    Expect(!parse(R"({"showBrand":1})").ok && !parse(R"({"showApp":"false"})").ok,"Invalid expanded header flags accepted");
     Expect(osd.enabled && !osd.visible_on_start && osd.compact && osd.horizontal_degrees==-40 &&
            osd.vertical_degrees==35 && osd.distance_meters==.5 && osd.scale==150 && osd.opacity==30 &&
            osd.update_hz==20 && !osd.show_graph && !osd.show_runtime && !osd.show_turbo && !osd.show_modules &&
