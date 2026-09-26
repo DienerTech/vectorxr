@@ -11,6 +11,7 @@ import DefaultProfileExclusions from "../DefaultProfileExclusions.vue";
 import ModuleBindingPage from "../ModuleBindingPage.vue";
 import ModuleBindingPanel from "../ModuleBindingPanel.vue";
 import ProfileShell from "../ProfileShell.vue";
+import SetupGuide from "../SetupGuide.vue";
 import QuadViewsOverlayGuide from "../QuadViewsOverlayGuide.vue";
 import QuadViewsSettingsFields from "../QuadViewsSettingsFields.vue";
 import QuadViewsDimensions from "../QuadViewsDimensions.vue";
@@ -41,6 +42,8 @@ defineEmits<{
   syncQuadViewsProfileName: [index: number];
 }>();
 
+// Open the setup guide for first-time setup; returning users with an enabled profile start with it closed.
+const setupGuideOpen = !(props.config.modules.quadviews.enabled || props.config.modules.quadviews.profiles.some((profile) => profile.enabled));
 const diagnosticBindingWarnings = computed(() => savedBindingConflictWarnings(props.config, [
   props.config.modules.quadviews.diagnosticVisualizationBinding,
 ]));
@@ -243,12 +246,6 @@ function budgetChipClass(settings: QuadViewsSettings) {
             request OpenXR quad views. Enabling this module does not add
             quad-view support to ordinary stereo games.
           </p>
-          <p class="mt-2 max-w-3xl text-sm font-bold leading-6 text-muted">
-            DCS is the primary tested title. Likely, but unconfirmed, D3D11 candidates include Pavlov VR, VAIL VR, The 7th Guest VR, and Kayak VR: Mirage. Each title must request quad views itself.
-          </p>
-          <p class="mt-1 max-w-3xl text-xs leading-5 text-muted">
-            Pixel estimates compare application view rendering only; the runtime and VectorXR composite have additional GPU cost.
-          </p>
         </div>
         <button
           class="button-secondary inline-flex items-center gap-2 rounded-[0.75rem] px-4 py-2 text-sm font-medium"
@@ -262,19 +259,25 @@ function budgetChipClass(settings: QuadViewsSettings) {
         </button>
       </div>
 
-      <div class="mb-4 rounded-[0.9rem] border px-4 py-3 text-sm leading-6 surface-panel-strong">
-        <strong>Recommended DCS setup</strong>
-        <ul class="mt-1.5 list-disc space-y-1 pl-5">
+      <SetupGuide class="mb-3" title="Setup guide" summary="Recommended DCS setup and compatible titles" :open="setupGuideOpen">
+        <p class="text-sm font-semibold">Recommended DCS setup</p>
+        <ul class="mt-1.5 list-disc space-y-1 pl-5 text-sm leading-6">
           <li><strong>Game:</strong> turn on <strong>Use Quad View</strong> and, for gaze tracking, <strong>Use Eye Tracking</strong>.</li>
           <li><strong>Provider:</strong> enable the VectorXR layer and Quadviews profile, then disable <code>XR_APILAYER_MBUCCHIA_quad_views_foveated</code>. On Pimax, also turn Native Pimax Quad Views off. Native Varjo Quadviews remains runtime-driven.</li>
           <li><strong>Apply:</strong> save the profile and restart DCS after changing runtime, layer, or in-game VR settings.</li>
         </ul>
-      </div>
+        <p class="mt-3 text-sm leading-6 text-muted">
+          DCS is the primary tested title. Likely, but unconfirmed, D3D11 candidates include Pavlov VR, VAIL VR, The 7th Guest VR, and Kayak VR: Mirage. Each title must request quad views itself.
+        </p>
+        <p class="mt-1 text-xs leading-5 text-muted">
+          Pixel estimates compare application view rendering only; the runtime and VectorXR composite have additional GPU cost.
+        </p>
+      </SetupGuide>
 
-      <div class="mb-4 flex items-start gap-2.5 rounded-[0.9rem] border px-4 py-3 text-sm leading-6 surface-panel-strong" role="note">
-        <span class="restart-required-mark mt-0.5" aria-hidden="true">&#8635;</span>
-        <p><strong>Restart to apply:</strong> marked fields and Quadviews on/off take full effect after the current OpenXR application exits. Unmarked controls update during play.</p>
-      </div>
+      <p class="mb-4 flex items-start gap-2 text-xs leading-5 text-muted" role="note">
+        <span class="restart-required-mark" aria-hidden="true">&#8635;</span>
+        <span><strong class="font-semibold">Restart to apply:</strong> marked fields and Quadviews on/off take full effect after the current OpenXR application exits. Unmarked controls update during play.</span>
+      </p>
 
       <div class="mb-4 space-y-3 rounded-[1rem] border p-4 surface-panel-soft">
         <div class="flex flex-wrap items-start justify-between gap-3">
@@ -358,18 +361,16 @@ function budgetChipClass(settings: QuadViewsSettings) {
             :profiles="config.modules.quadviews.profiles"
           />
         </div>
-        <div v-if="!config.modules.quadviews.enabled" class="mt-3 rounded-[0.9rem] border px-4 py-3 text-sm leading-6 surface-panel-strong">
-          The default profile is off and has no effect — applications without an enabled custom profile get no Quadviews. Enabled custom profiles below still apply to their assigned applications.
-        </div>
+        <p v-if="!config.modules.quadviews.enabled" class="mt-2 text-xs text-muted">
+          Off unless an enabled custom profile turns it on. Custom profiles below still apply to their applications.
+        </p>
         <QuadViewsSettingsFields v-else class="mt-3" :settings="config.modules.quadviews.defaults" />
       </details>
     </article>
 
     <section class="space-y-3">
-      <div
-        class="flex flex-wrap items-center justify-between gap-3 rounded-[1rem] border px-4 py-3 surface-panel"
-      >
-        <div>
+      <div class="sticky top-0 z-20 flex flex-wrap items-center justify-between gap-3 rounded-[1rem] border px-4 py-3 shadow-panel backdrop-blur surface-panel-strong">
+        <div class="min-w-0 flex-1">
           <h2 class="text-lg font-semibold tracking-tight">Custom Profiles</h2>
           <p class="text-sm text-muted">Override Quadviews per application. The first enabled matching profile wins.</p>
         </div>

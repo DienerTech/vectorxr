@@ -354,7 +354,7 @@ function closeSubPage() {
 
     <section class="space-y-3">
       <div class="sticky top-0 z-20 flex flex-wrap items-center justify-between gap-3 rounded-[1rem] border px-4 py-3 shadow-panel backdrop-blur surface-panel-strong">
-        <div>
+        <div class="min-w-0 flex-1">
           <h2 class="text-lg font-semibold tracking-tight">Custom Profiles</h2>
           <p class="text-sm text-muted">Choose applications and a Turbo strategy per profile. If enabled profiles overlap, the first matching profile takes priority.</p>
         </div>

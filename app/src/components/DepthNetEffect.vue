@@ -10,6 +10,8 @@ const props = defineProps<{
   stereoDepthLimit?: number
   convergenceLimit?: number
   muted?: boolean
+  // Collapse behind a summary row (closed by default) so repeated profiles stay compact.
+  collapsible?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -36,6 +38,7 @@ const mapConvergenceLimit = computed(() => props.convergenceLimit ?? 5)
 const depthSign = computed(() => sign(depthValue.value, 0.05))
 const convergenceSign = computed(() => sign(convergenceValue.value, 0.05))
 const dragging = ref(false)
+const expanded = ref(false)
 
 const markerStyle = computed(() => ({
   left: `${50 + clamp(depthValue.value / mapStereoDepthLimit.value, -1, 1) * 43}%`,
@@ -168,9 +171,19 @@ const netEffect = computed(() => {
 </script>
 
 <template>
+  <div :class="collapsible ? ['rounded-[1rem] border px-4 py-3 surface-panel-soft', { 'opacity-70': muted }] : undefined" :style="collapsible ? 'border-color: var(--app-border)' : undefined">
+  <button v-if="collapsible" type="button" class="flex w-full flex-wrap items-center gap-2 text-left" :aria-expanded="expanded" @click="expanded = !expanded">
+    <svg aria-hidden="true" class="depth-map-chevron h-3.5 w-3.5" :class="{ open: expanded }" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M7.2 14.8a1 1 0 0 1 0-1.4L10.6 10 7.2 6.6a1 1 0 1 1 1.4-1.4l4.1 4.1a1 1 0 0 1 0 1.4l-4.1 4.1a1 1 0 0 1-1.4 0Z" clip-rule="evenodd" /></svg>
+    <span class="text-sm font-semibold tracking-tight">Depth pairing map</span>
+    <span class="text-xs text-muted">{{ netEffect.title }}</span>
+    <span class="rounded-full px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.12em] surface-panel-muted">
+      Depth {{ depthValue > 0 ? '+' : '' }}{{ depthValue.toFixed(1) }} &middot; Conv {{ convergenceValue > 0 ? '+' : '' }}{{ convergenceValue.toFixed(1) }}
+    </span>
+  </button>
   <section
-    class="grid gap-4 rounded-[1rem] border p-4 shadow-panel backdrop-blur lg:grid-cols-[minmax(17rem,0.9fr)_minmax(19rem,1.1fr)]"
-    :class="muted ? 'surface-panel-soft opacity-70' : 'surface-panel'"
+    v-show="!collapsible || expanded"
+    class="grid gap-4 lg:grid-cols-[minmax(17rem,0.9fr)_minmax(19rem,1.1fr)]"
+    :class="collapsible ? 'mt-3' : ['rounded-[1rem] border p-4 shadow-panel backdrop-blur', muted ? 'surface-panel-soft opacity-70' : 'surface-panel']"
     aria-label="Combined Depth effect"
   >
     <div class="min-w-0">
@@ -240,9 +253,12 @@ const netEffect = computed(() => {
       </p>
     </div>
   </section>
+  </div>
 </template>
 
 <style scoped>
+.depth-map-chevron { color: var(--app-text-soft); transition: transform 160ms ease; }
+.depth-map-chevron.open { transform: rotate(90deg); }
 .depth-map { border-color: var(--app-border); background: var(--app-surface-subtle); cursor: crosshair; }
 .depth-map:disabled { cursor: default; }
 .depth-quadrant { display: block; color: var(--app-text-muted); border-color: var(--app-border); background: var(--app-surface-subtle); }

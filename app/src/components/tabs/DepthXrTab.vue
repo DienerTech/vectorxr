@@ -7,6 +7,7 @@ import DepthAnchorField from '../DepthAnchorField.vue'
 import DepthBindingsPage from '../DepthBindingsPage.vue'
 import DepthNetEffect from '../DepthNetEffect.vue'
 import ProfileShell from '../ProfileShell.vue'
+import SetupGuide from '../SetupGuide.vue'
 import StereoDepthField from '../StereoDepthField.vue'
 import { toConvergenceDisplay, toStereoBoostDisplay } from '../../lib/display'
 import { savedBindingConflictWarnings, type DepthXRSettings, type RegisteredApplication, type VectorXRConfig } from '../../lib/model'
@@ -23,6 +24,8 @@ defineEmits<{
 }>()
 
 const depthInfoOpen = ref(false)
+// Open the tuning guide for first-time setup; returning users with an enabled profile start with it closed.
+const setupGuideOpen = !(props.config.modules.depthxr.enabled || props.config.modules.depthxr.profiles.some((profile) => profile.enabled))
 const bindingsPageOpen = ref(false)
 const stereoDepthDisplayLimits = reactive(new WeakMap<DepthXRSettings, number>())
 const convergenceDisplayLimits = reactive(new WeakMap<DepthXRSettings, number>())
@@ -122,7 +125,8 @@ const profileWarnings = computed(() => {
         </button>
       </div>
 
-      <div class="mb-5 grid gap-3 lg:grid-cols-3" role="note" aria-label="Depth tuning guide">
+      <SetupGuide class="mb-3" title="Tuning guide" summary="Set scale, place depth, then compare" :open="setupGuideOpen">
+      <div class="grid gap-3 lg:grid-cols-3" role="note" aria-label="Depth tuning guide">
         <div class="rounded-[1rem] border p-4 surface-panel-strong">
           <p class="eyebrow text-[10px] font-semibold uppercase tracking-[0.18em]">Step 1: Set scale</p>
           <p class="mt-2 text-sm font-semibold">Stereo Depth</p>
@@ -145,19 +149,19 @@ const profileWarnings = computed(() => {
           </p>
         </div>
       </div>
-      <div
-        class="mb-5 rounded-[0.9rem] border px-4 py-3 text-sm leading-6 chip-warning"
+      </SetupGuide>
+      <p
+        class="mb-3 rounded-[0.9rem] border px-4 py-2.5 text-sm leading-6 chip-warning"
         style="border-color: var(--app-border)"
         role="note"
       >
-        <p class="font-medium">In-game IPD settings can override Stereo Depth</p>
-        <p class="mt-1">Disable any Force IPD, virtual IPD, stereo-separation, or world-scale override before testing Depth.</p>
-        <p class="mt-1">Example: in DCS, uncheck <strong>Force IPD Distance</strong> under Options &gt; VR.</p>
-      </div>
+        <strong class="font-semibold">In-game IPD settings can override Stereo Depth.</strong>
+        Disable any Force IPD, virtual IPD, stereo-separation, or world-scale override first. In DCS, uncheck <strong>Force IPD Distance</strong> under Options &gt; VR.
+      </p>
 
       <!-- Module-level binding — applies regardless of which profile is active -->
       <button
-        class="group mb-5 w-full rounded-[1rem] border p-4 text-left transition surface-panel-soft hover:-translate-y-0.5 hover:shadow-panel"
+        class="group mb-5 w-full rounded-[1rem] border px-4 py-3 text-left transition surface-panel-soft hover:-translate-y-0.5 hover:shadow-panel"
         type="button"
         @click="openBindings"
       >
@@ -197,9 +201,9 @@ const profileWarnings = computed(() => {
           :applications="applications"
           :profiles="config.modules.depthxr.profiles"
         />
-        <div v-if="!config.modules.depthxr.enabled" class="mt-3 rounded-[0.9rem] border px-4 py-3 text-sm leading-6 surface-panel-strong">
-          The default profile is off and has no effect — applications without an enabled custom profile get no Depth adjustment. Enabled custom profiles below still apply to their assigned applications.
-        </div>
+        <p v-if="!config.modules.depthxr.enabled" class="mt-2 text-xs text-muted">
+          Off unless an enabled custom profile turns it on. Custom profiles below still apply to their applications.
+        </p>
         <div v-else class="mt-3 space-y-3">
           <div class="grid gap-3 lg:grid-cols-2">
             <StereoDepthField
@@ -228,8 +232,8 @@ const profileWarnings = computed(() => {
     </article>
 
     <section class="space-y-3">
-      <div class="flex flex-wrap items-center justify-between gap-3 rounded-[1rem] border px-4 py-3 surface-panel">
-        <div>
+      <div class="sticky top-0 z-20 flex flex-wrap items-center justify-between gap-3 rounded-[1rem] border px-4 py-3 shadow-panel backdrop-blur surface-panel-strong">
+        <div class="min-w-0 flex-1">
           <h2 class="text-lg font-semibold tracking-tight">Custom Profiles</h2>
           <p class="text-sm text-muted">Override Depth per application. The first enabled matching profile wins.</p>
         </div>
@@ -272,6 +276,7 @@ const profileWarnings = computed(() => {
             :convergence-limit="convergenceDisplayLimit(profile.settings)"
             :depth-lock="profile.settings.depthAnchor"
             :muted="!profile.enabled"
+            collapsible
             @update:stereo-boost="profile.settings.stereoBoost = $event"
             @update:convergence="profile.settings.convergence = $event"
           />
