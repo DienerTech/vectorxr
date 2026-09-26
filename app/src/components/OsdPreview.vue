@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, useId } from 'vue'
+import { computed, onMounted, onUnmounted, ref, useId } from 'vue'
 import { osdCompactLayout } from '../lib/osdCompactLayout'
 import { osdAccentColors, type OsdSettings, type OsdBodyRow } from '../lib/model'
 const props = defineProps<{ settings: OsdSettings }>()
@@ -24,8 +24,17 @@ const panelWidth = computed(() => props.settings.compact ? compactLayout.value.w
 const height = computed(() => props.settings.compact ? compactLayout.value.height : 210 - expandedHeader.value.shift + rows.value.reduce((sum, row) => sum + (row.key === 'graph' ? 156 : 52), 0))
 const width = computed(() => 2 * Math.atan(.275 * props.settings.scale / 100 * (panelWidth.value - 2) / 958) * 180 / Math.PI)
 const angularHeight = computed(() => width.value * (height.value - 2) / (panelWidth.value - 2))
-const readableWidth = computed(() => Math.max(560, panelWidth.value) + 80)
-const readableHeight = computed(() => Math.max(220, height.value + 60))
+// Legible mode draws both layouts at one shared scale so text size matches between Compact and Expanded.
+// The scale only shrinks when the stage is too narrow for the widest (expanded) panel.
+const legibleMaxScale = 0.56, legibleWidestPanel = 960, legiblePadX = 48, legiblePadY = 52
+const stage = ref<HTMLElement | null>(null)
+const stageSize = ref({ width: 0, height: 0 })
+const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(([entry]) => { if (entry) stageSize.value = { width: entry.contentRect.width, height: entry.contentRect.height } })
+onMounted(() => { if (stage.value) observer?.observe(stage.value) })
+onUnmounted(() => observer?.disconnect())
+const legibleScale = computed(() => Math.min(legibleMaxScale, stageSize.value.width > 0 ? (stageSize.value.width - legiblePadX) / legibleWidestPanel : legibleMaxScale))
+const legibleStageHeight = computed(() => Math.max(300, Math.ceil(height.value * legibleScale.value) + legiblePadY))
+const legibleView = computed(() => ({ width: stageSize.value.width || legibleWidestPanel, height: stageSize.value.height || legibleStageHeight.value }))
 const headerValues = computed(() => ({ brand: 'VECTORXR', app: 'your-game.exe', runtime: 'Your OpenXR runtime', clock: props.settings.clockFormat === '12' ? '8:42 PM' : '20:42' }))
 const labels: Record<OsdBodyRow, [string, string]> = { graph: ['', ''], turbo: ['TURBO', 'Async / Experimental'], pivot: ['PIVOT', 'DCS Stepped Applied, Nudges Applied'], modules: ['ENHANCEMENTS', 'Depth / Pivot / Turbo / Quadviews'] }
 let drag: { x: number; y: number; h: number; v: number; unit: number } | null = null
@@ -43,16 +52,12 @@ function move(event: PointerEvent) {
 
 <template>
   <div class="osd-preview">
-    <div class="preview-view-controls flex flex-wrap items-center justify-end gap-2 px-5 pb-3">
-      <span class="mr-auto text-xs text-muted">Preview size</span>
-      <button v-for="mode in [false, true]" :key="String(mode)" :aria-pressed="legible === mode" :class="legible === mode ? 'button-accent' : 'button-secondary'" class="rounded-lg px-3 py-2 text-xs" @click="legible = mode">{{ mode ? 'Legible' : 'Estimated size' }}</button>
-    </div>
-  <div class="osd-stage" :class="{ legible }" :style="legible ? { height: `${Math.min(620, readableHeight)}px` } : undefined">
-    <span class="stage-note">{{ legible ? 'CONTENT PREVIEW · Enlarged for reading' : 'PLACEMENT PREVIEW · 100° × 80° reference view' }}</span>
-    <svg :viewBox="legible ? `0 0 ${readableWidth} ${readableHeight}` : '-50 -40 100 80'" class="stage-svg" :aria-label="legible ? 'Legible OSD content preview, enlarged and centered' : 'Estimated OSD size within a 100 by 80 degree reference view'">
+  <div class="osd-stage" :class="{ legible }" ref="stage" :style="legible ? { height: `${legibleStageHeight}px` } : undefined">
+    <span class="stage-note">{{ legible ? 'CONTENT PREVIEW · Sample values · Use Placement to judge position and size' : 'PLACEMENT PREVIEW · 100° × 80° reference view' }}</span>
+    <svg :viewBox="legible ? `0 0 ${legibleView.width} ${legibleView.height}` : '-50 -40 100 80'" class="stage-svg" :aria-label="legible ? 'Legible OSD content preview, enlarged and centered' : 'Estimated OSD size within a 100 by 80 degree reference view'">
       <path v-if="!legible" d="M -50 0 H 50 M 0 -40 V 40" stroke="#a4c1d630" stroke-width=".15" />
       <circle v-if="!legible" r="1" fill="none" stroke="#a4c1d685" stroke-width=".15" />
-      <svg v-if="!settings.compact || !compactLayout.empty" :x="legible ? (readableWidth - panelWidth) / 2 : settings.horizontalDegrees - width / 2" :y="legible ? (readableHeight - height) / 2 : -settings.verticalDegrees - angularHeight / 2" :width="legible ? panelWidth : width" :height="legible ? height : angularHeight" :viewBox="`0 0 ${panelWidth} ${height}`" class="preview" :style="{ '--accent': accent, opacity: settings.opacity / 100 }"
+      <svg v-if="!settings.compact || !compactLayout.empty" :x="legible ? (legibleView.width - panelWidth * legibleScale) / 2 : settings.horizontalDegrees - width / 2" :y="legible ? (legibleView.height - height * legibleScale) / 2 + 8 : -settings.verticalDegrees - angularHeight / 2" :width="legible ? panelWidth * legibleScale : width" :height="legible ? height * legibleScale : angularHeight" :viewBox="`0 0 ${panelWidth} ${height}`" class="preview" :style="{ '--accent': accent, opacity: settings.opacity / 100 }"
         @pointerdown="start" @pointermove="move" @pointerup="drag = null" @pointercancel="drag = null" @lostpointercapture="drag = null">
         <defs>
           <filter :id="`${edgeId}-blur`"><feGaussianBlur stdDeviation="2" /></filter>
@@ -95,7 +100,7 @@ function move(event: PointerEvent) {
       </svg>
     </svg>
     <span v-if="settings.compact && compactLayout.empty" class="empty-preview">Choose a compact value to show the display.</span>
-    <span class="stage-bottom">{{ legible ? 'Sample values · Use Estimated size to judge placement and size' : `${width.toFixed(1)}° panel width · Drag to position · Headset field of view varies` }}</span>
+    <span v-if="!legible" class="stage-bottom">{{ `${width.toFixed(1)}° panel width · Drag to position · Headset field of view varies` }}</span>
   </div>
   </div>
 </template>
@@ -104,7 +109,7 @@ function move(event: PointerEvent) {
 .osd-preview { display: flex; flex-direction: column; min-height: 0; }
 .empty-preview { position: absolute; inset: 45% 18px auto; text-align: center; font-size: 13px; }
 .legible .preview { cursor: default; }
-.osd-stage { height: 340px; position: relative; overflow: hidden; background: radial-gradient(ellipse at 50% 42%, #273d54, #132232 48%, #0b121c); color: #9eb1c7; }
+.osd-stage { height: 300px; position: relative; overflow: hidden; background: radial-gradient(ellipse at 50% 42%, #273d54, #132232 48%, #0b121c); color: #9eb1c7; }
 .stage-svg { width: 100%; height: 100%; }
 .stage-note, .stage-bottom { position: absolute; left: 18px; font-size: 10px; pointer-events: none; }
 .stage-note { top: 15px; } .stage-bottom { bottom: 14px; }
