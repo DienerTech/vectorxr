@@ -166,7 +166,7 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
           </nav>
           <h2 class="mt-2 text-2xl font-semibold tracking-tight">Runtime Behavior</h2>
           <p class="mt-1 max-w-3xl text-sm leading-6 text-muted">
-            Control how Turbo coordinates with each OpenXR runtime. Auto is the right choice for almost everyone, but it cannot make runtime reprojection compatible with pipelined timing.
+            Choose how VectorXR Turbo coordinates with each OpenXR runtime. Auto is a safe starting point; to find the fastest strategy for a game, try Async and Sequenced and compare them in Performance Diagnostics. Profiles using the Toolkit-style or Custom strategy ignore these settings.
           </p>
         </div>
         <button
@@ -186,7 +186,7 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
           <div class="max-w-2xl">
             <p class="text-sm font-semibold tracking-tight">Pacing strategy</p>
             <p class="mt-1 text-sm leading-6 text-muted">
-              Auto starts with Async and tries Sequenced if Async stalls or repeatedly rejects frames. A strategy is remembered after 60 seconds of stable play. There are no built-in runtime or headset mappings; explicit manual overrides still apply.
+              Auto is stability-first: it starts with Async and tries Sequenced if Async stalls or repeatedly rejects frames, then remembers the strategy after 60 seconds of stable play. It does not compare performance, so the remembered strategy is not necessarily the fastest.
             </p>
           </div>
           <label class="flex items-center gap-3 text-sm font-medium">
@@ -196,9 +196,9 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
               class="rounded-[0.6rem] border px-3 py-1.5 text-sm surface-panel-strong"
               style="border-color: var(--app-border)"
             >
-              <option value="auto">Auto (recommended)</option>
-              <option value="async">Async — always</option>
-              <option value="sequenced">Sequenced — always</option>
+              <option value="auto">Auto · stability-first</option>
+              <option value="async">Async only · usually fastest</option>
+              <option value="sequenced">Sequenced only · for runtimes that need it</option>
             </select>
           </label>
         </div>
@@ -209,7 +209,7 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
           style="border-color: var(--app-border)"
         >
           <template v-if="!pacingForced">
-            <strong>Automatic protection is active.</strong> Async overlaps the runtime wait with game work; Sequenced supports runtimes that require wait and submission to remain interlocked.
+            <strong>Auto is active.</strong> Async overlaps the runtime wait with game work; Sequenced supports runtimes that require wait and submission to remain interlocked. Pin a runtime below to test a specific strategy.
           </template>
           <template v-else>
             <strong>Manual override is active.</strong> Only the selected strategy runs. Automatic discovery is paused; Turbo Safety and live fault suspension still apply.

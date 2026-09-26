@@ -89,3 +89,13 @@ test('legacy unassigned timing is retained without silently applying it to a gam
   assert.equal(normalized.modules.turbo.profiles[0].experimental.enabled, false)
   assert.equal(normalized.modules.turbo.experimental.enabled, true)
 })
+
+test('diagnostics label flights by Turbo strategy', async () => {
+  const { turboSessionStrategy } = await import('../src/lib/turboDiagnostics.ts')
+  const bucket = state => ({ state })
+  assert.equal(turboSessionStrategy({ timingConfiguration: 'Normal timing; trace=x', buckets: [bucket('off'), bucket('async')] }), 'VectorXR · Async')
+  assert.equal(turboSessionStrategy({ buckets: [bucket('sequenced')] }), 'VectorXR · Sequenced')
+  assert.equal(turboSessionStrategy({ timingConfiguration: 'Experimental Async; submit=wait; sample=entry; prediction=100%; clock=available; cap=0; trace=x', buckets: [] }), 'Toolkit-style')
+  assert.equal(turboSessionStrategy({ timingConfiguration: 'Experimental Async; submit=wait; sample=entry; prediction=90%; clock=available; cap=0; trace=x', buckets: [] }), 'Custom')
+  assert.equal(turboSessionStrategy({ buckets: [bucket('off')] }), 'Unknown strategy')
+})

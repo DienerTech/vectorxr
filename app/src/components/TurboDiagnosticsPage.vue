@@ -2,7 +2,7 @@
 import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue'
 
 import ModuleBindingPage from './ModuleBindingPage.vue'
-import { preferredTurboSession } from '../lib/turboDiagnostics'
+import { preferredTurboSession, turboSessionStrategy } from '../lib/turboDiagnostics'
 import ModuleBindingPanel from './ModuleBindingPanel.vue'
 import { savedBindingConflictWarnings, type TurboMetricsBucket, type TurboMetricsSession, type VectorXRConfig } from '../lib/model'
 
@@ -56,7 +56,7 @@ function formatSessionLabel(session: TurboMetricsSession): string {
       })
     : 'Unknown time'
   const runtime = session.runtimeName ? ` · ${session.runtimeName}` : ''
-  return `${when} — ${session.appName || 'unknown app'}${runtime}${session.live ? ' (live)' : ''}`
+  return `${when} — ${session.appName || 'unknown app'} · ${turboSessionStrategy(session)}${runtime}${session.live ? ' (live)' : ''}`
 }
 
 function bucketLabel(state: string): string {
@@ -277,10 +277,12 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
             </select>
           </label>
 
-          <p v-if="selectedSession?.timingConfiguration" class="mb-4 rounded-xl border p-3 text-sm surface-panel-soft">
-            {{ selectedSession.timingConfiguration }}
+          <p v-if="selectedSession" class="mb-4 flex flex-wrap items-center gap-2 text-sm">
+            <span class="text-muted">Strategy</span>
+            <span class="chip-accent rounded-full px-2.5 py-1 text-xs font-semibold" :title="selectedSession.timingConfiguration">{{ turboSessionStrategy(selectedSession) }}</span>
+            <span v-if="selectedSession.timingConfiguration?.startsWith('Experimental')" class="text-xs text-muted">{{ selectedSession.timingConfiguration }}</span>
           </p>
-          <p class="mb-4 text-xs text-muted">Results accumulate within a session. Use a fresh launch for each condition; these figures do not measure ASW activity or headset presentation.</p>
+          <p class="mb-4 text-xs text-muted">Results accumulate within a session. To compare strategies, use a fresh launch for each and compare their gain versus Turbo off; these figures do not measure ASW activity or headset presentation.</p>
           <div v-if="comparisons.length > 0" class="grid gap-3 md:grid-cols-2">
             <article
               v-for="comparison in comparisons"

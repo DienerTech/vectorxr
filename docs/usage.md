@@ -371,17 +371,24 @@ and enable it only for applications where an in-headset A/B comparison demonstra
 1. Register the game's executable in **Application Registry**.
 2. On **Turbo**, leave **Default Profile** off and add an enabled **Custom Profile** for
    that application. Default On applies Turbo to applications without a custom profile.
-3. Keep **Turbo Safety** enabled. Open **Runtime Behavior** and leave **Mode** on
-   **Auto (recommended)**.
+3. Keep **Turbo Safety** enabled. Open **Runtime Behavior** and start with **Mode** on
+   **Auto · stability-first**. Auto picks a stable strategy, not necessarily the fastest one.
 4. Use **In-game Turbo Toggle > Edit Binding…** to assign a keyboard or controller control,
    then click **Save Changes**. The binding works only where Turbo is enabled in the
    application's profile; it can also retry after a safety block or suspension.
 5. Launch the game and compare Turbo on/off in the same scene. Use **Performance Diagnostics**
    to compare FPS, frame times, and pacing waits alongside what you see in the headset.
 
-Experimental timing belongs to **Turbo → Custom Profiles → Profile timing**. Choose **Normal
-Turbo timing**, **Toolkit-inspired**, or custom timing values for each profile. The profile's
-application assignments also scope its timing; there is no separate experiment application picker.
+Each custom profile has a **Strategy**: **VectorXR** (VectorXR's own Turbo, following Runtime
+Behavior), **Toolkit-style** (recreates the timing of OpenXR Toolkit's Turbo Mode), or **Custom**
+(Toolkit-style with your own values under **Advanced timing**). Toolkit-style and Custom are
+experimental and take effect after a game restart. The profile's application assignments also
+scope its strategy; there is no separate experiment application picker.
+
+To find the best strategy for a game, test one strategy per launch. In each flight, capture Turbo
+on and Turbo off with the in-game toggle, then compare the gain in **Performance Diagnostics**,
+which labels each flight with the strategy it used. Try Async and Sequenced in Runtime Behavior,
+then Toolkit-style, and keep the one with the best gain and 1% lows and no stalls.
 The first matching enabled profile takes priority. To compare profiles for the same game, enable
 the intended profile, save, and relaunch the game. Timing remains fixed for that VR session.
 Older scoped experiments migrate into the corresponding custom profiles; mixed application groups
