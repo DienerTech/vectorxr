@@ -7732,6 +7732,84 @@ XrResult OpenXrLayer::CreateReferenceSpace(XrSession session,
     return result;
 }
 
+XrResult OpenXrLayer::CreateAction(XrActionSet set, const XrActionCreateInfo* info, XrAction* action) {
+    const auto result = next_create_action_(set, info, action);
+    if (XR_SUCCEEDED(result) && info && action) {
+        std::scoped_lock lock(mutex_);
+        application_pose_actions_.erase(*action);
+        if (info->actionType == XR_ACTION_TYPE_POSE_INPUT) {
+            application_pose_actions_[*action] = std::make_shared<ApplicationPoseAction>(ApplicationPoseAction{set});
+        }
+    }
+    return result;
+}
+
+XrResult OpenXrLayer::DestroyAction(XrAction action) {
+    const auto result = next_destroy_action_(action);
+    if (XR_SUCCEEDED(result)) {
+        std::scoped_lock lock(mutex_);
+        application_pose_actions_.erase(action);
+        // Existing spaces still locate the old action resource, per OpenXR.
+    }
+    return result;
+}
+
+XrResult OpenXrLayer::DestroyActionSet(XrActionSet set) {
+    const auto result = next_destroy_action_set_(set);
+    if (XR_SUCCEEDED(result)) {
+        std::scoped_lock lock(mutex_);
+        std::erase_if(application_pose_actions_, [set](const auto& entry) { return entry.second->owner == set; });
+    }
+    return result;
+}
+
+XrResult OpenXrLayer::SuggestInteractionProfileBindings(XrInstance instance, const XrInteractionProfileSuggestedBinding* bindings) {
+    const auto result = next_suggest_interaction_profile_bindings_(instance, bindings);
+    if (XR_SUCCEEDED(result) && bindings) {
+        XrPath profile = XR_NULL_PATH, pose = XR_NULL_PATH;
+        // Resolve the standard paths downstream, independently of our private
+        // Quadviews gaze action and without holding the layer's state lock.
+        if (XR_SUCCEEDED(next_string_to_path_(instance, "/interaction_profiles/ext/eye_gaze_interaction", &profile)) &&
+            bindings->interactionProfile == profile &&
+            XR_SUCCEEDED(next_string_to_path_(instance, "/user/eyes_ext/input/gaze_ext/pose", &pose))) {
+            std::scoped_lock lock(mutex_);
+            // A successful re-suggestion replaces this profile's whole list.
+            for (const auto& [handle, action] : application_pose_actions_) action->eye_gaze = false;
+            for (const auto& [handle, space] : application_action_spaces_) space.action->eye_gaze = false;
+            for (uint32_t i = 0; bindings->suggestedBindings && i < bindings->countSuggestedBindings; ++i) {
+                const auto& binding = bindings->suggestedBindings[i];
+                const auto found = application_pose_actions_.find(binding.action);
+                if (binding.binding == pose && found != application_pose_actions_.end()) found->second->eye_gaze = true;
+            }
+        }
+    }
+    return result;
+}
+
+XrResult OpenXrLayer::CreateActionSpace(XrSession session, const XrActionSpaceCreateInfo* info, XrSpace* space) {
+    const auto result = next_create_action_space_(session, info, space);
+    if (XR_SUCCEEDED(result) && info && space) {
+        XrPath eyes = XR_NULL_PATH;
+        const bool includes_eyes = info->subactionPath == XR_NULL_PATH ||
+            (XR_SUCCEEDED(next_string_to_path_(instance_, "/user/eyes_ext", &eyes)) && info->subactionPath == eyes);
+        std::scoped_lock lock(mutex_);
+        application_action_spaces_.erase(*space);
+        const auto action = application_pose_actions_.find(info->action);
+        if (action != application_pose_actions_.end())
+            application_action_spaces_[*space] = {action->second, includes_eyes};
+    }
+    return result;
+}
+
+bool OpenXrLayer::IsHeadRelativeEyeGaze(XrSpace space, XrSpace base_space) const {
+    const auto is_gaze = [&](XrSpace candidate) {
+        const auto found = application_action_spaces_.find(candidate);
+        return found != application_action_spaces_.end() && found->second.includes_eyes && found->second.action->eye_gaze;
+    };
+    return (IsTrackedViewSpace(base_space) && is_gaze(space)) ||
+           (IsTrackedViewSpace(space) && is_gaze(base_space));
+}
+
 XrResult OpenXrLayer::LocateSpace(XrSpace space, XrSpace base_space, XrTime time, XrSpaceLocation* location) {
     bool pivotxr_active = false;
     bool pivot_processing_required = false;
@@ -7742,7 +7820,12 @@ XrResult OpenXrLayer::LocateSpace(XrSpace space, XrSpace base_space, XrTime time
         std::scoped_lock lock(mutex_);
         ReloadConfigIfNeeded();
         RefreshResolvedSettings();
-        if (resolved_settings_.core.enabled && resolved_settings_.pivotxr.enabled) {
+        // Head-relative eye direction must stay attached to the virtual head.
+        // Applying the inverse camera rotation here moves MSFS's focus region
+        // away from the user's eyes. Preserve the complete runtime result,
+        // including sample time/validity, and avoid extra anchor-space queries.
+        if (resolved_settings_.core.enabled && resolved_settings_.pivotxr.enabled &&
+            !IsHeadRelativeEyeGaze(space, base_space)) {
             pivotxr_active = IsPivotXrActive();
             pivot_processing_required =
                 pivotxr_active || pivotxr_activation_gain_ > kPivotActivationGainEpsilon;
@@ -8384,6 +8467,7 @@ XrResult OpenXrLayer::DestroySpace(XrSpace space) {
         logged_pivot_space_conversions_.erase(space);
         failed_pivot_space_conversions_.erase(space);
         tracked_view_spaces_.erase(space);
+        application_action_spaces_.erase(space);
         tracked_local_spaces_.erase(space);
         tracked_stage_spaces_.erase(space);
         if (pivotxr_translation_anchor_ && pivotxr_translation_anchor_->space == space) {
@@ -9011,6 +9095,7 @@ void OpenXrLayer::CaptureInstanceFunctions() {
 }
 
 void OpenXrLayer::ResetSessionState() {
+    application_action_spaces_.clear();
     osd_.Shutdown();
     ReleasePendingOsdImages();osd_composite_.Reset();osd_composite_logged_=false;osd_composite_fallback_logged_=false;
     osd_monitoring_.store(false);
@@ -9114,6 +9199,8 @@ void OpenXrLayer::ResetSessionState() {
 }
 
 void OpenXrLayer::ResetInstanceState() {
+    application_action_spaces_.clear();
+    application_pose_actions_.clear();
     quad_views_extension_requested_ = false;
     varjo_foveated_rendering_extension_requested_ = false;
     d3d11_graphics_extension_requested_ = false;

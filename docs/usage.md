@@ -228,6 +228,13 @@ Pivot and Quadviews are built to work together: because VectorXR computes both i
 foveated focus region stays locked to your gaze even while Pivot rotates your view. This
 combination is VectorXR's signature capability — see [Why VectorXR](../README.md#why-vectorxr).
 
+**Does Pivot work with MSFS 2024's built-in eye-tracked foveation?**
+
+Yes. Pivot preserves eye direction relative to the headset so the high-resolution region
+stays aligned with your gaze as the camera turns. Enable foveated rendering in MSFS 2024
+and eye tracking in your headset software. MSFS handles its own foveated rendering;
+VectorXR's Quadviews provider is not required for this path.
+
 ### Quadviews
 
 ![VectorXR Quadviews tab](screenshots/quadviews.jpg)

@@ -180,6 +180,11 @@ class OpenXrLayer {
                                          XrExtent2Df* bounds);
     XrResult CreateReferenceSpace(XrSession session, const XrReferenceSpaceCreateInfo* create_info, XrSpace* space);
     XrResult DestroySpace(XrSpace space);
+    XrResult CreateAction(XrActionSet set, const XrActionCreateInfo* info, XrAction* action);
+    XrResult DestroyAction(XrAction action);
+    XrResult DestroyActionSet(XrActionSet set);
+    XrResult SuggestInteractionProfileBindings(XrInstance instance, const XrInteractionProfileSuggestedBinding* bindings);
+    XrResult CreateActionSpace(XrSession session, const XrActionSpaceCreateInfo* info, XrSpace* space);
     XrResult LocateSpace(XrSpace space, XrSpace base_space, XrTime time, XrSpaceLocation* location);
     XrResult LocateViews(XrSession session,
                          const XrViewLocateInfo* view_locate_info,
@@ -192,6 +197,7 @@ class OpenXrLayer {
 #if defined(DEPTHXR_TESTING)
     friend class TurboFrameTestPeer;
     friend class PivotPoseTestPeer;
+    friend class PivotGazeTestPeer;
 #endif
 
     OpenXrLayer() = default;
@@ -1207,6 +1213,20 @@ class OpenXrLayer {
     uint32_t cached_quadviews_stereo_max_width_{0};
     uint32_t cached_quadviews_stereo_max_height_{0};
     std::unordered_set<XrSpace> tracked_view_spaces_;
+    // Action resources outlive xrDestroyAction/xrDestroyActionSet when spaces
+    // still reference them. Shared identity prevents reused handles from
+    // changing the classification of an existing eye-gaze space.
+    struct ApplicationPoseAction {
+        XrActionSet owner{XR_NULL_HANDLE};
+        bool eye_gaze{false};
+    };
+    std::unordered_map<XrAction, std::shared_ptr<ApplicationPoseAction>> application_pose_actions_;
+    struct ApplicationActionSpace {
+        std::shared_ptr<ApplicationPoseAction> action;
+        bool includes_eyes{false};
+    };
+    std::unordered_map<XrSpace, ApplicationActionSpace> application_action_spaces_;
+    bool IsHeadRelativeEyeGaze(XrSpace space, XrSpace base_space) const;
     std::unordered_set<XrSpace> tracked_local_spaces_;
     std::unordered_set<XrSpace> tracked_stage_spaces_;
     std::vector<XrPosef> cached_eye_offset_poses_;

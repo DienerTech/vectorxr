@@ -206,6 +206,22 @@ XrResult XRAPI_CALL DepthxrDestroySpace(XrSpace space) {
     return OpenXrLayer::Instance().DestroySpace(space);
 }
 
+XrResult XRAPI_CALL DepthxrCreateAction(XrActionSet set, const XrActionCreateInfo* info, XrAction* action) {
+    return OpenXrLayer::Instance().CreateAction(set, info, action);
+}
+XrResult XRAPI_CALL DepthxrDestroyAction(XrAction action) {
+    return OpenXrLayer::Instance().DestroyAction(action);
+}
+XrResult XRAPI_CALL DepthxrDestroyActionSet(XrActionSet set) {
+    return OpenXrLayer::Instance().DestroyActionSet(set);
+}
+XrResult XRAPI_CALL DepthxrSuggestInteractionProfileBindings(XrInstance instance, const XrInteractionProfileSuggestedBinding* bindings) {
+    return OpenXrLayer::Instance().SuggestInteractionProfileBindings(instance, bindings);
+}
+XrResult XRAPI_CALL DepthxrCreateActionSpace(XrSession session, const XrActionSpaceCreateInfo* info, XrSpace* space) {
+    return OpenXrLayer::Instance().CreateActionSpace(session, info, space);
+}
+
 XrResult XRAPI_CALL DepthxrLocateSpace(XrSpace space,
                                        XrSpace base_space,
                                        XrTime time,
@@ -404,6 +420,27 @@ XrResult XRAPI_CALL xrGetInstanceProcAddr(XrInstance instance, const char* name,
     }
 
     const std::string_view requested(name);
+    // Track application gaze independently of VectorXR's Quadviews feature.
+    if (requested == "xrCreateAction") {
+        *function = reinterpret_cast<PFN_xrVoidFunction>(depthxr::DepthxrCreateAction);
+        return XR_SUCCESS;
+    }
+    if (requested == "xrDestroyAction") {
+        *function = reinterpret_cast<PFN_xrVoidFunction>(depthxr::DepthxrDestroyAction);
+        return XR_SUCCESS;
+    }
+    if (requested == "xrDestroyActionSet") {
+        *function = reinterpret_cast<PFN_xrVoidFunction>(depthxr::DepthxrDestroyActionSet);
+        return XR_SUCCESS;
+    }
+    if (requested == "xrSuggestInteractionProfileBindings") {
+        *function = reinterpret_cast<PFN_xrVoidFunction>(depthxr::DepthxrSuggestInteractionProfileBindings);
+        return XR_SUCCESS;
+    }
+    if (requested == "xrCreateActionSpace") {
+        *function = reinterpret_cast<PFN_xrVoidFunction>(depthxr::DepthxrCreateActionSpace);
+        return XR_SUCCESS;
+    }
     if (requested == "xrGetInstanceProcAddr") {
         *function = reinterpret_cast<PFN_xrVoidFunction>(xrGetInstanceProcAddr);
         return XR_SUCCESS;

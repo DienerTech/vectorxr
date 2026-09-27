@@ -1,5 +1,42 @@
 [
   {
+    "version": "0.18.0",
+    "date": "2026-09-27",
+    "title": "In-Headset OSD and Sharper Pivot Views",
+    "summary": "Adds a customizable in-headset performance display, fixes Pivot's eye-tracked foveation alignment in MSFS 2024, and expands per-profile Turbo timing controls.",
+    "items": [
+      {
+        "html": "<strong>In-headset OSD</strong>",
+        "items": [
+          "Adds an optional headset display for application FPS, frame times, Turbo state, Pivot, and active enhancements in D3D11, D3D12, and Vulkan sessions.",
+          "Choose compact or detailed layouts, arrange status rows, customize placement and colors, and save reusable presets with a desktop preview."
+        ]
+      },
+      {
+        "html": "<strong>Pivot</strong>",
+        "items": [
+          "Fixes the high-resolution region drifting away from your gaze when Pivot turns the view in MSFS 2024 with eye-tracked foveated rendering enabled.",
+          "Preserves eye direction relative to the headset while retaining Pivot's camera and controller transformations.",
+          "Keeps physical leaning aligned with the rotated view, including combined yaw and pitch, and improves Snap View transitions around 180 degrees."
+        ]
+      },
+      {
+        "html": "<strong>Turbo</strong>",
+        "items": [
+          "Adds Toolkit-style and Custom timing strategies to custom profiles, with advanced prediction and frame-cap controls for experimentation.",
+          "Makes restart requirements and active timing choices clearer in the desktop app and OSD."
+        ]
+      },
+      {
+        "html": "<strong>Setup and reliability</strong>",
+        "items": [
+          "Improves setup guidance and descriptions across the enhancement pages.",
+          "Adds regression coverage for eye-gaze bindings, controller behavior, and action-space lifetimes."
+        ]
+      }
+    ]
+  },
+  {
     "version": "0.17.0",
     "date": "2026-09-12",
     "title": "Turbo Safety, Eye Tracking Correction, and Better Diagnostics",
