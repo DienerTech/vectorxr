@@ -2,14 +2,19 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cctype>
 #include <chrono>
+#include <condition_variable>
 #include <cwctype>
 #include <mutex>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <system_error>
+#include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #if defined(_WIN32)
@@ -352,11 +357,17 @@ HWND FindCurrentProcessTopLevelWindow() {
 class DirectInputPoller {
   public:
     ~DirectInputPoller() {
+        // Static destruction. At process exit the connector thread may have been
+        // terminated mid-call (possibly holding mutex_), so never lock or wait
+        // here; if it could still be running, leak rather than race it.
+        if (connector_running_.load()) {
+            return;
+        }
+        for (IDirectInputDevice8W* device : retired_) {
+            ReleaseDevice(device);
+        }
         for (auto& [_, device] : devices_) {
-            if (device) {
-                device->Unacquire();
-                device->Release();
-            }
+            ReleaseDevice(device);
         }
         if (direct_input_) {
             direct_input_->Release();
@@ -386,11 +397,26 @@ class DirectInputPoller {
             return result;
         }
 
+        // A background setup failure surfaces once as a real attempt so the
+        // caller logs and counts it; later polls read it as deferred below.
+        if (unreported_failures_.erase(cache_key) > 0) {
+            if (const auto failure = failure_diagnostics_.find(cache_key);
+                failure != failure_diagnostics_.end()) {
+                result = failure->second;
+                result.down = false;
+                result.device_poll_attempted = true;
+                result.device_retry_deferred = false;
+                result.device_retry_delay_ms =
+                    retry_backoff_.RetryDelayRemaining(cache_key, now).count();
+                return result;
+            }
+        }
+
         // A missing HID can make DirectInput setup/reacquisition surprisingly
         // expensive. Without a negative cache, every binding for the same
-        // unplugged device retries here every 30ms on the OpenXR frame path.
-        // Return the last inactive diagnostic until this device's reconnect
-        // deadline, then permit one new attempt for all of its bindings.
+        // unplugged device retries every 30ms. Return the last inactive
+        // diagnostic until this device's reconnect deadline, then permit one
+        // new attempt for all of its bindings.
         if (!retry_backoff_.ShouldAttempt(cache_key, now)) {
             if (const auto failure = failure_diagnostics_.find(cache_key);
                 failure != failure_diagnostics_.end()) {
@@ -412,17 +438,33 @@ class DirectInputPoller {
             failure_diagnostics_[cache_key] = result;
         };
 
-        IDirectInputDevice8W* device = GetOrCreateDevice(binding.device_guid, result);
-        if (!device) {
-            cache_failure();
+        const auto device = devices_.find(cache_key);
+        if (device == devices_.end()) {
+            if (pending_connects_.contains(cache_key)) {
+                result.device_connect_pending = true;
+                return result;
+            }
+            if (binding.device_guid.empty() || !ParseGuid(binding.device_guid).has_value()) {
+                SetDiagnostic(result, InputBindingPollStage::ParseDeviceGuid, E_INVALIDARG);
+                cache_failure();
+                return result;
+            }
+            // CreateDevice, the window lookup, SetCooperativeLevel and Acquire
+            // cost 1-6ms per device, and a failing device repeats them at every
+            // reconnect deadline (2s at steady state): a periodic frame-time
+            // spike on the OpenXR frame thread. The connector does that work;
+            // the binding stays inactive until the device is published.
+            pending_connects_.emplace(cache_key, binding.device_guid);
+            StartConnectorLocked();
+            result.device_connect_pending = true;
             return result;
         }
 
         CachedDeviceState& cached = state_cache_[cache_key];
         cached.read_time = now;
-        cached.valid = ReadState(device, cached.state, result);
+        cached.valid = ReadState(device->second, cached.state, result);
         if (!cached.valid) {
-            DropDevice(binding.device_guid);
+            RetireDeviceLocked(cache_key);
             cache_failure();
             return result;
         }
@@ -435,6 +477,11 @@ class DirectInputPoller {
         }
         result.down = IsStateDown(*input, cached.state);
         return result;
+    }
+
+    void Drain(std::chrono::milliseconds timeout) {
+        std::unique_lock lock(mutex_);
+        connector_idle_.wait_for(lock, timeout, [this] { return !connector_running_.load(); });
     }
 
   private:
@@ -461,43 +508,34 @@ class DirectInputPoller {
                    std::optional<std::size_t>(input.direction);
     }
 
-    IDirectInput8W* GetDirectInput(InputBindingPollResult& diagnostic) {
-        if (direct_input_) {
-            return direct_input_;
+    static void ReleaseDevice(IDirectInputDevice8W* device) {
+        if (device) {
+            device->Unacquire();
+            device->Release();
         }
+    }
 
+    static IDirectInput8W* CreateDirectInput(InputBindingPollResult& diagnostic) {
+        IDirectInput8W* direct_input = nullptr;
         const HRESULT result = DirectInput8Create(
                 GetModuleHandleW(nullptr),
                 DIRECTINPUT_VERSION,
                 IID_IDirectInput8W,
-                reinterpret_cast<void**>(&direct_input_),
+                reinterpret_cast<void**>(&direct_input),
                 nullptr);
-        if (FAILED(result) || !direct_input_) {
-            direct_input_ = nullptr;
+        if (FAILED(result) || !direct_input) {
             SetDiagnostic(diagnostic, InputBindingPollStage::CreateDirectInput,
                           FAILED(result) ? result : E_POINTER);
+            return nullptr;
         }
-
-        return direct_input_;
+        return direct_input;
     }
 
-    IDirectInputDevice8W* GetOrCreateDevice(std::string_view device_guid_text,
-                                           InputBindingPollResult& diagnostic) {
-        if (device_guid_text.empty()) {
-            SetDiagnostic(diagnostic, InputBindingPollStage::ParseDeviceGuid, E_INVALIDARG);
-            return nullptr;
-        }
-
-        const std::wstring cache_key = NormalizeGuidText(device_guid_text);
-        if (const auto it = devices_.find(cache_key); it != devices_.end()) {
-            return it->second;
-        }
-
-        IDirectInput8W* direct_input = GetDirectInput(diagnostic);
+    // Runs on the connector thread, outside mutex_.
+    static IDirectInputDevice8W* CreateDevice(IDirectInput8W* direct_input,
+                                              std::string_view device_guid_text,
+                                              InputBindingPollResult& diagnostic) {
         const std::optional<GUID> device_guid = ParseGuid(device_guid_text);
-        if (!direct_input) {
-            return nullptr;
-        }
         if (!device_guid.has_value()) {
             SetDiagnostic(diagnostic, InputBindingPollStage::ParseDeviceGuid, E_INVALIDARG);
             return nullptr;
@@ -534,11 +572,9 @@ class DirectInputPoller {
             return nullptr;
         }
 
-        const HRESULT acquire_result = device->Acquire();
-        if (FAILED(acquire_result)) {
-            SetDiagnostic(diagnostic, InputBindingPollStage::Acquire, acquire_result);
-        }
-        devices_[cache_key] = device;
+        // A failed Acquire is not fatal: the frame thread's read reacquires
+        // once and retires the device if that still fails.
+        device->Acquire();
         return device;
     }
 
@@ -578,19 +614,85 @@ class DirectInputPoller {
         return true;
     }
 
-    void DropDevice(std::string_view device_guid_text) {
-        const std::wstring cache_key = NormalizeGuidText(device_guid_text);
+    // Unacquire/Release close the HID handle, so they also run on the connector.
+    void RetireDeviceLocked(const std::wstring& cache_key) {
         const auto it = devices_.find(cache_key);
         if (it == devices_.end()) {
             return;
         }
-
         if (it->second) {
-            it->second->Unacquire();
-            it->second->Release();
+            retired_.push_back(it->second);
         }
         devices_.erase(it);
         state_cache_.erase(cache_key);
+        StartConnectorLocked();
+    }
+
+    void StartConnectorLocked() {
+        if (connector_running_.load()) {
+            return; // The running connector drains newly queued work before exiting.
+        }
+        connector_running_.store(true);
+        try {
+            // Short-lived and detached: it exits as soon as the queue is empty,
+            // so no thread outlives the work (Drain covers layer unload).
+            std::thread([this] { ConnectorLoop(); }).detach();
+        } catch (const std::system_error&) {
+            connector_running_.store(false);
+            connector_idle_.notify_all();
+        }
+    }
+
+    void ConnectorLoop() {
+        for (;;) {
+            std::vector<IDirectInputDevice8W*> retired;
+            std::optional<std::pair<std::wstring, std::string>> job;
+            IDirectInput8W* direct_input = nullptr;
+            {
+                std::scoped_lock lock(mutex_);
+                retired.swap(retired_);
+                if (!pending_connects_.empty()) {
+                    job = *pending_connects_.begin();
+                } else if (retired.empty()) {
+                    connector_running_.store(false);
+                    connector_idle_.notify_all();
+                    return;
+                }
+                direct_input = direct_input_;
+            }
+
+            for (IDirectInputDevice8W* device : retired) {
+                ReleaseDevice(device);
+            }
+            if (!job.has_value()) {
+                continue;
+            }
+
+            InputBindingPollResult diagnostic;
+            diagnostic.device_poll_attempted = true;
+            const bool created_direct_input = direct_input == nullptr;
+            if (created_direct_input) {
+                direct_input = CreateDirectInput(diagnostic);
+            }
+            IDirectInputDevice8W* device =
+                direct_input ? CreateDevice(direct_input, job->second, diagnostic) : nullptr;
+
+            std::scoped_lock lock(mutex_);
+            if (created_direct_input && direct_input) {
+                direct_input_ = direct_input; // Only the connector creates it.
+            }
+            pending_connects_.erase(job->first);
+            if (device) {
+                devices_[job->first] = device;
+                continue;
+            }
+            diagnostic.down = false;
+            diagnostic.device_retry_deferred = false;
+            diagnostic.device_retry_delay_ms =
+                retry_backoff_.RecordFailure(job->first, InputDeviceRetryBackoff::Clock::now()).count();
+            failure_diagnostics_[job->first] = diagnostic;
+            unreported_failures_.insert(job->first);
+        }
     }
 
     // Shorter than the callers' poll interval (30ms) so a snapshot never spans
@@ -605,10 +707,16 @@ class DirectInputPoller {
 
     IDirectInput8W* direct_input_{nullptr};
     std::mutex mutex_;
+    std::condition_variable connector_idle_;
+    std::atomic<bool> connector_running_{false};
     InputDeviceRetryBackoff retry_backoff_;
     std::unordered_map<std::wstring, IDirectInputDevice8W*> devices_;
     std::unordered_map<std::wstring, CachedDeviceState> state_cache_;
     std::unordered_map<std::wstring, InputBindingPollResult> failure_diagnostics_;
+    // Device key -> GUID text awaiting background setup.
+    std::unordered_map<std::wstring, std::string> pending_connects_;
+    std::unordered_set<std::wstring> unreported_failures_;
+    std::vector<IDirectInputDevice8W*> retired_;
 };
 
 DirectInputPoller& Poller() {
@@ -648,6 +756,14 @@ InputBindingPollResult PollInputBinding(const InputBinding& binding) {
 
 bool IsInputBindingDown(const InputBinding& binding) {
     return PollInputBinding(binding).down;
+}
+
+void DrainInputDeviceWork(std::chrono::milliseconds timeout) {
+#if defined(_WIN32)
+    Poller().Drain(timeout);
+#else
+    (void)timeout;
+#endif
 }
 
 } // namespace depthxr

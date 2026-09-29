@@ -2763,15 +2763,25 @@ void TestDeviceInputPathsAndHatDirections() {
     missing_device_binding.type = depthxr::InputBindingType::Device;
     missing_device_binding.device_guid = "{11111111-2222-3333-4444-555555555555}";
     missing_device_binding.input_path = "button-1";
+    const depthxr::InputBindingPollResult connecting_missing_device =
+        depthxr::PollInputBinding(missing_device_binding);
+    Expect(connecting_missing_device.device_poll_attempted &&
+               connecting_missing_device.device_connect_pending &&
+               !connecting_missing_device.down &&
+               connecting_missing_device.diagnostic_stage == depthxr::InputBindingPollStage::None,
+           "Device setup must be handed to the background connector, never run on the polling thread");
+    depthxr::DrainInputDeviceWork(std::chrono::seconds(5));
     const depthxr::InputBindingPollResult first_missing_device =
         depthxr::PollInputBinding(missing_device_binding);
     const depthxr::InputBindingPollResult repeated_missing_device =
         depthxr::PollInputBinding(missing_device_binding);
     Expect(first_missing_device.device_poll_attempted &&
                !first_missing_device.device_retry_deferred &&
+               !first_missing_device.device_connect_pending &&
                first_missing_device.diagnostic_stage != depthxr::InputBindingPollStage::None &&
-               first_missing_device.device_retry_delay_ms >= 250,
-           "The first missing-device poll must record a real DirectInput failure and reconnect deadline");
+               first_missing_device.device_retry_delay_ms > 0 &&
+               first_missing_device.device_retry_delay_ms <= 250,
+           "A background setup failure must surface once as a real attempt with a reconnect deadline");
     Expect(repeated_missing_device.device_retry_deferred &&
                repeated_missing_device.diagnostic_stage == first_missing_device.diagnostic_stage &&
                repeated_missing_device.result_code == first_missing_device.result_code,

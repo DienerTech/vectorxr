@@ -664,3 +664,10 @@ textarea {
 .app-link {
   color: var(--app-accent);
 }
+
+/* Panels nested inside another panel sit flat so only top-level cards float.
+   Sticky headers and dialogs keep their elevation to separate from content. */
+:is(.surface-panel, .surface-panel-strong, .surface-panel-soft, .surface-panel-muted)
+  :is(.surface-panel, .surface-panel-strong, .shadow-panel):not(.sticky):not(.fixed > *) {
+  box-shadow: none;
+}

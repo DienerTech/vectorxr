@@ -1682,10 +1682,10 @@ void OpenXrLayer::SetNextProcAddr(PFN_xrGetInstanceProcAddr next_get_instance_pr
 
 bool OpenXrLayer::PollInputBindingDown(const InputBinding& binding) {
     const InputBindingPollResult poll = PollInputBinding(binding);
-    if (poll.device_retry_deferred) {
+    if (poll.device_retry_deferred || poll.device_connect_pending) {
         // The first real failure already recorded the unavailable-device
-        // diagnostic. Keep deferred bindings entirely off Logger's mutex and
-        // string-formatting path until the per-device reconnect deadline.
+        // diagnostic (or background setup has not finished yet). Keep these
+        // bindings entirely off Logger's mutex and string-formatting path.
         return false;
     }
     if (!poll.device_poll_attempted) {
@@ -2050,6 +2050,9 @@ XrResult OpenXrLayer::DestroyInstance(XrInstance instance) {
     // holding the lock, so stopping it under mutex_ would deadlock.
     StopConfigWatcher();
     StopTurboAsyncWorker();
+    // The loader may unload the layer after this returns; let in-flight
+    // background input-device setup finish first.
+    DrainInputDeviceWork(std::chrono::seconds(2));
 
     std::scoped_lock lock(mutex_);
 
