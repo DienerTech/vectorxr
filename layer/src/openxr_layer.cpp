@@ -1806,8 +1806,7 @@ XrResult OpenXrLayer::OnInstanceCreated(const XrInstanceCreateInfo* create_info,
 
     current_exe_name_ = GetCurrentExecutableName();
     logger_.Info(std::string("VectorXR layer version: ") + VECTORXR_VERSION);
-    logger_.Info(std::string("VectorXR layer build: ") + __DATE__ + " " + __TIME__ +
-                 "; async-off=recoupled; metrics-pause=queued");
+    logger_.Info(std::string("VectorXR layer build: ") + __DATE__ + " " + __TIME__);
     logger_.Info("VectorXR attached to process: " + current_exe_name_);
     {
         const ProcessInteropSnapshot interop = GetProcessInteropSnapshot();
