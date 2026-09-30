@@ -1058,6 +1058,14 @@ class OpenXrLayer {
     bool turbo_valve_open_{false};
     int turbo_pacing_tokens_{0};
     std::condition_variable turbo_valve_cv_;
+    // Frame-thread state (ForwardEndFrame only). Only a manual toggle-off keeps
+    // an async pipeline re-coupled. A stall while re-coupled, a safety
+    // suspension, a recovery block, or disabling Turbo in settings hands the
+    // owned frame to frame-thread (sequenced) pacing, which cannot interlock
+    // with submission. A handover re-resolves the configured strategy at the
+    // next session.
+    bool turbo_async_recouple_stalled_{false};
+    bool turbo_async_handed_over_{false};
     std::string runtime_version_;
 
     // Frame pacing telemetry (debug log level): quantifies judder sources by

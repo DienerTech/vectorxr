@@ -132,6 +132,13 @@ class TurboFrameTestPeer {
     static bool IsForced() { return Layer().turbo_pacing_source_ == OpenXrLayer::TurboPacingSource::kForced; }
     static void DisableEffectiveTurbo() { Layer().turbo_effective_active_.store(false); }
     static void Toggle(bool enabled) { Layer().turbo_toggle_enabled_ = enabled; }
+    static void Suspend() { Layer().turbo_auto_suspended_.store(true, std::memory_order_relaxed); }
+    static void ConfigureTurbo(bool enabled) {
+        auto& layer = Layer();
+        std::scoped_lock lock(layer.mutex_);
+        layer.resolved_settings_.turbo.enabled = enabled;
+    }
+    static bool PacingResolved() { return Layer().turbo_pacing_resolved_; }
     static void MetricsFrame(bool capturing) {
         Layer().RecordTurboMetricsFrame(false, 0.0, false,
             capturing ? TurboMetricsMode::kAlways : TurboMetricsMode::kOff, {}, true, 0);
@@ -654,6 +661,81 @@ void TestAsyncTogglePreservesQueuedFrame(bool experimental) {
     Expect(runtime.MaxConcurrentWaits() == 1, "Toggle duplicated a runtime wait");
 }
 
+// Suspension and disabling Turbo must remove the off-thread wait (it is what
+// interlocks with submission on PiOpenXR/Oculus/Varjo) without forwarding a
+// queued app Begin that has no runtime wait.
+void TestAsyncReleaseHandsOverToFrameThread(bool disable_in_settings) {
+    FakeRuntime runtime;
+    runtime.StrictOrder();
+    TurboHarness harness(runtime, depthxr::TurboPacingMode::kAsync);
+    const auto end_info = FrameEndInfo();
+    Expect(depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &end_info) == XR_SUCCESS,
+           "Release test could not establish async pacing");
+    Expect(runtime.WaitForWaitExited(1), "Release test worker wait did not complete");
+    XrFrameState state{XR_TYPE_FRAME_STATE};
+    Expect(AppWait(&state) == XR_SUCCESS && AppBegin() == XR_SUCCESS, "Release test first virtual frame failed");
+    Expect(AppWait(&state) == XR_SUCCESS, "Release test queued app wait failed");
+
+    if (disable_in_settings) depthxr::TurboFrameTestPeer::ConfigureTurbo(false);
+    else depthxr::TurboFrameTestPeer::Suspend();
+    Expect(depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &end_info) == XR_SUCCESS,
+           "Releasing async pacing violated runtime frame order");
+    Expect(AppBegin() == XR_SUCCESS, "Queued begin lost its runtime wait when async pacing was released");
+    Expect(depthxr::TurboFrameTestPeer::PacingMode() == depthxr::TurboPacingMode::kSequenced &&
+               depthxr::TurboFrameTestPeer::SequencedState() == depthxr::TurboFrameTestPeer::ActiveState(),
+           "Released async pacing did not hand its frame to frame-thread pacing");
+    Expect(!depthxr::TurboFrameTestPeer::Handoff().wait_valid && !depthxr::TurboFrameTestPeer::Handoff().active,
+           "Released async pacing left a worker wait or shield armed");
+
+    Expect(AppWait(&state) == XR_SUCCESS, "Frame-thread pacing did not return the next app wait");
+    Expect(depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &end_info) == XR_SUCCESS,
+           "Frame-thread pacing submit failed after release");
+    const std::vector<RuntimeCall> expected{
+        RuntimeCall::kEnd, RuntimeCall::kWait,                      // async establishment + worker wait
+        RuntimeCall::kBegin, RuntimeCall::kEnd, RuntimeCall::kWait, RuntimeCall::kBegin, // release frame
+        RuntimeCall::kEnd, RuntimeCall::kWait, RuntimeCall::kBegin, // frame-thread steady state
+    };
+    Expect(runtime.Calls() == expected, "Released async pacing did not continue as End -> Wait -> Begin");
+    Expect(runtime.MaxConcurrentWaits() == 1, "Release duplicated a runtime wait");
+    depthxr::TurboFrameTestPeer::Cleanup();
+    Expect(!depthxr::TurboFrameTestPeer::PacingResolved(),
+           "A released session must re-resolve the configured strategy next session");
+}
+
+void TestAsyncRecoupleStallReleasesPipeline() {
+    FakeRuntime runtime;
+    TurboHarness harness(runtime, depthxr::TurboPacingMode::kAsync);
+    const auto end_info = FrameEndInfo();
+    Expect(depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &end_info) == XR_SUCCESS,
+           "Stall test could not establish async pacing");
+    Expect(runtime.WaitForWaitExited(1), "Stall test worker wait did not complete");
+
+    // Manual toggle-off keeps the async pipeline re-coupled...
+    depthxr::TurboFrameTestPeer::Toggle(false);
+    runtime.BlockWait();
+    Expect(depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &end_info) == XR_SUCCESS,
+           "Stall test toggle-off submit failed");
+    Expect(runtime.WaitForWaitEntered(2), "Re-coupled pipeline did not keep its worker wait");
+    Expect(depthxr::TurboFrameTestPeer::PacingMode() == depthxr::TurboPacingMode::kAsync,
+           "A manual toggle-off must keep the async pipeline");
+
+    // ...until its worker wait interlocks with submission.
+    runtime.ReleaseWaitOnNextEnd();
+    Expect(depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &end_info) == XR_SUCCESS,
+           "Stalled re-coupled submit failed");
+    Expect(runtime.WaitForWaitExited(2), "Interlocked worker wait did not release on submit");
+    Expect(depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &end_info) == XR_SUCCESS,
+           "Release after a re-coupled stall failed");
+    Expect(depthxr::TurboFrameTestPeer::PacingMode() == depthxr::TurboPacingMode::kSequenced &&
+               depthxr::TurboFrameTestPeer::SequencedState() == depthxr::TurboFrameTestPeer::ActiveState(),
+           "A stalled re-coupled pipeline was not released to frame-thread pacing");
+    const int waits = runtime.WaitCalls();
+    Expect(depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &end_info) == XR_SUCCESS &&
+               runtime.WaitCalls() == waits + 1 && !depthxr::TurboFrameTestPeer::Handoff().wait_valid,
+           "Released pipeline launched another off-thread wait");
+    Expect(runtime.MaxConcurrentWaits() == 1, "Stall release duplicated a runtime wait");
+}
+
 void TestMetricsPauseFlushesWithoutAnotherFrame() {
     FakeRuntime runtime;
     TurboHarness harness(runtime, depthxr::TurboPacingMode::kAsync);
@@ -1061,6 +1143,9 @@ void TestSubmissionInterlockFallsBackThenSuspends() {
 int main() {
     TestAsyncTogglePreservesQueuedFrame(false);
     TestAsyncTogglePreservesQueuedFrame(true);
+    TestAsyncReleaseHandsOverToFrameThread(false);
+    TestAsyncReleaseHandsOverToFrameThread(true);
+    TestAsyncRecoupleStallReleasesPipeline();
     TestMetricsPauseFlushesWithoutAnotherFrame();
     TestExperimentalSubmitGate(true);
     TestExperimentalSubmitGate(false);

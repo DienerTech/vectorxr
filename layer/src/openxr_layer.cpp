@@ -5494,6 +5494,17 @@ XrResult OpenXrLayer::ForwardEndFrame(XrSession session,
     const InputBinding metrics_binding = resolved_settings_.turbo.metrics_binding;
     const bool metrics_available = resolved_settings_.core.enabled && resolved_settings_.turbo.enabled;
     const int metrics_sound_volume = resolved_settings_.core.sound_volume;
+    // Why Turbo is off decides whether an established async pipeline may stay
+    // re-coupled. A manual toggle-off keeps it (toggling back on must resume
+    // the same queued frame). Every other reason releases the worker wait.
+    const bool suspended_now = turbo_auto_suspended_.load(std::memory_order_relaxed);
+    const bool recovery_blocked_now = turbo_recovery_blocked_.load();
+    const char* async_release_reason =
+        turbo_engaged ? nullptr :
+        !metrics_available ? "Turbo disabled in settings" :
+        suspended_now ? "Turbo safety suspension" :
+        recovery_blocked_now ? "Turbo recovery block" :
+        turbo_async_recouple_stalled_ ? "runtime wait stalled while Turbo was off" : nullptr;
 
     // Everything past this point is frame forwarding: turbo drain (which can
     // block a full frame interval), the deferred begin, and the runtime end.
@@ -5593,6 +5604,7 @@ XrResult OpenXrLayer::ForwardEndFrame(XrSession session,
                           "ms, ready=" + std::to_string(ready ? 1 : 0));
         }
         XrResult async_wait_result = XR_SUCCESS;
+        bool handed_over = false;
         {
             std::scoped_lock lock(turbo_mutex_);
             if (ready && pending_async_generation == turbo_async_wait_generation_) {
@@ -5600,12 +5612,32 @@ XrResult OpenXrLayer::ForwardEndFrame(XrSession session,
                 turbo_async_wait_ = {};
                 if (keep_async_pipeline && turbo_pacing_mode_ == TurboPacingMode::kAsync &&
                     turbo_seq_state_ == TurboSequencedState::kInactive) {
-                    // Retire and arm atomically under turbo_mutex_: an app
-                    // WaitFrame can observe the old future or the shield, but
-                    // never a pass-through gap between them.
-                    ArmTurboAsyncHandoffLocked("completed async wait retired before submit");
+                    // Retire and shield atomically under turbo_mutex_: an app
+                    // WaitFrame can observe the old future or the next shield,
+                    // but never a pass-through gap between them.
+                    if (async_release_reason) {
+                        // Releasing must not forward a queued app Begin without
+                        // its runtime wait. Hand the owned frame to the
+                        // sequenced shield instead: this submit is followed by
+                        // a frame-thread wait+begin, and app calls stay
+                        // fabricated/swallowed exactly as in sequenced pacing.
+                        turbo_seq_state_ = TurboSequencedState::kActive;
+                        handed_over = true;
+                    } else {
+                        ArmTurboAsyncHandoffLocked("completed async wait retired before submit");
+                    }
                 }
             }
+        }
+        if (handed_over) {
+            {
+                std::scoped_lock lock(mutex_);
+                turbo_pacing_mode_ = TurboPacingMode::kSequenced;
+            }
+            turbo_async_handed_over_ = true;
+            turbo_async_recouple_stalled_ = false;
+            logger_.Info(std::string("Turbo: async worker wait released (") + async_release_reason +
+                         "); frame pacing continues on the application's frame thread for this session.");
         }
         if (ready && XR_FAILED(async_wait_result)) {
             abandon_end_frame_window();
@@ -5623,6 +5655,14 @@ XrResult OpenXrLayer::ForwardEndFrame(XrSession session,
                 SoundPlayer::Instance().PlayTransition(turbo_sound, false, dll_directory_, turbo_sound_volume,
                                                        L"turbo-on.wav", L"turbo-off.wav");
             }
+        }
+        // A re-coupled pipeline still waits off-thread. If that wait interlocks
+        // with submission, Turbo being off must not keep the stall: release it
+        // once this wait completes (the next EndFrame).
+        if (!ready && !turbo_engaged && keep_async_pipeline && cadence_countable &&
+            !turbo_async_recouple_stalled_) {
+            turbo_async_recouple_stalled_ = true;
+            logger_.Info("Turbo: async wait stalled while Turbo was off; releasing the async pipeline.");
         }
 
         if (!frame_begun) {
@@ -5904,7 +5944,9 @@ XrResult OpenXrLayer::ForwardEndFrame(XrSession session,
             // their valve restores app-visible pacing. A fabricated app wait
             // can already be queued on another thread when the toggle changes;
             // removing interception here would forward its unmatched begin.
-            // Only an unestablished handshake can be discarded safely.
+            // Only an unestablished handshake can be discarded safely. An
+            // async pipeline that must release (see async_release_reason)
+            // hands over to sequenced ownership at its next retired wait.
             std::scoped_lock lock(turbo_mutex_);
             if (!keep_async_pipeline) {
                 CancelTurboAsyncHandoffLocked("turbo disengaged before async publication");
@@ -6808,7 +6850,11 @@ void OpenXrLayer::ResetTurboFrameState() {
     // Final metrics flush first (it takes turbo_mutex_ itself and joins the
     // async writer); a second call at teardown is a no-op.
     ResetTurboMetricsState();
-    if (turbo_experiment_.enabled) turbo_pacing_resolved_ = false;
+    // A released async pipeline switched this session to frame-thread pacing;
+    // the next session starts from the configured strategy again.
+    if (turbo_experiment_.enabled || turbo_async_handed_over_) turbo_pacing_resolved_ = false;
+    turbo_async_handed_over_ = false;
+    turbo_async_recouple_stalled_ = false;
     turbo_experiment_ = {};
     turbo_limit_last_wait_.reset();
     turbo_trace_last_engaged_ = false;
