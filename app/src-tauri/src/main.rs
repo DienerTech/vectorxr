@@ -262,8 +262,88 @@ impl Default for SoundSettings {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+struct OsdSettings {
+    enabled: bool,
+    visible_on_start: bool,
+    compact: bool,
+    horizontal_degrees: f64,
+    vertical_degrees: f64,
+    distance_meters: f64,
+    scale: f64,
+    opacity: u32,
+    update_hz: u32,
+    show_graph: bool,
+    show_runtime: bool,
+    show_brand: bool,
+    show_app: bool,
+    show_turbo: bool,
+    show_modules: bool,
+    show_clock: bool,
+    show_pivot: bool,
+    compact_show_runtime: bool,
+    compact_show_brand: bool,
+    compact_show_app: bool,
+    compact_metrics: String,
+    compact_show_clock: bool,
+    compact_show_turbo: bool,
+    compact_show_pivot: bool,
+    clock_format: String,
+    body_order: Vec<String>,
+    custom_color: String,
+    custom_presets: Vec<serde_json::Value>,
+    accent: String,
+    toggle_binding: InputBinding,
+    cycle_binding: InputBinding,
+}
+
+impl Default for OsdSettings {
+    fn default() -> Self {
+        let binding = |key: &str| InputBinding::Keyboard {
+            chord: vec!["Ctrl".into(), "Alt".into(), key.into()],
+            sound: SoundFeedback::default(),
+        };
+        Self {
+            enabled: false,
+            visible_on_start: true,
+            compact: false,
+            horizontal_degrees: 20.0,
+            vertical_degrees: -12.0,
+            distance_meters: 1.2,
+            scale: 100.0,
+            opacity: 90,
+            update_hz: 5,
+            show_graph: true,
+            show_runtime: true,
+            show_brand: true,
+            show_app: true,
+            show_turbo: true,
+            show_modules: true,
+            show_clock: true,
+            show_pivot: true,
+            compact_show_runtime: true,
+            compact_show_brand: true,
+            compact_show_app: true,
+            compact_metrics: "all".into(),
+            compact_show_clock: true,
+            compact_show_turbo: false,
+            compact_show_pivot: false,
+            clock_format: "24".into(),
+            body_order: vec!["graph".into(), "turbo".into(), "pivot".into(), "modules".into()],
+            custom_color: "#51ddbd".into(),
+            custom_presets: vec![],
+            accent: "teal".into(),
+            toggle_binding: binding("F10"),
+            cycle_binding: binding("F11"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CoreConfig {
+    #[serde(default)]
+    osd: OsdSettings,
     #[serde(default = "default_true")]
     enabled: bool,
     #[serde(default = "default_log_level")]
@@ -281,6 +361,7 @@ impl Default for CoreConfig {
         Self {
             enabled: true,
             log_level: default_log_level(),
+            osd: OsdSettings::default(),
             log_retention_files: default_log_retention_files(),
             track_seen_apps: true,
             sound: SoundSettings::default(),
@@ -628,6 +709,8 @@ impl Default for QuadViewsModuleConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct TurboProfileConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    experimental: Option<TurboExperimentalSettings>,
     #[serde(default)]
     disable_safety: bool,
     #[serde(default)]
@@ -643,6 +726,8 @@ struct TurboProfileConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct TurboModuleConfig {
+    #[serde(default)]
+    experimental: TurboExperimentalSettings,
     #[serde(default = "default_true")]
     interrupted_session_recovery: bool,
     #[serde(default = "default_false")]
@@ -661,6 +746,24 @@ struct TurboModuleConfig {
     profiles: Vec<TurboProfileConfig>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+struct TurboExperimentalSettings {
+    enabled: bool,
+    application_ids: Vec<String>,
+    wait_for_submit: bool,
+    sample_at_entry: bool,
+    prediction_percent: u32,
+    frame_limit: u32,
+}
+
+impl Default for TurboExperimentalSettings {
+    fn default() -> Self {
+        Self { enabled: false, application_ids: Vec::new(), wait_for_submit: false,
+            sample_at_entry: false, prediction_percent: 100, frame_limit: 0 }
+    }
+}
+
 fn default_turbo_pacing_mode() -> String {
     "auto".into()
 }
@@ -675,6 +778,7 @@ impl Default for TurboModuleConfig {
             interrupted_session_recovery: true,
             enabled: false,
             toggle_binding: default_activation_binding(),
+            experimental: TurboExperimentalSettings::default(),
             pacing_mode: default_turbo_pacing_mode(),
             runtime_pins: std::collections::BTreeMap::new(),
             metrics_mode: default_turbo_metrics_mode(),
@@ -858,6 +962,8 @@ struct TurboMetricsBucket {
 #[serde(rename_all = "camelCase")]
 struct TurboMetricsSession {
     #[serde(default)]
+    timing_configuration: String,
+    #[serde(default)]
     session_id: String,
     #[serde(default)]
     app_name: String,
@@ -901,12 +1007,20 @@ static RUNTIME_CONTROL_REVISION: AtomicU64 = AtomicU64::new(0);
 #[serde(rename_all = "camelCase")]
 struct RuntimeCapabilities {
     #[serde(default)]
+    osd: bool,
+    #[serde(default)]
     quadviews_diagnostic_visualization: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 struct RuntimeState {
+    #[serde(default)]
+    osd_visible: bool,
+    #[serde(default)]
+    osd_compact: bool,
+    #[serde(default)]
+    osd_message: String,
     #[serde(default)]
     turbo_state: String,
     #[serde(default)]
@@ -2519,6 +2633,29 @@ fn play_test_sound(
 #[cfg(test)]
 mod tests {
     #[test]
+    fn osd_defaults_and_round_trip() {
+        let legacy: super::CoreConfig = serde_json::from_str(r#"{"enabled":true,"logLevel":"info"}"#).unwrap();
+        assert!(!legacy.osd.enabled);
+        assert_eq!(legacy.osd.update_hz, 5);
+        let input = serde_json::json!({"enabled":true,"compact":true,"visibleOnStart":false,
+            "horizontalDegrees":-30.0,"verticalDegrees":15.0,"distanceMeters":2.0,"scale":75.0,
+            "opacity":70,"updateHz":10,"showGraph":false,"showRuntime":false,"showTurbo":false,
+            "showModules":false,"showClock":false,"accent":"blue","toggleBinding":{"type":"none"},
+            "showPivot":false,"clockFormat":"12","customColor":"#aB12Ef","bodyOrder":["pivot","turbo","modules","graph"],
+            "compactShowRuntime":true,"compactShowClock":true,"compactShowTurbo":true,"compactShowPivot":true,
+            "compactShowBrand":false,"compactShowApp":false,"compactMetrics":"fps",
+            "showBrand":false,"showApp":false,
+            "customPresets":[{"name":"Small cockpit","settings":{"scale":25,"accent":"custom","customColor":"#aB12Ef"}}],
+            "cycleBinding":{"type":"keyboard","chord":["Ctrl","F11"]}});
+        let osd: super::OsdSettings = serde_json::from_value(input.clone()).unwrap();
+        let output = serde_json::to_value(osd).unwrap();
+        for (key,value) in input.as_object().unwrap() {
+            if key != "cycleBinding" { assert_eq!(&output[key], value, "{key}"); }
+        }
+        assert_eq!(output["cycleBinding"]["chord"], input["cycleBinding"]["chord"]);
+    }
+
+    #[test]
     fn runtime_retest_invalidates_legacy_and_late_session_results() {
         let root = std::env::temp_dir().join(format!(
             "vectorxr-retest-{}-{}",
@@ -2648,6 +2785,35 @@ mod tests {
     }
 
     #[test]
+    fn turbo_experiments_survive_backend_round_trip() {
+        let defaults: super::TurboModuleConfig = serde_json::from_str("{}").unwrap();
+        assert!(!defaults.experimental.enabled);
+        assert!(defaults.experimental.application_ids.is_empty());
+        assert_eq!(defaults.experimental.prediction_percent, 100);
+        let input = serde_json::json!({"experimental": {
+            "enabled": true, "applicationIds": ["dcs"], "waitForSubmit": true,
+            "sampleAtEntry": true, "predictionPercent": 75, "frameLimit": 45
+        }});
+        let config: super::TurboModuleConfig = serde_json::from_value(input.clone()).unwrap();
+        let output = serde_json::to_value(config).unwrap();
+        assert_eq!(output["experimental"], input["experimental"]);
+        let profiles = serde_json::json!({"profiles": [
+            {"id":"dcs","name":"DCS","enabled":true,"applicationIds":["dcs"],"experimental": {
+                "enabled":true,"waitForSubmit":true,"sampleAtEntry":true,"predictionPercent":90,"frameLimit":45
+            }}
+        ]});
+        let migrated: super::TurboModuleConfig = serde_json::from_value(profiles).unwrap();
+        let saved=serde_json::to_value(migrated).unwrap();
+        assert_eq!(saved["profiles"][0]["experimental"]["predictionPercent"],90);
+        assert_eq!(saved["profiles"][0]["experimental"]["enabled"],true);
+
+        let session: super::TurboMetricsSession = serde_json::from_value(serde_json::json!({
+            "timingConfiguration": "Experimental Async; cap=45"
+        })).unwrap();
+        assert_eq!(serde_json::to_value(session).unwrap()["timingConfiguration"], "Experimental Async; cap=45");
+    }
+
+    #[test]
     fn turbo_recovery_defaults_on_and_preserves_opt_out() {
         let old: super::TurboModuleConfig =
             serde_json::from_value(serde_json::json!({ "enabled": true })).unwrap();
@@ -2687,11 +2853,18 @@ mod tests {
         });
         let old: super::RuntimeStatusDocument = serde_json::from_value(value.clone()).unwrap();
         assert!(old.quadviews_dimensions.is_empty());
+        assert!(!old.capabilities.osd && !old.state.osd_visible);
+        value["capabilities"]["osd"] = true.into();
+        value["state"]["osdVisible"] = true.into();
+        value["state"]["osdCompact"] = true.into();
+        value["state"]["osdMessage"] = "Visible".into();
         value["state"]["turboState"] = "recovery-disabled".into();
         value["state"]["turboReason"] = "Previous interruption".into();
         value["quadviewsDimensions"] = serde_json::json!([{"width": 1000, "height": 900, "allocatedWidth": 1200, "allocatedHeight": 1000}]);
         let current: super::RuntimeStatusDocument = serde_json::from_value(value).unwrap();
         assert_eq!(current.state.turbo_state, "recovery-disabled");
+        assert!(current.capabilities.osd && current.state.osd_visible && current.state.osd_compact);
+        assert_eq!(current.state.osd_message,"Visible");
         assert_eq!(current.quadviews_dimensions[0].allocated_width, 1200);
     }
 

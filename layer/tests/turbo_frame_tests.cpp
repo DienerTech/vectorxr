@@ -5,13 +5,16 @@
 #include <cstdint>
 #include <cstdlib>
 #include <future>
+#include <filesystem>
 #include <iostream>
 #include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
+#include <Windows.h>
 
 #include "depthxr/openxr_layer.h"
+#include "depthxr/turbo_metrics.h"
 
 using namespace std::chrono_literals;
 
@@ -96,6 +99,163 @@ class TurboFrameTestPeer {
         }
         layer.turbo_frame_interception_required_.store(true, std::memory_order_release);
     }
+
+    static void Experiment(bool wait_for_submit = false, bool entry = false, int prediction = 100, int limit = 0) {
+        auto& layer = Layer();
+        layer.turbo_experiment_.enabled = true;
+        layer.turbo_experiment_.wait_for_submit = wait_for_submit;
+        layer.turbo_experiment_.sample_at_entry = entry;
+        layer.turbo_experiment_.prediction_percent = prediction;
+        layer.turbo_experiment_.frame_limit = limit;
+        layer.turbo_effective_active_.store(true);
+        layer.turbo_effective_async_.store(true);
+    }
+
+    static XrResult XRAPI_CALL Clock(XrInstance, const LARGE_INTEGER*, XrTime* time) {
+        *time = 10'000'000'000;
+        return XR_SUCCESS;
+    }
+
+    static void PredictionFixture(bool clock) {
+        auto& layer = Layer();
+        std::scoped_lock lock(layer.turbo_mutex_);
+        std::promise<void> ready;
+        ready.set_value();
+        layer.turbo_async_wait_ = ready.get_future().share();
+        layer.turbo_async_wait_completed_ = true;
+        layer.turbo_async_wait_polled_ = false;
+        layer.turbo_last_predicted_display_time_ = 10'020'000'000;
+        layer.turbo_max_returned_display_time_ = 10'000'000'000;
+        layer.turbo_convert_counter_time_ = clock ? reinterpret_cast<PFN_xrVoidFunction>(&Clock) : nullptr;
+    }
+
+    static bool IsForced() { return Layer().turbo_pacing_source_ == OpenXrLayer::TurboPacingSource::kForced; }
+    static void DisableEffectiveTurbo() { Layer().turbo_effective_active_.store(false); }
+    static void Toggle(bool enabled) { Layer().turbo_toggle_enabled_ = enabled; }
+    static void Suspend() { Layer().turbo_auto_suspended_.store(true, std::memory_order_relaxed); }
+    static void ConfigureTurbo(bool enabled) {
+        auto& layer = Layer();
+        std::scoped_lock lock(layer.mutex_);
+        layer.resolved_settings_.turbo.enabled = enabled;
+    }
+    static bool PacingResolved() { return Layer().turbo_pacing_resolved_; }
+    static void MetricsFrame(bool capturing) {
+        Layer().RecordTurboMetricsFrame(false, 0.0, false,
+            capturing ? TurboMetricsMode::kAlways : TurboMetricsMode::kOff, {}, true, 0);
+    }
+    static void ResetMetrics() { Layer().ResetTurboMetricsState(); }
+    static void WaitMetrics() {
+        if (Layer().turbo_metrics_write_future_.valid()) Layer().turbo_metrics_write_future_.wait();
+    }
+    static void BlockMetricsWriter(std::shared_future<void> gate) {
+        auto& layer = Layer();
+        auto previous = std::move(layer.turbo_metrics_write_future_);
+        layer.turbo_metrics_write_future_ = std::async(std::launch::async,
+            [previous = std::move(previous), gate]() mutable {
+                if (previous.valid()) previous.wait();
+                gate.wait();
+            });
+    }
+    static void FlushMetrics() { Layer().FlushTurboMetrics(false); }
+    static bool OsdStateTransitions() {
+        auto& layer=Layer();
+        layer.resolved_settings_={}; layer.resolved_settings_.core.enabled=true;
+        layer.resolved_settings_.turbo.enabled=false;
+        layer.turbo_toggle_enabled_=true; layer.turbo_recovery_blocked_=false;
+        layer.turbo_auto_suspended_=false; layer.turbo_effective_active_=false;
+        bool ok=layer.BuildOsdSnapshot().turbo=="Disabled";
+        layer.resolved_settings_.turbo.enabled=true; layer.turbo_toggle_enabled_=false;
+        auto snapshot=layer.BuildOsdSnapshot();
+        ok=ok && snapshot.turbo=="Enabled / Off" && snapshot.modules.find("Turbo")!=std::string::npos;
+        layer.turbo_toggle_enabled_=true; layer.turbo_effective_active_=true; layer.turbo_effective_async_=true;
+        ok=ok && layer.BuildOsdSnapshot().turbo=="Async";
+        layer.turbo_metrics_active_.store(true);
+        ok=ok && layer.BuildOsdSnapshot().turbo=="Async / Analyzing";
+        layer.turbo_toggle_enabled_=false;
+        ok=ok && layer.BuildOsdSnapshot().turbo=="Enabled / Off / Analyzing";
+        layer.turbo_metrics_active_.store(false); layer.turbo_toggle_enabled_=true;
+
+        layer.resolved_settings_.pivotxr.enabled=true;
+        PivotXrResolvedProfile profile; profile.name="DCS Stepped";
+        layer.resolved_settings_.pivotxr.profiles={profile}; layer.pivotxr_active_profile_index_=0;
+        layer.pivotxr_engaged_=true; layer.pivotxr_quick_view_active_=false; layer.pivotxr_quick_view_transitioning_=false;
+        layer.pivotxr_manual_view_transition_={}; layer.pivotxr_profile_view_transition_={};
+        layer.pivotxr_profile_view_transition_.current.yaw_radians=.1;
+        ok=ok && layer.BuildOsdSnapshot().pivot=="DCS Stepped Applied, Nudges Applied";
+        layer.pivotxr_engaged_=false; layer.pivotxr_profile_view_transition_={};
+        ok=ok && layer.BuildOsdSnapshot().pivot=="Pivot ready";
+        layer.pivotxr_engaged_=true; layer.resolved_settings_.pivotxr.enabled=false;
+        ok=ok && layer.BuildOsdSnapshot().pivot=="Disabled";
+        layer.pivotxr_engaged_=false;
+        return ok;
+    }
+    inline static XrTime osd_locate_time{};
+    inline static std::vector<XrSwapchain> osd_releases;
+    inline static bool osd_release_failure{};
+    static XrResult XRAPI_CALL LocateOsd(XrSpace,XrSpace,XrTime time,XrSpaceLocation* location) {
+        osd_locate_time=time;
+        location->locationFlags=XR_SPACE_LOCATION_POSITION_VALID_BIT|XR_SPACE_LOCATION_ORIENTATION_VALID_BIT;
+        location->pose.orientation.w=1;
+        return XR_SUCCESS;
+    }
+    static XrResult XRAPI_CALL ReleaseOsd(XrSwapchain swapchain,const XrSwapchainImageReleaseInfo*) {
+        osd_releases.push_back(swapchain);
+        return osd_release_failure && osd_releases.size()==1?XR_ERROR_RUNTIME_FAILURE:XR_SUCCESS;
+    }
+    static bool OsdLatePoseAndRelease() {
+        auto& layer=Layer();
+        const auto old_locate=layer.next_locate_space_;
+        const auto old_release=layer.next_release_swapchain_image_;
+        layer.next_locate_space_=&LocateOsd;layer.next_release_swapchain_image_=&ReleaseOsd;
+        layer.osd_should_render_=true;
+        // Use a later runtime prediction than the rendered frame. No GPU source
+        // is supplied: this also exercises setup failure without leaking images.
+        layer.turbo_last_predicted_display_time_=30'000'000'000;
+        const XrSwapchain left=reinterpret_cast<XrSwapchain>(0x3456),right=reinterpret_cast<XrSwapchain>(0x4567);
+        auto queue=[&] {
+            OpenXrLayer::PendingOsdComposite pending;
+            pending.frame_time=20'000'000'000;pending.swapchains={left,right};
+            pending.quad.size={1,1};pending.quad.pose.orientation.w=1;
+            pending.quad.pose.position.z=-1;
+            layer.pending_osd_composite_=std::move(pending);
+            osd_locate_time=0;osd_releases.clear();
+        };
+        XrFrameEndInfo frame{XR_TYPE_FRAME_END_INFO};frame.displayTime=20'000'000'000;frame.layerCount=1;
+        bool drawn=false,ok=true;
+        queue();
+        ok=layer.FinishOsdComposite(&frame,drawn)==XR_SUCCESS && !drawn &&
+            osd_locate_time==30'000'000'000 && frame.displayTime==20'000'000'000 &&
+            osd_releases==std::vector<XrSwapchain>{left,right} && !layer.pending_osd_composite_;
+        layer.ReleasePendingOsdImages();
+        ok=ok && osd_releases.size()==2;
+        queue();frame.displayTime++;
+        ok=ok && layer.FinishOsdComposite(&frame,drawn)==XR_SUCCESS && !drawn &&
+            osd_locate_time==0 && osd_releases.size()==2;
+        queue();osd_release_failure=true;
+        ok=ok && layer.ReleasePendingOsdImages()==XR_ERROR_RUNTIME_FAILURE &&
+            osd_releases==std::vector<XrSwapchain>{left,right} && !layer.pending_osd_composite_;
+        osd_release_failure=false;
+        // A failed eye-image release must not swallow the application's
+        // xrEndFrame: the runtime frame would otherwise stay open.
+        const auto old_end=layer.next_end_frame_;
+        layer.next_end_frame_=&EndOsd;osd_end_calls=0;
+        queue();osd_release_failure=true;frame.displayTime=20'000'000'000;
+        ok=ok && layer.TraceRuntimeEndFrame(XR_NULL_HANDLE,&frame)==XR_SUCCESS && osd_end_calls==1 &&
+            !layer.pending_osd_composite_;
+        osd_release_failure=false;
+        layer.next_end_frame_=old_end;
+        layer.next_locate_space_=old_locate;layer.next_release_swapchain_image_=old_release;
+        return ok;
+    }
+    inline static int osd_end_calls{};
+    static XrResult XRAPI_CALL EndOsd(XrSession,const XrFrameEndInfo*) { ++osd_end_calls; return XR_SUCCESS; }
+    static double PredictionSampleAgeMs() {
+        auto& layer = Layer();
+        std::scoped_lock lock(layer.turbo_mutex_);
+        return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() -
+            *layer.turbo_last_wait_frame_wall_time_).count();
+    }
+    static bool LimiterReset() { return !Layer().turbo_limit_last_wait_.has_value(); }
 
     static void Cleanup() {
         OpenXrLayer& layer = Layer();
@@ -253,6 +413,7 @@ class FakeRuntime {
         runtime.cv_.wait(lock, [&runtime] { return runtime.wait_released_; });
         const XrResult result = runtime.wait_result_;
         if (XR_SUCCEEDED(result) && frame_state) {
+            ++runtime.wait_tokens_;
             runtime.next_display_time_ += runtime.display_period_;
             frame_state->predictedDisplayTime = runtime.next_display_time_;
             frame_state->predictedDisplayPeriod = runtime.display_period_;
@@ -272,6 +433,11 @@ class FakeRuntime {
         runtime.calls_.push_back(RuntimeCall::kBegin);
         ++runtime.begin_calls_;
         runtime.cv_.notify_all();
+        if (runtime.strict_order_) {
+            if (!runtime.wait_tokens_ || runtime.frame_open_) return XR_ERROR_CALL_ORDER_INVALID;
+            --runtime.wait_tokens_;
+            runtime.frame_open_ = true;
+        }
         return runtime.begin_result_;
     }
 
@@ -282,6 +448,10 @@ class FakeRuntime {
                                  frame_end_info->type == XR_TYPE_FRAME_END_INFO;
         runtime.calls_.push_back(RuntimeCall::kEnd);
         ++runtime.end_entered_;
+        if (runtime.strict_order_) {
+            if (!runtime.frame_open_) return XR_ERROR_CALL_ORDER_INVALID;
+            runtime.frame_open_ = false;
+        }
         if (runtime.release_wait_on_next_end_) {
             runtime.release_wait_on_next_end_ = false;
             runtime.wait_released_ = true;
@@ -297,6 +467,8 @@ class FakeRuntime {
         std::scoped_lock lock(mutex_);
         end_released_ = false;
     }
+
+    void StrictOrder() { strict_order_ = true; }
 
     void ReleaseEnd() {
         std::scoped_lock lock(mutex_);
@@ -391,6 +563,8 @@ class FakeRuntime {
     bool wait_released_{true};
     bool release_wait_on_next_end_{false};
     bool valid_structs_{true};
+    bool strict_order_{false}, frame_open_{true};
+    int wait_tokens_{0};
     int wait_entered_{0};
     int wait_exited_{0};
     int begin_calls_{0};
@@ -453,6 +627,169 @@ bool WaitForSecondPollBlock() {
         std::this_thread::sleep_for(1ms);
     }
     return false;
+}
+
+void TestAsyncTogglePreservesQueuedFrame(bool experimental) {
+    FakeRuntime runtime;
+    runtime.StrictOrder();
+    TurboHarness harness(runtime, depthxr::TurboPacingMode::kAsync);
+    if (experimental) depthxr::TurboFrameTestPeer::Experiment(true, true);
+    const auto end_info = FrameEndInfo();
+    Expect(depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &end_info) == XR_SUCCESS,
+           "Toggle test could not establish async pacing");
+    Expect(runtime.WaitForWaitExited(1), "Initial worker wait did not complete");
+    XrFrameState state{XR_TYPE_FRAME_STATE};
+    Expect(AppWait(&state) == XR_SUCCESS && AppBegin() == XR_SUCCESS,
+           "First virtual frame failed");
+    // A legal pipelined application can wait for N+1 before it submits N.
+    // Its Begin(N+1) arrives AFTER Turbo is switched off and N is submitted.
+    Expect(AppWait(&state) == XR_SUCCESS, "Queued app wait failed");
+    for (int cycle = 0; cycle < 4; ++cycle) {
+        Expect(runtime.WaitForWaitExited(1 + cycle * 2), "Previous runtime wait did not complete");
+        depthxr::TurboFrameTestPeer::Toggle(false);
+        runtime.BlockWait();
+        const int before = runtime.WaitCalls();
+        Expect(depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &end_info) == XR_SUCCESS,
+               "Off transition violated runtime frame order");
+        // Previously the pipeline was removed here: this forwarded a begin
+        // without a completed runtime wait and returned -37 in MSFS and DCS.
+        Expect(AppBegin() == XR_SUCCESS, "Queued begin lost its wait at the off transition");
+        Expect(runtime.WaitForWaitEntered(before + 1), "Off transition lost runtime pacing ownership");
+        auto next_wait = std::async(std::launch::async, [] {
+            XrFrameState next{XR_TYPE_FRAME_STATE}; return AppWait(&next);
+        });
+        Expect(next_wait.wait_for(30ms) == std::future_status::timeout,
+               "Turbo off still allowed the app to run ahead of the blocked runtime");
+        runtime.ReleaseWait();
+        Expect(next_wait.wait_for(2s) == std::future_status::ready && next_wait.get() == XR_SUCCESS,
+               "Re-coupled wait did not resume");
+        depthxr::TurboFrameTestPeer::Toggle(true);
+        Expect(depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &end_info) == XR_SUCCESS,
+               "On transition violated runtime frame order");
+        Expect(AppBegin() == XR_SUCCESS && AppWait(&state) == XR_SUCCESS,
+               "Re-enabled pipeline lost its queued frame");
+    }
+    Expect(runtime.MaxConcurrentWaits() == 1, "Toggle duplicated a runtime wait");
+}
+
+// Suspension and disabling Turbo must remove the off-thread wait (it is what
+// interlocks with submission on PiOpenXR/Oculus/Varjo) without forwarding a
+// queued app Begin that has no runtime wait.
+void TestAsyncReleaseHandsOverToFrameThread(bool disable_in_settings) {
+    FakeRuntime runtime;
+    runtime.StrictOrder();
+    TurboHarness harness(runtime, depthxr::TurboPacingMode::kAsync);
+    const auto end_info = FrameEndInfo();
+    Expect(depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &end_info) == XR_SUCCESS,
+           "Release test could not establish async pacing");
+    Expect(runtime.WaitForWaitExited(1), "Release test worker wait did not complete");
+    XrFrameState state{XR_TYPE_FRAME_STATE};
+    Expect(AppWait(&state) == XR_SUCCESS && AppBegin() == XR_SUCCESS, "Release test first virtual frame failed");
+    Expect(AppWait(&state) == XR_SUCCESS, "Release test queued app wait failed");
+
+    if (disable_in_settings) depthxr::TurboFrameTestPeer::ConfigureTurbo(false);
+    else depthxr::TurboFrameTestPeer::Suspend();
+    Expect(depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &end_info) == XR_SUCCESS,
+           "Releasing async pacing violated runtime frame order");
+    Expect(AppBegin() == XR_SUCCESS, "Queued begin lost its runtime wait when async pacing was released");
+    Expect(depthxr::TurboFrameTestPeer::PacingMode() == depthxr::TurboPacingMode::kSequenced &&
+               depthxr::TurboFrameTestPeer::SequencedState() == depthxr::TurboFrameTestPeer::ActiveState(),
+           "Released async pacing did not hand its frame to frame-thread pacing");
+    Expect(!depthxr::TurboFrameTestPeer::Handoff().wait_valid && !depthxr::TurboFrameTestPeer::Handoff().active,
+           "Released async pacing left a worker wait or shield armed");
+
+    Expect(AppWait(&state) == XR_SUCCESS, "Frame-thread pacing did not return the next app wait");
+    Expect(depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &end_info) == XR_SUCCESS,
+           "Frame-thread pacing submit failed after release");
+    const std::vector<RuntimeCall> expected{
+        RuntimeCall::kEnd, RuntimeCall::kWait,                      // async establishment + worker wait
+        RuntimeCall::kBegin, RuntimeCall::kEnd, RuntimeCall::kWait, RuntimeCall::kBegin, // release frame
+        RuntimeCall::kEnd, RuntimeCall::kWait, RuntimeCall::kBegin, // frame-thread steady state
+    };
+    Expect(runtime.Calls() == expected, "Released async pacing did not continue as End -> Wait -> Begin");
+    Expect(runtime.MaxConcurrentWaits() == 1, "Release duplicated a runtime wait");
+    depthxr::TurboFrameTestPeer::Cleanup();
+    Expect(!depthxr::TurboFrameTestPeer::PacingResolved(),
+           "A released session must re-resolve the configured strategy next session");
+}
+
+void TestAsyncRecoupleStallReleasesPipeline() {
+    FakeRuntime runtime;
+    TurboHarness harness(runtime, depthxr::TurboPacingMode::kAsync);
+    const auto end_info = FrameEndInfo();
+    Expect(depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &end_info) == XR_SUCCESS,
+           "Stall test could not establish async pacing");
+    Expect(runtime.WaitForWaitExited(1), "Stall test worker wait did not complete");
+
+    // Manual toggle-off keeps the async pipeline re-coupled...
+    depthxr::TurboFrameTestPeer::Toggle(false);
+    runtime.BlockWait();
+    Expect(depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &end_info) == XR_SUCCESS,
+           "Stall test toggle-off submit failed");
+    Expect(runtime.WaitForWaitEntered(2), "Re-coupled pipeline did not keep its worker wait");
+    Expect(depthxr::TurboFrameTestPeer::PacingMode() == depthxr::TurboPacingMode::kAsync,
+           "A manual toggle-off must keep the async pipeline");
+
+    // ...until its worker wait interlocks with submission.
+    runtime.ReleaseWaitOnNextEnd();
+    Expect(depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &end_info) == XR_SUCCESS,
+           "Stalled re-coupled submit failed");
+    Expect(runtime.WaitForWaitExited(2), "Interlocked worker wait did not release on submit");
+    Expect(depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &end_info) == XR_SUCCESS,
+           "Release after a re-coupled stall failed");
+    Expect(depthxr::TurboFrameTestPeer::PacingMode() == depthxr::TurboPacingMode::kSequenced &&
+               depthxr::TurboFrameTestPeer::SequencedState() == depthxr::TurboFrameTestPeer::ActiveState(),
+           "A stalled re-coupled pipeline was not released to frame-thread pacing");
+    const int waits = runtime.WaitCalls();
+    Expect(depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &end_info) == XR_SUCCESS &&
+               runtime.WaitCalls() == waits + 1 && !depthxr::TurboFrameTestPeer::Handoff().wait_valid,
+           "Released pipeline launched another off-thread wait");
+    Expect(runtime.MaxConcurrentWaits() == 1, "Stall release duplicated a runtime wait");
+}
+
+void TestMetricsPauseFlushesWithoutAnotherFrame() {
+    FakeRuntime runtime;
+    TurboHarness harness(runtime, depthxr::TurboPacingMode::kAsync);
+    const auto path = std::filesystem::temp_directory_path() /
+        ("vectorxr-pause-test-" + std::to_string(GetCurrentProcessId()) + ".json");
+    const char* old = std::getenv("VECTORXR_TURBO_METRICS_PATH");
+    const std::string previous_path = old ? old : "";
+    _putenv_s("VECTORXR_TURBO_METRICS_PATH", path.string().c_str());
+    depthxr::TurboFrameTestPeer::ResetMetrics();
+    depthxr::TurboFrameTestPeer::MetricsFrame(true);
+    depthxr::TurboFrameTestPeer::MetricsFrame(true);
+    depthxr::TurboFrameTestPeer::FlushMetrics();
+    depthxr::TurboFrameTestPeer::WaitMetrics();
+    auto sessions = depthxr::ReadTurboMetricsSessions(path);
+    Expect(sessions.size() == 1 && sessions[0].live && sessions[0].buckets[0].frames == 1,
+           "Initial capture snapshot was not live");
+    const auto id = sessions[0].session_id;
+    std::promise<void> release;
+    depthxr::TurboFrameTestPeer::BlockMetricsWriter(release.get_future().share());
+    depthxr::TurboFrameTestPeer::MetricsFrame(true);
+    auto paused = std::async(std::launch::async, [] { depthxr::TurboFrameTestPeer::MetricsFrame(false); });
+    Expect(paused.wait_for(100ms) == std::future_status::ready,
+           "Pausing blocked on a busy metrics writer");
+    paused.get();
+    release.set_value();
+    depthxr::TurboFrameTestPeer::WaitMetrics(); // No subsequent application frame.
+    sessions = depthxr::ReadTurboMetricsSessions(path);
+    Expect(sessions.size() == 1 && !sessions[0].live && sessions[0].buckets[0].frames == 2,
+           "Pause lost the tail or left the session live");
+    std::this_thread::sleep_for(10ms);
+    depthxr::TurboFrameTestPeer::MetricsFrame(true);
+    depthxr::TurboFrameTestPeer::WaitMetrics();
+    sessions = depthxr::ReadTurboMetricsSessions(path);
+    Expect(sessions[0].live && sessions[0].session_id == id && sessions[0].buckets[0].frames == 2,
+           "Resume changed sessions, counted paused time, or failed to restore live status");
+    depthxr::TurboFrameTestPeer::MetricsFrame(true);
+    depthxr::TurboFrameTestPeer::MetricsFrame(false);
+    depthxr::TurboFrameTestPeer::ResetMetrics();
+    sessions = depthxr::ReadTurboMetricsSessions(path);
+    Expect(!sessions[0].live && sessions[0].buckets[0].frames == 3,
+           "Final shutdown was overwritten by a stale capture snapshot");
+    std::filesystem::remove(path);
+    _putenv_s("VECTORXR_TURBO_METRICS_PATH", previous_path.c_str());
 }
 
 void TestAsyncHandoffCoversEndFrameWindow() {
@@ -690,6 +1027,68 @@ void TestAutoHasNoRuntimeMappings() {
     }
 }
 
+void TestExperimentalSubmitGate(bool release_before_timeout, bool failed_submit = false, bool sample_at_entry = false) {
+    FakeRuntime runtime;
+    runtime.BlockEnd();
+    if (failed_submit) runtime.SetEndResult(XR_ERROR_RUNTIME_FAILURE);
+    TurboHarness harness(runtime, depthxr::TurboPacingMode::kAsync);
+    depthxr::TurboFrameTestPeer::Experiment(true, sample_at_entry);
+    const auto end_info = FrameEndInfo();
+    auto end = std::async(std::launch::async, [&] {
+        return depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &end_info);
+    });
+    Expect(runtime.WaitForEndEntered(1), "Experimental submit did not reach runtime");
+    auto wait = std::async(std::launch::async, [] {
+        XrFrameState state{XR_TYPE_FRAME_STATE};
+        return AppWait(&state);
+    });
+    Expect(wait.wait_for(10ms) == std::future_status::timeout,
+           "Experimental app wait did not wait behind submission");
+    if (release_before_timeout) runtime.ReleaseEnd();
+    Expect(wait.wait_for(2s) == std::future_status::ready && wait.get() == XR_SUCCESS,
+           "Experimental app wait deadlocked or failed");
+    if (!release_before_timeout) {
+        if (sample_at_entry) Expect(depthxr::TurboFrameTestPeer::PredictionSampleAgeMs() >= 40,
+                                   "Entry sampling accidentally included the submission gate wait");
+        Expect(runtime.WaitCalls() == 0, "Gate timeout bypassed the handoff and duplicated a real wait");
+        runtime.ReleaseEnd();
+    }
+    Expect(end.wait_for(2s) == std::future_status::ready &&
+           end.get() == (failed_submit ? XR_ERROR_RUNTIME_FAILURE : XR_SUCCESS), "Experimental submit failed");
+    Expect(runtime.WaitForWaitExited(1) && runtime.MaxConcurrentWaits() == 1,
+           "Experimental gate allowed duplicate runtime waits");
+}
+
+void TestExperimentalPredictionAndLimiter() {
+    FakeRuntime runtime;
+    TurboHarness harness(runtime, depthxr::TurboPacingMode::kAsync);
+    depthxr::TurboFrameTestPeer::Experiment(false, false, 50);
+    depthxr::TurboFrameTestPeer::PredictionFixture(true);
+    XrFrameState state{XR_TYPE_FRAME_STATE};
+    Expect(AppWait(&state) == XR_SUCCESS && state.predictedDisplayTime == 10'010'000'000,
+           "Prediction dampening did not use runtime clock horizon");
+    Expect(state.predictedDisplayPeriod == 11'111'111 && state.shouldRender == XR_TRUE,
+           "Prediction dampening altered runtime period or visibility");
+    const auto previous = state.predictedDisplayTime;
+    Expect(AppWait(&state) == XR_SUCCESS && state.predictedDisplayTime == previous + 1,
+           "Dampening broke monotonic predictions");
+    depthxr::TurboFrameTestPeer::PredictionFixture(false);
+    Expect(AppWait(&state) == XR_SUCCESS && state.predictedDisplayTime == 10'020'000'000,
+           "Missing clock conversion must preserve runtime prediction");
+    depthxr::TurboFrameTestPeer::Experiment(false, false, 100, 20);
+    Expect(AppWait(&state) == XR_SUCCESS, "Limiter first wait failed");
+    const auto start = std::chrono::steady_clock::now();
+    Expect(AppWait(&state) == XR_SUCCESS && std::chrono::steady_clock::now() - start >= 40ms,
+           "Experimental cap did not limit app frame cadence");
+    depthxr::TurboFrameTestPeer::DisableEffectiveTurbo();
+    Expect(AppWait(&state) == XR_SUCCESS, "Turbo-off wait with configured limiter failed");
+    Expect(depthxr::TurboFrameTestPeer::LimiterReset(), "Experimental limiter remained armed after Turbo was disabled");
+    depthxr::TurboFrameTestPeer::ResolveAuto("Experiment test", "Test headset");
+    Expect(depthxr::TurboFrameTestPeer::IsForced() &&
+           depthxr::TurboFrameTestPeer::PacingMode() == depthxr::TurboPacingMode::kAsync,
+           "Experimental session must bypass Auto discovery");
+}
+
 void TestSubmissionInterlockFallsBackThenSuspends() {
     FakeRuntime runtime;
     runtime.BlockWait();
@@ -753,6 +1152,17 @@ void TestSubmissionInterlockFallsBackThenSuspends() {
 } // namespace
 
 int main() {
+    TestAsyncTogglePreservesQueuedFrame(false);
+    TestAsyncTogglePreservesQueuedFrame(true);
+    TestAsyncReleaseHandsOverToFrameThread(false);
+    TestAsyncReleaseHandsOverToFrameThread(true);
+    TestAsyncRecoupleStallReleasesPipeline();
+    TestMetricsPauseFlushesWithoutAnotherFrame();
+    TestExperimentalSubmitGate(true);
+    TestExperimentalSubmitGate(false);
+    TestExperimentalSubmitGate(false, false, true);
+    TestExperimentalSubmitGate(true, true);
+    TestExperimentalPredictionAndLimiter();
     TestStartupFailuresDoNotQuarantineTurbo();
     TestSubmissionFailureRestartsStabilityWindow();
     TestAsyncHandoffCoversEndFrameWindow();
@@ -763,6 +1173,8 @@ int main() {
     TestAutoSubmissionErrorsTryBothModes();
     TestAutoHasNoRuntimeMappings();
     TestSubmissionInterlockFallsBackThenSuspends();
+    Expect(depthxr::TurboFrameTestPeer::OsdStateTransitions(), "OSD lost enabled/off Turbo or applied/ready/disabled Pivot state");
+    Expect(depthxr::TurboFrameTestPeer::OsdLatePoseAndRelease(), "OSD late prediction or deferred-image cleanup failed");
     std::cout << "depthxr_turbo_frame_tests passed\n";
     return 0;
 }

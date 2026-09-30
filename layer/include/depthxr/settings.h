@@ -73,7 +73,41 @@ struct InputBinding {
     SoundFeedback sound;
 };
 
+struct OsdSettings {
+    bool enabled{false};
+    bool visible_on_start{true};
+    bool compact{false};
+    double horizontal_degrees{20.0};
+    double vertical_degrees{-12.0};
+    double distance_meters{1.2};
+    double scale{100.0};
+    int opacity{90};
+    int update_hz{5};
+    bool show_graph{true};
+    bool show_runtime{true};
+    bool show_brand{true};
+    bool show_app{true};
+    bool show_turbo{true};
+    bool show_modules{true};
+    bool show_clock{true};
+    bool show_pivot{true};
+    bool compact_show_runtime{true};
+    bool compact_show_brand{true};
+    bool compact_show_app{true};
+    std::string compact_metrics{"all"};
+    bool compact_show_clock{true};
+    bool compact_show_turbo{false};
+    bool compact_show_pivot{false};
+    std::string clock_format{"24"};
+    std::vector<std::string> body_order{"graph", "turbo", "pivot", "modules"};
+    std::string accent{"teal"};
+    std::string custom_color{"#51ddbd"};
+    InputBinding toggle_binding{InputBindingType::Keyboard, {"Ctrl", "Alt", "F10"}};
+    InputBinding cycle_binding{InputBindingType::Keyboard, {"Ctrl", "Alt", "F11"}};
+};
+
 struct CoreSettings {
+    OsdSettings osd;
     bool enabled{true};
     LogLevel log_level{LogLevel::Info};
     int log_retention_files{7};
@@ -344,8 +378,18 @@ struct QuadViewsResolvedSettings : QuadViewsSettings {
     InputBinding diagnostic_visualization_binding;
 };
 
+// Session-latched, profile-scoped experiments. Defaults preserve production timing.
+struct TurboExperimentalSettings {
+    bool enabled{false};
+    std::vector<std::string> application_ids;
+    bool wait_for_submit{false};
+    bool sample_at_entry{false};
+    int prediction_percent{100};
+    int frame_limit{0};
+};
+
 // Turbo mode: overrides runtime frame pacing (one frame of pipelining).
-// Binary per application — profiles carry no settings.
+// First matching enabled profile owns timing choices.
 struct TurboProfile {
     bool disable_safety{false};
     std::string id;
@@ -353,6 +397,7 @@ struct TurboProfile {
     bool enabled{true};
     ProfileMode mode{ProfileMode::Custom};
     std::vector<std::string> application_ids;
+    std::optional<TurboExperimentalSettings> experimental;
 };
 
 // How the real xrWaitFrame is sequenced against the frame submit.
@@ -398,6 +443,7 @@ struct TurboModuleConfig {
     // Per-runtime user overrides, keyed by exact xrGetInstanceProperties
     // runtimeName. Only consulted when pacing_mode is kAuto.
     std::vector<std::pair<std::string, TurboPacingMode>> runtime_pins;
+    TurboExperimentalSettings experimental;
     TurboMetricsMode metrics_mode{TurboMetricsMode::kAlways};
     // Begin/end metric capture while in-game (kBinding mode only).
     InputBinding metrics_binding;
@@ -405,11 +451,13 @@ struct TurboModuleConfig {
 };
 
 struct TurboResolvedSettings {
+    std::string profile_name;
     bool enabled{false};
     bool interrupted_session_recovery{true};
     InputBinding toggle_binding;
     TurboPacingSetting pacing_mode{TurboPacingSetting::kAuto};
     std::vector<std::pair<std::string, TurboPacingMode>> runtime_pins;
+    TurboExperimentalSettings experimental;
     TurboMetricsMode metrics_mode{TurboMetricsMode::kAlways};
     InputBinding metrics_binding;
 };

@@ -693,12 +693,121 @@ bool CheckAllowedKeys(const JsonValue::Object& object,
     return true;
 }
 
+bool ParseOsdSettings(const JsonValue::Object& object, OsdSettings& out, std::string& error) {
+    if (!CheckAllowedKeys(object, {"enabled", "visibleOnStart", "compact", "horizontalDegrees", "verticalDegrees",
+        "distanceMeters", "scale", "opacity", "updateHz", "showGraph", "showRuntime", "showBrand", "showApp", "showTurbo", "showModules",
+        "showClock", "showPivot", "compactShowRuntime", "compactShowClock", "compactShowTurbo", "compactShowPivot",
+        "compactShowBrand", "compactShowApp", "compactMetrics",
+        "clockFormat", "bodyOrder", "customColor", "customPresets", "accent", "toggleBinding", "cycleBinding"}, error)) return false;
+    for (const auto& [key, target] : {std::pair{"enabled", &out.enabled}, {"visibleOnStart", &out.visible_on_start},
+        {"compact", &out.compact}, {"showGraph", &out.show_graph}, {"showRuntime", &out.show_runtime}, {"showBrand", &out.show_brand}, {"showApp", &out.show_app},
+        {"showTurbo", &out.show_turbo}, {"showModules", &out.show_modules}, {"showClock", &out.show_clock}, {"showPivot", &out.show_pivot}}) {
+        std::optional<bool> value;
+        if (!ReadOptionalBool(object, key, value, error)) return false;
+        if (value) *target = *value;
+    }
+    for (const auto& [key, target] : {std::pair{"compactShowRuntime", &out.compact_show_runtime},
+        {"compactShowClock", &out.compact_show_clock}, {"compactShowTurbo", &out.compact_show_turbo},
+        {"compactShowPivot", &out.compact_show_pivot}, {"compactShowBrand", &out.compact_show_brand}, {"compactShowApp", &out.compact_show_app}}) {
+        std::optional<bool> value;
+        if (!ReadOptionalBool(object, key, value, error)) return false;
+        if (value) *target = *value;
+    }
+    std::optional<std::string> metrics;
+    if (!ReadOptionalString(object, "compactMetrics", metrics, error)) return false;
+    if (metrics) {
+        if (*metrics!="all" && *metrics!="fps" && *metrics!="frameTime" && *metrics!="none") { error="Invalid core.osd.compactMetrics"; return false; }
+        out.compact_metrics=*metrics;
+    }
+    const auto number = [&](const char* key, double& target, double low, double high) {
+        std::optional<double> value;
+        if (!ReadOptionalNumber(object, key, value, error)) return false;
+        if (value) {
+            if (!std::isfinite(*value) || *value < low || *value > high) {
+                error = std::string("core.osd.") + key + " is out of range"; return false;
+            }
+            target = *value;
+        }
+        return true;
+    };
+    if (!number("horizontalDegrees", out.horizontal_degrees, -40, 40) ||
+        !number("verticalDegrees", out.vertical_degrees, -35, 35) ||
+        !number("distanceMeters", out.distance_meters, 0.5, 3) || !number("scale", out.scale, 25, 150)) return false;
+    for (const auto& [key, target] : {std::pair{"opacity", &out.opacity}, {"updateHz", &out.update_hz}}) {
+        std::optional<double> value;
+        if (!ReadOptionalNumber(object, key, value, error)) return false;
+        const int low = std::string_view(key) == "opacity" ? 30 : 1;
+        const int high = std::string_view(key) == "opacity" ? 100 : 20;
+        if (value) {
+            if (!std::isfinite(*value) || std::floor(*value) != *value || *value < low || *value > high) {
+                error = std::string("core.osd.") + key + " must be an integer in range"; return false;
+            }
+            *target = static_cast<int>(*value);
+        }
+    }
+    std::optional<std::string> accent;
+    if (!ReadOptionalString(object, "accent", accent, error)) return false;
+    if (accent) {
+        if (*accent != "teal" && *accent != "copper" && *accent != "blue" && *accent != "violet" && *accent != "rose" && *accent != "custom") { error = "Invalid core.osd.accent"; return false; }
+        out.accent = *accent;
+    }
+    std::optional<std::string> color, clock;
+    if (!ReadOptionalString(object, "customColor", color, error) || !ReadOptionalString(object, "clockFormat", clock, error)) return false;
+    if (color) {
+        if (color->size()!=7 || (*color)[0]!='#' || color->find_first_not_of("0123456789abcdefABCDEF",1)!=std::string::npos) {
+            error="Invalid core.osd.customColor"; return false;
+        }
+        out.custom_color=*color;
+    }
+    if (clock) {
+        if (*clock!="12" && *clock!="24") { error="Invalid core.osd.clockFormat"; return false; }
+        out.clock_format=*clock;
+    }
+    if (const auto it=object.find("bodyOrder"); it!=object.end()) {
+        const auto* rows=RequireArray(it->second,"core.osd.bodyOrder",error);
+        if (!rows) return false;
+        std::vector<std::string> order;
+        for (const auto& row:*rows) {
+            const auto* name=row.IsString()?&row.AsString():nullptr;
+            if (!name || (*name!="graph" && *name!="turbo" && *name!="pivot" && *name!="modules") ||
+                std::find(order.begin(),order.end(),*name)!=order.end()) { error="Invalid core.osd.bodyOrder"; return false; }
+            order.push_back(*name);
+        }
+        for (const auto& name:out.body_order) if (std::find(order.begin(),order.end(),name)==order.end()) order.push_back(name);
+        out.body_order=std::move(order);
+    }
+    // Saved layouts belong to the desktop UI; validate them without carrying them into the frame path.
+    if (const auto it=object.find("customPresets"); it!=object.end()) {
+        const auto* presets=RequireArray(it->second,"core.osd.customPresets",error);
+        if (!presets || presets->size()>50) { error="Invalid core.osd.customPresets"; return false; }
+        for (const auto& preset:*presets) {
+            const auto* entry=RequireObject(preset,"OSD preset",error);
+            if (!entry || !CheckAllowedKeys(*entry,{"name","settings"},error)) return false;
+            std::optional<std::string> name;
+            if (!ReadOptionalString(*entry,"name",name,error) || !name || name->empty() || name->size()>240) { error="Invalid OSD preset name"; return false; }
+            const auto layout=entry->find("settings");
+            if (layout==entry->end()) { error="Missing OSD preset settings"; return false; }
+            const auto* values=RequireObject(layout->second,"OSD preset settings",error);
+            if (!values) return false;
+            for (const auto* key:{"customPresets","enabled","visibleOnStart","toggleBinding","cycleBinding"})
+                if (values->count(key)) { error="OSD presets may only contain layout settings"; return false; }
+            OsdSettings checked;
+            if (!ParseOsdSettings(*values,checked,error)) return false;
+        }
+    }
+    for (const auto& [key, target] : {std::pair{"toggleBinding", &out.toggle_binding}, {"cycleBinding", &out.cycle_binding}}) {
+        if (const auto it = object.find(key); it != object.end() && !ParseInputBinding(it->second, *target, error)) return false;
+    }
+    return true;
+}
+
 bool ParseCoreSettings(const JsonValue::Object& object, CoreSettings& out, std::string& error) {
     static const std::unordered_set<std::string> allowed = {
         "enabled",
         "logLevel",
         "logRetentionFiles",
         "trackSeenApps",
+        "osd",
         "sound",
     };
 
@@ -731,6 +840,10 @@ bool ParseCoreSettings(const JsonValue::Object& object, CoreSettings& out, std::
         out.track_seen_apps = *track_seen_apps;
     }
 
+    if (const auto it = object.find("osd"); it != object.end()) {
+        const auto* osd = RequireObject(it->second, "core.osd", error);
+        if (!osd || !ParseOsdSettings(*osd, out.osd, error)) return false;
+    }
     if (const auto sound_it = object.find("sound"); sound_it != object.end()) {
         const JsonValue::Object* sound_object = RequireObject(sound_it->second, "core.sound", error);
         if (!sound_object) {
@@ -1090,6 +1203,8 @@ bool ParseDepthModule(const JsonValue::Object& object,
     return true;
 }
 
+bool ParseTurboExperimental(const JsonValue::Object&, TurboExperimentalSettings&, std::string&);
+
 bool ParseTurboProfile(const JsonValue& value, TurboProfile& out, std::string& error) {
     const JsonValue::Object* object = RequireObject(value, "turboProfile", error);
     if (!object) {
@@ -1097,6 +1212,7 @@ bool ParseTurboProfile(const JsonValue& value, TurboProfile& out, std::string& e
     }
 
     static const std::unordered_set<std::string> allowed = {
+        "experimental",
         "disableSafety",
         "id",
         "name",
@@ -1109,6 +1225,12 @@ bool ParseTurboProfile(const JsonValue& value, TurboProfile& out, std::string& e
         return false;
     }
 
+    if (const auto it=object->find("experimental");it!=object->end()){
+        const auto* settings=RequireObject(it->second,"turboProfile.experimental",error);
+        TurboExperimentalSettings parsed;
+        if(!settings || !ParseTurboExperimental(*settings,parsed,error))return false;
+        parsed.application_ids.clear();out.experimental=std::move(parsed);
+    }
     std::optional<bool> disable_safety;
     if (!ReadOptionalBool(*object, "disableSafety", disable_safety, error)) return false;
     out.disable_safety = disable_safety.value_or(false);
@@ -1141,12 +1263,42 @@ bool ParseTurboProfile(const JsonValue& value, TurboProfile& out, std::string& e
     return true;
 }
 
+bool ParseTurboExperimental(const JsonValue::Object& object, TurboExperimentalSettings& out, std::string& error) {
+    if (!CheckAllowedKeys(object, {"enabled", "applicationIds", "waitForSubmit", "sampleAtEntry",
+                                  "predictionPercent", "frameLimit", "timingTrace"}, error)) return false;
+    for (auto [key, target] : {std::pair{"enabled", &out.enabled}, {"waitForSubmit", &out.wait_for_submit},
+                              {"sampleAtEntry", &out.sample_at_entry}}) {
+        std::optional<bool> value;
+        if (!ReadOptionalBool(object, key, value, error)) return false;
+        if (value) *target = *value;
+    }
+    std::optional<bool> legacy_trace;
+    if (!ReadOptionalBool(object, "timingTrace", legacy_trace, error)) return false;
+    const auto ids = object.find("applicationIds");
+    if (ids != object.end() && !ParseStringArray(ids->second, "turbo.experimental.applicationIds", out.application_ids, error)) return false;
+    for (auto [key, target] : {std::pair{"predictionPercent", &out.prediction_percent}, {"frameLimit", &out.frame_limit}}) {
+        std::optional<double> value;
+        if (!ReadOptionalNumber(object, key, value, error)) return false;
+        if (!value) continue;
+        const bool prediction = std::string_view(key) == "predictionPercent";
+        if (!std::isfinite(*value) || std::floor(*value) != *value ||
+            (prediction ? (*value < 50 || *value > 100) : (*value != 0 && (*value < 20 || *value > 240)))) {
+            error = std::string("turbo.experimental.") + key +
+                (prediction ? " must be an integer from 50 to 100" : " must be 0 (off) or an integer from 20 to 240");
+            return false;
+        }
+        *target = static_cast<int>(*value);
+    }
+    return true;
+}
+
 bool ParseTurboModule(const JsonValue::Object& object, TurboModuleConfig& out, std::string& error) {
     std::optional<bool> recovery;
     if (!ReadOptionalBool(object, "interruptedSessionRecovery", recovery, error)) return false;
     out.interrupted_session_recovery = recovery.value_or(true);
     static const std::unordered_set<std::string> allowed = {
         "interruptedSessionRecovery",
+        "experimental",
         "enabled",
         "toggleBinding",
         "pacingMode",
@@ -1166,6 +1318,12 @@ bool ParseTurboModule(const JsonValue::Object& object, TurboModuleConfig& out, s
     }
     if (enabled.has_value()) {
         out.enabled = *enabled;
+    }
+
+    const auto experiment = object.find("experimental");
+    if (experiment != object.end()) {
+        const auto* settings = RequireObject(experiment->second, "turbo.experimental", error);
+        if (!settings || !ParseTurboExperimental(*settings, out.experimental, error)) return false;
     }
 
     // Optional: absent in configs written before pacing modes existed.

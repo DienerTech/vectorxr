@@ -9,6 +9,8 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <utility>
+#include <vector>
 
 namespace depthxr {
 
@@ -44,6 +46,9 @@ struct InputBindingPollResult {
     // DirectInput call. This preserves diagnostics while preventing reconnect
     // attempts from running at the frame-loop polling rate.
     bool device_retry_deferred{false};
+    // True while the device's DirectInput setup runs on the background
+    // connector. The binding reads inactive until the device is published.
+    bool device_connect_pending{false};
     std::int64_t device_retry_delay_ms{0};
     InputBindingPollStage diagnostic_stage{InputBindingPollStage::None};
     std::int64_t result_code{0};
@@ -86,12 +91,38 @@ class InputDeviceRetryBackoff {
     std::unordered_map<std::wstring, Entry> entries_;
 };
 
+// A device published by the background connector may already have inputs held
+// (for example a maintained HOTAS switch). Callers prime their edge detectors
+// on their first poll, which reads inactive while the connector runs, so an
+// input held at connect reads released until it is released once; otherwise
+// the connect itself would look like a press. The poller owns synchronization.
+class InputConnectPriming {
+  public:
+    void DeviceConnected(const std::wstring& device_key);
+    bool Filter(const std::wstring& device_key, std::string_view input_path, bool down);
+
+  private:
+    struct Device {
+        std::uint64_t generation{0};
+        // Input path -> connection generation in which it was seen released.
+        std::vector<std::pair<std::string, std::uint64_t>> released;
+    };
+    std::unordered_map<std::wstring, Device> devices_;
+};
+
 std::optional<DeviceInputPath> ParseDeviceInputPath(std::string_view input_path);
 std::optional<std::size_t> DirectInputHatDirection(std::uint32_t value);
 const char* ToString(InputBindingPollStage stage);
 const char* DirectInputResultName(std::int64_t result_code);
 
+// Device bindings never set up DirectInput devices on the calling (frame)
+// thread: CreateDevice/Acquire/Release cost 1-6ms per device and a failing
+// device retries on the reconnect backoff, which showed up as a periodic
+// frame-time spike. Setup runs on a short-lived background connector instead.
 InputBindingPollResult PollInputBinding(const InputBinding& binding);
 bool IsInputBindingDown(const InputBinding& binding);
+// Waits (bounded) for in-flight background device setup. Call before the
+// layer can be unloaded; never from the frame thread.
+void DrainInputDeviceWork(std::chrono::milliseconds timeout);
 
 } // namespace depthxr

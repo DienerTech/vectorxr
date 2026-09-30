@@ -16,6 +16,7 @@ Developed by DienerTech LLC.
 - Configure enhanced yaw and pitch rotation through the Pivot module.
 - Drive foveated-style rendering with a visible performance budget through the Quadviews module.
 - Override OpenXR runtime frame pacing per application with Turbo and compare strategies using built-in diagnostics.
+- Monitor application frame times, Turbo state, and enhancements with a configurable [in-headset OSD](docs/usage.md#on-screen-display) for Direct3D 11, Direct3D 12, and Vulkan games.
 - Create per-application profiles so different OpenXR games can use different settings.
 - Track OpenXR apps VectorXR has seen and register them as profile targets.
 - Bind feature toggles to keyboard shortcuts or detected input devices.
@@ -72,9 +73,12 @@ reading render zones, focus alignment, gaze filtering, and tracking availability
 Turbo provides an opt-in per-application frame-pacing override, automatic runtime strategy selection, in-headset A/B controls, and performance diagnostics.
 
 Auto tries Async first, falls back to Sequenced when needed, and remembers a strategy after
-60 seconds of stable play. Version 0.17 removes the previous DCS + SteamVR + synthesized
-Quadviews activation restriction. Disable SteamVR Motion Smoothing when comparing Turbo;
-this change does not remove runtime-enforced FPS caps.
+60 seconds of stable play. Custom profiles can also choose experimental **Toolkit-style** or
+**Custom** timing strategies, and Performance Diagnostics labels each capture with the strategy
+it used. Disable SteamVR Motion Smoothing when comparing Turbo; Turbo does not remove
+runtime-enforced FPS caps.
+
+![VectorXR Turbo custom profiles with timing strategies](docs/screenshots/turbo-profiles.jpg)
 
 ### Turbo Safety
 
@@ -85,6 +89,16 @@ runtime fault. Inspect blocked setups and fault details, retry in-game, or use *
 for a fresh strategy test. **Clear Logs** clears fault history while preserving blocks and
 learned pacing decisions. Global and per-profile controls let you bypass persistent protection.
 See the [Turbo setup and Safety guide](docs/usage.md#turbo) for the controls and save/relaunch behavior.
+
+### On-Screen Display
+
+![VectorXR On-Screen Display page](docs/screenshots/osd.jpg)
+
+The On-Screen Display adds an optional head-following panel in Direct3D 11, Direct3D 12, and
+Vulkan games showing application FPS, frame times, a frame-time graph, Turbo state, Pivot, and
+active enhancements. Choose compact or expanded layouts, place the panel with a live preview,
+customize its contents and colors, save presets, and show or switch it in game with
+**Ctrl+Alt+F10** and **Ctrl+Alt+F11**. See the [On-Screen Display guide](docs/usage.md#on-screen-display).
 
 ### Application Registry
 
@@ -102,7 +116,7 @@ The OpenXR layer manager inspects installed implicit API layers across the Windo
 
 ![VectorXR Settings tab](docs/screenshots/settings.jpg)
 
-Settings holds the runtime master switch, theme, logging, discovered-app tracking, and config import/export/reset.
+Settings holds the runtime master switch, theme, discovered-app tracking, logging, sound feedback volume, and config import/export/reset.
 
 ### About And Updates
 

@@ -1142,7 +1142,8 @@ XrPosef InvertPose(const XrPosef& pose) {
     return {inverse_orientation, inverse_position};
 }
 
-XrPosef ApplyExtraRotationToPose(const XrPosef& pose, float extra_yaw_radians, float extra_pitch_radians) {
+XrPosef ApplyExtraRotationToPose(const XrPosef& pose, float extra_yaw_radians, float extra_pitch_radians,
+                               const XrVector3f* translation_anchor = nullptr) {
     if (NearlyZero(extra_yaw_radians) && NearlyZero(extra_pitch_radians)) {
         return pose;
     }
@@ -1158,9 +1159,22 @@ XrPosef ApplyExtraRotationToPose(const XrPosef& pose, float extra_yaw_radians, f
         MultiplyQuaternion(YawQuaternion(heading_radians + extra_yaw_radians),
                            MultiplyQuaternion(PitchQuaternion(extra_pitch_radians),
                                               YawQuaternion(-heading_radians))));
+    XrVector3f position = pose.position;
+    if (translation_anchor) {
+        // Turn the whole tracked displacement, not just the orientation. Keep
+        // the seated anchor fixed; rotating absolute room coordinates would
+        // orbit the camera around the runtime's origin (often the floor).
+        const XrVector3f displacement{position.x - translation_anchor->x,
+                                     position.y - translation_anchor->y,
+                                     position.z - translation_anchor->z};
+        const XrVector3f rotated = RotateVector(extra_rotation, displacement);
+        position = {translation_anchor->x + rotated.x,
+                    translation_anchor->y + rotated.y,
+                    translation_anchor->z + rotated.z};
+    }
     return {
         NormalizeQuaternion(MultiplyQuaternion(extra_rotation, pose.orientation)),
-        pose.position,
+        position,
     };
 }
 
@@ -1668,10 +1682,10 @@ void OpenXrLayer::SetNextProcAddr(PFN_xrGetInstanceProcAddr next_get_instance_pr
 
 bool OpenXrLayer::PollInputBindingDown(const InputBinding& binding) {
     const InputBindingPollResult poll = PollInputBinding(binding);
-    if (poll.device_retry_deferred) {
+    if (poll.device_retry_deferred || poll.device_connect_pending) {
         // The first real failure already recorded the unavailable-device
-        // diagnostic. Keep deferred bindings entirely off Logger's mutex and
-        // string-formatting path until the per-device reconnect deadline.
+        // diagnostic (or background setup has not finished yet). Keep these
+        // bindings entirely off Logger's mutex and string-formatting path.
         return false;
     }
     if (!poll.device_poll_attempted) {
@@ -1782,6 +1796,7 @@ XrResult OpenXrLayer::OnInstanceCreated(const XrInstanceCreateInfo* create_info,
 
     instance_ = instance;
     ResetInstanceState();
+    turbo_clock_enabled_ = diagnostics.turbo_clock_enabled;
     eye_gaze_extension_enabled_ = eye_gaze_extension_enabled;
     varjo_compatible_quadviews_active_ = diagnostics.varjo_compatible_quad_forwarded;
     ResetSessionState();
@@ -1791,6 +1806,7 @@ XrResult OpenXrLayer::OnInstanceCreated(const XrInstanceCreateInfo* create_info,
 
     current_exe_name_ = GetCurrentExecutableName();
     logger_.Info(std::string("VectorXR layer version: ") + VECTORXR_VERSION);
+    logger_.Info(std::string("VectorXR layer build: ") + __DATE__ + " " + __TIME__);
     logger_.Info("VectorXR attached to process: " + current_exe_name_);
     {
         const ProcessInteropSnapshot interop = GetProcessInteropSnapshot();
@@ -2033,9 +2049,14 @@ XrResult OpenXrLayer::DestroyInstance(XrInstance instance) {
     // holding the lock, so stopping it under mutex_ would deadlock.
     StopConfigWatcher();
     StopTurboAsyncWorker();
+    // The loader may unload the layer after this returns; let in-flight
+    // background input-device setup finish first.
+    DrainInputDeviceWork(std::chrono::seconds(2));
 
     std::scoped_lock lock(mutex_);
 
+    osd_.Shutdown();
+    ReleasePendingOsdImages();osd_composite_.Reset();osd_composite_logged_=false;osd_composite_fallback_logged_=false;
     DestroyEyeGazeResources();
     DestroyVarjoNativeFoveationResources();
     DestroyInternalReferenceSpaces();
@@ -2072,6 +2093,7 @@ XrResult OpenXrLayer::DestroyInstance(XrInstance instance) {
         next_begin_frame_ = nullptr;
         next_end_frame_ = nullptr;
         next_locate_space_ = nullptr;
+        next_poll_event_ = nullptr;
         next_locate_views_ = nullptr;
         next_string_to_path_ = nullptr;
         next_create_action_set_ = nullptr;
@@ -2161,6 +2183,16 @@ XrResult OpenXrLayer::CreateSession(XrInstance instance,
     } else {
         logger_.Info("D3D11 graphics binding not detected; synthesized quadviews is unavailable for this session.");
     }
+    XrSystemProperties osd_system{XR_TYPE_SYSTEM_PROPERTIES};
+    const bool osd_limits = create_info && next_get_system_properties_ &&
+        XR_SUCCEEDED(next_get_system_properties_(instance, create_info->systemId, &osd_system));
+    osd_.InitializeGraphics(*session, create_info ? create_info->next : nullptr,
+        osd_limits ? osd_system.graphicsProperties.maxLayerCount : 0,
+        {next_enumerate_swapchain_formats_, next_create_swapchain_, next_enumerate_swapchain_images_,
+         next_acquire_swapchain_image_, next_wait_swapchain_image_, next_release_swapchain_image_,
+         next_destroy_swapchain_, next_create_reference_space_, next_destroy_space_}, &logger_, "application="+current_exe_name_+" runtime="+runtime_name_);
+    graphics_api_=osd_.GraphicsApi();
+    osd_vulkan_.store(graphics_api_=="Vulkan");
     const XrResult internal_result = CreateInternalReferenceSpaces(*session);
     if (XR_FAILED(internal_result)) {
         logger_.Error("Failed to create one or more internal reference spaces; PivotXR will degrade for this session.");
@@ -2196,6 +2228,8 @@ XrResult OpenXrLayer::DestroySession(XrSession session) {
     {
         std::scoped_lock lock(mutex_);
         if (session == active_session_) {
+            osd_.Shutdown();
+            ReleasePendingOsdImages();osd_composite_.Reset();osd_composite_logged_=false;osd_composite_fallback_logged_=false;
             DestroyEyeGazeResources();
             DestroyVarjoNativeFoveationResources();
             DestroyInternalReferenceSpaces();
@@ -2259,6 +2293,9 @@ XrResult OpenXrLayer::BeginSession(XrSession session, const XrSessionBeginInfo* 
     }
     active_session_ = session;
     session_begin_wall_time_ = std::chrono::steady_clock::now();
+    osd_.ResetPresentation();
+    osd_last_input_poll_.reset();
+    ConfigureTurboExperiment();
     TurboRecoveryRecord recovery_identity;
     turbo_test_started_at_ = RuntimeRelayUnixMilliseconds();
     recovery_identity.application = current_exe_name_;
@@ -2337,7 +2374,7 @@ XrResult OpenXrLayer::EndSession(XrSession session) {
 
     if (begin_pending_frame) {
         const XrFrameBeginInfo begin_info{XR_TYPE_FRAME_BEGIN_INFO};
-        const XrResult begin_result = next_begin_frame_(session, &begin_info);
+        const XrResult begin_result = TraceRuntimeBeginFrame(session, &begin_info);
         if (XR_FAILED(begin_result)) {
             logger_.Info("Session end: unable to balance Turbo's pending xrBeginFrame, result=" +
                          std::to_string(static_cast<int>(begin_result)) + ".");
@@ -2350,7 +2387,7 @@ XrResult OpenXrLayer::EndSession(XrSession session) {
         empty_end.environmentBlendMode = blend_mode;
         empty_end.layerCount = 0;
         empty_end.layers = nullptr;
-        const XrResult end_result = next_end_frame_(session, &empty_end);
+        const XrResult end_result = TraceRuntimeEndFrame(session, &empty_end);
         if (XR_FAILED(end_result)) {
             logger_.Info("Session end: unable to balance Turbo's pending empty frame, result=" +
                          std::to_string(static_cast<int>(end_result)) + ".");
@@ -3894,6 +3931,9 @@ bool OpenXrLayer::ComposeQuadViewsD3D11(const XrCompositionLayerProjection* sour
                                         XrTime display_time,
                                         const XrPosef& reverse_delta,
                                         bool has_non_identity_delta,
+                                        const DepthSubmissionGeometry* depth_geometry,
+                                        uint32_t* restored_view_count,
+                                        bool allow_osd_composite,
                                         XrCompositionLayerProjection* composed_layer,
                                         std::vector<XrCompositionLayerProjectionView>* composed_views) {
     const auto compose_start = std::chrono::steady_clock::now();
@@ -3975,6 +4015,60 @@ bool OpenXrLayer::ComposeQuadViewsD3D11(const XrCompositionLayerProjection* sour
         gaze_diagnostic.raw_pitch_radians = quadviews_raw_focus_pitch_radians_;
         gaze_diagnostic.smoothed_yaw_radians = quadviews_smoothed_focus_yaw_radians_;
         gaze_diagnostic.smoothed_pitch_radians = quadviews_smoothed_focus_pitch_radians_;
+    }
+
+    composed_views->assign(source_layer->views, source_layer->views + 2);
+    for (uint32_t eye = 0; eye < 2; ++eye) {
+        if (has_non_identity_delta) {
+            (*composed_views)[eye].pose = MultiplyPoses((*composed_views)[eye].pose, reverse_delta);
+        }
+        if (has_cached_fovs) {
+            (*composed_views)[eye].fov = cached_frame.fovs[eye];
+        }
+        QuadViewsCompositionTarget& target = d3d11_quadviews_compositor_.targets[eye];
+        (*composed_views)[eye].subImage.swapchain = target.swapchain;
+        (*composed_views)[eye].subImage.imageRect.offset = {0, 0};
+        (*composed_views)[eye].subImage.imageRect.extent = {
+            static_cast<int32_t>(target.width),
+            static_cast<int32_t>(target.height),
+        };
+        (*composed_views)[eye].subImage.imageArrayIndex = 0;
+    }
+
+    // Use the final submitted eye geometry, including Pivot/depth restoration,
+    // so the diagnostic panel occupies the same rays as the independent quad.
+    const uint32_t restored = depth_geometry ? RestoreDepthSubmissionGeometry(
+        std::span<XrCompositionLayerProjectionView>(*composed_views), 0, *depth_geometry,
+        reverse_delta, has_non_identity_delta) : 0;
+    // Temporary diagnostic limited to the first D3D11 quadviews projection.
+    // Other rendering paths retain the normal independently submitted quad.
+    bool composite_osd = false;
+    PendingOsdComposite pending_osd;
+    std::array<bool,2> deferred_release{};
+    if (allow_osd_composite && osd_monitoring_.load(std::memory_order_relaxed)) {
+        XrFrameEndInfo frame{XR_TYPE_FRAME_END_INFO};frame.displayTime=display_time;frame.layerCount=1;
+        const auto* source=reinterpret_cast<const XrCompositionLayerBaseHeader*>(source_layer);frame.layers=&source;
+        if (const auto* overlay=osd_.Append(frame,osd_should_render_.load(std::memory_order_relaxed))) {
+            const auto& quad=*reinterpret_cast<const XrCompositionLayerQuad*>(overlay);
+            XrSpaceLocation relation{XR_TYPE_SPACE_LOCATION};
+            const auto valid=XR_SPACE_LOCATION_POSITION_VALID_BIT|XR_SPACE_LOCATION_ORIENTATION_VALID_BIT;
+            std::string error="OSD space unavailable";
+            if(next_locate_space_ && XR_SUCCEEDED(next_locate_space_(quad.space,source_layer->space,display_time,&relation)) &&
+               (relation.locationFlags&valid)==valid) {
+                bool rgba=false;auto bitmap=osd_.PresentedBitmap(rgba);
+                pending_osd.frame_time=display_time;pending_osd.layer_space=source_layer->space;
+                pending_osd.quad=quad;pending_osd.early_panel_pose=MultiplyPoses(quad.pose,relation.pose);
+                pending_osd.bitmap=std::move(bitmap);pending_osd.rgba=rgba;
+                pending_osd.eyes={(*composed_views)[0],(*composed_views)[1]};
+                pending_osd.width=output_width;pending_osd.height=output_height;
+                composite_osd=osd_composite_.Prepare(d3d11_quadviews_compositor_.device,pending_osd.bitmap,rgba,
+                    pending_osd.early_panel_pose,quad.size,pending_osd.eyes,error);
+            }
+            if(!composite_osd && !osd_composite_fallback_logged_) {
+                logger_.Info("OSD presentation diagnostic=eye-image composite fallback: "+error);
+                osd_composite_fallback_logged_=true;
+            }
+        }
     }
 
     struct SavedD3D11State {
@@ -4403,6 +4497,14 @@ bool OpenXrLayer::ComposeQuadViewsD3D11(const XrCompositionLayerProjection* sour
         context->UpdateSubresource(d3d11_quadviews_compositor_.constants, 0, nullptr, &constants, 0, 0);
         context->PSSetConstantBuffers(0, 1, &d3d11_quadviews_compositor_.constants);
         context->Draw(3, 0);
+        // Leave the OSD out of this early scene pass. Turbo may still wait for
+        // the runtime; head-locked placement must be sampled after that wait.
+        if(composite_osd) {
+            pending_osd.swapchains[eye]=target.swapchain;
+            pending_osd.targets[eye]=render_target;
+            pending_osd.output_images[eye]=target.d3d11_images[output_indices[eye]];
+            pending_osd.private_images[eye]=direct_output?nullptr:target.render_texture;
+        }
 
         ID3D11ShaderResourceView* null_resources[2]{nullptr, nullptr};
         context->PSSetShaderResources(0, 2, null_resources);
@@ -4444,6 +4546,10 @@ bool OpenXrLayer::ComposeQuadViewsD3D11(const XrCompositionLayerProjection* sour
             }
         }
 
+        if(composite_osd) {
+            deferred_release[eye]=true;
+            continue;
+        }
         XrSwapchainImageReleaseInfo release_info{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
         result = next_release_swapchain_image_(target.swapchain, &release_info);
         if (XR_FAILED(result)) {
@@ -4476,6 +4582,10 @@ bool OpenXrLayer::ComposeQuadViewsD3D11(const XrCompositionLayerProjection* sour
 
     restore_state();
     if (!rendered) {
+        // A partial scene failure must not strand the first eye's acquired image.
+        XrSwapchainImageReleaseInfo release{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
+        for(unsigned eye=0;eye<2;++eye)if(deferred_release[eye])
+            next_release_swapchain_image_(pending_osd.swapchains[eye],&release);
         if (d3d11_quadviews_compositor_.failure_logs_remaining > 0) {
             logger_.Error("D3D11 quadviews composition failed; falling back to projection-layer split. reason=" +
                           failure_reason);
@@ -4570,24 +4680,8 @@ bool OpenXrLayer::ComposeQuadViewsD3D11(const XrCompositionLayerProjection* sour
         }
     }
 
-    composed_views->assign(source_layer->views, source_layer->views + 2);
-    for (uint32_t eye = 0; eye < 2; ++eye) {
-        if (has_non_identity_delta) {
-            (*composed_views)[eye].pose = MultiplyPoses((*composed_views)[eye].pose, reverse_delta);
-        }
-        if (has_cached_fovs) {
-            (*composed_views)[eye].fov = cached_frame.fovs[eye];
-        }
-        QuadViewsCompositionTarget& target = d3d11_quadviews_compositor_.targets[eye];
-        (*composed_views)[eye].subImage.swapchain = target.swapchain;
-        (*composed_views)[eye].subImage.imageRect.offset = {0, 0};
-        (*composed_views)[eye].subImage.imageRect.extent = {
-            static_cast<int32_t>(target.width),
-            static_cast<int32_t>(target.height),
-        };
-        (*composed_views)[eye].subImage.imageArrayIndex = 0;
-    }
-
+    if(restored_view_count)*restored_view_count+=restored;
+    if(composite_osd)pending_osd_composite_=std::move(pending_osd);
     *composed_layer = *source_layer;
     composed_layer->viewCount = static_cast<uint32_t>(composed_views->size());
     composed_layer->views = composed_views->data();
@@ -4595,6 +4689,196 @@ bool OpenXrLayer::ComposeQuadViewsD3D11(const XrCompositionLayerProjection* sour
                                     XR_COMPOSITION_LAYER_UNPREMULTIPLIED_ALPHA_BIT |
                                     XR_COMPOSITION_LAYER_INVERTED_ALPHA_BIT_EXT);
     return true;
+}
+
+XrResult OpenXrLayer::TraceRuntimeWaitFrame(XrSession session, const XrFrameWaitInfo* info, XrFrameState* state) {
+    if (!turbo_trace_.Enabled()) {
+        const auto result=next_wait_frame_(session, info, state);
+        if (XR_SUCCEEDED(result) && state)
+            osd_should_render_.store(state->shouldRender == XR_TRUE, std::memory_order_relaxed);
+        return result;
+    }
+    const auto id = turbo_trace_.NextId();
+    turbo_trace_.Record("runtime.wait.enter", id);
+    const auto result = next_wait_frame_(session, info, state);
+    if (XR_FAILED(result)) turbo_trace_.Burst();
+    turbo_trace_.Record("runtime.wait.return", id, XR_SUCCEEDED(result) ? state->predictedDisplayTime : 0,
+                        XR_SUCCEEDED(result) ? state->predictedDisplayPeriod : 0, result);
+    if (XR_SUCCEEDED(result) && state) osd_should_render_.store(state->shouldRender == XR_TRUE, std::memory_order_relaxed);
+    if (XR_SUCCEEDED(result) && turbo_trace_.Capturing()) turbo_trace_.Record("runtime.wait.state", id, state->shouldRender, TurboClockNow());
+    return result;
+}
+
+XrResult OpenXrLayer::TraceRuntimeBeginFrame(XrSession session, const XrFrameBeginInfo* info) {
+    std::unique_lock queue_lock(osd_vulkan_queue_mutex_,std::defer_lock);
+    if(osd_vulkan_.load())queue_lock.lock();
+    if (!turbo_trace_.Enabled()) return next_begin_frame_(session, info);
+    const auto id = turbo_trace_.NextId();
+    turbo_trace_.Record("runtime.begin.enter", id);
+    const auto result = next_begin_frame_(session, info);
+    if (XR_FAILED(result)) turbo_trace_.Burst();
+    turbo_trace_.Record("runtime.begin.return", id, result);
+    return result;
+}
+
+XrResult OpenXrLayer::ReleasePendingOsdImages() {
+    if(!pending_osd_composite_)return XR_SUCCESS;
+    // Clear ownership before calling downstream; cleanup must never release twice.
+    auto pending=std::move(*pending_osd_composite_);pending_osd_composite_.reset();
+    XrResult result=XR_SUCCESS;
+    XrSwapchainImageReleaseInfo release{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
+    for(const auto swapchain:pending.swapchains)if(swapchain && next_release_swapchain_image_) {
+        const auto released=next_release_swapchain_image_(swapchain,&release);
+        if(XR_FAILED(released) && XR_SUCCEEDED(result))result=released;
+    }
+    if(XR_FAILED(result))logger_.Error("OSD eye-image release failed: "+std::to_string(result));
+    return result;
+}
+
+XrResult OpenXrLayer::FinishOsdComposite(const XrFrameEndInfo* info, bool& drawn) {
+    drawn=false;
+    if(!pending_osd_composite_)return XR_SUCCESS;
+    auto& pending=*pending_osd_composite_;
+    if(info && info->layerCount && info->displayTime==pending.frame_time && osd_should_render_.load()) {
+        // The scene's render pose stays unchanged. Only the HUD anchor follows
+        // the most recent real runtime prediction, after Turbo's wait/drain.
+        // A fabricated app timestamp may lag or lead that prediction.
+        XrTime pose_time=info->displayTime;
+        {
+            std::scoped_lock lock(turbo_mutex_);
+            if(turbo_last_predicted_display_time_>0)pose_time=turbo_last_predicted_display_time_;
+        }
+        XrSpaceLocation relation{XR_TYPE_SPACE_LOCATION};
+        const auto valid=XR_SPACE_LOCATION_POSITION_VALID_BIT|XR_SPACE_LOCATION_ORIENTATION_VALID_BIT;
+        bool prepared=true, late_pose=false;
+        std::string error;
+        if(next_locate_space_ && XR_SUCCEEDED(next_locate_space_(pending.quad.space,pending.layer_space,pose_time,&relation)) &&
+           (relation.locationFlags&valid)==valid) {
+            prepared=osd_composite_.Prepare(d3d11_quadviews_compositor_.device,pending.bitmap,pending.rgba,
+                MultiplyPoses(pending.quad.pose,relation.pose),pending.quad.size,pending.eyes,error);
+            late_pose=prepared;
+            if(!prepared)prepared=osd_composite_.Prepare(d3d11_quadviews_compositor_.device,pending.bitmap,pending.rgba,
+                pending.early_panel_pose,pending.quad.size,pending.eyes,error);
+        }
+        if(prepared) {
+            for(unsigned eye=0;eye<2;++eye) {
+                osd_composite_.Draw(eye,pending.targets[eye],pending.width,pending.height);
+                if(pending.private_images[eye])d3d11_quadviews_compositor_.context->CopyResource(
+                    pending.output_images[eye],pending.private_images[eye]);
+            }
+            drawn=true;
+            if(!osd_composite_logged_) {
+                logger_.Info("OSD presentation diagnostic=eye-image composite active; pose sampled after frame wait; latePose="+
+                    std::to_string(late_pose)+" renderTime="+std::to_string(info->displayTime)+
+                    " poseTime="+std::to_string(pose_time)+"; no separate OSD layer");
+                osd_composite_logged_=true;
+            }
+        }
+    }
+    return ReleasePendingOsdImages();
+}
+
+XrResult OpenXrLayer::TraceRuntimeEndFrame(XrSession session, const XrFrameEndInfo* info) {
+    std::unique_lock queue_lock(osd_vulkan_queue_mutex_,std::defer_lock);
+    if(osd_vulkan_.load())queue_lock.lock();
+    XrFrameEndInfo with_osd{};
+    std::vector<const XrCompositionLayerBaseHeader*> layers;
+    bool osd_in_eye_images=false;
+    // A failed eye-image release is logged by ReleasePendingOsdImages. Still
+    // submit: skipping xrEndFrame would drop the app's frame and leave the
+    // runtime frame open; the runtime reports any resulting layer error.
+    FinishOsdComposite(info,osd_in_eye_images);
+    if (info && !osd_in_eye_images && osd_monitoring_.load(std::memory_order_relaxed)) {
+        if (const auto* overlay=osd_.Append(*info, osd_should_render_.load(std::memory_order_relaxed))) {
+            with_osd=*info;
+            layers.assign(info->layers, info->layers+info->layerCount);
+            layers.push_back(overlay);
+            with_osd.layerCount=static_cast<std::uint32_t>(layers.size()); with_osd.layers=layers.data();
+            info=&with_osd;
+        }
+    }
+    const auto submit=[&] {
+        const auto submit_start=std::chrono::steady_clock::now();
+        const auto result=next_end_frame_(session,info);
+        osd_.RecordSubmit(std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-submit_start).count());
+        if (!layers.empty() && XR_FAILED(result)) {
+            // Never retry xrEndFrame: a failing runtime may already consume it.
+            // Let the renderer distinguish a frame-order/timestamp rejection
+            // from an actual overlay failure.
+            osd_.SubmissionFailed(result);
+        }
+        return result;
+    };
+    if (!turbo_trace_.Enabled()) return submit();
+    const auto id = turbo_trace_.NextId();
+    turbo_trace_.Record("submit.enter", id, info->displayTime, info->layerCount);
+    if (turbo_trace_.Capturing()) {
+        const XrTime clock_now = TurboClockNow();
+        turbo_trace_.Record("submit.clock", id, clock_now, clock_now > 0 ? info->displayTime - clock_now : 0);
+    }
+    const auto result = submit();
+    if (XR_FAILED(result)) turbo_trace_.Burst();
+    turbo_trace_.Record("submit.return", id, result);
+    return result;
+}
+
+bool OpenXrLayer::WantsTurboClockConversion() {
+    const auto parsed = LoadConfigFromFile(ResolveConfigPath());
+    if (!parsed.ok) return false;
+    const auto settings = ResolveTurboSettings(parsed.document, GetCurrentExecutableName());
+    return parsed.document.core.enabled &&
+        (parsed.document.core.log_level == LogLevel::Debug ||
+         (settings.experimental.enabled && settings.experimental.prediction_percent != 100));
+}
+
+XrTime OpenXrLayer::TurboClockNow() {
+    if (!turbo_convert_counter_time_) return 0;
+    using Convert = XrResult (XRAPI_PTR *)(XrInstance, const LARGE_INTEGER*, XrTime*);
+    LARGE_INTEGER counter;
+    QueryPerformanceCounter(&counter);
+    XrTime time = 0;
+    return XR_SUCCEEDED(reinterpret_cast<Convert>(turbo_convert_counter_time_)(instance_, &counter, &time)) ? time : 0;
+}
+
+std::string OpenXrLayer::TurboTimingConfiguration() const {
+    return (turbo_experiment_.enabled
+        ? "Experimental Async; submit=" + std::string(turbo_experiment_.wait_for_submit ? "wait" : "overlap") +
+          "; sample=" + (turbo_experiment_.sample_at_entry ? "entry" : "return") +
+          "; prediction=" + std::to_string(turbo_experiment_.prediction_percent) + "%" +
+          "; clock=" + (turbo_convert_counter_time_ ? "available" : "unavailable") +
+          "; cap=" + std::to_string(turbo_experiment_.frame_limit)
+        : std::string("Normal timing")) + "; trace=controlled by live Debug log level";
+}
+
+void OpenXrLayer::ConfigureTurboExperiment() {
+    turbo_trace_.Stop();
+    turbo_experiment_ = resolved_settings_.core.enabled ? resolved_settings_.turbo.experimental : TurboExperimentalSettings{};
+    turbo_limit_last_wait_.reset();
+    turbo_trace_last_engaged_ = false;
+    turbo_convert_counter_time_ = nullptr;
+    if (turbo_clock_enabled_ && next_get_instance_proc_addr_) {
+        next_get_instance_proc_addr_(instance_, "xrConvertWin32PerformanceCounterToTimeKHR", &turbo_convert_counter_time_);
+    }
+    // Pacing decisions may survive sessions, but an experimental session must
+    // neither inherit nor teach a production verdict.
+    if (turbo_experiment_.enabled) {
+        turbo_pacing_resolved_ = false;
+        turbo_pacing_verdict_pending_ = false;
+    }
+    logger_.Info("Turbo session settings: application=" + current_exe_name_ +
+        ", profile=" + resolved_settings_.turbo.profile_name +
+        ", experimental=" + std::to_string(turbo_experiment_.enabled) +
+        ", waitForSubmit=" + std::to_string(turbo_experiment_.wait_for_submit) +
+        ", sampleAtEntry=" + std::to_string(turbo_experiment_.sample_at_entry) +
+        ", predictionPercent=" + std::to_string(turbo_experiment_.prediction_percent) +
+        ", frameLimit=" + std::to_string(turbo_experiment_.frame_limit) +
+        ", runtimeClock=" + std::to_string(turbo_convert_counter_time_ != nullptr) +
+        ", pacing=" + (turbo_experiment_.enabled ? std::string("experimental-async") : ToString(resolved_settings_.turbo.pacing_mode)) +
+        ", metrics=" + ToString(resolved_settings_.turbo.metrics_mode) + "; changes require a new session.");
+    if (turbo_experiment_.enabled && turbo_experiment_.prediction_percent != 100 && !turbo_convert_counter_time_) {
+        logger_.Info("Turbo experiment: runtime clock conversion unavailable; prediction dampening will be bypassed.");
+    }
+    turbo_trace_.Start(logger_);
 }
 
 // Turbo mode frame loop. The runtime always sees a conformant
@@ -4612,12 +4896,36 @@ XrResult OpenXrLayer::WaitFrame(XrSession session,
         frame_state->type != XR_TYPE_FRAME_STATE) {
         return XR_ERROR_VALIDATION_FAILURE;
     }
+    const auto trace_id = turbo_trace_.NextId();
+    turbo_trace_.Record("wait.enter", trace_id);
+    const bool experimental_active = turbo_experiment_.enabled &&
+        turbo_effective_active_.load(std::memory_order_relaxed) && turbo_effective_async_.load(std::memory_order_relaxed);
+    if (experimental_active && turbo_experiment_.frame_limit > 0) {
+        const auto limit_start = std::chrono::steady_clock::now();
+        turbo_trace_.Record("limit.enter", trace_id, turbo_experiment_.frame_limit);
+        if (turbo_limit_last_wait_) {
+            std::this_thread::sleep_until(*turbo_limit_last_wait_ +
+                std::chrono::nanoseconds(1'000'000'000 / turbo_experiment_.frame_limit));
+        }
+        turbo_limit_last_wait_ = std::chrono::steady_clock::now();
+        turbo_trace_.Record("limit.return", trace_id);
+        std::scoped_lock lock(turbo_mutex_);
+        turbo_metrics_wait_pending_ms_ += std::chrono::duration<double, std::milli>(
+            *turbo_limit_last_wait_ - limit_start).count();
+    } else {
+        turbo_limit_last_wait_.reset();
+    }
+    const auto entry_time = experimental_active && turbo_experiment_.sample_at_entry
+        ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
     if (!turbo_frame_interception_required_.load(std::memory_order_acquire)) {
         if (!frame_pacing_debug_enabled_.load(std::memory_order_relaxed)) {
-            return next_wait_frame_(session, frame_wait_info, frame_state);
+            const auto result = TraceRuntimeWaitFrame(session, frame_wait_info, frame_state);
+            turbo_trace_.Record("wait.return", trace_id, XR_SUCCEEDED(result) ? frame_state->predictedDisplayTime : 0,
+                XR_SUCCEEDED(result) ? frame_state->predictedDisplayPeriod : 0, result);
+            return result;
         }
         const auto wait_start = std::chrono::steady_clock::now();
-        const XrResult result = next_wait_frame_(session, frame_wait_info, frame_state);
+        const XrResult result = TraceRuntimeWaitFrame(session, frame_wait_info, frame_state);
         const auto wait_end = std::chrono::steady_clock::now();
         if (XR_SUCCEEDED(result) && frame_state) {
             const double wait_ms =
@@ -4636,10 +4944,22 @@ XrResult OpenXrLayer::WaitFrame(XrSession session,
             NoteTurboShouldRenderLocked(turbo_last_should_render_);
             turbo_last_wait_frame_wall_time_ = wait_end;
         }
+        turbo_trace_.Record("wait.return", trace_id, XR_SUCCEEDED(result) ? frame_state->predictedDisplayTime : 0,
+                            XR_SUCCEEDED(result) ? frame_state->predictedDisplayPeriod : 0, result);
         return result;
     }
     {
         std::unique_lock lock(turbo_mutex_);
+        if (experimental_active && turbo_experiment_.wait_for_submit && turbo_end_frame_in_flight_) {
+            const auto gate_start = std::chrono::steady_clock::now();
+            turbo_trace_.Record("gate.enter", trace_id);
+            const bool complete = turbo_async_handoff_cv_.wait_for(lock, std::chrono::milliseconds(50), [this] {
+                return !turbo_end_frame_in_flight_ && !turbo_async_handoff_active_;
+            });
+            turbo_metrics_wait_pending_ms_ += std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - gate_start).count();
+            turbo_trace_.Record("gate.return", trace_id, complete);
+        }
         bool wait_pipelined = turbo_async_wait_.valid();
         bool async_handoff = turbo_async_handoff_active_;
         bool async_interception_cancelled = false;
@@ -4695,7 +5015,7 @@ XrResult OpenXrLayer::WaitFrame(XrSession session,
             }
             if (wait_pipelined || async_handoff) {
                 bool mark_wait_polled = true;
-                if (turbo_async_wait_polled_) {
+                if (turbo_async_wait_polled_ || !turbo_valve_open_) {
                     // Second poll while pipelined: only one frame of
                     // pipelining is allowed, so now we must wait for the real
                     // frame. If EndFrame has pre-armed the handoff but not yet
@@ -4709,9 +5029,11 @@ XrResult OpenXrLayer::WaitFrame(XrSession session,
                                           "publication; generation=" +
                                           std::to_string(turbo_async_wait_generation_) + ".");
                         }
+                        turbo_trace_.Record("poll.handoff.enter", trace_id, turbo_async_wait_generation_);
                         turbo_async_handoff_cv_.wait(lock, [this] {
                             return !turbo_async_handoff_active_ || turbo_async_wait_.valid();
                         });
+                        turbo_trace_.Record("poll.handoff.return", trace_id, turbo_async_wait_generation_);
                         wait_pipelined = turbo_async_wait_.valid();
                         async_handoff = turbo_async_handoff_active_;
                         if (!wait_pipelined && !async_handoff) {
@@ -4730,9 +5052,24 @@ XrResult OpenXrLayer::WaitFrame(XrSession session,
                         // member while this app thread is blocked.
                         const std::shared_future<void> pending_wait = turbo_async_wait_;
                         const std::uint64_t pending_generation = turbo_async_wait_generation_;
+                        const bool recouple = !turbo_valve_open_;
+                        const auto poll_start = std::chrono::steady_clock::now();
                         lock.unlock();
-                        pending_wait.wait();
+                        turbo_trace_.Record("poll.worker.enter", trace_id, pending_generation);
+                        if (!recouple) {
+                            pending_wait.wait();
+                        } else {
+                            // Keep ownership of waits/begins stable when Turbo
+                            // is switched off, but re-couple the app to runtime
+                            // pacing. Bound this for submit-interlocked runtimes.
+                            pending_wait.wait_for(std::chrono::milliseconds(100));
+                        }
+                        turbo_trace_.Record("poll.worker.return", trace_id, pending_generation);
                         lock.lock();
+                        if (recouple) {
+                            turbo_metrics_wait_pending_ms_ += std::chrono::duration<double, std::milli>(
+                                std::chrono::steady_clock::now() - poll_start).count();
+                        }
                         if (pending_generation != turbo_async_wait_generation_) {
                             // EndFrame already retired this wait and may have
                             // launched the following one. Do not mark that newer
@@ -4751,7 +5088,8 @@ XrResult OpenXrLayer::WaitFrame(XrSession session,
                 // pre-publication shield. This call has not fabricated a frame,
                 // so it can safely resume normal runtime pacing below.
             } else {
-                const auto now = std::chrono::steady_clock::now();
+                const auto now = experimental_active && turbo_experiment_.sample_at_entry
+                    ? entry_time : std::chrono::steady_clock::now();
                 XrTime predicted = turbo_last_predicted_display_time_;
                 if ((wait_pipelined || async_handoff) && !turbo_async_wait_completed_ &&
                     turbo_last_wait_frame_wall_time_.has_value()) {
@@ -4765,6 +5103,14 @@ XrResult OpenXrLayer::WaitFrame(XrSession session,
                 }
                 turbo_last_wait_frame_wall_time_ = now;
 
+                const XrTime extrapolated_prediction = predicted;
+                if (experimental_active && turbo_experiment_.prediction_percent != 100) {
+                    const XrTime clock_now = TurboClockNow();
+                    if (clock_now > 0 && predicted > clock_now) {
+                        predicted = clock_now + static_cast<XrTime>(
+                            static_cast<double>(predicted - clock_now) * turbo_experiment_.prediction_percent / 100.0);
+                    }
+                }
                 // Preserve the runtime prediction whenever possible. A full-period
                 // minimum step accumulates artificial lead when predictions repeat
                 // or the app outruns refresh. Only enforce strict monotonicity,
@@ -4774,6 +5120,15 @@ XrResult OpenXrLayer::WaitFrame(XrSession session,
                 frame_state->predictedDisplayPeriod = turbo_last_predicted_display_period_;
                 frame_state->shouldRender = turbo_last_should_render_ ? XR_TRUE : XR_FALSE;
                 turbo_max_returned_display_time_ = frame_state->predictedDisplayTime;
+                turbo_trace_.Record("predict.adjust", trace_id, extrapolated_prediction, predicted,
+                                    frame_state->predictedDisplayTime - predicted);
+                turbo_trace_.Record("predict.state", trace_id, turbo_async_wait_completed_, async_handoff,
+                                    static_cast<int>(turbo_pacing_mode_));
+                turbo_trace_.Record("predict", trace_id, turbo_last_predicted_display_time_,
+                                    frame_state->predictedDisplayTime, turbo_async_wait_generation_);
+                turbo_trace_.Record("wait.return", trace_id, frame_state->predictedDisplayTime,
+                                    frame_state->predictedDisplayPeriod, XR_SUCCESS);
+                if (turbo_trace_.Capturing()) turbo_trace_.Record("clock", trace_id, TurboClockNow());
                 ++pacing_fabricated_waits_;
                 ++turbo_metrics_fabricated_pending_;
                 if (turbo_fabricated_wait_log_budget_ > 0 && logger_.IsDebugEnabled()) {
@@ -4807,7 +5162,7 @@ XrResult OpenXrLayer::WaitFrame(XrSession session,
     XrResult result = XR_SUCCESS;
     {
         std::scoped_lock wait_lock(turbo_runtime_wait_mutex_);
-        result = next_wait_frame_(session, frame_wait_info, frame_state);
+        result = TraceRuntimeWaitFrame(session, frame_wait_info, frame_state);
     }
     const double wait_ms =
         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - wait_start).count();
@@ -4827,7 +5182,8 @@ XrResult OpenXrLayer::WaitFrame(XrSession session,
         turbo_last_predicted_display_period_ = frame_state->predictedDisplayPeriod;
         turbo_last_should_render_ = frame_state->shouldRender == XR_TRUE;
         NoteTurboShouldRenderLocked(turbo_last_should_render_);
-        turbo_last_wait_frame_wall_time_ = std::chrono::steady_clock::now();
+        turbo_last_wait_frame_wall_time_ = experimental_active && turbo_experiment_.sample_at_entry
+            ? entry_time : std::chrono::steady_clock::now();
         frame_state->predictedDisplayTime =
             std::max(frame_state->predictedDisplayTime, turbo_max_returned_display_time_ + 1);
         turbo_max_returned_display_time_ = frame_state->predictedDisplayTime;
@@ -4849,10 +5205,13 @@ XrResult OpenXrLayer::WaitFrame(XrSession session,
             turbo_seq_state_ = TurboSequencedState::kInactive;
         }
     }
+    turbo_trace_.Record("wait.return", trace_id, XR_SUCCEEDED(result) ? frame_state->predictedDisplayTime : 0,
+                        XR_SUCCEEDED(result) ? frame_state->predictedDisplayPeriod : 0, result);
     return result;
 }
 
 XrResult OpenXrLayer::BeginFrame(XrSession session, const XrFrameBeginInfo* frame_begin_info) {
+    turbo_trace_.Record("begin.enter", turbo_trace_.NextId());
     if (frame_begin_info && frame_begin_info->type != XR_TYPE_FRAME_BEGIN_INFO) {
         return XR_ERROR_VALIDATION_FAILURE;
     }
@@ -4865,7 +5224,7 @@ XrResult OpenXrLayer::BeginFrame(XrSession session, const XrFrameBeginInfo* fram
     TryAttachEyeGazeActionSetFallback(session);
 
     if (!turbo_frame_interception_required_.load(std::memory_order_acquire)) {
-        return next_begin_frame_(session, frame_begin_info);
+        return TraceRuntimeBeginFrame(session, frame_begin_info);
     }
     {
         std::scoped_lock lock(turbo_mutex_);
@@ -4911,7 +5270,7 @@ XrResult OpenXrLayer::BeginFrame(XrSession session, const XrFrameBeginInfo* fram
             logger_.Debug("Turbo-diag: app xrBeginFrame passing through while engaging.");
         }
     }
-    const XrResult result = next_begin_frame_(session, frame_begin_info);
+    const XrResult result = TraceRuntimeBeginFrame(session, frame_begin_info);
     if (XR_SUCCEEDED(result)) {
         std::scoped_lock lock(turbo_mutex_);
         turbo_frame_begun_ = true;
@@ -4939,6 +5298,12 @@ void OpenXrLayer::ObserveCompositionLayerTopology(const XrFrameEndInfo* frame_en
 XrResult OpenXrLayer::ForwardEndFrame(XrSession session,
                                       const XrFrameEndInfo* frame_end_info,
                                       std::unique_lock<std::mutex>& config_lock) {
+    // Runtime wait/begin can fail before TraceRuntimeEndFrame is reached.
+    // Release any held output images on every early-return path as well.
+    struct PendingImageGuard {
+        OpenXrLayer& layer;
+        ~PendingImageGuard() { layer.ReleasePendingOsdImages(); }
+    } pending_guard{*this};
     ObserveCompositionLayerTopology(frame_end_info);
     if (frame_pacing_debug_enabled_.load(std::memory_order_relaxed) && frame_end_info) {
         std::scoped_lock lock(turbo_mutex_);
@@ -4967,7 +5332,7 @@ XrResult OpenXrLayer::ForwardEndFrame(XrSession session,
             pacing_start = std::chrono::steady_clock::now();
         }
         config_lock.unlock();
-        const XrResult result = next_end_frame_(session, frame_end_info);
+        const XrResult result = TraceRuntimeEndFrame(session, frame_end_info);
         if (XR_FAILED(result) && end_frame_error_log_budget_ > 0) {
             --end_frame_error_log_budget_;
             logger_.Error("Runtime xrEndFrame failed with " +
@@ -5131,6 +5496,17 @@ XrResult OpenXrLayer::ForwardEndFrame(XrSession session,
     const InputBinding metrics_binding = resolved_settings_.turbo.metrics_binding;
     const bool metrics_available = resolved_settings_.core.enabled && resolved_settings_.turbo.enabled;
     const int metrics_sound_volume = resolved_settings_.core.sound_volume;
+    // Why Turbo is off decides whether an established async pipeline may stay
+    // re-coupled. A manual toggle-off keeps it (toggling back on must resume
+    // the same queued frame). Every other reason releases the worker wait.
+    const bool suspended_now = turbo_auto_suspended_.load(std::memory_order_relaxed);
+    const bool recovery_blocked_now = turbo_recovery_blocked_.load();
+    const char* async_release_reason =
+        turbo_engaged ? nullptr :
+        !metrics_available ? "Turbo disabled in settings" :
+        suspended_now ? "Turbo safety suspension" :
+        recovery_blocked_now ? "Turbo recovery block" :
+        turbo_async_recouple_stalled_ ? "runtime wait stalled while Turbo was off" : nullptr;
 
     // Everything past this point is frame forwarding: turbo drain (which can
     // block a full frame interval), the deferred begin, and the runtime end.
@@ -5141,6 +5517,7 @@ XrResult OpenXrLayer::ForwardEndFrame(XrSession session,
     const auto pacing_start = std::chrono::steady_clock::now();
 
     bool has_pending_wait = false;
+    bool keep_async_pipeline = false;
     bool frame_begun = false;
     bool begin_owed = false;
     bool valve_open = false;
@@ -5159,6 +5536,17 @@ XrResult OpenXrLayer::ForwardEndFrame(XrSession session,
         frame_begun = turbo_frame_begun_;
         turbo_frame_begun_ = false;
         seq_state = turbo_seq_state_;
+        keep_async_pipeline = turbo_pacing_mode_ == TurboPacingMode::kAsync &&
+            seq_state == TurboSequencedState::kInactive &&
+            (turbo_engaged || has_pending_wait || turbo_async_handoff_active_);
+        if (keep_async_pipeline) {
+            if (turbo_valve_open_ != turbo_engaged) {
+                logger_.Info(turbo_engaged
+                    ? "Turbo: async pacing decoupled; frame ownership preserved."
+                    : "Turbo: async pacing re-coupled; frame ownership preserved.");
+            }
+            turbo_valve_open_ = turbo_engaged;
+        }
         begin_owed = turbo_begin_owed_;
         valve_open = turbo_valve_open_;
         if (!has_pending_wait && turbo_engaged && turbo_pacing_mode_ == TurboPacingMode::kAsync &&
@@ -5204,8 +5592,11 @@ XrResult OpenXrLayer::ForwardEndFrame(XrSession session,
             logger_.Debug("Turbo-diag: async drain starting (250ms cap).");
         }
         const auto drain_start = std::chrono::steady_clock::now();
+        turbo_trace_.Record("drain.enter", pending_async_generation);
         const bool ready =
             pending_async_wait.wait_for(kTurboDrainTimeout) == std::future_status::ready;
+        if (!ready) turbo_trace_.Burst();
+        turbo_trace_.Record("drain.return", pending_async_generation, ready);
         const double drain_ms =
             std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - drain_start)
                 .count();
@@ -5215,19 +5606,40 @@ XrResult OpenXrLayer::ForwardEndFrame(XrSession session,
                           "ms, ready=" + std::to_string(ready ? 1 : 0));
         }
         XrResult async_wait_result = XR_SUCCESS;
+        bool handed_over = false;
         {
             std::scoped_lock lock(turbo_mutex_);
             if (ready && pending_async_generation == turbo_async_wait_generation_) {
                 async_wait_result = turbo_async_wait_result_;
                 turbo_async_wait_ = {};
-                if (turbo_engaged && turbo_pacing_mode_ == TurboPacingMode::kAsync &&
+                if (keep_async_pipeline && turbo_pacing_mode_ == TurboPacingMode::kAsync &&
                     turbo_seq_state_ == TurboSequencedState::kInactive) {
-                    // Retire and arm atomically under turbo_mutex_: an app
-                    // WaitFrame can observe the old future or the shield, but
-                    // never a pass-through gap between them.
-                    ArmTurboAsyncHandoffLocked("completed async wait retired before submit");
+                    // Retire and shield atomically under turbo_mutex_: an app
+                    // WaitFrame can observe the old future or the next shield,
+                    // but never a pass-through gap between them.
+                    if (async_release_reason) {
+                        // Releasing must not forward a queued app Begin without
+                        // its runtime wait. Hand the owned frame to the
+                        // sequenced shield instead: this submit is followed by
+                        // a frame-thread wait+begin, and app calls stay
+                        // fabricated/swallowed exactly as in sequenced pacing.
+                        turbo_seq_state_ = TurboSequencedState::kActive;
+                        handed_over = true;
+                    } else {
+                        ArmTurboAsyncHandoffLocked("completed async wait retired before submit");
+                    }
                 }
             }
+        }
+        if (handed_over) {
+            {
+                std::scoped_lock lock(mutex_);
+                turbo_pacing_mode_ = TurboPacingMode::kSequenced;
+            }
+            turbo_async_handed_over_ = true;
+            turbo_async_recouple_stalled_ = false;
+            logger_.Info(std::string("Turbo: async worker wait released (") + async_release_reason +
+                         "); frame pacing continues on the application's frame thread for this session.");
         }
         if (ready && XR_FAILED(async_wait_result)) {
             abandon_end_frame_window();
@@ -5246,12 +5658,20 @@ XrResult OpenXrLayer::ForwardEndFrame(XrSession session,
                                                        L"turbo-on.wav", L"turbo-off.wav");
             }
         }
+        // A re-coupled pipeline still waits off-thread. If that wait interlocks
+        // with submission, Turbo being off must not keep the stall: release it
+        // once this wait completes (the next EndFrame).
+        if (!ready && !turbo_engaged && keep_async_pipeline && cadence_countable &&
+            !turbo_async_recouple_stalled_) {
+            turbo_async_recouple_stalled_ = true;
+            logger_.Info("Turbo: async wait stalled while Turbo was off; releasing the async pipeline.");
+        }
 
         if (!frame_begun) {
             // Deferred xrBeginFrame for the pipelined frame. Errors pass
             // through (e.g. the session state machine advanced under us).
             const XrFrameBeginInfo begin_info{XR_TYPE_FRAME_BEGIN_INFO};
-            const XrResult begin_result = next_begin_frame_(session, &begin_info);
+            const XrResult begin_result = TraceRuntimeBeginFrame(session, &begin_info);
             if (XR_FAILED(begin_result)) {
                 logger_.Error("Turbo: deferred xrBeginFrame failed with " +
                               std::to_string(static_cast<int>(begin_result)));
@@ -5283,7 +5703,7 @@ XrResult OpenXrLayer::ForwardEndFrame(XrSession session,
         XrResult comp_result = XR_SUCCESS;
         {
             std::scoped_lock wait_lock(turbo_runtime_wait_mutex_);
-            comp_result = next_wait_frame_(session, &wait_info, &frame_state);
+            comp_result = TraceRuntimeWaitFrame(session, &wait_info, &frame_state);
         }
         const double comp_ms =
             std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - comp_start)
@@ -5302,7 +5722,7 @@ XrResult OpenXrLayer::ForwardEndFrame(XrSession session,
                 NoteTurboShouldRenderLocked(turbo_last_should_render_);
             }
             const XrFrameBeginInfo begin_info{XR_TYPE_FRAME_BEGIN_INFO};
-            const XrResult begin_result = next_begin_frame_(session, &begin_info);
+            const XrResult begin_result = TraceRuntimeBeginFrame(session, &begin_info);
             if (XR_FAILED(begin_result)) {
                 logger_.Error("Turbo: compensation xrBeginFrame failed with " +
                               std::to_string(static_cast<int>(begin_result)));
@@ -5320,7 +5740,12 @@ XrResult OpenXrLayer::ForwardEndFrame(XrSession session,
     if (diag_end) {
         logger_.Debug("Turbo-diag: runtime xrEndFrame starting.");
     }
-    const XrResult result = next_end_frame_(session, frame_end_info);
+    if (turbo_engaged != turbo_trace_last_engaged_) {
+        turbo_trace_.Burst();
+        turbo_trace_.Record("turbo.state", 0, turbo_engaged);
+        turbo_trace_last_engaged_ = turbo_engaged;
+    }
+    const XrResult result = TraceRuntimeEndFrame(session, frame_end_info);
     // Interception is armed by configuration before the first Turbo frame.
     // Only blame Turbo once it is engaged or has an established pipeline.
     if (turbo_engaged || pipeline_established) {
@@ -5419,7 +5844,7 @@ XrResult OpenXrLayer::ForwardEndFrame(XrSession session,
                 XrResult wait_result = XR_SUCCESS;
                 {
                     std::scoped_lock wait_lock(turbo_runtime_wait_mutex_);
-                    wait_result = next_wait_frame_(session, &wait_info, &frame_state);
+                    wait_result = TraceRuntimeWaitFrame(session, &wait_info, &frame_state);
                 }
                 const double wait_ms =
                     std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() -
@@ -5449,7 +5874,7 @@ XrResult OpenXrLayer::ForwardEndFrame(XrSession session,
                         turbo_valve_cv_.notify_all();
                     }
                     const XrFrameBeginInfo begin_info{XR_TYPE_FRAME_BEGIN_INFO};
-                    const XrResult begin_result = next_begin_frame_(session, &begin_info);
+                    const XrResult begin_result = TraceRuntimeBeginFrame(session, &begin_info);
                     if (XR_SUCCEEDED(begin_result)) {
                         std::scoped_lock lock(turbo_mutex_);
                         turbo_frame_begun_ = true;
@@ -5478,7 +5903,7 @@ XrResult OpenXrLayer::ForwardEndFrame(XrSession session,
                                   "; keeping previous frame timing.");
                 }
             }
-        } else if (turbo_engaged) {
+        } else if (turbo_engaged || keep_async_pipeline) {
             // Async pacing: background-thread wait, drained at the next
             // EndFrame.
             std::scoped_lock lock(turbo_mutex_);
@@ -5506,6 +5931,7 @@ XrResult OpenXrLayer::ForwardEndFrame(XrSession session,
                 PublishTurboAsyncHandoffLocked();
                 turbo_async_job_session_ = session;
                 turbo_async_job_pending_ = true;
+                turbo_trace_.Record("worker.queued", turbo_async_wait_generation_);
                 turbo_async_worker_cv_.notify_one();
             }
         }
@@ -5516,13 +5942,17 @@ XrResult OpenXrLayer::ForwardEndFrame(XrSession session,
         }
 
         if (!turbo_engaged) {
-            // Turbo off/suspended. The structural sequenced pipeline stays up
-            // (the valve above already closed — tearing the pipeline down and
-            // re-establishing it wedges PiOpenXR's per-thread pacing); only a
-            // not-yet-established handshake is dropped, and the async
-            // drain-out is logged.
+            // Both established pipelines retain runtime frame ownership while
+            // their valve restores app-visible pacing. A fabricated app wait
+            // can already be queued on another thread when the toggle changes;
+            // removing interception here would forward its unmatched begin.
+            // Only an unestablished handshake can be discarded safely. An
+            // async pipeline that must release (see async_release_reason)
+            // hands over to sequenced ownership at its next retired wait.
             std::scoped_lock lock(turbo_mutex_);
-            CancelTurboAsyncHandoffLocked("turbo disengaged before async publication");
+            if (!keep_async_pipeline) {
+                CancelTurboAsyncHandoffLocked("turbo disengaged before async publication");
+            }
             if (turbo_seq_state_ == TurboSequencedState::kEngaging) {
                 // Nothing was pipelined yet; drop the handshake request.
                 turbo_seq_state_ = TurboSequencedState::kInactive;
@@ -5554,6 +5984,7 @@ XrResult OpenXrLayer::ForwardEndFrame(XrSession session,
     {
         std::scoped_lock lock(turbo_mutex_);
         turbo_end_frame_in_flight_ = false;
+        turbo_async_handoff_cv_.notify_all();
         if (turbo_begin_deferred_) {
             turbo_begin_deferred_ = false;
             issue_deferred_begin = turbo_begin_owed_;
@@ -5565,7 +5996,7 @@ XrResult OpenXrLayer::ForwardEndFrame(XrSession session,
             logger_.Debug("Turbo-diag: issuing deferred establishment xrBeginFrame (frame thread).");
         }
         const XrFrameBeginInfo begin_info{XR_TYPE_FRAME_BEGIN_INFO};
-        const XrResult begin_result = next_begin_frame_(session, &begin_info);
+        const XrResult begin_result = TraceRuntimeBeginFrame(session, &begin_info);
         if (XR_SUCCEEDED(begin_result)) {
             std::scoped_lock lock(turbo_mutex_);
             turbo_frame_begun_ = true;
@@ -5637,7 +6068,8 @@ void OpenXrLayer::ResolveTurboPacingModeLocked() {
     turbo_drain_timeout_count_ = 0;
     turbo_timeout_window_start_.reset();
 
-    const TurboPacingSetting setting = resolved_settings_.turbo.pacing_mode;
+    const TurboPacingSetting setting = turbo_experiment_.enabled ? TurboPacingSetting::kAsync
+                                                               : resolved_settings_.turbo.pacing_mode;
     if (setting != TurboPacingSetting::kAuto) {
         turbo_pacing_mode_ = setting == TurboPacingSetting::kSequenced ? TurboPacingMode::kSequenced
                                                                        : TurboPacingMode::kAsync;
@@ -5690,7 +6122,7 @@ void OpenXrLayer::ResolveTurboPacingModeLocked() {
 void OpenXrLayer::RecordTurboPacingVerdict(TurboPacingMode mode,
                                            const char* source,
                                            std::int64_t stable_seconds) {
-    if (runtime_name_.empty()) {
+    if (runtime_name_.empty() || turbo_experiment_.enabled) {
         return;
     }
     RuntimePacingObservation observation;
@@ -6030,11 +6462,20 @@ void OpenXrLayer::RecordTurboMetricsFrame(bool turbo_engaged,
         (metrics_mode == TurboMetricsMode::kAlways ||
          (metrics_mode == TurboMetricsMode::kBinding &&
           IsTurboMetricsCaptureArmed(metrics_binding, sound_volume)));
+    turbo_metrics_active_.store(capturing);
     if (!capturing) {
+        if (turbo_metrics_was_capturing_) {
+            // Queue the entire tail even if a periodic write is still busy.
+            // No later EndFrame or clean application shutdown is required.
+            turbo_metrics_dirty_ = true;
+            FlushTurboMetrics(false, true);
+            logger_.Info("Turbo metrics: paused capture snapshot queued (live=false).");
+        }
         turbo_metrics_was_capturing_ = false;
         return;
     }
 
+    const bool resuming = !turbo_metrics_was_capturing_ && !turbo_metrics_session_id_.empty();
     const auto now = std::chrono::steady_clock::now();
     if (turbo_metrics_session_id_.empty()) {
         const auto system_now = std::chrono::system_clock::now().time_since_epoch();
@@ -6079,7 +6520,10 @@ void OpenXrLayer::RecordTurboMetricsFrame(bool turbo_engaged,
     turbo_metrics_dirty_ = true;
 
     constexpr std::chrono::seconds kMetricsFlushInterval{15};
-    if (!turbo_metrics_last_flush_time_.has_value()) {
+    if (resuming) {
+        FlushTurboMetrics(false, true);
+        turbo_metrics_last_flush_time_ = now;
+    } else if (!turbo_metrics_last_flush_time_.has_value()) {
         turbo_metrics_last_flush_time_ = now;
     } else if (now - *turbo_metrics_last_flush_time_ >= kMetricsFlushInterval) {
         FlushTurboMetrics(false);
@@ -6120,7 +6564,7 @@ bool OpenXrLayer::IsTurboMetricsCaptureArmed(const InputBinding& binding, int so
     return turbo_metrics_capture_armed_;
 }
 
-void OpenXrLayer::FlushTurboMetrics(bool final_flush) {
+void OpenXrLayer::FlushTurboMetrics(bool final_flush, bool queue_after_pending) {
     if (turbo_metrics_session_id_.empty() || (!turbo_metrics_dirty_ && !final_flush)) {
         return;
     }
@@ -6131,7 +6575,8 @@ void OpenXrLayer::FlushTurboMetrics(bool final_flush) {
     session.runtime_name = runtime_name_;
     session.layer_version = VECTORXR_VERSION;
     session.collection_mode = ToString(turbo_metrics_collection_mode_);
-    session.live = !final_flush;
+    session.timing_configuration = TurboTimingConfiguration();
+    session.live = !final_flush && turbo_metrics_active_.load();
     session.started_unix_seconds = turbo_metrics_started_unix_seconds_;
     session.updated_unix_seconds =
         std::chrono::duration_cast<std::chrono::seconds>(
@@ -6186,16 +6631,23 @@ void OpenXrLayer::FlushTurboMetrics(bool final_flush) {
         // Never block the frame thread on the filesystem: skip this flush if
         // the previous async write is still in flight (data stays dirty and
         // rides the next interval).
-        if (turbo_metrics_write_future_.valid() &&
+        if (!queue_after_pending && turbo_metrics_write_future_.valid() &&
             turbo_metrics_write_future_.wait_for(std::chrono::seconds(0)) !=
                 std::future_status::ready) {
             return;
         }
+        // Move the old future into the new worker before replacing it: destroying
+        // an unfinished std::async future on the frame thread would block it.
+        auto previous = std::move(turbo_metrics_write_future_);
         turbo_metrics_write_future_ =
             std::async(std::launch::async,
-                       [path = ResolveTurboMetricsPath(), snapshot = std::move(session)] {
+                       [this, path = ResolveTurboMetricsPath(), snapshot = std::move(session),
+                        previous = std::move(previous)]() mutable {
+                           if (previous.valid()) previous.wait();
                            std::string error;
-                           RecordTurboMetricsSession(path, snapshot, &error);
+                           if (!RecordTurboMetricsSession(path, snapshot, &error)) {
+                               logger_.Info("Turbo metrics: background session write failed: " + error);
+                           }
                        });
     }
     turbo_metrics_dirty_ = false;
@@ -6252,6 +6704,7 @@ void OpenXrLayer::ArmTurboAsyncHandoffLocked(const char* reason) {
     turbo_async_wait_completed_ = false;
     ++turbo_async_wait_generation_;
     ++turbo_async_handoff_armed_total_;
+    turbo_trace_.Record("handoff.arm", turbo_async_wait_generation_);
     if (turbo_async_handoff_armed_total_ == 1) {
         // Capture establishment and the first several steady-state handoffs,
         // then rely on the five-second aggregate so debug logging cannot turn
@@ -6275,6 +6728,7 @@ void OpenXrLayer::PublishTurboAsyncHandoffLocked() {
         CancelTurboAsyncHandoffLocked("publication missing worker future");
         return;
     }
+    turbo_trace_.Record("handoff.publish", turbo_async_wait_generation_);
     turbo_async_handoff_active_ = false;
     turbo_async_handoff_cv_.notify_all();
     if (logger_.IsDebugEnabled() && turbo_async_handoff_debug_log_budget_ > 0) {
@@ -6292,6 +6746,8 @@ void OpenXrLayer::CancelTurboAsyncHandoffLocked(const char* reason) {
     }
     turbo_async_handoff_active_ = false;
     ++turbo_async_handoff_cancellations_;
+    turbo_trace_.Burst();
+    turbo_trace_.Record("handoff.cancel", turbo_async_wait_generation_);
     turbo_async_handoff_cv_.notify_all();
     logger_.Info("Turbo: async handoff shield cancelled; reason=" +
                  std::string(reason ? reason : "unknown") +
@@ -6310,6 +6766,7 @@ void OpenXrLayer::EnsureTurboAsyncWorkerLocked() {
 void OpenXrLayer::TurboAsyncWorkerLoop() {
     for (;;) {
         XrSession session = XR_NULL_HANDLE;
+        std::uint64_t generation = 0;
         std::shared_ptr<std::promise<void>> completion;
         {
             std::unique_lock lock(turbo_mutex_);
@@ -6320,16 +6777,18 @@ void OpenXrLayer::TurboAsyncWorkerLoop() {
                 return;
             }
             session = turbo_async_job_session_;
+            generation = turbo_async_wait_generation_;
             completion = std::move(turbo_async_job_completion_);
             turbo_async_job_pending_ = false;
         }
 
+        turbo_trace_.Record("worker.job", generation);
         XrFrameState frame_state{XR_TYPE_FRAME_STATE};
         const XrFrameWaitInfo wait_info{XR_TYPE_FRAME_WAIT_INFO};
         XrResult wait_result = XR_SUCCESS;
         {
             std::scoped_lock wait_lock(turbo_runtime_wait_mutex_);
-            wait_result = next_wait_frame_(session, &wait_info, &frame_state);
+            wait_result = TraceRuntimeWaitFrame(session, &wait_info, &frame_state);
         }
         {
             std::scoped_lock state_lock(turbo_mutex_);
@@ -6346,6 +6805,7 @@ void OpenXrLayer::TurboAsyncWorkerLoop() {
             turbo_async_wait_result_ = wait_result;
             turbo_async_wait_completed_ = true;
         }
+        turbo_trace_.Record("worker.ready", generation, wait_result);
         if (completion) {
             completion->set_value();
         }
@@ -6388,9 +6848,18 @@ void OpenXrLayer::DrainTurboAsyncWait() {
 }
 
 void OpenXrLayer::ResetTurboFrameState() {
+    turbo_trace_.Stop();
     // Final metrics flush first (it takes turbo_mutex_ itself and joins the
     // async writer); a second call at teardown is a no-op.
     ResetTurboMetricsState();
+    // A released async pipeline switched this session to frame-thread pacing;
+    // the next session starts from the configured strategy again.
+    if (turbo_experiment_.enabled || turbo_async_handed_over_) turbo_pacing_resolved_ = false;
+    turbo_async_handed_over_ = false;
+    turbo_async_recouple_stalled_ = false;
+    turbo_experiment_ = {};
+    turbo_limit_last_wait_.reset();
+    turbo_trace_last_engaged_ = false;
     DrainRuntimePacingWrites();
     // The async wait worker publishes its result while taking turbo_mutex_.
     // Join it before taking that mutex ourselves; destroying the last async
@@ -6483,6 +6952,11 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
     }
     ReloadConfigIfNeeded();
     RefreshResolvedSettings();
+    PrepareOsd();
+    // Eye images held for the OSD composite belong to one submission. If an
+    // earlier EndFrame returned before forwarding, release them now so the
+    // next composition cannot strand them or submit a stale image.
+    ReleasePendingOsdImages();
     // Capture application-submitted rectangles before synthesized Quadviews
     // rewrites them into two runtime views. Report allocated sizes separately.
     if (frame_end_info && frame_end_info->layers) {
@@ -7068,17 +7542,11 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
                                       frame_end_info->displayTime,
                                       layer_pivot_delta.reverse,
                                       layer_pivot_delta.non_identity,
+                                      find_depth_submission_geometry_for_layer(projection_layer, nullptr),
+                                      &depth_anchor_restored_view_count,
+                                      i==0,
                                       &adjusted_projection_layers.back(),
                                       &adjusted_projection_views.back())) {
-                if (const DepthSubmissionGeometry* layer_geometry =
-                        find_depth_submission_geometry_for_layer(projection_layer, nullptr)) {
-                    depth_anchor_restored_view_count += RestoreDepthSubmissionGeometry(
-                        std::span<XrCompositionLayerProjectionView>(adjusted_projection_views.back()),
-                        0,
-                        *layer_geometry,
-                        layer_pivot_delta.reverse,
-                        layer_pivot_delta.non_identity);
-                }
                 adjusted_layers.push_back(
                     reinterpret_cast<const XrCompositionLayerBaseHeader*>(&adjusted_projection_layers.back()));
                 ++corrected_projection_layer_count;
@@ -7166,6 +7634,7 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
     PruneDepthSubmissionGeometry(frame_end_info->displayTime);
     PruneQuadViewsFrames(frame_end_info->displayTime);
     if (XR_FAILED(release_result)) {
+        ReleasePendingOsdImages();
         return release_result;
     }
 
@@ -7319,17 +7788,149 @@ XrResult OpenXrLayer::CreateReferenceSpace(XrSession session,
     return result;
 }
 
+XrResult OpenXrLayer::CreateAction(XrActionSet set, const XrActionCreateInfo* info, XrAction* action) {
+    const auto result = next_create_action_(set, info, action);
+    if (XR_SUCCEEDED(result) && info && action) {
+        std::scoped_lock lock(mutex_);
+        application_pose_actions_.erase(*action);
+        if (info->actionType == XR_ACTION_TYPE_POSE_INPUT) {
+            application_pose_actions_[*action] = std::make_shared<ApplicationPoseAction>(ApplicationPoseAction{set});
+        }
+    }
+    return result;
+}
+
+XrResult OpenXrLayer::DestroyAction(XrAction action) {
+    const auto result = next_destroy_action_(action);
+    if (XR_SUCCEEDED(result)) {
+        std::scoped_lock lock(mutex_);
+        application_pose_actions_.erase(action);
+        // Existing spaces still locate the old action resource, per OpenXR.
+    }
+    return result;
+}
+
+XrResult OpenXrLayer::DestroyActionSet(XrActionSet set) {
+    const auto result = next_destroy_action_set_(set);
+    if (XR_SUCCEEDED(result)) {
+        std::scoped_lock lock(mutex_);
+        std::erase_if(application_pose_actions_, [set](const auto& entry) { return entry.second->owner == set; });
+    }
+    return result;
+}
+
+XrResult OpenXrLayer::SuggestInteractionProfileBindings(XrInstance instance, const XrInteractionProfileSuggestedBinding* bindings) {
+    const auto result = next_suggest_interaction_profile_bindings_(instance, bindings);
+    if (XR_SUCCEEDED(result) && bindings) {
+        XrPath profile = XR_NULL_PATH, pose = XR_NULL_PATH;
+        // Resolve the standard paths downstream, independently of our private
+        // Quadviews gaze action and without holding the layer's state lock.
+        if (XR_SUCCEEDED(next_string_to_path_(instance, "/interaction_profiles/ext/eye_gaze_interaction", &profile)) &&
+            bindings->interactionProfile == profile &&
+            XR_SUCCEEDED(next_string_to_path_(instance, "/user/eyes_ext/input/gaze_ext/pose", &pose))) {
+            std::scoped_lock lock(mutex_);
+            // A successful re-suggestion replaces this profile's whole list.
+            for (const auto& [handle, action] : application_pose_actions_) action->eye_gaze = false;
+            for (const auto& [handle, space] : application_action_spaces_) space.action->eye_gaze = false;
+            for (uint32_t i = 0; bindings->suggestedBindings && i < bindings->countSuggestedBindings; ++i) {
+                const auto& binding = bindings->suggestedBindings[i];
+                const auto found = application_pose_actions_.find(binding.action);
+                if (binding.binding == pose && found != application_pose_actions_.end()) found->second->eye_gaze = true;
+            }
+        }
+    }
+    return result;
+}
+
+XrResult OpenXrLayer::CreateActionSpace(XrSession session, const XrActionSpaceCreateInfo* info, XrSpace* space) {
+    const auto result = next_create_action_space_(session, info, space);
+    if (XR_SUCCEEDED(result) && info && space) {
+        XrPath eyes = XR_NULL_PATH;
+        const bool includes_eyes = info->subactionPath == XR_NULL_PATH ||
+            (XR_SUCCEEDED(next_string_to_path_(instance_, "/user/eyes_ext", &eyes)) && info->subactionPath == eyes);
+        std::scoped_lock lock(mutex_);
+        application_action_spaces_.erase(*space);
+        const auto action = application_pose_actions_.find(info->action);
+        if (action != application_pose_actions_.end())
+            application_action_spaces_[*space] = {action->second, includes_eyes};
+    }
+    return result;
+}
+
+bool OpenXrLayer::IsHeadRelativeEyeGaze(XrSpace space, XrSpace base_space) const {
+    const auto is_gaze = [&](XrSpace candidate) {
+        const auto found = application_action_spaces_.find(candidate);
+        return found != application_action_spaces_.end() && found->second.includes_eyes && found->second.action->eye_gaze;
+    };
+    return (IsTrackedViewSpace(base_space) && is_gaze(space)) ||
+           (IsTrackedViewSpace(space) && is_gaze(base_space));
+}
+
+XrResult OpenXrLayer::PollEvent(XrInstance instance, XrEventDataBuffer* event_data) {
+    if (!next_poll_event_) {
+        return XR_ERROR_FUNCTION_UNSUPPORTED;
+    }
+    const XrResult result = next_poll_event_(instance, event_data);
+    if (result != XR_SUCCESS || !event_data ||
+        event_data->type != XR_TYPE_EVENT_DATA_REFERENCE_SPACE_CHANGE_PENDING) {
+        return result;
+    }
+    const auto& change = *reinterpret_cast<const XrEventDataReferenceSpaceChangePending*>(event_data);
+    if (change.referenceSpaceType == XR_REFERENCE_SPACE_TYPE_VIEW) {
+        return result;
+    }
+    std::scoped_lock lock(mutex_);
+    if (change.session == active_session_ && pivotxr_reference_changes_.size() < 16) {
+        pivotxr_reference_changes_.push_back({change.referenceSpaceType, change.changeTime});
+        logger_.Info("Runtime reference space change pending: type=" +
+                     std::to_string(static_cast<int>(change.referenceSpaceType)) +
+                     ", changeTime=" + std::to_string(change.changeTime) +
+                     "; Pivot re-anchors its seated position at the change.");
+    }
+    return result;
+}
+
+bool OpenXrLayer::PivotAnchorAffectedBy(XrReferenceSpaceType type) const {
+    if (!pivotxr_translation_anchor_) {
+        return false;
+    }
+    const XrSpace space = pivotxr_translation_anchor_->space;
+    if (tracked_local_spaces_.contains(space)) {
+        return type == XR_REFERENCE_SPACE_TYPE_LOCAL || type == XR_REFERENCE_SPACE_TYPE_LOCAL_FLOOR_EXT;
+    }
+    if (tracked_stage_spaces_.contains(space)) {
+        return type == XR_REFERENCE_SPACE_TYPE_STAGE;
+    }
+    // Unknown app space type (e.g. LOCAL_FLOOR or a custom origin): any
+    // tracking-origin change may move it.
+    return true;
+}
+
 XrResult OpenXrLayer::LocateSpace(XrSpace space, XrSpace base_space, XrTime time, XrSpaceLocation* location) {
     bool pivotxr_active = false;
     bool pivot_processing_required = false;
+    XrSpace anchor_space = XR_NULL_HANDLE;
+    XrSpace reference_space = XR_NULL_HANDLE;
+    XrTime anchor_locate_time = time;
     {
         std::scoped_lock lock(mutex_);
         ReloadConfigIfNeeded();
         RefreshResolvedSettings();
-        if (resolved_settings_.core.enabled && resolved_settings_.pivotxr.enabled) {
+        // Head-relative eye direction must stay attached to the virtual head.
+        // Applying the inverse camera rotation here moves MSFS's focus region
+        // away from the user's eyes. Preserve the complete runtime result,
+        // including sample time/validity, and avoid extra anchor-space queries.
+        if (resolved_settings_.core.enabled && resolved_settings_.pivotxr.enabled &&
+            !IsHeadRelativeEyeGaze(space, base_space)) {
             pivotxr_active = IsPivotXrActive();
             pivot_processing_required =
                 pivotxr_active || pivotxr_activation_gain_ > kPivotActivationGainEpsilon;
+            if (pivot_processing_required && pivotxr_translation_anchor_ &&
+                IsTrackedViewSpace(space) != IsTrackedViewSpace(base_space)) {
+                reference_space = IsTrackedViewSpace(space) ? base_space : space;
+                anchor_space = pivotxr_translation_anchor_->space;
+                anchor_locate_time = ClampInternalLocateTime(time);
+            }
         }
     }
 
@@ -7360,9 +7961,17 @@ XrResult OpenXrLayer::LocateSpace(XrSpace space, XrSpace base_space, XrTime time
         return result;
     }
 
+    XrSpaceLocation anchor_relation{XR_TYPE_SPACE_LOCATION};
+    if (anchor_space != XR_NULL_HANDLE && anchor_space != reference_space) {
+        if (XR_FAILED(next_locate_space_(anchor_space, reference_space, anchor_locate_time, &anchor_relation))) {
+            anchor_relation.locationFlags = 0;
+        }
+    }
     std::scoped_lock lock(mutex_);
+    const bool same_anchor_space = pivotxr_translation_anchor_ &&
+        pivotxr_translation_anchor_->space == anchor_space;
     return ApplyPivotToLocatedSpace(space, base_space, time, pivotxr_active, location, nullptr,
-                                    nullptr, nullptr, false);
+                                    nullptr, nullptr, false, same_anchor_space ? &anchor_relation : nullptr);
 }
 
 XrResult OpenXrLayer::LocateViews(XrSession session,
@@ -7519,6 +8128,11 @@ XrResult OpenXrLayer::LocateViews(XrSession session,
             origin.session = session;
             origin.location_flags = origin_location.locationFlags;
             pivotxr_origin_ = origin;
+            pivotxr_translation_anchor_.reset();
+            if ((origin_location.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT) != 0) {
+                pivotxr_translation_anchor_ = PivotTranslationAnchor{
+                    origin.pose.position, view_locate_info->space};
+            }
             pivotxr_origin_capture_pending_ = false;
             std::ostringstream origin_stream;
             origin_stream << "PivotXR origin captured: yaw=" << FormatDiagnosticDouble(origin.yaw_radians)
@@ -7655,6 +8269,7 @@ XrResult OpenXrLayer::LocateViews(XrSession session,
             pivot_diagnostic_.recomposition_mode = "locate_space_failed";
         }
     } else if (!pivotxr_envelope_engaged) {
+        if (!pivotxr_origin_) pivotxr_translation_anchor_.reset();
         pivotxr_smoothed_extra_yaw_radians_ = 0.0;
         pivotxr_smoothed_extra_pitch_radians_ = 0.0;
         pivotxr_yaw_step_ = 0;
@@ -7948,8 +8563,12 @@ XrResult OpenXrLayer::DestroySpace(XrSpace space) {
         logged_pivot_space_conversions_.erase(space);
         failed_pivot_space_conversions_.erase(space);
         tracked_view_spaces_.erase(space);
+        application_action_spaces_.erase(space);
         tracked_local_spaces_.erase(space);
         tracked_stage_spaces_.erase(space);
+        if (pivotxr_translation_anchor_ && pivotxr_translation_anchor_->space == space) {
+            pivotxr_translation_anchor_.reset();
+        }
         if (space == internal_view_space_) {
             internal_view_space_ = XR_NULL_HANDLE;
         }
@@ -8153,6 +8772,74 @@ void OpenXrLayer::PollConfigFile() {
     }
 }
 
+OsdSnapshot OpenXrLayer::BuildOsdSnapshot() const {
+    OsdSnapshot snapshot;
+    snapshot.application=current_exe_name_; snapshot.runtime=runtime_name_;
+    const bool turbo_enabled=resolved_settings_.turbo.enabled && resolved_settings_.core.enabled;
+    snapshot.turbo=!turbo_enabled?"Disabled":!turbo_toggle_enabled_?"Enabled / Off":
+        turbo_recovery_blocked_.load()?"Recovery blocked":turbo_auto_suspended_.load()?"Suspended":
+        turbo_effective_active_.load()?(turbo_effective_async_.load()?"Async":"Sequenced"):
+        "Enabled / Waiting";
+    if(turbo_metrics_active_.load())snapshot.turbo+=" / Analyzing";
+    snapshot.experimental=turbo_experiment_.enabled;
+    auto add=[&](const char* name) { if (!snapshot.modules.empty()) snapshot.modules+="  /  "; snapshot.modules+=name; };
+    if (resolved_settings_.core.enabled && resolved_settings_.depthxr.enabled && depthxr_toggle_enabled_) add("Depth");
+    if (resolved_settings_.core.enabled && resolved_settings_.pivotxr.enabled) add("Pivot");
+    if (turbo_enabled) add("Turbo");
+    if (quadviews_session_active_.value_or(false)) add("Quadviews");
+    if (snapshot.modules.empty()) snapshot.modules="Off";
+    snapshot.pivot="Disabled";
+    snapshot.compact_pivot="Disabled";
+    if (resolved_settings_.core.enabled && resolved_settings_.pivotxr.enabled) {
+        snapshot.pivot="Pivot ready";
+        const auto& profiles=resolved_settings_.pivotxr.profiles;
+        const bool quick=pivotxr_quick_view_active_ || pivotxr_quick_view_transitioning_;
+        const auto index=quick?pivotxr_quick_view_profile_index_:pivotxr_active_profile_index_;
+        if ((pivotxr_engaged_ || quick) && index<profiles.size()) snapshot.pivot=profiles[index].name+" Applied";
+        const bool nudged=!PivotViewOffsetNearlyZero(pivotxr_manual_view_transition_.current) ||
+            !PivotViewOffsetNearlyZero(pivotxr_manual_view_transition_.target) ||
+            !PivotViewOffsetNearlyZero(pivotxr_profile_view_transition_.current) ||
+            !PivotViewOffsetNearlyZero(pivotxr_profile_view_transition_.target);
+        if (nudged) snapshot.pivot+=(snapshot.pivot=="Pivot ready"?" / ":", ")+std::string("Nudges Applied");
+        if (quick) snapshot.pivot+=", Quick View Applied";
+        snapshot.compact_pivot=quick?"Quick view":pivotxr_engaged_?"Applied":"Ready";
+        if (nudged) snapshot.compact_pivot=(!quick && !pivotxr_engaged_)?"Nudged":snapshot.compact_pivot+" + Nudge";
+    }
+    const auto& e=resolved_settings_.turbo.experimental;
+    if (e.enabled!=turbo_experiment_.enabled || (e.enabled &&
+        (e.wait_for_submit!=turbo_experiment_.wait_for_submit || e.sample_at_entry!=turbo_experiment_.sample_at_entry ||
+         e.prediction_percent!=turbo_experiment_.prediction_percent || e.frame_limit!=turbo_experiment_.frame_limit)))
+        snapshot.restart="Turbo experiments";
+    if (deferred_quadviews_config_active_) snapshot.restart+=(snapshot.restart.empty()?"":" + ")+std::string("Quadviews");
+    return snapshot;
+}
+
+void OpenXrLayer::PrepareOsd() {
+    const auto prepare_start=std::chrono::steady_clock::now();
+    const auto record=[&]{osd_.RecordPrepare(std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-prepare_start).count());};
+    const auto& settings=resolved_settings_.core.osd;
+    if (!settings.enabled && !osd_was_enabled_) {record();return;}
+    osd_was_enabled_=settings.enabled;
+    // OSD remains available when enhancements are off, so it can explain state.
+    if (settings.enabled) {
+        const auto now=std::chrono::steady_clock::now();
+        if (!osd_last_input_poll_ || now-*osd_last_input_poll_>=kInputBindingPollInterval) {
+            osd_last_input_poll_=now;
+            osd_toggle_down_=PollInputBindingDown(settings.toggle_binding);
+            osd_cycle_down_=PollInputBindingDown(settings.cycle_binding);
+        }
+    }
+    // The status strings are only read when the worker rasterizes (at the
+    // refresh rate), so build them then instead of on every EndFrame.
+    std::optional<OsdSnapshot> snapshot;
+    if (settings.enabled && osd_.SnapshotDue()) snapshot=BuildOsdSnapshot();
+    const auto [before, after]=osd_.Prepare(settings, std::move(snapshot), osd_toggle_down_, osd_cycle_down_,
+                                            osd_settings_revision_);
+    record();
+    if (before.compact!=after.compact) SoundPlayer::Instance().PlayTransition(settings.cycle_binding.sound,after.compact,dll_directory_,resolved_settings_.core.sound_volume);
+    if (before.shown!=after.shown) SoundPlayer::Instance().PlayTransition(settings.toggle_binding.sound,after.shown,dll_directory_,resolved_settings_.core.sound_volume);
+}
+
 void OpenXrLayer::RefreshResolvedSettings() {
     // Re-resolving settings is expensive (string compares, copies, logging
     // checks); the result only changes when the config document or the active
@@ -8169,6 +8856,9 @@ void OpenXrLayer::RefreshResolvedSettings() {
     const ResolvedRuntimeConfig previous = resolved_settings_;
     resolved_settings_ = ResolveRuntimeConfig(config_, current_exe_name_);
 
+    osd_monitoring_.store(resolved_settings_.core.osd.enabled, std::memory_order_relaxed);
+    osd_last_input_poll_.reset();
+    ++osd_settings_revision_;
     const bool configured_core_active = resolved_settings_.core.enabled;
     const bool configured_quadviews_active =
         configured_core_active && resolved_settings_.quadviews.enabled;
@@ -8246,6 +8936,7 @@ void OpenXrLayer::RefreshResolvedSettings() {
     frame_pacing_debug_enabled_.store(resolved_settings_.core.log_level == LogLevel::Debug,
                                       std::memory_order_relaxed);
     logger_.SetLevel(resolved_settings_.core.log_level);
+    turbo_trace_.SetDebugEnabled(logger_, resolved_settings_.core.log_level == LogLevel::Debug);
     logger_.SetRetentionFiles(resolved_settings_.core.log_retention_files);
     if (!last_logged_settings_ || !SameSettings(*last_logged_settings_, resolved_settings_)) {
         LogResolvedSettings(resolved_settings_);
@@ -8451,6 +9142,11 @@ void OpenXrLayer::CaptureInstanceFunctions() {
     }
 
     function = nullptr;
+    if (XR_SUCCEEDED(next_get_instance_proc_addr_(instance_, "xrPollEvent", &function))) {
+        next_poll_event_ = reinterpret_cast<PFN_xrPollEvent>(function);
+    }
+
+    function = nullptr;
     if (XR_SUCCEEDED(next_get_instance_proc_addr_(instance_, "xrLocateViews", &function))) {
         next_locate_views_ = reinterpret_cast<PFN_xrLocateViews>(function);
     }
@@ -8503,6 +9199,13 @@ void OpenXrLayer::CaptureInstanceFunctions() {
 }
 
 void OpenXrLayer::ResetSessionState() {
+    application_action_spaces_.clear();
+    osd_.Shutdown();
+    ReleasePendingOsdImages();osd_composite_.Reset();osd_composite_logged_=false;osd_composite_fallback_logged_=false;
+    osd_monitoring_.store(false);
+    osd_should_render_.store(true);
+    osd_last_input_poll_.reset();
+    osd_toggle_down_=false; osd_cycle_down_=false; osd_was_enabled_=false;osd_vulkan_.store(false);turbo_metrics_active_.store(false);
     if (!runtime_relay_session_id_.empty()) {
         runtime_relay_sessions_to_remove_.push_back(runtime_relay_session_id_);
         runtime_relay_session_id_.clear();
@@ -8600,6 +9303,8 @@ void OpenXrLayer::ResetSessionState() {
 }
 
 void OpenXrLayer::ResetInstanceState() {
+    application_action_spaces_.clear();
+    application_pose_actions_.clear();
     quad_views_extension_requested_ = false;
     varjo_foveated_rendering_extension_requested_ = false;
     d3d11_graphics_extension_requested_ = false;
@@ -9863,6 +10568,7 @@ XrResult OpenXrLayer::LocateRuntimeViews(XrSession session,
     }
 
     bool quadviews_emulation_active = false;
+    if (view_locate_info) turbo_trace_.Record("locate", turbo_trace_.NextId(), view_locate_info->displayTime);
     bool varjo_compatible = false;
     bool request_native_foveated_locates = false;
     QuadViewsResolvedSettings quadviews_settings;
@@ -10126,7 +10832,8 @@ XrResult OpenXrLayer::ApplyPivotToLocatedSpace(XrSpace space,
                                                double* applied_extra_yaw_radians,
                                                double* applied_extra_pitch_radians,
                                                XrPosef* applied_pose_delta,
-                                               bool update_smoothing) {
+                                               bool update_smoothing,
+                                               const XrSpaceLocation* anchor_space_in_reference) {
     const XrResult result = XR_SUCCESS;
     if (applied_pose_delta) {
         *applied_pose_delta = IdentityPose();
@@ -10142,6 +10849,7 @@ XrResult OpenXrLayer::ApplyPivotToLocatedSpace(XrSpace space,
 
     if (!resolved_settings_.pivotxr.enabled) {
         pivotxr_activation_gain_ = 0.0;
+        pivotxr_translation_anchor_.reset();
         clear_extra_outputs();
         return result;
     }
@@ -10183,6 +10891,7 @@ XrResult OpenXrLayer::ApplyPivotToLocatedSpace(XrSpace space,
     // engaged. While the envelope is still open we keep applying the (eased)
     // pivot so toggling off releases the view smoothly.
     if (!pivotxr_active && pivotxr_activation_gain_ <= kPivotActivationGainEpsilon) {
+        if (!pivotxr_origin_) pivotxr_translation_anchor_.reset();
         pivotxr_activation_gain_ = 0.0;
         pivotxr_smoothed_extra_yaw_radians_ = 0.0;
         pivotxr_smoothed_extra_pitch_radians_ = 0.0;
@@ -10204,7 +10913,31 @@ XrResult OpenXrLayer::ApplyPivotToLocatedSpace(XrSpace space,
         return result;
     }
 
+    if ((location->locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT) == 0) {
+        clear_extra_outputs();
+        return result;
+    }
+
     const XrPosef view_pose = space_is_view ? location->pose : InvertPose(location->pose);
+    const XrSpace reference_space = space_is_view ? base_space : space;
+    const bool position_valid = (location->locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT) != 0;
+    if (update_smoothing && !pivotxr_reference_changes_.empty()) {
+        // A recenter reached this frame: the stored anchor coordinates now
+        // name a different physical point, which would orbit the camera.
+        std::erase_if(pivotxr_reference_changes_, [&](const PivotReferenceChange& change) {
+            if (time < change.change_time) {
+                return false;
+            }
+            if (PivotAnchorAffectedBy(change.type)) {
+                pivotxr_translation_anchor_.reset();
+                logger_.Info("PivotXR: re-anchoring the seated position after a runtime recenter.");
+            }
+            return true;
+        });
+    }
+    if (update_smoothing && position_valid && !pivotxr_translation_anchor_) {
+        pivotxr_translation_anchor_ = PivotTranslationAnchor{view_pose.position, reference_space};
+    }
     const ViewOrientation orientation{
         view_pose.orientation.x,
         view_pose.orientation.y,
@@ -10333,7 +11066,8 @@ XrResult OpenXrLayer::ApplyPivotToLocatedSpace(XrSpace space,
     }
     constexpr double kPi = 3.14159265358979323846;
     const double extra_yaw_radians =
-        std::clamp(applied_view_offset.yaw_radians, -kPi, kPi);
+        quick_view_override ? WrapRadians(applied_view_offset.yaw_radians)
+                            : std::clamp(applied_view_offset.yaw_radians, -kPi, kPi);
     const double extra_pitch_radians =
         std::clamp(applied_view_offset.pitch_radians,
                    DegreesToRadians(-85.0), DegreesToRadians(85.0));
@@ -10363,8 +11097,37 @@ XrResult OpenXrLayer::ApplyPivotToLocatedSpace(XrSpace space,
     if (applied_extra_pitch_radians) {
         *applied_extra_pitch_radians = extra_pitch_radians;
     }
+    std::optional<XrVector3f> translation_anchor;
+    if (position_valid && pivotxr_translation_anchor_) {
+        const auto& anchor = *pivotxr_translation_anchor_;
+        if (anchor.space == reference_space) {
+            translation_anchor = anchor.position;
+        } else {
+            // Like the submission-space conversion, this internal reference
+            // relation must use the known runtime horizon, never a fabricated
+            // future Turbo time that could block while holding mutex_.
+            XrSpaceLocation located_relation{XR_TYPE_SPACE_LOCATION};
+            // xrLocateSpace supplies this relation from outside mutex_. Only
+            // the xrLocateViews drive path may perform the internal lookup.
+            if (!anchor_space_in_reference && update_smoothing && next_locate_space_) {
+                if (XR_SUCCEEDED(next_locate_space_(anchor.space, reference_space,
+                    ClampInternalLocateTime(time), &located_relation))) {
+                    anchor_space_in_reference = &located_relation;
+                }
+            }
+            constexpr XrSpaceLocationFlags valid_pose =
+                XR_SPACE_LOCATION_ORIENTATION_VALID_BIT | XR_SPACE_LOCATION_POSITION_VALID_BIT;
+            if (anchor_space_in_reference &&
+                (anchor_space_in_reference->locationFlags & valid_pose) == valid_pose) {
+                XrPosef anchor_pose = IdentityPose();
+                anchor_pose.position = anchor.position;
+                translation_anchor = MultiplyPoses(anchor_pose, anchor_space_in_reference->pose).position;
+            }
+        }
+    }
     XrPosef selected_pose = ApplyExtraRotationToPose(
-        view_pose, static_cast<float>(extra_yaw_radians), static_cast<float>(extra_pitch_radians));
+        view_pose, static_cast<float>(extra_yaw_radians), static_cast<float>(extra_pitch_radians),
+        translation_anchor ? &*translation_anchor : nullptr);
     if (!NearlyZero(applied_view_offset.right_meters) ||
         !NearlyZero(applied_view_offset.up_meters) ||
         !NearlyZero(applied_view_offset.forward_meters)) {
@@ -10498,6 +11261,8 @@ void OpenXrLayer::ResetPivotActivationState() {
     pivotxr_quick_view_index_ = 0;
     pivotxr_origin_.reset();
     pivotxr_origin_capture_pending_ = false;
+    pivotxr_translation_anchor_.reset();
+    pivotxr_reference_changes_.clear();
     pivotxr_binding_last_poll_time_.reset();
     pivot_diagnostic_stride_counter_ = 0;
     pivot_diagnostic_ = PivotDiagnosticState{};
@@ -11873,6 +12638,7 @@ bool OpenXrLayer::IsPivotXrActive() {
         if (release_origin.pressed && (pivotxr_origin_.has_value() || pivotxr_origin_capture_pending_)) {
             pivotxr_origin_.reset();
             pivotxr_origin_capture_pending_ = false;
+            pivotxr_translation_anchor_.reset();
             pivotxr_manual_view_transition_ = {};
             pivotxr_profile_view_transition_ = {};
             pivotxr_quick_view_transition_ = {};
@@ -12114,6 +12880,7 @@ void OpenXrLayer::PollRuntimeRelay() {
         now - *runtime_relay_last_status_write_ >= std::chrono::seconds(1);
     if (!heartbeat_due && !runtime_relay_status_dirty_.exchange(false, std::memory_order_acq_rel)) return;
 
+    osd_.ReportDiagnostics();
     RuntimeStatusDocument status;
     {
         std::scoped_lock lock(mutex_);
@@ -12127,6 +12894,9 @@ void OpenXrLayer::PollRuntimeRelay() {
             turbo_auto_suspended_.load() ? "suspended" :
             turbo_effective_active_.load() ? (turbo_effective_async_.load() ? "async" : "sequenced") :
             (resolved_settings_.core.enabled && resolved_settings_.turbo.enabled && turbo_toggle_enabled_) ? "waiting" : "off";
+        const auto overlay=osd_.Status();
+        status.osd_available=overlay.available; status.osd_visible=overlay.visible;
+        status.osd_compact=overlay.compact; status.osd_message=overlay.message;
         status.turbo_reason = turbo_recovery_.Reason();
         if (status.turbo_reason.empty() && turbo_auto_suspended_.load())
             status.turbo_reason = "Runtime pacing repeatedly stalled. Use the Turbo toggle to retry.";

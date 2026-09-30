@@ -26,6 +26,7 @@
 #include "depthxr/settings_resolver.h"
 #include "depthxr/swapchain_state.h"
 #include "depthxr/turbo_metrics.h"
+#include "depthxr/turbo_trace.h"
 
 #ifdef _WIN32
 #include <d3dcompiler.h>
@@ -37,6 +38,96 @@ void Expect(bool condition, const std::string& message) {
     if (!condition) {
         std::cerr << message << '\n';
         std::exit(1);
+    }
+}
+
+void TestOsdConfig() {
+    const auto parse=[](const std::string& osd) {
+        return depthxr::ParseConfig(R"({"version":3,"core":{"enabled":true,"logLevel":"info","osd":)"+osd+R"(},"applications":[],"modules":{"depthxr":{"enabled":false,"defaults":{"stereoBoost":1,"convergence":0},"bindings":{"toggleEnabled":{"type":"none"}},"profiles":[]},"pivotxr":{"enabled":false,"defaults":{},"profiles":[]}}})");
+    };
+    const auto defaults=parse("{}");
+    Expect(defaults.ok && !defaults.document.core.osd.enabled && defaults.document.core.osd.update_hz==5,
+           "OSD default compatibility failed: "+defaults.error);
+    const auto configured=parse(R"({"enabled":true,"visibleOnStart":false,"compact":true,"horizontalDegrees":-40,
+      "verticalDegrees":35,"distanceMeters":0.5,"scale":150,"opacity":30,"updateHz":20,"showGraph":false,
+      "showRuntime":false,"showTurbo":false,"showModules":false,"showClock":false,"accent":"blue",
+      "toggleBinding":{"type":"keyboard","chord":["Ctrl","F10"]},"cycleBinding":{"type":"none"}})");
+    Expect(configured.ok,"Valid OSD rejected: "+configured.error);
+    const auto custom=parse(R"({"scale":25,"showPivot":true,"clockFormat":"12","accent":"custom","customColor":"#aB12Ef","bodyOrder":["pivot","turbo","graph","modules"],"customPresets":[{"name":"Small cockpit","settings":{"scale":25,"accent":"rose","showPivot":false}}]})");
+    Expect(custom.ok && custom.document.core.osd.scale==25 && custom.document.core.osd.clock_format=="12" &&
+           custom.document.core.osd.custom_color=="#aB12Ef" && custom.document.core.osd.body_order.front()=="pivot","Custom OSD configuration rejected: "+custom.error);
+    for (const auto& bad:{R"({"customColor":"#zzzzzz"})",R"({"bodyOrder":["graph","graph"]})",R"({"clockFormat":"13"})",R"({"customPresets":[{"name":"Bad","settings":{"customPresets":[]}}]})"})
+        Expect(!parse(bad).ok,"Malformed OSD layout accepted");
+    const auto& osd=configured.document.core.osd;
+    Expect(osd.compact_show_runtime && osd.compact_show_clock && !osd.compact_show_turbo && !osd.compact_show_pivot,
+           "Independent compact defaults were not preserved");
+    const auto compact=parse(R"({"showRuntime":false,"showClock":false,"showTurbo":false,"showPivot":false,"compactShowRuntime":true,"compactShowClock":true,"compactShowTurbo":true,"compactShowPivot":true})");
+    Expect(compact.ok && compact.document.core.osd.compact_show_runtime && compact.document.core.osd.compact_show_clock &&
+           compact.document.core.osd.compact_show_turbo && compact.document.core.osd.compact_show_pivot &&
+           !compact.document.core.osd.show_turbo && !compact.document.core.osd.show_pivot,"Independent compact settings were dropped");
+    for (const auto* key:{"compactShowRuntime","compactShowClock","compactShowTurbo","compactShowPivot"})
+        Expect(!parse(std::string("{\"")+key+"\":1}").ok,"Invalid compact flag accepted");
+    const auto micro=parse(R"({"compactMetrics":"fps","compactShowBrand":false,"compactShowApp":false,"compactShowClock":false,"compactShowRuntime":false})");
+    Expect(micro.ok && micro.document.core.osd.compact_metrics=="fps" && !micro.document.core.osd.compact_show_brand && !micro.document.core.osd.compact_show_app,"Micro settings were dropped");
+    Expect(!parse(R"({"compactMetrics":"bad"})").ok,"Unknown compact metrics accepted");
+    const auto no_header=parse(R"({"showBrand":false,"showApp":false,"showRuntime":false,"showClock":false})");
+    Expect(no_header.ok && !no_header.document.core.osd.show_brand && !no_header.document.core.osd.show_app &&
+           !no_header.document.core.osd.show_runtime && !no_header.document.core.osd.show_clock,"Expanded header choices were dropped");
+    Expect(!parse(R"({"showBrand":1})").ok && !parse(R"({"showApp":"false"})").ok,"Invalid expanded header flags accepted");
+    Expect(osd.enabled && !osd.visible_on_start && osd.compact && osd.horizontal_degrees==-40 &&
+           osd.vertical_degrees==35 && osd.distance_meters==.5 && osd.scale==150 && osd.opacity==30 &&
+           osd.update_hz==20 && !osd.show_graph && !osd.show_runtime && !osd.show_turbo && !osd.show_modules &&
+           !osd.show_clock && osd.accent=="blue" && osd.toggle_binding.chord.size()==2 &&
+           osd.cycle_binding.type==depthxr::InputBindingType::None,"OSD fields were dropped");
+    for(const std::string& fields:{R"("horizontalDegrees":41)",R"("verticalDegrees":-36)",R"("distanceMeters":0)",
+      R"("scale":24)",R"("opacity":101)",R"("updateHz":0)",R"("updateHz":5.5)",R"("enabled":"true")",
+      R"("showClock":1)",R"("accent":"red")",R"("unknown":true)"})
+        Expect(!parse("{"+fields+"}").ok,"Invalid OSD accepted: "+fields);
+}
+
+void TestTurboExperimentalConfig() {
+    const auto parse = [](const std::string& turbo) {
+        return depthxr::ParseConfig(R"({"version":3,"core":{"enabled":true,"logLevel":"info","logRetentionFiles":7},
+          "applications":[{"id":"dcs","name":"DCS","enabled":true,"match":{"exe":"DCS.exe"}}],
+          "modules":{"depthxr":{"enabled":false,"defaults":{"stereoBoost":1,"convergence":0},"bindings":{"toggleEnabled":{"type":"none"}},"profiles":[]},
+          "pivotxr":{"enabled":false,"defaults":{},"profiles":[]},"turbo":)" + turbo + "}}");
+    };
+    const auto legacy = parse(R"({"enabled":true})");
+    Expect(legacy.ok && !legacy.document.turbo.experimental.enabled &&
+        legacy.document.turbo.experimental.prediction_percent == 100, "Legacy Turbo timing must remain neutral: " + legacy.error);
+    const auto configured = parse(R"({"enabled":true,"experimental":{"enabled":true,"applicationIds":["dcs"],
+      "waitForSubmit":true,"sampleAtEntry":true,"predictionPercent":75,"frameLimit":45,"timingTrace":true}})");
+    Expect(configured.ok, "Valid experimental config rejected: " + configured.error);
+    const auto dcs = depthxr::ResolveTurboSettings(configured.document, "DCS.exe");
+    const auto other = depthxr::ResolveTurboSettings(configured.document, "Other.exe");
+    Expect(dcs.experimental.enabled && dcs.experimental.wait_for_submit &&
+           dcs.experimental.sample_at_entry && dcs.experimental.frame_limit == 45 &&
+           dcs.experimental.prediction_percent == 75, "Selected application's experimental settings were lost");
+    Expect(!other.experimental.enabled, "Experiments escaped the application allowlist");
+    const auto turbo_off = parse(R"({"enabled":false,"experimental":{"enabled":true,"applicationIds":["dcs"]}})");
+    Expect(turbo_off.ok && !depthxr::ResolveTurboSettings(turbo_off.document, "DCS.exe").experimental.enabled,
+           "Legacy module timing must not apply where Turbo is off for the application");
+    auto disabled = configured.document;
+    disabled.applications[0].enabled = false;
+    Expect(!depthxr::ResolveTurboSettings(disabled, "DCS.exe").experimental.enabled,
+           "Disabled registered application enabled experiments");
+    auto profiles=parse(R"({"enabled":false,"profiles":[
+      {"id":"first","name":"Toolkit","enabled":true,"applicationIds":["dcs"],"experimental":{"enabled":true,"waitForSubmit":true,"sampleAtEntry":true}},
+      {"id":"second","name":"Custom","enabled":true,"applicationIds":["dcs"],"experimental":{"enabled":true,"predictionPercent":80,"frameLimit":45}}]})");
+    Expect(profiles.ok,"Profile timing parse failed: "+profiles.error);
+    auto selected=depthxr::ResolveTurboSettings(profiles.document,"DCS.exe");
+    Expect(selected.enabled && selected.experimental.enabled && selected.experimental.wait_for_submit && selected.profile_name=="Toolkit", "First profile timing not selected");
+    profiles.document.turbo.profiles[0].enabled=false;
+    selected=depthxr::ResolveTurboSettings(profiles.document,"DCS.exe");
+    Expect(selected.experimental.prediction_percent==80 && selected.experimental.frame_limit==45 && selected.profile_name=="Custom", "Independent profile settings lost");
+    profiles.document.turbo.profiles[1].experimental=depthxr::TurboExperimentalSettings{};
+    Expect(!depthxr::ResolveTurboSettings(profiles.document,"DCS.exe").experimental.enabled,"Normal profile did not disable experiments");
+    Expect(!parse(R"({"profiles":[{"name":"Bad","applicationIds":["dcs"],"experimental":{"predictionPercent":200}}]})").ok,"Bad profile timing accepted");
+    for (const std::string& fields : {R"("predictionPercent":49)", R"("predictionPercent":101)",
+         R"("predictionPercent":75.5)", R"("frameLimit":1)", R"("frameLimit":241)", R"("frameLimit":45.5)",
+         R"("waitForSubmit":"yes")", R"("unknown":true)"}) {
+        const auto invalid = parse("{\"experimental\":{" + fields + "}}");
+        Expect(!invalid.ok, "Invalid experimental settings accepted: " + fields);
     }
 }
 
@@ -1145,6 +1236,7 @@ void TestTurboMetricsSessionRoundTrip() {
     session.runtime_name = "PiOpenXR";
     session.layer_version = "0.12.1";
     session.collection_mode = "binding";
+    session.timing_configuration = "Experimental Async; cap=45; trace=on";
     session.live = true;
     session.started_unix_seconds = 1000;
     session.updated_unix_seconds = 1015;
@@ -1186,6 +1278,8 @@ void TestTurboMetricsSessionRoundTrip() {
 
     auto sessions = depthxr::ReadTurboMetricsSessions(path);
     Expect(sessions.size() == 1, "Turbo metrics session upsert should not duplicate");
+    Expect(sessions[0].timing_configuration == session.timing_configuration,
+           "Metrics lost the session's experimental timing label");
     Expect(sessions[0].session_id == "DCS.exe-1000", "Turbo metrics session id mismatch");
     Expect(sessions[0].app_name == "DCS.exe", "Turbo metrics app name mismatch");
     Expect(sessions[0].runtime_name == "PiOpenXR", "Turbo metrics runtime name mismatch");
@@ -2015,6 +2109,86 @@ void TestPivotYawNoOpInsideDeadzone() {
     Expect(std::abs(smoothed_extra_yaw) < 0.0001, "PivotXR should not accumulate extra yaw inside the deadzone");
 }
 
+void TestTurboTraceBoundedAndDrained() {
+    const auto directory = std::filesystem::current_path() / "build" / "vectorxr-test-turbo-trace";
+    std::filesystem::create_directories(directory);
+    std::filesystem::path log_path;
+    {
+        depthxr::Logger logger;
+        logger.Initialize(directory / "trace.log");
+        logger.SetLevel(depthxr::LogLevel::Debug);
+        log_path = logger.ActiveLogPath();
+        depthxr::TurboTimingTrace trace;
+        trace.Record("disabled");
+        Expect(!trace.Enabled() && trace.NextId() == 0, "Disabled trace must be inert");
+        trace.Start(logger);
+        trace.Record("test.first", trace.NextId(), 11, 22, 33);
+        for (int i = 0; i < 40000; ++i) {
+            if (i % 1000 == 0) trace.Burst();
+            trace.Record("test.event", trace.NextId(), i);
+        }
+        trace.Stop();
+        Expect(!trace.Enabled(), "Stopping trace left it active");
+        trace.Record("after.stop");
+        trace.SetDebugEnabled(logger, true);
+        Expect(!trace.Enabled(), "Log-level update restarted an ended session");
+    }
+    std::ifstream input(log_path);
+    std::string line;
+    std::size_t events = 0;
+    bool first = false;
+    while (std::getline(input, line)) {
+        if (line.find("Turbo-trace ns=") != std::string::npos) ++events;
+        first = first || line.find("event=test.first a=11 b=22 c=33") != std::string::npos;
+        Expect(line.find("event=disabled") == std::string::npos && line.find("event=after.stop") == std::string::npos,
+               "Disabled tracing wrote events");
+    }
+    Expect(first && events > 0 && events <= 30000, "Trace lost its first event, failed to drain, or exceeded its budget");
+    input.close();
+    std::filesystem::remove(log_path);
+}
+
+void TestTurboTraceFollowsDebugLevel() {
+    const auto directory = std::filesystem::current_path() / "build" / "vectorxr-test-turbo-trace";
+    std::filesystem::create_directories(directory);
+    std::filesystem::path log_path;
+    {
+        depthxr::Logger logger;
+        logger.Initialize(directory / "level.log");
+        log_path = logger.ActiveLogPath();
+        depthxr::TurboTimingTrace trace;
+        trace.Start(logger);
+        Expect(!trace.Enabled(), "Info logging unexpectedly enabled detailed timing");
+        trace.Record("info.only");
+        logger.SetLevel(depthxr::LogLevel::Debug);
+        trace.SetDebugEnabled(logger, true);
+        Expect(trace.Enabled(), "Debug did not enable detailed timing in the live session");
+        const auto first_id = trace.NextId();
+        logger.SetLevel(depthxr::LogLevel::Info);
+        trace.SetDebugEnabled(logger, false);
+        Expect(!trace.Enabled() && !trace.Capturing(), "Info did not pause detailed timing");
+        trace.Record("info.paused");
+        logger.SetLevel(depthxr::LogLevel::Debug);
+        trace.SetDebugEnabled(logger, true);
+        Expect(trace.NextId() > first_id, "Resuming Debug reset the session correlation IDs");
+        trace.Record("debug.resumed");
+        trace.Stop();
+    }
+    std::ifstream input(log_path);
+    std::string line;
+    bool resumed = false;
+    while (std::getline(input, line)) {
+        resumed = resumed || line.find("event=debug.resumed") != std::string::npos;
+        Expect(line.find("event=info.") == std::string::npos, "Info interval leaked detailed timing");
+        if (line.find("Turbo-trace ns=") != std::string::npos) {
+            Expect(line.find("[debug]") != std::string::npos, "Timing trace was not a Debug-level record");
+        }
+    }
+    Expect(resumed, "Resumed Debug trace did not drain");
+    input.close();
+    std::filesystem::remove(log_path);
+}
+
 void TestLoggerCollapsesDuplicateMessages() {
     const std::filesystem::path test_directory =
         std::filesystem::current_path() / "build" / "vectorxr-test-logger-duplicate-collapse";
@@ -2592,20 +2766,49 @@ void TestDeviceInputPathsAndHatDirections() {
     missing_device_binding.type = depthxr::InputBindingType::Device;
     missing_device_binding.device_guid = "{11111111-2222-3333-4444-555555555555}";
     missing_device_binding.input_path = "button-1";
+    const depthxr::InputBindingPollResult connecting_missing_device =
+        depthxr::PollInputBinding(missing_device_binding);
+    Expect(connecting_missing_device.device_poll_attempted &&
+               connecting_missing_device.device_connect_pending &&
+               !connecting_missing_device.down &&
+               connecting_missing_device.diagnostic_stage == depthxr::InputBindingPollStage::None,
+           "Device setup must be handed to the background connector, never run on the polling thread");
+    depthxr::DrainInputDeviceWork(std::chrono::seconds(5));
     const depthxr::InputBindingPollResult first_missing_device =
         depthxr::PollInputBinding(missing_device_binding);
     const depthxr::InputBindingPollResult repeated_missing_device =
         depthxr::PollInputBinding(missing_device_binding);
     Expect(first_missing_device.device_poll_attempted &&
                !first_missing_device.device_retry_deferred &&
+               !first_missing_device.device_connect_pending &&
                first_missing_device.diagnostic_stage != depthxr::InputBindingPollStage::None &&
-               first_missing_device.device_retry_delay_ms >= 250,
-           "The first missing-device poll must record a real DirectInput failure and reconnect deadline");
+               first_missing_device.device_retry_delay_ms > 0 &&
+               first_missing_device.device_retry_delay_ms <= 250,
+           "A background setup failure must surface once as a real attempt with a reconnect deadline");
     Expect(repeated_missing_device.device_retry_deferred &&
                repeated_missing_device.diagnostic_stage == first_missing_device.diagnostic_stage &&
                repeated_missing_device.result_code == first_missing_device.result_code,
            "A repeated missing-device binding must reuse the failure without touching DirectInput");
 #endif
+}
+
+// An input held when a device (re)connects must not look like a press: the
+// callers primed their edge detectors while the connector was still running.
+void TestInputConnectPriming() {
+    depthxr::InputConnectPriming priming;
+    const std::wstring hotas = L"{hotas-guid}";
+    Expect(priming.Filter(hotas, "button:1", true), "Unpublished devices must pass state through");
+    priming.DeviceConnected(hotas);
+    Expect(!priming.Filter(hotas, "button:1", true), "A switch held at connect must read released");
+    Expect(!priming.Filter(hotas, "button:1", true), "A held switch must stay released until it is released once");
+    Expect(!priming.Filter(hotas, "button:1", false), "A released switch must read released");
+    Expect(priming.Filter(hotas, "button:1", true), "A press after release must register");
+    Expect(!priming.Filter(hotas, "button:2", false) && priming.Filter(hotas, "button:2", true),
+           "An input released at connect must register its first press");
+    priming.DeviceConnected(hotas);
+    Expect(!priming.Filter(hotas, "button:1", true), "A reconnect must re-prime held inputs");
+    Expect(!priming.Filter(hotas, "button:2", false) && priming.Filter(hotas, "button:2", true),
+           "Released inputs must work immediately after a reconnect");
 }
 
 void TestInputDeviceRetryBackoff() {
@@ -2720,6 +2923,8 @@ void TestSwapchainImageQueuePreservesFifo() {
 } // namespace
 
 int main() {
+    TestOsdConfig();
+    TestTurboExperimentalConfig();
     TestParseConfig();
     TestPivotActivationBindingModel();
     TestLogLevelCompatibility();
@@ -2756,6 +2961,8 @@ int main() {
     TestPivotYawNoOpInsideDeadzone();
     TestSwapchainImageQueuePreservesFifo();
     TestLoggerCollapsesDuplicateMessages();
+    TestTurboTraceBoundedAndDrained();
+    TestTurboTraceFollowsDebugLevel();
     TestEyeGazeExtensionCompatibilityPolicy();
     TestQuadViewsSessionActivationPolicy();
     TestQuadViewsRecoveryStabilizationPolicy();
@@ -2767,6 +2974,7 @@ int main() {
     TestNumpadActivationKeys();
     TestDeviceInputPathsAndHatDirections();
     TestInputDeviceRetryBackoff();
+    TestInputConnectPriming();
 #ifdef _WIN32
     TestD3D11SharpenShaderRegression();
 #endif

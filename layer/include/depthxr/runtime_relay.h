@@ -24,6 +24,8 @@ struct QuadViewDimensions {
 };
 
 struct RuntimeStatusDocument {
+    bool osd_available{false}, osd_visible{false}, osd_compact{false};
+    std::string osd_message;
     std::string turbo_state;
     std::string turbo_reason;
     std::vector<QuadViewDimensions> quadviews_dimensions;

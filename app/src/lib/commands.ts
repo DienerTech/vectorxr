@@ -123,6 +123,7 @@ export interface OpenXrLayerRegistrySlice {
 }
 
 export interface OpenXrLayerSnapshot {
+  processElevated: boolean
   slices: OpenXrLayerRegistrySlice[]
 }
 
@@ -404,8 +405,8 @@ export interface RuntimeStatusSession {
   application: string
   updatedAtUnixMilliseconds: number
   acknowledgedRevision: number
-  capabilities: { quadviewsDiagnosticVisualization: boolean }
-  state: { quadviewsDiagnosticVisualization: boolean; turboState?: string; turboReason?: string }
+  capabilities: { quadviewsDiagnosticVisualization: boolean; osd?: boolean }
+  state: { osdVisible?: boolean; osdCompact?: boolean; osdMessage?: string; quadviewsDiagnosticVisualization: boolean; turboState?: string; turboReason?: string }
 }
 
 export interface RuntimeStatusEnvelope {
@@ -456,6 +457,7 @@ export async function setRuntimeQuadViewsDiagnosticVisualization(
 export async function loadOpenXrLayers(includeSignatures = false): Promise<OpenXrLayerSnapshot> {
   if (!tauriAvailable()) {
     return {
+      processElevated: false,
       slices: [
         {
           id: 'hklm64',

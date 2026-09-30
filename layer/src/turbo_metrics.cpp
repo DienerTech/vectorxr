@@ -189,6 +189,7 @@ std::string SerializeSessions(const std::vector<TurboMetricsSession>& sessions) 
         stream << "      \"runtimeName\": \"" << EscapeJsonString(session.runtime_name) << "\",\n";
         stream << "      \"layerVersion\": \"" << EscapeJsonString(session.layer_version) << "\",\n";
         stream << "      \"collectionMode\": \"" << EscapeJsonString(session.collection_mode) << "\",\n";
+        stream << "      \"timingConfiguration\": \"" << EscapeJsonString(session.timing_configuration) << "\",\n";
         stream << "      \"live\": " << (session.live ? "true" : "false") << ",\n";
         stream << "      \"startedUnixSeconds\": " << session.started_unix_seconds << ",\n";
         stream << "      \"updatedUnixSeconds\": " << session.updated_unix_seconds << ",\n";
@@ -299,6 +300,7 @@ std::vector<TurboMetricsSession> ReadTurboMetricsSessions(const std::filesystem:
         session.runtime_name = ExtractString(object, "runtimeName");
         session.layer_version = ExtractString(object, "layerVersion");
         session.collection_mode = ExtractString(object, "collectionMode");
+        session.timing_configuration = ExtractString(object, "timingConfiguration");
         session.live = ExtractBool(object, "live", false);
         session.started_unix_seconds = ExtractInteger(object, "startedUnixSeconds", 0);
         session.updated_unix_seconds = ExtractInteger(object, "updatedUnixSeconds", 0);

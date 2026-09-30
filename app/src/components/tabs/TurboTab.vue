@@ -6,6 +6,8 @@ import DefaultProfileExclusions from '../DefaultProfileExclusions.vue'
 import ModuleBindingPage from '../ModuleBindingPage.vue'
 import ModuleBindingPanel from '../ModuleBindingPanel.vue'
 import ProfileShell from '../ProfileShell.vue'
+import TurboProfileTiming from '../TurboProfileTiming.vue'
+import { defaultTurboExperimental } from '../../lib/model'
 import TurboDiagnosticsPage from '../TurboDiagnosticsPage.vue'
 import TurboRuntimePage from '../TurboRuntimePage.vue'
 import TurboSafetyPage from '../TurboSafetyPage.vue'
@@ -103,6 +105,8 @@ const turboInUse = computed(
   () => props.config.modules.turbo.enabled || props.config.modules.turbo.profiles.some((profile) => profile.enabled),
 )
 
+
+
 const toolkitConflict = computed(() => {
   if (!turboInUse.value) {
     return false
@@ -120,7 +124,7 @@ const pacingModeLabel = computed(() => {
   if (mode === 'sequenced') {
     return 'Forced Sequenced'
   }
-  return 'Auto'
+  return 'Auto · stability-first'
 })
 
 const pacingSummary = computed(() => {
@@ -129,9 +133,9 @@ const pacingSummary = computed(() => {
   }
   const environments = props.runtimePacing.length
   if (environments === 0) {
-    return 'VectorXR will choose and remember the safe strategy for each runtime.'
+    return 'Auto picks and remembers a stable strategy per runtime. Try Async and Sequenced to find the fastest.'
   }
-  return `${environments} runtime ${environments === 1 ? 'environment' : 'environments'} observed. VectorXR adapts each one independently.`
+  return `${environments} runtime ${environments === 1 ? 'environment' : 'environments'} observed. Auto picks the most stable strategy for each, not necessarily the fastest.`
 })
 
 const metricsModeLabel = computed(() => {
@@ -148,12 +152,19 @@ const metricsModeLabel = computed(() => {
 const metricsSummary = computed(() => {
   const count = props.turboMetrics.length
   if (count === 0) {
-    return 'Run an in-game A/B check to see whether Turbo helps this title.'
+    return 'Capture Turbo on and off in the same flight to measure the gain for each strategy.'
   }
   const latest = props.turboMetrics[0]
   const app = latest.appName || 'unknown app'
   return `${count} ${count === 1 ? 'flight' : 'flights'} recorded. Latest: ${app}${latest.live ? ' (in progress)' : ''}.`
 })
+
+const tools = computed(() => [
+  { page: 'runtime' as const, title: 'Runtime Behavior', chip: pacingModeLabel.value, summary: pacingSummary.value,
+    icon: 'M3 5.5A2.5 2.5 0 0 1 5.5 3h9A2.5 2.5 0 0 1 17 5.5v4a2.5 2.5 0 0 1-2.5 2.5h-9A2.5 2.5 0 0 1 3 9.5v-4Zm2.5-.5a.5.5 0 0 0-.5.5v4a.5.5 0 0 0 .5.5h9a.5.5 0 0 0 .5-.5v-4a.5.5 0 0 0-.5-.5h-9ZM6 15a1 1 0 0 1 1-1h6a1 1 0 1 1 0 2H7a1 1 0 0 1-1-1Z' },
+  { page: 'diagnostics' as const, title: 'Performance Diagnostics', chip: metricsModeLabel.value, summary: metricsSummary.value,
+    icon: 'M3 15a1 1 0 0 1 1-1h1.5V9.5a1 1 0 0 1 2 0V14H9V5a1 1 0 0 1 2 0v9h1.5V7.5a1 1 0 0 1 2 0V14H16a1 1 0 1 1 0 2H4a1 1 0 0 1-1-1Z' },
+])
 
 function pageScroller(): Element | null {
   return document.querySelector('main section.overflow-y-auto')
@@ -205,6 +216,7 @@ function closeSubPage() {
     :config="config" :saved-config="savedConfig" :status="runtimeStatus" :error="recoveryError" :clearing="clearing"
     :clearing-logs="clearingLogs" @clear-logs="clearFaultLogs" @clear="clearSafety" @close="closeSubPage"
   />
+
   <TurboDiagnosticsPage
     v-else-if="activeSubPage === 'diagnostics'"
     :config="config"
@@ -245,30 +257,16 @@ function closeSubPage() {
       <section class="border-t pt-4" style="border-color: var(--app-border)">
         <div class="mb-3">
           <p class="eyebrow text-xs font-semibold uppercase tracking-[0.24em]">Essentials</p>
-          <p class="mt-1 text-sm text-muted">Turn Turbo on broadly, or leave the default off and enable only the applications that benefit.</p>
+          <p class="mt-1 text-sm text-muted">Leave the default off and enable Turbo per application with a custom profile, or turn it on broadly. Enablement applies on Save; the toggle binding switches Turbo off and on in the running game.</p>
         </div>
-        <div class="mb-3 rounded-[1rem] border p-4 surface-panel-soft">
-          <div class="flex flex-wrap items-center justify-between gap-3">
-            <div><h3 class="text-base font-semibold tracking-tight">Turbo Safety</h3>
-              <p class="mt-1 text-sm text-muted">Holds Turbo off after an interrupted session or repeated runtime fault. The in-game binding can retry it.</p>
-            </div>
-            <TurboSafetyToggle v-model="config.modules.turbo.interruptedSessionRecovery" />
-          </div>
-          <div class="mt-3 flex flex-wrap items-center justify-between gap-3">
-            <p class="rounded-full px-3 py-1 text-xs" :class="safetyBlocks.length ? 'chip-warning' : 'chip-idle'">{{ safetyBlocks.length }} recorded {{ safetyBlocks.length === 1 ? 'block' : 'blocks' }} · {{ runtimeStatus.faults.length }} {{ runtimeStatus.faults.length === 1 ? 'fault' : 'faults' }}</p>
-            <button type="button" class="button-secondary rounded-[0.75rem] px-4 py-2 text-sm font-medium" @click="openSubPage('safety')">Turbo Safety…</button>
-          </div>
-          <p v-if="recoveryError" class="mt-2 text-xs chip-danger" role="status">{{ recoveryError }}</p>
-        </div>
-
-        <div class="rounded-[1rem] border p-4 surface-panel-soft">
-          <div class="flex flex-wrap items-center justify-between gap-3">
-            <div class="max-w-2xl">
-              <h3 class="text-base font-semibold tracking-tight">Default Profile</h3>
-              <p class="mt-1 text-sm leading-6 text-muted">
+        <div class="grid gap-3 lg:grid-cols-2">
+          <div class="flex flex-wrap items-center justify-between gap-3 rounded-[1rem] border p-4 surface-panel-soft">
+            <div class="min-w-0">
+              <p class="text-sm font-semibold tracking-tight">Default Profile</p>
+              <p class="mt-1 text-xs leading-5 text-muted">
                 {{ config.modules.turbo.enabled
                   ? 'Turbo applies to applications without a custom profile.'
-                  : 'Turbo stays off unless an enabled custom profile turns it on.' }}
+                  : 'Off unless an enabled custom profile turns it on.' }}
               </p>
             </div>
             <div class="flex flex-wrap items-center justify-end gap-2">
@@ -282,74 +280,83 @@ function closeSubPage() {
               </label>
             </div>
           </div>
+          <ModuleBindingPanel
+            heading="In-game Turbo Toggle"
+            :binding="config.modules.turbo.toggleBinding"
+            hint="Flip Turbo on and off while in-game for a direct comparison."
+            @edit="openToggleBinding"
+          />
         </div>
 
-        <ModuleBindingPanel
-          class="mt-3"
-          heading="In-game Turbo Toggle"
-          :binding="config.modules.turbo.toggleBinding"
-          hint="Flip Turbo on and off while in-game for a direct comparison."
-          @edit="openToggleBinding"
-        />
+        <div
+          class="mt-3 flex flex-wrap items-center gap-3 rounded-[1rem] border px-4 py-3"
+          :class="safetyBlocks.length ? 'chip-warning' : 'surface-panel-soft'"
+          style="border-color: var(--app-border)"
+        >
+          <div class="min-w-0 flex-1">
+            <p class="text-sm font-semibold tracking-tight">Turbo Safety</p>
+            <p class="text-xs leading-5" :class="safetyBlocks.length ? '' : 'text-muted'">
+              {{ safetyBlocks.length
+                ? `Turbo is being held off for ${safetyBlocks.length} ${safetyBlocks.length === 1 ? 'setup' : 'setups'}. Review, then clear or retry with the toggle binding.`
+                : 'Holds Turbo off after an interrupted session or repeated runtime fault.' }}
+            </p>
+          </div>
+          <span class="rounded-full px-2.5 py-1 text-xs" :class="safetyBlocks.length ? 'surface-panel-strong' : 'chip-idle'" style="box-shadow: none">{{ safetyBlocks.length }} {{ safetyBlocks.length === 1 ? 'block' : 'blocks' }} · {{ runtimeStatus.faults.length }} {{ runtimeStatus.faults.length === 1 ? 'fault' : 'faults' }}</span>
+          <TurboSafetyToggle v-model="config.modules.turbo.interruptedSessionRecovery" />
+          <button type="button" class="button-secondary rounded-[0.75rem] px-3 py-1.5 text-xs font-medium" @click="openSubPage('safety')">{{ safetyBlocks.length ? 'Review…' : 'Details…' }}</button>
+          <p v-if="recoveryError" class="w-full text-xs chip-danger" role="status">{{ recoveryError }}</p>
+        </div>
       </section>
 
       <section class="mt-5 border-t pt-4" style="border-color: var(--app-border)">
         <div class="mb-3">
           <p class="eyebrow text-xs font-semibold uppercase tracking-[0.24em]">Tune &amp; Verify</p>
-          <p class="mt-1 text-sm text-muted">These tools are here when you need them, without getting between you and the basic setup.</p>
+          <p class="mt-1 text-sm text-muted">Turbo results depend on the game, headset, runtime, and driver. To find what works best, compare each strategy against Turbo off in the same flight.</p>
         </div>
 
         <div class="grid gap-3 md:grid-cols-2">
           <button
-            class="group rounded-[1rem] border p-4 text-left transition surface-panel-soft hover:-translate-y-0.5 hover:shadow-panel"
+            v-for="tool in tools"
+            :key="tool.page"
+            class="group flex items-center gap-3 rounded-[1rem] border p-3 text-left transition surface-panel-soft hover:shadow-panel"
             type="button"
-            @click="openSubPage('runtime')"
+            @click="openSubPage(tool.page)"
           >
-            <div class="flex items-start justify-between gap-3">
-              <span class="inline-flex h-10 w-10 items-center justify-center rounded-[0.8rem] border surface-panel-strong" style="border-color: var(--app-border)">
-                <svg aria-hidden="true" class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
-                  <path d="M3 5.5A2.5 2.5 0 0 1 5.5 3h9A2.5 2.5 0 0 1 17 5.5v4a2.5 2.5 0 0 1-2.5 2.5h-9A2.5 2.5 0 0 1 3 9.5v-4Zm2.5-.5a.5.5 0 0 0-.5.5v4a.5.5 0 0 0 .5.5h9a.5.5 0 0 0 .5-.5v-4a.5.5 0 0 0-.5-.5h-9ZM6 15a1 1 0 0 1 1-1h6a1 1 0 1 1 0 2H7a1 1 0 0 1-1-1Z" />
-                </svg>
-              </span>
-              <span class="rounded-full border px-3 py-1 text-xs font-medium" style="border-color: var(--app-border)">{{ pacingModeLabel }}</span>
-            </div>
-            <h3 class="mt-4 text-base font-semibold tracking-tight">Runtime Behavior</h3>
-            <p class="mt-1 min-h-[3rem] text-sm leading-6 text-muted">{{ pacingSummary }}</p>
-            <span class="mt-4 inline-flex items-center gap-2 text-sm font-medium">
-              Review pacing
-              <span aria-hidden="true" class="transition group-hover:translate-x-1">→</span>
+            <span class="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-[0.7rem] border surface-panel-strong" style="border-color: var(--app-border); box-shadow: none">
+              <svg aria-hidden="true" class="h-4 w-4" viewBox="0 0 20 20" fill="currentColor"><path :d="tool.icon" /></svg>
             </span>
-          </button>
-
-          <button
-            class="group rounded-[1rem] border p-4 text-left transition surface-panel-soft hover:-translate-y-0.5 hover:shadow-panel"
-            type="button"
-            @click="openSubPage('diagnostics')"
-          >
-            <div class="flex items-start justify-between gap-3">
-              <span class="inline-flex h-10 w-10 items-center justify-center rounded-[0.8rem] border surface-panel-strong" style="border-color: var(--app-border)">
-                <svg aria-hidden="true" class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
-                  <path d="M3 15a1 1 0 0 1 1-1h1.5V9.5a1 1 0 0 1 2 0V14H9V5a1 1 0 0 1 2 0v9h1.5V7.5a1 1 0 0 1 2 0V14H16a1 1 0 1 1 0 2H4a1 1 0 0 1-1-1Z" />
-                </svg>
+            <span class="min-w-0 flex-1">
+              <span class="flex flex-wrap items-center gap-2">
+                <span class="text-sm font-semibold tracking-tight" style="color: var(--app-text)">{{ tool.title }}</span>
+                <span class="rounded-full border px-2 py-0.5 text-[11px] font-medium" style="border-color: var(--app-border)">{{ tool.chip }}</span>
               </span>
-              <span class="rounded-full border px-3 py-1 text-xs font-medium" style="border-color: var(--app-border)">{{ metricsModeLabel }}</span>
-            </div>
-            <h3 class="mt-4 text-base font-semibold tracking-tight">Performance Diagnostics</h3>
-            <p class="mt-1 min-h-[3rem] text-sm leading-6 text-muted">{{ metricsSummary }}</p>
-            <span class="mt-4 inline-flex items-center gap-2 text-sm font-medium">
-              View performance checks
-              <span aria-hidden="true" class="transition group-hover:translate-x-1">→</span>
+              <span class="mt-0.5 block text-xs leading-5 text-muted">{{ tool.summary }}</span>
             </span>
+            <span aria-hidden="true" class="text-muted transition group-hover:translate-x-1">→</span>
           </button>
         </div>
+
+        <details class="section-disclosure mt-3 rounded-[1rem] border px-4 py-3 surface-panel-soft" style="border-color: var(--app-border)">
+          <summary class="flex items-center gap-2 text-sm font-medium" style="color: var(--app-text)">
+            <svg aria-hidden="true" class="section-chevron h-3.5 w-3.5" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M7.2 14.8a1 1 0 0 1 0-1.4L10.6 10 7.2 6.6a1 1 0 1 1 1.4-1.4l4.1 4.1a1 1 0 0 1 0 1.4l-4.1 4.1a1 1 0 0 1-1.4 0Z" clip-rule="evenodd" /></svg>
+            Finding the best strategy for a game
+          </summary>
+          <ol class="mt-3 list-decimal space-y-1.5 pl-5 text-sm leading-6 text-muted">
+            <li>Create a custom profile for the game and assign the in-game Turbo toggle. Set Performance Diagnostics to use a capture binding.</li>
+            <li>Launch the game with one strategy. Fly a repeatable scenario for about a minute with Turbo on, then toggle it off for at least 30 seconds.</li>
+            <li>Note the gain versus Turbo off in Performance Diagnostics. Each flight is labeled with the strategy it used.</li>
+            <li>Change the strategy, Save, relaunch, and repeat. Try Async and Sequenced in Runtime Behavior, then the Toolkit-style profile strategy.</li>
+            <li>Keep the strategy with the best gain and 1% lows and no stalls. Auto remains a safe default, but it picks the most stable strategy, not necessarily the fastest.</li>
+          </ol>
+        </details>
       </section>
     </article>
 
     <section class="space-y-3">
       <div class="sticky top-0 z-20 flex flex-wrap items-center justify-between gap-3 rounded-[1rem] border px-4 py-3 shadow-panel backdrop-blur surface-panel-strong">
-        <div>
+        <div class="min-w-0 flex-1">
           <h2 class="text-lg font-semibold tracking-tight">Custom Profiles</h2>
-          <p class="text-sm text-muted">Enable Turbo for selected applications while leaving the default off.</p>
+          <p class="text-sm text-muted">Choose applications and a Turbo strategy per profile. If enabled profiles overlap, the first matching profile takes priority.</p>
         </div>
         <button
           class="button-accent rounded-[0.75rem] px-5 py-2.5 text-sm font-medium"
@@ -374,15 +381,16 @@ function closeSubPage() {
         @remove="$emit('removeTurboProfile', index)"
         @sync-name="$emit('syncTurboProfileName', index)"
       >
-        <div class="rounded-[0.9rem] border px-4 py-3 text-sm leading-6 surface-panel-strong">
-          Turbo is on for this profile's applications. Runtime behavior remains automatic unless you changed it on the Runtime Behavior page.
+        <TurboProfileTiming v-model="profile.experimental" :pacing-label="pacingModeLabel" />
+        <div v-if="config.modules.turbo.experimental.enabled && !config.modules.turbo.experimental.applicationIds.length" class="mt-3 rounded-lg border p-3 text-sm chip-warning">
+          Previous experimental settings were saved without an application assignment.
+          <button class="button-secondary ml-2 rounded-lg px-3 py-2 text-xs" @click="profile.experimental = { ...config.modules.turbo.experimental, applicationIds: [] }; config.modules.turbo.experimental = defaultTurboExperimental()">Use saved timing in this profile</button>
         </div>
-        <div class="mt-3 flex flex-wrap items-center justify-between gap-3 rounded-[0.9rem] border p-4 surface-panel-soft">
-          <div class="max-w-xl"><h4 class="text-sm font-semibold">Turbo Safety override</h4><p class="mt-1 text-sm text-muted">Bypass persistent safety blocks for these applications. Live pacing fallback still suspends a failing session; use the binding to retry.</p></div>
-          <label class="pill-toggle inline-flex items-center gap-3 rounded-full px-4 py-2 text-sm font-medium">
-            <input v-model="profile.disableSafety" type="checkbox" class="h-4 w-4 accent-depthxr-copper" /> Disable safety for this profile
-          </label>
-        </div>
+        <label class="mt-3 flex items-start gap-2.5 rounded-[1rem] border px-4 py-3 text-sm surface-panel-soft" style="border-color: var(--app-border)">
+          <input v-model="profile.disableSafety" type="checkbox" class="mt-1 h-4 w-4 accent-depthxr-copper" />
+          <span><span class="font-medium" style="color: var(--app-text)">Bypass Turbo Safety for these applications</span>
+            <span class="block text-xs leading-5 text-muted">Ignores persistent safety blocks. Live pacing fallback still suspends a failing session; use the toggle binding to retry.</span></span>
+        </label>
       </ProfileShell>
 
       <div
@@ -410,7 +418,10 @@ function closeSubPage() {
               A game normally idles until the headset runtime signals the next frame. Turbo performs that wait out of the game's way, so the game can begin its next frame as soon as the previous one is submitted. VectorXR preserves downstream frame-call order, but changes when pacing occurs and may estimate the next display time.
             </div>
             <div class="rounded-[1rem] border px-4 py-3 surface-panel">
-              <strong>Auto</strong> chooses the wait strategy and remembers what works: <strong>Async</strong> waits in the background where supported, while <strong>Sequenced</strong> supports runtimes that interlock waiting with submission.
+              <strong>Async</strong> (usually fastest) waits in the background. <strong>Sequenced</strong> (for runtimes that need it) keeps waiting and submission in step. <strong>Auto</strong> starts with Async and falls back to Sequenced if Async is unstable, then remembers the result per runtime. Auto is stability-first: it picks the strategy that works, not necessarily the fastest one.
+            </div>
+            <div class="rounded-[1rem] border px-4 py-3 surface-panel">
+              <strong>Toolkit-style</strong> is an experimental, per-profile strategy that recreates the timing of OpenXR Toolkit's Turbo Mode, originally developed by mbucchia. It always uses Async and takes effect after the game restarts.
             </div>
           </section>
 
@@ -421,6 +432,13 @@ function closeSubPage() {
             </div>
             <div class="rounded-[1rem] border px-4 py-3 chip-warning" style="border-color: var(--app-border)">
               <strong>Reprojection compatibility:</strong> Turbo can interfere with SteamVR Motion Smoothing and other reprojection systems such as ASW. Disable Motion Smoothing when testing Turbo. Frame-time prediction may be less accurate, and switching Turbo mid-session can briefly hitch while the pipeline re-synchronizes.
+            </div>
+          </section>
+
+          <section class="space-y-3">
+            <p class="eyebrow text-xs font-semibold uppercase tracking-[0.24em]">Finding the best strategy</p>
+            <div class="rounded-[1rem] border px-4 py-3 surface-panel">
+              Turbo relies on OpenXR timing behavior that the specification does not formally define, so results vary by hardware, driver, runtime, and game. Strategies cannot always be switched safely mid-session, so test one per launch: use the in-game toggle to capture Turbo on and Turbo off in the same flight, then compare the gain for each strategy in Performance Diagnostics.
             </div>
           </section>
 

@@ -146,18 +146,33 @@
     "pivotActivationBinding": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["behavior", "binding"],
+      "required": [
+        "behavior",
+        "binding"
+      ],
       "properties": {
-        "behavior": { "type": "string", "enum": ["toggle", "hold"] },
-        "binding": { "$ref": "#/$defs/inputBinding" }
+        "behavior": {
+          "type": "string",
+          "enum": [
+            "toggle",
+            "hold"
+          ]
+        },
+        "binding": {
+          "$ref": "#/$defs/inputBinding"
+        }
       }
     },
     "pivotActivationBindings": {
       "type": "array",
       "items": {
         "oneOf": [
-          { "$ref": "#/$defs/pivotActivationBinding" },
-          { "$ref": "#/$defs/inputBinding" }
+          {
+            "$ref": "#/$defs/pivotActivationBinding"
+          },
+          {
+            "$ref": "#/$defs/inputBinding"
+          }
         ]
       }
     },
@@ -200,6 +215,338 @@
         }
       }
     },
+    "osdSettings": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": false
+        },
+        "visibleOnStart": {
+          "type": "boolean",
+          "default": true
+        },
+        "compact": {
+          "type": "boolean",
+          "default": false
+        },
+        "showGraph": {
+          "type": "boolean",
+          "default": true
+        },
+        "showBrand": {
+          "type": "boolean",
+          "default": true
+        },
+        "showApp": {
+          "type": "boolean",
+          "default": true
+        },
+        "showRuntime": {
+          "type": "boolean",
+          "default": true
+        },
+        "showTurbo": {
+          "type": "boolean",
+          "default": true
+        },
+        "showModules": {
+          "type": "boolean",
+          "default": true
+        },
+        "showClock": {
+          "type": "boolean",
+          "default": true
+        },
+        "horizontalDegrees": {
+          "type": "number",
+          "minimum": -40,
+          "maximum": 40,
+          "default": 20
+        },
+        "verticalDegrees": {
+          "type": "number",
+          "minimum": -35,
+          "maximum": 35,
+          "default": -12
+        },
+        "distanceMeters": {
+          "type": "number",
+          "minimum": 0.5,
+          "maximum": 3,
+          "default": 1.2
+        },
+        "scale": {
+          "type": "number",
+          "minimum": 25,
+          "maximum": 150,
+          "default": 100
+        },
+        "opacity": {
+          "type": "integer",
+          "minimum": 30,
+          "maximum": 100,
+          "default": 90
+        },
+        "updateHz": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 20,
+          "default": 5
+        },
+        "accent": {
+          "enum": [
+            "teal",
+            "copper",
+            "blue",
+            "violet",
+            "rose",
+            "custom"
+          ],
+          "default": "teal"
+        },
+        "toggleBinding": {
+          "$ref": "#/$defs/inputBinding"
+        },
+        "cycleBinding": {
+          "$ref": "#/$defs/inputBinding"
+        },
+        "compactShowBrand": {
+          "type": "boolean",
+          "default": true
+        },
+        "compactShowApp": {
+          "type": "boolean",
+          "default": true
+        },
+        "compactMetrics": {
+          "type": "string",
+          "enum": ["all", "fps", "frameTime", "none"],
+          "default": "all"
+        },
+        "compactShowRuntime": {
+          "type": "boolean",
+          "description": "Show the runtime in compact mode. Defaults to true."
+        },
+        "compactShowClock": {
+          "type": "boolean",
+          "description": "Show the clock in compact mode. Defaults to true."
+        },
+        "compactShowTurbo": {
+          "type": "boolean",
+          "description": "Show Turbo in the compact status row. Defaults to false."
+        },
+        "compactShowPivot": {
+          "type": "boolean",
+          "description": "Show Pivot in the compact status row. Defaults to false."
+        },
+        "showPivot": {
+          "type": "boolean",
+          "default": true
+        },
+        "clockFormat": {
+          "type": "string",
+          "enum": [
+            "12",
+            "24"
+          ],
+          "default": "24"
+        },
+        "customColor": {
+          "type": "string",
+          "pattern": "^#[0-9a-fA-F]{6}$",
+          "default": "#51ddbd"
+        },
+        "bodyOrder": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "graph",
+              "turbo",
+              "pivot",
+              "modules"
+            ]
+          },
+          "default": [
+            "graph",
+            "turbo",
+            "pivot",
+            "modules"
+          ]
+        },
+        "customPresets": {
+          "type": "array",
+          "maxItems": 50,
+          "default": [],
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "name",
+              "settings"
+            ],
+            "properties": {
+              "name": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 60
+              },
+              "settings": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "compact": {
+                    "type": "boolean",
+                    "default": false
+                  },
+                  "showGraph": {
+                    "type": "boolean",
+                    "default": true
+                  },
+                  "showBrand": {
+                    "type": "boolean",
+                    "default": true
+                  },
+                  "showApp": {
+                    "type": "boolean",
+                    "default": true
+                  },
+                  "showRuntime": {
+                    "type": "boolean",
+                    "default": true
+                  },
+                  "showTurbo": {
+                    "type": "boolean",
+                    "default": true
+                  },
+                  "showModules": {
+                    "type": "boolean",
+                    "default": true
+                  },
+                  "showClock": {
+                    "type": "boolean",
+                    "default": true
+                  },
+                  "horizontalDegrees": {
+                    "type": "number",
+                    "minimum": -40,
+                    "maximum": 40,
+                    "default": 20
+                  },
+                  "verticalDegrees": {
+                    "type": "number",
+                    "minimum": -35,
+                    "maximum": 35,
+                    "default": -12
+                  },
+                  "distanceMeters": {
+                    "type": "number",
+                    "minimum": 0.5,
+                    "maximum": 3,
+                    "default": 1.2
+                  },
+                  "scale": {
+                    "type": "number",
+                    "minimum": 25,
+                    "maximum": 150,
+                    "default": 100
+                  },
+                  "opacity": {
+                    "type": "integer",
+                    "minimum": 30,
+                    "maximum": 100,
+                    "default": 90
+                  },
+                  "updateHz": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 20,
+                    "default": 5
+                  },
+                  "accent": {
+                    "enum": [
+                      "teal",
+                      "copper",
+                      "blue",
+                      "violet",
+                      "rose",
+                      "custom"
+                    ],
+                    "default": "teal"
+                  },
+                  "compactShowBrand": {
+                    "type": "boolean",
+                    "default": true
+                  },
+                  "compactShowApp": {
+                    "type": "boolean",
+                    "default": true
+                  },
+                  "compactMetrics": {
+                    "type": "string",
+                    "enum": ["all", "fps", "frameTime", "none"],
+                    "default": "all"
+                  },
+                  "compactShowRuntime": {
+                    "type": "boolean",
+                    "description": "Show the runtime in compact mode. Defaults to true."
+                  },
+                  "compactShowClock": {
+                    "type": "boolean",
+                    "description": "Show the clock in compact mode. Defaults to true."
+                  },
+                  "compactShowTurbo": {
+                    "type": "boolean",
+                    "description": "Show Turbo in the compact status row. Defaults to false."
+                  },
+                  "compactShowPivot": {
+                    "type": "boolean",
+                    "description": "Show Pivot in the compact status row. Defaults to false."
+                  },
+                  "showPivot": {
+                    "type": "boolean",
+                    "default": true
+                  },
+                  "clockFormat": {
+                    "type": "string",
+                    "enum": [
+                      "12",
+                      "24"
+                    ],
+                    "default": "24"
+                  },
+                  "customColor": {
+                    "type": "string",
+                    "pattern": "^#[0-9a-fA-F]{6}$",
+                    "default": "#51ddbd"
+                  },
+                  "bodyOrder": {
+                    "type": "array",
+                    "uniqueItems": true,
+                    "items": {
+                      "enum": [
+                        "graph",
+                        "turbo",
+                        "pivot",
+                        "modules"
+                      ]
+                    },
+                    "default": [
+                      "graph",
+                      "turbo",
+                      "pivot",
+                      "modules"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "core": {
       "type": "object",
       "additionalProperties": false,
@@ -210,6 +557,9 @@
         "trackSeenApps"
       ],
       "properties": {
+        "osd": {
+          "$ref": "#/$defs/osdSettings"
+        },
         "enabled": {
           "type": "boolean"
         },
@@ -336,23 +686,65 @@
     "pivotAxisTuning": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["rotationMultiplier", "deadzoneDegrees", "maxExtraDegrees"],
+      "required": [
+        "rotationMultiplier",
+        "deadzoneDegrees",
+        "maxExtraDegrees"
+      ],
       "properties": {
-        "rotationMultiplier": { "type": "number", "minimum": 1.0, "maximum": 3.0 },
-        "deadzoneDegrees": { "type": "number", "minimum": 0.0, "maximum": 180.0 },
-        "maxExtraDegrees": { "type": "number", "minimum": 0.0, "maximum": 180.0 }
+        "rotationMultiplier": {
+          "type": "number",
+          "minimum": 1.0,
+          "maximum": 3.0
+        },
+        "deadzoneDegrees": {
+          "type": "number",
+          "minimum": 0.0,
+          "maximum": 180.0
+        },
+        "maxExtraDegrees": {
+          "type": "number",
+          "minimum": 0.0,
+          "maximum": 180.0
+        }
       }
     },
     "pivotStepTuning": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["deadzoneDegrees", "triggerDegrees", "amountDegrees", "hysteresisDegrees", "maxExtraDegrees"],
+      "required": [
+        "deadzoneDegrees",
+        "triggerDegrees",
+        "amountDegrees",
+        "hysteresisDegrees",
+        "maxExtraDegrees"
+      ],
       "properties": {
-        "deadzoneDegrees": { "type": "number", "minimum": 0.0, "maximum": 180.0 },
-        "triggerDegrees": { "type": "number", "minimum": 1.0, "maximum": 45.0 },
-        "amountDegrees": { "type": "number", "minimum": 0.0, "maximum": 60.0 },
-        "hysteresisDegrees": { "type": "number", "minimum": 0.0, "maximum": 20.0 },
-        "maxExtraDegrees": { "type": "number", "minimum": 0.0, "maximum": 180.0 }
+        "deadzoneDegrees": {
+          "type": "number",
+          "minimum": 0.0,
+          "maximum": 180.0
+        },
+        "triggerDegrees": {
+          "type": "number",
+          "minimum": 1.0,
+          "maximum": 45.0
+        },
+        "amountDegrees": {
+          "type": "number",
+          "minimum": 0.0,
+          "maximum": 60.0
+        },
+        "hysteresisDegrees": {
+          "type": "number",
+          "minimum": 0.0,
+          "maximum": 20.0
+        },
+        "maxExtraDegrees": {
+          "type": "number",
+          "minimum": 0.0,
+          "maximum": 180.0
+        }
       }
     },
     "pivotxrSettings": {
@@ -383,88 +775,253 @@
         "pitchDownStep"
       ],
       "properties": {
-        "smoothing": { "type": "number", "minimum": 0.0, "maximum": 1.0 },
-        "activationRampSeconds": { "type": "number", "minimum": 0.0, "maximum": 2.0 },
-        "rotationMultiplier": { "type": "number", "minimum": 1.0, "maximum": 3.0 },
-        "deadzoneDegrees": { "type": "number", "minimum": 0.0, "maximum": 180.0 },
-        "maxExtraYawDegrees": { "type": "number", "minimum": 0.0, "maximum": 180.0 },
-        "pitchRotationMultiplier": { "type": "number", "minimum": 1.0, "maximum": 3.0 },
-        "pitchDeadzoneDegrees": { "type": "number", "minimum": 0.0, "maximum": 90.0 },
-        "maxExtraPitchDegrees": { "type": "number", "minimum": 0.0, "maximum": 180.0 },
-        "responseMode": { "type": "string", "enum": ["continuous", "stepped"] },
-        "stepGlideMode": { "type": "string", "enum": ["instant", "glide"] },
-        "stepGlideSeconds": { "type": "number", "minimum": 0.0, "maximum": 2.0 },
-        "yawStep": { "$ref": "#/$defs/pivotStepTuning" },
-        "pitchStep": { "$ref": "#/$defs/pivotStepTuning" },
-        "advancedAxes": { "type": "boolean" },
-        "yawLeft": { "$ref": "#/$defs/pivotAxisTuning" },
-        "yawRight": { "$ref": "#/$defs/pivotAxisTuning" },
-        "pitchUp": { "$ref": "#/$defs/pivotAxisTuning" },
-        "pitchDown": { "$ref": "#/$defs/pivotAxisTuning" },
-        "yawLeftStep": { "$ref": "#/$defs/pivotStepTuning" },
-        "yawRightStep": { "$ref": "#/$defs/pivotStepTuning" },
-        "pitchUpStep": { "$ref": "#/$defs/pivotStepTuning" },
-        "pitchDownStep": { "$ref": "#/$defs/pivotStepTuning" }
+        "smoothing": {
+          "type": "number",
+          "minimum": 0.0,
+          "maximum": 1.0
+        },
+        "activationRampSeconds": {
+          "type": "number",
+          "minimum": 0.0,
+          "maximum": 2.0
+        },
+        "rotationMultiplier": {
+          "type": "number",
+          "minimum": 1.0,
+          "maximum": 3.0
+        },
+        "deadzoneDegrees": {
+          "type": "number",
+          "minimum": 0.0,
+          "maximum": 180.0
+        },
+        "maxExtraYawDegrees": {
+          "type": "number",
+          "minimum": 0.0,
+          "maximum": 180.0
+        },
+        "pitchRotationMultiplier": {
+          "type": "number",
+          "minimum": 1.0,
+          "maximum": 3.0
+        },
+        "pitchDeadzoneDegrees": {
+          "type": "number",
+          "minimum": 0.0,
+          "maximum": 90.0
+        },
+        "maxExtraPitchDegrees": {
+          "type": "number",
+          "minimum": 0.0,
+          "maximum": 180.0
+        },
+        "responseMode": {
+          "type": "string",
+          "enum": [
+            "continuous",
+            "stepped"
+          ]
+        },
+        "stepGlideMode": {
+          "type": "string",
+          "enum": [
+            "instant",
+            "glide"
+          ]
+        },
+        "stepGlideSeconds": {
+          "type": "number",
+          "minimum": 0.0,
+          "maximum": 2.0
+        },
+        "yawStep": {
+          "$ref": "#/$defs/pivotStepTuning"
+        },
+        "pitchStep": {
+          "$ref": "#/$defs/pivotStepTuning"
+        },
+        "advancedAxes": {
+          "type": "boolean"
+        },
+        "yawLeft": {
+          "$ref": "#/$defs/pivotAxisTuning"
+        },
+        "yawRight": {
+          "$ref": "#/$defs/pivotAxisTuning"
+        },
+        "pitchUp": {
+          "$ref": "#/$defs/pivotAxisTuning"
+        },
+        "pitchDown": {
+          "$ref": "#/$defs/pivotAxisTuning"
+        },
+        "yawLeftStep": {
+          "$ref": "#/$defs/pivotStepTuning"
+        },
+        "yawRightStep": {
+          "$ref": "#/$defs/pivotStepTuning"
+        },
+        "pitchUpStep": {
+          "$ref": "#/$defs/pivotStepTuning"
+        },
+        "pitchDownStep": {
+          "$ref": "#/$defs/pivotStepTuning"
+        }
       }
     },
     "pivotNudgeSettings": {
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "yawStepDegrees", "pitchStepDegrees", "transitionSeconds",
-        "yawLeftBindings", "yawRightBindings", "pitchUpBindings", "pitchDownBindings", "centerBindings"
+        "yawStepDegrees",
+        "pitchStepDegrees",
+        "transitionSeconds",
+        "yawLeftBindings",
+        "yawRightBindings",
+        "pitchUpBindings",
+        "pitchDownBindings",
+        "centerBindings"
       ],
       "properties": {
-        "yawStepDegrees": { "type": "number", "minimum": 1.0, "maximum": 90.0 },
-        "pitchStepDegrees": { "type": "number", "minimum": 1.0, "maximum": 60.0 },
-        "transitionSeconds": { "type": "number", "minimum": 0.0, "maximum": 2.0 },
-        "yawLeftBindings": { "$ref": "#/$defs/inputBindings" },
-        "yawRightBindings": { "$ref": "#/$defs/inputBindings" },
-        "pitchUpBindings": { "$ref": "#/$defs/inputBindings" },
-        "pitchDownBindings": { "$ref": "#/$defs/inputBindings" },
-        "centerBindings": { "$ref": "#/$defs/inputBindings" }
+        "yawStepDegrees": {
+          "type": "number",
+          "minimum": 1.0,
+          "maximum": 90.0
+        },
+        "pitchStepDegrees": {
+          "type": "number",
+          "minimum": 1.0,
+          "maximum": 60.0
+        },
+        "transitionSeconds": {
+          "type": "number",
+          "minimum": 0.0,
+          "maximum": 2.0
+        },
+        "yawLeftBindings": {
+          "$ref": "#/$defs/inputBindings"
+        },
+        "yawRightBindings": {
+          "$ref": "#/$defs/inputBindings"
+        },
+        "pitchUpBindings": {
+          "$ref": "#/$defs/inputBindings"
+        },
+        "pitchDownBindings": {
+          "$ref": "#/$defs/inputBindings"
+        },
+        "centerBindings": {
+          "$ref": "#/$defs/inputBindings"
+        }
       }
     },
     "pivotNudgeSet": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["id", "name", "allowWhileInactive", "settings"],
+      "required": [
+        "id",
+        "name",
+        "allowWhileInactive",
+        "settings"
+      ],
       "properties": {
-        "id": { "type": "string", "minLength": 1 },
-        "name": { "type": "string", "minLength": 1 },
-        "allowWhileInactive": { "type": "boolean" },
-        "settings": { "$ref": "#/$defs/pivotNudgeSettings" }
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "allowWhileInactive": {
+          "type": "boolean"
+        },
+        "settings": {
+          "$ref": "#/$defs/pivotNudgeSettings"
+        }
       }
     },
     "pivotQuickView": {
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "id", "name", "yawDegrees", "pitchDegrees", "positionRightCm", "positionUpCm",
-        "positionForwardCm", "transitionSeconds", "activationBindings"
+        "id",
+        "name",
+        "yawDegrees",
+        "pitchDegrees",
+        "positionRightCm",
+        "positionUpCm",
+        "positionForwardCm",
+        "transitionSeconds",
+        "activationBindings"
       ],
       "properties": {
-        "id": { "type": "string", "minLength": 1 },
-        "name": { "type": "string", "minLength": 1 },
-        "yawDegrees": { "type": "number", "minimum": -180.0, "maximum": 180.0 },
-        "pitchDegrees": { "type": "number", "minimum": -85.0, "maximum": 85.0 },
-        "positionRightCm": { "type": "number", "minimum": -100.0, "maximum": 100.0 },
-        "positionUpCm": { "type": "number", "minimum": -100.0, "maximum": 100.0 },
-        "positionForwardCm": { "type": "number", "minimum": -100.0, "maximum": 100.0 },
-        "transitionSeconds": { "type": "number", "minimum": 0.0, "maximum": 2.0 },
-        "turnDirection": { "type": "string", "enum": ["left", "right"] },
-        "activationBindings": { "$ref": "#/$defs/pivotActivationBindings" }
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "yawDegrees": {
+          "type": "number",
+          "minimum": -180.0,
+          "maximum": 180.0
+        },
+        "pitchDegrees": {
+          "type": "number",
+          "minimum": -85.0,
+          "maximum": 85.0
+        },
+        "positionRightCm": {
+          "type": "number",
+          "minimum": -100.0,
+          "maximum": 100.0
+        },
+        "positionUpCm": {
+          "type": "number",
+          "minimum": -100.0,
+          "maximum": 100.0
+        },
+        "positionForwardCm": {
+          "type": "number",
+          "minimum": -100.0,
+          "maximum": 100.0
+        },
+        "transitionSeconds": {
+          "type": "number",
+          "minimum": 0.0,
+          "maximum": 2.0
+        },
+        "turnDirection": {
+          "type": "string",
+          "enum": [
+            "left",
+            "right"
+          ]
+        },
+        "activationBindings": {
+          "$ref": "#/$defs/pivotActivationBindings"
+        }
       }
     },
     "pivotViewControls": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["nudges", "quickViews"],
+      "required": [
+        "nudges",
+        "quickViews"
+      ],
       "properties": {
-        "nudges": { "$ref": "#/$defs/pivotNudgeSettings" },
+        "nudges": {
+          "$ref": "#/$defs/pivotNudgeSettings"
+        },
         "quickViews": {
           "type": "array",
-          "items": { "$ref": "#/$defs/pivotQuickView" }
+          "items": {
+            "$ref": "#/$defs/pivotQuickView"
+          }
         }
       }
     },
@@ -472,8 +1029,16 @@
       "type": "object",
       "additionalProperties": false,
       "anyOf": [
-        { "required": ["alwaysActive"] },
-        { "required": ["activationMode"] }
+        {
+          "required": [
+            "alwaysActive"
+          ]
+        },
+        {
+          "required": [
+            "activationMode"
+          ]
+        }
       ],
       "required": [
         "name",
@@ -484,13 +1049,26 @@
         "settings"
       ],
       "properties": {
-        "id": { "type": "string", "minLength": 1 },
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
         "name": {
           "type": "string",
           "minLength": 1
         },
-        "behavior": { "type": "string", "enum": ["enhancedMotion", "snapViews"] },
-        "nudgeSetId": { "type": "string", "minLength": 1, "description": "Nudge Set id, or 'none' to disable nudges for this profile." },
+        "behavior": {
+          "type": "string",
+          "enum": [
+            "enhancedMotion",
+            "snapViews"
+          ]
+        },
+        "nudgeSetId": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Nudge Set id, or 'none' to disable nudges for this profile."
+        },
         "enabled": {
           "type": "boolean"
         },
@@ -542,9 +1120,24 @@
         "defaults": {
           "$ref": "#/$defs/pivotxrSettings"
         },
-        "behavior": { "type": "string", "enum": ["enhancedMotion", "snapViews"] },
-        "nudgeSetId": { "type": "string", "minLength": 1, "description": "Nudge Set id, or 'none' to disable nudges for the default profile." },
-        "nudgeSets": { "type": "array", "items": { "$ref": "#/$defs/pivotNudgeSet" } },
+        "behavior": {
+          "type": "string",
+          "enum": [
+            "enhancedMotion",
+            "snapViews"
+          ]
+        },
+        "nudgeSetId": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Nudge Set id, or 'none' to disable nudges for the default profile."
+        },
+        "nudgeSets": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/pivotNudgeSet"
+          }
+        },
         "activationMode": {
           "$ref": "#/$defs/activationMode",
           "deprecated": true
@@ -597,7 +1190,10 @@
       ],
       "properties": {
         "eyeTrackingCorrection": {
-          "enum": ["default", "flip-z"],
+          "enum": [
+            "default",
+            "flip-z"
+          ],
           "default": "default"
         },
         "trackingMode": {
@@ -716,6 +1312,55 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
+        "experimental": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": false
+            },
+            "applicationIds": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "waitForSubmit": {
+              "type": "boolean",
+              "default": false
+            },
+            "sampleAtEntry": {
+              "type": "boolean",
+              "default": false
+            },
+            "predictionPercent": {
+              "type": "integer",
+              "minimum": 50,
+              "maximum": 100,
+              "default": 100
+            },
+            "frameLimit": {
+              "type": "integer",
+              "anyOf": [
+                {
+                  "const": 0
+                },
+                {
+                  "minimum": 20,
+                  "maximum": 240
+                }
+              ],
+              "default": 0
+            },
+            "timingTrace": {
+              "type": "boolean",
+              "deprecated": true,
+              "description": "Legacy field, ignored. Detailed Turbo traces follow core.logLevel=debug."
+            }
+          },
+          "description": "Legacy migration data. New timing choices belong to custom profiles."
+        },
         "enabled": {
           "type": "boolean"
         },
@@ -758,8 +1403,13 @@
             "type": "object",
             "additionalProperties": false,
             "properties": {
-              "id": { "type": "string" },
-              "disableSafety": { "type": "boolean", "default": false },
+              "id": {
+                "type": "string"
+              },
+              "disableSafety": {
+                "type": "boolean",
+                "default": false
+              },
               "name": {
                 "type": "string"
               },
@@ -771,6 +1421,55 @@
                 "items": {
                   "type": "string"
                 }
+              },
+              "experimental": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "enabled": {
+                    "type": "boolean",
+                    "default": false
+                  },
+                  "applicationIds": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "waitForSubmit": {
+                    "type": "boolean",
+                    "default": false
+                  },
+                  "sampleAtEntry": {
+                    "type": "boolean",
+                    "default": false
+                  },
+                  "predictionPercent": {
+                    "type": "integer",
+                    "minimum": 50,
+                    "maximum": 100,
+                    "default": 100
+                  },
+                  "frameLimit": {
+                    "type": "integer",
+                    "anyOf": [
+                      {
+                        "const": 0
+                      },
+                      {
+                        "minimum": 20,
+                        "maximum": 240
+                      }
+                    ],
+                    "default": 0
+                  },
+                  "timingTrace": {
+                    "type": "boolean",
+                    "deprecated": true,
+                    "description": "Legacy field, ignored. Detailed Turbo traces follow core.logLevel=debug."
+                  }
+                },
+                "description": "Session-latched timing for this custom profile; its application assignments determine scope."
               }
             }
           }
@@ -792,7 +1491,9 @@
         "pivotxr": {
           "$ref": "#/$defs/pivotxrModule"
         },
-        "turbo": { "$ref": "#/$defs/turboModule" },
+        "turbo": {
+          "$ref": "#/$defs/turboModule"
+        },
         "quadviews": {
           "$ref": "#/$defs/quadviewsModule"
         }

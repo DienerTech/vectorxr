@@ -8,6 +8,7 @@ add_library(
     src/runtime_relay.cpp
     src/runtime_compatibility.cpp
     src/seen_apps.cpp
+    src/turbo_trace.cpp
     src/turbo_metrics.cpp
     src/turbo_recovery.cpp
     src/settings.cpp
@@ -75,6 +76,25 @@ if(WIN32 AND DEPTHXR_BUILD_LAYER)
         endif()
     endif()
 
+    set(VULKAN_HEADERS_ENABLE_MODULE OFF CACHE BOOL "" FORCE)
+    include(FetchContent)
+    FetchContent_Declare(vulkan_headers
+        URL https://github.com/KhronosGroup/Vulkan-Headers/archive/b379292b2ab6df5771ba9870d53cf8b2c9295daf.tar.gz
+        URL_HASH SHA256=2ad177c0e468ac2eb3db9b5be6b8a18a6730d339378ac670e5fbda3503ac7d64
+        DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
+    FetchContent_MakeAvailable(vulkan_headers)
+    add_library(depthxr_osd STATIC src/osd_renderer.cpp src/osd_graphics.cpp src/osd_vulkan.cpp src/osd_composite.cpp)
+    target_include_directories(depthxr_osd PUBLIC include)
+    target_compile_features(depthxr_osd PUBLIC cxx_std_20)
+    target_compile_definitions(depthxr_osd PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX XR_USE_GRAPHICS_API_D3D11 XR_USE_GRAPHICS_API_D3D12 XR_USE_GRAPHICS_API_VULKAN)
+    target_link_libraries(depthxr_osd PUBLIC depthxr_core OpenXR::openxr_loader Vulkan::Headers d3d11 d3d12 d3dcompiler gdi32)
+    if(BUILD_TESTING)
+        add_executable(depthxr_osd_composite_tests tests/osd_composite_tests.cpp)
+        target_link_libraries(depthxr_osd_composite_tests PRIVATE depthxr_osd)
+        target_compile_definitions(depthxr_osd_composite_tests PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+        add_test(NAME depthxr_osd_composite_tests COMMAND depthxr_osd_composite_tests)
+    endif()
+
     add_library(
         XR_APILAYER_DIENERTECH_VECTORXR
         SHARED
@@ -88,6 +108,7 @@ if(WIN32 AND DEPTHXR_BUILD_LAYER)
         XR_APILAYER_DIENERTECH_VECTORXR
         PRIVATE
         depthxr_core
+        depthxr_osd
         OpenXR::openxr_loader
         d3d11
         d3dcompiler
@@ -186,6 +207,19 @@ if(WIN32 AND DEPTHXR_BUILD_LAYER)
     endif()
 
     if(DEPTHXR_BUILD_TESTS)
+        add_executable(depthxr_osd_backend_tests tests/osd_backend_tests.cpp)
+        target_link_libraries(depthxr_osd_backend_tests PRIVATE depthxr_osd dxgi)
+        target_compile_definitions(depthxr_osd_backend_tests PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX XR_USE_GRAPHICS_API_D3D11 XR_USE_GRAPHICS_API_D3D12 XR_USE_GRAPHICS_API_VULKAN)
+        add_test(NAME depthxr_osd_d3d12_tests COMMAND depthxr_osd_backend_tests d3d12)
+        add_test(NAME depthxr_osd_vulkan_tests COMMAND depthxr_osd_backend_tests vulkan)
+        set_tests_properties(depthxr_osd_d3d12_tests depthxr_osd_vulkan_tests PROPERTIES TIMEOUT 30)
+        set_tests_properties(depthxr_osd_vulkan_tests PROPERTIES SKIP_RETURN_CODE 77)
+        add_executable(depthxr_osd_tests tests/osd_tests.cpp)
+        target_link_libraries(depthxr_osd_tests PRIVATE depthxr_osd)
+        target_compile_definitions(depthxr_osd_tests PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX XR_USE_GRAPHICS_API_D3D11)
+        add_test(NAME depthxr_osd_tests COMMAND depthxr_osd_tests)
+        set_tests_properties(depthxr_osd_tests PROPERTIES TIMEOUT 20)
+
         # Compile the real frame-loop implementation into a dedicated fake-runtime
         # harness. DEPTHXR_TESTING only grants the harness state setup/inspection
         # access; no test hooks are present in the shipping layer target.
@@ -199,6 +233,7 @@ if(WIN32 AND DEPTHXR_BUILD_LAYER)
             depthxr_turbo_frame_tests
             PRIVATE
             depthxr_core
+            depthxr_osd
             OpenXR::openxr_loader
             d3d11
             d3dcompiler
@@ -216,6 +251,24 @@ if(WIN32 AND DEPTHXR_BUILD_LAYER)
         )
         add_test(NAME depthxr_turbo_frame_tests COMMAND depthxr_turbo_frame_tests)
         set_tests_properties(depthxr_turbo_frame_tests PROPERTIES TIMEOUT 15)
+
+        add_executable(depthxr_pivot_pose_tests tests/pivot_pose_tests.cpp src/openxr_layer.cpp)
+        target_include_directories(depthxr_pivot_pose_tests PRIVATE include)
+        target_link_libraries(depthxr_pivot_pose_tests PRIVATE depthxr_core depthxr_osd
+            OpenXR::openxr_loader d3d11 d3dcompiler dxgi shlwapi)
+        target_compile_definitions(depthxr_pivot_pose_tests PRIVATE DEPTHXR_TESTING
+            WIN32_LEAN_AND_MEAN NOMINMAX XR_USE_GRAPHICS_API_D3D11 VECTORXR_VERSION="${_vectorxr_version}")
+        add_test(NAME depthxr_pivot_pose_tests COMMAND depthxr_pivot_pose_tests)
+        set_tests_properties(depthxr_pivot_pose_tests PROPERTIES TIMEOUT 15)
+
+        add_executable(depthxr_pivot_gaze_tests tests/pivot_gaze_tests.cpp src/openxr_layer.cpp src/layer_entry.cpp)
+        target_include_directories(depthxr_pivot_gaze_tests PRIVATE include)
+        target_link_libraries(depthxr_pivot_gaze_tests PRIVATE depthxr_core depthxr_osd
+            OpenXR::openxr_loader d3d11 d3dcompiler dxgi shlwapi)
+        target_compile_definitions(depthxr_pivot_gaze_tests PRIVATE DEPTHXR_TESTING
+            WIN32_LEAN_AND_MEAN NOMINMAX XR_USE_GRAPHICS_API_D3D11 VECTORXR_VERSION="${_vectorxr_version}")
+        add_test(NAME depthxr_pivot_gaze_tests COMMAND depthxr_pivot_gaze_tests)
+        set_tests_properties(depthxr_pivot_gaze_tests PROPERTIES TIMEOUT 15)
     endif()
 endif()
 

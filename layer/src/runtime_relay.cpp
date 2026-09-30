@@ -155,8 +155,11 @@ bool WriteRuntimeStatus(const std::filesystem::path& path, const RuntimeStatusDo
            << "  \"application\": \"" << EscapeJson(document.application) << "\",\n"
            << "  \"updatedAtUnixMilliseconds\": " << document.updated_at_unix_milliseconds << ",\n"
            << "  \"acknowledgedRevision\": " << document.acknowledged_revision << ",\n"
-           << "  \"capabilities\": { \"quadviewsDiagnosticVisualization\": " << (document.quadviews_diagnostic_visualization_available ? "true" : "false") << " },\n"
+           << "  \"capabilities\": { \"quadviewsDiagnosticVisualization\": " << (document.quadviews_diagnostic_visualization_available ? "true" : "false") << ", \"osd\": " << (document.osd_available ? "true" : "false") << " },\n"
            << "  \"state\": { \"quadviewsDiagnosticVisualization\": " << (document.quadviews_diagnostic_visualization_enabled ? "true" : "false")
+           << ", \"osdVisible\": " << (document.osd_visible ? "true" : "false")
+           << ", \"osdCompact\": " << (document.osd_compact ? "true" : "false")
+           << ", \"osdMessage\": \"" << EscapeJson(document.osd_message) << "\""
            << ", \"turboState\": \"" << EscapeJson(document.turbo_state)
            << "\", \"turboReason\": \"" << EscapeJson(document.turbo_reason) << "\" },\n"
            << "  \"quadviewsDimensionsAt\": " << document.quadviews_dimensions_at << ",\n"

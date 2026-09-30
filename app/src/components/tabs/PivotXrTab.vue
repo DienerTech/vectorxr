@@ -407,9 +407,9 @@ const profileOverviewWarningIndexes = computed(() => new Set(
           />
 
         </div>
-        <div v-else class="mt-3 rounded-[0.9rem] border px-4 py-3 text-sm leading-6 surface-panel-strong">
-          The default profile is off and has no effect — applications without an enabled custom profile get no Pivot. Enabled custom profiles below still apply to their assigned applications.
-        </div>
+        <p v-else class="mt-2 text-xs text-muted">
+          Off unless an enabled custom profile turns it on. Custom profiles below still apply to their applications.
+        </p>
       </details>
     </article>
 
@@ -417,10 +417,10 @@ const profileOverviewWarningIndexes = computed(() => new Set(
     <section class="space-y-3">
       <!-- Sticky so Add Profile stays reachable while scrolling a long profile list. -->
       <div class="sticky top-0 z-20 flex flex-wrap items-center justify-between gap-3 rounded-[1rem] border px-4 py-3 shadow-panel backdrop-blur surface-panel-strong">
-        <div>
+        <div class="min-w-0 flex-1">
           <h2 class="text-lg font-semibold tracking-tight">Custom Profiles</h2>
           <p class="text-sm text-muted">
-            Override Pivot per application. Several profiles can target the same title with different bindings — the binding you press picks the profile. Order sets priority when bindings collide.
+            Override Pivot per application. Profiles for the same title can use different bindings; the binding you press picks the profile, and order sets priority.
           </p>
         </div>
         <button

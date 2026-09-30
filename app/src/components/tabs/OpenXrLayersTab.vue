@@ -37,7 +37,8 @@ const busyKey = ref<string | null>(null)
 const unlockingMachineWrites = ref(false)
 
 const activeSlice = computed(() => props.snapshot?.slices.find((slice) => slice.id === activeSliceId.value) ?? null)
-const activeSliceReadOnly = computed(() => activeSlice.value?.requiresElevationForWrites === true && !props.machineWritesUnlocked)
+const adminWritesAvailable = computed(() => props.snapshot?.processElevated === true || props.machineWritesUnlocked)
+const activeSliceReadOnly = computed(() => activeSlice.value?.requiresElevationForWrites === true && !adminWritesAvailable.value)
 const uncommonLayerCount = computed(
   () => props.snapshot?.slices.filter((slice) => slice.uncommon).reduce((count, slice) => count + slice.layers.length, 0) ?? 0,
 )
@@ -224,6 +225,7 @@ function applyLayerEnabled(
   enabled: boolean,
 ): OpenXrLayerSnapshot {
   return {
+    ...snapshot,
     slices: snapshot.slices.map((slice) => ({
       ...slice,
       layers: slice.id === sliceId
@@ -240,6 +242,7 @@ function applyLayerMove(
   direction: OpenXrLayerMoveDirection,
 ): OpenXrLayerSnapshot {
   return {
+    ...snapshot,
     slices: snapshot.slices.map((slice) => {
       if (slice.id !== sliceId) {
         return slice
@@ -270,6 +273,7 @@ function applyLayerDelete(
   manifestPath: string,
 ): OpenXrLayerSnapshot {
   return {
+    ...snapshot,
     slices: snapshot.slices.map((slice) => ({
       ...slice,
       layers: slice.id === sliceId
@@ -365,7 +369,7 @@ function elevatedWriteTooltip(action: string, slice: OpenXrLayerRegistrySlice): 
     return `${action} This per-user hive should not require administrator approval.`
   }
 
-  if (!props.machineWritesUnlocked) {
+  if (!adminWritesAvailable.value) {
     return `${action} Unlock admin writes before changing machine-wide OpenXR layers.`
   }
 
@@ -490,9 +494,9 @@ function signatureGuidance(layer: OpenXrLayerEntry): string {
               <span
                 v-if="activeSlice.requiresElevationForWrites"
                 class="rounded-full px-3 py-1 text-xs font-semibold uppercase tracking-[0.16em]"
-                :class="machineWritesUnlocked ? 'chip-success' : 'chip-warning'"
+                :class="adminWritesAvailable ? 'chip-success' : 'chip-warning'"
               >
-                {{ machineWritesUnlocked ? 'Unlocked' : 'Read only' }}
+                {{ adminWritesAvailable ? 'Unlocked' : 'Read only' }}
               </span>
             </div>
             <p class="mt-1 text-sm leading-6 text-muted">{{ sliceDescription(activeSlice) }}</p>

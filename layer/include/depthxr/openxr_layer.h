@@ -31,7 +31,10 @@
 #include "depthxr/runtime_compatibility.h"
 #include "depthxr/runtime_pacing.h"
 #include "depthxr/runtime_relay.h"
+#include "depthxr/osd_renderer.h"
+#include "depthxr/osd_composite.h"
 #include "depthxr/turbo_recovery.h"
+#include "depthxr/turbo_trace.h"
 #include "depthxr/settings_resolver.h"
 #include "depthxr/swapchain_state.h"
 
@@ -64,6 +67,7 @@ class OpenXrLayer {
     bool CanCreateInstance();
 
     struct InstanceCreateDiagnostics {
+        bool turbo_clock_enabled{false};
         bool app_requested_quad_views{false};
         bool app_requested_varjo_foveated_rendering{false};
         bool app_requested_eye_gaze{false};
@@ -107,6 +111,8 @@ class OpenXrLayer {
     // (loads config lazily). Does not consider runtime capability — the caller
     // pairs this with a runtime extension probe.
     bool IsVarjoCompatibleQuadviewsEligible();
+    bool WantsTurboClockConversion();
+
 
     XrResult OnInstanceCreated(const XrInstanceCreateInfo* create_info,
                                XrInstance instance,
@@ -174,7 +180,13 @@ class OpenXrLayer {
                                          XrExtent2Df* bounds);
     XrResult CreateReferenceSpace(XrSession session, const XrReferenceSpaceCreateInfo* create_info, XrSpace* space);
     XrResult DestroySpace(XrSpace space);
+    XrResult CreateAction(XrActionSet set, const XrActionCreateInfo* info, XrAction* action);
+    XrResult DestroyAction(XrAction action);
+    XrResult DestroyActionSet(XrActionSet set);
+    XrResult SuggestInteractionProfileBindings(XrInstance instance, const XrInteractionProfileSuggestedBinding* bindings);
+    XrResult CreateActionSpace(XrSession session, const XrActionSpaceCreateInfo* info, XrSpace* space);
     XrResult LocateSpace(XrSpace space, XrSpace base_space, XrTime time, XrSpaceLocation* location);
+    XrResult PollEvent(XrInstance instance, XrEventDataBuffer* event_data);
     XrResult LocateViews(XrSession session,
                          const XrViewLocateInfo* view_locate_info,
                          XrViewState* view_state,
@@ -185,6 +197,8 @@ class OpenXrLayer {
   private:
 #if defined(DEPTHXR_TESTING)
     friend class TurboFrameTestPeer;
+    friend class PivotPoseTestPeer;
+    friend class PivotGazeTestPeer;
 #endif
 
     OpenXrLayer() = default;
@@ -448,7 +462,7 @@ class OpenXrLayer {
                                  bool metrics_available,
                                  int sound_volume);
     bool IsTurboMetricsCaptureArmed(const InputBinding& binding, int sound_volume);
-    void FlushTurboMetrics(bool final_flush);
+    void FlushTurboMetrics(bool final_flush, bool queue_after_pending = false);
     void ResetTurboMetricsState();
     // Logs shouldRender changes (turbo_mutex_ held by caller). A silent
     // shouldRender=false is one of the ways an app goes black while its
@@ -628,6 +642,9 @@ class OpenXrLayer {
                                XrTime display_time,
                                const XrPosef& reverse_delta,
                                bool has_non_identity_delta,
+                               const DepthSubmissionGeometry* depth_geometry,
+                               uint32_t* restored_view_count,
+                               bool allow_osd_composite,
                                XrCompositionLayerProjection* composed_layer,
                                std::vector<XrCompositionLayerProjectionView>* composed_views);
 
@@ -653,6 +670,50 @@ class OpenXrLayer {
     bool has_failed_config_timestamp_{false};
 
     Logger logger_;
+    TurboTimingTrace turbo_trace_; // destroyed before logger_
+    // Immutable between BeginSession and teardown; live edits apply next session.
+    OsdRenderer osd_;
+    OsdComposite osd_composite_;
+    struct PendingOsdComposite {
+        XrTime frame_time{};
+        XrSpace layer_space{XR_NULL_HANDLE};
+        XrCompositionLayerQuad quad{XR_TYPE_COMPOSITION_LAYER_QUAD};
+        XrPosef early_panel_pose{};
+        std::shared_ptr<const OsdBitmap> bitmap;
+        bool rgba{};
+        std::array<XrCompositionLayerProjectionView,2> eyes;
+        std::array<XrSwapchain,2> swapchains{};
+        std::array<ID3D11RenderTargetView*,2> targets{};
+        std::array<ID3D11Texture2D*,2> output_images{}, private_images{};
+        uint32_t width{},height{};
+    };
+    // Owned by the application's end-frame thread; images remain acquired until
+    // the last pose update and draw immediately before downstream xrEndFrame.
+    std::optional<PendingOsdComposite> pending_osd_composite_;
+    XrResult ReleasePendingOsdImages();
+    XrResult FinishOsdComposite(const XrFrameEndInfo*, bool& drawn);
+    bool osd_composite_logged_{false}, osd_composite_fallback_logged_{false};
+    std::atomic<bool> osd_vulkan_{false}, turbo_metrics_active_{false};
+    std::mutex osd_vulkan_queue_mutex_;
+    std::atomic<bool> osd_monitoring_{false};
+    std::atomic<bool> osd_should_render_{true};
+    std::optional<std::chrono::steady_clock::time_point> osd_last_input_poll_;
+    bool osd_toggle_down_{false}, osd_cycle_down_{false}, osd_was_enabled_{false};
+    std::uint64_t osd_settings_revision_{1}; // bumped whenever settings re-resolve
+    OsdSnapshot BuildOsdSnapshot() const;
+    void PrepareOsd();
+    TurboExperimentalSettings turbo_experiment_;
+    bool turbo_clock_enabled_{false};
+    PFN_xrVoidFunction turbo_convert_counter_time_{nullptr};
+    std::optional<std::chrono::steady_clock::time_point> turbo_limit_last_wait_;
+    bool turbo_trace_last_engaged_{false};
+    XrResult TraceRuntimeWaitFrame(XrSession, const XrFrameWaitInfo*, XrFrameState*);
+    XrResult TraceRuntimeBeginFrame(XrSession, const XrFrameBeginInfo*);
+    XrResult TraceRuntimeEndFrame(XrSession, const XrFrameEndInfo*);
+    XrTime TurboClockNow();
+    void ConfigureTurboExperiment();
+    std::string TurboTimingConfiguration() const;
+
     struct InputBindingDiagnosticLogState {
         bool failure_active{false};
         std::string signature;
@@ -779,11 +840,9 @@ class OpenXrLayer {
     size_t pivotxr_quick_view_index_{0};
     size_t pivotxr_quick_view_return_profile_index_{0};
     bool pivotxr_quick_view_return_engaged_{false};
-    // Optional full seated origin in the app's reference space. Motion Assist
-    // currently consumes yaw/pitch, while the complete pose, capture time, and
-    // session identity establish the stable positional reference required by
-    // future Quick Views. Capture happens on the xrLocateViews drive path so
-    // it shares the frame's displayTime pipeline with the pivot drive.
+    // Optional full seated origin in the app's reference space. Its position
+    // anchors translation for every Pivot mode. Capture happens on the
+    // xrLocateViews drive path and shares the pivot drive's displayTime.
     struct PivotOrigin {
         XrPosef pose{{0.0f, 0.0f, 0.0f, 1.0f}, {0.0f, 0.0f, 0.0f}};
         double yaw_radians{0.0};
@@ -794,6 +853,22 @@ class OpenXrLayer {
     };
     std::optional<PivotOrigin> pivotxr_origin_;
     bool pivotxr_origin_capture_pending_{false};
+    struct PivotTranslationAnchor {
+        XrVector3f position;
+        XrSpace space{XR_NULL_HANDLE};
+    };
+    // Without Set Origin, capture once per engagement, never once per frame:
+    // repeatedly anchoring at the moving head would cancel the rotated lean.
+    std::optional<PivotTranslationAnchor> pivotxr_translation_anchor_;
+    // A runtime recenter (REFERENCE_SPACE_CHANGE_PENDING) moves the anchor's
+    // reference origin under the stored coordinates. The drive path re-anchors
+    // at the first located frame at or after the change time.
+    struct PivotReferenceChange {
+        XrReferenceSpaceType type;
+        XrTime change_time;
+    };
+    std::vector<PivotReferenceChange> pivotxr_reference_changes_;
+    bool PivotAnchorAffectedBy(XrReferenceSpaceType type) const;
     bool depthxr_toggle_enabled_{true};
     bool depthxr_toggle_binding_was_down_{false};
     std::optional<std::chrono::steady_clock::time_point> pivotxr_binding_last_poll_time_;
@@ -982,7 +1057,8 @@ class OpenXrLayer {
                                       double* applied_extra_yaw_radians,
                                       double* applied_extra_pitch_radians,
                                       XrPosef* applied_pose_delta,
-                                      bool update_smoothing);
+                                      bool update_smoothing,
+                                      const XrSpaceLocation* anchor_space_in_reference = nullptr);
     // The pacing valve (turbo_mutex_): with the pipeline structural, the
     // turbo toggle only flips this. Open: app waits fabricate instantly
     // (decoupled). Closed: app waits block consuming a pacing token — one is
@@ -993,6 +1069,14 @@ class OpenXrLayer {
     bool turbo_valve_open_{false};
     int turbo_pacing_tokens_{0};
     std::condition_variable turbo_valve_cv_;
+    // Frame-thread state (ForwardEndFrame only). Only a manual toggle-off keeps
+    // an async pipeline re-coupled. A stall while re-coupled, a safety
+    // suspension, a recovery block, or disabling Turbo in settings hands the
+    // owned frame to frame-thread (sequenced) pacing, which cannot interlock
+    // with submission. A handover re-resolves the configured strategy at the
+    // next session.
+    bool turbo_async_recouple_stalled_{false};
+    bool turbo_async_handed_over_{false};
     std::string runtime_version_;
 
     // Frame pacing telemetry (debug log level): quantifies judder sources by
@@ -1148,6 +1232,20 @@ class OpenXrLayer {
     uint32_t cached_quadviews_stereo_max_width_{0};
     uint32_t cached_quadviews_stereo_max_height_{0};
     std::unordered_set<XrSpace> tracked_view_spaces_;
+    // Action resources outlive xrDestroyAction/xrDestroyActionSet when spaces
+    // still reference them. Shared identity prevents reused handles from
+    // changing the classification of an existing eye-gaze space.
+    struct ApplicationPoseAction {
+        XrActionSet owner{XR_NULL_HANDLE};
+        bool eye_gaze{false};
+    };
+    std::unordered_map<XrAction, std::shared_ptr<ApplicationPoseAction>> application_pose_actions_;
+    struct ApplicationActionSpace {
+        std::shared_ptr<ApplicationPoseAction> action;
+        bool includes_eyes{false};
+    };
+    std::unordered_map<XrSpace, ApplicationActionSpace> application_action_spaces_;
+    bool IsHeadRelativeEyeGaze(XrSpace space, XrSpace base_space) const;
     std::unordered_set<XrSpace> tracked_local_spaces_;
     std::unordered_set<XrSpace> tracked_stage_spaces_;
     std::vector<XrPosef> cached_eye_offset_poses_;
@@ -1204,6 +1302,7 @@ class OpenXrLayer {
     PFN_xrCreateActionSpace next_create_action_space_{nullptr};
     PFN_xrDestroySpace next_destroy_space_{nullptr};
     PFN_xrLocateSpace next_locate_space_{nullptr};
+    PFN_xrPollEvent next_poll_event_{nullptr};
     PFN_xrLocateViews next_locate_views_{nullptr};
     PFN_xrStringToPath next_string_to_path_{nullptr};
     PFN_xrCreateActionSet next_create_action_set_{nullptr};

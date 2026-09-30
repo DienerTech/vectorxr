@@ -16,8 +16,13 @@ use std::os::windows::process::CommandExt;
 use windows::core::PWSTR;
 #[cfg(windows)]
 use windows::Win32::Foundation::{
-    ERROR_ACCESS_DENIED, ERROR_FILE_NOT_FOUND, ERROR_MORE_DATA, ERROR_NO_MORE_ITEMS, WIN32_ERROR,
+    CloseHandle, HANDLE, ERROR_ACCESS_DENIED, ERROR_FILE_NOT_FOUND, ERROR_MORE_DATA,
+    ERROR_NO_MORE_ITEMS, WIN32_ERROR,
 };
+#[cfg(windows)]
+use windows::Win32::Security::{GetTokenInformation, TokenElevation, TOKEN_ELEVATION, TOKEN_QUERY};
+#[cfg(windows)]
+use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 #[cfg(windows)]
 use windows::Win32::System::Registry::{
     RegCloseKey, RegDeleteValueW, RegEnumValueW, RegFlushKey, RegOpenKeyExW, RegSetValueExW, HKEY,
@@ -38,6 +43,7 @@ pub enum MoveDirection {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OpenXrLayerSnapshot {
+    process_elevated: bool,
     slices: Vec<OpenXrLayerRegistrySlice>,
 }
 
@@ -204,7 +210,38 @@ pub fn load_openxr_layers_with_signatures(
         .map(|definition| read_slice(definition, include_signatures))
         .collect::<Result<Vec<_>, _>>()?;
 
-    Ok(OpenXrLayerSnapshot { slices })
+    Ok(OpenXrLayerSnapshot {
+        process_elevated: process_is_elevated(),
+        slices,
+    })
+}
+
+// Check the process token, not membership in Administrators: UAC can give
+// an administrator a non-elevated token. A failed probe keeps controls locked.
+#[cfg(windows)]
+fn process_is_elevated() -> bool {
+    unsafe {
+        let mut token = HANDLE::default();
+        if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token).is_err() {
+            return false;
+        }
+        let mut elevation = TOKEN_ELEVATION::default();
+        let mut returned_size = 0;
+        let result = GetTokenInformation(
+            token,
+            TokenElevation,
+            Some((&mut elevation as *mut TOKEN_ELEVATION).cast()),
+            std::mem::size_of::<TOKEN_ELEVATION>() as u32,
+            &mut returned_size,
+        );
+        let _ = CloseHandle(token);
+        result.is_ok() && elevation.TokenIsElevated != 0
+    }
+}
+
+#[cfg(not(windows))]
+fn process_is_elevated() -> bool {
+    false
 }
 
 pub fn ensure_openxr_layer_elevation() -> Result<(), String> {
@@ -535,6 +572,10 @@ fn run_powershell(script: &str) -> Result<String, String> {
 }
 
 fn run_elevated_registry_operation(operation: ElevatedOpenXrOperation) -> Result<(), String> {
+    if process_is_elevated() {
+        return run_elevated_operation(operation);
+    }
+
     let helper_lock = ELEVATED_HELPER.get_or_init(|| Mutex::new(None));
     let mut helper_guard = helper_lock
         .lock()
