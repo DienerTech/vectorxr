@@ -2094,6 +2094,7 @@ XrResult OpenXrLayer::DestroyInstance(XrInstance instance) {
         next_begin_frame_ = nullptr;
         next_end_frame_ = nullptr;
         next_locate_space_ = nullptr;
+        next_poll_event_ = nullptr;
         next_locate_views_ = nullptr;
         next_string_to_path_ = nullptr;
         next_create_action_set_ = nullptr;
@@ -7859,6 +7860,46 @@ bool OpenXrLayer::IsHeadRelativeEyeGaze(XrSpace space, XrSpace base_space) const
            (IsTrackedViewSpace(space) && is_gaze(base_space));
 }
 
+XrResult OpenXrLayer::PollEvent(XrInstance instance, XrEventDataBuffer* event_data) {
+    if (!next_poll_event_) {
+        return XR_ERROR_FUNCTION_UNSUPPORTED;
+    }
+    const XrResult result = next_poll_event_(instance, event_data);
+    if (result != XR_SUCCESS || !event_data ||
+        event_data->type != XR_TYPE_EVENT_DATA_REFERENCE_SPACE_CHANGE_PENDING) {
+        return result;
+    }
+    const auto& change = *reinterpret_cast<const XrEventDataReferenceSpaceChangePending*>(event_data);
+    if (change.referenceSpaceType == XR_REFERENCE_SPACE_TYPE_VIEW) {
+        return result;
+    }
+    std::scoped_lock lock(mutex_);
+    if (change.session == active_session_ && pivotxr_reference_changes_.size() < 16) {
+        pivotxr_reference_changes_.push_back({change.referenceSpaceType, change.changeTime});
+        logger_.Info("Runtime reference space change pending: type=" +
+                     std::to_string(static_cast<int>(change.referenceSpaceType)) +
+                     ", changeTime=" + std::to_string(change.changeTime) +
+                     "; Pivot re-anchors its seated position at the change.");
+    }
+    return result;
+}
+
+bool OpenXrLayer::PivotAnchorAffectedBy(XrReferenceSpaceType type) const {
+    if (!pivotxr_translation_anchor_) {
+        return false;
+    }
+    const XrSpace space = pivotxr_translation_anchor_->space;
+    if (tracked_local_spaces_.contains(space)) {
+        return type == XR_REFERENCE_SPACE_TYPE_LOCAL || type == XR_REFERENCE_SPACE_TYPE_LOCAL_FLOOR_EXT;
+    }
+    if (tracked_stage_spaces_.contains(space)) {
+        return type == XR_REFERENCE_SPACE_TYPE_STAGE;
+    }
+    // Unknown app space type (e.g. LOCAL_FLOOR or a custom origin): any
+    // tracking-origin change may move it.
+    return true;
+}
+
 XrResult OpenXrLayer::LocateSpace(XrSpace space, XrSpace base_space, XrTime time, XrSpaceLocation* location) {
     bool pivotxr_active = false;
     bool pivot_processing_required = false;
@@ -9089,6 +9130,11 @@ void OpenXrLayer::CaptureInstanceFunctions() {
     function = nullptr;
     if (XR_SUCCEEDED(next_get_instance_proc_addr_(instance_, "xrLocateSpace", &function))) {
         next_locate_space_ = reinterpret_cast<PFN_xrLocateSpace>(function);
+    }
+
+    function = nullptr;
+    if (XR_SUCCEEDED(next_get_instance_proc_addr_(instance_, "xrPollEvent", &function))) {
+        next_poll_event_ = reinterpret_cast<PFN_xrPollEvent>(function);
     }
 
     function = nullptr;
@@ -10866,6 +10912,20 @@ XrResult OpenXrLayer::ApplyPivotToLocatedSpace(XrSpace space,
     const XrPosef view_pose = space_is_view ? location->pose : InvertPose(location->pose);
     const XrSpace reference_space = space_is_view ? base_space : space;
     const bool position_valid = (location->locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT) != 0;
+    if (update_smoothing && !pivotxr_reference_changes_.empty()) {
+        // A recenter reached this frame: the stored anchor coordinates now
+        // name a different physical point, which would orbit the camera.
+        std::erase_if(pivotxr_reference_changes_, [&](const PivotReferenceChange& change) {
+            if (time < change.change_time) {
+                return false;
+            }
+            if (PivotAnchorAffectedBy(change.type)) {
+                pivotxr_translation_anchor_.reset();
+                logger_.Info("PivotXR: re-anchoring the seated position after a runtime recenter.");
+            }
+            return true;
+        });
+    }
     if (update_smoothing && position_valid && !pivotxr_translation_anchor_) {
         pivotxr_translation_anchor_ = PivotTranslationAnchor{view_pose.position, reference_space};
     }
@@ -11193,6 +11253,7 @@ void OpenXrLayer::ResetPivotActivationState() {
     pivotxr_origin_.reset();
     pivotxr_origin_capture_pending_ = false;
     pivotxr_translation_anchor_.reset();
+    pivotxr_reference_changes_.clear();
     pivotxr_binding_last_poll_time_.reset();
     pivot_diagnostic_stride_counter_ = 0;
     pivot_diagnostic_ = PivotDiagnosticState{};

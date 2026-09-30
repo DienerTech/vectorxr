@@ -186,6 +186,7 @@ class OpenXrLayer {
     XrResult SuggestInteractionProfileBindings(XrInstance instance, const XrInteractionProfileSuggestedBinding* bindings);
     XrResult CreateActionSpace(XrSession session, const XrActionSpaceCreateInfo* info, XrSpace* space);
     XrResult LocateSpace(XrSpace space, XrSpace base_space, XrTime time, XrSpaceLocation* location);
+    XrResult PollEvent(XrInstance instance, XrEventDataBuffer* event_data);
     XrResult LocateViews(XrSession session,
                          const XrViewLocateInfo* view_locate_info,
                          XrViewState* view_state,
@@ -858,6 +859,15 @@ class OpenXrLayer {
     // Without Set Origin, capture once per engagement, never once per frame:
     // repeatedly anchoring at the moving head would cancel the rotated lean.
     std::optional<PivotTranslationAnchor> pivotxr_translation_anchor_;
+    // A runtime recenter (REFERENCE_SPACE_CHANGE_PENDING) moves the anchor's
+    // reference origin under the stored coordinates. The drive path re-anchors
+    // at the first located frame at or after the change time.
+    struct PivotReferenceChange {
+        XrReferenceSpaceType type;
+        XrTime change_time;
+    };
+    std::vector<PivotReferenceChange> pivotxr_reference_changes_;
+    bool PivotAnchorAffectedBy(XrReferenceSpaceType type) const;
     bool depthxr_toggle_enabled_{true};
     bool depthxr_toggle_binding_was_down_{false};
     std::optional<std::chrono::steady_clock::time_point> pivotxr_binding_last_poll_time_;
@@ -1291,6 +1301,7 @@ class OpenXrLayer {
     PFN_xrCreateActionSpace next_create_action_space_{nullptr};
     PFN_xrDestroySpace next_destroy_space_{nullptr};
     PFN_xrLocateSpace next_locate_space_{nullptr};
+    PFN_xrPollEvent next_poll_event_{nullptr};
     PFN_xrLocateViews next_locate_views_{nullptr};
     PFN_xrStringToPath next_string_to_path_{nullptr};
     PFN_xrCreateActionSet next_create_action_set_{nullptr};

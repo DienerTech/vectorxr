@@ -222,6 +222,10 @@ XrResult XRAPI_CALL DepthxrCreateActionSpace(XrSession session, const XrActionSp
     return OpenXrLayer::Instance().CreateActionSpace(session, info, space);
 }
 
+XrResult XRAPI_CALL DepthxrPollEvent(XrInstance instance, XrEventDataBuffer* event_data) {
+    return OpenXrLayer::Instance().PollEvent(instance, event_data);
+}
+
 XrResult XRAPI_CALL DepthxrLocateSpace(XrSpace space,
                                        XrSpace base_space,
                                        XrTime time,
@@ -555,6 +559,10 @@ XrResult XRAPI_CALL xrGetInstanceProcAddr(XrInstance instance, const char* name,
     }
     if (requested == "xrLocateSpace") {
         *function = reinterpret_cast<PFN_xrVoidFunction>(depthxr::DepthxrLocateSpace);
+        return XR_SUCCESS;
+    }
+    if (requested == "xrPollEvent") {
+        *function = reinterpret_cast<PFN_xrVoidFunction>(depthxr::DepthxrPollEvent);
         return XR_SUCCESS;
     }
     if (requested == "xrLocateViews") {

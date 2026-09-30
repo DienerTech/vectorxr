@@ -1,6 +1,7 @@
 #include "depthxr/openxr_layer.h"
 
 #include <cmath>
+#include <cstring>
 #include <iostream>
 #include <stdexcept>
 
@@ -76,14 +77,37 @@ public:
         }
     }
     static XrPosef Apply(XrPosef raw, XrPosef* delta=nullptr, bool reverse=false,
-                        XrSpace base=Space(2), XrSpaceLocationFlags flags=valid_pose, bool drive=true) {
+                        XrSpace base=Space(2), XrSpaceLocationFlags flags=valid_pose, bool drive=true,
+                        XrTime time=100) {
         auto& l=OpenXrLayer::Instance();
         l.pivotxr_last_smoothing_wall_time_.reset(); // deterministic zero elapsed time
         XrSpaceLocation location{XR_TYPE_SPACE_LOCATION};
         location.pose=reverse ? Inverse(raw) : raw; location.locationFlags=flags;
         l.ApplyPivotToLocatedSpace(reverse ? base : Space(1), reverse ? Space(1) : base,
-            100, true, &location, nullptr, nullptr, delta, drive && !reverse);
+            time, true, &location, nullptr, nullptr, delta, drive && !reverse);
         return location.pose;
+    }
+    inline static XrEventDataReferenceSpaceChangePending pending_change{XR_TYPE_EVENT_DATA_REFERENCE_SPACE_CHANGE_PENDING};
+    static XrResult XRAPI_CALL PollChange(XrInstance, XrEventDataBuffer* buffer) {
+        std::memcpy(buffer,&pending_change,sizeof(pending_change));
+        return XR_SUCCESS;
+    }
+    static void TrackLocal(XrSpace space) {
+        auto& l=OpenXrLayer::Instance();
+        l.tracked_local_spaces_={space}; l.tracked_stage_spaces_.clear();
+    }
+    // Delivers a runtime recenter through the layer's xrPollEvent hook.
+    static void Recenter(XrReferenceSpaceType type, XrTime change_time) {
+        auto& l=OpenXrLayer::Instance();
+        l.active_session_=reinterpret_cast<XrSession>(uintptr_t{0x99});
+        pending_change.session=l.active_session_;
+        pending_change.referenceSpaceType=type;
+        pending_change.changeTime=change_time;
+        l.next_poll_event_=&PollChange;
+        XrEventDataBuffer buffer{XR_TYPE_EVENT_DATA_BUFFER};
+        Expect(l.PollEvent(XR_NULL_HANDLE,&buffer)==XR_SUCCESS &&
+               buffer.type==XR_TYPE_EVENT_DATA_REFERENCE_SPACE_CHANGE_PENDING,"Event hook must pass events through unchanged");
+        l.next_poll_event_=nullptr;
     }
     static void Target(double yaw) {
         auto& l=OpenXrLayer::Instance();
@@ -245,7 +269,29 @@ int main() {
             Expect(!Close(driven,turned),"Motion fixture must actually generate extra rotation");
         }
 
+        // A runtime recenter moves LOCAL under the stored anchor: re-anchor at
+        // the change time instead of orbiting around the old seated point.
+        for (bool explicit_origin : {false,true}) {
+            Peer::Prepare(Peer::Mode::GlobalNudge,pi/2);
+            Peer::TrackLocal(Space(2));
+            if (explicit_origin) Peer::Origin(Pose());
+            Peer::Apply(Pose());
+            const auto recentered=Pose(0,{0,1.6f,0});
+            Peer::Recenter(XR_REFERENCE_SPACE_TYPE_STAGE,50);
+            Expect(!Close(Peer::Apply(recentered).position,recentered.position),
+                   "A STAGE change must not re-anchor a LOCAL seated position");
+            Peer::Recenter(XR_REFERENCE_SPACE_TYPE_LOCAL,200);
+            Expect(!Close(Peer::Apply(recentered,nullptr,false,Space(2),valid_pose,true,150).position,recentered.position),
+                   "Frames before the change time still belong to the old origin");
+            Expect(Close(Peer::Apply(recentered,nullptr,false,Space(2),valid_pose,true,200).position,recentered.position),
+                   "A recenter must re-anchor the seated position at its change time");
+            auto leaned_after=recentered; leaned_after.position.x+=.02f;
+            Expect(Close(Peer::Apply(leaned_after,nullptr,false,Space(2),valid_pose,true,250).position,{0,1.6f,-.02f}),
+                   "Lean after a recenter must rotate about the new seated position");
+        }
+
         Peer::Prepare(Peer::Mode::GlobalNudge,pi/2);
+        Peer::TrackLocal(XR_NULL_HANDLE);
         Peer::Apply(Pose());
         auto source_result=Peer::Apply(leaned);
         Peer::AlternateSpace();
