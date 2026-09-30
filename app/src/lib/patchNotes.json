@@ -12,7 +12,8 @@
           "Works in Direct3D 11, Direct3D 12, and Vulkan games, including Quadviews sessions.",
           "Choose a detailed or compact layout, arrange its rows, and set placement, size, opacity, accent color, and a 12- or 24-hour clock. Save your favorite layouts as presets.",
           "Position the panel with a live desktop preview, or pop the preview out into its own window while you adjust settings.",
-          "Press Ctrl+Alt+F10 to show or hide it and Ctrl+Alt+F11 to switch layouts. Both shortcuts can be reassigned to keyboard, joystick, or hat inputs."
+          "Press Ctrl+Alt+F10 to show or hide it and Ctrl+Alt+F11 to switch layouts. Both shortcuts can be reassigned to keyboard, joystick, or hat inputs.",
+          "Known issue: on Pimax headsets, the panel's edges can show slight color fringing, except in DCS with Quadviews."
         ]
       },
       {

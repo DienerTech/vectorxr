@@ -17,6 +17,7 @@ docs/research/
 docs/turbo-pacing.md
 docs/runtime-hardening.md
 Claude outputs/
+.claude/
 
 # Versioned GitHub release notes are public artifacts
 !release/notes/
