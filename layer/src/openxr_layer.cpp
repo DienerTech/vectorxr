@@ -4785,8 +4785,10 @@ XrResult OpenXrLayer::TraceRuntimeEndFrame(XrSession session, const XrFrameEndIn
     XrFrameEndInfo with_osd{};
     std::vector<const XrCompositionLayerBaseHeader*> layers;
     bool osd_in_eye_images=false;
-    const auto composite_result=FinishOsdComposite(info,osd_in_eye_images);
-    if(XR_FAILED(composite_result))return composite_result;
+    // A failed eye-image release is logged by ReleasePendingOsdImages. Still
+    // submit: skipping xrEndFrame would drop the app's frame and leave the
+    // runtime frame open; the runtime reports any resulting layer error.
+    FinishOsdComposite(info,osd_in_eye_images);
     if (info && !osd_in_eye_images && osd_monitoring_.load(std::memory_order_relaxed)) {
         if (const auto* overlay=osd_.Append(*info, osd_should_render_.load(std::memory_order_relaxed))) {
             with_osd=*info;
@@ -6952,6 +6954,10 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
     ReloadConfigIfNeeded();
     RefreshResolvedSettings();
     PrepareOsd();
+    // Eye images held for the OSD composite belong to one submission. If an
+    // earlier EndFrame returned before forwarding, release them now so the
+    // next composition cannot strand them or submit a stale image.
+    ReleasePendingOsdImages();
     // Capture application-submitted rectangles before synthesized Quadviews
     // rewrites them into two runtime views. Report allocated sizes separately.
     if (frame_end_info && frame_end_info->layers) {
@@ -7629,6 +7635,7 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
     PruneDepthSubmissionGeometry(frame_end_info->displayTime);
     PruneQuadViewsFrames(frame_end_info->displayTime);
     if (XR_FAILED(release_result)) {
+        ReleasePendingOsdImages();
         return release_result;
     }
 

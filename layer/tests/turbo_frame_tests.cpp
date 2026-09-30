@@ -235,9 +235,20 @@ class TurboFrameTestPeer {
         ok=ok && layer.ReleasePendingOsdImages()==XR_ERROR_RUNTIME_FAILURE &&
             osd_releases==std::vector<XrSwapchain>{left,right} && !layer.pending_osd_composite_;
         osd_release_failure=false;
+        // A failed eye-image release must not swallow the application's
+        // xrEndFrame: the runtime frame would otherwise stay open.
+        const auto old_end=layer.next_end_frame_;
+        layer.next_end_frame_=&EndOsd;osd_end_calls=0;
+        queue();osd_release_failure=true;frame.displayTime=20'000'000'000;
+        ok=ok && layer.TraceRuntimeEndFrame(XR_NULL_HANDLE,&frame)==XR_SUCCESS && osd_end_calls==1 &&
+            !layer.pending_osd_composite_;
+        osd_release_failure=false;
+        layer.next_end_frame_=old_end;
         layer.next_locate_space_=old_locate;layer.next_release_swapchain_image_=old_release;
         return ok;
     }
+    inline static int osd_end_calls{};
+    static XrResult XRAPI_CALL EndOsd(XrSession,const XrFrameEndInfo*) { ++osd_end_calls; return XR_SUCCESS; }
     static double PredictionSampleAgeMs() {
         auto& layer = Layer();
         std::scoped_lock lock(layer.turbo_mutex_);
