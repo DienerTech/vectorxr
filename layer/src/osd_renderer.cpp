@@ -365,8 +365,17 @@ void OsdRenderer::InitializeGraphics(XrSession session,const void* chain,std::ui
     Event(false,"initialize api="+std::string(graphics_?graphics_->Name():"Unsupported")+" maxLayers="+std::to_string(max_layers_)+" status="+status_.message);
 }
 std::string OsdRenderer::GraphicsApi() const { std::scoped_lock lock(mutex_);return graphics_?graphics_->Name():"Other"; }
-void OsdRenderer::Prepare(const OsdSettings& settings, OsdSnapshot snapshot, bool toggle, bool cycle) {
+bool OsdRenderer::SnapshotDue() const {
     std::scoped_lock lock(mutex_);
+    // Mirrors Append's refresh condition, so the next raster request sees a
+    // snapshot taken this frame; a disabled renderer needs one on re-enable.
+    return !configured_ || !settings_.enabled || !ready_ || updated_==Clock::time_point{} ||
+        Clock::now()-updated_>=std::chrono::duration<double>(1.0/std::max(1,settings_.update_hz));
+}
+std::pair<OsdPresentation, OsdPresentation> OsdRenderer::Prepare(const OsdSettings& settings, std::optional<OsdSnapshot> snapshot,
+                                                                 bool toggle, bool cycle, std::uint64_t revision) {
+    std::scoped_lock lock(mutex_);
+    const OsdPresentation before{status_.compact, status_.shown};
     if (!configured_ || (settings.enabled && !settings_.enabled)) {
         if (failed_) {
             if(graphics_) graphics_->Reset();
@@ -394,7 +403,9 @@ void OsdRenderer::Prepare(const OsdSettings& settings, OsdSnapshot snapshot, boo
         settings.compact_show_turbo!=settings_.compact_show_turbo || settings.compact_show_pivot!=settings_.compact_show_pivot ||
         settings.accent!=settings_.accent || settings.custom_color!=settings_.custom_color || settings.horizontal_degrees!=settings_.horizontal_degrees ||
         settings.vertical_degrees!=settings_.vertical_degrees || settings.distance_meters!=settings_.distance_meters;
-    settings_=settings; snapshot_=std::move(snapshot); configured_=true;
+    if (!configured_ || revision==0 || revision!=settings_revision_) { settings_=settings; settings_revision_=revision; }
+    if (snapshot) snapshot_=std::move(*snapshot);
+    configured_=true;
     if(changed){
         Event(false,"configuration enabled="+std::to_string(settings.enabled)+" shown="+std::to_string(settings.enabled&&visible_)+" compact="+std::to_string(compact_)+
             " refreshHz="+std::to_string(settings.update_hz)+" scale="+std::to_string(settings.scale)+" opacity="+std::to_string(settings.opacity)+
@@ -405,6 +416,7 @@ void OsdRenderer::Prepare(const OsdSettings& settings, OsdSnapshot snapshot, boo
     status_.compact=compact_;
     status_.shown=settings.enabled && visible_;
     if (graphics_ && (!settings.enabled || !visible_)) { status_.visible=false; status_.message=settings.enabled?"Hidden by binding":"Disabled"; }
+    return {before, OsdPresentation{status_.compact, status_.shown}};
 }
 void OsdRenderer::Fail(const char* operation, XrResult result) {
     Event(true,std::string(operation)+" XrResult="+std::to_string(result)+"("+XrResultName(result)+")"+"; OSD disabled until explicit retry");

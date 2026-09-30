@@ -8830,10 +8830,12 @@ void OpenXrLayer::PrepareOsd() {
             osd_cycle_down_=PollInputBindingDown(settings.cycle_binding);
         }
     }
-    auto snapshot=settings.enabled?BuildOsdSnapshot():OsdSnapshot{};
-    const auto before=osd_.Status();
-    osd_.Prepare(settings, std::move(snapshot), osd_toggle_down_, osd_cycle_down_);
-    const auto after=osd_.Status();
+    // The status strings are only read when the worker rasterizes (at the
+    // refresh rate), so build them then instead of on every EndFrame.
+    std::optional<OsdSnapshot> snapshot;
+    if (settings.enabled && osd_.SnapshotDue()) snapshot=BuildOsdSnapshot();
+    const auto [before, after]=osd_.Prepare(settings, std::move(snapshot), osd_toggle_down_, osd_cycle_down_,
+                                            osd_settings_revision_);
     record();
     if (before.compact!=after.compact) SoundPlayer::Instance().PlayTransition(settings.cycle_binding.sound,after.compact,dll_directory_,resolved_settings_.core.sound_volume);
     if (before.shown!=after.shown) SoundPlayer::Instance().PlayTransition(settings.toggle_binding.sound,after.shown,dll_directory_,resolved_settings_.core.sound_volume);
@@ -8857,6 +8859,7 @@ void OpenXrLayer::RefreshResolvedSettings() {
 
     osd_monitoring_.store(resolved_settings_.core.osd.enabled, std::memory_order_relaxed);
     osd_last_input_poll_.reset();
+    ++osd_settings_revision_;
     const bool configured_core_active = resolved_settings_.core.enabled;
     const bool configured_quadviews_active =
         configured_core_active && resolved_settings_.quadviews.enabled;

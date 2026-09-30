@@ -231,6 +231,7 @@ int main(int argc, char** argv) {
         CheckUnusedTexturePixels(960,quad->subImage.imageRect.extent.height+2);
         Check(frame.layerCount==1 && frame.layers==&original,"Application submission was modified");
         Check(renderer.Append(frame,true) && acquires==1,"Unchanged panel was uploaded again before refresh deadline");
+        Check(!renderer.SnapshotDue(),"Status snapshot was requested before the refresh deadline");
         // A refresh whose image is not ready yet must keep presenting the last
         // released image instead of blinking the panel off for a frame.
         settings.update_hz=20; renderer.Prepare(settings,Snapshot(),true,false); // binding still held
@@ -246,6 +247,7 @@ int main(int argc, char** argv) {
         timeouts=0;
         Check(renderer.Append(frame,true) && releases==2 && acquires==2,"Deferred refresh did not complete once the image was ready");
         settings.update_hz=5; renderer.Prepare(settings,Snapshot(),true,false); // binding still held
+        Check(renderer.SnapshotDue(),"A settings change must refresh the status snapshot");
         frame.layerCount=4; Check(!renderer.Append(frame,true),"Exceeded runtime layer count");
         frame.layerCount=0; Check(!renderer.Append(frame,true),"Added OSD to an empty frame");
         frame.layerCount=1; Check(!renderer.Append(frame,false),"OSD ignored shouldRender");

@@ -699,6 +699,7 @@ class OpenXrLayer {
     std::atomic<bool> osd_should_render_{true};
     std::optional<std::chrono::steady_clock::time_point> osd_last_input_poll_;
     bool osd_toggle_down_{false}, osd_cycle_down_{false}, osd_was_enabled_{false};
+    std::uint64_t osd_settings_revision_{1}; // bumped whenever settings re-resolve
     OsdSnapshot BuildOsdSnapshot() const;
     void PrepareOsd();
     TurboExperimentalSettings turbo_experiment_;

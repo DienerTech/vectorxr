@@ -9,6 +9,7 @@
 #include <deque>
 #include <mutex>
 #include <optional>
+#include <utility>
 #include <string>
 #include <thread>
 #include <vector>
@@ -52,6 +53,10 @@ struct OsdSnapshot {
     bool experimental{false};
     std::string pivot;
     std::string compact_pivot;
+};
+
+struct OsdPresentation {
+    bool compact{false}, shown{false};
 };
 
 struct OsdStatus {
@@ -100,7 +105,13 @@ class OsdRenderer {
     void Shutdown();
     void ResetPresentation();
     void SubmissionFailed(XrResult);
-    void Prepare(const OsdSettings&, OsdSnapshot, bool toggle_down, bool cycle_down);
+    // Called every frame. A nonzero settings_revision that matches the last
+    // call skips copying unchanged settings. Pass a snapshot only when
+    // SnapshotDue(): the worker reads it at the refresh rate, not per frame.
+    // Returns the presentation before and after this call's bindings/settings.
+    std::pair<OsdPresentation, OsdPresentation> Prepare(const OsdSettings&, std::optional<OsdSnapshot>,
+        bool toggle_down, bool cycle_down, std::uint64_t settings_revision = 0);
+    bool SnapshotDue() const;
     // The returned layer and its image remain valid until the next Append/Shutdown.
     // Only called on the application's end-frame thread, after game-layer transforms.
     const XrCompositionLayerBaseHeader* Append(const XrFrameEndInfo&, bool should_render);
@@ -129,6 +140,7 @@ class OsdRenderer {
     OsdSnapshot snapshot_;
     OsdTelemetry telemetry_;
     OsdStatus status_;
+    std::uint64_t settings_revision_{};
     int image_height_{};
     int image_width_{OsdBitmap::width};
     std::chrono::steady_clock::time_point updated_{};
