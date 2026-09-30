@@ -9,6 +9,8 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <utility>
+#include <vector>
 
 namespace depthxr {
 
@@ -87,6 +89,25 @@ class InputDeviceRetryBackoff {
     std::chrono::milliseconds initial_delay_;
     std::chrono::milliseconds maximum_delay_;
     std::unordered_map<std::wstring, Entry> entries_;
+};
+
+// A device published by the background connector may already have inputs held
+// (for example a maintained HOTAS switch). Callers prime their edge detectors
+// on their first poll, which reads inactive while the connector runs, so an
+// input held at connect reads released until it is released once; otherwise
+// the connect itself would look like a press. The poller owns synchronization.
+class InputConnectPriming {
+  public:
+    void DeviceConnected(const std::wstring& device_key);
+    bool Filter(const std::wstring& device_key, std::string_view input_path, bool down);
+
+  private:
+    struct Device {
+        std::uint64_t generation{0};
+        // Input path -> connection generation in which it was seen released.
+        std::vector<std::pair<std::string, std::uint64_t>> released;
+    };
+    std::unordered_map<std::wstring, Device> devices_;
 };
 
 std::optional<DeviceInputPath> ParseDeviceInputPath(std::string_view input_path);

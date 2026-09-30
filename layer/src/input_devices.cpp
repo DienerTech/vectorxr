@@ -8,11 +8,10 @@
 #include <condition_variable>
 #include <cwctype>
 #include <mutex>
+#include <new>
 #include <optional>
 #include <string>
 #include <string_view>
-#include <system_error>
-#include <thread>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -219,6 +218,30 @@ std::size_t InputDeviceRetryBackoff::ConsecutiveFailures(
     return entry == entries_.end() ? 0 : entry->second.consecutive_failures;
 }
 
+void InputConnectPriming::DeviceConnected(const std::wstring& device_key) {
+    ++devices_[device_key].generation;
+}
+
+bool InputConnectPriming::Filter(const std::wstring& device_key, std::string_view input_path, bool down) {
+    const auto device = devices_.find(device_key);
+    if (device == devices_.end()) {
+        return down;
+    }
+    auto input = std::find_if(device->second.released.begin(), device->second.released.end(),
+                              [&](const auto& entry) { return entry.first == input_path; });
+    if (input == device->second.released.end()) {
+        device->second.released.emplace_back(std::string(input_path), 0);
+        input = std::prev(device->second.released.end());
+    }
+    if (input->second == device->second.generation) {
+        return down;
+    }
+    if (!down) {
+        input->second = device->second.generation;
+    }
+    return false;
+}
+
 namespace {
 
 #if defined(_WIN32)
@@ -393,7 +416,8 @@ class DirectInputPoller {
         const auto now = std::chrono::steady_clock::now();
         if (const auto it = state_cache_.find(cache_key); it != state_cache_.end() &&
                                                           now - it->second.read_time < kStateCacheLifetime) {
-            result.down = it->second.valid && IsStateDown(*input, it->second.state);
+            result.down = priming_.Filter(cache_key, binding.input_path,
+                                          it->second.valid && IsStateDown(*input, it->second.state));
             return result;
         }
 
@@ -475,7 +499,7 @@ class DirectInputPoller {
         if (result.diagnostic_stage != InputBindingPollStage::None) {
             result.recovered = true;
         }
-        result.down = IsStateDown(*input, cached.state);
+        result.down = priming_.Filter(cache_key, binding.input_path, IsStateDown(*input, cached.state));
         return result;
     }
 
@@ -632,15 +656,62 @@ class DirectInputPoller {
         if (connector_running_.load()) {
             return; // The running connector drains newly queued work before exiting.
         }
-        connector_running_.store(true);
-        try {
-            // Short-lived and detached: it exits as soon as the queue is empty,
-            // so no thread outlives the work (Drain covers layer unload).
-            std::thread([this] { ConnectorLoop(); }).detach();
-        } catch (const std::system_error&) {
-            connector_running_.store(false);
-            connector_idle_.notify_all();
+        // Short-lived: it exits as soon as the queue is empty. The loader may
+        // FreeLibrary the layer after xrDestroyInstance even if Drain timed out
+        // (a hung HID), so the thread holds a module reference and drops it
+        // with FreeLibraryAndExitThread; it never runs unmapped code.
+        HMODULE module = nullptr;
+        if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
+                                reinterpret_cast<LPCWSTR>(&ConnectorThread), &module)) {
+            module = nullptr;
         }
+        connector_running_.store(true);
+        auto* start = new (std::nothrow) ConnectorStart{this, module};
+        const HANDLE thread = start ? CreateThread(nullptr, 0, &ConnectorThread, start, 0, nullptr) : nullptr;
+        if (thread) {
+            CloseHandle(thread);
+            return;
+        }
+        delete start;
+        // Could not start: fail the queued connects onto the reconnect backoff
+        // instead of leaving their bindings pending forever.
+        if (module) {
+            FreeLibrary(module);
+        }
+        connector_running_.store(false);
+        connector_idle_.notify_all();
+        for (const auto& [key, guid] : pending_connects_) {
+            InputBindingPollResult failure;
+            failure.device_poll_attempted = true;
+            SetDiagnostic(failure, InputBindingPollStage::CreateDevice, E_OUTOFMEMORY);
+            failure.device_retry_delay_ms =
+                retry_backoff_.RecordFailure(key, InputDeviceRetryBackoff::Clock::now()).count();
+            failure_diagnostics_[key] = failure;
+            unreported_failures_.insert(key);
+        }
+        pending_connects_.clear();
+    }
+
+    struct ConnectorStart {
+        DirectInputPoller* poller;
+        HMODULE module;
+    };
+
+    static DWORD WINAPI ConnectorThread(void* parameter) {
+        const ConnectorStart start = *static_cast<ConnectorStart*>(parameter);
+        delete static_cast<ConnectorStart*>(parameter);
+        try {
+            start.poller->ConnectorLoop();
+        } catch (...) {
+            // Input diagnostics must never terminate the host application.
+            std::scoped_lock lock(start.poller->mutex_);
+            start.poller->connector_running_.store(false);
+            start.poller->connector_idle_.notify_all();
+        }
+        if (start.module) {
+            FreeLibraryAndExitThread(start.module, 0);
+        }
+        return 0;
     }
 
     void ConnectorLoop() {
@@ -684,6 +755,7 @@ class DirectInputPoller {
             pending_connects_.erase(job->first);
             if (device) {
                 devices_[job->first] = device;
+                priming_.DeviceConnected(job->first);
                 continue;
             }
             diagnostic.down = false;
@@ -710,6 +782,7 @@ class DirectInputPoller {
     std::condition_variable connector_idle_;
     std::atomic<bool> connector_running_{false};
     InputDeviceRetryBackoff retry_backoff_;
+    InputConnectPriming priming_;
     std::unordered_map<std::wstring, IDirectInputDevice8W*> devices_;
     std::unordered_map<std::wstring, CachedDeviceState> state_cache_;
     std::unordered_map<std::wstring, InputBindingPollResult> failure_diagnostics_;

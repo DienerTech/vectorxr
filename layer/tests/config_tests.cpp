@@ -2789,6 +2789,25 @@ void TestDeviceInputPathsAndHatDirections() {
 #endif
 }
 
+// An input held when a device (re)connects must not look like a press: the
+// callers primed their edge detectors while the connector was still running.
+void TestInputConnectPriming() {
+    depthxr::InputConnectPriming priming;
+    const std::wstring hotas = L"{hotas-guid}";
+    Expect(priming.Filter(hotas, "button:1", true), "Unpublished devices must pass state through");
+    priming.DeviceConnected(hotas);
+    Expect(!priming.Filter(hotas, "button:1", true), "A switch held at connect must read released");
+    Expect(!priming.Filter(hotas, "button:1", true), "A held switch must stay released until it is released once");
+    Expect(!priming.Filter(hotas, "button:1", false), "A released switch must read released");
+    Expect(priming.Filter(hotas, "button:1", true), "A press after release must register");
+    Expect(!priming.Filter(hotas, "button:2", false) && priming.Filter(hotas, "button:2", true),
+           "An input released at connect must register its first press");
+    priming.DeviceConnected(hotas);
+    Expect(!priming.Filter(hotas, "button:1", true), "A reconnect must re-prime held inputs");
+    Expect(!priming.Filter(hotas, "button:2", false) && priming.Filter(hotas, "button:2", true),
+           "Released inputs must work immediately after a reconnect");
+}
+
 void TestInputDeviceRetryBackoff() {
     using Backoff = depthxr::InputDeviceRetryBackoff;
     using namespace std::chrono_literals;
@@ -2952,6 +2971,7 @@ int main() {
     TestNumpadActivationKeys();
     TestDeviceInputPathsAndHatDirections();
     TestInputDeviceRetryBackoff();
+    TestInputConnectPriming();
 #ifdef _WIN32
     TestD3D11SharpenShaderRegression();
 #endif
