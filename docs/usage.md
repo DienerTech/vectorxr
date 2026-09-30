@@ -23,8 +23,9 @@ The **Home** tab is a status dashboard:
 - The **Active overview** lists the four Enhancements — **Quadviews**, **Turbo**, **Pivot**, and
   **Depth**, including the default profile and enabled custom-profile counts. These summarize
   your configuration; an Active badge does not mean a VR application is currently running.
-- The left sidebar holds app sections (Home, Settings, Application Registry, OpenXR Layers,
-  About) and the four Enhancements, each with its own on/off toggle.
+- The left sidebar holds app sections (Home, Settings, On-Screen Display, Application Registry,
+  OpenXR Layers, About) and the four Enhancements. A green dot marks an Enhancement with an
+  enabled default or custom profile.
 - The bar at the bottom is the **save bar**. Changes you make are staged until you click **Save
   Changes** (or **Discard**). Watch this bar — nothing you change takes effect until it's saved.
 - **Community & Announcements** provides access to the DienerTech Discord and Ko-fi support.
@@ -60,11 +61,16 @@ single master switch for all Enhancements at runtime.
 
 While you're here:
 
-- **Track Discovered XR apps** is on by default. It records the executable name of OpenXR apps
-  you launch so you can register them in one click later (see Step 2). All data stays local.
-- Set your **theme** (System / Light / Dark), **log level**, and **log retention**.
-- **Import / Export Config** moves your full configuration between machines or backs it up, and
-  **Reset to Default** rebuilds the config and clears discovery data.
+- **General** also holds the **Theme** (System / Light / Dark, stored on this PC only) and
+  **Track discovered XR apps**, which is on by default. It records the executable name of OpenXR
+  apps you launch so you can register them in one click later (see Step 2). All data stays local.
+- **Logging** sets the **Log Level** and **Log Retention** and opens the log folder with
+  **View Logs**.
+- **Sound Feedback** sets the master volume for the activate/deactivate cues you can attach to
+  bindings; **Test** plays a sample.
+- **Config Files** moves your full configuration between machines or backs it up with
+  **Import Config** / **Export Config**, shows where it is stored, and **Reset to Default**
+  rebuilds the config and clears discovery data.
 
 ## Step 2 — Register the app you want to tune
 
@@ -95,7 +101,9 @@ The four Enhancements:
 ![VectorXR Depth tab](screenshots/depth.jpg)
 
 Depth adjusts virtual eye separation and projection convergence as one binocular system. Stereo
-Depth controls perceived world scale; Convergence places the zero-parallax depth plane.
+Depth controls perceived world scale; Convergence places the zero-parallax depth plane. The
+collapsible **Tuning guide** summarizes the order below; it starts open until a Depth profile is
+enabled.
 
 - Begin with **Convergence at 0**. Move **Stereo Depth / World Scale** left to increase apparent
   scale when a cockpit feels miniaturized, or right for stronger stereo shape and a more compact
@@ -158,7 +166,9 @@ up/down than your physical neck allows.
 In every Pivot mode, including Nudges and Snap Views, physical leaning follows the rotated view
 at 1:1 scale. **Set Origin** supplies the fixed seated position for this movement. Without a captured
 origin, Pivot uses your head position when it first engages and keeps it until fully disengaged.
-Set the origin again after recentering the simulator or changing your seated position.
+Set the origin again after recentering the simulator or changing your seated position. When you
+reset or recenter your view in SteamVR, Oculus, or Pimax, Pivot re-anchors its seated position
+automatically, so leaning stays centered on where you now sit.
 
 #### Setting up Snap Views
 
@@ -260,6 +270,8 @@ For the recommended **DCS + synthesized VectorXR Quadviews** path, set:
   provider. Run one quadviews provider at a time.
 
 Restart DCS after changing its VR settings, the active OpenXR runtime, or API-layer state.
+The page's collapsible **Setup guide** repeats this checklist and the compatible titles; it
+starts open until a Quadviews profile is enabled.
 
 #### Live tuning and restarts
 
@@ -367,7 +379,7 @@ Re-enable extras one at a time after the base setup works.
 
 ### Turbo
 
-![VectorXR 0.17 Turbo controls with Safety enabled and the default profile off](screenshots/turbo.jpg)
+![VectorXR Turbo controls with Safety enabled and the default profile off](screenshots/turbo.jpg)
 
 Turbo is an opt-in frame-pacing override for games whose main thread is being held back by the
 OpenXR runtime's wait behavior. It is compatibility-sensitive, so keep the default profile off
@@ -386,11 +398,14 @@ and enable it only for applications where an in-headset A/B comparison demonstra
 5. Launch the game and compare Turbo on/off in the same scene. Use **Performance Diagnostics**
    to compare FPS, frame times, and pacing waits alongside what you see in the headset.
 
+![Turbo custom profiles with the VectorXR and Toolkit-style strategies](screenshots/turbo-profiles.jpg)
+
 Each custom profile has a **Strategy**: **VectorXR** (VectorXR's own Turbo, following Runtime
 Behavior), **Toolkit-style** (recreates the timing of OpenXR Toolkit's Turbo Mode), or **Custom**
 (Toolkit-style with your own values under **Advanced timing**). Toolkit-style and Custom are
 experimental and take effect after a game restart. The profile's application assignments also
-scope its strategy; there is no separate experiment application picker.
+scope its strategy; there is no separate experiment application picker. See
+[Turbo timing experiments](turbo-experiments.md) for what each advanced control changes.
 
 To find the best strategy for a game, test one strategy per launch. In each flight, capture Turbo
 on and Turbo off with the in-game toggle, then compare the gain in **Performance Diagnostics**,
@@ -398,9 +413,9 @@ which labels each flight with the strategy it used. Try Async and Sequenced in R
 then Toolkit-style, and keep the one with the best gain and 1% lows and no stalls.
 The first matching enabled profile takes priority. To compare profiles for the same game, enable
 the intended profile, save, and relaunch the game. Timing remains fixed for that VR session.
-Older scoped experiments migrate into the corresponding custom profiles; mixed application groups
-are split to preserve scope. Previously unassigned timing is offered as **Use saved timing in this
-profile**, without activating it for any game until selected and saved.
+Timing experiments saved by pre-release 0.18 builds migrate into the matching custom profiles;
+unassigned timing is offered as **Use saved timing in this profile** and is not applied to any
+game until selected and saved.
 
 Do not combine VectorXR Turbo with another pacing override such as OpenXR Toolkit Turbo Mode.
 Turn Turbo off if you see a Waiting overlay, black frames, persistent stutter, or broken
@@ -413,11 +428,14 @@ off/Async toggles has been observed in DCS; this does not establish compatibilit
 every game/runtime combination. Experimental timing settings are latched at session
 start and still require a relaunch. Quadviews activation also requires a relaunch.
 
-After Turbo establishes a frame pipeline, switching it off restores runtime-paced
-application waits while preserving ownership of the pending frames. This applies to
-both Async and Sequenced pacing and avoids unmatched begin/end calls during a live
-toggle. The pipeline is released at session shutdown. An off interval in the same
-session measures re-coupled pacing; use a fresh session with Turbo disabled to compare
+After Turbo establishes a frame pipeline, switching it off with the in-game toggle restores
+runtime-paced application waits while preserving ownership of the pending frames, so
+switching it back on resumes immediately. This applies to both Async and Sequenced pacing
+and avoids unmatched begin/end calls during a live toggle. If Turbo Safety suspends Turbo,
+Turbo is disabled in settings, or the runtime stalls while Turbo is off, an Async pipeline
+instead hands its frames to pacing on the game's own frame thread for the rest of the
+session; the next launch starts from your configured strategy again. An off interval in the
+same session measures re-coupled pacing; use a fresh session with Turbo disabled to compare
 against a session in which Turbo never established a pipeline.
 
 
@@ -450,9 +468,9 @@ including ASW, may also conflict with Turbo's timing.
 
 ![Turbo Safety page with automatic protection and blocked setups](screenshots/turbo-safety.jpg)
 
-Open **Turbo Safety…** from the Turbo page. The **Enabled/Disabled** switch appears both
-there and under **Automatic protection** on the Safety page; both edit the same global
-setting. Protection is enabled by default. Click **Save Changes** after changing it.
+Open **Details…** on the Turbo page's **Turbo Safety** card (**Review…** when setups are
+blocked). The **Enabled/Disabled** switch appears both on that card and under **Automatic
+protection** on the Safety page; both edit the same global setting. Protection is enabled by default. Click **Save Changes** after changing it.
 
 An interrupted session or repeated runtime fault can hold Turbo off for the same application
 and runtime setup, including its headset and graphics configuration. Turbo remains enabled
@@ -477,21 +495,17 @@ Safety cannot unblock a driver call already in flight.
 
 #### Per-application Safety override
 
-![Example DCS Turbo profile with its Safety bypass left unchecked](screenshots/turbo-profile-safety.jpg)
-
 For an application-specific exception, open its custom Turbo profile and check
-**Turbo Safety override > Disable safety for this profile**, then **Save Changes**.
-Leave this unchecked to use the global protection setting. The bypass applies only to
-that profile's applications; it does not turn off live pacing fallback or delete history.
-The screenshot shows an example DCS profile with protection retained.
+**Bypass Turbo Safety for these applications**, then **Save Changes** (see the profile
+screenshot above). Leave this unchecked to use the global protection setting. The bypass
+applies only to that profile's applications; it does not turn off live pacing fallback or
+delete history.
 
 #### Fault logs and support exports
 
-![Turbo Safety fault log and Clear Logs control with no faults recorded](screenshots/turbo-safety-fault-log.jpg)
-
 Faults remain available after a retry. For an unclean exit, the recorded timestamp is the
-last Safety marker, not a confirmed crash time. The screenshots show an empty history;
-recorded faults add rows with **Details** controls.
+last Safety marker, not a confirmed crash time. The Turbo Safety screenshot shows an empty
+**Fault log**; recorded faults add rows with **Details** controls.
 
 Before clearing logs, use **Home > Export Debug** to save an **Export Debug Information** ZIP
 when reporting a problem. It includes Turbo metrics, pacing decisions, safety records,
@@ -501,26 +515,37 @@ unavailable or limited files. Review the ZIP for private information before shar
 
 ## On-Screen Display
 
-The **On-Screen Display** page adds a head-following information panel
-inside Direct3D 11, Direct3D 12, and Vulkan OpenXR applications. It works with stereo and Quadviews submissions
-and is off by default. VectorXR must be registered and loaded by the application;
-relaunch the application after updating the layer DLL.
+![On-Screen Display page showing the Expanded layout in the Legible preview](screenshots/osd.jpg)
 
-1. Open **On-Screen Display**, enable the OSD, and choose **Detailed**, **Performance**,
-   or **Minimal** below the placement preview as a starting layout.
-2. Drag the preview to place the panel, or adjust the horizontal and vertical sliders.
-   Positive horizontal angles move right; positive vertical angles move up.
-3. Choose content, size, opacity, accent, and viewing distance, then **Save Changes**.
-   The preview uses sample values and the panel's angular size in a 100° × 80° reference view. Actual headset field of view varies.
-4. In the game, press **Ctrl+Alt+F10** to show or hide the display and **Ctrl+Alt+F11**
-   to switch between compact and detailed layouts. Both bindings can be reassigned to
+The **On-Screen Display** page adds a head-following information panel inside Direct3D 11,
+Direct3D 12, and Vulkan OpenXR applications. It works with stereo and Quadviews submissions
+and is off by default. VectorXR must be registered and loaded by the application; relaunch
+the application after updating the layer DLL.
+
+1. Open **On-Screen Display** and switch **OSD Off** to **OSD On**.
+2. Pick a starting point under **Presets** at the bottom of the page: **Expanded**,
+   **Performance**, or **Minimal**.
+3. Choose **Compact** or **Expanded** above the preview to edit that layout. The layout the
+   panel opens in each session is marked **Starting layout**; while editing the other one,
+   **Start in Compact** or **Start in Expanded** makes it the starting layout.
+4. With **Placement** selected, drag the panel in the preview or use the **Horizontal** and
+   **Vertical** sliders. Positive horizontal angles move right; positive vertical angles move
+   up. **Center in view** returns it to the middle.
+5. Choose contents, size, opacity, refresh rate, accent, and viewing distance, then
+   **Save Changes**.
+6. In the game, press **Ctrl+Alt+F10** to show or hide the display and **Ctrl+Alt+F11** to
+   switch between the compact and expanded layouts. Both bindings can be reassigned to
    keyboard chords, joystick buttons, or hat directions, with optional sound feedback.
 
-The preview section starts expanded and can be collapsed while editing. **Pop out
-preview** opens a resizable window that stays above the desktop app and reflects
-unsaved changes. Dragging the panel there also updates the position controls. Closing
-the window restores the embedded preview; leaving the OSD page closes the pop-out.
-The **Custom** accent button selects your custom color and opens or closes its picker.
+The preview has two views. **Placement** shows the panel's angular size and position in a
+100° × 80° reference view; actual headset field of view varies. **Legible** enlarges the
+panel with sample values so you can check its contents, at one shared scale for both layouts.
+**Pop out** opens a resizable preview window that stays above the desktop app and reflects
+unsaved changes. Dragging the panel there also updates the position controls. Closing the
+window restores the embedded preview; leaving the OSD page closes the pop-out. The **Custom**
+accent button selects your custom color and opens or closes its picker.
+
+![Compact OSD layout with its contents and placement controls](screenshots/osd-compact.jpg)
 
 Every setting on this page applies live after Save, including enabling the OSD in an
 already running application. Visibility and layout changes made with bindings last for
@@ -529,14 +554,17 @@ automatic visibility option also updates visibility in the current session. The 
 can remain visible when the VectorXR enhancement master switch is off; disable it on
 its own page when you want no overlay.
 
-Both layouts keep a fixed header order: VectorXR, application name, optional OpenXR
-runtime, and optional local clock. Choose 12-hour (with AM/PM) or 24-hour time. Long
-application and runtime names are truncated within their own fields.
+Both layouts keep a fixed header order: VectorXR, application name, OpenXR runtime, and
+local clock. Each header item can be turned off, and turning all of them off removes the
+header. Choose 12-hour (with AM/PM) or 24-hour time. Long application and runtime names are
+truncated within their own fields.
 
-Application FPS, average application frame interval, and P95 remain visible in both
-layouts. The detailed body adds selectable rows for the frame-time graph, Turbo,
-Pivot, and active enhancements. Drag these rows or use their up/down arrows to arrange
-them. Turbo distinguishes **Disabled**, **Enabled / Off**, **Enabled / Waiting**, active
+The **Expanded** layout always shows application FPS, average application frame interval,
+and P95, and adds selectable rows for the frame-time graph, Turbo, Pivot, and active
+enhancements. Drag these rows or use their up/down arrows to arrange them. The **Compact**
+layout chooses its **Performance** readout (FPS and average frame time, either one, or
+none) and can add one-line Turbo and Pivot status rows. **Just FPS** clears the compact
+header and status rows for the smallest display. Turbo distinguishes **Disabled**, **Enabled / Off**, **Enabled / Waiting**, active
 **Async** or **Sequenced**, and safety states. Enabled enhancements include Turbo even
 when its binding has switched pacing off. Pivot shows the engaged profile and applied
 nudges/quick views without angle measurements; idle enabled Pivot reads **Pivot ready**.
@@ -553,7 +581,7 @@ Presets do not change enablement, startup visibility, or bindings, and travel wi
 saved configuration rather than becoming application profiles.
 
 Pending changes to Turbo experiments or Quadviews activation appear as a restart notice
-in the detailed layout. Other settings retain the live/restart behavior described on
+in the expanded layout. Other settings retain the live/restart behavior described on
 their respective pages; this notice is not an exhaustive list of every restart-sensitive
 setting. Settings editing remains in the desktop app.
 
@@ -566,10 +594,12 @@ Pauses longer than one second reset the history.
 
 Panel refresh is independent of frame sampling. The default **5 Hz** redraw rate keeps
 the information readable without updating the text every frame; 1–20 Hz is available.
-Drawing runs on a background worker. The panel occupies its own composition layer,
-so it stays independent of application resolution and foveation. Viewing distance changes
-its stereo depth while preserving its apparent size. The panel follows the headset,
-not the world, and does not appear in every game's desktop mirror.
+Drawing runs on a background worker. The panel normally occupies its own composition layer,
+so it stays independent of application resolution and foveation. In VectorXR's synthesized
+D3D11 Quadviews sessions it is drawn into the combined eye images instead. Viewing distance
+changes its stereo depth while preserving its apparent size. The panel follows the headset,
+not the world, and does not appear in every game's desktop mirror. If a refresh cannot
+finish in the current frame, the previous panel image stays on screen until it does.
 
 **Compatibility:** the OSD requires a D3D11, D3D12, or Vulkan session and a runtime-provided sRGB swapchain
 format. Both Vulkan OpenXR bindings (`XR_KHR_vulkan_enable` and `enable2`) are supported. OpenGL is not supported. The panel is omitted while the
@@ -610,6 +640,10 @@ status, and you can enable, disable, reorder, or remove its registry registratio
 Signature verification is optional: Refresh on this page requests it, with a
 four-second limit per binary; startup readiness does not wait for verification. Removal asks
 for confirmation and does not delete the layer's files from disk.
+
+Machine-wide slices are read-only until you choose **Unlock Admin Writes**, which asks Windows
+for administrator approval. When VectorXR itself is running as administrator, machine-wide
+slices are already unlocked and changes apply without an extra prompt.
 
 **Provider and order both matter.** When VectorXR provides Quadviews, disable
 **Quad-Views-Foveated** so the two layers do not compete. If you intentionally use
