@@ -477,6 +477,11 @@ const XrCompositionLayerBaseHeader* OsdRenderer::Append(const XrFrameEndInfo& in
             }
         } else ++stats.worker_busy;
     }
+    // A refresh that cannot complete this frame (image still in use, previous
+    // GPU copy pending) keeps its acquired image and retries next frame. The
+    // last released image stays valid, so keep presenting it: returning no
+    // layer would blink the panel off for that frame.
+    const char* refresh_pending=nullptr;
     if (upload_) {
         if (!acquired_) {
             XrSwapchainImageAcquireInfo acquire{XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO}; std::uint32_t index{};
@@ -489,22 +494,26 @@ const XrCompositionLayerBaseHeader* OsdRenderer::Append(const XrFrameEndInfo& in
         if(!acquired_waited_){
             XrSwapchainImageWaitInfo wait{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};wait.timeout=0;
             const auto wait_start=Clock::now();const auto result=api_.wait(swapchain_,&wait);stats.wait.Add(Milliseconds(wait_start));
-            if(result==XR_TIMEOUT_EXPIRED){++stats.image_timeouts;status_.message="Waiting for an overlay image";return nullptr;}
-            if(result!=XR_SUCCESS && result!=XR_SESSION_LOSS_PENDING){Fail("OSD wait",result);return nullptr;}
-            acquired_waited_=true;
+            if(result==XR_TIMEOUT_EXPIRED){++stats.image_timeouts;refresh_pending="Waiting for an overlay image";}
+            else if(result!=XR_SUCCESS && result!=XR_SESSION_LOSS_PENDING){Fail("OSD wait",result);return nullptr;}
+            else acquired_waited_=true;
         }
-        const auto& bitmap=*upload_;
-        if(bitmap.pixels.empty()){Fail("OSD rasterization",XR_ERROR_OUT_OF_MEMORY);return nullptr;}
-        std::string error;const auto upload_start=Clock::now();const auto uploaded=graphics_->Upload(*acquired_,bitmap,error);stats.upload.Add(Milliseconds(upload_start));
-        if(uploaded==OsdUpload::Busy){++stats.upload_busy;status_.message="Waiting for previous OSD upload";return nullptr;}
-        if(uploaded==OsdUpload::Failed){Fail(error.c_str(),XR_ERROR_GRAPHICS_DEVICE_INVALID);return nullptr;}
-        XrSwapchainImageReleaseInfo release{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
-        const auto release_start=Clock::now();const auto released=api_.release(swapchain_,&release);stats.release.Add(Milliseconds(release_start));
-        if (XR_FAILED(released)) { Fail("OSD release",released); return nullptr; }
-        acquired_.reset(); acquired_waited_=false; ++stats.refreshed; ready_=true; image_height_=bitmap.height; image_width_=bitmap.content_width; updated_=now; image_updated_=Clock::now();
-        presented_bitmap_=std::make_shared<OsdBitmap>(std::move(*upload_));upload_.reset();
+        if(!refresh_pending) {
+            const auto& bitmap=*upload_;
+            if(bitmap.pixels.empty()){Fail("OSD rasterization",XR_ERROR_OUT_OF_MEMORY);return nullptr;}
+            std::string error;const auto upload_start=Clock::now();const auto uploaded=graphics_->Upload(*acquired_,bitmap,error);stats.upload.Add(Milliseconds(upload_start));
+            if(uploaded==OsdUpload::Busy){++stats.upload_busy;refresh_pending="Waiting for previous OSD upload";}
+            else if(uploaded==OsdUpload::Failed){Fail(error.c_str(),XR_ERROR_GRAPHICS_DEVICE_INVALID);return nullptr;}
+            else {
+                XrSwapchainImageReleaseInfo release{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
+                const auto release_start=Clock::now();const auto released=api_.release(swapchain_,&release);stats.release.Add(Milliseconds(release_start));
+                if (XR_FAILED(released)) { Fail("OSD release",released); return nullptr; }
+                acquired_.reset(); acquired_waited_=false; ++stats.refreshed; ready_=true; image_height_=bitmap.height; image_width_=bitmap.content_width; updated_=now; image_updated_=Clock::now();
+                presented_bitmap_=std::make_shared<OsdBitmap>(std::move(*upload_));upload_.reset();
+            }
+        }
     }
-    if (!ready_) { status_.message="Preparing the overlay"; return nullptr; }
+    if (!ready_) { status_.message=refresh_pending?refresh_pending:"Preparing the overlay"; return nullptr; }
     if (compact_ && CompactOsdLayout(settings_).empty) { status_.visible=false; status_.message="No compact values selected"; return nullptr; }
     constexpr double rad=3.14159265358979323846/180;
     const auto yaw=-settings_.horizontal_degrees*rad, pitch=settings_.vertical_degrees*rad;
