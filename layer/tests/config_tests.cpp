@@ -104,6 +104,9 @@ void TestTurboExperimentalConfig() {
            dcs.experimental.sample_at_entry && dcs.experimental.frame_limit == 45 &&
            dcs.experimental.prediction_percent == 75, "Selected application's experimental settings were lost");
     Expect(!other.experimental.enabled, "Experiments escaped the application allowlist");
+    const auto turbo_off = parse(R"({"enabled":false,"experimental":{"enabled":true,"applicationIds":["dcs"]}})");
+    Expect(turbo_off.ok && !depthxr::ResolveTurboSettings(turbo_off.document, "DCS.exe").experimental.enabled,
+           "Legacy module timing must not apply where Turbo is off for the application");
     auto disabled = configured.document;
     disabled.applications[0].enabled = false;
     Expect(!depthxr::ResolveTurboSettings(disabled, "DCS.exe").experimental.enabled,

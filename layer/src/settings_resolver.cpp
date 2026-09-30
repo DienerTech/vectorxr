@@ -318,11 +318,15 @@ TurboResolvedSettings ResolveTurboSettings(const ConfigDocument& config, std::st
     resolved.metrics_binding = config.turbo.metrics_binding;
 
     const RegisteredApplication* application = FindMatchingApplication(config, exe_name);
-    const auto& experiment = config.turbo.experimental;
-    if (application && application->enabled && std::find(experiment.application_ids.begin(), experiment.application_ids.end(),
-                                 application->id) != experiment.application_ids.end()) {
-        resolved.experimental = experiment;
-    }
+    // Pre-release 0.18 configs listed applications under a module-level
+    // experiment. The desktop app migrates it into each application's profile
+    // on save; until then honor it only where Turbo is actually on for the
+    // application and its profile carries no timing of its own.
+    const auto& legacy_experiment = config.turbo.experimental;
+    const bool legacy_listed = application && application->enabled &&
+        std::find(legacy_experiment.application_ids.begin(), legacy_experiment.application_ids.end(),
+                  application->id) != legacy_experiment.application_ids.end();
+    bool profile_timing = false;
     if (application) {
         for (const TurboProfile& profile : config.turbo.profiles) {
             if (!profile.enabled) {
@@ -332,11 +336,17 @@ TurboResolvedSettings ResolveTurboSettings(const ConfigDocument& config, std::st
                 profile.application_ids.end()) {
                 resolved.enabled = true;
                 resolved.profile_name=profile.name;
-                if(profile.experimental)resolved.experimental=*profile.experimental;
+                if (profile.experimental) {
+                    resolved.experimental = *profile.experimental;
+                    profile_timing = true;
+                }
                 resolved.interrupted_session_recovery = resolved.interrupted_session_recovery && !profile.disable_safety;
                 break;
             }
         }
+    }
+    if (legacy_listed && resolved.enabled && !profile_timing) {
+        resolved.experimental = legacy_experiment;
     }
 
     return resolved;
