@@ -4,6 +4,7 @@ add_library(
     src/config_parser.cpp
     src/input_devices.cpp
     src/quadviews_sizing.cpp
+    src/framegen_plan.cpp
     src/runtime_pacing.cpp
     src/runtime_relay.cpp
     src/runtime_compatibility.cpp
@@ -88,6 +89,82 @@ if(WIN32 AND DEPTHXR_BUILD_LAYER)
     target_compile_features(depthxr_osd PUBLIC cxx_std_20)
     target_compile_definitions(depthxr_osd PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX XR_USE_GRAPHICS_API_D3D11 XR_USE_GRAPHICS_API_D3D12 XR_USE_GRAPHICS_API_VULKAN)
     target_link_libraries(depthxr_osd PUBLIC depthxr_core OpenXR::openxr_loader Vulkan::Headers d3d11 d3d12 d3dcompiler gdi32)
+
+    # Frame Generation compute shaders. One HLSL source compiles to DXBC for
+    # Direct3D 11 and 12 (fxc from the Windows SDK) and to SPIR-V for Vulkan.
+    # The Windows SDK's dxc is built without SPIR-V code generation, so a
+    # pinned DXC release is fetched the same way as the Vulkan headers.
+    option(DEPTHXR_FRAMEGEN_SPIRV "Compile Frame Generation SPIR-V for Vulkan with a pinned DXC release" ON)
+    cmake_host_system_information(RESULT _framegen_kits_root QUERY WINDOWS_REGISTRY
+        "HKLM/SOFTWARE/Microsoft/Windows Kits/Installed Roots" VALUE "KitsRoot10")
+    set(_framegen_fxc_hints "")
+    if(CMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION)
+        list(APPEND _framegen_fxc_hints "${_framegen_kits_root}/bin/${CMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION}/x64")
+    endif()
+    file(GLOB _framegen_kit_bins LIST_DIRECTORIES true "${_framegen_kits_root}/bin/10.*")
+    list(SORT _framegen_kit_bins COMPARE NATURAL ORDER DESCENDING)
+    foreach(_framegen_kit_bin IN LISTS _framegen_kit_bins)
+        list(APPEND _framegen_fxc_hints "${_framegen_kit_bin}/x64")
+    endforeach()
+    find_program(DEPTHXR_FXC fxc HINTS ${_framegen_fxc_hints} REQUIRED)
+    set(DEPTHXR_DXC "")
+    if(DEPTHXR_FRAMEGEN_SPIRV)
+        FetchContent_Declare(dxc_release
+            URL https://github.com/microsoft/DirectXShaderCompiler/releases/download/v1.8.2505.1/dxc_2025_07_14.zip
+            URL_HASH SHA256=9ad895a6b039e3a8f8c22a1009f866800b840a74b50db9218d13319e215ea8a4
+            DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
+        FetchContent_MakeAvailable(dxc_release)
+        set(DEPTHXR_DXC "${dxc_release_SOURCE_DIR}/bin/x64/dxc.exe")
+    endif()
+    set(_framegen_passes LUMA DOWNSAMPLE SEARCH REFINE FILTER SYNTHESIZE_UNORM8 SYNTHESIZE_FLOAT16)
+    set(_framegen_hlsl "${CMAKE_CURRENT_SOURCE_DIR}/shaders/framegen.hlsl")
+    set(_framegen_out "${CMAKE_CURRENT_BINARY_DIR}/framegen_shaders")
+    file(MAKE_DIRECTORY "${_framegen_out}")
+    set(_framegen_binaries "")
+    foreach(_framegen_pass IN LISTS _framegen_passes)
+        add_custom_command(
+            OUTPUT "${_framegen_out}/${_framegen_pass}.dxbc"
+            COMMAND "${DEPTHXR_FXC}" -nologo -T cs_5_0 -E CSMain -D "FG_PASS_${_framegen_pass}=1" -O3 -WX
+                    -Fo "${_framegen_out}/${_framegen_pass}.dxbc" "${_framegen_hlsl}"
+            DEPENDS "${_framegen_hlsl}"
+            COMMENT "Compiling Frame Generation ${_framegen_pass} (DXBC)"
+            VERBATIM)
+        list(APPEND _framegen_binaries "${_framegen_out}/${_framegen_pass}.dxbc")
+        if(DEPTHXR_DXC)
+            add_custom_command(
+                OUTPUT "${_framegen_out}/${_framegen_pass}.spv"
+                COMMAND "${DEPTHXR_DXC}" -nologo -spirv -T cs_6_0 -E CSMain -D "FG_PASS_${_framegen_pass}=1" -O3 -WX
+                        -fspv-target-env=vulkan1.0 -Fo "${_framegen_out}/${_framegen_pass}.spv" "${_framegen_hlsl}"
+                DEPENDS "${_framegen_hlsl}"
+                COMMENT "Compiling Frame Generation ${_framegen_pass} (SPIR-V)"
+                VERBATIM)
+            list(APPEND _framegen_binaries "${_framegen_out}/${_framegen_pass}.spv")
+        endif()
+    endforeach()
+    string(REPLACE ";" "," _framegen_pass_list "${_framegen_passes}")
+    set(_framegen_spirv_dir "")
+    if(DEPTHXR_DXC)
+        set(_framegen_spirv_dir "${_framegen_out}")
+    endif()
+    add_custom_command(
+        OUTPUT "${_framegen_out}/framegen_shaders.cpp"
+        COMMAND "${CMAKE_COMMAND}" "-DOUTPUT=${_framegen_out}/framegen_shaders.cpp" "-DPASSES=${_framegen_pass_list}"
+                "-DDXBC_DIR=${_framegen_out}" "-DSPIRV_DIR=${_framegen_spirv_dir}"
+                -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/EmbedFrameGenShaders.cmake"
+        DEPENDS ${_framegen_binaries} "${CMAKE_CURRENT_SOURCE_DIR}/cmake/EmbedFrameGenShaders.cmake"
+        COMMENT "Embedding Frame Generation shaders"
+        VERBATIM)
+    add_library(depthxr_framegen STATIC
+        src/framegen/framegen_gpu.cpp
+        src/framegen/framegen_d3d11.cpp
+        src/framegen/framegen_d3d12.cpp
+        src/framegen/framegen_vulkan.cpp
+        "${_framegen_out}/framegen_shaders.cpp")
+    target_include_directories(depthxr_framegen PUBLIC include)
+    target_compile_features(depthxr_framegen PUBLIC cxx_std_20)
+    target_compile_definitions(depthxr_framegen PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX XR_USE_GRAPHICS_API_D3D11 XR_USE_GRAPHICS_API_D3D12 XR_USE_GRAPHICS_API_VULKAN)
+    target_link_libraries(depthxr_framegen PUBLIC depthxr_core OpenXR::openxr_loader Vulkan::Headers d3d11 d3d12 dxgi)
+
     if(BUILD_TESTING)
         add_executable(depthxr_osd_composite_tests tests/osd_composite_tests.cpp)
         target_link_libraries(depthxr_osd_composite_tests PRIVATE depthxr_osd)
@@ -109,6 +186,7 @@ if(WIN32 AND DEPTHXR_BUILD_LAYER)
         PRIVATE
         depthxr_core
         depthxr_osd
+        depthxr_framegen
         OpenXR::openxr_loader
         d3d11
         d3dcompiler
@@ -214,6 +292,14 @@ if(WIN32 AND DEPTHXR_BUILD_LAYER)
         add_test(NAME depthxr_osd_vulkan_tests COMMAND depthxr_osd_backend_tests vulkan)
         set_tests_properties(depthxr_osd_d3d12_tests depthxr_osd_vulkan_tests PROPERTIES TIMEOUT 30)
         set_tests_properties(depthxr_osd_vulkan_tests PROPERTIES SKIP_RETURN_CODE 77)
+        add_executable(depthxr_framegen_tests tests/framegen_backend_tests.cpp)
+        target_link_libraries(depthxr_framegen_tests PRIVATE depthxr_framegen dxgi)
+        target_compile_definitions(depthxr_framegen_tests PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX XR_USE_GRAPHICS_API_D3D11 XR_USE_GRAPHICS_API_D3D12 XR_USE_GRAPHICS_API_VULKAN)
+        add_test(NAME depthxr_framegen_d3d11_tests COMMAND depthxr_framegen_tests d3d11)
+        add_test(NAME depthxr_framegen_d3d12_tests COMMAND depthxr_framegen_tests d3d12)
+        add_test(NAME depthxr_framegen_vulkan_tests COMMAND depthxr_framegen_tests vulkan)
+        set_tests_properties(depthxr_framegen_d3d11_tests depthxr_framegen_d3d12_tests depthxr_framegen_vulkan_tests PROPERTIES TIMEOUT 60)
+        set_tests_properties(depthxr_framegen_vulkan_tests PROPERTIES SKIP_RETURN_CODE 77)
         add_executable(depthxr_osd_tests tests/osd_tests.cpp)
         target_link_libraries(depthxr_osd_tests PRIVATE depthxr_osd)
         target_compile_definitions(depthxr_osd_tests PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX XR_USE_GRAPHICS_API_D3D11)
@@ -234,6 +320,7 @@ if(WIN32 AND DEPTHXR_BUILD_LAYER)
             PRIVATE
             depthxr_core
             depthxr_osd
+            depthxr_framegen
             OpenXR::openxr_loader
             d3d11
             d3dcompiler
@@ -254,7 +341,7 @@ if(WIN32 AND DEPTHXR_BUILD_LAYER)
 
         add_executable(depthxr_pivot_pose_tests tests/pivot_pose_tests.cpp src/openxr_layer.cpp)
         target_include_directories(depthxr_pivot_pose_tests PRIVATE include)
-        target_link_libraries(depthxr_pivot_pose_tests PRIVATE depthxr_core depthxr_osd
+        target_link_libraries(depthxr_pivot_pose_tests PRIVATE depthxr_core depthxr_osd depthxr_framegen
             OpenXR::openxr_loader d3d11 d3dcompiler dxgi shlwapi)
         target_compile_definitions(depthxr_pivot_pose_tests PRIVATE DEPTHXR_TESTING
             WIN32_LEAN_AND_MEAN NOMINMAX XR_USE_GRAPHICS_API_D3D11 VECTORXR_VERSION="${_vectorxr_version}")
@@ -263,7 +350,7 @@ if(WIN32 AND DEPTHXR_BUILD_LAYER)
 
         add_executable(depthxr_pivot_gaze_tests tests/pivot_gaze_tests.cpp src/openxr_layer.cpp src/layer_entry.cpp)
         target_include_directories(depthxr_pivot_gaze_tests PRIVATE include)
-        target_link_libraries(depthxr_pivot_gaze_tests PRIVATE depthxr_core depthxr_osd
+        target_link_libraries(depthxr_pivot_gaze_tests PRIVATE depthxr_core depthxr_osd depthxr_framegen
             OpenXR::openxr_loader d3d11 d3dcompiler dxgi shlwapi)
         target_compile_definitions(depthxr_pivot_gaze_tests PRIVATE DEPTHXR_TESTING
             WIN32_LEAN_AND_MEAN NOMINMAX XR_USE_GRAPHICS_API_D3D11 VECTORXR_VERSION="${_vectorxr_version}")

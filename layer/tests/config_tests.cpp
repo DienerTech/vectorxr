@@ -11,6 +11,7 @@
 
 #include "depthxr/config_parser.h"
 #include "depthxr/effects.h"
+#include "depthxr/framegen_plan.h"
 #include "depthxr/input_devices.h"
 #include "depthxr/logger.h"
 #include "depthxr/pivot_routing.h"
@@ -1282,6 +1283,123 @@ void TestFrameGenOsdRows() {
         R"json({ "bodyOrder": ["framegen", "graph", "turbo", "pivot", "modules"] })json"));
     Expect(ordered.ok && ordered.document.core.osd.body_order.front() == "framegen",
            "OSD body order should accept the Frame Gen row");
+}
+
+void TestFrameGenPlan() {
+    using depthxr::FrameGenPass;
+    using depthxr::FrameGenTextureKind;
+    depthxr::FrameGenViewRequest request;
+    request.extent = {2000, 1800};
+    request.synthesize = true;
+    request.temporal = true;
+    request.newest.angle_left = request.previous.angle_left = -0.8f;
+    request.newest.angle_right = request.previous.angle_right = 0.8f;
+    request.newest.angle_up = request.previous.angle_up = 0.8f;
+    request.newest.angle_down = request.previous.angle_down = -0.8f;
+    depthxr::FrameGenTuning tuning;
+
+    const auto pyramid = depthxr::FrameGenPyramid({2001, 7});
+    Expect(pyramid[1].width == 1001 && pyramid[1].height == 4 && pyramid[5].height == 1,
+           "Frame Generation pyramid should round up and never reach zero");
+
+    const std::array<std::pair<depthxr::FrameGenFlowQuality, std::size_t>, 3> qualities{{
+        {depthxr::FrameGenFlowQuality::kPerformance, 1},
+        {depthxr::FrameGenFlowQuality::kBalanced, 2},
+        {depthxr::FrameGenFlowQuality::kQuality, 3},
+    }};
+    for (const auto& [quality, refines] : qualities) {
+        tuning.quality = quality;
+        const auto plan = depthxr::BuildFrameGenViewPlan(request, tuning);
+        Expect(plan.synthesize, "Frame Generation plan should synthesize with history");
+        // luma + 4 downsamples + search + refines + filter + synthesize
+        Expect(plan.dispatches.size() == 1 + 4 + 1 + refines + 1 + 1, "Unexpected Frame Generation dispatch count");
+        Expect(plan.dispatches.front().pass == FrameGenPass::kLuma &&
+                   plan.dispatches.back().pass == FrameGenPass::kSynthesizeUnorm8,
+               "Frame Generation plan should start with luma and end with synthesis");
+        const auto& final_refine = plan.dispatches[plan.dispatches.size() - 3];
+        Expect(final_refine.pass == FrameGenPass::kRefine &&
+                   final_refine.outputs[0].level == depthxr::FrameGenFinalFlowLevel(quality),
+               "Last refine should write the quality's flow level");
+        Expect(final_refine.inputs[3].kind == FrameGenTextureKind::kFilteredPrevious,
+               "Temporal flow should seed refinement when requested");
+        Expect(final_refine.inputs[0].level == depthxr::FrameGenMatchLevel(final_refine.outputs[0].level) &&
+                   final_refine.constants.options[3] == (1u << (final_refine.outputs[0].level - final_refine.inputs[0].level)),
+               "Refine should match on a finer level with the matching cell scale");
+        for (const auto& dispatch : plan.dispatches) {
+            Expect(dispatch.width > 0 && dispatch.height > 0, "Frame Generation dispatch has an empty extent");
+        }
+    }
+
+    request.synthesize = false;
+    const auto still = depthxr::BuildFrameGenViewPlan(request, tuning);
+    Expect(!still.synthesize && still.dispatches.size() == 1 &&
+               (still.dispatches[0].constants.options[1] & depthxr::kFrameGenFlagStill) != 0,
+           "Priming should write the newest frame through one still dispatch");
+    request.synthesize = true;
+    request.extent = {48, 48};
+    Expect(!depthxr::BuildFrameGenViewPlan(request, tuning).synthesize, "Tiny views should not run optical flow");
+
+    request.extent = {1024, 1024};
+    request.output = depthxr::FrameGenOutputKind::kFloat16;
+    tuning.mode = depthxr::FrameGenSynthesisMode::kExtrapolate;
+    tuning.diagnostic = depthxr::FrameGenDiagnosticView::kFlow;
+    const auto extrapolate = depthxr::BuildFrameGenViewPlan(request, tuning);
+    const auto& synth = extrapolate.dispatches.back();
+    Expect(synth.pass == FrameGenPass::kSynthesizeFloat16, "Float swapchains should use the float synthesis pass");
+    Expect((synth.constants.options[1] & depthxr::kFrameGenFlagExtrapolate) != 0 &&
+               (synth.constants.options[1] & depthxr::kFrameGenFlagSrgbEncode) == 0,
+           "Extrapolation flag set and no sRGB encode for float output");
+    Expect(synth.constants.options[2] == static_cast<std::uint32_t>(depthxr::FrameGenDiagnosticView::kFlow),
+           "Diagnostic view should reach the synthesis pass");
+
+    // Fractions follow display times and clamp.
+    using depthxr::FrameGenFraction;
+    using depthxr::FrameGenSynthesisMode;
+    Expect(std::abs(FrameGenFraction(FrameGenSynthesisMode::kInterpolate, 0, 22'222'222, 11'111'111) - 0.5f) < 1e-4f,
+           "Interpolation halfway between two real frames should be 0.5");
+    Expect(std::abs(FrameGenFraction(FrameGenSynthesisMode::kExtrapolate, 0, 22'222'222, 33'333'333) - 0.5f) < 1e-4f,
+           "Extrapolation one refresh past a half-rate frame should be 0.5");
+    Expect(FrameGenFraction(FrameGenSynthesisMode::kExtrapolate, 0, 10, 100) == 1.0f &&
+               FrameGenFraction(FrameGenSynthesisMode::kInterpolate, 10, 10, 10) == 1.0f,
+           "Frame Generation fractions should clamp hitches and degenerate intervals");
+
+    // Relative rotation: identity for equal poses; a yaw maps newest forward
+    // into the previous view by the yaw difference.
+    const float half = 0.05f;
+    const auto same = depthxr::FrameGenRelativeRotation({0, std::sin(half), 0, std::cos(half)}, {0, std::sin(half), 0, std::cos(half)});
+    Expect(std::abs(same[0][0] - 1) < 1e-5f && std::abs(same[0][2]) < 1e-5f && std::abs(same[2][2] - 1) < 1e-5f,
+           "Equal orientations should give an identity rotation");
+    const auto yawed = depthxr::FrameGenRelativeRotation({0, std::sin(half), 0, std::cos(half)}, {0, 0, 0, 1});
+    // Newest forward (0,0,-1) expressed in the previous view: rotated by +0.1 rad about +Y.
+    const float x = -yawed[0][2], z = -yawed[2][2];
+    Expect(std::abs(x + std::sin(2 * half)) < 1e-4f && std::abs(z + std::cos(2 * half)) < 1e-4f,
+           "Relative rotation should carry the newest view's yaw into previous-view space");
+}
+
+void TestFrameGenHistoryState() {
+    depthxr::FrameGenHistoryState state;
+    depthxr::FrameGenViewRequest request;
+    request.synthesize = true;
+    request.temporal = true;
+    Expect(state.Configure({1000, 1000}, 29, depthxr::FrameGenOutputKind::kSrgb8, 3) == depthxr::FrameGenHistoryState::kAll,
+           "First configuration should create every texture");
+    Expect(!state.Effective(request).synthesize, "No history yet: the first frame must be a still");
+    state.Commit(false);
+    auto effective = state.Effective(request);
+    Expect(effective.synthesize && !effective.temporal, "Second frame synthesizes without temporal flow");
+    state.Commit(true);
+    effective = state.Effective(request);
+    Expect(effective.synthesize && effective.temporal, "Third frame may reuse the previous filtered flow");
+    Expect(state.Configure({1000, 1000}, 29, depthxr::FrameGenOutputKind::kSrgb8, 2) == depthxr::FrameGenHistoryState::kFiltered,
+           "A flow quality change should only recreate the filtered flow");
+    effective = state.Effective(request);
+    Expect(effective.synthesize && !effective.temporal, "A quality change keeps history but drops temporal flow");
+    Expect(state.Configure({1200, 1000}, 29, depthxr::FrameGenOutputKind::kSrgb8, 2) == depthxr::FrameGenHistoryState::kAll &&
+               !state.Effective(request).synthesize,
+           "A view resize should drop history");
+    state.Commit(false);
+    state.Invalidate();
+    Expect(!state.Effective(request).synthesize, "Invalidate should drop history");
 }
 
 void TestTurboMetricsSettingsParsing() {
@@ -3070,6 +3188,8 @@ int main() {
     TestFrameGenProfileResolution();
     TestFrameGenInvalidSettingsRejected();
     TestFrameGenOsdRows();
+    TestFrameGenPlan();
+    TestFrameGenHistoryState();
     TestTurboMetricsSettingsParsing();
     TestTurboMetricsSessionRoundTrip();
     TestQuadViewsProfileResolution();
