@@ -720,6 +720,7 @@ class OpenXrLayer {
     // Frame Generation is latched per session. While it owns pacing, the app's
     // Wait/Begin/End go to the presenter and Turbo stays off for the session.
     FrameGenPresenter framegen_;
+    FrameGenPresenter::GpuFactory framegen_gpu_factory_{CreateFrameGenGpu};
     FrameGenRuntimeCalls framegen_calls_;
     std::atomic<bool> framegen_owns_pacing_{false};
     bool framegen_session_enabled_{false};  // mutex_

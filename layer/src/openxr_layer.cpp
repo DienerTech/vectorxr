@@ -11488,7 +11488,8 @@ void OpenXrLayer::StartFrameGen(XrSession session, const void* binding_chain) {
                         {next_enumerate_swapchain_formats_, next_create_swapchain_, next_destroy_swapchain_,
                          next_enumerate_swapchain_images_, next_acquire_swapchain_image_, next_wait_swapchain_image_,
                          next_release_swapchain_image_},
-                        &logger_, graphics_api_ == "Vulkan" ? &osd_vulkan_queue_mutex_ : nullptr);
+                        &logger_, graphics_api_ == "Vulkan" ? &osd_vulkan_queue_mutex_ : nullptr,
+                        framegen_gpu_factory_);
     }
     framegen_owns_pacing_.store(framegen_.OwnsPacing(), std::memory_order_release);
     if (framegen_owns_pacing_.load(std::memory_order_acquire)) {
