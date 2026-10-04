@@ -20,11 +20,11 @@ The **Home** tab is a status dashboard:
 
 - **System Health** shows whether the runtime is enabled and the VectorXR layer is registered.
   Use **View Health** for details or **Export Debug** to collect a support ZIP.
-- The **Active overview** lists the four Enhancements — **Quadviews**, **Turbo**, **Pivot**, and
-  **Depth**, including the default profile and enabled custom-profile counts. These summarize
+- The **Active overview** lists the five Enhancements — **Quadviews**, **Turbo**, **Frame
+  Generation**, **Pivot**, and **Depth**, including the default profile and enabled custom-profile counts. These summarize
   your configuration; an Active badge does not mean a VR application is currently running.
 - The left sidebar holds app sections (Home, Settings, On-Screen Display, Application Registry,
-  OpenXR Layers, About) and the four Enhancements. A green dot marks an Enhancement with an
+  OpenXR Layers, About) and the five Enhancements. A green dot marks an Enhancement with an
   enabled default or custom profile.
 - The bar at the bottom is the **save bar**. Changes you make are staged until you click **Save
   Changes** (or **Discard**). Watch this bar — nothing you change takes effect until it's saved.
@@ -94,7 +94,7 @@ top and a **Custom Profiles** list below. To apply it to the app you just regist
 **Add Profile**, point the profile at that application, tune the values, and save. To apply it
 broadly instead, just turn the **Default Profile** on.
 
-The four Enhancements:
+The five Enhancements:
 
 ### Depth
 
@@ -418,6 +418,8 @@ unassigned timing is offered as **Use saved timing in this profile** and is not 
 game until selected and saved.
 
 Do not combine VectorXR Turbo with another pacing override such as OpenXR Toolkit Turbo Mode.
+VectorXR [Frame Generation](#frame-generation-experimental) also takes over pacing: Turbo stays
+off in sessions where it runs.
 Turn Turbo off if you see a Waiting overlay, black frames, persistent stutter, or broken
 reprojection. A mid-session toggle can briefly hitch while timing resynchronizes.
 
@@ -513,6 +515,136 @@ live and saved runtime diagnostics, current and saved settings, and retained Vec
 Raw capture is limited to 8 MiB per file and 64 MiB total; the ZIP inventory lists any
 unavailable or limited files. Review the ZIP for private information before sharing it.
 
+### Frame Generation (experimental)
+
+Frame Generation holds a game at exactly half your headset's refresh rate, for example 45 fps
+on a 90 Hz headset, and inserts a generated frame between every pair of real frames. The
+headset still receives a full-rate image stream while the game renders only half of it.
+
+Generated frames come from GPU optical flow measured on the final color images the game
+submits. VectorXR removes your head rotation from the flow before matching, because the
+runtime's own reprojection already handles head rotation, so the flow follows world,
+vehicle, and object motion. The approach is inspired by
+[OFXR-Bridge](https://github.com/djules75/OFXR-Bridge).
+
+Frame Generation is experimental. Keep the Default Profile off and enable it per game after
+comparing it in the headset.
+
+#### Set up Frame Generation for a game
+
+1. Turn off runtime smoothing for the game: **SteamVR Motion Smoothing**, **Pimax Smart
+   Smoothing**, **Virtual Desktop SSW**, or **Meta ASW**. They fight Frame Generation's pacing.
+2. Register the game's executable in **Application Registry**.
+3. On **Frame Generation**, leave **Default Profile** off, click **Add Profile**, and assign the
+   game. An enabled matching custom profile turns Frame Generation on for that game even when
+   the Default Profile is off.
+4. Start with **Synthesis mode: Interpolate** and the default settings, then click **Save Changes**.
+5. Restart the game. Turning Frame Generation on or off, for the Default Profile or a custom
+   profile, takes effect at the next launch. A running game keeps its launch-time state.
+6. Confirm it is running: turn on the **Frame Generation state** row on the **On-Screen
+   Display** page, or set **Diagnostic view** to **Generated-frame tint**.
+7. Optional: use **A/B toggle > Edit Binding…** to assign a keyboard or controller input, then
+   switch generated frames off and on in the same scene to compare.
+
+The page's collapsible **Setup guide** repeats this checklist; it starts open until a Frame
+Generation profile is enabled. **In-headset controls** lists running VR applications with
+their live Frame Generation status. **Needs the updated VectorXR layer** means the running
+layer predates Frame Generation.
+
+#### Interpolate or Extrapolate
+
+| Mode | How it works | Trade-off |
+| --- | --- | --- |
+| **Interpolate** (default) | Blends the generated frame between the previous and the newest real frame. | Fewest artifacts, and the closest match to OFXR-Bridge. Each real frame must finish one refresh earlier, so it needs more GPU headroom. |
+| **Extrapolate** | Pushes the newest real frame forward along its motion, like ASW or Smart Smoothing. | Gives the game more GPU time per frame. More edge artifacts on fast motion and in newly revealed areas. |
+
+If Interpolate cannot hold half rate on your GPU, try a lower **Flow quality** first, then
+Extrapolate.
+
+#### Frame Generation settings
+
+Every setting below applies live after **Save Changes**. Only turning Frame Generation on or
+off needs a game restart.
+
+- **Flow quality** sets the resolution motion is measured at: **Performance** (1/16 of the eye
+  image), **Balanced** (1/8, default), or **Quality** (1/4). Higher quality tracks small and
+  thin objects better and costs more GPU time.
+- **Artifact suppression** (0–100, default 50): higher values fall back to the real image
+  sooner where motion is uncertain. You get fewer warping artifacts and more local judder.
+- **Motion limit** (2–25% of view width, default 10%) is the farthest a generated frame may
+  move image content. Motion beyond it falls back to the real image.
+- **Diagnostic view** applies to every Frame Generation session: **Off**, **Motion flow**
+  (color-coded motion overlay on generated frames), **Confidence** (heat map of where
+  generation fell back to the real image), or **Generated-frame tint** (a faint tint on
+  generated frames, so you can confirm they are being shown).
+- **A/B toggle** is an optional binding that switches generated frames off and on live. It only
+  works in sessions that started with Frame Generation on.
+
+The Default Profile and each custom profile have their own Synthesis mode, Flow quality,
+Artifact suppression, and Motion limit. The first enabled custom profile that matches the
+running game wins.
+
+#### How Frame Generation works with other features
+
+- **Turbo:** Turbo and Frame Generation have opposite pacing goals. In a session where Frame
+  Generation runs, Turbo stays off and its status reads **Paused for Frame Generation**. Your
+  Turbo profiles are not changed. The Turbo and Frame Generation pages show a notice when an
+  application has both turned on; it never blocks saving.
+- **Quadviews:** works with VectorXR's synthesized quad views and with Varjo-native quad views,
+  because generation runs on the final images sent to the headset.
+- **Graphics APIs:** Direct3D 11, Direct3D 12, and Vulkan.
+- **On-Screen Display:** the expanded layout has a Frame Generation row and the compact layout
+  an optional one-line status. See [On-Screen Display](#on-screen-display).
+- **Runtime smoothing:** SteamVR Motion Smoothing, Pimax Smart Smoothing, Virtual Desktop SSW,
+  and Meta ASW fight the pacing. Turn them off for games that use Frame Generation.
+
+#### Current limits
+
+- Frame Generation does not use game motion vectors or depth yet; motion is estimated from
+  color images only. Motion-vector and depth input are planned.
+- There is no HUD masking yet. Cockpit text and gauges baked into the 3D image can shimmer on
+  generated frames.
+- Fast motion and newly revealed areas can warp, more so with Extrapolate. Raise **Artifact
+  suppression** or lower **Motion limit** to trade warping for local judder.
+- The game needs enough GPU headroom to hold exactly half rate plus the flow work.
+
+### Frame Generation FAQ
+
+**Why does the game now run at 45 fps?**
+
+That is expected. Frame Generation holds the game at half the headset refresh rate and fills
+in every other frame. Judge the image in the headset, not the game's own FPS counter.
+
+**I saved, but nothing changed in the running game. Why?**
+
+Turning Frame Generation on or off takes effect at the next launch. Restart the game, and
+confirm the enabled profile targets the running executable. Other settings apply live.
+
+**Why does the A/B toggle do nothing?**
+
+The toggle only works in sessions that started with Frame Generation on for that game. Turn it
+on, save, restart the game, then use the binding.
+
+**Should I use Interpolate or Extrapolate?**
+
+Start with Interpolate: it has the fewest artifacts. Switch to Extrapolate when your GPU cannot
+finish each real frame a refresh early, and accept more edge artifacts in return.
+
+**Why do cockpit gauges and text shimmer?**
+
+HUD masking is not available yet, so text and gauges in the 3D image can wobble on generated
+frames. Raising Artifact suppression can help.
+
+**Can I use Turbo with Frame Generation?**
+
+Not in the same session. Frame Generation takes over frame pacing, so Turbo stays off wherever
+Frame Generation runs. Turbo still works for games without Frame Generation.
+
+**Do I need to turn off Motion Smoothing or ASW?**
+
+Yes. Runtime smoothing (SteamVR Motion Smoothing, Pimax Smart Smoothing, Virtual Desktop SSW,
+Meta ASW) fights Frame Generation's pacing.
+
 ## On-Screen Display
 
 ![On-Screen Display page showing the Expanded layout in the Legible preview](screenshots/osd.jpg)
@@ -560,12 +692,15 @@ header. Choose 12-hour (with AM/PM) or 24-hour time. Long application and runtim
 truncated within their own fields.
 
 The **Expanded** layout always shows application FPS, average application frame interval,
-and P95, and adds selectable rows for the frame-time graph, Turbo, Pivot, and active
-enhancements. Drag these rows or use their up/down arrows to arrange them. The **Compact**
+and P95, and adds selectable rows for the frame-time graph, Turbo, Frame Generation, Pivot,
+and active enhancements. Drag these rows or use their up/down arrows to arrange them. Saved
+layouts from earlier versions gain the Frame Generation row at the end. The **Compact**
 layout chooses its **Performance** readout (FPS and average frame time, either one, or
-none) and can add one-line Turbo and Pivot status rows. **Just FPS** clears the compact
+none) and can add one-line Turbo, Frame Generation, and Pivot status rows. **Just FPS** clears the compact
 header and status rows for the smallest display. Turbo distinguishes **Disabled**, **Enabled / Off**, **Enabled / Waiting**, active
-**Async** or **Sequenced**, and safety states. Enabled enhancements include Turbo even
+**Async** or **Sequenced**, and safety states. Frame Generation shows its mode and frame
+rates, such as `Interpolate · 45 → 90 fps`, or a status such as **Waiting for steady
+frames**, **Paused**, or **Unavailable** with a reason. Enabled enhancements include Turbo even
 when its binding has switched pacing off. Pivot shows the engaged profile and applied
 nudges/quick views without angle measurements; idle enabled Pivot reads **Pivot ready**.
 Disabling Pivot clears its applied-state display. Independently enabled inactive nudges
