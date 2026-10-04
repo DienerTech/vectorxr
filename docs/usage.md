@@ -539,8 +539,9 @@ comparing it in the headset.
    game. An enabled matching custom profile turns Frame Generation on for that game even when
    the Default Profile is off.
 4. Start with **Synthesis mode: Interpolate** and the default settings, then click **Save Changes**.
-5. Restart the game. Turning Frame Generation on or off, for the Default Profile or a custom
-   profile, takes effect at the next launch. A running game keeps its launch-time state.
+5. Restart the game. Turning Frame Generation on, for the Default Profile or a custom profile,
+   takes effect at the next launch. Turning it off applies to a running game at once: frames
+   pass straight through.
 6. Confirm it is running: turn on the **Frame Generation state** row on the **On-Screen
    Display** page, or set **Diagnostic view** to **Generated-frame tint**.
 7. Optional: use **A/B toggle > Edit Binding…** to assign a keyboard or controller input, then
@@ -548,9 +549,10 @@ comparing it in the headset.
 
 Frame Generation engages a few seconds after the game starts rendering steadily. Loading
 screens and other frames without a rendered image pass straight through, and generation
-resumes once the game renders steadily again. If the runtime rejects a generated frame or the
-GPU work fails repeatedly, Frame Generation pauses for the rest of the session; press the A/B
-toggle to retry. **Unavailable** means the session cannot generate frames at all, for example
+resumes once the game renders steadily again. If the runtime rejects a generated frame, the
+GPU work fails repeatedly, or the game keeps starting frames before the previous one ends,
+Frame Generation pauses. It retries by itself after a few seconds, up to three times per
+session, and the A/B toggle retries at any time. **Unavailable** means the session cannot generate frames at all, for example
 because the game renders into multisampled or unusual swapchain formats; the reason appears in
 the OSD and in the live status.
 
@@ -571,8 +573,8 @@ Extrapolate.
 
 #### Frame Generation settings
 
-Every setting below applies live after **Save Changes**. Only turning Frame Generation on or
-off needs a game restart.
+Every setting below applies live after **Save Changes**. Only turning Frame Generation on
+needs a game restart; turning it off applies at once.
 
 - **Flow quality** sets the resolution motion is measured at: **Performance** (1/16 of the eye
   image), **Balanced** (1/8, default), or **Quality** (1/4). Higher quality tracks small and
@@ -601,8 +603,9 @@ running game wins.
 - **Quadviews:** works with VectorXR's synthesized quad views and with Varjo-native quad views,
   because generation runs on the final images sent to the headset.
 - **Graphics APIs:** Direct3D 11, Direct3D 12, and Vulkan.
-- **On-Screen Display:** the expanded layout has a Frame Generation row and the compact layout
-  an optional one-line status. See [On-Screen Display](#on-screen-display).
+- **On-Screen Display:** the expanded layout has a Frame Generation row, shown only in games
+  where Frame Generation is on, and the compact layout an optional one-line status. See
+  [On-Screen Display](#on-screen-display).
 - **Runtime smoothing:** SteamVR Motion Smoothing, Pimax Smart Smoothing, Virtual Desktop SSW,
   and Meta ASW fight the pacing. Turn them off for games that use Frame Generation.
 
@@ -630,7 +633,7 @@ in every other frame. Judge the image in the headset, not the game's own FPS cou
 
 **I saved, but nothing changed in the running game. Why?**
 
-Turning Frame Generation on or off takes effect at the next launch. Restart the game, and
+Turning Frame Generation on takes effect at the next launch. Restart the game, and
 confirm the enabled profile targets the running executable. Other settings apply live.
 
 **Why does the A/B toggle do nothing?**

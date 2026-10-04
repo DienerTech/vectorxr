@@ -40,7 +40,7 @@ const setupGuideOpen = !(props.config.modules.framegen.enabled || props.config.m
 const toggleBindingWarnings = computed(() => savedBindingConflictWarnings(props.config, [framegen.value.toggleBinding]))
 const turboWarnings = computed(() => configWarnings(props.config))
 
-const restartNote = 'Saved immediately, but a running VR application keeps its launch-time Frame Generation state until it exits.'
+const restartNote = 'Turning Frame Generation off applies to a running game at once; turning it on takes effect the next time the game starts.'
 
 const diagnosticViews: { value: FrameGenDiagnosticView; label: string; description: string }[] = [
   { value: 'off', label: 'Off', description: 'Generated frames are shown without an overlay.' },
@@ -177,7 +177,7 @@ function settingsSummary(settings: FrameGenSettings) {
         <ol class="list-decimal space-y-1 pl-5 text-sm leading-6">
           <li><strong>Turn off runtime smoothing:</strong> SteamVR Motion Smoothing, Pimax Smart Smoothing, Virtual Desktop SSW, or Meta ASW. They fight Frame Generation's pacing.</li>
           <li><strong>Enable it for one game:</strong> leave the Default Profile off, add a custom profile below, and assign the game.</li>
-          <li><strong>Save and restart the game.</strong> Turning Frame Generation on or off takes effect at the next launch.</li>
+          <li><strong>Save and restart the game.</strong> Turning Frame Generation on takes effect at the next launch.</li>
           <li><strong>Check it in the headset:</strong> show the Frame Generation state row in the <button class="underline underline-offset-2" type="button" @click="$emit('navigate', 'osd')">On-Screen Display</button>, or pick the Generated-frame tint diagnostic view.</li>
           <li><strong>Compare:</strong> assign the A/B toggle and switch generated frames off and on in the same scene.</li>
         </ol>
@@ -188,7 +188,7 @@ function settingsSummary(settings: FrameGenSettings) {
 
       <p class="mb-4 flex items-start gap-2 text-xs leading-5 text-muted" role="note">
         <span class="restart-required-mark" aria-hidden="true">&#8635;</span>
-        <span><strong class="font-semibold">Restart to apply:</strong> turning Frame Generation on or off for an application, through the Default Profile or a custom profile and its applications, takes effect the next time that VR application starts. Every other setting on this page updates during play.</span>
+        <span><strong class="font-semibold">Restart to apply:</strong> turning Frame Generation on for an application, through the Default Profile or a custom profile and its applications, takes effect the next time that VR application starts. Turning it off, and every other setting on this page, updates during play.</span>
       </p>
 
       <div class="mb-4 space-y-3 rounded-[1rem] border p-4 surface-panel-soft">
@@ -334,7 +334,7 @@ function settingsSummary(settings: FrameGenSettings) {
               <strong>Turbo stays off while Frame Generation runs.</strong> The two have opposite pacing goals, so in a session where Frame Generation runs, Turbo yields and its status reads Paused for Frame Generation. Your Turbo profiles are not changed.
             </div>
             <div class="rounded-[1rem] border px-4 py-3 surface-panel">
-              Works with Direct3D 11, Direct3D 12, and Vulkan games. It also works with Quadviews, both VectorXR's synthesized quad views and Varjo-native quad views, because generation runs on the final images sent to the headset. Turning it on or off needs a game restart; every other setting applies live.
+              Works with Direct3D 11, Direct3D 12, and Vulkan games. It also works with Quadviews, both VectorXR's synthesized quad views and Varjo-native quad views, because generation runs on the final images sent to the headset. Turning it on needs a game restart; turning it off and every other setting apply live.
             </div>
           </section>
 

@@ -6,7 +6,7 @@ import { frameGenLimits, type FrameGenFlowQuality, type FrameGenSettings, type F
 // Shared Frame Generation settings editor used by both the Default Profile and
 // each custom profile, so the two stay visually and structurally identical.
 // Fields mutate the passed-in reactive `settings` object directly. Every field
-// here applies live; only turning Frame Generation on or off needs a restart.
+// here applies live; only turning Frame Generation on needs a restart.
 defineProps<{
   settings: FrameGenSettings
 }>()

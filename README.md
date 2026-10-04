@@ -104,7 +104,7 @@ Quadviews.
 It is experimental: flow is measured on the final color images only (no game motion vectors or
 depth yet), and cockpit text can shimmer on generated frames. Turn off runtime smoothing such as
 SteamVR Motion Smoothing or ASW, and expect Turbo to stay off where Frame Generation runs.
-Turning it on or off needs a game restart. See the
+Turning it on needs a game restart. See the
 [Frame Generation guide](docs/usage.md#frame-generation-experimental).
 
 ### On-Screen Display

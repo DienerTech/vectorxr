@@ -49,7 +49,7 @@ function closeBinding() {
 const contents: Record<OsdBodyRow, { key: 'showGraph' | 'showTurbo' | 'showFramegen' | 'showPivot' | 'showModules'; label: string; hint: string }> = {
   graph: { key: 'showGraph', label: 'Frame-time graph', hint: 'Rolling history of the last 120 application frames.' },
   turbo: { key: 'showTurbo', label: 'Turbo state', hint: 'Distinguishes disabled, enabled but off, active strategy, and safety states.' },
-  framegen: { key: 'showFramegen', label: 'Frame Generation state', hint: 'Mode and real-to-headset frame rate, or why generation is waiting, paused, or unavailable.' },
+  framegen: { key: 'showFramegen', label: 'Frame Generation state', hint: 'Mode and real-to-headset frame rate, or why generation is waiting, paused, or unavailable. Shown only in games where Frame Generation is on.' },
   pivot: { key: 'showPivot', label: 'Pivot state', hint: 'Engaged profile, applied nudges and quick views, or ready when idle.' },
   modules: { key: 'showModules', label: 'Active enhancements', hint: 'Depth, Pivot, Turbo, Quadviews, and Frame Generation enabled for this app.' },
 }
@@ -193,7 +193,7 @@ function preset(name: 'balanced' | 'minimal' | 'performance') {
         <div class="mt-3 max-w-4xl space-y-2 text-xs leading-5 text-muted">
           <p>Every setting on this page applies after Save, including enabling the OSD in a running game. Bindings change visibility and layout immediately for the current session. The next session uses your saved starting layout and visibility.</p>
           <p>The overlay measures intervals between the application's xrEndFrame calls over the last 120 frames. P95 is the interval at the 95th percentile; lower, steadier frame times are better. These values do not measure GPU work, reprojection, or compositor frame rate. Turbo can make application cadence differ from the headset's refresh rate.</p>
-          <p>Turbo can be enabled after Save in a running game, and the in-game binding switches it off/on; live enable and Async toggles have been observed in DCS. Experimental timing controls and Quadviews enable/disable changes still require an application restart; the expanded OSD shows these pending changes. Turning Frame Generation on or off also needs a restart. Other VectorXR controls retain the behavior described on their own settings pages.</p>
+          <p>Turbo can be enabled after Save in a running game, and the in-game binding switches it off/on; live enable and Async toggles have been observed in DCS. Experimental timing controls and Quadviews enable/disable changes still require an application restart; the expanded OSD shows these pending changes. Turning Frame Generation on also needs a restart; turning it off applies at once. Other VectorXR controls retain the behavior described on their own settings pages.</p>
           <p>This is an information panel with in-game visibility and layout controls. Edit settings in the desktop app. OpenGL is not supported. A runtime with no spare composition layers cannot show the panel.</p>
         </div>
       </details>
