@@ -95,14 +95,14 @@ test('compact layout packs selected rows and preserves a small FPS-only footprin
 
 test('custom layouts retain small sizes, row order and colors without capturing controls or recursive presets', () => {
   const osd = defaultOsdSettings()
-  Object.assign(osd, { enabled: true, scale: 25, accent: 'custom', customColor: '#aB12Ef', clockFormat: '12', bodyOrder: ['pivot', 'modules', 'graph', 'turbo'], showBrand: false, showApp: false, showRuntime: false, showClock: false })
+  Object.assign(osd, { enabled: true, scale: 25, accent: 'custom', customColor: '#aB12Ef', clockFormat: '12', bodyOrder: ['pivot', 'modules', 'framegen', 'graph', 'turbo'], showBrand: false, showApp: false, showRuntime: false, showClock: false })
   const layout = osdLayout(osd)
   osd.customPresets.push({ name: 'Small cockpit', settings: layout })
   osd.bodyOrder.reverse()
-  assert.deepEqual(layout.bodyOrder, ['pivot', 'modules', 'graph', 'turbo'])
+  assert.deepEqual(layout.bodyOrder, ['pivot', 'modules', 'framegen', 'graph', 'turbo'])
   for (const key of ['enabled', 'visibleOnStart', 'toggleBinding', 'cycleBinding', 'customPresets']) assert.ok(!(key in layout))
   assert.deepEqual(normalizeOsdSettings(JSON.parse(JSON.stringify(osd))), osd)
-  assert.deepEqual(normalizeOsdSettings({ bodyOrder: ['pivot', 'pivot', 'unknown', 'turbo'] }).bodyOrder, ['pivot', 'turbo', 'graph', 'modules'])
+  assert.deepEqual(normalizeOsdSettings({ bodyOrder: ['pivot', 'pivot', 'unknown', 'turbo'] }).bodyOrder, ['pivot', 'turbo', 'graph', 'framegen', 'modules'])
   assert.equal(normalizeOsdSettings({ accent: 'toString' }).accent, 'teal')
   const config = defaultConfig(); config.core.osd = osd
   assert.deepEqual(validateConfig(config), [])

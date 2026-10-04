@@ -7,7 +7,7 @@ const legible = defineModel<boolean>('legible', { default: false })
 const edgeId = useId()
 const emit = defineEmits<{ position: [horizontal: number, vertical: number] }>()
 const accent = computed(() => props.settings.accent === 'custom' ? props.settings.customColor : osdAccentColors[props.settings.accent])
-const flags = { graph: 'showGraph', turbo: 'showTurbo', pivot: 'showPivot', modules: 'showModules' } as const
+const flags = { graph: 'showGraph', turbo: 'showTurbo', framegen: 'showFramegen', pivot: 'showPivot', modules: 'showModules' } as const
 const expandedHeader = computed(() => {
   const s = props.settings, clockX = s.showClock ? 790 : 932, appX = s.showBrand ? 200 : 28
   return { shift: s.showBrand || s.showApp || s.showRuntime || s.showClock ? 0 : 40,
@@ -36,7 +36,7 @@ const legibleScale = computed(() => Math.min(legibleMaxScale, stageSize.value.wi
 const legibleStageHeight = computed(() => Math.max(300, Math.ceil(height.value * legibleScale.value) + legiblePadY))
 const legibleView = computed(() => ({ width: stageSize.value.width || legibleWidestPanel, height: stageSize.value.height || legibleStageHeight.value }))
 const headerValues = computed(() => ({ brand: 'VECTORXR', app: 'your-game.exe', runtime: 'Your OpenXR runtime', clock: props.settings.clockFormat === '12' ? '8:42 PM' : '20:42' }))
-const labels: Record<OsdBodyRow, [string, string]> = { graph: ['', ''], turbo: ['TURBO', 'Async / Experimental'], pivot: ['PIVOT', 'DCS Stepped Applied, Nudges Applied'], modules: ['ENHANCEMENTS', 'Depth / Pivot / Turbo / Quadviews'] }
+const labels: Record<OsdBodyRow, [string, string]> = { graph: ['', ''], turbo: ['TURBO', 'Async / Experimental'], framegen: ['FRAME GEN', 'Interpolate · 45 → 90 fps'], pivot: ['PIVOT', 'DCS Stepped Applied, Nudges Applied'], modules: ['ENHANCEMENTS', 'Depth / Pivot / Turbo / Quadviews'] }
 let drag: { x: number; y: number; h: number; v: number; unit: number } | null = null
 function start(event: PointerEvent) {
   if (event.button !== 0 || legible.value) return
@@ -75,11 +75,15 @@ function move(event: PointerEvent) {
             <path v-if="compactLayout.statusY > 18" :d="`M28 ${compactLayout.statusY - 8} H${panelWidth - 28}`" stroke="#141f2d" />
             <g v-if="settings.compactShowTurbo" :transform="`translate(0 ${compactLayout.turboY})`">
               <text x="30" y="22" font-size="20" fill="#94a5b8">TURBO</text>
-              <foreignObject x="128" :width="panelWidth - 156" height="36"><div class="body-value" :style="{ color: accent }">Async / EXP</div></foreignObject>
+              <foreignObject :x="compactLayout.statusValueX" :width="panelWidth - compactLayout.statusValueX - 28" height="36"><div class="body-value" :style="{ color: accent }">Async / EXP</div></foreignObject>
+            </g>
+            <g v-if="settings.compactShowFramegen" :transform="`translate(0 ${compactLayout.framegenY})`">
+              <text x="30" y="22" font-size="20" fill="#94a5b8">FRAME GEN</text>
+              <foreignObject :x="compactLayout.statusValueX" :width="panelWidth - compactLayout.statusValueX - 28" height="36"><div class="body-value" style="color: #e9f0f8">Interpolate · 45 → 90 fps</div></foreignObject>
             </g>
             <g v-if="settings.compactShowPivot" :transform="`translate(0 ${compactLayout.pivotY})`">
               <text x="30" y="22" font-size="20" fill="#94a5b8">PIVOT</text>
-              <foreignObject x="128" :width="panelWidth - 156" height="36"><div class="body-value" style="color: #e9f0f8">Applied + Nudge</div></foreignObject>
+              <foreignObject :x="compactLayout.statusValueX" :width="panelWidth - compactLayout.statusValueX - 28" height="36"><div class="body-value" style="color: #e9f0f8">Applied + Nudge</div></foreignObject>
             </g>
           </g>
         </template>

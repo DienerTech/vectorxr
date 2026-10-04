@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import test from 'node:test'
 
-import { createPivotQuickView, createTurboProfile, defaultConfig } from '../src/lib/model.ts'
+import { createFrameGenProfile, createPivotQuickView, createTurboProfile, defaultConfig, defaultFrameGenSettings } from '../src/lib/model.ts'
 
 const schema = JSON.parse(readFileSync(new URL('../../config/vectorxr.schema.json', import.meta.url), 'utf8'))
 
@@ -18,6 +18,31 @@ test('schema permits Turbo settings and defaults interrupted-session recovery on
   assertSchemaDescribesObject(schema.$defs.turboModule.properties.profiles.items, createTurboProfile())
   assert.equal(schema.$defs.turboModule.properties.interruptedSessionRecovery.default, true)
   assert.ok('turbo' in schema.$defs.modules.properties)
+})
+
+test('schema describes generated Frame Generation settings and keeps the module optional', () => {
+  const framegen = defaultConfig().modules.framegen
+  assertSchemaDescribesObject(schema.$defs.framegenModule, framegen)
+  assertSchemaDescribesObject(schema.$defs.framegenSettings, framegen.defaults)
+  assertSchemaDescribesObject(schema.$defs.framegenProfile, createFrameGenProfile(defaultFrameGenSettings(), ['dcs']))
+  assert.equal(schema.$defs.modules.properties.framegen.$ref, '#/$defs/framegenModule')
+  assert.ok(!schema.$defs.modules.required.includes('framegen'))
+
+  const settings = schema.$defs.framegenSettings.properties
+  for (const [key, value] of Object.entries(framegen.defaults)) assert.equal(settings[key].default, value, key)
+  assert.deepEqual(settings.synthesisMode.enum, ['interpolate', 'extrapolate'])
+  assert.deepEqual(settings.flowQuality.enum, ['performance', 'balanced', 'quality'])
+  assert.deepEqual([settings.artifactSuppression.minimum, settings.artifactSuppression.maximum], [0, 100])
+  assert.deepEqual([settings.motionLimitPercent.minimum, settings.motionLimitPercent.maximum], [2, 25])
+  assert.deepEqual(schema.$defs.framegenModule.properties.diagnosticView.enum, ['off', 'flow', 'confidence', 'tint'])
+  assert.equal(schema.$defs.framegenModule.properties.diagnosticView.default, framegen.diagnosticView)
+
+  const osd = schema.$defs.osdSettings.properties
+  assert.deepEqual(osd.bodyOrder.default, defaultConfig().core.osd.bodyOrder)
+  assert.deepEqual(osd.bodyOrder.items.enum, defaultConfig().core.osd.bodyOrder)
+  assert.deepEqual(osd.customPresets.items.properties.settings.properties.bodyOrder.items.enum, defaultConfig().core.osd.bodyOrder)
+  assert.equal(osd.showFramegen.default, true)
+  assert.equal(osd.compactShowFramegen.default, false)
 })
 
 function assertSchemaDescribesObject(definition, value) {

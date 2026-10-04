@@ -281,6 +281,7 @@ struct OsdSettings {
     show_modules: bool,
     show_clock: bool,
     show_pivot: bool,
+    show_framegen: bool,
     compact_show_runtime: bool,
     compact_show_brand: bool,
     compact_show_app: bool,
@@ -288,6 +289,7 @@ struct OsdSettings {
     compact_show_clock: bool,
     compact_show_turbo: bool,
     compact_show_pivot: bool,
+    compact_show_framegen: bool,
     clock_format: String,
     body_order: Vec<String>,
     custom_color: String,
@@ -321,6 +323,7 @@ impl Default for OsdSettings {
             show_modules: true,
             show_clock: true,
             show_pivot: true,
+            show_framegen: true,
             compact_show_runtime: true,
             compact_show_brand: true,
             compact_show_app: true,
@@ -328,8 +331,15 @@ impl Default for OsdSettings {
             compact_show_clock: true,
             compact_show_turbo: false,
             compact_show_pivot: false,
+            compact_show_framegen: false,
             clock_format: "24".into(),
-            body_order: vec!["graph".into(), "turbo".into(), "pivot".into(), "modules".into()],
+            body_order: vec![
+                "graph".into(),
+                "turbo".into(),
+                "framegen".into(),
+                "pivot".into(),
+                "modules".into(),
+            ],
             custom_color: "#51ddbd".into(),
             custom_presets: vec![],
             accent: "teal".into(),
@@ -788,6 +798,93 @@ impl Default for TurboModuleConfig {
     }
 }
 
+fn default_framegen_synthesis_mode() -> String {
+    "interpolate".into()
+}
+
+fn default_framegen_flow_quality() -> String {
+    "balanced".into()
+}
+
+fn default_framegen_artifact_suppression() -> i64 {
+    50
+}
+
+fn default_framegen_motion_limit_percent() -> i64 {
+    10
+}
+
+fn default_framegen_diagnostic_view() -> String {
+    "off".into()
+}
+
+// Frame Generation tuning. The layer parser rejects unknown keys, so these
+// four fields are the complete serialized shape.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FrameGenSettings {
+    #[serde(default = "default_framegen_synthesis_mode")]
+    synthesis_mode: String,
+    #[serde(default = "default_framegen_flow_quality")]
+    flow_quality: String,
+    #[serde(default = "default_framegen_artifact_suppression")]
+    artifact_suppression: i64,
+    #[serde(default = "default_framegen_motion_limit_percent")]
+    motion_limit_percent: i64,
+}
+
+impl Default for FrameGenSettings {
+    fn default() -> Self {
+        Self {
+            synthesis_mode: default_framegen_synthesis_mode(),
+            flow_quality: default_framegen_flow_quality(),
+            artifact_suppression: default_framegen_artifact_suppression(),
+            motion_limit_percent: default_framegen_motion_limit_percent(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FrameGenProfileConfig {
+    #[serde(default)]
+    name: String,
+    #[serde(default = "default_true")]
+    enabled: bool,
+    #[serde(default)]
+    application_ids: Vec<String>,
+    #[serde(default)]
+    settings: FrameGenSettings,
+}
+
+// Optional in older configs: a missing `framegen` block resolves to Off.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FrameGenModuleConfig {
+    #[serde(default = "default_false")]
+    enabled: bool,
+    #[serde(default = "default_activation_binding")]
+    toggle_binding: InputBinding,
+    #[serde(default = "default_framegen_diagnostic_view")]
+    diagnostic_view: String,
+    #[serde(default)]
+    defaults: FrameGenSettings,
+    #[serde(default)]
+    profiles: Vec<FrameGenProfileConfig>,
+}
+
+impl Default for FrameGenModuleConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            toggle_binding: default_activation_binding(),
+            diagnostic_view: default_framegen_diagnostic_view(),
+            defaults: FrameGenSettings::default(),
+            profiles: Vec::new(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 struct VectorXRModules {
@@ -799,6 +896,8 @@ struct VectorXRModules {
     quadviews: QuadViewsModuleConfig,
     #[serde(default)]
     turbo: TurboModuleConfig,
+    #[serde(default)]
+    framegen: FrameGenModuleConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1025,6 +1124,12 @@ struct RuntimeState {
     turbo_state: String,
     #[serde(default)]
     turbo_reason: String,
+    // "off" | "waiting" | "active" | "paused" | "unavailable"; empty from
+    // layers without Frame Generation.
+    #[serde(default)]
+    framegen_state: String,
+    #[serde(default)]
+    framegen_reason: String,
     #[serde(default)]
     quadviews_diagnostic_visualization: bool,
 }
@@ -1291,6 +1396,21 @@ fn normalize_config(mut config: VectorXRConfig) -> VectorXRConfig {
         }
 
         profile.r#match = None;
+    }
+
+    for profile in &mut config.modules.framegen.profiles {
+        if profile.name.trim().is_empty() {
+            let first_application = profile.application_ids.first().and_then(|application_id| {
+                config
+                    .applications
+                    .iter()
+                    .find(|application| &application.id == application_id)
+            });
+
+            profile.name = first_application
+                .map(|application| application.name.clone())
+                .unwrap_or_else(|| "New Profile".into());
+        }
     }
 
     config
@@ -2637,11 +2757,14 @@ mod tests {
         let legacy: super::CoreConfig = serde_json::from_str(r#"{"enabled":true,"logLevel":"info"}"#).unwrap();
         assert!(!legacy.osd.enabled);
         assert_eq!(legacy.osd.update_hz, 5);
+        assert!(legacy.osd.show_framegen && !legacy.osd.compact_show_framegen);
+        assert_eq!(legacy.osd.body_order, ["graph", "turbo", "framegen", "pivot", "modules"]);
         let input = serde_json::json!({"enabled":true,"compact":true,"visibleOnStart":false,
             "horizontalDegrees":-30.0,"verticalDegrees":15.0,"distanceMeters":2.0,"scale":75.0,
             "opacity":70,"updateHz":10,"showGraph":false,"showRuntime":false,"showTurbo":false,
             "showModules":false,"showClock":false,"accent":"blue","toggleBinding":{"type":"none"},
-            "showPivot":false,"clockFormat":"12","customColor":"#aB12Ef","bodyOrder":["pivot","turbo","modules","graph"],
+            "showPivot":false,"clockFormat":"12","customColor":"#aB12Ef","bodyOrder":["pivot","framegen","turbo","modules","graph"],
+            "showFramegen":false,"compactShowFramegen":true,
             "compactShowRuntime":true,"compactShowClock":true,"compactShowTurbo":true,"compactShowPivot":true,
             "compactShowBrand":false,"compactShowApp":false,"compactMetrics":"fps",
             "showBrand":false,"showApp":false,
@@ -2814,6 +2937,68 @@ mod tests {
     }
 
     #[test]
+    fn framegen_defaults_and_round_trip() {
+        let defaults: super::FrameGenModuleConfig = serde_json::from_str("{}").unwrap();
+        assert!(!defaults.enabled);
+        assert!(matches!(defaults.toggle_binding, super::InputBinding::None));
+        assert_eq!(defaults.diagnostic_view, "off");
+        assert_eq!(defaults.defaults.synthesis_mode, "interpolate");
+        assert_eq!(defaults.defaults.flow_quality, "balanced");
+        assert_eq!(defaults.defaults.artifact_suppression, 50);
+        assert_eq!(defaults.defaults.motion_limit_percent, 10);
+        assert!(defaults.profiles.is_empty());
+
+        // The layer rejects unknown keys, so the saved shape must match exactly.
+        let input = serde_json::json!({
+            "enabled": true,
+            "toggleBinding": { "type": "keyboard", "chord": ["Ctrl", "F7"] },
+            "diagnosticView": "tint",
+            "defaults": {
+                "synthesisMode": "extrapolate", "flowQuality": "quality",
+                "artifactSuppression": 80, "motionLimitPercent": 4
+            },
+            "profiles": [{
+                "name": "DCS", "enabled": false, "applicationIds": ["dcs"],
+                "settings": {
+                    "synthesisMode": "interpolate", "flowQuality": "performance",
+                    "artifactSuppression": 0, "motionLimitPercent": 25
+                }
+            }]
+        });
+        let config: super::FrameGenModuleConfig = serde_json::from_value(input.clone()).unwrap();
+        assert_eq!(serde_json::to_value(config).unwrap(), input);
+
+        // Configs written before Frame Generation load with it off and save the defaults.
+        let old: super::VectorXRConfig = serde_json::from_value(serde_json::json!({
+            "version": 3,
+            "core": { "enabled": true, "logLevel": "info", "logRetentionFiles": 7, "trackSeenApps": true },
+            "applications": [{ "id": "dcs", "name": "DCS", "enabled": true, "match": { "exe": "DCS.exe" } }],
+            "modules": { "turbo": { "enabled": true } }
+        }))
+        .unwrap();
+        assert!(!old.modules.framegen.enabled);
+        assert!(old.modules.turbo.enabled);
+        let saved = serde_json::to_value(super::normalize_config(old)).unwrap();
+        assert_eq!(
+            saved["modules"]["framegen"],
+            serde_json::to_value(super::FrameGenModuleConfig::default()).unwrap()
+        );
+        assert_eq!(saved["modules"]["framegen"]["toggleBinding"]["type"], "none");
+        assert_eq!(saved["core"]["osd"]["showFramegen"], true);
+        assert_eq!(saved["core"]["osd"]["compactShowFramegen"], false);
+
+        let unnamed: super::VectorXRConfig = serde_json::from_value(serde_json::json!({
+            "applications": [{ "id": "dcs", "name": "DCS", "enabled": true, "match": { "exe": "DCS.exe" } }],
+            "modules": { "framegen": { "profiles": [{ "name": " ", "applicationIds": ["dcs"] }] } }
+        }))
+        .unwrap();
+        let profile = &super::normalize_config(unnamed).modules.framegen.profiles[0];
+        assert_eq!(profile.name, "DCS");
+        assert!(profile.enabled);
+        assert_eq!(profile.settings.flow_quality, "balanced");
+    }
+
+    #[test]
     fn turbo_recovery_defaults_on_and_preserves_opt_out() {
         let old: super::TurboModuleConfig =
             serde_json::from_value(serde_json::json!({ "enabled": true })).unwrap();
@@ -2860,11 +3045,16 @@ mod tests {
         value["state"]["osdMessage"] = "Visible".into();
         value["state"]["turboState"] = "recovery-disabled".into();
         value["state"]["turboReason"] = "Previous interruption".into();
+        value["state"]["framegenState"] = "unavailable".into();
+        value["state"]["framegenReason"] = "Runtime refresh rate unknown".into();
         value["quadviewsDimensions"] = serde_json::json!([{"width": 1000, "height": 900, "allocatedWidth": 1200, "allocatedHeight": 1000}]);
         let current: super::RuntimeStatusDocument = serde_json::from_value(value).unwrap();
         assert_eq!(current.state.turbo_state, "recovery-disabled");
         assert!(current.capabilities.osd && current.state.osd_visible && current.state.osd_compact);
         assert_eq!(current.state.osd_message,"Visible");
+        assert_eq!(current.state.framegen_state, "unavailable");
+        assert_eq!(current.state.framegen_reason, "Runtime refresh rate unknown");
+        assert!(old.state.framegen_state.is_empty() && old.state.framegen_reason.is_empty());
         assert_eq!(current.quadviews_dimensions[0].allocated_width, 1200);
     }
 

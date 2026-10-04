@@ -13,6 +13,7 @@ import TurboRuntimePage from '../TurboRuntimePage.vue'
 import TurboSafetyPage from '../TurboSafetyPage.vue'
 import TurboSafetyToggle from '../TurboSafetyToggle.vue'
 import { turboSafetyBlocks } from '../../lib/turboSafety'
+import { configWarnings } from '../../lib/validation'
 import type { ActiveRuntimeInfo, OpenXrLayerSnapshot } from '../../lib/commands'
 import {
   savedBindingConflictWarnings,
@@ -106,6 +107,12 @@ const turboInUse = computed(
 )
 
 
+
+// Frame Generation owns pacing in its sessions, so Turbo yields there.
+const frameGenInUse = computed(
+  () => props.config.modules.framegen.enabled || props.config.modules.framegen.profiles.some((profile) => profile.enabled),
+)
+const frameGenWarnings = computed(() => configWarnings(props.config))
 
 const toolkitConflict = computed(() => {
   if (!turboInUse.value) {
@@ -253,6 +260,24 @@ function closeSubPage() {
       >
         OpenXR Toolkit is enabled alongside VectorXR Turbo. If OXRTK's Turbo Mode is also on, disable one of them so the two pacing layers do not compete.
       </div>
+
+      <div
+        v-for="warning in frameGenWarnings"
+        :key="warning"
+        class="mb-5 rounded-[0.9rem] border px-4 py-3 text-sm leading-6 chip-warning"
+        style="border-color: var(--app-border)"
+        role="note"
+      >
+        {{ warning }}
+      </div>
+      <p
+        v-if="frameGenInUse && frameGenWarnings.length === 0"
+        class="mb-5 rounded-[0.9rem] border px-4 py-3 text-sm leading-6 surface-panel-soft"
+        style="border-color: var(--app-border)"
+        role="note"
+      >
+        Frame Generation is on for some applications. Turbo stays off in sessions where Frame Generation runs, and its status reads Paused for Frame Generation.
+      </p>
 
       <section class="border-t pt-4" style="border-color: var(--app-border)">
         <div class="mb-3">

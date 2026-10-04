@@ -12,7 +12,7 @@ export function osdCompactLayout(settings: OsdSettings) {
   const fields = header.map(item => { const field = { ...item, x }; x += item.width + 16; return field })
   const fps = settings.compactMetrics === 'all' || settings.compactMetrics === 'fps'
   const frameTime = settings.compactMetrics === 'all' || settings.compactMetrics === 'frameTime'
-  const status = settings.compactShowTurbo || settings.compactShowPivot
+  const status = settings.compactShowTurbo || settings.compactShowFramegen || settings.compactShowPivot
   const empty = !fields.length && !fps && !frameTime && !status
   const width = Math.max(240, fields.length ? x + 12 : 0,
     fps || frameTime ? 56 + (fps ? 210 : 0) + (frameTime ? 300 : 0) + (fps && frameTime ? 24 : 0) : 0,
@@ -20,7 +20,11 @@ export function osdCompactLayout(settings: OsdSettings) {
   let y = 18
   const row = (show: boolean, height: number) => { if (!show) return -1; const top = y; y += height + 12; return top }
   const headerY = row(!!fields.length, 32), metricsY = row(fps || frameTime, 56)
-  const turboY = row(settings.compactShowTurbo, 36), pivotY = row(settings.compactShowPivot, 36)
-  const statusY = turboY >= 0 ? turboY : pivotY
-  return { width, height: empty ? 80 : y + 6, fields, fps, frameTime, headerY, metricsY, statusY, turboY, pivotY, empty }
+  // Status rows stack Turbo, Frame Gen, then Pivot. The "FRAME GEN" label is
+  // wider than "TURBO"/"PIVOT", so every status value starts further right
+  // while the Frame Gen row is shown, keeping the values aligned.
+  const turboY = row(settings.compactShowTurbo, 36), framegenY = row(settings.compactShowFramegen, 36), pivotY = row(settings.compactShowPivot, 36)
+  const statusY = [turboY, framegenY, pivotY].find(top => top >= 0) ?? -1
+  const statusValueX = settings.compactShowFramegen ? 150 : 128
+  return { width, height: empty ? 80 : y + 6, fields, fps, frameTime, headerY, metricsY, statusY, turboY, framegenY, pivotY, statusValueX, empty }
 }

@@ -49,6 +49,14 @@ defineEmits<{
               Quadviews default: <span class="font-medium" style="color: var(--app-text)">{{ config.modules.quadviews.enabled ? 'On' : 'Off' }}</span>
               - {{ config.modules.quadviews.profiles.length }} {{ config.modules.quadviews.profiles.length === 1 ? 'profile' : 'profiles' }}
             </li>
+            <li>
+              Turbo default: <span class="font-medium" style="color: var(--app-text)">{{ config.modules.turbo.enabled ? 'On' : 'Off' }}</span>
+              — {{ config.modules.turbo.profiles.length }} {{ config.modules.turbo.profiles.length === 1 ? 'profile' : 'profiles' }}
+            </li>
+            <li>
+              Frame Generation default: <span class="font-medium" style="color: var(--app-text)">{{ config.modules.framegen.enabled ? 'On' : 'Off' }}</span>
+              — {{ config.modules.framegen.profiles.length }} {{ config.modules.framegen.profiles.length === 1 ? 'profile' : 'profiles' }}
+            </li>
           </ul>
         </div>
 
