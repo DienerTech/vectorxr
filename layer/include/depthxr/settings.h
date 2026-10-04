@@ -91,6 +91,7 @@ struct OsdSettings {
     bool show_modules{true};
     bool show_clock{true};
     bool show_pivot{true};
+    bool show_framegen{true};
     bool compact_show_runtime{true};
     bool compact_show_brand{true};
     bool compact_show_app{true};
@@ -98,8 +99,9 @@ struct OsdSettings {
     bool compact_show_clock{true};
     bool compact_show_turbo{false};
     bool compact_show_pivot{false};
+    bool compact_show_framegen{false};
     std::string clock_format{"24"};
-    std::vector<std::string> body_order{"graph", "turbo", "pivot", "modules"};
+    std::vector<std::string> body_order{"graph", "turbo", "framegen", "pivot", "modules"};
     std::string accent{"teal"};
     std::string custom_color{"#51ddbd"};
     InputBinding toggle_binding{InputBindingType::Keyboard, {"Ctrl", "Alt", "F10"}};
@@ -462,6 +464,66 @@ struct TurboResolvedSettings {
     InputBinding metrics_binding;
 };
 
+// Frame Generation: holds the application at half the runtime refresh rate and
+// presents an optical-flow generated frame between every pair of real frames.
+// Interpolate places the generated frame between the previous and newest real
+// frames (fewer artifacts; the real frame is due one refresh earlier).
+// Extrapolate pushes the newest real frame forward along its motion (the real
+// frame keeps an extra refresh of GPU time; more disocclusion artifacts).
+enum class FrameGenSynthesisMode {
+    kInterpolate,
+    kExtrapolate,
+};
+
+// Optical-flow resolution relative to the eye image: 1/16, 1/8 or 1/4.
+enum class FrameGenFlowQuality {
+    kPerformance,
+    kBalanced,
+    kQuality,
+};
+
+// Diagnostic overlays drawn into generated frames only.
+enum class FrameGenDiagnosticView {
+    kOff,
+    kFlow,
+    kConfidence,
+    kTint,
+};
+
+struct FrameGenSettings {
+    FrameGenSynthesisMode synthesis_mode{FrameGenSynthesisMode::kInterpolate};
+    FrameGenFlowQuality flow_quality{FrameGenFlowQuality::kBalanced};
+    // 0-100: higher falls back to the real image sooner where motion is uncertain.
+    int artifact_suppression{50};
+    // 2-25: largest content shift, in percent of view width, a generated frame may apply.
+    int motion_limit_percent{10};
+};
+
+struct FrameGenProfile {
+    std::string name;
+    bool enabled{true};
+    ProfileMode mode{ProfileMode::Custom};
+    std::vector<std::string> application_ids;
+    FrameGenSettings settings;
+};
+
+struct FrameGenModuleConfig {
+    bool enabled{false};
+    // Optional in-session A/B toggle; only effective in sessions that started
+    // with Frame Generation enabled (the pacing takeover is session-latched).
+    InputBinding toggle_binding;
+    FrameGenDiagnosticView diagnostic_view{FrameGenDiagnosticView::kOff};
+    FrameGenSettings defaults;
+    std::vector<FrameGenProfile> profiles;
+};
+
+struct FrameGenResolvedSettings : FrameGenSettings {
+    bool enabled{false};
+    std::string profile_name;
+    InputBinding toggle_binding;
+    FrameGenDiagnosticView diagnostic_view{FrameGenDiagnosticView::kOff};
+};
+
 struct ConfigDocument {
     int version{3};
     CoreSettings core;
@@ -470,6 +532,7 @@ struct ConfigDocument {
     PivotXrModuleConfig pivotxr;
     QuadViewsModuleConfig quadviews;
     TurboModuleConfig turbo;
+    FrameGenModuleConfig framegen;
 };
 
 struct ResolvedRuntimeConfig {
@@ -479,6 +542,7 @@ struct ResolvedRuntimeConfig {
     PivotXrResolvedSettings pivotxr;
     QuadViewsResolvedSettings quadviews;
     TurboResolvedSettings turbo;
+    FrameGenResolvedSettings framegen;
 };
 
 const char* ToString(LogLevel level);
@@ -498,6 +562,12 @@ const char* ToString(InputBindingType type);
 std::optional<InputBindingType> ParseInputBindingType(const std::string& value);
 const char* ToString(QuadViewsTrackingMode mode);
 std::optional<QuadViewsTrackingMode> ParseQuadViewsTrackingMode(const std::string& value);
+const char* ToString(FrameGenSynthesisMode mode);
+std::optional<FrameGenSynthesisMode> ParseFrameGenSynthesisMode(const std::string& value);
+const char* ToString(FrameGenFlowQuality quality);
+std::optional<FrameGenFlowQuality> ParseFrameGenFlowQuality(const std::string& value);
+const char* ToString(FrameGenDiagnosticView view);
+std::optional<FrameGenDiagnosticView> ParseFrameGenDiagnosticView(const std::string& value);
 const char* ToString(ProfileMode mode);
 std::optional<ProfileMode> ParseProfileMode(const std::string& value);
 const char* ToString(PivotResponseMode mode);

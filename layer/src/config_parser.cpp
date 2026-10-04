@@ -696,19 +696,22 @@ bool CheckAllowedKeys(const JsonValue::Object& object,
 bool ParseOsdSettings(const JsonValue::Object& object, OsdSettings& out, std::string& error) {
     if (!CheckAllowedKeys(object, {"enabled", "visibleOnStart", "compact", "horizontalDegrees", "verticalDegrees",
         "distanceMeters", "scale", "opacity", "updateHz", "showGraph", "showRuntime", "showBrand", "showApp", "showTurbo", "showModules",
-        "showClock", "showPivot", "compactShowRuntime", "compactShowClock", "compactShowTurbo", "compactShowPivot",
+        "showClock", "showPivot", "showFramegen", "compactShowRuntime", "compactShowClock", "compactShowTurbo", "compactShowPivot",
+        "compactShowFramegen",
         "compactShowBrand", "compactShowApp", "compactMetrics",
         "clockFormat", "bodyOrder", "customColor", "customPresets", "accent", "toggleBinding", "cycleBinding"}, error)) return false;
     for (const auto& [key, target] : {std::pair{"enabled", &out.enabled}, {"visibleOnStart", &out.visible_on_start},
         {"compact", &out.compact}, {"showGraph", &out.show_graph}, {"showRuntime", &out.show_runtime}, {"showBrand", &out.show_brand}, {"showApp", &out.show_app},
-        {"showTurbo", &out.show_turbo}, {"showModules", &out.show_modules}, {"showClock", &out.show_clock}, {"showPivot", &out.show_pivot}}) {
+        {"showTurbo", &out.show_turbo}, {"showModules", &out.show_modules}, {"showClock", &out.show_clock}, {"showPivot", &out.show_pivot},
+        {"showFramegen", &out.show_framegen}}) {
         std::optional<bool> value;
         if (!ReadOptionalBool(object, key, value, error)) return false;
         if (value) *target = *value;
     }
     for (const auto& [key, target] : {std::pair{"compactShowRuntime", &out.compact_show_runtime},
         {"compactShowClock", &out.compact_show_clock}, {"compactShowTurbo", &out.compact_show_turbo},
-        {"compactShowPivot", &out.compact_show_pivot}, {"compactShowBrand", &out.compact_show_brand}, {"compactShowApp", &out.compact_show_app}}) {
+        {"compactShowPivot", &out.compact_show_pivot}, {"compactShowBrand", &out.compact_show_brand}, {"compactShowApp", &out.compact_show_app},
+        {"compactShowFramegen", &out.compact_show_framegen}}) {
         std::optional<bool> value;
         if (!ReadOptionalBool(object, key, value, error)) return false;
         if (value) *target = *value;
@@ -769,7 +772,7 @@ bool ParseOsdSettings(const JsonValue::Object& object, OsdSettings& out, std::st
         std::vector<std::string> order;
         for (const auto& row:*rows) {
             const auto* name=row.IsString()?&row.AsString():nullptr;
-            if (!name || (*name!="graph" && *name!="turbo" && *name!="pivot" && *name!="modules") ||
+            if (!name || (*name!="graph" && *name!="turbo" && *name!="framegen" && *name!="pivot" && *name!="modules") ||
                 std::find(order.begin(),order.end(),*name)!=order.end()) { error="Invalid core.osd.bodyOrder"; return false; }
             order.push_back(*name);
         }
@@ -2262,6 +2265,170 @@ bool ParseQuadViewsModule(const JsonValue::Object& object, QuadViewsModuleConfig
     return true;
 }
 
+bool ReadOptionalBoundedInt(const JsonValue::Object& object, const char* key, const char* field, int low, int high,
+                            int& out, std::string& error) {
+    std::optional<double> value;
+    if (!ReadOptionalNumber(object, key, value, error)) {
+        return false;
+    }
+    if (!value) {
+        return true;
+    }
+    if (!std::isfinite(*value) || std::floor(*value) != *value || *value < low || *value > high) {
+        error = std::string(field) + "." + key + " must be an integer from " + std::to_string(low) + " to " +
+            std::to_string(high);
+        return false;
+    }
+    out = static_cast<int>(*value);
+    return true;
+}
+
+bool ParseFrameGenSettings(const JsonValue::Object& object, const char* field, FrameGenSettings& out,
+                           std::string& error) {
+    static const std::unordered_set<std::string> allowed = {
+        "synthesisMode",
+        "flowQuality",
+        "artifactSuppression",
+        "motionLimitPercent",
+    };
+    if (!CheckAllowedKeys(object, allowed, error)) {
+        return false;
+    }
+
+    std::optional<std::string> synthesis_mode;
+    std::optional<std::string> flow_quality;
+    if (!ReadOptionalString(object, "synthesisMode", synthesis_mode, error) ||
+        !ReadOptionalString(object, "flowQuality", flow_quality, error)) {
+        return false;
+    }
+    if (synthesis_mode) {
+        const auto parsed = ParseFrameGenSynthesisMode(*synthesis_mode);
+        if (!parsed) {
+            error = std::string(field) + ".synthesisMode must be interpolate or extrapolate";
+            return false;
+        }
+        out.synthesis_mode = *parsed;
+    }
+    if (flow_quality) {
+        const auto parsed = ParseFrameGenFlowQuality(*flow_quality);
+        if (!parsed) {
+            error = std::string(field) + ".flowQuality must be performance, balanced, or quality";
+            return false;
+        }
+        out.flow_quality = *parsed;
+    }
+    return ReadOptionalBoundedInt(object, "artifactSuppression", field, 0, 100, out.artifact_suppression, error) &&
+        ReadOptionalBoundedInt(object, "motionLimitPercent", field, 2, 25, out.motion_limit_percent, error);
+}
+
+bool ParseFrameGenProfile(const JsonValue& value, FrameGenProfile& out, std::string& error) {
+    const JsonValue::Object* object = RequireObject(value, "framegenProfile", error);
+    if (!object) {
+        return false;
+    }
+
+    static const std::unordered_set<std::string> allowed = {
+        "name",
+        "enabled",
+        "mode",
+        "applicationIds",
+        "settings",
+    };
+    if (!CheckAllowedKeys(*object, allowed, error)) {
+        return false;
+    }
+
+    const auto application_ids_it = object->find("applicationIds");
+    if (application_ids_it == object->end()) {
+        error = "Missing required field: framegenProfile.applicationIds";
+        return false;
+    }
+    if (!ParseStringArray(application_ids_it->second, "framegenProfile.applicationIds", out.application_ids, error)) {
+        return false;
+    }
+
+    std::optional<std::string> name;
+    std::optional<bool> enabled;
+    std::optional<ProfileMode> mode;
+    if (!ReadOptionalString(*object, "name", name, error) ||
+        !ReadOptionalBool(*object, "enabled", enabled, error) ||
+        !ReadOptionalProfileMode(*object, "mode", mode, error)) {
+        return false;
+    }
+    out.name = name.value_or("New Profile");
+    out.enabled = enabled.value_or(true);
+    out.mode = mode.value_or(ProfileMode::Custom);
+
+    const auto settings_it = object->find("settings");
+    if (settings_it != object->end()) {
+        const JsonValue::Object* settings_object = RequireObject(settings_it->second, "framegenProfile.settings", error);
+        if (!settings_object || !ParseFrameGenSettings(*settings_object, "framegenProfile.settings", out.settings, error)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool ParseFrameGenModule(const JsonValue::Object& object, FrameGenModuleConfig& out, std::string& error) {
+    static const std::unordered_set<std::string> allowed = {
+        "enabled",
+        "toggleBinding",
+        "diagnosticView",
+        "defaults",
+        "profiles",
+    };
+    if (!CheckAllowedKeys(object, allowed, error)) {
+        return false;
+    }
+
+    std::optional<bool> enabled;
+    std::optional<std::string> diagnostic_view;
+    if (!ReadOptionalBool(object, "enabled", enabled, error) ||
+        !ReadOptionalString(object, "diagnosticView", diagnostic_view, error)) {
+        return false;
+    }
+    if (enabled) {
+        out.enabled = *enabled;
+    }
+    if (diagnostic_view) {
+        const auto parsed = ParseFrameGenDiagnosticView(*diagnostic_view);
+        if (!parsed) {
+            error = "framegen.diagnosticView must be off, flow, confidence, or tint";
+            return false;
+        }
+        out.diagnostic_view = *parsed;
+    }
+
+    const auto binding_it = object.find("toggleBinding");
+    if (binding_it != object.end() && !ParseInputBinding(binding_it->second, out.toggle_binding, error)) {
+        return false;
+    }
+
+    const auto defaults_it = object.find("defaults");
+    if (defaults_it != object.end()) {
+        const JsonValue::Object* defaults_object = RequireObject(defaults_it->second, "framegen.defaults", error);
+        if (!defaults_object || !ParseFrameGenSettings(*defaults_object, "framegen.defaults", out.defaults, error)) {
+            return false;
+        }
+    }
+
+    const auto profiles_it = object.find("profiles");
+    if (profiles_it != object.end()) {
+        const JsonValue::Array* profiles = RequireArray(profiles_it->second, "framegen.profiles", error);
+        if (!profiles) {
+            return false;
+        }
+        for (const JsonValue& profile_value : *profiles) {
+            FrameGenProfile profile;
+            if (!ParseFrameGenProfile(profile_value, profile, error)) {
+                return false;
+            }
+            out.profiles.push_back(std::move(profile));
+        }
+    }
+    return true;
+}
+
 bool ParseVectorDocument(const JsonValue::Object& root_object, ConfigDocument& out, std::string& error) {
     static const std::unordered_set<std::string> allowed_root = {"version", "core", "applications", "modules"};
     if (!CheckAllowedKeys(root_object, allowed_root, error)) {
@@ -2308,7 +2475,7 @@ bool ParseVectorDocument(const JsonValue::Object& root_object, ConfigDocument& o
         return false;
     }
 
-    static const std::unordered_set<std::string> allowed_modules = {"depthxr", "pivotxr", "quadviews", "turbo"};
+    static const std::unordered_set<std::string> allowed_modules = {"depthxr", "pivotxr", "quadviews", "turbo", "framegen"};
     if (!CheckAllowedKeys(*modules_object, allowed_modules, error)) {
         return false;
     }
@@ -2346,6 +2513,15 @@ bool ParseVectorDocument(const JsonValue::Object& root_object, ConfigDocument& o
     if (turbo_it != modules_object->end()) {
         const JsonValue::Object* turbo_object = RequireObject(turbo_it->second, "modules.turbo", error);
         if (!turbo_object || !ParseTurboModule(*turbo_object, out.turbo, error)) {
+            return false;
+        }
+    }
+
+    // Optional: absent in configs written before Frame Generation existed.
+    const auto framegen_it = modules_object->find("framegen");
+    if (framegen_it != modules_object->end()) {
+        const JsonValue::Object* framegen_object = RequireObject(framegen_it->second, "modules.framegen", error);
+        if (!framegen_object || !ParseFrameGenModule(*framegen_object, out.framegen, error)) {
             return false;
         }
     }

@@ -1157,6 +1157,133 @@ void TestTurboModuleOptional() {
     Expect(!resolved.turbo.enabled, "Turbo resolved settings should default to disabled");
 }
 
+std::string FrameGenConfigJson(const std::string& framegen_module, const std::string& osd = "{}") {
+    return std::string(R"json(
+{
+  "version": 3,
+  "core": { "enabled": true, "logLevel": "info", "logRetentionFiles": 7, "osd": )json") + osd + R"json( },
+  "applications": [
+    { "id": "app-dcs", "name": "DCS", "enabled": true, "match": { "exe": "DCS.exe" } },
+    { "id": "app-msfs", "name": "MSFS", "enabled": true, "match": { "exe": "FlightSimulator2024.exe" } }
+  ],
+  "modules": {
+    "depthxr": {
+      "enabled": false,
+      "defaults": { "stereoBoost": 1.0, "convergence": 0.0 },
+      "bindings": { "toggleEnabled": { "type": "none" } },
+      "profiles": []
+    },
+    "pivotxr": { "enabled": false, "defaults": {}, "profiles": [] },
+    "framegen": )json" + framegen_module + R"json(
+  }
+}
+)json";
+}
+
+void TestFrameGenModuleOptional() {
+    // Configs written before Frame Generation existed must parse with it off.
+    const std::string json = R"json(
+{
+  "version": 3,
+  "core": { "enabled": true, "logLevel": "info", "logRetentionFiles": 7 },
+  "applications": [],
+  "modules": {
+    "depthxr": {
+      "enabled": false,
+      "defaults": { "stereoBoost": 1.0, "convergence": 0.0 },
+      "bindings": { "toggleEnabled": { "type": "none" } },
+      "profiles": []
+    },
+    "pivotxr": { "enabled": false, "defaults": {}, "profiles": [] }
+  }
+}
+)json";
+    const depthxr::ParseResult result = depthxr::ParseConfig(json);
+    Expect(result.ok, "Config without framegen module was rejected: " + result.error);
+    Expect(!result.document.framegen.enabled, "Frame Generation should default off when absent");
+    const auto resolved = depthxr::ResolveRuntimeConfig(result.document, "DCS.exe");
+    Expect(!resolved.framegen.enabled, "Frame Generation should resolve off when absent");
+    Expect(resolved.framegen.synthesis_mode == depthxr::FrameGenSynthesisMode::kInterpolate,
+           "Frame Generation should default to interpolation");
+    Expect(resolved.framegen.flow_quality == depthxr::FrameGenFlowQuality::kBalanced,
+           "Frame Generation should default to balanced flow");
+    Expect(resolved.framegen.artifact_suppression == 50 && resolved.framegen.motion_limit_percent == 10,
+           "Frame Generation numeric defaults changed");
+    Expect(resolved.framegen.diagnostic_view == depthxr::FrameGenDiagnosticView::kOff,
+           "Frame Generation diagnostics should default off");
+    Expect(resolved.core.osd.show_framegen && !resolved.core.osd.compact_show_framegen,
+           "OSD Frame Gen rows should default to full-panel only");
+    Expect(resolved.core.osd.body_order.size() == 5 && resolved.core.osd.body_order[2] == "framegen",
+           "Default OSD body order should include the Frame Gen row after Turbo");
+}
+
+void TestFrameGenProfileResolution() {
+    const std::string module = R"json({
+      "enabled": false,
+      "diagnosticView": "tint",
+      "toggleBinding": { "type": "keyboard", "chord": ["Ctrl", "Alt", "F9"] },
+      "defaults": { "synthesisMode": "interpolate", "flowQuality": "performance", "artifactSuppression": 40, "motionLimitPercent": 8 },
+      "profiles": [
+        { "name": "Disabled", "enabled": false, "applicationIds": ["app-dcs"],
+          "settings": { "synthesisMode": "interpolate", "flowQuality": "quality" } },
+        { "name": "DCS", "enabled": true, "applicationIds": ["app-dcs"],
+          "settings": { "synthesisMode": "extrapolate", "flowQuality": "quality", "artifactSuppression": 75, "motionLimitPercent": 25 } }
+      ]
+    })json";
+    const depthxr::ParseResult result = depthxr::ParseConfig(FrameGenConfigJson(module));
+    Expect(result.ok, "Frame Generation module was rejected: " + result.error);
+    Expect(result.document.framegen.profiles.size() == 2, "Frame Generation profiles were not parsed");
+    Expect(result.document.framegen.toggle_binding.type == depthxr::InputBindingType::Keyboard,
+           "Frame Generation toggle binding was not parsed");
+
+    const auto dcs = depthxr::ResolveFrameGenSettings(result.document, "DCS.exe");
+    Expect(dcs.enabled, "Matching enabled profile should enable Frame Generation over an off default");
+    Expect(dcs.profile_name == "DCS", "Disabled profiles must not win resolution");
+    Expect(dcs.synthesis_mode == depthxr::FrameGenSynthesisMode::kExtrapolate &&
+               dcs.flow_quality == depthxr::FrameGenFlowQuality::kQuality &&
+               dcs.artifact_suppression == 75 && dcs.motion_limit_percent == 25,
+           "Profile settings did not replace defaults");
+    Expect(dcs.diagnostic_view == depthxr::FrameGenDiagnosticView::kTint,
+           "Module diagnostic view should apply to profiles");
+
+    const auto other = depthxr::ResolveFrameGenSettings(result.document, "FlightSimulator2024.exe");
+    Expect(!other.enabled && other.profile_name.empty(), "Unmatched application should use the off default");
+    Expect(other.flow_quality == depthxr::FrameGenFlowQuality::kPerformance && other.artifact_suppression == 40 &&
+               other.motion_limit_percent == 8,
+           "Unmatched application should use module defaults");
+}
+
+void TestFrameGenInvalidSettingsRejected() {
+    const std::array<std::string, 6> invalid_modules{
+        R"json({ "enabled": true, "defaults": { "synthesisMode": "blend" } })json",
+        R"json({ "enabled": true, "defaults": { "flowQuality": "ultra" } })json",
+        R"json({ "enabled": true, "defaults": { "artifactSuppression": 101 } })json",
+        R"json({ "enabled": true, "defaults": { "motionLimitPercent": 1 } })json",
+        R"json({ "enabled": true, "defaults": { "motionLimitPercent": 7.5 } })json",
+        R"json({ "enabled": true, "diagnosticView": "wireframe" })json",
+    };
+    for (const auto& module : invalid_modules) {
+        const auto result = depthxr::ParseConfig(FrameGenConfigJson(module));
+        Expect(!result.ok, "Invalid Frame Generation settings were accepted: " + module);
+    }
+    const auto unknown = depthxr::ParseConfig(FrameGenConfigJson(R"json({ "enabled": true, "presenter": true })json"));
+    Expect(!unknown.ok, "Unknown Frame Generation keys must be rejected like other modules");
+}
+
+void TestFrameGenOsdRows() {
+    const auto result = depthxr::ParseConfig(FrameGenConfigJson(R"json({ "enabled": false })json",
+        R"json({ "showFramegen": false, "compactShowFramegen": true, "bodyOrder": ["modules", "graph", "turbo", "pivot"] })json"));
+    Expect(result.ok, "OSD Frame Gen settings were rejected: " + result.error);
+    const auto& osd = result.document.core.osd;
+    Expect(!osd.show_framegen && osd.compact_show_framegen, "OSD Frame Gen row toggles were not parsed");
+    Expect(osd.body_order.size() == 5 && osd.body_order.back() == "framegen",
+           "Saved OSD orders without the Frame Gen row should append it");
+    const auto ordered = depthxr::ParseConfig(FrameGenConfigJson(R"json({ "enabled": false })json",
+        R"json({ "bodyOrder": ["framegen", "graph", "turbo", "pivot", "modules"] })json"));
+    Expect(ordered.ok && ordered.document.core.osd.body_order.front() == "framegen",
+           "OSD body order should accept the Frame Gen row");
+}
+
 void TestTurboMetricsSettingsParsing() {
     const std::string json = R"json(
 {
@@ -2939,6 +3066,10 @@ int main() {
     TestTurboModuleResolution();
     TestTurboPacingModeParsing();
     TestTurboModuleOptional();
+    TestFrameGenModuleOptional();
+    TestFrameGenProfileResolution();
+    TestFrameGenInvalidSettingsRejected();
+    TestFrameGenOsdRows();
     TestTurboMetricsSettingsParsing();
     TestTurboMetricsSessionRoundTrip();
     TestQuadViewsProfileResolution();

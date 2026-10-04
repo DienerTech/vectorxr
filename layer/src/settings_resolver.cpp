@@ -352,6 +352,35 @@ TurboResolvedSettings ResolveTurboSettings(const ConfigDocument& config, std::st
     return resolved;
 }
 
+const FrameGenProfile* FindMatchingFrameGenProfile(const ConfigDocument& config, std::string_view exe_name) {
+    const RegisteredApplication* application = FindMatchingApplication(config, exe_name);
+    if (!application) {
+        return nullptr;
+    }
+    for (const FrameGenProfile& profile : config.framegen.profiles) {
+        if (profile.enabled &&
+            std::find(profile.application_ids.begin(), profile.application_ids.end(), application->id) !=
+                profile.application_ids.end()) {
+            return &profile;
+        }
+    }
+    return nullptr;
+}
+
+FrameGenResolvedSettings ResolveFrameGenSettings(const ConfigDocument& config, std::string_view exe_name) {
+    FrameGenResolvedSettings resolved;
+    resolved.enabled = config.framegen.enabled;
+    resolved.toggle_binding = config.framegen.toggle_binding;
+    resolved.diagnostic_view = config.framegen.diagnostic_view;
+    static_cast<FrameGenSettings&>(resolved) = config.framegen.defaults;
+    if (const FrameGenProfile* profile = FindMatchingFrameGenProfile(config, exe_name)) {
+        resolved.enabled = true;
+        resolved.profile_name = profile->name;
+        static_cast<FrameGenSettings&>(resolved) = profile->settings;
+    }
+    return resolved;
+}
+
 ResolvedRuntimeConfig ResolveRuntimeConfig(const ConfigDocument& config, std::string_view exe_name) {
     ResolvedRuntimeConfig resolved;
     resolved.core = config.core;
@@ -360,6 +389,7 @@ ResolvedRuntimeConfig ResolveRuntimeConfig(const ConfigDocument& config, std::st
     resolved.pivotxr = ResolvePivotXrSettings(config, exe_name);
     resolved.quadviews = ResolveQuadViewsSettings(config, exe_name);
     resolved.turbo = ResolveTurboSettings(config, exe_name);
+    resolved.framegen = ResolveFrameGenSettings(config, exe_name);
     return resolved;
 }
 
