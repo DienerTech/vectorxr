@@ -30,10 +30,18 @@ Status documents identify one process-local OpenXR session and advertise only th
     "quadviewsDiagnosticVisualization": true
   },
   "state": {
-    "quadviewsDiagnosticVisualization": false
+    "quadviewsDiagnosticVisualization": false,
+    "turboState": "framegen",
+    "turboReason": "Frame Generation owns frame pacing in this session.",
+    "framegenState": "active",
+    "framegenReason": ""
   }
 }
 ```
+
+`framegenState` is `off`, `waiting`, `active`, `paused`, or `unavailable`, with
+`framegenReason` explaining a pause or why the session cannot generate frames. `turboState`
+reads `framegen` while Turbo yields to Frame Generation.
 
 Control documents target that exact session and express desired state rather than a toggle event:
 

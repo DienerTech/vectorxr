@@ -21,6 +21,7 @@ The app presents product modules:
 - `Pivot` feature editing (internal id `pivotxr`)
 - `Quadviews` feature editing
 - `Turbo` frame pacing, runtime strategy selection, diagnostics, and Safety controls
+- `Frame Generation` optical-flow frame synthesis (internal id `framegen`, experimental)
 
 This "module" concept is a product and config boundary, not a separate runtime ownership boundary. User-facing labels are display-first (`Depth`, `Pivot`); internal ids, config keys, and C++ namespaces stay `depthxr`/`pivotxr`.
 
@@ -75,6 +76,37 @@ Feature interception (varies by which modules are active):
 - `xrLocateSpace` — Pivot yaw/pitch recomposition
 - `xrEnumerateViewConfigurations` / `xrEnumerateViewConfigurationViews` and the swapchain
   lifecycle calls — Quadviews composition
+- `xrWaitFrame` / `xrBeginFrame` / `xrEndFrame` — Turbo pacing, or Frame Generation pacing in
+  sessions that start with Frame Generation on; swapchain creation and release also tell
+  Frame Generation which image each projection view submitted
+
+## Frame Generation
+
+Frame Generation is latched per session in `xrCreateSession`. When it owns pacing,
+`FrameGenPresenter` (`layer/src/framegen/framegen_presenter.cpp`) takes the application's
+frame calls:
+
+- The app's `xrWaitFrame` waits on runtime slot *k* but reports slot *k + 1* with a doubled
+  period, so the app renders for the time its frame is shown and runs at half the refresh rate.
+- The app's `xrEndFrame` submits slot *k* with a generated frame, then makes one extra runtime
+  wait/begin/end for slot *k + 1* with the app's own layers. Both submissions go through the
+  layer's normal final submission, so they carry the OSD layer.
+- A wait that arrives while an engaged frame is still ending is held, so runtime frame calls
+  never overlap even for applications that wait on one thread while ending on another.
+- Turbo yields for the session; the two features pace frames in opposite directions.
+
+Generation runs on the session's own device and queue. An API-neutral plan
+(`layer/src/framegen_plan.cpp`) describes every pass, and the Direct3D 11, Direct3D 12 and
+Vulkan backends (`layer/src/framegen/`) only record copies, barriers and compute dispatches
+for it. The passes live in one HLSL file (`layer/shaders/framegen.hlsl`): fxc builds DXBC for
+both Direct3D backends and a pinned DXC release builds SPIR-V for Vulkan at build time.
+
+Per view, the newest submitted image is copied into a history texture; luma pyramids are built
+for it and for the previous frame rotated into the newest view (head rotation is the runtime's
+job, so it is removed before matching); block matching runs coarse to fine; and synthesis either
+interpolates between the two real frames or extrapolates past the newest, writing into a
+layer-owned output swapchain. Generation works on whatever projection views reach the runtime,
+so it follows Quadviews composition and Varjo-native quad views alike.
 
 The interception set is intentionally scoped to what the enabled features need rather than
 hooking every call.

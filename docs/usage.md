@@ -525,7 +525,7 @@ Generated frames come from GPU optical flow measured on the final color images t
 submits. VectorXR removes your head rotation from the flow before matching, because the
 runtime's own reprojection already handles head rotation, so the flow follows world,
 vehicle, and object motion. The approach is inspired by
-[OFXR-Bridge](https://github.com/djules75/OFXR-Bridge).
+[OFXR-Bridge](https://github.com/tig3rmast3r/OFXR-Bridge).
 
 Frame Generation is experimental. Keep the Default Profile off and enable it per game after
 comparing it in the headset.
@@ -545,6 +545,14 @@ comparing it in the headset.
    Display** page, or set **Diagnostic view** to **Generated-frame tint**.
 7. Optional: use **A/B toggle > Edit Binding…** to assign a keyboard or controller input, then
    switch generated frames off and on in the same scene to compare.
+
+Frame Generation engages a few seconds after the game starts rendering steadily. Loading
+screens and other frames without a rendered image pass straight through, and generation
+resumes once the game renders steadily again. If the runtime rejects a generated frame or the
+GPU work fails repeatedly, Frame Generation pauses for the rest of the session; press the A/B
+toggle to retry. **Unavailable** means the session cannot generate frames at all, for example
+because the game renders into multisampled or unusual swapchain formats; the reason appears in
+the OSD and in the live status.
 
 The page's collapsible **Setup guide** repeats this checklist; it starts open until a Frame
 Generation profile is enabled. **In-headset controls** lists running VR applications with
@@ -606,7 +614,12 @@ running game wins.
   generated frames.
 - Fast motion and newly revealed areas can warp, more so with Extrapolate. Raise **Artifact
   suppression** or lower **Motion limit** to trade warping for local judder.
-- The game needs enough GPU headroom to hold exactly half rate plus the flow work.
+- The game needs enough GPU headroom to hold exactly half rate plus the flow work, roughly
+  0.6–1 ms per generated frame for both eyes on a high-end GPU at Balanced quality, more at
+  Quality and on slower GPUs.
+- Generated frames carry no depth, so runtime features that reproject with the game's depth
+  apply to real frames only. Only the first projection layer is generated; other layers, such
+  as menus drawn as quads, repeat unchanged.
 
 ### Frame Generation FAQ
 
