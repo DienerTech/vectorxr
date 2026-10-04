@@ -2063,6 +2063,10 @@ XrResult OpenXrLayer::DestroyInstance(XrInstance instance) {
 
     std::scoped_lock lock(mutex_);
 
+    framegen_.Stop();
+    framegen_owns_pacing_.store(false, std::memory_order_release);
+    framegen_session_enabled_ = false;
+    turbo_yielded_to_framegen_ = false;
     osd_.Shutdown();
     ReleasePendingOsdImages();osd_composite_.Reset();osd_composite_logged_=false;osd_composite_fallback_logged_=false;
     DestroyEyeGazeResources();
@@ -2267,6 +2271,7 @@ XrResult OpenXrLayer::DestroySession(XrSession session) {
 }
 
 XrResult OpenXrLayer::BeginSession(XrSession session, const XrSessionBeginInfo* begin_info) {
+    framegen_.ResetFrames();
     bool quadviews_emulation_active = false;
     {
         std::scoped_lock lock(mutex_);
@@ -2366,6 +2371,7 @@ XrResult OpenXrLayer::BeginSession(XrSession session, const XrSessionBeginInfo* 
 }
 
 XrResult OpenXrLayer::EndSession(XrSession session) {
+    framegen_.ResetFrames();
     // Turbo deliberately pre-waits (and, in sequenced mode, pre-begins) the
     // following frame. Balance that owned frame before ending the session so a
     // later xrBeginSession starts from a clean runtime call-order state.
@@ -3221,6 +3227,7 @@ XrResult OpenXrLayer::CreateSwapchain(XrSession session,
     }
 
     // Frame Generation copies released color images (Vulkan needs TRANSFER_SRC).
+    const XrSwapchainCreateInfo* const original_create_info = create_info;
     XrSwapchainCreateInfo adjusted_create_info{};
     if (create_info && framegen_owns_pacing_.load(std::memory_order_acquire)) {
         const XrSwapchainUsageFlags extra = framegen_.SourceUsage(*create_info);
@@ -3232,7 +3239,14 @@ XrResult OpenXrLayer::CreateSwapchain(XrSession session,
             create_info = &adjusted_create_info;
         }
     }
-    const XrResult result = next_create_swapchain_(session, create_info, swapchain);
+    XrResult result = next_create_swapchain_(session, create_info, swapchain);
+    if (XR_FAILED(result) && create_info == &adjusted_create_info) {
+        // Without the capture usage, generation copies after release instead.
+        create_info = original_create_info;
+        logger_.Info("Runtime rejected the Frame Generation capture usage (result=" +
+                     std::to_string(static_cast<int>(result)) + "); retrying with the application's usage.");
+        result = next_create_swapchain_(session, create_info, swapchain);
+    }
     if (XR_FAILED(result)) {
         std::ostringstream stream;
         stream << "xrCreateSwapchain failed downstream: result=" << static_cast<int>(result);
@@ -3440,6 +3454,9 @@ XrResult OpenXrLayer::ReleaseSwapchainImage(XrSwapchain swapchain,
                 it->second.last_released_image_index = *released_index;
                 it->second.has_last_released_image_index = true;
                 framegen_.NoteRelease(swapchain, *released_index);
+                // Before forwarding (or deferring) the release: the image is
+                // still the application's and in its pre-release state.
+                framegen_.CaptureOnRelease(swapchain, *released_index);
             }
             if (ShouldDeferSwapchainRelease(it->second)) {
                 ++it->second.deferred_release_count;
@@ -4580,6 +4597,7 @@ bool OpenXrLayer::ComposeQuadViewsD3D11(const XrCompositionLayerProjection* sour
             deferred_release[eye]=true;
             continue;
         }
+        framegen_.CaptureOnRelease(target.swapchain, output_indices[eye]);
         XrSwapchainImageReleaseInfo release_info{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
         result = next_release_swapchain_image_(target.swapchain, &release_info);
         if (XR_FAILED(result)) {
@@ -7052,6 +7070,7 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
         PruneDepthSubmissionGeometry(frame_end_info->displayTime);
         PruneQuadViewsFrames(frame_end_info->displayTime);
         if (XR_FAILED(release_result)) {
+            framegen_.AbandonFrame(frame_end_info->displayTime);
             return release_result;
         }
         return ForwardEndFrame(session, frame_end_info, lock);
@@ -7345,6 +7364,7 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
         PruneDepthSubmissionGeometry(frame_end_info->displayTime);
         PruneQuadViewsFrames(frame_end_info->displayTime);
         if (XR_FAILED(release_result)) {
+            framegen_.AbandonFrame(frame_end_info->displayTime);
             return release_result;
         }
         log_depth_runtime_submission(*frame_end_info, "passthrough");
@@ -7682,6 +7702,7 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
     PruneQuadViewsFrames(frame_end_info->displayTime);
     if (XR_FAILED(release_result)) {
         ReleasePendingOsdImages();
+        framegen_.AbandonFrame(frame_end_info->displayTime);
         return release_result;
     }
 
@@ -8862,9 +8883,10 @@ OsdSnapshot OpenXrLayer::BuildOsdSnapshot() const {
          e.prediction_percent!=turbo_experiment_.prediction_percent || e.frame_limit!=turbo_experiment_.frame_limit)))
         snapshot.restart="Turbo experiments";
     if (deferred_quadviews_config_active_) snapshot.restart+=(snapshot.restart.empty()?"":" + ")+std::string("Quadviews");
-    if (active_session_ != XR_NULL_HANDLE &&
-        (resolved_settings_.core.enabled && resolved_settings_.framegen.enabled) != framegen_session_enabled_)
+    if (active_session_ != XR_NULL_HANDLE && resolved_settings_.core.enabled && resolved_settings_.framegen.enabled &&
+        !framegen_session_enabled_)
         snapshot.restart+=(snapshot.restart.empty()?"":" + ")+std::string("Frame Generation");
+    snapshot.framegen_session=framegen_session_enabled_;
     return snapshot;
 }
 
@@ -8910,6 +8932,7 @@ void OpenXrLayer::RefreshResolvedSettings() {
     const ResolvedRuntimeConfig previous = resolved_settings_;
     resolved_settings_ = ResolveRuntimeConfig(config_, current_exe_name_);
     framegen_.Configure(resolved_settings_.framegen);
+    framegen_.SetConfigured(resolved_settings_.core.enabled && resolved_settings_.framegen.enabled);
     // Turbo decouples the app from runtime pacing; Frame Generation locks it
     // to half the refresh. A session Frame Generation owns keeps Turbo off.
     turbo_yielded_to_framegen_ = false;
@@ -12030,6 +12053,7 @@ void OpenXrLayer::SharpenNativeFocusViews(std::vector<XrCompositionLayerProjecti
         ID3D11RenderTargetView* null_rtv = nullptr;
         context->OMSetRenderTargets(1, &null_rtv, nullptr);
 
+        framegen_.CaptureOnRelease(target.swapchain, output_index);
         XrSwapchainImageReleaseInfo release_info{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
         result = next_release_swapchain_image_(target.swapchain, &release_info);
         if (XR_FAILED(result)) {

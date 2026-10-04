@@ -698,6 +698,11 @@ class FgGpu final : public depthxr::FrameGenGpu {
     XrSwapchainUsageFlags OutputUsage() const override { return XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT; }
     bool Track(XrSwapchain, PFN_xrEnumerateSwapchainImages, std::string&) override { return true; }
     void Forget(XrSwapchain) override {}
+    bool Capture(std::size_t, const depthxr::FrameGenImage&, const depthxr::FrameGenViewRequest&,
+                 depthxr::FrameGenFlowQuality, std::string&) override {
+        return true;
+    }
+    void WaitIdle() override {}
     bool Execute(const std::vector<depthxr::FrameGenViewSubmission>& views, const depthxr::FrameGenTuning&,
                  depthxr::FrameGenExecuteResult& result, std::string&) override {
         ++*executes_;

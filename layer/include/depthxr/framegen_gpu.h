@@ -48,10 +48,21 @@ class FrameGenGpu {
     virtual XrSwapchainUsageFlags OutputUsage() const = 0;
     virtual bool Track(XrSwapchain swapchain, PFN_xrEnumerateSwapchainImages enumerate, std::string& error) = 0;
     virtual void Forget(XrSwapchain swapchain) = 0;
-    // Records and submits capture and generation for every view on the
-    // session's graphics queue. Never waits on the CPU for this submission.
+    // Copies an application image into `view`'s history while the
+    // application still owns it: called from xrReleaseSwapchainImage before
+    // the release is forwarded, so the image is in its documented
+    // pre-release state and no runtime work can touch it yet. Execute then
+    // skips its own copy for that view when the image matches.
+    virtual bool Capture(std::size_t view, const FrameGenImage& source, const FrameGenViewRequest& request,
+                         FrameGenFlowQuality quality, std::string& error) = 0;
+    // Records and submits generation for every view on the session's graphics
+    // queue, copying a view's source first unless Capture already did. Never
+    // waits on the CPU for this submission.
     virtual bool Execute(const std::vector<FrameGenViewSubmission>& views, const FrameGenTuning& tuning,
                          FrameGenExecuteResult& result, std::string& error) = 0;
+    // Blocks until every submitted command list has finished; required before
+    // freeing anything a recent submission may still use.
+    virtual void WaitIdle() = 0;
     // Forget history (discontinuity); textures stay allocated.
     virtual void ResetHistory() = 0;
     // Teardown only: waits for outstanding work and frees every resource.

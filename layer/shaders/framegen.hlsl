@@ -507,8 +507,11 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
     if (view == FG_VIEW_FLOW) {
         const float2 v = flow_here.xy * aspect;
         const float magnitude = saturate(length(v) * 20.0);
-        const float3 tint = Hue(frac(atan2(v.y, v.x) / 6.2831853 + 1.0)) * magnitude;
-        result.rgb = lerp(result.rgb, tint, 0.6 * saturate(magnitude * 4.0));
+        if (magnitude > 0.0) {
+            // atan2(0, 0) is undefined on some GPUs; zero motion keeps the image.
+            const float3 tint = Hue(frac(atan2(v.y, v.x) / 6.2831853 + 1.0)) * magnitude;
+            result.rgb = lerp(result.rgb, tint, 0.6 * saturate(magnitude * 4.0));
+        }
     } else if (view == FG_VIEW_CONFIDENCE) {
         const float trust = confidence * photometric_confidence;
         result.rgb = lerp(result.rgb, float3(1.0, 0.1, 0.05), 0.75 * (1.0 - trust));

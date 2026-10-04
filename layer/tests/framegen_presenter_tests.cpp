@@ -1,11 +1,14 @@
 // Frame Generation pacing against a fake runtime and a fake GPU backend:
-// runtime call order, display times, the overlap gate, failure handling and
-// the in-session toggle. No graphics device is needed.
+// runtime call order, display times, the overlap gate and frame demotion,
+// output image ownership, capture at release, failure handling, automatic
+// retry and the in-session toggle. No graphics device is needed.
 
 #include "depthxr/framegen_presenter.h"
 
+#include <array>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstdlib>
 #include <iostream>
 #include <map>
@@ -15,6 +18,7 @@
 #include <vector>
 
 using namespace depthxr;
+using namespace std::chrono_literals;
 
 namespace {
 
@@ -26,33 +30,38 @@ void Check(bool ok, const std::string& why) {
 }
 
 constexpr XrDuration kPeriod = 11'111'111;
-constexpr std::int64_t kFormat = 29; // DXGI_FORMAT_R8G8B8A8_UNORM_SRGB
+constexpr std::int64_t kFormat = 29;      // DXGI_FORMAT_R8G8B8A8_UNORM_SRGB
+constexpr std::int64_t kFloatFormat = 10; // DXGI_FORMAT_R16G16B16A16_FLOAT
 
 // --- fake swapchain dispatch --------------------------------------------------
 
+struct SwapchainImages {
+    std::deque<std::uint32_t> acquired; // FIFO, like OpenXR
+    int waited{0};
+    std::uint32_t cursor{0};
+};
+
 std::mutex g_xr_mutex;
 std::uint64_t g_next_handle = 0x1000;
-std::map<XrSwapchain, std::uint32_t> g_acquire_cursor;
-std::vector<std::string> g_events;
-
-void Event(const std::string& event) {
-    std::scoped_lock lock(g_xr_mutex);
-    g_events.push_back(event);
-}
+std::map<XrSwapchain, SwapchainImages> g_images;
+int g_creates = 0;
+int g_wait_timeouts = 0; // number of upcoming output waits that time out
+bool g_release_violation = false;
 
 XrResult XRAPI_PTR Formats(XrSession, std::uint32_t capacity, std::uint32_t* count, std::int64_t* formats) {
     *count = 1;
     if (capacity) formats[0] = kFormat;
     return XR_SUCCESS;
 }
-XrResult XRAPI_PTR Create(XrSession, const XrSwapchainCreateInfo* info, XrSwapchain* swapchain) {
+XrResult XRAPI_PTR Create(XrSession, const XrSwapchainCreateInfo*, XrSwapchain* swapchain) {
     std::scoped_lock lock(g_xr_mutex);
     *swapchain = reinterpret_cast<XrSwapchain>(++g_next_handle);
-    g_events.push_back("create " + std::to_string(info->width) + "x" + std::to_string(info->height));
+    ++g_creates;
     return XR_SUCCESS;
 }
-XrResult XRAPI_PTR Destroy(XrSwapchain) {
-    Event("destroy");
+XrResult XRAPI_PTR Destroy(XrSwapchain swapchain) {
+    std::scoped_lock lock(g_xr_mutex);
+    g_images.erase(swapchain);
     return XR_SUCCESS;
 }
 XrResult XRAPI_PTR Images(XrSwapchain, std::uint32_t, std::uint32_t* count, XrSwapchainImageBaseHeader*) {
@@ -61,13 +70,30 @@ XrResult XRAPI_PTR Images(XrSwapchain, std::uint32_t, std::uint32_t* count, XrSw
 }
 XrResult XRAPI_PTR Acquire(XrSwapchain swapchain, const XrSwapchainImageAcquireInfo*, std::uint32_t* index) {
     std::scoped_lock lock(g_xr_mutex);
-    *index = g_acquire_cursor[swapchain]++ % 3;
-    g_events.push_back("acquire");
+    auto& images = g_images[swapchain];
+    *index = images.cursor++ % 3;
+    images.acquired.push_back(*index);
     return XR_SUCCESS;
 }
-XrResult XRAPI_PTR WaitImage(XrSwapchain, const XrSwapchainImageWaitInfo*) { return XR_SUCCESS; }
-XrResult XRAPI_PTR Release(XrSwapchain, const XrSwapchainImageReleaseInfo*) {
-    Event("release");
+XrResult XRAPI_PTR WaitImage(XrSwapchain swapchain, const XrSwapchainImageWaitInfo*) {
+    std::scoped_lock lock(g_xr_mutex);
+    if (g_wait_timeouts > 0) {
+        --g_wait_timeouts;
+        return XR_TIMEOUT_EXPIRED;
+    }
+    ++g_images[swapchain].waited;
+    return XR_SUCCESS;
+}
+XrResult XRAPI_PTR Release(XrSwapchain swapchain, const XrSwapchainImageReleaseInfo*) {
+    std::scoped_lock lock(g_xr_mutex);
+    auto& images = g_images[swapchain];
+    // Only the oldest acquired image that has been waited may be released.
+    if (images.acquired.empty() || images.waited == 0) {
+        g_release_violation = true;
+        return XR_ERROR_CALL_ORDER_INVALID;
+    }
+    images.acquired.pop_front();
+    --images.waited;
     return XR_SUCCESS;
 }
 
@@ -75,8 +101,11 @@ XrResult XRAPI_PTR Release(XrSwapchain, const XrSwapchainImageReleaseInfo*) {
 
 struct GpuLog {
     int executes{0};
+    int captures{0};
+    int wait_idles{0};
     bool fail{false};
     std::vector<FrameGenViewSubmission> last;
+    FrameGenImage last_capture;
     FrameGenTuning tuning;
 };
 
@@ -85,18 +114,27 @@ class FakeGpu final : public FrameGenGpu {
     explicit FakeGpu(GpuLog* log) : log_(log) {}
     const char* Name() const override { return "Fake"; }
     std::optional<FrameGenOutputKind> Classify(std::int64_t format) const override {
-        return format == kFormat ? std::optional(FrameGenOutputKind::kSrgb8) : std::nullopt;
+        if (format == kFormat) return FrameGenOutputKind::kSrgb8;
+        if (format == kFloatFormat) return FrameGenOutputKind::kFloat16;
+        return std::nullopt;
     }
-    std::vector<std::int64_t> OutputFormats(FrameGenOutputKind) const override { return {kFormat}; }
+    std::vector<std::int64_t> OutputFormats(FrameGenOutputKind kind) const override {
+        return {kind == FrameGenOutputKind::kFloat16 ? kFloatFormat : kFormat};
+    }
     XrSwapchainUsageFlags RequiredSourceUsage() const override { return XR_SWAPCHAIN_USAGE_TRANSFER_SRC_BIT; }
     XrSwapchainUsageFlags OutputUsage() const override {
         return XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT;
     }
     bool Track(XrSwapchain, PFN_xrEnumerateSwapchainImages, std::string&) override { return true; }
     void Forget(XrSwapchain) override {}
+    bool Capture(std::size_t, const FrameGenImage& source, const FrameGenViewRequest&, FrameGenFlowQuality,
+                 std::string&) override {
+        ++log_->captures;
+        log_->last_capture = source;
+        return true;
+    }
     bool Execute(const std::vector<FrameGenViewSubmission>& views, const FrameGenTuning& tuning,
                  FrameGenExecuteResult& result, std::string& error) override {
-        Event("execute");
         ++log_->executes;
         log_->last = views;
         log_->tuning = tuning;
@@ -114,6 +152,7 @@ class FakeGpu final : public FrameGenGpu {
         }
         return true;
     }
+    void WaitIdle() override { ++log_->wait_idles; }
     void ResetHistory() override { history_.clear(); }
     void Reset() override {}
     double LastGpuMilliseconds() const override { return 0.75; }
@@ -144,25 +183,20 @@ struct Runtime {
             state->predictedDisplayTime = next_display.fetch_add(kPeriod);
             state->predictedDisplayPeriod = kPeriod;
             state->shouldRender = XR_TRUE;
-            Event("wait");
             return XR_SUCCESS;
         };
         calls.begin = [this](XrSession, const XrFrameBeginInfo*) {
             if (outstanding_waits.load() != 1) ordering_violation = true;
             --outstanding_waits;
-            {
-                std::scoped_lock lock(g_xr_mutex);
-                if (begun) ordering_violation = true;
-                begun = true;
-            }
-            Event("begin");
+            std::scoped_lock lock(g_xr_mutex);
+            if (begun) ordering_violation = true;
+            begun = true;
             return XR_SUCCESS;
         };
         calls.submit = [this](XrSession, const XrFrameEndInfo* info) {
             std::scoped_lock lock(g_xr_mutex);
             if (!begun) ordering_violation = true;
             begun = false;
-            g_events.push_back("submit");
             if (fail_next_submit.exchange(false)) return XR_ERROR_TIME_INVALID;
             submitted_times.push_back(info->displayTime);
             std::vector<XrSwapchain> swapchains;
@@ -179,6 +213,11 @@ struct Runtime {
             return XR_SUCCESS;
         };
         return calls;
+    }
+
+    std::size_t Submissions() {
+        std::scoped_lock lock(g_xr_mutex);
+        return submitted_times.size();
     }
 };
 
@@ -226,10 +265,16 @@ struct App {
         Check(XR_SUCCEEDED(presenter.BeginFrame(kSession, &info, calls)), "app begin");
     }
 
-    XrResult End(XrTime display_time, bool layers = true) {
+    // The layer's release hook: note the index, capture, then forward.
+    void Release() {
         image = (image + 1) % 3;
-        presenter.NoteRelease(kLeft, image);
-        presenter.NoteRelease(kRight, image);
+        for (const XrSwapchain swapchain : {kLeft, kRight}) {
+            presenter.NoteRelease(swapchain, image);
+            presenter.CaptureOnRelease(swapchain, image);
+        }
+    }
+
+    XrResult End(XrTime display_time, bool layers = true) {
         XrFrameEndInfo info{XR_TYPE_FRAME_END_INFO};
         info.displayTime = display_time;
         info.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
@@ -241,6 +286,7 @@ struct App {
     XrFrameState Frame(bool layers = true) {
         const XrFrameState state = Wait();
         Begin();
+        Release();
         Check(XR_SUCCEEDED(End(state.predictedDisplayTime, layers)), "app end");
         return state;
     }
@@ -250,20 +296,21 @@ FrameGenSwapchainDispatch Dispatch() {
     return {Formats, Create, Destroy, Images, Acquire, WaitImage, Release};
 }
 
-void StartPresenter(FrameGenPresenter& presenter, GpuLog& gpu, FrameGenSynthesisMode mode) {
+void StartPresenter(FrameGenPresenter& presenter, GpuLog& gpu, FrameGenSynthesisMode mode,
+                    std::int64_t format = kFormat) {
     FrameGenResolvedSettings settings;
     settings.enabled = true;
     settings.synthesis_mode = mode;
     presenter.Configure(settings);
-    presenter.SetEngagementPolicy(3, std::chrono::milliseconds(0));
+    presenter.SetEngagementPolicy(3, 0ms);
     presenter.Start(kSession, nullptr, Dispatch(), nullptr, nullptr,
                     [&](const void*, std::string&) { return std::make_unique<FakeGpu>(&gpu); });
-    presenter.TrackSwapchain(kLeft, kFormat, 1);
-    presenter.TrackSwapchain(kRight, kFormat, 1);
-    {
-        std::scoped_lock lock(g_xr_mutex);
-        g_events.clear();
-    }
+    presenter.TrackSwapchain(kLeft, format, 1);
+    presenter.TrackSwapchain(kRight, format, 1);
+    std::scoped_lock lock(g_xr_mutex);
+    g_creates = 0;
+    g_wait_timeouts = 0;
+    g_release_violation = false;
 }
 
 void TestInterpolationPacing() {
@@ -280,20 +327,20 @@ void TestInterpolationPacing() {
           "only color swapchains get capture usage");
 
     App app(presenter, runtime);
-    // Until the cadence is steady the app passes straight through.
     for (int i = 0; i < 3; ++i) {
-        const XrFrameState state = app.Frame();
-        Check(state.predictedDisplayPeriod == kPeriod, "pass-through keeps the runtime period");
+        Check(app.Frame().predictedDisplayPeriod == kPeriod, "pass-through keeps the runtime period");
     }
-    Check(runtime.submitted_times.size() == 3 && gpu.executes == 0, "no generation before engagement");
+    Check(runtime.Submissions() == 3 && gpu.executes == 0, "no generation before engagement");
     Check(presenter.Status().state == FrameGenState::kWaiting, "waiting before engagement");
+    Check(gpu.captures > 0 && gpu.last_capture.image_index == app.image && gpu.last_capture.rect.extent.width == 1600,
+          "released images are captured with the last frame's view regions");
 
     // Engaged: each app frame owns two runtime frames.
     const XrTime slot = runtime.next_display.load();
     const XrFrameState first = app.Frame();
     Check(first.predictedDisplayPeriod == 2 * kPeriod, "engaged app sees a doubled period");
     Check(first.predictedDisplayTime == slot + kPeriod, "engaged app renders for the following slot");
-    Check(runtime.submitted_times.size() == 5, "engaged frame submits two runtime frames");
+    Check(runtime.Submissions() == 5, "engaged frame submits two runtime frames");
     Check(runtime.submitted_times[3] == slot && runtime.submitted_times[4] == slot + kPeriod,
           "generated frame takes slot k, the real frame slot k + 1");
     Check(gpu.executes == 1 && !gpu.last[0].request.synthesize, "first engaged frame primes history with a still");
@@ -303,22 +350,20 @@ void TestInterpolationPacing() {
           "generated views drop depth; the real frame keeps the app's chain");
     Check(runtime.submitted_swapchains[4][0] == kLeft && runtime.submitted_swapchains[4][1] == kRight,
           "slot k + 1 presents the application's own images");
+    Check(gpu.last[0].source.image_index == app.image, "generation reads the image the app released");
 
     app.Frame();
     Check(gpu.executes == 2 && gpu.last[0].request.synthesize && gpu.last[1].request.synthesize,
           "continuous frames synthesize");
     Check(std::abs(gpu.tuning.fraction - 0.5f) < 1e-4f, "interpolation sits halfway between real frames");
     Check(presenter.Status().state == FrameGenState::kActive && presenter.Status().generated == 1, "active and generating");
-    Check(!runtime.ordering_violation, "runtime frame calls stayed ordered");
 
     // A frame without layers keeps its slot and skips the extra runtime frame.
-    const std::size_t before = runtime.submitted_times.size();
+    const std::size_t before = runtime.Submissions();
     app.Frame(false);
-    Check(runtime.submitted_times.size() == before + 1, "empty engaged frame submits once");
-    // The broken cadence disengages until the policy's streak is met again.
-    const XrFrameState after = app.Frame();
-    Check(after.predictedDisplayPeriod == kPeriod, "an empty frame drops back to pass-through");
-    Check(!runtime.ordering_violation, "runtime frame calls stayed ordered after an empty frame");
+    Check(runtime.Submissions() == before + 1, "empty engaged frame submits once");
+    Check(app.Frame().predictedDisplayPeriod == kPeriod, "an empty frame drops back to pass-through");
+    Check(!runtime.ordering_violation && !g_release_violation, "runtime and image calls stayed ordered");
     presenter.Stop();
     Check(!presenter.Started(), "stop releases the session");
 }
@@ -336,8 +381,12 @@ void TestExtrapolationPacing() {
     app.Frame();
     Check(runtime.submitted_swapchains[5][0] != kLeft, "next slot k shows the extrapolated frame");
     Check(std::abs(gpu.tuning.fraction - 0.5f) < 1e-4f, "extrapolation pushes half an app frame forward");
-    Check(gpu.tuning.mode == FrameGenSynthesisMode::kExtrapolate, "mode reaches the backend");
-    Check(!runtime.ordering_violation, "extrapolation kept runtime calls ordered");
+    // A recreated reference space must not reach the runtime through a stale
+    // extrapolated layer.
+    app.projection.space = reinterpret_cast<XrSpace>(0x3);
+    app.Frame();
+    Check(runtime.submitted_swapchains[7][0] == kLeft, "a space change repeats the real frame instead of a stale layer");
+    Check(!runtime.ordering_violation && !g_release_violation, "extrapolation kept calls ordered");
 }
 
 void TestOverlappingWaitIsHeld() {
@@ -348,55 +397,182 @@ void TestOverlappingWaitIsHeld() {
     App app(presenter, runtime);
     for (int i = 0; i < 4; ++i) app.Frame();
     // DCS-style threading: the next wait arrives while the previous frame is
-    // still inside its end (which itself waits on the runtime).
-    runtime.wait_sleep_ms = 5;
+    // inside its end, which itself waits on the runtime for longer than the
+    // hold. A claimed frame is waited for, never demoted.
+    runtime.wait_sleep_ms = 320;
     const XrFrameState state = app.Wait();
     app.Begin();
+    app.Release();
     std::thread ender([&] { Check(XR_SUCCEEDED(app.End(state.predictedDisplayTime)), "overlapped end"); });
-    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    std::this_thread::sleep_for(20ms);
     App other(presenter, runtime);
     const XrFrameState next = other.Wait();
     ender.join();
+    runtime.wait_sleep_ms = 0;
     other.Begin();
+    other.Release();
     Check(XR_SUCCEEDED(other.End(next.predictedDisplayTime)), "follow-up end");
     Check(!runtime.ordering_violation, "an early wait never reached the runtime mid-pair");
-    Check(presenter.Status().state != FrameGenState::kPaused, "a short overlap does not pause");
+    Check(presenter.Status().state != FrameGenState::kPaused && presenter.Status().demoted == 0,
+          "a slow claimed frame neither pauses nor demotes");
 }
 
-void TestFailuresAndToggle() {
+void TestUnclaimedFrameIsDemoted() {
     FrameGenPresenter presenter;
     GpuLog gpu;
     Runtime runtime;
     StartPresenter(presenter, gpu, FrameGenSynthesisMode::kInterpolate);
+    App app(presenter, runtime);
+    for (int i = 0; i < 4; ++i) app.Frame();
+    // Another thread waits while this engaged frame is still rendering (a
+    // hitch longer than the hold): the frame is demoted to one submission.
+    const XrFrameState stalled = app.Wait();
+    app.Begin();
+    std::atomic<bool> waited{false};
+    XrFrameState next{};
+    App other(presenter, runtime);
+    std::thread waiter([&] {
+        next = other.Wait();
+        waited = true;
+    });
+    std::this_thread::sleep_for(400ms);
+    Check(waited.load(), "a wait held behind an unclaimed frame is released after the hold");
+    const std::size_t before = runtime.Submissions();
+    app.Release();
+    Check(XR_SUCCEEDED(app.End(stalled.predictedDisplayTime)), "demoted frame end");
+    Check(runtime.Submissions() == before + 1, "a demoted frame submits once");
+    waiter.join();
+    other.Begin();
+    other.Release();
+    Check(XR_SUCCEEDED(other.End(next.predictedDisplayTime)), "follow-up end");
+    Check(!runtime.ordering_violation, "demotion kept runtime calls ordered");
+    Check(presenter.Status().demoted == 1, "the demotion is counted");
+}
+
+void TestSameThreadDoubleWait() {
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    StartPresenter(presenter, gpu, FrameGenSynthesisMode::kInterpolate);
+    App app(presenter, runtime);
+    for (int i = 0; i < 4; ++i) app.Frame();
+    // One thread: wait N, begin N, wait N+1, end N. Holding would deadlock
+    // until the timeout, so the frame is demoted at once.
+    const XrFrameState first = app.Wait();
+    app.Begin();
+    const auto start = std::chrono::steady_clock::now();
+    const XrFrameState second = app.Wait();
+    Check(std::chrono::steady_clock::now() - start < 150ms, "a same-thread wait is not held");
+    app.Release();
+    Check(XR_SUCCEEDED(app.End(first.predictedDisplayTime)), "first end");
+    app.Begin();
+    app.Release();
+    Check(XR_SUCCEEDED(app.End(second.predictedDisplayTime)), "second end");
+    Check(!runtime.ordering_violation, "same-thread overlap kept runtime calls ordered");
+}
+
+void TestOutputWaitTimeout() {
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    StartPresenter(presenter, gpu, FrameGenSynthesisMode::kInterpolate);
+    App app(presenter, runtime);
+    for (int i = 0; i < 4; ++i) app.Frame();
+    const int executes = gpu.executes;
+    {
+        std::scoped_lock lock(g_xr_mutex);
+        g_wait_timeouts = 1;
+    }
+    app.Frame();
+    Check(gpu.executes == executes, "an output that is still in use is not written");
+    app.Frame();
+    Check(gpu.executes == executes + 1, "the next frame retries the wait and generates");
+    Check(!g_release_violation, "an image is never released before its wait succeeded");
+    Check(presenter.Status().state == FrameGenState::kActive, "a timeout neither pauses nor disengages");
+}
+
+void TestOutputFormatFallback() {
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    // The app renders FP16, but the runtime only offers 8-bit sRGB outputs.
+    StartPresenter(presenter, gpu, FrameGenSynthesisMode::kInterpolate, kFloatFormat);
+    App app(presenter, runtime);
+    for (int i = 0; i < 6; ++i) app.Frame();
+    Check(gpu.executes >= 3 && gpu.last[0].request.output == FrameGenOutputKind::kSrgb8,
+          "the sRGB fallback reaches the shader so it encodes");
+    Check(g_creates == 2, "fallback outputs are created once, not every frame");
+}
+
+void TestFailuresRetryAndToggle() {
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    StartPresenter(presenter, gpu, FrameGenSynthesisMode::kInterpolate);
+    presenter.SetRetryPolicy(0ms, 1);
     App app(presenter, runtime);
     for (int i = 0; i < 5; ++i) app.Frame();
 
     // GPU failures fall back to repeating the real frame, then pause.
     gpu.fail = true;
     for (int i = 0; i < 3; ++i) app.Frame();
-    Check(presenter.Status().state == FrameGenState::kPaused, "repeated GPU failures pause");
-    const XrFrameState paused = app.Frame();
-    Check(paused.predictedDisplayPeriod == kPeriod, "a paused session passes through");
+    Check(presenter.Status().state == FrameGenState::kPaused && presenter.Status().retry_pending,
+          "repeated GPU failures pause with a retry pending");
     gpu.fail = false;
-    Check(presenter.Toggle() && presenter.Status().state == FrameGenState::kWaiting, "the toggle retries after a pause");
-    for (int i = 0; i < 4; ++i) app.Frame();
-    Check(presenter.Status().state == FrameGenState::kActive, "re-engaged after retry");
+    // The automatic retry rebuilds the cadence and re-engages.
+    for (int i = 0; i < 5; ++i) app.Frame();
+    Check(presenter.Status().state == FrameGenState::kActive, "the automatic retry re-engages");
 
-    // A runtime rejection of the generated frame pauses immediately.
+    // A runtime rejection of the generated frame pauses immediately; the
+    // single retry is spent, so it stays paused until the toggle.
     runtime.fail_next_submit = true;
     const XrFrameState state = app.Wait();
     app.Begin();
+    app.Release();
     Check(app.End(state.predictedDisplayTime) == XR_ERROR_TIME_INVALID, "runtime error reaches the app");
-    Check(presenter.Status().state == FrameGenState::kPaused, "a runtime rejection pauses");
+    Check(presenter.Status().state == FrameGenState::kPaused && !presenter.Status().retry_pending,
+          "a runtime rejection pauses; retries are bounded");
+    for (int i = 0; i < 4; ++i) {
+        Check(app.Frame().predictedDisplayPeriod == kPeriod, "a paused session passes through");
+    }
+    Check(presenter.Toggle() && presenter.Status().state == FrameGenState::kWaiting, "the toggle retries after a pause");
+    for (int i = 0; i < 4; ++i) app.Frame();
+    Check(presenter.Status().state == FrameGenState::kActive, "re-engaged after the toggle");
 
-    // Toggling off is a clean pass-through.
-    Check(presenter.Toggle(), "retry");
     Check(!presenter.Toggle() && presenter.Status().state == FrameGenState::kOff, "toggle off");
     for (int i = 0; i < 6; ++i) {
         Check(app.Frame().predictedDisplayPeriod == kPeriod, "toggled off never engages");
     }
     Check(presenter.OsdText() == "Off" && presenter.CompactOsdText() == "Off", "OSD shows off");
-    Check(!runtime.ordering_violation, "runtime calls stayed ordered through failures");
+    Check(!runtime.ordering_violation && !g_release_violation, "calls stayed ordered through failures");
+}
+
+void TestSettingsAndSessionChanges() {
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    StartPresenter(presenter, gpu, FrameGenSynthesisMode::kInterpolate);
+    App app(presenter, runtime);
+    for (int i = 0; i < 4; ++i) app.Frame();
+    Check(presenter.Status().state == FrameGenState::kActive, "engaged");
+
+    // Turned off in settings mid-session: frames pass through; back on resumes.
+    presenter.SetConfigured(false);
+    Check(presenter.Status().state == FrameGenState::kOff, "settings turn a running session off");
+    for (int i = 0; i < 4; ++i) Check(app.Frame().predictedDisplayPeriod == kPeriod, "off in settings passes through");
+    presenter.SetConfigured(true);
+    for (int i = 0; i < 4; ++i) app.Frame();
+    Check(presenter.Status().state == FrameGenState::kActive, "settings turn it back on without a restart");
+
+    // An engaged frame the layer never forwards must not hold the next wait.
+    const XrFrameState abandoned = app.Wait();
+    app.Begin();
+    presenter.AbandonFrame(abandoned.predictedDisplayTime);
+    const auto start = std::chrono::steady_clock::now();
+    app.Wait();
+    Check(std::chrono::steady_clock::now() - start < 150ms, "an abandoned frame does not hold the next wait");
+    presenter.ResetFrames();
+    Check(presenter.Status().state == FrameGenState::kWaiting, "a session state change starts over");
 }
 
 void TestUnavailableWithoutBackend() {
@@ -417,7 +593,12 @@ int main() {
     TestInterpolationPacing();
     TestExtrapolationPacing();
     TestOverlappingWaitIsHeld();
-    TestFailuresAndToggle();
+    TestUnclaimedFrameIsDemoted();
+    TestSameThreadDoubleWait();
+    TestOutputWaitTimeout();
+    TestOutputFormatFallback();
+    TestFailuresRetryAndToggle();
+    TestSettingsAndSessionChanges();
     TestUnavailableWithoutBackend();
     std::cout << "depthxr_framegen_presenter_tests passed\n";
     return 0;

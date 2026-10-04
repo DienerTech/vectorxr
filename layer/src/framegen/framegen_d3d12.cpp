@@ -42,8 +42,25 @@ struct Texture {
     bool uav{false};
 };
 
+// Identifies the image a view's history was captured from at release time.
+struct CaptureKey {
+    bool valid{false};
+    XrSwapchain swapchain{XR_NULL_HANDLE};
+    std::uint32_t image_index{0};
+    std::uint32_t array_index{0};
+    XrRect2Di rect{};
+
+    bool Matches(const FrameGenImage& image) const {
+        return valid && swapchain == image.swapchain && image_index == image.image_index &&
+               array_index == image.array_index && rect.offset.x == image.rect.offset.x &&
+               rect.offset.y == image.rect.offset.y && rect.extent.width == image.rect.extent.width &&
+               rect.extent.height == image.rect.extent.height;
+    }
+};
+
 struct ViewResources {
     FrameGenHistoryState history_state;
+    CaptureKey capture;
     std::array<Texture, 2> history;
     std::array<Texture, 2> filtered;
     std::array<Texture, kFrameGenPyramidLevels + 1> luma_newest;
@@ -56,6 +73,11 @@ struct FrameSlot {
     ComPtr<ID3D12CommandAllocator> allocator;
     UINT64 fence_value{0};
     bool timing_pending{false};
+};
+
+struct CaptureSlot {
+    ComPtr<ID3D12CommandAllocator> allocator;
+    UINT64 fence_value{0};
 };
 
 class D3D12FrameGen final : public FrameGenGpu {
@@ -114,6 +136,18 @@ class D3D12FrameGen final : public FrameGenGpu {
                        "D3D12 Frame Generation allocator")) {
                 return false;
             }
+        }
+        for (auto& slot : capture_slots_) {
+            if (!check(device_->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&slot.allocator)),
+                       "D3D12 Frame Generation capture allocator")) {
+                return false;
+            }
+        }
+        if (!check(device_->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, capture_slots_[0].allocator.Get(), nullptr,
+                                              IID_PPV_ARGS(&capture_commands_)),
+                   "D3D12 Frame Generation capture list") ||
+            !check(capture_commands_->Close(), "D3D12 Frame Generation capture list close")) {
+            return false;
         }
         if (!check(device_->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, slots_[0].allocator.Get(), nullptr,
                                               IID_PPV_ARGS(&commands_)),
@@ -207,6 +241,78 @@ class D3D12FrameGen final : public FrameGenGpu {
 
     void Forget(XrSwapchain swapchain) override { images_.erase(swapchain); }
 
+    bool Capture(std::size_t index, const FrameGenImage& source, const FrameGenViewRequest& request,
+                 FrameGenFlowQuality quality, std::string& error) override {
+        const auto it = images_.find(source.swapchain);
+        if (it == images_.end() || source.image_index >= it->second.size()) {
+            error = "Frame Generation capture image is not tracked";
+            return false;
+        }
+        HRESULT hr = device_->GetDeviceRemovedReason();
+        if (FAILED(hr)) {
+            error = Failure("D3D12 device", hr);
+            return false;
+        }
+        CaptureSlot& slot = capture_slots_[capture_count_ % capture_slots_.size()];
+        if (slot.fence_value && fence_->GetCompletedValue() < slot.fence_value &&
+            (FAILED(fence_->SetEventOnCompletion(slot.fence_value, event_)) || WaitForSingleObject(event_, 100) != WAIT_OBJECT_0)) {
+            error = "D3D12 Frame Generation capture work did not finish in time";
+            return false;
+        }
+        hr = slot.allocator->Reset();
+        if (SUCCEEDED(hr)) hr = capture_commands_->Reset(slot.allocator.Get(), nullptr);
+        if (FAILED(hr)) {
+            error = Failure("D3D12 Frame Generation capture reset", hr);
+            return false;
+        }
+        if (views_.size() <= index) {
+            views_.resize(index + 1);
+        }
+        ViewResources& view = views_[index];
+        FrameGenViewSubmission submission;
+        submission.source = source;
+        submission.request = request;
+        FrameGenTuning tuning;
+        tuning.quality = quality;
+        ID3D12Resource* resource = it->second[source.image_index];
+        bool ok = EnsureView(view, submission, resource, tuning, error);
+        std::vector<D3D12_RESOURCE_BARRIER> barriers;
+        if (ok) {
+            CopySource(capture_commands_.Get(), barriers, view, source, resource);
+        }
+        hr = capture_commands_->Close();
+        if (ok && FAILED(hr)) {
+            error = Failure("D3D12 Frame Generation capture close", hr);
+            ok = false;
+        }
+        if (!ok) {
+            // Nothing was submitted: tracked states no longer match the GPU.
+            WaitIdle();
+            view = {};
+            return false;
+        }
+        ID3D12CommandList* lists[] = {capture_commands_.Get()};
+        queue_->ExecuteCommandLists(1, lists);
+        hr = queue_->Signal(fence_.Get(), ++fence_value_);
+        if (FAILED(hr)) {
+            error = Failure("D3D12 Frame Generation capture signal", hr);
+            signal_failed_ = true;
+            return false;
+        }
+        slot.fence_value = fence_value_;
+        ++capture_count_;
+        view.capture = {true, source.swapchain, source.image_index, source.array_index, source.rect};
+        return true;
+    }
+
+    void WaitIdle() override {
+        if (fence_ && fence_value_ && !signal_failed_ && SUCCEEDED(device_->GetDeviceRemovedReason()) &&
+            fence_->GetCompletedValue() < fence_value_ && event_ &&
+            SUCCEEDED(fence_->SetEventOnCompletion(fence_value_, event_))) {
+            WaitForSingleObject(event_, 2000);
+        }
+    }
+
     bool Execute(const std::vector<FrameGenViewSubmission>& views, const FrameGenTuning& tuning,
                  FrameGenExecuteResult& result, std::string& error) override {
         result.synthesized.assign(views.size(), false);
@@ -255,7 +361,9 @@ class D3D12FrameGen final : public FrameGenGpu {
             ok = false;
         }
         if (!ok) {
-            // Nothing was submitted: the recorded state transitions never ran.
+            // Nothing was submitted: the recorded state transitions never ran,
+            // and earlier submissions may still use the textures.
+            WaitIdle();
             for (std::size_t i = 0; i < views.size(); ++i) {
                 if (i < views_.size()) views_[i] = {};
             }
@@ -274,6 +382,7 @@ class D3D12FrameGen final : public FrameGenGpu {
         ++submission_;
         for (std::size_t i = 0; i < views.size(); ++i) {
             views_[i].history_state.Commit(result.synthesized[i]);
+            views_[i].capture.valid = false;
         }
         return true;
     }
@@ -285,11 +394,7 @@ class D3D12FrameGen final : public FrameGenGpu {
     }
 
     void Reset() override {
-        if (fence_ && fence_value_ && !signal_failed_ && SUCCEEDED(device_->GetDeviceRemovedReason()) &&
-            fence_->GetCompletedValue() < fence_value_ && event_ &&
-            SUCCEEDED(fence_->SetEventOnCompletion(fence_value_, event_))) {
-            WaitForSingleObject(event_, 2000);
-        }
+        WaitIdle();
         views_.clear();
         images_.clear();
         if (event_) {
@@ -366,7 +471,12 @@ class D3D12FrameGen final : public FrameGenGpu {
         const unsigned change = view.history_state.Configure(extent, source_desc.Format, submission.request.output,
                                                               final_level);
         const auto levels = FrameGenPyramid(extent);
+        if (change != FrameGenHistoryState::kNone) {
+            // Recent submissions may still use the textures being replaced.
+            WaitIdle();
+        }
         if (change & FrameGenHistoryState::kAll || !view.output.resource) {
+            view.capture.valid = false;
             const DXGI_FORMAT view_format = ViewFormat(source_desc.Format, submission.source.format);
             for (auto& history : view.history) {
                 if (!Create(history, extent, source_desc.Format, view_format, false, error)) return false;
@@ -459,23 +569,9 @@ class D3D12FrameGen final : public FrameGenGpu {
         }
 
         std::vector<D3D12_RESOURCE_BARRIER> barriers;
-        // Swapchain images are in RENDER_TARGET whenever the runtime hands them
-        // out or the application releases them (XR_KHR_D3D12_enable).
-        Texture& history = view.history[view.history_state.Newest()];
-        const D3D12_RESOURCE_DESC source_desc = source->GetDesc();
-        Transition(barriers, source, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE);
-        Require(barriers, history, D3D12_RESOURCE_STATE_COPY_DEST);
-        Flush(barriers);
-        D3D12_TEXTURE_COPY_LOCATION destination{history.resource.Get(), D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX};
-        destination.SubresourceIndex = 0;
-        D3D12_TEXTURE_COPY_LOCATION source_location{source, D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX};
-        source_location.SubresourceIndex = submission.source.array_index * source_desc.MipLevels;
-        const auto& rect = submission.source.rect;
-        const D3D12_BOX box{static_cast<UINT>(rect.offset.x), static_cast<UINT>(rect.offset.y), 0,
-                            static_cast<UINT>(rect.offset.x + rect.extent.width),
-                            static_cast<UINT>(rect.offset.y + rect.extent.height), 1};
-        commands_->CopyTextureRegion(&destination, 0, 0, 0, &source_location, &box);
-        Transition(barriers, source, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
+        if (!view.capture.Matches(submission.source)) {
+            CopySource(commands_.Get(), barriers, view, submission.source, source);
+        }
 
         const FrameGenViewPlan plan = BuildFrameGenViewPlan(view.history_state.Effective(submission.request), tuning);
         for (const FrameGenDispatch& dispatch : plan.dispatches) {
@@ -529,6 +625,32 @@ class D3D12FrameGen final : public FrameGenGpu {
         return true;
     }
 
+    // Swapchain images are in RENDER_TARGET whenever the runtime hands them
+    // out or the application releases them (XR_KHR_D3D12_enable).
+    void CopySource(ID3D12GraphicsCommandList* commands, std::vector<D3D12_RESOURCE_BARRIER>& barriers,
+                    ViewResources& view, const FrameGenImage& image, ID3D12Resource* source) {
+        Texture& history = view.history[view.history_state.Newest()];
+        const D3D12_RESOURCE_DESC source_desc = source->GetDesc();
+        Transition(barriers, source, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE);
+        Require(barriers, history, D3D12_RESOURCE_STATE_COPY_DEST);
+        if (!barriers.empty()) {
+            commands->ResourceBarrier(static_cast<UINT>(barriers.size()), barriers.data());
+            barriers.clear();
+        }
+        D3D12_TEXTURE_COPY_LOCATION destination{history.resource.Get(), D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX};
+        destination.SubresourceIndex = 0;
+        D3D12_TEXTURE_COPY_LOCATION source_location{source, D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX};
+        source_location.SubresourceIndex = image.array_index * source_desc.MipLevels;
+        const auto& rect = image.rect;
+        const D3D12_BOX box{static_cast<UINT>(rect.offset.x), static_cast<UINT>(rect.offset.y), 0,
+                            static_cast<UINT>(rect.offset.x + rect.extent.width),
+                            static_cast<UINT>(rect.offset.y + rect.extent.height), 1};
+        commands->CopyTextureRegion(&destination, 0, 0, 0, &source_location, &box);
+        Transition(barriers, source, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
+        commands->ResourceBarrier(static_cast<UINT>(barriers.size()), barriers.data());
+        barriers.clear();
+    }
+
     D3D12_CPU_DESCRIPTOR_HANDLE Cpu(UINT index) const {
         D3D12_CPU_DESCRIPTOR_HANDLE handle = heap_->GetCPUDescriptorHandleForHeapStart();
         handle.ptr += static_cast<SIZE_T>(index) * descriptor_size_;
@@ -551,6 +673,9 @@ class D3D12FrameGen final : public FrameGenGpu {
     UINT descriptor_end_{0};
     ComPtr<ID3D12GraphicsCommandList> commands_;
     std::array<FrameSlot, kFramesInFlight> slots_;
+    ComPtr<ID3D12GraphicsCommandList> capture_commands_;
+    std::array<CaptureSlot, 4> capture_slots_;
+    UINT64 capture_count_{0};
     ComPtr<ID3D12Fence> fence_;
     UINT64 fence_value_{0};
     UINT64 submission_{0};

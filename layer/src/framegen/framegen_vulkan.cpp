@@ -35,8 +35,25 @@ struct Image {
     bool initialized{false}; // transitioned out of UNDEFINED into GENERAL
 };
 
+// Identifies the image a view's history was captured from at release time.
+struct CaptureKey {
+    bool valid{false};
+    XrSwapchain swapchain{XR_NULL_HANDLE};
+    std::uint32_t image_index{0};
+    std::uint32_t array_index{0};
+    XrRect2Di rect{};
+
+    bool Matches(const FrameGenImage& image) const {
+        return valid && swapchain == image.swapchain && image_index == image.image_index &&
+               array_index == image.array_index && rect.offset.x == image.rect.offset.x &&
+               rect.offset.y == image.rect.offset.y && rect.extent.width == image.rect.extent.width &&
+               rect.extent.height == image.rect.extent.height;
+    }
+};
+
 struct ViewResources {
     FrameGenHistoryState history_state;
+    CaptureKey capture;
     std::array<Image, 2> history;
     std::array<Image, 2> filtered;
     std::array<Image, kFrameGenPyramidLevels + 1> luma_newest;
@@ -184,6 +201,79 @@ class VulkanFrameGen final : public FrameGenGpu {
 
     void Forget(XrSwapchain swapchain) override { images_.erase(swapchain); }
 
+    bool Capture(std::size_t index, const FrameGenImage& source, const FrameGenViewRequest& request,
+                 FrameGenFlowQuality quality, std::string& error) override {
+        const auto it = images_.find(source.swapchain);
+        if (it == images_.end() || source.image_index >= it->second.size()) {
+            error = "Frame Generation capture image is not tracked";
+            return false;
+        }
+        FrameSlot& slot = capture_slots_[capture_count_ % capture_slots_.size()];
+        if (slot.pending) {
+            VkResult status = vkGetFenceStatus(binding_.device, slot.fence);
+            if (status == VK_NOT_READY) {
+                status = vkWaitForFences(binding_.device, 1, &slot.fence, VK_TRUE, 100'000'000ull);
+            }
+            if (status != VK_SUCCESS) {
+                error = "Vulkan Frame Generation capture work did not finish in time (VkResult=" + std::to_string(status) + ")";
+                return false;
+            }
+            slot.pending = false;
+        }
+        if (!Check(vkResetCommandPool(binding_.device, slot.pool, 0), "vkResetCommandPool", error)) {
+            return false;
+        }
+        VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+        begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        if (!Check(vkBeginCommandBuffer(slot.commands, &begin), "vkBeginCommandBuffer", error)) {
+            return false;
+        }
+        commands_ = slot.commands;
+        if (views_.size() <= index) {
+            views_.resize(index + 1);
+        }
+        ViewResources& view = views_[index];
+        FrameGenViewSubmission submission;
+        submission.source = source;
+        submission.request = request;
+        FrameGenTuning tuning;
+        tuning.quality = quality;
+        bool ok = EnsureView(view, submission, tuning, error);
+        if (ok) {
+            CopySource(view, source, it->second[source.image_index]);
+        }
+        ok = Check(vkEndCommandBuffer(slot.commands), "vkEndCommandBuffer", error) && ok;
+        if (!ok) {
+            DestroyView(view);
+            return false;
+        }
+        VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+        submit.commandBufferCount = 1;
+        submit.pCommandBuffers = &slot.commands;
+        if (!Check(vkResetFences(binding_.device, 1, &slot.fence), "vkResetFences", error) ||
+            !Check(vkQueueSubmit(queue_, 1, &submit, slot.fence), "vkQueueSubmit", error)) {
+            return false;
+        }
+        slot.pending = true;
+        ++capture_count_;
+        view.capture = {true, source.swapchain, source.image_index, source.array_index, source.rect};
+        return true;
+    }
+
+    void WaitIdle() override {
+        if (!binding_.device || !vkWaitForFences) {
+            return;
+        }
+        for (auto* slots : {&slots_, &capture_slots_}) {
+            for (auto& slot : *slots) {
+                if (slot.pending && slot.fence) {
+                    vkWaitForFences(binding_.device, 1, &slot.fence, VK_TRUE, 2'000'000'000ull);
+                    slot.pending = false;
+                }
+            }
+        }
+    }
+
     bool Execute(const std::vector<FrameGenViewSubmission>& views, const FrameGenTuning& tuning,
                  FrameGenExecuteResult& result, std::string& error) override {
         result.synthesized.assign(views.size(), false);
@@ -256,6 +346,7 @@ class VulkanFrameGen final : public FrameGenGpu {
         ++submission_;
         for (std::size_t i = 0; i < views.size(); ++i) {
             views_[i].history_state.Commit(result.synthesized[i]);
+            views_[i].capture.valid = false;
         }
         return true;
     }
@@ -270,12 +361,7 @@ class VulkanFrameGen final : public FrameGenGpu {
         if (!binding_.device) {
             return;
         }
-        for (auto& slot : slots_) {
-            if (slot.pending && slot.fence) {
-                vkWaitForFences(binding_.device, 1, &slot.fence, VK_TRUE, 2'000'000'000ull);
-                slot.pending = false;
-            }
-        }
+        WaitIdle();
         for (auto& view : views_) {
             DestroyView(view);
         }
@@ -356,6 +442,23 @@ class VulkanFrameGen final : public FrameGenGpu {
             {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, kSetsPerFrame * 2},
             {VK_DESCRIPTOR_TYPE_SAMPLER, kSetsPerFrame},
         }};
+        for (auto& slot : capture_slots_) {
+            VkCommandPoolCreateInfo pool{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
+            pool.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
+            pool.queueFamilyIndex = binding_.queueFamilyIndex;
+            VkFenceCreateInfo fence{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+            if (!Check(vkCreateCommandPool(binding_.device, &pool, nullptr, &slot.pool), "vkCreateCommandPool", error)) {
+                return false;
+            }
+            VkCommandBufferAllocateInfo buffer{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+            buffer.commandPool = slot.pool;
+            buffer.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+            buffer.commandBufferCount = 1;
+            if (!Check(vkAllocateCommandBuffers(binding_.device, &buffer, &slot.commands), "vkAllocateCommandBuffers", error) ||
+                !Check(vkCreateFence(binding_.device, &fence, nullptr, &slot.fence), "vkCreateFence", error)) {
+                return false;
+            }
+        }
         for (auto& slot : slots_) {
             VkCommandPoolCreateInfo pool{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
             pool.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
@@ -398,11 +501,13 @@ class VulkanFrameGen final : public FrameGenGpu {
             return;
         }
         DestroyImage(dummy_);
-        for (auto& slot : slots_) {
-            if (slot.descriptors) vkDestroyDescriptorPool(binding_.device, slot.descriptors, nullptr);
-            if (slot.fence) vkDestroyFence(binding_.device, slot.fence, nullptr);
-            if (slot.pool) vkDestroyCommandPool(binding_.device, slot.pool, nullptr);
-            slot = {};
+        for (auto* slots : {&slots_, &capture_slots_}) {
+            for (auto& slot : *slots) {
+                if (slot.descriptors) vkDestroyDescriptorPool(binding_.device, slot.descriptors, nullptr);
+                if (slot.fence) vkDestroyFence(binding_.device, slot.fence, nullptr);
+                if (slot.pool) vkDestroyCommandPool(binding_.device, slot.pool, nullptr);
+                slot = {};
+            }
         }
         if (query_pool_) vkDestroyQueryPool(binding_.device, query_pool_, nullptr);
         for (auto& pipeline : pipelines_) {
@@ -496,14 +601,9 @@ class VulkanFrameGen final : public FrameGenGpu {
     }
 
     void DestroyView(ViewResources& view) {
-        // Teardown and failure paths only: wait for every frame slot first so
+        // Teardown and failure paths only: wait for every submission first so
         // no recorded command still references these images.
-        for (auto& slot : slots_) {
-            if (slot.pending && slot.fence) {
-                vkWaitForFences(binding_.device, 1, &slot.fence, VK_TRUE, 2'000'000'000ull);
-                slot.pending = false;
-            }
-        }
+        WaitIdle();
         for (auto* group : {&view.history, &view.filtered}) {
             for (auto& image : *group) DestroyImage(image);
         }
@@ -563,7 +663,12 @@ class VulkanFrameGen final : public FrameGenGpu {
                                                               final_level);
         const auto levels = FrameGenPyramid(extent);
         constexpr VkImageUsageFlags storage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+        if (change != FrameGenHistoryState::kNone) {
+            // Recent submissions may still use the images being replaced.
+            WaitIdle();
+        }
         if (change & FrameGenHistoryState::kAll || !view.output.image) {
+            view.capture.valid = false;
             const auto format = static_cast<VkFormat>(submission.source.format);
             for (auto& history : view.history) {
                 if (!CreateImage(history, extent, format, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, error)) {
@@ -607,6 +712,30 @@ class VulkanFrameGen final : public FrameGenGpu {
         return true;
     }
 
+    // Released application images are in COLOR_ATTACHMENT_OPTIMAL
+    // (XR_KHR_vulkan_enable); the copy returns them there.
+    void CopySource(ViewResources& view, const FrameGenImage& image, VkImage source) {
+        const auto& rect = image.rect;
+        SwapchainBarrier(source, image.array_index, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                         VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT,
+                         VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+        GlobalBarrier(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                      VK_ACCESS_TRANSFER_WRITE_BIT);
+        VkImageCopy copy{};
+        copy.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, image.array_index, 1};
+        copy.srcOffset = {rect.offset.x, rect.offset.y, 0};
+        copy.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+        copy.extent = {static_cast<std::uint32_t>(rect.extent.width), static_cast<std::uint32_t>(rect.extent.height), 1};
+        vkCmdCopyImage(commands_, source, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, view.history[view.history_state.Newest()].image,
+                       VK_IMAGE_LAYOUT_GENERAL, 1, &copy);
+        SwapchainBarrier(source, image.array_index, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                         VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_ACCESS_TRANSFER_READ_BIT,
+                         VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+                         VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
+        GlobalBarrier(VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                      VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
+    }
+
     Image* Resolve(ViewResources& view, FrameGenTexture texture) {
         const std::uint8_t newest = view.history_state.Newest();
         const std::uint8_t previous = view.history_state.Previous();
@@ -639,27 +768,9 @@ class VulkanFrameGen final : public FrameGenGpu {
             return false;
         }
 
-        // Released application images and acquired runtime images are in
-        // COLOR_ATTACHMENT_OPTIMAL (XR_KHR_vulkan_enable).
-        const auto& rect = submission.source.rect;
-        SwapchainBarrier(source, submission.source.array_index, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-                         VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT,
-                         VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
-        GlobalBarrier(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                      VK_ACCESS_TRANSFER_WRITE_BIT);
-        VkImageCopy copy{};
-        copy.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, submission.source.array_index, 1};
-        copy.srcOffset = {rect.offset.x, rect.offset.y, 0};
-        copy.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-        copy.extent = {static_cast<std::uint32_t>(rect.extent.width), static_cast<std::uint32_t>(rect.extent.height), 1};
-        vkCmdCopyImage(commands_, source, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, view.history[view.history_state.Newest()].image,
-                       VK_IMAGE_LAYOUT_GENERAL, 1, &copy);
-        SwapchainBarrier(source, submission.source.array_index, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                         VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_ACCESS_TRANSFER_READ_BIT,
-                         VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
-                         VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
-        GlobalBarrier(VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                      VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
+        if (!view.capture.Matches(submission.source)) {
+            CopySource(view, submission.source, source);
+        }
 
         const FrameGenViewPlan plan = BuildFrameGenViewPlan(view.history_state.Effective(submission.request), tuning);
         for (const FrameGenDispatch& dispatch : plan.dispatches) {
@@ -731,6 +842,8 @@ class VulkanFrameGen final : public FrameGenGpu {
     VkPipelineLayout pipeline_layout_{VK_NULL_HANDLE};
     std::array<VkPipeline, kFrameGenPassCount> pipelines_{};
     std::array<FrameSlot, kFramesInFlight> slots_{};
+    std::array<FrameSlot, kFramesInFlight> capture_slots_{};
+    std::uint64_t capture_count_{0};
     VkQueryPool query_pool_{VK_NULL_HANDLE};
     float timestamp_period_{1.0f};
     double last_gpu_ms_{-1.0};

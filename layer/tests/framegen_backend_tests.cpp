@@ -280,7 +280,35 @@ int RunScenarios(Harness& harness) {
     std::cout << harness.name << " rotation: error " << rotation_error << " vs uncompensated " << rotation_baseline << '\n';
     Check(rotation_error < 0.3 * rotation_baseline, harness.name + " head rotation leaked into generated frames");
 
-    // 5. Diagnostics and still writes keep working; geometry changes reset history.
+    // 5. Capture at release gives the same result as copying in EndFrame,
+    // and a capture of a different image falls back to the EndFrame copy.
+    harness.upload(g_swapchains[kSource][0], a);
+    harness.upload(g_swapchains[kSource][1], b);
+    tuning = {};
+    tuning.fraction = 0.5f;
+    auto capture = [&](std::uint32_t index) {
+        const FrameGenViewSubmission view = Submission(index, harness.format, output_format, true, 0, 0);
+        const bool captured = gpu->Capture(0, view.source, view.request, tuning.quality, error);
+        Check(captured, harness.name + " capture: " + error);
+    };
+    gpu->ResetHistory();
+    capture(0);
+    run(0, true, 0, 0);
+    capture(1);
+    const Pixels captured = run(1, true, 0, 0);
+    Check(result.synthesized[0], harness.name + " captured history did not synthesize");
+    Check(MeanError(captured, interpolated, 0, 0, kSize, kSize) < 0.002,
+          harness.name + " capture at release changed the generated frame");
+    gpu->ResetHistory();
+    capture(0);
+    run(0, true, 0, 0);
+    harness.upload(g_swapchains[kSource][2], Panorama(0));
+    capture(2); // a different image than the one generation reads
+    const Pixels mismatched = run(1, true, 0, 0);
+    Check(MeanError(mismatched, interpolated, 0, 0, kSize, kSize) < 0.002,
+          harness.name + " a stale capture must not replace the submitted image");
+
+    // 6. Diagnostics and still writes keep working; geometry changes reset history.
     tuning.diagnostic = FrameGenDiagnosticView::kTint;
     run(0, false, 0, 0);
     Check(!result.synthesized[0], harness.name + " synthesize=false must write a still frame");

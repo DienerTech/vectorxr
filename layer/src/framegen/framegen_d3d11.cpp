@@ -51,8 +51,25 @@ struct Texture {
     ComPtr<ID3D11UnorderedAccessView> uav;
 };
 
+// Identifies the image a view's history was captured from at release time.
+struct CaptureKey {
+    bool valid{false};
+    XrSwapchain swapchain{XR_NULL_HANDLE};
+    std::uint32_t image_index{0};
+    std::uint32_t array_index{0};
+    XrRect2Di rect{};
+
+    bool Matches(const FrameGenImage& image) const {
+        return valid && swapchain == image.swapchain && image_index == image.image_index &&
+               array_index == image.array_index && rect.offset.x == image.rect.offset.x &&
+               rect.offset.y == image.rect.offset.y && rect.extent.width == image.rect.extent.width &&
+               rect.extent.height == image.rect.extent.height;
+    }
+};
+
 struct ViewResources {
     FrameGenHistoryState history_state;
+    CaptureKey capture;
     DXGI_FORMAT history_format{DXGI_FORMAT_UNKNOWN};
     std::array<Texture, 2> history;
     std::array<Texture, 2> filtered;
@@ -165,6 +182,38 @@ class D3D11FrameGen final : public FrameGenGpu {
     }
 
     void Forget(XrSwapchain swapchain) override { images_.erase(swapchain); }
+
+    bool Capture(std::size_t index, const FrameGenImage& source, const FrameGenViewRequest& request,
+                 FrameGenFlowQuality quality, std::string& error) override {
+        const auto it = images_.find(source.swapchain);
+        if (it == images_.end() || source.image_index >= it->second.size()) {
+            error = "Frame Generation capture image is not tracked";
+            return false;
+        }
+        if (views_.size() <= index) {
+            views_.resize(index + 1);
+        }
+        ViewResources& view = views_[index];
+        ID3D11Texture2D* texture = it->second[source.image_index];
+        FrameGenViewSubmission submission;
+        submission.source = source;
+        submission.request = request;
+        FrameGenTuning tuning;
+        tuning.quality = quality;
+        if (!EnsureView(view, submission, texture, tuning, error)) {
+            view.history_state.Invalidate();
+            return false;
+        }
+        SavedState saved;
+        Save(saved);
+        CopySource(view, source, texture);
+        Restore(saved);
+        view.capture = {true, source.swapchain, source.image_index, source.array_index, source.rect};
+        return true;
+    }
+
+    // The immediate context keeps resources alive for queued work.
+    void WaitIdle() override {}
 
     bool Execute(const std::vector<FrameGenViewSubmission>& views, const FrameGenTuning& tuning,
                  FrameGenExecuteResult& result, std::string& error) override {
@@ -327,6 +376,7 @@ class D3D11FrameGen final : public FrameGenGpu {
                                                               final_level);
         const auto levels = FrameGenPyramid(extent);
         if (change & FrameGenHistoryState::kAll || !view.output.texture) {
+            view.capture.valid = false;
             view.history_format = source_desc.Format;
             const DXGI_FORMAT view_format = ViewFormat(source_desc.Format, submission.source.format);
             for (auto& history : view.history) {
@@ -389,14 +439,9 @@ class D3D11FrameGen final : public FrameGenGpu {
             return false;
         }
 
-        D3D11_TEXTURE2D_DESC source_desc{};
-        source->GetDesc(&source_desc);
-        const auto& rect = submission.source.rect;
-        const D3D11_BOX box{static_cast<UINT>(rect.offset.x), static_cast<UINT>(rect.offset.y), 0,
-                            static_cast<UINT>(rect.offset.x + rect.extent.width),
-                            static_cast<UINT>(rect.offset.y + rect.extent.height), 1};
-        context_->CopySubresourceRegion(view.history[view.history_state.Newest()].texture.Get(), 0, 0, 0, 0, source,
-                                        D3D11CalcSubresource(0, submission.source.array_index, source_desc.MipLevels), &box);
+        if (!view.capture.Matches(submission.source)) {
+            CopySource(view, submission.source, source);
+        }
 
         const FrameGenViewPlan plan = BuildFrameGenViewPlan(view.history_state.Effective(submission.request), tuning);
         context_->CSSetConstantBuffers(0, 1, constants_.GetAddressOf());
@@ -431,7 +476,19 @@ class D3D11FrameGen final : public FrameGenGpu {
                                         view.output.texture.Get(), 0, nullptr);
         synthesized = plan.synthesize;
         view.history_state.Commit(plan.synthesize);
+        view.capture.valid = false;
         return true;
+    }
+
+    void CopySource(ViewResources& view, const FrameGenImage& image, ID3D11Texture2D* source) {
+        D3D11_TEXTURE2D_DESC source_desc{};
+        source->GetDesc(&source_desc);
+        const auto& rect = image.rect;
+        const D3D11_BOX box{static_cast<UINT>(rect.offset.x), static_cast<UINT>(rect.offset.y), 0,
+                            static_cast<UINT>(rect.offset.x + rect.extent.width),
+                            static_cast<UINT>(rect.offset.y + rect.extent.height), 1};
+        context_->CopySubresourceRegion(view.history[view.history_state.Newest()].texture.Get(), 0, 0, 0, 0, source,
+                                        D3D11CalcSubresource(0, image.array_index, source_desc.MipLevels), &box);
     }
 
     ComPtr<ID3D11Device> device_;

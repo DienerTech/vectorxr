@@ -55,6 +55,8 @@ struct OsdSnapshot {
     std::string compact_pivot;
     std::string framegen{"Disabled"};
     std::string compact_framegen{"Disabled"};
+    // The expanded row is shown only in sessions with Frame Generation on.
+    bool framegen_session{false};
 };
 
 struct OsdPresentation {

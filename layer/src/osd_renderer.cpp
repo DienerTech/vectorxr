@@ -166,7 +166,7 @@ OsdBitmap RasterizeOsd(const OsdSettings& settings, bool compact, const OsdSnaps
     const int panel_width=compact?layout.width:OsdBitmap::width;
     const int header_shift=(settings.show_brand || settings.show_app || settings.show_runtime || settings.show_clock)?0:40;
     const int height=compact?layout.height:210-header_shift+(settings.show_graph?156:0)+
-        (settings.show_turbo?52:0)+(settings.show_framegen?52:0)+(settings.show_pivot?52:0)+(settings.show_modules?52:0)+
+        (settings.show_turbo?52:0)+(settings.show_framegen&&snapshot.framegen_session?52:0)+(settings.show_pivot?52:0)+(settings.show_modules?52:0)+
         (!snapshot.restart.empty()?48:0);
     OsdBitmap output; output.height=height; output.content_width=panel_width;
     Canvas canvas(output.width,height);
@@ -233,7 +233,7 @@ OsdBitmap RasterizeOsd(const OsdSettings& settings, bool compact, const OsdSnaps
                     if (first) { MoveToEx(canvas.dc,x,py,nullptr); first=false; } else LineTo(canvas.dc,x,py);
                 }
                 SelectObject(canvas.dc,old); DeleteObject(pen); y+=156;
-            } else if ((row=="turbo" && settings.show_turbo) || (row=="framegen" && settings.show_framegen) ||
+            } else if ((row=="turbo" && settings.show_turbo) || (row=="framegen" && settings.show_framegen && snapshot.framegen_session) ||
                        (row=="pivot" && settings.show_pivot) || (row=="modules" && settings.show_modules)) {
                 const auto label=row=="turbo"?"TURBO":row=="framegen"?"FRAME GEN":row=="pivot"?"PIVOT":"ENHANCEMENTS";
                 const auto value=row=="turbo"?snapshot.turbo+(snapshot.experimental?" / EXPERIMENTAL":""):
