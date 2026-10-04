@@ -161,7 +161,9 @@ bool WriteRuntimeStatus(const std::filesystem::path& path, const RuntimeStatusDo
            << ", \"osdCompact\": " << (document.osd_compact ? "true" : "false")
            << ", \"osdMessage\": \"" << EscapeJson(document.osd_message) << "\""
            << ", \"turboState\": \"" << EscapeJson(document.turbo_state)
-           << "\", \"turboReason\": \"" << EscapeJson(document.turbo_reason) << "\" },\n"
+           << "\", \"turboReason\": \"" << EscapeJson(document.turbo_reason)
+           << "\", \"framegenState\": \"" << EscapeJson(document.framegen_state)
+           << "\", \"framegenReason\": \"" << EscapeJson(document.framegen_reason) << "\" },\n"
            << "  \"quadviewsDimensionsAt\": " << document.quadviews_dimensions_at << ",\n"
            << "  \"quadviewsDimensions\": [";
     for (std::size_t i = 0; i < document.quadviews_dimensions.size(); ++i) {

@@ -33,6 +33,7 @@
 #include "depthxr/runtime_relay.h"
 #include "depthxr/osd_renderer.h"
 #include "depthxr/osd_composite.h"
+#include "depthxr/framegen_presenter.h"
 #include "depthxr/turbo_recovery.h"
 #include "depthxr/turbo_trace.h"
 #include "depthxr/settings_resolver.h"
@@ -710,6 +711,22 @@ class OpenXrLayer {
     XrResult TraceRuntimeWaitFrame(XrSession, const XrFrameWaitInfo*, XrFrameState*);
     XrResult TraceRuntimeBeginFrame(XrSession, const XrFrameBeginInfo*);
     XrResult TraceRuntimeEndFrame(XrSession, const XrFrameEndInfo*);
+    // The layer's final submission: OSD overlay, then the runtime xrEndFrame.
+    // Frame Generation submits each of its runtime frames through it.
+    XrResult SubmitRuntimeFrame(XrSession, const XrFrameEndInfo*);
+    XrResult DestroyLayerSwapchain(XrSwapchain swapchain);
+    void PollFrameGenToggle();
+    void StartFrameGen(XrSession session, const void* binding_chain);
+    // Frame Generation is latched per session. While it owns pacing, the app's
+    // Wait/Begin/End go to the presenter and Turbo stays off for the session.
+    FrameGenPresenter framegen_;
+    FrameGenRuntimeCalls framegen_calls_;
+    std::atomic<bool> framegen_owns_pacing_{false};
+    bool framegen_session_enabled_{false};  // mutex_
+    bool turbo_yielded_to_framegen_{false}; // mutex_
+    bool framegen_toggle_binding_was_down_{false};
+    bool framegen_binding_down_cached_{false};
+    std::optional<std::chrono::steady_clock::time_point> framegen_binding_last_poll_time_;
     XrTime TurboClockNow();
     void ConfigureTurboExperiment();
     std::string TurboTimingConfiguration() const;

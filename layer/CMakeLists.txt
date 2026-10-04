@@ -156,6 +156,7 @@ if(WIN32 AND DEPTHXR_BUILD_LAYER)
         VERBATIM)
     add_library(depthxr_framegen STATIC
         src/framegen/framegen_gpu.cpp
+        src/framegen/framegen_presenter.cpp
         src/framegen/framegen_d3d11.cpp
         src/framegen/framegen_d3d12.cpp
         src/framegen/framegen_vulkan.cpp
@@ -300,6 +301,11 @@ if(WIN32 AND DEPTHXR_BUILD_LAYER)
         add_test(NAME depthxr_framegen_vulkan_tests COMMAND depthxr_framegen_tests vulkan)
         set_tests_properties(depthxr_framegen_d3d11_tests depthxr_framegen_d3d12_tests depthxr_framegen_vulkan_tests PROPERTIES TIMEOUT 60)
         set_tests_properties(depthxr_framegen_vulkan_tests PROPERTIES SKIP_RETURN_CODE 77)
+        add_executable(depthxr_framegen_presenter_tests tests/framegen_presenter_tests.cpp)
+        target_link_libraries(depthxr_framegen_presenter_tests PRIVATE depthxr_framegen)
+        target_compile_definitions(depthxr_framegen_presenter_tests PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+        add_test(NAME depthxr_framegen_presenter_tests COMMAND depthxr_framegen_presenter_tests)
+        set_tests_properties(depthxr_framegen_presenter_tests PROPERTIES TIMEOUT 30)
         add_executable(depthxr_osd_tests tests/osd_tests.cpp)
         target_link_libraries(depthxr_osd_tests PRIVATE depthxr_osd)
         target_compile_definitions(depthxr_osd_tests PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX XR_USE_GRAPHICS_API_D3D11)

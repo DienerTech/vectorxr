@@ -132,16 +132,20 @@ OsdCompactLayout CompactOsdLayout(const OsdSettings& settings) {
     for (int i=0;i<4;++i) if(headers[i]) { layout.header_x[i]=x; x+=widths[i]+16; ++count; }
     layout.fps=settings.compact_metrics=="all" || settings.compact_metrics=="fps";
     layout.frame_time=settings.compact_metrics=="all" || settings.compact_metrics=="frameTime";
-    const bool status=settings.compact_show_turbo || settings.compact_show_pivot;
+    const bool status=settings.compact_show_turbo || settings.compact_show_framegen || settings.compact_show_pivot;
     layout.empty=!count && !layout.fps && !layout.frame_time && !status;
     layout.width=std::max({240,count?x+12:0,
         (layout.fps || layout.frame_time)?56+(layout.fps?210:0)+(layout.frame_time?300:0)+(layout.fps&&layout.frame_time?24:0):0,
         status?520:0});
     if(count) { layout.header_y=y; y+=44; }
     if(layout.fps || layout.frame_time) { layout.metrics_y=y; y+=68; }
+    // Status rows stack Turbo, Frame Gen, then Pivot. "FRAME GEN" is the
+    // widest label, so values move right while that row is shown.
     if(settings.compact_show_turbo) { layout.turbo_y=y; y+=48; }
+    if(settings.compact_show_framegen) { layout.framegen_y=y; y+=48; }
     if(settings.compact_show_pivot) { layout.pivot_y=y; y+=48; }
-    layout.status_y=layout.turbo_y>=0?layout.turbo_y:layout.pivot_y;
+    layout.status_y=layout.turbo_y>=0?layout.turbo_y:layout.framegen_y>=0?layout.framegen_y:layout.pivot_y;
+    layout.status_value_x=settings.compact_show_framegen?150:128;
     layout.height=layout.empty?80:y+6;
     return layout;
 }
@@ -162,7 +166,8 @@ OsdBitmap RasterizeOsd(const OsdSettings& settings, bool compact, const OsdSnaps
     const int panel_width=compact?layout.width:OsdBitmap::width;
     const int header_shift=(settings.show_brand || settings.show_app || settings.show_runtime || settings.show_clock)?0:40;
     const int height=compact?layout.height:210-header_shift+(settings.show_graph?156:0)+
-        (settings.show_turbo?52:0)+(settings.show_pivot?52:0)+(settings.show_modules?52:0)+(!snapshot.restart.empty()?48:0);
+        (settings.show_turbo?52:0)+(settings.show_framegen?52:0)+(settings.show_pivot?52:0)+(settings.show_modules?52:0)+
+        (!snapshot.restart.empty()?48:0);
     OsdBitmap output; output.height=height; output.content_width=panel_width;
     Canvas canvas(output.width,height);
     if (!canvas.bits || !canvas.dc) return output;
@@ -182,13 +187,18 @@ OsdBitmap RasterizeOsd(const OsdSettings& settings, bool compact, const OsdSnaps
         if(layout.status_y>=0) {
             const int y=layout.status_y;
             if(y>18) canvas.Rect(28,y-8,panel_width-56,1,inset);
+            const int value_x=layout.status_value_x;
             if(settings.compact_show_turbo) {
                 canvas.Text(30,layout.turbo_y+2,90,20,"TURBO",muted);
-                canvas.Text(128,layout.turbo_y,panel_width-156,24,snapshot.turbo+(snapshot.experimental?" / EXP":""),accent,true);
+                canvas.Text(value_x,layout.turbo_y,panel_width-value_x-28,24,snapshot.turbo+(snapshot.experimental?" / EXP":""),accent,true);
+            }
+            if(settings.compact_show_framegen) {
+                canvas.Text(30,layout.framegen_y+2,118,20,"FRAME GEN",muted);
+                canvas.Text(value_x,layout.framegen_y,panel_width-value_x-28,24,snapshot.compact_framegen,white,true);
             }
             if(settings.compact_show_pivot) {
                 canvas.Text(30,layout.pivot_y+2,80,20,"PIVOT",muted);
-                canvas.Text(128,layout.pivot_y,panel_width-156,24,snapshot.compact_pivot.empty()?snapshot.pivot:snapshot.compact_pivot,white,true);
+                canvas.Text(value_x,layout.pivot_y,panel_width-value_x-28,24,snapshot.compact_pivot.empty()?snapshot.pivot:snapshot.compact_pivot,white,true);
             }
         }
     } else {
@@ -223,9 +233,11 @@ OsdBitmap RasterizeOsd(const OsdSettings& settings, bool compact, const OsdSnaps
                     if (first) { MoveToEx(canvas.dc,x,py,nullptr); first=false; } else LineTo(canvas.dc,x,py);
                 }
                 SelectObject(canvas.dc,old); DeleteObject(pen); y+=156;
-            } else if ((row=="turbo" && settings.show_turbo) || (row=="pivot" && settings.show_pivot) || (row=="modules" && settings.show_modules)) {
-                const auto label=row=="turbo"?"TURBO":row=="pivot"?"PIVOT":"ENHANCEMENTS";
-                const auto value=row=="turbo"?snapshot.turbo+(snapshot.experimental?" / EXPERIMENTAL":""):row=="pivot"?snapshot.pivot:snapshot.modules;
+            } else if ((row=="turbo" && settings.show_turbo) || (row=="framegen" && settings.show_framegen) ||
+                       (row=="pivot" && settings.show_pivot) || (row=="modules" && settings.show_modules)) {
+                const auto label=row=="turbo"?"TURBO":row=="framegen"?"FRAME GEN":row=="pivot"?"PIVOT":"ENHANCEMENTS";
+                const auto value=row=="turbo"?snapshot.turbo+(snapshot.experimental?" / EXPERIMENTAL":""):
+                    row=="framegen"?snapshot.framegen:row=="pivot"?snapshot.pivot:snapshot.modules;
                 canvas.Text(30,y,210,20,label,muted);
                 canvas.Text(242,y,680,24,value,row=="turbo"?accent:white,true); y+=52;
             }
@@ -397,6 +409,7 @@ std::pair<OsdPresentation, OsdPresentation> OsdRenderer::Prepare(const OsdSettin
         (settings.enabled&&visible_)!=status_.shown || settings.update_hz!=settings_.update_hz ||
         settings.scale!=settings_.scale || settings.opacity!=settings_.opacity || settings.body_order!=settings_.body_order ||
         settings.show_graph!=settings_.show_graph || settings.show_turbo!=settings_.show_turbo || settings.show_pivot!=settings_.show_pivot || settings.show_modules!=settings_.show_modules ||
+        settings.show_framegen!=settings_.show_framegen || settings.compact_show_framegen!=settings_.compact_show_framegen ||
         settings.show_runtime!=settings_.show_runtime || settings.show_brand!=settings_.show_brand || settings.show_app!=settings_.show_app || settings.show_clock!=settings_.show_clock || settings.clock_format!=settings_.clock_format ||
         settings.compact_metrics!=settings_.compact_metrics || settings.compact_show_brand!=settings_.compact_show_brand || settings.compact_show_app!=settings_.compact_show_app ||
         settings.compact_show_runtime!=settings_.compact_show_runtime || settings.compact_show_clock!=settings_.compact_show_clock ||
@@ -409,7 +422,7 @@ std::pair<OsdPresentation, OsdPresentation> OsdRenderer::Prepare(const OsdSettin
     if(changed){
         Event(false,"configuration enabled="+std::to_string(settings.enabled)+" shown="+std::to_string(settings.enabled&&visible_)+" compact="+std::to_string(compact_)+
             " refreshHz="+std::to_string(settings.update_hz)+" scale="+std::to_string(settings.scale)+" opacity="+std::to_string(settings.opacity)+
-            " graph="+std::to_string(settings.show_graph)+" turbo="+std::to_string(settings.show_turbo)+" pivot="+std::to_string(settings.show_pivot)+" modules="+std::to_string(settings.show_modules));
+            " graph="+std::to_string(settings.show_graph)+" turbo="+std::to_string(settings.show_turbo)+" framegen="+std::to_string(settings.show_framegen)+" pivot="+std::to_string(settings.show_pivot)+" modules="+std::to_string(settings.show_modules));
         updated_={};
     }
     if (settings.enabled) telemetry_.Tick(Clock::now()); else telemetry_={};

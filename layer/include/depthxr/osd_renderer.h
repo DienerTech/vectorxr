@@ -53,6 +53,8 @@ struct OsdSnapshot {
     bool experimental{false};
     std::string pivot;
     std::string compact_pivot;
+    std::string framegen{"Disabled"};
+    std::string compact_framegen{"Disabled"};
 };
 
 struct OsdPresentation {
@@ -84,7 +86,8 @@ struct OsdBitmap {
 };
 
 struct OsdCompactLayout {
-    int width{240}, height{}, header_y{-1}, metrics_y{-1}, status_y{-1}, turbo_y{-1}, pivot_y{-1};
+    int width{240}, height{}, header_y{-1}, metrics_y{-1}, status_y{-1}, turbo_y{-1}, framegen_y{-1}, pivot_y{-1};
+    int status_value_x{128};
     std::array<int,4> header_x{-1,-1,-1,-1};
     bool fps{}, frame_time{}, empty{};
 };
