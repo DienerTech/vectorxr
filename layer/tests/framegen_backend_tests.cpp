@@ -147,6 +147,7 @@ struct Harness {
     std::function<void*(std::uint32_t, std::uint32_t)> create;
     std::function<void(void*, const Pixels&)> upload;
     std::function<Pixels(void*)> readback;
+    std::function<void()> flush = [] {};
 };
 
 std::map<XrSwapchain, std::vector<void*>> g_swapchains;
@@ -213,7 +214,8 @@ int RunScenarios(Harness& harness) {
     auto run = [&](std::uint32_t index, bool synthesize, float yaw_newest, float yaw_previous) {
         const std::vector<FrameGenViewSubmission> views{
             Submission(index, harness.format, output_format, synthesize, yaw_newest, yaw_previous)};
-        Check(gpu->Execute(views, tuning, result, error), harness.name + " execute: " + error);
+        const bool executed = gpu->Execute(views, tuning, result, error);
+        Check(executed, harness.name + " execute: " + error);
         return harness.readback(g_swapchains[kOutput][0]);
     };
 
@@ -289,15 +291,74 @@ int RunScenarios(Harness& harness) {
     return 0;
 }
 
+// Benchmark: two views at real headset sizes on a hardware adapter. Not a
+// CTest; run `depthxr_framegen_tests bench-<api>` and read the GPU times.
+bool g_bench = false;
+
+int RunBench(Harness& harness) {
+    std::string error;
+    auto gpu = CreateFrameGenGpu(harness.binding, error);
+    Check(gpu != nullptr, harness.name + " backend: " + error);
+    const std::int64_t output_format = gpu->OutputFormats(FrameGenOutputKind::kSrgb8).front();
+    const XrSwapchain output_right = reinterpret_cast<XrSwapchain>(0x53);
+    for (const std::uint32_t size : {2048u, 2880u}) {
+        g_swapchains[kSource] = {harness.create(size, size)};
+        g_swapchains[kOutput] = {harness.create(size, size)};
+        g_swapchains[output_right] = {harness.create(size, size)};
+        gpu->Forget(kSource);
+        gpu->Forget(kOutput);
+        gpu->Forget(output_right);
+        Check(gpu->Track(kSource, EnumerateImages, error) && gpu->Track(kOutput, EnumerateImages, error) &&
+                  gpu->Track(output_right, EnumerateImages, error),
+              error);
+        for (const auto quality : {FrameGenFlowQuality::kPerformance, FrameGenFlowQuality::kBalanced, FrameGenFlowQuality::kQuality}) {
+            for (const auto mode : {FrameGenSynthesisMode::kInterpolate, FrameGenSynthesisMode::kExtrapolate}) {
+                FrameGenTuning tuning;
+                tuning.quality = quality;
+                tuning.mode = mode;
+                std::vector<FrameGenViewSubmission> views;
+                for (const XrSwapchain output : {kOutput, output_right}) {
+                    FrameGenViewSubmission view = Submission(0, harness.format, output_format, true, 0.01f, 0.0f);
+                    view.source.rect.extent = {static_cast<int>(size), static_cast<int>(size)};
+                    view.output = {output, 0, 0, view.source.rect, output_format};
+                    view.request.extent = {size, size};
+                    views.push_back(view);
+                }
+                FrameGenExecuteResult result;
+                double sum = 0.0;
+                int samples = 0;
+                for (int i = 0; i < 90; ++i) {
+                    const bool executed = gpu->Execute(views, tuning, result, error);
+                    Check(executed, harness.name + " bench execute: " + error);
+                    harness.flush();
+                    Sleep(4);
+                    const double ms = gpu->LastGpuMilliseconds();
+                    if (i >= 30 && ms > 0.0) {
+                        sum += ms;
+                        ++samples;
+                    }
+                }
+                std::printf("%s %ux%u x2 views  %-11s %-11s  %.3f ms GPU\n", harness.name.c_str(), size, size,
+                            quality == FrameGenFlowQuality::kPerformance ? "performance"
+                            : quality == FrameGenFlowQuality::kBalanced ? "balanced" : "quality",
+                            mode == FrameGenSynthesisMode::kInterpolate ? "interpolate" : "extrapolate",
+                            samples ? sum / samples : -1.0);
+            }
+        }
+    }
+    gpu->Reset();
+    return 0;
+}
+
 // --- Direct3D 11 ------------------------------------------------------------
 
 int D3D11Test() {
     ComPtr<ID3D11Device> device;
     ComPtr<ID3D11DeviceContext> context;
     const D3D_FEATURE_LEVEL level = D3D_FEATURE_LEVEL_11_0;
-    Check(SUCCEEDED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0, &level, 1, D3D11_SDK_VERSION, &device,
-                                      nullptr, &context)),
-          "D3D11 WARP device");
+    Check(SUCCEEDED(D3D11CreateDevice(nullptr, g_bench ? D3D_DRIVER_TYPE_HARDWARE : D3D_DRIVER_TYPE_WARP, nullptr, 0,
+                                      &level, 1, D3D11_SDK_VERSION, &device, nullptr, &context)),
+          "D3D11 device");
     std::vector<ComPtr<ID3D11Texture2D>> keep;
     XrGraphicsBindingD3D11KHR binding{XR_TYPE_GRAPHICS_BINDING_D3D11_KHR};
     binding.device = device.Get();
@@ -340,7 +401,8 @@ int D3D11Test() {
         context->Unmap(staging.Get(), 0);
         return pixels;
     };
-    return RunScenarios(harness);
+    harness.flush = [&] { context->Flush(); };
+    return g_bench ? RunBench(harness) : RunScenarios(harness);
 }
 
 // --- Direct3D 12 ------------------------------------------------------------
@@ -351,7 +413,11 @@ int D3D12Test() {
     ComPtr<ID3D12Device> device;
     ComPtr<ID3D12CommandQueue> queue;
     Check(SUCCEEDED(CreateDXGIFactory1(IID_PPV_ARGS(&factory))), "DXGI factory");
-    Check(SUCCEEDED(factory->EnumWarpAdapter(IID_PPV_ARGS(&warp))), "WARP adapter");
+    if (g_bench) {
+        Check(SUCCEEDED(factory->EnumAdapters(0, &warp)), "hardware adapter");
+    } else {
+        Check(SUCCEEDED(factory->EnumWarpAdapter(IID_PPV_ARGS(&warp))), "WARP adapter");
+    }
     Check(SUCCEEDED(D3D12CreateDevice(warp.Get(), D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&device))), "D3D12 WARP device");
     D3D12_COMMAND_QUEUE_DESC queue_desc{};
     Check(SUCCEEDED(device->CreateCommandQueue(&queue_desc, IID_PPV_ARGS(&queue))), "D3D12 queue");
@@ -416,10 +482,13 @@ int D3D12Test() {
     harness.name = "D3D12";
     harness.format = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
     harness.binding = &binding;
-    harness.create = [&](std::uint32_t, std::uint32_t) -> void* {
+    harness.create = [&](std::uint32_t w, std::uint32_t h) -> void* {
         D3D12_HEAP_PROPERTIES heap{D3D12_HEAP_TYPE_DEFAULT};
+        D3D12_RESOURCE_DESC desc = image_desc;
+        desc.Width = w;
+        desc.Height = h;
         ComPtr<ID3D12Resource> resource;
-        Check(SUCCEEDED(device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &image_desc,
+        Check(SUCCEEDED(device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc,
                                                         D3D12_RESOURCE_STATE_RENDER_TARGET, nullptr, IID_PPV_ARGS(&resource))),
               "D3D12 image");
         keep.push_back(resource);
@@ -463,7 +532,7 @@ int D3D12Test() {
         readback->Unmap(0, nullptr);
         return pixels;
     };
-    const int result = RunScenarios(harness);
+    const int result = g_bench ? RunBench(harness) : RunScenarios(harness);
     CloseHandle(event);
     return result;
 }
@@ -662,7 +731,7 @@ int VulkanTest() {
         std::memcpy(pixels.data(), mapped, pixels.size() * 4);
         return pixels;
     };
-    const int result = RunScenarios(harness);
+    const int result = g_bench ? RunBench(harness) : RunScenarios(harness);
     vkDeviceWaitIdle(device);
     for (const auto& image : owned) {
         vkDestroyImage(device, image.image, nullptr);
@@ -682,7 +751,11 @@ int VulkanTest() {
 } // namespace
 
 int main(int argc, char** argv) {
-    const std::string api = argc > 1 ? argv[1] : "d3d11";
+    std::string api = argc > 1 ? argv[1] : "d3d11";
+    if (api.rfind("bench-", 0) == 0) {
+        g_bench = true;
+        api = api.substr(6);
+    }
     if (api == "d3d12") return D3D12Test();
     if (api == "vulkan") return VulkanTest();
     return D3D11Test();

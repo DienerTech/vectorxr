@@ -138,8 +138,8 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
 #if defined(FG_PASS_SEARCH) || defined(FG_PASS_REFINE)
 // Flow passes write one vector per cell of the flow level (size.xy) but match
 // on a finer luma level: options.w holds the cell size in match-level texels,
-// so a cell compares its whole block (plus a one-texel border) and fine
-// texture such as instrument faces and terrain detail still constrains it.
+// so fine texture such as instrument faces and terrain detail still
+// constrains the vector of a coarse cell.
 FG_BIND(0) Texture2D<float4> g_luma_current : register(t0);
 FG_BIND(1) Texture2D<float4> g_luma_previous : register(t1);
 FG_BIND(4) FG_FORMAT("rgba16f") RWTexture2D<float4> g_flow : register(u0);
@@ -150,39 +150,43 @@ int2 MatchExtent() {
     return int2(width, height);
 }
 
-// Mean absolute luma difference between the newest frame's block for `cell`
-// and the previous frame displaced by -d (match-level texels). Samples whose
-// newest texel lies outside the image are skipped; previous texels outside the
-// image or outside the previous view cost a fixed penalty, so borders never
-// attract matches. A small motion term keeps flat regions still.
-float BlockCost(int2 cell, int2 d) {
-    const int scale = int(g.options.w);
-    const int border = scale == 1 ? FG_PATCH_RADIUS : 1;
-    const int2 extent = MatchExtent();
-    const int2 first = cell * scale - border;
-    const int span = scale + 2 * border;
-    float sum = 0.0;
-    float count = 0.0;
-    [loop]
-    for (int y = 0; y < span; ++y) {
-        [loop]
-        for (int x = 0; x < span; ++x) {
-            const int2 q = first + int2(x, y);
-            if (any(q < 0) || any(q >= extent)) {
-                continue;
-            }
-            const int2 s = q - d;
-            const float current = g_luma_current.Load(int3(q, 0)).r;
-            const float previous = (any(s < 0) || any(s >= extent)) ? -1.0 : g_luma_previous.Load(int3(s, 0)).r;
-            sum += previous < 0.0 ? FG_INVALID_PENALTY : abs(current - previous);
-            count += 1.0;
-        }
-    }
-    return sum / max(count, 1.0) + FG_MOTION_PENALTY * length(float2(d) / float2(extent));
+// Previous-frame luma at s, or -1 outside the image or the previous view.
+float PreviousLuma(int2 s, int2 extent) {
+    return (any(s < 0) || any(s >= extent)) ? -1.0 : g_luma_previous.Load(int3(s, 0)).r;
+}
+
+// Previous texels that are invalid cost a fixed penalty so borders never
+// attract matches; a small motion term keeps flat regions still.
+float MatchTerm(float current, float previous) {
+    return previous < 0.0 ? FG_INVALID_PENALTY : abs(current - previous);
+}
+
+float MotionTerm(int2 d, int2 extent) {
+    return FG_MOTION_PENALTY * length(float2(d) / float2(extent));
 }
 #endif
 
 #if defined(FG_PASS_SEARCH)
+// Mean absolute luma difference of a 5x5 patch around `cell` displaced by
+// -d. Newest texels outside the image are skipped.
+float PatchCost(int2 cell, int2 d, int2 extent) {
+    float sum = 0.0;
+    float count = 0.0;
+    [loop]
+    for (int y = -FG_PATCH_RADIUS; y <= FG_PATCH_RADIUS; ++y) {
+        [unroll]
+        for (int x = -FG_PATCH_RADIUS; x <= FG_PATCH_RADIUS; ++x) {
+            const int2 q = cell + int2(x, y);
+            if (any(q < 0) || any(q >= extent)) {
+                continue;
+            }
+            sum += MatchTerm(g_luma_current.Load(int3(q, 0)).r, PreviousLuma(q - d, extent));
+            count += 1.0;
+        }
+    }
+    return sum / max(count, 1.0) + MotionTerm(d, extent);
+}
+
 // Exhaustive search on the coarsest level.
 [numthreads(8, 8, 1)]
 void CSMain(uint3 id : SV_DispatchThreadID) {
@@ -190,21 +194,22 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
         return;
     }
     const int2 cell = int2(id.xy);
+    const int2 extent = MatchExtent();
     const int radius = int(g.options.x);
     int2 best = int2(0, 0);
-    float best_cost = BlockCost(cell, best);
+    float best_cost = PatchCost(cell, best, extent);
     [loop]
     for (int y = -radius; y <= radius; ++y) {
         [loop]
         for (int x = -radius; x <= radius; ++x) {
-            const float cost = BlockCost(cell, int2(x, y));
+            const float cost = PatchCost(cell, int2(x, y), extent);
             if (cost < best_cost) {
                 best_cost = cost;
                 best = int2(x, y);
             }
         }
     }
-    g_flow[id.xy] = float4(float2(best) / float2(MatchExtent()), best_cost, 1.0);
+    g_flow[id.xy] = float4(float2(best) / float2(extent), best_cost, 1.0);
 }
 #endif
 
@@ -213,8 +218,48 @@ FG_BIND(2) Texture2D<float4> g_parent : register(t2);
 FG_BIND(3) Texture2D<float4> g_temporal : register(t3);
 FG_BIND(6) SamplerState g_linear : register(s0);
 
-void Consider(int2 cell, int2 d, inout int2 best, inout float best_cost) {
-    const float cost = BlockCost(cell, d);
+// Every refine cell compares a fixed 4x4 sample block: the cell's own texels
+// at scale 4 (an 8x8 full-resolution block on half-resolution luma), or the
+// cell plus a one-texel border at scale 2. The newest frame's block is read
+// once into registers; each candidate then costs 16 previous-frame loads.
+#define FG_BLOCK 4
+
+struct Block {
+    float luma[FG_BLOCK * FG_BLOCK];
+    bool valid[FG_BLOCK * FG_BLOCK];
+    int2 first;
+    int2 extent;
+};
+
+Block LoadBlock(int2 cell, int scale) {
+    Block block;
+    block.extent = MatchExtent();
+    block.first = cell * scale - (scale >= FG_BLOCK ? 0 : 1);
+    [unroll]
+    for (int i = 0; i < FG_BLOCK * FG_BLOCK; ++i) {
+        const int2 q = block.first + int2(i % FG_BLOCK, i / FG_BLOCK);
+        block.valid[i] = all(q >= 0) && all(q < block.extent);
+        block.luma[i] = block.valid[i] ? g_luma_current.Load(int3(q, 0)).r : 0.0;
+    }
+    return block;
+}
+
+float BlockCost(Block block, int2 d) {
+    float sum = 0.0;
+    float count = 0.0;
+    [unroll]
+    for (int i = 0; i < FG_BLOCK * FG_BLOCK; ++i) {
+        if (block.valid[i]) {
+            const int2 q = block.first + int2(i % FG_BLOCK, i / FG_BLOCK);
+            sum += MatchTerm(block.luma[i], PreviousLuma(q - d, block.extent));
+            count += 1.0;
+        }
+    }
+    return sum / max(count, 1.0) + MotionTerm(d, block.extent);
+}
+
+void Consider(Block block, int2 d, inout int2 best, inout float best_cost) {
+    const float cost = BlockCost(block, d);
     if (cost < best_cost) {
         best_cost = cost;
         best = d;
@@ -228,7 +273,7 @@ float SubTexel(float minus, float center, float plus) {
 }
 
 // Candidate refinement: the parent vectors around this cell, last frame's
-// flow and zero motion compete; the winner gets a one-texel search and a
+// flow and zero motion compete; the winner gets a step-halving search and a
 // sub-texel fit at the match level.
 [numthreads(8, 8, 1)]
 void CSMain(uint3 id : SV_DispatchThreadID) {
@@ -236,43 +281,53 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
         return;
     }
     const int2 cell = int2(id.xy);
-    const float2 match = float2(MatchExtent());
+    const int scale = int(g.options.w);
+    const Block block = LoadBlock(cell, scale);
+    const float2 match = float2(block.extent);
     const int2 parent_limit = int2(g.size.zw) - 1;
     const int2 parent = clamp(int2(uint2(cell) >> 1), int2(0, 0), parent_limit);
 
     int2 best = int2(0, 0);
-    float best_cost = BlockCost(cell, best);
+    float best_cost = BlockCost(block, best);
     const int2 offsets[5] = { int2(0, 0), int2(-1, 0), int2(1, 0), int2(0, -1), int2(0, 1) };
     [unroll]
     for (int i = 0; i < 5; ++i) {
         const int2 q = clamp(parent + offsets[i], int2(0, 0), parent_limit);
-        Consider(cell, int2(round(g_parent.Load(int3(q, 0)).xy * match)), best, best_cost);
+        Consider(block, int2(round(g_parent.Load(int3(q, 0)).xy * match)), best, best_cost);
     }
     if ((g.options.y & FG_FLAG_TEMPORAL) != 0u) {
         const float2 uv = (float2(cell) + 0.5) / float2(g.size.xy);
-        Consider(cell, int2(round(g_temporal.SampleLevel(g_linear, uv, 0.0).xy * match)), best, best_cost);
+        Consider(block, int2(round(g_temporal.SampleLevel(g_linear, uv, 0.0).xy * match)), best, best_cost);
     }
 
     // Step-halving search: one flow-level cell (scale match texels) first,
     // then half that, down to single texels, so a level can correct its
     // parent by a full parent cell while still landing on exact texels.
+    // Coarse steps probe a cross; the final single-texel step probes all
+    // eight neighbours.
+    const int2 cross[4] = { int2(-1, 0), int2(1, 0), int2(0, -1), int2(0, 1) };
     [loop]
-    for (int step = int(g.options.w); step >= 1; step >>= 1) {
+    for (int step = scale; step > 1; step >>= 1) {
         const int2 center = best;
-        [loop]
-        for (int y = -1; y <= 1; ++y) {
-            [loop]
-            for (int x = -1; x <= 1; ++x) {
-                if (x != 0 || y != 0) {
-                    Consider(cell, center + int2(x, y) * step, best, best_cost);
-                }
+        [unroll]
+        for (int i = 0; i < 4; ++i) {
+            Consider(block, center + cross[i] * step, best, best_cost);
+        }
+    }
+    const int2 center = best;
+    [unroll]
+    for (int y = -1; y <= 1; ++y) {
+        [unroll]
+        for (int x = -1; x <= 1; ++x) {
+            if (x != 0 || y != 0) {
+                Consider(block, center + int2(x, y), best, best_cost);
             }
         }
     }
 
     const float2 sub = float2(
-        SubTexel(BlockCost(cell, best - int2(1, 0)), best_cost, BlockCost(cell, best + int2(1, 0))),
-        SubTexel(BlockCost(cell, best - int2(0, 1)), best_cost, BlockCost(cell, best + int2(0, 1))));
+        SubTexel(BlockCost(block, best - int2(1, 0)), best_cost, BlockCost(block, best + int2(1, 0))),
+        SubTexel(BlockCost(block, best - int2(0, 1)), best_cost, BlockCost(block, best + int2(0, 1))));
     g_flow[id.xy] = float4((float2(best) + sub) / match, best_cost, 1.0);
 }
 #endif
@@ -399,12 +454,21 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
         candidates[6] = float4(0.0, 0.0, here.z, 1.0);
         chosen = candidates[0];
         chosen_error = CandidateError(uv, chosen.xy, step);
+        // Smooth motion, most of a frame, leaves nothing to choose between;
+        // only pixels near a motion boundary pay for the comparisons.
+        float spread = 0.0;
         [unroll]
-        for (int k = 1; k < 7; ++k) {
-            const float error = CandidateError(uv, candidates[k].xy, step) + (k == 6 ? 0.03 : 0.01);
-            if (error < chosen_error) {
-                chosen_error = error;
-                chosen = candidates[k];
+        for (int s = 1; s < 7; ++s) {
+            spread = max(spread, length((candidates[s].xy - chosen.xy) * float2(g.size.xy)));
+        }
+        if (spread > 0.5) {
+            [unroll]
+            for (int k = 1; k < 7; ++k) {
+                const float error = CandidateError(uv, candidates[k].xy, step) + (k == 6 ? 0.03 : 0.01);
+                if (error < chosen_error) {
+                    chosen_error = error;
+                    chosen = candidates[k];
+                }
             }
         }
     }
