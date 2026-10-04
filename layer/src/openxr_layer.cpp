@@ -3241,7 +3241,8 @@ XrResult OpenXrLayer::CreateSwapchain(XrSession session,
     }
     XrResult result = next_create_swapchain_(session, create_info, swapchain);
     if (XR_FAILED(result) && create_info == &adjusted_create_info) {
-        // Without the capture usage, generation copies after release instead.
+        // Without the copy usage, Frame Generation reports itself unavailable
+        // rather than copying from this swapchain.
         create_info = original_create_info;
         logger_.Info("Runtime rejected the Frame Generation capture usage (result=" +
                      std::to_string(static_cast<int>(result)) + "); retrying with the application's usage.");
@@ -3284,7 +3285,7 @@ XrResult OpenXrLayer::CreateSwapchain(XrSession session,
                              (!has_active_primary_view_configuration_ ||
                               IsQuadViewConfiguration(active_primary_view_configuration_type_));
     tracked_swapchains_[*swapchain] = info;
-    framegen_.TrackSwapchain(*swapchain, create_info->format, create_info->sampleCount);
+    framegen_.TrackSwapchain(*swapchain, create_info->format, create_info->sampleCount, create_info->usageFlags);
     LogSwapchainSummary(*swapchain, info, "created");
     return result;
 }
@@ -3687,7 +3688,7 @@ bool OpenXrLayer::EnsureD3D11QuadViewsCompositor(const XrCompositionLayerProject
             }
         }
 
-        framegen_.TrackSwapchain(target.swapchain, output_format, 1);
+        framegen_.TrackSwapchain(target.swapchain, output_format, 1, create_info.usageFlags);
         uint32_t image_count = 0;
         result = next_enumerate_swapchain_images_(target.swapchain, 0, &image_count, nullptr);
         if (XR_FAILED(result) || image_count == 0) {
@@ -11839,7 +11840,7 @@ bool OpenXrLayer::EnsureFocusSharpenTarget(QuadViewsCompositionTarget& target,
         return false;
     }
 
-    framegen_.TrackSwapchain(target.swapchain, format, 1);
+    framegen_.TrackSwapchain(target.swapchain, format, 1, create_info.usageFlags);
     uint32_t image_count = 0;
     result = next_enumerate_swapchain_images_(target.swapchain, 0, &image_count, nullptr);
     if (XR_FAILED(result) || image_count == 0) {

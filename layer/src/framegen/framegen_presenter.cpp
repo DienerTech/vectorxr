@@ -157,6 +157,8 @@ void FrameGenPresenter::Stop() {
     if (!started_) {
         return;
     }
+    // From here no release thread captures into the backend.
+    started_ = false;
     // Finish outstanding GPU work before the runtime frees the output images
     // it writes. Teardown runs between frames, so no EndFrame touches the
     // outputs concurrently.
@@ -172,10 +174,12 @@ void FrameGenPresenter::Stop() {
                       std::to_string(repeated_) + ", failures=" + std::to_string(failures_) + ", demoted=" +
                       std::to_string(demoted_) + ", captured=" + std::to_string(captured_) + ".");
     }
-    started_ = false;
     state_ = FrameGenState::kOff;
     reason_.clear();
     swapchains_.clear();
+    output_kinds_.clear();
+    end_thread_ = {};
+    logged_claimed_wait_ = false;
     runtime_formats_.clear();
     frames_.clear();
     capture_targets_.clear();
@@ -278,12 +282,14 @@ XrSwapchainUsageFlags FrameGenPresenter::SourceUsage(const XrSwapchainCreateInfo
     return gpu_->RequiredSourceUsage();
 }
 
-void FrameGenPresenter::TrackSwapchain(XrSwapchain swapchain, std::int64_t format, std::uint32_t sample_count) {
+void FrameGenPresenter::TrackSwapchain(XrSwapchain swapchain, std::int64_t format, std::uint32_t sample_count,
+                                       XrSwapchainUsageFlags usage) {
     std::scoped_lock lock(mutex_);
     if (!started_) {
         return;
     }
-    swapchains_[swapchain] = {format, std::max(1u, sample_count), std::nullopt};
+    const XrSwapchainUsageFlags required = gpu_ ? gpu_->RequiredSourceUsage() : 0;
+    swapchains_[swapchain] = {format, std::max(1u, sample_count), (usage & required) == required, std::nullopt};
 }
 
 void FrameGenPresenter::ForgetSwapchain(XrSwapchain swapchain) {
@@ -311,27 +317,41 @@ void FrameGenPresenter::NoteRelease(XrSwapchain swapchain, std::uint32_t image_i
 
 std::optional<FrameGenOutputKind> FrameGenPresenter::OutputKindLocked(std::size_t view, std::int64_t source_format) const {
     const auto requested = gpu_ ? gpu_->Classify(source_format) : std::nullopt;
-    if (requested && view < outputs_.size() && outputs_[view].swapchain && outputs_[view].requested == *requested) {
-        return outputs_[view].kind;
+    if (requested && view < output_kinds_.size() && output_kinds_[view].valid &&
+        output_kinds_[view].requested == *requested) {
+        return output_kinds_[view].kind;
     }
     return requested;
 }
 
 void FrameGenPresenter::CaptureOnRelease(XrSwapchain swapchain, std::uint32_t image_index) {
+    auto capturing = [&] {
+        if (!started_ || !gpu_ || !user_enabled_ || !configured_enabled_ || state_ == FrameGenState::kPaused ||
+            state_ == FrameGenState::kUnavailable) {
+            return false;
+        }
+        const auto record = swapchains_.find(swapchain);
+        return record != swapchains_.end() && record->second.sample_count == 1 && record->second.capturable &&
+               std::any_of(capture_targets_.begin(), capture_targets_.end(),
+                           [&](const CaptureTarget& target) { return target.swapchain == swapchain; });
+    };
+    {
+        // Most releases have nothing to capture; check before the queue lock.
+        std::scoped_lock lock(mutex_);
+        if (!capturing()) {
+            return;
+        }
+    }
     // Lock order everywhere: queue, then presenter.
     std::unique_lock<std::mutex> queue_lock;
     if (queue_mutex_) {
         queue_lock = std::unique_lock<std::mutex>(*queue_mutex_);
     }
     std::scoped_lock lock(mutex_);
-    if (!started_ || !gpu_ || !user_enabled_ || !configured_enabled_ || state_ == FrameGenState::kPaused ||
-        state_ == FrameGenState::kUnavailable) {
+    if (!capturing()) {
         return;
     }
     const auto record = swapchains_.find(swapchain);
-    if (record == swapchains_.end() || record->second.sample_count > 1) {
-        return;
-    }
     for (const CaptureTarget& target : capture_targets_) {
         if (target.swapchain != swapchain) {
             continue;
@@ -348,8 +368,9 @@ void FrameGenPresenter::CaptureOnRelease(XrSwapchain swapchain, std::uint32_t im
         std::string error;
         if (!gpu_->Track(swapchain, xr_.images, error) ||
             !gpu_->Capture(target.view, source, request, settings_.flow_quality, error)) {
-            // Generation then copies after the release, as before.
-            if (logger_ && !logged_capture_failure_) {
+            // Generation then copies the image itself. An empty error means
+            // the view is not set up for this region yet; nothing to report.
+            if (logger_ && !error.empty() && !logged_capture_failure_) {
                 logged_capture_failure_ = true;
                 logger_->Error("Frame Generation could not capture a released image: " + error);
             }
@@ -441,20 +462,22 @@ XrResult FrameGenPresenter::WaitFrame(XrSession session, const XrFrameWaitInfo* 
         std::unique_lock lock(mutex_);
         MaybeRetryLocked();
         engage = WantsEngagementLocked();
-        const auto self = std::this_thread::get_id();
         bool demoted = false;
-        auto demote = [&](bool same_thread_only) {
+        auto demote = [&] {
             for (PendingFrame& frame : frames_) {
-                if (frame.engaged && !frame.demoted && !frame.claimed && (!same_thread_only || frame.thread == self)) {
+                if (frame.engaged && !frame.demoted && !frame.claimed) {
                     frame.demoted = true;
                     ++demoted_;
                     demoted = true;
                 }
             }
         };
-        // This thread waits again before ending its engaged frame; holding
-        // the wait would only stall until the timeout below.
-        demote(true);
+        // The thread that ends frames is waiting again before ending its
+        // engaged frame: holding it would only stall until the timeout.
+        // Apps that wait on one thread and end on another take the hold.
+        if (std::this_thread::get_id() == end_thread_) {
+            demote();
+        }
         // An engaged frame in progress owns the runtime until its extra
         // wait/begin/end has finished. One whose end has not started yet is
         // demoted after a short hold; one already in its end is finishing a
@@ -464,9 +487,14 @@ XrResult FrameGenPresenter::WaitFrame(XrSession session, const XrFrameWaitInfo* 
                                [](const PendingFrame& frame) { return frame.engaged && !frame.demoted; });
         };
         if (blocking() && !idle_cv_.wait_for(lock, kOverlapWait, [&] { return !blocking(); })) {
-            demote(false);
-            if (!idle_cv_.wait_for(lock, kClaimedFrameWait, [&] { return !blocking(); })) {
-                PauseLocked("a generated frame did not finish its runtime submission");
+            demote();
+            // What still blocks is inside its own runtime calls; a second
+            // runtime wait now would break frame ordering, so let it finish.
+            while (!idle_cv_.wait_for(lock, kClaimedFrameWait, [&] { return !blocking(); })) {
+                if (logger_ && !logged_claimed_wait_) {
+                    logged_claimed_wait_ = true;
+                    logger_->Error("Frame Generation: a generated frame has been inside the runtime for over 5 s.");
+                }
             }
         }
         if (demoted) {
@@ -494,7 +522,6 @@ XrResult FrameGenPresenter::WaitFrame(XrSession session, const XrFrameWaitInfo* 
     frame.should_render = state->shouldRender == XR_TRUE;
     frame.engaged = engage && frame.period > 0 && state_ != FrameGenState::kPaused;
     frame.sequence = sequence;
-    frame.thread = std::this_thread::get_id();
     frame.wait_return = Clock::now();
     if (frame.engaged) {
         state->predictedDisplayTime = frame.slot_time + frame.period;
@@ -522,6 +549,7 @@ XrResult FrameGenPresenter::EndFrame(XrSession session, const XrFrameEndInfo* in
     const bool renderable = info->layerCount > 0 && projection != nullptr;
     {
         std::scoped_lock lock(mutex_);
+        end_thread_ = std::this_thread::get_id();
         auto it = std::find_if(frames_.begin(), frames_.end(),
                                [&](const PendingFrame& pending) { return pending.app_time == info->displayTime; });
         if (it == frames_.end() && !frames_.empty()) {
@@ -743,6 +771,10 @@ bool FrameGenPresenter::Generate(const XrCompositionLayerProjection& projection,
                 UnavailableLocked("multisampled projection swapchains are not supported");
                 return false;
             }
+            if (!record->second.capturable) {
+                UnavailableLocked("the runtime refused the copy usage on the game's swapchains");
+                return false;
+            }
             const auto kind = gpu_->Classify(record->second.format);
             if (!kind) {
                 UnavailableLocked("projection swapchain format " + std::to_string(record->second.format) +
@@ -847,6 +879,8 @@ bool FrameGenPresenter::EnsureOutputs(const XrCompositionLayerProjection& projec
     if (outputs_.size() != projection.viewCount) {
         DestroyOutputs();
         outputs_.resize(projection.viewCount);
+        std::scoped_lock lock(mutex_);
+        output_kinds_.assign(projection.viewCount, {});
     }
     for (std::uint32_t i = 0; i < projection.viewCount; ++i) {
         Output& output = outputs_[i];
@@ -856,6 +890,10 @@ bool FrameGenPresenter::EnsureOutputs(const XrCompositionLayerProjection& projec
             continue;
         }
         if (output.swapchain) {
+            {
+                std::scoped_lock lock(mutex_);
+                output_kinds_[i] = {};
+            }
             // ForgetSwapchain waits for submissions that may still write it.
             ForgetSwapchain(output.swapchain);
             xr_.destroy(output.swapchain);
@@ -902,6 +940,7 @@ bool FrameGenPresenter::EnsureOutputs(const XrCompositionLayerProjection& projec
         output.requested = kinds[i];
         // An sRGB fallback for a UNORM or float source must also encode.
         output.kind = gpu_->Classify(format).value_or(FrameGenOutputKind::kSrgb8);
+        output_kinds_[i] = {true, output.requested, output.kind};
         extrapolated_.valid = false;
     }
     return true;
@@ -961,6 +1000,7 @@ void FrameGenPresenter::DestroyOutputs() {
     }
     outputs_.clear();
     std::scoped_lock lock(mutex_);
+    output_kinds_.clear();
     extrapolated_ = {};
 }
 

@@ -702,7 +702,7 @@ class FgGpu final : public depthxr::FrameGenGpu {
                  depthxr::FrameGenFlowQuality, std::string&) override {
         return true;
     }
-    void WaitIdle() override {}
+    bool WaitIdle() override { return true; }
     bool Execute(const std::vector<depthxr::FrameGenViewSubmission>& views, const depthxr::FrameGenTuning&,
                  depthxr::FrameGenExecuteResult& result, std::string&) override {
         ++*executes_;
@@ -1265,8 +1265,8 @@ void TestFrameGenOwnsFramePacing() {
 
     const XrSwapchain left = reinterpret_cast<XrSwapchain>(0x71), right = reinterpret_cast<XrSwapchain>(0x72);
     auto& framegen = depthxr::TurboFrameTestPeer::FrameGen();
-    framegen.TrackSwapchain(left, kFrameGenFormat, 1);
-    framegen.TrackSwapchain(right, kFrameGenFormat, 1);
+    framegen.TrackSwapchain(left, kFrameGenFormat, 1, XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT);
+    framegen.TrackSwapchain(right, kFrameGenFormat, 1, XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT);
     std::array<XrCompositionLayerProjectionView, 2> views{};
     for (int eye = 0; eye < 2; ++eye) {
         views[eye] = {XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW};

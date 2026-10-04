@@ -14,6 +14,7 @@ namespace depthxr {
 namespace {
 
 constexpr std::size_t kFramesInFlight = 3;
+constexpr std::size_t kCaptureSlots = 8; // views x frames in flight
 constexpr std::uint32_t kSetsPerFrame = 256;
 
 #define FG_VK_FUNCTIONS(X)                                                                                          \
@@ -208,6 +209,16 @@ class VulkanFrameGen final : public FrameGenGpu {
             error = "Frame Generation capture image is not tracked";
             return false;
         }
+        if (views_.size() <= index) {
+            views_.resize(index + 1);
+        }
+        ViewResources& view = views_[index];
+        // Capture never reallocates; Execute sets the view up first.
+        if (!view.output.image ||
+            !view.history_state.Matches(request.extent, source.format, request.output, FrameGenFinalFlowLevel(quality))) {
+            error.clear();
+            return false;
+        }
         FrameSlot& slot = capture_slots_[capture_count_ % capture_slots_.size()];
         if (slot.pending) {
             VkResult status = vkGetFenceStatus(binding_.device, slot.fence);
@@ -229,22 +240,10 @@ class VulkanFrameGen final : public FrameGenGpu {
             return false;
         }
         commands_ = slot.commands;
-        if (views_.size() <= index) {
-            views_.resize(index + 1);
-        }
-        ViewResources& view = views_[index];
-        FrameGenViewSubmission submission;
-        submission.source = source;
-        submission.request = request;
-        FrameGenTuning tuning;
-        tuning.quality = quality;
-        bool ok = EnsureView(view, submission, tuning, error);
-        if (ok) {
-            CopySource(view, source, it->second[source.image_index]);
-        }
-        ok = Check(vkEndCommandBuffer(slot.commands), "vkEndCommandBuffer", error) && ok;
-        if (!ok) {
-            DestroyView(view);
+        CopySource(view, source, it->second[source.image_index]);
+        if (!Check(vkEndCommandBuffer(slot.commands), "vkEndCommandBuffer", error)) {
+            // Nothing was submitted; rebuild the view on the next Execute.
+            view.history_state = {};
             return false;
         }
         VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
@@ -260,18 +259,23 @@ class VulkanFrameGen final : public FrameGenGpu {
         return true;
     }
 
-    void WaitIdle() override {
+    bool WaitIdle() override {
         if (!binding_.device || !vkWaitForFences) {
-            return;
+            return true;
         }
-        for (auto* slots : {&slots_, &capture_slots_}) {
-            for (auto& slot : *slots) {
-                if (slot.pending && slot.fence) {
-                    vkWaitForFences(binding_.device, 1, &slot.fence, VK_TRUE, 2'000'000'000ull);
+        bool idle = true;
+        auto wait = [&](FrameSlot& slot) {
+            if (slot.pending && slot.fence) {
+                if (vkWaitForFences(binding_.device, 1, &slot.fence, VK_TRUE, 2'000'000'000ull) == VK_SUCCESS) {
                     slot.pending = false;
+                } else {
+                    idle = false;
                 }
             }
-        }
+        };
+        for (auto& slot : slots_) wait(slot);
+        for (auto& slot : capture_slots_) wait(slot);
+        return idle;
     }
 
     bool Execute(const std::vector<FrameGenViewSubmission>& views, const FrameGenTuning& tuning,
@@ -501,14 +505,14 @@ class VulkanFrameGen final : public FrameGenGpu {
             return;
         }
         DestroyImage(dummy_);
-        for (auto* slots : {&slots_, &capture_slots_}) {
-            for (auto& slot : *slots) {
-                if (slot.descriptors) vkDestroyDescriptorPool(binding_.device, slot.descriptors, nullptr);
-                if (slot.fence) vkDestroyFence(binding_.device, slot.fence, nullptr);
-                if (slot.pool) vkDestroyCommandPool(binding_.device, slot.pool, nullptr);
-                slot = {};
-            }
-        }
+        auto destroy = [&](FrameSlot& slot) {
+            if (slot.descriptors) vkDestroyDescriptorPool(binding_.device, slot.descriptors, nullptr);
+            if (slot.fence) vkDestroyFence(binding_.device, slot.fence, nullptr);
+            if (slot.pool) vkDestroyCommandPool(binding_.device, slot.pool, nullptr);
+            slot = {};
+        };
+        for (auto& slot : slots_) destroy(slot);
+        for (auto& slot : capture_slots_) destroy(slot);
         if (query_pool_) vkDestroyQueryPool(binding_.device, query_pool_, nullptr);
         for (auto& pipeline : pipelines_) {
             if (pipeline) vkDestroyPipeline(binding_.device, pipeline, nullptr);
@@ -602,8 +606,12 @@ class VulkanFrameGen final : public FrameGenGpu {
 
     void DestroyView(ViewResources& view) {
         // Teardown and failure paths only: wait for every submission first so
-        // no recorded command still references these images.
-        WaitIdle();
+        // no recorded command still references these images. A stalled GPU
+        // keeps them (a leak) rather than freeing memory still in use.
+        if (!WaitIdle()) {
+            view.history_state = {};
+            return;
+        }
         for (auto* group : {&view.history, &view.filtered}) {
             for (auto& image : *group) DestroyImage(image);
         }
@@ -663,9 +671,11 @@ class VulkanFrameGen final : public FrameGenGpu {
                                                               final_level);
         const auto levels = FrameGenPyramid(extent);
         constexpr VkImageUsageFlags storage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
-        if (change != FrameGenHistoryState::kNone) {
-            // Recent submissions may still use the images being replaced.
-            WaitIdle();
+        if (change != FrameGenHistoryState::kNone && !WaitIdle()) {
+            // Recent submissions still use the images being replaced.
+            view.history_state = {};
+            error = "Vulkan Frame Generation GPU work did not finish before reallocation";
+            return false;
         }
         if (change & FrameGenHistoryState::kAll || !view.output.image) {
             view.capture.valid = false;
@@ -842,7 +852,7 @@ class VulkanFrameGen final : public FrameGenGpu {
     VkPipelineLayout pipeline_layout_{VK_NULL_HANDLE};
     std::array<VkPipeline, kFrameGenPassCount> pipelines_{};
     std::array<FrameSlot, kFramesInFlight> slots_{};
-    std::array<FrameSlot, kFramesInFlight> capture_slots_{};
+    std::array<FrameSlot, kCaptureSlots> capture_slots_{};
     std::uint64_t capture_count_{0};
     VkQueryPool query_pool_{VK_NULL_HANDLE};
     float timestamp_period_{1.0f};

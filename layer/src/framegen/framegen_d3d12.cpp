@@ -253,9 +253,19 @@ class D3D12FrameGen final : public FrameGenGpu {
             error = Failure("D3D12 device", hr);
             return false;
         }
+        if (views_.size() <= index) {
+            views_.resize(index + 1);
+        }
+        ViewResources& view = views_[index];
+        ID3D12Resource* resource = it->second[source.image_index];
+        // Capture never reallocates; Execute sets the view up first.
+        if (!view.output.resource || !view.history_state.Matches(request.extent, resource->GetDesc().Format, request.output,
+                                                                 FrameGenFinalFlowLevel(quality))) {
+            error.clear();
+            return false;
+        }
         CaptureSlot& slot = capture_slots_[capture_count_ % capture_slots_.size()];
-        if (slot.fence_value && fence_->GetCompletedValue() < slot.fence_value &&
-            (FAILED(fence_->SetEventOnCompletion(slot.fence_value, event_)) || WaitForSingleObject(event_, 100) != WAIT_OBJECT_0)) {
+        if (!WaitFence(slot.fence_value, 100)) {
             error = "D3D12 Frame Generation capture work did not finish in time";
             return false;
         }
@@ -265,30 +275,14 @@ class D3D12FrameGen final : public FrameGenGpu {
             error = Failure("D3D12 Frame Generation capture reset", hr);
             return false;
         }
-        if (views_.size() <= index) {
-            views_.resize(index + 1);
-        }
-        ViewResources& view = views_[index];
-        FrameGenViewSubmission submission;
-        submission.source = source;
-        submission.request = request;
-        FrameGenTuning tuning;
-        tuning.quality = quality;
-        ID3D12Resource* resource = it->second[source.image_index];
-        bool ok = EnsureView(view, submission, resource, tuning, error);
         std::vector<D3D12_RESOURCE_BARRIER> barriers;
-        if (ok) {
-            CopySource(capture_commands_.Get(), barriers, view, source, resource);
-        }
+        CopySource(capture_commands_.Get(), barriers, view, source, resource);
         hr = capture_commands_->Close();
-        if (ok && FAILED(hr)) {
+        if (FAILED(hr)) {
+            // Nothing was submitted, so tracked states no longer match the GPU:
+            // force a full rebuild, which waits for the GPU before freeing.
             error = Failure("D3D12 Frame Generation capture close", hr);
-            ok = false;
-        }
-        if (!ok) {
-            // Nothing was submitted: tracked states no longer match the GPU.
-            WaitIdle();
-            view = {};
+            view.history_state = {};
             return false;
         }
         ID3D12CommandList* lists[] = {capture_commands_.Get()};
@@ -305,13 +299,7 @@ class D3D12FrameGen final : public FrameGenGpu {
         return true;
     }
 
-    void WaitIdle() override {
-        if (fence_ && fence_value_ && !signal_failed_ && SUCCEEDED(device_->GetDeviceRemovedReason()) &&
-            fence_->GetCompletedValue() < fence_value_ && event_ &&
-            SUCCEEDED(fence_->SetEventOnCompletion(fence_value_, event_))) {
-            WaitForSingleObject(event_, 2000);
-        }
-    }
+    bool WaitIdle() override { return WaitFence(fence_value_, 2000); }
 
     bool Execute(const std::vector<FrameGenViewSubmission>& views, const FrameGenTuning& tuning,
                  FrameGenExecuteResult& result, std::string& error) override {
@@ -361,11 +349,16 @@ class D3D12FrameGen final : public FrameGenGpu {
             ok = false;
         }
         if (!ok) {
-            // Nothing was submitted: the recorded state transitions never ran,
-            // and earlier submissions may still use the textures.
-            WaitIdle();
-            for (std::size_t i = 0; i < views.size(); ++i) {
-                if (i < views_.size()) views_[i] = {};
+            // Nothing was submitted: the recorded state transitions never ran.
+            // Rebuild the views, freeing textures only once earlier
+            // submissions have finished with them.
+            const bool idle = WaitIdle();
+            for (std::size_t i = 0; i < views.size() && i < views_.size(); ++i) {
+                if (idle) {
+                    views_[i] = {};
+                } else {
+                    views_[i].history_state = {};
+                }
             }
             return false;
         }
@@ -394,7 +387,18 @@ class D3D12FrameGen final : public FrameGenGpu {
     }
 
     void Reset() override {
-        WaitIdle();
+        if (!WaitIdle()) {
+            // Teardown with a stalled GPU: leak rather than free in-use memory.
+            for (auto& view : views_) {
+                for (auto* group : {&view.history, &view.filtered}) {
+                    for (auto& texture : *group) texture.resource.Detach();
+                }
+                for (auto* group : {&view.luma_newest, &view.luma_previous, &view.flow}) {
+                    for (auto& texture : *group) texture.resource.Detach();
+                }
+                view.output.resource.Detach();
+            }
+        }
         views_.clear();
         images_.clear();
         if (event_) {
@@ -406,13 +410,29 @@ class D3D12FrameGen final : public FrameGenGpu {
     double LastGpuMilliseconds() const override { return last_gpu_ms_; }
 
   private:
-    bool WaitForSlot(FrameSlot& slot, std::string& error) {
-        if (!slot.fence_value || fence_->GetCompletedValue() >= slot.fence_value) {
+    // Every wait shares one auto-reset event, so an earlier wait that timed
+    // out can wake a later one early: wake, then re-check the fence itself.
+    bool WaitFence(UINT64 value, DWORD timeout_ms) {
+        if (!fence_ || !value || fence_->GetCompletedValue() >= value) {
             return true;
         }
-        // Three submissions ago; only a stalled GPU gets here.
-        if (FAILED(fence_->SetEventOnCompletion(slot.fence_value, event_)) ||
-            WaitForSingleObject(event_, 100) != WAIT_OBJECT_0) {
+        if (signal_failed_ || !event_ || FAILED(fence_->SetEventOnCompletion(value, event_))) {
+            return false;
+        }
+        const ULONGLONG deadline = GetTickCount64() + timeout_ms;
+        while (fence_->GetCompletedValue() < value) {
+            const ULONGLONG now = GetTickCount64();
+            if (now >= deadline) {
+                return false;
+            }
+            WaitForSingleObject(event_, static_cast<DWORD>(std::min<ULONGLONG>(deadline - now, 10)));
+        }
+        return true;
+    }
+
+    bool WaitForSlot(FrameSlot& slot, std::string& error) {
+        // Three submissions ago; only a stalled GPU waits here.
+        if (!WaitFence(slot.fence_value, 100)) {
             error = "D3D12 Frame Generation GPU work did not finish in time";
             return false;
         }
@@ -471,9 +491,11 @@ class D3D12FrameGen final : public FrameGenGpu {
         const unsigned change = view.history_state.Configure(extent, source_desc.Format, submission.request.output,
                                                               final_level);
         const auto levels = FrameGenPyramid(extent);
-        if (change != FrameGenHistoryState::kNone) {
-            // Recent submissions may still use the textures being replaced.
-            WaitIdle();
+        if (change != FrameGenHistoryState::kNone && !WaitIdle()) {
+            // Recent submissions still use the textures being replaced.
+            view.history_state = {};
+            error = "D3D12 Frame Generation GPU work did not finish before reallocation";
+            return false;
         }
         if (change & FrameGenHistoryState::kAll || !view.output.resource) {
             view.capture.valid = false;
@@ -564,7 +586,6 @@ class D3D12FrameGen final : public FrameGenGpu {
         ID3D12Resource* source = source_it->second[submission.source.image_index];
         ID3D12Resource* output = output_it->second[submission.output.image_index];
         if (!EnsureView(view, submission, source, tuning, error)) {
-            view = {};
             return false;
         }
 
@@ -674,7 +695,7 @@ class D3D12FrameGen final : public FrameGenGpu {
     ComPtr<ID3D12GraphicsCommandList> commands_;
     std::array<FrameSlot, kFramesInFlight> slots_;
     ComPtr<ID3D12GraphicsCommandList> capture_commands_;
-    std::array<CaptureSlot, 4> capture_slots_;
+    std::array<CaptureSlot, 8> capture_slots_; // views x frames in flight
     UINT64 capture_count_{0};
     ComPtr<ID3D12Fence> fence_;
     UINT64 fence_value_{0};

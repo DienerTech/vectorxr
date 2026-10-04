@@ -214,6 +214,12 @@ unsigned FrameGenHistoryState::Configure(FrameGenExtent extent, std::int64_t sou
     return change;
 }
 
+bool FrameGenHistoryState::Matches(FrameGenExtent extent, std::int64_t source_format, FrameGenOutputKind output,
+                                   std::uint8_t final_level) const {
+    return extent.width == extent_.width && extent.height == extent_.height && extent.width && extent.height &&
+           source_format == source_format_ && output == output_ && final_level == final_level_;
+}
+
 FrameGenViewRequest FrameGenHistoryState::Effective(const FrameGenViewRequest& request) const {
     FrameGenViewRequest effective = request;
     effective.synthesize = request.synthesize && history_valid_[Previous()];

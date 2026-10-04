@@ -195,13 +195,12 @@ class D3D11FrameGen final : public FrameGenGpu {
         }
         ViewResources& view = views_[index];
         ID3D11Texture2D* texture = it->second[source.image_index];
-        FrameGenViewSubmission submission;
-        submission.source = source;
-        submission.request = request;
-        FrameGenTuning tuning;
-        tuning.quality = quality;
-        if (!EnsureView(view, submission, texture, tuning, error)) {
-            view.history_state.Invalidate();
+        D3D11_TEXTURE2D_DESC desc{};
+        texture->GetDesc(&desc);
+        // Capture never reallocates; Execute sets the view up first.
+        if (!view.output.texture ||
+            !view.history_state.Matches(request.extent, desc.Format, request.output, FrameGenFinalFlowLevel(quality))) {
+            error.clear();
             return false;
         }
         SavedState saved;
@@ -213,7 +212,7 @@ class D3D11FrameGen final : public FrameGenGpu {
     }
 
     // The immediate context keeps resources alive for queued work.
-    void WaitIdle() override {}
+    bool WaitIdle() override { return true; }
 
     bool Execute(const std::vector<FrameGenViewSubmission>& views, const FrameGenTuning& tuning,
                  FrameGenExecuteResult& result, std::string& error) override {

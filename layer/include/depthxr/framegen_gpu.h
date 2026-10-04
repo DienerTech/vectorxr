@@ -52,7 +52,9 @@ class FrameGenGpu {
     // application still owns it: called from xrReleaseSwapchainImage before
     // the release is forwarded, so the image is in its documented
     // pre-release state and no runtime work can touch it yet. Execute then
-    // skips its own copy for that view when the image matches.
+    // skips its own copy for that view when the image matches. Capture never
+    // reallocates: if the view's textures do not match the request yet it
+    // returns false with an empty error and Execute copies instead.
     virtual bool Capture(std::size_t view, const FrameGenImage& source, const FrameGenViewRequest& request,
                          FrameGenFlowQuality quality, std::string& error) = 0;
     // Records and submits generation for every view on the session's graphics
@@ -61,8 +63,9 @@ class FrameGenGpu {
     virtual bool Execute(const std::vector<FrameGenViewSubmission>& views, const FrameGenTuning& tuning,
                          FrameGenExecuteResult& result, std::string& error) = 0;
     // Blocks until every submitted command list has finished; required before
-    // freeing anything a recent submission may still use.
-    virtual void WaitIdle() = 0;
+    // freeing anything a recent submission may still use. False when the GPU
+    // did not finish in time: callers must then keep resources alive.
+    virtual bool WaitIdle() = 0;
     // Forget history (discontinuity); textures stay allocated.
     virtual void ResetHistory() = 0;
     // Teardown only: waits for outstanding work and frees every resource.

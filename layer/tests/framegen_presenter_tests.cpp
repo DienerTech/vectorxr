@@ -7,6 +7,8 @@
 
 #include <array>
 #include <atomic>
+#include <condition_variable>
+#include <deque>
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
@@ -152,7 +154,10 @@ class FakeGpu final : public FrameGenGpu {
         }
         return true;
     }
-    void WaitIdle() override { ++log_->wait_idles; }
+    bool WaitIdle() override {
+        ++log_->wait_idles;
+        return true;
+    }
     void ResetHistory() override { history_.clear(); }
     void Reset() override {}
     double LastGpuMilliseconds() const override { return 0.75; }
@@ -296,8 +301,11 @@ FrameGenSwapchainDispatch Dispatch() {
     return {Formats, Create, Destroy, Images, Acquire, WaitImage, Release};
 }
 
+constexpr XrSwapchainUsageFlags kAppUsage =
+    XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_TRANSFER_SRC_BIT;
+
 void StartPresenter(FrameGenPresenter& presenter, GpuLog& gpu, FrameGenSynthesisMode mode,
-                    std::int64_t format = kFormat) {
+                    std::int64_t format = kFormat, XrSwapchainUsageFlags usage = kAppUsage) {
     FrameGenResolvedSettings settings;
     settings.enabled = true;
     settings.synthesis_mode = mode;
@@ -305,8 +313,8 @@ void StartPresenter(FrameGenPresenter& presenter, GpuLog& gpu, FrameGenSynthesis
     presenter.SetEngagementPolicy(3, 0ms);
     presenter.Start(kSession, nullptr, Dispatch(), nullptr, nullptr,
                     [&](const void*, std::string&) { return std::make_unique<FakeGpu>(&gpu); });
-    presenter.TrackSwapchain(kLeft, format, 1);
-    presenter.TrackSwapchain(kRight, format, 1);
+    presenter.TrackSwapchain(kLeft, format, 1, usage);
+    presenter.TrackSwapchain(kRight, format, 1, usage);
     std::scoped_lock lock(g_xr_mutex);
     g_creates = 0;
     g_wait_timeouts = 0;
@@ -471,6 +479,73 @@ void TestSameThreadDoubleWait() {
     Check(!runtime.ordering_violation, "same-thread overlap kept runtime calls ordered");
 }
 
+void TestWaitThreadSeparateFromEndThread() {
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    StartPresenter(presenter, gpu, FrameGenSynthesisMode::kInterpolate);
+    App app(presenter, runtime);
+    // The spec allows waiting on one thread while another begins and ends
+    // frames, and the waiter may wait for frame N + 1 before frame N ends.
+    // That must hold the waiter, not demote the frame.
+    std::mutex mutex;
+    std::condition_variable cv;
+    std::deque<XrFrameState> ready;
+    int begun = 0;
+    constexpr int kFrames = 24;
+    std::thread waiter([&] {
+        for (int i = 0; i < kFrames; ++i) {
+            {
+                // A real runtime blocks the next wait until the previous
+                // frame has begun; it may still be rendering.
+                std::unique_lock lock(mutex);
+                cv.wait(lock, [&] { return begun >= i; });
+            }
+            const XrFrameState state = app.Wait();
+            std::scoped_lock lock(mutex);
+            ready.push_back(state);
+            cv.notify_all();
+        }
+    });
+    for (int i = 0; i < kFrames; ++i) {
+        XrFrameState state{};
+        {
+            std::unique_lock lock(mutex);
+            cv.wait(lock, [&] { return !ready.empty(); });
+            state = ready.front();
+            ready.pop_front();
+        }
+        app.Begin();
+        {
+            std::scoped_lock lock(mutex);
+            ++begun;
+            cv.notify_all();
+        }
+        std::this_thread::sleep_for(2ms); // render
+        app.Release();
+        Check(XR_SUCCEEDED(app.End(state.predictedDisplayTime)), "end on the render thread");
+    }
+    waiter.join();
+    const FrameGenStatus status = presenter.Status();
+    Check(status.demoted == 0 && status.state == FrameGenState::kActive && status.generated >= kFrames / 2,
+          "a separate wait thread keeps generating without demotions");
+    Check(!runtime.ordering_violation && !g_release_violation, "separate wait and end threads kept calls ordered");
+}
+
+void TestRefusedCaptureUsage() {
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    // The runtime refused TRANSFER_SRC, so the swapchains lack the usage the
+    // copy needs: generation must not touch them.
+    StartPresenter(presenter, gpu, FrameGenSynthesisMode::kInterpolate, kFormat, XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT);
+    App app(presenter, runtime);
+    for (int i = 0; i < 6; ++i) app.Frame();
+    Check(gpu.captures == 0 && gpu.executes == 0, "no copy from a swapchain without the copy usage");
+    Check(presenter.Status().state == FrameGenState::kUnavailable, "refused copy usage makes generation unavailable");
+    Check(!runtime.ordering_violation, "an unavailable session keeps calls ordered");
+}
+
 void TestOutputWaitTimeout() {
     FrameGenPresenter presenter;
     GpuLog gpu;
@@ -595,6 +670,8 @@ int main() {
     TestOverlappingWaitIsHeld();
     TestUnclaimedFrameIsDemoted();
     TestSameThreadDoubleWait();
+    TestWaitThreadSeparateFromEndThread();
+    TestRefusedCaptureUsage();
     TestOutputWaitTimeout();
     TestOutputFormatFallback();
     TestFailuresRetryAndToggle();

@@ -116,7 +116,10 @@ class FrameGenPresenter {
     void AbandonFrame(XrTime display_time);
 
     XrSwapchainUsageFlags SourceUsage(const XrSwapchainCreateInfo& info) const;
-    void TrackSwapchain(XrSwapchain swapchain, std::int64_t format, std::uint32_t sample_count);
+    // `usage` is what the swapchain was actually created with; a source
+    // without the backend's capture usage is never copied.
+    void TrackSwapchain(XrSwapchain swapchain, std::int64_t format, std::uint32_t sample_count,
+                        XrSwapchainUsageFlags usage);
     void ForgetSwapchain(XrSwapchain swapchain);
     void NoteRelease(XrSwapchain swapchain, std::uint32_t image_index);
     // Call before forwarding a release: captures the image into history while
@@ -135,7 +138,15 @@ class FrameGenPresenter {
     struct SwapchainRecord {
         std::int64_t format{0};
         std::uint32_t sample_count{1};
+        bool capturable{true};
         std::optional<std::uint32_t> released;
+    };
+
+    // What each output swapchain holds, readable from release threads.
+    struct OutputKinds {
+        bool valid{false};
+        FrameGenOutputKind requested{FrameGenOutputKind::kSrgb8};
+        FrameGenOutputKind kind{FrameGenOutputKind::kSrgb8};
     };
 
     struct PendingFrame {
@@ -147,7 +158,6 @@ class FrameGenPresenter {
         bool demoted{false}; // falls back to one submission in slot k
         bool claimed{false}; // its end has started; it will run its extra frame
         std::uint64_t sequence{0};
-        std::thread::id thread;
         std::chrono::steady_clock::time_point wait_return{};
     };
 
@@ -248,6 +258,9 @@ class FrameGenPresenter {
     std::uint64_t wait_sequence_{0};
     XrTime last_returned_time_{0};
     std::vector<CaptureTarget> capture_targets_;
+    std::vector<OutputKinds> output_kinds_;
+    std::thread::id end_thread_; // the thread that last ended a frame
+    bool logged_claimed_wait_{false};
 
     // Touched by the frame thread inside EndFrame (one at a time) and by
     // Stop; mutex_ guards the parts other threads read.

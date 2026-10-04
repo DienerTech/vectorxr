@@ -140,6 +140,9 @@ class FrameGenHistoryState {
 
     unsigned Configure(FrameGenExtent extent, std::int64_t source_format, FrameGenOutputKind output,
                        std::uint8_t final_level);
+    // True when Configure with these arguments would change nothing.
+    bool Matches(FrameGenExtent extent, std::int64_t source_format, FrameGenOutputKind output,
+                 std::uint8_t final_level) const;
     FrameGenViewRequest Effective(const FrameGenViewRequest& request) const;
     void Commit(bool synthesized);
     void Invalidate();
