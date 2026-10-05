@@ -482,6 +482,17 @@ enum class FrameGenFlowQuality {
     kQuality,
 };
 
+// Headset frames per real application frame. 2x holds the application at
+// half the runtime refresh rate, 3x at a third, 4x at a quarter. Auto starts
+// at 2x, steps up while the application misses its cadence, probes back down
+// when it keeps up, and passes frames through when it holds full refresh.
+enum class FrameGenMultiplier {
+    kAuto,
+    k2,
+    k3,
+    k4,
+};
+
 // Diagnostic overlays drawn into generated frames only.
 enum class FrameGenDiagnosticView {
     kOff,
@@ -493,6 +504,7 @@ enum class FrameGenDiagnosticView {
 struct FrameGenSettings {
     FrameGenSynthesisMode synthesis_mode{FrameGenSynthesisMode::kInterpolate};
     FrameGenFlowQuality flow_quality{FrameGenFlowQuality::kBalanced};
+    FrameGenMultiplier multiplier{FrameGenMultiplier::kAuto};
     // 0-100: higher falls back to the real image sooner where motion is uncertain.
     int artifact_suppression{50};
     // 2-25: largest content shift, in percent of view width, a generated frame may apply.
@@ -567,6 +579,8 @@ std::optional<FrameGenSynthesisMode> ParseFrameGenSynthesisMode(const std::strin
 const char* ToString(FrameGenFlowQuality quality);
 std::optional<FrameGenFlowQuality> ParseFrameGenFlowQuality(const std::string& value);
 const char* ToString(FrameGenDiagnosticView view);
+const char* ToString(FrameGenMultiplier multiplier);
+std::optional<FrameGenMultiplier> ParseFrameGenMultiplier(const std::string& value);
 std::optional<FrameGenDiagnosticView> ParseFrameGenDiagnosticView(const std::string& value);
 const char* ToString(ProfileMode mode);
 std::optional<ProfileMode> ParseProfileMode(const std::string& value);

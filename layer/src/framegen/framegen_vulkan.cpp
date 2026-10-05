@@ -765,15 +765,21 @@ class VulkanFrameGen final : public FrameGenGpu {
     bool RecordView(const FrameGenViewSubmission& submission, const FrameGenTuning& tuning, ViewResources& view,
                     bool& synthesized, std::string& error) {
         const auto source_it = images_.find(submission.source.swapchain);
-        const auto output_it = images_.find(submission.output.swapchain);
-        if (source_it == images_.end() || output_it == images_.end() ||
-            submission.source.image_index >= source_it->second.size() ||
-            submission.output.image_index >= output_it->second.size()) {
+        if (source_it == images_.end() || submission.source.image_index >= source_it->second.size() ||
+            submission.outputs.size() < tuning.generated) {
             error = "Frame Generation image is not tracked";
             return false;
         }
+        std::vector<VkImage> outputs;
+        for (const FrameGenImage& image : submission.outputs) {
+            const auto output_it = images_.find(image.swapchain);
+            if (output_it == images_.end() || image.image_index >= output_it->second.size()) {
+                error = "Frame Generation output image is not tracked";
+                return false;
+            }
+            outputs.push_back(output_it->second[image.image_index]);
+        }
         const VkImage source = source_it->second[submission.source.image_index];
-        const VkImage output = output_it->second[submission.output.image_index];
         if (!EnsureView(view, submission, tuning, error)) {
             return false;
         }
@@ -820,26 +826,37 @@ class VulkanFrameGen final : public FrameGenGpu {
             GlobalBarrier(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT,
                           VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
                           VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_READ_BIT);
+            bool copied = false;
+            for (std::size_t index = 0; index < outputs.size(); ++index) {
+                if (!(dispatch.copy_mask & (1u << index))) {
+                    continue;
+                }
+                const VkImage output = outputs[index];
+                const FrameGenImage& image = submission.outputs[index];
+                SwapchainBarrier(output, image.array_index, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                                 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                 VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+                                 VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                                 VK_PIPELINE_STAGE_TRANSFER_BIT);
+                VkImageCopy out{};
+                out.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+                out.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, image.array_index, 1};
+                out.dstOffset = {image.rect.offset.x, image.rect.offset.y, 0};
+                out.extent = {submission.request.extent.width, submission.request.extent.height, 1};
+                vkCmdCopyImage(commands_, view.output.image, VK_IMAGE_LAYOUT_GENERAL, output,
+                               VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &out);
+                SwapchainBarrier(output, image.array_index, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                 VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_ACCESS_TRANSFER_WRITE_BIT,
+                                 VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+                                 VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
+                copied = true;
+            }
+            if (copied) {
+                // The next synthesis (or submission) overwrites the output texture.
+                GlobalBarrier(VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_READ_BIT,
+                              VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT);
+            }
         }
-
-        SwapchainBarrier(output, submission.output.array_index, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-                         VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
-                         VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-                         VK_PIPELINE_STAGE_TRANSFER_BIT);
-        VkImageCopy out{};
-        out.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-        out.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, submission.output.array_index, 1};
-        out.dstOffset = {submission.output.rect.offset.x, submission.output.rect.offset.y, 0};
-        out.extent = {submission.request.extent.width, submission.request.extent.height, 1};
-        vkCmdCopyImage(commands_, view.output.image, VK_IMAGE_LAYOUT_GENERAL, output, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1,
-                       &out);
-        SwapchainBarrier(output, submission.output.array_index, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                         VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_ACCESS_TRANSFER_WRITE_BIT,
-                         VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
-                         VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
-        // The next submission's first dispatch overwrites this view's output.
-        GlobalBarrier(VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_READ_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                      VK_ACCESS_SHADER_WRITE_BIT);
         synthesized = plan.synthesize;
         return true;
     }

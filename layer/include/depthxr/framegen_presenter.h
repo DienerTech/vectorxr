@@ -64,18 +64,23 @@ struct FrameGenStatus {
     std::uint64_t demoted{0};
     std::uint64_t captured{0};
     bool retry_pending{false};
+    std::uint32_t multiplier{2}; // headset frames per real frame in use
+    bool automatic{false};       // the multiplier is chosen automatically
+    bool full_rate{false};       // automatic and the app holds full refresh
 };
 
 // Frame Generation pacing for one OpenXR session.
 //
-// While engaged, every application frame owns two runtime frames. The app's
-// xrWaitFrame takes the runtime's slot k but reports the following slot,
-// k + 1, with a doubled period, so the app renders for the time its frame is
-// really shown. Inside the app's xrEndFrame the presenter submits slot k with
-// a generated frame (interpolated between the previous and newest real frames,
-// or extrapolated past the previous real frame), then runs one extra runtime
-// wait/begin/end for slot k + 1 with the app's own layers. The app is thereby
-// held at exactly half the runtime rate.
+// While engaged at multiplier N, every application frame owns N runtime
+// frames. The app's xrWaitFrame takes the runtime's slot k but reports slot
+// k + N - 1 with an N-fold period, so the app renders for the time its frame
+// is really shown. Inside the app's xrEndFrame the presenter submits slots k
+// to k + N - 2 with generated frames (interpolated between the previous and
+// newest real frames, or extrapolated past the previous real frame), each
+// after one extra runtime wait/begin, then slot k + N - 1 with the app's own
+// layers. The app is thereby held at 1/N of the runtime rate. Consecutive
+// submissions are kept most of a refresh apart for runtimes that do not
+// pace xrWaitFrame themselves.
 //
 // Runtime frame calls must never overlap, so a wait arriving while an engaged
 // frame is in progress is held until that frame has ended. An engaged frame
@@ -104,6 +109,12 @@ class FrameGenPresenter {
     void SetConfigured(bool enabled);
     // Steady renderable frames and session age required before engaging.
     void SetEngagementPolicy(std::uint32_t steady_frames, std::chrono::milliseconds minimum_session_age);
+    // Timing of the automatic multiplier (tests shorten it): how long a change
+    // settles before it is judged, how long the app must hold its cadence
+    // before probing one step down, how long a probe must hold, and the first
+    // wait between probes (doubling after each failed probe).
+    void SetAutoPolicy(std::chrono::milliseconds settle, std::chrono::milliseconds steady,
+                       std::chrono::milliseconds probe_confirm, std::chrono::milliseconds probe_backoff);
     // Delay before a paused session retries by itself, and how often.
     void SetRetryPolicy(std::chrono::milliseconds delay, std::uint32_t attempts);
     // In-session A/B toggle; also retries after a pause. Returns the new
@@ -156,7 +167,8 @@ class FrameGenPresenter {
         bool should_render{false};
         bool engaged{false};
         bool demoted{false}; // falls back to one submission in slot k
-        bool claimed{false}; // its end has started; it will run its extra frame
+        bool claimed{false}; // its end has started; it will run its extra frames
+        std::uint32_t multiplier{2};
         std::uint64_t sequence{0};
         std::chrono::steady_clock::time_point wait_return{};
     };
@@ -183,14 +195,16 @@ class FrameGenPresenter {
         bool acquired{false};
         bool waited{false};
         std::uint32_t index{0};
+        std::uint32_t image_count{0};
     };
 
-    // Generated projection views waiting for their slot (extrapolation).
+    // Generated projection views waiting for their slots (extrapolation),
+    // one set of views per generated frame.
     struct Generated {
         bool valid{false};
         XrSpace space{XR_NULL_HANDLE};
         XrCompositionLayerFlags flags{0};
-        std::vector<XrCompositionLayerProjectionView> views;
+        std::vector<std::vector<XrCompositionLayerProjectionView>> sets;
     };
 
     // A projection view's source region, captured when its swapchain releases.
@@ -202,6 +216,9 @@ class FrameGenPresenter {
     };
 
     bool WantsEngagementLocked() const;
+    bool RunnableLocked() const;
+    std::uint32_t EffectiveMultiplierLocked() const;
+    void UpdateAutoLocked(std::chrono::steady_clock::time_point now, const std::optional<PendingFrame>& frame);
     void MaybeRetryLocked();
     void PauseLocked(const std::string& reason);
     void UnavailableLocked(const std::string& reason);
@@ -210,16 +227,20 @@ class FrameGenPresenter {
     std::optional<FrameGenOutputKind> OutputKindLocked(std::size_t view, std::int64_t source_format) const;
 
     XrResult SubmitAt(XrSession session, const XrFrameEndInfo& info, XrTime time, const FrameGenRuntimeCalls& calls);
-    XrResult SubmitSecond(XrSession session, const XrFrameEndInfo& info, const PendingFrame& frame,
-                          const FrameGenRuntimeCalls& calls);
-    XrResult RunPair(XrSession session, const XrFrameEndInfo& info, const PendingFrame& frame,
-                     const FrameGenRuntimeCalls& calls);
-    // Generates into the output swapchains from the newest real frame. On
-    // success `views` holds the generated projection views.
-    bool Generate(const XrCompositionLayerProjection& projection, const PendingFrame& frame, float fraction,
-                  std::vector<XrCompositionLayerProjectionView>& views);
+    void NotePhaseLocked(std::chrono::steady_clock::time_point called, std::chrono::steady_clock::time_point returned,
+                         XrTime display_time, XrDuration period);
+    void PaceSubmission(XrTime display_time, XrDuration period);
+    XrResult NextSlot(XrSession session, const FrameGenRuntimeCalls& calls, XrDuration period, XrFrameState& state);
+    XrResult RunCycle(XrSession session, const XrFrameEndInfo& info, const PendingFrame& frame,
+                      const FrameGenRuntimeCalls& calls);
+    // Generates one frame per fraction into the output swapchain sets from
+    // the newest real frame. On success `sets` holds the generated
+    // projection views, one set per fraction.
+    bool Generate(const XrCompositionLayerProjection& projection, const PendingFrame& frame,
+                  const std::vector<float>& fractions,
+                  std::vector<std::vector<XrCompositionLayerProjectionView>>& sets);
     bool EnsureOutputs(const XrCompositionLayerProjection& projection, const std::vector<FrameGenOutputKind>& kinds,
-                       std::string& error);
+                       std::size_t sets, std::string& error);
     bool AcquireOutputs(std::string& error, bool& timed_out);
     void DestroyOutputs();
     void ReleaseOutputs();
@@ -245,6 +266,10 @@ class FrameGenPresenter {
     std::uint32_t healthy_streak_{0};
     std::uint32_t engage_streak_frames_{45};
     std::chrono::milliseconds engage_min_age_{3000};
+    std::chrono::milliseconds auto_settle_{2000};
+    std::chrono::milliseconds auto_steady_{5000};
+    std::chrono::milliseconds auto_probe_confirm_{15000};
+    std::chrono::milliseconds auto_initial_backoff_{10000};
     std::chrono::milliseconds retry_delay_{10000};
     std::uint32_t retry_attempts_{3};
     std::optional<std::chrono::steady_clock::time_point> paused_at_;
@@ -265,8 +290,28 @@ class FrameGenPresenter {
     // Touched by the frame thread inside EndFrame (one at a time) and by
     // Stop; mutex_ guards the parts other threads read.
     RealFrame last_real_;
-    std::vector<Output> outputs_;
+    std::vector<std::vector<Output>> output_sets_; // [generated frame][view]
     Generated extrapolated_;
+    std::chrono::steady_clock::time_point last_runtime_submit_{};
+    XrDuration last_period_{0};
+    // The runtime's own cadence: when a runtime wait blocked and returned for
+    // display time phase_xr_ at phase_wall_, the wait for display time t
+    // would return at phase_wall_ + (t - phase_xr_).
+    std::chrono::steady_clock::time_point phase_wall_{};
+    XrTime phase_xr_{0};
+
+    // Automatic multiplier: steps up while the app misses its cadence, probes
+    // one step down after a steady stretch, backing off when a probe fails.
+    std::uint32_t auto_multiplier_{2}; // 1 = full rate, no generation
+    bool full_rate_{false};
+    std::deque<std::pair<std::chrono::steady_clock::time_point, bool>> cadence_; // (end time, late)
+    std::optional<std::chrono::steady_clock::time_point> last_app_end_;
+    std::chrono::steady_clock::time_point multiplier_changed_at_{};
+    std::chrono::steady_clock::time_point probe_not_before_{};
+    std::chrono::milliseconds probe_backoff_{10000};
+    bool probing_{false};
+    std::uint32_t probe_from_{0};
+    std::size_t auto_late_percent_{0}; // for the log
 
     std::uint64_t generated_{0};
     std::uint64_t repeated_{0};

@@ -86,11 +86,18 @@ Frame Generation is latched per session in `xrCreateSession`. When it owns pacin
 `FrameGenPresenter` (`layer/src/framegen/framegen_presenter.cpp`) takes the application's
 frame calls:
 
-- The app's `xrWaitFrame` waits on runtime slot *k* but reports slot *k + 1* with a doubled
-  period, so the app renders for the time its frame is shown and runs at half the refresh rate.
-- The app's `xrEndFrame` submits slot *k* with a generated frame, then makes one extra runtime
-  wait/begin/end for slot *k + 1* with the app's own layers. Both submissions go through the
-  layer's normal final submission, so they carry the OSD layer.
+- At multiplier *N* (2x, 3x, 4x, or chosen automatically), the app's `xrWaitFrame` waits on
+  runtime slot *k* but reports slot *k + N - 1* with an *N*-fold period, so the app renders
+  for the time its frame is shown and runs at 1/*N* of the refresh rate.
+- The app's `xrEndFrame` submits slots *k* to *k + N - 2* with generated frames, each after an
+  extra runtime wait/begin, then slot *k + N - 1* with the app's own layers. Every submission
+  goes through the layer's normal final submission, so it carries the OSD layer. Each slot is
+  held until the runtime would have released its wait, measured from the last runtime wait
+  that blocked, and at least most of a refresh after the previous submission, because some
+  runtimes return waits inside a cycle at once and would show only the newest frame.
+- Auto steps the multiplier up when more than 30% of the last second's app frames miss the
+  cadence, and probes one step down after five steady seconds, doubling the wait between
+  probes (10 s to 80 s) each time a probe fails. At 1x it passes frames straight through.
 - A wait that arrives while an engaged frame is still ending is held, so runtime frame calls
   never overlap even for applications that wait on one thread while ending on another.
 - Turbo yields for the session; the two features pace frames in opposite directions.

@@ -26,7 +26,9 @@ struct FrameGenImage {
 
 struct FrameGenViewSubmission {
     FrameGenImage source; // newest real frame, already released by the app
-    FrameGenImage output; // acquired and waited image of a layer-owned output swapchain
+    // Acquired and waited images of layer-owned output swapchains, one per
+    // generated frame (FrameGenTuning::generated).
+    std::vector<FrameGenImage> outputs;
     FrameGenViewRequest request;
 };
 

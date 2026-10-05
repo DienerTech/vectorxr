@@ -295,6 +295,27 @@ std::optional<FrameGenDiagnosticView> ParseFrameGenDiagnosticView(const std::str
     return std::nullopt;
 }
 
+const char* ToString(FrameGenMultiplier multiplier) {
+    switch (multiplier) {
+    case FrameGenMultiplier::k2:
+        return "2x";
+    case FrameGenMultiplier::k3:
+        return "3x";
+    case FrameGenMultiplier::k4:
+        return "4x";
+    default:
+        return "auto";
+    }
+}
+
+std::optional<FrameGenMultiplier> ParseFrameGenMultiplier(const std::string& value) {
+    if (value == "auto") return FrameGenMultiplier::kAuto;
+    if (value == "2x") return FrameGenMultiplier::k2;
+    if (value == "3x") return FrameGenMultiplier::k3;
+    if (value == "4x") return FrameGenMultiplier::k4;
+    return std::nullopt;
+}
+
 const char* ToString(ProfileMode mode) {
     switch (mode) {
     case ProfileMode::Custom:

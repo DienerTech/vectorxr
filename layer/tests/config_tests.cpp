@@ -1212,6 +1212,8 @@ void TestFrameGenModuleOptional() {
            "Frame Generation numeric defaults changed");
     Expect(resolved.framegen.diagnostic_view == depthxr::FrameGenDiagnosticView::kOff,
            "Frame Generation diagnostics should default off");
+    Expect(resolved.framegen.multiplier == depthxr::FrameGenMultiplier::kAuto,
+           "Frame Generation should default to the automatic multiplier");
     Expect(resolved.core.osd.show_framegen && !resolved.core.osd.compact_show_framegen,
            "OSD Frame Gen rows should default to full-panel only");
     Expect(resolved.core.osd.body_order.size() == 5 && resolved.core.osd.body_order[2] == "framegen",
@@ -1223,12 +1225,12 @@ void TestFrameGenProfileResolution() {
       "enabled": false,
       "diagnosticView": "tint",
       "toggleBinding": { "type": "keyboard", "chord": ["Ctrl", "Alt", "F9"] },
-      "defaults": { "synthesisMode": "interpolate", "flowQuality": "performance", "artifactSuppression": 40, "motionLimitPercent": 8 },
+      "defaults": { "synthesisMode": "interpolate", "flowQuality": "performance", "frameMultiplier": "2x", "artifactSuppression": 40, "motionLimitPercent": 8 },
       "profiles": [
         { "name": "Disabled", "enabled": false, "applicationIds": ["app-dcs"],
           "settings": { "synthesisMode": "interpolate", "flowQuality": "quality" } },
         { "name": "DCS", "enabled": true, "applicationIds": ["app-dcs"],
-          "settings": { "synthesisMode": "extrapolate", "flowQuality": "quality", "artifactSuppression": 75, "motionLimitPercent": 25 } }
+          "settings": { "synthesisMode": "extrapolate", "flowQuality": "quality", "frameMultiplier": "4x", "artifactSuppression": 75, "motionLimitPercent": 25 } }
       ]
     })json";
     const depthxr::ParseResult result = depthxr::ParseConfig(FrameGenConfigJson(module));
@@ -1244,6 +1246,7 @@ void TestFrameGenProfileResolution() {
                dcs.flow_quality == depthxr::FrameGenFlowQuality::kQuality &&
                dcs.artifact_suppression == 75 && dcs.motion_limit_percent == 25,
            "Profile settings did not replace defaults");
+    Expect(dcs.multiplier == depthxr::FrameGenMultiplier::k4, "Profile frame multiplier did not apply");
     Expect(dcs.diagnostic_view == depthxr::FrameGenDiagnosticView::kTint,
            "Module diagnostic view should apply to profiles");
 
@@ -1255,7 +1258,8 @@ void TestFrameGenProfileResolution() {
 }
 
 void TestFrameGenInvalidSettingsRejected() {
-    const std::array<std::string, 6> invalid_modules{
+    const std::array<std::string, 7> invalid_modules{
+        R"json({ "enabled": true, "defaults": { "frameMultiplier": "6x" } })json",
         R"json({ "enabled": true, "defaults": { "synthesisMode": "blend" } })json",
         R"json({ "enabled": true, "defaults": { "flowQuality": "ultra" } })json",
         R"json({ "enabled": true, "defaults": { "artifactSuppression": 101 } })json",

@@ -424,15 +424,21 @@ class D3D11FrameGen final : public FrameGenGpu {
     bool ExecuteView(const FrameGenViewSubmission& submission, const FrameGenTuning& tuning, ViewResources& view,
                      bool& synthesized, std::string& error) {
         const auto source_it = images_.find(submission.source.swapchain);
-        const auto output_it = images_.find(submission.output.swapchain);
-        if (source_it == images_.end() || output_it == images_.end() ||
-            submission.source.image_index >= source_it->second.size() ||
-            submission.output.image_index >= output_it->second.size()) {
+        if (source_it == images_.end() || submission.source.image_index >= source_it->second.size() ||
+            submission.outputs.size() < tuning.generated) {
             error = "Frame Generation image is not tracked";
             return false;
         }
+        std::vector<ID3D11Texture2D*> outputs;
+        for (const FrameGenImage& image : submission.outputs) {
+            const auto output_it = images_.find(image.swapchain);
+            if (output_it == images_.end() || image.image_index >= output_it->second.size()) {
+                error = "Frame Generation output image is not tracked";
+                return false;
+            }
+            outputs.push_back(output_it->second[image.image_index]);
+        }
         ID3D11Texture2D* source = source_it->second[submission.source.image_index];
-        ID3D11Texture2D* output = output_it->second[submission.output.image_index];
         if (!EnsureView(view, submission, source, tuning, error)) {
             view.history_state.Invalidate();
             return false;
@@ -465,14 +471,18 @@ class D3D11FrameGen final : public FrameGenGpu {
             constexpr std::array<ID3D11UnorderedAccessView*, 2> no_uavs{};
             context_->CSSetShaderResources(0, 4, no_srvs.data());
             context_->CSSetUnorderedAccessViews(0, 2, no_uavs.data(), nullptr);
+            for (std::size_t index = 0; index < outputs.size(); ++index) {
+                if (!(dispatch.copy_mask & (1u << index))) {
+                    continue;
+                }
+                D3D11_TEXTURE2D_DESC output_desc{};
+                outputs[index]->GetDesc(&output_desc);
+                const FrameGenImage& image = submission.outputs[index];
+                context_->CopySubresourceRegion(outputs[index], D3D11CalcSubresource(0, image.array_index, output_desc.MipLevels),
+                                                static_cast<UINT>(image.rect.offset.x), static_cast<UINT>(image.rect.offset.y),
+                                                0, view.output.texture.Get(), 0, nullptr);
+            }
         }
-
-        D3D11_TEXTURE2D_DESC output_desc{};
-        output->GetDesc(&output_desc);
-        const auto& out_rect = submission.output.rect;
-        context_->CopySubresourceRegion(output, D3D11CalcSubresource(0, submission.output.array_index, output_desc.MipLevels),
-                                        static_cast<UINT>(out_rect.offset.x), static_cast<UINT>(out_rect.offset.y), 0,
-                                        view.output.texture.Get(), 0, nullptr);
         synthesized = plan.synthesize;
         view.history_state.Commit(plan.synthesize);
         view.capture.valid = false;

@@ -177,6 +177,7 @@ struct Runtime {
     std::atomic<int> wait_sleep_ms{0};
     bool begun{false};
     std::vector<XrTime> submitted_times;
+    std::vector<std::chrono::steady_clock::time_point> submitted_at;
     std::vector<std::vector<XrSwapchain>> submitted_swapchains;
     std::vector<bool> submitted_depth;
 
@@ -204,6 +205,7 @@ struct Runtime {
             begun = false;
             if (fail_next_submit.exchange(false)) return XR_ERROR_TIME_INVALID;
             submitted_times.push_back(info->displayTime);
+            submitted_at.push_back(std::chrono::steady_clock::now());
             std::vector<XrSwapchain> swapchains;
             bool depth = false;
             if (info->layerCount) {
@@ -305,10 +307,12 @@ constexpr XrSwapchainUsageFlags kAppUsage =
     XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_TRANSFER_SRC_BIT;
 
 void StartPresenter(FrameGenPresenter& presenter, GpuLog& gpu, FrameGenSynthesisMode mode,
-                    std::int64_t format = kFormat, XrSwapchainUsageFlags usage = kAppUsage) {
+                    std::int64_t format = kFormat, XrSwapchainUsageFlags usage = kAppUsage,
+                    FrameGenMultiplier multiplier = FrameGenMultiplier::k2) {
     FrameGenResolvedSettings settings;
     settings.enabled = true;
     settings.synthesis_mode = mode;
+    settings.multiplier = multiplier;
     presenter.Configure(settings);
     presenter.SetEngagementPolicy(3, 0ms);
     presenter.Start(kSession, nullptr, Dispatch(), nullptr, nullptr,
@@ -363,7 +367,8 @@ void TestInterpolationPacing() {
     app.Frame();
     Check(gpu.executes == 2 && gpu.last[0].request.synthesize && gpu.last[1].request.synthesize,
           "continuous frames synthesize");
-    Check(std::abs(gpu.tuning.fraction - 0.5f) < 1e-4f, "interpolation sits halfway between real frames");
+    Check(gpu.tuning.generated == 1 && std::abs(gpu.tuning.fractions[0] - 0.5f) < 1e-4f,
+          "interpolation sits halfway between real frames");
     Check(presenter.Status().state == FrameGenState::kActive && presenter.Status().generated == 1, "active and generating");
 
     // A frame without layers keeps its slot and skips the extra runtime frame.
@@ -388,13 +393,135 @@ void TestExtrapolationPacing() {
     Check(gpu.executes == 1, "extrapolation generates after the first submission");
     app.Frame();
     Check(runtime.submitted_swapchains[5][0] != kLeft, "next slot k shows the extrapolated frame");
-    Check(std::abs(gpu.tuning.fraction - 0.5f) < 1e-4f, "extrapolation pushes half an app frame forward");
+    Check(gpu.tuning.generated == 1 && std::abs(gpu.tuning.fractions[0] - 0.5f) < 1e-4f,
+          "extrapolation pushes half an app frame forward");
     // A recreated reference space must not reach the runtime through a stale
     // extrapolated layer.
     app.projection.space = reinterpret_cast<XrSpace>(0x3);
     app.Frame();
     Check(runtime.submitted_swapchains[7][0] == kLeft, "a space change repeats the real frame instead of a stale layer");
     Check(!runtime.ordering_violation && !g_release_violation, "extrapolation kept calls ordered");
+}
+
+bool IsAppImage(const std::vector<XrSwapchain>& swapchains) {
+    return swapchains.size() == 2 && swapchains[0] == kLeft && swapchains[1] == kRight;
+}
+
+void TestTripleInterpolation() {
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    StartPresenter(presenter, gpu, FrameGenSynthesisMode::kInterpolate, kFormat, kAppUsage, FrameGenMultiplier::k3);
+    App app(presenter, runtime);
+    for (int i = 0; i < 3; ++i) app.Frame();
+
+    // Engaged at 3x: each app frame owns three runtime frames.
+    const XrTime slot = runtime.next_display.load();
+    const XrFrameState first = app.Frame();
+    Check(first.predictedDisplayPeriod == 3 * kPeriod, "3x: the app sees a tripled period");
+    Check(first.predictedDisplayTime == slot + 2 * kPeriod, "3x: the app renders for the cycle's last slot");
+    Check(runtime.Submissions() == 6, "3x: an engaged frame submits three runtime frames");
+    Check(runtime.submitted_times[3] == slot && runtime.submitted_times[4] == slot + kPeriod &&
+              runtime.submitted_times[5] == slot + 2 * kPeriod,
+          "3x: slots k, k + 1 and k + 2 in order");
+    Check(!IsAppImage(runtime.submitted_swapchains[3]) && !IsAppImage(runtime.submitted_swapchains[4]) &&
+              IsAppImage(runtime.submitted_swapchains[5]),
+          "3x: two generated frames, then the real frame");
+    Check(runtime.submitted_swapchains[3][0] != runtime.submitted_swapchains[4][0],
+          "3x: each generated frame has its own output swapchain");
+    Check(g_creates == 4, "3x: two output sets of two views");
+
+    app.Frame();
+    Check(gpu.tuning.generated == 2 && std::abs(gpu.tuning.fractions[0] - 1.0f / 3.0f) < 1e-4f &&
+              std::abs(gpu.tuning.fractions[1] - 2.0f / 3.0f) < 1e-4f,
+          "3x: interpolation at one and two thirds");
+    Check(gpu.last[0].outputs.size() == 2, "3x: one execute writes both generated frames");
+    Check(presenter.Status().multiplier == 3 && !presenter.Status().automatic, "3x: status reports the multiplier");
+    Check(presenter.OsdText().find("3x") != std::string::npos, "3x: the OSD shows the multiplier");
+    Check(!runtime.ordering_violation && !g_release_violation, "3x: runtime and image calls stayed ordered");
+}
+
+void TestQuadExtrapolation() {
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    StartPresenter(presenter, gpu, FrameGenSynthesisMode::kExtrapolate, kFormat, kAppUsage, FrameGenMultiplier::k4);
+    App app(presenter, runtime);
+    for (int i = 0; i < 3; ++i) app.Frame();
+    const XrTime slot = runtime.next_display.load();
+    const XrFrameState first = app.Frame();
+    Check(first.predictedDisplayPeriod == 4 * kPeriod && first.predictedDisplayTime == slot + 3 * kPeriod,
+          "4x: the app renders for the fourth slot");
+    Check(runtime.Submissions() == 7, "4x: an engaged frame submits four runtime frames");
+    for (int i = 3; i < 7; ++i) {
+        Check(IsAppImage(runtime.submitted_swapchains[i]), "4x: nothing extrapolated yet repeats the real frame");
+    }
+    app.Frame();
+    Check(!IsAppImage(runtime.submitted_swapchains[7]) && !IsAppImage(runtime.submitted_swapchains[8]) &&
+              !IsAppImage(runtime.submitted_swapchains[9]) && IsAppImage(runtime.submitted_swapchains[10]),
+          "4x: three extrapolated frames, then the real frame");
+    for (int i = 7; i < 11; ++i) {
+        Check(runtime.submitted_times[i] == slot + (i - 3) * kPeriod, "4x: one slot per refresh");
+    }
+    Check(gpu.tuning.generated == 3 && std::abs(gpu.tuning.fractions[0] - 0.25f) < 1e-4f &&
+              std::abs(gpu.tuning.fractions[1] - 0.5f) < 1e-4f && std::abs(gpu.tuning.fractions[2] - 0.75f) < 1e-4f,
+          "4x: extrapolation one, two and three refreshes past the real frame");
+    Check(!runtime.ordering_violation && !g_release_violation, "4x: runtime and image calls stayed ordered");
+}
+
+void TestSubmissionSpacing() {
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime; // its waits return at once, like PiOpenXR's inside a cycle
+    StartPresenter(presenter, gpu, FrameGenSynthesisMode::kExtrapolate, kFormat, kAppUsage, FrameGenMultiplier::k3);
+    App app(presenter, runtime);
+    for (int i = 0; i < 3; ++i) app.Frame();
+    const std::size_t first = runtime.Submissions();
+    for (int i = 0; i < 4; ++i) app.Frame();
+    const auto minimum = std::chrono::nanoseconds(kPeriod * 8 / 10);
+    bool spaced = true;
+    for (std::size_t i = first + 1; i < runtime.submitted_at.size(); ++i) {
+        spaced = spaced && runtime.submitted_at[i] - runtime.submitted_at[i - 1] >= minimum;
+    }
+    Check(spaced, "consecutive engaged submissions are most of a refresh apart");
+}
+
+void TestAutomaticMultiplier() {
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    StartPresenter(presenter, gpu, FrameGenSynthesisMode::kExtrapolate, kFormat, kAppUsage, FrameGenMultiplier::kAuto);
+    presenter.SetAutoPolicy(200ms, 500ms, 600ms, 300ms);
+    App app(presenter, runtime);
+    Check(presenter.Status().automatic && presenter.Status().multiplier == 2, "auto starts at 2x");
+
+    // An app slower than 2x can hold steps up.
+    auto run = [&](std::chrono::milliseconds duration, std::chrono::milliseconds render) {
+        const auto end = std::chrono::steady_clock::now() + duration;
+        while (std::chrono::steady_clock::now() < end) {
+            const XrFrameState state = app.Wait();
+            app.Begin();
+            std::this_thread::sleep_for(render);
+            app.Release();
+            Check(XR_SUCCEEDED(app.End(state.predictedDisplayTime)), "auto: end");
+        }
+    };
+    run(1500ms, 30ms);
+    Check(presenter.Status().multiplier >= 3, "auto: a slow app steps up to 3x or more");
+    Check(app.Frame().predictedDisplayPeriod == presenter.Status().multiplier * kPeriod,
+          "auto: the app's period follows the multiplier");
+
+    // A fast app is probed back down, all the way to full rate.
+    run(4000ms, 0ms);
+    Check(presenter.Status().full_rate && presenter.Status().state == FrameGenState::kActive,
+          "auto: an app that holds full refresh runs without generation");
+    Check(app.Frame().predictedDisplayPeriod == kPeriod, "auto: full rate passes frames through");
+    Check(presenter.OsdText().find("full rate") != std::string::npos, "auto: the OSD says full rate");
+
+    // Slow again: generation comes back.
+    run(1500ms, 20ms); // the fake runtime let the fast phase run thousands of frames a second
+    Check(!presenter.Status().full_rate && presenter.Status().multiplier >= 2, "auto: a slower app re-engages");
+    Check(!runtime.ordering_violation && !g_release_violation, "auto: calls stayed ordered through changes");
 }
 
 void TestOverlappingWaitIsHeld() {
@@ -667,6 +794,10 @@ void TestUnavailableWithoutBackend() {
 int main() {
     TestInterpolationPacing();
     TestExtrapolationPacing();
+    TestTripleInterpolation();
+    TestQuadExtrapolation();
+    TestSubmissionSpacing();
+    TestAutomaticMultiplier();
     TestOverlappingWaitIsHeld();
     TestUnclaimedFrameIsDemoted();
     TestSameThreadDoubleWait();

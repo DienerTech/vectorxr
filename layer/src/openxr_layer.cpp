@@ -1542,6 +1542,7 @@ bool SameSettings(const ResolvedRuntimeConfig& lhs, const ResolvedRuntimeConfig&
            lhs.framegen.profile_name == rhs.framegen.profile_name &&
            lhs.framegen.synthesis_mode == rhs.framegen.synthesis_mode &&
            lhs.framegen.flow_quality == rhs.framegen.flow_quality &&
+           lhs.framegen.multiplier == rhs.framegen.multiplier &&
            lhs.framegen.artifact_suppression == rhs.framegen.artifact_suppression &&
            lhs.framegen.motion_limit_percent == rhs.framegen.motion_limit_percent &&
            lhs.framegen.diagnostic_view == rhs.framegen.diagnostic_view &&
@@ -11320,6 +11321,7 @@ void OpenXrLayer::LogResolvedSettings(const ResolvedRuntimeConfig& settings) {
            << ", framegenProfile=" << settings.framegen.profile_name
            << ", framegenMode=" << ToString(settings.framegen.synthesis_mode)
            << ", framegenFlowQuality=" << ToString(settings.framegen.flow_quality)
+           << ", framegenMultiplier=" << ToString(settings.framegen.multiplier)
            << ", framegenArtifactSuppression=" << settings.framegen.artifact_suppression
            << ", framegenMotionLimitPercent=" << settings.framegen.motion_limit_percent
            << ", framegenDiagnosticView=" << ToString(settings.framegen.diagnostic_view)
@@ -13068,6 +13070,11 @@ void OpenXrLayer::PollRuntimeRelay() {
         const FrameGenStatus framegen = framegen_.Status();
         status.framegen_state = ToString(framegen.state);
         status.framegen_reason = framegen.reason;
+        if (framegen.state == FrameGenState::kActive && status.framegen_reason.empty())
+            status.framegen_reason = framegen.full_rate ? "Auto, full rate: no generation needed."
+                : std::string(framegen.automatic ? "Auto " : "") + std::to_string(framegen.multiplier) + "x, " +
+                  std::to_string(static_cast<int>(framegen.app_fps + 0.5)) + " -> " +
+                  std::to_string(static_cast<int>(framegen.output_fps + 0.5)) + " fps.";
         if (status.turbo_reason.empty() && turbo_auto_suspended_.load())
             status.turbo_reason = "Runtime pacing repeatedly stalled. Use the Turbo toggle to retry.";
 

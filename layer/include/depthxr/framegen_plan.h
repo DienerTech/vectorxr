@@ -64,6 +64,8 @@ inline constexpr std::uint32_t kFrameGenFlagStill = 8u;
 inline constexpr std::uint32_t kFrameGenThreadGroupSize = 8u;
 inline constexpr std::uint8_t kFrameGenPyramidLevels = 5;
 inline constexpr std::uint32_t kFrameGenSearchRadius = 6;
+// Generated frames per real frame at most (a 4x multiplier).
+inline constexpr std::size_t kFrameGenMaxGenerated = 3;
 
 struct FrameGenDispatch {
     FrameGenPass pass{FrameGenPass::kLuma};
@@ -72,6 +74,9 @@ struct FrameGenDispatch {
     std::uint32_t width{0};  // threads, not groups
     std::uint32_t height{0};
     FrameGenConstants constants{};
+    // After this dispatch, copy the output texture to every generated-frame
+    // output whose bit is set.
+    std::uint8_t copy_mask{0};
 };
 
 enum class FrameGenOutputKind : std::uint8_t {
@@ -114,10 +119,12 @@ struct FrameGenTuning {
     FrameGenDiagnosticView diagnostic{FrameGenDiagnosticView::kOff};
     int artifact_suppression{50};
     int motion_limit_percent{10};
-    // Interpolation: generated time between the previous (0) and newest (1)
-    // real frames. Extrapolation: distance past the newest frame, in units of
-    // the interval between the two real frames.
-    float fraction{0.5f};
+    // One entry per generated frame (`generated` of them). Interpolation:
+    // generated time between the previous (0) and newest (1) real frames.
+    // Extrapolation: distance past the newest frame, in units of the interval
+    // between the two real frames. One flow field serves every fraction.
+    std::array<float, kFrameGenMaxGenerated> fractions{0.5f, 0.5f, 0.5f};
+    std::uint8_t generated{1};
 };
 
 struct FrameGenViewPlan {

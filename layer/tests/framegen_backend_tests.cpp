@@ -176,12 +176,14 @@ XrResult XRAPI_PTR EnumerateImages(XrSwapchain swapchain, std::uint32_t capacity
 
 const XrSwapchain kSource = reinterpret_cast<XrSwapchain>(0x51);
 const XrSwapchain kOutput = reinterpret_cast<XrSwapchain>(0x52);
+const XrSwapchain kOutputSecond = reinterpret_cast<XrSwapchain>(0x54);
 
 FrameGenViewSubmission Submission(std::uint32_t source_index, std::int64_t format, std::int64_t output_format, bool synthesize,
                                   float yaw_newest, float yaw_previous) {
     FrameGenViewSubmission view;
     view.source = {kSource, source_index, 0, {{0, 0}, {static_cast<int>(kSize), static_cast<int>(kSize)}}, format};
-    view.output = {kOutput, 0, 0, {{0, 0}, {static_cast<int>(kSize), static_cast<int>(kSize)}}, output_format};
+    view.outputs = {{kOutput, 0, 0, {{0, 0}, {static_cast<int>(kSize), static_cast<int>(kSize)}}, output_format},
+                    {kOutputSecond, 0, 0, {{0, 0}, {static_cast<int>(kSize), static_cast<int>(kSize)}}, output_format}};
     view.request.extent = {kSize, kSize};
     view.request.output = FrameGenOutputKind::kSrgb8;
     view.request.synthesize = synthesize;
@@ -207,7 +209,10 @@ int RunScenarios(Harness& harness) {
 
     g_swapchains[kSource] = {harness.create(kSize, kSize), harness.create(kSize, kSize), harness.create(kSize, kSize)};
     g_swapchains[kOutput] = {harness.create(kSize, kSize)};
-    Check(gpu->Track(kSource, EnumerateImages, error) && gpu->Track(kOutput, EnumerateImages, error), error);
+    g_swapchains[kOutputSecond] = {harness.create(kSize, kSize)};
+    Check(gpu->Track(kSource, EnumerateImages, error) && gpu->Track(kOutput, EnumerateImages, error) &&
+              gpu->Track(kOutputSecond, EnumerateImages, error),
+          error);
 
     FrameGenTuning tuning;
     FrameGenExecuteResult result;
@@ -230,7 +235,7 @@ int RunScenarios(Harness& harness) {
 
     // 2. Interpolation halfway between A and B: the square sits at (128, 124).
     tuning.mode = FrameGenSynthesisMode::kInterpolate;
-    tuning.fraction = 0.5f;
+    tuning.fractions[0] = 0.5f;
     const Pixels interpolated = run(1, true, 0, 0);
     Check(result.synthesized[0], harness.name + " interpolation did not synthesize");
     const Pixels truth_mid = MovingSquare(128, 124);
@@ -250,6 +255,25 @@ int RunScenarios(Harness& harness) {
     std::cout << harness.name << " interpolate: error " << interp_error << " vs hold " << hold_error << '\n';
     Check(interp_error < 0.3 * hold_error, harness.name + " interpolation is not better than repeating the newest frame");
     Check(MeanError(interpolated, truth_mid, 0, 0, 64, 64) < 0.01, harness.name + " static background was disturbed");
+
+    // 2b. A 3x multiplier: one flow field feeds two generated frames.
+    {
+        tuning.generated = 2;
+        tuning.fractions = {1.0f / 3.0f, 2.0f / 3.0f, 0.0f};
+        gpu->ResetHistory();
+        run(0, true, 0, 0);
+        const Pixels third = run(1, true, 0, 0);
+        const Pixels two_thirds = harness.readback(g_swapchains[kOutputSecond][0]);
+        const double third_error = MeanError(third, MovingSquare(120 + 16.0f / 3, 120 + 8.0f / 3), 96, 96, 256, 256);
+        const double two_thirds_error = MeanError(two_thirds, MovingSquare(120 + 32.0f / 3, 120 + 16.0f / 3), 96, 96, 256, 256);
+        const double third_hold = MeanError(b, MovingSquare(120 + 16.0f / 3, 120 + 8.0f / 3), 96, 96, 256, 256);
+        std::cout << harness.name << " 3x: errors " << third_error << ", " << two_thirds_error << " vs hold " << third_hold
+                  << '\n';
+        Check(third_error < 0.4 * third_hold && two_thirds_error < 0.4 * third_hold,
+              harness.name + " 3x frames are not placed at 1/3 and 2/3 of the motion");
+        tuning.generated = 1;
+        tuning.fractions = {0.5f, 0.5f, 0.5f};
+    }
 
     // 3. Extrapolation half a step past B: the square sits at (144, 132).
     harness.upload(g_swapchains[kSource][2], b);
@@ -285,7 +309,7 @@ int RunScenarios(Harness& harness) {
     harness.upload(g_swapchains[kSource][0], a);
     harness.upload(g_swapchains[kSource][1], b);
     tuning = {};
-    tuning.fraction = 0.5f;
+    tuning.fractions[0] = 0.5f;
     auto capture = [&](std::uint32_t index) {
         const FrameGenViewSubmission view = Submission(index, harness.format, output_format, true, 0, 0);
         const bool captured = gpu->Capture(0, view.source, view.request, tuning.quality, error);
@@ -348,7 +372,7 @@ int RunBench(Harness& harness) {
                 for (const XrSwapchain output : {kOutput, output_right}) {
                     FrameGenViewSubmission view = Submission(0, harness.format, output_format, true, 0.01f, 0.0f);
                     view.source.rect.extent = {static_cast<int>(size), static_cast<int>(size)};
-                    view.output = {output, 0, 0, view.source.rect, output_format};
+                    view.outputs = {{output, 0, 0, view.source.rect, output_format}};
                     view.request.extent = {size, size};
                     views.push_back(view);
                 }

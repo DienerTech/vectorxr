@@ -18,6 +18,13 @@ constexpr std::chrono::seconds kClaimedFrameWait{5};
 constexpr XrDuration kOutputWaitTimeout = 100'000'000; // 100 ms
 constexpr std::uint32_t kFailuresBeforePause = 3;
 constexpr std::uint32_t kDemotionsBeforePause = 3;
+constexpr std::uint32_t kMaxMultiplier = 4;
+constexpr std::chrono::seconds kPhaseLifetime{2};
+constexpr int kAutoMaxBackoffDoublings = 3; // 10 s, 20 s, 40 s, 80 s
+
+std::string MultiplierText(std::uint32_t multiplier) {
+    return std::to_string(multiplier) + "x";
+}
 
 const XrCompositionLayerProjection* FindProjection(const XrFrameEndInfo& info, std::uint32_t* index = nullptr) {
     for (std::uint32_t i = 0; i < info.layerCount; ++i) {
@@ -180,6 +187,18 @@ void FrameGenPresenter::Stop() {
     output_kinds_.clear();
     end_thread_ = {};
     logged_claimed_wait_ = false;
+    last_runtime_submit_ = {};
+    last_period_ = 0;
+    phase_wall_ = {};
+    phase_xr_ = 0;
+    auto_multiplier_ = 2;
+    full_rate_ = false;
+    cadence_.clear();
+    last_app_end_.reset();
+    multiplier_changed_at_ = {};
+    probe_not_before_ = {};
+    probe_backoff_ = auto_initial_backoff_;
+    probing_ = false;
     runtime_formats_.clear();
     frames_.clear();
     capture_targets_.clear();
@@ -219,6 +238,16 @@ void FrameGenPresenter::SetConfigured(bool enabled) {
     if (started_ && state_ != FrameGenState::kUnavailable && state_ != FrameGenState::kPaused) {
         SetStateLocked(enabled && user_enabled_ ? FrameGenState::kWaiting : FrameGenState::kOff, "");
     }
+}
+
+void FrameGenPresenter::SetAutoPolicy(std::chrono::milliseconds settle, std::chrono::milliseconds steady,
+                                      std::chrono::milliseconds probe_confirm, std::chrono::milliseconds probe_backoff) {
+    std::scoped_lock lock(mutex_);
+    auto_settle_ = settle;
+    auto_steady_ = steady;
+    auto_probe_confirm_ = probe_confirm;
+    auto_initial_backoff_ = probe_backoff;
+    probe_backoff_ = probe_backoff;
 }
 
 void FrameGenPresenter::SetEngagementPolicy(std::uint32_t steady_frames, std::chrono::milliseconds minimum_session_age) {
@@ -388,10 +417,102 @@ void FrameGenPresenter::RecordCaptureTargetsLocked(const XrCompositionLayerProje
     }
 }
 
-bool FrameGenPresenter::WantsEngagementLocked() const {
+bool FrameGenPresenter::RunnableLocked() const {
     return started_ && gpu_ && user_enabled_ && configured_enabled_ && state_ != FrameGenState::kPaused &&
            state_ != FrameGenState::kUnavailable && healthy_streak_ >= engage_streak_frames_ &&
            Clock::now() - started_at_ >= engage_min_age_;
+}
+
+bool FrameGenPresenter::WantsEngagementLocked() const {
+    return RunnableLocked() && EffectiveMultiplierLocked() >= 2;
+}
+
+std::uint32_t FrameGenPresenter::EffectiveMultiplierLocked() const {
+    switch (settings_.multiplier) {
+    case FrameGenMultiplier::k2:
+        return 2;
+    case FrameGenMultiplier::k3:
+        return 3;
+    case FrameGenMultiplier::k4:
+        return 4;
+    default:
+        return auto_multiplier_;
+    }
+}
+
+void FrameGenPresenter::UpdateAutoLocked(Clock::time_point now, const std::optional<PendingFrame>& frame) {
+    const bool automatic = settings_.multiplier == FrameGenMultiplier::kAuto;
+    const XrDuration period = frame && frame->period > 0 ? frame->period : last_period_;
+    if (!automatic || period <= 0 || !RunnableLocked()) {
+        last_app_end_ = now;
+        cadence_.clear();
+        return;
+    }
+    if (last_app_end_) {
+        // An engaged frame should take N refreshes; a passed-through one, one.
+        const double multiplier = frame && frame->engaged ? static_cast<double>(frame->multiplier) : 1.0;
+        const auto expected = std::chrono::nanoseconds(static_cast<std::int64_t>(period * multiplier * 1.25));
+        cadence_.emplace_back(now, now - *last_app_end_ > expected);
+    }
+    last_app_end_ = now;
+    while (!cadence_.empty() && (now - cadence_.front().first > std::chrono::seconds(6) || cadence_.size() > 4096)) {
+        cadence_.pop_front();
+    }
+    if (now - multiplier_changed_at_ < auto_settle_) {
+        return;
+    }
+    std::size_t recent = 0, recent_late = 0, steady = 0, steady_late = 0;
+    for (const auto& [time, late] : cadence_) {
+        if (now - time <= std::chrono::seconds(1)) {
+            ++recent;
+            recent_late += late ? 1 : 0;
+        }
+        if (now - time <= auto_steady_) {
+            ++steady;
+            steady_late += late ? 1 : 0;
+        }
+    }
+    const std::uint32_t before = auto_multiplier_;
+    // More than 30% of the last second's frames missed the cadence: step up.
+    if (recent >= 8 && recent_late * 10 > recent * 3) {
+        auto_late_percent_ = recent_late * 100 / recent;
+        if (probing_) {
+            // The lower multiplier could not keep up: go back and wait longer
+            // before probing again.
+            auto_multiplier_ = probe_from_;
+            probing_ = false;
+            probe_backoff_ = std::min(probe_backoff_ * 2, auto_initial_backoff_ * (1 << kAutoMaxBackoffDoublings));
+        } else if (auto_multiplier_ < kMaxMultiplier) {
+            ++auto_multiplier_;
+        }
+        probe_not_before_ = now + probe_backoff_;
+    } else if (probing_ && now - multiplier_changed_at_ >= auto_probe_confirm_) {
+        probing_ = false;
+        probe_backoff_ = auto_initial_backoff_;
+        probe_not_before_ = now + probe_backoff_;
+    } else if (!probing_ && auto_multiplier_ > 1 && now >= probe_not_before_ && !cadence_.empty() &&
+               now - cadence_.front().first >= auto_steady_ && steady >= 8 && steady_late * 50 <= steady) {
+        // Five steady seconds with at most 2% of frames late: try one step down.
+        probe_from_ = auto_multiplier_;
+        --auto_multiplier_;
+        probing_ = true;
+    }
+    if (auto_multiplier_ != before) {
+        multiplier_changed_at_ = now;
+        cadence_.clear();
+        if (logger_) {
+            const bool up = auto_multiplier_ > before;
+            logger_->Info("Frame Generation automatic multiplier " +
+                          (before == 1 ? std::string("full rate") : MultiplierText(before)) + " -> " +
+                          (auto_multiplier_ == 1 ? std::string("full rate") : MultiplierText(auto_multiplier_)) +
+                          (up ? " (" + std::to_string(auto_late_percent_) + "% of frames late" +
+                                    (probe_backoff_ > auto_initial_backoff_
+                                         ? ", next probe in " + std::to_string(probe_backoff_.count() / 1000) + " s"
+                                         : std::string()) +
+                                    ")."
+                              : " (probing a lower multiplier)."));
+        }
+    }
 }
 
 void FrameGenPresenter::MaybeRetryLocked() {
@@ -420,9 +541,12 @@ void FrameGenPresenter::SetStateLocked(FrameGenState state, const std::string& r
     if (!logger_) {
         return;
     }
-    if (state == FrameGenState::kActive) {
-        logger_->Info(std::string("Frame Generation engaged: ") + ToString(settings_.synthesis_mode) +
-                      ", application held at half the runtime refresh rate.");
+    if (state == FrameGenState::kActive && full_rate_) {
+        logger_->Info("Frame Generation standing by: the application holds full refresh.");
+    } else if (state == FrameGenState::kActive) {
+        logger_->Info(std::string("Frame Generation engaged: ") + ToString(settings_.synthesis_mode) + " " +
+                      MultiplierText(EffectiveMultiplierLocked()) + ", application held at 1/" +
+                      std::to_string(EffectiveMultiplierLocked()) + " of the runtime refresh rate.");
     } else if (state == FrameGenState::kPaused || state == FrameGenState::kUnavailable) {
         logger_->Error(std::string("Frame Generation ") + ToString(state) + ": " + reason + ".");
     } else if (previous == FrameGenState::kActive) {
@@ -457,6 +581,7 @@ void FrameGenPresenter::NoteFailureLocked(const std::string& error) {
 XrResult FrameGenPresenter::WaitFrame(XrSession session, const XrFrameWaitInfo* info, XrFrameState* state,
                                       const FrameGenRuntimeCalls& calls) {
     bool engage = false;
+    std::uint32_t multiplier = 2;
     std::uint64_t sequence = 0;
     {
         std::unique_lock lock(mutex_);
@@ -506,26 +631,40 @@ XrResult FrameGenPresenter::WaitFrame(XrSession session, const XrFrameWaitInfo* 
                 PauseLocked("the application starts frames before the previous one ends");
             }
         }
-        if (!engage && state_ == FrameGenState::kActive) {
+        multiplier = EffectiveMultiplierLocked();
+        // Automatic and at full rate: nothing to generate, but the feature is
+        // doing its job, so it reads as active.
+        const bool full_rate = !demoted && RunnableLocked() && multiplier < 2;
+        if (full_rate != full_rate_) {
+            full_rate_ = full_rate;
+            if (state_ == FrameGenState::kActive) state_ = FrameGenState::kWaiting; // re-log the transition
+        }
+        if (full_rate) {
+            SetStateLocked(FrameGenState::kActive, "");
+        } else if (!engage && state_ == FrameGenState::kActive) {
             SetStateLocked(FrameGenState::kWaiting, "");
         }
         sequence = ++wait_sequence_;
     }
+    const auto called = Clock::now();
     const XrResult result = calls.wait(session, info, state);
     if (XR_FAILED(result) || !state) {
         return result;
     }
     std::scoped_lock lock(mutex_);
+    NotePhaseLocked(called, Clock::now(), state->predictedDisplayTime, state->predictedDisplayPeriod);
     PendingFrame frame;
     frame.slot_time = state->predictedDisplayTime;
     frame.period = state->predictedDisplayPeriod;
     frame.should_render = state->shouldRender == XR_TRUE;
     frame.engaged = engage && frame.period > 0 && state_ != FrameGenState::kPaused;
+    frame.multiplier = multiplier;
     frame.sequence = sequence;
     frame.wait_return = Clock::now();
+    if (frame.period > 0) last_period_ = frame.period;
     if (frame.engaged) {
-        state->predictedDisplayTime = frame.slot_time + frame.period;
-        state->predictedDisplayPeriod = frame.period * 2;
+        state->predictedDisplayTime = frame.slot_time + frame.period * static_cast<XrDuration>(multiplier - 1);
+        state->predictedDisplayPeriod = frame.period * static_cast<XrDuration>(multiplier);
         SetStateLocked(FrameGenState::kActive, "");
     }
     state->predictedDisplayTime = std::max(state->predictedDisplayTime, last_returned_time_ + 1);
@@ -576,7 +715,7 @@ XrResult FrameGenPresenter::EndFrame(XrSession session, const XrFrameEndInfo* in
         std::scoped_lock lock(mutex_);
         InvalidateContinuityLocked();
     } else {
-        result = RunPair(session, *info, *frame, calls);
+        result = RunCycle(session, *info, *frame, calls);
     }
     {
         std::scoped_lock lock(mutex_);
@@ -591,6 +730,7 @@ XrResult FrameGenPresenter::EndFrame(XrSession session, const XrFrameEndInfo* in
         if (!frame || !frame->engaged) {
             NoteSubmissionLocked();
         }
+        UpdateAutoLocked(now, frame);
         if (logger_ && state_ == FrameGenState::kActive && now - last_summary_ >= std::chrono::seconds(60)) {
             last_summary_ = now;
             logger_->Info("Frame Generation: generated=" + std::to_string(generated_) + ", repeated=" +
@@ -613,61 +753,89 @@ XrResult FrameGenPresenter::SubmitAt(XrSession session, const XrFrameEndInfo& in
     return result;
 }
 
-XrResult FrameGenPresenter::SubmitSecond(XrSession session, const XrFrameEndInfo& info, const PendingFrame& frame,
-                                         const FrameGenRuntimeCalls& calls) {
+void FrameGenPresenter::NotePhaseLocked(Clock::time_point called, Clock::time_point returned, XrTime display_time,
+                                        XrDuration period) {
+    // A wait that blocked returned on the runtime's own schedule; one that
+    // returned at once says nothing about it.
+    const auto blocked = std::max<std::chrono::nanoseconds>(std::chrono::milliseconds(1),
+                                                            std::chrono::nanoseconds(period / 10));
+    if (period > 0 && returned - called >= blocked) {
+        phase_wall_ = returned;
+        phase_xr_ = display_time;
+    }
+}
+
+void FrameGenPresenter::PaceSubmission(XrTime display_time, XrDuration period) {
+    // Pimax and SteamVR can return the waits inside a generated cycle at once
+    // instead of pacing them, so the cycle's frames would reach the
+    // compositor inside one refresh and only the newest would be shown. Each
+    // slot is held until the runtime would have released its wait, measured
+    // from the last wait that did block, and at least most of a refresh after
+    // the previous submission. Runtimes that pace their waits rarely sleep.
+    if (period <= 0) {
+        return;
+    }
+    const auto now = Clock::now();
+    Clock::time_point target{};
+    {
+        std::scoped_lock lock(mutex_);
+        if (last_runtime_submit_ != Clock::time_point{}) {
+            target = last_runtime_submit_ + std::chrono::nanoseconds(period * 17 / 20);
+        }
+        if (phase_wall_ != Clock::time_point{} && now - phase_wall_ <= kPhaseLifetime && display_time > phase_xr_) {
+            target = std::max(target, phase_wall_ + std::chrono::nanoseconds(display_time - phase_xr_));
+        }
+    }
+    // A wrong phase never costs more than about one refresh.
+    SleepUntil(timer_, std::min(target, now + std::chrono::nanoseconds(period * 6 / 5)));
+}
+
+XrResult FrameGenPresenter::NextSlot(XrSession session, const FrameGenRuntimeCalls& calls, XrDuration period,
+                                     XrFrameState& state) {
     XrFrameWaitInfo wait_info{XR_TYPE_FRAME_WAIT_INFO};
-    XrFrameState state{XR_TYPE_FRAME_STATE};
+    state = {XR_TYPE_FRAME_STATE};
+    const auto called = Clock::now();
     XrResult result = calls.wait(session, &wait_info, &state);
     if (XR_FAILED(result)) {
         std::scoped_lock lock(mutex_);
-        PauseLocked("runtime xrWaitFrame failed for the real frame (" + std::to_string(result) + ")");
+        PauseLocked("runtime xrWaitFrame failed inside a generated cycle (" + std::to_string(result) + ")");
         return result;
     }
-    // Some runtimes return xrWaitFrame immediately instead of pacing it. Keep
-    // the two submissions at least most of a refresh apart so the compositor
-    // does not receive both for one slot and drop the generated frame.
-    SleepUntil(timer_, frame.wait_return + std::chrono::nanoseconds(frame.period * 3 / 4));
+    {
+        std::scoped_lock lock(mutex_);
+        NotePhaseLocked(called, Clock::now(), state.predictedDisplayTime, state.predictedDisplayPeriod);
+    }
+    PaceSubmission(state.predictedDisplayTime, period);
     XrFrameBeginInfo begin_info{XR_TYPE_FRAME_BEGIN_INFO};
     result = calls.begin(session, &begin_info);
     if (XR_FAILED(result)) {
         std::scoped_lock lock(mutex_);
-        PauseLocked("runtime xrBeginFrame failed for the real frame (" + std::to_string(result) + ")");
-        return result;
-    }
-    XrFrameEndInfo real = info;
-    real.displayTime = state.predictedDisplayTime;
-    if (state.shouldRender != XR_TRUE) {
-        real.layerCount = 0;
-        real.layers = nullptr;
-    }
-    result = calls.submit(session, &real);
-    std::scoped_lock lock(mutex_);
-    NoteSubmissionLocked();
-    if (XR_FAILED(result)) {
-        PauseLocked("runtime rejected the real frame (" + std::to_string(result) + ")");
-    } else {
-        consecutive_demotions_ = 0;
+        PauseLocked("runtime xrBeginFrame failed inside a generated cycle (" + std::to_string(result) + ")");
     }
     return result;
 }
 
-XrResult FrameGenPresenter::RunPair(XrSession session, const XrFrameEndInfo& info, const PendingFrame& frame,
-                                    const FrameGenRuntimeCalls& calls) {
+XrResult FrameGenPresenter::RunCycle(XrSession session, const XrFrameEndInfo& info, const PendingFrame& frame,
+                                     const FrameGenRuntimeCalls& calls) {
     std::uint32_t projection_index = 0;
     const XrCompositionLayerProjection& projection = *FindProjection(info, &projection_index);
-    const XrTime newest_time = frame.slot_time + frame.period;
+    const std::uint32_t generated = std::max(2u, frame.multiplier) - 1;
+    const XrDuration period = frame.period;
+    const XrTime newest_time = frame.slot_time + period * static_cast<XrDuration>(generated);
     FrameGenSynthesisMode mode;
     bool continuous;
     XrTime previous_time = 0;
-    bool extrapolated_ready = false;
+    std::size_t extrapolated_sets = 0;
     {
         std::scoped_lock lock(mutex_);
         mode = settings_.synthesis_mode;
         previous_time = last_real_.display_time;
-        continuous = last_real_.valid && last_real_.sequence + 1 == frame.sequence &&
-                     newest_time > previous_time && newest_time - previous_time <= 4 * frame.period;
-        extrapolated_ready = extrapolated_.valid && continuous && extrapolated_.space == projection.space &&
-                             extrapolated_.views.size() == projection.viewCount;
+        continuous = last_real_.valid && last_real_.sequence + 1 == frame.sequence && newest_time > previous_time &&
+                     newest_time - previous_time <= period * static_cast<XrDuration>(kMaxMultiplier + 2);
+        if (extrapolated_.valid && continuous && extrapolated_.space == projection.space && !extrapolated_.sets.empty() &&
+            extrapolated_.sets.front().size() == projection.viewCount) {
+            extrapolated_sets = extrapolated_.sets.size();
+        }
     }
 
     // Replaces the primary projection layer with generated views.
@@ -682,50 +850,85 @@ XrResult FrameGenPresenter::RunPair(XrSession session, const XrFrameEndInfo& inf
         generated_layer.viewCount = static_cast<std::uint32_t>(views.size());
         generated_layer.views = views.data();
         layers[projection_index] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&generated_layer);
-        XrFrameEndInfo generated = info;
-        generated.layers = layers.data();
-        return generated;
+        XrFrameEndInfo generated_info = info;
+        generated_info.layers = layers.data();
+        return generated_info;
     };
 
-    XrResult result = XR_SUCCESS;
+    // Interpolated frames need the newest real frame, so they are generated
+    // before the first slot; extrapolated ones were generated last cycle.
+    std::vector<std::vector<XrCompositionLayerProjectionView>> interpolated;
+    bool interpolated_ready = false;
     if (mode == FrameGenSynthesisMode::kInterpolate) {
-        std::vector<XrCompositionLayerProjectionView> views;
-        const float fraction = continuous ? FrameGenFraction(mode, previous_time, newest_time, frame.slot_time) : 1.0f;
-        if (Generate(projection, frame, fraction, views)) {
-            result = SubmitAt(session, with_views(views, projection.space, projection.layerFlags), frame.slot_time, calls);
-        } else {
-            result = SubmitAt(session, info, frame.slot_time, calls);
+        std::vector<float> fractions;
+        for (std::uint32_t slot = 0; slot < generated; ++slot) {
+            fractions.push_back(continuous ? FrameGenFraction(mode, previous_time, newest_time,
+                                                              frame.slot_time + period * static_cast<XrDuration>(slot))
+                                           : 1.0f);
         }
-    } else {
-        // Slot k shows the previous real frame pushed forward, generated during
-        // the previous app frame; the newest frame's own extrapolation is
-        // generated next and shown one app frame later.
-        if (extrapolated_ready) {
-            result = SubmitAt(session, with_views(extrapolated_.views, extrapolated_.space, extrapolated_.flags),
-                              frame.slot_time, calls);
+        interpolated_ready = Generate(projection, frame, fractions, interpolated);
+    }
+
+    XrTime time = frame.slot_time;
+    bool should_render = frame.should_render;
+    for (std::uint32_t slot = 0; slot <= generated; ++slot) {
+        if (slot > 0) {
+            XrFrameState state;
+            const XrResult next = NextSlot(session, calls, period, state);
+            if (XR_FAILED(next)) {
+                std::scoped_lock lock(mutex_);
+                InvalidateContinuityLocked();
+                return next;
+            }
+            time = state.predictedDisplayTime;
+            should_render = state.shouldRender == XR_TRUE;
         } else {
-            result = SubmitAt(session, info, frame.slot_time, calls);
+            PaceSubmission(time, period);
         }
-        if (XR_SUCCEEDED(result)) {
-            const float fraction = continuous
-                ? FrameGenFraction(mode, previous_time, newest_time, newest_time + frame.period) : 0.0f;
-            std::vector<XrCompositionLayerProjectionView> views;
-            const bool generated = Generate(projection, frame, fraction, views);
-            std::scoped_lock lock(mutex_);
-            extrapolated_.valid = generated;
-            extrapolated_.views = std::move(views);
-            extrapolated_.space = projection.space;
-            extrapolated_.flags = projection.layerFlags;
+        XrFrameEndInfo content = info; // the real frame, in the cycle's last slot
+        if (slot < generated) {
+            if (interpolated_ready) {
+                content = with_views(interpolated[slot], projection.space, projection.layerFlags);
+            } else if (mode == FrameGenSynthesisMode::kExtrapolate && slot < extrapolated_sets) {
+                content = with_views(extrapolated_.sets[slot], extrapolated_.space, extrapolated_.flags);
+            }
+        }
+        content.displayTime = time;
+        if (!should_render) {
+            content.layerCount = 0;
+            content.layers = nullptr;
+        }
+        const XrResult result = calls.submit(session, &content);
+        std::scoped_lock lock(mutex_);
+        NoteSubmissionLocked();
+        if (XR_FAILED(result)) {
+            PauseLocked(std::string(slot < generated ? "runtime rejected a generated frame (" : "runtime rejected the real frame (") +
+                        std::to_string(result) + ")");
+            InvalidateContinuityLocked();
+            return result;
         }
     }
-    if (XR_FAILED(result)) {
+
+    if (mode == FrameGenSynthesisMode::kExtrapolate) {
+        // The newest frame pushed forward, for the next cycle's generated slots.
+        std::vector<float> fractions;
+        for (std::uint32_t slot = 0; slot < generated; ++slot) {
+            fractions.push_back(continuous ? FrameGenFraction(mode, previous_time, newest_time,
+                                                              newest_time + period * static_cast<XrDuration>(slot + 1))
+                                           : 0.0f);
+        }
+        std::vector<std::vector<XrCompositionLayerProjectionView>> sets;
+        const bool ok = Generate(projection, frame, fractions, sets);
         std::scoped_lock lock(mutex_);
-        PauseLocked("runtime rejected the generated frame (" + std::to_string(result) + ")");
-        InvalidateContinuityLocked();
-        return result;
+        extrapolated_.valid = ok;
+        extrapolated_.sets = std::move(sets);
+        extrapolated_.space = projection.space;
+        extrapolated_.flags = projection.layerFlags;
     }
     RecordReal(projection, newest_time, frame.sequence);
-    return SubmitSecond(session, info, frame, calls);
+    std::scoped_lock lock(mutex_);
+    consecutive_demotions_ = 0;
+    return XR_SUCCESS;
 }
 
 void FrameGenPresenter::RecordReal(const XrCompositionLayerProjection& projection, XrTime display_time,
@@ -742,7 +945,12 @@ void FrameGenPresenter::RecordReal(const XrCompositionLayerProjection& projectio
 }
 
 bool FrameGenPresenter::Generate(const XrCompositionLayerProjection& projection, const PendingFrame& frame,
-                                 float fraction, std::vector<XrCompositionLayerProjectionView>& views) {
+                                 const std::vector<float>& fractions,
+                                 std::vector<std::vector<XrCompositionLayerProjectionView>>& sets) {
+    const std::size_t count = std::min(fractions.size(), kFrameGenMaxGenerated);
+    if (count == 0) {
+        return false;
+    }
     std::vector<FrameGenViewSubmission> submissions(projection.viewCount);
     std::vector<FrameGenOutputKind> kinds(projection.viewCount);
     FrameGenTuning tuning;
@@ -757,7 +965,10 @@ bool FrameGenPresenter::Generate(const XrCompositionLayerProjection& projection,
         tuning.diagnostic = settings_.diagnostic_view;
         tuning.artifact_suppression = settings_.artifact_suppression;
         tuning.motion_limit_percent = settings_.motion_limit_percent;
-        tuning.fraction = fraction;
+        tuning.generated = static_cast<std::uint8_t>(count);
+        for (std::size_t index = 0; index < count; ++index) {
+            tuning.fractions[index] = fractions[index];
+        }
         const bool continuous = last_real_.valid && last_real_.sequence + 1 == frame.sequence &&
                                 last_real_.space == projection.space && last_real_.views.size() == projection.viewCount;
         for (std::uint32_t i = 0; i < projection.viewCount; ++i) {
@@ -797,7 +1008,7 @@ bool FrameGenPresenter::Generate(const XrCompositionLayerProjection& projection,
             return false;
         }
     }
-    if (!EnsureOutputs(projection, kinds, error)) {
+    if (!EnsureOutputs(projection, kinds, count, error)) {
         std::scoped_lock lock(mutex_);
         NoteFailureLocked(error);
         return false;
@@ -825,14 +1036,16 @@ bool FrameGenPresenter::Generate(const XrCompositionLayerProjection& projection,
         if (queue_mutex_) queue_lock = std::unique_lock<std::mutex>(*queue_mutex_);
         std::scoped_lock lock(mutex_);
         for (std::size_t i = 0; i < submissions.size() && ok; ++i) {
-            const Output& output = outputs_[i];
-            submissions[i].request.output = output.kind;
-            submissions[i].output = {output.swapchain, output.index, 0,
-                                     {{0, 0}, {static_cast<std::int32_t>(output.extent.width),
-                                               static_cast<std::int32_t>(output.extent.height)}},
-                                     output.format};
-            ok = gpu_->Track(submissions[i].source.swapchain, xr_.images, error) &&
-                 gpu_->Track(output.swapchain, xr_.images, error);
+            ok = gpu_->Track(submissions[i].source.swapchain, xr_.images, error);
+            for (std::size_t set = 0; set < count && ok; ++set) {
+                const Output& output = output_sets_[set][i];
+                submissions[i].request.output = output.kind;
+                submissions[i].outputs.push_back({output.swapchain, output.index, 0,
+                                                  {{0, 0}, {static_cast<std::int32_t>(output.extent.width),
+                                                            static_cast<std::int32_t>(output.extent.height)}},
+                                                  output.format});
+                ok = gpu_->Track(output.swapchain, xr_.images, error);
+            }
         }
         ok = ok && gpu_->Execute(submissions, tuning, executed, error);
     }
@@ -849,16 +1062,20 @@ bool FrameGenPresenter::Generate(const XrCompositionLayerProjection& projection,
     const bool synthesized =
         std::any_of(executed.synthesized.begin(), executed.synthesized.end(), [](bool value) { return value; });
     if (synthesized) {
-        ++generated_;
+        generated_ += count;
     } else {
-        ++repeated_;
+        repeated_ += count;
     }
-    views.assign(projection.views, projection.views + projection.viewCount);
-    for (std::size_t i = 0; i < views.size(); ++i) {
-        views[i].next = nullptr; // a generated image has no matching depth
-        views[i].subImage.swapchain = outputs_[i].swapchain;
-        views[i].subImage.imageRect = submissions[i].output.rect;
-        views[i].subImage.imageArrayIndex = 0;
+    sets.assign(count, {});
+    for (std::size_t set = 0; set < count; ++set) {
+        auto& views = sets[set];
+        views.assign(projection.views, projection.views + projection.viewCount);
+        for (std::size_t i = 0; i < views.size(); ++i) {
+            views[i].next = nullptr; // a generated image has no matching depth
+            views[i].subImage.swapchain = output_sets_[set][i].swapchain;
+            views[i].subImage.imageRect = submissions[i].outputs[set].rect;
+            views[i].subImage.imageArrayIndex = 0;
+        }
     }
     if (logger_ && synthesized && !logged_first_generation_) {
         logged_first_generation_ = true;
@@ -867,145 +1084,201 @@ bool FrameGenPresenter::Generate(const XrCompositionLayerProjection& projection,
             extents += (extents.empty() ? "" : ",") + std::to_string(submission.request.extent.width) + "x" +
                        std::to_string(submission.request.extent.height);
         }
-        logger_->Info("Frame Generation produced its first frame: views=" + std::to_string(views.size()) + " (" + extents +
-                      "), backend=" + gpu_->Name() + ", fraction=" + Number(fraction, 3) + ", capturedAtRelease=" +
+        logger_->Info("Frame Generation produced its first frames: views=" + std::to_string(projection.viewCount) + " (" +
+                      extents + "), generatedPerFrame=" + std::to_string(count) + ", backend=" + gpu_->Name() +
+                      ", firstFraction=" + Number(fractions.front(), 3) + ", capturedAtRelease=" +
                       std::to_string(captured_ > 0) + ".");
     }
     return true;
 }
 
 bool FrameGenPresenter::EnsureOutputs(const XrCompositionLayerProjection& projection,
-                                      const std::vector<FrameGenOutputKind>& kinds, std::string& error) {
-    if (outputs_.size() != projection.viewCount) {
+                                      const std::vector<FrameGenOutputKind>& kinds, std::size_t sets,
+                                      std::string& error) {
+    if (!output_sets_.empty() && output_sets_.front().size() != projection.viewCount) {
         DestroyOutputs();
-        outputs_.resize(projection.viewCount);
+    }
+    if (output_kinds_.size() != projection.viewCount) {
         std::scoped_lock lock(mutex_);
         output_kinds_.assign(projection.viewCount, {});
     }
-    for (std::uint32_t i = 0; i < projection.viewCount; ++i) {
-        Output& output = outputs_[i];
-        const FrameGenExtent extent = Extent(projection.views[i]);
-        if (output.swapchain && output.extent.width == extent.width && output.extent.height == extent.height &&
-            output.requested == kinds[i]) {
-            continue;
+    // A lower multiplier frees the sets it no longer needs; a higher one adds.
+    while (output_sets_.size() > sets) {
+        for (Output& output : output_sets_.back()) {
+            if (output.swapchain) {
+                ForgetSwapchain(output.swapchain); // waits for submissions that may still write it
+                xr_.destroy(output.swapchain);
+            }
         }
-        if (output.swapchain) {
+        output_sets_.pop_back();
+        std::scoped_lock lock(mutex_);
+        extrapolated_.valid = false;
+    }
+    while (output_sets_.size() < sets) {
+        output_sets_.emplace_back(projection.viewCount);
+    }
+    bool created = false;
+    for (std::size_t set = 0; set < output_sets_.size(); ++set) {
+        for (std::uint32_t i = 0; i < projection.viewCount; ++i) {
+            Output& output = output_sets_[set][i];
+            const FrameGenExtent extent = Extent(projection.views[i]);
+            if (output.swapchain && output.extent.width == extent.width && output.extent.height == extent.height &&
+                output.requested == kinds[i]) {
+                continue;
+            }
+            if (output.swapchain) {
+                {
+                    std::scoped_lock lock(mutex_);
+                    output_kinds_[i] = {};
+                }
+                ForgetSwapchain(output.swapchain);
+                xr_.destroy(output.swapchain);
+                output = {};
+            }
+            std::vector<std::int64_t> candidates;
+            XrSwapchainCreateInfo create{XR_TYPE_SWAPCHAIN_CREATE_INFO};
             {
                 std::scoped_lock lock(mutex_);
-                output_kinds_[i] = {};
+                candidates = gpu_->OutputFormats(kinds[i]);
+                if (kinds[i] != FrameGenOutputKind::kSrgb8) {
+                    for (auto format : gpu_->OutputFormats(FrameGenOutputKind::kSrgb8)) candidates.push_back(format);
+                }
+                create.usageFlags = gpu_->OutputUsage();
             }
-            // ForgetSwapchain waits for submissions that may still write it.
-            ForgetSwapchain(output.swapchain);
-            xr_.destroy(output.swapchain);
-            output = {};
-        }
-        std::vector<std::int64_t> candidates;
-        XrSwapchainCreateInfo create{XR_TYPE_SWAPCHAIN_CREATE_INFO};
-        {
+            std::int64_t format = 0;
+            for (const auto candidate : candidates) {
+                if (runtime_formats_.empty() ||
+                    std::find(runtime_formats_.begin(), runtime_formats_.end(), candidate) != runtime_formats_.end()) {
+                    format = candidate;
+                    break;
+                }
+            }
+            if (!format) {
+                error = "the runtime offers no supported output swapchain format";
+                return false;
+            }
+            create.format = format;
+            create.sampleCount = 1;
+            create.width = extent.width;
+            create.height = extent.height;
+            create.faceCount = 1;
+            create.arraySize = 1;
+            create.mipCount = 1;
+            const XrResult result = xr_.create(session_, &create, &output.swapchain);
+            if (XR_FAILED(result)) {
+                output = {};
+                error = "output swapchain creation failed (" + std::to_string(result) + ")";
+                return false;
+            }
+            created = true;
+            if (xr_.images) {
+                xr_.images(output.swapchain, 0, &output.image_count, nullptr);
+            }
             std::scoped_lock lock(mutex_);
-            candidates = gpu_->OutputFormats(kinds[i]);
-            if (kinds[i] != FrameGenOutputKind::kSrgb8) {
-                for (auto format : gpu_->OutputFormats(FrameGenOutputKind::kSrgb8)) candidates.push_back(format);
+            output.extent = extent;
+            output.format = format;
+            output.requested = kinds[i];
+            // An sRGB fallback for a UNORM or float source must also encode.
+            output.kind = gpu_->Classify(format).value_or(FrameGenOutputKind::kSrgb8);
+            output_kinds_[i] = {true, output.requested, output.kind};
+            extrapolated_.valid = false;
+        }
+    }
+    if (created && logger_) {
+        // Rough video memory estimate: per view, two full-resolution history
+        // copies, a full-resolution intermediate and the flow pyramid in the
+        // backend, plus every output swapchain image.
+        double working = 0.0, swapchains = 0.0;
+        for (std::uint32_t i = 0; i < projection.viewCount; ++i) {
+            const Output& first = output_sets_.front()[i];
+            const double pixels = static_cast<double>(first.extent.width) * first.extent.height;
+            const double bytes = first.kind == FrameGenOutputKind::kFloat16 ? 8.0 : 4.0;
+            working += pixels * (3.0 * bytes + 3.4);
+        }
+        for (const auto& set : output_sets_) {
+            for (const Output& output : set) {
+                const double bytes = output.kind == FrameGenOutputKind::kFloat16 ? 8.0 : 4.0;
+                swapchains += static_cast<double>(output.extent.width) * output.extent.height * bytes *
+                              std::max<std::uint32_t>(output.image_count, 1);
             }
-            create.usageFlags = gpu_->OutputUsage();
         }
-        std::int64_t format = 0;
-        for (const auto candidate : candidates) {
-            if (runtime_formats_.empty() ||
-                std::find(runtime_formats_.begin(), runtime_formats_.end(), candidate) != runtime_formats_.end()) {
-                format = candidate;
-                break;
-            }
-        }
-        if (!format) {
-            error = "the runtime offers no supported output swapchain format";
-            return false;
-        }
-        create.format = format;
-        create.sampleCount = 1;
-        create.width = extent.width;
-        create.height = extent.height;
-        create.faceCount = 1;
-        create.arraySize = 1;
-        create.mipCount = 1;
-        const XrResult result = xr_.create(session_, &create, &output.swapchain);
-        if (XR_FAILED(result)) {
-            output = {};
-            error = "output swapchain creation failed (" + std::to_string(result) + ")";
-            return false;
-        }
-        std::scoped_lock lock(mutex_);
-        output.extent = extent;
-        output.format = format;
-        output.requested = kinds[i];
-        // An sRGB fallback for a UNORM or float source must also encode.
-        output.kind = gpu_->Classify(format).value_or(FrameGenOutputKind::kSrgb8);
-        output_kinds_[i] = {true, output.requested, output.kind};
-        extrapolated_.valid = false;
+        const double megabytes = 1024.0 * 1024.0;
+        logger_->Info("Frame Generation output swapchains ready: generatedPerFrame=" + std::to_string(output_sets_.size()) +
+                      ", imagesPerSwapchain=" + std::to_string(output_sets_.front().front().image_count) +
+                      ", estimated video memory " + Number((working + swapchains) / megabytes, 0) + " MB (working " +
+                      Number(working / megabytes, 0) + " MB, output swapchains " + Number(swapchains / megabytes, 0) +
+                      " MB).");
     }
     return true;
 }
 
 bool FrameGenPresenter::AcquireOutputs(std::string& error, bool& timed_out) {
     timed_out = false;
-    for (Output& output : outputs_) {
-        if (!output.acquired) {
-            XrSwapchainImageAcquireInfo acquire{XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};
-            const XrResult acquired = xr_.acquire(output.swapchain, &acquire, &output.index);
-            if (XR_FAILED(acquired)) {
-                error = "output image acquire failed (" + std::to_string(acquired) + ")";
-                return false;
+    for (auto& set : output_sets_) {
+        for (Output& output : set) {
+            if (!output.acquired) {
+                XrSwapchainImageAcquireInfo acquire{XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};
+                const XrResult acquired = xr_.acquire(output.swapchain, &acquire, &output.index);
+                if (XR_FAILED(acquired)) {
+                    error = "output image acquire failed (" + std::to_string(acquired) + ")";
+                    return false;
+                }
+                output.acquired = true;
+                output.waited = false;
             }
-            output.acquired = true;
-            output.waited = false;
-        }
-        if (!output.waited) {
-            XrSwapchainImageWaitInfo wait{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};
-            wait.timeout = kOutputWaitTimeout;
-            const XrResult waited = xr_.wait(output.swapchain, &wait);
-            if (waited == XR_TIMEOUT_EXPIRED) {
-                timed_out = true;
-                error = "output image wait timed out";
-                return false;
+            if (!output.waited) {
+                XrSwapchainImageWaitInfo wait{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};
+                wait.timeout = kOutputWaitTimeout;
+                const XrResult waited = xr_.wait(output.swapchain, &wait);
+                if (waited == XR_TIMEOUT_EXPIRED) {
+                    timed_out = true;
+                    error = "output image wait timed out";
+                    return false;
+                }
+                if (XR_FAILED(waited)) {
+                    error = "output image wait failed (" + std::to_string(waited) + ")";
+                    return false;
+                }
+                output.waited = true;
             }
-            if (XR_FAILED(waited)) {
-                error = "output image wait failed (" + std::to_string(waited) + ")";
-                return false;
-            }
-            output.waited = true;
         }
     }
     return true;
 }
 
 void FrameGenPresenter::ReleaseOutputs() {
-    for (Output& output : outputs_) {
-        if (!output.acquired || !output.waited) {
-            continue;
+    for (auto& set : output_sets_) {
+        for (Output& output : set) {
+            if (!output.acquired || !output.waited) {
+                continue;
+            }
+            XrSwapchainImageReleaseInfo release{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
+            xr_.release(output.swapchain, &release);
+            output.acquired = false;
+            output.waited = false;
         }
-        XrSwapchainImageReleaseInfo release{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
-        xr_.release(output.swapchain, &release);
-        output.acquired = false;
-        output.waited = false;
     }
 }
 
 void FrameGenPresenter::DestroyOutputs() {
     ReleaseOutputs();
-    for (Output& output : outputs_) {
-        if (output.swapchain) {
-            ForgetSwapchain(output.swapchain);
-            if (xr_.destroy) xr_.destroy(output.swapchain);
+    for (auto& set : output_sets_) {
+        for (Output& output : set) {
+            if (output.swapchain) {
+                ForgetSwapchain(output.swapchain);
+                if (xr_.destroy) xr_.destroy(output.swapchain);
+            }
         }
     }
-    outputs_.clear();
+    output_sets_.clear();
     std::scoped_lock lock(mutex_);
     output_kinds_.clear();
     extrapolated_ = {};
 }
 
 void FrameGenPresenter::NoteSubmissionLocked() {
-    submissions_.push_back(Clock::now());
+    last_runtime_submit_ = Clock::now();
+    submissions_.push_back(last_runtime_submit_);
 }
 
 FrameGenStatus FrameGenPresenter::Status() const {
@@ -1024,6 +1297,9 @@ FrameGenStatus FrameGenPresenter::Status() const {
     status.demoted = demoted_;
     status.captured = captured_;
     status.retry_pending = state_ == FrameGenState::kPaused && automatic_retries_ < retry_attempts_;
+    status.multiplier = EffectiveMultiplierLocked();
+    status.automatic = settings_.multiplier == FrameGenMultiplier::kAuto;
+    status.full_rate = full_rate_ && state_ == FrameGenState::kActive;
     return status;
 }
 
@@ -1031,8 +1307,12 @@ std::string FrameGenPresenter::OsdText() const {
     const FrameGenStatus status = Status();
     switch (status.state) {
     case FrameGenState::kActive: {
+        if (status.full_rate) {
+            return "Auto  /  full rate, no generation needed";
+        }
         std::string text = std::string(status.mode == FrameGenSynthesisMode::kExtrapolate ? "Extrapolate" : "Interpolate") +
-                           "  /  " + Number(status.app_fps, 0) + " -> " + Number(status.output_fps, 0) + " fps";
+                           "  /  " + (status.automatic ? "Auto " : "") + MultiplierText(status.multiplier) + "  /  " +
+                           Number(status.app_fps, 0) + " -> " + Number(status.output_fps, 0) + " fps";
         if (status.gpu_ms > 0.0) text += "  /  " + Number(status.gpu_ms, 1) + " ms";
         return text;
     }
@@ -1051,7 +1331,9 @@ std::string FrameGenPresenter::CompactOsdText() const {
     const FrameGenStatus status = Status();
     switch (status.state) {
     case FrameGenState::kActive:
-        return Number(status.app_fps, 0) + " -> " + Number(status.output_fps, 0) + " fps";
+        if (status.full_rate) return "Full rate";
+        return std::string(status.automatic ? "Auto " : "") + MultiplierText(status.multiplier) + "  /  " +
+               Number(status.app_fps, 0) + " -> " + Number(status.output_fps, 0) + " fps";
     case FrameGenState::kWaiting:
         return "Waiting";
     case FrameGenState::kPaused:

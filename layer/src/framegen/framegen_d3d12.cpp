@@ -576,15 +576,21 @@ class D3D12FrameGen final : public FrameGenGpu {
     bool RecordView(const FrameGenViewSubmission& submission, const FrameGenTuning& tuning, ViewResources& view,
                     bool& synthesized, std::string& error) {
         const auto source_it = images_.find(submission.source.swapchain);
-        const auto output_it = images_.find(submission.output.swapchain);
-        if (source_it == images_.end() || output_it == images_.end() ||
-            submission.source.image_index >= source_it->second.size() ||
-            submission.output.image_index >= output_it->second.size()) {
+        if (source_it == images_.end() || submission.source.image_index >= source_it->second.size() ||
+            submission.outputs.size() < tuning.generated) {
             error = "Frame Generation image is not tracked";
             return false;
         }
+        std::vector<ID3D12Resource*> outputs;
+        for (const FrameGenImage& image : submission.outputs) {
+            const auto output_it = images_.find(image.swapchain);
+            if (output_it == images_.end() || image.image_index >= output_it->second.size()) {
+                error = "Frame Generation output image is not tracked";
+                return false;
+            }
+            outputs.push_back(output_it->second[image.image_index]);
+        }
         ID3D12Resource* source = source_it->second[submission.source.image_index];
-        ID3D12Resource* output = output_it->second[submission.output.image_index];
         if (!EnsureView(view, submission, source, tuning, error)) {
             return false;
         }
@@ -628,20 +634,26 @@ class D3D12FrameGen final : public FrameGenGpu {
             commands_->SetComputeRootDescriptorTable(2, Gpu(base + 4));
             commands_->Dispatch((dispatch.width + kFrameGenThreadGroupSize - 1) / kFrameGenThreadGroupSize,
                                 (dispatch.height + kFrameGenThreadGroupSize - 1) / kFrameGenThreadGroupSize, 1);
+            for (std::size_t index = 0; index < outputs.size(); ++index) {
+                if (!(dispatch.copy_mask & (1u << index))) {
+                    continue;
+                }
+                ID3D12Resource* output = outputs[index];
+                const FrameGenImage& image = submission.outputs[index];
+                const D3D12_RESOURCE_DESC output_desc = output->GetDesc();
+                Require(barriers, view.output, D3D12_RESOURCE_STATE_COPY_SOURCE);
+                Transition(barriers, output, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_DEST);
+                Flush(barriers);
+                D3D12_TEXTURE_COPY_LOCATION out_destination{output, D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX};
+                out_destination.SubresourceIndex = image.array_index * output_desc.MipLevels;
+                D3D12_TEXTURE_COPY_LOCATION out_source{view.output.resource.Get(), D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX};
+                out_source.SubresourceIndex = 0;
+                commands_->CopyTextureRegion(&out_destination, static_cast<UINT>(image.rect.offset.x),
+                                             static_cast<UINT>(image.rect.offset.y), 0, &out_source, nullptr);
+                Transition(barriers, output, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_RENDER_TARGET);
+                Flush(barriers);
+            }
         }
-
-        const D3D12_RESOURCE_DESC output_desc = output->GetDesc();
-        Require(barriers, view.output, D3D12_RESOURCE_STATE_COPY_SOURCE);
-        Transition(barriers, output, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_DEST);
-        Flush(barriers);
-        D3D12_TEXTURE_COPY_LOCATION out_destination{output, D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX};
-        out_destination.SubresourceIndex = submission.output.array_index * output_desc.MipLevels;
-        D3D12_TEXTURE_COPY_LOCATION out_source{view.output.resource.Get(), D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX};
-        out_source.SubresourceIndex = 0;
-        commands_->CopyTextureRegion(&out_destination, static_cast<UINT>(submission.output.rect.offset.x),
-                                     static_cast<UINT>(submission.output.rect.offset.y), 0, &out_source, nullptr);
-        Transition(barriers, output, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_RENDER_TARGET);
-        Flush(barriers);
         synthesized = plan.synthesize;
         return true;
     }

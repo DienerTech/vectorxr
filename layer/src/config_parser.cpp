@@ -2288,6 +2288,7 @@ bool ParseFrameGenSettings(const JsonValue::Object& object, const char* field, F
     static const std::unordered_set<std::string> allowed = {
         "synthesisMode",
         "flowQuality",
+        "frameMultiplier",
         "artifactSuppression",
         "motionLimitPercent",
     };
@@ -2297,9 +2298,19 @@ bool ParseFrameGenSettings(const JsonValue::Object& object, const char* field, F
 
     std::optional<std::string> synthesis_mode;
     std::optional<std::string> flow_quality;
+    std::optional<std::string> multiplier;
     if (!ReadOptionalString(object, "synthesisMode", synthesis_mode, error) ||
-        !ReadOptionalString(object, "flowQuality", flow_quality, error)) {
+        !ReadOptionalString(object, "flowQuality", flow_quality, error) ||
+        !ReadOptionalString(object, "frameMultiplier", multiplier, error)) {
         return false;
+    }
+    if (multiplier) {
+        const auto parsed = ParseFrameGenMultiplier(*multiplier);
+        if (!parsed) {
+            error = std::string(field) + ".frameMultiplier must be auto, 2x, 3x, or 4x";
+            return false;
+        }
+        out.multiplier = *parsed;
     }
     if (synthesis_mode) {
         const auto parsed = ParseFrameGenSynthesisMode(*synthesis_mode);

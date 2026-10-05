@@ -123,7 +123,9 @@ FrameGenViewPlan BuildFrameGenViewPlan(const FrameGenViewRequest& request, const
         flags |= kFrameGenFlagTemporal;
     }
     base.options = {kFrameGenSearchRadius, flags, static_cast<std::uint32_t>(tuning.diagnostic), 0};
-    base.tuning = {std::clamp(tuning.fraction, 0.0f, 1.0f), limit, 4.0f + 26.0f * suppression,
+    const std::size_t generated = std::clamp<std::size_t>(tuning.generated, 1, kFrameGenMaxGenerated);
+    const auto all_outputs = static_cast<std::uint8_t>((1u << generated) - 1u);
+    base.tuning = {std::clamp(tuning.fractions[0], 0.0f, 1.0f), limit, 4.0f + 26.0f * suppression,
                    3.0f + 21.0f * suppression};
 
     const FrameGenPass synthesize = request.output == FrameGenOutputKind::kFloat16 ? FrameGenPass::kSynthesizeFloat16
@@ -135,6 +137,7 @@ FrameGenViewPlan BuildFrameGenViewPlan(const FrameGenViewRequest& request, const
         still.constants.options[2] = static_cast<std::uint32_t>(FrameGenDiagnosticView::kOff);
         still.inputs = {Texture(FrameGenTextureKind::kHistoryNewest), {}, {}, {}};
         still.outputs = {Texture(FrameGenTextureKind::kOutput), {}};
+        still.copy_mask = all_outputs;
         plan.dispatches.push_back(still);
         return plan;
     }
@@ -186,11 +189,15 @@ FrameGenViewPlan BuildFrameGenViewPlan(const FrameGenViewRequest& request, const
     filter.constants.options[3] = plan.final_flow_level;
     plan.dispatches.push_back(filter);
 
-    FrameGenDispatch output = Dispatch(synthesize, plan.levels[0], plan.levels[plan.final_flow_level], base);
-    output.inputs = {Texture(FrameGenTextureKind::kHistoryNewest), Texture(FrameGenTextureKind::kHistoryPrevious),
-                     Texture(FrameGenTextureKind::kFilteredNewest, plan.final_flow_level), {}};
-    output.outputs = {Texture(FrameGenTextureKind::kOutput), {}};
-    plan.dispatches.push_back(output);
+    for (std::size_t index = 0; index < generated; ++index) {
+        FrameGenDispatch output = Dispatch(synthesize, plan.levels[0], plan.levels[plan.final_flow_level], base);
+        output.inputs = {Texture(FrameGenTextureKind::kHistoryNewest), Texture(FrameGenTextureKind::kHistoryPrevious),
+                         Texture(FrameGenTextureKind::kFilteredNewest, plan.final_flow_level), {}};
+        output.outputs = {Texture(FrameGenTextureKind::kOutput), {}};
+        output.constants.tuning[0] = std::clamp(tuning.fractions[index], 0.0f, 1.0f);
+        output.copy_mask = static_cast<std::uint8_t>(1u << index);
+        plan.dispatches.push_back(output);
+    }
     return plan;
 }
 
