@@ -271,6 +271,8 @@ class TurboFrameTestPeer {
         OpenXrLayer& layer = Layer();
         std::scoped_lock lock(layer.mutex_);
         layer.resolved_settings_.framegen.enabled = true;
+        // Auto starts at full rate; these tests need an engaged 2x session.
+        layer.resolved_settings_.framegen.multiplier = FrameGenMultiplier::k2;
         layer.next_enumerate_swapchain_formats_ = xr.formats;
         layer.next_create_swapchain_ = xr.create;
         layer.next_destroy_swapchain_ = xr.destroy;

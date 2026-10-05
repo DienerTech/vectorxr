@@ -333,7 +333,7 @@ function settingsSummary(settings: FrameGenSettings) {
               The multiplier sets how many headset frames each real game frame covers. On a 90 Hz headset, <strong>2x</strong> runs the game at 45 fps with one generated frame between real frames, <strong>3x</strong> at 30 fps with two, and <strong>4x</strong> at 22.5 fps with three.
             </div>
             <div class="rounded-[1rem] border px-4 py-3 surface-panel">
-              <strong>Auto</strong> (default) starts at 2x, steps up when the game cannot keep the cadence, and steps back down when it can, checking now and then. When the game already holds full refresh, frames pass straight through and the status reads Full rate.
+              <strong>Auto</strong> (default) starts at full rate: while the game holds the headset refresh, frames pass straight through and the status reads Full rate. When it cannot, Auto steps up to 2x, 3x or 4x, and steps back down when it can, checking now and then.
             </div>
             <div class="rounded-[1rem] border px-4 py-3 chip-warning" style="border-color: var(--app-border)">
               <strong>Higher multipliers rescue very heavy games, such as MSFS at very high resolution, at a cost.</strong> Each generated frame moves content further, so artifacts grow, most at 4x. Use Extrapolate with 3x, 4x, or Auto for these games. In Extrapolate, each generated frame also needs its own set of headset-resolution images, so memory use grows with the multiplier.

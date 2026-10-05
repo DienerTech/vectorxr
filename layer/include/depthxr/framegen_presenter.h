@@ -310,7 +310,8 @@ class FrameGenPresenter {
                   std::vector<std::vector<XrCompositionLayerProjectionView>>& sets);
     bool EnsureOutputs(const XrCompositionLayerProjection& projection, const std::vector<FrameGenOutputKind>& kinds,
                        std::size_t sets, std::string& error);
-    bool AcquireOutputs(std::string& error, bool& timed_out);
+    // Acquires and waits the images of the first `sets` output sets.
+    bool AcquireOutputs(std::size_t sets, std::string& error, bool& timed_out);
     void DestroyOutputs();
     void ReleaseOutputs();
     void RecordReal(const XrCompositionLayerProjection& projection, XrTime display_time, std::uint64_t sequence);
@@ -423,7 +424,7 @@ class FrameGenPresenter {
 
     // Automatic multiplier: steps up while the app misses its cadence, probes
     // one step down after a steady stretch, backing off when a probe fails.
-    std::uint32_t auto_multiplier_{2}; // 1 = full rate, no generation
+    std::uint32_t auto_multiplier_{1}; // 1 = full rate, no generation; Auto starts there
     bool full_rate_{false};
     struct Cadence {
         std::chrono::steady_clock::time_point time;

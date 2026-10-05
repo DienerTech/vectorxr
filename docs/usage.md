@@ -596,16 +596,19 @@ The **Frame multiplier** sets how many headset frames each real game frame cover
 | **3x** | 1/3 | 30 fps | Two |
 | **4x** | 1/4 | 22.5 fps | Three |
 
-**Auto** (default) starts at 2x, steps up when the game cannot keep the cadence, and steps back
-down when it can, checking now and then whether a lower multiplier holds. When the game already
-holds full refresh, frames pass straight through and the status reads **Full rate**.
+**Auto** (default) starts at full rate: while the game holds the headset refresh, frames pass
+straight through and the status reads **Full rate**. When it cannot, Auto steps up to 2x, 3x or
+4x, and steps back down when it can, checking now and then whether a lower multiplier holds.
+Output images, once allocated, are kept for the session, so changing multiplier never stalls
+the game.
 
 Higher multipliers rescue very heavy games, such as MSFS at very high resolution, but each
 generated frame moves content further, so artifacts grow; 4x shows the most. For these games,
 use **Extrapolate** with **3x**, **4x**, or **Auto**: Interpolate needs each real frame ready before
 the generated frames leading up to it, so it needs GPU headroom whatever the multiplier. In
-Extrapolate, each generated frame also needs its own set of headset-resolution output images, so
-video memory use grows with the multiplier.
+Extrapolate, each generated frame also needs its own set of headset-resolution output images, and
+on Direct3D 12 one spare set covers a game frame that arrives late (up to three sets), so video
+memory use grows with the multiplier. The log reports the estimate.
 
 #### Frame Generation settings
 

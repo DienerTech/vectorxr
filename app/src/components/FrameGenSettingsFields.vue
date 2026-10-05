@@ -31,7 +31,7 @@ const frameMultipliers: { value: FrameGenFrameMultiplier; label: string; descrip
   {
     value: 'auto',
     label: 'Auto',
-    description: 'Starts at 2x, steps up when the game cannot keep the cadence, and steps back down when it can, checking now and then. If the game already holds full refresh, frames pass straight through.',
+    description: 'Starts at full rate, passing frames straight through while the game holds the headset refresh. When it cannot, steps up to 2x, 3x or 4x, and steps back down when it can, checking now and then.',
   },
   { value: '2x', label: '2x', description: 'The game runs at 1/2 the headset refresh, for example 45 fps at 90 Hz, with one generated frame between real frames.' },
   { value: '3x', label: '3x', description: 'The game runs at 1/3 the headset refresh, for example 30 fps at 90 Hz, with two generated frames between real frames.' },
@@ -40,7 +40,7 @@ const frameMultipliers: { value: FrameGenFrameMultiplier; label: string; descrip
 
 const multiplierDescription = computed(() => frameMultipliers.find((item) => item.value === props.settings.frameMultiplier)?.description ?? '')
 const multiplierModeNote = computed(() => props.settings.synthesisMode === 'extrapolate'
-  ? 'Extrapolate keeps one set of headset-resolution images per generated frame, so memory use grows with the multiplier.'
+  ? 'Extrapolate keeps one set of headset-resolution images per generated frame, plus a spare for a late game frame (up to three), so memory use grows with the multiplier.'
   : 'Interpolate needs each real frame ready before the generated frames leading up to it, so it needs GPU headroom at any multiplier. For heavy GPU-bound games, use Extrapolate.')
 
 const flowQualities: { value: FrameGenFlowQuality; label: string; resolution: string }[] = [

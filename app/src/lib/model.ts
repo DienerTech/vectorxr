@@ -435,9 +435,9 @@ export type FrameGenSynthesisMode = typeof frameGenSynthesisModes[number]
 export const frameGenFlowQualities = ['performance', 'balanced', 'quality'] as const
 export type FrameGenFlowQuality = typeof frameGenFlowQualities[number]
 // Headset frames per real application frame: 2x holds the application at 1/2
-// the headset refresh, 3x at 1/3, 4x at 1/4. 'auto' starts at 2x, steps up
-// while the application misses its cadence, probes back down when it keeps
-// up, and passes frames through when it already holds full refresh.
+// the headset refresh, 3x at 1/3, 4x at 1/4. 'auto' starts at full rate,
+// passing frames through while the application holds the headset refresh,
+// steps up while it misses its cadence, and probes back down when it keeps up.
 export const frameGenFrameMultipliers = ['auto', '2x', '3x', '4x'] as const
 export type FrameGenFrameMultiplier = typeof frameGenFrameMultipliers[number]
 // Module-level overlay drawn into generated frames only.

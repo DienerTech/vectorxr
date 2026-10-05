@@ -319,7 +319,7 @@ struct App {
     Runtime& runtime;
     FrameGenRuntimeCalls calls;
     std::uint32_t image{0};
-    XrBaseInStructure depth{XR_TYPE_COMPOSITION_LAYER_DEPTH_INFO_KHR};
+    XrCompositionLayerDepthInfoKHR depth{XR_TYPE_COMPOSITION_LAYER_DEPTH_INFO_KHR};
     std::array<XrCompositionLayerProjectionView, 2> views{};
     XrCompositionLayerProjection projection{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
     XrCompositionLayerQuad quad{XR_TYPE_COMPOSITION_LAYER_QUAD};
@@ -456,8 +456,8 @@ void TestInterpolationPacing() {
     Check(gpu.executes == 1 && !gpu.last[0].request.synthesize, "first engaged frame primes history with a still");
     Check(runtime.submitted_swapchains[3][0] != kLeft && runtime.submitted_swapchains[3][1] != kRight,
           "slot k presents the layer-owned output images");
-    Check(!runtime.submitted_depth[3] && runtime.submitted_depth[4],
-          "generated views drop depth; the real frame keeps the app's chain");
+    Check(runtime.submitted_depth[3] && runtime.submitted_depth[4],
+          "interpolated views carry the newest frame's depth, so the runtime corrects every frame alike");
     Check(runtime.submitted_swapchains[4][0] == kLeft && runtime.submitted_swapchains[4][1] == kRight,
           "slot k + 1 presents the application's own images");
     Check(gpu.last[0].source.image_index == app.image, "generation reads the image the app released");
@@ -567,6 +567,27 @@ void TestQuadExtrapolation() {
     Check(!runtime.ordering_violation && !g_release_violation, "4x: runtime and image calls stayed ordered");
 }
 
+void TestOutputsKeptAcrossMultipliers() {
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    StartPresenter(presenter, gpu, FrameGenSynthesisMode::kExtrapolate, kFormat, kAppUsage, FrameGenMultiplier::k3);
+    App app(presenter, runtime);
+    for (int i = 0; i < 6; ++i) app.Frame();
+    Check(g_creates == 4, "outputs: two sets of two views at 3x");
+    FrameGenResolvedSettings settings;
+    settings.enabled = true;
+    settings.synthesis_mode = FrameGenSynthesisMode::kExtrapolate;
+    settings.multiplier = FrameGenMultiplier::k2;
+    presenter.Configure(settings);
+    for (int i = 0; i < 6; ++i) app.Frame();
+    settings.multiplier = FrameGenMultiplier::k3;
+    presenter.Configure(settings);
+    for (int i = 0; i < 6; ++i) app.Frame();
+    Check(g_creates == 4, "outputs: stepping down and back up reallocates nothing");
+    Check(!runtime.ordering_violation && !g_release_violation, "outputs: calls stayed ordered");
+}
+
 void TestSubmissionSpacing() {
     FrameGenPresenter presenter;
     GpuLog gpu;
@@ -591,7 +612,11 @@ void TestAutomaticMultiplier() {
     StartPresenter(presenter, gpu, FrameGenSynthesisMode::kExtrapolate, kFormat, kAppUsage, FrameGenMultiplier::kAuto);
     presenter.SetAutoPolicy(200ms, 500ms, 600ms, 300ms);
     App app(presenter, runtime);
-    Check(presenter.Status().automatic && presenter.Status().multiplier == 2, "auto starts at 2x");
+    Check(presenter.Status().automatic && presenter.Status().multiplier == 1,
+          "auto starts at full rate: an app that holds the refresh is never slowed");
+    for (int i = 0; i < 20; ++i) app.Frame();
+    Check(presenter.Status().full_rate && runtime.Submissions() >= 20 && gpu.executes == 0,
+          "auto: a fast app passes straight through");
 
     // An app slower than 2x can hold steps up.
     auto run = [&](std::chrono::milliseconds duration, std::chrono::milliseconds render) {
@@ -965,12 +990,17 @@ void TestThreadedKeepsOtherLayers() {
     for (int i = 0; i < 20; ++i) app.Frame();
     presenter.Stop();
     const auto log = runtime.Snapshot();
-    bool all = true, any_generated = false;
-    for (std::size_t i = first; i < log.size(); ++i) {
-        all = all && log[i].layers == 2;
-        any_generated = any_generated || !IsAppImage(log[i].swapchains);
+    bool all = true, any_generated = false, depth = true;
+    {
+        std::scoped_lock lock(g_xr_mutex);
+        for (std::size_t i = first; i < log.size(); ++i) {
+            all = all && log[i].layers == 2;
+            any_generated = any_generated || !IsAppImage(log[i].swapchains);
+            depth = depth && runtime.submitted_depth[i];
+        }
     }
     Check(any_generated && all, "threaded: generated frames keep the app's quad layer");
+    Check(depth, "threaded: generated frames keep the real frame's depth");
     Check(!runtime.ordering_violation, "layers: runtime calls stayed ordered");
 }
 
@@ -1261,6 +1291,7 @@ int main() {
     TestTripleInterpolation();
     TestQuadExtrapolation();
     TestSubmissionSpacing();
+    TestOutputsKeptAcrossMultipliers();
     TestAutomaticMultiplier();
     TestThreadedExtrapolation();
     TestThreadedPipelinedApp();

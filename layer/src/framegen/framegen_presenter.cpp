@@ -211,7 +211,7 @@ void FrameGenPresenter::Stop() {
     last_period_ = 0;
     phase_wall_ = {};
     phase_xr_ = 0;
-    auto_multiplier_ = 2;
+    auto_multiplier_ = 1;
     full_rate_ = false;
     cadence_.clear();
     last_app_end_.reset();
@@ -560,7 +560,9 @@ void FrameGenPresenter::UpdateAutoLocked(Clock::time_point now, const std::optio
         cadence_.clear();
         return;
     }
-    if (last_app_end_) {
+    // Frames right after a change (a new multiplier, engaging, new output
+    // images) carry its one-off cost and say nothing about the app.
+    if (last_app_end_ && now - multiplier_changed_at_ >= auto_settle_) {
         // An engaged frame should take N refreshes; a passed-through one, one.
         const double multiplier = frame && frame->engaged ? static_cast<double>(frame->multiplier) : 1.0;
         const auto expected = std::chrono::nanoseconds(static_cast<std::int64_t>(period * multiplier * 1.25));
@@ -1150,14 +1152,24 @@ XrResult FrameGenPresenter::RunCycle(XrSession session, const XrFrameEndInfo& in
     // Replaces the primary projection layer with generated views.
     std::vector<const XrCompositionLayerBaseHeader*> layers(info.layers, info.layers + info.layerCount);
     XrCompositionLayerProjection generated_layer{};
+    std::vector<XrCompositionLayerProjectionView> with_depth;
     auto with_views = [&](const std::vector<XrCompositionLayerProjectionView>& views, XrSpace space,
-                          XrCompositionLayerFlags flags) {
+                          XrCompositionLayerFlags flags, bool depth) {
         generated_layer = projection;
         generated_layer.next = nullptr;
         generated_layer.space = space;
         generated_layer.layerFlags = flags;
         generated_layer.viewCount = static_cast<std::uint32_t>(views.size());
         generated_layer.views = views.data();
+        if (depth && views.size() == projection.viewCount) {
+            // The newest real frame's depth chain, valid during this end: its
+            // depth image is the one the game just released.
+            with_depth = views;
+            for (std::size_t i = 0; i < with_depth.size(); ++i) {
+                with_depth[i].next = projection.views[i].next;
+            }
+            generated_layer.views = with_depth.data();
+        }
         layers[projection_index] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&generated_layer);
         XrFrameEndInfo generated_info = info;
         generated_info.layers = layers.data();
@@ -1201,9 +1213,11 @@ XrResult FrameGenPresenter::RunCycle(XrSession session, const XrFrameEndInfo& in
         XrFrameEndInfo content = info; // the real frame, in the cycle's last slot
         if (slot < generated) {
             if (interpolated_ready) {
-                content = with_views(interpolated[slot], projection.space, projection.layerFlags);
+                content = with_views(interpolated[slot], projection.space, projection.layerFlags, true);
             } else if (mode == FrameGenSynthesisMode::kExtrapolate && slot < extrapolated_sets) {
-                content = with_views(extrapolated_.sets[slot], extrapolated_.space, extrapolated_.flags);
+                // From the previous real frame, whose depth image the game has
+                // since replaced: no depth.
+                content = with_views(extrapolated_.sets[slot], extrapolated_.space, extrapolated_.flags, false);
             }
         }
         content.displayTime = time;
@@ -1328,7 +1342,7 @@ bool FrameGenPresenter::Generate(const XrCompositionLayerProjection& projection,
     }
 
     bool timed_out = false;
-    if (!AcquireOutputs(error, timed_out)) {
+    if (!AcquireOutputs(count, error, timed_out)) {
         // A timed-out wait keeps its acquisition and is retried next frame;
         // an image the runtime has not handed over is never written or
         // released.
@@ -1425,24 +1439,14 @@ bool FrameGenPresenter::EnsureOutputs(const XrCompositionLayerProjection& projec
         std::scoped_lock lock(mutex_);
         output_kinds_.assign(projection.viewCount, {});
     }
-    // A lower multiplier frees the sets it no longer needs; a higher one adds.
-    while (output_sets_.size() > sets) {
-        for (Output& output : output_sets_.back()) {
-            if (output.swapchain) {
-                ForgetSwapchain(output.swapchain); // waits for submissions that may still write it
-                std::scoped_lock submit(submit_mutex_);
-                xr_.destroy(output.swapchain);
-            }
-        }
-        output_sets_.pop_back();
-        std::scoped_lock lock(mutex_);
-        extrapolated_.valid = false;
-    }
+    // A higher multiplier adds sets; a lower one keeps them, unused, so
+    // moving between multipliers never reallocates headset-resolution images
+    // (hundreds of milliseconds on the frame thread at high resolutions).
     while (output_sets_.size() < sets) {
         output_sets_.emplace_back(projection.viewCount);
     }
     bool created = false;
-    for (std::size_t set = 0; set < output_sets_.size(); ++set) {
+    for (std::size_t set = 0; set < sets; ++set) {
         for (std::uint32_t i = 0; i < projection.viewCount; ++i) {
             Output& output = output_sets_[set][i];
             const FrameGenExtent extent = Extent(projection.views[i]);
@@ -1511,6 +1515,12 @@ bool FrameGenPresenter::EnsureOutputs(const XrCompositionLayerProjection& projec
             extrapolated_.valid = false;
         }
     }
+    if (created) {
+        // The allocation stalled this frame: let Auto settle again.
+        std::scoped_lock lock(mutex_);
+        multiplier_changed_at_ = Clock::now();
+        cadence_.clear();
+    }
     if (created && logger_) {
         // Rough video memory estimate: per view, two full-resolution history
         // copies, a full-resolution intermediate and the flow pyramid in the
@@ -1530,7 +1540,8 @@ bool FrameGenPresenter::EnsureOutputs(const XrCompositionLayerProjection& projec
             }
         }
         const double megabytes = 1024.0 * 1024.0;
-        logger_->Info("Frame Generation output swapchains ready: generatedPerFrame=" + std::to_string(output_sets_.size()) +
+        logger_->Info("Frame Generation output swapchains ready: generatedPerFrame=" + std::to_string(sets) +
+                      ", setsKept=" + std::to_string(output_sets_.size()) +
                       ", imagesPerSwapchain=" + std::to_string(output_sets_.front().front().image_count) +
                       ", estimated video memory " + Number((working + swapchains) / megabytes, 0) + " MB (working " +
                       Number(working / megabytes, 0) + " MB, output swapchains " + Number(swapchains / megabytes, 0) +
@@ -1539,10 +1550,10 @@ bool FrameGenPresenter::EnsureOutputs(const XrCompositionLayerProjection& projec
     return true;
 }
 
-bool FrameGenPresenter::AcquireOutputs(std::string& error, bool& timed_out) {
+bool FrameGenPresenter::AcquireOutputs(std::size_t sets, std::string& error, bool& timed_out) {
     timed_out = false;
-    for (auto& set : output_sets_) {
-        for (Output& output : set) {
+    for (std::size_t index = 0; index < sets && index < output_sets_.size(); ++index) {
+        for (Output& output : output_sets_[index]) {
             if (!output.acquired) {
                 XrSwapchainImageAcquireInfo acquire{XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};
                 XrResult acquired;
@@ -1697,9 +1708,13 @@ XrFrameEndInfo FrameGenPresenter::BuildFrame(FrameCopy& copy, const std::vector<
                 continue;
             }
             if (generated && copy.has_projection && i == copy.projection_index) {
+                // The real frame's depth stays: the game has not released a
+                // newer depth image before its next real frame, and without it
+                // the runtime would correct head movement on real frames but
+                // not generated ones, making near geometry jump each cycle.
                 layer.views = *generated;
-                layer.depth.resize(layer.views.size());
-                layer.has_depth.assign(layer.views.size(), 0); // a generated image has no matching depth
+                layer.depth.resize(layer.views.size(), XrCompositionLayerDepthInfoKHR{XR_TYPE_COMPOSITION_LAYER_DEPTH_INFO_KHR});
+                layer.has_depth.resize(layer.views.size(), 0);
                 layer.projection.space = generated_space;
                 layer.projection.layerFlags = generated_flags;
             }
@@ -2246,7 +2261,10 @@ XrResult FrameGenPresenter::ThreadedEnd(XrSession session, const XrFrameEndInfo&
 
     if (generate) {
         std::vector<float> fractions;
-        for (std::uint32_t slot = 1; slot < frame.multiplier; ++slot) {
+        // One frame per generated slot, plus a spare for the slot the next
+        // real frame is due in: if that frame is late, the slot still shows
+        // motion instead of repeating the last generated frame.
+        for (std::uint32_t slot = 1; slot <= frame.multiplier && fractions.size() < kFrameGenMaxGenerated; ++slot) {
             fractions.push_back(FrameGenFraction(FrameGenSynthesisMode::kExtrapolate, previous_time, content_time,
                                                  offer.time + period * static_cast<XrDuration>(slot)));
         }
