@@ -86,6 +86,31 @@ Pixels MovingSquare(float px, float py) {
     return pixels;
 }
 
+// A building facade: a regular grid of windows (12 px apart across, 16 px
+// down) in lightly textured concrete, shifted right by `offset` pixels and
+// antialiased horizontally. One window period away it matches almost as well
+// as the true motion, which is what makes skyscrapers alias.
+Pixels Facade(float offset) {
+    Pixels pixels(kSize * kSize);
+    for (std::uint32_t y = 0; y < kSize; ++y) {
+        for (std::uint32_t x = 0; x < kSize; ++x) {
+            float glass = 0.0f;
+            for (int sample = 0; sample < 4; ++sample) {
+                const float u = x + (sample + 0.5f) / 4.0f - offset;
+                const float cell = u - 12.0f * std::floor(u / 12.0f);
+                const float row = (y + 0.5f) - 16.0f * std::floor((y + 0.5f) / 16.0f);
+                glass += (cell >= 3.0f && cell < 9.0f && row >= 4.0f && row < 12.0f) ? 0.25f : 0.0f;
+            }
+            const float n = 0.04f * Noise((x - offset) / 3.0f, y / 3.0f);
+            const float r = (0.72f + n) * (1.0f - glass) + 0.12f * glass;
+            const float g = (0.70f + n) * (1.0f - glass) + 0.18f * glass;
+            const float b = (0.66f + n) * (1.0f - glass) + 0.26f * glass;
+            pixels[y * kSize + x] = Pack(r, g, b);
+        }
+    }
+    return pixels;
+}
+
 // A panorama at infinity rendered through a camera yawed by `yaw` radians.
 constexpr float kTan = 0.8f;
 Pixels Panorama(float yaw) {
@@ -287,6 +312,50 @@ int RunScenarios(Harness& harness) {
     const double extrap_hold = MeanError(b, truth_ahead, 96, 96, 272, 272);
     std::cout << harness.name << " extrapolate: error " << extrap_error << " vs hold " << extrap_hold << '\n';
     Check(extrap_error < 0.5 * extrap_hold, harness.name + " extrapolation is not better than repeating the newest frame");
+
+    // 3b. A repeating facade drifting 3 px per frame (a skyscraper passing
+    // slowly). Known limit: windows repeat finer than the coarse pyramid
+    // levels resolve, so coarse vectors are noise and finer levels lock onto
+    // a neighbouring period; generated frames are then worse than repeating
+    // the newest one. Search changes that stop the aliasing (a motion prior,
+    // a local search around predictions) also stop finer levels finding
+    // real motion the coarse levels missed (case 3 regressed 2-7x). Depth-
+    // derived motion or hardware optical flow is the fix; until then this
+    // guards against it getting worse.
+    {
+        // Extrapolated half a step ahead, as the presenter thread does. Three
+        // frames 3 px apart: the last pair also has last frame's flow as a
+        // predictor, the way a steady scene would.
+        tuning.mode = FrameGenSynthesisMode::kExtrapolate;
+        tuning.fractions[0] = 0.5f;
+        harness.upload(g_swapchains[kSource][0], Facade(0.0f));
+        harness.upload(g_swapchains[kSource][1], Facade(3.0f));
+        harness.upload(g_swapchains[kSource][2], Facade(6.0f));
+        auto sequence = [&] {
+            gpu->ResetHistory();
+            run(0, true, 0, 0);
+            const Pixels first = run(1, true, 0, 0);
+            return std::make_pair(first, run(2, true, 0, 0));
+        };
+        const auto [first, facade] = sequence();
+        const double first_error = MeanError(first, Facade(4.5f), 32, 32, kSize - 32, kSize - 32);
+        const double first_hold = MeanError(Facade(3.0f), Facade(4.5f), 32, 32, kSize - 32, kSize - 32);
+        const double facade_error = MeanError(facade, Facade(7.5f), 32, 32, kSize - 32, kSize - 32);
+        const double facade_hold = MeanError(Facade(6.0f), Facade(7.5f), 32, 32, kSize - 32, kSize - 32);
+        Dump(harness.name + "-facade", facade);
+        Dump(harness.name + "-facade-truth", Facade(7.5f));
+        if (std::getenv("FG_TEST_DUMP")) {
+            tuning.diagnostic = FrameGenDiagnosticView::kFlow;
+            Dump(harness.name + "-facade-flow", sequence().second);
+            tuning.diagnostic = FrameGenDiagnosticView::kConfidence;
+            Dump(harness.name + "-facade-confidence", sequence().second);
+            tuning.diagnostic = FrameGenDiagnosticView::kOff;
+        }
+        std::cout << harness.name << " facade: errors " << first_error << ", " << facade_error << " vs hold "
+                  << first_hold << ", " << facade_hold << std::endl;
+        Check(first_error < 2.2 * first_hold && facade_error < 2.2 * facade_hold,
+              harness.name + " repeating windows alias worse than before");
+    }
 
     // 4. Head rotation only: compensation must leave a static panorama where
     // the newest frame has it. Uncompensated flow would smear it sideways.

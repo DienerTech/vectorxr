@@ -424,6 +424,7 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
     const bool still = (g.options.y & FG_FLAG_STILL) != 0u;
     const float fraction = g.tuning.x;
     const float limit = max(g.tuning.y, 1e-4);
+    bool boundary = false;
 
     // Content at x in the newest frame sits at x - (1 - f) * v at the
     // interpolated time, or at x + a * v when extrapolating; this pixel reads
@@ -455,13 +456,18 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
         chosen = candidates[0];
         chosen_error = CandidateError(uv, chosen.xy, step);
         // Smooth motion, most of a frame, leaves nothing to choose between;
-        // only pixels near a motion boundary pay for the comparisons.
+        // only pixels near a motion boundary, where the surrounding block
+        // vectors disagree, pay for the comparisons. Zero motion is not one
+        // of those vectors: counting it made every moving pixel choose on
+        // its own, and sharp repeating edges (windows, railings, cockpit
+        // trim) tore apart.
         float spread = 0.0;
         [unroll]
-        for (int s = 1; s < 7; ++s) {
+        for (int s = 1; s < 6; ++s) {
             spread = max(spread, length((candidates[s].xy - chosen.xy) * float2(g.size.xy)));
         }
-        if (spread > 0.5) {
+        boundary = spread > 0.5;
+        if (boundary) {
             [unroll]
             for (int k = 1; k < 7; ++k) {
                 const float error = CandidateError(uv, candidates[k].xy, step) + (k == 6 ? 0.03 : 0.01);
@@ -480,9 +486,13 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
     // Uncertain motion shrinks toward a still image instead of blending two
     // positions, which would ghost.
     float confidence = motion_confidence * cost_confidence;
-    if (extrapolate) {
-        // Extrapolation sees only the newest frame at display time, so a
-        // vector the two real frames disagree on is not trusted either.
+    if (extrapolate && boundary) {
+        // Extrapolation sees only the newest frame at display time, so at a
+        // motion boundary a vector the two real frames disagree on (newly
+        // revealed or hidden content) is not trusted either. Inside smooth
+        // motion this per-pixel check only reacts to sampling sharp edges
+        // between texels; applying it there shifted edges less than the
+        // surfaces around them.
         confidence *= agreement;
     }
 
@@ -498,7 +508,7 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
             photometric_confidence = saturate(1.0 - max(difference - 0.03, 0.0) * g.tuning.w);
             result = lerp(current, previous, (1.0 - fraction) * photometric_confidence);
         }
-    } else if (extrapolate) {
+    } else if (extrapolate && boundary) {
         photometric_confidence = agreement;
     }
     const float4 flow_here = chosen;

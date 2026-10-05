@@ -484,14 +484,15 @@ class FrameGenPresenter {
     std::optional<std::uint64_t> last_release_slot_;
     double app_latency_ms_{0.0}; // smoothed time from a wait returning to its end (log)
     // Refreshes between a wait's release and the slot its frame is predicted
-    // for: one more after a late frame, one fewer after frames that keep
-    // arriving more than a refresh before their deadline. Only frames
+    // for: one more after two late frames among the last ten, one fewer
+    // after seven of ten arriving more than a refresh before their deadline,
+    // so a single hitch does not add latency for good. Only frames
     // predicted with the current lead move it, so frames in flight do not
     // move it twice. An early frame is held until its slot, which delays the
     // app's next frame; a lead that is too long therefore slows the app, not
     // just adds latency.
     std::uint32_t lead_slots_{0};
-    std::uint32_t lead_slack_streak_{0};
+    std::deque<std::uint8_t> lead_history_; // last frames at the current lead: 0 on time, 1 late, 2 slack
     std::uint32_t dropped_unbegun_{0}; // dropped frames whose begin is still to come
     std::uint32_t dropped_unended_{0}; // dropped frames whose end is still to come
     // Runtime frame calls that succeeded this session.

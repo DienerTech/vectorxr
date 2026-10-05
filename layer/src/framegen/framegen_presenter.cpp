@@ -238,7 +238,8 @@ void FrameGenPresenter::Stop() {
     app_latency_ms_ = 0.0;
     passthrough_copy_ = {};
     threaded_late_ = 0;
-    lead_slots_ = lead_slack_streak_ = 0;
+    lead_slots_ = 0;
+    lead_history_.clear();
     dropped_unbegun_ = 0;
     gpu_ms_ = -1.0;
     inline_hold_until_.reset();
@@ -2060,23 +2061,25 @@ void FrameGenPresenter::ExitThreadedLocked(std::unique_lock<std::mutex>& lock) {
 }
 
 void FrameGenPresenter::UpdateLeadLocked(bool late, std::optional<double> slack_ms, const ThreadedFrame& frame) {
-    const bool current = frame.lead >= lead_slots_;
-    if (late) {
-        if (current) {
-            lead_slots_ = std::min(lead_slots_ + 1, 4 * frame.multiplier);
-        }
-        lead_slack_streak_ = 0;
+    // Frames predicted with an older lead say nothing about this one.
+    if (frame.lead < lead_slots_) {
         return;
     }
     const double period_ms = static_cast<double>(std::max<XrDuration>(last_period_, 1)) / 1e6;
-    if (current && slack_ms && *slack_ms > period_ms * 1.1) {
-        // It could have arrived a refresh later and still made its slot.
-        if (++lead_slack_streak_ >= 4 && lead_slots_ > 1) {
-            --lead_slots_;
-            lead_slack_streak_ = 0;
-        }
-    } else if (current) {
-        lead_slack_streak_ = 0;
+    // Slack: it could have arrived a refresh later and still made its slot.
+    lead_history_.push_back(late ? 1 : (slack_ms && *slack_ms > period_ms * 1.1) ? 2 : 0);
+    while (lead_history_.size() > 10) {
+        lead_history_.pop_front();
+    }
+    const auto count = [&](std::uint8_t kind) {
+        return static_cast<std::size_t>(std::count(lead_history_.begin(), lead_history_.end(), kind));
+    };
+    if (count(1) >= 2) {
+        lead_slots_ = std::min(lead_slots_ + 1, 4 * frame.multiplier);
+        lead_history_.clear();
+    } else if (lead_history_.size() >= 8 && count(2) >= 7 && lead_slots_ > 1) {
+        --lead_slots_;
+        lead_history_.clear();
     }
 }
 
