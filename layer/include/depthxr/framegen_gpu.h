@@ -74,6 +74,10 @@ class FrameGenGpu {
     virtual void Reset() = 0;
     // Most recent GPU duration of a whole submission, or a negative value.
     virtual double LastGpuMilliseconds() const { return -1.0; }
+    // The runtime may then be called from a presenter thread while the
+    // application renders: the API's queue is free-threaded (Direct3D 12), so
+    // runtime work on it cannot race the application's own submissions.
+    virtual bool SupportsThreadedPresentation() const { return false; }
 };
 
 // Builds the backend matching the session's graphics binding (D3D11, D3D12

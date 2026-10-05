@@ -23,7 +23,7 @@ const synthesisModes: { value: FrameGenSynthesisMode; label: string; badge?: str
   {
     value: 'extrapolate',
     label: 'Extrapolate',
-    description: 'Pushes the newest real frame forward along its motion. Gives the game more GPU time per frame, with more edge artifacts on fast motion and newly revealed areas. Best for heavy GPU-bound games.',
+    description: 'Pushes the newest real frame forward along its motion. Gives the game more time per frame, with more edge artifacts on fast motion and newly revealed areas. Best for heavy games: on Direct3D 12, such as MSFS, generated frames are shown from their own thread while the game keeps rendering.',
   },
 ]
 

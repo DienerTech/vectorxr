@@ -1,7 +1,13 @@
 // Frame Generation pacing against a fake runtime and a fake GPU backend:
 // runtime call order, display times, the overlap gate and frame demotion,
 // output image ownership, capture at release, failure handling, automatic
-// retry and the in-session toggle. No graphics device is needed.
+// retry and the in-session toggle, and threaded presentation against a
+// runtime that paces its waits. No graphics device is needed.
+
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
 
 #include "depthxr/framegen_presenter.h"
 
@@ -10,6 +16,7 @@
 #include <condition_variable>
 #include <deque>
 #include <chrono>
+#include <functional>
 #include <cmath>
 #include <cstdlib>
 #include <iostream>
@@ -102,10 +109,11 @@ XrResult XRAPI_PTR Release(XrSwapchain swapchain, const XrSwapchainImageReleaseI
 // --- fake GPU -------------------------------------------------------------------
 
 struct GpuLog {
-    int executes{0};
-    int captures{0};
+    std::atomic<int> executes{0};
+    std::atomic<int> captures{0};
     int wait_idles{0};
     bool fail{false};
+    bool threaded{false};
     std::vector<FrameGenViewSubmission> last;
     FrameGenImage last_capture;
     FrameGenTuning tuning;
@@ -161,6 +169,7 @@ class FakeGpu final : public FrameGenGpu {
     void ResetHistory() override { history_.clear(); }
     void Reset() override {}
     double LastGpuMilliseconds() const override { return 0.75; }
+    bool SupportsThreadedPresentation() const override { return log_->threaded; }
 
   private:
     GpuLog* log_;
@@ -169,8 +178,33 @@ class FakeGpu final : public FrameGenGpu {
 
 // --- fake runtime ------------------------------------------------------------------
 
+// Sleeps to a deadline with sub-millisecond precision.
+void SleepPrecise(std::chrono::steady_clock::time_point deadline) {
+    static thread_local HANDLE timer =
+        CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
+    const auto remaining = deadline - std::chrono::steady_clock::now();
+    if (remaining <= std::chrono::steady_clock::duration::zero()) return;
+    LARGE_INTEGER due{};
+    due.QuadPart = -std::max<long long>(1, std::chrono::duration_cast<std::chrono::nanoseconds>(remaining).count() / 100);
+    if (timer && SetWaitableTimer(timer, &due, 0, nullptr, nullptr, FALSE)) {
+        WaitForSingleObject(timer, 1000);
+    } else {
+        std::this_thread::sleep_until(deadline);
+    }
+}
+
+struct Submission {
+    XrTime time{0};
+    std::vector<XrSwapchain> swapchains;
+    std::uint32_t layers{0};
+};
+
 struct Runtime {
     std::atomic<XrTime> next_display{1'000'000'000};
+    // Paced: each wait blocks until the next refresh, like a compositor.
+    std::atomic<bool> paced{false};
+    std::chrono::steady_clock::time_point epoch{std::chrono::steady_clock::now()};
+    std::int64_t last_tick{0};
     std::atomic<int> outstanding_waits{0};
     std::atomic<bool> ordering_violation{false};
     std::atomic<bool> fail_next_submit{false};
@@ -186,6 +220,17 @@ struct Runtime {
         calls.wait = [this](XrSession, const XrFrameWaitInfo*, XrFrameState* state) {
             if (++outstanding_waits > 1) ordering_violation = true;
             if (wait_sleep_ms) std::this_thread::sleep_for(std::chrono::milliseconds(wait_sleep_ms));
+            if (paced) {
+                const auto period = std::chrono::nanoseconds(kPeriod);
+                std::int64_t tick = (std::chrono::steady_clock::now() - epoch) / period + 1;
+                tick = std::max(tick, last_tick + 1);
+                last_tick = tick;
+                SleepPrecise(epoch + tick * period);
+                state->predictedDisplayTime = 1'000'000'000 + (tick + 1) * kPeriod;
+                state->predictedDisplayPeriod = kPeriod;
+                state->shouldRender = XR_TRUE;
+                return XR_SUCCESS;
+            }
             state->predictedDisplayTime = next_display.fetch_add(kPeriod);
             state->predictedDisplayPeriod = kPeriod;
             state->shouldRender = XR_TRUE;
@@ -217,6 +262,7 @@ struct Runtime {
             }
             submitted_swapchains.push_back(swapchains);
             submitted_depth.push_back(depth);
+            log.push_back({info->displayTime, swapchains, info->layerCount});
             return XR_SUCCESS;
         };
         return calls;
@@ -226,6 +272,13 @@ struct Runtime {
         std::scoped_lock lock(g_xr_mutex);
         return submitted_times.size();
     }
+
+    std::vector<Submission> Snapshot() {
+        std::scoped_lock lock(g_xr_mutex);
+        return log;
+    }
+
+    std::vector<Submission> log;
 };
 
 // --- application ------------------------------------------------------------------
@@ -243,7 +296,10 @@ struct App {
     XrBaseInStructure depth{XR_TYPE_COMPOSITION_LAYER_DEPTH_INFO_KHR};
     std::array<XrCompositionLayerProjectionView, 2> views{};
     XrCompositionLayerProjection projection{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
-    const XrCompositionLayerBaseHeader* layer{reinterpret_cast<const XrCompositionLayerBaseHeader*>(&projection)};
+    XrCompositionLayerQuad quad{XR_TYPE_COMPOSITION_LAYER_QUAD};
+    XrCompositionLayerBaseHeader unknown{static_cast<XrStructureType>(1000999999)};
+    std::vector<const XrCompositionLayerBaseHeader*> layers{
+        reinterpret_cast<const XrCompositionLayerBaseHeader*>(&projection)};
 
     App(FrameGenPresenter& p, Runtime& r) : presenter(p), runtime(r), calls(r.Calls()) {
         for (int eye = 0; eye < 2; ++eye) {
@@ -258,6 +314,10 @@ struct App {
         projection.space = kSpace;
         projection.viewCount = 2;
         projection.views = views.data();
+        quad.space = kSpace;
+        quad.subImage.swapchain = reinterpret_cast<XrSwapchain>(0x13);
+        quad.size = {1.0f, 0.5f};
+        quad.pose.orientation.w = 1.0f;
     }
 
     XrFrameState Wait() {
@@ -285,8 +345,8 @@ struct App {
         XrFrameEndInfo info{XR_TYPE_FRAME_END_INFO};
         info.displayTime = display_time;
         info.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
-        info.layerCount = layers ? 1 : 0;
-        info.layers = layers ? &layer : nullptr;
+        info.layerCount = layers ? static_cast<std::uint32_t>(this->layers.size()) : 0;
+        info.layers = layers ? this->layers.data() : nullptr;
         return presenter.EndFrame(kSession, &info, calls);
     }
 
@@ -522,6 +582,219 @@ void TestAutomaticMultiplier() {
     run(1500ms, 20ms); // the fake runtime let the fast phase run thousands of frames a second
     Check(!presenter.Status().full_rate && presenter.Status().multiplier >= 2, "auto: a slower app re-engages");
     Check(!runtime.ordering_violation && !g_release_violation, "auto: calls stayed ordered through changes");
+}
+
+// --- threaded presentation --------------------------------------------------------
+
+void StartThreaded(FrameGenPresenter& presenter, GpuLog& gpu, FrameGenMultiplier multiplier) {
+    gpu.threaded = true;
+    StartPresenter(presenter, gpu, FrameGenSynthesisMode::kExtrapolate, kFormat, kAppUsage, multiplier);
+}
+
+double Seconds(std::chrono::steady_clock::duration duration) {
+    return std::chrono::duration<double>(duration).count();
+}
+
+// MSFS-style pipelining: a main thread waits for frame N + 1 and simulates
+// it while the render thread renders frame N. `between` runs on the render
+// thread after each end. Returns the frames ended.
+int RunPipelined(App& app, std::chrono::milliseconds duration, std::chrono::milliseconds simulate,
+                 std::chrono::milliseconds render, const std::function<void(int, const XrFrameState&)>& between = {}) {
+    std::mutex mutex;
+    std::condition_variable cv;
+    std::deque<XrFrameState> ready;
+    bool done = false;
+    int begun = 0;
+    const auto start = std::chrono::steady_clock::now();
+    std::thread main_thread([&] {
+        for (int i = 0; std::chrono::steady_clock::now() - start < duration; ++i) {
+            {
+                std::unique_lock lock(mutex);
+                cv.wait(lock, [&] { return begun >= i; });
+            }
+            const XrFrameState state = app.Wait();
+            std::this_thread::sleep_for(simulate);
+            std::scoped_lock lock(mutex);
+            ready.push_back(state);
+            cv.notify_all();
+        }
+        std::scoped_lock lock(mutex);
+        done = true;
+        cv.notify_all();
+    });
+    int ended = 0;
+    for (;;) {
+        XrFrameState state{};
+        {
+            std::unique_lock lock(mutex);
+            cv.wait(lock, [&] { return !ready.empty() || done; });
+            if (ready.empty()) break;
+            state = ready.front();
+            ready.pop_front();
+        }
+        app.Begin();
+        {
+            std::scoped_lock lock(mutex);
+            ++begun;
+            cv.notify_all();
+        }
+        std::this_thread::sleep_for(render);
+        app.Release();
+        Check(XR_SUCCEEDED(app.End(state.predictedDisplayTime)), "pipelined: end");
+        if (between) between(ended, state);
+        ++ended;
+    }
+    main_thread.join();
+    return ended;
+}
+
+void CheckOrderedTimes(const std::vector<Submission>& log, const std::string& what) {
+    for (std::size_t i = 1; i < log.size(); ++i) {
+        Check(log[i].time > log[i - 1].time, what + ": display times only move forward");
+    }
+}
+
+void TestThreadedExtrapolation() {
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    runtime.paced = true;
+    StartThreaded(presenter, gpu, FrameGenMultiplier::k3);
+    App app(presenter, runtime);
+    for (int i = 0; i < 3; ++i) app.Frame();
+    Check(!presenter.Status().threaded, "threaded: frames pass through before engagement");
+
+    const std::size_t first = runtime.Submissions();
+    const auto start = std::chrono::steady_clock::now();
+    int frames = 0;
+    XrFrameState state{};
+    while (std::chrono::steady_clock::now() - start < 1200ms) {
+        state = app.Wait();
+        app.Begin();
+        std::this_thread::sleep_for(4ms);
+        app.Release();
+        Check(XR_SUCCEEDED(app.End(state.predictedDisplayTime)), "threaded: end");
+        ++frames;
+    }
+    const double elapsed = Seconds(std::chrono::steady_clock::now() - start);
+    const FrameGenStatus status = presenter.Status();
+    Check(status.threaded && status.state == FrameGenState::kActive, "threaded: presents from its own thread");
+    Check(state.predictedDisplayPeriod == 3 * kPeriod, "threaded: the app sees a tripled period");
+    const auto log = runtime.Snapshot();
+    std::size_t real = 0, generated = 0;
+    for (std::size_t i = first + 20; i < log.size(); ++i) {
+        (IsAppImage(log[i].swapchains) ? real : generated) += 1;
+    }
+    const double share = static_cast<double>(real) / static_cast<double>(real + generated);
+    Check(share > 0.25 && share < 0.42, "threaded: one real frame in three refreshes (" + std::to_string(share) + ")");
+    const double refresh = 1e9 / static_cast<double>(kPeriod);
+    const double output = static_cast<double>(log.size() - first) / elapsed;
+    Check(output > refresh * 0.85, "threaded: every refresh gets a frame (" + std::to_string(output) + " fps)");
+    Check(frames / elapsed > refresh / 3 * 0.8 && frames / elapsed < refresh / 3 * 1.15,
+          "threaded: the app runs at a third of the refresh (" + std::to_string(frames / elapsed) + " fps)");
+    CheckOrderedTimes(log, "threaded");
+    Check(gpu.executes > frames / 2, "threaded: frames are generated from the real frames");
+    const auto stop_start = std::chrono::steady_clock::now();
+    presenter.Stop();
+    Check(std::chrono::steady_clock::now() - stop_start < 500ms, "threaded: stop ends the presenter thread promptly");
+    Check(!runtime.ordering_violation && !g_release_violation, "threaded: runtime and image calls stayed ordered");
+}
+
+void TestThreadedPipelinedApp() {
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    runtime.paced = true;
+    StartThreaded(presenter, gpu, FrameGenMultiplier::k3);
+    App app(presenter, runtime);
+    for (int i = 0; i < 3; ++i) app.Frame();
+    // Simulation and rendering each take 20+ ms but overlap, as in MSFS: the
+    // app can hold 3x (33 ms) only if its next wait is not held behind the
+    // current frame's generated slots.
+    const std::size_t first = runtime.Submissions();
+    const auto start = std::chrono::steady_clock::now();
+    const int frames = RunPipelined(app, 1500ms, 20ms, 22ms);
+    const double elapsed = Seconds(std::chrono::steady_clock::now() - start);
+    const double refresh = 1e9 / static_cast<double>(kPeriod);
+    Check(presenter.Status().threaded, "pipelined: presents from its own thread");
+    Check(frames / elapsed > refresh / 3 * 0.8,
+          "pipelined: the app keeps its overlap and holds a third of the refresh (" + std::to_string(frames / elapsed) +
+              " fps)");
+    const auto log = runtime.Snapshot();
+    Check(static_cast<double>(log.size() - first) / elapsed > refresh * 0.85, "pipelined: every refresh gets a frame");
+    CheckOrderedTimes(log, "pipelined");
+    presenter.Stop();
+    Check(!runtime.ordering_violation && !g_release_violation, "pipelined: runtime and image calls stayed ordered");
+}
+
+void TestThreadedToggleAndReset() {
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    runtime.paced = true;
+    StartThreaded(presenter, gpu, FrameGenMultiplier::k2);
+    App app(presenter, runtime);
+    for (int i = 0; i < 3; ++i) app.Frame();
+    bool saw_threaded = false, saw_passthrough = false, saw_rethreaded = false;
+    RunPipelined(app, 2000ms, 8ms, 10ms, [&](int frame, const XrFrameState& state) {
+        if (frame == 20) {
+            saw_threaded = presenter.Status().threaded && state.predictedDisplayPeriod == 2 * kPeriod;
+            presenter.Toggle(); // off: the presenter thread hands back while frames are in flight
+        } else if (frame == 40) {
+            saw_passthrough = !presenter.Status().threaded && state.predictedDisplayPeriod == kPeriod;
+            presenter.Toggle(); // on again
+        } else if (frame == 70) {
+            saw_rethreaded = presenter.Status().threaded;
+        }
+    });
+    Check(saw_threaded, "toggle: threaded before the toggle");
+    Check(saw_passthrough, "toggle: frames pass straight through after toggling off");
+    Check(saw_rethreaded, "toggle: toggling on presents from the thread again");
+    CheckOrderedTimes(runtime.Snapshot(), "toggle");
+
+    // A session state change stops the thread between frames.
+    presenter.ResetFrames();
+    Check(!presenter.Status().threaded, "reset: the presenter thread stops");
+    for (int i = 0; i < 8; ++i) app.Frame();
+    Check(presenter.Status().threaded, "reset: re-engages after the session settles");
+    presenter.Stop();
+    Check(!runtime.ordering_violation && !g_release_violation, "toggle: runtime and image calls stayed ordered");
+}
+
+void TestThreadedKeepsOtherLayers() {
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    runtime.paced = true;
+    StartThreaded(presenter, gpu, FrameGenMultiplier::k3);
+    App app(presenter, runtime);
+    app.layers.push_back(reinterpret_cast<const XrCompositionLayerBaseHeader*>(&app.quad));
+    for (int i = 0; i < 3; ++i) app.Frame();
+    const std::size_t first = runtime.Submissions();
+    for (int i = 0; i < 20; ++i) app.Frame();
+    presenter.Stop();
+    const auto log = runtime.Snapshot();
+    bool all = true, any_generated = false;
+    for (std::size_t i = first; i < log.size(); ++i) {
+        all = all && log[i].layers == 2;
+        any_generated = any_generated || !IsAppImage(log[i].swapchains);
+    }
+    Check(any_generated && all, "threaded: generated frames keep the app's quad layer");
+    Check(!runtime.ordering_violation, "layers: runtime calls stayed ordered");
+}
+
+void TestThreadedUnsupportedLayerPresentsInline() {
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    StartThreaded(presenter, gpu, FrameGenMultiplier::k2);
+    App app(presenter, runtime);
+    app.layers.push_back(&app.unknown);
+    for (int i = 0; i < 6; ++i) app.Frame();
+    const FrameGenStatus status = presenter.Status();
+    Check(!status.threaded && status.state == FrameGenState::kActive,
+          "unsupported layer: generation runs inline instead of from the thread");
+    Check(!runtime.ordering_violation, "unsupported layer: runtime calls stayed ordered");
 }
 
 void TestOverlappingWaitIsHeld() {
@@ -798,6 +1071,11 @@ int main() {
     TestQuadExtrapolation();
     TestSubmissionSpacing();
     TestAutomaticMultiplier();
+    TestThreadedExtrapolation();
+    TestThreadedPipelinedApp();
+    TestThreadedToggleAndReset();
+    TestThreadedKeepsOtherLayers();
+    TestThreadedUnsupportedLayerPresentsInline();
     TestOverlappingWaitIsHeld();
     TestUnclaimedFrameIsDemoted();
     TestSameThreadDoubleWait();

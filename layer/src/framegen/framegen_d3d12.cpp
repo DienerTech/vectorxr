@@ -301,6 +301,8 @@ class D3D12FrameGen final : public FrameGenGpu {
 
     bool WaitIdle() override { return WaitFence(fence_value_, 2000); }
 
+    bool SupportsThreadedPresentation() const override { return true; }
+
     bool Execute(const std::vector<FrameGenViewSubmission>& views, const FrameGenTuning& tuning,
                  FrameGenExecuteResult& result, std::string& error) override {
         result.synthesized.assign(views.size(), false);

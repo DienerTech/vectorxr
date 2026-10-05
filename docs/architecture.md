@@ -98,6 +98,23 @@ frame calls:
 - Auto steps the multiplier up when more than 30% of the last second's app frames miss the
   cadence, and probes one step down after five steady seconds, doubling the wait between
   probes (10 s to 80 s) each time a probe fails. At 1x it passes frames straight through.
+  When the late frames are inline cycles whose first slot was already past due, a higher
+  multiplier would only hold the game's thread longer, so Auto drops to full rate for a
+  minute instead.
+- Threaded presentation (Direct3D 12, Extrapolate): the inline cycle above holds the game's
+  frame thread for the generated slots and holds its next `xrWaitFrame` behind them, which
+  serialises games that overlap frames (MSFS waits for frame *N + 1* while rendering frame
+  *N*). Where the graphics queue is free-threaded, a presenter thread instead owns the
+  runtime frame loop: one runtime wait/begin/end per refresh. The app's `xrWaitFrame` never
+  reaches the runtime; it is released every *N*th slot the presenter thread publishes, and
+  predicts the slot the frame will really reach from the app's measured wait-to-end time.
+  The app's `xrBeginFrame` is a no-op. Its `xrEndFrame` asks for the first slot at or after
+  that one, runs the runtime begin/end for it with the app's own layers, then generates the
+  extrapolated frames for the following slots. Between real frames the presenter thread
+  submits those, composed with a deep copy of the newest real frame's other layers, or that
+  frame again until they are ready. Leaving the mode drains frames in flight; session
+  changes stop the thread and drop frames that have not started ending. Games whose layers
+  cannot be copied (unknown layer types) stay inline.
 - A wait that arrives while an engaged frame is still ending is held, so runtime frame calls
   never overlap even for applications that wait on one thread while ending on another.
 - Turbo yields for the session; the two features pace frames in opposite directions.

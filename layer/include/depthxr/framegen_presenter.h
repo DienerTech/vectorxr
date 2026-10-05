@@ -67,6 +67,7 @@ struct FrameGenStatus {
     std::uint32_t multiplier{2}; // headset frames per real frame in use
     bool automatic{false};       // the multiplier is chosen automatically
     bool full_rate{false};       // automatic and the app holds full refresh
+    bool threaded{false};        // presenting from the presenter thread
 };
 
 // Frame Generation pacing for one OpenXR session.
@@ -87,6 +88,17 @@ struct FrameGenStatus {
 // whose end has not started yet can instead be demoted to a single
 // submission: immediately when the same thread waits again before ending it,
 // or after a bounded hold when another thread does.
+//
+// That inline cycle holds the application's frame thread for the generated
+// slots, so a game whose frame takes longer than the runtime's lead time, or
+// that waits for its next frame before ending the current one (MSFS), loses
+// frame rate instead of gaining it. Where the graphics queue is free-threaded
+// (Direct3D 12) and the mode is Extrapolate, a presenter thread instead owns
+// the runtime frame loop: one runtime wait/begin/end per refresh, filled with
+// extrapolated frames, while the application's waits are paced to every Nth
+// refresh without reaching the runtime. Each real frame is submitted, from
+// its own xrEndFrame, in the first slot at or after the one it was predicted
+// for; the frames generated from it fill the slots until the next one.
 class FrameGenPresenter {
   public:
     using GpuFactory = std::function<std::unique_ptr<FrameGenGpu>(const void*, std::string&)>;
@@ -165,6 +177,7 @@ class FrameGenPresenter {
         XrTime slot_time{0};
         XrDuration period{0};
         bool should_render{false};
+        bool begun{false};
         bool engaged{false};
         bool demoted{false}; // falls back to one submission in slot k
         bool claimed{false}; // its end has started; it will run its extra frames
@@ -207,6 +220,51 @@ class FrameGenPresenter {
         std::vector<std::vector<XrCompositionLayerProjectionView>> sets;
     };
 
+    // A deep copy of a frame's composition layers that outlives the app's
+    // xrEndFrame, for slots the presenter thread fills between real frames.
+    struct FrameCopy {
+        struct Layer {
+            XrStructureType type{XR_TYPE_UNKNOWN};
+            XrCompositionLayerProjection projection{};
+            std::vector<XrCompositionLayerProjectionView> views;
+            std::vector<XrCompositionLayerDepthInfoKHR> depth;
+            std::vector<std::uint8_t> has_depth;
+            XrCompositionLayerQuad quad{};
+            XrCompositionLayerCylinderKHR cylinder{};
+            XrCompositionLayerEquirectKHR equirect{};
+            XrCompositionLayerEquirect2KHR equirect2{};
+            XrCompositionLayerCubeKHR cube{};
+        };
+        bool valid{false};
+        bool has_projection{false};
+        std::uint32_t projection_index{0};
+        XrEnvironmentBlendMode blend_mode{XR_ENVIRONMENT_BLEND_MODE_OPAQUE};
+        std::vector<Layer> layers;
+    };
+
+    // An application frame the presenter thread presents.
+    struct ThreadedFrame {
+        std::uint64_t id{0};
+        XrTime predicted{0};           // the display time the app rendered for
+        std::uint64_t target_slot{0};  // the slot that display time belongs to
+        std::uint32_t multiplier{2};
+        bool begun{false};
+        bool claimed{false}; // its end has started
+        std::chrono::steady_clock::time_point wait_return{};
+    };
+
+    struct SlotRequest {
+        std::uint64_t frame_id{0};
+        std::uint64_t earliest_slot{0};
+    };
+
+    struct SlotOffer {
+        std::uint64_t frame_id{0};
+        std::uint64_t slot{0};
+        XrTime time{0};
+        bool should_render{true};
+    };
+
     // A projection view's source region, captured when its swapchain releases.
     struct CaptureTarget {
         XrSwapchain swapchain{XR_NULL_HANDLE};
@@ -218,7 +276,8 @@ class FrameGenPresenter {
     bool WantsEngagementLocked() const;
     bool RunnableLocked() const;
     std::uint32_t EffectiveMultiplierLocked() const;
-    void UpdateAutoLocked(std::chrono::steady_clock::time_point now, const std::optional<PendingFrame>& frame);
+    void UpdateAutoLocked(std::chrono::steady_clock::time_point now, const std::optional<PendingFrame>& frame,
+                          bool started_late = false);
     void MaybeRetryLocked();
     void PauseLocked(const std::string& reason);
     void UnavailableLocked(const std::string& reason);
@@ -250,6 +309,29 @@ class FrameGenPresenter {
     void InvalidateContinuityLocked();
     void NoteFailureLocked(const std::string& error);
     void NoteSubmissionLocked();
+
+    // Threaded presentation.
+    bool ThreadedEligibleLocked() const;
+    // Returns nothing when the presenter thread is not running (the caller
+    // then takes the inline path).
+    std::optional<XrResult> ThreadedWaitLocked(std::unique_lock<std::mutex>& lock, XrFrameState* state,
+                                               const FrameGenRuntimeCalls& calls);
+    XrResult ThreadedEnd(XrSession session, const XrFrameEndInfo& info, const FrameGenRuntimeCalls& calls,
+                         const ThreadedFrame& frame, std::chrono::steady_clock::time_point entered);
+    void StartCompositorLocked(const FrameGenRuntimeCalls& calls);
+    // Lets the presenter thread present every frame in flight, then stops it.
+    void ExitThreadedLocked(std::unique_lock<std::mutex>& lock);
+    // Stops the presenter thread at its next slot; frames still in flight are
+    // dropped.
+    void StopCompositorLocked(std::unique_lock<std::mutex>& lock);
+    void JoinCompositorLocked(std::unique_lock<std::mutex>& lock);
+    void CompositorLoop();
+    static bool CopyFrame(const XrFrameEndInfo& info, FrameCopy& copy, std::string& unsupported);
+    // Points `pointers` at `copy`'s layers, replacing its primary projection's
+    // views with `generated` when given.
+    static XrFrameEndInfo BuildFrame(FrameCopy& copy, const std::vector<XrCompositionLayerProjectionView>* generated,
+                                     XrSpace generated_space, XrCompositionLayerFlags generated_flags,
+                                     std::vector<const XrCompositionLayerBaseHeader*>& pointers);
 
     mutable std::mutex mutex_;
     std::condition_variable idle_cv_;
@@ -306,7 +388,12 @@ class FrameGenPresenter {
     // one step down after a steady stretch, backing off when a probe fails.
     std::uint32_t auto_multiplier_{2}; // 1 = full rate, no generation
     bool full_rate_{false};
-    std::deque<std::pair<std::chrono::steady_clock::time_point, bool>> cadence_; // (end time, late)
+    struct Cadence {
+        std::chrono::steady_clock::time_point time;
+        bool late{false};
+        bool started_late{false}; // inline: the cycle's first slot was already past due
+    };
+    std::deque<Cadence> cadence_;
     std::optional<std::chrono::steady_clock::time_point> last_app_end_;
     std::chrono::steady_clock::time_point multiplier_changed_at_{};
     std::chrono::steady_clock::time_point probe_not_before_{};
@@ -329,9 +416,43 @@ class FrameGenPresenter {
     std::uint64_t app_work_frames_{0};
     std::uint64_t cycles_{0};
     std::uint64_t late_cycles_{0};
+    bool last_cycle_started_late_{false};
+    std::optional<std::chrono::steady_clock::time_point> inline_hold_until_; // auto stays at full rate
     bool logged_first_generation_{false};
     bool logged_capture_failure_{false};
     void* timer_{nullptr}; // high-resolution waitable timer, frame thread only
+
+    // Threaded presentation. The presenter thread owns the runtime frame loop
+    // while compositor_running_; app threads hand it real frames through
+    // slot_request_/slot_offer_. Lock order: submit_mutex_, queue, mutex_.
+    std::thread compositor_;
+    void* compositor_timer_{nullptr};
+    FrameGenRuntimeCalls compositor_calls_;
+    bool compositor_running_{false};
+    bool compositor_stop_{false};  // close the current slot and exit
+    bool compositor_drain_{false}; // exit once no application frame is in flight
+    bool threaded_disabled_{false};
+    bool logged_threaded_{false};
+    std::condition_variable slot_cv_;
+    std::uint64_t slot_index_{0}; // runtime slots the presenter thread has waited
+    XrTime slot_time_{0};
+    XrDuration slot_period_{0};
+    bool slot_should_render_{true};
+    std::deque<ThreadedFrame> threaded_frames_;
+    std::uint64_t threaded_id_{0};
+    std::optional<std::uint64_t> last_release_slot_;
+    double app_latency_ms_{0.0}; // smoothed time from a wait returning to its end
+    std::optional<SlotRequest> slot_request_;
+    std::optional<SlotOffer> slot_offer_;
+    bool offer_done_{false};
+    std::vector<XrTime> dropped_frames_; // ended without a runtime frame
+    FrameCopy newest_copy_;              // the newest real frame's layers
+    FrameCopy passthrough_copy_;         // the last frame passed straight through
+    bool generation_pending_{false};     // frames are being generated from newest_copy_
+    bool generated_ready_{false};        // extrapolated_ belongs to newest_copy_
+    std::size_t next_generated_set_{0};
+    std::uint64_t threaded_late_{0};     // real frames shown after their predicted slot
+    std::mutex submit_mutex_;            // presenter-thread submissions vs output swapchain calls
 };
 
 } // namespace depthxr
