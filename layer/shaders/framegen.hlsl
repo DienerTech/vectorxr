@@ -10,10 +10,12 @@
 //
 // Flow is the displacement of image content from the previous real frame to
 // the newest one, measured in the newest view and expressed in normalized
-// view coordinates. Head rotation between the two frames is removed before
-// matching by sampling the previous frame through a rotation-only mapping, so
-// the flow holds only world, vehicle and object motion: the runtime's own
-// reprojection already corrects head rotation for every submitted frame.
+// view coordinates. Head motion between the two frames is removed before
+// matching by sampling the previous frame through the relative view pose:
+// rotation only, or with the newest frame's depth the full pose, so content
+// fixed in the head's reference space (a cockpit) lines up exactly. The flow
+// then holds only world, vehicle and object motion: the runtime's own
+// reprojection corrects head motion for every submitted frame.
 
 #ifdef __spirv__
 #define FG_BIND(slot) [[vk::binding(slot, 0)]]
@@ -26,9 +28,9 @@
 struct FrameGenConstants {
     float4 fov_current;  // tangents left, right, up, down of the newest real view
     float4 fov_previous; // tangents of the previous real view
-    float4 rot0;         // rows of R: newest-view direction -> previous-view direction
-    float4 rot1;
-    float4 rot2;
+    float4 rot0;         // rows of R: newest-view direction -> previous-view direction;
+    float4 rot1;         // w: the newest view's position in the previous view's
+    float4 rot2;         // space (meters), used with depth
     uint4 size;          // xy destination extent, zw source extent
     uint4 options;       // x search radius, y flags, z diagnostic view, w level
     float4 tuning;       // x fraction, y motion limit, z cost scale, w photometric scale
@@ -46,6 +48,10 @@ cbuffer FrameGenConstantBuffer : register(b0) {
 #define FG_FLAG_EXTRAPOLATE 2u
 #define FG_FLAG_TEMPORAL 4u
 #define FG_FLAG_STILL 8u
+#define FG_FLAG_DEPTH 16u
+
+// Linear depth at or beyond this many meters is treated as infinitely far.
+#define FG_FAR_DEPTH 100000.0
 
 #define FG_VIEW_FLOW 1u
 #define FG_VIEW_CONFIDENCE 2u
@@ -61,13 +67,20 @@ float Luma(float3 rgb) {
     return sqrt(max(dot(rgb, float3(0.2126, 0.7152, 0.0722)), 0.0));
 }
 
-// Rotation-only reprojection of a newest-view coordinate into the previous
-// view. Returns false behind the previous view or outside its image.
-bool MapToPrevious(float2 uv, out float2 previous_uv) {
+// Reprojection of a newest-view coordinate into the previous view: by the
+// relative rotation, plus the relative position when the content's linear
+// depth (meters, along the view axis) is known. Returns false behind the
+// previous view or outside its image.
+bool MapToPrevious(float2 uv, float depth, out float2 previous_uv) {
     const float3 direction = float3(lerp(g.fov_current.x, g.fov_current.y, uv.x),
                                     lerp(g.fov_current.z, g.fov_current.w, uv.y), -1.0);
-    const float3 rotated = float3(dot(g.rot0.xyz, direction), dot(g.rot1.xyz, direction),
-                                  dot(g.rot2.xyz, direction));
+    float3 rotated = float3(dot(g.rot0.xyz, direction), dot(g.rot1.xyz, direction),
+                            dot(g.rot2.xyz, direction));
+    if ((g.options.y & FG_FLAG_DEPTH) != 0u && depth > 0.0 && depth < FG_FAR_DEPTH) {
+        // The point is direction * depth; in the previous view R p + t, and
+        // projection ignores scale, so R d + t / depth.
+        rotated += float3(g.rot0.w, g.rot1.w, g.rot2.w) / depth;
+    }
     previous_uv = float2(0.0, 0.0);
     if (rotated.z > -1e-4) {
         return false;
@@ -81,6 +94,7 @@ bool MapToPrevious(float2 uv, out float2 previous_uv) {
 #if defined(FG_PASS_LUMA)
 FG_BIND(0) Texture2D<float4> g_current : register(t0);
 FG_BIND(1) Texture2D<float4> g_previous : register(t1);
+FG_BIND(2) Texture2D<float4> g_depth : register(t2);
 FG_BIND(6) SamplerState g_linear : register(s0);
 FG_BIND(4) FG_FORMAT("r32f") RWTexture2D<float> g_luma_current : register(u0);
 FG_BIND(5) FG_FORMAT("r32f") RWTexture2D<float> g_luma_previous : register(u1);
@@ -94,8 +108,10 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
     }
     const float2 uv = (float2(id.xy) + 0.5) / float2(g.size.xy);
     g_luma_current[id.xy] = Luma(g_current.SampleLevel(g_linear, uv, 0.0).rgb);
+    // The depth grid is this pass's grid (half resolution).
+    const float depth = (g.options.y & FG_FLAG_DEPTH) != 0u ? g_depth.Load(int3(id.xy, 0)).r : 0.0;
     float2 previous_uv;
-    g_luma_previous[id.xy] = MapToPrevious(uv, previous_uv)
+    g_luma_previous[id.xy] = MapToPrevious(uv, depth, previous_uv)
         ? Luma(g_previous.SampleLevel(g_linear, previous_uv, 0.0).rgb)
         : -1.0;
 }
@@ -374,6 +390,7 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
 FG_BIND(0) Texture2D<float4> g_current : register(t0);
 FG_BIND(1) Texture2D<float4> g_previous : register(t1);
 FG_BIND(2) Texture2D<float4> g_flow : register(t2);
+FG_BIND(3) Texture2D<float4> g_depth : register(t3);
 FG_BIND(6) SamplerState g_linear : register(s0);
 #if defined(FG_PASS_SYNTHESIZE_UNORM8)
 FG_BIND(4) FG_FORMAT("rgba8") RWTexture2D<float4> g_output : register(u0);
@@ -398,6 +415,18 @@ float3 Perceptual(float3 value) {
     return sqrt(max(value, 0.0));
 }
 
+// Newest-frame linear depth at a newest-view coordinate (nearest texel: a
+// filtered depth across a silhouette belongs to neither surface).
+float DepthAt(float2 uv) {
+    if ((g.options.y & FG_FLAG_DEPTH) == 0u) {
+        return 0.0;
+    }
+    uint width, height;
+    g_depth.GetDimensions(width, height);
+    const int2 texel = clamp(int2(uv * float2(width, height)), int2(0, 0), int2(width, height) - 1);
+    return g_depth.Load(int3(texel, 0)).r;
+}
+
 // How differently the two real frames see the content a candidate vector
 // claims to carry to this pixel. Block flow straddles object edges; picking
 // the neighbouring block vector the frames agree on restores pixel-sharp
@@ -405,7 +434,7 @@ float3 Perceptual(float3 value) {
 float CandidateError(float2 uv, float2 v, float step) {
     const float2 newest_uv = uv + step * v;
     float2 previous_uv;
-    if (any(newest_uv < 0.0) || any(newest_uv > 1.0) || !MapToPrevious(newest_uv - v, previous_uv)) {
+    if (any(newest_uv < 0.0) || any(newest_uv > 1.0) || !MapToPrevious(newest_uv - v, DepthAt(newest_uv), previous_uv)) {
         return 1.0;
     }
     const float3 newest = Perceptual(g_current.SampleLevel(g_linear, newest_uv, 0.0).rgb);
@@ -502,7 +531,7 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
     float photometric_confidence = 1.0;
     if (!extrapolate && !still) {
         float2 previous_uv;
-        if (MapToPrevious(source - confidence * chosen.xy, previous_uv)) {
+        if (MapToPrevious(source - confidence * chosen.xy, DepthAt(source), previous_uv)) {
             const float4 previous = g_previous.SampleLevel(g_linear, previous_uv, 0.0);
             const float difference = MaxComponent(abs(Perceptual(previous.rgb) - Perceptual(current.rgb)));
             photometric_confidence = saturate(1.0 - max(difference - 0.03, 0.0) * g.tuning.w);
@@ -533,5 +562,27 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
         result.rgb = LinearToSrgb(result.rgb);
     }
     g_output[id.xy] = result;
+}
+#endif
+
+#if defined(FG_PASS_DEPTH)
+FG_BIND(0) Texture2DArray<float4> g_app_depth : register(t0);
+FG_BIND(4) FG_FORMAT("r32f") RWTexture2D<float> g_linear_depth : register(u0);
+
+// The application's depth to linear view depth (meters) on the view's
+// half-resolution grid. fov_current holds the depth region (offset, extent
+// in depth texels), options.w its array slice, tuning the encoding:
+// 1 / z = x + normalized * y, normalized = (raw - z) * w.
+[numthreads(8, 8, 1)]
+void CSMain(uint3 id : SV_DispatchThreadID) {
+    if (any(id.xy >= g.size.xy)) {
+        return;
+    }
+    const float2 uv = (float2(id.xy) + 0.5) / float2(g.size.xy);
+    const int2 texel = int2(g.fov_current.xy + min(uv * g.fov_current.zw, g.fov_current.zw - 1.0));
+    const float raw = g_app_depth.Load(int4(texel, int(g.options.w), 0)).r;
+    const float normalized = saturate((raw - g.tuning.z) * g.tuning.w);
+    const float inverse = g.tuning.x + normalized * g.tuning.y;
+    g_linear_depth[id.xy] = inverse > 1.0 / FG_FAR_DEPTH ? 1.0 / inverse : FG_FAR_DEPTH;
 }
 #endif

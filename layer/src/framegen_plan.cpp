@@ -109,9 +109,28 @@ FrameGenViewPlan BuildFrameGenViewPlan(const FrameGenViewRequest& request, const
     base.fov_current = Tangents(request.newest);
     base.fov_previous = Tangents(request.previous);
     const Matrix3 rotation = FrameGenRelativeRotation(request.newest.orientation, request.previous.orientation);
-    base.rot0 = {rotation[0][0], rotation[0][1], rotation[0][2], 0.0f};
-    base.rot1 = {rotation[1][0], rotation[1][1], rotation[1][2], 0.0f};
-    base.rot2 = {rotation[2][0], rotation[2][1], rotation[2][2], 0.0f};
+    // The w components carry the newest view's position in the previous
+    // view's space (meters), used with depth: a point at newest-view depth z
+    // along direction d lies at R d + t / z, up to scale, in the previous view.
+    std::array<float, 3> translation{0.0f, 0.0f, 0.0f};
+    if (request.depth) {
+        const auto& q = request.previous.orientation;
+        const std::array<float, 3> delta{request.newest.position[0] - request.previous.position[0],
+                                         request.newest.position[1] - request.previous.position[1],
+                                         request.newest.position[2] - request.previous.position[2]};
+        // Rotate by the inverse previous orientation: v + 2 w (u x v) + 2 u x (u x v), u = -q.xyz.
+        const std::array<float, 3> u{-q[0], -q[1], -q[2]};
+        const float w = q[3];
+        const std::array<float, 3> uv{u[1] * delta[2] - u[2] * delta[1], u[2] * delta[0] - u[0] * delta[2],
+                                      u[0] * delta[1] - u[1] * delta[0]};
+        const std::array<float, 3> uuv{u[1] * uv[2] - u[2] * uv[1], u[2] * uv[0] - u[0] * uv[2], u[0] * uv[1] - u[1] * uv[0]};
+        for (int i = 0; i < 3; ++i) {
+            translation[i] = delta[i] + 2.0f * (w * uv[i] + uuv[i]);
+        }
+    }
+    base.rot0 = {rotation[0][0], rotation[0][1], rotation[0][2], translation[0]};
+    base.rot1 = {rotation[1][0], rotation[1][1], rotation[1][2], translation[1]};
+    base.rot2 = {rotation[2][0], rotation[2][1], rotation[2][2], translation[2]};
     std::uint32_t flags = 0;
     if (request.output == FrameGenOutputKind::kSrgb8) {
         flags |= kFrameGenFlagSrgbEncode;
@@ -122,6 +141,10 @@ FrameGenViewPlan BuildFrameGenViewPlan(const FrameGenViewRequest& request, const
     if (request.temporal) {
         flags |= kFrameGenFlagTemporal;
     }
+    if (request.depth) {
+        flags |= kFrameGenFlagDepth;
+    }
+    const FrameGenTexture depth = request.depth ? Texture(FrameGenTextureKind::kDepth) : FrameGenTexture{};
     base.options = {kFrameGenSearchRadius, flags, static_cast<std::uint32_t>(tuning.diagnostic), 0};
     const std::size_t generated = std::clamp<std::size_t>(tuning.generated, 1, kFrameGenMaxGenerated);
     const auto all_outputs = static_cast<std::uint8_t>((1u << generated) - 1u);
@@ -143,7 +166,7 @@ FrameGenViewPlan BuildFrameGenViewPlan(const FrameGenViewRequest& request, const
     }
 
     FrameGenDispatch luma = Dispatch(FrameGenPass::kLuma, plan.levels[1], plan.levels[0], base);
-    luma.inputs = {Texture(FrameGenTextureKind::kHistoryNewest), Texture(FrameGenTextureKind::kHistoryPrevious), {}, {}};
+    luma.inputs = {Texture(FrameGenTextureKind::kHistoryNewest), Texture(FrameGenTextureKind::kHistoryPrevious), depth, {}};
     luma.outputs = {Texture(FrameGenTextureKind::kLumaNewest, 1), Texture(FrameGenTextureKind::kLumaPrevious, 1)};
     luma.constants.options[3] = 1;
     plan.dispatches.push_back(luma);
@@ -192,13 +215,35 @@ FrameGenViewPlan BuildFrameGenViewPlan(const FrameGenViewRequest& request, const
     for (std::size_t index = 0; index < generated; ++index) {
         FrameGenDispatch output = Dispatch(synthesize, plan.levels[0], plan.levels[plan.final_flow_level], base);
         output.inputs = {Texture(FrameGenTextureKind::kHistoryNewest), Texture(FrameGenTextureKind::kHistoryPrevious),
-                         Texture(FrameGenTextureKind::kFilteredNewest, plan.final_flow_level), {}};
+                         Texture(FrameGenTextureKind::kFilteredNewest, plan.final_flow_level), depth};
         output.outputs = {Texture(FrameGenTextureKind::kOutput), {}};
         output.constants.tuning[0] = std::clamp(tuning.fractions[index], 0.0f, 1.0f);
         output.copy_mask = static_cast<std::uint8_t>(1u << index);
         plan.dispatches.push_back(output);
     }
     return plan;
+}
+
+FrameGenDispatch BuildFrameGenDepthDispatch(FrameGenExtent view_extent, std::int32_t rect_x, std::int32_t rect_y,
+                                            std::uint32_t rect_width, std::uint32_t rect_height,
+                                            std::uint32_t array_index, const FrameGenDepthEncoding& encoding) {
+    const auto levels = FrameGenPyramid(view_extent);
+    FrameGenDispatch dispatch;
+    dispatch.pass = FrameGenPass::kDepth;
+    dispatch.width = levels[1].width;
+    dispatch.height = levels[1].height;
+    dispatch.outputs = {Texture(FrameGenTextureKind::kDepth), {}};
+    auto inverse = [](float z) { return std::isfinite(z) && z > 0.0f ? 1.0f / z : 0.0f; };
+    const float inverse_near = inverse(encoding.near_z);
+    const float inverse_far = inverse(encoding.far_z);
+    const float range = encoding.max_depth - encoding.min_depth;
+    dispatch.constants.size = {levels[1].width, levels[1].height, rect_width, rect_height};
+    dispatch.constants.options = {0, 0, 0, array_index};
+    dispatch.constants.fov_current = {static_cast<float>(rect_x), static_cast<float>(rect_y),
+                                      static_cast<float>(rect_width), static_cast<float>(rect_height)};
+    dispatch.constants.tuning = {inverse_near, inverse_far - inverse_near, encoding.min_depth,
+                                 std::abs(range) > 1e-9f ? 1.0f / range : 1.0f};
+    return dispatch;
 }
 
 unsigned FrameGenHistoryState::Configure(FrameGenExtent extent, std::int64_t source_format, FrameGenOutputKind output,

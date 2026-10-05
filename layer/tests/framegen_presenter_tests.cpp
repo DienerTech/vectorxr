@@ -115,6 +115,8 @@ struct GpuLog {
     int wait_idles{0};
     bool fail{false};
     bool threaded{false};
+    bool depth{false};
+    std::atomic<int> depth_captures{0};
     std::vector<FrameGenViewSubmission> last;
     FrameGenImage last_capture;
     FrameGenTuning tuning;
@@ -171,6 +173,16 @@ class FakeGpu final : public FrameGenGpu {
     void Reset() override {}
     double LastGpuMilliseconds() const override { return 0.75; }
     bool SupportsThreadedPresentation() const override { return log_->threaded; }
+    bool SupportsDepth() const override { return log_->depth; }
+    XrSwapchainUsageFlags RequiredDepthUsage() const override {
+        return log_->depth ? XR_SWAPCHAIN_USAGE_SAMPLED_BIT : 0;
+    }
+    bool CaptureDepth(std::size_t, const FrameGenImage&, const FrameGenDepthEncoding&, const FrameGenViewRequest&,
+                      std::string& error) override {
+        error.clear();
+        ++log_->depth_captures;
+        return log_->depth;
+    }
 
   private:
     GpuLog* log_;
@@ -368,7 +380,8 @@ struct App {
     // The layer's release hook: note the index, capture, then forward.
     void Release() {
         image = (image + 1) % 3;
-        for (const XrSwapchain swapchain : {kLeft, kRight}) {
+        for (const XrSwapchain swapchain : {kLeft, kRight, depth.subImage.swapchain}) {
+            if (!swapchain) continue;
             presenter.NoteRelease(swapchain, image);
             presenter.CaptureOnRelease(swapchain, image);
         }
@@ -1018,6 +1031,46 @@ void TestThreadedUnsupportedLayerPresentsInline() {
     Check(!runtime.ordering_violation, "unsupported layer: runtime calls stayed ordered");
 }
 
+void TestDepthCapture() {
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    gpu.depth = true;
+    Runtime runtime;
+    StartPresenter(presenter, gpu, FrameGenSynthesisMode::kExtrapolate);
+    const XrSwapchain depth_chain = reinterpret_cast<XrSwapchain>(0x21);
+    XrSwapchainCreateInfo depth_info{XR_TYPE_SWAPCHAIN_CREATE_INFO};
+    depth_info.usageFlags = XR_SWAPCHAIN_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
+    Check(presenter.SourceUsage(depth_info) == XR_SWAPCHAIN_USAGE_SAMPLED_BIT,
+          "depth: depth swapchains get the usage depth capture needs");
+    presenter.TrackSwapchain(depth_chain, 20, 1,
+                             XR_SWAPCHAIN_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_SAMPLED_BIT);
+    App app(presenter, runtime);
+    app.depth.subImage.swapchain = depth_chain; // both views share one depth chain here
+    app.depth.subImage.imageRect = {{0, 0}, {1200, 1200}};
+    app.depth.minDepth = 0.0f;
+    app.depth.maxDepth = 1.0f;
+    app.depth.nearZ = 0.1f;
+    app.depth.farZ = 1000.0f;
+    for (int i = 0; i < 8; ++i) app.Frame();
+    Check(gpu.depth_captures > 0, "depth: released depth images are captured");
+    Check(gpu.executes > 0 && gpu.last[0].request.depth && gpu.last[1].request.depth,
+          "depth: generation asks for the captured depth");
+    Check(!runtime.ordering_violation && !g_release_violation, "depth: calls stayed ordered");
+
+    // Without the depth usage the image is never read.
+    FrameGenPresenter plain;
+    GpuLog plain_gpu;
+    plain_gpu.depth = true;
+    Runtime plain_runtime;
+    StartPresenter(plain, plain_gpu, FrameGenSynthesisMode::kExtrapolate);
+    plain.TrackSwapchain(depth_chain, 20, 1, XR_SWAPCHAIN_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT);
+    App plain_app(plain, plain_runtime);
+    plain_app.depth.subImage.swapchain = depth_chain;
+    for (int i = 0; i < 8; ++i) plain_app.Frame();
+    Check(plain_gpu.depth_captures == 0 && plain_gpu.executes > 0 && !plain_gpu.last[0].request.depth,
+          "depth: a depth image without the sampling usage is left alone");
+}
+
 void TestOverlappingWaitIsHeld() {
     FrameGenPresenter presenter;
     GpuLog gpu;
@@ -1292,6 +1345,7 @@ int main() {
     TestQuadExtrapolation();
     TestSubmissionSpacing();
     TestOutputsKeptAcrossMultipliers();
+    TestDepthCapture();
     TestAutomaticMultiplier();
     TestThreadedExtrapolation();
     TestThreadedPipelinedApp();

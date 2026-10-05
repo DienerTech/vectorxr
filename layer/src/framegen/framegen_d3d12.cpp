@@ -16,6 +16,9 @@ using Microsoft::WRL::ComPtr;
 
 constexpr std::size_t kFramesInFlight = 3;
 constexpr UINT kDescriptorsPerFrame = 1024;
+constexpr UINT kCaptureSlots = 8;
+// Depth captures run outside a frame's descriptor range: one dispatch per
+// capture slot, after every frame's range.
 constexpr UINT kDescriptorsPerDispatch = 6;
 
 std::string Failure(const char* operation, HRESULT hr) {
@@ -67,6 +70,8 @@ struct ViewResources {
     std::array<Texture, kFrameGenPyramidLevels + 1> luma_previous;
     std::array<Texture, kFrameGenPyramidLevels + 1> flow;
     Texture output;
+    Texture depth;            // newest frame's linear depth, half resolution
+    bool depth_ready{false};  // captured since the last Execute
 };
 
 struct FrameSlot {
@@ -125,7 +130,8 @@ class D3D12FrameGen final : public FrameGenGpu {
                 return false;
             }
         }
-        D3D12_DESCRIPTOR_HEAP_DESC heap{D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, kDescriptorsPerFrame * kFramesInFlight,
+        D3D12_DESCRIPTOR_HEAP_DESC heap{D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,
+                                        kDescriptorsPerFrame * kFramesInFlight + kCaptureSlots * kDescriptorsPerDispatch,
                                         D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE, 0};
         if (!check(device_->CreateDescriptorHeap(&heap, IID_PPV_ARGS(&heap_)), "D3D12 Frame Generation descriptor heap")) {
             return false;
@@ -301,11 +307,149 @@ class D3D12FrameGen final : public FrameGenGpu {
 
     bool WaitIdle() override { return WaitFence(fence_value_, 2000); }
 
+    bool SupportsDepth() const override { return true; }
+    XrSwapchainUsageFlags RequiredDepthUsage() const override { return XR_SWAPCHAIN_USAGE_SAMPLED_BIT; }
+
+    // The plane-0 view of a depth format, readable in a shader.
+    static DXGI_FORMAT DepthViewFormat(DXGI_FORMAT format) {
+        switch (format) {
+        case DXGI_FORMAT_D32_FLOAT:
+        case DXGI_FORMAT_R32_TYPELESS:
+        case DXGI_FORMAT_R32_FLOAT:
+            return DXGI_FORMAT_R32_FLOAT;
+        case DXGI_FORMAT_D32_FLOAT_S8X24_UINT:
+        case DXGI_FORMAT_R32G8X24_TYPELESS:
+            return DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS;
+        case DXGI_FORMAT_D24_UNORM_S8_UINT:
+        case DXGI_FORMAT_R24G8_TYPELESS:
+            return DXGI_FORMAT_R24_UNORM_X8_TYPELESS;
+        case DXGI_FORMAT_D16_UNORM:
+        case DXGI_FORMAT_R16_TYPELESS:
+            return DXGI_FORMAT_R16_UNORM;
+        default:
+            return DXGI_FORMAT_UNKNOWN;
+        }
+    }
+
+    // Depth swapchain images are in DEPTH_WRITE whenever the application
+    // releases them (XR_KHR_D3D12_enable); called before that release is
+    // forwarded, like Capture.
+    bool CaptureDepth(std::size_t index, const FrameGenImage& depth, const FrameGenDepthEncoding& encoding,
+                      const FrameGenViewRequest& request, std::string& error) override {
+        error.clear();
+        const auto it = images_.find(depth.swapchain);
+        if (it == images_.end() || depth.image_index >= it->second.size()) {
+            error = "Frame Generation depth image is not tracked";
+            return false;
+        }
+        if (index >= views_.size()) {
+            return false;
+        }
+        ViewResources& view = views_[index];
+        const FrameGenExtent extent = view.history_state.Extent();
+        if (!view.depth.resource || extent.width != request.extent.width || extent.height != request.extent.height) {
+            return false; // Execute sets the view up first
+        }
+        ID3D12Resource* resource = it->second[depth.image_index];
+        const D3D12_RESOURCE_DESC desc = resource->GetDesc();
+        const DXGI_FORMAT view_format = DepthViewFormat(desc.Format);
+        if (view_format == DXGI_FORMAT_UNKNOWN || desc.SampleDesc.Count != 1 ||
+            depth.array_index >= desc.DepthOrArraySize) {
+            error = "Frame Generation cannot read depth format " + std::to_string(static_cast<int>(desc.Format));
+            return false;
+        }
+        HRESULT hr = device_->GetDeviceRemovedReason();
+        if (FAILED(hr)) {
+            error = Failure("D3D12 device", hr);
+            return false;
+        }
+        const std::size_t slot_index = capture_count_ % capture_slots_.size();
+        CaptureSlot& slot = capture_slots_[slot_index];
+        if (!WaitFence(slot.fence_value, 100)) {
+            error = "D3D12 Frame Generation capture work did not finish in time";
+            return false;
+        }
+        hr = slot.allocator->Reset();
+        if (SUCCEEDED(hr)) hr = capture_commands_->Reset(slot.allocator.Get(), nullptr);
+        if (FAILED(hr)) {
+            error = Failure("D3D12 Frame Generation depth capture reset", hr);
+            return false;
+        }
+        ID3D12DescriptorHeap* heaps[] = {heap_.Get()};
+        capture_commands_->SetDescriptorHeaps(1, heaps);
+        capture_commands_->SetComputeRootSignature(root_signature_.Get());
+        const UINT base = kDescriptorsPerFrame * kFramesInFlight + static_cast<UINT>(slot_index) * kDescriptorsPerDispatch;
+        D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
+        srv.Format = view_format;
+        srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
+        srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        srv.Texture2DArray.MipLevels = 1;
+        srv.Texture2DArray.ArraySize = desc.DepthOrArraySize;
+        device_->CreateShaderResourceView(resource, &srv, Cpu(base));
+        for (UINT i = 1; i < 4; ++i) {
+            D3D12_SHADER_RESOURCE_VIEW_DESC none{};
+            none.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+            none.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+            none.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+            none.Texture2D.MipLevels = 1;
+            device_->CreateShaderResourceView(nullptr, &none, Cpu(base + i));
+        }
+        D3D12_UNORDERED_ACCESS_VIEW_DESC uav{};
+        uav.Format = DXGI_FORMAT_R32_FLOAT;
+        uav.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+        device_->CreateUnorderedAccessView(view.depth.resource.Get(), nullptr, &uav, Cpu(base + 4));
+        D3D12_UNORDERED_ACCESS_VIEW_DESC no_uav = uav;
+        no_uav.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        device_->CreateUnorderedAccessView(nullptr, nullptr, &no_uav, Cpu(base + 5));
+
+        std::vector<D3D12_RESOURCE_BARRIER> barriers;
+        auto flush = [&] {
+            if (!barriers.empty()) {
+                capture_commands_->ResourceBarrier(static_cast<UINT>(barriers.size()), barriers.data());
+                barriers.clear();
+            }
+        };
+        Transition(barriers, resource, D3D12_RESOURCE_STATE_DEPTH_WRITE, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        Require(barriers, view.depth, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        flush();
+        FrameGenDepthEncoding depth_encoding = encoding;
+        const FrameGenDispatch dispatch = BuildFrameGenDepthDispatch(
+            request.extent, depth.rect.offset.x, depth.rect.offset.y, static_cast<std::uint32_t>(depth.rect.extent.width),
+            static_cast<std::uint32_t>(depth.rect.extent.height), depth.array_index, depth_encoding);
+        capture_commands_->SetPipelineState(pipelines_[static_cast<std::size_t>(FrameGenPass::kDepth)].Get());
+        capture_commands_->SetComputeRoot32BitConstants(0, sizeof(FrameGenConstants) / 4, &dispatch.constants, 0);
+        capture_commands_->SetComputeRootDescriptorTable(1, Gpu(base));
+        capture_commands_->SetComputeRootDescriptorTable(2, Gpu(base + 4));
+        capture_commands_->Dispatch((dispatch.width + kFrameGenThreadGroupSize - 1) / kFrameGenThreadGroupSize,
+                                    (dispatch.height + kFrameGenThreadGroupSize - 1) / kFrameGenThreadGroupSize, 1);
+        Transition(barriers, resource, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_DEPTH_WRITE);
+        flush();
+        hr = capture_commands_->Close();
+        if (FAILED(hr)) {
+            error = Failure("D3D12 Frame Generation depth capture close", hr);
+            view.history_state = {};
+            return false;
+        }
+        ID3D12CommandList* lists[] = {capture_commands_.Get()};
+        queue_->ExecuteCommandLists(1, lists);
+        hr = queue_->Signal(fence_.Get(), ++fence_value_);
+        if (FAILED(hr)) {
+            error = Failure("D3D12 Frame Generation depth capture signal", hr);
+            signal_failed_ = true;
+            return false;
+        }
+        slot.fence_value = fence_value_;
+        ++capture_count_;
+        view.depth_ready = true;
+        return true;
+    }
+
     bool SupportsThreadedPresentation() const override { return true; }
 
     bool Execute(const std::vector<FrameGenViewSubmission>& views, const FrameGenTuning& tuning,
                  FrameGenExecuteResult& result, std::string& error) override {
         result.synthesized.assign(views.size(), false);
+        result.depth.assign(views.size(), false);
         HRESULT hr = device_->GetDeviceRemovedReason();
         if (FAILED(hr)) {
             error = Failure("D3D12 device", hr);
@@ -337,8 +481,10 @@ class D3D12FrameGen final : public FrameGenGpu {
         bool ok = true;
         for (std::size_t i = 0; i < views.size() && ok; ++i) {
             bool synthesized = false;
-            ok = RecordView(views[i], tuning, views_[i], synthesized, error);
+            bool depth = false;
+            ok = RecordView(views[i], tuning, views_[i], synthesized, depth, error);
             result.synthesized[i] = synthesized;
+            result.depth[i] = depth;
         }
         if (timed) {
             commands_->EndQuery(query_heap_.Get(), D3D12_QUERY_TYPE_TIMESTAMP, static_cast<UINT>(slot_index * 2 + 1));
@@ -518,6 +664,8 @@ class D3D12FrameGen final : public FrameGenGpu {
             const DXGI_FORMAT intermediate = submission.request.output == FrameGenOutputKind::kFloat16
                 ? DXGI_FORMAT_R16G16B16A16_FLOAT : DXGI_FORMAT_R8G8B8A8_UNORM;
             if (!Create(view.output, extent, intermediate, intermediate, true, error)) return false;
+            if (!Create(view.depth, levels[1], DXGI_FORMAT_R32_FLOAT, DXGI_FORMAT_R32_FLOAT, true, error)) return false;
+            view.depth_ready = false;
         }
         if (change != FrameGenHistoryState::kNone || !view.filtered[0].resource) {
             for (auto& filtered : view.filtered) {
@@ -542,6 +690,7 @@ class D3D12FrameGen final : public FrameGenGpu {
         case FrameGenTextureKind::kFilteredNewest: return &view.filtered[newest];
         case FrameGenTextureKind::kFilteredPrevious: return &view.filtered[previous];
         case FrameGenTextureKind::kOutput: return &view.output;
+        case FrameGenTextureKind::kDepth: return &view.depth;
         default: return nullptr;
         }
     }
@@ -576,7 +725,7 @@ class D3D12FrameGen final : public FrameGenGpu {
     }
 
     bool RecordView(const FrameGenViewSubmission& submission, const FrameGenTuning& tuning, ViewResources& view,
-                    bool& synthesized, std::string& error) {
+                    bool& synthesized, bool& depth_used, std::string& error) {
         const auto source_it = images_.find(submission.source.swapchain);
         if (source_it == images_.end() || submission.source.image_index >= source_it->second.size() ||
             submission.outputs.size() < tuning.generated) {
@@ -602,7 +751,12 @@ class D3D12FrameGen final : public FrameGenGpu {
             CopySource(commands_.Get(), barriers, view, submission.source, source);
         }
 
-        const FrameGenViewPlan plan = BuildFrameGenViewPlan(view.history_state.Effective(submission.request), tuning);
+        // Depth only when it was captured for this frame; it is used once.
+        FrameGenViewRequest effective = view.history_state.Effective(submission.request);
+        effective.depth = effective.depth && view.depth_ready && view.depth.resource;
+        view.depth_ready = false;
+        depth_used = effective.depth && effective.synthesize;
+        const FrameGenViewPlan plan = BuildFrameGenViewPlan(effective, tuning);
         for (const FrameGenDispatch& dispatch : plan.dispatches) {
             if (descriptor_cursor_ + kDescriptorsPerDispatch > descriptor_end_) {
                 error = "D3D12 Frame Generation descriptor budget exhausted";
@@ -709,7 +863,7 @@ class D3D12FrameGen final : public FrameGenGpu {
     ComPtr<ID3D12GraphicsCommandList> commands_;
     std::array<FrameSlot, kFramesInFlight> slots_;
     ComPtr<ID3D12GraphicsCommandList> capture_commands_;
-    std::array<CaptureSlot, 8> capture_slots_; // views x frames in flight
+    std::array<CaptureSlot, kCaptureSlots> capture_slots_; // views x frames in flight, color and depth
     UINT64 capture_count_{0};
     ComPtr<ID3D12Fence> fence_;
     UINT64 fence_value_{0};

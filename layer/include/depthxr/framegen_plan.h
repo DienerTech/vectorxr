@@ -21,8 +21,9 @@ enum class FrameGenPass : std::uint8_t {
     kFilter,
     kSynthesizeUnorm8,
     kSynthesizeFloat16,
+    kDepth, // the application's depth image to linear view depth (capture time)
 };
-inline constexpr std::size_t kFrameGenPassCount = 7;
+inline constexpr std::size_t kFrameGenPassCount = 8;
 
 // Logical textures owned per view. History and filtered flow are ping-pong
 // pairs: "newest" is written this submission, "previous" is last
@@ -37,6 +38,7 @@ enum class FrameGenTextureKind : std::uint8_t {
     kFilteredNewest,
     kFilteredPrevious,
     kOutput,
+    kDepth, // newest frame's linear view depth in meters, at half resolution
 };
 
 struct FrameGenTexture {
@@ -61,6 +63,9 @@ inline constexpr std::uint32_t kFrameGenFlagSrgbEncode = 1u;
 inline constexpr std::uint32_t kFrameGenFlagExtrapolate = 2u;
 inline constexpr std::uint32_t kFrameGenFlagTemporal = 4u;
 inline constexpr std::uint32_t kFrameGenFlagStill = 8u;
+// The newest frame's depth is bound: the previous frame is mapped into the
+// newest view by the full relative head pose, not rotation alone.
+inline constexpr std::uint32_t kFrameGenFlagDepth = 16u;
 inline constexpr std::uint32_t kFrameGenThreadGroupSize = 8u;
 inline constexpr std::uint8_t kFrameGenPyramidLevels = 5;
 inline constexpr std::uint32_t kFrameGenSearchRadius = 6;
@@ -90,10 +95,12 @@ struct FrameGenExtent {
     std::uint32_t height{0};
 };
 
-// Pose data for one projection view: unit quaternion (x, y, z, w) and the
-// four FOV angles in radians, as submitted in XrCompositionLayerProjectionView.
+// Pose data for one projection view: unit quaternion (x, y, z, w), position
+// in meters and the four FOV angles in radians, as submitted in
+// XrCompositionLayerProjectionView.
 struct FrameGenViewGeometry {
     std::array<float, 4> orientation{0.0f, 0.0f, 0.0f, 1.0f};
+    std::array<float, 3> position{0.0f, 0.0f, 0.0f};
     float angle_left{0.0f};
     float angle_right{0.0f};
     float angle_up{0.0f};
@@ -109,6 +116,10 @@ struct FrameGenViewRequest {
     // False when last submission's filtered flow belongs to another view
     // geometry or quality and must not seed this frame's search.
     bool temporal{false};
+    // The newest frame's depth was captured for this view: content fixed
+    // relative to the head's reference space (a cockpit) then lines up
+    // exactly, and the flow holds only motion relative to that space.
+    bool depth{false};
     FrameGenViewGeometry newest;
     FrameGenViewGeometry previous;
 };
@@ -169,6 +180,24 @@ class FrameGenHistoryState {
 };
 
 std::uint8_t FrameGenFinalFlowLevel(FrameGenFlowQuality quality);
+
+// How an application's depth swapchain encodes view depth
+// (XrCompositionLayerDepthInfoKHR): minDepth..maxDepth spans nearZ..farZ in
+// meters with 1/z linear; nearZ > farZ is reversed depth; either may be
+// infinite.
+struct FrameGenDepthEncoding {
+    float min_depth{0.0f};
+    float max_depth{1.0f};
+    float near_z{0.1f};
+    float far_z{1000.0f};
+};
+
+// The kDepth dispatch for one view: resamples the region `depth_rect` (in
+// depth texels, array slice `array_index`) of the application's depth image
+// to the view's half-resolution grid as linear view depth.
+FrameGenDispatch BuildFrameGenDepthDispatch(FrameGenExtent view_extent, std::int32_t rect_x, std::int32_t rect_y,
+                                            std::uint32_t rect_width, std::uint32_t rect_height,
+                                            std::uint32_t array_index, const FrameGenDepthEncoding& encoding);
 // Luma level a flow level matches against: two levels finer, at most half resolution.
 std::uint8_t FrameGenMatchLevel(std::uint8_t flow_level);
 std::array<FrameGenExtent, kFrameGenPyramidLevels + 1> FrameGenPyramid(FrameGenExtent extent);

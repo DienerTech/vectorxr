@@ -788,7 +788,10 @@ class VulkanFrameGen final : public FrameGenGpu {
             CopySource(view, submission.source, source);
         }
 
-        const FrameGenViewPlan plan = BuildFrameGenViewPlan(view.history_state.Effective(submission.request), tuning);
+        // No depth capture on this backend yet: head rotation only.
+        FrameGenViewRequest effective = view.history_state.Effective(submission.request);
+        effective.depth = false;
+        const FrameGenViewPlan plan = BuildFrameGenViewPlan(effective, tuning);
         for (const FrameGenDispatch& dispatch : plan.dispatches) {
             VkDescriptorSetAllocateInfo allocate{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
             allocate.descriptorPool = descriptors_;

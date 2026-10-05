@@ -586,6 +586,13 @@ before trying again; the log says so. Extrapolate on Direct3D 12 avoids it: a pr
 shows a frame every refresh while the game renders at its own pace, as it would without
 Frame Generation.
 
+#### Game depth
+
+When a game sends depth to the headset (MSFS 2024 does), Frame Generation uses it on
+Direct3D 12 automatically: head movement is compensated exactly, so cockpit instruments, panels
+and text stay still in generated frames instead of wobbling. The log says **Frame Generation uses
+the game's depth** once it does. Direct3D 11 and Vulkan games use head rotation only for now.
+
 #### Frame multiplier
 
 The **Frame multiplier** sets how many headset frames each real game frame covers:

@@ -34,6 +34,7 @@ struct FrameGenViewSubmission {
 
 struct FrameGenExecuteResult {
     std::vector<bool> synthesized; // per view; false = the newest frame was written unchanged
+    std::vector<bool> depth;       // per view; the newest frame's depth was used
 };
 
 class FrameGenGpu {
@@ -59,6 +60,22 @@ class FrameGenGpu {
     // returns false with an empty error and Execute copies instead.
     virtual bool Capture(std::size_t view, const FrameGenImage& source, const FrameGenViewRequest& request,
                          FrameGenFlowQuality quality, std::string& error) = 0;
+    // Like Capture, for the depth image the application submitted with
+    // `view` (XrCompositionLayerDepthInfoKHR): converted to linear depth
+    // for the view's next Execute, which then sets request.depth's mapping
+    // if the request asks for it. `request` describes the color view. False
+    // with an empty error when the backend has no depth path or the view is
+    // not set up yet.
+    virtual bool CaptureDepth(std::size_t /*view*/, const FrameGenImage& /*depth*/,
+                              const FrameGenDepthEncoding& /*encoding*/, const FrameGenViewRequest& /*request*/,
+                              std::string& error) {
+        error.clear();
+        return false;
+    }
+    // Usage the application's depth swapchains need for CaptureDepth (none
+    // when the backend has no depth path).
+    virtual XrSwapchainUsageFlags RequiredDepthUsage() const { return 0; }
+    virtual bool SupportsDepth() const { return false; }
     // Records and submits generation for every view on the session's graphics
     // queue, copying a view's source first unless Capture already did. Never
     // waits on the CPU for this submission.

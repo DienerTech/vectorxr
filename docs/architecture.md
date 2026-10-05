@@ -132,5 +132,13 @@ interpolates between the two real frames or extrapolates past the newest, writin
 layer-owned output swapchain. Generation works on whatever projection views reach the runtime,
 so it follows Quadviews composition and Varjo-native quad views alike.
 
+When a game submits depth with its projection views (`XR_KHR_composition_layer_depth`) and the
+backend can read it (Direct3D 12 so far), the depth image is converted to linear view depth at
+release, next to the color capture, and the previous frame is mapped into the newest view by the
+full relative head pose instead of rotation alone. Content fixed in the head's reference space,
+such as a cockpit, then lines up exactly and the flow carries only motion relative to that space.
+Generated frames also keep the real frame's depth chain, so the runtime corrects head motion on
+every frame alike.
+
 The interception set is intentionally scoped to what the enabled features need rather than
 hooking every call.

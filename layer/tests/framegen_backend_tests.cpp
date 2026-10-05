@@ -111,8 +111,41 @@ Pixels Facade(float offset) {
     return pixels;
 }
 
-// A panorama at infinity rendered through a camera yawed by `yaw` radians.
+// Tangent of the test views' half field of view.
 constexpr float kTan = 0.8f;
+
+// A cockpit: a textured panel 0.4 m square, 0.5 m in front of the head, over
+// scenery at infinity, seen from a head at (head_x, 0, 0) looking down -Z.
+constexpr float kPanelDistance = 0.5f;
+constexpr float kPanelHalf = 0.2f;
+Pixels Cockpit(float head_x) {
+    Pixels pixels(kSize * kSize);
+    for (std::uint32_t y = 0; y < kSize; ++y) {
+        for (std::uint32_t x = 0; x < kSize; ++x) {
+            const float tx = -kTan + 2 * kTan * (x + 0.5f) / kSize;
+            const float ty = kTan - 2 * kTan * (y + 0.5f) / kSize;
+            const float px = head_x + kPanelDistance * tx;
+            const float py = kPanelDistance * ty;
+            pixels[y * kSize + x] = std::abs(px) < kPanelHalf && std::abs(py) < kPanelHalf
+                                        ? Patch(px * 480.0f + 100.0f, py * 480.0f + 100.0f)
+                                        : Background(tx * 240.0f, ty * 240.0f);
+        }
+    }
+    return pixels;
+}
+
+// Where the panel appears in the image for a head at head_x.
+XrRect2Di CockpitPanelRect(float head_x) {
+    auto column = [](float px, float head) {
+        return static_cast<int>(std::lround(((px - head) / kPanelDistance + kTan) / (2 * kTan) * kSize));
+    };
+    auto row = [](float py) { return static_cast<int>(std::lround((kTan - py / kPanelDistance) / (2 * kTan) * kSize)); };
+    const int x0 = column(-kPanelHalf, head_x), x1 = column(kPanelHalf, head_x);
+    const int y0 = row(kPanelHalf), y1 = row(-kPanelHalf);
+    return {{x0, y0}, {x1 - x0, y1 - y0}};
+}
+
+// A panorama at infinity rendered through a camera yawed by `yaw` radians.
 Pixels Panorama(float yaw) {
     Pixels pixels(kSize * kSize);
     for (std::uint32_t y = 0; y < kSize; ++y) {
@@ -173,6 +206,9 @@ struct Harness {
     std::function<void(void*, const Pixels&)> upload;
     std::function<Pixels(void*)> readback;
     std::function<void()> flush = [] {};
+    // A depth image cleared to `far_value`, with `rect` cleared to
+    // `near_value`; empty where the backend has no depth path.
+    std::function<void*(float near_value, XrRect2Di rect, float far_value)> create_depth;
 };
 
 std::map<XrSwapchain, std::vector<void*>> g_swapchains;
@@ -202,6 +238,7 @@ XrResult XRAPI_PTR EnumerateImages(XrSwapchain swapchain, std::uint32_t capacity
 const XrSwapchain kSource = reinterpret_cast<XrSwapchain>(0x51);
 const XrSwapchain kOutput = reinterpret_cast<XrSwapchain>(0x52);
 const XrSwapchain kOutputSecond = reinterpret_cast<XrSwapchain>(0x54);
+const XrSwapchain kDepthImage = reinterpret_cast<XrSwapchain>(0x55);
 
 FrameGenViewSubmission Submission(std::uint32_t source_index, std::int64_t format, std::int64_t output_format, bool synthesize,
                                   float yaw_newest, float yaw_previous) {
@@ -355,6 +392,56 @@ int RunScenarios(Harness& harness) {
                   << first_hold << ", " << facade_hold << std::endl;
         Check(first_error < 2.2 * first_hold && facade_error < 2.2 * facade_hold,
               harness.name + " repeating windows alias worse than before");
+    }
+
+    // 3c. Head translation in a cockpit: the head moves 2 cm sideways, so a
+    // panel 0.5 m away shifts ~10 px while the scenery stays. Nothing moves
+    // in the head's space, so a generated frame should show the newest frame
+    // as it is (the runtime corrects head motion). Rotation-only matching
+    // reads the parallax as motion and pushes the panel on; with the
+    // newest frame's depth the parallax is compensated.
+    if (harness.create_depth) {
+        const float shift = 0.02f;
+        const Pixels before = Cockpit(0.0f);
+        const Pixels after = Cockpit(shift);
+        harness.upload(g_swapchains[kSource][0], before);
+        harness.upload(g_swapchains[kSource][1], after);
+        FrameGenDepthEncoding encoding; // depth 0..1 for 0.1 m..100 m, 1/z linear
+        encoding.near_z = 0.1f;
+        encoding.far_z = 100.0f;
+        const float panel = (1.0f / kPanelDistance - 1.0f / encoding.near_z) / (1.0f / encoding.far_z - 1.0f / encoding.near_z);
+        g_swapchains[kDepthImage] = {harness.create_depth(panel, CockpitPanelRect(shift), 1.0f)};
+        Check(gpu->Track(kDepthImage, EnumerateImages, error), error);
+        tuning.mode = FrameGenSynthesisMode::kExtrapolate;
+        tuning.fractions[0] = 0.5f;
+        auto submission = [&](std::uint32_t index, bool depth) {
+            FrameGenViewSubmission view = Submission(index, harness.format, output_format, true, 0, 0);
+            view.request.newest.position = {shift, 0, 0};
+            view.request.previous.position = {0, 0, 0};
+            view.request.depth = depth;
+            return view;
+        };
+        auto generate = [&](bool depth) {
+            gpu->ResetHistory();
+            Check(gpu->Execute({submission(0, depth)}, tuning, result, error), harness.name + " execute: " + error);
+            if (depth) {
+                const FrameGenImage image{kDepthImage, 0, 0, {{0, 0}, {static_cast<int>(kSize), static_cast<int>(kSize)}}, 0};
+                Check(gpu->CaptureDepth(0, image, encoding, submission(1, true).request, error),
+                      harness.name + " depth capture: " + error);
+            }
+            Check(gpu->Execute({submission(1, depth)}, tuning, result, error), harness.name + " execute: " + error);
+            Check(result.depth.size() == 1 && result.depth[0] == depth, harness.name + " depth use was not reported");
+            return harness.readback(g_swapchains[kOutput][0]);
+        };
+        const Pixels rotation_only = generate(false);
+        const Pixels with_depth = generate(true);
+        Dump(harness.name + "-cockpit-rotation-only", rotation_only);
+        Dump(harness.name + "-cockpit-depth", with_depth);
+        const double rotation_error = MeanError(rotation_only, after, 64, 64, kSize - 64, kSize - 64);
+        const double depth_error = MeanError(with_depth, after, 64, 64, kSize - 64, kSize - 64);
+        std::cout << harness.name << " cockpit: error " << depth_error << " with depth vs " << rotation_error
+                  << " rotation only" << std::endl;
+        Check(depth_error < 0.4 * rotation_error, harness.name + " depth did not compensate head translation");
     }
 
     // 4. Head rotation only: compensation must leave a static panorama where
@@ -632,6 +719,41 @@ int D3D12Test() {
         commands->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
         transition(resource, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_RENDER_TARGET);
         submit_and_wait();
+    };
+    std::vector<ComPtr<ID3D12DescriptorHeap>> keep_heaps;
+    harness.create_depth = [&](float near_value, XrRect2Di rect, float far_value) -> void* {
+        // The format MSFS uses: 32-bit float depth with stencil.
+        D3D12_HEAP_PROPERTIES heap{D3D12_HEAP_TYPE_DEFAULT};
+        D3D12_RESOURCE_DESC desc{};
+        desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+        desc.Width = kSize;
+        desc.Height = kSize;
+        desc.DepthOrArraySize = 1;
+        desc.MipLevels = 1;
+        desc.Format = DXGI_FORMAT_D32_FLOAT_S8X24_UINT;
+        desc.SampleDesc.Count = 1;
+        desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
+        D3D12_CLEAR_VALUE clear{};
+        clear.Format = desc.Format;
+        clear.DepthStencil = {far_value, 0};
+        ComPtr<ID3D12Resource> resource;
+        Check(SUCCEEDED(device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_DEPTH_WRITE,
+                                                        &clear, IID_PPV_ARGS(&resource))),
+              "D3D12 depth image");
+        D3D12_DESCRIPTOR_HEAP_DESC heap_desc{D3D12_DESCRIPTOR_HEAP_TYPE_DSV, 1, D3D12_DESCRIPTOR_HEAP_FLAG_NONE, 0};
+        ComPtr<ID3D12DescriptorHeap> dsv_heap;
+        Check(SUCCEEDED(device->CreateDescriptorHeap(&heap_desc, IID_PPV_ARGS(&dsv_heap))), "D3D12 DSV heap");
+        const D3D12_CPU_DESCRIPTOR_HANDLE dsv = dsv_heap->GetCPUDescriptorHandleForHeapStart();
+        device->CreateDepthStencilView(resource.Get(), nullptr, dsv);
+        begin();
+        commands->ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH, far_value, 0, 0, nullptr);
+        const D3D12_RECT area{rect.offset.x, rect.offset.y, rect.offset.x + rect.extent.width,
+                              rect.offset.y + rect.extent.height};
+        commands->ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH, near_value, 0, 1, &area);
+        submit_and_wait();
+        keep.push_back(resource);
+        keep_heaps.push_back(dsv_heap);
+        return resource.Get();
     };
     harness.readback = [&](void* image) {
         auto readback = buffer(D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_STATE_COPY_DEST);

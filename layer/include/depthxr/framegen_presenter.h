@@ -165,6 +165,8 @@ class FrameGenPresenter {
         std::int64_t format{0};
         std::uint32_t sample_count{1};
         bool capturable{true};
+        bool depth{false};            // a depth swapchain
+        bool depth_capturable{false}; // created with the usage depth capture needs
         std::optional<std::uint32_t> released;
     };
 
@@ -279,6 +281,11 @@ class FrameGenPresenter {
         std::uint32_t array_index{0};
         XrRect2Di rect{};
         std::size_t view{0};
+        // A view's depth image (XrCompositionLayerDepthInfoKHR) rather than
+        // its color image.
+        bool depth{false};
+        FrameGenDepthEncoding encoding;
+        FrameGenExtent color_extent; // the color view the depth belongs to
     };
 
     bool WantsEngagementLocked() const;
@@ -457,6 +464,7 @@ class FrameGenPresenter {
     bool last_cycle_started_late_{false};
     std::optional<std::chrono::steady_clock::time_point> inline_hold_until_; // auto stays at full rate
     bool logged_first_generation_{false};
+    bool logged_depth_{false};
     bool logged_capture_failure_{false};
     void* timer_{nullptr}; // high-resolution waitable timer, frame thread only
 

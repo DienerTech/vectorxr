@@ -48,11 +48,22 @@ FrameGenViewGeometry Geometry(const XrCompositionLayerProjectionView& view) {
     FrameGenViewGeometry geometry;
     geometry.orientation = {view.pose.orientation.x, view.pose.orientation.y, view.pose.orientation.z,
                             view.pose.orientation.w};
+    geometry.position = {view.pose.position.x, view.pose.position.y, view.pose.position.z};
     geometry.angle_left = view.fov.angleLeft;
     geometry.angle_right = view.fov.angleRight;
     geometry.angle_up = view.fov.angleUp;
     geometry.angle_down = view.fov.angleDown;
     return geometry;
+}
+
+// The depth chained to a projection view, if any.
+const XrCompositionLayerDepthInfoKHR* DepthInfo(const XrCompositionLayerProjectionView& view) {
+    for (auto* next = static_cast<const XrBaseInStructure*>(view.next); next; next = next->next) {
+        if (next->type == XR_TYPE_COMPOSITION_LAYER_DEPTH_INFO_KHR) {
+            return reinterpret_cast<const XrCompositionLayerDepthInfoKHR*>(next);
+        }
+    }
+    return nullptr;
 }
 
 FrameGenExtent Extent(const XrCompositionLayerProjectionView& view) {
@@ -246,7 +257,7 @@ void FrameGenPresenter::Stop() {
     last_cycle_started_late_ = false;
     app_frames_.clear();
     submissions_.clear();
-    logged_first_generation_ = logged_capture_failure_ = false;
+    logged_first_generation_ = logged_capture_failure_ = logged_depth_ = false;
     session_ = XR_NULL_HANDLE;
     idle_cv_.notify_all();
 }
@@ -362,8 +373,11 @@ void FrameGenPresenter::AbandonFrame(XrTime display_time) {
 
 XrSwapchainUsageFlags FrameGenPresenter::SourceUsage(const XrSwapchainCreateInfo& info) const {
     std::scoped_lock lock(mutex_);
-    if (!started_ || !gpu_ || (info.usageFlags & XR_SWAPCHAIN_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT) != 0) {
+    if (!started_ || !gpu_) {
         return 0;
+    }
+    if ((info.usageFlags & XR_SWAPCHAIN_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT) != 0) {
+        return gpu_->SupportsDepth() ? gpu_->RequiredDepthUsage() : 0;
     }
     return gpu_->RequiredSourceUsage();
 }
@@ -375,7 +389,15 @@ void FrameGenPresenter::TrackSwapchain(XrSwapchain swapchain, std::int64_t forma
         return;
     }
     const XrSwapchainUsageFlags required = gpu_ ? gpu_->RequiredSourceUsage() : 0;
-    swapchains_[swapchain] = {format, std::max(1u, sample_count), (usage & required) == required, std::nullopt};
+    SwapchainRecord record;
+    record.format = format;
+    record.sample_count = std::max(1u, sample_count);
+    record.depth = (usage & XR_SWAPCHAIN_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT) != 0;
+    record.capturable = !record.depth && (usage & required) == required;
+    const XrSwapchainUsageFlags depth_required = gpu_ ? gpu_->RequiredDepthUsage() : 0;
+    record.depth_capturable = record.depth && gpu_ && gpu_->SupportsDepth() && record.sample_count == 1 &&
+                              (usage & depth_required) == depth_required;
+    swapchains_[swapchain] = record;
 }
 
 void FrameGenPresenter::ForgetSwapchain(XrSwapchain swapchain) {
@@ -439,7 +461,8 @@ void FrameGenPresenter::CaptureOnRelease(XrSwapchain swapchain, std::uint32_t im
             return false;
         }
         const auto record = swapchains_.find(swapchain);
-        return record != swapchains_.end() && record->second.sample_count == 1 && record->second.capturable &&
+        return record != swapchains_.end() && record->second.sample_count == 1 &&
+               (record->second.depth ? record->second.depth_capturable : record->second.capturable) &&
                std::any_of(capture_targets_.begin(), capture_targets_.end(),
                            [&](const CaptureTarget& target) { return target.swapchain == swapchain; });
     };
@@ -461,6 +484,8 @@ void FrameGenPresenter::CaptureOnRelease(XrSwapchain swapchain, std::uint32_t im
         std::size_t view{0};
         FrameGenImage source;
         FrameGenViewRequest request;
+        bool depth{false};
+        FrameGenDepthEncoding encoding;
     };
     std::vector<Job> jobs;
     FrameGenFlowQuality quality;
@@ -473,6 +498,16 @@ void FrameGenPresenter::CaptureOnRelease(XrSwapchain swapchain, std::uint32_t im
         const auto record = swapchains_.find(swapchain);
         for (const CaptureTarget& target : capture_targets_) {
             if (target.swapchain != swapchain) {
+                continue;
+            }
+            if (target.depth) {
+                Job job;
+                job.view = target.view;
+                job.depth = true;
+                job.encoding = target.encoding;
+                job.source = {swapchain, image_index, target.array_index, target.rect, record->second.format};
+                job.request.extent = target.color_extent;
+                jobs.push_back(job);
                 continue;
             }
             const auto kind = OutputKindLocked(target.view, record->second.format);
@@ -493,7 +528,8 @@ void FrameGenPresenter::CaptureOnRelease(XrSwapchain swapchain, std::uint32_t im
     for (const Job& job : jobs) {
         std::string error;
         if (!gpu_->Track(swapchain, xr_.images, error) ||
-            !gpu_->Capture(job.view, job.source, job.request, quality, error)) {
+            !(job.depth ? gpu_->CaptureDepth(job.view, job.source, job.encoding, job.request, error)
+                        : gpu_->Capture(job.view, job.source, job.request, quality, error))) {
             // Generation then copies the image itself. An empty error means
             // the view is not set up for this region yet; nothing to report.
             if (failure.empty()) {
@@ -515,7 +551,23 @@ void FrameGenPresenter::RecordCaptureTargetsLocked(const XrCompositionLayerProje
     capture_targets_.clear();
     for (std::uint32_t i = 0; i < projection.viewCount; ++i) {
         const auto& sub = projection.views[i].subImage;
-        capture_targets_.push_back({sub.swapchain, sub.imageArrayIndex, sub.imageRect, i});
+        CaptureTarget color;
+        color.swapchain = sub.swapchain;
+        color.array_index = sub.imageArrayIndex;
+        color.rect = sub.imageRect;
+        color.view = i;
+        capture_targets_.push_back(color);
+        if (const auto* depth = DepthInfo(projection.views[i])) {
+            CaptureTarget target;
+            target.swapchain = depth->subImage.swapchain;
+            target.array_index = depth->subImage.imageArrayIndex;
+            target.rect = depth->subImage.imageRect;
+            target.view = i;
+            target.depth = true;
+            target.encoding = {depth->minDepth, depth->maxDepth, depth->nearZ, depth->farZ};
+            target.color_extent = Extent(projection.views[i]);
+            capture_targets_.push_back(target);
+        }
     }
 }
 
@@ -1330,6 +1382,11 @@ bool FrameGenPresenter::Generate(const XrCompositionLayerProjection& projection,
                                             last_real_.views[i].extent.height == submission.request.extent.height;
             submission.request.previous = submission.request.synthesize ? last_real_.views[i].geometry : Geometry(view);
             submission.request.temporal = true;
+            if (const auto* depth = DepthInfo(view)) {
+                const auto depth_record = swapchains_.find(depth->subImage.swapchain);
+                submission.request.depth =
+                    depth_record != swapchains_.end() && depth_record->second.depth_capturable;
+            }
         }
         if (!error.empty()) {
             NoteFailureLocked(error);
@@ -1399,6 +1456,12 @@ bool FrameGenPresenter::Generate(const XrCompositionLayerProjection& projection,
     consecutive_failures_ = 0;
     const bool synthesized =
         std::any_of(executed.synthesized.begin(), executed.synthesized.end(), [](bool value) { return value; });
+    if (logger_ && !logged_depth_ &&
+        std::any_of(executed.depth.begin(), executed.depth.end(), [](bool value) { return value; })) {
+        logged_depth_ = true;
+        logger_->Info("Frame Generation uses the game's depth: head movement is compensated exactly, so content "
+                      "fixed in the cockpit stays still in generated frames.");
+    }
     if (synthesized) {
         generated_ += count;
     } else {
