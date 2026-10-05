@@ -111,6 +111,12 @@ struct ViewResources {
     NvOFGPUBufferHandle hardware_buffers[6]{};
     NV_OF_PERF_LEVEL hardware_perf{NV_OF_PERF_LEVEL_UNDEFINED};
 #endif
+    // Each session signals its own fence: sessions finish in their own
+    // order, and a fence two of them signalled could step back and leave a
+    // wait for the larger value forever. Kept for the process like the
+    // images (see RetireHardware).
+    ComPtr<ID3D12Fence> hardware_fence;
+    UINT64 hardware_fence_value{0};
     std::uint8_t raw_next{0};          // the raw image the next capture writes
     bool raw_previous{false};          // the other one holds the last capture's luma
     std::uint64_t raw_count{0};        // raw captures so far
@@ -118,12 +124,14 @@ struct ViewResources {
     std::uint64_t raw_executed{0};     // the count of the newest frame the last Execute generated from
     std::uint64_t raw_reference{0};    // the count of the reference the pending raw match used
     UINT64 raw_value{0};               // the hardware fence value of the pending raw match
+    UINT64 raw_last_match{0};          // ... of the last raw match, which reads both raw images
     CaptureKey raw_capture;            // the capture it matched
     bool raw_in_use{false};            // this Execute unpacks raw_flow
     int hardware_mode{0};              // what the session matched last: 1 packed, 2 raw (hints)
     FrameGenExtent hardware_extent{};
     bool hardware_fresh{false}; // no vectors of its own to hint the next match yet
-    bool hardware_matched{false}; // its session has matched once (see StartHardwareWatchdog)
+    bool hardware_matched{false}; // its session has matched its packed images once (see StartHardwareWatchdog)
+    bool raw_matched{false};      // ... and its raw images
 };
 
 // One view's recording: a plan recorded up to `next`, resumable after the
@@ -153,6 +161,18 @@ struct FrameSlot {
 struct CaptureSlot {
     ComPtr<ID3D12CommandAllocator> allocator;
     UINT64 fence_value{0};
+};
+
+// What the optical flow hardware's watchdog watches, per view (up to
+// kWatchedViews): the view's fence, the value a queue waits for, the
+// fence_ value that work started from, and how long it may take once
+// started.
+constexpr std::size_t kWatchedViews = 4;
+struct HardwareWatch {
+    std::atomic<ID3D12Fence*> fence{nullptr};
+    std::atomic<UINT64> wait{0};
+    std::atomic<UINT64> input{0};
+    std::atomic<ULONGLONG> allowed{250};
 };
 
 class D3D12FrameGen final : public FrameGenGpu {
@@ -365,6 +385,7 @@ class D3D12FrameGen final : public FrameGenGpu {
         std::vector<D3D12_RESOURCE_BARRIER> barriers;
         CopySource(capture_commands_.Get(), barriers, view, source, resource);
         const bool raw = RecordRawPack(view, request, static_cast<std::size_t>(capture_count_ % capture_slots_.size()));
+        HardwareWatch* watch = index < hardware_watch_.size() ? &hardware_watch_[index] : nullptr;
         hr = capture_commands_->Close();
         if (FAILED(hr)) {
             // Nothing was submitted, so tracked states no longer match the GPU:
@@ -373,10 +394,11 @@ class D3D12FrameGen final : public FrameGenGpu {
             view.history_state = {};
             return false;
         }
-        if (raw && raw_wait_value_) {
-            // The raw image written now was the reference of the last match.
-            hardware_wait_value_ = std::max<UINT64>(hardware_wait_value_, raw_wait_value_);
-            queue_->Wait(hardware_fence_.Get(), raw_wait_value_);
+        if (raw && view.raw_last_match && view.hardware_fence->GetCompletedValue() < view.raw_last_match) {
+            // The raw image written now was the reference of this view's
+            // last match (a frame ago: normally long done).
+            if (watch) watch->wait = std::max<UINT64>(watch->wait, view.raw_last_match);
+            queue_->Wait(view.hardware_fence.Get(), view.raw_last_match);
         }
         ID3D12CommandList* lists[] = {capture_commands_.Get()};
         queue_->ExecuteCommandLists(1, lists);
@@ -391,7 +413,7 @@ class D3D12FrameGen final : public FrameGenGpu {
         view.capture = {true, source.swapchain, source.image_index, source.array_index, source.rect};
         view.raw_captured = 0;
         if (raw) {
-            MatchRaw(view);
+            MatchRaw(view, watch);
         }
         return true;
     }
@@ -445,7 +467,7 @@ class D3D12FrameGen final : public FrameGenGpu {
 
     // After the raw pack is submitted: has the hardware match it against the
     // view's previous raw image, if the previous capture packed one.
-    void MatchRaw(ViewResources& view) {
+    void MatchRaw(ViewResources& view, HardwareWatch* watch) {
 #ifdef DEPTHXR_NVOF
         const std::uint8_t newest = view.raw_next;
         view.raw_next ^= 1u;
@@ -464,26 +486,31 @@ class D3D12FrameGen final : public FrameGenGpu {
         in.disableTemporalHints = view.hardware_mode == 2 && view.raw_executed == reference ? NV_OF_FALSE : NV_OF_TRUE;
         in.numFencePoints = 1;
         in.fencePoint = &ready;
-        NV_OF_FENCE_POINT done{hardware_fence_.Get(), ++hardware_fence_value_};
+        NV_OF_FENCE_POINT done{view.hardware_fence.Get(), ++view.hardware_fence_value};
         NV_OF_EXECUTE_OUTPUT_PARAMS_D3D12 out{};
         out.outputBuffer = view.hardware_buffers[5];
         out.fencePoint = &done;
-        hardware_allowed_ms_ = view.hardware_matched ? 250 : 3000;
-        hardware_submitted_at_ = GetTickCount64();
+        if (watch) {
+            // The first match on the raw images may take long too (see
+            // StartHardwareWatchdog).
+            watch->allowed = view.raw_matched ? 250 : 3000;
+            watch->input = ready.value;
+        }
         if (stall_hardware_for_test_) {
             stall_hardware_for_test_ = false;
         } else if (hardware_api_.nvOFExecuteD3D12(view.hardware, &in, &out) != NV_OF_SUCCESS) {
             HardwareFailed("the optical flow hardware failed: " + HardwareError(view.hardware));
-            queue_->Signal(hardware_fence_.Get(), hardware_fence_value_);
+            queue_->Signal(view.hardware_fence.Get(), view.hardware_fence_value);
         }
-        view.hardware_matched = true;
+        view.raw_matched = true;
         view.hardware_mode = 2;
         view.raw_reference = reference;
-        view.raw_value = hardware_fence_value_;
+        view.raw_value = view.hardware_fence_value;
         view.raw_capture = view.capture;
-        raw_wait_value_ = hardware_fence_value_;
+        view.raw_last_match = view.hardware_fence_value;
 #else
         static_cast<void>(view);
+        static_cast<void>(watch);
 #endif
     }
 
@@ -491,13 +518,15 @@ class D3D12FrameGen final : public FrameGenGpu {
         if (!WaitFence(fence_value_, 2000)) {
             return false;
         }
-        // The optical flow hardware signals its own fence.
+        // The optical flow hardware signals its own fences.
         const ULONGLONG deadline = GetTickCount64() + 2000;
-        while (hardware_fence_ && hardware_fence_->GetCompletedValue() < hardware_fence_value_) {
-            if (GetTickCount64() >= deadline) {
-                return false;
+        for (const ViewResources& view : views_) {
+            while (view.hardware_fence && view.hardware_fence->GetCompletedValue() < view.hardware_fence_value) {
+                if (GetTickCount64() >= deadline) {
+                    return false;
+                }
+                Sleep(1);
             }
-            Sleep(1);
         }
         return true;
     }
@@ -1130,7 +1159,7 @@ class D3D12FrameGen final : public FrameGenGpu {
         effective_tuning.hardware_flow = tuning.hardware_flow && HardwareFlowReady();
         for (std::size_t i = 0; i < views.size() && effective_tuning.hardware_flow; ++i) {
             // A session per view: its hints follow that view's motion.
-            effective_tuning.hardware_flow = EnsureHardware(views_[i], views[i], tuning);
+            effective_tuning.hardware_flow = EnsureHardware(views_[i], i, views[i], tuning);
         }
         // Captures start matching on the hardware while it is in use.
         hardware_active_ = effective_tuning.hardware_flow;
@@ -1267,13 +1296,10 @@ class D3D12FrameGen final : public FrameGenGpu {
                 view.shift_map.resource.Detach();
             }
         }
+        StopHardwareWatchdog();
         for (auto& view : views_) {
             RetireHardware(view);
         }
-        StopHardwareWatchdog();
-        // The driver signals it after sessions end (see RetireHardware).
-        hardware_fence_.Detach();
-        hardware_fence_value_ = 0;
         hardware_loaded_ = false;
         views_.clear();
         images_.clear();
@@ -1545,9 +1571,6 @@ class D3D12FrameGen final : public FrameGenGpu {
             return HardwareFailed("the NVIDIA driver does not offer optical flow API " +
                                   std::to_string(NV_OF_API_MAJOR_VERSION) + "." + std::to_string(NV_OF_API_MINOR_VERSION));
         }
-        if (FAILED(device_->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&hardware_fence_)))) {
-            return HardwareFailed("its fence could not be created");
-        }
         StartHardwareWatchdog();
         hardware_loaded_ = true;
         hardware_status_ = "active";
@@ -1564,20 +1587,36 @@ class D3D12FrameGen final : public FrameGenGpu {
     // The game's queue waits on the optical flow hardware's fence: should
     // the hardware stop answering, the game would hang behind it, and stop
     // calling us. A watchdog thread signals a fence a quarter second overdue
-    // itself, which releases the queue; the hardware is not used again. A
-    // new session's first match may take longer (the driver sets up its
-    // CUDA work then), so it gets a few seconds.
+    // itself, which releases the queue; the hardware is not used again.
+    // Overdue counts from when the hardware's input was ready (the game's
+    // own GPU work before ours, a hitch included, is not the hardware's
+    // fault). A new session's first match may take longer (the driver sets
+    // up its CUDA work then), so it gets a few seconds.
     void StartHardwareWatchdog() {
-        ID3D12Fence* fence = hardware_fence_.Get();
+        ID3D12Fence* input = fence_.Get();
         hardware_watchdog_stop_ = false;
-        hardware_watchdog_ = std::thread([this, fence] {
+        hardware_watchdog_ = std::thread([this, input] {
+            std::array<ULONGLONG, kWatchedViews> ready_since{};
+            std::array<UINT64, kWatchedViews> ready_input{};
             while (!hardware_watchdog_stop_) {
                 Sleep(50);
-                const UINT64 value = hardware_wait_value_;
-                if (value && fence->GetCompletedValue() < value &&
-                    GetTickCount64() - hardware_submitted_at_ > hardware_allowed_ms_) {
-                    fence->Signal(value);
-                    hardware_stuck_ = true;
+                for (std::size_t i = 0; i < kWatchedViews; ++i) {
+                    HardwareWatch& watch = hardware_watch_[i];
+                    ID3D12Fence* fence = watch.fence;
+                    const UINT64 value = watch.wait;
+                    const UINT64 needed = watch.input;
+                    if (!fence || !value || fence->GetCompletedValue() >= value || input->GetCompletedValue() < needed) {
+                        ready_since[i] = 0;
+                        continue;
+                    }
+                    const ULONGLONG now = GetTickCount64();
+                    if (!ready_since[i] || ready_input[i] != needed) {
+                        ready_since[i] = now;
+                        ready_input[i] = needed;
+                    } else if (now - ready_since[i] > watch.allowed) {
+                        fence->Signal(value);
+                        hardware_stuck_ = true;
+                    }
                 }
             }
         });
@@ -1598,7 +1637,8 @@ class D3D12FrameGen final : public FrameGenGpu {
 
     // The view's optical flow session and images for its size; false (and
     // hardware flow off for the session) when the hardware refuses them.
-    bool EnsureHardware(ViewResources& view, const FrameGenViewSubmission& submission, const FrameGenTuning& tuning) {
+    bool EnsureHardware(ViewResources& view, std::size_t index, const FrameGenViewSubmission& submission,
+                        const FrameGenTuning& tuning) {
 #ifdef DEPTHXR_NVOF
         const FrameGenExtent input = FrameGenPyramid(submission.request.extent)[1];
         const FrameGenExtent flow = FrameGenPyramid(submission.request.extent)[kFrameGenHardwareFlowLevel];
@@ -1642,14 +1682,23 @@ class D3D12FrameGen final : public FrameGenGpu {
             RetireHardware(view);
             return HardwareFailed(reason);
         }
+        if (FAILED(device_->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&view.hardware_fence)))) {
+            RetireHardware(view);
+            return HardwareFailed("its fence could not be created");
+        }
+        view.hardware_fence_value = 0;
+        if (index < hardware_watch_.size()) {
+            hardware_watch_[index].wait = 0;
+            hardware_watch_[index].fence = view.hardware_fence.Get();
+        }
         Texture* images[6] = {&view.hardware_newest, &view.hardware_previous, &view.hardware_flow,
                               &view.raw[0],          &view.raw[1],               &view.raw_flow};
         for (int i = 0; i < 6; ++i) {
             NV_OF_REGISTER_RESOURCE_PARAMS_D3D12 params{};
             params.resource = images[i]->resource.Get();
-            params.inputFencePoint = {hardware_fence_.Get(), hardware_fence_value_};
+            params.inputFencePoint = {view.hardware_fence.Get(), view.hardware_fence_value};
             params.hOFGpuBuffer = &view.hardware_buffers[i];
-            params.outputFencePoint = {hardware_fence_.Get(), ++hardware_fence_value_};
+            params.outputFencePoint = {view.hardware_fence.Get(), ++view.hardware_fence_value};
             if (hardware_api_.nvOFRegisterResourceD3D12(view.hardware, &params) != NV_OF_SUCCESS) {
                 const std::string reason = "the optical flow hardware refused its images: " + HardwareError(view.hardware);
                 RetireHardware(view);
@@ -1659,7 +1708,7 @@ class D3D12FrameGen final : public FrameGenGpu {
         view.hardware_extent = input;
         view.hardware_perf = perf;
         view.hardware_fresh = true;
-        view.hardware_matched = false;
+        view.hardware_matched = view.raw_matched = false;
         view.hardware_mode = 0;
         view.raw_previous = false;
         view.raw_value = 0;
@@ -1667,6 +1716,7 @@ class D3D12FrameGen final : public FrameGenGpu {
         return true;
 #else
         static_cast<void>(view);
+        static_cast<void>(index);
         static_cast<void>(submission);
         static_cast<void>(tuning);
         return false;
@@ -1702,6 +1752,9 @@ class D3D12FrameGen final : public FrameGenGpu {
                 texture->resource.Detach();
                 *texture = {};
             }
+            // The watchdog may still look at it: a fence that is never freed.
+            view.hardware_fence.Detach();
+            view.hardware_fence_value = 0;
         }
 #endif
         view.hardware_extent = {};
@@ -1736,17 +1789,19 @@ class D3D12FrameGen final : public FrameGenGpu {
             return false;
         }
         NV_OF_FENCE_POINT ready{fence_.Get(), fence_value_};
-        bool first_match = false;
-        bool submitted = false;
-        UINT64 wait = 0;
-        for (ViewRecording& recording : recordings) {
+        for (std::size_t index = 0; index < recordings.size(); ++index) {
+            ViewRecording& recording = recordings[index];
             if (!recording.waits_for_hardware) {
                 continue;
             }
             ViewResources& view = *recording.view;
+            HardwareWatch* watch = index < hardware_watch_.size() ? &hardware_watch_[index] : nullptr;
+            UINT64 wait = 0;
             if (view.raw_in_use) {
                 // Matched since the game released the image.
-                wait = std::max(wait, view.raw_value);
+                wait = view.raw_value;
+                if (watch) watch->wait = wait;
+                queue_->Wait(view.hardware_fence.Get(), wait);
                 continue;
             }
             NV_OF_EXECUTE_INPUT_PARAMS_D3D12 in{};
@@ -1755,37 +1810,31 @@ class D3D12FrameGen final : public FrameGenGpu {
             // Its own hints from the last pair, unless the history restarted.
             in.disableTemporalHints =
                 recording.temporal && !view.hardware_fresh && view.hardware_mode == 1 ? NV_OF_FALSE : NV_OF_TRUE;
-            first_match = first_match || !view.hardware_matched;
             in.numFencePoints = 1;
             in.fencePoint = &ready;
-            NV_OF_FENCE_POINT done{hardware_fence_.Get(), ++hardware_fence_value_};
+            NV_OF_FENCE_POINT done{view.hardware_fence.Get(), ++view.hardware_fence_value};
             NV_OF_EXECUTE_OUTPUT_PARAMS_D3D12 out{};
             out.outputBuffer = view.hardware_buffers[2];
             out.fencePoint = &done;
-            if (stall_hardware_for_test_) {
-                stall_hardware_for_test_ = false;
-                submitted = true;
-                wait = std::max(wait, hardware_fence_value_);
-                continue; // its fence is never signalled
+            wait = view.hardware_fence_value;
+            if (watch) {
+                watch->allowed = view.hardware_matched ? 250 : 3000;
+                watch->input = ready.value;
+                watch->wait = wait;
             }
-            if (hardware_api_.nvOFExecuteD3D12(view.hardware, &in, &out) != NV_OF_SUCCESS) {
+            if (stall_hardware_for_test_) {
+                stall_hardware_for_test_ = false; // its fence is never signalled
+            } else if (hardware_api_.nvOFExecuteD3D12(view.hardware, &in, &out) != NV_OF_SUCCESS) {
                 // This frame keeps the last vectors; later frames match on
                 // the shader cores again.
                 HardwareFailed("the optical flow hardware failed: " + HardwareError(view.hardware));
-                queue_->Signal(hardware_fence_.Get(), hardware_fence_value_);
+                queue_->Signal(view.hardware_fence.Get(), wait);
             }
             view.hardware_fresh = false;
             view.hardware_matched = true;
             view.hardware_mode = 1;
-            submitted = true;
-            wait = std::max(wait, hardware_fence_value_);
+            queue_->Wait(view.hardware_fence.Get(), wait);
         }
-        if (submitted) {
-            hardware_allowed_ms_ = first_match ? 3000 : 250;
-            hardware_submitted_at_ = GetTickCount64();
-        }
-        hardware_wait_value_ = wait;
-        queue_->Wait(hardware_fence_.Get(), wait);
         hr = slot.after_hardware->Reset();
         if (SUCCEEDED(hr)) hr = commands_->Reset(slot.after_hardware.Get(), nullptr);
         if (FAILED(hr)) {
@@ -2080,17 +2129,14 @@ class D3D12FrameGen final : public FrameGenGpu {
     bool hardware_loaded_{false};
     bool hardware_failed_{false};
     std::string hardware_status_;
-    ComPtr<ID3D12Fence> hardware_fence_;
-    UINT64 hardware_fence_value_{0};
+
     // Watchdog (StartHardwareWatchdog): the value the queue last waited
     // for, when, and whether the watchdog had to release it.
     std::thread hardware_watchdog_;
     std::atomic<bool> hardware_watchdog_stop_{false};
-    std::atomic<UINT64> hardware_wait_value_{0};
-    std::atomic<ULONGLONG> hardware_submitted_at_{0};
+    std::array<HardwareWatch, kWatchedViews> hardware_watch_;
     std::atomic<ULONGLONG> hardware_allowed_ms_{250};
     bool hardware_active_{false};  // the last Execute used the hardware: captures match early
-    UINT64 raw_wait_value_{0};     // the last raw match, which reads the raw images
     std::atomic<bool> hardware_stuck_{false};
     bool stall_hardware_for_test_{false};
     // Generated frames drawn straight into the output images.
