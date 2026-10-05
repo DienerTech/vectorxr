@@ -826,6 +826,62 @@ void TestThreadedPipelinedApp() {
     Check(!runtime.ordering_violation && !g_release_violation, "pipelined: runtime and image calls stayed ordered");
 }
 
+// Interpolate presents from the presenter thread too: each real frame is
+// shown after the frames interpolated between it and the previous one, at
+// the display time it was rendered for, and the game keeps its overlap.
+void TestThreadedInterpolation() {
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    gpu.threaded = true;
+    Runtime runtime;
+    runtime.paced = true;
+    StartPresenter(presenter, gpu, FrameGenSynthesisMode::kInterpolate, kFormat, kAppUsage, FrameGenMultiplier::k3);
+    App app(presenter, runtime);
+    for (int i = 0; i < 3; ++i) app.Frame();
+    const std::size_t first = runtime.Submissions();
+    std::mutex times_mutex;
+    std::vector<XrTime> rendered_for;
+    const auto start = std::chrono::steady_clock::now();
+    const int frames = RunPipelined(app, 1500ms, 20ms, 22ms, [&](int, const XrFrameState& state) {
+        std::scoped_lock lock(times_mutex);
+        rendered_for.push_back(state.predictedDisplayTime);
+    });
+    const double elapsed = Seconds(std::chrono::steady_clock::now() - start);
+    const double refresh = 1e9 / static_cast<double>(kPeriod);
+    const FrameGenStatus status = presenter.Status();
+    Check(status.threaded && status.state == FrameGenState::kActive && !status.full_rate,
+          "threaded interpolation: engages on the presenter thread");
+    Check(frames / elapsed > refresh / 3 * 0.8,
+          "threaded interpolation: the app holds a third of the refresh (" + std::to_string(frames / elapsed) + " fps)");
+    const auto log = runtime.Snapshot();
+    Check(static_cast<double>(log.size() - first) / elapsed > refresh * 0.85,
+          "threaded interpolation: every refresh gets a frame");
+    CheckOrderedTimes(log, "threaded interpolation");
+    Check(gpu.tuning.mode == FrameGenSynthesisMode::kInterpolate && gpu.tuning.generated == 2 &&
+              gpu.tuning.fractions[0] > 0.2f && gpu.tuning.fractions[0] < 0.5f && gpu.tuning.fractions[1] > 0.5f &&
+              gpu.tuning.fractions[1] < 0.8f,
+          "threaded interpolation: two frames a third and two thirds of the way between real frames (" +
+              std::to_string(gpu.tuning.fractions[0]) + ", " + std::to_string(gpu.tuning.fractions[1]) + ")");
+    // Real frames come after the frames interpolated toward them, mostly at
+    // the very display time they were rendered for.
+    std::size_t real = 0, after_two = 0, on_time = 0;
+    for (std::size_t i = first + 12; i < log.size(); ++i) {
+        if (!IsAppImage(log[i].swapchains)) continue;
+        ++real;
+        after_two += !IsAppImage(log[i - 1].swapchains) && !IsAppImage(log[i - 2].swapchains) ? 1 : 0;
+        std::scoped_lock lock(times_mutex);
+        on_time += std::find(rendered_for.begin(), rendered_for.end(), log[i].time) != rendered_for.end() ? 1 : 0;
+    }
+    Check(real > 10 && after_two * 10 >= real * 7,
+          "threaded interpolation: real frames follow their interpolated frames (" + std::to_string(after_two) + " of " +
+              std::to_string(real) + ")");
+    Check(on_time * 10 >= real * 7, "threaded interpolation: real frames are shown when they were rendered for (" +
+                                        std::to_string(on_time) + " of " + std::to_string(real) + ")");
+    presenter.Stop();
+    Check(!runtime.ordering_violation && !g_release_violation,
+          "threaded interpolation: runtime and image calls stayed ordered");
+}
+
 void TestThreadedToggleAndReset() {
     FrameGenPresenter presenter;
     GpuLog gpu;
@@ -1391,6 +1447,7 @@ int main() {
     TestAutomaticMultiplier();
     TestThreadedExtrapolation();
     TestThreadedPipelinedApp();
+    TestThreadedInterpolation();
     TestThreadedToggleAndReset();
     TestThreadedPipelinedDouble();
     TestThreadedDestroyedSwapchain();

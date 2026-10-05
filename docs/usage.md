@@ -571,20 +571,16 @@ layer predates Frame Generation.
 
 | Mode | How it works | Trade-off |
 | --- | --- | --- |
-| **Interpolate** (default) | Blends generated frames between the previous and the newest real frame. | Fewest artifacts, and the closest match to OFXR-Bridge. Each real frame must be ready before the generated frames leading up to it are shown, so it needs more GPU headroom at any multiplier. |
-| **Extrapolate** | Pushes the newest real frame forward along its motion, like ASW or Smart Smoothing. | Gives the game more time per frame, so it is recommended for heavy games. On Direct3D 12 it presents generated frames from its own thread while the game keeps rendering. More edge artifacts on fast motion and in newly revealed areas. |
+| **Interpolate** (default) | Blends generated frames between the previous and the newest real frame. | Fewest artifacts, and the closest match to OFXR-Bridge. Each real frame is shown after the generated frames leading up to it, so everything appears one real frame interval later (about 33 ms at 4x, 22 ms at 3x); head rotation is still corrected by the headset. |
+| **Extrapolate** | Pushes the newest real frame forward along its motion, like ASW or Smart Smoothing. | No added latency. More edge artifacts on fast motion and in newly revealed areas, and fine cockpit detail depends more on the game's depth (see Game depth). |
 
-If Interpolate cannot keep its cadence on your GPU, try a lower **Flow quality** first, then
-Extrapolate. For heavy games, start with Extrapolate.
-
-With Interpolate, and with Extrapolate on Direct3D 11 and Vulkan, the game's frame thread
-presents the generated frames itself before it can start the next frame. That works when the
-game finishes each frame well within the time the runtime gives it, but a game whose frame
-takes longer, or that starts its next frame before ending the current one (MSFS does both),
+On Direct3D 12 both modes present from their own thread: a frame every refresh while the game
+renders at its own pace, as it would without Frame Generation. With Direct3D 11 and Vulkan, the
+game's frame thread presents the generated frames itself before it can start the next frame.
+That works when the game finishes each frame well within the time the runtime gives it, but a
+game whose frame takes longer, or that starts its next frame before ending the current one,
 loses frame rate instead of gaining it. **Auto** detects this and holds full rate for a minute
-before trying again; the log says so. Extrapolate on Direct3D 12 avoids it: a presenter thread
-shows a frame every refresh while the game renders at its own pace, as it would without
-Frame Generation.
+before trying again (turning Frame Generation off and on retries at once); the log says so.
 
 #### Game depth
 
@@ -634,12 +630,10 @@ Output images, once allocated, are kept for the session, so changing multiplier 
 the game.
 
 Higher multipliers rescue very heavy games, such as MSFS at very high resolution, but each
-generated frame moves content further, so artifacts grow; 4x shows the most. For these games,
-use **Extrapolate** with **3x**, **4x**, or **Auto**: Interpolate needs each real frame ready before
-the generated frames leading up to it, so it needs GPU headroom whatever the multiplier. In
-Extrapolate, each generated frame also needs its own set of headset-resolution output images, and
-on Direct3D 12 one spare set covers a game frame that arrives late (up to three sets), so video
-memory use grows with the multiplier. The log reports the estimate.
+generated frame moves content further, so artifacts grow; 4x shows the most. Each generated frame
+also needs its own set of headset-resolution output images, and in Extrapolate on Direct3D 12 one
+spare set covers a game frame that arrives late (up to three sets), so video memory use grows
+with the multiplier. The log reports the estimate.
 
 #### Frame Generation settings
 
@@ -737,10 +731,9 @@ on, save, restart the game, then use the binding.
 
 **Should I use Interpolate or Extrapolate?**
 
-Start with Interpolate when the game has headroom: it has the fewest artifacts. Use Extrapolate
-for heavy games, and always for MSFS and other Direct3D 12 games that cannot hold full rate:
-there it presents from its own thread, so the game keeps its full frame rate up to the
-multiplier's rate. Expect more edge artifacts in return.
+Interpolate has the fewest artifacts and adds about one real frame interval of latency;
+Extrapolate adds none and has more artifacts. On Direct3D 12 (MSFS) both present from their own
+thread; with Direct3D 11 and Vulkan, prefer Extrapolate for games that cannot hold full rate.
 
 **Why do cockpit gauges and text shimmer?**
 

@@ -230,6 +230,10 @@ class FrameGenPresenter {
         XrSpace space{XR_NULL_HANDLE};
         XrCompositionLayerFlags flags{0};
         std::vector<std::vector<XrCompositionLayerProjectionView>> sets;
+        // Interpolated between the previous real frame and the newest one:
+        // once they are shown, the newest real frame is (extrapolated sets
+        // instead keep showing the last one).
+        bool interpolated{false};
     };
 
     // A deep copy of a frame's composition layers that outlives the app's
@@ -262,6 +266,12 @@ class FrameGenPresenter {
         XrTime target_time{0};         // the display time of target_slot
         XrDuration reported_period{0}; // the period returned to the app
         std::uint64_t target_slot{0};  // the slot the frame is predicted to reach
+        // The first slot it fills: target_slot, or when interpolating the
+        // first of the multiplier - 1 slots before it, which show frames
+        // generated between the previous real frame and this one.
+        std::uint64_t first_slot{0};
+        XrTime first_time{0};
+        bool interpolate{false};
         std::uint32_t multiplier{2};
         std::uint32_t lead{0};         // refreshes between its release and target_slot
         bool begun{false};

@@ -344,6 +344,11 @@ bool FrameGenPresenter::Toggle() {
         SetStateLocked(configured_enabled_ ? FrameGenState::kWaiting : FrameGenState::kOff, "");
     } else {
         user_enabled_ = !user_enabled_;
+        if (user_enabled_) {
+            // Turned back on: Auto gets a fresh look, not the rest of a
+            // full-rate hold from before.
+            inline_hold_until_.reset();
+        }
         if (state_ != FrameGenState::kUnavailable) {
             SetStateLocked(user_enabled_ && configured_enabled_ ? FrameGenState::kWaiting : FrameGenState::kOff, "");
         }
@@ -623,8 +628,7 @@ bool FrameGenPresenter::StayThreadedLocked() const {
 }
 
 bool FrameGenPresenter::ThreadedEligibleLocked() const {
-    return gpu_ && gpu_->SupportsThreadedPresentation() && !threaded_disabled_ &&
-           settings_.synthesis_mode == FrameGenSynthesisMode::kExtrapolate;
+    return gpu_ && gpu_->SupportsThreadedPresentation() && !threaded_disabled_;
 }
 
 std::uint32_t FrameGenPresenter::EffectiveMultiplierLocked() const {
@@ -2418,14 +2422,21 @@ std::optional<XrResult> FrameGenPresenter::ThreadedWaitLocked(std::unique_lock<s
         const double latency = app_latency_ms_ > 0.0 ? app_latency_ms_ : period_ms * multiplier;
         lead_slots_ = static_cast<std::uint32_t>(std::clamp(std::ceil((latency + 1.0) / period_ms), 1.0, 4.0 * multiplier));
     }
-    // Predict the slot the frame will really reach.
+    // Predict the first slot the frame will really reach. Interpolated
+    // frames before it are shown first, so the frame itself is shown (and
+    // rendered for) multiplier - 1 slots later.
     const std::uint64_t slots = std::clamp<std::uint64_t>(lead_slots_, 1, 4 * multiplier);
+    const bool interpolate = settings_.synthesis_mode == FrameGenSynthesisMode::kInterpolate;
+    const std::uint64_t between = interpolate ? multiplier - 1 : 0;
     ThreadedFrame frame;
     frame.id = ++threaded_id_;
     frame.multiplier = multiplier;
+    frame.interpolate = interpolate;
     frame.lead = static_cast<std::uint32_t>(slots);
-    frame.target_slot = slot_index_ + slots;
-    frame.target_time = slot_time_ + period * static_cast<XrDuration>(slots);
+    frame.first_slot = slot_index_ + slots;
+    frame.first_time = slot_time_ + period * static_cast<XrDuration>(slots);
+    frame.target_slot = frame.first_slot + between;
+    frame.target_time = frame.first_time + period * static_cast<XrDuration>(between);
     frame.reported_period = period * static_cast<XrDuration>(multiplier);
     frame.predicted =
         std::max(frame.target_time - DisplayOffsetLocked(frame.reported_period), last_returned_time_ + 1);
@@ -2478,13 +2489,36 @@ XrResult FrameGenPresenter::ThreadedEnd(XrSession session, const XrFrameEndInfo&
     // presenter thread waits for a due real frame until half a refresh after
     // the slot's wait would have returned.
     std::optional<double> slack_ms;
-    if (phase_wall_ != Clock::time_point{} && frame.target_time > phase_xr_) {
+    if (phase_wall_ != Clock::time_point{} && frame.first_time > phase_xr_) {
         const XrDuration period = std::max<XrDuration>(last_period_, 1);
-        const auto deadline = phase_wall_ + std::chrono::nanoseconds(frame.target_time - phase_xr_ + period / 2);
+        const auto deadline = phase_wall_ + std::chrono::nanoseconds(frame.first_time - phase_xr_ + period / 2);
         slack_ms = std::chrono::duration<double, std::milli>(deadline - entered).count();
     }
-    // Ask for the first slot at or after the one this frame was rendered for.
-    slot_request_ = SlotRequest{frame.id, frame.target_slot};
+    const XrTime previous_time = last_real_.display_time;
+    const XrDuration period = slot_period_ > 0 ? slot_period_ : last_period_;
+    // Interpolating, the frames between the previous real frame and this one
+    // fill the slots before it: generated now, the first shown from here.
+    const bool interpolate = frame.interpolate && renderable && copied && frame.multiplier >= 2;
+    std::vector<std::vector<XrCompositionLayerProjectionView>> between;
+    bool between_ok = false;
+    if (interpolate) {
+        lock.unlock();
+        std::vector<float> fractions;
+        std::vector<XrTime> targets;
+        for (std::uint32_t slot = 0; slot + 1 < frame.multiplier && fractions.size() < kFrameGenMaxGenerated; ++slot) {
+            targets.push_back(frame.first_time + period * static_cast<XrDuration>(slot));
+            fractions.push_back(
+                FrameGenFraction(FrameGenSynthesisMode::kInterpolate, previous_time, content_time, targets.back()));
+        }
+        PendingFrame pending;
+        pending.app_time = content_time;
+        pending.sequence = frame.id;
+        between_ok = Generate(*projection, pending, fractions, targets, calls, between);
+        RecordReal(*projection, content_time, frame.id);
+        lock.lock();
+    }
+    // Ask for the first slot at or after the first one this frame fills.
+    slot_request_ = SlotRequest{frame.id, frame.first_slot};
     WakeSlots();
     while (!slot_cv_.wait_for(lock, std::chrono::seconds(2), [&] {
         return !compositor_running_ || (slot_offer_ && slot_offer_->frame_id == frame.id);
@@ -2509,10 +2543,33 @@ XrResult FrameGenPresenter::ThreadedEnd(XrSession session, const XrFrameEndInfo&
     const SlotOffer offer = *slot_offer_;
     lock.unlock();
 
+    // A late frame skips the frames interpolated for the slots it missed;
+    // one later than all of them is shown itself.
+    const std::size_t skip = offer.slot > frame.first_slot ? static_cast<std::size_t>(offer.slot - frame.first_slot) : 0;
+    const bool show_between = interpolate && between_ok && skip < between.size();
     XrFrameBeginInfo begin_info{XR_TYPE_FRAME_BEGIN_INFO};
     XrResult result = RuntimeBegin(calls, session, &begin_info);
     if (XR_SUCCEEDED(result)) {
         XrFrameEndInfo real = info;
+        std::vector<const XrCompositionLayerBaseHeader*> layers;
+        XrCompositionLayerProjection generated_layer{};
+        std::vector<XrCompositionLayerProjectionView> generated_views;
+        if (show_between) {
+            // The projection layer replaced by the first interpolated frame,
+            // with the newest frame's depth chain (valid during this end).
+            std::uint32_t projection_index = 0;
+            FindProjection(info, &projection_index);
+            layers.assign(info.layers, info.layers + info.layerCount);
+            generated_views = between[skip];
+            for (std::size_t i = 0; i < generated_views.size() && i < projection->viewCount; ++i) {
+                generated_views[i].next = projection->views[i].next;
+            }
+            generated_layer = *projection;
+            generated_layer.viewCount = static_cast<std::uint32_t>(generated_views.size());
+            generated_layer.views = generated_views.data();
+            layers[projection_index] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&generated_layer);
+            real.layers = layers.data();
+        }
         real.displayTime = offer.time;
         if (!offer.should_render) {
             real.layerCount = 0;
@@ -2520,17 +2577,30 @@ XrResult FrameGenPresenter::ThreadedEnd(XrSession session, const XrFrameEndInfo&
         }
         result = RuntimeEnd(calls, session, &real);
     }
-    const bool generate = XR_SUCCEEDED(result) && renderable && copied && offer.should_render && frame.multiplier >= 2;
+    const bool generate = !frame.interpolate && XR_SUCCEEDED(result) && renderable && copied && offer.should_render &&
+                          frame.multiplier >= 2;
 
     lock.lock();
     NoteSubmissionLocked();
-    // From here the presenter thread fills its slots from this frame: again
-    // until the frames generated from it are ready, then those.
+    // From here the presenter thread fills its slots from this frame:
+    // extrapolating, again until the frames generated from it are ready,
+    // then those; interpolating, the rest of the frames before it, then it.
     newest_copy_ = copied ? std::move(copy) : FrameCopy{};
     generated_ready_ = false;
     generation_pending_ = generate;
     next_generated_set_ = 0;
-    const bool late = offer.slot > frame.target_slot;
+    if (frame.interpolate) {
+        extrapolated_ = {};
+        extrapolated_.interpolated = true;
+        if (show_between && skip + 1 < between.size() && compositor_running_) {
+            extrapolated_.valid = true;
+            extrapolated_.sets.assign(between.begin() + static_cast<std::ptrdiff_t>(skip + 1), between.end());
+            extrapolated_.space = projection->space;
+            extrapolated_.flags = projection->layerFlags;
+            generated_ready_ = true;
+        }
+    }
+    const bool late = offer.slot > frame.first_slot;
     threaded_late_ += late ? 1 : 0;
     UpdateLeadLocked(late, slack_ms, frame);
     erase_frame();
@@ -2544,8 +2614,6 @@ XrResult FrameGenPresenter::ThreadedEnd(XrSession session, const XrFrameEndInfo&
         InvalidateContinuityLocked();
         return result;
     }
-    const XrTime previous_time = last_real_.display_time;
-    const XrDuration period = slot_period_ > 0 ? slot_period_ : last_period_;
     lock.unlock();
 
     if (generate) {
@@ -2568,6 +2636,7 @@ XrResult FrameGenPresenter::ThreadedEnd(XrSession session, const XrFrameEndInfo&
         lock.lock();
         if (compositor_running_) {
             extrapolated_.valid = ok;
+            extrapolated_.interpolated = false;
             extrapolated_.sets = std::move(sets);
             extrapolated_.space = projection->space;
             extrapolated_.flags = projection->layerFlags;
@@ -2581,7 +2650,7 @@ XrResult FrameGenPresenter::ThreadedEnd(XrSession session, const XrFrameEndInfo&
         WakeSlots();
     } else {
         lock.lock();
-        if (!renderable) {
+        if (!renderable || (frame.interpolate && !between_ok)) {
             InvalidateContinuityLocked();
         }
     }
@@ -2692,7 +2761,7 @@ void FrameGenPresenter::CompositorLoop() {
         auto eligible = [&] { return slot_request_ && (slot_request_->earliest_slot <= slot || unusable()); };
         auto real_due = [&] {
             return std::any_of(threaded_frames_.begin(), threaded_frames_.end(),
-                               [&](const ThreadedFrame& frame) { return frame.target_slot <= slot; });
+                               [&](const ThreadedFrame& frame) { return frame.first_slot <= slot; });
         };
         CompositorWait(lock, submit_at, [&] { return compositor_stop_ || eligible(); });
         if (!compositor_stop_ && !eligible() && (real_due() || generation_pending_)) {
@@ -2736,7 +2805,8 @@ void FrameGenPresenter::CompositorLoop() {
         const bool use_generated =
             content.valid && content.has_projection && generated_ready_ && extrapolated_.valid &&
             !extrapolated_.sets.empty() &&
-            extrapolated_.sets.front().size() == content.layers[content.projection_index].views.size();
+            extrapolated_.sets.front().size() == content.layers[content.projection_index].views.size() &&
+            (!extrapolated_.interpolated || next_generated_set_ < extrapolated_.sets.size());
         if (use_generated) {
             views = extrapolated_.sets[std::min(next_generated_set_, extrapolated_.sets.size() - 1)];
             ++next_generated_set_;
