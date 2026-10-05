@@ -144,6 +144,9 @@ class FrameGenPresenter {
     void TrackSwapchain(XrSwapchain swapchain, std::int64_t format, std::uint32_t sample_count,
                         XrSwapchainUsageFlags usage);
     void ForgetSwapchain(XrSwapchain swapchain);
+    // Call before forwarding xrDestroySpace: nothing the presenter thread
+    // repeats may refer to the space afterwards.
+    void ForgetSpace(XrSpace space);
     void NoteRelease(XrSwapchain swapchain, std::uint32_t image_index);
     // Call before forwarding a release: captures the image into history while
     // the application still owns it.
@@ -182,6 +185,7 @@ class FrameGenPresenter {
         bool demoted{false}; // falls back to one submission in slot k
         bool claimed{false}; // its end has started; it will run its extra frames
         std::uint32_t multiplier{2};
+        XrDuration reported_period{0}; // the period the app was given
         std::uint64_t sequence{0};
         std::chrono::steady_clock::time_point wait_return{};
     };
@@ -246,8 +250,10 @@ class FrameGenPresenter {
     // An application frame the presenter thread presents.
     struct ThreadedFrame {
         std::uint64_t id{0};
-        XrTime predicted{0};           // the display time the app rendered for
-        std::uint64_t target_slot{0};  // the slot that display time belongs to
+        XrTime predicted{0};           // the display time returned to the app
+        XrTime target_time{0};         // the display time of target_slot
+        XrDuration reported_period{0}; // the period returned to the app
+        std::uint64_t target_slot{0};  // the slot the frame is predicted to reach
         std::uint32_t multiplier{2};
         std::uint32_t lead{0};         // refreshes between its release and target_slot
         bool begun{false};
@@ -321,6 +327,22 @@ class FrameGenPresenter {
     void UpdateLeadLocked(bool late, std::optional<double> slack_ms, const ThreadedFrame& frame);
     // Wakes the presenter thread and app threads waiting on slots.
     void WakeSlots();
+    // Every runtime frame call goes through these, so the presenter knows the
+    // runtime's frame state (waited, begun, ended) whatever its own frame
+    // bookkeeping says, and never makes a call out of order.
+    XrResult RuntimeWait(const FrameGenRuntimeCalls& calls, XrSession session, const XrFrameWaitInfo* info,
+                         XrFrameState* state);
+    XrResult RuntimeBegin(const FrameGenRuntimeCalls& calls, XrSession session, const XrFrameBeginInfo* info);
+    XrResult RuntimeEnd(const FrameGenRuntimeCalls& calls, XrSession session, const XrFrameEndInfo* info);
+    bool RuntimeFrameOpenLocked() const { return runtime_ends_ < runtime_begins_; }
+    bool RuntimeWaitPendingLocked() const { return runtime_waits_ > runtime_begins_; }
+    // Some apps end a frame with a display time other than the one they were
+    // given (MSFS adds one period and renders for that). The offset is
+    // measured in periods and taken off what engaged frames are told, so the
+    // content is rendered for when it is shown.
+    void NoteDisplayOffsetLocked(XrTime submitted, XrTime returned, XrDuration period);
+    XrDuration DisplayOffsetLocked(XrDuration period) const;
+    static void StripSpace(FrameCopy& copy, XrSpace space);
     // Presenter thread only: waits until `ready` or the deadline with the
     // high-resolution timer (condition variables round to the system tick).
     bool CompositorWait(std::unique_lock<std::mutex>& lock, std::chrono::steady_clock::time_point deadline,
@@ -470,11 +492,20 @@ class FrameGenPresenter {
     std::uint32_t lead_slots_{0};
     std::uint32_t lead_slack_streak_{0};
     std::uint32_t dropped_unbegun_{0}; // dropped frames whose begin is still to come
+    std::uint32_t dropped_unended_{0}; // dropped frames whose end is still to come
+    // Runtime frame calls that succeeded this session.
+    std::uint64_t runtime_waits_{0};
+    std::uint64_t runtime_begins_{0};
+    std::uint64_t runtime_ends_{0};
+    bool logged_order_guard_{false};
+    double display_offset_periods_{0.0};
+    std::uint32_t display_offset_samples_{0};
+    const char* compositor_phase_{"stopped"}; // for the watchdog log
+    bool logged_watchdog_{false};
     bool logged_swallowed_{false};
     std::optional<SlotRequest> slot_request_;
     std::optional<SlotOffer> slot_offer_;
     bool offer_done_{false};
-    std::vector<XrTime> dropped_frames_; // ended without a runtime frame
     FrameCopy newest_copy_;              // the newest real frame's layers
     FrameCopy passthrough_copy_;         // the last frame passed straight through
     bool generation_pending_{false};     // frames are being generated from newest_copy_

@@ -8604,6 +8604,8 @@ XrResult OpenXrLayer::LocateViews(XrSession session,
 }
 
 XrResult OpenXrLayer::DestroySpace(XrSpace space) {
+    // Frame Generation may still repeat a frame that refers to this space.
+    framegen_.ForgetSpace(space);
     const XrResult result = next_destroy_space_(space);
     if (XR_SUCCEEDED(result)) {
         std::scoped_lock lock(mutex_);

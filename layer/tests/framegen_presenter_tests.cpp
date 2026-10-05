@@ -212,6 +212,8 @@ struct Runtime {
     std::atomic<bool> fail_next_wait{false};
     std::atomic<bool> used_destroyed{false};
     std::vector<XrSwapchain> destroyed; // under g_xr_mutex
+    std::vector<XrSpace> destroyed_spaces; // under g_xr_mutex
+    std::atomic<bool> used_destroyed_space{false};
     std::atomic<int> wait_sleep_ms{0};
     bool begun{false};
     std::vector<XrTime> submitted_times;
@@ -258,11 +260,18 @@ struct Runtime {
             submitted_at.push_back(std::chrono::steady_clock::now());
             for (std::uint32_t layer = 0; layer < info->layerCount; ++layer) {
                 std::vector<XrSwapchain> used;
+                XrSpace space = XR_NULL_HANDLE;
                 if (info->layers[layer]->type == XR_TYPE_COMPOSITION_LAYER_PROJECTION) {
                     const auto* p = reinterpret_cast<const XrCompositionLayerProjection*>(info->layers[layer]);
                     for (std::uint32_t v = 0; v < p->viewCount; ++v) used.push_back(p->views[v].subImage.swapchain);
+                    space = p->space;
                 } else if (info->layers[layer]->type == XR_TYPE_COMPOSITION_LAYER_QUAD) {
-                    used.push_back(reinterpret_cast<const XrCompositionLayerQuad*>(info->layers[layer])->subImage.swapchain);
+                    const auto* q = reinterpret_cast<const XrCompositionLayerQuad*>(info->layers[layer]);
+                    used.push_back(q->subImage.swapchain);
+                    space = q->space;
+                }
+                if (std::find(destroyed_spaces.begin(), destroyed_spaces.end(), space) != destroyed_spaces.end()) {
+                    used_destroyed_space = true;
                 }
                 for (const XrSwapchain swapchain : used) {
                     if (std::find(destroyed.begin(), destroyed.end(), swapchain) != destroyed.end()) used_destroyed = true;
@@ -317,6 +326,10 @@ struct App {
     XrCompositionLayerBaseHeader unknown{static_cast<XrStructureType>(1000999999)};
     std::vector<const XrCompositionLayerBaseHeader*> layers{
         reinterpret_cast<const XrCompositionLayerBaseHeader*>(&projection)};
+    // MSFS ends each frame one period after the display time it was given.
+    int end_offset_periods{0};
+    std::mutex periods_mutex;
+    std::map<XrTime, XrDuration> periods;
 
     App(FrameGenPresenter& p, Runtime& r) : presenter(p), runtime(r), calls(r.Calls()) {
         for (int eye = 0; eye < 2; ++eye) {
@@ -341,6 +354,9 @@ struct App {
         XrFrameWaitInfo info{XR_TYPE_FRAME_WAIT_INFO};
         XrFrameState state{XR_TYPE_FRAME_STATE};
         Check(XR_SUCCEEDED(presenter.WaitFrame(kSession, &info, &state, calls)), "app wait");
+        std::scoped_lock lock(periods_mutex);
+        periods[state.predictedDisplayTime] = state.predictedDisplayPeriod;
+        if (periods.size() > 64) periods.erase(periods.begin());
         return state;
     }
 
@@ -361,6 +377,11 @@ struct App {
     XrResult End(XrTime display_time, bool layers = true) {
         XrFrameEndInfo info{XR_TYPE_FRAME_END_INFO};
         info.displayTime = display_time;
+        if (end_offset_periods) {
+            std::scoped_lock lock(periods_mutex);
+            const auto it = periods.find(display_time);
+            if (it != periods.end()) info.displayTime += it->second * end_offset_periods;
+        }
         info.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
         info.layerCount = layers ? static_cast<std::uint32_t>(this->layers.size()) : 0;
         info.layers = layers ? this->layers.data() : nullptr;
@@ -854,6 +875,83 @@ void TestThreadedRuntimeFailureRecovers() {
     Check(!runtime.ordering_violation && !g_release_violation, "failure: calls stayed ordered");
 }
 
+void TestThreadedMsfsTiming() {
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    runtime.paced = true;
+    StartThreaded(presenter, gpu, FrameGenMultiplier::k3);
+    App app(presenter, runtime);
+    app.end_offset_periods = 1;
+    const auto start = std::chrono::steady_clock::now();
+    std::chrono::steady_clock::duration gap{};
+    const int frames = RunPipelined(app, 2500ms, 20ms, 22ms, {}, &gap);
+    const double elapsed = Seconds(std::chrono::steady_clock::now() - start);
+    const double target = 1e9 / static_cast<double>(kPeriod) / 3;
+    Check(presenter.Status().threaded, "msfs timing: presents from its own thread");
+    Check(frames / elapsed > target * 0.8,
+          "msfs timing: the app holds a third of the refresh (" + std::to_string(frames / elapsed) + " fps)");
+    Check(gap < 200ms, "msfs timing: no stalls");
+    // Frames are told a period earlier, so their content is rendered for when
+    // they are shown and the frames generated after them move forward.
+    Check(gpu.tuning.fractions[0] > 0.15f,
+          "msfs timing: extrapolation is not clamped away (" + std::to_string(gpu.tuning.fractions[0]) + ")");
+    CheckOrderedTimes(runtime.Snapshot(), "msfs timing");
+    presenter.Stop();
+    Check(!runtime.ordering_violation && !g_release_violation, "msfs timing: calls stayed ordered");
+}
+
+void TestThreadedPauseRetryMsfsTiming() {
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    runtime.paced = true;
+    StartThreaded(presenter, gpu, FrameGenMultiplier::k2);
+    presenter.SetRetryPolicy(0ms, 3);
+    App app(presenter, runtime);
+    app.end_offset_periods = 1;
+    // The runtime rejects one frame mid-run (as Pimax did after a recenter):
+    // the session pauses, retries and presents from the thread again, with
+    // frames in flight across each switch.
+    bool rethreaded = false;
+    std::chrono::steady_clock::duration gap{};
+    RunPipelined(app, 3000ms, 8ms, 10ms, [&](int frame, const XrFrameState&) {
+        if (frame == 30) runtime.fail_next_submit = true;
+        if (frame > 120) rethreaded = rethreaded || presenter.Status().threaded;
+    }, &gap);
+    Check(gap < 300ms, "pause and retry: no stalls (" +
+                           std::to_string(std::chrono::duration<double, std::milli>(gap).count()) + " ms)");
+    Check(rethreaded, "pause and retry: presents from its own thread again after the retry");
+    presenter.Stop();
+    Check(!runtime.ordering_violation && !g_release_violation, "pause and retry: calls stayed ordered");
+}
+
+void TestThreadedDestroyedSpace() {
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    runtime.paced = true;
+    StartThreaded(presenter, gpu, FrameGenMultiplier::k4);
+    App app(presenter, runtime);
+    for (int i = 0; i < 8; ++i) app.Frame();
+    Check(presenter.Status().threaded, "space: presenting from its own thread");
+    // A recenter: the app makes a new reference space and destroys the old.
+    const XrSpace old_space = app.projection.space;
+    app.projection.space = reinterpret_cast<XrSpace>(0x7);
+    presenter.ForgetSpace(old_space);
+    {
+        std::scoped_lock lock(g_xr_mutex);
+        runtime.destroyed_spaces.push_back(old_space);
+    }
+    std::this_thread::sleep_for(60ms); // the presenter thread fills slots meanwhile
+    const auto start = std::chrono::steady_clock::now();
+    for (int i = 0; i < 8; ++i) app.Frame();
+    Check(std::chrono::steady_clock::now() - start < 600ms, "space: frames keep flowing");
+    Check(!runtime.used_destroyed_space, "space: a destroyed space is never submitted again");
+    presenter.Stop();
+    Check(!runtime.ordering_violation, "space: calls stayed ordered");
+}
+
 void TestThreadedKeepsOtherLayers() {
     FrameGenPresenter presenter;
     GpuLog gpu;
@@ -1170,6 +1268,9 @@ int main() {
     TestThreadedPipelinedDouble();
     TestThreadedDestroyedSwapchain();
     TestThreadedRuntimeFailureRecovers();
+    TestThreadedMsfsTiming();
+    TestThreadedPauseRetryMsfsTiming();
+    TestThreadedDestroyedSpace();
     TestThreadedKeepsOtherLayers();
     TestThreadedUnsupportedLayerPresentsInline();
     TestOverlappingWaitIsHeld();

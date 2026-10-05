@@ -227,8 +227,12 @@ void FrameGenPresenter::Stop() {
     consecutive_failures_ = consecutive_demotions_ = 0;
     generated_ = repeated_ = failures_ = demoted_ = captured_ = 0;
     threaded_frames_.clear();
-    dropped_frames_.clear();
+    dropped_unended_ = 0;
     threaded_disabled_ = logged_threaded_ = false;
+    runtime_waits_ = runtime_begins_ = runtime_ends_ = 0;
+    logged_order_guard_ = logged_watchdog_ = false;
+    display_offset_periods_ = 0.0;
+    display_offset_samples_ = 0;
     slot_index_ = 0;
     slot_time_ = slot_period_ = 0;
     app_latency_ms_ = 0.0;
@@ -318,8 +322,10 @@ void FrameGenPresenter::ResetFrames() {
     // The session is starting or stopping: the presenter thread must not
     // touch the runtime frame loop past this point.
     StopCompositorLocked(lock);
-    dropped_frames_.clear();
+    dropped_unended_ = 0;
     dropped_unbegun_ = 0;
+    // A new session starts with no runtime frame in flight.
+    runtime_waits_ = runtime_begins_ = runtime_ends_ = 0;
     frames_.clear();
     healthy_streak_ = 0;
     InvalidateContinuityLocked();
@@ -332,12 +338,20 @@ void FrameGenPresenter::ResetFrames() {
 void FrameGenPresenter::AbandonFrame(XrTime display_time) {
     {
         std::scoped_lock lock(mutex_);
-        frames_.erase(std::remove_if(frames_.begin(), frames_.end(),
-                                     [&](const PendingFrame& frame) { return frame.app_time == display_time; }),
-                      frames_.end());
-        threaded_frames_.erase(std::remove_if(threaded_frames_.begin(), threaded_frames_.end(),
-                                              [&](const ThreadedFrame& frame) { return frame.predicted == display_time; }),
-                               threaded_frames_.end());
+        // The oldest open frame is the one ending, as in EndFrame; the time
+        // is only a hint (apps may end with another time than they were given).
+        (void)display_time;
+        if (dropped_unended_ > 0) {
+            --dropped_unended_;
+        } else if (!frames_.empty()) {
+            frames_.pop_front();
+        } else {
+            const auto it = std::find_if(threaded_frames_.begin(), threaded_frames_.end(),
+                                         [](const ThreadedFrame& frame) { return !frame.claimed; });
+            if (it != threaded_frames_.end()) {
+                threaded_frames_.erase(it);
+            }
+        }
         healthy_streak_ = 0;
         InvalidateContinuityLocked();
     }
@@ -382,6 +396,22 @@ void FrameGenPresenter::ForgetSwapchain(XrSwapchain swapchain) {
         // images; destroys are rare, so always let it finish first.
         gpu_->WaitIdle();
         gpu_->Forget(swapchain);
+    }
+}
+
+void FrameGenPresenter::ForgetSpace(XrSpace space) {
+    // As for swapchains: under submit_mutex_, no presenter-thread submission
+    // is using the space, and none will after this.
+    std::scoped_lock submit(submit_mutex_);
+    std::scoped_lock lock(mutex_);
+    StripSpace(newest_copy_, space);
+    StripSpace(passthrough_copy_, space);
+    if (extrapolated_.space == space) {
+        extrapolated_.valid = false;
+        generated_ready_ = false;
+    }
+    if (last_real_.space == space) {
+        InvalidateContinuityLocked();
     }
 }
 
@@ -774,7 +804,7 @@ XrResult FrameGenPresenter::WaitFrame(XrSession session, const XrFrameWaitInfo* 
         sequence = ++wait_sequence_;
     }
     const auto called = Clock::now();
-    const XrResult result = calls.wait(session, info, state);
+    const XrResult result = RuntimeWait(calls, session, info, state);
     if (XR_FAILED(result) || !state) {
         return result;
     }
@@ -790,10 +820,12 @@ XrResult FrameGenPresenter::WaitFrame(XrSession session, const XrFrameWaitInfo* 
     frame.wait_return = Clock::now();
     if (frame.period > 0) last_period_ = frame.period;
     if (frame.engaged) {
-        state->predictedDisplayTime = frame.slot_time + frame.period * static_cast<XrDuration>(multiplier - 1);
         state->predictedDisplayPeriod = frame.period * static_cast<XrDuration>(multiplier);
+        state->predictedDisplayTime = frame.slot_time + frame.period * static_cast<XrDuration>(multiplier - 1) -
+                                      DisplayOffsetLocked(state->predictedDisplayPeriod);
         SetStateLocked(FrameGenState::kActive, "");
     }
+    frame.reported_period = state->predictedDisplayPeriod;
     state->predictedDisplayTime = std::max(state->predictedDisplayTime, last_returned_time_ + 1);
     last_returned_time_ = state->predictedDisplayTime;
     frame.app_time = state->predictedDisplayTime;
@@ -834,8 +866,17 @@ XrResult FrameGenPresenter::BeginFrame(XrSession session, const XrFrameBeginInfo
                 return XR_SUCCESS;
             }
         }
+        if (!RuntimeWaitPendingLocked()) {
+            // Nothing waited is left to begin: forwarding would break the
+            // runtime's frame order.
+            if (logger_ && !logged_order_guard_) {
+                logged_order_guard_ = true;
+                logger_->Error("Frame Generation: held back an xrBeginFrame with no waited frame to begin.");
+            }
+            return XR_SUCCESS;
+        }
     }
-    const XrResult result = calls.begin(session, info);
+    const XrResult result = RuntimeBegin(calls, session, info);
     WakeSlots();
     return result;
 }
@@ -846,30 +887,26 @@ XrResult FrameGenPresenter::EndFrame(XrSession session, const XrFrameEndInfo* in
         std::optional<ThreadedFrame> threaded;
         {
             std::scoped_lock lock(mutex_);
-            const auto dropped = std::find(dropped_frames_.begin(), dropped_frames_.end(), info->displayTime);
-            if (dropped != dropped_frames_.end()) {
+            // Frames end in the order they were waited, whatever display time
+            // an app reports (MSFS reports one period later): the oldest open
+            // frame is the one ending. Dropped frames are the oldest, then
+            // frames the runtime waited for, then the presenter thread's.
+            if (dropped_unended_ > 0) {
                 // Its runtime frame went to the frames around it when the
                 // presenter thread stopped; there is nothing to end.
-                dropped_frames_.erase(dropped);
+                --dropped_unended_;
                 healthy_streak_ = 0;
                 return XR_SUCCESS;
             }
-            const bool inline_frame =
-                std::any_of(frames_.begin(), frames_.end(),
-                            [&](const PendingFrame& pending) { return pending.app_time == info->displayTime; });
-            if (!inline_frame && !threaded_frames_.empty()) {
-                auto it = std::find_if(threaded_frames_.begin(), threaded_frames_.end(),
-                                       [&](const ThreadedFrame& pending) { return pending.predicted == info->displayTime; });
-                if (it == threaded_frames_.end() && frames_.empty()) {
-                    it = std::find_if(threaded_frames_.begin(), threaded_frames_.end(),
-                                      [](const ThreadedFrame& pending) { return !pending.claimed; });
-                }
+            if (frames_.empty() && !threaded_frames_.empty()) {
+                const auto it = std::find_if(threaded_frames_.begin(), threaded_frames_.end(),
+                                             [](const ThreadedFrame& pending) { return !pending.claimed; });
                 if (it != threaded_frames_.end()) {
                     it->claimed = true;
                     threaded = *it;
                 }
             }
-            if (!threaded && !inline_frame && frames_.empty() && compositor_running_) {
+            if (!threaded && frames_.empty() && compositor_running_) {
                 // The presenter thread owns the runtime frame loop and holds
                 // no runtime frame for this one.
                 if (logger_ && !logged_swallowed_) {
@@ -902,6 +939,7 @@ XrResult FrameGenPresenter::EndFrame(XrSession session, const XrFrameEndInfo* in
                 it->claimed = true;
             }
             frame = *it;
+            NoteDisplayOffsetLocked(info->displayTime, it->app_time, it->reported_period);
             app_work_ms_ += std::chrono::duration<double, std::milli>(Clock::now() - it->wait_return).count();
             ++app_work_frames_;
         }
@@ -910,8 +948,30 @@ XrResult FrameGenPresenter::EndFrame(XrSession session, const XrFrameEndInfo* in
         }
     }
     XrResult result = XR_SUCCESS;
+    bool open;
+    {
+        std::scoped_lock lock(mutex_);
+        open = RuntimeFrameOpenLocked();
+    }
+    if (!open) {
+        // No runtime frame is begun: forwarding would break the runtime's
+        // frame order.
+        std::scoped_lock lock(mutex_);
+        if (frame) {
+            frames_.erase(std::remove_if(frames_.begin(), frames_.end(),
+                                         [&](const PendingFrame& pending) { return pending.sequence == frame->sequence; }),
+                          frames_.end());
+        }
+        healthy_streak_ = 0;
+        if (logger_ && !logged_order_guard_) {
+            logged_order_guard_ = true;
+            logger_->Error("Frame Generation: held back an xrEndFrame with no begun frame to end.");
+        }
+        WakeSlots();
+        return XR_SUCCESS;
+    }
     if (!frame || !frame->engaged) {
-        result = calls.submit(session, info);
+        result = RuntimeEnd(calls, session, info);
         bool eligible;
         {
             std::scoped_lock lock(mutex_);
@@ -992,7 +1052,7 @@ XrResult FrameGenPresenter::SubmitAt(XrSession session, const XrFrameEndInfo& in
                                      const FrameGenRuntimeCalls& calls) {
     XrFrameEndInfo copy = info;
     copy.displayTime = time;
-    const XrResult result = calls.submit(session, &copy);
+    const XrResult result = RuntimeEnd(calls, session, &copy);
     std::scoped_lock lock(mutex_);
     NoteSubmissionLocked();
     return result;
@@ -1044,7 +1104,7 @@ XrResult FrameGenPresenter::NextSlot(XrSession session, const FrameGenRuntimeCal
     XrFrameWaitInfo wait_info{XR_TYPE_FRAME_WAIT_INFO};
     state = {XR_TYPE_FRAME_STATE};
     const auto called = Clock::now();
-    XrResult result = calls.wait(session, &wait_info, &state);
+    XrResult result = RuntimeWait(calls, session, &wait_info, &state);
     if (XR_FAILED(result)) {
         std::scoped_lock lock(mutex_);
         PauseLocked("runtime xrWaitFrame failed inside a generated cycle (" + std::to_string(result) + ")");
@@ -1056,7 +1116,7 @@ XrResult FrameGenPresenter::NextSlot(XrSession session, const FrameGenRuntimeCal
     }
     PaceSubmission(state.predictedDisplayTime, period);
     XrFrameBeginInfo begin_info{XR_TYPE_FRAME_BEGIN_INFO};
-    result = calls.begin(session, &begin_info);
+    result = RuntimeBegin(calls, session, &begin_info);
     if (XR_FAILED(result)) {
         std::scoped_lock lock(mutex_);
         PauseLocked("runtime xrBeginFrame failed inside a generated cycle (" + std::to_string(result) + ")");
@@ -1151,7 +1211,7 @@ XrResult FrameGenPresenter::RunCycle(XrSession session, const XrFrameEndInfo& in
             content.layerCount = 0;
             content.layers = nullptr;
         }
-        const XrResult result = calls.submit(session, &content);
+        const XrResult result = RuntimeEnd(calls, session, &content);
         std::scoped_lock lock(mutex_);
         NoteSubmissionLocked();
         if (XR_FAILED(result)) {
@@ -1677,6 +1737,121 @@ XrFrameEndInfo FrameGenPresenter::BuildFrame(FrameCopy& copy, const std::vector<
     return info;
 }
 
+XrResult FrameGenPresenter::RuntimeWait(const FrameGenRuntimeCalls& calls, XrSession session, const XrFrameWaitInfo* info,
+                                        XrFrameState* state) {
+    const XrResult result = calls.wait(session, info, state);
+    if (XR_SUCCEEDED(result)) {
+        std::scoped_lock lock(mutex_);
+        ++runtime_waits_;
+    }
+    return result;
+}
+
+XrResult FrameGenPresenter::RuntimeBegin(const FrameGenRuntimeCalls& calls, XrSession session,
+                                         const XrFrameBeginInfo* info) {
+    const XrResult result = calls.begin(session, info);
+    if (XR_SUCCEEDED(result)) {
+        std::scoped_lock lock(mutex_);
+        ++runtime_begins_;
+        // A begin over a frame still open discards that frame.
+        runtime_ends_ = std::max(runtime_ends_, runtime_begins_ - 1);
+        runtime_waits_ = std::max(runtime_waits_, runtime_begins_);
+    }
+    return result;
+}
+
+XrResult FrameGenPresenter::RuntimeEnd(const FrameGenRuntimeCalls& calls, XrSession session, const XrFrameEndInfo* info) {
+    const XrResult result = calls.submit(session, info);
+    {
+        std::scoped_lock lock(mutex_);
+        // Counted even when the runtime rejects the frame: it is over either way.
+        if (runtime_ends_ < runtime_begins_) {
+            ++runtime_ends_;
+        }
+    }
+    WakeSlots();
+    return result;
+}
+
+void FrameGenPresenter::NoteDisplayOffsetLocked(XrTime submitted, XrTime returned, XrDuration period) {
+    if (period <= 0 || returned <= 0 || submitted <= 0) {
+        return;
+    }
+    const double sample = static_cast<double>(submitted - returned) / static_cast<double>(period);
+    if (sample < -2.0 || sample > 3.0) {
+        return; // not a convention, just a stray time
+    }
+    display_offset_periods_ =
+        display_offset_samples_ == 0 ? sample : display_offset_periods_ * 0.9 + sample * 0.1;
+    if (display_offset_samples_ < 1000000) {
+        ++display_offset_samples_;
+    }
+    if (logger_ && display_offset_samples_ == 30 && std::abs(display_offset_periods_) >= 0.1) {
+        logger_->Info("Frame Generation: the game ends frames " + Number(display_offset_periods_, 2) +
+                      " periods after the display time it was given; engaged frames are told that much earlier so "
+                      "they are rendered for when they are shown.");
+    }
+}
+
+XrDuration FrameGenPresenter::DisplayOffsetLocked(XrDuration period) const {
+    if (display_offset_samples_ < 8 || std::abs(display_offset_periods_) < 0.1) {
+        return 0;
+    }
+    return static_cast<XrDuration>(std::clamp(display_offset_periods_, -1.0, 2.0) * static_cast<double>(period));
+}
+
+void FrameGenPresenter::StripSpace(FrameCopy& copy, XrSpace space) {
+    if (!copy.valid || !space) {
+        return;
+    }
+    std::vector<FrameCopy::Layer> kept;
+    kept.reserve(copy.layers.size());
+    std::optional<std::uint32_t> projection_index;
+    for (std::size_t i = 0; i < copy.layers.size(); ++i) {
+        FrameCopy::Layer& layer = copy.layers[i];
+        const bool primary = copy.has_projection && i == copy.projection_index;
+        XrSpace layer_space = XR_NULL_HANDLE;
+        switch (layer.type) {
+        case XR_TYPE_COMPOSITION_LAYER_PROJECTION:
+            layer_space = layer.projection.space;
+            break;
+        case XR_TYPE_COMPOSITION_LAYER_QUAD:
+            layer_space = layer.quad.space;
+            break;
+        case XR_TYPE_COMPOSITION_LAYER_CYLINDER_KHR:
+            layer_space = layer.cylinder.space;
+            break;
+        case XR_TYPE_COMPOSITION_LAYER_EQUIRECT_KHR:
+            layer_space = layer.equirect.space;
+            break;
+        case XR_TYPE_COMPOSITION_LAYER_EQUIRECT2_KHR:
+            layer_space = layer.equirect2.space;
+            break;
+        case XR_TYPE_COMPOSITION_LAYER_CUBE_KHR:
+            layer_space = layer.cube.space;
+            break;
+        default:
+            break;
+        }
+        if (layer_space == space) {
+            if (!primary) {
+                continue;
+            }
+            // Neither repeated nor reused for generated views, which share
+            // its space: the presenter thread waits for the next real frame.
+            copy.projection_stale = true;
+        }
+        if (primary) {
+            projection_index = static_cast<std::uint32_t>(kept.size());
+        }
+        kept.push_back(std::move(layer));
+    }
+    copy.layers = std::move(kept);
+    if (projection_index) {
+        copy.projection_index = *projection_index;
+    }
+}
+
 void FrameGenPresenter::StripSwapchain(FrameCopy& copy, XrSwapchain swapchain) {
     if (!copy.valid || !swapchain) {
         return;
@@ -1823,7 +1998,7 @@ void FrameGenPresenter::DropUnclaimedLocked() {
     // end is handed its slot or released without one.
     for (auto it = threaded_frames_.begin(); it != threaded_frames_.end();) {
         if (!it->claimed) {
-            dropped_frames_.push_back(it->predicted);
+            ++dropped_unended_;
             dropped_unbegun_ += it->begun ? 0 : 1;
             it = threaded_frames_.erase(it);
         } else {
@@ -1847,9 +2022,7 @@ void FrameGenPresenter::StopCompositorLocked(std::unique_lock<std::mutex>& lock)
     last_release_slot_.reset();
     generation_pending_ = generated_ready_ = false;
     newest_copy_ = {};
-    if (dropped_frames_.size() > 16) {
-        dropped_frames_.erase(dropped_frames_.begin(), dropped_frames_.end() - 16);
-    }
+    compositor_phase_ = "stopped";
     InvalidateContinuityLocked();
     WakeSlots();
 }
@@ -1922,7 +2095,14 @@ std::optional<XrResult> FrameGenPresenter::ThreadedWaitLocked(std::unique_lock<s
     const std::uint32_t multiplier = std::max(2u, EffectiveMultiplierLocked());
     std::uint64_t release = last_release_slot_ ? *last_release_slot_ + multiplier : slot_index_ + 1;
     release = std::max(release, slot_index_);
-    slot_cv_.wait(lock, [&] { return !compositor_running_ || slot_index_ >= release; });
+    while (!slot_cv_.wait_for(lock, std::chrono::seconds(2),
+                              [&] { return !compositor_running_ || slot_index_ >= release; })) {
+        if (logger_ && !logged_watchdog_) {
+            logged_watchdog_ = true;
+            logger_->Error(std::string("Frame Generation: the presenter thread has published no refresh for 2 s (it is ") +
+                           compositor_phase_ + ").");
+        }
+    }
     if (!compositor_running_) {
         return std::nullopt;
     }
@@ -1941,12 +2121,15 @@ std::optional<XrResult> FrameGenPresenter::ThreadedWaitLocked(std::unique_lock<s
     frame.multiplier = multiplier;
     frame.lead = static_cast<std::uint32_t>(slots);
     frame.target_slot = slot_index_ + slots;
-    frame.predicted = std::max(slot_time_ + period * static_cast<XrDuration>(slots), last_returned_time_ + 1);
+    frame.target_time = slot_time_ + period * static_cast<XrDuration>(slots);
+    frame.reported_period = period * static_cast<XrDuration>(multiplier);
+    frame.predicted =
+        std::max(frame.target_time - DisplayOffsetLocked(frame.reported_period), last_returned_time_ + 1);
     frame.wait_return = Clock::now();
     last_returned_time_ = frame.predicted;
     threaded_frames_.push_back(frame);
     state->predictedDisplayTime = frame.predicted;
-    state->predictedDisplayPeriod = period * static_cast<XrDuration>(multiplier);
+    state->predictedDisplayPeriod = frame.reported_period;
     state->shouldRender = slot_should_render_ ? XR_TRUE : XR_FALSE;
     full_rate_ = false;
     SetStateLocked(FrameGenState::kActive, "");
@@ -1962,6 +2145,11 @@ XrResult FrameGenPresenter::ThreadedEnd(XrSession session, const XrFrameEndInfo&
     const bool copied = CopyFrame(info, copy, unsupported);
     std::unique_lock lock(mutex_);
     end_thread_ = std::this_thread::get_id();
+    NoteDisplayOffsetLocked(info.displayTime, frame.predicted, frame.reported_period);
+    // The time the app rendered for: what it ends the frame with, unless that
+    // is far from anything it was told.
+    const XrTime content_time =
+        std::llabs(info.displayTime - frame.target_time) <= 2 * frame.reported_period ? info.displayTime : frame.target_time;
     const double latency = std::chrono::duration<double, std::milli>(entered - frame.wait_return).count();
     app_latency_ms_ = app_latency_ms_ <= 0.0 ? latency : app_latency_ms_ * 0.9 + latency * 0.1;
     app_work_ms_ += latency;
@@ -1986,15 +2174,24 @@ XrResult FrameGenPresenter::ThreadedEnd(XrSession session, const XrFrameEndInfo&
     // presenter thread waits for a due real frame until half a refresh after
     // the slot's wait would have returned.
     std::optional<double> slack_ms;
-    if (phase_wall_ != Clock::time_point{} && frame.predicted > phase_xr_) {
+    if (phase_wall_ != Clock::time_point{} && frame.target_time > phase_xr_) {
         const XrDuration period = std::max<XrDuration>(last_period_, 1);
-        const auto deadline = phase_wall_ + std::chrono::nanoseconds(frame.predicted - phase_xr_ + period / 2);
+        const auto deadline = phase_wall_ + std::chrono::nanoseconds(frame.target_time - phase_xr_ + period / 2);
         slack_ms = std::chrono::duration<double, std::milli>(deadline - entered).count();
     }
     // Ask for the first slot at or after the one this frame was rendered for.
     slot_request_ = SlotRequest{frame.id, frame.target_slot};
     WakeSlots();
-    slot_cv_.wait(lock, [&] { return !compositor_running_ || (slot_offer_ && slot_offer_->frame_id == frame.id); });
+    while (!slot_cv_.wait_for(lock, std::chrono::seconds(2), [&] {
+        return !compositor_running_ || (slot_offer_ && slot_offer_->frame_id == frame.id);
+    })) {
+        if (logger_ && !logged_watchdog_) {
+            logged_watchdog_ = true;
+            logger_->Error(std::string("Frame Generation: a real frame has waited 2 s for a slot (the presenter thread "
+                                       "is ") +
+                           compositor_phase_ + ").");
+        }
+    }
     if (!slot_offer_ || slot_offer_->frame_id != frame.id) {
         // The presenter thread stopped first; no runtime frame is left for
         // this one.
@@ -2009,7 +2206,7 @@ XrResult FrameGenPresenter::ThreadedEnd(XrSession session, const XrFrameEndInfo&
     lock.unlock();
 
     XrFrameBeginInfo begin_info{XR_TYPE_FRAME_BEGIN_INFO};
-    XrResult result = calls.begin(session, &begin_info);
+    XrResult result = RuntimeBegin(calls, session, &begin_info);
     if (XR_SUCCEEDED(result)) {
         XrFrameEndInfo real = info;
         real.displayTime = offer.time;
@@ -2017,7 +2214,7 @@ XrResult FrameGenPresenter::ThreadedEnd(XrSession session, const XrFrameEndInfo&
             real.layerCount = 0;
             real.layers = nullptr;
         }
-        result = calls.submit(session, &real);
+        result = RuntimeEnd(calls, session, &real);
     }
     const bool generate = XR_SUCCEEDED(result) && renderable && copied && offer.should_render && frame.multiplier >= 2;
 
@@ -2050,15 +2247,15 @@ XrResult FrameGenPresenter::ThreadedEnd(XrSession session, const XrFrameEndInfo&
     if (generate) {
         std::vector<float> fractions;
         for (std::uint32_t slot = 1; slot < frame.multiplier; ++slot) {
-            fractions.push_back(FrameGenFraction(FrameGenSynthesisMode::kExtrapolate, previous_time, frame.predicted,
+            fractions.push_back(FrameGenFraction(FrameGenSynthesisMode::kExtrapolate, previous_time, content_time,
                                                  offer.time + period * static_cast<XrDuration>(slot)));
         }
         PendingFrame pending;
-        pending.app_time = frame.predicted;
+        pending.app_time = content_time;
         pending.sequence = frame.id;
         std::vector<std::vector<XrCompositionLayerProjectionView>> sets;
         const bool ok = Generate(*projection, pending, fractions, sets);
-        RecordReal(*projection, frame.predicted, frame.id);
+        RecordReal(*projection, content_time, frame.id);
         lock.lock();
         if (compositor_running_) {
             extrapolated_.valid = ok;
@@ -2116,26 +2313,31 @@ void FrameGenPresenter::CompositorLoop() {
     const auto ns = [](XrDuration duration) { return std::chrono::nanoseconds(duration); };
     const auto forever = Clock::time_point::max();
     while (!compositor_stop_ && !(compositor_drain_ && threaded_frames_.empty())) {
-        // A frame the runtime waited for before the switch owns the runtime
-        // frame loop until it ends; no runtime wait before then.
-        if (!frames_.empty()) {
-            if (!CompositorWait(lock, Clock::now() + std::chrono::seconds(1),
-                                [&] { return compositor_stop_ || frames_.empty(); })) {
-                if (logger_) {
-                    logger_->Error("Frame Generation: a frame from before the presenter thread started never ended; "
-                                   "continuing without it.");
-                }
-                frames_.clear();
+        // A runtime frame the application began before the switch owns the
+        // runtime until it ends: no runtime wait while any frame is open.
+        compositor_phase_ = "waiting for the game's open runtime frame";
+        if (!CompositorWait(lock, Clock::now() + std::chrono::seconds(1), [&] {
+                return compositor_stop_ || (!RuntimeFrameOpenLocked() && !RuntimeWaitPendingLocked());
+            })) {
+            if (RuntimeWaitPendingLocked()) {
+                continue; // a waited frame was never begun: another wait would block in the runtime
             }
-            if (compositor_stop_) {
-                break;
+            if (logger_ && !logged_order_guard_) {
+                logged_order_guard_ = true;
+                logger_->Error("Frame Generation: a runtime frame begun before the presenter thread started never "
+                               "ended; continuing past it.");
             }
         }
+        if (compositor_stop_) {
+            break;
+        }
+        frames_.clear(); // anything left never reached the runtime
+        compositor_phase_ = "in the runtime's xrWaitFrame";
         lock.unlock();
         XrFrameWaitInfo wait_info{XR_TYPE_FRAME_WAIT_INFO};
         XrFrameState frame_state{XR_TYPE_FRAME_STATE};
         const auto called = Clock::now();
-        const XrResult waited = calls.wait(session, &wait_info, &frame_state);
+        const XrResult waited = RuntimeWait(calls, session, &wait_info, &frame_state);
         const auto returned = Clock::now();
         lock.lock();
         if (XR_FAILED(waited)) {
@@ -2163,7 +2365,15 @@ void FrameGenPresenter::CompositorLoop() {
             submit_at = std::max(submit_at, last_runtime_submit_ + ns(period * 17 / 20));
         }
         submit_at = std::min(submit_at, returned + ns(period * 6 / 5));
-        auto eligible = [&] { return slot_request_ && slot_request_->earliest_slot <= slot; };
+        compositor_phase_ = "choosing a frame for the refresh";
+        // The newest real frame cannot be repeated (a space or swapchain it
+        // used was destroyed) and nothing generated from it is ready: take
+        // the next real frame as soon as it ends instead.
+        auto unusable = [&] {
+            return !generated_ready_ &&
+                   (!newest_copy_.valid || (newest_copy_.has_projection && newest_copy_.projection_stale));
+        };
+        auto eligible = [&] { return slot_request_ && (slot_request_->earliest_slot <= slot || unusable()); };
         auto real_due = [&] {
             return std::any_of(threaded_frames_.begin(), threaded_frames_.end(),
                                [&](const ThreadedFrame& frame) { return frame.target_slot <= slot; });
@@ -2176,6 +2386,11 @@ void FrameGenPresenter::CompositorLoop() {
                 return compositor_stop_ || eligible() || (!real_due() && !generation_pending_);
             });
         }
+        if (!compositor_stop_ && !eligible() && unusable()) {
+            // The runtime keeps showing the last frame meanwhile.
+            CompositorWait(lock, submit_at + std::chrono::milliseconds(100),
+                           [&] { return compositor_stop_ || eligible(); });
+        }
         if (eligible()) {
             // Real frames keep the spacing generated ones get. The request
             // stays: only this thread or a stop after it clears it.
@@ -2187,6 +2402,7 @@ void FrameGenPresenter::CompositorLoop() {
             slot_offer_ = SlotOffer{slot_request_->frame_id, slot, slot_time_, slot_should_render_};
             slot_request_.reset();
             offer_done_ = false;
+            compositor_phase_ = "handing a refresh to the game's xrEndFrame";
             WakeSlots();
             CompositorWait(lock, forever, [&] { return offer_done_; });
             slot_offer_.reset();
@@ -2221,9 +2437,10 @@ void FrameGenPresenter::CompositorLoop() {
             end_info.layers = nullptr;
         }
         XrFrameBeginInfo begin_info{XR_TYPE_FRAME_BEGIN_INFO};
-        XrResult result = calls.begin(session, &begin_info);
+        compositor_phase_ = "submitting a generated frame";
+        XrResult result = RuntimeBegin(calls, session, &begin_info);
         if (XR_SUCCEEDED(result)) {
-            result = calls.submit(session, &end_info);
+            result = RuntimeEnd(calls, session, &end_info);
         }
         submit_lock.unlock();
         lock.lock();
@@ -2234,6 +2451,7 @@ void FrameGenPresenter::CompositorLoop() {
         }
     }
     compositor_running_ = false;
+    compositor_phase_ = "stopped";
     slot_request_.reset();
     WakeSlots();
     idle_cv_.notify_all();
