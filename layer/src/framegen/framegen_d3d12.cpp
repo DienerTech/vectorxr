@@ -1374,18 +1374,23 @@ class D3D12FrameGen final : public FrameGenGpu {
         if (!WaitIdle()) {
             return;
         }
-        for (DumpCopy& entry : dump) {
-            void* mapped = nullptr;
-            if (FAILED(entry.buffer->Map(0, nullptr, &mapped))) {
-                continue;
+        // Hundreds of megabytes per frame: written by a thread of their own,
+        // so the game only waits for this Execute to finish on the GPU.
+        std::thread([entries = std::move(dump), directory = dump_directory_]() mutable {
+            for (DumpCopy& entry : entries) {
+                void* mapped = nullptr;
+                if (FAILED(entry.buffer->Map(0, nullptr, &mapped))) {
+                    continue;
+                }
+                std::ofstream file(directory + "\\" + entry.name, std::ios::binary);
+                for (UINT row = 0; row < entry.rows && file; ++row) {
+                    file.write(static_cast<const char*>(mapped) + entry.footprint.Offset +
+                                   row * entry.footprint.Footprint.RowPitch,
+                               static_cast<std::streamsize>(entry.row_bytes));
+                }
+                entry.buffer->Unmap(0, nullptr);
             }
-            std::ofstream file(dump_directory_ + "\\" + entry.name, std::ios::binary);
-            for (UINT row = 0; row < entry.rows && file; ++row) {
-                file.write(static_cast<const char*>(mapped) + entry.footprint.Offset + row * entry.footprint.Footprint.RowPitch,
-                           static_cast<std::streamsize>(entry.row_bytes));
-            }
-            entry.buffer->Unmap(0, nullptr);
-        }
+        }).detach();
         std::ofstream meta(dump_directory_ + "\\frame.txt");
         meta.precision(9);
         meta << "mode " << static_cast<int>(tuning.mode) << "\nquality " << static_cast<int>(tuning.quality)
