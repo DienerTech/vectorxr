@@ -126,12 +126,15 @@ FrameGenPresenter::~FrameGenPresenter() {
     if (compositor_timer_) {
         CloseHandle(static_cast<HANDLE>(compositor_timer_));
     }
+    if (compositor_wake_) {
+        CloseHandle(static_cast<HANDLE>(compositor_wake_));
+    }
 }
 
 void FrameGenPresenter::Start(XrSession session, const void* binding_chain, const FrameGenSwapchainDispatch& dispatch,
                               Logger* logger, std::mutex* queue_mutex, GpuFactory factory) {
     Stop();
-    std::scoped_lock lock(mutex_);
+    std::scoped_lock lock(gpu_mutex_, mutex_);
     session_ = session;
     xr_ = dispatch;
     logger_ = logger;
@@ -175,18 +178,24 @@ void FrameGenPresenter::Stop() {
         return;
     }
     StopCompositorLocked(lock);
-    // From here no release thread captures into the backend.
+    // From here no release thread starts a capture.
     started_ = false;
-    // Finish outstanding GPU work before the runtime frees the output images
-    // it writes. Teardown runs between frames, so no EndFrame touches the
-    // outputs concurrently.
-    if (gpu_) {
-        gpu_->Reset();
-    }
     lock.unlock();
+    {
+        // Finish outstanding GPU work before the runtime frees the output
+        // images it writes. Teardown runs between frames, so no EndFrame
+        // touches the outputs concurrently.
+        std::scoped_lock gpu_lock(gpu_mutex_);
+        if (gpu_) {
+            gpu_->Reset();
+        }
+    }
     DestroyOutputs();
-    lock.lock();
-    gpu_.reset();
+    {
+        std::scoped_lock gpu_lock(gpu_mutex_);
+        lock.lock();
+        gpu_.reset();
+    }
     if (logger_ && (generated_ || repeated_ || failures_ || demoted_)) {
         logger_->Info("Frame Generation session summary: generated=" + std::to_string(generated_) + ", repeated=" +
                       std::to_string(repeated_) + ", failures=" + std::to_string(failures_) + ", demoted=" +
@@ -225,6 +234,9 @@ void FrameGenPresenter::Stop() {
     app_latency_ms_ = 0.0;
     passthrough_copy_ = {};
     threaded_late_ = 0;
+    lead_slots_ = lead_slack_streak_ = 0;
+    dropped_unbegun_ = 0;
+    gpu_ms_ = -1.0;
     inline_hold_until_.reset();
     last_cycle_started_late_ = false;
     app_frames_.clear();
@@ -306,6 +318,8 @@ void FrameGenPresenter::ResetFrames() {
     // The session is starting or stopping: the presenter thread must not
     // touch the runtime frame loop past this point.
     StopCompositorLocked(lock);
+    dropped_frames_.clear();
+    dropped_unbegun_ = 0;
     frames_.clear();
     healthy_streak_ = 0;
     InvalidateContinuityLocked();
@@ -328,7 +342,7 @@ void FrameGenPresenter::AbandonFrame(XrTime display_time) {
         InvalidateContinuityLocked();
     }
     idle_cv_.notify_all();
-    slot_cv_.notify_all();
+    WakeSlots();
 }
 
 XrSwapchainUsageFlags FrameGenPresenter::SourceUsage(const XrSwapchainCreateInfo& info) const {
@@ -350,17 +364,23 @@ void FrameGenPresenter::TrackSwapchain(XrSwapchain swapchain, std::int64_t forma
 }
 
 void FrameGenPresenter::ForgetSwapchain(XrSwapchain swapchain) {
-    std::scoped_lock lock(mutex_);
-    swapchains_.erase(swapchain);
+    // Holding submit_mutex_ keeps the presenter thread from submitting the
+    // swapchain while it goes; afterwards no copy refers to it.
+    std::scoped_lock submit(submit_mutex_);
+    {
+        std::scoped_lock lock(mutex_);
+        swapchains_.erase(swapchain);
+        capture_targets_.erase(std::remove_if(capture_targets_.begin(), capture_targets_.end(),
+                                              [&](const CaptureTarget& target) { return target.swapchain == swapchain; }),
+                               capture_targets_.end());
+        StripSwapchain(newest_copy_, swapchain);
+        StripSwapchain(passthrough_copy_, swapchain);
+    }
+    std::scoped_lock gpu_lock(gpu_mutex_);
     if (gpu_) {
         // A recent submission may still read or write this swapchain's
         // images; destroys are rare, so always let it finish first.
         gpu_->WaitIdle();
-    }
-    capture_targets_.erase(std::remove_if(capture_targets_.begin(), capture_targets_.end(),
-                                          [&](const CaptureTarget& target) { return target.swapchain == swapchain; }),
-                           capture_targets_.end());
-    if (gpu_) {
         gpu_->Forget(swapchain);
     }
 }
@@ -399,41 +419,64 @@ void FrameGenPresenter::CaptureOnRelease(XrSwapchain swapchain, std::uint32_t im
             return;
         }
     }
-    // Lock order everywhere: queue, then presenter.
+    // Lock order everywhere: submit, queue, GPU, presenter. The copy may wait
+    // on a fence, so it runs without the presenter lock.
     std::unique_lock<std::mutex> queue_lock;
     if (queue_mutex_) {
         queue_lock = std::unique_lock<std::mutex>(*queue_mutex_);
     }
-    std::scoped_lock lock(mutex_);
-    if (!capturing()) {
-        return;
-    }
-    const auto record = swapchains_.find(swapchain);
-    for (const CaptureTarget& target : capture_targets_) {
-        if (target.swapchain != swapchain) {
-            continue;
-        }
-        const auto kind = OutputKindLocked(target.view, record->second.format);
-        if (!kind) {
-            continue;
-        }
-        FrameGenImage source{swapchain, image_index, target.array_index, target.rect, record->second.format};
+    std::scoped_lock gpu_lock(gpu_mutex_);
+    struct Job {
+        std::size_t view{0};
+        FrameGenImage source;
         FrameGenViewRequest request;
-        request.extent = {static_cast<std::uint32_t>(target.rect.extent.width),
-                          static_cast<std::uint32_t>(target.rect.extent.height)};
-        request.output = *kind;
+    };
+    std::vector<Job> jobs;
+    FrameGenFlowQuality quality;
+    {
+        std::scoped_lock lock(mutex_);
+        if (!capturing()) {
+            return;
+        }
+        quality = settings_.flow_quality;
+        const auto record = swapchains_.find(swapchain);
+        for (const CaptureTarget& target : capture_targets_) {
+            if (target.swapchain != swapchain) {
+                continue;
+            }
+            const auto kind = OutputKindLocked(target.view, record->second.format);
+            if (!kind) {
+                continue;
+            }
+            Job job;
+            job.view = target.view;
+            job.source = {swapchain, image_index, target.array_index, target.rect, record->second.format};
+            job.request.extent = {static_cast<std::uint32_t>(target.rect.extent.width),
+                                  static_cast<std::uint32_t>(target.rect.extent.height)};
+            job.request.output = *kind;
+            jobs.push_back(job);
+        }
+    }
+    std::uint64_t captured = 0;
+    std::string failure;
+    for (const Job& job : jobs) {
         std::string error;
         if (!gpu_->Track(swapchain, xr_.images, error) ||
-            !gpu_->Capture(target.view, source, request, settings_.flow_quality, error)) {
+            !gpu_->Capture(job.view, job.source, job.request, quality, error)) {
             // Generation then copies the image itself. An empty error means
             // the view is not set up for this region yet; nothing to report.
-            if (logger_ && !error.empty() && !logged_capture_failure_) {
-                logged_capture_failure_ = true;
-                logger_->Error("Frame Generation could not capture a released image: " + error);
+            if (failure.empty()) {
+                failure = error;
             }
             continue;
         }
-        ++captured_;
+        ++captured;
+    }
+    std::scoped_lock lock(mutex_);
+    captured_ += captured;
+    if (logger_ && !failure.empty() && !logged_capture_failure_) {
+        logged_capture_failure_ = true;
+        logger_->Error("Frame Generation could not capture a released image: " + failure);
     }
 }
 
@@ -453,6 +496,11 @@ bool FrameGenPresenter::RunnableLocked() const {
 
 bool FrameGenPresenter::WantsEngagementLocked() const {
     return RunnableLocked() && EffectiveMultiplierLocked() >= 2;
+}
+
+bool FrameGenPresenter::StayThreadedLocked() const {
+    return started_ && gpu_ && user_enabled_ && configured_enabled_ && state_ != FrameGenState::kPaused &&
+           state_ != FrameGenState::kUnavailable && EffectiveMultiplierLocked() >= 2;
 }
 
 bool FrameGenPresenter::ThreadedEligibleLocked() const {
@@ -644,7 +692,14 @@ XrResult FrameGenPresenter::WaitFrame(XrSession session, const XrFrameWaitInfo* 
         const bool inline_engaged = std::any_of(frames_.begin(), frames_.end(), [](const PendingFrame& frame) {
             return frame.engaged && !frame.demoted;
         });
-        if (WantsEngagementLocked() && ThreadedEligibleLocked() && !inline_engaged) {
+        // A thread that waits again before ending its own frame would wait
+        // for itself while the presenter thread waits for that frame to end:
+        // such apps stay inline.
+        const bool own_frame_open = std::this_thread::get_id() == end_thread_ && !frames_.empty();
+        const bool threaded =
+            ThreadedEligibleLocked() &&
+            (compositor_running_ ? StayThreadedLocked() : WantsEngagementLocked() && !inline_engaged && !own_frame_open);
+        if (threaded) {
             if (const auto result = ThreadedWaitLocked(lock, state, calls)) {
                 return *result;
             }
@@ -753,6 +808,12 @@ XrResult FrameGenPresenter::WaitFrame(XrSession session, const XrFrameWaitInfo* 
 XrResult FrameGenPresenter::BeginFrame(XrSession session, const XrFrameBeginInfo* info, const FrameGenRuntimeCalls& calls) {
     {
         std::scoped_lock lock(mutex_);
+        // A frame dropped when the presenter thread stopped has no runtime
+        // frame; it was waited before anything still open, so begins first.
+        if (dropped_unbegun_ > 0) {
+            --dropped_unbegun_;
+            return XR_SUCCESS;
+        }
         // Frames begin in the order they were waited; one the runtime waited
         // for (inline) begins there, one the presenter thread presents only
         // here.
@@ -768,10 +829,14 @@ XrResult FrameGenPresenter::BeginFrame(XrSession session, const XrFrameBeginInfo
                 slot_cv_.notify_all();
                 return XR_SUCCESS;
             }
+            if (compositor_running_) {
+                // The presenter thread owns the runtime frame loop.
+                return XR_SUCCESS;
+            }
         }
     }
     const XrResult result = calls.begin(session, info);
-    slot_cv_.notify_all();
+    WakeSlots();
     return result;
 }
 
@@ -803,6 +868,16 @@ XrResult FrameGenPresenter::EndFrame(XrSession session, const XrFrameEndInfo* in
                     it->claimed = true;
                     threaded = *it;
                 }
+            }
+            if (!threaded && !inline_frame && frames_.empty() && compositor_running_) {
+                // The presenter thread owns the runtime frame loop and holds
+                // no runtime frame for this one.
+                if (logger_ && !logged_swallowed_) {
+                    logged_swallowed_ = true;
+                    logger_->Error("Frame Generation: an application frame matched no waited frame while presenting "
+                                   "from its own thread; it was not shown.");
+                }
+                return XR_SUCCESS;
             }
         }
         if (threaded) {
@@ -851,6 +926,11 @@ XrResult FrameGenPresenter::EndFrame(XrSession session, const XrFrameEndInfo* in
             std::scoped_lock lock(mutex_);
             if (copied) {
                 passthrough_copy_ = std::move(copy);
+                if (compositor_running_) {
+                    // The presenter thread is about to start: its first
+                    // slots show this frame, not the one before.
+                    newest_copy_ = passthrough_copy_;
+                }
             } else if (!threaded_disabled_) {
                 threaded_disabled_ = true;
                 if (logger_) {
@@ -896,8 +976,7 @@ XrResult FrameGenPresenter::EndFrame(XrSession session, const XrFrameEndInfo* in
                           ", threaded=" + std::to_string(compositor_running_) +
                           ", generated=" + std::to_string(generated_) + ", repeated=" + std::to_string(repeated_) +
                           ", failures=" + std::to_string(failures_) + ", demoted=" + std::to_string(demoted_) +
-                          ", captured=" + std::to_string(captured_) + ", gpuMs=" +
-                          Number(gpu_ ? gpu_->LastGpuMilliseconds() : -1.0, 2) + ".");
+                          ", captured=" + std::to_string(captured_) + ", gpuMs=" + Number(gpu_ms_, 2) + ".");
             app_work_ms_ = 0.0;
             app_work_frames_ = 0;
             cycles_ = 0;
@@ -905,6 +984,7 @@ XrResult FrameGenPresenter::EndFrame(XrSession session, const XrFrameEndInfo* in
         }
     }
     idle_cv_.notify_all();
+    WakeSlots(); // the presenter thread waits for inline frames to end
     return result;
 }
 
@@ -1202,12 +1282,18 @@ bool FrameGenPresenter::Generate(const XrCompositionLayerProjection& projection,
 
     FrameGenExecuteResult executed;
     bool ok = true;
+    double gpu_ms = -1.0;
     {
         // Vulkan queues need external synchronization with the runtime's own
-        // submissions on the session queue. Lock order: queue, then presenter.
+        // submissions on the session queue. Lock order: queue, GPU,
+        // presenter; the backend may wait on fences, so not under mutex_.
         std::unique_lock<std::mutex> queue_lock;
         if (queue_mutex_) queue_lock = std::unique_lock<std::mutex>(*queue_mutex_);
-        std::scoped_lock lock(mutex_);
+        std::scoped_lock gpu_lock(gpu_mutex_);
+        if (!gpu_) {
+            ok = false;
+            error = "the session ended";
+        }
         for (std::size_t i = 0; i < submissions.size() && ok; ++i) {
             ok = gpu_->Track(submissions[i].source.swapchain, xr_.images, error);
             for (std::size_t set = 0; set < count && ok; ++set) {
@@ -1221,6 +1307,9 @@ bool FrameGenPresenter::Generate(const XrCompositionLayerProjection& projection,
             }
         }
         ok = ok && gpu_->Execute(submissions, tuning, executed, error);
+        if (gpu_) {
+            gpu_ms = gpu_->LastGpuMilliseconds();
+        }
     }
     // Every output here was acquired and waited; release them all so the
     // next frame starts clean. Unwritten images are not submitted this frame.
@@ -1231,6 +1320,7 @@ bool FrameGenPresenter::Generate(const XrCompositionLayerProjection& projection,
         NoteFailureLocked(error);
         return false;
     }
+    gpu_ms_ = gpu_ms;
     consecutive_failures_ = 0;
     const bool synthesized =
         std::any_of(executed.synthesized.begin(), executed.synthesized.end(), [](bool value) { return value; });
@@ -1450,6 +1540,7 @@ void FrameGenPresenter::DestroyOutputs() {
         for (Output& output : set) {
             if (output.swapchain) {
                 ForgetSwapchain(output.swapchain);
+                std::scoped_lock submit(submit_mutex_);
                 if (xr_.destroy) xr_.destroy(output.swapchain);
             }
         }
@@ -1542,6 +1633,9 @@ XrFrameEndInfo FrameGenPresenter::BuildFrame(FrameCopy& copy, const std::vector<
         const void* header = nullptr;
         switch (layer.type) {
         case XR_TYPE_COMPOSITION_LAYER_PROJECTION:
+            if (copy.has_projection && i == copy.projection_index && !generated && copy.projection_stale) {
+                continue;
+            }
             if (generated && copy.has_projection && i == copy.projection_index) {
                 layer.views = *generated;
                 layer.depth.resize(layer.views.size());
@@ -1583,6 +1677,101 @@ XrFrameEndInfo FrameGenPresenter::BuildFrame(FrameCopy& copy, const std::vector<
     return info;
 }
 
+void FrameGenPresenter::StripSwapchain(FrameCopy& copy, XrSwapchain swapchain) {
+    if (!copy.valid || !swapchain) {
+        return;
+    }
+    std::vector<FrameCopy::Layer> kept;
+    kept.reserve(copy.layers.size());
+    std::optional<std::uint32_t> projection_index;
+    for (std::size_t i = 0; i < copy.layers.size(); ++i) {
+        FrameCopy::Layer& layer = copy.layers[i];
+        const bool primary = copy.has_projection && i == copy.projection_index;
+        bool uses = false;
+        switch (layer.type) {
+        case XR_TYPE_COMPOSITION_LAYER_PROJECTION:
+            for (std::size_t view = 0; view < layer.views.size(); ++view) {
+                if (layer.has_depth[view] && layer.depth[view].subImage.swapchain == swapchain) {
+                    layer.has_depth[view] = 0;
+                }
+                if (layer.views[view].subImage.swapchain == swapchain) {
+                    // The primary projection stays for generated views,
+                    // which replace its images; it is never repeated.
+                    if (primary) {
+                        copy.projection_stale = true;
+                    } else {
+                        uses = true;
+                    }
+                }
+            }
+            break;
+        case XR_TYPE_COMPOSITION_LAYER_QUAD:
+            uses = layer.quad.subImage.swapchain == swapchain;
+            break;
+        case XR_TYPE_COMPOSITION_LAYER_CYLINDER_KHR:
+            uses = layer.cylinder.subImage.swapchain == swapchain;
+            break;
+        case XR_TYPE_COMPOSITION_LAYER_EQUIRECT_KHR:
+            uses = layer.equirect.subImage.swapchain == swapchain;
+            break;
+        case XR_TYPE_COMPOSITION_LAYER_EQUIRECT2_KHR:
+            uses = layer.equirect2.subImage.swapchain == swapchain;
+            break;
+        case XR_TYPE_COMPOSITION_LAYER_CUBE_KHR:
+            uses = layer.cube.swapchain == swapchain;
+            break;
+        default:
+            break;
+        }
+        if (uses) {
+            continue;
+        }
+        if (primary) {
+            projection_index = static_cast<std::uint32_t>(kept.size());
+        }
+        kept.push_back(std::move(layer));
+    }
+    copy.layers = std::move(kept);
+    if (projection_index) {
+        copy.projection_index = *projection_index;
+    }
+}
+
+void FrameGenPresenter::WakeSlots() {
+    slot_cv_.notify_all();
+    if (compositor_wake_) {
+        SetEvent(static_cast<HANDLE>(compositor_wake_));
+    }
+}
+
+bool FrameGenPresenter::CompositorWait(std::unique_lock<std::mutex>& lock, Clock::time_point deadline,
+                                       const std::function<bool()>& ready) {
+    for (;;) {
+        if (ready()) {
+            return true;
+        }
+        const auto now = Clock::now();
+        if (now >= deadline) {
+            return false;
+        }
+        const auto until = std::min(deadline, now + std::chrono::milliseconds(100));
+        if (compositor_wake_ && compositor_timer_) {
+            LARGE_INTEGER due{};
+            due.QuadPart =
+                -std::max<std::int64_t>(1, std::chrono::duration_cast<std::chrono::nanoseconds>(until - now).count() / 100);
+            HANDLE handles[] = {static_cast<HANDLE>(compositor_wake_), static_cast<HANDLE>(compositor_timer_)};
+            const bool armed = SetWaitableTimer(handles[1], &due, 0, nullptr, nullptr, FALSE) != 0;
+            lock.unlock();
+            // The wake event is set after every change the presenter thread
+            // waits for, so nothing is missed between the check and here.
+            WaitForMultipleObjects(armed ? 2 : 1, handles, FALSE, armed ? 200 : 2);
+            lock.lock();
+        } else {
+            slot_cv_.wait_until(lock, until);
+        }
+    }
+}
+
 void FrameGenPresenter::StartCompositorLocked(const FrameGenRuntimeCalls& calls) {
     compositor_calls_ = calls;
     compositor_stop_ = compositor_drain_ = false;
@@ -1596,6 +1785,9 @@ void FrameGenPresenter::StartCompositorLocked(const FrameGenRuntimeCalls& calls)
     InvalidateContinuityLocked();
     if (!compositor_timer_) {
         compositor_timer_ = CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
+    }
+    if (!compositor_wake_) {
+        compositor_wake_ = CreateEventW(nullptr, FALSE, FALSE, nullptr);
     }
     compositor_running_ = true;
     try {
@@ -1626,20 +1818,27 @@ void FrameGenPresenter::JoinCompositorLocked(std::unique_lock<std::mutex>& lock)
     lock.lock();
 }
 
+void FrameGenPresenter::DropUnclaimedLocked() {
+    // Frames whose end has not started lose their slot; one already in its
+    // end is handed its slot or released without one.
+    for (auto it = threaded_frames_.begin(); it != threaded_frames_.end();) {
+        if (!it->claimed) {
+            dropped_frames_.push_back(it->predicted);
+            dropped_unbegun_ += it->begun ? 0 : 1;
+            it = threaded_frames_.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
 void FrameGenPresenter::StopCompositorLocked(std::unique_lock<std::mutex>& lock) {
+    // Also after the thread stopped itself: its frames would otherwise stay
+    // in flight forever and hold every later wait.
+    DropUnclaimedLocked();
     if (compositor_running_) {
         compositor_stop_ = true;
-        // Frames whose end has not started lose their slot; one already in
-        // its end is handed its slot or released without one.
-        for (auto it = threaded_frames_.begin(); it != threaded_frames_.end();) {
-            if (!it->claimed) {
-                dropped_frames_.push_back(it->predicted);
-                it = threaded_frames_.erase(it);
-            } else {
-                ++it;
-            }
-        }
-        slot_cv_.notify_all();
+        WakeSlots();
         slot_cv_.wait(lock, [&] { return !compositor_running_; });
     }
     JoinCompositorLocked(lock);
@@ -1652,7 +1851,7 @@ void FrameGenPresenter::StopCompositorLocked(std::unique_lock<std::mutex>& lock)
         dropped_frames_.erase(dropped_frames_.begin(), dropped_frames_.end() - 16);
     }
     InvalidateContinuityLocked();
-    slot_cv_.notify_all();
+    WakeSlots();
 }
 
 void FrameGenPresenter::ExitThreadedLocked(std::unique_lock<std::mutex>& lock) {
@@ -1660,16 +1859,9 @@ void FrameGenPresenter::ExitThreadedLocked(std::unique_lock<std::mutex>& lock) {
     // This thread also ends frames: one it has not started ending would only
     // end after this wait returns, so it gives up its slot.
     if (std::this_thread::get_id() == end_thread_) {
-        for (auto it = threaded_frames_.begin(); it != threaded_frames_.end();) {
-            if (!it->claimed) {
-                dropped_frames_.push_back(it->predicted);
-                it = threaded_frames_.erase(it);
-            } else {
-                ++it;
-            }
-        }
+        DropUnclaimedLocked();
     }
-    slot_cv_.notify_all();
+    WakeSlots();
     if (!slot_cv_.wait_for(lock, kThreadedDrain, [&] { return !compositor_running_; }) && logger_) {
         logger_->Error("Frame Generation: frames in flight did not end within 2 s; stopping the presenter thread.");
     }
@@ -1679,16 +1871,39 @@ void FrameGenPresenter::ExitThreadedLocked(std::unique_lock<std::mutex>& lock) {
     }
 }
 
+void FrameGenPresenter::UpdateLeadLocked(bool late, std::optional<double> slack_ms, const ThreadedFrame& frame) {
+    const bool current = frame.lead >= lead_slots_;
+    if (late) {
+        if (current) {
+            lead_slots_ = std::min(lead_slots_ + 1, 4 * frame.multiplier);
+        }
+        lead_slack_streak_ = 0;
+        return;
+    }
+    const double period_ms = static_cast<double>(std::max<XrDuration>(last_period_, 1)) / 1e6;
+    if (current && slack_ms && *slack_ms > period_ms * 1.1) {
+        // It could have arrived a refresh later and still made its slot.
+        if (++lead_slack_streak_ >= 4 && lead_slots_ > 1) {
+            --lead_slots_;
+            lead_slack_streak_ = 0;
+        }
+    } else if (current) {
+        lead_slack_streak_ = 0;
+    }
+}
+
 std::optional<XrResult> FrameGenPresenter::ThreadedWaitLocked(std::unique_lock<std::mutex>& lock, XrFrameState* state,
                                                             const FrameGenRuntimeCalls& calls) {
     if (!compositor_running_) {
         JoinCompositorLocked(lock);
-        if (!WantsEngagementLocked() || !ThreadedEligibleLocked()) {
-            return std::nullopt;
-        }
-        StartCompositorLocked(calls);
         if (!compositor_running_) {
-            return std::nullopt;
+            if (!WantsEngagementLocked() || !ThreadedEligibleLocked()) {
+                return std::nullopt;
+            }
+            StartCompositorLocked(calls);
+            if (!compositor_running_) {
+                return std::nullopt;
+            }
         }
     }
     // Like a runtime: a wait returns only once the previous frame has begun,
@@ -1714,16 +1929,17 @@ std::optional<XrResult> FrameGenPresenter::ThreadedWaitLocked(std::unique_lock<s
     last_release_slot_ = slot_index_;
     const XrDuration period = slot_period_ > 0 ? slot_period_ : std::max<XrDuration>(last_period_, 1);
     const double period_ms = static_cast<double>(period) / 1e6;
-    if (app_latency_ms_ <= 0.0) {
-        app_latency_ms_ = period_ms * multiplier;
+    if (lead_slots_ == 0) {
+        // Until measured, assume the frame takes one application frame.
+        const double latency = app_latency_ms_ > 0.0 ? app_latency_ms_ : period_ms * multiplier;
+        lead_slots_ = static_cast<std::uint32_t>(std::clamp(std::ceil((latency + 1.0) / period_ms), 1.0, 4.0 * multiplier));
     }
-    // Predict the slot the frame will really reach: the application's own
-    // time from wait to end, measured, rounded up to whole refreshes.
-    const auto slots = static_cast<std::uint64_t>(
-        std::clamp(std::ceil((app_latency_ms_ + 1.0) / period_ms), 1.0, 4.0 * multiplier));
+    // Predict the slot the frame will really reach.
+    const std::uint64_t slots = std::clamp<std::uint64_t>(lead_slots_, 1, 4 * multiplier);
     ThreadedFrame frame;
     frame.id = ++threaded_id_;
     frame.multiplier = multiplier;
+    frame.lead = static_cast<std::uint32_t>(slots);
     frame.target_slot = slot_index_ + slots;
     frame.predicted = std::max(slot_time_ + period * static_cast<XrDuration>(slots), last_returned_time_ + 1);
     frame.wait_return = Clock::now();
@@ -1766,9 +1982,18 @@ XrResult FrameGenPresenter::ThreadedEnd(XrSession session, const XrFrameEndInfo&
                                               [&](const ThreadedFrame& pending) { return pending.id == frame.id; }),
                                threaded_frames_.end());
     };
+    // How much later it could have arrived and still made its slot: the
+    // presenter thread waits for a due real frame until half a refresh after
+    // the slot's wait would have returned.
+    std::optional<double> slack_ms;
+    if (phase_wall_ != Clock::time_point{} && frame.predicted > phase_xr_) {
+        const XrDuration period = std::max<XrDuration>(last_period_, 1);
+        const auto deadline = phase_wall_ + std::chrono::nanoseconds(frame.predicted - phase_xr_ + period / 2);
+        slack_ms = std::chrono::duration<double, std::milli>(deadline - entered).count();
+    }
     // Ask for the first slot at or after the one this frame was rendered for.
     slot_request_ = SlotRequest{frame.id, frame.target_slot};
-    slot_cv_.notify_all();
+    WakeSlots();
     slot_cv_.wait(lock, [&] { return !compositor_running_ || (slot_offer_ && slot_offer_->frame_id == frame.id); });
     if (!slot_offer_ || slot_offer_->frame_id != frame.id) {
         // The presenter thread stopped first; no runtime frame is left for
@@ -1777,8 +2002,7 @@ XrResult FrameGenPresenter::ThreadedEnd(XrSession session, const XrFrameEndInfo&
             slot_request_.reset();
         }
         erase_frame();
-        healthy_streak_ = 0;
-        slot_cv_.notify_all();
+        WakeSlots();
         return XR_SUCCESS;
     }
     const SlotOffer offer = *slot_offer_;
@@ -1805,11 +2029,15 @@ XrResult FrameGenPresenter::ThreadedEnd(XrSession session, const XrFrameEndInfo&
     generated_ready_ = false;
     generation_pending_ = generate;
     next_generated_set_ = 0;
-    threaded_late_ += offer.slot > frame.target_slot ? 1 : 0;
+    const bool late = offer.slot > frame.target_slot;
+    threaded_late_ += late ? 1 : 0;
+    UpdateLeadLocked(late, slack_ms, frame);
     erase_frame();
     offer_done_ = true;
-    slot_cv_.notify_all();
-    healthy_streak_ = renderable && offer.should_render ? healthy_streak_ + 1 : 0;
+    WakeSlots();
+    if (renderable && offer.should_render) {
+        ++healthy_streak_;
+    }
     if (XR_FAILED(result)) {
         PauseLocked("runtime rejected the real frame (" + std::to_string(result) + ")");
         InvalidateContinuityLocked();
@@ -1832,13 +2060,19 @@ XrResult FrameGenPresenter::ThreadedEnd(XrSession session, const XrFrameEndInfo&
         const bool ok = Generate(*projection, pending, fractions, sets);
         RecordReal(*projection, frame.predicted, frame.id);
         lock.lock();
-        extrapolated_.valid = ok;
-        extrapolated_.sets = std::move(sets);
-        extrapolated_.space = projection->space;
-        extrapolated_.flags = projection->layerFlags;
-        generated_ready_ = ok;
+        if (compositor_running_) {
+            extrapolated_.valid = ok;
+            extrapolated_.sets = std::move(sets);
+            extrapolated_.space = projection->space;
+            extrapolated_.flags = projection->layerFlags;
+            generated_ready_ = ok;
+        } else {
+            // The thread stopped meanwhile: nothing it generated belongs to
+            // what comes next.
+            InvalidateContinuityLocked();
+        }
         generation_pending_ = false;
-        slot_cv_.notify_all();
+        WakeSlots();
     } else {
         lock.lock();
         if (!renderable) {
@@ -1857,11 +2091,11 @@ XrResult FrameGenPresenter::ThreadedEnd(XrSession session, const XrFrameEndInfo&
                       (settings_.multiplier == FrameGenMultiplier::kAuto ? " (auto)" : "") + ", threaded=1, appFps=" +
                       Number(RatePerSecond(app_frames_, entered), 1) + ", outputFps=" +
                       Number(RatePerSecond(submissions_, entered), 1) + ", appLatencyMs=" + Number(app_latency_ms_, 1) +
+                      ", leadSlots=" + std::to_string(lead_slots_) +
                       ", appWorkMs=" + Number(app_work_frames_ ? app_work_ms_ / app_work_frames_ : 0.0, 1) +
                       ", lateReal=" + std::to_string(threaded_late_) + ", generated=" + std::to_string(generated_) +
                       ", repeated=" + std::to_string(repeated_) + ", failures=" + std::to_string(failures_) +
-                      ", captured=" + std::to_string(captured_) + ", gpuMs=" +
-                      Number(gpu_ ? gpu_->LastGpuMilliseconds() : -1.0, 2) + ".");
+                      ", captured=" + std::to_string(captured_) + ", gpuMs=" + Number(gpu_ms_, 2) + ".");
         app_work_ms_ = 0.0;
         app_work_frames_ = 0;
         threaded_late_ = 0;
@@ -1880,7 +2114,23 @@ void FrameGenPresenter::CompositorLoop() {
     void* const timer = compositor_timer_;
     std::vector<const XrCompositionLayerBaseHeader*> pointers;
     const auto ns = [](XrDuration duration) { return std::chrono::nanoseconds(duration); };
+    const auto forever = Clock::time_point::max();
     while (!compositor_stop_ && !(compositor_drain_ && threaded_frames_.empty())) {
+        // A frame the runtime waited for before the switch owns the runtime
+        // frame loop until it ends; no runtime wait before then.
+        if (!frames_.empty()) {
+            if (!CompositorWait(lock, Clock::now() + std::chrono::seconds(1),
+                                [&] { return compositor_stop_ || frames_.empty(); })) {
+                if (logger_) {
+                    logger_->Error("Frame Generation: a frame from before the presenter thread started never ended; "
+                                   "continuing without it.");
+                }
+                frames_.clear();
+            }
+            if (compositor_stop_) {
+                break;
+            }
+        }
         lock.unlock();
         XrFrameWaitInfo wait_info{XR_TYPE_FRAME_WAIT_INFO};
         XrFrameState frame_state{XR_TYPE_FRAME_STATE};
@@ -1918,26 +2168,27 @@ void FrameGenPresenter::CompositorLoop() {
             return std::any_of(threaded_frames_.begin(), threaded_frames_.end(),
                                [&](const ThreadedFrame& frame) { return frame.target_slot <= slot; });
         };
-        slot_cv_.wait_until(lock, submit_at, [&] { return compositor_stop_ || eligible(); });
+        CompositorWait(lock, submit_at, [&] { return compositor_stop_ || eligible(); });
         if (!compositor_stop_ && !eligible() && (real_due() || generation_pending_)) {
             // A real frame due in this slot, or the frames being generated
             // from the newest one, get half a refresh more.
-            slot_cv_.wait_until(lock, submit_at + ns(period / 2), [&] {
+            CompositorWait(lock, submit_at + ns(period / 2), [&] {
                 return compositor_stop_ || eligible() || (!real_due() && !generation_pending_);
             });
         }
-        // Frames the runtime waited for before the switch still own their
-        // runtime frame: no begin until they ended.
-        if (!frames_.empty() && !slot_cv_.wait_for(lock, std::chrono::milliseconds(500), [&] { return frames_.empty(); })) {
-            frames_.clear(); // abandoned without an end
-        }
         if (eligible()) {
-            // Hand this slot to the application's end.
+            // Real frames keep the spacing generated ones get. The request
+            // stays: only this thread or a stop after it clears it.
+            if (Clock::now() < submit_at) {
+                lock.unlock();
+                SleepUntil(timer, submit_at);
+                lock.lock();
+            }
             slot_offer_ = SlotOffer{slot_request_->frame_id, slot, slot_time_, slot_should_render_};
             slot_request_.reset();
             offer_done_ = false;
-            slot_cv_.notify_all();
-            slot_cv_.wait(lock, [&] { return offer_done_; });
+            WakeSlots();
+            CompositorWait(lock, forever, [&] { return offer_done_; });
             slot_offer_.reset();
             continue;
         }
@@ -1984,7 +2235,7 @@ void FrameGenPresenter::CompositorLoop() {
     }
     compositor_running_ = false;
     slot_request_.reset();
-    slot_cv_.notify_all();
+    WakeSlots();
     idle_cv_.notify_all();
 }
 
@@ -1997,7 +2248,7 @@ FrameGenStatus FrameGenPresenter::Status() const {
     const auto now = Clock::now();
     status.app_fps = RatePerSecond(app_frames_, now);
     status.output_fps = RatePerSecond(submissions_, now);
-    status.gpu_ms = gpu_ ? gpu_->LastGpuMilliseconds() : -1.0;
+    status.gpu_ms = gpu_ms_;
     status.generated = generated_;
     status.repeated = repeated_;
     status.failures = failures_;

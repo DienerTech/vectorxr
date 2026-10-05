@@ -237,6 +237,7 @@ class FrameGenPresenter {
         };
         bool valid{false};
         bool has_projection{false};
+        bool projection_stale{false}; // its swapchain was destroyed: never repeat it
         std::uint32_t projection_index{0};
         XrEnvironmentBlendMode blend_mode{XR_ENVIRONMENT_BLEND_MODE_OPAQUE};
         std::vector<Layer> layers;
@@ -248,6 +249,7 @@ class FrameGenPresenter {
         XrTime predicted{0};           // the display time the app rendered for
         std::uint64_t target_slot{0};  // the slot that display time belongs to
         std::uint32_t multiplier{2};
+        std::uint32_t lead{0};         // refreshes between its release and target_slot
         bool begun{false};
         bool claimed{false}; // its end has started
         std::chrono::steady_clock::time_point wait_return{};
@@ -312,6 +314,19 @@ class FrameGenPresenter {
 
     // Threaded presentation.
     bool ThreadedEligibleLocked() const;
+    // Running threaded presentation continues while this holds; unlike
+    // engagement it does not need a fresh run of steady frames.
+    bool StayThreadedLocked() const;
+    void DropUnclaimedLocked();
+    void UpdateLeadLocked(bool late, std::optional<double> slack_ms, const ThreadedFrame& frame);
+    // Wakes the presenter thread and app threads waiting on slots.
+    void WakeSlots();
+    // Presenter thread only: waits until `ready` or the deadline with the
+    // high-resolution timer (condition variables round to the system tick).
+    bool CompositorWait(std::unique_lock<std::mutex>& lock, std::chrono::steady_clock::time_point deadline,
+                        const std::function<bool()>& ready);
+    // Removes a destroyed swapchain from a copy so it is never submitted.
+    static void StripSwapchain(FrameCopy& copy, XrSwapchain swapchain);
     // Returns nothing when the presenter thread is not running (the caller
     // then takes the inline path).
     std::optional<XrResult> ThreadedWaitLocked(std::unique_lock<std::mutex>& lock, XrFrameState* state,
@@ -424,9 +439,12 @@ class FrameGenPresenter {
 
     // Threaded presentation. The presenter thread owns the runtime frame loop
     // while compositor_running_; app threads hand it real frames through
-    // slot_request_/slot_offer_. Lock order: submit_mutex_, queue, mutex_.
+    // slot_request_/slot_offer_. Lock order: submit_mutex_, queue,
+    // gpu_mutex_, mutex_. GPU work never holds mutex_, which the presenter
+    // thread needs every refresh.
     std::thread compositor_;
     void* compositor_timer_{nullptr};
+    void* compositor_wake_{nullptr}; // auto-reset event behind slot_cv_ for the presenter thread
     FrameGenRuntimeCalls compositor_calls_;
     bool compositor_running_{false};
     bool compositor_stop_{false};  // close the current slot and exit
@@ -439,9 +457,20 @@ class FrameGenPresenter {
     XrDuration slot_period_{0};
     bool slot_should_render_{true};
     std::deque<ThreadedFrame> threaded_frames_;
-    std::uint64_t threaded_id_{0};
+    std::uint64_t threaded_id_{1ull << 48}; // apart from inline sequences, so continuity never spans modes
     std::optional<std::uint64_t> last_release_slot_;
-    double app_latency_ms_{0.0}; // smoothed time from a wait returning to its end
+    double app_latency_ms_{0.0}; // smoothed time from a wait returning to its end (log)
+    // Refreshes between a wait's release and the slot its frame is predicted
+    // for: one more after a late frame, one fewer after frames that keep
+    // arriving more than a refresh before their deadline. Only frames
+    // predicted with the current lead move it, so frames in flight do not
+    // move it twice. An early frame is held until its slot, which delays the
+    // app's next frame; a lead that is too long therefore slows the app, not
+    // just adds latency.
+    std::uint32_t lead_slots_{0};
+    std::uint32_t lead_slack_streak_{0};
+    std::uint32_t dropped_unbegun_{0}; // dropped frames whose begin is still to come
+    bool logged_swallowed_{false};
     std::optional<SlotRequest> slot_request_;
     std::optional<SlotOffer> slot_offer_;
     bool offer_done_{false};
@@ -453,6 +482,8 @@ class FrameGenPresenter {
     std::size_t next_generated_set_{0};
     std::uint64_t threaded_late_{0};     // real frames shown after their predicted slot
     std::mutex submit_mutex_;            // presenter-thread submissions vs output swapchain calls
+    std::mutex gpu_mutex_;               // the GPU backend (Track, Capture, Execute, WaitIdle, Forget, Reset)
+    double gpu_ms_{-1.0};                // last generation GPU time, read without the backend
 };
 
 } // namespace depthxr

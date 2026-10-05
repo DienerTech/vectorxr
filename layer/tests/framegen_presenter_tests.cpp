@@ -11,6 +11,7 @@
 
 #include "depthxr/framegen_presenter.h"
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <condition_variable>
@@ -208,6 +209,9 @@ struct Runtime {
     std::atomic<int> outstanding_waits{0};
     std::atomic<bool> ordering_violation{false};
     std::atomic<bool> fail_next_submit{false};
+    std::atomic<bool> fail_next_wait{false};
+    std::atomic<bool> used_destroyed{false};
+    std::vector<XrSwapchain> destroyed; // under g_xr_mutex
     std::atomic<int> wait_sleep_ms{0};
     bool begun{false};
     std::vector<XrTime> submitted_times;
@@ -218,6 +222,7 @@ struct Runtime {
     FrameGenRuntimeCalls Calls() {
         FrameGenRuntimeCalls calls;
         calls.wait = [this](XrSession, const XrFrameWaitInfo*, XrFrameState* state) {
+            if (fail_next_wait.exchange(false)) return XR_ERROR_RUNTIME_FAILURE;
             if (++outstanding_waits > 1) ordering_violation = true;
             if (wait_sleep_ms) std::this_thread::sleep_for(std::chrono::milliseconds(wait_sleep_ms));
             if (paced) {
@@ -251,6 +256,18 @@ struct Runtime {
             if (fail_next_submit.exchange(false)) return XR_ERROR_TIME_INVALID;
             submitted_times.push_back(info->displayTime);
             submitted_at.push_back(std::chrono::steady_clock::now());
+            for (std::uint32_t layer = 0; layer < info->layerCount; ++layer) {
+                std::vector<XrSwapchain> used;
+                if (info->layers[layer]->type == XR_TYPE_COMPOSITION_LAYER_PROJECTION) {
+                    const auto* p = reinterpret_cast<const XrCompositionLayerProjection*>(info->layers[layer]);
+                    for (std::uint32_t v = 0; v < p->viewCount; ++v) used.push_back(p->views[v].subImage.swapchain);
+                } else if (info->layers[layer]->type == XR_TYPE_COMPOSITION_LAYER_QUAD) {
+                    used.push_back(reinterpret_cast<const XrCompositionLayerQuad*>(info->layers[layer])->subImage.swapchain);
+                }
+                for (const XrSwapchain swapchain : used) {
+                    if (std::find(destroyed.begin(), destroyed.end(), swapchain) != destroyed.end()) used_destroyed = true;
+                }
+            }
             std::vector<XrSwapchain> swapchains;
             bool depth = false;
             if (info->layerCount) {
@@ -599,7 +616,8 @@ double Seconds(std::chrono::steady_clock::duration duration) {
 // it while the render thread renders frame N. `between` runs on the render
 // thread after each end. Returns the frames ended.
 int RunPipelined(App& app, std::chrono::milliseconds duration, std::chrono::milliseconds simulate,
-                 std::chrono::milliseconds render, const std::function<void(int, const XrFrameState&)>& between = {}) {
+                 std::chrono::milliseconds render, const std::function<void(int, const XrFrameState&)>& between = {},
+                 std::chrono::steady_clock::duration* longest_gap = nullptr) {
     std::mutex mutex;
     std::condition_variable cv;
     std::deque<XrFrameState> ready;
@@ -613,7 +631,7 @@ int RunPipelined(App& app, std::chrono::milliseconds duration, std::chrono::mill
                 cv.wait(lock, [&] { return begun >= i; });
             }
             const XrFrameState state = app.Wait();
-            std::this_thread::sleep_for(simulate);
+            SleepPrecise(std::chrono::steady_clock::now() + simulate);
             std::scoped_lock lock(mutex);
             ready.push_back(state);
             cv.notify_all();
@@ -623,6 +641,8 @@ int RunPipelined(App& app, std::chrono::milliseconds duration, std::chrono::mill
         cv.notify_all();
     });
     int ended = 0;
+    auto last_end = std::chrono::steady_clock::now();
+    if (longest_gap) *longest_gap = {};
     for (;;) {
         XrFrameState state{};
         {
@@ -638,9 +658,12 @@ int RunPipelined(App& app, std::chrono::milliseconds duration, std::chrono::mill
             ++begun;
             cv.notify_all();
         }
-        std::this_thread::sleep_for(render);
+        SleepPrecise(std::chrono::steady_clock::now() + render);
         app.Release();
         Check(XR_SUCCEEDED(app.End(state.predictedDisplayTime)), "pipelined: end");
+        const auto now = std::chrono::steady_clock::now();
+        if (longest_gap) *longest_gap = std::max(*longest_gap, now - last_end);
+        last_end = now;
         if (between) between(ended, state);
         ++ended;
     }
@@ -736,6 +759,7 @@ void TestThreadedToggleAndReset() {
     App app(presenter, runtime);
     for (int i = 0; i < 3; ++i) app.Frame();
     bool saw_threaded = false, saw_passthrough = false, saw_rethreaded = false;
+    std::chrono::steady_clock::duration gap{};
     RunPipelined(app, 2000ms, 8ms, 10ms, [&](int frame, const XrFrameState& state) {
         if (frame == 20) {
             saw_threaded = presenter.Status().threaded && state.predictedDisplayPeriod == 2 * kPeriod;
@@ -746,7 +770,9 @@ void TestThreadedToggleAndReset() {
         } else if (frame == 70) {
             saw_rethreaded = presenter.Status().threaded;
         }
-    });
+    }, &gap);
+    Check(gap < 200ms, "toggle: leaving and re-entering threaded presentation mid-pipeline never stalls (" +
+                           std::to_string(std::chrono::duration<double, std::milli>(gap).count()) + " ms)");
     Check(saw_threaded, "toggle: threaded before the toggle");
     Check(saw_passthrough, "toggle: frames pass straight through after toggling off");
     Check(saw_rethreaded, "toggle: toggling on presents from the thread again");
@@ -759,6 +785,73 @@ void TestThreadedToggleAndReset() {
     Check(presenter.Status().threaded, "reset: re-engages after the session settles");
     presenter.Stop();
     Check(!runtime.ordering_violation && !g_release_violation, "toggle: runtime and image calls stayed ordered");
+}
+
+void TestThreadedPipelinedDouble() {
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    runtime.paced = true;
+    StartThreaded(presenter, gpu, FrameGenMultiplier::k2);
+    App app(presenter, runtime);
+    // Rendering takes 90% of a 2x frame. Holding early frames must not
+    // inflate the predicted lead until the app falls behind.
+    const auto start = std::chrono::steady_clock::now();
+    const int frames = RunPipelined(app, 2500ms, 16ms, 20ms);
+    const double elapsed = Seconds(std::chrono::steady_clock::now() - start);
+    const double target = 1e9 / static_cast<double>(kPeriod) / 2;
+    Check(frames / elapsed > target * 0.82,
+          "2x pipelined: the app holds half the refresh (" + std::to_string(frames / elapsed) + " fps)");
+    presenter.Stop();
+    Check(!runtime.ordering_violation && !g_release_violation, "2x pipelined: calls stayed ordered");
+}
+
+void TestThreadedDestroyedSwapchain() {
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    runtime.paced = true;
+    StartThreaded(presenter, gpu, FrameGenMultiplier::k4);
+    App app(presenter, runtime);
+    app.layers.push_back(reinterpret_cast<const XrCompositionLayerBaseHeader*>(&app.quad));
+    for (int i = 0; i < 8; ++i) app.Frame();
+    Check(presenter.Status().threaded, "destroy: presenting from its own thread");
+    // The app destroys its quad swapchain between frames, as the layer's
+    // destroy hook does: forget, then destroy.
+    app.layers.pop_back();
+    presenter.ForgetSwapchain(app.quad.subImage.swapchain);
+    {
+        std::scoped_lock lock(g_xr_mutex);
+        runtime.destroyed.push_back(app.quad.subImage.swapchain);
+    }
+    std::this_thread::sleep_for(60ms); // the presenter thread fills slots from the older frame meanwhile
+    for (int i = 0; i < 8; ++i) app.Frame();
+    Check(!runtime.used_destroyed, "destroy: a destroyed swapchain is never submitted again");
+    presenter.Stop();
+    Check(!runtime.ordering_violation, "destroy: calls stayed ordered");
+}
+
+void TestThreadedRuntimeFailureRecovers() {
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    runtime.paced = true;
+    StartThreaded(presenter, gpu, FrameGenMultiplier::k2);
+    presenter.SetRetryPolicy(0ms, 0);
+    App app(presenter, runtime);
+    for (int i = 0; i < 8; ++i) app.Frame();
+    Check(presenter.Status().threaded, "failure: presenting from its own thread");
+    runtime.fail_next_wait = true;
+    const auto start = std::chrono::steady_clock::now();
+    for (int i = 0; i < 12; ++i) app.Frame();
+    Check(std::chrono::steady_clock::now() - start < 600ms, "failure: frames keep flowing after the thread stops");
+    const FrameGenStatus status = presenter.Status();
+    Check(!status.threaded && status.state == FrameGenState::kPaused, "failure: a runtime error pauses and stops the thread");
+    presenter.ResetFrames();
+    const auto again = std::chrono::steady_clock::now();
+    for (int i = 0; i < 6; ++i) app.Frame();
+    Check(std::chrono::steady_clock::now() - again < 400ms, "failure: no frame left in flight holds later waits");
+    Check(!runtime.ordering_violation && !g_release_violation, "failure: calls stayed ordered");
 }
 
 void TestThreadedKeepsOtherLayers() {
@@ -1074,6 +1167,9 @@ int main() {
     TestThreadedExtrapolation();
     TestThreadedPipelinedApp();
     TestThreadedToggleAndReset();
+    TestThreadedPipelinedDouble();
+    TestThreadedDestroyedSwapchain();
+    TestThreadedRuntimeFailureRecovers();
     TestThreadedKeepsOtherLayers();
     TestThreadedUnsupportedLayerPresentsInline();
     TestOverlappingWaitIsHeld();
