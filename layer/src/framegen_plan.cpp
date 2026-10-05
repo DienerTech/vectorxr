@@ -71,6 +71,10 @@ std::uint8_t FrameGenFinalFlowLevel(FrameGenFlowQuality quality) {
     }
 }
 
+std::uint8_t FrameGenFinalFlowLevel(const FrameGenTuning& tuning) {
+    return tuning.hardware_flow ? kFrameGenHardwareFlowLevel : FrameGenFinalFlowLevel(tuning.quality);
+}
+
 std::uint8_t FrameGenMatchLevel(std::uint8_t flow_level) {
     return static_cast<std::uint8_t>(std::max(1, static_cast<int>(flow_level) - 2));
 }
@@ -117,7 +121,7 @@ FrameGenViewPlan BuildFrameGenViewPlan(const FrameGenViewRequest& request, const
     FrameGenViewPlan plan;
     plan.extent = request.extent;
     plan.levels = FrameGenPyramid(request.extent);
-    plan.final_flow_level = FrameGenFinalFlowLevel(tuning.quality);
+    plan.final_flow_level = FrameGenFinalFlowLevel(tuning);
     plan.synthesize = request.synthesize && request.extent.width >= 64 && request.extent.height >= 64;
 
     const float suppression = static_cast<float>(std::clamp(tuning.artifact_suppression, 0, 100)) / 100.0f;
@@ -175,7 +179,24 @@ FrameGenViewPlan BuildFrameGenViewPlan(const FrameGenViewRequest& request, const
     luma.constants.options[3] = 1;
     plan.dispatches.push_back(luma);
 
-    for (std::uint8_t level = 2; level <= kFrameGenPyramidLevels; ++level) {
+    if (tuning.hardware_flow) {
+        // The optical flow hardware matches the half-resolution luma pair
+        // (run by the backend right after the pack), and the unpack scores
+        // each of its vectors the way block matching would.
+        FrameGenDispatch pack = Dispatch(FrameGenPass::kFlowPack, plan.levels[1], plan.levels[1], base);
+        pack.inputs = {Texture(FrameGenTextureKind::kLumaNewest, 1), Texture(FrameGenTextureKind::kLumaPrevious, 1), {}, {}};
+        pack.outputs = {Texture(FrameGenTextureKind::kHardwareNewest), Texture(FrameGenTextureKind::kHardwarePrevious)};
+        plan.dispatches.push_back(pack);
+        FrameGenDispatch unpack = Dispatch(FrameGenPass::kFlowUnpack, plan.levels[kFrameGenHardwareFlowLevel],
+                                           plan.levels[1], base);
+        unpack.inputs = {Texture(FrameGenTextureKind::kHardwareFlow), Texture(FrameGenTextureKind::kLumaNewest, 1),
+                         Texture(FrameGenTextureKind::kLumaPrevious, 1), {}};
+        unpack.outputs = {Texture(FrameGenTextureKind::kFlow, kFrameGenHardwareFlowLevel), {}};
+        unpack.constants.options[3] = 1u << (kFrameGenHardwareFlowLevel - 1);
+        plan.dispatches.push_back(unpack);
+    }
+
+    for (std::uint8_t level = 2; level <= kFrameGenPyramidLevels && !tuning.hardware_flow; ++level) {
         FrameGenDispatch down = Dispatch(FrameGenPass::kDownsample, plan.levels[level], plan.levels[level - 1], base);
         down.inputs = {Texture(FrameGenTextureKind::kLumaNewest, level - 1),
                        Texture(FrameGenTextureKind::kLumaPrevious, level - 1), {}, {}};
@@ -186,15 +207,18 @@ FrameGenViewPlan BuildFrameGenViewPlan(const FrameGenViewRequest& request, const
 
     // Flow passes match on luma at `match` and write one vector per cell of
     // the flow level; options.w carries the cell size in match texels.
-    FrameGenDispatch search = Dispatch(FrameGenPass::kSearch, plan.levels[kFrameGenPyramidLevels],
-                                       plan.levels[kFrameGenPyramidLevels], base);
-    search.inputs = {Texture(FrameGenTextureKind::kLumaNewest, kFrameGenPyramidLevels),
-                     Texture(FrameGenTextureKind::kLumaPrevious, kFrameGenPyramidLevels), {}, {}};
-    search.outputs = {Texture(FrameGenTextureKind::kFlow, kFrameGenPyramidLevels), {}};
-    search.constants.options[3] = 1;
-    plan.dispatches.push_back(search);
+    if (!tuning.hardware_flow) {
+        FrameGenDispatch search = Dispatch(FrameGenPass::kSearch, plan.levels[kFrameGenPyramidLevels],
+                                           plan.levels[kFrameGenPyramidLevels], base);
+        search.inputs = {Texture(FrameGenTextureKind::kLumaNewest, kFrameGenPyramidLevels),
+                         Texture(FrameGenTextureKind::kLumaPrevious, kFrameGenPyramidLevels), {}, {}};
+        search.outputs = {Texture(FrameGenTextureKind::kFlow, kFrameGenPyramidLevels), {}};
+        search.constants.options[3] = 1;
+        plan.dispatches.push_back(search);
+    }
 
-    for (std::uint8_t level = kFrameGenPyramidLevels - 1; level >= plan.final_flow_level; --level) {
+    for (std::uint8_t level = kFrameGenPyramidLevels - 1; level >= plan.final_flow_level && !tuning.hardware_flow;
+         --level) {
         const std::uint8_t match = FrameGenMatchLevel(level);
         FrameGenDispatch refine = Dispatch(FrameGenPass::kRefine, plan.levels[level], plan.levels[level + 1], base);
         refine.inputs = {Texture(FrameGenTextureKind::kLumaNewest, match), Texture(FrameGenTextureKind::kLumaPrevious, match),
@@ -404,8 +428,13 @@ unsigned FrameGenHistoryState::Configure(FrameGenExtent extent, std::int64_t sou
 
 bool FrameGenHistoryState::Matches(FrameGenExtent extent, std::int64_t source_format, FrameGenOutputKind output,
                                    std::uint8_t final_level) const {
+    return MatchesImages(extent, source_format, output) && final_level == final_level_;
+}
+
+bool FrameGenHistoryState::MatchesImages(FrameGenExtent extent, std::int64_t source_format,
+                                         FrameGenOutputKind output) const {
     return extent.width == extent_.width && extent.height == extent_.height && extent.width && extent.height &&
-           source_format == source_format_ && output == output_ && final_level == final_level_;
+           source_format == source_format_ && output == output_;
 }
 
 FrameGenViewRequest FrameGenHistoryState::Effective(const FrameGenViewRequest& request) const {

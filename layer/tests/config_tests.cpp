@@ -1208,6 +1208,8 @@ void TestFrameGenModuleOptional() {
            "Frame Generation should default to interpolation");
     Expect(resolved.framegen.flow_quality == depthxr::FrameGenFlowQuality::kBalanced,
            "Frame Generation should default to balanced flow");
+    Expect(resolved.framegen.motion_estimation == depthxr::FrameGenMotionEstimation::kShader,
+           "Frame Generation should default to shader motion estimation");
     Expect(resolved.framegen.artifact_suppression == 50 && resolved.framegen.motion_limit_percent == 10,
            "Frame Generation numeric defaults changed");
     Expect(resolved.framegen.diagnostic_view == depthxr::FrameGenDiagnosticView::kOff,
@@ -1230,7 +1232,7 @@ void TestFrameGenProfileResolution() {
         { "name": "Disabled", "enabled": false, "applicationIds": ["app-dcs"],
           "settings": { "synthesisMode": "interpolate", "flowQuality": "quality" } },
         { "name": "DCS", "enabled": true, "applicationIds": ["app-dcs"],
-          "settings": { "synthesisMode": "extrapolate", "flowQuality": "quality", "frameMultiplier": "4x", "artifactSuppression": 75, "motionLimitPercent": 25 } }
+          "settings": { "synthesisMode": "extrapolate", "flowQuality": "quality", "motionEstimation": "hardware", "frameMultiplier": "4x", "artifactSuppression": 75, "motionLimitPercent": 25 } }
       ]
     })json";
     const depthxr::ParseResult result = depthxr::ParseConfig(FrameGenConfigJson(module));
@@ -1247,21 +1249,25 @@ void TestFrameGenProfileResolution() {
                dcs.artifact_suppression == 75 && dcs.motion_limit_percent == 25,
            "Profile settings did not replace defaults");
     Expect(dcs.multiplier == depthxr::FrameGenMultiplier::k4, "Profile frame multiplier did not apply");
+    Expect(dcs.motion_estimation == depthxr::FrameGenMotionEstimation::kHardware, "Profile motion estimation did not apply");
     Expect(dcs.diagnostic_view == depthxr::FrameGenDiagnosticView::kTint,
            "Module diagnostic view should apply to profiles");
 
     const auto other = depthxr::ResolveFrameGenSettings(result.document, "FlightSimulator2024.exe");
     Expect(!other.enabled && other.profile_name.empty(), "Unmatched application should use the off default");
+    Expect(other.motion_estimation == depthxr::FrameGenMotionEstimation::kShader,
+           "Unmatched application should keep shader motion estimation");
     Expect(other.flow_quality == depthxr::FrameGenFlowQuality::kPerformance && other.artifact_suppression == 40 &&
                other.motion_limit_percent == 8,
            "Unmatched application should use module defaults");
 }
 
 void TestFrameGenInvalidSettingsRejected() {
-    const std::array<std::string, 7> invalid_modules{
+    const std::array<std::string, 8> invalid_modules{
         R"json({ "enabled": true, "defaults": { "frameMultiplier": "6x" } })json",
         R"json({ "enabled": true, "defaults": { "synthesisMode": "blend" } })json",
         R"json({ "enabled": true, "defaults": { "flowQuality": "ultra" } })json",
+        R"json({ "enabled": true, "defaults": { "motionEstimation": "cuda" } })json",
         R"json({ "enabled": true, "defaults": { "artifactSuppression": 101 } })json",
         R"json({ "enabled": true, "defaults": { "motionLimitPercent": 1 } })json",
         R"json({ "enabled": true, "defaults": { "motionLimitPercent": 7.5 } })json",

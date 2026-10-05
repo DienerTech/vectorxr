@@ -93,6 +93,12 @@ class FrameGenGpu {
     // Whether generated frames are drawn straight into the output images
     // (no intermediate image per view).
     virtual bool DrawsOutputs() const { return false; }
+    // FrameGenTuning::hardware_flow: empty until asked for, then "active",
+    // or why the hardware cannot be used (block matching measures motion).
+    virtual std::string HardwareFlowStatus() const { return "this graphics API has no optical flow hardware support"; }
+    // Tests: the next optical flow hardware work is never handed to the
+    // hardware, as if it had stopped responding.
+    virtual void StallHardwareForTest() {}
     // Tests and research: the flow the last Execute measured for `view`
     // (the filtered field synthesis used) in full-resolution pixels, x and
     // y per cell row by row; `cells` receives the field's size. Waits for the

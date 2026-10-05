@@ -23,7 +23,7 @@ test('configs written before Frame Generation load with it off and default setti
   delete config.modules.framegen
   const normalized = normalizeConfig(config)
   assert.deepEqual(normalized.modules.framegen, defaultFrameGenModule())
-  assert.deepEqual(normalized.modules.framegen.defaults, { synthesisMode: 'interpolate', flowQuality: 'balanced', frameMultiplier: 'auto', artifactSuppression: 50, motionLimitPercent: 10 })
+  assert.deepEqual(normalized.modules.framegen.defaults, { synthesisMode: 'interpolate', flowQuality: 'balanced', motionEstimation: 'shader', frameMultiplier: 'auto', artifactSuppression: 50, motionLimitPercent: 10 })
   assert.equal(normalized.modules.framegen.toggleBinding.type, 'none')
   assert.equal(normalized.modules.framegen.diagnosticView, 'off')
   assert.deepEqual(validateConfig(normalized), [])
@@ -33,9 +33,9 @@ test('configs written before Frame Generation load with it off and default setti
 })
 
 test('invalid imported values normalize safely: enums fall back, integers clamp', () => {
-  assert.deepEqual(normalizeFrameGenSettings({ synthesisMode: 'warp', flowQuality: 'ultra', frameMultiplier: '8x', artifactSuppression: 'high', motionLimitPercent: Number.NaN }), defaultFrameGenSettings())
-  assert.deepEqual(normalizeFrameGenSettings({ synthesisMode: 'extrapolate', flowQuality: 'quality', frameMultiplier: '3x', artifactSuppression: 140, motionLimitPercent: 1 }),
-    { synthesisMode: 'extrapolate', flowQuality: 'quality', frameMultiplier: '3x', artifactSuppression: 100, motionLimitPercent: 2 })
+  assert.deepEqual(normalizeFrameGenSettings({ synthesisMode: 'warp', flowQuality: 'ultra', motionEstimation: 'cuda', frameMultiplier: '8x', artifactSuppression: 'high', motionLimitPercent: Number.NaN }), defaultFrameGenSettings())
+  assert.deepEqual(normalizeFrameGenSettings({ synthesisMode: 'extrapolate', flowQuality: 'quality', motionEstimation: 'hardware', frameMultiplier: '3x', artifactSuppression: 140, motionLimitPercent: 1 }),
+    { synthesisMode: 'extrapolate', flowQuality: 'quality', motionEstimation: 'hardware', frameMultiplier: '3x', artifactSuppression: 100, motionLimitPercent: 2 })
   assert.deepEqual(normalizeFrameGenSettings({ artifactSuppression: -5, motionLimitPercent: 99 }), { ...defaultFrameGenSettings(), artifactSuppression: 0, motionLimitPercent: 25 })
   assert.equal(normalizeFrameGenSettings({ artifactSuppression: 33.6 }).artifactSuppression, 34)
   assert.equal(normalizeFrameGenSettings({ motionLimitPercent: Infinity }).motionLimitPercent, 10)
@@ -94,6 +94,7 @@ test('validateConfig rejects out-of-range and malformed edits', () => {
   const profile = createFrameGenProfile(defaultFrameGenSettings(), ['dcs', 'ghost'])
   profile.settings.synthesisMode = 'warp'
   profile.settings.flowQuality = 'ultra'
+  profile.settings.motionEstimation = 'optical'
   profile.settings.frameMultiplier = '8x'
   profile.settings.motionLimitPercent = ''
   profile.name = ' '
@@ -108,6 +109,7 @@ test('validateConfig rejects out-of-range and malformed edits', () => {
     'modules.framegen.profiles[0].applicationIds references unknown application: ghost',
     'modules.framegen.profiles[0].settings.synthesisMode must be interpolate or extrapolate',
     'modules.framegen.profiles[0].settings.flowQuality must be performance, balanced, or quality',
+    'modules.framegen.profiles[0].settings.motionEstimation must be shader or hardware',
     'modules.framegen.profiles[0].settings.frameMultiplier must be auto, 2x, 3x, or 4x',
     'modules.framegen.profiles[0].settings.motionLimitPercent must be a whole number from 2 to 25',
   ]) assert.ok(errors.includes(expected), expected)
@@ -126,7 +128,7 @@ test('saved settings round-trip unchanged and emit only the keys the layer accep
   config.modules.framegen.enabled = true
   config.modules.framegen.diagnosticView = 'confidence'
   config.modules.framegen.toggleBinding = { type: 'device', deviceGuid: '{stick}', inputPath: 'button-7', productGuid: '', deviceName: 'Stick', inputLabel: 'Button 7' }
-  config.modules.framegen.defaults = { synthesisMode: 'extrapolate', flowQuality: 'performance', frameMultiplier: '4x', artifactSuppression: 0, motionLimitPercent: 25 }
+  config.modules.framegen.defaults = { synthesisMode: 'extrapolate', flowQuality: 'performance', motionEstimation: 'hardware', frameMultiplier: '4x', artifactSuppression: 0, motionLimitPercent: 25 }
   const profile = createFrameGenProfile(config.modules.framegen.defaults, ['dcs'])
   profile.name = 'DCS'
   profile.settings.flowQuality = 'quality'
@@ -139,7 +141,7 @@ test('saved settings round-trip unchanged and emit only the keys the layer accep
   assert.deepEqual(validateConfig(normalized), [])
   assert.deepEqual(Object.keys(normalized.modules.framegen), ['enabled', 'toggleBinding', 'diagnosticView', 'defaults', 'profiles'])
   assert.deepEqual(Object.keys(normalized.modules.framegen.profiles[0]), ['name', 'enabled', 'applicationIds', 'settings'])
-  assert.deepEqual(Object.keys(normalized.modules.framegen.defaults), ['synthesisMode', 'flowQuality', 'frameMultiplier', 'artifactSuppression', 'motionLimitPercent'])
+  assert.deepEqual(Object.keys(normalized.modules.framegen.defaults), ['synthesisMode', 'flowQuality', 'motionEstimation', 'frameMultiplier', 'artifactSuppression', 'motionLimitPercent'])
   assert.equal(normalized.modules.framegen.defaults.frameMultiplier, '4x')
   assert.equal(normalized.modules.framegen.profiles[0].settings.frameMultiplier, '2x')
 

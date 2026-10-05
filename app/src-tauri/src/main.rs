@@ -806,6 +806,10 @@ fn default_framegen_flow_quality() -> String {
     "balanced".into()
 }
 
+fn default_framegen_motion_estimation() -> String {
+    "shader".into()
+}
+
 fn default_framegen_frame_multiplier() -> String {
     "auto".into()
 }
@@ -823,7 +827,7 @@ fn default_framegen_diagnostic_view() -> String {
 }
 
 // Frame Generation tuning. The layer parser rejects unknown keys, so these
-// five fields are the complete serialized shape.
+// six fields are the complete serialized shape.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct FrameGenSettings {
@@ -831,6 +835,9 @@ struct FrameGenSettings {
     synthesis_mode: String,
     #[serde(default = "default_framegen_flow_quality")]
     flow_quality: String,
+    // "shader" or "hardware" (NVIDIA's optical flow accelerator, experimental).
+    #[serde(default = "default_framegen_motion_estimation")]
+    motion_estimation: String,
     // "auto", "2x", "3x" or "4x": headset frames per real application frame.
     #[serde(default = "default_framegen_frame_multiplier")]
     frame_multiplier: String,
@@ -845,6 +852,7 @@ impl Default for FrameGenSettings {
         Self {
             synthesis_mode: default_framegen_synthesis_mode(),
             flow_quality: default_framegen_flow_quality(),
+            motion_estimation: default_framegen_motion_estimation(),
             frame_multiplier: default_framegen_frame_multiplier(),
             artifact_suppression: default_framegen_artifact_suppression(),
             motion_limit_percent: default_framegen_motion_limit_percent(),
@@ -2952,6 +2960,7 @@ mod tests {
         assert_eq!(defaults.diagnostic_view, "off");
         assert_eq!(defaults.defaults.synthesis_mode, "interpolate");
         assert_eq!(defaults.defaults.flow_quality, "balanced");
+        assert_eq!(defaults.defaults.motion_estimation, "shader");
         assert_eq!(defaults.defaults.frame_multiplier, "auto");
         assert_eq!(defaults.defaults.artifact_suppression, 50);
         assert_eq!(defaults.defaults.motion_limit_percent, 10);
@@ -2963,14 +2972,14 @@ mod tests {
             "toggleBinding": { "type": "keyboard", "chord": ["Ctrl", "F7"] },
             "diagnosticView": "tint",
             "defaults": {
-                "synthesisMode": "extrapolate", "flowQuality": "quality", "frameMultiplier": "4x",
-                "artifactSuppression": 80, "motionLimitPercent": 4
+                "synthesisMode": "extrapolate", "flowQuality": "quality", "motionEstimation": "hardware",
+                "frameMultiplier": "4x", "artifactSuppression": 80, "motionLimitPercent": 4
             },
             "profiles": [{
                 "name": "DCS", "enabled": false, "applicationIds": ["dcs"],
                 "settings": {
-                    "synthesisMode": "interpolate", "flowQuality": "performance", "frameMultiplier": "3x",
-                    "artifactSuppression": 0, "motionLimitPercent": 25
+                    "synthesisMode": "interpolate", "flowQuality": "performance", "motionEstimation": "shader",
+                    "frameMultiplier": "3x", "artifactSuppression": 0, "motionLimitPercent": 25
                 }
             }]
         });
@@ -2984,6 +2993,7 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(older.frame_multiplier, "auto");
+        assert_eq!(older.motion_estimation, "shader");
         assert_eq!(serde_json::to_value(older).unwrap()["frameMultiplier"], "auto");
         assert_eq!(
             serde_json::to_value(super::FrameGenSettings::default()).unwrap()["frameMultiplier"],

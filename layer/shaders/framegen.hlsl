@@ -831,6 +831,70 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
 }
 #endif
 
+#if defined(FG_PASS_FLOW_PACK)
+FG_BIND(0) Texture2D<float4> g_luma_current : register(t0);
+FG_BIND(1) Texture2D<float4> g_luma_previous : register(t1);
+FG_BIND(4) FG_FORMAT("r8") RWTexture2D<float> g_hardware_current : register(u0);
+FG_BIND(5) FG_FORMAT("r8") RWTexture2D<float> g_hardware_previous : register(u1);
+
+// The half-resolution luma pair (the previous frame already in the newest
+// view) as 8-bit images for the optical flow hardware. Previous texels
+// outside the previous view take the newest frame's: no motion there.
+[numthreads(8, 8, 1)]
+void CSMain(uint3 id : SV_DispatchThreadID) {
+    if (any(id.xy >= g.size.xy)) {
+        return;
+    }
+    const float current = g_luma_current.Load(int3(id.xy, 0)).r;
+    const float previous = g_luma_previous.Load(int3(id.xy, 0)).r;
+    g_hardware_current[id.xy] = saturate(current);
+    g_hardware_previous[id.xy] = saturate(previous < 0.0 ? current : previous);
+}
+#endif
+
+#if defined(FG_PASS_FLOW_UNPACK)
+FG_BIND(0) Texture2D<int2> g_hardware_flow : register(t0);
+FG_BIND(1) Texture2D<float4> g_luma_current : register(t1);
+FG_BIND(2) Texture2D<float4> g_luma_previous : register(t2);
+FG_BIND(4) FG_FORMAT("rgba16f") RWTexture2D<float4> g_flow : register(u0);
+
+// The hardware's vectors (S10.5 half-resolution pixels, from the newest
+// frame to the previous one) as flow (previous to newest, normalized), each
+// scored like block matching scores its vectors (FG_PASS_REFINE): the mean
+// luma difference of the block of options.w x options.w half-resolution
+// texels it carries, so synthesis trusts both kinds of flow alike.
+[numthreads(8, 8, 1)]
+void CSMain(uint3 id : SV_DispatchThreadID) {
+    if (any(id.xy >= g.size.xy)) {
+        return;
+    }
+    uint width, height;
+    g_luma_current.GetDimensions(width, height);
+    const int2 extent = int2(width, height);
+    const float2 d = -float2(g_hardware_flow.Load(int3(id.xy, 0)).xy) / 32.0;
+    const int2 offset = int2(round(d));
+    const int scale = int(g.options.w);
+    float sum = 0.0;
+    float count = 0.0;
+    [loop]
+    for (int y = 0; y < scale; ++y) {
+        [loop]
+        for (int x = 0; x < scale; ++x) {
+            const int2 q = int2(id.xy) * scale + int2(x, y);
+            if (any(q >= extent)) {
+                continue;
+            }
+            const int2 s = q - offset;
+            const float previous = any(s < 0) || any(s >= extent) ? -1.0 : g_luma_previous.Load(int3(s, 0)).r;
+            sum += previous < 0.0 ? FG_INVALID_PENALTY : abs(g_luma_current.Load(int3(q, 0)).r - previous);
+            count += 1.0;
+        }
+    }
+    const float cost = sum / max(count, 1.0) + FG_MOTION_PENALTY * length(float2(offset) / float2(extent));
+    g_flow[id.xy] = float4(d / float2(extent), cost, 1.0);
+}
+#endif
+
 #if defined(FG_PASS_DEPTH_TRUST)
 FG_BIND(0) Texture2D<float4> g_own : register(t0);
 FG_BIND(1) Texture2D<float4> g_other : register(t1);

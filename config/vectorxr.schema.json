@@ -1523,6 +1523,15 @@
           "default": "balanced",
           "description": "Optical-flow resolution: 1/16, 1/8, or 1/4 of the eye image."
         },
+        "motionEstimation": {
+          "type": "string",
+          "enum": [
+            "shader",
+            "hardware"
+          ],
+          "default": "shader",
+          "description": "How motion is measured: block matching on the shader cores (any GPU), or the optical flow accelerator of NVIDIA RTX 20-50 GPUs in Direct3D 12 games (experimental; falls back to shader elsewhere)."
+        },
         "frameMultiplier": {
           "type": "string",
           "enum": [

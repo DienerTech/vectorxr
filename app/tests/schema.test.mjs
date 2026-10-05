@@ -32,6 +32,7 @@ test('schema describes generated Frame Generation settings and keeps the module 
   for (const [key, value] of Object.entries(framegen.defaults)) assert.equal(settings[key].default, value, key)
   assert.deepEqual(settings.synthesisMode.enum, ['interpolate', 'extrapolate'])
   assert.deepEqual(settings.flowQuality.enum, ['performance', 'balanced', 'quality'])
+  assert.deepEqual(settings.motionEstimation.enum, ['shader', 'hardware'])
   assert.deepEqual(settings.frameMultiplier.enum, ['auto', '2x', '3x', '4x'])
   assert.deepEqual([settings.artifactSuppression.minimum, settings.artifactSuppression.maximum], [0, 100])
   assert.deepEqual([settings.motionLimitPercent.minimum, settings.motionLimitPercent.maximum], [2, 25])

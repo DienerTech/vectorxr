@@ -116,7 +116,7 @@ if(WIN32 AND DEPTHXR_BUILD_LAYER)
         FetchContent_MakeAvailable(dxc_release)
         set(DEPTHXR_DXC "${dxc_release_SOURCE_DIR}/bin/x64/dxc.exe")
     endif()
-    set(_framegen_passes LUMA DOWNSAMPLE SEARCH REFINE FILTER SYNTHESIZE_UNORM8 SYNTHESIZE_FLOAT16 DEPTH DEPTH_CHECK DEPTH_TRUST)
+    set(_framegen_passes LUMA DOWNSAMPLE SEARCH REFINE FILTER SYNTHESIZE_UNORM8 SYNTHESIZE_FLOAT16 DEPTH DEPTH_CHECK DEPTH_TRUST FLOW_PACK FLOW_UNPACK)
     set(_framegen_hlsl "${CMAKE_CURRENT_SOURCE_DIR}/shaders/framegen.hlsl")
     set(_framegen_out "${CMAKE_CURRENT_BINARY_DIR}/framegen_shaders")
     file(MAKE_DIRECTORY "${_framegen_out}")
@@ -183,6 +183,18 @@ if(WIN32 AND DEPTHXR_BUILD_LAYER)
         "${_framegen_out}/framegen_shaders.cpp")
     target_include_directories(depthxr_framegen PUBLIC include)
     target_compile_features(depthxr_framegen PUBLIC cxx_std_20)
+    # Experimental: NVIDIA's optical flow accelerator (RTX 20-50) measures
+    # motion on Direct3D 12 when the NVIDIA Optical Flow SDK is unpacked
+    # under libraries/ (git-ignored, never committed); nvofapi64.dll ships
+    # with the driver and is loaded at run time.
+    file(GLOB_RECURSE _nvof_header "${PROJECT_SOURCE_DIR}/libraries/Optical_Flow_SDK_*/nvOpticalFlowD3D12.h")
+    if(_nvof_header)
+        list(GET _nvof_header 0 _nvof_header)
+        get_filename_component(DEPTHXR_NVOF_INCLUDE "${_nvof_header}" DIRECTORY)
+        target_include_directories(depthxr_framegen PRIVATE "${DEPTHXR_NVOF_INCLUDE}")
+        target_compile_definitions(depthxr_framegen PRIVATE DEPTHXR_NVOF)
+        message(STATUS "Frame Generation: NVIDIA optical flow hardware support from ${DEPTHXR_NVOF_INCLUDE}")
+    endif()
     target_compile_definitions(depthxr_framegen PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX XR_USE_GRAPHICS_API_D3D11 XR_USE_GRAPHICS_API_D3D12 XR_USE_GRAPHICS_API_VULKAN)
     target_link_libraries(depthxr_framegen PUBLIC depthxr_core OpenXR::openxr_loader Vulkan::Headers d3d11 d3d12 dxgi)
 
@@ -319,11 +331,8 @@ if(WIN32 AND DEPTHXR_BUILD_LAYER)
         # Research: compares NVIDIA's hardware optical flow with ours
         # (`depthxr_framegen_tests nvof`) when the NVIDIA Optical Flow SDK is
         # unpacked under libraries/ (git-ignored; never committed).
-        file(GLOB_RECURSE _nvof_header "${PROJECT_SOURCE_DIR}/libraries/Optical_Flow_SDK_*/nvOpticalFlowD3D12.h")
-        if(_nvof_header)
-            list(GET _nvof_header 0 _nvof_header)
-            get_filename_component(_nvof_include "${_nvof_header}" DIRECTORY)
-            target_include_directories(depthxr_framegen_tests PRIVATE "${_nvof_include}")
+        if(DEPTHXR_NVOF_INCLUDE)
+            target_include_directories(depthxr_framegen_tests PRIVATE "${DEPTHXR_NVOF_INCLUDE}")
             target_compile_definitions(depthxr_framegen_tests PRIVATE DEPTHXR_NVOF_RESEARCH)
         endif()
         add_test(NAME depthxr_framegen_d3d11_tests COMMAND depthxr_framegen_tests d3d11)

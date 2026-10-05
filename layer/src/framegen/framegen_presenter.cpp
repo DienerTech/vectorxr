@@ -179,6 +179,7 @@ void FrameGenPresenter::Start(XrSession session, const void* binding_chain, cons
     if (logger_) {
         logger_->Info(std::string("Frame Generation enabled for this session: backend=") + gpu_->Name() +
                       ", mode=" + ToString(settings_.synthesis_mode) + ", flowQuality=" + ToString(settings_.flow_quality) +
+                      ", motionEstimation=" + ToString(settings_.motion_estimation) +
                       "; frame pacing is owned by Frame Generation (Turbo stays off).");
     }
 }
@@ -1360,6 +1361,7 @@ bool FrameGenPresenter::Generate(const XrCompositionLayerProjection& projection,
         }
         tuning.mode = settings_.synthesis_mode;
         tuning.quality = settings_.flow_quality;
+        tuning.hardware_flow = settings_.motion_estimation == FrameGenMotionEstimation::kHardware;
         tuning.diagnostic = settings_.diagnostic_view;
         tuning.artifact_suppression = settings_.artifact_suppression;
         tuning.motion_limit_percent = settings_.motion_limit_percent;
@@ -1439,6 +1441,7 @@ bool FrameGenPresenter::Generate(const XrCompositionLayerProjection& projection,
     bool ok = true;
     double gpu_ms = -1.0;
     FrameGenDepthStatus depth;
+    std::string hardware_status;
     {
         // Vulkan queues need external synchronization with the runtime's own
         // submissions on the session queue. Lock order: queue, GPU,
@@ -1466,6 +1469,9 @@ bool FrameGenPresenter::Generate(const XrCompositionLayerProjection& projection,
         if (gpu_) {
             gpu_ms = gpu_->LastGpuMilliseconds();
             depth = gpu_->DepthStatus();
+            if (tuning.hardware_flow) {
+                hardware_status = gpu_->HardwareFlowStatus();
+            }
         }
     }
     // Every output here was acquired and waited; release them all so the
@@ -1479,6 +1485,14 @@ bool FrameGenPresenter::Generate(const XrCompositionLayerProjection& projection,
     }
     gpu_ms_ = gpu_ms;
     consecutive_failures_ = 0;
+    if (logger_ && !hardware_status.empty() && hardware_status != logged_hardware_status_) {
+        logged_hardware_status_ = hardware_status;
+        logger_->Info(hardware_status == "active"
+                          ? "Frame Generation measures motion with NVIDIA's optical flow hardware (experimental): the "
+                            "game's GPU queue waits for it each real frame."
+                          : "Frame Generation cannot use NVIDIA's optical flow hardware (" + hardware_status +
+                                "); block matching measures motion instead.");
+    }
     if (logger_ && depth.decisions != logged_depth_decisions_) {
         logged_depth_decisions_ = depth.decisions;
         const FrameGenDepthEvidence& evidence = depth.evidence;

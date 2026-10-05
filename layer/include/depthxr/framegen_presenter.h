@@ -467,6 +467,7 @@ class FrameGenPresenter {
     bool logged_first_generation_{false};
     bool logged_depth_{false};
     std::uint32_t logged_depth_decisions_{0};
+    std::string logged_hardware_status_; // last optical flow hardware status logged
     bool logged_depth_info_{false};
     bool logged_capture_failure_{false};
     void* timer_{nullptr}; // high-resolution waitable timer, frame thread only

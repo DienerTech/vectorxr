@@ -470,6 +470,56 @@ int RunScenarios(Harness& harness) {
         Check(error_sum < 0.25 * difference_sum, harness.name + " shimmering still detail jitters in generated frames");
     }
 
+    // 3f. Motion measured by the optical flow hardware (NVIDIA RTX 20-50 on
+    // Direct3D 12): the repeating facade no longer aliases and the moving
+    // square still moves. Elsewhere the backend says why not and block
+    // matching measures motion instead.
+    {
+        tuning.mode = FrameGenSynthesisMode::kExtrapolate;
+        tuning.fractions[0] = 0.5f;
+        tuning.hardware_flow = true;
+        auto sequence = [&](const Pixels& a, const Pixels& b, const Pixels& c) {
+            harness.upload(g_swapchains[kSource][0], a);
+            harness.upload(g_swapchains[kSource][1], b);
+            harness.upload(g_swapchains[kSource][2], c);
+            gpu->ResetHistory();
+            run(0, true, 0, 0);
+            run(1, true, 0, 0);
+            return run(2, true, 0, 0);
+        };
+        const Pixels facade = sequence(Facade(0.0f), Facade(3.0f), Facade(6.0f));
+        const std::string status = gpu->HardwareFlowStatus();
+        const double facade_error = MeanError(facade, Facade(7.5f), 32, 32, kSize - 32, kSize - 32);
+        const double facade_hold = MeanError(Facade(6.0f), Facade(7.5f), 32, 32, kSize - 32, kSize - 32);
+        const Pixels square = sequence(MovingSquare(104, 112), MovingSquare(120, 120), MovingSquare(136, 128));
+        const double square_error = MeanError(square, MovingSquare(144, 132), 96, 96, 288, 288);
+        const double square_hold = MeanError(MovingSquare(136, 128), MovingSquare(144, 132), 96, 96, 288, 288);
+        std::cout << harness.name << " hardware flow (" << (status.empty() ? "not asked" : status) << "): facade error "
+                  << facade_error << " vs hold " << facade_hold << ", square " << square_error << " vs hold " << square_hold
+                  << std::endl;
+        Dump(harness.name + "-facade-hardware", facade);
+        if (status == "active") {
+            Check(facade_error < facade_hold, harness.name + " the optical flow hardware's facade is worse than holding");
+        }
+        Check(square_error < 0.5 * square_hold, harness.name + " motion is not extrapolated with hardware flow asked for");
+        if (status == "active") {
+            // Hardware that stops answering must not hang the game's queue:
+            // the watchdog releases it and block matching takes over.
+            gpu->StallHardwareForTest();
+            run(0, true, 0, 0);
+            const auto start = std::chrono::steady_clock::now();
+            const Pixels released = sequence(MovingSquare(104, 112), MovingSquare(120, 120), MovingSquare(136, 128));
+            const double waited = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+            std::cout << harness.name << " stalled hardware: released after " << waited << " ms, now "
+                      << gpu->HardwareFlowStatus() << std::endl;
+            Check(gpu->HardwareFlowStatus() == "the optical flow hardware stopped responding",
+                  harness.name + " the stalled optical flow hardware was not released");
+            Check(MeanError(released, MovingSquare(144, 132), 96, 96, 288, 288) < 0.5 * square_hold,
+                  harness.name + " block matching did not take over from stalled hardware");
+        }
+        tuning.hardware_flow = false;
+    }
+
     // 3e. Steady motion over several frames keeps being extrapolated once the
     // last frame pair's motion is known, also when a real frame came late
     // (the frames' times say how far steady motion moved meanwhile).
@@ -860,12 +910,15 @@ int RunProfile(Harness& harness) {
     FrameGenDepthEncoding encoding;
     encoding.near_z = 1000.0f;
     encoding.far_z = 0.1f;
-    const char* names[] = {"luma",           "downsample",   "search",      "refine",       "filter",
-                           "synthesize",     "synthesize16", "depth",       "depth check",  "depth trust",
-                           "source copy",    "output copy"};
-    for (const auto quality : {FrameGenFlowQuality::kBalanced, FrameGenFlowQuality::kQuality}) {
+    const char* names[] = {"luma",        "downsample",  "search",      "refine",      "filter",
+                           "synthesize",  "synthesize16", "depth",      "depth check", "depth trust",
+                           "flow pack",   "flow unpack", "source copy", "output copy", "hardware wait"};
+    static_assert(std::size(names) == kFrameGenPassCount + 3, "a name per profiled category");
+    for (const int config : {0, 1, 2}) {
+        const auto quality = config == 1 ? FrameGenFlowQuality::kQuality : FrameGenFlowQuality::kBalanced;
         FrameGenTuning tuning;
         tuning.quality = quality;
+        tuning.hardware_flow = config == 2;
         tuning.mode = FrameGenSynthesisMode::kExtrapolate;
         tuning.generated = 3;
         tuning.fractions = {0.25f, 0.5f, 0.75f};
@@ -923,8 +976,9 @@ int RunProfile(Harness& harness) {
         }
         const FrameGenDepthStatus depth = gpu->DepthStatus();
         std::printf("\n%s flow, 2 eyes, 3 generated frames: %.2f ms GPU per real frame (depth %s, %s)\n",
-                    quality == FrameGenFlowQuality::kQuality ? "Quality" : "Balanced", samples ? total / samples : -1.0,
-                    depth_used ? "used" : "not used", ToString(depth.reading));
+                    config == 2 ? ("Hardware (" + gpu->HardwareFlowStatus() + ")").c_str()
+                    : quality == FrameGenFlowQuality::kQuality ? "Quality" : "Balanced",
+                    samples ? total / samples : -1.0, depth_used ? "used" : "not used", ToString(depth.reading));
         for (std::size_t p = 0; p < sums.size() && p < std::size(names); ++p) {
             if (sums[p] > 0.0) {
                 std::printf("  %-14s %6.3f ms\n", names[p], sums[p] / samples);

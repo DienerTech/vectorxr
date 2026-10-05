@@ -274,6 +274,16 @@ std::optional<FrameGenFlowQuality> ParseFrameGenFlowQuality(const std::string& v
     return std::nullopt;
 }
 
+const char* ToString(FrameGenMotionEstimation estimation) {
+    return estimation == FrameGenMotionEstimation::kHardware ? "hardware" : "shader";
+}
+
+std::optional<FrameGenMotionEstimation> ParseFrameGenMotionEstimation(const std::string& value) {
+    if (value == "shader") return FrameGenMotionEstimation::kShader;
+    if (value == "hardware") return FrameGenMotionEstimation::kHardware;
+    return std::nullopt;
+}
+
 const char* ToString(FrameGenDiagnosticView view) {
     switch (view) {
     case FrameGenDiagnosticView::kFlow:

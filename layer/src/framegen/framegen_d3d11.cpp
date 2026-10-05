@@ -214,8 +214,11 @@ class D3D11FrameGen final : public FrameGenGpu {
     // The immediate context keeps resources alive for queued work.
     bool WaitIdle() override { return true; }
 
-    bool Execute(const std::vector<FrameGenViewSubmission>& views, const FrameGenTuning& tuning,
+    bool Execute(const std::vector<FrameGenViewSubmission>& views, const FrameGenTuning& requested,
                  FrameGenExecuteResult& result, std::string& error) override {
+        // No optical flow hardware path: block matching measures motion.
+        FrameGenTuning tuning = requested;
+        tuning.hardware_flow = false;
         result.synthesized.assign(views.size(), false);
         if (views_.size() < views.size()) {
             views_.resize(views.size());

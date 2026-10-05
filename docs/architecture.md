@@ -135,7 +135,25 @@ the frames share their flow reads and sRGB is encoded by the render target); Dir
 Vulkan write them by compute into an intermediate image and copy it.
 
 `depthxr_framegen_tests profile [width height]` renders a stereo cockpit with depth at headset
-size and prints the GPU time of every pass on the local GPU (Direct3D 12). Generation works on whatever projection views reach the runtime,
+size and prints the GPU time of every pass on the local GPU (Direct3D 12).
+
+With Motion estimation set to hardware, Direct3D 12 measures motion with NVIDIA's optical flow
+accelerator instead of block matching. It is built only when the NVIDIA Optical Flow SDK
+headers are unpacked under `libraries/`; `nvofapi64.dll` comes with the driver. Each view has
+a session that matches its half-resolution luma pair with a 4x4 grid (flow level 3) and keeps
+its own temporal hints. The frame's command list is split:
+
+1. The trust, luma and pack passes for every view.
+2. The submission signals a fence the accelerator waits on.
+3. The queue waits for the accelerator's fence.
+4. Unpack (the vectors with our block cost as their confidence), filter and synthesis.
+
+Waiting on the session's queue stalls the game's GPU work behind the accelerator. Running
+Frame Generation on its own queue, with output images released only once their work is done,
+would remove that.
+
+`depthxr_framegen_tests nvof` compares its vectors with ours on the scenarios' scenes and times
+it at headset size. Generation works on whatever projection views reach the runtime,
 so it follows Quadviews composition and Varjo-native quad views alike.
 
 When a game submits depth with its projection views (`XR_KHR_composition_layer_depth`) and the

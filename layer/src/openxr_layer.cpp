@@ -1542,6 +1542,7 @@ bool SameSettings(const ResolvedRuntimeConfig& lhs, const ResolvedRuntimeConfig&
            lhs.framegen.profile_name == rhs.framegen.profile_name &&
            lhs.framegen.synthesis_mode == rhs.framegen.synthesis_mode &&
            lhs.framegen.flow_quality == rhs.framegen.flow_quality &&
+           lhs.framegen.motion_estimation == rhs.framegen.motion_estimation &&
            lhs.framegen.multiplier == rhs.framegen.multiplier &&
            lhs.framegen.artifact_suppression == rhs.framegen.artifact_suppression &&
            lhs.framegen.motion_limit_percent == rhs.framegen.motion_limit_percent &&
@@ -11323,6 +11324,7 @@ void OpenXrLayer::LogResolvedSettings(const ResolvedRuntimeConfig& settings) {
            << ", framegenProfile=" << settings.framegen.profile_name
            << ", framegenMode=" << ToString(settings.framegen.synthesis_mode)
            << ", framegenFlowQuality=" << ToString(settings.framegen.flow_quality)
+           << ", framegenMotionEstimation=" << ToString(settings.framegen.motion_estimation)
            << ", framegenMultiplier=" << ToString(settings.framegen.multiplier)
            << ", framegenArtifactSuppression=" << settings.framegen.artifact_suppression
            << ", framegenMotionLimitPercent=" << settings.framegen.motion_limit_percent

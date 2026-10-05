@@ -278,8 +278,11 @@ class VulkanFrameGen final : public FrameGenGpu {
         return idle;
     }
 
-    bool Execute(const std::vector<FrameGenViewSubmission>& views, const FrameGenTuning& tuning,
+    bool Execute(const std::vector<FrameGenViewSubmission>& views, const FrameGenTuning& requested,
                  FrameGenExecuteResult& result, std::string& error) override {
+        // No optical flow hardware path: block matching measures motion.
+        FrameGenTuning tuning = requested;
+        tuning.hardware_flow = false;
         result.synthesized.assign(views.size(), false);
         const std::size_t slot_index = static_cast<std::size_t>(submission_ % kFramesInFlight);
         FrameSlot& slot = slots_[slot_index];

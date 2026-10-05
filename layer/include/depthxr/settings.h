@@ -482,6 +482,14 @@ enum class FrameGenFlowQuality {
     kQuality,
 };
 
+// How motion is measured. Shader: block matching on the GPU's shader cores
+// (any GPU). Hardware: the optical flow accelerator of NVIDIA RTX 20-50 GPUs
+// in Direct3D 12 games (experimental; falls back to shader elsewhere).
+enum class FrameGenMotionEstimation {
+    kShader,
+    kHardware,
+};
+
 // Headset frames per real application frame. 2x holds the application at
 // half the runtime refresh rate, 3x at a third, 4x at a quarter. Auto starts
 // at 2x, steps up while the application misses its cadence, probes back down
@@ -504,6 +512,7 @@ enum class FrameGenDiagnosticView {
 struct FrameGenSettings {
     FrameGenSynthesisMode synthesis_mode{FrameGenSynthesisMode::kInterpolate};
     FrameGenFlowQuality flow_quality{FrameGenFlowQuality::kBalanced};
+    FrameGenMotionEstimation motion_estimation{FrameGenMotionEstimation::kShader};
     FrameGenMultiplier multiplier{FrameGenMultiplier::kAuto};
     // 0-100: higher falls back to the real image sooner where motion is uncertain.
     int artifact_suppression{50};
@@ -578,6 +587,8 @@ const char* ToString(FrameGenSynthesisMode mode);
 std::optional<FrameGenSynthesisMode> ParseFrameGenSynthesisMode(const std::string& value);
 const char* ToString(FrameGenFlowQuality quality);
 std::optional<FrameGenFlowQuality> ParseFrameGenFlowQuality(const std::string& value);
+const char* ToString(FrameGenMotionEstimation estimation);
+std::optional<FrameGenMotionEstimation> ParseFrameGenMotionEstimation(const std::string& value);
 const char* ToString(FrameGenDiagnosticView view);
 const char* ToString(FrameGenMultiplier multiplier);
 std::optional<FrameGenMultiplier> ParseFrameGenMultiplier(const std::string& value);

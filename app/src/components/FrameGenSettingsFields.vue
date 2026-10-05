@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, useId } from 'vue'
 
-import { frameGenLimits, type FrameGenFlowQuality, type FrameGenFrameMultiplier, type FrameGenSettings, type FrameGenSynthesisMode } from '../lib/model'
+import { frameGenLimits, type FrameGenFlowQuality, type FrameGenFrameMultiplier, type FrameGenMotionEstimation, type FrameGenSettings, type FrameGenSynthesisMode } from '../lib/model'
 
 // Shared Frame Generation settings editor used by both the Default Profile and
 // each custom profile, so the two stay visually and structurally identical.
@@ -42,6 +42,22 @@ const multiplierDescription = computed(() => frameMultipliers.find((item) => ite
 const multiplierModeNote = computed(() => props.settings.synthesisMode === 'extrapolate'
   ? 'Extrapolate keeps one set of headset-resolution images per generated frame, plus a spare for a late game frame (up to three), so memory use grows with the multiplier.'
   : 'Interpolate needs each real frame ready before the generated frames leading up to it, so it needs GPU headroom at any multiplier. For heavy GPU-bound games, use Extrapolate.')
+
+const motionEstimations: { value: FrameGenMotionEstimation; label: string; description: string }[] = [
+  {
+    value: 'shader',
+    label: 'Shader',
+    description: 'Block matching on the GPU\'s shader cores. Works on any GPU and graphics API; repeating patterns such as building windows can lock onto the wrong repeat.',
+  },
+  {
+    value: 'hardware',
+    label: 'NVIDIA hardware',
+    description: 'Experimental: the optical flow accelerator of NVIDIA RTX 20-50 GPUs measures motion in Direct3D 12 games, such as MSFS, and repeating patterns stay put. For now the game waits for it every real frame, about 7 ms at Pimax Crystal resolution, so the game runs a little slower. Elsewhere Shader is used and the log says why.',
+  },
+]
+
+const motionEstimationDescription = computed(() =>
+  motionEstimations.find((item) => item.value === props.settings.motionEstimation)?.description ?? '')
 
 const flowQualities: { value: FrameGenFlowQuality; label: string; resolution: string }[] = [
   { value: 'performance', label: 'Performance', resolution: '1/16' },
@@ -108,6 +124,28 @@ function flowResolution(quality: FrameGenFlowQuality) {
       <p class="mt-1 text-xs leading-5 text-muted">
         Headset frames per real game frame. Higher multipliers rescue very heavy games, but each generated frame moves content further, so artifacts grow. {{ multiplierModeNote }}
       </p>
+    </div>
+
+    <div class="rounded-[1rem] border p-4 surface-panel-soft">
+      <div class="flex flex-wrap items-center justify-between gap-3">
+        <p class="eyebrow text-xs uppercase tracking-[0.18em]">Motion estimation</p>
+        <div class="segmented flex w-full sm:w-auto" role="radiogroup" aria-label="Motion estimation">
+          <button
+            v-for="estimation in motionEstimations"
+            :key="estimation.value"
+            type="button"
+            role="radio"
+            class="segmented-option flex-1 sm:min-w-[6rem]"
+            :class="{ 'segmented-option-active': settings.motionEstimation === estimation.value }"
+            :aria-checked="settings.motionEstimation === estimation.value"
+            :title="estimation.description"
+            @click="settings.motionEstimation = estimation.value"
+          >
+            {{ estimation.label }}
+          </button>
+        </div>
+      </div>
+      <p class="mt-2 text-sm leading-6">{{ motionEstimationDescription }}</p>
     </div>
 
     <div class="grid gap-3 lg:grid-cols-3">

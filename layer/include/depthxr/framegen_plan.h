@@ -24,8 +24,13 @@ enum class FrameGenPass : std::uint8_t {
     kDepth,      // the application's depth image to linear view depth (capture time)
     kDepthCheck, // scores readings of the depth against the other eye
     kDepthTrust, // per texel, drops depth the other eye disproves
+    // Optical flow hardware (FrameGenTuning::hardware_flow): the half-
+    // resolution luma pair to 8-bit images for it; the backend runs it right
+    // after this dispatch.
+    kFlowPack,
+    kFlowUnpack, // its vectors into the flow field, with our match cost
 };
-inline constexpr std::size_t kFrameGenPassCount = 10;
+inline constexpr std::size_t kFrameGenPassCount = 12;
 
 // Logical textures owned per view. History and filtered flow are ping-pong
 // pairs: "newest" is written this submission, "previous" is last
@@ -41,7 +46,17 @@ enum class FrameGenTextureKind : std::uint8_t {
     kFilteredPrevious,
     kOutput,
     kDepth, // newest frame's linear view depth in meters, at half resolution
+    // Optical flow hardware: its 8-bit inputs at half resolution and its
+    // vectors (16-bit S10.5 pixels of the inputs, from newest to previous)
+    // at kFrameGenHardwareFlowLevel.
+    kHardwareNewest,
+    kHardwarePrevious,
+    kHardwareFlow,
 };
+
+// The flow level the optical flow hardware fills: a 4x4 grid on the
+// half-resolution luma.
+inline constexpr std::uint8_t kFrameGenHardwareFlowLevel = 3;
 
 struct FrameGenTexture {
     FrameGenTextureKind kind{FrameGenTextureKind::kNone};
@@ -141,6 +156,10 @@ struct FrameGenTuning {
     // The newest real frame pair's interval over the pair before's: last
     // pair's motion times this is what steady motion moves now.
     float interval_ratio{1.0f};
+    // Motion measured by the GPU's optical flow hardware instead of block
+    // matching (kFlowPack, the hardware, kFlowUnpack), at
+    // kFrameGenHardwareFlowLevel whatever the quality.
+    bool hardware_flow{false};
 };
 
 struct FrameGenViewPlan {
@@ -166,6 +185,9 @@ class FrameGenHistoryState {
     // True when Configure with these arguments would change nothing.
     bool Matches(FrameGenExtent extent, std::int64_t source_format, FrameGenOutputKind output,
                  std::uint8_t final_level) const;
+    // True when Configure would keep the history images (the flow level
+    // may still change).
+    bool MatchesImages(FrameGenExtent extent, std::int64_t source_format, FrameGenOutputKind output) const;
     FrameGenViewRequest Effective(const FrameGenViewRequest& request) const;
     void Commit(bool synthesized);
     void Invalidate();
@@ -185,6 +207,8 @@ class FrameGenHistoryState {
 };
 
 std::uint8_t FrameGenFinalFlowLevel(FrameGenFlowQuality quality);
+// The level the plan's flow ends at: the quality's, or the hardware's.
+std::uint8_t FrameGenFinalFlowLevel(const FrameGenTuning& tuning);
 
 // How an application's depth swapchain encodes view depth
 // (XrCompositionLayerDepthInfoKHR): minDepth..maxDepth spans nearZ..farZ in

@@ -434,6 +434,11 @@ export type FrameGenSynthesisMode = typeof frameGenSynthesisModes[number]
 // Optical-flow resolution relative to the eye image: 1/16, 1/8, or 1/4.
 export const frameGenFlowQualities = ['performance', 'balanced', 'quality'] as const
 export type FrameGenFlowQuality = typeof frameGenFlowQualities[number]
+// How motion is measured: 'shader' block matching (any GPU) or 'hardware',
+// the optical flow accelerator of NVIDIA RTX 20-50 GPUs in Direct3D 12 games
+// (experimental; the layer falls back to shader elsewhere).
+export const frameGenMotionEstimations = ['shader', 'hardware'] as const
+export type FrameGenMotionEstimation = typeof frameGenMotionEstimations[number]
 // Headset frames per real application frame: 2x holds the application at 1/2
 // the headset refresh, 3x at 1/3, 4x at 1/4. 'auto' starts at full rate,
 // passing frames through while the application holds the headset refresh,
@@ -454,6 +459,7 @@ export const frameGenLimits = {
 export interface FrameGenSettings {
   synthesisMode: FrameGenSynthesisMode
   flowQuality: FrameGenFlowQuality
+  motionEstimation: FrameGenMotionEstimation
   frameMultiplier: FrameGenFrameMultiplier
   // 0-100: higher falls back to the real image sooner where motion is uncertain.
   artifactSuppression: number
@@ -482,6 +488,7 @@ export function defaultFrameGenSettings(): FrameGenSettings {
   return {
     synthesisMode: 'interpolate',
     flowQuality: 'balanced',
+    motionEstimation: 'shader',
     frameMultiplier: 'auto',
     artifactSuppression: 50,
     motionLimitPercent: 10,
@@ -514,6 +521,9 @@ export function normalizeFrameGenSettings(value: unknown, fallback: FrameGenSett
     flowQuality: frameGenFlowQualities.includes(source.flowQuality as FrameGenFlowQuality)
       ? source.flowQuality as FrameGenFlowQuality
       : fallback.flowQuality,
+    motionEstimation: frameGenMotionEstimations.includes(source.motionEstimation as FrameGenMotionEstimation)
+      ? source.motionEstimation as FrameGenMotionEstimation
+      : fallback.motionEstimation,
     frameMultiplier: frameGenFrameMultipliers.includes(source.frameMultiplier as FrameGenFrameMultiplier)
       ? source.frameMultiplier as FrameGenFrameMultiplier
       : fallback.frameMultiplier,
