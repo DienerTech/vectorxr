@@ -125,7 +125,8 @@ const profileWarnings = computed(() => {
 function settingsSummary(settings: FrameGenSettings) {
   const mode = settings.synthesisMode === 'extrapolate' ? 'Extrapolate' : 'Interpolate'
   const quality = settings.flowQuality.charAt(0).toUpperCase() + settings.flowQuality.slice(1)
-  return `${mode} · ${quality}`
+  const multiplier = settings.frameMultiplier === 'auto' ? 'Auto' : settings.frameMultiplier
+  return `${mode} · ${quality} · ${multiplier}`
 }
 </script>
 
@@ -150,7 +151,7 @@ function settingsSummary(settings: FrameGenSettings) {
             <span class="rounded-full px-2.5 py-1 text-xs font-semibold uppercase tracking-[0.14em] chip-warning">Experimental</span>
           </div>
           <p class="mt-2 max-w-3xl text-sm leading-6 text-muted">
-            Holds the game at half your headset's refresh rate and adds an optical-flow frame between each pair of real frames, so the headset still gets a full-rate image stream. Test it per game with the A/B toggle.
+            Holds the game at half your headset's refresh rate or lower and adds optical-flow frames between real frames, so the headset still gets a full-rate image stream. Test it per game with the A/B toggle.
           </p>
         </div>
         <button
@@ -176,7 +177,8 @@ function settingsSummary(settings: FrameGenSettings) {
       <SetupGuide class="mb-3" title="Setup guide" summary="Enable it for one game, then compare in the headset" :open="setupGuideOpen">
         <ol class="list-decimal space-y-1 pl-5 text-sm leading-6">
           <li><strong>Turn off runtime smoothing:</strong> SteamVR Motion Smoothing, Pimax Smart Smoothing, Virtual Desktop SSW, or Meta ASW. They fight Frame Generation's pacing.</li>
-          <li><strong>Enable it for one game:</strong> leave the Default Profile off, add a custom profile below, and assign the game.</li>
+          <li><strong>Keep the runtime at full refresh:</strong> don't halve the frame rate in Pimax Play or with a SteamVR fixed 45 fps setting. Frame Generation lowers the game's rate itself.</li>
+          <li><strong>Enable it for one game:</strong> leave the Default Profile off, add a custom profile below, and assign the game. Frame multiplier Auto suits most games; for very heavy games, try Extrapolate with 3x, 4x, or Auto.</li>
           <li><strong>Save and restart the game.</strong> Turning Frame Generation on takes effect at the next launch.</li>
           <li><strong>Check it in the headset:</strong> show the Frame Generation state row in the <button class="underline underline-offset-2" type="button" @click="$emit('navigate', 'osd')">On-Screen Display</button>, or pick the Generated-frame tint diagnostic view.</li>
           <li><strong>Compare:</strong> assign the A/B toggle and switch generated frames off and on in the same scene.</li>
@@ -308,7 +310,7 @@ function settingsSummary(settings: FrameGenSettings) {
           <section class="space-y-3">
             <p class="eyebrow text-xs font-semibold uppercase tracking-[0.24em]">What it does</p>
             <div class="rounded-[1rem] border px-4 py-3 surface-panel">
-              Frame Generation holds the game at exactly half your headset's refresh rate, for example 45 fps on a 90 Hz headset, and inserts a generated frame between every pair of real frames. The headset still receives a full-rate image stream, while the game only has to render half of it.
+              Frame Generation holds the game at half your headset's refresh rate or lower, for example 45 fps on a 90 Hz headset, and inserts generated frames between real frames. The headset still receives a full-rate image stream, while the game only has to render a fraction of it.
             </div>
             <div class="rounded-[1rem] border px-4 py-3 surface-panel">
               Generated frames come from GPU optical flow measured on the final images the game submits. VectorXR removes your head rotation from that flow first, because the runtime's own reprojection already handles head rotation, so the flow follows world, vehicle, and object motion.
@@ -318,10 +320,23 @@ function settingsSummary(settings: FrameGenSettings) {
           <section class="space-y-3">
             <p class="eyebrow text-xs font-semibold uppercase tracking-[0.24em]">Interpolate or Extrapolate</p>
             <div class="rounded-[1rem] border px-4 py-3 surface-panel">
-              <strong>Interpolate</strong> (default) blends the generated frame between the previous and the newest real frame. It shows the fewest artifacts and is the approach closest to OFXR-Bridge, but each real frame must finish one refresh earlier, so it needs more GPU headroom.
+              <strong>Interpolate</strong> (default) blends generated frames between the previous and the newest real frame. It shows the fewest artifacts and is the approach closest to OFXR-Bridge, but each real frame must be ready before the generated frames leading up to it are shown, so it needs more GPU headroom at any multiplier.
             </div>
             <div class="rounded-[1rem] border px-4 py-3 surface-panel">
-              <strong>Extrapolate</strong> pushes the newest real frame forward along its motion, like ASW or Smart Smoothing. The game gets more GPU time per frame, but fast motion and newly revealed areas show more edge artifacts.
+              <strong>Extrapolate</strong> pushes the newest real frame forward along its motion, like ASW or Smart Smoothing. The game gets more GPU time per frame, but fast motion and newly revealed areas show more edge artifacts. It is the better choice for heavy GPU-bound games.
+            </div>
+          </section>
+
+          <section class="space-y-3">
+            <p class="eyebrow text-xs font-semibold uppercase tracking-[0.24em]">Frame multiplier</p>
+            <div class="rounded-[1rem] border px-4 py-3 surface-panel">
+              The multiplier sets how many headset frames each real game frame covers. On a 90 Hz headset, <strong>2x</strong> runs the game at 45 fps with one generated frame between real frames, <strong>3x</strong> at 30 fps with two, and <strong>4x</strong> at 22.5 fps with three.
+            </div>
+            <div class="rounded-[1rem] border px-4 py-3 surface-panel">
+              <strong>Auto</strong> (default) starts at 2x, steps up when the game cannot keep the cadence, and steps back down when it can, checking now and then. When the game already holds full refresh, frames pass straight through and the status reads Full rate.
+            </div>
+            <div class="rounded-[1rem] border px-4 py-3 chip-warning" style="border-color: var(--app-border)">
+              <strong>Higher multipliers rescue very heavy games, such as MSFS at very high resolution, at a cost.</strong> Each generated frame moves content further, so artifacts grow, most at 4x. Use Extrapolate with 3x, 4x, or Auto for these games. In Extrapolate, each generated frame also needs its own set of headset-resolution images, so memory use grows with the multiplier.
             </div>
           </section>
 
@@ -329,6 +344,9 @@ function settingsSummary(settings: FrameGenSettings) {
             <p class="eyebrow text-xs font-semibold uppercase tracking-[0.24em]">Before you start</p>
             <div class="rounded-[1rem] border px-4 py-3 chip-warning" style="border-color: var(--app-border)">
               <strong>Turn off runtime smoothing.</strong> SteamVR Motion Smoothing, Pimax Smart Smoothing, Virtual Desktop SSW, and Meta ASW fight Frame Generation's pacing. Disable them for games that use Frame Generation.
+            </div>
+            <div class="rounded-[1rem] border px-4 py-3 chip-warning" style="border-color: var(--app-border)">
+              <strong>Keep the runtime at full refresh.</strong> Don't halve the frame rate in Pimax Play or with a SteamVR fixed 45 fps setting. Frame Generation lowers the game's rate itself and needs the headset running at its full refresh rate.
             </div>
             <div class="rounded-[1rem] border px-4 py-3 surface-panel">
               <strong>Turbo stays off while Frame Generation runs.</strong> The two have opposite pacing goals, so in a session where Frame Generation runs, Turbo yields and its status reads Paused for Frame Generation. Your Turbo profiles are not changed.

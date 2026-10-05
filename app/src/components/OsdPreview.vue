@@ -36,7 +36,7 @@ const legibleScale = computed(() => Math.min(legibleMaxScale, stageSize.value.wi
 const legibleStageHeight = computed(() => Math.max(300, Math.ceil(height.value * legibleScale.value) + legiblePadY))
 const legibleView = computed(() => ({ width: stageSize.value.width || legibleWidestPanel, height: stageSize.value.height || legibleStageHeight.value }))
 const headerValues = computed(() => ({ brand: 'VECTORXR', app: 'your-game.exe', runtime: 'Your OpenXR runtime', clock: props.settings.clockFormat === '12' ? '8:42 PM' : '20:42' }))
-const labels: Record<OsdBodyRow, [string, string]> = { graph: ['', ''], turbo: ['TURBO', 'Async / Experimental'], framegen: ['FRAME GEN', 'Interpolate · 45 → 90 fps'], pivot: ['PIVOT', 'DCS Stepped Applied, Nudges Applied'], modules: ['ENHANCEMENTS', 'Depth / Pivot / Turbo / Quadviews'] }
+const labels: Record<OsdBodyRow, [string, string]> = { graph: ['', ''], turbo: ['TURBO', 'Async / Experimental'], framegen: ['FRAME GEN', 'Extrapolate 3x / 30 -> 90 fps / 3.1 ms'], pivot: ['PIVOT', 'DCS Stepped Applied, Nudges Applied'], modules: ['ENHANCEMENTS', 'Depth / Pivot / Turbo / Quadviews'] }
 let drag: { x: number; y: number; h: number; v: number; unit: number } | null = null
 function start(event: PointerEvent) {
   if (event.button !== 0 || legible.value) return
@@ -79,7 +79,7 @@ function move(event: PointerEvent) {
             </g>
             <g v-if="settings.compactShowFramegen" :transform="`translate(0 ${compactLayout.framegenY})`">
               <text x="30" y="22" font-size="20" fill="#94a5b8">FRAME GEN</text>
-              <foreignObject :x="compactLayout.statusValueX" :width="panelWidth - compactLayout.statusValueX - 28" height="36"><div class="body-value" style="color: #e9f0f8">Interpolate · 45 → 90 fps</div></foreignObject>
+              <foreignObject :x="compactLayout.statusValueX" :width="panelWidth - compactLayout.statusValueX - 28" height="36"><div class="body-value" style="color: #e9f0f8">3x / 30 -> 90 fps</div></foreignObject>
             </g>
             <g v-if="settings.compactShowPivot" :transform="`translate(0 ${compactLayout.pivotY})`">
               <text x="30" y="22" font-size="20" fill="#94a5b8">PIVOT</text>

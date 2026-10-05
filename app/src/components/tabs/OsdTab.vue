@@ -49,13 +49,13 @@ function closeBinding() {
 const contents: Record<OsdBodyRow, { key: 'showGraph' | 'showTurbo' | 'showFramegen' | 'showPivot' | 'showModules'; label: string; hint: string }> = {
   graph: { key: 'showGraph', label: 'Frame-time graph', hint: 'Rolling history of the last 120 application frames.' },
   turbo: { key: 'showTurbo', label: 'Turbo state', hint: 'Distinguishes disabled, enabled but off, active strategy, and safety states.' },
-  framegen: { key: 'showFramegen', label: 'Frame Generation state', hint: 'Mode and real-to-headset frame rate, or why generation is waiting, paused, or unavailable. Shown only in games where Frame Generation is on.' },
+  framegen: { key: 'showFramegen', label: 'Frame Generation state', hint: 'Mode, multiplier, and real-to-headset frame rate, such as Extrapolate 3x / 30 -> 90 fps; Full rate when Auto needs no generated frames; or why generation is waiting, paused, or unavailable. Shown only in games where Frame Generation is on.' },
   pivot: { key: 'showPivot', label: 'Pivot state', hint: 'Engaged profile, applied nudges and quick views, or ready when idle.' },
   modules: { key: 'showModules', label: 'Active enhancements', hint: 'Depth, Pivot, Turbo, Quadviews, and Frame Generation enabled for this app.' },
 }
 const compactContents = [
   { key: 'compactShowTurbo', label: 'Turbo state', hint: 'Current strategy, off, waiting, or safety state.' },
-  { key: 'compactShowFramegen', label: 'Frame Generation state', hint: 'Mode and frame rates, or waiting, paused, or unavailable.' },
+  { key: 'compactShowFramegen', label: 'Frame Generation state', hint: 'Multiplier and frame rates, Full rate, or waiting, paused, or unavailable.' },
   { key: 'compactShowPivot', label: 'Pivot state', hint: 'Ready, applied, nudged, or quick view in a short label.' },
 ] as const
 const compactHeaders = [

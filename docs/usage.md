@@ -517,9 +517,10 @@ unavailable or limited files. Review the ZIP for private information before shar
 
 ### Frame Generation (experimental)
 
-Frame Generation holds a game at exactly half your headset's refresh rate, for example 45 fps
-on a 90 Hz headset, and inserts a generated frame between every pair of real frames. The
-headset still receives a full-rate image stream while the game renders only half of it.
+Frame Generation holds a game at half your headset's refresh rate or lower, for example 45 fps
+on a 90 Hz headset, and inserts generated frames between real frames. The headset still
+receives a full-rate image stream while the game renders only a fraction of it. The
+[Frame multiplier](#frame-multiplier) sets that fraction: 2x, 3x, 4x, or Auto.
 
 Generated frames come from GPU optical flow measured on the final color images the game
 submits. VectorXR removes your head rotation from the flow before matching, because the
@@ -534,17 +535,22 @@ comparing it in the headset.
 
 1. Turn off runtime smoothing for the game: **SteamVR Motion Smoothing**, **Pimax Smart
    Smoothing**, **Virtual Desktop SSW**, or **Meta ASW**. They fight Frame Generation's pacing.
-2. Register the game's executable in **Application Registry**.
-3. On **Frame Generation**, leave **Default Profile** off, click **Add Profile**, and assign the
+2. Keep the runtime at full refresh. Do not halve the frame rate in **Pimax Play** or with a
+   SteamVR fixed 45 fps setting: Frame Generation lowers the game's rate itself and needs the
+   headset running at its full refresh rate.
+3. Register the game's executable in **Application Registry**.
+4. On **Frame Generation**, leave **Default Profile** off, click **Add Profile**, and assign the
    game. An enabled matching custom profile turns Frame Generation on for that game even when
    the Default Profile is off.
-4. Start with **Synthesis mode: Interpolate** and the default settings, then click **Save Changes**.
-5. Restart the game. Turning Frame Generation on, for the Default Profile or a custom profile,
+5. Start with the default settings (**Synthesis mode: Interpolate**, **Frame multiplier: Auto**),
+   then click **Save Changes**. For very heavy games, such as MSFS at very high resolution, start
+   with **Extrapolate** and **3x**, **4x**, or **Auto** instead.
+6. Restart the game. Turning Frame Generation on, for the Default Profile or a custom profile,
    takes effect at the next launch. Turning it off applies to a running game at once: frames
    pass straight through.
-6. Confirm it is running: turn on the **Frame Generation state** row on the **On-Screen
+7. Confirm it is running: turn on the **Frame Generation state** row on the **On-Screen
    Display** page, or set **Diagnostic view** to **Generated-frame tint**.
-7. Optional: use **A/B toggle > Edit Binding…** to assign a keyboard or controller input, then
+8. Optional: use **A/B toggle > Edit Binding…** to assign a keyboard or controller input, then
    switch generated frames off and on in the same scene to compare.
 
 Frame Generation engages a few seconds after the game starts rendering steadily. Loading
@@ -565,17 +571,40 @@ layer predates Frame Generation.
 
 | Mode | How it works | Trade-off |
 | --- | --- | --- |
-| **Interpolate** (default) | Blends the generated frame between the previous and the newest real frame. | Fewest artifacts, and the closest match to OFXR-Bridge. Each real frame must finish one refresh earlier, so it needs more GPU headroom. |
-| **Extrapolate** | Pushes the newest real frame forward along its motion, like ASW or Smart Smoothing. | Gives the game more GPU time per frame. More edge artifacts on fast motion and in newly revealed areas. |
+| **Interpolate** (default) | Blends generated frames between the previous and the newest real frame. | Fewest artifacts, and the closest match to OFXR-Bridge. Each real frame must be ready before the generated frames leading up to it are shown, so it needs more GPU headroom at any multiplier. |
+| **Extrapolate** | Pushes the newest real frame forward along its motion, like ASW or Smart Smoothing. | Gives the game more GPU time per frame, so it is recommended for heavy GPU-bound games. More edge artifacts on fast motion and in newly revealed areas. |
 
-If Interpolate cannot hold half rate on your GPU, try a lower **Flow quality** first, then
-Extrapolate.
+If Interpolate cannot keep its cadence on your GPU, try a lower **Flow quality** first, then
+Extrapolate. For heavy GPU-bound games, start with Extrapolate.
+
+#### Frame multiplier
+
+The **Frame multiplier** sets how many headset frames each real game frame covers:
+
+| Multiplier | Game rate | Example at 90 Hz | Generated frames between real frames |
+| --- | --- | --- | --- |
+| **2x** | 1/2 of the headset refresh rate | 45 fps | One |
+| **3x** | 1/3 | 30 fps | Two |
+| **4x** | 1/4 | 22.5 fps | Three |
+
+**Auto** (default) starts at 2x, steps up when the game cannot keep the cadence, and steps back
+down when it can, checking now and then whether a lower multiplier holds. When the game already
+holds full refresh, frames pass straight through and the status reads **Full rate**.
+
+Higher multipliers rescue very heavy games, such as MSFS at very high resolution, but each
+generated frame moves content further, so artifacts grow; 4x shows the most. For these games,
+use **Extrapolate** with **3x**, **4x**, or **Auto**: Interpolate needs each real frame ready before
+the generated frames leading up to it, so it needs GPU headroom whatever the multiplier. In
+Extrapolate, each generated frame also needs its own set of headset-resolution output images, so
+video memory use grows with the multiplier.
 
 #### Frame Generation settings
 
 Every setting below applies live after **Save Changes**. Only turning Frame Generation on
 needs a game restart; turning it off applies at once.
 
+- **Frame multiplier** (**Auto**, **2x**, **3x**, or **4x**; default Auto) sets how many headset
+  frames each real game frame covers. See [Frame multiplier](#frame-multiplier).
 - **Flow quality** sets the resolution motion is measured at: **Performance** (1/16 of the eye
   image), **Balanced** (1/8, default), or **Quality** (1/4). Higher quality tracks small and
   thin objects better and costs more GPU time.
@@ -590,8 +619,8 @@ needs a game restart; turning it off applies at once.
 - **A/B toggle** is an optional binding that switches generated frames off and on live. It only
   works in sessions that started with Frame Generation on.
 
-The Default Profile and each custom profile have their own Synthesis mode, Flow quality,
-Artifact suppression, and Motion limit. The first enabled custom profile that matches the
+The Default Profile and each custom profile have their own Synthesis mode, Frame multiplier,
+Flow quality, Artifact suppression, and Motion limit. The first enabled custom profile that matches the
 running game wins.
 
 #### How Frame Generation works with other features
@@ -608,6 +637,9 @@ running game wins.
   [On-Screen Display](#on-screen-display).
 - **Runtime smoothing:** SteamVR Motion Smoothing, Pimax Smart Smoothing, Virtual Desktop SSW,
   and Meta ASW fight the pacing. Turn them off for games that use Frame Generation.
+- **Runtime frame rate:** keep the headset at its full refresh rate. Do not halve the frame rate
+  in Pimax Play or with a SteamVR fixed 45 fps setting; Frame Generation lowers the game's rate
+  itself.
 
 #### Current limits
 
@@ -617,19 +649,29 @@ running game wins.
   generated frames.
 - Fast motion and newly revealed areas can warp, more so with Extrapolate. Raise **Artifact
   suppression** or lower **Motion limit** to trade warping for local judder.
-- The game needs enough GPU headroom to hold exactly half rate plus the flow work, roughly
-  0.6–1 ms per generated frame for both eyes on a high-end GPU at Balanced quality, more at
-  Quality and on slower GPUs.
+- The game needs enough GPU headroom to hold its multiplier's rate (half rate at 2x) plus the
+  flow work, roughly 0.6–1 ms per generated frame for both eyes on a high-end GPU at Balanced
+  quality, more at Quality and on slower GPUs.
+- Higher multipliers show more artifacts, most at 4x, and in Extrapolate each generated frame
+  adds a set of headset-resolution output images to video memory.
 - Generated frames carry no depth, so runtime features that reproject with the game's depth
   apply to real frames only. Only the first projection layer is generated; other layers, such
   as menus drawn as quads, repeat unchanged.
 
 ### Frame Generation FAQ
 
-**Why does the game now run at 45 fps?**
+**Why does the game now run at 45 fps or lower?**
 
-That is expected. Frame Generation holds the game at half the headset refresh rate and fills
-in every other frame. Judge the image in the headset, not the game's own FPS counter.
+That is expected. Frame Generation holds the game at half the headset refresh rate or lower and
+fills in the frames between: 45, 30, or 22.5 fps on a 90 Hz headset at 2x, 3x, or 4x. With
+**Auto**, the rate changes as the game gets lighter or heavier. Judge the image in the headset,
+not the game's own FPS counter.
+
+**Which frame multiplier should I use?**
+
+Start with Auto. For very heavy games, such as MSFS at very high resolution, use Extrapolate with
+3x, 4x, or Auto. Each step up adds artifacts, and 4x shows the most, so use the lowest
+multiplier the game can hold.
 
 **I saved, but nothing changed in the running game. Why?**
 
@@ -644,7 +686,8 @@ on, save, restart the game, then use the binding.
 **Should I use Interpolate or Extrapolate?**
 
 Start with Interpolate: it has the fewest artifacts. Switch to Extrapolate when your GPU cannot
-finish each real frame a refresh early, and accept more edge artifacts in return.
+finish each real frame before the generated frames leading up to it, which is common in heavy
+GPU-bound games, and accept more edge artifacts in return.
 
 **Why do cockpit gauges and text shimmer?**
 
@@ -659,7 +702,8 @@ Frame Generation runs. Turbo still works for games without Frame Generation.
 **Do I need to turn off Motion Smoothing or ASW?**
 
 Yes. Runtime smoothing (SteamVR Motion Smoothing, Pimax Smart Smoothing, Virtual Desktop SSW,
-Meta ASW) fights Frame Generation's pacing.
+Meta ASW) fights Frame Generation's pacing. Also keep the runtime at full refresh: do not halve
+the frame rate in Pimax Play or with a SteamVR fixed 45 fps setting.
 
 ## On-Screen Display
 
@@ -714,8 +758,9 @@ layouts from earlier versions gain the Frame Generation row at the end. The **Co
 layout chooses its **Performance** readout (FPS and average frame time, either one, or
 none) and can add one-line Turbo, Frame Generation, and Pivot status rows. **Just FPS** clears the compact
 header and status rows for the smallest display. Turbo distinguishes **Disabled**, **Enabled / Off**, **Enabled / Waiting**, active
-**Async** or **Sequenced**, and safety states. Frame Generation shows its mode and frame
-rates, such as `Interpolate · 45 → 90 fps`, or a status such as **Waiting for steady
+**Async** or **Sequenced**, and safety states. Frame Generation shows its mode, multiplier,
+and frame rates, such as `Extrapolate 3x / 30 -> 90 fps / 3.1 ms` (`Auto 3x` with Auto, or
+**Full rate** when Auto needs no generated frames), or a status such as **Waiting for steady
 frames**, **Paused**, or **Unavailable** with a reason. Enabled enhancements include Turbo even
 when its binding has switched pacing off. Pivot shows the engaged profile and applied
 nudges/quick views without angle measurements; idle enabled Pivot reads **Pivot ready**.

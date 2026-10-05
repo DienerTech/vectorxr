@@ -1,13 +1,13 @@
 <script setup lang="ts">
-import { useId } from 'vue'
+import { computed, useId } from 'vue'
 
-import { frameGenLimits, type FrameGenFlowQuality, type FrameGenSettings, type FrameGenSynthesisMode } from '../lib/model'
+import { frameGenLimits, type FrameGenFlowQuality, type FrameGenFrameMultiplier, type FrameGenSettings, type FrameGenSynthesisMode } from '../lib/model'
 
 // Shared Frame Generation settings editor used by both the Default Profile and
 // each custom profile, so the two stay visually and structurally identical.
 // Fields mutate the passed-in reactive `settings` object directly. Every field
 // here applies live; only turning Frame Generation on needs a restart.
-defineProps<{
+const props = defineProps<{
   settings: FrameGenSettings
 }>()
 
@@ -18,14 +18,30 @@ const synthesisModes: { value: FrameGenSynthesisMode; label: string; badge?: str
     value: 'interpolate',
     label: 'Interpolate',
     badge: 'Default',
-    description: 'Blends between the previous and newest real frame. Fewer artifacts, but each real frame must finish one refresh earlier, so it needs more GPU headroom.',
+    description: 'Blends between the previous and newest real frame. Fewer artifacts, but each real frame must be ready before the generated frames leading up to it are shown, so it needs more GPU headroom.',
   },
   {
     value: 'extrapolate',
     label: 'Extrapolate',
-    description: 'Pushes the newest real frame forward along its motion. Gives the game more GPU time per frame, with more edge artifacts on fast motion and newly revealed areas.',
+    description: 'Pushes the newest real frame forward along its motion. Gives the game more GPU time per frame, with more edge artifacts on fast motion and newly revealed areas. Best for heavy GPU-bound games.',
   },
 ]
+
+const frameMultipliers: { value: FrameGenFrameMultiplier; label: string; description: string }[] = [
+  {
+    value: 'auto',
+    label: 'Auto',
+    description: 'Starts at 2x, steps up when the game cannot keep the cadence, and steps back down when it can, checking now and then. If the game already holds full refresh, frames pass straight through.',
+  },
+  { value: '2x', label: '2x', description: 'The game runs at 1/2 the headset refresh, for example 45 fps at 90 Hz, with one generated frame between real frames.' },
+  { value: '3x', label: '3x', description: 'The game runs at 1/3 the headset refresh, for example 30 fps at 90 Hz, with two generated frames between real frames.' },
+  { value: '4x', label: '4x', description: 'The game runs at 1/4 the headset refresh, for example 22.5 fps at 90 Hz, with three generated frames between real frames. The most artifacts; for the heaviest games.' },
+]
+
+const multiplierDescription = computed(() => frameMultipliers.find((item) => item.value === props.settings.frameMultiplier)?.description ?? '')
+const multiplierModeNote = computed(() => props.settings.synthesisMode === 'extrapolate'
+  ? 'Extrapolate keeps one set of headset-resolution images per generated frame, so memory use grows with the multiplier.'
+  : 'Interpolate needs each real frame ready before the generated frames leading up to it, so it needs GPU headroom at any multiplier. For heavy GPU-bound games, use Extrapolate.')
 
 const flowQualities: { value: FrameGenFlowQuality; label: string; resolution: string }[] = [
   { value: 'performance', label: 'Performance', resolution: '1/16' },
@@ -68,6 +84,31 @@ function flowResolution(quality: FrameGenFlowQuality) {
         </label>
       </div>
     </fieldset>
+
+    <div class="rounded-[1rem] border p-4 surface-panel-soft">
+      <div class="flex flex-wrap items-center justify-between gap-3">
+        <p class="eyebrow text-xs uppercase tracking-[0.18em]">Frame multiplier</p>
+        <div class="segmented flex w-full sm:w-auto" role="radiogroup" aria-label="Frame multiplier">
+          <button
+            v-for="multiplier in frameMultipliers"
+            :key="multiplier.value"
+            type="button"
+            role="radio"
+            class="segmented-option flex-1 sm:min-w-[4.5rem]"
+            :class="{ 'segmented-option-active': settings.frameMultiplier === multiplier.value }"
+            :aria-checked="settings.frameMultiplier === multiplier.value"
+            :title="multiplier.description"
+            @click="settings.frameMultiplier = multiplier.value"
+          >
+            {{ multiplier.label }}
+          </button>
+        </div>
+      </div>
+      <p class="mt-2 text-sm leading-6">{{ multiplierDescription }}</p>
+      <p class="mt-1 text-xs leading-5 text-muted">
+        Headset frames per real game frame. Higher multipliers rescue very heavy games, but each generated frame moves content further, so artifacts grow. {{ multiplierModeNote }}
+      </p>
+    </div>
 
     <div class="grid gap-3 lg:grid-cols-3">
       <div class="rounded-[1rem] border p-4 surface-panel-soft">

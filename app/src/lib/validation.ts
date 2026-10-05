@@ -5,6 +5,7 @@ import type { CoreConfig, DepthXRProfileConfig, DepthXRSettings, FrameGenProfile
 const osdBodyRowNames = ['graph', 'turbo', 'framegen', 'pivot', 'modules']
 const frameGenSynthesisModeNames = ['interpolate', 'extrapolate']
 const frameGenFlowQualityNames = ['performance', 'balanced', 'quality']
+const frameGenFrameMultiplierNames = ['auto', '2x', '3x', '4x']
 const frameGenDiagnosticViewNames = ['off', 'flow', 'confidence', 'tint']
 
 function validateCoreConfig(core: CoreConfig): string[] {
@@ -306,6 +307,9 @@ function validateFrameGenSettings(prefix: string, settings: FrameGenSettings): s
   }
   if (!frameGenFlowQualityNames.includes(settings.flowQuality)) {
     errors.push(`${prefix}flowQuality must be performance, balanced, or quality`)
+  }
+  if (!frameGenFrameMultiplierNames.includes(settings.frameMultiplier)) {
+    errors.push(`${prefix}frameMultiplier must be auto, 2x, 3x, or 4x`)
   }
 
   const bounded = [

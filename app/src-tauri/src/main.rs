@@ -806,6 +806,10 @@ fn default_framegen_flow_quality() -> String {
     "balanced".into()
 }
 
+fn default_framegen_frame_multiplier() -> String {
+    "auto".into()
+}
+
 fn default_framegen_artifact_suppression() -> i64 {
     50
 }
@@ -819,7 +823,7 @@ fn default_framegen_diagnostic_view() -> String {
 }
 
 // Frame Generation tuning. The layer parser rejects unknown keys, so these
-// four fields are the complete serialized shape.
+// five fields are the complete serialized shape.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct FrameGenSettings {
@@ -827,6 +831,9 @@ struct FrameGenSettings {
     synthesis_mode: String,
     #[serde(default = "default_framegen_flow_quality")]
     flow_quality: String,
+    // "auto", "2x", "3x" or "4x": headset frames per real application frame.
+    #[serde(default = "default_framegen_frame_multiplier")]
+    frame_multiplier: String,
     #[serde(default = "default_framegen_artifact_suppression")]
     artifact_suppression: i64,
     #[serde(default = "default_framegen_motion_limit_percent")]
@@ -838,6 +845,7 @@ impl Default for FrameGenSettings {
         Self {
             synthesis_mode: default_framegen_synthesis_mode(),
             flow_quality: default_framegen_flow_quality(),
+            frame_multiplier: default_framegen_frame_multiplier(),
             artifact_suppression: default_framegen_artifact_suppression(),
             motion_limit_percent: default_framegen_motion_limit_percent(),
         }
@@ -2944,6 +2952,7 @@ mod tests {
         assert_eq!(defaults.diagnostic_view, "off");
         assert_eq!(defaults.defaults.synthesis_mode, "interpolate");
         assert_eq!(defaults.defaults.flow_quality, "balanced");
+        assert_eq!(defaults.defaults.frame_multiplier, "auto");
         assert_eq!(defaults.defaults.artifact_suppression, 50);
         assert_eq!(defaults.defaults.motion_limit_percent, 10);
         assert!(defaults.profiles.is_empty());
@@ -2954,19 +2963,32 @@ mod tests {
             "toggleBinding": { "type": "keyboard", "chord": ["Ctrl", "F7"] },
             "diagnosticView": "tint",
             "defaults": {
-                "synthesisMode": "extrapolate", "flowQuality": "quality",
+                "synthesisMode": "extrapolate", "flowQuality": "quality", "frameMultiplier": "4x",
                 "artifactSuppression": 80, "motionLimitPercent": 4
             },
             "profiles": [{
                 "name": "DCS", "enabled": false, "applicationIds": ["dcs"],
                 "settings": {
-                    "synthesisMode": "interpolate", "flowQuality": "performance",
+                    "synthesisMode": "interpolate", "flowQuality": "performance", "frameMultiplier": "3x",
                     "artifactSuppression": 0, "motionLimitPercent": 25
                 }
             }]
         });
         let config: super::FrameGenModuleConfig = serde_json::from_value(input.clone()).unwrap();
         assert_eq!(serde_json::to_value(config).unwrap(), input);
+
+        // Settings saved before the frame multiplier existed load as Auto and save it.
+        let older: super::FrameGenSettings = serde_json::from_value(serde_json::json!({
+            "synthesisMode": "extrapolate", "flowQuality": "quality",
+            "artifactSuppression": 80, "motionLimitPercent": 4
+        }))
+        .unwrap();
+        assert_eq!(older.frame_multiplier, "auto");
+        assert_eq!(serde_json::to_value(older).unwrap()["frameMultiplier"], "auto");
+        assert_eq!(
+            serde_json::to_value(super::FrameGenSettings::default()).unwrap()["frameMultiplier"],
+            "auto"
+        );
 
         // Configs written before Frame Generation load with it off and save the defaults.
         let old: super::VectorXRConfig = serde_json::from_value(serde_json::json!({
@@ -2996,6 +3018,7 @@ mod tests {
         assert_eq!(profile.name, "DCS");
         assert!(profile.enabled);
         assert_eq!(profile.settings.flow_quality, "balanced");
+        assert_eq!(profile.settings.frame_multiplier, "auto");
     }
 
     #[test]

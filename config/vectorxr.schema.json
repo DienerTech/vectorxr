@@ -1523,6 +1523,17 @@
           "default": "balanced",
           "description": "Optical-flow resolution: 1/16, 1/8, or 1/4 of the eye image."
         },
+        "frameMultiplier": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "2x",
+            "3x",
+            "4x"
+          ],
+          "default": "auto",
+          "description": "Headset frames per real game frame. 2x holds the game at 1/2 the headset refresh rate (one generated frame between real frames), 3x at 1/3 (two), 4x at 1/4 (three). auto starts at 2x, steps up when the game cannot keep the cadence, steps back down when it can, and passes frames straight through when the game already holds full refresh. Higher multipliers produce more artifacts; with extrapolate, each generated frame adds one set of headset-resolution output images."
+        },
         "artifactSuppression": {
           "type": "integer",
           "minimum": 0,

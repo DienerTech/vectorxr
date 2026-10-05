@@ -423,17 +423,23 @@ export interface TurboModuleConfig {
 }
 
 // Frame Generation: the layer holds the application at half the headset
-// refresh rate and inserts an optical-flow frame between every pair of real
-// frames. Enablement is session-latched; every other setting applies live.
+// refresh rate or lower and inserts optical-flow frames between real frames.
+// Enablement is session-latched; every other setting applies live.
 // 'interpolate' blends between the previous and newest real frame (fewer
-// artifacts, the real frame is due one refresh earlier); 'extrapolate' pushes
-// the newest real frame forward along its motion (more GPU time per frame,
-// more edge artifacts).
+// artifacts, the real frame must be ready before the generated frames leading
+// up to it); 'extrapolate' pushes the newest real frame forward along its
+// motion (more GPU time per frame, more edge artifacts).
 export const frameGenSynthesisModes = ['interpolate', 'extrapolate'] as const
 export type FrameGenSynthesisMode = typeof frameGenSynthesisModes[number]
 // Optical-flow resolution relative to the eye image: 1/16, 1/8, or 1/4.
 export const frameGenFlowQualities = ['performance', 'balanced', 'quality'] as const
 export type FrameGenFlowQuality = typeof frameGenFlowQualities[number]
+// Headset frames per real application frame: 2x holds the application at 1/2
+// the headset refresh, 3x at 1/3, 4x at 1/4. 'auto' starts at 2x, steps up
+// while the application misses its cadence, probes back down when it keeps
+// up, and passes frames through when it already holds full refresh.
+export const frameGenFrameMultipliers = ['auto', '2x', '3x', '4x'] as const
+export type FrameGenFrameMultiplier = typeof frameGenFrameMultipliers[number]
 // Module-level overlay drawn into generated frames only.
 export const frameGenDiagnosticViews = ['off', 'flow', 'confidence', 'tint'] as const
 export type FrameGenDiagnosticView = typeof frameGenDiagnosticViews[number]
@@ -448,6 +454,7 @@ export const frameGenLimits = {
 export interface FrameGenSettings {
   synthesisMode: FrameGenSynthesisMode
   flowQuality: FrameGenFlowQuality
+  frameMultiplier: FrameGenFrameMultiplier
   // 0-100: higher falls back to the real image sooner where motion is uncertain.
   artifactSuppression: number
   // 2-25: largest content shift, in % of view width, a generated frame may apply.
@@ -475,6 +482,7 @@ export function defaultFrameGenSettings(): FrameGenSettings {
   return {
     synthesisMode: 'interpolate',
     flowQuality: 'balanced',
+    frameMultiplier: 'auto',
     artifactSuppression: 50,
     motionLimitPercent: 10,
   }
@@ -506,6 +514,9 @@ export function normalizeFrameGenSettings(value: unknown, fallback: FrameGenSett
     flowQuality: frameGenFlowQualities.includes(source.flowQuality as FrameGenFlowQuality)
       ? source.flowQuality as FrameGenFlowQuality
       : fallback.flowQuality,
+    frameMultiplier: frameGenFrameMultipliers.includes(source.frameMultiplier as FrameGenFrameMultiplier)
+      ? source.frameMultiplier as FrameGenFrameMultiplier
+      : fallback.frameMultiplier,
     artifactSuppression: normalizeFrameGenInteger(source.artifactSuppression, frameGenLimits.artifactSuppression, fallback.artifactSuppression),
     motionLimitPercent: normalizeFrameGenInteger(source.motionLimitPercent, frameGenLimits.motionLimitPercent, fallback.motionLimitPercent),
   }
