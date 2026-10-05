@@ -229,7 +229,9 @@ class FrameGenPresenter {
     XrResult SubmitAt(XrSession session, const XrFrameEndInfo& info, XrTime time, const FrameGenRuntimeCalls& calls);
     void NotePhaseLocked(std::chrono::steady_clock::time_point called, std::chrono::steady_clock::time_point returned,
                          XrTime display_time, XrDuration period);
-    void PaceSubmission(XrTime display_time, XrDuration period);
+    // Returns true when the slot was already more than half a refresh past
+    // the time the runtime would have released its wait.
+    bool PaceSubmission(XrTime display_time, XrDuration period);
     XrResult NextSlot(XrSession session, const FrameGenRuntimeCalls& calls, XrDuration period, XrFrameState& state);
     XrResult RunCycle(XrSession session, const XrFrameEndInfo& info, const PendingFrame& frame,
                       const FrameGenRuntimeCalls& calls);
@@ -321,6 +323,12 @@ class FrameGenPresenter {
     mutable std::deque<std::chrono::steady_clock::time_point> app_frames_;
     mutable std::deque<std::chrono::steady_clock::time_point> submissions_;
     std::chrono::steady_clock::time_point last_summary_{};
+    // Per summary window: time the app spends between its wait returning and
+    // its end, and engaged cycles whose first slot was already late.
+    double app_work_ms_{0.0};
+    std::uint64_t app_work_frames_{0};
+    std::uint64_t cycles_{0};
+    std::uint64_t late_cycles_{0};
     bool logged_first_generation_{false};
     bool logged_capture_failure_{false};
     void* timer_{nullptr}; // high-resolution waitable timer, frame thread only

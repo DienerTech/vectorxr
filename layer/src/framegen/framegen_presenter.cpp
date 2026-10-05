@@ -701,6 +701,8 @@ XrResult FrameGenPresenter::EndFrame(XrSession session, const XrFrameEndInfo* in
                 it->claimed = true;
             }
             frame = *it;
+            app_work_ms_ += std::chrono::duration<double, std::milli>(Clock::now() - it->wait_return).count();
+            ++app_work_frames_;
         }
         if (renderable) {
             RecordCaptureTargetsLocked(*projection);
@@ -731,12 +733,26 @@ XrResult FrameGenPresenter::EndFrame(XrSession session, const XrFrameEndInfo* in
             NoteSubmissionLocked();
         }
         UpdateAutoLocked(now, frame);
-        if (logger_ && state_ == FrameGenState::kActive && now - last_summary_ >= std::chrono::seconds(60)) {
+        if (logger_ && state_ == FrameGenState::kActive && now - last_summary_ >= std::chrono::seconds(30)) {
             last_summary_ = now;
-            logger_->Info("Frame Generation: generated=" + std::to_string(generated_) + ", repeated=" +
-                          std::to_string(repeated_) + ", failures=" + std::to_string(failures_) + ", demoted=" +
-                          std::to_string(demoted_) + ", captured=" + std::to_string(captured_) + ", gpuMs=" +
+            // appWorkMs: the game's own time per frame between its wait and
+            // its end. lateCycles: cycles whose first generated slot was
+            // already past due, so the game's frame did not fit the time the
+            // runtime gives before that slot.
+            logger_->Info("Frame Generation: multiplier=" +
+                          (full_rate_ ? std::string("full rate") : MultiplierText(EffectiveMultiplierLocked())) +
+                          (settings_.multiplier == FrameGenMultiplier::kAuto ? " (auto)" : "") + ", appFps=" +
+                          Number(RatePerSecond(app_frames_, now), 1) + ", outputFps=" + Number(RatePerSecond(submissions_, now), 1) +
+                          ", appWorkMs=" + Number(app_work_frames_ ? app_work_ms_ / app_work_frames_ : 0.0, 1) +
+                          ", lateCycles=" + std::to_string(late_cycles_) + "/" + std::to_string(cycles_) +
+                          ", generated=" + std::to_string(generated_) + ", repeated=" + std::to_string(repeated_) +
+                          ", failures=" + std::to_string(failures_) + ", demoted=" + std::to_string(demoted_) +
+                          ", captured=" + std::to_string(captured_) + ", gpuMs=" +
                           Number(gpu_ ? gpu_->LastGpuMilliseconds() : -1.0, 2) + ".");
+            app_work_ms_ = 0.0;
+            app_work_frames_ = 0;
+            cycles_ = 0;
+            late_cycles_ = 0;
         }
     }
     idle_cv_.notify_all();
@@ -765,7 +781,7 @@ void FrameGenPresenter::NotePhaseLocked(Clock::time_point called, Clock::time_po
     }
 }
 
-void FrameGenPresenter::PaceSubmission(XrTime display_time, XrDuration period) {
+bool FrameGenPresenter::PaceSubmission(XrTime display_time, XrDuration period) {
     // Pimax and SteamVR can return the waits inside a generated cycle at once
     // instead of pacing them, so the cycle's frames would reach the
     // compositor inside one refresh and only the newest would be shown. Each
@@ -773,21 +789,25 @@ void FrameGenPresenter::PaceSubmission(XrTime display_time, XrDuration period) {
     // from the last wait that did block, and at least most of a refresh after
     // the previous submission. Runtimes that pace their waits rarely sleep.
     if (period <= 0) {
-        return;
+        return false;
     }
     const auto now = Clock::now();
     Clock::time_point target{};
+    bool late = false;
     {
         std::scoped_lock lock(mutex_);
         if (last_runtime_submit_ != Clock::time_point{}) {
             target = last_runtime_submit_ + std::chrono::nanoseconds(period * 17 / 20);
         }
         if (phase_wall_ != Clock::time_point{} && now - phase_wall_ <= kPhaseLifetime && display_time > phase_xr_) {
-            target = std::max(target, phase_wall_ + std::chrono::nanoseconds(display_time - phase_xr_));
+            const auto ideal = phase_wall_ + std::chrono::nanoseconds(display_time - phase_xr_);
+            late = now > ideal + std::chrono::nanoseconds(period / 2);
+            target = std::max(target, ideal);
         }
     }
     // A wrong phase never costs more than about one refresh.
     SleepUntil(timer_, std::min(target, now + std::chrono::nanoseconds(period * 6 / 5)));
+    return late;
 }
 
 XrResult FrameGenPresenter::NextSlot(XrSession session, const FrameGenRuntimeCalls& calls, XrDuration period,
@@ -883,7 +903,10 @@ XrResult FrameGenPresenter::RunCycle(XrSession session, const XrFrameEndInfo& in
             time = state.predictedDisplayTime;
             should_render = state.shouldRender == XR_TRUE;
         } else {
-            PaceSubmission(time, period);
+            const bool late = PaceSubmission(time, period);
+            std::scoped_lock lock(mutex_);
+            ++cycles_;
+            late_cycles_ += late ? 1 : 0;
         }
         XrFrameEndInfo content = info; // the real frame, in the cycle's last slot
         if (slot < generated) {
