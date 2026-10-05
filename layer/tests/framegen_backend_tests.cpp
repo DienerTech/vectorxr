@@ -19,6 +19,7 @@
 #endif
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -41,6 +42,9 @@ namespace {
 
 constexpr std::uint32_t kSize = 384;
 constexpr int kSkip = 77;
+// On a hardware adapter (bench-, hw-, profile, nvof, replay) and benchmarking.
+bool g_bench = false;
+bool g_hardware = false;
 
 void Check(bool ok, const std::string& why) {
     if (!ok) {
@@ -525,6 +529,51 @@ int RunScenarios(Harness& harness) {
         tuning.hardware_flow = false;
     }
 
+    // 3h. Captured at release, as games' frames are, the hardware matches
+    // the frames as rendered right away; generation then takes the head
+    // movement out of its vectors. Motion still moves, and a static
+    // panorama seen by a turning head stays where the newest frame has it.
+    if (harness.name == "D3D12" && g_hardware) {
+        auto backend = CreateFrameGenGpu(harness.binding, error);
+        Check(backend != nullptr, harness.name + " backend: " + error);
+        Check(backend->Track(kSource, EnumerateImages, error) && backend->Track(kOutput, EnumerateImages, error) &&
+                  backend->Track(kOutputSecond, EnumerateImages, error),
+              error);
+        FrameGenTuning raw_tuning;
+        raw_tuning.mode = FrameGenSynthesisMode::kExtrapolate;
+        raw_tuning.fractions[0] = 0.5f;
+        raw_tuning.hardware_flow = true;
+        auto captured = [&](const std::array<Pixels, 3>& frames, const std::array<float, 3>& yaws) {
+            for (std::uint32_t i = 0; i < 3; ++i) harness.upload(g_swapchains[kSource][i], frames[i]);
+            backend->ResetHistory();
+            for (std::uint32_t i = 0; i < 3; ++i) {
+                const std::vector<FrameGenViewSubmission> views{
+                    Submission(i, harness.format, output_format, true, yaws[i], i ? yaws[i - 1] : yaws[i])};
+                Check(backend->Capture(0, views[0].source, views[0].request, raw_tuning.quality, error) || error.empty(),
+                      harness.name + " capture: " + error);
+                const bool executed = backend->Execute(views, raw_tuning, result, error);
+                Check(executed, harness.name + " execute: " + error);
+            }
+            return harness.readback(g_swapchains[kOutput][0]);
+        };
+        const Pixels square = captured({MovingSquare(104, 112), MovingSquare(120, 120), MovingSquare(136, 128)}, {0, 0, 0});
+        const std::string status = backend->HardwareFlowStatus();
+        const double square_error = MeanError(square, MovingSquare(144, 132), 96, 96, 288, 288);
+        const double square_hold = MeanError(MovingSquare(136, 128), MovingSquare(144, 132), 96, 96, 288, 288);
+        const float turn = 2.0f * 3.14159265f / 180.0f;
+        const Pixels turned = captured({Panorama(0), Panorama(turn), Panorama(2 * turn)}, {0, turn, 2 * turn});
+        const double turned_error = MeanError(turned, Panorama(2 * turn), 48, 48, kSize - 48, kSize - 48);
+        const double turned_baseline = MeanError(Panorama(turn), Panorama(2 * turn), 48, 48, kSize - 48, kSize - 48);
+        std::cout << harness.name << " hardware flow from release (" << status << "): square " << square_error
+                  << " vs hold " << square_hold << ", turning head " << turned_error << " vs uncompensated "
+                  << turned_baseline << std::endl;
+        if (status == "active") {
+            Check(square_error < 0.5 * square_hold, harness.name + " motion matched at release is not extrapolated");
+            Check(turned_error < 0.3 * turned_baseline, harness.name + " head rotation leaked into vectors matched at release");
+        }
+        backend->Reset();
+    }
+
     // 3e. Steady motion over several frames keeps being extrapolated once the
     // last frame pair's motion is known, also when a real frame came late
     // (the frames' times say how far steady motion moved meanwhile).
@@ -800,8 +849,6 @@ int RunScenarios(Harness& harness) {
 
 // Benchmark: two views at real headset sizes on a hardware adapter. Not a
 // CTest; run `depthxr_framegen_tests bench-<api>` and read the GPU times.
-bool g_bench = false;
-bool g_hardware = false;
 
 int RunBench(Harness& harness) {
     std::string error;
@@ -943,7 +990,7 @@ int RunProfile(Harness& harness) {
     const char* names[] = {"luma",        "downsample",  "search",      "refine",      "filter",
                            "synthesize",  "synthesize16", "depth",      "depth check", "depth trust",
                            "flow pack",   "flow unpack", "trust update", "shift clear", "shift splat",
-                           "shift resolve", "shift fill", "source copy", "output copy", "hardware wait"};
+                           "shift resolve", "shift fill", "raw pack",   "source copy", "output copy", "hardware wait"};
     static_assert(std::size(names) == kFrameGenPassCount + 3, "a name per profiled category");
     for (const int config : {0, 1, 2}) {
         const auto quality = config == 1 ? FrameGenFlowQuality::kQuality : FrameGenFlowQuality::kBalanced;
@@ -994,6 +1041,10 @@ int RunProfile(Harness& harness) {
                           error.empty(),
                       "depth capture: " + error);
             }
+            // Games release their images a few milliseconds before the frame
+            // ends and generation starts (FG_PROFILE_GAP_MS, default 6).
+            const char* gap = std::getenv("FG_PROFILE_GAP_MS");
+            Sleep(static_cast<DWORD>(gap ? std::atoi(gap) : 6));
             // FG_PROFILE_DUMP=<directory>: frames 30-34 of the first run as a
             // capture for `replay`.
             if (const char* dump = std::getenv("FG_PROFILE_DUMP"); dump && config == 0 && i >= 30 && i < 35) {

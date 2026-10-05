@@ -194,17 +194,24 @@ FrameGenViewPlan BuildFrameGenViewPlan(const FrameGenViewRequest& request, const
 
     if (tuning.hardware_flow) {
         // The optical flow hardware matches the half-resolution luma pair
-        // (run by the backend right after the pack), and the unpack scores
-        // each of its vectors the way block matching would.
-        FrameGenDispatch pack = Dispatch(FrameGenPass::kFlowPack, plan.levels[1], plan.levels[1], base);
-        pack.inputs = {Texture(FrameGenTextureKind::kLumaNewest, 1), Texture(FrameGenTextureKind::kLumaPrevious, 1), {}, {}, {}};
-        pack.outputs = {Texture(FrameGenTextureKind::kHardwareNewest), Texture(FrameGenTextureKind::kHardwarePrevious)};
-        plan.dispatches.push_back(pack);
+        // (run by the backend right before the unpack), and the unpack scores
+        // each of its vectors the way block matching would. Frames it matched
+        // as rendered need no pack, and the unpack takes the head movement
+        // out of its vectors.
+        if (!request.hardware_raw) {
+            FrameGenDispatch pack = Dispatch(FrameGenPass::kFlowPack, plan.levels[1], plan.levels[1], base);
+            pack.inputs = {Texture(FrameGenTextureKind::kLumaNewest, 1), Texture(FrameGenTextureKind::kLumaPrevious, 1),
+                           {}, {}, {}};
+            pack.outputs = {Texture(FrameGenTextureKind::kHardwareNewest), Texture(FrameGenTextureKind::kHardwarePrevious)};
+            plan.dispatches.push_back(pack);
+        }
         FrameGenDispatch unpack = Dispatch(FrameGenPass::kFlowUnpack, plan.levels[kFrameGenHardwareFlowLevel],
                                            plan.levels[1], base);
         unpack.inputs = {Texture(FrameGenTextureKind::kHardwareFlow), Texture(FrameGenTextureKind::kLumaNewest, 1),
-                         Texture(FrameGenTextureKind::kLumaPrevious, 1), {}, {}};
+                         Texture(FrameGenTextureKind::kLumaPrevious, 1), request.hardware_raw ? depth : FrameGenTexture{},
+                         {}};
         unpack.outputs = {Texture(FrameGenTextureKind::kFlow, kFrameGenHardwareFlowLevel), {}};
+        unpack.constants.options[0] = request.hardware_raw ? 1u : 0u;
         unpack.constants.options[3] = 1u << (kFrameGenHardwareFlowLevel - 1);
         plan.dispatches.push_back(unpack);
     }
@@ -308,6 +315,14 @@ FrameGenViewPlan BuildFrameGenViewPlan(const FrameGenViewRequest& request, const
         plan.dispatches.push_back(output);
     }
     return plan;
+}
+
+FrameGenDispatch BuildFrameGenRawPackDispatch(FrameGenExtent view_extent) {
+    const FrameGenExtent half = FrameGenPyramid(view_extent)[1];
+    FrameGenDispatch dispatch = Dispatch(FrameGenPass::kFlowPackRaw, half, view_extent, {});
+    dispatch.inputs = {Texture(FrameGenTextureKind::kHistoryNewest), {}, {}, {}, {}};
+    dispatch.outputs = {Texture(FrameGenTextureKind::kHardwareNewest), {}};
+    return dispatch;
 }
 
 FrameGenDispatch BuildFrameGenDepthCheckDispatch(const FrameGenViewGeometry& view0, const FrameGenViewGeometry& view1,

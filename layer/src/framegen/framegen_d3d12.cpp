@@ -100,11 +100,27 @@ struct ViewResources {
     Texture hardware_newest;
     Texture hardware_previous;
     Texture hardware_flow;
+    // Matching frames as rendered, started at capture (kFlowPackRaw,
+    // FrameGenViewRequest::hardware_raw): two raw luma images used in turn
+    // and the vectors between them, apart from the images Execute packs.
+    std::array<Texture, 2> raw;
+    Texture raw_flow;
 #ifdef DEPTHXR_NVOF
     NvOFHandle hardware{};
-    NvOFGPUBufferHandle hardware_buffers[3]{}; // newest, previous, vectors
+    // newest, previous, vectors, then raw[0], raw[1], raw vectors
+    NvOFGPUBufferHandle hardware_buffers[6]{};
     NV_OF_PERF_LEVEL hardware_perf{NV_OF_PERF_LEVEL_UNDEFINED};
 #endif
+    std::uint8_t raw_next{0};          // the raw image the next capture writes
+    bool raw_previous{false};          // the other one holds the last capture's luma
+    std::uint64_t raw_count{0};        // raw captures so far
+    std::uint64_t raw_captured{0};     // the count of the capture Execute may use next (0: none)
+    std::uint64_t raw_executed{0};     // the count of the newest frame the last Execute generated from
+    std::uint64_t raw_reference{0};    // the count of the reference the pending raw match used
+    UINT64 raw_value{0};               // the hardware fence value of the pending raw match
+    CaptureKey raw_capture;            // the capture it matched
+    bool raw_in_use{false};            // this Execute unpacks raw_flow
+    int hardware_mode{0};              // what the session matched last: 1 packed, 2 raw (hints)
     FrameGenExtent hardware_extent{};
     bool hardware_fresh{false}; // no vectors of its own to hint the next match yet
     bool hardware_matched{false}; // its session has matched once (see StartHardwareWatchdog)
@@ -121,7 +137,7 @@ struct ViewRecording {
     bool draw{false};
     bool temporal{false};
     std::size_t next{0};
-    bool waits_for_hardware{false}; // stopped after kFlowPack
+    bool waits_for_hardware{false}; // stopped before kFlowUnpack
 };
 
 struct FrameSlot {
@@ -348,6 +364,7 @@ class D3D12FrameGen final : public FrameGenGpu {
         }
         std::vector<D3D12_RESOURCE_BARRIER> barriers;
         CopySource(capture_commands_.Get(), barriers, view, source, resource);
+        const bool raw = RecordRawPack(view, request, static_cast<std::size_t>(capture_count_ % capture_slots_.size()));
         hr = capture_commands_->Close();
         if (FAILED(hr)) {
             // Nothing was submitted, so tracked states no longer match the GPU:
@@ -355,6 +372,11 @@ class D3D12FrameGen final : public FrameGenGpu {
             error = Failure("D3D12 Frame Generation capture close", hr);
             view.history_state = {};
             return false;
+        }
+        if (raw && raw_wait_value_) {
+            // The raw image written now was the reference of the last match.
+            hardware_wait_value_ = std::max<UINT64>(hardware_wait_value_, raw_wait_value_);
+            queue_->Wait(hardware_fence_.Get(), raw_wait_value_);
         }
         ID3D12CommandList* lists[] = {capture_commands_.Get()};
         queue_->ExecuteCommandLists(1, lists);
@@ -367,7 +389,102 @@ class D3D12FrameGen final : public FrameGenGpu {
         slot.fence_value = fence_value_;
         ++capture_count_;
         view.capture = {true, source.swapchain, source.image_index, source.array_index, source.rect};
+        view.raw_captured = 0;
+        if (raw) {
+            MatchRaw(view);
+        }
         return true;
+    }
+
+    // With optical flow hardware in use, records the captured frame's raw
+    // luma (kFlowPackRaw) into the view's next raw image on the capture list.
+    bool RecordRawPack(ViewResources& view, const FrameGenViewRequest& request, std::size_t slot_index) {
+#ifdef DEPTHXR_NVOF
+        if (!hardware_active_ || hardware_failed_ || !view.hardware || !view.raw_flow.resource) {
+            return false;
+        }
+        const FrameGenDispatch dispatch = BuildFrameGenRawPackDispatch(request.extent);
+        const UINT base = kDescriptorsPerFrame * kFramesInFlight + static_cast<UINT>(slot_index) * kDescriptorsPerDispatch;
+        Texture& color = view.history[view.history_state.Newest()];
+        Texture& target = view.raw[view.raw_next];
+        ShaderResource(&color, base, 0);
+        for (UINT i = 1; i < kShaderResources; ++i) {
+            ShaderResource(nullptr, base, i);
+        }
+        UnorderedAccess(&target, base + kFirstUav);
+        UnorderedAccess(nullptr, base + kFirstUav + 1);
+        std::vector<D3D12_RESOURCE_BARRIER> barriers;
+        Require(barriers, color, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        Require(barriers, target, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        if (!barriers.empty()) {
+            capture_commands_->ResourceBarrier(static_cast<UINT>(barriers.size()), barriers.data());
+            barriers.clear();
+        }
+        ID3D12DescriptorHeap* heaps[] = {heap_.Get()};
+        capture_commands_->SetDescriptorHeaps(1, heaps);
+        capture_commands_->SetComputeRootSignature(root_signature_.Get());
+        capture_commands_->SetPipelineState(pipelines_[static_cast<std::size_t>(FrameGenPass::kFlowPackRaw)].Get());
+        capture_commands_->SetComputeRoot32BitConstants(0, sizeof(FrameGenConstants) / 4, &dispatch.constants, 0);
+        capture_commands_->SetComputeRootDescriptorTable(1, Gpu(base));
+        capture_commands_->SetComputeRootDescriptorTable(2, Gpu(base + kFirstUav));
+        capture_commands_->Dispatch((dispatch.width + kFrameGenThreadGroupSize - 1) / kFrameGenThreadGroupSize,
+                                    (dispatch.height + kFrameGenThreadGroupSize - 1) / kFrameGenThreadGroupSize, 1);
+        // The hardware reads and writes its images in COMMON.
+        Require(barriers, target, D3D12_RESOURCE_STATE_COMMON);
+        Require(barriers, view.raw[view.raw_next ^ 1u], D3D12_RESOURCE_STATE_COMMON);
+        Require(barriers, view.raw_flow, D3D12_RESOURCE_STATE_COMMON);
+        capture_commands_->ResourceBarrier(static_cast<UINT>(barriers.size()), barriers.data());
+        return true;
+#else
+        static_cast<void>(view);
+        static_cast<void>(request);
+        static_cast<void>(slot_index);
+        return false;
+#endif
+    }
+
+    // After the raw pack is submitted: has the hardware match it against the
+    // view's previous raw image, if the previous capture packed one.
+    void MatchRaw(ViewResources& view) {
+#ifdef DEPTHXR_NVOF
+        const std::uint8_t newest = view.raw_next;
+        view.raw_next ^= 1u;
+        const std::uint64_t reference = view.raw_previous ? view.raw_count : 0;
+        view.raw_captured = ++view.raw_count;
+        view.raw_previous = true;
+        view.raw_value = 0;
+        if (!reference) {
+            return;
+        }
+        NV_OF_FENCE_POINT ready{fence_.Get(), fence_value_};
+        NV_OF_EXECUTE_INPUT_PARAMS_D3D12 in{};
+        in.inputFrame = view.hardware_buffers[3 + newest];
+        in.referenceFrame = view.hardware_buffers[3 + (newest ^ 1u)];
+        // Its own hints only from a raw match of the frame before.
+        in.disableTemporalHints = view.hardware_mode == 2 && view.raw_executed == reference ? NV_OF_FALSE : NV_OF_TRUE;
+        in.numFencePoints = 1;
+        in.fencePoint = &ready;
+        NV_OF_FENCE_POINT done{hardware_fence_.Get(), ++hardware_fence_value_};
+        NV_OF_EXECUTE_OUTPUT_PARAMS_D3D12 out{};
+        out.outputBuffer = view.hardware_buffers[5];
+        out.fencePoint = &done;
+        hardware_allowed_ms_ = view.hardware_matched ? 250 : 3000;
+        hardware_submitted_at_ = GetTickCount64();
+        if (stall_hardware_for_test_) {
+            stall_hardware_for_test_ = false;
+        } else if (hardware_api_.nvOFExecuteD3D12(view.hardware, &in, &out) != NV_OF_SUCCESS) {
+            HardwareFailed("the optical flow hardware failed: " + HardwareError(view.hardware));
+            queue_->Signal(hardware_fence_.Get(), hardware_fence_value_);
+        }
+        view.hardware_matched = true;
+        view.hardware_mode = 2;
+        view.raw_reference = reference;
+        view.raw_value = hardware_fence_value_;
+        view.raw_capture = view.capture;
+        raw_wait_value_ = hardware_fence_value_;
+#else
+        static_cast<void>(view);
+#endif
     }
 
     bool WaitIdle() override {
@@ -1015,6 +1132,8 @@ class D3D12FrameGen final : public FrameGenGpu {
             // A session per view: its hints follow that view's motion.
             effective_tuning.hardware_flow = EnsureHardware(views_[i], views[i], tuning);
         }
+        // Captures start matching on the hardware while it is in use.
+        hardware_active_ = effective_tuning.hardware_flow;
         bool ok = true;
         // Depth the other eye disproves is dropped per texel before any view
         // uses it. Needs both eyes' images of this frame, captured at release.
@@ -1498,7 +1617,10 @@ class D3D12FrameGen final : public FrameGenGpu {
         std::string error;
         if (!Create(view.hardware_newest, input, DXGI_FORMAT_R8_UNORM, DXGI_FORMAT_R8_UNORM, true, error) ||
             !Create(view.hardware_previous, input, DXGI_FORMAT_R8_UNORM, DXGI_FORMAT_R8_UNORM, true, error) ||
-            !Create(view.hardware_flow, flow, DXGI_FORMAT_R16G16_SINT, DXGI_FORMAT_R16G16_SINT, false, error)) {
+            !Create(view.hardware_flow, flow, DXGI_FORMAT_R16G16_SINT, DXGI_FORMAT_R16G16_SINT, false, error) ||
+            !Create(view.raw[0], input, DXGI_FORMAT_R8_UNORM, DXGI_FORMAT_R8_UNORM, true, error) ||
+            !Create(view.raw[1], input, DXGI_FORMAT_R8_UNORM, DXGI_FORMAT_R8_UNORM, true, error) ||
+            !Create(view.raw_flow, flow, DXGI_FORMAT_R16G16_SINT, DXGI_FORMAT_R16G16_SINT, false, error)) {
             return HardwareFailed("its images could not be created (" + error + ")");
         }
         if (hardware_api_.nvCreateOpticalFlowD3D12(device_.Get(), &view.hardware) != NV_OF_SUCCESS || !view.hardware) {
@@ -1520,8 +1642,9 @@ class D3D12FrameGen final : public FrameGenGpu {
             RetireHardware(view);
             return HardwareFailed(reason);
         }
-        Texture* images[3] = {&view.hardware_newest, &view.hardware_previous, &view.hardware_flow};
-        for (int i = 0; i < 3; ++i) {
+        Texture* images[6] = {&view.hardware_newest, &view.hardware_previous, &view.hardware_flow,
+                              &view.raw[0],          &view.raw[1],               &view.raw_flow};
+        for (int i = 0; i < 6; ++i) {
             NV_OF_REGISTER_RESOURCE_PARAMS_D3D12 params{};
             params.resource = images[i]->resource.Get();
             params.inputFencePoint = {hardware_fence_.Get(), hardware_fence_value_};
@@ -1537,6 +1660,10 @@ class D3D12FrameGen final : public FrameGenGpu {
         view.hardware_perf = perf;
         view.hardware_fresh = true;
         view.hardware_matched = false;
+        view.hardware_mode = 0;
+        view.raw_previous = false;
+        view.raw_value = 0;
+        view.raw_captured = view.raw_executed = 0;
         return true;
 #else
         static_cast<void>(view);
@@ -1570,7 +1697,8 @@ class D3D12FrameGen final : public FrameGenGpu {
             }
             hardware_api_.nvOFDestroy(view.hardware);
             view.hardware = {};
-            for (Texture* texture : {&view.hardware_newest, &view.hardware_previous, &view.hardware_flow}) {
+            for (Texture* texture : {&view.hardware_newest, &view.hardware_previous, &view.hardware_flow, &view.raw[0],
+                                     &view.raw[1], &view.raw_flow}) {
                 texture->resource.Detach();
                 *texture = {};
             }
@@ -1586,7 +1714,7 @@ class D3D12FrameGen final : public FrameGenGpu {
 #ifdef DEPTHXR_NVOF
         std::vector<D3D12_RESOURCE_BARRIER> barriers;
         for (const ViewRecording& recording : recordings) {
-            if (recording.waits_for_hardware) {
+            if (recording.waits_for_hardware && !recording.view->raw_in_use) {
                 Require(barriers, recording.view->hardware_newest, D3D12_RESOURCE_STATE_COMMON);
                 Require(barriers, recording.view->hardware_previous, D3D12_RESOURCE_STATE_COMMON);
                 Require(barriers, recording.view->hardware_flow, D3D12_RESOURCE_STATE_COMMON);
@@ -1609,16 +1737,24 @@ class D3D12FrameGen final : public FrameGenGpu {
         }
         NV_OF_FENCE_POINT ready{fence_.Get(), fence_value_};
         bool first_match = false;
+        bool submitted = false;
+        UINT64 wait = 0;
         for (ViewRecording& recording : recordings) {
             if (!recording.waits_for_hardware) {
                 continue;
             }
             ViewResources& view = *recording.view;
+            if (view.raw_in_use) {
+                // Matched since the game released the image.
+                wait = std::max(wait, view.raw_value);
+                continue;
+            }
             NV_OF_EXECUTE_INPUT_PARAMS_D3D12 in{};
             in.inputFrame = view.hardware_buffers[0];
             in.referenceFrame = view.hardware_buffers[1];
             // Its own hints from the last pair, unless the history restarted.
-            in.disableTemporalHints = recording.temporal && !view.hardware_fresh ? NV_OF_FALSE : NV_OF_TRUE;
+            in.disableTemporalHints =
+                recording.temporal && !view.hardware_fresh && view.hardware_mode == 1 ? NV_OF_FALSE : NV_OF_TRUE;
             first_match = first_match || !view.hardware_matched;
             in.numFencePoints = 1;
             in.fencePoint = &ready;
@@ -1628,6 +1764,8 @@ class D3D12FrameGen final : public FrameGenGpu {
             out.fencePoint = &done;
             if (stall_hardware_for_test_) {
                 stall_hardware_for_test_ = false;
+                submitted = true;
+                wait = std::max(wait, hardware_fence_value_);
                 continue; // its fence is never signalled
             }
             if (hardware_api_.nvOFExecuteD3D12(view.hardware, &in, &out) != NV_OF_SUCCESS) {
@@ -1638,11 +1776,16 @@ class D3D12FrameGen final : public FrameGenGpu {
             }
             view.hardware_fresh = false;
             view.hardware_matched = true;
+            view.hardware_mode = 1;
+            submitted = true;
+            wait = std::max(wait, hardware_fence_value_);
         }
-        hardware_allowed_ms_ = first_match ? 3000 : 250;
-        hardware_submitted_at_ = GetTickCount64();
-        hardware_wait_value_ = hardware_fence_value_;
-        queue_->Wait(hardware_fence_.Get(), hardware_fence_value_);
+        if (submitted) {
+            hardware_allowed_ms_ = first_match ? 3000 : 250;
+            hardware_submitted_at_ = GetTickCount64();
+        }
+        hardware_wait_value_ = wait;
+        queue_->Wait(hardware_fence_.Get(), wait);
         hr = slot.after_hardware->Reset();
         if (SUCCEEDED(hr)) hr = commands_->Reset(slot.after_hardware.Get(), nullptr);
         if (FAILED(hr)) {
@@ -1689,7 +1832,7 @@ class D3D12FrameGen final : public FrameGenGpu {
         case FrameGenTextureKind::kDepth: return &view.depth;
         case FrameGenTextureKind::kHardwareNewest: return &view.hardware_newest;
         case FrameGenTextureKind::kHardwarePrevious: return &view.hardware_previous;
-        case FrameGenTextureKind::kHardwareFlow: return &view.hardware_flow;
+        case FrameGenTextureKind::kHardwareFlow: return view.raw_in_use ? &view.raw_flow : &view.hardware_flow;
         case FrameGenTextureKind::kTrustNewest: return &view.trust[newest];
         case FrameGenTextureKind::kTrustPrevious: return &view.trust[previous];
         case FrameGenTextureKind::kShiftKeys: return &view.shift_keys;
@@ -1768,6 +1911,16 @@ class D3D12FrameGen final : public FrameGenGpu {
         view.depth_ready = false;
         effective.trust_stereo = view.trust_stereo;
         view.trust_stereo = false;
+        // The hardware matched this frame against the previous one as soon
+        // as the game released it: usable when that previous one is the frame
+        // the last Execute generated from.
+        const bool captured = view.capture.Matches(submission.source);
+        effective.hardware_raw = tuning.hardware_flow && effective.synthesize && captured && view.raw_value &&
+                                 view.raw_capture.Matches(submission.source) && view.raw_reference &&
+                                 view.raw_reference == view.raw_executed;
+        view.raw_in_use = effective.hardware_raw;
+        view.raw_executed = captured ? view.raw_captured : 0;
+        view.raw_value = effective.hardware_raw ? view.raw_value : 0;
         if (effective.depth && !EnsureTrust(view, submission.request.extent, error)) {
             return false;
         }
@@ -1799,7 +1952,8 @@ class D3D12FrameGen final : public FrameGenGpu {
     }
 
     // Records a view's plan from where it stopped; with `until_hardware`,
-    // stops right after kFlowPack, where the optical flow hardware runs.
+    // stops right before kFlowUnpack, which needs the optical flow hardware's
+    // vectors.
     bool RecordPlan(ViewRecording& recording, bool until_hardware, std::string& error) {
         ViewResources& view = *recording.view;
         const FrameGenViewSubmission& submission = *recording.submission;
@@ -1807,6 +1961,11 @@ class D3D12FrameGen final : public FrameGenGpu {
         std::vector<D3D12_RESOURCE_BARRIER> barriers;
         recording.waits_for_hardware = false;
         while (recording.next < recording.plan.dispatches.size()) {
+            if (until_hardware && recording.plan.dispatches[recording.next].pass == FrameGenPass::kFlowUnpack) {
+                // The optical flow hardware's vectors are next.
+                recording.waits_for_hardware = true;
+                return true;
+            }
             const FrameGenDispatch& dispatch = recording.plan.dispatches[recording.next++];
             if (recording.draw && Generates(dispatch)) {
                 continue;
@@ -1854,10 +2013,6 @@ class D3D12FrameGen final : public FrameGenGpu {
                 Transition(barriers, output, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_RENDER_TARGET);
                 Flush(barriers);
                 Stamp(kProfileOutputCopy);
-            }
-            if (until_hardware && dispatch.pass == FrameGenPass::kFlowPack) {
-                recording.waits_for_hardware = true;
-                return true;
             }
         }
         return !recording.draw || RecordDraw(view, submission, outputs, recording.frames, error);
@@ -1934,6 +2089,8 @@ class D3D12FrameGen final : public FrameGenGpu {
     std::atomic<UINT64> hardware_wait_value_{0};
     std::atomic<ULONGLONG> hardware_submitted_at_{0};
     std::atomic<ULONGLONG> hardware_allowed_ms_{250};
+    bool hardware_active_{false};  // the last Execute used the hardware: captures match early
+    UINT64 raw_wait_value_{0};     // the last raw match, which reads the raw images
     std::atomic<bool> hardware_stuck_{false};
     bool stall_hardware_for_test_{false};
     // Generated frames drawn straight into the output images.

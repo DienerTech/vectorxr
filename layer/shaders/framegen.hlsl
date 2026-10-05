@@ -945,17 +945,70 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
 }
 #endif
 
+#if defined(FG_PASS_FLOW_PACK_RAW)
+FG_BIND(0) Texture2D<float4> g_color : register(t0);
+FG_BIND(6) SamplerState g_linear : register(s0);
+FG_BIND(4) FG_FORMAT("r8") RWTexture2D<float> g_raw : register(u0);
+
+// A frame's half-resolution luma as it was rendered, head movement and all,
+// for the optical flow hardware to match against the previous frame's as
+// soon as the game releases the image (FG_PASS_FLOW_UNPACK then takes the
+// head movement out with the poses).
+[numthreads(8, 8, 1)]
+void CSMain(uint3 id : SV_DispatchThreadID) {
+    if (any(id.xy >= g.size.xy)) {
+        return;
+    }
+    const float2 uv = (float2(id.xy) + 0.5) / float2(g.size.xy);
+    g_raw[id.xy] = saturate(Luma(g_color.SampleLevel(g_linear, uv, 0.0).rgb));
+}
+#endif
+
 #if defined(FG_PASS_FLOW_UNPACK)
 FG_BIND(0) Texture2D<int2> g_hardware_flow : register(t0);
 FG_BIND(1) Texture2D<float4> g_luma_current : register(t1);
 FG_BIND(2) Texture2D<float4> g_luma_previous : register(t2);
+FG_BIND(3) Texture2D<float4> g_depth : register(t3);
 FG_BIND(4) FG_FORMAT("rgba16f") RWTexture2D<float4> g_flow : register(u0);
+
+// options.x: the hardware matched the frames as rendered (FG_PASS_FLOW_PACK_RAW).
+#define FG_UNPACK_RAW 1u
+
+// The inverse of MapToPrevious: where a previous-view coordinate lies in the
+// newest view, for content at newest-view depth `depth` (rotation only
+// without it). False behind the newest view.
+bool MapToNewest(float2 previous_uv, float depth, out float2 newest_uv) {
+    const float3 seen = float3(lerp(g.fov_previous.x, g.fov_previous.y, previous_uv.x),
+                               lerp(g.fov_previous.z, g.fov_previous.w, previous_uv.y), -1.0);
+    // R transposed: newest-view directions from previous-view ones.
+    const float3 c0 = float3(g.rot0.x, g.rot1.x, g.rot2.x);
+    const float3 c1 = float3(g.rot0.y, g.rot1.y, g.rot2.y);
+    const float3 c2 = float3(g.rot0.z, g.rot1.z, g.rot2.z);
+    float3 located = float3(dot(c0, seen), dot(c1, seen), dot(c2, seen));
+    if ((g.options.y & FG_FLAG_DEPTH) != 0u && depth > 0.0 && depth < FG_FAR_DEPTH && abs(located.z) > 1e-6) {
+        // The point is s * seen in the previous view and R^T (s seen - t) in
+        // the newest, at depth `depth` there.
+        const float3 t = float3(g.rot0.w, g.rot1.w, g.rot2.w);
+        const float3 back = float3(dot(c0, t), dot(c1, t), dot(c2, t));
+        located = (back.z - depth) / located.z * located - back;
+    }
+    newest_uv = float2(0.0, 0.0);
+    if (located.z > -1e-4) {
+        return false;
+    }
+    const float2 tangent = located.xy / -located.z;
+    newest_uv = float2((tangent.x - g.fov_current.x) / (g.fov_current.y - g.fov_current.x),
+                       (tangent.y - g.fov_current.z) / (g.fov_current.w - g.fov_current.z));
+    return true;
+}
 
 // The hardware's vectors (S10.5 half-resolution pixels, from the newest
 // frame to the previous one) as flow (previous to newest, normalized), each
 // scored like block matching scores its vectors (FG_PASS_REFINE): the mean
 // luma difference of the block of options.w x options.w half-resolution
-// texels it carries, so synthesis trusts both kinds of flow alike.
+// texels it carries, so synthesis trusts both kinds of flow alike. Vectors
+// between frames as rendered (FG_UNPACK_RAW) first lose the head movement:
+// the previous position they point at is mapped back into the newest view.
 [numthreads(8, 8, 1)]
 void CSMain(uint3 id : SV_DispatchThreadID) {
     if (any(id.xy >= g.size.xy)) {
@@ -964,9 +1017,16 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
     uint width, height;
     g_luma_current.GetDimensions(width, height);
     const int2 extent = int2(width, height);
-    const float2 d = -float2(g_hardware_flow.Load(int3(id.xy, 0)).xy) / 32.0;
-    const int2 offset = int2(round(d));
     const int scale = int(g.options.w);
+    float2 d = -float2(g_hardware_flow.Load(int3(id.xy, 0)).xy) / 32.0;
+    if ((g.options.x & FG_UNPACK_RAW) != 0u) {
+        const float2 centre = (float2(id.xy) * float(scale) + 0.5 * float(scale)) / float2(extent);
+        float2 newest_uv;
+        d = MapToNewest(centre - d / float2(extent), DepthNearest(g_depth, centre), newest_uv)
+                ? (centre - newest_uv) * float2(extent)
+                : float2(0.0, 0.0);
+    }
+    const int2 offset = int2(round(d));
     float sum = 0.0;
     float count = 0.0;
     [loop]

@@ -40,8 +40,12 @@ enum class FrameGenPass : std::uint8_t {
     kShiftSplat,
     kShiftResolve,
     kShiftFill,
+    // Optical flow hardware matching frames as rendered, started when the
+    // game releases each image: its half-resolution luma (no head movement
+    // taken out), recorded with the capture (FrameGenViewRequest::hardware_raw).
+    kFlowPackRaw,
 };
-inline constexpr std::size_t kFrameGenPassCount = 17;
+inline constexpr std::size_t kFrameGenPassCount = 18;
 
 // Logical textures owned per view. History and filtered flow are ping-pong
 // pairs: "newest" is written this submission, "previous" is last
@@ -182,6 +186,10 @@ struct FrameGenViewRequest {
     // the view (kDepthTrust), and last frame's trust scores are valid.
     bool trust_stereo{false};
     bool trust_history{false};
+    // Set by backends: the optical flow hardware already matched this frame
+    // and the previous one as rendered (kFlowPackRaw at capture), so the plan
+    // packs nothing and kFlowUnpack takes the head movement out.
+    bool hardware_raw{false};
 };
 
 struct FrameGenTuning {
@@ -361,6 +369,9 @@ struct FrameGenDepthStatus {
     std::uint32_t decisions{0};
     FrameGenDepthEvidence evidence;
 };
+// The kFlowPackRaw dispatch for a view of this extent (half resolution).
+FrameGenDispatch BuildFrameGenRawPackDispatch(FrameGenExtent view_extent);
+
 // Luma level a flow level matches against: two levels finer, at most half resolution.
 std::uint8_t FrameGenMatchLevel(std::uint8_t flow_level);
 std::array<FrameGenExtent, kFrameGenPyramidLevels + 1> FrameGenPyramid(FrameGenExtent extent);

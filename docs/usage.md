@@ -652,10 +652,11 @@ needs a game restart; turning it off applies at once.
 - **Motion estimation** (experimental): **Shader** (default) measures motion by block matching
   on the GPU's shader cores, on any GPU. **NVIDIA hardware** uses the optical flow accelerator of
   NVIDIA RTX 20-50 GPUs in Direct3D 12 games such as MSFS, at 1/8 of the eye image. Repeating
-  patterns such as building windows and railings no longer lock onto the wrong repeat. For now
-  the game's GPU queue waits for the accelerator every real frame (about 7 ms at a Pimax Crystal
-  Super's resolution), so the game runs a little slower. With **Performance** flow quality it
-  uses the accelerator's fastest preset. Elsewhere Shader is used, and the log says why. In
+  patterns such as building windows and railings no longer lock onto the wrong repeat. The
+  accelerator starts on each eye's image as soon as the game releases it, so it mostly runs
+  while the game finishes its frame (about 7 ms of accelerator time at a Pimax Crystal Super's
+  resolution). With **Performance** flow quality it uses the accelerator's fastest preset, which
+  is less accurate on repeating patterns. Elsewhere Shader is used, and the log says why. In
   `settings.json`, set `"motionEstimation": "hardware"` in a profile's settings.
 - **Artifact suppression** (0–100, default 50): higher values fall back to the real image
   sooner where motion is uncertain. You get fewer warping artifacts and more local judder.

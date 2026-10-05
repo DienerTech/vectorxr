@@ -1583,8 +1583,8 @@ bool FrameGenPresenter::Generate(const XrCompositionLayerProjection& projection,
     if (logger_ && !hardware_status.empty() && hardware_status != logged_hardware_status_) {
         logged_hardware_status_ = hardware_status;
         logger_->Info(hardware_status == "active"
-                          ? "Frame Generation measures motion with NVIDIA's optical flow hardware (experimental): the "
-                            "game's GPU queue waits for it each real frame."
+                          ? "Frame Generation measures motion with NVIDIA's optical flow hardware (experimental): it "
+                            "starts matching each eye's image as soon as the game releases it."
                           : "Frame Generation cannot use NVIDIA's optical flow hardware (" + hardware_status +
                                 "); block matching measures motion instead.");
     }

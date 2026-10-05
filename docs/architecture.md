@@ -148,9 +148,15 @@ its own temporal hints. The frame's command list is split:
 3. The queue waits for the accelerator's fence.
 4. Unpack (the vectors with our block cost as their confidence), filter and synthesis.
 
-Waiting on the session's queue stalls the game's GPU work behind the accelerator. Running
-Frame Generation on its own queue, with output images released only once their work is done,
-would remove that.
+That wait would stall the game's GPU work behind the accelerator for its whole run (about 7 ms
+at headset resolution), and the first generated frame would miss its refresh. So once the
+accelerator is in use, every color capture at release also packs the frame's raw luma
+(`kFlowPackRaw`, head movement and all) and starts the accelerator on it against the previous
+capture's. The accelerator then runs while the game finishes its frame. Generation uses those
+vectors when the previous capture was the frame it last generated from. The unpack maps the
+previous position each vector points at back into the newest view (the inverse of the
+head-movement mapping, with the trusted depth), which takes the head movement out. Otherwise it
+packs and matches as above.
 
 `depthxr_framegen_tests nvof` compares its vectors with ours on the scenarios' scenes and times
 it at headset size. Generation works on whatever projection views reach the runtime,
