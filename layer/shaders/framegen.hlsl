@@ -60,8 +60,10 @@ cbuffer FrameGenConstantBuffer : register(b0) {
 
 // Depth trust (FG_PASS_TRUST_UPDATE): a score per depth texel in [-1, 1],
 // positive where the other eye or the previous frame confirms the depth,
-// negative where content lines up as infinitely far instead. Depth is
-// dropped below -threshold and moves content with the eye above +threshold.
+// negative where content lines up as infinitely far instead. Only depth
+// scored above +threshold is used (head movement compensated in full,
+// content moved with the eye); below -threshold the texel is known to be
+// far (scenery behind glass), in between it is unknown.
 #define FG_TRUST_THRESHOLD 0.25
 
 #define FG_VIEW_FLOW 1u
@@ -1039,8 +1041,11 @@ FG_BIND(5) FG_FORMAT("r32f") RWTexture2D<float> g_depth : register(u1);
 //   - last frame's score at the texel's previous position: cockpit and
 //     glass stay where they are in the cockpit, so the depth maps a texel
 //     to where it was.
-// Then drops the depth of texels scored below -threshold (negated: head
-// movement is compensated for rotation only there).
+// Then drops the depth of texels not scored above +threshold (negated:
+// head movement is compensated for rotation only there). Plain content
+// neither view can vouch for (sky, haze, flat terrain behind glass the
+// game wrote depth for) is better treated as far: aligned by glass depth,
+// distant scenery would shift by the head's parallax at the glass.
 // options.x: FG_TRUST_* flags; the mapping describes newest -> previous.
 [numthreads(8, 8, 1)]
 void CSMain(uint3 id : SV_DispatchThreadID) {
@@ -1064,7 +1069,7 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
         }
         score = clamp(FG_TRUST_KEEP * carried + FG_TRUST_STEREO_WEIGHT * stereo + FG_TRUST_MOTION_WEIGHT * motion,
                       -1.0, 1.0);
-        if (score < -FG_TRUST_THRESHOLD) {
+        if (!(score > FG_TRUST_THRESHOLD)) {
             g_depth[id.xy] = -depth;
         }
     }
@@ -1104,8 +1109,8 @@ FG_BIND(1) Texture2D<float4> g_trust : register(t1);
 
 // Whether a texel moves with the eye: its depth is trusted, or at least
 // three of its neighbours on the same surface are (a texel too plain for
-// either eye to vouch for still moves with the panel around it). Depth the
-// trust update dropped (negative) never moves.
+// either eye to vouch for still moves with the panel around it). Content
+// known to be far never moves.
 bool MovesWithEye(int2 id, float depth) {
     if (g_trust.Load(int3(id, 0)).r > FG_TRUST_THRESHOLD) {
         return true;
@@ -1115,7 +1120,7 @@ bool MovesWithEye(int2 id, float depth) {
     [unroll]
     for (int i = 0; i < 9; ++i) {
         const int2 texel = clamp(id + int2(i % 3 - 1, i / 3 - 1), int2(0, 0), limit);
-        const float neighbour = g_depth.Load(int3(texel, 0)).r;
+        const float neighbour = abs(g_depth.Load(int3(texel, 0)).r);
         if (i != 4 && abs(neighbour - depth) < FG_SHIFT_SURFACE * depth &&
             g_trust.Load(int3(texel, 0)).r > FG_TRUST_THRESHOLD) {
             ++vouching;
@@ -1127,8 +1132,10 @@ bool MovesWithEye(int2 id, float depth) {
 bool Landing(uint2 id, out float2 landing, out uint key) {
     const float2 size = float2(g.size.xy);
     const float2 uv = (float2(id) + 0.5) / size;
-    const float depth = g_depth.Load(int3(id, 0)).r;
-    const bool known = depth > 0.0 && depth < FG_FAR_DEPTH;
+    // Untrusted depth (negative) still orders content unless it is known to
+    // be far: a plain cockpit surface keeps covering what moves behind it.
+    const float depth = abs(g_depth.Load(int3(id, 0)).r);
+    const bool known = depth > 0.0 && depth < FG_FAR_DEPTH && g_trust.Load(int3(id, 0)).r >= -FG_TRUST_THRESHOLD;
     float2 shifted = uv;
     bool inside = true;
     bool moves = false;
