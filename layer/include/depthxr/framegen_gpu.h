@@ -79,6 +79,13 @@ class FrameGenGpu {
     // How the game's depth is being read after checking it against the
     // other eye, with the evidence; counts decisions so callers log each once.
     virtual FrameGenDepthStatus DepthStatus() const { return {}; }
+    // Benchmarks only: while on, Execute stamps the GPU time after every
+    // pass and waits for the GPU, and PassMilliseconds() reports the last
+    // Execute's time per pass (kFrameGenPassCount entries, then source
+    // copies, then copies into the output swapchains). Empty where the
+    // backend cannot profile.
+    virtual void SetProfiling(bool /*on*/) {}
+    virtual std::vector<double> PassMilliseconds() const { return {}; }
     // Records and submits generation for every view on the session's graphics
     // queue, copying a view's source first unless Capture already did. Never
     // waits on the CPU for this submission.

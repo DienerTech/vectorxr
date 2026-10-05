@@ -197,20 +197,30 @@ float MotionTerm(int2 d, int2 extent) {
 #endif
 
 #if defined(FG_PASS_SEARCH)
-// Mean absolute luma difference of a 5x5 patch around `cell` displaced by
-// -d. Newest texels outside the image are skipped.
-float PatchCost(int2 cell, int2 d, int2 extent) {
+// The previous frame's luma around one thread group's cells, as far as any
+// candidate patch reaches: every candidate of every cell reads from here.
+#define FG_SEARCH_MAX_RADIUS 6
+#define FG_SEARCH_APRON (FG_SEARCH_MAX_RADIUS + FG_PATCH_RADIUS)
+#define FG_SEARCH_TILE (8 + 2 * FG_SEARCH_APRON)
+#define FG_PATCH_SIDE (2 * FG_PATCH_RADIUS + 1)
+groupshared float g_tile[FG_SEARCH_TILE * FG_SEARCH_TILE];
+
+struct Patch {
+    float luma[FG_PATCH_SIDE * FG_PATCH_SIDE];
+    bool valid[FG_PATCH_SIDE * FG_PATCH_SIDE];
+};
+
+// Mean absolute luma difference of a 5x5 patch around the cell, whose top
+// left patch texel is at `corner` in the tile, displaced by -d. Newest
+// texels outside the image are skipped.
+float PatchCost(Patch patch, int2 corner, int2 d, int2 extent) {
     float sum = 0.0;
     float count = 0.0;
-    [loop]
-    for (int y = -FG_PATCH_RADIUS; y <= FG_PATCH_RADIUS; ++y) {
-        [unroll]
-        for (int x = -FG_PATCH_RADIUS; x <= FG_PATCH_RADIUS; ++x) {
-            const int2 q = cell + int2(x, y);
-            if (any(q < 0) || any(q >= extent)) {
-                continue;
-            }
-            sum += MatchTerm(g_luma_current.Load(int3(q, 0)).r, PreviousLuma(q - d, extent));
+    [unroll]
+    for (int i = 0; i < FG_PATCH_SIDE * FG_PATCH_SIDE; ++i) {
+        if (patch.valid[i]) {
+            const int2 t = corner + int2(i % FG_PATCH_SIDE, i / FG_PATCH_SIDE) - d;
+            sum += MatchTerm(patch.luma[i], g_tile[t.y * FG_SEARCH_TILE + t.x]);
             count += 1.0;
         }
     }
@@ -219,20 +229,33 @@ float PatchCost(int2 cell, int2 d, int2 extent) {
 
 // Exhaustive search on the coarsest level.
 [numthreads(8, 8, 1)]
-void CSMain(uint3 id : SV_DispatchThreadID) {
+void CSMain(uint3 id : SV_DispatchThreadID, uint3 group : SV_GroupID, uint index : SV_GroupIndex) {
+    const int2 extent = MatchExtent();
+    const int2 origin = int2(group.xy) * 8 - FG_SEARCH_APRON;
+    for (uint t = index; t < FG_SEARCH_TILE * FG_SEARCH_TILE; t += 64) {
+        g_tile[t] = PreviousLuma(origin + int2(t % FG_SEARCH_TILE, t / FG_SEARCH_TILE), extent);
+    }
+    GroupMemoryBarrierWithGroupSync();
     if (any(id.xy >= g.size.xy)) {
         return;
     }
     const int2 cell = int2(id.xy);
-    const int2 extent = MatchExtent();
-    const int radius = int(g.options.x);
+    Patch patch;
+    [unroll]
+    for (int i = 0; i < FG_PATCH_SIDE * FG_PATCH_SIDE; ++i) {
+        const int2 q = cell + int2(i % FG_PATCH_SIDE, i / FG_PATCH_SIDE) - FG_PATCH_RADIUS;
+        patch.valid[i] = all(q >= 0) && all(q < extent);
+        patch.luma[i] = patch.valid[i] ? g_luma_current.Load(int3(q, 0)).r : 0.0;
+    }
+    const int2 corner = cell - origin - FG_PATCH_RADIUS;
+    const int radius = min(int(g.options.x), FG_SEARCH_MAX_RADIUS);
     int2 best = int2(0, 0);
-    float best_cost = PatchCost(cell, best, extent);
+    float best_cost = PatchCost(patch, corner, best, extent);
     [loop]
     for (int y = -radius; y <= radius; ++y) {
         [loop]
         for (int x = -radius; x <= radius; ++x) {
-            const float cost = PatchCost(cell, int2(x, y), extent);
+            const float cost = PatchCost(patch, corner, int2(x, y), extent);
             if (cost < best_cost) {
                 best_cost = cost;
                 best = int2(x, y);
@@ -257,6 +280,7 @@ FG_BIND(6) SamplerState g_linear : register(s0);
 struct Block {
     float luma[FG_BLOCK * FG_BLOCK];
     bool valid[FG_BLOCK * FG_BLOCK];
+    bool all_valid;
     int2 first;
     int2 extent;
 };
@@ -265,6 +289,7 @@ Block LoadBlock(int2 cell, int scale) {
     Block block;
     block.extent = MatchExtent();
     block.first = cell * scale - (scale >= FG_BLOCK ? 0 : 1);
+    block.all_valid = all(block.first >= 0) && all(block.first + (FG_BLOCK - 1) < block.extent);
     [unroll]
     for (int i = 0; i < FG_BLOCK * FG_BLOCK; ++i) {
         const int2 q = block.first + int2(i % FG_BLOCK, i / FG_BLOCK);
@@ -275,14 +300,35 @@ Block LoadBlock(int2 cell, int scale) {
 }
 
 float BlockCost(Block block, int2 d) {
+    const int2 first = block.first - d;
     float sum = 0.0;
     float count = 0.0;
-    [unroll]
-    for (int i = 0; i < FG_BLOCK * FG_BLOCK; ++i) {
-        if (block.valid[i]) {
-            const int2 q = block.first + int2(i % FG_BLOCK, i / FG_BLOCK);
-            sum += MatchTerm(block.luma[i], PreviousLuma(q - d, block.extent));
-            count += 1.0;
+    [branch]
+    if (block.all_valid && all(first >= 0) && all(first + (FG_BLOCK - 1) < block.extent)) {
+        // The whole previous block is inside the image: four gathers of 2x2
+        // texels each instead of sixteen loads (the most frequent case, and
+        // the bulk of Frame Generation's matching time). Gather returns
+        // (bottom left, bottom right, top right, top left) of the quad.
+        const float2 texel = 1.0 / float2(block.extent);
+        [unroll]
+        for (int y = 0; y < FG_BLOCK; y += 2) {
+            [unroll]
+            for (int x = 0; x < FG_BLOCK; x += 2) {
+                const float4 quad = g_luma_previous.GatherRed(g_linear, (float2(first + int2(x, y)) + 1.0) * texel);
+                sum += MatchTerm(block.luma[(y + 1) * FG_BLOCK + x], quad.x) +
+                       MatchTerm(block.luma[(y + 1) * FG_BLOCK + x + 1], quad.y) +
+                       MatchTerm(block.luma[y * FG_BLOCK + x + 1], quad.z) + MatchTerm(block.luma[y * FG_BLOCK + x], quad.w);
+            }
+        }
+        count = float(FG_BLOCK * FG_BLOCK);
+    } else {
+        [unroll]
+        for (int i = 0; i < FG_BLOCK * FG_BLOCK; ++i) {
+            if (block.valid[i]) {
+                const int2 q = block.first + int2(i % FG_BLOCK, i / FG_BLOCK);
+                sum += MatchTerm(block.luma[i], PreviousLuma(q - d, block.extent));
+                count += 1.0;
+            }
         }
     }
     return sum / max(count, 1.0) + MotionTerm(d, block.extent);
@@ -523,7 +569,6 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
         }
         candidates[6] = float4(0.0, 0.0, here.z, 1.0);
         chosen = candidates[0];
-        chosen_error = CandidateError(uv, chosen.xy, step);
         // Smooth motion, most of a frame, leaves nothing to choose between;
         // only pixels near a motion boundary, where the surrounding block
         // vectors disagree, pay for the comparisons. Zero motion is not one
@@ -536,7 +581,9 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
             spread = max(spread, length((candidates[s].xy - chosen.xy) * float2(g.size.xy)));
         }
         boundary = spread > 0.5;
+        [branch]
         if (boundary) {
+            chosen_error = CandidateError(uv, chosen.xy, step);
             [unroll]
             for (int k = 1; k < 7; ++k) {
                 const float error = CandidateError(uv, candidates[k].xy, step) + (k == 6 ? 0.03 : 0.01);

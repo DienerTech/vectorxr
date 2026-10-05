@@ -25,6 +25,7 @@
 #include <map>
 #include <tuple>
 #include <string>
+#include <thread>
 #include <vector>
 
 using namespace depthxr;
@@ -232,6 +233,9 @@ struct Harness {
     // A depth image cleared to `far_value`, with `rect` cleared to
     // `near_value`; empty where the backend has no depth path.
     std::function<void*(float near_value, XrRect2Di rect, float far_value)> create_depth;
+    // Profiling at headset sizes (Direct3D 12 only): the same at any size.
+    std::function<void(void*, std::uint32_t, std::uint32_t, const Pixels&)> upload_sized;
+    std::function<void*(std::uint32_t, std::uint32_t, float, XrRect2Di, float)> create_depth_sized;
 };
 
 std::map<XrSwapchain, std::vector<void*>> g_swapchains;
@@ -698,6 +702,7 @@ int RunScenarios(Harness& harness) {
 // Benchmark: two views at real headset sizes on a hardware adapter. Not a
 // CTest; run `depthxr_framegen_tests bench-<api>` and read the GPU times.
 bool g_bench = false;
+bool g_hardware = false;
 
 int RunBench(Harness& harness) {
     std::string error;
@@ -754,13 +759,170 @@ int RunBench(Harness& harness) {
     return 0;
 }
 
+// Profile: the MSFS-like case at headset size on the GPU. Two eyes of a
+// cockpit over scrolling scenery, with depth, extrapolated 4x; prints the
+// GPU time of every pass. Not a CTest: `depthxr_framegen_tests profile`.
+bool g_profile = false;
+std::uint32_t g_profile_width = 6240, g_profile_height = 6280;
+
+// The stereo cockpit at any size: the panel (fine detail) 0.5 m away over
+// scenery at infinity scrolled `scroll` tangent units sideways.
+Pixels CockpitAt(std::uint32_t width, std::uint32_t height, float head_x, float tan_left, float tan_right,
+                 float tan_vertical, float scroll) {
+    Pixels pixels(std::size_t{width} * height);
+    auto rows = [&](std::uint32_t first, std::uint32_t step) {
+        for (std::uint32_t y = first; y < height; y += step) {
+            const float ty = tan_vertical - 2 * tan_vertical * (y + 0.5f) / height;
+            for (std::uint32_t x = 0; x < width; ++x) {
+                const float tx = tan_left + (tan_right - tan_left) * (x + 0.5f) / width;
+                const float px = head_x + kPanelDistance * tx;
+                const float py = kPanelDistance * ty;
+                pixels[std::size_t{y} * width + x] = std::abs(px) < kPanelHalf && std::abs(py) < kPanelHalf
+                                                         ? Patch(px * 4000.0f + 100.0f, py * 4000.0f + 100.0f)
+                                                         : Background((tx + scroll) * 2400.0f, ty * 2400.0f);
+            }
+        }
+    };
+    const std::uint32_t threads = std::max(1u, std::thread::hardware_concurrency());
+    std::vector<std::thread> workers;
+    for (std::uint32_t t = 0; t < threads; ++t) {
+        workers.emplace_back(rows, t, threads);
+    }
+    for (auto& worker : workers) {
+        worker.join();
+    }
+    return pixels;
+}
+
+int RunProfile(Harness& harness) {
+    std::string error;
+    auto gpu = CreateFrameGenGpu(harness.binding, error);
+    Check(gpu != nullptr, harness.name + " backend: " + error);
+    gpu->SetProfiling(true);
+    const std::int64_t output_format = gpu->OutputFormats(FrameGenOutputKind::kSrgb8).front();
+    const std::uint32_t width = g_profile_width, height = g_profile_height;
+    const std::uint32_t depth_width = width * 4 / 5, depth_height = height * 4 / 5; // 80% render scale
+    // A Pimax Crystal Super's views: each eye sees further outward.
+    const float outer = 2.0f, inner = 1.26f, vertical = 1.64f, half_ipd = 0.0336f;
+    constexpr int kFrames = 6;
+    constexpr float kScroll = 0.004f; // per frame, ~8 px at this size
+    std::printf("Profiling %ux%u per eye, depth %ux%u, extrapolate 4x; rendering test frames...\n", width, height,
+                depth_width, depth_height);
+    std::array<XrSwapchain, 2> sources{reinterpret_cast<XrSwapchain>(0x61), reinterpret_cast<XrSwapchain>(0x62)};
+    std::array<XrSwapchain, 2> depths{reinterpret_cast<XrSwapchain>(0x63), reinterpret_cast<XrSwapchain>(0x64)};
+    std::array<std::array<XrSwapchain, 3>, 2> outputs{};
+    for (std::size_t eye = 0; eye < 2; ++eye) {
+        const float head = eye == 0 ? -half_ipd : half_ipd;
+        const float left = eye == 0 ? -outer : -inner, right = eye == 0 ? inner : outer;
+        g_swapchains[sources[eye]].clear();
+        for (int frame = 0; frame < kFrames; ++frame) {
+            void* image = harness.create(width, height);
+            harness.upload_sized(image, width, height, CockpitAt(width, height, head, left, right, vertical, kScroll * frame));
+            g_swapchains[sources[eye]].push_back(image);
+        }
+        // The panel in depth texels, depth MSFS-style: reversed, 1000 m to 0.1 m.
+        auto column = [&](float px) {
+            return static_cast<int>(((px - head) / kPanelDistance - left) / (right - left) * depth_width);
+        };
+        auto row = [&](float py) { return static_cast<int>((vertical - py / kPanelDistance) / (2 * vertical) * depth_height); };
+        const XrRect2Di panel{{column(-kPanelHalf), row(kPanelHalf)},
+                              {column(kPanelHalf) - column(-kPanelHalf), row(-kPanelHalf) - row(kPanelHalf)}};
+        const float panel_depth = (1.0f / kPanelDistance - 1.0f / 1000.0f) / (1.0f / 0.1f - 1.0f / 1000.0f);
+        g_swapchains[depths[eye]] = {harness.create_depth_sized(depth_width, depth_height, panel_depth, panel, 0.0f)};
+        for (std::size_t set = 0; set < 3; ++set) {
+            outputs[eye][set] = reinterpret_cast<XrSwapchain>(0x70 + eye * 3 + set);
+            g_swapchains[outputs[eye][set]] = {harness.create(width, height)};
+        }
+        Check(gpu->Track(sources[eye], EnumerateImages, error) && gpu->Track(depths[eye], EnumerateImages, error), error);
+        for (const XrSwapchain output : outputs[eye]) {
+            Check(gpu->Track(output, EnumerateImages, error), error);
+        }
+    }
+    FrameGenDepthEncoding encoding;
+    encoding.near_z = 1000.0f;
+    encoding.far_z = 0.1f;
+    const char* names[] = {"luma",           "downsample",   "search",      "refine",       "filter",
+                           "synthesize",     "synthesize16", "depth",       "depth check",  "depth trust",
+                           "source copy",    "output copy"};
+    for (const auto quality : {FrameGenFlowQuality::kBalanced, FrameGenFlowQuality::kQuality}) {
+        FrameGenTuning tuning;
+        tuning.quality = quality;
+        tuning.mode = FrameGenSynthesisMode::kExtrapolate;
+        tuning.generated = 3;
+        tuning.fractions = {0.25f, 0.5f, 0.75f};
+        gpu->ResetHistory();
+        std::vector<double> sums;
+        double total = 0.0;
+        int samples = 0;
+        bool depth_used = false;
+        for (int i = 0; i < 48; ++i) {
+            const std::uint32_t frame = static_cast<std::uint32_t>(i % kFrames);
+            std::vector<FrameGenViewSubmission> views;
+            for (std::size_t eye = 0; eye < 2; ++eye) {
+                const float head = eye == 0 ? -half_ipd : half_ipd;
+                FrameGenViewSubmission view;
+                const XrRect2Di rect{{0, 0}, {static_cast<int>(width), static_cast<int>(height)}};
+                view.source = {sources[eye], frame, 0, rect, harness.format};
+                for (const XrSwapchain output : outputs[eye]) {
+                    view.outputs.push_back({output, 0, 0, rect, output_format});
+                }
+                view.request.extent = {width, height};
+                view.request.output = FrameGenOutputKind::kSrgb8;
+                view.request.synthesize = true;
+                view.request.temporal = true;
+                view.request.depth = true;
+                for (auto* geometry : {&view.request.newest, &view.request.previous}) {
+                    geometry->angle_left = std::atan(eye == 0 ? -outer : -inner);
+                    geometry->angle_right = std::atan(eye == 0 ? inner : outer);
+                    geometry->angle_up = std::atan(vertical);
+                    geometry->angle_down = -std::atan(vertical);
+                    geometry->position = {head, 0, 0};
+                }
+                views.push_back(view);
+            }
+            // At release, as the presenter does: color, then depth.
+            for (std::size_t eye = 0; eye < 2; ++eye) {
+                Check(gpu->Capture(eye, views[eye].source, views[eye].request, quality, error) || error.empty(),
+                      "capture: " + error);
+                const XrRect2Di depth_rect{{0, 0}, {static_cast<int>(depth_width), static_cast<int>(depth_height)}};
+                Check(gpu->CaptureDepth(eye, {depths[eye], 0, 0, depth_rect, 0}, encoding, views[eye].request, error) ||
+                          error.empty(),
+                      "depth capture: " + error);
+            }
+            FrameGenExecuteResult result;
+            Check(gpu->Execute(views, tuning, result, error), "profile execute: " + error);
+            const std::vector<double> times = gpu->PassMilliseconds();
+            if (i >= 24 && !times.empty()) {
+                sums.resize(times.size());
+                for (std::size_t p = 0; p < times.size(); ++p) {
+                    sums[p] += times[p];
+                    total += times[p];
+                }
+                ++samples;
+                depth_used = depth_used || (result.depth.size() == 2 && result.depth[0]);
+            }
+        }
+        const FrameGenDepthStatus depth = gpu->DepthStatus();
+        std::printf("\n%s flow, 2 eyes, 3 generated frames: %.2f ms GPU per real frame (depth %s, %s)\n",
+                    quality == FrameGenFlowQuality::kQuality ? "Quality" : "Balanced", samples ? total / samples : -1.0,
+                    depth_used ? "used" : "not used", ToString(depth.reading));
+        for (std::size_t p = 0; p < sums.size() && p < std::size(names); ++p) {
+            if (sums[p] > 0.0) {
+                std::printf("  %-14s %6.3f ms\n", names[p], sums[p] / samples);
+            }
+        }
+    }
+    gpu->Reset();
+    return 0;
+}
+
 // --- Direct3D 11 ------------------------------------------------------------
 
 int D3D11Test() {
     ComPtr<ID3D11Device> device;
     ComPtr<ID3D11DeviceContext> context;
     const D3D_FEATURE_LEVEL level = D3D_FEATURE_LEVEL_11_0;
-    Check(SUCCEEDED(D3D11CreateDevice(nullptr, g_bench ? D3D_DRIVER_TYPE_HARDWARE : D3D_DRIVER_TYPE_WARP, nullptr, 0,
+    Check(SUCCEEDED(D3D11CreateDevice(nullptr, g_bench || g_hardware ? D3D_DRIVER_TYPE_HARDWARE : D3D_DRIVER_TYPE_WARP, nullptr, 0,
                                       &level, 1, D3D11_SDK_VERSION, &device, nullptr, &context)),
           "D3D11 device");
     std::vector<ComPtr<ID3D11Texture2D>> keep;
@@ -817,7 +979,7 @@ int D3D12Test() {
     ComPtr<ID3D12Device> device;
     ComPtr<ID3D12CommandQueue> queue;
     Check(SUCCEEDED(CreateDXGIFactory1(IID_PPV_ARGS(&factory))), "DXGI factory");
-    if (g_bench) {
+    if (g_bench || g_hardware) {
         Check(SUCCEEDED(factory->EnumAdapters(0, &warp)), "hardware adapter");
     } else {
         Check(SUCCEEDED(factory->EnumWarpAdapter(IID_PPV_ARGS(&warp))), "WARP adapter");
@@ -916,14 +1078,48 @@ int D3D12Test() {
         transition(resource, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_RENDER_TARGET);
         submit_and_wait();
     };
+    harness.upload_sized = [&](void* image, std::uint32_t width, std::uint32_t height, const Pixels& pixels) {
+        auto* resource = static_cast<ID3D12Resource*>(image);
+        const D3D12_RESOURCE_DESC desc = resource->GetDesc();
+        D3D12_PLACED_SUBRESOURCE_FOOTPRINT sized{};
+        UINT64 size_bytes = 0;
+        device->GetCopyableFootprints(&desc, 0, 1, 0, &sized, nullptr, nullptr, &size_bytes);
+        D3D12_HEAP_PROPERTIES heap{D3D12_HEAP_TYPE_UPLOAD};
+        D3D12_RESOURCE_DESC buffer_desc{};
+        buffer_desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        buffer_desc.Width = size_bytes;
+        buffer_desc.Height = buffer_desc.DepthOrArraySize = buffer_desc.MipLevels = 1;
+        buffer_desc.SampleDesc.Count = 1;
+        buffer_desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        ComPtr<ID3D12Resource> upload;
+        Check(SUCCEEDED(device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &buffer_desc,
+                                                        D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&upload))),
+              "D3D12 upload buffer");
+        void* mapped = nullptr;
+        Check(SUCCEEDED(upload->Map(0, nullptr, &mapped)), "D3D12 upload map");
+        for (std::uint32_t y = 0; y < height; ++y) {
+            std::memcpy(static_cast<std::byte*>(mapped) + y * sized.Footprint.RowPitch, &pixels[std::size_t{y} * width],
+                        std::size_t{width} * 4);
+        }
+        upload->Unmap(0, nullptr);
+        begin();
+        transition(resource, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_DEST);
+        D3D12_TEXTURE_COPY_LOCATION dst{resource, D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX};
+        D3D12_TEXTURE_COPY_LOCATION src{upload.Get(), D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT};
+        src.PlacedFootprint = sized;
+        commands->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+        transition(resource, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_RENDER_TARGET);
+        submit_and_wait();
+    };
     std::vector<ComPtr<ID3D12DescriptorHeap>> keep_heaps;
+    std::uint32_t depth_width = kSize, depth_height = kSize;
     harness.create_depth = [&](float near_value, XrRect2Di rect, float far_value) -> void* {
         // The format MSFS uses: 32-bit float depth with stencil.
         D3D12_HEAP_PROPERTIES heap{D3D12_HEAP_TYPE_DEFAULT};
         D3D12_RESOURCE_DESC desc{};
         desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
-        desc.Width = kSize;
-        desc.Height = kSize;
+        desc.Width = depth_width;
+        desc.Height = depth_height;
         desc.DepthOrArraySize = 1;
         desc.MipLevels = 1;
         desc.Format = DXGI_FORMAT_D32_FLOAT_S8X24_UINT;
@@ -951,6 +1147,14 @@ int D3D12Test() {
         keep_heaps.push_back(dsv_heap);
         return resource.Get();
     };
+    harness.create_depth_sized = [&](std::uint32_t width, std::uint32_t height, float near_value, XrRect2Di rect,
+                                     float far_value) -> void* {
+        depth_width = width;
+        depth_height = height;
+        void* image = harness.create_depth(near_value, rect, far_value);
+        depth_width = depth_height = kSize;
+        return image;
+    };
     harness.readback = [&](void* image) {
         auto readback = buffer(D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_STATE_COPY_DEST);
         begin();
@@ -971,7 +1175,7 @@ int D3D12Test() {
         readback->Unmap(0, nullptr);
         return pixels;
     };
-    const int result = g_bench ? RunBench(harness) : RunScenarios(harness);
+    const int result = g_profile ? RunProfile(harness) : g_bench ? RunBench(harness) : RunScenarios(harness);
     CloseHandle(event);
     return result;
 }
@@ -1194,6 +1398,20 @@ int main(int argc, char** argv) {
     if (api.rfind("bench-", 0) == 0) {
         g_bench = true;
         api = api.substr(6);
+    }
+    if (api.rfind("hw-", 0) == 0) {
+        // The scenarios on the GPU instead of WARP / the software device.
+        g_hardware = true;
+        api = api.substr(3);
+    }
+    if (api == "profile") {
+        // depthxr_framegen_tests profile [width height]: Direct3D 12 on the GPU.
+        g_bench = g_profile = true;
+        api = "d3d12";
+        if (argc > 3) {
+            g_profile_width = static_cast<std::uint32_t>(std::atoi(argv[2]));
+            g_profile_height = static_cast<std::uint32_t>(std::atoi(argv[3]));
+        }
     }
     if (api == "d3d12") return D3D12Test();
     if (api == "vulkan") return VulkanTest();

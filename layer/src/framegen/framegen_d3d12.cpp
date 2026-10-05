@@ -616,6 +616,64 @@ class D3D12FrameGen final : public FrameGenGpu {
 
     bool SupportsThreadedPresentation() const override { return true; }
 
+    void SetProfiling(bool on) override {
+        profiling_ = false;
+        if (!on) {
+            return;
+        }
+        D3D12_QUERY_HEAP_DESC queries{D3D12_QUERY_HEAP_TYPE_TIMESTAMP, kProfileStamps, 0};
+        D3D12_HEAP_PROPERTIES readback{D3D12_HEAP_TYPE_READBACK};
+        D3D12_RESOURCE_DESC buffer{};
+        buffer.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        buffer.Width = kProfileStamps * sizeof(UINT64);
+        buffer.Height = buffer.DepthOrArraySize = buffer.MipLevels = 1;
+        buffer.SampleDesc.Count = 1;
+        buffer.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        profiling_ = timestamp_frequency_ != 0 &&
+                     (profile_heap_ || SUCCEEDED(device_->CreateQueryHeap(&queries, IID_PPV_ARGS(&profile_heap_)))) &&
+                     (profile_readback_ ||
+                      SUCCEEDED(device_->CreateCommittedResource(&readback, D3D12_HEAP_FLAG_NONE, &buffer,
+                                                                 D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                                                 IID_PPV_ARGS(&profile_readback_))));
+    }
+
+    std::vector<double> PassMilliseconds() const override { return profile_ms_; }
+
+    // Profiling: what ran since the previous stamp.
+    static constexpr int kProfileSourceCopy = static_cast<int>(kFrameGenPassCount);
+    static constexpr int kProfileOutputCopy = kProfileSourceCopy + 1;
+    static constexpr UINT kProfileStamps = 1024;
+
+    void Stamp(int category) {
+        if (!profiling_ || profile_labels_.size() + 1 >= kProfileStamps) {
+            return;
+        }
+        commands_->EndQuery(profile_heap_.Get(), D3D12_QUERY_TYPE_TIMESTAMP, static_cast<UINT>(profile_labels_.size() + 1));
+        profile_labels_.push_back(category);
+    }
+
+    // After the profiled submission: waits for it and sums the time per category.
+    void ReadProfile() {
+        profile_ms_.assign(kProfileOutputCopy + 1, 0.0);
+        if (!WaitIdle()) {
+            return;
+        }
+        void* mapped = nullptr;
+        const D3D12_RANGE range{0, (profile_labels_.size() + 1) * sizeof(UINT64)};
+        if (FAILED(profile_readback_->Map(0, &range, &mapped))) {
+            return;
+        }
+        const auto* stamps = static_cast<const UINT64*>(mapped);
+        for (std::size_t i = 0; i < profile_labels_.size(); ++i) {
+            if (stamps[i + 1] >= stamps[i]) {
+                profile_ms_[profile_labels_[i]] +=
+                    static_cast<double>(stamps[i + 1] - stamps[i]) * 1000.0 / static_cast<double>(timestamp_frequency_);
+            }
+        }
+        const D3D12_RANGE written{0, 0};
+        profile_readback_->Unmap(0, &written);
+    }
+
     bool Execute(const std::vector<FrameGenViewSubmission>& views, const FrameGenTuning& tuning,
                  FrameGenExecuteResult& result, std::string& error) override {
         result.synthesized.assign(views.size(), false);
@@ -645,6 +703,8 @@ class D3D12FrameGen final : public FrameGenGpu {
         commands_->SetComputeRootSignature(root_signature_.Get());
         const bool timed = query_heap_ != nullptr;
         if (timed) commands_->EndQuery(query_heap_.Get(), D3D12_QUERY_TYPE_TIMESTAMP, static_cast<UINT>(slot_index * 2));
+        profile_labels_.clear();
+        if (profiling_) commands_->EndQuery(profile_heap_.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 0);
 
         if (views_.size() < views.size()) {
             views_.resize(views.size());
@@ -661,6 +721,7 @@ class D3D12FrameGen final : public FrameGenGpu {
                 ViewResources& view = views_[i];
                 if (views[i].request.depth && view.depth_ready && view.depth_generation == validator_.Generation()) {
                     ok = RecordDepthTrust(views[i], views[1 - i], view, views_[1 - i], error);
+                    Stamp(static_cast<int>(FrameGenPass::kDepthTrust));
                 }
             }
         }
@@ -676,6 +737,7 @@ class D3D12FrameGen final : public FrameGenGpu {
         if (ok && views.size() >= 2 && views_[0].depth_fresh && views[0].request.depth &&
             views_[0].depth_generation == validator_.Generation() && validator_.WantsCheck(submission_)) {
             ok = RecordDepthCheck(views[0], views[1], views_[0], views_[1], slot, error);
+            Stamp(static_cast<int>(FrameGenPass::kDepthCheck));
         }
         for (std::size_t i = 0; i < views.size(); ++i) {
             views_[i].depth_fresh = false;
@@ -684,6 +746,10 @@ class D3D12FrameGen final : public FrameGenGpu {
             commands_->EndQuery(query_heap_.Get(), D3D12_QUERY_TYPE_TIMESTAMP, static_cast<UINT>(slot_index * 2 + 1));
             commands_->ResolveQueryData(query_heap_.Get(), D3D12_QUERY_TYPE_TIMESTAMP, static_cast<UINT>(slot_index * 2), 2,
                                         readback_.Get(), slot_index * 2 * sizeof(UINT64));
+        }
+        if (profiling_) {
+            commands_->ResolveQueryData(profile_heap_.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 0,
+                                        static_cast<UINT>(profile_labels_.size() + 1), profile_readback_.Get(), 0);
         }
         hr = commands_->Close();
         if (FAILED(hr)) {
@@ -715,6 +781,9 @@ class D3D12FrameGen final : public FrameGenGpu {
         slot.fence_value = fence_value_;
         slot.timing_pending = timed;
         ++submission_;
+        if (profiling_) {
+            ReadProfile();
+        }
         for (std::size_t i = 0; i < views.size(); ++i) {
             views_[i].history_state.Commit(result.synthesized[i]);
             views_[i].capture.valid = false;
@@ -954,6 +1023,7 @@ class D3D12FrameGen final : public FrameGenGpu {
         std::vector<D3D12_RESOURCE_BARRIER> barriers;
         if (!view.capture.Matches(submission.source)) {
             CopySource(commands_.Get(), barriers, view, submission.source, source);
+            Stamp(kProfileSourceCopy);
         }
 
         // Depth only when it was captured for this frame; it is used once.
@@ -997,6 +1067,7 @@ class D3D12FrameGen final : public FrameGenGpu {
             commands_->SetComputeRootDescriptorTable(2, Gpu(base + 4));
             commands_->Dispatch((dispatch.width + kFrameGenThreadGroupSize - 1) / kFrameGenThreadGroupSize,
                                 (dispatch.height + kFrameGenThreadGroupSize - 1) / kFrameGenThreadGroupSize, 1);
+            Stamp(static_cast<int>(dispatch.pass));
             for (std::size_t index = 0; index < outputs.size(); ++index) {
                 if (!(dispatch.copy_mask & (1u << index))) {
                     continue;
@@ -1015,6 +1086,7 @@ class D3D12FrameGen final : public FrameGenGpu {
                                              static_cast<UINT>(image.rect.offset.y), 0, &out_source, nullptr);
                 Transition(barriers, output, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_RENDER_TARGET);
                 Flush(barriers);
+                Stamp(kProfileOutputCopy);
             }
         }
         synthesized = plan.synthesize;
@@ -1075,6 +1147,11 @@ class D3D12FrameGen final : public FrameGenGpu {
     D3D12_PLACED_SUBRESOURCE_FOOTPRINT check_footprint_{};
     UINT64 check_bytes_{0};
     FrameGenDepthValidator validator_;
+    bool profiling_{false};
+    ComPtr<ID3D12QueryHeap> profile_heap_;
+    ComPtr<ID3D12Resource> profile_readback_;
+    std::vector<int> profile_labels_; // category of the work before each stamp after the first
+    std::vector<double> profile_ms_;
     UINT64 capture_count_{0};
     ComPtr<ID3D12Fence> fence_;
     UINT64 fence_value_{0};
