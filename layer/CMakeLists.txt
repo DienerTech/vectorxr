@@ -316,6 +316,16 @@ if(WIN32 AND DEPTHXR_BUILD_LAYER)
         add_executable(depthxr_framegen_tests tests/framegen_backend_tests.cpp)
         target_link_libraries(depthxr_framegen_tests PRIVATE depthxr_framegen dxgi)
         target_compile_definitions(depthxr_framegen_tests PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX XR_USE_GRAPHICS_API_D3D11 XR_USE_GRAPHICS_API_D3D12 XR_USE_GRAPHICS_API_VULKAN)
+        # Research: compares NVIDIA's hardware optical flow with ours
+        # (`depthxr_framegen_tests nvof`) when the NVIDIA Optical Flow SDK is
+        # unpacked under libraries/ (git-ignored; never committed).
+        file(GLOB_RECURSE _nvof_header "${PROJECT_SOURCE_DIR}/libraries/Optical_Flow_SDK_*/nvOpticalFlowD3D12.h")
+        if(_nvof_header)
+            list(GET _nvof_header 0 _nvof_header)
+            get_filename_component(_nvof_include "${_nvof_header}" DIRECTORY)
+            target_include_directories(depthxr_framegen_tests PRIVATE "${_nvof_include}")
+            target_compile_definitions(depthxr_framegen_tests PRIVATE DEPTHXR_NVOF_RESEARCH)
+        endif()
         add_test(NAME depthxr_framegen_d3d11_tests COMMAND depthxr_framegen_tests d3d11)
         add_test(NAME depthxr_framegen_d3d12_tests COMMAND depthxr_framegen_tests d3d12)
         add_test(NAME depthxr_framegen_vulkan_tests COMMAND depthxr_framegen_tests vulkan)

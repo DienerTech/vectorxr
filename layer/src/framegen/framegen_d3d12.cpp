@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstring>
 #include <unordered_map>
 
@@ -708,6 +709,89 @@ class D3D12FrameGen final : public FrameGenGpu {
             }
         }
         return DrawPipeline(formats, count) != nullptr;
+    }
+
+    bool ReadFlow(std::size_t index, std::vector<float>& xy, FrameGenExtent& cells) override {
+        if (index >= views_.size() || !WaitIdle()) {
+            return false;
+        }
+        ViewResources& view = views_[index];
+        // The pair flipped after the Execute that wrote it.
+        Texture& flow = view.filtered[view.history_state.Previous()];
+        if (!flow.resource) {
+            return false;
+        }
+        const D3D12_RESOURCE_DESC desc = flow.resource->GetDesc();
+        D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
+        UINT64 bytes = 0;
+        device_->GetCopyableFootprints(&desc, 0, 1, 0, &footprint, nullptr, nullptr, &bytes);
+        D3D12_HEAP_PROPERTIES heap{D3D12_HEAP_TYPE_READBACK};
+        D3D12_RESOURCE_DESC buffer{};
+        buffer.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        buffer.Width = bytes;
+        buffer.Height = buffer.DepthOrArraySize = buffer.MipLevels = 1;
+        buffer.SampleDesc.Count = 1;
+        buffer.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        ComPtr<ID3D12Resource> readback;
+        ComPtr<ID3D12CommandAllocator> allocator;
+        ComPtr<ID3D12GraphicsCommandList> list;
+        if (FAILED(device_->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &buffer, D3D12_RESOURCE_STATE_COPY_DEST,
+                                                    nullptr, IID_PPV_ARGS(&readback))) ||
+            FAILED(device_->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&allocator))) ||
+            FAILED(device_->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, allocator.Get(), nullptr,
+                                              IID_PPV_ARGS(&list)))) {
+            return false;
+        }
+        std::vector<D3D12_RESOURCE_BARRIER> barriers;
+        Require(barriers, flow, D3D12_RESOURCE_STATE_COPY_SOURCE);
+        if (!barriers.empty()) {
+            list->ResourceBarrier(static_cast<UINT>(barriers.size()), barriers.data());
+        }
+        D3D12_TEXTURE_COPY_LOCATION destination{readback.Get(), D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT};
+        destination.PlacedFootprint = footprint;
+        D3D12_TEXTURE_COPY_LOCATION source{flow.resource.Get(), D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX};
+        list->CopyTextureRegion(&destination, 0, 0, 0, &source, nullptr);
+        if (FAILED(list->Close())) {
+            return false;
+        }
+        ID3D12CommandList* lists[] = {list.Get()};
+        queue_->ExecuteCommandLists(1, lists);
+        if (FAILED(queue_->Signal(fence_.Get(), ++fence_value_)) || !WaitIdle()) {
+            return false;
+        }
+        void* mapped = nullptr;
+        if (FAILED(readback->Map(0, nullptr, &mapped))) {
+            return false;
+        }
+        auto half = [](std::uint16_t h) {
+            const std::uint32_t sign = (h & 0x8000u) << 16, exponent = (h >> 10) & 0x1fu, mantissa = h & 0x3ffu;
+            std::uint32_t bits;
+            if (exponent == 0) {
+                // Zero or subnormal.
+                float value = std::ldexp(static_cast<float>(mantissa), -24);
+                return sign ? -value : value;
+            } else if (exponent == 31) {
+                bits = sign | 0x7f800000u | (mantissa << 13);
+            } else {
+                bits = sign | ((exponent + 112) << 23) | (mantissa << 13);
+            }
+            float value;
+            std::memcpy(&value, &bits, sizeof(value));
+            return value;
+        };
+        const FrameGenExtent extent = view.history_state.Extent();
+        cells = {static_cast<std::uint32_t>(desc.Width), desc.Height};
+        xy.resize(std::size_t{cells.width} * cells.height * 2);
+        for (std::uint32_t y = 0; y < cells.height; ++y) {
+            const auto* row = reinterpret_cast<const std::uint16_t*>(static_cast<const std::byte*>(mapped) +
+                                                                      footprint.Offset + y * footprint.Footprint.RowPitch);
+            for (std::uint32_t x = 0; x < cells.width; ++x) {
+                xy[(std::size_t{y} * cells.width + x) * 2] = half(row[x * 4]) * extent.width;
+                xy[(std::size_t{y} * cells.width + x) * 2 + 1] = half(row[x * 4 + 1]) * extent.height;
+            }
+        }
+        readback->Unmap(0, nullptr);
+        return true;
     }
 
     void SetDirectOutput(bool on) override { direct_output_ = on; }

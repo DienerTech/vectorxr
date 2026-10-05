@@ -14,7 +14,12 @@
 
 #include "depthxr/framegen_gpu.h"
 
+#ifdef DEPTHXR_NVOF_RESEARCH
+#include <nvOpticalFlowD3D12.h>
+#endif
+
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
@@ -930,6 +935,455 @@ int RunProfile(Harness& harness) {
     return 0;
 }
 
+#ifdef DEPTHXR_NVOF_RESEARCH
+// Research: NVIDIA's optical flow accelerator (NVOFA, RTX 20-50) against our
+// block matching, on the scenes the scenarios use and at headset size.
+// `depthxr_framegen_tests nvof` on an NVIDIA GPU; built only with the SDK.
+bool g_nvof = false;
+
+std::vector<std::uint8_t> Gray(const Pixels& pixels) {
+    std::vector<std::uint8_t> gray(pixels.size());
+    for (std::size_t i = 0; i < pixels.size(); ++i) {
+        const std::uint32_t p = pixels[i];
+        gray[i] = static_cast<std::uint8_t>(std::lround(0.2126 * (p & 255) + 0.7152 * ((p >> 8) & 255) +
+                                                        0.0722 * ((p >> 16) & 255)));
+    }
+    return gray;
+}
+
+class NvofSession {
+  public:
+    ~NvofSession() {
+        if (handle_) {
+            Wait(fence_value_);
+            for (auto buffer : registered_) {
+                NV_OF_UNREGISTER_RESOURCE_PARAMS_D3D12 params{buffer};
+                const NV_OF_STATUS status = api_.nvOFUnregisterResourceD3D12(&params);
+                if (std::getenv("FG_TEST_VERBOSE")) std::printf("    unregister %d\n", static_cast<int>(status));
+            }
+            const NV_OF_STATUS status = api_.nvOFDestroy(handle_);
+            if (std::getenv("FG_TEST_VERBOSE")) std::printf("    destroy %d\n", static_cast<int>(status));
+            // Releasing the registered images or the fence after the session
+            // is destroyed crashes in the driver (5.0.7 on a 5090); a
+            // research run leaks them instead.
+            for (auto& input : inputs_) input.Detach();
+            output_.Detach();
+            fence_.Detach();
+        }
+    }
+
+    bool Create(ID3D12Device* device, ID3D12CommandQueue* queue, std::uint32_t width, std::uint32_t height, int inputs,
+                NV_OF_OUTPUT_VECTOR_GRID_SIZE grid, NV_OF_PERF_LEVEL perf, std::string& error) {
+        device_ = device;
+        queue_ = queue;
+        width_ = width;
+        height_ = height;
+        grid_ = grid;
+        if (std::getenv("FG_TEST_VERBOSE")) std::printf("    loading\n");
+        const HMODULE library = LoadLibraryW(L"nvofapi64.dll");
+        auto create = library ? reinterpret_cast<decltype(&NvOFAPICreateInstanceD3D12)>(
+                                    GetProcAddress(library, "NvOFAPICreateInstanceD3D12"))
+                              : nullptr;
+        if (!create || create(NV_OF_API_VERSION, &api_) != NV_OF_SUCCESS) {
+            error = "nvofapi64.dll / NvOFAPICreateInstanceD3D12 unavailable";
+            return false;
+        }
+        if (std::getenv("FG_TEST_VERBOSE")) std::printf("    create %ux%u grid %d\n", width, height, static_cast<int>(grid));
+        if (api_.nvCreateOpticalFlowD3D12(device, &handle_) != NV_OF_SUCCESS) {
+            error = "nvCreateOpticalFlowD3D12 failed";
+            return false;
+        }
+        if (std::getenv("FG_TEST_VERBOSE")) std::printf("    created\n");
+        NV_OF_INIT_PARAMS init{};
+        init.width = width;
+        init.height = height;
+        init.outGridSize = grid;
+        init.hintGridSize = NV_OF_HINT_VECTOR_GRID_SIZE_UNDEFINED;
+        init.mode = NV_OF_MODE_OPTICALFLOW;
+        init.perfLevel = perf;
+        init.enableExternalHints = NV_OF_FALSE;
+        init.enableOutputCost = NV_OF_FALSE;
+        init.predDirection = NV_OF_PRED_DIRECTION_FORWARD;
+        init.inputBufferFormat = NV_OF_BUFFER_FORMAT_GRAYSCALE8;
+        if (api_.nvOFInit(handle_, &init) != NV_OF_SUCCESS) {
+            error = "nvOFInit failed: " + LastError();
+            return false;
+        }
+        if (FAILED(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence_)))) {
+            error = "fence";
+            return false;
+        }
+        for (int i = 0; i < inputs; ++i) {
+            ComPtr<ID3D12Resource> input;
+            NvOFGPUBufferHandle buffer{};
+            if (!CreateTexture(width, height, DXGI_FORMAT_R8_UNORM, input, buffer, error)) return false; // GRAYSCALE8
+            inputs_.push_back(input);
+            input_handles_.push_back(buffer);
+        }
+        output_width_ = (width + grid - 1) / grid;
+        output_height_ = (height + grid - 1) / grid;
+        return CreateTexture(output_width_, output_height_, DXGI_FORMAT_R16G16_SINT, output_, output_handle_, error); // SHORT2
+    }
+
+    // Copies an 8-bit gray image into input `slot` on the queue.
+    void Upload(int slot, const std::vector<std::uint8_t>& gray) {
+        Copy(inputs_[slot].Get(), const_cast<std::uint8_t*>(gray.data()), 1, true);
+    }
+
+    // Flow from input `input` to input `reference`, waiting for it; `xy`
+    // receives the vectors in pixels.
+    bool Run(int input, int reference, bool temporal, std::vector<float>* xy) {
+        Execute(input, reference, temporal);
+        Wait(fence_value_);
+        if (xy) {
+            std::vector<std::int16_t> raw(std::size_t{output_width_} * output_height_ * 2);
+            Copy(output_.Get(), raw.data(), 4, false);
+            xy->resize(raw.size());
+            for (std::size_t i = 0; i < raw.size(); ++i) {
+                (*xy)[i] = raw[i] / 32.0f; // S10.5
+            }
+        }
+        return true;
+    }
+
+    // Average milliseconds per execute, `count` back to back.
+    double Time(int count) {
+        Run(0, 1, true, nullptr);
+        const auto start = std::chrono::steady_clock::now();
+        for (int i = 0; i < count; ++i) {
+            Execute(i & 1, (i + 1) & 1, true);
+        }
+        Wait(fence_value_);
+        return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count() / count;
+    }
+
+    std::uint32_t OutputWidth() const { return output_width_; }
+    std::uint32_t OutputHeight() const { return output_height_; }
+
+  private:
+    std::string LastError() {
+        char text[MIN_ERROR_STRING_SIZE * 4] = {};
+        std::uint32_t size = sizeof(text);
+        api_.nvOFGetLastError(handle_, text, &size);
+        return text;
+    }
+
+    bool CreateTexture(std::uint32_t width, std::uint32_t height, DXGI_FORMAT format, ComPtr<ID3D12Resource>& texture,
+                       NvOFGPUBufferHandle& buffer, std::string& error) {
+        D3D12_HEAP_PROPERTIES heap{D3D12_HEAP_TYPE_DEFAULT};
+        D3D12_RESOURCE_DESC desc{};
+        desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+        desc.Width = width;
+        desc.Height = height;
+        desc.DepthOrArraySize = 1;
+        desc.MipLevels = 1;
+        desc.Format = format;
+        desc.SampleDesc.Count = 1;
+        if (format == DXGI_FORMAT_UNKNOWN ||
+            FAILED(device_->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_COMMON, nullptr,
+                                                    IID_PPV_ARGS(&texture)))) {
+            error = "NVOF texture of format " + std::to_string(format);
+            return false;
+        }
+        NV_OF_REGISTER_RESOURCE_PARAMS_D3D12 params{};
+        params.resource = texture.Get();
+        params.inputFencePoint = {fence_.Get(), fence_value_};
+        params.hOFGpuBuffer = &buffer;
+        params.outputFencePoint = {fence_.Get(), ++fence_value_};
+        if (api_.nvOFRegisterResourceD3D12(handle_, &params) != NV_OF_SUCCESS) {
+            error = "nvOFRegisterResourceD3D12: " + LastError();
+            return false;
+        }
+        registered_.push_back(buffer);
+        Wait(fence_value_);
+        return true;
+    }
+
+    void Execute(int input, int reference, bool temporal) {
+        NV_OF_FENCE_POINT ready{fence_.Get(), fence_value_};
+        NV_OF_EXECUTE_INPUT_PARAMS_D3D12 in{};
+        in.inputFrame = input_handles_[input];
+        in.referenceFrame = input_handles_[reference];
+        in.disableTemporalHints = temporal ? NV_OF_FALSE : NV_OF_TRUE;
+        in.numFencePoints = 1;
+        in.fencePoint = &ready;
+        NV_OF_FENCE_POINT done{fence_.Get(), ++fence_value_};
+        NV_OF_EXECUTE_OUTPUT_PARAMS_D3D12 out{};
+        out.outputBuffer = output_handle_;
+        out.fencePoint = &done;
+        if (api_.nvOFExecuteD3D12(handle_, &in, &out) != NV_OF_SUCCESS) {
+            std::cerr << "nvOFExecuteD3D12: " << LastError() << '\n';
+        }
+    }
+
+    void Wait(UINT64 value) {
+        while (fence_->GetCompletedValue() < value) {
+            Sleep(0);
+        }
+    }
+
+    // Uploads `data` into or reads it from `texture` (texel size `texel`) on
+    // the queue, ordered with the optical flow work by the fence.
+    void Copy(ID3D12Resource* texture, void* data, UINT texel, bool upload) {
+        const D3D12_RESOURCE_DESC desc = texture->GetDesc();
+        D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
+        UINT64 bytes = 0;
+        device_->GetCopyableFootprints(&desc, 0, 1, 0, &footprint, nullptr, nullptr, &bytes);
+        D3D12_HEAP_PROPERTIES heap{upload ? D3D12_HEAP_TYPE_UPLOAD : D3D12_HEAP_TYPE_READBACK};
+        D3D12_RESOURCE_DESC buffer_desc{};
+        buffer_desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        buffer_desc.Width = bytes;
+        buffer_desc.Height = buffer_desc.DepthOrArraySize = buffer_desc.MipLevels = 1;
+        buffer_desc.SampleDesc.Count = 1;
+        buffer_desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        ComPtr<ID3D12Resource> buffer;
+        Check(SUCCEEDED(device_->CreateCommittedResource(
+                  &heap, D3D12_HEAP_FLAG_NONE, &buffer_desc,
+                  upload ? D3D12_RESOURCE_STATE_GENERIC_READ : D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&buffer))),
+              "NVOF staging buffer");
+        const std::size_t row_bytes = std::size_t{desc.Width} * texel;
+        std::byte* mapped = nullptr;
+        if (upload) {
+            Check(SUCCEEDED(buffer->Map(0, nullptr, reinterpret_cast<void**>(&mapped))), "map");
+            for (UINT y = 0; y < desc.Height; ++y) {
+                std::memcpy(mapped + footprint.Offset + y * footprint.Footprint.RowPitch,
+                            static_cast<const std::byte*>(data) + y * row_bytes, row_bytes);
+            }
+            buffer->Unmap(0, nullptr);
+        }
+        ComPtr<ID3D12CommandAllocator> allocator;
+        ComPtr<ID3D12GraphicsCommandList> list;
+        Check(SUCCEEDED(device_->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&allocator))) &&
+                  SUCCEEDED(device_->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, allocator.Get(), nullptr,
+                                                       IID_PPV_ARGS(&list))),
+              "NVOF copy list");
+        D3D12_TEXTURE_COPY_LOCATION texture_location{texture, D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX};
+        D3D12_TEXTURE_COPY_LOCATION buffer_location{buffer.Get(), D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT};
+        buffer_location.PlacedFootprint = footprint;
+        // The optical flow engine shares images in COMMON.
+        const D3D12_RESOURCE_STATES copy_state = upload ? D3D12_RESOURCE_STATE_COPY_DEST : D3D12_RESOURCE_STATE_COPY_SOURCE;
+        D3D12_RESOURCE_BARRIER barrier{};
+        barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        barrier.Transition = {texture, D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, D3D12_RESOURCE_STATE_COMMON, copy_state};
+        list->ResourceBarrier(1, &barrier);
+        if (upload) {
+            list->CopyTextureRegion(&texture_location, 0, 0, 0, &buffer_location, nullptr);
+        } else {
+            list->CopyTextureRegion(&buffer_location, 0, 0, 0, &texture_location, nullptr);
+        }
+        std::swap(barrier.Transition.StateBefore, barrier.Transition.StateAfter);
+        list->ResourceBarrier(1, &barrier);
+        Check(SUCCEEDED(list->Close()), "NVOF copy close");
+        queue_->Wait(fence_.Get(), fence_value_);
+        ID3D12CommandList* lists[] = {list.Get()};
+        queue_->ExecuteCommandLists(1, lists);
+        queue_->Signal(fence_.Get(), ++fence_value_);
+        Wait(fence_value_);
+        if (!upload) {
+            Check(SUCCEEDED(buffer->Map(0, nullptr, reinterpret_cast<void**>(&mapped))), "map");
+            for (UINT y = 0; y < desc.Height; ++y) {
+                std::memcpy(static_cast<std::byte*>(data) + y * row_bytes,
+                            mapped + footprint.Offset + y * footprint.Footprint.RowPitch, row_bytes);
+            }
+            buffer->Unmap(0, nullptr);
+        }
+    }
+
+    NV_OF_D3D12_API_FUNCTION_LIST api_{};
+    NvOFHandle handle_{};
+    ID3D12Device* device_{nullptr};
+    ID3D12CommandQueue* queue_{nullptr};
+    ComPtr<ID3D12Fence> fence_;
+    UINT64 fence_value_{0};
+    std::uint32_t width_{0}, height_{0}, output_width_{0}, output_height_{0};
+    NV_OF_OUTPUT_VECTOR_GRID_SIZE grid_{NV_OF_OUTPUT_VECTOR_GRID_SIZE_4};
+    std::vector<ComPtr<ID3D12Resource>> inputs_;
+    std::vector<NvOFGPUBufferHandle> input_handles_;
+    ComPtr<ID3D12Resource> output_;
+    NvOFGPUBufferHandle output_handle_{};
+    std::vector<NvOFGPUBufferHandle> registered_;
+};
+
+// Mean endpoint error (pixels) of a flow field against `truth(x, y)` over
+// cells whose centre lies in [margin, size - margin).
+template <typename Truth>
+double EndpointError(const std::vector<float>& xy, std::uint32_t width, std::uint32_t height, std::uint32_t cell,
+                     std::uint32_t margin, Truth truth, double* within_half = nullptr) {
+    double sum = 0.0, good = 0.0;
+    std::size_t count = 0;
+    for (std::uint32_t y = 0; y < height; ++y) {
+        for (std::uint32_t x = 0; x < width; ++x) {
+            const float cx = (x + 0.5f) * cell, cy = (y + 0.5f) * cell;
+            if (cx < margin || cy < margin || cx >= kSize - margin || cy >= kSize - margin) continue;
+            const auto [tx, ty] = truth(cx, cy);
+            const double error = std::hypot(xy[(std::size_t{y} * width + x) * 2] - tx, xy[(std::size_t{y} * width + x) * 2 + 1] - ty);
+            sum += error;
+            good += error < 0.5 ? 1.0 : 0.0;
+            ++count;
+        }
+    }
+    if (within_half) *within_half = count ? good / count : 0.0;
+    return count ? sum / count : -1.0;
+}
+
+int RunNvof(Harness& harness) {
+    std::setvbuf(stdout, nullptr, _IONBF, 0);
+    const auto* binding = static_cast<const XrGraphicsBindingD3D12KHR*>(harness.binding);
+    std::string error;
+    struct Scene {
+        const char* name;
+        std::vector<Pixels> frames; // previous ... newest
+        std::function<std::pair<float, float>(float, float)> motion; // newest frame's motion at a pixel
+    };
+    const auto square_motion = [](float x, float y) {
+        const bool inside = x >= 136 && x < 232 && y >= 128 && y < 224;
+        return inside ? std::make_pair(16.0f, 8.0f) : std::make_pair(0.0f, 0.0f);
+    };
+    std::vector<Scene> scenes;
+    scenes.push_back({"facade (3 px/frame, 12 px windows)", {Facade(0), Facade(3), Facade(6)},
+                      [](float, float) { return std::make_pair(3.0f, 0.0f); }});
+    scenes.push_back({"moving square (16, 8)", {MovingSquare(104, 112), MovingSquare(120, 120), MovingSquare(136, 128)},
+                      square_motion});
+    scenes.push_back({"shimmering still panel", {Shimmer(0), Shimmer(1), Shimmer(2)},
+                      [](float, float) { return std::make_pair(0.0f, 0.0f); }});
+
+    std::printf("Flow accuracy at %ux%u: mean endpoint error in pixels (share of cells within 0.5 px)\n", kSize, kSize);
+    for (const Scene& scene : scenes) {
+        std::printf("\n%s\n", scene.name);
+        // Ours: the field synthesis uses, after the last frame pair.
+        for (const auto quality : {FrameGenFlowQuality::kBalanced, FrameGenFlowQuality::kQuality}) {
+            auto gpu = CreateFrameGenGpu(harness.binding, error);
+            Check(gpu != nullptr, error);
+            const std::int64_t output_format = gpu->OutputFormats(FrameGenOutputKind::kSrgb8).front();
+            g_swapchains[kSource] = {harness.create(kSize, kSize), harness.create(kSize, kSize), harness.create(kSize, kSize)};
+            g_swapchains[kOutput] = {harness.create(kSize, kSize)};
+            g_swapchains[kOutputSecond] = {harness.create(kSize, kSize)};
+            Check(gpu->Track(kSource, EnumerateImages, error) && gpu->Track(kOutput, EnumerateImages, error) &&
+                      gpu->Track(kOutputSecond, EnumerateImages, error),
+                  error);
+            FrameGenTuning tuning;
+            tuning.quality = quality;
+            tuning.mode = FrameGenSynthesisMode::kExtrapolate;
+            FrameGenExecuteResult result;
+            for (std::uint32_t i = 0; i < scene.frames.size(); ++i) {
+                harness.upload(g_swapchains[kSource][i], scene.frames[i]);
+                Check(gpu->Execute({Submission(i, harness.format, output_format, true, 0, 0)}, tuning, result, error), error);
+            }
+            std::vector<float> xy;
+            FrameGenExtent cells;
+            Check(gpu->ReadFlow(0, xy, cells), "read flow");
+            if (std::getenv("FG_TEST_VERBOSE")) {
+                const std::size_t middle = (std::size_t{cells.height} / 2 * cells.width + cells.width / 2) * 2;
+                std::printf("    centre cell flow (%.3f, %.3f), first (%.3f, %.3f)\n", xy[middle], xy[middle + 1], xy[0], xy[1]);
+            }
+            double within = 0.0;
+            const double epe = EndpointError(xy, cells.width, cells.height, kSize / cells.width, 32, scene.motion, &within);
+            std::printf("  ours %-12s (%ux%u cells)          %6.3f px (%3.0f%%)\n",
+                        quality == FrameGenFlowQuality::kQuality ? "Quality" : "Balanced", cells.width, cells.height, epe,
+                        100.0 * within);
+            gpu->Reset();
+        }
+        // NVOFA: forward flow from the newest frame to the one before it is
+        // minus the motion; the last pair runs with the first pair's
+        // vectors as temporal hints, as a frame sequence would.
+        for (const auto grid : {NV_OF_OUTPUT_VECTOR_GRID_SIZE_1, NV_OF_OUTPUT_VECTOR_GRID_SIZE_4}) {
+            for (const auto perf : {NV_OF_PERF_LEVEL_SLOW, NV_OF_PERF_LEVEL_FAST}) {
+                NvofSession session;
+                if (!session.Create(binding->device, binding->queue, kSize, kSize, 3, grid, perf, error)) {
+                    std::printf("  NVOFA unavailable: %s\n", error.c_str());
+                    return 0;
+                }
+                for (int i = 0; i < 3; ++i) {
+                    session.Upload(i, Gray(scene.frames[i]));
+                }
+                std::vector<float> xy;
+                session.Run(1, 0, false, nullptr);
+                session.Run(2, 1, true, &xy);
+                for (float& v : xy) v = -v;
+                double within = 0.0;
+                const double epe = EndpointError(xy, session.OutputWidth(), session.OutputHeight(), grid, 32, scene.motion,
+                                                 &within);
+                std::printf("  NVOFA grid %d %-6s (%ux%u cells)    %6.3f px (%3.0f%%)\n", static_cast<int>(grid),
+                            perf == NV_OF_PERF_LEVEL_SLOW ? "slow" : "fast", session.OutputWidth(), session.OutputHeight(),
+                            epe, 100.0 * within);
+            }
+        }
+    }
+
+    // Half resolution keeps NVOFA affordable at headset size, but halves the
+    // window period too: the facade at 192x192 (box-filtered), 1.5 px/frame.
+    {
+        auto half = [](const Pixels& pixels) {
+            std::vector<std::uint8_t> gray = Gray(pixels), out(kSize / 2 * (kSize / 2));
+            for (std::uint32_t y = 0; y < kSize / 2; ++y) {
+                for (std::uint32_t x = 0; x < kSize / 2; ++x) {
+                    const std::size_t i = std::size_t{y} * 2 * kSize + x * 2;
+                    out[std::size_t{y} * (kSize / 2) + x] =
+                        static_cast<std::uint8_t>((gray[i] + gray[i + 1] + gray[i + kSize] + gray[i + kSize + 1] + 2) / 4);
+                }
+            }
+            return out;
+        };
+        std::printf("\nfacade at half resolution (NVOFA input 192x192, 6 px windows)\n");
+        for (const auto grid : {NV_OF_OUTPUT_VECTOR_GRID_SIZE_2, NV_OF_OUTPUT_VECTOR_GRID_SIZE_4}) {
+            for (const auto perf : {NV_OF_PERF_LEVEL_SLOW, NV_OF_PERF_LEVEL_MEDIUM}) {
+                NvofSession session;
+                if (!session.Create(binding->device, binding->queue, kSize / 2, kSize / 2, 3, grid, perf, error)) {
+                    std::printf("  NVOFA unavailable: %s\n", error.c_str());
+                    break;
+                }
+                session.Upload(0, half(Facade(0)));
+                session.Upload(1, half(Facade(3)));
+                session.Upload(2, half(Facade(6)));
+                std::vector<float> xy;
+                session.Run(1, 0, false, nullptr);
+                session.Run(2, 1, true, &xy);
+                // Back to full-resolution pixels.
+                for (float& v : xy) v = -2.0f * v;
+                double within = 0.0;
+                const double epe = EndpointError(xy, session.OutputWidth(), session.OutputHeight(), 2 * grid, 32,
+                                                 [](float, float) { return std::make_pair(3.0f, 0.0f); }, &within);
+                std::printf("  NVOFA grid %d %-6s (%ux%u cells)    %6.3f px (%3.0f%%)\n", static_cast<int>(grid),
+                            perf == NV_OF_PERF_LEVEL_SLOW ? "slow" : "medium", session.OutputWidth(), session.OutputHeight(),
+                            epe, 100.0 * within);
+            }
+        }
+    }
+
+    // Speed at a Pimax Crystal Super's 6240x6280 per eye: full resolution with
+    // a 4x4 grid (Quality's flow resolution) and half resolution with 2x2.
+    std::printf("\nNVOFA time per eye (wall clock, back to back):\n");
+    struct Size {
+        std::uint32_t width, height;
+        NV_OF_OUTPUT_VECTOR_GRID_SIZE grid;
+    };
+    for (const Size size : {Size{6240, 6280, NV_OF_OUTPUT_VECTOR_GRID_SIZE_4}, Size{3120, 3140, NV_OF_OUTPUT_VECTOR_GRID_SIZE_2},
+                            Size{3120, 3140, NV_OF_OUTPUT_VECTOR_GRID_SIZE_4}}) {
+        for (const auto perf : {NV_OF_PERF_LEVEL_SLOW, NV_OF_PERF_LEVEL_MEDIUM, NV_OF_PERF_LEVEL_FAST}) {
+            NvofSession session;
+            if (!session.Create(binding->device, binding->queue, size.width, size.height, 2, size.grid, perf, error)) {
+                std::printf("  %ux%u: %s\n", size.width, size.height, error.c_str());
+                continue;
+            }
+            std::vector<std::uint8_t> gray(std::size_t{size.width} * size.height);
+            for (int frame = 0; frame < 2; ++frame) {
+                for (std::uint32_t y = 0; y < size.height; ++y) {
+                    for (std::uint32_t x = 0; x < size.width; ++x) {
+                        gray[std::size_t{y} * size.width + x] =
+                            static_cast<std::uint8_t>(255.0f * Noise((x + 6.0f * frame) / 9.0f, y / 9.0f));
+                    }
+                }
+                session.Upload(frame, gray);
+            }
+            std::printf("  %ux%u grid %d %-6s %6.2f ms\n", size.width, size.height, static_cast<int>(size.grid),
+                        perf == NV_OF_PERF_LEVEL_SLOW ? "slow" : perf == NV_OF_PERF_LEVEL_MEDIUM ? "medium" : "fast",
+                        session.Time(20));
+        }
+    }
+    return 0;
+}
+#endif
+
 // --- Direct3D 11 ------------------------------------------------------------
 
 int D3D11Test() {
@@ -1189,6 +1643,13 @@ int D3D12Test() {
         readback->Unmap(0, nullptr);
         return pixels;
     };
+#ifdef DEPTHXR_NVOF_RESEARCH
+    if (g_nvof) {
+        const int nvof = RunNvof(harness);
+        CloseHandle(event);
+        return nvof;
+    }
+#endif
     const int result = g_profile ? RunProfile(harness) : g_bench ? RunBench(harness) : RunScenarios(harness);
     CloseHandle(event);
     return result;
@@ -1418,6 +1879,12 @@ int main(int argc, char** argv) {
         g_hardware = true;
         api = api.substr(3);
     }
+#ifdef DEPTHXR_NVOF_RESEARCH
+    if (api == "nvof") {
+        g_nvof = g_hardware = true;
+        api = "d3d12";
+    }
+#endif
     if (api == "profile") {
         // depthxr_framegen_tests profile [width height]: Direct3D 12 on the GPU.
         g_bench = g_profile = true;

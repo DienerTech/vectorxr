@@ -93,6 +93,11 @@ class FrameGenGpu {
     // Whether generated frames are drawn straight into the output images
     // (no intermediate image per view).
     virtual bool DrawsOutputs() const { return false; }
+    // Tests and research: the flow the last Execute measured for `view`
+    // (the filtered field synthesis used) in full-resolution pixels, x and
+    // y per cell row by row; `cells` receives the field's size. Waits for the
+    // GPU. Direct3D 12 only.
+    virtual bool ReadFlow(std::size_t /*view*/, std::vector<float>& /*xy*/, FrameGenExtent& /*cells*/) { return false; }
     // Records and submits generation for every view on the session's graphics
     // queue, copying a view's source first unless Capture already did. Never
     // waits on the CPU for this submission.
