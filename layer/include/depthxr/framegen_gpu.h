@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -35,6 +36,15 @@ struct FrameGenViewSubmission {
 struct FrameGenExecuteResult {
     std::vector<bool> synthesized; // per view; false = the newest frame was written unchanged
     std::vector<bool> depth;       // per view; the newest frame's depth was used
+    // Identifies this submission in LastGpuWindow; 0 = not timed.
+    std::uint64_t submission{0};
+};
+
+// When one submission ran on the GPU, on std::chrono::steady_clock.
+struct FrameGenGpuWindow {
+    std::uint64_t submission{0};
+    std::chrono::steady_clock::time_point start{};
+    std::chrono::steady_clock::time_point end{};
 };
 
 class FrameGenGpu {
@@ -126,6 +136,9 @@ class FrameGenGpu {
     virtual void Reset() = 0;
     // Most recent GPU duration of a whole submission, or a negative value.
     virtual double LastGpuMilliseconds() const { return -1.0; }
+    // When the newest submission whose timing has been read (a few
+    // submissions after it) started and ended on the GPU.
+    virtual std::optional<FrameGenGpuWindow> LastGpuWindow() const { return std::nullopt; }
     // The runtime may then be called from a presenter thread while the
     // application renders: the API's queue is free-threaded (Direct3D 12), so
     // runtime work on it cannot race the application's own submissions.

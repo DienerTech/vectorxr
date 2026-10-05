@@ -111,8 +111,10 @@ frame calls:
   The app's `xrBeginFrame` is a no-op. Extrapolating, its `xrEndFrame` asks for the first slot
   at or after that one, runs the runtime begin/end for it with the app's own layers, then
   generates the extrapolated frames for the following slots. Interpolating, the frame is
-  predicted for (and rendered for) *N - 1* slots later: its `xrEndFrame` first generates the
-  frames between the previous real frame and this one, asks for the first of those slots and
+  predicted for (and rendered for) *N - 1* slots later: its `xrEndFrame` first waits until the
+  presenter thread has submitted the frames interpolated toward the previous real frame (they
+  use the same output swapchains, and the runtime shows a swapchain's newest image), generates
+  the frames between the previous real frame and this one, asks for the first of those slots and
   submits the first generated frame there; the presenter thread shows the rest, then the real
   frame at its own display time. Between real frames the presenter thread submits generated
   frames composed with a deep copy of the newest real frame's other layers, or that frame again
@@ -197,10 +199,13 @@ Texels scored below -0.25 are negated and compensated for rotation only; all oth
 move with the eye. Using only texels scored above +0.25 tore cockpit labels apart in MSFS: the
 plain texels between letters, which neither view can score, stayed behind while the letters moved. Runtimes that only rotate submitted frames (Pimax among them) never correct head
 translation, so a generated frame shown 11-33 ms after its real frame would show near cockpit
-content from where the eye was, and that content would jump at the real frame rate. The presenter
-asks the runtime where each eye will be at every generated frame's display time
-(`FrameGenRuntimeCalls::locate`, in the eye's own view space). Synthesis then reads an eye-shift
-map built per view:
+content from where the eye was, and that content would jump at the real frame rate. Each eye
+keeps moving as it moved between the previous real frame and the newest one, in the eye's own
+view space (`FrameGenViewRequest::shift`, per unit of generated-frame time, which is that
+interval): onward when extrapolating, back toward the previous frame when interpolating. The
+real frames' own poses are used rather than asking the runtime where the eyes will be: Pimax
+returns about the current pose for any later time, which left generated frames at the real
+frame's eye position. Synthesis then reads an eye-shift map built per view:
 
 1. Every half-resolution texel splats onto the texels around where it lands from the new eye
    position, with an atomic max on its inverse depth, so nearer content covers what it moves over.
@@ -209,7 +214,7 @@ map built per view:
    line content moves on.
 
 The map is built for the generated frame furthest in time; the others scale it. Generated frames
-are submitted with the eye's predicted position. Trusted cockpit content also drops sub-pixel
+are submitted with the eye's position at their time. Trusted cockpit content also drops sub-pixel
 motion as matching noise.
 
 When extrapolating, the filter pass also rates how steady each motion vector is against the

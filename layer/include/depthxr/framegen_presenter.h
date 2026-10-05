@@ -29,11 +29,6 @@ struct FrameGenRuntimeCalls {
     std::function<XrResult(XrSession, const XrFrameWaitInfo*, XrFrameState*)> wait;
     std::function<XrResult(XrSession, const XrFrameBeginInfo*)> begin;
     std::function<XrResult(XrSession, const XrFrameEndInfo*)> submit;
-    // The runtime's views (its own view configuration) in `space` at a
-    // display time, as predicted now; fails unless every pose is valid.
-    // Optional: without it generated frames keep the real frame's eye
-    // position.
-    std::function<XrResult(XrSession, XrSpace, XrTime, std::vector<XrView>&)> locate;
 };
 
 struct FrameGenSwapchainDispatch {
@@ -68,7 +63,8 @@ enum class FrameGenDepthState {
 };
 
 const char* ToString(FrameGenDepthState state); // "unknown", "not-sent", ... (relay names)
-// One line for people: "Depth in use", "No depth from this game", ...
+// One line for people (the OSD's second Frame Generation line): "Depth in
+// use: ...", "No depth from this game: ...", ...
 const char* Describe(FrameGenDepthState state);
 
 struct FrameGenStatus {
@@ -180,6 +176,9 @@ class FrameGenPresenter {
     FrameGenStatus Status() const;
     std::string OsdText() const;
     std::string CompactOsdText() const;
+    // A second OSD line under OsdText: what the game's depth does for
+    // generated frames, or empty.
+    std::string OsdDetailText() const;
 
   private:
     struct SwapchainRecord {
@@ -211,6 +210,11 @@ class FrameGenPresenter {
         XrDuration reported_period{0}; // the period the app was given
         std::uint64_t sequence{0};
         std::chrono::steady_clock::time_point wait_return{};
+        // Presenter thread: when the runtime releases the waits of the slot
+        // the real frame is shown in and of the first generated frame's
+        // slot ({} when unknown), for the GPU timing in the summary.
+        std::chrono::steady_clock::time_point real_due{};
+        std::chrono::steady_clock::time_point generated_due{};
     };
 
     struct ViewRecord {
@@ -342,19 +346,21 @@ class FrameGenPresenter {
     XrResult RunCycle(XrSession session, const XrFrameEndInfo& info, const PendingFrame& frame,
                       const FrameGenRuntimeCalls& calls);
     // Generates one frame per fraction into the output swapchain sets from
-    // the newest real frame, for display at `targets` (one per fraction).
-    // On success `sets` holds the generated projection views, one set per
-    // fraction.
+    // the newest real frame. On success `sets` holds the generated
+    // projection views, one set per fraction.
     bool Generate(const XrCompositionLayerProjection& projection, const PendingFrame& frame,
-                  const std::vector<float>& fractions, const std::vector<XrTime>& targets,
-                  const FrameGenRuntimeCalls& calls, std::vector<std::vector<XrCompositionLayerProjectionView>>& sets);
-    // How far each eye moves per unit of generated-frame time (`times`, one
-    // per target) from the real frame shown at `newest_time`, in that eye's
-    // view space, by the runtime's prediction (FrameGenViewRequest::shift);
-    // zeros when the runtime cannot say.
-    std::vector<std::array<float, 3>> EyeShifts(const XrCompositionLayerProjection& projection, XrTime newest_time,
-                                                const std::vector<float>& times, const std::vector<XrTime>& targets,
-                                                const FrameGenRuntimeCalls& calls);
+                  const std::vector<float>& fractions, std::vector<std::vector<XrCompositionLayerProjectionView>>& sets);
+    // How far each eye moves per unit of generated-frame time from the real
+    // frame shown at `newest_time` (FrameGenViewRequest::shift), in that
+    // eye's view space: as far as it moved since the previous real frame
+    // (last_real_), whose display time `newest_time` follows.
+    std::vector<std::array<float, 3>> EyeShiftsLocked(const XrCompositionLayerProjection& projection,
+                                                      XrTime newest_time, FrameGenSynthesisMode mode) const;
+    // Summary statistics: the eye shift's prediction, and when generation
+    // ran on the GPU.
+    void NoteEyeMovementLocked(const XrCompositionLayerProjection& projection, const PendingFrame& frame);
+    void NoteGpuTimingLocked(std::uint64_t submission, const PendingFrame& frame,
+                             const std::optional<FrameGenGpuWindow>& window);
     bool EnsureOutputs(const XrCompositionLayerProjection& projection, const std::vector<FrameGenOutputKind>& kinds,
                        std::size_t sets, std::string& error);
     // Acquires and waits the images of the first `sets` output sets.
@@ -579,6 +585,25 @@ class FrameGenPresenter {
     double shift_window_sum_mm_{0.0};
     double shift_window_max_mm_{0.0};
     std::uint64_t shift_window_frames_{0};
+    // How far the first eye moved between real frames, and how far that was
+    // from continuing its movement between the two before (the eye shift's
+    // prediction), millimeters, since the last summary.
+    std::optional<std::array<double, 3>> eye_velocity_; // meters per second
+    std::uint64_t eye_velocity_sequence_{0};
+    double eye_move_sum_mm_{0.0};
+    double eye_miss_sum_mm_{0.0};
+    std::uint64_t eye_frames_{0};
+    // When generation ran on the GPU: its start after the real frame's slot
+    // was released and its end after the first generated slot was,
+    // milliseconds, since the last summary (FrameGenGpu::LastGpuWindow).
+    struct GpuDue {
+        std::uint64_t submission{0};
+        std::chrono::steady_clock::time_point real_due{};
+        std::chrono::steady_clock::time_point generated_due{};
+    };
+    std::deque<GpuDue> gpu_due_;
+    std::vector<double> gpu_start_ms_;
+    std::vector<double> gpu_done_ms_;
     // Research capture: a file %LOCALAPPDATA%\VectorXR\framegen-capture.request
     // (checked once a second) writes the next kCaptureFrames real frames'
     // inputs under %LOCALAPPDATA%\VectorXR\captures (FrameGenGpu::DumpNextExecute).

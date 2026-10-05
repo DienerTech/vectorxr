@@ -166,7 +166,8 @@ OsdBitmap RasterizeOsd(const OsdSettings& settings, bool compact, const OsdSnaps
     const int panel_width=compact?layout.width:OsdBitmap::width;
     const int header_shift=(settings.show_brand || settings.show_app || settings.show_runtime || settings.show_clock)?0:40;
     const int height=compact?layout.height:210-header_shift+(settings.show_graph?156:0)+
-        (settings.show_turbo?52:0)+(settings.show_framegen&&snapshot.framegen_session?52:0)+(settings.show_pivot?52:0)+(settings.show_modules?52:0)+
+        (settings.show_turbo?52:0)+(settings.show_framegen&&snapshot.framegen_session?(snapshot.framegen_detail.empty()?52:80):0)+
+        (settings.show_pivot?52:0)+(settings.show_modules?52:0)+
         (!snapshot.restart.empty()?48:0);
     OsdBitmap output; output.height=height; output.content_width=panel_width;
     Canvas canvas(output.width,height);
@@ -240,6 +241,9 @@ OsdBitmap RasterizeOsd(const OsdSettings& settings, bool compact, const OsdSnaps
                     row=="framegen"?snapshot.framegen:row=="pivot"?snapshot.pivot:snapshot.modules;
                 canvas.Text(30,y,210,20,label,muted);
                 canvas.Text(242,y,680,24,value,row=="turbo"?accent:white,true); y+=52;
+                if (row=="framegen" && !snapshot.framegen_detail.empty()) {
+                    canvas.Text(242,y-22,680,20,snapshot.framegen_detail,muted); y+=28;
+                }
             }
         }
         if (!snapshot.restart.empty()) canvas.Text(30,y,902,20,"RESTART PENDING  /  "+snapshot.restart,RGB(245,185,108));

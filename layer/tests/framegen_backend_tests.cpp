@@ -854,6 +854,15 @@ int RunScenarios(Harness& harness) {
     run(0, false, 0, 0);
     Check(!result.synthesized[0], harness.name + " synthesize=false must write a still frame");
     Check(gpu->LastGpuMilliseconds() >= -1.0, harness.name + " timing query");
+    if (const auto window = gpu->LastGpuWindow()) {
+        // On the presenter's clock: shortly before now.
+        const auto now = std::chrono::steady_clock::now();
+        Check(window->submission > 0 && window->end >= window->start && window->end <= now &&
+                  now - window->end < std::chrono::seconds(10),
+              harness.name + " GPU timing on the steady clock");
+    } else {
+        Check(harness.name != "D3D12", harness.name + " GPU timing window");
+    }
 
     gpu->Reset();
     std::cout << harness.name << " Frame Generation backend scenarios passed\n";
@@ -1103,7 +1112,9 @@ int RunProfile(Harness& harness) {
 //   depthxr_framegen_tests replay <capture directory> [output directory]
 // Environment: FG_REPLAY_QUALITY=performance|balanced|quality,
 // FG_REPLAY_HARDWARE=1 (optical flow hardware), FG_REPLAY_NOSHIFT=1 (no eye
-// shift), FG_REPLAY_NODEPTH=1 (rotation only).
+// shift), FG_REPLAY_NODEPTH=1 (rotation only), FG_REPLAY_PREDICT=1 (the eye
+// keeps moving as it did from the previous frame, as the presenter shifts,
+// instead of exactly to the next frame's position).
 bool g_replay = false;
 std::string g_replay_directory, g_replay_output;
 
@@ -1327,6 +1338,7 @@ int RunReplay(Harness& harness) {
     const bool hardware = env("FG_REPLAY_HARDWARE") == "1";
     const bool no_shift = env("FG_REPLAY_NOSHIFT") == "1";
     const bool no_depth = env("FG_REPLAY_NODEPTH") == "1";
+    const bool predict = env("FG_REPLAY_PREDICT") == "1";
 
     // Frame k extrapolated to frame k + 1: one frame at the time ratio of
     // the two intervals, from the eye position frame k + 1 was rendered at.
@@ -1355,16 +1367,19 @@ int RunReplay(Harness& harness) {
             submission.request.depth = !no_depth;
             submission.request.newest = view.newest;
             submission.request.previous = synthesize ? view.previous : view.newest;
-            if (has_next && !no_shift) {
-                // Where the eye was for frame k + 1, in frame k's view space.
+            if (has_next && !no_shift && (!predict || synthesize)) {
+                // Where the eye was for frame k + 1, in frame k's view space;
+                // predicting, on as it moved from frame k - 1, for as long as
+                // frame k + 1 really came after (captures hitch, and the
+                // fraction stops at one interval).
                 const auto rotation = ReplayRotation(view.newest.orientation);
-                const ReplayView& next = frames[k + 1].views[v];
-                const double delta[3] = {next.newest.position[0] - view.newest.position[0],
-                                         next.newest.position[1] - view.newest.position[1],
-                                         next.newest.position[2] - view.newest.position[2]};
+                const auto& to = predict ? view.newest.position : frames[k + 1].views[v].newest.position;
+                const auto& from = predict ? view.previous.position : view.newest.position;
+                const double delta[3] = {to[0] - from[0], to[1] - from[1], to[2] - from[2]};
                 for (int i = 0; i < 3; ++i) {
                     const double local = rotation[0][i] * delta[0] + rotation[1][i] * delta[1] + rotation[2][i] * delta[2];
-                    submission.request.shift[i] = static_cast<float>(local / tuning.fractions[0]);
+                    submission.request.shift[i] = static_cast<float>(
+                        local / tuning.fractions[0] * (predict ? frames[k + 1].tuning.interval_ratio : 1.0f));
                 }
             }
             Check(gpu->Capture(v, submission.source, submission.request, tuning.quality, error) || error.empty(),

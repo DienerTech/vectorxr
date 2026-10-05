@@ -55,6 +55,9 @@ struct OsdSnapshot {
     std::string compact_pivot;
     std::string framegen{"Disabled"};
     std::string compact_framegen{"Disabled"};
+    // A second, smaller line under the expanded row (what the game's depth
+    // does), empty for none.
+    std::string framegen_detail;
     // The expanded row is shown only in sessions with Frame Generation on.
     bool framegen_session{false};
 };

@@ -57,6 +57,7 @@ std::map<XrSwapchain, SwapchainImages> g_images;
 int g_creates = 0;
 int g_wait_timeouts = 0; // number of upcoming output waits that time out
 bool g_release_violation = false;
+std::map<XrSwapchain, int> g_releases; // images released per swapchain
 
 XrResult XRAPI_PTR Formats(XrSession, std::uint32_t capacity, std::uint32_t* count, std::int64_t* formats) {
     *count = 1;
@@ -104,6 +105,7 @@ XrResult XRAPI_PTR Release(XrSwapchain swapchain, const XrSwapchainImageReleaseI
     }
     images.acquired.pop_front();
     --images.waited;
+    ++g_releases[swapchain];
     return XR_SUCCESS;
 }
 
@@ -212,6 +214,8 @@ struct Submission {
     XrTime time{0};
     std::vector<XrSwapchain> swapchains;
     std::uint32_t layers{0};
+    // Per swapchain, how many images it had released: the image shown.
+    std::vector<int> releases;
 };
 
 struct Runtime {
@@ -235,8 +239,6 @@ struct Runtime {
     std::vector<std::vector<XrSwapchain>> submitted_swapchains;
     std::vector<bool> submitted_depth;
     std::vector<float> submitted_left_x; // the first projection view's position
-    // Eyes 64 mm apart moving sideways at this many m/s (locate).
-    double eye_speed{0.0};
 
     FrameGenRuntimeCalls Calls() {
         FrameGenRuntimeCalls calls;
@@ -295,12 +297,14 @@ struct Runtime {
                 }
             }
             std::vector<XrSwapchain> swapchains;
+            std::vector<int> releases;
             bool depth = false;
             float left_x = 0.0f;
             if (info->layerCount) {
                 const auto* projection = reinterpret_cast<const XrCompositionLayerProjection*>(info->layers[0]);
                 for (std::uint32_t i = 0; i < projection->viewCount; ++i) {
                     swapchains.push_back(projection->views[i].subImage.swapchain);
+                    releases.push_back(g_releases[projection->views[i].subImage.swapchain]);
                     depth = depth || projection->views[i].next != nullptr;
                 }
                 left_x = projection->viewCount ? projection->views[0].pose.position.x : 0.0f;
@@ -308,16 +312,7 @@ struct Runtime {
             submitted_swapchains.push_back(swapchains);
             submitted_depth.push_back(depth);
             submitted_left_x.push_back(left_x);
-            log.push_back({info->displayTime, swapchains, info->layerCount});
-            return XR_SUCCESS;
-        };
-        calls.locate = [this](XrSession, XrSpace, XrTime time, std::vector<XrView>& views) {
-            views.assign(2, XrView{XR_TYPE_VIEW});
-            for (int eye = 0; eye < 2; ++eye) {
-                views[eye].pose.orientation.w = 1.0f;
-                views[eye].pose.position.x =
-                    static_cast<float>((eye ? 0.032 : -0.032) + eye_speed * static_cast<double>(time - 1'000'000'000) * 1e-9);
-            }
+            log.push_back({info->displayTime, swapchains, info->layerCount, releases});
             return XR_SUCCESS;
         };
         return calls;
@@ -357,6 +352,9 @@ struct App {
         reinterpret_cast<const XrCompositionLayerBaseHeader*>(&projection)};
     // MSFS ends each frame one period after the display time it was given.
     int end_offset_periods{0};
+    // The eyes move sideways at this many m/s: each frame is rendered from
+    // where they are at the display time it was given.
+    double eye_speed{0.0};
     std::mutex periods_mutex;
     std::map<XrTime, XrDuration> periods;
 
@@ -407,6 +405,9 @@ struct App {
     XrResult End(XrTime display_time, bool layers = true) {
         XrFrameEndInfo info{XR_TYPE_FRAME_END_INFO};
         info.displayTime = display_time;
+        for (auto& view : views) {
+            view.pose.position.x = static_cast<float>(eye_speed * static_cast<double>(display_time - 1'000'000'000) * 1e-9);
+        }
         if (end_offset_periods) {
             std::scoped_lock lock(periods_mutex);
             const auto it = periods.find(display_time);
@@ -693,7 +694,8 @@ double Seconds(std::chrono::steady_clock::duration duration) {
 // thread after each end. Returns the frames ended.
 int RunPipelined(App& app, std::chrono::milliseconds duration, std::chrono::milliseconds simulate,
                  std::chrono::milliseconds render, const std::function<void(int, const XrFrameState&)>& between = {},
-                 std::chrono::steady_clock::duration* longest_gap = nullptr) {
+                 std::chrono::steady_clock::duration* longest_gap = nullptr,
+                 std::chrono::milliseconds faster_every_other = 0ms) {
     std::mutex mutex;
     std::condition_variable cv;
     std::deque<XrFrameState> ready;
@@ -734,7 +736,7 @@ int RunPipelined(App& app, std::chrono::milliseconds duration, std::chrono::mill
             ++begun;
             cv.notify_all();
         }
-        SleepPrecise(std::chrono::steady_clock::now() + render);
+        SleepPrecise(std::chrono::steady_clock::now() + render - (ended % 2 ? faster_every_other : 0ms));
         app.Release();
         Check(XR_SUCCEEDED(app.End(state.predictedDisplayTime)), "pipelined: end");
         const auto now = std::chrono::steady_clock::now();
@@ -837,15 +839,22 @@ void TestThreadedInterpolation() {
     runtime.paced = true;
     StartPresenter(presenter, gpu, FrameGenSynthesisMode::kInterpolate, kFormat, kAppUsage, FrameGenMultiplier::k3);
     App app(presenter, runtime);
+    app.eye_speed = 0.5;
     for (int i = 0; i < 3; ++i) app.Frame();
     const std::size_t first = runtime.Submissions();
     std::mutex times_mutex;
     std::vector<XrTime> rendered_for;
     const auto start = std::chrono::steady_clock::now();
-    const int frames = RunPipelined(app, 1500ms, 20ms, 22ms, [&](int, const XrFrameState& state) {
-        std::scoped_lock lock(times_mutex);
-        rendered_for.push_back(state.predictedDisplayTime);
-    });
+    // Every other frame renders much faster, as game frames vary: those
+    // arrive well before their slot, while the previous real frame's
+    // interpolated frames are still being shown.
+    const int frames = RunPipelined(
+        app, 1500ms, 20ms, 30ms,
+        [&](int, const XrFrameState& state) {
+            std::scoped_lock lock(times_mutex);
+            rendered_for.push_back(state.predictedDisplayTime);
+        },
+        nullptr, 26ms);
     const double elapsed = Seconds(std::chrono::steady_clock::now() - start);
     const double refresh = 1e9 / static_cast<double>(kPeriod);
     const FrameGenStatus status = presenter.Status();
@@ -877,6 +886,29 @@ void TestThreadedInterpolation() {
               std::to_string(real) + ")");
     Check(on_time * 10 >= real * 7, "threaded interpolation: real frames are shown when they were rendered for (" +
                                         std::to_string(on_time) + " of " + std::to_string(real) + ")");
+    // Each frame interpolated toward a real frame is shown before the frames
+    // toward the next one are generated into the same output swapchains:
+    // every submission of an output image shows one released since that
+    // swapchain was last shown.
+    std::map<XrSwapchain, int> shown;
+    std::size_t overwritten = 0, generated_shown = 0;
+    for (std::size_t i = first; i < log.size(); ++i) {
+        if (IsAppImage(log[i].swapchains) || log[i].releases.empty()) continue;
+        ++generated_shown;
+        const XrSwapchain swapchain = log[i].swapchains[0];
+        const auto previous = shown.find(swapchain);
+        overwritten += previous != shown.end() && log[i].releases[0] <= previous->second ? 1 : 0;
+        shown[swapchain] = log[i].releases[0];
+    }
+    Check(generated_shown > 20 && overwritten == 0,
+          "threaded interpolation: no interpolated image is replaced before it is shown (" +
+              std::to_string(overwritten) + " of " + std::to_string(generated_shown) + ")");
+    // The eyes moved +x: interpolated frames sit back toward the previous
+    // real frame, a real frame interval (three periods) per unit.
+    const float per_unit = static_cast<float>(0.5 * 3.0 * kPeriod * 1e-9);
+    Check(std::abs(gpu.last[0].request.shift[0] + per_unit) < 0.05f * per_unit,
+          "threaded interpolation: generated frames sit back where the eyes were (" +
+              std::to_string(gpu.last[0].request.shift[0]) + " vs " + std::to_string(-per_unit) + ")");
     presenter.Stop();
     Check(!runtime.ordering_violation && !g_release_violation,
           "threaded interpolation: runtime and image calls stayed ordered");
@@ -1133,9 +1165,10 @@ void TestDepthCapture() {
     // The fake backend never decides how to read the depth.
     Check(presenter.Status().depth == FrameGenDepthState::kChecking, "depth: reported as being checked");
 
-    // The eyes keep moving: generated frames are asked to follow them, and
-    // are submitted from where the eye will be.
-    runtime.eye_speed = 0.5;
+    // The eyes keep moving: generated frames are asked to follow them as
+    // they moved between the real frames, and are submitted from where the
+    // eye will be.
+    app.eye_speed = 0.5;
     for (int i = 0; i < 6; ++i) app.Frame();
     // 2x extrapolation: one generated frame a period past the newest, half
     // a real frame interval: the eye moves 0.5 m/s * 2 periods per unit.
@@ -1148,9 +1181,10 @@ void TestDepthCapture() {
     bool shifted_pose = false;
     {
         std::scoped_lock lock(g_xr_mutex);
-        for (std::size_t i = 0; i < runtime.submitted_swapchains.size(); ++i) {
-            if (!IsAppImage(runtime.submitted_swapchains[i]) && runtime.submitted_left_x[i] > 1e-4f) {
-                shifted_pose = true; // the app's own views stay at x = 0
+        for (std::size_t i = 1; i < runtime.submitted_swapchains.size(); ++i) {
+            if (!IsAppImage(runtime.submitted_swapchains[i]) && IsAppImage(runtime.submitted_swapchains[i - 1]) &&
+                runtime.submitted_left_x[i] > runtime.submitted_left_x[i - 1] + 1e-4f) {
+                shifted_pose = true; // ahead of the real frame before it
             }
         }
     }

@@ -122,6 +122,16 @@ int main(int argc, char** argv) {
             Check(RasterizeOsd(choices,true,Snapshot(),stats,false).pixels==compact_before.pixels,"Expanded header choices changed compact output");
         }
         if(argc>1) WriteBitmap(argv[1],bitmap);
+        {
+            // Frame Generation's depth status gets a second line under its row.
+            auto framegen=Snapshot(); framegen.framegen_session=true;
+            framegen.framegen="Extrapolate  /  Auto 4x  /  23 -> 90 fps  /  8.0 ms";
+            const auto one_line=RasterizeOsd(settings,false,framegen,stats,false);
+            framegen.framegen_detail="Depth empty: turn on the game's depth reprojection";
+            const auto two_lines=RasterizeOsd(settings,false,framegen,stats,false);
+            Check(two_lines.Valid() && two_lines.height==one_line.height+28,"Frame Generation's second line did not add its height");
+            if(const char* path=std::getenv("OSD_FRAMEGEN_BMP")) WriteBitmap(path,two_lines);
+        }
         settings.accent="custom"; settings.custom_color="#123456";
         settings.body_order={"pivot","modules","turbo","graph"};
         const auto reordered=RasterizeOsd(settings,false,Snapshot(),stats,false);

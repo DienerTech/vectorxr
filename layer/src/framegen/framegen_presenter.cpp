@@ -58,10 +58,9 @@ FrameGenViewGeometry Geometry(const XrCompositionLayerProjectionView& view) {
     return geometry;
 }
 
-// A head moves well under 2 m/s: eye shifts per unit of generated-frame
-// time (at most a real frame interval, ~50 ms at low frame rates) above
-// this are tracking glitches.
-constexpr double kMaxEyeShift = 0.1;
+// A head moves well under 2 m/s (meters per second); eyes that moved faster
+// between two real frames are a tracking glitch.
+constexpr double kMaxEyeSpeed = 2.0;
 
 // `v` rotated by the unit quaternion `q`, and by its inverse.
 std::array<double, 3> Rotate(const XrQuaternionf& q, const std::array<double, 3>& v) {
@@ -95,6 +94,15 @@ std::string Number(double value, int decimals) {
     char buffer[32];
     std::snprintf(buffer, sizeof(buffer), "%.*f", decimals, value);
     return buffer;
+}
+
+// "median/largest" of a summary window, "-" when empty.
+std::string MedianAndMax(std::vector<double> values) {
+    if (values.empty()) {
+        return "-";
+    }
+    std::sort(values.begin(), values.end());
+    return Number(values[values.size() / 2], 1) + "/" + Number(values.back(), 1);
 }
 
 double RatePerSecond(std::deque<Clock::time_point>& stamps, Clock::time_point now) {
@@ -142,12 +150,12 @@ const char* ToString(FrameGenDepthState state) {
 
 const char* Describe(FrameGenDepthState state) {
     switch (state) {
-    case FrameGenDepthState::kNotSent: return "No depth from this game";
-    case FrameGenDepthState::kNotReadable: return "Depth not read on this graphics API yet";
-    case FrameGenDepthState::kChecking: return "Checking the game's depth";
-    case FrameGenDepthState::kInUse: return "Depth in use";
+    case FrameGenDepthState::kNotSent: return "No depth from this game: near cockpit detail may jitter";
+    case FrameGenDepthState::kNotReadable: return "Depth is only read in Direct3D 12 games for now";
+    case FrameGenDepthState::kChecking: return "Checking the game's depth against the other eye";
+    case FrameGenDepthState::kInUse: return "Depth in use: cockpit detail follows head movement";
     case FrameGenDepthState::kEmpty: return "Depth empty: turn on the game's depth reprojection";
-    case FrameGenDepthState::kUnusable: return "Depth does not match the other eye";
+    case FrameGenDepthState::kUnusable: return "Depth does not match the other eye, so it is not used";
     default: return "";
     }
 }
@@ -1299,12 +1307,11 @@ XrResult FrameGenPresenter::RunCycle(XrSession session, const XrFrameEndInfo& in
     bool interpolated_ready = false;
     if (mode == FrameGenSynthesisMode::kInterpolate) {
         std::vector<float> fractions;
-        std::vector<XrTime> targets;
         for (std::uint32_t slot = 0; slot < generated; ++slot) {
-            targets.push_back(frame.slot_time + period * static_cast<XrDuration>(slot));
-            fractions.push_back(continuous ? FrameGenFraction(mode, previous_time, newest_time, targets.back()) : 1.0f);
+            const XrTime target = frame.slot_time + period * static_cast<XrDuration>(slot);
+            fractions.push_back(continuous ? FrameGenFraction(mode, previous_time, newest_time, target) : 1.0f);
         }
-        interpolated_ready = Generate(projection, frame, fractions, targets, calls, interpolated);
+        interpolated_ready = Generate(projection, frame, fractions, interpolated);
     }
 
     XrTime time = frame.slot_time;
@@ -1356,13 +1363,12 @@ XrResult FrameGenPresenter::RunCycle(XrSession session, const XrFrameEndInfo& in
     if (mode == FrameGenSynthesisMode::kExtrapolate) {
         // The newest frame pushed forward, for the next cycle's generated slots.
         std::vector<float> fractions;
-        std::vector<XrTime> targets;
         for (std::uint32_t slot = 0; slot < generated; ++slot) {
-            targets.push_back(newest_time + period * static_cast<XrDuration>(slot + 1));
-            fractions.push_back(continuous ? FrameGenFraction(mode, previous_time, newest_time, targets.back()) : 0.0f);
+            const XrTime target = newest_time + period * static_cast<XrDuration>(slot + 1);
+            fractions.push_back(continuous ? FrameGenFraction(mode, previous_time, newest_time, target) : 0.0f);
         }
         std::vector<std::vector<XrCompositionLayerProjectionView>> sets;
-        const bool ok = Generate(projection, frame, fractions, targets, calls, sets);
+        const bool ok = Generate(projection, frame, fractions, sets);
         std::scoped_lock lock(mutex_);
         extrapolated_.valid = ok;
         extrapolated_.sets = std::move(sets);
@@ -1391,61 +1397,85 @@ void FrameGenPresenter::RecordReal(const XrCompositionLayerProjection& projectio
     }
 }
 
-std::vector<std::array<float, 3>> FrameGenPresenter::EyeShifts(const XrCompositionLayerProjection& projection,
-                                                               XrTime newest_time, const std::vector<float>& times,
-                                                               const std::vector<XrTime>& targets,
-                                                               const FrameGenRuntimeCalls& calls) {
+std::vector<std::array<float, 3>> FrameGenPresenter::EyeShiftsLocked(const XrCompositionLayerProjection& projection,
+                                                                     XrTime newest_time,
+                                                                     FrameGenSynthesisMode mode) const {
     std::vector<std::array<float, 3>> shifts(projection.viewCount, {0.0f, 0.0f, 0.0f});
-    if (!calls.locate || newest_time <= 0 || times.size() != targets.size()) {
+    const double seconds = static_cast<double>(newest_time - last_real_.display_time) / 1e9;
+    if (!last_real_.valid || seconds <= 0.0 || last_real_.views.size() != projection.viewCount) {
         return shifts;
     }
-    std::vector<XrView> newest;
-    if (XR_FAILED(calls.locate(session_, projection.space, newest_time, newest)) || newest.size() != projection.viewCount) {
-        return shifts;
-    }
-    // Least squares through the origin: the eye moves `shift` per unit time.
-    std::vector<std::array<double, 3>> sums(projection.viewCount, {0.0, 0.0, 0.0});
-    double norm = 0.0;
-    std::vector<XrView> later;
-    for (std::size_t j = 0; j < targets.size(); ++j) {
-        if (times[j] <= 0.0f) {
-            continue;
-        }
-        if (XR_FAILED(calls.locate(session_, projection.space, targets[j], later)) || later.size() != newest.size()) {
-            return shifts;
-        }
-        for (std::size_t i = 0; i < newest.size(); ++i) {
-            // Into the eye's own view space at the newest frame: the same
-            // movement in the view the game rendered, whatever it did to
-            // the world around it.
-            const XrQuaternionf& q = newest[i].pose.orientation;
-            const std::array<double, 3> delta{later[i].pose.position.x - newest[i].pose.position.x,
-                                              later[i].pose.position.y - newest[i].pose.position.y,
-                                              later[i].pose.position.z - newest[i].pose.position.z};
-            const std::array<double, 3> local = RotateInverse(q, delta);
-            for (int axis = 0; axis < 3; ++axis) {
-                sums[i][axis] += times[j] * local[axis];
-            }
-        }
-        norm += static_cast<double>(times[j]) * times[j];
-    }
-    if (norm <= 0.0) {
-        return shifts;
-    }
-    for (std::size_t i = 0; i < shifts.size(); ++i) {
-        std::array<double, 3> shift{sums[i][0] / norm, sums[i][1] / norm, sums[i][2] / norm};
-        // A head moves well under 2 m/s; anything more is a tracking glitch.
-        const double length = std::sqrt(shift[0] * shift[0] + shift[1] * shift[1] + shift[2] * shift[2]);
-        if (std::isfinite(length) && length < kMaxEyeShift) {
-            shifts[i] = {static_cast<float>(shift[0]), static_cast<float>(shift[1]), static_cast<float>(shift[2])};
+    // One unit of generated-frame time is the interval between the two real
+    // frames, so the eyes move as far per unit as they did between them:
+    // onward when extrapolating, back toward the previous frame when
+    // interpolating. Runtimes are not asked where the eyes will be: Pimax
+    // returns about the current pose for any later time, which kept
+    // generated frames at the real frame's eye position.
+    const double sign = mode == FrameGenSynthesisMode::kExtrapolate ? 1.0 : -1.0;
+    for (std::uint32_t i = 0; i < projection.viewCount; ++i) {
+        const XrPosef& pose = projection.views[i].pose;
+        const std::array<float, 3>& previous = last_real_.views[i].geometry.position;
+        const std::array<double, 3> delta{pose.position.x - previous[0], pose.position.y - previous[1],
+                                          pose.position.z - previous[2]};
+        // Into the eye's own view space at the newest frame: the same
+        // movement in the view the game rendered, whatever it did to the
+        // world around it.
+        const std::array<double, 3> local = RotateInverse(pose.orientation, delta);
+        const double length = std::sqrt(local[0] * local[0] + local[1] * local[1] + local[2] * local[2]);
+        if (std::isfinite(length) && length < kMaxEyeSpeed * seconds) {
+            shifts[i] = {static_cast<float>(sign * local[0]), static_cast<float>(sign * local[1]),
+                         static_cast<float>(sign * local[2])};
         }
     }
     return shifts;
 }
 
+void FrameGenPresenter::NoteEyeMovementLocked(const XrCompositionLayerProjection& projection,
+                                              const PendingFrame& frame) {
+    const double seconds = static_cast<double>(frame.app_time - last_real_.display_time) / 1e9;
+    if (projection.viewCount == 0 || last_real_.views.empty() || seconds <= 0.0) {
+        eye_velocity_.reset();
+        return;
+    }
+    const XrVector3f& now = projection.views[0].pose.position;
+    const std::array<float, 3>& before = last_real_.views[0].geometry.position;
+    const std::array<double, 3> moved{now.x - before[0], now.y - before[1], now.z - before[2]};
+    const double length = std::sqrt(moved[0] * moved[0] + moved[1] * moved[1] + moved[2] * moved[2]);
+    if (eye_velocity_ && eye_velocity_sequence_ + 1 == frame.sequence && length < kMaxEyeSpeed * seconds) {
+        const std::array<double, 3>& velocity = *eye_velocity_;
+        const std::array<double, 3> miss{moved[0] - velocity[0] * seconds, moved[1] - velocity[1] * seconds,
+                                         moved[2] - velocity[2] * seconds};
+        eye_move_sum_mm_ += 1000.0 * length;
+        eye_miss_sum_mm_ += 1000.0 * std::sqrt(miss[0] * miss[0] + miss[1] * miss[1] + miss[2] * miss[2]);
+        ++eye_frames_;
+    }
+    eye_velocity_ = std::array<double, 3>{moved[0] / seconds, moved[1] / seconds, moved[2] / seconds};
+    eye_velocity_sequence_ = frame.sequence;
+}
+
+void FrameGenPresenter::NoteGpuTimingLocked(std::uint64_t submission, const PendingFrame& frame,
+                                            const std::optional<FrameGenGpuWindow>& window) {
+    if (submission && frame.real_due != Clock::time_point{} && frame.generated_due != Clock::time_point{}) {
+        gpu_due_.push_back({submission, frame.real_due, frame.generated_due});
+        while (gpu_due_.size() > 16) {
+            gpu_due_.pop_front();
+        }
+    }
+    if (!window) {
+        return;
+    }
+    while (!gpu_due_.empty() && gpu_due_.front().submission <= window->submission) {
+        const GpuDue due = gpu_due_.front();
+        gpu_due_.pop_front();
+        if (due.submission == window->submission && gpu_start_ms_.size() < 4096) {
+            gpu_start_ms_.push_back(std::chrono::duration<double, std::milli>(window->start - due.real_due).count());
+            gpu_done_ms_.push_back(std::chrono::duration<double, std::milli>(window->end - due.generated_due).count());
+        }
+    }
+}
+
 bool FrameGenPresenter::Generate(const XrCompositionLayerProjection& projection, const PendingFrame& frame,
-                                 const std::vector<float>& fractions, const std::vector<XrTime>& targets,
-                                 const FrameGenRuntimeCalls& calls,
+                                 const std::vector<float>& fractions,
                                  std::vector<std::vector<XrCompositionLayerProjectionView>>& sets) {
     const std::size_t count = std::min(fractions.size(), kFrameGenMaxGenerated);
     if (count == 0) {
@@ -1462,11 +1492,7 @@ bool FrameGenPresenter::Generate(const XrCompositionLayerProjection& projection,
     for (std::size_t index = 0; index < count; ++index) {
         times[index] = mode == FrameGenSynthesisMode::kExtrapolate ? fractions[index] : 1.0f - fractions[index];
     }
-    const std::vector<std::array<float, 3>> shifts =
-        targets.size() >= count
-            ? EyeShifts(projection, frame.app_time, times, std::vector<XrTime>(targets.begin(), targets.begin() + count),
-                        calls)
-            : std::vector<std::array<float, 3>>(projection.viewCount, {0.0f, 0.0f, 0.0f});
+    std::vector<std::array<float, 3>> shifts(projection.viewCount, {0.0f, 0.0f, 0.0f});
     std::vector<FrameGenViewSubmission> submissions(projection.viewCount);
     std::vector<FrameGenOutputKind> kinds(projection.viewCount);
     FrameGenTuning tuning;
@@ -1492,6 +1518,10 @@ bool FrameGenPresenter::Generate(const XrCompositionLayerProjection& projection,
             tuning.interval_ratio = std::clamp(static_cast<float>(frame.app_time - last_real_.display_time) /
                                                    static_cast<float>(last_real_.interval),
                                                0.25f, 4.0f);
+        }
+        if (continuous) {
+            shifts = EyeShiftsLocked(projection, frame.app_time, mode);
+            NoteEyeMovementLocked(projection, frame);
         }
         for (std::uint32_t i = 0; i < projection.viewCount; ++i) {
             const auto& view = projection.views[i];
@@ -1564,6 +1594,7 @@ bool FrameGenPresenter::Generate(const XrCompositionLayerProjection& projection,
     FrameGenExecuteResult executed;
     bool ok = true;
     double gpu_ms = -1.0;
+    std::optional<FrameGenGpuWindow> window;
     FrameGenDepthStatus depth;
     std::string hardware_status;
     {
@@ -1597,6 +1628,7 @@ bool FrameGenPresenter::Generate(const XrCompositionLayerProjection& projection,
         ok = ok && gpu_->Execute(submissions, tuning, executed, error);
         if (gpu_) {
             gpu_ms = gpu_->LastGpuMilliseconds();
+            window = gpu_->LastGpuWindow();
             depth = gpu_->DepthStatus();
             if (tuning.hardware_flow) {
                 hardware_status = gpu_->HardwareFlowStatus();
@@ -1615,6 +1647,7 @@ bool FrameGenPresenter::Generate(const XrCompositionLayerProjection& projection,
     gpu_ms_ = gpu_ms;
     depth_status_ = depth;
     consecutive_failures_ = 0;
+    NoteGpuTimingLocked(executed.submission, frame, window);
     if (logger_ && !hardware_status.empty() && hardware_status != logged_hardware_status_) {
         logged_hardware_status_ = hardware_status;
         logger_->Info(hardware_status == "active"
@@ -2532,24 +2565,39 @@ XrResult FrameGenPresenter::ThreadedEnd(XrSession session, const XrFrameEndInfo&
     }
     const XrTime previous_time = last_real_.display_time;
     const XrDuration period = slot_period_ > 0 ? slot_period_ : last_period_;
+    // When the runtime releases the wait of the slot shown at `time`.
+    auto due = [&](XrTime time) {
+        return phase_wall_ != Clock::time_point{} && time > phase_xr_
+                   ? phase_wall_ + std::chrono::nanoseconds(time - phase_xr_)
+                   : Clock::time_point{};
+    };
+    const Clock::time_point first_due = due(frame.first_time);
     // Interpolating, the frames between the previous real frame and this one
     // fill the slots before it: generated now, the first shown from here.
     const bool interpolate = frame.interpolate && renderable && copied && frame.multiplier >= 2;
     std::vector<std::vector<XrCompositionLayerProjectionView>> between;
     bool between_ok = false;
     if (interpolate) {
+        // The frames interpolated toward the previous real frame use the same
+        // output swapchains, and the runtime shows a swapchain's newest
+        // image: those still to be shown are submitted first, or this frame's
+        // would be shown in their slots, a real frame ahead and from the
+        // wrong eye position. Game frames often end slots early.
+        slot_cv_.wait_for(lock, kThreadedDrain, [&] {
+            return !compositor_running_ || !extrapolated_.interpolated || !extrapolated_.valid || !generated_ready_ ||
+                   next_generated_set_ >= extrapolated_.sets.size();
+        });
         lock.unlock();
         std::vector<float> fractions;
-        std::vector<XrTime> targets;
         for (std::uint32_t slot = 0; slot + 1 < frame.multiplier && fractions.size() < kFrameGenMaxGenerated; ++slot) {
-            targets.push_back(frame.first_time + period * static_cast<XrDuration>(slot));
-            fractions.push_back(
-                FrameGenFraction(FrameGenSynthesisMode::kInterpolate, previous_time, content_time, targets.back()));
+            const XrTime target = frame.first_time + period * static_cast<XrDuration>(slot);
+            fractions.push_back(FrameGenFraction(FrameGenSynthesisMode::kInterpolate, previous_time, content_time, target));
         }
         PendingFrame pending;
         pending.app_time = content_time;
         pending.sequence = frame.id;
-        between_ok = Generate(*projection, pending, fractions, targets, calls, between);
+        pending.real_due = pending.generated_due = first_due;
+        between_ok = Generate(*projection, pending, fractions, between);
         RecordReal(*projection, content_time, frame.id);
         lock.lock();
     }
@@ -2636,6 +2684,8 @@ XrResult FrameGenPresenter::ThreadedEnd(XrSession session, const XrFrameEndInfo&
             generated_ready_ = true;
         }
     }
+    const Clock::time_point real_due = due(offer.time);
+    const Clock::time_point generated_due = due(offer.time + period);
     const bool late = offer.slot > frame.first_slot;
     threaded_late_ += late ? 1 : 0;
     UpdateLeadLocked(late, slack_ms, frame);
@@ -2654,20 +2704,20 @@ XrResult FrameGenPresenter::ThreadedEnd(XrSession session, const XrFrameEndInfo&
 
     if (generate) {
         std::vector<float> fractions;
-        std::vector<XrTime> targets;
         // One frame per generated slot, plus a spare for the slot the next
         // real frame is due in: if that frame is late, the slot still shows
         // motion instead of repeating the last generated frame.
         for (std::uint32_t slot = 1; slot <= frame.multiplier && fractions.size() < kFrameGenMaxGenerated; ++slot) {
-            targets.push_back(offer.time + period * static_cast<XrDuration>(slot));
-            fractions.push_back(
-                FrameGenFraction(FrameGenSynthesisMode::kExtrapolate, previous_time, content_time, targets.back()));
+            const XrTime target = offer.time + period * static_cast<XrDuration>(slot);
+            fractions.push_back(FrameGenFraction(FrameGenSynthesisMode::kExtrapolate, previous_time, content_time, target));
         }
         PendingFrame pending;
         pending.app_time = content_time;
         pending.sequence = frame.id;
+        pending.real_due = real_due;
+        pending.generated_due = generated_due;
         std::vector<std::vector<XrCompositionLayerProjectionView>> sets;
-        const bool ok = Generate(*projection, pending, fractions, targets, calls, sets);
+        const bool ok = Generate(*projection, pending, fractions, sets);
         RecordReal(*projection, content_time, frame.id);
         lock.lock();
         if (compositor_running_) {
@@ -2710,7 +2760,14 @@ XrResult FrameGenPresenter::ThreadedEnd(XrSession session, const XrFrameEndInfo&
                       Number(depth_window_frames_ ? 100.0 * depth_window_used_ / depth_window_frames_ : 0.0, 0) +
                       "%, eyeShiftMm=" +
                       Number(shift_window_frames_ ? shift_window_sum_mm_ / shift_window_frames_ : 0.0, 1) + "/" +
-                      Number(shift_window_max_mm_, 1) + ".");
+                      Number(shift_window_max_mm_, 1) + ", eyeMoveMm=" +
+                      Number(eye_frames_ ? eye_move_sum_mm_ / eye_frames_ : 0.0, 1) + ", eyeMissMm=" +
+                      Number(eye_frames_ ? eye_miss_sum_mm_ / eye_frames_ : 0.0, 1) + ", gpuStartMs=" +
+                      MedianAndMax(gpu_start_ms_) + ", gpuDoneMs=" + MedianAndMax(gpu_done_ms_) + ".");
+        eye_move_sum_mm_ = eye_miss_sum_mm_ = 0.0;
+        eye_frames_ = 0;
+        gpu_start_ms_.clear();
+        gpu_done_ms_.clear();
         app_work_ms_ = 0.0;
         app_work_frames_ = 0;
         threaded_late_ = 0;
@@ -2846,6 +2903,10 @@ void FrameGenPresenter::CompositorLoop() {
         if (use_generated) {
             views = extrapolated_.sets[std::min(next_generated_set_, extrapolated_.sets.size() - 1)];
             ++next_generated_set_;
+            // Interpolating, the game's frame thread may wait to generate
+            // into these swapchains; it still waits on submit_mutex_ for
+            // this submission.
+            slot_cv_.notify_all();
         }
         const XrSpace space = extrapolated_.space;
         const XrCompositionLayerFlags flags = extrapolated_.flags;
@@ -2924,7 +2985,6 @@ std::string FrameGenPresenter::OsdText() const {
                            "  /  " + (status.automatic ? "Auto " : "") + MultiplierText(status.multiplier) + "  /  " +
                            Number(status.app_fps, 0) + " -> " + Number(status.output_fps, 0) + " fps";
         if (status.gpu_ms > 0.0) text += "  /  " + Number(status.gpu_ms, 1) + " ms";
-        if (status.depth != FrameGenDepthState::kUnknown) text += std::string("  /  ") + Describe(status.depth);
         return text;
     }
     case FrameGenState::kWaiting:
@@ -2936,6 +2996,14 @@ std::string FrameGenPresenter::OsdText() const {
     default:
         return Started() ? "Off" : "Disabled";
     }
+}
+
+std::string FrameGenPresenter::OsdDetailText() const {
+    const FrameGenStatus status = Status();
+    if (status.state != FrameGenState::kActive || status.full_rate || status.depth == FrameGenDepthState::kUnknown) {
+        return {};
+    }
+    return Describe(status.depth);
 }
 
 std::string FrameGenPresenter::CompactOsdText() const {

@@ -153,6 +153,11 @@ struct FrameSlot {
     ComPtr<ID3D12CommandAllocator> after_hardware; // the work after the optical flow hardware
     UINT64 fence_value{0};
     bool timing_pending{false};
+    // The queue's GPU and CPU (QueryPerformanceCounter) clocks just before
+    // the submission, and its FrameGenExecuteResult::submission.
+    UINT64 calibration_gpu{0};
+    UINT64 calibration_cpu{0};
+    std::uint64_t timed_submission{0};
     ComPtr<ID3D12Resource> check_readback; // depth check scores, read once the slot's fence passes
     bool check_pending{false};
     std::uint32_t check_generation{0}; // decoding the checked depth used
@@ -1252,6 +1257,11 @@ class D3D12FrameGen final : public FrameGenGpu {
             }
             return false;
         }
+        slot.timed_submission = 0;
+        if (timed && SUCCEEDED(queue_->GetClockCalibration(&slot.calibration_gpu, &slot.calibration_cpu))) {
+            slot.timed_submission = submission_ + 1;
+        }
+        result.submission = slot.timed_submission;
         ID3D12CommandList* lists[] = {commands_.Get()};
         queue_->ExecuteCommandLists(1, lists);
         hr = queue_->Signal(fence_.Get(), ++fence_value_);
@@ -1318,6 +1328,7 @@ class D3D12FrameGen final : public FrameGenGpu {
     }
 
     double LastGpuMilliseconds() const override { return last_gpu_ms_; }
+    std::optional<FrameGenGpuWindow> LastGpuWindow() const override { return last_window_; }
 
   private:
     // A texture copied into a readback buffer for a research dump.
@@ -1466,6 +1477,20 @@ class D3D12FrameGen final : public FrameGenGpu {
             const auto* stamps = reinterpret_cast<const UINT64*>(static_cast<const std::byte*>(mapped) + range.Begin);
             if (stamps[1] >= stamps[0]) {
                 last_gpu_ms_ = static_cast<double>(stamps[1] - stamps[0]) * 1000.0 / static_cast<double>(timestamp_frequency_);
+            }
+            LARGE_INTEGER frequency{};
+            if (slot.timed_submission && stamps[1] >= stamps[0] && QueryPerformanceFrequency(&frequency)) {
+                // GPU ticks after the calibration, as steady_clock time
+                // (which counts QueryPerformanceCounter from zero).
+                auto clock = [&](UINT64 stamp) {
+                    const double seconds =
+                        static_cast<double>(slot.calibration_cpu) / static_cast<double>(frequency.QuadPart) +
+                        (static_cast<double>(stamp) - static_cast<double>(slot.calibration_gpu)) /
+                            static_cast<double>(timestamp_frequency_);
+                    return std::chrono::steady_clock::time_point(std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                        std::chrono::duration<double>(seconds)));
+                };
+                last_window_ = FrameGenGpuWindow{slot.timed_submission, clock(stamps[0]), clock(stamps[1])};
             }
             const D3D12_RANGE written{0, 0};
             readback_->Unmap(0, &written);
@@ -2174,6 +2199,7 @@ class D3D12FrameGen final : public FrameGenGpu {
     ComPtr<ID3D12Resource> readback_;
     UINT64 timestamp_frequency_{0};
     double last_gpu_ms_{-1.0};
+    std::optional<FrameGenGpuWindow> last_window_;
     std::string dump_directory_; // DumpNextExecute
     std::unordered_map<XrSwapchain, std::vector<ID3D12Resource*>> images_;
     std::vector<ViewResources> views_;

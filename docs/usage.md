@@ -589,9 +589,10 @@ MSFS 2024 only fills the depth it sends while its **Motion reprojection** settin
 with it off, the depth is empty and Frame Generation does without. With depth, head movement is
 compensated exactly, so cockpit instruments, panels and text stay still in generated frames
 instead of wobbling. Generated frames also show the
-cockpit from where your eyes will be when each frame is displayed, as the runtime predicts it.
-Most headset runtimes only correct head rotation between frames, so without this, near cockpit
-detail would jump at the game's frame rate whenever your head moved. Direct3D 11 and Vulkan games
+cockpit from where your eyes will be when each frame is displayed: they keep moving as they did
+between the game's last two frames. Most headset runtimes only correct head rotation between
+frames, so without this, near cockpit detail would jump at the game's frame rate whenever your
+head moved. Direct3D 11 and Vulkan games
 use head rotation only for now.
 
 Games do not always describe their depth correctly, so Frame Generation first checks it against
@@ -603,14 +604,22 @@ example cockpit glass the game wrote to depth over the scenery behind it, those 
 treated as far away, and do not move with your eyes. The log reports each
 decision (**Frame Generation checked the game's depth against the other eye**), how much of the
 view the depth affects and how much of it the other eye disproved. Each 30-second summary shows
-**depthUsed**, the share of real frames generated with depth, and **eyeShiftMm**, how far
-generated frames moved with your eyes (average/largest, millimeters).
+**depthUsed**, the share of real frames generated with depth, **eyeShiftMm**, how far
+generated frames moved with your eyes (average/largest, millimeters), **eyeMoveMm**, how far
+your eyes moved between real frames on average, and **eyeMissMm**, how far that was from where
+they were expected to be (the eyes keeping their movement). **gpuStartMs** and **gpuDoneMs**
+(median/largest) say when generation ran on the GPU: its start after the real frame's refresh
+began and its end after the first generated frame's refresh began, measured from when the
+runtime releases that refresh's frame wait (about two refreshes before it is shown on Pimax).
+Generated frames finishing much later than that miss their refresh, and the headset shows the
+previous frame again.
 
-The OSD's Frame Generation line and the Frame Generation page's session status say what the
-depth is doing: **Depth in use**, **Checking the game's depth**, **No depth from this game**
-(near cockpit detail may jitter in Extrapolate; Interpolate depends on depth less), **Depth not
-read on this graphics API yet** (Direct3D 11 and Vulkan), **Depth empty** (the game sends depth
-but fills it only with its own depth reprojection on), or **does not match the other eye**.
+A second line under the OSD's Frame Generation row and the Frame Generation page's session
+status say what the depth is doing: **Depth in use**, **Checking the game's depth against the other eye**, **No
+depth from this game** (near cockpit detail may jitter in Extrapolate; Interpolate depends on
+depth less), **Depth is only read in Direct3D 12 games for now** (Direct3D 11 and Vulkan),
+**Depth empty** (the game sends depth but fills it only with its own depth reprojection on), or
+**Depth does not match the other eye**.
 
 #### Still detail
 
