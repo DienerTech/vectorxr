@@ -588,9 +588,11 @@ Frame Generation.
 
 #### Game depth
 
-When a game sends depth to the headset (MSFS 2024 does), Frame Generation uses it on
-Direct3D 12 automatically: head movement is compensated exactly, so cockpit instruments, panels
-and text stay still in generated frames instead of wobbling. Generated frames also show the
+When a game sends depth to the headset, Frame Generation uses it on Direct3D 12 automatically.
+MSFS 2024 only fills the depth it sends while its **Motion reprojection** setting is **Depth**;
+with it off, the depth is empty and Frame Generation does without. With depth, head movement is
+compensated exactly, so cockpit instruments, panels and text stay still in generated frames
+instead of wobbling. Generated frames also show the
 cockpit from where your eyes will be when each frame is displayed, as the runtime predicts it.
 Most headset runtimes only correct head rotation between frames, so without this, near cockpit
 detail would jump at the game's frame rate whenever your head moved. Direct3D 11 and Vulkan games
@@ -601,7 +603,7 @@ the other eye: depth that is right lines the two eyes' images up. It starts usin
 that check passes, recognizes depth stored the other way round, and ignores depth that does not
 line the eyes up. Where the other eye or the previous frame disproves depth in places, for
 example cockpit glass the game wrote to depth over the scenery behind it, those places are
-treated as far away. Only cockpit detail they confirm moves with your eyes. The log reports each
+treated as far away, and do not move with your eyes. The log reports each
 decision (**Frame Generation checked the game's depth against the other eye**), how much of the
 view the depth affects and how much of it the other eye disproved. Each 30-second summary shows
 **depthUsed**, the share of real frames generated with depth, and **eyeShiftMm**, how far

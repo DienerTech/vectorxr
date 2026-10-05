@@ -185,8 +185,9 @@ Each frame, before any view uses it, every depth texel gets a trust score in [-1
 - last frame's score at the texel's previous position (cockpit and glass stay put in the cockpit),
   so the score is steady and decisions carry across the view as the head turns.
 
-Texels scored below -0.25 are negated and compensated for rotation only. Texels above +0.25 move
-with the eye. Runtimes that only rotate submitted frames (Pimax among them) never correct head
+Texels scored below -0.25 are negated and compensated for rotation only; all others are used and
+move with the eye. Using only texels scored above +0.25 tore cockpit labels apart in MSFS: the
+plain texels between letters, which neither view can score, stayed behind while the letters moved. Runtimes that only rotate submitted frames (Pimax among them) never correct head
 translation, so a generated frame shown 11-33 ms after its real frame would show near cockpit
 content from where the eye was, and that content would jump at the real frame rate. The presenter
 asks the runtime where each eye will be at every generated frame's display time
