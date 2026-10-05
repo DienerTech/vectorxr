@@ -480,7 +480,7 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
 }
 #endif
 
-#if defined(FG_PASS_SYNTHESIZE_UNORM8) || defined(FG_PASS_SYNTHESIZE_FLOAT16)
+#if defined(FG_PASS_SYNTHESIZE_UNORM8) || defined(FG_PASS_SYNTHESIZE_FLOAT16) || defined(FG_PASS_SYNTHESIZE_DRAW)
 FG_BIND(0) Texture2D<float4> g_current : register(t0);
 FG_BIND(1) Texture2D<float4> g_previous : register(t1);
 FG_BIND(2) Texture2D<float4> g_flow : register(t2);
@@ -488,7 +488,7 @@ FG_BIND(3) Texture2D<float4> g_depth : register(t3);
 FG_BIND(6) SamplerState g_linear : register(s0);
 #if defined(FG_PASS_SYNTHESIZE_UNORM8)
 FG_BIND(4) FG_FORMAT("rgba8") RWTexture2D<float4> g_output : register(u0);
-#else
+#elif defined(FG_PASS_SYNTHESIZE_FLOAT16)
 FG_BIND(4) FG_FORMAT("rgba16f") RWTexture2D<float4> g_output : register(u0);
 #endif
 
@@ -528,16 +528,12 @@ float CandidateError(float2 uv, float2 v, float step) {
     return MaxComponent(abs(newest - previous));
 }
 
-[numthreads(8, 8, 1)]
-void CSMain(uint3 id : SV_DispatchThreadID) {
-    if (any(id.xy >= g.size.xy)) {
-        return;
-    }
-    const float2 uv = (float2(id.xy) + 0.5) / float2(g.size.xy);
+// One generated pixel at `fraction` (see FrameGenTuning::fractions).
+float4 Synthesize(uint2 pixel, float fraction) {
+    const float2 uv = (float2(pixel) + 0.5) / float2(g.size.xy);
     const float2 aspect = float2(1.0, float(g.size.y) / float(g.size.x));
     const bool extrapolate = (g.options.y & FG_FLAG_EXTRAPOLATE) != 0u;
     const bool still = (g.options.y & FG_FLAG_STILL) != 0u;
-    const float fraction = g.tuning.x;
     const float limit = max(g.tuning.y, 1e-4);
     bool boundary = false;
 
@@ -649,8 +645,52 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
     if ((g.options.y & FG_FLAG_SRGB_ENCODE) != 0u) {
         result.rgb = LinearToSrgb(result.rgb);
     }
-    g_output[id.xy] = result;
+    return result;
 }
+
+#if defined(FG_PASS_SYNTHESIZE_DRAW)
+// Direct3D 12 renders the generated frames of a view straight into the
+// output swapchain images in one draw: no intermediate image and no copy,
+// and the frames share their flow reads. FG_DRAW_OUTPUTS render targets,
+// fractions in tuning.x, then size.z and size.w (as float bits). An sRGB
+// render target encodes in hardware, so the encode flag is off.
+struct DrawOutput {
+    float4 frame0 : SV_Target0;
+#if FG_DRAW_OUTPUTS > 1
+    float4 frame1 : SV_Target1;
+#endif
+#if FG_DRAW_OUTPUTS > 2
+    float4 frame2 : SV_Target2;
+#endif
+};
+
+DrawOutput PSMain(float4 position : SV_Position) {
+    const uint2 pixel = uint2(position.xy);
+    DrawOutput output;
+    output.frame0 = Synthesize(pixel, g.tuning.x);
+#if FG_DRAW_OUTPUTS > 1
+    output.frame1 = Synthesize(pixel, asfloat(g.size.z));
+#endif
+#if FG_DRAW_OUTPUTS > 2
+    output.frame2 = Synthesize(pixel, asfloat(g.size.w));
+#endif
+    return output;
+}
+
+// One triangle covering the viewport.
+float4 VSMain(uint vertex : SV_VertexID) : SV_Position {
+    const float2 corner = float2((vertex << 1) & 2, vertex & 2);
+    return float4(corner * float2(2.0, -2.0) + float2(-1.0, 1.0), 0.0, 1.0);
+}
+#else
+[numthreads(8, 8, 1)]
+void CSMain(uint3 id : SV_DispatchThreadID) {
+    if (any(id.xy >= g.size.xy)) {
+        return;
+    }
+    g_output[id.xy] = Synthesize(id.xy, g.tuning.x);
+}
+#endif
 #endif
 
 #if defined(FG_PASS_DEPTH)

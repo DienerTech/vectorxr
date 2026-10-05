@@ -686,8 +686,9 @@ running game wins.
 - Fast motion and newly revealed areas can warp, more so with Extrapolate. Raise **Artifact
   suppression** or lower **Motion limit** to trade warping for local judder.
 - The game needs enough GPU headroom to hold its multiplier's rate (half rate at 2x) plus the
-  flow work, roughly 0.6–1 ms per generated frame for both eyes on a high-end GPU at Balanced
-  quality, more at Quality and on slower GPUs.
+  Frame Generation work. On an RTX 5090 at a Pimax Crystal Super's 6240x6280 per eye, 4x
+  Extrapolate on Direct3D 12 takes about 3.1 ms per real frame at Balanced flow quality and
+  3.8 ms at Quality, for both eyes; slower GPUs and Direct3D 11 and Vulkan take more.
 - Higher multipliers show more artifacts, most at 4x, and in Extrapolate each generated frame
   adds a set of headset-resolution output images to video memory.
 - Only the first projection layer is generated; other layers, such as menus drawn as quads,

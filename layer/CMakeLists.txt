@@ -141,7 +141,27 @@ if(WIN32 AND DEPTHXR_BUILD_LAYER)
             list(APPEND _framegen_binaries "${_framegen_out}/${_framegen_pass}.spv")
         endif()
     endforeach()
+    # Synthesis as a draw into the output swapchains (Direct3D 12): the
+    # vertex shader and a pixel shader per number of generated frames.
+    set(_framegen_draw_shaders DRAW_VS DRAW_PS1 DRAW_PS2 DRAW_PS3)
+    foreach(_framegen_draw IN LISTS _framegen_draw_shaders)
+        if(_framegen_draw STREQUAL "DRAW_VS")
+            set(_framegen_draw_args -T vs_5_0 -E VSMain -D FG_DRAW_OUTPUTS=1)
+        else()
+            string(SUBSTRING "${_framegen_draw}" 7 1 _framegen_draw_outputs)
+            set(_framegen_draw_args -T ps_5_0 -E PSMain -D "FG_DRAW_OUTPUTS=${_framegen_draw_outputs}")
+        endif()
+        add_custom_command(
+            OUTPUT "${_framegen_out}/${_framegen_draw}.dxbc"
+            COMMAND "${DEPTHXR_FXC}" -nologo ${_framegen_draw_args} -D FG_PASS_SYNTHESIZE_DRAW=1 -O3 -WX
+                    -Fo "${_framegen_out}/${_framegen_draw}.dxbc" "${_framegen_hlsl}"
+            DEPENDS "${_framegen_hlsl}"
+            COMMENT "Compiling Frame Generation ${_framegen_draw} (DXBC)"
+            VERBATIM)
+        list(APPEND _framegen_binaries "${_framegen_out}/${_framegen_draw}.dxbc")
+    endforeach()
     string(REPLACE ";" "," _framegen_pass_list "${_framegen_passes}")
+    string(REPLACE ";" "," _framegen_draw_list "${_framegen_draw_shaders}")
     set(_framegen_spirv_dir "")
     if(DEPTHXR_DXC)
         set(_framegen_spirv_dir "${_framegen_out}")
@@ -149,7 +169,7 @@ if(WIN32 AND DEPTHXR_BUILD_LAYER)
     add_custom_command(
         OUTPUT "${_framegen_out}/framegen_shaders.cpp"
         COMMAND "${CMAKE_COMMAND}" "-DOUTPUT=${_framegen_out}/framegen_shaders.cpp" "-DPASSES=${_framegen_pass_list}"
-                "-DDXBC_DIR=${_framegen_out}" "-DSPIRV_DIR=${_framegen_spirv_dir}"
+                "-DDRAW=${_framegen_draw_list}" "-DDXBC_DIR=${_framegen_out}" "-DSPIRV_DIR=${_framegen_spirv_dir}"
                 -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/EmbedFrameGenShaders.cmake"
         DEPENDS ${_framegen_binaries} "${CMAKE_CURRENT_SOURCE_DIR}/cmake/EmbedFrameGenShaders.cmake"
         COMMENT "Embedding Frame Generation shaders"

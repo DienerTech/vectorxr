@@ -360,6 +360,20 @@ int RunScenarios(Harness& harness) {
                   << '\n';
         Check(third_error < 0.4 * third_hold && two_thirds_error < 0.4 * third_hold,
               harness.name + " 3x frames are not placed at 1/3 and 2/3 of the motion");
+
+        // 2c. Direct3D 12 draws generated frames straight into the outputs;
+        // written by compute and copied, as the other backends do, they are
+        // the same up to sRGB rounding.
+        gpu->SetDirectOutput(false);
+        gpu->ResetHistory();
+        run(0, true, 0, 0);
+        const Pixels third_copied = run(1, true, 0, 0);
+        const Pixels two_thirds_copied = harness.readback(g_swapchains[kOutputSecond][0]);
+        gpu->SetDirectOutput(true);
+        const double drawn_difference = std::max(MeanError(third, third_copied, 0, 0, kSize, kSize),
+                                                 MeanError(two_thirds, two_thirds_copied, 0, 0, kSize, kSize));
+        std::cout << harness.name << " drawn vs copied: difference " << drawn_difference << '\n';
+        Check(drawn_difference < 0.001, harness.name + " drawn generated frames differ from computed ones");
         tuning.generated = 1;
         tuning.fractions = {0.5f, 0.5f, 0.5f};
     }

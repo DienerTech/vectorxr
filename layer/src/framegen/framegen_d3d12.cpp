@@ -7,7 +7,9 @@
 
 #include "depthxr/framegen_gpu.h"
 
+#include <algorithm>
 #include <array>
+#include <cstring>
 #include <unordered_map>
 
 namespace depthxr {
@@ -143,6 +145,14 @@ class D3D12FrameGen final : public FrameGenGpu {
             return false;
         }
         descriptor_size_ = device_->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+        // Without it generated frames are written by compute and copied.
+        D3D12_DESCRIPTOR_HEAP_DESC rtv_heap{D3D12_DESCRIPTOR_HEAP_TYPE_RTV, kRenderTargetViews,
+                                            D3D12_DESCRIPTOR_HEAP_FLAG_NONE, 0};
+        if (SUCCEEDED(device_->CreateDescriptorHeap(&rtv_heap, IID_PPV_ARGS(&rtv_heap_)))) {
+            rtv_size_ = device_->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+        } else {
+            rtv_heap_.Reset();
+        }
         for (auto& slot : slots_) {
             if (!check(device_->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&slot.allocator)),
                        "D3D12 Frame Generation allocator")) {
@@ -271,8 +281,8 @@ class D3D12FrameGen final : public FrameGenGpu {
         ViewResources& view = views_[index];
         ID3D12Resource* resource = it->second[source.image_index];
         // Capture never reallocates; Execute sets the view up first.
-        if (!view.output.resource || !view.history_state.Matches(request.extent, resource->GetDesc().Format, request.output,
-                                                                 FrameGenFinalFlowLevel(quality))) {
+        if (!view.depth.resource || !view.history_state.Matches(request.extent, resource->GetDesc().Format, request.output,
+                                                                FrameGenFinalFlowLevel(quality))) {
             error.clear();
             return false;
         }
@@ -639,6 +649,147 @@ class D3D12FrameGen final : public FrameGenGpu {
 
     std::vector<double> PassMilliseconds() const override { return profile_ms_; }
 
+    // The graphics pipeline drawing `count` generated frames into render
+    // targets of these formats; null if it cannot be created.
+    ID3D12PipelineState* DrawPipeline(const std::array<DXGI_FORMAT, kFrameGenMaxGenerated>& formats, std::size_t count) {
+        std::uint64_t key = count;
+        for (std::size_t i = 0; i < count; ++i) {
+            key = key * 1000 + static_cast<std::uint64_t>(formats[i]);
+        }
+        const auto found = draw_pipelines_.find(key);
+        if (found != draw_pipelines_.end()) {
+            return found->second.Get();
+        }
+        D3D12_GRAPHICS_PIPELINE_STATE_DESC desc{};
+        desc.pRootSignature = root_signature_.Get();
+        desc.VS = {framegen_shaders::kDxbcDraw[0].data, framegen_shaders::kDxbcDraw[0].size};
+        desc.PS = {framegen_shaders::kDxbcDraw[count].data, framegen_shaders::kDxbcDraw[count].size};
+        for (std::size_t i = 0; i < count; ++i) {
+            desc.BlendState.RenderTarget[i].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+            desc.RTVFormats[i] = formats[i];
+        }
+        desc.SampleMask = UINT_MAX;
+        desc.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+        desc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+        desc.RasterizerState.DepthClipEnable = TRUE;
+        desc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+        desc.NumRenderTargets = static_cast<UINT>(count);
+        desc.SampleDesc.Count = 1;
+        ComPtr<ID3D12PipelineState> pipeline;
+        if (FAILED(device_->CreateGraphicsPipelineState(&desc, IID_PPV_ARGS(&pipeline)))) {
+            pipeline.Reset();
+        }
+        draw_pipelines_[key] = pipeline;
+        return pipeline.Get();
+    }
+
+    // Whether every generated frame of the view can be drawn straight into
+    // its output image: renderable, single-sampled, a typed format, and the
+    // whole image at the view's size.
+    bool CanDraw(const FrameGenViewSubmission& submission, const std::vector<ID3D12Resource*>& outputs,
+                 std::size_t count) {
+        if (!direct_output_ || !rtv_heap_ || count == 0 || count > kFrameGenMaxGenerated || outputs.size() < count) {
+            return false;
+        }
+        std::array<DXGI_FORMAT, kFrameGenMaxGenerated> formats{};
+        for (std::size_t i = 0; i < count; ++i) {
+            formats[i] = static_cast<DXGI_FORMAT>(submission.outputs[i].format);
+        }
+        for (std::size_t i = 0; i < count; ++i) {
+            const FrameGenImage& image = submission.outputs[i];
+            const D3D12_RESOURCE_DESC desc = outputs[i]->GetDesc();
+            if (!(desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET) || desc.SampleDesc.Count != 1 ||
+                image.array_index >= desc.DepthOrArraySize || image.rect.offset.x != 0 || image.rect.offset.y != 0 ||
+                static_cast<std::uint32_t>(image.rect.extent.width) != submission.request.extent.width ||
+                static_cast<std::uint32_t>(image.rect.extent.height) != submission.request.extent.height ||
+                image.format == DXGI_FORMAT_R8G8B8A8_TYPELESS || image.format == DXGI_FORMAT_B8G8R8A8_TYPELESS ||
+                image.format == DXGI_FORMAT_R16G16B16A16_TYPELESS || image.format == DXGI_FORMAT_UNKNOWN) {
+                return false;
+            }
+        }
+        return DrawPipeline(formats, count) != nullptr;
+    }
+
+    void SetDirectOutput(bool on) override { direct_output_ = on; }
+    bool DrawsOutputs() const override { return direct_output_ && rtv_heap_; }
+
+    // Draws the view's generated frames (the plan's synthesis dispatches, one
+    // per output) straight into the output images in one draw.
+    bool RecordDraw(ViewResources& view, const FrameGenViewSubmission& submission,
+                    const std::vector<ID3D12Resource*>& outputs, const std::vector<const FrameGenDispatch*>& frames,
+                    std::string& error) {
+        std::array<DXGI_FORMAT, kFrameGenMaxGenerated> formats{};
+        for (std::size_t i = 0; i < frames.size(); ++i) {
+            formats[i] = static_cast<DXGI_FORMAT>(submission.outputs[i].format);
+        }
+        ID3D12PipelineState* pipeline = DrawPipeline(formats, frames.size()); // created by CanDraw
+        if (descriptor_cursor_ + kDescriptorsPerDispatch > descriptor_end_) {
+            error = "D3D12 Frame Generation descriptor budget exhausted";
+            return false;
+        }
+        const FrameGenDispatch& first = *frames[0];
+        const UINT base = descriptor_cursor_;
+        descriptor_cursor_ += kDescriptorsPerDispatch;
+        std::vector<D3D12_RESOURCE_BARRIER> barriers;
+        for (std::size_t i = 0; i < 4; ++i) {
+            Texture* texture = Resolve(view, first.inputs[i]);
+            D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
+            srv.Format = texture ? texture->view_format : DXGI_FORMAT_R8G8B8A8_UNORM;
+            srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+            srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+            srv.Texture2D.MipLevels = 1;
+            device_->CreateShaderResourceView(texture ? texture->resource.Get() : nullptr, &srv,
+                                              Cpu(base + static_cast<UINT>(i)));
+            if (texture) Require(barriers, *texture, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE);
+        }
+        D3D12_UNORDERED_ACCESS_VIEW_DESC no_uav{};
+        no_uav.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        no_uav.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+        device_->CreateUnorderedAccessView(nullptr, nullptr, &no_uav, Cpu(base + 4));
+        device_->CreateUnorderedAccessView(nullptr, nullptr, &no_uav, Cpu(base + 5));
+        Flush(barriers);
+
+        // Output images are in RENDER_TARGET while acquired.
+        std::array<D3D12_CPU_DESCRIPTOR_HANDLE, kFrameGenMaxGenerated> targets{};
+        for (std::size_t i = 0; i < frames.size(); ++i) {
+            const FrameGenImage& image = submission.outputs[i];
+            D3D12_RENDER_TARGET_VIEW_DESC rtv{};
+            rtv.Format = formats[i];
+            if (outputs[i]->GetDesc().DepthOrArraySize > 1) {
+                rtv.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2DARRAY;
+                rtv.Texture2DArray.FirstArraySlice = image.array_index;
+                rtv.Texture2DArray.ArraySize = 1;
+            } else {
+                rtv.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2D;
+            }
+            targets[i] = rtv_heap_->GetCPUDescriptorHandleForHeapStart();
+            targets[i].ptr += static_cast<SIZE_T>(rtv_cursor_++ % kRenderTargetViews) * rtv_size_;
+            device_->CreateRenderTargetView(outputs[i], &rtv, targets[i]);
+        }
+        FrameGenConstants constants = first.constants;
+        constants.options[1] &= ~kFrameGenFlagSrgbEncode; // the sRGB render target encodes
+        for (std::size_t i = 1; i < frames.size(); ++i) {
+            const float fraction = frames[i]->constants.tuning[0];
+            std::memcpy(&constants.size[1 + i], &fraction, sizeof(fraction));
+        }
+        const D3D12_VIEWPORT viewport{0.0f, 0.0f, static_cast<float>(submission.request.extent.width),
+                                      static_cast<float>(submission.request.extent.height), 0.0f, 1.0f};
+        const D3D12_RECT scissor{0, 0, static_cast<LONG>(submission.request.extent.width),
+                                 static_cast<LONG>(submission.request.extent.height)};
+        commands_->SetGraphicsRootSignature(root_signature_.Get());
+        commands_->SetPipelineState(pipeline);
+        commands_->SetGraphicsRoot32BitConstants(0, sizeof(FrameGenConstants) / 4, &constants, 0);
+        commands_->SetGraphicsRootDescriptorTable(1, Gpu(base));
+        commands_->SetGraphicsRootDescriptorTable(2, Gpu(base + 4));
+        commands_->RSSetViewports(1, &viewport);
+        commands_->RSSetScissorRects(1, &scissor);
+        commands_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        commands_->OMSetRenderTargets(static_cast<UINT>(frames.size()), targets.data(), FALSE, nullptr);
+        commands_->DrawInstanced(3, 1, 0, 0);
+        Stamp(static_cast<int>(FrameGenPass::kSynthesizeUnorm8));
+        return true;
+    }
+
     // Profiling: what ran since the previous stamp.
     static constexpr int kProfileSourceCopy = static_cast<int>(kFrameGenPassCount);
     static constexpr int kProfileOutputCopy = kProfileSourceCopy + 1;
@@ -897,8 +1048,7 @@ class D3D12FrameGen final : public FrameGenGpu {
     // Whether EnsureView would keep every texture of the view as it is.
     bool Prepared(const FrameGenViewSubmission& submission, const ViewResources& view, const FrameGenTuning& tuning) const {
         const auto it = images_.find(submission.source.swapchain);
-        if (it == images_.end() || submission.source.image_index >= it->second.size() || !view.output.resource ||
-            !view.depth.resource) {
+        if (it == images_.end() || submission.source.image_index >= it->second.size() || !view.depth.resource) {
             return false;
         }
         return view.history_state.Matches(submission.request.extent, it->second[submission.source.image_index]->GetDesc().Format,
@@ -919,7 +1069,8 @@ class D3D12FrameGen final : public FrameGenGpu {
             error = "D3D12 Frame Generation GPU work did not finish before reallocation";
             return false;
         }
-        if (change & FrameGenHistoryState::kAll || !view.output.resource) {
+        // The depth texture is created last: it marks a view set up.
+        if (change & FrameGenHistoryState::kAll || !view.depth.resource) {
             view.capture.valid = false;
             const DXGI_FORMAT view_format = ViewFormat(source_desc.Format, submission.source.format);
             for (auto& history : view.history) {
@@ -935,9 +1086,7 @@ class D3D12FrameGen final : public FrameGenGpu {
                     return false;
                 }
             }
-            const DXGI_FORMAT intermediate = submission.request.output == FrameGenOutputKind::kFloat16
-                ? DXGI_FORMAT_R16G16B16A16_FLOAT : DXGI_FORMAT_R8G8B8A8_UNORM;
-            if (!Create(view.output, extent, intermediate, intermediate, true, error)) return false;
+            view.output = {}; // created when first needed (see EnsureOutput)
             if (!Create(view.depth, levels[1], DXGI_FORMAT_R32_FLOAT, DXGI_FORMAT_R32_FLOAT, true, error)) return false;
             view.depth_ready = false;
         }
@@ -950,6 +1099,18 @@ class D3D12FrameGen final : public FrameGenGpu {
             }
         }
         return true;
+    }
+
+    // The image generated frames are written to by compute before being
+    // copied to the outputs. Not needed while they are drawn straight into
+    // the outputs, which saves a headset-resolution image per view.
+    bool EnsureOutput(ViewResources& view, const FrameGenViewSubmission& submission, std::string& error) {
+        if (view.output.resource) {
+            return true;
+        }
+        const DXGI_FORMAT intermediate = submission.request.output == FrameGenOutputKind::kFloat16
+            ? DXGI_FORMAT_R16G16B16A16_FLOAT : DXGI_FORMAT_R8G8B8A8_UNORM;
+        return Create(view.output, submission.request.extent, intermediate, intermediate, true, error);
     }
 
     Texture* Resolve(ViewResources& view, FrameGenTexture texture) {
@@ -1034,7 +1195,29 @@ class D3D12FrameGen final : public FrameGenGpu {
         view.depth_ready = false;
         depth_used = effective.depth && effective.synthesize;
         const FrameGenViewPlan plan = BuildFrameGenViewPlan(effective, tuning);
+        // The generated frames (a synthesis dispatch per output, or one still
+        // write for all of them) are drawn into the outputs together when
+        // the outputs allow it; they come last in the plan.
+        auto generates = [](const FrameGenDispatch& dispatch) {
+            return dispatch.pass == FrameGenPass::kSynthesizeUnorm8 || dispatch.pass == FrameGenPass::kSynthesizeFloat16;
+        };
+        std::vector<const FrameGenDispatch*> frames(tuning.generated, nullptr);
         for (const FrameGenDispatch& dispatch : plan.dispatches) {
+            for (std::size_t index = 0; index < frames.size(); ++index) {
+                if (generates(dispatch) && (dispatch.copy_mask & (1u << index))) {
+                    frames[index] = &dispatch;
+                }
+            }
+        }
+        const bool draw = std::find(frames.begin(), frames.end(), nullptr) == frames.end() &&
+                          CanDraw(submission, outputs, frames.size());
+        if (!draw && !EnsureOutput(view, submission, error)) {
+            return false;
+        }
+        for (const FrameGenDispatch& dispatch : plan.dispatches) {
+            if (draw && generates(dispatch)) {
+                continue;
+            }
             if (descriptor_cursor_ + kDescriptorsPerDispatch > descriptor_end_) {
                 error = "D3D12 Frame Generation descriptor budget exhausted";
                 return false;
@@ -1088,6 +1271,9 @@ class D3D12FrameGen final : public FrameGenGpu {
                 Flush(barriers);
                 Stamp(kProfileOutputCopy);
             }
+        }
+        if (draw && !RecordDraw(view, submission, outputs, frames, error)) {
+            return false;
         }
         synthesized = plan.synthesize;
         return true;
@@ -1147,6 +1333,13 @@ class D3D12FrameGen final : public FrameGenGpu {
     D3D12_PLACED_SUBRESOURCE_FOOTPRINT check_footprint_{};
     UINT64 check_bytes_{0};
     FrameGenDepthValidator validator_;
+    // Generated frames drawn straight into the output images.
+    static constexpr UINT kRenderTargetViews = 16;
+    bool direct_output_{true};
+    ComPtr<ID3D12DescriptorHeap> rtv_heap_;
+    UINT rtv_size_{0};
+    UINT rtv_cursor_{0};
+    std::unordered_map<std::uint64_t, ComPtr<ID3D12PipelineState>> draw_pipelines_;
     bool profiling_{false};
     ComPtr<ID3D12QueryHeap> profile_heap_;
     ComPtr<ID3D12Resource> profile_readback_;

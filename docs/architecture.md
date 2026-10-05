@@ -129,7 +129,13 @@ Per view, the newest submitted image is copied into a history texture; luma pyra
 for it and for the previous frame rotated into the newest view (head rotation is the runtime's
 job, so it is removed before matching); block matching runs coarse to fine; and synthesis either
 interpolates between the two real frames or extrapolates past the newest, writing into a
-layer-owned output swapchain. Generation works on whatever projection views reach the runtime,
+layer-owned output swapchain. Direct3D 12 draws all of a view's generated frames straight into
+their output images in one draw (a full-screen pixel shader with a render target per frame, so
+the frames share their flow reads and sRGB is encoded by the render target); Direct3D 11 and
+Vulkan write them by compute into an intermediate image and copy it.
+
+`depthxr_framegen_tests profile [width height]` renders a stereo cockpit with depth at headset
+size and prints the GPU time of every pass on the local GPU (Direct3D 12). Generation works on whatever projection views reach the runtime,
 so it follows Quadviews composition and Varjo-native quad views alike.
 
 When a game submits depth with its projection views (`XR_KHR_composition_layer_depth`) and the

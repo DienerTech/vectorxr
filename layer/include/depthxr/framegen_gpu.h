@@ -86,6 +86,13 @@ class FrameGenGpu {
     // backend cannot profile.
     virtual void SetProfiling(bool /*on*/) {}
     virtual std::vector<double> PassMilliseconds() const { return {}; }
+    // Direct3D 12 draws a view's generated frames straight into the output
+    // images when it can (on by default); off writes them by compute and
+    // copies them, as the other backends do. For tests.
+    virtual void SetDirectOutput(bool /*on*/) {}
+    // Whether generated frames are drawn straight into the output images
+    // (no intermediate image per view).
+    virtual bool DrawsOutputs() const { return false; }
     // Records and submits generation for every view on the session's graphics
     // queue, copying a view's source first unless Capture already did. Never
     // waits on the CPU for this submission.
@@ -120,6 +127,10 @@ struct Blob {
 // SPIR-V compiler; the Vulkan backend then reports itself unavailable.
 extern const std::array<Blob, kFrameGenPassCount> kDxbc;
 extern const std::array<Blob, kFrameGenPassCount> kSpirv;
+// Synthesis as a draw (Direct3D 12): the vertex shader, then the pixel
+// shader writing 1, 2 and 3 generated frames.
+inline constexpr std::size_t kDrawShaderCount = 4;
+extern const std::array<Blob, kDrawShaderCount> kDxbcDraw;
 } // namespace framegen_shaders
 
 } // namespace depthxr

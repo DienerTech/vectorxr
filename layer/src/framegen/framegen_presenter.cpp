@@ -1633,14 +1633,20 @@ bool FrameGenPresenter::EnsureOutputs(const XrCompositionLayerProjection& projec
     }
     if (created && logger_) {
         // Rough video memory estimate: per view, two full-resolution history
-        // copies, a full-resolution intermediate and the flow pyramid in the
+        // copies, a full-resolution intermediate (unless generated frames are
+        // drawn straight into the outputs) and the flow pyramid in the
         // backend, plus every output swapchain image.
         double working = 0.0, swapchains = 0.0;
+        double copies = 3.0;
+        {
+            std::scoped_lock lock(mutex_);
+            copies = gpu_ && gpu_->DrawsOutputs() ? 2.0 : 3.0;
+        }
         for (std::uint32_t i = 0; i < projection.viewCount; ++i) {
             const Output& first = output_sets_.front()[i];
             const double pixels = static_cast<double>(first.extent.width) * first.extent.height;
             const double bytes = first.kind == FrameGenOutputKind::kFloat16 ? 8.0 : 4.0;
-            working += pixels * (3.0 * bytes + 3.4);
+            working += pixels * (copies * bytes + 3.4);
         }
         for (const auto& set : output_sets_) {
             for (const Output& output : set) {
