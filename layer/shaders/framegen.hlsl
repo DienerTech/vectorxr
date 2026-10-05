@@ -1183,11 +1183,15 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
 
 #if defined(FG_PASS_SHIFT_CLEAR)
 FG_BIND(4) FG_FORMAT("r32ui") RWTexture2D<uint> g_target : register(u0);
+FG_BIND(5) FG_FORMAT("r32ui") RWTexture2D<uint> g_shift : register(u1);
 
+// Keys to nothing reached; the map to the largest value (FG_PASS_SHIFT_RESOLVE
+// keeps the smallest offset written).
 [numthreads(8, 8, 1)]
 void CSMain(uint3 id : SV_DispatchThreadID) {
     if (all(id.xy < g.size.xy)) {
         g_target[id.xy] = 0u;
+        g_shift[id.xy] = 0xffffffffu;
     }
 }
 #endif
@@ -1206,7 +1210,8 @@ FG_BIND(1) Texture2D<float4> g_trust : register(t1);
 //
 // The mapping (MapToPrevious) takes the newest view to the shifted eye's:
 // no rotation, position in rot*.w. Returns false where the texel leaves the
-// view; `landing` is in texels (centres at +0.5).
+// view; `landing` is in texels (centres at +0.5); `key` ranks the texel by
+// its depth alone (see Key).
 
 // Neighbours within this share of a texel's depth belong to its surface.
 #define FG_SHIFT_SURFACE 0.03
@@ -1249,10 +1254,18 @@ bool Landing(uint2 id, out float2 landing, out uint key) {
     }
     landing = shifted * size;
     // Positive floats order like their bits; 0 marks texels nothing reached.
-    // The lowest bit breaks ties at one depth in favour of moved content:
-    // what stayed is where its surface was, not where it is.
-    key = ((asuint(known ? 1.0 / depth : 0.0) + 2u) & ~1u) | (moves ? 1u : 0u);
+    // At one depth (the lowest six bits dropped), moved content wins: what
+    // stayed is where its surface was, not where it is.
+    key = ((asuint(known ? 1.0 / depth : 0.0) + 64u) & ~63u) | (moves ? 32u : 0u);
     return inside;
+}
+
+// A texel's key at one of the texels around its landing: at one depth, the
+// source landing nearest the texel's centre wins, so neighbours on a surface
+// facing the eye do not both claim it.
+uint Key(uint key, float2 landing, int2 texel) {
+    const float2 offset = float2(texel) + 0.5 - landing;
+    return key | (31u - min(31u, uint(dot(offset, offset) * 15.5 + 0.5)));
 }
 #endif
 
@@ -1269,7 +1282,7 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
         for (int i = 0; i < 4; ++i) {
             const int2 texel = first + int2(i & 1, i >> 1);
             if (all(texel >= 0) && all(texel < int2(g.size.xy))) {
-                InterlockedMax(g_keys[texel], key);
+                InterlockedMax(g_keys[texel], Key(key, landing, texel));
             }
         }
     }
@@ -1282,7 +1295,8 @@ FG_BIND(4) FG_FORMAT("r32ui") RWTexture2D<uint> g_shift : register(u0);
 
 // The winners of FG_PASS_SHIFT_SPLAT write where their content comes from:
 // the offset from the shifted texel back to its source, in texels, as two
-// halves.
+// halves; of winners still tied, the smallest value, so the map is the same
+// whichever thread runs first.
 [numthreads(8, 8, 1)]
 void CSMain(uint3 id : SV_DispatchThreadID) {
     float2 landing;
@@ -1294,8 +1308,9 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
         [unroll]
         for (int i = 0; i < 4; ++i) {
             const int2 texel = first + int2(i & 1, i >> 1);
-            if (all(texel >= 0) && all(texel < int2(g.size.xy)) && g_keys.Load(int3(texel, 0)) == key) {
-                g_shift[texel] = packed;
+            if (all(texel >= 0) && all(texel < int2(g.size.xy)) &&
+                g_keys.Load(int3(texel, 0)) == Key(key, landing, texel)) {
+                InterlockedMin(g_shift[texel], packed);
             }
         }
     }

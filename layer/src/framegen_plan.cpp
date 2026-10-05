@@ -320,14 +320,15 @@ FrameGenViewPlan BuildFrameGenViewPlan(const FrameGenViewRequest& request, const
             mapping.rot1 = {0.0f, 1.0f, 0.0f, -eye[1]};
             mapping.rot2 = {0.0f, 0.0f, 1.0f, -eye[2]};
             mapping.options = {0, kFrameGenFlagDepth, 0, 0};
-            auto pass = [&](FrameGenPass kind, std::array<FrameGenTexture, 6> inputs, FrameGenTexture output) {
+            auto pass = [&](FrameGenPass kind, std::array<FrameGenTexture, 6> inputs, FrameGenTexture output,
+                            FrameGenTexture second = {}) {
                 FrameGenDispatch dispatch = Dispatch(kind, plan.levels[1], plan.levels[1], mapping);
                 dispatch.inputs = inputs;
-                dispatch.outputs = {output, {}};
+                dispatch.outputs = {output, second};
                 plan.dispatches.push_back(dispatch);
             };
             const FrameGenTexture target = Texture(FrameGenTextureKind::kShiftMap, map);
-            pass(FrameGenPass::kShiftClear, {}, keys);
+            pass(FrameGenPass::kShiftClear, {}, keys, target);
             pass(FrameGenPass::kShiftSplat, {depth, trust, {}, {}, {}, {}}, keys);
             pass(FrameGenPass::kShiftResolve, {depth, trust, keys, {}, {}, {}}, target);
             pass(FrameGenPass::kShiftFill, {keys, {}, {}, {}, {}, {}}, target);

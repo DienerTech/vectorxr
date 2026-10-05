@@ -863,6 +863,11 @@ int RunScenarios(Harness& harness) {
               harness.name + " generated frames did not follow the eye");
         Check(moving_glass.used && moving_glass_error < 0.4 * unshifted_error,
               harness.name + " glass moved with the eye");
+        // The panel faces the eye, so neighbours land at one depth: the map
+        // must not depend on which of them the GPU ran first.
+        const Outcome again = run_case(panel, 1.0f, standard, true, 0, eye);
+        Check(MeanError(again.output, moving.output, 0, 0, kSize, kSize) == 0.0,
+              harness.name + " the eye-shift map differs between identical frames");
 
         // 3g'. Two generated frames, half and a whole interval on: the first
         // still sees the panel from 2 cm further. Scaling one map built for
