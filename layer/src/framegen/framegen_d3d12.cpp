@@ -73,7 +73,7 @@ struct ViewResources {
     Texture depth;            // newest frame's linear depth, half resolution
     bool depth_ready{false};  // captured since the last Execute
     bool depth_fresh{false};  // captured for this Execute's frame (for the check)
-    bool depth_swapped{false}; // the capture decoded with near and far swapped
+    std::uint32_t depth_generation{0}; // FrameGenDepthValidator::Generation() the capture decoded with
     FrameGenDepthEncoding depth_encoding; // as the game describes it
 };
 
@@ -83,7 +83,7 @@ struct FrameSlot {
     bool timing_pending{false};
     ComPtr<ID3D12Resource> check_readback; // depth check scores, read once the slot's fence passes
     bool check_pending{false};
-    bool check_swapped{false}; // decoding the checked depth used
+    std::uint32_t check_generation{0}; // decoding the checked depth used
 };
 
 struct CaptureSlot {
@@ -419,9 +419,9 @@ class D3D12FrameGen final : public FrameGenGpu {
         Require(barriers, view.depth, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         flush();
         view.depth_encoding = encoding;
-        view.depth_swapped = validator_.Swapped();
+        view.depth_generation = validator_.Generation();
         FrameGenDepthEncoding depth_encoding = encoding;
-        if (view.depth_swapped) {
+        if (validator_.Swapped()) {
             std::swap(depth_encoding.near_z, depth_encoding.far_z);
         }
         const FrameGenDispatch dispatch = BuildFrameGenDepthDispatch(
@@ -456,15 +456,57 @@ class D3D12FrameGen final : public FrameGenGpu {
         return true;
     }
 
-    FrameGenDepthReading DepthReading() const override { return validator_.Reading(); }
-    std::uint32_t DepthDecisions() const override { return validator_.Decisions(); }
-    std::array<double, 3> DepthErrors() const override { return validator_.LastErrors(); }
+    FrameGenDepthStatus DepthStatus() const override {
+        return {validator_.Reading(), validator_.Decisions(), validator_.Evidence()};
+    }
+
+    // Negates the texels of `view`'s depth that `other` disproves (see
+    // FG_PASS_DEPTH_TRUST); both views' newest images must be this frame's.
+    bool RecordDepthTrust(const FrameGenViewSubmission& submission, const FrameGenViewSubmission& other_submission,
+                          ViewResources& view, ViewResources& other, std::string& error) {
+        if (descriptor_cursor_ + kDescriptorsPerDispatch > descriptor_end_) {
+            error = "D3D12 Frame Generation descriptor budget exhausted";
+            return false;
+        }
+        const UINT base = descriptor_cursor_;
+        descriptor_cursor_ += kDescriptorsPerDispatch;
+        Texture* inputs[4] = {&view.history[view.history_state.Newest()], &other.history[other.history_state.Newest()],
+                              nullptr, nullptr};
+        std::vector<D3D12_RESOURCE_BARRIER> barriers;
+        for (UINT i = 0; i < 4; ++i) {
+            D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
+            srv.Format = inputs[i] ? inputs[i]->view_format : DXGI_FORMAT_R8G8B8A8_UNORM;
+            srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+            srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+            srv.Texture2D.MipLevels = 1;
+            device_->CreateShaderResourceView(inputs[i] ? inputs[i]->resource.Get() : nullptr, &srv, Cpu(base + i));
+            if (inputs[i]) Require(barriers, *inputs[i], D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        }
+        D3D12_UNORDERED_ACCESS_VIEW_DESC uav{};
+        uav.Format = DXGI_FORMAT_R32_FLOAT;
+        uav.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+        device_->CreateUnorderedAccessView(view.depth.resource.Get(), nullptr, &uav, Cpu(base + 4));
+        D3D12_UNORDERED_ACCESS_VIEW_DESC no_uav = uav;
+        no_uav.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        device_->CreateUnorderedAccessView(nullptr, nullptr, &no_uav, Cpu(base + 5));
+        Require(barriers, view.depth, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        Flush(barriers);
+        const FrameGenDispatch dispatch = BuildFrameGenDepthTrustDispatch(submission.request.extent, submission.request.newest,
+                                                                          other_submission.request.newest);
+        commands_->SetPipelineState(pipelines_[static_cast<std::size_t>(FrameGenPass::kDepthTrust)].Get());
+        commands_->SetComputeRoot32BitConstants(0, sizeof(FrameGenConstants) / 4, &dispatch.constants, 0);
+        commands_->SetComputeRootDescriptorTable(1, Gpu(base));
+        commands_->SetComputeRootDescriptorTable(2, Gpu(base + 4));
+        commands_->Dispatch((dispatch.width + kFrameGenThreadGroupSize - 1) / kFrameGenThreadGroupSize,
+                            (dispatch.height + kFrameGenThreadGroupSize - 1) / kFrameGenThreadGroupSize, 1);
+        return true;
+    }
 
     // Scores the depth of view 0 against view 1 (see FrameGenDepthValidator)
     // and copies the scores for reading once this submission has finished.
     bool RecordDepthCheck(const FrameGenViewSubmission& first, const FrameGenViewSubmission& second,
                           ViewResources& view0, ViewResources& view1, FrameSlot& slot, std::string& error) {
-        const FrameGenExtent cells{kFrameGenDepthCheckCells, kFrameGenDepthCheckCells};
+        const FrameGenExtent cells{kFrameGenDepthCheckCells * kFrameGenDepthCheckTexels, kFrameGenDepthCheckCells};
         if (!check_scores_.resource &&
             !Create(check_scores_, cells, DXGI_FORMAT_R32G32B32A32_FLOAT, DXGI_FORMAT_R32G32B32A32_FLOAT, true, error)) {
             return false;
@@ -530,7 +572,7 @@ class D3D12FrameGen final : public FrameGenGpu {
         source.SubresourceIndex = 0;
         commands_->CopyTextureRegion(&destination, 0, 0, 0, &source, nullptr);
         slot.check_pending = true;
-        slot.check_swapped = view0.depth_swapped;
+        slot.check_generation = view0.depth_generation;
         return true;
     }
 
@@ -545,25 +587,31 @@ class D3D12FrameGen final : public FrameGenGpu {
         if (FAILED(slot.check_readback->Map(0, &range, &mapped)) || !mapped) {
             return;
         }
-        double current = 0.0, swapped = 0.0, none = 0.0, samples = 0.0;
+        FrameGenDepthEvidence evidence;
+        FrameGenDepthScore* scores[] = {&evidence.decoded, &evidence.swapped};
         for (UINT y = 0; y < kFrameGenDepthCheckCells; ++y) {
             const auto* row = reinterpret_cast<const float*>(static_cast<const std::byte*>(mapped) +
                                                              check_footprint_.Offset + y * check_footprint_.Footprint.RowPitch);
-            for (UINT x = 0; x < kFrameGenDepthCheckCells; ++x) {
-                current += row[x * 4 + 0];
-                swapped += row[x * 4 + 1];
-                none += row[x * 4 + 2];
-                samples += row[x * 4 + 3];
+            for (UINT x = 0; x < kFrameGenDepthCheckCells * kFrameGenDepthCheckTexels; ++x) {
+                const float* texel = row + x * 4;
+                const UINT reading = x % kFrameGenDepthCheckTexels;
+                if (reading < 2) {
+                    scores[reading]->error += texel[0];
+                    scores[reading]->none += texel[1];
+                    scores[reading]->samples += texel[2];
+                    scores[reading]->fallback += texel[3];
+                } else {
+                    evidence.binocular += texel[0];
+                }
             }
         }
         const D3D12_RANGE written{0, 0};
         slot.check_readback->Unmap(0, &written);
-        // Checks recorded before the validator last flipped the decoding
-        // scored the readings the other way round.
-        if (slot.check_swapped != validator_.Swapped()) {
-            std::swap(current, swapped);
+        // A check of depth decoded before the validator last changed the
+        // decoding scored other readings.
+        if (slot.check_generation == validator_.Generation()) {
+            validator_.Add(evidence);
         }
-        validator_.Add(current, swapped, none, samples);
     }
 
     bool SupportsThreadedPresentation() const override { return true; }
@@ -602,6 +650,20 @@ class D3D12FrameGen final : public FrameGenGpu {
             views_.resize(views.size());
         }
         bool ok = true;
+        // Depth the other eye disproves is dropped per texel before any view
+        // uses it. Needs both eyes' images of this frame, captured at release.
+        if (views.size() >= 2 && validator_.Usable()) {
+            bool both = true;
+            for (std::size_t i = 0; i < 2; ++i) {
+                both = both && Prepared(views[i], views_[i], tuning) && views_[i].capture.Matches(views[i].source);
+            }
+            for (std::size_t i = 0; i < 2 && both && ok; ++i) {
+                ViewResources& view = views_[i];
+                if (views[i].request.depth && view.depth_ready && view.depth_generation == validator_.Generation()) {
+                    ok = RecordDepthTrust(views[i], views[1 - i], view, views_[1 - i], error);
+                }
+            }
+        }
         for (std::size_t i = 0; i < views.size() && ok; ++i) {
             bool synthesized = false;
             bool depth = false;
@@ -612,7 +674,7 @@ class D3D12FrameGen final : public FrameGenGpu {
         // Check the game's depth against the other eye while undecided, and
         // now and then afterwards.
         if (ok && views.size() >= 2 && views_[0].depth_fresh && views[0].request.depth &&
-            validator_.WantsCheck(submission_)) {
+            views_[0].depth_generation == validator_.Generation() && validator_.WantsCheck(submission_)) {
             ok = RecordDepthCheck(views[0], views[1], views_[0], views_[1], slot, error);
         }
         for (std::size_t i = 0; i < views.size(); ++i) {
@@ -763,6 +825,17 @@ class D3D12FrameGen final : public FrameGenGpu {
         return true;
     }
 
+    // Whether EnsureView would keep every texture of the view as it is.
+    bool Prepared(const FrameGenViewSubmission& submission, const ViewResources& view, const FrameGenTuning& tuning) const {
+        const auto it = images_.find(submission.source.swapchain);
+        if (it == images_.end() || submission.source.image_index >= it->second.size() || !view.output.resource ||
+            !view.depth.resource) {
+            return false;
+        }
+        return view.history_state.Matches(submission.request.extent, it->second[submission.source.image_index]->GetDesc().Format,
+                                          submission.request.output, FrameGenFinalFlowLevel(tuning.quality));
+    }
+
     bool EnsureView(ViewResources& view, const FrameGenViewSubmission& submission, ID3D12Resource* source,
                     const FrameGenTuning& tuning, std::string& error) {
         const D3D12_RESOURCE_DESC source_desc = source->GetDesc();
@@ -887,7 +960,7 @@ class D3D12FrameGen final : public FrameGenGpu {
         FrameGenViewRequest effective = view.history_state.Effective(submission.request);
         // Only once the depth is known to line the eyes up (see RecordDepthCheck).
         effective.depth = effective.depth && view.depth_ready && view.depth.resource && validator_.Usable() &&
-                          view.depth_swapped == validator_.Swapped();
+                          view.depth_generation == validator_.Generation();
         view.depth_ready = false;
         depth_used = effective.depth && effective.synthesize;
         const FrameGenViewPlan plan = BuildFrameGenViewPlan(effective, tuning);

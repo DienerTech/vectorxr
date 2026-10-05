@@ -203,6 +203,7 @@ FrameGenViewPlan BuildFrameGenViewPlan(const FrameGenViewRequest& request, const
                                           : FrameGenTexture{}};
         refine.outputs = {Texture(FrameGenTextureKind::kFlow, level), {}};
         refine.constants.options[3] = 1u << (level - match);
+        refine.constants.tuning[0] = std::clamp(tuning.interval_ratio, 0.25f, 4.0f);
         plan.dispatches.push_back(refine);
         if (level == plan.final_flow_level) {
             break;
@@ -211,9 +212,14 @@ FrameGenViewPlan BuildFrameGenViewPlan(const FrameGenViewRequest& request, const
 
     FrameGenDispatch filter = Dispatch(FrameGenPass::kFilter, plan.levels[plan.final_flow_level],
                                        plan.levels[plan.final_flow_level], base);
-    filter.inputs = {Texture(FrameGenTextureKind::kFlow, plan.final_flow_level), {}, {}, {}};
+    // Last frame's filtered flow and the depth: how steady each vector is.
+    filter.inputs = {Texture(FrameGenTextureKind::kFlow, plan.final_flow_level),
+                     request.temporal ? Texture(FrameGenTextureKind::kFilteredPrevious, plan.final_flow_level)
+                                      : FrameGenTexture{},
+                     depth, {}};
     filter.outputs = {Texture(FrameGenTextureKind::kFilteredNewest, plan.final_flow_level), {}};
     filter.constants.options[3] = plan.final_flow_level;
+    filter.constants.tuning[0] = std::clamp(tuning.interval_ratio, 0.25f, 4.0f);
     plan.dispatches.push_back(filter);
 
     for (std::size_t index = 0; index < generated; ++index) {
@@ -253,6 +259,27 @@ FrameGenDispatch BuildFrameGenDepthCheckDispatch(const FrameGenViewGeometry& vie
     return dispatch;
 }
 
+FrameGenDispatch BuildFrameGenDepthTrustDispatch(FrameGenExtent view_extent, const FrameGenViewGeometry& own,
+                                                 const FrameGenViewGeometry& other) {
+    const auto levels = FrameGenPyramid(view_extent);
+    FrameGenDispatch dispatch;
+    dispatch.pass = FrameGenPass::kDepthTrust;
+    dispatch.width = levels[1].width;
+    dispatch.height = levels[1].height;
+    dispatch.constants.fov_current = Tangents(own);
+    dispatch.constants.fov_previous = Tangents(other);
+    const Matrix3 rotation = FrameGenRelativeRotation(own.orientation, other.orientation);
+    const std::array<float, 3> translation = RelativeTranslation(own, other);
+    dispatch.constants.rot0 = {rotation[0][0], rotation[0][1], rotation[0][2], translation[0]};
+    dispatch.constants.rot1 = {rotation[1][0], rotation[1][1], rotation[1][2], translation[1]};
+    dispatch.constants.rot2 = {rotation[2][0], rotation[2][1], rotation[2][2], translation[2]};
+    dispatch.constants.size = {levels[1].width, levels[1].height, 0, 0};
+    dispatch.constants.options = {0, kFrameGenFlagDepth, 0, 0};
+    dispatch.inputs = {Texture(FrameGenTextureKind::kHistoryNewest), {}, {}, {}}; // the other view's newest goes in t1
+    dispatch.outputs = {Texture(FrameGenTextureKind::kDepth), {}};
+    return dispatch;
+}
+
 const char* ToString(FrameGenDepthReading reading) {
     switch (reading) {
     case FrameGenDepthReading::kAsSubmitted:
@@ -266,42 +293,71 @@ const char* ToString(FrameGenDepthReading reading) {
     }
 }
 
-void FrameGenDepthValidator::Add(double current, double swapped, double none, double samples) {
-    if (samples <= 0.0) {
+FrameGenDepthEvidence& FrameGenDepthEvidence::operator+=(const FrameGenDepthEvidence& other) {
+    auto add = [](FrameGenDepthScore& a, const FrameGenDepthScore& b) {
+        a.error += b.error;
+        a.none += b.none;
+        a.samples += b.samples;
+        a.fallback += b.fallback;
+    };
+    add(decoded, other.decoded);
+    add(swapped, other.swapped);
+    binocular += other.binocular;
+    return *this;
+}
+
+void FrameGenDepthValidator::Add(const FrameGenDepthEvidence& check) {
+    sums_ += check;
+    if (++checks_ < 3) {
         return;
     }
-    sums_[0] += current;
-    sums_[1] += swapped;
-    sums_[2] += none;
-    samples_ += samples;
-    ++checks_;
-    // A few checks' worth of samples before deciding.
-    constexpr double kSamplesToDecide = 3.0 * kFrameGenDepthCheckCells * kFrameGenDepthCheckCells;
-    if (checks_ < 3 || samples_ < kSamplesToDecide) {
-        return;
-    }
-    last_errors_ = {sums_[0] / samples_, sums_[1] / samples_, sums_[2] / samples_};
-    const double best = std::min(last_errors_[0], last_errors_[1]);
-    FrameGenDepthReading reading = FrameGenDepthReading::kUnusable;
-    // Depth must line the eyes up clearly better than no depth at all.
-    if (best < 0.85 * last_errors_[2]) {
-        if (last_errors_[1] < last_errors_[0]) {
+    evidence_ = sums_;
+    sums_ = {};
+    checks_ = 0;
+    const FrameGenDepthReading reading_before = reading_;
+    const bool swapped_before = swapped_;
+
+    // A reading is judged where it moves content; too few such samples (the
+    // view is all scenery) decide nothing.
+    const double enough = std::max(64.0, 0.02 * evidence_.binocular);
+    auto judged = [&](const FrameGenDepthScore& score) { return score.samples >= enough; };
+    // Depth must line the eyes up clearly better than no depth to be taken
+    // up, and stops being used only once it is no better at all: looking
+    // out at scenery, or a moment of noise, must not switch it on and off.
+    constexpr double kAdopt = 0.7;
+    constexpr double kDrop = 0.9;
+    const FrameGenDepthScore& decoded = evidence_.decoded;
+    const FrameGenDepthScore& swapped = evidence_.swapped;
+    const bool decoded_adopts = judged(decoded) && decoded.Ratio() < kAdopt;
+    const bool swapped_adopts = judged(swapped) && swapped.Ratio() < kAdopt;
+    if (!Usable()) {
+        if (swapped_adopts && (!decoded_adopts || swapped.Ratio() < decoded.Ratio())) {
             swapped_ = !swapped_;
         }
-        reading = swapped_ ? FrameGenDepthReading::kReversed : FrameGenDepthReading::kAsSubmitted;
+        if (decoded_adopts || swapped_adopts) {
+            reading_ = swapped_ ? FrameGenDepthReading::kReversed : FrameGenDepthReading::kAsSubmitted;
+        } else if (judged(decoded) && judged(swapped)) {
+            reading_ = FrameGenDepthReading::kUnusable;
+        }
+    } else if (swapped_adopts && swapped.Ratio() < kAdopt * decoded.Ratio()) {
+        swapped_ = !swapped_;
+        reading_ = swapped_ ? FrameGenDepthReading::kReversed : FrameGenDepthReading::kAsSubmitted;
+    } else if (judged(decoded) && decoded.Ratio() > kDrop) {
+        reading_ = FrameGenDepthReading::kUnusable;
     }
-    if (reading != reading_ || last_errors_[1] < last_errors_[0]) {
+
+    if (swapped_ != swapped_before) {
+        ++generation_;
+    }
+    const bool changed = reading_ != reading_before || swapped_ != swapped_before;
+    if (changed) {
         ++decisions_;
     }
-    reading_ = reading;
-    sums_ = {};
-    samples_ = 0.0;
-    checks_ = 0;
+    settled_ = !changed && reading_ != FrameGenDepthReading::kUnknown;
 }
 
 bool FrameGenDepthValidator::WantsCheck(std::uint64_t submission) const {
-    return reading_ == FrameGenDepthReading::kUnknown || submission % 60 == 0 ||
-           (checks_ > 0 && checks_ < 3);
+    return !settled_ || submission % 20 < 3;
 }
 
 FrameGenDispatch BuildFrameGenDepthDispatch(FrameGenExtent view_extent, std::int32_t rect_x, std::int32_t rect_y,

@@ -91,6 +91,20 @@ bool MapToPrevious(float2 uv, float depth, out float2 previous_uv) {
     return all(previous_uv >= 0.0) && all(previous_uv <= 1.0);
 }
 
+// Newest-frame linear depth at a newest-view coordinate (nearest texel: a
+// filtered depth across a silhouette belongs to neither surface). Negative
+// where the other eye disproved it (FG_PASS_DEPTH_TRUST): MapToPrevious then
+// uses rotation only there.
+float DepthNearest(Texture2D<float4> depth, float2 uv) {
+    if ((g.options.y & FG_FLAG_DEPTH) == 0u) {
+        return 0.0;
+    }
+    uint width, height;
+    depth.GetDimensions(width, height);
+    const int2 texel = clamp(int2(uv * float2(width, height)), int2(0, 0), int2(width, height) - 1);
+    return depth.Load(int3(texel, 0)).r;
+}
+
 #if defined(FG_PASS_LUMA)
 FG_BIND(0) Texture2D<float4> g_current : register(t0);
 FG_BIND(1) Texture2D<float4> g_previous : register(t1);
@@ -312,8 +326,9 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
         Consider(block, int2(round(g_parent.Load(int3(q, 0)).xy * match)), best, best_cost);
     }
     if ((g.options.y & FG_FLAG_TEMPORAL) != 0u) {
+        // Last frame pair's motion, scaled to this pair's interval (tuning.x).
         const float2 uv = (float2(cell) + 0.5) / float2(g.size.xy);
-        Consider(block, int2(round(g_temporal.SampleLevel(g_linear, uv, 0.0).xy * match)), best, best_cost);
+        Consider(block, int2(round(g_temporal.SampleLevel(g_linear, uv, 0.0).xy * g.tuning.x * match)), best, best_cost);
     }
 
     // Step-halving search: one flow-level cell (scale match texels) first,
@@ -350,10 +365,27 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
 
 #if defined(FG_PASS_FILTER)
 FG_BIND(0) Texture2D<float4> g_flow_in : register(t0);
+FG_BIND(1) Texture2D<float4> g_flow_before : register(t1);
+FG_BIND(2) Texture2D<float4> g_depth : register(t2);
+FG_BIND(6) SamplerState g_linear : register(s0);
 FG_BIND(4) FG_FORMAT("rgba16f") RWTexture2D<float4> g_flow_out : register(u0);
+
+// A vector continues the motion the previous frame pair showed when it is
+// within this many full-resolution pixels of it, plus this share of the speed.
+#define FG_STEADY_PIXELS 1.0
+#define FG_STEADY_SHARE 0.25
 
 // Cost-weighted vector median over 3x3: removes isolated mismatches without
 // blurring motion boundaries the way averaging would.
+//
+// When extrapolating, w carries how steady the chosen motion is: compared
+// with the vector the same content had one frame pair earlier (scaled by
+// tuning.x, the ratio of the two pairs' intervals), 1 when it continues it
+// and 0 when it changes by twice the tolerance. Extrapolation
+// pushes content on by its motion with nothing after it to correct it, so
+// matching noise (instrument faces, fine text, anti-aliasing shimmer on
+// still cockpit detail) would make still content jitter at the real frame
+// rate; noise does not repeat from one frame pair to the next, motion does.
 [numthreads(8, 8, 1)]
 void CSMain(uint3 id : SV_DispatchThreadID) {
     if (any(id.xy >= g.size.xy)) {
@@ -382,7 +414,23 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
             chosen = c;
         }
     }
-    g_flow_out[id.xy] = float4(samples[chosen].xy, min(samples[chosen].z, samples[4].z), 1.0);
+    const float2 v = samples[chosen].xy;
+    float steadiness = 1.0;
+    const uint steady_flags = FG_FLAG_EXTRAPOLATE | FG_FLAG_TEMPORAL;
+    if ((g.options.y & steady_flags) == steady_flags) {
+        // Where this content was in the previous real frame, and the motion
+        // it had there.
+        const float2 uv = (float2(id.xy) + 0.5) / float2(g.size.xy);
+        float2 before_uv;
+        if (MapToPrevious(uv - v, DepthNearest(g_depth, uv), before_uv)) {
+            const float2 before = g_flow_before.SampleLevel(g_linear, before_uv, 0.0).xy * g.tuning.x;
+            const float2 pixels = float2(g.size.xy) * float(1u << g.options.w);
+            const float change = length((v - before) * pixels);
+            const float speed = max(length(v * pixels), length(before * pixels));
+            steadiness = saturate(2.0 - change / (FG_STEADY_PIXELS + FG_STEADY_SHARE * speed));
+        }
+    }
+    g_flow_out[id.xy] = float4(v, min(samples[chosen].z, samples[4].z), steadiness);
 }
 #endif
 
@@ -415,16 +463,8 @@ float3 Perceptual(float3 value) {
     return sqrt(max(value, 0.0));
 }
 
-// Newest-frame linear depth at a newest-view coordinate (nearest texel: a
-// filtered depth across a silhouette belongs to neither surface).
 float DepthAt(float2 uv) {
-    if ((g.options.y & FG_FLAG_DEPTH) == 0u) {
-        return 0.0;
-    }
-    uint width, height;
-    g_depth.GetDimensions(width, height);
-    const int2 texel = clamp(int2(uv * float2(width, height)), int2(0, 0), int2(width, height) - 1);
-    return g_depth.Load(int3(texel, 0)).r;
+    return DepthNearest(g_depth, uv);
 }
 
 // How differently the two real frames see the content a candidate vector
@@ -513,8 +553,9 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
     const float cost_confidence = saturate(1.0 - max(chosen.z - 0.02, 0.0) * g.tuning.z);
     const float agreement = saturate(1.0 - max(chosen_error - 0.03, 0.0) * g.tuning.w);
     // Uncertain motion shrinks toward a still image instead of blending two
-    // positions, which would ghost.
-    float confidence = motion_confidence * cost_confidence;
+    // positions, which would ghost. w: how steady the motion is (FG_PASS_FILTER;
+    // 1 unless extrapolating).
+    float confidence = motion_confidence * cost_confidence * chosen.w;
     if (extrapolate && boundary) {
         // Extrapolation sees only the newest frame at display time, so at a
         // motion boundary a vector the two real frames disagree on (newly
@@ -587,19 +628,79 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
 }
 #endif
 
-#if defined(FG_PASS_DEPTH_CHECK)
+#if defined(FG_PASS_DEPTH_CHECK) || defined(FG_PASS_DEPTH_TRUST)
+// Error of a sample whose reading throws it out of the other eye's view.
 #define FG_CHECK_OUTSIDE 0.25
+// Depth must beat "infinitely far" by this much luma error to count as
+// right; within it, noise decides.
+#define FG_CHECK_MARGIN 0.02
+#define FG_CHECK_TAPS 9
+
+// Luma of a 3x3 patch around uv, `spacing` apart in uv.
+void LoadPatch(Texture2D<float4> image, SamplerState linear_sampler, float2 uv, float2 spacing,
+               out float patch[FG_CHECK_TAPS]) {
+    [unroll]
+    for (int y = 0; y < 3; ++y) {
+        [unroll]
+        for (int x = 0; x < 3; ++x) {
+            const float2 offset = float2(x - 1, y - 1) * spacing;
+            patch[y * 3 + x] = Luma(image.SampleLevel(linear_sampler, uv + offset, 0.0).rgb);
+        }
+    }
+}
+
+// Mean luma error between `reference` and the other eye's patch at uv.
+float PatchError(Texture2D<float4> image, SamplerState linear_sampler, float2 uv, float2 spacing,
+                 float reference[FG_CHECK_TAPS]) {
+    float sum = 0.0;
+    [unroll]
+    for (int y = 0; y < 3; ++y) {
+        [unroll]
+        for (int x = 0; x < 3; ++x) {
+            const float2 offset = float2(x - 1, y - 1) * spacing;
+            sum += abs(Luma(image.SampleLevel(linear_sampler, uv + offset, 0.0).rgb) - reference[y * 3 + x]);
+        }
+    }
+    return sum / float(FG_CHECK_TAPS);
+}
+#endif
+
+#if defined(FG_PASS_DEPTH_CHECK)
 FG_BIND(0) Texture2D<float4> g_view0 : register(t0);
 FG_BIND(1) Texture2D<float4> g_view1 : register(t1);
 FG_BIND(2) Texture2D<float4> g_depth : register(t2);
 FG_BIND(6) SamplerState g_linear : register(s0);
 FG_BIND(4) FG_FORMAT("rgba32f") RWTexture2D<float4> g_scores : register(u0);
 
+// One sample's evidence for a reading of its depth: (error with fallback,
+// error without depth, 1, 1 if it fell back), or zero where the reading
+// cannot be told apart from no depth. A sample that falls back costs what
+// synthesis then gets there, the error without depth.
+float4 Score(float2 uv, float depth, float2 far_uv, float none, float2 spacing, float2 size,
+             float reference[FG_CHECK_TAPS]) {
+    float2 mapped;
+    const bool inside = MapToPrevious(uv, depth, mapped);
+    if (inside && all(abs(mapped - far_uv) * size < 1.0)) {
+        return float4(0.0, 0.0, 0.0, 0.0);
+    }
+    const float error = inside ? PatchError(g_view1, g_linear, mapped, spacing, reference) : FG_CHECK_OUTSIDE;
+    const bool fallback = error > none + FG_CHECK_MARGIN;
+    return float4(fallback ? none : error, none, 1.0, fallback ? 1.0 : 0.0);
+}
+
 // One cell of the depth check: view 0 samples warped into view 1 by their
-// depth read three ways (as decoded, near and far swapped, none), summing
-// the luma error of each.
-// fov_current/previous and the rotation rows describe view 0 -> view 1;
-// tuning.x is 1/near + 1/far; options.w samples per cell side.
+// depth read two ways (as decoded; near and far swapped), each compared with
+// no depth. fov_current/previous and the rotation rows describe view 0 ->
+// view 1; tuning.x is 1/near + 1/far; options.w samples per cell side.
+//
+// Only samples both eyes see count (the part of a wide field of view one
+// eye sees alone says nothing), and each reading is judged where it matters,
+// where it moves the sample by more than a texel from no depth. There a
+// reading may fall back to "infinitely far" per sample, as synthesis does
+// (FG_PASS_DEPTH_TRUST): depth wrong in places (cockpit glass written to
+// depth) does not hide that it is right elsewhere.
+// Writes three texels per cell: a Score sum per reading, then (samples both
+// eyes see, 0, 0, 0).
 [numthreads(8, 8, 1)]
 void CSMain(uint3 id : SV_DispatchThreadID) {
     if (any(id.xy >= g.size.xy)) {
@@ -607,32 +708,78 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
     }
     uint width, height;
     g_depth.GetDimensions(width, height);
+    const float2 size = float2(width, height);
+    const float2 spacing = 1.0 / size;
     const int samples = int(g.options.w);
-    float3 sums = float3(0.0, 0.0, 0.0);
-    float count = 0.0;
+    float4 decoded = float4(0.0, 0.0, 0.0, 0.0);
+    float4 swapped = float4(0.0, 0.0, 0.0, 0.0);
+    float binocular = 0.0;
     [loop]
     for (int sy = 0; sy < samples; ++sy) {
         [loop]
         for (int sx = 0; sx < samples; ++sx) {
             const float2 uv = (float2(id.xy) + (float2(sx, sy) + 0.5) / float(samples)) / float2(g.size.xy);
-            const int2 texel = clamp(int2(uv * float2(width, height)), int2(0, 0), int2(width, height) - 1);
-            const float depth = g_depth.Load(int3(texel, 0)).r;
-            const float swapped_inverse = g.tuning.x - 1.0 / max(depth, 1e-6);
-            const float swapped = swapped_inverse > 1.0 / FG_FAR_DEPTH ? 1.0 / swapped_inverse : FG_FAR_DEPTH;
-            const float reference = Luma(g_view0.SampleLevel(g_linear, uv, 0.0).rgb);
-            // A reading that throws a sample out of the other eye's view pays a
-            // fixed error: counting only samples every reading keeps would let
-            // a wrong reading discard exactly the samples that expose it.
-            float2 a, b, c;
-            sums.x += MapToPrevious(uv, depth, a) ? abs(Luma(g_view1.SampleLevel(g_linear, a, 0.0).rgb) - reference)
-                                                  : FG_CHECK_OUTSIDE;
-            sums.y += MapToPrevious(uv, swapped, b) ? abs(Luma(g_view1.SampleLevel(g_linear, b, 0.0).rgb) - reference)
-                                                    : FG_CHECK_OUTSIDE;
-            sums.z += MapToPrevious(uv, FG_FAR_DEPTH, c) ? abs(Luma(g_view1.SampleLevel(g_linear, c, 0.0).rgb) - reference)
-                                                         : FG_CHECK_OUTSIDE;
-            count += 1.0;
+            float2 far_uv;
+            if (!MapToPrevious(uv, FG_FAR_DEPTH, far_uv)) {
+                continue;
+            }
+            binocular += 1.0;
+            const int2 texel = clamp(int2(uv * size), int2(0, 0), int2(size) - 1);
+            // Negative where synthesis already disproved it: the check reads
+            // the depth itself.
+            const float depth = max(abs(g_depth.Load(int3(texel, 0)).r), 1e-6);
+            const float swapped_inverse = g.tuning.x - 1.0 / depth;
+            float reference[FG_CHECK_TAPS];
+            LoadPatch(g_view0, g_linear, uv, spacing, reference);
+            const float none = PatchError(g_view1, g_linear, far_uv, spacing, reference);
+            decoded += Score(uv, depth, far_uv, none, spacing, size, reference);
+            swapped += Score(uv, swapped_inverse > 1.0 / FG_FAR_DEPTH ? 1.0 / swapped_inverse : FG_FAR_DEPTH, far_uv,
+                             none, spacing, size, reference);
         }
     }
-    g_scores[id.xy] = float4(sums, count);
+    const int2 base = int2(id.x * 3, id.y);
+    g_scores[base] = decoded;
+    g_scores[base + int2(1, 0)] = swapped;
+    g_scores[base + int2(2, 0)] = float4(binocular, 0.0, 0.0, 0.0);
+}
+#endif
+
+#if defined(FG_PASS_DEPTH_TRUST)
+FG_BIND(0) Texture2D<float4> g_own : register(t0);
+FG_BIND(1) Texture2D<float4> g_other : register(t1);
+FG_BIND(6) SamplerState g_linear : register(s0);
+FG_BIND(4) FG_FORMAT("r32f") RWTexture2D<float> g_depth : register(u0);
+
+// Per texel of one view's linear depth: does the other eye see what the
+// depth says it should? Where the content lines up clearly better as
+// infinitely far (scenery behind cockpit glass the game wrote depth for, or
+// depth that is wrong there), the texel is negated, so head movement is
+// compensated for rotation only there. Texels the other eye cannot verify
+// (seen by one eye only, occluded, or as near and far alike) are kept.
+// fov_current/previous and the rotation rows describe this view -> the other.
+[numthreads(8, 8, 1)]
+void CSMain(uint3 id : SV_DispatchThreadID) {
+    if (any(id.xy >= g.size.xy)) {
+        return;
+    }
+    const float depth = g_depth[id.xy];
+    if (!(depth > 0.0 && depth < FG_FAR_DEPTH)) {
+        return;
+    }
+    const float2 size = float2(g.size.xy);
+    const float2 uv = (float2(id.xy) + 0.5) / size;
+    float2 near_uv, far_uv;
+    if (!MapToPrevious(uv, FG_FAR_DEPTH, far_uv) || !MapToPrevious(uv, depth, near_uv) ||
+        all(abs(near_uv - far_uv) * size < 1.0)) {
+        return;
+    }
+    const float2 spacing = 1.0 / size;
+    float reference[FG_CHECK_TAPS];
+    LoadPatch(g_own, g_linear, uv, spacing, reference);
+    const float near_error = PatchError(g_other, g_linear, near_uv, spacing, reference);
+    const float far_error = PatchError(g_other, g_linear, far_uv, spacing, reference);
+    if (far_error + FG_CHECK_MARGIN < near_error && far_error < 0.6 * near_error) {
+        g_depth[id.xy] = -depth;
+    }
 }
 #endif

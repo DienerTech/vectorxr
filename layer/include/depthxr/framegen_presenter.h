@@ -201,6 +201,7 @@ class FrameGenPresenter {
         bool valid{false};
         std::uint64_t sequence{0};
         XrTime display_time{0};
+        XrDuration interval{0}; // since the real frame before it, 0 when not continuous
         XrSpace space{XR_NULL_HANDLE};
         std::vector<ViewRecord> views;
     };
@@ -524,6 +525,10 @@ class FrameGenPresenter {
     bool generated_ready_{false};        // extrapolated_ belongs to newest_copy_
     std::size_t next_generated_set_{0};
     std::uint64_t threaded_late_{0};     // real frames shown after their predicted slot
+    // Real frames generated from, and how many of them used the game's depth,
+    // since the last summary.
+    std::uint64_t depth_window_frames_{0};
+    std::uint64_t depth_window_used_{0};
     std::mutex submit_mutex_;            // presenter-thread submissions vs output swapchain calls
     std::mutex gpu_mutex_;               // the GPU backend (Track, Capture, Execute, WaitIdle, Forget, Reset)
     double gpu_ms_{-1.0};                // last generation GPU time, read without the backend

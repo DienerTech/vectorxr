@@ -590,8 +590,25 @@ Frame Generation.
 
 When a game sends depth to the headset (MSFS 2024 does), Frame Generation uses it on
 Direct3D 12 automatically: head movement is compensated exactly, so cockpit instruments, panels
-and text stay still in generated frames instead of wobbling. The log says **Frame Generation uses
-the game's depth** once it does. Direct3D 11 and Vulkan games use head rotation only for now.
+and text stay still in generated frames instead of wobbling. Direct3D 11 and Vulkan games use
+head rotation only for now.
+
+Games do not always describe their depth correctly, so Frame Generation first checks it against
+the other eye: depth that is right lines the two eyes' images up. It starts using depth once
+that check passes, recognizes depth stored the other way round, and ignores depth that does not
+line the eyes up. Where the other eye disproves depth in places, for example cockpit glass the
+game wrote to depth over the scenery behind it, those places are treated as far away. The log
+reports each decision (**Frame Generation checked the game's depth against the other eye**),
+how much of the view the depth affects and how much of it the other eye disproved, and each
+30-second summary shows **depthUsed**, the share of real frames generated with depth.
+
+#### Still detail
+
+In Extrapolate, motion is only pushed forward where it continues the motion of the previous
+pair of real frames. Fine still detail such as instrument faces and text shimmers slightly from
+frame to frame under anti-aliasing and upscaling, and motion estimation reads that as motion
+that changes every frame; extrapolating it would make still cockpit detail jitter. Steady
+motion, including after a real frame arrives late, is extrapolated as before.
 
 #### Frame multiplier
 
@@ -662,8 +679,8 @@ running game wins.
 
 #### Current limits
 
-- Frame Generation does not use game motion vectors or depth yet; motion is estimated from
-  color images only. Motion-vector and depth input are planned.
+- Frame Generation does not use game motion vectors yet; motion is estimated from color
+  images, with the game's depth (Direct3D 12) used only to remove head movement.
 - There is no HUD masking yet. Cockpit text and gauges baked into the 3D image can shimmer on
   generated frames.
 - Fast motion and newly revealed areas can warp, more so with Extrapolate. Raise **Artifact
@@ -673,9 +690,8 @@ running game wins.
   quality, more at Quality and on slower GPUs.
 - Higher multipliers show more artifacts, most at 4x, and in Extrapolate each generated frame
   adds a set of headset-resolution output images to video memory.
-- Generated frames carry no depth, so runtime features that reproject with the game's depth
-  apply to real frames only. Only the first projection layer is generated; other layers, such
-  as menus drawn as quads, repeat unchanged.
+- Only the first projection layer is generated; other layers, such as menus drawn as quads,
+  repeat unchanged. Generated frames keep the real frame's depth for the runtime.
 
 ### Frame Generation FAQ
 

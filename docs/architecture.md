@@ -140,5 +140,18 @@ such as a cockpit, then lines up exactly and the flow carries only motion relati
 Generated frames also keep the real frame's depth chain, so the runtime corrects head motion on
 every frame alike.
 
+Depth is only used once it is shown to be read correctly. A check pass warps view 0 into view 1
+by the depth and the eyes' relative pose, over the samples both eyes see, and scores the depth
+as decoded and with near and far swapped against no depth; `FrameGenDepthValidator` adopts a
+reading that clearly lines the eyes up, and drops depth only once it no longer helps at all.
+Each frame, before any view uses it, a trust pass negates the depth texels the other eye
+disproves (scenery behind cockpit glass written to depth), which are then compensated for
+rotation only.
+
+When extrapolating, the filter pass also rates how steady each motion vector is against the
+vector the same content had one real frame pair earlier, scaled by the ratio of the two pairs'
+intervals; synthesis extrapolates unsteady motion less, so matching noise on still detail does
+not make it jitter.
+
 The interception set is intentionally scoped to what the enabled features need rather than
 hooking every call.

@@ -1329,6 +1329,9 @@ XrResult FrameGenPresenter::RunCycle(XrSession session, const XrFrameEndInfo& in
 void FrameGenPresenter::RecordReal(const XrCompositionLayerProjection& projection, XrTime display_time,
                                    std::uint64_t sequence) {
     std::scoped_lock lock(mutex_);
+    last_real_.interval = last_real_.valid && last_real_.sequence + 1 == sequence && display_time > last_real_.display_time
+                              ? display_time - last_real_.display_time
+                              : 0;
     last_real_.valid = true;
     last_real_.sequence = sequence;
     last_real_.display_time = display_time;
@@ -1366,6 +1369,11 @@ bool FrameGenPresenter::Generate(const XrCompositionLayerProjection& projection,
         }
         const bool continuous = last_real_.valid && last_real_.sequence + 1 == frame.sequence &&
                                 last_real_.space == projection.space && last_real_.views.size() == projection.viewCount;
+        if (continuous && last_real_.interval > 0 && frame.app_time > last_real_.display_time) {
+            tuning.interval_ratio = std::clamp(static_cast<float>(frame.app_time - last_real_.display_time) /
+                                                   static_cast<float>(last_real_.interval),
+                                               0.25f, 4.0f);
+        }
         for (std::uint32_t i = 0; i < projection.viewCount; ++i) {
             const auto& view = projection.views[i];
             const auto record = swapchains_.find(view.subImage.swapchain);
@@ -1430,9 +1438,7 @@ bool FrameGenPresenter::Generate(const XrCompositionLayerProjection& projection,
     FrameGenExecuteResult executed;
     bool ok = true;
     double gpu_ms = -1.0;
-    std::uint32_t depth_decisions = 0;
-    FrameGenDepthReading depth_reading = FrameGenDepthReading::kUnknown;
-    std::array<double, 3> depth_errors{};
+    FrameGenDepthStatus depth;
     {
         // Vulkan queues need external synchronization with the runtime's own
         // submissions on the session queue. Lock order: queue, GPU,
@@ -1459,9 +1465,7 @@ bool FrameGenPresenter::Generate(const XrCompositionLayerProjection& projection,
         ok = ok && gpu_->Execute(submissions, tuning, executed, error);
         if (gpu_) {
             gpu_ms = gpu_->LastGpuMilliseconds();
-            depth_decisions = gpu_->DepthDecisions();
-            depth_reading = gpu_->DepthReading();
-            depth_errors = gpu_->DepthErrors();
+            depth = gpu_->DepthStatus();
         }
     }
     // Every output here was acquired and waited; release them all so the
@@ -1475,17 +1479,29 @@ bool FrameGenPresenter::Generate(const XrCompositionLayerProjection& projection,
     }
     gpu_ms_ = gpu_ms;
     consecutive_failures_ = 0;
-    if (logger_ && depth_decisions != logged_depth_decisions_) {
-        logged_depth_decisions_ = depth_decisions;
-        logger_->Info(std::string("Frame Generation checked the game's depth against the other eye: reading it ") +
-                      ToString(depth_reading) +
-                      (depth_reading == FrameGenDepthReading::kUnusable ? ", so head movement is compensated for rotation only"
-                                                                        : ", head movement is compensated in full") +
-                      " (luma error " + Number(depth_errors[0], 4) + " as decoded, " + Number(depth_errors[1], 4) +
-                      " swapped, " + Number(depth_errors[2], 4) + " without depth).");
+    if (logger_ && depth.decisions != logged_depth_decisions_) {
+        logged_depth_decisions_ = depth.decisions;
+        const FrameGenDepthEvidence& evidence = depth.evidence;
+        const double moved = evidence.decoded.samples;
+        logger_->Info(
+            std::string("Frame Generation checked the game's depth against the other eye: reading it ") +
+            ToString(depth.reading) +
+            (depth.reading == FrameGenDepthReading::kUnusable ? ", so head movement is compensated for rotation only"
+                                                              : ", head movement is compensated in full") +
+            ". Where depth moves content (" + Number(evidence.binocular > 0.0 ? 100.0 * moved / evidence.binocular : 0.0, 0) +
+            "% of what both eyes see) it leaves " + Number(evidence.decoded.Ratio(), 2) +
+            " of the error without depth (swapped " + Number(evidence.swapped.Ratio(), 2) +
+            "); the other eye disproves " + Number(moved > 0.0 ? 100.0 * evidence.decoded.fallback / moved : 0.0, 0) +
+            "% of it, which is treated as far (cockpit glass written to depth, or depth wrong there).");
     }
     const bool synthesized =
         std::any_of(executed.synthesized.begin(), executed.synthesized.end(), [](bool value) { return value; });
+    if (synthesized) {
+        ++depth_window_frames_;
+        if (std::any_of(executed.depth.begin(), executed.depth.end(), [](bool value) { return value; })) {
+            ++depth_window_used_;
+        }
+    }
     if (logger_ && !logged_depth_ &&
         std::any_of(executed.depth.begin(), executed.depth.end(), [](bool value) { return value; })) {
         logged_depth_ = true;
@@ -2406,10 +2422,12 @@ XrResult FrameGenPresenter::ThreadedEnd(XrSession session, const XrFrameEndInfo&
                       ", appWorkMs=" + Number(app_work_frames_ ? app_work_ms_ / app_work_frames_ : 0.0, 1) +
                       ", lateReal=" + std::to_string(threaded_late_) + ", generated=" + std::to_string(generated_) +
                       ", repeated=" + std::to_string(repeated_) + ", failures=" + std::to_string(failures_) +
-                      ", captured=" + std::to_string(captured_) + ", gpuMs=" + Number(gpu_ms_, 2) + ".");
+                      ", captured=" + std::to_string(captured_) + ", gpuMs=" + Number(gpu_ms_, 2) + ", depthUsed=" +
+                      Number(depth_window_frames_ ? 100.0 * depth_window_used_ / depth_window_frames_ : 0.0, 0) + "%.");
         app_work_ms_ = 0.0;
         app_work_frames_ = 0;
         threaded_late_ = 0;
+        depth_window_frames_ = depth_window_used_ = 0;
     }
     return result;
 }
