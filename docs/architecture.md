@@ -219,8 +219,11 @@ frame's eye position. Synthesis then reads an eye-shift map built per view:
 3. Texels nothing reached (content the movement uncovers) stretch the farther neighbour along the
    line content moves on.
 
-The map is built for the generated frame furthest in time; the others scale it. Generated frames
-are submitted with the eye's position at their time. Trusted cockpit content also drops sub-pixel
+Maps are built for the earliest and latest generated frames (the second only while the eyes move
+half a millimeter or more between them; a spare frame for a late real frame is left out); the
+others scale the nearer one. Which surface is in front changes with time, so one map scaled far
+from its own time cuts the edge of near content where the scenery comes into view. Generated
+frames are submitted with the eye's position at their time. Trusted cockpit content also drops sub-pixel
 motion as matching noise.
 
 When extrapolating, the filter pass also rates how steady each motion vector is against the

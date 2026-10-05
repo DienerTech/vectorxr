@@ -218,6 +218,7 @@ class FrameGenPresenter {
         // slot ({} when unknown), for the GPU timing in the summary.
         std::chrono::steady_clock::time_point real_due{};
         std::chrono::steady_clock::time_point generated_due{};
+        bool spare{false}; // the last fraction is a spare (FrameGenTuning::spare)
     };
 
     struct ViewRecord {

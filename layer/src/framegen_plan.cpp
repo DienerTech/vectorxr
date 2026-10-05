@@ -59,6 +59,23 @@ FrameGenTexture Texture(FrameGenTextureKind kind, std::uint8_t level = 0) {
     return {kind, level};
 }
 
+// The bits of an IEEE half float (f16tof32 in the shaders), rounded to
+// nearest; for times between 0 and a few, so no infinities or subnormals.
+std::uint32_t FrameGenHalf(float value) {
+    std::uint32_t bits = 0;
+    std::memcpy(&bits, &value, sizeof(bits));
+    const std::uint32_t sign = (bits >> 16) & 0x8000u;
+    const int exponent = static_cast<int>((bits >> 23) & 0xffu) - 127 + 15;
+    const std::uint32_t mantissa = bits & 0x7fffffu;
+    if (exponent <= 0) {
+        return sign;
+    }
+    if (exponent >= 31) {
+        return sign | 0x7bffu;
+    }
+    return (sign | (static_cast<std::uint32_t>(exponent) << 10) | (mantissa >> 13)) + ((mantissa >> 12) & 1u);
+}
+
 } // namespace
 
 std::uint8_t FrameGenFinalFlowLevel(FrameGenFlowQuality quality) {
@@ -268,46 +285,69 @@ FrameGenViewPlan BuildFrameGenViewPlan(const FrameGenViewRequest& request, const
     filter.constants.tuning[0] = std::clamp(tuning.interval_ratio, 0.25f, 4.0f);
     plan.dispatches.push_back(filter);
 
-    // The eye-shift map for the generated frame furthest in time from the
-    // newest one; the others scale it by their time.
-    float shift_time = 0.0f;
-    for (std::size_t index = 0; index < generated; ++index) {
+    // Eye-shift maps for the earliest and latest generated frames (one when
+    // they coincide); the others scale the nearer one by their time. Which
+    // surface is in front changes with time, so a map scaled far from its
+    // own time cuts the edge of near content moving across the view. A
+    // spare frame, rarely shown, scales the latest. Times are past the
+    // newest frame (before it when interpolating); a frame at the newest
+    // frame's own time needs none.
+    float early = 0.0f, late = 0.0f;
+    const std::size_t mapped = tuning.spare && generated > 1 ? generated - 1 : generated;
+    for (std::size_t index = 0; index < mapped; ++index) {
         const float fraction = std::clamp(tuning.fractions[index], 0.0f, 1.0f);
-        shift_time = std::max(shift_time, tuning.mode == FrameGenSynthesisMode::kExtrapolate ? fraction : 1.0f - fraction);
+        const float time = tuning.mode == FrameGenSynthesisMode::kExtrapolate ? fraction : 1.0f - fraction;
+        if (time > 0.0f) {
+            early = early > 0.0f ? std::min(early, time) : time;
+            late = std::max(late, time);
+        }
     }
-    const std::array<float, 3> eye{request.shift[0] * shift_time, request.shift[1] * shift_time,
-                                   request.shift[2] * shift_time};
-    const bool shifted =
-        request.depth && std::sqrt(eye[0] * eye[0] + eye[1] * eye[1] + eye[2] * eye[2]) >= kFrameGenMinimumShift;
+    const float shift_length = std::sqrt(request.shift[0] * request.shift[0] + request.shift[1] * request.shift[1] +
+                                         request.shift[2] * request.shift[2]);
+    const bool shifted = request.depth && late > 0.0f && shift_length * late >= kFrameGenMinimumShift;
+    // The second map only while the eyes move half a millimeter or more
+    // between the two times: less is a pixel or two of near edge.
+    const bool two_maps = shifted && shift_length * (late - early) >= 0.0005f;
     if (shifted) {
-        FrameGenConstants mapping = base;
-        mapping.fov_previous = mapping.fov_current;
-        mapping.rot0 = {1.0f, 0.0f, 0.0f, -eye[0]};
-        mapping.rot1 = {0.0f, 1.0f, 0.0f, -eye[1]};
-        mapping.rot2 = {0.0f, 0.0f, 1.0f, -eye[2]};
-        mapping.options = {0, kFrameGenFlagDepth, 0, 0};
-        auto pass = [&](FrameGenPass kind, std::array<FrameGenTexture, 5> inputs, FrameGenTextureKind output) {
-            FrameGenDispatch dispatch = Dispatch(kind, plan.levels[1], plan.levels[1], mapping);
-            dispatch.inputs = inputs;
-            dispatch.outputs = {Texture(output), {}};
-            plan.dispatches.push_back(dispatch);
-        };
         const FrameGenTexture trust = Texture(FrameGenTextureKind::kTrustNewest);
         const FrameGenTexture keys = Texture(FrameGenTextureKind::kShiftKeys);
-        pass(FrameGenPass::kShiftClear, {}, FrameGenTextureKind::kShiftKeys);
-        pass(FrameGenPass::kShiftSplat, {depth, trust, {}, {}, {}}, FrameGenTextureKind::kShiftKeys);
-        pass(FrameGenPass::kShiftResolve, {depth, trust, keys, {}, {}}, FrameGenTextureKind::kShiftMap);
-        pass(FrameGenPass::kShiftFill, {keys, {}, {}, {}, {}}, FrameGenTextureKind::kShiftMap);
+        for (std::uint8_t map = 0; map < (two_maps ? 2 : 1); ++map) {
+            const float time = map == 0 ? (two_maps ? early : late) : late;
+            const std::array<float, 3> eye{request.shift[0] * time, request.shift[1] * time, request.shift[2] * time};
+            FrameGenConstants mapping = base;
+            mapping.fov_previous = mapping.fov_current;
+            mapping.rot0 = {1.0f, 0.0f, 0.0f, -eye[0]};
+            mapping.rot1 = {0.0f, 1.0f, 0.0f, -eye[1]};
+            mapping.rot2 = {0.0f, 0.0f, 1.0f, -eye[2]};
+            mapping.options = {0, kFrameGenFlagDepth, 0, 0};
+            auto pass = [&](FrameGenPass kind, std::array<FrameGenTexture, 6> inputs, FrameGenTexture output) {
+                FrameGenDispatch dispatch = Dispatch(kind, plan.levels[1], plan.levels[1], mapping);
+                dispatch.inputs = inputs;
+                dispatch.outputs = {output, {}};
+                plan.dispatches.push_back(dispatch);
+            };
+            const FrameGenTexture target = Texture(FrameGenTextureKind::kShiftMap, map);
+            pass(FrameGenPass::kShiftClear, {}, keys);
+            pass(FrameGenPass::kShiftSplat, {depth, trust, {}, {}, {}, {}}, keys);
+            pass(FrameGenPass::kShiftResolve, {depth, trust, keys, {}, {}, {}}, target);
+            pass(FrameGenPass::kShiftFill, {keys, {}, {}, {}, {}, {}}, target);
+        }
     }
+    // The maps' times as two halves (FG_FLAG_SHIFT).
+    const std::uint32_t map_times =
+        FrameGenHalf(two_maps ? early : late) | (static_cast<std::uint32_t>(FrameGenHalf(late)) << 16);
 
     for (std::size_t index = 0; index < generated; ++index) {
         FrameGenDispatch output = Dispatch(synthesize, plan.levels[0], plan.levels[plan.final_flow_level], base);
-        output.inputs = {Texture(FrameGenTextureKind::kHistoryNewest), Texture(FrameGenTextureKind::kHistoryPrevious),
-                         Texture(FrameGenTextureKind::kFilteredNewest, plan.final_flow_level), depth,
-                         shifted ? Texture(FrameGenTextureKind::kShiftMap) : FrameGenTexture{}};
+        output.inputs = {Texture(FrameGenTextureKind::kHistoryNewest),
+                         Texture(FrameGenTextureKind::kHistoryPrevious),
+                         Texture(FrameGenTextureKind::kFilteredNewest, plan.final_flow_level),
+                         depth,
+                         shifted ? Texture(FrameGenTextureKind::kShiftMap, 0) : FrameGenTexture{},
+                         shifted ? Texture(FrameGenTextureKind::kShiftMap, two_maps ? 1 : 0) : FrameGenTexture{}};
         if (shifted) {
             output.constants.options[1] |= kFrameGenFlagShift;
-            std::memcpy(&output.constants.options[3], &shift_time, sizeof(shift_time));
+            output.constants.options[3] = map_times;
         }
         output.outputs = {Texture(FrameGenTextureKind::kOutput), {}};
         output.constants.tuning[0] = std::clamp(tuning.fractions[index], 0.0f, 1.0f);

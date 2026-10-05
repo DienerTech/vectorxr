@@ -280,8 +280,8 @@ const XrSwapchain kSource = reinterpret_cast<XrSwapchain>(0x51);
 const XrSwapchain kOutput = reinterpret_cast<XrSwapchain>(0x52);
 const XrSwapchain kOutputSecond = reinterpret_cast<XrSwapchain>(0x54);
 const XrSwapchain kDepthImage = reinterpret_cast<XrSwapchain>(0x55);
-const XrSwapchain kOutputThird = reinterpret_cast<XrSwapchain>(0x56);
-const XrSwapchain kOutputFourth = reinterpret_cast<XrSwapchain>(0x57);
+const XrSwapchain kOutputThird = reinterpret_cast<XrSwapchain>(0x5a);
+const XrSwapchain kOutputFourth = reinterpret_cast<XrSwapchain>(0x5b);
 
 FrameGenViewSubmission Submission(std::uint32_t source_index, std::int64_t format, std::int64_t output_format, bool synthesize,
                                   float yaw_newest, float yaw_previous) {
@@ -682,8 +682,10 @@ int RunScenarios(Harness& harness) {
         const XrSwapchain right_source = reinterpret_cast<XrSwapchain>(0x56);
         const XrSwapchain right_output = reinterpret_cast<XrSwapchain>(0x57);
         const XrSwapchain right_depth = reinterpret_cast<XrSwapchain>(0x58);
+        const XrSwapchain right_second = reinterpret_cast<XrSwapchain>(0x59);
         g_swapchains[right_source] = {harness.create(kSize, kSize), harness.create(kSize, kSize)};
         g_swapchains[right_output] = {harness.create(kSize, kSize)};
+        g_swapchains[right_second] = {harness.create(kSize, kSize)};
         harness.upload(g_swapchains[kSource][0], Cockpit(-half_ipd, -outer, inner));
         harness.upload(g_swapchains[kSource][1], Cockpit(shift - half_ipd, -outer, inner));
         harness.upload(g_swapchains[right_source][0], Cockpit(half_ipd, -inner, outer));
@@ -724,15 +726,18 @@ int RunScenarios(Harness& harness) {
             Check(backend != nullptr, harness.name + " backend: " + error);
             g_swapchains[kDepthImage] = {harness.create_depth(panel_value, grow(left_panel, glass), background_value)};
             g_swapchains[right_depth] = {harness.create_depth(panel_value, grow(right_panel, glass), background_value)};
-            for (const XrSwapchain chain : {kSource, kOutput, right_source, right_output, kDepthImage, right_depth}) {
+            for (const XrSwapchain chain :
+                 {kSource, kOutput, kOutputSecond, right_source, right_output, right_second, kDepthImage, right_depth}) {
                 Check(backend->Track(chain, EnumerateImages, error), error);
             }
             auto views = [&](std::uint32_t index) {
                 FrameGenViewSubmission left = Submission(index, harness.format, output_format, true, 0, 0);
                 FrameGenViewSubmission right = left;
                 right.source.swapchain = right_source;
-                right.outputs = {{right_output, 0, 0, left.outputs[0].rect, output_format}};
-                left.outputs.resize(1);
+                right.outputs = {{right_output, 0, 0, left.outputs[0].rect, output_format},
+                                 {right_second, 0, 0, left.outputs[0].rect, output_format}};
+                left.outputs.resize(tuning.generated);
+                right.outputs.resize(tuning.generated);
                 for (auto* geometry : {&left.request.newest, &left.request.previous}) {
                     geometry->angle_left = std::atan(-outer);
                     geometry->angle_right = std::atan(inner);
@@ -858,6 +863,21 @@ int RunScenarios(Harness& harness) {
               harness.name + " generated frames did not follow the eye");
         Check(moving_glass.used && moving_glass_error < 0.4 * unshifted_error,
               harness.name + " glass moved with the eye");
+
+        // 3g'. Two generated frames, half and a whole interval on: the first
+        // still sees the panel from 2 cm further. Scaling one map built for
+        // the later frame cut the panel's edge where the scenery comes into
+        // view (which surface is in front changes with time).
+        tuning.generated = 2;
+        tuning.fractions = {0.5f, 1.0f, 0.5f, 0.5f};
+        const Outcome two = run_case(panel, 1.0f, standard, true, 0, eye);
+        tuning.generated = 1;
+        tuning.fractions = {0.5f, 0.5f, 0.5f, 0.5f};
+        const double two_error = moved_error_of(two.output);
+        std::cout << harness.name << " eye shift, two frames: first " << two_error << " vs " << moving_error << " alone"
+                  << std::endl;
+        Check(two.used && two_error < 1.2 * moving_error + 0.0005,
+              harness.name + " a generated frame before the last one did not see the panel from its own eye position");
     }
 
     // 4. Head rotation only: compensation must leave a static panorama where

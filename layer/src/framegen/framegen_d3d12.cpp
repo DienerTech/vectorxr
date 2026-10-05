@@ -31,7 +31,7 @@ constexpr UINT kCaptureSlots = 8;
 // A dispatch's descriptors: sampled textures t0-t4, then storage textures
 // u0-u1. Depth captures run outside a frame's descriptor range: one
 // dispatch per capture slot, after every frame's range.
-constexpr UINT kShaderResources = 5;
+constexpr UINT kShaderResources = 6;
 constexpr UINT kFirstUav = kShaderResources;
 constexpr UINT kDescriptorsPerDispatch = kShaderResources + 2;
 
@@ -89,7 +89,7 @@ struct ViewResources {
     // at half resolution; created once depth is first used.
     std::array<Texture, 2> trust;
     Texture shift_keys;
-    Texture shift_map;
+    std::array<Texture, 2> shift_map; // earliest and latest generated frames
     bool trust_stereo{false}; // this frame's stereo evidence is in trust[newest]
     bool depth_ready{false};  // captured since the last Execute
     bool depth_fresh{false};  // captured for this Execute's frame (for the check)
@@ -726,7 +726,7 @@ class D3D12FrameGen final : public FrameGenGpu {
     // A view's depth trust and eye-shift textures, created the first time
     // its depth is used.
     bool EnsureTrust(ViewResources& view, FrameGenExtent extent, std::string& error) {
-        if (view.shift_map.resource) {
+        if (view.shift_map[1].resource) {
             return true;
         }
         const FrameGenExtent half = FrameGenPyramid(extent)[1];
@@ -734,15 +734,16 @@ class D3D12FrameGen final : public FrameGenGpu {
             if (!Create(trust, half, DXGI_FORMAT_R32_FLOAT, DXGI_FORMAT_R32_FLOAT, true, error)) return false;
         }
         return Create(view.shift_keys, half, DXGI_FORMAT_R32_UINT, DXGI_FORMAT_R32_UINT, true, error) &&
-               Create(view.shift_map, half, DXGI_FORMAT_R32_UINT, DXGI_FORMAT_R32_UINT, true, error);
+               Create(view.shift_map[0], half, DXGI_FORMAT_R32_UINT, DXGI_FORMAT_R32_UINT, true, error) &&
+               Create(view.shift_map[1], half, DXGI_FORMAT_R32_UINT, DXGI_FORMAT_R32_UINT, true, error);
     }
 
     // A 2D shader resource view of `texture` (a null one without) for
     // register t`slot` of the dispatch whose descriptors start at `base`.
-    // The fifth is read as unsigned integers.
+    // The fifth and sixth are read as unsigned integers.
     void ShaderResource(Texture* texture, UINT base, UINT slot) {
         D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
-        srv.Format = texture ? texture->view_format : slot == 4 ? DXGI_FORMAT_R32_UINT : DXGI_FORMAT_R8G8B8A8_UNORM;
+        srv.Format = texture ? texture->view_format : slot >= 4 ? DXGI_FORMAT_R32_UINT : DXGI_FORMAT_R8G8B8A8_UNORM;
         srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
         srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
         srv.Texture2D.MipLevels = 1;
@@ -1323,7 +1324,7 @@ class D3D12FrameGen final : public FrameGenGpu {
                 view.depth.resource.Detach();
                 for (auto& texture : view.trust) texture.resource.Detach();
                 view.shift_keys.resource.Detach();
-                view.shift_map.resource.Detach();
+                for (auto& texture : view.shift_map) texture.resource.Detach();
             }
         }
         StopHardwareWatchdog();
@@ -1961,7 +1962,7 @@ class D3D12FrameGen final : public FrameGenGpu {
         case FrameGenTextureKind::kTrustNewest: return &view.trust[newest];
         case FrameGenTextureKind::kTrustPrevious: return &view.trust[previous];
         case FrameGenTextureKind::kShiftKeys: return &view.shift_keys;
-        case FrameGenTextureKind::kShiftMap: return &view.shift_map;
+        case FrameGenTextureKind::kShiftMap: return &view.shift_map[std::min<std::size_t>(texture.level, 1)];
         default: return nullptr;
         }
     }

@@ -517,8 +517,10 @@ FG_BIND(2) Texture2D<float4> g_flow : register(t2);
 FG_BIND(3) Texture2D<float4> g_depth : register(t3);
 FG_BIND(6) SamplerState g_linear : register(s0);
 #if !defined(__spirv__)
-// The eye-shift map (FG_PASS_SHIFT_*), Direct3D 12 only, as depth is.
+// The eye-shift maps (FG_PASS_SHIFT_*) for the earliest and latest generated
+// frames, Direct3D 12 only, as depth is.
 Texture2D<uint> g_shift : register(t4);
+Texture2D<uint> g_shift_late : register(t5);
 #endif
 #if defined(FG_PASS_SYNTHESIZE_UNORM8)
 FG_BIND(4) FG_FORMAT("rgba8") RWTexture2D<float4> g_output : register(u0);
@@ -563,20 +565,25 @@ float CandidateError(float2 uv, float2 v, float step) {
 }
 
 // Where a generated pixel's content sits in the newest view: the pixel
-// itself, or with FG_FLAG_SHIFT where the eye-shift map says it comes from.
-// The map is for the eye's position at the frame time options.w (as float
-// bits, in units of `fraction` past the newest frame, or before it when
-// interpolating); other frames scale it by their own time.
+// itself, or with FG_FLAG_SHIFT where the eye-shift map nearer its time
+// says it comes from. options.w holds the maps' frame times as two halves
+// (earliest low, latest high; equal with one map), in units of `fraction`
+// past the newest frame, or before it when interpolating; a frame scales
+// its map by its own time.
 float2 SourceUv(uint2 pixel, float fraction) {
     float2 uv = (float2(pixel) + 0.5) / float2(g.size.xy);
 #if !defined(__spirv__)
     if ((g.options.y & FG_FLAG_SHIFT) != 0u) {
+        const float early = f16tof32(g.options.w & 0xffffu);
+        const float late = f16tof32(g.options.w >> 16);
+        const float time = (g.options.y & FG_FLAG_EXTRAPOLATE) != 0u ? fraction : 1.0 - fraction;
+        const bool later = late > early && time > 0.5 * (early + late);
         uint width, height;
         g_shift.GetDimensions(width, height);
-        const uint packed = g_shift.Load(int3(min(int2(pixel >> 1), int2(width, height) - 1), 0));
+        const int3 texel = int3(min(int2(pixel >> 1), int2(width, height) - 1), 0);
+        const uint packed = later ? g_shift_late.Load(texel) : g_shift.Load(texel);
         const float2 back = float2(f16tof32(packed & 0xffffu), f16tof32(packed >> 16));
-        const float time = (g.options.y & FG_FLAG_EXTRAPOLATE) != 0u ? fraction : 1.0 - fraction;
-        uv += time / max(asfloat(g.options.w), 1e-6) * back / float2(width, height);
+        uv += time / max(later ? late : early, 1e-6) * back / float2(width, height);
     }
 #endif
     return uv;

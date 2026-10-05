@@ -1504,6 +1504,7 @@ bool FrameGenPresenter::Generate(const XrCompositionLayerProjection& projection,
             return false;
         }
         tuning.mode = mode;
+        tuning.spare = frame.spare;
         tuning.quality = settings_.flow_quality;
         tuning.hardware_flow = settings_.motion_estimation == FrameGenMotionEstimation::kHardware;
         tuning.diagnostic = settings_.diagnostic_view;
@@ -2763,6 +2764,7 @@ XrResult FrameGenPresenter::ThreadedEnd(XrSession session, const XrFrameEndInfo&
         pending.sequence = frame.id;
         pending.real_due = real_due;
         pending.generated_due = generated_due;
+        pending.spare = fractions.size() == frame.multiplier;
         std::vector<std::vector<XrCompositionLayerProjectionView>> sets;
         const bool ok = Generate(*projection, pending, FrameGenSynthesisMode::kExtrapolate, fractions, sets);
         RecordReal(*projection, content_time, frame.id);

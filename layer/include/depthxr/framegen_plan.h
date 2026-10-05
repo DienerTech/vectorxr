@@ -125,9 +125,9 @@ inline constexpr float kFrameGenMinimumShift = 5e-5f;
 
 struct FrameGenDispatch {
     FrameGenPass pass{FrameGenPass::kLuma};
-    // Sampled textures t0-t4; only Direct3D 12 binds the fifth (the eye-shift
-    // map, used with depth).
-    std::array<FrameGenTexture, 5> inputs{};
+    // Sampled textures t0-t5; only Direct3D 12 binds the fifth and sixth
+    // (the eye-shift maps, used with depth).
+    std::array<FrameGenTexture, 6> inputs{};
     std::array<FrameGenTexture, 2> outputs{};
     std::uint32_t width{0};  // threads, not groups
     std::uint32_t height{0};
@@ -211,6 +211,9 @@ struct FrameGenTuning {
     // matching (kFlowPack, the hardware, kFlowUnpack), at
     // kFrameGenHardwareFlowLevel whatever the quality.
     bool hardware_flow{false};
+    // The last generated frame is a spare, shown only when the next real
+    // frame is late: the eye-shift maps are built for the others.
+    bool spare{false};
 };
 
 struct FrameGenViewPlan {
