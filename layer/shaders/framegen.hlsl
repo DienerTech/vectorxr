@@ -883,7 +883,8 @@ float4 Score(float2 uv, float depth, float2 far_uv, float none, float2 spacing, 
 // (FG_PASS_DEPTH_TRUST): depth wrong in places (cockpit glass written to
 // depth) does not hide that it is right elsewhere.
 // Writes three texels per cell: a Score sum per reading, then (samples both
-// eyes see, 0, 0, 0).
+// eyes see, how many of them are nearer than FG_CHECK_NEAR meters, 0, 0).
+#define FG_CHECK_NEAR 10.0
 [numthreads(8, 8, 1)]
 void CSMain(uint3 id : SV_DispatchThreadID) {
     if (any(id.xy >= g.size.xy)) {
@@ -897,6 +898,7 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
     float4 decoded = float4(0.0, 0.0, 0.0, 0.0);
     float4 swapped = float4(0.0, 0.0, 0.0, 0.0);
     float binocular = 0.0;
+    float cockpit = 0.0;
     [loop]
     for (int sy = 0; sy < samples; ++sy) {
         [loop]
@@ -911,6 +913,7 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
             // Negative where synthesis already disproved it: the check reads
             // the depth itself.
             const float depth = max(abs(g_depth.Load(int3(texel, 0)).r), 1e-6);
+            cockpit += depth < FG_CHECK_NEAR ? 1.0 : 0.0;
             const float swapped_inverse = g.tuning.x - 1.0 / depth;
             float reference[FG_CHECK_TAPS];
             LoadPatch(g_view0, g_linear, uv, spacing, reference);
@@ -923,7 +926,7 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
     const int2 base = int2(id.x * 3, id.y);
     g_scores[base] = decoded;
     g_scores[base + int2(1, 0)] = swapped;
-    g_scores[base + int2(2, 0)] = float4(binocular, 0.0, 0.0, 0.0);
+    g_scores[base + int2(2, 0)] = float4(binocular, cockpit, 0.0, 0.0);
 }
 #endif
 

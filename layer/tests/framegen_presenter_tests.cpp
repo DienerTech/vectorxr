@@ -1130,6 +1130,8 @@ void TestDepthCapture() {
           "depth: generation asks for the captured depth");
     Check(gpu.last[0].request.shift == std::array<float, 3>{0.0f, 0.0f, 0.0f},
           "depth: still eyes do not shift generated frames");
+    // The fake backend never decides how to read the depth.
+    Check(presenter.Status().depth == FrameGenDepthState::kChecking, "depth: reported as being checked");
 
     // The eyes keep moving: generated frames are asked to follow them, and
     // are submitted from where the eye will be.
@@ -1167,6 +1169,19 @@ void TestDepthCapture() {
     for (int i = 0; i < 8; ++i) plain_app.Frame();
     Check(plain_gpu.depth_captures == 0 && plain_gpu.executes > 0 && !plain_gpu.last[0].request.depth,
           "depth: a depth image without the sampling usage is left alone");
+    Check(plain.Status().depth == FrameGenDepthState::kNotReadable, "depth: unreadable depth is reported");
+
+    // A game that sends no depth.
+    FrameGenPresenter none;
+    GpuLog none_gpu;
+    none_gpu.depth = true;
+    Runtime none_runtime;
+    StartPresenter(none, none_gpu, FrameGenSynthesisMode::kExtrapolate);
+    App none_app(none, none_runtime);
+    for (auto& view : none_app.views) view.next = nullptr;
+    Check(none.Status().depth == FrameGenDepthState::kUnknown, "depth: nothing reported before generated frames");
+    for (int i = 0; i < 8; ++i) none_app.Frame();
+    Check(none.Status().depth == FrameGenDepthState::kNotSent, "depth: a game without depth is reported");
 }
 
 void TestOverlappingWaitIsHeld() {

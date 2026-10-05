@@ -408,8 +408,9 @@ export interface RuntimeStatusSession {
   capabilities: { quadviewsDiagnosticVisualization: boolean; osd?: boolean }
   // turboState may be 'framegen' when Turbo yields to Frame Generation.
   // framegenState: 'off' | 'waiting' | 'active' | 'paused' | 'unavailable';
-  // both Frame Generation fields are absent with older layers.
-  state: { osdVisible?: boolean; osdCompact?: boolean; osdMessage?: string; quadviewsDiagnosticVisualization: boolean; turboState?: string; turboReason?: string; framegenState?: string; framegenReason?: string }
+  // framegenDepth: 'in-use' | 'checking' | 'not-sent' | 'not-readable' | 'empty' | 'unusable', or empty
+  // before generated frames; Frame Generation fields are absent with older layers.
+  state: { osdVisible?: boolean; osdCompact?: boolean; osdMessage?: string; quadviewsDiagnosticVisualization: boolean; turboState?: string; turboReason?: string; framegenState?: string; framegenReason?: string; framegenDepth?: string }
 }
 
 export interface RuntimeStatusEnvelope {

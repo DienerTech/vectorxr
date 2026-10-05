@@ -13097,6 +13097,7 @@ void OpenXrLayer::PollRuntimeRelay() {
         const FrameGenStatus framegen = framegen_.Status();
         status.framegen_state = ToString(framegen.state);
         status.framegen_reason = framegen.reason;
+        status.framegen_depth = framegen.depth == FrameGenDepthState::kUnknown ? "" : ToString(framegen.depth);
         if (framegen.state == FrameGenState::kActive && status.framegen_reason.empty())
             status.framegen_reason = framegen.full_rate ? "Auto, full rate: no generation needed."
                 : std::string(framegen.automatic ? "Auto " : "") + std::to_string(framegen.multiplier) + "x, " +

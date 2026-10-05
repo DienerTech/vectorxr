@@ -79,6 +79,19 @@ function sessionStatus(session: RuntimeStatusSession): { label: string; chip: st
   }
 }
 
+// What the game's depth does for generated frames (Direct3D 12 reads it).
+function depthStatus(session: RuntimeStatusSession): { label: string; chip: string } | null {
+  switch (session.state.framegenDepth) {
+    case 'in-use': return { label: 'Depth in use: cockpit detail is compensated exactly', chip: 'chip-success' }
+    case 'checking': return { label: "Checking the game's depth against the other eye", chip: 'chip-idle' }
+    case 'not-sent': return { label: 'No depth from this game: near cockpit detail may jitter, Interpolate fits best', chip: 'chip-idle' }
+    case 'not-readable': return { label: 'Depth is only read in Direct3D 12 games for now', chip: 'chip-idle' }
+    case 'empty': return { label: "The game's depth is empty: turn on its depth reprojection (MSFS: Motion reprojection = Depth)", chip: 'chip-warning' }
+    case 'unusable': return { label: "The game's depth does not match the other eye, so it is not used", chip: 'chip-warning' }
+    default: return null
+  }
+}
+
 function pageScroller(): Element | null {
   return document.querySelector('main section.overflow-y-auto')
 }
@@ -199,9 +212,14 @@ function settingsSummary(settings: FrameGenSettings) {
           <span v-if="statusError" class="text-xs text-muted">{{ statusError }}</span>
           <span v-else-if="!sessions.length" class="chip-idle rounded-full px-2.5 py-1 text-xs">No VR application running</span>
           <template v-else>
-            <span v-for="session in sessions" :key="session.sessionId" class="rounded-full px-2.5 py-1 text-xs" :class="sessionStatus(session).chip">
-              <strong class="font-semibold">{{ session.application }}</strong> · {{ sessionStatus(session).label }}
-            </span>
+            <template v-for="session in sessions" :key="session.sessionId">
+              <span class="rounded-full px-2.5 py-1 text-xs" :class="sessionStatus(session).chip">
+                <strong class="font-semibold">{{ session.application }}</strong> · {{ sessionStatus(session).label }}
+              </span>
+              <span v-if="depthStatus(session)" class="rounded-full px-2.5 py-1 text-xs" :class="depthStatus(session)!.chip">
+                {{ depthStatus(session)!.label }}
+              </span>
+            </template>
           </template>
         </div>
         <div class="grid gap-3 lg:grid-cols-2">

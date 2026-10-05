@@ -128,6 +128,30 @@ void SleepUntil(void* timer, Clock::time_point deadline) {
 
 } // namespace
 
+const char* ToString(FrameGenDepthState state) {
+    switch (state) {
+    case FrameGenDepthState::kNotSent: return "not-sent";
+    case FrameGenDepthState::kNotReadable: return "not-readable";
+    case FrameGenDepthState::kChecking: return "checking";
+    case FrameGenDepthState::kInUse: return "in-use";
+    case FrameGenDepthState::kEmpty: return "empty";
+    case FrameGenDepthState::kUnusable: return "unusable";
+    default: return "unknown";
+    }
+}
+
+const char* Describe(FrameGenDepthState state) {
+    switch (state) {
+    case FrameGenDepthState::kNotSent: return "No depth from this game";
+    case FrameGenDepthState::kNotReadable: return "Depth not read on this graphics API yet";
+    case FrameGenDepthState::kChecking: return "Checking the game's depth";
+    case FrameGenDepthState::kInUse: return "Depth in use";
+    case FrameGenDepthState::kEmpty: return "Depth empty: turn on the game's depth reprojection";
+    case FrameGenDepthState::kUnusable: return "Depth does not match the other eye";
+    default: return "";
+    }
+}
+
 const char* ToString(FrameGenState state) {
     switch (state) {
     case FrameGenState::kWaiting:
@@ -1501,10 +1525,16 @@ bool FrameGenPresenter::Generate(const XrCompositionLayerProjection& projection,
             submission.request.previous = submission.request.synthesize ? last_real_.views[i].geometry : Geometry(view);
             submission.request.temporal = true;
             submission.request.shift = shifts[i];
+            if (i == 0) {
+                depth_seen_ = true;
+                depth_sent_ = depth_readable_ = false;
+            }
             if (const auto* depth = DepthInfo(view)) {
                 const auto depth_record = swapchains_.find(depth->subImage.swapchain);
                 submission.request.depth =
                     depth_record != swapchains_.end() && depth_record->second.depth_capturable;
+                depth_sent_ = true;
+                depth_readable_ = depth_readable_ || (submission.request.depth && gpu_->SupportsDepth());
             }
         }
         if (!error.empty()) {
@@ -1583,6 +1613,7 @@ bool FrameGenPresenter::Generate(const XrCompositionLayerProjection& projection,
         return false;
     }
     gpu_ms_ = gpu_ms;
+    depth_status_ = depth;
     consecutive_failures_ = 0;
     if (logger_ && !hardware_status.empty() && hardware_status != logged_hardware_status_) {
         logged_hardware_status_ = hardware_status;
@@ -2863,6 +2894,17 @@ FrameGenStatus FrameGenPresenter::Status() const {
     status.automatic = settings_.multiplier == FrameGenMultiplier::kAuto;
     status.full_rate = full_rate_ && state_ == FrameGenState::kActive;
     status.threaded = compositor_running_;
+    if (depth_seen_) {
+        const FrameGenDepthEvidence& evidence = depth_status_.evidence;
+        status.depth = !depth_sent_ ? FrameGenDepthState::kNotSent
+                       : !depth_readable_ ? FrameGenDepthState::kNotReadable
+                       : depth_status_.reading == FrameGenDepthReading::kUnknown ? FrameGenDepthState::kChecking
+                       : depth_status_.reading == FrameGenDepthReading::kUnusable
+                           ? (evidence.binocular > 0.0 && evidence.cockpit < 0.005 * evidence.binocular
+                                  ? FrameGenDepthState::kEmpty
+                                  : FrameGenDepthState::kUnusable)
+                           : FrameGenDepthState::kInUse;
+    }
     return status;
 }
 
@@ -2877,6 +2919,7 @@ std::string FrameGenPresenter::OsdText() const {
                            "  /  " + (status.automatic ? "Auto " : "") + MultiplierText(status.multiplier) + "  /  " +
                            Number(status.app_fps, 0) + " -> " + Number(status.output_fps, 0) + " fps";
         if (status.gpu_ms > 0.0) text += "  /  " + Number(status.gpu_ms, 1) + " ms";
+        if (status.depth != FrameGenDepthState::kUnknown) text += std::string("  /  ") + Describe(status.depth);
         return text;
     }
     case FrameGenState::kWaiting:

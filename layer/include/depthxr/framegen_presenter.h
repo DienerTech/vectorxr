@@ -56,6 +56,21 @@ enum class FrameGenState {
 
 const char* ToString(FrameGenState state);
 
+// Whether generated frames use the game's depth, and if not, why.
+enum class FrameGenDepthState {
+    kUnknown,     // no frames generated yet
+    kNotSent,     // the game sends no depth with its views
+    kNotReadable, // sent, but this graphics API's depth is not read yet (Direct3D 12 only)
+    kChecking,    // being checked against the other eye
+    kInUse,
+    kEmpty,       // sent but holds nothing near (games that only fill it with their own reprojection on)
+    kUnusable,    // does not line the eyes up
+};
+
+const char* ToString(FrameGenDepthState state); // "unknown", "not-sent", ... (relay names)
+// One line for people: "Depth in use", "No depth from this game", ...
+const char* Describe(FrameGenDepthState state);
+
 struct FrameGenStatus {
     FrameGenState state{FrameGenState::kOff};
     std::string reason;
@@ -73,6 +88,7 @@ struct FrameGenStatus {
     bool automatic{false};       // the multiplier is chosen automatically
     bool full_rate{false};       // automatic and the app holds full refresh
     bool threaded{false};        // presenting from the presenter thread
+    FrameGenDepthState depth{FrameGenDepthState::kUnknown};
 };
 
 // Frame Generation pacing for one OpenXR session.
@@ -553,6 +569,11 @@ class FrameGenPresenter {
     // since the last summary.
     std::uint64_t depth_window_frames_{0};
     std::uint64_t depth_window_used_{0};
+    // What the last generated frames knew about the game's depth (Status).
+    bool depth_seen_{false};     // views were generated at all
+    bool depth_sent_{false};     // they carried depth
+    bool depth_readable_{false}; // and the backend could read it
+    FrameGenDepthStatus depth_status_;
     // How far generated frames moved with the eye (the last one per real
     // frame, millimeters) since the last summary.
     double shift_window_sum_mm_{0.0};

@@ -605,6 +605,12 @@ view the depth affects and how much of it the other eye disproved. Each 30-secon
 **depthUsed**, the share of real frames generated with depth, and **eyeShiftMm**, how far
 generated frames moved with your eyes (average/largest, millimeters).
 
+The OSD's Frame Generation line and the Frame Generation page's session status say what the
+depth is doing: **Depth in use**, **Checking the game's depth**, **No depth from this game**
+(near cockpit detail may jitter in Extrapolate; Interpolate depends on depth less), **Depth not
+read on this graphics API yet** (Direct3D 11 and Vulkan), **Depth empty** (the game sends depth
+but fills it only with its own depth reprojection on), or **does not match the other eye**.
+
 #### Still detail
 
 In Extrapolate, motion is only pushed forward where it continues the motion of the previous

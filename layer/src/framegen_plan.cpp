@@ -395,6 +395,7 @@ FrameGenDepthEvidence& FrameGenDepthEvidence::operator+=(const FrameGenDepthEvid
     add(decoded, other.decoded);
     add(swapped, other.swapped);
     binocular += other.binocular;
+    cockpit += other.cockpit;
     return *this;
 }
 

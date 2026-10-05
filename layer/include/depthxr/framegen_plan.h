@@ -330,6 +330,7 @@ struct FrameGenDepthEvidence {
     FrameGenDepthScore decoded; // as currently decoded
     FrameGenDepthScore swapped; // near and far swapped
     double binocular{0.0};      // samples both eyes see
+    double cockpit{0.0};        // ... whose depth is nearer than 10 m (none: empty depth)
     FrameGenDepthEvidence& operator+=(const FrameGenDepthEvidence& other);
 };
 

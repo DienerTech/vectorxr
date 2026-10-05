@@ -1146,6 +1146,10 @@ struct RuntimeState {
     framegen_state: String,
     #[serde(default)]
     framegen_reason: String,
+    // "in-use" | "checking" | "not-sent" | "not-readable" | "empty" |
+    // "unusable"; empty before generated frames and from older layers.
+    #[serde(default)]
+    framegen_depth: String,
     #[serde(default)]
     quadviews_diagnostic_visualization: bool,
 }
@@ -3080,6 +3084,7 @@ mod tests {
         value["state"]["turboReason"] = "Previous interruption".into();
         value["state"]["framegenState"] = "unavailable".into();
         value["state"]["framegenReason"] = "Runtime refresh rate unknown".into();
+        value["state"]["framegenDepth"] = "empty".into();
         value["quadviewsDimensions"] = serde_json::json!([{"width": 1000, "height": 900, "allocatedWidth": 1200, "allocatedHeight": 1000}]);
         let current: super::RuntimeStatusDocument = serde_json::from_value(value).unwrap();
         assert_eq!(current.state.turbo_state, "recovery-disabled");
@@ -3088,6 +3093,8 @@ mod tests {
         assert_eq!(current.state.framegen_state, "unavailable");
         assert_eq!(current.state.framegen_reason, "Runtime refresh rate unknown");
         assert!(old.state.framegen_state.is_empty() && old.state.framegen_reason.is_empty());
+        assert_eq!(current.state.framegen_depth, "empty");
+        assert!(old.state.framegen_depth.is_empty());
         assert_eq!(current.quadviews_dimensions[0].allocated_width, 1200);
     }
 

@@ -829,6 +829,7 @@ class D3D12FrameGen final : public FrameGenGpu {
                     scores[reading]->fallback += texel[3];
                 } else {
                     evidence.binocular += texel[0];
+                    evidence.cockpit += texel[1];
                 }
             }
         }

@@ -163,7 +163,8 @@ bool WriteRuntimeStatus(const std::filesystem::path& path, const RuntimeStatusDo
            << ", \"turboState\": \"" << EscapeJson(document.turbo_state)
            << "\", \"turboReason\": \"" << EscapeJson(document.turbo_reason)
            << "\", \"framegenState\": \"" << EscapeJson(document.framegen_state)
-           << "\", \"framegenReason\": \"" << EscapeJson(document.framegen_reason) << "\" },\n"
+           << "\", \"framegenReason\": \"" << EscapeJson(document.framegen_reason)
+           << "\", \"framegenDepth\": \"" << EscapeJson(document.framegen_depth) << "\" },\n"
            << "  \"quadviewsDimensionsAt\": " << document.quadviews_dimensions_at << ",\n"
            << "  \"quadviewsDimensions\": [";
     for (std::size_t i = 0; i < document.quadviews_dimensions.size(); ++i) {
