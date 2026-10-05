@@ -15,7 +15,9 @@
 #include <array>
 #include <atomic>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
+#include <fstream>
 #include <thread>
 #include <unordered_map>
 
@@ -1036,10 +1038,17 @@ class D3D12FrameGen final : public FrameGenGpu {
         for (std::size_t i = 0; i < views.size() && ok; ++i) {
             bool synthesized = false;
             bool depth = false;
-            ok = BeginView(views[i], effective_tuning, views_[i], recordings[i], synthesized, depth, error) &&
-                 RecordPlan(recordings[i], effective_tuning.hardware_flow, error);
+            ok = BeginView(views[i], effective_tuning, views_[i], recordings[i], synthesized, depth, error);
             result.synthesized[i] = synthesized;
             result.depth[i] = depth;
+        }
+        // Research dumps read the inputs before the plans change the depth.
+        std::vector<DumpCopy> dump;
+        if (ok && !dump_directory_.empty()) {
+            ok = RecordDump(views, dump, error);
+        }
+        for (std::size_t i = 0; i < views.size() && ok; ++i) {
+            ok = RecordPlan(recordings[i], effective_tuning.hardware_flow, error);
             hardware = hardware || recordings[i].waits_for_hardware;
         }
         if (ok && hardware) {
@@ -1101,10 +1110,19 @@ class D3D12FrameGen final : public FrameGenGpu {
         if (profiling_) {
             ReadProfile();
         }
+        if (!dump.empty()) {
+            WriteDump(views, effective_tuning, result, dump);
+        }
+        dump_directory_.clear();
         for (std::size_t i = 0; i < views.size(); ++i) {
             views_[i].history_state.Commit(result.synthesized[i], result.depth[i]);
             views_[i].capture.valid = false;
         }
+        return true;
+    }
+
+    bool DumpNextExecute(const std::string& directory) override {
+        dump_directory_ = directory;
         return true;
     }
 
@@ -1149,6 +1167,107 @@ class D3D12FrameGen final : public FrameGenGpu {
     double LastGpuMilliseconds() const override { return last_gpu_ms_; }
 
   private:
+    // A texture copied into a readback buffer for a research dump.
+    struct DumpCopy {
+        std::string name;
+        ComPtr<ID3D12Resource> buffer;
+        D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
+        UINT rows{0};
+        UINT64 row_bytes{0};
+        DXGI_FORMAT format{DXGI_FORMAT_UNKNOWN};
+    };
+
+    // Copies every view's newest image and depth into readback buffers.
+    bool RecordDump(const std::vector<FrameGenViewSubmission>& views, std::vector<DumpCopy>& dump, std::string& error) {
+        std::vector<D3D12_RESOURCE_BARRIER> barriers;
+        auto copy = [&](Texture& texture, const std::string& name) {
+            if (!texture.resource) {
+                return true;
+            }
+            DumpCopy entry;
+            entry.name = name;
+            const D3D12_RESOURCE_DESC desc = texture.resource->GetDesc();
+            entry.format = texture.view_format;
+            UINT64 bytes = 0;
+            device_->GetCopyableFootprints(&desc, 0, 1, 0, &entry.footprint, &entry.rows, &entry.row_bytes, &bytes);
+            D3D12_HEAP_PROPERTIES heap{D3D12_HEAP_TYPE_READBACK};
+            D3D12_RESOURCE_DESC buffer{};
+            buffer.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+            buffer.Width = bytes;
+            buffer.Height = buffer.DepthOrArraySize = buffer.MipLevels = 1;
+            buffer.SampleDesc.Count = 1;
+            buffer.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+            const HRESULT hr = device_->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &buffer,
+                                                                D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                                                IID_PPV_ARGS(&entry.buffer));
+            if (FAILED(hr)) {
+                error = Failure("D3D12 Frame Generation dump buffer", hr);
+                return false;
+            }
+            Require(barriers, texture, D3D12_RESOURCE_STATE_COPY_SOURCE);
+            Flush(barriers);
+            D3D12_TEXTURE_COPY_LOCATION destination{entry.buffer.Get(), D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT};
+            destination.PlacedFootprint = entry.footprint;
+            D3D12_TEXTURE_COPY_LOCATION source{texture.resource.Get(), D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX};
+            commands_->CopyTextureRegion(&destination, 0, 0, 0, &source, nullptr);
+            dump.push_back(std::move(entry));
+            return true;
+        };
+        for (std::size_t i = 0; i < views.size() && i < views_.size(); ++i) {
+            ViewResources& view = views_[i];
+            if (!copy(view.history[view.history_state.Newest()], "view" + std::to_string(i) + "-color.raw") ||
+                !copy(view.depth, "view" + std::to_string(i) + "-depth.f32")) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    // After the dumped Execute: waits for it and writes the files.
+    void WriteDump(const std::vector<FrameGenViewSubmission>& views, const FrameGenTuning& tuning,
+                   const FrameGenExecuteResult& result, std::vector<DumpCopy>& dump) {
+        if (!WaitIdle()) {
+            return;
+        }
+        for (DumpCopy& entry : dump) {
+            void* mapped = nullptr;
+            if (FAILED(entry.buffer->Map(0, nullptr, &mapped))) {
+                continue;
+            }
+            std::ofstream file(dump_directory_ + "\\" + entry.name, std::ios::binary);
+            for (UINT row = 0; row < entry.rows && file; ++row) {
+                file.write(static_cast<const char*>(mapped) + entry.footprint.Offset + row * entry.footprint.Footprint.RowPitch,
+                           static_cast<std::streamsize>(entry.row_bytes));
+            }
+            entry.buffer->Unmap(0, nullptr);
+        }
+        std::ofstream meta(dump_directory_ + "\\frame.txt");
+        meta.precision(9);
+        meta << "mode " << static_cast<int>(tuning.mode) << "\nquality " << static_cast<int>(tuning.quality)
+             << "\nhardware " << tuning.hardware_flow << "\nsuppression " << tuning.artifact_suppression
+             << "\nlimit " << tuning.motion_limit_percent << "\ninterval_ratio " << tuning.interval_ratio
+             << "\ngenerated " << static_cast<int>(tuning.generated) << "\nfractions";
+        for (const float fraction : tuning.fractions) meta << ' ' << fraction;
+        meta << "\ndepth_reading " << static_cast<int>(validator_.Reading()) << "\nviews " << views.size() << '\n';
+        auto geometry = [&](const char* name, const FrameGenViewGeometry& g) {
+            meta << name << ' ' << g.orientation[0] << ' ' << g.orientation[1] << ' ' << g.orientation[2] << ' '
+                 << g.orientation[3] << ' ' << g.position[0] << ' ' << g.position[1] << ' ' << g.position[2] << ' '
+                 << g.angle_left << ' ' << g.angle_right << ' ' << g.angle_up << ' ' << g.angle_down << '\n';
+        };
+        for (std::size_t i = 0; i < views.size(); ++i) {
+            const FrameGenViewRequest& request = views[i].request;
+            const FrameGenExtent half = FrameGenPyramid(request.extent)[1];
+            meta << "view " << i << " extent " << request.extent.width << ' ' << request.extent.height << " half "
+                 << half.width << ' ' << half.height << " format "
+                 << (i < views_.size() ? static_cast<int>(views_[i].history[views_[i].history_state.Newest()].view_format) : 0)
+                 << " output " << static_cast<int>(request.output) << " synthesize " << request.synthesize
+                 << " depth " << request.depth << " used " << (i < result.depth.size() && result.depth[i])
+                 << " shift " << request.shift[0] << ' ' << request.shift[1] << ' ' << request.shift[2] << '\n';
+            geometry("newest", request.newest);
+            geometry("previous", request.previous);
+        }
+    }
+
     // Every wait shares one auto-reset event, so an earlier wait that timed
     // out can wake a later one early: wake, then re-check the fence itself.
     bool WaitFence(UINT64 value, DWORD timeout_ms) {
@@ -1839,6 +1958,7 @@ class D3D12FrameGen final : public FrameGenGpu {
     ComPtr<ID3D12Resource> readback_;
     UINT64 timestamp_frequency_{0};
     double last_gpu_ms_{-1.0};
+    std::string dump_directory_; // DumpNextExecute
     std::unordered_map<XrSwapchain, std::vector<ID3D12Resource*>> images_;
     std::vector<ViewResources> views_;
 };

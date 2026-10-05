@@ -548,6 +548,16 @@ class FrameGenPresenter {
     double shift_window_sum_mm_{0.0};
     double shift_window_max_mm_{0.0};
     std::uint64_t shift_window_frames_{0};
+    // Research capture: a file %LOCALAPPDATA%\VectorXR\framegen-capture.request
+    // (checked once a second) writes the next kCaptureFrames real frames'
+    // inputs under %LOCALAPPDATA%\VectorXR\captures (FrameGenGpu::DumpNextExecute).
+    // Under gpu_mutex_.
+    static constexpr std::uint32_t kCaptureFrames = 5;
+    std::string NextCaptureDirectory();
+    std::chrono::steady_clock::time_point last_capture_check_{};
+    std::uint32_t capture_frames_left_{0};
+    std::uint32_t capture_index_{0};
+    std::string capture_root_;
     std::mutex submit_mutex_;            // presenter-thread submissions vs output swapchain calls
     std::mutex gpu_mutex_;               // the GPU backend (Track, Capture, Execute, WaitIdle, Forget, Reset)
     double gpu_ms_{-1.0};                // last generation GPU time, read without the backend

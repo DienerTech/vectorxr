@@ -7,6 +7,8 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <ctime>
+#include <filesystem>
 
 namespace depthxr {
 namespace {
@@ -1553,6 +1555,11 @@ bool FrameGenPresenter::Generate(const XrCompositionLayerProjection& projection,
                 ok = gpu_->Track(output.swapchain, xr_.images, error);
             }
         }
+        if (ok) {
+            if (const std::string directory = NextCaptureDirectory(); !directory.empty()) {
+                gpu_->DumpNextExecute(directory);
+            }
+        }
         ok = ok && gpu_->Execute(submissions, tuning, executed, error);
         if (gpu_) {
             gpu_ms = gpu_->LastGpuMilliseconds();
@@ -1657,6 +1664,46 @@ bool FrameGenPresenter::Generate(const XrCompositionLayerProjection& projection,
                       std::to_string(captured_ > 0) + ".");
     }
     return true;
+}
+
+std::string FrameGenPresenter::NextCaptureDirectory() {
+    std::error_code ignored;
+    if (capture_frames_left_ == 0) {
+        const auto now = Clock::now();
+        if (now - last_capture_check_ < std::chrono::seconds(1)) {
+            return {};
+        }
+        last_capture_check_ = now;
+        const char* local = std::getenv("LOCALAPPDATA");
+        if (!local || !*local) {
+            return {};
+        }
+        const std::filesystem::path root = std::filesystem::path(local) / "VectorXR";
+        const std::filesystem::path request = root / "framegen-capture.request";
+        if (!std::filesystem::exists(request, ignored)) {
+            return {};
+        }
+        std::filesystem::remove(request, ignored);
+        const std::time_t time = std::time(nullptr);
+        std::tm local_time{};
+        localtime_s(&local_time, &time);
+        char stamp[32];
+        std::strftime(stamp, sizeof(stamp), "%Y%m%d-%H%M%S", &local_time);
+        capture_root_ = (root / "captures" / (std::string("framegen-") + stamp)).string();
+        capture_frames_left_ = kCaptureFrames;
+        capture_index_ = 0;
+    }
+    const std::filesystem::path directory =
+        std::filesystem::path(capture_root_) / ("frame-" + std::to_string(capture_index_++));
+    if (!std::filesystem::create_directories(directory, ignored) && !std::filesystem::exists(directory, ignored)) {
+        capture_frames_left_ = 0;
+        return {};
+    }
+    if (--capture_frames_left_ == 0 && logger_) {
+        logger_->Info("Frame Generation captured " + std::to_string(kCaptureFrames) +
+                      " real frames for offline replay in " + capture_root_ + ".");
+    }
+    return directory.string();
 }
 
 bool FrameGenPresenter::EnsureOutputs(const XrCompositionLayerProjection& projection,

@@ -27,6 +27,7 @@
 #include <cstring>
 #include <functional>
 #include <iostream>
+#include <limits>
 #include <map>
 #include <tuple>
 #include <string>
@@ -241,6 +242,10 @@ struct Harness {
     // Profiling at headset sizes (Direct3D 12 only): the same at any size.
     std::function<void(void*, std::uint32_t, std::uint32_t, const Pixels&)> upload_sized;
     std::function<void*(std::uint32_t, std::uint32_t, float, XrRect2Di, float)> create_depth_sized;
+    // Replay (Direct3D 12): a 32-bit float depth image holding `values`, and
+    // reading back an image of any size.
+    std::function<void*(std::uint32_t, std::uint32_t, const std::vector<float>&)> create_depth_data;
+    std::function<Pixels(void*)> readback_sized;
 };
 
 std::map<XrSwapchain, std::vector<void*>> g_swapchains;
@@ -989,6 +994,13 @@ int RunProfile(Harness& harness) {
                           error.empty(),
                       "depth capture: " + error);
             }
+            // FG_PROFILE_DUMP=<directory>: frames 30-34 of the first run as a
+            // capture for `replay`.
+            if (const char* dump = std::getenv("FG_PROFILE_DUMP"); dump && config == 0 && i >= 30 && i < 35) {
+                const std::string directory = std::string(dump) + "/frame-" + std::to_string(i - 30);
+                CreateDirectoryA(directory.c_str(), nullptr);
+                gpu->DumpNextExecute(directory);
+            }
             FrameGenExecuteResult result;
             Check(gpu->Execute(views, tuning, result, error), "profile execute: " + error);
             const std::vector<double> times = gpu->PassMilliseconds();
@@ -1011,6 +1023,327 @@ int RunProfile(Harness& harness) {
             if (sums[p] > 0.0) {
                 std::printf("  %-14s %6.3f ms\n", names[p], sums[p] / samples);
             }
+        }
+    }
+    gpu->Reset();
+    return 0;
+}
+
+// Replay: real frames captured from a game (FrameGenGpu::DumpNextExecute,
+// armed by %LOCALAPPDATA%\VectorXR\framegen-capture.request) fed back
+// through Direct3D 12 on the GPU. Each frame is extrapolated exactly to the
+// next captured frame's time and eye position, and compared with that frame
+// turned to the same orientation (what the runtime does to every frame):
+// a measure of generated-frame quality on real content, split into cockpit
+// (trusted depth nearer than 4 m) and the rest. Not a CTest:
+//   depthxr_framegen_tests replay <capture directory> [output directory]
+// Environment: FG_REPLAY_QUALITY=performance|balanced|quality,
+// FG_REPLAY_HARDWARE=1 (optical flow hardware), FG_REPLAY_NOSHIFT=1 (no eye
+// shift), FG_REPLAY_NODEPTH=1 (rotation only).
+bool g_replay = false;
+std::string g_replay_directory, g_replay_output;
+
+struct ReplayView {
+    std::uint32_t width{0}, height{0}, half_width{0}, half_height{0};
+    int format{0};
+    FrameGenViewGeometry newest, previous;
+    std::array<float, 3> shift{};
+    Pixels color;
+    std::vector<float> depth; // linear meters at half resolution, before trust
+};
+
+struct ReplayFrame {
+    FrameGenTuning tuning;
+    std::vector<ReplayView> views;
+};
+
+bool ReadBinary(const std::string& path, void* data, std::size_t bytes) {
+    std::FILE* file = std::fopen(path.c_str(), "rb");
+    if (!file) return false;
+    const std::size_t read = std::fread(data, 1, bytes, file);
+    std::fclose(file);
+    return read == bytes;
+}
+
+bool LoadReplayFrame(const std::string& directory, ReplayFrame& frame) {
+    std::FILE* file = std::fopen((directory + "/frame.txt").c_str(), "r");
+    if (!file) return false;
+    char key[64];
+    auto geometry = [&](FrameGenViewGeometry& g) {
+        return std::fscanf(file, " %63s %f %f %f %f %f %f %f %f %f %f %f", key, &g.orientation[0], &g.orientation[1],
+                           &g.orientation[2], &g.orientation[3], &g.position[0], &g.position[1], &g.position[2],
+                           &g.angle_left, &g.angle_right, &g.angle_up, &g.angle_down) == 12;
+    };
+    int mode = 0, quality = 0, hardware = 0, generated = 0, reading = 0;
+    std::size_t count = 0;
+    bool ok = std::fscanf(file, " mode %d quality %d hardware %d suppression %d limit %d interval_ratio %f generated %d"
+                                " fractions %f %f %f depth_reading %d views %zu",
+                          &mode, &quality, &hardware, &frame.tuning.artifact_suppression,
+                          &frame.tuning.motion_limit_percent, &frame.tuning.interval_ratio, &generated,
+                          &frame.tuning.fractions[0], &frame.tuning.fractions[1], &frame.tuning.fractions[2], &reading,
+                          &count) == 12;
+    frame.tuning.mode = static_cast<FrameGenSynthesisMode>(mode);
+    frame.tuning.quality = static_cast<FrameGenFlowQuality>(quality);
+    frame.tuning.hardware_flow = hardware != 0;
+    frame.tuning.generated = static_cast<std::uint8_t>(generated);
+    frame.views.resize(count);
+    for (std::size_t i = 0; i < count && ok; ++i) {
+        ReplayView& view = frame.views[i];
+        int index = 0, output = 0, synthesize = 0, depth = 0, used = 0;
+        ok = std::fscanf(file, " view %d extent %u %u half %u %u format %d output %d synthesize %d depth %d used %d shift %f %f %f",
+                         &index, &view.width, &view.height, &view.half_width, &view.half_height, &view.format, &output,
+                         &synthesize, &depth, &used, &view.shift[0], &view.shift[1], &view.shift[2]) == 13 &&
+             geometry(view.newest) && geometry(view.previous);
+    }
+    std::fclose(file);
+    for (std::size_t i = 0; i < count && ok; ++i) {
+        ReplayView& view = frame.views[i];
+        view.color.resize(std::size_t{view.width} * view.height);
+        view.depth.resize(std::size_t{view.half_width} * view.half_height);
+        ok = ReadBinary(directory + "/view" + std::to_string(i) + "-color.raw", view.color.data(), view.color.size() * 4) &&
+             ReadBinary(directory + "/view" + std::to_string(i) + "-depth.f32", view.depth.data(), view.depth.size() * 4);
+        if (view.format == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB || view.format == DXGI_FORMAT_B8G8R8A8_UNORM) {
+            for (std::uint32_t& p : view.color) p = (p & 0xff00ff00u) | ((p & 0xffu) << 16) | ((p >> 16) & 0xffu);
+        }
+    }
+    return ok;
+}
+
+// Half-resolution binary PPM of an RGBA image (2x2 box filter).
+void WriteHalfPpm(const std::string& path, const Pixels& pixels, std::uint32_t width, std::uint32_t height) {
+    std::FILE* file = std::fopen(path.c_str(), "wb");
+    if (!file) return;
+    const std::uint32_t w = width / 2, h = height / 2;
+    std::fprintf(file, "P6\n%u %u\n255\n", w, h);
+    std::vector<unsigned char> row(std::size_t{w} * 3);
+    for (std::uint32_t y = 0; y < h; ++y) {
+        for (std::uint32_t x = 0; x < w; ++x) {
+            for (int c = 0; c < 3; ++c) {
+                unsigned sum = 0;
+                for (int i = 0; i < 4; ++i) {
+                    sum += (pixels[std::size_t{2 * y + i / 2} * width + 2 * x + i % 2] >> (8 * c)) & 255u;
+                }
+                row[std::size_t{x} * 3 + c] = static_cast<unsigned char>(sum / 4);
+            }
+        }
+        std::fwrite(row.data(), 1, row.size(), file);
+    }
+    std::fclose(file);
+}
+
+std::array<std::array<double, 3>, 3> ReplayRotation(const std::array<float, 4>& q) {
+    const double x = q[0], y = q[1], z = q[2], w = q[3];
+    return {{{1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)},
+             {2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)},
+             {2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)}}};
+}
+
+// `next` turned to `view`'s orientation (the runtime's correction), sampled
+// bilinearly; `valid` marks pixels inside `next`'s view.
+Pixels TurnTo(const ReplayView& view, const ReplayView& next, std::vector<bool>& valid) {
+    const auto a = ReplayRotation(view.newest.orientation);
+    const auto b = ReplayRotation(next.newest.orientation);
+    const double l = std::tan(view.newest.angle_left), r = std::tan(view.newest.angle_right);
+    const double u = std::tan(view.newest.angle_up), d = std::tan(view.newest.angle_down);
+    const double nl = std::tan(next.newest.angle_left), nr = std::tan(next.newest.angle_right);
+    const double nu = std::tan(next.newest.angle_up), nd = std::tan(next.newest.angle_down);
+    Pixels out(view.color.size(), 0xff000000u);
+    valid.assign(view.color.size(), false);
+    auto rows = [&](std::uint32_t first, std::uint32_t step) {
+        for (std::uint32_t y = first; y < view.height; y += step) {
+            for (std::uint32_t x = 0; x < view.width; ++x) {
+                const double dir[3] = {l + (r - l) * (x + 0.5) / view.width, u + (d - u) * (y + 0.5) / view.height, -1.0};
+                double world[3], local[3];
+                for (int i = 0; i < 3; ++i) world[i] = a[i][0] * dir[0] + a[i][1] * dir[1] + a[i][2] * dir[2];
+                for (int i = 0; i < 3; ++i) local[i] = b[0][i] * world[0] + b[1][i] * world[1] + b[2][i] * world[2];
+                if (local[2] > -1e-6) continue;
+                const double sx = ((local[0] / -local[2]) - nl) / (nr - nl) * next.width - 0.5;
+                const double sy = ((local[1] / -local[2]) - nu) / (nd - nu) * next.height - 0.5;
+                if (sx < 0 || sy < 0 || sx > next.width - 1.001 || sy > next.height - 1.001) continue;
+                const int ix = static_cast<int>(sx), iy = static_cast<int>(sy);
+                const double fx = sx - ix, fy = sy - iy;
+                std::uint32_t pixel = 0xff000000u;
+                for (int c = 0; c < 3; ++c) {
+                    auto at = [&](int px, int py) {
+                        return static_cast<double>((next.color[std::size_t{static_cast<std::uint32_t>(py)} * next.width + px] >> (8 * c)) & 255u);
+                    };
+                    const double value = (at(ix, iy) * (1 - fx) + at(ix + 1, iy) * fx) * (1 - fy) +
+                                         (at(ix, iy + 1) * (1 - fx) + at(ix + 1, iy + 1) * fx) * fy;
+                    pixel |= static_cast<std::uint32_t>(std::lround(value)) << (8 * c);
+                }
+                const std::size_t index = std::size_t{y} * view.width + x;
+                out[index] = pixel;
+                valid[index] = true;
+            }
+        }
+    };
+    const std::uint32_t threads = std::max(1u, std::thread::hardware_concurrency());
+    std::vector<std::thread> workers;
+    for (std::uint32_t t = 0; t < threads; ++t) workers.emplace_back(rows, t, threads);
+    for (auto& worker : workers) worker.join();
+    return out;
+}
+
+// Mean error over valid pixels, all and split by the newest frame's depth
+// (nearer than 4 m: cockpit).
+struct ReplayError {
+    double all{0}, cockpit{0}, outside{0};
+};
+ReplayError CompareTo(const Pixels& image, const Pixels& truth, const std::vector<bool>& valid, const ReplayView& view) {
+    double sums[3] = {}, counts[3] = {};
+    for (std::uint32_t y = 0; y < view.height; ++y) {
+        const std::uint32_t hy = std::min(y / 2, view.half_height - 1);
+        for (std::uint32_t x = 0; x < view.width; ++x) {
+            const std::size_t index = std::size_t{y} * view.width + x;
+            if (!valid[index]) continue;
+            double error = 0;
+            for (int c = 0; c < 3; ++c) {
+                error += std::abs(static_cast<int>((image[index] >> (8 * c)) & 255u) - static_cast<int>((truth[index] >> (8 * c)) & 255u));
+            }
+            error /= 3 * 255.0;
+            const float depth = std::abs(view.depth[std::size_t{hy} * view.half_width + std::min(x / 2, view.half_width - 1)]);
+            const int part = depth > 0.0f && depth < 4.0f ? 1 : 2;
+            sums[0] += error;
+            counts[0] += 1;
+            sums[part] += error;
+            counts[part] += 1;
+        }
+    }
+    return {counts[0] ? sums[0] / counts[0] : 0, counts[1] ? sums[1] / counts[1] : 0, counts[2] ? sums[2] / counts[2] : 0};
+}
+
+int RunReplay(Harness& harness) {
+    std::vector<ReplayFrame> frames;
+    for (int k = 0;; ++k) {
+        ReplayFrame frame;
+        if (!LoadReplayFrame(g_replay_directory + "/frame-" + std::to_string(k), frame)) break;
+        frames.push_back(std::move(frame));
+    }
+    Check(frames.size() >= 3 && frames[0].views.size() >= 2, "replay: needs at least three captured stereo frames in " +
+                                                                 g_replay_directory);
+    const std::size_t view_count = frames[0].views.size();
+    const ReplayView& first = frames[0].views[0];
+    std::printf("Replaying %zu frames, %zu views, %ux%u (depth grid %ux%u)\n", frames.size(), view_count, first.width,
+                first.height, first.half_width, first.half_height);
+    std::string error;
+    auto gpu = CreateFrameGenGpu(harness.binding, error);
+    Check(gpu != nullptr, "replay backend: " + error);
+    const std::int64_t output_format = gpu->OutputFormats(FrameGenOutputKind::kSrgb8).front();
+    std::vector<XrSwapchain> sources(view_count), depths(view_count), outputs(view_count);
+    for (std::size_t v = 0; v < view_count; ++v) {
+        const ReplayView& view = frames[0].views[v];
+        sources[v] = reinterpret_cast<XrSwapchain>(0x100 + v);
+        depths[v] = reinterpret_cast<XrSwapchain>(0x200 + v);
+        outputs[v] = reinterpret_cast<XrSwapchain>(0x300 + v);
+        g_swapchains[sources[v]].clear();
+        g_swapchains[depths[v]].clear();
+        for (const ReplayFrame& frame : frames) {
+            void* image = harness.create(view.width, view.height);
+            harness.upload_sized(image, view.width, view.height, frame.views[v].color);
+            g_swapchains[sources[v]].push_back(image);
+            // Depth for an encoding the depth pass decodes exactly:
+            // 1/z = 100 * raw (near infinitely far, far 1 cm).
+            std::vector<float> raw(frame.views[v].depth.size());
+            for (std::size_t i = 0; i < raw.size(); ++i) raw[i] = 0.01f / std::max(std::abs(frame.views[v].depth[i]), 0.01f);
+            g_swapchains[depths[v]].push_back(harness.create_depth_data(view.half_width, view.half_height, raw));
+        }
+        g_swapchains[outputs[v]] = {harness.create(view.width, view.height)};
+        Check(gpu->Track(sources[v], EnumerateImages, error) && gpu->Track(depths[v], EnumerateImages, error) &&
+                  gpu->Track(outputs[v], EnumerateImages, error),
+              error);
+    }
+    FrameGenDepthEncoding encoding;
+    encoding.near_z = std::numeric_limits<float>::infinity();
+    encoding.far_z = 0.01f;
+    auto env = [](const char* name) {
+        const char* value = std::getenv(name);
+        return std::string(value ? value : "");
+    };
+    const std::string quality = env("FG_REPLAY_QUALITY");
+    const bool hardware = env("FG_REPLAY_HARDWARE") == "1";
+    const bool no_shift = env("FG_REPLAY_NOSHIFT") == "1";
+    const bool no_depth = env("FG_REPLAY_NODEPTH") == "1";
+
+    // Frame k extrapolated to frame k + 1: one frame at the time ratio of
+    // the two intervals, from the eye position frame k + 1 was rendered at.
+    auto run = [&](std::size_t k, bool synthesize, bool evaluate) {
+        const ReplayFrame& frame = frames[k];
+        FrameGenTuning tuning = frame.tuning;
+        tuning.mode = FrameGenSynthesisMode::kExtrapolate;
+        tuning.hardware_flow = hardware;
+        if (quality == "performance") tuning.quality = FrameGenFlowQuality::kPerformance;
+        if (quality == "balanced") tuning.quality = FrameGenFlowQuality::kBalanced;
+        if (quality == "quality") tuning.quality = FrameGenFlowQuality::kQuality;
+        tuning.generated = 1;
+        const bool has_next = k + 1 < frames.size();
+        tuning.fractions[0] = has_next ? std::clamp(frames[k + 1].tuning.interval_ratio, 0.25f, 1.0f) : 1.0f;
+        std::vector<FrameGenViewSubmission> views(view_count);
+        for (std::size_t v = 0; v < view_count; ++v) {
+            const ReplayView& view = frame.views[v];
+            FrameGenViewSubmission& submission = views[v];
+            const XrRect2Di rect{{0, 0}, {static_cast<int>(view.width), static_cast<int>(view.height)}};
+            submission.source = {sources[v], static_cast<std::uint32_t>(k), 0, rect, harness.format};
+            submission.outputs = {{outputs[v], 0, 0, rect, output_format}};
+            submission.request.extent = {view.width, view.height};
+            submission.request.output = FrameGenOutputKind::kSrgb8;
+            submission.request.synthesize = synthesize;
+            submission.request.temporal = true;
+            submission.request.depth = !no_depth;
+            submission.request.newest = view.newest;
+            submission.request.previous = synthesize ? view.previous : view.newest;
+            if (has_next && !no_shift) {
+                // Where the eye was for frame k + 1, in frame k's view space.
+                const auto rotation = ReplayRotation(view.newest.orientation);
+                const ReplayView& next = frames[k + 1].views[v];
+                const double delta[3] = {next.newest.position[0] - view.newest.position[0],
+                                         next.newest.position[1] - view.newest.position[1],
+                                         next.newest.position[2] - view.newest.position[2]};
+                for (int i = 0; i < 3; ++i) {
+                    const double local = rotation[0][i] * delta[0] + rotation[1][i] * delta[1] + rotation[2][i] * delta[2];
+                    submission.request.shift[i] = static_cast<float>(local / tuning.fractions[0]);
+                }
+            }
+            Check(gpu->Capture(v, submission.source, submission.request, tuning.quality, error) || error.empty(),
+                  "replay capture: " + error);
+            const XrRect2Di depth_rect{{0, 0}, {static_cast<int>(view.half_width), static_cast<int>(view.half_height)}};
+            Check(gpu->CaptureDepth(v, {depths[v], static_cast<std::uint32_t>(k), 0, depth_rect, 0}, encoding,
+                                    submission.request, error) ||
+                      error.empty(),
+                  "replay depth capture: " + error);
+        }
+        FrameGenExecuteResult result;
+        Check(gpu->Execute(views, tuning, result, error), "replay execute: " + error);
+        if (!evaluate || !has_next) {
+            return;
+        }
+        for (std::size_t v = 0; v < view_count; ++v) {
+            const ReplayView& view = frame.views[v];
+            const Pixels generated = harness.readback_sized(g_swapchains[outputs[v]][0]);
+            std::vector<bool> valid;
+            const Pixels truth = TurnTo(view, frames[k + 1].views[v], valid);
+            const ReplayError generated_error = CompareTo(generated, truth, valid, view);
+            const ReplayError hold_error = CompareTo(view.color, truth, valid, view);
+            std::printf("frame %zu view %zu (depth %s, %.2f of an interval): generated %.4f (cockpit %.4f, outside %.4f)"
+                        "  hold %.4f (cockpit %.4f, outside %.4f)\n",
+                        k, v, result.depth.size() > v && result.depth[v] ? "used" : "not used", tuning.fractions[0],
+                        generated_error.all, generated_error.cockpit, generated_error.outside, hold_error.all,
+                        hold_error.cockpit, hold_error.outside);
+            if (!g_replay_output.empty() && v == 0) {
+                const std::string prefix = g_replay_output + "/frame-" + std::to_string(k) + "-view" + std::to_string(v);
+                WriteHalfPpm(prefix + "-generated.ppm", generated, view.width, view.height);
+                WriteHalfPpm(prefix + "-truth.ppm", truth, view.width, view.height);
+                WriteHalfPpm(prefix + "-newest.ppm", view.color, view.width, view.height);
+            }
+        }
+    };
+    // Three times through to settle the depth check, then once to measure.
+    for (int pass = 0; pass < 4; ++pass) {
+        gpu->ResetHistory();
+        for (std::size_t k = 0; k < frames.size(); ++k) {
+            run(k, k > 0, pass == 3 && k > 0);
+        }
+        if (pass == 2) {
+            std::printf("Depth reading: %s\n", ToString(gpu->DepthStatus().reading));
         }
     }
     gpu->Reset();
@@ -1725,6 +2058,88 @@ int D3D12Test() {
         readback->Unmap(0, nullptr);
         return pixels;
     };
+    harness.create_depth_data = [&](std::uint32_t width, std::uint32_t height, const std::vector<float>& values) -> void* {
+        D3D12_HEAP_PROPERTIES heap{D3D12_HEAP_TYPE_DEFAULT};
+        D3D12_RESOURCE_DESC desc{};
+        desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+        desc.Width = width;
+        desc.Height = height;
+        desc.DepthOrArraySize = 1;
+        desc.MipLevels = 1;
+        desc.Format = DXGI_FORMAT_D32_FLOAT;
+        desc.SampleDesc.Count = 1;
+        desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
+        ComPtr<ID3D12Resource> resource;
+        Check(SUCCEEDED(device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_COPY_DEST,
+                                                        nullptr, IID_PPV_ARGS(&resource))),
+              "D3D12 depth data image");
+        D3D12_PLACED_SUBRESOURCE_FOOTPRINT sized{};
+        UINT64 size_bytes = 0;
+        device->GetCopyableFootprints(&desc, 0, 1, 0, &sized, nullptr, nullptr, &size_bytes);
+        D3D12_HEAP_PROPERTIES upload_heap{D3D12_HEAP_TYPE_UPLOAD};
+        D3D12_RESOURCE_DESC buffer_desc{};
+        buffer_desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        buffer_desc.Width = size_bytes;
+        buffer_desc.Height = buffer_desc.DepthOrArraySize = buffer_desc.MipLevels = 1;
+        buffer_desc.SampleDesc.Count = 1;
+        buffer_desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        ComPtr<ID3D12Resource> upload;
+        Check(SUCCEEDED(device->CreateCommittedResource(&upload_heap, D3D12_HEAP_FLAG_NONE, &buffer_desc,
+                                                        D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&upload))),
+              "D3D12 depth upload buffer");
+        void* mapped = nullptr;
+        Check(SUCCEEDED(upload->Map(0, nullptr, &mapped)), "D3D12 depth upload map");
+        for (std::uint32_t y = 0; y < height; ++y) {
+            std::memcpy(static_cast<std::byte*>(mapped) + y * sized.Footprint.RowPitch, &values[std::size_t{y} * width],
+                        std::size_t{width} * 4);
+        }
+        upload->Unmap(0, nullptr);
+        begin();
+        D3D12_TEXTURE_COPY_LOCATION dst{resource.Get(), D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX};
+        D3D12_TEXTURE_COPY_LOCATION src{upload.Get(), D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT};
+        src.PlacedFootprint = sized;
+        commands->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+        transition(resource.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_DEPTH_WRITE);
+        submit_and_wait();
+        keep.push_back(resource);
+        return resource.Get();
+    };
+    harness.readback_sized = [&](void* image) {
+        auto* resource = static_cast<ID3D12Resource*>(image);
+        const D3D12_RESOURCE_DESC desc = resource->GetDesc();
+        D3D12_PLACED_SUBRESOURCE_FOOTPRINT sized{};
+        UINT64 size_bytes = 0;
+        device->GetCopyableFootprints(&desc, 0, 1, 0, &sized, nullptr, nullptr, &size_bytes);
+        D3D12_HEAP_PROPERTIES heap{D3D12_HEAP_TYPE_READBACK};
+        D3D12_RESOURCE_DESC buffer_desc{};
+        buffer_desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        buffer_desc.Width = size_bytes;
+        buffer_desc.Height = buffer_desc.DepthOrArraySize = buffer_desc.MipLevels = 1;
+        buffer_desc.SampleDesc.Count = 1;
+        buffer_desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        ComPtr<ID3D12Resource> readback;
+        Check(SUCCEEDED(device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &buffer_desc,
+                                                        D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&readback))),
+              "D3D12 readback buffer");
+        begin();
+        transition(resource, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE);
+        D3D12_TEXTURE_COPY_LOCATION src{resource, D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX};
+        D3D12_TEXTURE_COPY_LOCATION dst{readback.Get(), D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT};
+        dst.PlacedFootprint = sized;
+        commands->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+        transition(resource, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
+        submit_and_wait();
+        void* mapped = nullptr;
+        Check(SUCCEEDED(readback->Map(0, nullptr, &mapped)), "D3D12 readback map");
+        const std::uint32_t width = static_cast<std::uint32_t>(desc.Width), height = desc.Height;
+        Pixels pixels(std::size_t{width} * height);
+        for (std::uint32_t y = 0; y < height; ++y) {
+            std::memcpy(&pixels[std::size_t{y} * width], static_cast<const std::byte*>(mapped) + y * sized.Footprint.RowPitch,
+                        std::size_t{width} * 4);
+        }
+        readback->Unmap(0, nullptr);
+        return pixels;
+    };
 #ifdef DEPTHXR_NVOF_RESEARCH
     if (g_nvof) {
         const int nvof = RunNvof(harness);
@@ -1732,7 +2147,10 @@ int D3D12Test() {
         return nvof;
     }
 #endif
-    const int result = g_profile ? RunProfile(harness) : g_bench ? RunBench(harness) : RunScenarios(harness);
+    const int result = g_replay    ? RunReplay(harness)
+                       : g_profile ? RunProfile(harness)
+                       : g_bench   ? RunBench(harness)
+                                   : RunScenarios(harness);
     CloseHandle(event);
     return result;
 }
@@ -1967,6 +2385,14 @@ int main(int argc, char** argv) {
         api = "d3d12";
     }
 #endif
+    if (api == "replay") {
+        // depthxr_framegen_tests replay <capture directory> [output directory]
+        Check(argc > 2, "replay needs a capture directory");
+        g_replay = g_hardware = true;
+        g_replay_directory = argv[2];
+        g_replay_output = argc > 3 ? argv[3] : "";
+        api = "d3d12";
+    }
     if (api == "profile") {
         // depthxr_framegen_tests profile [width height]: Direct3D 12 on the GPU.
         g_bench = g_profile = true;

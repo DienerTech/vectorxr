@@ -104,6 +104,13 @@ class FrameGenGpu {
     // y per cell row by row; `cells` receives the field's size. Waits for the
     // GPU. Direct3D 12 only.
     virtual bool ReadFlow(std::size_t /*view*/, std::vector<float>& /*xy*/, FrameGenExtent& /*cells*/) { return false; }
+    // Research: the next Execute also writes what it generates from into
+    // `directory` (which must exist): each view's newest image and linear
+    // depth before any trust decision, as raw texels, and frame.txt with the
+    // requests and tuning, for replaying real frames offline
+    // (`depthxr_framegen_tests replay`). That Execute waits for the GPU.
+    // Direct3D 12 only.
+    virtual bool DumpNextExecute(const std::string& /*directory*/) { return false; }
     // Records and submits generation for every view on the session's graphics
     // queue, copying a view's source first unless Capture already did. Never
     // waits on the CPU for this submission.
