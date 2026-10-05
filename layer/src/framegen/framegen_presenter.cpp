@@ -1630,8 +1630,13 @@ bool FrameGenPresenter::Generate(const XrCompositionLayerProjection& projection,
         logger_->Info(
             std::string("Frame Generation checked the game's depth against the other eye: reading it ") +
             ToString(depth.reading) +
-            (depth.reading == FrameGenDepthReading::kUnusable ? ", so head movement is compensated for rotation only"
-                                                              : ", head movement is compensated in full") +
+            (depth.reading == FrameGenDepthReading::kUnusable
+                 ? std::string(", so head movement is compensated for rotation only")
+                 : (std::abs(depth.scale - 1.0f) > 0.005f
+                        ? " and " + Number(depth.scale, 3) +
+                              " times as far as described (its near plane is described wrongly)"
+                        : std::string()) +
+                       ", head movement is compensated in full") +
             ". Where depth moves content (" + Number(evidence.binocular > 0.0 ? 100.0 * moved / evidence.binocular : 0.0, 0) +
             "% of what both eyes see) it leaves " + Number(evidence.decoded.Ratio(), 2) +
             " of the error without depth (swapped " + Number(evidence.swapped.Ratio(), 2) +

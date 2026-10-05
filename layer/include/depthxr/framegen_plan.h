@@ -272,6 +272,9 @@ struct FrameGenDepthEncoding {
     float max_depth{1.0f};
     float near_z{0.1f};
     float far_z{1000.0f};
+    // Decoded depth is multiplied by this (FrameGenDepthValidator::Scale):
+    // games describe their near plane wrongly too.
+    float scale{1.0f};
 };
 
 // The kDepth dispatch for one view: resamples the region `depth_rect` (in
@@ -293,9 +296,14 @@ FrameGenDispatch BuildFrameGenDepthDispatch(FrameGenExtent view_extent, std::int
 // samples both eyes see.
 inline constexpr std::uint32_t kFrameGenDepthCheckCells = 32;
 inline constexpr std::uint32_t kFrameGenDepthCheckSamples = 4; // per cell side
-inline constexpr std::uint32_t kFrameGenDepthCheckTexels = 3;  // per cell, side by side
+inline constexpr std::uint32_t kFrameGenDepthCheckTexels = 5;  // per cell, side by side
+// Scale probes per check: the depth scaled by exp(step * (j - 2)).
+inline constexpr std::size_t kFrameGenDepthScaleProbes = 5;
+// `scale` is the scale the checked depth was decoded with, `probe_step`
+// the probes' step (natural log).
 FrameGenDispatch BuildFrameGenDepthCheckDispatch(const FrameGenViewGeometry& view0, const FrameGenViewGeometry& view1,
-                                                 const FrameGenDepthEncoding& encoding);
+                                                 const FrameGenDepthEncoding& encoding, float scale = 1.0f,
+                                                 float probe_step = 0.08f);
 
 // The kDepthTrust dispatch for one view of a stereo pair: compares each
 // texel of `own`'s linear depth with what `other` sees and writes the
@@ -330,6 +338,11 @@ struct FrameGenDepthEvidence {
     FrameGenDepthScore decoded; // as currently decoded
     FrameGenDepthScore swapped; // near and far swapped
     double binocular{0.0};      // samples both eyes see
+    // The other eye's error with the depth scaled by each probe's factor,
+    // summed over `probed` samples (cockpit-near, moved and lined up better
+    // than without depth).
+    std::array<double, kFrameGenDepthScaleProbes> probes{};
+    double probed{0.0};
     double cockpit{0.0};        // ... whose depth is nearer than 10 m (none: empty depth)
     FrameGenDepthEvidence& operator+=(const FrameGenDepthEvidence& other);
 };
@@ -342,6 +355,12 @@ class FrameGenDepthValidator {
     FrameGenDepthReading Reading() const { return reading_; }
     // Whether the depth pass should swap the game's near and far.
     bool Swapped() const { return swapped_; }
+    // What decoded depth is multiplied by: found by searching the scale that
+    // lines the eyes up best (the check's probes), 1 until then.
+    float Scale() const { return scale_; }
+    // The probes' step (natural log): wide while searching, narrowing as
+    // the scale settles.
+    float ProbeStep() const { return probe_step_; }
     // Changes whenever the decoding does: depth captured and checks
     // recorded with an older decoding are not used.
     std::uint32_t Generation() const { return generation_; }
@@ -359,6 +378,8 @@ class FrameGenDepthValidator {
     std::uint32_t checks_{0};
     FrameGenDepthReading reading_{FrameGenDepthReading::kUnknown};
     bool swapped_{false};
+    float scale_{1.0f};
+    float probe_step_{0.08f};
     bool settled_{false};
     std::uint32_t generation_{0};
     std::uint32_t decisions_{0};
@@ -369,6 +390,7 @@ struct FrameGenDepthStatus {
     FrameGenDepthReading reading{FrameGenDepthReading::kUnknown};
     std::uint32_t decisions{0};
     FrameGenDepthEvidence evidence;
+    float scale{1.0f};
 };
 // The kFlowPackRaw dispatch for a view of this extent (half resolution).
 FrameGenDispatch BuildFrameGenRawPackDispatch(FrameGenExtent view_extent);

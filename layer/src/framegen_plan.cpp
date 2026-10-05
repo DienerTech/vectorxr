@@ -326,7 +326,7 @@ FrameGenDispatch BuildFrameGenRawPackDispatch(FrameGenExtent view_extent) {
 }
 
 FrameGenDispatch BuildFrameGenDepthCheckDispatch(const FrameGenViewGeometry& view0, const FrameGenViewGeometry& view1,
-                                                 const FrameGenDepthEncoding& encoding) {
+                                                 const FrameGenDepthEncoding& encoding, float scale, float probe_step) {
     FrameGenDispatch dispatch;
     dispatch.pass = FrameGenPass::kDepthCheck;
     dispatch.width = kFrameGenDepthCheckCells;
@@ -342,10 +342,12 @@ FrameGenDispatch BuildFrameGenDepthCheckDispatch(const FrameGenViewGeometry& vie
     dispatch.constants.rot2 = {rotation[2][0], rotation[2][1], rotation[2][2], translation[2]};
     dispatch.constants.size = {kFrameGenDepthCheckCells, kFrameGenDepthCheckCells, 0, 0};
     dispatch.constants.options = {0, kFrameGenFlagDepth, 0, kFrameGenDepthCheckSamples};
-    // 1/near + 1/far: the swapped reading of a depth decoded to z is
-    // 1 / (x - 1/z), whichever way round the decoding currently is.
+    // 1/near + 1/far: the swapped reading of a depth decoded to z (before
+    // scaling) is 1 / (x - 1/z), whichever way round the decoding currently
+    // is.
     auto inverse = [](float z) { return std::isfinite(z) && z > 0.0f ? 1.0f / z : 0.0f; };
-    dispatch.constants.tuning = {inverse(encoding.near_z) + inverse(encoding.far_z), 0.0f, 0.0f, 0.0f};
+    dispatch.constants.tuning = {inverse(encoding.near_z) + inverse(encoding.far_z), scale > 0.0f ? scale : 1.0f,
+                                 probe_step, 0.0f};
     dispatch.outputs = {Texture(FrameGenTextureKind::kNone), {}};
     return dispatch;
 }
@@ -395,6 +397,10 @@ FrameGenDepthEvidence& FrameGenDepthEvidence::operator+=(const FrameGenDepthEvid
     add(decoded, other.decoded);
     add(swapped, other.swapped);
     binocular += other.binocular;
+    for (std::size_t i = 0; i < probes.size(); ++i) {
+        probes[i] += other.probes[i];
+    }
+    probed += other.probed;
     cockpit += other.cockpit;
     return *this;
 }
@@ -439,10 +445,40 @@ void FrameGenDepthValidator::Add(const FrameGenDepthEvidence& check) {
         reading_ = FrameGenDepthReading::kUnusable;
     }
 
+    // The scale that lines the eyes up best: the probes' minimum, refined by
+    // a parabola through it and its neighbours; at the edge of the probes,
+    // a step that way with wider probes. A swap starts the search over.
+    const float scale_before = scale_;
+    const float step_before = probe_step_;
     if (swapped_ != swapped_before) {
+        scale_ = 1.0f;
+        probe_step_ = 0.08f;
+    } else if (evidence_.probed >= std::max(200.0, 0.01 * evidence_.binocular)) {
+        const auto& e = evidence_.probes;
+        const double used = probe_step_; // the step these probes were taken with
+        const std::size_t best = static_cast<std::size_t>(std::min_element(e.begin(), e.end()) - e.begin());
+        const double centre = static_cast<double>(kFrameGenDepthScaleProbes / 2);
+        double offset = static_cast<double>(best) - centre;
+        if (best == 0 || best + 1 == kFrameGenDepthScaleProbes) {
+            probe_step_ = std::min(probe_step_ * 1.5f, 0.25f);
+        } else {
+            const double curvature = e[best - 1] - 2.0 * e[best] + e[best + 1];
+            if (curvature > 0.0) {
+                offset += std::clamp(0.5 * (e[best - 1] - e[best + 1]) / curvature, -0.5, 0.5);
+            }
+            probe_step_ = std::max(probe_step_ * 0.6f, 0.02f);
+        }
+        // Moves of under 1% (or that gain under 1% over the current scale)
+        // are noise.
+        const double step = std::exp(used * offset);
+        if (std::abs(offset) * used > 0.01 && e[best] < 0.99 * e[kFrameGenDepthScaleProbes / 2]) {
+            scale_ = static_cast<float>(std::clamp(scale_ * step, 0.5, 2.0));
+        }
+    }
+    if (swapped_ != swapped_before || scale_ != scale_before || probe_step_ != step_before) {
         ++generation_;
     }
-    const bool changed = reading_ != reading_before || swapped_ != swapped_before;
+    const bool changed = reading_ != reading_before || swapped_ != swapped_before || scale_ != scale_before;
     if (changed) {
         ++decisions_;
     }
@@ -463,8 +499,10 @@ FrameGenDispatch BuildFrameGenDepthDispatch(FrameGenExtent view_extent, std::int
     dispatch.height = levels[1].height;
     dispatch.outputs = {Texture(FrameGenTextureKind::kDepth), {}};
     auto inverse = [](float z) { return std::isfinite(z) && z > 0.0f ? 1.0f / z : 0.0f; };
-    const float inverse_near = inverse(encoding.near_z);
-    const float inverse_far = inverse(encoding.far_z);
+    // 1 / (scale z): the scale divides the decoded inverse depth.
+    const float scale = encoding.scale > 0.0f ? encoding.scale : 1.0f;
+    const float inverse_near = inverse(encoding.near_z) / scale;
+    const float inverse_far = inverse(encoding.far_z) / scale;
     const float range = encoding.max_depth - encoding.min_depth;
     dispatch.constants.size = {levels[1].width, levels[1].height, rect_width, rect_height};
     dispatch.constants.options = {0, 0, 0, array_index};

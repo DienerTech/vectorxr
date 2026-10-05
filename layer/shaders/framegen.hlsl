@@ -874,7 +874,17 @@ float4 Score(float2 uv, float depth, float2 far_uv, float none, float2 spacing, 
 // One cell of the depth check: view 0 samples warped into view 1 by their
 // depth read two ways (as decoded; near and far swapped), each compared with
 // no depth. fov_current/previous and the rotation rows describe view 0 ->
-// view 1; tuning.x is 1/near + 1/far; options.w samples per cell side.
+// view 1; tuning.x is 1/near + 1/far, tuning.y the scale the depth was
+// decoded with, tuning.z the scale probes' step (natural log); options.w
+// samples per cell side.
+//
+// Scale probes: games describe their depth's near plane wrongly too (MSFS
+// 2024's lines the eyes up 1.2 times further than described), which scales
+// every depth and makes head-movement compensation over- or under-correct
+// near content. Where the decoded depth moves a sample and lines it up
+// better than no depth, the other eye's error is also measured with the
+// depth scaled by exp(step * (j - 2)), j = 0..4, for FrameGenDepthValidator
+// to search the scale.
 //
 // Only samples both eyes see count (the part of a wide field of view one
 // eye sees alone says nothing), and each reading is judged where it matters,
@@ -882,9 +892,11 @@ float4 Score(float2 uv, float depth, float2 far_uv, float none, float2 spacing, 
 // reading may fall back to "infinitely far" per sample, as synthesis does
 // (FG_PASS_DEPTH_TRUST): depth wrong in places (cockpit glass written to
 // depth) does not hide that it is right elsewhere.
-// Writes three texels per cell: a Score sum per reading, then (samples both
-// eyes see, how many of them are nearer than FG_CHECK_NEAR meters, 0, 0).
+// Writes five texels per cell: a Score sum per reading, then (samples both
+// eyes see, how many of them are nearer than FG_CHECK_NEAR meters, 0, 0),
+// then the probes' error sums (j = 0..3) and (j = 4, probed samples, 0, 0).
 #define FG_CHECK_NEAR 10.0
+#define FG_CHECK_PROBES 5
 [numthreads(8, 8, 1)]
 void CSMain(uint3 id : SV_DispatchThreadID) {
     if (any(id.xy >= g.size.xy)) {
@@ -899,6 +911,8 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
     float4 swapped = float4(0.0, 0.0, 0.0, 0.0);
     float binocular = 0.0;
     float cockpit = 0.0;
+    float probes[FG_CHECK_PROBES] = {0.0, 0.0, 0.0, 0.0, 0.0};
+    float probed = 0.0;
     [loop]
     for (int sy = 0; sy < samples; ++sy) {
         [loop]
@@ -914,19 +928,32 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
             // the depth itself.
             const float depth = max(abs(g_depth.Load(int3(texel, 0)).r), 1e-6);
             cockpit += depth < FG_CHECK_NEAR ? 1.0 : 0.0;
-            const float swapped_inverse = g.tuning.x - 1.0 / depth;
+            // The swapped reading of the depth as the game describes it.
+            const float swapped_inverse = g.tuning.x - g.tuning.y / depth;
             float reference[FG_CHECK_TAPS];
             LoadPatch(g_view0, g_linear, uv, spacing, reference);
             const float none = PatchError(g_view1, g_linear, far_uv, spacing, reference);
-            decoded += Score(uv, depth, far_uv, none, spacing, size, reference);
+            const float4 score = Score(uv, depth, far_uv, none, spacing, size, reference);
+            decoded += score;
             swapped += Score(uv, swapped_inverse > 1.0 / FG_FAR_DEPTH ? 1.0 / swapped_inverse : FG_FAR_DEPTH, far_uv,
                              none, spacing, size, reference);
+            if (depth < FG_CHECK_NEAR && score.z > 0.0 && score.w == 0.0) {
+                probed += 1.0;
+                [unroll]
+                for (int j = 0; j < FG_CHECK_PROBES; ++j) {
+                    float2 mapped;
+                    const bool inside = MapToPrevious(uv, depth * exp(g.tuning.z * float(j - 2)), mapped);
+                    probes[j] += inside ? PatchError(g_view1, g_linear, mapped, spacing, reference) : FG_CHECK_OUTSIDE;
+                }
+            }
         }
     }
-    const int2 base = int2(id.x * 3, id.y);
+    const int2 base = int2(id.x * 5, id.y);
     g_scores[base] = decoded;
     g_scores[base + int2(1, 0)] = swapped;
     g_scores[base + int2(2, 0)] = float4(binocular, cockpit, 0.0, 0.0);
+    g_scores[base + int2(3, 0)] = float4(probes[0], probes[1], probes[2], probes[3]);
+    g_scores[base + int2(4, 0)] = float4(probes[4], probed, 0.0, 0.0);
 }
 #endif
 

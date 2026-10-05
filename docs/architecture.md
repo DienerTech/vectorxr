@@ -177,7 +177,11 @@ every frame alike.
 Depth is only used once it is shown to be read correctly. A check pass warps view 0 into view 1
 by the depth and the eyes' relative pose, over the samples both eyes see, and scores the depth
 as decoded and with near and far swapped against no depth; `FrameGenDepthValidator` adopts a
-reading that clearly lines the eyes up, and drops depth only once it no longer helps at all.
+reading that clearly lines the eyes up, and drops depth only once it no longer helps at all. The
+check also probes the depth scaled by five factors around the current scale and searches the
+scale that lines the eyes up best (parabola through the best probe, wider probes at the edge):
+games describe their near plane wrongly too, which scales every depth. MSFS 2024's lines up 1.2
+times as far as described, and unscaled, head translation was over-compensated by that much.
 
 Each frame, before any view uses it, every depth texel gets a trust score in [-1, 1]:
 

@@ -657,6 +657,7 @@ int RunScenarios(Harness& harness) {
             Pixels output;
             bool used{false};
             FrameGenDepthReading reading{FrameGenDepthReading::kUnknown};
+            float scale{1.0f};
         };
         // Runs one depth case on a fresh backend: depth images for the newest
         // frame (panel and background values, the near value over the panel
@@ -711,7 +712,7 @@ int RunScenarios(Harness& harness) {
             // Prime, then frames until the eyes have been checked a few times
             // and the scores read back.
             Check(backend->Execute(views(0), tuning, result, error), harness.name + " execute: " + error);
-            for (int i = 0; i < 12; ++i) {
+            for (int i = 0; i < 20; ++i) {
                 capture(1);
                 Check(backend->Execute(views(1), tuning, result, error), harness.name + " execute: " + error);
             }
@@ -725,6 +726,7 @@ int RunScenarios(Harness& harness) {
             outcome.output = harness.readback(g_swapchains[kOutput][0]);
             const FrameGenDepthStatus status = backend->DepthStatus();
             outcome.reading = status.reading;
+            outcome.scale = status.scale;
             const FrameGenDepthEvidence& evidence = status.evidence;
             std::cout << harness.name << " depth check: " << ToString(status.reading) << " after " << status.decisions
                       << " decisions; moved " << evidence.decoded.samples << " of " << evidence.binocular
@@ -742,6 +744,11 @@ int RunScenarios(Harness& harness) {
         const Outcome nonsense = run_case(1.0f, panel, standard, true, 0);
         // Glass: depth also claims 40 px of scenery around the panel is near.
         const Outcome glass = run_case(panel, 1.0f, standard, true, 40);
+        // A near plane described wrongly (0.1 m, rendered with 0.125 m): the
+        // panel decodes 20% too near, so head translation would be
+        // over-compensated, until the scale is searched (1/0.8 = 1.25).
+        const float panel_misplaced = (1.0f / kPanelDistance - 1.0f / 0.125f) / (1.0f / standard.far_z - 1.0f / 0.125f);
+        const Outcome misplaced = run_case(panel_misplaced, 1.0f, standard, true, 0);
         Dump(harness.name + "-cockpit-rotation-only", rotation_only.output);
         Dump(harness.name + "-cockpit-depth", correct.output);
         Dump(harness.name + "-cockpit-mislabeled", mislabeled.output);
@@ -767,6 +774,12 @@ int RunScenarios(Harness& harness) {
               harness.name + " nonsense depth was used");
         Check(glass.used && glass.reading == FrameGenDepthReading::kAsSubmitted && glass_error < 0.4 * rotation_error,
               harness.name + " depth wrong around the panel (glass) was not dropped there");
+        const double misplaced_error = error_of(misplaced);
+        std::cout << harness.name << " near plane described wrongly: scale " << misplaced.scale << ", error "
+                  << misplaced_error << " (correct depth: scale " << correct.scale << ")" << std::endl;
+        Check(misplaced.used && misplaced.scale > 1.15f && misplaced.scale < 1.35f && misplaced_error < 0.4 * rotation_error,
+              harness.name + " a wrongly described near plane was not corrected");
+        Check(std::abs(correct.scale - 1.0f) < 0.05f, harness.name + " correctly described depth was rescaled");
 
         // 3g. The head keeps moving after the newest frame: 4 cm sideways per
         // real frame interval, so the generated frame (half an interval on)
@@ -1369,6 +1382,42 @@ int RunReplay(Harness& harness) {
         }
         for (std::size_t v = 0; v < view_count; ++v) {
             const ReplayView& view = frame.views[v];
+            // Motion measured on the cockpit (depth nearer than 4 m), which
+            // stands still once head movement is taken out: noise there is
+            // jitter in generated frames.
+            std::vector<float> xy;
+            FrameGenExtent cells{};
+            double cockpit_motion = 0.0, cockpit_cells = 0.0, cockpit_moving = 0.0;
+            if (gpu->ReadFlow(v, xy, cells) && cells.width && cells.height) {
+                for (std::uint32_t cy = 0; cy < cells.height; ++cy) {
+                    for (std::uint32_t cx = 0; cx < cells.width; ++cx) {
+                        const std::uint32_t hx = std::min(view.half_width - 1, (cx * 2 + 1) * view.half_width / (cells.width * 2));
+                        const std::uint32_t hy = std::min(view.half_height - 1, (cy * 2 + 1) * view.half_height / (cells.height * 2));
+                        const float depth = std::abs(view.depth[std::size_t{hy} * view.half_width + hx]);
+                        if (!(depth > 0.0f && depth < 4.0f)) continue;
+                        const std::size_t i = (std::size_t{cy} * cells.width + cx) * 2;
+                        const double length = std::hypot(xy[i], xy[i + 1]);
+                        cockpit_motion += length;
+                        cockpit_moving += length > 0.5 ? 1.0 : 0.0;
+                        cockpit_cells += 1.0;
+                    }
+                }
+            }
+            if (!g_replay_output.empty() && v == 0 && !xy.empty()) {
+                // The flow as a little-endian float image (x, y per cell).
+                std::FILE* file = std::fopen((g_replay_output + "/frame-" + std::to_string(k) + "-flow-" +
+                                              std::to_string(cells.width) + "x" + std::to_string(cells.height) + ".f32")
+                                                 .c_str(),
+                                             "wb");
+                if (file) {
+                    std::fwrite(xy.data(), sizeof(float), xy.size(), file);
+                    std::fclose(file);
+                }
+            }
+            if (cockpit_cells > 0.0) {
+                std::printf("frame %zu view %zu cockpit motion: mean %.3f px, %.1f%% of cells above 0.5 px\n", k, v,
+                            cockpit_motion / cockpit_cells, 100.0 * cockpit_moving / cockpit_cells);
+            }
             const Pixels generated = harness.readback_sized(g_swapchains[outputs[v]][0]);
             std::vector<bool> valid;
             const Pixels truth = TurnTo(view, frames[k + 1].views[v], valid);
@@ -1394,7 +1443,8 @@ int RunReplay(Harness& harness) {
             run(k, k > 0, pass == 3 && k > 0);
         }
         if (pass == 2) {
-            std::printf("Depth reading: %s\n", ToString(gpu->DepthStatus().reading));
+            std::printf("Depth reading: %s, scale %.3f\n", ToString(gpu->DepthStatus().reading),
+                        static_cast<double>(gpu->DepthStatus().scale));
         }
     }
     gpu->Reset();

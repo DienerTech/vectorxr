@@ -632,6 +632,7 @@ class D3D12FrameGen final : public FrameGenGpu {
         if (validator_.Swapped()) {
             std::swap(depth_encoding.near_z, depth_encoding.far_z);
         }
+        depth_encoding.scale = validator_.Scale();
         const FrameGenDispatch dispatch = BuildFrameGenDepthDispatch(
             request.extent, depth.rect.offset.x, depth.rect.offset.y, static_cast<std::uint32_t>(depth.rect.extent.width),
             static_cast<std::uint32_t>(depth.rect.extent.height), depth.array_index, depth_encoding);
@@ -665,7 +666,7 @@ class D3D12FrameGen final : public FrameGenGpu {
     }
 
     FrameGenDepthStatus DepthStatus() const override {
-        return {validator_.Reading(), validator_.Decisions(), validator_.Evidence()};
+        return {validator_.Reading(), validator_.Decisions(), validator_.Evidence(), validator_.Scale()};
     }
 
     // Records what `other` says about `view`'s depth (see FG_PASS_DEPTH_TRUST)
@@ -784,7 +785,8 @@ class D3D12FrameGen final : public FrameGenGpu {
         Require(barriers, check_scores_, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         Flush(barriers);
         const FrameGenDispatch dispatch =
-            BuildFrameGenDepthCheckDispatch(first.request.newest, second.request.newest, view0.depth_encoding);
+            BuildFrameGenDepthCheckDispatch(first.request.newest, second.request.newest, view0.depth_encoding,
+                                            validator_.Scale(), validator_.ProbeStep());
         commands_->SetPipelineState(pipelines_[static_cast<std::size_t>(FrameGenPass::kDepthCheck)].Get());
         commands_->SetComputeRoot32BitConstants(0, sizeof(FrameGenConstants) / 4, &dispatch.constants, 0);
         commands_->SetComputeRootDescriptorTable(1, Gpu(base));
@@ -827,9 +829,14 @@ class D3D12FrameGen final : public FrameGenGpu {
                     scores[reading]->none += texel[1];
                     scores[reading]->samples += texel[2];
                     scores[reading]->fallback += texel[3];
-                } else {
+                } else if (reading == 2) {
                     evidence.binocular += texel[0];
                     evidence.cockpit += texel[1];
+                } else if (reading == 3) {
+                    for (int probe = 0; probe < 4; ++probe) evidence.probes[probe] += texel[probe];
+                } else {
+                    evidence.probes[4] += texel[0];
+                    evidence.probed += texel[1];
                 }
             }
         }

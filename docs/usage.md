@@ -596,8 +596,9 @@ use head rotation only for now.
 
 Games do not always describe their depth correctly, so Frame Generation first checks it against
 the other eye: depth that is right lines the two eyes' images up. It starts using depth once
-that check passes, recognizes depth stored the other way round, and ignores depth that does not
-line the eyes up. Where the other eye or the previous frame disproves depth in places, for
+that check passes, recognizes depth stored the other way round, corrects depth whose scale is
+described wrongly (MSFS 2024's is 1.2 times further than it says), and ignores depth that does
+not line the eyes up. Where the other eye or the previous frame disproves depth in places, for
 example cockpit glass the game wrote to depth over the scenery behind it, those places are
 treated as far away, and do not move with your eyes. The log reports each
 decision (**Frame Generation checked the game's depth against the other eye**), how much of the
