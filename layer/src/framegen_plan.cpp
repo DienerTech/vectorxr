@@ -17,6 +17,24 @@ Matrix3 RotationMatrix(const std::array<float, 4>& q) {
     }};
 }
 
+// `newest`'s position in `previous`'s view space, meters.
+std::array<float, 3> RelativeTranslation(const FrameGenViewGeometry& newest, const FrameGenViewGeometry& previous) {
+    const auto& q = previous.orientation;
+    const std::array<float, 3> delta{newest.position[0] - previous.position[0], newest.position[1] - previous.position[1],
+                                     newest.position[2] - previous.position[2]};
+    // Rotate by the inverse previous orientation: v + 2 w (u x v) + 2 u x (u x v), u = -q.xyz.
+    const std::array<float, 3> u{-q[0], -q[1], -q[2]};
+    const float w = q[3];
+    const std::array<float, 3> uv{u[1] * delta[2] - u[2] * delta[1], u[2] * delta[0] - u[0] * delta[2],
+                                  u[0] * delta[1] - u[1] * delta[0]};
+    const std::array<float, 3> uuv{u[1] * uv[2] - u[2] * uv[1], u[2] * uv[0] - u[0] * uv[2], u[0] * uv[1] - u[1] * uv[0]};
+    std::array<float, 3> translation{};
+    for (int i = 0; i < 3; ++i) {
+        translation[i] = delta[i] + 2.0f * (w * uv[i] + uuv[i]);
+    }
+    return translation;
+}
+
 std::array<float, 4> Tangents(const FrameGenViewGeometry& view) {
     return {std::tan(view.angle_left), std::tan(view.angle_right), std::tan(view.angle_up), std::tan(view.angle_down)};
 }
@@ -112,22 +130,8 @@ FrameGenViewPlan BuildFrameGenViewPlan(const FrameGenViewRequest& request, const
     // The w components carry the newest view's position in the previous
     // view's space (meters), used with depth: a point at newest-view depth z
     // along direction d lies at R d + t / z, up to scale, in the previous view.
-    std::array<float, 3> translation{0.0f, 0.0f, 0.0f};
-    if (request.depth) {
-        const auto& q = request.previous.orientation;
-        const std::array<float, 3> delta{request.newest.position[0] - request.previous.position[0],
-                                         request.newest.position[1] - request.previous.position[1],
-                                         request.newest.position[2] - request.previous.position[2]};
-        // Rotate by the inverse previous orientation: v + 2 w (u x v) + 2 u x (u x v), u = -q.xyz.
-        const std::array<float, 3> u{-q[0], -q[1], -q[2]};
-        const float w = q[3];
-        const std::array<float, 3> uv{u[1] * delta[2] - u[2] * delta[1], u[2] * delta[0] - u[0] * delta[2],
-                                      u[0] * delta[1] - u[1] * delta[0]};
-        const std::array<float, 3> uuv{u[1] * uv[2] - u[2] * uv[1], u[2] * uv[0] - u[0] * uv[2], u[0] * uv[1] - u[1] * uv[0]};
-        for (int i = 0; i < 3; ++i) {
-            translation[i] = delta[i] + 2.0f * (w * uv[i] + uuv[i]);
-        }
-    }
+    const std::array<float, 3> translation =
+        request.depth ? RelativeTranslation(request.newest, request.previous) : std::array<float, 3>{0.0f, 0.0f, 0.0f};
     base.rot0 = {rotation[0][0], rotation[0][1], rotation[0][2], translation[0]};
     base.rot1 = {rotation[1][0], rotation[1][1], rotation[1][2], translation[1]};
     base.rot2 = {rotation[2][0], rotation[2][1], rotation[2][2], translation[2]};
@@ -222,6 +226,82 @@ FrameGenViewPlan BuildFrameGenViewPlan(const FrameGenViewRequest& request, const
         plan.dispatches.push_back(output);
     }
     return plan;
+}
+
+FrameGenDispatch BuildFrameGenDepthCheckDispatch(const FrameGenViewGeometry& view0, const FrameGenViewGeometry& view1,
+                                                 const FrameGenDepthEncoding& encoding) {
+    FrameGenDispatch dispatch;
+    dispatch.pass = FrameGenPass::kDepthCheck;
+    dispatch.width = kFrameGenDepthCheckCells;
+    dispatch.height = kFrameGenDepthCheckCells;
+    // View 0 plays the newest view and view 1 the previous one in the shared
+    // mapping: direction rotation and position, view 0 into view 1.
+    dispatch.constants.fov_current = Tangents(view0);
+    dispatch.constants.fov_previous = Tangents(view1);
+    const Matrix3 rotation = FrameGenRelativeRotation(view0.orientation, view1.orientation);
+    const std::array<float, 3> translation = RelativeTranslation(view0, view1);
+    dispatch.constants.rot0 = {rotation[0][0], rotation[0][1], rotation[0][2], translation[0]};
+    dispatch.constants.rot1 = {rotation[1][0], rotation[1][1], rotation[1][2], translation[1]};
+    dispatch.constants.rot2 = {rotation[2][0], rotation[2][1], rotation[2][2], translation[2]};
+    dispatch.constants.size = {kFrameGenDepthCheckCells, kFrameGenDepthCheckCells, 0, 0};
+    dispatch.constants.options = {0, kFrameGenFlagDepth, 0, kFrameGenDepthCheckSamples};
+    // 1/near + 1/far: the swapped reading of a depth decoded to z is
+    // 1 / (x - 1/z), whichever way round the decoding currently is.
+    auto inverse = [](float z) { return std::isfinite(z) && z > 0.0f ? 1.0f / z : 0.0f; };
+    dispatch.constants.tuning = {inverse(encoding.near_z) + inverse(encoding.far_z), 0.0f, 0.0f, 0.0f};
+    dispatch.outputs = {Texture(FrameGenTextureKind::kNone), {}};
+    return dispatch;
+}
+
+const char* ToString(FrameGenDepthReading reading) {
+    switch (reading) {
+    case FrameGenDepthReading::kAsSubmitted:
+        return "as submitted";
+    case FrameGenDepthReading::kReversed:
+        return "with near and far swapped";
+    case FrameGenDepthReading::kUnusable:
+        return "not usable";
+    default:
+        return "not checked";
+    }
+}
+
+void FrameGenDepthValidator::Add(double current, double swapped, double none, double samples) {
+    if (samples <= 0.0) {
+        return;
+    }
+    sums_[0] += current;
+    sums_[1] += swapped;
+    sums_[2] += none;
+    samples_ += samples;
+    ++checks_;
+    // A few checks' worth of samples before deciding.
+    constexpr double kSamplesToDecide = 3.0 * kFrameGenDepthCheckCells * kFrameGenDepthCheckCells;
+    if (checks_ < 3 || samples_ < kSamplesToDecide) {
+        return;
+    }
+    last_errors_ = {sums_[0] / samples_, sums_[1] / samples_, sums_[2] / samples_};
+    const double best = std::min(last_errors_[0], last_errors_[1]);
+    FrameGenDepthReading reading = FrameGenDepthReading::kUnusable;
+    // Depth must line the eyes up clearly better than no depth at all.
+    if (best < 0.85 * last_errors_[2]) {
+        if (last_errors_[1] < last_errors_[0]) {
+            swapped_ = !swapped_;
+        }
+        reading = swapped_ ? FrameGenDepthReading::kReversed : FrameGenDepthReading::kAsSubmitted;
+    }
+    if (reading != reading_ || last_errors_[1] < last_errors_[0]) {
+        ++decisions_;
+    }
+    reading_ = reading;
+    sums_ = {};
+    samples_ = 0.0;
+    checks_ = 0;
+}
+
+bool FrameGenDepthValidator::WantsCheck(std::uint64_t submission) const {
+    return reading_ == FrameGenDepthReading::kUnknown || submission % 60 == 0 ||
+           (checks_ > 0 && checks_ < 3);
 }
 
 FrameGenDispatch BuildFrameGenDepthDispatch(FrameGenExtent view_extent, std::int32_t rect_x, std::int32_t rect_y,

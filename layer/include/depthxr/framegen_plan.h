@@ -21,9 +21,10 @@ enum class FrameGenPass : std::uint8_t {
     kFilter,
     kSynthesizeUnorm8,
     kSynthesizeFloat16,
-    kDepth, // the application's depth image to linear view depth (capture time)
+    kDepth,      // the application's depth image to linear view depth (capture time)
+    kDepthCheck, // scores readings of the depth against the other eye
 };
-inline constexpr std::size_t kFrameGenPassCount = 8;
+inline constexpr std::size_t kFrameGenPassCount = 9;
 
 // Logical textures owned per view. History and filtered flow are ping-pong
 // pairs: "newest" is written this submission, "previous" is last
@@ -198,6 +199,55 @@ struct FrameGenDepthEncoding {
 FrameGenDispatch BuildFrameGenDepthDispatch(FrameGenExtent view_extent, std::int32_t rect_x, std::int32_t rect_y,
                                             std::uint32_t rect_width, std::uint32_t rect_height,
                                             std::uint32_t array_index, const FrameGenDepthEncoding& encoding);
+
+// Games do not always describe their depth correctly (reversed depth marked
+// as standard is common), and wrong depth makes head-movement compensation
+// distort the whole image. Depth is therefore checked against the other eye:
+// view 0 is warped into view 1 by its depth and the eyes' relative pose,
+// which only lines up when the depth is read correctly. The kDepthCheck pass
+// writes, per cell of a kFrameGenDepthCheckCells grid, the summed luma error
+// of three readings (as currently decoded, with near and far swapped, and no
+// depth) and the sample count.
+inline constexpr std::uint32_t kFrameGenDepthCheckCells = 32;
+inline constexpr std::uint32_t kFrameGenDepthCheckSamples = 4; // per cell side
+FrameGenDispatch BuildFrameGenDepthCheckDispatch(const FrameGenViewGeometry& view0, const FrameGenViewGeometry& view1,
+                                                 const FrameGenDepthEncoding& encoding);
+
+enum class FrameGenDepthReading : std::uint8_t {
+    kUnknown,     // not checked yet: depth is not used
+    kAsSubmitted, // the game's description is right
+    kReversed,    // near and far swapped (reversed depth described as standard, or the reverse)
+    kUnusable,    // no reading lines the eyes up better than no depth
+};
+
+const char* ToString(FrameGenDepthReading reading);
+
+// Decides how to read a game's depth from kDepthCheck scores.
+class FrameGenDepthValidator {
+  public:
+    // One check's totals: luma error of the current decoding, the swapped
+    // one and no depth, and the samples behind them.
+    void Add(double current, double swapped, double none, double samples);
+    FrameGenDepthReading Reading() const { return reading_; }
+    // Whether the depth pass should swap the game's near and far.
+    bool Swapped() const { return swapped_; }
+    bool Usable() const { return reading_ == FrameGenDepthReading::kAsSubmitted || reading_ == FrameGenDepthReading::kReversed; }
+    // Checks run every submission until decided, then now and then.
+    bool WantsCheck(std::uint64_t submission) const;
+    // Counts decisions, so callers can log each one once.
+    std::uint32_t Decisions() const { return decisions_; }
+    // The last decision's mean errors (current, swapped, none).
+    std::array<double, 3> LastErrors() const { return last_errors_; }
+
+  private:
+    std::array<double, 3> sums_{};
+    double samples_{0.0};
+    std::uint32_t checks_{0};
+    FrameGenDepthReading reading_{FrameGenDepthReading::kUnknown};
+    bool swapped_{false};
+    std::uint32_t decisions_{0};
+    std::array<double, 3> last_errors_{};
+};
 // Luma level a flow level matches against: two levels finer, at most half resolution.
 std::uint8_t FrameGenMatchLevel(std::uint8_t flow_level);
 std::array<FrameGenExtent, kFrameGenPyramidLevels + 1> FrameGenPyramid(FrameGenExtent extent);

@@ -23,6 +23,7 @@
 #include <functional>
 #include <iostream>
 #include <map>
+#include <tuple>
 #include <string>
 #include <vector>
 
@@ -394,54 +395,113 @@ int RunScenarios(Harness& harness) {
               harness.name + " repeating windows alias worse than before");
     }
 
-    // 3c. Head translation in a cockpit: the head moves 2 cm sideways, so a
-    // panel 0.5 m away shifts ~10 px while the scenery stays. Nothing moves
-    // in the head's space, so a generated frame should show the newest frame
-    // as it is (the runtime corrects head motion). Rotation-only matching
-    // reads the parallax as motion and pushes the panel on; with the
-    // newest frame's depth the parallax is compensated.
+    // 3c. Head translation in a cockpit, seen by two eyes 64 mm apart: the
+    // head moves 2 cm sideways, so a panel 0.5 m away shifts ~10 px while the
+    // scenery stays. Nothing moves in the head's space, so a generated frame
+    // should show the newest frame as it is (the runtime corrects head
+    // motion). Rotation-only matching reads the parallax as motion and pushes
+    // the panel on; with depth it is compensated, but only once the depth
+    // has lined the eyes up, which also catches depth described wrongly.
     if (harness.create_depth) {
         const float shift = 0.02f;
-        const Pixels before = Cockpit(0.0f);
-        const Pixels after = Cockpit(shift);
-        harness.upload(g_swapchains[kSource][0], before);
-        harness.upload(g_swapchains[kSource][1], after);
-        FrameGenDepthEncoding encoding; // depth 0..1 for 0.1 m..100 m, 1/z linear
-        encoding.near_z = 0.1f;
-        encoding.far_z = 100.0f;
-        const float panel = (1.0f / kPanelDistance - 1.0f / encoding.near_z) / (1.0f / encoding.far_z - 1.0f / encoding.near_z);
-        g_swapchains[kDepthImage] = {harness.create_depth(panel, CockpitPanelRect(shift), 1.0f)};
-        Check(gpu->Track(kDepthImage, EnumerateImages, error), error);
+        const float half_ipd = 0.032f;
+        const XrSwapchain right_source = reinterpret_cast<XrSwapchain>(0x56);
+        const XrSwapchain right_output = reinterpret_cast<XrSwapchain>(0x57);
+        const XrSwapchain right_depth = reinterpret_cast<XrSwapchain>(0x58);
+        g_swapchains[right_source] = {harness.create(kSize, kSize), harness.create(kSize, kSize)};
+        g_swapchains[right_output] = {harness.create(kSize, kSize)};
+        harness.upload(g_swapchains[kSource][0], Cockpit(-half_ipd));
+        harness.upload(g_swapchains[kSource][1], Cockpit(shift - half_ipd));
+        harness.upload(g_swapchains[right_source][0], Cockpit(half_ipd));
+        harness.upload(g_swapchains[right_source][1], Cockpit(shift + half_ipd));
+        const Pixels truth = Cockpit(shift - half_ipd);
+        FrameGenDepthEncoding standard; // depth 0..1 for 0.1 m..100 m, 1/z linear
+        standard.near_z = 0.1f;
+        standard.far_z = 100.0f;
+        const float panel = (1.0f / kPanelDistance - 1.0f / standard.near_z) /
+                            (1.0f / standard.far_z - 1.0f / standard.near_z);
         tuning.mode = FrameGenSynthesisMode::kExtrapolate;
         tuning.fractions[0] = 0.5f;
-        auto submission = [&](std::uint32_t index, bool depth) {
-            FrameGenViewSubmission view = Submission(index, harness.format, output_format, true, 0, 0);
-            view.request.newest.position = {shift, 0, 0};
-            view.request.previous.position = {0, 0, 0};
-            view.request.depth = depth;
-            return view;
-        };
-        auto generate = [&](bool depth) {
-            gpu->ResetHistory();
-            Check(gpu->Execute({submission(0, depth)}, tuning, result, error), harness.name + " execute: " + error);
-            if (depth) {
-                const FrameGenImage image{kDepthImage, 0, 0, {{0, 0}, {static_cast<int>(kSize), static_cast<int>(kSize)}}, 0};
-                Check(gpu->CaptureDepth(0, image, encoding, submission(1, true).request, error),
-                      harness.name + " depth capture: " + error);
+        tuning.generated = 1;
+
+        // Runs one depth case on a fresh backend: depth images for the newest
+        // frame (panel and background values) described by `encoding`.
+        auto run_case = [&](float panel_value, float background_value, const FrameGenDepthEncoding& encoding,
+                            bool use_depth) {
+            auto backend = CreateFrameGenGpu(harness.binding, error);
+            Check(backend != nullptr, harness.name + " backend: " + error);
+            g_swapchains[kDepthImage] = {harness.create_depth(panel_value, CockpitPanelRect(shift - half_ipd), background_value)};
+            g_swapchains[right_depth] = {harness.create_depth(panel_value, CockpitPanelRect(shift + half_ipd), background_value)};
+            for (const XrSwapchain chain : {kSource, kOutput, right_source, right_output, kDepthImage, right_depth}) {
+                Check(backend->Track(chain, EnumerateImages, error), error);
             }
-            Check(gpu->Execute({submission(1, depth)}, tuning, result, error), harness.name + " execute: " + error);
-            Check(result.depth.size() == 1 && result.depth[0] == depth, harness.name + " depth use was not reported");
-            return harness.readback(g_swapchains[kOutput][0]);
+            auto views = [&](std::uint32_t index) {
+                FrameGenViewSubmission left = Submission(index, harness.format, output_format, true, 0, 0);
+                FrameGenViewSubmission right = left;
+                right.source.swapchain = right_source;
+                right.outputs = {{right_output, 0, 0, left.outputs[0].rect, output_format}};
+                left.outputs.resize(1);
+                left.request.newest.position = {shift - half_ipd, 0, 0};
+                left.request.previous.position = {-half_ipd, 0, 0};
+                right.request.newest.position = {shift + half_ipd, 0, 0};
+                right.request.previous.position = {half_ipd, 0, 0};
+                left.request.depth = right.request.depth = use_depth;
+                return std::vector<FrameGenViewSubmission>{left, right};
+            };
+            auto capture = [&] {
+                const XrRect2Di rect{{0, 0}, {static_cast<int>(kSize), static_cast<int>(kSize)}};
+                const auto requests = views(1);
+                Check(backend->CaptureDepth(0, {kDepthImage, 0, 0, rect, 0}, encoding, requests[0].request, error) &&
+                          backend->CaptureDepth(1, {right_depth, 0, 0, rect, 0}, encoding, requests[1].request, error),
+                      harness.name + " depth capture: " + error);
+            };
+            // Prime, then frames until the eyes have been checked a few times
+            // and the scores read back.
+            Check(backend->Execute(views(0), tuning, result, error), harness.name + " execute: " + error);
+            for (int i = 0; i < 9; ++i) {
+                capture();
+                Check(backend->Execute(views(1), tuning, result, error), harness.name + " execute: " + error);
+            }
+            backend->ResetHistory();
+            Check(backend->Execute(views(0), tuning, result, error), harness.name + " execute: " + error);
+            capture();
+            Check(backend->Execute(views(1), tuning, result, error), harness.name + " execute: " + error);
+            const bool used = result.depth.size() == 2 && result.depth[0];
+            const Pixels output = harness.readback(g_swapchains[kOutput][0]);
+            const FrameGenDepthReading reading = backend->DepthReading();
+            const auto errors = backend->DepthErrors();
+            std::cout << harness.name << " depth check: " << ToString(reading) << " after " << backend->DepthDecisions()
+                      << " decisions, errors " << errors[0] << " / " << errors[1] << " / " << errors[2] << std::endl;
+            backend->Reset();
+            return std::make_tuple(output, used, reading);
         };
-        const Pixels rotation_only = generate(false);
-        const Pixels with_depth = generate(true);
+
+        const auto [rotation_only, rotation_used, rotation_reading] = run_case(panel, 1.0f, standard, false);
+        const auto [correct, correct_used, correct_reading] = run_case(panel, 1.0f, standard, true);
+        // Reversed depth described as standard: near is 1, far is 0.
+        const auto [mislabeled, mislabeled_used, mislabeled_reading] = run_case(1.0f - panel, 0.0f, standard, true);
+        // Nonsense: the panel far away and the scenery half a meter off.
+        const auto [nonsense, nonsense_used, nonsense_reading] = run_case(1.0f, panel, standard, true);
         Dump(harness.name + "-cockpit-rotation-only", rotation_only);
-        Dump(harness.name + "-cockpit-depth", with_depth);
-        const double rotation_error = MeanError(rotation_only, after, 64, 64, kSize - 64, kSize - 64);
-        const double depth_error = MeanError(with_depth, after, 64, 64, kSize - 64, kSize - 64);
-        std::cout << harness.name << " cockpit: error " << depth_error << " with depth vs " << rotation_error
-                  << " rotation only" << std::endl;
-        Check(depth_error < 0.4 * rotation_error, harness.name + " depth did not compensate head translation");
+        Dump(harness.name + "-cockpit-depth", correct);
+        Dump(harness.name + "-cockpit-mislabeled", mislabeled);
+        const double rotation_error = MeanError(rotation_only, truth, 64, 64, kSize - 64, kSize - 64);
+        const double correct_error = MeanError(correct, truth, 64, 64, kSize - 64, kSize - 64);
+        const double mislabeled_error = MeanError(mislabeled, truth, 64, 64, kSize - 64, kSize - 64);
+        const double nonsense_error = MeanError(nonsense, truth, 64, 64, kSize - 64, kSize - 64);
+        std::cout << harness.name << " cockpit: error " << correct_error << " (" << ToString(correct_reading) << "), "
+                  << mislabeled_error << " mislabeled (" << ToString(mislabeled_reading) << "), " << nonsense_error
+                  << " nonsense (" << ToString(nonsense_reading) << ") vs " << rotation_error << " rotation only"
+                  << std::endl;
+        Check(!rotation_used, harness.name + " depth used without being asked for");
+        Check(correct_used && correct_reading == FrameGenDepthReading::kAsSubmitted && correct_error < 0.4 * rotation_error,
+              harness.name + " correct depth did not compensate head translation");
+        Check(mislabeled_used && mislabeled_reading == FrameGenDepthReading::kReversed &&
+                  mislabeled_error < 0.4 * rotation_error,
+              harness.name + " reversed depth described as standard was not recognized");
+        Check(!nonsense_used && nonsense_reading == FrameGenDepthReading::kUnusable &&
+                  nonsense_error < 1.2 * rotation_error,
+              harness.name + " nonsense depth was used");
     }
 
     // 4. Head rotation only: compensation must leave a static panorama where

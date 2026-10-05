@@ -258,6 +258,8 @@ void FrameGenPresenter::Stop() {
     app_frames_.clear();
     submissions_.clear();
     logged_first_generation_ = logged_capture_failure_ = logged_depth_ = false;
+    logged_depth_decisions_ = 0;
+    logged_depth_info_ = false;
     session_ = XR_NULL_HANDLE;
     idle_cv_.notify_all();
 }
@@ -567,6 +569,19 @@ void FrameGenPresenter::RecordCaptureTargetsLocked(const XrCompositionLayerProje
             target.encoding = {depth->minDepth, depth->maxDepth, depth->nearZ, depth->farZ};
             target.color_extent = Extent(projection.views[i]);
             capture_targets_.push_back(target);
+            if (logger_ && !logged_depth_info_) {
+                logged_depth_info_ = true;
+                const auto record = swapchains_.find(depth->subImage.swapchain);
+                logger_->Info("Frame Generation: the game submits depth described as minDepth=" + Number(depth->minDepth, 3) +
+                              ", maxDepth=" + Number(depth->maxDepth, 3) + ", nearZ=" + Number(depth->nearZ, 4) +
+                              ", farZ=" + Number(depth->farZ, 1) + ", region " +
+                              std::to_string(depth->subImage.imageRect.extent.width) + "x" +
+                              std::to_string(depth->subImage.imageRect.extent.height) + ", format " +
+                              std::to_string(record != swapchains_.end() ? record->second.format : 0) +
+                              (record != swapchains_.end() && record->second.depth_capturable ? ", readable"
+                                                                                               : ", not readable") +
+                              "; it is checked against the other eye before use.");
+            }
         }
     }
 }
@@ -1415,6 +1430,9 @@ bool FrameGenPresenter::Generate(const XrCompositionLayerProjection& projection,
     FrameGenExecuteResult executed;
     bool ok = true;
     double gpu_ms = -1.0;
+    std::uint32_t depth_decisions = 0;
+    FrameGenDepthReading depth_reading = FrameGenDepthReading::kUnknown;
+    std::array<double, 3> depth_errors{};
     {
         // Vulkan queues need external synchronization with the runtime's own
         // submissions on the session queue. Lock order: queue, GPU,
@@ -1441,6 +1459,9 @@ bool FrameGenPresenter::Generate(const XrCompositionLayerProjection& projection,
         ok = ok && gpu_->Execute(submissions, tuning, executed, error);
         if (gpu_) {
             gpu_ms = gpu_->LastGpuMilliseconds();
+            depth_decisions = gpu_->DepthDecisions();
+            depth_reading = gpu_->DepthReading();
+            depth_errors = gpu_->DepthErrors();
         }
     }
     // Every output here was acquired and waited; release them all so the
@@ -1454,6 +1475,15 @@ bool FrameGenPresenter::Generate(const XrCompositionLayerProjection& projection,
     }
     gpu_ms_ = gpu_ms;
     consecutive_failures_ = 0;
+    if (logger_ && depth_decisions != logged_depth_decisions_) {
+        logged_depth_decisions_ = depth_decisions;
+        logger_->Info(std::string("Frame Generation checked the game's depth against the other eye: reading it ") +
+                      ToString(depth_reading) +
+                      (depth_reading == FrameGenDepthReading::kUnusable ? ", so head movement is compensated for rotation only"
+                                                                        : ", head movement is compensated in full") +
+                      " (luma error " + Number(depth_errors[0], 4) + " as decoded, " + Number(depth_errors[1], 4) +
+                      " swapped, " + Number(depth_errors[2], 4) + " without depth).");
+    }
     const bool synthesized =
         std::any_of(executed.synthesized.begin(), executed.synthesized.end(), [](bool value) { return value; });
     if (logger_ && !logged_depth_ &&

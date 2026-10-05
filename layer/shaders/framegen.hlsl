@@ -586,3 +586,53 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
     g_linear_depth[id.xy] = inverse > 1.0 / FG_FAR_DEPTH ? 1.0 / inverse : FG_FAR_DEPTH;
 }
 #endif
+
+#if defined(FG_PASS_DEPTH_CHECK)
+#define FG_CHECK_OUTSIDE 0.25
+FG_BIND(0) Texture2D<float4> g_view0 : register(t0);
+FG_BIND(1) Texture2D<float4> g_view1 : register(t1);
+FG_BIND(2) Texture2D<float4> g_depth : register(t2);
+FG_BIND(6) SamplerState g_linear : register(s0);
+FG_BIND(4) FG_FORMAT("rgba32f") RWTexture2D<float4> g_scores : register(u0);
+
+// One cell of the depth check: view 0 samples warped into view 1 by their
+// depth read three ways (as decoded, near and far swapped, none), summing
+// the luma error of each.
+// fov_current/previous and the rotation rows describe view 0 -> view 1;
+// tuning.x is 1/near + 1/far; options.w samples per cell side.
+[numthreads(8, 8, 1)]
+void CSMain(uint3 id : SV_DispatchThreadID) {
+    if (any(id.xy >= g.size.xy)) {
+        return;
+    }
+    uint width, height;
+    g_depth.GetDimensions(width, height);
+    const int samples = int(g.options.w);
+    float3 sums = float3(0.0, 0.0, 0.0);
+    float count = 0.0;
+    [loop]
+    for (int sy = 0; sy < samples; ++sy) {
+        [loop]
+        for (int sx = 0; sx < samples; ++sx) {
+            const float2 uv = (float2(id.xy) + (float2(sx, sy) + 0.5) / float(samples)) / float2(g.size.xy);
+            const int2 texel = clamp(int2(uv * float2(width, height)), int2(0, 0), int2(width, height) - 1);
+            const float depth = g_depth.Load(int3(texel, 0)).r;
+            const float swapped_inverse = g.tuning.x - 1.0 / max(depth, 1e-6);
+            const float swapped = swapped_inverse > 1.0 / FG_FAR_DEPTH ? 1.0 / swapped_inverse : FG_FAR_DEPTH;
+            const float reference = Luma(g_view0.SampleLevel(g_linear, uv, 0.0).rgb);
+            // A reading that throws a sample out of the other eye's view pays a
+            // fixed error: counting only samples every reading keeps would let
+            // a wrong reading discard exactly the samples that expose it.
+            float2 a, b, c;
+            sums.x += MapToPrevious(uv, depth, a) ? abs(Luma(g_view1.SampleLevel(g_linear, a, 0.0).rgb) - reference)
+                                                  : FG_CHECK_OUTSIDE;
+            sums.y += MapToPrevious(uv, swapped, b) ? abs(Luma(g_view1.SampleLevel(g_linear, b, 0.0).rgb) - reference)
+                                                    : FG_CHECK_OUTSIDE;
+            sums.z += MapToPrevious(uv, FG_FAR_DEPTH, c) ? abs(Luma(g_view1.SampleLevel(g_linear, c, 0.0).rgb) - reference)
+                                                         : FG_CHECK_OUTSIDE;
+            count += 1.0;
+        }
+    }
+    g_scores[id.xy] = float4(sums, count);
+}
+#endif

@@ -76,6 +76,11 @@ class FrameGenGpu {
     // when the backend has no depth path).
     virtual XrSwapchainUsageFlags RequiredDepthUsage() const { return 0; }
     virtual bool SupportsDepth() const { return false; }
+    // How the game's depth is being read after checking it against the
+    // other eye, with the evidence; counts decisions so callers log each once.
+    virtual FrameGenDepthReading DepthReading() const { return FrameGenDepthReading::kUnknown; }
+    virtual std::uint32_t DepthDecisions() const { return 0; }
+    virtual std::array<double, 3> DepthErrors() const { return {}; }
     // Records and submits generation for every view on the session's graphics
     // queue, copying a view's source first unless Capture already did. Never
     // waits on the CPU for this submission.

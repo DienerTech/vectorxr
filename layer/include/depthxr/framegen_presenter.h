@@ -465,6 +465,8 @@ class FrameGenPresenter {
     std::optional<std::chrono::steady_clock::time_point> inline_hold_until_; // auto stays at full rate
     bool logged_first_generation_{false};
     bool logged_depth_{false};
+    std::uint32_t logged_depth_decisions_{0};
+    bool logged_depth_info_{false};
     bool logged_capture_failure_{false};
     void* timer_{nullptr}; // high-resolution waitable timer, frame thread only
 
