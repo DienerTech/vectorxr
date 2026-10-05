@@ -590,17 +590,22 @@ Frame Generation.
 
 When a game sends depth to the headset (MSFS 2024 does), Frame Generation uses it on
 Direct3D 12 automatically: head movement is compensated exactly, so cockpit instruments, panels
-and text stay still in generated frames instead of wobbling. Direct3D 11 and Vulkan games use
-head rotation only for now.
+and text stay still in generated frames instead of wobbling. Generated frames also show the
+cockpit from where your eyes will be when each frame is displayed, as the runtime predicts it.
+Most headset runtimes only correct head rotation between frames, so without this, near cockpit
+detail would jump at the game's frame rate whenever your head moved. Direct3D 11 and Vulkan games
+use head rotation only for now.
 
 Games do not always describe their depth correctly, so Frame Generation first checks it against
 the other eye: depth that is right lines the two eyes' images up. It starts using depth once
 that check passes, recognizes depth stored the other way round, and ignores depth that does not
-line the eyes up. Where the other eye disproves depth in places, for example cockpit glass the
-game wrote to depth over the scenery behind it, those places are treated as far away. The log
-reports each decision (**Frame Generation checked the game's depth against the other eye**),
-how much of the view the depth affects and how much of it the other eye disproved, and each
-30-second summary shows **depthUsed**, the share of real frames generated with depth.
+line the eyes up. Where the other eye or the previous frame disproves depth in places, for
+example cockpit glass the game wrote to depth over the scenery behind it, those places are
+treated as far away. Only cockpit detail they confirm moves with your eyes. The log reports each
+decision (**Frame Generation checked the game's depth against the other eye**), how much of the
+view the depth affects and how much of it the other eye disproved. Each 30-second summary shows
+**depthUsed**, the share of real frames generated with depth, and **eyeShiftMm**, how far
+generated frames moved with your eyes (average/largest, millimeters).
 
 #### Still detail
 

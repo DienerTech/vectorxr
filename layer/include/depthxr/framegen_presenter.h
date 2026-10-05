@@ -29,6 +29,11 @@ struct FrameGenRuntimeCalls {
     std::function<XrResult(XrSession, const XrFrameWaitInfo*, XrFrameState*)> wait;
     std::function<XrResult(XrSession, const XrFrameBeginInfo*)> begin;
     std::function<XrResult(XrSession, const XrFrameEndInfo*)> submit;
+    // The runtime's views (its own view configuration) in `space` at a
+    // display time, as predicted now; fails unless every pose is valid.
+    // Optional: without it generated frames keep the real frame's eye
+    // position.
+    std::function<XrResult(XrSession, XrSpace, XrTime, std::vector<XrView>&)> locate;
 };
 
 struct FrameGenSwapchainDispatch {
@@ -311,11 +316,19 @@ class FrameGenPresenter {
     XrResult RunCycle(XrSession session, const XrFrameEndInfo& info, const PendingFrame& frame,
                       const FrameGenRuntimeCalls& calls);
     // Generates one frame per fraction into the output swapchain sets from
-    // the newest real frame. On success `sets` holds the generated
-    // projection views, one set per fraction.
+    // the newest real frame, for display at `targets` (one per fraction).
+    // On success `sets` holds the generated projection views, one set per
+    // fraction.
     bool Generate(const XrCompositionLayerProjection& projection, const PendingFrame& frame,
-                  const std::vector<float>& fractions,
-                  std::vector<std::vector<XrCompositionLayerProjectionView>>& sets);
+                  const std::vector<float>& fractions, const std::vector<XrTime>& targets,
+                  const FrameGenRuntimeCalls& calls, std::vector<std::vector<XrCompositionLayerProjectionView>>& sets);
+    // How far each eye moves per unit of generated-frame time (`times`, one
+    // per target) from the real frame shown at `newest_time`, in that eye's
+    // view space, by the runtime's prediction (FrameGenViewRequest::shift);
+    // zeros when the runtime cannot say.
+    std::vector<std::array<float, 3>> EyeShifts(const XrCompositionLayerProjection& projection, XrTime newest_time,
+                                                const std::vector<float>& times, const std::vector<XrTime>& targets,
+                                                const FrameGenRuntimeCalls& calls);
     bool EnsureOutputs(const XrCompositionLayerProjection& projection, const std::vector<FrameGenOutputKind>& kinds,
                        std::size_t sets, std::string& error);
     // Acquires and waits the images of the first `sets` output sets.
@@ -530,6 +543,11 @@ class FrameGenPresenter {
     // since the last summary.
     std::uint64_t depth_window_frames_{0};
     std::uint64_t depth_window_used_{0};
+    // How far generated frames moved with the eye (the last one per real
+    // frame, millimeters) since the last summary.
+    double shift_window_sum_mm_{0.0};
+    double shift_window_max_mm_{0.0};
+    std::uint64_t shift_window_frames_{0};
     std::mutex submit_mutex_;            // presenter-thread submissions vs output swapchain calls
     std::mutex gpu_mutex_;               // the GPU backend (Track, Capture, Execute, WaitIdle, Forget, Reset)
     double gpu_ms_{-1.0};                // last generation GPU time, read without the backend

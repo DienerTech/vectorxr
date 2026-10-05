@@ -15,7 +15,9 @@
 // rotation only, or with the newest frame's depth the full pose, so content
 // fixed in the head's reference space (a cockpit) lines up exactly. The flow
 // then holds only world, vehicle and object motion: the runtime's own
-// reprojection corrects head motion for every submitted frame.
+// reprojection corrects head rotation for every submitted frame, and with
+// depth, generated frames are seen from where the eye will have moved to
+// (FG_PASS_SHIFT_*), which runtimes that only rotate frames never correct.
 
 #ifdef __spirv__
 #define FG_BIND(slot) [[vk::binding(slot, 0)]]
@@ -49,9 +51,18 @@ cbuffer FrameGenConstantBuffer : register(b0) {
 #define FG_FLAG_TEMPORAL 4u
 #define FG_FLAG_STILL 8u
 #define FG_FLAG_DEPTH 16u
+// Synthesis reads the eye-shift map (FG_PASS_SHIFT_*): generated frames
+// are seen from where the eye will be, not where the newest frame was.
+#define FG_FLAG_SHIFT 32u
 
 // Linear depth at or beyond this many meters is treated as infinitely far.
 #define FG_FAR_DEPTH 100000.0
+
+// Depth trust (FG_PASS_TRUST_UPDATE): a score per depth texel in [-1, 1],
+// positive where the other eye or the previous frame confirms the depth,
+// negative where content lines up as infinitely far instead. Depth is
+// dropped below -threshold and moves content with the eye above +threshold.
+#define FG_TRUST_THRESHOLD 0.25
 
 #define FG_VIEW_FLOW 1u
 #define FG_VIEW_CONFIDENCE 2u
@@ -413,6 +424,7 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
 FG_BIND(0) Texture2D<float4> g_flow_in : register(t0);
 FG_BIND(1) Texture2D<float4> g_flow_before : register(t1);
 FG_BIND(2) Texture2D<float4> g_depth : register(t2);
+FG_BIND(3) Texture2D<float4> g_trust : register(t3);
 FG_BIND(6) SamplerState g_linear : register(s0);
 FG_BIND(4) FG_FORMAT("rgba16f") RWTexture2D<float4> g_flow_out : register(u0);
 
@@ -420,6 +432,13 @@ FG_BIND(4) FG_FORMAT("rgba16f") RWTexture2D<float4> g_flow_out : register(u0);
 // within this many full-resolution pixels of it, plus this share of the speed.
 #define FG_STEADY_PIXELS 1.0
 #define FG_STEADY_SHARE 0.25
+// Cockpit content (trusted depth nearer than this many meters) lines up
+// exactly once head movement is compensated: motion below the first many
+// full-resolution pixels is matching noise on fine detail and is dropped,
+// fading back in by the second.
+#define FG_STILL_DEPTH 4.0
+#define FG_STILL_PIXELS 0.5
+#define FG_STILL_FADE 1.0
 
 // Cost-weighted vector median over 3x3: removes isolated mismatches without
 // blurring motion boundaries the way averaging would.
@@ -432,6 +451,8 @@ FG_BIND(4) FG_FORMAT("rgba16f") RWTexture2D<float4> g_flow_out : register(u0);
 // matching noise (instrument faces, fine text, anti-aliasing shimmer on
 // still cockpit detail) would make still content jitter at the real frame
 // rate; noise does not repeat from one frame pair to the next, motion does.
+// Where the depth is trusted (t3, FG_PASS_TRUST_UPDATE), sub-pixel motion of
+// cockpit content is dropped outright (FG_STILL_*).
 [numthreads(8, 8, 1)]
 void CSMain(uint3 id : SV_DispatchThreadID) {
     if (any(id.xy >= g.size.xy)) {
@@ -460,17 +481,21 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
             chosen = c;
         }
     }
-    const float2 v = samples[chosen].xy;
+    float2 v = samples[chosen].xy;
+    const float2 uv = (float2(id.xy) + 0.5) / float2(g.size.xy);
+    const float2 pixels = float2(g.size.xy) * float(1u << g.options.w);
+    const float depth = DepthNearest(g_depth, uv);
+    if (depth > 0.0 && depth < FG_STILL_DEPTH && DepthNearest(g_trust, uv) > FG_TRUST_THRESHOLD) {
+        v *= saturate((length(v * pixels) - FG_STILL_PIXELS) / FG_STILL_FADE);
+    }
     float steadiness = 1.0;
     const uint steady_flags = FG_FLAG_EXTRAPOLATE | FG_FLAG_TEMPORAL;
     if ((g.options.y & steady_flags) == steady_flags) {
         // Where this content was in the previous real frame, and the motion
         // it had there.
-        const float2 uv = (float2(id.xy) + 0.5) / float2(g.size.xy);
         float2 before_uv;
-        if (MapToPrevious(uv - v, DepthNearest(g_depth, uv), before_uv)) {
+        if (MapToPrevious(uv - v, depth, before_uv)) {
             const float2 before = g_flow_before.SampleLevel(g_linear, before_uv, 0.0).xy * g.tuning.x;
-            const float2 pixels = float2(g.size.xy) * float(1u << g.options.w);
             const float change = length((v - before) * pixels);
             const float speed = max(length(v * pixels), length(before * pixels));
             steadiness = saturate(2.0 - change / (FG_STEADY_PIXELS + FG_STEADY_SHARE * speed));
@@ -486,6 +511,10 @@ FG_BIND(1) Texture2D<float4> g_previous : register(t1);
 FG_BIND(2) Texture2D<float4> g_flow : register(t2);
 FG_BIND(3) Texture2D<float4> g_depth : register(t3);
 FG_BIND(6) SamplerState g_linear : register(s0);
+#if !defined(__spirv__)
+// The eye-shift map (FG_PASS_SHIFT_*), Direct3D 12 only, as depth is.
+Texture2D<uint> g_shift : register(t4);
+#endif
 #if defined(FG_PASS_SYNTHESIZE_UNORM8)
 FG_BIND(4) FG_FORMAT("rgba8") RWTexture2D<float4> g_output : register(u0);
 #elif defined(FG_PASS_SYNTHESIZE_FLOAT16)
@@ -528,9 +557,29 @@ float CandidateError(float2 uv, float2 v, float step) {
     return MaxComponent(abs(newest - previous));
 }
 
+// Where a generated pixel's content sits in the newest view: the pixel
+// itself, or with FG_FLAG_SHIFT where the eye-shift map says it comes from.
+// The map is for the eye's position at the frame time options.w (as float
+// bits, in units of `fraction` past the newest frame, or before it when
+// interpolating); other frames scale it by their own time.
+float2 SourceUv(uint2 pixel, float fraction) {
+    float2 uv = (float2(pixel) + 0.5) / float2(g.size.xy);
+#if !defined(__spirv__)
+    if ((g.options.y & FG_FLAG_SHIFT) != 0u) {
+        uint width, height;
+        g_shift.GetDimensions(width, height);
+        const uint packed = g_shift.Load(int3(min(int2(pixel >> 1), int2(width, height) - 1), 0));
+        const float2 back = float2(f16tof32(packed & 0xffffu), f16tof32(packed >> 16));
+        const float time = (g.options.y & FG_FLAG_EXTRAPOLATE) != 0u ? fraction : 1.0 - fraction;
+        uv += time / max(asfloat(g.options.w), 1e-6) * back / float2(width, height);
+    }
+#endif
+    return uv;
+}
+
 // One generated pixel at `fraction` (see FrameGenTuning::fractions).
 float4 Synthesize(uint2 pixel, float fraction) {
-    const float2 uv = (float2(pixel) + 0.5) / float2(g.size.xy);
+    const float2 uv = SourceUv(pixel, fraction);
     const float2 aspect = float2(1.0, float(g.size.y) / float(g.size.x));
     const bool extrapolate = (g.options.y & FG_FLAG_EXTRAPOLATE) != 0u;
     const bool still = (g.options.y & FG_FLAG_STILL) != 0u;
@@ -715,7 +764,7 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
 }
 #endif
 
-#if defined(FG_PASS_DEPTH_CHECK) || defined(FG_PASS_DEPTH_TRUST)
+#if defined(FG_PASS_DEPTH_CHECK) || defined(FG_PASS_DEPTH_TRUST) || defined(FG_PASS_TRUST_UPDATE)
 // Error of a sample whose reading throws it out of the other eye's view.
 #define FG_CHECK_OUTSIDE 0.25
 // Depth must beat "infinitely far" by this much luma error to count as
@@ -749,6 +798,48 @@ float PatchError(Texture2D<float4> image, SamplerState linear_sampler, float2 uv
         }
     }
     return sum / float(FG_CHECK_TAPS);
+}
+
+// The lowest PatchError at uv and one texel (`step`) either side along the
+// line content moves on with depth: depth and poses a texel off still line
+// the views up.
+float LineError(Texture2D<float4> image, SamplerState linear_sampler, float2 uv, float2 step, float2 spacing,
+                float reference[FG_CHECK_TAPS]) {
+    float best = PatchError(image, linear_sampler, uv, spacing, reference);
+    best = min(best, PatchError(image, linear_sampler, uv - step, spacing, reference));
+    return min(best, PatchError(image, linear_sampler, uv + step, spacing, reference));
+}
+
+// How clearly a view lines up with the depth (positive, up to 1) or as
+// infinitely far (negative): the errors' difference over the larger one.
+// Within FG_CHECK_MARGIN noise decides, so there is no evidence.
+float Evidence(float near_error, float far_error) {
+    const float difference = far_error - near_error;
+    return abs(difference) < FG_CHECK_MARGIN
+               ? 0.0
+               : clamp(difference / max(max(near_error, far_error), 0.04), -1.0, 1.0);
+}
+
+// Evidence for `depth` at uv from `other`, an image the mapping
+// (MapToPrevious) takes uv into: the other eye, or the previous frame.
+// Zero where depth and "infinitely far" land within a texel of each other
+// or outside `other`.
+float DepthEvidence(Texture2D<float4> own, Texture2D<float4> other, SamplerState linear_sampler, float2 uv, float depth,
+                    float2 size) {
+    float evidence = 0.0;
+    float2 near_uv, far_uv;
+    if (MapToPrevious(uv, depth, near_uv) && MapToPrevious(uv, FG_FAR_DEPTH, far_uv)) {
+        const float2 apart = (near_uv - far_uv) * size;
+        if (dot(apart, apart) >= 1.0) {
+            const float2 spacing = 1.0 / size;
+            const float2 step = normalize(apart) * spacing;
+            float reference[FG_CHECK_TAPS];
+            LoadPatch(own, linear_sampler, uv, spacing, reference);
+            evidence = Evidence(LineError(other, linear_sampler, near_uv, step, spacing, reference),
+                                LineError(other, linear_sampler, far_uv, step, spacing, reference));
+        }
+    }
+    return evidence;
 }
 #endif
 
@@ -898,39 +989,284 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
 #if defined(FG_PASS_DEPTH_TRUST)
 FG_BIND(0) Texture2D<float4> g_own : register(t0);
 FG_BIND(1) Texture2D<float4> g_other : register(t1);
+FG_BIND(2) Texture2D<float4> g_depth : register(t2);
 FG_BIND(6) SamplerState g_linear : register(s0);
-FG_BIND(4) FG_FORMAT("r32f") RWTexture2D<float> g_depth : register(u0);
+FG_BIND(4) FG_FORMAT("r32f") RWTexture2D<float> g_evidence : register(u0);
 
 // Per texel of one view's linear depth: does the other eye see what the
-// depth says it should? Where the content lines up clearly better as
-// infinitely far (scenery behind cockpit glass the game wrote depth for, or
-// depth that is wrong there), the texel is negated, so head movement is
-// compensated for rotation only there. Texels the other eye cannot verify
-// (seen by one eye only, occluded, or as near and far alike) are kept.
+// depth says it should (DepthEvidence)? Negative where the content lines up
+// clearly better as infinitely far: scenery behind cockpit glass the game
+// wrote depth for, or depth that is wrong there. Zero where the other eye
+// cannot tell (seen by one eye only, or as near and far alike).
+// FG_PASS_TRUST_UPDATE turns it into the texel's trust score.
 // fov_current/previous and the rotation rows describe this view -> the other.
 [numthreads(8, 8, 1)]
 void CSMain(uint3 id : SV_DispatchThreadID) {
     if (any(id.xy >= g.size.xy)) {
         return;
     }
+    const float depth = g_depth.Load(int3(id.xy, 0)).r;
+    const float2 size = float2(g.size.xy);
+    g_evidence[id.xy] = depth > 0.0 && depth < FG_FAR_DEPTH
+                            ? DepthEvidence(g_own, g_other, g_linear, (float2(id.xy) + 0.5) / size, depth, size)
+                            : 0.0;
+}
+#endif
+
+#if defined(FG_PASS_TRUST_UPDATE)
+FG_BIND(0) Texture2D<float4> g_newest : register(t0);
+FG_BIND(1) Texture2D<float4> g_previous : register(t1);
+FG_BIND(2) Texture2D<float4> g_trust_before : register(t2);
+FG_BIND(6) SamplerState g_linear : register(s0);
+FG_BIND(4) FG_FORMAT("r32f") RWTexture2D<float> g_trust : register(u0);
+FG_BIND(5) FG_FORMAT("r32f") RWTexture2D<float> g_depth : register(u1);
+
+#define FG_TRUST_STEREO 1u  // g_trust holds this frame's stereo evidence (FG_PASS_DEPTH_TRUST)
+#define FG_TRUST_HISTORY 2u // g_trust_before is last frame's score
+#define FG_TRUST_MOTION 4u  // g_previous is the previous real frame
+// Last frame's score carries over at this weight; stereo and motion
+// evidence add theirs.
+#define FG_TRUST_KEEP 0.8
+#define FG_TRUST_STEREO_WEIGHT 0.6
+#define FG_TRUST_MOTION_WEIGHT 0.4
+
+// Each depth texel's trust score, from three sources:
+//   - the other eye (FG_PASS_DEPTH_TRUST), where both eyes see it;
+//   - the previous frame: head movement between the frames moves content
+//     at its depth differently from infinitely far content, so cockpit
+//     detail confirms its depth where one eye sees it alone (scenery that
+//     moves on its own lines up neither way and says nothing);
+//   - last frame's score at the texel's previous position: cockpit and
+//     glass stay where they are in the cockpit, so the depth maps a texel
+//     to where it was.
+// Then drops the depth of texels scored below -threshold (negated: head
+// movement is compensated for rotation only there).
+// options.x: FG_TRUST_* flags; the mapping describes newest -> previous.
+[numthreads(8, 8, 1)]
+void CSMain(uint3 id : SV_DispatchThreadID) {
+    if (any(id.xy >= g.size.xy)) {
+        return;
+    }
     const float depth = g_depth[id.xy];
-    if (!(depth > 0.0 && depth < FG_FAR_DEPTH)) {
+    float score = 0.0;
+    if (depth > 0.0 && depth < FG_FAR_DEPTH) {
+        const float2 size = float2(g.size.xy);
+        const float2 uv = (float2(id.xy) + 0.5) / size;
+        const float stereo = (g.options.x & FG_TRUST_STEREO) != 0u ? g_trust[id.xy] : 0.0;
+        const float motion = (g.options.x & FG_TRUST_MOTION) != 0u
+                                 ? DepthEvidence(g_newest, g_previous, g_linear, uv, depth, size)
+                                 : 0.0;
+        float carried = 0.0;
+        float2 before_uv;
+        if ((g.options.x & FG_TRUST_HISTORY) != 0u && MapToPrevious(uv, depth, before_uv)) {
+            const int2 texel = clamp(int2(before_uv * size), int2(0, 0), int2(g.size.xy) - 1);
+            carried = g_trust_before.Load(int3(texel, 0)).r;
+        }
+        score = clamp(FG_TRUST_KEEP * carried + FG_TRUST_STEREO_WEIGHT * stereo + FG_TRUST_MOTION_WEIGHT * motion,
+                      -1.0, 1.0);
+        if (score < -FG_TRUST_THRESHOLD) {
+            g_depth[id.xy] = -depth;
+        }
+    }
+    g_trust[id.xy] = score;
+}
+#endif
+
+#if defined(FG_PASS_SHIFT_CLEAR)
+FG_BIND(4) FG_FORMAT("r32ui") RWTexture2D<uint> g_target : register(u0);
+
+[numthreads(8, 8, 1)]
+void CSMain(uint3 id : SV_DispatchThreadID) {
+    if (all(id.xy < g.size.xy)) {
+        g_target[id.xy] = 0u;
+    }
+}
+#endif
+
+#if defined(FG_PASS_SHIFT_SPLAT) || defined(FG_PASS_SHIFT_RESOLVE)
+FG_BIND(0) Texture2D<float4> g_depth : register(t0);
+FG_BIND(1) Texture2D<float4> g_trust : register(t1);
+
+// The eye-shift map: where each texel of the newest frame lands when seen
+// from the eye's position at a generated frame's time (head movement the
+// runtime does not correct: it only rotates frames). Content moves with
+// the eye only where its depth is trusted (cockpit detail); everything else
+// stays, as if infinitely far. Every half-resolution texel splats onto the
+// 2x2 texels around where it lands; nearer content wins (largest key), so
+// cockpit edges cover what they move over.
+//
+// The mapping (MapToPrevious) takes the newest view to the shifted eye's:
+// no rotation, position in rot*.w. Returns false where the texel leaves the
+// view; `landing` is in texels (centres at +0.5).
+
+// Neighbours within this share of a texel's depth belong to its surface.
+#define FG_SHIFT_SURFACE 0.03
+
+// Whether a texel moves with the eye: its depth is trusted, or at least
+// three of its neighbours on the same surface are (a texel too plain for
+// either eye to vouch for still moves with the panel around it). Depth the
+// trust update dropped (negative) never moves.
+bool MovesWithEye(int2 id, float depth) {
+    if (g_trust.Load(int3(id, 0)).r > FG_TRUST_THRESHOLD) {
+        return true;
+    }
+    const int2 limit = int2(g.size.xy) - 1;
+    int vouching = 0;
+    [unroll]
+    for (int i = 0; i < 9; ++i) {
+        const int2 texel = clamp(id + int2(i % 3 - 1, i / 3 - 1), int2(0, 0), limit);
+        const float neighbour = g_depth.Load(int3(texel, 0)).r;
+        if (i != 4 && abs(neighbour - depth) < FG_SHIFT_SURFACE * depth &&
+            g_trust.Load(int3(texel, 0)).r > FG_TRUST_THRESHOLD) {
+            ++vouching;
+        }
+    }
+    return vouching >= 3;
+}
+
+bool Landing(uint2 id, out float2 landing, out uint key) {
+    const float2 size = float2(g.size.xy);
+    const float2 uv = (float2(id) + 0.5) / size;
+    const float depth = g_depth.Load(int3(id, 0)).r;
+    const bool known = depth > 0.0 && depth < FG_FAR_DEPTH;
+    float2 shifted = uv;
+    bool inside = true;
+    bool moves = false;
+    if (known && MovesWithEye(int2(id), depth)) {
+        inside = MapToPrevious(uv, depth, shifted);
+        moves = true;
+    }
+    landing = shifted * size;
+    // Positive floats order like their bits; 0 marks texels nothing reached.
+    // The lowest bit breaks ties at one depth in favour of moved content:
+    // what stayed is where its surface was, not where it is.
+    key = ((asuint(known ? 1.0 / depth : 0.0) + 2u) & ~1u) | (moves ? 1u : 0u);
+    return inside;
+}
+#endif
+
+#if defined(FG_PASS_SHIFT_SPLAT)
+FG_BIND(4) FG_FORMAT("r32ui") RWTexture2D<uint> g_keys : register(u0);
+
+[numthreads(8, 8, 1)]
+void CSMain(uint3 id : SV_DispatchThreadID) {
+    float2 landing;
+    uint key;
+    if (all(id.xy < g.size.xy) && Landing(id.xy, landing, key)) {
+        const int2 first = int2(floor(landing - 0.5));
+        [unroll]
+        for (int i = 0; i < 4; ++i) {
+            const int2 texel = first + int2(i & 1, i >> 1);
+            if (all(texel >= 0) && all(texel < int2(g.size.xy))) {
+                InterlockedMax(g_keys[texel], key);
+            }
+        }
+    }
+}
+#endif
+
+#if defined(FG_PASS_SHIFT_RESOLVE)
+FG_BIND(2) Texture2D<uint> g_keys : register(t2);
+FG_BIND(4) FG_FORMAT("r32ui") RWTexture2D<uint> g_shift : register(u0);
+
+// The winners of FG_PASS_SHIFT_SPLAT write where their content comes from:
+// the offset from the shifted texel back to its source, in texels, as two
+// halves.
+[numthreads(8, 8, 1)]
+void CSMain(uint3 id : SV_DispatchThreadID) {
+    float2 landing;
+    uint key;
+    if (all(id.xy < g.size.xy) && Landing(id.xy, landing, key)) {
+        const float2 back = float2(id.xy) + 0.5 - landing;
+        const uint packed = f32tof16(back.x) | (f32tof16(back.y) << 16);
+        const int2 first = int2(floor(landing - 0.5));
+        [unroll]
+        for (int i = 0; i < 4; ++i) {
+            const int2 texel = first + int2(i & 1, i >> 1);
+            if (all(texel >= 0) && all(texel < int2(g.size.xy)) && g_keys.Load(int3(texel, 0)) == key) {
+                g_shift[texel] = packed;
+            }
+        }
+    }
+}
+#endif
+
+#if defined(FG_PASS_SHIFT_FILL)
+FG_BIND(0) Texture2D<uint> g_keys : register(t0);
+FG_BIND(4) FG_FORMAT("r32ui") RWTexture2D<uint> g_shift : register(u0);
+
+#define FG_FILL_REACH 7  // texels 1, 2, 4 ... 64 away
+#define FG_FILL_REFINE 3
+
+// The first texel some content reached from `start` along `direction`, at
+// doubling distances then halving back toward the gap; `key` 0 if none.
+int2 Reached(int2 start, float2 direction, out uint key) {
+    key = 0u;
+    int2 found = start;
+    float inside = 0.0; // distance known to be in the gap
+    float outside = 0.0;
+    float distance = 1.0;
+    [loop]
+    for (int i = 0; i < FG_FILL_REACH && outside == 0.0; ++i) {
+        const int2 texel = int2(round(float2(start) + direction * distance));
+        if (any(texel < 0) || any(texel >= int2(g.size.xy))) {
+            break;
+        }
+        const uint value = g_keys.Load(int3(texel, 0));
+        if (value != 0u) {
+            key = value;
+            found = texel;
+            outside = distance;
+        } else {
+            inside = distance;
+            distance *= 2.0;
+        }
+    }
+    [loop]
+    for (int r = 0; r < FG_FILL_REFINE && outside > inside + 1.0; ++r) {
+        const float middle = 0.5 * (inside + outside);
+        const int2 texel = int2(round(float2(start) + direction * middle));
+        const uint value = g_keys.Load(int3(texel, 0));
+        if (value != 0u) {
+            key = value;
+            found = texel;
+            outside = middle;
+        } else {
+            inside = middle;
+        }
+    }
+    return found;
+}
+
+// Texels nothing reached: content the eye's movement uncovers, which the
+// newest frame never saw. Moving content leaves the gap along the line it
+// moves on, so the nearest texel either side is found there and the farther
+// one (background) is stretched over the gap.
+[numthreads(8, 8, 1)]
+void CSMain(uint3 id : SV_DispatchThreadID) {
+    if (any(id.xy >= g.size.xy) || g_keys.Load(int3(id.xy, 0)) != 0u) {
         return;
     }
     const float2 size = float2(g.size.xy);
     const float2 uv = (float2(id.xy) + 0.5) / size;
-    float2 near_uv, far_uv;
-    if (!MapToPrevious(uv, FG_FAR_DEPTH, far_uv) || !MapToPrevious(uv, depth, near_uv) ||
-        all(abs(near_uv - far_uv) * size < 1.0)) {
-        return;
+    const float2 tangent = float2(lerp(g.fov_current.x, g.fov_current.y, uv.x), lerp(g.fov_current.z, g.fov_current.w, uv.y));
+    // A point d/z moves by (t.xy + d t.z) / z for an eye at -t (first order).
+    const float3 t = float3(g.rot0.w, g.rot1.w, g.rot2.w);
+    float2 direction = (t.xy + tangent * t.z) /
+                       float2(g.fov_current.y - g.fov_current.x, g.fov_current.w - g.fov_current.z) * size;
+    direction = dot(direction, direction) > 1e-12 ? normalize(direction) : float2(1.0, 0.0);
+    uint ahead_key, behind_key;
+    const int2 ahead = Reached(int2(id.xy), direction, ahead_key);
+    const int2 behind = Reached(int2(id.xy), -direction, behind_key);
+    const bool use_ahead = ahead_key != 0u && (behind_key == 0u || ahead_key <= behind_key);
+    const int2 source = use_ahead ? ahead : behind;
+    uint packed = 0u;
+    if (ahead_key != 0u || behind_key != 0u) {
+        const uint neighbour = g_shift[source];
+        const float2 back = float2(f16tof32(neighbour & 0xffffu), f16tof32(neighbour >> 16)) +
+                            float2(source - int2(id.xy));
+        packed = f32tof16(back.x) | (f32tof16(back.y) << 16);
     }
-    const float2 spacing = 1.0 / size;
-    float reference[FG_CHECK_TAPS];
-    LoadPatch(g_own, g_linear, uv, spacing, reference);
-    const float near_error = PatchError(g_other, g_linear, near_uv, spacing, reference);
-    const float far_error = PatchError(g_other, g_linear, far_uv, spacing, reference);
-    if (far_error + FG_CHECK_MARGIN < near_error && far_error < 0.6 * near_error) {
-        g_depth[id.xy] = -depth;
-    }
+    g_shift[id.xy] = packed;
 }
 #endif

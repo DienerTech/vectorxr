@@ -168,9 +168,34 @@ Depth is only used once it is shown to be read correctly. A check pass warps vie
 by the depth and the eyes' relative pose, over the samples both eyes see, and scores the depth
 as decoded and with near and far swapped against no depth; `FrameGenDepthValidator` adopts a
 reading that clearly lines the eyes up, and drops depth only once it no longer helps at all.
-Each frame, before any view uses it, a trust pass negates the depth texels the other eye
-disproves (scenery behind cockpit glass written to depth), which are then compensated for
-rotation only.
+
+Each frame, before any view uses it, every depth texel gets a trust score in [-1, 1]:
+
+- the other eye's evidence, where both eyes see the texel: does its content line up at the
+  depth, or as infinitely far (scenery behind cockpit glass written to depth)?
+- the previous frame's evidence: head movement between the two frames moves content at its depth
+  differently from infinitely far content, so cockpit detail is confirmed even where one eye sees
+  it alone;
+- last frame's score at the texel's previous position (cockpit and glass stay put in the cockpit),
+  so the score is steady and decisions carry across the view as the head turns.
+
+Texels scored below -0.25 are negated and compensated for rotation only. Texels above +0.25 move
+with the eye. Runtimes that only rotate submitted frames (Pimax among them) never correct head
+translation, so a generated frame shown 11-33 ms after its real frame would show near cockpit
+content from where the eye was, and that content would jump at the real frame rate. The presenter
+asks the runtime where each eye will be at every generated frame's display time
+(`FrameGenRuntimeCalls::locate`, in the eye's own view space). Synthesis then reads an eye-shift
+map built per view:
+
+1. Every half-resolution texel splats onto the texels around where it lands from the new eye
+   position, with an atomic max on its inverse depth, so nearer content covers what it moves over.
+2. The winners write the offset back to their source.
+3. Texels nothing reached (content the movement uncovers) stretch the farther neighbour along the
+   line content moves on.
+
+The map is built for the generated frame furthest in time; the others scale it. Generated frames
+are submitted with the eye's predicted position. Trusted cockpit content also drops sub-pixel
+motion as matching noise.
 
 When extrapolating, the filter pass also rates how steady each motion vector is against the
 vector the same content had one real frame pair earlier, scaled by the ratio of the two pairs'

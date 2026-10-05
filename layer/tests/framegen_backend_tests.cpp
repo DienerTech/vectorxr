@@ -606,9 +606,10 @@ int RunScenarios(Harness& harness) {
         };
         // Runs one depth case on a fresh backend: depth images for the newest
         // frame (panel and background values, the near value over the panel
-        // grown by `glass` px) described by `encoding`.
+        // grown by `glass` px) described by `encoding`; the eyes keep moving
+        // `eye` meters sideways per unit of generated-frame time.
         auto run_case = [&](float panel_value, float background_value, const FrameGenDepthEncoding& encoding,
-                            bool use_depth, int glass) {
+                            bool use_depth, int glass, float eye = 0.0f) {
             auto backend = CreateFrameGenGpu(harness.binding, error);
             Check(backend != nullptr, harness.name + " backend: " + error);
             g_swapchains[kDepthImage] = {harness.create_depth(panel_value, grow(left_panel, glass), background_value)};
@@ -635,6 +636,7 @@ int RunScenarios(Harness& harness) {
                 right.request.newest.position = {shift + half_ipd, 0, 0};
                 right.request.previous.position = {half_ipd, 0, 0};
                 left.request.depth = right.request.depth = use_depth;
+                left.request.shift = right.request.shift = {eye, 0.0f, 0.0f};
                 return std::vector<FrameGenViewSubmission>{left, right};
             };
             // Color is captured at release, as games' frames are; the depth
@@ -711,6 +713,29 @@ int RunScenarios(Harness& harness) {
               harness.name + " nonsense depth was used");
         Check(glass.used && glass.reading == FrameGenDepthReading::kAsSubmitted && glass_error < 0.4 * rotation_error,
               harness.name + " depth wrong around the panel (glass) was not dropped there");
+
+        // 3g. The head keeps moving after the newest frame: 4 cm sideways per
+        // real frame interval, so the generated frame (half an interval on)
+        // sees the panel from 2 cm further, ~10 px of parallax. Runtimes
+        // only rotate frames, so the generated frame itself must show it;
+        // the scenery (and glass in front of it) stays.
+        const float eye = 0.04f;
+        const Pixels moved_truth = Cockpit(shift - half_ipd + 0.5f * eye, -outer, inner);
+        const Outcome moving = run_case(panel, 1.0f, standard, true, 0, eye);
+        const Outcome moving_glass = run_case(panel, 1.0f, standard, true, 40, eye);
+        Dump(harness.name + "-cockpit-eye-shift", moving.output);
+        Dump(harness.name + "-cockpit-eye-shift-glass", moving_glass.output);
+        Dump(harness.name + "-cockpit-eye-shift-truth", moved_truth);
+        auto moved_error_of = [&](const Pixels& output) { return MeanError(output, moved_truth, 64, 64, kSize - 64, kSize - 64); };
+        const double moving_error = moved_error_of(moving.output);
+        const double moving_glass_error = moved_error_of(moving_glass.output);
+        const double unshifted_error = moved_error_of(correct.output);
+        std::cout << harness.name << " eye shift: error " << moving_error << ", " << moving_glass_error
+                  << " glass vs " << unshifted_error << " unshifted" << std::endl;
+        Check(moving.used && moving_error < 0.4 * unshifted_error,
+              harness.name + " generated frames did not follow the eye");
+        Check(moving_glass.used && moving_glass_error < 0.4 * unshifted_error,
+              harness.name + " glass moved with the eye");
     }
 
     // 4. Head rotation only: compensation must leave a static panorama where
@@ -912,7 +937,8 @@ int RunProfile(Harness& harness) {
     encoding.far_z = 0.1f;
     const char* names[] = {"luma",        "downsample",  "search",      "refine",      "filter",
                            "synthesize",  "synthesize16", "depth",      "depth check", "depth trust",
-                           "flow pack",   "flow unpack", "source copy", "output copy", "hardware wait"};
+                           "flow pack",   "flow unpack", "trust update", "shift clear", "shift splat",
+                           "shift resolve", "shift fill", "source copy", "output copy", "hardware wait"};
     static_assert(std::size(names) == kFrameGenPassCount + 3, "a name per profiled category");
     for (const int config : {0, 1, 2}) {
         const auto quality = config == 1 ? FrameGenFlowQuality::kQuality : FrameGenFlowQuality::kBalanced;
@@ -943,6 +969,8 @@ int RunProfile(Harness& harness) {
                 view.request.synthesize = true;
                 view.request.temporal = true;
                 view.request.depth = true;
+                // The head moving 2 cm per real frame: generated frames follow the eye.
+                view.request.shift = {0.02f, 0.0f, 0.0f};
                 for (auto* geometry : {&view.request.newest, &view.request.previous}) {
                     geometry->angle_left = std::atan(eye == 0 ? -outer : -inner);
                     geometry->angle_right = std::atan(eye == 0 ? inner : outer);

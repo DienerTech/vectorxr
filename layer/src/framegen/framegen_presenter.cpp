@@ -56,6 +56,24 @@ FrameGenViewGeometry Geometry(const XrCompositionLayerProjectionView& view) {
     return geometry;
 }
 
+// A head moves well under 2 m/s: eye shifts per unit of generated-frame
+// time (at most a real frame interval, ~50 ms at low frame rates) above
+// this are tracking glitches.
+constexpr double kMaxEyeShift = 0.1;
+
+// `v` rotated by the unit quaternion `q`, and by its inverse.
+std::array<double, 3> Rotate(const XrQuaternionf& q, const std::array<double, 3>& v) {
+    const double x = q.x, y = q.y, z = q.z, w = q.w;
+    // v + 2 w (u x v) + 2 u x (u x v), u = q.xyz.
+    const std::array<double, 3> uv{y * v[2] - z * v[1], z * v[0] - x * v[2], x * v[1] - y * v[0]};
+    const std::array<double, 3> uuv{y * uv[2] - z * uv[1], z * uv[0] - x * uv[2], x * uv[1] - y * uv[0]};
+    return {v[0] + 2.0 * (w * uv[0] + uuv[0]), v[1] + 2.0 * (w * uv[1] + uuv[1]), v[2] + 2.0 * (w * uv[2] + uuv[2])};
+}
+
+std::array<double, 3> RotateInverse(const XrQuaternionf& q, const std::array<double, 3>& v) {
+    return Rotate(XrQuaternionf{-q.x, -q.y, -q.z, q.w}, v);
+}
+
 // The depth chained to a projection view, if any.
 const XrCompositionLayerDepthInfoKHR* DepthInfo(const XrCompositionLayerProjectionView& view) {
     for (auto* next = static_cast<const XrBaseInStructure*>(view.next); next; next = next->next) {
@@ -1251,12 +1269,12 @@ XrResult FrameGenPresenter::RunCycle(XrSession session, const XrFrameEndInfo& in
     bool interpolated_ready = false;
     if (mode == FrameGenSynthesisMode::kInterpolate) {
         std::vector<float> fractions;
+        std::vector<XrTime> targets;
         for (std::uint32_t slot = 0; slot < generated; ++slot) {
-            fractions.push_back(continuous ? FrameGenFraction(mode, previous_time, newest_time,
-                                                              frame.slot_time + period * static_cast<XrDuration>(slot))
-                                           : 1.0f);
+            targets.push_back(frame.slot_time + period * static_cast<XrDuration>(slot));
+            fractions.push_back(continuous ? FrameGenFraction(mode, previous_time, newest_time, targets.back()) : 1.0f);
         }
-        interpolated_ready = Generate(projection, frame, fractions, interpolated);
+        interpolated_ready = Generate(projection, frame, fractions, targets, calls, interpolated);
     }
 
     XrTime time = frame.slot_time;
@@ -1308,13 +1326,13 @@ XrResult FrameGenPresenter::RunCycle(XrSession session, const XrFrameEndInfo& in
     if (mode == FrameGenSynthesisMode::kExtrapolate) {
         // The newest frame pushed forward, for the next cycle's generated slots.
         std::vector<float> fractions;
+        std::vector<XrTime> targets;
         for (std::uint32_t slot = 0; slot < generated; ++slot) {
-            fractions.push_back(continuous ? FrameGenFraction(mode, previous_time, newest_time,
-                                                              newest_time + period * static_cast<XrDuration>(slot + 1))
-                                           : 0.0f);
+            targets.push_back(newest_time + period * static_cast<XrDuration>(slot + 1));
+            fractions.push_back(continuous ? FrameGenFraction(mode, previous_time, newest_time, targets.back()) : 0.0f);
         }
         std::vector<std::vector<XrCompositionLayerProjectionView>> sets;
-        const bool ok = Generate(projection, frame, fractions, sets);
+        const bool ok = Generate(projection, frame, fractions, targets, calls, sets);
         std::scoped_lock lock(mutex_);
         extrapolated_.valid = ok;
         extrapolated_.sets = std::move(sets);
@@ -1343,13 +1361,82 @@ void FrameGenPresenter::RecordReal(const XrCompositionLayerProjection& projectio
     }
 }
 
+std::vector<std::array<float, 3>> FrameGenPresenter::EyeShifts(const XrCompositionLayerProjection& projection,
+                                                               XrTime newest_time, const std::vector<float>& times,
+                                                               const std::vector<XrTime>& targets,
+                                                               const FrameGenRuntimeCalls& calls) {
+    std::vector<std::array<float, 3>> shifts(projection.viewCount, {0.0f, 0.0f, 0.0f});
+    if (!calls.locate || newest_time <= 0 || times.size() != targets.size()) {
+        return shifts;
+    }
+    std::vector<XrView> newest;
+    if (XR_FAILED(calls.locate(session_, projection.space, newest_time, newest)) || newest.size() != projection.viewCount) {
+        return shifts;
+    }
+    // Least squares through the origin: the eye moves `shift` per unit time.
+    std::vector<std::array<double, 3>> sums(projection.viewCount, {0.0, 0.0, 0.0});
+    double norm = 0.0;
+    std::vector<XrView> later;
+    for (std::size_t j = 0; j < targets.size(); ++j) {
+        if (times[j] <= 0.0f) {
+            continue;
+        }
+        if (XR_FAILED(calls.locate(session_, projection.space, targets[j], later)) || later.size() != newest.size()) {
+            return shifts;
+        }
+        for (std::size_t i = 0; i < newest.size(); ++i) {
+            // Into the eye's own view space at the newest frame: the same
+            // movement in the view the game rendered, whatever it did to
+            // the world around it.
+            const XrQuaternionf& q = newest[i].pose.orientation;
+            const std::array<double, 3> delta{later[i].pose.position.x - newest[i].pose.position.x,
+                                              later[i].pose.position.y - newest[i].pose.position.y,
+                                              later[i].pose.position.z - newest[i].pose.position.z};
+            const std::array<double, 3> local = RotateInverse(q, delta);
+            for (int axis = 0; axis < 3; ++axis) {
+                sums[i][axis] += times[j] * local[axis];
+            }
+        }
+        norm += static_cast<double>(times[j]) * times[j];
+    }
+    if (norm <= 0.0) {
+        return shifts;
+    }
+    for (std::size_t i = 0; i < shifts.size(); ++i) {
+        std::array<double, 3> shift{sums[i][0] / norm, sums[i][1] / norm, sums[i][2] / norm};
+        // A head moves well under 2 m/s; anything more is a tracking glitch.
+        const double length = std::sqrt(shift[0] * shift[0] + shift[1] * shift[1] + shift[2] * shift[2]);
+        if (std::isfinite(length) && length < kMaxEyeShift) {
+            shifts[i] = {static_cast<float>(shift[0]), static_cast<float>(shift[1]), static_cast<float>(shift[2])};
+        }
+    }
+    return shifts;
+}
+
 bool FrameGenPresenter::Generate(const XrCompositionLayerProjection& projection, const PendingFrame& frame,
-                                 const std::vector<float>& fractions,
+                                 const std::vector<float>& fractions, const std::vector<XrTime>& targets,
+                                 const FrameGenRuntimeCalls& calls,
                                  std::vector<std::vector<XrCompositionLayerProjectionView>>& sets) {
     const std::size_t count = std::min(fractions.size(), kFrameGenMaxGenerated);
     if (count == 0) {
         return false;
     }
+    // Each generated frame's time past the newest real frame (before it when
+    // interpolating), in the fractions' units, and where the eyes move.
+    FrameGenSynthesisMode mode;
+    {
+        std::scoped_lock lock(mutex_);
+        mode = settings_.synthesis_mode;
+    }
+    std::vector<float> times(count, 0.0f);
+    for (std::size_t index = 0; index < count; ++index) {
+        times[index] = mode == FrameGenSynthesisMode::kExtrapolate ? fractions[index] : 1.0f - fractions[index];
+    }
+    const std::vector<std::array<float, 3>> shifts =
+        targets.size() >= count
+            ? EyeShifts(projection, frame.app_time, times, std::vector<XrTime>(targets.begin(), targets.begin() + count),
+                        calls)
+            : std::vector<std::array<float, 3>>(projection.viewCount, {0.0f, 0.0f, 0.0f});
     std::vector<FrameGenViewSubmission> submissions(projection.viewCount);
     std::vector<FrameGenOutputKind> kinds(projection.viewCount);
     FrameGenTuning tuning;
@@ -1407,6 +1494,7 @@ bool FrameGenPresenter::Generate(const XrCompositionLayerProjection& projection,
                                             last_real_.views[i].extent.height == submission.request.extent.height;
             submission.request.previous = submission.request.synthesize ? last_real_.views[i].geometry : Geometry(view);
             submission.request.temporal = true;
+            submission.request.shift = shifts[i];
             if (const auto* depth = DepthInfo(view)) {
                 const auto depth_record = swapchains_.find(depth->subImage.swapchain);
                 submission.request.depth =
@@ -1528,6 +1616,7 @@ bool FrameGenPresenter::Generate(const XrCompositionLayerProjection& projection,
         repeated_ += count;
     }
     sets.assign(count, {});
+    double moved_mm = 0.0;
     for (std::size_t set = 0; set < count; ++set) {
         auto& views = sets[set];
         views.assign(projection.views, projection.views + projection.viewCount);
@@ -1536,7 +1625,24 @@ bool FrameGenPresenter::Generate(const XrCompositionLayerProjection& projection,
             views[i].subImage.swapchain = output_sets_[set][i].swapchain;
             views[i].subImage.imageRect = submissions[i].outputs[set].rect;
             views[i].subImage.imageArrayIndex = 0;
+            if (i < executed.depth.size() && executed.depth[i]) {
+                // Seen from where the eye will be (FrameGenViewRequest::shift);
+                // the runtime still corrects the rotation.
+                const std::array<double, 3> local{times[set] * shifts[i][0], times[set] * shifts[i][1],
+                                                  times[set] * shifts[i][2]};
+                const std::array<double, 3> world = Rotate(views[i].pose.orientation, local);
+                views[i].pose.position.x += static_cast<float>(world[0]);
+                views[i].pose.position.y += static_cast<float>(world[1]);
+                views[i].pose.position.z += static_cast<float>(world[2]);
+                moved_mm = std::max(moved_mm, 1000.0 * std::sqrt(local[0] * local[0] + local[1] * local[1] +
+                                                                 local[2] * local[2]));
+            }
         }
+    }
+    if (std::any_of(executed.depth.begin(), executed.depth.end(), [](bool value) { return value; })) {
+        shift_window_sum_mm_ += moved_mm;
+        shift_window_max_mm_ = std::max(shift_window_max_mm_, moved_mm);
+        ++shift_window_frames_;
     }
     if (logger_ && synthesized && !logged_first_generation_) {
         logged_first_generation_ = true;
@@ -2393,18 +2499,20 @@ XrResult FrameGenPresenter::ThreadedEnd(XrSession session, const XrFrameEndInfo&
 
     if (generate) {
         std::vector<float> fractions;
+        std::vector<XrTime> targets;
         // One frame per generated slot, plus a spare for the slot the next
         // real frame is due in: if that frame is late, the slot still shows
         // motion instead of repeating the last generated frame.
         for (std::uint32_t slot = 1; slot <= frame.multiplier && fractions.size() < kFrameGenMaxGenerated; ++slot) {
-            fractions.push_back(FrameGenFraction(FrameGenSynthesisMode::kExtrapolate, previous_time, content_time,
-                                                 offer.time + period * static_cast<XrDuration>(slot)));
+            targets.push_back(offer.time + period * static_cast<XrDuration>(slot));
+            fractions.push_back(
+                FrameGenFraction(FrameGenSynthesisMode::kExtrapolate, previous_time, content_time, targets.back()));
         }
         PendingFrame pending;
         pending.app_time = content_time;
         pending.sequence = frame.id;
         std::vector<std::vector<XrCompositionLayerProjectionView>> sets;
-        const bool ok = Generate(*projection, pending, fractions, sets);
+        const bool ok = Generate(*projection, pending, fractions, targets, calls, sets);
         RecordReal(*projection, content_time, frame.id);
         lock.lock();
         if (compositor_running_) {
@@ -2443,11 +2551,16 @@ XrResult FrameGenPresenter::ThreadedEnd(XrSession session, const XrFrameEndInfo&
                       ", lateReal=" + std::to_string(threaded_late_) + ", generated=" + std::to_string(generated_) +
                       ", repeated=" + std::to_string(repeated_) + ", failures=" + std::to_string(failures_) +
                       ", captured=" + std::to_string(captured_) + ", gpuMs=" + Number(gpu_ms_, 2) + ", depthUsed=" +
-                      Number(depth_window_frames_ ? 100.0 * depth_window_used_ / depth_window_frames_ : 0.0, 0) + "%.");
+                      Number(depth_window_frames_ ? 100.0 * depth_window_used_ / depth_window_frames_ : 0.0, 0) +
+                      "%, eyeShiftMm=" +
+                      Number(shift_window_frames_ ? shift_window_sum_mm_ / shift_window_frames_ : 0.0, 1) + "/" +
+                      Number(shift_window_max_mm_, 1) + ".");
         app_work_ms_ = 0.0;
         app_work_frames_ = 0;
         threaded_late_ = 0;
         depth_window_frames_ = depth_window_used_ = 0;
+        shift_window_sum_mm_ = shift_window_max_mm_ = 0.0;
+        shift_window_frames_ = 0;
     }
     return result;
 }

@@ -157,11 +157,13 @@ class FakeGpu final : public FrameGenGpu {
         }
         history_.resize(views.size());
         result.synthesized.clear();
+        result.depth.clear();
         for (std::size_t i = 0; i < views.size(); ++i) {
             history_[i].Configure(views[i].request.extent, views[i].source.format, views[i].request.output, 3);
             const bool synthesized = history_[i].Effective(views[i].request).synthesize;
             history_[i].Commit(synthesized);
             result.synthesized.push_back(synthesized);
+            result.depth.push_back(synthesized && views[i].request.depth && log_->depth);
         }
         return true;
     }
@@ -232,6 +234,9 @@ struct Runtime {
     std::vector<std::chrono::steady_clock::time_point> submitted_at;
     std::vector<std::vector<XrSwapchain>> submitted_swapchains;
     std::vector<bool> submitted_depth;
+    std::vector<float> submitted_left_x; // the first projection view's position
+    // Eyes 64 mm apart moving sideways at this many m/s (locate).
+    double eye_speed{0.0};
 
     FrameGenRuntimeCalls Calls() {
         FrameGenRuntimeCalls calls;
@@ -291,16 +296,28 @@ struct Runtime {
             }
             std::vector<XrSwapchain> swapchains;
             bool depth = false;
+            float left_x = 0.0f;
             if (info->layerCount) {
                 const auto* projection = reinterpret_cast<const XrCompositionLayerProjection*>(info->layers[0]);
                 for (std::uint32_t i = 0; i < projection->viewCount; ++i) {
                     swapchains.push_back(projection->views[i].subImage.swapchain);
                     depth = depth || projection->views[i].next != nullptr;
                 }
+                left_x = projection->viewCount ? projection->views[0].pose.position.x : 0.0f;
             }
             submitted_swapchains.push_back(swapchains);
             submitted_depth.push_back(depth);
+            submitted_left_x.push_back(left_x);
             log.push_back({info->displayTime, swapchains, info->layerCount});
+            return XR_SUCCESS;
+        };
+        calls.locate = [this](XrSession, XrSpace, XrTime time, std::vector<XrView>& views) {
+            views.assign(2, XrView{XR_TYPE_VIEW});
+            for (int eye = 0; eye < 2; ++eye) {
+                views[eye].pose.orientation.w = 1.0f;
+                views[eye].pose.position.x =
+                    static_cast<float>((eye ? 0.032 : -0.032) + eye_speed * static_cast<double>(time - 1'000'000'000) * 1e-9);
+            }
             return XR_SUCCESS;
         };
         return calls;
@@ -1055,6 +1072,31 @@ void TestDepthCapture() {
     Check(gpu.depth_captures > 0, "depth: released depth images are captured");
     Check(gpu.executes > 0 && gpu.last[0].request.depth && gpu.last[1].request.depth,
           "depth: generation asks for the captured depth");
+    Check(gpu.last[0].request.shift == std::array<float, 3>{0.0f, 0.0f, 0.0f},
+          "depth: still eyes do not shift generated frames");
+
+    // The eyes keep moving: generated frames are asked to follow them, and
+    // are submitted from where the eye will be.
+    runtime.eye_speed = 0.5;
+    for (int i = 0; i < 6; ++i) app.Frame();
+    // 2x extrapolation: one generated frame a period past the newest, half
+    // a real frame interval: the eye moves 0.5 m/s * 2 periods per unit.
+    const float per_unit = static_cast<float>(0.5 * 2.0 * kPeriod * 1e-9);
+    Check(std::abs(gpu.last[0].request.shift[0] - per_unit) < 0.05f * per_unit &&
+              std::abs(gpu.last[1].request.shift[0] - per_unit) < 0.05f * per_unit &&
+              std::abs(gpu.last[0].request.shift[1]) < 1e-6f,
+          "depth: generated frames follow the eyes (" + std::to_string(gpu.last[0].request.shift[0]) + " vs " +
+              std::to_string(per_unit) + ")");
+    bool shifted_pose = false;
+    {
+        std::scoped_lock lock(g_xr_mutex);
+        for (std::size_t i = 0; i < runtime.submitted_swapchains.size(); ++i) {
+            if (!IsAppImage(runtime.submitted_swapchains[i]) && runtime.submitted_left_x[i] > 1e-4f) {
+                shifted_pose = true; // the app's own views stay at x = 0
+            }
+        }
+    }
+    Check(shifted_pose, "depth: generated frames are submitted from the moved eye position");
     Check(!runtime.ordering_violation && !g_release_violation, "depth: calls stayed ordered");
 
     // Without the depth usage the image is never read.

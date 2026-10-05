@@ -26,9 +26,12 @@ using Microsoft::WRL::ComPtr;
 constexpr std::size_t kFramesInFlight = 3;
 constexpr UINT kDescriptorsPerFrame = 1024;
 constexpr UINT kCaptureSlots = 8;
-// Depth captures run outside a frame's descriptor range: one dispatch per
-// capture slot, after every frame's range.
-constexpr UINT kDescriptorsPerDispatch = 6;
+// A dispatch's descriptors: sampled textures t0-t4, then storage textures
+// u0-u1. Depth captures run outside a frame's descriptor range: one
+// dispatch per capture slot, after every frame's range.
+constexpr UINT kShaderResources = 5;
+constexpr UINT kFirstUav = kShaderResources;
+constexpr UINT kDescriptorsPerDispatch = kShaderResources + 2;
 
 std::string Failure(const char* operation, HRESULT hr) {
     return std::string(operation) + " failed: hr=" + std::to_string(static_cast<long>(hr));
@@ -80,6 +83,12 @@ struct ViewResources {
     std::array<Texture, kFrameGenPyramidLevels + 1> flow;
     Texture output;
     Texture depth;            // newest frame's linear depth, half resolution
+    // Depth trust scores (ping-pong with the history) and the eye-shift map,
+    // at half resolution; created once depth is first used.
+    std::array<Texture, 2> trust;
+    Texture shift_keys;
+    Texture shift_map;
+    bool trust_stereo{false}; // this frame's stereo evidence is in trust[newest]
     bool depth_ready{false};  // captured since the last Execute
     bool depth_fresh{false};  // captured for this Execute's frame (for the check)
     std::uint32_t depth_generation{0}; // FrameGenDepthValidator::Generation() the capture decoded with
@@ -96,6 +105,7 @@ struct ViewResources {
 #endif
     FrameGenExtent hardware_extent{};
     bool hardware_fresh{false}; // no vectors of its own to hint the next match yet
+    bool hardware_matched{false}; // its session has matched once (see StartHardwareWatchdog)
 };
 
 // One view's recording: a plan recorded up to `next`, resumable after the
@@ -138,7 +148,7 @@ class D3D12FrameGen final : public FrameGenGpu {
             return SUCCEEDED(hr);
         };
         D3D12_DESCRIPTOR_RANGE ranges[2]{};
-        ranges[0] = {D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 4, 0, 0, 0};
+        ranges[0] = {D3D12_DESCRIPTOR_RANGE_TYPE_SRV, kShaderResources, 0, 0, 0};
         ranges[1] = {D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 2, 0, 0, 0};
         D3D12_ROOT_PARAMETER parameters[3]{};
         parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
@@ -452,21 +462,11 @@ class D3D12FrameGen final : public FrameGenGpu {
         srv.Texture2DArray.MipLevels = 1;
         srv.Texture2DArray.ArraySize = desc.DepthOrArraySize;
         device_->CreateShaderResourceView(resource, &srv, Cpu(base));
-        for (UINT i = 1; i < 4; ++i) {
-            D3D12_SHADER_RESOURCE_VIEW_DESC none{};
-            none.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-            none.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
-            none.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-            none.Texture2D.MipLevels = 1;
-            device_->CreateShaderResourceView(nullptr, &none, Cpu(base + i));
+        for (UINT i = 1; i < kShaderResources; ++i) {
+            ShaderResource(nullptr, base, i);
         }
-        D3D12_UNORDERED_ACCESS_VIEW_DESC uav{};
-        uav.Format = DXGI_FORMAT_R32_FLOAT;
-        uav.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
-        device_->CreateUnorderedAccessView(view.depth.resource.Get(), nullptr, &uav, Cpu(base + 4));
-        D3D12_UNORDERED_ACCESS_VIEW_DESC no_uav = uav;
-        no_uav.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-        device_->CreateUnorderedAccessView(nullptr, nullptr, &no_uav, Cpu(base + 5));
+        UnorderedAccess(&view.depth, base + kFirstUav);
+        UnorderedAccess(nullptr, base + kFirstUav + 1);
 
         std::vector<D3D12_RESOURCE_BARRIER> barriers;
         auto flush = [&] {
@@ -490,7 +490,7 @@ class D3D12FrameGen final : public FrameGenGpu {
         capture_commands_->SetPipelineState(pipelines_[static_cast<std::size_t>(FrameGenPass::kDepth)].Get());
         capture_commands_->SetComputeRoot32BitConstants(0, sizeof(FrameGenConstants) / 4, &dispatch.constants, 0);
         capture_commands_->SetComputeRootDescriptorTable(1, Gpu(base));
-        capture_commands_->SetComputeRootDescriptorTable(2, Gpu(base + 4));
+        capture_commands_->SetComputeRootDescriptorTable(2, Gpu(base + kFirstUav));
         capture_commands_->Dispatch((dispatch.width + kFrameGenThreadGroupSize - 1) / kFrameGenThreadGroupSize,
                                     (dispatch.height + kFrameGenThreadGroupSize - 1) / kFrameGenThreadGroupSize, 1);
         Transition(barriers, resource, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_DEPTH_WRITE);
@@ -520,46 +520,75 @@ class D3D12FrameGen final : public FrameGenGpu {
         return {validator_.Reading(), validator_.Decisions(), validator_.Evidence()};
     }
 
-    // Negates the texels of `view`'s depth that `other` disproves (see
-    // FG_PASS_DEPTH_TRUST); both views' newest images must be this frame's.
+    // Records what `other` says about `view`'s depth (see FG_PASS_DEPTH_TRUST)
+    // into the view's newest trust texture, for this frame's kTrustUpdate;
+    // both views' newest images must be this frame's.
     bool RecordDepthTrust(const FrameGenViewSubmission& submission, const FrameGenViewSubmission& other_submission,
                           ViewResources& view, ViewResources& other, std::string& error) {
         if (descriptor_cursor_ + kDescriptorsPerDispatch > descriptor_end_) {
             error = "D3D12 Frame Generation descriptor budget exhausted";
             return false;
         }
+        if (!EnsureTrust(view, submission.request.extent, error)) {
+            return false;
+        }
         const UINT base = descriptor_cursor_;
         descriptor_cursor_ += kDescriptorsPerDispatch;
-        Texture* inputs[4] = {&view.history[view.history_state.Newest()], &other.history[other.history_state.Newest()],
-                              nullptr, nullptr};
+        Texture* inputs[kShaderResources] = {&view.history[view.history_state.Newest()],
+                                             &other.history[other.history_state.Newest()], &view.depth, nullptr, nullptr};
         std::vector<D3D12_RESOURCE_BARRIER> barriers;
-        for (UINT i = 0; i < 4; ++i) {
-            D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
-            srv.Format = inputs[i] ? inputs[i]->view_format : DXGI_FORMAT_R8G8B8A8_UNORM;
-            srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
-            srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-            srv.Texture2D.MipLevels = 1;
-            device_->CreateShaderResourceView(inputs[i] ? inputs[i]->resource.Get() : nullptr, &srv, Cpu(base + i));
+        for (UINT i = 0; i < kShaderResources; ++i) {
+            ShaderResource(inputs[i], base, i);
             if (inputs[i]) Require(barriers, *inputs[i], D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
         }
-        D3D12_UNORDERED_ACCESS_VIEW_DESC uav{};
-        uav.Format = DXGI_FORMAT_R32_FLOAT;
-        uav.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
-        device_->CreateUnorderedAccessView(view.depth.resource.Get(), nullptr, &uav, Cpu(base + 4));
-        D3D12_UNORDERED_ACCESS_VIEW_DESC no_uav = uav;
-        no_uav.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-        device_->CreateUnorderedAccessView(nullptr, nullptr, &no_uav, Cpu(base + 5));
-        Require(barriers, view.depth, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        Texture& evidence = view.trust[view.history_state.Newest()];
+        UnorderedAccess(&evidence, base + kFirstUav);
+        UnorderedAccess(nullptr, base + kFirstUav + 1);
+        Require(barriers, evidence, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         Flush(barriers);
         const FrameGenDispatch dispatch = BuildFrameGenDepthTrustDispatch(submission.request.extent, submission.request.newest,
                                                                           other_submission.request.newest);
         commands_->SetPipelineState(pipelines_[static_cast<std::size_t>(FrameGenPass::kDepthTrust)].Get());
         commands_->SetComputeRoot32BitConstants(0, sizeof(FrameGenConstants) / 4, &dispatch.constants, 0);
         commands_->SetComputeRootDescriptorTable(1, Gpu(base));
-        commands_->SetComputeRootDescriptorTable(2, Gpu(base + 4));
+        commands_->SetComputeRootDescriptorTable(2, Gpu(base + kFirstUav));
         commands_->Dispatch((dispatch.width + kFrameGenThreadGroupSize - 1) / kFrameGenThreadGroupSize,
                             (dispatch.height + kFrameGenThreadGroupSize - 1) / kFrameGenThreadGroupSize, 1);
+        view.trust_stereo = true;
         return true;
+    }
+
+    // A view's depth trust and eye-shift textures, created the first time
+    // its depth is used.
+    bool EnsureTrust(ViewResources& view, FrameGenExtent extent, std::string& error) {
+        if (view.shift_map.resource) {
+            return true;
+        }
+        const FrameGenExtent half = FrameGenPyramid(extent)[1];
+        for (Texture& trust : view.trust) {
+            if (!Create(trust, half, DXGI_FORMAT_R32_FLOAT, DXGI_FORMAT_R32_FLOAT, true, error)) return false;
+        }
+        return Create(view.shift_keys, half, DXGI_FORMAT_R32_UINT, DXGI_FORMAT_R32_UINT, true, error) &&
+               Create(view.shift_map, half, DXGI_FORMAT_R32_UINT, DXGI_FORMAT_R32_UINT, true, error);
+    }
+
+    // A 2D shader resource view of `texture` (a null one without) for
+    // register t`slot` of the dispatch whose descriptors start at `base`.
+    // The fifth is read as unsigned integers.
+    void ShaderResource(Texture* texture, UINT base, UINT slot) {
+        D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
+        srv.Format = texture ? texture->view_format : slot == 4 ? DXGI_FORMAT_R32_UINT : DXGI_FORMAT_R8G8B8A8_UNORM;
+        srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+        srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        srv.Texture2D.MipLevels = 1;
+        device_->CreateShaderResourceView(texture ? texture->resource.Get() : nullptr, &srv, Cpu(base + slot));
+    }
+
+    void UnorderedAccess(Texture* texture, UINT index) {
+        D3D12_UNORDERED_ACCESS_VIEW_DESC uav{};
+        uav.Format = texture ? texture->view_format : DXGI_FORMAT_R8G8B8A8_UNORM;
+        uav.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+        device_->CreateUnorderedAccessView(texture ? texture->resource.Get() : nullptr, nullptr, &uav, Cpu(index));
     }
 
     // Scores the depth of view 0 against view 1 (see FrameGenDepthValidator)
@@ -595,25 +624,15 @@ class D3D12FrameGen final : public FrameGenGpu {
         }
         const UINT base = descriptor_cursor_;
         descriptor_cursor_ += kDescriptorsPerDispatch;
-        Texture* inputs[4] = {&view0.history[view0.history_state.Newest()], &view1.history[view1.history_state.Newest()],
-                              &view0.depth, nullptr};
+        Texture* inputs[kShaderResources] = {&view0.history[view0.history_state.Newest()],
+                                             &view1.history[view1.history_state.Newest()], &view0.depth, nullptr, nullptr};
         std::vector<D3D12_RESOURCE_BARRIER> barriers;
-        for (UINT i = 0; i < 4; ++i) {
-            D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
-            srv.Format = inputs[i] ? inputs[i]->view_format : DXGI_FORMAT_R8G8B8A8_UNORM;
-            srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
-            srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-            srv.Texture2D.MipLevels = 1;
-            device_->CreateShaderResourceView(inputs[i] ? inputs[i]->resource.Get() : nullptr, &srv, Cpu(base + i));
+        for (UINT i = 0; i < kShaderResources; ++i) {
+            ShaderResource(inputs[i], base, i);
             if (inputs[i]) Require(barriers, *inputs[i], D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
         }
-        D3D12_UNORDERED_ACCESS_VIEW_DESC uav{};
-        uav.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
-        uav.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
-        device_->CreateUnorderedAccessView(check_scores_.resource.Get(), nullptr, &uav, Cpu(base + 4));
-        D3D12_UNORDERED_ACCESS_VIEW_DESC no_uav = uav;
-        no_uav.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-        device_->CreateUnorderedAccessView(nullptr, nullptr, &no_uav, Cpu(base + 5));
+        UnorderedAccess(&check_scores_, base + kFirstUav);
+        UnorderedAccess(nullptr, base + kFirstUav + 1);
         Require(barriers, check_scores_, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         Flush(barriers);
         const FrameGenDispatch dispatch =
@@ -621,7 +640,7 @@ class D3D12FrameGen final : public FrameGenGpu {
         commands_->SetPipelineState(pipelines_[static_cast<std::size_t>(FrameGenPass::kDepthCheck)].Get());
         commands_->SetComputeRoot32BitConstants(0, sizeof(FrameGenConstants) / 4, &dispatch.constants, 0);
         commands_->SetComputeRootDescriptorTable(1, Gpu(base));
-        commands_->SetComputeRootDescriptorTable(2, Gpu(base + 4));
+        commands_->SetComputeRootDescriptorTable(2, Gpu(base + kFirstUav));
         commands_->Dispatch((dispatch.width + kFrameGenThreadGroupSize - 1) / kFrameGenThreadGroupSize,
                             (dispatch.height + kFrameGenThreadGroupSize - 1) / kFrameGenThreadGroupSize, 1);
         Require(barriers, check_scores_, D3D12_RESOURCE_STATE_COPY_SOURCE);
@@ -864,22 +883,13 @@ class D3D12FrameGen final : public FrameGenGpu {
         const UINT base = descriptor_cursor_;
         descriptor_cursor_ += kDescriptorsPerDispatch;
         std::vector<D3D12_RESOURCE_BARRIER> barriers;
-        for (std::size_t i = 0; i < 4; ++i) {
+        for (UINT i = 0; i < kShaderResources; ++i) {
             Texture* texture = Resolve(view, first.inputs[i]);
-            D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
-            srv.Format = texture ? texture->view_format : DXGI_FORMAT_R8G8B8A8_UNORM;
-            srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
-            srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-            srv.Texture2D.MipLevels = 1;
-            device_->CreateShaderResourceView(texture ? texture->resource.Get() : nullptr, &srv,
-                                              Cpu(base + static_cast<UINT>(i)));
+            ShaderResource(texture, base, i);
             if (texture) Require(barriers, *texture, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE);
         }
-        D3D12_UNORDERED_ACCESS_VIEW_DESC no_uav{};
-        no_uav.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-        no_uav.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
-        device_->CreateUnorderedAccessView(nullptr, nullptr, &no_uav, Cpu(base + 4));
-        device_->CreateUnorderedAccessView(nullptr, nullptr, &no_uav, Cpu(base + 5));
+        UnorderedAccess(nullptr, base + kFirstUav);
+        UnorderedAccess(nullptr, base + kFirstUav + 1);
         Flush(barriers);
 
         // Output images are in RENDER_TARGET while acquired.
@@ -913,7 +923,7 @@ class D3D12FrameGen final : public FrameGenGpu {
         commands_->SetPipelineState(pipeline);
         commands_->SetGraphicsRoot32BitConstants(0, sizeof(FrameGenConstants) / 4, &constants, 0);
         commands_->SetGraphicsRootDescriptorTable(1, Gpu(base));
-        commands_->SetGraphicsRootDescriptorTable(2, Gpu(base + 4));
+        commands_->SetGraphicsRootDescriptorTable(2, Gpu(base + kFirstUav));
         commands_->RSSetViewports(1, &viewport);
         commands_->RSSetScissorRects(1, &scissor);
         commands_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
@@ -1092,7 +1102,7 @@ class D3D12FrameGen final : public FrameGenGpu {
             ReadProfile();
         }
         for (std::size_t i = 0; i < views.size(); ++i) {
-            views_[i].history_state.Commit(result.synthesized[i]);
+            views_[i].history_state.Commit(result.synthesized[i], result.depth[i]);
             views_[i].capture.valid = false;
         }
         return true;
@@ -1115,6 +1125,9 @@ class D3D12FrameGen final : public FrameGenGpu {
                     for (auto& texture : *group) texture.resource.Detach();
                 }
                 view.output.resource.Detach();
+                for (auto& texture : view.trust) texture.resource.Detach();
+                view.shift_keys.resource.Detach();
+                view.shift_map.resource.Detach();
             }
         }
         for (auto& view : views_) {
@@ -1253,6 +1266,10 @@ class D3D12FrameGen final : public FrameGenGpu {
                 }
             }
             view.output = {}; // created when first needed (see EnsureOutput)
+            view.trust = {};  // likewise (see EnsureTrust)
+            view.shift_keys = {};
+            view.shift_map = {};
+            view.trust_stereo = false;
             if (!Create(view.depth, levels[1], DXGI_FORMAT_R32_FLOAT, DXGI_FORMAT_R32_FLOAT, true, error)) return false;
             view.depth_ready = false;
         }
@@ -1309,7 +1326,9 @@ class D3D12FrameGen final : public FrameGenGpu {
     // The game's queue waits on the optical flow hardware's fence: should
     // the hardware stop answering, the game would hang behind it, and stop
     // calling us. A watchdog thread signals a fence a quarter second overdue
-    // itself, which releases the queue; the hardware is not used again.
+    // itself, which releases the queue; the hardware is not used again. A
+    // new session's first match may take longer (the driver sets up its
+    // CUDA work then), so it gets a few seconds.
     void StartHardwareWatchdog() {
         ID3D12Fence* fence = hardware_fence_.Get();
         hardware_watchdog_stop_ = false;
@@ -1317,7 +1336,8 @@ class D3D12FrameGen final : public FrameGenGpu {
             while (!hardware_watchdog_stop_) {
                 Sleep(50);
                 const UINT64 value = hardware_wait_value_;
-                if (value && fence->GetCompletedValue() < value && GetTickCount64() - hardware_submitted_at_ > 250) {
+                if (value && fence->GetCompletedValue() < value &&
+                    GetTickCount64() - hardware_submitted_at_ > hardware_allowed_ms_) {
                     fence->Signal(value);
                     hardware_stuck_ = true;
                 }
@@ -1397,6 +1417,7 @@ class D3D12FrameGen final : public FrameGenGpu {
         view.hardware_extent = input;
         view.hardware_perf = perf;
         view.hardware_fresh = true;
+        view.hardware_matched = false;
         return true;
 #else
         static_cast<void>(view);
@@ -1468,6 +1489,7 @@ class D3D12FrameGen final : public FrameGenGpu {
             return false;
         }
         NV_OF_FENCE_POINT ready{fence_.Get(), fence_value_};
+        bool first_match = false;
         for (ViewRecording& recording : recordings) {
             if (!recording.waits_for_hardware) {
                 continue;
@@ -1478,6 +1500,7 @@ class D3D12FrameGen final : public FrameGenGpu {
             in.referenceFrame = view.hardware_buffers[1];
             // Its own hints from the last pair, unless the history restarted.
             in.disableTemporalHints = recording.temporal && !view.hardware_fresh ? NV_OF_FALSE : NV_OF_TRUE;
+            first_match = first_match || !view.hardware_matched;
             in.numFencePoints = 1;
             in.fencePoint = &ready;
             NV_OF_FENCE_POINT done{hardware_fence_.Get(), ++hardware_fence_value_};
@@ -1495,7 +1518,9 @@ class D3D12FrameGen final : public FrameGenGpu {
                 queue_->Signal(hardware_fence_.Get(), hardware_fence_value_);
             }
             view.hardware_fresh = false;
+            view.hardware_matched = true;
         }
+        hardware_allowed_ms_ = first_match ? 3000 : 250;
         hardware_submitted_at_ = GetTickCount64();
         hardware_wait_value_ = hardware_fence_value_;
         queue_->Wait(hardware_fence_.Get(), hardware_fence_value_);
@@ -1546,6 +1571,10 @@ class D3D12FrameGen final : public FrameGenGpu {
         case FrameGenTextureKind::kHardwareNewest: return &view.hardware_newest;
         case FrameGenTextureKind::kHardwarePrevious: return &view.hardware_previous;
         case FrameGenTextureKind::kHardwareFlow: return &view.hardware_flow;
+        case FrameGenTextureKind::kTrustNewest: return &view.trust[newest];
+        case FrameGenTextureKind::kTrustPrevious: return &view.trust[previous];
+        case FrameGenTextureKind::kShiftKeys: return &view.shift_keys;
+        case FrameGenTextureKind::kShiftMap: return &view.shift_map;
         default: return nullptr;
         }
     }
@@ -1618,6 +1647,11 @@ class D3D12FrameGen final : public FrameGenGpu {
         effective.depth = effective.depth && view.depth_ready && view.depth.resource && validator_.Usable() &&
                           view.depth_generation == validator_.Generation();
         view.depth_ready = false;
+        effective.trust_stereo = view.trust_stereo;
+        view.trust_stereo = false;
+        if (effective.depth && !EnsureTrust(view, submission.request.extent, error)) {
+            return false;
+        }
         depth_used = effective.depth && effective.synthesize;
         recording.submission = &submission;
         recording.view = &view;
@@ -1664,30 +1698,21 @@ class D3D12FrameGen final : public FrameGenGpu {
             }
             const UINT base = descriptor_cursor_;
             descriptor_cursor_ += kDescriptorsPerDispatch;
-            for (std::size_t i = 0; i < 4; ++i) {
+            for (UINT i = 0; i < kShaderResources; ++i) {
                 Texture* texture = Resolve(view, dispatch.inputs[i]);
-                D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
-                srv.Format = texture ? texture->view_format : DXGI_FORMAT_R8G8B8A8_UNORM;
-                srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
-                srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-                srv.Texture2D.MipLevels = 1;
-                device_->CreateShaderResourceView(texture ? texture->resource.Get() : nullptr, &srv, Cpu(base + static_cast<UINT>(i)));
+                ShaderResource(texture, base, i);
                 if (texture) Require(barriers, *texture, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
             }
-            for (std::size_t i = 0; i < 2; ++i) {
+            for (UINT i = 0; i < 2; ++i) {
                 Texture* texture = Resolve(view, dispatch.outputs[i]);
-                D3D12_UNORDERED_ACCESS_VIEW_DESC uav{};
-                uav.Format = texture ? texture->view_format : DXGI_FORMAT_R8G8B8A8_UNORM;
-                uav.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
-                device_->CreateUnorderedAccessView(texture ? texture->resource.Get() : nullptr, nullptr, &uav,
-                                                   Cpu(base + 4 + static_cast<UINT>(i)));
+                UnorderedAccess(texture, base + kFirstUav + i);
                 if (texture) Require(barriers, *texture, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
             }
             Flush(barriers);
             commands_->SetPipelineState(pipelines_[static_cast<std::size_t>(dispatch.pass)].Get());
             commands_->SetComputeRoot32BitConstants(0, sizeof(FrameGenConstants) / 4, &dispatch.constants, 0);
             commands_->SetComputeRootDescriptorTable(1, Gpu(base));
-            commands_->SetComputeRootDescriptorTable(2, Gpu(base + 4));
+            commands_->SetComputeRootDescriptorTable(2, Gpu(base + kFirstUav));
             commands_->Dispatch((dispatch.width + kFrameGenThreadGroupSize - 1) / kFrameGenThreadGroupSize,
                                 (dispatch.height + kFrameGenThreadGroupSize - 1) / kFrameGenThreadGroupSize, 1);
             Stamp(static_cast<int>(dispatch.pass));
@@ -1789,6 +1814,7 @@ class D3D12FrameGen final : public FrameGenGpu {
     std::atomic<bool> hardware_watchdog_stop_{false};
     std::atomic<UINT64> hardware_wait_value_{0};
     std::atomic<ULONGLONG> hardware_submitted_at_{0};
+    std::atomic<ULONGLONG> hardware_allowed_ms_{250};
     std::atomic<bool> hardware_stuck_{false};
     bool stall_hardware_for_test_{false};
     // Generated frames drawn straight into the output images.

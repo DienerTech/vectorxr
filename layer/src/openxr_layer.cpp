@@ -11513,6 +11513,29 @@ void OpenXrLayer::StartFrameGen(XrSession session, const void* binding_chain) {
         };
         framegen_calls_.begin = [this](XrSession s, const XrFrameBeginInfo* i) { return TraceRuntimeBeginFrame(s, i); };
         framegen_calls_.submit = [this](XrSession s, const XrFrameEndInfo* i) { return SubmitRuntimeFrame(s, i); };
+        // The runtime's own views, unchanged by the layer's features: Frame
+        // Generation only takes how far each eye moves between two times.
+        framegen_calls_.locate = [this](XrSession s, XrSpace space, XrTime time, std::vector<XrView>& views) {
+            if (!next_locate_views_) {
+                return XR_ERROR_FUNCTION_UNSUPPORTED;
+            }
+            XrViewLocateInfo info{XR_TYPE_VIEW_LOCATE_INFO};
+            info.viewConfigurationType = active_runtime_view_configuration_type_;
+            info.displayTime = time;
+            info.space = space;
+            XrViewState state{XR_TYPE_VIEW_STATE};
+            views.assign(4, XrView{XR_TYPE_VIEW});
+            std::uint32_t count = 0;
+            const XrResult result = next_locate_views_(s, &info, &state, static_cast<std::uint32_t>(views.size()), &count,
+                                                       views.data());
+            const XrViewStateFlags valid = XR_VIEW_STATE_ORIENTATION_VALID_BIT | XR_VIEW_STATE_POSITION_VALID_BIT;
+            if (XR_FAILED(result) || (state.viewStateFlags & valid) != valid) {
+                views.clear();
+                return XR_FAILED(result) ? result : XR_ERROR_POSE_INVALID;
+            }
+            views.resize(std::min<std::size_t>(count, views.size()));
+            return result;
+        };
         framegen_.Configure(resolved_settings_.framegen);
         framegen_.Start(session, binding_chain,
                         {next_enumerate_swapchain_formats_, next_create_swapchain_, next_destroy_swapchain_,

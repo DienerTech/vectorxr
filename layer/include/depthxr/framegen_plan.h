@@ -29,8 +29,19 @@ enum class FrameGenPass : std::uint8_t {
     // after this dispatch.
     kFlowPack,
     kFlowUnpack, // its vectors into the flow field, with our match cost
+    // Depth (Direct3D 12): each texel's trust score from the other eye's
+    // evidence (kDepthTrust), the previous frame and last frame's score;
+    // drops depth the score disproves.
+    kTrustUpdate,
+    // The eye-shift map (FrameGenViewRequest::shift): where each texel of the
+    // newest frame lands seen from the eye's position at a generated frame's
+    // time; nearest content wins, uncovered texels stretch the background.
+    kShiftClear,
+    kShiftSplat,
+    kShiftResolve,
+    kShiftFill,
 };
-inline constexpr std::size_t kFrameGenPassCount = 12;
+inline constexpr std::size_t kFrameGenPassCount = 17;
 
 // Logical textures owned per view. History and filtered flow are ping-pong
 // pairs: "newest" is written this submission, "previous" is last
@@ -52,6 +63,14 @@ enum class FrameGenTextureKind : std::uint8_t {
     kHardwareNewest,
     kHardwarePrevious,
     kHardwareFlow,
+    // Depth trust scores (kTrustUpdate) at half resolution, a ping-pong pair
+    // like the history.
+    kTrustNewest,
+    kTrustPrevious,
+    // The eye-shift map at half resolution: the splat keys (nearest content
+    // reaching each texel) and the offsets back to the newest frame.
+    kShiftKeys,
+    kShiftMap,
 };
 
 // The flow level the optical flow hardware fills: a 4x4 grid on the
@@ -83,15 +102,28 @@ inline constexpr std::uint32_t kFrameGenFlagStill = 8u;
 // The newest frame's depth is bound: the previous frame is mapped into the
 // newest view by the full relative head pose, not rotation alone.
 inline constexpr std::uint32_t kFrameGenFlagDepth = 16u;
+// Synthesis reads the eye-shift map (input 4); options.w holds the frame
+// time (float bits) the map is for.
+inline constexpr std::uint32_t kFrameGenFlagShift = 32u;
+// kTrustUpdate's options.x: this frame's stereo evidence is in the newest
+// trust texture, last frame's scores are valid, the previous frame is.
+inline constexpr std::uint32_t kFrameGenTrustStereo = 1u;
+inline constexpr std::uint32_t kFrameGenTrustHistory = 2u;
+inline constexpr std::uint32_t kFrameGenTrustMotion = 4u;
 inline constexpr std::uint32_t kFrameGenThreadGroupSize = 8u;
 inline constexpr std::uint8_t kFrameGenPyramidLevels = 5;
 inline constexpr std::uint32_t kFrameGenSearchRadius = 6;
 // Generated frames per real frame at most (a 4x multiplier).
 inline constexpr std::size_t kFrameGenMaxGenerated = 3;
+// Eye movement (meters) below which generated frames are not shifted: a
+// fraction of a pixel even for content a hand's width away.
+inline constexpr float kFrameGenMinimumShift = 5e-5f;
 
 struct FrameGenDispatch {
     FrameGenPass pass{FrameGenPass::kLuma};
-    std::array<FrameGenTexture, 4> inputs{};
+    // Sampled textures t0-t4; only Direct3D 12 binds the fifth (the eye-shift
+    // map, used with depth).
+    std::array<FrameGenTexture, 5> inputs{};
     std::array<FrameGenTexture, 2> outputs{};
     std::uint32_t width{0};  // threads, not groups
     std::uint32_t height{0};
@@ -139,6 +171,17 @@ struct FrameGenViewRequest {
     bool depth{false};
     FrameGenViewGeometry newest;
     FrameGenViewGeometry previous;
+    // With depth: how far the eye moves per unit of generated-frame time
+    // (FrameGenTuning::fractions past the newest frame when extrapolating,
+    // 1 - fraction before it when interpolating), in meters in the newest
+    // view's space. Generated frames then show trusted cockpit content from
+    // where the eye will be: runtimes that only rotate frames never correct
+    // head translation, so near content would jump at the real frame rate.
+    std::array<float, 3> shift{0.0f, 0.0f, 0.0f};
+    // Set by backends: this frame's stereo trust evidence was recorded for
+    // the view (kDepthTrust), and last frame's trust scores are valid.
+    bool trust_stereo{false};
+    bool trust_history{false};
 };
 
 struct FrameGenTuning {
@@ -189,7 +232,8 @@ class FrameGenHistoryState {
     // may still change).
     bool MatchesImages(FrameGenExtent extent, std::int64_t source_format, FrameGenOutputKind output) const;
     FrameGenViewRequest Effective(const FrameGenViewRequest& request) const;
-    void Commit(bool synthesized);
+    // `trusted`: the newest trust scores were written (kTrustUpdate ran).
+    void Commit(bool synthesized, bool trusted = false);
     void Invalidate();
 
     std::uint8_t Newest() const { return newest_; }
@@ -204,6 +248,7 @@ class FrameGenHistoryState {
     std::uint8_t newest_{0};
     std::array<bool, 2> history_valid_{};
     std::array<bool, 2> filtered_valid_{};
+    std::array<bool, 2> trust_valid_{};
 };
 
 std::uint8_t FrameGenFinalFlowLevel(FrameGenFlowQuality quality);
@@ -245,8 +290,10 @@ FrameGenDispatch BuildFrameGenDepthCheckDispatch(const FrameGenViewGeometry& vie
                                                  const FrameGenDepthEncoding& encoding);
 
 // The kDepthTrust dispatch for one view of a stereo pair: compares each
-// texel of `own`'s linear depth with what `other` sees and negates the
-// texels it disproves (they are then compensated for rotation only).
+// texel of `own`'s linear depth with what `other` sees and writes the
+// evidence (positive confirms the depth, negative says the content is
+// infinitely far) into the view's newest trust texture, from which
+// kTrustUpdate scores the texel.
 FrameGenDispatch BuildFrameGenDepthTrustDispatch(FrameGenExtent view_extent, const FrameGenViewGeometry& own,
                                                  const FrameGenViewGeometry& other);
 

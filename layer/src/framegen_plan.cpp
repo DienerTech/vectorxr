@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 
 namespace depthxr {
 namespace {
@@ -166,15 +167,27 @@ FrameGenViewPlan BuildFrameGenViewPlan(const FrameGenViewRequest& request, const
         FrameGenDispatch still = Dispatch(synthesize, plan.levels[0], plan.levels[0], base);
         still.constants.options[1] |= kFrameGenFlagStill;
         still.constants.options[2] = static_cast<std::uint32_t>(FrameGenDiagnosticView::kOff);
-        still.inputs = {Texture(FrameGenTextureKind::kHistoryNewest), {}, {}, {}};
+        still.inputs = {Texture(FrameGenTextureKind::kHistoryNewest), {}, {}, {}, {}};
         still.outputs = {Texture(FrameGenTextureKind::kOutput), {}};
         still.copy_mask = all_outputs;
         plan.dispatches.push_back(still);
         return plan;
     }
 
+    if (request.depth) {
+        // Each depth texel's trust (the other eye's evidence, the previous
+        // frame, last frame's score) before anything maps through the depth.
+        FrameGenDispatch trust = Dispatch(FrameGenPass::kTrustUpdate, plan.levels[1], plan.levels[1], base);
+        trust.inputs = {Texture(FrameGenTextureKind::kHistoryNewest), Texture(FrameGenTextureKind::kHistoryPrevious),
+                        request.trust_history ? Texture(FrameGenTextureKind::kTrustPrevious) : FrameGenTexture{}, {}, {}};
+        trust.outputs = {Texture(FrameGenTextureKind::kTrustNewest), Texture(FrameGenTextureKind::kDepth)};
+        trust.constants.options[0] = kFrameGenTrustMotion | (request.trust_stereo ? kFrameGenTrustStereo : 0u) |
+                                     (request.trust_history ? kFrameGenTrustHistory : 0u);
+        plan.dispatches.push_back(trust);
+    }
+
     FrameGenDispatch luma = Dispatch(FrameGenPass::kLuma, plan.levels[1], plan.levels[0], base);
-    luma.inputs = {Texture(FrameGenTextureKind::kHistoryNewest), Texture(FrameGenTextureKind::kHistoryPrevious), depth, {}};
+    luma.inputs = {Texture(FrameGenTextureKind::kHistoryNewest), Texture(FrameGenTextureKind::kHistoryPrevious), depth, {}, {}};
     luma.outputs = {Texture(FrameGenTextureKind::kLumaNewest, 1), Texture(FrameGenTextureKind::kLumaPrevious, 1)};
     luma.constants.options[3] = 1;
     plan.dispatches.push_back(luma);
@@ -184,13 +197,13 @@ FrameGenViewPlan BuildFrameGenViewPlan(const FrameGenViewRequest& request, const
         // (run by the backend right after the pack), and the unpack scores
         // each of its vectors the way block matching would.
         FrameGenDispatch pack = Dispatch(FrameGenPass::kFlowPack, plan.levels[1], plan.levels[1], base);
-        pack.inputs = {Texture(FrameGenTextureKind::kLumaNewest, 1), Texture(FrameGenTextureKind::kLumaPrevious, 1), {}, {}};
+        pack.inputs = {Texture(FrameGenTextureKind::kLumaNewest, 1), Texture(FrameGenTextureKind::kLumaPrevious, 1), {}, {}, {}};
         pack.outputs = {Texture(FrameGenTextureKind::kHardwareNewest), Texture(FrameGenTextureKind::kHardwarePrevious)};
         plan.dispatches.push_back(pack);
         FrameGenDispatch unpack = Dispatch(FrameGenPass::kFlowUnpack, plan.levels[kFrameGenHardwareFlowLevel],
                                            plan.levels[1], base);
         unpack.inputs = {Texture(FrameGenTextureKind::kHardwareFlow), Texture(FrameGenTextureKind::kLumaNewest, 1),
-                         Texture(FrameGenTextureKind::kLumaPrevious, 1), {}};
+                         Texture(FrameGenTextureKind::kLumaPrevious, 1), {}, {}};
         unpack.outputs = {Texture(FrameGenTextureKind::kFlow, kFrameGenHardwareFlowLevel), {}};
         unpack.constants.options[3] = 1u << (kFrameGenHardwareFlowLevel - 1);
         plan.dispatches.push_back(unpack);
@@ -199,7 +212,7 @@ FrameGenViewPlan BuildFrameGenViewPlan(const FrameGenViewRequest& request, const
     for (std::uint8_t level = 2; level <= kFrameGenPyramidLevels && !tuning.hardware_flow; ++level) {
         FrameGenDispatch down = Dispatch(FrameGenPass::kDownsample, plan.levels[level], plan.levels[level - 1], base);
         down.inputs = {Texture(FrameGenTextureKind::kLumaNewest, level - 1),
-                       Texture(FrameGenTextureKind::kLumaPrevious, level - 1), {}, {}};
+                       Texture(FrameGenTextureKind::kLumaPrevious, level - 1), {}, {}, {}};
         down.outputs = {Texture(FrameGenTextureKind::kLumaNewest, level), Texture(FrameGenTextureKind::kLumaPrevious, level)};
         down.constants.options[3] = level;
         plan.dispatches.push_back(down);
@@ -211,7 +224,7 @@ FrameGenViewPlan BuildFrameGenViewPlan(const FrameGenViewRequest& request, const
         FrameGenDispatch search = Dispatch(FrameGenPass::kSearch, plan.levels[kFrameGenPyramidLevels],
                                            plan.levels[kFrameGenPyramidLevels], base);
         search.inputs = {Texture(FrameGenTextureKind::kLumaNewest, kFrameGenPyramidLevels),
-                         Texture(FrameGenTextureKind::kLumaPrevious, kFrameGenPyramidLevels), {}, {}};
+                         Texture(FrameGenTextureKind::kLumaPrevious, kFrameGenPyramidLevels), {}, {}, {}};
         search.outputs = {Texture(FrameGenTextureKind::kFlow, kFrameGenPyramidLevels), {}};
         search.constants.options[3] = 1;
         plan.dispatches.push_back(search);
@@ -224,7 +237,8 @@ FrameGenViewPlan BuildFrameGenViewPlan(const FrameGenViewRequest& request, const
         refine.inputs = {Texture(FrameGenTextureKind::kLumaNewest, match), Texture(FrameGenTextureKind::kLumaPrevious, match),
                          Texture(FrameGenTextureKind::kFlow, level + 1),
                          request.temporal ? Texture(FrameGenTextureKind::kFilteredPrevious, plan.final_flow_level)
-                                          : FrameGenTexture{}};
+                                          : FrameGenTexture{},
+                         {}};
         refine.outputs = {Texture(FrameGenTextureKind::kFlow, level), {}};
         refine.constants.options[3] = 1u << (level - match);
         refine.constants.tuning[0] = std::clamp(tuning.interval_ratio, 0.25f, 4.0f);
@@ -236,20 +250,58 @@ FrameGenViewPlan BuildFrameGenViewPlan(const FrameGenViewRequest& request, const
 
     FrameGenDispatch filter = Dispatch(FrameGenPass::kFilter, plan.levels[plan.final_flow_level],
                                        plan.levels[plan.final_flow_level], base);
-    // Last frame's filtered flow and the depth: how steady each vector is.
+    // Last frame's filtered flow and the depth: how steady each vector is;
+    // the trust: where cockpit content stays still.
     filter.inputs = {Texture(FrameGenTextureKind::kFlow, plan.final_flow_level),
                      request.temporal ? Texture(FrameGenTextureKind::kFilteredPrevious, plan.final_flow_level)
                                       : FrameGenTexture{},
-                     depth, {}};
+                     depth, request.depth ? Texture(FrameGenTextureKind::kTrustNewest) : FrameGenTexture{}, {}};
     filter.outputs = {Texture(FrameGenTextureKind::kFilteredNewest, plan.final_flow_level), {}};
     filter.constants.options[3] = plan.final_flow_level;
     filter.constants.tuning[0] = std::clamp(tuning.interval_ratio, 0.25f, 4.0f);
     plan.dispatches.push_back(filter);
 
+    // The eye-shift map for the generated frame furthest in time from the
+    // newest one; the others scale it by their time.
+    float shift_time = 0.0f;
+    for (std::size_t index = 0; index < generated; ++index) {
+        const float fraction = std::clamp(tuning.fractions[index], 0.0f, 1.0f);
+        shift_time = std::max(shift_time, tuning.mode == FrameGenSynthesisMode::kExtrapolate ? fraction : 1.0f - fraction);
+    }
+    const std::array<float, 3> eye{request.shift[0] * shift_time, request.shift[1] * shift_time,
+                                   request.shift[2] * shift_time};
+    const bool shifted =
+        request.depth && std::sqrt(eye[0] * eye[0] + eye[1] * eye[1] + eye[2] * eye[2]) >= kFrameGenMinimumShift;
+    if (shifted) {
+        FrameGenConstants mapping = base;
+        mapping.fov_previous = mapping.fov_current;
+        mapping.rot0 = {1.0f, 0.0f, 0.0f, -eye[0]};
+        mapping.rot1 = {0.0f, 1.0f, 0.0f, -eye[1]};
+        mapping.rot2 = {0.0f, 0.0f, 1.0f, -eye[2]};
+        mapping.options = {0, kFrameGenFlagDepth, 0, 0};
+        auto pass = [&](FrameGenPass kind, std::array<FrameGenTexture, 5> inputs, FrameGenTextureKind output) {
+            FrameGenDispatch dispatch = Dispatch(kind, plan.levels[1], plan.levels[1], mapping);
+            dispatch.inputs = inputs;
+            dispatch.outputs = {Texture(output), {}};
+            plan.dispatches.push_back(dispatch);
+        };
+        const FrameGenTexture trust = Texture(FrameGenTextureKind::kTrustNewest);
+        const FrameGenTexture keys = Texture(FrameGenTextureKind::kShiftKeys);
+        pass(FrameGenPass::kShiftClear, {}, FrameGenTextureKind::kShiftKeys);
+        pass(FrameGenPass::kShiftSplat, {depth, trust, {}, {}, {}}, FrameGenTextureKind::kShiftKeys);
+        pass(FrameGenPass::kShiftResolve, {depth, trust, keys, {}, {}}, FrameGenTextureKind::kShiftMap);
+        pass(FrameGenPass::kShiftFill, {keys, {}, {}, {}, {}}, FrameGenTextureKind::kShiftMap);
+    }
+
     for (std::size_t index = 0; index < generated; ++index) {
         FrameGenDispatch output = Dispatch(synthesize, plan.levels[0], plan.levels[plan.final_flow_level], base);
         output.inputs = {Texture(FrameGenTextureKind::kHistoryNewest), Texture(FrameGenTextureKind::kHistoryPrevious),
-                         Texture(FrameGenTextureKind::kFilteredNewest, plan.final_flow_level), depth};
+                         Texture(FrameGenTextureKind::kFilteredNewest, plan.final_flow_level), depth,
+                         shifted ? Texture(FrameGenTextureKind::kShiftMap) : FrameGenTexture{}};
+        if (shifted) {
+            output.constants.options[1] |= kFrameGenFlagShift;
+            std::memcpy(&output.constants.options[3], &shift_time, sizeof(shift_time));
+        }
         output.outputs = {Texture(FrameGenTextureKind::kOutput), {}};
         output.constants.tuning[0] = std::clamp(tuning.fractions[index], 0.0f, 1.0f);
         output.copy_mask = static_cast<std::uint8_t>(1u << index);
@@ -299,8 +351,9 @@ FrameGenDispatch BuildFrameGenDepthTrustDispatch(FrameGenExtent view_extent, con
     dispatch.constants.rot2 = {rotation[2][0], rotation[2][1], rotation[2][2], translation[2]};
     dispatch.constants.size = {levels[1].width, levels[1].height, 0, 0};
     dispatch.constants.options = {0, kFrameGenFlagDepth, 0, 0};
-    dispatch.inputs = {Texture(FrameGenTextureKind::kHistoryNewest), {}, {}, {}}; // the other view's newest goes in t1
-    dispatch.outputs = {Texture(FrameGenTextureKind::kDepth), {}};
+    // The other view's newest goes in t1, the depth in t2.
+    dispatch.inputs = {Texture(FrameGenTextureKind::kHistoryNewest), {}, Texture(FrameGenTextureKind::kDepth), {}, {}};
+    dispatch.outputs = {Texture(FrameGenTextureKind::kTrustNewest), {}};
     return dispatch;
 }
 
@@ -441,18 +494,21 @@ FrameGenViewRequest FrameGenHistoryState::Effective(const FrameGenViewRequest& r
     FrameGenViewRequest effective = request;
     effective.synthesize = request.synthesize && history_valid_[Previous()];
     effective.temporal = effective.synthesize && request.temporal && filtered_valid_[Previous()];
+    effective.trust_history = effective.synthesize && trust_valid_[Previous()];
     return effective;
 }
 
-void FrameGenHistoryState::Commit(bool synthesized) {
+void FrameGenHistoryState::Commit(bool synthesized, bool trusted) {
     history_valid_[newest_] = true;
     filtered_valid_[newest_] = synthesized;
+    trust_valid_[newest_] = trusted;
     newest_ ^= 1u;
 }
 
 void FrameGenHistoryState::Invalidate() {
     history_valid_ = {};
     filtered_valid_ = {};
+    trust_valid_ = {};
     newest_ = 0;
 }
 
