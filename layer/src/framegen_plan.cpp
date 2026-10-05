@@ -475,8 +475,11 @@ void FrameGenDepthValidator::Add(const FrameGenDepthEvidence& check) {
             scale_ = static_cast<float>(std::clamp(scale_ * step, 0.5, 2.0));
         }
     }
-    if (swapped_ != swapped_before || scale_ != scale_before || probe_step_ != step_before) {
+    if (swapped_ != swapped_before || scale_ != scale_before) {
         ++generation_;
+    }
+    if (swapped_ != swapped_before || scale_ != scale_before || probe_step_ != step_before) {
+        ++check_generation_;
     }
     const bool changed = reading_ != reading_before || swapped_ != swapped_before || scale_ != scale_before;
     if (changed) {

@@ -160,7 +160,9 @@ class FrameGenPresenter {
     // without the backend's capture usage is never copied.
     void TrackSwapchain(XrSwapchain swapchain, std::int64_t format, std::uint32_t sample_count,
                         XrSwapchainUsageFlags usage);
-    void ForgetSwapchain(XrSwapchain swapchain);
+    // False when the GPU did not finish its work in time: work recorded by
+    // the layer may still use the swapchain's images.
+    bool ForgetSwapchain(XrSwapchain swapchain);
     // Call before forwarding xrDestroySpace: nothing the presenter thread
     // repeats may refer to the space afterwards.
     void ForgetSpace(XrSpace space);
@@ -188,6 +190,7 @@ class FrameGenPresenter {
         bool depth{false};            // a depth swapchain
         bool depth_capturable{false}; // created with the usage depth capture needs
         std::optional<std::uint32_t> released;
+        std::uint64_t releases{0}; // images released so far
     };
 
     // What each output swapchain holds, readable from release threads.
@@ -250,9 +253,10 @@ class FrameGenPresenter {
         XrSpace space{XR_NULL_HANDLE};
         XrCompositionLayerFlags flags{0};
         std::vector<std::vector<XrCompositionLayerProjectionView>> sets;
-        // Interpolated between the previous real frame and the newest one:
-        // once they are shown, the newest real frame is (extrapolated sets
-        // instead keep showing the last one).
+        // The display time each set was made for (presenter thread).
+        std::vector<XrTime> targets;
+        // Interpolated between the previous real frame and the newest one,
+        // ending with the newest real frame's own copy.
         bool interpolated{false};
     };
 
@@ -265,6 +269,8 @@ class FrameGenPresenter {
             std::vector<XrCompositionLayerProjectionView> views;
             std::vector<XrCompositionLayerDepthInfoKHR> depth;
             std::vector<std::uint8_t> has_depth;
+            // The depth swapchains' SwapchainRecord::releases when copied.
+            std::vector<std::uint64_t> depth_releases;
             XrCompositionLayerQuad quad{};
             XrCompositionLayerCylinderKHR cylinder{};
             XrCompositionLayerEquirectKHR equirect{};
@@ -347,9 +353,15 @@ class FrameGenPresenter {
                       const FrameGenRuntimeCalls& calls);
     // Generates one frame per fraction into the output swapchain sets from
     // the newest real frame. On success `sets` holds the generated
-    // projection views, one set per fraction.
-    bool Generate(const XrCompositionLayerProjection& projection, const PendingFrame& frame,
-                  const std::vector<float>& fractions, std::vector<std::vector<XrCompositionLayerProjectionView>>& sets);
+    // projection views, one set per fraction. Without `release` the output
+    // images, written or not, stay acquired until ReleaseOutputs.
+    bool Generate(const XrCompositionLayerProjection& projection, const PendingFrame& frame, FrameGenSynthesisMode mode,
+                  const std::vector<float>& fractions, std::vector<std::vector<XrCompositionLayerProjectionView>>& sets,
+                  bool release = true);
+    // Depth chains of a frame copy that describe images the game has since
+    // replaced are dropped.
+    void RecordDepthReleasesLocked(FrameCopy& copy) const;
+    void DropStaleDepthLocked(FrameCopy& copy) const;
     // How far each eye moves per unit of generated-frame time from the real
     // frame shown at `newest_time` (FrameGenViewRequest::shift), in that
     // eye's view space: as far as it moved since the previous real frame
@@ -571,6 +583,7 @@ class FrameGenPresenter {
     bool generated_ready_{false};        // extrapolated_ belongs to newest_copy_
     std::size_t next_generated_set_{0};
     std::uint64_t threaded_late_{0};     // real frames shown after their predicted slot
+    std::uint64_t skipped_generated_{0}; // generated frames passed over: made for a refresh already past
     // Real frames generated from, and how many of them used the game's depth,
     // since the last summary.
     std::uint64_t depth_window_frames_{0};

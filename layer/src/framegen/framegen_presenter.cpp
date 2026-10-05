@@ -460,7 +460,7 @@ void FrameGenPresenter::TrackSwapchain(XrSwapchain swapchain, std::int64_t forma
     swapchains_[swapchain] = record;
 }
 
-void FrameGenPresenter::ForgetSwapchain(XrSwapchain swapchain) {
+bool FrameGenPresenter::ForgetSwapchain(XrSwapchain swapchain) {
     // Holding submit_mutex_ keeps the presenter thread from submitting the
     // swapchain while it goes; afterwards no copy refers to it.
     std::scoped_lock submit(submit_mutex_);
@@ -474,12 +474,17 @@ void FrameGenPresenter::ForgetSwapchain(XrSwapchain swapchain) {
         StripSwapchain(passthrough_copy_, swapchain);
     }
     std::scoped_lock gpu_lock(gpu_mutex_);
+    bool idle = true;
     if (gpu_) {
         // A recent submission may still read or write this swapchain's
         // images; destroys are rare, so always let it finish first.
-        gpu_->WaitIdle();
+        idle = gpu_->WaitIdle() || gpu_->WaitIdle() || gpu_->WaitIdle();
         gpu_->Forget(swapchain);
     }
+    if (!idle && logger_) {
+        logger_->Error("Frame Generation: the GPU did not finish its work on a swapchain being destroyed within 6 s.");
+    }
+    return idle;
 }
 
 void FrameGenPresenter::ForgetSpace(XrSpace space) {
@@ -502,6 +507,7 @@ void FrameGenPresenter::NoteRelease(XrSwapchain swapchain, std::uint32_t image_i
     std::scoped_lock lock(mutex_);
     if (const auto it = swapchains_.find(swapchain); it != swapchains_.end()) {
         it->second.released = image_index;
+        ++it->second.releases;
     }
 }
 
@@ -1311,7 +1317,7 @@ XrResult FrameGenPresenter::RunCycle(XrSession session, const XrFrameEndInfo& in
             const XrTime target = frame.slot_time + period * static_cast<XrDuration>(slot);
             fractions.push_back(continuous ? FrameGenFraction(mode, previous_time, newest_time, target) : 1.0f);
         }
-        interpolated_ready = Generate(projection, frame, fractions, interpolated);
+        interpolated_ready = Generate(projection, frame, mode, fractions, interpolated);
     }
 
     XrTime time = frame.slot_time;
@@ -1368,7 +1374,7 @@ XrResult FrameGenPresenter::RunCycle(XrSession session, const XrFrameEndInfo& in
             fractions.push_back(continuous ? FrameGenFraction(mode, previous_time, newest_time, target) : 0.0f);
         }
         std::vector<std::vector<XrCompositionLayerProjectionView>> sets;
-        const bool ok = Generate(projection, frame, fractions, sets);
+        const bool ok = Generate(projection, frame, mode, fractions, sets);
         std::scoped_lock lock(mutex_);
         extrapolated_.valid = ok;
         extrapolated_.sets = std::move(sets);
@@ -1475,19 +1481,14 @@ void FrameGenPresenter::NoteGpuTimingLocked(std::uint64_t submission, const Pend
 }
 
 bool FrameGenPresenter::Generate(const XrCompositionLayerProjection& projection, const PendingFrame& frame,
-                                 const std::vector<float>& fractions,
-                                 std::vector<std::vector<XrCompositionLayerProjectionView>>& sets) {
+                                 FrameGenSynthesisMode mode, const std::vector<float>& fractions,
+                                 std::vector<std::vector<XrCompositionLayerProjectionView>>& sets, bool release) {
     const std::size_t count = std::min(fractions.size(), kFrameGenMaxGenerated);
     if (count == 0) {
         return false;
     }
     // Each generated frame's time past the newest real frame (before it when
     // interpolating), in the fractions' units, and where the eyes move.
-    FrameGenSynthesisMode mode;
-    {
-        std::scoped_lock lock(mutex_);
-        mode = settings_.synthesis_mode;
-    }
     std::vector<float> times(count, 0.0f);
     for (std::size_t index = 0; index < count; ++index) {
         times[index] = mode == FrameGenSynthesisMode::kExtrapolate ? fractions[index] : 1.0f - fractions[index];
@@ -1502,7 +1503,7 @@ bool FrameGenPresenter::Generate(const XrCompositionLayerProjection& projection,
         if (!gpu_ || state_ == FrameGenState::kUnavailable) {
             return false;
         }
-        tuning.mode = settings_.synthesis_mode;
+        tuning.mode = mode;
         tuning.quality = settings_.flow_quality;
         tuning.hardware_flow = settings_.motion_estimation == FrameGenMotionEstimation::kHardware;
         tuning.diagnostic = settings_.diagnostic_view;
@@ -1636,8 +1637,11 @@ bool FrameGenPresenter::Generate(const XrCompositionLayerProjection& projection,
         }
     }
     // Every output here was acquired and waited; release them all so the
-    // next frame starts clean. Unwritten images are not submitted this frame.
-    ReleaseOutputs();
+    // next frame starts clean (or the caller does, once it may replace what
+    // the runtime shows). Unwritten images are not submitted this frame.
+    if (release) {
+        ReleaseOutputs();
+    }
 
     std::scoped_lock lock(mutex_);
     if (!ok) {
@@ -1813,8 +1817,9 @@ bool FrameGenPresenter::EnsureOutputs(const XrCompositionLayerProjection& projec
                     std::scoped_lock lock(mutex_);
                     output_kinds_[i] = {};
                 }
-                ForgetSwapchain(output.swapchain);
-                {
+                // Unfinished GPU work may still write it: then it is left to
+                // the runtime, which frees it with the session.
+                if (ForgetSwapchain(output.swapchain)) {
                     std::scoped_lock submit(submit_mutex_);
                     xr_.destroy(output.swapchain);
                 }
@@ -1969,8 +1974,7 @@ void FrameGenPresenter::DestroyOutputs() {
     ReleaseOutputs();
     for (auto& set : output_sets_) {
         for (Output& output : set) {
-            if (output.swapchain) {
-                ForgetSwapchain(output.swapchain);
+            if (output.swapchain && ForgetSwapchain(output.swapchain)) {
                 std::scoped_lock submit(submit_mutex_);
                 if (xr_.destroy) xr_.destroy(output.swapchain);
             }
@@ -1988,6 +1992,30 @@ void FrameGenPresenter::NoteSubmissionLocked() {
 }
 
 // --- Threaded presentation -----------------------------------------------------
+
+void FrameGenPresenter::RecordDepthReleasesLocked(FrameCopy& copy) const {
+    for (FrameCopy::Layer& layer : copy.layers) {
+        layer.depth_releases.assign(layer.depth.size(), 0);
+        for (std::size_t view = 0; view < layer.depth.size(); ++view) {
+            if (const auto it = swapchains_.find(layer.depth[view].subImage.swapchain); it != swapchains_.end()) {
+                layer.depth_releases[view] = it->second.releases;
+            }
+        }
+    }
+}
+
+void FrameGenPresenter::DropStaleDepthLocked(FrameCopy& copy) const {
+    // The runtime reads a swapchain's newest image: once the game has
+    // released its next depth image, the copied chain describes that one.
+    for (FrameCopy::Layer& layer : copy.layers) {
+        for (std::size_t view = 0; view < layer.has_depth.size() && view < layer.depth_releases.size(); ++view) {
+            const auto it = swapchains_.find(layer.depth[view].subImage.swapchain);
+            if (layer.has_depth[view] && it != swapchains_.end() && it->second.releases != layer.depth_releases[view]) {
+                layer.has_depth[view] = 0;
+            }
+        }
+    }
+}
 
 bool FrameGenPresenter::CopyFrame(const XrFrameEndInfo& info, FrameCopy& copy, std::string& unsupported) {
     copy = {};
@@ -2576,28 +2604,31 @@ XrResult FrameGenPresenter::ThreadedEnd(XrSession session, const XrFrameEndInfo&
     // fill the slots before it: generated now, the first shown from here.
     const bool interpolate = frame.interpolate && renderable && copied && frame.multiplier >= 2;
     std::vector<std::vector<XrCompositionLayerProjectionView>> between;
+    std::vector<XrTime> between_targets;
     bool between_ok = false;
     if (interpolate) {
-        // The frames interpolated toward the previous real frame use the same
-        // output swapchains, and the runtime shows a swapchain's newest
-        // image: those still to be shown are submitted first, or this frame's
-        // would be shown in their slots, a real frame ahead and from the
-        // wrong eye position. Game frames often end slots early.
-        slot_cv_.wait_for(lock, kThreadedDrain, [&] {
-            return !compositor_running_ || !extrapolated_.interpolated || !extrapolated_.valid || !generated_ready_ ||
-                   next_generated_set_ >= extrapolated_.sets.size();
-        });
         lock.unlock();
+        // The frames between the previous real frame and this one, then this
+        // frame itself (fraction 1 reproduces it) for its own slot, N - 1
+        // slots after it ended: by then the game may have released its next
+        // image into the same swapchain, and the runtime shows a swapchain's
+        // newest image. Released to the runtime only once this frame has its
+        // slot: until then the output swapchains keep showing the previous
+        // real frame's frames, still being presented.
         std::vector<float> fractions;
-        for (std::uint32_t slot = 0; slot + 1 < frame.multiplier && fractions.size() < kFrameGenMaxGenerated; ++slot) {
+        for (std::uint32_t slot = 0; slot < frame.multiplier && fractions.size() < kFrameGenMaxGenerated; ++slot) {
             const XrTime target = frame.first_time + period * static_cast<XrDuration>(slot);
-            fractions.push_back(FrameGenFraction(FrameGenSynthesisMode::kInterpolate, previous_time, content_time, target));
+            between_targets.push_back(target);
+            fractions.push_back(slot + 1 == frame.multiplier
+                                    ? 1.0f
+                                    : FrameGenFraction(FrameGenSynthesisMode::kInterpolate, previous_time, content_time,
+                                                       target));
         }
         PendingFrame pending;
         pending.app_time = content_time;
         pending.sequence = frame.id;
         pending.real_due = pending.generated_due = first_due;
-        between_ok = Generate(*projection, pending, fractions, between);
+        between_ok = Generate(*projection, pending, FrameGenSynthesisMode::kInterpolate, fractions, between, false);
         RecordReal(*projection, content_time, frame.id);
         lock.lock();
     }
@@ -2622,15 +2653,23 @@ XrResult FrameGenPresenter::ThreadedEnd(XrSession session, const XrFrameEndInfo&
         }
         erase_frame();
         WakeSlots();
+        lock.unlock();
+        if (interpolate) {
+            ReleaseOutputs();
+        }
         return XR_SUCCESS;
     }
     const SlotOffer offer = *slot_offer_;
     lock.unlock();
+    if (interpolate) {
+        ReleaseOutputs();
+    }
 
     // A late frame skips the frames interpolated for the slots it missed;
-    // one later than all of them is shown itself.
+    // one late for its own slot is shown itself (the game has not released
+    // a newer image yet).
     const std::size_t skip = offer.slot > frame.first_slot ? static_cast<std::size_t>(offer.slot - frame.first_slot) : 0;
-    const bool show_between = interpolate && between_ok && skip < between.size();
+    const bool show_between = interpolate && between_ok && skip + 1 < between.size();
     XrFrameBeginInfo begin_info{XR_TYPE_FRAME_BEGIN_INFO};
     XrResult result = RuntimeBegin(calls, session, &begin_info);
     if (XR_SUCCEEDED(result)) {
@@ -2676,14 +2715,20 @@ XrResult FrameGenPresenter::ThreadedEnd(XrSession session, const XrFrameEndInfo&
     if (frame.interpolate) {
         extrapolated_ = {};
         extrapolated_.interpolated = true;
-        if (show_between && skip + 1 < between.size() && compositor_running_) {
+        if (interpolate && between_ok && compositor_running_) {
+            // The rest of the frames before it, then its copy; only the copy
+            // when it was shown itself, repeated if the next frame is late.
+            const std::size_t first = show_between ? skip + 1 : between.size() - 1;
             extrapolated_.valid = true;
-            extrapolated_.sets.assign(between.begin() + static_cast<std::ptrdiff_t>(skip + 1), between.end());
+            extrapolated_.sets.assign(between.begin() + static_cast<std::ptrdiff_t>(first), between.end());
+            extrapolated_.targets.assign(between_targets.begin() + static_cast<std::ptrdiff_t>(first),
+                                         between_targets.end());
             extrapolated_.space = projection->space;
             extrapolated_.flags = projection->layerFlags;
             generated_ready_ = true;
         }
     }
+    RecordDepthReleasesLocked(newest_copy_);
     const Clock::time_point real_due = due(offer.time);
     const Clock::time_point generated_due = due(offer.time + period);
     const bool late = offer.slot > frame.first_slot;
@@ -2704,11 +2749,13 @@ XrResult FrameGenPresenter::ThreadedEnd(XrSession session, const XrFrameEndInfo&
 
     if (generate) {
         std::vector<float> fractions;
+        std::vector<XrTime> targets;
         // One frame per generated slot, plus a spare for the slot the next
         // real frame is due in: if that frame is late, the slot still shows
         // motion instead of repeating the last generated frame.
         for (std::uint32_t slot = 1; slot <= frame.multiplier && fractions.size() < kFrameGenMaxGenerated; ++slot) {
             const XrTime target = offer.time + period * static_cast<XrDuration>(slot);
+            targets.push_back(target);
             fractions.push_back(FrameGenFraction(FrameGenSynthesisMode::kExtrapolate, previous_time, content_time, target));
         }
         PendingFrame pending;
@@ -2717,13 +2764,14 @@ XrResult FrameGenPresenter::ThreadedEnd(XrSession session, const XrFrameEndInfo&
         pending.real_due = real_due;
         pending.generated_due = generated_due;
         std::vector<std::vector<XrCompositionLayerProjectionView>> sets;
-        const bool ok = Generate(*projection, pending, fractions, sets);
+        const bool ok = Generate(*projection, pending, FrameGenSynthesisMode::kExtrapolate, fractions, sets);
         RecordReal(*projection, content_time, frame.id);
         lock.lock();
         if (compositor_running_) {
             extrapolated_.valid = ok;
             extrapolated_.interpolated = false;
             extrapolated_.sets = std::move(sets);
+            extrapolated_.targets = std::move(targets);
             extrapolated_.space = projection->space;
             extrapolated_.flags = projection->layerFlags;
             generated_ready_ = ok;
@@ -2754,7 +2802,8 @@ XrResult FrameGenPresenter::ThreadedEnd(XrSession session, const XrFrameEndInfo&
                       Number(RatePerSecond(submissions_, entered), 1) + ", appLatencyMs=" + Number(app_latency_ms_, 1) +
                       ", leadSlots=" + std::to_string(lead_slots_) +
                       ", appWorkMs=" + Number(app_work_frames_ ? app_work_ms_ / app_work_frames_ : 0.0, 1) +
-                      ", lateReal=" + std::to_string(threaded_late_) + ", generated=" + std::to_string(generated_) +
+                      ", lateReal=" + std::to_string(threaded_late_) +
+                      ", skippedGenerated=" + std::to_string(skipped_generated_) + ", generated=" + std::to_string(generated_) +
                       ", repeated=" + std::to_string(repeated_) + ", failures=" + std::to_string(failures_) +
                       ", captured=" + std::to_string(captured_) + ", gpuMs=" + Number(gpu_ms_, 2) + ", depthUsed=" +
                       Number(depth_window_frames_ ? 100.0 * depth_window_used_ / depth_window_frames_ : 0.0, 0) +
@@ -2771,6 +2820,7 @@ XrResult FrameGenPresenter::ThreadedEnd(XrSession session, const XrFrameEndInfo&
         app_work_ms_ = 0.0;
         app_work_frames_ = 0;
         threaded_late_ = 0;
+        skipped_generated_ = 0;
         depth_window_frames_ = depth_window_used_ = 0;
         shift_window_sum_mm_ = shift_window_max_mm_ = 0.0;
         shift_window_frames_ = 0;
@@ -2894,19 +2944,25 @@ void FrameGenPresenter::CompositorLoop() {
         std::unique_lock submit_lock(submit_mutex_);
         lock.lock();
         FrameCopy content = newest_copy_;
+        DropStaleDepthLocked(content);
         std::vector<XrCompositionLayerProjectionView> views;
         const bool use_generated =
             content.valid && content.has_projection && generated_ready_ && extrapolated_.valid &&
             !extrapolated_.sets.empty() &&
-            extrapolated_.sets.front().size() == content.layers[content.projection_index].views.size() &&
-            (!extrapolated_.interpolated || next_generated_set_ < extrapolated_.sets.size());
+            extrapolated_.sets.front().size() == content.layers[content.projection_index].views.size();
         if (use_generated) {
-            views = extrapolated_.sets[std::min(next_generated_set_, extrapolated_.sets.size() - 1)];
-            ++next_generated_set_;
-            // Interpolating, the game's frame thread may wait to generate
-            // into these swapchains; it still waits on submit_mutex_ for
-            // this submission.
-            slot_cv_.notify_all();
+            // The frame made for this refresh: frames made for refreshes
+            // already past (a skipped refresh, or frames ready late) are
+            // passed over, and the last one stays after its own (the next
+            // real frame is late; interpolating, it is the real frame's copy).
+            std::size_t index = std::min(next_generated_set_, extrapolated_.sets.size() - 1);
+            while (index + 1 < extrapolated_.sets.size() && index < extrapolated_.targets.size() &&
+                   extrapolated_.targets[index] + period / 2 < slot_time_) {
+                ++index;
+                ++skipped_generated_;
+            }
+            views = extrapolated_.sets[index];
+            next_generated_set_ = index + 1;
         }
         const XrSpace space = extrapolated_.space;
         const XrCompositionLayerFlags flags = extrapolated_.flags;

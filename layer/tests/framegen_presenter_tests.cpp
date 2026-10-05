@@ -19,6 +19,7 @@
 #include <chrono>
 #include <functional>
 #include <cmath>
+#include <limits>
 #include <cstdlib>
 #include <iostream>
 #include <map>
@@ -58,6 +59,11 @@ int g_creates = 0;
 int g_wait_timeouts = 0; // number of upcoming output waits that time out
 bool g_release_violation = false;
 std::map<XrSwapchain, int> g_releases; // images released per swapchain
+// What the fake GPU drew into output images, as the eye position (x) the
+// image was generated for: written ones in acquisition order, and the
+// newest released one, which the runtime shows (NaN: released unwritten).
+std::map<XrSwapchain, std::deque<float>> g_written;
+std::map<XrSwapchain, float> g_shown;
 
 XrResult XRAPI_PTR Formats(XrSession, std::uint32_t capacity, std::uint32_t* count, std::int64_t* formats) {
     *count = 1;
@@ -106,6 +112,9 @@ XrResult XRAPI_PTR Release(XrSwapchain swapchain, const XrSwapchainImageReleaseI
     images.acquired.pop_front();
     --images.waited;
     ++g_releases[swapchain];
+    auto& written = g_written[swapchain];
+    g_shown[swapchain] = written.empty() ? std::numeric_limits<float>::quiet_NaN() : written.front();
+    if (!written.empty()) written.pop_front();
     return XR_SUCCESS;
 }
 
@@ -166,6 +175,14 @@ class FakeGpu final : public FrameGenGpu {
             history_[i].Commit(synthesized);
             result.synthesized.push_back(synthesized);
             result.depth.push_back(synthesized && views[i].request.depth && log_->depth);
+            // Each output shows the scene from the eye position of its time.
+            std::scoped_lock lock(g_xr_mutex);
+            for (std::size_t j = 0; j < views[i].outputs.size(); ++j) {
+                const float fraction = tuning.fractions[j];
+                const float time = tuning.mode == FrameGenSynthesisMode::kExtrapolate ? fraction : 1.0f - fraction;
+                g_written[views[i].outputs[j].swapchain].push_back(
+                    views[i].request.newest.position[0] + (result.depth.back() ? time * views[i].request.shift[0] : 0.0f));
+            }
         }
         return true;
     }
@@ -232,6 +249,9 @@ struct Runtime {
     std::vector<XrSwapchain> destroyed; // under g_xr_mutex
     std::vector<XrSpace> destroyed_spaces; // under g_xr_mutex
     std::atomic<bool> used_destroyed_space{false};
+    // Submissions showing an output image generated for another eye position
+    // than the views submitted with it (another frame's, or none).
+    std::atomic<int> mismatched_images{0};
     std::atomic<int> wait_sleep_ms{0};
     bool begun{false};
     std::vector<XrTime> submitted_times;
@@ -306,6 +326,10 @@ struct Runtime {
                     swapchains.push_back(projection->views[i].subImage.swapchain);
                     releases.push_back(g_releases[projection->views[i].subImage.swapchain]);
                     depth = depth || projection->views[i].next != nullptr;
+                    const auto shown = g_shown.find(projection->views[i].subImage.swapchain);
+                    if (shown != g_shown.end() && !(std::abs(shown->second - projection->views[i].pose.position.x) < 1e-5f)) {
+                        ++mismatched_images;
+                    }
                 }
                 left_x = projection->viewCount ? projection->views[0].pose.position.x : 0.0f;
             }
@@ -866,43 +890,37 @@ void TestThreadedInterpolation() {
     Check(static_cast<double>(log.size() - first) / elapsed > refresh * 0.85,
           "threaded interpolation: every refresh gets a frame");
     CheckOrderedTimes(log, "threaded interpolation");
-    Check(gpu.tuning.mode == FrameGenSynthesisMode::kInterpolate && gpu.tuning.generated == 2 &&
+    Check(gpu.tuning.mode == FrameGenSynthesisMode::kInterpolate && gpu.tuning.generated == 3 &&
               gpu.tuning.fractions[0] > 0.2f && gpu.tuning.fractions[0] < 0.5f && gpu.tuning.fractions[1] > 0.5f &&
-              gpu.tuning.fractions[1] < 0.8f,
-          "threaded interpolation: two frames a third and two thirds of the way between real frames (" +
-              std::to_string(gpu.tuning.fractions[0]) + ", " + std::to_string(gpu.tuning.fractions[1]) + ")");
-    // Real frames come after the frames interpolated toward them, mostly at
-    // the very display time they were rendered for.
-    std::size_t real = 0, after_two = 0, on_time = 0;
+              gpu.tuning.fractions[1] < 0.8f && gpu.tuning.fractions[2] == 1.0f,
+          "threaded interpolation: frames a third and two thirds of the way between real frames, then the real "
+          "frame's own copy (" +
+              std::to_string(gpu.tuning.fractions[0]) + ", " + std::to_string(gpu.tuning.fractions[1]) + ", " +
+              std::to_string(gpu.tuning.fractions[2]) + ")");
+    // Each real frame's slot, the display time it was rendered for, shows
+    // its copy (the last output set; the game may have released its next
+    // image by then) right after the frames interpolated toward it.
+    const XrSwapchain copy_swapchain = gpu.last[0].outputs.back().swapchain;
+    std::size_t real = 0, as_copy = 0, after_two = 0;
     for (std::size_t i = first + 12; i < log.size(); ++i) {
-        if (!IsAppImage(log[i].swapchains)) continue;
+        {
+            std::scoped_lock lock(times_mutex);
+            if (std::find(rendered_for.begin(), rendered_for.end(), log[i].time) == rendered_for.end()) continue;
+        }
         ++real;
-        after_two += !IsAppImage(log[i - 1].swapchains) && !IsAppImage(log[i - 2].swapchains) ? 1 : 0;
-        std::scoped_lock lock(times_mutex);
-        on_time += std::find(rendered_for.begin(), rendered_for.end(), log[i].time) != rendered_for.end() ? 1 : 0;
+        as_copy += log[i].swapchains.size() && log[i].swapchains[0] == copy_swapchain ? 1 : 0;
+        auto interpolated = [&](std::size_t j) {
+            return !IsAppImage(log[j].swapchains) && log[j].swapchains.size() && log[j].swapchains[0] != copy_swapchain;
+        };
+        after_two += interpolated(i - 1) && interpolated(i - 2) ? 1 : 0;
     }
-    Check(real > 10 && after_two * 10 >= real * 7,
-          "threaded interpolation: real frames follow their interpolated frames (" + std::to_string(after_two) + " of " +
-              std::to_string(real) + ")");
-    Check(on_time * 10 >= real * 7, "threaded interpolation: real frames are shown when they were rendered for (" +
-                                        std::to_string(on_time) + " of " + std::to_string(real) + ")");
-    // Each frame interpolated toward a real frame is shown before the frames
-    // toward the next one are generated into the same output swapchains:
-    // every submission of an output image shows one released since that
-    // swapchain was last shown.
-    std::map<XrSwapchain, int> shown;
-    std::size_t overwritten = 0, generated_shown = 0;
-    for (std::size_t i = first; i < log.size(); ++i) {
-        if (IsAppImage(log[i].swapchains) || log[i].releases.empty()) continue;
-        ++generated_shown;
-        const XrSwapchain swapchain = log[i].swapchains[0];
-        const auto previous = shown.find(swapchain);
-        overwritten += previous != shown.end() && log[i].releases[0] <= previous->second ? 1 : 0;
-        shown[swapchain] = log[i].releases[0];
-    }
-    Check(generated_shown > 20 && overwritten == 0,
-          "threaded interpolation: no interpolated image is replaced before it is shown (" +
-              std::to_string(overwritten) + " of " + std::to_string(generated_shown) + ")");
+    Check(real > 10 && as_copy * 10 >= real * 7 && after_two * 10 >= real * 7,
+          "threaded interpolation: real frames' slots show their copies after their interpolated frames (" +
+              std::to_string(as_copy) + " and " + std::to_string(after_two) + " of " + std::to_string(real) + ")");
+    // No slot shows an image generated for another frame than its views.
+    Check(runtime.mismatched_images == 0,
+          "threaded interpolation: every output image shown is the one generated with its views (" +
+              std::to_string(runtime.mismatched_images.load()) + " mismatched)");
     // The eyes moved +x: interpolated frames sit back toward the previous
     // real frame, a real frame interval (three periods) per unit.
     const float per_unit = static_cast<float>(0.5 * 3.0 * kPeriod * 1e-9);

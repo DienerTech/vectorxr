@@ -118,7 +118,7 @@ inline constexpr std::uint32_t kFrameGenThreadGroupSize = 8u;
 inline constexpr std::uint8_t kFrameGenPyramidLevels = 5;
 inline constexpr std::uint32_t kFrameGenSearchRadius = 6;
 // Generated frames per real frame at most (a 4x multiplier).
-inline constexpr std::size_t kFrameGenMaxGenerated = 3;
+inline constexpr std::size_t kFrameGenMaxGenerated = 4;
 // Eye movement (meters) below which generated frames are not shifted: a
 // fraction of a pixel even for content a hand's width away.
 inline constexpr float kFrameGenMinimumShift = 5e-5f;
@@ -202,7 +202,7 @@ struct FrameGenTuning {
     // generated time between the previous (0) and newest (1) real frames.
     // Extrapolation: distance past the newest frame, in units of the interval
     // between the two real frames. One flow field serves every fraction.
-    std::array<float, kFrameGenMaxGenerated> fractions{0.5f, 0.5f, 0.5f};
+    std::array<float, kFrameGenMaxGenerated> fractions{0.5f, 0.5f, 0.5f, 0.5f};
     std::uint8_t generated{1};
     // The newest real frame pair's interval over the pair before's: last
     // pair's motion times this is what steady motion moves now.
@@ -361,9 +361,12 @@ class FrameGenDepthValidator {
     // The probes' step (natural log): wide while searching, narrowing as
     // the scale settles.
     float ProbeStep() const { return probe_step_; }
-    // Changes whenever the decoding does: depth captured and checks
-    // recorded with an older decoding are not used.
+    // Changes whenever the decoding does (Swapped, Scale): depth captured
+    // with an older decoding is not used.
     std::uint32_t Generation() const { return generation_; }
+    // Changes with the decoding and with the probes' step: checks recorded
+    // with either older are not added.
+    std::uint32_t CheckGeneration() const { return check_generation_; }
     bool Usable() const { return reading_ == FrameGenDepthReading::kAsSubmitted || reading_ == FrameGenDepthReading::kReversed; }
     // Checks run every submission until a decision holds, then three in a
     // row every 20 submissions.
@@ -382,6 +385,7 @@ class FrameGenDepthValidator {
     float probe_step_{0.08f};
     bool settled_{false};
     std::uint32_t generation_{0};
+    std::uint32_t check_generation_{0};
     std::uint32_t decisions_{0};
     FrameGenDepthEvidence evidence_;
 };

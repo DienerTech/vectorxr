@@ -706,8 +706,9 @@ float4 Synthesize(uint2 pixel, float fraction) {
 // Direct3D 12 renders the generated frames of a view straight into the
 // output swapchain images in one draw: no intermediate image and no copy,
 // and the frames share their flow reads. FG_DRAW_OUTPUTS render targets,
-// fractions in tuning.x, then size.z and size.w (as float bits). An sRGB
-// render target encodes in hardware, so the encode flag is off.
+// fractions in tuning.x, then size.z, size.w and options.x (as float bits;
+// synthesis reads none of those otherwise). An sRGB render target encodes
+// in hardware, so the encode flag is off.
 struct DrawOutput {
     float4 frame0 : SV_Target0;
 #if FG_DRAW_OUTPUTS > 1
@@ -715,6 +716,9 @@ struct DrawOutput {
 #endif
 #if FG_DRAW_OUTPUTS > 2
     float4 frame2 : SV_Target2;
+#endif
+#if FG_DRAW_OUTPUTS > 3
+    float4 frame3 : SV_Target3;
 #endif
 };
 
@@ -727,6 +731,9 @@ DrawOutput PSMain(float4 position : SV_Position) {
 #endif
 #if FG_DRAW_OUTPUTS > 2
     output.frame2 = Synthesize(pixel, asfloat(g.size.w));
+#endif
+#if FG_DRAW_OUTPUTS > 3
+    output.frame3 = Synthesize(pixel, asfloat(g.options.x));
 #endif
     return output;
 }

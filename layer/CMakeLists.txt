@@ -144,7 +144,7 @@ if(WIN32 AND DEPTHXR_BUILD_LAYER)
     endforeach()
     # Synthesis as a draw into the output swapchains (Direct3D 12): the
     # vertex shader and a pixel shader per number of generated frames.
-    set(_framegen_draw_shaders DRAW_VS DRAW_PS1 DRAW_PS2 DRAW_PS3)
+    set(_framegen_draw_shaders DRAW_VS DRAW_PS1 DRAW_PS2 DRAW_PS3 DRAW_PS4)
     foreach(_framegen_draw IN LISTS _framegen_draw_shaders)
         if(_framegen_draw STREQUAL "DRAW_VS")
             set(_framegen_draw_args -T vs_5_0 -E VSMain -D FG_DRAW_OUTPUTS=1)

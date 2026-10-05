@@ -160,7 +160,7 @@ extern const std::array<Blob, kFrameGenPassCount> kDxbc;
 extern const std::array<Blob, kFrameGenPassCount> kSpirv;
 // Synthesis as a draw (Direct3D 12): the vertex shader, then the pixel
 // shader writing 1, 2 and 3 generated frames.
-inline constexpr std::size_t kDrawShaderCount = 4;
+inline constexpr std::size_t kDrawShaderCount = 1 + kFrameGenMaxGenerated;
 extern const std::array<Blob, kDrawShaderCount> kDxbcDraw;
 } // namespace framegen_shaders
 

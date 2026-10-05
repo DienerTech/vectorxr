@@ -76,7 +76,12 @@ class VulkanFrameGen final : public FrameGenGpu {
   public:
     ~VulkanFrameGen() override {
         Reset();
-        DestroyPipelineObjects();
+        // Command pools with pending command buffers, and the descriptors
+        // and pipelines they use, must outlive that work: a stalled GPU
+        // leaks them instead.
+        if (!binding_.device || WaitIdle()) {
+            DestroyPipelineObjects();
+        }
         if (loader_) FreeLibrary(loader_);
     }
 

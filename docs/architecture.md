@@ -111,14 +111,20 @@ frame calls:
   The app's `xrBeginFrame` is a no-op. Extrapolating, its `xrEndFrame` asks for the first slot
   at or after that one, runs the runtime begin/end for it with the app's own layers, then
   generates the extrapolated frames for the following slots. Interpolating, the frame is
-  predicted for (and rendered for) *N - 1* slots later: its `xrEndFrame` first waits until the
-  presenter thread has submitted the frames interpolated toward the previous real frame (they
-  use the same output swapchains, and the runtime shows a swapchain's newest image), generates
-  the frames between the previous real frame and this one, asks for the first of those slots and
-  submits the first generated frame there; the presenter thread shows the rest, then the real
-  frame at its own display time. Between real frames the presenter thread submits generated
+  predicted for (and rendered for) *N - 1* slots later: its `xrEndFrame` first generates the
+  frames between the previous real frame and this one plus a copy of this frame (fraction 1),
+  asks for the first of those slots and submits the first generated frame there; the presenter
+  thread shows the rest, then the copy at the real frame's own display time. The runtime shows a
+  swapchain's newest released image, so the copy keeps the game's next image (often released
+  before then) out of this frame's slot, and the generated images are released to the runtime
+  only once the frame has its slot: until then the output swapchains keep showing the previous
+  real frame's frames, still being presented. Between real frames the presenter thread submits generated
   frames composed with a deep copy of the newest real frame's other layers, or that frame again
-  until they are ready. Leaving the mode drains frames in flight; session
+  until they are ready. Each generated frame carries the display time it was made for: a slot
+  takes the frame made for it, passing over frames made for slots already past, and repeats the
+  last one when the next real frame is late. Extrapolating, the last is a spare made for the slot
+  the next real frame is due in (up to four generated frames per real frame). A copied depth chain
+  is dropped once the game has released a newer image into its swapchain. Leaving the mode drains frames in flight; session
   changes stop the thread and drop frames that have not started ending. Games whose layers
   cannot be copied (unknown layer types) stay inline.
 - A wait that arrives while an engaged frame is still ending is held, so runtime frame calls

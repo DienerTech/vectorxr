@@ -612,7 +612,8 @@ they were expected to be (the eyes keeping their movement). **gpuStartMs** and *
 began and its end after the first generated frame's refresh began, measured from when the
 runtime releases that refresh's frame wait (about two refreshes before it is shown on Pimax).
 Generated frames finishing much later than that miss their refresh, and the headset shows the
-previous frame again.
+previous frame again. **skippedGenerated** counts generated frames passed over because they were
+made for a refresh already past.
 
 A second line under the OSD's Frame Generation row and the Frame Generation page's session
 status say what the depth is doing: **Depth in use**, **Checking the game's depth against the other eye**, **No

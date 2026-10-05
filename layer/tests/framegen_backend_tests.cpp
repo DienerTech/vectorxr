@@ -280,6 +280,8 @@ const XrSwapchain kSource = reinterpret_cast<XrSwapchain>(0x51);
 const XrSwapchain kOutput = reinterpret_cast<XrSwapchain>(0x52);
 const XrSwapchain kOutputSecond = reinterpret_cast<XrSwapchain>(0x54);
 const XrSwapchain kDepthImage = reinterpret_cast<XrSwapchain>(0x55);
+const XrSwapchain kOutputThird = reinterpret_cast<XrSwapchain>(0x56);
+const XrSwapchain kOutputFourth = reinterpret_cast<XrSwapchain>(0x57);
 
 FrameGenViewSubmission Submission(std::uint32_t source_index, std::int64_t format, std::int64_t output_format, bool synthesize,
                                   float yaw_newest, float yaw_previous) {
@@ -388,8 +390,38 @@ int RunScenarios(Harness& harness) {
                                                  MeanError(two_thirds, two_thirds_copied, 0, 0, kSize, kSize));
         std::cout << harness.name << " drawn vs copied: difference " << drawn_difference << '\n';
         Check(drawn_difference < 0.001, harness.name + " drawn generated frames differ from computed ones");
+
+        // 2d. Four frames in one draw (4x Interpolate): the last, at
+        // fraction 1, is the newest real frame's own copy for its slot.
+        g_swapchains[kOutputThird] = {harness.create(kSize, kSize)};
+        g_swapchains[kOutputFourth] = {harness.create(kSize, kSize)};
+        Check(gpu->Track(kOutputThird, EnumerateImages, error) && gpu->Track(kOutputFourth, EnumerateImages, error), error);
+        auto four = [&](std::uint32_t index) {
+            std::vector<FrameGenViewSubmission> views{Submission(index, harness.format, output_format, true, 0, 0)};
+            for (const XrSwapchain output : {kOutputThird, kOutputFourth}) {
+                views[0].outputs.push_back(views[0].outputs[0]);
+                views[0].outputs.back().swapchain = output;
+            }
+            Check(gpu->Execute(views, tuning, result, error), harness.name + " execute: " + error);
+        };
+        tuning.generated = 4;
+        tuning.fractions = {0.25f, 0.5f, 0.75f, 1.0f};
+        gpu->ResetHistory();
+        four(0);
+        four(1);
+        const Pixels quarter = harness.readback(g_swapchains[kOutput][0]);
+        const Pixels three_quarters = harness.readback(g_swapchains[kOutputThird][0]);
+        const Pixels whole = harness.readback(g_swapchains[kOutputFourth][0]);
+        const double quarter_error = MeanError(quarter, MovingSquare(124, 122), 96, 96, 256, 256);
+        const double three_quarters_error = MeanError(three_quarters, MovingSquare(132, 126), 96, 96, 256, 256);
+        const double copy_error = MeanError(whole, b, 0, 0, kSize, kSize);
+        std::cout << harness.name << " 4x: errors " << quarter_error << ", " << three_quarters_error
+                  << ", real frame copy " << copy_error << std::endl;
+        Check(quarter_error < 0.4 * third_hold && three_quarters_error < 0.4 * third_hold,
+              harness.name + " 4x frames are not placed at 1/4 and 3/4 of the motion");
+        Check(copy_error < 0.002, harness.name + " the frame at fraction 1 is not the newest real frame");
         tuning.generated = 1;
-        tuning.fractions = {0.5f, 0.5f, 0.5f};
+        tuning.fractions = {0.5f, 0.5f, 0.5f, 0.5f};
     }
 
     // 3. Extrapolation half a step past B: the square sits at (144, 132).
@@ -570,6 +602,29 @@ int RunScenarios(Harness& harness) {
         if (status == "active") {
             Check(square_error < 0.5 * square_hold, harness.name + " motion matched at release is not extrapolated");
             Check(turned_error < 0.3 * turned_baseline, harness.name + " head rotation leaked into vectors matched at release");
+            // A match at release that never finishes, with the next
+            // capture's work queued behind it (its input can never become
+            // ready): the watchdog still releases the game's queue.
+            const auto start = std::chrono::steady_clock::now();
+            const std::array<Pixels, 3> frames{MovingSquare(104, 112), MovingSquare(120, 120), MovingSquare(136, 128)};
+            for (std::uint32_t i = 0; i < 3; ++i) harness.upload(g_swapchains[kSource][i], frames[i]);
+            backend->ResetHistory();
+            for (std::uint32_t i = 0; i < 3; ++i) {
+                const std::vector<FrameGenViewSubmission> views{Submission(i, harness.format, output_format, true, 0, 0)};
+                if (i == 1) backend->StallHardwareForTest();
+                Check(backend->Capture(0, views[0].source, views[0].request, raw_tuning.quality, error) || error.empty(),
+                      harness.name + " capture: " + error);
+                Check(backend->Execute(views, raw_tuning, result, error), harness.name + " execute: " + error);
+            }
+            harness.readback(g_swapchains[kOutput][0]);
+            const double waited = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+            // The next generation takes the hardware out of use.
+            const std::vector<FrameGenViewSubmission> after{Submission(0, harness.format, output_format, true, 0, 0)};
+            Check(backend->Execute(after, raw_tuning, result, error), harness.name + " execute: " + error);
+            std::cout << harness.name << " stalled match at release: released after " << waited << " ms, now "
+                      << backend->HardwareFlowStatus() << std::endl;
+            Check(backend->HardwareFlowStatus() == "the optical flow hardware stopped responding" && waited < 2000.0,
+                  harness.name + " a stalled match at release, queued behind, was not released");
         }
         backend->Reset();
     }
@@ -978,7 +1033,7 @@ int RunProfile(Harness& harness) {
                 depth_width, depth_height);
     std::array<XrSwapchain, 2> sources{reinterpret_cast<XrSwapchain>(0x61), reinterpret_cast<XrSwapchain>(0x62)};
     std::array<XrSwapchain, 2> depths{reinterpret_cast<XrSwapchain>(0x63), reinterpret_cast<XrSwapchain>(0x64)};
-    std::array<std::array<XrSwapchain, 3>, 2> outputs{};
+    std::array<std::array<XrSwapchain, 4>, 2> outputs{};
     for (std::size_t eye = 0; eye < 2; ++eye) {
         const float head = eye == 0 ? -half_ipd : half_ipd;
         const float left = eye == 0 ? -outer : -inner, right = eye == 0 ? inner : outer;
@@ -997,8 +1052,8 @@ int RunProfile(Harness& harness) {
                               {column(kPanelHalf) - column(-kPanelHalf), row(-kPanelHalf) - row(kPanelHalf)}};
         const float panel_depth = (1.0f / kPanelDistance - 1.0f / 1000.0f) / (1.0f / 0.1f - 1.0f / 1000.0f);
         g_swapchains[depths[eye]] = {harness.create_depth_sized(depth_width, depth_height, panel_depth, panel, 0.0f)};
-        for (std::size_t set = 0; set < 3; ++set) {
-            outputs[eye][set] = reinterpret_cast<XrSwapchain>(0x70 + eye * 3 + set);
+        for (std::size_t set = 0; set < 4; ++set) {
+            outputs[eye][set] = reinterpret_cast<XrSwapchain>(0x70 + eye * 4 + set);
             g_swapchains[outputs[eye][set]] = {harness.create(width, height)};
         }
         Check(gpu->Track(sources[eye], EnumerateImages, error) && gpu->Track(depths[eye], EnumerateImages, error), error);
@@ -1020,8 +1075,9 @@ int RunProfile(Harness& harness) {
         tuning.quality = quality;
         tuning.hardware_flow = config == 2;
         tuning.mode = FrameGenSynthesisMode::kExtrapolate;
-        tuning.generated = 3;
-        tuning.fractions = {0.25f, 0.5f, 0.75f};
+        // 4x: three generated slots and the spare for a late real frame.
+        tuning.generated = 4;
+        tuning.fractions = {0.25f, 0.5f, 0.75f, 1.0f};
         gpu->ResetHistory();
         std::vector<double> sums;
         double total = 0.0;
@@ -1088,7 +1144,7 @@ int RunProfile(Harness& harness) {
             }
         }
         const FrameGenDepthStatus depth = gpu->DepthStatus();
-        std::printf("\n%s flow, 2 eyes, 3 generated frames: %.2f ms GPU per real frame (depth %s, %s)\n",
+        std::printf("\n%s flow, 2 eyes, 4 generated frames: %.2f ms GPU per real frame (depth %s, %s)\n",
                     config == 2 ? ("Hardware (" + gpu->HardwareFlowStatus() + ")").c_str()
                     : quality == FrameGenFlowQuality::kQuality ? "Quality" : "Balanced",
                     samples ? total / samples : -1.0, depth_used ? "used" : "not used", ToString(depth.reading));
@@ -1152,11 +1208,16 @@ bool LoadReplayFrame(const std::string& directory, ReplayFrame& frame) {
     int mode = 0, quality = 0, hardware = 0, generated = 0, reading = 0;
     std::size_t count = 0;
     bool ok = std::fscanf(file, " mode %d quality %d hardware %d suppression %d limit %d interval_ratio %f generated %d"
-                                " fractions %f %f %f depth_reading %d views %zu",
+                                " fractions",
                           &mode, &quality, &hardware, &frame.tuning.artifact_suppression,
-                          &frame.tuning.motion_limit_percent, &frame.tuning.interval_ratio, &generated,
-                          &frame.tuning.fractions[0], &frame.tuning.fractions[1], &frame.tuning.fractions[2], &reading,
-                          &count) == 12;
+                          &frame.tuning.motion_limit_percent, &frame.tuning.interval_ratio, &generated) == 7;
+    // Three fractions in older captures, kFrameGenMaxGenerated now.
+    for (std::size_t i = 0; ok && i < kFrameGenMaxGenerated; ++i) {
+        if (std::fscanf(file, " %f", &frame.tuning.fractions[i]) != 1) {
+            break;
+        }
+    }
+    ok = ok && std::fscanf(file, " depth_reading %d views %zu", &reading, &count) == 2;
     frame.tuning.mode = static_cast<FrameGenSynthesisMode>(mode);
     frame.tuning.quality = static_cast<FrameGenFlowQuality>(quality);
     frame.tuning.hardware_flow = hardware != 0;
