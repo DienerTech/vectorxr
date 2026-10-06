@@ -72,7 +72,11 @@ struct FrameGenStatus {
     std::string reason;
     FrameGenSynthesisMode mode{FrameGenSynthesisMode::kInterpolate};
     double app_fps{0.0};
-    double output_fps{0.0};
+    double output_fps{0.0};   // frames submitted to the runtime per second
+    // Of those, frames showing something the frame before did not (a new
+    // generated or real frame): repeats of the last image when generation
+    // or the game ran late are left out.
+    double distinct_fps{0.0};
     double gpu_ms{-1.0};
     std::uint64_t generated{0};
     std::uint64_t repeated{0};
@@ -254,6 +258,11 @@ class FrameGenPresenter {
         XrSpace space{XR_NULL_HANDLE};
         XrCompositionLayerFlags flags{0};
         std::vector<std::vector<XrCompositionLayerProjectionView>> sets;
+        // Per set: an exact copy of the real frame it came from (its own pose
+        // and image), which alone may carry that frame's depth chain.
+        std::vector<std::uint8_t> exact;
+        // Changes whenever the sets are replaced (distinct-frame counting).
+        std::uint64_t generation{0};
         // The display time each set was made for (presenter thread).
         std::vector<XrTime> targets;
         // Interpolated between the previous real frame and the newest one,
@@ -354,11 +363,15 @@ class FrameGenPresenter {
                       const FrameGenRuntimeCalls& calls);
     // Generates one frame per fraction into the output swapchain sets from
     // the newest real frame. On success `sets` holds the generated
-    // projection views, one set per fraction. Without `release` the output
-    // images, written or not, stay acquired until ReleaseOutputs.
+    // projection views, one set per fraction, and `exact` which of them
+    // reproduce the newest frame exactly (its own time: an interpolated
+    // fraction of 1, or a frame written unchanged); only those may carry its
+    // depth, which describes its image and eye position, not a generated
+    // frame's. Without `release` the output images, written or not, stay
+    // acquired until ReleaseOutputs.
     bool Generate(const XrCompositionLayerProjection& projection, const PendingFrame& frame, FrameGenSynthesisMode mode,
                   const std::vector<float>& fractions, std::vector<std::vector<XrCompositionLayerProjectionView>>& sets,
-                  bool release = true);
+                  std::vector<std::uint8_t>& exact, bool release = true);
     // Depth chains of a frame copy that describe images the game has since
     // replaced are dropped.
     void RecordDepthReleasesLocked(FrameCopy& copy) const;
@@ -383,7 +396,8 @@ class FrameGenPresenter {
     void RecordReal(const XrCompositionLayerProjection& projection, XrTime display_time, std::uint64_t sequence);
     void InvalidateContinuityLocked();
     void NoteFailureLocked(const std::string& error);
-    void NoteSubmissionLocked();
+    // `distinct`: the submission shows something the one before did not.
+    void NoteSubmissionLocked(bool distinct);
 
     // Threaded presentation.
     bool ThreadedEligibleLocked() const;
@@ -432,10 +446,11 @@ class FrameGenPresenter {
     void CompositorLoop();
     static bool CopyFrame(const XrFrameEndInfo& info, FrameCopy& copy, std::string& unsupported);
     // Points `pointers` at `copy`'s layers, replacing its primary projection's
-    // views with `generated` when given.
+    // views with `generated` when given; those keep the copy's depth chain
+    // only when `generated_depth` (an exact copy of the real frame).
     static XrFrameEndInfo BuildFrame(FrameCopy& copy, const std::vector<XrCompositionLayerProjectionView>* generated,
                                      XrSpace generated_space, XrCompositionLayerFlags generated_flags,
-                                     std::vector<const XrCompositionLayerBaseHeader*>& pointers);
+                                     bool generated_depth, std::vector<const XrCompositionLayerBaseHeader*>& pointers);
 
     mutable std::mutex mutex_;
     std::condition_variable idle_cv_;
@@ -513,6 +528,11 @@ class FrameGenPresenter {
     std::uint64_t captured_{0};
     mutable std::deque<std::chrono::steady_clock::time_point> app_frames_;
     mutable std::deque<std::chrono::steady_clock::time_point> submissions_;
+    mutable std::deque<std::chrono::steady_clock::time_point> distinct_submissions_;
+    std::uint64_t repeated_submissions_{0}; // since the last summary
+    // The generated set the presenter thread last showed: (Generated::generation, index).
+    std::optional<std::pair<std::uint64_t, std::size_t>> last_shown_set_;
+    std::uint64_t next_generation_{1};
     std::chrono::steady_clock::time_point last_summary_{};
     // Per summary window: time the app spends between its wait returning and
     // its end, and engaged cycles whose first slot was already late.
@@ -528,6 +548,7 @@ class FrameGenPresenter {
     std::string logged_hardware_status_; // last optical flow hardware status logged
     bool logged_depth_info_{false};
     bool logged_capture_failure_{false};
+    bool logged_uncaptured_{false};
     void* timer_{nullptr}; // high-resolution waitable timer, frame thread only
 
     // Threaded presentation. The presenter thread owns the runtime frame loop
@@ -631,6 +652,9 @@ class FrameGenPresenter {
     std::mutex submit_mutex_;            // presenter-thread submissions vs output swapchain calls
     std::mutex gpu_mutex_;               // the GPU backend (Track, Capture, Execute, WaitIdle, Forget, Reset)
     double gpu_ms_{-1.0};                // last generation GPU time, read without the backend
+    // The GPU did not finish this session's Frame Generation work before
+    // teardown: swapchains it may still use are never reported idle.
+    bool gpu_stalled_{false};
 };
 
 } // namespace depthxr

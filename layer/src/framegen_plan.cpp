@@ -193,19 +193,30 @@ FrameGenViewPlan BuildFrameGenViewPlan(const FrameGenViewRequest& request, const
 
     if (request.depth) {
         // Each depth texel's trust (the other eye's evidence, the previous
-        // frame, last frame's score) before anything maps through the depth.
+        // frame, last frame's score) before anything maps through the depth,
+        // then the depth of disproved regions dropped.
         FrameGenDispatch trust = Dispatch(FrameGenPass::kTrustUpdate, plan.levels[1], plan.levels[1], base);
         trust.inputs = {Texture(FrameGenTextureKind::kHistoryNewest), Texture(FrameGenTextureKind::kHistoryPrevious),
-                        request.trust_history ? Texture(FrameGenTextureKind::kTrustPrevious) : FrameGenTexture{}, {}, {}};
-        trust.outputs = {Texture(FrameGenTextureKind::kTrustNewest), Texture(FrameGenTextureKind::kDepth)};
+                        request.trust_history ? Texture(FrameGenTextureKind::kTrustPrevious) : FrameGenTexture{}, depth,
+                        {}};
+        trust.outputs = {Texture(FrameGenTextureKind::kTrustNewest), {}};
         trust.constants.options[0] = kFrameGenTrustMotion | (request.trust_stereo ? kFrameGenTrustStereo : 0u) |
                                      (request.trust_history ? kFrameGenTrustHistory : 0u);
         plan.dispatches.push_back(trust);
+        FrameGenDispatch resolve = Dispatch(FrameGenPass::kTrustResolve, plan.levels[1], plan.levels[1], base);
+        resolve.inputs = {Texture(FrameGenTextureKind::kTrustNewest), {}, {}, {}, {}};
+        resolve.outputs = {Texture(FrameGenTextureKind::kDepth), {}};
+        plan.dispatches.push_back(resolve);
     }
 
+    // With the previous frame's depth, content it did not see is told apart
+    // from content that moved.
+    const bool depth_previous = request.depth && request.depth_previous;
     FrameGenDispatch luma = Dispatch(FrameGenPass::kLuma, plan.levels[1], plan.levels[0], base);
-    luma.inputs = {Texture(FrameGenTextureKind::kHistoryNewest), Texture(FrameGenTextureKind::kHistoryPrevious), depth, {}, {}};
+    luma.inputs = {Texture(FrameGenTextureKind::kHistoryNewest), Texture(FrameGenTextureKind::kHistoryPrevious), depth,
+                   depth_previous ? Texture(FrameGenTextureKind::kDepthPrevious) : FrameGenTexture{}, {}};
     luma.outputs = {Texture(FrameGenTextureKind::kLumaNewest, 1), Texture(FrameGenTextureKind::kLumaPrevious, 1)};
+    luma.constants.options[1] |= depth_previous ? kFrameGenFlagDepthPrevious : 0u;
     luma.constants.options[3] = 1;
     plan.dispatches.push_back(luma);
 
@@ -274,45 +285,37 @@ FrameGenViewPlan BuildFrameGenViewPlan(const FrameGenViewRequest& request, const
 
     FrameGenDispatch filter = Dispatch(FrameGenPass::kFilter, plan.levels[plan.final_flow_level],
                                        plan.levels[plan.final_flow_level], base);
-    // Last frame's filtered flow and the depth: how steady each vector is;
-    // the trust: where cockpit content stays still.
+    // Last frame's filtered flow: how steady each vector is; the depth:
+    // where cockpit content stays still.
     filter.inputs = {Texture(FrameGenTextureKind::kFlow, plan.final_flow_level),
                      request.temporal ? Texture(FrameGenTextureKind::kFilteredPrevious, plan.final_flow_level)
                                       : FrameGenTexture{},
-                     depth, request.depth ? Texture(FrameGenTextureKind::kTrustNewest) : FrameGenTexture{}, {}};
+                     depth, {}, {}};
     filter.outputs = {Texture(FrameGenTextureKind::kFilteredNewest, plan.final_flow_level), {}};
     filter.constants.options[3] = plan.final_flow_level;
     filter.constants.tuning[0] = std::clamp(tuning.interval_ratio, 0.25f, 4.0f);
     plan.dispatches.push_back(filter);
 
-    // Eye-shift maps for the earliest and latest generated frames (one when
-    // they coincide); the others scale the nearer one by their time. Which
-    // surface is in front changes with time, so a map scaled far from its
-    // own time cuts the edge of near content moving across the view. A
-    // spare frame, rarely shown, scales the latest. Times are past the
-    // newest frame (before it when interpolating); a frame at the newest
-    // frame's own time needs none.
-    float early = 0.0f, late = 0.0f;
-    const std::size_t mapped = tuning.spare && generated > 1 ? generated - 1 : generated;
-    for (std::size_t index = 0; index < mapped; ++index) {
-        const float fraction = std::clamp(tuning.fractions[index], 0.0f, 1.0f);
-        const float time = tuning.mode == FrameGenSynthesisMode::kExtrapolate ? fraction : 1.0f - fraction;
-        if (time > 0.0f) {
-            early = early > 0.0f ? std::min(early, time) : time;
-            late = std::max(late, time);
-        }
-    }
+    // Eye-shift maps, built into the one map texture right before the frames
+    // written from it: one per generated frame whose eye has moved
+    // kFrameGenShiftRebuild from where the last map was built for. Which
+    // surface is in front changes with the eye, so a map scaled far from
+    // its own eye position cut the edges of near content and left its gaps
+    // in the wrong place. A spare frame (rarely shown) reuses the frame
+    // before's map, scaled to its time. Times are past the newest frame
+    // (before it when interpolating); a frame at the newest frame's own time
+    // needs none.
     const float shift_length = std::sqrt(request.shift[0] * request.shift[0] + request.shift[1] * request.shift[1] +
                                          request.shift[2] * request.shift[2]);
-    const bool shifted = request.depth && late > 0.0f && shift_length * late >= kFrameGenMinimumShift;
-    // The second map only while the eyes move half a millimeter or more
-    // between the two times: less is a pixel or two of near edge.
-    const bool two_maps = shifted && shift_length * (late - early) >= 0.0005f;
-    if (shifted) {
-        const FrameGenTexture trust = Texture(FrameGenTextureKind::kTrustNewest);
-        const FrameGenTexture keys = Texture(FrameGenTextureKind::kShiftKeys);
-        for (std::uint8_t map = 0; map < (two_maps ? 2 : 1); ++map) {
-            const float time = map == 0 ? (two_maps ? early : late) : late;
+    float map_time = 0.0f;
+    for (std::size_t index = 0; index < generated; ++index) {
+        const float fraction = std::clamp(tuning.fractions[index], 0.0f, 1.0f);
+        const float time = tuning.mode == FrameGenSynthesisMode::kExtrapolate ? fraction : 1.0f - fraction;
+        const bool spare = tuning.spare && generated > 1 && index + 1 == generated;
+        const bool shifted = request.depth && time > 0.0f && shift_length * time >= kFrameGenMinimumShift;
+        const bool rebuild = map_time <= 0.0f || (!spare && shift_length * std::abs(time - map_time) >= kFrameGenShiftRebuild);
+        if (shifted && rebuild) {
+            map_time = time;
             const std::array<float, 3> eye{request.shift[0] * time, request.shift[1] * time, request.shift[2] * time};
             FrameGenConstants mapping = base;
             mapping.fov_previous = mapping.fov_current;
@@ -327,31 +330,27 @@ FrameGenViewPlan BuildFrameGenViewPlan(const FrameGenViewRequest& request, const
                 dispatch.outputs = {output, second};
                 plan.dispatches.push_back(dispatch);
             };
-            const FrameGenTexture target = Texture(FrameGenTextureKind::kShiftMap, map);
+            const FrameGenTexture keys = Texture(FrameGenTextureKind::kShiftKeys);
+            const FrameGenTexture target = Texture(FrameGenTextureKind::kShiftMap);
             pass(FrameGenPass::kShiftClear, {}, keys, target);
-            pass(FrameGenPass::kShiftSplat, {depth, trust, {}, {}, {}, {}}, keys);
-            pass(FrameGenPass::kShiftResolve, {depth, trust, keys, {}, {}, {}}, target);
+            pass(FrameGenPass::kShiftSplat, {depth, {}, {}, {}, {}, {}}, keys);
+            pass(FrameGenPass::kShiftResolve, {depth, {}, keys, {}, {}, {}}, target);
             pass(FrameGenPass::kShiftFill, {keys, {}, {}, {}, {}, {}}, target);
+            plan.frames_in_order = true;
         }
-    }
-    // The maps' times as two halves (FG_FLAG_SHIFT).
-    const std::uint32_t map_times =
-        FrameGenHalf(two_maps ? early : late) | (static_cast<std::uint32_t>(FrameGenHalf(late)) << 16);
-
-    for (std::size_t index = 0; index < generated; ++index) {
         FrameGenDispatch output = Dispatch(synthesize, plan.levels[0], plan.levels[plan.final_flow_level], base);
         output.inputs = {Texture(FrameGenTextureKind::kHistoryNewest),
                          Texture(FrameGenTextureKind::kHistoryPrevious),
                          Texture(FrameGenTextureKind::kFilteredNewest, plan.final_flow_level),
                          depth,
-                         shifted ? Texture(FrameGenTextureKind::kShiftMap, 0) : FrameGenTexture{},
-                         shifted ? Texture(FrameGenTextureKind::kShiftMap, two_maps ? 1 : 0) : FrameGenTexture{}};
+                         shifted ? Texture(FrameGenTextureKind::kShiftMap) : FrameGenTexture{},
+                         {}};
         if (shifted) {
             output.constants.options[1] |= kFrameGenFlagShift;
-            output.constants.options[3] = map_times;
+            output.constants.options[3] = FrameGenHalf(map_time);
         }
         output.outputs = {Texture(FrameGenTextureKind::kOutput), {}};
-        output.constants.tuning[0] = std::clamp(tuning.fractions[index], 0.0f, 1.0f);
+        output.constants.tuning[0] = fraction;
         output.copy_mask = static_cast<std::uint8_t>(1u << index);
         plan.dispatches.push_back(output);
     }

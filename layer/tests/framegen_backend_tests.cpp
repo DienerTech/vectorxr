@@ -30,6 +30,7 @@
 #include <iostream>
 #include <limits>
 #include <map>
+#include <optional>
 #include <tuple>
 #include <string>
 #include <thread>
@@ -308,6 +309,7 @@ FrameGenViewSubmission Submission(std::uint32_t source_index, std::int64_t forma
 int RunScenarios(Harness& harness) {
     std::string error;
     auto gpu = CreateFrameGenGpu(harness.binding, error);
+    if (gpu) gpu->SetCopyAfterRelease(true); // the tests' images are their own
     Check(gpu != nullptr, harness.name + " backend: " + error);
     Check(gpu->Classify(harness.format) == FrameGenOutputKind::kSrgb8, harness.name + " classifies sRGB RGBA8");
     const std::int64_t output_format = gpu->OutputFormats(FrameGenOutputKind::kSrgb8).front();
@@ -567,6 +569,7 @@ int RunScenarios(Harness& harness) {
     // panorama seen by a turning head stays where the newest frame has it.
     if (harness.name == "D3D12" && g_hardware) {
         auto backend = CreateFrameGenGpu(harness.binding, error);
+        if (backend) backend->SetCopyAfterRelease(true); // the tests' images are their own
         Check(backend != nullptr, harness.name + " backend: " + error);
         Check(backend->Track(kSource, EnumerateImages, error) && backend->Track(kOutput, EnumerateImages, error) &&
                   backend->Track(kOutputSecond, EnumerateImages, error),
@@ -723,6 +726,7 @@ int RunScenarios(Harness& harness) {
         auto run_case = [&](float panel_value, float background_value, const FrameGenDepthEncoding& encoding,
                             bool use_depth, int glass, float eye = 0.0f) {
             auto backend = CreateFrameGenGpu(harness.binding, error);
+            if (backend) backend->SetCopyAfterRelease(true); // the tests' images are their own
             Check(backend != nullptr, harness.name + " backend: " + error);
             g_swapchains[kDepthImage] = {harness.create_depth(panel_value, grow(left_panel, glass), background_value)};
             g_swapchains[right_depth] = {harness.create_depth(panel_value, grow(right_panel, glass), background_value)};
@@ -955,6 +959,7 @@ int RunScenarios(Harness& harness) {
 int RunBench(Harness& harness) {
     std::string error;
     auto gpu = CreateFrameGenGpu(harness.binding, error);
+    if (gpu) gpu->SetCopyAfterRelease(true); // the tests' images are their own
     Check(gpu != nullptr, harness.name + " backend: " + error);
     const std::int64_t output_format = gpu->OutputFormats(FrameGenOutputKind::kSrgb8).front();
     const XrSwapchain output_right = reinterpret_cast<XrSwapchain>(0x53);
@@ -1045,6 +1050,7 @@ Pixels CockpitAt(std::uint32_t width, std::uint32_t height, float head_x, float 
 int RunProfile(Harness& harness) {
     std::string error;
     auto gpu = CreateFrameGenGpu(harness.binding, error);
+    if (gpu) gpu->SetCopyAfterRelease(true); // the tests' images are their own
     Check(gpu != nullptr, harness.name + " backend: " + error);
     gpu->SetProfiling(true);
     const std::int64_t output_format = gpu->OutputFormats(FrameGenOutputKind::kSrgb8).front();
@@ -1092,7 +1098,8 @@ int RunProfile(Harness& harness) {
     const char* names[] = {"luma",        "downsample",  "search",      "refine",      "filter",
                            "synthesize",  "synthesize16", "depth",      "depth check", "depth trust",
                            "flow pack",   "flow unpack", "trust update", "shift clear", "shift splat",
-                           "shift resolve", "shift fill", "raw pack",   "source copy", "output copy", "hardware wait"};
+                           "shift resolve", "shift fill", "raw pack",   "trust resolve", "source copy", "output copy",
+                           "hardware wait"};
     static_assert(std::size(names) == kFrameGenPassCount + 3, "a name per profiled category");
     for (const int config : {0, 1, 2}) {
         const auto quality = config == 1 ? FrameGenFlowQuality::kQuality : FrameGenFlowQuality::kBalanced;
@@ -1124,8 +1131,10 @@ int RunProfile(Harness& harness) {
                 view.request.synthesize = true;
                 view.request.temporal = true;
                 view.request.depth = true;
-                // The head moving 2 cm per real frame: generated frames follow the eye.
-                view.request.shift = {0.02f, 0.0f, 0.0f};
+                // The head moving 2 cm per real frame (a fast turn; FG_PROFILE_EYE_MM
+                // sets it): generated frames follow the eye.
+                const char* eye_mm = std::getenv("FG_PROFILE_EYE_MM");
+                view.request.shift = {eye_mm ? static_cast<float>(std::atof(eye_mm)) / 1000.0f : 0.02f, 0.0f, 0.0f};
                 for (auto* geometry : {&view.request.newest, &view.request.previous}) {
                     geometry->angle_left = std::atan(eye == 0 ? -outer : -inner);
                     geometry->angle_right = std::atan(eye == 0 ? inner : outer);
@@ -1346,12 +1355,14 @@ Pixels TurnTo(const ReplayView& view, const ReplayView& next, std::vector<bool>&
 }
 
 // Mean error over valid pixels, all and split by the newest frame's depth
-// (nearer than 4 m: cockpit).
+// (nearer than 4 m: cockpit), and the share of pixels off by more than a
+// tenth (visible artifacts: torn or misplaced edges rather than blur).
 struct ReplayError {
     double all{0}, cockpit{0}, outside{0};
+    double bad_cockpit{0}, bad_outside{0}; // percent
 };
 ReplayError CompareTo(const Pixels& image, const Pixels& truth, const std::vector<bool>& valid, const ReplayView& view) {
-    double sums[3] = {}, counts[3] = {};
+    double sums[3] = {}, counts[3] = {}, bad[3] = {};
     for (std::uint32_t y = 0; y < view.height; ++y) {
         const std::uint32_t hy = std::min(y / 2, view.half_height - 1);
         for (std::uint32_t x = 0; x < view.width; ++x) {
@@ -1368,9 +1379,24 @@ ReplayError CompareTo(const Pixels& image, const Pixels& truth, const std::vecto
             counts[0] += 1;
             sums[part] += error;
             counts[part] += 1;
+            bad[part] += error > 0.1 ? 1.0 : 0.0;
         }
     }
-    return {counts[0] ? sums[0] / counts[0] : 0, counts[1] ? sums[1] / counts[1] : 0, counts[2] ? sums[2] / counts[2] : 0};
+    return {counts[0] ? sums[0] / counts[0] : 0, counts[1] ? sums[1] / counts[1] : 0, counts[2] ? sums[2] / counts[2] : 0,
+            counts[1] ? 100.0 * bad[1] / counts[1] : 0, counts[2] ? 100.0 * bad[2] / counts[2] : 0};
+}
+
+// Research dump: a float image as raw little-endian floats, the size and
+// channel count in the name.
+void WriteFloats(const std::string& prefix, const std::vector<float>& values, FrameGenExtent extent, std::uint32_t channels) {
+    std::FILE* file = std::fopen((prefix + "-" + std::to_string(extent.width) + "x" + std::to_string(extent.height) + "x" +
+                                  std::to_string(channels) + ".f32")
+                                     .c_str(),
+                                 "wb");
+    if (file) {
+        std::fwrite(values.data(), sizeof(float), values.size(), file);
+        std::fclose(file);
+    }
 }
 
 int RunReplay(Harness& harness) {
@@ -1388,6 +1414,7 @@ int RunReplay(Harness& harness) {
                 first.height, first.half_width, first.half_height);
     std::string error;
     auto gpu = CreateFrameGenGpu(harness.binding, error);
+    if (gpu) gpu->SetCopyAfterRelease(true); // the tests' images are their own
     Check(gpu != nullptr, "replay backend: " + error);
     const std::int64_t output_format = gpu->OutputFormats(FrameGenOutputKind::kSrgb8).front();
     std::vector<XrSwapchain> sources(view_count), depths(view_count), outputs(view_count);
@@ -1426,19 +1453,25 @@ int RunReplay(Harness& harness) {
     const bool no_depth = env("FG_REPLAY_NODEPTH") == "1";
     const bool predict = env("FG_REPLAY_PREDICT") == "1";
 
-    // Frame k extrapolated to frame k + 1: one frame at the time ratio of
-    // the two intervals, from the eye position frame k + 1 was rendered at.
-    auto run = [&](std::size_t k, bool synthesize, bool evaluate) {
+    const bool interpolate = env("FG_REPLAY_MODE") == "interpolate";
+    const bool dump_maps = env("FG_REPLAY_DUMP") == "1";
+
+    // Executes frame k as the newest real frame after frame `before` (none:
+    // a fresh sequence, nothing generated), generating one frame at
+    // `fraction` seen from the eye moved by shift * time (FrameGenViewRequest).
+    auto execute = [&](std::size_t k, std::optional<std::size_t> before, FrameGenSynthesisMode mode, float fraction,
+                       const std::vector<std::array<float, 3>>& shifts, FrameGenExecuteResult& result) {
         const ReplayFrame& frame = frames[k];
         FrameGenTuning tuning = frame.tuning;
-        tuning.mode = FrameGenSynthesisMode::kExtrapolate;
+        tuning.mode = mode;
         tuning.hardware_flow = hardware;
         if (quality == "performance") tuning.quality = FrameGenFlowQuality::kPerformance;
         if (quality == "balanced") tuning.quality = FrameGenFlowQuality::kBalanced;
         if (quality == "quality") tuning.quality = FrameGenFlowQuality::kQuality;
         tuning.generated = 1;
-        const bool has_next = k + 1 < frames.size();
-        tuning.fractions[0] = has_next ? std::clamp(frames[k + 1].tuning.interval_ratio, 0.25f, 1.0f) : 1.0f;
+        tuning.spare = false;
+        tuning.fractions[0] = fraction;
+        if (before && *before + 1 != k) tuning.interval_ratio = 1.0f;
         std::vector<FrameGenViewSubmission> views(view_count);
         for (std::size_t v = 0; v < view_count; ++v) {
             const ReplayView& view = frame.views[v];
@@ -1448,26 +1481,12 @@ int RunReplay(Harness& harness) {
             submission.outputs = {{outputs[v], 0, 0, rect, output_format}};
             submission.request.extent = {view.width, view.height};
             submission.request.output = FrameGenOutputKind::kSrgb8;
-            submission.request.synthesize = synthesize;
+            submission.request.synthesize = before.has_value();
             submission.request.temporal = true;
             submission.request.depth = !no_depth;
             submission.request.newest = view.newest;
-            submission.request.previous = synthesize ? view.previous : view.newest;
-            if (has_next && !no_shift && (!predict || synthesize)) {
-                // Where the eye was for frame k + 1, in frame k's view space;
-                // predicting, on as it moved from frame k - 1, for as long as
-                // frame k + 1 really came after (captures hitch, and the
-                // fraction stops at one interval).
-                const auto rotation = ReplayRotation(view.newest.orientation);
-                const auto& to = predict ? view.newest.position : frames[k + 1].views[v].newest.position;
-                const auto& from = predict ? view.previous.position : view.newest.position;
-                const double delta[3] = {to[0] - from[0], to[1] - from[1], to[2] - from[2]};
-                for (int i = 0; i < 3; ++i) {
-                    const double local = rotation[0][i] * delta[0] + rotation[1][i] * delta[1] + rotation[2][i] * delta[2];
-                    submission.request.shift[i] = static_cast<float>(
-                        local / tuning.fractions[0] * (predict ? frames[k + 1].tuning.interval_ratio : 1.0f));
-                }
-            }
+            submission.request.previous = before ? frames[*before].views[v].newest : view.newest;
+            if (v < shifts.size()) submission.request.shift = shifts[v];
             Check(gpu->Capture(v, submission.source, submission.request, tuning.quality, error) || error.empty(),
                   "replay capture: " + error);
             const XrRect2Di depth_rect{{0, 0}, {static_cast<int>(view.half_width), static_cast<int>(view.half_height)}};
@@ -1476,16 +1495,34 @@ int RunReplay(Harness& harness) {
                       error.empty(),
                   "replay depth capture: " + error);
         }
-        FrameGenExecuteResult result;
         Check(gpu->Execute(views, tuning, result, error), "replay execute: " + error);
-        if (!evaluate || !has_next) {
-            return;
+    };
+    // Where the eye was at frame `to`, from frame `from`'s eye, in frame
+    // `from`'s view space, divided by `time`.
+    auto eye_shifts = [&](std::size_t from, std::size_t to, float time) {
+        std::vector<std::array<float, 3>> shifts(view_count, {0.0f, 0.0f, 0.0f});
+        for (std::size_t v = 0; v < view_count && !no_shift && time > 0.0f; ++v) {
+            const ReplayView& view = frames[from].views[v];
+            const auto rotation = ReplayRotation(view.newest.orientation);
+            const auto& target = frames[to].views[v].newest.position;
+            const double delta[3] = {target[0] - view.newest.position[0], target[1] - view.newest.position[1],
+                                     target[2] - view.newest.position[2]};
+            for (int i = 0; i < 3; ++i) {
+                const double local = rotation[0][i] * delta[0] + rotation[1][i] * delta[1] + rotation[2][i] * delta[2];
+                shifts[v][i] = static_cast<float>(local / time);
+            }
         }
+        return shifts;
+    };
+    // Compares each view's generated frame (in frame `view_frame`'s view)
+    // with frame `truth_frame` turned to that view; `hold` (view 0) is what
+    // showing a real frame instead would give.
+    double sums[4] = {};
+    std::size_t evaluated = 0;
+    auto evaluate = [&](std::size_t k, std::size_t view_frame, std::size_t truth_frame, const Pixels& hold,
+                        const FrameGenExecuteResult& result, float fraction) {
         for (std::size_t v = 0; v < view_count; ++v) {
-            const ReplayView& view = frame.views[v];
-            // Motion measured on the cockpit (depth nearer than 4 m), which
-            // stands still once head movement is taken out: noise there is
-            // jitter in generated frames.
+            const ReplayView& view = frames[view_frame].views[v];
             std::vector<float> xy;
             FrameGenExtent cells{};
             double cockpit_motion = 0.0, cockpit_cells = 0.0, cockpit_moving = 0.0;
@@ -1504,15 +1541,25 @@ int RunReplay(Harness& harness) {
                     }
                 }
             }
+            const std::string prefix = g_replay_output + "/frame-" + std::to_string(k) + "-view" + std::to_string(v);
             if (!g_replay_output.empty() && v == 0 && !xy.empty()) {
-                // The flow as a little-endian float image (x, y per cell).
-                std::FILE* file = std::fopen((g_replay_output + "/frame-" + std::to_string(k) + "-flow-" +
-                                              std::to_string(cells.width) + "x" + std::to_string(cells.height) + ".f32")
-                                                 .c_str(),
-                                             "wb");
-                if (file) {
-                    std::fwrite(xy.data(), sizeof(float), xy.size(), file);
-                    std::fclose(file);
+                WriteFloats(prefix + "-flow", xy, cells, 2);
+            }
+            if (!g_replay_output.empty() && v == 0 && dump_maps) {
+                const std::pair<const char*, FrameGenTexture> maps[] = {
+                    {"depth", {FrameGenTextureKind::kDepth, 0}},
+                    {"trust", {FrameGenTextureKind::kTrustNewest, 0}},
+                    {"shift0", {FrameGenTextureKind::kShiftMap, 0}},
+                    {"keys", {FrameGenTextureKind::kShiftKeys, 0}},
+                    {"filtered", {FrameGenTextureKind::kFilteredNewest, 0}},
+                };
+                for (const auto& [name, texture] : maps) {
+                    std::vector<float> values;
+                    FrameGenExtent extent{};
+                    std::uint32_t channels = 0;
+                    if (gpu->ReadTexture(v, texture, values, extent, channels)) {
+                        WriteFloats(prefix + "-" + name, values, extent, channels);
+                    }
                 }
             }
             if (cockpit_cells > 0.0) {
@@ -1521,32 +1568,85 @@ int RunReplay(Harness& harness) {
             }
             const Pixels generated = harness.readback_sized(g_swapchains[outputs[v]][0]);
             std::vector<bool> valid;
-            const Pixels truth = TurnTo(view, frames[k + 1].views[v], valid);
+            const Pixels truth = TurnTo(view, frames[truth_frame].views[v], valid);
             const ReplayError generated_error = CompareTo(generated, truth, valid, view);
-            const ReplayError hold_error = CompareTo(view.color, truth, valid, view);
-            std::printf("frame %zu view %zu (depth %s, %.2f of an interval): generated %.4f (cockpit %.4f, outside %.4f)"
-                        "  hold %.4f (cockpit %.4f, outside %.4f)\n",
-                        k, v, result.depth.size() > v && result.depth[v] ? "used" : "not used", tuning.fractions[0],
-                        generated_error.all, generated_error.cockpit, generated_error.outside, hold_error.all,
-                        hold_error.cockpit, hold_error.outside);
+            const ReplayError hold_error = CompareTo(v == 0 ? hold : frames[view_frame].views[v].color, truth, valid, view);
+            std::printf("frame %zu view %zu (depth %s, %.2f): generated %.4f (cockpit %.4f %.2f%% bad, outside %.4f %.2f%% bad)"
+                        "  hold %.4f (cockpit %.4f %.2f%%, outside %.4f %.2f%%)\n",
+                        k, v, result.depth.size() > v && result.depth[v] ? "used" : "not used", fraction,
+                        generated_error.all, generated_error.cockpit, generated_error.bad_cockpit, generated_error.outside,
+                        generated_error.bad_outside, hold_error.all, hold_error.cockpit, hold_error.bad_cockpit,
+                        hold_error.outside, hold_error.bad_outside);
+            sums[0] += generated_error.cockpit;
+            sums[1] += generated_error.bad_cockpit;
+            sums[2] += generated_error.outside;
+            sums[3] += generated_error.bad_outside;
+            ++evaluated;
             if (!g_replay_output.empty() && v == 0) {
-                const std::string prefix = g_replay_output + "/frame-" + std::to_string(k) + "-view" + std::to_string(v);
                 WriteHalfPpm(prefix + "-generated.ppm", generated, view.width, view.height);
                 WriteHalfPpm(prefix + "-truth.ppm", truth, view.width, view.height);
-                WriteHalfPpm(prefix + "-newest.ppm", view.color, view.width, view.height);
+                WriteHalfPpm(prefix + "-newest.ppm", frames[view_frame].views[v].color, view.width, view.height);
             }
         }
     };
     // Three times through to settle the depth check, then once to measure.
     for (int pass = 0; pass < 4; ++pass) {
         gpu->ResetHistory();
+        const bool measure = pass == 3;
         for (std::size_t k = 0; k < frames.size(); ++k) {
-            run(k, k > 0, pass == 3 && k > 0);
+            FrameGenExecuteResult result;
+            const bool has_next = k + 1 < frames.size();
+            if (interpolate && measure) {
+                // Frame k from the frames either side of it: k - 1, then k + 1
+                // as the next real frame, at k's share of the two intervals.
+                if (k == 0 || !has_next) continue;
+                const float ratio = std::clamp(frames[k + 1].tuning.interval_ratio, 0.25f, 4.0f);
+                const float fraction = 1.0f / (1.0f + ratio);
+                gpu->ResetHistory();
+                execute(k - 1, std::nullopt, FrameGenSynthesisMode::kInterpolate, fraction, {}, result);
+                execute(k + 1, k - 1, FrameGenSynthesisMode::kInterpolate, fraction,
+                        eye_shifts(k + 1, k, 1.0f - fraction), result);
+                evaluate(k, k + 1, k, frames[k + 1].views[0].color, result, fraction);
+                continue;
+            }
+            // Frame k extrapolated to frame k + 1: one frame at the time ratio
+            // of the two intervals, from the eye position frame k + 1 was
+            // rendered at (predicting: on as it moved from frame k - 1).
+            const float fraction = has_next ? std::clamp(frames[k + 1].tuning.interval_ratio, 0.25f, 1.0f) : 1.0f;
+            std::vector<std::array<float, 3>> shifts;
+            if (has_next && k > 0) {
+                if (predict) {
+                    shifts = eye_shifts(k - 1, k, 1.0f);
+                    for (std::size_t v = 0; v < view_count; ++v) {
+                        // From frame k - 1's view space into frame k's; the eye
+                        // keeps moving as it did, for the intervals' ratio.
+                        const auto a = ReplayRotation(frames[k - 1].views[v].newest.orientation);
+                        const auto b = ReplayRotation(frames[k].views[v].newest.orientation);
+                        double world[3], local[3];
+                        for (int i = 0; i < 3; ++i) world[i] = a[i][0] * shifts[v][0] + a[i][1] * shifts[v][1] + a[i][2] * shifts[v][2];
+                        for (int i = 0; i < 3; ++i) local[i] = b[0][i] * world[0] + b[1][i] * world[1] + b[2][i] * world[2];
+                        for (int i = 0; i < 3; ++i) {
+                            shifts[v][i] = static_cast<float>(local[i] * frames[k + 1].tuning.interval_ratio / fraction);
+                        }
+                    }
+                } else {
+                    shifts = eye_shifts(k, k + 1, fraction);
+                }
+            }
+            execute(k, k > 0 ? std::optional<std::size_t>(k - 1) : std::nullopt, FrameGenSynthesisMode::kExtrapolate,
+                    fraction, shifts, result);
+            if (measure && k > 0 && has_next && !interpolate) {
+                evaluate(k, k, k + 1, frames[k].views[0].color, result, fraction);
+            }
         }
         if (pass == 2) {
             std::printf("Depth reading: %s, scale %.3f\n", ToString(gpu->DepthStatus().reading),
                         static_cast<double>(gpu->DepthStatus().scale));
         }
+    }
+    if (evaluated) {
+        std::printf("Mean over %zu views: cockpit %.4f (%.2f%% bad), outside %.4f (%.2f%% bad)\n", evaluated,
+                    sums[0] / evaluated, sums[1] / evaluated, sums[2] / evaluated, sums[3] / evaluated);
     }
     gpu->Reset();
     return 0;
@@ -1870,6 +1970,7 @@ int RunNvof(Harness& harness) {
         // Ours: the field synthesis uses, after the last frame pair.
         for (const auto quality : {FrameGenFlowQuality::kBalanced, FrameGenFlowQuality::kQuality}) {
             auto gpu = CreateFrameGenGpu(harness.binding, error);
+            if (gpu) gpu->SetCopyAfterRelease(true); // the tests' images are their own
             Check(gpu != nullptr, error);
             const std::int64_t output_format = gpu->OutputFormats(FrameGenOutputKind::kSrgb8).front();
             g_swapchains[kSource] = {harness.create(kSize, kSize), harness.create(kSize, kSize), harness.create(kSize, kSize)};

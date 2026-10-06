@@ -44,8 +44,11 @@ enum class FrameGenPass : std::uint8_t {
     // game releases each image: its half-resolution luma (no head movement
     // taken out), recorded with the capture (FrameGenViewRequest::hardware_raw).
     kFlowPackRaw,
+    // Depth (Direct3D 12): drops the depth of regions the trust scores
+    // disprove (kTrustUpdate scores, this decides).
+    kTrustResolve,
 };
-inline constexpr std::size_t kFrameGenPassCount = 18;
+inline constexpr std::size_t kFrameGenPassCount = 19;
 
 // Logical textures owned per view. History and filtered flow are ping-pong
 // pairs: "newest" is written this submission, "previous" is last
@@ -75,6 +78,9 @@ enum class FrameGenTextureKind : std::uint8_t {
     // reaching each texel) and the offsets back to the newest frame.
     kShiftKeys,
     kShiftMap,
+    // The previous frame's linear depth (kDepth one submission on), for
+    // content it did not see (FrameGenViewRequest::depth_previous).
+    kDepthPrevious,
 };
 
 // The flow level the optical flow hardware fills: a 4x4 grid on the
@@ -107,8 +113,11 @@ inline constexpr std::uint32_t kFrameGenFlagStill = 8u;
 // newest view by the full relative head pose, not rotation alone.
 inline constexpr std::uint32_t kFrameGenFlagDepth = 16u;
 // Synthesis reads the eye-shift map (input 4); options.w holds the frame
-// time (float bits) the map is for.
+// time (half float bits) the map is for.
 inline constexpr std::uint32_t kFrameGenFlagShift = 32u;
+// kLuma reads the previous frame's depth (input 3): content it did not see
+// is marked like content outside its view.
+inline constexpr std::uint32_t kFrameGenFlagDepthPrevious = 64u;
 // kTrustUpdate's options.x: this frame's stereo evidence is in the newest
 // trust texture, last frame's scores are valid, the previous frame is.
 inline constexpr std::uint32_t kFrameGenTrustStereo = 1u;
@@ -122,11 +131,16 @@ inline constexpr std::size_t kFrameGenMaxGenerated = 4;
 // Eye movement (meters) below which generated frames are not shifted: a
 // fraction of a pixel even for content a hand's width away.
 inline constexpr float kFrameGenMinimumShift = 5e-5f;
+// A generated frame gets an eye-shift map of its own once its eye is this
+// far (meters) from where the last map was built for: closer, it scales
+// that map (a few pixels of near edge at most), as each map costs about a
+// fifth of a millisecond per eye at headset resolution.
+inline constexpr float kFrameGenShiftRebuild = 7.5e-4f;
 
 struct FrameGenDispatch {
     FrameGenPass pass{FrameGenPass::kLuma};
     // Sampled textures t0-t5; only Direct3D 12 binds the fifth and sixth
-    // (the eye-shift maps, used with depth).
+    // (the eye-shift map, used with depth).
     std::array<FrameGenTexture, 6> inputs{};
     std::array<FrameGenTexture, 2> outputs{};
     std::uint32_t width{0};  // threads, not groups
@@ -186,6 +200,9 @@ struct FrameGenViewRequest {
     // the view (kDepthTrust), and last frame's trust scores are valid.
     bool trust_stereo{false};
     bool trust_history{false};
+    // Set by backends: the previous frame's depth was used and kept
+    // (kDepthPrevious), so content it did not see can be told apart.
+    bool depth_previous{false};
     // Set by backends: the optical flow hardware already matched this frame
     // and the previous one as rendered (kFlowPackRaw at capture), so the plan
     // packs nothing and kFlowUnpack takes the head movement out.
@@ -212,7 +229,7 @@ struct FrameGenTuning {
     // kFrameGenHardwareFlowLevel whatever the quality.
     bool hardware_flow{false};
     // The last generated frame is a spare, shown only when the next real
-    // frame is late: the eye-shift maps are built for the others.
+    // frame is late: it reuses the frame before's eye-shift map.
     bool spare{false};
 };
 
@@ -221,6 +238,10 @@ struct FrameGenViewPlan {
     std::array<FrameGenExtent, kFrameGenPyramidLevels + 1> levels{}; // [0] = full resolution
     std::uint8_t final_flow_level{3};
     bool synthesize{false};
+    // Each generated frame has its own eye-shift map, built into the one
+    // map texture right before it: the frames are written one at a time in
+    // plan order, not drawn together at the end.
+    bool frames_in_order{false};
     std::vector<FrameGenDispatch> dispatches;
 };
 

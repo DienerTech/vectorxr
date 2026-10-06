@@ -36,6 +36,10 @@ struct FrameGenViewSubmission {
 struct FrameGenExecuteResult {
     std::vector<bool> synthesized; // per view; false = the newest frame was written unchanged
     std::vector<bool> depth;       // per view; the newest frame's depth was used
+    // Execute failed only because a view's image was not captured when the
+    // application released it (SetCopyAfterRelease): nothing was generated,
+    // and the views are now set up so the next releases are captured.
+    bool uncaptured{false};
     // Identifies this submission in LastGpuWindow; 0 = not timed.
     std::uint64_t submission{0};
 };
@@ -114,6 +118,14 @@ class FrameGenGpu {
     // y per cell row by row; `cells` receives the field's size. Waits for the
     // GPU. Direct3D 12 only.
     virtual bool ReadFlow(std::size_t /*view*/, std::vector<float>& /*xy*/, FrameGenExtent& /*cells*/) { return false; }
+    // Research: one of `view`'s working textures as the last Execute left
+    // it ("newest" names what that Execute wrote), as floats, `channels` per
+    // texel row by row (packed half pairs, such as the eye-shift map, as
+    // two). Waits for the GPU. Direct3D 12 only.
+    virtual bool ReadTexture(std::size_t /*view*/, FrameGenTexture /*texture*/, std::vector<float>& /*values*/,
+                             FrameGenExtent& /*extent*/, std::uint32_t& /*channels*/) {
+        return false;
+    }
     // Research: the next Execute also writes what it generates from into
     // `directory` (which must exist): each view's newest image and linear
     // depth before any trust decision, as raw texels, and frame.txt with the
@@ -121,9 +133,14 @@ class FrameGenGpu {
     // (`depthxr_framegen_tests replay`). That Execute waits for the GPU.
     // Direct3D 12 only.
     virtual bool DumpNextExecute(const std::string& /*directory*/) { return false; }
+    // Tests and research only: Execute copies a view's image itself when
+    // Capture did not, though by then the application has released it to
+    // the runtime. Off (the default), such a frame is not generated from
+    // (FrameGenExecuteResult::uncaptured).
+    virtual void SetCopyAfterRelease(bool /*on*/) {}
     // Records and submits generation for every view on the session's graphics
-    // queue, copying a view's source first unless Capture already did. Never
-    // waits on the CPU for this submission.
+    // queue from the images Capture copied at release. Never waits on the
+    // CPU for this submission.
     virtual bool Execute(const std::vector<FrameGenViewSubmission>& views, const FrameGenTuning& tuning,
                          FrameGenExecuteResult& result, std::string& error) = 0;
     // Blocks until every submitted command list has finished; required before

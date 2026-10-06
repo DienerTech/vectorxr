@@ -1,5 +1,6 @@
 #include <windows.h>
 #include <d3d11.h>
+#include <d3d11_1.h>
 #include <d3d12.h>
 #include <wrl/client.h>
 #include <vulkan/vulkan_core.h>
@@ -81,7 +82,10 @@ struct ViewResources {
 
 class D3D11FrameGen final : public FrameGenGpu {
   public:
-    explicit D3D11FrameGen(ID3D11Device* device) : device_(device) { device_->GetImmediateContext(&context_); }
+    explicit D3D11FrameGen(ID3D11Device* device) : device_(device) {
+        device_->GetImmediateContext(&context_);
+        context_.As(&context1_); // Direct3D 11.1: constant buffer ranges
+    }
 
     bool Initialize(std::string& error) {
         for (std::size_t pass = 0; pass < kFrameGenPassCount; ++pass) {
@@ -223,6 +227,9 @@ class D3D11FrameGen final : public FrameGenGpu {
         if (views_.size() < views.size()) {
             views_.resize(views.size());
         }
+        if (Uncaptured(views, tuning, result, error)) {
+            return false;
+        }
         SavedState saved;
         Save(saved);
         TimingQuery* timing = BeginTiming();
@@ -250,6 +257,8 @@ class D3D11FrameGen final : public FrameGenGpu {
         }
     }
 
+    void SetCopyAfterRelease(bool on) override { copy_after_release_ = on; }
+
     void Reset() override {
         views_.clear();
         images_.clear();
@@ -258,11 +267,19 @@ class D3D11FrameGen final : public FrameGenGpu {
     double LastGpuMilliseconds() const override { return last_gpu_ms_; }
 
   private:
+    // The application's compute state that Execute overwrites: everything
+    // it may have bound in the slots Frame Generation uses, including class
+    // instances and Direct3D 11.1 constant buffer ranges.
     struct SavedState {
         ComPtr<ID3D11ComputeShader> shader;
+        std::array<ID3D11ClassInstance*, D3D11_SHADER_MAX_INTERFACES> instances{};
+        UINT instance_count{0};
         std::array<ID3D11ShaderResourceView*, 4> srvs{};
         std::array<ID3D11UnorderedAccessView*, 2> uavs{};
         ID3D11Buffer* constants{};
+        UINT first_constant{0};
+        UINT constant_count{0};
+        bool ranged{false}; // the constant buffer was read with its range
         ID3D11SamplerState* sampler{};
     };
 
@@ -272,22 +289,36 @@ class D3D11FrameGen final : public FrameGenGpu {
     };
 
     void Save(SavedState& saved) {
-        context_->CSGetShader(&saved.shader, nullptr, nullptr);
+        saved.instance_count = static_cast<UINT>(saved.instances.size());
+        context_->CSGetShader(&saved.shader, saved.instances.data(), &saved.instance_count);
         context_->CSGetShaderResources(0, 4, saved.srvs.data());
         context_->CSGetUnorderedAccessViews(0, 2, saved.uavs.data());
-        context_->CSGetConstantBuffers(0, 1, &saved.constants);
+        saved.ranged = context1_ != nullptr;
+        if (saved.ranged) {
+            context1_->CSGetConstantBuffers1(0, 1, &saved.constants, &saved.first_constant, &saved.constant_count);
+        } else {
+            context_->CSGetConstantBuffers(0, 1, &saved.constants);
+        }
         context_->CSGetSamplers(0, 1, &saved.sampler);
     }
 
     void Restore(SavedState& saved) {
-        context_->CSSetShader(saved.shader.Get(), nullptr, 0);
+        context_->CSSetShader(saved.shader.Get(), saved.instance_count ? saved.instances.data() : nullptr,
+                              saved.instance_count);
         context_->CSSetShaderResources(0, 4, saved.srvs.data());
         // Counters are not preserved by CSGetUnorderedAccessViews; -1 keeps
         // the current hidden counter value for append/consume buffers.
         const UINT keep[2] = {static_cast<UINT>(-1), static_cast<UINT>(-1)};
         context_->CSSetUnorderedAccessViews(0, 2, saved.uavs.data(), keep);
-        context_->CSSetConstantBuffers(0, 1, &saved.constants);
+        if (saved.ranged && saved.constants) {
+            context1_->CSSetConstantBuffers1(0, 1, &saved.constants, &saved.first_constant, &saved.constant_count);
+        } else {
+            context_->CSSetConstantBuffers(0, 1, &saved.constants);
+        }
         context_->CSSetSamplers(0, 1, &saved.sampler);
+        for (UINT i = 0; i < saved.instance_count; ++i) {
+            if (saved.instances[i]) saved.instances[i]->Release();
+        }
         for (auto* srv : saved.srvs) {
             if (srv) srv->Release();
         }
@@ -448,6 +479,7 @@ class D3D11FrameGen final : public FrameGenGpu {
         }
 
         if (!view.capture.Matches(submission.source)) {
+            // Only with SetCopyAfterRelease (Uncaptured stops Execute otherwise).
             CopySource(view, submission.source, source);
         }
 
@@ -506,8 +538,42 @@ class D3D11FrameGen final : public FrameGenGpu {
                                         D3D11CalcSubresource(0, image.array_index, source_desc.MipLevels), &box);
     }
 
+    // A view whose image was not captured when the game released it cannot
+    // be generated from (the runtime owns the image after its release): the
+    // views are set up for the next releases to be captured instead.
+    bool Uncaptured(const std::vector<FrameGenViewSubmission>& views, const FrameGenTuning& tuning,
+                    FrameGenExecuteResult& result, std::string& error) {
+        if (copy_after_release_) {
+            return false;
+        }
+        bool captured = true;
+        for (std::size_t i = 0; i < views.size(); ++i) {
+            captured = captured && views_[i].capture.Matches(views[i].source);
+        }
+        if (captured) {
+            return false;
+        }
+        for (std::size_t i = 0; i < views.size(); ++i) {
+            const auto it = images_.find(views[i].source.swapchain);
+            if (it == images_.end() || views[i].source.image_index >= it->second.size()) {
+                error = "Frame Generation image is not tracked";
+                return true;
+            }
+            if (!EnsureView(views_[i], views[i], it->second[views[i].source.image_index], tuning, error)) {
+                views_[i].history_state.Invalidate();
+                return true;
+            }
+            views_[i].capture.valid = false;
+        }
+        result.uncaptured = true;
+        error = "a view's image was not captured when the game released it";
+        return true;
+    }
+
+    bool copy_after_release_{false}; // SetCopyAfterRelease
     ComPtr<ID3D11Device> device_;
     ComPtr<ID3D11DeviceContext> context_;
+    ComPtr<ID3D11DeviceContext1> context1_; // null before Direct3D 11.1
     std::array<ComPtr<ID3D11ComputeShader>, kFrameGenPassCount> shaders_;
     ComPtr<ID3D11Buffer> constants_;
     ComPtr<ID3D11SamplerState> sampler_;

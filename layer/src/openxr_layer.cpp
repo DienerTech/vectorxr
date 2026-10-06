@@ -3308,10 +3308,20 @@ XrResult OpenXrLayer::DestroySwapchain(XrSwapchain swapchain) {
         }
     }
 
-    framegen_.ForgetSwapchain(swapchain);
-    const XrResult result = next_destroy_swapchain_(swapchain);
-    if (XR_FAILED(result)) {
-        return result;
+    // Frame Generation's GPU work may still read the swapchain's images (a
+    // capture, or generation from them) when the GPU stopped finishing it:
+    // then the runtime's swapchain is kept, never freed under that work. The
+    // application's handle counts as destroyed; the runtime frees the
+    // swapchain with its session.
+    XrResult result = XR_SUCCESS;
+    if (framegen_.ForgetSwapchain(swapchain)) {
+        result = next_destroy_swapchain_(swapchain);
+        if (XR_FAILED(result)) {
+            return result;
+        }
+    } else {
+        logger_.Error("Swapchain " + FormatHandle(swapchain) +
+                      " is kept until its session ends: Frame Generation's GPU work on it did not finish.");
     }
 
     std::scoped_lock lock(mutex_);
@@ -13080,7 +13090,7 @@ void OpenXrLayer::PollRuntimeRelay() {
             status.framegen_reason = framegen.full_rate ? "Auto, full rate: no generation needed."
                 : std::string(framegen.automatic ? "Auto " : "") + std::to_string(framegen.multiplier) + "x, " +
                   std::to_string(static_cast<int>(framegen.app_fps + 0.5)) + " -> " +
-                  std::to_string(static_cast<int>(framegen.output_fps + 0.5)) + " fps.";
+                  std::to_string(static_cast<int>(framegen.distinct_fps + 0.5)) + " fps.";
         if (status.turbo_reason.empty() && turbo_auto_suspended_.load())
             status.turbo_reason = "Runtime pacing repeatedly stalled. Use the Turbo toggle to retry.";
 

@@ -125,6 +125,7 @@ struct GpuLog {
     std::atomic<int> captures{0};
     int wait_idles{0};
     bool fail{false};
+    bool uncaptured{false}; // views not captured at release: nothing generated
     bool threaded{false};
     bool depth{false};
     std::atomic<int> depth_captures{0};
@@ -164,6 +165,11 @@ class FakeGpu final : public FrameGenGpu {
         log_->tuning = tuning;
         if (log_->fail) {
             error = "fake GPU failure";
+            return false;
+        }
+        if (log_->uncaptured) {
+            result.uncaptured = true;
+            error = "not captured";
             return false;
         }
         history_.resize(views.size());
@@ -512,7 +518,7 @@ void TestInterpolationPacing() {
     Check(runtime.submitted_swapchains[3][0] != kLeft && runtime.submitted_swapchains[3][1] != kRight,
           "slot k presents the layer-owned output images");
     Check(runtime.submitted_depth[3] && runtime.submitted_depth[4],
-          "interpolated views carry the newest frame's depth, so the runtime corrects every frame alike");
+          "the newest frame and an unchanged copy of it (the priming still) carry its depth");
     Check(runtime.submitted_swapchains[4][0] == kLeft && runtime.submitted_swapchains[4][1] == kRight,
           "slot k + 1 presents the application's own images");
     Check(gpu.last[0].source.image_index == app.image, "generation reads the image the app released");
@@ -818,11 +824,44 @@ void TestThreadedExtrapolation() {
     Check(frames / elapsed > refresh / 3 * 0.8 && frames / elapsed < refresh / 3 * 1.15,
           "threaded: the app runs at a third of the refresh (" + std::to_string(frames / elapsed) + " fps)");
     CheckOrderedTimes(log, "threaded");
+    Check(status.distinct_fps > 0.8 * status.output_fps && status.distinct_fps <= status.output_fps + 1.0,
+          "threaded: a steady app shows a new frame each refresh (" + std::to_string(status.distinct_fps) + " of " +
+              std::to_string(status.output_fps) + " fps)");
     Check(gpu.executes > frames / 2, "threaded: frames are generated from the real frames");
     const auto stop_start = std::chrono::steady_clock::now();
     presenter.Stop();
     Check(std::chrono::steady_clock::now() - stop_start < 500ms, "threaded: stop ends the presenter thread promptly");
     Check(!runtime.ordering_violation && !g_release_violation, "threaded: runtime and image calls stayed ordered");
+}
+
+// A game frame far later than its slot leaves the presenter thread showing
+// its last frame again: those refreshes are submitted, but they are not
+// distinct frames, which is what the OSD reports.
+void TestThreadedRepeatsAreNotDistinct() {
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    runtime.paced = true;
+    StartThreaded(presenter, gpu, FrameGenMultiplier::k2);
+    App app(presenter, runtime);
+    for (int i = 0; i < 3; ++i) app.Frame();
+    auto frame = [&](std::chrono::milliseconds work) {
+        const XrFrameState state = app.Wait();
+        app.Begin();
+        std::this_thread::sleep_for(work);
+        app.Release();
+        Check(XR_SUCCEEDED(app.End(state.predictedDisplayTime)), "repeats: end");
+    };
+    const auto start = std::chrono::steady_clock::now();
+    while (std::chrono::steady_clock::now() - start < 600ms) frame(4ms);
+    frame(250ms); // over twenty refreshes with nothing new to show
+    for (int i = 0; i < 4; ++i) frame(4ms);
+    const FrameGenStatus status = presenter.Status();
+    Check(status.threaded && status.output_fps > 0.0 && status.distinct_fps < 0.9 * status.output_fps,
+          "repeats: refreshes showing the last frame again are not counted as new frames (" +
+              std::to_string(status.distinct_fps) + " of " + std::to_string(status.output_fps) + " fps)");
+    presenter.Stop();
+    Check(!runtime.ordering_violation && !g_release_violation, "repeats: runtime and image calls stayed ordered");
 }
 
 void TestThreadedPipelinedApp() {
@@ -1126,17 +1165,25 @@ void TestThreadedKeepsOtherLayers() {
     for (int i = 0; i < 20; ++i) app.Frame();
     presenter.Stop();
     const auto log = runtime.Snapshot();
-    bool all = true, any_generated = false, depth = true;
+    bool all = true, any_generated = false, real_depth = true, generated_without_depth = false;
     {
         std::scoped_lock lock(g_xr_mutex);
         for (std::size_t i = first; i < log.size(); ++i) {
             all = all && log[i].layers == 2;
-            any_generated = any_generated || !IsAppImage(log[i].swapchains);
-            depth = depth && runtime.submitted_depth[i];
+            const bool generated = !IsAppImage(log[i].swapchains);
+            any_generated = any_generated || generated;
+            if (generated) {
+                generated_without_depth = generated_without_depth || !runtime.submitted_depth[i];
+            } else {
+                real_depth = real_depth && runtime.submitted_depth[i];
+            }
         }
     }
     Check(any_generated && all, "threaded: generated frames keep the app's quad layer");
-    Check(depth, "threaded: generated frames keep the real frame's depth");
+    Check(real_depth, "threaded: real frames keep their depth");
+    // Its depth describes the real frame's image and eye position, not a
+    // generated frame's moved content seen from where the eye will be.
+    Check(generated_without_depth, "threaded: generated frames do not carry the real frame's depth");
     Check(!runtime.ordering_violation, "layers: runtime calls stayed ordered");
 }
 
@@ -1461,6 +1508,30 @@ void TestFailuresRetryAndToggle() {
     Check(!runtime.ordering_violation && !g_release_violation, "calls stayed ordered through failures");
 }
 
+// A frame whose images were not captured when the game released them (a
+// view's first frame, or its region changed) is skipped, never read after
+// release: it is not a GPU failure, so it never pauses generation.
+void TestUncapturedFramesAreSkipped() {
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    StartPresenter(presenter, gpu, FrameGenSynthesisMode::kInterpolate);
+    App app(presenter, runtime);
+    for (int i = 0; i < 5; ++i) app.Frame();
+    Check(presenter.Status().state == FrameGenState::kActive, "uncaptured: engaged");
+    gpu.uncaptured = true;
+    for (int i = 0; i < 6; ++i) app.Frame();
+    const FrameGenStatus status = presenter.Status();
+    Check(status.state == FrameGenState::kActive && status.failures == 0,
+          "uncaptured: skipped frames are not failures and do not pause");
+    Check(IsAppImage(runtime.Snapshot().back().swapchains), "uncaptured: the real frame is still shown");
+    gpu.uncaptured = false;
+    const std::uint64_t generated = presenter.Status().generated;
+    for (int i = 0; i < 3; ++i) app.Frame();
+    Check(presenter.Status().generated > generated, "uncaptured: generation resumes with captured frames");
+    Check(!runtime.ordering_violation && !g_release_violation, "uncaptured: calls stayed ordered");
+}
+
 void TestSettingsAndSessionChanges() {
     FrameGenPresenter presenter;
     GpuLog gpu;
@@ -1513,6 +1584,7 @@ int main() {
     TestDepthCapture();
     TestAutomaticMultiplier();
     TestThreadedExtrapolation();
+    TestThreadedRepeatsAreNotDistinct();
     TestThreadedPipelinedApp();
     TestThreadedInterpolation();
     TestThreadedToggleAndReset();
@@ -1532,6 +1604,7 @@ int main() {
     TestOutputWaitTimeout();
     TestOutputFormatFallback();
     TestFailuresRetryAndToggle();
+    TestUncapturedFramesAreSkipped();
     TestSettingsAndSessionChanges();
     TestUnavailableWithoutBackend();
     std::cout << "depthxr_framegen_presenter_tests passed\n";

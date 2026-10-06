@@ -289,6 +289,9 @@ class VulkanFrameGen final : public FrameGenGpu {
         FrameGenTuning tuning = requested;
         tuning.hardware_flow = false;
         result.synthesized.assign(views.size(), false);
+        if (Uncaptured(views, tuning, result, error)) {
+            return false;
+        }
         const std::size_t slot_index = static_cast<std::size_t>(submission_ % kFramesInFlight);
         FrameSlot& slot = slots_[slot_index];
         if (slot.pending) {
@@ -368,6 +371,8 @@ class VulkanFrameGen final : public FrameGenGpu {
             view.history_state.Invalidate();
         }
     }
+
+    void SetCopyAfterRelease(bool on) override { copy_after_release_ = on; }
 
     void Reset() override {
         if (!binding_.device) {
@@ -612,6 +617,36 @@ class VulkanFrameGen final : public FrameGenGpu {
         image = {};
     }
 
+    // A view whose image was not captured when the game released it cannot
+    // be generated from (the runtime owns the image, and its layout, after
+    // its release): the views are set up for the next releases to be
+    // captured instead.
+    bool Uncaptured(const std::vector<FrameGenViewSubmission>& views, const FrameGenTuning& tuning,
+                    FrameGenExecuteResult& result, std::string& error) {
+        if (copy_after_release_) {
+            return false;
+        }
+        if (views_.size() < views.size()) {
+            views_.resize(views.size());
+        }
+        bool captured = true;
+        for (std::size_t i = 0; i < views.size(); ++i) {
+            captured = captured && views_[i].capture.Matches(views[i].source);
+        }
+        if (captured) {
+            return false;
+        }
+        for (std::size_t i = 0; i < views.size(); ++i) {
+            if (!EnsureView(views_[i], views[i], tuning, error)) {
+                return true;
+            }
+            views_[i].capture.valid = false;
+        }
+        result.uncaptured = true;
+        error = "a view's image was not captured when the game released it";
+        return true;
+    }
+
     void DestroyView(ViewResources& view) {
         // Teardown and failure paths only: wait for every submission first so
         // no recorded command still references these images. A stalled GPU
@@ -793,6 +828,7 @@ class VulkanFrameGen final : public FrameGenGpu {
         }
 
         if (!view.capture.Matches(submission.source)) {
+            // Only with SetCopyAfterRelease (Uncaptured stops Execute otherwise).
             CopySource(view, submission.source, source);
         }
 
@@ -891,6 +927,7 @@ class VulkanFrameGen final : public FrameGenGpu {
     Image dummy_;
     std::unordered_map<XrSwapchain, std::vector<VkImage>> images_;
     std::vector<ViewResources> views_;
+    bool copy_after_release_{false}; // SetCopyAfterRelease
     PFN_vkGetPhysicalDeviceMemoryProperties memory_properties_{nullptr};
 #define FG_DECLARE(name) PFN_vk##name vk##name{nullptr};
     FG_VK_FUNCTIONS(FG_DECLARE)
