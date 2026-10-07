@@ -503,12 +503,20 @@ FG_BIND(4) FG_FORMAT("rgba16f") RWTexture2D<float4> g_flow_out : register(u0);
 #define FG_STEADY_SHARE 0.25
 // Rigid content: with depth in use (not disproved) and nearer than this
 // many meters, content is cockpit, fixed in the head's reference space, and
-// lines up exactly once head movement is taken out. It keeps a measured
-// vector only when no motion matches clearly worse (by this share of the
+// lines up exactly once head movement is taken out. Extrapolating, it keeps
+// no measured vector: cockpit content barely moves between frames (a moving
+// map scrolls a pixel or two), while screen text and repeating instrument
+// detail (gauge bars, screen borders, the digits of a compass rose) alias to
+// vectors of 2-180 px, pushed past the newest frame with nothing to correct
+// them. Those tore MFD text apart (MSFS captures 2026-10-05: 9% of MFD cells
+// moved, by 8 px or more on half of them). Cockpit content then moves with
+// the eye; its own motion (a map scrolling, a lever, a hand) shows at the
+// game's frame rate. Interpolating between two known frames, it keeps a
+// vector when no motion matches clearly worse (by this share of the
 // vector's cost plus the margin, in luma) and the vector is longer than the
 // pixels (full resolution): flat panels and bezels match any vector about
-// equally, and an alias carried their edges' colour across the cockpit.
-// Moving levers and hands still match far better moved than still.
+// equally, and an alias carried their edges' colour across the cockpit
+// (holding all cockpit motion measured worse there: bad pixels 0.71% to 0.77%).
 #define FG_RIGID_DEPTH 4.0
 #define FG_RIGID_SHARE 1.5
 #define FG_RIGID_MARGIN 0.01
@@ -526,7 +534,9 @@ float4 Rigid(float4 flow, int2 cell, float2 pixels, out bool rigid) {
     const float depth = DepthNearest(g_depth, (float2(cell) + 0.5) / float2(g.size.xy));
     rigid = depth > 0.0 && depth < FG_RIGID_DEPTH;
     if (rigid) {
-        if (zero < 0.0 || zero <= flow.z * FG_RIGID_SHARE + FG_RIGID_MARGIN || length(flow.xy * pixels) <= FG_RIGID_PIXELS) {
+        const bool keep = (g.options.y & FG_FLAG_EXTRAPOLATE) == 0u && zero >= 0.0 &&
+                          zero > flow.z * FG_RIGID_SHARE + FG_RIGID_MARGIN && length(flow.xy * pixels) > FG_RIGID_PIXELS;
+        if (!keep) {
             return float4(0.0, 0.0, zero < 0.0 ? flow.z : min(flow.z, zero), 1.0);
         }
     } else if (zero < 0.0) {
