@@ -501,9 +501,10 @@ class FrameGenPresenter {
         bool cover{false}; // past the newest real frame while the next one is late
     };
     JitChoice ChooseJitLocked(XrTime time, XrDuration period, bool interpolate, bool& due) const;
-    // Presenter thread, holding submit_mutex_ only: writes the chosen frame
-    // into the next output images and fills `views` with the projection
-    // views showing them. False (nothing released) when it cannot.
+    // Presenter thread, holding no lock (it makes output swapchains, which
+    // takes submit_mutex_): writes the chosen frame into the next output
+    // images and fills `views` with the projection views showing them.
+    // False (nothing released) when it cannot.
     bool SynthesizeJit(const JitFrame& frame, const JitChoice& choice, std::vector<XrCompositionLayerProjectionView>& views,
                        bool& exact);
     void SummaryLocked(std::chrono::steady_clock::time_point now);

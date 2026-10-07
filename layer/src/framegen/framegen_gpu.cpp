@@ -9,16 +9,20 @@
 namespace depthxr {
 
 std::unique_ptr<FrameGenGpu> CreateFrameGenD3D11(const void* binding, std::string& error);
-std::unique_ptr<FrameGenGpu> CreateFrameGenD3D12(const void* binding, std::string& error);
+std::unique_ptr<FrameGenGpu> CreateFrameGenD3D12(const void* binding, std::string& error, void* runtime_queue);
 std::unique_ptr<FrameGenGpu> CreateFrameGenVulkan(const void* binding, std::string& error);
 
 std::unique_ptr<FrameGenGpu> CreateFrameGenGpu(const void* binding_chain, std::string& error) {
+    void* runtime_queue = nullptr; // FrameGenRuntimeQueue
     for (auto* base = static_cast<const XrBaseInStructure*>(binding_chain); base; base = base->next) {
         switch (base->type) {
+        case kFrameGenRuntimeQueueType:
+            runtime_queue = reinterpret_cast<const FrameGenRuntimeQueue*>(base)->d3d12_queue;
+            break;
         case XR_TYPE_GRAPHICS_BINDING_D3D11_KHR:
             return CreateFrameGenD3D11(base, error);
         case XR_TYPE_GRAPHICS_BINDING_D3D12_KHR:
-            return CreateFrameGenD3D12(base, error);
+            return CreateFrameGenD3D12(base, error, runtime_queue);
         case XR_TYPE_GRAPHICS_BINDING_VULKAN_KHR:
             return CreateFrameGenVulkan(base, error);
         default:

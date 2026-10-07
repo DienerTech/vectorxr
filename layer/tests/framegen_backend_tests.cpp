@@ -2330,26 +2330,49 @@ int D3D11Test() {
 
 // --- Direct3D 12 ------------------------------------------------------------
 
-// Research (`contention`, Direct3D 12 on the GPU): how long a just-in-time
-// frame takes from its submission to done while the GPU is saturated by
-// "game" work on the session queue (a second backend generating headset-size
-// frames back to back there), on Frame Generation's own high-priority queue
-// and, for comparison, on the session queue. A frame must be done within
-// about a refresh of its submission to be shown in its refresh.
+// Research (`contention`, Direct3D 12 on the GPU): how long after its
+// submission a just-in-time frame can be used by the runtime (a fence the
+// runtime would signal at its release, on the queue the runtime was given)
+// while the GPU is saturated by "game" work on the game's queue (a second
+// backend generating headset-size frames back to back there):
+// - substituted: the runtime has Frame Generation's own high-priority queue;
+// - own queue: Frame Generation writes on its own queue, the runtime has the
+//   game's (so the release waits behind the game's queued work);
+// - game queue: everything on the game's queue.
+// A frame must be usable within about a refresh of its submission.
 bool g_contention = false;
 
 int RunContention(Harness& harness) {
     const std::uint32_t width = g_profile_width, height = g_profile_height;
     const float outer = 2.0f, inner = 1.26f, vertical = 1.64f, half_ipd = 0.0336f;
     std::string error;
-    auto make = [&](const char* queue) {
+    // The game's binding (the harness may chain a runtime queue ahead of it).
+    const XrGraphicsBindingD3D12KHR* game = nullptr;
+    for (auto* base = static_cast<const XrBaseInStructure*>(harness.binding); base; base = base->next) {
+        if (base->type == XR_TYPE_GRAPHICS_BINDING_D3D12_KHR) game = reinterpret_cast<const XrGraphicsBindingD3D12KHR*>(base);
+    }
+    Check(game != nullptr, "contention needs a Direct3D 12 binding");
+    ComPtr<ID3D12CommandQueue> runtime;
+    D3D12_COMMAND_QUEUE_DESC runtime_desc{D3D12_COMMAND_LIST_TYPE_DIRECT, D3D12_COMMAND_QUEUE_PRIORITY_HIGH,
+                                          D3D12_COMMAND_QUEUE_FLAG_NONE, 0};
+    Check(SUCCEEDED(game->device->CreateCommandQueue(&runtime_desc, IID_PPV_ARGS(&runtime))), "runtime queue");
+    FrameGenRuntimeQueue marker;
+    marker.next = game;
+    marker.d3d12_queue = runtime.Get();
+    auto make = [&](const char* queue, bool substituted) {
         _putenv_s("VECTORXR_FRAMEGEN_QUEUE", queue);
-        auto gpu = CreateFrameGenGpu(harness.binding, error);
+        _putenv_s("VECTORXR_FRAMEGEN_JIT", "1");
+        auto gpu = CreateFrameGenGpu(substituted ? static_cast<const void*>(&marker) : game, error);
         _putenv_s("VECTORXR_FRAMEGEN_QUEUE", "");
+        _putenv_s("VECTORXR_FRAMEGEN_JIT", "");
         Check(gpu != nullptr, harness.name + " backend: " + error);
         gpu->SetCopyAfterRelease(true);
         return gpu;
     };
+    ComPtr<ID3D12Fence> release_fence;
+    Check(SUCCEEDED(game->device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&release_fence))), "release fence");
+    UINT64 release_value = 0;
+    const HANDLE release_event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
     const std::int64_t output_format = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
     std::array<XrSwapchain, 2> sources{reinterpret_cast<XrSwapchain>(0x81), reinterpret_cast<XrSwapchain>(0x82)};
     std::array<std::array<XrSwapchain, 4>, 2> outputs{};
@@ -2403,10 +2426,10 @@ int RunContention(Harness& harness) {
     };
     // The "game": frames generated at headset size, back to back, on the
     // session queue (4 outputs each: several milliseconds of GPU work).
-    auto load = make("game");
+    auto load = make("game", false);
     track(*load);
     std::atomic<bool> loading{false}, stop{false};
-    std::thread game([&] {
+    std::thread game_thread([&] {
         FrameGenTuning tuning;
         tuning.mode = FrameGenSynthesisMode::kExtrapolate;
         tuning.generated = 4;
@@ -2422,8 +2445,16 @@ int RunContention(Harness& harness) {
             load->Execute(views_for(frame++ % 2, true), tuning, result, game_error);
         }
     });
-    for (const char* queue : {"", "game"}) {
-        auto jit = make(queue);
+    struct Variant {
+        const char* name;
+        const char* queue;
+        bool substituted;
+    };
+    for (const Variant& variant : {Variant{"substituted (runtime has Frame Generation's queue)", "", true},
+                                   Variant{"own queue, runtime has the game's", "", false},
+                                   Variant{"all on the game's queue", "game", false}}) {
+        auto jit = make(variant.queue, variant.substituted);
+        ID3D12CommandQueue* runtime_side = variant.substituted ? runtime.Get() : game->queue;
         track(*jit);
         FrameGenTuning analyze;
         analyze.mode = FrameGenSynthesisMode::kExtrapolate;
@@ -2442,22 +2473,27 @@ int RunContention(Harness& harness) {
                 const auto start = std::chrono::steady_clock::now();
                 Check(jit->Synthesize(result.frame, FrameGenSynthesisMode::kExtrapolate, 0.5f, images, error),
                       "synthesize: " + error);
-                Check(jit->WaitIdle(), "synthesis did not finish");
+                // The runtime's release signal, on the queue it was given.
+                Check(SUCCEEDED(runtime_side->Signal(release_fence.Get(), ++release_value)) &&
+                          SUCCEEDED(release_fence->SetEventOnCompletion(release_value, release_event)) &&
+                          WaitForSingleObject(release_event, 2000) == WAIT_OBJECT_0,
+                      "the release did not complete");
                 latencies.push_back(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count());
                 Sleep(5);
             }
             std::sort(latencies.begin(), latencies.end());
-            std::printf("%s queue, %s: frame done %.2f ms after submission (median), %.2f (90%%), %.2f (max)\n",
-                        *queue ? "session" : "own high-priority", loaded ? "GPU saturated by the game" : "idle GPU",
-                        latencies[latencies.size() / 2], latencies[latencies.size() * 9 / 10], latencies.back());
+            std::printf("%s, %s: usable by the runtime %.2f ms after submission (median), %.2f (90%%), %.2f (max)\n",
+                        variant.name, loaded ? "GPU saturated by the game" : "idle GPU", latencies[latencies.size() / 2],
+                        latencies[latencies.size() * 9 / 10], latencies.back());
         }
         loading = false;
         load->WaitIdle();
         jit->Reset();
     }
     stop = true;
-    game.join();
+    game_thread.join();
     load->Reset();
+    CloseHandle(release_event);
     return 0;
 }
 
@@ -2498,6 +2534,20 @@ int D3D12Test() {
     Check(SUCCEEDED(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence))), "D3D12 fence");
     UINT64 fence_value = 0;
     const HANDLE event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    // As in a session (FrameGenQueueSubstitution): the runtime was given a
+    // queue of Frame Generation's own, and the test's queue plays the
+    // game's. FG_TEST_RUNTIME_QUEUE=0: the runtime has the game's queue.
+    const bool substitute = !(std::getenv("FG_TEST_RUNTIME_QUEUE") && std::string(std::getenv("FG_TEST_RUNTIME_QUEUE")) == "0");
+    ComPtr<ID3D12CommandQueue> runtime_queue;
+    ComPtr<ID3D12Fence> runtime_fence;
+    UINT64 runtime_value = 0;
+    if (substitute) {
+        D3D12_COMMAND_QUEUE_DESC runtime_desc{D3D12_COMMAND_LIST_TYPE_DIRECT, D3D12_COMMAND_QUEUE_PRIORITY_HIGH,
+                                              D3D12_COMMAND_QUEUE_FLAG_NONE, 0};
+        Check(SUCCEEDED(device->CreateCommandQueue(&runtime_desc, IID_PPV_ARGS(&runtime_queue))) &&
+                  SUCCEEDED(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&runtime_fence))),
+              "D3D12 runtime queue");
+    }
     auto submit_and_wait = [&] {
         Check(SUCCEEDED(commands->Close()), "D3D12 test close");
         ID3D12CommandList* lists[] = {commands.Get()};
@@ -2508,6 +2558,12 @@ int D3D12Test() {
     };
     auto begin = [&] {
         Check(SUCCEEDED(allocator->Reset()) && SUCCEEDED(commands->Reset(allocator.Get(), nullptr)), "D3D12 reset");
+        if (runtime_queue) {
+            // The test reads and writes images as the runtime and the game
+            // would: after Frame Generation's work on the runtime's queue.
+            runtime_queue->Signal(runtime_fence.Get(), ++runtime_value);
+            queue->Wait(runtime_fence.Get(), runtime_value);
+        }
     };
     std::vector<ComPtr<ID3D12Resource>> keep;
     XrGraphicsBindingD3D12KHR binding{XR_TYPE_GRAPHICS_BINDING_D3D12_KHR};
@@ -2548,7 +2604,10 @@ int D3D12Test() {
     Harness harness;
     harness.name = "D3D12";
     harness.format = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
-    harness.binding = &binding;
+    FrameGenRuntimeQueue runtime_marker;
+    runtime_marker.next = &binding;
+    runtime_marker.d3d12_queue = runtime_queue.Get();
+    harness.binding = runtime_queue ? static_cast<const void*>(&runtime_marker) : &binding;
     harness.create = [&](std::uint32_t w, std::uint32_t h) -> void* {
         D3D12_HEAP_PROPERTIES heap{D3D12_HEAP_TYPE_DEFAULT};
         D3D12_RESOURCE_DESC desc = image_desc;

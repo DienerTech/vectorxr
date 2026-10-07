@@ -533,8 +533,12 @@ void FrameGenPresenter::ForgetSpace(XrSpace space) {
                                                 frame.copy.layers[frame.copy.projection_index].projection.space == space;
                                      }),
                       jit_frames_.end());
+    for (JitFrame& frame : jit_frames_) {
+        StripSpace(frame.copy, space); // other layers in that space
+    }
     if (jit_content_.has_projection && jit_content_.layers[jit_content_.projection_index].projection.space == space) {
         jit_content_ = {};
+        jit_views_.clear();
     }
     if (extrapolated_.space == space) {
         extrapolated_.valid = false;
@@ -1752,6 +1756,11 @@ bool FrameGenPresenter::Generate(const XrCompositionLayerProjection& projection,
             submission.source = {view.subImage.swapchain, *record->second.released, view.subImage.imageArrayIndex,
                                  view.subImage.imageRect, record->second.format};
             submission.request.extent = Extent(view);
+            if (analyze) {
+                // As captured at release (OutputKindLocked): the history's
+                // images match it, and frames written later encode for it.
+                submission.request.output = OutputKindLocked(i, record->second.format).value_or(*kind);
+            }
             submission.request.newest = Geometry(view);
             submission.request.synthesize = continuous && last_real_.views[i].extent.width == submission.request.extent.width &&
                                             last_real_.views[i].extent.height == submission.request.extent.height;
@@ -3297,12 +3306,31 @@ bool FrameGenPresenter::AnalyzeJit(const XrCompositionLayerProjection& projectio
     if (ok) RecordReal(projection, frame.app_time, frame.sequence);
     std::scoped_lock lock(mutex_);
     if (!ok || !compositor_running_ || !copy.valid || !copy.has_projection) {
+        // Not kept: the frame is shown unchanged in its own refresh and
+        // nothing is generated from it (frames are found by id).
         InvalidateContinuityLocked();
-        if (mode == FrameGenSynthesisMode::kExtrapolate) {
-            jit_frames_.clear(); // the newest real frame is shown unchanged until the next
-        }
         return false;
     }
+    // Frames of another view size (or output kind) are never written again:
+    // their output images would be made anew each time one was chosen.
+    const auto& views = copy.layers[copy.projection_index].views;
+    jit_frames_.erase(std::remove_if(jit_frames_.begin(), jit_frames_.end(),
+                                     [&](const JitFrame& kept) {
+                                         const auto& kept_views = kept.copy.layers[kept.copy.projection_index].views;
+                                         if (kept_views.size() != views.size() || kept.kinds != analysis.kinds) {
+                                             return true;
+                                         }
+                                         for (std::size_t i = 0; i < views.size(); ++i) {
+                                             if (kept_views[i].subImage.imageRect.extent.width !=
+                                                     views[i].subImage.imageRect.extent.width ||
+                                                 kept_views[i].subImage.imageRect.extent.height !=
+                                                     views[i].subImage.imageRect.extent.height) {
+                                                 return true;
+                                             }
+                                         }
+                                         return false;
+                                     }),
+                      jit_frames_.end());
     JitFrame jit;
     jit.id = frame.sequence;
     jit.analyzed = analysis.frame;
@@ -3379,11 +3407,15 @@ XrResult FrameGenPresenter::ThreadedEndInterpolate(const XrFrameEndInfo& info, c
         newest_copy_id_ = frame.id;
         ++healthy_streak_;
     } else if (!renderable) {
-        // Nothing to show: the presenter thread submits no layers until the
-        // next frame (and nothing is generated across the gap).
-        newest_copy_ = {};
+        // No projection (a loading screen's quads, or nothing at all): the
+        // presenter thread shows its layers as they are until the next frame,
+        // and nothing is generated across the gap.
+        newest_copy_ = copied ? copy : FrameCopy{};
         newest_copy_id_ = frame.id;
         jit_frames_.clear();
+        jit_content_ = {};
+        jit_views_.clear();
+        jit_shown_.reset();
         InvalidateContinuityLocked();
     }
     generation_pending_ = measure;
@@ -3504,10 +3536,22 @@ bool FrameGenPresenter::SynthesizeJit(const JitFrame& frame, const JitChoice& ch
     projection.views = layer.views.data();
     std::string error;
     // One set of output images, made on this thread (no other uses them).
-    if (!EnsureOutputs(projection, frame.kinds, 1, error)) {
+    const bool ensured = EnsureOutputs(projection, frame.kinds, 1, error);
+    {
         std::scoped_lock lock(mutex_);
-        NoteFailureLocked(error);
-        return false;
+        const bool current = ensured && !output_sets_.empty() && jit_views_.size() == output_sets_.front().size() &&
+                             std::equal(jit_views_.begin(), jit_views_.end(), output_sets_.front().begin(),
+                                        [](const XrCompositionLayerProjectionView& view, const Output& output) {
+                                            return view.subImage.swapchain == output.swapchain;
+                                        });
+        if (!current) {
+            jit_views_.clear();
+            jit_content_ = {};
+        }
+        if (!ensured) {
+            NoteFailureLocked(error);
+            return false;
+        }
     }
     std::vector<FrameGenImage> images;
     for (Output& output : output_sets_.front()) {
@@ -3774,7 +3818,17 @@ void FrameGenPresenter::CompositorLoop() {
                 distinct = jit_shown_ != shown;
                 jit_shown_ = shown;
                 generated = true;
-            } else if (jit_interpolate_ && jit_content_.valid && !jit_views_.empty()) {
+            } else if (written && jit_content_.valid && jit_content_.has_projection &&
+                       jit_content_.layers[jit_content_.projection_index].projection.space ==
+                           source->copy.layers[source->copy.projection_index].projection.space) {
+                // Written, but its real frame was dropped meanwhile: the
+                // image just released goes with its own views and the last
+                // layers shown around it.
+                content = jit_content_;
+                jit_views_ = std::move(written_views);
+                jit_exact_ = false;
+                generated = true;
+            } else if (jit_interpolate_ && jit_content_.valid && !jit_views_.empty() && !written) {
                 // The last frame written again: the output images' newest.
                 content = jit_content_;
                 generated = true;

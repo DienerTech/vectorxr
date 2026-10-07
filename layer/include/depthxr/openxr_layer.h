@@ -34,6 +34,7 @@
 #include "depthxr/osd_renderer.h"
 #include "depthxr/osd_composite.h"
 #include "depthxr/framegen_presenter.h"
+#include "depthxr/framegen_runtime_queue.h"
 #include "depthxr/turbo_recovery.h"
 #include "depthxr/turbo_trace.h"
 #include "depthxr/settings_resolver.h"
@@ -720,6 +721,9 @@ class OpenXrLayer {
     // Frame Generation is latched per session. While it owns pacing, the app's
     // Wait/Begin/End go to the presenter and Turbo stays off for the session.
     FrameGenPresenter framegen_;
+    // Direct3D 12: the runtime is given Frame Generation's queue (see
+    // FrameGenQueueSubstitution); decided at xrCreateSession.
+    FrameGenQueueSubstitution framegen_queue_;
     FrameGenPresenter::GpuFactory framegen_gpu_factory_{CreateFrameGenGpu};
     FrameGenRuntimeCalls framegen_calls_;
     std::atomic<bool> framegen_owns_pacing_{false};

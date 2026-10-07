@@ -198,6 +198,18 @@ class FrameGenGpu {
     }
 };
 
+// Direct3D 12 queue substitution (FrameGenQueueSubstitution): the runtime was
+// given this queue in place of the game's. Chained ahead of the game's own
+// graphics binding in the chain CreateFrameGenGpu is given (never passed to
+// the runtime): Frame Generation's work then runs on it, so frames it writes
+// are synchronized with the runtime as soon as they are written.
+inline constexpr XrStructureType kFrameGenRuntimeQueueType = static_cast<XrStructureType>(0x56584651);
+struct FrameGenRuntimeQueue {
+    XrStructureType type{kFrameGenRuntimeQueueType};
+    const void* next{nullptr};
+    void* d3d12_queue{nullptr}; // ID3D12CommandQueue*
+};
+
 // Builds the backend matching the session's graphics binding (D3D11, D3D12
 // or Vulkan). Returns nullptr with a reason for other APIs or failures.
 std::unique_ptr<FrameGenGpu> CreateFrameGenGpu(const void* binding_chain, std::string& error);

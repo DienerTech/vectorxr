@@ -2076,6 +2076,7 @@ XrResult OpenXrLayer::DestroyInstance(XrInstance instance) {
     DestroyInternalReferenceSpaces();
     ResetSwapchainState();
     const XrResult result = next_destroy_instance_(instance);
+    framegen_queue_.Reset();
     if (XR_SUCCEEDED(result)) {
         turbo_recovery_.Complete();
         instance_ = XR_NULL_HANDLE;
@@ -2147,11 +2148,32 @@ XrResult OpenXrLayer::CreateSession(XrInstance instance,
                      (next_struct ? std::to_string(next_struct->type) : "none"));
     }
 
-    const XrResult result = next_create_session_(instance, create_info, session);
+    // Frame Generation running this session gives the runtime a Direct3D 12
+    // queue of its own (FrameGenQueueSubstitution), decided before the
+    // session exists.
+    const XrSessionCreateInfo* downstream_info = create_info;
+    {
+        bool framegen_wanted = false;
+        {
+            std::scoped_lock lock(mutex_);
+            ReloadConfigIfNeeded();
+            const ResolvedRuntimeConfig resolved = ResolveRuntimeConfig(config_, current_exe_name_);
+            framegen_wanted = resolved.core.enabled && resolved.framegen.enabled;
+        }
+        framegen_queue_.Reset();
+        if (framegen_wanted) {
+            std::string note;
+            downstream_info = framegen_queue_.Prepare(create_info, note);
+            if (!note.empty()) logger_.Info(note);
+        }
+    }
+
+    const XrResult result = next_create_session_(instance, downstream_info, session);
     if (XR_FAILED(result) || !session) {
         if (XR_FAILED(result)) {
             logger_.Error("xrCreateSession failed downstream: result=" + std::to_string(static_cast<int>(result)));
         }
+        framegen_queue_.Reset();
         return result;
     }
     logger_.Info("xrCreateSession succeeded downstream; configuring VectorXR session resources.");
@@ -2200,7 +2222,8 @@ XrResult OpenXrLayer::CreateSession(XrInstance instance,
     XrSystemProperties osd_system{XR_TYPE_SYSTEM_PROPERTIES};
     const bool osd_limits = create_info && next_get_system_properties_ &&
         XR_SUCCEEDED(next_get_system_properties_(instance, create_info->systemId, &osd_system));
-    osd_.InitializeGraphics(*session, create_info ? create_info->next : nullptr,
+    osd_.InitializeGraphics(*session,
+        framegen_queue_.Active() ? framegen_queue_.RuntimeChain() : (create_info ? create_info->next : nullptr),
         osd_limits ? osd_system.graphicsProperties.maxLayerCount : 0,
         {next_enumerate_swapchain_formats_, next_create_swapchain_, next_enumerate_swapchain_images_,
          next_acquire_swapchain_image_, next_wait_swapchain_image_, next_release_swapchain_image_,
@@ -2215,7 +2238,7 @@ XrResult OpenXrLayer::CreateSession(XrInstance instance,
     ReloadConfigIfNeeded();
     RefreshResolvedSettings();
     quadviews_session_active_ = resolved_settings_.core.enabled && resolved_settings_.quadviews.enabled;
-    StartFrameGen(*session, create_info ? create_info->next : nullptr);
+    StartFrameGen(*session, framegen_queue_.FrameGenChain(create_info ? create_info->next : nullptr));
     if (runtime_relay_root_.empty()) runtime_relay_root_ = ResolveRuntimeRelayRoot();
     runtime_relay_session_id_ = std::to_string(GetCurrentProcessId()) + "-" +
         std::to_string(RuntimeRelayUnixMilliseconds()) + "-" +
@@ -2260,6 +2283,7 @@ XrResult OpenXrLayer::DestroySession(XrSession session) {
     }
 
     const XrResult result = next_destroy_session_(session);
+    framegen_queue_.Reset();
     if (XR_SUCCEEDED(result)) {
         std::scoped_lock lock(mutex_);
         if (session == active_session_) turbo_recovery_.Complete();
@@ -3434,6 +3458,11 @@ XrResult OpenXrLayer::WaitSwapchainImage(XrSwapchain swapchain, const XrSwapchai
     }
     const auto wait_start = std::chrono::steady_clock::now();
     const XrResult result = next_wait_swapchain_image_(swapchain, wait_info);
+    if (result == XR_SUCCESS) {
+        // Anything the runtime queued for the image runs before the game's
+        // rendering into it.
+        framegen_queue_.AfterWait();
+    }
     if (diag) {
         logger_.Debug("Turbo-diag: xrWaitSwapchainImage completed in " +
                       std::to_string(std::chrono::duration<double, std::milli>(
@@ -3487,6 +3516,9 @@ XrResult OpenXrLayer::ReleaseSwapchainImage(XrSwapchain swapchain,
         logger_.Debug("Turbo-diag: xrReleaseSwapchainImage(" +
                       std::to_string(reinterpret_cast<uintptr_t>(swapchain)) + ") starting.");
     }
+    // The runtime's queue reads the image only after the game's rendering
+    // into it (and Frame Generation's capture of it) has run.
+    framegen_queue_.BeforeRelease();
     const XrResult result = next_release_swapchain_image_(swapchain, release_info);
     if (diag) {
         logger_.Debug("Turbo-diag: xrReleaseSwapchainImage completed.");

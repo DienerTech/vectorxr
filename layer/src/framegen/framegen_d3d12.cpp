@@ -250,8 +250,13 @@ struct HardwareWatch {
 
 class D3D12FrameGen final : public FrameGenGpu {
   public:
-    explicit D3D12FrameGen(const XrGraphicsBindingD3D12KHR& binding)
+    D3D12FrameGen(const XrGraphicsBindingD3D12KHR& binding, ID3D12CommandQueue* runtime_queue)
         : device_(binding.device), queue_(binding.queue), work_(binding.queue) {
+        if (runtime_queue) {
+            // Queue substitution: the runtime synchronizes with this queue.
+            work_ = runtime_queue;
+            runtime_on_work_ = true;
+        }
         ComPtr<IDXGIFactory4> factory;
         if (SUCCEEDED(CreateDXGIFactory1(IID_PPV_ARGS(&factory)))) {
             factory->EnumAdapterByLuid(device_->GetAdapterLuid(), IID_PPV_ARGS(&memory_adapter_));
@@ -354,7 +359,16 @@ class D3D12FrameGen final : public FrameGenGpu {
         // are not queued behind it. VECTORXR_FRAMEGEN_QUEUE=game keeps
         // everything on the game's queue.
         const char* queue_choice = std::getenv("VECTORXR_FRAMEGEN_QUEUE");
-        if (!(queue_choice && std::string(queue_choice) == "game")) {
+        if (runtime_on_work_) {
+            ComPtr<ID3D12Fence> capture_fence;
+            if (SUCCEEDED(device_->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&capture_fence)))) {
+                capture_fence_ = capture_fence;
+                separate_ = true;
+            } else {
+                work_ = queue_;
+                runtime_on_work_ = false;
+            }
+        } else if (!(queue_choice && std::string(queue_choice) == "game")) {
             D3D12_COMMAND_QUEUE_DESC desc{D3D12_COMMAND_LIST_TYPE_DIRECT, D3D12_COMMAND_QUEUE_PRIORITY_HIGH,
                                           D3D12_COMMAND_QUEUE_FLAG_NONE, 0};
             ComPtr<ID3D12CommandQueue> own;
@@ -367,10 +381,15 @@ class D3D12FrameGen final : public FrameGenGpu {
                 separate_ = true;
             }
         }
-        // Just-in-time synthesis (VECTORXR_FRAMEGEN_JIT=0: generated frames
-        // are written together, right after each real frame).
+        // Just-in-time synthesis where the runtime synchronizes with the
+        // queue frames are written on (queue substitution): released through
+        // the game's queue, a frame written right before its refresh would
+        // wait behind the game's queued work. VECTORXR_FRAMEGEN_JIT=0 writes
+        // generated frames together, right after each real frame; =1 writes
+        // them just in time without substitution (research).
+        just_in_time_ = runtime_on_work_;
         if (const char* jit = std::getenv("VECTORXR_FRAMEGEN_JIT")) {
-            just_in_time_ = std::string(jit) != "0";
+            just_in_time_ = std::string(jit) == "1" || (runtime_on_work_ && std::string(jit) != "0");
         }
         if (!check(device_->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, capture_slots_[0].allocator.Get(), nullptr,
                                               IID_PPV_ARGS(&capture_commands_)),
@@ -1699,11 +1718,14 @@ class D3D12FrameGen final : public FrameGenGpu {
             return false;
         }
         const AnalyzedFrame& frame = *found;
+        // A frame at the newest frame's own time is a copy of it alone.
+        const bool exact = mode == FrameGenSynthesisMode::kExtrapolate ? fraction <= 0.0f : fraction >= 1.0f;
         for (std::size_t i = 0; i < frame.views.size(); ++i) {
             const AnalyzedView& analyzed = frame.views[i];
             const ViewResources& view = views_[i];
             if (!analyzed.valid || view.slot_generation[analyzed.newest] != analyzed.newest_generation ||
-                (analyzed.request.synthesize && view.slot_generation[analyzed.previous] != analyzed.previous_generation)) {
+                (analyzed.request.synthesize && !exact &&
+                 view.slot_generation[analyzed.previous] != analyzed.previous_generation)) {
                 error = "the real frame's images were replaced by newer ones";
                 return false;
             }
@@ -1796,7 +1818,10 @@ class D3D12FrameGen final : public FrameGenGpu {
             analyzed_.clear();
             return false;
         }
-        hr = SubmitWork(synthesis_commands_.Get());
+        // Its images were captured before the Execute that analyzed them,
+        // which waited for that: newer captures (queued behind the game's
+        // next frame on its queue) are not waited for.
+        hr = SubmitWork(synthesis_commands_.Get(), false);
         if (FAILED(hr)) {
             error = Failure("D3D12 Frame Generation synthesis signal", hr);
             signal_failed_ = true;
@@ -1829,9 +1854,12 @@ class D3D12FrameGen final : public FrameGenGpu {
         if (views_.size() < views.size()) {
             views_.resize(views.size());
         }
+        // A capture made for the other ring size (batch or just in time) is
+        // into textures EnsureView replaces.
+        const std::uint8_t ring = tuning.analyze_only ? kFrameGenHistoryRingMax : 2;
         bool captured = true;
         for (std::size_t i = 0; i < views.size(); ++i) {
-            captured = captured && views_[i].capture.Matches(views[i].source);
+            captured = captured && views_[i].capture.Matches(views[i].source) && views_[i].history_state.Ring() == ring;
         }
         if (captured) {
             return false;
@@ -1914,7 +1942,7 @@ class D3D12FrameGen final : public FrameGenGpu {
         synthesis_commands_.Detach();
         for (auto& slot : synthesis_slots_) slot.allocator.Detach();
         if (separate_) {
-            work_.Detach();
+            if (!runtime_on_work_) work_.Detach(); // the substituted queue belongs to the layer
             capture_fence_.Detach();
         }
         for (auto& slot : slots_) {
@@ -2124,9 +2152,10 @@ class D3D12FrameGen final : public FrameGenGpu {
         return hr;
     }
 
-    // Submits Frame Generation's own work, after every capture so far.
-    HRESULT SubmitWork(ID3D12GraphicsCommandList* list) {
-        if (separate_ && capture_value_ > capture_waited_) {
+    // Submits Frame Generation's own work, after every capture so far
+    // (`after_captures`).
+    HRESULT SubmitWork(ID3D12GraphicsCommandList* list, bool after_captures = true) {
+        if (after_captures && separate_ && capture_value_ > capture_waited_) {
             work_->Wait(capture_fence_.Get(), capture_value_);
             capture_waited_ = capture_value_;
         }
@@ -2136,9 +2165,10 @@ class D3D12FrameGen final : public FrameGenGpu {
     }
 
     // Output images written on the work queue: the game's queue (which the
-    // runtime synchronizes with when they are released) waits for them.
+    // runtime synchronizes with when they are released) waits for them. With
+    // queue substitution the runtime synchronizes with the work queue itself.
     void HandOverOutputs() {
-        if (separate_ && fence_value_) {
+        if (separate_ && !runtime_on_work_ && fence_value_) {
             queue_->Wait(fence_.Get(), fence_value_);
         }
     }
@@ -2978,6 +3008,7 @@ class D3D12FrameGen final : public FrameGenGpu {
     // game's queue (`separate_` false).
     ComPtr<ID3D12CommandQueue> work_;
     bool separate_{false};
+    bool runtime_on_work_{false}; // the runtime was given work_ (FrameGenRuntimeQueue)
     // Captures signal this on the game's queue while separate (fence_ otherwise).
     ComPtr<ID3D12Fence> capture_fence_;
     UINT64 capture_value_{0};
@@ -3071,13 +3102,13 @@ class D3D12FrameGen final : public FrameGenGpu {
 
 } // namespace
 
-std::unique_ptr<FrameGenGpu> CreateFrameGenD3D12(const void* binding, std::string& error) {
+std::unique_ptr<FrameGenGpu> CreateFrameGenD3D12(const void* binding, std::string& error, void* runtime_queue) {
     const auto& d3d12 = *static_cast<const XrGraphicsBindingD3D12KHR*>(binding);
     if (!d3d12.device || !d3d12.queue || d3d12.queue->GetDesc().Type != D3D12_COMMAND_LIST_TYPE_DIRECT) {
         error = "Invalid D3D12 device or direct queue";
         return nullptr;
     }
-    auto gpu = std::make_unique<D3D12FrameGen>(d3d12);
+    auto gpu = std::make_unique<D3D12FrameGen>(d3d12, static_cast<ID3D12CommandQueue*>(runtime_queue));
     if (!gpu->Initialize(error)) {
         return nullptr;
     }

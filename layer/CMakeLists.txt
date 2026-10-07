@@ -178,6 +178,7 @@ if(WIN32 AND DEPTHXR_BUILD_LAYER)
     add_library(depthxr_framegen STATIC
         src/framegen/framegen_gpu.cpp
         src/framegen/framegen_presenter.cpp
+        src/framegen/framegen_runtime_queue.cpp
         src/framegen/framegen_d3d11.cpp
         src/framegen/framegen_d3d12.cpp
         src/framegen/framegen_vulkan.cpp
