@@ -56,8 +56,17 @@ enum class FrameGenPass : std::uint8_t {
     // flow of world content, summed per group, then solved.
     kWorldReduce,
     kWorldSolve,
+    // Depth (Direct3D 12): the trust scores (counted per tile by
+    // kTrustUpdate) summed over the tiles around each, for kTrustResolve to
+    // judge texels without evidence of their own by the surface around them.
+    kTrustVote,
+    // Depth (Direct3D 12): per tile, how well the other eye lines up at
+    // scales of the depth (recorded with kDepthTrust), then the scale each
+    // surface lines up best at, which kTrustResolve applies.
+    kDepthScale,
+    kDepthScaleVote,
 };
-inline constexpr std::size_t kFrameGenPassCount = 22;
+inline constexpr std::size_t kFrameGenPassCount = 25;
 
 // Logical textures owned per view. History and filtered flow are ping-pong
 // pairs: "newest" is written this submission, "previous" is last
@@ -99,6 +108,17 @@ enum class FrameGenTextureKind : std::uint8_t {
     // flow filtered for extrapolation as well, for cover frames shown when
     // the next real frame is late. Kept per real frame like the history.
     kFilteredCover,
+    // Depth trust per tile of kFrameGenTrustTile half-resolution texels:
+    // disproved and confirmed counts with their mean inverse depths
+    // (kTrustUpdate's second output), and the same summed over the tiles
+    // around (kTrustVotes).
+    kTrustTiles,
+    kTrustVotes,
+    // The stereo depth-scale probe per trust tile (kDepthScale, three texels
+    // per tile side by side) and the vote on it (kDepthScaleVote).
+    kDepthScales,
+    kDepthScaleVotes,
+    kDepthScaleRaw, // kDepthScaleVote's first stage, before the neighbours agree
 };
 
 // The flow level the optical flow hardware fills: a 4x4 grid on the
@@ -146,6 +166,15 @@ inline constexpr std::uint32_t kFrameGenFlagOcclusion = 256u;
 inline constexpr std::uint32_t kFrameGenFlagCrossFade = 512u;
 // World motion: samples per side of the fit's grid, and its iterations.
 inline constexpr std::uint32_t kFrameGenWorldGrid = 128u;
+// The trust vote's tile side in half-resolution texels (FG_TRUST_TILE):
+// kTrustUpdate counts a tile per thread group.
+inline constexpr std::uint32_t kFrameGenTrustTile = 8u;
+// kDepthScales texels per tile.
+inline constexpr std::uint32_t kFrameGenDepthScaleTexels = 3u;
+// kTrustResolve's options.x: this frame's stereo scale vote is in its t2.
+inline constexpr std::uint32_t kFrameGenResolveScale = 1u;
+// kDepthScaleVote's options.x: the second stage (the votes neighbours agree with).
+inline constexpr std::uint32_t kFrameGenScaleAccept = 1u;
 inline constexpr std::uint32_t kFrameGenWorldIterations = 3u;
 // kTrustUpdate's options.x: this frame's stereo evidence is in the newest
 // trust texture, last frame's scores are valid, the previous frame is.
@@ -153,6 +182,7 @@ inline constexpr std::uint32_t kFrameGenTrustStereo = 1u;
 inline constexpr std::uint32_t kFrameGenTrustHistory = 2u;
 inline constexpr std::uint32_t kFrameGenTrustMotion = 4u;
 inline constexpr std::uint32_t kFrameGenThreadGroupSize = 8u;
+static_assert(kFrameGenTrustTile == kFrameGenThreadGroupSize, "kTrustUpdate counts a tile per thread group");
 inline constexpr std::uint8_t kFrameGenPyramidLevels = 5;
 inline constexpr std::uint32_t kFrameGenSearchRadius = 6;
 // Generated frames per real frame at most (a 4x multiplier).
@@ -190,6 +220,12 @@ struct FrameGenExtent {
     std::uint32_t width{0};
     std::uint32_t height{0};
 };
+
+// The trust vote's tiles over a half-resolution extent.
+inline FrameGenExtent FrameGenTrustTiles(FrameGenExtent half) {
+    return {(half.width + kFrameGenTrustTile - 1) / kFrameGenTrustTile,
+            (half.height + kFrameGenTrustTile - 1) / kFrameGenTrustTile};
+}
 
 // Pose data for one projection view: unit quaternion (x, y, z, w), position
 // in meters and the four FOV angles in radians, as submitted in
@@ -394,6 +430,11 @@ FrameGenDispatch BuildFrameGenDepthCheckDispatch(const FrameGenViewGeometry& vie
 // infinitely far) into the view's newest trust texture, from which
 // kTrustUpdate scores the texel.
 FrameGenDispatch BuildFrameGenDepthTrustDispatch(FrameGenExtent view_extent, const FrameGenViewGeometry& own,
+                                                 const FrameGenViewGeometry& other);
+// The kDepthScale dispatch for the same view pair, recorded right after
+// kDepthTrust: per trust tile, the other eye's error at each probed scale
+// of the depth (see FG_PASS_DEPTH_SCALE).
+FrameGenDispatch BuildFrameGenDepthScaleDispatch(FrameGenExtent view_extent, const FrameGenViewGeometry& own,
                                                  const FrameGenViewGeometry& other);
 
 enum class FrameGenDepthReading : std::uint8_t {

@@ -1369,6 +1369,49 @@ void TestFrameGenPlan() {
     Expect(synth.constants.options[2] == static_cast<std::uint32_t>(depthxr::FrameGenDiagnosticView::kFlow),
            "Diagnostic view should reach the synthesis pass");
 
+    // Depth: the trust scores, their surface vote, the stereo depth-scale
+    // vote (with this frame's stereo evidence) in two stages, then the resolve.
+    request.depth = true;
+    for (const bool stereo : {true, false}) {
+        request.trust_stereo = stereo;
+        const auto depth_plan = depthxr::BuildFrameGenViewPlan(request, tuning);
+        std::vector<FrameGenPass> passes;
+        for (const auto& dispatch : depth_plan.dispatches) {
+            passes.push_back(dispatch.pass);
+            if (dispatch.pass == FrameGenPass::kTrustResolve) break;
+        }
+        const std::vector<FrameGenPass> expected =
+            stereo ? std::vector<FrameGenPass>{FrameGenPass::kTrustUpdate, FrameGenPass::kTrustVote,
+                                               FrameGenPass::kDepthScaleVote, FrameGenPass::kDepthScaleVote,
+                                               FrameGenPass::kTrustResolve}
+                   : std::vector<FrameGenPass>{FrameGenPass::kTrustUpdate, FrameGenPass::kTrustVote,
+                                               FrameGenPass::kTrustResolve};
+        Expect(passes == expected, "Depth trust passes should vote per surface before the resolve");
+        const auto& trust = depth_plan.dispatches[0];
+        const auto half = depthxr::FrameGenPyramid(request.extent)[1];
+        Expect(trust.width == half.width && trust.outputs[1].kind == FrameGenTextureKind::kTrustTiles &&
+                   depth_plan.dispatches[1].inputs[0].kind == FrameGenTextureKind::kTrustTiles &&
+                   depth_plan.dispatches[1].width == (half.width + depthxr::kFrameGenTrustTile - 1) / depthxr::kFrameGenTrustTile,
+               "The trust update should count its tiles for the vote, which runs per tile");
+        const auto& resolve = depth_plan.dispatches[passes.size() - 1];
+        Expect(resolve.inputs[1].kind == FrameGenTextureKind::kTrustVotes &&
+                   resolve.inputs[2].kind == (stereo ? FrameGenTextureKind::kDepthScaleVotes : FrameGenTextureKind::kNone) &&
+                   resolve.constants.options[0] == (stereo ? depthxr::kFrameGenResolveScale : 0u),
+               "The resolve should read the trust vote, and the stereo scale vote only with this frame's stereo evidence");
+        if (stereo) {
+            Expect(depth_plan.dispatches[2].outputs[0].kind == FrameGenTextureKind::kDepthScaleRaw &&
+                       depth_plan.dispatches[3].inputs[0].kind == FrameGenTextureKind::kDepthScaleRaw &&
+                       depth_plan.dispatches[3].constants.options[0] == depthxr::kFrameGenScaleAccept,
+                   "The scale vote's second stage should accept the first stage's votes");
+        }
+    }
+    const auto scale = depthxr::BuildFrameGenDepthScaleDispatch(request.extent, request.newest, request.previous);
+    Expect(scale.pass == FrameGenPass::kDepthScale && scale.outputs[0].kind == FrameGenTextureKind::kDepthScales &&
+               scale.constants.size[2] == depthxr::FrameGenPyramid(request.extent)[1].width,
+           "The stereo scale probe should run per trust tile over the half-resolution depth");
+    request.depth = false;
+    request.trust_stereo = false;
+
     // Fractions follow display times and clamp.
     using depthxr::FrameGenFraction;
     using depthxr::FrameGenSynthesisMode;

@@ -822,14 +822,17 @@ int RunScenarios(Harness& harness) {
             auto capture = [&](std::uint32_t index) {
                 const XrRect2Di rect{{0, 0}, {static_cast<int>(kSize), static_cast<int>(kSize)}};
                 const auto requests = views(index);
+                // Each call before its message: arguments are evaluated in no
+                // set order, and the message must read the call's error.
                 for (std::size_t i = 0; i < 2; ++i) {
-                    Check(backend->Capture(i, requests[i].source, requests[i].request, tuning.quality, error),
-                          harness.name + " capture: " + error);
+                    const bool captured = backend->Capture(i, requests[i].source, requests[i].request, tuning.quality, error);
+                    Check(captured, harness.name + " capture: " + error);
                 }
                 if (index == 1) {
-                    Check(backend->CaptureDepth(0, {kDepthImage, 0, 0, rect, 0}, encoding, requests[0].request, error) &&
-                              backend->CaptureDepth(1, {right_depth, 0, 0, rect, 0}, encoding, requests[1].request, error),
-                          harness.name + " depth capture: " + error);
+                    const bool depth_captured =
+                        backend->CaptureDepth(0, {kDepthImage, 0, 0, rect, 0}, encoding, requests[0].request, error) &&
+                        backend->CaptureDepth(1, {right_depth, 0, 0, rect, 0}, encoding, requests[1].request, error);
+                    Check(depth_captured, harness.name + " depth capture: " + error);
                 }
             };
             // Prime, then frames until the eyes have been checked a few times
@@ -1163,7 +1166,8 @@ int RunProfile(Harness& harness) {
     const char* names[] = {"luma",        "downsample",  "search",      "refine",      "filter",
                            "synthesize",  "synthesize16", "depth",      "depth check", "depth trust",
                            "flow pack",   "flow unpack", "trust update", "shift clear", "shift splat",
-                           "shift resolve", "shift fill", "raw pack",   "trust resolve", "shading rate", "world reduce", "world solve", "source copy", "output copy",
+                           "shift resolve", "shift fill", "raw pack",   "trust resolve", "shading rate", "world reduce", "world solve", "trust vote", "depth scale", "scale vote",
+                           "source copy", "output copy",
                            "hardware wait"};
     static_assert(std::size(names) == kFrameGenPassCount + 3, "a name per profiled category");
     for (const int config : {0, 1, 2}) {
@@ -1714,6 +1718,8 @@ int RunReplay(Harness& harness) {
                     {"keys", {FrameGenTextureKind::kShiftKeys, 0}},
                     {"filtered", {FrameGenTextureKind::kFilteredNewest, 0}},
                     {"world", {FrameGenTextureKind::kWorldParams, 0}},
+                    {"scalevotes", {FrameGenTextureKind::kDepthScaleVotes, 0}},
+                    {"scales", {FrameGenTextureKind::kDepthScales, 0}},
                 };
                 for (const auto& [name, texture] : maps) {
                     std::vector<float> values;

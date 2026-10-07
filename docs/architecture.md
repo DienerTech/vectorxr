@@ -203,7 +203,21 @@ Each frame, before any view uses it, every depth texel gets a trust score in [-1
 
 Texels scored below -0.25 are negated and compensated for rotation only; all others are used and
 move with the eye. Using only texels scored above +0.25 tore cockpit labels apart in MSFS: the
-plain texels between letters, which neither view can score, stayed behind while the letters moved. Runtimes that only rotate submitted frames (Pimax among them) never correct head
+plain texels between letters, which neither view can score, stayed behind while the letters moved.
+Decisions follow the surface around a texel as well: the scores are counted per 8x8 tile and
+summed over the tiles around each, and a texel no view can score is dropped too where the scored
+texels of its surface around it are mostly disproved and cover a quarter of the area. MSFS 2024
+writes an invisible box at the glareshield's depth over the scenery above the panel, and the plain
+scenery in it kept that depth in islands, moving with the eye while the rest did not.
+
+The same box covers the EFB tablet and the top of the displays in front of it, which a near
+reading lines up with well enough to be confirmed. A stereo probe per tile therefore also measures
+how well the other eye lines up at scales of the depth from 0.7 to 1.4; per surface (the tiles
+around at a similar depth), a clearly better scale is taken (refined between the probes), kept
+where most neighbouring tiles agree, and blended across tiles so a correction that stops
+stretches a flat surface rather than tearing it.
+
+Runtimes that only rotate submitted frames (Pimax among them) never correct head
 translation, so a generated frame shown 11-33 ms after its real frame would show near cockpit
 content from where the eye was, and that content would jump at the real frame rate. Each eye
 keeps moving as it moved between the previous real frame and the newest one, in the eye's own

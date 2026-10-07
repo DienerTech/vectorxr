@@ -117,6 +117,11 @@ struct ViewResources {
     int bound_previous{-1};
     Texture shift_keys;
     Texture shift_map; // rebuilt for each generated frame
+    Texture trust_tiles; // the trust vote's counts per tile, then summed around each
+    Texture trust_votes;
+    Texture depth_scales; // the stereo depth-scale probe per tile, then the vote on it (raw, accepted)
+    Texture depth_scale_raw;
+    Texture depth_scale_votes;
     // World motion (FrameGenViewRequest::world_motion): the fit's per-group
     // sums and its result.
     Texture world_partials;
@@ -425,6 +430,10 @@ class D3D12FrameGen final : public FrameGenGpu {
         if (const char* vrs = std::getenv("VECTORXR_FRAMEGEN_VRS")) {
             coarse_tangent_ = std::atof(vrs);
         }
+        // A software rasterizer (WARP, the tests' device) runs a dispatch on
+        // a few CPU threads: its fence waits get far longer than a GPU's
+        // watchdog-short ones.
+        wait_scale_ = software ? 20 : 1;
         // World motion for world content (VECTORXR_FRAMEGEN_WORLD=0: measured
         // flow as before).
         if (const char* world = std::getenv("VECTORXR_FRAMEGEN_WORLD")) {
@@ -894,6 +903,29 @@ class D3D12FrameGen final : public FrameGenGpu {
         commands_->SetComputeRootDescriptorTable(2, Gpu(base + kFirstUav));
         commands_->Dispatch((dispatch.width + kFrameGenThreadGroupSize - 1) / kFrameGenThreadGroupSize,
                             (dispatch.height + kFrameGenThreadGroupSize - 1) / kFrameGenThreadGroupSize, 1);
+
+        // The stereo depth-scale probe, from the same images (FG_PASS_DEPTH_SCALE).
+        if (descriptor_cursor_ + kDescriptorsPerDispatch > descriptor_end_) {
+            error = "D3D12 Frame Generation descriptor budget exhausted";
+            return false;
+        }
+        const UINT scale_base = descriptor_cursor_;
+        descriptor_cursor_ += kDescriptorsPerDispatch;
+        for (UINT i = 0; i < kShaderResources; ++i) {
+            ShaderResource(inputs[i], scale_base, i);
+        }
+        UnorderedAccess(&view.depth_scales, scale_base + kFirstUav);
+        UnorderedAccess(nullptr, scale_base + kFirstUav + 1);
+        Require(barriers, view.depth_scales, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        Flush(barriers);
+        const FrameGenDispatch scale = BuildFrameGenDepthScaleDispatch(submission.request.extent, submission.request.newest,
+                                                                       other_submission.request.newest);
+        commands_->SetPipelineState(pipelines_[static_cast<std::size_t>(FrameGenPass::kDepthScale)].Get());
+        commands_->SetComputeRoot32BitConstants(0, sizeof(FrameGenConstants) / 4, &scale.constants, 0);
+        commands_->SetComputeRootDescriptorTable(1, Gpu(scale_base));
+        commands_->SetComputeRootDescriptorTable(2, Gpu(scale_base + kFirstUav));
+        commands_->Dispatch((scale.width + kFrameGenThreadGroupSize - 1) / kFrameGenThreadGroupSize,
+                            (scale.height + kFrameGenThreadGroupSize - 1) / kFrameGenThreadGroupSize, 1);
         view.trust_stereo = true;
         return true;
     }
@@ -909,7 +941,18 @@ class D3D12FrameGen final : public FrameGenGpu {
         for (std::uint8_t slot = 0; slot < view.history_state.Ring(); ++slot) {
             if (!Create(view.trust[slot], half, DXGI_FORMAT_R16_FLOAT, DXGI_FORMAT_R16_FLOAT, true, error)) return false;
         }
-        return Create(view.shift_keys, half, DXGI_FORMAT_R32_UINT, DXGI_FORMAT_R32_UINT, true, error) &&
+        const FrameGenExtent tiles = FrameGenTrustTiles(half);
+        return Create(view.depth_scales, {tiles.width * kFrameGenDepthScaleTexels, tiles.height},
+                      DXGI_FORMAT_R32G32B32A32_FLOAT, DXGI_FORMAT_R32G32B32A32_FLOAT, true, error) &&
+               Create(view.depth_scale_raw, tiles, DXGI_FORMAT_R32G32B32A32_FLOAT, DXGI_FORMAT_R32G32B32A32_FLOAT,
+                      true, error) &&
+               Create(view.depth_scale_votes, tiles, DXGI_FORMAT_R32G32B32A32_FLOAT, DXGI_FORMAT_R32G32B32A32_FLOAT,
+                      true, error) &&
+               Create(view.trust_tiles, tiles, DXGI_FORMAT_R32G32B32A32_FLOAT, DXGI_FORMAT_R32G32B32A32_FLOAT, true,
+                      error) &&
+               Create(view.trust_votes, tiles, DXGI_FORMAT_R32G32B32A32_FLOAT, DXGI_FORMAT_R32G32B32A32_FLOAT, true,
+                      error) &&
+               Create(view.shift_keys, half, DXGI_FORMAT_R32_UINT, DXGI_FORMAT_R32_UINT, true, error) &&
                Create(view.shift_map, half, DXGI_FORMAT_R32_UINT, DXGI_FORMAT_R32_UINT, true, error);
     }
 
@@ -1323,6 +1366,7 @@ class D3D12FrameGen final : public FrameGenGpu {
     // reach it.
     static constexpr double kCoarseShadingTangent = 1.0;
     double coarse_tangent_{kCoarseShadingTangent};
+    DWORD wait_scale_{1}; // fence waits on a software rasterizer are this many times longer
 
     // Records the view's shading-rate image for the synthesis draw from this
     // frame's depth (`depth`, null when not in use: the angle alone decides).
@@ -1991,6 +2035,11 @@ class D3D12FrameGen final : public FrameGenGpu {
             view.output.resource.Detach();
             view.shift_keys.resource.Detach();
             view.shift_map.resource.Detach();
+            view.trust_tiles.resource.Detach();
+            view.trust_votes.resource.Detach();
+            view.depth_scales.resource.Detach();
+            view.depth_scale_raw.resource.Detach();
+            view.depth_scale_votes.resource.Detach();
         }
         root_signature_.Detach();
         for (auto& pipeline : pipelines_) pipeline.Detach();
@@ -2042,7 +2091,9 @@ class D3D12FrameGen final : public FrameGenGpu {
             for (const Texture& texture : view.raw) add(texture);
             for (const Texture* texture : {&view.output, &view.shift_keys, &view.shift_map, &view.hardware_newest,
                                            &view.hardware_previous, &view.hardware_flow, &view.raw_flow,
-                                           &view.world_partials, &view.world_params, &view.shading_rate}) {
+                                           &view.world_partials, &view.world_params, &view.shading_rate,
+                                           &view.trust_tiles, &view.trust_votes, &view.depth_scales,
+                                           &view.depth_scale_raw, &view.depth_scale_votes}) {
                 add(*texture);
             }
         }
@@ -2177,7 +2228,7 @@ class D3D12FrameGen final : public FrameGenGpu {
         if (signal_failed_ || !event_ || FAILED(fence->SetEventOnCompletion(value, event_))) {
             return false;
         }
-        const ULONGLONG deadline = GetTickCount64() + timeout_ms;
+        const ULONGLONG deadline = GetTickCount64() + static_cast<ULONGLONG>(timeout_ms) * wait_scale_;
         while (fence->GetCompletedValue() < value) {
             const ULONGLONG now = GetTickCount64();
             if (now >= deadline) {
@@ -2399,6 +2450,11 @@ class D3D12FrameGen final : public FrameGenGpu {
             view.trust = {};  // likewise (see EnsureTrust)
             view.shift_keys = {};
             view.shift_map = {};
+            view.trust_tiles = {};
+            view.trust_votes = {};
+            view.depth_scales = {};
+            view.depth_scale_raw = {};
+            view.depth_scale_votes = {};
             view.trust_stereo = false;
             view.depth = {};
             for (std::uint8_t slot = 0; slot < ring; ++slot) {
@@ -2800,6 +2856,11 @@ class D3D12FrameGen final : public FrameGenGpu {
         case FrameGenTextureKind::kShiftMap: return &view.shift_map;
         case FrameGenTextureKind::kWorldPartials: return &view.world_partials;
         case FrameGenTextureKind::kWorldParams: return &view.world_params;
+        case FrameGenTextureKind::kTrustTiles: return &view.trust_tiles;
+        case FrameGenTextureKind::kTrustVotes: return &view.trust_votes;
+        case FrameGenTextureKind::kDepthScales: return &view.depth_scales;
+        case FrameGenTextureKind::kDepthScaleVotes: return &view.depth_scale_votes;
+        case FrameGenTextureKind::kDepthScaleRaw: return &view.depth_scale_raw;
         default: return nullptr;
         }
     }

@@ -89,6 +89,19 @@ cbuffer FrameGenConstantBuffer : register(b0) {
 // between their letters are scored by neither view, stayed behind while
 // the letters moved, and broke up the motion matched across them.
 #define FG_TRUST_THRESHOLD 0.25
+// Trust scores are counted per tile of this many half-resolution texels a
+// side, a thread group of FG_PASS_TRUST_UPDATE each, for the surface vote
+// (FG_PASS_TRUST_VOTE).
+#define FG_TRUST_TILE 8
+// Tiles either way a tile's vote counts.
+#define FG_VOTE_RADIUS 2
+// Scales of a texel's depth the stereo probe tries (FG_PASS_DEPTH_SCALE),
+// FG_SCALE_AS_READ its depth as read.
+#define FG_SCALE_PROBES 7
+#define FG_SCALE_AS_READ 3
+static const float kDepthScaleProbes[FG_SCALE_PROBES] = {0.7, 0.8, 0.9, 1.0, 1.12, 1.25, 1.4};
+// options.x of FG_PASS_TRUST_RESOLVE: the stereo scale vote is in t2.
+#define FG_RESOLVE_SCALE 1u
 
 #define FG_VIEW_FLOW 1u
 #define FG_VIEW_CONFIDENCE 2u
@@ -1272,7 +1285,8 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
 }
 #endif
 
-#if defined(FG_PASS_DEPTH_CHECK) || defined(FG_PASS_DEPTH_TRUST) || defined(FG_PASS_TRUST_UPDATE)
+#if defined(FG_PASS_DEPTH_CHECK) || defined(FG_PASS_DEPTH_TRUST) || defined(FG_PASS_TRUST_UPDATE) || \
+    defined(FG_PASS_DEPTH_SCALE)
 // Depth within this share of a texel's own across the 3x3 texels its
 // evidence patch covers: the patch shows one surface.
 #define FG_FLAT_SHARE 0.03
@@ -1647,6 +1661,225 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
 }
 #endif
 
+#if defined(FG_PASS_DEPTH_SCALE)
+FG_BIND(0) Texture2D<float4> g_own : register(t0);
+FG_BIND(1) Texture2D<float4> g_other : register(t1);
+FG_BIND(2) Texture2D<float4> g_depth : register(t2);
+FG_BIND(6) SamplerState g_linear : register(s0);
+FG_BIND(4) FG_FORMAT("rgba32f") RWTexture2D<float4> g_scales : register(u0);
+
+// Depth nearer than this is probed: further out, a scale barely moves a
+// sample between the eyes.
+#define FG_SCALE_NEAR 10.0
+// A patch needs this much luma range to tell scales apart.
+#define FG_SCALE_CONTRAST 0.04
+
+// Per FG_TRUST_TILE x FG_TRUST_TILE texels of one view's depth: how well the
+// other eye lines up with textured samples on one surface at each probed
+// scale of their depth (kDepthScaleProbes). The game's depth is not always
+// the depth of what shows: MSFS 2024 writes a box at the glareshield's depth
+// over the EFB tablet in front of it (and over the scenery behind), and
+// content moved with the eye by the box's depth landed pixels out of place.
+// Writes three texels per tile: the error sums for probes 0-3, then 4-6 and
+// the samples, then the samples' summed inverse depth.
+// fov_current/previous and the rotation rows describe this view -> the
+// other (as FG_PASS_DEPTH_TRUST); size.xy: the tiles.
+[numthreads(8, 8, 1)]
+void CSMain(uint3 id : SV_DispatchThreadID) {
+    if (any(id.xy >= g.size.xy)) {
+        return;
+    }
+    uint width, height;
+    g_depth.GetDimensions(width, height);
+    const float2 size = float2(width, height);
+    const float2 spacing = 1.0 / size;
+    float errors[FG_SCALE_PROBES] = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+    float samples = 0.0;
+    float inverse = 0.0;
+    [loop]
+    for (uint s = 0; s < 8; ++s) {
+        // Every other texel of every other row, every other row's half
+        // offset by one: a checkerboard of eight.
+        const uint2 cell = uint2(s % 4u, s / 4u);
+        const int2 texel = int2(id.xy) * FG_TRUST_TILE + int2(cell.x * 2u + (cell.y & 1u), cell.y * 4u + 1u);
+        if (texel.x >= int(width) || texel.y >= int(height)) {
+            continue;
+        }
+        const float depth = g_depth.Load(int3(texel, 0)).r;
+        if (!(depth > 0.0) || depth >= FG_SCALE_NEAR) {
+            continue;
+        }
+        const float2 uv = (float2(texel) + 0.5) / size;
+        float reference[FG_CHECK_TAPS];
+        LoadPatch(g_own, g_linear, uv, spacing, reference);
+        float low = reference[0];
+        float high = reference[0];
+        [unroll]
+        for (int t = 1; t < FG_CHECK_TAPS; ++t) {
+            low = min(low, reference[t]);
+            high = max(high, reference[t]);
+        }
+        float2 near_uv, far_uv;
+        if (high - low < FG_SCALE_CONTRAST || !FlatDepth(g_depth, texel, depth) || !MapToPrevious(uv, depth, near_uv) ||
+            !MapToPrevious(uv, FG_FAR_DEPTH, far_uv)) {
+            continue;
+        }
+        const float2 apart = (near_uv - far_uv) * size;
+        if (dot(apart, apart) < 1.0) {
+            continue;
+        }
+        const float2 step = normalize(apart) * spacing;
+        [unroll]
+        for (int j = 0; j < FG_SCALE_PROBES; ++j) {
+            float2 mapped;
+            errors[j] += MapToPrevious(uv, depth * kDepthScaleProbes[j], mapped)
+                             ? LineError(g_other, g_linear, mapped, step, spacing, reference)
+                             : FG_CHECK_OUTSIDE;
+        }
+        samples += 1.0;
+        inverse += 1.0 / depth;
+    }
+    const int2 base = int2(id.x * 3, id.y);
+    g_scales[base] = float4(errors[0], errors[1], errors[2], errors[3]);
+    g_scales[base + int2(1, 0)] = float4(errors[4], errors[5], errors[6], samples);
+    g_scales[base + int2(2, 0)] = float4(inverse, 0.0, 0.0, 0.0);
+}
+#endif
+
+#if defined(FG_PASS_DEPTH_SCALE_VOTE)
+FG_BIND(0) Texture2D<float4> g_scales : register(t0);
+FG_BIND(4) FG_FORMAT("rgba32f") RWTexture2D<float4> g_votes : register(u0);
+
+// options.x: the second stage, accepting the first stage's votes (t0).
+#define FG_SCALE_ACCEPT 1u
+// A tile's scale stands where at least this many of the eight tiles around
+// agree (a scale within FG_SCALE_AGREE of it in log, on the same surface):
+// a lone tile's pick on a seat's edge is noise.
+#define FG_SCALE_NEIGHBOURS 4
+#define FG_SCALE_AGREE 0.08
+
+// Tiles either way the vote sums, those on the surface: sampled inverse
+// depth within this share of the tile's.
+#define FG_SCALE_RADIUS 5
+#define FG_SCALE_SURFACE 0.1
+// A scale other than the depth as read wins with this many samples, at
+// most this share of the as-read error, and this much less per sample.
+#define FG_SCALE_SAMPLES 12.0
+#define FG_SCALE_GAIN 0.6
+#define FG_SCALE_MARGIN 0.01
+
+// Second stage: a tile's vote where enough of its neighbours agree, else 1.
+float4 Accept(int2 centre) {
+    const float4 vote = g_scales.Load(int3(centre, 0));
+    if (vote.x == 1.0 || !(vote.x > 0.0)) {
+        return float4(1.0, vote.yzw);
+    }
+    int agree = 0;
+    [unroll]
+    for (int i = 0; i < 9; ++i) {
+        const int2 other = centre + int2(i % 3 - 1, i / 3 - 1);
+        if (i == 4 || any(other < 0) || any(other >= int2(g.size.xy))) {
+            continue;
+        }
+        const float4 near = g_scales.Load(int3(other, 0));
+        agree += near.x > 0.0 && abs(log(near.x / vote.x)) <= FG_SCALE_AGREE &&
+                         abs(near.y - vote.y) <= FG_SCALE_SURFACE * vote.y
+                     ? 1
+                     : 0;
+    }
+    return agree >= FG_SCALE_NEIGHBOURS ? vote : float4(1.0, vote.yzw);
+}
+
+// Per tile, the stereo probe (FG_PASS_DEPTH_SCALE) of the tiles around it
+// on its surface summed: (the scale its depth lines up best at, 1 when the
+// depth as read does or nothing tells; the surface's inverse depth; the
+// samples). A tile without samples of its own takes its neighbours'
+// surface. Then (FG_SCALE_ACCEPT) the votes enough neighbours agree with.
+// size.xy: the tiles.
+[numthreads(8, 8, 1)]
+void CSMain(uint3 id : SV_DispatchThreadID) {
+    if (any(id.xy >= g.size.xy)) {
+        return;
+    }
+    const int2 centre = int2(id.xy);
+    if ((g.options.x & FG_SCALE_ACCEPT) != 0u) {
+        g_votes[id.xy] = Accept(centre);
+        return;
+    }
+    float reference = 0.0;
+    {
+        const float own = g_scales.Load(int3(centre.x * 3 + 1, centre.y, 0)).w;
+        float samples = own;
+        float inverse = own > 0.0 ? g_scales.Load(int3(centre.x * 3 + 2, centre.y, 0)).x : 0.0;
+        if (own <= 0.0) {
+            [loop]
+            for (int y = -FG_SCALE_RADIUS; y <= FG_SCALE_RADIUS; ++y) {
+                [loop]
+                for (int x = -FG_SCALE_RADIUS; x <= FG_SCALE_RADIUS; ++x) {
+                    const int2 tile = centre + int2(x, y);
+                    if (any(tile < 0) || any(tile >= int2(g.size.xy))) {
+                        continue;
+                    }
+                    samples += g_scales.Load(int3(tile.x * 3 + 1, tile.y, 0)).w;
+                    inverse += g_scales.Load(int3(tile.x * 3 + 2, tile.y, 0)).x;
+                }
+            }
+        }
+        reference = samples > 0.0 ? inverse / samples : 0.0;
+    }
+    float errors[FG_SCALE_PROBES] = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+    float samples = 0.0;
+    [loop]
+    for (int y = -FG_SCALE_RADIUS; y <= FG_SCALE_RADIUS; ++y) {
+        [loop]
+        for (int x = -FG_SCALE_RADIUS; x <= FG_SCALE_RADIUS; ++x) {
+            const int2 tile = centre + int2(x, y);
+            if (reference <= 0.0 || any(tile < 0) || any(tile >= int2(g.size.xy))) {
+                continue;
+            }
+            const float4 low = g_scales.Load(int3(tile.x * 3, tile.y, 0));
+            const float4 high = g_scales.Load(int3(tile.x * 3 + 1, tile.y, 0));
+            const float inverse = g_scales.Load(int3(tile.x * 3 + 2, tile.y, 0)).x;
+            if (high.w <= 0.0 || abs(inverse / high.w - reference) > FG_SCALE_SURFACE * reference) {
+                continue;
+            }
+            errors[0] += low.x;
+            errors[1] += low.y;
+            errors[2] += low.z;
+            errors[3] += low.w;
+            errors[4] += high.x;
+            errors[5] += high.y;
+            errors[6] += high.z;
+            samples += high.w;
+        }
+    }
+    int best = FG_SCALE_AS_READ;
+    [unroll]
+    for (int j = 0; j < FG_SCALE_PROBES; ++j) {
+        best = errors[j] < errors[best] ? j : best;
+    }
+    const float as_read = errors[FG_SCALE_AS_READ];
+    const bool better = samples >= FG_SCALE_SAMPLES && errors[best] <= FG_SCALE_GAIN * as_read &&
+                        as_read - errors[best] >= FG_SCALE_MARGIN * samples;
+    float scale = 1.0;
+    if (better) {
+        // Between the probes either side (a parabola through the three
+        // errors, in log scale): a surface 0.76 times its depth is not
+        // picked as 0.7 here and 0.8 next door.
+        float position = 0.0;
+        if (best > 0 && best < FG_SCALE_PROBES - 1) {
+            const float below = errors[best - 1];
+            const float above = errors[best + 1];
+            const float curve = below - 2.0 * errors[best] + above;
+            position = curve > 0.0 ? clamp(0.5 * (below - above) / curve, -0.5, 0.5) : 0.0;
+        }
+        const int towards = position < 0.0 ? max(best - 1, 0) : min(best + 1, FG_SCALE_PROBES - 1);
+        scale = exp(lerp(log(kDepthScaleProbes[best]), log(kDepthScaleProbes[towards]), abs(position)));
+    }
+    g_votes[id.xy] = float4(scale, reference, samples, 0.0);
+}
+#endif
+
 #if defined(FG_PASS_TRUST_UPDATE)
 FG_BIND(0) Texture2D<float4> g_newest : register(t0);
 FG_BIND(1) Texture2D<float4> g_previous : register(t1);
@@ -1654,6 +1887,9 @@ FG_BIND(2) Texture2D<float4> g_trust_before : register(t2);
 FG_BIND(3) Texture2D<float4> g_depth : register(t3);
 FG_BIND(6) SamplerState g_linear : register(s0);
 FG_BIND(4) FG_FORMAT("r32f") RWTexture2D<float> g_trust : register(u0);
+FG_BIND(5) FG_FORMAT("rgba32f") RWTexture2D<float4> g_tiles : register(u1);
+
+groupshared float4 g_tile_sums[FG_TRUST_TILE * FG_TRUST_TILE];
 
 #define FG_TRUST_STEREO 1u  // g_trust holds this frame's stereo evidence (FG_PASS_DEPTH_TRUST)
 #define FG_TRUST_HISTORY 2u // g_trust_before is last frame's score
@@ -1674,15 +1910,16 @@ FG_BIND(4) FG_FORMAT("r32f") RWTexture2D<float> g_trust : register(u0);
 //     glass stay where they are in the cockpit, so the depth maps a texel
 //     to where it was.
 // FG_PASS_TRUST_RESOLVE then drops the depth regions score below -threshold.
+// Each thread group also counts its tile (u1) for the surface vote
+// (FG_PASS_TRUST_VOTE): texels disproved (below -threshold) and confirmed
+// (above +threshold), and the mean inverse depth of each kind.
 // options.x: FG_TRUST_* flags; the mapping describes newest -> previous.
-[numthreads(8, 8, 1)]
-void CSMain(uint3 id : SV_DispatchThreadID) {
-    if (any(id.xy >= g.size.xy)) {
-        return;
-    }
-    const float depth = g_depth.Load(int3(id.xy, 0)).r;
+[numthreads(FG_TRUST_TILE, FG_TRUST_TILE, 1)]
+void CSMain(uint3 id : SV_DispatchThreadID, uint3 group : SV_GroupID, uint index : SV_GroupIndex) {
+    const bool inside = all(id.xy < g.size.xy);
+    const float depth = inside ? g_depth.Load(int3(id.xy, 0)).r : 0.0;
     float score = 0.0;
-    if (depth > 0.0 && depth < FG_FAR_DEPTH) {
+    if (inside && depth > 0.0 && depth < FG_FAR_DEPTH) {
         const float2 size = float2(g.size.xy);
         const float2 uv = (float2(id.xy) + 0.5) / size;
         const float stereo = (g.options.x & FG_TRUST_STEREO) != 0u ? g_trust[id.xy] : 0.0;
@@ -1698,12 +1935,66 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
         score = clamp(FG_TRUST_KEEP * carried + FG_TRUST_STEREO_WEIGHT * stereo + FG_TRUST_MOTION_WEIGHT * motion,
                       -1.0, 1.0);
     }
-    g_trust[id.xy] = score;
+    if (inside) {
+        g_trust[id.xy] = score;
+    }
+    float4 sums = float4(0.0, 0.0, 0.0, 0.0);
+    if (inside && depth > 0.0 && depth < FG_FAR_DEPTH) {
+        sums = score < -FG_TRUST_THRESHOLD ? float4(1.0, 0.0, 1.0 / depth, 0.0)
+               : score > FG_TRUST_THRESHOLD ? float4(0.0, 1.0, 0.0, 1.0 / depth)
+                                            : sums;
+    }
+    g_tile_sums[index] = sums;
+    GroupMemoryBarrierWithGroupSync();
+    [unroll]
+    for (uint stride = FG_TRUST_TILE * FG_TRUST_TILE / 2; stride > 0; stride /= 2) {
+        if (index < stride) {
+            g_tile_sums[index] += g_tile_sums[index + stride];
+        }
+        GroupMemoryBarrierWithGroupSync();
+    }
+    if (index == 0) {
+        const float4 total = g_tile_sums[0];
+        g_tiles[group.xy] =
+            float4(total.xy, total.x > 0.0 ? total.z / total.x : 0.0, total.y > 0.0 ? total.w / total.y : 0.0);
+    }
+}
+#endif
+
+#if defined(FG_PASS_TRUST_VOTE)
+FG_BIND(0) Texture2D<float4> g_tiles : register(t0);
+FG_BIND(4) FG_FORMAT("rgba32f") RWTexture2D<float4> g_votes : register(u0);
+
+// Per tile, the tile counts (FG_PASS_TRUST_UPDATE) around it summed: texels
+// disproved and confirmed, and the mean inverse depth of each kind, for
+// FG_PASS_TRUST_RESOLVE to judge texels without evidence of their own by.
+// size.xy: the tiles.
+[numthreads(8, 8, 1)]
+void CSMain(uint3 id : SV_DispatchThreadID) {
+    if (any(id.xy >= g.size.xy)) {
+        return;
+    }
+    float4 sums = float4(0.0, 0.0, 0.0, 0.0);
+    [loop]
+    for (int y = -FG_VOTE_RADIUS; y <= FG_VOTE_RADIUS; ++y) {
+        [loop]
+        for (int x = -FG_VOTE_RADIUS; x <= FG_VOTE_RADIUS; ++x) {
+            const int2 tile = int2(id.xy) + int2(x, y);
+            if (any(tile < 0) || any(tile >= int2(g.size.xy))) {
+                continue;
+            }
+            const float4 counts = g_tiles.Load(int3(tile, 0));
+            sums += float4(counts.xy, counts.x * counts.z, counts.y * counts.w);
+        }
+    }
+    g_votes[id.xy] = float4(sums.xy, sums.x > 0.0 ? sums.z / sums.x : 0.0, sums.y > 0.0 ? sums.w / sums.y : 0.0);
 }
 #endif
 
 #if defined(FG_PASS_TRUST_RESOLVE)
 FG_BIND(0) Texture2D<float4> g_scores : register(t0);
+FG_BIND(1) Texture2D<float4> g_votes : register(t1);
+FG_BIND(2) Texture2D<float4> g_scale_votes : register(t2);
 FG_BIND(4) FG_FORMAT("r32f") RWTexture2D<float> g_depth : register(u0);
 
 // Neighbours within this share of a texel's depth are its surface.
@@ -1712,20 +2003,113 @@ FG_BIND(4) FG_FORMAT("r32f") RWTexture2D<float> g_depth : register(u0);
 // The share of the surface around a disproved texel (FG_RESOLVE_RADIUS
 // texels either way) that must be disproved too.
 #define FG_RESOLVE_SHARE 0.6
+// The surface vote (FG_PASS_TRUST_VOTE) around a texel: a kind counts at
+// inverse depth within this share of the texel's; the disproved decide
+// where they outnumber the confirmed and cover this share of the vote's
+// area (a surface of them, not a few specks: plain cockpit texels near a
+// handful kept their depth); the confirmed where they outnumber the
+// disproved this many times.
+#define FG_VOTE_DEPTH 0.15
+#define FG_VOTE_AREA 0.25
+#define FG_VOTE_CONFIRMED 8.0
+// The accepted stereo scale votes apply to texels within this share of
+// their surface's inverse depth.
+#define FG_RESOLVE_SCALE_SURFACE 0.1
 
-// Drops the depth of texels scored below -threshold (FG_PASS_TRUST_UPDATE)
-// where most of the surface around them is too (negated: head movement is
-// compensated for rotation only there, and they do not move with the eye).
-// Cockpit glass the game writes depth for is disproved over its whole
-// surface; a texel or a thin line of noise among confirmed ones is not
-// glass, and dropping it tore it out of the panel around it.
+// A texel keeps its depth: corrected where the accepted stereo scale votes
+// (FG_PASS_DEPTH_SCALE_VOTE, options.x FG_RESOLVE_SCALE) of its surface line
+// the eyes up better at another scale of its depth. The tiles around blend
+// in (in log, weighted 1-2-1 by distance; tiles that keep the depth as
+// read count as 1), so where a correction stops, a flat surface stretches
+// over a few tiles instead of tearing at a tile's edge.
+void Keep(uint2 texel, float depth) {
+    if ((g.options.x & FG_RESOLVE_SCALE) == 0u) {
+        return;
+    }
+    uint width, height;
+    g_scale_votes.GetDimensions(width, height);
+    // The four tiles whose centres surround the texel, and the ring
+    // around them: a tent over tile centres two tiles wide.
+    const float2 position = (float2(texel) + 0.5) / float(FG_TRUST_TILE) - 0.5;
+    const int2 corner = int2(floor(position));
+    const float2 within = position - float2(corner);
+    const float inverse = 1.0 / depth;
+    float sum = 0.0;
+    float weight = 0.0;
+    bool any_scaled = false;
+    [unroll]
+    for (int i = 0; i < 16; ++i) {
+        const int2 offset = int2(i % 4, i / 4) - 1;
+        const int2 tile = corner + offset;
+        if (any(tile < 0) || tile.x >= int(width) || tile.y >= int(height)) {
+            continue;
+        }
+        const float4 vote = g_scale_votes.Load(int3(tile, 0));
+        if (!(vote.x > 0.0) || abs(vote.y - inverse) > FG_RESOLVE_SCALE_SURFACE * inverse) {
+            continue;
+        }
+        const float2 distance = abs(float2(offset) - within);
+        const float w = max(0.0, 1.0 - 0.5 * distance.x) * max(0.0, 1.0 - 0.5 * distance.y);
+        sum += w * log(vote.x);
+        weight += w;
+        any_scaled = any_scaled || vote.x != 1.0;
+    }
+    if (any_scaled && weight > 0.0) {
+        g_depth[texel] = depth * exp(sum / weight);
+    }
+}
+
+// Drops the depth (negated: head movement is compensated for rotation only
+// there, and the content does not move with the eye) of
+//   - texels scored below -threshold (FG_PASS_TRUST_UPDATE) where most of
+//     the surface around them is too: cockpit glass the game writes depth
+//     for is disproved over its whole surface; a texel or a thin line of
+//     noise among confirmed ones is not glass, and dropping it tore it out
+//     of the panel around it. Nor are specks on a surface the vote confirms
+//     (left behind, they were pixels out of place on MSFS's displays);
+//   - texels without clear evidence of their own on a surface the vote
+//     around them disproves: plain scenery behind glass the game wrote
+//     depth for (an invisible box over MSFS's glareshield) tells near and
+//     far apart nowhere, kept its depth in islands among the disproved
+//     texels and moved with the eye while they did not, jittering. Texels
+//     between confirmed ones (the plain ones between a label's letters)
+//     keep theirs.
+// The rest keep theirs, corrected by the stereo scale vote (Keep).
 [numthreads(8, 8, 1)]
 void CSMain(uint3 id : SV_DispatchThreadID) {
     if (any(id.xy >= g.size.xy)) {
         return;
     }
     const float depth = g_depth[id.xy];
-    if (!(depth > 0.0) || depth >= FG_FAR_DEPTH || g_scores.Load(int3(id.xy, 0)).r >= -FG_TRUST_THRESHOLD) {
+    const float score = g_scores.Load(int3(id.xy, 0)).r;
+    if (!(depth > 0.0) || depth >= FG_FAR_DEPTH) {
+        return;
+    }
+    if (score > FG_TRUST_THRESHOLD) {
+        Keep(id.xy, depth);
+        return;
+    }
+    const float4 vote = g_votes.Load(int3(id.xy / uint(FG_TRUST_TILE), 0));
+    const float inverse = 1.0 / depth;
+    const float disproved_votes = abs(vote.z - inverse) <= FG_VOTE_DEPTH * inverse ? vote.x : 0.0;
+    const float confirmed_votes = abs(vote.w - inverse) <= FG_VOTE_DEPTH * inverse ? vote.y : 0.0;
+    const float side = float((2 * FG_VOTE_RADIUS + 1) * FG_TRUST_TILE);
+    const bool surface_disproved =
+        disproved_votes >= FG_VOTE_AREA * side * side && disproved_votes >= confirmed_votes;
+    if (score >= -FG_TRUST_THRESHOLD) {
+        if (surface_disproved) {
+            g_depth[id.xy] = -depth;
+        } else {
+            Keep(id.xy, depth);
+        }
+        return;
+    }
+    if (confirmed_votes >= FG_VOTE_CONFIRMED * max(disproved_votes, 1.0)) {
+        Keep(id.xy, depth);
+        return;
+    }
+    if (surface_disproved) {
+        g_depth[id.xy] = -depth;
         return;
     }
     const int2 limit = int2(g.size.xy) - 1;
@@ -1746,6 +2130,8 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
     }
     if (disproved >= FG_RESOLVE_SHARE * surface) {
         g_depth[id.xy] = -depth;
+    } else {
+        Keep(id.xy, depth);
     }
 }
 #endif

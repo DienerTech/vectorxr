@@ -263,12 +263,36 @@ FrameGenViewPlan BuildFrameGenViewPlan(const FrameGenViewRequest& request, const
         trust.inputs = {Texture(FrameGenTextureKind::kHistoryNewest), Texture(FrameGenTextureKind::kHistoryPrevious),
                         request.trust_history ? Texture(FrameGenTextureKind::kTrustPrevious) : FrameGenTexture{}, depth,
                         {}};
-        trust.outputs = {Texture(FrameGenTextureKind::kTrustNewest), {}};
+        // ...and counts them per tile (kFrameGenTrustTile).
+        trust.outputs = {Texture(FrameGenTextureKind::kTrustNewest), Texture(FrameGenTextureKind::kTrustTiles)};
         trust.constants.options[0] = kFrameGenTrustMotion | (request.trust_stereo ? kFrameGenTrustStereo : 0u) |
                                      (request.trust_history ? kFrameGenTrustHistory : 0u);
         plan.dispatches.push_back(trust);
+        // The scores per tile summed around each tile: texels without
+        // evidence of their own follow the surface around them.
+        const FrameGenExtent tiles = FrameGenTrustTiles(plan.levels[1]);
+        FrameGenDispatch vote = Dispatch(FrameGenPass::kTrustVote, tiles, tiles, base);
+        vote.inputs = {Texture(FrameGenTextureKind::kTrustTiles), {}, {}, {}, {}};
+        vote.outputs = {Texture(FrameGenTextureKind::kTrustVotes), {}};
+        plan.dispatches.push_back(vote);
+        if (request.trust_stereo) {
+            // The scale each surface's depth lines the eyes up best at (the
+            // stereo probe was recorded with this frame's kDepthTrust).
+            FrameGenDispatch scale = Dispatch(FrameGenPass::kDepthScaleVote, tiles, tiles, base);
+            scale.inputs = {Texture(FrameGenTextureKind::kDepthScales), {}, {}, {}, {}};
+            scale.outputs = {Texture(FrameGenTextureKind::kDepthScaleRaw), {}};
+            plan.dispatches.push_back(scale);
+            FrameGenDispatch accept = Dispatch(FrameGenPass::kDepthScaleVote, tiles, tiles, base);
+            accept.inputs = {Texture(FrameGenTextureKind::kDepthScaleRaw), {}, {}, {}, {}};
+            accept.outputs = {Texture(FrameGenTextureKind::kDepthScaleVotes), {}};
+            accept.constants.options[0] = kFrameGenScaleAccept;
+            plan.dispatches.push_back(accept);
+        }
         FrameGenDispatch resolve = Dispatch(FrameGenPass::kTrustResolve, plan.levels[1], plan.levels[1], base);
-        resolve.inputs = {Texture(FrameGenTextureKind::kTrustNewest), {}, {}, {}, {}};
+        resolve.inputs = {Texture(FrameGenTextureKind::kTrustNewest), Texture(FrameGenTextureKind::kTrustVotes),
+                          request.trust_stereo ? Texture(FrameGenTextureKind::kDepthScaleVotes) : FrameGenTexture{}, {},
+                          {}};
+        resolve.constants.options[0] = request.trust_stereo ? kFrameGenResolveScale : 0u;
         resolve.outputs = {Texture(FrameGenTextureKind::kDepth), {}};
         plan.dispatches.push_back(resolve);
     }
@@ -536,6 +560,19 @@ FrameGenDispatch BuildFrameGenDepthTrustDispatch(FrameGenExtent view_extent, con
     // The other view's newest goes in t1, the depth in t2.
     dispatch.inputs = {Texture(FrameGenTextureKind::kHistoryNewest), {}, Texture(FrameGenTextureKind::kDepth), {}, {}};
     dispatch.outputs = {Texture(FrameGenTextureKind::kTrustNewest), {}};
+    return dispatch;
+}
+
+FrameGenDispatch BuildFrameGenDepthScaleDispatch(FrameGenExtent view_extent, const FrameGenViewGeometry& own,
+                                                 const FrameGenViewGeometry& other) {
+    FrameGenDispatch dispatch = BuildFrameGenDepthTrustDispatch(view_extent, own, other);
+    const FrameGenExtent half = FrameGenPyramid(view_extent)[1];
+    const FrameGenExtent tiles = FrameGenTrustTiles(half);
+    dispatch.pass = FrameGenPass::kDepthScale;
+    dispatch.width = tiles.width;
+    dispatch.height = tiles.height;
+    dispatch.constants.size = {tiles.width, tiles.height, half.width, half.height};
+    dispatch.outputs = {Texture(FrameGenTextureKind::kDepthScales), {}};
     return dispatch;
 }
 
