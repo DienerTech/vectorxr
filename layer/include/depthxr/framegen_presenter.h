@@ -396,6 +396,7 @@ class FrameGenPresenter {
     void RecordReal(const XrCompositionLayerProjection& projection, XrTime display_time, std::uint64_t sequence);
     void InvalidateContinuityLocked();
     void NoteFailureLocked(const std::string& error);
+    void LogMemoryBudgetLocked();
     // `distinct`: the submission shows something the one before did not.
     void NoteSubmissionLocked(bool distinct);
 
@@ -520,6 +521,11 @@ class FrameGenPresenter {
     bool probing_{false};
     std::uint32_t probe_from_{0};
     std::size_t auto_late_percent_{0}; // for the log
+    // Auto never steps above this again in the session once video memory
+    // ran near its budget: each step up allocates more output images.
+    std::uint32_t auto_memory_ceiling_{4};
+    std::optional<FrameGenMemoryBudget> memory_budget_;
+    std::chrono::steady_clock::time_point memory_checked_at_{};
 
     std::uint64_t generated_{0};
     std::uint64_t repeated_{0};

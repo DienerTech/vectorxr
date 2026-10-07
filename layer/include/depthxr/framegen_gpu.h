@@ -51,6 +51,11 @@ struct FrameGenGpuWindow {
     std::chrono::steady_clock::time_point end{};
 };
 
+struct FrameGenMemoryBudget {
+    std::uint64_t usage_bytes{0};
+    std::uint64_t budget_bytes{0};
+};
+
 class FrameGenGpu {
   public:
     virtual ~FrameGenGpu() = default;
@@ -156,6 +161,9 @@ class FrameGenGpu {
     // When the newest submission whose timing has been read (a few
     // submissions after it) started and ended on the GPU.
     virtual std::optional<FrameGenGpuWindow> LastGpuWindow() const { return std::nullopt; }
+    // The process's local video memory use (the application's included) and
+    // the OS budget for it; absent when the backend cannot query it.
+    virtual std::optional<FrameGenMemoryBudget> MemoryBudget() const { return std::nullopt; }
     // The runtime may then be called from a presenter thread while the
     // application renders: the API's queue is free-threaded (Direct3D 12), so
     // runtime work on it cannot race the application's own submissions.

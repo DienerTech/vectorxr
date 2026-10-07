@@ -1,6 +1,7 @@
 #include <windows.h>
 #include <d3d11.h>
 #include <d3d12.h>
+#include <dxgi1_4.h>
 #include <wrl/client.h>
 #include <vulkan/vulkan_core.h>
 #include <openxr/openxr_platform.h>
@@ -197,7 +198,12 @@ struct HardwareWatch {
 
 class D3D12FrameGen final : public FrameGenGpu {
   public:
-    explicit D3D12FrameGen(const XrGraphicsBindingD3D12KHR& binding) : device_(binding.device), queue_(binding.queue) {}
+    explicit D3D12FrameGen(const XrGraphicsBindingD3D12KHR& binding) : device_(binding.device), queue_(binding.queue) {
+        ComPtr<IDXGIFactory4> factory;
+        if (SUCCEEDED(CreateDXGIFactory1(IID_PPV_ARGS(&factory)))) {
+            factory->EnumAdapterByLuid(device_->GetAdapterLuid(), IID_PPV_ARGS(&memory_adapter_));
+        }
+    }
     ~D3D12FrameGen() override { Reset(); }
 
     bool Initialize(std::string& error) {
@@ -1506,6 +1512,13 @@ class D3D12FrameGen final : public FrameGenGpu {
 
     double LastGpuMilliseconds() const override { return last_gpu_ms_; }
     std::optional<FrameGenGpuWindow> LastGpuWindow() const override { return last_window_; }
+    std::optional<FrameGenMemoryBudget> MemoryBudget() const override {
+        DXGI_QUERY_VIDEO_MEMORY_INFO info{};
+        if (!memory_adapter_ || FAILED(memory_adapter_->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &info))) {
+            return std::nullopt;
+        }
+        return FrameGenMemoryBudget{info.CurrentUsage, info.Budget};
+    }
 
   private:
     // A texture copied into a readback buffer for a research dump.
@@ -2432,6 +2445,7 @@ class D3D12FrameGen final : public FrameGenGpu {
     std::array<FrameSlot, kFramesInFlight> slots_;
     ComPtr<ID3D12GraphicsCommandList> capture_commands_;
     std::array<CaptureSlot, kCaptureSlots> capture_slots_; // views x frames in flight, color and depth
+    ComPtr<IDXGIAdapter3> memory_adapter_; // for MemoryBudget
     Texture check_scores_;
     D3D12_PLACED_SUBRESOURCE_FOOTPRINT check_footprint_{};
     UINT64 check_bytes_{0};

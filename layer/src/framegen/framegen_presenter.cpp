@@ -282,6 +282,9 @@ void FrameGenPresenter::Stop() {
     phase_wall_ = {};
     phase_xr_ = 0;
     auto_multiplier_ = 1;
+    auto_memory_ceiling_ = kMaxMultiplier;
+    memory_budget_.reset();
+    memory_checked_at_ = {};
     full_rate_ = false;
     cadence_.clear();
     last_app_end_.reset();
@@ -702,6 +705,38 @@ void FrameGenPresenter::UpdateAutoLocked(Clock::time_point now, const std::optio
         cadence_.clear();
         return;
     }
+    // Paging makes the game late too, and reading that as a reason to step
+    // up allocates more output images and compounds it. Sample the process
+    // budget twice a second; within 5% of it, step down and never above that
+    // again this session (stepping back up would reallocate and oscillate).
+    const bool sampled_memory =
+        memory_checked_at_ == Clock::time_point{} || now - memory_checked_at_ >= std::chrono::milliseconds(500);
+    if (sampled_memory) {
+        memory_checked_at_ = now;
+        memory_budget_ = gpu_ ? gpu_->MemoryBudget() : std::nullopt;
+    }
+    const bool memory_pressure = memory_budget_ && memory_budget_->budget_bytes &&
+                                 memory_budget_->usage_bytes > memory_budget_->budget_bytes - memory_budget_->budget_bytes / 20;
+    if (memory_pressure) {
+        if (sampled_memory) {
+            auto_memory_ceiling_ = std::min(auto_memory_ceiling_, auto_multiplier_ > 2 ? auto_multiplier_ - 1 : 2u);
+        }
+        if (auto_multiplier_ > auto_memory_ceiling_) {
+            const std::uint32_t before = auto_multiplier_;
+            auto_multiplier_ = auto_memory_ceiling_;
+            probing_ = false;
+            multiplier_changed_at_ = now;
+            last_app_end_ = now;
+            cadence_.clear();
+            if (logger_) {
+                logger_->Info("Frame Generation automatic multiplier " + MultiplierText(before) + " -> " +
+                              MultiplierText(auto_multiplier_) +
+                              ": process video memory is near its budget; it stays at most this for the session.");
+                LogMemoryBudgetLocked();
+            }
+            return;
+        }
+    }
     // Frames right after a change (a new multiplier, engaging, new output
     // images) carry its one-off cost and say nothing about the app.
     if (last_app_end_ && now - multiplier_changed_at_ >= auto_settle_) {
@@ -748,10 +783,10 @@ void FrameGenPresenter::UpdateAutoLocked(Clock::time_point now, const std::optio
         } else if (probing_) {
             // The lower multiplier could not keep up: go back and wait longer
             // before probing again.
-            auto_multiplier_ = probe_from_;
+            auto_multiplier_ = std::min(probe_from_, auto_memory_ceiling_);
             probing_ = false;
             probe_backoff_ = std::min(probe_backoff_ * 2, auto_initial_backoff_ * (1 << kAutoMaxBackoffDoublings));
-        } else if (auto_multiplier_ < kMaxMultiplier) {
+        } else if (!memory_pressure && auto_multiplier_ < auto_memory_ceiling_) {
             ++auto_multiplier_;
         }
         probe_not_before_ = now + probe_backoff_;
@@ -843,6 +878,16 @@ void FrameGenPresenter::UnavailableLocked(const std::string& reason) {
 void FrameGenPresenter::InvalidateContinuityLocked() {
     last_real_.valid = false;
     extrapolated_.valid = false;
+}
+
+void FrameGenPresenter::LogMemoryBudgetLocked() {
+    if (!logger_ || !gpu_) return;
+    if (const auto memory = gpu_->MemoryBudget()) {
+        constexpr double megabytes = 1024.0 * 1024.0;
+        logger_->Info("Frame Generation process video memory: usage=" + Number(memory->usage_bytes / megabytes, 0) +
+                      " MB, budget=" + Number(memory->budget_bytes / megabytes, 0) + " MB" +
+                      (memory->usage_bytes > memory->budget_bytes ? " (over budget)." : "."));
+    }
 }
 
 void FrameGenPresenter::NoteFailureLocked(const std::string& error) {
@@ -1071,11 +1116,11 @@ XrResult FrameGenPresenter::EndFrame(XrSession session, const XrFrameEndInfo* in
     {
         std::scoped_lock lock(mutex_);
         end_thread_ = std::this_thread::get_id();
-        auto it = std::find_if(frames_.begin(), frames_.end(),
-                               [&](const PendingFrame& pending) { return pending.app_time == info->displayTime; });
-        if (it == frames_.end() && !frames_.empty()) {
-            it = frames_.begin();
-        }
+        // The oldest waited frame is the one ending, as on the threaded path.
+        // MSFS ends frames one period after the time it was given, which can
+        // equal the prediction of its next pipelined frame: matching by time
+        // would take that frame's record instead of this one's.
+        const auto it = frames_.begin();
         if (it != frames_.end()) {
             // Claiming under the lock: from here a held wait lets this frame
             // finish its extra runtime frame instead of demoting it.
@@ -1167,6 +1212,7 @@ XrResult FrameGenPresenter::EndFrame(XrSession session, const XrFrameEndInfo* in
         UpdateAutoLocked(now, frame, frame && frame->engaged && last_cycle_started_late_);
         if (logger_ && state_ == FrameGenState::kActive && now - last_summary_ >= std::chrono::seconds(30)) {
             last_summary_ = now;
+            LogMemoryBudgetLocked();
             // appWorkMs: the game's own time per frame between its wait and
             // its end. lateCycles: cycles whose first generated slot was
             // already past due, so the game's frame did not fit the time the
@@ -1334,6 +1380,7 @@ XrResult FrameGenPresenter::RunCycle(XrSession session, const XrFrameEndInfo& in
         }
         interpolated_ready = Generate(projection, frame, mode, fractions, interpolated, interpolated_exact);
     }
+    bool generated_ok = interpolated_ready;
 
     XrTime time = frame.slot_time;
     bool should_render = frame.should_render;
@@ -1405,6 +1452,7 @@ XrResult FrameGenPresenter::RunCycle(XrSession session, const XrFrameEndInfo& in
         std::vector<std::vector<XrCompositionLayerProjectionView>> sets;
         std::vector<std::uint8_t> exact;
         const bool ok = Generate(projection, frame, mode, fractions, sets, exact);
+        generated_ok = ok;
         std::scoped_lock lock(mutex_);
         extrapolated_.valid = ok;
         extrapolated_.sets = std::move(sets);
@@ -1413,8 +1461,12 @@ XrResult FrameGenPresenter::RunCycle(XrSession session, const XrFrameEndInfo& in
         extrapolated_.space = projection.space;
         extrapolated_.flags = projection.layerFlags;
     }
-    RecordReal(projection, newest_time, frame.sequence);
+    // A frame that did not reach the GPU history (not captured, or failed) is
+    // not the previous frame of the next one: its interval and eye motion
+    // would be measured against a different pair than the flow.
+    if (generated_ok) RecordReal(projection, newest_time, frame.sequence);
     std::scoped_lock lock(mutex_);
+    if (!generated_ok) InvalidateContinuityLocked();
     consecutive_demotions_ = 0;
     return XR_SUCCESS;
 }
@@ -1960,6 +2012,8 @@ bool FrameGenPresenter::EnsureOutputs(const XrCompositionLayerProjection& projec
                       ", estimated video memory " + Number((working + swapchains) / megabytes, 0) + " MB (working " +
                       Number(working / megabytes, 0) + " MB, output swapchains " + Number(swapchains / megabytes, 0) +
                       " MB).");
+        std::scoped_lock lock(mutex_);
+        LogMemoryBudgetLocked();
     }
     return true;
 }
@@ -2693,7 +2747,7 @@ XrResult FrameGenPresenter::ThreadedEnd(XrSession session, const XrFrameEndInfo&
         pending.real_due = pending.generated_due = first_due;
         between_ok =
             Generate(*projection, pending, FrameGenSynthesisMode::kInterpolate, fractions, between, between_exact, false);
-        RecordReal(*projection, content_time, frame.id);
+        if (between_ok) RecordReal(*projection, content_time, frame.id);
         lock.lock();
     }
     // Ask for the first slot at or after the first one this frame fills.
@@ -2836,8 +2890,9 @@ XrResult FrameGenPresenter::ThreadedEnd(XrSession session, const XrFrameEndInfo&
         std::vector<std::vector<XrCompositionLayerProjectionView>> sets;
         std::vector<std::uint8_t> exact;
         const bool ok = Generate(*projection, pending, FrameGenSynthesisMode::kExtrapolate, fractions, sets, exact);
-        RecordReal(*projection, content_time, frame.id);
+        if (ok) RecordReal(*projection, content_time, frame.id);
         lock.lock();
+        if (!ok) InvalidateContinuityLocked();
         if (compositor_running_) {
             extrapolated_.valid = ok;
             extrapolated_.interpolated = false;
@@ -2869,6 +2924,7 @@ XrResult FrameGenPresenter::ThreadedEnd(XrSession session, const XrFrameEndInfo&
     UpdateAutoLocked(entered, cadence);
     if (logger_ && state_ == FrameGenState::kActive && entered - last_summary_ >= std::chrono::seconds(30)) {
         last_summary_ = entered;
+        LogMemoryBudgetLocked();
         logger_->Info("Frame Generation: multiplier=" + MultiplierText(EffectiveMultiplierLocked()) +
                       (settings_.multiplier == FrameGenMultiplier::kAuto ? " (auto)" : "") + ", threaded=1, appFps=" +
                       Number(RatePerSecond(app_frames_, entered), 1) + ", outputFps=" +
