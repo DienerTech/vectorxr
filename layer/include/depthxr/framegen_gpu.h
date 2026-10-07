@@ -42,6 +42,9 @@ struct FrameGenExecuteResult {
     bool uncaptured{false};
     // Identifies this submission in LastGpuWindow; 0 = not timed.
     std::uint64_t submission{0};
+    // FrameGenTuning::analyze_only: the real frame Synthesize can now write
+    // generated frames from (0: none, Execute failed).
+    std::uint64_t frame{0};
 };
 
 // When one submission ran on the GPU, on std::chrono::steady_clock.
@@ -172,6 +175,27 @@ class FrameGenGpu {
     // application renders: the API's queue is free-threaded (Direct3D 12), so
     // runtime work on it cannot race the application's own submissions.
     virtual bool SupportsThreadedPresentation() const { return false; }
+    // Just-in-time synthesis (Direct3D 12): Execute with
+    // FrameGenTuning::analyze_only measures a real frame's motion once, and
+    // Synthesize then writes any generated frame from it, one at a time,
+    // right before the refresh that shows it. Generated frames need one
+    // output image per view instead of one per generated frame, and a frame
+    // the next real one is late for is made when that is known.
+    virtual bool SupportsJustInTime() const { return false; }
+    // Writes one generated frame per view from analyzed real frame `frame`
+    // (FrameGenExecuteResult::frame) at `fraction` in `mode`: between it and
+    // the real frame before it, or past it (from a frame analyzed for
+    // interpolation, with FrameGenTuning::cover). `outputs` are acquired and
+    // waited output images, one per view, in Execute's view order. False
+    // when the frame's images have since been replaced by newer captures
+    // (the last kFrameGenHistoryRingMax real frames are kept) or the GPU
+    // failed. Never waits on the CPU; the session's queue waits for the
+    // frame on the GPU, so the outputs can be released right after.
+    virtual bool Synthesize(std::uint64_t /*frame*/, FrameGenSynthesisMode /*mode*/, float /*fraction*/,
+                            const std::vector<FrameGenImage>& /*outputs*/, std::string& error) {
+        error = "this graphics API cannot write generated frames one at a time";
+        return false;
+    }
 };
 
 // Builds the backend matching the session's graphics binding (D3D11, D3D12

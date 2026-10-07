@@ -95,6 +95,10 @@ enum class FrameGenTextureKind : std::uint8_t {
     // valid; translation and the inlier share).
     kWorldPartials,
     kWorldParams,
+    // Just-in-time interpolation (FrameGenTuning::cover): the newest frame's
+    // flow filtered for extrapolation as well, for cover frames shown when
+    // the next real frame is late. Kept per real frame like the history.
+    kFilteredCover,
 };
 
 // The flow level the optical flow hardware fills: a 4x4 grid on the
@@ -134,6 +138,12 @@ inline constexpr std::uint32_t kFrameGenFlagShift = 32u;
 inline constexpr std::uint32_t kFrameGenFlagDepthPrevious = 64u;
 // kFilter: world content takes the fitted world motion (input 3).
 inline constexpr std::uint32_t kFrameGenFlagWorld = 128u;
+// Synthesis, interpolating with depth: content only one real frame sees is
+// shown from that frame alone (FrameGenTuning::occlusion).
+inline constexpr std::uint32_t kFrameGenFlagOcclusion = 256u;
+// Synthesis, interpolating: untrusted motion fades between the two real
+// frames (FrameGenTuning::cross_fade, research).
+inline constexpr std::uint32_t kFrameGenFlagCrossFade = 512u;
 // World motion: samples per side of the fit's grid, and its iterations.
 inline constexpr std::uint32_t kFrameGenWorldGrid = 128u;
 inline constexpr std::uint32_t kFrameGenWorldIterations = 3u;
@@ -254,6 +264,21 @@ struct FrameGenTuning {
     // The last generated frame is a spare, shown only when the next real
     // frame is late: it reuses the frame before's eye-shift map.
     bool spare{false};
+    // Just-in-time synthesis (FrameGenGpu::Synthesize): this submission only
+    // measures and filters motion (`generated` is ignored); each generated
+    // frame is written later, one at a time, right before its refresh.
+    bool analyze_only{false};
+    // With analyze_only, interpolating: also filter the flow for
+    // extrapolation (kFilteredCover), so a refresh the next real frame is
+    // late for shows motion past the newest frame instead of repeating it.
+    bool cover{false};
+    // Interpolating with depth: at a motion boundary where no vector has
+    // both real frames agree, content only one of them sees (newly revealed
+    // or being covered) is shown from that one alone, ordered by depth.
+    bool occlusion{true};
+    // Research: where interpolated motion is not trusted, fade between the
+    // two real frames instead of showing the newest one.
+    bool cross_fade{false};
 };
 
 struct FrameGenViewPlan {
@@ -268,18 +293,27 @@ struct FrameGenViewPlan {
     std::vector<FrameGenDispatch> dispatches;
 };
 
-// Per-view ping-pong bookkeeping shared by every backend. Slots hold the
-// history color copy and the filtered flow that seeds the next search.
+// Slots of per-real-frame textures (history, filtered flow, depth, trust)
+// at most: two let the newest frame be generated from while the next is
+// captured; just-in-time synthesis keeps a third, as the frames generated
+// between two real frames are still being written when the next one is
+// captured into the slot after them.
+inline constexpr std::uint8_t kFrameGenHistoryRingMax = 3;
+
+// Per-view ring bookkeeping shared by every backend. Slots hold the history
+// color copy and the filtered flow that seeds the next search; Newest() is
+// the slot the next capture writes and the next Execute generates from,
+// Previous() the one the Execute before used.
 class FrameGenHistoryState {
   public:
     enum Change : unsigned {
         kNone = 0,
-        kAll = 1,      // extent, source format or output kind changed: recreate every texture
+        kAll = 1,      // extent, source format, output kind or ring size changed: recreate every texture
         kFiltered = 2, // flow quality changed: recreate the filtered flow pair
     };
 
     unsigned Configure(FrameGenExtent extent, std::int64_t source_format, FrameGenOutputKind output,
-                       std::uint8_t final_level);
+                       std::uint8_t final_level, std::uint8_t ring = 2);
     // True when Configure with these arguments would change nothing.
     bool Matches(FrameGenExtent extent, std::int64_t source_format, FrameGenOutputKind output,
                  std::uint8_t final_level) const;
@@ -292,7 +326,8 @@ class FrameGenHistoryState {
     void Invalidate();
 
     std::uint8_t Newest() const { return newest_; }
-    std::uint8_t Previous() const { return static_cast<std::uint8_t>(newest_ ^ 1u); }
+    std::uint8_t Previous() const { return static_cast<std::uint8_t>((newest_ + ring_ - 1u) % ring_); }
+    std::uint8_t Ring() const { return ring_; }
     FrameGenExtent Extent() const { return extent_; }
 
   private:
@@ -300,10 +335,11 @@ class FrameGenHistoryState {
     std::int64_t source_format_{0};
     FrameGenOutputKind output_{FrameGenOutputKind::kSrgb8};
     std::uint8_t final_level_{0};
+    std::uint8_t ring_{2};
     std::uint8_t newest_{0};
-    std::array<bool, 2> history_valid_{};
-    std::array<bool, 2> filtered_valid_{};
-    std::array<bool, 2> trust_valid_{};
+    std::array<bool, kFrameGenHistoryRingMax> history_valid_{};
+    std::array<bool, kFrameGenHistoryRingMax> filtered_valid_{};
+    std::array<bool, kFrameGenHistoryRingMax> trust_valid_{};
 };
 
 std::uint8_t FrameGenFinalFlowLevel(FrameGenFlowQuality quality);
@@ -450,6 +486,17 @@ FrameGenDispatch BuildFrameGenRawPackDispatch(FrameGenExtent view_extent);
 std::uint8_t FrameGenMatchLevel(std::uint8_t flow_level);
 std::array<FrameGenExtent, kFrameGenPyramidLevels + 1> FrameGenPyramid(FrameGenExtent extent);
 FrameGenViewPlan BuildFrameGenViewPlan(const FrameGenViewRequest& request, const FrameGenTuning& tuning);
+
+// Just-in-time synthesis: one generated frame of a view from a real frame
+// an analyze_only plan measured (`request` as that plan was built from, its
+// shift the eye's movement per unit forward in time, as when extrapolating),
+// at `fraction` (FrameGenTuning::fractions) in `mode`: its eye-shift map
+// when the eye moves, then the frame into output 0. Extrapolating from a
+// frame analyzed for interpolation reads the cover flow (kFilteredCover). A
+// frame at the newest frame's own time, or without motion measured, is the
+// newest frame unchanged.
+FrameGenViewPlan BuildFrameGenSynthesisPlan(const FrameGenViewRequest& request, const FrameGenTuning& tuning,
+                                            FrameGenSynthesisMode mode, float fraction, bool cover_flow);
 
 // Interpolation fraction or extrapolation distance for a generated frame
 // displayed at target_time, given the two real frames' display times. Clamped

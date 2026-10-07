@@ -18,7 +18,7 @@ const synthesisModes: { value: FrameGenSynthesisMode; label: string; badge?: str
     value: 'interpolate',
     label: 'Interpolate',
     badge: 'Default',
-    description: 'Blends between the previous and newest real frame. Fewer artifacts, but each real frame must be ready before the generated frames leading up to it are shown, so it needs more GPU headroom.',
+    description: 'Blends between the previous and newest real frame. Fewer artifacts; each real frame is shown about one game frame later, after the frames leading up to it. On Direct3D 12, such as MSFS, a game frame that arrives late is covered by frames moved on from the newest one instead of a stutter.',
   },
   {
     value: 'extrapolate',
@@ -36,7 +36,7 @@ const frameMultipliers: { value: FrameGenFrameMultiplier; label: string; descrip
   {
     value: 'dynamic',
     label: 'Dynamic',
-    description: 'The game runs as fast as it can, never held to a fraction of the headset refresh, and generated frames fill the refreshes between its frames: 40 fps becomes 90 with about 1.25 generated frames per real one. Extrapolate in Direct3D 12 games, such as MSFS; elsewhere it behaves as Auto.',
+    description: 'The game runs as fast as it can, never held to a fraction of the headset refresh, and generated frames fill the refreshes between its frames: 40 fps becomes 90 with about 1.25 generated frames per real one. Direct3D 12 games, such as MSFS; elsewhere it behaves as Auto.',
   },
   { value: '2x', label: '2x', description: 'The game runs at 1/2 the headset refresh, for example 45 fps at 90 Hz, with one generated frame between real frames.' },
   { value: '3x', label: '3x', description: 'The game runs at 1/3 the headset refresh, for example 30 fps at 90 Hz, with two generated frames between real frames.' },
@@ -45,8 +45,8 @@ const frameMultipliers: { value: FrameGenFrameMultiplier; label: string; descrip
 
 const multiplierDescription = computed(() => frameMultipliers.find((item) => item.value === props.settings.frameMultiplier)?.description ?? '')
 const multiplierModeNote = computed(() => props.settings.synthesisMode === 'extrapolate'
-  ? 'Extrapolate keeps one set of headset-resolution images per generated frame, plus a spare for a late game frame (up to three), so memory use grows with the multiplier.'
-  : 'Interpolate needs each real frame ready before the generated frames leading up to it, so it needs GPU headroom at any multiplier. For heavy GPU-bound games, use Extrapolate.')
+  ? 'On Direct3D 12 each generated frame is written right before its refresh into one set of headset-resolution images, whatever the multiplier. Elsewhere Extrapolate keeps a set per generated frame, plus a spare for a late game frame.'
+  : 'Interpolate shows real frames about one game frame later than Extrapolate. On Direct3D 12 each generated frame is written right before its refresh into one set of headset-resolution images; elsewhere it needs each real frame ready before the frames leading up to it, so it needs GPU headroom.')
 
 const motionEstimations: { value: FrameGenMotionEstimation; label: string; description: string }[] = [
   {
@@ -57,7 +57,7 @@ const motionEstimations: { value: FrameGenMotionEstimation; label: string; descr
   {
     value: 'hardware',
     label: 'NVIDIA hardware',
-    description: 'Experimental: the optical flow accelerator of NVIDIA RTX 20-50 GPUs measures motion in Direct3D 12 games, such as MSFS, and repeating patterns stay put. For now the game waits for it every real frame, about 7 ms at Pimax Crystal resolution, so the game runs a little slower. Elsewhere Shader is used and the log says why.',
+    description: 'Experimental: the optical flow accelerator of NVIDIA RTX 20-50 GPUs measures motion in Direct3D 12 games, such as MSFS, and repeating patterns stay put. It runs on Frame Generation\'s own GPU queue, after head movement is taken out, so the game does not wait for it. Elsewhere Shader is used and the log says why.',
   },
 ]
 

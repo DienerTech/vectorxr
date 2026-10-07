@@ -20,6 +20,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -422,6 +423,63 @@ int RunScenarios(Harness& harness) {
         Check(quarter_error < 0.4 * third_hold && three_quarters_error < 0.4 * third_hold,
               harness.name + " 4x frames are not placed at 1/4 and 3/4 of the motion");
         Check(copy_error < 0.002, harness.name + " the frame at fraction 1 is not the newest real frame");
+
+        // 2e. Just-in-time synthesis (Direct3D 12): the motion measured once
+        // per real frame and each generated frame written on its own, later,
+        // is what writing them together gives; from the same measurement a
+        // cover frame moves on past the newest frame.
+        if (gpu->SupportsJustInTime()) {
+            FrameGenTuning together = tuning;
+            together.generated = 2;
+            together.fractions = {1.0f / 3.0f, 2.0f / 3.0f, 0.0f, 0.0f};
+            std::swap(tuning, together);
+            gpu->ResetHistory();
+            run(0, true, 0, 0);
+            const Pixels batch_third = run(1, true, 0, 0);
+            const Pixels batch_two_thirds = harness.readback(g_swapchains[kOutputSecond][0]);
+            std::swap(tuning, together);
+            FrameGenTuning analyze = together;
+            analyze.analyze_only = true;
+            analyze.cover = true;
+            gpu->ResetHistory();
+            auto measure = [&](std::uint32_t index) {
+                const std::vector<FrameGenViewSubmission> views{Submission(index, harness.format, output_format, true, 0, 0)};
+                Check(gpu->Execute(views, analyze, result, error), harness.name + " analyze: " + error);
+                Check(result.frame != 0, harness.name + " analyze names the real frame");
+                return result.frame;
+            };
+            measure(0);
+            const std::uint64_t frame = measure(1);
+            const FrameGenImage first_output = Submission(1, harness.format, output_format, true, 0, 0).outputs[0];
+            FrameGenImage second_output = first_output;
+            second_output.swapchain = kOutputSecond;
+            auto synthesize = [&](FrameGenSynthesisMode mode, float fraction, const FrameGenImage& output) {
+                Check(gpu->Synthesize(frame, mode, fraction, {output}, error), harness.name + " synthesize: " + error);
+                return harness.readback(g_swapchains[output.swapchain][0]);
+            };
+            // The later frame first: frames are written in any order.
+            const Pixels jit_two_thirds = synthesize(FrameGenSynthesisMode::kInterpolate, 2.0f / 3.0f, second_output);
+            const Pixels jit_third = synthesize(FrameGenSynthesisMode::kInterpolate, 1.0f / 3.0f, first_output);
+            const double jit_difference = std::max(MeanError(jit_third, batch_third, 0, 0, kSize, kSize),
+                                                   MeanError(jit_two_thirds, batch_two_thirds, 0, 0, kSize, kSize));
+            std::cout << harness.name << " just in time vs together: difference " << jit_difference << '\n';
+            Check(jit_difference < 0.001, harness.name + " frames written one at a time differ from frames written together");
+            const Pixels jit_copy = synthesize(FrameGenSynthesisMode::kInterpolate, 1.0f, first_output);
+            Check(MeanError(jit_copy, b, 0, 0, kSize, kSize) < 0.002,
+                  harness.name + " just in time at fraction 1 is not the newest real frame");
+            // Half an interval past B: the square at (144, 132).
+            const Pixels cover = synthesize(FrameGenSynthesisMode::kExtrapolate, 0.5f, first_output);
+            const double cover_error = MeanError(cover, MovingSquare(144, 132), 96, 96, 272, 272);
+            const double cover_hold = MeanError(b, MovingSquare(144, 132), 96, 96, 272, 272);
+            std::cout << harness.name << " cover: error " << cover_error << " vs hold " << cover_hold << '\n';
+            Check(cover_error < 0.5 * cover_hold, harness.name + " a cover frame does not move content past the newest frame");
+            // Two real frames on, the first one's images are gone.
+            measure(2);
+            measure(0);
+            Check(!gpu->Synthesize(frame, FrameGenSynthesisMode::kInterpolate, 0.5f, {first_output}, error),
+                  harness.name + " a real frame whose images were replaced is not synthesized from");
+            gpu->ResetHistory();
+        }
         tuning.generated = 1;
         tuning.fractions = {0.5f, 0.5f, 0.5f, 0.5f};
     }
@@ -1060,8 +1118,14 @@ int RunProfile(Harness& harness) {
     const float outer = 2.0f, inner = 1.26f, vertical = 1.64f, half_ipd = 0.0336f;
     constexpr int kFrames = 6;
     constexpr float kScroll = 0.004f; // per frame, ~8 px at this size
-    std::printf("Profiling %ux%u per eye, depth %ux%u, extrapolate 4x; rendering test frames...\n", width, height,
-                depth_width, depth_height);
+    // FG_PROFILE_JIT=1: just-in-time synthesis (each real frame measured
+    // once, then three frames written one at a time); FG_PROFILE_MODE=
+    // interpolate measures for interpolation, with cover flow, and writes
+    // two frames between and the real frame's copy.
+    const bool jit = std::getenv("FG_PROFILE_JIT") && std::string(std::getenv("FG_PROFILE_JIT")) == "1";
+    const bool interpolate = std::getenv("FG_PROFILE_MODE") && std::string(std::getenv("FG_PROFILE_MODE")) == "interpolate";
+    std::printf("Profiling %ux%u per eye, depth %ux%u, %s %s; rendering test frames...\n", width, height, depth_width,
+                depth_height, interpolate ? "interpolate" : "extrapolate", jit ? "just in time" : "4x");
     std::array<XrSwapchain, 2> sources{reinterpret_cast<XrSwapchain>(0x61), reinterpret_cast<XrSwapchain>(0x62)};
     std::array<XrSwapchain, 2> depths{reinterpret_cast<XrSwapchain>(0x63), reinterpret_cast<XrSwapchain>(0x64)};
     std::array<std::array<XrSwapchain, 4>, 2> outputs{};
@@ -1110,10 +1174,18 @@ int RunProfile(Harness& harness) {
         // 4x: three generated slots and the spare for a late real frame.
         tuning.generated = 4;
         tuning.fractions = {0.25f, 0.5f, 0.75f, 1.0f};
+        if (interpolate) {
+            tuning.mode = FrameGenSynthesisMode::kInterpolate;
+            tuning.generated = 3;
+            tuning.fractions = {1.0f / 3.0f, 2.0f / 3.0f, 1.0f, 0.0f};
+        }
         gpu->ResetHistory();
         std::vector<double> sums;
+        std::vector<double> synthesis_sums;
         double total = 0.0;
+        double synthesis_total = 0.0;
         int samples = 0;
+        int synthesis_samples = 0;
         bool depth_used = false;
         for (int i = 0; i < 48; ++i) {
             const std::uint32_t frame = static_cast<std::uint32_t>(i % kFrames);
@@ -1165,8 +1237,31 @@ int RunProfile(Harness& harness) {
                 gpu->DumpNextExecute(directory);
             }
             FrameGenExecuteResult result;
-            Check(gpu->Execute(views, tuning, result, error), "profile execute: " + error);
+            FrameGenTuning executed = tuning;
+            executed.analyze_only = jit;
+            executed.cover = jit && interpolate;
+            Check(gpu->Execute(views, executed, result, error), "profile execute: " + error);
             const std::vector<double> times = gpu->PassMilliseconds();
+            if (jit) {
+                // The frames until the next real one, each written on its own.
+                for (std::size_t k = 0; k < 3; ++k) {
+                    const float fraction = interpolate ? tuning.fractions[k] : 0.25f * static_cast<float>(k + 1);
+                    std::vector<FrameGenImage> images;
+                    for (std::size_t eye = 0; eye < 2; ++eye) {
+                        images.push_back(views[eye].outputs[k]);
+                    }
+                    Check(gpu->Synthesize(result.frame, tuning.mode, fraction, images, error), "profile synthesize: " + error);
+                    const std::vector<double> synthesis = gpu->PassMilliseconds();
+                    if (i >= 24 && !synthesis.empty()) {
+                        synthesis_sums.resize(synthesis.size());
+                        for (std::size_t q = 0; q < synthesis.size(); ++q) {
+                            synthesis_sums[q] += synthesis[q];
+                            synthesis_total += synthesis[q];
+                        }
+                        ++synthesis_samples;
+                    }
+                }
+            }
             if (i >= 24 && !times.empty()) {
                 sums.resize(times.size());
                 for (std::size_t p = 0; p < times.size(); ++p) {
@@ -1187,6 +1282,16 @@ int RunProfile(Harness& harness) {
                 std::printf("  %-14s %6.3f ms\n", names[p], sums[p] / samples);
             }
         }
+        if (synthesis_samples) {
+            std::printf("  just in time, per frame written: %.3f ms (%.2f ms for the three per real frame)\n",
+                        synthesis_total / synthesis_samples, 3.0 * synthesis_total / synthesis_samples);
+            for (std::size_t p = 0; p < synthesis_sums.size() && p < std::size(names); ++p) {
+                if (synthesis_sums[p] > 0.0) {
+                    std::printf("    %-14s %6.3f ms\n", names[p], synthesis_sums[p] / synthesis_samples);
+                }
+            }
+        }
+        std::printf("  working memory %.0f MB\n", static_cast<double>(gpu->WorkingMemoryBytes()) / (1024.0 * 1024.0));
     }
     gpu->Reset();
     return 0;
@@ -2225,12 +2330,156 @@ int D3D11Test() {
 
 // --- Direct3D 12 ------------------------------------------------------------
 
+// Research (`contention`, Direct3D 12 on the GPU): how long a just-in-time
+// frame takes from its submission to done while the GPU is saturated by
+// "game" work on the session queue (a second backend generating headset-size
+// frames back to back there), on Frame Generation's own high-priority queue
+// and, for comparison, on the session queue. A frame must be done within
+// about a refresh of its submission to be shown in its refresh.
+bool g_contention = false;
+
+int RunContention(Harness& harness) {
+    const std::uint32_t width = g_profile_width, height = g_profile_height;
+    const float outer = 2.0f, inner = 1.26f, vertical = 1.64f, half_ipd = 0.0336f;
+    std::string error;
+    auto make = [&](const char* queue) {
+        _putenv_s("VECTORXR_FRAMEGEN_QUEUE", queue);
+        auto gpu = CreateFrameGenGpu(harness.binding, error);
+        _putenv_s("VECTORXR_FRAMEGEN_QUEUE", "");
+        Check(gpu != nullptr, harness.name + " backend: " + error);
+        gpu->SetCopyAfterRelease(true);
+        return gpu;
+    };
+    const std::int64_t output_format = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
+    std::array<XrSwapchain, 2> sources{reinterpret_cast<XrSwapchain>(0x81), reinterpret_cast<XrSwapchain>(0x82)};
+    std::array<std::array<XrSwapchain, 4>, 2> outputs{};
+    std::array<XrSwapchain, 2> jit_outputs{reinterpret_cast<XrSwapchain>(0x91), reinterpret_cast<XrSwapchain>(0x92)};
+    for (std::size_t eye = 0; eye < 2; ++eye) {
+        const float head = eye == 0 ? -half_ipd : half_ipd;
+        const float left = eye == 0 ? -outer : -inner, right = eye == 0 ? inner : outer;
+        g_swapchains[sources[eye]].clear();
+        for (int frame = 0; frame < 2; ++frame) {
+            void* image = harness.create(width, height);
+            harness.upload_sized(image, width, height, CockpitAt(width, height, head, left, right, vertical, 0.004f * frame));
+            g_swapchains[sources[eye]].push_back(image);
+        }
+        for (std::size_t set = 0; set < 4; ++set) {
+            outputs[eye][set] = reinterpret_cast<XrSwapchain>(0xa0 + eye * 4 + set);
+            g_swapchains[outputs[eye][set]] = {harness.create(width, height)};
+        }
+        g_swapchains[jit_outputs[eye]] = {harness.create(width, height)};
+    }
+    auto views_for = [&](std::uint32_t frame, bool with_outputs) {
+        std::vector<FrameGenViewSubmission> views;
+        for (std::size_t eye = 0; eye < 2; ++eye) {
+            const float head = eye == 0 ? -half_ipd : half_ipd;
+            FrameGenViewSubmission view;
+            const XrRect2Di rect{{0, 0}, {static_cast<int>(width), static_cast<int>(height)}};
+            view.source = {sources[eye], frame, 0, rect, harness.format};
+            if (with_outputs) {
+                for (const XrSwapchain output : outputs[eye]) view.outputs.push_back({output, 0, 0, rect, output_format});
+            }
+            view.request.extent = {width, height};
+            view.request.output = FrameGenOutputKind::kSrgb8;
+            view.request.synthesize = true;
+            view.request.temporal = true;
+            for (auto* geometry : {&view.request.newest, &view.request.previous}) {
+                geometry->angle_left = std::atan(eye == 0 ? -outer : -inner);
+                geometry->angle_right = std::atan(eye == 0 ? inner : outer);
+                geometry->angle_up = std::atan(vertical);
+                geometry->angle_down = -std::atan(vertical);
+                geometry->position = {head, 0, 0};
+            }
+            views.push_back(view);
+        }
+        return views;
+    };
+    auto track = [&](FrameGenGpu& gpu) {
+        for (std::size_t eye = 0; eye < 2; ++eye) {
+            Check(gpu.Track(sources[eye], EnumerateImages, error), error);
+            for (const XrSwapchain output : outputs[eye]) Check(gpu.Track(output, EnumerateImages, error), error);
+            Check(gpu.Track(jit_outputs[eye], EnumerateImages, error), error);
+        }
+    };
+    // The "game": frames generated at headset size, back to back, on the
+    // session queue (4 outputs each: several milliseconds of GPU work).
+    auto load = make("game");
+    track(*load);
+    std::atomic<bool> loading{false}, stop{false};
+    std::thread game([&] {
+        FrameGenTuning tuning;
+        tuning.mode = FrameGenSynthesisMode::kExtrapolate;
+        tuning.generated = 4;
+        tuning.fractions = {0.25f, 0.5f, 0.75f, 1.0f};
+        std::string game_error;
+        std::uint32_t frame = 0;
+        while (!stop) {
+            if (!loading) {
+                Sleep(1);
+                continue;
+            }
+            FrameGenExecuteResult result;
+            load->Execute(views_for(frame++ % 2, true), tuning, result, game_error);
+        }
+    });
+    for (const char* queue : {"", "game"}) {
+        auto jit = make(queue);
+        track(*jit);
+        FrameGenTuning analyze;
+        analyze.mode = FrameGenSynthesisMode::kExtrapolate;
+        analyze.analyze_only = true;
+        FrameGenExecuteResult result;
+        Check(jit->Execute(views_for(0, false), analyze, result, error), "analyze: " + error);
+        Check(jit->Execute(views_for(1, false), analyze, result, error), "analyze: " + error);
+        jit->WaitIdle();
+        const XrRect2Di rect{{0, 0}, {static_cast<int>(width), static_cast<int>(height)}};
+        const std::vector<FrameGenImage> images{{jit_outputs[0], 0, 0, rect, output_format}, {jit_outputs[1], 0, 0, rect, output_format}};
+        for (const bool loaded : {false, true}) {
+            loading = loaded;
+            Sleep(loaded ? 200 : 20);
+            std::vector<double> latencies;
+            for (int i = 0; i < 60; ++i) {
+                const auto start = std::chrono::steady_clock::now();
+                Check(jit->Synthesize(result.frame, FrameGenSynthesisMode::kExtrapolate, 0.5f, images, error),
+                      "synthesize: " + error);
+                Check(jit->WaitIdle(), "synthesis did not finish");
+                latencies.push_back(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count());
+                Sleep(5);
+            }
+            std::sort(latencies.begin(), latencies.end());
+            std::printf("%s queue, %s: frame done %.2f ms after submission (median), %.2f (90%%), %.2f (max)\n",
+                        *queue ? "session" : "own high-priority", loaded ? "GPU saturated by the game" : "idle GPU",
+                        latencies[latencies.size() / 2], latencies[latencies.size() * 9 / 10], latencies.back());
+        }
+        loading = false;
+        load->WaitIdle();
+        jit->Reset();
+    }
+    stop = true;
+    game.join();
+    load->Reset();
+    return 0;
+}
+
 int D3D12Test() {
     ComPtr<IDXGIFactory4> factory;
     ComPtr<IDXGIAdapter> warp;
     ComPtr<ID3D12Device> device;
     ComPtr<ID3D12CommandQueue> queue;
     Check(SUCCEEDED(CreateDXGIFactory1(IID_PPV_ARGS(&factory))), "DXGI factory");
+    // FG_D3D12_DEBUG=1: the debug layer validates every call (and with
+    // FG_D3D12_DEBUG=gpu, resource states as the GPU executes); any error
+    // fails the run.
+    const std::string debug_mode = std::getenv("FG_D3D12_DEBUG") ? std::getenv("FG_D3D12_DEBUG") : "";
+    if (!debug_mode.empty()) {
+        ComPtr<ID3D12Debug> debug;
+        Check(SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&debug))), "D3D12 debug layer (Graphics Tools) is not installed");
+        debug->EnableDebugLayer();
+        ComPtr<ID3D12Debug1> debug1;
+        if (debug_mode == "gpu" && SUCCEEDED(debug.As(&debug1))) {
+            debug1->SetEnableGPUBasedValidation(TRUE);
+        }
+    }
     if (g_bench || g_hardware) {
         Check(SUCCEEDED(factory->EnumAdapters(0, &warp)), "hardware adapter");
     } else {
@@ -2516,11 +2765,31 @@ int D3D12Test() {
         return nvof;
     }
 #endif
-    const int result = g_replay    ? RunReplay(harness)
-                       : g_profile ? RunProfile(harness)
+    const int result = g_replay      ? RunReplay(harness)
+                       : g_contention ? RunContention(harness)
+                       : g_profile   ? RunProfile(harness)
                        : g_bench   ? RunBench(harness)
                                    : RunScenarios(harness);
     CloseHandle(event);
+    if (!debug_mode.empty()) {
+        ComPtr<ID3D12InfoQueue> info;
+        std::size_t errors = 0;
+        if (SUCCEEDED(device.As(&info))) {
+            for (UINT64 i = 0; i < info->GetNumStoredMessages(); ++i) {
+                SIZE_T size = 0;
+                info->GetMessage(i, nullptr, &size);
+                std::vector<char> storage(size);
+                auto* message = reinterpret_cast<D3D12_MESSAGE*>(storage.data());
+                if (SUCCEEDED(info->GetMessage(i, message, &size)) &&
+                    (message->Severity == D3D12_MESSAGE_SEVERITY_ERROR ||
+                     message->Severity == D3D12_MESSAGE_SEVERITY_CORRUPTION)) {
+                    if (++errors <= 10) std::cerr << "D3D12 debug layer: " << message->pDescription << '\n';
+                }
+            }
+        }
+        std::cout << "D3D12 debug layer: " << errors << " errors\n";
+        Check(errors == 0, "the D3D12 debug layer reported errors");
+    }
     return result;
 }
 
@@ -2761,6 +3030,11 @@ int main(int argc, char** argv) {
         g_replay_directory = argv[2];
         g_replay_output = argc > 3 ? argv[3] : "";
         api = "d3d12";
+    }
+    if (api == "contention") {
+        // depthxr_framegen_tests contention [width height]: Direct3D 12 on the GPU.
+        g_contention = true;
+        api = "profile";
     }
     if (api == "profile") {
         // depthxr_framegen_tests profile [width height]: Direct3D 12 on the GPU.

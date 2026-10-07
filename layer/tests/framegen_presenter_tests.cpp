@@ -16,6 +16,7 @@
 #include <atomic>
 #include <condition_variable>
 #include <deque>
+#include <exception>
 #include <chrono>
 #include <functional>
 #include <cmath>
@@ -135,6 +136,13 @@ struct GpuLog {
     std::vector<FrameGenViewSubmission> last;
     FrameGenImage last_capture;
     FrameGenTuning tuning;
+    // Just-in-time synthesis (SupportsJustInTime): frames written one at a
+    // time, with their mode and fraction, in order.
+    bool jit{false};
+    std::atomic<int> analyzes{0};
+    std::mutex syntheses_mutex;
+    std::vector<std::pair<FrameGenSynthesisMode, float>> syntheses;
+    std::atomic<int> synthesis_failures{0};
 };
 
 class FakeGpu final : public FrameGenGpu {
@@ -178,12 +186,20 @@ class FakeGpu final : public FrameGenGpu {
         history_.resize(views.size());
         result.synthesized.clear();
         result.depth.clear();
+        Analyzed analyzed;
         for (std::size_t i = 0; i < views.size(); ++i) {
-            history_[i].Configure(views[i].request.extent, views[i].source.format, views[i].request.output, 3);
+            history_[i].Configure(views[i].request.extent, views[i].source.format, views[i].request.output, 3,
+                                  tuning.analyze_only ? 3 : 2);
             const bool synthesized = history_[i].Effective(views[i].request).synthesize;
             history_[i].Commit(synthesized);
             result.synthesized.push_back(synthesized);
             result.depth.push_back(synthesized && views[i].request.depth && log_->depth);
+            if (tuning.analyze_only) {
+                // Kept for Synthesize: where the eye is and how it moves.
+                analyzed.views.push_back({views[i].request.newest.position[0],
+                                          result.depth.back() ? views[i].request.shift[0] : 0.0f, synthesized});
+                continue;
+            }
             // Each output shows the scene from the eye position of its time.
             std::scoped_lock lock(g_xr_mutex);
             for (std::size_t j = 0; j < views[i].outputs.size(); ++j) {
@@ -192,6 +208,42 @@ class FakeGpu final : public FrameGenGpu {
                 g_written[views[i].outputs[j].swapchain].push_back(
                     views[i].request.newest.position[0] + (result.depth.back() ? time * views[i].request.shift[0] : 0.0f));
             }
+        }
+        if (tuning.analyze_only) {
+            ++log_->analyzes;
+            analyzed.id = next_frame_++;
+            result.frame = analyzed.id;
+            std::scoped_lock lock(analyzed_mutex_);
+            analyzed_.push_back(analyzed);
+            while (analyzed_.size() > 3) analyzed_.pop_front();
+        }
+        return true;
+    }
+    bool SupportsJustInTime() const override { return log_->jit; }
+    bool Synthesize(std::uint64_t frame, FrameGenSynthesisMode mode, float fraction, const std::vector<FrameGenImage>& outputs,
+                    std::string& error) override {
+        Analyzed analyzed;
+        {
+            std::scoped_lock lock(analyzed_mutex_);
+            const auto it = std::find_if(analyzed_.begin(), analyzed_.end(), [&](const Analyzed& a) { return a.id == frame; });
+            if (it == analyzed_.end() || outputs.size() < it->views.size()) {
+                ++log_->synthesis_failures;
+                error = "the real frame is no longer kept";
+                return false;
+            }
+            analyzed = *it;
+        }
+        {
+            std::scoped_lock lock(log_->syntheses_mutex);
+            log_->syntheses.push_back({mode, fraction});
+        }
+        // Seen from the eye's position at the frame's time, as the presenter
+        // places the views (where depth is used).
+        const float eye_time = mode == FrameGenSynthesisMode::kExtrapolate ? fraction : fraction - 1.0f;
+        std::scoped_lock lock(g_xr_mutex);
+        for (std::size_t i = 0; i < analyzed.views.size(); ++i) {
+            const auto& view = analyzed.views[i];
+            g_written[outputs[i].swapchain].push_back(view.x + (view.synthesized ? eye_time * view.shift : 0.0f));
         }
         return true;
     }
@@ -219,8 +271,20 @@ class FakeGpu final : public FrameGenGpu {
     }
 
   private:
+    struct Analyzed {
+        std::uint64_t id{0};
+        struct View {
+            float x{0.0f};
+            float shift{0.0f};
+            bool synthesized{false};
+        };
+        std::vector<View> views;
+    };
     GpuLog* log_;
     std::vector<FrameGenHistoryState> history_;
+    std::mutex analyzed_mutex_;
+    std::deque<Analyzed> analyzed_;
+    std::uint64_t next_frame_{1};
 };
 
 // --- fake runtime ------------------------------------------------------------------
@@ -721,8 +785,13 @@ void TestAutomaticMultiplier() {
 
 // --- threaded presentation --------------------------------------------------------
 
+// Threaded tests run twice: generated frames written together after each
+// real frame, then each written just in time (FrameGenGpu::Synthesize).
+bool g_jit = false;
+
 void StartThreaded(FrameGenPresenter& presenter, GpuLog& gpu, FrameGenMultiplier multiplier) {
     gpu.threaded = true;
+    gpu.jit = g_jit;
     StartPresenter(presenter, gpu, FrameGenSynthesisMode::kExtrapolate, kFormat, kAppUsage, multiplier);
 }
 
@@ -1327,6 +1396,314 @@ void TestThreadedUnsupportedLayerPresentsInline() {
     Check(!runtime.ordering_violation, "unsupported layer: runtime calls stayed ordered");
 }
 
+// --- just-in-time synthesis ----------------------------------------------------------
+
+const XrSwapchain kDepthChain = reinterpret_cast<XrSwapchain>(0x21);
+
+// Frames written one at a time on the presenter thread, with the game's
+// depth (generated frames are then seen from where the eye is at their time).
+void StartJit(FrameGenPresenter& presenter, GpuLog& gpu, FrameGenSynthesisMode mode, FrameGenMultiplier multiplier,
+              App*& app_out, Runtime& runtime, std::unique_ptr<App>& app) {
+    gpu.threaded = true;
+    gpu.jit = true;
+    gpu.depth = true;
+    StartPresenter(presenter, gpu, mode, kFormat, kAppUsage, multiplier);
+    presenter.TrackSwapchain(kDepthChain, 20, 1,
+                             XR_SWAPCHAIN_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_SAMPLED_BIT);
+    app = std::make_unique<App>(presenter, runtime);
+    app->depth.subImage.swapchain = kDepthChain;
+    app->depth.subImage.imageRect = {{0, 0}, {1600, 1600}};
+    app->depth.nearZ = 0.1f;
+    app->depth.farZ = 1000.0f;
+    app_out = app.get();
+}
+
+// The eyes move at `speed` m/s and every frame is rendered from where they
+// are at its display time: a refresh showing the content of its own display
+// time has its first view there. Returns the share of refreshes after
+// `first` (the first `skip` left out) that do, up to a constant offset (an
+// app ending frames later than told): frozen or jumping content does not.
+double TimelineShare(Runtime& runtime, std::size_t first, std::size_t skip, double speed, double* worst = nullptr) {
+    std::vector<double> residuals;
+    {
+        std::scoped_lock lock(g_xr_mutex);
+        for (std::size_t i = first + skip; i < runtime.submitted_times.size(); ++i) {
+            if (runtime.submitted_swapchains[i].empty()) continue;
+            const double expected = speed * static_cast<double>(runtime.submitted_times[i] - 1'000'000'000) * 1e-9;
+            residuals.push_back(runtime.submitted_left_x[i] - expected);
+        }
+    }
+    if (residuals.empty()) return 0.0;
+    std::vector<double> sorted = residuals;
+    std::sort(sorted.begin(), sorted.end());
+    const double median = sorted[sorted.size() / 2];
+    const double tolerance = 0.6 * speed * static_cast<double>(kPeriod) * 1e-9;
+    std::size_t good = 0;
+    double largest = 0.0;
+    for (const double residual : residuals) {
+        good += std::abs(residual - median) <= tolerance ? 1 : 0;
+        largest = std::max(largest, std::abs(residual - median));
+    }
+    if (worst) *worst = largest / (speed * static_cast<double>(kPeriod) * 1e-9);
+    return static_cast<double>(good) / static_cast<double>(residuals.size());
+}
+
+int SynthesesWhere(GpuLog& gpu, const std::function<bool(FrameGenSynthesisMode, float)>& match) {
+    std::scoped_lock lock(gpu.syntheses_mutex);
+    return static_cast<int>(std::count_if(gpu.syntheses.begin(), gpu.syntheses.end(),
+                                          [&](const auto& entry) { return match(entry.first, entry.second); }));
+}
+
+// Extrapolate at 3x, each generated frame written right before its refresh:
+// one output image per eye whatever the multiplier, the game's own frame in
+// its refresh, and every other refresh moved on from it by its time.
+void TestJitExtrapolation() {
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    runtime.paced = true;
+    std::unique_ptr<App> owned;
+    App* app = nullptr;
+    StartJit(presenter, gpu, FrameGenSynthesisMode::kExtrapolate, FrameGenMultiplier::k3, app, runtime, owned);
+    app->eye_speed = 0.5;
+    for (int i = 0; i < 3; ++i) app->Frame();
+    const std::size_t first = runtime.Submissions();
+    const auto start = std::chrono::steady_clock::now();
+    int frames = 0;
+    while (std::chrono::steady_clock::now() - start < 1200ms) {
+        const XrFrameState state = app->Wait();
+        app->Begin();
+        std::this_thread::sleep_for(4ms);
+        app->Release();
+        Check(XR_SUCCEEDED(app->End(state.predictedDisplayTime)), "jit extrapolation: end");
+        ++frames;
+    }
+    const double elapsed = Seconds(std::chrono::steady_clock::now() - start);
+    const FrameGenStatus status = presenter.Status();
+    Check(status.threaded && status.state == FrameGenState::kActive, "jit extrapolation: presents from its own thread");
+    const auto log = runtime.Snapshot();
+    std::size_t real = 0, generated = 0;
+    for (std::size_t i = first + 20; i < log.size(); ++i) {
+        (IsAppImage(log[i].swapchains) ? real : generated) += 1;
+    }
+    const double share = static_cast<double>(real) / static_cast<double>(real + generated);
+    Check(share > 0.25 && share < 0.42, "jit extrapolation: one real frame in three refreshes (" + std::to_string(share) + ")");
+    const double refresh = 1e9 / static_cast<double>(kPeriod);
+    Check(static_cast<double>(log.size() - first) / elapsed > refresh * 0.85, "jit extrapolation: every refresh gets a frame");
+    Check(status.distinct_fps > 0.8 * status.output_fps,
+          "jit extrapolation: refreshes show new frames (" + std::to_string(status.distinct_fps) + " of " +
+              std::to_string(status.output_fps) + " fps)");
+    Check(gpu.analyzes > frames / 2 && gpu.executes == gpu.analyzes,
+          "jit extrapolation: each real frame is measured once, nothing generated with it");
+    Check(SynthesesWhere(gpu, [](FrameGenSynthesisMode mode, float fraction) {
+              return mode == FrameGenSynthesisMode::kExtrapolate && fraction > 0.2f && fraction < 0.9f;
+          }) > frames / 2,
+          "jit extrapolation: frames written a third and two thirds of an interval past the real frame");
+    int creates = 0;
+    {
+        std::scoped_lock lock(g_xr_mutex);
+        creates = g_creates;
+    }
+    Check(creates == 2, "jit extrapolation: one output swapchain per eye at 3x (" + std::to_string(creates) + ")");
+    Check(runtime.mismatched_images == 0, "jit extrapolation: every image shown was written for its views (" +
+                                              std::to_string(runtime.mismatched_images.load()) + " mismatched)");
+    double worst = 0.0;
+    const double timeline = TimelineShare(runtime, first, 20, app->eye_speed, &worst);
+    Check(timeline > 0.95, "jit extrapolation: refreshes show their own time (" + std::to_string(timeline) + ", worst " +
+                               std::to_string(worst) + " periods)");
+    CheckOrderedTimes(log, "jit extrapolation");
+    presenter.Stop();
+    Check(!runtime.ordering_violation && !g_release_violation, "jit extrapolation: calls stayed ordered");
+}
+
+// Interpolate at 3x just in time: the presenter thread shows every refresh,
+// each real frame's own refresh its exact copy, the two refreshes before it
+// the frames between it and the previous one, and the game keeps its pace.
+void TestJitInterpolation() {
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    runtime.paced = true;
+    std::unique_ptr<App> owned;
+    App* app = nullptr;
+    StartJit(presenter, gpu, FrameGenSynthesisMode::kInterpolate, FrameGenMultiplier::k3, app, runtime, owned);
+    app->eye_speed = 0.5;
+    for (int i = 0; i < 3; ++i) app->Frame();
+    const std::size_t first = runtime.Submissions();
+    const auto start = std::chrono::steady_clock::now();
+    std::chrono::steady_clock::duration gap{};
+    const int frames = RunPipelined(*app, 1500ms, 20ms, 30ms, {}, &gap, 26ms);
+    const double elapsed = Seconds(std::chrono::steady_clock::now() - start);
+    const double refresh = 1e9 / static_cast<double>(kPeriod);
+    const FrameGenStatus status = presenter.Status();
+    Check(status.threaded && status.state == FrameGenState::kActive, "jit interpolation: presents from its own thread");
+    Check(frames / elapsed > refresh / 3 * 0.8,
+          "jit interpolation: the app holds a third of the refresh (" + std::to_string(frames / elapsed) + " fps)");
+    const auto log = runtime.Snapshot();
+    Check(static_cast<double>(log.size() - first) / elapsed > refresh * 0.85, "jit interpolation: every refresh gets a frame");
+    std::size_t app_images = 0;
+    for (std::size_t i = first + 12; i < log.size(); ++i) app_images += IsAppImage(log[i].swapchains) ? 1 : 0;
+    Check(app_images == 0, "jit interpolation: refreshes show written frames, not the game's swapchain (" +
+                               std::to_string(app_images) + ")");
+    const int between = SynthesesWhere(gpu, [](FrameGenSynthesisMode mode, float fraction) {
+        return mode == FrameGenSynthesisMode::kInterpolate && fraction > 0.2f && fraction < 0.8f;
+    });
+    const int copies = SynthesesWhere(gpu, [](FrameGenSynthesisMode mode, float fraction) {
+        return mode == FrameGenSynthesisMode::kInterpolate && fraction == 1.0f;
+    });
+    Check(between > frames && copies > frames / 2 && copies < frames * 3 / 2,
+          "jit interpolation: two frames between real frames, then the real frame's copy (" + std::to_string(between) +
+              " between, " + std::to_string(copies) + " copies, " + std::to_string(frames) + " real)");
+    Check(runtime.mismatched_images == 0, "jit interpolation: every image shown was written for its views (" +
+                                              std::to_string(runtime.mismatched_images.load()) + " mismatched)");
+    double worst = 0.0;
+    const double timeline = TimelineShare(runtime, first, 12, app->eye_speed, &worst);
+    Check(timeline > 0.95, "jit interpolation: refreshes show their own time (" + std::to_string(timeline) + ", worst " +
+                               std::to_string(worst) + " periods)");
+    Check(status.distinct_fps > 0.9 * status.output_fps,
+          "jit interpolation: every refresh is a new frame (" + std::to_string(status.distinct_fps) + " of " +
+              std::to_string(status.output_fps) + " fps)");
+    Check(gap < 200ms, "jit interpolation: no stalls");
+    int creates = 0;
+    {
+        std::scoped_lock lock(g_xr_mutex);
+        creates = g_creates;
+    }
+    Check(creates == 2, "jit interpolation: one output swapchain per eye (" + std::to_string(creates) + ")");
+    CheckOrderedTimes(log, "jit interpolation");
+    presenter.Stop();
+    Check(!runtime.ordering_violation && !g_release_violation, "jit interpolation: calls stayed ordered");
+}
+
+// Dynamic interpolation: an MSFS-like game runs at its own varying rate,
+// every refresh shows its own time between the real frames either side, and
+// a real frame far later than its pace is covered by frames moved on past
+// the newest one instead of a freeze and a jump.
+void TestJitDynamicInterpolation() {
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    runtime.paced = true;
+    std::unique_ptr<App> owned;
+    App* app = nullptr;
+    StartJit(presenter, gpu, FrameGenSynthesisMode::kInterpolate, FrameGenMultiplier::kDynamic, app, runtime, owned);
+    app->eye_speed = 0.5;
+    app->end_offset_periods = 1;
+    const std::size_t first = runtime.Submissions();
+    const auto start = std::chrono::steady_clock::now();
+    std::chrono::steady_clock::duration gap{};
+    int covers_before = 0;
+    const int frames = RunPipelined(
+        *app, 2000ms, 16ms, 26ms,
+        [&](int frame, const XrFrameState&) {
+            if (frame == 40) {
+                covers_before = SynthesesWhere(gpu, [](FrameGenSynthesisMode mode, float fraction) {
+                    return mode == FrameGenSynthesisMode::kExtrapolate && fraction > 0.0f;
+                });
+                std::this_thread::sleep_for(40ms); // one frame far slower than the rest
+            }
+        },
+        &gap, 8ms);
+    const double elapsed = Seconds(std::chrono::steady_clock::now() - start);
+    const double refresh = 1e9 / static_cast<double>(kPeriod);
+    const FrameGenStatus status = presenter.Status();
+    Check(status.threaded && status.dynamic && status.state == FrameGenState::kActive,
+          "jit dynamic interpolation: presents from its own thread, dynamically");
+    Check(presenter.OsdText().find("Interpolate") != std::string::npos &&
+              presenter.OsdText().find("Dynamic") != std::string::npos,
+          "jit dynamic interpolation: the OSD says Interpolate and Dynamic (" + presenter.OsdText() + ")");
+    Check(frames / elapsed > refresh / 3 * 1.15,
+          "jit dynamic interpolation: the app is not held to a third of the refresh (" + std::to_string(frames / elapsed) +
+              " fps)");
+    const auto log = runtime.Snapshot();
+    double longest_ms = 0.0;
+    std::size_t longest_at = 0;
+    {
+        std::scoped_lock lock(g_xr_mutex);
+        for (std::size_t i = first + 1; i < runtime.submitted_at.size(); ++i) {
+            const double ms = std::chrono::duration<double, std::milli>(runtime.submitted_at[i] - runtime.submitted_at[i - 1]).count();
+            if (ms > longest_ms) {
+                longest_ms = ms;
+                longest_at = i - first;
+            }
+        }
+    }
+    if (std::getenv("FG_TEST_GAPS")) {
+        std::scoped_lock lock(g_xr_mutex);
+        for (std::size_t i = first + 1; i < runtime.submitted_at.size(); ++i) {
+            const double ms = std::chrono::duration<double, std::milli>(runtime.submitted_at[i] - runtime.submitted_at[i - 1]).count();
+            const double t = std::chrono::duration<double, std::milli>(runtime.submitted_at[i] - start).count();
+            if (ms > 16.0) std::cerr << "gap " << ms << " ms at " << t << " ms (submission " << i - first << ", time "
+                                     << (runtime.submitted_times[i] - runtime.submitted_times[i - 1]) / 1e6 << " ms)\n";
+        }
+    }
+    Check(static_cast<double>(log.size() - first) / elapsed > refresh * 0.85,
+          "jit dynamic interpolation: every refresh gets a frame (" +
+              std::to_string(static_cast<double>(log.size() - first) / elapsed) + " fps, longest gap " +
+              std::to_string(longest_ms) + " ms at submission " + std::to_string(longest_at) + " of " +
+              std::to_string(log.size() - first) + ")");
+    double worst = 0.0;
+    const double timeline = TimelineShare(runtime, first, 30, app->eye_speed, &worst);
+    Check(timeline > 0.95, "jit dynamic interpolation: refreshes show their own time (" + std::to_string(timeline) +
+                               ", worst " + std::to_string(worst) + " periods)");
+    const int covers = SynthesesWhere(gpu, [](FrameGenSynthesisMode mode, float fraction) {
+        return mode == FrameGenSynthesisMode::kExtrapolate && fraction > 0.0f;
+    });
+    Check(covers > covers_before, "jit dynamic interpolation: the slow frame's refreshes were covered (" +
+                                      std::to_string(covers_before) + " then " + std::to_string(covers) + ")");
+    Check(status.distinct_fps > 0.9 * status.output_fps,
+          "jit dynamic interpolation: refreshes show new frames (" + std::to_string(status.distinct_fps) + " of " +
+              std::to_string(status.output_fps) + " fps)");
+    Check(runtime.mismatched_images == 0, "jit dynamic interpolation: every image shown was written for its views (" +
+                                              std::to_string(runtime.mismatched_images.load()) + " mismatched)");
+    Check(gap < 200ms, "jit dynamic interpolation: no stalls");
+    CheckOrderedTimes(log, "jit dynamic interpolation");
+    presenter.Stop();
+    Check(!runtime.ordering_violation && !g_release_violation, "jit dynamic interpolation: calls stayed ordered");
+}
+
+// Dynamic extrapolation just in time: the game runs at its own rate and
+// every refresh between its frames is written for its own time.
+void TestJitDynamicExtrapolation() {
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    runtime.paced = true;
+    std::unique_ptr<App> owned;
+    App* app = nullptr;
+    StartJit(presenter, gpu, FrameGenSynthesisMode::kExtrapolate, FrameGenMultiplier::kDynamic, app, runtime, owned);
+    app->eye_speed = 0.5;
+    app->end_offset_periods = 1;
+    const std::size_t first = runtime.Submissions();
+    const auto start = std::chrono::steady_clock::now();
+    std::chrono::steady_clock::duration gap{};
+    const int frames = RunPipelined(*app, 1500ms, 16ms, 26ms, {}, &gap, 8ms);
+    const double elapsed = Seconds(std::chrono::steady_clock::now() - start);
+    const double refresh = 1e9 / static_cast<double>(kPeriod);
+    const FrameGenStatus status = presenter.Status();
+    Check(status.threaded && status.dynamic, "jit dynamic extrapolation: presents dynamically from its own thread");
+    Check(frames / elapsed > refresh / 3 * 1.15,
+          "jit dynamic extrapolation: the app is not held to a third of the refresh (" + std::to_string(frames / elapsed) +
+              " fps)");
+    const auto log = runtime.Snapshot();
+    Check(static_cast<double>(log.size() - first) / elapsed > refresh * 0.85,
+          "jit dynamic extrapolation: every refresh gets a frame");
+    Check(status.distinct_fps > 0.85 * status.output_fps,
+          "jit dynamic extrapolation: refreshes show new frames (" + std::to_string(status.distinct_fps) + " of " +
+              std::to_string(status.output_fps) + " fps)");
+    Check(runtime.mismatched_images == 0, "jit dynamic extrapolation: every image shown was written for its views");
+    int creates = 0;
+    {
+        std::scoped_lock lock(g_xr_mutex);
+        creates = g_creates;
+    }
+    Check(creates == 2, "jit dynamic extrapolation: one output swapchain per eye (" + std::to_string(creates) + ")");
+    Check(gap < 200ms, "jit dynamic extrapolation: no stalls");
+    CheckOrderedTimes(log, "jit dynamic extrapolation");
+    presenter.Stop();
+    Check(!runtime.ordering_violation && !g_release_violation, "jit dynamic extrapolation: calls stayed ordered");
+}
+
 void TestDepthCapture() {
     FrameGenPresenter presenter;
     GpuLog gpu;
@@ -1700,41 +2077,69 @@ void TestUnavailableWithoutBackend() {
 
 } // namespace
 
+// FG_TEST_VERBOSE=1 names each test as it starts; FG_TEST_ONLY=<name> runs
+// only the tests whose name contains it.
+#define RUN(test)                                                                                                          do {                                                                                                                       const char* only = std::getenv("FG_TEST_ONLY");                                                                        if (only && std::string(#test).find(only) == std::string::npos) break;                                                 if (std::getenv("FG_TEST_VERBOSE")) std::cerr << #test << (g_jit ? " (just in time)" : "") << std::endl;              test();                                                                                                            } while (0)
+
 int main() {
-    TestInterpolationPacing();
-    TestExtrapolationPacing();
-    TestTripleInterpolation();
-    TestQuadExtrapolation();
-    TestSubmissionSpacing();
-    TestOutputsKeptAcrossMultipliers();
-    TestDepthCapture();
-    TestAutomaticMultiplier();
-    TestThreadedExtrapolation();
-    TestThreadedDynamic();
-    TestDynamicFreesOutputsNearBudget();
-    TestThreadedRepeatsAreNotDistinct();
-    TestThreadedPipelinedApp();
-    TestThreadedInterpolation();
-    TestThreadedToggleAndReset();
-    TestThreadedPipelinedDouble();
-    TestThreadedDestroyedSwapchain();
-    TestThreadedRuntimeFailureRecovers();
-    TestThreadedMsfsTiming();
-    TestThreadedPauseRetryMsfsTiming();
-    TestThreadedDestroyedSpace();
-    TestThreadedKeepsOtherLayers();
-    TestThreadedUnsupportedLayerPresentsInline();
-    TestOverlappingWaitIsHeld();
-    TestUnclaimedFrameIsDemoted();
-    TestSameThreadDoubleWait();
-    TestWaitThreadSeparateFromEndThread();
-    TestRefusedCaptureUsage();
-    TestOutputWaitTimeout();
-    TestOutputFormatFallback();
-    TestFailuresRetryAndToggle();
-    TestUncapturedFramesAreSkipped();
-    TestSettingsAndSessionChanges();
-    TestUnavailableWithoutBackend();
+    // An exception escaping a thread (the presenter's included) ends the run
+    // with what it was, not a bare fail-fast.
+    std::set_terminate([] {
+        std::string what = "unknown";
+        try {
+            if (const auto exception = std::current_exception()) std::rethrow_exception(exception);
+            what = "terminate without an exception";
+        } catch (const std::exception& e) {
+            what = e.what();
+        } catch (...) {
+        }
+        std::cerr << "FAILED: terminate: " << what << std::endl;
+        std::_Exit(3);
+    });
+    RUN(TestInterpolationPacing);
+    RUN(TestExtrapolationPacing);
+    RUN(TestTripleInterpolation);
+    RUN(TestQuadExtrapolation);
+    RUN(TestSubmissionSpacing);
+    RUN(TestOutputsKeptAcrossMultipliers);
+    RUN(TestDepthCapture);
+    RUN(TestAutomaticMultiplier);
+    RUN(TestThreadedExtrapolation);
+    RUN(TestThreadedDynamic);
+    RUN(TestDynamicFreesOutputsNearBudget);
+    RUN(TestThreadedPipelinedApp);
+    RUN(TestThreadedInterpolation);
+    RUN(TestJitExtrapolation);
+    RUN(TestJitDynamicExtrapolation);
+    RUN(TestJitInterpolation);
+    RUN(TestJitDynamicInterpolation);
+    // The threaded presenter's lifecycle with frames written together, then
+    // just in time.
+    for (const bool jit : {false, true}) {
+        g_jit = jit;
+        RUN(TestThreadedToggleAndReset);
+        RUN(TestThreadedPipelinedDouble);
+        RUN(TestThreadedDestroyedSwapchain);
+        RUN(TestThreadedRuntimeFailureRecovers);
+        RUN(TestThreadedPauseRetryMsfsTiming);
+        RUN(TestThreadedDestroyedSpace);
+        RUN(TestThreadedKeepsOtherLayers);
+        RUN(TestThreadedRepeatsAreNotDistinct);
+    }
+    g_jit = false;
+    RUN(TestThreadedMsfsTiming);
+    RUN(TestThreadedUnsupportedLayerPresentsInline);
+    RUN(TestOverlappingWaitIsHeld);
+    RUN(TestUnclaimedFrameIsDemoted);
+    RUN(TestSameThreadDoubleWait);
+    RUN(TestWaitThreadSeparateFromEndThread);
+    RUN(TestRefusedCaptureUsage);
+    RUN(TestOutputWaitTimeout);
+    RUN(TestOutputFormatFallback);
+    RUN(TestFailuresRetryAndToggle);
+    RUN(TestUncapturedFramesAreSkipped);
+    RUN(TestSettingsAndSessionChanges);
+    RUN(TestUnavailableWithoutBackend);
     std::cout << "depthxr_framegen_presenter_tests passed\n";
     return 0;
 }

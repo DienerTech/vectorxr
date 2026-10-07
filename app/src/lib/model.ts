@@ -444,8 +444,8 @@ export type FrameGenMotionEstimation = typeof frameGenMotionEstimations[number]
 // passing frames through while the application holds the headset refresh,
 // steps up while it misses its cadence, and probes back down when it keeps up.
 // 'dynamic' holds nothing: the application runs at its own rate and generated
-// frames fill the refreshes between its frames (Extrapolate on Direct3D 12;
-// elsewhere the layer treats it as 'auto').
+// frames fill the refreshes between its frames (Direct3D 12; elsewhere the
+// layer treats it as 'auto').
 export const frameGenFrameMultipliers = ['auto', 'dynamic', '2x', '3x', '4x'] as const
 export type FrameGenFrameMultiplier = typeof frameGenFrameMultipliers[number]
 // Module-level overlay drawn into generated frames only.

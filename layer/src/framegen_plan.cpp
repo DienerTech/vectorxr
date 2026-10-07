@@ -76,6 +76,96 @@ std::uint32_t FrameGenHalf(float value) {
     return (sign | (static_cast<std::uint32_t>(exponent) << 10) | (mantissa >> 13)) + ((mantissa >> 12) & 1u);
 }
 
+// The constants every dispatch of a view starts from: both views' tangents,
+// the relative pose (with depth, the newest view's position in the previous
+// view's space), the flags and the tuning scales.
+FrameGenConstants BaseConstants(const FrameGenViewRequest& request, const FrameGenTuning& tuning,
+                                FrameGenSynthesisMode mode) {
+    const float suppression = static_cast<float>(std::clamp(tuning.artifact_suppression, 0, 100)) / 100.0f;
+    const float limit = static_cast<float>(std::clamp(tuning.motion_limit_percent, 2, 25)) / 100.0f;
+    FrameGenConstants base;
+    base.fov_current = Tangents(request.newest);
+    base.fov_previous = Tangents(request.previous);
+    const Matrix3 rotation = FrameGenRelativeRotation(request.newest.orientation, request.previous.orientation);
+    // The w components carry the newest view's position in the previous
+    // view's space (meters), used with depth: a point at newest-view depth z
+    // along direction d lies at R d + t / z, up to scale, in the previous view.
+    const std::array<float, 3> translation =
+        request.depth ? RelativeTranslation(request.newest, request.previous) : std::array<float, 3>{0.0f, 0.0f, 0.0f};
+    base.rot0 = {rotation[0][0], rotation[0][1], rotation[0][2], translation[0]};
+    base.rot1 = {rotation[1][0], rotation[1][1], rotation[1][2], translation[1]};
+    base.rot2 = {rotation[2][0], rotation[2][1], rotation[2][2], translation[2]};
+    std::uint32_t flags = 0;
+    if (request.output == FrameGenOutputKind::kSrgb8) {
+        flags |= kFrameGenFlagSrgbEncode;
+    }
+    if (mode == FrameGenSynthesisMode::kExtrapolate) {
+        flags |= kFrameGenFlagExtrapolate;
+    }
+    if (request.temporal) {
+        flags |= kFrameGenFlagTemporal;
+    }
+    if (request.depth) {
+        flags |= kFrameGenFlagDepth;
+    }
+    if (tuning.occlusion && mode == FrameGenSynthesisMode::kInterpolate) {
+        flags |= kFrameGenFlagOcclusion;
+    }
+    if (tuning.cross_fade && mode == FrameGenSynthesisMode::kInterpolate) {
+        flags |= kFrameGenFlagCrossFade;
+    }
+    base.options = {kFrameGenSearchRadius, flags, static_cast<std::uint32_t>(tuning.diagnostic), 0};
+    base.tuning = {std::clamp(tuning.fractions[0], 0.0f, 1.0f), limit, 4.0f + 26.0f * suppression,
+                   3.0f + 21.0f * suppression};
+    return base;
+}
+
+// The eye-shift map for a generated frame seen from `eye` (meters, in the
+// newest view's space), built into the one map texture.
+void AppendShiftMap(FrameGenViewPlan& plan, const FrameGenConstants& base, const std::array<float, 3>& eye,
+                    FrameGenTexture depth) {
+    FrameGenConstants mapping = base;
+    mapping.fov_previous = mapping.fov_current;
+    mapping.rot0 = {1.0f, 0.0f, 0.0f, -eye[0]};
+    mapping.rot1 = {0.0f, 1.0f, 0.0f, -eye[1]};
+    mapping.rot2 = {0.0f, 0.0f, 1.0f, -eye[2]};
+    mapping.options = {0, kFrameGenFlagDepth, 0, 0};
+    auto pass = [&](FrameGenPass kind, std::array<FrameGenTexture, 6> inputs, FrameGenTexture output,
+                    FrameGenTexture second = {}) {
+        FrameGenDispatch dispatch = Dispatch(kind, plan.levels[1], plan.levels[1], mapping);
+        dispatch.inputs = inputs;
+        dispatch.outputs = {output, second};
+        plan.dispatches.push_back(dispatch);
+    };
+    const FrameGenTexture keys = Texture(FrameGenTextureKind::kShiftKeys);
+    const FrameGenTexture target = Texture(FrameGenTextureKind::kShiftMap);
+    pass(FrameGenPass::kShiftClear, {}, keys, target);
+    pass(FrameGenPass::kShiftSplat, {depth, {}, {}, {}, {}, {}}, keys);
+    pass(FrameGenPass::kShiftResolve, {depth, {}, keys, {}, {}, {}}, target);
+    pass(FrameGenPass::kShiftFill, {keys, {}, {}, {}, {}, {}}, target);
+}
+
+// The world's own motion (FrameGenViewRequest::world_motion), fitted to the
+// measured flow at a grid of samples: each iteration weighs the samples by
+// the last fit.
+void AppendWorldFit(FrameGenViewPlan& plan, const FrameGenConstants& base, FrameGenTexture depth) {
+    for (std::uint32_t iteration = 0; iteration < kFrameGenWorldIterations; ++iteration) {
+        FrameGenDispatch reduce = Dispatch(FrameGenPass::kWorldReduce, {kFrameGenWorldGrid, kFrameGenWorldGrid},
+                                           plan.levels[plan.final_flow_level], base);
+        reduce.inputs = {Texture(FrameGenTextureKind::kFlow, plan.final_flow_level), {}, depth,
+                         iteration ? Texture(FrameGenTextureKind::kWorldParams) : FrameGenTexture{}, {}};
+        reduce.outputs = {Texture(FrameGenTextureKind::kWorldPartials), {}};
+        reduce.constants.options[2] = iteration;
+        reduce.constants.options[3] = plan.final_flow_level;
+        plan.dispatches.push_back(reduce);
+        FrameGenDispatch solve = Dispatch(FrameGenPass::kWorldSolve, {kFrameGenThreadGroupSize, kFrameGenThreadGroupSize},
+                                          {kFrameGenThreadGroupSize, kFrameGenThreadGroupSize}, base);
+        solve.inputs = {Texture(FrameGenTextureKind::kWorldPartials), {}, {}, {}, {}};
+        solve.outputs = {Texture(FrameGenTextureKind::kWorldParams), {}};
+        plan.dispatches.push_back(solve);
+    }
+}
+
 } // namespace
 
 std::uint8_t FrameGenFinalFlowLevel(FrameGenFlowQuality quality) {
@@ -142,43 +232,17 @@ FrameGenViewPlan BuildFrameGenViewPlan(const FrameGenViewRequest& request, const
     plan.final_flow_level = FrameGenFinalFlowLevel(tuning);
     plan.synthesize = request.synthesize && request.extent.width >= 64 && request.extent.height >= 64;
 
-    const float suppression = static_cast<float>(std::clamp(tuning.artifact_suppression, 0, 100)) / 100.0f;
-    const float limit = static_cast<float>(std::clamp(tuning.motion_limit_percent, 2, 25)) / 100.0f;
-
-    FrameGenConstants base;
-    base.fov_current = Tangents(request.newest);
-    base.fov_previous = Tangents(request.previous);
-    const Matrix3 rotation = FrameGenRelativeRotation(request.newest.orientation, request.previous.orientation);
-    // The w components carry the newest view's position in the previous
-    // view's space (meters), used with depth: a point at newest-view depth z
-    // along direction d lies at R d + t / z, up to scale, in the previous view.
-    const std::array<float, 3> translation =
-        request.depth ? RelativeTranslation(request.newest, request.previous) : std::array<float, 3>{0.0f, 0.0f, 0.0f};
-    base.rot0 = {rotation[0][0], rotation[0][1], rotation[0][2], translation[0]};
-    base.rot1 = {rotation[1][0], rotation[1][1], rotation[1][2], translation[1]};
-    base.rot2 = {rotation[2][0], rotation[2][1], rotation[2][2], translation[2]};
-    std::uint32_t flags = 0;
-    if (request.output == FrameGenOutputKind::kSrgb8) {
-        flags |= kFrameGenFlagSrgbEncode;
-    }
-    if (tuning.mode == FrameGenSynthesisMode::kExtrapolate) {
-        flags |= kFrameGenFlagExtrapolate;
-    }
-    if (request.temporal) {
-        flags |= kFrameGenFlagTemporal;
-    }
-    if (request.depth) {
-        flags |= kFrameGenFlagDepth;
-    }
+    const FrameGenConstants base = BaseConstants(request, tuning, tuning.mode);
     const FrameGenTexture depth = request.depth ? Texture(FrameGenTextureKind::kDepth) : FrameGenTexture{};
-    base.options = {kFrameGenSearchRadius, flags, static_cast<std::uint32_t>(tuning.diagnostic), 0};
     const std::size_t generated = std::clamp<std::size_t>(tuning.generated, 1, kFrameGenMaxGenerated);
     const auto all_outputs = static_cast<std::uint8_t>((1u << generated) - 1u);
-    base.tuning = {std::clamp(tuning.fractions[0], 0.0f, 1.0f), limit, 4.0f + 26.0f * suppression,
-                   3.0f + 21.0f * suppression};
 
     const FrameGenPass synthesize = request.output == FrameGenOutputKind::kFloat16 ? FrameGenPass::kSynthesizeFloat16
                                                                                    : FrameGenPass::kSynthesizeUnorm8;
+    if (!plan.synthesize && tuning.analyze_only) {
+        // Nothing to measure (no previous frame); synthesis writes it unchanged.
+        return plan;
+    }
     if (!plan.synthesize) {
         // Still image: the synthesis pass with the still flag and no flow.
         FrameGenDispatch still = Dispatch(synthesize, plan.levels[0], plan.levels[0], base);
@@ -294,28 +358,29 @@ FrameGenViewPlan BuildFrameGenViewPlan(const FrameGenViewRequest& request, const
     filter.outputs = {Texture(FrameGenTextureKind::kFilteredNewest, plan.final_flow_level), {}};
     filter.constants.options[3] = plan.final_flow_level;
     filter.constants.tuning[0] = std::clamp(tuning.interval_ratio, 0.25f, 4.0f);
-    if (request.depth && request.world_motion && tuning.mode == FrameGenSynthesisMode::kExtrapolate) {
-        // The world's own motion, fitted to the measured flow at a grid of
-        // samples: each iteration weighs the samples by the last fit.
-        for (std::uint32_t iteration = 0; iteration < kFrameGenWorldIterations; ++iteration) {
-            FrameGenDispatch reduce = Dispatch(FrameGenPass::kWorldReduce, {kFrameGenWorldGrid, kFrameGenWorldGrid},
-                                               plan.levels[plan.final_flow_level], base);
-            reduce.inputs = {Texture(FrameGenTextureKind::kFlow, plan.final_flow_level), {}, depth,
-                             iteration ? Texture(FrameGenTextureKind::kWorldParams) : FrameGenTexture{}, {}};
-            reduce.outputs = {Texture(FrameGenTextureKind::kWorldPartials), {}};
-            reduce.constants.options[2] = iteration;
-            reduce.constants.options[3] = plan.final_flow_level;
-            plan.dispatches.push_back(reduce);
-            FrameGenDispatch solve = Dispatch(FrameGenPass::kWorldSolve, {kFrameGenThreadGroupSize, kFrameGenThreadGroupSize},
-                                              {kFrameGenThreadGroupSize, kFrameGenThreadGroupSize}, base);
-            solve.inputs = {Texture(FrameGenTextureKind::kWorldPartials), {}, {}, {}, {}};
-            solve.outputs = {Texture(FrameGenTextureKind::kWorldParams), {}};
-            plan.dispatches.push_back(solve);
-        }
+    const bool world = request.depth && request.world_motion;
+    if (world && tuning.mode == FrameGenSynthesisMode::kExtrapolate) {
+        AppendWorldFit(plan, base, depth);
         filter.inputs[3] = Texture(FrameGenTextureKind::kWorldParams);
         filter.constants.options[1] |= kFrameGenFlagWorld;
     }
     plan.dispatches.push_back(filter);
+    if (tuning.analyze_only) {
+        if (tuning.cover && tuning.mode == FrameGenSynthesisMode::kInterpolate) {
+            // The same flow filtered as extrapolation filters it, for cover
+            // frames past the newest frame.
+            FrameGenDispatch cover = filter;
+            cover.outputs = {Texture(FrameGenTextureKind::kFilteredCover, plan.final_flow_level), {}};
+            cover.constants.options[1] |= kFrameGenFlagExtrapolate;
+            if (world) {
+                AppendWorldFit(plan, base, depth);
+                cover.inputs[3] = Texture(FrameGenTextureKind::kWorldParams);
+                cover.constants.options[1] |= kFrameGenFlagWorld;
+            }
+            plan.dispatches.push_back(cover);
+        }
+        return plan;
+    }
 
     // Eye-shift maps, built into the one map texture right before the frames
     // written from it: one per generated frame whose eye has moved
@@ -337,26 +402,7 @@ FrameGenViewPlan BuildFrameGenViewPlan(const FrameGenViewRequest& request, const
         const bool rebuild = map_time <= 0.0f || (!spare && shift_length * std::abs(time - map_time) >= kFrameGenShiftRebuild);
         if (shifted && rebuild) {
             map_time = time;
-            const std::array<float, 3> eye{request.shift[0] * time, request.shift[1] * time, request.shift[2] * time};
-            FrameGenConstants mapping = base;
-            mapping.fov_previous = mapping.fov_current;
-            mapping.rot0 = {1.0f, 0.0f, 0.0f, -eye[0]};
-            mapping.rot1 = {0.0f, 1.0f, 0.0f, -eye[1]};
-            mapping.rot2 = {0.0f, 0.0f, 1.0f, -eye[2]};
-            mapping.options = {0, kFrameGenFlagDepth, 0, 0};
-            auto pass = [&](FrameGenPass kind, std::array<FrameGenTexture, 6> inputs, FrameGenTexture output,
-                            FrameGenTexture second = {}) {
-                FrameGenDispatch dispatch = Dispatch(kind, plan.levels[1], plan.levels[1], mapping);
-                dispatch.inputs = inputs;
-                dispatch.outputs = {output, second};
-                plan.dispatches.push_back(dispatch);
-            };
-            const FrameGenTexture keys = Texture(FrameGenTextureKind::kShiftKeys);
-            const FrameGenTexture target = Texture(FrameGenTextureKind::kShiftMap);
-            pass(FrameGenPass::kShiftClear, {}, keys, target);
-            pass(FrameGenPass::kShiftSplat, {depth, {}, {}, {}, {}, {}}, keys);
-            pass(FrameGenPass::kShiftResolve, {depth, {}, keys, {}, {}, {}}, target);
-            pass(FrameGenPass::kShiftFill, {keys, {}, {}, {}, {}, {}}, target);
+            AppendShiftMap(plan, base, {request.shift[0] * time, request.shift[1] * time, request.shift[2] * time}, depth);
             plan.frames_in_order = true;
         }
         FrameGenDispatch output = Dispatch(synthesize, plan.levels[0], plan.levels[plan.final_flow_level], base);
@@ -375,6 +421,64 @@ FrameGenViewPlan BuildFrameGenViewPlan(const FrameGenViewRequest& request, const
         output.copy_mask = static_cast<std::uint8_t>(1u << index);
         plan.dispatches.push_back(output);
     }
+    return plan;
+}
+
+FrameGenViewPlan BuildFrameGenSynthesisPlan(const FrameGenViewRequest& request, const FrameGenTuning& tuning,
+                                            FrameGenSynthesisMode mode, float fraction, bool cover_flow) {
+    FrameGenViewPlan plan;
+    plan.extent = request.extent;
+    plan.levels = FrameGenPyramid(request.extent);
+    plan.final_flow_level = FrameGenFinalFlowLevel(tuning);
+    plan.synthesize = request.synthesize && request.extent.width >= 64 && request.extent.height >= 64;
+    const bool extrapolate = mode == FrameGenSynthesisMode::kExtrapolate;
+    fraction = std::clamp(fraction, 0.0f, 1.0f);
+    FrameGenConstants base = BaseConstants(request, tuning, mode);
+    base.tuning[0] = fraction;
+    const FrameGenPass synthesize = request.output == FrameGenOutputKind::kFloat16 ? FrameGenPass::kSynthesizeFloat16
+                                                                                   : FrameGenPass::kSynthesizeUnorm8;
+    // The time synthesis moves content by (past the newest frame, or before
+    // it), and the eye's offset at the frame's time: the shift is the eye's
+    // movement per unit forward in time, so interpolated frames sit back
+    // toward the previous frame.
+    const float time = extrapolate ? fraction : 1.0f - fraction;
+    if (!plan.synthesize || time <= 0.0f) {
+        FrameGenDispatch still = Dispatch(synthesize, plan.levels[0], plan.levels[0], base);
+        still.constants.options[1] |= kFrameGenFlagStill;
+        still.constants.options[2] = static_cast<std::uint32_t>(FrameGenDiagnosticView::kOff);
+        still.inputs = {Texture(FrameGenTextureKind::kHistoryNewest), {}, {}, {}, {}};
+        still.outputs = {Texture(FrameGenTextureKind::kOutput), {}};
+        still.copy_mask = 1u;
+        plan.synthesize = false;
+        plan.dispatches.push_back(still);
+        return plan;
+    }
+    const FrameGenTexture depth = request.depth ? Texture(FrameGenTextureKind::kDepth) : FrameGenTexture{};
+    const float eye_time = extrapolate ? fraction : fraction - 1.0f;
+    const std::array<float, 3> eye{request.shift[0] * eye_time, request.shift[1] * eye_time, request.shift[2] * eye_time};
+    const bool shifted =
+        request.depth && std::sqrt(eye[0] * eye[0] + eye[1] * eye[1] + eye[2] * eye[2]) >= kFrameGenMinimumShift;
+    if (shifted) {
+        AppendShiftMap(plan, base, eye, depth);
+    }
+    FrameGenDispatch output = Dispatch(synthesize, plan.levels[0], plan.levels[plan.final_flow_level], base);
+    output.inputs = {Texture(FrameGenTextureKind::kHistoryNewest),
+                     Texture(FrameGenTextureKind::kHistoryPrevious),
+                     Texture(extrapolate && cover_flow ? FrameGenTextureKind::kFilteredCover
+                                                       : FrameGenTextureKind::kFilteredNewest,
+                             plan.final_flow_level),
+                     depth,
+                     shifted ? Texture(FrameGenTextureKind::kShiftMap) : FrameGenTexture{},
+                     {}};
+    if (shifted) {
+        // The map is built for this frame's own eye position: synthesis
+        // scales it by one.
+        output.constants.options[1] |= kFrameGenFlagShift;
+        output.constants.options[3] = FrameGenHalf(time);
+    }
+    output.outputs = {Texture(FrameGenTextureKind::kOutput), {}};
+    output.copy_mask = 1u;
+    plan.dispatches.push_back(output);
     return plan;
 }
 
@@ -578,14 +682,16 @@ FrameGenDispatch BuildFrameGenDepthDispatch(FrameGenExtent view_extent, std::int
 }
 
 unsigned FrameGenHistoryState::Configure(FrameGenExtent extent, std::int64_t source_format, FrameGenOutputKind output,
-                                         std::uint8_t final_level) {
+                                         std::uint8_t final_level, std::uint8_t ring) {
     unsigned change = kNone;
+    ring = std::clamp<std::uint8_t>(ring, 2, kFrameGenHistoryRingMax);
     if (extent.width != extent_.width || extent.height != extent_.height || source_format != source_format_ ||
-        output != output_) {
+        output != output_ || ring != ring_) {
         extent_ = extent;
         source_format_ = source_format;
         output_ = output;
         final_level_ = final_level;
+        ring_ = ring;
         Invalidate();
         return kAll;
     }
@@ -620,7 +726,7 @@ void FrameGenHistoryState::Commit(bool synthesized, bool trusted) {
     history_valid_[newest_] = true;
     filtered_valid_[newest_] = synthesized;
     trust_valid_[newest_] = trusted;
-    newest_ ^= 1u;
+    newest_ = static_cast<std::uint8_t>((newest_ + 1u) % ring_);
 }
 
 void FrameGenHistoryState::Invalidate() {

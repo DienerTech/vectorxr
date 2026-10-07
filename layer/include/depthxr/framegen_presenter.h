@@ -10,6 +10,7 @@
 #include <optional>
 #include <string>
 #include <thread>
+#include <tuple>
 #include <unordered_map>
 #include <vector>
 
@@ -302,6 +303,18 @@ class FrameGenPresenter {
         std::vector<Layer> layers;
     };
 
+    // Just-in-time presentation: a real frame generated frames are written
+    // from on the presenter thread, right before the refreshes showing them.
+    struct JitFrame {
+        std::uint64_t id{0};       // ThreadedFrame::id
+        std::uint64_t analyzed{0}; // FrameGenExecuteResult::frame
+        XrTime time{0};            // the display time it was rendered for
+        XrTime previous_time{0};   // the real frame before's, when continuous (0: shown unchanged only)
+        FrameCopy copy;            // its layers; the primary projection's views are its own
+        std::vector<FrameGenOutputKind> kinds;       // per view
+        std::vector<std::array<float, 3>> velocity; // per view (Analysis::velocity)
+    };
+
     // An application frame the presenter thread presents.
     struct ThreadedFrame {
         std::uint64_t id{0};
@@ -315,6 +328,7 @@ class FrameGenPresenter {
         std::uint64_t first_slot{0};
         XrTime first_time{0};
         bool interpolate{false};
+        bool jit{false};               // presented just in time (jit_ when it was waited)
         std::uint32_t multiplier{2};
         std::uint32_t lead{0};         // refreshes between its release and target_slot
         bool begun{false};
@@ -374,6 +388,18 @@ class FrameGenPresenter {
     XrResult NextSlot(XrSession session, const FrameGenRuntimeCalls& calls, XrDuration period, XrFrameState& state);
     XrResult RunCycle(XrSession session, const XrFrameEndInfo& info, const PendingFrame& frame,
                       const FrameGenRuntimeCalls& calls);
+    // Just-in-time presentation: what measuring a real frame's motion gave
+    // (Generate with `analyze`).
+    struct Analysis {
+        std::uint64_t frame{0}; // FrameGenExecuteResult::frame
+        bool synthesized{false}; // motion was measured (a previous frame to measure it against)
+        std::vector<FrameGenOutputKind> kinds;
+        // Per view: how far the eye moves per unit forward in time (the
+        // interval between the two real frames), in its view space, where
+        // depth is used (generated frames are seen from where it will be).
+        std::vector<std::array<float, 3>> velocity;
+    };
+
     // Generates one frame per fraction into the output swapchain sets from
     // the newest real frame. On success `sets` holds the generated
     // projection views, one set per fraction, and `exact` which of them
@@ -381,10 +407,13 @@ class FrameGenPresenter {
     // fraction of 1, or a frame written unchanged); only those may carry its
     // depth, which describes its image and eye position, not a generated
     // frame's. Without `release` the output images, written or not, stay
-    // acquired until ReleaseOutputs.
+    // acquired until ReleaseOutputs. With `analyze` it only measures the
+    // newest frame's motion for just-in-time synthesis (no fractions, no
+    // output images), filtered for `mode` and, interpolating, for cover
+    // frames too.
     bool Generate(const XrCompositionLayerProjection& projection, const PendingFrame& frame, FrameGenSynthesisMode mode,
                   const std::vector<float>& fractions, std::vector<std::vector<XrCompositionLayerProjectionView>>& sets,
-                  std::vector<std::uint8_t>& exact, bool release = true);
+                  std::vector<std::uint8_t>& exact, bool release = true, Analysis* analyze = nullptr);
     // Depth chains of a frame copy that describe images the game has since
     // replaced are dropped.
     void RecordDepthReleasesLocked(FrameCopy& copy) const;
@@ -452,6 +481,32 @@ class FrameGenPresenter {
                                                const FrameGenRuntimeCalls& calls);
     XrResult ThreadedEnd(XrSession session, const XrFrameEndInfo& info, const FrameGenRuntimeCalls& calls,
                          const ThreadedFrame& frame, std::chrono::steady_clock::time_point entered);
+    // Interpolating just in time: the real frame is measured and kept; the
+    // presenter thread shows it, and the frames between it and the one
+    // before, at the display times they are due.
+    XrResult ThreadedEndInterpolate(const XrFrameEndInfo& info, const ThreadedFrame& frame,
+                                    std::chrono::steady_clock::time_point entered);
+    // Just in time: measures a real frame (app thread) and keeps it for the
+    // presenter thread. False when nothing can be generated from it.
+    bool AnalyzeJit(const XrCompositionLayerProjection& projection, const PendingFrame& frame, FrameGenSynthesisMode mode,
+                    FrameCopy copy);
+    // Presenter thread, just in time: what the refresh at `time` shows: the
+    // real frame `index` of jit_frames_ at `fraction` in `mode`, or nothing
+    // (repeat). `due` is set when the next real frame is needed and not
+    // measured yet.
+    struct JitChoice {
+        std::optional<std::size_t> index;
+        FrameGenSynthesisMode mode{FrameGenSynthesisMode::kInterpolate};
+        float fraction{1.0f};
+        bool cover{false}; // past the newest real frame while the next one is late
+    };
+    JitChoice ChooseJitLocked(XrTime time, XrDuration period, bool interpolate, bool& due) const;
+    // Presenter thread, holding submit_mutex_ only: writes the chosen frame
+    // into the next output images and fills `views` with the projection
+    // views showing them. False (nothing released) when it cannot.
+    bool SynthesizeJit(const JitFrame& frame, const JitChoice& choice, std::vector<XrCompositionLayerProjectionView>& views,
+                       bool& exact);
+    void SummaryLocked(std::chrono::steady_clock::time_point now);
     void StartCompositorLocked(const FrameGenRuntimeCalls& calls);
     // Lets the presenter thread present every frame in flight, then stops it.
     void ExitThreadedLocked(std::unique_lock<std::mutex>& lock);
@@ -639,6 +694,21 @@ class FrameGenPresenter {
     std::size_t next_generated_set_{0};
     std::uint64_t threaded_late_{0};     // real frames shown after their predicted slot
     std::uint64_t skipped_generated_{0}; // generated frames passed over: made for a refresh already past
+    // Just-in-time presentation (latched when the presenter thread starts).
+    bool jit_{false};
+    std::deque<JitFrame> jit_frames_; // oldest first
+    // The last frame the presenter thread wrote (real frame id, mode,
+    // fraction), for distinct-frame counting, and the views submitted with it.
+    std::optional<std::tuple<std::uint64_t, int, float>> jit_shown_;
+    std::vector<XrCompositionLayerProjectionView> jit_views_;
+    FrameCopy jit_content_; // the layers submitted with them
+    bool jit_exact_{false}; // they were a real frame's exact copy
+    bool jit_interpolate_{false}; // the presenter thread interpolates (latched with jit_)
+    bool logged_jit_{false};
+    std::uint64_t newest_copy_id_{0}; // the ThreadedFrame::id newest_copy_ came from
+    std::uint64_t jit_covers_{0};   // refreshes shown past the newest real frame while the next was late (summary)
+    std::uint64_t jit_failures_{0}; // refreshes that could not be written (summary)
+    XrTime last_target_time_{0};    // interpolating just in time: the display time the newest waited frame was told
     // Real frames generated from, and how many of them used the game's depth,
     // since the last summary.
     std::uint64_t depth_window_frames_{0};

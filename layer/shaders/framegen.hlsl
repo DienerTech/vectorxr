@@ -61,6 +61,13 @@ cbuffer FrameGenConstantBuffer : register(b0) {
 // FG_PASS_FILTER: the world's own motion (FG_PASS_WORLD_SOLVE, input 3)
 // replaces the measured flow of world content.
 #define FG_FLAG_WORLD 128u
+// Synthesis, interpolating with depth: content only one real frame sees (at
+// a motion boundary) is shown from that frame alone (see Synthesize).
+#define FG_FLAG_OCCLUSION 256u
+// Research: interpolation falls back to a cross-fade of the two real frames
+// (head movement taken out) where its motion is not trusted, instead of to
+// the newest frame.
+#define FG_FLAG_CROSSFADE 512u
 
 // Linear depth at or beyond this many meters is treated as infinitely far.
 #define FG_FAR_DEPTH 100000.0
@@ -918,6 +925,10 @@ float3 Hue(float h) {
     return saturate(float3(abs(h * 6.0 - 3.0) - 1.0, 2.0 - abs(h * 6.0 - 2.0), 2.0 - abs(h * 6.0 - 4.0)));
 }
 
+// Synthesis (FG_FLAG_OCCLUSION): the candidate error (CandidateError) above
+// which the two real frames see different content wherever a vector points.
+#define FG_OCCLUSION_ERROR 0.12
+
 float MaxComponent(float3 value) {
     return max(value.x, max(value.y, value.z));
 }
@@ -928,6 +939,69 @@ float3 Perceptual(float3 value) {
 
 float DepthAt(float2 uv) {
     return DepthNearest(g_depth, uv);
+}
+
+// Depth for front-to-back order: unknown or disproved depth is far.
+float OrderDepth(float depth) {
+    return depth > 0.0 ? depth : FG_FAR_DEPTH;
+}
+
+// The newest frame sees content moving by `v` at `newest_uv` when its own
+// flow there is `v` (within a pixel and a half, or a quarter of the motion).
+bool SeesMoving(float2 newest_uv, float2 v) {
+    if (any(newest_uv < 0.0) || any(newest_uv > 1.0)) {
+        return false;
+    }
+    uint width, height;
+    g_flow.GetDimensions(width, height);
+    const int2 cell = clamp(int2(newest_uv * float2(width, height)), int2(0, 0), int2(width, height) - 1);
+    const float2 there = g_flow.Load(int3(cell, 0)).xy;
+    const float2 pixels = float2(g.size.xy);
+    return length((there - v) * pixels) <= max(1.5, 0.25 * length(v * pixels));
+}
+
+// Interpolating with depth, at a motion boundary where no candidate vector
+// has both real frames agree, the content belongs to one of them: newly
+// revealed (the newest frame sees it, the previous one saw what moved off
+// it) or being covered (the previous frame sees it, the newest one already
+// shows what moved over it). A candidate the newest frame sees moving its
+// way where it lands is shown from the newest frame alone, the nearest such
+// surface in front; with none, the content is being covered: the farthest
+// candidate's surface (the background, whose motion the cell beside it
+// measured) is shown from the previous frame alone. Returns 1 or 2 with the
+// vector and the depth to map it with, or 0.
+int Occlusion(float2 uv, float step, float4 candidates[7], float candidate_depth[7], out float2 v, out float depth) {
+    v = float2(0.0, 0.0);
+    depth = 0.0;
+    float nearest = 2.0 * FG_FAR_DEPTH;
+    int kind = 0;
+    [unroll]
+    for (int k = 0; k < 7; ++k) {
+        const float2 landing = uv + step * candidates[k].xy;
+        if (SeesMoving(landing, candidates[k].xy)) {
+            const float there = OrderDepth(DepthAt(landing));
+            if (there < nearest) {
+                nearest = there;
+                kind = 1;
+                v = candidates[k].xy;
+                depth = DepthAt(landing);
+            }
+        }
+    }
+    if (kind != 0) {
+        return kind;
+    }
+    float farthest = -1.0;
+    [unroll]
+    for (int c = 0; c < 7; ++c) {
+        const float own = OrderDepth(candidate_depth[c]);
+        if (own > farthest) {
+            farthest = own;
+            v = candidates[c].xy;
+            depth = candidate_depth[c];
+        }
+    }
+    return 2;
 }
 
 // How differently the two real frames see the content a candidate vector
@@ -986,12 +1060,18 @@ float4 Synthesize(float2 position, float fraction) {
     const float step = extrapolate ? -fraction : 1.0 - fraction;
     float4 chosen = float4(0.0, 0.0, 0.0, 1.0);
     float chosen_error = 0.0;
+    int occlusion = 0; // 1: newest frame alone, 2: previous frame alone (Occlusion)
+    float2 occlusion_v = float2(0.0, 0.0);
+    float occlusion_depth = 0.0;
     if (!still) {
         // Candidates: the smooth field solved with a fixed-point iteration,
         // the field at this pixel, the four surrounding block vectors, and
         // zero motion. Later candidates carry a small bias so noise alone
         // never pulls a pixel off the smooth field.
         float4 candidates[7];
+        // Where each candidate's motion was measured, in the newest frame:
+        // its depth orders surfaces (FG_FLAG_OCCLUSION).
+        float candidate_depth[7];
         const float4 here = g_flow.SampleLevel(g_linear, uv, 0.0);
         float4 solved = g_flow.SampleLevel(g_linear, uv + step * here.xy, 0.0);
         solved = g_flow.SampleLevel(g_linear, uv + step * solved.xy, 0.0);
@@ -1005,8 +1085,10 @@ float4 Synthesize(float2 position, float fraction) {
         for (int i = 0; i < 4; ++i) {
             const int2 cell = clamp(base + int2(i & 1, i >> 1), int2(0, 0), limit_cell);
             candidates[2 + i] = g_flow.Load(int3(cell, 0));
+            candidate_depth[2 + i] = DepthAt((float2(cell) + 0.5) / float2(flow_width, flow_height));
         }
         candidates[6] = float4(0.0, 0.0, here.z, 1.0);
+        candidate_depth[0] = candidate_depth[1] = candidate_depth[6] = DepthAt(uv);
         chosen = candidates[0];
         // Smooth motion, most of a frame, leaves nothing to choose between;
         // only pixels near a motion boundary, where the surrounding block
@@ -1030,6 +1112,10 @@ float4 Synthesize(float2 position, float fraction) {
                     chosen_error = error;
                     chosen = candidates[k];
                 }
+            }
+            if (!extrapolate && (g.options.y & (FG_FLAG_OCCLUSION | FG_FLAG_DEPTH)) == (FG_FLAG_OCCLUSION | FG_FLAG_DEPTH) &&
+                chosen_error > FG_OCCLUSION_ERROR) {
+                occlusion = Occlusion(uv, step, candidates, candidate_depth, occlusion_v, occlusion_depth);
             }
         }
     }
@@ -1056,13 +1142,34 @@ float4 Synthesize(float2 position, float fraction) {
     const float4 current = g_current.SampleLevel(g_linear, source, 0.0);
     float4 result = current;
     float photometric_confidence = 1.0;
-    if (!extrapolate && !still) {
+    if (occlusion == 1) {
+        // Revealed (or in front): the newest frame alone.
+        result = g_current.SampleLevel(g_linear, uv + confidence * step * occlusion_v, 0.0);
+    } else if (occlusion == 2) {
+        // Being covered: the previous frame alone, where the content was.
+        float2 previous_uv;
+        if (MapToPrevious(uv - confidence * fraction * occlusion_v, occlusion_depth, previous_uv)) {
+            result = g_previous.SampleLevel(g_linear, previous_uv, 0.0);
+        }
+    } else if (!extrapolate && !still) {
         float2 previous_uv;
         if (MapToPrevious(source - confidence * chosen.xy, DepthAt(source), previous_uv)) {
             const float4 previous = g_previous.SampleLevel(g_linear, previous_uv, 0.0);
             const float difference = MaxComponent(abs(Perceptual(previous.rgb) - Perceptual(current.rgb)));
             photometric_confidence = saturate(1.0 - max(difference - 0.03, 0.0) * g.tuning.w);
             result = lerp(current, previous, (1.0 - fraction) * photometric_confidence);
+            if ((g.options.y & FG_FLAG_CROSSFADE) != 0u) {
+                // Research: untrusted motion fades between the two real
+                // frames where they are, instead of showing the newest one.
+                float2 still_uv;
+                const float4 newest_here = g_current.SampleLevel(g_linear, uv, 0.0);
+                const float4 previous_here = MapToPrevious(uv, DepthAt(uv), still_uv)
+                                                 ? g_previous.SampleLevel(g_linear, still_uv, 0.0)
+                                                 : newest_here;
+                const float4 fade = lerp(newest_here, previous_here, 1.0 - fraction);
+                const float4 paired = lerp(current, previous, 1.0 - fraction);
+                result = lerp(fade, paired, confidence * photometric_confidence);
+            }
         }
     } else if (extrapolate && boundary) {
         photometric_confidence = agreement;
