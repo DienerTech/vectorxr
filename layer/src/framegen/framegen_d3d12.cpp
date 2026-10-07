@@ -110,6 +110,7 @@ struct ViewResources {
     // for that on the GPU).
     std::array<std::uint32_t, kFrameGenHistoryRingMax> slot_generation{};
     std::array<UINT64, kFrameGenHistoryRingMax> slot_read{};
+    std::array<UINT64, kFrameGenHistoryRingMax> slot_read_present{}; // ... of the present queue (synthesis)
     // While recording Synthesize: the ring slots the analyzed frame's
     // newest and previous textures are in (-1: the history state's own).
     int bound_newest{-1};
@@ -221,6 +222,7 @@ struct AnalyzedFrame {
     std::uint64_t id{0};
     FrameGenTuning tuning;
     std::vector<AnalyzedView> views;
+    UINT64 work_value{0}; // the work queue's fence when its analysis is done
 };
 
 // What the optical flow hardware's watchdog watches, per view (up to
@@ -251,11 +253,11 @@ struct HardwareWatch {
 class D3D12FrameGen final : public FrameGenGpu {
   public:
     D3D12FrameGen(const XrGraphicsBindingD3D12KHR& binding, ID3D12CommandQueue* runtime_queue)
-        : device_(binding.device), queue_(binding.queue), work_(binding.queue) {
+        : device_(binding.device), queue_(binding.queue), work_(binding.queue), present_(binding.queue) {
         if (runtime_queue) {
             // Queue substitution: the runtime synchronizes with this queue.
-            work_ = runtime_queue;
-            runtime_on_work_ = true;
+            present_ = runtime_queue;
+            runtime_on_present_ = true;
         }
         ComPtr<IDXGIFactory4> factory;
         if (SUCCEEDED(CreateDXGIFactory1(IID_PPV_ARGS(&factory)))) {
@@ -358,28 +360,33 @@ class D3D12FrameGen final : public FrameGenGpu {
         // holds that frame up, and frames written right before their refresh
         // are not queued behind it. VECTORXR_FRAMEGEN_QUEUE=game keeps
         // everything on the game's queue.
+        // The work queue measures motion (and writes frames together, when
+        // not just in time); frames written just in time go on the present
+        // queue, the one the runtime synchronizes released images with (its
+        // own with queue substitution, else the game's). Kept apart, the
+        // present queue only ever holds a refresh's frame, so the game's
+        // queue waiting for it (FrameGenQueueSubstitution::AfterWait) never
+        // waits for a measurement.
         const char* queue_choice = std::getenv("VECTORXR_FRAMEGEN_QUEUE");
-        if (runtime_on_work_) {
-            ComPtr<ID3D12Fence> capture_fence;
-            if (SUCCEEDED(device_->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&capture_fence)))) {
-                capture_fence_ = capture_fence;
-                separate_ = true;
-            } else {
-                work_ = queue_;
-                runtime_on_work_ = false;
+        ComPtr<ID3D12Fence> capture_fence;
+        if (SUCCEEDED(device_->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&capture_fence)))) {
+            if (!(queue_choice && std::string(queue_choice) == "game")) {
+                D3D12_COMMAND_QUEUE_DESC desc{D3D12_COMMAND_LIST_TYPE_DIRECT, D3D12_COMMAND_QUEUE_PRIORITY_HIGH,
+                                              D3D12_COMMAND_QUEUE_FLAG_NONE, 0};
+                ComPtr<ID3D12CommandQueue> own;
+                if (SUCCEEDED(device_->CreateCommandQueue(&desc, IID_PPV_ARGS(&own)))) {
+                    own->SetName(L"VectorXR Frame Generation analysis");
+                    work_ = own;
+                }
             }
-        } else if (!(queue_choice && std::string(queue_choice) == "game")) {
-            D3D12_COMMAND_QUEUE_DESC desc{D3D12_COMMAND_LIST_TYPE_DIRECT, D3D12_COMMAND_QUEUE_PRIORITY_HIGH,
-                                          D3D12_COMMAND_QUEUE_FLAG_NONE, 0};
-            ComPtr<ID3D12CommandQueue> own;
-            ComPtr<ID3D12Fence> capture_fence;
-            if (SUCCEEDED(device_->CreateCommandQueue(&desc, IID_PPV_ARGS(&own))) &&
-                SUCCEEDED(device_->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&capture_fence)))) {
-                own->SetName(L"VectorXR Frame Generation");
-                work_ = own;
+            if (work_.Get() != queue_.Get()) {
                 capture_fence_ = capture_fence;
                 separate_ = true;
             }
+        }
+        if (present_.Get() != work_.Get() && present_.Get() != queue_.Get() &&
+            FAILED(device_->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&present_fence_)))) {
+            present_ = work_; // frames written just in time share the work queue
         }
         // Just-in-time synthesis where the runtime synchronizes with the
         // queue frames are written on (queue substitution): released through
@@ -387,9 +394,9 @@ class D3D12FrameGen final : public FrameGenGpu {
         // wait behind the game's queued work. VECTORXR_FRAMEGEN_JIT=0 writes
         // generated frames together, right after each real frame; =1 writes
         // them just in time without substitution (research).
-        just_in_time_ = runtime_on_work_;
+        just_in_time_ = runtime_on_present_;
         if (const char* jit = std::getenv("VECTORXR_FRAMEGEN_JIT")) {
-            just_in_time_ = std::string(jit) == "1" || (runtime_on_work_ && std::string(jit) != "0");
+            just_in_time_ = std::string(jit) == "1" || (runtime_on_present_ && std::string(jit) != "0");
         }
         if (!check(device_->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, capture_slots_[0].allocator.Get(), nullptr,
                                               IID_PPV_ARGS(&capture_commands_)),
@@ -690,7 +697,8 @@ class D3D12FrameGen final : public FrameGenGpu {
 
     bool WaitIdle() override {
         if (stalled_ || !WaitFence(fence_value_, 2000) ||
-            (separate_ && !WaitFence(capture_value_, 2000, CaptureFence()))) {
+            (separate_ && !WaitFence(capture_value_, 2000, CaptureFence())) ||
+            (present_fence_ && !WaitFence(present_value_, 2000, present_fence_.Get()))) {
             return false;
         }
         // The optical flow hardware signals its own fences.
@@ -1608,6 +1616,22 @@ class D3D12FrameGen final : public FrameGenGpu {
         for (std::size_t i = 0; i < views.size(); ++i) {
             views_[i].depth_fresh = false;
         }
+        if (ok && effective_tuning.analyze_only) {
+            // What frames written just in time read (on the present queue,
+            // while the next measurement may run here): readable by every
+            // shader stage from now until the slot is written again, so no
+            // queue transitions it while the other reads it.
+            std::vector<D3D12_RESOURCE_BARRIER> barriers;
+            for (std::size_t i = 0; i < views.size(); ++i) {
+                ViewResources& view = views_[i];
+                const std::uint8_t newest = view.history_state.Newest();
+                for (Texture* texture : {&view.history[newest], &view.filtered[newest], &view.filtered_cover[newest],
+                                         &view.depth[newest], &view.history[view.history_state.Previous()]}) {
+                    if (texture->resource) Require(barriers, *texture, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE);
+                }
+            }
+            Flush(barriers);
+        }
         if (timed) {
             commands_->EndQuery(query_heap_.Get(), D3D12_QUERY_TYPE_TIMESTAMP, static_cast<UINT>(slot_index * 2 + 1));
             commands_->ResolveQueryData(query_heap_.Get(), D3D12_QUERY_TYPE_TIMESTAMP, static_cast<UINT>(slot_index * 2), 2,
@@ -1668,6 +1692,7 @@ class D3D12FrameGen final : public FrameGenGpu {
             AnalyzedFrame frame;
             frame.id = next_analyzed_id_++;
             frame.tuning = effective_tuning;
+            frame.work_value = fence_value_;
             for (std::size_t i = 0; i < views.size(); ++i) {
                 const ViewResources& view = views_[i];
                 AnalyzedView analyzed;
@@ -1732,7 +1757,7 @@ class D3D12FrameGen final : public FrameGenGpu {
         }
         const std::size_t slot_index = static_cast<std::size_t>(synthesis_count_ % kSynthesisSlots);
         SynthesisSlot& slot = synthesis_slots_[slot_index];
-        if (!WaitFence(slot.fence_value, 100)) {
+        if (!WaitFence(slot.fence_value, 100, slot.fence)) {
             error = "D3D12 Frame Generation synthesis did not finish in time";
             return false;
         }
@@ -1821,18 +1846,23 @@ class D3D12FrameGen final : public FrameGenGpu {
         // Its images were captured before the Execute that analyzed them,
         // which waited for that: newer captures (queued behind the game's
         // next frame on its queue) are not waited for.
-        hr = SubmitWork(synthesis_commands_.Get(), false);
+        ID3D12Fence* done = nullptr;
+        UINT64 done_value = 0;
+        hr = SubmitPresent(synthesis_commands_.Get(), frame.work_value, done, done_value);
         if (FAILED(hr)) {
             error = Failure("D3D12 Frame Generation synthesis signal", hr);
             signal_failed_ = true;
             return false;
         }
-        slot.fence_value = fence_value_;
+        slot.fence = done;
+        slot.fence_value = done_value;
         for (std::size_t i = 0; i < frame.views.size(); ++i) {
             ViewResources& view = views_[i];
-            view.slot_read[frame.views[i].newest] = view.slot_read[frame.views[i].previous] = fence_value_;
+            auto& read = done == present_fence_.Get() ? view.slot_read_present : view.slot_read;
+            if (done == fence_.Get() || done == present_fence_.Get()) {
+                read[frame.views[i].newest] = read[frame.views[i].previous] = done_value;
+            }
         }
-        HandOverOutputs();
         ++synthesis_count_;
         if (profiling_) {
             ReadProfile();
@@ -1942,9 +1972,10 @@ class D3D12FrameGen final : public FrameGenGpu {
         synthesis_commands_.Detach();
         for (auto& slot : synthesis_slots_) slot.allocator.Detach();
         if (separate_) {
-            if (!runtime_on_work_) work_.Detach(); // the substituted queue belongs to the layer
+            work_.Detach();
             capture_fence_.Detach();
         }
+        present_fence_.Detach();
         for (auto& slot : slots_) {
             slot.allocator.Detach();
             slot.after_hardware.Detach();
@@ -2140,6 +2171,12 @@ class D3D12FrameGen final : public FrameGenGpu {
                 queue_->Wait(fence_.Get(), read);
             }
         }
+        if (present_fence_) {
+            const UINT64 read = view.slot_read_present[view.history_state.Newest()];
+            if (read && present_fence_->GetCompletedValue() < read) {
+                queue_->Wait(present_fence_.Get(), read);
+            }
+        }
         ID3D12CommandList* lists[] = {list};
         queue_->ExecuteCommandLists(1, lists);
         if (separate_) {
@@ -2168,9 +2205,36 @@ class D3D12FrameGen final : public FrameGenGpu {
     // runtime synchronizes with when they are released) waits for them. With
     // queue substitution the runtime synchronizes with the work queue itself.
     void HandOverOutputs() {
-        if (separate_ && !runtime_on_work_ && fence_value_) {
-            queue_->Wait(fence_.Get(), fence_value_);
+        if (present_.Get() != work_.Get() && fence_value_) {
+            present_->Wait(fence_.Get(), fence_value_);
         }
+    }
+
+    // Submits a frame written just in time on the present queue, once its
+    // real frame's measurement (`after`, on the work queue) is done; returns
+    // the fence and value it reaches when done.
+    HRESULT SubmitPresent(ID3D12GraphicsCommandList* list, UINT64 after, ID3D12Fence*& done, UINT64& value) {
+        if (present_.Get() == work_.Get()) {
+            const HRESULT hr = SubmitWork(list, false);
+            done = fence_.Get();
+            value = fence_value_;
+            return hr;
+        }
+        if (after && fence_->GetCompletedValue() < after) {
+            present_->Wait(fence_.Get(), after);
+        }
+        ID3D12CommandList* lists[] = {list};
+        present_->ExecuteCommandLists(1, lists);
+        if (present_fence_) {
+            done = present_fence_.Get();
+            value = ++present_value_;
+            return present_->Signal(present_fence_.Get(), present_value_);
+        }
+        // The game's queue itself (no queue substitution): the fence the
+        // captures signal there.
+        done = CaptureFence();
+        value = ++capture_value_;
+        return present_->Signal(done, value);
     }
 
     bool WaitForSlot(FrameSlot& slot, std::string& error) {
@@ -2714,6 +2778,10 @@ class D3D12FrameGen final : public FrameGenGpu {
     }
 
     static void Require(std::vector<D3D12_RESOURCE_BARRIER>& barriers, Texture& texture, D3D12_RESOURCE_STATES state) {
+        if (texture.state == D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE &&
+            (state == D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE || state == D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE)) {
+            return; // already readable that way
+        }
         if (texture.state == state) {
             if (state == D3D12_RESOURCE_STATE_UNORDERED_ACCESS) {
                 D3D12_RESOURCE_BARRIER barrier{};
@@ -3008,7 +3076,14 @@ class D3D12FrameGen final : public FrameGenGpu {
     // game's queue (`separate_` false).
     ComPtr<ID3D12CommandQueue> work_;
     bool separate_{false};
-    bool runtime_on_work_{false}; // the runtime was given work_ (FrameGenRuntimeQueue)
+    // The queue the runtime synchronizes released images with: its own
+    // (FrameGenRuntimeQueue, `runtime_on_present_`) or the game's. Frames
+    // written just in time are submitted to it; it signals present_fence_
+    // when it is neither the work queue nor the game's.
+    ComPtr<ID3D12CommandQueue> present_;
+    bool runtime_on_present_{false};
+    ComPtr<ID3D12Fence> present_fence_;
+    UINT64 present_value_{0};
     // Captures signal this on the game's queue while separate (fence_ otherwise).
     ComPtr<ID3D12Fence> capture_fence_;
     UINT64 capture_value_{0};
@@ -3019,6 +3094,7 @@ class D3D12FrameGen final : public FrameGenGpu {
     // real frames analyzed for it (newest last).
     struct SynthesisSlot {
         ComPtr<ID3D12CommandAllocator> allocator;
+        ID3D12Fence* fence{nullptr}; // the fence its submission signals
         UINT64 fence_value{0};
     };
     std::array<SynthesisSlot, kSynthesisSlots> synthesis_slots_;
