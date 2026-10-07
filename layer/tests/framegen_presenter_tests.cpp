@@ -204,7 +204,8 @@ class FakeGpu final : public FrameGenGpu {
     double LastGpuMilliseconds() const override { return 0.75; }
     bool SupportsThreadedPresentation() const override { return log_->threaded; }
     std::optional<FrameGenMemoryBudget> MemoryBudget() const override {
-        return FrameGenMemoryBudget{log_->memory_pressure ? 990u : 500u, 1000u};
+        constexpr std::uint64_t gigabyte = 1024ull * 1024 * 1024;
+        return FrameGenMemoryBudget{log_->memory_pressure ? 31 * gigabyte + gigabyte / 2 : 16 * gigabyte, 32 * gigabyte};
     }
     bool SupportsDepth() const override { return log_->depth; }
     XrSwapchainUsageFlags RequiredDepthUsage() const override {
@@ -941,6 +942,20 @@ void TestDynamicFreesOutputsNearBudget() {
     Check(static_cast<double>(runtime.Submissions() - first) / elapsed > refresh * 0.85,
           "memory: every refresh still gets a frame");
     Check(presenter.Status().threaded && presenter.Status().dynamic, "memory: still presenting dynamically");
+
+    // The budget grows back: after the delay the third set returns.
+    presenter.SetMemoryRecoveryDelay(300ms);
+    gpu.memory_pressure = false;
+    int max_generated = 0;
+    RunPipelined(app, 1500ms, 26ms, 32ms,
+                 [&](int, const XrFrameState&) { max_generated = std::max<int>(max_generated, gpu.tuning.generated); });
+    {
+        std::scoped_lock lock(g_xr_mutex);
+        creates = g_creates;
+    }
+    Check(creates == 8, "memory: with room again the third set is made again (" + std::to_string(creates) + " created)");
+    Check(max_generated == 3, "memory: three generated frames per real frame again (" + std::to_string(max_generated) + ")");
+    Check(!runtime.used_destroyed, "memory: the freed swapchains stay unused");
     presenter.Stop();
     Check(!runtime.ordering_violation && !g_release_violation, "memory: calls stayed ordered");
 }

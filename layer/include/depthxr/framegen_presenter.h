@@ -146,6 +146,9 @@ class FrameGenPresenter {
     void SetConfigured(bool enabled);
     // Steady renderable frames and session age required before engaging.
     void SetEngagementPolicy(std::uint32_t steady_frames, std::chrono::milliseconds minimum_session_age);
+    // How long the video memory budget must have room for another set of
+    // output images before a lowered ceiling rises again (tests shorten it).
+    void SetMemoryRecoveryDelay(std::chrono::milliseconds delay);
     // Timing of the automatic multiplier (tests shorten it): how long a change
     // settles before it is judged, how long the app must hold its cadence
     // before probing one step down, how long a probe must hold, and the first
@@ -540,6 +543,12 @@ class FrameGenPresenter {
     std::chrono::steady_clock::time_point memory_checked_at_{};
     std::uint64_t working_bytes_{0}; // the backend's own images after the last Execute (log)
     std::uint64_t output_bytes_{0};  // output swapchain images, estimated from their size (log)
+    std::uint64_t output_set_bytes_{0}; // one set of them
+    // Since when the budget has had room for another set (UpdateAutoLocked),
+    // and how often the ceiling rose again this session.
+    std::optional<std::chrono::steady_clock::time_point> memory_room_since_;
+    std::uint32_t memory_recoveries_{0};
+    std::chrono::milliseconds memory_recovery_delay_{30000};
 
     std::uint64_t generated_{0};
     std::uint64_t repeated_{0};

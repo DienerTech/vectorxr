@@ -21,6 +21,8 @@ constexpr XrDuration kOutputWaitTimeout = 100'000'000; // 100 ms
 constexpr std::uint32_t kFailuresBeforePause = 3;
 constexpr std::uint32_t kDemotionsBeforePause = 3;
 constexpr std::uint32_t kMaxMultiplier = 4;
+// Times a session the video memory ceiling may rise again (see UpdateAutoLocked).
+constexpr std::uint32_t kMemoryRecoveries = 2;
 constexpr std::chrono::seconds kPhaseLifetime{2};
 constexpr int kAutoMaxBackoffDoublings = 3; // 10 s, 20 s, 40 s, 80 s
 // Auto stays at full rate this long after inline cycles kept starting late.
@@ -285,6 +287,8 @@ void FrameGenPresenter::Stop() {
     auto_memory_ceiling_ = kMaxMultiplier;
     memory_budget_.reset();
     memory_checked_at_ = {};
+    memory_room_since_.reset();
+    memory_recoveries_ = 0;
     full_rate_ = false;
     cadence_.clear();
     last_app_end_.reset();
@@ -372,6 +376,11 @@ void FrameGenPresenter::SetEngagementPolicy(std::uint32_t steady_frames, std::ch
     std::scoped_lock lock(mutex_);
     engage_streak_frames_ = steady_frames;
     engage_min_age_ = minimum_session_age;
+}
+
+void FrameGenPresenter::SetMemoryRecoveryDelay(std::chrono::milliseconds delay) {
+    std::scoped_lock lock(mutex_);
+    memory_recovery_delay_ = delay;
 }
 
 void FrameGenPresenter::SetRetryPolicy(std::chrono::milliseconds delay, std::uint32_t attempts) {
@@ -733,8 +742,12 @@ void FrameGenPresenter::UpdateAutoLocked(Clock::time_point now, const std::optio
     }
     // Paging makes the game late too, and reading that as a reason to step
     // up allocates more output images and compounds it. Sample the process
-    // budget twice a second; within 5% of it, step down and never above that
-    // again this session (stepping back up would reallocate and oscillate).
+    // budget twice a second; within 5% of it, step down (EnsureOutputs frees
+    // the sets above the new ceiling). Budgets shrink while other processes
+    // need memory and grow back: with room for another set and a tenth of the
+    // budget to spare for memory_recovery_delay_, the ceiling rises again, at
+    // most kMemoryRecoveries times a session so a budget hovering at the edge
+    // does not reallocate headset-size images back and forth.
     const bool sampled_memory =
         memory_checked_at_ == Clock::time_point{} || now - memory_checked_at_ >= std::chrono::milliseconds(500);
     if (sampled_memory) {
@@ -743,15 +756,35 @@ void FrameGenPresenter::UpdateAutoLocked(Clock::time_point now, const std::optio
     }
     const bool memory_pressure = memory_budget_ && memory_budget_->budget_bytes &&
                                  memory_budget_->usage_bytes > memory_budget_->budget_bytes - memory_budget_->budget_bytes / 20;
+    if (memory_pressure) {
+        memory_room_since_.reset();
+    } else if (sampled_memory && auto_memory_ceiling_ < kMaxMultiplier && memory_recoveries_ < kMemoryRecoveries &&
+               memory_budget_ && memory_budget_->budget_bytes && output_set_bytes_) {
+        const std::uint64_t budget = memory_budget_->budget_bytes;
+        if (memory_budget_->usage_bytes + output_set_bytes_ + budget / 10 >= budget) {
+            memory_room_since_.reset();
+        } else if (!memory_room_since_) {
+            memory_room_since_ = now;
+        } else if (now - *memory_room_since_ >= memory_recovery_delay_) {
+            memory_room_since_.reset();
+            ++memory_recoveries_;
+            auto_memory_ceiling_ = dynamic ? kMaxMultiplier : auto_memory_ceiling_ + 1;
+            if (logger_) {
+                logger_->Info(std::string("Frame Generation: process video memory has room again; ") +
+                              (dynamic ? "dynamic uses up to three generated frames per real frame."
+                                       : "automatic may step up to " + MultiplierText(auto_memory_ceiling_) + "."));
+                LogMemoryBudgetLocked();
+            }
+        }
+    }
     if (dynamic) {
-        // No multiplier to choose: near the budget, real frames stop using a
-        // third set of output images (sets already made stay until the
-        // session ends, so this stops growth rather than freeing memory).
+        // No multiplier to choose: near the budget, real frames use at most
+        // two sets of output images (EnsureOutputs frees the third).
         if (memory_pressure && sampled_memory && auto_memory_ceiling_ > 2) {
             auto_memory_ceiling_ = 2;
             if (logger_) {
-                logger_->Info("Frame Generation (dynamic) uses at most two generated frames per real frame from now "
-                              "on: process video memory is near its budget.");
+                logger_->Info("Frame Generation (dynamic) uses at most two generated frames per real frame until video "
+                              "memory frees up: process video memory is near its budget.");
                 LogMemoryBudgetLocked();
             }
         }
@@ -773,7 +806,8 @@ void FrameGenPresenter::UpdateAutoLocked(Clock::time_point now, const std::optio
             if (logger_) {
                 logger_->Info("Frame Generation automatic multiplier " + MultiplierText(before) + " -> " +
                               MultiplierText(auto_multiplier_) +
-                              ": process video memory is near its budget; it stays at most this for the session.");
+                              ": process video memory is near its budget; it stays at most this until video memory "
+                              "frees up.");
                 LogMemoryBudgetLocked();
             }
             return;
@@ -2050,7 +2084,7 @@ bool FrameGenPresenter::EnsureOutputs(const XrCompositionLayerProjection& projec
         multiplier_changed_at_ = Clock::now();
         cadence_.clear();
     }
-    if (created && logger_) {
+    if (created) {
         // Rough video memory estimate: per view, two full-resolution history
         // copies, a full-resolution intermediate (unless generated frames are
         // drawn straight into the outputs) and the flow pyramid in the
@@ -2079,13 +2113,16 @@ bool FrameGenPresenter::EnsureOutputs(const XrCompositionLayerProjection& projec
         // Once generating, the backend reports what its images really take.
         if (working_bytes_) working = static_cast<double>(working_bytes_);
         output_bytes_ = static_cast<std::uint64_t>(swapchains);
-        logger_->Info("Frame Generation output swapchains ready: generatedPerFrame=" + std::to_string(sets) +
-                      ", setsKept=" + std::to_string(output_sets_.size()) +
-                      ", imagesPerSwapchain=" + std::to_string(output_sets_.front().front().image_count) +
-                      ", estimated video memory " + Number((working + swapchains) / megabytes, 0) + " MB (working " +
-                      Number(working / megabytes, 0) + " MB" + (working_bytes_ ? "" : " estimated") +
-                      ", output swapchains " + Number(swapchains / megabytes, 0) + " MB).");
-        LogMemoryBudgetLocked();
+        output_set_bytes_ = static_cast<std::uint64_t>(swapchains / static_cast<double>(output_sets_.size()));
+        if (logger_) {
+            logger_->Info("Frame Generation output swapchains ready: generatedPerFrame=" + std::to_string(sets) +
+                          ", setsKept=" + std::to_string(output_sets_.size()) +
+                          ", imagesPerSwapchain=" + std::to_string(output_sets_.front().front().image_count) +
+                          ", estimated video memory " + Number((working + swapchains) / megabytes, 0) +
+                          " MB (working " + Number(working / megabytes, 0) + " MB" + (working_bytes_ ? "" : " estimated") +
+                          ", output swapchains " + Number(swapchains / megabytes, 0) + " MB).");
+            LogMemoryBudgetLocked();
+        }
     }
     return true;
 }
