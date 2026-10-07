@@ -47,8 +47,12 @@ enum class FrameGenPass : std::uint8_t {
     // Depth (Direct3D 12): drops the depth of regions the trust scores
     // disprove (kTrustUpdate scores, this decides).
     kTrustResolve,
+    // Direct3D 12: the shading-rate image of the synthesis draw (coarse
+    // shading off the view axis where no cockpit content is), recorded by
+    // the backend itself.
+    kShadingRate,
 };
-inline constexpr std::size_t kFrameGenPassCount = 19;
+inline constexpr std::size_t kFrameGenPassCount = 20;
 
 // Logical textures owned per view. History and filtered flow are ping-pong
 // pairs: "newest" is written this submission, "previous" is last

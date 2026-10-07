@@ -536,6 +536,8 @@ class FrameGenPresenter {
     std::uint32_t auto_memory_ceiling_{4};
     std::optional<FrameGenMemoryBudget> memory_budget_;
     std::chrono::steady_clock::time_point memory_checked_at_{};
+    std::uint64_t working_bytes_{0}; // the backend's own images after the last Execute (log)
+    std::uint64_t output_bytes_{0};  // output swapchain images, estimated from their size (log)
 
     std::uint64_t generated_{0};
     std::uint64_t repeated_{0};

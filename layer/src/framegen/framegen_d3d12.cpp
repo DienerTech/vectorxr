@@ -17,6 +17,7 @@
 #include <atomic>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <thread>
@@ -93,6 +94,12 @@ struct ViewResources {
     std::array<Texture, 2> trust;
     Texture shift_keys;
     Texture shift_map; // rebuilt for each generated frame
+    // Variable-rate shading of the synthesis draw: a rate per tile for the
+    // extent and field of view it was made for (see EnsureShadingRate).
+    Texture shading_rate;
+    FrameGenExtent shading_extent{};
+    std::array<float, 4> shading_fov{};
+    bool shading_coarse{false}; // the field of view reaches the coarse-shading angle
     bool trust_stereo{false}; // this frame's stereo evidence is in trust[newest]
     bool depth_ready{false};  // captured since the last Execute
     bool depth_fresh{false};  // captured for this Execute's frame (for the check)
@@ -294,6 +301,23 @@ class D3D12FrameGen final : public FrameGenGpu {
             !check(commands_->Close(), "D3D12 Frame Generation command list close") ||
             !check(device_->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence_)), "D3D12 Frame Generation fence")) {
             return false;
+        }
+        // Tier 2 variable-rate shading (an image of rates per screen tile)
+        // for the synthesis draw, on GPUs: a software rasterizer (WARP) gains
+        // nothing and slows down. VECTORXR_FRAMEGEN_VRS sets the tangent off
+        // the view axis where coarse shading starts; 0 turns it off.
+        D3D12_FEATURE_DATA_D3D12_OPTIONS6 options6{};
+        DXGI_ADAPTER_DESC1 adapter{};
+        const bool software = memory_adapter_ && SUCCEEDED(memory_adapter_->GetDesc1(&adapter)) &&
+                              (adapter.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) != 0;
+        if (const char* vrs = std::getenv("VECTORXR_FRAMEGEN_VRS")) {
+            coarse_tangent_ = std::atof(vrs);
+        }
+        if (!software && coarse_tangent_ > 0.0 &&
+            SUCCEEDED(device_->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS6, &options6, sizeof(options6))) &&
+            options6.VariableShadingRateTier >= D3D12_VARIABLE_SHADING_RATE_TIER_2 &&
+            options6.ShadingRateImageTileSize > 0 && SUCCEEDED(commands_.As(&commands5_))) {
+            shading_tile_ = options6.ShadingRateImageTileSize;
         }
         event_ = CreateEventW(nullptr, FALSE, FALSE, nullptr);
         if (!event_) {
@@ -747,8 +771,9 @@ class D3D12FrameGen final : public FrameGenGpu {
             return true;
         }
         const FrameGenExtent half = FrameGenPyramid(extent)[1];
+        // Scores in [-1, 1]: half floats hold them to a thousandth.
         for (Texture& trust : view.trust) {
-            if (!Create(trust, half, DXGI_FORMAT_R32_FLOAT, DXGI_FORMAT_R32_FLOAT, true, error)) return false;
+            if (!Create(trust, half, DXGI_FORMAT_R16_FLOAT, DXGI_FORMAT_R16_FLOAT, true, error)) return false;
         }
         return Create(view.shift_keys, half, DXGI_FORMAT_R32_UINT, DXGI_FORMAT_R32_UINT, true, error) &&
                Create(view.shift_map, half, DXGI_FORMAT_R32_UINT, DXGI_FORMAT_R32_UINT, true, error);
@@ -1081,6 +1106,7 @@ class D3D12FrameGen final : public FrameGenGpu {
         switch (desc.Format) {
         case DXGI_FORMAT_R16G16B16A16_FLOAT: channels = 4; break;
         case DXGI_FORMAT_R32_FLOAT: channels = 1; break;
+        case DXGI_FORMAT_R16_FLOAT: channels = 1; break;
         case DXGI_FORMAT_R32_UINT: channels = 2; break; // two packed halves
         case DXGI_FORMAT_R8_UNORM: channels = 1; break;
         default: channels = 0; break;
@@ -1103,6 +1129,12 @@ class D3D12FrameGen final : public FrameGenGpu {
                 case DXGI_FORMAT_R32_FLOAT:
                     std::memcpy(&out[x], row + x * 4, sizeof(float));
                     break;
+                case DXGI_FORMAT_R16_FLOAT: {
+                    std::uint16_t texel = 0;
+                    std::memcpy(&texel, row + x * 2, sizeof(texel));
+                    out[x] = half(texel);
+                    break;
+                }
                 case DXGI_FORMAT_R32_UINT: {
                     std::uint32_t packed = 0;
                     std::memcpy(&packed, row + x * 4, sizeof(packed));
@@ -1132,6 +1164,85 @@ class D3D12FrameGen final : public FrameGenGpu {
     void SetDirectOutput(bool on) override { direct_output_ = on; }
     bool DrawsOutputs() const override { return direct_output_ && rtv_heap_; }
 
+    // A wide view's periphery is rendered far denser than a headset shows
+    // it: angle per pixel shrinks with the square of the angle's tangent off
+    // the view axis, and lenses spread the panel's pixels out there. Beyond
+    // this tangent (45 degrees) generated frames are shaded once per 2x2
+    // pixels where no cockpit content is (FG_PASS_SHADING_RATE): cockpit
+    // edges stay per pixel everywhere. Narrow views (focus insets) never
+    // reach it.
+    static constexpr double kCoarseShadingTangent = 1.0;
+    double coarse_tangent_{kCoarseShadingTangent};
+
+    // Records the view's shading-rate image for the synthesis draw from this
+    // frame's depth (`depth`, null when not in use: the angle alone decides).
+    // True when the draw should use it.
+    bool RecordShadingRate(ViewResources& view, const FrameGenViewSubmission& submission, Texture* depth,
+                           std::string& error) {
+        if (!shading_tile_) {
+            return false;
+        }
+        const FrameGenExtent extent = submission.request.extent;
+        const FrameGenViewGeometry& geometry = submission.request.newest;
+        const std::array<float, 4> fov{geometry.angle_left, geometry.angle_right, geometry.angle_up, geometry.angle_down};
+        const std::array<float, 4> tangents{std::tan(fov[0]), std::tan(fov[1]), std::tan(fov[2]), std::tan(fov[3])};
+        if (view.shading_extent.width != extent.width || view.shading_extent.height != extent.height ||
+            !std::equal(fov.begin(), fov.end(), view.shading_fov.begin(),
+                        [](float a, float b) { return std::abs(a - b) < 1e-3f; })) {
+            // Whether any corner reaches the angle (the tangent radius grows
+            // toward the corners of the tangent rectangle).
+            view.shading_extent = extent;
+            view.shading_fov = fov;
+            view.shading_coarse = false;
+            for (const float x : {tangents[0], tangents[1]}) {
+                for (const float y : {tangents[2], tangents[3]}) {
+                    view.shading_coarse = view.shading_coarse || std::hypot(x, y) >= coarse_tangent_;
+                }
+            }
+        }
+        if (!view.shading_coarse) {
+            return false;
+        }
+        const UINT tiles_x = (extent.width + shading_tile_ - 1) / shading_tile_;
+        const UINT tiles_y = (extent.height + shading_tile_ - 1) / shading_tile_;
+        if (!view.shading_rate.resource || view.shading_rate.resource->GetDesc().Width != tiles_x ||
+            view.shading_rate.resource->GetDesc().Height != tiles_y) {
+            if (!Create(view.shading_rate, {tiles_x, tiles_y}, DXGI_FORMAT_R8_UINT, DXGI_FORMAT_R8_UINT, true, error)) {
+                view.shading_coarse = false;
+                return false;
+            }
+        }
+        if (descriptor_cursor_ + kDescriptorsPerDispatch > descriptor_end_) {
+            error = "D3D12 Frame Generation descriptor budget exhausted";
+            return false;
+        }
+        const UINT base = descriptor_cursor_;
+        descriptor_cursor_ += kDescriptorsPerDispatch;
+        std::vector<D3D12_RESOURCE_BARRIER> barriers;
+        ShaderResource(depth, base, 0);
+        if (depth) Require(barriers, *depth, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        for (UINT i = 1; i < kShaderResources; ++i) {
+            ShaderResource(nullptr, base, i);
+        }
+        UnorderedAccess(&view.shading_rate, base + kFirstUav);
+        UnorderedAccess(nullptr, base + kFirstUav + 1);
+        Require(barriers, view.shading_rate, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        Flush(barriers);
+        FrameGenConstants constants{};
+        constants.fov_current = tangents;
+        constants.size = {tiles_x, tiles_y, extent.width, extent.height};
+        constants.options = {shading_tile_, depth ? kFrameGenFlagDepth : 0u, 0u, 0u};
+        constants.tuning = {static_cast<float>(coarse_tangent_), 0.0f, 0.0f, 0.0f};
+        commands_->SetPipelineState(pipelines_[static_cast<std::size_t>(FrameGenPass::kShadingRate)].Get());
+        commands_->SetComputeRoot32BitConstants(0, sizeof(FrameGenConstants) / 4, &constants, 0);
+        commands_->SetComputeRootDescriptorTable(1, Gpu(base));
+        commands_->SetComputeRootDescriptorTable(2, Gpu(base + kFirstUav));
+        commands_->Dispatch((tiles_x + kFrameGenThreadGroupSize - 1) / kFrameGenThreadGroupSize,
+                            (tiles_y + kFrameGenThreadGroupSize - 1) / kFrameGenThreadGroupSize, 1);
+        Stamp(static_cast<int>(FrameGenPass::kShadingRate));
+        return true;
+    }
+
     // Draws generated frames (the plan's synthesis dispatches, one per
     // output) straight into the output images in one draw: `indices` are
     // the outputs, `frames` their dispatches.
@@ -1147,11 +1258,16 @@ class D3D12FrameGen final : public FrameGenGpu {
             error = "D3D12 Frame Generation draw pipeline unavailable";
             return false;
         }
+        const FrameGenDispatch& first = *frames[0];
+        // Its own dispatch first, its barriers flushed: the synthesis input
+        // t3 is the newest frame's depth when it is in use. Without the image
+        // the frames are drawn per pixel.
+        std::string rate_error;
+        const bool coarse = RecordShadingRate(view, submission, Resolve(view, first.inputs[3]), rate_error);
         if (descriptor_cursor_ + kDescriptorsPerDispatch > descriptor_end_) {
             error = "D3D12 Frame Generation descriptor budget exhausted";
             return false;
         }
-        const FrameGenDispatch& first = *frames[0];
         const UINT base = descriptor_cursor_;
         descriptor_cursor_ += kDescriptorsPerDispatch;
         std::vector<D3D12_RESOURCE_BARRIER> barriers;
@@ -1162,6 +1278,7 @@ class D3D12FrameGen final : public FrameGenGpu {
         }
         UnorderedAccess(nullptr, base + kFirstUav);
         UnorderedAccess(nullptr, base + kFirstUav + 1);
+        if (coarse) Require(barriers, view.shading_rate, D3D12_RESOURCE_STATE_SHADING_RATE_SOURCE);
         Flush(barriers);
 
         // Output images are in RENDER_TARGET while acquired.
@@ -1201,7 +1318,17 @@ class D3D12FrameGen final : public FrameGenGpu {
         commands_->RSSetScissorRects(1, &scissor);
         commands_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
         commands_->OMSetRenderTargets(static_cast<UINT>(frames.size()), targets.data(), FALSE, nullptr);
+        if (coarse) {
+            const D3D12_SHADING_RATE_COMBINER combiners[2]{D3D12_SHADING_RATE_COMBINER_PASSTHROUGH,
+                                                           D3D12_SHADING_RATE_COMBINER_OVERRIDE};
+            commands5_->RSSetShadingRate(D3D12_SHADING_RATE_1X1, combiners);
+            commands5_->RSSetShadingRateImage(view.shading_rate.resource.Get());
+        }
         commands_->DrawInstanced(3, 1, 0, 0);
+        if (coarse) {
+            commands5_->RSSetShadingRateImage(nullptr);
+            commands5_->RSSetShadingRate(D3D12_SHADING_RATE_1X1, nullptr);
+        }
         Stamp(static_cast<int>(FrameGenPass::kSynthesizeUnorm8));
         return true;
     }
@@ -1512,6 +1639,31 @@ class D3D12FrameGen final : public FrameGenGpu {
 
     double LastGpuMilliseconds() const override { return last_gpu_ms_; }
     std::optional<FrameGenGpuWindow> LastGpuWindow() const override { return last_window_; }
+    std::uint64_t WorkingMemoryBytes() const override {
+        std::uint64_t bytes = 0;
+        auto add = [&](const Texture& texture) {
+            if (!texture.resource) return;
+            const D3D12_RESOURCE_DESC desc = texture.resource->GetDesc();
+            bytes += device_->GetResourceAllocationInfo(0, 1, &desc).SizeInBytes;
+        };
+        for (const ViewResources& view : views_) {
+            for (const Texture& texture : view.history) add(texture);
+            for (const Texture& texture : view.filtered) add(texture);
+            for (const Texture& texture : view.luma_newest) add(texture);
+            for (const Texture& texture : view.luma_previous) add(texture);
+            for (const Texture& texture : view.flow) add(texture);
+            for (const Texture& texture : view.depth) add(texture);
+            for (const Texture& texture : view.trust) add(texture);
+            for (const Texture& texture : view.raw) add(texture);
+            for (const Texture* texture : {&view.output, &view.shift_keys, &view.shift_map, &view.hardware_newest,
+                                           &view.hardware_previous, &view.hardware_flow, &view.raw_flow}) {
+                add(*texture);
+            }
+        }
+        add(check_scores_);
+        return bytes;
+    }
+
     std::optional<FrameGenMemoryBudget> MemoryBudget() const override {
         DXGI_QUERY_VIDEO_MEMORY_INFO info{};
         if (!memory_adapter_ || FAILED(memory_adapter_->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &info))) {
@@ -1747,9 +1899,11 @@ class D3D12FrameGen final : public FrameGenGpu {
             for (auto& history : view.history) {
                 if (!Create(history, extent, source_desc.Format, view_format, false, error)) return false;
             }
+            // Square-root luma in [0, 1] and -1 where invalid: half floats keep
+            // it to a two-thousandth, below what matching costs resolve.
             for (std::uint8_t level = 1; level <= kFrameGenPyramidLevels; ++level) {
-                if (!Create(view.luma_newest[level], levels[level], DXGI_FORMAT_R32_FLOAT, DXGI_FORMAT_R32_FLOAT, true, error) ||
-                    !Create(view.luma_previous[level], levels[level], DXGI_FORMAT_R32_FLOAT, DXGI_FORMAT_R32_FLOAT, true, error)) {
+                if (!Create(view.luma_newest[level], levels[level], DXGI_FORMAT_R16_FLOAT, DXGI_FORMAT_R16_FLOAT, true, error) ||
+                    !Create(view.luma_previous[level], levels[level], DXGI_FORMAT_R16_FLOAT, DXGI_FORMAT_R16_FLOAT, true, error)) {
                     return false;
                 }
                 if (level >= 2 && !Create(view.flow[level], levels[level], DXGI_FORMAT_R16G16B16A16_FLOAT,
@@ -2442,6 +2596,8 @@ class D3D12FrameGen final : public FrameGenGpu {
     UINT descriptor_cursor_{0};
     UINT descriptor_end_{0};
     ComPtr<ID3D12GraphicsCommandList> commands_;
+    ComPtr<ID3D12GraphicsCommandList5> commands5_; // the same list, for variable-rate shading
+    UINT shading_tile_{0};                          // pixels per shading-rate tile side; 0: no variable-rate shading
     std::array<FrameSlot, kFramesInFlight> slots_;
     ComPtr<ID3D12GraphicsCommandList> capture_commands_;
     std::array<CaptureSlot, kCaptureSlots> capture_slots_; // views x frames in flight, color and depth

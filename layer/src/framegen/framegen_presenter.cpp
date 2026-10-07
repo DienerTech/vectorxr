@@ -930,8 +930,14 @@ void FrameGenPresenter::LogMemoryBudgetLocked() {
     if (!logger_ || !gpu_) return;
     if (const auto memory = gpu_->MemoryBudget()) {
         constexpr double megabytes = 1024.0 * 1024.0;
+        // Frame Generation's own share: its working images as allocated (once
+        // it has generated) and the output swapchain images it created.
+        const std::string own = working_bytes_ || output_bytes_
+                                    ? "; Frame Generation working " + Number(working_bytes_ / megabytes, 0) +
+                                          " MB, output images " + Number(output_bytes_ / megabytes, 0) + " MB"
+                                    : std::string();
         logger_->Info("Frame Generation process video memory: usage=" + Number(memory->usage_bytes / megabytes, 0) +
-                      " MB, budget=" + Number(memory->budget_bytes / megabytes, 0) + " MB" +
+                      " MB, budget=" + Number(memory->budget_bytes / megabytes, 0) + " MB" + own +
                       (memory->usage_bytes > memory->budget_bytes ? " (over budget)." : "."));
     }
 }
@@ -1727,6 +1733,7 @@ bool FrameGenPresenter::Generate(const XrCompositionLayerProjection& projection,
     FrameGenExecuteResult executed;
     bool ok = true;
     double gpu_ms = -1.0;
+    std::uint64_t working_bytes = 0;
     std::optional<FrameGenGpuWindow> window;
     FrameGenDepthStatus depth;
     std::string hardware_status;
@@ -1763,6 +1770,7 @@ bool FrameGenPresenter::Generate(const XrCompositionLayerProjection& projection,
             gpu_ms = gpu_->LastGpuMilliseconds();
             window = gpu_->LastGpuWindow();
             depth = gpu_->DepthStatus();
+            working_bytes = gpu_->WorkingMemoryBytes();
             if (tuning.hardware_flow) {
                 hardware_status = gpu_->HardwareFlowStatus();
             }
@@ -1792,6 +1800,7 @@ bool FrameGenPresenter::Generate(const XrCompositionLayerProjection& projection,
         return false;
     }
     gpu_ms_ = gpu_ms;
+    if (working_bytes) working_bytes_ = working_bytes;
     depth_status_ = depth;
     consecutive_failures_ = 0;
     NoteGpuTimingLocked(executed.submission, frame, window);
@@ -2052,13 +2061,16 @@ bool FrameGenPresenter::EnsureOutputs(const XrCompositionLayerProjection& projec
             }
         }
         const double megabytes = 1024.0 * 1024.0;
+        std::scoped_lock lock(mutex_);
+        // Once generating, the backend reports what its images really take.
+        if (working_bytes_) working = static_cast<double>(working_bytes_);
+        output_bytes_ = static_cast<std::uint64_t>(swapchains);
         logger_->Info("Frame Generation output swapchains ready: generatedPerFrame=" + std::to_string(sets) +
                       ", setsKept=" + std::to_string(output_sets_.size()) +
                       ", imagesPerSwapchain=" + std::to_string(output_sets_.front().front().image_count) +
                       ", estimated video memory " + Number((working + swapchains) / megabytes, 0) + " MB (working " +
-                      Number(working / megabytes, 0) + " MB, output swapchains " + Number(swapchains / megabytes, 0) +
-                      " MB).");
-        std::scoped_lock lock(mutex_);
+                      Number(working / megabytes, 0) + " MB" + (working_bytes_ ? "" : " estimated") +
+                      ", output swapchains " + Number(swapchains / megabytes, 0) + " MB).");
         LogMemoryBudgetLocked();
     }
     return true;

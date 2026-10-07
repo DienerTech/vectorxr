@@ -1098,7 +1098,7 @@ int RunProfile(Harness& harness) {
     const char* names[] = {"luma",        "downsample",  "search",      "refine",      "filter",
                            "synthesize",  "synthesize16", "depth",      "depth check", "depth trust",
                            "flow pack",   "flow unpack", "trust update", "shift clear", "shift splat",
-                           "shift resolve", "shift fill", "raw pack",   "trust resolve", "source copy", "output copy",
+                           "shift resolve", "shift fill", "raw pack",   "trust resolve", "shading rate", "source copy", "output copy",
                            "hardware wait"};
     static_assert(std::size(names) == kFrameGenPassCount + 3, "a name per profiled category");
     for (const int config : {0, 1, 2}) {
@@ -1360,9 +1360,23 @@ Pixels TurnTo(const ReplayView& view, const ReplayView& next, std::vector<bool>&
 struct ReplayError {
     double all{0}, cockpit{0}, outside{0};
     double bad_cockpit{0}, bad_outside{0}; // percent
+    // Cockpit pixels on an edge of the truth (luma gradient over a tenth):
+    // mean error there, and gradient energy of the image over the truth's
+    // (below 1: softer edges; a generated frame alternating with sharp real
+    // frames then shimmers).
+    double edge_cockpit{0};
+    double sharpness_cockpit{0};
 };
+double PixelLuma(std::uint32_t p) {
+    return (0.2126 * (p & 255u) + 0.7152 * ((p >> 8) & 255u) + 0.0722 * ((p >> 16) & 255u)) / 255.0;
+}
+double Gradient(const Pixels& image, std::size_t index, std::uint32_t width) {
+    return std::abs(PixelLuma(image[index + 1]) - PixelLuma(image[index - 1])) +
+           std::abs(PixelLuma(image[index + width]) - PixelLuma(image[index - width]));
+}
 ReplayError CompareTo(const Pixels& image, const Pixels& truth, const std::vector<bool>& valid, const ReplayView& view) {
     double sums[3] = {}, counts[3] = {}, bad[3] = {};
+    double edge_sum = 0, edge_count = 0, image_energy = 0, truth_energy = 0;
     for (std::uint32_t y = 0; y < view.height; ++y) {
         const std::uint32_t hy = std::min(y / 2, view.half_height - 1);
         for (std::uint32_t x = 0; x < view.width; ++x) {
@@ -1380,10 +1394,42 @@ ReplayError CompareTo(const Pixels& image, const Pixels& truth, const std::vecto
             sums[part] += error;
             counts[part] += 1;
             bad[part] += error > 0.1 ? 1.0 : 0.0;
+            if (part == 1 && x > 0 && y > 0 && x + 1 < view.width && y + 1 < view.height && valid[index - 1] &&
+                valid[index + 1] && valid[index - view.width] && valid[index + view.width]) {
+                const double truth_gradient = Gradient(truth, index, view.width);
+                truth_energy += truth_gradient;
+                image_energy += Gradient(image, index, view.width);
+                if (truth_gradient > 0.1) {
+                    edge_sum += error;
+                    edge_count += 1;
+                }
+            }
         }
     }
     return {counts[0] ? sums[0] / counts[0] : 0, counts[1] ? sums[1] / counts[1] : 0, counts[2] ? sums[2] / counts[2] : 0,
-            counts[1] ? 100.0 * bad[1] / counts[1] : 0, counts[2] ? 100.0 * bad[2] / counts[2] : 0};
+            counts[1] ? 100.0 * bad[1] / counts[1] : 0, counts[2] ? 100.0 * bad[2] / counts[2] : 0,
+            edge_count ? edge_sum / edge_count : 0, truth_energy > 0 ? image_energy / truth_energy : 0};
+}
+
+// Research: a full-resolution crop (FG_REPLAY_CROP=x0,y0,x1,y1), scaled up
+// `zoom` times with nearest sampling so single pixels stay visible.
+void WriteCropPpm(const std::string& path, const Pixels& pixels, std::uint32_t width, std::uint32_t height,
+                  const std::array<int, 4>& box, int zoom) {
+    const int x0 = std::clamp(box[0], 0, static_cast<int>(width)), y0 = std::clamp(box[1], 0, static_cast<int>(height));
+    const int x1 = std::clamp(box[2], x0 + 1, static_cast<int>(width)), y1 = std::clamp(box[3], y0 + 1, static_cast<int>(height));
+    std::FILE* file = std::fopen(path.c_str(), "wb");
+    if (!file) return;
+    const int w = (x1 - x0) * zoom, h = (y1 - y0) * zoom;
+    std::fprintf(file, "P6\n%d %d\n255\n", w, h);
+    std::vector<unsigned char> row(std::size_t(w) * 3);
+    for (int y = 0; y < h; ++y) {
+        for (int x = 0; x < w; ++x) {
+            const std::uint32_t p = pixels[std::size_t(y0 + y / zoom) * width + std::size_t(x0 + x / zoom)];
+            for (int c = 0; c < 3; ++c) row[std::size_t(x) * 3 + c] = static_cast<unsigned char>((p >> (8 * c)) & 255u);
+        }
+        std::fwrite(row.data(), 1, row.size(), file);
+    }
+    std::fclose(file);
 }
 
 // Research dump: a float image as raw little-endian floats, the size and
@@ -1455,6 +1501,10 @@ int RunReplay(Harness& harness) {
 
     const bool interpolate = env("FG_REPLAY_MODE") == "interpolate";
     const bool dump_maps = env("FG_REPLAY_DUMP") == "1";
+    std::optional<std::array<int, 4>> crop;
+    if (std::array<int, 4> box{}; std::sscanf(env("FG_REPLAY_CROP").c_str(), "%d,%d,%d,%d", &box[0], &box[1], &box[2], &box[3]) == 4) {
+        crop = box;
+    }
 
     // Executes frame k as the newest real frame after frame `before` (none:
     // a fresh sequence, nothing generated), generating one frame at
@@ -1517,7 +1567,7 @@ int RunReplay(Harness& harness) {
     // Compares each view's generated frame (in frame `view_frame`'s view)
     // with frame `truth_frame` turned to that view; `hold` (view 0) is what
     // showing a real frame instead would give.
-    double sums[4] = {};
+    double sums[6] = {};
     std::size_t evaluated = 0;
     auto evaluate = [&](std::size_t k, std::size_t view_frame, std::size_t truth_frame, const Pixels& hold,
                         const FrameGenExecuteResult& result, float fraction) {
@@ -1571,17 +1621,24 @@ int RunReplay(Harness& harness) {
             const Pixels truth = TurnTo(view, frames[truth_frame].views[v], valid);
             const ReplayError generated_error = CompareTo(generated, truth, valid, view);
             const ReplayError hold_error = CompareTo(v == 0 ? hold : frames[view_frame].views[v].color, truth, valid, view);
-            std::printf("frame %zu view %zu (depth %s, %.2f): generated %.4f (cockpit %.4f %.2f%% bad, outside %.4f %.2f%% bad)"
-                        "  hold %.4f (cockpit %.4f %.2f%%, outside %.4f %.2f%%)\n",
+            std::printf("frame %zu view %zu (depth %s, %.2f): generated %.4f (cockpit %.4f %.2f%% bad, outside %.4f %.2f%% bad,"
+                        " cockpit edges %.4f, sharpness %.3f)  hold %.4f (cockpit %.4f %.2f%%, outside %.4f %.2f%%)\n",
                         k, v, result.depth.size() > v && result.depth[v] ? "used" : "not used", fraction,
                         generated_error.all, generated_error.cockpit, generated_error.bad_cockpit, generated_error.outside,
-                        generated_error.bad_outside, hold_error.all, hold_error.cockpit, hold_error.bad_cockpit,
-                        hold_error.outside, hold_error.bad_outside);
+                        generated_error.bad_outside, generated_error.edge_cockpit, generated_error.sharpness_cockpit,
+                        hold_error.all, hold_error.cockpit, hold_error.bad_cockpit, hold_error.outside, hold_error.bad_outside);
             sums[0] += generated_error.cockpit;
             sums[1] += generated_error.bad_cockpit;
             sums[2] += generated_error.outside;
             sums[3] += generated_error.bad_outside;
+            sums[4] += generated_error.edge_cockpit;
+            sums[5] += generated_error.sharpness_cockpit;
             ++evaluated;
+            if (!g_replay_output.empty() && v == 0 && crop) {
+                WriteCropPpm(prefix + "-crop-generated.ppm", generated, view.width, view.height, *crop, 3);
+                WriteCropPpm(prefix + "-crop-truth.ppm", truth, view.width, view.height, *crop, 3);
+                WriteCropPpm(prefix + "-crop-newest.ppm", frames[view_frame].views[v].color, view.width, view.height, *crop, 3);
+            }
             if (!g_replay_output.empty() && v == 0) {
                 WriteHalfPpm(prefix + "-generated.ppm", generated, view.width, view.height);
                 WriteHalfPpm(prefix + "-truth.ppm", truth, view.width, view.height);
@@ -1645,8 +1702,10 @@ int RunReplay(Harness& harness) {
         }
     }
     if (evaluated) {
-        std::printf("Mean over %zu views: cockpit %.4f (%.2f%% bad), outside %.4f (%.2f%% bad)\n", evaluated,
-                    sums[0] / evaluated, sums[1] / evaluated, sums[2] / evaluated, sums[3] / evaluated);
+        std::printf("Mean over %zu views: cockpit %.4f (%.2f%% bad), outside %.4f (%.2f%% bad), cockpit edges %.4f,"
+                    " sharpness %.3f\n",
+                    evaluated, sums[0] / evaluated, sums[1] / evaluated, sums[2] / evaluated, sums[3] / evaluated,
+                    sums[4] / evaluated, sums[5] / evaluated);
     }
     gpu->Reset();
     return 0;

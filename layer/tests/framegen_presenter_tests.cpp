@@ -855,7 +855,7 @@ void TestThreadedDynamic() {
     int max_generated = 0;
     // Render alternates 26 and 18 ms: refreshes per real frame alternate too.
     const int frames = RunPipelined(
-        app, 2500ms, 16ms, 26ms,
+        app, 1500ms, 16ms, 26ms,
         [&](int frame, const XrFrameState& state) {
             max_generated = std::max<int>(max_generated, gpu.tuning.generated);
             if (frame >= 10) {

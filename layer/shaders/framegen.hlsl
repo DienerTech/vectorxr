@@ -666,10 +666,13 @@ float CandidateError(float2 uv, float2 v, float step) {
 // options.w holds the map's frame time (half float bits), in units of
 // `fraction` past the newest frame, or before it when interpolating: the
 // frame's own time, except a spare's, which scales the map to its time.
-float2 SourceUv(uint2 pixel, float fraction) {
-    float2 uv = (float2(pixel) + 0.5) / float2(g.size.xy);
+// `position`: the pixel's centre in pixels (a coarse pixel's centre under
+// variable-rate shading).
+float2 SourceUv(float2 position, float fraction) {
+    float2 uv = position / float2(g.size.xy);
 #if !defined(__spirv__)
     if ((g.options.y & FG_FLAG_SHIFT) != 0u) {
+        const uint2 pixel = uint2(position);
         const float map_time = f16tof32(g.options.w & 0xffffu);
         const float time = (g.options.y & FG_FLAG_EXTRAPOLATE) != 0u ? fraction : 1.0 - fraction;
         uint width, height;
@@ -683,9 +686,10 @@ float2 SourceUv(uint2 pixel, float fraction) {
     return uv;
 }
 
-// One generated pixel at `fraction` (see FrameGenTuning::fractions).
-float4 Synthesize(uint2 pixel, float fraction) {
-    const float2 uv = SourceUv(pixel, fraction);
+// One generated pixel at `fraction` (see FrameGenTuning::fractions);
+// `position` as for SourceUv.
+float4 Synthesize(float2 position, float fraction) {
+    const float2 uv = SourceUv(position, fraction);
     const float2 aspect = float2(1.0, float(g.size.y) / float(g.size.x));
     const bool extrapolate = (g.options.y & FG_FLAG_EXTRAPOLATE) != 0u;
     const bool still = (g.options.y & FG_FLAG_STILL) != 0u;
@@ -824,7 +828,7 @@ struct DrawOutput {
 };
 
 DrawOutput PSMain(float4 position : SV_Position) {
-    const uint2 pixel = uint2(position.xy);
+    const float2 pixel = position.xy;
     DrawOutput output;
     output.frame0 = Synthesize(pixel, g.tuning.x);
 #if FG_DRAW_OUTPUTS > 1
@@ -850,7 +854,7 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
     if (any(id.xy >= g.size.xy)) {
         return;
     }
-    g_output[id.xy] = Synthesize(id.xy, g.tuning.x);
+    g_output[id.xy] = Synthesize(float2(id.xy) + 0.5, g.tuning.x);
 }
 #endif
 #endif
@@ -1588,5 +1592,60 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
         packed = f32tof16(back.x) | (f32tof16(back.y) << 16);
     }
     g_shift[id.xy] = packed;
+}
+#endif
+
+#if defined(FG_PASS_SHADING_RATE)
+FG_BIND(0) Texture2D<float4> g_depth : register(t0);
+FG_BIND(6) SamplerState g_linear : register(s0);
+FG_BIND(4) FG_FORMAT("r8ui") RWTexture2D<uint> g_rates : register(u0);
+
+// D3D12_SHADING_RATE_1X1 and D3D12_SHADING_RATE_2X2.
+#define FG_RATE_1X1 0u
+#define FG_RATE_2X2 5u
+// Nearer than this is cockpit (FG_RIGID_DEPTH): always shaded per pixel.
+#define FG_RATE_NEAR 4.0
+
+// The shading-rate image for the synthesis draw (Direct3D 12): one rate per
+// screen tile. A tile far off the view axis (tuning.x: the tangent of the
+// angle) is shaded per 2x2 pixels unless it shows cockpit content: a wide
+// view's periphery is rendered far denser than the headset shows it, while
+// cockpit edges there are what generated frames must keep sharp. size.xy:
+// tiles, size.zw: the output extent, options.x: the tile's side in pixels,
+// options.y: FG_FLAG_DEPTH when the newest frame's depth is bound (without
+// it, the angle alone decides).
+[numthreads(8, 8, 1)]
+void CSMain(uint3 id : SV_DispatchThreadID) {
+    if (any(id.xy >= g.size.xy)) {
+        return;
+    }
+    const float tile = float(g.options.x);
+    const float2 extent = float2(g.size.zw);
+    const float2 centre = min((float2(id.xy) + 0.5) * tile, extent) / extent;
+    const float2 tangent = float2(lerp(g.fov_current.x, g.fov_current.y, centre.x),
+                                  lerp(g.fov_current.z, g.fov_current.w, centre.y));
+    uint rate = length(tangent) >= g.tuning.x ? FG_RATE_2X2 : FG_RATE_1X1;
+    if (rate != FG_RATE_1X1 && (g.options.y & FG_FLAG_DEPTH) != 0u) {
+        uint width, height;
+        g_depth.GetDimensions(width, height);
+        const float2 scale = float2(width, height) / extent;
+        const int2 first = int2(floor(float2(id.xy) * tile * scale));
+        const int2 last = min(int2(ceil((float2(id.xy) + 1.0) * tile * scale)), int2(width, height)) - 1;
+        // Four texels a fetch: the 2x2 block from (x, y) (clamped at edges).
+        const float2 texel = 1.0 / float2(width, height);
+        [loop]
+        for (int y = first.y; y <= last.y && rate != FG_RATE_1X1; y += 2) {
+            [loop]
+            for (int x = first.x; x <= last.x; x += 2) {
+                const float4 depth = g_depth.GatherRed(g_linear, (float2(x, y) + 1.0) * texel);
+                // Per texel: depth in use (positive) and nearer than cockpit range.
+                if (any(step(1e-6, depth) * step(depth, FG_RATE_NEAR) > 0.0)) {
+                    rate = FG_RATE_1X1;
+                    break;
+                }
+            }
+        }
+    }
+    g_rates[id.xy] = rate;
 }
 #endif

@@ -164,6 +164,10 @@ class FrameGenGpu {
     // The process's local video memory use (the application's included) and
     // the OS budget for it; absent when the backend cannot query it.
     virtual std::optional<FrameGenMemoryBudget> MemoryBudget() const { return std::nullopt; }
+    // Video memory of the backend's own images for all views (history, flow,
+    // depth, trust, eye-shift maps), as allocated; 0 when unknown. Output
+    // images belong to the runtime and are not included.
+    virtual std::uint64_t WorkingMemoryBytes() const { return 0; }
     // The runtime may then be called from a presenter thread while the
     // application renders: the API's queue is free-threaded (Direct3D 12), so
     // runtime work on it cannot race the application's own submissions.
