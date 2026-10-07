@@ -9,6 +9,7 @@
 
 #include "depthxr/framegen_gpu.h"
 
+#include <algorithm>
 #include <cstdlib>
 #include <deque>
 #include <mutex>
@@ -18,6 +19,16 @@ namespace depthxr {
 
 using Microsoft::WRL::ComPtr;
 
+namespace {
+
+// A held-back wait reaches the runtime once the release before it has. The
+// runtime shows none of the swapchain's images by then, so it returns at
+// once; bounded all the same, retried at the next call when it is not.
+constexpr XrDuration kHeldBackWaitTimeout = 1'000'000'000;
+constexpr DWORD kReleaseWaitMs = 100;
+
+} // namespace
+
 struct FrameGenQueueSubstitution::Impl {
     ComPtr<ID3D12CommandQueue> game;    // the application's queue
     ComPtr<ID3D12CommandQueue> runtime; // the queue the runtime was given
@@ -25,36 +36,112 @@ struct FrameGenQueueSubstitution::Impl {
     // after a wait, for the game's.
     ComPtr<ID3D12Fence> released;
     ComPtr<ID3D12Fence> handed_back;
-    std::mutex mutex; // fence values only move forward; the swapchains below
+    std::mutex mutex; // the swapchain map, the fence values (in queue order) and the log
     UINT64 released_value{0};
     UINT64 handed_back_value{0};
-    // Per application swapchain: lazy releases not forwarded yet (the
-    // `released` value marking the game's work on each image, oldest first),
-    // and images the application holds (acquired, not released).
-    struct Swapchain {
-        std::deque<UINT64> pending;
-        std::uint32_t held{0};
-    };
-    std::unordered_map<XrSwapchain, Swapchain> swapchains;
-    HANDLE event{nullptr};
+    std::function<void(const std::string&)> log;
+    int failures{0};
 
-    ~Impl() {
-        if (event) CloseHandle(event);
+    // An application call held back: a release (after the game's work up
+    // to `value` on the `released` fence) or a wait.
+    struct Call {
+        bool wait{false};
+        UINT64 value{0};
+    };
+    // Per application swapchain. `calls` keeps the runtime's calls on it in
+    // order and guards the rest; taken before `mutex`.
+    struct Swapchain {
+        std::mutex calls;
+        std::deque<Call> held_back;
+        std::uint32_t releases{0};     // releases in `held_back`
+        std::uint32_t held{0};         // acquired by the application, not released by it
+        std::uint32_t image_count{0};  // as acquiring last said
+        std::uint32_t direct_waits{0}; // waits not held back: an image was shown since
+        HANDLE event{nullptr};
+        ~Swapchain() {
+            if (event) CloseHandle(event);
+        }
+    };
+    std::unordered_map<XrSwapchain, std::shared_ptr<Swapchain>> swapchains;
+
+    std::shared_ptr<Swapchain> Find(XrSwapchain swapchain, bool create) {
+        std::scoped_lock lock(mutex);
+        const auto it = swapchains.find(swapchain);
+        if (it != swapchains.end()) {
+            return it->second;
+        }
+        return create ? (swapchains[swapchain] = std::make_shared<Swapchain>()) : nullptr;
     }
 
-    // Forwards pending releases from the oldest: those whose work has run
-    // (`all`: every one, the runtime's queue waiting for the rest).
-    void Forward(XrSwapchain swapchain, Swapchain& state, PFN_xrReleaseSwapchainImage next, bool all) {
+    // Marks the game's work so far on its queue.
+    UINT64 MarkGameWork() {
+        std::scoped_lock lock(mutex);
+        const UINT64 value = ++released_value;
+        game->Signal(released.Get(), value);
+        return value;
+    }
+
+    void Note(XrResult result, const char* call) {
+        if (XR_SUCCEEDED(result)) {
+            return;
+        }
+        std::function<void(const std::string&)> report;
+        {
+            std::scoped_lock lock(mutex);
+            if (++failures > 5 || !log) return;
+            report = log;
+        }
+        report(std::string("Frame Generation: the runtime refused a held-back ") + call + " of a game image (" +
+               std::to_string(result) + ").");
+    }
+
+    enum class Until {
+        kDone,     // releases whose work has run (and the waits after them)
+        kReleases, // every release (the runtime's queue waiting for its work); later waits stay
+        kAll,      // everything
+        kOldest,   // through the oldest release, the runtime's queue waiting for its work
+    };
+    // Forwards held-back calls from the oldest (holding `state.calls`).
+    // False when a wait the runtime did not return in time stopped it.
+    bool Forward(XrSwapchain swapchain, Swapchain& state, const Calls& next, Until until) {
         const UINT64 done = released->GetCompletedValue();
-        while (!state.pending.empty() && (all || state.pending.front() <= done)) {
-            if (state.pending.front() > done) {
-                runtime->Wait(released.Get(), state.pending.front());
+        while (!state.held_back.empty()) {
+            const Call call = state.held_back.front();
+            if (call.wait) {
+                if (until == Until::kReleases && state.releases == 0) break;
+                XrSwapchainImageWaitInfo info{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};
+                info.timeout = kHeldBackWaitTimeout;
+                const XrResult result = next.wait(swapchain, &info);
+                if (result == XR_TIMEOUT_EXPIRED) {
+                    Note(XR_ERROR_RUNTIME_FAILURE, "wait (timed out; retried)");
+                    return false;
+                }
+                Note(result, "wait");
+                state.held_back.pop_front();
+                continue;
+            }
+            if (call.value > done) {
+                if (until == Until::kDone) break;
+                runtime->Wait(released.Get(), call.value);
             }
             XrSwapchainImageReleaseInfo info{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
-            next(swapchain, &info);
-            state.pending.pop_front();
+            Note(next.release(swapchain, &info), "release");
+            state.held_back.pop_front();
+            --state.releases;
+            if (until == Until::kOldest) break;
         }
+        return true;
     }
+
+    // After the runtime handed an image back: anything it queued for the
+    // image runs before the game's rendering into it.
+    void AfterWait() {
+        std::scoped_lock lock(mutex);
+        const UINT64 value = ++handed_back_value;
+        runtime->Signal(handed_back.Get(), value);
+        game->Wait(handed_back.Get(), value);
+    }
+
     XrGraphicsBindingD3D12KHR binding{XR_TYPE_GRAPHICS_BINDING_D3D12_KHR};
     XrSessionCreateInfo info{XR_TYPE_SESSION_CREATE_INFO};
     FrameGenRuntimeQueue marker;
@@ -115,6 +202,7 @@ const XrSessionCreateInfo* FrameGenQueueSubstitution::Prepare(const XrSessionCre
     impl->info = *info;
     impl->info.next = &impl->binding;
     impl->marker.d3d12_queue = impl->runtime.Get();
+    impl->log = log_;
     impl_ = std::move(impl);
     note = "Frame Generation gives the runtime a Direct3D 12 queue of its own: frames it writes reach the runtime "
            "as soon as they are written, not after the game's queued work; the game's images are kept in order "
@@ -124,6 +212,14 @@ const XrSessionCreateInfo* FrameGenQueueSubstitution::Prepare(const XrSessionCre
 
 bool FrameGenQueueSubstitution::Active() const {
     return impl_ != nullptr;
+}
+
+void FrameGenQueueSubstitution::SetLog(std::function<void(const std::string&)> log) {
+    log_ = std::move(log);
+    if (impl_) {
+        std::scoped_lock lock(impl_->mutex);
+        impl_->log = log_;
+    }
 }
 
 const void* FrameGenQueueSubstitution::FrameGenChain(const void* game_chain) {
@@ -138,74 +234,103 @@ const void* FrameGenQueueSubstitution::RuntimeChain() const {
     return impl_ ? static_cast<const void*>(&impl_->binding) : nullptr;
 }
 
-XrResult FrameGenQueueSubstitution::Release(XrSwapchain swapchain, bool lazy, PFN_xrReleaseSwapchainImage next,
-                                            const XrSwapchainImageReleaseInfo* info) {
+XrResult FrameGenQueueSubstitution::Acquire(XrSwapchain swapchain, std::uint32_t image_count, const Calls& next,
+                                            const XrSwapchainImageAcquireInfo* info, std::uint32_t* index) {
     if (!impl_) {
-        return next(swapchain, info);
+        return next.acquire(swapchain, info, index);
     }
-    std::scoped_lock lock(impl_->mutex);
-    Impl::Swapchain& state = impl_->swapchains[swapchain];
-    state.held = state.held ? state.held - 1 : 0;
-    const UINT64 value = ++impl_->released_value;
-    impl_->game->Signal(impl_->released.Get(), value);
-    if (lazy) {
-        state.pending.push_back(value);
-        impl_->Forward(swapchain, state, next, false);
-        return XR_SUCCESS;
+    const auto state = impl_->Find(swapchain, true);
+    std::scoped_lock calls(state->calls);
+    if (image_count) {
+        state->image_count = image_count;
     }
-    impl_->Forward(swapchain, state, next, true);
-    impl_->runtime->Wait(impl_->released.Get(), value);
-    return next(swapchain, info);
-}
-
-void FrameGenQueueSubstitution::BeforeAcquire(XrSwapchain swapchain, std::uint32_t image_count,
-                                              PFN_xrReleaseSwapchainImage next) {
-    if (!impl_) {
-        return;
-    }
-    std::scoped_lock lock(impl_->mutex);
-    const auto it = impl_->swapchains.find(swapchain);
-    if (it == impl_->swapchains.end()) {
-        return;
-    }
-    Impl::Swapchain& state = it->second;
-    impl_->Forward(swapchain, state, next, false);
+    impl_->Forward(swapchain, *state, next, Impl::Until::kDone);
     // The runtime hands out an image only while the application (to its
     // knowledge) holds fewer than all of them.
-    while (!state.pending.empty() && image_count && state.held + state.pending.size() >= image_count) {
-        if (!impl_->event) impl_->event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
-        if (impl_->event && SUCCEEDED(impl_->released->SetEventOnCompletion(state.pending.front(), impl_->event))) {
-            WaitForSingleObject(impl_->event, 100);
+    for (int forced = 0; state->releases && image_count && state->held + state->releases >= image_count &&
+                         forced < static_cast<int>(image_count);
+         ++forced) {
+        const auto oldest = std::find_if(state->held_back.begin(), state->held_back.end(),
+                                         [](const Impl::Call& call) { return !call.wait; });
+        if (!state->event) state->event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+        if (state->event && SUCCEEDED(impl_->released->SetEventOnCompletion(oldest->value, state->event))) {
+            WaitForSingleObject(state->event, kReleaseWaitMs);
         }
-        const UINT64 oldest = state.pending.front();
-        impl_->Forward(swapchain, state, next, false);
-        if (!state.pending.empty() && state.pending.front() == oldest) {
-            // Still running after 100 ms: forwarded with the runtime's queue
-            // waiting for it instead.
-            impl_->runtime->Wait(impl_->released.Get(), oldest);
-            XrSwapchainImageReleaseInfo info{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
-            next(swapchain, &info);
-            state.pending.pop_front();
+        // Still running after that: forwarded with the runtime's queue
+        // waiting for it instead.
+        if (!impl_->Forward(swapchain, *state, next, Impl::Until::kOldest)) {
+            break;
         }
+        impl_->Forward(swapchain, *state, next, Impl::Until::kDone);
     }
+    const XrResult result = next.acquire(swapchain, info, index);
+    if (XR_SUCCEEDED(result)) {
+        ++state->held;
+    }
+    return result;
 }
 
-void FrameGenQueueSubstitution::AfterAcquire(XrSwapchain swapchain) {
+XrResult FrameGenQueueSubstitution::Wait(XrSwapchain swapchain, bool lazy, const Calls& next,
+                                         const XrSwapchainImageWaitInfo* info) {
+    if (!impl_) {
+        return next.wait(swapchain, info);
+    }
+    if (const auto state = impl_->Find(swapchain, false)) {
+        std::unique_lock calls(state->calls);
+        impl_->Forward(swapchain, *state, next, Impl::Until::kDone);
+        if (!state->held_back.empty() && lazy && !state->direct_waits) {
+            // A release before it is still held back: so is this wait.
+            state->held_back.push_back({true, 0});
+            calls.unlock();
+            impl_->AfterWait();
+            return XR_SUCCESS;
+        }
+        if (!impl_->Forward(swapchain, *state, next, Impl::Until::kAll)) {
+            return XR_ERROR_RUNTIME_FAILURE;
+        }
+        if (state->direct_waits) {
+            --state->direct_waits;
+        }
+        // Nothing is held back now, and only this thread holds calls back on
+        // the swapchain: the wait (which may block) goes without `calls`.
+    }
+    const XrResult result = next.wait(swapchain, info);
+    if (XR_SUCCEEDED(result) && result != XR_TIMEOUT_EXPIRED) {
+        impl_->AfterWait();
+    }
+    return result;
+}
+
+XrResult FrameGenQueueSubstitution::Release(XrSwapchain swapchain, bool lazy, const Calls& next,
+                                            const XrSwapchainImageReleaseInfo* info) {
+    if (!impl_) {
+        return next.release(swapchain, info);
+    }
+    const auto state = impl_->Find(swapchain, true);
+    std::scoped_lock calls(state->calls);
+    state->held = state->held ? state->held - 1 : 0;
+    const UINT64 value = impl_->MarkGameWork();
+    if (lazy) {
+        state->held_back.push_back({false, value});
+        ++state->releases;
+        impl_->Forward(swapchain, *state, next, Impl::Until::kDone);
+        return XR_SUCCESS;
+    }
+    if (!impl_->Forward(swapchain, *state, next, Impl::Until::kAll)) {
+        return XR_ERROR_RUNTIME_FAILURE;
+    }
+    impl_->runtime->Wait(impl_->released.Get(), value);
+    return next.release(swapchain, info);
+}
+
+void FrameGenQueueSubstitution::Flush(XrSwapchain swapchain, const Calls& next) {
     if (!impl_) {
         return;
     }
-    std::scoped_lock lock(impl_->mutex);
-    ++impl_->swapchains[swapchain].held;
-}
-
-void FrameGenQueueSubstitution::Flush(XrSwapchain swapchain, PFN_xrReleaseSwapchainImage next) {
-    if (!impl_) {
-        return;
-    }
-    std::scoped_lock lock(impl_->mutex);
-    const auto it = impl_->swapchains.find(swapchain);
-    if (it != impl_->swapchains.end()) {
-        impl_->Forward(swapchain, it->second, next, true);
+    if (const auto state = impl_->Find(swapchain, false)) {
+        std::scoped_lock calls(state->calls);
+        impl_->Forward(swapchain, *state, next, Impl::Until::kReleases);
+        state->direct_waits = state->image_count ? state->image_count : 3;
     }
 }
 
@@ -217,24 +342,16 @@ void FrameGenQueueSubstitution::Forget(XrSwapchain swapchain) {
     impl_->swapchains.erase(swapchain);
 }
 
-void FrameGenQueueSubstitution::BeforeRelease() {
+void FrameGenQueueSubstitution::BeforeRelease(XrSwapchain swapchain, const Calls& next) {
     if (!impl_) {
         return;
     }
-    std::scoped_lock lock(impl_->mutex);
-    const UINT64 value = ++impl_->released_value;
-    impl_->game->Signal(impl_->released.Get(), value);
-    impl_->runtime->Wait(impl_->released.Get(), value);
-}
-
-void FrameGenQueueSubstitution::AfterWait() {
-    if (!impl_) {
-        return;
+    if (const auto state = impl_->Find(swapchain, false)) {
+        std::scoped_lock calls(state->calls);
+        impl_->Forward(swapchain, *state, next, Impl::Until::kAll);
+        state->held = state->held ? state->held - 1 : 0;
     }
-    std::scoped_lock lock(impl_->mutex);
-    const UINT64 value = ++impl_->handed_back_value;
-    impl_->runtime->Signal(impl_->handed_back.Get(), value);
-    impl_->game->Wait(impl_->handed_back.Get(), value);
+    impl_->runtime->Wait(impl_->released.Get(), impl_->MarkGameWork());
 }
 
 void FrameGenQueueSubstitution::Reset() {

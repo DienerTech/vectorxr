@@ -507,14 +507,21 @@ class FrameGenPresenter {
         float fraction{1.0f};
         bool cover{false}; // past the newest real frame while the next one is late
     };
-    JitChoice ChooseJitLocked(XrTime time, XrDuration period, bool interpolate, bool& due) const;
+    // Of the oldest `limit` kept real frames (all by default).
+    JitChoice ChooseJitLocked(XrTime time, XrDuration period, bool interpolate, bool& due,
+                              std::size_t limit = SIZE_MAX) const;
     // Presenter thread, holding no lock (it makes output swapchains, which
     // takes submit_mutex_): writes the chosen frame into the next output
     // images and fills `views` with the projection views showing them.
     // False (nothing released) when it cannot.
-    // `choice` becomes the real frame's exact copy when its motion is not
-    // measured on the GPU yet.
-    bool SynthesizeJit(const JitFrame& frame, JitChoice& choice, std::vector<XrCompositionLayerProjectionView>& views,
+    // What a frame is made from must have run on the GPU (written before,
+    // the frame would wait for it on the runtime's queue, and everything
+    // after it there): a moved frame whose motion is not measured yet
+    // becomes its real frame's exact copy; a real frame not captured yet
+    // gives way to `fallback` (the choice as if it had not arrived; `frame`
+    // and `choice` become it), else nothing is written.
+    bool SynthesizeJit(std::optional<JitFrame>& frame, JitChoice& choice, const std::optional<JitFrame>& fallback,
+                       const JitChoice& fallback_choice, std::vector<XrCompositionLayerProjectionView>& views,
                        bool& exact);
     void SummaryLocked(std::chrono::steady_clock::time_point now);
     void StartCompositorLocked(const FrameGenRuntimeCalls& calls);
@@ -719,6 +726,7 @@ class FrameGenPresenter {
     std::uint64_t newest_copy_id_{0}; // the ThreadedFrame::id newest_copy_ came from
     std::uint64_t jit_covers_{0};   // refreshes shown past the newest real frame while the next was late (summary)
     std::uint64_t jit_failures_{0}; // refreshes that could not be written (summary)
+    std::uint64_t jit_unready_{0};  // refreshes whose real frames were still on the GPU (summary)
     XrTime last_target_time_{0};    // interpolating just in time: the display time the newest waited frame was told
     // Real frames generated from, and how many of them used the game's depth,
     // since the last summary.

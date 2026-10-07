@@ -724,6 +724,15 @@ class OpenXrLayer {
     // Direct3D 12: the runtime is given Frame Generation's queue (see
     // FrameGenQueueSubstitution); decided at xrCreateSession.
     FrameGenQueueSubstitution framegen_queue_;
+    FrameGenQueueSubstitution::Calls FrameGenQueueCalls() const {
+        return {next_acquire_swapchain_image_, next_wait_swapchain_image_, next_release_swapchain_image_};
+    }
+    // Whether the application's calls on `swapchain` may be held back
+    // (FrameGenQueueSubstitution: Frame Generation captures its images and
+    // shows images of its own only).
+    bool FrameGenLazy(XrSwapchain swapchain) {
+        return framegen_queue_.Active() && framegen_.ShowsOwnImagesOnly() && framegen_.CapturesFrom(swapchain);
+    }
     FrameGenPresenter::GpuFactory framegen_gpu_factory_{CreateFrameGenGpu};
     FrameGenRuntimeCalls framegen_calls_;
     std::atomic<bool> framegen_owns_pacing_{false};

@@ -201,6 +201,9 @@ class FrameGenGpu {
     // them anything submitted after them to the same queue. (Its exact copy
     // only needs its capture.)
     virtual bool Measured(std::uint64_t /*frame*/) const { return true; }
+    // Whether its images' capture has run on the GPU by now: its exact copy
+    // written before then waits for that (and the game's frame before it).
+    virtual bool Captured(std::uint64_t /*frame*/) const { return true; }
 };
 
 // Direct3D 12 queue substitution (FrameGenQueueSubstitution): the runtime was

@@ -2342,6 +2342,11 @@ int D3D11Test() {
 // - game queue: everything on the game's queue.
 // A frame must be usable within about a refresh of its submission.
 bool g_contention = false;
+XrResult XRAPI_PTR IgnoreAcquire(XrSwapchain, const XrSwapchainImageAcquireInfo*, uint32_t* index) {
+    if (index) *index = 0;
+    return XR_SUCCESS;
+}
+XrResult XRAPI_PTR IgnoreWait(XrSwapchain, const XrSwapchainImageWaitInfo*) { return XR_SUCCESS; }
 XrResult XRAPI_PTR IgnoreRelease(XrSwapchain, const XrSwapchainImageReleaseInfo*) { return XR_SUCCESS; }
 
 int RunContention(Harness& harness) {
@@ -2366,7 +2371,9 @@ int RunContention(Harness& harness) {
     ID3D12CommandQueue* runtime = static_cast<const XrGraphicsBindingD3D12KHR*>(substituted_info->next)->queue;
     const void* marker = substitution.FrameGenChain(game);
     const XrSwapchain game_swapchain = reinterpret_cast<XrSwapchain>(0xee);
+    const XrSwapchainImageWaitInfo game_wait{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO, nullptr, XR_INFINITE_DURATION};
     const XrSwapchainImageReleaseInfo game_release{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
+    const FrameGenQueueSubstitution::Calls ignore{IgnoreAcquire, IgnoreWait, IgnoreRelease};
     auto make = [&](const char* queue, bool substituted) {
         _putenv_s("VECTORXR_FRAMEGEN_QUEUE", queue);
         _putenv_s("VECTORXR_FRAMEGEN_JIT", "1");
@@ -2482,11 +2489,12 @@ int RunContention(Harness& harness) {
             std::vector<double> latencies;
             for (int i = 0; i < 60; ++i) {
                 if (variant.substituted) {
-                    // The game released an image of the frame its GPU is
-                    // still rendering.
-                    substitution.AfterAcquire(game_swapchain);
-                    substitution.Release(game_swapchain, variant.lazy, IgnoreRelease, &game_release);
-                    substitution.BeforeAcquire(game_swapchain, 1000, IgnoreRelease);
+                    // The game takes an image and releases it while its GPU
+                    // is still rendering the frame.
+                    std::uint32_t index = 0;
+                    substitution.Acquire(game_swapchain, 1000, ignore, nullptr, &index);
+                    substitution.Wait(game_swapchain, variant.lazy, ignore, &game_wait);
+                    substitution.Release(game_swapchain, variant.lazy, ignore, &game_release);
                 }
                 const auto start = std::chrono::steady_clock::now();
                 Check(jit->Synthesize(result.frame, FrameGenSynthesisMode::kExtrapolate, 0.5f, images, error),
@@ -2506,7 +2514,7 @@ int RunContention(Harness& harness) {
         }
         loading = false;
         load->WaitIdle();
-        substitution.Flush(game_swapchain, IgnoreRelease);
+        substitution.Flush(game_swapchain, ignore);
         jit->Reset();
     }
     stop = true;
@@ -2518,14 +2526,53 @@ int RunContention(Harness& harness) {
 }
 
 // Queue substitution (FrameGenQueueSubstitution) against a stand-in runtime
-// whose releases are only recorded: the runtime is given a queue of its own;
+// that keeps OpenXR's swapchain call order as strictly as runtimes may: an
+// image is acquired only while the application holds fewer than all of them,
+// waited for only when no image is waited for and not yet released, and
+// released only once waited for. The runtime is given a queue of its own;
 // lazy releases reach it only once the game's GPU work on the image has run
-// (here held back by a fence the test signals), in order, and earlier only as
-// far as the runtime needs one to hand out an image; a release that is not
-// lazy, or a frame showing the swapchain, sends every pending one first.
-std::vector<XrSwapchain> g_forwarded_releases;
-XrResult XRAPI_PTR RecordRelease(XrSwapchain swapchain, const XrSwapchainImageReleaseInfo*) {
-    g_forwarded_releases.push_back(swapchain);
+// (here held back by a fence the test signals), with the game's next waits
+// held back behind them, in order; earlier only as far as the runtime needs
+// one to hand out an image. A release that is not lazy, or a frame showing
+// the swapchain, sends everything held back first, and after a frame showing
+// the swapchain its waits are not held back.
+struct StrictSwapchain {
+    std::uint32_t images{3};
+    std::uint32_t acquired{0};
+    bool waited{false};
+    std::uint32_t next{0};
+    std::string calls; // a(cquire), w(ait), r(elease), as the runtime saw them
+    int refused{0};
+};
+StrictSwapchain g_strict;
+XrResult XRAPI_PTR StrictAcquire(XrSwapchain, const XrSwapchainImageAcquireInfo*, uint32_t* index) {
+    if (g_strict.acquired == g_strict.images) {
+        ++g_strict.refused;
+        return XR_ERROR_CALL_ORDER_INVALID;
+    }
+    ++g_strict.acquired;
+    if (index) *index = g_strict.next;
+    g_strict.next = (g_strict.next + 1) % g_strict.images;
+    g_strict.calls += 'a';
+    return XR_SUCCESS;
+}
+XrResult XRAPI_PTR StrictWait(XrSwapchain, const XrSwapchainImageWaitInfo*) {
+    if (g_strict.waited || g_strict.acquired == 0) {
+        ++g_strict.refused;
+        return XR_ERROR_CALL_ORDER_INVALID;
+    }
+    g_strict.waited = true;
+    g_strict.calls += 'w';
+    return XR_SUCCESS;
+}
+XrResult XRAPI_PTR StrictRelease(XrSwapchain, const XrSwapchainImageReleaseInfo*) {
+    if (!g_strict.waited) {
+        ++g_strict.refused;
+        return XR_ERROR_CALL_ORDER_INVALID;
+    }
+    g_strict.waited = false;
+    --g_strict.acquired;
+    g_strict.calls += 'r';
     return XR_SUCCESS;
 }
 
@@ -2536,6 +2583,8 @@ void SubstitutionTest(ID3D12Device* device, ID3D12CommandQueue* game_queue) {
     XrSessionCreateInfo info{XR_TYPE_SESSION_CREATE_INFO};
     info.next = &binding;
     FrameGenQueueSubstitution substitution;
+    std::vector<std::string> logged;
+    substitution.SetLog([&](const std::string& message) { logged.push_back(message); });
     std::string note;
     const XrSessionCreateInfo* created = substitution.Prepare(&info, note);
     Check(substitution.Active() && created != &info, "substitution: a Direct3D 12 session gets the layer's queue (" + note + ")");
@@ -2547,55 +2596,81 @@ void SubstitutionTest(ID3D12Device* device, ID3D12CommandQueue* game_queue) {
     Check(marker->type == kFrameGenRuntimeQueueType && marker->d3d12_queue == runtime_binding->queue && marker->next == &binding,
           "substitution: Frame Generation's chain carries the runtime's queue ahead of the game's binding");
 
-    // The game's GPU is busy: its queue waits on a fence the test holds back.
+    const FrameGenQueueSubstitution::Calls strict{StrictAcquire, StrictWait, StrictRelease};
+    const XrSwapchain color = reinterpret_cast<XrSwapchain>(0xc0);
+    const XrSwapchainImageWaitInfo wait{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO, nullptr, XR_INFINITE_DURATION};
+    const XrSwapchainImageReleaseInfo release{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
+    g_strict = {};
+    // One game frame: its image taken, waited for, rendered (queued) and
+    // released.
+    auto frame = [&](bool lazy, const std::string& what) {
+        std::uint32_t index = 0;
+        Check(substitution.Acquire(color, g_strict.images, strict, nullptr, &index) == XR_SUCCESS,
+              "substitution: " + what + ": acquire (" + g_strict.calls + ")");
+        Check(substitution.Wait(color, lazy, strict, &wait) == XR_SUCCESS,
+              "substitution: " + what + ": wait (" + g_strict.calls + ")");
+        Check(substitution.Release(color, lazy, strict, &release) == XR_SUCCESS,
+              "substitution: " + what + ": release (" + g_strict.calls + ")");
+        Check(g_strict.refused == 0, "substitution: " + what + ": the runtime saw its calls in order (" + g_strict.calls + ")");
+    };
     ComPtr<ID3D12Fence> busy;
     Check(SUCCEEDED(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&busy))), "substitution fence");
+    ComPtr<ID3D12Fence> idle;
+    Check(SUCCEEDED(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&idle))), "substitution fence");
+    const HANDLE event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    UINT64 idle_value = 0;
+    auto finish_game_queue = [&](const std::string& what) {
+        game_queue->Signal(idle.Get(), ++idle_value);
+        idle->SetEventOnCompletion(idle_value, event);
+        Check(WaitForSingleObject(event, 5000) == WAIT_OBJECT_0, "substitution: " + what);
+    };
+
+    // The game's GPU is busy: its queue waits on a fence the test holds back.
     game_queue->Wait(busy.Get(), 1);
-    const XrSwapchain color = reinterpret_cast<XrSwapchain>(0xc0);
-    const XrSwapchainImageReleaseInfo release{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
-    g_forwarded_releases.clear();
-    for (int i = 0; i < 3; ++i) {
-        substitution.AfterAcquire(color);
-        Check(substitution.Release(color, true, RecordRelease, &release) == XR_SUCCESS, "substitution: lazy release");
-    }
-    Check(g_forwarded_releases.empty(), "substitution: releases wait for the game's GPU work on their images");
-    substitution.BeforeAcquire(color, 4, RecordRelease); // a fourth image is free
-    Check(g_forwarded_releases.empty(), "substitution: an acquire the runtime can serve forwards nothing still running");
+    frame(true, "first frame");
+    Check(g_strict.calls == "aw", "substitution: a release waits for the game's GPU work on its image (" + g_strict.calls + ")");
+    frame(true, "second frame");
+    frame(true, "third frame");
+    Check(g_strict.calls == "awaa",
+          "substitution: waits behind a held-back release are held back with it (" + g_strict.calls + ")");
     const auto start = std::chrono::steady_clock::now();
-    substitution.BeforeAcquire(color, 3, RecordRelease); // all three held by the game, as the runtime sees it
-    Check(g_forwarded_releases.size() == 1, "substitution: an acquire the runtime could not serve gets the oldest release (" +
-                                                std::to_string(g_forwarded_releases.size()) + ")");
+    frame(true, "fourth frame"); // all three images held, as the runtime sees it
+    Check(g_strict.calls == "awaarwa",
+          "substitution: an acquire the runtime could not serve gets the oldest release and the wait after it (" +
+              g_strict.calls + ")");
     Check(std::chrono::steady_clock::now() - start < std::chrono::milliseconds(1000),
           "substitution: waiting for the oldest release is bounded");
     // The game's work runs: the rest go at its next call, in order.
     Check(SUCCEEDED(busy->Signal(1)), "substitution: release the game's queue");
-    ComPtr<ID3D12Fence> idle;
-    Check(SUCCEEDED(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&idle))), "substitution fence");
-    const HANDLE event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
-    game_queue->Signal(idle.Get(), 1);
-    idle->SetEventOnCompletion(1, event);
-    Check(WaitForSingleObject(event, 5000) == WAIT_OBJECT_0, "substitution: the game's queue finishes");
-    substitution.BeforeAcquire(color, 3, RecordRelease);
-    Check(g_forwarded_releases.size() == 3, "substitution: done releases go at the game's next call (" +
-                                                std::to_string(g_forwarded_releases.size()) + ")");
-    // Lazy again, then a frame showing the swapchain: everything first.
-    substitution.AfterAcquire(color);
-    substitution.Release(color, true, RecordRelease, &release);
-    substitution.Flush(color, RecordRelease);
-    Check(g_forwarded_releases.size() == 4, "substitution: a frame showing the swapchain sends pending releases first");
-    // Not lazy: forwarded at once (after any pending).
-    substitution.AfterAcquire(color);
-    substitution.Release(color, true, RecordRelease, &release);
-    substitution.AfterAcquire(color);
-    substitution.Release(color, false, RecordRelease, &release);
-    Check(g_forwarded_releases.size() == 6, "substitution: a release that is not lazy goes at once, after pending ones (" +
-                                                std::to_string(g_forwarded_releases.size()) + ")");
-    substitution.AfterWait();
+    finish_game_queue("the game's queue finishes");
+    frame(true, "frame after the game's work ran");
+    Check(g_strict.calls.rfind("awaarwarwrwraw", 0) == 0,
+          "substitution: done calls go at the game's next call (" + g_strict.calls + ")");
+    // A frame showing the swapchain: every release first; the game's next
+    // waits (one per image) are its own again.
+    substitution.Flush(color, strict);
+    Check(g_strict.acquired == 0 && !g_strict.waited,
+          "substitution: a frame showing the swapchain sends held-back releases first (" + g_strict.calls + ")");
+    game_queue->Wait(busy.Get(), 2);
+    const std::size_t shown = g_strict.calls.size();
+    frame(true, "frame after the swapchain was shown");
+    frame(true, "second frame after the swapchain was shown");
+    Check(g_strict.calls.substr(shown) == "awarw",
+          "substitution: after a frame showing the swapchain, waits are not held back (" + g_strict.calls.substr(shown) + ")");
+    // Not lazy: forwarded at once (after anything held back).
+    frame(true, "lazy frame");
+    std::uint32_t index = 0;
+    Check(substitution.Acquire(color, g_strict.images, strict, nullptr, &index) == XR_SUCCESS &&
+              substitution.Wait(color, false, strict, &wait) == XR_SUCCESS &&
+              substitution.Release(color, false, strict, &release) == XR_SUCCESS,
+          "substitution: frame that is not lazy");
+    Check(g_strict.refused == 0 && g_strict.acquired == 0 && !g_strict.waited,
+          "substitution: a release that is not lazy goes at once, after held-back calls (" + g_strict.calls + ")");
+    Check(logged.empty(), "substitution: no held-back call failed (" + (logged.empty() ? std::string() : logged.front()) + ")");
+    Check(SUCCEEDED(busy->Signal(2)), "substitution: release the game's queue");
     substitution.Reset();
     Check(!substitution.Active(), "substitution: reset at session end");
-    game_queue->Signal(idle.Get(), 2);
-    idle->SetEventOnCompletion(2, event);
-    Check(WaitForSingleObject(event, 5000) == WAIT_OBJECT_0, "substitution: the game's queue is not left waiting");
+    finish_game_queue("the game's queue is not left waiting");
     CloseHandle(event);
     std::cout << "D3D12 queue substitution passed\n";
 }

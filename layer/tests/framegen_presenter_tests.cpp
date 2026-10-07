@@ -143,6 +143,11 @@ struct GpuLog {
     std::mutex syntheses_mutex;
     std::vector<std::pair<FrameGenSynthesisMode, float>> syntheses;
     std::atomic<int> synthesis_failures{0};
+    // Each real frame's game frame still on the GPU for this long after it
+    // was analyzed (Captured and Measured false meanwhile), and frames
+    // written from one meanwhile.
+    std::chrono::milliseconds capture_lag{0};
+    std::atomic<int> unready_syntheses{0};
 };
 
 class FakeGpu final : public FrameGenGpu {
@@ -212,6 +217,7 @@ class FakeGpu final : public FrameGenGpu {
         if (tuning.analyze_only) {
             ++log_->analyzes;
             analyzed.id = next_frame_++;
+            analyzed.ready_at = std::chrono::steady_clock::now() + log_->capture_lag;
             result.frame = analyzed.id;
             std::scoped_lock lock(analyzed_mutex_);
             analyzed_.push_back(analyzed);
@@ -220,6 +226,12 @@ class FakeGpu final : public FrameGenGpu {
         return true;
     }
     bool SupportsJustInTime() const override { return log_->jit; }
+    bool Captured(std::uint64_t frame) const override {
+        std::scoped_lock lock(analyzed_mutex_);
+        const auto it = std::find_if(analyzed_.begin(), analyzed_.end(), [&](const Analyzed& a) { return a.id == frame; });
+        return it == analyzed_.end() || std::chrono::steady_clock::now() >= it->ready_at;
+    }
+    bool Measured(std::uint64_t frame) const override { return Captured(frame); }
     bool Synthesize(std::uint64_t frame, FrameGenSynthesisMode mode, float fraction, const std::vector<FrameGenImage>& outputs,
                     std::string& error) override {
         Analyzed analyzed;
@@ -230,6 +242,9 @@ class FakeGpu final : public FrameGenGpu {
                 ++log_->synthesis_failures;
                 error = "the real frame is no longer kept";
                 return false;
+            }
+            if (std::chrono::steady_clock::now() < it->ready_at) {
+                ++log_->unready_syntheses;
             }
             analyzed = *it;
         }
@@ -273,6 +288,7 @@ class FakeGpu final : public FrameGenGpu {
   private:
     struct Analyzed {
         std::uint64_t id{0};
+        std::chrono::steady_clock::time_point ready_at;
         struct View {
             float x{0.0f};
             float shift{0.0f};
@@ -282,7 +298,7 @@ class FakeGpu final : public FrameGenGpu {
     };
     GpuLog* log_;
     std::vector<FrameGenHistoryState> history_;
-    std::mutex analyzed_mutex_;
+    mutable std::mutex analyzed_mutex_;
     std::deque<Analyzed> analyzed_;
     std::uint64_t next_frame_{1};
 };
@@ -1454,6 +1470,49 @@ int SynthesesWhere(GpuLog& gpu, const std::function<bool(FrameGenSynthesisMode, 
                                           [&](const auto& entry) { return match(entry.first, entry.second); }));
 }
 
+// Extrapolate just in time while each real frame's game frame is still on
+// the GPU at its own refresh (it finishes a refresh and a half after the
+// frame is analyzed): nothing is written from it meanwhile (written, a frame
+// would wait for it on the runtime's queue, holding the refresh); the frame
+// before it is moved on instead.
+void TestJitWaitsForNoGameFrame() {
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    gpu.capture_lag = std::chrono::milliseconds(17);
+    Runtime runtime;
+    runtime.paced = true;
+    std::unique_ptr<App> owned;
+    App* app = nullptr;
+    StartJit(presenter, gpu, FrameGenSynthesisMode::kExtrapolate, FrameGenMultiplier::k2, app, runtime, owned);
+    app->eye_speed = 0.5;
+    for (int i = 0; i < 3; ++i) app->Frame();
+    const std::size_t first = runtime.Submissions();
+    const auto start = std::chrono::steady_clock::now();
+    while (std::chrono::steady_clock::now() - start < 1000ms) {
+        const XrFrameState state = app->Wait();
+        app->Begin();
+        std::this_thread::sleep_for(4ms);
+        app->Release();
+        Check(XR_SUCCEEDED(app->End(state.predictedDisplayTime)), "jit unready: end");
+    }
+    const double elapsed = Seconds(std::chrono::steady_clock::now() - start);
+    const FrameGenStatus status = presenter.Status();
+    const auto log = runtime.Snapshot();
+    Check(gpu.unready_syntheses == 0,
+          "jit unready: nothing written from a real frame still on the GPU (" + std::to_string(gpu.unready_syntheses.load()) + ")");
+    const double refresh = 1e9 / static_cast<double>(kPeriod);
+    Check(static_cast<double>(log.size() - first) / elapsed > refresh * 0.85, "jit unready: every refresh gets a frame");
+    Check(SynthesesWhere(gpu, [](FrameGenSynthesisMode mode, float fraction) {
+              return mode == FrameGenSynthesisMode::kExtrapolate && fraction > 0.0f;
+          }) > static_cast<int>(refresh * elapsed * 0.7),
+          "jit unready: the frame before it moved on instead");
+    Check(status.distinct_fps > 0.8 * status.output_fps,
+          "jit unready: refreshes show new frames (" + std::to_string(status.distinct_fps) + " of " +
+              std::to_string(status.output_fps) + " fps)");
+    Check(!runtime.ordering_violation && !g_release_violation, "jit unready: calls stayed ordered");
+    presenter.Stop();
+}
+
 // Extrapolate at 3x, each generated frame written right before its refresh:
 // one output image per eye whatever the multiplier, the game's own frame in
 // its refresh, and every other refresh moved on from it by its time.
@@ -2124,6 +2183,7 @@ int main() {
     RUN(TestJitDynamicExtrapolation);
     RUN(TestJitInterpolation);
     RUN(TestJitDynamicInterpolation);
+    RUN(TestJitWaitsForNoGameFrame);
     // The threaded presenter's lifecycle with frames written together, then
     // just in time.
     for (const bool jit : {false, true}) {

@@ -1707,7 +1707,9 @@ class D3D12FrameGen final : public FrameGenGpu {
             frame.id = next_analyzed_id_++;
             frame.tuning = effective_tuning;
             frame.work_value = fence_value_;
-            frame.capture_value = separate_ ? capture_waited_ : 0;
+            // Captures run on the game's queue: with a work queue of its own,
+            // the capture fence this work waited for; else the work itself.
+            frame.capture_value = separate_ ? capture_waited_ : fence_value_;
             for (std::size_t i = 0; i < views.size(); ++i) {
                 const ViewResources& view = views_[i];
                 AnalyzedView analyzed;
@@ -1748,6 +1750,13 @@ class D3D12FrameGen final : public FrameGenGpu {
         const auto found = std::find_if(analyzed_.begin(), analyzed_.end(),
                                         [&](const AnalyzedFrame& frame) { return frame.id == frame_id; });
         return found == analyzed_.end() || !fence_ || fence_->GetCompletedValue() >= found->work_value;
+    }
+
+    bool Captured(std::uint64_t frame_id) const override {
+        const auto found = std::find_if(analyzed_.begin(), analyzed_.end(),
+                                        [&](const AnalyzedFrame& frame) { return frame.id == frame_id; });
+        ID3D12Fence* fence = CaptureFence();
+        return found == analyzed_.end() || !fence || fence->GetCompletedValue() >= found->capture_value;
     }
 
     bool Synthesize(std::uint64_t frame_id, FrameGenSynthesisMode mode, float fraction,

@@ -2163,6 +2163,7 @@ XrResult OpenXrLayer::CreateSession(XrInstance instance,
         framegen_queue_.Reset();
         if (framegen_wanted) {
             std::string note;
+            framegen_queue_.SetLog([this](const std::string& message) { logger_.Error(message); });
             downstream_info = framegen_queue_.Prepare(create_info, note);
             if (!note.empty()) logger_.Info(note);
         }
@@ -3339,7 +3340,7 @@ XrResult OpenXrLayer::DestroySwapchain(XrSwapchain swapchain) {
         }
     }
 
-    framegen_queue_.Flush(swapchain, next_release_swapchain_image_);
+    framegen_queue_.Flush(swapchain, FrameGenQueueCalls());
     framegen_queue_.Forget(swapchain);
     // Frame Generation's GPU work may still read the swapchain's images (a
     // capture, or generation from them) when the GPU stopped finishing it:
@@ -3431,23 +3432,20 @@ XrResult OpenXrLayer::AcquireSwapchainImage(XrSwapchain swapchain,
             }
         }
     }
-    // Releases Frame Generation deferred (FrameGenQueueSubstitution) go
-    // first, as far as the runtime needs them to hand out an image.
-    framegen_queue_.BeforeAcquire(swapchain, image_count, next_release_swapchain_image_);
-
     const bool diag = TurboSequencedDebugTick();
     if (diag) {
         logger_.Debug("Turbo-diag: xrAcquireSwapchainImage(" +
                       std::to_string(reinterpret_cast<uintptr_t>(swapchain)) + ") starting.");
     }
-    const XrResult result = next_acquire_swapchain_image_(swapchain, acquire_info, index);
+    // Calls Frame Generation held back (FrameGenQueueSubstitution) go first,
+    // as far as the runtime needs them to hand out an image.
+    const XrResult result = framegen_queue_.Acquire(swapchain, image_count, FrameGenQueueCalls(), acquire_info, index);
     if (diag) {
         logger_.Debug("Turbo-diag: xrAcquireSwapchainImage completed.");
     }
     if (XR_FAILED(result)) {
         return result;
     }
-    framegen_queue_.AfterAcquire(swapchain);
 
     std::scoped_lock lock(mutex_);
     const auto it = tracked_swapchains_.find(swapchain);
@@ -3472,12 +3470,9 @@ XrResult OpenXrLayer::WaitSwapchainImage(XrSwapchain swapchain, const XrSwapchai
                       std::to_string(reinterpret_cast<uintptr_t>(swapchain)) + ") starting.");
     }
     const auto wait_start = std::chrono::steady_clock::now();
-    const XrResult result = next_wait_swapchain_image_(swapchain, wait_info);
-    if (XR_SUCCEEDED(result) && result != XR_TIMEOUT_EXPIRED) {
-        // Anything the runtime queued for the image runs before the game's
-        // rendering into it.
-        framegen_queue_.AfterWait();
-    }
+    // Anything the runtime queued for the image runs before the game's
+    // rendering into it; held back with a release before it that is.
+    const XrResult result = framegen_queue_.Wait(swapchain, FrameGenLazy(swapchain), FrameGenQueueCalls(), wait_info);
     if (diag) {
         logger_.Debug("Turbo-diag: xrWaitSwapchainImage completed in " +
                       std::to_string(std::chrono::duration<double, std::milli>(
@@ -3535,9 +3530,8 @@ XrResult OpenXrLayer::ReleaseSwapchainImage(XrSwapchain swapchain,
     // into it (and Frame Generation's capture of it) has run; while Frame
     // Generation shows only images of its own, an image it captures reaches
     // the runtime once that has run, without the runtime's queue waiting.
-    const bool lazy = framegen_queue_.Active() && framegen_.ShowsOwnImagesOnly() && framegen_.CapturesFrom(swapchain);
     const XrResult result =
-        framegen_queue_.Release(swapchain, lazy, next_release_swapchain_image_, release_info);
+        framegen_queue_.Release(swapchain, FrameGenLazy(swapchain), FrameGenQueueCalls(), release_info);
     if (diag) {
         logger_.Debug("Turbo-diag: xrReleaseSwapchainImage completed.");
     }
@@ -4906,7 +4900,7 @@ XrResult OpenXrLayer::SubmitRuntimeFrame(XrSession session, const XrFrameEndInfo
         for (std::uint32_t i = 0; i < info->layerCount; ++i) {
             const XrCompositionLayerBaseHeader* header = info->layers ? info->layers[i] : nullptr;
             if (!header) continue;
-            auto flush = [&](XrSwapchain swapchain) { framegen_queue_.Flush(swapchain, next_release_swapchain_image_); };
+            auto flush = [&](XrSwapchain swapchain) { framegen_queue_.Flush(swapchain, FrameGenQueueCalls()); };
             switch (header->type) {
             case XR_TYPE_COMPOSITION_LAYER_PROJECTION: {
                 const auto* projection = reinterpret_cast<const XrCompositionLayerProjection*>(header);
@@ -11777,7 +11771,7 @@ XrResult OpenXrLayer::FlushDeferredSwapchainReleaseLocked(XrSwapchain swapchain,
 
     while (info.deferred_release_count > 0) {
         XrSwapchainImageReleaseInfo release_info{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
-        framegen_queue_.BeforeRelease();
+        framegen_queue_.BeforeRelease(swapchain, FrameGenQueueCalls());
         const XrResult result = next_release_swapchain_image_(swapchain, &release_info);
         if (XR_FAILED(result)) {
             logger_.Error("Deferred swapchain release failed: handle=" + FormatHandle(swapchain) +
