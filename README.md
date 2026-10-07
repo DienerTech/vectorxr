@@ -203,6 +203,11 @@ The local `OpenXR.Loader.*.nupkg` package is intentionally not tracked in source
 CI and the GitHub release workflow install the OpenXR loader from a pinned vcpkg registry
 before building the layer.
 
+Frame Generation's NVIDIA hardware optical flow builds from the two MIT-licensed interface
+headers of the [NVIDIA Optical Flow SDK](https://developer.nvidia.com/optical-flow-sdk)
+included in `third_party/nvidia-optical-flow/`; no SDK download is needed. The optical flow
+library itself, `nvofapi64.dll`, comes with the NVIDIA driver and is loaded at run time.
+
 Install app dependencies:
 
 ```powershell

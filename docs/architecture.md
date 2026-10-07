@@ -150,8 +150,8 @@ Vulkan write them by compute into an intermediate image and copy it.
 size and prints the GPU time of every pass on the local GPU (Direct3D 12).
 
 With Motion estimation set to hardware, Direct3D 12 measures motion with NVIDIA's optical flow
-accelerator instead of block matching. It is built only when the NVIDIA Optical Flow SDK
-headers are unpacked under `libraries/`; `nvofapi64.dll` comes with the driver. Each view has
+accelerator instead of block matching, through the SDK's MIT-licensed interface headers in
+`third_party/nvidia-optical-flow/`; `nvofapi64.dll` comes with the driver. Each view has
 a session that matches its half-resolution luma pair with a 4x4 grid (flow level 3) and keeps
 its own temporal hints. The frame's command list is split:
 
