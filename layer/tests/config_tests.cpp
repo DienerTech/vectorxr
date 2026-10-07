@@ -1260,6 +1260,13 @@ void TestFrameGenProfileResolution() {
     Expect(other.flow_quality == depthxr::FrameGenFlowQuality::kPerformance && other.artifact_suppression == 40 &&
                other.motion_limit_percent == 8,
            "Unmatched application should use module defaults");
+
+    const depthxr::ParseResult dynamic =
+        depthxr::ParseConfig(FrameGenConfigJson(R"json({ "enabled": true, "defaults": { "frameMultiplier": "dynamic" } })json"));
+    Expect(dynamic.ok && dynamic.document.framegen.defaults.multiplier == depthxr::FrameGenMultiplier::kDynamic,
+           "Dynamic frame multiplier was not parsed");
+    Expect(std::string(depthxr::ToString(depthxr::FrameGenMultiplier::kDynamic)) == "dynamic",
+           "Dynamic frame multiplier did not round-trip");
 }
 
 void TestFrameGenInvalidSettingsRejected() {

@@ -2318,7 +2318,7 @@ bool ParseFrameGenSettings(const JsonValue::Object& object, const char* field, F
     if (multiplier) {
         const auto parsed = ParseFrameGenMultiplier(*multiplier);
         if (!parsed) {
-            error = std::string(field) + ".frameMultiplier must be auto, 2x, 3x, or 4x";
+            error = std::string(field) + ".frameMultiplier must be auto, dynamic, 2x, 3x, or 4x";
             return false;
         }
         out.multiplier = *parsed;

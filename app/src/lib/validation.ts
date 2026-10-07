@@ -6,7 +6,7 @@ const osdBodyRowNames = ['graph', 'turbo', 'framegen', 'pivot', 'modules']
 const frameGenSynthesisModeNames = ['interpolate', 'extrapolate']
 const frameGenFlowQualityNames = ['performance', 'balanced', 'quality']
 const frameGenMotionEstimationNames = ['shader', 'hardware']
-const frameGenFrameMultiplierNames = ['auto', '2x', '3x', '4x']
+const frameGenFrameMultiplierNames = ['auto', 'dynamic', '2x', '3x', '4x']
 const frameGenDiagnosticViewNames = ['off', 'flow', 'confidence', 'tint']
 
 function validateCoreConfig(core: CoreConfig): string[] {
@@ -313,7 +313,7 @@ function validateFrameGenSettings(prefix: string, settings: FrameGenSettings): s
     errors.push(`${prefix}motionEstimation must be shader or hardware`)
   }
   if (!frameGenFrameMultiplierNames.includes(settings.frameMultiplier)) {
-    errors.push(`${prefix}frameMultiplier must be auto, 2x, 3x, or 4x`)
+    errors.push(`${prefix}frameMultiplier must be auto, dynamic, 2x, 3x, or 4x`)
   }
 
   const bounded = [

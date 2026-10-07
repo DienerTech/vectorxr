@@ -60,7 +60,7 @@ test('invalid imported values normalize safely: enums fall back, integers clamp'
 
 test('the frame multiplier defaults to Auto, keeps valid choices, and falls back on bad values', () => {
   assert.equal(defaultFrameGenSettings().frameMultiplier, 'auto')
-  for (const value of ['auto', '2x', '3x', '4x']) {
+  for (const value of ['auto', 'dynamic', '2x', '3x', '4x']) {
     assert.equal(normalizeFrameGenSettings({ frameMultiplier: value }).frameMultiplier, value)
   }
   for (const value of ['8x', '1x', '2X', 'Auto', 3, null, true, {}]) {
@@ -81,7 +81,7 @@ test('the frame multiplier defaults to Auto, keeps valid choices, and falls back
   assert.deepEqual(validateConfig(normalizeConfig(config)), [])
 
   config.modules.framegen.defaults.frameMultiplier = 4
-  assert.ok(validateConfig(config).includes('modules.framegen.defaults.frameMultiplier must be auto, 2x, 3x, or 4x'))
+  assert.ok(validateConfig(config).includes('modules.framegen.defaults.frameMultiplier must be auto, dynamic, 2x, 3x, or 4x'))
 })
 
 test('validateConfig rejects out-of-range and malformed edits', () => {
@@ -110,7 +110,7 @@ test('validateConfig rejects out-of-range and malformed edits', () => {
     'modules.framegen.profiles[0].settings.synthesisMode must be interpolate or extrapolate',
     'modules.framegen.profiles[0].settings.flowQuality must be performance, balanced, or quality',
     'modules.framegen.profiles[0].settings.motionEstimation must be shader or hardware',
-    'modules.framegen.profiles[0].settings.frameMultiplier must be auto, 2x, 3x, or 4x',
+    'modules.framegen.profiles[0].settings.frameMultiplier must be auto, dynamic, 2x, 3x, or 4x',
     'modules.framegen.profiles[0].settings.motionLimitPercent must be a whole number from 2 to 25',
   ]) assert.ok(errors.includes(expected), expected)
 

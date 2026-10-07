@@ -838,7 +838,7 @@ struct FrameGenSettings {
     // "shader" or "hardware" (NVIDIA's optical flow accelerator, experimental).
     #[serde(default = "default_framegen_motion_estimation")]
     motion_estimation: String,
-    // "auto", "2x", "3x" or "4x": headset frames per real application frame.
+    // "auto", "dynamic", "2x", "3x" or "4x": headset frames per real application frame.
     #[serde(default = "default_framegen_frame_multiplier")]
     frame_multiplier: String,
     #[serde(default = "default_framegen_artifact_suppression")]

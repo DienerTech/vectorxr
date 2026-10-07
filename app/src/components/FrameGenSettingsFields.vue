@@ -33,6 +33,11 @@ const frameMultipliers: { value: FrameGenFrameMultiplier; label: string; descrip
     label: 'Auto',
     description: 'Starts at full rate, passing frames straight through while the game holds the headset refresh. When it cannot, steps up to 2x, 3x or 4x, and steps back down when it can, checking now and then.',
   },
+  {
+    value: 'dynamic',
+    label: 'Dynamic',
+    description: 'The game runs as fast as it can, never held to a fraction of the headset refresh, and generated frames fill the refreshes between its frames: 40 fps becomes 90 with about 1.25 generated frames per real one. Extrapolate in Direct3D 12 games, such as MSFS; elsewhere it behaves as Auto.',
+  },
   { value: '2x', label: '2x', description: 'The game runs at 1/2 the headset refresh, for example 45 fps at 90 Hz, with one generated frame between real frames.' },
   { value: '3x', label: '3x', description: 'The game runs at 1/3 the headset refresh, for example 30 fps at 90 Hz, with two generated frames between real frames.' },
   { value: '4x', label: '4x', description: 'The game runs at 1/4 the headset refresh, for example 22.5 fps at 90 Hz, with three generated frames between real frames. The most artifacts; for the heaviest games.' },

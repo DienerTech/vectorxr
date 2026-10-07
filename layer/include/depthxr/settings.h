@@ -494,11 +494,15 @@ enum class FrameGenMotionEstimation {
 // half the runtime refresh rate, 3x at a third, 4x at a quarter. Auto starts
 // at 2x, steps up while the application misses its cadence, probes back down
 // when it keeps up, and passes frames through when it holds full refresh.
+// Dynamic holds nothing: the application runs at its own rate and generated
+// frames fill the refreshes between its frames (Extrapolate presented from
+// the presenter thread; elsewhere it behaves as Auto).
 enum class FrameGenMultiplier {
     kAuto,
     k2,
     k3,
     k4,
+    kDynamic,
 };
 
 // Diagnostic overlays drawn into generated frames only.

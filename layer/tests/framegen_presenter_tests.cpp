@@ -781,7 +781,11 @@ int RunPipelined(App& app, std::chrono::milliseconds duration, std::chrono::mill
 
 void CheckOrderedTimes(const std::vector<Submission>& log, const std::string& what) {
     for (std::size_t i = 1; i < log.size(); ++i) {
-        Check(log[i].time > log[i - 1].time, what + ": display times only move forward");
+        Check(log[i].time > log[i - 1].time,
+              what + ": display times only move forward (submission " + std::to_string(i) + " of " +
+                  std::to_string(log.size()) + ": " + std::to_string(log[i - 1].time) + " then " +
+                  std::to_string(log[i].time) + (IsAppImage(log[i - 1].swapchains) ? ", real" : ", generated") +
+                  (IsAppImage(log[i].swapchains) ? " then real)" : " then generated)"));
     }
 }
 
@@ -832,6 +836,63 @@ void TestThreadedExtrapolation() {
     presenter.Stop();
     Check(std::chrono::steady_clock::now() - stop_start < 500ms, "threaded: stop ends the presenter thread promptly");
     Check(!runtime.ordering_violation && !g_release_violation, "threaded: runtime and image calls stayed ordered");
+}
+
+// Dynamic: an MSFS-like pipelined game that could do about 45 fps is not held
+// at 30 (3x) or 45 with misses (2x); it runs at its own rate, varying frame to
+// frame, and generated frames fill every refresh between its frames.
+void TestThreadedDynamic() {
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    runtime.paced = true;
+    StartThreaded(presenter, gpu, FrameGenMultiplier::kDynamic);
+    App app(presenter, runtime);
+    app.end_offset_periods = 1;
+    const std::size_t first = runtime.Submissions();
+    const auto start = std::chrono::steady_clock::now();
+    std::chrono::steady_clock::duration gap{};
+    int max_generated = 0;
+    // Render alternates 26 and 18 ms: refreshes per real frame alternate too.
+    const int frames = RunPipelined(
+        app, 2500ms, 16ms, 26ms,
+        [&](int frame, const XrFrameState& state) {
+            max_generated = std::max<int>(max_generated, gpu.tuning.generated);
+            if (frame >= 10) {
+                Check(state.predictedDisplayPeriod % kPeriod == 0 && state.predictedDisplayPeriod >= 2 * kPeriod &&
+                          state.predictedDisplayPeriod <= 4 * kPeriod,
+                      "dynamic: the app is told a whole number of refreshes per frame (" +
+                          std::to_string(state.predictedDisplayPeriod) + ")");
+            }
+        },
+        &gap, 8ms);
+    const double elapsed = Seconds(std::chrono::steady_clock::now() - start);
+    const double refresh = 1e9 / static_cast<double>(kPeriod);
+    const FrameGenStatus status = presenter.Status();
+    Check(status.threaded && status.dynamic && status.state == FrameGenState::kActive,
+          "dynamic: presents from its own thread");
+    Check(presenter.OsdText().find("Dynamic") != std::string::npos, "dynamic: the OSD says Dynamic");
+    Check(frames / elapsed > refresh / 3 * 1.15,
+          "dynamic: the app is not held to a third of the refresh (" + std::to_string(frames / elapsed) + " fps)");
+    const auto log = runtime.Snapshot();
+    Check(static_cast<double>(log.size() - first) / elapsed > refresh * 0.85,
+          "dynamic: every refresh gets a frame (" + std::to_string((log.size() - first) / elapsed) + " fps)");
+    std::size_t real = 0, generated = 0;
+    for (std::size_t i = first + 20; i < log.size(); ++i) {
+        (IsAppImage(log[i].swapchains) ? real : generated) += 1;
+    }
+    const double share = static_cast<double>(real) / static_cast<double>(real + generated);
+    Check(share > 0.36 && share < 0.6, "dynamic: real frames fill the refreshes they reach (" + std::to_string(share) + ")");
+    Check(status.distinct_fps > 0.8 * status.output_fps,
+          "dynamic: refreshes show new frames (" + std::to_string(status.distinct_fps) + " of " +
+              std::to_string(status.output_fps) + " fps)");
+    Check(gpu.executes > frames / 2, "dynamic: frames are generated from the real frames");
+    Check(max_generated >= 1 && max_generated <= 3,
+          "dynamic: at most two generated frames and a spare per real frame (" + std::to_string(max_generated) + ")");
+    Check(gap < 200ms, "dynamic: no stalls");
+    CheckOrderedTimes(log, "dynamic");
+    presenter.Stop();
+    Check(!runtime.ordering_violation && !g_release_violation, "dynamic: calls stayed ordered");
 }
 
 // A game frame far later than its slot leaves the presenter thread showing
@@ -1584,6 +1645,7 @@ int main() {
     TestDepthCapture();
     TestAutomaticMultiplier();
     TestThreadedExtrapolation();
+    TestThreadedDynamic();
     TestThreadedRepeatsAreNotDistinct();
     TestThreadedPipelinedApp();
     TestThreadedInterpolation();

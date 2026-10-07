@@ -313,6 +313,8 @@ void FrameGenPresenter::Stop() {
     threaded_late_ = 0;
     lead_slots_ = 0;
     lead_history_.clear();
+    dynamic_interval_slots_ = 0.0;
+    last_offer_slot_.reset();
     dropped_unbegun_ = 0;
     gpu_ms_ = -1.0;
     inline_hold_until_.reset();
@@ -691,16 +693,40 @@ std::uint32_t FrameGenPresenter::EffectiveMultiplierLocked() const {
         return 3;
     case FrameGenMultiplier::k4:
         return 4;
+    case FrameGenMultiplier::kDynamic:
+        return DynamicLocked() ? DynamicSlotsLocked() : auto_multiplier_;
     default:
         return auto_multiplier_;
     }
 }
 
+bool FrameGenPresenter::DynamicLocked() const {
+    return settings_.multiplier == FrameGenMultiplier::kDynamic &&
+           settings_.synthesis_mode == FrameGenSynthesisMode::kExtrapolate && ThreadedEligibleLocked();
+}
+
+std::uint32_t FrameGenPresenter::DynamicSlotsLocked() const {
+    // Two until measured: always engaged, so frames the game misses are filled.
+    if (dynamic_interval_slots_ <= 0.0) return 2;
+    return static_cast<std::uint32_t>(std::clamp(std::lround(dynamic_interval_slots_), 2l, 4l));
+}
+
+std::uint32_t FrameGenPresenter::DynamicSetCapLocked() const {
+    // Two generated frames and a spare cover a game at a third of the refresh
+    // rate or faster; slower, the last frame is shown again until the next
+    // real one (a fourth set costs as much video memory as the game's own
+    // frame at headset resolution). Near the video memory budget, one fewer.
+    return std::min<std::uint32_t>(3, auto_memory_ceiling_);
+}
+
 void FrameGenPresenter::UpdateAutoLocked(Clock::time_point now, const std::optional<PendingFrame>& frame,
                                          bool started_late) {
-    const bool automatic = settings_.multiplier == FrameGenMultiplier::kAuto;
+    const bool dynamic = DynamicLocked();
+    // Dynamic where the presenter thread cannot extrapolate is Auto.
+    const bool automatic = settings_.multiplier == FrameGenMultiplier::kAuto ||
+                           (settings_.multiplier == FrameGenMultiplier::kDynamic && !dynamic);
     const XrDuration period = frame && frame->period > 0 ? frame->period : last_period_;
-    if (!automatic || period <= 0 || !RunnableLocked()) {
+    if (!(automatic || dynamic) || period <= 0 || !RunnableLocked()) {
         last_app_end_ = now;
         cadence_.clear();
         return;
@@ -717,6 +743,22 @@ void FrameGenPresenter::UpdateAutoLocked(Clock::time_point now, const std::optio
     }
     const bool memory_pressure = memory_budget_ && memory_budget_->budget_bytes &&
                                  memory_budget_->usage_bytes > memory_budget_->budget_bytes - memory_budget_->budget_bytes / 20;
+    if (dynamic) {
+        // No multiplier to choose: near the budget, real frames stop using a
+        // third set of output images (sets already made stay until the
+        // session ends, so this stops growth rather than freeing memory).
+        if (memory_pressure && sampled_memory && auto_memory_ceiling_ > 2) {
+            auto_memory_ceiling_ = 2;
+            if (logger_) {
+                logger_->Info("Frame Generation (dynamic) uses at most two generated frames per real frame from now "
+                              "on: process video memory is near its budget.");
+                LogMemoryBudgetLocked();
+            }
+        }
+        last_app_end_ = now;
+        cadence_.clear();
+        return;
+    }
     if (memory_pressure) {
         if (sampled_memory) {
             auto_memory_ceiling_ = std::min(auto_memory_ceiling_, auto_multiplier_ > 2 ? auto_multiplier_ - 1 : 2u);
@@ -854,6 +896,10 @@ void FrameGenPresenter::SetStateLocked(FrameGenState state, const std::string& r
     }
     if (state == FrameGenState::kActive && full_rate_) {
         logger_->Info("Frame Generation standing by: the application holds full refresh.");
+    } else if (state == FrameGenState::kActive && DynamicLocked()) {
+        logger_->Info(std::string("Frame Generation engaged: ") + ToString(settings_.synthesis_mode) +
+                      " dynamic, the application runs at its own rate and generated frames fill the refreshes "
+                      "between its frames.");
     } else if (state == FrameGenState::kActive) {
         logger_->Info(std::string("Frame Generation engaged: ") + ToString(settings_.synthesis_mode) + " " +
                       MultiplierText(EffectiveMultiplierLocked()) + ", application held at 1/" +
@@ -2473,6 +2519,7 @@ void FrameGenPresenter::StartCompositorLocked(const FrameGenRuntimeCalls& calls)
     slot_offer_.reset();
     offer_done_ = false;
     last_release_slot_.reset();
+    last_offer_slot_.reset();
     newest_copy_ = passthrough_copy_;
     generation_pending_ = generated_ready_ = false;
     next_generated_set_ = 0;
@@ -2613,8 +2660,12 @@ std::optional<XrResult> FrameGenPresenter::ThreadedWaitLocked(std::unique_lock<s
         return std::nullopt;
     }
     // Released every Nth refresh; a late application is released at once.
+    // Dynamic releases at most once a refresh, like a runtime: the game's own
+    // rate (and the two frames in flight above) sets its pace.
+    const bool dynamic = DynamicLocked();
     const std::uint32_t multiplier = std::max(2u, EffectiveMultiplierLocked());
-    std::uint64_t release = last_release_slot_ ? *last_release_slot_ + multiplier : slot_index_ + 1;
+    std::uint64_t release =
+        last_release_slot_ ? *last_release_slot_ + (dynamic ? 1 : multiplier) : slot_index_ + 1;
     release = std::max(release, slot_index_);
     while (!slot_cv_.wait_for(lock, std::chrono::seconds(2),
                               [&] { return !compositor_running_ || slot_index_ >= release; })) {
@@ -2820,10 +2871,41 @@ XrResult FrameGenPresenter::ThreadedEnd(XrSession session, const XrFrameEndInfo&
         }
         result = RuntimeEnd(calls, session, &real);
     }
-    const bool generate = !frame.interpolate && XR_SUCCEEDED(result) && renderable && copied && offer.should_render &&
-                          frame.multiplier >= 2;
+    bool generate = !frame.interpolate && XR_SUCCEEDED(result) && renderable && copied && offer.should_render &&
+                    frame.multiplier >= 2;
 
     lock.lock();
+    // Frames to extrapolate: one per refresh until the next real frame's,
+    // and a spare for that refresh in case the frame is late. Dynamic counts
+    // the refreshes to the next frame's predicted slot (it is usually in
+    // flight already). One due in the very next refresh still gets its
+    // spare: a frame not generated from leaves the next one without a
+    // previous frame to measure motion against. Only a game holding full
+    // refresh skips generation.
+    std::uint32_t count = frame.multiplier;
+    bool spare = true;
+    if (DynamicLocked()) {
+        if (last_offer_slot_ && offer.slot > *last_offer_slot_) {
+            const double interval = static_cast<double>(offer.slot - *last_offer_slot_);
+            dynamic_interval_slots_ =
+                dynamic_interval_slots_ > 0.0 ? dynamic_interval_slots_ * 0.9 + interval * 0.1 : interval;
+        }
+        std::uint64_t gap = DynamicSlotsLocked();
+        for (const ThreadedFrame& next : threaded_frames_) {
+            if (next.id > frame.id) {
+                gap = next.first_slot > offer.slot ? next.first_slot - offer.slot : 1;
+                break;
+            }
+        }
+        const bool full_rate = dynamic_interval_slots_ > 0.0 && dynamic_interval_slots_ < 1.25;
+        count = gap <= 1 && full_rate
+                    ? 0
+                    : static_cast<std::uint32_t>(std::min<std::uint64_t>(std::max<std::uint64_t>(gap, 1),
+                                                                         DynamicSetCapLocked()));
+        spare = count == gap;
+        generate = generate && count > 0;
+    }
+    last_offer_slot_ = offer.slot;
     NoteSubmissionLocked(offer.should_render);
     last_shown_set_.reset(); // a real frame, or a set not among the sets below
     // From here the presenter thread fills its slots from this frame:
@@ -2876,7 +2958,7 @@ XrResult FrameGenPresenter::ThreadedEnd(XrSession session, const XrFrameEndInfo&
         // One frame per generated slot, plus a spare for the slot the next
         // real frame is due in: if that frame is late, the slot still shows
         // motion instead of repeating the last generated frame.
-        for (std::uint32_t slot = 1; slot <= frame.multiplier && fractions.size() < kFrameGenMaxGenerated; ++slot) {
+        for (std::uint32_t slot = 1; slot <= count && fractions.size() < kFrameGenMaxGenerated; ++slot) {
             const XrTime target = offer.time + period * static_cast<XrDuration>(slot);
             targets.push_back(target);
             fractions.push_back(FrameGenFraction(FrameGenSynthesisMode::kExtrapolate, previous_time, content_time, target));
@@ -2886,7 +2968,7 @@ XrResult FrameGenPresenter::ThreadedEnd(XrSession session, const XrFrameEndInfo&
         pending.sequence = frame.id;
         pending.real_due = real_due;
         pending.generated_due = generated_due;
-        pending.spare = fractions.size() == frame.multiplier;
+        pending.spare = spare && fractions.size() == count;
         std::vector<std::vector<XrCompositionLayerProjectionView>> sets;
         std::vector<std::uint8_t> exact;
         const bool ok = Generate(*projection, pending, FrameGenSynthesisMode::kExtrapolate, fractions, sets, exact);
@@ -2925,8 +3007,11 @@ XrResult FrameGenPresenter::ThreadedEnd(XrSession session, const XrFrameEndInfo&
     if (logger_ && state_ == FrameGenState::kActive && entered - last_summary_ >= std::chrono::seconds(30)) {
         last_summary_ = entered;
         LogMemoryBudgetLocked();
-        logger_->Info("Frame Generation: multiplier=" + MultiplierText(EffectiveMultiplierLocked()) +
-                      (settings_.multiplier == FrameGenMultiplier::kAuto ? " (auto)" : "") + ", threaded=1, appFps=" +
+        const std::string multiplier =
+            DynamicLocked() ? "dynamic (" + Number(dynamic_interval_slots_, 2) + " refreshes per real frame)"
+                            : MultiplierText(EffectiveMultiplierLocked()) +
+                                  (settings_.multiplier == FrameGenMultiplier::kAuto ? " (auto)" : "");
+        logger_->Info("Frame Generation: multiplier=" + multiplier + ", threaded=1, appFps=" +
                       Number(RatePerSecond(app_frames_, entered), 1) + ", outputFps=" +
                       Number(RatePerSecond(submissions_, entered), 1) + ", distinctFps=" +
                       Number(RatePerSecond(distinct_submissions_, entered), 1) + ", repeatedFrames=" +
@@ -3155,7 +3240,9 @@ FrameGenStatus FrameGenPresenter::Status() const {
     status.captured = captured_;
     status.retry_pending = state_ == FrameGenState::kPaused && automatic_retries_ < retry_attempts_;
     status.multiplier = EffectiveMultiplierLocked();
-    status.automatic = settings_.multiplier == FrameGenMultiplier::kAuto;
+    status.dynamic = DynamicLocked();
+    status.automatic = settings_.multiplier == FrameGenMultiplier::kAuto ||
+                       (settings_.multiplier == FrameGenMultiplier::kDynamic && !status.dynamic);
     status.full_rate = full_rate_ && state_ == FrameGenState::kActive;
     status.threaded = compositor_running_;
     if (depth_seen_) {
@@ -3182,8 +3269,10 @@ std::string FrameGenPresenter::OsdText() const {
         // Distinct frames: a frame shown twice (generation or the game ran
         // late) is not counted again.
         std::string text = std::string(status.mode == FrameGenSynthesisMode::kExtrapolate ? "Extrapolate" : "Interpolate") +
-                           "  /  " + (status.automatic ? "Auto " : "") + MultiplierText(status.multiplier) + "  /  " +
-                           Number(status.app_fps, 0) + " -> " + Number(status.distinct_fps, 0) + " fps";
+                           "  /  " +
+                           (status.dynamic ? std::string("Dynamic")
+                                           : (status.automatic ? "Auto " : "") + MultiplierText(status.multiplier)) +
+                           "  /  " + Number(status.app_fps, 0) + " -> " + Number(status.distinct_fps, 0) + " fps";
         if (status.gpu_ms > 0.0) text += "  /  " + Number(status.gpu_ms, 1) + " ms";
         return text;
     }
@@ -3211,8 +3300,9 @@ std::string FrameGenPresenter::CompactOsdText() const {
     switch (status.state) {
     case FrameGenState::kActive:
         if (status.full_rate) return "Full rate";
-        return std::string(status.automatic ? "Auto " : "") + MultiplierText(status.multiplier) + "  /  " +
-               Number(status.app_fps, 0) + " -> " + Number(status.distinct_fps, 0) + " fps";
+        return (status.dynamic ? std::string("Dynamic")
+                               : std::string(status.automatic ? "Auto " : "") + MultiplierText(status.multiplier)) +
+               "  /  " + Number(status.app_fps, 0) + " -> " + Number(status.distinct_fps, 0) + " fps";
     case FrameGenState::kWaiting:
         return "Waiting";
     case FrameGenState::kPaused:

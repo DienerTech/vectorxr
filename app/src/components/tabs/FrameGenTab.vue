@@ -138,7 +138,7 @@ const profileWarnings = computed(() => {
 function settingsSummary(settings: FrameGenSettings) {
   const mode = settings.synthesisMode === 'extrapolate' ? 'Extrapolate' : 'Interpolate'
   const quality = settings.flowQuality.charAt(0).toUpperCase() + settings.flowQuality.slice(1)
-  const multiplier = settings.frameMultiplier === 'auto' ? 'Auto' : settings.frameMultiplier
+  const multiplier = settings.frameMultiplier === 'auto' ? 'Auto' : settings.frameMultiplier === 'dynamic' ? 'Dynamic' : settings.frameMultiplier
   return `${mode} · ${quality} · ${multiplier}`
 }
 </script>

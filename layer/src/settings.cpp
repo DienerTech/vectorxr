@@ -313,6 +313,8 @@ const char* ToString(FrameGenMultiplier multiplier) {
         return "3x";
     case FrameGenMultiplier::k4:
         return "4x";
+    case FrameGenMultiplier::kDynamic:
+        return "dynamic";
     default:
         return "auto";
     }
@@ -320,6 +322,7 @@ const char* ToString(FrameGenMultiplier multiplier) {
 
 std::optional<FrameGenMultiplier> ParseFrameGenMultiplier(const std::string& value) {
     if (value == "auto") return FrameGenMultiplier::kAuto;
+    if (value == "dynamic") return FrameGenMultiplier::kDynamic;
     if (value == "2x") return FrameGenMultiplier::k2;
     if (value == "3x") return FrameGenMultiplier::k3;
     if (value == "4x") return FrameGenMultiplier::k4;

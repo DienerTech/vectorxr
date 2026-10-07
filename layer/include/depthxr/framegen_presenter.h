@@ -87,6 +87,10 @@ struct FrameGenStatus {
     std::uint32_t multiplier{2}; // headset frames per real frame in use
     bool automatic{false};       // the multiplier is chosen automatically
     bool full_rate{false};       // automatic and the app holds full refresh
+    // Dynamic: the app runs at its own rate and generated frames fill the
+    // refreshes between; `multiplier` is then the typical refreshes per real
+    // frame.
+    bool dynamic{false};
     bool threaded{false};        // presenting from the presenter thread
     FrameGenDepthState depth{FrameGenDepthState::kUnknown};
 };
@@ -343,6 +347,12 @@ class FrameGenPresenter {
     bool WantsEngagementLocked() const;
     bool RunnableLocked() const;
     std::uint32_t EffectiveMultiplierLocked() const;
+    // Dynamic in effect: chosen, and the presenter thread extrapolates.
+    bool DynamicLocked() const;
+    // Dynamic: refreshes per real frame, smoothed and rounded (2-4).
+    std::uint32_t DynamicSlotsLocked() const;
+    // Dynamic: generated frames (sets of output images) one real frame may use.
+    std::uint32_t DynamicSetCapLocked() const;
     void UpdateAutoLocked(std::chrono::steady_clock::time_point now, const std::optional<PendingFrame>& frame,
                           bool started_late = false);
     void MaybeRetryLocked();
@@ -590,6 +600,10 @@ class FrameGenPresenter {
     // just adds latency.
     std::uint32_t lead_slots_{0};
     std::deque<std::uint8_t> lead_history_; // last frames at the current lead: 0 on time, 1 late, 2 slack
+    // Dynamic: refreshes between real frames' slots, smoothed, and the slot
+    // the last real frame was shown in.
+    double dynamic_interval_slots_{0.0};
+    std::optional<std::uint64_t> last_offer_slot_;
     std::uint32_t dropped_unbegun_{0}; // dropped frames whose begin is still to come
     std::uint32_t dropped_unended_{0}; // dropped frames whose end is still to come
     // Runtime frame calls that succeeded this session.

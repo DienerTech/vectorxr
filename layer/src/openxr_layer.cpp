@@ -13088,7 +13088,9 @@ void OpenXrLayer::PollRuntimeRelay() {
         status.framegen_depth = framegen.depth == FrameGenDepthState::kUnknown ? "" : ToString(framegen.depth);
         if (framegen.state == FrameGenState::kActive && status.framegen_reason.empty())
             status.framegen_reason = framegen.full_rate ? "Auto, full rate: no generation needed."
-                : std::string(framegen.automatic ? "Auto " : "") + std::to_string(framegen.multiplier) + "x, " +
+                : (framegen.dynamic ? std::string("Dynamic, ")
+                                    : std::string(framegen.automatic ? "Auto " : "") + std::to_string(framegen.multiplier) +
+                                          "x, ") +
                   std::to_string(static_cast<int>(framegen.app_fps + 0.5)) + " -> " +
                   std::to_string(static_cast<int>(framegen.distinct_fps + 0.5)) + " fps.";
         if (status.turbo_reason.empty() && turbo_auto_suspended_.load())
