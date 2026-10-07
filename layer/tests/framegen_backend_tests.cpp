@@ -1366,6 +1366,9 @@ struct ReplayError {
     // frames then shimmers).
     double edge_cockpit{0};
     double sharpness_cockpit{0};
+    // ... and over the newest real frame's own gradients there, unresampled:
+    // what alternates with generated frames in the headset (1: no shimmer).
+    double sharpness_newest{0};
 };
 double PixelLuma(std::uint32_t p) {
     return (0.2126 * (p & 255u) + 0.7152 * ((p >> 8) & 255u) + 0.0722 * ((p >> 16) & 255u)) / 255.0;
@@ -1376,7 +1379,7 @@ double Gradient(const Pixels& image, std::size_t index, std::uint32_t width) {
 }
 ReplayError CompareTo(const Pixels& image, const Pixels& truth, const std::vector<bool>& valid, const ReplayView& view) {
     double sums[3] = {}, counts[3] = {}, bad[3] = {};
-    double edge_sum = 0, edge_count = 0, image_energy = 0, truth_energy = 0;
+    double edge_sum = 0, edge_count = 0, image_energy = 0, truth_energy = 0, newest_energy = 0;
     for (std::uint32_t y = 0; y < view.height; ++y) {
         const std::uint32_t hy = std::min(y / 2, view.half_height - 1);
         for (std::uint32_t x = 0; x < view.width; ++x) {
@@ -1399,6 +1402,7 @@ ReplayError CompareTo(const Pixels& image, const Pixels& truth, const std::vecto
                 const double truth_gradient = Gradient(truth, index, view.width);
                 truth_energy += truth_gradient;
                 image_energy += Gradient(image, index, view.width);
+                newest_energy += Gradient(view.color, index, view.width);
                 if (truth_gradient > 0.1) {
                     edge_sum += error;
                     edge_count += 1;
@@ -1408,7 +1412,8 @@ ReplayError CompareTo(const Pixels& image, const Pixels& truth, const std::vecto
     }
     return {counts[0] ? sums[0] / counts[0] : 0, counts[1] ? sums[1] / counts[1] : 0, counts[2] ? sums[2] / counts[2] : 0,
             counts[1] ? 100.0 * bad[1] / counts[1] : 0, counts[2] ? 100.0 * bad[2] / counts[2] : 0,
-            edge_count ? edge_sum / edge_count : 0, truth_energy > 0 ? image_energy / truth_energy : 0};
+            edge_count ? edge_sum / edge_count : 0, truth_energy > 0 ? image_energy / truth_energy : 0,
+            newest_energy > 0 ? image_energy / newest_energy : 0};
 }
 
 // Research: a full-resolution crop (FG_REPLAY_CROP=x0,y0,x1,y1), scaled up
@@ -1567,7 +1572,7 @@ int RunReplay(Harness& harness) {
     // Compares each view's generated frame (in frame `view_frame`'s view)
     // with frame `truth_frame` turned to that view; `hold` (view 0) is what
     // showing a real frame instead would give.
-    double sums[6] = {};
+    double sums[7] = {};
     std::size_t evaluated = 0;
     auto evaluate = [&](std::size_t k, std::size_t view_frame, std::size_t truth_frame, const Pixels& hold,
                         const FrameGenExecuteResult& result, float fraction) {
@@ -1622,17 +1627,18 @@ int RunReplay(Harness& harness) {
             const ReplayError generated_error = CompareTo(generated, truth, valid, view);
             const ReplayError hold_error = CompareTo(v == 0 ? hold : frames[view_frame].views[v].color, truth, valid, view);
             std::printf("frame %zu view %zu (depth %s, %.2f): generated %.4f (cockpit %.4f %.2f%% bad, outside %.4f %.2f%% bad,"
-                        " cockpit edges %.4f, sharpness %.3f)  hold %.4f (cockpit %.4f %.2f%%, outside %.4f %.2f%%)\n",
+                        " cockpit edges %.4f, sharpness %.3f, vs newest %.3f)  hold %.4f (cockpit %.4f %.2f%%, outside %.4f %.2f%%)\n",
                         k, v, result.depth.size() > v && result.depth[v] ? "used" : "not used", fraction,
                         generated_error.all, generated_error.cockpit, generated_error.bad_cockpit, generated_error.outside,
                         generated_error.bad_outside, generated_error.edge_cockpit, generated_error.sharpness_cockpit,
-                        hold_error.all, hold_error.cockpit, hold_error.bad_cockpit, hold_error.outside, hold_error.bad_outside);
+                        generated_error.sharpness_newest, hold_error.all, hold_error.cockpit, hold_error.bad_cockpit, hold_error.outside, hold_error.bad_outside);
             sums[0] += generated_error.cockpit;
             sums[1] += generated_error.bad_cockpit;
             sums[2] += generated_error.outside;
             sums[3] += generated_error.bad_outside;
             sums[4] += generated_error.edge_cockpit;
             sums[5] += generated_error.sharpness_cockpit;
+            sums[6] += generated_error.sharpness_newest;
             ++evaluated;
             if (!g_replay_output.empty() && v == 0 && crop) {
                 WriteCropPpm(prefix + "-crop-generated.ppm", generated, view.width, view.height, *crop, 3);
@@ -1703,9 +1709,9 @@ int RunReplay(Harness& harness) {
     }
     if (evaluated) {
         std::printf("Mean over %zu views: cockpit %.4f (%.2f%% bad), outside %.4f (%.2f%% bad), cockpit edges %.4f,"
-                    " sharpness %.3f\n",
+                    " sharpness %.3f, vs newest %.3f\n",
                     evaluated, sums[0] / evaluated, sums[1] / evaluated, sums[2] / evaluated, sums[3] / evaluated,
-                    sums[4] / evaluated, sums[5] / evaluated);
+                    sums[4] / evaluated, sums[5] / evaluated, sums[6] / evaluated);
     }
     gpu->Reset();
     return 0;

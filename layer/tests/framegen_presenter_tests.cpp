@@ -56,6 +56,7 @@ std::mutex g_xr_mutex;
 std::uint64_t g_next_handle = 0x1000;
 std::map<XrSwapchain, SwapchainImages> g_images;
 int g_creates = 0;
+std::vector<XrSwapchain> g_destroyed; // swapchains the layer destroyed
 int g_wait_timeouts = 0; // number of upcoming output waits that time out
 bool g_release_violation = false;
 std::map<XrSwapchain, int> g_releases; // images released per swapchain
@@ -79,6 +80,7 @@ XrResult XRAPI_PTR Create(XrSession, const XrSwapchainCreateInfo*, XrSwapchain* 
 XrResult XRAPI_PTR Destroy(XrSwapchain swapchain) {
     std::scoped_lock lock(g_xr_mutex);
     g_images.erase(swapchain);
+    g_destroyed.push_back(swapchain);
     return XR_SUCCESS;
 }
 XrResult XRAPI_PTR Images(XrSwapchain, std::uint32_t, std::uint32_t* count, XrSwapchainImageBaseHeader*) {
@@ -128,6 +130,7 @@ struct GpuLog {
     bool uncaptured{false}; // views not captured at release: nothing generated
     bool threaded{false};
     bool depth{false};
+    std::atomic<bool> memory_pressure{false}; // process video memory near its budget
     std::atomic<int> depth_captures{0};
     std::vector<FrameGenViewSubmission> last;
     FrameGenImage last_capture;
@@ -200,6 +203,9 @@ class FakeGpu final : public FrameGenGpu {
     void Reset() override {}
     double LastGpuMilliseconds() const override { return 0.75; }
     bool SupportsThreadedPresentation() const override { return log_->threaded; }
+    std::optional<FrameGenMemoryBudget> MemoryBudget() const override {
+        return FrameGenMemoryBudget{log_->memory_pressure ? 990u : 500u, 1000u};
+    }
     bool SupportsDepth() const override { return log_->depth; }
     XrSwapchainUsageFlags RequiredDepthUsage() const override {
         return log_->depth ? XR_SWAPCHAIN_USAGE_SAMPLED_BIT : 0;
@@ -319,7 +325,10 @@ struct Runtime {
                     used_destroyed_space = true;
                 }
                 for (const XrSwapchain swapchain : used) {
-                    if (std::find(destroyed.begin(), destroyed.end(), swapchain) != destroyed.end()) used_destroyed = true;
+                    if (std::find(destroyed.begin(), destroyed.end(), swapchain) != destroyed.end() ||
+                        std::find(g_destroyed.begin(), g_destroyed.end(), swapchain) != g_destroyed.end()) {
+                        used_destroyed = true;
+                    }
                 }
             }
             std::vector<XrSwapchain> swapchains;
@@ -480,6 +489,7 @@ void StartPresenter(FrameGenPresenter& presenter, GpuLog& gpu, FrameGenSynthesis
     presenter.TrackSwapchain(kRight, format, 1, usage);
     std::scoped_lock lock(g_xr_mutex);
     g_creates = 0;
+    g_destroyed.clear();
     g_wait_timeouts = 0;
     g_release_violation = false;
 }
@@ -893,6 +903,46 @@ void TestThreadedDynamic() {
     CheckOrderedTimes(log, "dynamic");
     presenter.Stop();
     Check(!runtime.ordering_violation && !g_release_violation, "dynamic: calls stayed ordered");
+}
+
+// Dynamic near the video memory budget: the third set of output images
+// (a full headset-resolution swapchain per eye) is freed, not just left
+// unused, and nothing submits it afterwards.
+void TestDynamicFreesOutputsNearBudget() {
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    runtime.paced = true;
+    StartThreaded(presenter, gpu, FrameGenMultiplier::kDynamic);
+    App app(presenter, runtime);
+    // About 31 fps: three refreshes per real frame, two generated frames and a spare.
+    RunPipelined(app, 1200ms, 26ms, 32ms);
+    int creates = 0;
+    {
+        std::scoped_lock lock(g_xr_mutex);
+        creates = g_creates;
+    }
+    Check(creates == 6, "memory: three sets of two views at a third of the refresh (" + std::to_string(creates) + ")");
+    gpu.memory_pressure = true;
+    const auto start = std::chrono::steady_clock::now();
+    const std::size_t first = runtime.Submissions();
+    RunPipelined(app, 1500ms, 26ms, 32ms);
+    const double elapsed = Seconds(std::chrono::steady_clock::now() - start);
+    std::size_t destroyed = 0;
+    {
+        std::scoped_lock lock(g_xr_mutex);
+        destroyed = g_destroyed.size();
+        creates = g_creates;
+    }
+    Check(destroyed == 2, "memory: near the budget the third set is freed (" + std::to_string(destroyed) + " destroyed)");
+    Check(creates == 6, "memory: nothing is made again");
+    Check(!runtime.used_destroyed, "memory: a freed output swapchain is never submitted");
+    const double refresh = 1e9 / static_cast<double>(kPeriod);
+    Check(static_cast<double>(runtime.Submissions() - first) / elapsed > refresh * 0.85,
+          "memory: every refresh still gets a frame");
+    Check(presenter.Status().threaded && presenter.Status().dynamic, "memory: still presenting dynamically");
+    presenter.Stop();
+    Check(!runtime.ordering_violation && !g_release_violation, "memory: calls stayed ordered");
 }
 
 // A game frame far later than its slot leaves the presenter thread showing
@@ -1646,6 +1696,7 @@ int main() {
     TestAutomaticMultiplier();
     TestThreadedExtrapolation();
     TestThreadedDynamic();
+    TestDynamicFreesOutputsNearBudget();
     TestThreadedRepeatsAreNotDistinct();
     TestThreadedPipelinedApp();
     TestThreadedInterpolation();

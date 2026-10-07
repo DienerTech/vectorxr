@@ -402,6 +402,8 @@ class FrameGenPresenter {
     // Acquires and waits the images of the first `sets` output sets.
     bool AcquireOutputs(std::size_t sets, std::string& error, bool& timed_out);
     void DestroyOutputs();
+    // Destroys the output sets from `keep` on (frame thread).
+    void TrimOutputs(std::size_t keep);
     void ReleaseOutputs();
     void RecordReal(const XrCompositionLayerProjection& projection, XrTime display_time, std::uint64_t sequence);
     void InvalidateContinuityLocked();

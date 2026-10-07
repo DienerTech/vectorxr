@@ -1953,6 +1953,20 @@ bool FrameGenPresenter::EnsureOutputs(const XrCompositionLayerProjection& projec
         std::scoped_lock lock(mutex_);
         output_kinds_.assign(projection.viewCount, {});
     }
+    // Near the video memory budget, sets above the session's ceiling go
+    // (the ceiling never rises again, so they are not made again).
+    std::size_t ceiling = output_sets_.size();
+    {
+        std::scoped_lock lock(mutex_);
+        if (DynamicLocked()) {
+            ceiling = DynamicSetCapLocked();
+        } else if (settings_.multiplier == FrameGenMultiplier::kAuto && auto_memory_ceiling_ < kMaxMultiplier) {
+            ceiling = auto_memory_ceiling_;
+        }
+    }
+    if (output_sets_.size() > ceiling && ceiling >= sets) {
+        TrimOutputs(ceiling);
+    }
     // A higher multiplier adds sets; a lower one keeps them, unused, so
     // moving between multipliers never reallocates headset-resolution images
     // (hundreds of milliseconds on the frame thread at high resolutions).
@@ -2128,6 +2142,42 @@ void FrameGenPresenter::ReleaseOutputs() {
             output.acquired = false;
             output.waited = false;
         }
+    }
+}
+
+void FrameGenPresenter::TrimOutputs(std::size_t keep) {
+    {
+        // Frames generated into the sets going are dropped: the presenter
+        // thread shows the newest real frame until the next batch is ready.
+        std::scoped_lock submit(submit_mutex_);
+        std::scoped_lock lock(mutex_);
+        extrapolated_.valid = false;
+        generated_ready_ = false;
+        last_shown_set_.reset();
+    }
+    double freed = 0.0;
+    for (std::size_t set = keep; set < output_sets_.size(); ++set) {
+        for (Output& output : output_sets_[set]) {
+            if (!output.swapchain) continue;
+            const double bytes = output.kind == FrameGenOutputKind::kFloat16 ? 8.0 : 4.0;
+            freed += static_cast<double>(output.extent.width) * output.extent.height * bytes *
+                     std::max<std::uint32_t>(output.image_count, 1);
+            // Unfinished GPU work may still write it: then it is left to
+            // the runtime, which frees it with the session.
+            if (ForgetSwapchain(output.swapchain)) {
+                std::scoped_lock submit(submit_mutex_);
+                if (xr_.destroy) xr_.destroy(output.swapchain);
+            }
+        }
+    }
+    output_sets_.resize(keep);
+    std::scoped_lock lock(mutex_);
+    output_bytes_ = output_bytes_ > freed ? output_bytes_ - static_cast<std::uint64_t>(freed) : 0;
+    if (logger_) {
+        logger_->Info("Frame Generation freed " + Number(freed / (1024.0 * 1024.0), 0) +
+                      " MB of output images near the video memory budget (" + std::to_string(keep) +
+                      " sets kept).");
+        LogMemoryBudgetLocked();
     }
 }
 
