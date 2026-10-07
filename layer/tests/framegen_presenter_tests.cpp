@@ -1482,12 +1482,21 @@ void TestJitExtrapolation() {
     const FrameGenStatus status = presenter.Status();
     Check(status.threaded && status.state == FrameGenState::kActive, "jit extrapolation: presents from its own thread");
     const auto log = runtime.Snapshot();
-    std::size_t real = 0, generated = 0;
-    for (std::size_t i = first + 20; i < log.size(); ++i) {
-        (IsAppImage(log[i].swapchains) ? real : generated) += 1;
-    }
-    const double share = static_cast<double>(real) / static_cast<double>(real + generated);
-    Check(share > 0.25 && share < 0.42, "jit extrapolation: one real frame in three refreshes (" + std::to_string(share) + ")");
+    // Real frames are shown as exact copies, like the frames moved on from
+    // them: the runtime never shows the game's own images.
+    std::size_t app_images = 0;
+    for (std::size_t i = first + 20; i < log.size(); ++i) app_images += IsAppImage(log[i].swapchains) ? 1 : 0;
+    Check(app_images == 0, "jit extrapolation: the game's own images are never shown (" + std::to_string(app_images) + ")");
+    const int copies = SynthesesWhere(gpu, [](FrameGenSynthesisMode mode, float fraction) {
+        return (mode == FrameGenSynthesisMode::kInterpolate && fraction == 1.0f) ||
+               (mode == FrameGenSynthesisMode::kExtrapolate && fraction == 0.0f);
+    });
+    const int moved = SynthesesWhere(gpu, [](FrameGenSynthesisMode mode, float fraction) {
+        return mode == FrameGenSynthesisMode::kExtrapolate && fraction > 0.0f;
+    });
+    const double share = static_cast<double>(copies) / static_cast<double>(copies + moved);
+    Check(share > 0.25 && share < 0.42, "jit extrapolation: one real frame's copy in three refreshes (" +
+                                            std::to_string(share) + ")");
     const double refresh = 1e9 / static_cast<double>(kPeriod);
     Check(static_cast<double>(log.size() - first) / elapsed > refresh * 0.85, "jit extrapolation: every refresh gets a frame");
     Check(status.distinct_fps > 0.8 * status.output_fps,
@@ -1688,7 +1697,9 @@ void TestJitDynamicExtrapolation() {
     const auto log = runtime.Snapshot();
     Check(static_cast<double>(log.size() - first) / elapsed > refresh * 0.85,
           "jit dynamic extrapolation: every refresh gets a frame");
-    Check(status.distinct_fps > 0.85 * status.output_fps,
+    // A real frame later than a whole interval of its varying pace holds
+    // its motion at one interval (as frames written together do): repeats.
+    Check(status.distinct_fps > 0.8 * status.output_fps,
           "jit dynamic extrapolation: refreshes show new frames (" + std::to_string(status.distinct_fps) + " of " +
               std::to_string(status.output_fps) + " fps)");
     Check(runtime.mismatched_images == 0, "jit dynamic extrapolation: every image shown was written for its views");

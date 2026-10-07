@@ -13,6 +13,7 @@
 #include <openxr/openxr_platform.h>
 
 #include "depthxr/framegen_gpu.h"
+#include "depthxr/framegen_runtime_queue.h"
 
 #ifdef DEPTHXR_NVOF_RESEARCH
 #include <nvOpticalFlowD3D12.h>
@@ -2341,6 +2342,7 @@ int D3D11Test() {
 // - game queue: everything on the game's queue.
 // A frame must be usable within about a refresh of its submission.
 bool g_contention = false;
+XrResult XRAPI_PTR IgnoreRelease(XrSwapchain, const XrSwapchainImageReleaseInfo*) { return XR_SUCCESS; }
 
 int RunContention(Harness& harness) {
     const std::uint32_t width = g_profile_width, height = g_profile_height;
@@ -2352,17 +2354,23 @@ int RunContention(Harness& harness) {
         if (base->type == XR_TYPE_GRAPHICS_BINDING_D3D12_KHR) game = reinterpret_cast<const XrGraphicsBindingD3D12KHR*>(base);
     }
     Check(game != nullptr, "contention needs a Direct3D 12 binding");
-    ComPtr<ID3D12CommandQueue> runtime;
-    D3D12_COMMAND_QUEUE_DESC runtime_desc{D3D12_COMMAND_LIST_TYPE_DIRECT, D3D12_COMMAND_QUEUE_PRIORITY_HIGH,
-                                          D3D12_COMMAND_QUEUE_FLAG_NONE, 0};
-    Check(SUCCEEDED(game->device->CreateCommandQueue(&runtime_desc, IID_PPV_ARGS(&runtime))), "runtime queue");
-    FrameGenRuntimeQueue marker;
-    marker.next = game;
-    marker.d3d12_queue = runtime.Get();
+    // The layer's queue substitution, as in a session: the runtime's queue,
+    // and the game's releases (each just after its frame's work was queued,
+    // as games release before the GPU has run it).
+    FrameGenQueueSubstitution substitution;
+    XrSessionCreateInfo session_info{XR_TYPE_SESSION_CREATE_INFO};
+    session_info.next = game;
+    std::string note;
+    const auto* substituted_info = substitution.Prepare(&session_info, note);
+    Check(substitution.Active(), "contention: queue substitution (" + note + ")");
+    ID3D12CommandQueue* runtime = static_cast<const XrGraphicsBindingD3D12KHR*>(substituted_info->next)->queue;
+    const void* marker = substitution.FrameGenChain(game);
+    const XrSwapchain game_swapchain = reinterpret_cast<XrSwapchain>(0xee);
+    const XrSwapchainImageReleaseInfo game_release{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
     auto make = [&](const char* queue, bool substituted) {
         _putenv_s("VECTORXR_FRAMEGEN_QUEUE", queue);
         _putenv_s("VECTORXR_FRAMEGEN_JIT", "1");
-        auto gpu = CreateFrameGenGpu(substituted ? static_cast<const void*>(&marker) : game, error);
+        auto gpu = CreateFrameGenGpu(substituted ? marker : game, error);
         _putenv_s("VECTORXR_FRAMEGEN_QUEUE", "");
         _putenv_s("VECTORXR_FRAMEGEN_JIT", "");
         Check(gpu != nullptr, harness.name + " backend: " + error);
@@ -2449,12 +2457,15 @@ int RunContention(Harness& harness) {
         const char* name;
         const char* queue;
         bool substituted;
+        bool lazy; // the game's releases (substituted)
     };
-    for (const Variant& variant : {Variant{"substituted (runtime has Frame Generation's queue)", "", true},
-                                   Variant{"own queue, runtime has the game's", "", false},
-                                   Variant{"all on the game's queue", "game", false}}) {
+    for (const Variant& variant :
+         {Variant{"substituted, game releases lazy", "", true, true},
+          Variant{"substituted, runtime queue waiting for game releases", "", true, false},
+          Variant{"own queue, runtime has the game's", "", false, false},
+          Variant{"all on the game's queue", "game", false, false}}) {
         auto jit = make(variant.queue, variant.substituted);
-        ID3D12CommandQueue* runtime_side = variant.substituted ? runtime.Get() : game->queue;
+        ID3D12CommandQueue* runtime_side = variant.substituted ? runtime : game->queue;
         track(*jit);
         FrameGenTuning analyze;
         analyze.mode = FrameGenSynthesisMode::kExtrapolate;
@@ -2470,6 +2481,13 @@ int RunContention(Harness& harness) {
             Sleep(loaded ? 200 : 20);
             std::vector<double> latencies;
             for (int i = 0; i < 60; ++i) {
+                if (variant.substituted) {
+                    // The game released an image of the frame its GPU is
+                    // still rendering.
+                    substitution.AfterAcquire(game_swapchain);
+                    substitution.Release(game_swapchain, variant.lazy, IgnoreRelease, &game_release);
+                    substitution.BeforeAcquire(game_swapchain, 1000, IgnoreRelease);
+                }
                 const auto start = std::chrono::steady_clock::now();
                 Check(jit->Synthesize(result.frame, FrameGenSynthesisMode::kExtrapolate, 0.5f, images, error),
                       "synthesize: " + error);
@@ -2488,13 +2506,98 @@ int RunContention(Harness& harness) {
         }
         loading = false;
         load->WaitIdle();
+        substitution.Flush(game_swapchain, IgnoreRelease);
         jit->Reset();
     }
     stop = true;
     game_thread.join();
     load->Reset();
+    substitution.Reset();
     CloseHandle(release_event);
     return 0;
+}
+
+// Queue substitution (FrameGenQueueSubstitution) against a stand-in runtime
+// whose releases are only recorded: the runtime is given a queue of its own;
+// lazy releases reach it only once the game's GPU work on the image has run
+// (here held back by a fence the test signals), in order, and earlier only as
+// far as the runtime needs one to hand out an image; a release that is not
+// lazy, or a frame showing the swapchain, sends every pending one first.
+std::vector<XrSwapchain> g_forwarded_releases;
+XrResult XRAPI_PTR RecordRelease(XrSwapchain swapchain, const XrSwapchainImageReleaseInfo*) {
+    g_forwarded_releases.push_back(swapchain);
+    return XR_SUCCESS;
+}
+
+void SubstitutionTest(ID3D12Device* device, ID3D12CommandQueue* game_queue) {
+    XrGraphicsBindingD3D12KHR binding{XR_TYPE_GRAPHICS_BINDING_D3D12_KHR};
+    binding.device = device;
+    binding.queue = game_queue;
+    XrSessionCreateInfo info{XR_TYPE_SESSION_CREATE_INFO};
+    info.next = &binding;
+    FrameGenQueueSubstitution substitution;
+    std::string note;
+    const XrSessionCreateInfo* created = substitution.Prepare(&info, note);
+    Check(substitution.Active() && created != &info, "substitution: a Direct3D 12 session gets the layer's queue (" + note + ")");
+    const auto* runtime_binding = static_cast<const XrGraphicsBindingD3D12KHR*>(created->next);
+    Check(runtime_binding->type == XR_TYPE_GRAPHICS_BINDING_D3D12_KHR && runtime_binding->device == device &&
+              runtime_binding->queue && runtime_binding->queue != game_queue,
+          "substitution: the runtime's binding names another queue on the same device");
+    const auto* marker = static_cast<const FrameGenRuntimeQueue*>(substitution.FrameGenChain(&binding));
+    Check(marker->type == kFrameGenRuntimeQueueType && marker->d3d12_queue == runtime_binding->queue && marker->next == &binding,
+          "substitution: Frame Generation's chain carries the runtime's queue ahead of the game's binding");
+
+    // The game's GPU is busy: its queue waits on a fence the test holds back.
+    ComPtr<ID3D12Fence> busy;
+    Check(SUCCEEDED(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&busy))), "substitution fence");
+    game_queue->Wait(busy.Get(), 1);
+    const XrSwapchain color = reinterpret_cast<XrSwapchain>(0xc0);
+    const XrSwapchainImageReleaseInfo release{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
+    g_forwarded_releases.clear();
+    for (int i = 0; i < 3; ++i) {
+        substitution.AfterAcquire(color);
+        Check(substitution.Release(color, true, RecordRelease, &release) == XR_SUCCESS, "substitution: lazy release");
+    }
+    Check(g_forwarded_releases.empty(), "substitution: releases wait for the game's GPU work on their images");
+    substitution.BeforeAcquire(color, 4, RecordRelease); // a fourth image is free
+    Check(g_forwarded_releases.empty(), "substitution: an acquire the runtime can serve forwards nothing still running");
+    const auto start = std::chrono::steady_clock::now();
+    substitution.BeforeAcquire(color, 3, RecordRelease); // all three held by the game, as the runtime sees it
+    Check(g_forwarded_releases.size() == 1, "substitution: an acquire the runtime could not serve gets the oldest release (" +
+                                                std::to_string(g_forwarded_releases.size()) + ")");
+    Check(std::chrono::steady_clock::now() - start < std::chrono::milliseconds(1000),
+          "substitution: waiting for the oldest release is bounded");
+    // The game's work runs: the rest go at its next call, in order.
+    Check(SUCCEEDED(busy->Signal(1)), "substitution: release the game's queue");
+    ComPtr<ID3D12Fence> idle;
+    Check(SUCCEEDED(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&idle))), "substitution fence");
+    const HANDLE event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    game_queue->Signal(idle.Get(), 1);
+    idle->SetEventOnCompletion(1, event);
+    Check(WaitForSingleObject(event, 5000) == WAIT_OBJECT_0, "substitution: the game's queue finishes");
+    substitution.BeforeAcquire(color, 3, RecordRelease);
+    Check(g_forwarded_releases.size() == 3, "substitution: done releases go at the game's next call (" +
+                                                std::to_string(g_forwarded_releases.size()) + ")");
+    // Lazy again, then a frame showing the swapchain: everything first.
+    substitution.AfterAcquire(color);
+    substitution.Release(color, true, RecordRelease, &release);
+    substitution.Flush(color, RecordRelease);
+    Check(g_forwarded_releases.size() == 4, "substitution: a frame showing the swapchain sends pending releases first");
+    // Not lazy: forwarded at once (after any pending).
+    substitution.AfterAcquire(color);
+    substitution.Release(color, true, RecordRelease, &release);
+    substitution.AfterAcquire(color);
+    substitution.Release(color, false, RecordRelease, &release);
+    Check(g_forwarded_releases.size() == 6, "substitution: a release that is not lazy goes at once, after pending ones (" +
+                                                std::to_string(g_forwarded_releases.size()) + ")");
+    substitution.AfterWait();
+    substitution.Reset();
+    Check(!substitution.Active(), "substitution: reset at session end");
+    game_queue->Signal(idle.Get(), 2);
+    idle->SetEventOnCompletion(2, event);
+    Check(WaitForSingleObject(event, 5000) == WAIT_OBJECT_0, "substitution: the game's queue is not left waiting");
+    CloseHandle(event);
+    std::cout << "D3D12 queue substitution passed\n";
 }
 
 int D3D12Test() {
@@ -2824,6 +2927,9 @@ int D3D12Test() {
         return nvof;
     }
 #endif
+    if (!g_replay && !g_contention && !g_profile && !g_bench) {
+        SubstitutionTest(device.Get(), queue.Get());
+    }
     const int result = g_replay      ? RunReplay(harness)
                        : g_contention ? RunContention(harness)
                        : g_profile   ? RunProfile(harness)

@@ -222,7 +222,8 @@ struct AnalyzedFrame {
     std::uint64_t id{0};
     FrameGenTuning tuning;
     std::vector<AnalyzedView> views;
-    UINT64 work_value{0}; // the work queue's fence when its analysis is done
+    UINT64 work_value{0};    // the work queue's fence when its analysis is done
+    UINT64 capture_value{0}; // the capture fence when its images were captured
 };
 
 // What the optical flow hardware's watchdog watches, per view (up to
@@ -384,9 +385,10 @@ class D3D12FrameGen final : public FrameGenGpu {
                 separate_ = true;
             }
         }
+        bool present_ready = true;
         if (present_.Get() != work_.Get() && present_.Get() != queue_.Get() &&
             FAILED(device_->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&present_fence_)))) {
-            present_ = work_; // frames written just in time share the work queue
+            present_ready = false; // frames are written together and handed over (HandOverOutputs)
         }
         // Just-in-time synthesis where the runtime synchronizes with the
         // queue frames are written on (queue substitution): released through
@@ -398,6 +400,7 @@ class D3D12FrameGen final : public FrameGenGpu {
         if (const char* jit = std::getenv("VECTORXR_FRAMEGEN_JIT")) {
             just_in_time_ = std::string(jit) == "1" || (runtime_on_present_ && std::string(jit) != "0");
         }
+        just_in_time_ = just_in_time_ && present_ready;
         if (!check(device_->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, capture_slots_[0].allocator.Get(), nullptr,
                                               IID_PPV_ARGS(&capture_commands_)),
                    "D3D12 Frame Generation capture list") ||
@@ -570,6 +573,11 @@ class D3D12FrameGen final : public FrameGenGpu {
         CopySource(capture_commands_.Get(), barriers, view, source, resource);
         const bool raw = RecordRawPack(view, request, static_cast<std::size_t>(capture_count_ % capture_slots_.size()));
         HardwareWatch* watch = index < hardware_watch_.size() ? &hardware_watch_[index] : nullptr;
+        Require(barriers, view.history[view.history_state.Newest()], D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE);
+        if (!barriers.empty()) {
+            capture_commands_->ResourceBarrier(static_cast<UINT>(barriers.size()), barriers.data());
+            barriers.clear();
+        }
         hr = capture_commands_->Close();
         if (FAILED(hr)) {
             // Nothing was submitted, so tracked states no longer match the GPU:
@@ -1663,6 +1671,12 @@ class D3D12FrameGen final : public FrameGenGpu {
             return false;
         }
         slot.timed_submission = 0;
+        if (!effective_tuning.analyze_only && present_fence_ && present_.Get() != work_.Get()) {
+            // Output images the runtime's queue may still be reading (it
+            // synchronizes their reuse there, not here).
+            present_->Signal(present_fence_.Get(), ++present_value_);
+            work_->Wait(present_fence_.Get(), present_value_);
+        }
         if (timed && SUCCEEDED(work_->GetClockCalibration(&slot.calibration_gpu, &slot.calibration_cpu))) {
             slot.timed_submission = submission_ + 1;
         }
@@ -1693,6 +1707,7 @@ class D3D12FrameGen final : public FrameGenGpu {
             frame.id = next_analyzed_id_++;
             frame.tuning = effective_tuning;
             frame.work_value = fence_value_;
+            frame.capture_value = separate_ ? capture_waited_ : 0;
             for (std::size_t i = 0; i < views.size(); ++i) {
                 const ViewResources& view = views_[i];
                 AnalyzedView analyzed;
@@ -1728,6 +1743,12 @@ class D3D12FrameGen final : public FrameGenGpu {
     }
 
     bool SupportsJustInTime() const override { return just_in_time_; }
+
+    bool Measured(std::uint64_t frame_id) const override {
+        const auto found = std::find_if(analyzed_.begin(), analyzed_.end(),
+                                        [&](const AnalyzedFrame& frame) { return frame.id == frame_id; });
+        return found == analyzed_.end() || !fence_ || fence_->GetCompletedValue() >= found->work_value;
+    }
 
     bool Synthesize(std::uint64_t frame_id, FrameGenSynthesisMode mode, float fraction,
                     const std::vector<FrameGenImage>& outputs, std::string& error) override {
@@ -1848,7 +1869,8 @@ class D3D12FrameGen final : public FrameGenGpu {
         // next frame on its queue) are not waited for.
         ID3D12Fence* done = nullptr;
         UINT64 done_value = 0;
-        hr = SubmitPresent(synthesis_commands_.Get(), frame.work_value, done, done_value);
+        hr = exact ? SubmitPresent(synthesis_commands_.Get(), CaptureFence(), frame.capture_value, done, done_value)
+                   : SubmitPresent(synthesis_commands_.Get(), fence_.Get(), frame.work_value, done, done_value);
         if (FAILED(hr)) {
             error = Failure("D3D12 Frame Generation synthesis signal", hr);
             signal_failed_ = true;
@@ -2213,15 +2235,19 @@ class D3D12FrameGen final : public FrameGenGpu {
     // Submits a frame written just in time on the present queue, once its
     // real frame's measurement (`after`, on the work queue) is done; returns
     // the fence and value it reaches when done.
-    HRESULT SubmitPresent(ID3D12GraphicsCommandList* list, UINT64 after, ID3D12Fence*& done, UINT64& value) {
+    HRESULT SubmitPresent(ID3D12GraphicsCommandList* list, ID3D12Fence* after_fence, UINT64 after, ID3D12Fence*& done,
+                          UINT64& value) {
         if (present_.Get() == work_.Get()) {
+            if (after_fence != fence_.Get() && after && after_fence->GetCompletedValue() < after) {
+                work_->Wait(after_fence, after);
+            }
             const HRESULT hr = SubmitWork(list, false);
             done = fence_.Get();
             value = fence_value_;
             return hr;
         }
-        if (after && fence_->GetCompletedValue() < after) {
-            present_->Wait(fence_.Get(), after);
+        if (after && after_fence->GetCompletedValue() < after) {
+            present_->Wait(after_fence, after);
         }
         ID3D12CommandList* lists[] = {list};
         present_->ExecuteCommandLists(1, lists);

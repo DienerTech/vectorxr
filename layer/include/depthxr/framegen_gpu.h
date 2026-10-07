@@ -196,6 +196,11 @@ class FrameGenGpu {
         error = "this graphics API cannot write generated frames one at a time";
         return false;
     }
+    // Whether analyzed real frame `frame`'s motion is measured on the GPU
+    // by now: frames moved by it written before then wait for it, and with
+    // them anything submitted after them to the same queue. (Its exact copy
+    // only needs its capture.)
+    virtual bool Measured(std::uint64_t /*frame*/) const { return true; }
 };
 
 // Direct3D 12 queue substitution (FrameGenQueueSubstitution): the runtime was

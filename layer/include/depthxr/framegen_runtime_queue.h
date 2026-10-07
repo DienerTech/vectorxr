@@ -18,8 +18,16 @@ namespace depthxr {
 // a game frame later. So the runtime is given Frame Generation's queue
 // instead, and the layer keeps the game's images in order across the two:
 // before a game image is released to the runtime, the runtime's queue waits
-// for the game's work so far (BeforeRelease); after the runtime hands one back,
-// the game's queue waits for anything the runtime queued for it (AfterWait).
+// for the game's work so far; after the runtime hands one back, the game's
+// queue waits for anything the runtime queued for it (AfterWait).
+//
+// That wait on the runtime's queue would hold every frame Frame Generation
+// writes after it until the game's GPU work on the image had run, so while
+// Frame Generation shows only images of its own, releases of the images it
+// captures are lazy instead: the game's queue marks the image's work, and
+// the release reaches the runtime once that mark has passed on the GPU (no
+// queue waits for it), at the application's next call on the swapchain, or
+// before a frame showing the swapchain is submitted (then with the wait).
 class FrameGenQueueSubstitution {
   public:
     FrameGenQueueSubstitution();
@@ -40,6 +48,24 @@ class FrameGenQueueSubstitution {
     // rendering into its own swapchains (the OSD).
     const void* RuntimeChain() const;
     // The application's swapchain calls (Active only; thread-safe).
+    // Release replaces forwarding the application's release: `lazy` defers
+    // it as described above (returning XR_SUCCESS); otherwise releases still
+    // pending go first, then this one, each after the runtime's queue waits
+    // for the game's work. Without substitution it forwards at once.
+    XrResult Release(XrSwapchain swapchain, bool lazy, PFN_xrReleaseSwapchainImage next,
+                     const XrSwapchainImageReleaseInfo* info);
+    // Before forwarding the application's acquire: releases whose work has
+    // run go; while the runtime would have no image left to hand out, the
+    // oldest pending one is waited for on the CPU.
+    void BeforeAcquire(XrSwapchain swapchain, std::uint32_t image_count, PFN_xrReleaseSwapchainImage next);
+    void AfterAcquire(XrSwapchain swapchain);
+    // Before a frame showing `swapchain`'s images is submitted, or before
+    // it is destroyed: every pending release goes, after the runtime's queue
+    // waits for the game's work.
+    void Flush(XrSwapchain swapchain, PFN_xrReleaseSwapchainImage next);
+    void Forget(XrSwapchain swapchain);
+    // Ordering of a release made elsewhere (deferred releases): the runtime's
+    // queue waits for the game's work so far.
     void BeforeRelease();
     void AfterWait();
     // After xrDestroySession (or a failed xrCreateSession): waits for the

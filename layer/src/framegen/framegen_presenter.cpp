@@ -2680,6 +2680,7 @@ void FrameGenPresenter::StartCompositorLocked(const FrameGenRuntimeCalls& calls)
     jit_shown_.reset();
     jit_views_.clear();
     jit_content_ = {};
+    jit_started_ = false;
     last_target_time_ = 0;
     InvalidateContinuityLocked();
     if (!compositor_timer_) {
@@ -2902,8 +2903,8 @@ std::optional<XrResult> FrameGenPresenter::ThreadedWaitLocked(std::unique_lock<s
 
 XrResult FrameGenPresenter::ThreadedEnd(XrSession session, const XrFrameEndInfo& info, const FrameGenRuntimeCalls& calls,
                                         const ThreadedFrame& frame, Clock::time_point entered) {
-    if (frame.jit && frame.interpolate) {
-        return ThreadedEndInterpolate(info, frame, entered);
+    if (frame.jit) {
+        return ThreadedEndJit(info, frame, entered);
     }
     const XrCompositionLayerProjection* projection = FindProjection(info);
     const bool renderable = info.layerCount > 0 && projection != nullptr;
@@ -2914,12 +2915,9 @@ XrResult FrameGenPresenter::ThreadedEnd(XrSession session, const XrFrameEndInfo&
     end_thread_ = std::this_thread::get_id();
     NoteDisplayOffsetLocked(info.displayTime, frame.predicted, frame.reported_period);
     // The time the app rendered for: what it ends the frame with, unless that
-    // is far from anything it was told. Just in time, the time it was told:
-    // games label frames inconsistently (MSFS's labels wander by whole
-    // refreshes), and generated frames are placed on the presenter's clock.
+    // is far from anything it was told.
     const XrTime content_time =
-        !frame.jit && std::llabs(info.displayTime - frame.target_time) <= 2 * frame.reported_period ? info.displayTime
-                                                                                                    : frame.target_time;
+        std::llabs(info.displayTime - frame.target_time) <= 2 * frame.reported_period ? info.displayTime : frame.target_time;
     const double latency = std::chrono::duration<double, std::milli>(entered - frame.wait_return).count();
     app_latency_ms_ = app_latency_ms_ <= 0.0 ? latency : app_latency_ms_ * 0.9 + latency * 0.1;
     app_work_ms_ += latency;
@@ -2991,24 +2989,6 @@ XrResult FrameGenPresenter::ThreadedEnd(XrSession session, const XrFrameEndInfo&
             Generate(*projection, pending, FrameGenSynthesisMode::kInterpolate, fractions, between, between_exact, false);
         if (between_ok) RecordReal(*projection, content_time, frame.id);
         lock.lock();
-    }
-    // Just in time, extrapolating: a frame that ended a refresh or more
-    // before its own is measured while it waits for it, so the frames after
-    // it can be written from the refresh after it (the optical flow
-    // hardware alone takes most of a refresh at headset resolution). The
-    // presenter thread keeps writing the previous real frame's meanwhile.
-    bool analyzed_early = false;
-    const bool holds_full_rate = DynamicLocked() && dynamic_interval_slots_ > 0.0 && dynamic_interval_slots_ < 1.25;
-    if (frame.jit && !frame.interpolate && renderable && copied && frame.multiplier >= 2 && !holds_full_rate &&
-        compositor_running_ && slot_index_ + 1 < frame.first_slot) {
-        FrameCopy kept = copy;
-        lock.unlock();
-        PendingFrame pending;
-        pending.app_time = content_time;
-        pending.sequence = frame.id;
-        AnalyzeJit(*projection, pending, FrameGenSynthesisMode::kExtrapolate, std::move(kept));
-        lock.lock();
-        analyzed_early = true;
     }
     // Ask for the first slot at or after the first one this frame fills.
     slot_request_ = SlotRequest{frame.id, frame.first_slot};
@@ -3114,11 +3094,6 @@ XrResult FrameGenPresenter::ThreadedEnd(XrSession session, const XrFrameEndInfo&
         spare = count == gap;
         generate = generate && count > 0;
     }
-    if (frame.jit) {
-        // Measured once; the presenter thread writes the frames each refresh
-        // until the next real frame needs, however many.
-        count = generate ? 1 : 0;
-    }
     last_offer_slot_ = offer.slot;
     NoteSubmissionLocked(offer.should_render);
     last_shown_set_.reset(); // a real frame, or a set not among the sets below
@@ -3126,13 +3101,8 @@ XrResult FrameGenPresenter::ThreadedEnd(XrSession session, const XrFrameEndInfo&
     // extrapolating, again until the frames generated from it are ready,
     // then those; interpolating, the rest of the frames before it, then it.
     newest_copy_ = copied ? std::move(copy) : FrameCopy{};
-    newest_copy_id_ = frame.id;
     generated_ready_ = false;
-    generation_pending_ = generate && !analyzed_early;
-    if (frame.jit && !generate) {
-        // Nothing is generated from older real frames past this one.
-        jit_frames_.clear();
-    }
+    generation_pending_ = generate;
     next_generated_set_ = 0;
     if (frame.interpolate) {
         extrapolated_ = {};
@@ -3171,22 +3141,7 @@ XrResult FrameGenPresenter::ThreadedEnd(XrSession session, const XrFrameEndInfo&
     }
     lock.unlock();
 
-    if (generate && frame.jit && analyzed_early) {
-        lock.lock();
-    } else if (generate && frame.jit) {
-        lock.lock();
-        FrameCopy kept = newest_copy_;
-        lock.unlock();
-        PendingFrame pending;
-        pending.app_time = content_time;
-        pending.sequence = frame.id;
-        pending.real_due = real_due;
-        pending.generated_due = generated_due;
-        AnalyzeJit(*projection, pending, FrameGenSynthesisMode::kExtrapolate, std::move(kept));
-        lock.lock();
-        generation_pending_ = false;
-        WakeSlots();
-    } else if (generate) {
+    if (generate) {
         std::vector<float> fractions;
         std::vector<XrTime> targets;
         // One frame per generated slot, plus a spare for the slot the next
@@ -3348,8 +3303,8 @@ bool FrameGenPresenter::AnalyzeJit(const XrCompositionLayerProjection& projectio
     return true;
 }
 
-XrResult FrameGenPresenter::ThreadedEndInterpolate(const XrFrameEndInfo& info, const ThreadedFrame& frame,
-                                                   Clock::time_point entered) {
+XrResult FrameGenPresenter::ThreadedEndJit(const XrFrameEndInfo& info, const ThreadedFrame& frame,
+                                           Clock::time_point entered) {
     const XrCompositionLayerProjection* projection = FindProjection(info);
     const bool renderable = info.layerCount > 0 && projection != nullptr;
     FrameCopy copy;
@@ -3374,11 +3329,13 @@ XrResult FrameGenPresenter::ThreadedEndInterpolate(const XrFrameEndInfo& info, c
         }
     }
     const XrDuration period = slot_period_ > 0 ? slot_period_ : std::max<XrDuration>(last_period_, 1);
-    // Its frames are needed from the refresh after the newest real frame's
-    // (its own refresh, for the first): measured, then written on the GPU,
-    // before the runtime releases that refresh's wait.
-    const XrTime needed = jit_frames_.empty() ? frame.target_time
-                                              : std::min(frame.target_time, jit_frames_.back().time + period);
+    // When it is needed: extrapolating, in its own refresh; interpolating,
+    // from the refresh after the newest real frame's (its own, the first),
+    // for the frames between. Measured, then written on the GPU, by when
+    // the runtime releases that refresh's wait.
+    const XrTime needed = !frame.interpolate || jit_frames_.empty()
+                              ? frame.target_time
+                              : std::min(frame.target_time, jit_frames_.back().time + period);
     // A refresh already past (before the runtime's last paced wait) maps
     // back on the same clock: the frame is that much late.
     std::optional<double> slack_ms;
@@ -3426,7 +3383,9 @@ XrResult FrameGenPresenter::ThreadedEndInterpolate(const XrFrameEndInfo& info, c
         pending.app_time = frame.target_time;
         pending.sequence = frame.id;
         pending.real_due = pending.generated_due = needed_due;
-        AnalyzeJit(*projection, pending, FrameGenSynthesisMode::kInterpolate, std::move(copy));
+        AnalyzeJit(*projection, pending,
+                   frame.interpolate ? FrameGenSynthesisMode::kInterpolate : FrameGenSynthesisMode::kExtrapolate,
+                   std::move(copy));
     }
     lock.lock();
     generation_pending_ = false;
@@ -3444,86 +3403,74 @@ XrResult FrameGenPresenter::ThreadedEndInterpolate(const XrFrameEndInfo& info, c
 FrameGenPresenter::JitChoice FrameGenPresenter::ChooseJitLocked(XrTime time, XrDuration period, bool interpolate,
                                                                 bool& due) const {
     JitChoice choice;
-    const bool in_flight = !threaded_frames_.empty() || generation_pending_;
     due = false;
-    std::size_t newest = jit_frames_.size() - 1;
-    if (!interpolate) {
-        // Extrapolating: past the real frame the game's own end showed last
-        // (the next one may be measured already, waiting for its refresh).
-        // Until it is measured, it is repeated.
-        const auto shown = std::find_if(jit_frames_.begin(), jit_frames_.end(),
-                                        [&](const JitFrame& frame) { return frame.id == newest_copy_id_; });
-        if (shown == jit_frames_.end()) {
-            due = generation_pending_;
-            return choice;
-        }
-        newest = static_cast<std::size_t>(shown - jit_frames_.begin());
-    } else if (jit_frames_.empty()) {
-        due = in_flight;
-        return choice;
-    }
-    const JitFrame& last = jit_frames_[newest];
     const XrDuration half = period / 2;
-    // Past the newest real frame: moved on by its motion (just in time, the
-    // next real frame is late: a cover frame), for at most a few intervals
-    // (a game that stopped sending frames shows its last one).
-    auto past = [&] {
-        choice.index = newest;
-        choice.mode = FrameGenSynthesisMode::kExtrapolate;
-        if (last.previous_time && time > last.time) {
-            const XrTime interval = last.time - last.previous_time;
-            choice.fraction = time - last.time > 4 * interval
-                                  ? 0.0f
-                                  : FrameGenFraction(FrameGenSynthesisMode::kExtrapolate, last.previous_time, last.time, time);
-        } else {
-            choice.fraction = 0.0f;
-        }
-    };
-    if (!interpolate) {
-        past();
+    // A real frame on its way that this refresh needs: interpolating, any
+    // (the frames past the newest are made from the next); extrapolating,
+    // one rendered for this refresh or an earlier one.
+    const bool needed_in_flight =
+        generation_pending_ || std::any_of(threaded_frames_.begin(), threaded_frames_.end(), [&](const ThreadedFrame& frame) {
+            return interpolate || frame.target_time <= time + half;
+        });
+    if (jit_frames_.empty()) {
+        due = needed_in_flight;
         return choice;
     }
-    if (time > last.time + half) {
-        due = in_flight;
-        past();
-        choice.cover = choice.fraction > 0.0f;
+    // The newest real frame whose own refresh is this one or earlier.
+    std::size_t index = jit_frames_.size();
+    for (std::size_t i = jit_frames_.size(); i-- > 0;) {
+        if (jit_frames_[i].time <= time + half) {
+            index = i;
+            break;
+        }
+    }
+    choice.mode = FrameGenSynthesisMode::kInterpolate;
+    choice.fraction = 1.0f;
+    if (index == jit_frames_.size()) {
+        // Before every kept real frame (the presenter thread just started):
+        // the oldest, unchanged.
+        choice.index = 0;
         return choice;
     }
-    // The newest real frame whose own refresh is at or before this one.
-    for (std::size_t i = newest + 1; i-- > 0;) {
-        const JitFrame& frame = jit_frames_[i];
-        if (time + half < frame.time) {
-            continue;
-        }
-        choice.mode = FrameGenSynthesisMode::kInterpolate;
-        if (i == newest || time <= frame.time + half) {
-            choice.index = i; // its own refresh: its exact copy
-            choice.fraction = 1.0f;
-            return choice;
-        }
-        const JitFrame& next = jit_frames_[i + 1];
+    const JitFrame& frame = jit_frames_[index];
+    if (time <= frame.time + half) {
+        choice.index = index; // its own refresh: its exact copy
+        return choice;
+    }
+    const bool newest = index + 1 == jit_frames_.size();
+    if (interpolate && !newest) {
+        const JitFrame& next = jit_frames_[index + 1];
         if (next.previous_time == frame.time) {
             // Between it and the next: from the next one's measurement.
-            choice.index = i + 1;
+            choice.index = index + 1;
             choice.fraction = FrameGenFraction(FrameGenSynthesisMode::kInterpolate, frame.time, next.time, time);
         } else {
             // Not continuous: the nearer of the two, unchanged.
-            choice.index = time - frame.time < next.time - time ? i : i + 1;
-            choice.fraction = 1.0f;
+            choice.index = time - frame.time < next.time - time ? index : index + 1;
         }
         return choice;
     }
-    // Before every kept real frame (the presenter thread just started).
-    choice.index = 0;
-    choice.mode = FrameGenSynthesisMode::kInterpolate;
-    choice.fraction = 1.0f;
+    // Past it, moved on by its motion: extrapolating, until the next real
+    // frame's refresh; interpolating, the next real frame is late (a cover
+    // frame). For at most a few intervals: a game that stopped sending
+    // frames shows its last one.
+    choice.index = index;
+    choice.mode = FrameGenSynthesisMode::kExtrapolate;
+    choice.fraction = 0.0f;
+    if (frame.previous_time && time > frame.time && time - frame.time <= 4 * (frame.time - frame.previous_time)) {
+        choice.fraction = FrameGenFraction(FrameGenSynthesisMode::kExtrapolate, frame.previous_time, frame.time, time);
+    }
+    if (newest) {
+        due = needed_in_flight;
+        choice.cover = due && choice.fraction > 0.0f;
+    }
     return choice;
 }
 
-bool FrameGenPresenter::SynthesizeJit(const JitFrame& frame, const JitChoice& choice,
+bool FrameGenPresenter::SynthesizeJit(const JitFrame& frame, JitChoice& choice,
                                       std::vector<XrCompositionLayerProjectionView>& views, bool& exact) {
-    const bool extrapolate = choice.mode == FrameGenSynthesisMode::kExtrapolate;
-    exact = frame.previous_time == 0 || (extrapolate ? choice.fraction <= 0.0f : choice.fraction >= 1.0f);
+    exact = frame.previous_time == 0 || (choice.mode == FrameGenSynthesisMode::kExtrapolate ? choice.fraction <= 0.0f
+                                                                                            : choice.fraction >= 1.0f);
     if (!frame.copy.has_projection || frame.copy.projection_index >= frame.copy.layers.size()) {
         return false;
     }
@@ -3594,8 +3541,18 @@ bool FrameGenPresenter::SynthesizeJit(const JitFrame& frame, const JitChoice& ch
         for (const FrameGenImage& image : images) {
             ok = ok && gpu_->Track(image.swapchain, xr_.images, error);
         }
+        if (ok && !exact && !gpu_->Measured(frame.analyzed)) {
+            // Its motion is still being measured: written now, the frame
+            // would wait for that on the runtime's queue (and the game's
+            // queue, taking an image back, for it). Its real frame unchanged.
+            choice.mode = FrameGenSynthesisMode::kInterpolate;
+            choice.fraction = 1.0f;
+            choice.cover = false;
+            exact = true;
+        }
         ok = ok && gpu_->Synthesize(frame.analyzed, choice.mode, choice.fraction, images, error);
     }
+    const bool extrapolate = choice.mode == FrameGenSynthesisMode::kExtrapolate;
     if (!ok) {
         // The images stay acquired and waited for the next refresh; the
         // runtime keeps the last ones released.
@@ -3643,7 +3600,7 @@ bool FrameGenPresenter::SynthesizeJit(const JitFrame& frame, const JitChoice& ch
         logger_->Info("Frame Generation writes each generated frame right before its refresh (" +
                       std::string(jit_interpolate_ ? "interpolating, with cover frames past the newest real frame when "
                                                      "the next one is late"
-                                                   : "extrapolating") +
+                                                   : "extrapolating, real frames shown as exact copies") +
                       "): one output image per eye, any number of frames between real frames.");
     }
     return true;
@@ -3730,10 +3687,10 @@ void FrameGenPresenter::CompositorLoop() {
             return std::any_of(threaded_frames_.begin(), threaded_frames_.end(),
                                [&](const ThreadedFrame& frame) { return frame.first_slot <= slot; });
         };
-        if (jit_ && jit_interpolate_) {
-            // Interpolating just in time every refresh is this thread's: the
-            // next real frame, when this refresh needs it and it is on its way,
-            // gets until the refresh is due. Later, a cover frame shows this
+        if (jit_) {
+            // Just in time every refresh is this thread's: the next real
+            // frame, when this refresh needs it and it is on its way, gets
+            // until the refresh is due. Later, a cover frame shows this
             // refresh's time as well (waiting longer would push the next
             // refreshes late too).
             auto due = [&] {
@@ -3744,9 +3701,6 @@ void FrameGenPresenter::CompositorLoop() {
             if (due()) {
                 CompositorWait(lock, submit_at, [&] { return compositor_stop_ || !due(); });
             }
-        } else if (jit_ && !eligible() && !real_due() && !generation_pending_ && !unusable()) {
-            // No real frame is due: the frame generated for this refresh is
-            // written right away, giving the GPU the most time.
         } else {
             CompositorWait(lock, submit_at, [&] { return compositor_stop_ || eligible(); });
             if (!compositor_stop_ && !eligible() && (real_due() || generation_pending_)) {
@@ -3784,7 +3738,7 @@ void FrameGenPresenter::CompositorLoop() {
             // Just in time: the frame this refresh shows, written now.
             compositor_phase_ = "writing a generated frame";
             bool due = false;
-            const JitChoice choice = ChooseJitLocked(slot_time_, period, jit_interpolate_, due);
+            JitChoice choice = ChooseJitLocked(slot_time_, period, jit_interpolate_, due);
             if (choice.cover && due) {
                 ++jit_covers_;
             }
@@ -3810,6 +3764,7 @@ void FrameGenPresenter::CompositorLoop() {
                                       : jit_frames_.end();
             if (kept != jit_frames_.end()) {
                 content = kept->copy;
+                jit_started_ = true;
                 jit_content_ = content;
                 jit_views_ = std::move(written_views);
                 jit_exact_ = exact;
@@ -3828,15 +3783,20 @@ void FrameGenPresenter::CompositorLoop() {
                 jit_views_ = std::move(written_views);
                 jit_exact_ = false;
                 generated = true;
-            } else if (jit_interpolate_ && jit_content_.valid && !jit_views_.empty() && !written) {
+            } else if (jit_content_.valid && !jit_views_.empty() && !written) {
                 // The last frame written again: the output images' newest.
                 content = jit_content_;
                 generated = true;
             } else {
-                // The newest real frame again (extrapolating, or before any
-                // frame was written).
-                content = newest_copy_;
-                const std::tuple<std::uint64_t, int, float> shown{newest_copy_id_, -1, 0.0f};
+                // Before any frame was written: the frame passed through last
+                // (its images released the usual way). After that the game's
+                // projection images are never shown (their releases may wait
+                // for its GPU work): a frame without one (a loading screen's
+                // quads) as it is, else nothing until the next frame written.
+                content = !jit_started_                                       ? passthrough_copy_
+                          : newest_copy_.valid && !newest_copy_.has_projection ? newest_copy_
+                                                                                : FrameCopy{};
+                const std::tuple<std::uint64_t, int, float> shown{0, -1, 0.0f};
                 distinct = jit_shown_ != shown;
                 jit_shown_ = shown;
             }
@@ -3846,7 +3806,10 @@ void FrameGenPresenter::CompositorLoop() {
             const XrCompositionLayerFlags flags =
                 usable ? content.layers[content.projection_index].projection.layerFlags : 0;
             std::vector<XrCompositionLayerProjectionView> views = jit_views_;
-            const bool depth = jit_exact_;
+            // Never the game's depth: its images' releases may wait for its
+            // GPU work (FrameGenQueueSubstitution), and the frame shows an
+            // image of Frame Generation's own.
+            const bool depth = false;
             const XrTime time = slot_time_;
             const bool should_render = slot_should_render_;
             lock.unlock();
@@ -3946,6 +3909,17 @@ void FrameGenPresenter::CompositorLoop() {
     slot_request_.reset();
     WakeSlots();
     idle_cv_.notify_all();
+}
+
+bool FrameGenPresenter::ShowsOwnImagesOnly() const {
+    std::scoped_lock lock(mutex_);
+    return compositor_running_ && jit_ && jit_started_;
+}
+
+bool FrameGenPresenter::CapturesFrom(XrSwapchain swapchain) const {
+    std::scoped_lock lock(mutex_);
+    return std::any_of(capture_targets_.begin(), capture_targets_.end(),
+                       [&](const CaptureTarget& target) { return target.swapchain == swapchain; });
 }
 
 FrameGenStatus FrameGenPresenter::Status() const {
