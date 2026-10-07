@@ -51,8 +51,13 @@ enum class FrameGenPass : std::uint8_t {
     // shading off the view axis where no cockpit content is), recorded by
     // the backend itself.
     kShadingRate,
+    // World motion (FrameGenViewRequest::world_motion): one iteration of a
+    // robust fit of the world's rotation and translation to the measured
+    // flow of world content, summed per group, then solved.
+    kWorldReduce,
+    kWorldSolve,
 };
-inline constexpr std::size_t kFrameGenPassCount = 20;
+inline constexpr std::size_t kFrameGenPassCount = 22;
 
 // Logical textures owned per view. History and filtered flow are ping-pong
 // pairs: "newest" is written this submission, "previous" is last
@@ -85,6 +90,11 @@ enum class FrameGenTextureKind : std::uint8_t {
     // The previous frame's linear depth (kDepth one submission on), for
     // content it did not see (FrameGenViewRequest::depth_previous).
     kDepthPrevious,
+    // World motion: the per-group sums of kWorldReduce (8 RGBA32F texels per
+    // group in one row) and the fit (2 RGBA32F texels: rotation and 1 when
+    // valid; translation and the inlier share).
+    kWorldPartials,
+    kWorldParams,
 };
 
 // The flow level the optical flow hardware fills: a 4x4 grid on the
@@ -122,6 +132,11 @@ inline constexpr std::uint32_t kFrameGenFlagShift = 32u;
 // kLuma reads the previous frame's depth (input 3): content it did not see
 // is marked like content outside its view.
 inline constexpr std::uint32_t kFrameGenFlagDepthPrevious = 64u;
+// kFilter: world content takes the fitted world motion (input 3).
+inline constexpr std::uint32_t kFrameGenFlagWorld = 128u;
+// World motion: samples per side of the fit's grid, and its iterations.
+inline constexpr std::uint32_t kFrameGenWorldGrid = 128u;
+inline constexpr std::uint32_t kFrameGenWorldIterations = 3u;
 // kTrustUpdate's options.x: this frame's stereo evidence is in the newest
 // trust texture, last frame's scores are valid, the previous frame is.
 inline constexpr std::uint32_t kFrameGenTrustStereo = 1u;
@@ -211,6 +226,10 @@ struct FrameGenViewRequest {
     // and the previous one as rendered (kFlowPackRaw at capture), so the plan
     // packs nothing and kFlowUnpack takes the head movement out.
     bool hardware_raw{false};
+    // Set by backends (with depth): world content (beyond 30 m) moves with
+    // one rotation and translation fitted to its measured flow, instead of
+    // the flow itself (kWorldReduce, kWorldSolve).
+    bool world_motion{false};
 };
 
 struct FrameGenTuning {

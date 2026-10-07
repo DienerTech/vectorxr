@@ -58,6 +58,9 @@ cbuffer FrameGenConstantBuffer : register(b0) {
 // previous frame did not see (something nearer stood in front of it) is
 // marked unseen like content outside its view.
 #define FG_FLAG_DEPTH_PREVIOUS 64u
+// FG_PASS_FILTER: the world's own motion (FG_PASS_WORLD_SOLVE, input 3)
+// replaces the measured flow of world content.
+#define FG_FLAG_WORLD 128u
 
 // Linear depth at or beyond this many meters is treated as infinitely far.
 #define FG_FAR_DEPTH 100000.0
@@ -490,12 +493,283 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
 }
 #endif
 
+#if defined(FG_PASS_WORLD_REDUCE) || defined(FG_PASS_WORLD_SOLVE) || defined(FG_PASS_FILTER)
+// World motion (FrameGenViewRequest::world_motion): content beyond this many
+// meters is the world outside the vehicle, and it moves rigidly relative to
+// the view with the vehicle's own motion (or the player's, walking): one
+// rotation and one translation between two real frames explain its flow, and
+// depth gives each texel its share of the translation. Measured block flow
+// aliases on repeating detail (windows, roofs, fields) and is noisy on flat
+// texture; the fitted motion is neither (MSFS captures 2026-10-05: the fit
+// explains outside flow to a median 0.6 px).
+#define FG_WORLD_DEPTH 30.0
+// Depth at or beyond this is the far sentinel (FG_FAR_DEPTH: the sky, or
+// terrain past the game's depth range): it stays out of the fit (no texture
+// to match in the sky) and keeps its measured flow. A rotation fitted where
+// world content with depth fills only a few percent of the view is the
+// least certain part of the fit, and the sky is a third of it (replay of 12
+// MSFS captures: outside bad pixels 2.75% -> 2.81% with the sky moved by
+// the fit, 2.61% without).
+#define FG_WORLD_SKY (0.5 * FG_FAR_DEPTH)
+// The fit solves for the translation in units of this many meters, so its
+// columns are about as large as the rotation's for distant world content.
+#define FG_WORLD_TRANSLATION_UNIT 100.0
+
+// The newest view's tangents at uv (fov_current: left, right, up, down).
+float2 WorldTangents(float2 uv) {
+    return float2(lerp(g.fov_current.x, g.fov_current.y, uv.x), lerp(g.fov_current.z, g.fov_current.w, uv.y));
+}
+
+// Tangent units per uv unit: flow in uv times this is flow in tangents.
+float2 WorldTangentScale() {
+    return float2(g.fov_current.y - g.fov_current.x, g.fov_current.w - g.fov_current.z);
+}
+
+// The inverse depth of world content (0: infinitely far, the sky), or -1 for
+// content that is not world (cockpit and vehicle, disproved, no depth).
+float WorldInverseDepth(float depth) {
+    return depth >= FG_WORLD_DEPTH ? 1.0 / depth : -1.0;
+}
+
+// The derivatives of the flow (the newest minus the previous position, in
+// tangents) with respect to the world's rotation w (radians) and
+// translation t (meters) between the frames, in the newest view's space
+// (x right, y up, -z forward), at tangent `at` and inverse depth inv_z.
+void WorldRows(float2 at, float inv_z, out float3 x_w, out float3 x_t, out float3 y_w, out float3 y_t) {
+    x_w = float3(at.x * at.y, -1.0 - at.x * at.x, -at.y);
+    x_t = float3(inv_z, 0.0, at.x * inv_z);
+    y_w = float3(1.0 + at.y * at.y, -at.x * at.y, at.x);
+    y_t = float3(0.0, inv_z, at.y * inv_z);
+}
+
+// The flow the world motion in `world` (texel 0: rotation and validity,
+// texel 1: translation) gives content at uv and inverse depth inv_z, in
+// tangents.
+float2 WorldFlow(Texture2D<float4> world, float2 uv, float inv_z) {
+    float3 x_w, x_t, y_w, y_t;
+    WorldRows(WorldTangents(uv), inv_z, x_w, x_t, y_w, y_t);
+    const float3 rotation = world.Load(int3(0, 0, 0)).xyz;
+    const float3 translation = world.Load(int3(1, 0, 0)).xyz;
+    return float2(dot(x_w, rotation) + dot(x_t, translation), dot(y_w, rotation) + dot(y_t, translation));
+}
+#endif
+
+#if defined(FG_PASS_WORLD_REDUCE)
+FG_BIND(0) Texture2D<float4> g_flow : register(t0);
+FG_BIND(2) Texture2D<float4> g_depth : register(t2);
+FG_BIND(3) Texture2D<float4> g_world : register(t3);
+FG_BIND(4) FG_FORMAT("rgba32f") RWTexture2D<float4> g_partials : register(u0);
+
+// Once a fit exists, residuals past this many pixels count less (Huber):
+// aliases, moving objects and depth errors do not pull the motion.
+#define FG_WORLD_HUBER 1.5
+// The terms a sample adds: the 21 of the symmetric normal matrix, the 6 of
+// the right side, its weight and 1 (the count); padded to 8 float4.
+#define FG_WORLD_TERMS 29
+groupshared float g_terms[64][FG_WORLD_TERMS];
+
+// One iteration of a robust least-squares fit of the world motion to the
+// measured flow (the final level, input 0) at a grid of samples (size.xy;
+// size.zw: the flow level; options.w: its level; options.z: the iteration,
+// whose weights come from the previous fit in input 3). Each group writes the
+// sums of its samples to its 8 texels of the partials (FG_PASS_WORLD_SOLVE).
+[numthreads(8, 8, 1)]
+void CSMain(uint3 id : SV_DispatchThreadID, uint3 group : SV_GroupID, uint index : SV_GroupIndex) {
+    float terms[FG_WORLD_TERMS];
+    [unroll]
+    for (int i = 0; i < FG_WORLD_TERMS; ++i) {
+        terms[i] = 0.0;
+    }
+    if (all(id.xy < g.size.xy)) {
+        const float2 uv = (float2(id.xy) + 0.5) / float2(g.size.xy);
+        const int2 cell = min(int2(uv * float2(g.size.zw)), int2(g.size.zw) - 1);
+        const float4 flow = g_flow.Load(int3(cell, 0));
+        const float depth = DepthNearest(g_depth, uv);
+        const float inv_z = WorldInverseDepth(depth);
+        // World content with depth (not the sky) the previous frame saw (w:
+        // its no-motion cost, negative where unseen).
+        if (inv_z >= 0.0 && depth < FG_WORLD_SKY && flow.w >= 0.0) {
+            const float2 measured = flow.xy * WorldTangentScale();
+            const float pixels = float(g.size.z << g.options.w) / abs(WorldTangentScale().x);
+            float weight = length(measured) * pixels < 64.0 ? 1.0 : 0.0;
+            if (g.options.z > 0u && g_world.Load(int3(0, 0, 0)).w > 0.0) {
+                const float residual = length(WorldFlow(g_world, uv, inv_z) - measured) * pixels;
+                weight = residual <= FG_WORLD_HUBER ? 1.0 : FG_WORLD_HUBER / residual;
+            }
+            float3 x_w, x_t, y_w, y_t;
+            WorldRows(WorldTangents(uv), inv_z, x_w, x_t, y_w, y_t);
+            x_t *= FG_WORLD_TRANSLATION_UNIT;
+            y_t *= FG_WORLD_TRANSLATION_UNIT;
+            const float x[6] = {x_w.x, x_w.y, x_w.z, x_t.x, x_t.y, x_t.z};
+            const float y[6] = {y_w.x, y_w.y, y_w.z, y_t.x, y_t.y, y_t.z};
+            int k = 0;
+            [unroll]
+            for (int r = 0; r < 6; ++r) {
+                [unroll]
+                for (int c = r; c < 6; ++c) {
+                    terms[k++] = weight * (x[r] * x[c] + y[r] * y[c]);
+                }
+            }
+            [unroll]
+            for (int b = 0; b < 6; ++b) {
+                terms[21 + b] = weight * (x[b] * measured.x + y[b] * measured.y);
+            }
+            terms[27] = weight;
+            terms[28] = 1.0;
+        }
+    }
+    [unroll]
+    for (int term = 0; term < FG_WORLD_TERMS; ++term) {
+        g_terms[index][term] = terms[term];
+    }
+    GroupMemoryBarrierWithGroupSync();
+    [unroll]
+    for (uint stride = 32u; stride > 0u; stride >>= 1) {
+        if (index < stride) {
+            [unroll]
+            for (int sum = 0; sum < FG_WORLD_TERMS; ++sum) {
+                g_terms[index][sum] += g_terms[index + stride][sum];
+            }
+        }
+        GroupMemoryBarrierWithGroupSync();
+    }
+    if (index == 0u) {
+        const uint slot = group.y * ((g.size.x + 7u) / 8u) + group.x;
+        [unroll]
+        for (int texel = 0; texel < 8; ++texel) {
+            float4 value = float4(0.0, 0.0, 0.0, 0.0);
+            [unroll]
+            for (int lane = 0; lane < 4; ++lane) {
+                if (4 * texel + lane < FG_WORLD_TERMS) value[lane] = g_terms[0][4 * texel + lane];
+            }
+            g_partials[uint2(slot * 8u + uint(texel), 0u)] = value;
+        }
+    }
+}
+#endif
+
+#if defined(FG_PASS_WORLD_SOLVE)
+FG_BIND(0) Texture2D<float4> g_partials : register(t0);
+FG_BIND(4) FG_FORMAT("rgba32f") RWTexture2D<float4> g_world : register(u0);
+
+// A fit needs this many samples, with this share of their weight left after
+// the robust weights (most of the world agrees with one motion).
+#define FG_WORLD_MIN_SAMPLES 200.0
+#define FG_WORLD_MIN_INLIERS 0.5
+groupshared float g_sums[64][32];
+
+// Sums the partials (FG_PASS_WORLD_REDUCE) and solves the normal equations:
+// texel 0 of the output holds the rotation and 1 when the fit is valid,
+// texel 1 the translation and the inlier share. One group.
+[numthreads(8, 8, 1)]
+void CSMain(uint3 id : SV_DispatchThreadID, uint index : SV_GroupIndex) {
+    uint width, height;
+    g_partials.GetDimensions(width, height);
+    const uint groups = width / 8u;
+    float sums[32];
+    [unroll]
+    for (int i = 0; i < 32; ++i) {
+        sums[i] = 0.0;
+    }
+    for (uint slot = index; slot < groups; slot += 64u) {
+        [unroll]
+        for (int j = 0; j < 8; ++j) {
+            const float4 value = g_partials.Load(int3(slot * 8u + uint(j), 0, 0));
+            sums[4 * j] += value.x;
+            sums[4 * j + 1] += value.y;
+            sums[4 * j + 2] += value.z;
+            sums[4 * j + 3] += value.w;
+        }
+    }
+    [unroll]
+    for (int term = 0; term < 32; ++term) {
+        g_sums[index][term] = sums[term];
+    }
+    GroupMemoryBarrierWithGroupSync();
+    [unroll]
+    for (uint stride = 32u; stride > 0u; stride >>= 1) {
+        if (index < stride) {
+            [unroll]
+            for (int sum = 0; sum < 32; ++sum) {
+                g_sums[index][sum] += g_sums[index + stride][sum];
+            }
+        }
+        GroupMemoryBarrierWithGroupSync();
+    }
+    if (index != 0u) {
+        return;
+    }
+    float a[6][7];
+    int k = 0;
+    [unroll]
+    for (int r = 0; r < 6; ++r) {
+        [unroll]
+        for (int c = r; c < 6; ++c) {
+            a[r][c] = g_sums[0][k];
+            a[c][r] = g_sums[0][k];
+            ++k;
+        }
+        a[r][6] = g_sums[0][21 + r];
+    }
+    const float weight = g_sums[0][27];
+    const float count = g_sums[0][28];
+    // A trace of damping: with the world far away (or only sky) the
+    // translation is barely seen and must not make the system singular.
+    [unroll]
+    for (int d = 0; d < 6; ++d) {
+        a[d][d] += weight * 1e-9;
+    }
+    // Gaussian elimination with partial pivoting.
+    bool solved = count >= FG_WORLD_MIN_SAMPLES && weight >= FG_WORLD_MIN_INLIERS * count;
+    [unroll]
+    for (int col = 0; col < 6; ++col) {
+        int pivot = col;
+        [unroll]
+        for (int row = col + 1; row < 6; ++row) {
+            if (abs(a[row][col]) > abs(a[pivot][col])) pivot = row;
+        }
+        [unroll]
+        for (int swap = 0; swap < 7; ++swap) {
+            const float held = a[col][swap];
+            a[col][swap] = a[pivot][swap];
+            a[pivot][swap] = held;
+        }
+        solved = solved && abs(a[col][col]) > 1e-20;
+        const float inverse = abs(a[col][col]) > 1e-20 ? 1.0 / a[col][col] : 0.0;
+        [unroll]
+        for (int other = 0; other < 6; ++other) {
+            if (other != col) {
+                const float factor = a[other][col] * inverse;
+                [unroll]
+                for (int entry = 0; entry < 7; ++entry) {
+                    a[other][entry] -= factor * a[col][entry];
+                }
+            }
+        }
+    }
+    float x[6];
+    [unroll]
+    for (int v = 0; v < 6; ++v) {
+        x[v] = abs(a[v][v]) > 1e-20 ? a[v][6] / a[v][v] : 0.0;
+        solved = solved && !isnan(x[v]) && !isinf(x[v]);
+    }
+    g_world[uint2(0u, 0u)] = float4(x[0], x[1], x[2], solved ? 1.0 : 0.0);
+    g_world[uint2(1u, 0u)] = float4(float3(x[3], x[4], x[5]) * FG_WORLD_TRANSLATION_UNIT,
+                                    count > 0.0 ? weight / count : 0.0);
+}
+#endif
+
 #if defined(FG_PASS_FILTER)
 FG_BIND(0) Texture2D<float4> g_flow_in : register(t0);
 FG_BIND(1) Texture2D<float4> g_flow_before : register(t1);
 FG_BIND(2) Texture2D<float4> g_depth : register(t2);
+FG_BIND(3) Texture2D<float4> g_world : register(t3);
 FG_BIND(6) SamplerState g_linear : register(s0);
 FG_BIND(4) FG_FORMAT("rgba16f") RWTexture2D<float4> g_flow_out : register(u0);
+
+// The match cost given to world content's fitted motion (FG_FLAG_WORLD):
+// that of a clear match.
+#define FG_WORLD_COST 0.01
 
 // A vector continues the motion the previous frame pair showed when it is
 // within this many full-resolution pixels of it, plus this share of the speed.
@@ -531,18 +805,28 @@ FG_BIND(4) FG_FORMAT("rgba16f") RWTexture2D<float4> g_flow_out : register(u0);
 // at its cell; `rigid` when the cell is cockpit content.
 float4 Rigid(float4 flow, int2 cell, float2 pixels, out bool rigid) {
     const float zero = flow.w;
-    const float depth = DepthNearest(g_depth, (float2(cell) + 0.5) / float2(g.size.xy));
+    const float2 uv = (float2(cell) + 0.5) / float2(g.size.xy);
+    const float depth = DepthNearest(g_depth, uv);
     rigid = depth > 0.0 && depth < FG_RIGID_DEPTH;
+    float4 result = flow;
     if (rigid) {
         const bool keep = (g.options.y & FG_FLAG_EXTRAPOLATE) == 0u && zero >= 0.0 &&
                           zero > flow.z * FG_RIGID_SHARE + FG_RIGID_MARGIN && length(flow.xy * pixels) > FG_RIGID_PIXELS;
         if (!keep) {
-            return float4(0.0, 0.0, zero < 0.0 ? flow.z : min(flow.z, zero), 1.0);
+            result = float4(0.0, 0.0, zero < 0.0 ? flow.z : min(flow.z, zero), 1.0);
         }
-    } else if (zero < 0.0) {
-        flow.z = max(flow.z, FG_UNSEEN_COST);
+    } else {
+        // World content takes the world's fitted motion, also where the
+        // previous frame did not see it (no measured vector to trust there).
+        const float inv_z = WorldInverseDepth(depth);
+        if ((g.options.y & FG_FLAG_WORLD) != 0u && inv_z >= 0.0 && depth < FG_WORLD_SKY &&
+            g_world.Load(int3(0, 0, 0)).w > 0.0) {
+            result = float4(WorldFlow(g_world, uv, inv_z) / WorldTangentScale(), FG_WORLD_COST, max(zero, 0.0));
+        } else if (zero < 0.0) {
+            result.z = max(flow.z, FG_UNSEEN_COST);
+        }
     }
-    return flow;
+    return result;
 }
 
 // Cost-weighted vector median over 3x3: removes isolated mismatches without

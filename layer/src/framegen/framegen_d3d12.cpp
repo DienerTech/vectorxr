@@ -94,6 +94,10 @@ struct ViewResources {
     std::array<Texture, 2> trust;
     Texture shift_keys;
     Texture shift_map; // rebuilt for each generated frame
+    // World motion (FrameGenViewRequest::world_motion): the fit's per-group
+    // sums and its result.
+    Texture world_partials;
+    Texture world_params;
     // Variable-rate shading of the synthesis draw: a rate per tile for the
     // extent and field of view it was made for (see EnsureShadingRate).
     Texture shading_rate;
@@ -312,6 +316,11 @@ class D3D12FrameGen final : public FrameGenGpu {
                               (adapter.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) != 0;
         if (const char* vrs = std::getenv("VECTORXR_FRAMEGEN_VRS")) {
             coarse_tangent_ = std::atof(vrs);
+        }
+        // World motion for world content (VECTORXR_FRAMEGEN_WORLD=0: measured
+        // flow as before).
+        if (const char* world = std::getenv("VECTORXR_FRAMEGEN_WORLD")) {
+            world_motion_ = std::string(world) != "0";
         }
         if (!software && coarse_tangent_ > 0.0 &&
             SUCCEEDED(device_->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS6, &options6, sizeof(options6))) &&
@@ -779,6 +788,18 @@ class D3D12FrameGen final : public FrameGenGpu {
                Create(view.shift_map, half, DXGI_FORMAT_R32_UINT, DXGI_FORMAT_R32_UINT, true, error);
     }
 
+    // A view's world-motion fit textures, created the first time it is used.
+    bool EnsureWorld(ViewResources& view, std::string& error) {
+        if (view.world_params.resource) {
+            return true;
+        }
+        const std::uint32_t groups = (kFrameGenWorldGrid / kFrameGenThreadGroupSize) * (kFrameGenWorldGrid / kFrameGenThreadGroupSize);
+        return Create(view.world_partials, {groups * 8u, 1u}, DXGI_FORMAT_R32G32B32A32_FLOAT,
+                      DXGI_FORMAT_R32G32B32A32_FLOAT, true, error) &&
+               Create(view.world_params, {2u, 1u}, DXGI_FORMAT_R32G32B32A32_FLOAT, DXGI_FORMAT_R32G32B32A32_FLOAT, true,
+                      error);
+    }
+
     // A 2D shader resource view of `texture` (a null one without) for
     // register t`slot` of the dispatch whose descriptors start at `base`.
     // The fifth and sixth are read as unsigned integers.
@@ -1105,6 +1126,7 @@ class D3D12FrameGen final : public FrameGenGpu {
         extent = {static_cast<std::uint32_t>(desc.Width), desc.Height};
         switch (desc.Format) {
         case DXGI_FORMAT_R16G16B16A16_FLOAT: channels = 4; break;
+        case DXGI_FORMAT_R32G32B32A32_FLOAT: channels = 4; break;
         case DXGI_FORMAT_R32_FLOAT: channels = 1; break;
         case DXGI_FORMAT_R16_FLOAT: channels = 1; break;
         case DXGI_FORMAT_R32_UINT: channels = 2; break; // two packed halves
@@ -1126,6 +1148,9 @@ class D3D12FrameGen final : public FrameGenGpu {
                     for (int c = 0; c < 4; ++c) out[x * 4 + c] = half(texel[c]);
                     break;
                 }
+                case DXGI_FORMAT_R32G32B32A32_FLOAT:
+                    std::memcpy(&out[x * 4], row + x * 16, 4 * sizeof(float));
+                    break;
                 case DXGI_FORMAT_R32_FLOAT:
                     std::memcpy(&out[x], row + x * 4, sizeof(float));
                     break;
@@ -1656,7 +1681,8 @@ class D3D12FrameGen final : public FrameGenGpu {
             for (const Texture& texture : view.trust) add(texture);
             for (const Texture& texture : view.raw) add(texture);
             for (const Texture* texture : {&view.output, &view.shift_keys, &view.shift_map, &view.hardware_newest,
-                                           &view.hardware_previous, &view.hardware_flow, &view.raw_flow}) {
+                                           &view.hardware_previous, &view.hardware_flow, &view.raw_flow,
+                                           &view.world_partials, &view.world_params, &view.shading_rate}) {
                 add(*texture);
             }
         }
@@ -2298,6 +2324,8 @@ class D3D12FrameGen final : public FrameGenGpu {
         case FrameGenTextureKind::kTrustPrevious: return &view.trust[previous];
         case FrameGenTextureKind::kShiftKeys: return &view.shift_keys;
         case FrameGenTextureKind::kShiftMap: return &view.shift_map;
+        case FrameGenTextureKind::kWorldPartials: return &view.world_partials;
+        case FrameGenTextureKind::kWorldParams: return &view.world_params;
         default: return nullptr;
         }
     }
@@ -2389,6 +2417,11 @@ class D3D12FrameGen final : public FrameGenGpu {
         // The previous frame's depth was used (its trust scores were kept),
         // so it is still in the other depth image.
         effective.depth_previous = effective.depth && effective.trust_history;
+        // World content moves with the world's fitted motion.
+        effective.world_motion = world_motion_ && effective.depth && effective.synthesize;
+        if (effective.world_motion && !EnsureWorld(view, error)) {
+            return false;
+        }
         depth_used = effective.depth && effective.synthesize;
         recording.submission = &submission;
         recording.view = &view;
@@ -2598,6 +2631,7 @@ class D3D12FrameGen final : public FrameGenGpu {
     ComPtr<ID3D12GraphicsCommandList> commands_;
     ComPtr<ID3D12GraphicsCommandList5> commands5_; // the same list, for variable-rate shading
     UINT shading_tile_{0};                          // pixels per shading-rate tile side; 0: no variable-rate shading
+    bool world_motion_{true};                       // FrameGenViewRequest::world_motion where depth is in use
     std::array<FrameSlot, kFramesInFlight> slots_;
     ComPtr<ID3D12GraphicsCommandList> capture_commands_;
     std::array<CaptureSlot, kCaptureSlots> capture_slots_; // views x frames in flight, color and depth

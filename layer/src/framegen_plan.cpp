@@ -294,6 +294,27 @@ FrameGenViewPlan BuildFrameGenViewPlan(const FrameGenViewRequest& request, const
     filter.outputs = {Texture(FrameGenTextureKind::kFilteredNewest, plan.final_flow_level), {}};
     filter.constants.options[3] = plan.final_flow_level;
     filter.constants.tuning[0] = std::clamp(tuning.interval_ratio, 0.25f, 4.0f);
+    if (request.depth && request.world_motion && tuning.mode == FrameGenSynthesisMode::kExtrapolate) {
+        // The world's own motion, fitted to the measured flow at a grid of
+        // samples: each iteration weighs the samples by the last fit.
+        for (std::uint32_t iteration = 0; iteration < kFrameGenWorldIterations; ++iteration) {
+            FrameGenDispatch reduce = Dispatch(FrameGenPass::kWorldReduce, {kFrameGenWorldGrid, kFrameGenWorldGrid},
+                                               plan.levels[plan.final_flow_level], base);
+            reduce.inputs = {Texture(FrameGenTextureKind::kFlow, plan.final_flow_level), {}, depth,
+                             iteration ? Texture(FrameGenTextureKind::kWorldParams) : FrameGenTexture{}, {}};
+            reduce.outputs = {Texture(FrameGenTextureKind::kWorldPartials), {}};
+            reduce.constants.options[2] = iteration;
+            reduce.constants.options[3] = plan.final_flow_level;
+            plan.dispatches.push_back(reduce);
+            FrameGenDispatch solve = Dispatch(FrameGenPass::kWorldSolve, {kFrameGenThreadGroupSize, kFrameGenThreadGroupSize},
+                                              {kFrameGenThreadGroupSize, kFrameGenThreadGroupSize}, base);
+            solve.inputs = {Texture(FrameGenTextureKind::kWorldPartials), {}, {}, {}, {}};
+            solve.outputs = {Texture(FrameGenTextureKind::kWorldParams), {}};
+            plan.dispatches.push_back(solve);
+        }
+        filter.inputs[3] = Texture(FrameGenTextureKind::kWorldParams);
+        filter.constants.options[1] |= kFrameGenFlagWorld;
+    }
     plan.dispatches.push_back(filter);
 
     // Eye-shift maps, built into the one map texture right before the frames

@@ -1098,7 +1098,7 @@ int RunProfile(Harness& harness) {
     const char* names[] = {"luma",        "downsample",  "search",      "refine",      "filter",
                            "synthesize",  "synthesize16", "depth",      "depth check", "depth trust",
                            "flow pack",   "flow unpack", "trust update", "shift clear", "shift splat",
-                           "shift resolve", "shift fill", "raw pack",   "trust resolve", "shading rate", "source copy", "output copy",
+                           "shift resolve", "shift fill", "raw pack",   "trust resolve", "shading rate", "world reduce", "world solve", "source copy", "output copy",
                            "hardware wait"};
     static_assert(std::size(names) == kFrameGenPassCount + 3, "a name per profiled category");
     for (const int config : {0, 1, 2}) {
@@ -1607,6 +1607,7 @@ int RunReplay(Harness& harness) {
                     {"shift0", {FrameGenTextureKind::kShiftMap, 0}},
                     {"keys", {FrameGenTextureKind::kShiftKeys, 0}},
                     {"filtered", {FrameGenTextureKind::kFilteredNewest, 0}},
+                    {"world", {FrameGenTextureKind::kWorldParams, 0}},
                 };
                 for (const auto& [name, texture] : maps) {
                     std::vector<float> values;
