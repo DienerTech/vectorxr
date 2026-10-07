@@ -1513,6 +1513,112 @@ void TestJitWaitsForNoGameFrame() {
     presenter.Stop();
 }
 
+// Interpolate and Extrapolate switched while the game runs, just in time,
+// with a frame always in flight (the game waits for its next frame before
+// ending the last, as MSFS does): the presenter thread restarts in the new
+// mode after a short run of steady frames. Engaging frames inline instead
+// would keep it from ever starting again (the game held at half rate, inline).
+void TestJitModeSwitchRestarts() {
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    runtime.paced = true;
+    std::unique_ptr<App> owned;
+    App* app = nullptr;
+    StartJit(presenter, gpu, FrameGenSynthesisMode::kInterpolate, FrameGenMultiplier::kDynamic, app, runtime, owned);
+    for (int i = 0; i < 3; ++i) app->Frame();
+    FrameGenResolvedSettings settings;
+    settings.enabled = true;
+    settings.multiplier = FrameGenMultiplier::kDynamic;
+    auto extrapolated = [&] {
+        return SynthesesWhere(gpu, [](FrameGenSynthesisMode mode, float fraction) {
+            return mode == FrameGenSynthesisMode::kExtrapolate && fraction > 0.0f;
+        });
+    };
+    auto between = [&] {
+        return SynthesesWhere(gpu, [](FrameGenSynthesisMode mode, float fraction) {
+            return mode == FrameGenSynthesisMode::kInterpolate && fraction > 0.0f && fraction < 1.0f;
+        });
+    };
+    auto engaged = [&] {
+        const FrameGenStatus status = presenter.Status();
+        return status.threaded && status.state == FrameGenState::kActive;
+    };
+    bool before = false, extrapolating = false, interpolating = false;
+    int moved_at_switch = 0, moved_after = 0, between_at_switch = 0, between_after = 0;
+    RunPipelined(*app, 4000ms, 20ms, 30ms, [&](int frame, const XrFrameState&) {
+        if (frame == 20) {
+            before = engaged();
+            moved_at_switch = extrapolated();
+            settings.synthesis_mode = FrameGenSynthesisMode::kExtrapolate;
+            presenter.Configure(settings);
+        } else if (frame == 55) {
+            extrapolating = engaged();
+            moved_after = extrapolated();
+            between_at_switch = between();
+            settings.synthesis_mode = FrameGenSynthesisMode::kInterpolate;
+            presenter.Configure(settings);
+        } else if (frame == 90) {
+            interpolating = engaged();
+            between_after = between();
+        }
+    });
+    Check(before, "mode switch: interpolating from the presenter thread before the switch");
+    Check(extrapolating, "mode switch: the presenter thread runs again after switching to Extrapolate");
+    Check(moved_after - moved_at_switch > 20, "mode switch: frames are extrapolated after the switch (" +
+                                                  std::to_string(moved_after - moved_at_switch) + ")");
+    Check(interpolating, "mode switch: the presenter thread runs again after switching back to Interpolate");
+    Check(between_after - between_at_switch > 20, "mode switch: frames are interpolated after switching back (" +
+                                                      std::to_string(between_after - between_at_switch) + ")");
+    presenter.Stop();
+    Check(!runtime.ordering_violation && !g_release_violation, "mode switch: calls stayed ordered");
+}
+
+// Turned off while the game's frame wait is under way (where a paced game
+// spends most of its time), Frame Generation reads off: the frame that wait
+// returns is not engaged, and nothing marks the state active, then waiting.
+void TestToggleOffReadsOff() {
+    for (const bool jit : {false, true}) {
+        const std::string name = jit ? "toggle off (just in time)" : "toggle off (inline)";
+        FrameGenPresenter presenter;
+        GpuLog gpu;
+        Runtime runtime;
+        runtime.paced = true;
+        std::unique_ptr<App> owned;
+        App* app = nullptr;
+        if (jit) {
+            StartJit(presenter, gpu, FrameGenSynthesisMode::kExtrapolate, FrameGenMultiplier::kDynamic, app, runtime, owned);
+        } else {
+            StartPresenter(presenter, gpu, FrameGenSynthesisMode::kExtrapolate);
+            owned = std::make_unique<App>(presenter, runtime);
+            app = owned.get();
+        }
+        std::atomic<bool> stop{false};
+        std::thread game([&] {
+            while (!stop) app->Frame();
+        });
+        int engaged = 0, not_off = 0;
+        for (int i = 0; i < 8; ++i) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(250 + 7 * i));
+            engaged += presenter.Status().state == FrameGenState::kActive ? 1 : 0;
+            Check(!presenter.Toggle(), name + ": turned off");
+            std::this_thread::sleep_for(150ms);
+            const FrameGenState state = presenter.Status().state;
+            if (state != FrameGenState::kOff) {
+                ++not_off;
+                if (std::getenv("FG_TEST_VERBOSE")) std::cerr << name << ": reads " << ToString(state) << std::endl;
+            }
+            Check(presenter.Toggle(), name + ": turned on");
+        }
+        stop = true;
+        game.join();
+        Check(engaged >= 6, name + ": engaged before each toggle (" + std::to_string(engaged) + " of 8)");
+        Check(not_off == 0, name + ": reads off once turned off (" + std::to_string(not_off) + " of 8 did not)");
+        presenter.Stop();
+        Check(!runtime.ordering_violation && !g_release_violation, name + ": calls stayed ordered");
+    }
+}
+
 // Extrapolate at 3x, each generated frame written right before its refresh:
 // one output image per eye whatever the multiplier, the game's own frame in
 // its refresh, and every other refresh moved on from it by its time.
@@ -2184,6 +2290,8 @@ int main() {
     RUN(TestJitInterpolation);
     RUN(TestJitDynamicInterpolation);
     RUN(TestJitWaitsForNoGameFrame);
+    RUN(TestJitModeSwitchRestarts);
+    RUN(TestToggleOffReadsOff);
     // The threaded presenter's lifecycle with frames written together, then
     // just in time.
     for (const bool jit : {false, true}) {

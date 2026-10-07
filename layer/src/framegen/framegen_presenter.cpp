@@ -349,7 +349,23 @@ bool FrameGenPresenter::Started() const {
 
 void FrameGenPresenter::Configure(const FrameGenResolvedSettings& settings) {
     std::scoped_lock lock(mutex_);
+    // Just in time, the presenter thread keeps the mode it started with
+    // (StayThreadedLocked): another one starts it again, after a fresh run of
+    // steady frames, as turning Frame Generation off and on does. Frames
+    // engaged inline in between would keep it from starting again (an app
+    // that waits before ending its last frame always has one in flight).
+    const bool restart = jit_ && compositor_running_ && settings.synthesis_mode != settings_.synthesis_mode;
     settings_ = settings;
+    if (restart) {
+        healthy_streak_ = 0;
+        if (state_ == FrameGenState::kActive) {
+            SetStateLocked(FrameGenState::kWaiting, "");
+        }
+        if (logger_) {
+            logger_->Info(std::string("Frame Generation restarts for ") + ToString(settings_.synthesis_mode) +
+                          " once frames are steady again.");
+        }
+    }
 }
 
 void FrameGenPresenter::SetConfigured(bool enabled) {
@@ -427,7 +443,7 @@ void FrameGenPresenter::ResetFrames() {
     healthy_streak_ = 0;
     InvalidateContinuityLocked();
     if (state_ == FrameGenState::kActive) {
-        SetStateLocked(FrameGenState::kWaiting, "");
+        SetStateLocked(IdleStateLocked(), "");
     }
     idle_cv_.notify_all();
 }
@@ -704,6 +720,10 @@ bool FrameGenPresenter::RunnableLocked() const {
 
 bool FrameGenPresenter::WantsEngagementLocked() const {
     return RunnableLocked() && EffectiveMultiplierLocked() >= 2;
+}
+
+FrameGenState FrameGenPresenter::IdleStateLocked() const {
+    return user_enabled_ && configured_enabled_ ? FrameGenState::kWaiting : FrameGenState::kOff;
 }
 
 bool FrameGenPresenter::StayThreadedLocked() const {
@@ -1102,7 +1122,7 @@ XrResult FrameGenPresenter::WaitFrame(XrSession session, const XrFrameWaitInfo* 
         if (full_rate) {
             SetStateLocked(FrameGenState::kActive, "");
         } else if (!engage && state_ == FrameGenState::kActive) {
-            SetStateLocked(FrameGenState::kWaiting, "");
+            SetStateLocked(IdleStateLocked(), "");
         }
         sequence = ++wait_sequence_;
     }
@@ -1117,7 +1137,9 @@ XrResult FrameGenPresenter::WaitFrame(XrSession session, const XrFrameWaitInfo* 
     frame.slot_time = state->predictedDisplayTime;
     frame.period = state->predictedDisplayPeriod;
     frame.should_render = state->shouldRender == XR_TRUE;
-    frame.engaged = engage && frame.period > 0 && state_ != FrameGenState::kPaused;
+    // Still wanted after the runtime's wait: turned off meanwhile, the frame
+    // passes through (and the state stays off).
+    frame.engaged = engage && frame.period > 0 && state_ != FrameGenState::kPaused && user_enabled_ && configured_enabled_;
     frame.multiplier = multiplier;
     frame.sequence = sequence;
     frame.wait_return = Clock::now();

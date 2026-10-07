@@ -368,6 +368,8 @@ class FrameGenPresenter {
     };
 
     bool WantsEngagementLocked() const;
+    // The state while no frame is engaged: off when turned off, else waiting.
+    FrameGenState IdleStateLocked() const;
     bool RunnableLocked() const;
     std::uint32_t EffectiveMultiplierLocked() const;
     // Dynamic in effect: chosen, and the presenter thread extrapolates.
