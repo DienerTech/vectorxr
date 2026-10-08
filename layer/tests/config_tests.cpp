@@ -1,6 +1,9 @@
+#include <algorithm>
 #include <array>
+#include <bit>
 #include <chrono>
 #include <cmath>
+#include <cstdint>
 #include <cstdlib>
 #include <filesystem>
 #include <iostream>
@@ -17,6 +20,7 @@
 #include "depthxr/pivot_routing.h"
 #include "depthxr/pivot_step.h"
 #include "depthxr/pivot_view.h"
+#include "depthxr/quadviews_compose.h"
 #include "depthxr/quadviews_frame_cache.h"
 #include "depthxr/quadviews_recovery.h"
 #include "depthxr/quadviews_sizing.h"
@@ -2580,21 +2584,21 @@ void TestD3D11SharpenShaderRegression() {
     Expect(stream.good(), "Failed to open the D3D11 shader source for regression testing");
     const std::string source_file((std::istreambuf_iterator<char>(stream)), std::istreambuf_iterator<char>());
 
-    for (const std::string& function_marker : {
-             "const char* D3D11QuadViewsShaderSource()",
-             "const char* D3D11FocusSharpenShaderSource()",
-         }) {
-        const std::string shader = ExtractRawShaderSource(source_file, function_marker);
+    const std::string compositor = depthxr::QuadViewsD3D11ShaderSource();
+    const std::array<std::pair<std::string, std::string>, 2> shaders{{
+        {"QuadViewsD3D11ShaderSource()", compositor},
+        {"D3D11FocusSharpenShaderSource()",
+         ExtractRawShaderSource(source_file, "const char* D3D11FocusSharpenShaderSource()")},
+    }};
+    for (const auto& [label, shader] : shaders) {
         Expect(shader.find("focus.rgb = saturate(focus.rgb + detail);") != std::string::npos,
-               function_marker + " lost the extrema-preserving sharpen output");
+               label + " lost the extrema-preserving sharpen output");
         Expect(shader.find("focus.rgb = clamp(sharpened, lo, hi);") == std::string::npos,
-               function_marker + " regressed to the clamp that cancelled sharpening at extrema");
-        ExpectShaderCompiles(shader, "VSMain", "vs_5_0", function_marker + " vertex shader");
-        ExpectShaderCompiles(shader, "PSMain", "ps_5_0", function_marker + " pixel shader");
+               label + " regressed to the clamp that cancelled sharpening at extrema");
+        ExpectShaderCompiles(shader, "VSMain", "vs_5_0", label + " vertex shader");
+        ExpectShaderCompiles(shader, "PSMain", "ps_5_0", label + " pixel shader");
     }
 
-    const std::string compositor =
-        ExtractRawShaderSource(source_file, "const char* D3D11QuadViewsShaderSource()");
     Expect(compositor.find("saturate(blendParams.z) * edgeAlpha") != std::string::npos,
            "Quadviews compositor sharpening no longer ramps with the focus feather");
     Expect(compositor.find("diagnosticParams.x < 0.5") != std::string::npos &&
@@ -3202,6 +3206,185 @@ void TestQuadViewsCanvasDimensionsMatchCompositionDensity() {
            "Quadviews canvas dimensions exceeded the runtime maximum");
 }
 
+depthxr::FrameGenFov FovFromTangents(double left, double right, double up, double down) {
+    return {static_cast<float>(std::atan(left)), static_cast<float>(std::atan(right)),
+            static_cast<float>(std::atan(up)), static_cast<float>(std::atan(down))};
+}
+
+void TestFrameGenComposeEye() {
+    const auto close_to = [](float value, double expected) {
+        return std::abs(value - expected) <= 1e-5 * (std::max)(1.0, std::abs(expected));
+    };
+    const auto relative = [](float value, double expected) {
+        return std::abs(value - expected) <= 1e-4 * std::abs(expected);
+    };
+    const depthxr::FrameGenFov full = FovFromTangents(-1.0, 1.0, 1.0, -1.0);
+    const depthxr::FrameGenFov focus = FovFromTangents(-0.5, 0.25, 0.5, -0.25);
+
+    const depthxr::FrameGenComposeEye eye =
+        depthxr::BuildFrameGenComposeEye(full, focus, {2000, 1000}, {1200, 900}, 10.0, 50.0);
+    Expect(eye.peripheral == 0 && eye.focus == 0, "The compose builder should leave the view indices to the caller");
+    Expect(close_to(eye.focus_rect[0], 0.25) && close_to(eye.focus_rect[1], 0.25) &&
+               close_to(eye.focus_rect[2], 0.625) && close_to(eye.focus_rect[3], 0.625),
+           "The focus rectangle should lie where the focus view's tangents fall in the full view's");
+    Expect(close_to(eye.feather[0], 0.0375) && close_to(eye.feather[1], 0.0375),
+           "The blend band should be the transition's share of the focus rectangle");
+    Expect(eye.sharpen == 0.5f, "Sharpness 50 should sharpen by half");
+    Expect(eye.focus_texel[0] == 1.0f / 1200.0f && eye.focus_texel[1] == 1.0f / 900.0f,
+           "The focus texel should be one over the focus view's extent");
+    Expect(relative(eye.output_pixel_in_focus[0], (1.0 / 2000.0) / 0.375) &&
+               relative(eye.output_pixel_in_focus[1], (1.0 / 1000.0) / 0.375),
+           "One output pixel should be expressed in focus uv");
+
+    // A focus view reaching past the full view's left and bottom edges.
+    const depthxr::FrameGenComposeEye edge = depthxr::BuildFrameGenComposeEye(
+        full, FovFromTangents(-1.5, 0.5, 0.5, -2.0), {2000, 1000}, {1200, 900}, 10.0, 50.0);
+    Expect(edge.focus_rect[0] == 0.0f && edge.focus_rect[3] == 1.0f && close_to(edge.focus_rect[1], 0.25) &&
+               close_to(edge.focus_rect[2], 0.75),
+           "The focus rectangle should be clamped at the full view's edges");
+    Expect(close_to(edge.feather[0], 0.075) && close_to(edge.feather[1], 0.075),
+           "The blend band should follow the clamped focus rectangle");
+
+    // The blend band is never under one output pixel.
+    for (const double transition : {0.0, -20.0, 0.01}) {
+        const depthxr::FrameGenComposeEye hard =
+            depthxr::BuildFrameGenComposeEye(full, focus, {2000, 1000}, {1200, 900}, transition, 50.0);
+        Expect(hard.feather[0] == static_cast<float>(1.0 / 2000.0) &&
+                   hard.feather[1] == static_cast<float>(1.0 / 1000.0),
+               "A transition under one output pixel should keep a one-pixel blend band");
+    }
+    const depthxr::FrameGenComposeEye empty = depthxr::BuildFrameGenComposeEye(full, focus, {0, 0}, {0, 0}, 0.0, 50.0);
+    Expect(empty.feather[0] == 1.0f && empty.feather[1] == 1.0f && empty.focus_texel[0] == 1.0f &&
+               empty.focus_texel[1] == 1.0f,
+           "Empty extents should count as one pixel");
+    const depthxr::FrameGenComposeEye wide =
+        depthxr::BuildFrameGenComposeEye(full, focus, {2000, 1000}, {1200, 900}, 250.0, 50.0);
+    Expect(close_to(wide.feather[0], 0.375) && close_to(wide.feather[1], 0.375),
+           "A transition over 100% should blend across the whole focus rectangle");
+
+    const std::array<std::pair<double, float>, 5> sharpness{{
+        {-10.0, 0.0f},
+        {0.0, 0.0f},
+        {37.0, static_cast<float>(37.0 / 100.0)},
+        {100.0, 1.0f},
+        {250.0, 1.0f},
+    }};
+    for (const auto& [percent, expected] : sharpness) {
+        Expect(depthxr::BuildFrameGenComposeEye(full, focus, {2000, 1000}, {1200, 900}, 10.0, percent).sharpen ==
+                   expected,
+               "Sharpness should be clamped to 0-100 and scaled to 0-1");
+    }
+
+    const depthxr::FrameGenConstants constants = depthxr::BuildFrameGenComposeConstants(eye, {2000, 1000});
+    Expect(constants.fov_current == eye.focus_rect, "The compose constants should carry the focus rectangle");
+    Expect(constants.fov_previous == std::array<float, 4>{eye.feather[0], eye.feather[1], eye.sharpen, 0.0f},
+           "The compose constants should carry the blend band and sharpening");
+    Expect(constants.rot0 == std::array<float, 4>{eye.focus_texel[0], eye.focus_texel[1], eye.output_pixel_in_focus[0],
+                                                  eye.output_pixel_in_focus[1]},
+           "The compose constants should carry the focus texel and one output pixel in focus uv");
+    Expect(constants.size == std::array<std::uint32_t, 4>{2000, 1000, 0, 0},
+           "The compose constants should carry the output extent");
+    Expect(constants.options == std::array<std::uint32_t, 4>{} && constants.rot1 == std::array<float, 4>{} &&
+               constants.rot2 == std::array<float, 4>{} && constants.tuning == std::array<float, 4>{},
+           "The compose constants' other fields should be zero");
+}
+
+// The quad views compositor's focus rectangle arithmetic before the shared
+// builder: focus_rect, blend_params and focus_texel, 4 floats each.
+std::array<float, 12> ReferenceFocusRectConstants(const depthxr::FrameGenFov& full_fov,
+                                                  const depthxr::FrameGenFov& focus_fov,
+                                                  std::uint32_t width,
+                                                  std::uint32_t height,
+                                                  std::uint32_t focus_width,
+                                                  std::uint32_t focus_height,
+                                                  double transition_thickness_percent,
+                                                  double foveate_sharpness) {
+    const auto clamp = [](double value, double min_value, double max_value) {
+        return (std::max)(min_value, (std::min)(max_value, value));
+    };
+    const double full_left = std::tan(full_fov.left);
+    const double full_right = std::tan(full_fov.right);
+    const double full_down = std::tan(full_fov.down);
+    const double full_up = std::tan(full_fov.up);
+    const double focus_left = std::tan(focus_fov.left);
+    const double focus_right = std::tan(focus_fov.right);
+    const double focus_down = std::tan(focus_fov.down);
+    const double focus_up = std::tan(focus_fov.up);
+    const double full_width = (std::max)(0.0001, full_right - full_left);
+    const double full_height = (std::max)(0.0001, full_up - full_down);
+
+    std::array<float, 12> constants{};
+    float* focus_rect = constants.data();
+    float* blend_params = constants.data() + 4;
+    float* focus_texel = constants.data() + 8;
+    focus_rect[0] = static_cast<float>(clamp((focus_left - full_left) / full_width, 0.0, 1.0));
+    focus_rect[2] = static_cast<float>(clamp((focus_right - full_left) / full_width, 0.0, 1.0));
+    focus_rect[1] = static_cast<float>(clamp((full_up - focus_up) / full_height, 0.0, 1.0));
+    focus_rect[3] = static_cast<float>(clamp((full_up - focus_down) / full_height, 0.0, 1.0));
+
+    const double focus_rect_width = (std::max)(0.0001, static_cast<double>(focus_rect[2]) - focus_rect[0]);
+    const double focus_rect_height = (std::max)(0.0001, static_cast<double>(focus_rect[3]) - focus_rect[1]);
+    const double transition_fraction = clamp(transition_thickness_percent, 0.0, 100.0) / 100.0;
+    blend_params[0] =
+        static_cast<float>((std::max)(1.0 / std::max<std::uint32_t>(1, width), focus_rect_width * transition_fraction));
+    blend_params[1] = static_cast<float>(
+        (std::max)(1.0 / std::max<std::uint32_t>(1, height), focus_rect_height * transition_fraction));
+    blend_params[2] = static_cast<float>(clamp(foveate_sharpness, 0.0, 100.0) / 100.0);
+    blend_params[3] = 0.0f;
+    focus_texel[0] = 1.0f / static_cast<float>(std::max<std::uint32_t>(1, focus_width));
+    focus_texel[1] = 1.0f / static_cast<float>(std::max<std::uint32_t>(1, focus_height));
+    focus_texel[2] = static_cast<float>((1.0 / std::max<std::uint32_t>(1, width)) / focus_rect_width);
+    focus_texel[3] = static_cast<float>((1.0 / std::max<std::uint32_t>(1, height)) / focus_rect_height);
+    return constants;
+}
+
+void TestFrameGenComposeEyeMatchesCompositor() {
+    // A fixed-seed generator, so every run checks the same 50 pairs.
+    std::uint64_t state = 0x5EED0F0CA1ULL;
+    const auto random = [&state](double low, double high) {
+        state = state * 6364136223846793005ULL + 1442695040888963407ULL;
+        return low + (high - low) * static_cast<double>(state >> 11) / 9007199254740992.0;
+    };
+    int clamped = 0;
+    for (int pair = 0; pair < 50; ++pair) {
+        const depthxr::FrameGenFov full{static_cast<float>(random(-1.2, -0.5)), static_cast<float>(random(0.5, 1.2)),
+                                        static_cast<float>(random(0.5, 1.1)), static_cast<float>(random(-1.2, -0.5))};
+        // Some focus views reach past the full view's edges.
+        const double center_x = random(-0.6, 0.6);
+        const double center_y = random(-0.5, 0.5);
+        const double half_width = random(0.1, 0.7);
+        const double half_height = random(0.1, 0.7);
+        const depthxr::FrameGenFov focus{
+            static_cast<float>(center_x - half_width), static_cast<float>(center_x + half_width),
+            static_cast<float>(center_y + half_height), static_cast<float>(center_y - half_height)};
+        const auto width = static_cast<std::uint32_t>(random(500.0, 4000.0));
+        const auto height = static_cast<std::uint32_t>(random(500.0, 4000.0));
+        const auto focus_width = static_cast<std::uint32_t>(random(400.0, 3000.0));
+        const auto focus_height = static_cast<std::uint32_t>(random(400.0, 3000.0));
+        const double transition = random(-10.0, 110.0);
+        const double sharpness = random(-10.0, 110.0);
+
+        const depthxr::FrameGenComposeEye eye = depthxr::BuildFrameGenComposeEye(
+            full, focus, {width, height}, {focus_width, focus_height}, transition, sharpness);
+        const std::array<float, 12> shared{
+            eye.focus_rect[0], eye.focus_rect[1], eye.focus_rect[2], eye.focus_rect[3],
+            eye.feather[0], eye.feather[1], eye.sharpen, 0.0f,
+            eye.focus_texel[0], eye.focus_texel[1], eye.output_pixel_in_focus[0], eye.output_pixel_in_focus[1]};
+        const std::array<float, 12> reference = ReferenceFocusRectConstants(
+            full, focus, width, height, focus_width, focus_height, transition, sharpness);
+        for (std::size_t value = 0; value < shared.size(); ++value) {
+            Expect(std::bit_cast<std::uint32_t>(shared[value]) == std::bit_cast<std::uint32_t>(reference[value]),
+                   "The compose builder should match the quadviews compositor bit for bit (pair " +
+                       std::to_string(pair) + ", value " + std::to_string(value) + ")");
+        }
+        if (std::any_of(eye.focus_rect.begin(), eye.focus_rect.end(),
+                        [](float edge) { return edge == 0.0f || edge == 1.0f; })) {
+            ++clamped;
+        }
+    }
+    Expect(clamped > 0, "The compose builder comparison should include focus views clamped at an edge");
+}
+
 void TestSwapchainImageQueuePreservesFifo() {
     depthxr::SwapchainImageQueue queue;
     queue.Acquire(2);
@@ -3280,6 +3463,8 @@ int main() {
     TestQuadViewsRecoveryStabilizer();
     TestQuadViewsFrameCacheKeepsGazeWithLocatedFrame();
     TestQuadViewsCanvasDimensionsMatchCompositionDensity();
+    TestFrameGenComposeEye();
+    TestFrameGenComposeEyeMatchesCompositor();
     TestPivotLocateViewsRouting();
     TestPivotPoseDeltaSpaceReexpression();
     TestNumpadActivationKeys();

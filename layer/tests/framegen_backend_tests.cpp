@@ -8,12 +8,14 @@
 #include <d3d11.h>
 #include <d3d12.h>
 #include <dxgi1_4.h>
+#include <d3dcompiler.h>
 #include <wrl/client.h>
 #include <vulkan/vulkan_core.h>
 #include <openxr/openxr_platform.h>
 
 #include "depthxr/framegen_gpu.h"
 #include "depthxr/framegen_runtime_queue.h"
+#include "depthxr/quadviews_compose.h"
 
 #ifdef DEPTHXR_NVOF_RESEARCH
 #include <nvOpticalFlowD3D12.h>
@@ -218,18 +220,22 @@ double MeanError(const Pixels& a, const Pixels& b, std::uint32_t x0, std::uint32
 }
 
 // FG_TEST_DUMP=<directory> writes every compared image as a binary PPM.
-void Dump(const std::string& name, const Pixels& pixels) {
+void DumpSized(const std::string& name, const Pixels& pixels, FrameGenExtent extent) {
     const char* directory = std::getenv("FG_TEST_DUMP");
     if (!directory) return;
     std::FILE* file = std::fopen((std::string(directory) + "/" + name + ".ppm").c_str(), "wb");
     if (!file) return;
-    std::fprintf(file, "P6\n%u %u\n255\n", kSize, kSize);
+    std::fprintf(file, "P6\n%u %u\n255\n", extent.width, extent.height);
     for (const std::uint32_t pixel : pixels) {
         const unsigned char rgb[3] = {static_cast<unsigned char>(pixel & 255), static_cast<unsigned char>((pixel >> 8) & 255),
                                       static_cast<unsigned char>((pixel >> 16) & 255)};
         std::fwrite(rgb, 1, 3, file);
     }
     std::fclose(file);
+}
+
+void Dump(const std::string& name, const Pixels& pixels) {
+    DumpSized(name, pixels, {kSize, kSize});
 }
 
 // ---------------------------------------------------------------------------
@@ -1077,6 +1083,10 @@ int RunBench(Harness& harness) {
 // Profile: the MSFS-like case at headset size on the GPU. Two eyes of a
 // cockpit over scrolling scenery, with depth, extrapolated 4x; prints the
 // GPU time of every pass. Not a CTest: `depthxr_framegen_tests profile`.
+// FG_PROFILE_QUAD=1 profiles DCS's quad views instead (RunQuadProfile);
+// FG_PROFILE_LOAD_MS=N then also times captures and analyses queued behind
+// N ms of the game's GPU work (ProfileUnderLoad; FG_PROFILE_HARDWARE=1 with
+// the optical flow hardware).
 bool g_profile = false;
 std::uint32_t g_profile_width = 6240, g_profile_height = 6280;
 
@@ -1109,7 +1119,1265 @@ Pixels CockpitAt(std::uint32_t width, std::uint32_t height, float head_x, float 
     return pixels;
 }
 
+// Profiled categories (PassMilliseconds): the passes, then copies, the
+// optical flow hardware's wait and the quad views' compose and flow merge.
+const char* const kProfileNames[] = {"luma",        "downsample",  "search",      "refine",      "filter",
+                                     "synthesize",  "synthesize16", "depth",      "depth check", "depth trust",
+                                     "flow pack",   "flow unpack", "trust update", "shift clear", "shift splat",
+                                     "shift resolve", "shift fill", "raw pack",   "trust resolve", "shading rate", "world reduce", "world solve", "trust vote", "depth scale", "scale vote",
+                                     "source copy", "output copy",
+                                     "hardware wait", "compose", "flow merge"};
+static_assert(std::size(kProfileNames) == kFrameGenPassCount + 5, "a name per profiled category");
+
+// --- Quad views (Direct3D 12) ------------------------------------------------
+// The layer composes Varjo quad views (a peripheral and a focus view per eye)
+// into stereo. Frame Generation composes them itself (SynthesizeComposed):
+// each view's generated frame at its own size, then each eye composed as the
+// layer's Direct3D 11 compositor composes it.
+
+float SrgbToLinear(float c) {
+    return c <= 0.04045f ? c / 12.92f : std::pow((c + 0.055f) / 1.055f, 2.4f);
+}
+
+float LinearToSrgb(float c) {
+    c = std::clamp(c, 0.0f, 1.0f);
+    return c <= 0.0031308f ? 12.92f * c : 1.055f * std::pow(c, 1.0f / 2.4f) - 0.055f;
+}
+
+// An sRGB image in linear light, sampled as a linear clamp sampler does.
+struct LinearImage {
+    std::uint32_t width{0}, height{0};
+    std::vector<std::array<float, 3>> texels;
+
+    LinearImage(const Pixels& pixels, FrameGenExtent extent) : width(extent.width), height(extent.height) {
+        texels.resize(pixels.size());
+        for (std::size_t i = 0; i < pixels.size(); ++i) {
+            for (int c = 0; c < 3; ++c) {
+                texels[i][c] = SrgbToLinear(static_cast<float>((pixels[i] >> (8 * c)) & 255u) / 255.0f);
+            }
+        }
+    }
+
+    std::array<float, 3> Sample(float u, float v) const {
+        const float x = u * width - 0.5f, y = v * height - 0.5f;
+        const int x0 = static_cast<int>(std::floor(x)), y0 = static_cast<int>(std::floor(y));
+        // Filtering weights at the 8 bits of subtexel precision Direct3D
+        // requires (and GPUs and WARP use).
+        const float fx = std::round((x - x0) * 256.0f) / 256.0f, fy = std::round((y - y0) * 256.0f) / 256.0f;
+        auto at = [&](int tx, int ty) -> const std::array<float, 3>& {
+            tx = std::clamp(tx, 0, static_cast<int>(width) - 1);
+            ty = std::clamp(ty, 0, static_cast<int>(height) - 1);
+            return texels[static_cast<std::size_t>(ty) * width + static_cast<std::size_t>(tx)];
+        };
+        std::array<float, 3> result{};
+        for (int c = 0; c < 3; ++c) {
+            const float top = at(x0, y0)[c] + (at(x0 + 1, y0)[c] - at(x0, y0)[c]) * fx;
+            const float bottom = at(x0, y0 + 1)[c] + (at(x0 + 1, y0 + 1)[c] - at(x0, y0 + 1)[c]) * fx;
+            result[c] = top + (bottom - top) * fy;
+        }
+        return result;
+    }
+};
+
+// How far into the focus rectangle's blend band an output pixel is: 0 at
+// its edge (or outside), 1 inside the band (the compositor's edge alpha).
+float ComposeAlpha(const FrameGenConstants& c, float u, float v) {
+    const auto& rect = c.fov_current;
+    if (u < rect[0] || v < rect[1] || u > rect[2] || v > rect[3]) {
+        return -1.0f;
+    }
+    const float to_x = std::min(u - rect[0], rect[2] - u), to_y = std::min(v - rect[1], rect[3] - v);
+    float alpha = std::clamp(std::min(to_x / std::max(c.fov_previous[0], 0.0001f), to_y / std::max(c.fov_previous[1], 0.0001f)),
+                             0.0f, 1.0f);
+    return alpha * alpha * (3.0f - 2.0f * alpha);
+}
+
+// One eye composed on the CPU from its views, as FG_PASS_COMPOSE_DRAW and the
+// Direct3D 11 compositor compose it: the reference.
+Pixels ComposeReference(const LinearImage& periphery, const LinearImage& focus, const FrameGenConstants& c,
+                        FrameGenExtent output) {
+    Pixels pixels(std::size_t{output.width} * output.height);
+    const auto& rect = c.fov_current;
+    for (std::uint32_t y = 0; y < output.height; ++y) {
+        for (std::uint32_t x = 0; x < output.width; ++x) {
+            const float u = (x + 0.5f) / output.width, v = (y + 0.5f) / output.height;
+            std::array<float, 3> composed = periphery.Sample(u, v);
+            const float alpha = ComposeAlpha(c, u, v);
+            if (alpha >= 0.0f) {
+                const float fu = std::clamp((u - rect[0]) / std::max(rect[2] - rect[0], 0.0001f), 0.0f, 1.0f);
+                const float fv = std::clamp((v - rect[1]) / std::max(rect[3] - rect[1], 0.0001f), 0.0f, 1.0f);
+                std::array<float, 3> sample = focus.Sample(fu, fv);
+                const float sharpen = std::clamp(c.fov_previous[2], 0.0f, 1.0f) * alpha;
+                if (sharpen > 0.001f) {
+                    const float ox = c.rot0[2], oy = c.rot0[3];
+                    auto tap = [&](float du, float dv) {
+                        return focus.Sample(std::clamp(fu + du, 0.0f, 1.0f), std::clamp(fv + dv, 0.0f, 1.0f));
+                    };
+                    const auto n = tap(0.0f, -oy), s = tap(0.0f, oy), e = tap(ox, 0.0f), w = tap(-ox, 0.0f);
+                    for (int k = 0; k < 3; ++k) {
+                        const float average = (n[k] + s[k] + e[k] + w[k]) * 0.25f;
+                        const float low = std::min({sample[k], n[k], s[k], e[k], w[k]});
+                        const float high = std::max({sample[k], n[k], s[k], e[k], w[k]});
+                        const float range = std::max(high - low, 1.0f / 255.0f);
+                        sample[k] = std::clamp(sample[k] + std::clamp((sample[k] - average) * (sharpen * 2.0f),
+                                                                      -range * 0.5f, range * 0.5f),
+                                               0.0f, 1.0f);
+                    }
+                }
+                for (int k = 0; k < 3; ++k) composed[k] += (sample[k] - composed[k]) * alpha;
+            }
+            pixels[std::size_t{y} * output.width + x] =
+                Pack(LinearToSrgb(composed[0]), LinearToSrgb(composed[1]), LinearToSrgb(composed[2]));
+        }
+    }
+    return pixels;
+}
+
+// Per-channel differences of two images where `inside` holds: mean (of 1)
+// and largest (in 8-bit steps).
+struct Difference {
+    double mean{0.0};
+    int max{0};
+    std::size_t pixels{0};
+};
+
+Difference Compare(const Pixels& a, const Pixels& b, FrameGenExtent extent,
+                   const std::function<bool(std::uint32_t, std::uint32_t)>& inside) {
+    Difference difference;
+    double sum = 0.0;
+    for (std::uint32_t y = 0; y < extent.height; ++y) {
+        for (std::uint32_t x = 0; x < extent.width; ++x) {
+            if (!inside(x, y)) continue;
+            const std::uint32_t p = a[std::size_t{y} * extent.width + x], q = b[std::size_t{y} * extent.width + x];
+            for (int c = 0; c < 3; ++c) {
+                const int d = std::abs(static_cast<int>((p >> (8 * c)) & 255) - static_cast<int>((q >> (8 * c)) & 255));
+                sum += d;
+                difference.max = std::max(difference.max, d);
+            }
+            ++difference.pixels;
+        }
+    }
+    difference.mean = difference.pixels ? sum / (255.0 * 3.0 * difference.pixels) : 0.0;
+    return difference;
+}
+
+// The layer's own Direct3D 11 compositor shader (QuadViewsD3D11ShaderSource,
+// diagnostics off) composing one eye from the same images, the source rects
+// whole images: what Frame Generation's compose must reproduce.
+class D3D11Compositor {
+  public:
+    explicit D3D11Compositor(bool hardware) {
+        const D3D_FEATURE_LEVEL level = D3D_FEATURE_LEVEL_11_0;
+        Check(SUCCEEDED(D3D11CreateDevice(nullptr, hardware ? D3D_DRIVER_TYPE_HARDWARE : D3D_DRIVER_TYPE_WARP, nullptr, 0,
+                                          &level, 1, D3D11_SDK_VERSION, &device_, nullptr, &context_)),
+              "D3D11 compositor device");
+        const char* source = QuadViewsD3D11ShaderSource();
+        ComPtr<ID3DBlob> vs, ps, errors;
+        Check(SUCCEEDED(D3DCompile(source, std::strlen(source), "quadviews", nullptr, nullptr, "VSMain", "vs_5_0", 0, 0,
+                                   &vs, &errors)) &&
+                  SUCCEEDED(D3DCompile(source, std::strlen(source), "quadviews", nullptr, nullptr, "PSMain", "ps_5_0", 0, 0,
+                                       &ps, &errors)),
+              std::string("D3D11 compositor shader: ") +
+                  (errors ? static_cast<const char*>(errors->GetBufferPointer()) : "compile failed"));
+        Check(SUCCEEDED(device_->CreateVertexShader(vs->GetBufferPointer(), vs->GetBufferSize(), nullptr, &vertex_)) &&
+                  SUCCEEDED(device_->CreatePixelShader(ps->GetBufferPointer(), ps->GetBufferSize(), nullptr, &pixel_)),
+              "D3D11 compositor shaders");
+        D3D11_SAMPLER_DESC sampler{}; // as the layer's compositor
+        sampler.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
+        sampler.AddressU = sampler.AddressV = sampler.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
+        sampler.MaxLOD = D3D11_FLOAT32_MAX;
+        Check(SUCCEEDED(device_->CreateSamplerState(&sampler, &sampler_)), "D3D11 compositor sampler");
+    }
+
+    Pixels Compose(const Pixels& periphery, FrameGenExtent periphery_extent, const Pixels& focus,
+                   FrameGenExtent focus_extent, const FrameGenComposeEye& eye, FrameGenExtent output) {
+        auto texture = [&](const Pixels& pixels, FrameGenExtent extent, UINT bind) {
+            D3D11_TEXTURE2D_DESC desc{};
+            desc.Width = extent.width;
+            desc.Height = extent.height;
+            desc.MipLevels = desc.ArraySize = 1;
+            desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
+            desc.SampleDesc.Count = 1;
+            desc.BindFlags = bind;
+            const D3D11_SUBRESOURCE_DATA data{pixels.data(), extent.width * 4, 0};
+            ComPtr<ID3D11Texture2D> created;
+            Check(SUCCEEDED(device_->CreateTexture2D(&desc, pixels.empty() ? nullptr : &data, &created)),
+                  "D3D11 compositor texture");
+            return created;
+        };
+        const auto periphery_texture = texture(periphery, periphery_extent, D3D11_BIND_SHADER_RESOURCE);
+        const auto focus_texture = texture(focus, focus_extent, D3D11_BIND_SHADER_RESOURCE);
+        const auto target = texture({}, output, D3D11_BIND_RENDER_TARGET);
+        ComPtr<ID3D11ShaderResourceView> views[2];
+        ComPtr<ID3D11RenderTargetView> rtv;
+        Check(SUCCEEDED(device_->CreateShaderResourceView(periphery_texture.Get(), nullptr, &views[0])) &&
+                  SUCCEEDED(device_->CreateShaderResourceView(focus_texture.Get(), nullptr, &views[1])) &&
+                  SUCCEEDED(device_->CreateRenderTargetView(target.Get(), nullptr, &rtv)),
+              "D3D11 compositor views");
+        // QuadViewsConstants: focusRect, blendParams, focusTexel, the source
+        // rects, diagnostics (off), the output texel, markers.
+        std::array<float, 36> constants{};
+        std::copy(eye.focus_rect.begin(), eye.focus_rect.end(), constants.begin());
+        constants[4] = eye.feather[0];
+        constants[5] = eye.feather[1];
+        constants[6] = eye.sharpen;
+        constants[8] = eye.focus_texel[0];
+        constants[9] = eye.focus_texel[1];
+        constants[10] = eye.output_pixel_in_focus[0];
+        constants[11] = eye.output_pixel_in_focus[1];
+        constants[14] = constants[15] = 1.0f; // peripheral source rect (0, 0, 1, 1)
+        constants[18] = constants[19] = 1.0f; // focus source rect
+        constants[24] = 1.0f / output.width;
+        constants[25] = 1.0f / output.height;
+        D3D11_BUFFER_DESC buffer{};
+        buffer.ByteWidth = sizeof(constants);
+        buffer.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+        const D3D11_SUBRESOURCE_DATA buffer_data{constants.data(), 0, 0};
+        ComPtr<ID3D11Buffer> cbuffer;
+        Check(SUCCEEDED(device_->CreateBuffer(&buffer, &buffer_data, &cbuffer)), "D3D11 compositor constants");
+        const D3D11_VIEWPORT viewport{0.0f, 0.0f, static_cast<float>(output.width), static_cast<float>(output.height), 0.0f,
+                                      1.0f};
+        ID3D11ShaderResourceView* srvs[] = {views[0].Get(), views[1].Get()};
+        ID3D11RenderTargetView* rtvs[] = {rtv.Get()};
+        ID3D11SamplerState* samplers[] = {sampler_.Get()};
+        ID3D11Buffer* cbuffers[] = {cbuffer.Get()};
+        context_->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        context_->IASetInputLayout(nullptr);
+        context_->VSSetShader(vertex_.Get(), nullptr, 0);
+        context_->PSSetShader(pixel_.Get(), nullptr, 0);
+        context_->PSSetConstantBuffers(0, 1, cbuffers);
+        context_->PSSetShaderResources(0, 2, srvs);
+        context_->PSSetSamplers(0, 1, samplers);
+        context_->RSSetViewports(1, &viewport);
+        context_->OMSetRenderTargets(1, rtvs, nullptr);
+        context_->Draw(3, 0);
+        D3D11_TEXTURE2D_DESC desc{};
+        target->GetDesc(&desc);
+        desc.BindFlags = 0;
+        desc.Usage = D3D11_USAGE_STAGING;
+        desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+        ComPtr<ID3D11Texture2D> staging;
+        Check(SUCCEEDED(device_->CreateTexture2D(&desc, nullptr, &staging)), "D3D11 compositor staging");
+        context_->CopyResource(staging.Get(), target.Get());
+        D3D11_MAPPED_SUBRESOURCE mapped{};
+        Check(SUCCEEDED(context_->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &mapped)), "D3D11 compositor map");
+        Pixels pixels(std::size_t{output.width} * output.height);
+        for (std::uint32_t y = 0; y < output.height; ++y) {
+            std::memcpy(&pixels[std::size_t{y} * output.width], static_cast<const std::byte*>(mapped.pData) + y * mapped.RowPitch,
+                        std::size_t{output.width} * 4);
+        }
+        context_->Unmap(staging.Get(), 0);
+        return pixels;
+    }
+
+  private:
+    ComPtr<ID3D11Device> device_;
+    ComPtr<ID3D11DeviceContext> context_;
+    ComPtr<ID3D11VertexShader> vertex_;
+    ComPtr<ID3D11PixelShader> pixel_;
+    ComPtr<ID3D11SamplerState> sampler_;
+};
+
+// A view of the quad views test scene: its field of view in tangents (left,
+// right, up, down) and its size.
+struct QuadView {
+    std::array<float, 4> tangents{};
+    FrameGenExtent extent;
+};
+
+FrameGenFov QuadFov(const QuadView& view) {
+    return {std::atan(view.tangents[0]), std::atan(view.tangents[1]), std::atan(view.tangents[2]),
+            std::atan(view.tangents[3])};
+}
+
+FrameGenViewGeometry QuadGeometry(const QuadView& view) {
+    FrameGenViewGeometry geometry;
+    const FrameGenFov fov = QuadFov(view);
+    geometry.angle_left = fov.left;
+    geometry.angle_right = fov.right;
+    geometry.angle_up = fov.up;
+    geometry.angle_down = fov.down;
+    return geometry;
+}
+
+// The quad views test scene's colour (linear light) in a direction: tangents
+// across and up.
+using QuadColor = std::array<float, 3>;
+using QuadScene = std::function<QuadColor(float, float)>;
+
+// Detail at each scale the test's views resolve (tangent units): features
+// of about 0.06 (10 peripheral pixels) and 0.02 (10 focus pixels).
+float QuadDetail(float x, float y, float seed) {
+    return 0.55f * Noise(x * 16.0f + seed, y * 16.0f) + 0.45f * Noise(x * 50.0f + 17.0f + seed, y * 50.0f - seed);
+}
+
+QuadColor Scenery(float tx, float ty) {
+    const float n = QuadDetail(tx, ty, 0.0f);
+    return {0.02f + 0.35f * n, 0.03f + 0.3f * n, 0.05f + 0.2f * n};
+}
+
+// The scene through `view`, anti-aliased as a renderer resolves it: 4x4
+// samples per pixel averaged in linear light, so the periphery does not
+// alias detail only the focus views resolve.
+Pixels RenderQuad(const QuadView& view, const QuadScene& scene) {
+    const auto& t = view.tangents;
+    Pixels pixels(std::size_t{view.extent.width} * view.extent.height);
+    auto rows = [&](std::uint32_t first, std::uint32_t step) {
+        for (std::uint32_t y = first; y < view.extent.height; y += step) {
+            for (std::uint32_t x = 0; x < view.extent.width; ++x) {
+                QuadColor sum{};
+                for (int sy = 0; sy < 4; ++sy) {
+                    const float ty = t[2] - (t[2] - t[3]) * (y + (sy + 0.5f) / 4.0f) / view.extent.height;
+                    for (int sx = 0; sx < 4; ++sx) {
+                        const float tx = t[0] + (t[1] - t[0]) * (x + (sx + 0.5f) / 4.0f) / view.extent.width;
+                        const QuadColor sample = scene(tx, ty);
+                        for (int c = 0; c < 3; ++c) sum[c] += sample[c] / 16.0f;
+                    }
+                }
+                pixels[std::size_t{y} * view.extent.width + x] =
+                    Pack(LinearToSrgb(sum[0]), LinearToSrgb(sum[1]), LinearToSrgb(sum[2]));
+            }
+        }
+    };
+    const std::uint32_t threads = std::max(1u, std::min(16u, std::thread::hardware_concurrency()));
+    std::vector<std::thread> workers;
+    for (std::uint32_t thread = 0; thread < threads; ++thread) {
+        workers.emplace_back(rows, thread, threads);
+    }
+    for (auto& worker : workers) {
+        worker.join();
+    }
+    return pixels;
+}
+
+// Each eye's composition of quad views 0-3 (peripheral 0/1, focus 2/3).
+FrameGenComposition QuadComposition(const std::array<QuadView, 4>& views, FrameGenExtent output, double transition,
+                                    double sharpness) {
+    FrameGenComposition composition;
+    composition.output = output;
+    for (std::uint32_t eye = 0; eye < 2; ++eye) {
+        FrameGenComposeEye composed = BuildFrameGenComposeEye(QuadFov(views[eye]), QuadFov(views[eye + 2]), output,
+                                                              views[eye + 2].extent, transition, sharpness);
+        composed.peripheral = eye;
+        composed.focus = eye + 2;
+        composition.eyes.push_back(composed);
+    }
+    return composition;
+}
+
+// Quad views on Direct3D 12: the compose against the Direct3D 11
+// compositor and a CPU reference, generated frames of four views composed
+// into two eyes, the seam where an eye blends its views, and the capture
+// marks and analysis timings GPU-aware pacing reads.
+int RunQuadViews(Harness& harness) {
+    std::string error;
+    auto gpu = CreateFrameGenGpu(harness.binding, error);
+    Check(gpu != nullptr, harness.name + " backend: " + error);
+    gpu->SetCopyAfterRelease(true); // the tests' images are their own
+    // Without just-in-time synthesis (FG_TEST_RUNTIME_QUEUE=0) nothing is
+    // composed; GPU-aware pacing (4.) applies all the same.
+    const bool composes = gpu->SupportsJustInTime();
+    Check(gpu->SupportsComposition() == composes, harness.name + " composes quad views just in time, and only then");
+    if (!composes) {
+        std::cout << harness.name << " quad views: no just-in-time synthesis here; composing skipped\n";
+    }
+    const std::int64_t output_format = gpu->OutputFormats(FrameGenOutputKind::kSrgb8).front();
+    auto chain = [](std::uintptr_t id) { return reinterpret_cast<XrSwapchain>(id); };
+    auto whole = [](FrameGenExtent extent) {
+        return XrRect2Di{{0, 0}, {static_cast<std::int32_t>(extent.width), static_cast<std::int32_t>(extent.height)}};
+    };
+    auto submission = [&](XrSwapchain source, std::uint32_t index, const QuadView& view, const QuadView& previous,
+                          bool synthesize) {
+        FrameGenViewSubmission sub;
+        sub.source = {source, index, 0, whole(view.extent), harness.format};
+        sub.request.extent = view.extent;
+        sub.request.output = FrameGenOutputKind::kSrgb8;
+        sub.request.synthesize = synthesize;
+        sub.request.temporal = true;
+        sub.request.newest = QuadGeometry(view);
+        sub.request.previous = QuadGeometry(synthesize ? previous : view);
+        return sub;
+    };
+
+    // 1. The compose: an eye of two exact views (the real frame's own
+    // images) is what the Direct3D 11 compositor and the CPU reference
+    // compose. A peripheral view of +-0.8 rad, an off-centre focus view, an
+    // output of another size; the rect clamped where the focus view reaches
+    // past the periphery; sharpening off and on.
+    if (composes) {
+        const FrameGenExtent periphery_extent{200, 202}, focus_extent{252, 254}, output{280, 282};
+        const XrSwapchain periphery_chain = chain(0xd0), focus_chain = chain(0xd1), output_chain = chain(0xd2);
+        g_swapchains[periphery_chain] = {harness.create(periphery_extent.width, periphery_extent.height)};
+        g_swapchains[focus_chain] = {harness.create(focus_extent.width, focus_extent.height)};
+        g_swapchains[output_chain] = {harness.create(output.width, output.height)};
+        Check(gpu->Track(periphery_chain, EnumerateImages, error) && gpu->Track(focus_chain, EnumerateImages, error) &&
+                  gpu->Track(output_chain, EnumerateImages, error),
+              error);
+        // The two views' images differ, so the inset shows. Smooth: filtering
+        // precision differs between GPUs (sharpening amplifies it at hard
+        // edges), the compose must not.
+        Pixels periphery_pixels(std::size_t{periphery_extent.width} * periphery_extent.height);
+        for (std::uint32_t y = 0; y < periphery_extent.height; ++y) {
+            for (std::uint32_t x = 0; x < periphery_extent.width; ++x) {
+                periphery_pixels[std::size_t{y} * periphery_extent.width + x] = Background(x * 0.8f, y * 0.8f);
+            }
+        }
+        Pixels focus_pixels(std::size_t{focus_extent.width} * focus_extent.height);
+        for (std::uint32_t y = 0; y < focus_extent.height; ++y) {
+            for (std::uint32_t x = 0; x < focus_extent.width; ++x) {
+                // Soft yellow cells over the patch texture.
+                const float cell = std::clamp(0.5f + 1.5f * std::sin(x * 0.13f) * std::sin(y * 0.13f), 0.0f, 1.0f);
+                const std::uint32_t patch = Patch(x * 0.7f, y * 0.7f);
+                auto channel = [&](int c, float yellow) {
+                    const float value = static_cast<float>((patch >> (8 * c)) & 255u) / 255.0f;
+                    return value + (yellow - value) * cell;
+                };
+                focus_pixels[std::size_t{y} * focus_extent.width + x] =
+                    Pack(channel(0, 0.95f), channel(1, 0.9f), channel(2, 0.2f));
+            }
+        }
+        harness.upload_sized(g_swapchains[periphery_chain][0], periphery_extent.width, periphery_extent.height,
+                             periphery_pixels);
+        harness.upload_sized(g_swapchains[focus_chain][0], focus_extent.width, focus_extent.height, focus_pixels);
+        const LinearImage periphery_linear(periphery_pixels, periphery_extent), focus_linear(focus_pixels, focus_extent);
+        D3D11Compositor d3d11(g_hardware);
+        FrameGenTuning analyze;
+        analyze.analyze_only = true;
+        FrameGenExecuteResult result;
+        const QuadView full{{std::tan(-0.8f), std::tan(0.8f), std::tan(0.8f), std::tan(-0.8f)}, periphery_extent};
+        struct Case {
+            const char* name;
+            std::array<float, 4> focus_angles; // left, right, up, down (radians)
+            double transition, sharpness;
+        };
+        for (const Case& test : {Case{"off-centre", {-0.25f, 0.3f, 0.35f, -0.1f}, 25.0, 0.0},
+                                 Case{"off-centre sharpened", {-0.25f, 0.3f, 0.35f, -0.1f}, 25.0, 50.0},
+                                 Case{"clamped", {-0.95f, -0.2f, 0.9f, 0.3f}, 10.0, 50.0}}) {
+            const QuadView focus{{std::tan(test.focus_angles[0]), std::tan(test.focus_angles[1]),
+                                  std::tan(test.focus_angles[2]), std::tan(test.focus_angles[3])},
+                                 focus_extent};
+            const std::vector<FrameGenViewSubmission> views{submission(periphery_chain, 0, full, full, false),
+                                                            submission(focus_chain, 0, focus, focus, false)};
+            const bool analyzed = gpu->Execute(views, analyze, result, error);
+            Check(analyzed && result.frame != 0, harness.name + " analyze: " + error);
+            FrameGenComposition composition;
+            composition.output = output;
+            FrameGenComposeEye eye = BuildFrameGenComposeEye(QuadFov(full), QuadFov(focus), output, focus_extent,
+                                                             test.transition, test.sharpness);
+            eye.peripheral = 0;
+            eye.focus = 1;
+            composition.eyes = {eye};
+            const FrameGenImage image{output_chain, 0, 0, whole(output), output_format};
+            const bool composed_ok =
+                gpu->SynthesizeComposed(result.frame, FrameGenSynthesisMode::kInterpolate, 1.0f, composition, {image}, error);
+            Check(composed_ok, harness.name + " compose: " + error);
+            const Pixels composed = harness.readback_sized(g_swapchains[output_chain][0]);
+            const FrameGenConstants constants = BuildFrameGenComposeConstants(eye, output);
+            const Pixels reference = ComposeReference(periphery_linear, focus_linear, constants, output);
+            const Pixels shipped = d3d11.Compose(periphery_pixels, periphery_extent, focus_pixels, focus_extent, eye, output);
+            DumpSized(harness.name + "-compose-" + test.name, composed, output);
+            auto region = [&](int which) {
+                return [&, which](std::uint32_t x, std::uint32_t y) {
+                    const float alpha = ComposeAlpha(constants, (x + 0.5f) / output.width, (y + 0.5f) / output.height);
+                    return which == 0 ? alpha < 0.0f : which == 1 ? alpha >= 0.0f && alpha < 1.0f : alpha >= 1.0f;
+                };
+            };
+            auto all = [](std::uint32_t, std::uint32_t) { return true; };
+            const Difference to_reference = Compare(composed, reference, output, all);
+            const Difference to_shipped = Compare(composed, shipped, output, all);
+            const char* region_names[] = {"outside", "band", "inside"};
+            // A GPU's sRGB conversions and filter weights are only as exact as
+            // Direct3D requires (the shipped shader on it agrees to a step);
+            // sharpening at 50% doubles their differences from the reference.
+            const int tolerance = g_hardware && test.sharpness > 0.0 ? 4 : 2;
+            std::cout << harness.name << " compose " << test.name << ": reference mean " << to_reference.mean << " max "
+                      << to_reference.max << ", Direct3D 11 compositor mean " << to_shipped.mean << " max "
+                      << to_shipped.max << " (rect " << eye.focus_rect[0] << ' ' << eye.focus_rect[1] << ' '
+                      << eye.focus_rect[2] << ' ' << eye.focus_rect[3] << ";";
+            for (int which = 0; which < 3; ++which) {
+                const Difference part = Compare(composed, reference, output, region(which));
+                std::cout << ' ' << region_names[which] << ' ' << part.pixels << " px max " << part.max;
+                // Every region is there, and each composes as the reference does.
+                Check(part.pixels > 0 && part.max <= tolerance, harness.name + " compose " + test.name + ": the " +
+                                                                    region_names[which] + " differs from the reference");
+            }
+            std::cout << ")\n";
+            Check(to_reference.mean < 0.002 && to_reference.max <= tolerance,
+                  harness.name + " compose " + test.name + " differs from the CPU reference");
+            Check(to_shipped.max <= 1, harness.name + " compose " + test.name + " differs from the Direct3D 11 compositor");
+            // The inset is there: inside, the focus view shows, not the periphery.
+            const FrameGenConstants no_inset = [&] {
+                FrameGenConstants c = constants;
+                c.fov_current = {2.0f, 2.0f, 2.0f, 2.0f};
+                return c;
+            }();
+            const Pixels periphery_only = ComposeReference(periphery_linear, focus_linear, no_inset, output);
+            Check(Compare(composed, periphery_only, output, region(2)).mean > 0.05,
+                  harness.name + " compose " + test.name + ": the focus view is not inset");
+        }
+        gpu->ResetHistory();
+    }
+
+    // 2. Generated frames of quad views: four views of two sizes (the
+    // peripheral views 256 px over +-0.8 tangents, the focus views 320 px
+    // over 0.64, 3x denser), one analysis measuring all four, both eyes
+    // composed from each generated frame. A textured square moves over the
+    // scenery inside the inset, across its blend band.
+    const FrameGenExtent periphery_extent{256, 256}, focus_extent{320, 320}, output{384, 384};
+    const std::array<XrSwapchain, 4> sources{chain(0xd4), chain(0xd5), chain(0xd6), chain(0xd7)};
+    const std::array<XrSwapchain, 2> outputs{chain(0xd8), chain(0xd9)};
+    constexpr std::uint32_t kQuadImages = 4;
+    for (std::size_t i = 0; i < 4; ++i) {
+        const FrameGenExtent extent = i < 2 ? periphery_extent : focus_extent;
+        g_swapchains[sources[i]].clear();
+        for (std::uint32_t image = 0; image < kQuadImages; ++image) {
+            g_swapchains[sources[i]].push_back(harness.create(extent.width, extent.height));
+        }
+        Check(gpu->Track(sources[i], EnumerateImages, error), error);
+    }
+    for (const XrSwapchain out : outputs) {
+        g_swapchains[out] = {harness.create(output.width, output.height)};
+        Check(gpu->Track(out, EnumerateImages, error), error);
+    }
+    const std::vector<FrameGenImage> eye_images{{outputs[0], 0, 0, whole(output), output_format},
+                                                {outputs[1], 0, 0, whole(output), output_format}};
+    // The views of a frame: the peripheral views share the field of view,
+    // the right eye's inset sits a little up and to the right.
+    auto quad_views = [&](float focus_x, float focus_y) {
+        std::array<QuadView, 4> views{};
+        views[0] = views[1] = QuadView{{-0.8f, 0.8f, 0.8f, -0.8f}, periphery_extent};
+        views[2] = QuadView{{-0.3f + focus_x, 0.34f + focus_x, 0.3f + focus_y, -0.34f + focus_y}, focus_extent};
+        views[3] = QuadView{{-0.26f + focus_x, 0.38f + focus_x, 0.32f + focus_y, -0.32f + focus_y}, focus_extent};
+        return views;
+    };
+    // A real frame of four views: what the backend analyzed.
+    struct QuadFrame {
+        std::array<QuadView, 4> views;
+        std::array<Pixels, 4> pixels;
+        FrameGenComposition composition;
+        std::uint64_t id{0};
+        std::uint64_t submission{0};
+        std::chrono::steady_clock::time_point captured{}; // just before its captures
+    };
+    // Uploads frame `image`'s four views and has the backend capture them,
+    // then analyzes them as one real frame (with `merge`, its flow merged;
+    // the views in `restarted` without their previous frame).
+    auto analyze = [&](FrameGenGpu& backend, std::uint32_t image, const std::array<QuadView, 4>& views,
+                       const QuadFrame* previous, const QuadScene& scene, FrameGenTuning tuning, double transition,
+                       double sharpness, bool merge, std::uint32_t restarted = 0) {
+        QuadFrame frame;
+        frame.views = views;
+        frame.composition = QuadComposition(views, output, transition, sharpness);
+        backend.WaitIdle(); // the image may still be read by an earlier frame
+        std::vector<FrameGenViewSubmission> submissions;
+        for (std::size_t i = 0; i < 4; ++i) {
+            frame.pixels[i] = RenderQuad(views[i], scene);
+            harness.upload_sized(g_swapchains[sources[i]][image], views[i].extent.width, views[i].extent.height,
+                                 frame.pixels[i]);
+            submissions.push_back(submission(sources[i], image, views[i], previous ? previous->views[i] : views[i],
+                                             previous != nullptr && !(restarted & (1u << i))));
+        }
+        // At release, as the presenter captures them.
+        frame.captured = std::chrono::steady_clock::now();
+        for (std::size_t i = 0; i < 4; ++i) {
+            const bool captured = backend.Capture(i, submissions[i].source, submissions[i].request, tuning.quality, error);
+            Check(captured || error.empty(), harness.name + " quad capture: " + error);
+        }
+        tuning.analyze_only = true;
+        tuning.composition = merge ? &frame.composition : nullptr;
+        FrameGenExecuteResult result;
+        const bool analyzed = backend.Execute(submissions, tuning, result, error);
+        Check(analyzed, harness.name + " quad analyze: " + error);
+        Check(result.frame != 0, harness.name + " a quad views analysis names its real frame");
+        frame.id = result.frame;
+        frame.submission = result.submission;
+        return frame;
+    };
+    // Both eyes of a generated frame.
+    auto generate = [&](FrameGenGpu& backend, const QuadFrame& frame, FrameGenSynthesisMode mode, float fraction,
+                        const FrameGenComposition& composition) {
+        const bool composed = backend.SynthesizeComposed(frame.id, mode, fraction, composition, eye_images, error);
+        Check(composed, harness.name + " compose generated frame: " + error);
+        return std::array<Pixels, 2>{harness.readback_sized(g_swapchains[outputs[0]][0]),
+                                     harness.readback_sized(g_swapchains[outputs[1]][0])};
+    };
+    // Both eyes composed on the CPU from `scene` seen through `frame`'s views.
+    auto composed_truth = [&](const QuadFrame& frame, const FrameGenComposition& composition, const QuadScene& scene) {
+        std::array<Pixels, 2> eyes;
+        for (std::size_t eye = 0; eye < 2; ++eye) {
+            const QuadView& periphery = frame.views[eye];
+            const QuadView& focus = frame.views[eye + 2];
+            eyes[eye] = ComposeReference(LinearImage(RenderQuad(periphery, scene), periphery.extent),
+                                         LinearImage(RenderQuad(focus, scene), focus.extent),
+                                         BuildFrameGenComposeConstants(composition.eyes[eye], output), output);
+        }
+        return eyes;
+    };
+    // The square (0.3 tangents a side) at time t, moving 0.04 across and
+    // 0.02 down per frame (6 and 3 peripheral pixels, 20 and 10 focus).
+    auto moving = [&](float t) {
+        const float sx = -0.2f + 0.04f * t, sy = 0.18f - 0.02f * t;
+        return QuadScene([=](float tx, float ty) {
+            const float u = tx - sx, v = sy - ty;
+            if (u >= 0.0f && u < 0.3f && v >= 0.0f && v < 0.3f) {
+                const float n = QuadDetail(u, v, 40.0f);
+                return QuadColor{0.05f + 0.75f * n, 0.4f * (1.0f - n), 0.06f};
+            }
+            return Scenery(tx, ty);
+        });
+    };
+    // The square's whole path in output pixels (generated frames differ from
+    // the newest frame only there), with a margin.
+    auto path = [&](std::uint32_t x, std::uint32_t y) {
+        const float tx = -0.8f + 1.6f * (x + 0.5f) / output.width, ty = 0.8f - 1.6f * (y + 0.5f) / output.height;
+        return tx > -0.33f && tx < 0.37f && ty < 0.28f && ty > -0.24f;
+    };
+    auto eyes_error = [&](const std::array<Pixels, 2>& eyes, const std::array<Pixels, 2>& truth) {
+        return 0.5 * (Compare(eyes[0], truth[0], output, path).mean + Compare(eyes[1], truth[1], output, path).mean);
+    };
+    if (composes) {
+        const auto views = quad_views(0.0f, 0.0f);
+        // Interpolating (with cover flow for a late real frame), then
+        // extrapolating; on the GPU also with the optical flow hardware: an
+        // optical flow session per view, four of them.
+        for (const bool hardware : {false, true}) {
+            if (hardware && !g_hardware) continue;
+            for (const auto mode : {FrameGenSynthesisMode::kInterpolate, FrameGenSynthesisMode::kExtrapolate}) {
+                FrameGenTuning tuning;
+                tuning.mode = mode;
+                tuning.cover = mode == FrameGenSynthesisMode::kInterpolate;
+                tuning.hardware_flow = hardware;
+                gpu->ResetHistory();
+                const QuadFrame a = analyze(*gpu, 0, views, nullptr, moving(0.0f), tuning, 25.0, 0.0, true);
+                const QuadFrame b = analyze(*gpu, 1, views, &a, moving(1.0f), tuning, 25.0, 0.0, true);
+                const std::array<Pixels, 2> hold{
+                    ComposeReference(LinearImage(b.pixels[0], periphery_extent), LinearImage(b.pixels[2], focus_extent),
+                                     BuildFrameGenComposeConstants(b.composition.eyes[0], output), output),
+                    ComposeReference(LinearImage(b.pixels[1], periphery_extent), LinearImage(b.pixels[3], focus_extent),
+                                     BuildFrameGenComposeConstants(b.composition.eyes[1], output), output)};
+                const bool interpolate = mode == FrameGenSynthesisMode::kInterpolate;
+                // One analyzed frame serves all four views: both eyes from its id.
+                const auto generated = generate(*gpu, b, mode, 0.5f, b.composition);
+                const auto truth = composed_truth(b, b.composition, moving(interpolate ? 0.5f : 1.5f));
+                const double error_generated = eyes_error(generated, truth);
+                const double error_hold = eyes_error(hold, truth);
+                const std::string what = std::string(interpolate ? "interpolate" : "extrapolate") +
+                                         (hardware ? " (hardware flow: " + gpu->HardwareFlowStatus() + ")" : "");
+                std::cout << harness.name << " quad views " << what << ": error " << error_generated << " vs hold "
+                          << error_hold << '\n';
+                DumpSized(harness.name + "-quad-" + (interpolate ? "interpolated" : "extrapolated"), generated[0], output);
+                DumpSized(harness.name + "-quad-" + (interpolate ? "interpolated" : "extrapolated") + "-truth", truth[0],
+                          output);
+                DumpSized(harness.name + "-quad-hold", hold[0], output);
+                Check(error_generated < (interpolate ? 0.4 : 0.5) * error_hold,
+                      harness.name + " quad views " + what + " is not better than repeating the newest frame");
+                // The real frame's own refresh: its views as captured, composed.
+                const auto exact = generate(*gpu, b, mode, interpolate ? 1.0f : 0.0f, b.composition);
+                Check(Compare(exact[0], hold[0], output, path).max <= 2 && Compare(exact[1], hold[1], output, path).max <= 2,
+                      harness.name + " quad views: the real frame's refresh is not its views composed");
+                // Far off the axis nothing moves, and the periphery is shaded
+                // per pixel there (no coarse shading: the compose magnifies
+                // it): the real frame, up to the blend with the previous one
+                // (coarse shading on a GPU would quadruple the difference;
+                // extrapolating, a little measuring noise moves it on).
+                auto off_axis = [&](std::uint32_t x, std::uint32_t y) {
+                    const float tx = -0.8f + 1.6f * (x + 0.5f) / output.width, ty = 0.8f - 1.6f * (y + 0.5f) / output.height;
+                    return std::hypot(tx, ty) > 1.02f;
+                };
+                const double still = 0.5 * (Compare(generated[0], exact[0], output, off_axis).mean +
+                                            Compare(generated[1], exact[1], output, off_axis).mean);
+                std::cout << harness.name << " quad views: still periphery off the axis differs from the real frame by "
+                          << still << '\n';
+                Check(!interpolate || still < 0.0025, harness.name + " quad views: still periphery far off the axis changed");
+                if (interpolate) {
+                    // Cover: past the newest frame from the same analysis.
+                    const auto cover = generate(*gpu, b, FrameGenSynthesisMode::kExtrapolate, 0.5f, b.composition);
+                    const double cover_error = eyes_error(cover, composed_truth(b, b.composition, moving(1.5f)));
+                    const double cover_hold = eyes_error(hold, composed_truth(b, b.composition, moving(1.5f)));
+                    std::cout << harness.name << " quad views cover: error " << cover_error << " vs hold " << cover_hold
+                              << '\n';
+                    Check(cover_error < 0.5 * cover_hold, harness.name + " quad views cover frames do not move content");
+                }
+                if (!hardware && interpolate) {
+                    // Written by compute and copied instead of drawn: the same.
+                    gpu->SetDirectOutput(false);
+                    const auto copied = generate(*gpu, b, mode, 0.5f, b.composition);
+                    gpu->SetDirectOutput(true);
+                    const double difference = std::max(Compare(copied[0], generated[0], output, path).mean,
+                                                       Compare(copied[1], generated[1], output, path).mean);
+                    std::cout << harness.name << " quad views drawn vs copied: difference " << difference << '\n';
+                    Check(difference < 0.001, harness.name + " quad views written by compute differ from drawn ones");
+
+                    // A newer real frame with its inset elsewhere is pending:
+                    // frames generated from the older one keep its inset.
+                    const auto moved_views = quad_views(0.12f, -0.08f);
+                    const QuadFrame c = analyze(*gpu, 2, moved_views, &b, moving(2.0f), tuning, 25.0, 0.0, true);
+                    const auto kept = generate(*gpu, b, mode, 0.5f, b.composition);
+                    const double kept_error = eyes_error(kept, truth);
+                    // Composed at the newer frame's inset instead, it is wrong.
+                    const double newer_inset = eyes_error(generate(*gpu, b, mode, 0.5f, c.composition), truth);
+                    std::cout << harness.name << " quad views older frame with a newer one pending: error " << kept_error
+                              << " (" << newer_inset << " at the newer frame's inset)\n";
+                    Check(Compare(kept[0], generated[0], output, path).max <= 1 &&
+                              Compare(kept[1], generated[1], output, path).max <= 1 && kept_error < 0.5 * newer_inset,
+                          harness.name + " a generated frame does not keep its real frame's inset");
+                    const auto kept_exact = generate(*gpu, b, mode, 1.0f, b.composition);
+                    Check(Compare(kept_exact[0], hold[0], output, path).max <= 2,
+                          harness.name + " the older real frame's refresh is not its own views");
+                    // Two real frames on, its images are gone: refused.
+                    analyze(*gpu, 3, moved_views, &c, moving(3.0f), tuning, 25.0, 0.0, true);
+                    Check(!gpu->SynthesizeComposed(b.id, mode, 0.5f, b.composition, eye_images, error),
+                          harness.name + " a quad views frame whose images were replaced is composed from");
+                    // An eye naming a view the frame does not have is refused.
+                    FrameGenComposition wrong = c.composition;
+                    wrong.eyes[1].focus = 4;
+                    Check(!gpu->SynthesizeComposed(c.id, mode, 0.5f, wrong, eye_images, error),
+                          harness.name + " a composed eye naming a missing view was accepted");
+                }
+            }
+        }
+
+        // A focus view limits the motion its periphery would: at the lowest
+        // motion limit (2% of the view's width a frame) the periphery's 3%
+        // half-frame steps pass, and so do the focus view's 9% (2% of the
+        // periphery's width over the 40% the inset spans: 5%).
+        FrameGenTuning tuning;
+        tuning.mode = FrameGenSynthesisMode::kInterpolate;
+        tuning.motion_limit_percent = 2;
+        gpu->ResetHistory();
+        const QuadFrame a = analyze(*gpu, 0, views, nullptr, moving(0.0f), tuning, 25.0, 0.0, true);
+        const QuadFrame b = analyze(*gpu, 1, views, &a, moving(1.0f), tuning, 25.0, 0.0, true);
+        std::array<Pixels, 2> hold;
+        for (std::size_t eye = 0; eye < 2; ++eye) {
+            hold[eye] = ComposeReference(LinearImage(b.pixels[eye], periphery_extent),
+                                         LinearImage(b.pixels[eye + 2], focus_extent),
+                                         BuildFrameGenComposeConstants(b.composition.eyes[eye], output), output);
+        }
+        const auto truth = composed_truth(b, b.composition, moving(0.5f));
+        const double limited_error = eyes_error(generate(*gpu, b, tuning.mode, 0.5f, b.composition), truth);
+        const double limited_hold = eyes_error(hold, truth);
+        std::cout << harness.name << " quad views at a 2% motion limit: error " << limited_error << " vs hold "
+                  << limited_hold << '\n';
+        Check(limited_error < 0.4 * limited_hold, harness.name + " quad views: a focus view limits more motion than its periphery");
+
+        // An eye whose views disagree (its focus view starts over: nothing
+        // measured for it) shows its real frame in both, so the two line
+        // up; the other eye moves.
+        tuning.motion_limit_percent = 10;
+        gpu->ResetHistory();
+        const QuadFrame c = analyze(*gpu, 2, views, nullptr, moving(0.0f), tuning, 25.0, 0.0, true);
+        const QuadFrame d = analyze(*gpu, 3, views, &c, moving(1.0f), tuning, 25.0, 0.0, true, 1u << 2);
+        const auto disagreeing = generate(*gpu, d, tuning.mode, 0.5f, d.composition);
+        auto all = [](std::uint32_t, std::uint32_t) { return true; };
+        const Difference left = Compare(disagreeing[0], hold[0], output, all);
+        const double right_error = Compare(disagreeing[1], truth[1], output, path).mean;
+        const double right_hold = Compare(hold[1], truth[1], output, path).mean;
+        std::cout << harness.name << " quad views, an eye's views disagreeing: that eye differs from its real frame by "
+                  << left.max << " steps at most; the other eye's error " << right_error << " vs hold " << right_hold
+                  << '\n';
+        Check(left.max <= 2, harness.name + " quad views: an eye whose views disagree is not its real frame");
+        Check(right_error < 0.4 * right_hold, harness.name + " quad views: the other eye stopped moving");
+    }
+
+    // 3. The seam: where an eye blends its views (a quarter of the inset
+    // either side of its edge, sharpened), both views' generated frames must
+    // move content alike. A facade (windows 12 peripheral pixels apart, 37
+    // focus pixels) drifts 3 peripheral pixels a frame behind still bars (an
+    // occluder) crossing the band, and the inset moves between the real
+    // frames: the periphery's own matching aliases on the windows (as the
+    // canvas facade case does), the focus views' does not. With the flow merge
+    // the band is within 1.2x of the inset interior's error; without it (the
+    // negative control) the band is far worse and the views disagree more.
+    if (composes) {
+        constexpr float kScroll = 0.02f;  // tangents per frame
+        constexpr float kPeriod = 0.075f; // tangents between windows across, 1.33x that down
+        auto occluded = [&](float t) {
+            return QuadScene([=](float tx, float ty) {
+                if (std::abs(tx - 0.02f) < 0.06f || std::abs(ty + 0.01f) < 0.05f) {
+                    const float n = QuadDetail(tx, ty, 90.0f);
+                    return QuadColor{0.3f + 0.5f * n, 0.04f, 0.08f + 0.3f * n};
+                }
+                const float u = tx - kScroll * t;
+                const float column = u - kPeriod * std::floor(u / kPeriod);
+                const float row = ty - 1.33f * kPeriod * std::floor(ty / (1.33f * kPeriod));
+                const bool glass = column > 0.25f * kPeriod && column < 0.75f * kPeriod && row > 0.33f * kPeriod &&
+                                   row < kPeriod;
+                const float n = 0.1f * QuadDetail(u, ty, 5.0f);
+                return glass ? QuadColor{0.02f, 0.04f + 0.2f * n, 0.08f} : QuadColor{0.45f + n, 0.42f + n, 0.38f + n};
+            });
+        };
+        struct SeamMetrics {
+            double band{0.0}, interior{0.0}, band_hold{0.0}, double_edge{0.0};
+        };
+        auto seam = [&](bool merge, FrameGenSynthesisMode mode) {
+            FrameGenTuning tuning;
+            tuning.mode = mode;
+            tuning.cover = mode == FrameGenSynthesisMode::kInterpolate;
+            gpu->ResetHistory();
+            const QuadFrame a = analyze(*gpu, 0, quad_views(0.0f, 0.0f), nullptr, occluded(0.0f), tuning, 25.0, 50.0, merge);
+            const QuadFrame b = analyze(*gpu, 1, quad_views(0.03f, 0.02f), &a, occluded(1.0f), tuning, 25.0, 50.0, merge);
+            const bool interpolate = mode == FrameGenSynthesisMode::kInterpolate;
+            const auto generated = generate(*gpu, b, mode, 0.5f, b.composition);
+            const auto truth = composed_truth(b, b.composition, occluded(interpolate ? 0.5f : 1.5f));
+            // How far the two views' generated frames disagree in the band:
+            // the eye composed from the focus view alone inside the inset
+            // (no band) against the periphery alone.
+            FrameGenComposition focus_only = b.composition, periphery_only = b.composition;
+            for (std::size_t eye = 0; eye < 2; ++eye) {
+                focus_only.eyes[eye].feather = {0.0f, 0.0f};
+                focus_only.eyes[eye].sharpen = 0.0f;
+                periphery_only.eyes[eye].focus_rect = {2.0f, 2.0f, 2.0f, 2.0f};
+            }
+            const auto focus_alone = generate(*gpu, b, mode, 0.5f, focus_only);
+            const auto periphery_alone = generate(*gpu, b, mode, 0.5f, periphery_only);
+            SeamMetrics metrics;
+            for (std::size_t eye = 0; eye < 2; ++eye) {
+                const FrameGenConstants constants = BuildFrameGenComposeConstants(b.composition.eyes[eye], output);
+                auto band = [&](std::uint32_t x, std::uint32_t y) {
+                    const float alpha = ComposeAlpha(constants, (x + 0.5f) / output.width, (y + 0.5f) / output.height);
+                    return alpha > 0.0f && alpha < 1.0f;
+                };
+                auto interior = [&](std::uint32_t x, std::uint32_t y) {
+                    return ComposeAlpha(constants, (x + 0.5f) / output.width, (y + 0.5f) / output.height) >= 1.0f;
+                };
+                const Pixels hold = ComposeReference(LinearImage(b.pixels[eye], periphery_extent),
+                                                     LinearImage(b.pixels[eye + 2], focus_extent), constants, output);
+                metrics.band += 0.5 * Compare(generated[eye], truth[eye], output, band).mean;
+                metrics.interior += 0.5 * Compare(generated[eye], truth[eye], output, interior).mean;
+                metrics.band_hold += 0.5 * Compare(hold, truth[eye], output, band).mean;
+                metrics.double_edge += 0.5 * Compare(focus_alone[eye], periphery_alone[eye], output, band).mean;
+            }
+            DumpSized(harness.name + std::string("-seam-") + (merge ? "merged" : "unmerged"), generated[0], output);
+            return metrics;
+        };
+        for (const auto mode : {FrameGenSynthesisMode::kInterpolate, FrameGenSynthesisMode::kExtrapolate}) {
+            const SeamMetrics merged = seam(true, mode);
+            const SeamMetrics unmerged = seam(false, mode);
+            const std::string what = mode == FrameGenSynthesisMode::kInterpolate ? "interpolate" : "extrapolate";
+            std::cout << harness.name << " quad views seam, " << what << ": band error " << merged.band << " vs interior "
+                      << merged.interior << " (hold " << merged.band_hold << "), views disagree by " << merged.double_edge
+                      << "; without the flow merge: band " << unmerged.band << " vs interior " << unmerged.interior
+                      << ", views disagree by " << unmerged.double_edge << '\n';
+            Check(merged.band <= 1.2 * merged.interior,
+                  harness.name + " quad views seam (" + what + "): the blend band is worse than the inset");
+            Check(merged.band < 0.5 * merged.band_hold,
+                  harness.name + " quad views seam (" + what + "): the blend band is not better than holding");
+            Check(merged.band < 0.5 * unmerged.band && merged.double_edge < 0.5 * unmerged.double_edge,
+                  harness.name + " quad views seam (" + what + "): the flow merge does not line the views up");
+        }
+    }
+    gpu->Reset();
+
+    // 4. GPU-aware pacing: every capture moves the capture mark on, a wait
+    // for one returns once the game's queue has run it (and not before, with
+    // the queue held back), from any thread; each analysis' GPU times come
+    // back once, in order, after the capture it waited for.
+    {
+        const XrGraphicsBindingD3D12KHR* game = nullptr;
+        for (auto* base = static_cast<const XrBaseInStructure*>(harness.binding); base; base = base->next) {
+            if (base->type == XR_TYPE_GRAPHICS_BINDING_D3D12_KHR) game = reinterpret_cast<const XrGraphicsBindingD3D12KHR*>(base);
+        }
+        Check(game != nullptr, "capture marks need the game's Direct3D 12 binding");
+        auto backend = CreateFrameGenGpu(harness.binding, error);
+        Check(backend != nullptr, harness.name + " backend: " + error);
+        backend->SetCopyAfterRelease(true);
+        for (std::size_t i = 0; i < 4; ++i) Check(backend->Track(sources[i], EnumerateImages, error), error);
+        Check(backend->CaptureMark() == 0 && backend->CaptureReached(0), harness.name + " a capture mark before any capture");
+        FrameGenTuning tuning;
+        tuning.mode = FrameGenSynthesisMode::kInterpolate;
+        tuning.hardware_flow = g_hardware; // on the GPU: the stamps around the optical flow hardware
+        const auto views = quad_views(0.0f, 0.0f);
+        QuadFrame previous = analyze(*backend, 0, views, nullptr, moving(0.0f), tuning, 25.0, 0.0, true);
+        // That analysis copied the images itself (they were not captured):
+        // the game's queue reads them again only once it is done.
+        backend->WaitIdle();
+        const FrameGenViewSubmission view = submission(sources[0], 0, views[0], views[0], false);
+        std::uint64_t mark = backend->CaptureMark();
+        for (int i = 0; i < 3; ++i) {
+            const bool captured = backend->Capture(0, view.source, view.request, tuning.quality, error);
+            Check(captured, harness.name + " capture: " + error);
+            Check(backend->CaptureMark() > mark, harness.name + " a capture did not move the capture mark on");
+            mark = backend->CaptureMark();
+        }
+        Check(backend->WaitIdle() && backend->CaptureReached(mark) &&
+                  backend->WaitCapture(mark, std::chrono::milliseconds(100)),
+              harness.name + " a capture that has run is not reached");
+        // The game's queue held back: its capture is not reached, and a wait
+        // for it ends at its timeout.
+        ComPtr<ID3D12Fence> gate;
+        Check(SUCCEEDED(game->device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&gate))), "gate fence");
+        game->queue->Wait(gate.Get(), 1);
+        const bool held_captured = backend->Capture(0, view.source, view.request, tuning.quality, error);
+        Check(held_captured, harness.name + " capture: " + error);
+        const std::uint64_t held = backend->CaptureMark();
+        const auto start = std::chrono::steady_clock::now();
+        const bool early = backend->WaitCapture(held, std::chrono::milliseconds(60));
+        const double waited = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+        Check(!early && !backend->CaptureReached(held) && waited >= 55.0 && waited < 1000.0,
+              harness.name + " a wait for a capture held back did not time out (" + std::to_string(waited) + " ms)");
+        // Waited for on another thread, as the presenter's wait: released
+        // once the queue runs.
+        bool reached = false;
+        std::thread waiter([&] { reached = backend->WaitCapture(held, std::chrono::milliseconds(5000)); });
+        Sleep(20);
+        Check(SUCCEEDED(gate->Signal(1)), "gate signal");
+        waiter.join();
+        Check(reached && backend->CaptureReached(held), harness.name + " a capture that ran was not reached");
+        std::cout << harness.name << " capture marks: a held capture's wait timed out after " << waited << " ms\n";
+
+        // Analysis timings: four analyses, each after its views' captures.
+        backend->WaitIdle();
+        backend->TakeTimings();
+        std::vector<QuadFrame> frames;
+        for (std::uint32_t i = 1; i <= 4; ++i) {
+            frames.push_back(analyze(*backend, i % kQuadImages, views, &previous, moving(static_cast<float>(i)), tuning,
+                                     25.0, 0.0, true));
+            previous = frames.back();
+        }
+        Check(backend->WaitIdle(), harness.name + " idle");
+        const auto now = std::chrono::steady_clock::now();
+        const std::vector<FrameGenAnalysisTiming> timings = backend->TakeTimings();
+        Check(timings.size() == frames.size(), harness.name + " an analysis timing is missing (" +
+                                                   std::to_string(timings.size()) + " of " +
+                                                   std::to_string(frames.size()) + ")");
+        // Times from the game's queue and the analysis queue, each on its
+        // own calibration: allowed a tenth of a millisecond apart.
+        const auto slack = std::chrono::microseconds(100);
+        for (std::size_t i = 0; i < timings.size(); ++i) {
+            const FrameGenAnalysisTiming& timing = timings[i];
+            const auto ms = [](auto d) { return std::chrono::duration<double, std::milli>(d).count(); };
+            std::cout << harness.name << " analysis " << timing.submission << ": captured "
+                      << ms(timing.capture_end - frames[i].captured) << " ms after its captures were queued, ran "
+                      << ms(timing.start - timing.capture_end) << " ms later for " << ms(timing.end - timing.start)
+                      << " ms";
+            if (timing.hardware_start != std::chrono::steady_clock::time_point{}) {
+                std::cout << " (optical flow hardware " << ms(timing.hardware_end - timing.hardware_start) << " ms)";
+            }
+            std::cout << '\n';
+            Check(timing.submission == frames[i].submission, harness.name + " analysis timings out of order");
+            Check(timing.capture_end != std::chrono::steady_clock::time_point{} &&
+                      timing.capture_end + slack >= frames[i].captured && timing.capture_end <= timing.start + slack &&
+                      timing.start <= timing.end && timing.end <= now + slack,
+                  harness.name + " analysis timing stamps out of order");
+            if (timing.hardware_start != std::chrono::steady_clock::time_point{}) {
+                Check(timing.start <= timing.hardware_start && timing.hardware_start <= timing.hardware_end &&
+                          timing.hardware_end <= timing.end,
+                      harness.name + " optical flow hardware stamps out of order");
+            } else {
+                Check(!g_hardware || backend->HardwareFlowStatus() != "active",
+                      harness.name + " the optical flow hardware was not timed");
+            }
+        }
+        Check(backend->TakeTimings().empty(), harness.name + " analysis timings returned twice");
+        backend->Reset();
+    }
+    std::cout << harness.name << " quad views passed\n";
+    return 0;
+}
+
+// FG_PROFILE_LOAD_MS=N: how late captures and analyses finish while the
+// game's GPU is busy: N ms of "game" work (a second backend generating
+// frames on the game's queue, as `contention` does) held back by a fence
+// with each real frame's captures queued behind it, then released at once.
+// `real_frame` captures and analyzes one real frame on `backend` (its
+// captures queued) and returns its FrameGenExecuteResult::submission.
+void ProfileUnderLoad(Harness& harness, double load_ms, const std::function<std::uint64_t(FrameGenGpu&, int)>& real_frame) {
+    std::string error;
+    const XrGraphicsBindingD3D12KHR* game = nullptr;
+    for (auto* base = static_cast<const XrBaseInStructure*>(harness.binding); base; base = base->next) {
+        if (base->type == XR_TYPE_GRAPHICS_BINDING_D3D12_KHR) game = reinterpret_cast<const XrGraphicsBindingD3D12KHR*>(base);
+    }
+    Check(game != nullptr, "the load needs a Direct3D 12 binding");
+    _putenv_s("VECTORXR_FRAMEGEN_QUEUE", "game");
+    auto load = CreateFrameGenGpu(game, error);
+    _putenv_s("VECTORXR_FRAMEGEN_QUEUE", "");
+    Check(load != nullptr, "load backend: " + error);
+    load->SetCopyAfterRelease(true);
+    FrameGenTuning load_tuning;
+    load_tuning.mode = FrameGenSynthesisMode::kExtrapolate;
+    load_tuning.generated = 4;
+    load_tuning.fractions = {0.25f, 0.5f, 0.75f, 1.0f};
+    FrameGenExecuteResult load_result;
+    // Three Executes a frame (all the gate can hold back: a fourth waits for
+    // the first's slot), each a square view whose GPU time grows with its
+    // area: measured at one size, then sized for a third of the load.
+    FrameGenViewSubmission load_view;
+    auto size_load = [&](std::uint32_t size, std::uintptr_t first_chain) {
+        const XrSwapchain source = reinterpret_cast<XrSwapchain>(first_chain);
+        g_swapchains[source] = {harness.create(size, size)};
+        harness.upload_sized(g_swapchains[source][0], size, size, CockpitAt(size, size, 0.0f, -1.5f, 1.5f, 1.5f, 0.0f));
+        Check(load->Track(source, EnumerateImages, error), error);
+        const XrRect2Di rect{{0, 0}, {static_cast<int>(size), static_cast<int>(size)}};
+        load_view = {};
+        load_view.source = {source, 0, 0, rect, harness.format};
+        for (std::uintptr_t i = 1; i <= 4; ++i) {
+            const XrSwapchain output = reinterpret_cast<XrSwapchain>(first_chain + i);
+            g_swapchains[output] = {harness.create(size, size)};
+            Check(load->Track(output, EnumerateImages, error), error);
+            load_view.outputs.push_back({output, 0, 0, rect, DXGI_FORMAT_R8G8B8A8_UNORM_SRGB});
+        }
+        load_view.request.extent = {size, size};
+        load_view.request.synthesize = true;
+        load_view.request.temporal = true;
+        std::vector<double> times;
+        for (int i = 0; i < 12; ++i) {
+            const bool loaded = load->Execute({load_view}, load_tuning, load_result, error);
+            Check(loaded, "load execute: " + error);
+            load->WaitIdle();
+            if (i >= 6 && load->LastGpuMilliseconds() > 0.0) times.push_back(load->LastGpuMilliseconds());
+        }
+        Check(!times.empty(), "the load's GPU time");
+        std::sort(times.begin(), times.end());
+        return times[times.size() / 2];
+    };
+    std::uint32_t size = 2048;
+    double per_execute = size_load(size, 0xe0);
+    for (const std::uintptr_t chain : {0xe8u, 0xf0u}) {
+        // Fixed costs do not grow with the area: sized twice.
+        size = std::clamp<std::uint32_t>(
+            static_cast<std::uint32_t>(size * std::sqrt(load_ms / 3.0 / per_execute)) / 64u * 64u, 256u, 8192u);
+        per_execute = size_load(size, chain);
+    }
+
+    auto backend = CreateFrameGenGpu(harness.binding, error);
+    Check(backend != nullptr, "backend: " + error);
+    backend->SetCopyAfterRelease(true);
+    ComPtr<ID3D12Fence> gate;
+    Check(SUCCEEDED(game->device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&gate))), "load gate");
+    UINT64 gate_value = 0;
+    std::map<std::uint64_t, std::chrono::steady_clock::time_point> released;
+    std::vector<double> capture_done, measure_done;
+    for (int frame = 0; frame < 48; ++frame) {
+        // The first frames set the views up (which waits for the GPU): unloaded.
+        const bool loaded = frame >= 2;
+        if (loaded) {
+            game->queue->Wait(gate.Get(), ++gate_value);
+            for (int i = 0; i < 3; ++i) {
+                const bool queued = load->Execute({load_view}, load_tuning, load_result, error);
+                Check(queued, "load execute: " + error);
+            }
+        }
+        const std::uint64_t submission = real_frame(*backend, frame);
+        released[submission] = std::chrono::steady_clock::now();
+        if (loaded) {
+            Check(SUCCEEDED(gate->Signal(gate_value)), "load gate signal");
+        }
+        // A frame's time: the load, then the analysis, done before the next.
+        Sleep(static_cast<DWORD>(std::max(11.0, load_ms * 1.5) + 4.0));
+        for (const FrameGenAnalysisTiming& timing : backend->TakeTimings()) {
+            const auto found = released.find(timing.submission);
+            if (frame < 12 || found == released.end() || timing.capture_end == std::chrono::steady_clock::time_point{}) {
+                continue;
+            }
+            capture_done.push_back(std::chrono::duration<double, std::milli>(timing.capture_end - found->second).count());
+            measure_done.push_back(std::chrono::duration<double, std::milli>(timing.end - found->second).count());
+        }
+    }
+    auto median = [](std::vector<double> values) {
+        std::sort(values.begin(), values.end());
+        return values.empty() ? -1.0 : values[values.size() / 2];
+    };
+    std::printf("\nCaptures queued behind %.1f ms of the game's GPU work (3 x %.2f ms at %ux%u): captures done %.2f ms "
+                "after the game's queue ran (median), motion measured %.2f ms after (%zu frames)\n",
+                3.0 * per_execute, per_execute, size, size, median(capture_done), median(measure_done),
+                capture_done.size());
+    load->WaitIdle();
+    backend->Reset();
+    load->Reset();
+}
+
+// The cockpit (CockpitAt) through a view of any field of view, rendered on
+// every CPU thread.
+Pixels CockpitView(const QuadView& view, float head_x, float scroll) {
+    Pixels pixels(std::size_t{view.extent.width} * view.extent.height);
+    const auto& t = view.tangents;
+    auto rows = [&](std::uint32_t first, std::uint32_t step) {
+        for (std::uint32_t y = first; y < view.extent.height; y += step) {
+            const float ty = t[2] - (t[2] - t[3]) * (y + 0.5f) / view.extent.height;
+            for (std::uint32_t x = 0; x < view.extent.width; ++x) {
+                const float tx = t[0] + (t[1] - t[0]) * (x + 0.5f) / view.extent.width;
+                const float px = head_x + kPanelDistance * tx;
+                const float py = kPanelDistance * ty;
+                pixels[std::size_t{y} * view.extent.width + x] = std::abs(px) < kPanelHalf && std::abs(py) < kPanelHalf
+                                                                     ? Patch(px * 4000.0f + 100.0f, py * 4000.0f + 100.0f)
+                                                                     : Background((tx + scroll) * 2400.0f, ty * 2400.0f);
+            }
+        }
+    };
+    const std::uint32_t threads = std::max(1u, std::thread::hardware_concurrency());
+    std::vector<std::thread> workers;
+    for (std::uint32_t t_index = 0; t_index < threads; ++t_index) {
+        workers.emplace_back(rows, t_index, threads);
+    }
+    for (auto& worker : workers) {
+        worker.join();
+    }
+    return pixels;
+}
+
+// FG_PROFILE_QUAD=1: DCS's quad views on a Pimax Crystal Super, just in
+// time: two peripheral views of 2184x2200 and two focus views of 2748x2764
+// composed into two eyes of 6864x6908 (no depth: DCS sends none). Per real
+// frame its analysis (four views, the flow merge) and the compose of its own
+// refresh; per generated frame the four views' frames and the compose.
+int RunQuadProfile(Harness& harness, const char* const* names, std::size_t name_count) {
+    std::string error;
+    auto gpu = CreateFrameGenGpu(harness.binding, error);
+    Check(gpu != nullptr, harness.name + " backend: " + error);
+    gpu->SetCopyAfterRelease(true); // the tests' images are their own
+    Check(gpu->SupportsComposition(), harness.name + " composes quad views (just in time)");
+    gpu->SetProfiling(true);
+    const std::int64_t output_format = gpu->OutputFormats(FrameGenOutputKind::kSrgb8).front();
+    const FrameGenExtent periphery_extent{2184, 2200}, focus_extent{2748, 2764}, output{6864, 6908};
+    const float outer = 2.0f, inner = 1.26f, vertical = 1.64f, half_ipd = 0.0336f;
+    std::array<QuadView, 4> views{};
+    views[0] = {{-outer, inner, vertical, -vertical}, periphery_extent};
+    views[1] = {{-inner, outer, vertical, -vertical}, periphery_extent};
+    views[2] = {{-0.55f, 0.5f, 0.52f, -0.48f}, focus_extent};
+    views[3] = {{-0.5f, 0.55f, 0.52f, -0.48f}, focus_extent};
+    FrameGenComposition composition = QuadComposition(views, output, 25.0, 50.0);
+    constexpr int kFrames = 6;
+    constexpr float kScroll = 0.004f;
+    std::printf("Profiling quad views: 2x %ux%u + 2x %ux%u composed into 2x %ux%u, just in time; rendering test frames...\n",
+                periphery_extent.width, periphery_extent.height, focus_extent.width, focus_extent.height, output.width,
+                output.height);
+    std::array<XrSwapchain, 4> sources{};
+    for (std::size_t i = 0; i < 4; ++i) {
+        sources[i] = reinterpret_cast<XrSwapchain>(0x61 + i);
+        g_swapchains[sources[i]].clear();
+        for (int frame = 0; frame < kFrames; ++frame) {
+            void* image = harness.create(views[i].extent.width, views[i].extent.height);
+            harness.upload_sized(image, views[i].extent.width, views[i].extent.height,
+                                 CockpitView(views[i], i % 2 == 0 ? -half_ipd : half_ipd, kScroll * frame));
+            g_swapchains[sources[i]].push_back(image);
+        }
+        Check(gpu->Track(sources[i], EnumerateImages, error), error);
+    }
+    const std::array<XrSwapchain, 2> eyes{reinterpret_cast<XrSwapchain>(0x70), reinterpret_cast<XrSwapchain>(0x71)};
+    std::vector<FrameGenImage> eye_images;
+    for (const XrSwapchain eye : eyes) {
+        g_swapchains[eye] = {harness.create(output.width, output.height)};
+        Check(gpu->Track(eye, EnumerateImages, error), error);
+        eye_images.push_back({eye, 0, 0, {{0, 0}, {static_cast<int>(output.width), static_cast<int>(output.height)}},
+                              output_format});
+    }
+    const bool interpolate = std::getenv("FG_PROFILE_MODE") && std::string(std::getenv("FG_PROFILE_MODE")) == "interpolate";
+    auto submissions = [&](std::uint32_t frame, bool synthesize) {
+        std::vector<FrameGenViewSubmission> result;
+        for (std::size_t i = 0; i < 4; ++i) {
+            FrameGenViewSubmission view;
+            const XrRect2Di rect{{0, 0}, {static_cast<int>(views[i].extent.width), static_cast<int>(views[i].extent.height)}};
+            view.source = {sources[i], frame, 0, rect, harness.format};
+            view.request.extent = views[i].extent;
+            view.request.output = FrameGenOutputKind::kSrgb8;
+            view.request.synthesize = synthesize;
+            view.request.temporal = true;
+            view.request.newest = view.request.previous = QuadGeometry(views[i]);
+            for (auto* geometry : {&view.request.newest, &view.request.previous}) {
+                geometry->position = {i % 2 == 0 ? -half_ipd : half_ipd, 0.0f, 0.0f};
+            }
+            result.push_back(view);
+        }
+        return result;
+    };
+    // Captures, then the analysis, as the presenter runs a real frame.
+    auto real_frame = [&](FrameGenGpu& backend, int i, const FrameGenTuning& tuning, FrameGenExecuteResult& result) {
+        const auto views_now = submissions(static_cast<std::uint32_t>(i % kFrames), i > 0);
+        for (std::size_t v = 0; v < 4; ++v) {
+            const bool captured = backend.Capture(v, views_now[v].source, views_now[v].request, tuning.quality, error);
+            Check(captured || error.empty(), "capture: " + error);
+        }
+        Sleep(2); // released a little before the frame ends
+        FrameGenTuning analyze = tuning;
+        analyze.analyze_only = true;
+        analyze.cover = interpolate;
+        analyze.composition = &composition;
+        const bool analyzed = backend.Execute(views_now, analyze, result, error);
+        Check(analyzed, "quad profile analyze: " + error);
+    };
+    for (const int config : {0, 1, 2}) {
+        FrameGenTuning tuning;
+        tuning.quality = config == 1 ? FrameGenFlowQuality::kQuality : FrameGenFlowQuality::kBalanced;
+        tuning.hardware_flow = config == 2;
+        tuning.mode = interpolate ? FrameGenSynthesisMode::kInterpolate : FrameGenSynthesisMode::kExtrapolate;
+        gpu->ResetHistory();
+        std::vector<double> analysis_sums, exact_sums, generated_sums;
+        double analysis_total = 0.0, exact_total = 0.0, generated_total = 0.0;
+        int analyses = 0, exacts = 0, generated = 0;
+        auto add = [](std::vector<double>& sums, double& total, const std::vector<double>& times) {
+            sums.resize(std::max(sums.size(), times.size()));
+            for (std::size_t p = 0; p < times.size(); ++p) {
+                sums[p] += times[p];
+                total += times[p];
+            }
+        };
+        for (int i = 0; i < 48; ++i) {
+            FrameGenExecuteResult result;
+            real_frame(*gpu, i, tuning, result);
+            const std::vector<double> analysis = gpu->PassMilliseconds();
+            // The real frame's own refresh (composed from its views as
+            // captured), then the frames until the next real one.
+            const bool composed =
+                gpu->SynthesizeComposed(result.frame, tuning.mode, interpolate ? 1.0f : 0.0f, composition, eye_images, error);
+            Check(composed, "quad profile compose: " + error);
+            const std::vector<double> exact = gpu->PassMilliseconds();
+            std::vector<std::vector<double>> frames;
+            for (std::size_t k = 0; k < 3; ++k) {
+                const float fraction = interpolate ? (k + 1) / 3.0f : 0.25f * static_cast<float>(k + 1);
+                const bool written = gpu->SynthesizeComposed(result.frame, tuning.mode, fraction, composition, eye_images, error);
+                Check(written, "quad profile synthesize: " + error);
+                frames.push_back(gpu->PassMilliseconds());
+            }
+            if (i >= 24) {
+                add(analysis_sums, analysis_total, analysis);
+                ++analyses;
+                add(exact_sums, exact_total, exact);
+                ++exacts;
+                for (const auto& times : frames) {
+                    add(generated_sums, generated_total, times);
+                    ++generated;
+                }
+            }
+        }
+        auto print = [&](const std::vector<double>& sums, int samples) {
+            for (std::size_t p = 0; p < sums.size() && p < name_count; ++p) {
+                if (sums[p] > 0.0) std::printf("    %-14s %6.3f ms\n", names[p], sums[p] / samples);
+            }
+        };
+        std::printf("\n%s flow, 4 views: %.2f ms GPU per real frame (analysis %.2f, compose of its own refresh %.2f)\n",
+                    config == 2 ? ("Hardware (" + gpu->HardwareFlowStatus() + ")").c_str()
+                    : config == 1 ? "Quality" : "Balanced",
+                    (analysis_total + exact_total) / std::max(analyses, 1), analysis_total / std::max(analyses, 1),
+                    exact_total / std::max(exacts, 1));
+        print(analysis_sums, analyses);
+        std::printf("  own refresh:\n");
+        print(exact_sums, exacts);
+        std::printf("  per generated frame: %.3f ms\n", generated_total / std::max(generated, 1));
+        print(generated_sums, generated);
+        std::printf("  working memory %.0f MB\n", static_cast<double>(gpu->WorkingMemoryBytes()) / (1024.0 * 1024.0));
+    }
+    gpu->Reset();
+    if (const char* load = std::getenv("FG_PROFILE_LOAD_MS")) {
+        FrameGenTuning tuning;
+        tuning.mode = interpolate ? FrameGenSynthesisMode::kInterpolate : FrameGenSynthesisMode::kExtrapolate;
+        tuning.hardware_flow = std::getenv("FG_PROFILE_HARDWARE") && std::string(std::getenv("FG_PROFILE_HARDWARE")) == "1";
+        ProfileUnderLoad(harness, std::atof(load), [&](FrameGenGpu& backend, int i) {
+            if (i == 0) {
+                for (const XrSwapchain source : sources) Check(backend.Track(source, EnumerateImages, error), error);
+                for (const XrSwapchain eye : eyes) Check(backend.Track(eye, EnumerateImages, error), error);
+            }
+            FrameGenExecuteResult result;
+            real_frame(backend, i, tuning, result);
+            return result.submission;
+        });
+    }
+    return 0;
+}
+
 int RunProfile(Harness& harness) {
+    if (std::getenv("FG_PROFILE_QUAD") && std::string(std::getenv("FG_PROFILE_QUAD")) == "1") {
+        return RunQuadProfile(harness, kProfileNames, std::size(kProfileNames));
+    }
     std::string error;
     auto gpu = CreateFrameGenGpu(harness.binding, error);
     if (gpu) gpu->SetCopyAfterRelease(true); // the tests' images are their own
@@ -1163,13 +2431,47 @@ int RunProfile(Harness& harness) {
     FrameGenDepthEncoding encoding;
     encoding.near_z = 1000.0f;
     encoding.far_z = 0.1f;
-    const char* names[] = {"luma",        "downsample",  "search",      "refine",      "filter",
-                           "synthesize",  "synthesize16", "depth",      "depth check", "depth trust",
-                           "flow pack",   "flow unpack", "trust update", "shift clear", "shift splat",
-                           "shift resolve", "shift fill", "raw pack",   "trust resolve", "shading rate", "world reduce", "world solve", "trust vote", "depth scale", "scale vote",
-                           "source copy", "output copy",
-                           "hardware wait"};
-    static_assert(std::size(names) == kFrameGenPassCount + 3, "a name per profiled category");
+    const char* const* names = kProfileNames;
+    // A real frame's two views, captured at release as the presenter does:
+    // color, then depth.
+    auto capture_frame = [&](FrameGenGpu& backend, std::uint32_t frame, FrameGenFlowQuality quality) {
+        std::vector<FrameGenViewSubmission> views;
+        for (std::size_t eye = 0; eye < 2; ++eye) {
+            const float head = eye == 0 ? -half_ipd : half_ipd;
+            FrameGenViewSubmission view;
+            const XrRect2Di rect{{0, 0}, {static_cast<int>(width), static_cast<int>(height)}};
+            view.source = {sources[eye], frame, 0, rect, harness.format};
+            for (const XrSwapchain output : outputs[eye]) {
+                view.outputs.push_back({output, 0, 0, rect, output_format});
+            }
+            view.request.extent = {width, height};
+            view.request.output = FrameGenOutputKind::kSrgb8;
+            view.request.synthesize = true;
+            view.request.temporal = true;
+            view.request.depth = true;
+            // The head moving 2 cm per real frame (a fast turn; FG_PROFILE_EYE_MM
+            // sets it): generated frames follow the eye.
+            const char* eye_mm = std::getenv("FG_PROFILE_EYE_MM");
+            view.request.shift = {eye_mm ? static_cast<float>(std::atof(eye_mm)) / 1000.0f : 0.02f, 0.0f, 0.0f};
+            for (auto* geometry : {&view.request.newest, &view.request.previous}) {
+                geometry->angle_left = std::atan(eye == 0 ? -outer : -inner);
+                geometry->angle_right = std::atan(eye == 0 ? inner : outer);
+                geometry->angle_up = std::atan(vertical);
+                geometry->angle_down = -std::atan(vertical);
+                geometry->position = {head, 0, 0};
+            }
+            views.push_back(view);
+        }
+        for (std::size_t eye = 0; eye < 2; ++eye) {
+            const bool captured = backend.Capture(eye, views[eye].source, views[eye].request, quality, error);
+            Check(captured || error.empty(), "capture: " + error);
+            const XrRect2Di depth_rect{{0, 0}, {static_cast<int>(depth_width), static_cast<int>(depth_height)}};
+            const bool depth_captured =
+                backend.CaptureDepth(eye, {depths[eye], 0, 0, depth_rect, 0}, encoding, views[eye].request, error);
+            Check(depth_captured || error.empty(), "depth capture: " + error);
+        }
+        return views;
+    };
     for (const int config : {0, 1, 2}) {
         const auto quality = config == 1 ? FrameGenFlowQuality::kQuality : FrameGenFlowQuality::kBalanced;
         FrameGenTuning tuning;
@@ -1194,42 +2496,7 @@ int RunProfile(Harness& harness) {
         bool depth_used = false;
         for (int i = 0; i < 48; ++i) {
             const std::uint32_t frame = static_cast<std::uint32_t>(i % kFrames);
-            std::vector<FrameGenViewSubmission> views;
-            for (std::size_t eye = 0; eye < 2; ++eye) {
-                const float head = eye == 0 ? -half_ipd : half_ipd;
-                FrameGenViewSubmission view;
-                const XrRect2Di rect{{0, 0}, {static_cast<int>(width), static_cast<int>(height)}};
-                view.source = {sources[eye], frame, 0, rect, harness.format};
-                for (const XrSwapchain output : outputs[eye]) {
-                    view.outputs.push_back({output, 0, 0, rect, output_format});
-                }
-                view.request.extent = {width, height};
-                view.request.output = FrameGenOutputKind::kSrgb8;
-                view.request.synthesize = true;
-                view.request.temporal = true;
-                view.request.depth = true;
-                // The head moving 2 cm per real frame (a fast turn; FG_PROFILE_EYE_MM
-                // sets it): generated frames follow the eye.
-                const char* eye_mm = std::getenv("FG_PROFILE_EYE_MM");
-                view.request.shift = {eye_mm ? static_cast<float>(std::atof(eye_mm)) / 1000.0f : 0.02f, 0.0f, 0.0f};
-                for (auto* geometry : {&view.request.newest, &view.request.previous}) {
-                    geometry->angle_left = std::atan(eye == 0 ? -outer : -inner);
-                    geometry->angle_right = std::atan(eye == 0 ? inner : outer);
-                    geometry->angle_up = std::atan(vertical);
-                    geometry->angle_down = -std::atan(vertical);
-                    geometry->position = {head, 0, 0};
-                }
-                views.push_back(view);
-            }
-            // At release, as the presenter does: color, then depth.
-            for (std::size_t eye = 0; eye < 2; ++eye) {
-                Check(gpu->Capture(eye, views[eye].source, views[eye].request, quality, error) || error.empty(),
-                      "capture: " + error);
-                const XrRect2Di depth_rect{{0, 0}, {static_cast<int>(depth_width), static_cast<int>(depth_height)}};
-                Check(gpu->CaptureDepth(eye, {depths[eye], 0, 0, depth_rect, 0}, encoding, views[eye].request, error) ||
-                          error.empty(),
-                      "depth capture: " + error);
-            }
+            const std::vector<FrameGenViewSubmission> views = capture_frame(*gpu, frame, quality);
             // Games release their images a few milliseconds before the frame
             // ends and generation starts (FG_PROFILE_GAP_MS, default 6).
             const char* gap = std::getenv("FG_PROFILE_GAP_MS");
@@ -1282,7 +2549,7 @@ int RunProfile(Harness& harness) {
                     config == 2 ? ("Hardware (" + gpu->HardwareFlowStatus() + ")").c_str()
                     : quality == FrameGenFlowQuality::kQuality ? "Quality" : "Balanced",
                     samples ? total / samples : -1.0, depth_used ? "used" : "not used", ToString(depth.reading));
-        for (std::size_t p = 0; p < sums.size() && p < std::size(names); ++p) {
+        for (std::size_t p = 0; p < sums.size() && p < std::size(kProfileNames); ++p) {
             if (sums[p] > 0.0) {
                 std::printf("  %-14s %6.3f ms\n", names[p], sums[p] / samples);
             }
@@ -1290,7 +2557,7 @@ int RunProfile(Harness& harness) {
         if (synthesis_samples) {
             std::printf("  just in time, per frame written: %.3f ms (%.2f ms for the three per real frame)\n",
                         synthesis_total / synthesis_samples, 3.0 * synthesis_total / synthesis_samples);
-            for (std::size_t p = 0; p < synthesis_sums.size() && p < std::size(names); ++p) {
+            for (std::size_t p = 0; p < synthesis_sums.size() && p < std::size(kProfileNames); ++p) {
                 if (synthesis_sums[p] > 0.0) {
                     std::printf("    %-14s %6.3f ms\n", names[p], synthesis_sums[p] / synthesis_samples);
                 }
@@ -1299,6 +2566,31 @@ int RunProfile(Harness& harness) {
         std::printf("  working memory %.0f MB\n", static_cast<double>(gpu->WorkingMemoryBytes()) / (1024.0 * 1024.0));
     }
     gpu->Reset();
+    if (const char* load = std::getenv("FG_PROFILE_LOAD_MS")) {
+        // Each real frame measured just in time, behind the game's work.
+        FrameGenTuning tuning;
+        tuning.mode = interpolate ? FrameGenSynthesisMode::kInterpolate : FrameGenSynthesisMode::kExtrapolate;
+        tuning.hardware_flow = std::getenv("FG_PROFILE_HARDWARE") && std::string(std::getenv("FG_PROFILE_HARDWARE")) == "1";
+        tuning.analyze_only = true;
+        tuning.cover = interpolate;
+        ProfileUnderLoad(harness, std::atof(load), [&](FrameGenGpu& backend, int i) {
+            if (i == 0) {
+                for (std::size_t eye = 0; eye < 2; ++eye) {
+                    Check(backend.Track(sources[eye], EnumerateImages, error) && backend.Track(depths[eye], EnumerateImages, error),
+                          error);
+                    for (const XrSwapchain output : outputs[eye]) {
+                        Check(backend.Track(output, EnumerateImages, error), error);
+                    }
+                }
+            }
+            const std::vector<FrameGenViewSubmission> views =
+                capture_frame(backend, static_cast<std::uint32_t>(i % kFrames), tuning.quality);
+            FrameGenExecuteResult result;
+            const bool analyzed = backend.Execute(views, tuning, result, error);
+            Check(analyzed, "profile execute: " + error);
+            return result.submission;
+        });
+    }
     return 0;
 }
 
@@ -3011,11 +4303,14 @@ int D3D12Test() {
     if (!g_replay && !g_contention && !g_profile && !g_bench) {
         SubstitutionTest(device.Get(), queue.Get());
     }
-    const int result = g_replay      ? RunReplay(harness)
-                       : g_contention ? RunContention(harness)
-                       : g_profile   ? RunProfile(harness)
-                       : g_bench   ? RunBench(harness)
-                                   : RunScenarios(harness);
+    int result = g_replay      ? RunReplay(harness)
+                 : g_contention ? RunContention(harness)
+                 : g_profile   ? RunProfile(harness)
+                 : g_bench   ? RunBench(harness)
+                             : RunScenarios(harness);
+    if (result == 0 && !g_replay && !g_contention && !g_profile && !g_bench) {
+        result = RunQuadViews(harness);
+    }
     CloseHandle(event);
     if (!debug_mode.empty()) {
         ComPtr<ID3D12InfoQueue> info;

@@ -666,11 +666,43 @@ class OpenXrLayer {
                                         int64_t output_format);
     bool EnsureD3D11SwapchainShaderResources(SwapchainInfo& swapchain, uint32_t array_slice = 0);
     void TryPrewarmD3D11QuadViewsCompositor();
+    // An emulated quad views frame (views 0/1 peripheral, 2/3 focus) as it is
+    // composed into stereo, worked out on the CPU alone: what the Direct3D 11
+    // compositor draws from, and what Frame Generation composes from.
+    struct QuadViewsComposePlan {
+        uint32_t width{0}; // each eye's composed image
+        uint32_t height{0};
+        double density{1.0};
+        int64_t format{0}; // the focus swapchain's (the composed images')
+        bool has_cached_fovs{false};
+        XrTime matched_time{0};
+        QuadViewsGazeDiagnostic gaze{};
+        std::array<XrFovf, 4> fovs{}; // located at the display time, else as submitted
+        // As submitted, posed times the Pivot reverse delta, fov = fovs[i].
+        std::array<XrCompositionLayerProjectionView, 4> source_views{};
+        // The composed eyes: source views 0/1 with their depth geometry
+        // restored; subImage unset.
+        std::array<XrCompositionLayerProjectionView, 2> eye_views{};
+        uint32_t restored{0}; // eye views whose depth geometry was restored
+        FrameGenComposition composition; // per eye: views eye and eye + 2
+        bool log_diagnostic{false};      // the frame logs the compositor's Debug diagnostics
+    };
+    // The plan for `source_layer` at `display_time`; false when its views
+    // cannot be composed. Logs the focus rectangles on diagnostic frames.
+    bool BuildQuadViewsComposePlan(const XrCompositionLayerProjection* source_layer,
+                                   XrTime display_time,
+                                   const XrPosef& reverse_delta,
+                                   bool has_non_identity_delta,
+                                   const DepthSubmissionGeometry* depth_geometry,
+                                   QuadViewsComposePlan* plan);
+    // The four views' swapchains, when each has a released (or acquired)
+    // image of its own to compose from.
+    bool FindQuadViewsSourceSwapchains(const XrCompositionLayerProjection* source_layer,
+                                       std::array<SwapchainInfo*, 4>* swapchains);
+    static uint32_t QuadViewsSourceImageIndex(const SwapchainInfo& swapchain);
     bool ComposeQuadViewsD3D11(const XrCompositionLayerProjection* source_layer,
                                XrTime display_time,
-                               const XrPosef& reverse_delta,
-                               bool has_non_identity_delta,
-                               const DepthSubmissionGeometry* depth_geometry,
+                               const QuadViewsComposePlan& plan,
                                uint32_t* restored_view_count,
                                bool allow_osd_composite,
                                XrCompositionLayerProjection* composed_layer,
@@ -770,6 +802,15 @@ class OpenXrLayer {
     bool d3d11_bridge_depth_logged_{false};   // mutex_
     bool d3d11_bridge_sharpen_logged_{false}; // mutex_
     std::chrono::steady_clock::time_point d3d11_bridge_last_summary_; // mutex_
+    // Quad views frames of a bridged session (mutex_): composed by the
+    // Direct3D 11 compositor, or split into projection layers when composing
+    // failed. The session's, and as of the last summary.
+    struct D3D11BridgeQuadFrames {
+        std::uint64_t d3d11{0};
+        std::uint64_t split{0};
+    };
+    D3D11BridgeQuadFrames d3d11_bridge_quad_frames_;
+    D3D11BridgeQuadFrames d3d11_bridge_quad_frames_summarized_;
     FrameGenQueueSubstitution::Calls FrameGenQueueCalls() const {
         return {next_acquire_swapchain_image_, next_wait_swapchain_image_, next_release_swapchain_image_};
     }

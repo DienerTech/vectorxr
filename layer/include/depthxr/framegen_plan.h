@@ -227,6 +227,43 @@ inline FrameGenExtent FrameGenTrustTiles(FrameGenExtent half) {
             (half.height + kFrameGenTrustTile - 1) / kFrameGenTrustTile};
 }
 
+// Quad views: each eye's image is composed from a peripheral view and a
+// focus view inset where its field of view lands, as the layer's quad views
+// compositor composes them.
+struct FrameGenFov {
+    float left{0.0f}; // radians, XrFovf order
+    float right{0.0f};
+    float up{0.0f};
+    float down{0.0f};
+};
+
+struct FrameGenComposeEye {
+    std::uint32_t peripheral{0};                  // analyzed view indices
+    std::uint32_t focus{0};
+    std::array<float, 4> focus_rect{};            // left, top, right, bottom in output uv
+    std::array<float, 2> feather{};               // the blend band in output uv
+    float sharpen{0.0f};                          // 0-1
+    std::array<float, 2> focus_texel{};           // 1 / the focus view's extent
+    std::array<float, 2> output_pixel_in_focus{}; // one output pixel in focus uv
+};
+
+struct FrameGenComposition {
+    FrameGenExtent output;                // each eye's composed image
+    std::vector<FrameGenComposeEye> eyes; // one per output image, in output order
+};
+
+// Exactly the Direct3D 11 compositor's focus rectangle (bit for bit:
+// computed in double, rounded to float where it rounds) from the full and
+// focus fields of view, the composed image's and the focus view's extents.
+// The view indices are left 0 for the caller.
+FrameGenComposeEye BuildFrameGenComposeEye(const FrameGenFov& full, const FrameGenFov& focus, FrameGenExtent output,
+                                           FrameGenExtent focus_extent, double transition_percent,
+                                           double sharpness_percent);
+// The compose draw's constants: fov_current = focus_rect; fov_previous =
+// {feather, sharpen, 0}; rot0 = {focus_texel, output_pixel_in_focus};
+// size = {output.width, output.height, 0, 0}; options = 0.
+FrameGenConstants BuildFrameGenComposeConstants(const FrameGenComposeEye& eye, FrameGenExtent output);
+
 // Pose data for one projection view: unit quaternion (x, y, z, w), position
 // in meters and the four FOV angles in radians, as submitted in
 // XrCompositionLayerProjectionView.
@@ -315,6 +352,10 @@ struct FrameGenTuning {
     // Research: where interpolated motion is not trusted, fade between the
     // two real frames instead of showing the newest one.
     bool cross_fade{false};
+    // Quad views: how each eye is composed from its views, for the flow
+    // merge and the focus views' motion limit; null on the canvas path. Not
+    // owned: the caller keeps it alive for the Execute call.
+    const FrameGenComposition* composition{nullptr};
 };
 
 struct FrameGenViewPlan {

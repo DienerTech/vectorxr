@@ -22,10 +22,12 @@
 
 #include "depthxr/config_path.h"
 #include "depthxr/effects.h"
+#include "depthxr/framegen_plan.h"
 #include "depthxr/input_devices.h"
 #include "depthxr/process_info.h"
 #include "depthxr/pivot_step.h"
 #include "depthxr/pivot_view.h"
+#include "depthxr/quadviews_compose.h"
 #include "depthxr/quadviews_sizing.h"
 #include "depthxr/runtime_compatibility.h"
 #include "depthxr/runtime_pacing.h"
@@ -694,51 +696,27 @@ struct FocusRectConstants {
     float reference_markers[4];
 };
 
-FocusRectConstants BuildFocusRectConstants(const XrFovf& full_fov,
-                                           const XrFovf& focus_fov,
-                                           uint32_t width,
-                                           uint32_t height,
-                                           uint32_t focus_width,
-                                           uint32_t focus_height,
-                                           double transition_thickness_percent,
-                                           double foveate_sharpness) {
-    const double full_left = std::tan(full_fov.angleLeft);
-    const double full_right = std::tan(full_fov.angleRight);
-    const double full_down = std::tan(full_fov.angleDown);
-    const double full_up = std::tan(full_fov.angleUp);
-    const double focus_left = std::tan(focus_fov.angleLeft);
-    const double focus_right = std::tan(focus_fov.angleRight);
-    const double focus_down = std::tan(focus_fov.angleDown);
-    const double focus_up = std::tan(focus_fov.angleUp);
-    const double full_width = std::max(0.0001, full_right - full_left);
-    const double full_height = std::max(0.0001, full_up - full_down);
+FrameGenFov ToFrameGenFov(const XrFovf& fov) {
+    return {fov.angleLeft, fov.angleRight, fov.angleUp, fov.angleDown};
+}
 
+// The compositor's constants for one eye of a quad views compose plan
+// (BuildFrameGenComposeEye: one builder for this compositor and Frame
+// Generation's quad views compose).
+FocusRectConstants FocusRectConstantsFor(const FrameGenComposeEye& eye) {
     FocusRectConstants constants{};
-    constants.focus_rect[0] = static_cast<float>(Clamp((focus_left - full_left) / full_width, 0.0, 1.0));
-    constants.focus_rect[2] = static_cast<float>(Clamp((focus_right - full_left) / full_width, 0.0, 1.0));
-    constants.focus_rect[1] = static_cast<float>(Clamp((full_up - focus_up) / full_height, 0.0, 1.0));
-    constants.focus_rect[3] = static_cast<float>(Clamp((full_up - focus_down) / full_height, 0.0, 1.0));
-
-    const double focus_rect_width =
-        std::max(0.0001, static_cast<double>(constants.focus_rect[2]) - constants.focus_rect[0]);
-    const double focus_rect_height =
-        std::max(0.0001, static_cast<double>(constants.focus_rect[3]) - constants.focus_rect[1]);
-    const double transition_fraction = Clamp(transition_thickness_percent, 0.0, 100.0) / 100.0;
+    std::copy(eye.focus_rect.begin(), eye.focus_rect.end(), constants.focus_rect);
     // Feathering is measured in output pixels, while sharpening samples the focus texture.
-    constants.blend_params[0] = static_cast<float>(std::max(1.0 / std::max<uint32_t>(1, width),
-                                                           focus_rect_width * transition_fraction));
-    constants.blend_params[1] = static_cast<float>(std::max(1.0 / std::max<uint32_t>(1, height),
-                                                           focus_rect_height * transition_fraction));
-    constants.blend_params[2] = static_cast<float>(Clamp(foveate_sharpness, 0.0, 100.0) / 100.0);
+    constants.blend_params[0] = eye.feather[0];
+    constants.blend_params[1] = eye.feather[1];
+    constants.blend_params[2] = eye.sharpen;
     constants.blend_params[3] = 0.0f;
-    constants.focus_texel[0] = 1.0f / static_cast<float>(std::max<uint32_t>(1, focus_width));
-    constants.focus_texel[1] = 1.0f / static_cast<float>(std::max<uint32_t>(1, focus_height));
+    constants.focus_texel[0] = eye.focus_texel[0];
+    constants.focus_texel[1] = eye.focus_texel[1];
     // One output pixel expressed in focus-UV, so inline sharpening samples at output-pixel
     // spacing (frequencies that survive the focus->output resample) instead of focus-texel scale.
-    constants.focus_texel[2] =
-        static_cast<float>((1.0 / std::max<uint32_t>(1, width)) / focus_rect_width);
-    constants.focus_texel[3] =
-        static_cast<float>((1.0 / std::max<uint32_t>(1, height)) / focus_rect_height);
+    constants.focus_texel[2] = eye.output_pixel_in_focus[0];
+    constants.focus_texel[3] = eye.output_pixel_in_focus[1];
     constants.peripheral_src_rect[0] = 0.0f;
     constants.peripheral_src_rect[1] = 0.0f;
     constants.peripheral_src_rect[2] = 1.0f;
@@ -765,166 +743,6 @@ std::array<float, 2> ProjectViewAnglesToUv(const XrFovf& full_fov,
     };
 }
 
-const char* D3D11QuadViewsShaderSource() {
-    return R"(
-cbuffer QuadViewsConstants : register(b0) {
-    float4 focusRect;
-    float4 blendParams;
-    float4 focusTexel;
-    float4 peripheralSrcRect;
-    float4 focusSrcRect;
-    float4 diagnosticParams;
-    float4 outputTexel;
-    float4 gazeMarkers;
-    float4 referenceMarkers;
-};
-
-Texture2D peripheralTexture : register(t0);
-Texture2D focusTexture : register(t1);
-SamplerState linearSampler : register(s0);
-
-struct VSOut {
-    float4 position : SV_Position;
-    float2 uv : TEXCOORD0;
-};
-
-VSOut VSMain(uint vertexId : SV_VertexID) {
-    float2 positions[3] = {
-        float2(-1.0, -1.0),
-        float2(-1.0,  3.0),
-        float2( 3.0, -1.0)
-    };
-    float2 uvs[3] = {
-        float2(0.0, 1.0),
-        float2(0.0, -1.0),
-        float2(2.0, 1.0)
-    };
-
-    VSOut output;
-    output.position = float4(positions[vertexId], 0.0, 1.0);
-    output.uv = uvs[vertexId];
-    return output;
-}
-
-float RectOutlineMask(float2 uv, float2 rectMin, float2 rectMax, float thicknessPixels) {
-    float2 pixelSize = max(outputTexel.xy, float2(0.000001, 0.000001));
-    float2 center = (rectMin + rectMax) * 0.5;
-    float2 halfSizePixels = max((rectMax - rectMin) * 0.5 / pixelSize, float2(0.0, 0.0));
-    float2 pointPixels = (uv - center) / pixelSize;
-    float2 q = abs(pointPixels) - halfSizePixels;
-    float signedDistance = length(max(q, 0.0)) + min(max(q.x, q.y), 0.0);
-    return 1.0 - smoothstep(thicknessPixels, thicknessPixels + 1.0, abs(signedDistance));
-}
-
-float CrossMask(float2 uv, float2 center, float lengthPixels, float thicknessPixels) {
-    float2 deltaPixels = abs((uv - center) / max(outputTexel.xy, float2(0.000001, 0.000001)));
-    float horizontal = (1.0 - smoothstep(thicknessPixels, thicknessPixels + 1.0, deltaPixels.y)) *
-                       (1.0 - smoothstep(lengthPixels, lengthPixels + 1.0, deltaPixels.x));
-    float vertical = (1.0 - smoothstep(thicknessPixels, thicknessPixels + 1.0, deltaPixels.x)) *
-                     (1.0 - smoothstep(lengthPixels, lengthPixels + 1.0, deltaPixels.y));
-    return max(horizontal, vertical);
-}
-
-float RingMask(float2 uv, float2 center, float radiusPixels, float thicknessPixels) {
-    float2 deltaPixels = (uv - center) / max(outputTexel.xy, float2(0.000001, 0.000001));
-    float ringDistance = abs(length(deltaPixels) - radiusPixels);
-    return 1.0 - smoothstep(thicknessPixels, thicknessPixels + 1.0, ringDistance);
-}
-
-float SegmentMask(float2 uv, float2 start, float2 end, float thicknessPixels) {
-    float2 pixelSize = max(outputTexel.xy, float2(0.000001, 0.000001));
-    float2 offsetPixels = (uv - start) / pixelSize;
-    float2 segment = (end - start) / pixelSize;
-    float segmentLengthSquared = max(dot(segment, segment), 0.0001);
-    float along = saturate(dot(offsetPixels, segment) / segmentLengthSquared);
-    float distancePixels = length(offsetPixels - segment * along);
-    return 1.0 - smoothstep(thicknessPixels, thicknessPixels + 1.0, distancePixels);
-}
-
-
-float4 PSMain(VSOut input) : SV_Target {
-    float2 uv = saturate(input.uv);
-    float2 peripheralUv = peripheralSrcRect.xy + uv * peripheralSrcRect.zw;
-    float4 peripheral = peripheralTexture.Sample(linearSampler, peripheralUv);
-
-    float2 inside = step(focusRect.xy, uv) * step(uv, focusRect.zw);
-    float inRect = inside.x * inside.y;
-    float edgeAlpha = 0.0;
-    float4 composed = peripheral;
-
-    if (inRect >= 0.5) {
-        float2 distToEdge = min(uv - focusRect.xy, focusRect.zw - uv);
-        edgeAlpha = saturate(min(distToEdge.x / max(blendParams.x, 0.0001),
-                                 distToEdge.y / max(blendParams.y, 0.0001)));
-        edgeAlpha = edgeAlpha * edgeAlpha * (3.0 - 2.0 * edgeAlpha);
-
-        float2 focusUv = saturate((uv - focusRect.xy) / max(focusRect.zw - focusRect.xy, float2(0.0001, 0.0001)));
-        float2 focusSampleUv = focusSrcRect.xy + focusUv * focusSrcRect.zw;
-        float2 focusSampleMin = focusSrcRect.xy;
-        float2 focusSampleMax = focusSrcRect.xy + focusSrcRect.zw;
-        float4 focus = focusTexture.Sample(linearSampler, focusSampleUv);
-        // Sharpening follows the same smooth transition as the focus image. This prevents
-        // maximum local contrast from appearing at the first pixels of the feather.
-        float sharpenAmount = saturate(blendParams.z) * edgeAlpha;
-        if (sharpenAmount > 0.001) {
-            // Sample neighbors at output-pixel spacing (focusTexel.zw is one output pixel expressed
-            // in focus-UV), not focus-texel spacing. The focus texture is minified into the focus
-            // rect, so a focus-texel-scale unsharp mask synthesizes detail that the resample averages
-            // away; output-space offsets target the frequencies the user actually sees.
-            float2 off = focusTexel.zw * focusSrcRect.zw;
-            float3 n = focusTexture.Sample(linearSampler, clamp(focusSampleUv + float2(0.0, -off.y), focusSampleMin, focusSampleMax)).rgb;
-            float3 s = focusTexture.Sample(linearSampler, clamp(focusSampleUv + float2(0.0,  off.y), focusSampleMin, focusSampleMax)).rgb;
-            float3 e = focusTexture.Sample(linearSampler, clamp(focusSampleUv + float2( off.x, 0.0), focusSampleMin, focusSampleMax)).rgb;
-            float3 w = focusTexture.Sample(linearSampler, clamp(focusSampleUv + float2(-off.x, 0.0), focusSampleMin, focusSampleMax)).rgb;
-            float3 avg = (n + s + e + w) * 0.25;
-            float3 lo = min(focus.rgb, min(min(n, s), min(e, w)));
-            float3 hi = max(focus.rgb, max(max(n, s), max(e, w)));
-            float3 localRange = max(hi - lo, float3(1.0 / 255.0, 1.0 / 255.0, 1.0 / 255.0));
-            float3 detail = (focus.rgb - avg) * (sharpenAmount * 2.0);
-            detail = clamp(detail, -localRange * 0.5, localRange * 0.5);
-            focus.rgb = saturate(focus.rgb + detail);
-        }
-        composed = lerp(peripheral, focus, edgeAlpha);
-    }
-
-    if (diagnosticParams.x < 0.5) {
-        return composed;
-    }
-
-    float transition = inRect * (1.0 - step(0.999, edgeAlpha));
-    float3 zoneColor = inRect < 0.5 ? float3(0.08, 0.28, 0.95) :
-                       (transition > 0.5 ? float3(1.0, 0.55, 0.04) : float3(0.08, 0.85, 0.28));
-    float zoneStrength = inRect < 0.5 ? 0.13 : (transition > 0.5 ? 0.20 : 0.055);
-    composed.rgb = lerp(composed.rgb, zoneColor, zoneStrength);
-
-    float trackingUnavailable = diagnosticParams.y * (1.0 - diagnosticParams.z);
-    float3 focusOutlineColor = lerp(float3(0.15, 1.0, 0.3), float3(1.0, 0.08, 0.05), trackingUnavailable);
-    float focusOutline = RectOutlineMask(uv, focusRect.xy, focusRect.zw, 2.0);
-    composed.rgb = lerp(composed.rgb, focusOutlineColor, focusOutline);
-
-    float2 innerMin = min(focusRect.xy + blendParams.xy, focusRect.zw);
-    float2 innerMax = max(focusRect.zw - blendParams.xy, focusRect.xy);
-    float innerOutline = RectOutlineMask(uv, innerMin, innerMax, 1.25) *
-                         step(outputTexel.x * 2.0, blendParams.x) * step(outputTexel.y * 2.0, blendParams.y);
-    composed.rgb = lerp(composed.rgb, float3(1.0, 0.65, 0.05), innerOutline * 0.9);
-
-    float2 offsetCorner = float2(referenceMarkers.z, referenceMarkers.y);
-    float offsetAxes = max(SegmentMask(uv, referenceMarkers.xy, offsetCorner, 1.0),
-                           SegmentMask(uv, offsetCorner, referenceMarkers.zw, 1.0));
-    float headMarker = CrossMask(uv, referenceMarkers.xy, 14.0, 1.5);
-    float offsetMarker = RingMask(uv, referenceMarkers.zw, 12.0, 1.5);
-    float rawGazeMarker = RingMask(uv, gazeMarkers.xy, 7.0, 1.75) * diagnosticParams.z;
-    float smoothedGazeMarker = CrossMask(uv, gazeMarkers.zw, 8.0, 1.5) * diagnosticParams.z;
-    composed.rgb = lerp(composed.rgb, float3(1.0, 0.1, 0.85), offsetAxes * 0.8);
-    composed.rgb = lerp(composed.rgb, float3(1.0, 1.0, 1.0), headMarker);
-    composed.rgb = lerp(composed.rgb, float3(1.0, 0.1, 0.85), offsetMarker);
-    composed.rgb = lerp(composed.rgb, float3(0.0, 0.95, 1.0), rawGazeMarker);
-    composed.rgb = lerp(composed.rgb, float3(1.0, 0.95, 0.05), smoothedGazeMarker);
-    return composed;
-}
-)";
-}
-
 // Constants for the standalone focus sharpen pass (Varjo compatible quadviews).
 struct FocusSharpenConstants {
     float params[4];   // x = sharpen amount [0,1], y/z = neighbor sample offset in UV, w = unused
@@ -935,7 +753,7 @@ struct FocusSharpenConstants {
 // compositor path there is no minification into a smaller output rect here — the focus
 // view is forwarded to the runtime near display-native — so a 1-texel unsharp lands at
 // the runtime's panel-resample Nyquist and gets averaged away (the same reason the
-// compositor path samples at output-pixel spacing; see D3D11QuadViewsShaderSource). A
+// compositor path samples at output-pixel spacing; see QuadViewsD3D11ShaderSource). A
 // few-texel radius targets the frequencies that survive the resample, reproducing the
 // visible-but-gentle sharpen of the compositor path while the CAS clamp still prevents
 // halos. Tunable; 3.0 matches the effective radius of the compositor path in testing.
@@ -2426,6 +2244,8 @@ XrResult OpenXrLayer::CreateSession(XrInstance instance,
     d3d11_bridge_lost_logged_ = false;
     d3d11_bridge_depth_logged_ = false;
     d3d11_bridge_last_summary_ = std::chrono::steady_clock::now();
+    d3d11_bridge_quad_frames_ = {};
+    d3d11_bridge_quad_frames_summarized_ = {};
     d3d11_bridge_sharpen_logged_ = false;
     const auto* d3d11_binding = create_info
                                     ? static_cast<const XrGraphicsBindingD3D11KHR*>(
@@ -3899,7 +3719,7 @@ bool OpenXrLayer::EnsureD3D11QuadViewsCompositor(const XrCompositionLayerProject
     }
 
     if (!d3d11_quadviews_compositor_.initialized) {
-        const char* source = D3D11QuadViewsShaderSource();
+        const char* source = QuadViewsD3D11ShaderSource();
         ID3DBlob* vertex_blob = nullptr;
         ID3DBlob* pixel_blob = nullptr;
         ID3DBlob* errors = nullptr;
@@ -4385,38 +4205,40 @@ void OpenXrLayer::TryPrewarmD3D11QuadViewsCompositor() {
     }
 }
 
-bool OpenXrLayer::ComposeQuadViewsD3D11(const XrCompositionLayerProjection* source_layer,
-                                        XrTime display_time,
-                                        const XrPosef& reverse_delta,
-                                        bool has_non_identity_delta,
-                                        const DepthSubmissionGeometry* depth_geometry,
-                                        uint32_t* restored_view_count,
-                                        bool allow_osd_composite,
-                                        XrCompositionLayerProjection* composed_layer,
-                                        std::vector<XrCompositionLayerProjectionView>* composed_views) {
-    const auto compose_start = std::chrono::steady_clock::now();
-    if (!source_layer || source_layer->viewCount < 4 || !source_layer->views || !composed_layer || !composed_views ||
-        !d3d11_quadviews_compositor_.device || !d3d11_quadviews_compositor_.context) {
-        return false;
-    }
-
+uint32_t OpenXrLayer::QuadViewsSourceImageIndex(const SwapchainInfo& swapchain) {
     // Sample the image the app last RELEASED (this frame's content); under
     // turbo pipelining last_acquired may already point at the next frame.
-    const auto source_image_index = [](const SwapchainInfo& info) {
-        return info.has_last_released_image_index ? info.last_released_image_index
-                                                  : info.last_acquired_image_index;
-    };
+    return swapchain.has_last_released_image_index ? swapchain.last_released_image_index
+                                                   : swapchain.last_acquired_image_index;
+}
 
-    std::array<SwapchainInfo*, 4> swapchains{};
+bool OpenXrLayer::FindQuadViewsSourceSwapchains(const XrCompositionLayerProjection* source_layer,
+                                                std::array<SwapchainInfo*, 4>* swapchains) {
+    if (!source_layer || source_layer->viewCount < 4 || !source_layer->views || !swapchains) {
+        return false;
+    }
     for (uint32_t i = 0; i < 4; ++i) {
         const auto it = tracked_swapchains_.find(source_layer->views[i].subImage.swapchain);
         if (it == tracked_swapchains_.end() || it->second.d3d11_images.empty() ||
             !(it->second.has_last_acquired_image_index || it->second.has_last_released_image_index) ||
-            source_image_index(it->second) >= it->second.d3d11_images.size() ||
+            QuadViewsSourceImageIndex(it->second) >= it->second.d3d11_images.size() ||
             source_layer->views[i].subImage.imageArrayIndex >= std::max<uint32_t>(1, it->second.array_size)) {
             return false;
         }
-        swapchains[i] = &it->second;
+        (*swapchains)[i] = &it->second;
+    }
+    return true;
+}
+
+bool OpenXrLayer::BuildQuadViewsComposePlan(const XrCompositionLayerProjection* source_layer,
+                                            XrTime display_time,
+                                            const XrPosef& reverse_delta,
+                                            bool has_non_identity_delta,
+                                            const DepthSubmissionGeometry* depth_geometry,
+                                            QuadViewsComposePlan* plan) {
+    std::array<SwapchainInfo*, 4> swapchains{};
+    if (!plan || !FindQuadViewsSourceSwapchains(source_layer, &swapchains)) {
+        return false;
     }
 
     const double peripheral_scale = resolved_settings_.quadviews.peripheral_scale;
@@ -4450,39 +4272,140 @@ bool OpenXrLayer::ComposeQuadViewsD3D11(const XrCompositionLayerProjection* sour
         cached_quadviews_stereo_max_width_,
         cached_quadviews_stereo_max_height_,
         resolved_settings_.quadviews.focus_scale);
-    const double canvas_density = canvas_dimensions.density;
-    const uint32_t output_width = canvas_dimensions.width;
-    const uint32_t output_height = canvas_dimensions.height;
-    const int64_t output_format = swapchains[2]->format;
+    plan->width = canvas_dimensions.width;
+    plan->height = canvas_dimensions.height;
+    plan->density = canvas_dimensions.density;
+    plan->format = swapchains[2]->format;
+
+    QuadViewsFrameState cached_frame{};
+    plan->matched_time = 0;
+    plan->has_cached_fovs = FindQuadViewsFrame(display_time, &cached_frame, &plan->matched_time);
+    plan->gaze = {};
+    if (plan->has_cached_fovs) {
+        plan->gaze = cached_frame.gaze;
+    } else if (quadviews_raw_focus_valid_ && quadviews_raw_focus_time_ == display_time) {
+        // A missing FOV cache is unusual, but retain an exact-time fallback for
+        // startup frames instead of pairing the submission with a newer locate.
+        plan->gaze.valid = true;
+        plan->gaze.raw_yaw_radians = quadviews_raw_focus_yaw_radians_;
+        plan->gaze.raw_pitch_radians = quadviews_raw_focus_pitch_radians_;
+        plan->gaze.smoothed_yaw_radians = quadviews_smoothed_focus_yaw_radians_;
+        plan->gaze.smoothed_pitch_radians = quadviews_smoothed_focus_pitch_radians_;
+    }
+
+    for (uint32_t view = 0; view < 4; ++view) {
+        plan->fovs[view] = plan->has_cached_fovs ? cached_frame.fovs[view] : source_layer->views[view].fov;
+        XrCompositionLayerProjectionView& source = plan->source_views[view];
+        source = source_layer->views[view];
+        if (has_non_identity_delta) {
+            source.pose = MultiplyPoses(source.pose, reverse_delta);
+        }
+        source.fov = plan->fovs[view];
+    }
+    for (uint32_t eye = 0; eye < 2; ++eye) {
+        plan->eye_views[eye] = plan->source_views[eye];
+        plan->eye_views[eye].subImage = {};
+    }
+    // Use the final submitted eye geometry, including Pivot/depth restoration,
+    // so the diagnostic panel occupies the same rays as the independent quad.
+    plan->restored = depth_geometry ? RestoreDepthSubmissionGeometry(
+        std::span<XrCompositionLayerProjectionView>(plan->eye_views), 0, *depth_geometry,
+        reverse_delta, has_non_identity_delta) : 0;
+
+    // A diagnostic frame logs the focus rectangles below, and the compositor
+    // its GPU timing and frame. Pending diagnostics count down per planned
+    // frame, whoever composes it.
+    plan->log_diagnostic = pending_quadviews_compositor_diagnostics_ > 0 ||
+                           ShouldLogQuadViewsDebugHeartbeat(last_quadviews_compositor_debug_heartbeat_);
+    if (plan->log_diagnostic && pending_quadviews_compositor_diagnostics_ > 0) {
+        --pending_quadviews_compositor_diagnostics_;
+    }
+
+    plan->composition.output = FrameGenExtent{plan->width, plan->height};
+    plan->composition.eyes.resize(2);
+    for (uint32_t eye = 0; eye < 2; ++eye) {
+        const XrSwapchainSubImage& focus_sub_image = source_layer->views[eye + 2].subImage;
+        const uint32_t focus_content_width =
+            static_cast<uint32_t>(std::max<int32_t>(1, focus_sub_image.imageRect.extent.width));
+        const uint32_t focus_content_height =
+            static_cast<uint32_t>(std::max<int32_t>(1, focus_sub_image.imageRect.extent.height));
+        FrameGenComposeEye& composed = plan->composition.eyes[eye];
+        composed = BuildFrameGenComposeEye(ToFrameGenFov(plan->fovs[eye]),
+                                           ToFrameGenFov(plan->fovs[eye + 2]),
+                                           plan->composition.output,
+                                           FrameGenExtent{focus_content_width, focus_content_height},
+                                           resolved_settings_.quadviews.transition_thickness_percent,
+                                           resolved_settings_.quadviews.foveate_sharpness);
+        composed.peripheral = eye;
+        composed.focus = eye + 2;
+        if (!plan->log_diagnostic) {
+            continue;
+        }
+        // Effective focus sampling ratio: focus texture pixels vs. the output pixels its
+        // sub-rectangle occupies. ~1.0 = ideal 1:1; >1.0 = focus is being downsampled
+        // (blur, the pre-fix behaviour); <1.0 = focus canvas is larger than needed.
+        const double focus_rect_output_width =
+            std::max(1.0, static_cast<double>(composed.focus_rect[2] - composed.focus_rect[0]) * plan->width);
+        const double focus_rect_output_height =
+            std::max(1.0, static_cast<double>(composed.focus_rect[3] - composed.focus_rect[1]) * plan->height);
+        const double focus_sampling_ratio_x = focus_content_width / focus_rect_output_width;
+        const double focus_sampling_ratio_y = focus_content_height / focus_rect_output_height;
+        std::ostringstream stream;
+        stream << "D3D11 quadviews compositor focus rect: frameTime=" << display_time
+               << ", eye=" << eye
+               << ", cachedFovHit=" << plan->has_cached_fovs
+               << ", matchedTime=" << plan->matched_time
+               << ", matchedDeltaNs=" << (plan->matched_time - display_time)
+               << ", rect=(" << FormatDiagnosticDouble(composed.focus_rect[0]) << ", "
+               << FormatDiagnosticDouble(composed.focus_rect[1]) << ", "
+               << FormatDiagnosticDouble(composed.focus_rect[2]) << ", "
+               << FormatDiagnosticDouble(composed.focus_rect[3]) << ")"
+               << ", focusTex=" << focus_content_width << "x" << focus_content_height
+               << ", focusRectOutputPx=" << FormatDiagnosticDouble(focus_rect_output_width) << "x"
+               << FormatDiagnosticDouble(focus_rect_output_height)
+               << ", focusSamplingRatio=(" << FormatDiagnosticDouble(focus_sampling_ratio_x) << ", "
+               << FormatDiagnosticDouble(focus_sampling_ratio_y) << ")"
+               << ", feather=(" << FormatDiagnosticDouble(composed.feather[0]) << ", "
+               << FormatDiagnosticDouble(composed.feather[1]) << ")"
+               << ", sharpness=" << FormatDiagnosticDouble(composed.sharpen)
+               << ", sharpenBackend=inlineAdaptive"
+               << ", outputTexel=(" << FormatDiagnosticDouble(composed.output_pixel_in_focus[0]) << ", "
+               << FormatDiagnosticDouble(composed.output_pixel_in_focus[1]) << ")"
+               << ", focusTexel=(" << FormatDiagnosticDouble(composed.focus_texel[0]) << ", "
+               << FormatDiagnosticDouble(composed.focus_texel[1]) << ")"
+               << ", fullFov=" << FormatFov(plan->fovs[eye])
+               << ", focusFov=" << FormatFov(plan->fovs[eye + 2])
+               << ", sourceFullFov=" << FormatFov(source_layer->views[eye].fov)
+               << ", sourceFocusFov=" << FormatFov(source_layer->views[eye + 2].fov);
+        logger_.Debug(stream.str());
+    }
+    return true;
+}
+
+bool OpenXrLayer::ComposeQuadViewsD3D11(const XrCompositionLayerProjection* source_layer,
+                                        XrTime display_time,
+                                        const QuadViewsComposePlan& plan,
+                                        uint32_t* restored_view_count,
+                                        bool allow_osd_composite,
+                                        XrCompositionLayerProjection* composed_layer,
+                                        std::vector<XrCompositionLayerProjectionView>* composed_views) {
+    const auto compose_start = std::chrono::steady_clock::now();
+    std::array<SwapchainInfo*, 4> swapchains{};
+    if (!composed_layer || !composed_views || !d3d11_quadviews_compositor_.device ||
+        !d3d11_quadviews_compositor_.context || !FindQuadViewsSourceSwapchains(source_layer, &swapchains)) {
+        return false;
+    }
+
+    const double canvas_density = plan.density;
+    const uint32_t output_width = plan.width;
+    const uint32_t output_height = plan.height;
+    const int64_t output_format = plan.format;
     if (!EnsureD3D11QuadViewsCompositor(source_layer, output_width, output_height, output_format)) {
         return false;
     }
 
-    QuadViewsFrameState cached_frame{};
-    XrTime matched_quadviews_fov_time = 0;
-    const bool has_cached_fovs =
-        FindQuadViewsFrame(display_time, &cached_frame, &matched_quadviews_fov_time);
-    QuadViewsGazeDiagnostic gaze_diagnostic{};
-    if (has_cached_fovs) {
-        gaze_diagnostic = cached_frame.gaze;
-    } else if (quadviews_raw_focus_valid_ && quadviews_raw_focus_time_ == display_time) {
-        // A missing FOV cache is unusual, but retain an exact-time fallback for
-        // startup frames instead of pairing the submission with a newer locate.
-        gaze_diagnostic.valid = true;
-        gaze_diagnostic.raw_yaw_radians = quadviews_raw_focus_yaw_radians_;
-        gaze_diagnostic.raw_pitch_radians = quadviews_raw_focus_pitch_radians_;
-        gaze_diagnostic.smoothed_yaw_radians = quadviews_smoothed_focus_yaw_radians_;
-        gaze_diagnostic.smoothed_pitch_radians = quadviews_smoothed_focus_pitch_radians_;
-    }
-
-    composed_views->assign(source_layer->views, source_layer->views + 2);
+    composed_views->assign(plan.eye_views.begin(), plan.eye_views.end());
     for (uint32_t eye = 0; eye < 2; ++eye) {
-        if (has_non_identity_delta) {
-            (*composed_views)[eye].pose = MultiplyPoses((*composed_views)[eye].pose, reverse_delta);
-        }
-        if (has_cached_fovs) {
-            (*composed_views)[eye].fov = cached_frame.fovs[eye];
-        }
         QuadViewsCompositionTarget& target = d3d11_quadviews_compositor_.targets[eye];
         (*composed_views)[eye].subImage.swapchain = target.swapchain;
         (*composed_views)[eye].subImage.imageRect.offset = {0, 0};
@@ -4493,11 +4416,7 @@ bool OpenXrLayer::ComposeQuadViewsD3D11(const XrCompositionLayerProjection* sour
         (*composed_views)[eye].subImage.imageArrayIndex = 0;
     }
 
-    // Use the final submitted eye geometry, including Pivot/depth restoration,
-    // so the diagnostic panel occupies the same rays as the independent quad.
-    const uint32_t restored = depth_geometry ? RestoreDepthSubmissionGeometry(
-        std::span<XrCompositionLayerProjectionView>(*composed_views), 0, *depth_geometry,
-        reverse_delta, has_non_identity_delta) : 0;
+    const uint32_t restored = plan.restored;
     // Temporary diagnostic limited to the first D3D11 quadviews projection.
     // Other rendering paths retain the normal independently submitted quad.
     bool composite_osd = false;
@@ -4646,9 +4565,7 @@ bool OpenXrLayer::ComposeQuadViewsD3D11(const XrCompositionLayerProjection* sour
         output_width >= kQuadViewsPixelProbeSize && output_height >= kQuadViewsPixelProbeSize &&
         !d3d11_quadviews_compositor_.pixel_probe.issued &&
         EnsureD3D11QuadViewsPixelProbeResources(output_format);
-    const bool should_log_compositor_diagnostic =
-        pending_quadviews_compositor_diagnostics_ > 0 ||
-        ShouldLogQuadViewsDebugHeartbeat(last_quadviews_compositor_debug_heartbeat_);
+    const bool should_log_compositor_diagnostic = plan.log_diagnostic;
     QuadViewsGpuTimingQuery* active_gpu_query = nullptr;
     if (should_log_compositor_diagnostic && d3d11_quadviews_compositor_.gpu_timing_available) {
         QuadViewsGpuTimingQuery& query =
@@ -4754,8 +4671,8 @@ bool OpenXrLayer::ComposeQuadViewsD3D11(const XrCompositionLayerProjection* sour
         }
         auto release_output_after_failure = [&]() { ReleaseLayerSwapchainImage(target.swapchain, std::nullopt); };
 
-        const uint32_t peripheral_index = source_image_index(*swapchains[eye]);
-        const uint32_t focus_index = source_image_index(*swapchains[eye + 2]);
+        const uint32_t peripheral_index = QuadViewsSourceImageIndex(*swapchains[eye]);
+        const uint32_t focus_index = QuadViewsSourceImageIndex(*swapchains[eye + 2]);
         ID3D11Texture2D* peripheral_source = swapchains[eye]->d3d11_images[peripheral_index];
         ID3D11Texture2D* focus_source = swapchains[eye + 2]->d3d11_images[focus_index];
         selected_source_indices[eye] = peripheral_index;
@@ -4867,24 +4784,12 @@ bool OpenXrLayer::ComposeQuadViewsD3D11(const XrCompositionLayerProjection* sour
         context->PSSetShaderResources(0, 2, resources);
         context->PSSetSamplers(0, 1, &d3d11_quadviews_compositor_.sampler);
 
-        const XrFovf& full_fov = has_cached_fovs ? cached_frame.fovs[eye] : source_layer->views[eye].fov;
-        const XrFovf& focus_fov =
-            has_cached_fovs ? cached_frame.fovs[eye + 2] : source_layer->views[eye + 2].fov;
+        const XrFovf& full_fov = plan.fovs[eye];
         const XrSwapchainSubImage& peripheral_sub_image = source_layer->views[eye].subImage;
         const XrSwapchainSubImage& focus_sub_image = source_layer->views[eye + 2].subImage;
-        const uint32_t focus_content_width =
-            static_cast<uint32_t>(std::max<int32_t>(1, focus_sub_image.imageRect.extent.width));
-        const uint32_t focus_content_height =
-            static_cast<uint32_t>(std::max<int32_t>(1, focus_sub_image.imageRect.extent.height));
-        FocusRectConstants constants = BuildFocusRectConstants(full_fov,
-                                                               focus_fov,
-                                                               target.width,
-                                                               target.height,
-                                                               focus_content_width,
-                                                               focus_content_height,
-                                                               resolved_settings_.quadviews.transition_thickness_percent,
-                                                               resolved_settings_.quadviews.foveate_sharpness);
+        FocusRectConstants constants = FocusRectConstantsFor(plan.composition.eyes[eye]);
 
+        const QuadViewsGazeDiagnostic& gaze_diagnostic = plan.gaze;
         const bool eye_tracking_mode =
             resolved_settings_.quadviews.tracking_mode == QuadViewsTrackingMode::Eye;
         const bool raw_gaze_valid = eye_tracking_mode && gaze_diagnostic.valid;
@@ -4924,45 +4829,6 @@ bool OpenXrLayer::ComposeQuadViewsD3D11(const XrCompositionLayerProjection* sour
         };
         set_source_rect(constants.peripheral_src_rect, peripheral_sub_image, peripheral_swapchain);
         set_source_rect(constants.focus_src_rect, focus_sub_image, focus_swapchain);
-        if (should_log_compositor_diagnostic) {
-            // Effective focus sampling ratio: focus texture pixels vs. the output pixels its
-            // sub-rectangle occupies. ~1.0 = ideal 1:1; >1.0 = focus is being downsampled
-            // (blur, the pre-fix behaviour); <1.0 = focus canvas is larger than needed.
-            const double focus_rect_output_width =
-                std::max(1.0, static_cast<double>(constants.focus_rect[2] - constants.focus_rect[0]) * target.width);
-            const double focus_rect_output_height =
-                std::max(1.0, static_cast<double>(constants.focus_rect[3] - constants.focus_rect[1]) * target.height);
-            const double focus_sampling_ratio_x = focus_content_width / focus_rect_output_width;
-            const double focus_sampling_ratio_y = focus_content_height / focus_rect_output_height;
-            std::ostringstream stream;
-            stream << "D3D11 quadviews compositor focus rect: frameTime=" << display_time
-                   << ", eye=" << eye
-                   << ", cachedFovHit=" << has_cached_fovs
-                   << ", matchedTime=" << matched_quadviews_fov_time
-                   << ", matchedDeltaNs=" << (matched_quadviews_fov_time - display_time)
-                   << ", rect=(" << FormatDiagnosticDouble(constants.focus_rect[0]) << ", "
-                   << FormatDiagnosticDouble(constants.focus_rect[1]) << ", "
-                   << FormatDiagnosticDouble(constants.focus_rect[2]) << ", "
-                   << FormatDiagnosticDouble(constants.focus_rect[3]) << ")"
-                   << ", focusTex=" << focus_content_width << "x" << focus_content_height
-                   << ", focusRectOutputPx=" << FormatDiagnosticDouble(focus_rect_output_width) << "x"
-                   << FormatDiagnosticDouble(focus_rect_output_height)
-                   << ", focusSamplingRatio=(" << FormatDiagnosticDouble(focus_sampling_ratio_x) << ", "
-                   << FormatDiagnosticDouble(focus_sampling_ratio_y) << ")"
-                   << ", feather=(" << FormatDiagnosticDouble(constants.blend_params[0]) << ", "
-                   << FormatDiagnosticDouble(constants.blend_params[1]) << ")"
-                   << ", sharpness=" << FormatDiagnosticDouble(constants.blend_params[2])
-                   << ", sharpenBackend=inlineAdaptive"
-                   << ", outputTexel=(" << FormatDiagnosticDouble(constants.focus_texel[2]) << ", "
-                   << FormatDiagnosticDouble(constants.focus_texel[3]) << ")"
-                   << ", focusTexel=(" << FormatDiagnosticDouble(constants.focus_texel[0]) << ", "
-                   << FormatDiagnosticDouble(constants.focus_texel[1]) << ")"
-                   << ", fullFov=" << FormatFov(full_fov)
-                   << ", focusFov=" << FormatFov(focus_fov)
-                   << ", sourceFullFov=" << FormatFov(source_layer->views[eye].fov)
-                   << ", sourceFocusFov=" << FormatFov(source_layer->views[eye + 2].fov);
-            logger_.Debug(stream.str());
-        }
         context->UpdateSubresource(d3d11_quadviews_compositor_.constants, 0, nullptr, &constants, 0, 0);
         context->PSSetConstantBuffers(0, 1, &d3d11_quadviews_compositor_.constants);
         context->Draw(3, 0);
@@ -5144,9 +5010,6 @@ bool OpenXrLayer::ComposeQuadViewsD3D11(const XrCompositionLayerProjection* sour
                    << "}";
         }
         logger_.Debug(stream.str());
-        if (pending_quadviews_compositor_diagnostics_ > 0) {
-            --pending_quadviews_compositor_diagnostics_;
-        }
     }
 
     if(restored_view_count)*restored_view_count+=restored;
@@ -7496,7 +7359,19 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
         const auto now = std::chrono::steady_clock::now();
         if (now - d3d11_bridge_last_summary_ >= std::chrono::seconds(30)) {
             d3d11_bridge_last_summary_ = now;
-            logger_.Info("Frame Generation's Direct3D 11 bridge: " + d3d11_bridge_.Summary());
+            std::string quad_frames;
+            if (has_active_primary_view_configuration_ &&
+                IsQuadViewConfiguration(active_primary_view_configuration_type_)) {
+                // This window's quad views frames: composed by Direct3D 11, or split into layers.
+                quad_frames = ", quadFrames=d3d11:" +
+                              std::to_string(d3d11_bridge_quad_frames_.d3d11 -
+                                             d3d11_bridge_quad_frames_summarized_.d3d11) +
+                              ",split:" +
+                              std::to_string(d3d11_bridge_quad_frames_.split -
+                                             d3d11_bridge_quad_frames_summarized_.split);
+            }
+            d3d11_bridge_quad_frames_summarized_ = d3d11_bridge_quad_frames_;
+            logger_.Info("Frame Generation's Direct3D 11 bridge: " + d3d11_bridge_.Summary() + quad_frames);
         }
         if (d3d11_bridge_.Lost(lost)) {
             if (!d3d11_bridge_lost_logged_) {
@@ -8112,12 +7987,15 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
         }
 
         if (quadviews_projection_split_active && projection_layer->viewCount >= 4) {
-            adjusted_projection_views.emplace_back();
-            adjusted_projection_layers.emplace_back();
-            const bool composed = ComposeQuadViewsD3D11(
+            QuadViewsComposePlan plan;
+            const bool planned = BuildQuadViewsComposePlan(
                 projection_layer, frame_end_info->displayTime, layer_pivot_delta.reverse,
                 layer_pivot_delta.non_identity, find_depth_submission_geometry_for_layer(projection_layer, nullptr),
-                &depth_anchor_restored_view_count,
+                &plan);
+            adjusted_projection_views.emplace_back();
+            adjusted_projection_layers.emplace_back();
+            const bool composed = planned && ComposeQuadViewsD3D11(
+                projection_layer, frame_end_info->displayTime, plan, &depth_anchor_restored_view_count,
                 i == 0 && !framegen_owns_pacing_.load(std::memory_order_acquire) && !d3d11_bridge_.Active(),
                 &adjusted_projection_layers.back(), &adjusted_projection_views.back());
             // The views of a composed layer reach the runtime only when
@@ -8127,6 +8005,7 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
                 for (uint32_t view = 0; view < 4; ++view) {
                     d3d11_bridge_.SetComposed(projection_layer->views[view].subImage.swapchain, composed);
                 }
+                ++(composed ? d3d11_bridge_quad_frames_.d3d11 : d3d11_bridge_quad_frames_.split);
             }
             if (composed) {
                 adjusted_layers.push_back(

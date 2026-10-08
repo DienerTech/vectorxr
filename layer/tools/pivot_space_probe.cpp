@@ -23,6 +23,7 @@
 #include <future>
 #include <iomanip>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -67,6 +68,10 @@ struct Options {
     double hitch_every{0.0}; // seconds
     double hitch_ms{300.0};
     double frame_ms{0.0};
+    double gpu_ms{0.0};       // GPU work per frame (0: none)
+    int gpu_frames_ahead{2};  // frames whose GPU work may be queued
+    bool gpu_ms_fixed{false}; // keep the calibrated work instead of re-measuring
+    bool gpu_calibrate{false};
     bool self_test{false};
     bool help{false};
 };
@@ -101,6 +106,15 @@ void PrintUsage() {
         << "  --pattern               Also draw a test pattern fixed to each view (a grid and a moving bar;\n"
         << "                          focus views in other colors), visible wherever the headset points.\n"
         << "  --frame-ms N            Make each frame take at least N ms (a slower game).\n"
+        << "  --gpu-ms N              Give each frame N ms of GPU work (0-100), split between the views by\n"
+        << "                          pixel count; each view's share runs right before the view renders.\n"
+        << "  --gpu-frames-ahead N    At most N frames' GPU work queued (0-4, default: 2): a frame waits for\n"
+        << "                          the one N before it; 0 waits for its own before xrEndFrame.\n"
+        << "  --gpu-ms-fixed          Keep the calibrated GPU work (default: re-measured every 30 frames to\n"
+        << "                          hold --gpu-ms while other GPU work competes).\n"
+        << "  --gpu-calibrate         Without OpenXR: calibrate --gpu-ms on the default adapter, run 200\n"
+        << "                          frames of the load alone (paced at 90 Hz, or --frame-ms when longer),\n"
+        << "                          report what they measured and fail if the mean is off by over 3%.\n"
         << "  --depth                 Render depth into depth swapchains and submit it with each view\n"
         << "                          (XR_KHR_composition_layer_depth).\n"
         << "  --recreate-seconds N    Destroy and recreate the swapchains every N seconds.\n"
@@ -110,9 +124,34 @@ void PrintUsage() {
         << "  --hitch-ms M            The stutter's length (default: 300).\n"
         << "  --d3d11-debug           Create the Direct3D 11 device with the debug layer and report its\n"
         << "                          errors and warnings at the end.\n"
-        << "  --self-test             Validate argument-independent pose math without a headset.\n"
+        << "  --self-test             Validate pose math, option parsing and GPU load arithmetic without\n"
+        << "                          a headset.\n"
         << "  --help                  Show this help.\n\n"
         << "Press Escape in the console window to end an active run early.\n";
+}
+
+// The value after argv[i] (advancing i): all of it a number in [minimum, maximum], whole if asked.
+double ParseNumber(int argc, char** argv, int& i, double minimum, double maximum, bool whole) {
+    const std::string argument = argv[i];
+    if (++i >= argc) {
+        throw std::runtime_error(argument + " requires a value");
+    }
+    const std::string text = argv[i];
+    std::size_t used = 0;
+    double value = std::numeric_limits<double>::quiet_NaN();
+    try {
+        value = std::stod(text, &used);
+    } catch (const std::exception&) {
+        used = 0;
+    }
+    if (used == 0 || used != text.size() || !std::isfinite(value) || value < minimum || value > maximum ||
+        (whole && value != std::floor(value))) {
+        std::ostringstream message;
+        message << argument << " must be " << (whole ? "a whole number " : "") << "between " << minimum << " and "
+                << maximum << " (got '" << text << "')";
+        throw std::runtime_error(message.str());
+    }
+    return value;
 }
 
 Options ParseOptions(int argc, char** argv) {
@@ -169,6 +208,14 @@ Options ParseOptions(int argc, char** argv) {
             if (!std::isfinite(options.frame_ms) || options.frame_ms < 0.0 || options.frame_ms > 1000.0) {
                 throw std::runtime_error("--frame-ms must be between 0 and 1000");
             }
+        } else if (argument == "--gpu-ms") {
+            options.gpu_ms = ParseNumber(argc, argv, i, 0.0, 100.0, false);
+        } else if (argument == "--gpu-frames-ahead") {
+            options.gpu_frames_ahead = static_cast<int>(ParseNumber(argc, argv, i, 0.0, 4.0, true));
+        } else if (argument == "--gpu-ms-fixed") {
+            options.gpu_ms_fixed = true;
+        } else if (argument == "--gpu-calibrate") {
+            options.gpu_calibrate = true;
         } else if (argument == "--mode") {
             if (++i >= argc) {
                 throw std::runtime_error("--mode requires a value");
@@ -195,6 +242,9 @@ Options ParseOptions(int argc, char** argv) {
         } else {
             throw std::runtime_error("unknown argument: " + std::string(argument));
         }
+    }
+    if (options.gpu_calibrate && options.gpu_ms <= 0.0) {
+        throw std::runtime_error("--gpu-calibrate requires --gpu-ms N with N above 0");
     }
     return options;
 }
@@ -382,7 +432,157 @@ void CreateSwapchainRenderTarget(ID3D11Device* device,
     }
 }
 
+// --gpu-ms: a compute dispatch of 1024 groups of 64 threads, each looping a dependent sequence `iterations` times, so
+// its time grows linearly with the iterations and hardly with the GPU's width.
+constexpr uint32_t kLoadGroups = 1024;
+constexpr uint32_t kLoadThreads = kLoadGroups * 64;
+constexpr uint32_t kLoadFirstIterations = 4096;
+constexpr uint32_t kLoadMaximumIterations = 1u << 30;
+constexpr int kLoadCalibrationRounds = 8;
+constexpr int kLoadCalibrationRuns = 5;
+constexpr double kLoadTolerance = 0.03;
+constexpr int kLoadRecalibrationFrames = 30;
+constexpr int kLoadCalibrationFrames = 200; // --gpu-calibrate
+
+// The value at `fraction` of `sorted` (as the probe's other percentiles); 0 without samples.
+double Percentile(const std::vector<double>& sorted, double fraction) {
+    if (sorted.empty()) {
+        return 0.0;
+    }
+    return sorted[std::min(sorted.size() - 1,
+                           static_cast<std::size_t>(static_cast<double>(sorted.size()) * fraction))];
+}
+
+uint32_t ScaleIterations(uint32_t iterations, double factor) {
+    const double scaled = std::round(static_cast<double>(iterations) * factor);
+    if (!std::isfinite(scaled)) {
+        return iterations;
+    }
+    return static_cast<uint32_t>(std::clamp(scaled, 1.0, static_cast<double>(kLoadMaximumIterations)));
+}
+
+// Calibration's next scale, bounded so that a first measurement near the timer's resolution cannot ask for seconds of
+// work in one dispatch.
+double CalibrationFactor(double target_ms, double measured_ms) {
+    return measured_ms > 0.0 ? std::clamp(target_ms / measured_ms, 1.0 / 64.0, 64.0) : 64.0;
+}
+
+// Recalibration while running: at most 10% a step, so one disturbed window cannot swing the load.
+double RecalibrationFactor(double target_ms, double measured_ms) {
+    return measured_ms > 0.0 ? std::clamp(target_ms / measured_ms, 0.9, 1.1) : 1.1;
+}
+
+// One view's share of a frame's iterations: none without a share, else at least one.
+uint32_t ViewIterations(uint32_t iterations, double share) {
+    if (!(share > 0.0)) {
+        return 0;
+    }
+    return ScaleIterations(iterations, std::min(share, 1.0));
+}
+
+void Expect(bool condition, std::string_view what) {
+    if (!condition) {
+        throw std::runtime_error("self-test failed: " + std::string(what));
+    }
+}
+
+void RunOptionSelfTest() {
+    const auto parse = [](std::vector<std::string> arguments) {
+        arguments.insert(arguments.begin(), "vectorxr_hardware_probe");
+        std::vector<char*> argv;
+        for (std::string& argument : arguments) {
+            argv.push_back(argument.data());
+        }
+        return ParseOptions(static_cast<int>(argv.size()), argv.data());
+    };
+    const auto rejected = [&](std::vector<std::string> arguments) {
+        try {
+            parse(std::move(arguments));
+        } catch (const std::exception&) {
+            return true;
+        }
+        return false;
+    };
+
+    const Options defaults = parse({});
+    Expect(defaults.gpu_ms == 0.0 && defaults.gpu_frames_ahead == 2 && !defaults.gpu_ms_fixed &&
+               !defaults.gpu_calibrate,
+           "GPU load defaults");
+    const Options load = parse({"--gpu-ms", "11.5", "--gpu-frames-ahead", "0", "--gpu-ms-fixed", "--quad-views"});
+    Expect(load.gpu_ms == 11.5 && load.gpu_frames_ahead == 0 && load.gpu_ms_fixed && load.quad_views,
+           "--gpu-ms, --gpu-frames-ahead and --gpu-ms-fixed parse");
+    Expect(parse({"--gpu-ms", "0"}).gpu_ms == 0.0 && parse({"--gpu-ms", "100"}).gpu_ms == 100.0 &&
+               parse({"--gpu-frames-ahead", "4"}).gpu_frames_ahead == 4,
+           "GPU load range ends accepted");
+    const Options calibrate = parse({"--gpu-calibrate", "--gpu-ms", "5"});
+    Expect(calibrate.gpu_calibrate && calibrate.gpu_ms == 5.0, "--gpu-calibrate with --gpu-ms parses");
+    for (const std::vector<std::string>& arguments : std::vector<std::vector<std::string>>{
+             {"--gpu-ms"},
+             {"--gpu-ms", "-1"},
+             {"--gpu-ms", "100.5"},
+             {"--gpu-ms", "nan"},
+             {"--gpu-ms", "inf"},
+             {"--gpu-ms", "abc"},
+             {"--gpu-ms", "11ms"},
+             {"--gpu-ms", ""},
+             {"--gpu-frames-ahead"},
+             {"--gpu-frames-ahead", "5"},
+             {"--gpu-frames-ahead", "-1"},
+             {"--gpu-frames-ahead", "1.5"},
+             {"--gpu-calibrate"},
+             {"--gpu-calibrate", "--gpu-ms", "0"},
+         }) {
+        std::string joined;
+        for (const std::string& argument : arguments) {
+            joined += (joined.empty() ? "" : " ") + argument;
+        }
+        Expect(rejected(arguments), "rejects: " + joined);
+    }
+}
+
+void RunGpuLoadSelfTest() {
+    Expect(CalibrationFactor(20.0, 10.0) == 2.0, "calibration scales by target / measured");
+    Expect(CalibrationFactor(20.0, 0.001) == 64.0 && CalibrationFactor(20.0, 0.0) == 64.0 &&
+               CalibrationFactor(0.5, 100.0) == 1.0 / 64.0,
+           "calibration scale is bounded");
+    Expect(RecalibrationFactor(11.0, 22.0) == 0.9 && RecalibrationFactor(11.0, 5.0) == 1.1 &&
+               RecalibrationFactor(11.0, 0.0) == 1.1,
+           "recalibration moves at most 10%");
+    Expect(std::abs(RecalibrationFactor(11.0, 10.5) - 11.0 / 10.5) < 1.0e-12, "recalibration inside its bounds");
+    Expect(ScaleIterations(kLoadFirstIterations, 64.0) == 262144 && ScaleIterations(3, 0.01) == 1 &&
+               ScaleIterations(kLoadMaximumIterations, 64.0) == kLoadMaximumIterations &&
+               ScaleIterations(1000, std::numeric_limits<double>::quiet_NaN()) == 1000,
+           "iterations scale within [1, maximum]");
+
+    // Quad views as DCS sizes them: the shares follow the pixel counts and add up to the frame's load.
+    const std::array<double, 4> pixels{2184.0 * 2200.0, 2184.0 * 2200.0, 2748.0 * 2764.0, 2748.0 * 2764.0};
+    double total_pixels = 0.0;
+    for (const double count : pixels) {
+        total_pixels += count;
+    }
+    constexpr uint32_t kIterations = 1000003;
+    uint64_t sum = 0;
+    for (const double count : pixels) {
+        sum += ViewIterations(kIterations, count / total_pixels);
+    }
+    Expect(sum + 2 >= kIterations && sum <= kIterations + 2, "view shares add up to the frame's iterations");
+    Expect(ViewIterations(kIterations, pixels[2] / total_pixels) > ViewIterations(kIterations, pixels[0] / total_pixels),
+           "a larger view gets a larger share");
+    Expect(ViewIterations(kIterations, 0.0) == 0 && ViewIterations(1, 1.0e-9) == 1 &&
+               ViewIterations(kIterations, 2.0) == kIterations,
+           "view share edges");
+
+    std::vector<double> samples;
+    for (int i = 1; i <= 100; ++i) {
+        samples.push_back(static_cast<double>(i));
+    }
+    Expect(Percentile(samples, 0.5) == 51.0 && Percentile(samples, 0.99) == 100.0 && Percentile({}, 0.5) == 0.0,
+           "percentiles");
+}
+
 void RunSelfTest() {
+    RunOptionSelfTest();
+    RunGpuLoadSelfTest();
     constexpr float kPi = 3.14159265358979323846f;
     const float half_yaw = 0.5f * kPi / 2.0f;
     const XrPosef target{
@@ -422,6 +622,24 @@ struct Vertex {
 struct SceneConstants {
     XMFLOAT4X4 view_projection;
 };
+
+void CompileShader(const char* source,
+                   const char* entry,
+                   const char* profile,
+                   ID3DBlob** output) {
+    ComPtr<ID3DBlob> errors;
+    const HRESULT result = D3DCompile(
+        source, std::strlen(source), "pivot_space_probe.hlsl", nullptr, nullptr,
+        entry, profile, D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, output, &errors);
+    if (FAILED(result)) {
+        const std::string detail = errors
+            ? std::string(static_cast<const char*>(errors->GetBufferPointer()),
+                          errors->GetBufferSize())
+            : std::string{};
+        throw std::runtime_error("D3DCompile failed for " + std::string(entry) +
+                                 ": " + detail);
+    }
+}
 
 class DiagnosticRenderer {
 public:
@@ -573,24 +791,6 @@ float4 PSMain(VertexOutput input) : SV_TARGET {
     }
 
 private:
-    static void CompileShader(const char* source,
-                              const char* entry,
-                              const char* profile,
-                              ID3DBlob** output) {
-        ComPtr<ID3DBlob> errors;
-        const HRESULT result = D3DCompile(
-            source, std::strlen(source), "pivot_space_probe.hlsl", nullptr, nullptr,
-            entry, profile, D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, output, &errors);
-        if (FAILED(result)) {
-            const std::string detail = errors
-                ? std::string(static_cast<const char*>(errors->GetBufferPointer()),
-                              errors->GetBufferSize())
-                : std::string{};
-            throw std::runtime_error("D3DCompile failed for " + std::string(entry) +
-                                     ": " + detail);
-        }
-    }
-
     static std::vector<Vertex> BuildScene() {
         std::vector<Vertex> vertices;
         const auto line = [&](XMFLOAT3 start, XMFLOAT3 end, XMFLOAT3 color) {
@@ -633,6 +833,495 @@ private:
     ComPtr<ID3D11DepthStencilState> depth_state_;
     UINT vertex_count_{0};
 };
+
+// --gpu-ms: GPU work that gives each of the probe's frames a game's GPU time. Calibrated with timestamp queries before
+// the first frame. Each view's share is recorded right before the view renders, so the view's release (and anything a
+// layer queues behind it) waits for it. An event query per frame holds the probe until its frame --gpu-frames-ahead
+// before has run on the GPU, as a game's own frame queue would.
+class GpuLoad {
+public:
+    GpuLoad(ID3D11Device* device, ID3D11DeviceContext* context, const Options& options)
+        : device_(device),
+          context_(context),
+          target_ms_(options.gpu_ms),
+          frames_ahead_(static_cast<uint64_t>(options.gpu_frames_ahead)),
+          fixed_(options.gpu_ms_fixed) {
+        if (device_->GetFeatureLevel() < D3D_FEATURE_LEVEL_11_0) {
+            throw std::runtime_error("--gpu-ms needs a Direct3D 11.0 GPU (compute shaders)");
+        }
+        static constexpr char kShaderSource[] = R"(
+cbuffer LoadConstants : register(b0) {
+    uint iterations;
+};
+
+RWStructuredBuffer<float> values : register(u0);
+
+[numthreads(64, 1, 1)]
+void CSMain(uint3 id : SV_DispatchThreadID) {
+    float v = values[id.x];
+    // The values carry over from dispatch to dispatch: start again long before they could overflow.
+    if (!(abs(v) < 1.0e4)) {
+        v = 1.0 + id.x * 1.0e-6;
+    }
+    [loop]
+    for (uint i = 0; i < iterations; ++i) {
+        v = mad(v, 1.000001, sin(v) * 1.0e-3);
+    }
+    values[id.x] = v;
+}
+)";
+        ComPtr<ID3DBlob> blob;
+        CompileShader(kShaderSource, "CSMain", "cs_5_0", &blob);
+        ThrowIfFailed(device_->CreateComputeShader(blob->GetBufferPointer(), blob->GetBufferSize(), nullptr,
+                                                   &shader_),
+                      "CreateComputeShader(GPU load)");
+
+        std::vector<float> seeds(kLoadThreads);
+        for (uint32_t i = 0; i < kLoadThreads; ++i) {
+            seeds[i] = 1.0f + static_cast<float>(i) * 1.0e-6f;
+        }
+        D3D11_BUFFER_DESC values_desc{};
+        values_desc.ByteWidth = kLoadThreads * sizeof(float);
+        values_desc.Usage = D3D11_USAGE_DEFAULT;
+        values_desc.BindFlags = D3D11_BIND_UNORDERED_ACCESS;
+        values_desc.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
+        values_desc.StructureByteStride = sizeof(float);
+        D3D11_SUBRESOURCE_DATA values_data{};
+        values_data.pSysMem = seeds.data();
+        ThrowIfFailed(device_->CreateBuffer(&values_desc, &values_data, &values_), "CreateBuffer(GPU load)");
+        D3D11_UNORDERED_ACCESS_VIEW_DESC view_desc{};
+        view_desc.Format = DXGI_FORMAT_UNKNOWN;
+        view_desc.ViewDimension = D3D11_UAV_DIMENSION_BUFFER;
+        view_desc.Buffer.NumElements = kLoadThreads;
+        ThrowIfFailed(device_->CreateUnorderedAccessView(values_.Get(), &view_desc, &values_view_),
+                      "CreateUnorderedAccessView(GPU load)");
+
+        D3D11_BUFFER_DESC constant_desc{};
+        constant_desc.ByteWidth = 16;
+        constant_desc.Usage = D3D11_USAGE_DYNAMIC;
+        constant_desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+        constant_desc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+        ThrowIfFailed(device_->CreateBuffer(&constant_desc, nullptr, &constants_),
+                      "CreateBuffer(GPU load constants)");
+
+        for (Timer& timer : calibration_.views) {
+            timer = CreateTimer();
+        }
+        for (Frame& frame : ring_) {
+            for (Timer& timer : frame.views) {
+                timer = CreateTimer();
+            }
+            frame.done = CreateQuery(D3D11_QUERY_EVENT);
+        }
+    }
+
+    // The iterations that take --gpu-ms as frames record them, split evenly into `views` timed dispatches (a split
+    // load measures a few percent above one dispatch of the same iterations): 30 warm-up dispatches, then rounds of
+    // 5 timed frames, each scaled by target / median, until within 3% (at most 8 rounds).
+    void Calibrate(uint32_t views) {
+        views = std::clamp<uint32_t>(views, 1, kMaximumViews);
+        iterations_ = kLoadFirstIterations;
+        for (int i = 0; i < 30; ++i) {
+            Dispatch(iterations_);
+        }
+        double measured = 0.0;
+        for (int round = 0; round < kLoadCalibrationRounds; ++round) {
+            std::vector<double> runs;
+            for (int run = 0; run < kLoadCalibrationRuns; ++run) {
+                calibration_.views_used = 0;
+                for (uint32_t view = 0; view < views; ++view) {
+                    RecordTimed(calibration_.views[calibration_.views_used++],
+                                ViewIterations(iterations_, 1.0 / views));
+                }
+                if (const std::optional<double> ms = ReadFrame(calibration_)) {
+                    runs.push_back(*ms);
+                }
+            }
+            if (runs.empty()) {
+                continue; // every run straddled a clock change
+            }
+            std::sort(runs.begin(), runs.end());
+            measured = Percentile(runs, 0.5);
+            if (std::abs(measured - target_ms_) <= kLoadTolerance * target_ms_ ||
+                round + 1 == kLoadCalibrationRounds) {
+                break;
+            }
+            iterations_ = ScaleIterations(iterations_, CalibrationFactor(target_ms_, measured));
+        }
+        calibrated_iterations_ = iterations_;
+        std::ostringstream line;
+        line << std::fixed << std::setprecision(2) << "GPU load: target " << target_ms_ << " ms = " << iterations_
+             << " iterations in " << views << " views (measured " << measured << " ms)\n";
+        std::cout << line.str();
+    }
+
+    // A frame begins: waits until the frame --gpu-frames-ahead before it has run on the GPU.
+    void BeginFrame() {
+        if (frames_ahead_ > 0 && frames_ >= frames_ahead_) {
+            WaitForFrame(frames_ - frames_ahead_);
+        }
+        Collect(false);
+        // Frames finish in order, so every frame from the oldest uncollected one on is still queued.
+        max_queued_ = std::max(max_queued_, frames_ - collected_);
+    }
+
+    // One view's share of this frame's load (its pixels / all views' pixels), right before the view renders.
+    void DispatchView(double share) {
+        Frame& frame = ring_[frames_ % kRing];
+        if (!open_) {
+            while (frames_ - collected_ >= kRing) {
+                CollectOldest(true);
+            }
+            frame.views_used = 0;
+            frame.iterations = iterations_;
+            open_ = true;
+        }
+        const uint32_t iterations = ViewIterations(frame.iterations, share);
+        if (iterations == 0 || frame.views_used >= frame.views.size()) {
+            return;
+        }
+        RecordTimed(frame.views[frame.views_used++], iterations);
+    }
+
+    // The frame's last view was recorded; with --gpu-frames-ahead 0 the frame waits for its own GPU work here.
+    void EndFrame() {
+        if (!open_) {
+            return;
+        }
+        context_->End(ring_[frames_ % kRing].done.Get());
+        open_ = false;
+        ++frames_;
+        if (frames_ahead_ == 0) {
+            WaitForFrame(frames_ - 1);
+        }
+    }
+
+    // Collects every recorded frame's timings (waits for the GPU).
+    void Drain() {
+        Collect(true);
+    }
+
+    // Whether no frame began with more earlier frames queued on the GPU than --gpu-frames-ahead allows.
+    bool QueueBounded() const {
+        return max_queued_ <= (frames_ahead_ > 0 ? frames_ahead_ - 1 : 0);
+    }
+
+    double MeanMs() const {
+        double sum = 0.0;
+        for (const double ms : frame_ms_) {
+            sum += ms;
+        }
+        return frame_ms_.empty() ? 0.0 : sum / static_cast<double>(frame_ms_.size());
+    }
+
+    void Report(std::ostream& out) const {
+        std::vector<double> sorted = frame_ms_;
+        std::sort(sorted.begin(), sorted.end());
+        std::ostringstream line;
+        line << std::fixed << std::setprecision(2) << "GPU load: target " << target_ms_ << " ms, mean " << MeanMs()
+             << " ms, p50 " << Percentile(sorted, 0.5) << " ms, p99 " << Percentile(sorted, 0.99) << " ms ("
+             << sorted.size() << " frames timed";
+        if (disjoint_frames_ > 0) {
+            line << ", " << disjoint_frames_ << " straddled a clock change";
+        }
+        line << "), iterations " << iterations_ << " (calibrated " << calibrated_iterations_ << ", "
+             << (fixed_ ? std::string("fixed") : std::to_string(adjustments_) + " adjustments") << ")\n"
+             << "GPU frames ahead " << frames_ahead_ << ": at most " << max_queued_
+             << " earlier frames queued when a frame began, " << stalls_ << " stalls of " << frames_ << " frames";
+        if (stalls_ > 0) {
+            line << ", mean " << stall_ms_ / static_cast<double>(stalls_) << " ms, max " << stall_max_ms_
+                 << " ms, total " << stall_ms_ << " ms";
+        }
+        line << "\n";
+        out << line.str();
+    }
+
+private:
+    static constexpr std::size_t kRing = 8;
+    static_assert(kRing > 4 + 1, "the ring must hold more frames than --gpu-frames-ahead lets queue");
+
+    struct Timer {
+        ComPtr<ID3D11Query> disjoint;
+        ComPtr<ID3D11Query> start;
+        ComPtr<ID3D11Query> end;
+    };
+
+    struct Frame {
+        std::array<Timer, kMaximumViews> views;
+        ComPtr<ID3D11Query> done; // event: the frame's GPU work has run
+        uint32_t views_used{0};
+        uint32_t iterations{0}; // the frame's total, before its views' shares
+    };
+
+    ComPtr<ID3D11Query> CreateQuery(D3D11_QUERY type) {
+        D3D11_QUERY_DESC desc{};
+        desc.Query = type;
+        ComPtr<ID3D11Query> query;
+        ThrowIfFailed(device_->CreateQuery(&desc, &query), "CreateQuery(GPU load)");
+        return query;
+    }
+
+    Timer CreateTimer() {
+        return {CreateQuery(D3D11_QUERY_TIMESTAMP_DISJOINT), CreateQuery(D3D11_QUERY_TIMESTAMP),
+                CreateQuery(D3D11_QUERY_TIMESTAMP)};
+    }
+
+    void Dispatch(uint32_t iterations) {
+        D3D11_MAPPED_SUBRESOURCE mapped{};
+        ThrowIfFailed(context_->Map(constants_.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped),
+                      "Map(GPU load constants)");
+        const std::array<uint32_t, 4> constants{iterations, 0, 0, 0};
+        std::memcpy(mapped.pData, constants.data(), sizeof(constants));
+        context_->Unmap(constants_.Get(), 0);
+        ID3D11Buffer* constant_buffer = constants_.Get();
+        ID3D11UnorderedAccessView* view = values_view_.Get();
+        context_->CSSetShader(shader_.Get(), nullptr, 0);
+        context_->CSSetConstantBuffers(0, 1, &constant_buffer);
+        context_->CSSetUnorderedAccessViews(0, 1, &view, nullptr);
+        context_->Dispatch(kLoadGroups, 1, 1);
+        // No compute state is left behind for the frame's rendering or a layer's work.
+        ID3D11UnorderedAccessView* no_view = nullptr;
+        ID3D11Buffer* no_buffer = nullptr;
+        context_->CSSetUnorderedAccessViews(0, 1, &no_view, nullptr);
+        context_->CSSetConstantBuffers(0, 1, &no_buffer);
+        context_->CSSetShader(nullptr, nullptr, 0);
+    }
+
+    // Whether `query` has its result (written to `data` when given). Only the first poll of a wait flushes.
+    bool Poll(ID3D11Query* query, void* data, UINT size, bool flush) {
+        const HRESULT result =
+            context_->GetData(query, data, size, flush ? 0 : D3D11_ASYNC_GETDATA_DONOTFLUSH);
+        ThrowIfFailed(result, "ID3D11DeviceContext::GetData(GPU load)");
+        return result == S_OK;
+    }
+
+    void Wait(ID3D11Query* query, void* data, UINT size) {
+        if (Poll(query, data, size, true)) {
+            return;
+        }
+        while (!Poll(query, data, size, false)) {
+            std::this_thread::yield();
+        }
+    }
+
+    // A timer's span in ms; nullopt when it straddled a clock change.
+    std::optional<double> Read(const Timer& timer) {
+        D3D11_QUERY_DATA_TIMESTAMP_DISJOINT disjoint{};
+        UINT64 start = 0;
+        UINT64 end = 0;
+        Wait(timer.disjoint.Get(), &disjoint, sizeof(disjoint));
+        Wait(timer.start.Get(), &start, sizeof(start));
+        Wait(timer.end.Get(), &end, sizeof(end));
+        if (disjoint.Disjoint || disjoint.Frequency == 0 || end < start) {
+            return std::nullopt;
+        }
+        return static_cast<double>(end - start) * 1000.0 / static_cast<double>(disjoint.Frequency);
+    }
+
+    // A frame's load: the sum of its views' timers; nullopt when one straddled a clock change.
+    std::optional<double> ReadFrame(const Frame& frame) {
+        double ms = 0.0;
+        for (uint32_t view = 0; view < frame.views_used; ++view) {
+            const std::optional<double> view_ms = Read(frame.views[view]);
+            if (!view_ms) {
+                return std::nullopt;
+            }
+            ms += *view_ms;
+        }
+        return ms;
+    }
+
+    void RecordTimed(const Timer& timer, uint32_t iterations) {
+        context_->Begin(timer.disjoint.Get());
+        context_->End(timer.start.Get());
+        Dispatch(iterations);
+        context_->End(timer.end.Get());
+        context_->End(timer.disjoint.Get());
+    }
+
+    // Blocks until frame `index` has run on the GPU; a wait that blocks is a stall.
+    void WaitForFrame(uint64_t index) {
+        if (index < collected_) {
+            return; // collected: it has run
+        }
+        ID3D11Query* done = ring_[index % kRing].done.Get();
+        if (Poll(done, nullptr, 0, true)) {
+            return;
+        }
+        const auto begun = std::chrono::steady_clock::now();
+        while (!Poll(done, nullptr, 0, false)) {
+            std::this_thread::yield();
+        }
+        const double ms =
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - begun).count();
+        ++stalls_;
+        stall_ms_ += ms;
+        stall_max_ms_ = std::max(stall_max_ms_, ms);
+    }
+
+    void Collect(bool wait) {
+        while (collected_ < frames_ && CollectOldest(wait)) {
+        }
+    }
+
+    // The oldest uncollected frame's timing, once it has run; recalibrates every 30 frames unless --gpu-ms-fixed.
+    bool CollectOldest(bool wait) {
+        const Frame& frame = ring_[collected_ % kRing];
+        if (wait) {
+            Wait(frame.done.Get(), nullptr, 0);
+        } else if (!Poll(frame.done.Get(), nullptr, 0, false)) {
+            return false;
+        }
+        ++collected_;
+        if (frame.views_used == 0) {
+            return true;
+        }
+        const std::optional<double> ms = ReadFrame(frame);
+        if (!ms) {
+            ++disjoint_frames_;
+            return true;
+        }
+        frame_ms_.push_back(*ms);
+        // Only frames recorded at the current iterations judge them (older ones may still be in flight).
+        if (!fixed_ && frame.iterations == iterations_) {
+            window_ms_ += *ms;
+            if (++window_frames_ >= kLoadRecalibrationFrames) {
+                iterations_ = ScaleIterations(
+                    iterations_, RecalibrationFactor(target_ms_, window_ms_ / static_cast<double>(window_frames_)));
+                ++adjustments_;
+                window_ms_ = 0.0;
+                window_frames_ = 0;
+            }
+        }
+        return true;
+    }
+
+    ID3D11Device* device_{nullptr};
+    ID3D11DeviceContext* context_{nullptr};
+    double target_ms_{0.0};
+    uint64_t frames_ahead_{0};
+    bool fixed_{false};
+    ComPtr<ID3D11ComputeShader> shader_;
+    ComPtr<ID3D11Buffer> values_;
+    ComPtr<ID3D11UnorderedAccessView> values_view_;
+    ComPtr<ID3D11Buffer> constants_;
+    Frame calibration_; // its views' timers only
+    std::array<Frame, kRing> ring_;
+    uint64_t frames_{0};    // frames recorded
+    uint64_t collected_{0}; // frames whose timings were read, oldest first
+    bool open_{false};      // the current frame has recorded a view
+    uint32_t iterations_{kLoadFirstIterations};
+    uint32_t calibrated_iterations_{0};
+    uint64_t adjustments_{0};
+    double window_ms_{0.0};
+    int window_frames_{0};
+    std::vector<double> frame_ms_;
+    uint64_t disjoint_frames_{0};
+    uint64_t stalls_{0};
+    double stall_ms_{0.0};
+    double stall_max_ms_{0.0};
+    uint64_t max_queued_{0};
+};
+
+// The Direct3D 11 debug layer's errors and warnings over the run (the first
+// few of them, and how many).
+void ReportD3D11Messages(ID3D11Device* device) {
+    ComPtr<ID3D11InfoQueue> queue;
+    if (FAILED(device->QueryInterface(IID_PPV_ARGS(&queue)))) {
+        std::cout << "Direct3D 11 debug layer: unavailable\n";
+        return;
+    }
+    uint64_t errors = 0;
+    uint64_t warnings = 0;
+    int shown = 0;
+    for (UINT64 i = 0; i < queue->GetNumStoredMessages(); ++i) {
+        SIZE_T size = 0;
+        queue->GetMessage(i, nullptr, &size);
+        std::vector<char> storage(size);
+        auto* message = reinterpret_cast<D3D11_MESSAGE*>(storage.data());
+        if (FAILED(queue->GetMessage(i, message, &size))) continue;
+        if (message->Severity <= D3D11_MESSAGE_SEVERITY_ERROR) {
+            ++errors;
+        } else if (message->Severity == D3D11_MESSAGE_SEVERITY_WARNING) {
+            ++warnings;
+        } else {
+            continue;
+        }
+        if (shown++ < 10) {
+            std::cout << "Direct3D 11 debug layer [" << message->ID << "]: " << message->pDescription << "\n";
+        }
+    }
+    std::cout << "Direct3D 11 debug layer: " << errors << " errors, " << warnings << " warnings (of "
+              << queue->GetNumStoredMessages() << " stored, " << queue->GetNumMessagesDiscardedByMessageCountLimit()
+              << " discarded)\n";
+}
+
+// --gpu-calibrate: the GPU load alone, without OpenXR, on the default hardware adapter. Its frames are paced as a
+// 90 Hz runtime would (or at --frame-ms when longer) and split into two views (four with --quad-views). True when
+// their mean load is within 3% of --gpu-ms and no frame began with more frames queued than --gpu-frames-ahead allows.
+bool RunGpuCalibration(const Options& options) {
+    const std::array<D3D_FEATURE_LEVEL, 4> feature_levels{
+        D3D_FEATURE_LEVEL_12_1, D3D_FEATURE_LEVEL_12_0, D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0,
+    };
+    ComPtr<ID3D11Device> device;
+    ComPtr<ID3D11DeviceContext> context;
+    ThrowIfFailed(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr,
+                                    options.d3d11_debug ? D3D11_CREATE_DEVICE_DEBUG : 0, feature_levels.data(),
+                                    static_cast<UINT>(feature_levels.size()), D3D11_SDK_VERSION, &device, nullptr,
+                                    &context),
+                  "D3D11CreateDevice");
+    ComPtr<IDXGIDevice> dxgi_device;
+    ComPtr<IDXGIAdapter> adapter;
+    DXGI_ADAPTER_DESC description{};
+    if (SUCCEEDED(device.As(&dxgi_device)) && SUCCEEDED(dxgi_device->GetAdapter(&adapter)) &&
+        SUCCEEDED(adapter->GetDesc(&description))) {
+        std::wcout << L"Graphics adapter: " << description.Description << L"\n";
+    }
+
+    GpuLoad load(device.Get(), context.Get(), options);
+    const uint32_t views = options.quad_views ? 4u : 2u;
+    load.Calibrate(views);
+    const double period_ms = std::max(options.frame_ms, 1000.0 / 90.0);
+    const auto period = std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+        std::chrono::duration<double, std::milli>(period_ms));
+    const auto started = std::chrono::steady_clock::now();
+    auto next = started;
+    for (int frame = 0; frame < kLoadCalibrationFrames; ++frame) {
+        load.BeginFrame();
+        for (uint32_t view = 0; view < views; ++view) {
+            load.DispatchView(1.0 / views);
+        }
+        load.EndFrame();
+        context->Flush(); // as a frame's release would
+        // A late frame (the GPU holding it back) starts the next one at once, without catching up.
+        next = std::max(next + period, std::chrono::steady_clock::now());
+        while (std::chrono::steady_clock::now() < next) {
+            if (next - std::chrono::steady_clock::now() > std::chrono::milliseconds(2)) {
+                Sleep(1);
+            } else {
+                std::this_thread::yield();
+            }
+        }
+    }
+    load.Drain();
+    const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
+
+    load.Report(std::cout);
+    const double error = (load.MeanMs() - options.gpu_ms) / options.gpu_ms;
+    const bool within = std::abs(error) <= kLoadTolerance;
+    std::ostringstream line;
+    line << std::fixed << std::setprecision(2) << "Frames: " << kLoadCalibrationFrames << " in " << seconds << " s ("
+         << kLoadCalibrationFrames / seconds << " fps, paced at " << 1000.0 / period_ms << " Hz, " << views
+         << " views)\n"
+         << "GPU load check: the mean is " << std::showpos << error * 100.0 << std::noshowpos << "% off the target ("
+         << (within ? "within" : "outside") << " 3%); the frame queue "
+         << (load.QueueBounded() ? "stayed within" : "exceeded") << " --gpu-frames-ahead\n";
+    std::cout << line.str();
+    if (options.d3d11_debug) {
+        ReportD3D11Messages(device.Get());
+    }
+    return within && load.QueueBounded();
+}
 
 struct EyeSwapchain {
     XrSwapchain handle{XR_NULL_HANDLE};
@@ -746,6 +1435,7 @@ public:
 
     ~ProbeApp() {
         DestroySwapchains();
+        gpu_load_.reset();
         renderer_.reset();
         context1_.Reset();
         context_.Reset();
@@ -807,8 +1497,12 @@ public:
             std::cout << "Probe active: mode=" << ModeName(options_.mode)
                       << ", threadedWait=" << (options_.threaded_wait ? "yes" : "no")
                       << ", views=" << swapchains_.size()
-                      << ", frameMs=" << options_.frame_ms
-                      << ", duration=" << options_.seconds << "s\n"
+                      << ", frameMs=" << options_.frame_ms;
+            if (gpu_load_) {
+                std::cout << ", gpuMs=" << options_.gpu_ms << " (framesAhead " << options_.gpu_frames_ahead
+                          << (options_.gpu_ms_fixed ? ", fixed" : "") << ")";
+            }
+            std::cout << ", duration=" << options_.seconds << "s\n"
                       << "Use a Pivot profile with both yaw and pitch for the strongest visual test.\n";
 
             RenderLoop();
@@ -820,7 +1514,7 @@ public:
                   << ", invalidViewFrames=" << invalid_view_frames_
                   << ", spaceRelationFailures=" << space_relation_failures_ << "\n";
         if (options_.d3d11_debug) {
-            ReportD3D11Messages();
+            ReportD3D11Messages(device_.Get());
         }
         static const char* const call_names[] = {"acquire", "wait", "release", "endFrame"};
         for (int call = 0; call < 4; ++call) {
@@ -841,6 +1535,10 @@ public:
             std::cout << std::fixed << std::setprecision(2) << "Frame interval (xrWaitFrame to xrWaitFrame): mean "
                       << sum / sorted.size() << " ms, median " << sorted[sorted.size() / 2] << " ms, p99 "
                       << sorted[std::min(sorted.size() - 1, sorted.size() * 99 / 100)] << " ms\n";
+        }
+        if (gpu_load_) {
+            gpu_load_->Drain();
+            gpu_load_->Report(std::cout);
         }
     }
 
@@ -964,6 +1662,10 @@ private:
                       "D3D11CreateDevice");
         if (created_level < requirements.minFeatureLevel) {
             throw std::runtime_error("created D3D11 device does not meet the runtime feature-level requirement");
+        }
+        if (options_.gpu_ms > 0.0) {
+            gpu_load_ = std::make_unique<GpuLoad>(device_.Get(), context_.Get(), options_);
+            gpu_load_->Calibrate(options_.quad_views ? 4u : 2u);
         }
     }
 
@@ -1374,6 +2076,9 @@ private:
             CheckXr(instance_, waited.result, "xrWaitFrame");
             const XrFrameBeginInfo begin_info{XR_TYPE_FRAME_BEGIN_INFO};
             CheckXr(instance_, xrBeginFrame(session_, &begin_info), "xrBeginFrame");
+            if (gpu_load_) {
+                gpu_load_->BeginFrame();
+            }
 
             const auto frame_started = std::chrono::steady_clock::now();
             if (last_frame_started_) {
@@ -1406,7 +2111,15 @@ private:
                 }
 
                 if (options_.mode == ProbeMode::SourceExact || source_in_target.has_value()) {
+                    double total_pixels = 0.0;
+                    for (const EyeSwapchain& swapchain : swapchains_) {
+                        total_pixels += static_cast<double>(swapchain.width) * swapchain.height;
+                    }
                     for (uint32_t eye = 0; eye < ViewCount(); ++eye) {
+                        if (gpu_load_) {
+                            gpu_load_->DispatchView(
+                                static_cast<double>(swapchains_[eye].width) * swapchains_[eye].height / total_pixels);
+                        }
                         RenderEye(eye, source_views[eye]);
                         projection_views[eye].pose =
                             source_in_target.has_value()
@@ -1436,6 +2149,9 @@ private:
                 }
             } else if (waited.state.shouldRender == XR_TRUE) {
                 ++invalid_view_frames_;
+            }
+            if (gpu_load_) {
+                gpu_load_->EndFrame();
             }
 
             XrCompositionLayerProjection projection{
@@ -1537,39 +2253,6 @@ private:
     std::array<std::vector<double>, 4> call_ms_;
     int slow_calls_reported_{0};
 
-    // The Direct3D 11 debug layer's errors and warnings over the run (the
-    // first few of them, and how many).
-    void ReportD3D11Messages() {
-        ComPtr<ID3D11InfoQueue> queue;
-        if (FAILED(device_.As(&queue))) {
-            std::cout << "Direct3D 11 debug layer: unavailable\n";
-            return;
-        }
-        uint64_t errors = 0;
-        uint64_t warnings = 0;
-        int shown = 0;
-        for (UINT64 i = 0; i < queue->GetNumStoredMessages(); ++i) {
-            SIZE_T size = 0;
-            queue->GetMessage(i, nullptr, &size);
-            std::vector<char> storage(size);
-            auto* message = reinterpret_cast<D3D11_MESSAGE*>(storage.data());
-            if (FAILED(queue->GetMessage(i, message, &size))) continue;
-            if (message->Severity <= D3D11_MESSAGE_SEVERITY_ERROR) {
-                ++errors;
-            } else if (message->Severity == D3D11_MESSAGE_SEVERITY_WARNING) {
-                ++warnings;
-            } else {
-                continue;
-            }
-            if (shown++ < 10) {
-                std::cout << "Direct3D 11 debug layer [" << message->ID << "]: " << message->pDescription << "\n";
-            }
-        }
-        std::cout << "Direct3D 11 debug layer: " << errors << " errors, " << warnings << " warnings (of "
-                  << queue->GetNumStoredMessages() << " stored, " << queue->GetNumMessagesDiscardedByMessageCountLimit()
-                  << " discarded)\n";
-    }
-
     uint32_t ViewCount() const {
         return static_cast<uint32_t>(swapchains_.size());
     }
@@ -1590,6 +2273,7 @@ private:
     std::vector<XrViewConfigurationView> view_configuration_views_;
     std::vector<EyeSwapchain> swapchains_;
     std::unique_ptr<DiagnosticRenderer> renderer_;
+    std::unique_ptr<GpuLoad> gpu_load_;
     uint64_t rendered_frames_{0};
     uint64_t invalid_view_frames_{0};
     uint64_t space_relation_failures_{0};
@@ -1607,6 +2291,12 @@ int main(int argc, char** argv) {
         if (options.self_test) {
             RunSelfTest();
             return 0;
+        }
+        if (options.gpu_calibrate) {
+            timeBeginPeriod(1);
+            const bool within = RunGpuCalibration(options);
+            timeEndPeriod(1);
+            return within ? 0 : 1;
         }
         // Sleep(1) in --frame-ms pacing sleeps a whole timer period otherwise.
         timeBeginPeriod(1);

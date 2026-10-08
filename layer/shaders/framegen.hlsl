@@ -912,6 +912,74 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
 }
 #endif
 
+#if defined(FG_PASS_FLOW_MERGE)
+// Quad views (Direct3D 12, a shader of its own): inside an eye's focus
+// rectangle, the peripheral view's filtered flow (u0) and cover flow (u1,
+// options.x 1 when made) take the focus view's (t0, t1) under each cell,
+// rescaled from focus to peripheral view coordinates. Both views then move
+// content the same way where the compositor blends them.
+// fov_current: the focus rectangle (left, top, right, bottom) in peripheral
+// uv; size.xy: the peripheral flow's cells, size.zw: the focus flow's.
+FG_BIND(0) Texture2D<float4> g_focus_flow : register(t0);
+FG_BIND(1) Texture2D<float4> g_focus_cover : register(t1);
+FG_BIND(4) FG_FORMAT("rgba16f") RWTexture2D<float4> g_flow : register(u0);
+FG_BIND(5) FG_FORMAT("rgba16f") RWTexture2D<float4> g_cover : register(u1);
+
+[numthreads(8, 8, 1)]
+void CSMain(uint3 id : SV_DispatchThreadID) {
+    if (any(id.xy >= g.size.xy)) {
+        return;
+    }
+    const float2 uv = (float2(id.xy) + 0.5) / float2(g.size.xy);
+    const float4 rect = g.fov_current;
+    if (any(uv < rect.xy) || any(uv > rect.zw)) {
+        return;
+    }
+    const float2 extent = max(rect.zw - rect.xy, float2(0.0001, 0.0001));
+    // The focus cells under this cell (4x4 at most, about 3x3 for DCS): their
+    // cost-weighted vector median, as FG_PASS_FILTER chooses within a view.
+    const float2 focus_cells = float2(g.size.zw);
+    const float2 first = (uv - 0.5 / float2(g.size.xy) - rect.xy) / extent * focus_cells;
+    const float2 last = (uv + 0.5 / float2(g.size.xy) - rect.xy) / extent * focus_cells;
+    const int2 centre = int2((uv - rect.xy) / extent * focus_cells);
+    const int2 low = clamp(max(int2(floor(first)), centre - 1), int2(0, 0), int2(g.size.zw) - 1);
+    const int2 high = clamp(min(int2(ceil(last)) - 1, low + 3), low, int2(g.size.zw) - 1);
+    const float2 aspect = float2(1.0, focus_cells.y / focus_cells.x);
+    float4 samples[16];
+    float4 covers[16];
+    int count = 0;
+    [loop]
+    for (int y = low.y; y <= high.y; ++y) {
+        [loop]
+        for (int x = low.x; x <= high.x; ++x) {
+            samples[count] = g_focus_flow.Load(int3(x, y, 0));
+            covers[count] = g.options.x != 0u ? g_focus_cover.Load(int3(x, y, 0)) : float4(0.0, 0.0, 0.0, 0.0);
+            ++count;
+        }
+    }
+    int chosen = 0;
+    float chosen_score = 1e30;
+    [loop]
+    for (int c = 0; c < count; ++c) {
+        float score = 0.0;
+        [loop]
+        for (int j = 0; j < count; ++j) {
+            score += length((samples[c].xy - samples[j].xy) * aspect) / (samples[j].z + 0.01);
+        }
+        if (score < chosen_score) {
+            chosen_score = score;
+            chosen = c;
+        }
+    }
+    // Vectors are in view coordinates: a focus view spans `extent` of its
+    // peripheral view. Costs and steadiness carry over as measured.
+    g_flow[id.xy] = float4(samples[chosen].xy * extent, samples[chosen].zw);
+    if (g.options.x != 0u) {
+        g_cover[id.xy] = float4(covers[chosen].xy * extent, covers[chosen].zw);
+    }
+}
+#endif
+
 #if defined(FG_PASS_SYNTHESIZE_UNORM8) || defined(FG_PASS_SYNTHESIZE_FLOAT16) || defined(FG_PASS_SYNTHESIZE_DRAW)
 FG_BIND(0) Texture2D<float4> g_current : register(t0);
 FG_BIND(1) Texture2D<float4> g_previous : register(t1);
@@ -1261,6 +1329,52 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
     g_output[id.xy] = Synthesize(float2(id.xy) + 0.5, g.tuning.x);
 }
 #endif
+#endif
+
+#if defined(FG_PASS_COMPOSE_DRAW)
+// Quad views (Direct3D 12): one eye of the composed image from its
+// peripheral view (t0) and focus view (t1), as the layer's Direct3D 11 quad
+// views compositor composes them (without its diagnostics), drawn by
+// FG_PASS_SYNTHESIZE_DRAW's VSMain. Both are read through sRGB views and
+// written to an sRGB target: blending is linear. fov_current: the focus
+// rectangle (left, top, right, bottom) in output uv; fov_previous.xy: the
+// blend band in output uv, .z: sharpening (0-1); rot0.zw: one output pixel
+// in focus uv; size.xy: the output extent.
+FG_BIND(0) Texture2D<float4> g_peripheral : register(t0);
+FG_BIND(1) Texture2D<float4> g_focus : register(t1);
+FG_BIND(6) SamplerState g_linear : register(s0);
+
+float4 PSMain(float4 position : SV_Position) : SV_Target {
+    // The pixel's centre: the Direct3D 11 compositor's interpolated uv.
+    const float2 uv = saturate(position.xy / float2(g.size.xy));
+    const float4 rect = g.fov_current;
+    float4 composed = g_peripheral.SampleLevel(g_linear, uv, 0.0);
+    if (all(uv >= rect.xy) && all(uv <= rect.zw)) {
+        const float2 to_edge = min(uv - rect.xy, rect.zw - uv);
+        float alpha = saturate(min(to_edge.x / max(g.fov_previous.x, 0.0001), to_edge.y / max(g.fov_previous.y, 0.0001)));
+        alpha = alpha * alpha * (3.0 - 2.0 * alpha);
+        const float2 focus_uv = saturate((uv - rect.xy) / max(rect.zw - rect.xy, float2(0.0001, 0.0001)));
+        float4 focus = g_focus.SampleLevel(g_linear, focus_uv, 0.0);
+        // Sharpening fades in with the focus image, sampling neighbours one
+        // output pixel apart: the detail that survives the resample into the
+        // rectangle.
+        const float sharpen = saturate(g.fov_previous.z) * alpha;
+        if (sharpen > 0.001) {
+            const float2 off = g.rot0.zw;
+            const float3 n = g_focus.SampleLevel(g_linear, saturate(focus_uv + float2(0.0, -off.y)), 0.0).rgb;
+            const float3 s = g_focus.SampleLevel(g_linear, saturate(focus_uv + float2(0.0, off.y)), 0.0).rgb;
+            const float3 e = g_focus.SampleLevel(g_linear, saturate(focus_uv + float2(off.x, 0.0)), 0.0).rgb;
+            const float3 w = g_focus.SampleLevel(g_linear, saturate(focus_uv + float2(-off.x, 0.0)), 0.0).rgb;
+            const float3 average = (n + s + e + w) * 0.25;
+            const float3 low = min(focus.rgb, min(min(n, s), min(e, w)));
+            const float3 high = max(focus.rgb, max(max(n, s), max(e, w)));
+            const float3 range = max(high - low, float3(1.0 / 255.0, 1.0 / 255.0, 1.0 / 255.0));
+            focus.rgb = saturate(focus.rgb + clamp((focus.rgb - average) * (sharpen * 2.0), -range * 0.5, range * 0.5));
+        }
+        composed = lerp(composed, focus, alpha);
+    }
+    return composed;
+}
 #endif
 
 #if defined(FG_PASS_DEPTH)

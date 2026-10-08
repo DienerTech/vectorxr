@@ -54,6 +54,17 @@ struct FrameGenGpuWindow {
     std::chrono::steady_clock::time_point end{};
 };
 
+// One analysis (Execute with FrameGenTuning::analyze_only) on the GPU, on
+// std::chrono::steady_clock ({} unknown).
+struct FrameGenAnalysisTiming {
+    std::uint64_t submission{0};                            // FrameGenExecuteResult::submission
+    std::chrono::steady_clock::time_point capture_end{};    // the newest capture it waited for had run
+    std::chrono::steady_clock::time_point start{};
+    std::chrono::steady_clock::time_point hardware_start{}; // waiting for the optical flow hardware ({} without it)
+    std::chrono::steady_clock::time_point hardware_end{};
+    std::chrono::steady_clock::time_point end{};
+};
+
 struct FrameGenMemoryBudget {
     std::uint64_t usage_bytes{0};
     std::uint64_t budget_bytes{0};
@@ -164,6 +175,9 @@ class FrameGenGpu {
     // When the newest submission whose timing has been read (a few
     // submissions after it) started and ended on the GPU.
     virtual std::optional<FrameGenGpuWindow> LastGpuWindow() const { return std::nullopt; }
+    // Timings of analyses the GPU has finished since the last call, oldest
+    // first; never waits. Under the caller's GPU lock.
+    virtual std::vector<FrameGenAnalysisTiming> TakeTimings() { return {}; }
     // The process's local video memory use (the application's included) and
     // the OS budget for it; absent when the backend cannot query it.
     virtual std::optional<FrameGenMemoryBudget> MemoryBudget() const { return std::nullopt; }
@@ -196,6 +210,21 @@ class FrameGenGpu {
         error = "this graphics API cannot write generated frames one at a time";
         return false;
     }
+    // Quad views: frames written just in time from views of their own
+    // (FrameGenComposition), composed per eye.
+    virtual bool SupportsComposition() const { return false; }
+    // Like Synthesize, but each analyzed view is written at `fraction` into
+    // an image of the backend's own (or read as captured, for its exact copy
+    // or a view without motion), then each eye of `composition` is composed
+    // from its peripheral and focus views into `outputs[eye]` (acquired and
+    // waited, composition.output in size). Never waits on the CPU. False as
+    // Synthesize.
+    virtual bool SynthesizeComposed(std::uint64_t /*frame*/, FrameGenSynthesisMode /*mode*/, float /*fraction*/,
+                                    const FrameGenComposition& /*composition*/,
+                                    const std::vector<FrameGenImage>& /*outputs*/, std::string& error) {
+        error = "this graphics API cannot compose quad views";
+        return false;
+    }
     // Whether analyzed real frame `frame`'s motion is measured on the GPU
     // by now: frames moved by it written before then wait for it, and with
     // them anything submitted after them to the same queue. (Its exact copy
@@ -204,6 +233,16 @@ class FrameGenGpu {
     // Whether its images' capture has run on the GPU by now: its exact copy
     // written before then waits for that (and the game's frame before it).
     virtual bool Captured(std::uint64_t /*frame*/) const { return true; }
+    // GPU-aware pacing: identifies every capture submitted so far (0: none).
+    // Under the caller's GPU lock, after Capture.
+    virtual std::uint64_t CaptureMark() const { return 0; }
+    // Whether every capture up to `mark` has run on the GPU. Thread-safe:
+    // callable without the caller's GPU lock, from any thread, while the
+    // backend exists (not during Reset).
+    virtual bool CaptureReached(std::uint64_t /*mark*/) const { return true; }
+    // Blocks the calling thread until CaptureReached(mark) or `timeout`;
+    // false on timeout. Thread-safe like CaptureReached; one caller at a time.
+    virtual bool WaitCapture(std::uint64_t /*mark*/, std::chrono::milliseconds /*timeout*/) const { return true; }
 };
 
 // Direct3D 12 queue substitution (FrameGenQueueSubstitution): the runtime was
@@ -231,9 +270,11 @@ struct Blob {
 // SPIR-V compiler; the Vulkan backend then reports itself unavailable.
 extern const std::array<Blob, kFrameGenPassCount> kDxbc;
 extern const std::array<Blob, kFrameGenPassCount> kSpirv;
-// Synthesis as a draw (Direct3D 12): the vertex shader, then the pixel
-// shader writing 1, 2 and 3 generated frames.
-inline constexpr std::size_t kDrawShaderCount = 1 + kFrameGenMaxGenerated;
+// Synthesis as a draw (Direct3D 12): the vertex shader, the pixel shader
+// writing 1 to kFrameGenMaxGenerated generated frames, then the quad views
+// compose pixel shader (empty while the build has none).
+inline constexpr std::size_t kDrawShaderCount = 2 + kFrameGenMaxGenerated;
+inline constexpr std::size_t kComposeDrawShader = kDrawShaderCount - 1;
 extern const std::array<Blob, kDrawShaderCount> kDxbcDraw;
 } // namespace framegen_shaders
 

@@ -3,6 +3,7 @@ add_library(
     STATIC
     src/config_parser.cpp
     src/input_devices.cpp
+    src/quadviews_compose.cpp
     src/quadviews_sizing.cpp
     src/framegen_plan.cpp
     src/runtime_pacing.cpp
@@ -145,24 +146,37 @@ if(WIN32 AND DEPTHXR_BUILD_LAYER)
         endif()
     endforeach()
     # Synthesis as a draw into the output swapchains (Direct3D 12): the
-    # vertex shader and a pixel shader per number of generated frames.
-    set(_framegen_draw_shaders DRAW_VS DRAW_PS1 DRAW_PS2 DRAW_PS3 DRAW_PS4)
+    # vertex shader and a pixel shader per number of generated frames; then
+    # the quad views compose pixel shader, drawn by the same vertex shader.
+    set(_framegen_draw_shaders DRAW_VS DRAW_PS1 DRAW_PS2 DRAW_PS3 DRAW_PS4 COMPOSE_PS)
     foreach(_framegen_draw IN LISTS _framegen_draw_shaders)
         if(_framegen_draw STREQUAL "DRAW_VS")
-            set(_framegen_draw_args -T vs_5_0 -E VSMain -D FG_DRAW_OUTPUTS=1)
+            set(_framegen_draw_args -T vs_5_0 -E VSMain -D FG_DRAW_OUTPUTS=1 -D FG_PASS_SYNTHESIZE_DRAW=1)
+        elseif(_framegen_draw STREQUAL "COMPOSE_PS")
+            set(_framegen_draw_args -T ps_5_0 -E PSMain -D FG_PASS_COMPOSE_DRAW=1)
         else()
             string(SUBSTRING "${_framegen_draw}" 7 1 _framegen_draw_outputs)
-            set(_framegen_draw_args -T ps_5_0 -E PSMain -D "FG_DRAW_OUTPUTS=${_framegen_draw_outputs}")
+            set(_framegen_draw_args -T ps_5_0 -E PSMain -D "FG_DRAW_OUTPUTS=${_framegen_draw_outputs}"
+                -D FG_PASS_SYNTHESIZE_DRAW=1)
         endif()
         add_custom_command(
             OUTPUT "${_framegen_out}/${_framegen_draw}.dxbc"
-            COMMAND "${DEPTHXR_FXC}" -nologo ${_framegen_draw_args} -D FG_PASS_SYNTHESIZE_DRAW=1 -O3 -WX
+            COMMAND "${DEPTHXR_FXC}" -nologo ${_framegen_draw_args} -O3 -WX
                     -Fo "${_framegen_out}/${_framegen_draw}.dxbc" "${_framegen_hlsl}"
             DEPENDS "${_framegen_hlsl}"
             COMMENT "Compiling Frame Generation ${_framegen_draw} (DXBC)"
             VERBATIM)
         list(APPEND _framegen_binaries "${_framegen_out}/${_framegen_draw}.dxbc")
     endforeach()
+    # Quad views' flow merge (Direct3D 12): a compute shader outside the
+    # FrameGenPass list, included by the backend as a header.
+    add_custom_command(
+        OUTPUT "${_framegen_out}/framegen_flow_merge.h"
+        COMMAND "${DEPTHXR_FXC}" -nologo -T cs_5_0 -E CSMain -D FG_PASS_FLOW_MERGE=1 -O3 -WX
+                -Vn kFrameGenFlowMergeDxbc -Fh "${_framegen_out}/framegen_flow_merge.h" "${_framegen_hlsl}"
+        DEPENDS "${_framegen_hlsl}"
+        COMMENT "Compiling Frame Generation FLOW_MERGE (DXBC)"
+        VERBATIM)
     string(REPLACE ";" "," _framegen_pass_list "${_framegen_passes}")
     string(REPLACE ";" "," _framegen_draw_list "${_framegen_draw_shaders}")
     set(_framegen_spirv_dir "")
@@ -185,8 +199,10 @@ if(WIN32 AND DEPTHXR_BUILD_LAYER)
         src/framegen/framegen_d3d11.cpp
         src/framegen/framegen_d3d12.cpp
         src/framegen/framegen_vulkan.cpp
-        "${_framegen_out}/framegen_shaders.cpp")
+        "${_framegen_out}/framegen_shaders.cpp"
+        "${_framegen_out}/framegen_flow_merge.h")
     target_include_directories(depthxr_framegen PUBLIC include)
+    target_include_directories(depthxr_framegen PRIVATE "${_framegen_out}")
     target_compile_features(depthxr_framegen PUBLIC cxx_std_20)
     # NVIDIA's optical flow accelerator (RTX 20-50) measures motion on
     # Direct3D 12, through the SDK's MIT-licensed interface headers in
@@ -326,7 +342,9 @@ if(WIN32 AND DEPTHXR_BUILD_LAYER)
         set_tests_properties(depthxr_osd_d3d12_tests depthxr_osd_vulkan_tests PROPERTIES TIMEOUT 30)
         set_tests_properties(depthxr_osd_vulkan_tests PROPERTIES SKIP_RETURN_CODE 77)
         add_executable(depthxr_framegen_tests tests/framegen_backend_tests.cpp)
-        target_link_libraries(depthxr_framegen_tests PRIVATE depthxr_framegen dxgi)
+        # d3dcompiler: the quad views compose is checked against the layer's
+        # Direct3D 11 compositor shader, compiled at run time.
+        target_link_libraries(depthxr_framegen_tests PRIVATE depthxr_framegen dxgi d3dcompiler)
         target_compile_definitions(depthxr_framegen_tests PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX XR_USE_GRAPHICS_API_D3D11 XR_USE_GRAPHICS_API_D3D12 XR_USE_GRAPHICS_API_VULKAN)
         # Research: compares NVIDIA's hardware optical flow with ours
         # (`depthxr_framegen_tests nvof`).

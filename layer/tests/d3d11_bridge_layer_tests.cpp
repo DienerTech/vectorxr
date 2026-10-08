@@ -9,7 +9,9 @@
 // logs and the layer's other files go to a temporary directory. The
 // Direct3D 12 debug layer checks the GPU work (and the Direct3D 11 one when
 // installed), after every case's teardown; without either, a warning says so
-// and the behavioural checks stand alone. Exit code 77: this machine shares
+// and the behavioural checks stand alone. Quad views (XR_VARJO_quad_views)
+// run on a stereo stand-in whose waits are paced like a runtime's: the layer
+// composes the four views into stereo. Exit code 77: this machine shares
 // nothing between the APIs.
 #include <windows.h>
 #include <d3d11_4.h>
@@ -19,12 +21,16 @@
 #include <openxr/openxr_platform.h>
 
 #include "depthxr/framegen_gpu.h"
+#include "depthxr/framegen_plan.h"
 #include "depthxr/openxr_layer.h"
 #include "depthxr/openxr_loader_api_layer.h"
+#include "depthxr/quadviews_sizing.h"
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -32,12 +38,15 @@
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <iomanip>
 #include <iostream>
 #include <map>
+#include <mutex>
 #include <optional>
 #include <sstream>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 // The layer's loader entry point (layer_entry.cpp).
@@ -89,6 +98,39 @@ class D3D11BridgeLayerTestPeer {
     static void ReleaseLog(const std::filesystem::path& path) {
         OpenXrLayer::Instance().logger_.Initialize(path);
     }
+    // Frame Generation engages after `steady_frames` steady frames once its
+    // session is `minimum_age` old (kept across sessions).
+    static void SetFrameGenEngagement(std::uint32_t steady_frames, std::chrono::milliseconds minimum_age) {
+        OpenXrLayer::Instance().framegen_.SetEngagementPolicy(steady_frames, minimum_age);
+    }
+    // Frame Generation's hotkey: whether it is on afterwards.
+    static bool ToggleFrameGen() {
+        return OpenXrLayer::Instance().framegen_.Toggle();
+    }
+    // Frame Generation's state and counters (until its session ends).
+    static FrameGenStatus FrameGen() {
+        return OpenXrLayer::Instance().framegen_.Status();
+    }
+    // Quad views: the Direct3D 11 compositor's output swapchains (the runtime's).
+    static std::array<XrSwapchain, 2> CompositorOutputs() {
+        OpenXrLayer& layer = OpenXrLayer::Instance();
+        std::scoped_lock lock(layer.mutex_);
+        return {layer.d3d11_quadviews_compositor_.targets[0].swapchain,
+                layer.d3d11_quadviews_compositor_.targets[1].swapchain};
+    }
+    // The bridged session's quad views frames so far: composed by the
+    // Direct3D 11 compositor, and split into layers.
+    static std::pair<std::uint64_t, std::uint64_t> QuadFrames() {
+        OpenXrLayer& layer = OpenXrLayer::Instance();
+        std::scoped_lock lock(layer.mutex_);
+        return {layer.d3d11_bridge_quad_frames_.d3d11, layer.d3d11_bridge_quad_frames_.split};
+    }
+    // The bridge's 30 s summary is logged at the next xrEndFrame.
+    static void ExpireBridgeSummary() {
+        OpenXrLayer& layer = OpenXrLayer::Instance();
+        std::scoped_lock lock(layer.mutex_);
+        layer.d3d11_bridge_last_summary_ = std::chrono::steady_clock::now() - std::chrono::seconds(31);
+    }
 };
 
 } // namespace depthxr
@@ -103,6 +145,8 @@ constexpr int kSkip = 77;
 constexpr const char* kD3D11Extension = "XR_KHR_D3D11_enable";
 constexpr const char* kD3D12Extension = "XR_KHR_D3D12_enable";
 constexpr const char* kClockExtension = "XR_KHR_win32_convert_performance_counter_time";
+constexpr const char* kQuadViewsExtension = "XR_VARJO_quad_views";
+constexpr const char* kFoveatedExtension = "XR_VARJO_foveated_rendering";
 constexpr XrSystemId kSystem = 7;
 constexpr XrDuration kPeriod = 11'111'111;
 constexpr std::uint32_t kImages = 3;
@@ -186,6 +230,23 @@ bool Near(const std::optional<Color>& texel, const Color& expected) {
 Color FrameColor(int frame, int eye) {
     return {static_cast<std::uint8_t>(16 + 37 * frame), static_cast<std::uint8_t>(200 - 29 * frame),
             static_cast<std::uint8_t>(eye ? 220 : 60), 255};
+}
+
+// Quad views: P(frame, eye), each periphery's colour, and F(frame, eye), each
+// focus view's, differ from each other, from the other eye's, and from those
+// of the seven frames before them.
+Color PeripheryColor(int frame, int eye) {
+    return {static_cast<std::uint8_t>(30 + 23 * (frame % 8)), static_cast<std::uint8_t>(eye ? 50 : 100), 210, 255};
+}
+
+Color FocusColor(int frame, int eye) {
+    return {220, static_cast<std::uint8_t>(40 + 21 * (frame % 8)), static_cast<std::uint8_t>(eye ? 150 : 90), 255};
+}
+
+// Detail in the focus view's interior, right of its centre (Stripes): what
+// the compositor sharpens.
+Color StripeColor(int frame, int eye) {
+    return {static_cast<std::uint8_t>(250 - 25 * (frame % 8)), 20, static_cast<std::uint8_t>(eye ? 30 : 240), 255};
 }
 
 void SetEnv(const char* name, const std::string& value) {
@@ -409,6 +470,7 @@ struct ShownView {
     XrStructureType next_type{XR_TYPE_UNKNOWN}; // the first structure of the view's chain
     bool depth{false};                          // the chain had XrCompositionLayerDepthInfoKHR
     std::optional<Color> texel;                 // the centre of the image released last
+    std::vector<Color> probed;                  // its texels at StandIn::probes
 };
 
 struct ShownFrame {
@@ -428,6 +490,12 @@ struct StandIn {
     bool refuse_transfer_dst{false};  // swapchains with TRANSFER_DST are refused
     std::uint32_t width_error{0};     // images this much wider than asked for
     LUID luid{};                      // the adapter it composes on
+    std::uint32_t recommended_width{kWidth}; // each stereo view's recommended size
+    std::uint32_t recommended_height{kHeight};
+    // xrWaitFrame returns at the next refresh, as a runtime's does (else at once).
+    bool paced{false};
+    // Where each shown view's image is read besides its centre (fractions of its size).
+    std::vector<std::array<float, 2>> probes;
     // Direct3D 11 held back behind it: the next readback is checked to wait
     // for the game's rendering, then the gate is opened.
     Gate* hold{nullptr};
@@ -457,6 +525,13 @@ struct StandIn {
     std::function<void()> on_destroy_session;
     std::function<void()> on_destroy_instance; // before a session still alive goes with the instance
     XrTime time{1'000'000'000};
+    std::chrono::steady_clock::time_point refresh{}; // paced: the refresh the last wait returned at
+    // The frame loop as the stand-in saw it: every begin follows a wait of its
+    // own, every end a begin, and a wait comes only once the frame waited
+    // before it began.
+    std::uint64_t frame_waits{0};
+    std::uint64_t frame_begins{0};
+    std::uint64_t frame_ends{0};
     std::uintptr_t handles{0x1000};
 
     // The index of the first `call` at or after `from`, or -1.
@@ -469,6 +544,53 @@ struct StandIn {
 };
 
 StandIn g_runtime;
+// Over g_runtime while a case runs: Frame Generation's presenter thread calls
+// the runtime as the application's thread does. The test reads what the
+// stand-in saw under it too (Shown).
+std::recursive_mutex g_runtime_mutex;
+// Frame loop calls in progress: xrWaitFrame never overlaps another wait, nor
+// xrBeginFrame or xrEndFrame another begin or end, whichever threads make them.
+std::atomic<int> g_waits_in{0};
+std::atomic<int> g_begins_ends_in{0};
+
+struct InCall {
+    std::atomic<int>& calls;
+    InCall(std::atomic<int>& in, const char* call) : calls(in) {
+        Check(calls.fetch_add(1) == 0, std::string(call) + " overlaps another frame call of its kind");
+    }
+    ~InCall() { calls.fetch_sub(1); }
+    InCall(const InCall&) = delete;
+    InCall& operator=(const InCall&) = delete;
+};
+
+// The frames the stand-in showed from the `from`th on.
+std::vector<ShownFrame> Shown(std::size_t from = 0) {
+    std::scoped_lock lock(g_runtime_mutex);
+    const std::vector<ShownFrame>& frames = g_runtime.frames;
+    return {frames.begin() + static_cast<std::ptrdiff_t>(std::min(from, frames.size())), frames.end()};
+}
+
+std::size_t ShownCount() {
+    std::scoped_lock lock(g_runtime_mutex);
+    return g_runtime.frames.size();
+}
+
+// Until `until`, on a high-resolution timer (a runtime's wait wakes at the refresh).
+void SleepUntil(std::chrono::steady_clock::time_point until) {
+    const auto now = std::chrono::steady_clock::now();
+    if (until <= now) return;
+    HANDLE timer = CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
+    if (!timer) timer = CreateWaitableTimerExW(nullptr, nullptr, 0, TIMER_ALL_ACCESS);
+    LARGE_INTEGER due{};
+    due.QuadPart = -std::max<LONGLONG>(
+        1, std::chrono::duration_cast<std::chrono::nanoseconds>(until - now).count() / 100); // relative, 100 ns
+    if (timer && SetWaitableTimer(timer, &due, 0, nullptr, nullptr, FALSE)) {
+        WaitForSingleObject(timer, INFINITE);
+    } else {
+        std::this_thread::sleep_until(until);
+    }
+    if (timer) CloseHandle(timer);
+}
 
 StandInSwapchain* FindSwapchain(XrSwapchain swapchain) {
     const auto it = g_runtime.swapchains.find(swapchain);
@@ -485,9 +607,20 @@ D3D12_RESOURCE_BARRIER Transition(ID3D12Resource* resource, D3D12_RESOURCE_STATE
     return barrier;
 }
 
-using Sources = std::vector<std::pair<ID3D12Resource*, std::uint32_t>>; // images and array slices
+// A texel to read: an image's array slice, and where in it (fractions of its size).
+struct Source {
+    ID3D12Resource* image{nullptr};
+    std::uint32_t slice{0};
+    std::array<float, 2> at{0.5f, 0.5f};
+};
+using Sources = std::vector<Source>;
 
-// A copy of the centre texel of images' slices, submitted to a queue.
+// The texel at `at` (a fraction) of `size` texels.
+UINT TexelAt(float at, UINT size) {
+    return std::min(size - 1, static_cast<UINT>(std::floor(static_cast<double>(at) * size)));
+}
+
+// A copy of each source's texel, submitted to a queue.
 struct Readback {
     ComPtr<ID3D12Resource> buffer;
     ComPtr<ID3D12CommandAllocator> allocator;
@@ -520,24 +653,24 @@ bool SubmitReadback(ID3D12CommandQueue* queue, ID3D12Fence* fence, UINT64& fence
     }
     // Colour images are render targets whenever the runtime holds them.
     std::vector<D3D12_RESOURCE_BARRIER> barriers;
-    for (const auto& [image, slice] : sources) {
-        if (std::none_of(barriers.begin(), barriers.end(), [image = image](const D3D12_RESOURCE_BARRIER& barrier) {
-                return barrier.Transition.pResource == image;
+    for (const Source& texel : sources) {
+        if (std::none_of(barriers.begin(), barriers.end(), [&](const D3D12_RESOURCE_BARRIER& barrier) {
+                return barrier.Transition.pResource == texel.image;
             })) {
             barriers.push_back(
-                Transition(image, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE));
+                Transition(texel.image, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE));
         }
     }
     readback.list->ResourceBarrier(static_cast<UINT>(barriers.size()), barriers.data());
     for (std::size_t i = 0; i < sources.size(); ++i) {
-        const D3D12_RESOURCE_DESC image = sources[i].first->GetDesc();
-        D3D12_TEXTURE_COPY_LOCATION source{sources[i].first, D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX};
-        source.SubresourceIndex = sources[i].second * image.MipLevels;
+        const D3D12_RESOURCE_DESC image = sources[i].image->GetDesc();
+        D3D12_TEXTURE_COPY_LOCATION source{sources[i].image, D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX};
+        source.SubresourceIndex = sources[i].slice * image.MipLevels;
         D3D12_TEXTURE_COPY_LOCATION destination{readback.buffer.Get(), D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT};
         destination.PlacedFootprint.Offset = kReadbackStride * i;
         destination.PlacedFootprint.Footprint = {image.Format, 1, 1, 1, D3D12_TEXTURE_DATA_PITCH_ALIGNMENT};
-        const UINT x = static_cast<UINT>(image.Width / 2);
-        const UINT y = image.Height / 2;
+        const UINT x = TexelAt(sources[i].at[0], static_cast<UINT>(image.Width));
+        const UINT y = TexelAt(sources[i].at[1], image.Height);
         const D3D12_BOX box{x, y, 0, x + 1, y + 1, 1};
         readback.list->CopyTextureRegion(&destination, 0, 0, 0, &source, &box);
     }
@@ -576,13 +709,12 @@ bool FinishReadback(Readback& readback, std::vector<Color>& texels) {
     return true;
 }
 
-// Reads the centre texel of each image's slice on the session's queue, after
-// everything queued there before (the images' releases among it), as a
-// compositor reads what it shows. With the game held back (StandIn::hold),
-// the readback must still be waiting a while later, nothing ordered after the
-// game's rendering having run; as a control, the same images read meanwhile
-// on a queue of the stand-in's own, ordered after nothing, do not hold the
-// frame yet.
+// Reads each source's texel on the session's queue, after everything queued
+// there before (the images' releases among it), as a compositor reads what
+// it shows. With the game held back (StandIn::hold), the readback must still
+// be waiting a while later, nothing ordered after the game's rendering having
+// run; as a control, the same images read meanwhile on a queue of the
+// stand-in's own, ordered after nothing, do not hold the frame yet.
 bool ReadBack12(const Sources& sources, ShownFrame& frame, std::vector<Color>& texels) {
     StandIn& rt = g_runtime;
     Readback shown;
@@ -645,6 +777,7 @@ bool ReadBack11(const std::vector<std::pair<ID3D11Texture2D*, std::uint32_t>>& s
 
 XrResult XRAPI_CALL RtEnumerateInstanceExtensions(const char*, std::uint32_t capacity, std::uint32_t* count,
                                                    XrExtensionProperties* properties) {
+    std::scoped_lock lock(g_runtime_mutex);
     const std::vector<std::string>& names = g_runtime.extensions;
     *count = static_cast<std::uint32_t>(names.size());
     if (capacity == 0) return XR_SUCCESS;
@@ -658,6 +791,7 @@ XrResult XRAPI_CALL RtEnumerateInstanceExtensions(const char*, std::uint32_t cap
 
 XrResult XRAPI_CALL RtCreateApiLayerInstance(const XrInstanceCreateInfo* info,
                                              const depthxr::XrApiLayerCreateInfo* layer_info, XrInstance* instance) {
+    std::scoped_lock lock(g_runtime_mutex);
     StandIn& rt = g_runtime;
     std::vector<std::string> extensions;
     for (std::uint32_t i = 0; i < info->enabledExtensionCount; ++i) {
@@ -690,6 +824,7 @@ void DropSession(StandIn& rt) {
 }
 
 XrResult XRAPI_CALL RtDestroyInstance(XrInstance instance) {
+    std::scoped_lock lock(g_runtime_mutex);
     StandIn& rt = g_runtime;
     rt.calls.push_back("xrDestroyInstance");
     Check(instance == rt.instance, "the runtime's instance is destroyed");
@@ -727,6 +862,7 @@ XrResult XRAPI_CALL RtGetSystemProperties(XrInstance, XrSystemId, XrSystemProper
 }
 
 XrResult XRAPI_CALL RtGetD3D11Requirements(XrInstance, XrSystemId, XrGraphicsRequirementsD3D11KHR* requirements) {
+    std::scoped_lock lock(g_runtime_mutex);
     g_runtime.calls.push_back("xrGetD3D11GraphicsRequirementsKHR");
     requirements->adapterLuid = g_runtime.luid;
     requirements->minFeatureLevel = D3D_FEATURE_LEVEL_11_0;
@@ -734,6 +870,7 @@ XrResult XRAPI_CALL RtGetD3D11Requirements(XrInstance, XrSystemId, XrGraphicsReq
 }
 
 XrResult XRAPI_CALL RtGetD3D12Requirements(XrInstance, XrSystemId, XrGraphicsRequirementsD3D12KHR* requirements) {
+    std::scoped_lock lock(g_runtime_mutex);
     g_runtime.calls.push_back("xrGetD3D12GraphicsRequirementsKHR");
     requirements->adapterLuid = g_runtime.luid;
     requirements->minFeatureLevel = D3D_FEATURE_LEVEL_11_0;
@@ -757,10 +894,11 @@ XrResult XRAPI_CALL RtGetViewConfigurationProperties(XrInstance, XrSystemId, XrV
 XrResult XRAPI_CALL RtEnumerateViewConfigurationViews(XrInstance, XrSystemId, XrViewConfigurationType,
                                                        std::uint32_t capacity, std::uint32_t* count,
                                                        XrViewConfigurationView* views) {
+    std::scoped_lock lock(g_runtime_mutex);
     *count = 2;
     for (std::uint32_t i = 0; i < std::min(capacity, 2u); ++i) {
-        views[i].recommendedImageRectWidth = kWidth;
-        views[i].recommendedImageRectHeight = kHeight;
+        views[i].recommendedImageRectWidth = g_runtime.recommended_width;
+        views[i].recommendedImageRectHeight = g_runtime.recommended_height;
         views[i].maxImageRectWidth = 4096;
         views[i].maxImageRectHeight = 4096;
         views[i].recommendedSwapchainSampleCount = 1;
@@ -781,6 +919,7 @@ XrResult XRAPI_CALL RtPollEvent(XrInstance, XrEventDataBuffer*) {
 }
 
 XrResult XRAPI_CALL RtCreateSession(XrInstance, const XrSessionCreateInfo* info, XrSession* session) {
+    std::scoped_lock lock(g_runtime_mutex);
     StandIn& rt = g_runtime;
     const auto* first = info ? static_cast<const XrBaseInStructure*>(info->next) : nullptr;
     if (first && first->type == XR_TYPE_GRAPHICS_BINDING_D3D12_KHR) {
@@ -812,6 +951,7 @@ XrResult XRAPI_CALL RtCreateSession(XrInstance, const XrSessionCreateInfo* info,
 }
 
 XrResult XRAPI_CALL RtDestroySession(XrSession session) {
+    std::scoped_lock lock(g_runtime_mutex);
     StandIn& rt = g_runtime;
     rt.calls.push_back("xrDestroySession");
     Check(session == rt.session, "the runtime's session is destroyed");
@@ -825,12 +965,17 @@ XrResult XRAPI_CALL RtDestroySession(XrSession session) {
     return XR_SUCCESS;
 }
 
-XrResult XRAPI_CALL RtBeginSession(XrSession, const XrSessionBeginInfo*) {
+XrResult XRAPI_CALL RtBeginSession(XrSession, const XrSessionBeginInfo* info) {
+    std::scoped_lock lock(g_runtime_mutex);
     g_runtime.calls.push_back("xrBeginSession");
+    // Quad views are the layer's: the stand-in has the stereo configuration only.
+    Check(info && info->primaryViewConfigurationType == XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO,
+          "the runtime's session begins with the stereo view configuration");
     return XR_SUCCESS;
 }
 
 XrResult XRAPI_CALL RtEndSession(XrSession) {
+    std::scoped_lock lock(g_runtime_mutex);
     g_runtime.calls.push_back("xrEndSession");
     return XR_SUCCESS;
 }
@@ -860,11 +1005,13 @@ XrResult XRAPI_CALL RtGetReferenceSpaceBoundsRect(XrSession, XrReferenceSpaceTyp
 }
 
 XrResult XRAPI_CALL RtCreateReferenceSpace(XrSession, const XrReferenceSpaceCreateInfo*, XrSpace* space) {
+    std::scoped_lock lock(g_runtime_mutex);
     *space = Handle<XrSpace>(++g_runtime.handles);
     return XR_SUCCESS;
 }
 
 XrResult XRAPI_CALL RtCreateActionSpace(XrSession, const XrActionSpaceCreateInfo*, XrSpace* space) {
+    std::scoped_lock lock(g_runtime_mutex);
     *space = Handle<XrSpace>(++g_runtime.handles);
     return XR_SUCCESS;
 }
@@ -893,20 +1040,55 @@ XrResult XRAPI_CALL RtLocateViews(XrSession, const XrViewLocateInfo*, XrViewStat
 }
 
 XrResult XRAPI_CALL RtWaitFrame(XrSession, const XrFrameWaitInfo*, XrFrameState* state) {
-    g_runtime.time += kPeriod;
-    state->predictedDisplayTime = g_runtime.time;
+    const InCall in(g_waits_in, "xrWaitFrame");
+    std::optional<std::chrono::steady_clock::time_point> until;
+    XrTime time = 0;
+    {
+        std::scoped_lock lock(g_runtime_mutex);
+        StandIn& rt = g_runtime;
+        Check(rt.frame_waits == rt.frame_begins, "xrWaitFrame comes only once the frame waited before it began");
+        ++rt.frame_waits;
+        XrDuration refreshes = 1;
+        if (rt.paced) {
+            // The next refresh, or the first one after a wait that comes late.
+            const auto now = std::chrono::steady_clock::now();
+            const std::chrono::nanoseconds period(kPeriod);
+            if (rt.refresh == std::chrono::steady_clock::time_point{}) {
+                rt.refresh = now;
+            } else {
+                rt.refresh += period;
+                for (; rt.refresh < now; rt.refresh += period) {
+                    ++refreshes;
+                }
+                until = rt.refresh;
+            }
+        }
+        rt.time += kPeriod * refreshes;
+        time = rt.time;
+    }
+    if (until) SleepUntil(*until);
+    state->predictedDisplayTime = time;
     state->predictedDisplayPeriod = kPeriod;
     state->shouldRender = XR_TRUE;
     return XR_SUCCESS;
 }
 
 XrResult XRAPI_CALL RtBeginFrame(XrSession, const XrFrameBeginInfo*) {
+    const InCall in(g_begins_ends_in, "xrBeginFrame or xrEndFrame");
+    std::scoped_lock lock(g_runtime_mutex);
+    StandIn& rt = g_runtime;
+    Check(rt.frame_begins < rt.frame_waits, "xrBeginFrame begins a frame waited for");
+    ++rt.frame_begins;
     return XR_SUCCESS;
 }
 
 XrResult XRAPI_CALL RtEndFrame(XrSession, const XrFrameEndInfo* info) {
+    const InCall in(g_begins_ends_in, "xrBeginFrame or xrEndFrame");
+    std::scoped_lock lock(g_runtime_mutex);
     StandIn& rt = g_runtime;
     rt.calls.push_back("xrEndFrame");
+    Check(rt.frame_ends < rt.frame_begins, "xrEndFrame ends a begun frame");
+    ++rt.frame_ends;
     ShownFrame frame;
     frame.time = info->displayTime;
     for (std::uint32_t i = 0; i < info->layerCount; ++i) {
@@ -928,15 +1110,21 @@ XrResult XRAPI_CALL RtEndFrame(XrSession, const XrFrameEndInfo* info) {
     }
     std::vector<Color> texels;
     bool read = false;
+    std::size_t per_view = 1; // texels read per view: the centre, then the probes (Direct3D 12)
     if (rt.device12) {
         Sources sources;
+        per_view += rt.probes.size();
         for (const ShownView& view : frame.views) {
             const StandInSwapchain* chain = FindSwapchain(view.swapchain);
             if (!chain || !chain->released || chain->images12.empty()) {
                 sources.clear();
                 break;
             }
-            sources.emplace_back(chain->images12[*chain->released].Get(), view.slice);
+            ID3D12Resource* image = chain->images12[*chain->released].Get();
+            sources.push_back({image, view.slice});
+            for (const std::array<float, 2>& probe : rt.probes) {
+                sources.push_back({image, view.slice, probe});
+            }
         }
         read = !sources.empty() && ReadBack12(sources, frame, texels);
     } else if (rt.device11) {
@@ -952,7 +1140,9 @@ XrResult XRAPI_CALL RtEndFrame(XrSession, const XrFrameEndInfo* info) {
         read = !sources.empty() && ReadBack11(sources, texels);
     }
     for (std::size_t i = 0; read && i < frame.views.size(); ++i) {
-        frame.views[i].texel = texels[i];
+        frame.views[i].texel = texels[i * per_view];
+        frame.views[i].probed.assign(texels.begin() + static_cast<std::ptrdiff_t>(i * per_view + 1),
+                                     texels.begin() + static_cast<std::ptrdiff_t>((i + 1) * per_view));
     }
     rt.frames.push_back(frame);
     return XR_SUCCESS;
@@ -970,6 +1160,7 @@ XrResult XRAPI_CALL RtEnumerateSwapchainFormats(XrSession, std::uint32_t capacit
 }
 
 XrResult XRAPI_CALL RtCreateSwapchain(XrSession session, const XrSwapchainCreateInfo* info, XrSwapchain* swapchain) {
+    std::scoped_lock lock(g_runtime_mutex);
     StandIn& rt = g_runtime;
     rt.calls.push_back("xrCreateSwapchain");
     rt.swapchain_requests.push_back(*info);
@@ -1031,6 +1222,7 @@ XrResult XRAPI_CALL RtCreateSwapchain(XrSession session, const XrSwapchainCreate
 }
 
 XrResult XRAPI_CALL RtDestroySwapchain(XrSwapchain swapchain) {
+    std::scoped_lock lock(g_runtime_mutex);
     StandIn& rt = g_runtime;
     rt.calls.push_back("xrDestroySwapchain");
     if (!FindSwapchain(swapchain)) return XR_ERROR_HANDLE_INVALID;
@@ -1042,6 +1234,7 @@ XrResult XRAPI_CALL RtDestroySwapchain(XrSwapchain swapchain) {
 
 XrResult XRAPI_CALL RtEnumerateSwapchainImages(XrSwapchain swapchain, std::uint32_t capacity, std::uint32_t* count,
                                                 XrSwapchainImageBaseHeader* images) {
+    std::scoped_lock lock(g_runtime_mutex);
     const StandInSwapchain* chain = FindSwapchain(swapchain);
     if (!chain) return XR_ERROR_HANDLE_INVALID;
     *count = static_cast<std::uint32_t>(chain->Count());
@@ -1064,6 +1257,7 @@ XrResult XRAPI_CALL RtEnumerateSwapchainImages(XrSwapchain swapchain, std::uint3
 }
 
 XrResult XRAPI_CALL RtAcquire(XrSwapchain swapchain, const XrSwapchainImageAcquireInfo*, std::uint32_t* index) {
+    std::scoped_lock lock(g_runtime_mutex);
     StandInSwapchain* chain = FindSwapchain(swapchain);
     if (!chain) return XR_ERROR_HANDLE_INVALID;
     if (chain->acquired.size() >= chain->Count()) return XR_ERROR_CALL_ORDER_INVALID;
@@ -1075,6 +1269,7 @@ XrResult XRAPI_CALL RtAcquire(XrSwapchain swapchain, const XrSwapchainImageAcqui
 }
 
 XrResult XRAPI_CALL RtWait(XrSwapchain swapchain, const XrSwapchainImageWaitInfo*) {
+    std::scoped_lock lock(g_runtime_mutex);
     StandInSwapchain* chain = FindSwapchain(swapchain);
     if (!chain) return XR_ERROR_HANDLE_INVALID;
     if (chain->waits >= chain->acquires) return XR_ERROR_CALL_ORDER_INVALID;
@@ -1083,6 +1278,7 @@ XrResult XRAPI_CALL RtWait(XrSwapchain swapchain, const XrSwapchainImageWaitInfo
 }
 
 XrResult XRAPI_CALL RtRelease(XrSwapchain swapchain, const XrSwapchainImageReleaseInfo*) {
+    std::scoped_lock lock(g_runtime_mutex);
     StandIn& rt = g_runtime;
     StandInSwapchain* chain = FindSwapchain(swapchain);
     if (!chain) return XR_ERROR_HANDLE_INVALID;
@@ -1143,6 +1339,7 @@ XrResult XRAPI_CALL RtGetInstanceProcAddr(XrInstance instance, const char* name,
     *function = nullptr;
     if (instance == XR_NULL_HANDLE) {
         // Before the instance: the loader's extension scan.
+        std::scoped_lock lock(g_runtime_mutex);
         if (std::strcmp(name, "xrEnumerateInstanceExtensionProperties") == 0 && g_runtime.enumeration_offered) {
             *function = Function(RtEnumerateInstanceExtensions);
             return XR_SUCCESS;
@@ -1214,6 +1411,7 @@ struct Api {
     PFN_xrDestroyInstance destroy_instance{};
     PFN_xrGetSystem get_system{};
     PFN_xrGetD3D11GraphicsRequirementsKHR d3d11_requirements{};
+    PFN_xrEnumerateViewConfigurationViews enumerate_views{};
     PFN_xrPollEvent poll_event{};
     PFN_xrCreateSession create_session{};
     PFN_xrDestroySession destroy_session{};
@@ -1248,6 +1446,8 @@ Api Load(XrInstance instance) {
     api.get_system = LayerFunction<PFN_xrGetSystem>(instance, "xrGetSystem");
     api.d3d11_requirements =
         LayerFunction<PFN_xrGetD3D11GraphicsRequirementsKHR>(instance, "xrGetD3D11GraphicsRequirementsKHR");
+    api.enumerate_views =
+        LayerFunction<PFN_xrEnumerateViewConfigurationViews>(instance, "xrEnumerateViewConfigurationViews");
     api.poll_event = LayerFunction<PFN_xrPollEvent>(instance, "xrPollEvent");
     api.create_session = LayerFunction<PFN_xrCreateSession>(instance, "xrCreateSession");
     api.destroy_session = LayerFunction<PFN_xrDestroySession>(instance, "xrDestroySession");
@@ -1335,7 +1535,7 @@ App StartApp(const std::vector<const char*>& extensions = {kD3D11Extension}) {
     return app;
 }
 
-void BeginSession(App& app) {
+void BeginSession(App& app, XrViewConfigurationType configuration = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO) {
     XrReferenceSpaceCreateInfo space{XR_TYPE_REFERENCE_SPACE_CREATE_INFO};
     space.referenceSpaceType = XR_REFERENCE_SPACE_TYPE_LOCAL;
     space.poseInReferenceSpace.orientation.w = 1;
@@ -1343,7 +1543,7 @@ void BeginSession(App& app) {
     XrEventDataBuffer event{XR_TYPE_EVENT_DATA_BUFFER};
     Check(app.api.poll_event(app.api.instance, &event) == XR_EVENT_UNAVAILABLE, "xrPollEvent");
     XrSessionBeginInfo begin{XR_TYPE_SESSION_BEGIN_INFO};
-    begin.primaryViewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
+    begin.primaryViewConfigurationType = configuration;
     Check(app.api.begin_session(app.session, &begin) == XR_SUCCESS, "xrBeginSession");
 }
 
@@ -1442,6 +1642,25 @@ void Draw(Game& game, ID3D11Texture2D* image, const Color& color) {
     for (std::uint32_t slice = 0; slice < desc.ArraySize; ++slice) {
         Clear(game, image, color, slice);
     }
+}
+
+// Vertical stripes one texel wide, two apart, across 62-72% of the image's
+// width: detail away from its centre and edges.
+void Stripes(Game& game, ID3D11Texture2D* image, const Color& color) {
+    D3D11_TEXTURE2D_DESC desc{};
+    image->GetDesc(&desc);
+    D3D11_RENDER_TARGET_VIEW_DESC view{};
+    view.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    view.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2DARRAY;
+    view.Texture2DArray.ArraySize = 1;
+    ComPtr<ID3D11RenderTargetView> target;
+    Check(SUCCEEDED(game.device->CreateRenderTargetView(image, &view, &target)), "a render-target view of an image");
+    std::vector<D3D11_RECT> stripes;
+    for (LONG x = static_cast<LONG>(desc.Width * 62 / 100); x < static_cast<LONG>(desc.Width * 72 / 100); x += 3) {
+        stripes.push_back({x, 0, x + 1, static_cast<LONG>(desc.Height)});
+    }
+    const float rgba[4] = {color[0] / 255.0f, color[1] / 255.0f, color[2] / 255.0f, color[3] / 255.0f};
+    game.context4->ClearView(target.Get(), rgba, stripes.data(), static_cast<UINT>(stripes.size()));
 }
 
 // An image rendered and released outside a frame.
@@ -1552,6 +1771,76 @@ XrResult Frame(App& app, Game& game, const std::vector<const Target*>& targets, 
     return result;
 }
 
+// Quad views (XR_VARJO_quad_views): views 0/1 peripheral, 2/3 focus, each with
+// a swapchain of its own.
+using QuadTargets = std::array<Target, 4>;
+
+// The four quad views at `time`, located through the layer.
+std::array<XrView, 4> LocateQuadViews(App& app, XrTime time) {
+    XrViewLocateInfo locate{XR_TYPE_VIEW_LOCATE_INFO};
+    locate.viewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_QUAD_VARJO;
+    locate.displayTime = time;
+    locate.space = app.space;
+    XrViewState state{XR_TYPE_VIEW_STATE};
+    std::array<XrView, 4> views{};
+    for (XrView& view : views) view.type = XR_TYPE_VIEW;
+    std::uint32_t count = 0;
+    Check(app.api.locate_views(app.session, &locate, &state, 4, &count, views.data()) == XR_SUCCESS && count == 4,
+          "xrLocateViews locates four quad views");
+    return views;
+}
+
+// One application frame of quad views: the four views located at the frame's
+// time, each periphery cleared to P(frame, eye) and each focus view to
+// F(frame, eye) with stripes of StripeColor(frame, eye), released, then
+// submitted as located in one projection.
+XrResult QuadFrame(App& app, Game& game, const QuadTargets& targets, int frame) {
+    XrFrameWaitInfo wait_info{XR_TYPE_FRAME_WAIT_INFO};
+    XrFrameState state{XR_TYPE_FRAME_STATE};
+    Check(app.api.wait_frame(app.session, &wait_info, &state) == XR_SUCCESS, "xrWaitFrame");
+    XrFrameBeginInfo begin_info{XR_TYPE_FRAME_BEGIN_INFO};
+    Check(app.api.begin_frame(app.session, &begin_info) == XR_SUCCESS, "xrBeginFrame");
+    const std::array<XrView, 4> located = LocateQuadViews(app, state.predictedDisplayTime);
+
+    std::array<std::uint32_t, 4> indices{};
+    for (std::size_t i = 0; i < targets.size(); ++i) {
+        indices[i] = Acquire(app, targets[i]);
+    }
+    for (std::size_t i = 0; i < targets.size(); ++i) {
+        const int eye = static_cast<int>(i % 2);
+        Draw(game, targets[i].images[indices[i]], i < 2 ? PeripheryColor(frame, eye) : FocusColor(frame, eye));
+        if (i >= 2) {
+            Stripes(game, targets[i].images[indices[i]], StripeColor(frame, eye));
+        }
+    }
+    for (const Target& target : targets) {
+        Release(app, target);
+    }
+
+    std::array<XrCompositionLayerProjectionView, 4> views{};
+    for (std::size_t i = 0; i < views.size(); ++i) {
+        D3D11_TEXTURE2D_DESC desc{};
+        targets[i].images[indices[i]]->GetDesc(&desc);
+        views[i] = {XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW};
+        views[i].pose = located[i].pose;
+        views[i].fov = located[i].fov;
+        views[i].subImage.swapchain = targets[i].swapchain;
+        views[i].subImage.imageRect = {
+            {0, 0}, {static_cast<std::int32_t>(desc.Width), static_cast<std::int32_t>(desc.Height)}};
+    }
+    XrCompositionLayerProjection projection{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
+    projection.space = app.space;
+    projection.viewCount = 4;
+    projection.views = views.data();
+    const XrCompositionLayerBaseHeader* layers[] = {reinterpret_cast<const XrCompositionLayerBaseHeader*>(&projection)};
+    XrFrameEndInfo end{XR_TYPE_FRAME_END_INFO};
+    end.displayTime = state.predictedDisplayTime;
+    end.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
+    end.layerCount = 1;
+    end.layers = layers;
+    return app.api.end_frame(app.session, &end);
+}
+
 // --- The cases --------------------------------------------------------------
 
 // The test's own reference to the Direct3D 12 device on the game's adapter,
@@ -1592,22 +1881,61 @@ void CheckValidation(Game& game, const std::string& when) {
     Check(errors.empty(), g_case + " (" + when + "): the debug layers reported\n" + errors);
 }
 
+// Quad views cases: the stand-in's stereo views' recommended size, and
+// Quadviews' focus scale, blend band and sharpening.
+constexpr std::uint32_t kQuadStereoSize = 256;
+constexpr double kQuadFocusScale = 1.1;
+constexpr double kQuadTransitionPercent = 25.0;
+constexpr double kQuadSharpness = 50.0;
+
+// What a case's settings turn on beyond the defaults.
+struct CaseSettings {
+    bool framegen{true};
+    bool debug_log{false};
+    // Quadviews' stereo-composite emulation, the focus fixed at the centre.
+    bool quadviews{false};
+    std::string frame_multiplier; // Frame Generation's (its default when empty)
+};
+
 // A fresh stand-in runtime, a log of the case's own, and the test's settings.
 // Every case ends with EndCase.
-void BeginCase(const std::string& name, const Game& game, bool framegen = true, bool debug_log = false) {
+void BeginCase(const std::string& name, const Game& game, const CaseSettings& case_settings) {
     Check(g_case.empty(), name + ": the case before it (" + g_case + ") ended with its debug layers checked");
     Check(Peer::Idle(), name + ": nothing is left of the cases before it");
     g_case = name;
     g_device12 = MakeDevice12(game);
+    // The runtime's clock runs on across sessions, as a runtime's does.
+    const XrTime time = g_runtime.time;
     g_runtime = StandIn{};
+    g_runtime.time = time;
     g_runtime.luid = game.luid;
     g_framegen_chain = {};
     SetEnv("VECTORXR_LOG_PATH", (g_root / "logs" / name / "vectorxr.log").string());
     std::ofstream settings(g_root / "settings.json", std::ios::trunc);
-    settings << R"({"version": 3, "core": {"enabled": true, "logLevel": ")" << (debug_log ? "debug" : "info")
+    settings << R"({"version": 3, "core": {"enabled": true, "logLevel": ")"
+             << (case_settings.debug_log ? "debug" : "info")
              << R"(", "trackSeenApps": false}, "applications": [], "modules": {"depthxr": {"enabled": false}, )"
-             << R"("pivotxr": {"enabled": false}, "quadviews": {"enabled": false}, "turbo": {"enabled": false}, )"
-             << R"("framegen": {"enabled": )" << (framegen ? "true" : "false") << "}}}\n";
+             << R"("pivotxr": {"enabled": false}, )";
+    if (case_settings.quadviews) {
+        settings << R"("quadviews": {"enabled": true, "defaults": {"trackingMode": "head", "focusScale": )"
+                 << kQuadFocusScale << R"(, "transitionThicknessPercent": )" << kQuadTransitionPercent
+                 << R"(, "foveateSharpness": )" << kQuadSharpness << "}}, ";
+    } else {
+        settings << R"("quadviews": {"enabled": false}, )";
+    }
+    settings << R"("turbo": {"enabled": false}, "framegen": {"enabled": )"
+             << (case_settings.framegen ? "true" : "false");
+    if (!case_settings.frame_multiplier.empty()) {
+        settings << R"(, "defaults": {"frameMultiplier": ")" << case_settings.frame_multiplier << R"("})";
+    }
+    settings << "}}}\n";
+}
+
+void BeginCase(const std::string& name, const Game& game, bool framegen = true, bool debug_log = false) {
+    CaseSettings settings;
+    settings.framegen = framegen;
+    settings.debug_log = debug_log;
+    BeginCase(name, game, settings);
 }
 
 // After the case's teardown: neither debug layer reported an error during the
@@ -2249,6 +2577,231 @@ void TestDestroyInstanceWithSession(Game& game) {
     EndCase(game);
 }
 
+// Each channel of `texel` lies strictly between those of `a` and `b` where
+// they differ enough to tell (a blend of the two).
+bool Between(const std::optional<Color>& texel, const Color& a, const Color& b) {
+    if (!texel) return false;
+    for (int i = 0; i < 3; ++i) {
+        const int low = std::min(a[i], b[i]);
+        const int high = std::max(a[i], b[i]);
+        if (high - low >= 8 && ((*texel)[i] <= low + 1 || (*texel)[i] >= high - 1)) return false;
+    }
+    return true;
+}
+
+depthxr::FrameGenFov ToFov(const XrFovf& fov) {
+    return {fov.angleLeft, fov.angleRight, fov.angleUp, fov.angleDown};
+}
+
+// 9. Quad views on a bridged session, as DCS renders them: the game renders
+// four views (XR_VARJO_quad_views), the layer composes each eye from its
+// periphery and focus view with its Direct3D 11 compositor, and the stereo
+// runtime gets two views, the compositor's outputs: at their centres the
+// focus colour, at a corner the periphery's and in the blend band a blend of
+// the two, all of the frame just ended. Frame Generation toggled off, the
+// frames are shown as they are; at 2x (the stand-in backend, inline), engaged
+// after two steady frames, each frame also has a frame of Frame Generation's
+// own outputs before it. The compositor's readbacks are printed as a digest
+// to compare builds by.
+void TestBridgedQuadViewsComposed(Game& game, bool framegen) {
+    CaseSettings settings;
+    settings.quadviews = true;
+    settings.frame_multiplier = framegen ? "2x" : "";
+    BeginCase(framegen ? "quad-views-framegen" : "quad-views", game, settings);
+    g_runtime.recommended_width = g_runtime.recommended_height = kQuadStereoSize;
+    g_runtime.paced = true;
+    if (framegen) {
+        Peer::SetFrameGenEngagement(2, std::chrono::milliseconds(0));
+    }
+    App app = StartApp({kD3D11Extension, kQuadViewsExtension, kFoveatedExtension});
+    std::uint32_t count = 0;
+    std::array<XrViewConfigurationView, 4> configuration{};
+    for (XrViewConfigurationView& view : configuration) view.type = XR_TYPE_VIEW_CONFIGURATION_VIEW;
+    Check(app.api.enumerate_views(app.api.instance, app.system, XR_VIEW_CONFIGURATION_TYPE_PRIMARY_QUAD_VARJO, 0,
+                                  &count, nullptr) == XR_SUCCESS &&
+              count == 4 &&
+              app.api.enumerate_views(app.api.instance, app.system, XR_VIEW_CONFIGURATION_TYPE_PRIMARY_QUAD_VARJO, 4,
+                                      &count, configuration.data()) == XR_SUCCESS,
+          "the layer offers the quad views configuration's four views");
+    SessionCreate create(game.device.Get(), app.system);
+    Check(app.api.create_session(app.api.instance, &create.info, &app.session) == XR_SUCCESS && Peer::Bridge().Active(),
+          "a bridged session");
+    if (!framegen) {
+        Check(!Peer::ToggleFrameGen(), "Frame Generation toggled off");
+    }
+    BeginSession(app, XR_VIEW_CONFIGURATION_TYPE_PRIMARY_QUAD_VARJO);
+    QuadTargets targets;
+    for (std::size_t i = 0; i < targets.size(); ++i) {
+        targets[i] = MakeTarget(app,
+                                ColorInfo(1, configuration[i].recommendedImageRectWidth,
+                                          configuration[i].recommendedImageRectHeight),
+                                i < 2 ? "a peripheral view" : "a focus view");
+    }
+
+    // Where the focus view lands, as the compositor places it: the stand-in
+    // reads a corner, the middle of the blend band on the centre line, and
+    // (for the digest) the centre row and column, through the band and the
+    // focus view's stripes.
+    const depthxr::QuadViewsCanvasDimensions canvas =
+        depthxr::ComputeQuadViewsCanvasDimensions(kQuadStereoSize, kQuadStereoSize, 4096, 4096, kQuadFocusScale);
+    XrTime located_at = 0;
+    {
+        std::scoped_lock lock(g_runtime_mutex);
+        located_at = g_runtime.time;
+    }
+    const std::array<XrView, 4> located = LocateQuadViews(app, located_at);
+    std::array<depthxr::FrameGenComposeEye, 2> placed{};
+    for (int eye = 0; eye < 2; ++eye) {
+        placed[eye] = depthxr::BuildFrameGenComposeEye(
+            ToFov(located[eye].fov), ToFov(located[eye + 2].fov), {canvas.width, canvas.height},
+            {configuration[eye + 2].recommendedImageRectWidth, configuration[eye + 2].recommendedImageRectHeight},
+            kQuadTransitionPercent, kQuadSharpness);
+    }
+    const std::array<float, 2> corner{0.03f, 0.03f};
+    const std::array<float, 2> band{placed[0].focus_rect[0] + placed[0].feather[0] * 0.5f, 0.5f};
+    Check(placed[0].focus_rect == placed[1].focus_rect && placed[0].feather == placed[1].feather,
+          "both eyes' focus views land alike (the stand-in reads both at the same places)");
+    Check(placed[0].focus_rect[0] > 0.1f && placed[0].focus_rect[1] > 0.1f && placed[0].focus_rect[2] < 0.9f &&
+              placed[0].feather[0] * static_cast<float>(canvas.width) >= 4.0f,
+          "the focus view lands inside the image, with a blend band of at least four texels");
+    {
+        std::scoped_lock lock(g_runtime_mutex);
+        g_runtime.probes = {corner, band};
+        for (int i = 0; i < 96; ++i) {
+            g_runtime.probes.push_back({(i + 0.5f) / 96.0f, 0.5f});
+        }
+        for (int i = 0; i < 48; ++i) {
+            g_runtime.probes.push_back({0.5f, (i + 0.5f) / 48.0f});
+        }
+    }
+
+    constexpr int kFrames = 12;
+    int generated_frames = 0;
+    // Per frame, the composed frame the runtime showed: each eye's centre and probes.
+    std::vector<std::vector<Color>> readbacks;
+    const auto frames_start = std::chrono::steady_clock::now();
+    for (int frame = 0; frame < kFrames; ++frame) {
+        const std::string at = "quad frame " + std::to_string(frame);
+        const std::size_t before = ShownCount();
+        const XrResult result = QuadFrame(app, game, targets, frame);
+        Check(result == XR_SUCCESS, at + ": xrEndFrame " + std::to_string(result));
+        const std::array<XrSwapchain, 2> outputs = Peer::CompositorOutputs();
+        int composed = 0;
+        for (const ShownFrame& shown : Shown(before)) {
+            Check(shown.views.size() == 2,
+                  at + ": the runtime gets two views, not " + std::to_string(shown.views.size()));
+            if (shown.views[0].swapchain != outputs[0] || shown.views[1].swapchain != outputs[1]) {
+                // Frame Generation's own outputs (the stand-in backend writes nothing into them).
+                Check(framegen, at + ": the runtime shows the compositor's outputs");
+                for (const ShownView& view : shown.views) {
+                    Check(view.swapchain != outputs[0] && view.swapchain != outputs[1] &&
+                              std::none_of(targets.begin(), targets.end(),
+                                           [&](const Target& target) { return target.swapchain == view.swapchain; }),
+                          at + ": a frame of Frame Generation's shows its own outputs only");
+                }
+                ++generated_frames;
+                continue;
+            }
+            ++composed;
+            std::vector<Color> texels;
+            for (int eye = 0; eye < 2; ++eye) {
+                const ShownView& view = shown.views[eye];
+                const Color periphery = PeripheryColor(frame, eye);
+                const Color focus = FocusColor(frame, eye);
+                const std::string where = at + " eye " + std::to_string(eye);
+                Check(view.texel && view.probed.size() == 2 + 96 + 48,
+                      where + ": the runtime read the composed image back");
+                Check(Near(view.texel, focus),
+                      where + ": the centre shows the focus view, " + Text(*view.texel) + ", rendered " + Text(focus));
+                Check(Near(view.probed[0], periphery), where + ": the corner shows the periphery, " +
+                                                           Text(view.probed[0]) + ", rendered " + Text(periphery));
+                Check(Between(view.probed[1], periphery, focus),
+                      where + ": the blend band blends the periphery " + Text(periphery) + " and the focus view " +
+                          Text(focus) + ", " + Text(view.probed[1]));
+                texels.push_back(*view.texel);
+                texels.insert(texels.end(), view.probed.begin(), view.probed.end());
+            }
+            if (composed == 1) {
+                readbacks.push_back(texels);
+            } else {
+                Check(readbacks.back() == texels, at + ": the runtime shows the same composed frame again");
+            }
+        }
+        Check(composed >= 1, at + ": the runtime shows the composed frame");
+    }
+    // Paced: the runtime's frames took a refresh each at least (a lower
+    // bound alone: a loaded machine only makes them slower), and their
+    // display times only ever increase.
+    const double frames_ms =
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - frames_start).count();
+    const std::vector<ShownFrame> runtime_frames = Shown();
+    Check(frames_ms >= 0.9 * static_cast<double>(runtime_frames.size() - 1) * kPeriod / 1e6,
+          "the stand-in paces its waits: " + std::to_string(runtime_frames.size()) + " frames in " +
+              std::to_string(frames_ms) + " ms");
+    for (std::size_t i = 1; i < runtime_frames.size(); ++i) {
+        Check(runtime_frames[i].time > runtime_frames[i - 1].time, "the runtime's display times increase");
+    }
+    {
+        std::scoped_lock lock(g_runtime_mutex);
+        const StandInSwapchain* output = FindSwapchain(Peer::CompositorOutputs()[0]);
+        Check(output && output->info.width == canvas.width && output->info.height == canvas.height,
+              "the compositor's outputs are the canvas's size");
+    }
+    const auto [d3d11_frames, split_frames] = Peer::QuadFrames();
+    Check(d3d11_frames == static_cast<std::uint64_t>(kFrames) && split_frames == 0,
+          "Direct3D 11 composed every quad frame: d3d11=" + std::to_string(d3d11_frames) +
+              ", split=" + std::to_string(split_frames));
+    if (framegen) {
+        const depthxr::FrameGenStatus status = Peer::FrameGen();
+        Check(status.multiplier == 2 && status.generated > 0 && generated_frames > 0,
+              "Frame Generation engaged at 2x: generated=" + std::to_string(status.generated) +
+                  ", frames of its own outputs shown=" + std::to_string(generated_frames));
+    } else {
+        Check(Shown().size() == static_cast<std::size_t>(kFrames), "a runtime frame per quad frame");
+    }
+
+    // The bridge's summary counts each window's quad frames: the first all of
+    // the frames before it, the next the two since.
+    Peer::ExpireBridgeSummary();
+    Check(QuadFrame(app, game, targets, kFrames) == XR_SUCCESS, "a quad frame logging the bridge's summary");
+    Check(QuadFrame(app, game, targets, kFrames + 1) == XR_SUCCESS, "a quad frame");
+    Peer::ExpireBridgeSummary();
+    Check(QuadFrame(app, game, targets, kFrames + 2) == XR_SUCCESS, "a quad frame logging the bridge's summary");
+    const std::string log = Peer::Log();
+    Check(Contains(log, "quadFrames=d3d11:" + std::to_string(kFrames) + ",split:0") &&
+              Contains(log, "quadFrames=d3d11:2,split:0"),
+          "the bridge's summaries count each window's quad frames");
+    Check(!Contains(log, "D3D11 quadviews composition failed"), "composing never failed");
+
+    // Readbacks of builds that compose alike print alike (FNV-1a).
+    std::uint32_t digest = 2166136261u;
+    std::size_t texel_count = 0;
+    for (const std::vector<Color>& texels : readbacks) {
+        texel_count += texels.size();
+        for (const Color& texel : texels) {
+            for (const std::uint8_t channel : texel) {
+                digest = (digest ^ channel) * 16777619u;
+            }
+        }
+    }
+    std::ostringstream hex;
+    hex << std::hex << std::setw(8) << std::setfill('0') << digest;
+    const std::size_t eye_texels = readbacks.front().size() / 2;
+    std::cout << g_case << ": the compositor's readbacks (" << readbacks.size() << " frames, " << texel_count
+              << " texels): digest " << hex.str() << ", frame 0 band " << Text(readbacks.front()[2]) << " / "
+              << Text(readbacks.front()[eye_texels + 2]) << "\n";
+
+    for (const Target& target : targets) {
+        Check(app.api.destroy_swapchain(target.swapchain) == XR_SUCCESS, "a quad view's swapchain is destroyed");
+    }
+    StopApp(app);
+    if (framegen) {
+        Peer::SetFrameGenEngagement(45, std::chrono::milliseconds(3000)); // the presenter's own
+    }
+    Check(GameRuns(game), "the game's device works");
+    EndCase(game);
+}
+
 // 8. The bridge's device removed: the session is lost. Last: Direct3D 12
 // makes one device per adapter in a process.
 void TestDeviceLost(Game& game) {
@@ -2359,6 +2912,8 @@ int main(int argc, char** argv) {
         TestRefusedD3D12Session(game);
         TestInstanceExtensions(game);
         TestDestroyInstanceWithSession(game);
+        TestBridgedQuadViewsComposed(game, false);
+        TestBridgedQuadViewsComposed(game, true);
         TestDeviceLost(game);
     }
     g_runtime = StandIn{};

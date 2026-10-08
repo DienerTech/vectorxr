@@ -29,11 +29,15 @@ The executable and a matching OpenXR loader DLL are written to:
 build\hardware-probe\layer\RelWithDebInfo\vectorxr_hardware_probe.exe
 ```
 
-The non-headset pose-math check can run in CI or from a desktop session:
+The non-headset check of the pose math, option parsing and GPU load
+arithmetic can run in CI or from a desktop session:
 
 ```powershell
 .\build\hardware-probe\layer\RelWithDebInfo\vectorxr_hardware_probe.exe --self-test
 ```
+
+`--gpu-calibrate` checks the GPU load (see below) on the desktop's GPU,
+without OpenXR or a headset.
 
 ## Prepare VectorXR
 
@@ -161,6 +165,10 @@ probe like DCS, or stress the bridge:
 | `--full-size` | Recommended view sizes, without the 1280-pixel limit (implied by `--quad-views`). |
 | `--pattern` | A grid and a sweeping bar fixed to each view (focus views in other colors), visible wherever the headset points, and motion for Frame Generation. |
 | `--frame-ms N` | Each frame takes at least N ms (a game slower than the refresh rate). |
+| `--gpu-ms N` | Each frame takes N ms (0-100) of GPU work, split between the views by pixel count (see [GPU load](#gpu-load)). |
+| `--gpu-frames-ahead N` | At most N frames' GPU work is queued (0-4, default 2): each frame waits until the one N before it has run on the GPU; 0 waits for the frame's own work before `xrEndFrame`. |
+| `--gpu-ms-fixed` | The calibrated GPU work stays fixed, so work competing for the GPU shows as a longer load. By default the load is re-measured every 30 frames to hold N ms. |
+| `--gpu-calibrate` | No OpenXR: calibrates `--gpu-ms` on the default adapter, runs 200 frames of the load alone and reports what they measured. |
 | `--depth` | Depth rendered into depth swapchains and submitted (`XR_KHR_composition_layer_depth`). |
 | `--recreate-seconds N` | The swapchains are destroyed and recreated every N seconds. |
 | `--sessions N` | N sessions one after another in one instance. |
@@ -190,6 +198,60 @@ session Direct3D 11.
 
 An idle headset may make the runtime refresh far slower than it reports;
 timings from such a run do not stand for a worn headset's.
+
+### GPU load
+
+`--frame-ms` makes the game slow on the CPU; `--gpu-ms N` makes it slow on
+the GPU, as DCS usually is. Before the session the probe calibrates a compute
+shader with Direct3D 11 timestamp queries until a frame of it, split as the
+views split it, takes N ms (within 3%), and prints:
+
+```text
+GPU load: target 11.00 ms = 903078 iterations in 4 views (measured 11.08 ms)
+```
+
+Each frame then runs each view's share of the load right before the view
+renders, so the view's release, and whatever VectorXR queues behind it, waits
+for it on the GPU. An event query per frame stands for a game's own frame
+queue (`--gpu-frames-ahead`). At the end the probe reports the load each frame
+measured and how often and how long the frame queue held the probe:
+
+```text
+GPU load: target 11.00 ms, mean 11.01 ms, p50 10.89 ms, p99 12.10 ms (5400 frames timed), iterations 892566 (calibrated 903078, 180 adjustments)
+GPU frames ahead 2: at most 1 earlier frames queued when a frame began, 67 stalls of 5400 frames, mean 2.62 ms, max 4.52 ms, total 175.67 ms
+```
+
+Measure Frame Generation's pacing against a game that is near the refresh
+rate and against one well below it:
+
+```powershell
+& $probe --mode source-exact --quad-views --pattern --threaded-wait --gpu-ms 11 --seconds 60
+& $probe --mode source-exact --quad-views --pattern --threaded-wait --gpu-ms 20 --seconds 60
+```
+
+Without Frame Generation, at 90 Hz, the first runs at about 80 fps, near the
+refresh rate, and the second at about 45-50 fps, well below it: the two cases
+Frame Generation's Dynamic multiplier must tell apart. Compare
+`--gpu-frames-ahead` 0, 1 and 2 to see how far a game's GPU queue changes the
+result.
+
+Other GPU work (the runtime's compositor, Frame Generation, other
+applications) can lengthen the load. By default the probe re-measures it
+every 30 frames and adjusts the work by at most 10% a step, so the game's
+frames keep taking about N ms; with `--gpu-ms-fixed` the work stays as
+calibrated and the competition shows as a longer load.
+
+To check the load without a headset:
+
+```powershell
+& $probe --gpu-calibrate --gpu-ms 11
+```
+
+It paces 200 frames at 90 Hz (or `--frame-ms`, when longer), split into two
+views (four with `--quad-views`), reports as above, and exits with an error
+when the frames' mean is more than 3% off the target or a frame began with
+more frames queued than `--gpu-frames-ahead` allows. Other applications using
+the GPU at the same time add spikes to the p99.
 
 ## What this probe does not prove
 

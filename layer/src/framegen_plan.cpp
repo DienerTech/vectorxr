@@ -166,6 +166,11 @@ void AppendWorldFit(FrameGenViewPlan& plan, const FrameGenConstants& base, Frame
     }
 }
 
+// The quad views compositor's clamp (NaN clamps to `high`, unlike std::clamp).
+double ComposeClamp(double value, double low, double high) {
+    return std::max(low, std::min(high, value));
+}
+
 } // namespace
 
 std::uint8_t FrameGenFinalFlowLevel(FrameGenFlowQuality quality) {
@@ -223,6 +228,56 @@ float FrameGenFraction(FrameGenSynthesisMode mode, std::int64_t previous_time, s
         return static_cast<float>(std::clamp((target_time - previous_time) / interval, 0.0, 1.0));
     }
     return static_cast<float>(std::clamp((target_time - newest_time) / interval, 0.0, 1.0));
+}
+
+FrameGenComposeEye BuildFrameGenComposeEye(const FrameGenFov& full, const FrameGenFov& focus, FrameGenExtent output,
+                                           FrameGenExtent focus_extent, double transition_percent,
+                                           double sharpness_percent) {
+    // Tangents of the float angles (std::tan(float)), widened to double.
+    const double full_left = std::tan(full.left);
+    const double full_right = std::tan(full.right);
+    const double full_down = std::tan(full.down);
+    const double full_up = std::tan(full.up);
+    const double focus_left = std::tan(focus.left);
+    const double focus_right = std::tan(focus.right);
+    const double focus_down = std::tan(focus.down);
+    const double focus_up = std::tan(focus.up);
+    const double full_width = std::max(0.0001, full_right - full_left);
+    const double full_height = std::max(0.0001, full_up - full_down);
+
+    FrameGenComposeEye eye;
+    eye.focus_rect[0] = static_cast<float>(ComposeClamp((focus_left - full_left) / full_width, 0.0, 1.0));
+    eye.focus_rect[2] = static_cast<float>(ComposeClamp((focus_right - full_left) / full_width, 0.0, 1.0));
+    eye.focus_rect[1] = static_cast<float>(ComposeClamp((full_up - focus_up) / full_height, 0.0, 1.0));
+    eye.focus_rect[3] = static_cast<float>(ComposeClamp((full_up - focus_down) / full_height, 0.0, 1.0));
+
+    // The rectangle's size from its rounded edges.
+    const double rect_width = std::max(0.0001, static_cast<double>(eye.focus_rect[2]) - eye.focus_rect[0]);
+    const double rect_height = std::max(0.0001, static_cast<double>(eye.focus_rect[3]) - eye.focus_rect[1]);
+    const double transition = ComposeClamp(transition_percent, 0.0, 100.0) / 100.0;
+    const double pixel_width = 1.0 / std::max<std::uint32_t>(1, output.width);
+    const double pixel_height = 1.0 / std::max<std::uint32_t>(1, output.height);
+    // The band is at least one output pixel wide.
+    eye.feather[0] = static_cast<float>(std::max(pixel_width, rect_width * transition));
+    eye.feather[1] = static_cast<float>(std::max(pixel_height, rect_height * transition));
+    eye.sharpen = static_cast<float>(ComposeClamp(sharpness_percent, 0.0, 100.0) / 100.0);
+    eye.focus_texel[0] = 1.0f / static_cast<float>(std::max<std::uint32_t>(1, focus_extent.width));
+    eye.focus_texel[1] = 1.0f / static_cast<float>(std::max<std::uint32_t>(1, focus_extent.height));
+    // Sharpening samples at output-pixel spacing: the frequencies that survive
+    // the focus view's resample into the rectangle.
+    eye.output_pixel_in_focus[0] = static_cast<float>(pixel_width / rect_width);
+    eye.output_pixel_in_focus[1] = static_cast<float>(pixel_height / rect_height);
+    return eye;
+}
+
+FrameGenConstants BuildFrameGenComposeConstants(const FrameGenComposeEye& eye, FrameGenExtent output) {
+    FrameGenConstants constants{};
+    constants.fov_current = eye.focus_rect;
+    constants.fov_previous = {eye.feather[0], eye.feather[1], eye.sharpen, 0.0f};
+    constants.rot0 = {eye.focus_texel[0], eye.focus_texel[1], eye.output_pixel_in_focus[0],
+                      eye.output_pixel_in_focus[1]};
+    constants.size = {output.width, output.height, 0u, 0u};
+    return constants;
 }
 
 FrameGenViewPlan BuildFrameGenViewPlan(const FrameGenViewRequest& request, const FrameGenTuning& tuning) {
