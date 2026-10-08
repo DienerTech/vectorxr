@@ -19,6 +19,17 @@ const keyboard = (...chord) => ({ type: 'keyboard', chord })
 const none = () => ({ type: 'none' })
 const activation = (behavior, binding) => ({ behavior, binding })
 
+test('Quadviews permits 1% resolution tuning up to 300% focus and rejects values above the cap', () => {
+  const config = defaultConfig()
+  config.modules.quadviews.defaults.focusScale = 3
+  config.modules.quadviews.defaults.peripheralScale = 0.31
+  assert.deepEqual(validateConfig(config), [])
+  config.modules.quadviews.defaults.focusScale = 2.99
+  assert.deepEqual(validateConfig(config), [])
+  config.modules.quadviews.defaults.focusScale = 3.01
+  assert.match(validateConfig(config).join('\n'), /focusScale must be between 0.5 and 3/)
+})
+
 test('replacing a binding input preserves sound enablement and custom files', () => {
   const sound = {
     enabled: true,

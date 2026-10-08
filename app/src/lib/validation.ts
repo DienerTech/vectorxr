@@ -268,7 +268,7 @@ function validateQuadViewsSettings(prefix: string, settings: QuadViewsSettings):
   const bounded = [
     ['focusHorizontalSizePercent', settings.focusHorizontalSizePercent, 5, 100],
     ['focusVerticalSizePercent', settings.focusVerticalSizePercent, 5, 100],
-    ['focusScale', settings.focusScale, 0.5, 2.0],
+    ['focusScale', settings.focusScale, 0.5, 3.0],
     ['peripheralScale', settings.peripheralScale, 0.1, 1.5],
     ['foveateSharpness', settings.foveateSharpness, 0, 100],
     ['transitionThicknessPercent', settings.transitionThicknessPercent, 0, 50],

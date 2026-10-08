@@ -199,6 +199,7 @@ class OpenXrLayer {
     friend class TurboFrameTestPeer;
     friend class PivotPoseTestPeer;
     friend class PivotGazeTestPeer;
+    friend class EyeGazeTestPeer;
 #endif
 
     OpenXrLayer() = default;
@@ -494,6 +495,9 @@ class OpenXrLayer {
                                   XrResult* locate_result,
                                   XrSpaceLocationFlags* location_flags);
     XrResult CreateEyeGazeResources(XrSession session);
+    bool FinalizeEyeGazeBindings(); // Called under mutex_, immediately before attachment.
+    void RecordEyeGazeSyncResult(bool application, XrResult result);
+    void ResetEyeGazeInputState();
     void DestroyEyeGazeResources();
     void TryAttachEyeGazeActionSetFallback(XrSession session);
     bool LocateEyeGazeFocusOffsets(XrSession session,
@@ -1190,6 +1194,12 @@ class OpenXrLayer {
     XrPath eye_gaze_interaction_profile_path_{XR_NULL_PATH};
     XrPath eye_gaze_pose_path_{XR_NULL_PATH};
     bool eye_gaze_resources_ready_{false};
+    bool eye_gaze_bindings_ready_{false};
+    bool eye_gaze_binding_augmentation_disabled_{false};
+    // Instance-owned application actions may survive session recreation. Cache
+    // only value data; a caller's extension chain must never be replayed.
+    std::vector<XrActionSuggestedBinding> application_eye_gaze_bindings_;
+    bool application_eye_gaze_binding_chain_unsupported_{false};
     DelayedActionSetAttachment<XrActionSet> eye_gaze_action_set_attachment_;
     bool has_logged_eye_gaze_focus_active_{false};
     bool has_logged_eye_gaze_focus_unavailable_{false};
@@ -1240,6 +1250,7 @@ class OpenXrLayer {
         bool eye_gaze{false};
     };
     std::unordered_map<XrAction, std::shared_ptr<ApplicationPoseAction>> application_pose_actions_;
+    std::unordered_map<XrAction, XrActionSet> application_action_owners_;
     struct ApplicationActionSpace {
         std::shared_ptr<ApplicationPoseAction> action;
         bool includes_eyes{false};
@@ -1253,6 +1264,15 @@ class OpenXrLayer {
     XrViewConfigurationType cached_eye_offsets_view_configuration_{XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO};
     std::optional<std::chrono::steady_clock::time_point> last_app_action_sync_time_;
     std::optional<std::chrono::steady_clock::time_point> last_eye_gaze_self_sync_time_;
+    std::optional<std::chrono::steady_clock::time_point> last_app_action_sync_attempt_time_;
+    std::optional<std::chrono::steady_clock::time_point> last_eye_gaze_self_sync_attempt_time_;
+    std::optional<XrResult> last_app_action_sync_result_;
+    std::optional<XrResult> last_eye_gaze_self_sync_result_;
+    XrSessionState observed_session_state_{XR_SESSION_STATE_UNKNOWN};
+    bool eye_gaze_sync_not_focused_{false};
+    uint32_t eye_gaze_sync_transition_logs_remaining_{32};
+    std::optional<std::chrono::steady_clock::time_point> last_eye_gaze_bound_sources_probe_;
+    std::string eye_gaze_bound_sources_diagnostic_{"not-probed"};
     std::vector<ViewAdjustmentData> locate_views_original_scratch_;
     std::vector<ViewAdjustmentData> locate_views_adjusted_scratch_;
     std::vector<ViewAdjustmentData> locate_views_depth_native_scratch_;
@@ -1311,6 +1331,7 @@ class OpenXrLayer {
     PFN_xrDestroyAction next_destroy_action_{nullptr};
     PFN_xrSuggestInteractionProfileBindings next_suggest_interaction_profile_bindings_{nullptr};
     PFN_xrGetActionStatePose next_get_action_state_pose_{nullptr};
+    PFN_xrEnumerateBoundSourcesForAction next_enumerate_bound_sources_for_action_{nullptr};
     PFN_xrGetCurrentInteractionProfile next_get_current_interaction_profile_{nullptr};
     PFN_xrPathToString next_path_to_string_{nullptr};
     XrInstance instance_{XR_NULL_HANDLE};

@@ -269,6 +269,15 @@ if(WIN32 AND DEPTHXR_BUILD_LAYER)
             WIN32_LEAN_AND_MEAN NOMINMAX XR_USE_GRAPHICS_API_D3D11 VECTORXR_VERSION="${_vectorxr_version}")
         add_test(NAME depthxr_pivot_gaze_tests COMMAND depthxr_pivot_gaze_tests)
         set_tests_properties(depthxr_pivot_gaze_tests PROPERTIES TIMEOUT 15)
+
+        add_executable(depthxr_eye_gaze_tests tests/eye_gaze_tests.cpp src/openxr_layer.cpp)
+        target_include_directories(depthxr_eye_gaze_tests PRIVATE include)
+        target_link_libraries(depthxr_eye_gaze_tests PRIVATE depthxr_core depthxr_osd
+            OpenXR::openxr_loader d3d11 d3dcompiler dxgi shlwapi)
+        target_compile_definitions(depthxr_eye_gaze_tests PRIVATE DEPTHXR_TESTING
+            WIN32_LEAN_AND_MEAN NOMINMAX XR_USE_GRAPHICS_API_D3D11 VECTORXR_VERSION="${_vectorxr_version}")
+        add_test(NAME depthxr_eye_gaze_tests COMMAND depthxr_eye_gaze_tests)
+        set_tests_properties(depthxr_eye_gaze_tests PROPERTIES TIMEOUT 15)
     endif()
 endif()
 

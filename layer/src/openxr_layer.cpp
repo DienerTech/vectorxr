@@ -2102,6 +2102,7 @@ XrResult OpenXrLayer::DestroyInstance(XrInstance instance) {
         next_destroy_action_ = nullptr;
         next_suggest_interaction_profile_bindings_ = nullptr;
         next_get_action_state_pose_ = nullptr;
+        next_enumerate_bound_sources_for_action_ = nullptr;
         has_loaded_config_ = false;
         locate_views_call_count_ = 0;
         pending_locate_views_diagnostics_ = 0;
@@ -2422,8 +2423,7 @@ XrResult OpenXrLayer::EndSession(XrSession session) {
         failed_pivot_space_conversions_.clear();
         cached_depth_submission_geometry_.clear();
         cached_quadviews_frames_.Clear();
-        last_app_action_sync_time_.reset();
-        last_eye_gaze_self_sync_time_.reset();
+        ResetEyeGazeInputState();
         quadviews_smoothed_focus_yaw_radians_ = 0.0;
         quadviews_smoothed_focus_pitch_radians_ = 0.0;
         quadviews_last_focus_smoothing_wall_time_.reset();
@@ -2457,6 +2457,9 @@ XrResult OpenXrLayer::AttachSessionActionSets(XrSession session, const XrSession
             if (attach_info->countActionSets > 0 && attach_info->actionSets) {
                 application_action_sets =
                     std::span<const XrActionSet>(attach_info->actionSets, attach_info->countActionSets);
+            }
+            if (!eye_gaze_action_set_attachment_.SessionAttachmentCompleted()) {
+                FinalizeEyeGazeBindings();
             }
             attachment_attempt =
                 eye_gaze_action_set_attachment_.PrepareApplicationAttachment(application_action_sets);
@@ -2508,6 +2511,9 @@ void OpenXrLayer::TryAttachEyeGazeActionSetFallback(XrSession session) {
             return;
         }
         attachment_attempt = eye_gaze_action_set_attachment_.PrepareFallbackAttachment();
+        if (attachment_attempt && !FinalizeEyeGazeBindings()) {
+            return;
+        }
         completed_frames = eye_gaze_action_set_attachment_.CompletedFrames();
     }
     if (!attachment_attempt.has_value()) {
@@ -2549,7 +2555,7 @@ XrResult OpenXrLayer::SyncActions(XrSession session, const XrActionsSyncInfo* sy
     uint32_t submitted_action_set_count = sync_info->countActiveActionSets;
     {
         std::scoped_lock lock(mutex_);
-        if (session == active_session_ && eye_gaze_resources_ready_ &&
+        if (session == active_session_ && eye_gaze_resources_ready_ && eye_gaze_bindings_ready_ &&
             eye_gaze_action_set_attachment_.PrivateActionSetAttached() &&
             quadviews_action_set_ != XR_NULL_HANDLE &&
             (sync_info->countActiveActionSets == 0 || sync_info->activeActionSets)) {
@@ -2573,13 +2579,16 @@ XrResult OpenXrLayer::SyncActions(XrSession session, const XrActionsSyncInfo* sy
     }
 
     const XrResult result = next_sync_actions_(session, &downstream_sync_info);
-    if (XR_SUCCEEDED(result) && appended_eye_gaze_active_set) {
+    {
         std::scoped_lock lock(mutex_);
-        last_app_action_sync_time_ = std::chrono::steady_clock::now();
+        if (session == active_session_ && eye_gaze_resources_ready_ && eye_gaze_bindings_ready_ &&
+            eye_gaze_action_set_attachment_.PrivateActionSetAttached()) {
+            RecordEyeGazeSyncResult(true, result);
+        }
     }
-    if (pending_eye_gaze_sync_diagnostics_ > 0) {
+    {
         std::scoped_lock lock(mutex_);
-        if (session == active_session_ && eye_gaze_resources_ready_) {
+        if (pending_eye_gaze_sync_diagnostics_ > 0 && session == active_session_ && eye_gaze_resources_ready_) {
             logger_.Debug("Quadviews eye-gaze action sync: result=" +
                           FormatHex(static_cast<uint64_t>(result)) +
                           ", appActionSets=" + std::to_string(sync_info->countActiveActionSets) +
@@ -7793,6 +7802,7 @@ XrResult OpenXrLayer::CreateAction(XrActionSet set, const XrActionCreateInfo* in
     if (XR_SUCCEEDED(result) && info && action) {
         std::scoped_lock lock(mutex_);
         application_pose_actions_.erase(*action);
+        application_action_owners_[*action] = set;
         if (info->actionType == XR_ACTION_TYPE_POSE_INPUT) {
             application_pose_actions_[*action] = std::make_shared<ApplicationPoseAction>(ApplicationPoseAction{set});
         }
@@ -7805,6 +7815,13 @@ XrResult OpenXrLayer::DestroyAction(XrAction action) {
     if (XR_SUCCEEDED(result)) {
         std::scoped_lock lock(mutex_);
         application_pose_actions_.erase(action);
+        application_action_owners_.erase(action);
+        const auto removed = std::erase_if(application_eye_gaze_bindings_, [action](const auto& binding) {
+            return binding.action == action;
+        });
+        if (removed && !eye_gaze_action_set_attachment_.SessionAttachmentCompleted()) {
+            eye_gaze_bindings_ready_ = false;
+        }
         // Existing spaces still locate the old action resource, per OpenXR.
     }
     return result;
@@ -7814,6 +7831,14 @@ XrResult OpenXrLayer::DestroyActionSet(XrActionSet set) {
     const auto result = next_destroy_action_set_(set);
     if (XR_SUCCEEDED(result)) {
         std::scoped_lock lock(mutex_);
+        const auto removed = std::erase_if(application_eye_gaze_bindings_, [&](const auto& binding) {
+            const auto found = application_action_owners_.find(binding.action);
+            return found != application_action_owners_.end() && found->second == set;
+        });
+        if (removed && !eye_gaze_action_set_attachment_.SessionAttachmentCompleted()) {
+            eye_gaze_bindings_ready_ = false;
+        }
+        std::erase_if(application_action_owners_, [set](const auto& entry) { return entry.second == set; });
         std::erase_if(application_pose_actions_, [set](const auto& entry) { return entry.second->owner == set; });
     }
     return result;
@@ -7829,6 +7854,22 @@ XrResult OpenXrLayer::SuggestInteractionProfileBindings(XrInstance instance, con
             bindings->interactionProfile == profile &&
             XR_SUCCEEDED(next_string_to_path_(instance, "/user/eyes_ext/input/gaze_ext/pose", &pose))) {
             std::scoped_lock lock(mutex_);
+            application_eye_gaze_bindings_.clear();
+            application_eye_gaze_binding_chain_unsupported_ = bindings->next != nullptr;
+            if (!application_eye_gaze_binding_chain_unsupported_ && bindings->suggestedBindings) {
+                application_eye_gaze_bindings_.assign(bindings->suggestedBindings,
+                    bindings->suggestedBindings + bindings->countSuggestedBindings);
+            }
+            eye_gaze_bindings_ready_ = false;
+            logger_.Info("Application eye-gaze binding suggestions accepted: count=" +
+                         std::to_string(bindings->countSuggestedBindings) +
+                         ", extensionChain=" + std::to_string(bindings->next != nullptr) +
+                         ", privateSetAttached=" +
+                         std::to_string(eye_gaze_action_set_attachment_.PrivateActionSetAttached()));
+            if (eye_gaze_action_set_attachment_.PrivateActionSetAttached()) {
+                logger_.Info("Application replaced eye-gaze bindings after attachment; private gaze is disabled "
+                             "for this session because attached actions cannot be re-suggested.");
+            }
             // A successful re-suggestion replaces this profile's whole list.
             for (const auto& [handle, action] : application_pose_actions_) action->eye_gaze = false;
             for (const auto& [handle, space] : application_action_spaces_) space.action->eye_gaze = false;
@@ -7871,8 +7912,39 @@ XrResult OpenXrLayer::PollEvent(XrInstance instance, XrEventDataBuffer* event_da
         return XR_ERROR_FUNCTION_UNSUPPORTED;
     }
     const XrResult result = next_poll_event_(instance, event_data);
-    if (result != XR_SUCCESS || !event_data ||
-        event_data->type != XR_TYPE_EVENT_DATA_REFERENCE_SPACE_CHANGE_PENDING) {
+    if (result != XR_SUCCESS || !event_data) {
+        return result;
+    }
+    if (event_data->type == XR_TYPE_EVENT_DATA_SESSION_STATE_CHANGED) {
+        const auto& change = *reinterpret_cast<const XrEventDataSessionStateChanged*>(event_data);
+        std::scoped_lock lock(mutex_);
+        if (change.session == active_session_) {
+            observed_session_state_ = change.state;
+            if (change.state == XR_SESSION_STATE_FOCUSED) {
+                eye_gaze_sync_not_focused_ = false;
+                // Input sampled before focus returned is not current focused input.
+                last_app_action_sync_time_.reset();
+                last_eye_gaze_self_sync_time_.reset();
+                last_app_action_sync_attempt_time_.reset();
+                last_eye_gaze_self_sync_attempt_time_.reset();
+            }
+            logger_.Info("Runtime session state changed: state=" +
+                         std::to_string(static_cast<int>(change.state)) +
+                         ", time=" + std::to_string(change.time));
+        }
+        return result;
+    }
+    if (event_data->type == XR_TYPE_EVENT_DATA_INTERACTION_PROFILE_CHANGED) {
+        const auto& change = *reinterpret_cast<const XrEventDataInteractionProfileChanged*>(event_data);
+        std::scoped_lock lock(mutex_);
+        if (change.session == active_session_) {
+            logger_.Info("Runtime interaction profile changed; eye-gaze binding/source diagnostics will refresh.");
+            last_eye_gaze_bound_sources_probe_.reset();
+            pending_eye_gaze_diagnostics_ = std::max(pending_eye_gaze_diagnostics_, 20u);
+        }
+        return result;
+    }
+    if (event_data->type != XR_TYPE_EVENT_DATA_REFERENCE_SPACE_CHANGE_PENDING) {
         return result;
     }
     const auto& change = *reinterpret_cast<const XrEventDataReferenceSpaceChangePending*>(event_data);
@@ -9196,6 +9268,11 @@ void OpenXrLayer::CaptureInstanceFunctions() {
     if (XR_SUCCEEDED(next_get_instance_proc_addr_(instance_, "xrGetActionStatePose", &function))) {
         next_get_action_state_pose_ = reinterpret_cast<PFN_xrGetActionStatePose>(function);
     }
+    function = nullptr;
+    if (XR_SUCCEEDED(next_get_instance_proc_addr_(instance_, "xrEnumerateBoundSourcesForAction", &function))) {
+        next_enumerate_bound_sources_for_action_ =
+            reinterpret_cast<PFN_xrEnumerateBoundSourcesForAction>(function);
+    }
 }
 
 void OpenXrLayer::ResetSessionState() {
@@ -9263,6 +9340,8 @@ void OpenXrLayer::ResetSessionState() {
     eye_gaze_interaction_profile_path_ = XR_NULL_PATH;
     eye_gaze_pose_path_ = XR_NULL_PATH;
     eye_gaze_resources_ready_ = false;
+    eye_gaze_bindings_ready_ = false;
+    eye_gaze_binding_augmentation_disabled_ = false;
     eye_gaze_action_set_attachment_.Reset();
     has_logged_eye_gaze_focus_active_ = false;
     has_logged_eye_gaze_focus_unavailable_ = false;
@@ -9297,14 +9376,16 @@ void OpenXrLayer::ResetSessionState() {
     failed_pivot_space_conversions_.clear();
     cached_depth_submission_geometry_.clear();
     cached_quadviews_frames_.Clear();
-    last_app_action_sync_time_.reset();
-    last_eye_gaze_self_sync_time_.reset();
+    ResetEyeGazeInputState();
     ResetSwapchainState();
 }
 
 void OpenXrLayer::ResetInstanceState() {
     application_action_spaces_.clear();
     application_pose_actions_.clear();
+    application_action_owners_.clear();
+    application_eye_gaze_bindings_.clear();
+    application_eye_gaze_binding_chain_unsupported_ = false;
     quad_views_extension_requested_ = false;
     varjo_foveated_rendering_extension_requested_ = false;
     d3d11_graphics_extension_requested_ = false;
@@ -9370,6 +9451,93 @@ void OpenXrLayer::ResetQuadViewsDebugHeartbeatState() {
     last_quadviews_eye_gaze_debug_heartbeat_.reset();
 }
 
+bool OpenXrLayer::FinalizeEyeGazeBindings() {
+    if (!eye_gaze_resources_ready_ || eye_gaze_binding_augmentation_disabled_) {
+        return false;
+    }
+    if (eye_gaze_bindings_ready_) {
+        return true;
+    }
+    if (eye_gaze_action_set_attachment_.SessionAttachmentCompleted()) {
+        return false; // Never rebind attached actions or recover by reattachment.
+    }
+    if (application_eye_gaze_binding_chain_unsupported_) {
+        logger_.Info("Private eye-gaze binding skipped: application extension-chain semantics cannot be replayed; "
+                     "preserving application bindings and using head/static focus offsets.");
+    } else {
+        std::vector<XrActionSuggestedBinding> merged;
+        const auto add_unique = [&](const XrActionSuggestedBinding& binding) {
+            if (std::none_of(merged.begin(), merged.end(), [&](const auto& existing) {
+                    return existing.action == binding.action && existing.binding == binding.binding;
+                })) {
+                merged.push_back(binding);
+            }
+        };
+        for (const auto& binding : application_eye_gaze_bindings_) add_unique(binding);
+        add_unique({quadviews_eye_gaze_action_, eye_gaze_pose_path_});
+        XrInteractionProfileSuggestedBinding info{XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING};
+        info.interactionProfile = eye_gaze_interaction_profile_path_;
+        info.countSuggestedBindings = static_cast<uint32_t>(merged.size());
+        info.suggestedBindings = merged.data();
+        const XrResult result = next_suggest_interaction_profile_bindings_(instance_, &info);
+        logger_.Info("Finalized eye-gaze binding suggestions before attachment: result=" +
+                     std::to_string(static_cast<int>(result)) +
+                     ", appBindings=" + std::to_string(application_eye_gaze_bindings_.size()) +
+                     ", mergedBindings=" + std::to_string(merged.size()) + ", privatePriority=0");
+        if (result == XR_SUCCESS) {
+            eye_gaze_bindings_ready_ = true;
+            return true;
+        }
+        // A rejected suggestion leaves the previous successful application
+        // suggestions intact. Do not make optional gaze fail the app's attach.
+        logger_.Info("Private eye-gaze binding rejected; preserving application attachment and using "
+                     "head/static focus offsets.");
+    }
+    eye_gaze_binding_augmentation_disabled_ = true;
+    eye_gaze_action_set_attachment_.ClearPrivateActionSet();
+    return false;
+}
+
+void OpenXrLayer::ResetEyeGazeInputState() {
+    last_app_action_sync_time_.reset();
+    last_eye_gaze_self_sync_time_.reset();
+    last_app_action_sync_attempt_time_.reset();
+    last_eye_gaze_self_sync_attempt_time_.reset();
+    last_app_action_sync_result_.reset();
+    last_eye_gaze_self_sync_result_.reset();
+    observed_session_state_ = XR_SESSION_STATE_UNKNOWN;
+    eye_gaze_sync_not_focused_ = false;
+    eye_gaze_sync_transition_logs_remaining_ = 32;
+    last_eye_gaze_bound_sources_probe_.reset();
+    eye_gaze_bound_sources_diagnostic_ = "not-probed";
+}
+
+void OpenXrLayer::RecordEyeGazeSyncResult(bool application, XrResult result) {
+    auto& previous = application ? last_app_action_sync_result_ : last_eye_gaze_self_sync_result_;
+    auto& attempt = application ? last_app_action_sync_attempt_time_ : last_eye_gaze_self_sync_attempt_time_;
+    auto& success = application ? last_app_action_sync_time_ : last_eye_gaze_self_sync_time_;
+    attempt = std::chrono::steady_clock::now();
+    if (result == XR_SUCCESS) {
+        success = attempt;
+        eye_gaze_sync_not_focused_ = false;
+    } else {
+        success.reset();
+        if (result == XR_SESSION_NOT_FOCUSED) {
+            eye_gaze_sync_not_focused_ = true;
+            last_app_action_sync_time_.reset();
+            last_eye_gaze_self_sync_time_.reset();
+        }
+    }
+    if ((!previous || *previous != result) && eye_gaze_sync_transition_logs_remaining_ > 0) {
+        --eye_gaze_sync_transition_logs_remaining_;
+        logger_.Info(std::string("Eye-gaze ") + (application ? "application" : "private") +
+                     " sync result changed: result=" + std::to_string(static_cast<int>(result)) +
+                     ", focusedInput=" + std::to_string(result == XR_SUCCESS) +
+                     ", observedSessionState=" + std::to_string(static_cast<int>(observed_session_state_)));
+    }
+    previous = result;
+}
+
 XrResult OpenXrLayer::CreateEyeGazeResources(XrSession session) {
     if (eye_gaze_resources_ready_) {
         return XR_SUCCESS;
@@ -9424,18 +9592,6 @@ XrResult OpenXrLayer::CreateEyeGazeResources(XrSession session) {
         return result;
     }
 
-    const XrActionSuggestedBinding suggested_binding{quadviews_eye_gaze_action_, eye_gaze_pose_path_};
-    XrInteractionProfileSuggestedBinding profile_bindings{XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING};
-    profile_bindings.interactionProfile = eye_gaze_interaction_profile_path_;
-    profile_bindings.countSuggestedBindings = 1;
-    profile_bindings.suggestedBindings = &suggested_binding;
-    result = next_suggest_interaction_profile_bindings_(instance_, &profile_bindings);
-    if (XR_FAILED(result)) {
-        logger_.Info("VectorXR quadviews eye-gaze interaction profile binding suggestion failed: result=" +
-                     std::to_string(static_cast<int>(result)));
-        return result;
-    }
-
     XrActionSpaceCreateInfo action_space_info{XR_TYPE_ACTION_SPACE_CREATE_INFO};
     action_space_info.action = quadviews_eye_gaze_action_;
     action_space_info.poseInActionSpace = IdentityPose();
@@ -9447,7 +9603,10 @@ XrResult OpenXrLayer::CreateEyeGazeResources(XrSession session) {
     }
 
     eye_gaze_resources_ready_ = true;
-    eye_gaze_action_set_attachment_.SetPrivateActionSet(quadviews_action_set_);
+    eye_gaze_bindings_ready_ = false;
+    if (!eye_gaze_binding_augmentation_disabled_) {
+        eye_gaze_action_set_attachment_.SetPrivateActionSet(quadviews_action_set_);
+    }
     has_logged_eye_gaze_focus_active_ = false;
     has_logged_eye_gaze_focus_unavailable_ = false;
     eye_gaze_unavailable_streak_ = 0;
@@ -9470,6 +9629,7 @@ void OpenXrLayer::DestroyEyeGazeResources() {
     eye_gaze_interaction_profile_path_ = XR_NULL_PATH;
     eye_gaze_pose_path_ = XR_NULL_PATH;
     eye_gaze_resources_ready_ = false;
+    eye_gaze_bindings_ready_ = false;
     eye_gaze_action_set_attachment_.ClearPrivateActionSet();
     has_logged_eye_gaze_focus_active_ = false;
     has_logged_eye_gaze_focus_unavailable_ = false;
@@ -9483,6 +9643,8 @@ void OpenXrLayer::DestroyEyeGazeResources() {
     quadviews_has_seen_valid_gaze_ = false;
     quadviews_compositor_recovery_.Reset();
     last_eye_gaze_self_sync_time_.reset();
+    last_eye_gaze_self_sync_attempt_time_.reset();
+    last_eye_gaze_bound_sources_probe_.reset();
 
     if (eye_gaze_space != XR_NULL_HANDLE && next_destroy_space_) {
         next_destroy_space_(eye_gaze_space);
@@ -9510,11 +9672,8 @@ bool OpenXrLayer::LocateEyeGazeFocusOffsets(XrSession session,
     quadviews_raw_focus_time_ = time;
     quadviews_raw_focus_valid_ = false;
 
-    // Probe the runtime's current interaction profile for /user/eyes_ext. When our eye-gaze
-    // action reports isActive=0, this reveals *why*: "none" means the runtime never bound the
-    // eye-gaze profile (e.g. tracker not enabled/calibrated, or the extension isn't truly
-    // active downstream), whereas the eye-gaze profile string means the binding took and the
-    // problem is elsewhere. This is the single most useful signal for the Varjo blur report.
+    // Profile selection and bound sources are independent of current activation.
+    // Log them with focus/sync state to distinguish missing bindings from input loss.
     auto describe_eye_profile = [&]() -> std::string {
         if (!next_get_current_interaction_profile_ || !next_string_to_path_ ||
             active_session_ == XR_NULL_HANDLE) {
@@ -9564,6 +9723,8 @@ bool OpenXrLayer::LocateEyeGazeFocusOffsets(XrSession session,
             if (eye_gaze_unavailable_streak_ >= kEyeGazeUnavailableLogThreshold) {
                 logger_.Info("Quadviews eye-gaze focus unavailable; using head/static focus offsets. reason=" + reason +
                              ", resourcesReady=" + std::to_string(eye_gaze_resources_ready_) +
+                             ", observedSessionState=" + std::to_string(static_cast<int>(observed_session_state_)) +
+                             ", syncNotFocused=" + std::to_string(eye_gaze_sync_not_focused_) +
                              ", actionSetAttached=" +
                                  std::to_string(eye_gaze_action_set_attachment_.PrivateActionSetAttached()));
                 has_logged_eye_gaze_focus_unavailable_ = true;
@@ -9575,11 +9736,39 @@ bool OpenXrLayer::LocateEyeGazeFocusOffsets(XrSession session,
             (pending_eye_gaze_diagnostics_ > 0 ||
              ShouldLogQuadViewsDebugHeartbeat(last_quadviews_eye_gaze_debug_heartbeat_));
         if (should_log_unavailable_debug) {
+            const auto now = std::chrono::steady_clock::now();
+            if (eye_gaze_bindings_ready_ && eye_gaze_action_set_attachment_.PrivateActionSetAttached() &&
+                next_enumerate_bound_sources_for_action_ &&
+                (!last_eye_gaze_bound_sources_probe_ || now - *last_eye_gaze_bound_sources_probe_ >= std::chrono::seconds(2))) {
+                last_eye_gaze_bound_sources_probe_ = now;
+                XrBoundSourcesForActionEnumerateInfo info{XR_TYPE_BOUND_SOURCES_FOR_ACTION_ENUMERATE_INFO};
+                info.action = quadviews_eye_gaze_action_;
+                uint32_t count = 0;
+                const XrResult result = next_enumerate_bound_sources_for_action_(session, &info, 0, &count, nullptr);
+                eye_gaze_bound_sources_diagnostic_ = "result=" + std::to_string(static_cast<int>(result)) +
+                                                     ", count=" + std::to_string(count);
+            }
+            const auto sync_age = [&](const auto& timestamp) {
+                return timestamp ? std::to_string(std::chrono::duration_cast<std::chrono::milliseconds>(
+                    now - *timestamp).count()) : std::string("never");
+            };
+            const auto sync_result_text = [](const auto& result) {
+                return result ? std::to_string(static_cast<int>(*result)) : std::string("never");
+            };
             logger_.Debug("Quadviews eye-gaze focus unavailable: " + reason +
                           ", resourcesReady=" + std::to_string(eye_gaze_resources_ready_) +
                           ", actionSetAttached=" +
                               std::to_string(eye_gaze_action_set_attachment_.PrivateActionSetAttached()) +
                           ", eyeInteractionProfile=" + describe_eye_profile() +
+                          ", bindingsReady=" + std::to_string(eye_gaze_bindings_ready_) +
+                          ", boundSources={" + eye_gaze_bound_sources_diagnostic_ + "}" +
+                          ", observedSessionState=" + std::to_string(static_cast<int>(observed_session_state_)) +
+                          ", appSyncResult=" + sync_result_text(last_app_action_sync_result_) +
+                          ", privateSyncResult=" + sync_result_text(last_eye_gaze_self_sync_result_) +
+                          ", appSyncAttemptAgeMs=" + sync_age(last_app_action_sync_attempt_time_) +
+                          ", privateSyncAttemptAgeMs=" + sync_age(last_eye_gaze_self_sync_attempt_time_) +
+                          ", appFocusedSyncAgeMs=" + sync_age(last_app_action_sync_time_) +
+                          ", privateFocusedSyncAgeMs=" + sync_age(last_eye_gaze_self_sync_time_) +
                           ", eyeGazeExtEnabled=" + std::to_string(eye_gaze_extension_enabled_) +
                           ", unavailableStreak=" + std::to_string(eye_gaze_unavailable_streak_));
             if (pending_eye_gaze_diagnostics_ > 0) {
@@ -9603,7 +9792,7 @@ bool OpenXrLayer::LocateEyeGazeFocusOffsets(XrSession session,
         log_eye_gaze_diagnostic("base space is null");
         return false;
     }
-    if (!eye_gaze_resources_ready_ ||
+    if (!eye_gaze_resources_ready_ || !eye_gaze_bindings_ready_ ||
         !eye_gaze_action_set_attachment_.PrivateActionSetAttached() ||
         quadviews_eye_gaze_action_ == XR_NULL_HANDLE || quadviews_eye_gaze_space_ == XR_NULL_HANDLE) {
         log_eye_gaze_diagnostic("eye-gaze action resources are not ready");
@@ -9613,25 +9802,38 @@ bool OpenXrLayer::LocateEyeGazeFocusOffsets(XrSession session,
         log_eye_gaze_diagnostic("required OpenXR action/space functions are unavailable");
         return false;
     }
+    if (observed_session_state_ != XR_SESSION_STATE_UNKNOWN &&
+        observed_session_state_ != XR_SESSION_STATE_FOCUSED) {
+        log_eye_gaze_diagnostic("session is not focused");
+        return false;
+    }
 
     // The layer's action set rides along with the app's xrSyncActions; only
     // issue a downstream self-sync when the app has not synced recently.
     const auto sync_check_now = std::chrono::steady_clock::now();
-    const bool app_sync_fresh = last_app_action_sync_time_.has_value() &&
-                                sync_check_now - *last_app_action_sync_time_ < kAppActionSyncFreshWindow;
-    const bool self_sync_fresh = last_eye_gaze_self_sync_time_.has_value() &&
-                                 sync_check_now - *last_eye_gaze_self_sync_time_ < kAppActionSyncFreshWindow;
-    if (!app_sync_fresh && !self_sync_fresh) {
+    const auto fresh = [&](const auto& timestamp) {
+        return timestamp && sync_check_now - *timestamp < kAppActionSyncFreshWindow;
+    };
+    const bool app_sync_fresh = fresh(last_app_action_sync_time_);
+    const bool self_sync_fresh = fresh(last_eye_gaze_self_sync_time_);
+    // Throttle attempts separately from focused successes, including positive
+    // XR_SESSION_NOT_FOCUSED. Unknown focus must still allow bounded retries
+    // because some applications never poll session events.
+    if (!fresh(last_app_action_sync_attempt_time_) && !fresh(last_eye_gaze_self_sync_attempt_time_)) {
         const XrActiveActionSet active_action_set{quadviews_action_set_, XR_NULL_PATH};
         XrActionsSyncInfo sync_info{XR_TYPE_ACTIONS_SYNC_INFO};
         sync_info.countActiveActionSets = 1;
         sync_info.activeActionSets = &active_action_set;
         const XrResult sync_result = next_sync_actions_(session, &sync_info);
-        if (XR_FAILED(sync_result)) {
-            log_eye_gaze_diagnostic("self sync failed, result=" + FormatHex(static_cast<uint64_t>(sync_result)));
+        RecordEyeGazeSyncResult(false, sync_result);
+        if (sync_result != XR_SUCCESS) {
+            log_eye_gaze_diagnostic("self sync did not provide focused input, result=" +
+                                    std::to_string(static_cast<int>(sync_result)));
             return false;
         }
-        last_eye_gaze_self_sync_time_ = sync_check_now;
+    } else if (eye_gaze_sync_not_focused_ || (!app_sync_fresh && !self_sync_fresh)) {
+        log_eye_gaze_diagnostic("waiting for a successful focused action sync");
+        return false;
     }
 
     XrActionStateGetInfo action_state_info{XR_TYPE_ACTION_STATE_GET_INFO};

@@ -289,6 +289,8 @@ safe, but the running game keeps its launch-time state until it exits.
 - **Focus Window** sets the size and offset of the high-detail region; **Resolution** sets
   **Foveate** (inner) and **Peripheral** (outer) resolution as a percentage of your headset's
   resolution (100% = headset default).
+  Focus Resolution supports 50–300% and Peripheral Resolution supports 10–150%, both in 1% steps.
+  Higher focus resolution increases output texture size and GPU memory use; runtime texture limits still apply.
 - The budget indicator at the top right estimates render cost *before* you launch — it reads as a
   **% of stereo pixels** and is color-coded, with a "Detrimental" warning when you exceed budget.
   Watch it while tuning to keep performance positive.
