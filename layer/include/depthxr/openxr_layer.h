@@ -39,6 +39,7 @@
 #include "depthxr/turbo_trace.h"
 #include "depthxr/settings_resolver.h"
 #include "depthxr/swapchain_state.h"
+#include "depthxr/thread_census.h"
 
 struct ID3D11BlendState;
 struct ID3D11Buffer;
@@ -474,6 +475,8 @@ class OpenXrLayer {
     bool IsQuadViewsEmulationActive() const;
     void ResetSwapchainState();
     void LogSwapchainSummary(XrSwapchain swapchain, const SwapchainInfo& info, std::string_view event_name);
+    // Counts an application call on the calling thread; logs the first call of each kind on each thread.
+    void NoteThread(ThreadCensus::Call call);
     bool ShouldDeferSwapchainRelease(const SwapchainInfo& info) const;
     XrResult FlushDeferredSwapchainReleaseLocked(XrSwapchain swapchain,
                                                  SwapchainInfo& info,
@@ -673,6 +676,8 @@ class OpenXrLayer {
 
     Logger logger_;
     TurboTimingTrace turbo_trace_; // destroyed before logger_
+    // Which threads the application calls the frame loop and swapchain functions on, per session.
+    ThreadCensus thread_census_;
     // Immutable between BeginSession and teardown; live edits apply next session.
     OsdRenderer osd_;
     OsdComposite osd_composite_;

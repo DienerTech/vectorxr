@@ -16,6 +16,7 @@ add_library(
     src/sound_player.cpp
     src/settings_resolver.cpp
     src/swapchain_state.cpp
+    src/thread_census.cpp
     src/util/config_path.cpp
     src/util/logger.cpp
     src/util/process_info.cpp
@@ -424,6 +425,10 @@ if(DEPTHXR_BUILD_TESTS)
     target_link_libraries(depthxr_turbo_recovery_tests PRIVATE depthxr_core)
     add_test(NAME depthxr_turbo_recovery_tests COMMAND depthxr_turbo_recovery_tests)
     set_tests_properties(depthxr_turbo_recovery_tests PROPERTIES TIMEOUT 10)
+    add_executable(depthxr_thread_census_tests tests/thread_census_tests.cpp)
+    target_link_libraries(depthxr_thread_census_tests PRIVATE depthxr_core)
+    add_test(NAME depthxr_thread_census_tests COMMAND depthxr_thread_census_tests)
+    set_tests_properties(depthxr_thread_census_tests PROPERTIES TIMEOUT 10)
 
     add_executable(
         depthxr_action_set_attachment_tests

@@ -14,6 +14,7 @@
 
 #include <d3d11.h>
 #include <d3d11_1.h>
+#include <d3d11_4.h>
 #include <d3dcompiler.h>
 #include <openxr/openxr_platform.h>
 
@@ -286,6 +287,90 @@ std::string FormatTextureDesc(const D3D11_TEXTURE2D_DESC& desc) {
            << "}";
     return stream.str();
 }
+
+std::string Utf8FromWide(const wchar_t* text) {
+    if (!text || !*text) {
+        return {};
+    }
+    const int size = WideCharToMultiByte(CP_UTF8, 0, text, -1, nullptr, 0, nullptr, nullptr);
+    if (size <= 1) {
+        return {};
+    }
+    std::string result(static_cast<std::size_t>(size), '\0');
+    WideCharToMultiByte(CP_UTF8, 0, text, -1, result.data(), size, nullptr, nullptr);
+    result.resize(static_cast<std::size_t>(size - 1));
+    return result;
+}
+
+// The application's D3D11 device as the D3D11 bridge needs to know it: its creation flags (SINGLETHREADED means
+// no call into it from any thread but the game's), whether D3D11 serializes calls into it, and its adapter.
+std::string DescribeD3D11Device(ID3D11Device* device, ID3D11DeviceContext* context) {
+    std::ostringstream stream;
+    const D3D_FEATURE_LEVEL level = device->GetFeatureLevel();
+    stream << "featureLevel=" << ((level >> 12) & 0xF) << "_" << ((level >> 8) & 0xF);
+    const UINT flags = device->GetCreationFlags();
+    static constexpr std::pair<UINT, const char*> kFlagNames[] = {
+        {D3D11_CREATE_DEVICE_SINGLETHREADED, "SINGLETHREADED"},
+        {D3D11_CREATE_DEVICE_DEBUG, "DEBUG"},
+        {D3D11_CREATE_DEVICE_SWITCH_TO_REF, "SWITCH_TO_REF"},
+        {D3D11_CREATE_DEVICE_PREVENT_INTERNAL_THREADING_OPTIMIZATIONS, "PREVENT_INTERNAL_THREADING_OPTIMIZATIONS"},
+        {D3D11_CREATE_DEVICE_BGRA_SUPPORT, "BGRA_SUPPORT"},
+        {D3D11_CREATE_DEVICE_DEBUGGABLE, "DEBUGGABLE"},
+        {D3D11_CREATE_DEVICE_PREVENT_ALTERING_LAYER_SETTINGS_FROM_REGISTRY,
+         "PREVENT_ALTERING_LAYER_SETTINGS_FROM_REGISTRY"},
+        {D3D11_CREATE_DEVICE_DISABLE_GPU_TIMEOUT, "DISABLE_GPU_TIMEOUT"},
+        {D3D11_CREATE_DEVICE_VIDEO_SUPPORT, "VIDEO_SUPPORT"},
+    };
+    stream << ", creationFlags=0x" << std::hex << flags << std::dec << " (";
+    UINT named = 0;
+    for (const auto& [bit, name] : kFlagNames) {
+        if ((flags & bit) != 0) {
+            stream << (named ? "|" : "") << name;
+            named |= bit;
+        }
+    }
+    if ((flags & ~named) != 0) {
+        stream << (named ? "|" : "") << "0x" << std::hex << (flags & ~named) << std::dec;
+    }
+    stream << (flags == 0 ? "none)" : ")");
+    ID3D11Multithread* multithread = nullptr;
+    if (context && SUCCEEDED(context->QueryInterface(__uuidof(ID3D11Multithread),
+                                                     reinterpret_cast<void**>(&multithread)))) {
+        stream << ", multithreadProtected=" << (multithread->GetMultithreadProtected() ? "yes" : "no");
+        multithread->Release();
+    } else {
+        stream << ", multithreadProtected=unknown";
+    }
+    IDXGIDevice* dxgi_device = nullptr;
+    IDXGIAdapter* adapter = nullptr;
+    DXGI_ADAPTER_DESC adapter_desc{};
+    if (SUCCEEDED(device->QueryInterface(__uuidof(IDXGIDevice), reinterpret_cast<void**>(&dxgi_device))) &&
+        SUCCEEDED(dxgi_device->GetAdapter(&adapter)) && SUCCEEDED(adapter->GetDesc(&adapter_desc))) {
+        stream << ", adapter=\"" << Utf8FromWide(adapter_desc.Description) << "\" luid=0x" << std::hex
+               << static_cast<uint32_t>(adapter_desc.AdapterLuid.HighPart) << ":0x"
+               << adapter_desc.AdapterLuid.LowPart << std::dec;
+    }
+    SafeRelease(adapter);
+    SafeRelease(dxgi_device);
+    return stream.str();
+}
+
+// The calling thread's name, if the application set one (SetThreadDescription, Windows 10 1607 and later).
+std::string CurrentThreadDescription() {
+    using GetThreadDescriptionFn = HRESULT(WINAPI*)(HANDLE, PWSTR*);
+    static const auto get_description = reinterpret_cast<GetThreadDescriptionFn>(
+        reinterpret_cast<void*>(GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "GetThreadDescription")));
+    PWSTR description = nullptr;
+    if (!get_description || FAILED(get_description(GetCurrentThread(), &description)) || !description) {
+        return {};
+    }
+    std::string name = Utf8FromWide(description);
+    LocalFree(description);
+    return name;
+}
+
+// The thread census is logged whole once the frame loop has settled, and again when the session ends.
+constexpr std::uint64_t kThreadCensusSummaryFrame = 300;
 
 struct QuadViewsPixelMetrics {
     uint64_t hash{1469598103934665603ull};
@@ -2141,6 +2226,8 @@ XrResult OpenXrLayer::CreateSession(XrInstance instance,
             return XR_ERROR_LIMIT_REACHED;
         }
     }
+    thread_census_.Reset();
+    NoteThread(ThreadCensus::Call::CreateSession);
     {
         const void* graphics_binding = create_info ? create_info->next : nullptr;
         const auto* next_struct = static_cast<const XrBaseInStructure*>(graphics_binding);
@@ -2216,6 +2303,8 @@ XrResult OpenXrLayer::CreateSession(XrInstance instance,
             }
         }
         SafeRelease(device1);
+        logger_.Info("D3D11 device: " + DescribeD3D11Device(d3d11_quadviews_compositor_.device,
+                                                             d3d11_quadviews_compositor_.context));
         logger_.Info("D3D11 graphics binding detected; native quadviews compositor is available.");
     } else {
         logger_.Info("D3D11 graphics binding not detected; synthesized quadviews is unavailable for this session.");
@@ -3240,6 +3329,7 @@ XrResult OpenXrLayer::EnumerateSwapchainFormats(XrSession session,
 XrResult OpenXrLayer::CreateSwapchain(XrSession session,
                                       const XrSwapchainCreateInfo* create_info,
                                       XrSwapchain* swapchain) {
+    NoteThread(ThreadCensus::Call::CreateSwapchain);
     {
         std::ostringstream stream;
         stream << "xrCreateSwapchain requested by application:";
@@ -3419,6 +3509,7 @@ XrResult OpenXrLayer::EnumerateSwapchainImages(XrSwapchain swapchain,
 XrResult OpenXrLayer::AcquireSwapchainImage(XrSwapchain swapchain,
                                             const XrSwapchainImageAcquireInfo* acquire_info,
                                             uint32_t* index) {
+    NoteThread(ThreadCensus::Call::AcquireSwapchainImage);
     std::uint32_t image_count = 0;
     {
         std::scoped_lock lock(mutex_);
@@ -3464,6 +3555,7 @@ XrResult OpenXrLayer::AcquireSwapchainImage(XrSwapchain swapchain,
 }
 
 XrResult OpenXrLayer::WaitSwapchainImage(XrSwapchain swapchain, const XrSwapchainImageWaitInfo* wait_info) {
+    NoteThread(ThreadCensus::Call::WaitSwapchainImage);
     const bool diag = TurboSequencedDebugTick();
     if (diag) {
         logger_.Debug("Turbo-diag: xrWaitSwapchainImage(" +
@@ -3495,6 +3587,7 @@ XrResult OpenXrLayer::WaitSwapchainImage(XrSwapchain swapchain, const XrSwapchai
 
 XrResult OpenXrLayer::ReleaseSwapchainImage(XrSwapchain swapchain,
                                             const XrSwapchainImageReleaseInfo* release_info) {
+    NoteThread(ThreadCensus::Call::ReleaseSwapchainImage);
     {
         std::scoped_lock lock(mutex_);
         const auto it = tracked_swapchains_.find(swapchain);
@@ -5051,6 +5144,7 @@ XrResult OpenXrLayer::WaitFrame(XrSession session,
         frame_state->type != XR_TYPE_FRAME_STATE) {
         return XR_ERROR_VALIDATION_FAILURE;
     }
+    NoteThread(ThreadCensus::Call::WaitFrame);
     if (framegen_owns_pacing_.load(std::memory_order_acquire)) {
         return framegen_.WaitFrame(session, frame_wait_info, frame_state, framegen_calls_);
     }
@@ -5370,6 +5464,7 @@ XrResult OpenXrLayer::WaitFrame(XrSession session,
 
 XrResult OpenXrLayer::BeginFrame(XrSession session, const XrFrameBeginInfo* frame_begin_info) {
     turbo_trace_.Record("begin.enter", turbo_trace_.NextId());
+    NoteThread(ThreadCensus::Call::BeginFrame);
     if (frame_begin_info && frame_begin_info->type != XR_TYPE_FRAME_BEGIN_INFO) {
         return XR_ERROR_VALIDATION_FAILURE;
     }
@@ -7098,6 +7193,7 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
     if (!frame_end_info || frame_end_info->type != XR_TYPE_FRAME_END_INFO) {
         return XR_ERROR_VALIDATION_FAILURE;
     }
+    NoteThread(ThreadCensus::Call::EndFrame);
 
     // Hang forensics: if a log ends between these two markers, a thread is
     // parked inside a runtime call while holding mutex_.
@@ -9384,6 +9480,10 @@ void OpenXrLayer::CaptureInstanceFunctions() {
 }
 
 void OpenXrLayer::ResetSessionState() {
+    // Both xrDestroySession and an xrDestroyInstance that skipped it end a session here.
+    if (active_session_ != XR_NULL_HANDLE) {
+        logger_.Info("Thread census at session end: " + thread_census_.Summary());
+    }
     application_action_spaces_.clear();
     osd_.Shutdown();
     ReleasePendingOsdImages();osd_composite_.Reset();osd_composite_logged_=false;osd_composite_fallback_logged_=false;
@@ -12492,6 +12592,18 @@ void OpenXrLayer::ResetD3D11QuadViewsCompositor() {
     d3d11_quadviews_compositor_.output_target_generation = 0;
     d3d11_quadviews_compositor_.last_completed_gpu_ms = 0.0;
     d3d11_quadviews_compositor_.last_completed_gpu_frame_time = 0;
+}
+
+void OpenXrLayer::NoteThread(ThreadCensus::Call call) {
+    std::uint64_t count = 0;
+    const std::string line = thread_census_.Note(call, static_cast<std::uint32_t>(GetCurrentThreadId()),
+                                                 CurrentThreadDescription, &count);
+    if (!line.empty()) {
+        logger_.Info(line);
+    }
+    if (call == ThreadCensus::Call::EndFrame && count == kThreadCensusSummaryFrame) {
+        logger_.Info("Thread census after " + std::to_string(count) + " frames: " + thread_census_.Summary());
+    }
 }
 
 void OpenXrLayer::LogSwapchainSummary(XrSwapchain swapchain,
