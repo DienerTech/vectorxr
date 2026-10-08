@@ -2109,7 +2109,7 @@ void TestPivotYawNoOpInsideDeadzone() {
     Expect(std::abs(smoothed_extra_yaw) < 0.0001, "PivotXR should not accumulate extra yaw inside the deadzone");
 }
 
-void TestTurboTraceBoundedAndDrained() {
+void TestTurboTraceContinuousAndDrained() {
     const auto directory = std::filesystem::current_path() / "build" / "vectorxr-test-turbo-trace";
     std::filesystem::create_directories(directory);
     std::filesystem::path log_path;
@@ -2125,6 +2125,7 @@ void TestTurboTraceBoundedAndDrained() {
         trace.Record("test.first", trace.NextId(), 11, 22, 33);
         for (int i = 0; i < 40000; ++i) {
             if (i % 1000 == 0) trace.Burst();
+            if (i % 128 == 0) std::this_thread::sleep_for(std::chrono::milliseconds(2));
             trace.Record("test.event", trace.NextId(), i);
         }
         trace.Stop();
@@ -2143,9 +2144,11 @@ void TestTurboTraceBoundedAndDrained() {
         Expect(line.find("event=disabled") == std::string::npos && line.find("event=after.stop") == std::string::npos,
                "Disabled tracing wrote events");
     }
-    Expect(first && events > 0 && events <= 30000, "Trace lost its first event, failed to drain, or exceeded its budget");
+    Expect(first && events > 30000, "Trace stopped at the old lifetime budget or failed to drain");
     input.close();
     std::filesystem::remove(log_path);
+    for (unsigned part = 0; part < 2; ++part)
+        std::filesystem::remove(depthxr::TurboTimingTrace::RecorderPath(log_path, part));
 }
 
 void TestTurboTraceFollowsDebugLevel() {
@@ -2187,6 +2190,8 @@ void TestTurboTraceFollowsDebugLevel() {
     Expect(resumed, "Resumed Debug trace did not drain");
     input.close();
     std::filesystem::remove(log_path);
+    for (unsigned part = 0; part < 2; ++part)
+        std::filesystem::remove(depthxr::TurboTimingTrace::RecorderPath(log_path, part));
 }
 
 void TestLoggerCollapsesDuplicateMessages() {
@@ -2961,7 +2966,7 @@ int main() {
     TestPivotYawNoOpInsideDeadzone();
     TestSwapchainImageQueuePreservesFifo();
     TestLoggerCollapsesDuplicateMessages();
-    TestTurboTraceBoundedAndDrained();
+    TestTurboTraceContinuousAndDrained();
     TestTurboTraceFollowsDebugLevel();
     TestEyeGazeExtensionCompatibilityPolicy();
     TestQuadViewsSessionActivationPolicy();

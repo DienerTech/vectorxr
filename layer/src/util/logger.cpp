@@ -141,6 +141,15 @@ void Logger::Debug(const std::string& message) {
     Write(LogLevel::Debug, message);
 }
 
+bool Logger::TryDebug(const std::string& message) {
+    std::unique_lock lock(mutex_, std::try_to_lock);
+    if (!lock) return false;
+    if (Severity(LogLevel::Debug) > Severity(level_) || active_log_path_.empty()) return true;
+    FlushPendingDuplicateLocked();
+    WriteLineLocked(LogLevel::Debug, std::chrono::system_clock::now(), message);
+    return true;
+}
+
 bool Logger::IsDebugEnabled() const {
     std::scoped_lock lock(mutex_);
     return Severity(LogLevel::Debug) <= Severity(level_);
@@ -177,7 +186,23 @@ void Logger::PruneLocked() {
 
     for (size_t index = static_cast<size_t>(retention_files_); index < log_files.size(); ++index) {
         std::error_code error;
-        std::filesystem::remove(log_files[index].path(), error);
+        const auto& old_log = log_files[index].path();
+        const bool removed = std::filesystem::remove(old_log, error);
+        if (removed && !error) {
+            // Recorder parts belong to this session and share its retention.
+            for (unsigned part = 0; part < 2; ++part) {
+                auto recorder = old_log;
+                recorder.replace_extension(".flight-recorder." + std::to_string(part) + ".log");
+                std::filesystem::remove(recorder, error);
+                error.clear();
+            }
+            auto snapshot = old_log;
+            snapshot.replace_extension(".flight-recorder.stall.log");
+            std::filesystem::remove(snapshot, error);
+            error.clear();
+            snapshot += ".tmp";
+            std::filesystem::remove(snapshot, error);
+        }
     }
 }
 

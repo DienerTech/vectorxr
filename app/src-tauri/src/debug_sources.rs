@@ -68,6 +68,30 @@ impl DebugSourceSnapshot {
         self.files.push(entry);
     }
 
+    fn logs(&mut self, paths: Vec<std::path::PathBuf>) {
+        for path in paths {
+            // Prioritize recent continuous history over older session logs.
+            let mut recorders = (0..2)
+                .map(|part| path.with_extension(format!("flight-recorder.{part}.log")))
+                .filter(|recorder| recorder.exists())
+                .collect::<Vec<_>>();
+            recorders.sort_by_key(|recorder| {
+                std::cmp::Reverse(fs::metadata(recorder).and_then(|m| m.modified()).ok())
+            });
+            let frozen = path.with_extension("flight-recorder.stall.log");
+            if frozen.exists() {
+                let name = frozen.file_name().unwrap().to_string_lossy();
+                self.file(&frozen, format!("logs/{name}"), true);
+            }
+            for recorder in recorders {
+                let name = recorder.file_name().unwrap().to_string_lossy();
+                self.file(&recorder, format!("logs/{name}"), true);
+            }
+            let name = path.file_name().unwrap().to_string_lossy();
+            self.file(&path, format!("logs/{name}"), true);
+        }
+    }
+
     fn directory(&mut self, directory: &Path, archive_directory: &str, extension: &str) {
         let entries = match fs::read_dir(directory) {
             Ok(entries) => entries,
@@ -138,12 +162,7 @@ pub fn collect() -> DebugSourceSnapshot {
         "txt",
     );
     match super::log_series_paths(&super::resolve_log_path()) {
-        Ok(paths) => {
-            for path in paths {
-                let name = path.file_name().unwrap().to_string_lossy();
-                snapshot.file(&path, format!("logs/{name}"), true);
-            }
-        }
+        Ok(paths) => snapshot.logs(paths),
         Err(error) => snapshot
             .warnings
             .push(format!("Unable to enumerate logs: {error}")),
@@ -177,6 +196,47 @@ mod tests {
         assert_eq!(snapshot.files[1].content.as_deref(), Some(log.as_str()));
         assert!(!snapshot.files[1].truncated);
         assert!(snapshot.files[2].error.is_some());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn includes_both_recorder_parts_before_main_log_without_unrelated_files() {
+        let root = std::env::temp_dir().join(format!(
+            "vectorxr-recorder-export-{}-{}",
+            std::process::id(),
+            super::super::unix_milliseconds()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let main = root.join("vectorxr-20261008-190626.log");
+        fs::write(&main, "main log").unwrap();
+        fs::write(
+            main.with_extension("flight-recorder.0.log"),
+            "older flight history",
+        )
+        .unwrap();
+        fs::write(
+            main.with_extension("flight-recorder.1.log"),
+            "recent flight history",
+        )
+        .unwrap();
+        fs::write(
+            main.with_extension("flight-recorder.stall.log"),
+            "frozen pre-stall history",
+        )
+        .unwrap();
+        fs::write(root.join("unrelated.flight-recorder.0.log"), "unrelated").unwrap();
+        let mut snapshot = DebugSourceSnapshot::default();
+        snapshot.logs(vec![main]);
+        assert_eq!(snapshot.files.len(), 4);
+        assert_eq!(
+            snapshot.files[0].content.as_deref(),
+            Some("frozen pre-stall history")
+        );
+        assert!(snapshot.files[..3]
+            .iter()
+            .all(|f| f.archive_path.contains("flight-recorder.")));
+        assert_eq!(snapshot.files[3].content.as_deref(), Some("main log"));
+        assert!(snapshot.files.iter().all(|f| f.error.is_none()));
         fs::remove_dir_all(root).unwrap();
     }
 

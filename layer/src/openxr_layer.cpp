@@ -3339,6 +3339,7 @@ XrResult OpenXrLayer::EnumerateSwapchainImages(XrSwapchain swapchain,
 XrResult OpenXrLayer::AcquireSwapchainImage(XrSwapchain swapchain,
                                             const XrSwapchainImageAcquireInfo* acquire_info,
                                             uint32_t* index) {
+    const auto trace_call = turbo_trace_.Watch("app.acquireImage");
     {
         std::scoped_lock lock(mutex_);
         auto it = tracked_swapchains_.find(swapchain);
@@ -3381,6 +3382,7 @@ XrResult OpenXrLayer::AcquireSwapchainImage(XrSwapchain swapchain,
 }
 
 XrResult OpenXrLayer::WaitSwapchainImage(XrSwapchain swapchain, const XrSwapchainImageWaitInfo* wait_info) {
+    const auto trace_call = turbo_trace_.Watch("app.waitImage");
     const bool diag = TurboSequencedDebugTick();
     if (diag) {
         logger_.Debug("Turbo-diag: xrWaitSwapchainImage(" +
@@ -3410,6 +3412,7 @@ XrResult OpenXrLayer::WaitSwapchainImage(XrSwapchain swapchain, const XrSwapchai
 
 XrResult OpenXrLayer::ReleaseSwapchainImage(XrSwapchain swapchain,
                                             const XrSwapchainImageReleaseInfo* release_info) {
+    const auto trace_call = turbo_trace_.Watch("app.releaseImage");
     {
         std::scoped_lock lock(mutex_);
         const auto it = tracked_swapchains_.find(swapchain);
@@ -4701,6 +4704,7 @@ bool OpenXrLayer::ComposeQuadViewsD3D11(const XrCompositionLayerProjection* sour
 }
 
 XrResult OpenXrLayer::TraceRuntimeWaitFrame(XrSession session, const XrFrameWaitInfo* info, XrFrameState* state) {
+    const auto trace_call = turbo_trace_.Watch("runtime.wait");
     if (!turbo_trace_.Enabled()) {
         const auto result=next_wait_frame_(session, info, state);
         if (XR_SUCCEEDED(result) && state)
@@ -4719,6 +4723,7 @@ XrResult OpenXrLayer::TraceRuntimeWaitFrame(XrSession session, const XrFrameWait
 }
 
 XrResult OpenXrLayer::TraceRuntimeBeginFrame(XrSession session, const XrFrameBeginInfo* info) {
+    const auto trace_call = turbo_trace_.Watch("runtime.begin");
     std::unique_lock queue_lock(osd_vulkan_queue_mutex_,std::defer_lock);
     if(osd_vulkan_.load())queue_lock.lock();
     if (!turbo_trace_.Enabled()) return next_begin_frame_(session, info);
@@ -4788,6 +4793,7 @@ XrResult OpenXrLayer::FinishOsdComposite(const XrFrameEndInfo* info, bool& drawn
 }
 
 XrResult OpenXrLayer::TraceRuntimeEndFrame(XrSession session, const XrFrameEndInfo* info) {
+    const auto trace_call = turbo_trace_.Watch("forward.end");
     std::unique_lock queue_lock(osd_vulkan_queue_mutex_,std::defer_lock);
     if(osd_vulkan_.load())queue_lock.lock();
     XrFrameEndInfo with_osd{};
@@ -4808,7 +4814,11 @@ XrResult OpenXrLayer::TraceRuntimeEndFrame(XrSession session, const XrFrameEndIn
     }
     const auto submit=[&] {
         const auto submit_start=std::chrono::steady_clock::now();
-        const auto result=next_end_frame_(session,info);
+        XrResult result;
+        {
+            const auto runtime_call = turbo_trace_.Watch("runtime.end");
+            result = next_end_frame_(session, info);
+        }
         osd_.RecordSubmit(std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-submit_start).count());
         if (!layers.empty() && XR_FAILED(result)) {
             // Never retry xrEndFrame: a failing runtime may already consume it.
@@ -4901,6 +4911,7 @@ void OpenXrLayer::ConfigureTurboExperiment() {
 XrResult OpenXrLayer::WaitFrame(XrSession session,
                                 const XrFrameWaitInfo* frame_wait_info,
                                 XrFrameState* frame_state) {
+    const auto trace_call = turbo_trace_.Watch("app.wait");
     if (!frame_state || (frame_wait_info && frame_wait_info->type != XR_TYPE_FRAME_WAIT_INFO) ||
         frame_state->type != XR_TYPE_FRAME_STATE) {
         return XR_ERROR_VALIDATION_FAILURE;
@@ -5220,6 +5231,7 @@ XrResult OpenXrLayer::WaitFrame(XrSession session,
 }
 
 XrResult OpenXrLayer::BeginFrame(XrSession session, const XrFrameBeginInfo* frame_begin_info) {
+    const auto trace_call = turbo_trace_.Watch("app.begin");
     turbo_trace_.Record("begin.enter", turbo_trace_.NextId());
     if (frame_begin_info && frame_begin_info->type != XR_TYPE_FRAME_BEGIN_INFO) {
         return XR_ERROR_VALIDATION_FAILURE;
@@ -6943,6 +6955,7 @@ void OpenXrLayer::ResetTurboFrameState() {
 }
 
 XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_end_info) {
+    const auto trace_call = turbo_trace_.Watch("app.end");
     if (!frame_end_info || frame_end_info->type != XR_TYPE_FRAME_END_INFO) {
         return XR_ERROR_VALIDATION_FAILURE;
     }
@@ -8052,6 +8065,7 @@ XrResult OpenXrLayer::LocateViews(XrSession session,
                                   uint32_t view_capacity_input,
                                   uint32_t* view_count_output,
                                   XrView* views) {
+    const auto trace_call = turbo_trace_.Watch("app.locateViews");
     bool synthesized_quad_views = false;
     QuadViewsGazeDiagnostic gaze_diagnostic{};
     const XrResult result = LocateRuntimeViews(
