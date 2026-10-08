@@ -33,6 +33,7 @@
 #include "depthxr/runtime_relay.h"
 #include "depthxr/osd_renderer.h"
 #include "depthxr/osd_composite.h"
+#include "depthxr/framegen_d3d11_bridge.h"
 #include "depthxr/framegen_presenter.h"
 #include "depthxr/framegen_runtime_queue.h"
 #include "depthxr/turbo_recovery.h"
@@ -107,6 +108,19 @@ class OpenXrLayer {
         // This covers Varjo's unreliable pre-instance extension enumeration.
         bool active_runtime_is_varjo{false};
         std::string active_runtime_path;
+        // XR_KHR_D3D12_enable, for the Direct3D 11 bridge (Frame Generation in
+        // Direct3D 11 games): whether the layer added it to a Direct3D 11
+        // application's extensions, whether the runtime refused the instance
+        // with it, and whether the instance has it.
+        bool app_requested_d3d11{false};
+        bool d3d12_wanted{false};       // Frame Generation is enabled for the executable
+        bool d3d12_scan_trusted{false}; // the runtime's pre-instance extension list was believable
+        bool layer_injected_d3d12{false};
+        bool retried_without_d3d12{false};
+        XrResult d3d12_retry_result{XR_SUCCESS};
+        bool d3d12_enabled{false};
+        // The names of the layers below VectorXR, nearest first.
+        std::string layers_below;
     };
 
     // True when VectorXR quadviews should run in Varjo compatible mode, i.e. core
@@ -115,6 +129,10 @@ class OpenXrLayer {
     // pairs this with a runtime extension probe.
     bool IsVarjoCompatibleQuadviewsEligible();
     bool WantsTurboClockConversion();
+    // Whether Frame Generation is enabled for this executable, so a Direct3D 11
+    // application's instance needs XR_KHR_D3D12_enable for the bridge. Safe
+    // before the instance exists (reads the config file).
+    bool WantsD3D11Bridge();
 
 
     XrResult OnInstanceCreated(const XrInstanceCreateInfo* create_info,
@@ -202,6 +220,7 @@ class OpenXrLayer {
     friend class TurboFrameTestPeer;
     friend class PivotPoseTestPeer;
     friend class PivotGazeTestPeer;
+    friend class D3D11BridgeLayerTestPeer;
 #endif
 
     OpenXrLayer() = default;
@@ -250,6 +269,10 @@ class OpenXrLayer {
         std::vector<ID3D11RenderTargetView*> image_render_target_views;
         ID3D11Texture2D* render_texture{nullptr};
         ID3D11RenderTargetView* render_target_view{nullptr};
+        // An image acquired whose wait timed out: still the runtime's, waited
+        // for again before anything is drawn into it.
+        bool awaiting_wait{false};
+        uint32_t awaiting_index{0};
     };
 
     struct QuadViewsInputCopy {
@@ -720,6 +743,16 @@ class OpenXrLayer {
     // The layer's final submission: OSD overlay, then the runtime xrEndFrame.
     // Frame Generation submits each of its runtime frames through it.
     XrResult SubmitRuntimeFrame(XrSession, const XrFrameEndInfo*);
+    // The layer's own swapchains (Quadviews' outputs): through the queue
+    // substitution and the Direct3D 11 bridge when the session is bridged,
+    // else straight to the runtime. `drawn_index`: the released image holds a
+    // new frame (Frame Generation captures it; the bridge copies it into the
+    // runtime's image); without it the image's content is dropped.
+    // After xrDestroySession or xrDestroyInstance: the bridge's summary, then its teardown.
+    void EndD3D11Bridge();
+    XrResult AcquireLayerSwapchainImage(XrSwapchain swapchain, uint32_t image_count, uint32_t* index);
+    XrResult WaitLayerSwapchainImage(XrSwapchain swapchain, const XrSwapchainImageWaitInfo* info);
+    XrResult ReleaseLayerSwapchainImage(XrSwapchain swapchain, std::optional<uint32_t> drawn_index);
     XrResult DestroyLayerSwapchain(XrSwapchain swapchain);
     void PollFrameGenToggle();
     void StartFrameGen(XrSession session, const void* binding_chain);
@@ -729,14 +762,26 @@ class OpenXrLayer {
     // Direct3D 12: the runtime is given Frame Generation's queue (see
     // FrameGenQueueSubstitution); decided at xrCreateSession.
     FrameGenQueueSubstitution framegen_queue_;
+    // Direct3D 11 games with Frame Generation: the session is Direct3D 12 and
+    // the game renders into images shared with it (see D3D11Bridge); decided
+    // at xrCreateSession.
+    D3D11Bridge d3d11_bridge_;
+    bool d3d11_bridge_lost_logged_{false};    // mutex_
+    bool d3d11_bridge_depth_logged_{false};   // mutex_
+    bool d3d11_bridge_sharpen_logged_{false}; // mutex_
+    std::chrono::steady_clock::time_point d3d11_bridge_last_summary_; // mutex_
     FrameGenQueueSubstitution::Calls FrameGenQueueCalls() const {
         return {next_acquire_swapchain_image_, next_wait_swapchain_image_, next_release_swapchain_image_};
     }
     // Whether the application's calls on `swapchain` may be held back
     // (FrameGenQueueSubstitution: Frame Generation captures its images and
     // shows images of its own only).
+    // A bridged swapchain the layer composes (Quadviews' views) reaches the
+    // runtime only when composing fails, likewise.
     bool FrameGenLazy(XrSwapchain swapchain) {
-        return framegen_queue_.Active() && framegen_.ShowsOwnImagesOnly() && framegen_.CapturesFrom(swapchain);
+        return framegen_queue_.Active() &&
+               ((framegen_.ShowsOwnImagesOnly() && framegen_.CapturesFrom(swapchain)) ||
+                d3d11_bridge_.Composed(swapchain));
     }
     FrameGenPresenter::GpuFactory framegen_gpu_factory_{CreateFrameGenGpu};
     FrameGenRuntimeCalls framegen_calls_;
@@ -1197,6 +1242,8 @@ class OpenXrLayer {
     bool quad_views_extension_requested_{false};
     bool varjo_foveated_rendering_extension_requested_{false};
     bool d3d11_graphics_extension_requested_{false};
+    // XR_KHR_D3D12_enable is enabled on the instance (the Direct3D 11 bridge needs it).
+    bool d3d12_extension_enabled_{false};
     bool eye_gaze_extension_enabled_{false};
     // True for the life of the instance when native Varjo quad-views were
     // forwarded to the runtime (Varjo compatible quadviews). Single source of truth

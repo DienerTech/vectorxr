@@ -1,5 +1,7 @@
 #include <Windows.h>
 #include <d3d11.h>
+#include <d3d11_1.h>
+#include <timeapi.h>
 #include <d3dcompiler.h>
 #include <dxgi1_2.h>
 #include <DirectXMath.h>
@@ -31,13 +33,16 @@
 #include <thread>
 #include <vector>
 
+#pragma comment(lib, "winmm.lib")
+
 using Microsoft::WRL::ComPtr;
 using namespace DirectX;
 
 namespace {
 
-constexpr XrViewConfigurationType kViewConfiguration =
-    XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
+// Quad views (--quad-views): peripheral left/right, then focus left/right, as
+// DCS renders them.
+constexpr uint32_t kMaximumViews = 4;
 constexpr float kNearZ = 0.05f;
 constexpr float kFarZ = 100.0f;
 constexpr uint32_t kMaximumEyeDimension = 1280;
@@ -52,6 +57,16 @@ struct Options {
     ProbeMode mode{ProbeMode::CrossSpace};
     double seconds{20.0};
     bool threaded_wait{false};
+    bool quad_views{false};
+    bool full_size{false};
+    bool pattern{false};
+    bool depth{false};
+    double recreate_seconds{0.0};
+    int sessions{1};
+    bool d3d11_debug{false};
+    double hitch_every{0.0}; // seconds
+    double hitch_ms{300.0};
+    double frame_ms{0.0};
     bool self_test{false};
     bool help{false};
 };
@@ -80,6 +95,21 @@ void PrintUsage() {
         << "      cross-space-cached  Also locate the offset space at the same display time.\n"
         << "  --seconds N             Active render duration (default: 20).\n"
         << "  --threaded-wait         Overlap the next xrWaitFrame with the current xrEndFrame.\n"
+        << "  --quad-views            Render four views (XR_VARJO_quad_views) into four color|sampled\n"
+        << "                          swapchains at full size, as DCS does.\n"
+        << "  --full-size             Use the recommended view sizes (default: at most 1280 px).\n"
+        << "  --pattern               Also draw a test pattern fixed to each view (a grid and a moving bar;\n"
+        << "                          focus views in other colors), visible wherever the headset points.\n"
+        << "  --frame-ms N            Make each frame take at least N ms (a slower game).\n"
+        << "  --depth                 Render depth into depth swapchains and submit it with each view\n"
+        << "                          (XR_KHR_composition_layer_depth).\n"
+        << "  --recreate-seconds N    Destroy and recreate the swapchains every N seconds.\n"
+        << "  --sessions N            Run N sessions one after another in one instance (default: 1),\n"
+        << "                          each for --seconds.\n"
+        << "  --hitch-every N         Every N seconds, one frame takes --hitch-ms longer (a stutter).\n"
+        << "  --hitch-ms M            The stutter's length (default: 300).\n"
+        << "  --d3d11-debug           Create the Direct3D 11 device with the debug layer and report its\n"
+        << "                          errors and warnings at the end.\n"
         << "  --self-test             Validate argument-independent pose math without a headset.\n"
         << "  --help                  Show this help.\n\n"
         << "Press Escape in the console window to end an active run early.\n";
@@ -95,6 +125,50 @@ Options ParseOptions(int argc, char** argv) {
             options.self_test = true;
         } else if (argument == "--threaded-wait") {
             options.threaded_wait = true;
+        } else if (argument == "--quad-views") {
+            options.quad_views = true;
+            options.full_size = true;
+        } else if (argument == "--full-size") {
+            options.full_size = true;
+        } else if (argument == "--pattern") {
+            options.pattern = true;
+        } else if (argument == "--depth") {
+            options.depth = true;
+        } else if (argument == "--d3d11-debug") {
+            options.d3d11_debug = true;
+        } else if (argument == "--hitch-every" || argument == "--hitch-ms") {
+            if (++i >= argc) {
+                throw std::runtime_error(std::string(argument) + " requires a value");
+            }
+            const double value = std::stod(argv[i]);
+            if (!std::isfinite(value) || value < 0.0 || value > 10000.0) {
+                throw std::runtime_error(std::string(argument) + " is out of range");
+            }
+            (argument == "--hitch-every" ? options.hitch_every : options.hitch_ms) = value;
+        } else if (argument == "--recreate-seconds") {
+            if (++i >= argc) {
+                throw std::runtime_error("--recreate-seconds requires a value");
+            }
+            options.recreate_seconds = std::stod(argv[i]);
+            if (!std::isfinite(options.recreate_seconds) || options.recreate_seconds < 0.0) {
+                throw std::runtime_error("--recreate-seconds must not be negative");
+            }
+        } else if (argument == "--sessions") {
+            if (++i >= argc) {
+                throw std::runtime_error("--sessions requires a value");
+            }
+            options.sessions = std::stoi(argv[i]);
+            if (options.sessions < 1 || options.sessions > 100) {
+                throw std::runtime_error("--sessions must be between 1 and 100");
+            }
+        } else if (argument == "--frame-ms") {
+            if (++i >= argc) {
+                throw std::runtime_error("--frame-ms requires a value");
+            }
+            options.frame_ms = std::stod(argv[i]);
+            if (!std::isfinite(options.frame_ms) || options.frame_ms < 0.0 || options.frame_ms > 1000.0) {
+                throw std::runtime_error("--frame-ms must be between 0 and 1000");
+            }
         } else if (argument == "--mode") {
             if (++i >= argc) {
                 throw std::runtime_error("--mode requires a value");
@@ -569,6 +643,9 @@ struct EyeSwapchain {
     std::vector<ComPtr<ID3D11RenderTargetView>> render_targets;
     ComPtr<ID3D11Texture2D> depth_texture;
     ComPtr<ID3D11DepthStencilView> depth_target;
+    // --depth: a depth swapchain, one view per image, instead of depth_texture.
+    XrSwapchain depth_handle{XR_NULL_HANDLE};
+    std::vector<ComPtr<ID3D11DepthStencilView>> depth_targets;
 };
 
 struct WaitedFrame {
@@ -662,55 +739,109 @@ private:
 
 class ProbeApp {
 public:
-    explicit ProbeApp(Options options) : options_(options) {}
+    explicit ProbeApp(Options options)
+        : options_(options),
+          view_configuration_(options.quad_views ? XR_VIEW_CONFIGURATION_TYPE_PRIMARY_QUAD_VARJO
+                                                 : XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO) {}
 
     ~ProbeApp() {
-        for (EyeSwapchain& swapchain : swapchains_) {
-            swapchain.depth_target.Reset();
-            swapchain.depth_texture.Reset();
-            swapchain.render_targets.clear();
-            swapchain.images.clear();
-            if (swapchain.handle != XR_NULL_HANDLE) {
-                xrDestroySwapchain(swapchain.handle);
-            }
-        }
-        swapchains_.clear();
+        DestroySwapchains();
         renderer_.reset();
+        context1_.Reset();
         context_.Reset();
         device_.Reset();
-        if (target_space_ != XR_NULL_HANDLE) {
-            xrDestroySpace(target_space_);
-        }
-        if (source_space_ != XR_NULL_HANDLE) {
-            xrDestroySpace(source_space_);
-        }
-        if (session_ != XR_NULL_HANDLE) {
-            xrDestroySession(session_);
-        }
+        DestroySession();
         if (instance_ != XR_NULL_HANDLE) {
             xrDestroyInstance(instance_);
         }
     }
 
+    void DestroySwapchains() {
+        for (EyeSwapchain& swapchain : swapchains_) {
+            swapchain.depth_target.Reset();
+            swapchain.depth_texture.Reset();
+            swapchain.depth_targets.clear();
+            swapchain.render_targets.clear();
+            swapchain.images.clear();
+            if (swapchain.handle != XR_NULL_HANDLE) {
+                xrDestroySwapchain(swapchain.handle);
+            }
+            if (swapchain.depth_handle != XR_NULL_HANDLE) {
+                xrDestroySwapchain(swapchain.depth_handle);
+            }
+        }
+        swapchains_.clear();
+    }
+
+    void DestroySession() {
+        if (target_space_ != XR_NULL_HANDLE) {
+            xrDestroySpace(target_space_);
+            target_space_ = XR_NULL_HANDLE;
+        }
+        if (source_space_ != XR_NULL_HANDLE) {
+            xrDestroySpace(source_space_);
+            source_space_ = XR_NULL_HANDLE;
+        }
+        if (session_ != XR_NULL_HANDLE) {
+            xrDestroySession(session_);
+            session_ = XR_NULL_HANDLE;
+        }
+        session_running_ = false;
+        session_state_ = XR_SESSION_STATE_UNKNOWN;
+    }
+
     void Run() {
         CreateInstance();
         CreateSystemAndDevice();
-        CreateSession();
-        CreateSpaces();
-        CreateSwapchains();
-        WaitForSessionReady();
+        for (int session = 0; session < options_.sessions; ++session) {
+            if (session > 0) {
+                DestroySwapchains();
+                DestroySession();
+                std::cout << "Session " << session + 1 << " of " << options_.sessions << "\n";
+            }
+            CreateSession();
+            CreateSpaces();
+            CreateSwapchains();
+            WaitForSessionReady();
 
-        std::cout << "Probe active: mode=" << ModeName(options_.mode)
-                  << ", threadedWait=" << (options_.threaded_wait ? "yes" : "no")
-                  << ", duration=" << options_.seconds << "s\n"
-                  << "Use a Pivot profile with both yaw and pitch for the strongest visual test.\n";
+            std::cout << "Probe active: mode=" << ModeName(options_.mode)
+                      << ", threadedWait=" << (options_.threaded_wait ? "yes" : "no")
+                      << ", views=" << swapchains_.size()
+                      << ", frameMs=" << options_.frame_ms
+                      << ", duration=" << options_.seconds << "s\n"
+                      << "Use a Pivot profile with both yaw and pitch for the strongest visual test.\n";
 
-        RenderLoop();
-        RequestAndDrainExit();
+            RenderLoop();
+            RequestAndDrainExit();
+        }
 
         std::cout << "Probe complete: frames=" << rendered_frames_
+                  << ", swapchainRecreations=" << recreations_ << ", hitches=" << hitches_
                   << ", invalidViewFrames=" << invalid_view_frames_
                   << ", spaceRelationFailures=" << space_relation_failures_ << "\n";
+        if (options_.d3d11_debug) {
+            ReportD3D11Messages();
+        }
+        static const char* const call_names[] = {"acquire", "wait", "release", "endFrame"};
+        for (int call = 0; call < 4; ++call) {
+            std::vector<double> sorted = call_ms_[call];
+            if (sorted.empty()) continue;
+            std::sort(sorted.begin(), sorted.end());
+            double sum = 0.0;
+            for (const double ms : sorted) sum += ms;
+            std::cout << std::fixed << std::setprecision(2) << "Call " << call_names[call] << ": mean "
+                      << sum / sorted.size() << " ms, p99 " << sorted[std::min(sorted.size() - 1, sorted.size() * 99 / 100)]
+                      << " ms, max " << sorted.back() << " ms (" << sorted.size() << " calls)\n";
+        }
+        if (frame_ms_.size() > 1) {
+            std::vector<double> sorted(frame_ms_.begin() + 1, frame_ms_.end());
+            std::sort(sorted.begin(), sorted.end());
+            double sum = 0.0;
+            for (const double ms : sorted) sum += ms;
+            std::cout << std::fixed << std::setprecision(2) << "Frame interval (xrWaitFrame to xrWaitFrame): mean "
+                      << sum / sorted.size() << " ms, median " << sorted[sorted.size() / 2] << " ms, p99 "
+                      << sorted[std::min(sorted.size() - 1, sorted.size() * 99 / 100)] << " ms\n";
+        }
     }
 
 private:
@@ -725,16 +856,31 @@ private:
                 xrEnumerateInstanceExtensionProperties(
                     nullptr, extension_count, &extension_count, extensions.data()),
                 "xrEnumerateInstanceExtensionProperties");
-        const bool has_d3d11 = std::any_of(
-            extensions.begin(), extensions.end(), [](const XrExtensionProperties& extension) {
-                return std::strcmp(extension.extensionName,
-                                   XR_KHR_D3D11_ENABLE_EXTENSION_NAME) == 0;
+        const auto offered = [&](const char* name) {
+            return std::any_of(extensions.begin(), extensions.end(), [&](const XrExtensionProperties& extension) {
+                return std::strcmp(extension.extensionName, name) == 0;
             });
-        if (!has_d3d11) {
+        };
+        if (!offered(XR_KHR_D3D11_ENABLE_EXTENSION_NAME)) {
             throw std::runtime_error("active OpenXR runtime does not expose XR_KHR_D3D11_enable");
         }
 
-        const char* enabled_extensions[] = {XR_KHR_D3D11_ENABLE_EXTENSION_NAME};
+        std::vector<const char*> enabled_extensions{XR_KHR_D3D11_ENABLE_EXTENSION_NAME};
+        if (options_.depth) {
+            if (!offered(XR_KHR_COMPOSITION_LAYER_DEPTH_EXTENSION_NAME)) {
+                throw std::runtime_error("the runtime does not offer XR_KHR_composition_layer_depth");
+            }
+            enabled_extensions.push_back(XR_KHR_COMPOSITION_LAYER_DEPTH_EXTENSION_NAME);
+        }
+        if (options_.quad_views) {
+            // As DCS asks for them; VectorXR offers them on runtimes without.
+            for (const char* name : {XR_VARJO_QUAD_VIEWS_EXTENSION_NAME, XR_VARJO_FOVEATED_RENDERING_EXTENSION_NAME}) {
+                if (!offered(name)) {
+                    throw std::runtime_error(std::string(name) + " is not offered: is VectorXR loaded?");
+                }
+                enabled_extensions.push_back(name);
+            }
+        }
         XrInstanceCreateInfo create_info{XR_TYPE_INSTANCE_CREATE_INFO};
         strcpy_s(create_info.applicationInfo.applicationName,
                  XR_MAX_APPLICATION_NAME_SIZE,
@@ -745,8 +891,8 @@ private:
                  "VectorXR Probe");
         create_info.applicationInfo.engineVersion = 1;
         create_info.applicationInfo.apiVersion = XR_CURRENT_API_VERSION;
-        create_info.enabledExtensionCount = 1;
-        create_info.enabledExtensionNames = enabled_extensions;
+        create_info.enabledExtensionCount = static_cast<uint32_t>(enabled_extensions.size());
+        create_info.enabledExtensionNames = enabled_extensions.data();
         CheckXr(XR_NULL_HANDLE, xrCreateInstance(&create_info, &instance_),
                 "xrCreateInstance");
 
@@ -811,7 +957,8 @@ private:
         D3D_FEATURE_LEVEL created_level{};
         ThrowIfFailed(D3D11CreateDevice(
                           selected_adapter.Get(), D3D_DRIVER_TYPE_UNKNOWN, nullptr,
-                          D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+                          D3D11_CREATE_DEVICE_BGRA_SUPPORT |
+                              (options_.d3d11_debug ? D3D11_CREATE_DEVICE_DEBUG : 0),
                           feature_levels.data(), static_cast<UINT>(feature_levels.size()),
                           D3D11_SDK_VERSION, &device_, &created_level, &context_),
                       "D3D11CreateDevice");
@@ -832,12 +979,12 @@ private:
 
         uint32_t blend_count = 0;
         CheckXr(instance_, xrEnumerateEnvironmentBlendModes(
-                               instance_, system_id_, kViewConfiguration,
+                               instance_, system_id_, view_configuration_,
                                0, &blend_count, nullptr),
                 "xrEnumerateEnvironmentBlendModes(count)");
         std::vector<XrEnvironmentBlendMode> modes(blend_count);
         CheckXr(instance_, xrEnumerateEnvironmentBlendModes(
-                               instance_, system_id_, kViewConfiguration,
+                               instance_, system_id_, view_configuration_,
                                blend_count, &blend_count, modes.data()),
                 "xrEnumerateEnvironmentBlendModes");
         const auto opaque = std::find(
@@ -872,16 +1019,17 @@ private:
     void CreateSwapchains() {
         uint32_t view_count = 0;
         CheckXr(instance_, xrEnumerateViewConfigurationViews(
-                               instance_, system_id_, kViewConfiguration,
+                               instance_, system_id_, view_configuration_,
                                0, &view_count, nullptr),
                 "xrEnumerateViewConfigurationViews(count)");
-        if (view_count != 2) {
-            throw std::runtime_error("probe requires a two-view PRIMARY_STEREO configuration");
+        if (view_count != (options_.quad_views ? 4u : 2u)) {
+            throw std::runtime_error(options_.quad_views ? "the quad views configuration does not have four views"
+                                                         : "probe requires a two-view PRIMARY_STEREO configuration");
         }
         view_configuration_views_.assign(
             view_count, {XR_TYPE_VIEW_CONFIGURATION_VIEW});
         CheckXr(instance_, xrEnumerateViewConfigurationViews(
-                               instance_, system_id_, kViewConfiguration,
+                               instance_, system_id_, view_configuration_,
                                view_count, &view_count, view_configuration_views_.data()),
                 "xrEnumerateViewConfigurationViews");
 
@@ -910,19 +1058,17 @@ private:
         swapchains_.resize(view_count);
         for (uint32_t eye = 0; eye < view_count; ++eye) {
             EyeSwapchain& swapchain = swapchains_[eye];
-            swapchain.width = std::min(
-                view_configuration_views_[eye].recommendedImageRectWidth,
-                kMaximumEyeDimension);
-            swapchain.height = std::min(
-                view_configuration_views_[eye].recommendedImageRectHeight,
-                kMaximumEyeDimension);
+            const uint32_t limit = options_.full_size ? UINT32_MAX : kMaximumEyeDimension;
+            swapchain.width = std::min(view_configuration_views_[eye].recommendedImageRectWidth, limit);
+            swapchain.height = std::min(view_configuration_views_[eye].recommendedImageRectHeight, limit);
             if (swapchain.width == 0 || swapchain.height == 0) {
                 throw std::runtime_error("runtime returned a zero recommended view dimension");
             }
             swapchain.format = *preferred;
 
             XrSwapchainCreateInfo create_info{XR_TYPE_SWAPCHAIN_CREATE_INFO};
-            create_info.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT;
+            create_info.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT |
+                                     (options_.quad_views ? XR_SWAPCHAIN_USAGE_SAMPLED_BIT : 0);
             create_info.format = swapchain.format;
             create_info.sampleCount = 1;
             create_info.width = swapchain.width;
@@ -950,6 +1096,41 @@ private:
                     swapchain.format, &swapchain.render_targets[image]);
             }
 
+            if (options_.depth) {
+                if (std::find(formats.begin(), formats.end(), DXGI_FORMAT_D32_FLOAT) == formats.end()) {
+                    throw std::runtime_error("the runtime offers no D32_FLOAT swapchains");
+                }
+                XrSwapchainCreateInfo depth_info{XR_TYPE_SWAPCHAIN_CREATE_INFO};
+                depth_info.usageFlags = XR_SWAPCHAIN_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
+                depth_info.format = DXGI_FORMAT_D32_FLOAT;
+                depth_info.sampleCount = 1;
+                depth_info.width = swapchain.width;
+                depth_info.height = swapchain.height;
+                depth_info.faceCount = 1;
+                depth_info.arraySize = 1;
+                depth_info.mipCount = 1;
+                CheckXr(instance_, xrCreateSwapchain(session_, &depth_info, &swapchain.depth_handle),
+                        "xrCreateSwapchain(depth)");
+                uint32_t depth_count = 0;
+                CheckXr(instance_, xrEnumerateSwapchainImages(swapchain.depth_handle, 0, &depth_count, nullptr),
+                        "xrEnumerateSwapchainImages(depth count)");
+                std::vector<XrSwapchainImageD3D11KHR> depth_images(depth_count, {XR_TYPE_SWAPCHAIN_IMAGE_D3D11_KHR});
+                CheckXr(instance_,
+                        xrEnumerateSwapchainImages(swapchain.depth_handle, depth_count, &depth_count,
+                                                   reinterpret_cast<XrSwapchainImageBaseHeader*>(depth_images.data())),
+                        "xrEnumerateSwapchainImages(depth)");
+                for (const XrSwapchainImageD3D11KHR& image : depth_images) {
+                    D3D11_DEPTH_STENCIL_VIEW_DESC view{};
+                    view.Format = DXGI_FORMAT_D32_FLOAT;
+                    view.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2D;
+                    ComPtr<ID3D11DepthStencilView> target;
+                    ThrowIfFailed(device_->CreateDepthStencilView(image.texture, &view, &target),
+                                  "CreateDepthStencilView(depth swapchain)");
+                    swapchain.depth_targets.push_back(target);
+                }
+                continue;
+            }
+
             D3D11_TEXTURE2D_DESC depth_desc{};
             depth_desc.Width = swapchain.width;
             depth_desc.Height = swapchain.height;
@@ -970,8 +1151,12 @@ private:
 
         renderer_ = std::make_unique<DiagnosticRenderer>();
         renderer_->Initialize(device_.Get(), context_.Get());
-        std::cout << "Probe swapchains: " << swapchains_[0].width << "x"
-                  << swapchains_[0].height << " per eye\n";
+        std::cout << "Probe swapchains:";
+        for (const EyeSwapchain& swapchain : swapchains_) {
+            std::cout << " " << swapchain.width << "x" << swapchain.height;
+        }
+        std::cout << " (format " << swapchains_[0].format << ", "
+                  << swapchains_[0].images.size() << " images each)\n";
     }
 
     bool PollEvents() {
@@ -989,7 +1174,7 @@ private:
                 std::cout << "Session state: " << static_cast<int>(session_state_) << "\n";
                 if (session_state_ == XR_SESSION_STATE_READY && !session_running_) {
                     const XrSessionBeginInfo begin_info{
-                        XR_TYPE_SESSION_BEGIN_INFO, nullptr, kViewConfiguration};
+                        XR_TYPE_SESSION_BEGIN_INFO, nullptr, view_configuration_};
                     CheckXr(instance_, xrBeginSession(session_, &begin_info),
                             "xrBeginSession");
                     session_running_ = true;
@@ -1029,37 +1214,35 @@ private:
     }
 
     bool LocateSourceViews(XrTime display_time,
-                           std::array<XrView, 2>* views,
+                           std::array<XrView, kMaximumViews>* views,
                            XrViewState* view_state) {
-        *views = {XrView{XR_TYPE_VIEW}, XrView{XR_TYPE_VIEW}};
+        views->fill(XrView{XR_TYPE_VIEW});
         *view_state = {XR_TYPE_VIEW_STATE};
         const XrViewLocateInfo locate_info{
-            XR_TYPE_VIEW_LOCATE_INFO, nullptr, kViewConfiguration,
+            XR_TYPE_VIEW_LOCATE_INFO, nullptr, view_configuration_,
             display_time, source_space_};
         uint32_t count = 0;
         CheckXr(instance_, xrLocateViews(session_, &locate_info, view_state,
-                                         static_cast<uint32_t>(views->size()),
-                                         &count, views->data()),
+                                         ViewCount(), &count, views->data()),
                 "xrLocateViews(source)");
         constexpr XrViewStateFlags kRequired =
             XR_VIEW_STATE_ORIENTATION_VALID_BIT | XR_VIEW_STATE_POSITION_VALID_BIT;
-        return count == views->size() &&
+        return count == ViewCount() &&
                (view_state->viewStateFlags & kRequired) == kRequired;
     }
 
     void LocateTargetViewsForCache(XrTime display_time) {
-        std::array<XrView, 2> target_views{
-            XrView{XR_TYPE_VIEW}, XrView{XR_TYPE_VIEW}};
+        std::array<XrView, kMaximumViews> target_views;
+        target_views.fill(XrView{XR_TYPE_VIEW});
         XrViewState target_state{XR_TYPE_VIEW_STATE};
         const XrViewLocateInfo locate_info{
-            XR_TYPE_VIEW_LOCATE_INFO, nullptr, kViewConfiguration,
+            XR_TYPE_VIEW_LOCATE_INFO, nullptr, view_configuration_,
             display_time, target_space_};
         uint32_t count = 0;
         CheckXr(instance_, xrLocateViews(session_, &locate_info, &target_state,
-                                         static_cast<uint32_t>(target_views.size()),
-                                         &count, target_views.data()),
+                                         ViewCount(), &count, target_views.data()),
                 "xrLocateViews(offset target cache)");
-        if (count != target_views.size()) {
+        if (count != ViewCount()) {
             throw std::runtime_error("target-space xrLocateViews returned an unexpected view count");
         }
     }
@@ -1078,27 +1261,98 @@ private:
         return relation.pose;
     }
 
+    // How long a swapchain call took; a slow one is reported (a few times).
+    void NoteCall(int call, std::chrono::steady_clock::time_point start) {
+        const double ms =
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+        call_ms_[call].push_back(ms);
+        if (ms > 30.0 && slow_calls_reported_ < 40) {
+            ++slow_calls_reported_;
+            static const char* const names[] = {"xrAcquireSwapchainImage", "xrWaitSwapchainImage",
+                                                "xrReleaseSwapchainImage", "xrEndFrame"};
+            std::cout << "Slow " << names[call] << ": " << std::fixed << std::setprecision(1) << ms
+                      << " ms at frame " << rendered_frames_ << " (recreations so far " << recreations_ << ")\n";
+        }
+    }
+
     void RenderEye(uint32_t eye, const XrView& view) {
         EyeSwapchain& swapchain = swapchains_[eye];
         uint32_t image_index = 0;
         const XrSwapchainImageAcquireInfo acquire_info{
             XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};
+        auto call_start = std::chrono::steady_clock::now();
         CheckXr(instance_, xrAcquireSwapchainImage(
                                swapchain.handle, &acquire_info, &image_index),
                 "xrAcquireSwapchainImage");
+        NoteCall(0, call_start);
         const XrSwapchainImageWaitInfo wait_info{
             XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO, nullptr, XR_INFINITE_DURATION};
+        call_start = std::chrono::steady_clock::now();
         CheckXr(instance_, xrWaitSwapchainImage(swapchain.handle, &wait_info),
                 "xrWaitSwapchainImage");
+        NoteCall(1, call_start);
+        ID3D11DepthStencilView* depth_target = swapchain.depth_target.Get();
+        if (swapchain.depth_handle != XR_NULL_HANDLE) {
+            uint32_t depth_index = 0;
+            CheckXr(instance_, xrAcquireSwapchainImage(swapchain.depth_handle, &acquire_info, &depth_index),
+                    "xrAcquireSwapchainImage(depth)");
+            CheckXr(instance_, xrWaitSwapchainImage(swapchain.depth_handle, &wait_info),
+                    "xrWaitSwapchainImage(depth)");
+            depth_target = swapchain.depth_targets[depth_index].Get();
+        }
         renderer_->Render(swapchain.render_targets[image_index].Get(),
-                          swapchain.depth_target.Get(),
+                          depth_target,
                           swapchain.width, swapchain.height,
-                          view.pose, view.fov, eye);
+                          view.pose, view.fov, eye % 2);
+        if (options_.pattern) {
+            DrawPattern(swapchain.render_targets[image_index].Get(), swapchain.width, swapchain.height, eye);
+        }
         const XrSwapchainImageReleaseInfo release_info{
             XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
+        call_start = std::chrono::steady_clock::now();
         CheckXr(instance_, xrReleaseSwapchainImage(
                                swapchain.handle, &release_info),
                 "xrReleaseSwapchainImage");
+        NoteCall(2, call_start);
+        if (swapchain.depth_handle != XR_NULL_HANDLE) {
+            CheckXr(instance_, xrReleaseSwapchainImage(swapchain.depth_handle, &release_info),
+                    "xrReleaseSwapchainImage(depth)");
+        }
+    }
+
+    // A grid of squares, a frame and a bar sweeping across once every four
+    // seconds, in the view's own pixels: peripheral views white and green,
+    // focus views yellow and magenta.
+    void DrawPattern(ID3D11RenderTargetView* target, uint32_t width, uint32_t height, uint32_t view) {
+        if (!context1_) {
+            ThrowIfFailed(context_.As(&context1_), "ID3D11DeviceContext1");
+        }
+        const bool focus = view >= 2;
+        const float bar[4] = {1.0f, 1.0f, focus ? 0.0f : 1.0f, 1.0f};
+        const float grid[4] = {focus ? 0.9f : 0.1f, focus ? 0.1f : 0.8f, focus ? 0.9f : 0.2f, 1.0f};
+        const LONG w = static_cast<LONG>(width);
+        const LONG h = static_cast<LONG>(height);
+        std::vector<D3D11_RECT> squares;
+        const LONG square = std::max<LONG>(4, w / 40);
+        for (int y = 1; y < 8; ++y) {
+            for (int x = 1; x < 8; ++x) {
+                const LONG left = w * x / 8 - square / 2;
+                const LONG top = h * y / 8 - square / 2;
+                squares.push_back({left, top, left + square, top + square});
+            }
+        }
+        const LONG edge = std::max<LONG>(2, w / 200);
+        squares.push_back({0, 0, w, edge});
+        squares.push_back({0, h - edge, w, h});
+        squares.push_back({0, 0, edge, h});
+        squares.push_back({w - edge, 0, w, h});
+        context1_->ClearView(target, grid, squares.data(), static_cast<UINT>(squares.size()));
+        const double seconds =
+            std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+        const LONG bar_width = std::max<LONG>(4, w / 24);
+        const LONG bar_left = static_cast<LONG>(std::fmod(seconds / 4.0, 1.0) * static_cast<double>(w - bar_width));
+        const D3D11_RECT bar_rect{bar_left, 0, bar_left + bar_width, h};
+        context1_->ClearView(target, bar, &bar_rect, 1);
     }
 
     void RenderLoop() {
@@ -1112,19 +1366,28 @@ private:
             : WaitOnCallingThread();
 
         const auto started = std::chrono::steady_clock::now();
+        auto last_recreate = started;
+        auto last_hitch = started;
+        last_frame_started_.reset();
         bool exit_requested = false;
         while (session_running_ && !exit_requested) {
             CheckXr(instance_, waited.result, "xrWaitFrame");
             const XrFrameBeginInfo begin_info{XR_TYPE_FRAME_BEGIN_INFO};
             CheckXr(instance_, xrBeginFrame(session_, &begin_info), "xrBeginFrame");
 
-            std::array<XrView, 2> source_views{
-                XrView{XR_TYPE_VIEW}, XrView{XR_TYPE_VIEW}};
+            const auto frame_started = std::chrono::steady_clock::now();
+            if (last_frame_started_) {
+                frame_ms_.push_back(
+                    std::chrono::duration<double, std::milli>(frame_started - *last_frame_started_).count());
+            }
+            last_frame_started_ = frame_started;
+            std::array<XrCompositionLayerDepthInfoKHR, kMaximumViews> depth_infos;
+            depth_infos.fill(XrCompositionLayerDepthInfoKHR{XR_TYPE_COMPOSITION_LAYER_DEPTH_INFO_KHR});
+            std::array<XrView, kMaximumViews> source_views;
+            source_views.fill(XrView{XR_TYPE_VIEW});
             XrViewState view_state{XR_TYPE_VIEW_STATE};
-            std::array<XrCompositionLayerProjectionView, 2> projection_views{
-                XrCompositionLayerProjectionView{XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW},
-                XrCompositionLayerProjectionView{XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW},
-            };
+            std::array<XrCompositionLayerProjectionView, kMaximumViews> projection_views;
+            projection_views.fill(XrCompositionLayerProjectionView{XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW});
             bool submit_projection = false;
             XrSpace projection_space = source_space_;
 
@@ -1143,7 +1406,7 @@ private:
                 }
 
                 if (options_.mode == ProbeMode::SourceExact || source_in_target.has_value()) {
-                    for (uint32_t eye = 0; eye < source_views.size(); ++eye) {
+                    for (uint32_t eye = 0; eye < ViewCount(); ++eye) {
                         RenderEye(eye, source_views[eye]);
                         projection_views[eye].pose =
                             source_in_target.has_value()
@@ -1158,6 +1421,16 @@ private:
                              static_cast<int32_t>(swapchains_[eye].height)},
                         };
                         projection_views[eye].subImage.imageArrayIndex = 0;
+                        if (swapchains_[eye].depth_handle != XR_NULL_HANDLE) {
+                            XrCompositionLayerDepthInfoKHR& depth = depth_infos[eye];
+                            depth.subImage = projection_views[eye].subImage;
+                            depth.subImage.swapchain = swapchains_[eye].depth_handle;
+                            depth.minDepth = 0.0f;
+                            depth.maxDepth = 1.0f;
+                            depth.nearZ = kNearZ;
+                            depth.farZ = kFarZ;
+                            projection_views[eye].next = &depth;
+                        }
                     }
                     submit_projection = true;
                 }
@@ -1168,11 +1441,24 @@ private:
             XrCompositionLayerProjection projection{
                 XR_TYPE_COMPOSITION_LAYER_PROJECTION};
             projection.space = projection_space;
-            projection.viewCount = static_cast<uint32_t>(projection_views.size());
+            projection.viewCount = ViewCount();
             projection.views = projection_views.data();
             const XrCompositionLayerBaseHeader* layers[] = {
                 reinterpret_cast<const XrCompositionLayerBaseHeader*>(&projection)};
 
+            // A slower game: the frame takes at least --frame-ms (plus, now and
+            // then, a stutter: --hitch-every).
+            double frame_ms = options_.frame_ms;
+            if (options_.hitch_every > 0.0 &&
+                std::chrono::duration<double>(frame_started - last_hitch).count() >= options_.hitch_every) {
+                frame_ms += options_.hitch_ms;
+                last_hitch = frame_started;
+                ++hitches_;
+            }
+            while (std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - frame_started)
+                       .count() < frame_ms) {
+                Sleep(1);
+            }
             const double elapsed = std::chrono::duration<double>(
                 std::chrono::steady_clock::now() - started).count();
             exit_requested = elapsed >= options_.seconds ||
@@ -1193,7 +1479,9 @@ private:
             end_info.environmentBlendMode = blend_mode_;
             end_info.layerCount = submit_projection ? 1u : 0u;
             end_info.layers = submit_projection ? layers : nullptr;
+            const auto end_start = std::chrono::steady_clock::now();
             const XrResult end_result = xrEndFrame(session_, &end_info);
+            NoteCall(3, end_start);
             ++rendered_frames_;
 
             if (next_wait_requested) {
@@ -1205,6 +1493,15 @@ private:
             }
             if (exit_requested || !session_running_) {
                 break;
+            }
+            if (options_.recreate_seconds > 0.0 &&
+                std::chrono::duration<double>(std::chrono::steady_clock::now() - last_recreate).count() >=
+                    options_.recreate_seconds) {
+                // As a game that changes its render resolution does: no image is held.
+                DestroySwapchains();
+                CreateSwapchains();
+                ++recreations_;
+                last_recreate = std::chrono::steady_clock::now();
             }
             if (!options_.threaded_wait) {
                 waited = WaitOnCallingThread();
@@ -1233,7 +1530,52 @@ private:
         }
     }
 
+    std::optional<std::chrono::steady_clock::time_point> last_frame_started_;
+    std::vector<double> frame_ms_;
+    uint64_t recreations_{0};
+    uint64_t hitches_{0};
+    std::array<std::vector<double>, 4> call_ms_;
+    int slow_calls_reported_{0};
+
+    // The Direct3D 11 debug layer's errors and warnings over the run (the
+    // first few of them, and how many).
+    void ReportD3D11Messages() {
+        ComPtr<ID3D11InfoQueue> queue;
+        if (FAILED(device_.As(&queue))) {
+            std::cout << "Direct3D 11 debug layer: unavailable\n";
+            return;
+        }
+        uint64_t errors = 0;
+        uint64_t warnings = 0;
+        int shown = 0;
+        for (UINT64 i = 0; i < queue->GetNumStoredMessages(); ++i) {
+            SIZE_T size = 0;
+            queue->GetMessage(i, nullptr, &size);
+            std::vector<char> storage(size);
+            auto* message = reinterpret_cast<D3D11_MESSAGE*>(storage.data());
+            if (FAILED(queue->GetMessage(i, message, &size))) continue;
+            if (message->Severity <= D3D11_MESSAGE_SEVERITY_ERROR) {
+                ++errors;
+            } else if (message->Severity == D3D11_MESSAGE_SEVERITY_WARNING) {
+                ++warnings;
+            } else {
+                continue;
+            }
+            if (shown++ < 10) {
+                std::cout << "Direct3D 11 debug layer [" << message->ID << "]: " << message->pDescription << "\n";
+            }
+        }
+        std::cout << "Direct3D 11 debug layer: " << errors << " errors, " << warnings << " warnings (of "
+                  << queue->GetNumStoredMessages() << " stored, " << queue->GetNumMessagesDiscardedByMessageCountLimit()
+                  << " discarded)\n";
+    }
+
+    uint32_t ViewCount() const {
+        return static_cast<uint32_t>(swapchains_.size());
+    }
+
     Options options_;
+    XrViewConfigurationType view_configuration_;
     XrInstance instance_{XR_NULL_HANDLE};
     XrSystemId system_id_{XR_NULL_SYSTEM_ID};
     XrSession session_{XR_NULL_HANDLE};
@@ -1244,6 +1586,7 @@ private:
     bool session_running_{false};
     ComPtr<ID3D11Device> device_;
     ComPtr<ID3D11DeviceContext> context_;
+    ComPtr<ID3D11DeviceContext1> context1_;
     std::vector<XrViewConfigurationView> view_configuration_views_;
     std::vector<EyeSwapchain> swapchains_;
     std::unique_ptr<DiagnosticRenderer> renderer_;
@@ -1265,7 +1608,10 @@ int main(int argc, char** argv) {
             RunSelfTest();
             return 0;
         }
+        // Sleep(1) in --frame-ms pacing sleeps a whole timer period otherwise.
+        timeBeginPeriod(1);
         ProbeApp(options).Run();
+        timeEndPeriod(1);
         return 0;
     } catch (const std::exception& error) {
         std::cerr << "vectorxr_hardware_probe: " << error.what() << "\n";

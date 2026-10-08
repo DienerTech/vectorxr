@@ -4,7 +4,9 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
+#include <deque>
 #include <cstdint>
 #include <iomanip>
 #include <sstream>
@@ -594,6 +596,68 @@ const void* FindStructInChain(const void* next, XrStructureType type) {
         header = header->next;
     }
     return nullptr;
+}
+
+// A frame without the depth of some swapchains (a bridged session's depth
+// stays the game's, see D3D11Bridge), and the copies it needs.
+struct DepthlessFrame {
+    XrFrameEndInfo info{XR_TYPE_FRAME_END_INFO};
+    std::vector<const XrCompositionLayerBaseHeader*> layers;
+    std::deque<XrCompositionLayerProjection> projections;
+    std::deque<std::vector<XrCompositionLayerProjectionView>> views;
+};
+
+// `frame` itself when no projection view's depth is to be dropped. A view's
+// chain loses its depth structure when that comes first, otherwise the whole
+// chain (another structure ahead of it cannot be copied without knowing it).
+template <typename Drop>
+const XrFrameEndInfo* WithoutDepth(const XrFrameEndInfo* frame, DepthlessFrame& storage, const Drop& drop) {
+    const auto dropped = [&](const XrCompositionLayerProjectionView& view) {
+        for (auto* base = static_cast<const XrBaseInStructure*>(view.next); base; base = base->next) {
+            if (base->type == XR_TYPE_COMPOSITION_LAYER_DEPTH_INFO_KHR &&
+                drop(reinterpret_cast<const XrCompositionLayerDepthInfoKHR*>(base)->subImage.swapchain)) {
+                return true;
+            }
+        }
+        return false;
+    };
+    const auto projection_at = [&](std::uint32_t i) -> const XrCompositionLayerProjection* {
+        const XrCompositionLayerBaseHeader* base = frame->layers ? frame->layers[i] : nullptr;
+        return base && base->type == XR_TYPE_COMPOSITION_LAYER_PROJECTION
+                   ? reinterpret_cast<const XrCompositionLayerProjection*>(base)
+                   : nullptr;
+    };
+    const auto any_dropped = [&](const XrCompositionLayerProjection* projection) {
+        return projection && projection->views &&
+               std::any_of(projection->views, projection->views + projection->viewCount, dropped);
+    };
+    bool any = false;
+    for (std::uint32_t i = 0; i < frame->layerCount && !any; ++i) {
+        any = any_dropped(projection_at(i));
+    }
+    if (!any) {
+        return frame;
+    }
+    storage.info = *frame;
+    storage.layers.assign(frame->layers, frame->layers + frame->layerCount);
+    for (std::uint32_t i = 0; i < frame->layerCount; ++i) {
+        const XrCompositionLayerProjection* projection = projection_at(i);
+        if (!any_dropped(projection)) {
+            continue;
+        }
+        storage.views.emplace_back(projection->views, projection->views + projection->viewCount);
+        for (XrCompositionLayerProjectionView& view : storage.views.back()) {
+            if (dropped(view)) {
+                const auto* first = static_cast<const XrBaseInStructure*>(view.next);
+                view.next = first->type == XR_TYPE_COMPOSITION_LAYER_DEPTH_INFO_KHR ? first->next : nullptr;
+            }
+        }
+        storage.projections.push_back(*projection);
+        storage.projections.back().views = storage.views.back().data();
+        storage.layers[i] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&storage.projections.back());
+    }
+    storage.info.layers = storage.layers.data();
+    return &storage.info;
 }
 
 const void* StripVarjoFoveatedViewLocateNextChain(const void* next) {
@@ -1892,6 +1956,7 @@ XrResult OpenXrLayer::OnInstanceCreated(const XrInstanceCreateInfo* create_info,
     instance_ = instance;
     ResetInstanceState();
     turbo_clock_enabled_ = diagnostics.turbo_clock_enabled;
+    d3d12_extension_enabled_ = diagnostics.d3d12_enabled;
     eye_gaze_extension_enabled_ = eye_gaze_extension_enabled;
     varjo_compatible_quadviews_active_ = diagnostics.varjo_compatible_quad_forwarded;
     ResetSessionState();
@@ -1952,6 +2017,25 @@ XrResult OpenXrLayer::OnInstanceCreated(const XrInstanceCreateInfo* create_info,
             }
         }
         logger_.Info(ext_stream.str());
+        logger_.Info("OpenXR API layers below VectorXR: [" + diagnostics.layers_below + "]");
+        if (diagnostics.layer_injected_d3d12) {
+            logger_.Info(std::string("Frame Generation's Direct3D 11 bridge: XR_KHR_D3D12_enable ") +
+                         (diagnostics.d3d12_enabled
+                              ? "added to the instance's extensions" +
+                                    std::string(diagnostics.d3d12_scan_trusted
+                                                    ? "."
+                                                    : " (the runtime's extension list before the instance was not "
+                                                      "believable).")
+                              : "left out after the runtime refused an extension (instance result " +
+                                    std::to_string(static_cast<int>(diagnostics.first_create_result)) +
+                                    "; created again without it, result " +
+                                    std::to_string(static_cast<int>(diagnostics.d3d12_retry_result)) +
+                                    "; which extension the runtime refused is not known); Frame Generation "
+                                    "keeps Direct3D 11 sessions as they are."));
+        } else if (diagnostics.d3d12_wanted) {
+            logger_.Info("Frame Generation's Direct3D 11 bridge is unavailable: the runtime does not offer "
+                         "XR_KHR_D3D12_enable; Frame Generation keeps Direct3D 11 sessions as they are.");
+        }
         if (quad_views_extension_requested_ || varjo_foveated_rendering_extension_requested_) {
             logger_.Info(std::string("Application requested layer-owned extensions: quadViews=") +
                          (quad_views_extension_requested_ ? "true" : "false") +
@@ -2160,8 +2244,10 @@ XrResult OpenXrLayer::DestroyInstance(XrInstance instance) {
     DestroyVarjoNativeFoveationResources();
     DestroyInternalReferenceSpaces();
     ResetSwapchainState();
+    d3d11_bridge_.Drain();
     const XrResult result = next_destroy_instance_(instance);
     framegen_queue_.Reset();
+    EndD3D11Bridge();
     if (XR_SUCCEEDED(result)) {
         turbo_recovery_.Complete();
         instance_ = XR_NULL_HANDLE;
@@ -2237,8 +2323,10 @@ XrResult OpenXrLayer::CreateSession(XrInstance instance,
 
     // Frame Generation running this session gives the runtime a Direct3D 12
     // queue of its own (FrameGenQueueSubstitution), decided before the
-    // session exists.
+    // session exists. A Direct3D 11 game's session becomes Direct3D 12 for
+    // it (D3D11Bridge): the bridge's queue then stands for the game's.
     const XrSessionCreateInfo* downstream_info = create_info;
+    std::string bridge_description;
     {
         bool framegen_wanted = false;
         {
@@ -2248,27 +2336,97 @@ XrResult OpenXrLayer::CreateSession(XrInstance instance,
             framegen_wanted = resolved.core.enabled && resolved.framegen.enabled;
         }
         framegen_queue_.Reset();
+        d3d11_bridge_.End();
         if (framegen_wanted) {
+            const XrSessionCreateInfo* game_info = create_info;
+            const auto* first = create_info ? static_cast<const XrBaseInStructure*>(create_info->next) : nullptr;
+            if (first && first->type == XR_TYPE_GRAPHICS_BINDING_D3D11_KHR) {
+                const char* bridge_switch = std::getenv("VECTORXR_D3D11_BRIDGE");
+                if (bridge_switch && std::string(bridge_switch) == "off") {
+                    logger_.Info("Frame Generation keeps this Direct3D 11 session as it is: "
+                                 "VECTORXR_D3D11_BRIDGE=off.");
+                } else if (!d3d12_extension_enabled_) {
+                    logger_.Info("Frame Generation keeps this Direct3D 11 session as it is: the instance has no "
+                                 "XR_KHR_D3D12_enable for its bridge (Frame Generation was enabled after the game "
+                                 "started, or the runtime refused the extension). Restart the game to use it.");
+                } else {
+                    std::string reason;
+                    d3d11_bridge_.SetLog([this](const std::string& message) { logger_.Error(message); });
+                    if (const XrSessionCreateInfo* bridged = d3d11_bridge_.Begin(
+                            instance, create_info, next_get_instance_proc_addr_, reason, bridge_description)) {
+                        game_info = bridged;
+                    } else {
+                        logger_.Info("Frame Generation keeps this Direct3D 11 session as it is (no bridge): " +
+                                     reason);
+                    }
+                }
+            }
             std::string note;
             framegen_queue_.SetLog([this](const std::string& message) { logger_.Error(message); });
-            downstream_info = framegen_queue_.Prepare(create_info, note);
+            downstream_info = framegen_queue_.Prepare(game_info, note);
             if (!note.empty()) logger_.Info(note);
+            if (d3d11_bridge_.Active() && !framegen_queue_.Active()) {
+                // The runtime must never be given the bridge's queue: it
+                // waits for the game's Direct3D 11 work.
+                logger_.Info("Frame Generation keeps this Direct3D 11 session as it is (no bridge): the runtime "
+                             "would be given the bridge's queue.");
+                framegen_queue_.Reset();
+                d3d11_bridge_.End();
+                downstream_info = create_info;
+            }
         }
     }
 
-    const XrResult result = next_create_session_(instance, downstream_info, session);
+    // A runtime may expect the graphics requirements of the API it was
+    // asked about last: a session made with Direct3D 11 after the bridge
+    // asked for Direct3D 12's asks for Direct3D 11's again.
+    const auto requery_d3d11_requirements = [&] {
+        if (!d3d11_bridge_.QueriedD3D12Requirements() || !create_info || !next_get_instance_proc_addr_) {
+            return;
+        }
+        PFN_xrGetD3D11GraphicsRequirementsKHR get_requirements = nullptr;
+        if (XR_SUCCEEDED(next_get_instance_proc_addr_(instance, "xrGetD3D11GraphicsRequirementsKHR",
+                                                      reinterpret_cast<PFN_xrVoidFunction*>(&get_requirements))) &&
+            get_requirements) {
+            XrGraphicsRequirementsD3D11KHR requirements{XR_TYPE_GRAPHICS_REQUIREMENTS_D3D11_KHR};
+            get_requirements(instance, create_info->systemId, &requirements);
+        }
+    };
+    if (!d3d11_bridge_.Active()) {
+        requery_d3d11_requirements();
+    }
+    XrResult result = next_create_session_(instance, downstream_info, session);
+    if (XR_FAILED(result) && d3d11_bridge_.Active()) {
+        logger_.Error("xrCreateSession refused the bridged Direct3D 12 session (result=" +
+                      std::to_string(static_cast<int>(result)) +
+                      "); creating it with the game's Direct3D 11 binding instead.");
+        framegen_queue_.Reset();
+        d3d11_bridge_.End();
+        requery_d3d11_requirements();
+        result = next_create_session_(instance, create_info, session);
+    }
     if (XR_FAILED(result) || !session) {
         if (XR_FAILED(result)) {
             logger_.Error("xrCreateSession failed downstream: result=" + std::to_string(static_cast<int>(result)));
         }
         framegen_queue_.Reset();
+        d3d11_bridge_.End();
         return result;
+    }
+    if (d3d11_bridge_.Active()) {
+        logger_.Info("Frame Generation's Direct3D 11 bridge: the session is Direct3D 12 and the game renders into "
+                     "images shared with it (the OSD's eye-image composite and Varjo focus sharpening are off); " +
+                     bridge_description);
     }
     logger_.Info("xrCreateSession succeeded downstream; configuring VectorXR session resources.");
 
     std::scoped_lock lock(mutex_);
     ResetSessionState();
     active_session_ = *session;
+    d3d11_bridge_lost_logged_ = false;
+    d3d11_bridge_depth_logged_ = false;
+    d3d11_bridge_last_summary_ = std::chrono::steady_clock::now();
+    d3d11_bridge_sharpen_logged_ = false;
     const auto* d3d11_binding = create_info
                                     ? static_cast<const XrGraphicsBindingD3D11KHR*>(
                                           FindStructInChain(create_info->next, XR_TYPE_GRAPHICS_BINDING_D3D11_KHR))
@@ -2319,6 +2477,7 @@ XrResult OpenXrLayer::CreateSession(XrInstance instance,
          next_acquire_swapchain_image_, next_wait_swapchain_image_, next_release_swapchain_image_,
          next_destroy_swapchain_, next_create_reference_space_, next_destroy_space_}, &logger_, "application="+current_exe_name_+" runtime="+runtime_name_);
     graphics_api_=osd_.GraphicsApi();
+    if (d3d11_bridge_.Active()) graphics_api_ = "D3D11-on-D3D12";
     osd_vulkan_.store(graphics_api_=="Vulkan");
     const XrResult internal_result = CreateInternalReferenceSpaces(*session);
     if (XR_FAILED(internal_result)) {
@@ -2328,7 +2487,12 @@ XrResult OpenXrLayer::CreateSession(XrInstance instance,
     ReloadConfigIfNeeded();
     RefreshResolvedSettings();
     quadviews_session_active_ = resolved_settings_.core.enabled && resolved_settings_.quadviews.enabled;
-    StartFrameGen(*session, framegen_queue_.FrameGenChain(create_info ? create_info->next : nullptr));
+    // A bridged session's Frame Generation is Direct3D 12, on the bridge's
+    // device, capturing on the bridge's queue.
+    StartFrameGen(*session, framegen_queue_.FrameGenChain(
+                                d3d11_bridge_.Active() ? d3d11_bridge_.Binding()
+                                                       : (create_info ? create_info->next : nullptr)));
+    d3d11_bridge_.SessionCreated();
     if (runtime_relay_root_.empty()) runtime_relay_root_ = ResolveRuntimeRelayRoot();
     runtime_relay_session_id_ = std::to_string(GetCurrentProcessId()) + "-" +
         std::to_string(RuntimeRelayUnixMilliseconds()) + "-" +
@@ -2369,6 +2533,9 @@ XrResult OpenXrLayer::DestroySession(XrSession session) {
             FlushDeferredSwapchainReleasesLocked("session teardown");
             ResetD3D11QuadViewsCompositor();
             ResetSwapchainState();
+            // The bridge's copies into the runtime's images finish before the
+            // runtime frees them with the session.
+            d3d11_bridge_.Drain();
         }
     }
 
@@ -2380,6 +2547,7 @@ XrResult OpenXrLayer::DestroySession(XrSession session) {
     const XrResult result = next_destroy_session_(session);
     if (destroying_active && XR_SUCCEEDED(result)) {
         framegen_queue_.Reset();
+        EndD3D11Bridge();
     }
     if (XR_SUCCEEDED(result)) {
         std::scoped_lock lock(mutex_);
@@ -3350,8 +3518,17 @@ XrResult OpenXrLayer::CreateSwapchain(XrSession session,
         logger_.Info(stream.str());
     }
 
-    // Frame Generation copies released color images (Vulkan needs TRANSFER_SRC).
     const XrSwapchainCreateInfo* const original_create_info = create_info;
+    // A bridged session's runtime swapchains take the bridge's copies of the
+    // game's images (D3D11Bridge).
+    const bool bridged = create_info && d3d11_bridge_.Active();
+    XrSwapchainCreateInfo bridged_create_info{};
+    if (bridged) {
+        bridged_create_info = D3D11Bridge::RuntimeCreateInfo(*create_info);
+        create_info = &bridged_create_info;
+    }
+    const XrSwapchainCreateInfo* const base_create_info = create_info;
+    // Frame Generation copies released color images (Vulkan needs TRANSFER_SRC).
     XrSwapchainCreateInfo adjusted_create_info{};
     if (create_info && framegen_owns_pacing_.load(std::memory_order_acquire)) {
         const XrSwapchainUsageFlags extra = framegen_.SourceUsage(*create_info);
@@ -3367,9 +3544,18 @@ XrResult OpenXrLayer::CreateSwapchain(XrSession session,
     if (XR_FAILED(result) && create_info == &adjusted_create_info) {
         // Without the copy usage, Frame Generation reports itself unavailable
         // rather than copying from this swapchain.
-        create_info = original_create_info;
+        create_info = base_create_info;
         logger_.Info("Runtime rejected the Frame Generation capture usage (result=" +
                      std::to_string(static_cast<int>(result)) + "); retrying with the application's usage.");
+        result = next_create_swapchain_(session, create_info, swapchain);
+    }
+    if (XR_FAILED(result) && bridged &&
+        ((bridged_create_info.usageFlags & ~original_create_info->usageFlags) & XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT)) {
+        // Direct3D 12 copies into an image need no usage of their own.
+        bridged_create_info.usageFlags &= ~XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT;
+        create_info = &bridged_create_info;
+        logger_.Info("Runtime rejected the bridge's copy usage (result=" + std::to_string(static_cast<int>(result)) +
+                     "); retrying without it.");
         result = next_create_swapchain_(session, create_info, swapchain);
     }
     if (XR_FAILED(result)) {
@@ -3392,6 +3578,18 @@ XrResult OpenXrLayer::CreateSwapchain(XrSession session,
     }
     if (!create_info || !swapchain || *swapchain == XR_NULL_HANDLE) {
         return result;
+    }
+    if (bridged) {
+        std::string reason;
+        if (!d3d11_bridge_.AddSwapchain(*swapchain, *original_create_info, next_enumerate_swapchain_images_,
+                                        reason)) {
+            logger_.Error("Frame Generation's Direct3D 11 bridge refuses a swapchain it cannot share: " + reason);
+            next_destroy_swapchain_(*swapchain);
+            *swapchain = XR_NULL_HANDLE;
+            return XR_ERROR_RUNTIME_FAILURE;
+        }
+        logger_.Info("Frame Generation's Direct3D 11 bridge: swapchain " + FormatHandle(*swapchain) + " is shared (" +
+                     d3d11_bridge_.Describe(*swapchain) + ").");
     }
 
     std::scoped_lock lock(mutex_);
@@ -3438,14 +3636,16 @@ XrResult OpenXrLayer::DestroySwapchain(XrSwapchain swapchain) {
     // application's handle counts as destroyed; the runtime frees the
     // swapchain with its session.
     XrResult result = XR_SUCCESS;
-    if (framegen_.ForgetSwapchain(swapchain)) {
+    // So do the bridge's copies into the runtime's images.
+    if (framegen_.ForgetSwapchain(swapchain) && d3d11_bridge_.RemoveSwapchain(swapchain)) {
         result = next_destroy_swapchain_(swapchain);
         if (XR_FAILED(result)) {
             return result;
         }
     } else {
         logger_.Error("Swapchain " + FormatHandle(swapchain) +
-                      " is kept until its session ends: Frame Generation's GPU work on it did not finish.");
+                      " is kept until its session ends: GPU work on it (Frame Generation's, or the Direct3D 11 "
+                      "bridge's) did not finish.");
     }
 
     std::scoped_lock lock(mutex_);
@@ -3465,8 +3665,30 @@ XrResult OpenXrLayer::EnumerateSwapchainImages(XrSwapchain swapchain,
                                                uint32_t image_capacity_input,
                                                uint32_t* image_count_output,
                                                XrSwapchainImageBaseHeader* images) {
-    const XrResult result =
-        next_enumerate_swapchain_images_(swapchain, image_capacity_input, image_count_output, images);
+    XrResult result = XR_SUCCESS;
+    if (d3d11_bridge_.Bridged(swapchain)) {
+        // A bridged swapchain's images are the bridge's Direct3D 11 ones; the
+        // runtime's are Direct3D 12.
+        const std::vector<ID3D11Texture2D*> textures = d3d11_bridge_.Images(swapchain);
+        if (!image_count_output) {
+            return XR_ERROR_VALIDATION_FAILURE;
+        }
+        *image_count_output = static_cast<uint32_t>(textures.size());
+        if (image_capacity_input > 0) {
+            if (image_capacity_input < textures.size()) {
+                return XR_ERROR_SIZE_INSUFFICIENT;
+            }
+            if (!images || images->type != XR_TYPE_SWAPCHAIN_IMAGE_D3D11_KHR) {
+                return XR_ERROR_VALIDATION_FAILURE;
+            }
+            auto* d3d11_images = reinterpret_cast<XrSwapchainImageD3D11KHR*>(images);
+            for (std::size_t i = 0; i < textures.size(); ++i) {
+                d3d11_images[i].texture = textures[i];
+            }
+        }
+    } else {
+        result = next_enumerate_swapchain_images_(swapchain, image_capacity_input, image_count_output, images);
+    }
     if (XR_FAILED(result) || !image_count_output) {
         return result;
     }
@@ -3530,12 +3752,21 @@ XrResult OpenXrLayer::AcquireSwapchainImage(XrSwapchain swapchain,
     }
     // Calls Frame Generation held back (FrameGenQueueSubstitution) go first,
     // as far as the runtime needs them to hand out an image.
-    const XrResult result = framegen_queue_.Acquire(swapchain, image_count, FrameGenQueueCalls(), acquire_info, index);
+    // A bridged swapchain whose runtime images never get anything (depth)
+    // needs no ordering with the game's queue.
+    const XrResult result = d3d11_bridge_.Unmirrored(swapchain)
+                                ? next_acquire_swapchain_image_(swapchain, acquire_info, index)
+                                : framegen_queue_.Acquire(swapchain, image_count, FrameGenQueueCalls(), acquire_info,
+                                                          index);
     if (diag) {
         logger_.Debug("Turbo-diag: xrAcquireSwapchainImage completed.");
     }
     if (XR_FAILED(result)) {
         return result;
+    }
+    if (index) {
+        // A bridged image is rendered again only after the bridge's last copy of it.
+        d3d11_bridge_.Acquired(swapchain, *index);
     }
 
     std::scoped_lock lock(mutex_);
@@ -3564,7 +3795,10 @@ XrResult OpenXrLayer::WaitSwapchainImage(XrSwapchain swapchain, const XrSwapchai
     const auto wait_start = std::chrono::steady_clock::now();
     // Anything the runtime queued for the image runs before the game's
     // rendering into it; held back with a release before it that is.
-    const XrResult result = framegen_queue_.Wait(swapchain, FrameGenLazy(swapchain), FrameGenQueueCalls(), wait_info);
+    const XrResult result = d3d11_bridge_.Unmirrored(swapchain)
+                                ? next_wait_swapchain_image_(swapchain, wait_info)
+                                : framegen_queue_.Wait(swapchain, FrameGenLazy(swapchain), FrameGenQueueCalls(),
+                                                       wait_info);
     if (diag) {
         logger_.Debug("Turbo-diag: xrWaitSwapchainImage completed in " +
                       std::to_string(std::chrono::duration<double, std::milli>(
@@ -3590,6 +3824,13 @@ XrResult OpenXrLayer::ReleaseSwapchainImage(XrSwapchain swapchain,
     NoteThread(ThreadCensus::Call::ReleaseSwapchainImage);
     {
         std::scoped_lock lock(mutex_);
+        // A bridged image reaches the runtime's image by the bridge's copy,
+        // queued ahead of Frame Generation's capture of it, and before the
+        // release goes on below (MarkGameWork must come after the copy on the
+        // bridge's queue, or the runtime may read the image before it). A
+        // copy skipped (a stalled queue) leaves an older frame there: not
+        // captured.
+        const bool copied = d3d11_bridge_.Released(swapchain);
         const auto it = tracked_swapchains_.find(swapchain);
         if (it != tracked_swapchains_.end()) {
             // Snapshot the released image index at the app's release moment —
@@ -3601,7 +3842,9 @@ XrResult OpenXrLayer::ReleaseSwapchainImage(XrSwapchain swapchain,
                 framegen_.NoteRelease(swapchain, *released_index);
                 // Before forwarding (or deferring) the release: the image is
                 // still the application's and in its pre-release state.
-                framegen_.CaptureOnRelease(swapchain, *released_index);
+                if (copied) {
+                    framegen_.CaptureOnRelease(swapchain, *released_index);
+                }
             }
             if (ShouldDeferSwapchainRelease(it->second)) {
                 ++it->second.deferred_release_count;
@@ -3624,7 +3867,9 @@ XrResult OpenXrLayer::ReleaseSwapchainImage(XrSwapchain swapchain,
     // Generation shows only images of its own, an image it captures reaches
     // the runtime once that has run, without the runtime's queue waiting.
     const XrResult result =
-        framegen_queue_.Release(swapchain, FrameGenLazy(swapchain), FrameGenQueueCalls(), release_info);
+        d3d11_bridge_.Unmirrored(swapchain)
+            ? next_release_swapchain_image_(swapchain, release_info)
+            : framegen_queue_.Release(swapchain, FrameGenLazy(swapchain), FrameGenQueueCalls(), release_info);
     if (diag) {
         logger_.Debug("Turbo-diag: xrReleaseSwapchainImage completed.");
     }
@@ -3838,38 +4083,54 @@ bool OpenXrLayer::EnsureD3D11QuadViewsCompositor(const XrCompositionLayerProject
         }
 
         framegen_.TrackSwapchain(target.swapchain, output_format, 1, create_info.usageFlags);
-        uint32_t image_count = 0;
-        result = next_enumerate_swapchain_images_(target.swapchain, 0, &image_count, nullptr);
-        if (XR_FAILED(result) || image_count == 0) {
-            logger_.Error("D3D11 quadviews compositor output swapchain image count query failed.");
-            d3d11_quadviews_compositor_.failed = true;
-            return false;
-        }
+        std::vector<ID3D11Texture2D*> textures;
+        if (d3d11_bridge_.Active()) {
+            // A bridged session's outputs are drawn into the bridge's images,
+            // each copied into the runtime's at release.
+            std::string reason;
+            if (!d3d11_bridge_.AddSwapchain(target.swapchain, create_info, next_enumerate_swapchain_images_,
+                                            reason)) {
+                logger_.Error("D3D11 quadviews compositor output swapchain could not be shared by Frame "
+                              "Generation's Direct3D 11 bridge: " + reason);
+                DestroyLayerSwapchain(target.swapchain);
+                target = {};
+                d3d11_quadviews_compositor_.failed = true;
+                return false;
+            }
+            textures = d3d11_bridge_.Images(target.swapchain);
+        } else {
+            uint32_t image_count = 0;
+            result = next_enumerate_swapchain_images_(target.swapchain, 0, &image_count, nullptr);
+            if (XR_FAILED(result) || image_count == 0) {
+                logger_.Error("D3D11 quadviews compositor output swapchain image count query failed.");
+                d3d11_quadviews_compositor_.failed = true;
+                return false;
+            }
 
-        std::vector<XrSwapchainImageD3D11KHR> images(image_count);
-        for (XrSwapchainImageD3D11KHR& image : images) {
-            image = {XR_TYPE_SWAPCHAIN_IMAGE_D3D11_KHR};
-        }
-        result = next_enumerate_swapchain_images_(
-            target.swapchain,
-            image_count,
-            &image_count,
-            reinterpret_cast<XrSwapchainImageBaseHeader*>(images.data()));
-        if (XR_FAILED(result)) {
-            logger_.Error("D3D11 quadviews compositor output swapchain image enumeration failed.");
-            d3d11_quadviews_compositor_.failed = true;
-            return false;
+            std::vector<XrSwapchainImageD3D11KHR> images(image_count);
+            for (XrSwapchainImageD3D11KHR& image : images) {
+                image = {XR_TYPE_SWAPCHAIN_IMAGE_D3D11_KHR};
+            }
+            result = next_enumerate_swapchain_images_(
+                target.swapchain,
+                image_count,
+                &image_count,
+                reinterpret_cast<XrSwapchainImageBaseHeader*>(images.data()));
+            if (XR_FAILED(result)) {
+                logger_.Error("D3D11 quadviews compositor output swapchain image enumeration failed.");
+                d3d11_quadviews_compositor_.failed = true;
+                return false;
+            }
+            for (const XrSwapchainImageD3D11KHR& image : images) {
+                textures.push_back(image.texture);
+            }
         }
 
         target.width = output_width;
         target.height = output_height;
         target.format = output_format;
-        target.image_count = image_count;
-        target.d3d11_images.clear();
-        target.d3d11_images.reserve(image_count);
-        for (const XrSwapchainImageD3D11KHR& image : images) {
-            target.d3d11_images.push_back(image.texture);
-        }
+        target.image_count = static_cast<uint32_t>(textures.size());
+        target.d3d11_images = std::move(textures);
 
         target.image_render_target_views.clear();
         target.image_render_target_views.reserve(target.d3d11_images.size());
@@ -4456,8 +4717,13 @@ bool OpenXrLayer::ComposeQuadViewsD3D11(const XrCompositionLayerProjection* sour
             break;
         }
         QuadViewsCompositionTarget& target = d3d11_quadviews_compositor_.targets[eye];
-        XrSwapchainImageAcquireInfo acquire_info{XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};
-        XrResult result = next_acquire_swapchain_image_(target.swapchain, &acquire_info, &output_indices[eye]);
+        XrResult result = XR_SUCCESS;
+        if (target.awaiting_wait) {
+            // Acquired before, its wait timed out: waited for again.
+            output_indices[eye] = target.awaiting_index;
+        } else {
+            result = AcquireLayerSwapchainImage(target.swapchain, target.image_count, &output_indices[eye]);
+        }
         if (XR_FAILED(result) || output_indices[eye] >= target.d3d11_images.size()) {
             failure_reason = "outputAcquire eye=" + std::to_string(eye) +
                              ", result=" + FormatHex(static_cast<uint64_t>(result)) +
@@ -4468,19 +4734,25 @@ bool OpenXrLayer::ComposeQuadViewsD3D11(const XrCompositionLayerProjection* sour
         }
         XrSwapchainImageWaitInfo wait_info{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};
         wait_info.timeout = kInternalSwapchainWaitTimeout;
-        result = next_wait_swapchain_image_(target.swapchain, &wait_info);
-        if (XR_FAILED(result)) {
-            failure_reason = "outputWait eye=" + std::to_string(eye) +
-                             ", result=" + FormatHex(static_cast<uint64_t>(result));
-            XrSwapchainImageReleaseInfo release_info{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
-            next_release_swapchain_image_(target.swapchain, &release_info);
+        result = WaitLayerSwapchainImage(target.swapchain, &wait_info);
+        if (result == XR_TIMEOUT_EXPIRED) {
+            // The runtime has not handed the image back: it is neither drawn
+            // into nor released, and is waited for again next frame.
+            target.awaiting_wait = true;
+            target.awaiting_index = output_indices[eye];
+            failure_reason = "outputWait eye=" + std::to_string(eye) + " timed out";
             rendered = false;
             break;
         }
-        auto release_output_after_failure = [&]() {
-            XrSwapchainImageReleaseInfo release_info{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
-            next_release_swapchain_image_(target.swapchain, &release_info);
-        };
+        target.awaiting_wait = false;
+        if (XR_FAILED(result)) {
+            failure_reason = "outputWait eye=" + std::to_string(eye) +
+                             ", result=" + FormatHex(static_cast<uint64_t>(result));
+            ReleaseLayerSwapchainImage(target.swapchain, std::nullopt);
+            rendered = false;
+            break;
+        }
+        auto release_output_after_failure = [&]() { ReleaseLayerSwapchainImage(target.swapchain, std::nullopt); };
 
         const uint32_t peripheral_index = source_image_index(*swapchains[eye]);
         const uint32_t focus_index = source_image_index(*swapchains[eye + 2]);
@@ -4747,9 +5019,7 @@ bool OpenXrLayer::ComposeQuadViewsD3D11(const XrCompositionLayerProjection* sour
             deferred_release[eye]=true;
             continue;
         }
-        framegen_.CaptureOnRelease(target.swapchain, output_indices[eye]);
-        XrSwapchainImageReleaseInfo release_info{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
-        result = next_release_swapchain_image_(target.swapchain, &release_info);
+        result = ReleaseLayerSwapchainImage(target.swapchain, output_indices[eye]);
         if (XR_FAILED(result)) {
             failure_reason = "outputRelease eye=" + std::to_string(eye) +
                              ", result=" + FormatHex(static_cast<uint64_t>(result));
@@ -5077,6 +5347,16 @@ bool OpenXrLayer::WantsTurboClockConversion() {
     return parsed.document.core.enabled &&
         (parsed.document.core.log_level == LogLevel::Debug ||
          (settings.experimental.enabled && settings.experimental.prediction_percent != 100));
+}
+
+bool OpenXrLayer::WantsD3D11Bridge() {
+    if (const char* bridge = std::getenv("VECTORXR_D3D11_BRIDGE"); bridge && std::string(bridge) == "off") {
+        return false;
+    }
+    const auto parsed = LoadConfigFromFile(ResolveConfigPath());
+    if (!parsed.ok) return false;
+    return parsed.document.core.enabled &&
+           ResolveFrameGenSettings(parsed.document, GetCurrentExecutableName()).enabled;
 }
 
 XrTime OpenXrLayer::TurboClockNow() {
@@ -7207,6 +7487,37 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
     if (diag) {
         logger_.Debug("Turbo-diag: xrEndFrame config lock acquired.");
     }
+    // A bridged session lives on the bridge's device; depth that stays the
+    // game's is left out of its frames.
+    std::optional<DepthlessFrame> depthless_frame;
+    if (d3d11_bridge_.Active()) {
+        std::string lost;
+        d3d11_bridge_.FrameEnded();
+        const auto now = std::chrono::steady_clock::now();
+        if (now - d3d11_bridge_last_summary_ >= std::chrono::seconds(30)) {
+            d3d11_bridge_last_summary_ = now;
+            logger_.Info("Frame Generation's Direct3D 11 bridge: " + d3d11_bridge_.Summary());
+        }
+        if (d3d11_bridge_.Lost(lost)) {
+            if (!d3d11_bridge_lost_logged_) {
+                d3d11_bridge_lost_logged_ = true;
+                logger_.Error("Frame Generation's Direct3D 11 bridge: " + lost + "; the session is lost.");
+            }
+            framegen_.AbandonFrame(frame_end_info->displayTime);
+            return XR_ERROR_SESSION_LOST;
+        }
+        if (d3d11_bridge_.HasUnmirrored()) {
+            const XrFrameEndInfo* without_depth = WithoutDepth(
+                frame_end_info, depthless_frame.emplace(),
+                [this](XrSwapchain swapchain) { return d3d11_bridge_.Unmirrored(swapchain); });
+            if (without_depth != frame_end_info && !d3d11_bridge_depth_logged_) {
+                d3d11_bridge_depth_logged_ = true;
+                logger_.Info("Frame Generation's Direct3D 11 bridge keeps the game's depth to itself: it is left "
+                             "out of the frames the runtime and Frame Generation get.");
+            }
+            frame_end_info = without_depth;
+        }
+    }
     ReloadConfigIfNeeded();
     RefreshResolvedSettings();
     PollFrameGenToggle();
@@ -7292,8 +7603,13 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
     // where PivotXR happened to produce a correction. Threshold matches
     // SharpenNativeFocusViews (amount <= 0.001 is treated as off).
     const bool needs_native_focus_sharpen =
-        varjo_compatible_quadviews_active_ && IsQuadViewsActive() &&
+        varjo_compatible_quadviews_active_ && IsQuadViewsActive() && !d3d11_bridge_.Active() &&
         Clamp(resolved_settings_.quadviews.foveate_sharpness, 0.0, 100.0) / 100.0 > 0.001;
+    if (d3d11_bridge_.Active() && !d3d11_bridge_sharpen_logged_ && varjo_compatible_quadviews_active_ &&
+        IsQuadViewsActive() && Clamp(resolved_settings_.quadviews.foveate_sharpness, 0.0, 100.0) / 100.0 > 0.001) {
+        d3d11_bridge_sharpen_logged_ = true;
+        logger_.Info("Varjo focus sharpening is off while Frame Generation's Direct3D 11 bridge runs.");
+    }
     const bool should_log_end_frame_diagnostic =
         pending_end_frame_diagnostics_ > 0 ||
         (quadviews_projection_split_active &&
@@ -7798,15 +8114,21 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
         if (quadviews_projection_split_active && projection_layer->viewCount >= 4) {
             adjusted_projection_views.emplace_back();
             adjusted_projection_layers.emplace_back();
-            if (ComposeQuadViewsD3D11(projection_layer,
-                                      frame_end_info->displayTime,
-                                      layer_pivot_delta.reverse,
-                                      layer_pivot_delta.non_identity,
-                                      find_depth_submission_geometry_for_layer(projection_layer, nullptr),
-                                      &depth_anchor_restored_view_count,
-                                      i==0 && !framegen_owns_pacing_.load(std::memory_order_acquire),
-                                      &adjusted_projection_layers.back(),
-                                      &adjusted_projection_views.back())) {
+            const bool composed = ComposeQuadViewsD3D11(
+                projection_layer, frame_end_info->displayTime, layer_pivot_delta.reverse,
+                layer_pivot_delta.non_identity, find_depth_submission_geometry_for_layer(projection_layer, nullptr),
+                &depth_anchor_restored_view_count,
+                i == 0 && !framegen_owns_pacing_.load(std::memory_order_acquire) && !d3d11_bridge_.Active(),
+                &adjusted_projection_layers.back(), &adjusted_projection_views.back());
+            // The views of a composed layer reach the runtime only when
+            // composing fails: their next releases need not wait on the
+            // runtime's queue (FrameGenLazy).
+            if (d3d11_bridge_.Active()) {
+                for (uint32_t view = 0; view < 4; ++view) {
+                    d3d11_bridge_.SetComposed(projection_layer->views[view].subImage.swapchain, composed);
+                }
+            }
+            if (composed) {
                 adjusted_layers.push_back(
                     reinterpret_cast<const XrCompositionLayerBaseHeader*>(&adjusted_projection_layers.back()));
                 ++corrected_projection_layer_count;
@@ -7845,7 +8167,9 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
         // Varjo compatible quadviews: sharpen the runtime's focus views in place when
         // foveate_sharpness > 0. No-op (pure passthrough) when sharpness is 0 or the
         // layer is not a native quad projection.
-        if (varjo_compatible_quadviews_active_ && projection_layer->viewCount >= 4 && IsQuadViewsActive()) {
+        // Not on a bridged session: the sharpen's own swapchains are not bridged.
+        if (varjo_compatible_quadviews_active_ && projection_layer->viewCount >= 4 && IsQuadViewsActive() &&
+            !d3d11_bridge_.Active()) {
             SharpenNativeFocusViews(adjusted_projection_views.back(), frame_end_info->displayTime);
         }
     }
@@ -9593,6 +9917,7 @@ void OpenXrLayer::ResetInstanceState() {
     quad_views_extension_requested_ = false;
     varjo_foveated_rendering_extension_requested_ = false;
     d3d11_graphics_extension_requested_ = false;
+    d3d12_extension_enabled_ = false;
     eye_gaze_extension_enabled_ = false;
     next_get_visibility_mask_khr_ = nullptr;
     defer_quadviews_swapchain_releases_ = false;
@@ -11728,10 +12053,74 @@ void OpenXrLayer::StartFrameGen(XrSession session, const void* binding_chain) {
         }
     } else if (framegen_session_enabled_) {
         logger_.Info("Frame Generation is enabled but unavailable for this session: " + framegen_.Status().reason);
+        if (d3d11_bridge_.Active()) {
+            logger_.Info("Frame Generation's Direct3D 11 bridge stays for the session all the same: its session is "
+                         "Direct3D 12 for life.");
+        }
     }
 }
 
+void OpenXrLayer::EndD3D11Bridge() {
+    if (!d3d11_bridge_.Active()) {
+        return;
+    }
+    logger_.Info("Frame Generation's Direct3D 11 bridge at session end: " + d3d11_bridge_.Summary());
+    d3d11_bridge_.End();
+}
+
+XrResult OpenXrLayer::AcquireLayerSwapchainImage(XrSwapchain swapchain, uint32_t image_count, uint32_t* index) {
+    XrSwapchainImageAcquireInfo info{XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};
+    if (!d3d11_bridge_.Bridged(swapchain)) {
+        return next_acquire_swapchain_image_(swapchain, &info, index);
+    }
+    const XrResult result = framegen_queue_.Acquire(swapchain, image_count, FrameGenQueueCalls(), &info, index);
+    if (XR_SUCCEEDED(result) && index) {
+        d3d11_bridge_.Acquired(swapchain, *index);
+    }
+    return result;
+}
+
+XrResult OpenXrLayer::WaitLayerSwapchainImage(XrSwapchain swapchain, const XrSwapchainImageWaitInfo* info) {
+    if (!d3d11_bridge_.Bridged(swapchain)) {
+        return next_wait_swapchain_image_(swapchain, info);
+    }
+    return framegen_queue_.Wait(swapchain, FrameGenLazy(swapchain), FrameGenQueueCalls(), info);
+}
+
+XrResult OpenXrLayer::ReleaseLayerSwapchainImage(XrSwapchain swapchain, std::optional<uint32_t> drawn_index) {
+    XrSwapchainImageReleaseInfo info{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
+    if (!d3d11_bridge_.Bridged(swapchain)) {
+        if (drawn_index) {
+            framegen_.CaptureOnRelease(swapchain, *drawn_index);
+        }
+        return next_release_swapchain_image_(swapchain, &info);
+    }
+    if (drawn_index) {
+        // The bridge's copy into the runtime's image goes ahead of Frame
+        // Generation's capture of it, and of the release (as in
+        // ReleaseSwapchainImage).
+        if (d3d11_bridge_.Released(swapchain)) {
+            framegen_.CaptureOnRelease(swapchain, *drawn_index);
+        }
+    } else {
+        d3d11_bridge_.Abandoned(swapchain);
+    }
+    return framegen_queue_.Release(swapchain, FrameGenLazy(swapchain), FrameGenQueueCalls(), &info);
+}
+
 XrResult OpenXrLayer::DestroyLayerSwapchain(XrSwapchain swapchain) {
+    if (d3d11_bridge_.Bridged(swapchain)) {
+        // As an application's bridged swapchain (DestroySwapchain).
+        framegen_queue_.Flush(swapchain, FrameGenQueueCalls());
+        framegen_queue_.Forget(swapchain);
+        if (!framegen_.ForgetSwapchain(swapchain) || !d3d11_bridge_.RemoveSwapchain(swapchain)) {
+            logger_.Error("Swapchain " + FormatHandle(swapchain) +
+                          " is kept until its session ends: GPU work on it (Frame Generation's, or the Direct3D 11 "
+                          "bridge's) did not finish.");
+            return XR_SUCCESS;
+        }
+        return next_destroy_swapchain_(swapchain);
+    }
     framegen_.ForgetSwapchain(swapchain);
     return next_destroy_swapchain_(swapchain);
 }

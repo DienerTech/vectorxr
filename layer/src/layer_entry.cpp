@@ -606,6 +606,15 @@ XrResult XRAPI_CALL xrCreateApiLayerInstance(const XrInstanceCreateInfo* instanc
     chain_info.nextInfo = next_info->next;
 
     OpenXrLayer::InstanceCreateDiagnostics diagnostics;
+    // The API layers between VectorXR and the runtime see what VectorXR sends
+    // on (a bridged Direct3D 11 game's session is Direct3D 12 for them). The
+    // first entry is VectorXR's own.
+    for (const XrApiLayerNextInfo* below = next_info->next; below; below = below->next) {
+        if (!diagnostics.layers_below.empty()) {
+            diagnostics.layers_below += ' ';
+        }
+        diagnostics.layers_below += std::string(below->layerName, strnlen(below->layerName, XR_MAX_API_LAYER_NAME_SIZE));
+    }
     diagnostics.app_requested_quad_views =
         ApplicationRequestedExtension(instance_create_info, XR_VARJO_QUAD_VIEWS_EXTENSION_NAME);
     diagnostics.app_requested_varjo_foveated_rendering =
@@ -713,6 +722,27 @@ XrResult XRAPI_CALL xrCreateApiLayerInstance(const XrInstanceCreateInfo* instanc
     }
 
     std::vector<const char*> first_downstream_extensions = base_downstream_extensions;
+    // Frame Generation runs a Direct3D 11 game on a Direct3D 12 session (the
+    // Direct3D 11 bridge), which needs XR_KHR_D3D12_enable from the start. It
+    // is added only while Frame Generation is enabled for this executable and
+    // the runtime offers it (or its pre-instance list cannot be trusted: such
+    // scans sometimes come back empty), ahead of the layer's other additions,
+    // and it never makes the application's instance fail (see the retry below).
+    constexpr const char* d3d11_extension = "XR_KHR_D3D11_enable";
+    constexpr const char* d3d12_extension = "XR_KHR_D3D12_enable";
+    diagnostics.app_requested_d3d11 = ApplicationRequestedExtension(instance_create_info, d3d11_extension);
+    if (diagnostics.app_requested_d3d11 && !ExtensionListContains(first_downstream_extensions, d3d12_extension) &&
+        OpenXrLayer::Instance().WantsD3D11Bridge()) {
+        diagnostics.d3d12_wanted = true;
+        const RuntimeExtensionScan d3d12_scan =
+            extension_scan.ran ? extension_scan : ScanRuntimeInstanceExtensions(next_info->nextGetInstanceProcAddr);
+        // A scan is trusted when it lists the extension the application enabled.
+        diagnostics.d3d12_scan_trusted = d3d12_scan.complete && d3d12_scan.Contains(d3d11_extension);
+        if (!diagnostics.d3d12_scan_trusted || d3d12_scan.Contains(d3d12_extension)) {
+            first_downstream_extensions.push_back(d3d12_extension);
+            diagnostics.layer_injected_d3d12 = true;
+        }
+    }
     diagnostics.eye_gaze_probe_known_unreliable =
         IsEyeGazeExtensionProbeKnownUnreliable(diagnostics.active_runtime_path);
     const EyeGazeRequestDecision eye_gaze_request = DecideEyeGazeExtensionRequest({
@@ -747,6 +777,25 @@ XrResult XRAPI_CALL xrCreateApiLayerInstance(const XrInstanceCreateInfo* instanc
 
     XrResult result = next_info->nextCreateApiLayerInstance(&downstream_create_info, &chain_info, instance);
     diagnostics.first_create_result = result;
+
+    // A runtime refusing XR_KHR_D3D12_enable gets the instance without it,
+    // with the layer's other additions (they are retried on their own below).
+    if (diagnostics.layer_injected_d3d12 &&
+        (result == XR_ERROR_EXTENSION_NOT_PRESENT || result == XR_ERROR_EXTENSION_DEPENDENCY_NOT_ENABLED)) {
+        first_downstream_extensions.erase(
+            std::remove_if(first_downstream_extensions.begin(), first_downstream_extensions.end(),
+                           [&](const char* name) { return name && std::string_view(name) == d3d12_extension; }),
+            first_downstream_extensions.end());
+        downstream_create_info.enabledExtensionCount = static_cast<uint32_t>(first_downstream_extensions.size());
+        downstream_create_info.enabledExtensionNames =
+            first_downstream_extensions.empty() ? nullptr : first_downstream_extensions.data();
+        *instance = XR_NULL_HANDLE;
+        chain_info = *layer_info;
+        chain_info.nextInfo = next_info->next;
+        result = next_info->nextCreateApiLayerInstance(&downstream_create_info, &chain_info, instance);
+        diagnostics.retried_without_d3d12 = true;
+        diagnostics.d3d12_retry_result = result;
+    }
 
     // An optional experimental clock must never make an otherwise valid app
     // fail instance creation when a runtime misadvertises its extensions.
@@ -786,6 +835,7 @@ XrResult XRAPI_CALL xrCreateApiLayerInstance(const XrInstanceCreateInfo* instanc
         return result;
     }
 
+    diagnostics.d3d12_enabled = ExtensionListContains(*successful_downstream_extensions, d3d12_extension);
     diagnostics.final_downstream_extension_count =
         static_cast<uint32_t>(successful_downstream_extensions->size());
     const bool eye_gaze_extension_enabled = ExtensionListContains(

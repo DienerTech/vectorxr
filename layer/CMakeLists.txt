@@ -181,6 +181,7 @@ if(WIN32 AND DEPTHXR_BUILD_LAYER)
         src/framegen/framegen_gpu.cpp
         src/framegen/framegen_presenter.cpp
         src/framegen/framegen_runtime_queue.cpp
+        src/framegen/framegen_d3d11_bridge.cpp
         src/framegen/framegen_d3d11.cpp
         src/framegen/framegen_d3d12.cpp
         src/framegen/framegen_vulkan.cpp
@@ -342,6 +343,15 @@ if(WIN32 AND DEPTHXR_BUILD_LAYER)
         target_link_libraries(depthxr_bridge_probe PRIVATE d3d11 d3d12 dxgi dxguid d3dcompiler)
         target_compile_definitions(depthxr_bridge_probe PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
         target_compile_features(depthxr_bridge_probe PRIVATE cxx_std_20)
+        # Frame Generation's Direct3D 11 bridge against a stand-in runtime, on WARP
+        # (`depthxr_d3d11_bridge_tests hw` runs it on the GPU).
+        add_executable(depthxr_d3d11_bridge_tests tests/d3d11_bridge_tests.cpp)
+        target_link_libraries(depthxr_d3d11_bridge_tests PRIVATE depthxr_framegen d3d11 d3d12 dxgi)
+        target_compile_definitions(depthxr_d3d11_bridge_tests PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX XR_USE_GRAPHICS_API_D3D11 XR_USE_GRAPHICS_API_D3D12)
+        add_test(NAME depthxr_d3d11_bridge_tests COMMAND depthxr_d3d11_bridge_tests)
+        add_test(NAME depthxr_d3d11_bridge_hw_tests COMMAND depthxr_d3d11_bridge_tests hw)
+        set_tests_properties(depthxr_d3d11_bridge_tests depthxr_d3d11_bridge_hw_tests PROPERTIES TIMEOUT 120
+                             SKIP_RETURN_CODE 77)
         add_executable(depthxr_framegen_presenter_tests tests/framegen_presenter_tests.cpp)
         target_link_libraries(depthxr_framegen_presenter_tests PRIVATE depthxr_framegen)
         target_compile_definitions(depthxr_framegen_presenter_tests PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
@@ -403,6 +413,26 @@ if(WIN32 AND DEPTHXR_BUILD_LAYER)
             WIN32_LEAN_AND_MEAN NOMINMAX XR_USE_GRAPHICS_API_D3D11 VECTORXR_VERSION="${_vectorxr_version}")
         add_test(NAME depthxr_pivot_gaze_tests COMMAND depthxr_pivot_gaze_tests)
         set_tests_properties(depthxr_pivot_gaze_tests PROPERTIES TIMEOUT 15)
+
+        # Frame Generation's Direct3D 11 bridge through the layer's own hooks
+        # (xrCreateApiLayerInstance on) against a stand-in runtime whose
+        # swapchain images are Direct3D 12 textures, on WARP
+        # (`depthxr_d3d11_bridge_layer_tests hw` runs it on the GPU). Only the
+        # test sees the Direct3D 12 OpenXR types: the layer stays Direct3D 11
+        # only, as it ships.
+        add_executable(depthxr_d3d11_bridge_layer_tests tests/d3d11_bridge_layer_tests.cpp src/openxr_layer.cpp
+            src/layer_entry.cpp)
+        set_source_files_properties(tests/d3d11_bridge_layer_tests.cpp PROPERTIES
+            COMPILE_DEFINITIONS XR_USE_GRAPHICS_API_D3D12)
+        target_include_directories(depthxr_d3d11_bridge_layer_tests PRIVATE include)
+        target_link_libraries(depthxr_d3d11_bridge_layer_tests PRIVATE depthxr_core depthxr_osd depthxr_framegen
+            OpenXR::openxr_loader d3d11 d3d12 d3dcompiler dxgi shlwapi)
+        target_compile_definitions(depthxr_d3d11_bridge_layer_tests PRIVATE DEPTHXR_TESTING
+            WIN32_LEAN_AND_MEAN NOMINMAX XR_USE_GRAPHICS_API_D3D11 VECTORXR_VERSION="${_vectorxr_version}")
+        add_test(NAME depthxr_d3d11_bridge_layer_tests COMMAND depthxr_d3d11_bridge_layer_tests)
+        add_test(NAME depthxr_d3d11_bridge_layer_hw_tests COMMAND depthxr_d3d11_bridge_layer_tests hw)
+        set_tests_properties(depthxr_d3d11_bridge_layer_tests depthxr_d3d11_bridge_layer_hw_tests PROPERTIES
+                             TIMEOUT 180 SKIP_RETURN_CODE 77)
     endif()
 endif()
 

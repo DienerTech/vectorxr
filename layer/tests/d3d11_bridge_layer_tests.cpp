@@ -1,0 +1,2375 @@
+// Frame Generation's Direct3D 11 bridge through the layer itself: the real
+// hooks, from xrCreateApiLayerInstance on, against a stand-in runtime whose
+// swapchain images are Direct3D 12 textures on the device of the binding it
+// is given, with a real Direct3D 11 game (WARP; `hw`: the first hardware
+// adapter). The stand-in reads back what each frame shows on the session's
+// queue, after the images' releases there, as a compositor reads what it
+// shows. Frame Generation runs on a stand-in backend: it owns frame pacing, as
+// with a real one, and does no GPU work. The host is left alone: settings,
+// logs and the layer's other files go to a temporary directory. The
+// Direct3D 12 debug layer checks the GPU work (and the Direct3D 11 one when
+// installed), after every case's teardown; without either, a warning says so
+// and the behavioural checks stand alone. Exit code 77: this machine shares
+// nothing between the APIs.
+#include <windows.h>
+#include <d3d11_4.h>
+#include <d3d12.h>
+#include <dxgi1_4.h>
+#include <wrl/client.h>
+#include <openxr/openxr_platform.h>
+
+#include "depthxr/framegen_gpu.h"
+#include "depthxr/openxr_layer.h"
+#include "depthxr/openxr_loader_api_layer.h"
+
+#include <algorithm>
+#include <array>
+#include <chrono>
+#include <cstdint>
+#include <cstdlib>
+#include <cstring>
+#include <deque>
+#include <filesystem>
+#include <fstream>
+#include <functional>
+#include <iostream>
+#include <map>
+#include <optional>
+#include <sstream>
+#include <string>
+#include <thread>
+#include <vector>
+
+// The layer's loader entry point (layer_entry.cpp).
+extern "C" XrResult XRAPI_CALL xrCreateApiLayerInstance(const XrInstanceCreateInfo* info,
+                                                        const depthxr::XrApiLayerCreateInfo* layer_info,
+                                                        XrInstance* instance);
+
+namespace depthxr {
+
+// Test-only access to the singleton (DEPTHXR_TESTING), for what an
+// application cannot reach through OpenXR.
+class D3D11BridgeLayerTestPeer {
+  public:
+    // Frame Generation starts sessions with `factory`'s backend.
+    static void UseFrameGenGpu(FrameGenPresenter::GpuFactory factory) {
+        OpenXrLayer::Instance().framegen_gpu_factory_ = std::move(factory);
+    }
+    static D3D11Bridge& Bridge() {
+        return OpenXrLayer::Instance().d3d11_bridge_;
+    }
+    static bool QueueSubstituted() {
+        return OpenXrLayer::Instance().framegen_queue_.Active();
+    }
+    static bool FrameGenOwnsPacing() {
+        return OpenXrLayer::Instance().framegen_owns_pacing_.load();
+    }
+    // Nothing of an instance, a session, the bridge or Frame Generation is left.
+    static bool Idle() {
+        OpenXrLayer& layer = OpenXrLayer::Instance();
+        std::scoped_lock lock(layer.mutex_);
+        return layer.instance_ == XR_NULL_HANDLE && layer.active_session_ == XR_NULL_HANDLE &&
+               !layer.d3d11_bridge_.Active() && !layer.framegen_queue_.Active() && !layer.framegen_.Started();
+    }
+    // The layer's log so far: an error reaches the file at once, with
+    // everything logged before it.
+    static std::string Log() {
+        static int reads = 0;
+        OpenXrLayer& layer = OpenXrLayer::Instance();
+        layer.logger_.Error("D3D11 bridge layer tests: log read " + std::to_string(++reads) + ".");
+        std::ifstream stream(layer.logger_.ActiveLogPath(), std::ios::binary);
+        std::ostringstream text;
+        text << stream.rdbuf();
+        return text.str();
+    }
+    static std::filesystem::path LogPath() {
+        return OpenXrLayer::Instance().logger_.ActiveLogPath();
+    }
+    // Lets the log file go (nothing is logged after the last instance).
+    static void ReleaseLog(const std::filesystem::path& path) {
+        OpenXrLayer::Instance().logger_.Initialize(path);
+    }
+};
+
+} // namespace depthxr
+
+namespace {
+
+using Microsoft::WRL::ComPtr;
+using Peer = depthxr::D3D11BridgeLayerTestPeer;
+using Color = std::array<std::uint8_t, 4>;
+
+constexpr int kSkip = 77;
+constexpr const char* kD3D11Extension = "XR_KHR_D3D11_enable";
+constexpr const char* kD3D12Extension = "XR_KHR_D3D12_enable";
+constexpr const char* kClockExtension = "XR_KHR_win32_convert_performance_counter_time";
+constexpr XrSystemId kSystem = 7;
+constexpr XrDuration kPeriod = 11'111'111;
+constexpr std::uint32_t kImages = 3;
+constexpr std::uint32_t kWidth = 64;
+constexpr std::uint32_t kHeight = 48;
+// An application structure of no known type, chained after the ones the
+// layer reads (it must reach the runtime as it was).
+constexpr XrStructureType kApplicationStructType = static_cast<XrStructureType>(1000999000);
+
+std::filesystem::path g_root; // the test's own directory for everything the layer writes
+
+// Without static destructors: a failure inside a layer call (in the stand-in
+// runtime) holds the layer's lock, which its teardown takes.
+void Check(bool value, const std::string& message) {
+    if (!value) {
+        std::cerr << "FAILED: " << message << "\n(layer log: " << Peer::LogPath().string() << ")" << std::endl;
+        std::_Exit(1);
+    }
+}
+
+bool Contains(const std::string& text, const std::string& part) {
+    return text.find(part) != std::string::npos;
+}
+
+// How many times `part` appears in `text`.
+std::size_t Count(const std::string& text, const std::string& part) {
+    std::size_t count = 0;
+    for (std::size_t at = text.find(part); at != std::string::npos; at = text.find(part, at + part.size())) {
+        ++count;
+    }
+    return count;
+}
+
+// Logged once for each session the bridge makes Direct3D 12.
+constexpr const char* kBridgedSessionLine =
+    "the session is Direct3D 12 and the game renders into images shared with it";
+
+// A figure from the bridge's summary ("name=value").
+std::uint64_t SummaryValue(const std::string& summary, const std::string& name) {
+    const std::size_t at = summary.find(name + "=");
+    Check(at != std::string::npos, "the summary has " + name + ": " + summary);
+    return std::stoull(summary.substr(at + name.size() + 1));
+}
+
+bool SameLuid(const LUID& a, const LUID& b) {
+    return a.LowPart == b.LowPart && a.HighPart == b.HighPart;
+}
+
+template <typename T>
+T Handle(std::uintptr_t value) {
+    return reinterpret_cast<T>(value);
+}
+
+std::string Text(const Color& texel) {
+    return std::to_string(texel[0]) + "," + std::to_string(texel[1]) + "," + std::to_string(texel[2]) + "," +
+           std::to_string(texel[3]);
+}
+
+// Each attempt's extensions, in order.
+std::string Text(const std::vector<std::vector<std::string>>& attempts) {
+    std::string text;
+    for (const std::vector<std::string>& names : attempts) {
+        text += text.empty() ? "[" : " then [";
+        for (std::size_t i = 0; i < names.size(); ++i) {
+            text += (i ? " " : "") + names[i];
+        }
+        text += "]";
+    }
+    return text.empty() ? "no attempt" : text;
+}
+
+bool Near(const std::optional<Color>& texel, const Color& expected) {
+    if (!texel) return false;
+    for (int i = 0; i < 4; ++i) {
+        if (std::abs(static_cast<int>((*texel)[i]) - static_cast<int>(expected[i])) > 1) return false;
+    }
+    return true;
+}
+
+// Each frame's colour differs from those of the frames before it in the same image.
+Color FrameColor(int frame, int eye) {
+    return {static_cast<std::uint8_t>(16 + 37 * frame), static_cast<std::uint8_t>(200 - 29 * frame),
+            static_cast<std::uint8_t>(eye ? 220 : 60), 255};
+}
+
+void SetEnv(const char* name, const std::string& value) {
+    _putenv_s(name, value.c_str());
+}
+
+// --- The game ---------------------------------------------------------------
+
+struct Game {
+    ComPtr<ID3D11Device> device;
+    ComPtr<ID3D11DeviceContext> context;
+    ComPtr<ID3D11DeviceContext4> context4;
+    LUID luid{};
+    bool debug{false};
+};
+
+bool MakeGame(bool hardware, Game& game) {
+    ComPtr<IDXGIAdapter1> adapter;
+    if (hardware) {
+        ComPtr<IDXGIFactory1> factory;
+        if (FAILED(CreateDXGIFactory1(IID_PPV_ARGS(&factory))) || FAILED(factory->EnumAdapters1(0, &adapter))) {
+            return false;
+        }
+    }
+    const D3D_FEATURE_LEVEL levels[] = {D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0};
+    const D3D_DRIVER_TYPE type = hardware ? D3D_DRIVER_TYPE_UNKNOWN : D3D_DRIVER_TYPE_WARP;
+    // The Direct3D 11 debug layer when its SDK layers are installed.
+    game.debug = SUCCEEDED(D3D11CreateDevice(adapter.Get(), type, nullptr,
+                                             D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_DEBUG, levels, 2,
+                                             D3D11_SDK_VERSION, &game.device, nullptr, &game.context));
+    if (!game.debug && FAILED(D3D11CreateDevice(adapter.Get(), type, nullptr, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+                                                levels, 2, D3D11_SDK_VERSION, &game.device, nullptr, &game.context))) {
+        return false;
+    }
+    ComPtr<IDXGIDevice> dxgi_device;
+    ComPtr<IDXGIAdapter> game_adapter;
+    DXGI_ADAPTER_DESC desc{};
+    if (FAILED(game.device.As(&dxgi_device)) || FAILED(dxgi_device->GetAdapter(&game_adapter)) ||
+        FAILED(game_adapter->GetDesc(&desc)) || FAILED(game.context.As(&game.context4))) {
+        return false;
+    }
+    game.luid = desc.AdapterLuid;
+    return true;
+}
+
+// Only errors and corruption are stored: nothing the checks look for is
+// crowded out by the message limit.
+void StoreErrorsOnly(ID3D12InfoQueue* queue) {
+    D3D12_MESSAGE_SEVERITY deny[] = {D3D12_MESSAGE_SEVERITY_WARNING, D3D12_MESSAGE_SEVERITY_INFO,
+                                     D3D12_MESSAGE_SEVERITY_MESSAGE};
+    D3D12_INFO_QUEUE_FILTER filter{};
+    filter.DenyList.NumSeverities = static_cast<UINT>(std::size(deny));
+    filter.DenyList.pSeverityList = deny;
+    queue->PushStorageFilter(&filter);
+}
+
+void StoreErrorsOnly(ID3D11InfoQueue* queue) {
+    D3D11_MESSAGE_SEVERITY deny[] = {D3D11_MESSAGE_SEVERITY_WARNING, D3D11_MESSAGE_SEVERITY_INFO,
+                                     D3D11_MESSAGE_SEVERITY_MESSAGE};
+    D3D11_INFO_QUEUE_FILTER filter{};
+    filter.DenyList.NumSeverities = static_cast<UINT>(std::size(deny));
+    filter.DenyList.pSeverityList = deny;
+    queue->PushStorageFilter(&filter);
+}
+
+// The errors each debug layer stored since the last check (messages it had
+// to drop counted as errors).
+struct Validation {
+    std::string d3d12;
+    std::string d3d11;
+    std::string All() const { return d3d12 + d3d11; }
+};
+
+// Every error and corruption message both debug layers stored since the last check.
+Validation ValidationMessages(ID3D12Device* device, Game& game) {
+    Validation validation;
+    std::string& errors12 = validation.d3d12;
+    ComPtr<ID3D12InfoQueue> queue12;
+    if (device && SUCCEEDED(device->QueryInterface(IID_PPV_ARGS(&queue12)))) {
+        if (const UINT64 dropped = queue12->GetNumMessagesDiscardedByMessageCountLimit()) {
+            errors12 += "[D3D12] " + std::to_string(dropped) + " messages dropped at the message limit\n";
+        }
+        for (UINT64 i = 0; i < queue12->GetNumStoredMessages(); ++i) {
+            SIZE_T size = 0;
+            queue12->GetMessage(i, nullptr, &size);
+            std::vector<char> storage(size);
+            auto* message = reinterpret_cast<D3D12_MESSAGE*>(storage.data());
+            if (SUCCEEDED(queue12->GetMessage(i, message, &size)) &&
+                message->Severity <= D3D12_MESSAGE_SEVERITY_ERROR) {
+                errors12 += std::string("[D3D12 ") + std::to_string(message->ID) + "] " + message->pDescription + "\n";
+            }
+        }
+        queue12->ClearStoredMessages();
+    }
+    std::string& errors = validation.d3d11;
+    ComPtr<ID3D11InfoQueue> queue11;
+    if (game.debug && SUCCEEDED(game.device.As(&queue11))) {
+        if (const UINT64 dropped = queue11->GetNumMessagesDiscardedByMessageCountLimit()) {
+            errors += "[D3D11] " + std::to_string(dropped) + " messages dropped at the message limit\n";
+        }
+        for (UINT64 i = 0; i < queue11->GetNumStoredMessages(); ++i) {
+            SIZE_T size = 0;
+            queue11->GetMessage(i, nullptr, &size);
+            std::vector<char> storage(size);
+            auto* message = reinterpret_cast<D3D11_MESSAGE*>(storage.data());
+            if (SUCCEEDED(queue11->GetMessage(i, message, &size)) &&
+                message->Severity <= D3D11_MESSAGE_SEVERITY_ERROR) {
+                errors += std::string("[D3D11 ") + std::to_string(message->ID) + "] " + message->pDescription + "\n";
+            }
+        }
+        queue11->ClearStoredMessages();
+    }
+    return validation;
+}
+
+// The game's rendering: a clear of `texture`'s slice through a UNORM
+// render-target view, as DCS renders its sRGB images.
+void Clear(Game& game, ID3D11Texture2D* texture, const Color& color, std::uint32_t slice) {
+    D3D11_TEXTURE2D_DESC desc{};
+    texture->GetDesc(&desc);
+    D3D11_RENDER_TARGET_VIEW_DESC view{};
+    view.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    if (desc.SampleDesc.Count > 1) {
+        view.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2DMSARRAY;
+        view.Texture2DMSArray.FirstArraySlice = slice;
+        view.Texture2DMSArray.ArraySize = 1;
+    } else {
+        view.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2DARRAY;
+        view.Texture2DArray.FirstArraySlice = slice;
+        view.Texture2DArray.ArraySize = 1;
+    }
+    ComPtr<ID3D11RenderTargetView> target;
+    Check(SUCCEEDED(game.device->CreateRenderTargetView(texture, &view, &target)), "a render-target view of an image");
+    const float rgba[4] = {color[0] / 255.0f, color[1] / 255.0f, color[2] / 255.0f, color[3] / 255.0f};
+    game.context->ClearRenderTargetView(target.Get(), rgba);
+}
+
+void ClearDepth(Game& game, ID3D11Texture2D* texture, std::uint32_t slice) {
+    D3D11_DEPTH_STENCIL_VIEW_DESC view{};
+    view.Format = DXGI_FORMAT_D32_FLOAT;
+    view.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2DARRAY;
+    view.Texture2DArray.FirstArraySlice = slice;
+    view.Texture2DArray.ArraySize = 1;
+    ComPtr<ID3D11DepthStencilView> target;
+    Check(SUCCEEDED(game.device->CreateDepthStencilView(texture, &view, &target)), "a depth view of an image");
+    game.context->ClearDepthStencilView(target.Get(), D3D11_CLEAR_DEPTH, 0.5f, 0);
+}
+
+// Direct3D 11 still works: an event query after a flush completes.
+bool GameRuns(Game& game) {
+    D3D11_QUERY_DESC desc{D3D11_QUERY_EVENT};
+    ComPtr<ID3D11Query> query;
+    if (FAILED(game.device->CreateQuery(&desc, &query))) return false;
+    game.context->End(query.Get());
+    game.context->Flush();
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    BOOL done = FALSE;
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (game.context->GetData(query.Get(), &done, sizeof(done), 0) == S_OK && done) return true;
+        Sleep(1);
+    }
+    return false;
+}
+
+// A fence the test opens: Direct3D 11 (or a Direct3D 12 queue) held back until Open.
+struct Gate {
+    ComPtr<ID3D12Fence> fence;
+    ComPtr<ID3D11Fence> fence11;
+    Gate(ID3D12Device* device, Game& game) {
+        HANDLE handle = nullptr;
+        Check(device && SUCCEEDED(device->CreateFence(0, D3D12_FENCE_FLAG_SHARED, IID_PPV_ARGS(&fence))) &&
+                  SUCCEEDED(device->CreateSharedHandle(fence.Get(), nullptr, GENERIC_ALL, nullptr, &handle)),
+              "a gate fence");
+        ComPtr<ID3D11Device5> device5;
+        Check(SUCCEEDED(game.device.As(&device5)) &&
+                  SUCCEEDED(device5->OpenSharedFence(handle, IID_PPV_ARGS(&fence11))),
+              "the gate opened on the game's device");
+        CloseHandle(handle);
+    }
+    void HoldGame(Game& game) { game.context4->Wait(fence11.Get(), 1); }
+    void HoldQueue(ID3D12CommandQueue* queue) { queue->Wait(fence.Get(), 1); }
+    void Open() { fence->Signal(1); }
+    // Opened from another thread after `ms`, while the layer waits for what it holds.
+    std::thread OpenLater(DWORD ms) {
+        return std::thread([this, ms] {
+            Sleep(ms);
+            Open();
+        });
+    }
+};
+
+bool WaitFence(ID3D12Fence* fence, UINT64 value, DWORD timeout_ms) {
+    if (fence->GetCompletedValue() >= value) return true;
+    const HANDLE event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    if (event && SUCCEEDED(fence->SetEventOnCompletion(value, event))) {
+        WaitForSingleObject(event, timeout_ms);
+    }
+    if (event) CloseHandle(event);
+    return fence->GetCompletedValue() >= value;
+}
+
+// --- The stand-in runtime ---------------------------------------------------
+
+struct StandInSwapchain {
+    XrSwapchainCreateInfo info{XR_TYPE_SWAPCHAIN_CREATE_INFO};
+    std::vector<ComPtr<ID3D12Resource>> images12; // a Direct3D 12 session's
+    std::vector<ComPtr<ID3D11Texture2D>> images11; // a Direct3D 11 session's
+    std::deque<std::uint32_t> acquired;            // oldest first
+    std::uint32_t next{0};
+    std::optional<std::uint32_t> released; // the image released last
+    int acquires{0};
+    int waits{0};
+    int releases{0};
+    std::size_t Count() const { return images12.empty() ? images11.size() : images12.size(); }
+};
+
+// What the stand-in showed for one projection view.
+struct ShownView {
+    XrSwapchain swapchain{XR_NULL_HANDLE};
+    std::uint32_t slice{0};
+    XrStructureType next_type{XR_TYPE_UNKNOWN}; // the first structure of the view's chain
+    bool depth{false};                          // the chain had XrCompositionLayerDepthInfoKHR
+    std::optional<Color> texel;                 // the centre of the image released last
+};
+
+struct ShownFrame {
+    XrTime time{0};
+    std::vector<ShownView> views;
+    bool held{false}; // the readback still waited while the game's rendering was held back
+    std::vector<Color> unordered; // read meanwhile on a queue ordered after nothing (the control)
+};
+
+// The stand-in runtime: what it does, and what it saw.
+struct StandIn {
+    std::vector<std::string> extensions{kD3D11Extension, kD3D12Extension}; // listed before the instance
+    bool enumeration_offered{true};
+    bool refuse_d3d12_instance{false}; // XR_ERROR_EXTENSION_NOT_PRESENT for instances with XR_KHR_D3D12_enable
+    XrResult instance_failure{XR_SUCCESS};
+    bool refuse_d3d12_session{false}; // XR_ERROR_GRAPHICS_DEVICE_INVALID for Direct3D 12 sessions
+    bool refuse_transfer_dst{false};  // swapchains with TRANSFER_DST are refused
+    std::uint32_t width_error{0};     // images this much wider than asked for
+    LUID luid{};                      // the adapter it composes on
+    // Direct3D 11 held back behind it: the next readback is checked to wait
+    // for the game's rendering, then the gate is opened.
+    Gate* hold{nullptr};
+
+    std::vector<std::vector<std::string>> instance_attempts; // each attempt's extensions
+    std::vector<std::string> calls;
+    XrInstance instance{XR_NULL_HANDLE};
+    XrSession session{XR_NULL_HANDLE};
+    XrStructureType binding{XR_TYPE_UNKNOWN}; // the session's graphics binding
+    const void* binding_next{nullptr};        // what followed it
+    ComPtr<ID3D12Device> device12;
+    ComPtr<ID3D12CommandQueue> queue; // the session's queue
+    ComPtr<ID3D11Device> device11;
+    ComPtr<ID3D12Fence> released; // signalled on `queue` at each release
+    UINT64 released_value{0};
+    ComPtr<ID3D12Fence> readback;
+    UINT64 readback_value{0};
+    ComPtr<ID3D12CommandQueue> control_queue; // the stand-in's own, for the control readbacks
+    ComPtr<ID3D12Fence> control;
+    UINT64 control_value{0};
+    std::map<XrSwapchain, StandInSwapchain> swapchains;
+    std::vector<XrSwapchainCreateInfo> swapchain_requests; // as received
+    std::vector<XrSwapchain> created;
+    std::vector<XrSwapchain> destroyed;
+    std::vector<ShownFrame> frames;
+    std::function<void(XrSwapchain)> on_destroy_swapchain;
+    std::function<void()> on_destroy_session;
+    std::function<void()> on_destroy_instance; // before a session still alive goes with the instance
+    XrTime time{1'000'000'000};
+    std::uintptr_t handles{0x1000};
+
+    // The index of the first `call` at or after `from`, or -1.
+    std::ptrdiff_t Position(const std::string& call, std::ptrdiff_t from = 0) const {
+        for (std::size_t i = static_cast<std::size_t>(std::max<std::ptrdiff_t>(from, 0)); i < calls.size(); ++i) {
+            if (calls[i] == call) return static_cast<std::ptrdiff_t>(i);
+        }
+        return -1;
+    }
+};
+
+StandIn g_runtime;
+
+StandInSwapchain* FindSwapchain(XrSwapchain swapchain) {
+    const auto it = g_runtime.swapchains.find(swapchain);
+    return it == g_runtime.swapchains.end() ? nullptr : &it->second;
+}
+
+D3D12_RESOURCE_BARRIER Transition(ID3D12Resource* resource, D3D12_RESOURCE_STATES before, D3D12_RESOURCE_STATES after) {
+    D3D12_RESOURCE_BARRIER barrier{};
+    barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    barrier.Transition.pResource = resource;
+    barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    barrier.Transition.StateBefore = before;
+    barrier.Transition.StateAfter = after;
+    return barrier;
+}
+
+using Sources = std::vector<std::pair<ID3D12Resource*, std::uint32_t>>; // images and array slices
+
+// A copy of the centre texel of images' slices, submitted to a queue.
+struct Readback {
+    ComPtr<ID3D12Resource> buffer;
+    ComPtr<ID3D12CommandAllocator> allocator;
+    ComPtr<ID3D12GraphicsCommandList> list;
+    ID3D12Fence* fence{nullptr};
+    UINT64 value{0};
+    std::size_t count{0};
+};
+
+constexpr UINT64 kReadbackStride = D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT;
+
+bool SubmitReadback(ID3D12CommandQueue* queue, ID3D12Fence* fence, UINT64& fence_value, const Sources& sources,
+                    Readback& readback) {
+    ID3D12Device* device = g_runtime.device12.Get();
+    D3D12_HEAP_PROPERTIES heap{D3D12_HEAP_TYPE_READBACK};
+    D3D12_RESOURCE_DESC desc{};
+    desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    desc.Width = kReadbackStride * sources.size();
+    desc.Height = 1;
+    desc.DepthOrArraySize = 1;
+    desc.MipLevels = 1;
+    desc.SampleDesc.Count = 1;
+    desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    if (FAILED(device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_COPY_DEST,
+                                               nullptr, IID_PPV_ARGS(&readback.buffer))) ||
+        FAILED(device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&readback.allocator))) ||
+        FAILED(device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, readback.allocator.Get(), nullptr,
+                                         IID_PPV_ARGS(&readback.list)))) {
+        return false;
+    }
+    // Colour images are render targets whenever the runtime holds them.
+    std::vector<D3D12_RESOURCE_BARRIER> barriers;
+    for (const auto& [image, slice] : sources) {
+        if (std::none_of(barriers.begin(), barriers.end(), [image = image](const D3D12_RESOURCE_BARRIER& barrier) {
+                return barrier.Transition.pResource == image;
+            })) {
+            barriers.push_back(
+                Transition(image, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE));
+        }
+    }
+    readback.list->ResourceBarrier(static_cast<UINT>(barriers.size()), barriers.data());
+    for (std::size_t i = 0; i < sources.size(); ++i) {
+        const D3D12_RESOURCE_DESC image = sources[i].first->GetDesc();
+        D3D12_TEXTURE_COPY_LOCATION source{sources[i].first, D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX};
+        source.SubresourceIndex = sources[i].second * image.MipLevels;
+        D3D12_TEXTURE_COPY_LOCATION destination{readback.buffer.Get(), D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT};
+        destination.PlacedFootprint.Offset = kReadbackStride * i;
+        destination.PlacedFootprint.Footprint = {image.Format, 1, 1, 1, D3D12_TEXTURE_DATA_PITCH_ALIGNMENT};
+        const UINT x = static_cast<UINT>(image.Width / 2);
+        const UINT y = image.Height / 2;
+        const D3D12_BOX box{x, y, 0, x + 1, y + 1, 1};
+        readback.list->CopyTextureRegion(&destination, 0, 0, 0, &source, &box);
+    }
+    for (D3D12_RESOURCE_BARRIER& barrier : barriers) {
+        std::swap(barrier.Transition.StateBefore, barrier.Transition.StateAfter);
+    }
+    readback.list->ResourceBarrier(static_cast<UINT>(barriers.size()), barriers.data());
+    if (FAILED(readback.list->Close())) {
+        return false;
+    }
+    ID3D12CommandList* lists[] = {readback.list.Get()};
+    queue->ExecuteCommandLists(1, lists);
+    readback.fence = fence;
+    readback.value = ++fence_value;
+    readback.count = sources.size();
+    queue->Signal(fence, readback.value);
+    return true;
+}
+
+bool FinishReadback(Readback& readback, std::vector<Color>& texels) {
+    if (!WaitFence(readback.fence, readback.value, 10000)) {
+        return false;
+    }
+    void* mapped = nullptr;
+    const D3D12_RANGE range{0, static_cast<SIZE_T>(kReadbackStride * readback.count)};
+    if (FAILED(readback.buffer->Map(0, &range, &mapped))) {
+        return false;
+    }
+    texels.resize(readback.count);
+    for (std::size_t i = 0; i < readback.count; ++i) {
+        const auto* texel = static_cast<const std::uint8_t*>(mapped) + kReadbackStride * i;
+        texels[i] = {texel[0], texel[1], texel[2], texel[3]};
+    }
+    const D3D12_RANGE written{0, 0};
+    readback.buffer->Unmap(0, &written);
+    return true;
+}
+
+// Reads the centre texel of each image's slice on the session's queue, after
+// everything queued there before (the images' releases among it), as a
+// compositor reads what it shows. With the game held back (StandIn::hold),
+// the readback must still be waiting a while later, nothing ordered after the
+// game's rendering having run; as a control, the same images read meanwhile
+// on a queue of the stand-in's own, ordered after nothing, do not hold the
+// frame yet.
+bool ReadBack12(const Sources& sources, ShownFrame& frame, std::vector<Color>& texels) {
+    StandIn& rt = g_runtime;
+    Readback shown;
+    if (!SubmitReadback(rt.queue.Get(), rt.readback.Get(), rt.readback_value, sources, shown)) {
+        return false;
+    }
+    if (rt.hold) {
+        Sleep(50);
+        frame.held = rt.readback->GetCompletedValue() < shown.value;
+        if (!rt.control_queue) {
+            const D3D12_COMMAND_QUEUE_DESC desc{D3D12_COMMAND_LIST_TYPE_DIRECT};
+            rt.device12->CreateCommandQueue(&desc, IID_PPV_ARGS(&rt.control_queue));
+            rt.device12->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&rt.control));
+        }
+        Readback control;
+        if (rt.control_queue && rt.control &&
+            SubmitReadback(rt.control_queue.Get(), rt.control.Get(), rt.control_value, sources, control)) {
+            FinishReadback(control, frame.unordered);
+        }
+        rt.hold->Open();
+        rt.hold = nullptr;
+    }
+    return FinishReadback(shown, texels);
+}
+
+// A Direct3D 11 session's: on the game's immediate context, after its work.
+bool ReadBack11(const std::vector<std::pair<ID3D11Texture2D*, std::uint32_t>>& sources, std::vector<Color>& texels) {
+    ComPtr<ID3D11DeviceContext> context;
+    g_runtime.device11->GetImmediateContext(&context);
+    texels.clear();
+    for (const auto& [image, slice] : sources) {
+        D3D11_TEXTURE2D_DESC desc{};
+        image->GetDesc(&desc);
+        D3D11_TEXTURE2D_DESC staging_desc{};
+        staging_desc.Width = 1;
+        staging_desc.Height = 1;
+        staging_desc.MipLevels = 1;
+        staging_desc.ArraySize = 1;
+        staging_desc.Format = desc.Format;
+        staging_desc.SampleDesc.Count = 1;
+        staging_desc.Usage = D3D11_USAGE_STAGING;
+        staging_desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+        ComPtr<ID3D11Texture2D> staging;
+        if (FAILED(g_runtime.device11->CreateTexture2D(&staging_desc, nullptr, &staging))) {
+            return false;
+        }
+        const D3D11_BOX box{desc.Width / 2, desc.Height / 2, 0, desc.Width / 2 + 1, desc.Height / 2 + 1, 1};
+        context->CopySubresourceRegion(staging.Get(), 0, 0, 0, 0, image, D3D11CalcSubresource(0, slice, desc.MipLevels),
+                                       &box);
+        D3D11_MAPPED_SUBRESOURCE mapped{};
+        if (FAILED(context->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &mapped))) {
+            return false;
+        }
+        const auto* texel = static_cast<const std::uint8_t*>(mapped.pData);
+        texels.push_back({texel[0], texel[1], texel[2], texel[3]});
+        context->Unmap(staging.Get(), 0);
+    }
+    return true;
+}
+
+XrResult XRAPI_CALL RtEnumerateInstanceExtensions(const char*, std::uint32_t capacity, std::uint32_t* count,
+                                                   XrExtensionProperties* properties) {
+    const std::vector<std::string>& names = g_runtime.extensions;
+    *count = static_cast<std::uint32_t>(names.size());
+    if (capacity == 0) return XR_SUCCESS;
+    if (capacity < names.size()) return XR_ERROR_SIZE_INSUFFICIENT;
+    for (std::size_t i = 0; i < names.size(); ++i) {
+        std::strncpy(properties[i].extensionName, names[i].c_str(), XR_MAX_EXTENSION_NAME_SIZE - 1);
+        properties[i].extensionVersion = 1;
+    }
+    return XR_SUCCESS;
+}
+
+XrResult XRAPI_CALL RtCreateApiLayerInstance(const XrInstanceCreateInfo* info,
+                                             const depthxr::XrApiLayerCreateInfo* layer_info, XrInstance* instance) {
+    StandIn& rt = g_runtime;
+    std::vector<std::string> extensions;
+    for (std::uint32_t i = 0; i < info->enabledExtensionCount; ++i) {
+        extensions.emplace_back(info->enabledExtensionNames[i]);
+    }
+    rt.instance_attempts.push_back(extensions);
+    rt.calls.push_back("xrCreateApiLayerInstance");
+    // The stand-in is the last of the chain: nothing follows it.
+    Check(layer_info && layer_info->nextInfo == nullptr, "the layer hands the rest of the chain on");
+    if (rt.instance_failure != XR_SUCCESS) return rt.instance_failure;
+    if (rt.refuse_d3d12_instance &&
+        std::find(extensions.begin(), extensions.end(), kD3D12Extension) != extensions.end()) {
+        return XR_ERROR_EXTENSION_NOT_PRESENT;
+    }
+    *instance = rt.instance = Handle<XrInstance>(++rt.handles);
+    return XR_SUCCESS;
+}
+
+// The session's swapchains (their images) and everything of its device go.
+void DropSession(StandIn& rt) {
+    rt.swapchains.clear();
+    rt.device12.Reset();
+    rt.queue.Reset();
+    rt.device11.Reset();
+    rt.released.Reset();
+    rt.readback.Reset();
+    rt.control_queue.Reset();
+    rt.control.Reset();
+    rt.session = XR_NULL_HANDLE;
+}
+
+XrResult XRAPI_CALL RtDestroyInstance(XrInstance instance) {
+    StandIn& rt = g_runtime;
+    rt.calls.push_back("xrDestroyInstance");
+    Check(instance == rt.instance, "the runtime's instance is destroyed");
+    if (rt.on_destroy_instance) {
+        const auto hook = std::move(rt.on_destroy_instance);
+        rt.on_destroy_instance = nullptr;
+        hook();
+    }
+    // A session the application did not destroy goes with its instance.
+    DropSession(rt);
+    rt.instance = XR_NULL_HANDLE;
+    return XR_SUCCESS;
+}
+
+XrResult XRAPI_CALL RtGetInstanceProperties(XrInstance, XrInstanceProperties* properties) {
+    properties->runtimeVersion = XR_MAKE_VERSION(1, 0, 0);
+    std::strncpy(properties->runtimeName, "VectorXR stand-in runtime", XR_MAX_RUNTIME_NAME_SIZE - 1);
+    return XR_SUCCESS;
+}
+
+XrResult XRAPI_CALL RtGetSystem(XrInstance, const XrSystemGetInfo*, XrSystemId* system) {
+    *system = kSystem;
+    return XR_SUCCESS;
+}
+
+XrResult XRAPI_CALL RtGetSystemProperties(XrInstance, XrSystemId, XrSystemProperties* properties) {
+    properties->systemId = kSystem;
+    std::strncpy(properties->systemName, "Stand-in headset", XR_MAX_SYSTEM_NAME_SIZE - 1);
+    properties->graphicsProperties.maxLayerCount = 16;
+    properties->graphicsProperties.maxSwapchainImageWidth = 4096;
+    properties->graphicsProperties.maxSwapchainImageHeight = 4096;
+    properties->trackingProperties.orientationTracking = XR_TRUE;
+    properties->trackingProperties.positionTracking = XR_TRUE;
+    return XR_SUCCESS;
+}
+
+XrResult XRAPI_CALL RtGetD3D11Requirements(XrInstance, XrSystemId, XrGraphicsRequirementsD3D11KHR* requirements) {
+    g_runtime.calls.push_back("xrGetD3D11GraphicsRequirementsKHR");
+    requirements->adapterLuid = g_runtime.luid;
+    requirements->minFeatureLevel = D3D_FEATURE_LEVEL_11_0;
+    return XR_SUCCESS;
+}
+
+XrResult XRAPI_CALL RtGetD3D12Requirements(XrInstance, XrSystemId, XrGraphicsRequirementsD3D12KHR* requirements) {
+    g_runtime.calls.push_back("xrGetD3D12GraphicsRequirementsKHR");
+    requirements->adapterLuid = g_runtime.luid;
+    requirements->minFeatureLevel = D3D_FEATURE_LEVEL_11_0;
+    return XR_SUCCESS;
+}
+
+XrResult XRAPI_CALL RtEnumerateViewConfigurations(XrInstance, XrSystemId, std::uint32_t capacity,
+                                                   std::uint32_t* count, XrViewConfigurationType* types) {
+    *count = 1;
+    if (capacity) types[0] = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
+    return XR_SUCCESS;
+}
+
+XrResult XRAPI_CALL RtGetViewConfigurationProperties(XrInstance, XrSystemId, XrViewConfigurationType type,
+                                                      XrViewConfigurationProperties* properties) {
+    properties->viewConfigurationType = type;
+    properties->fovMutable = XR_TRUE;
+    return XR_SUCCESS;
+}
+
+XrResult XRAPI_CALL RtEnumerateViewConfigurationViews(XrInstance, XrSystemId, XrViewConfigurationType,
+                                                       std::uint32_t capacity, std::uint32_t* count,
+                                                       XrViewConfigurationView* views) {
+    *count = 2;
+    for (std::uint32_t i = 0; i < std::min(capacity, 2u); ++i) {
+        views[i].recommendedImageRectWidth = kWidth;
+        views[i].recommendedImageRectHeight = kHeight;
+        views[i].maxImageRectWidth = 4096;
+        views[i].maxImageRectHeight = 4096;
+        views[i].recommendedSwapchainSampleCount = 1;
+        views[i].maxSwapchainSampleCount = 4;
+    }
+    return XR_SUCCESS;
+}
+
+XrResult XRAPI_CALL RtEnumerateBlendModes(XrInstance, XrSystemId, XrViewConfigurationType, std::uint32_t capacity,
+                                          std::uint32_t* count, XrEnvironmentBlendMode* modes) {
+    *count = 1;
+    if (capacity) modes[0] = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
+    return XR_SUCCESS;
+}
+
+XrResult XRAPI_CALL RtPollEvent(XrInstance, XrEventDataBuffer*) {
+    return XR_EVENT_UNAVAILABLE;
+}
+
+XrResult XRAPI_CALL RtCreateSession(XrInstance, const XrSessionCreateInfo* info, XrSession* session) {
+    StandIn& rt = g_runtime;
+    const auto* first = info ? static_cast<const XrBaseInStructure*>(info->next) : nullptr;
+    if (first && first->type == XR_TYPE_GRAPHICS_BINDING_D3D12_KHR) {
+        rt.calls.push_back("xrCreateSession:D3D12");
+        const auto& binding = *reinterpret_cast<const XrGraphicsBindingD3D12KHR*>(first);
+        if (rt.refuse_d3d12_session || !binding.device || !binding.queue ||
+            FAILED(binding.device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&rt.released))) ||
+            FAILED(binding.device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&rt.readback)))) {
+            rt.released.Reset();
+            rt.readback.Reset();
+            return XR_ERROR_GRAPHICS_DEVICE_INVALID;
+        }
+        rt.device12 = binding.device;
+        rt.queue = binding.queue;
+        rt.binding_next = binding.next;
+    } else if (first && first->type == XR_TYPE_GRAPHICS_BINDING_D3D11_KHR) {
+        rt.calls.push_back("xrCreateSession:D3D11");
+        const auto& binding = *reinterpret_cast<const XrGraphicsBindingD3D11KHR*>(first);
+        if (!binding.device) return XR_ERROR_GRAPHICS_DEVICE_INVALID;
+        rt.device11 = binding.device;
+        rt.binding_next = binding.next;
+    } else {
+        rt.calls.push_back("xrCreateSession:other");
+        return XR_ERROR_GRAPHICS_DEVICE_INVALID;
+    }
+    rt.binding = first->type;
+    *session = rt.session = Handle<XrSession>(++rt.handles);
+    return XR_SUCCESS;
+}
+
+XrResult XRAPI_CALL RtDestroySession(XrSession session) {
+    StandIn& rt = g_runtime;
+    rt.calls.push_back("xrDestroySession");
+    Check(session == rt.session, "the runtime's session is destroyed");
+    if (rt.on_destroy_session) {
+        const auto hook = std::move(rt.on_destroy_session);
+        rt.on_destroy_session = nullptr;
+        hook();
+    }
+    // Its swapchains go with it.
+    DropSession(rt);
+    return XR_SUCCESS;
+}
+
+XrResult XRAPI_CALL RtBeginSession(XrSession, const XrSessionBeginInfo*) {
+    g_runtime.calls.push_back("xrBeginSession");
+    return XR_SUCCESS;
+}
+
+XrResult XRAPI_CALL RtEndSession(XrSession) {
+    g_runtime.calls.push_back("xrEndSession");
+    return XR_SUCCESS;
+}
+
+XrResult XRAPI_CALL RtAttachActionSets(XrSession, const XrSessionActionSetsAttachInfo*) {
+    return XR_SUCCESS;
+}
+
+XrResult XRAPI_CALL RtSyncActions(XrSession, const XrActionsSyncInfo*) {
+    return XR_SUCCESS;
+}
+
+XrResult XRAPI_CALL RtEnumerateReferenceSpaces(XrSession, std::uint32_t capacity, std::uint32_t* count,
+                                                XrReferenceSpaceType* spaces) {
+    constexpr XrReferenceSpaceType kSpaces[] = {XR_REFERENCE_SPACE_TYPE_VIEW, XR_REFERENCE_SPACE_TYPE_LOCAL,
+                                                XR_REFERENCE_SPACE_TYPE_STAGE};
+    *count = 3;
+    if (capacity == 0) return XR_SUCCESS;
+    if (capacity < 3) return XR_ERROR_SIZE_INSUFFICIENT;
+    std::copy(std::begin(kSpaces), std::end(kSpaces), spaces);
+    return XR_SUCCESS;
+}
+
+XrResult XRAPI_CALL RtGetReferenceSpaceBoundsRect(XrSession, XrReferenceSpaceType, XrExtent2Df* bounds) {
+    *bounds = {};
+    return XR_SPACE_BOUNDS_UNAVAILABLE;
+}
+
+XrResult XRAPI_CALL RtCreateReferenceSpace(XrSession, const XrReferenceSpaceCreateInfo*, XrSpace* space) {
+    *space = Handle<XrSpace>(++g_runtime.handles);
+    return XR_SUCCESS;
+}
+
+XrResult XRAPI_CALL RtCreateActionSpace(XrSession, const XrActionSpaceCreateInfo*, XrSpace* space) {
+    *space = Handle<XrSpace>(++g_runtime.handles);
+    return XR_SUCCESS;
+}
+
+XrResult XRAPI_CALL RtDestroySpace(XrSpace) {
+    return XR_SUCCESS;
+}
+
+XrResult XRAPI_CALL RtLocateSpace(XrSpace, XrSpace, XrTime, XrSpaceLocation* location) {
+    location->locationFlags = XR_SPACE_LOCATION_ORIENTATION_VALID_BIT | XR_SPACE_LOCATION_POSITION_VALID_BIT |
+                              XR_SPACE_LOCATION_ORIENTATION_TRACKED_BIT | XR_SPACE_LOCATION_POSITION_TRACKED_BIT;
+    location->pose = {{0, 0, 0, 1}, {0, 0, 0}};
+    return XR_SUCCESS;
+}
+
+XrResult XRAPI_CALL RtLocateViews(XrSession, const XrViewLocateInfo*, XrViewState* state, std::uint32_t capacity,
+                                  std::uint32_t* count, XrView* views) {
+    *count = 2;
+    state->viewStateFlags = XR_VIEW_STATE_ORIENTATION_VALID_BIT | XR_VIEW_STATE_POSITION_VALID_BIT |
+                            XR_VIEW_STATE_ORIENTATION_TRACKED_BIT | XR_VIEW_STATE_POSITION_TRACKED_BIT;
+    for (std::uint32_t i = 0; i < std::min(capacity, 2u); ++i) {
+        views[i].pose = {{0, 0, 0, 1}, {i ? 0.032f : -0.032f, 0, 0}};
+        views[i].fov = {-0.8f, 0.8f, 0.8f, -0.8f};
+    }
+    return XR_SUCCESS;
+}
+
+XrResult XRAPI_CALL RtWaitFrame(XrSession, const XrFrameWaitInfo*, XrFrameState* state) {
+    g_runtime.time += kPeriod;
+    state->predictedDisplayTime = g_runtime.time;
+    state->predictedDisplayPeriod = kPeriod;
+    state->shouldRender = XR_TRUE;
+    return XR_SUCCESS;
+}
+
+XrResult XRAPI_CALL RtBeginFrame(XrSession, const XrFrameBeginInfo*) {
+    return XR_SUCCESS;
+}
+
+XrResult XRAPI_CALL RtEndFrame(XrSession, const XrFrameEndInfo* info) {
+    StandIn& rt = g_runtime;
+    rt.calls.push_back("xrEndFrame");
+    ShownFrame frame;
+    frame.time = info->displayTime;
+    for (std::uint32_t i = 0; i < info->layerCount; ++i) {
+        const XrCompositionLayerBaseHeader* base = info->layers[i];
+        if (!base || base->type != XR_TYPE_COMPOSITION_LAYER_PROJECTION) continue;
+        const auto& projection = *reinterpret_cast<const XrCompositionLayerProjection*>(base);
+        for (std::uint32_t v = 0; v < projection.viewCount; ++v) {
+            const XrCompositionLayerProjectionView& view = projection.views[v];
+            ShownView shown;
+            shown.swapchain = view.subImage.swapchain;
+            shown.slice = view.subImage.imageArrayIndex;
+            const auto* chain = static_cast<const XrBaseInStructure*>(view.next);
+            shown.next_type = chain ? chain->type : XR_TYPE_UNKNOWN;
+            for (; chain; chain = chain->next) {
+                shown.depth = shown.depth || chain->type == XR_TYPE_COMPOSITION_LAYER_DEPTH_INFO_KHR;
+            }
+            frame.views.push_back(shown);
+        }
+    }
+    std::vector<Color> texels;
+    bool read = false;
+    if (rt.device12) {
+        Sources sources;
+        for (const ShownView& view : frame.views) {
+            const StandInSwapchain* chain = FindSwapchain(view.swapchain);
+            if (!chain || !chain->released || chain->images12.empty()) {
+                sources.clear();
+                break;
+            }
+            sources.emplace_back(chain->images12[*chain->released].Get(), view.slice);
+        }
+        read = !sources.empty() && ReadBack12(sources, frame, texels);
+    } else if (rt.device11) {
+        std::vector<std::pair<ID3D11Texture2D*, std::uint32_t>> sources;
+        for (const ShownView& view : frame.views) {
+            const StandInSwapchain* chain = FindSwapchain(view.swapchain);
+            if (!chain || !chain->released || chain->images11.empty()) {
+                sources.clear();
+                break;
+            }
+            sources.emplace_back(chain->images11[*chain->released].Get(), view.slice);
+        }
+        read = !sources.empty() && ReadBack11(sources, texels);
+    }
+    for (std::size_t i = 0; read && i < frame.views.size(); ++i) {
+        frame.views[i].texel = texels[i];
+    }
+    rt.frames.push_back(frame);
+    return XR_SUCCESS;
+}
+
+XrResult XRAPI_CALL RtEnumerateSwapchainFormats(XrSession, std::uint32_t capacity, std::uint32_t* count,
+                                                 std::int64_t* formats) {
+    constexpr std::int64_t kFormats[] = {DXGI_FORMAT_R8G8B8A8_UNORM_SRGB, DXGI_FORMAT_R8G8B8A8_UNORM,
+                                         DXGI_FORMAT_D32_FLOAT};
+    *count = 3;
+    if (capacity == 0) return XR_SUCCESS;
+    if (capacity < 3) return XR_ERROR_SIZE_INSUFFICIENT;
+    std::copy(std::begin(kFormats), std::end(kFormats), formats);
+    return XR_SUCCESS;
+}
+
+XrResult XRAPI_CALL RtCreateSwapchain(XrSession session, const XrSwapchainCreateInfo* info, XrSwapchain* swapchain) {
+    StandIn& rt = g_runtime;
+    rt.calls.push_back("xrCreateSwapchain");
+    rt.swapchain_requests.push_back(*info);
+    if (session != rt.session) return XR_ERROR_HANDLE_INVALID;
+    if (rt.refuse_transfer_dst && (info->usageFlags & XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT)) {
+        return XR_ERROR_FEATURE_UNSUPPORTED;
+    }
+    const bool depth = (info->usageFlags & XR_SWAPCHAIN_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT) != 0;
+    StandInSwapchain chain;
+    chain.info = *info;
+    chain.info.next = nullptr;
+    const std::uint32_t array_size = std::max(1u, info->arraySize) * std::max(1u, info->faceCount);
+    for (std::uint32_t i = 0; i < kImages; ++i) {
+        if (rt.device12) {
+            D3D12_HEAP_PROPERTIES heap{D3D12_HEAP_TYPE_DEFAULT};
+            D3D12_RESOURCE_DESC desc{};
+            desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+            desc.Width = info->width + rt.width_error;
+            desc.Height = info->height;
+            desc.DepthOrArraySize = static_cast<UINT16>(array_size);
+            desc.MipLevels = static_cast<UINT16>(std::max(1u, info->mipCount));
+            desc.Format = static_cast<DXGI_FORMAT>(info->format);
+            desc.SampleDesc.Count = std::max(1u, info->sampleCount);
+            desc.Flags = depth ? D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL : D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+            // Handed out as runtimes hand them out: colour images as render targets.
+            ComPtr<ID3D12Resource> image;
+            if (FAILED(rt.device12->CreateCommittedResource(
+                    &heap, D3D12_HEAP_FLAG_NONE, &desc,
+                    depth ? D3D12_RESOURCE_STATE_DEPTH_WRITE : D3D12_RESOURCE_STATE_RENDER_TARGET, nullptr,
+                    IID_PPV_ARGS(&image)))) {
+                return XR_ERROR_RUNTIME_FAILURE;
+            }
+            image->SetName(L"VectorXR stand-in runtime swapchain image");
+            chain.images12.push_back(image);
+        } else if (rt.device11) {
+            // Typeless, as runtimes' Direct3D 11 images usually are.
+            D3D11_TEXTURE2D_DESC desc{};
+            desc.Width = info->width + rt.width_error;
+            desc.Height = info->height;
+            desc.MipLevels = std::max(1u, info->mipCount);
+            desc.ArraySize = array_size;
+            desc.Format = depth ? DXGI_FORMAT_R32_TYPELESS : DXGI_FORMAT_R8G8B8A8_TYPELESS;
+            desc.SampleDesc.Count = std::max(1u, info->sampleCount);
+            desc.Usage = D3D11_USAGE_DEFAULT;
+            desc.BindFlags = depth ? D3D11_BIND_DEPTH_STENCIL : D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+            ComPtr<ID3D11Texture2D> image;
+            if (FAILED(rt.device11->CreateTexture2D(&desc, nullptr, &image))) {
+                return XR_ERROR_RUNTIME_FAILURE;
+            }
+            chain.images11.push_back(image);
+        } else {
+            return XR_ERROR_HANDLE_INVALID;
+        }
+    }
+    *swapchain = Handle<XrSwapchain>(++rt.handles);
+    rt.swapchains[*swapchain] = std::move(chain);
+    rt.created.push_back(*swapchain);
+    return XR_SUCCESS;
+}
+
+XrResult XRAPI_CALL RtDestroySwapchain(XrSwapchain swapchain) {
+    StandIn& rt = g_runtime;
+    rt.calls.push_back("xrDestroySwapchain");
+    if (!FindSwapchain(swapchain)) return XR_ERROR_HANDLE_INVALID;
+    if (rt.on_destroy_swapchain) rt.on_destroy_swapchain(swapchain);
+    rt.destroyed.push_back(swapchain);
+    rt.swapchains.erase(swapchain);
+    return XR_SUCCESS;
+}
+
+XrResult XRAPI_CALL RtEnumerateSwapchainImages(XrSwapchain swapchain, std::uint32_t capacity, std::uint32_t* count,
+                                                XrSwapchainImageBaseHeader* images) {
+    const StandInSwapchain* chain = FindSwapchain(swapchain);
+    if (!chain) return XR_ERROR_HANDLE_INVALID;
+    *count = static_cast<std::uint32_t>(chain->Count());
+    if (capacity == 0) return XR_SUCCESS;
+    if (capacity < chain->Count()) return XR_ERROR_SIZE_INSUFFICIENT;
+    if (!chain->images12.empty()) {
+        auto* out = reinterpret_cast<XrSwapchainImageD3D12KHR*>(images);
+        for (std::size_t i = 0; i < chain->images12.size(); ++i) {
+            if (out[i].type != XR_TYPE_SWAPCHAIN_IMAGE_D3D12_KHR) return XR_ERROR_VALIDATION_FAILURE;
+            out[i].texture = chain->images12[i].Get();
+        }
+    } else {
+        auto* out = reinterpret_cast<XrSwapchainImageD3D11KHR*>(images);
+        for (std::size_t i = 0; i < chain->images11.size(); ++i) {
+            if (out[i].type != XR_TYPE_SWAPCHAIN_IMAGE_D3D11_KHR) return XR_ERROR_VALIDATION_FAILURE;
+            out[i].texture = chain->images11[i].Get();
+        }
+    }
+    return XR_SUCCESS;
+}
+
+XrResult XRAPI_CALL RtAcquire(XrSwapchain swapchain, const XrSwapchainImageAcquireInfo*, std::uint32_t* index) {
+    StandInSwapchain* chain = FindSwapchain(swapchain);
+    if (!chain) return XR_ERROR_HANDLE_INVALID;
+    if (chain->acquired.size() >= chain->Count()) return XR_ERROR_CALL_ORDER_INVALID;
+    *index = chain->next;
+    chain->next = (chain->next + 1) % static_cast<std::uint32_t>(chain->Count());
+    chain->acquired.push_back(*index);
+    ++chain->acquires;
+    return XR_SUCCESS;
+}
+
+XrResult XRAPI_CALL RtWait(XrSwapchain swapchain, const XrSwapchainImageWaitInfo*) {
+    StandInSwapchain* chain = FindSwapchain(swapchain);
+    if (!chain) return XR_ERROR_HANDLE_INVALID;
+    if (chain->waits >= chain->acquires) return XR_ERROR_CALL_ORDER_INVALID;
+    ++chain->waits;
+    return XR_SUCCESS;
+}
+
+XrResult XRAPI_CALL RtRelease(XrSwapchain swapchain, const XrSwapchainImageReleaseInfo*) {
+    StandIn& rt = g_runtime;
+    StandInSwapchain* chain = FindSwapchain(swapchain);
+    if (!chain) return XR_ERROR_HANDLE_INVALID;
+    if (chain->acquired.empty() || chain->releases >= chain->waits) return XR_ERROR_CALL_ORDER_INVALID;
+    chain->released = chain->acquired.front();
+    chain->acquired.pop_front();
+    ++chain->releases;
+    // As runtimes do: the image counts as written once the session's queue
+    // has run everything submitted before the release.
+    if (rt.queue) {
+        rt.queue->Signal(rt.released.Get(), ++rt.released_value);
+    }
+    return XR_SUCCESS;
+}
+
+template <typename F>
+PFN_xrVoidFunction Function(F* function) {
+    return reinterpret_cast<PFN_xrVoidFunction>(function);
+}
+
+XrResult XRAPI_CALL RtGetInstanceProcAddr(XrInstance instance, const char* name, PFN_xrVoidFunction* function) {
+    static const std::map<std::string, PFN_xrVoidFunction> kFunctions = {
+        {"xrDestroyInstance", Function(RtDestroyInstance)},
+        {"xrGetInstanceProperties", Function(RtGetInstanceProperties)},
+        {"xrGetSystem", Function(RtGetSystem)},
+        {"xrGetSystemProperties", Function(RtGetSystemProperties)},
+        {"xrGetD3D11GraphicsRequirementsKHR", Function(RtGetD3D11Requirements)},
+        {"xrGetD3D12GraphicsRequirementsKHR", Function(RtGetD3D12Requirements)},
+        {"xrEnumerateViewConfigurations", Function(RtEnumerateViewConfigurations)},
+        {"xrGetViewConfigurationProperties", Function(RtGetViewConfigurationProperties)},
+        {"xrEnumerateViewConfigurationViews", Function(RtEnumerateViewConfigurationViews)},
+        {"xrEnumerateEnvironmentBlendModes", Function(RtEnumerateBlendModes)},
+        {"xrPollEvent", Function(RtPollEvent)},
+        {"xrCreateSession", Function(RtCreateSession)},
+        {"xrDestroySession", Function(RtDestroySession)},
+        {"xrBeginSession", Function(RtBeginSession)},
+        {"xrEndSession", Function(RtEndSession)},
+        {"xrAttachSessionActionSets", Function(RtAttachActionSets)},
+        {"xrSyncActions", Function(RtSyncActions)},
+        {"xrEnumerateReferenceSpaces", Function(RtEnumerateReferenceSpaces)},
+        {"xrGetReferenceSpaceBoundsRect", Function(RtGetReferenceSpaceBoundsRect)},
+        {"xrCreateReferenceSpace", Function(RtCreateReferenceSpace)},
+        {"xrCreateActionSpace", Function(RtCreateActionSpace)},
+        {"xrDestroySpace", Function(RtDestroySpace)},
+        {"xrLocateSpace", Function(RtLocateSpace)},
+        {"xrLocateViews", Function(RtLocateViews)},
+        {"xrWaitFrame", Function(RtWaitFrame)},
+        {"xrBeginFrame", Function(RtBeginFrame)},
+        {"xrEndFrame", Function(RtEndFrame)},
+        {"xrEnumerateSwapchainFormats", Function(RtEnumerateSwapchainFormats)},
+        {"xrCreateSwapchain", Function(RtCreateSwapchain)},
+        {"xrDestroySwapchain", Function(RtDestroySwapchain)},
+        {"xrEnumerateSwapchainImages", Function(RtEnumerateSwapchainImages)},
+        {"xrAcquireSwapchainImage", Function(RtAcquire)},
+        {"xrWaitSwapchainImage", Function(RtWait)},
+        {"xrReleaseSwapchainImage", Function(RtRelease)},
+    };
+    *function = nullptr;
+    if (instance == XR_NULL_HANDLE) {
+        // Before the instance: the loader's extension scan.
+        if (std::strcmp(name, "xrEnumerateInstanceExtensionProperties") == 0 && g_runtime.enumeration_offered) {
+            *function = Function(RtEnumerateInstanceExtensions);
+            return XR_SUCCESS;
+        }
+        return XR_ERROR_FUNCTION_UNSUPPORTED;
+    }
+    const auto it = kFunctions.find(name);
+    if (it == kFunctions.end()) return XR_ERROR_FUNCTION_UNSUPPORTED;
+    *function = it->second;
+    return XR_SUCCESS;
+}
+
+// --- Frame Generation's stand-in backend ------------------------------------
+
+// The chain Frame Generation's backend was made from.
+struct FrameGenChain {
+    XrStructureType first{XR_TYPE_UNKNOWN};
+    void* queue{nullptr};        // FrameGenRuntimeQueue::d3d12_queue
+    const void* next{nullptr};   // the game's chain after it (or the chain itself)
+};
+FrameGenChain g_framegen_chain;
+
+class StandInGpu final : public depthxr::FrameGenGpu {
+  public:
+    const char* Name() const override { return "Stand-in"; }
+    std::optional<depthxr::FrameGenOutputKind> Classify(std::int64_t) const override {
+        return depthxr::FrameGenOutputKind::kSrgb8;
+    }
+    std::vector<std::int64_t> OutputFormats(depthxr::FrameGenOutputKind) const override {
+        return {DXGI_FORMAT_R8G8B8A8_UNORM_SRGB};
+    }
+    XrSwapchainUsageFlags RequiredSourceUsage() const override { return 0; }
+    XrSwapchainUsageFlags OutputUsage() const override { return XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT; }
+    bool Track(XrSwapchain, PFN_xrEnumerateSwapchainImages, std::string&) override { return true; }
+    void Forget(XrSwapchain) override {}
+    bool Capture(std::size_t, const depthxr::FrameGenImage&, const depthxr::FrameGenViewRequest&,
+                 depthxr::FrameGenFlowQuality, std::string&) override {
+        return true;
+    }
+    bool WaitIdle() override { return true; }
+    bool Execute(const std::vector<depthxr::FrameGenViewSubmission>& views, const depthxr::FrameGenTuning&,
+                 depthxr::FrameGenExecuteResult& result, std::string&) override {
+        result.synthesized.assign(views.size(), true);
+        return true;
+    }
+    void ResetHistory() override {}
+    void Reset() override {}
+};
+
+std::unique_ptr<depthxr::FrameGenGpu> MakeStandInGpu(const void* chain, std::string&) {
+    g_framegen_chain = {};
+    if (const auto* first = static_cast<const XrBaseInStructure*>(chain)) {
+        g_framegen_chain.first = first->type;
+        g_framegen_chain.next = chain;
+        if (first->type == depthxr::kFrameGenRuntimeQueueType) {
+            const auto* marker = static_cast<const depthxr::FrameGenRuntimeQueue*>(chain);
+            g_framegen_chain.queue = marker->d3d12_queue;
+            g_framegen_chain.next = marker->next;
+        }
+    }
+    return std::make_unique<StandInGpu>();
+}
+
+// --- The application --------------------------------------------------------
+
+// The application's OpenXR, from the layer's xrGetInstanceProcAddr.
+struct Api {
+    XrInstance instance{XR_NULL_HANDLE};
+    PFN_xrDestroyInstance destroy_instance{};
+    PFN_xrGetSystem get_system{};
+    PFN_xrGetD3D11GraphicsRequirementsKHR d3d11_requirements{};
+    PFN_xrPollEvent poll_event{};
+    PFN_xrCreateSession create_session{};
+    PFN_xrDestroySession destroy_session{};
+    PFN_xrBeginSession begin_session{};
+    PFN_xrEndSession end_session{};
+    PFN_xrCreateReferenceSpace create_space{};
+    PFN_xrDestroySpace destroy_space{};
+    PFN_xrCreateSwapchain create_swapchain{};
+    PFN_xrDestroySwapchain destroy_swapchain{};
+    PFN_xrEnumerateSwapchainImages enumerate_images{};
+    PFN_xrAcquireSwapchainImage acquire{};
+    PFN_xrWaitSwapchainImage wait{};
+    PFN_xrReleaseSwapchainImage release{};
+    PFN_xrWaitFrame wait_frame{};
+    PFN_xrBeginFrame begin_frame{};
+    PFN_xrEndFrame end_frame{};
+    PFN_xrLocateViews locate_views{};
+};
+
+template <typename T>
+T LayerFunction(XrInstance instance, const char* name) {
+    PFN_xrVoidFunction function = nullptr;
+    Check(XR_SUCCEEDED(xrGetInstanceProcAddr(instance, name, &function)) && function,
+          std::string("the layer hands out ") + name);
+    return reinterpret_cast<T>(function);
+}
+
+Api Load(XrInstance instance) {
+    Api api;
+    api.instance = instance;
+    api.destroy_instance = LayerFunction<PFN_xrDestroyInstance>(instance, "xrDestroyInstance");
+    api.get_system = LayerFunction<PFN_xrGetSystem>(instance, "xrGetSystem");
+    api.d3d11_requirements =
+        LayerFunction<PFN_xrGetD3D11GraphicsRequirementsKHR>(instance, "xrGetD3D11GraphicsRequirementsKHR");
+    api.poll_event = LayerFunction<PFN_xrPollEvent>(instance, "xrPollEvent");
+    api.create_session = LayerFunction<PFN_xrCreateSession>(instance, "xrCreateSession");
+    api.destroy_session = LayerFunction<PFN_xrDestroySession>(instance, "xrDestroySession");
+    api.begin_session = LayerFunction<PFN_xrBeginSession>(instance, "xrBeginSession");
+    api.end_session = LayerFunction<PFN_xrEndSession>(instance, "xrEndSession");
+    api.create_space = LayerFunction<PFN_xrCreateReferenceSpace>(instance, "xrCreateReferenceSpace");
+    api.destroy_space = LayerFunction<PFN_xrDestroySpace>(instance, "xrDestroySpace");
+    api.create_swapchain = LayerFunction<PFN_xrCreateSwapchain>(instance, "xrCreateSwapchain");
+    api.destroy_swapchain = LayerFunction<PFN_xrDestroySwapchain>(instance, "xrDestroySwapchain");
+    api.enumerate_images = LayerFunction<PFN_xrEnumerateSwapchainImages>(instance, "xrEnumerateSwapchainImages");
+    api.acquire = LayerFunction<PFN_xrAcquireSwapchainImage>(instance, "xrAcquireSwapchainImage");
+    api.wait = LayerFunction<PFN_xrWaitSwapchainImage>(instance, "xrWaitSwapchainImage");
+    api.release = LayerFunction<PFN_xrReleaseSwapchainImage>(instance, "xrReleaseSwapchainImage");
+    api.wait_frame = LayerFunction<PFN_xrWaitFrame>(instance, "xrWaitFrame");
+    api.begin_frame = LayerFunction<PFN_xrBeginFrame>(instance, "xrBeginFrame");
+    api.end_frame = LayerFunction<PFN_xrEndFrame>(instance, "xrEndFrame");
+    api.locate_views = LayerFunction<PFN_xrLocateViews>(instance, "xrLocateViews");
+    return api;
+}
+
+// xrCreateInstance as the loader makes it with the layer enabled: the
+// stand-in runtime is the next (and last) of the chain.
+XrResult CreateInstance(const std::vector<const char*>& extensions, XrInstance& instance) {
+    XrInstanceCreateInfo info{XR_TYPE_INSTANCE_CREATE_INFO};
+    std::strncpy(info.applicationInfo.applicationName, "VectorXR bridge test", XR_MAX_APPLICATION_NAME_SIZE - 1);
+    std::strncpy(info.applicationInfo.engineName, "Direct3D 11", XR_MAX_ENGINE_NAME_SIZE - 1);
+    info.applicationInfo.apiVersion = XR_MAKE_VERSION(1, 0, 0);
+    info.enabledExtensionCount = static_cast<std::uint32_t>(extensions.size());
+    info.enabledExtensionNames = extensions.empty() ? nullptr : extensions.data();
+    depthxr::XrApiLayerNextInfo next{};
+    next.structType = depthxr::XR_LOADER_INTERFACE_STRUCT_API_LAYER_NEXT_INFO;
+    next.structVersion = depthxr::XR_API_LAYER_NEXT_INFO_STRUCT_VERSION;
+    next.structSize = sizeof(next);
+    std::strncpy(next.layerName, "XR_APILAYER_TEST_stand_in_runtime", XR_MAX_API_LAYER_NAME_SIZE - 1);
+    next.nextGetInstanceProcAddr = RtGetInstanceProcAddr;
+    next.nextCreateApiLayerInstance = RtCreateApiLayerInstance;
+    depthxr::XrApiLayerCreateInfo create{};
+    create.structType = depthxr::XR_LOADER_INTERFACE_STRUCT_API_LAYER_CREATE_INFO;
+    create.structVersion = depthxr::XR_API_LAYER_CREATE_INFO_STRUCT_VERSION;
+    create.structSize = sizeof(create);
+    create.nextInfo = &next;
+    instance = XR_NULL_HANDLE;
+    return xrCreateApiLayerInstance(&info, &create, &instance);
+}
+
+// The application's session create info: its Direct3D 11 binding first, a
+// structure of its own after it.
+struct SessionCreate {
+    XrBaseInStructure application_struct{kApplicationStructType};
+    XrGraphicsBindingD3D11KHR binding{XR_TYPE_GRAPHICS_BINDING_D3D11_KHR};
+    XrSessionCreateInfo info{XR_TYPE_SESSION_CREATE_INFO};
+    SessionCreate(ID3D11Device* device, XrSystemId system) {
+        binding.next = &application_struct;
+        binding.device = device;
+        info.next = &binding;
+        info.systemId = system;
+    }
+    SessionCreate(const SessionCreate&) = delete;
+    SessionCreate& operator=(const SessionCreate&) = delete;
+};
+
+struct App {
+    Api api;
+    XrSystemId system{XR_NULL_SYSTEM_ID};
+    XrSession session{XR_NULL_HANDLE};
+    XrSpace space{XR_NULL_HANDLE};
+};
+
+// A Direct3D 11 game's start: its instance, system and graphics requirements.
+App StartApp(const std::vector<const char*>& extensions = {kD3D11Extension}) {
+    XrInstance instance = XR_NULL_HANDLE;
+    const XrResult result = CreateInstance(extensions, instance);
+    Check(result == XR_SUCCESS && instance != XR_NULL_HANDLE,
+          "xrCreateInstance through the layer: " + std::to_string(result));
+    App app;
+    app.api = Load(instance);
+    XrSystemGetInfo get{XR_TYPE_SYSTEM_GET_INFO};
+    get.formFactor = XR_FORM_FACTOR_HEAD_MOUNTED_DISPLAY;
+    Check(app.api.get_system(instance, &get, &app.system) == XR_SUCCESS, "xrGetSystem");
+    XrGraphicsRequirementsD3D11KHR requirements{XR_TYPE_GRAPHICS_REQUIREMENTS_D3D11_KHR};
+    Check(app.api.d3d11_requirements(instance, app.system, &requirements) == XR_SUCCESS &&
+              SameLuid(requirements.adapterLuid, g_runtime.luid),
+          "xrGetD3D11GraphicsRequirementsKHR");
+    Check(Contains(Peer::Log(), "Loaded config from"), "the test's settings were loaded");
+    return app;
+}
+
+void BeginSession(App& app) {
+    XrReferenceSpaceCreateInfo space{XR_TYPE_REFERENCE_SPACE_CREATE_INFO};
+    space.referenceSpaceType = XR_REFERENCE_SPACE_TYPE_LOCAL;
+    space.poseInReferenceSpace.orientation.w = 1;
+    Check(app.api.create_space(app.session, &space, &app.space) == XR_SUCCESS, "xrCreateReferenceSpace");
+    XrEventDataBuffer event{XR_TYPE_EVENT_DATA_BUFFER};
+    Check(app.api.poll_event(app.api.instance, &event) == XR_EVENT_UNAVAILABLE, "xrPollEvent");
+    XrSessionBeginInfo begin{XR_TYPE_SESSION_BEGIN_INFO};
+    begin.primaryViewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
+    Check(app.api.begin_session(app.session, &begin) == XR_SUCCESS, "xrBeginSession");
+}
+
+// Its session (when it has one) and instance destroyed.
+void StopApp(App& app) {
+    if (app.space != XR_NULL_HANDLE) {
+        Check(app.api.destroy_space(app.space) == XR_SUCCESS, "xrDestroySpace");
+        app.space = XR_NULL_HANDLE;
+    }
+    if (app.session != XR_NULL_HANDLE) {
+        Check(app.api.destroy_session(app.session) == XR_SUCCESS, "xrDestroySession");
+        app.session = XR_NULL_HANDLE;
+    }
+    Check(app.api.destroy_instance(app.api.instance) == XR_SUCCESS, "xrDestroyInstance");
+    Check(Peer::Idle(), "nothing is left of the instance");
+}
+
+XrSwapchainCreateInfo ColorInfo(std::uint32_t samples = 1, std::uint32_t width = kWidth,
+                                std::uint32_t height = kHeight) {
+    XrSwapchainCreateInfo info{XR_TYPE_SWAPCHAIN_CREATE_INFO};
+    info.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_SAMPLED_BIT;
+    info.format = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
+    info.sampleCount = samples;
+    info.width = width;
+    info.height = height;
+    info.faceCount = 1;
+    info.arraySize = 1;
+    info.mipCount = 1;
+    return info;
+}
+
+XrSwapchainCreateInfo DepthInfo(std::uint32_t array_size) {
+    XrSwapchainCreateInfo info{XR_TYPE_SWAPCHAIN_CREATE_INFO};
+    info.usageFlags = XR_SWAPCHAIN_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
+    info.format = DXGI_FORMAT_D32_FLOAT;
+    info.sampleCount = 1;
+    info.width = kWidth;
+    info.height = kHeight;
+    info.faceCount = 1;
+    info.arraySize = array_size;
+    info.mipCount = 1;
+    return info;
+}
+
+// A swapchain the application renders into, with its images.
+struct Target {
+    XrSwapchain swapchain{XR_NULL_HANDLE};
+    std::vector<ID3D11Texture2D*> images;
+};
+
+std::vector<ID3D11Texture2D*> Images(App& app, XrSwapchain swapchain) {
+    std::uint32_t count = 0;
+    const XrResult result = app.api.enumerate_images(swapchain, 0, &count, nullptr);
+    Check(result == XR_SUCCESS && count == kImages,
+          "xrEnumerateSwapchainImages counts the images: " + std::to_string(count));
+    std::vector<XrSwapchainImageD3D11KHR> images(count, {XR_TYPE_SWAPCHAIN_IMAGE_D3D11_KHR});
+    Check(app.api.enumerate_images(swapchain, count, &count,
+                                   reinterpret_cast<XrSwapchainImageBaseHeader*>(images.data())) == XR_SUCCESS,
+          "xrEnumerateSwapchainImages");
+    std::vector<ID3D11Texture2D*> textures;
+    for (const XrSwapchainImageD3D11KHR& image : images) {
+        Check(image.texture != nullptr, "every image is a texture");
+        textures.push_back(image.texture);
+    }
+    return textures;
+}
+
+Target MakeTarget(App& app, const XrSwapchainCreateInfo& info, const std::string& what) {
+    Target target;
+    const XrResult result = app.api.create_swapchain(app.session, &info, &target.swapchain);
+    Check(result == XR_SUCCESS && target.swapchain != XR_NULL_HANDLE,
+          what + ": xrCreateSwapchain " + std::to_string(result));
+    target.images = Images(app, target.swapchain);
+    return target;
+}
+
+std::uint32_t Acquire(App& app, const Target& target) {
+    std::uint32_t index = 0;
+    XrSwapchainImageAcquireInfo acquire{XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};
+    Check(app.api.acquire(target.swapchain, &acquire, &index) == XR_SUCCESS && index < target.images.size(),
+          "xrAcquireSwapchainImage");
+    XrSwapchainImageWaitInfo wait{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};
+    wait.timeout = XR_INFINITE_DURATION;
+    Check(app.api.wait(target.swapchain, &wait) == XR_SUCCESS, "xrWaitSwapchainImage");
+    return index;
+}
+
+void Release(App& app, const Target& target) {
+    XrSwapchainImageReleaseInfo release{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
+    Check(app.api.release(target.swapchain, &release) == XR_SUCCESS, "xrReleaseSwapchainImage");
+}
+
+void Draw(Game& game, ID3D11Texture2D* image, const Color& color) {
+    D3D11_TEXTURE2D_DESC desc{};
+    image->GetDesc(&desc);
+    for (std::uint32_t slice = 0; slice < desc.ArraySize; ++slice) {
+        Clear(game, image, color, slice);
+    }
+}
+
+// An image rendered and released outside a frame.
+void Render(App& app, Game& game, const Target& target, const Color& color) {
+    Draw(game, target.images[Acquire(app, target)], color);
+    Release(app, target);
+}
+
+struct Eye {
+    const Target* target{nullptr};
+    std::uint32_t slice{0};
+};
+
+// One application frame: each colour target acquired, waited, cleared to its
+// colour and released, in the order given (with `depth`, cleared, when given);
+// then a stereo projection of `eyes`, each view chaining its slice of `depth`
+// (and a structure of the application's after it) when given. With `hold`,
+// Direct3D 11 waits for the gate from just before the LAST colour target's
+// release on (after the others' releases): that image alone is not written
+// yet, and nothing queued for the releases before it waits for the gate. The
+// stand-in opens the gate once it has seen its readback wait all the same.
+XrResult Frame(App& app, Game& game, const std::vector<const Target*>& targets, const std::vector<Color>& colors,
+               const std::array<Eye, 2>& eyes, const Target* depth = nullptr, Gate* hold = nullptr) {
+    XrFrameWaitInfo wait_info{XR_TYPE_FRAME_WAIT_INFO};
+    XrFrameState state{XR_TYPE_FRAME_STATE};
+    Check(app.api.wait_frame(app.session, &wait_info, &state) == XR_SUCCESS, "xrWaitFrame");
+    XrFrameBeginInfo begin_info{XR_TYPE_FRAME_BEGIN_INFO};
+    Check(app.api.begin_frame(app.session, &begin_info) == XR_SUCCESS, "xrBeginFrame");
+    XrViewLocateInfo locate{XR_TYPE_VIEW_LOCATE_INFO};
+    locate.viewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
+    locate.displayTime = state.predictedDisplayTime;
+    locate.space = app.space;
+    XrViewState view_state{XR_TYPE_VIEW_STATE};
+    std::array<XrView, 2> located{};
+    for (XrView& view : located) view.type = XR_TYPE_VIEW;
+    std::uint32_t located_count = 0;
+    Check(app.api.locate_views(app.session, &locate, &view_state, 2, &located_count, located.data()) == XR_SUCCESS &&
+              located_count == 2,
+          "xrLocateViews");
+
+    std::vector<std::uint32_t> indices;
+    for (const Target* target : targets) {
+        indices.push_back(Acquire(app, *target));
+    }
+    const std::uint32_t depth_index = depth ? Acquire(app, *depth) : 0;
+    for (std::size_t i = 0; i < targets.size(); ++i) {
+        Draw(game, targets[i]->images[indices[i]], colors[i]);
+    }
+    if (depth) {
+        ClearDepth(game, depth->images[depth_index], 0);
+        ClearDepth(game, depth->images[depth_index], 1);
+    }
+    for (std::size_t i = 0; i < targets.size(); ++i) {
+        if (hold && i + 1 == targets.size()) {
+            // A layer that let the runtime's queue wait only for what was
+            // queued before this release (not for its own copy) would show
+            // the frame without the gate.
+            hold->HoldGame(game);
+        }
+        Release(app, *targets[i]);
+    }
+    if (depth) {
+        Release(app, *depth);
+    }
+
+    XrBaseInStructure after_depth{kApplicationStructType};
+    std::array<XrCompositionLayerDepthInfoKHR, 2> depth_infos{};
+    std::array<XrCompositionLayerProjectionView, 2> views{};
+    for (std::uint32_t eye = 0; eye < 2; ++eye) {
+        views[eye] = {XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW};
+        views[eye].pose = located[eye].pose;
+        views[eye].fov = located[eye].fov;
+        views[eye].subImage.swapchain = eyes[eye].target->swapchain;
+        views[eye].subImage.imageRect = {{0, 0},
+                                         {static_cast<std::int32_t>(kWidth), static_cast<std::int32_t>(kHeight)}};
+        views[eye].subImage.imageArrayIndex = eyes[eye].slice;
+        if (depth) {
+            depth_infos[eye] = {XR_TYPE_COMPOSITION_LAYER_DEPTH_INFO_KHR};
+            depth_infos[eye].next = &after_depth;
+            depth_infos[eye].subImage.swapchain = depth->swapchain;
+            depth_infos[eye].subImage.imageRect = views[eye].subImage.imageRect;
+            depth_infos[eye].subImage.imageArrayIndex = eye;
+            depth_infos[eye].minDepth = 0.0f;
+            depth_infos[eye].maxDepth = 1.0f;
+            depth_infos[eye].nearZ = 0.05f;
+            depth_infos[eye].farZ = 1000.0f;
+            views[eye].next = &depth_infos[eye];
+        }
+    }
+    XrCompositionLayerProjection projection{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
+    projection.space = app.space;
+    projection.viewCount = 2;
+    projection.views = views.data();
+    const XrCompositionLayerBaseHeader* layers[] = {reinterpret_cast<const XrCompositionLayerBaseHeader*>(&projection)};
+    XrFrameEndInfo end{XR_TYPE_FRAME_END_INFO};
+    end.displayTime = state.predictedDisplayTime;
+    end.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
+    end.layerCount = 1;
+    end.layers = layers;
+    g_runtime.hold = hold;
+    const XrResult result = app.api.end_frame(app.session, &end);
+    if (g_runtime.hold) {
+        // The stand-in never read the frame back: let the game run on.
+        g_runtime.hold->Open();
+        g_runtime.hold = nullptr;
+        Check(!hold || result != XR_SUCCESS, "the runtime read back a frame the game was held back for");
+    }
+    return result;
+}
+
+// --- The cases --------------------------------------------------------------
+
+// The test's own reference to the Direct3D 12 device on the game's adapter,
+// from the start of each case to its end. Direct3D 12 makes one device per
+// adapter in a process, so the bridge's device (the session's) is this one,
+// and what its debug layer reported is still there to check once the case's
+// teardown has let everything of the layer's go.
+ComPtr<ID3D12Device> g_device12;
+std::string g_case; // begun, and its debug layers not yet checked
+
+ComPtr<ID3D12Device> MakeDevice12(const Game& game) {
+    ComPtr<IDXGIFactory4> factory;
+    ComPtr<IDXGIAdapter1> adapter;
+    ComPtr<ID3D12Device> device;
+    if (FAILED(CreateDXGIFactory1(IID_PPV_ARGS(&factory))) ||
+        FAILED(factory->EnumAdapterByLuid(game.luid, IID_PPV_ARGS(&adapter))) ||
+        FAILED(D3D12CreateDevice(adapter.Get(), D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&device)))) {
+        return nullptr;
+    }
+    ComPtr<ID3D12InfoQueue> queue;
+    if (SUCCEEDED(device.As(&queue))) {
+        StoreErrorsOnly(queue.Get());
+    }
+    return device;
+}
+
+bool SameObject(IUnknown* a, IUnknown* b) {
+    ComPtr<IUnknown> identity_a;
+    ComPtr<IUnknown> identity_b;
+    return a && b && SUCCEEDED(a->QueryInterface(IID_PPV_ARGS(&identity_a))) &&
+           SUCCEEDED(b->QueryInterface(IID_PPV_ARGS(&identity_b))) && identity_a.Get() == identity_b.Get();
+}
+
+// Neither debug layer reported an error since the last check.
+void CheckValidation(Game& game, const std::string& when) {
+    const std::string errors =
+        ValidationMessages(g_device12 ? g_device12.Get() : g_runtime.device12.Get(), game).All();
+    Check(errors.empty(), g_case + " (" + when + "): the debug layers reported\n" + errors);
+}
+
+// A fresh stand-in runtime, a log of the case's own, and the test's settings.
+// Every case ends with EndCase.
+void BeginCase(const std::string& name, const Game& game, bool framegen = true, bool debug_log = false) {
+    Check(g_case.empty(), name + ": the case before it (" + g_case + ") ended with its debug layers checked");
+    Check(Peer::Idle(), name + ": nothing is left of the cases before it");
+    g_case = name;
+    g_device12 = MakeDevice12(game);
+    g_runtime = StandIn{};
+    g_runtime.luid = game.luid;
+    g_framegen_chain = {};
+    SetEnv("VECTORXR_LOG_PATH", (g_root / "logs" / name / "vectorxr.log").string());
+    std::ofstream settings(g_root / "settings.json", std::ios::trunc);
+    settings << R"({"version": 3, "core": {"enabled": true, "logLevel": ")" << (debug_log ? "debug" : "info")
+             << R"(", "trackSeenApps": false}, "applications": [], "modules": {"depthxr": {"enabled": false}, )"
+             << R"("pivotxr": {"enabled": false}, "quadviews": {"enabled": false}, "turbo": {"enabled": false}, )"
+             << R"("framegen": {"enabled": )" << (framegen ? "true" : "false") << "}}}\n";
+}
+
+// After the case's teardown: neither debug layer reported an error during the
+// case. `device_removed`: the case removed the Direct3D 12 device, and what
+// its debug layer reported since the last check is the removal's.
+void EndCase(Game& game, bool device_removed = false) {
+    Check(Peer::Idle(), g_case + ": nothing is left of the case");
+    const Validation validation = ValidationMessages(g_device12 ? g_device12.Get() : nullptr, game);
+    const std::string errors = device_removed ? validation.d3d11 : validation.All();
+    Check(errors.empty(), g_case + " (after its teardown): the debug layers reported\n" + errors);
+    g_device12.Reset();
+    g_case.clear();
+}
+
+const XrGraphicsBindingD3D12KHR* BridgeBinding() {
+    return static_cast<const XrGraphicsBindingD3D12KHR*>(Peer::Bridge().Binding());
+}
+
+// 1. A Direct3D 11 game's session with Frame Generation: the runtime gets a
+// Direct3D 12 session on the game's adapter, with the queue substitution's
+// queue, never the bridge's. False when the bridge cannot share images here.
+bool CheckRouting(Game& game, SessionCreate& create) {
+    const std::string log = Peer::Log();
+    if (g_runtime.binding == XR_TYPE_GRAPHICS_BINDING_D3D11_KHR && Contains(log, "shares no typeless images")) {
+        std::cout << "skipped: the driver shares no typeless images between Direct3D 11 and 12\n";
+        return false;
+    }
+    const XrGraphicsBindingD3D12KHR* bridge = BridgeBinding();
+    Check(bridge && Peer::Bridge().Active(), "the session is bridged");
+    Check(g_runtime.binding == XR_TYPE_GRAPHICS_BINDING_D3D12_KHR,
+          "the runtime gets a Direct3D 12 binding first: " + std::to_string(g_runtime.binding));
+    Check(SameLuid(g_runtime.device12->GetAdapterLuid(), game.luid), "the session's device is on the game's adapter");
+    Check(g_runtime.device12.Get() == bridge->device, "the session's device is the bridge's");
+    Check(!g_device12 || SameObject(g_device12.Get(), bridge->device),
+          "the bridge's device is the one the test holds for its debug-layer checks");
+    Check(g_runtime.queue.Get() != bridge->queue, "the runtime is never given the bridge's queue");
+    const D3D12_COMMAND_QUEUE_DESC queue = g_runtime.queue->GetDesc();
+    Check(queue.Type == D3D12_COMMAND_LIST_TYPE_DIRECT && queue.Priority == D3D12_COMMAND_QUEUE_PRIORITY_HIGH &&
+              Peer::QueueSubstituted(),
+          "the runtime's queue is the substitution's high-priority direct queue");
+    const std::ptrdiff_t requirements = g_runtime.Position("xrGetD3D12GraphicsRequirementsKHR");
+    const std::ptrdiff_t session = g_runtime.Position("xrCreateSession:D3D12");
+    Check(requirements >= 0 && requirements < session,
+          "the Direct3D 12 requirements are asked for before the session is made");
+    Check(g_runtime.binding_next == &create.application_struct,
+          "the application's other structures follow the binding");
+    // Frame Generation: made from the bridge's binding (capturing on its
+    // queue, the game's), writing on the runtime's queue.
+    Check(Peer::FrameGenOwnsPacing(), "Frame Generation runs the bridged session");
+    Check(g_framegen_chain.first == depthxr::kFrameGenRuntimeQueueType &&
+              g_framegen_chain.queue == g_runtime.queue.Get() && g_framegen_chain.next == bridge,
+          "Frame Generation is made from the bridge's binding, with the runtime's queue");
+    Check(Contains(log, "Direct3D 11 bridge: XR_KHR_D3D12_enable added to the instance's extensions.") &&
+              Contains(log, "Frame Generation gives the runtime a Direct3D 12 queue of its own"),
+          "the log tells the session's bridge and queue");
+    Check(Count(log, std::string("Frame Generation's Direct3D 11 bridge: ") + kBridgedSessionLine) == 1,
+          "the log tells once that the session is bridged");
+    return true;
+}
+
+// 2. Swapchains on a bridged session.
+void CheckSwapchains(App& app, Game& game) {
+    // A multisampled one: the runtime's are single-sampled copy destinations.
+    std::size_t requests = g_runtime.swapchain_requests.size();
+    XrSwapchain msaa = XR_NULL_HANDLE;
+    const XrSwapchainCreateInfo msaa_info = ColorInfo(4);
+    Check(app.api.create_swapchain(app.session, &msaa_info, &msaa) == XR_SUCCESS, "a multisampled swapchain");
+    Check(g_runtime.swapchain_requests.size() == requests + 1, "one runtime swapchain for it");
+    const XrSwapchainCreateInfo& asked = g_runtime.swapchain_requests.back();
+    Check((asked.usageFlags & XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT) &&
+              (asked.usageFlags & XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT) && asked.sampleCount == 1 &&
+              asked.width == kWidth && asked.height == kHeight && asked.format == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB,
+          "the runtime's swapchain is a single-sampled colour attachment and copy destination");
+    // The two-call idiom, on the bridge's images.
+    std::uint32_t count = 0;
+    Check(app.api.enumerate_images(msaa, 0, &count, nullptr) == XR_SUCCESS && count == kImages, "the images counted");
+    std::vector<XrSwapchainImageD3D11KHR> short_array(kImages - 1, {XR_TYPE_SWAPCHAIN_IMAGE_D3D11_KHR});
+    count = 0;
+    Check(app.api.enumerate_images(msaa, kImages - 1, &count,
+                                   reinterpret_cast<XrSwapchainImageBaseHeader*>(short_array.data())) ==
+                  XR_ERROR_SIZE_INSUFFICIENT &&
+              count == kImages,
+          "too short an array is refused, with the count");
+    std::vector<XrSwapchainImageD3D12KHR> d3d12_array(kImages, {XR_TYPE_SWAPCHAIN_IMAGE_D3D12_KHR});
+    Check(app.api.enumerate_images(msaa, kImages, &count,
+                                   reinterpret_cast<XrSwapchainImageBaseHeader*>(d3d12_array.data())) ==
+              XR_ERROR_VALIDATION_FAILURE,
+          "Direct3D 12 images are refused: the application's are Direct3D 11");
+    Target msaa_target{msaa, Images(app, msaa)};
+    const StandInSwapchain* runtime = FindSwapchain(msaa);
+    Check(runtime && runtime->images12.size() == kImages, "the runtime made Direct3D 12 images");
+    for (ID3D11Texture2D* image : msaa_target.images) {
+        for (const ComPtr<ID3D12Resource>& runtime_image : runtime->images12) {
+            Check(static_cast<void*>(image) != static_cast<void*>(runtime_image.Get()),
+                  "the application's images are not the runtime's");
+        }
+        ComPtr<ID3D11Device> device;
+        image->GetDevice(&device);
+        D3D11_TEXTURE2D_DESC desc{};
+        image->GetDesc(&desc);
+        Check(device.Get() == game.device.Get() && desc.SampleDesc.Count == 4 && desc.Width == kWidth,
+              "the application renders four samples on its own device");
+    }
+    // Its frame reaches the runtime resolved.
+    const Color color{90, 180, 30, 255};
+    Check(Frame(app, game, {&msaa_target}, {color}, {{{&msaa_target, 0}, {&msaa_target, 0}}}) == XR_SUCCESS,
+          "a frame of the multisampled swapchain");
+    for (const ShownView& view : g_runtime.frames.back().views) {
+        Check(Near(view.texel, color),
+              "the resolved frame reaches the runtime: " + (view.texel ? Text(*view.texel) : "none"));
+    }
+    Check(app.api.destroy_swapchain(msaa) == XR_SUCCESS && g_runtime.destroyed.back() == msaa,
+          "the multisampled swapchain is destroyed");
+
+    // A runtime refusing the copy usage is asked again without it.
+    g_runtime.refuse_transfer_dst = true;
+    requests = g_runtime.swapchain_requests.size();
+    XrSwapchain plain = XR_NULL_HANDLE;
+    const XrSwapchainCreateInfo plain_info = ColorInfo();
+    Check(app.api.create_swapchain(app.session, &plain_info, &plain) == XR_SUCCESS && plain != XR_NULL_HANDLE,
+          "a swapchain the runtime makes without the copy usage");
+    Check(g_runtime.swapchain_requests.size() == requests + 2 &&
+              (g_runtime.swapchain_requests[requests].usageFlags & XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT) &&
+              !(g_runtime.swapchain_requests[requests + 1].usageFlags & XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT) &&
+              (g_runtime.swapchain_requests[requests + 1].usageFlags & XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT),
+          "the second request drops TRANSFER_DST only");
+    Check(Peer::Bridge().Bridged(plain), "it is bridged all the same");
+    Check(Contains(Peer::Log(), "Runtime rejected the bridge's copy usage"), "the retry is logged");
+    Check(app.api.destroy_swapchain(plain) == XR_SUCCESS, "it is destroyed");
+    g_runtime.refuse_transfer_dst = false;
+
+    // Runtime images that do not match are refused, and the runtime's swapchain goes.
+    g_runtime.width_error = 2;
+    XrSwapchain mismatched = XR_NULL_HANDLE;
+    const XrResult result = app.api.create_swapchain(app.session, &plain_info, &mismatched);
+    g_runtime.width_error = 0;
+    Check(result == XR_ERROR_RUNTIME_FAILURE && mismatched == XR_NULL_HANDLE,
+          "images the bridge cannot share fail the swapchain: " + std::to_string(result));
+    Check(!g_runtime.created.empty() && g_runtime.destroyed.back() == g_runtime.created.back(),
+          "the runtime's swapchain is destroyed again");
+    const std::string log = Peer::Log();
+    Check(Contains(log, "refuses a swapchain it cannot share") && Contains(log, "does not match"),
+          "the refusal is logged with the reason");
+}
+
+// 3. Frames: what the runtime shows on its queue is what the game rendered
+// that frame, the runtime's queue ordered after the bridge's copies (through
+// the queue substitution). In two frames the game is held back from just
+// before the last eye's release (the right eye's, then the left's) until the
+// runtime's readback is seen waiting for it: the runtime's queue must wait
+// for that eye's own copy, not only for what was queued before its release.
+void CheckFrames(App& app, Game& game, Target& left, Target& right) {
+    for (const Target* target : {&left, &right}) {
+        const StandInSwapchain* runtime = FindSwapchain(target->swapchain);
+        Check(runtime != nullptr, "the runtime made the eye's swapchain");
+        for (ID3D11Texture2D* image : target->images) {
+            D3D11_TEXTURE2D_DESC desc{};
+            image->GetDesc(&desc);
+            Check(desc.Format == DXGI_FORMAT_R8G8B8A8_TYPELESS && desc.SampleDesc.Count == 1 &&
+                      (desc.BindFlags & D3D11_BIND_RENDER_TARGET),
+                  "an eye's images are typeless twins the game renders into");
+            for (const ComPtr<ID3D12Resource>& runtime_image : runtime->images12) {
+                Check(static_cast<void*>(image) != static_cast<void*>(runtime_image.Get()),
+                      "the application's images are not the runtime's");
+            }
+        }
+    }
+    constexpr int kFrames = 10;
+    for (int frame = 0; frame < kFrames; ++frame) {
+        const std::vector<Color> colors{FrameColor(frame, 0), FrameColor(frame, 1)};
+        std::optional<Gate> gate;
+        if (frame == 2 || frame == 6) {
+            gate.emplace(g_runtime.device12.Get(), game);
+        }
+        // Frame 6 releases the right eye first: the left is the one held.
+        const bool right_first = frame == 6;
+        const int held_eye = right_first ? 0 : 1;
+        const std::vector<const Target*> order =
+            right_first ? std::vector<const Target*>{&right, &left} : std::vector<const Target*>{&left, &right};
+        const std::vector<Color> order_colors = right_first ? std::vector<Color>{colors[1], colors[0]} : colors;
+        const XrResult result =
+            Frame(app, game, order, order_colors, {{{&left, 0}, {&right, 0}}}, nullptr, gate ? &*gate : nullptr);
+        Check(result == XR_SUCCESS, "frame " + std::to_string(frame) + ": xrEndFrame " + std::to_string(result));
+        const ShownFrame& shown = g_runtime.frames.back();
+        Check(shown.views.size() == 2, "frame " + std::to_string(frame) + ": two views");
+        if (gate) {
+            // First, as what decides it (the texels below may race a copy
+            // the runtime's queue does not wait for): the readback was still
+            // pending while the eye released last was held back...
+            Check(shown.held, "frame " + std::to_string(frame) + ": the runtime's readback still waits for eye " +
+                                  std::to_string(held_eye) + ", released last and held back");
+            Check(shown.unordered.size() == 2 && !Near(shown.unordered[held_eye], colors[held_eye]),
+                  "frame " + std::to_string(frame) + ": read on a queue ordered after nothing meanwhile, eye " +
+                      std::to_string(held_eye) + "'s image does not hold the frame yet");
+        }
+        // ...and, once the gate opened, it read what the game rendered.
+        for (int eye = 0; eye < 2; ++eye) {
+            const ShownView& view = shown.views[eye];
+            Check(view.swapchain == (eye ? right : left).swapchain && !view.depth,
+                  "frame " + std::to_string(frame) + ": the eye's view as submitted");
+            Check(Near(view.texel, colors[eye]),
+                  "frame " + std::to_string(frame) + " eye " + std::to_string(eye) + ": the runtime shows " +
+                      (view.texel ? Text(*view.texel) : "nothing") + ", rendered " + Text(colors[eye]));
+        }
+    }
+    for (const Target* target : {&left, &right}) {
+        const std::string describe = Peer::Bridge().Describe(target->swapchain);
+        Check(Contains(describe, "copies=" + std::to_string(kFrames)) && Contains(describe, "skippedCopies=0"),
+              "a copy per frame: " + describe);
+    }
+}
+
+// 4. Depth on a bridged session stays the game's: its swapchain's calls reach
+// the runtime, its depth never reaches submitted frames.
+void CheckDepth(App& app, Game& game, Target& left, Target& right, Target& depth) {
+    Check(Peer::Bridge().Bridged(depth.swapchain) && Peer::Bridge().Unmirrored(depth.swapchain),
+          "the depth swapchain is the game's own");
+    for (ID3D11Texture2D* image : depth.images) {
+        D3D11_TEXTURE2D_DESC desc{};
+        image->GetDesc(&desc);
+        Check((desc.BindFlags & D3D11_BIND_DEPTH_STENCIL) && desc.ArraySize == 2 &&
+                  desc.Format == DXGI_FORMAT_R32_TYPELESS,
+              "the game gets typeless depth images");
+    }
+    constexpr int kFrames = 8;
+    for (int frame = 0; frame < kFrames; ++frame) {
+        const std::vector<Color> colors{FrameColor(frame + 10, 0), FrameColor(frame + 10, 1)};
+        const XrResult result = Frame(app, game, {&left, &right}, colors, {{{&left, 0}, {&right, 0}}}, &depth);
+        Check(result == XR_SUCCESS, "depth frame " + std::to_string(frame) + ": xrEndFrame " + std::to_string(result));
+        const ShownFrame& shown = g_runtime.frames.back();
+        Check(shown.views.size() == 2, "depth frame: two views");
+        for (int eye = 0; eye < 2; ++eye) {
+            const ShownView& view = shown.views[eye];
+            Check(!view.depth, "the runtime gets no depth in a bridged session's views");
+            Check(view.next_type == kApplicationStructType,
+                  "the rest of a view's chain reaches the runtime: " + std::to_string(view.next_type));
+            Check(Near(view.texel, colors[eye]),
+                  "depth frame " + std::to_string(frame) + " eye " + std::to_string(eye) + ": the runtime shows " +
+                      (view.texel ? Text(*view.texel) : "nothing") + ", rendered " + Text(colors[eye]));
+        }
+    }
+    const StandInSwapchain* runtime = FindSwapchain(depth.swapchain);
+    Check(runtime && runtime->acquires == kFrames && runtime->waits == kFrames && runtime->releases == kFrames,
+          "the depth swapchain's acquires, waits and releases reach the runtime");
+    Check(Contains(Peer::Log(), "keeps the game's depth to itself"), "the log tells depth is left out");
+    Check(Contains(Peer::Bridge().Describe(left.swapchain), "copies=" + std::to_string(10 + kFrames)),
+          "colour is still copied: " + Peer::Bridge().Describe(left.swapchain));
+}
+
+// 5. Teardown: the runtime frees nothing the bridge's queue still writes.
+void CheckTeardown(App& app, Game& game, Target& left, Target& right) {
+    ID3D12Device* device = g_runtime.device12.Get();
+    ID3D12CommandQueue* bridge_queue = BridgeBinding()->queue;
+    {
+        // The left eye's last copy waits behind a gate the layer's wait outlasts.
+        Gate gate(device, game);
+        gate.HoldQueue(bridge_queue);
+        Render(app, game, left, {1, 2, 3, 255});
+        bool destroyed = false;
+        std::string summary;
+        g_runtime.on_destroy_swapchain = [&](XrSwapchain swapchain) {
+            if (swapchain == left.swapchain) {
+                destroyed = true;
+                summary = Peer::Bridge().Summary();
+            }
+        };
+        std::thread opener = gate.OpenLater(300);
+        const XrResult result = app.api.destroy_swapchain(left.swapchain);
+        opener.join();
+        g_runtime.on_destroy_swapchain = nullptr;
+        Check(result == XR_SUCCESS && destroyed, "the runtime's swapchain is destroyed with the application's");
+        Check(SummaryValue(summary, "doneCompleted") == SummaryValue(summary, "doneValue"),
+              "the bridge's copies were done when the runtime destroyed its swapchain: " + summary);
+        Check(!Peer::Bridge().Bridged(left.swapchain), "the bridge let the swapchain go");
+    }
+
+    Check(app.api.destroy_space(app.space) == XR_SUCCESS, "xrDestroySpace");
+    app.space = XR_NULL_HANDLE;
+    Check(app.api.end_session(app.session) == XR_SUCCESS, "xrEndSession");
+    // The right eye (and depth) are left to the session; its last copy waits
+    // behind a gate, and a marker after everything on the bridge's queue.
+    Gate gate(device, game);
+    gate.HoldQueue(bridge_queue);
+    Render(app, game, right, {4, 5, 6, 255});
+    ComPtr<ID3D12Fence> marker;
+    Check(SUCCEEDED(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&marker))), "a marker fence");
+    bridge_queue->Signal(marker.Get(), 1);
+    bool marker_done = false;
+    bool idle = false;
+    std::string summary;
+    g_runtime.on_destroy_session = [&] {
+        marker_done = marker->GetCompletedValue() >= 1;
+        summary = Peer::Bridge().Summary();
+        // A signal queued now on the idle queue runs at once (polled briefly:
+        // even an idle queue takes a moment to run it). The gate would hold
+        // a queue the layer had not waited for far longer.
+        for (int poll = 0; poll < 50 && !idle; ++poll) {
+            idle = Peer::Bridge().WaitIdle(poll ? 1 : 0);
+        }
+    };
+    std::thread opener = gate.OpenLater(300);
+    const XrResult result = app.api.destroy_session(app.session);
+    opener.join();
+    app.session = XR_NULL_HANDLE;
+    Check(result == XR_SUCCESS && g_runtime.Position("xrDestroySession") >= 0, "xrDestroySession");
+    Check(marker_done, "the bridge's queue had run everything queued on it when the runtime destroyed the session");
+    Check(SummaryValue(summary, "doneCompleted") == SummaryValue(summary, "doneValue"),
+          "the bridge's copies were done when the runtime destroyed the session: " + summary);
+    Check(idle, "the bridge's queue was idle when the runtime destroyed the session");
+    Check(!Peer::Bridge().Active() && !Peer::QueueSubstituted(),
+          "the bridge and the substitution end with the session");
+    const std::string log = Peer::Log();
+    Check(Contains(log, "Frame Generation's Direct3D 11 bridge at session end: "), "the bridge's summary is logged");
+    Check(!Contains(log, "did not finish") && !Contains(log, "kept until its session ends") &&
+              !Contains(log, "[error] Direct3D 11 bridge:") && !Contains(log, "refused a held-back"),
+          "nothing was stalled, skipped or refused");
+    Check(Count(log, kBridgedSessionLine) == 1, "the session's bridge was logged once, for the whole session");
+    Check(app.api.destroy_instance(app.api.instance) == XR_SUCCESS && g_runtime.Position("xrDestroyInstance") >= 0,
+          "xrDestroyInstance");
+    Check(Peer::Idle(), "nothing is left of the instance");
+    Check(GameRuns(game), "the game's device works after teardown");
+}
+
+// Cases 1 to 5, in one session. False when this machine cannot bridge.
+bool TestBridgedSession(Game& game) {
+    BeginCase("bridged-session", game);
+    App app = StartApp();
+    Check(g_runtime.instance_attempts.size() == 1 &&
+              g_runtime.instance_attempts[0] == std::vector<std::string>{kD3D11Extension, kD3D12Extension},
+          "the instance gets XR_KHR_D3D12_enable");
+    SessionCreate create(game.device.Get(), app.system);
+    Check(app.api.create_session(app.api.instance, &create.info, &app.session) == XR_SUCCESS, "xrCreateSession");
+    if (!CheckRouting(game, create)) {
+        StopApp(app);
+        EndCase(game);
+        return false;
+    }
+    BeginSession(app);
+    CheckSwapchains(app, game);
+    Target left = MakeTarget(app, ColorInfo(), "the left eye");
+    Target right = MakeTarget(app, ColorInfo(), "the right eye");
+    CheckFrames(app, game, left, right);
+    Target depth = MakeTarget(app, DepthInfo(2), "depth");
+    CheckDepth(app, game, left, right, depth);
+    CheckValidation(game, "cases 1 to 4");
+    CheckTeardown(app, game, left, right);
+    EndCase(game);
+    return true;
+}
+
+// 1a. VECTORXR_FRAMEGEN_QUEUE=game: the runtime would get the bridge's queue,
+// so the session stays Direct3D 11, asking for its requirements again.
+void TestKeepGameQueue(Game& game) {
+    BeginCase("game-queue", game);
+    SetEnv("VECTORXR_FRAMEGEN_QUEUE", "game");
+    App app = StartApp();
+    SessionCreate create(game.device.Get(), app.system);
+    Check(app.api.create_session(app.api.instance, &create.info, &app.session) == XR_SUCCESS, "xrCreateSession");
+    Check(g_runtime.binding == XR_TYPE_GRAPHICS_BINDING_D3D11_KHR && g_runtime.device11.Get() == game.device.Get() &&
+              g_runtime.binding_next == &create.application_struct,
+          "the runtime gets the application's Direct3D 11 binding");
+    const std::ptrdiff_t d3d12 = g_runtime.Position("xrGetD3D12GraphicsRequirementsKHR");
+    const std::ptrdiff_t d3d11 = g_runtime.Position("xrGetD3D11GraphicsRequirementsKHR", d3d12 + 1);
+    const std::ptrdiff_t session = g_runtime.Position("xrCreateSession:D3D11");
+    Check(d3d12 >= 0 && d3d11 > d3d12 && session > d3d11 && g_runtime.Position("xrCreateSession:D3D12") < 0,
+          "the Direct3D 11 requirements are asked for again after the Direct3D 12 ones, before the session");
+    Check(!Peer::Bridge().Active() && !Peer::QueueSubstituted(), "no bridge, no substitution");
+    const std::string log = Peer::Log();
+    Check(Contains(log, "the runtime would be given the bridge's queue"), "the log tells why");
+    Check(!Contains(log, kBridgedSessionLine), "the log does not tell of a bridged session");
+    StopApp(app);
+    SetEnv("VECTORXR_FRAMEGEN_QUEUE", "");
+    EndCase(game);
+}
+
+// 1c. VECTORXR_D3D11_BRIDGE=off: the session is the game's Direct3D 11 one,
+// with Frame Generation on it, and the log tells why.
+void TestBridgeOffSession(Game& game) {
+    BeginCase("session-bridge-off", game);
+    SetEnv("VECTORXR_D3D11_BRIDGE", "off");
+    App app = StartApp();
+    Check(g_runtime.instance_attempts.size() == 1 &&
+              g_runtime.instance_attempts[0] == std::vector<std::string>{kD3D11Extension},
+          "the instance gets no XR_KHR_D3D12_enable: " + Text(g_runtime.instance_attempts));
+    SessionCreate create(game.device.Get(), app.system);
+    Check(app.api.create_session(app.api.instance, &create.info, &app.session) == XR_SUCCESS, "xrCreateSession");
+    Check(g_runtime.binding == XR_TYPE_GRAPHICS_BINDING_D3D11_KHR && g_runtime.device11.Get() == game.device.Get() &&
+              g_runtime.binding_next == &create.application_struct &&
+              g_runtime.Position("xrGetD3D12GraphicsRequirementsKHR") < 0 &&
+              g_runtime.Position("xrCreateSession:D3D12") < 0,
+          "the runtime gets the application's Direct3D 11 binding, and nothing of Direct3D 12");
+    Check(!Peer::Bridge().Active(), "no bridge");
+    Check(g_framegen_chain.first == XR_TYPE_GRAPHICS_BINDING_D3D11_KHR, "Frame Generation runs on Direct3D 11");
+    const std::string log = Peer::Log();
+    Check(Count(log, "Frame Generation keeps this Direct3D 11 session as it is: VECTORXR_D3D11_BRIDGE=off.") == 1,
+          "the log tells why, once");
+    Check(!Contains(log, kBridgedSessionLine), "the log does not tell of a bridged session");
+    BeginSession(app);
+    Target left = MakeTarget(app, ColorInfo(), "the left eye");
+    Target right = MakeTarget(app, ColorInfo(), "the right eye");
+    const std::vector<Color> colors{FrameColor(4, 0), FrameColor(4, 1)};
+    Check(Frame(app, game, {&left, &right}, colors, {{{&left, 0}, {&right, 0}}}) == XR_SUCCESS,
+          "a Direct3D 11 frame");
+    for (int eye = 0; eye < 2; ++eye) {
+        const ShownView& view = g_runtime.frames.back().views[eye];
+        Check(Near(view.texel, colors[eye]), "the Direct3D 11 runtime shows " +
+                                                 (view.texel ? Text(*view.texel) : "nothing") + ", rendered " +
+                                                 Text(colors[eye]));
+    }
+    Check(app.api.destroy_swapchain(left.swapchain) == XR_SUCCESS &&
+              app.api.destroy_swapchain(right.swapchain) == XR_SUCCESS,
+          "the swapchains are destroyed");
+    StopApp(app);
+    SetEnv("VECTORXR_D3D11_BRIDGE", "");
+    Check(GameRuns(game), "the game's device works");
+    EndCase(game);
+}
+
+// 1b. A runtime refusing the Direct3D 12 session gets the game's Direct3D 11
+// one, which works as it would without the bridge.
+void TestRefusedD3D12Session(Game& game) {
+    BeginCase("refused-d3d12-session", game);
+    g_runtime.refuse_d3d12_session = true;
+    App app = StartApp();
+    SessionCreate create(game.device.Get(), app.system);
+    Check(app.api.create_session(app.api.instance, &create.info, &app.session) == XR_SUCCESS,
+          "xrCreateSession succeeds with Direct3D 11");
+    const std::ptrdiff_t d3d12 = g_runtime.Position("xrGetD3D12GraphicsRequirementsKHR");
+    const std::ptrdiff_t refused = g_runtime.Position("xrCreateSession:D3D12");
+    const std::ptrdiff_t d3d11 = g_runtime.Position("xrGetD3D11GraphicsRequirementsKHR", refused + 1);
+    const std::ptrdiff_t session = g_runtime.Position("xrCreateSession:D3D11");
+    Check(d3d12 >= 0 && refused > d3d12 && d3d11 > refused && session > d3d11,
+          "the Direct3D 11 requirements are asked for again before the retry");
+    Check(g_runtime.binding == XR_TYPE_GRAPHICS_BINDING_D3D11_KHR &&
+              g_runtime.binding_next == &create.application_struct,
+          "the retry has the application's own binding");
+    Check(!Peer::Bridge().Active() && !Peer::QueueSubstituted(), "no bridge, no substitution");
+    Check(g_framegen_chain.first == XR_TYPE_GRAPHICS_BINDING_D3D11_KHR, "Frame Generation runs on Direct3D 11");
+    const std::string log = Peer::Log();
+    Check(Contains(log, "xrCreateSession refused the bridged Direct3D 12 session"), "the retry is logged");
+    Check(!Contains(log, kBridgedSessionLine), "the log does not tell of a bridged session");
+    BeginSession(app);
+    Target left = MakeTarget(app, ColorInfo(), "the left eye");
+    Target right = MakeTarget(app, ColorInfo(), "the right eye");
+    for (const Target* target : {&left, &right}) {
+        const StandInSwapchain* runtime = FindSwapchain(target->swapchain);
+        Check(runtime && runtime->images11.size() == kImages, "the runtime made Direct3D 11 images");
+        for (std::size_t i = 0; i < kImages; ++i) {
+            Check(target->images[i] == runtime->images11[i].Get(), "the application renders into the runtime's images");
+        }
+    }
+    for (int frame = 0; frame < 3; ++frame) {
+        const std::vector<Color> colors{FrameColor(frame, 0), FrameColor(frame, 1)};
+        Check(Frame(app, game, {&left, &right}, colors, {{{&left, 0}, {&right, 0}}}) == XR_SUCCESS,
+              "a Direct3D 11 frame");
+        for (int eye = 0; eye < 2; ++eye) {
+            const ShownView& view = g_runtime.frames.back().views[eye];
+            Check(Near(view.texel, colors[eye]), "the Direct3D 11 runtime shows " +
+                                                     (view.texel ? Text(*view.texel) : "nothing") + ", rendered " +
+                                                     Text(colors[eye]));
+        }
+    }
+    Check(app.api.destroy_swapchain(left.swapchain) == XR_SUCCESS &&
+              app.api.destroy_swapchain(right.swapchain) == XR_SUCCESS,
+          "the swapchains are destroyed");
+    StopApp(app);
+    Check(GameRuns(game), "the game's device works");
+    EndCase(game);
+}
+
+// One instance of an application asking for `extensions`: the result and the
+// extensions the runtime was asked for, attempt by attempt. A created
+// instance is destroyed again.
+XrResult InstanceAttempts(const std::vector<const char*>& extensions, std::vector<std::vector<std::string>>& attempts,
+                          std::string& log) {
+    XrInstance instance = XR_NULL_HANDLE;
+    const XrResult result = CreateInstance(extensions, instance);
+    attempts = g_runtime.instance_attempts;
+    log = Peer::Log();
+    if (XR_SUCCEEDED(result)) {
+        Check(LayerFunction<PFN_xrDestroyInstance>(instance, "xrDestroyInstance")(instance) == XR_SUCCESS,
+              "xrDestroyInstance");
+    }
+    Check(Peer::Idle(), "nothing is left of the instance");
+    return result;
+}
+
+// 6. XR_KHR_D3D12_enable at xrCreateInstance.
+void TestInstanceExtensions(Game& game) {
+    using Names = std::vector<std::string>;
+    std::vector<Names> attempts;
+    std::string log;
+    const std::string added = "XR_KHR_D3D12_enable added to the instance's extensions";
+
+    BeginCase("instance-offered", game);
+    g_runtime.extensions = {"XR_KHR_composition_layer_depth", kD3D11Extension, kD3D12Extension};
+    XrResult result = InstanceAttempts({kD3D11Extension}, attempts, log);
+    Check(result == XR_SUCCESS && attempts.size() == 1 && attempts[0] == Names{kD3D11Extension, kD3D12Extension} &&
+              Contains(log, added + "."),
+          "added when the runtime offers it: " + Text(attempts));
+    EndCase(game);
+
+    BeginCase("instance-not-offered", game);
+    g_runtime.extensions = {kD3D11Extension, "XR_KHR_composition_layer_depth"};
+    result = InstanceAttempts({kD3D11Extension}, attempts, log);
+    Check(result == XR_SUCCESS && attempts.size() == 1 && attempts[0] == Names{kD3D11Extension} &&
+              !Contains(log, added) && Contains(log, "the runtime does not offer XR_KHR_D3D12_enable"),
+          "not added when a believable list lacks it: " + Text(attempts));
+    EndCase(game);
+
+    BeginCase("instance-empty-list", game);
+    g_runtime.extensions = {};
+    result = InstanceAttempts({kD3D11Extension}, attempts, log);
+    Check(result == XR_SUCCESS && attempts.size() == 1 && attempts[0] == Names{kD3D11Extension, kD3D12Extension} &&
+              Contains(log, "not believable"),
+          "added when the list is empty: " + Text(attempts));
+    EndCase(game);
+
+    BeginCase("instance-no-list", game);
+    g_runtime.enumeration_offered = false;
+    result = InstanceAttempts({kD3D11Extension}, attempts, log);
+    Check(result == XR_SUCCESS && attempts.size() == 1 && attempts[0] == Names{kD3D11Extension, kD3D12Extension},
+          "added when there is no list: " + Text(attempts));
+    EndCase(game);
+
+    BeginCase("instance-bridge-off", game);
+    SetEnv("VECTORXR_D3D11_BRIDGE", "off");
+    result = InstanceAttempts({kD3D11Extension}, attempts, log);
+    SetEnv("VECTORXR_D3D11_BRIDGE", "");
+    Check(result == XR_SUCCESS && attempts.size() == 1 && attempts[0] == Names{kD3D11Extension} &&
+              !Contains(log, "Direct3D 11 bridge"),
+          "not added with VECTORXR_D3D11_BRIDGE=off: " + Text(attempts));
+    EndCase(game);
+
+    BeginCase("instance-framegen-off", game, false);
+    result = InstanceAttempts({kD3D11Extension}, attempts, log);
+    Check(result == XR_SUCCESS && attempts.size() == 1 && attempts[0] == Names{kD3D11Extension} &&
+              !Contains(log, "Direct3D 11 bridge"),
+          "not added without Frame Generation: " + Text(attempts));
+    EndCase(game);
+
+    BeginCase("instance-vulkan", game);
+    result = InstanceAttempts({"XR_KHR_vulkan_enable2"}, attempts, log);
+    Check(result == XR_SUCCESS && attempts.size() == 1 && attempts[0] == Names{"XR_KHR_vulkan_enable2"},
+          "not added for an application without Direct3D 11: " + Text(attempts));
+    EndCase(game);
+
+    BeginCase("instance-own-d3d12", game);
+    result = InstanceAttempts({kD3D11Extension, kD3D12Extension}, attempts, log);
+    Check(result == XR_SUCCESS && attempts.size() == 1 && attempts[0] == Names{kD3D11Extension, kD3D12Extension},
+          "not added twice: " + Text(attempts));
+    EndCase(game);
+
+    BeginCase("instance-runtime-failure", game);
+    g_runtime.instance_failure = XR_ERROR_RUNTIME_FAILURE;
+    result = InstanceAttempts({kD3D11Extension}, attempts, log);
+    Check(result == XR_ERROR_RUNTIME_FAILURE && attempts.size() == 1 &&
+              attempts[0] == Names{kD3D11Extension, kD3D12Extension},
+          "another failure is the application's, with no retry: " + Text(attempts));
+    EndCase(game);
+
+    // Refused: the very next attempt drops it alone (the turbo clock, another
+    // of the layer's additions, stays), and the instance's sessions are not
+    // bridged.
+    BeginCase("instance-refused", game, true, true);
+    g_runtime.extensions = {kD3D11Extension, kD3D12Extension, kClockExtension};
+    g_runtime.refuse_d3d12_instance = true;
+    App app = StartApp();
+    attempts = g_runtime.instance_attempts;
+    Check(attempts.size() == 2 && attempts[0] == Names{kD3D11Extension, kD3D12Extension, kClockExtension} &&
+              attempts[1] == Names{kD3D11Extension, kClockExtension},
+          "the retry drops XR_KHR_D3D12_enable alone: " + Text(attempts));
+    Check(Contains(Peer::Log(), "XR_KHR_D3D12_enable left out after the runtime refused an extension"),
+          "the refusal is logged");
+    SessionCreate create(game.device.Get(), app.system);
+    Check(app.api.create_session(app.api.instance, &create.info, &app.session) == XR_SUCCESS, "xrCreateSession");
+    Check(g_runtime.binding == XR_TYPE_GRAPHICS_BINDING_D3D11_KHR &&
+              g_runtime.Position("xrGetD3D12GraphicsRequirementsKHR") < 0 && !Peer::Bridge().Active(),
+          "the session is not bridged");
+    const std::string session_log = Peer::Log();
+    Check(Contains(session_log, "the instance has no XR_KHR_D3D12_enable"), "the log tells why");
+    Check(!Contains(session_log, kBridgedSessionLine), "the log does not tell of a bridged session");
+    StopApp(app);
+    EndCase(game);
+}
+
+// 7. The instance destroyed with its bridged session still alive (as a game
+// that quits may): the runtime frees the session's images with the instance,
+// so the bridge's copies into them are done before it is called.
+void TestDestroyInstanceWithSession(Game& game) {
+    BeginCase("instance-with-session", game);
+    App app = StartApp();
+    SessionCreate create(game.device.Get(), app.system);
+    Check(app.api.create_session(app.api.instance, &create.info, &app.session) == XR_SUCCESS && Peer::Bridge().Active(),
+          "a bridged session");
+    BeginSession(app);
+    Target left = MakeTarget(app, ColorInfo(), "the left eye");
+    Target right = MakeTarget(app, ColorInfo(), "the right eye");
+    const std::vector<Color> colors{FrameColor(3, 0), FrameColor(3, 1)};
+    Check(Frame(app, game, {&left, &right}, colors, {{{&left, 0}, {&right, 0}}}) == XR_SUCCESS &&
+              Near(g_runtime.frames.back().views[0].texel, colors[0]) &&
+              Near(g_runtime.frames.back().views[1].texel, colors[1]),
+          "a frame of the bridged session");
+    // The left eye's last copy waits behind a gate the layer's wait outlasts,
+    // and a marker after everything on the bridge's queue.
+    ID3D12CommandQueue* bridge_queue = BridgeBinding()->queue;
+    Gate gate(g_runtime.device12.Get(), game);
+    gate.HoldQueue(bridge_queue);
+    Render(app, game, left, {7, 8, 9, 255});
+    ComPtr<ID3D12Fence> marker;
+    Check(SUCCEEDED(g_runtime.device12->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&marker))),
+          "a marker fence");
+    bridge_queue->Signal(marker.Get(), 1);
+    bool destroyed = false;
+    g_runtime.on_destroy_instance = [&] {
+        destroyed = true;
+        // Checked here, before the stand-in frees the session's images.
+        const std::string summary = Peer::Bridge().Summary();
+        Check(marker->GetCompletedValue() >= 1,
+              "the bridge's queue had run everything queued on it when the runtime destroyed the instance (with "
+              "its session's images): " +
+                  summary);
+        Check(SummaryValue(summary, "doneCompleted") == SummaryValue(summary, "doneValue"),
+              "the bridge's copies were done when the runtime destroyed the instance: " + summary);
+    };
+    std::thread opener = gate.OpenLater(300);
+    const XrResult result = app.api.destroy_instance(app.api.instance);
+    opener.join();
+    g_runtime.on_destroy_instance = nullptr;
+    Check(result == XR_SUCCESS && destroyed, "xrDestroyInstance with the session alive");
+    Check(g_runtime.Position("xrDestroySession") < 0, "the session went with the instance, not on its own");
+    Check(Peer::Idle() && !Peer::QueueSubstituted(), "nothing is left of the instance and its session");
+    const std::string log = Peer::Log();
+    Check(Count(log, kBridgedSessionLine) == 1, "the session's bridge was logged once");
+    Check(Contains(log, "Frame Generation's Direct3D 11 bridge at session end: "), "the bridge's summary is logged");
+    Check(!Contains(log, "did not finish") && !Contains(log, "[error] Direct3D 11 bridge:"),
+          "nothing was stalled");
+    Check(GameRuns(game), "the game's device works after its instance went with the session");
+    EndCase(game);
+}
+
+// 8. The bridge's device removed: the session is lost. Last: Direct3D 12
+// makes one device per adapter in a process.
+void TestDeviceLost(Game& game) {
+    BeginCase("device-lost", game);
+    App app = StartApp();
+    SessionCreate create(game.device.Get(), app.system);
+    Check(app.api.create_session(app.api.instance, &create.info, &app.session) == XR_SUCCESS && Peer::Bridge().Active(),
+          "a bridged session");
+    BeginSession(app);
+    Target left = MakeTarget(app, ColorInfo(), "the left eye");
+    Target right = MakeTarget(app, ColorInfo(), "the right eye");
+    const std::vector<Color> colors{FrameColor(0, 0), FrameColor(0, 1)};
+    Check(Frame(app, game, {&left, &right}, colors, {{{&left, 0}, {&right, 0}}}) == XR_SUCCESS &&
+              Near(g_runtime.frames.back().views[0].texel, colors[0]),
+          "a frame before the loss");
+    ComPtr<ID3D12Device5> device5;
+    if (FAILED(BridgeBinding()->device->QueryInterface(IID_PPV_ARGS(&device5)))) {
+        std::cout << "device loss not tested: no ID3D12Device5\n";
+        Check(app.api.destroy_swapchain(left.swapchain) == XR_SUCCESS, "xrDestroySwapchain");
+        StopApp(app);
+        EndCase(game);
+        return;
+    }
+    CheckValidation(game, "before the device's removal");
+    device5->RemoveDevice();
+    device5.Reset();
+    const std::size_t shown = g_runtime.frames.size();
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        const XrResult result = Frame(app, game, {&left, &right}, colors, {{{&left, 0}, {&right, 0}}});
+        Check(result == XR_ERROR_SESSION_LOST,
+              "xrEndFrame " + std::to_string(attempt + 1) + " after the removal loses the session: " +
+                  std::to_string(result));
+        Check(g_runtime.frames.size() == shown, "the frame does not reach the runtime");
+    }
+    const std::string log = Peer::Log();
+    Check(Count(log, "the session is lost") == 1, "the loss is logged once, for two frames");
+    Check(Count(log, kBridgedSessionLine) == 1, "the session's bridge was logged once");
+    const auto start = std::chrono::steady_clock::now();
+    Check(app.api.destroy_swapchain(left.swapchain) == XR_SUCCESS, "xrDestroySwapchain on a lost session");
+    StopApp(app);
+    const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+    Check(seconds < 10.0, "teardown does not wait on a removed device: " + std::to_string(seconds) + " s");
+    Check(GameRuns(game), "the game's Direct3D 11 device runs on");
+    // What Direct3D 12 reports after the removal is the removal's; Direct3D
+    // 11's is still checked.
+    EndCase(game, true);
+}
+
+// Everything the layer reads and writes on the host goes to the test's own directory.
+void IsolateHost() {
+    wchar_t temp[MAX_PATH + 1]{};
+    GetTempPathW(MAX_PATH, temp);
+    g_root = std::filesystem::path(temp) /
+             ("vectorxr-d3d11-bridge-layer-tests-" + std::to_string(GetCurrentProcessId()));
+    std::error_code error;
+    std::filesystem::remove_all(g_root, error);
+    std::filesystem::create_directories(g_root);
+    SetEnv("VECTORXR_CONFIG_PATH", (g_root / "settings.json").string());
+    SetEnv("VECTORXR_LOG_PATH", (g_root / "logs" / "vectorxr.log").string());
+    SetEnv("VECTORXR_SEEN_APPS_PATH", (g_root / "seen-apps.json").string());
+    SetEnv("VECTORXR_RUNTIME_RELAY_PATH", (g_root / "runtime").string());
+    SetEnv("VECTORXR_RUNTIME_PACING_PATH", (g_root / "runtime-pacing.json").string());
+    SetEnv("VECTORXR_TURBO_METRICS_PATH", (g_root / "turbo-metrics.json").string());
+    SetEnv("XR_RUNTIME_JSON", (g_root / "no-runtime.json").string());
+    // Whatever the host sets for the bridge does not apply.
+    SetEnv("VECTORXR_FRAMEGEN_QUEUE", "");
+    SetEnv("VECTORXR_D3D11_BRIDGE", "");
+    SetEnv("VECTORXR_D3D11_BRIDGE_DEBUG", "");
+}
+
+} // namespace
+
+int main(int argc, char** argv) {
+    const bool hardware = argc > 1 && std::string(argv[1]) == "hw";
+    // Before any Direct3D 12 device exists.
+    ComPtr<ID3D12Debug> debug;
+    const HRESULT debug_result = D3D12GetDebugInterface(IID_PPV_ARGS(&debug));
+    if (SUCCEEDED(debug_result)) {
+        debug->EnableDebugLayer();
+    } else {
+        debug.Reset();
+        std::ostringstream hr;
+        hr << std::hex << static_cast<std::uint32_t>(debug_result);
+        std::cout << "WARNING: no Direct3D 12 debug layer (D3D12GetDebugInterface failed, hr=0x" << hr.str()
+                  << "; install the Graphics Tools optional feature): the bridge's Direct3D 12 work is NOT validated, "
+                     "only the behavioural checks run\n"
+                  << std::flush;
+    }
+    Game game;
+    if (!MakeGame(hardware, game)) {
+        std::cout << "skipped: no Direct3D 11 device\n";
+        return kSkip;
+    }
+    ComPtr<ID3D11InfoQueue> queue11;
+    if (game.debug && SUCCEEDED(game.device.As(&queue11))) {
+        StoreErrorsOnly(queue11.Get());
+    } else {
+        std::cout << "WARNING: no Direct3D 11 debug layer (its SDK layers are not installed): the game's Direct3D 11 "
+                     "work is NOT validated, only the behavioural checks run\n"
+                  << std::flush;
+    }
+    IsolateHost();
+    Peer::UseFrameGenGpu(MakeStandInGpu);
+    const bool bridged = TestBridgedSession(game);
+    if (bridged) {
+        TestKeepGameQueue(game);
+        TestBridgeOffSession(game);
+        TestRefusedD3D12Session(game);
+        TestInstanceExtensions(game);
+        TestDestroyInstanceWithSession(game);
+        TestDeviceLost(game);
+    }
+    g_runtime = StandIn{};
+    Peer::ReleaseLog(g_root / "released" / "vectorxr.log");
+    std::error_code error;
+    std::filesystem::remove_all(g_root, error);
+    if (!bridged) {
+        return kSkip;
+    }
+    std::cout << "d3d11 bridge layer tests passed (" << (hardware ? "hardware" : "WARP")
+              << (debug ? ", D3D12 debug layer" : ", WITHOUT the D3D12 debug layer")
+              << (game.debug ? ", D3D11 debug layer" : ", WITHOUT the D3D11 debug layer") << ")\n";
+    return 0;
+}

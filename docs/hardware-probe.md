@@ -6,9 +6,10 @@ game to use a particular frame loop or reference-space arrangement. It is not
 included in the VectorXR installer or the default CMake build.
 
 The probe renders an asymmetric line scene through D3D11: a ground grid,
-colored axes, and two differently placed beacons. Each eye is limited to
-1280 pixels in either dimension so the diagnostic does not allocate the
-headset's full recommended render size.
+colored axes, and two differently placed beacons. Unless `--full-size` or
+`--quad-views` is given, each eye is limited to 1280 pixels in either
+dimension so the diagnostic does not allocate the headset's full recommended
+render size.
 
 ## Build
 
@@ -146,6 +147,49 @@ auto-suspend after five drain timeouts. That outcome still exercises the
 handoff and safety path, but it does not establish that sustained Async is
 compatible with that driver. Restore **Runtime Behavior > Mode** to **Auto (recommended)**
 and save after the test.
+
+## Frame Generation and the Direct3D 11 bridge
+
+With Frame Generation enabled for the probe, its session goes through the
+Direct3D 11 bridge (the runtime's session is Direct3D 12, and the probe
+renders into images shared with it), as DCS's does. Further options shape the
+probe like DCS, or stress the bridge:
+
+| Option | Effect |
+| --- | --- |
+| `--quad-views` | Four views (`XR_VARJO_quad_views`) in four `color\|sampled` swapchains at full size, as DCS renders them; VectorXR composes them where the runtime lacks quad views. |
+| `--full-size` | Recommended view sizes, without the 1280-pixel limit (implied by `--quad-views`). |
+| `--pattern` | A grid and a sweeping bar fixed to each view (focus views in other colors), visible wherever the headset points, and motion for Frame Generation. |
+| `--frame-ms N` | Each frame takes at least N ms (a game slower than the refresh rate). |
+| `--depth` | Depth rendered into depth swapchains and submitted (`XR_KHR_composition_layer_depth`). |
+| `--recreate-seconds N` | The swapchains are destroyed and recreated every N seconds. |
+| `--sessions N` | N sessions one after another in one instance. |
+| `--hitch-every N`, `--hitch-ms M` | Every N seconds one frame takes M ms longer (a stutter). |
+| `--d3d11-debug` | The Direct3D 11 device has the debug layer; its errors and warnings are reported at the end. |
+
+The probe reports its frame interval and the time its swapchain calls and
+`xrEndFrame` took. Keep the probe's settings apart from your own with
+`VECTORXR_CONFIG_PATH` (a copy of `settings.json` with Frame Generation and
+Quadviews profiles for `vectorxr-hardware-probe`), and its log with
+`VECTORXR_LOG_PATH`:
+
+```powershell
+$env:VECTORXR_CONFIG_PATH = "$env:TEMP\probe-settings.json"
+$env:VECTORXR_LOG_PATH = "$env:TEMP\probe.log"
+& $probe --mode source-exact --quad-views --pattern --threaded-wait --frame-ms 15 --seconds 60
+```
+
+Expected log evidence: "XR_KHR_D3D12_enable added to the instance's
+extensions", "the session is Direct3D 12 and the game renders into images
+shared with it", one "is shared" line per swapchain, "Frame Generation
+enabled for this session: backend=D3D12", and at the end the bridge's
+summary with `skippedCopies=0` and `unmatchedReleases=0`.
+`VECTORXR_D3D11_BRIDGE_DEBUG=1` also enables the Direct3D 12 debug layer and
+reports what it finds in the log; `VECTORXR_D3D11_BRIDGE=off` keeps the
+session Direct3D 11.
+
+An idle headset may make the runtime refresh far slower than it reports;
+timings from such a run do not stand for a worn headset's.
 
 ## What this probe does not prove
 
