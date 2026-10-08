@@ -572,7 +572,7 @@ layer predates Frame Generation.
 | Mode | How it works | Trade-off |
 | --- | --- | --- |
 | **Interpolate** (default) | Blends generated frames between the previous and the newest real frame. | Fewest artifacts, and the closest match to OFXR-Bridge. Each real frame is shown after the generated frames leading up to it, so everything appears one real frame interval later (about 33 ms at 4x, 22 ms at 3x); head rotation is still corrected by the headset. |
-| **Extrapolate** | Pushes the newest real frame forward along its motion, like ASW or Smart Smoothing. | No added latency. More edge artifacts on fast motion and in newly revealed areas, and fine cockpit detail depends more on the game's depth (see Game depth). |
+| **Extrapolate** | Pushes the newest real frame forward along its motion, like ASW or Smart Smoothing. | No added latency. More edge artifacts on fast motion and in newly revealed areas, and fine cockpit detail depends more on the game's depth (see Game depth). Use it with **NVIDIA hardware** motion estimation; with **Shader**, Interpolate usually looks cleaner. |
 
 On Direct3D 12 both modes present from their own thread: a frame every refresh while the game
 renders at its own pace, as it would without Frame Generation. With Direct3D 11 and Vulkan, the
@@ -662,9 +662,11 @@ needs a game restart; turning it off applies at once.
 - **Flow quality** sets the resolution motion is measured at: **Performance** (1/16 of the eye
   image), **Balanced** (1/8, default), or **Quality** (1/4). Higher quality tracks small and
   thin objects better and costs more GPU time.
-- **Motion estimation** (experimental): **Shader** (default) measures motion by block matching
-  on the GPU's shader cores, on any GPU. **NVIDIA hardware** uses the optical flow accelerator of
-  NVIDIA RTX 20-50 GPUs in Direct3D 12 games such as MSFS, at 1/8 of the eye image. Repeating
+- **Motion estimation**: **Shader** (default) measures motion by block matching on the GPU's
+  shader cores, on any GPU, and pairs best with Interpolate. **NVIDIA hardware** uses the optical
+  flow accelerator of NVIDIA RTX 20-50 GPUs in Direct3D 12 games such as MSFS, at 1/8 of the eye
+  image, and is recommended wherever it is available: it measures motion at least as well as
+  Shader, and Extrapolate needs it to look its best. Repeating
   patterns such as building windows and railings no longer lock onto the wrong repeat. The
   accelerator starts on each eye's image as soon as the game releases it, so it mostly runs
   while the game finishes its frame (about 7 ms of accelerator time at a Pimax Crystal Super's

@@ -1511,7 +1511,7 @@
             "extrapolate"
           ],
           "default": "interpolate",
-          "description": "interpolate blends between the previous and newest real frame (fewer artifacts, needs more GPU headroom); extrapolate pushes the newest real frame forward along its motion (more GPU time per frame, more edge artifacts)."
+          "description": "interpolate blends between the previous and newest real frame (fewer artifacts, needs more GPU headroom); extrapolate pushes the newest real frame forward along its motion (more GPU time per frame, more edge artifacts; best with motionEstimation hardware)."
         },
         "flowQuality": {
           "type": "string",
@@ -1530,7 +1530,7 @@
             "hardware"
           ],
           "default": "shader",
-          "description": "How motion is measured: block matching on the shader cores (any GPU), or the optical flow accelerator of NVIDIA RTX 20-50 GPUs in Direct3D 12 games (experimental; falls back to shader elsewhere)."
+          "description": "How motion is measured: block matching on the shader cores (any GPU), or the optical flow accelerator of NVIDIA RTX 20-50 GPUs in Direct3D 12 games (recommended where available, and needed for extrapolate to look its best; falls back to shader elsewhere)."
         },
         "frameMultiplier": {
           "type": "string",

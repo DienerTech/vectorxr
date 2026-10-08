@@ -23,7 +23,7 @@ const synthesisModes: { value: FrameGenSynthesisMode; label: string; badge?: str
   {
     value: 'extrapolate',
     label: 'Extrapolate',
-    description: 'Pushes the newest real frame forward along its motion. Gives the game more time per frame, with more edge artifacts on fast motion and newly revealed areas. Best for heavy games: on Direct3D 12, such as MSFS, generated frames are shown from their own thread while the game keeps rendering.',
+    description: 'Pushes the newest real frame forward along its motion. Gives the game more time per frame, with more edge artifacts on fast motion and newly revealed areas. Best for heavy games: on Direct3D 12, such as MSFS, generated frames are shown from their own thread while the game keeps rendering. Use it with NVIDIA hardware motion estimation; with Shader, Interpolate usually looks cleaner.',
   },
 ]
 
@@ -52,12 +52,12 @@ const motionEstimations: { value: FrameGenMotionEstimation; label: string; descr
   {
     value: 'shader',
     label: 'Shader',
-    description: 'Block matching on the GPU\'s shader cores. Works on any GPU and graphics API; repeating patterns such as building windows can lock onto the wrong repeat.',
+    description: 'Block matching on the GPU\'s shader cores. Works on any GPU and graphics API; repeating patterns such as building windows can lock onto the wrong repeat. Pairs best with Interpolate.',
   },
   {
     value: 'hardware',
     label: 'NVIDIA hardware',
-    description: 'Experimental: the optical flow accelerator of NVIDIA RTX 20-50 GPUs measures motion in Direct3D 12 games, such as MSFS, and repeating patterns stay put. It runs on Frame Generation\'s own GPU queue, after head movement is taken out, so the game does not wait for it. Elsewhere Shader is used and the log says why.',
+    description: 'Recommended on NVIDIA RTX 20-50 GPUs: their optical flow accelerator measures motion in Direct3D 12 games, such as MSFS, at least as well as Shader, and repeating patterns stay put. Extrapolate needs it to look its best. It runs on Frame Generation\'s own GPU queue, after head movement is taken out, so the game does not wait for it. Elsewhere Shader is used and the log says why.',
   },
 ]
 
