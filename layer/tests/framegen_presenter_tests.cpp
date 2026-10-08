@@ -36,8 +36,10 @@ namespace {
 
 void Check(bool ok, const std::string& why) {
     if (!ok) {
-        std::cerr << "FAILED: " << why << '\n';
-        std::exit(1);
+        std::cerr << "FAILED: " << why << std::endl;
+        // Without running destructors: the presenter thread may still be using the fakes' globals, and
+        // tearing them down under it crashed the run instead of failing it.
+        std::_Exit(1);
     }
 }
 
@@ -1836,6 +1838,34 @@ void TestJitDynamicInterpolation() {
     Check(!runtime.ordering_violation && !g_release_violation, "jit dynamic interpolation: calls stayed ordered");
 }
 
+// Repeats the one-interval clamp of extrapolation predicts between real frames shown at `times`: a frame whose
+// interval from the one before is p refreshes, followed by the next after g, is moved a whole interval on by its
+// p-th refresh, and shows that again in each of the g - 1 - p refreshes left.
+std::size_t ClampedRepeats(const std::vector<XrTime>& times) {
+    std::size_t repeats = 0;
+    for (std::size_t i = 2; i < times.size(); ++i) {
+        const XrTime p = (times[i - 1] - times[i - 2] + kPeriod / 2) / kPeriod;
+        const XrTime g = (times[i] - times[i - 1] + kPeriod / 2) / kPeriod;
+        if (g - 1 > p) repeats += static_cast<std::size_t>(g - 1 - p);
+    }
+    return repeats;
+}
+
+// Refreshes the runtime was given after `from` and before `to`, and how many of them showed the same eye position
+// as the refresh before: the same frame again.
+std::pair<std::size_t, std::size_t> ShownRepeats(Runtime& runtime, XrTime from, XrTime to) {
+    std::scoped_lock lock(g_xr_mutex);
+    std::size_t refreshes = 0;
+    std::size_t repeats = 0;
+    for (std::size_t i = 1; i < runtime.submitted_times.size(); ++i) {
+        const XrTime time = runtime.submitted_times[i];
+        if (time <= from || time >= to || runtime.submitted_swapchains[i].empty()) continue;
+        ++refreshes;
+        repeats += runtime.submitted_left_x[i] == runtime.submitted_left_x[i - 1] ? 1 : 0;
+    }
+    return {refreshes, repeats};
+}
+
 // Dynamic extrapolation just in time: the game runs at its own rate and
 // every refresh between its frames is written for its own time.
 void TestJitDynamicExtrapolation() {
@@ -1851,10 +1881,39 @@ void TestJitDynamicExtrapolation() {
     const std::size_t first = runtime.Submissions();
     const auto start = std::chrono::steady_clock::now();
     std::chrono::steady_clock::duration gap{};
-    const int frames = RunPipelined(*app, 1500ms, 16ms, 26ms, {}, &gap, 8ms);
+    // Each real frame's display time as the game ends it (one told period late, as MSFS does), and as predicted.
+    std::vector<XrTime> ended_times;
+    std::vector<XrTime> predicted_times;
+    const int frames = RunPipelined(
+        *app, 1500ms, 16ms, 26ms,
+        [&](int, const XrFrameState& state) {
+            ended_times.push_back(state.predictedDisplayTime + state.predictedDisplayPeriod * app->end_offset_periods);
+            predicted_times.push_back(state.predictedDisplayTime);
+        },
+        &gap, 8ms);
     const double elapsed = Seconds(std::chrono::steady_clock::now() - start);
     const double refresh = 1e9 / static_cast<double>(kPeriod);
     const FrameGenStatus status = presenter.Status();
+    // Past the first frames (engagement), up to the last.
+    const std::vector<XrTime> steady_ended(ended_times.begin() + std::min<std::size_t>(10, ended_times.size()),
+                                           ended_times.end());
+    const std::vector<XrTime> steady_predicted(
+        predicted_times.begin() + std::min<std::size_t>(10, predicted_times.size()), predicted_times.end());
+    const auto [window, shown] =
+        steady_ended.size() > 2 ? ShownRepeats(runtime, steady_ended[1], steady_ended.back())
+                                : std::pair<std::size_t, std::size_t>{0, 0};
+    if (std::getenv("FG_TEST_STATS")) {
+        std::map<XrTime, int> steps;
+        for (std::size_t i = 1; i < steady_ended.size(); ++i) {
+            ++steps[(steady_ended[i] - steady_ended[i - 1] + kPeriod / 2) / kPeriod];
+        }
+        std::cerr << "jit dynamic extrapolation: distinct " << status.distinct_fps << " of " << status.output_fps
+                  << " fps, app " << frames / elapsed << " fps; window " << window << " refreshes, shown repeats "
+                  << shown << ", clamp predicts " << ClampedRepeats(steady_ended) << " (ended times), "
+                  << ClampedRepeats(steady_predicted) << " (predicted times); steps";
+        for (const auto& [refreshes, count] : steps) std::cerr << ' ' << refreshes << 'x' << count;
+        std::cerr << '\n';
+    }
     Check(status.threaded && status.dynamic, "jit dynamic extrapolation: presents dynamically from its own thread");
     Check(frames / elapsed > refresh / 3 * 1.15,
           "jit dynamic extrapolation: the app is not held to a third of the refresh (" + std::to_string(frames / elapsed) +
@@ -1862,11 +1921,15 @@ void TestJitDynamicExtrapolation() {
     const auto log = runtime.Snapshot();
     Check(static_cast<double>(log.size() - first) / elapsed > refresh * 0.85,
           "jit dynamic extrapolation: every refresh gets a frame");
-    // A real frame later than a whole interval of its varying pace holds
-    // its motion at one interval (as frames written together do): repeats.
-    Check(status.distinct_fps > 0.8 * status.output_fps,
-          "jit dynamic extrapolation: refreshes show new frames (" + std::to_string(status.distinct_fps) + " of " +
-              std::to_string(status.output_fps) + " fps)");
+    // A real frame later than a whole interval of its varying pace holds its motion at one interval (as frames
+    // written together do): repeats. How many depends on how the game's frames fall on refreshes. This one
+    // alternates 18 and 26 ms frames, which land 2 and 2 refreshes apart in one phase (no repeats) and 1 and 3
+    // in another (one refresh in four repeats), so a fixed share of new frames fails in the second phase. The
+    // refreshes shown may repeat only where the clamp says, give or take a late frame or two (+2).
+    Check(window > 50 && shown <= ClampedRepeats(steady_ended) + 2,
+          "jit dynamic extrapolation: refreshes repeat only where a frame is more than an interval late (" +
+              std::to_string(shown) + " of " + std::to_string(window) + " repeated, " +
+              std::to_string(ClampedRepeats(steady_ended)) + " expected)");
     Check(runtime.mismatched_images == 0, "jit dynamic extrapolation: every image shown was written for its views");
     int creates = 0;
     {
