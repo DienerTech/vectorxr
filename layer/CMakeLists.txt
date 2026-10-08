@@ -335,6 +335,12 @@ if(WIN32 AND DEPTHXR_BUILD_LAYER)
         add_test(NAME depthxr_framegen_vulkan_tests COMMAND depthxr_framegen_tests vulkan)
         set_tests_properties(depthxr_framegen_d3d11_tests depthxr_framegen_d3d12_tests depthxr_framegen_vulkan_tests PROPERTIES TIMEOUT 60)
         set_tests_properties(depthxr_framegen_vulkan_tests PROPERTIES SKIP_RETURN_CODE 77)
+        # Direct3D 11 <-> 12 sharing probe for the D3D11 bridge. It needs a real GPU, so it is
+        # built here but is not a CTest (`depthxr_bridge_probe --help`).
+        add_executable(depthxr_bridge_probe tests/bridge_probe.cpp)
+        target_link_libraries(depthxr_bridge_probe PRIVATE d3d11 d3d12 dxgi dxguid d3dcompiler)
+        target_compile_definitions(depthxr_bridge_probe PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+        target_compile_features(depthxr_bridge_probe PRIVATE cxx_std_20)
         add_executable(depthxr_framegen_presenter_tests tests/framegen_presenter_tests.cpp)
         target_link_libraries(depthxr_framegen_presenter_tests PRIVATE depthxr_framegen)
         target_compile_definitions(depthxr_framegen_presenter_tests PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
