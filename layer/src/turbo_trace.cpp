@@ -1,9 +1,12 @@
 #include "depthxr/turbo_trace.h"
 
+#include <algorithm>
 #include <charconv>
 #include <fstream>
 #include <functional>
+#include <optional>
 #include <string>
+#include <string_view>
 #include <stdexcept>
 #include <vector>
 
@@ -20,11 +23,24 @@ template <typename T> void Number(std::string& line, T value) {
     const auto result = std::to_chars(buffer, buffer + sizeof(buffer), value);
     line.append(buffer, result.ptr);
 }
+// Fault, dropped-frame and recovery events freeze history like a stall does:
+// the application keeps calling afterwards and would rotate it away.
+bool IsIncident(const char* name) {
+    const std::string_view event(name);
+    return event.starts_with("fault.") || event.starts_with("recover.") || event == "frame.dropped";
+}
 }
 
 std::filesystem::path TurboTimingTrace::RecorderPath(const std::filesystem::path& log, unsigned part) {
     auto path = log;
     path.replace_extension(".flight-recorder." + std::to_string(part) + ".log");
+    return path;
+}
+
+std::filesystem::path TurboTimingTrace::SnapshotPath(const std::filesystem::path& log, unsigned index) {
+    auto path = log;
+    path.replace_extension(index == 0 ? std::string(".flight-recorder.stall.log")
+                                      : ".flight-recorder.stall-" + std::to_string(index) + ".log");
     return path;
 }
 
@@ -85,7 +101,8 @@ void TurboTimingTrace::SetDebugEnabledLocked(Logger& logger, bool enabled) {
             return;
         }
         logger.Debug("Turbo trace v3: continuous recent history in " + RecorderPath(log_path_, 0).string() +
-            " and part 1 (4 MiB each); ordinary trace bursts have no lifetime event cap. "
+            " and part 1 (4 MiB each); stalls, faults and recoveries freeze the latest three snapshots. "
+            "The ordinary log keeps up to 100000 sampled lines per session. "
             "Queue=32768; background flush=250ms; stall threshold=2s. "
             "ns is monotonic since capture start; unixMs anchors exported tails; sequence detects lost history. "
             "phase=enter/exit/stall tracks calls by id; a=call age ns on exit/stall. "
@@ -229,7 +246,11 @@ void TurboTimingTrace::Run(Logger& logger) {
             const auto path = RecorderPath(log_path_, part);
             file.open(path, std::ios::binary | (truncate ? std::ios::trunc : std::ios::app));
             if (!file) throw std::runtime_error("Unable to open flight recorder");
-            bytes = static_cast<std::uint64_t>(file.tellp());
+            // An append stream reports position 0 before its first write; use
+            // the real size so a part reopened by a later session stays bounded.
+            std::error_code size_error;
+            const auto size = truncate ? 0 : std::filesystem::file_size(path, size_error);
+            bytes = size_error ? 0 : static_cast<std::uint64_t>(size);
         };
         open(false);
         const auto persist = [&](const std::string& text) {
@@ -243,7 +264,46 @@ void TurboTimingTrace::Run(Logger& logger) {
             bytes += text.size();
             if (!file) throw std::runtime_error("Unable to write flight recorder");
         };
+        const auto freeze = [&]() -> bool {
+            // Freeze pre-incident history before later healthy frames can rotate
+            // it away. The ordinary rolling files continue independently, and a
+            // snapshot failure never disables them.
+            std::error_code error;
+            auto temporary = SnapshotPath(log_path_, 0);
+            temporary += ".tmp";
+            {
+                std::ofstream frozen(temporary, std::ios::binary | std::ios::trunc);
+                if (!frozen) return false;
+                std::vector<char> copy_buffer(64 * 1024);
+                for (unsigned source_part : {part ^ 1, part}) {
+                    const auto source = RecorderPath(log_path_, source_part);
+                    if (!std::filesystem::exists(source, error)) {
+                        error.clear();
+                        continue;
+                    }
+                    std::ifstream history(source, std::ios::binary);
+                    if (!history) return false;
+                    while (history) {
+                        history.read(copy_buffer.data(), static_cast<std::streamsize>(copy_buffer.size()));
+                        frozen.write(copy_buffer.data(), history.gcount());
+                    }
+                    if (!history.eof()) return false;
+                }
+                frozen.flush();
+                if (!frozen) return false;
+            }
+            for (unsigned index = kSnapshots - 1; index > 0; --index) {
+                std::filesystem::rename(SnapshotPath(log_path_, index - 1), SnapshotPath(log_path_, index), error);
+                error.clear();
+            }
+            std::filesystem::rename(temporary, SnapshotPath(log_path_, 0), error);
+            return !error;
+        };
         bool was_stalled = false;
+        bool snapshot_failure_logged = false;
+        bool sampled_cap_logged = false;
+        std::uint64_t sampled_lines = 0;
+        std::optional<std::int64_t> last_incident_snapshot_ns;
         for (;;) {
             bool stalled = false;
             bool stopping;
@@ -308,39 +368,35 @@ void TurboTimingTrace::Run(Logger& logger) {
             if (!output.empty()) persist(output);
             file.flush(); // OS-visible tail survives a process crash; not a power-loss guarantee.
             if (!file) throw std::runtime_error("Unable to flush flight recorder");
-            if (stalled && !was_stalled) {
-                // Freeze pre-stall history before later healthy frames can rotate
-                // it away. The ordinary rolling files continue independently.
-                auto snapshot = log_path_;
-                snapshot.replace_extension(".flight-recorder.stall.log");
-                auto temporary = snapshot;
-                temporary += ".tmp";
-                std::ofstream frozen(temporary, std::ios::binary | std::ios::trunc);
-                if (!frozen) throw std::runtime_error("Unable to open stall snapshot");
-                std::vector<char> copy_buffer(64 * 1024);
-                for (unsigned source_part : {part ^ 1, part}) {
-                    const auto source = RecorderPath(log_path_, source_part);
-                    if (!std::filesystem::exists(source)) continue;
-                    std::ifstream history(source, std::ios::binary);
-                    if (!history) throw std::runtime_error("Unable to read recorder history");
-                    while (history) {
-                        history.read(copy_buffer.data(), static_cast<std::streamsize>(copy_buffer.size()));
-                        frozen.write(copy_buffer.data(), history.gcount());
-                    }
-                    if (!history.eof()) throw std::runtime_error("Unable to copy recorder history");
+            // Incidents snapshot at most once per report interval: a fault that
+            // repeats every frame must not turn into continuous 8 MiB copies.
+            const auto now_ns = NowNs();
+            const bool incident = std::any_of(batch.begin(), batch.end(),
+                                              [](const Event& e) { return IsIncident(e.name); }) &&
+                                  (!last_incident_snapshot_ns || now_ns - *last_incident_snapshot_ns >= kReportNs);
+            if ((stalled && !was_stalled) || incident) {
+                if (incident) last_incident_snapshot_ns = now_ns;
+                if (!freeze() && !snapshot_failure_logged) {
+                    snapshot_failure_logged = true;
+                    logger.TryDebug("Turbo flight recorder: an incident snapshot could not be saved; "
+                                    "continuous history is unaffected.");
                 }
-                frozen.flush();
-                if (!frozen) throw std::runtime_error("Unable to flush stall snapshot");
-                frozen.close();
-                std::error_code error;
-                std::filesystem::remove(snapshot, error);
-                std::filesystem::rename(temporary, snapshot);
             }
             was_stalled = stalled;
             // Commit continuous history first. Sampled ordinary logging must
             // never make the recorder wait for a lock held by a game thread.
             for (const auto& e : batch) {
-                if (e.sampled) { format_event(e); logger.TryDebug(line); }
+                if (!e.sampled) continue;
+                if (sampled_lines >= kSampledLogLines) {
+                    if (!sampled_cap_logged) {
+                        sampled_cap_logged = logger.TryDebug(
+                            "Turbo trace: the ordinary log reached its sampled-detail limit for this session; "
+                            "the flight recorder files keep recording.");
+                    }
+                    break;
+                }
+                format_event(e);
+                if (logger.TryDebug(line)) ++sampled_lines;
             }
             if (stopping) break;
         }

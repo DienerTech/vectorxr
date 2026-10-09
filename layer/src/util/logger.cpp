@@ -196,12 +196,14 @@ void Logger::PruneLocked() {
                 std::filesystem::remove(recorder, error);
                 error.clear();
             }
-            auto snapshot = old_log;
-            snapshot.replace_extension(".flight-recorder.stall.log");
-            std::filesystem::remove(snapshot, error);
-            error.clear();
-            snapshot += ".tmp";
-            std::filesystem::remove(snapshot, error);
+            // Incident snapshots: the latest, two previous, and a temporary.
+            for (const char* suffix : {".flight-recorder.stall.log", ".flight-recorder.stall-1.log",
+                                       ".flight-recorder.stall-2.log", ".flight-recorder.stall.log.tmp"}) {
+                auto snapshot = old_log;
+                snapshot.replace_extension(suffix);
+                std::filesystem::remove(snapshot, error);
+                error.clear();
+            }
         }
     }
 }

@@ -50,6 +50,13 @@ public:
     void Record(const char* event, std::uint64_t id = 0, std::int64_t a = 0,
                 std::int64_t b = 0, std::int64_t c = 0);
     static std::filesystem::path RecorderPath(const std::filesystem::path& log, unsigned part);
+    // Frozen pre-incident history: index 0 is the latest snapshot, 1 and 2 the
+    // previous ones, so a later benign stall cannot erase an earlier incident.
+    static constexpr unsigned kSnapshots = 3;
+    static std::filesystem::path SnapshotPath(const std::filesystem::path& log, unsigned index);
+    // Ordinary-log copies of sampled events per capture session; the recorder
+    // files keep recording beyond it.
+    static constexpr std::uint64_t kSampledLogLines = 100000;
 
 private:
     friend class TurboTraceTestPeer;

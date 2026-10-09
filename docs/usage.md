@@ -541,8 +541,10 @@ last Safety marker, not a confirmed crash time. The Turbo Safety screenshot show
 Before clearing logs, use **Home > Export Debug** to save an **Export Debug Information** ZIP
 when reporting a problem. It includes Turbo metrics, pacing decisions, safety records,
 live and saved runtime diagnostics, current and saved settings, and retained VectorXR logs.
-With Debug logging, the export also includes continuous recent frame-call history and the latest
-frozen pre-stall snapshot. These recorder files follow the configured log retention.
+With Debug logging, the export also includes continuous recent frame-call history and up to three
+frozen snapshots taken at stalls, faults, and recoveries. These recorder files follow the
+configured log retention. The two most recent sessions are exported in full, then the remaining
+session logs, then older recorder history.
 Raw capture is limited to 8 MiB per file and 64 MiB total; the ZIP inventory lists any
 unavailable or limited files. Review the ZIP for private information before sharing it.
 

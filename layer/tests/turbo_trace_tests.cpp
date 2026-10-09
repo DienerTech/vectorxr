@@ -237,6 +237,61 @@ void TestDebugControlAndFailure(const std::filesystem::path& root) {
     Check(Wait([&] { return !failure.Enabled(); }), "Writer failure did not disable diagnostics");
     failure.Stop(); // cannot throw/terminate the host
 }
+void TestIncidentSnapshotsRotate(const std::filesystem::path& root) {
+    depthxr::Logger logger;
+    logger.Initialize(root / "incident.log");
+    logger.SetLevel(depthxr::LogLevel::Debug);
+    depthxr::TurboTimingTrace trace;
+    trace.Start(logger);
+    const auto log = logger.ActiveLogPath();
+    const auto latest = depthxr::TurboTimingTrace::SnapshotPath(log, 0);
+    const auto previous = depthxr::TurboTimingTrace::SnapshotPath(log, 1);
+    trace.Record("before.fault", trace.NextId(), 11);
+    trace.Record("fault.begin", 0, -37);
+    // A fault freezes history at once; the application keeps calling and
+    // would otherwise rotate it away.
+    Check(Wait([&] { return Read(latest).find("event=fault.begin a=-37") != std::string::npos; }),
+          "A fault did not freeze recorder history");
+    Check(Read(latest).find("event=before.fault a=11") != std::string::npos,
+          "The fault snapshot lacks pre-fault history");
+    // A fault repeating every frame must not turn into repeated 8 MiB copies.
+    trace.Record("fault.begin", 0, -37);
+    std::this_thread::sleep_for(600ms);
+    Check(!std::filesystem::exists(previous), "Repeated faults were snapshotted without a rate limit");
+    // A later stall keeps the fault snapshot as the previous incident.
+    {
+        const auto call = trace.Watch("runtime.wait");
+        depthxr::TurboTraceTestPeer::AgeCalls(trace);
+        Check(Wait([&] { return Read(latest).find("phase=stall") != std::string::npos; }),
+              "A stall after a fault was not frozen");
+    }
+    Check(Read(previous).find("event=fault.begin") != std::string::npos,
+          "A later stall overwrote the earlier fault snapshot");
+    Check(!std::filesystem::exists(depthxr::TurboTimingTrace::SnapshotPath(log, 2)),
+          "Snapshot rotation created a snapshot without an incident");
+    trace.Stop();
+}
+void TestReopenedPartStaysBounded(const std::filesystem::path& root) {
+    depthxr::Logger logger;
+    logger.Initialize(root / "reopen.log");
+    logger.SetLevel(depthxr::LogLevel::Debug);
+    const auto log = logger.ActiveLogPath();
+    const auto part0 = depthxr::TurboTimingTrace::RecorderPath(log, 0);
+    // An earlier session in the same process left part 0 at its bound.
+    {
+        std::ofstream prior(part0, std::ios::binary);
+        prior << std::string(4 * 1024 * 1024, 'x');
+    }
+    const auto prior_size = std::filesystem::file_size(part0);
+    depthxr::TurboTimingTrace trace;
+    trace.Start(logger);
+    for (int i = 0; i < 1000; ++i) trace.Record("second.session", trace.NextId(), i);
+    trace.Stop();
+    Check(std::filesystem::file_size(part0) == prior_size,
+          "A reopened recorder part grew past its bound");
+    Check(Read(depthxr::TurboTimingTrace::RecorderPath(log, 1)).find("event=second.session") != std::string::npos,
+          "The second session's history was not rotated into the other part");
+}
 void TestRetention(const std::filesystem::path& root) {
     const auto directory = root / "retention";
     std::filesystem::create_directory(directory);
@@ -244,7 +299,8 @@ void TestRetention(const std::filesystem::path& root) {
     std::ofstream(old) << "old";
     for (unsigned part = 0; part < 2; ++part)
         std::ofstream(depthxr::TurboTimingTrace::RecorderPath(old, part)) << "old recorder";
-    std::ofstream(Snapshot(old)) << "old frozen history";
+    for (unsigned index = 0; index < depthxr::TurboTimingTrace::kSnapshots; ++index)
+        std::ofstream(depthxr::TurboTimingTrace::SnapshotPath(old, index)) << "old frozen history";
     std::filesystem::last_write_time(old, std::filesystem::file_time_type::clock::now() - 1h);
     depthxr::Logger logger;
     logger.Initialize(directory / "vectorxr.log");
@@ -253,7 +309,10 @@ void TestRetention(const std::filesystem::path& root) {
     Check(!std::filesystem::exists(old) &&
           !std::filesystem::exists(depthxr::TurboTimingTrace::RecorderPath(old, 0)) &&
           !std::filesystem::exists(depthxr::TurboTimingTrace::RecorderPath(old, 1)) &&
-          !std::filesystem::exists(Snapshot(old)), "Log retention orphaned recorder files");
+          !std::filesystem::exists(Snapshot(old)) &&
+          !std::filesystem::exists(depthxr::TurboTimingTrace::SnapshotPath(old, 1)) &&
+          !std::filesystem::exists(depthxr::TurboTimingTrace::SnapshotPath(old, 2)),
+          "Log retention orphaned recorder files");
 }
 }
 int main(int argc, char** argv) {
@@ -280,9 +339,12 @@ int main(int argc, char** argv) {
         TestContinuousPersistenceAndStall(root);
         TestProducersNeverWait(root);
         TestDebugControlAndFailure(root);
+        TestIncidentSnapshotsRotate(root);
+        TestReopenedPartStaysBounded(root);
         TestRetention(root);
-        std::cout << "Flight recorder: continuous persistence, rollover, frozen stalls, nonblocking producers, "
-                     "Debug lifecycle, writer failure, and retention passed.\n";
+        std::cout << "Flight recorder: continuous persistence, rollover, frozen stalls, incident snapshots and "
+                     "rotation, reopened part bounds, nonblocking producers, Debug lifecycle, writer failure, "
+                     "and retention passed.\n";
         return 0;
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
