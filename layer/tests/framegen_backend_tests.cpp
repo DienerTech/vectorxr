@@ -2151,6 +2151,7 @@ int RunQuadViews(Harness& harness) {
         // for it ends at its timeout.
         ComPtr<ID3D12Fence> gate;
         Check(SUCCEEDED(game->device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&gate))), "gate fence");
+        const test_gates::Guard gate_guard(gate.Get());
         game->queue->Wait(gate.Get(), 1);
         const bool held_captured = backend->Capture(0, view.source, view.request, tuning.quality, error);
         Check(held_captured, harness.name + " capture: " + error);
@@ -2336,6 +2337,7 @@ int RunQuadViews(Harness& harness) {
             Check(backend->WaitIdle(), harness.name + " idle");
             ComPtr<ID3D12Fence> gate;
             Check(SUCCEEDED(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&gate))), "gate fence");
+            const test_gates::Guard gate_guard(gate.Get());
             runtime_queue->Wait(gate.Get(), 1);
             const bool written = backend->SynthesizeComposed(b.id, tuning.mode, 0.5f, b.composition, eye_images, error);
             const bool executed = written && backend->Execute(pair, two_views, canvas_result, error);
@@ -2402,6 +2404,7 @@ int RunQuadViews(Harness& harness) {
             Check(stalled->WaitIdle(), harness.name + " idle");
             ComPtr<ID3D12Fence> gate;
             Check(SUCCEEDED(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&gate))), "gate fence");
+            const test_gates::Guard gate_guard(gate.Get());
             runtime_queue->Wait(gate.Get(), 1);
             const bool written = stalled->Synthesize(f.id, tuning.mode, 0.5f, view_images, error) &&
                                  stalled->SynthesizeComposed(f.id, tuning.mode, 0.5f, f.composition, eye_images, error);
@@ -2493,6 +2496,7 @@ void ProfileUnderLoad(Harness& harness, double load_ms, const std::function<std:
     backend->SetCopyAfterRelease(true);
     ComPtr<ID3D12Fence> gate;
     Check(SUCCEEDED(game->device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&gate))), "load gate");
+    const test_gates::Guard gate_guard(gate.Get());
     UINT64 gate_value = 0;
     std::map<std::uint64_t, std::chrono::steady_clock::time_point> released;
     std::vector<double> capture_done, measure_done;
@@ -4403,7 +4407,8 @@ void SubstitutionShownTest(ID3D12Device* device, ID3D12CommandQueue* game_queue)
     const test_gates::Guard busy_gate(busy.Get());
     const HANDLE event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
     // A mark that did not run in time completes later: it has an event of its
-    // own, so it never ends a wait for the game's queue.
+    // own, so it never ends a wait for the game's queue, and a later mark is
+    // reached only when the fence says so (the event just wakes the wait).
     const HANDLE mark_event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
     UINT64 idle_value = 0;
     UINT64 mark_value = 0;
@@ -4417,7 +4422,14 @@ void SubstitutionShownTest(ID3D12Device* device, ID3D12CommandQueue* game_queue)
     auto runtime_reaches = [&](DWORD ms) {
         runtime->Signal(marks.Get(), ++mark_value);
         marks->SetEventOnCompletion(mark_value, mark_event);
-        return WaitForSingleObject(mark_event, ms) == WAIT_OBJECT_0;
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(ms);
+        while (marks->GetCompletedValue() < mark_value) {
+            const auto left =
+                std::chrono::duration_cast<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now()).count();
+            if (left <= 0) return false;
+            WaitForSingleObject(mark_event, static_cast<DWORD>(left));
+        }
+        return true;
     };
     auto acquire = [&](const std::string& what) {
         std::uint32_t index = 0;
@@ -4432,6 +4444,20 @@ void SubstitutionShownTest(ID3D12Device* device, ID3D12CommandQueue* game_queue)
         Check(substitution.Release(ui, false, strict, &release) == XR_SUCCESS,
               "shown layers: " + what + ": release (" + g_strict.calls + ")");
     };
+
+    // A mark that timed out and completed later does not answer the next one.
+    ComPtr<ID3D12Fence> hold;
+    Check(SUCCEEDED(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&hold))), "shown layers: hold fence");
+    const test_gates::Guard hold_gate(hold.Get());
+    runtime->Wait(hold.Get(), 1);
+    Check(!runtime_reaches(20), "shown layers: a mark behind a held runtime queue is not reached");
+    Check(SUCCEEDED(hold->Signal(1)), "shown layers: release the runtime's queue");
+    for (int i = 0; i < 500 && marks->GetCompletedValue() < mark_value; ++i) Sleep(1);
+    runtime->Wait(hold.Get(), 2);
+    const bool late_answered = runtime_reaches(50);
+    Check(SUCCEEDED(hold->Signal(2)), "shown layers: release the runtime's queue again");
+    Check(!late_answered, "shown layers: a late mark's completion does not answer the next mark");
+    Check(runtime_reaches(5000), "shown layers: the runtime's queue runs on after the held marks");
 
     // Not shown lazily yet: its first release goes at once, the runtime's
     // queue waiting for the game's work.
