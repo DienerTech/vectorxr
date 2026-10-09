@@ -23,6 +23,7 @@
 #include <openxr/openxr_platform.h>
 
 #include "depthxr/framegen_vulkan_bridge.h"
+#include "test_gates.h"
 #include "vulkan_test_validation.h"
 
 #include <algorithm>
@@ -54,6 +55,7 @@ void Check(bool condition, const std::string& message) {
     if (!condition) {
         std::fprintf(stderr, "FAIL: %s\n", message.c_str());
         std::fflush(stderr);
+        test_gates::OpenAllBeforeExit();
         std::exit(1);
     }
 }
@@ -1268,7 +1270,10 @@ struct Gate {
                   "the gate imported into the game's device");
         }
         CloseHandle(handle);
+        test_gates::Add(fence.Get());
     }
+    Gate(const Gate&) = delete;
+    Gate& operator=(const Gate&) = delete;
     // Everything the game submits from here on waits for Open.
     void HoldGame() {
         const std::uint64_t value = 1;
@@ -1286,6 +1291,7 @@ struct Gate {
     void HoldQueue(ID3D12CommandQueue* queue) { queue->Wait(fence.Get(), 1); }
     void Open() { fence->Signal(1); }
     ~Gate() {
+        test_gates::Remove(fence.Get());
         Open();
         if (semaphore) {
             GameIdle(game);

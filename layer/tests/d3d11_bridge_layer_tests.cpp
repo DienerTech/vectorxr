@@ -27,6 +27,7 @@
 #include "depthxr/openxr_layer.h"
 #include "depthxr/openxr_loader_api_layer.h"
 #include "depthxr/quadviews_sizing.h"
+#include "test_gates.h"
 
 #include <algorithm>
 #include <array>
@@ -191,6 +192,7 @@ std::filesystem::path g_root; // the test's own directory for everything the lay
 void Check(bool value, const std::string& message) {
     if (!value) {
         std::cerr << "FAILED: " << message << "\n(layer log: " << Peer::LogPath().string() << ")" << std::endl;
+        test_gates::OpenAllBeforeExit();
         std::_Exit(1);
     }
 }
@@ -453,7 +455,14 @@ struct Gate {
                   SUCCEEDED(device5->OpenSharedFence(handle, IID_PPV_ARGS(&fence11))),
               "the gate opened on the game's device");
         CloseHandle(handle);
+        test_gates::Add(fence.Get());
     }
+    ~Gate() {
+        test_gates::Remove(fence.Get());
+        Open();
+    }
+    Gate(const Gate&) = delete;
+    Gate& operator=(const Gate&) = delete;
     void HoldGame(Game& game) { game.context4->Wait(fence11.Get(), 1); }
     void HoldQueue(ID3D12CommandQueue* queue) { queue->Wait(fence.Get(), 1); }
     void Open() { fence->Signal(1); }

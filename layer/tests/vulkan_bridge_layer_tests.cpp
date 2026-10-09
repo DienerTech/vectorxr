@@ -37,6 +37,7 @@
 #include "depthxr/openxr_layer.h"
 #include "depthxr/openxr_loader_api_layer.h"
 #include "depthxr/vulkan_enable_hooks.h"
+#include "test_gates.h"
 #include "vulkan_test_validation.h"
 
 #include <algorithm>
@@ -185,6 +186,7 @@ bool g_unbridged_only = false; // `unbridged`: the cases that need no working br
 void Check(bool value, const std::string& message) {
     if (!value) {
         std::cerr << "FAILED: " << message << "\n(layer log: " << Peer::LogPath().string() << ")" << std::endl;
+        test_gates::OpenAllBeforeExit();
         std::_Exit(1);
     }
 }
@@ -646,8 +648,10 @@ struct Gate {
             CheckVk(g_vk.vkImportSemaphoreWin32HandleKHR(game->device, &import), "the gate opened on the game's device");
         }
         CloseHandle(handle);
+        test_gates::Add(fence.Get());
     }
     ~Gate() {
+        test_gates::Remove(fence.Get());
         Open();
         if (game && semaphore) {
             g_vk.vkQueueWaitIdle(game->queue);

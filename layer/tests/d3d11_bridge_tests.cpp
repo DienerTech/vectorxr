@@ -13,6 +13,7 @@
 #include <openxr/openxr_platform.h>
 
 #include "depthxr/framegen_d3d11_bridge.h"
+#include "test_gates.h"
 
 #include <array>
 #include <chrono>
@@ -34,6 +35,7 @@ constexpr int kSkip = 77;
 void Check(bool value, const std::string& message) {
     if (!value) {
         std::cerr << "FAILED: " << message << std::endl;
+        test_gates::OpenAllBeforeExit();
         std::exit(1);
     }
 }
@@ -319,7 +321,14 @@ struct Gate {
         Check(SUCCEEDED(game.device.As(&device5)) && SUCCEEDED(device5->OpenSharedFence(handle, IID_PPV_ARGS(&fence11))),
               "the gate opened on the game's device");
         CloseHandle(handle);
+        test_gates::Add(fence.Get());
     }
+    ~Gate() {
+        test_gates::Remove(fence.Get());
+        Open();
+    }
+    Gate(const Gate&) = delete;
+    Gate& operator=(const Gate&) = delete;
     void HoldGame(Game& game) { game.context4->Wait(fence11.Get(), 1); }
     void HoldQueue(ID3D12CommandQueue* queue) { queue->Wait(fence.Get(), 1); }
     void Open() { fence->Signal(1); }

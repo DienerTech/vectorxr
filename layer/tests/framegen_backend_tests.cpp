@@ -19,6 +19,7 @@
 #include "depthxr/framegen_gpu.h"
 #include "depthxr/framegen_runtime_queue.h"
 #include "depthxr/quadviews_compose.h"
+#include "test_gates.h"
 
 #ifdef DEPTHXR_NVOF_RESEARCH
 #include <nvOpticalFlowD3D12.h>
@@ -60,6 +61,7 @@ std::string g_flow_status;
 void Check(bool ok, const std::string& why) {
     if (!ok) {
         std::cerr << "FAILED: " << why << '\n';
+        test_gates::OpenAllBeforeExit();
         std::exit(1);
     }
 }
@@ -4177,6 +4179,37 @@ int RunContention(Harness& harness) {
     return 0;
 }
 
+// The tests' gates (test_gates.h): what a failed check does before it exits
+// opens a gate still shut, and the queue held back by it runs on.
+void GatesOpenBeforeExitTest(ID3D12Device* device, ID3D12CommandQueue* queue) {
+    ComPtr<ID3D12Fence> gate;
+    ComPtr<ID3D12Fence> mark;
+    Check(SUCCEEDED(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&gate))) &&
+              SUCCEEDED(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&mark))),
+          "gates: fences");
+    {
+        const test_gates::Guard guard(gate.Get());
+        queue->Wait(gate.Get(), 1);
+        queue->Signal(mark.Get(), 1);
+        Sleep(50);
+        const bool held = mark->GetCompletedValue() == 0;
+        test_gates::OpenAllBeforeExit();
+        const HANDLE event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+        const bool ran = SUCCEEDED(mark->SetEventOnCompletion(1, event)) && WaitForSingleObject(event, 5000) == WAIT_OBJECT_0;
+        CloseHandle(event);
+        if (!ran) gate->Signal(test_gates::kOpenValue); // not left waiting either way
+        Check(held && ran, std::string("gates: a failed check opens a gate still shut (held ") + (held ? "yes" : "no") +
+                               ", ran on " + (ran ? "yes" : "no") + ")");
+    }
+    // Once its guard is gone a gate is not opened again.
+    ComPtr<ID3D12Fence> later;
+    Check(SUCCEEDED(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&later))), "gates: fence");
+    { const test_gates::Guard guard(later.Get()); }
+    test_gates::OpenAllBeforeExit();
+    Check(later->GetCompletedValue() == 0, "gates: a gate whose guard is gone is left alone");
+    std::cout << "D3D12 test gates passed\n";
+}
+
 // Queue substitution (FrameGenQueueSubstitution) against a stand-in runtime
 // that keeps OpenXR's swapchain call order as strictly as runtimes may: an
 // image is acquired only while the application holds fewer than all of them,
@@ -4267,6 +4300,7 @@ void SubstitutionTest(ID3D12Device* device, ID3D12CommandQueue* game_queue) {
     };
     ComPtr<ID3D12Fence> busy;
     Check(SUCCEEDED(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&busy))), "substitution fence");
+    const test_gates::Guard busy_gate(busy.Get());
     ComPtr<ID3D12Fence> idle;
     Check(SUCCEEDED(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&idle))), "substitution fence");
     const HANDLE event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
@@ -4366,6 +4400,7 @@ void SubstitutionShownTest(ID3D12Device* device, ID3D12CommandQueue* game_queue)
               SUCCEEDED(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&idle))) &&
               SUCCEEDED(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&marks))),
           "shown layers: fences");
+    const test_gates::Guard busy_gate(busy.Get());
     const HANDLE event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
     // A mark that did not run in time completes later: it has an event of its
     // own, so it never ends a wait for the game's queue.
@@ -4890,6 +4925,7 @@ int D3D12Test() {
     }
 #endif
     if (!g_replay && !g_contention && !g_profile && !g_bench) {
+        GatesOpenBeforeExitTest(device.Get(), queue.Get());
         SubstitutionTest(device.Get(), queue.Get());
         SubstitutionShownTest(device.Get(), queue.Get());
     }
