@@ -1,80 +1,30 @@
-#include <Windows.h>
-#include <d3d11.h>
-#include <d3d11_1.h>
-#include <timeapi.h>
-#include <d3dcompiler.h>
-#include <dxgi1_2.h>
-#include <DirectXMath.h>
-#include <wrl/client.h>
+// vectorxr_hardware_probe: a real-runtime OpenXR client for exercising VectorXR (docs/hardware-probe.md). This file
+// holds the options, the self-test and the OpenXR frame loop; rendering is Direct3D 11 (probe_d3d11.cpp) or Vulkan
+// (probe_vulkan.cpp), and the GPU load's bookkeeping is in probe_gpu_load.cpp.
+#include "probe_common.h"
 
-#include <openxr/openxr.h>
-#include <openxr/openxr_platform.h>
+#include <timeapi.h>
+#include <DirectXMath.h>
 
 #include <algorithm>
-#include <array>
-#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <condition_variable>
-#include <cstddef>
-#include <cstdint>
 #include <cstring>
 #include <exception>
-#include <future>
 #include <iomanip>
 #include <iostream>
 #include <limits>
-#include <memory>
 #include <mutex>
-#include <optional>
 #include <sstream>
 #include <stdexcept>
-#include <string>
-#include <string_view>
 #include <thread>
-#include <vector>
 
 #pragma comment(lib, "winmm.lib")
 
-using Microsoft::WRL::ComPtr;
 using namespace DirectX;
 
-namespace {
-
-// Quad views (--quad-views): peripheral left/right, then focus left/right, as
-// DCS renders them.
-constexpr uint32_t kMaximumViews = 4;
-constexpr float kNearZ = 0.05f;
-constexpr float kFarZ = 100.0f;
-constexpr uint32_t kMaximumEyeDimension = 1280;
-
-enum class ProbeMode {
-    SourceExact,
-    CrossSpace,
-    CrossSpaceCached,
-};
-
-struct Options {
-    ProbeMode mode{ProbeMode::CrossSpace};
-    double seconds{20.0};
-    bool threaded_wait{false};
-    bool quad_views{false};
-    bool full_size{false};
-    bool pattern{false};
-    bool depth{false};
-    double recreate_seconds{0.0};
-    int sessions{1};
-    bool d3d11_debug{false};
-    double hitch_every{0.0}; // seconds
-    double hitch_ms{300.0};
-    double frame_ms{0.0};
-    double gpu_ms{0.0};       // GPU work per frame (0: none)
-    int gpu_frames_ahead{2};  // frames whose GPU work may be queued
-    bool gpu_ms_fixed{false}; // keep the calibrated work instead of re-measuring
-    bool gpu_calibrate{false};
-    bool self_test{false};
-    bool help{false};
-};
+namespace probe {
 
 const char* ModeName(ProbeMode mode) {
     switch (mode) {
@@ -86,167 +36,6 @@ const char* ModeName(ProbeMode mode) {
         return "cross-space-cached";
     }
     return "unknown";
-}
-
-void PrintUsage() {
-    std::cout
-        << "VectorXR real-runtime Pivot space probe\n\n"
-        << "Usage:\n"
-        << "  vectorxr_hardware_probe [options]\n\n"
-        << "Options:\n"
-        << "  --mode source-exact|cross-space|cross-space-cached\n"
-        << "      source-exact        Locate and submit in source LOCAL space.\n"
-        << "      cross-space         Locate in source LOCAL, submit in an offset LOCAL space.\n"
-        << "      cross-space-cached  Also locate the offset space at the same display time.\n"
-        << "  --seconds N             Active render duration (default: 20).\n"
-        << "  --threaded-wait         Overlap the next xrWaitFrame with the current xrEndFrame.\n"
-        << "  --quad-views            Render four views (XR_VARJO_quad_views) into four color|sampled\n"
-        << "                          swapchains at full size, as DCS does.\n"
-        << "  --full-size             Use the recommended view sizes (default: at most 1280 px).\n"
-        << "  --pattern               Also draw a test pattern fixed to each view (a grid and a moving bar;\n"
-        << "                          focus views in other colors), visible wherever the headset points.\n"
-        << "  --frame-ms N            Make each frame take at least N ms (a slower game).\n"
-        << "  --gpu-ms N              Give each frame N ms of GPU work (0-100), split between the views by\n"
-        << "                          pixel count; each view's share runs right before the view renders.\n"
-        << "  --gpu-frames-ahead N    At most N frames' GPU work queued (0-4, default: 2): a frame waits for\n"
-        << "                          the one N before it; 0 waits for its own before xrEndFrame.\n"
-        << "  --gpu-ms-fixed          Keep the calibrated GPU work (default: re-measured every 30 frames to\n"
-        << "                          hold --gpu-ms while other GPU work competes).\n"
-        << "  --gpu-calibrate         Without OpenXR: calibrate --gpu-ms on the default adapter, run 200\n"
-        << "                          frames of the load alone (paced at 90 Hz, or --frame-ms when longer),\n"
-        << "                          report what they measured and fail if the mean is off by over 3%.\n"
-        << "  --depth                 Render depth into depth swapchains and submit it with each view\n"
-        << "                          (XR_KHR_composition_layer_depth).\n"
-        << "  --recreate-seconds N    Destroy and recreate the swapchains every N seconds.\n"
-        << "  --sessions N            Run N sessions one after another in one instance (default: 1),\n"
-        << "                          each for --seconds.\n"
-        << "  --hitch-every N         Every N seconds, one frame takes --hitch-ms longer (a stutter).\n"
-        << "  --hitch-ms M            The stutter's length (default: 300).\n"
-        << "  --d3d11-debug           Create the Direct3D 11 device with the debug layer and report its\n"
-        << "                          errors and warnings at the end.\n"
-        << "  --self-test             Validate pose math, option parsing and GPU load arithmetic without\n"
-        << "                          a headset.\n"
-        << "  --help                  Show this help.\n\n"
-        << "Press Escape in the console window to end an active run early.\n";
-}
-
-// The value after argv[i] (advancing i): all of it a number in [minimum, maximum], whole if asked.
-double ParseNumber(int argc, char** argv, int& i, double minimum, double maximum, bool whole) {
-    const std::string argument = argv[i];
-    if (++i >= argc) {
-        throw std::runtime_error(argument + " requires a value");
-    }
-    const std::string text = argv[i];
-    std::size_t used = 0;
-    double value = std::numeric_limits<double>::quiet_NaN();
-    try {
-        value = std::stod(text, &used);
-    } catch (const std::exception&) {
-        used = 0;
-    }
-    if (used == 0 || used != text.size() || !std::isfinite(value) || value < minimum || value > maximum ||
-        (whole && value != std::floor(value))) {
-        std::ostringstream message;
-        message << argument << " must be " << (whole ? "a whole number " : "") << "between " << minimum << " and "
-                << maximum << " (got '" << text << "')";
-        throw std::runtime_error(message.str());
-    }
-    return value;
-}
-
-Options ParseOptions(int argc, char** argv) {
-    Options options;
-    for (int i = 1; i < argc; ++i) {
-        const std::string_view argument = argv[i];
-        if (argument == "--help" || argument == "-h") {
-            options.help = true;
-        } else if (argument == "--self-test") {
-            options.self_test = true;
-        } else if (argument == "--threaded-wait") {
-            options.threaded_wait = true;
-        } else if (argument == "--quad-views") {
-            options.quad_views = true;
-            options.full_size = true;
-        } else if (argument == "--full-size") {
-            options.full_size = true;
-        } else if (argument == "--pattern") {
-            options.pattern = true;
-        } else if (argument == "--depth") {
-            options.depth = true;
-        } else if (argument == "--d3d11-debug") {
-            options.d3d11_debug = true;
-        } else if (argument == "--hitch-every" || argument == "--hitch-ms") {
-            if (++i >= argc) {
-                throw std::runtime_error(std::string(argument) + " requires a value");
-            }
-            const double value = std::stod(argv[i]);
-            if (!std::isfinite(value) || value < 0.0 || value > 10000.0) {
-                throw std::runtime_error(std::string(argument) + " is out of range");
-            }
-            (argument == "--hitch-every" ? options.hitch_every : options.hitch_ms) = value;
-        } else if (argument == "--recreate-seconds") {
-            if (++i >= argc) {
-                throw std::runtime_error("--recreate-seconds requires a value");
-            }
-            options.recreate_seconds = std::stod(argv[i]);
-            if (!std::isfinite(options.recreate_seconds) || options.recreate_seconds < 0.0) {
-                throw std::runtime_error("--recreate-seconds must not be negative");
-            }
-        } else if (argument == "--sessions") {
-            if (++i >= argc) {
-                throw std::runtime_error("--sessions requires a value");
-            }
-            options.sessions = std::stoi(argv[i]);
-            if (options.sessions < 1 || options.sessions > 100) {
-                throw std::runtime_error("--sessions must be between 1 and 100");
-            }
-        } else if (argument == "--frame-ms") {
-            if (++i >= argc) {
-                throw std::runtime_error("--frame-ms requires a value");
-            }
-            options.frame_ms = std::stod(argv[i]);
-            if (!std::isfinite(options.frame_ms) || options.frame_ms < 0.0 || options.frame_ms > 1000.0) {
-                throw std::runtime_error("--frame-ms must be between 0 and 1000");
-            }
-        } else if (argument == "--gpu-ms") {
-            options.gpu_ms = ParseNumber(argc, argv, i, 0.0, 100.0, false);
-        } else if (argument == "--gpu-frames-ahead") {
-            options.gpu_frames_ahead = static_cast<int>(ParseNumber(argc, argv, i, 0.0, 4.0, true));
-        } else if (argument == "--gpu-ms-fixed") {
-            options.gpu_ms_fixed = true;
-        } else if (argument == "--gpu-calibrate") {
-            options.gpu_calibrate = true;
-        } else if (argument == "--mode") {
-            if (++i >= argc) {
-                throw std::runtime_error("--mode requires a value");
-            }
-            const std::string_view value = argv[i];
-            if (value == "source-exact") {
-                options.mode = ProbeMode::SourceExact;
-            } else if (value == "cross-space") {
-                options.mode = ProbeMode::CrossSpace;
-            } else if (value == "cross-space-cached") {
-                options.mode = ProbeMode::CrossSpaceCached;
-            } else {
-                throw std::runtime_error("unknown --mode value: " + std::string(value));
-            }
-        } else if (argument == "--seconds") {
-            if (++i >= argc) {
-                throw std::runtime_error("--seconds requires a value");
-            }
-            options.seconds = std::stod(argv[i]);
-            if (!std::isfinite(options.seconds) || options.seconds <= 0.0 ||
-                options.seconds > 3600.0) {
-                throw std::runtime_error("--seconds must be between 0 and 3600");
-            }
-        } else {
-            throw std::runtime_error("unknown argument: " + std::string(argument));
-        }
-    }
-    if (options.gpu_calibrate && options.gpu_ms <= 0.0) {
-        throw std::runtime_error("--gpu-calibrate requires --gpu-ms N with N above 0");
-    }
-    return options;
 }
 
 void ThrowIfFailed(HRESULT result, std::string_view operation) {
@@ -273,6 +62,477 @@ void CheckXr(XrInstance instance, XrResult result, std::string_view operation) {
     }
     throw std::runtime_error(stream.str());
 }
+
+void Expect(bool condition, std::string_view what) {
+    if (!condition) {
+        throw std::runtime_error("self-test failed: " + std::string(what));
+    }
+}
+
+std::optional<int64_t> ChooseFormat(const std::vector<int64_t>& available, const std::vector<int64_t>& preferences) {
+    for (const int64_t candidate : preferences) {
+        if (std::find(available.begin(), available.end(), candidate) != available.end()) {
+            return candidate;
+        }
+    }
+    return std::nullopt;
+}
+
+Pattern PatternRects(uint32_t width, uint32_t height, PatternKind kind, double seconds) {
+    Pattern pattern;
+    switch (kind) {
+    case PatternKind::Peripheral:
+        pattern.bar_color = {1.0f, 1.0f, 1.0f, 1.0f};
+        pattern.grid_color = {0.1f, 0.8f, 0.2f, 1.0f};
+        break;
+    case PatternKind::Focus:
+        pattern.bar_color = {1.0f, 1.0f, 0.0f, 1.0f};
+        pattern.grid_color = {0.9f, 0.1f, 0.9f, 1.0f};
+        break;
+    case PatternKind::Quad:
+        pattern.bar_color = {1.0f, 0.5f, 0.0f, 1.0f};
+        pattern.grid_color = {0.1f, 0.7f, 0.9f, 1.0f};
+        break;
+    }
+    const int32_t w = static_cast<int32_t>(width);
+    const int32_t h = static_cast<int32_t>(height);
+    const auto add = [&](int32_t left, int32_t top, int32_t right, int32_t bottom) {
+        const PixelRect rect{std::clamp(left, 0, w), std::clamp(top, 0, h), std::clamp(right, 0, w),
+                             std::clamp(bottom, 0, h)};
+        if (rect.right > rect.left && rect.bottom > rect.top) {
+            pattern.grid.push_back(rect);
+        }
+    };
+    const int32_t square = std::max(4, w / 40);
+    for (int32_t y = 1; y < 8; ++y) {
+        for (int32_t x = 1; x < 8; ++x) {
+            const int32_t left = w * x / 8 - square / 2;
+            const int32_t top = h * y / 8 - square / 2;
+            add(left, top, left + square, top + square);
+        }
+    }
+    const int32_t edge = std::max(2, w / 200);
+    add(0, 0, w, edge);
+    add(0, h - edge, w, h);
+    add(0, 0, edge, h);
+    add(w - edge, 0, w, h);
+    const int32_t bar_width = std::min(w, std::max(4, w / 24));
+    const int32_t bar_left =
+        static_cast<int32_t>(std::fmod(seconds / 4.0, 1.0) * static_cast<double>(w - bar_width));
+    pattern.bar = {bar_left, 0, bar_left + bar_width, h};
+    return pattern;
+}
+
+std::array<float, 4> ClearColor(uint32_t view) {
+    return {view % 2 == 0 ? 0.015f : 0.025f, 0.02f, view % 2 == 0 ? 0.03f : 0.015f, 1.0f};
+}
+
+float DepthAt(float meters) {
+    // XMMatrixPerspectiveOffCenterRH: depth = far (d - near) / ((far - near) d).
+    return kFarZ * (meters - kNearZ) / ((kFarZ - kNearZ) * meters);
+}
+
+namespace {
+
+void PrintUsage() {
+    std::cout
+        << "VectorXR real-runtime Pivot space probe\n\n"
+        << "Usage:\n"
+        << "  vectorxr_hardware_probe [options]\n\n"
+        << "Options:\n"
+        << "  --mode source-exact|cross-space|cross-space-cached\n"
+        << "      source-exact        Locate and submit in source LOCAL space.\n"
+        << "      cross-space         Locate in source LOCAL, submit in an offset LOCAL space.\n"
+        << "      cross-space-cached  Also locate the offset space at the same display time.\n"
+        << "  --seconds N             Active render duration (default: 20).\n"
+        << "  --threaded-wait         Overlap the next xrWaitFrame with the current xrEndFrame.\n"
+        << "  --graphics d3d11|vulkan Render with Direct3D 11 (default) or Vulkan. Vulkan clears and draws the\n"
+        << "                          pattern only (no line scene) and is stereo only.\n"
+        << "  --vulkan-enable 1|2     XR_KHR_vulkan_enable or XR_KHR_vulkan_enable2 (default: 2).\n"
+        << "  --vulkan-api 1.0|1.1|1.2|1.3\n"
+        << "                          The Vulkan instance's API version (default: 1.2).\n"
+        << "  --vulkan-validation     Enable the Khronos validation layer (from VK_ADD_LAYER_PATH, else the\n"
+        << "                          build's own copy) and report its errors and warnings at the end.\n"
+        << "  --vk-late-submit        Vulkan: release each view's image first and submit the frame's rendering\n"
+        << "                          only after the last release, before xrEndFrame.\n"
+        << "  --quad-views            Render four views (XR_VARJO_quad_views) into four color|sampled\n"
+        << "                          swapchains at full size, as DCS does (Direct3D 11).\n"
+        << "  --side-by-side          One double-wide color swapchain for both eyes, each eye an imageRect.\n"
+        << "  --quad-layer            Also submit a 2048x2048 quad layer after the projection, re-rendered and\n"
+        << "                          released every frame (a UI panel).\n"
+        << "  --minimal-usage         Create the color swapchains with usage 0.\n"
+        << "  --full-size             Use the recommended view sizes (default: at most 1280 px).\n"
+        << "  --pattern               Also draw a test pattern fixed to each view (a grid and a moving bar;\n"
+        << "                          focus views in other colors), visible wherever the headset points.\n"
+        << "  --frame-ms N            Make each frame take at least N ms (a slower game).\n"
+        << "  --gpu-ms N              Give each frame N ms of GPU work (0-100), split between the views by\n"
+        << "                          pixel count; each view's share runs right before the view renders.\n"
+        << "  --gpu-frames-ahead N    At most N frames' GPU work queued (0-4, default: 2): a frame waits for\n"
+        << "                          the one N before it; 0 waits for its own before xrEndFrame.\n"
+        << "  --gpu-ms-fixed          Keep the calibrated GPU work (default: re-measured every 30 frames to\n"
+        << "                          hold --gpu-ms while other GPU work competes).\n"
+        << "  --gpu-calibrate         Without OpenXR: calibrate --gpu-ms on the default adapter (--graphics\n"
+        << "                          vulkan: the first discrete GPU), run 200 frames of the load alone (paced\n"
+        << "                          at 90 Hz, or --frame-ms when longer), report what they measured and fail\n"
+        << "                          if the mean is off by over 3%.\n"
+        << "  --render-check          Without OpenXR: draw the swapchain shapes into images the probe makes\n"
+        << "                          itself, check their pixels, and fail on debug layer or validation messages.\n"
+        << "  --depth                 Render depth into depth swapchains and submit it with each view\n"
+        << "                          (XR_KHR_composition_layer_depth).\n"
+        << "  --recreate-seconds N    Destroy and recreate the swapchains every N seconds.\n"
+        << "  --sessions N            Run N sessions one after another in one instance (default: 1),\n"
+        << "                          each for --seconds.\n"
+        << "  --hitch-every N         Every N seconds, one frame takes --hitch-ms longer (a stutter).\n"
+        << "  --hitch-ms M            The stutter's length (default: 300).\n"
+        << "  --d3d11-debug           Create the Direct3D 11 device with the debug layer and report its\n"
+        << "                          errors and warnings at the end.\n"
+        << "  --self-test             Validate pose math, option parsing and GPU load arithmetic without\n"
+        << "                          a headset.\n"
+        << "  --help                  Show this help.\n\n"
+        << "Press Escape in the console window to end an active run early.\n";
+}
+
+// The value after argv[i] (advancing i).
+std::string ParseValue(int argc, char** argv, int& i) {
+    const std::string argument = argv[i];
+    if (++i >= argc) {
+        throw std::runtime_error(argument + " requires a value");
+    }
+    return argv[i];
+}
+
+// The value after argv[i] (advancing i): all of it a number in [minimum, maximum], whole if asked.
+double ParseNumber(int argc, char** argv, int& i, double minimum, double maximum, bool whole) {
+    const std::string argument = argv[i];
+    const std::string text = ParseValue(argc, argv, i);
+    std::size_t used = 0;
+    double value = std::numeric_limits<double>::quiet_NaN();
+    try {
+        value = std::stod(text, &used);
+    } catch (const std::exception&) {
+        used = 0;
+    }
+    if (used == 0 || used != text.size() || !std::isfinite(value) || value < minimum || value > maximum ||
+        (whole && value != std::floor(value))) {
+        std::ostringstream message;
+        message << argument << " must be " << (whole ? "a whole number " : "") << "between " << minimum << " and "
+                << maximum << " (got '" << text << "')";
+        throw std::runtime_error(message.str());
+    }
+    return value;
+}
+
+Options ParseOptions(int argc, char** argv) {
+    Options options;
+    std::string vulkan_only; // the first Vulkan-only option given
+    for (int i = 1; i < argc; ++i) {
+        const std::string_view argument = argv[i];
+        if (argument == "--help" || argument == "-h") {
+            options.help = true;
+        } else if (argument == "--self-test") {
+            options.self_test = true;
+        } else if (argument == "--threaded-wait") {
+            options.threaded_wait = true;
+        } else if (argument == "--quad-views") {
+            options.quad_views = true;
+            options.full_size = true;
+        } else if (argument == "--full-size") {
+            options.full_size = true;
+        } else if (argument == "--pattern") {
+            options.pattern = true;
+        } else if (argument == "--depth") {
+            options.depth = true;
+        } else if (argument == "--d3d11-debug") {
+            options.d3d11_debug = true;
+        } else if (argument == "--side-by-side") {
+            options.side_by_side = true;
+        } else if (argument == "--quad-layer") {
+            options.quad_layer = true;
+        } else if (argument == "--minimal-usage") {
+            options.minimal_usage = true;
+        } else if (argument == "--render-check") {
+            options.render_check = true;
+        } else if (argument == "--graphics") {
+            const std::string value = ParseValue(argc, argv, i);
+            if (value == "d3d11") {
+                options.graphics = GraphicsApi::D3D11;
+            } else if (value == "vulkan") {
+                options.graphics = GraphicsApi::Vulkan;
+            } else {
+                throw std::runtime_error("--graphics must be d3d11 or vulkan (got '" + value + "')");
+            }
+        } else if (argument == "--vulkan-enable") {
+            options.vulkan_enable = static_cast<int>(ParseNumber(argc, argv, i, 1.0, 2.0, true));
+            vulkan_only = vulkan_only.empty() ? std::string(argument) : vulkan_only;
+        } else if (argument == "--vulkan-api") {
+            const std::string value = ParseValue(argc, argv, i);
+            if (value == "1.0" || value == "1.1" || value == "1.2" || value == "1.3") {
+                options.vulkan_api = VK_MAKE_API_VERSION(0, 1, static_cast<uint32_t>(value[2] - '0'), 0);
+            } else {
+                throw std::runtime_error("--vulkan-api must be 1.0, 1.1, 1.2 or 1.3 (got '" + value + "')");
+            }
+            vulkan_only = vulkan_only.empty() ? std::string(argument) : vulkan_only;
+        } else if (argument == "--vulkan-validation") {
+            options.vulkan_validation = true;
+            vulkan_only = vulkan_only.empty() ? std::string(argument) : vulkan_only;
+        } else if (argument == "--vk-late-submit") {
+            options.vk_late_submit = true;
+            vulkan_only = vulkan_only.empty() ? std::string(argument) : vulkan_only;
+        } else if (argument == "--hitch-every" || argument == "--hitch-ms") {
+            (argument == "--hitch-every" ? options.hitch_every : options.hitch_ms) =
+                ParseNumber(argc, argv, i, 0.0, 10000.0, false);
+        } else if (argument == "--recreate-seconds") {
+            options.recreate_seconds = ParseNumber(argc, argv, i, 0.0, 3600.0, false);
+        } else if (argument == "--sessions") {
+            options.sessions = static_cast<int>(ParseNumber(argc, argv, i, 1.0, 100.0, true));
+        } else if (argument == "--frame-ms") {
+            options.frame_ms = ParseNumber(argc, argv, i, 0.0, 1000.0, false);
+        } else if (argument == "--gpu-ms") {
+            options.gpu_ms = ParseNumber(argc, argv, i, 0.0, 100.0, false);
+        } else if (argument == "--gpu-frames-ahead") {
+            options.gpu_frames_ahead = static_cast<int>(ParseNumber(argc, argv, i, 0.0, 4.0, true));
+        } else if (argument == "--gpu-ms-fixed") {
+            options.gpu_ms_fixed = true;
+        } else if (argument == "--gpu-calibrate") {
+            options.gpu_calibrate = true;
+        } else if (argument == "--mode") {
+            const std::string value = ParseValue(argc, argv, i);
+            if (value == "source-exact") {
+                options.mode = ProbeMode::SourceExact;
+            } else if (value == "cross-space") {
+                options.mode = ProbeMode::CrossSpace;
+            } else if (value == "cross-space-cached") {
+                options.mode = ProbeMode::CrossSpaceCached;
+            } else {
+                throw std::runtime_error("unknown --mode value: " + value);
+            }
+        } else if (argument == "--seconds") {
+            options.seconds = ParseNumber(argc, argv, i, 0.0, 3600.0, false);
+            if (options.seconds <= 0.0) {
+                throw std::runtime_error("--seconds must be above 0");
+            }
+        } else {
+            throw std::runtime_error("unknown argument: " + std::string(argument));
+        }
+    }
+    if (options.graphics == GraphicsApi::D3D11 && !vulkan_only.empty()) {
+        throw std::runtime_error(vulkan_only + " requires --graphics vulkan");
+    }
+    if (options.graphics == GraphicsApi::Vulkan && options.d3d11_debug) {
+        throw std::runtime_error("--d3d11-debug requires --graphics d3d11 (Vulkan: --vulkan-validation)");
+    }
+    if (options.graphics == GraphicsApi::Vulkan && options.quad_views) {
+        throw std::runtime_error("--quad-views requires --graphics d3d11 (the Vulkan mode is stereo only)");
+    }
+    if (options.side_by_side && options.quad_views) {
+        throw std::runtime_error("--side-by-side is a stereo shape: it cannot be combined with --quad-views");
+    }
+    if (options.gpu_calibrate && options.gpu_ms <= 0.0) {
+        throw std::runtime_error("--gpu-calibrate requires --gpu-ms N with N above 0");
+    }
+    return options;
+}
+
+void RunOptionSelfTest() {
+    const auto parse = [](std::vector<std::string> arguments) {
+        arguments.insert(arguments.begin(), "vectorxr_hardware_probe");
+        std::vector<char*> argv;
+        for (std::string& argument : arguments) {
+            argv.push_back(argument.data());
+        }
+        return ParseOptions(static_cast<int>(argv.size()), argv.data());
+    };
+    const auto rejected = [&](std::vector<std::string> arguments) {
+        try {
+            parse(std::move(arguments));
+        } catch (const std::exception&) {
+            return true;
+        }
+        return false;
+    };
+
+    const Options defaults = parse({});
+    Expect(defaults.gpu_ms == 0.0 && defaults.gpu_frames_ahead == 2 && !defaults.gpu_ms_fixed &&
+               !defaults.gpu_calibrate,
+           "GPU load defaults");
+    Expect(defaults.graphics == GraphicsApi::D3D11 && defaults.vulkan_enable == 2 &&
+               defaults.vulkan_api == VK_API_VERSION_1_2 && !defaults.vulkan_validation && !defaults.vk_late_submit &&
+               !defaults.side_by_side && !defaults.quad_layer && !defaults.minimal_usage,
+           "graphics and shape defaults");
+    const Options load = parse({"--gpu-ms", "11.5", "--gpu-frames-ahead", "0", "--gpu-ms-fixed", "--quad-views"});
+    Expect(load.gpu_ms == 11.5 && load.gpu_frames_ahead == 0 && load.gpu_ms_fixed && load.quad_views,
+           "--gpu-ms, --gpu-frames-ahead and --gpu-ms-fixed parse");
+    Expect(parse({"--gpu-ms", "0"}).gpu_ms == 0.0 && parse({"--gpu-ms", "100"}).gpu_ms == 100.0 &&
+               parse({"--gpu-frames-ahead", "4"}).gpu_frames_ahead == 4,
+           "GPU load range ends accepted");
+    const Options calibrate = parse({"--gpu-calibrate", "--gpu-ms", "5"});
+    Expect(calibrate.gpu_calibrate && calibrate.gpu_ms == 5.0, "--gpu-calibrate with --gpu-ms parses");
+    const Options vulkan = parse({"--vulkan-enable", "1", "--vulkan-api", "1.0", "--graphics", "vulkan",
+                                  "--vulkan-validation", "--vk-late-submit", "--depth", "--pattern"});
+    Expect(vulkan.graphics == GraphicsApi::Vulkan && vulkan.vulkan_enable == 1 &&
+               vulkan.vulkan_api == VK_API_VERSION_1_0 && vulkan.vulkan_validation && vulkan.vk_late_submit &&
+               vulkan.depth && vulkan.pattern,
+           "Vulkan options parse in any order");
+    Expect(parse({"--graphics", "vulkan", "--vulkan-api", "1.3"}).vulkan_api == VK_API_VERSION_1_3 &&
+               parse({"--graphics", "vulkan", "--vulkan-api", "1.1"}).vulkan_api == VK_API_VERSION_1_1 &&
+               parse({"--graphics", "vulkan", "--vulkan-enable", "2"}).vulkan_enable == 2 &&
+               parse({"--graphics", "d3d11"}).graphics == GraphicsApi::D3D11,
+           "--graphics, --vulkan-api and --vulkan-enable values");
+    for (const GraphicsApi api : {GraphicsApi::D3D11, GraphicsApi::Vulkan}) {
+        const Options shapes = parse({"--side-by-side", "--quad-layer", "--minimal-usage", "--graphics",
+                                      api == GraphicsApi::Vulkan ? "vulkan" : "d3d11"});
+        Expect(shapes.side_by_side && shapes.quad_layer && shapes.minimal_usage && shapes.graphics == api,
+               "X-Plane shapes parse for both graphics APIs");
+    }
+    Expect(parse({"--graphics", "vulkan", "--gpu-calibrate", "--gpu-ms", "11"}).gpu_calibrate,
+           "--gpu-calibrate with --graphics vulkan");
+    Expect(!defaults.render_check && parse({"--render-check", "--graphics", "vulkan", "--vk-late-submit"}).render_check,
+           "--render-check");
+    Expect(parse({"--seconds", "0.5", "--sessions", "3", "--recreate-seconds", "2.5", "--frame-ms", "15",
+                  "--hitch-every", "4", "--hitch-ms", "250"})
+                   .sessions == 3,
+           "frame options parse");
+    for (const std::vector<std::string>& arguments : std::vector<std::vector<std::string>>{
+             {"--gpu-ms"},
+             {"--gpu-ms", "-1"},
+             {"--gpu-ms", "100.5"},
+             {"--gpu-ms", "nan"},
+             {"--gpu-ms", "inf"},
+             {"--gpu-ms", "abc"},
+             {"--gpu-ms", "11ms"},
+             {"--gpu-ms", ""},
+             {"--gpu-frames-ahead"},
+             {"--gpu-frames-ahead", "5"},
+             {"--gpu-frames-ahead", "-1"},
+             {"--gpu-frames-ahead", "1.5"},
+             {"--gpu-calibrate"},
+             {"--gpu-calibrate", "--gpu-ms", "0"},
+             {"--graphics"},
+             {"--graphics", "Vulkan"},
+             {"--graphics", "d3d12"},
+             {"--graphics", ""},
+             {"--vulkan-enable", "2"},
+             {"--vulkan-validation"},
+             {"--vk-late-submit"},
+             {"--vulkan-api", "1.2"},
+             {"--graphics", "d3d11", "--vulkan-enable", "1"},
+             {"--graphics", "vulkan", "--vulkan-enable"},
+             {"--graphics", "vulkan", "--vulkan-enable", "0"},
+             {"--graphics", "vulkan", "--vulkan-enable", "3"},
+             {"--graphics", "vulkan", "--vulkan-enable", "1.5"},
+             {"--graphics", "vulkan", "--vulkan-enable", "2x"},
+             {"--graphics", "vulkan", "--vulkan-api"},
+             {"--graphics", "vulkan", "--vulkan-api", "1"},
+             {"--graphics", "vulkan", "--vulkan-api", "1.4"},
+             {"--graphics", "vulkan", "--vulkan-api", "1.2.0"},
+             {"--graphics", "vulkan", "--vulkan-api", "v1.2"},
+             {"--graphics", "vulkan", "--d3d11-debug"},
+             {"--graphics", "vulkan", "--quad-views"},
+             {"--side-by-side", "--quad-views"},
+             {"--seconds", "0"},
+             {"--seconds", "15s"},
+             {"--seconds", "3601"},
+             {"--sessions", "1.5"},
+             {"--sessions", "0"},
+             {"--frame-ms", "abc"},
+             {"--hitch-ms", "-1"},
+             {"--recreate-seconds", "nan"},
+             {"--mode"},
+             {"--mode", "cross"},
+             {"--side-by-side=1"},
+         }) {
+        std::string joined;
+        for (const std::string& argument : arguments) {
+            joined += (joined.empty() ? "" : " ") + argument;
+        }
+        Expect(rejected(arguments), "rejects: " + joined);
+    }
+}
+
+void RunGpuLoadSelfTest() {
+    Expect(CalibrationFactor(20.0, 10.0) == 2.0, "calibration scales by target / measured");
+    Expect(CalibrationFactor(20.0, 0.001) == 64.0 && CalibrationFactor(20.0, 0.0) == 64.0 &&
+               CalibrationFactor(0.5, 100.0) == 1.0 / 64.0,
+           "calibration scale is bounded");
+    Expect(RecalibrationFactor(11.0, 22.0) == 0.9 && RecalibrationFactor(11.0, 5.0) == 1.1 &&
+               RecalibrationFactor(11.0, 0.0) == 1.1,
+           "recalibration moves at most 10%");
+    Expect(std::abs(RecalibrationFactor(11.0, 10.5) - 11.0 / 10.5) < 1.0e-12, "recalibration inside its bounds");
+    Expect(ScaleIterations(kLoadFirstIterations, 64.0) == 262144 && ScaleIterations(3, 0.01) == 1 &&
+               ScaleIterations(kLoadMaximumIterations, 64.0) == kLoadMaximumIterations &&
+               ScaleIterations(1000, std::numeric_limits<double>::quiet_NaN()) == 1000,
+           "iterations scale within [1, maximum]");
+
+    // Quad views as DCS sizes them: the shares follow the pixel counts and add up to the frame's load.
+    const std::array<double, 4> pixels{2184.0 * 2200.0, 2184.0 * 2200.0, 2748.0 * 2764.0, 2748.0 * 2764.0};
+    double total_pixels = 0.0;
+    for (const double count : pixels) {
+        total_pixels += count;
+    }
+    constexpr uint32_t kIterations = 1000003;
+    uint64_t sum = 0;
+    for (const double count : pixels) {
+        sum += ViewIterations(kIterations, count / total_pixels);
+    }
+    Expect(sum + 2 >= kIterations && sum <= kIterations + 2, "view shares add up to the frame's iterations");
+    Expect(ViewIterations(kIterations, pixels[2] / total_pixels) > ViewIterations(kIterations, pixels[0] / total_pixels),
+           "a larger view gets a larger share");
+    Expect(ViewIterations(kIterations, 0.0) == 0 && ViewIterations(1, 1.0e-9) == 1 &&
+               ViewIterations(kIterations, 2.0) == kIterations,
+           "view share edges");
+
+    std::vector<double> samples;
+    for (int i = 1; i <= 100; ++i) {
+        samples.push_back(static_cast<double>(i));
+    }
+    Expect(Percentile(samples, 0.5) == 51.0 && Percentile(samples, 0.99) == 100.0 && Percentile({}, 0.5) == 0.0,
+           "percentiles");
+}
+
+void RunPatternSelfTest() {
+    const auto inside = [](const PixelRect& rect, uint32_t width, uint32_t height) {
+        return rect.left >= 0 && rect.top >= 0 && rect.right <= static_cast<int32_t>(width) &&
+               rect.bottom <= static_cast<int32_t>(height) && rect.right > rect.left && rect.bottom > rect.top;
+    };
+    for (const auto& [width, height] : std::vector<std::pair<uint32_t, uint32_t>>{
+             {1280, 1200}, {2184, 2200}, {kQuadLayerSize, kQuadLayerSize}, {8, 6}}) {
+        for (const double seconds : {0.0, 1.3, 3.999, 123456.7}) {
+            const Pattern pattern = PatternRects(width, height, PatternKind::Peripheral, seconds);
+            Expect(std::all_of(pattern.grid.begin(), pattern.grid.end(),
+                               [&](const PixelRect& rect) { return inside(rect, width, height); }) &&
+                       inside(pattern.bar, width, height),
+                   "pattern rects stay inside the view");
+        }
+    }
+    const Pattern pattern = PatternRects(1280, 1200, PatternKind::Focus, 0.0);
+    Expect(pattern.grid.size() == 7 * 7 + 4, "the pattern is 49 squares and a frame of 4 edges");
+    Expect(pattern.bar.left == 0 && pattern.bar.right == 1280 / 24 && pattern.bar.bottom == 1200,
+           "the bar starts at the left edge");
+    Expect(PatternRects(1280, 1200, PatternKind::Focus, 2.0).bar.left == (1280 - 1280 / 24) / 2,
+           "the bar crosses the view every four seconds");
+    Expect(pattern.grid_color != PatternRects(1280, 1200, PatternKind::Peripheral, 0.0).grid_color &&
+               pattern.grid_color != PatternRects(1280, 1200, PatternKind::Quad, 0.0).grid_color,
+           "peripheral, focus and quad patterns differ in colour");
+    Expect(ClearColor(0) != ClearColor(1) && ClearColor(2) == ClearColor(0), "per-eye clear colours");
+    Expect(std::abs(DepthAt(kNearZ)) < 1.0e-6f && std::abs(DepthAt(kFarZ) - 1.0f) < 1.0e-6f &&
+               DepthAt(2.0f) > 0.97f && DepthAt(2.0f) < 0.98f && DepthAt(1.0f) < DepthAt(2.0f),
+           "depth of a point in front of the eye");
+}
+
+void RunSelfTest() {
+    RunOptionSelfTest();
+    RunGpuLoadSelfTest();
+    RunPatternSelfTest();
+    RunD3D11SelfTest();
+    RunVulkanSelfTest();
+}
+
+} // namespace
+} // namespace probe
+
+namespace {
+
+using namespace probe;
 
 XrPosef IdentityPose() {
     return {{0.0f, 0.0f, 0.0f, 1.0f}, {0.0f, 0.0f, 0.0f}};
@@ -343,246 +603,7 @@ bool NearlyIdentity(const XrPosef& pose) {
            NearlyEqual(pose.position.z, 0.0f);
 }
 
-bool IsTypelessFormat(DXGI_FORMAT format) {
-    switch (format) {
-    case DXGI_FORMAT_R8G8B8A8_TYPELESS:
-    case DXGI_FORMAT_B8G8R8A8_TYPELESS:
-    case DXGI_FORMAT_B8G8R8X8_TYPELESS:
-    case DXGI_FORMAT_R10G10B10A2_TYPELESS:
-    case DXGI_FORMAT_R16G16B16A16_TYPELESS:
-    case DXGI_FORMAT_R16G16_TYPELESS:
-    case DXGI_FORMAT_R32_TYPELESS:
-        return true;
-    default:
-        return false;
-    }
-}
-
-DXGI_FORMAT ResolveRenderTargetFormat(DXGI_FORMAT texture_format,
-                                      int64_t requested_format) {
-    if (!IsTypelessFormat(texture_format)) {
-        return texture_format;
-    }
-    const DXGI_FORMAT requested = static_cast<DXGI_FORMAT>(requested_format);
-    if (requested != DXGI_FORMAT_UNKNOWN && !IsTypelessFormat(requested)) {
-        return requested;
-    }
-    switch (texture_format) {
-    case DXGI_FORMAT_R8G8B8A8_TYPELESS:
-        return DXGI_FORMAT_R8G8B8A8_UNORM;
-    case DXGI_FORMAT_B8G8R8A8_TYPELESS:
-        return DXGI_FORMAT_B8G8R8A8_UNORM;
-    case DXGI_FORMAT_B8G8R8X8_TYPELESS:
-        return DXGI_FORMAT_B8G8R8X8_UNORM;
-    case DXGI_FORMAT_R10G10B10A2_TYPELESS:
-        return DXGI_FORMAT_R10G10B10A2_UNORM;
-    case DXGI_FORMAT_R16G16B16A16_TYPELESS:
-        return DXGI_FORMAT_R16G16B16A16_FLOAT;
-    case DXGI_FORMAT_R16G16_TYPELESS:
-        return DXGI_FORMAT_R16G16_UNORM;
-    case DXGI_FORMAT_R32_TYPELESS:
-        return DXGI_FORMAT_R32_FLOAT;
-    default:
-        return texture_format;
-    }
-}
-
-void CreateSwapchainRenderTarget(ID3D11Device* device,
-                                 ID3D11Texture2D* texture,
-                                 int64_t requested_format,
-                                 ID3D11RenderTargetView** render_target) {
-    D3D11_TEXTURE2D_DESC texture_desc{};
-    texture->GetDesc(&texture_desc);
-
-    D3D11_RENDER_TARGET_VIEW_DESC view_desc{};
-    view_desc.Format = ResolveRenderTargetFormat(
-        texture_desc.Format, requested_format);
-    if (texture_desc.SampleDesc.Count > 1 && texture_desc.ArraySize > 1) {
-        view_desc.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2DMSARRAY;
-        view_desc.Texture2DMSArray.FirstArraySlice = 0;
-        view_desc.Texture2DMSArray.ArraySize = 1;
-    } else if (texture_desc.SampleDesc.Count > 1) {
-        view_desc.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2DMS;
-    } else if (texture_desc.ArraySize > 1) {
-        view_desc.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2DARRAY;
-        view_desc.Texture2DArray.MipSlice = 0;
-        view_desc.Texture2DArray.FirstArraySlice = 0;
-        view_desc.Texture2DArray.ArraySize = 1;
-    } else {
-        view_desc.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D;
-        view_desc.Texture2D.MipSlice = 0;
-    }
-
-    const HRESULT result = device->CreateRenderTargetView(
-        texture, &view_desc, render_target);
-    if (FAILED(result)) {
-        std::ostringstream stream;
-        stream << "CreateRenderTargetView failed with HRESULT 0x" << std::hex
-               << static_cast<uint32_t>(result) << std::dec
-               << "; requestedFormat=" << requested_format
-               << ", texture={size=" << texture_desc.Width << "x" << texture_desc.Height
-               << ", mips=" << texture_desc.MipLevels
-               << ", array=" << texture_desc.ArraySize
-               << ", format=" << static_cast<uint32_t>(texture_desc.Format)
-               << ", samples=" << texture_desc.SampleDesc.Count
-               << ", bindFlags=0x" << std::hex << texture_desc.BindFlags << std::dec
-               << "}, viewFormat=" << static_cast<uint32_t>(view_desc.Format)
-               << ", viewDimension=" << static_cast<uint32_t>(view_desc.ViewDimension);
-        throw std::runtime_error(stream.str());
-    }
-}
-
-// --gpu-ms: a compute dispatch of 1024 groups of 64 threads, each looping a dependent sequence `iterations` times, so
-// its time grows linearly with the iterations and hardly with the GPU's width.
-constexpr uint32_t kLoadGroups = 1024;
-constexpr uint32_t kLoadThreads = kLoadGroups * 64;
-constexpr uint32_t kLoadFirstIterations = 4096;
-constexpr uint32_t kLoadMaximumIterations = 1u << 30;
-constexpr int kLoadCalibrationRounds = 8;
-constexpr int kLoadCalibrationRuns = 5;
-constexpr double kLoadTolerance = 0.03;
-constexpr int kLoadRecalibrationFrames = 30;
-constexpr int kLoadCalibrationFrames = 200; // --gpu-calibrate
-
-// The value at `fraction` of `sorted` (as the probe's other percentiles); 0 without samples.
-double Percentile(const std::vector<double>& sorted, double fraction) {
-    if (sorted.empty()) {
-        return 0.0;
-    }
-    return sorted[std::min(sorted.size() - 1,
-                           static_cast<std::size_t>(static_cast<double>(sorted.size()) * fraction))];
-}
-
-uint32_t ScaleIterations(uint32_t iterations, double factor) {
-    const double scaled = std::round(static_cast<double>(iterations) * factor);
-    if (!std::isfinite(scaled)) {
-        return iterations;
-    }
-    return static_cast<uint32_t>(std::clamp(scaled, 1.0, static_cast<double>(kLoadMaximumIterations)));
-}
-
-// Calibration's next scale, bounded so that a first measurement near the timer's resolution cannot ask for seconds of
-// work in one dispatch.
-double CalibrationFactor(double target_ms, double measured_ms) {
-    return measured_ms > 0.0 ? std::clamp(target_ms / measured_ms, 1.0 / 64.0, 64.0) : 64.0;
-}
-
-// Recalibration while running: at most 10% a step, so one disturbed window cannot swing the load.
-double RecalibrationFactor(double target_ms, double measured_ms) {
-    return measured_ms > 0.0 ? std::clamp(target_ms / measured_ms, 0.9, 1.1) : 1.1;
-}
-
-// One view's share of a frame's iterations: none without a share, else at least one.
-uint32_t ViewIterations(uint32_t iterations, double share) {
-    if (!(share > 0.0)) {
-        return 0;
-    }
-    return ScaleIterations(iterations, std::min(share, 1.0));
-}
-
-void Expect(bool condition, std::string_view what) {
-    if (!condition) {
-        throw std::runtime_error("self-test failed: " + std::string(what));
-    }
-}
-
-void RunOptionSelfTest() {
-    const auto parse = [](std::vector<std::string> arguments) {
-        arguments.insert(arguments.begin(), "vectorxr_hardware_probe");
-        std::vector<char*> argv;
-        for (std::string& argument : arguments) {
-            argv.push_back(argument.data());
-        }
-        return ParseOptions(static_cast<int>(argv.size()), argv.data());
-    };
-    const auto rejected = [&](std::vector<std::string> arguments) {
-        try {
-            parse(std::move(arguments));
-        } catch (const std::exception&) {
-            return true;
-        }
-        return false;
-    };
-
-    const Options defaults = parse({});
-    Expect(defaults.gpu_ms == 0.0 && defaults.gpu_frames_ahead == 2 && !defaults.gpu_ms_fixed &&
-               !defaults.gpu_calibrate,
-           "GPU load defaults");
-    const Options load = parse({"--gpu-ms", "11.5", "--gpu-frames-ahead", "0", "--gpu-ms-fixed", "--quad-views"});
-    Expect(load.gpu_ms == 11.5 && load.gpu_frames_ahead == 0 && load.gpu_ms_fixed && load.quad_views,
-           "--gpu-ms, --gpu-frames-ahead and --gpu-ms-fixed parse");
-    Expect(parse({"--gpu-ms", "0"}).gpu_ms == 0.0 && parse({"--gpu-ms", "100"}).gpu_ms == 100.0 &&
-               parse({"--gpu-frames-ahead", "4"}).gpu_frames_ahead == 4,
-           "GPU load range ends accepted");
-    const Options calibrate = parse({"--gpu-calibrate", "--gpu-ms", "5"});
-    Expect(calibrate.gpu_calibrate && calibrate.gpu_ms == 5.0, "--gpu-calibrate with --gpu-ms parses");
-    for (const std::vector<std::string>& arguments : std::vector<std::vector<std::string>>{
-             {"--gpu-ms"},
-             {"--gpu-ms", "-1"},
-             {"--gpu-ms", "100.5"},
-             {"--gpu-ms", "nan"},
-             {"--gpu-ms", "inf"},
-             {"--gpu-ms", "abc"},
-             {"--gpu-ms", "11ms"},
-             {"--gpu-ms", ""},
-             {"--gpu-frames-ahead"},
-             {"--gpu-frames-ahead", "5"},
-             {"--gpu-frames-ahead", "-1"},
-             {"--gpu-frames-ahead", "1.5"},
-             {"--gpu-calibrate"},
-             {"--gpu-calibrate", "--gpu-ms", "0"},
-         }) {
-        std::string joined;
-        for (const std::string& argument : arguments) {
-            joined += (joined.empty() ? "" : " ") + argument;
-        }
-        Expect(rejected(arguments), "rejects: " + joined);
-    }
-}
-
-void RunGpuLoadSelfTest() {
-    Expect(CalibrationFactor(20.0, 10.0) == 2.0, "calibration scales by target / measured");
-    Expect(CalibrationFactor(20.0, 0.001) == 64.0 && CalibrationFactor(20.0, 0.0) == 64.0 &&
-               CalibrationFactor(0.5, 100.0) == 1.0 / 64.0,
-           "calibration scale is bounded");
-    Expect(RecalibrationFactor(11.0, 22.0) == 0.9 && RecalibrationFactor(11.0, 5.0) == 1.1 &&
-               RecalibrationFactor(11.0, 0.0) == 1.1,
-           "recalibration moves at most 10%");
-    Expect(std::abs(RecalibrationFactor(11.0, 10.5) - 11.0 / 10.5) < 1.0e-12, "recalibration inside its bounds");
-    Expect(ScaleIterations(kLoadFirstIterations, 64.0) == 262144 && ScaleIterations(3, 0.01) == 1 &&
-               ScaleIterations(kLoadMaximumIterations, 64.0) == kLoadMaximumIterations &&
-               ScaleIterations(1000, std::numeric_limits<double>::quiet_NaN()) == 1000,
-           "iterations scale within [1, maximum]");
-
-    // Quad views as DCS sizes them: the shares follow the pixel counts and add up to the frame's load.
-    const std::array<double, 4> pixels{2184.0 * 2200.0, 2184.0 * 2200.0, 2748.0 * 2764.0, 2748.0 * 2764.0};
-    double total_pixels = 0.0;
-    for (const double count : pixels) {
-        total_pixels += count;
-    }
-    constexpr uint32_t kIterations = 1000003;
-    uint64_t sum = 0;
-    for (const double count : pixels) {
-        sum += ViewIterations(kIterations, count / total_pixels);
-    }
-    Expect(sum + 2 >= kIterations && sum <= kIterations + 2, "view shares add up to the frame's iterations");
-    Expect(ViewIterations(kIterations, pixels[2] / total_pixels) > ViewIterations(kIterations, pixels[0] / total_pixels),
-           "a larger view gets a larger share");
-    Expect(ViewIterations(kIterations, 0.0) == 0 && ViewIterations(1, 1.0e-9) == 1 &&
-               ViewIterations(kIterations, 2.0) == kIterations,
-           "view share edges");
-
-    std::vector<double> samples;
-    for (int i = 1; i <= 100; ++i) {
-        samples.push_back(static_cast<double>(i));
-    }
-    Expect(Percentile(samples, 0.5) == 51.0 && Percentile(samples, 0.99) == 100.0 && Percentile({}, 0.5) == 0.0,
-           "percentiles");
-}
-
-void RunSelfTest() {
-    RunOptionSelfTest();
-    RunGpuLoadSelfTest();
+void RunPoseSelfTest() {
     constexpr float kPi = 3.14159265358979323846f;
     const float half_yaw = 0.5f * kPi / 2.0f;
     const XrPosef target{
@@ -596,746 +617,32 @@ void RunSelfTest() {
     const XrPosef transformed = ComposePose(target, view);
     const XrPosef round_trip = ComposePose(InvertPose(target), transformed);
     const XrPosef error = ComposePose(InvertPose(view), round_trip);
-    if (!NearlyIdentity(error)) {
-        throw std::runtime_error("pose composition round-trip failed");
-    }
-    if (ResolveRenderTargetFormat(
-            DXGI_FORMAT_R8G8B8A8_TYPELESS,
-            DXGI_FORMAT_R8G8B8A8_UNORM_SRGB) !=
-        DXGI_FORMAT_R8G8B8A8_UNORM_SRGB) {
-        throw std::runtime_error("typeless swapchain RTV format resolution failed");
-    }
-    if (ResolveRenderTargetFormat(
-            DXGI_FORMAT_B8G8R8A8_UNORM,
-            DXGI_FORMAT_R8G8B8A8_UNORM) !=
-        DXGI_FORMAT_B8G8R8A8_UNORM) {
-        throw std::runtime_error("typed swapchain RTV format preservation failed");
-    }
-    std::cout << "vectorxr_hardware_probe self-test passed\n";
+    Expect(NearlyIdentity(error), "pose composition round-trip");
 }
 
-struct Vertex {
-    XMFLOAT3 position;
-    XMFLOAT3 color;
-};
-
-struct SceneConstants {
-    XMFLOAT4X4 view_projection;
-};
-
-void CompileShader(const char* source,
-                   const char* entry,
-                   const char* profile,
-                   ID3DBlob** output) {
-    ComPtr<ID3DBlob> errors;
-    const HRESULT result = D3DCompile(
-        source, std::strlen(source), "pivot_space_probe.hlsl", nullptr, nullptr,
-        entry, profile, D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, output, &errors);
-    if (FAILED(result)) {
-        const std::string detail = errors
-            ? std::string(static_cast<const char*>(errors->GetBufferPointer()),
-                          errors->GetBufferSize())
-            : std::string{};
-        throw std::runtime_error("D3DCompile failed for " + std::string(entry) +
-                                 ": " + detail);
-    }
-}
-
-class DiagnosticRenderer {
-public:
-    void Initialize(ID3D11Device* device, ID3D11DeviceContext* context) {
-        device_ = device;
-        context_ = context;
-
-        static constexpr char kShaderSource[] = R"(
-cbuffer SceneConstants : register(b0) {
-    row_major float4x4 viewProjection;
-};
-
-struct VertexInput {
-    float3 position : POSITION;
-    float3 color : COLOR0;
-};
-
-struct VertexOutput {
-    float4 position : SV_POSITION;
-    float3 color : COLOR0;
-};
-
-VertexOutput VSMain(VertexInput input) {
-    VertexOutput output;
-    output.position = mul(float4(input.position, 1.0), viewProjection);
-    output.color = input.color;
-    return output;
-}
-
-float4 PSMain(VertexOutput input) : SV_TARGET {
-    return float4(input.color, 1.0);
-}
-)";
-
-        ComPtr<ID3DBlob> vertex_blob;
-        ComPtr<ID3DBlob> pixel_blob;
-        CompileShader(kShaderSource, "VSMain", "vs_5_0", &vertex_blob);
-        CompileShader(kShaderSource, "PSMain", "ps_5_0", &pixel_blob);
-        ThrowIfFailed(device_->CreateVertexShader(
-                          vertex_blob->GetBufferPointer(), vertex_blob->GetBufferSize(),
-                          nullptr, &vertex_shader_),
-                      "CreateVertexShader");
-        ThrowIfFailed(device_->CreatePixelShader(
-                          pixel_blob->GetBufferPointer(), pixel_blob->GetBufferSize(),
-                          nullptr, &pixel_shader_),
-                      "CreatePixelShader");
-
-        const D3D11_INPUT_ELEMENT_DESC elements[] = {
-            {"POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0,
-             static_cast<UINT>(offsetof(Vertex, position)),
-             D3D11_INPUT_PER_VERTEX_DATA, 0},
-            {"COLOR", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0,
-             static_cast<UINT>(offsetof(Vertex, color)),
-             D3D11_INPUT_PER_VERTEX_DATA, 0},
-        };
-        ThrowIfFailed(device_->CreateInputLayout(
-                          elements, static_cast<UINT>(std::size(elements)),
-                          vertex_blob->GetBufferPointer(), vertex_blob->GetBufferSize(),
-                          &input_layout_),
-                      "CreateInputLayout");
-
-        const std::vector<Vertex> vertices = BuildScene();
-        vertex_count_ = static_cast<UINT>(vertices.size());
-        D3D11_BUFFER_DESC vertex_desc{};
-        vertex_desc.ByteWidth = static_cast<UINT>(vertices.size() * sizeof(Vertex));
-        vertex_desc.Usage = D3D11_USAGE_IMMUTABLE;
-        vertex_desc.BindFlags = D3D11_BIND_VERTEX_BUFFER;
-        D3D11_SUBRESOURCE_DATA vertex_data{};
-        vertex_data.pSysMem = vertices.data();
-        ThrowIfFailed(device_->CreateBuffer(&vertex_desc, &vertex_data, &vertex_buffer_),
-                      "CreateBuffer(vertex)");
-
-        D3D11_BUFFER_DESC constant_desc{};
-        constant_desc.ByteWidth = sizeof(SceneConstants);
-        constant_desc.Usage = D3D11_USAGE_DYNAMIC;
-        constant_desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
-        constant_desc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
-        ThrowIfFailed(device_->CreateBuffer(&constant_desc, nullptr, &constant_buffer_),
-                      "CreateBuffer(constants)");
-
-        D3D11_DEPTH_STENCIL_DESC depth_state_desc{};
-        depth_state_desc.DepthEnable = TRUE;
-        depth_state_desc.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ALL;
-        depth_state_desc.DepthFunc = D3D11_COMPARISON_LESS;
-        ThrowIfFailed(device_->CreateDepthStencilState(&depth_state_desc, &depth_state_),
-                      "CreateDepthStencilState");
-    }
-
-    void Render(ID3D11RenderTargetView* render_target,
-                ID3D11DepthStencilView* depth_target,
-                uint32_t width,
-                uint32_t height,
-                const XrPosef& view_pose,
-                const XrFovf& fov,
-                uint32_t eye) {
-        const float clear_color[4] = {
-            eye == 0 ? 0.015f : 0.025f,
-            0.02f,
-            eye == 0 ? 0.03f : 0.015f,
-            1.0f,
-        };
-        context_->ClearRenderTargetView(render_target, clear_color);
-        context_->ClearDepthStencilView(depth_target, D3D11_CLEAR_DEPTH, 1.0f, 0);
-
-        const XMVECTOR orientation = XMVectorSet(
-            view_pose.orientation.x, view_pose.orientation.y,
-            view_pose.orientation.z, view_pose.orientation.w);
-        const XMMATRIX world_from_view =
-            XMMatrixRotationQuaternion(orientation) *
-            XMMatrixTranslation(view_pose.position.x,
-                                view_pose.position.y,
-                                view_pose.position.z);
-        const XMMATRIX view_from_world = XMMatrixInverse(nullptr, world_from_view);
-        const float left = std::tan(fov.angleLeft) * kNearZ;
-        const float right = std::tan(fov.angleRight) * kNearZ;
-        const float bottom = std::tan(fov.angleDown) * kNearZ;
-        const float top = std::tan(fov.angleUp) * kNearZ;
-        const XMMATRIX projection = XMMatrixPerspectiveOffCenterRH(
-            left, right, bottom, top, kNearZ, kFarZ);
-
-        SceneConstants constants{};
-        XMStoreFloat4x4(&constants.view_projection, view_from_world * projection);
-        D3D11_MAPPED_SUBRESOURCE mapped{};
-        ThrowIfFailed(context_->Map(constant_buffer_.Get(), 0,
-                                    D3D11_MAP_WRITE_DISCARD, 0, &mapped),
-                      "Map(constants)");
-        std::memcpy(mapped.pData, &constants, sizeof(constants));
-        context_->Unmap(constant_buffer_.Get(), 0);
-
-        D3D11_VIEWPORT viewport{};
-        viewport.Width = static_cast<float>(width);
-        viewport.Height = static_cast<float>(height);
-        viewport.MinDepth = 0.0f;
-        viewport.MaxDepth = 1.0f;
-        context_->RSSetViewports(1, &viewport);
-        context_->OMSetRenderTargets(1, &render_target, depth_target);
-        context_->OMSetDepthStencilState(depth_state_.Get(), 0);
-        context_->IASetInputLayout(input_layout_.Get());
-        context_->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_LINELIST);
-        const UINT stride = sizeof(Vertex);
-        const UINT offset = 0;
-        ID3D11Buffer* vertex_buffer = vertex_buffer_.Get();
-        context_->IASetVertexBuffers(0, 1, &vertex_buffer, &stride, &offset);
-        context_->VSSetShader(vertex_shader_.Get(), nullptr, 0);
-        ID3D11Buffer* constant_buffer = constant_buffer_.Get();
-        context_->VSSetConstantBuffers(0, 1, &constant_buffer);
-        context_->PSSetShader(pixel_shader_.Get(), nullptr, 0);
-        context_->Draw(vertex_count_, 0);
-    }
-
-private:
-    static std::vector<Vertex> BuildScene() {
-        std::vector<Vertex> vertices;
-        const auto line = [&](XMFLOAT3 start, XMFLOAT3 end, XMFLOAT3 color) {
-            vertices.push_back({start, color});
-            vertices.push_back({end, color});
-        };
-
-        const XMFLOAT3 grid{0.18f, 0.22f, 0.27f};
-        for (int x = -10; x <= 10; ++x) {
-            line({static_cast<float>(x), -1.5f, -1.0f},
-                 {static_cast<float>(x), -1.5f, -21.0f}, grid);
-        }
-        for (int z = 1; z <= 21; ++z) {
-            line({-10.0f, -1.5f, -static_cast<float>(z)},
-                 {10.0f, -1.5f, -static_cast<float>(z)}, grid);
-        }
-
-        const XMFLOAT3 origin{0.0f, -1.5f, -4.0f};
-        line(origin, {2.5f, -1.5f, -4.0f}, {1.0f, 0.1f, 0.1f});
-        line(origin, {0.0f, 1.0f, -4.0f}, {0.1f, 1.0f, 0.1f});
-        line(origin, {0.0f, -1.5f, -7.0f}, {0.1f, 0.35f, 1.0f});
-
-        const auto beacon = [&](float x, float z, XMFLOAT3 color) {
-            line({x, -1.5f, z}, {x, 2.5f, z}, color);
-            line({x - 0.4f, 2.1f, z}, {x + 0.4f, 2.1f, z}, color);
-            line({x, 1.7f, z - 0.4f}, {x, 1.7f, z + 0.4f}, color);
-        };
-        beacon(-3.0f, -7.0f, {1.0f, 0.85f, 0.1f});
-        beacon(4.0f, -12.0f, {1.0f, 0.1f, 0.85f});
-        return vertices;
-    }
-
-    ID3D11Device* device_{nullptr};
-    ID3D11DeviceContext* context_{nullptr};
-    ComPtr<ID3D11VertexShader> vertex_shader_;
-    ComPtr<ID3D11PixelShader> pixel_shader_;
-    ComPtr<ID3D11InputLayout> input_layout_;
-    ComPtr<ID3D11Buffer> vertex_buffer_;
-    ComPtr<ID3D11Buffer> constant_buffer_;
-    ComPtr<ID3D11DepthStencilState> depth_state_;
-    UINT vertex_count_{0};
-};
-
-// --gpu-ms: GPU work that gives each of the probe's frames a game's GPU time. Calibrated with timestamp queries before
-// the first frame. Each view's share is recorded right before the view renders, so the view's release (and anything a
-// layer queues behind it) waits for it. An event query per frame holds the probe until its frame --gpu-frames-ahead
-// before has run on the GPU, as a game's own frame queue would.
-class GpuLoad {
-public:
-    GpuLoad(ID3D11Device* device, ID3D11DeviceContext* context, const Options& options)
-        : device_(device),
-          context_(context),
-          target_ms_(options.gpu_ms),
-          frames_ahead_(static_cast<uint64_t>(options.gpu_frames_ahead)),
-          fixed_(options.gpu_ms_fixed) {
-        if (device_->GetFeatureLevel() < D3D_FEATURE_LEVEL_11_0) {
-            throw std::runtime_error("--gpu-ms needs a Direct3D 11.0 GPU (compute shaders)");
-        }
-        static constexpr char kShaderSource[] = R"(
-cbuffer LoadConstants : register(b0) {
-    uint iterations;
-};
-
-RWStructuredBuffer<float> values : register(u0);
-
-[numthreads(64, 1, 1)]
-void CSMain(uint3 id : SV_DispatchThreadID) {
-    float v = values[id.x];
-    // The values carry over from dispatch to dispatch: start again long before they could overflow.
-    if (!(abs(v) < 1.0e4)) {
-        v = 1.0 + id.x * 1.0e-6;
-    }
-    [loop]
-    for (uint i = 0; i < iterations; ++i) {
-        v = mad(v, 1.000001, sin(v) * 1.0e-3);
-    }
-    values[id.x] = v;
-}
-)";
-        ComPtr<ID3DBlob> blob;
-        CompileShader(kShaderSource, "CSMain", "cs_5_0", &blob);
-        ThrowIfFailed(device_->CreateComputeShader(blob->GetBufferPointer(), blob->GetBufferSize(), nullptr,
-                                                   &shader_),
-                      "CreateComputeShader(GPU load)");
-
-        std::vector<float> seeds(kLoadThreads);
-        for (uint32_t i = 0; i < kLoadThreads; ++i) {
-            seeds[i] = 1.0f + static_cast<float>(i) * 1.0e-6f;
-        }
-        D3D11_BUFFER_DESC values_desc{};
-        values_desc.ByteWidth = kLoadThreads * sizeof(float);
-        values_desc.Usage = D3D11_USAGE_DEFAULT;
-        values_desc.BindFlags = D3D11_BIND_UNORDERED_ACCESS;
-        values_desc.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
-        values_desc.StructureByteStride = sizeof(float);
-        D3D11_SUBRESOURCE_DATA values_data{};
-        values_data.pSysMem = seeds.data();
-        ThrowIfFailed(device_->CreateBuffer(&values_desc, &values_data, &values_), "CreateBuffer(GPU load)");
-        D3D11_UNORDERED_ACCESS_VIEW_DESC view_desc{};
-        view_desc.Format = DXGI_FORMAT_UNKNOWN;
-        view_desc.ViewDimension = D3D11_UAV_DIMENSION_BUFFER;
-        view_desc.Buffer.NumElements = kLoadThreads;
-        ThrowIfFailed(device_->CreateUnorderedAccessView(values_.Get(), &view_desc, &values_view_),
-                      "CreateUnorderedAccessView(GPU load)");
-
-        D3D11_BUFFER_DESC constant_desc{};
-        constant_desc.ByteWidth = 16;
-        constant_desc.Usage = D3D11_USAGE_DYNAMIC;
-        constant_desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
-        constant_desc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
-        ThrowIfFailed(device_->CreateBuffer(&constant_desc, nullptr, &constants_),
-                      "CreateBuffer(GPU load constants)");
-
-        for (Timer& timer : calibration_.views) {
-            timer = CreateTimer();
-        }
-        for (Frame& frame : ring_) {
-            for (Timer& timer : frame.views) {
-                timer = CreateTimer();
-            }
-            frame.done = CreateQuery(D3D11_QUERY_EVENT);
-        }
-    }
-
-    // The iterations that take --gpu-ms as frames record them, split evenly into `views` timed dispatches (a split
-    // load measures a few percent above one dispatch of the same iterations): 30 warm-up dispatches, then rounds of
-    // 5 timed frames, each scaled by target / median, until within 3% (at most 8 rounds).
-    void Calibrate(uint32_t views) {
-        views = std::clamp<uint32_t>(views, 1, kMaximumViews);
-        iterations_ = kLoadFirstIterations;
-        for (int i = 0; i < 30; ++i) {
-            Dispatch(iterations_);
-        }
-        double measured = 0.0;
-        for (int round = 0; round < kLoadCalibrationRounds; ++round) {
-            std::vector<double> runs;
-            for (int run = 0; run < kLoadCalibrationRuns; ++run) {
-                calibration_.views_used = 0;
-                for (uint32_t view = 0; view < views; ++view) {
-                    RecordTimed(calibration_.views[calibration_.views_used++],
-                                ViewIterations(iterations_, 1.0 / views));
-                }
-                if (const std::optional<double> ms = ReadFrame(calibration_)) {
-                    runs.push_back(*ms);
-                }
-            }
-            if (runs.empty()) {
-                continue; // every run straddled a clock change
-            }
-            std::sort(runs.begin(), runs.end());
-            measured = Percentile(runs, 0.5);
-            if (std::abs(measured - target_ms_) <= kLoadTolerance * target_ms_ ||
-                round + 1 == kLoadCalibrationRounds) {
-                break;
-            }
-            iterations_ = ScaleIterations(iterations_, CalibrationFactor(target_ms_, measured));
-        }
-        calibrated_iterations_ = iterations_;
-        std::ostringstream line;
-        line << std::fixed << std::setprecision(2) << "GPU load: target " << target_ms_ << " ms = " << iterations_
-             << " iterations in " << views << " views (measured " << measured << " ms)\n";
-        std::cout << line.str();
-    }
-
-    // A frame begins: waits until the frame --gpu-frames-ahead before it has run on the GPU.
-    void BeginFrame() {
-        if (frames_ahead_ > 0 && frames_ >= frames_ahead_) {
-            WaitForFrame(frames_ - frames_ahead_);
-        }
-        Collect(false);
-        // Frames finish in order, so every frame from the oldest uncollected one on is still queued.
-        max_queued_ = std::max(max_queued_, frames_ - collected_);
-    }
-
-    // One view's share of this frame's load (its pixels / all views' pixels), right before the view renders.
-    void DispatchView(double share) {
-        Frame& frame = ring_[frames_ % kRing];
-        if (!open_) {
-            while (frames_ - collected_ >= kRing) {
-                CollectOldest(true);
-            }
-            frame.views_used = 0;
-            frame.iterations = iterations_;
-            open_ = true;
-        }
-        const uint32_t iterations = ViewIterations(frame.iterations, share);
-        if (iterations == 0 || frame.views_used >= frame.views.size()) {
-            return;
-        }
-        RecordTimed(frame.views[frame.views_used++], iterations);
-    }
-
-    // The frame's last view was recorded; with --gpu-frames-ahead 0 the frame waits for its own GPU work here.
-    void EndFrame() {
-        if (!open_) {
-            return;
-        }
-        context_->End(ring_[frames_ % kRing].done.Get());
-        open_ = false;
-        ++frames_;
-        if (frames_ahead_ == 0) {
-            WaitForFrame(frames_ - 1);
-        }
-    }
-
-    // Collects every recorded frame's timings (waits for the GPU).
-    void Drain() {
-        Collect(true);
-    }
-
-    // Whether no frame began with more earlier frames queued on the GPU than --gpu-frames-ahead allows.
-    bool QueueBounded() const {
-        return max_queued_ <= (frames_ahead_ > 0 ? frames_ahead_ - 1 : 0);
-    }
-
-    double MeanMs() const {
-        double sum = 0.0;
-        for (const double ms : frame_ms_) {
-            sum += ms;
-        }
-        return frame_ms_.empty() ? 0.0 : sum / static_cast<double>(frame_ms_.size());
-    }
-
-    void Report(std::ostream& out) const {
-        std::vector<double> sorted = frame_ms_;
-        std::sort(sorted.begin(), sorted.end());
-        std::ostringstream line;
-        line << std::fixed << std::setprecision(2) << "GPU load: target " << target_ms_ << " ms, mean " << MeanMs()
-             << " ms, p50 " << Percentile(sorted, 0.5) << " ms, p99 " << Percentile(sorted, 0.99) << " ms ("
-             << sorted.size() << " frames timed";
-        if (disjoint_frames_ > 0) {
-            line << ", " << disjoint_frames_ << " straddled a clock change";
-        }
-        line << "), iterations " << iterations_ << " (calibrated " << calibrated_iterations_ << ", "
-             << (fixed_ ? std::string("fixed") : std::to_string(adjustments_) + " adjustments") << ")\n"
-             << "GPU frames ahead " << frames_ahead_ << ": at most " << max_queued_
-             << " earlier frames queued when a frame began, " << stalls_ << " stalls of " << frames_ << " frames";
-        if (stalls_ > 0) {
-            line << ", mean " << stall_ms_ / static_cast<double>(stalls_) << " ms, max " << stall_max_ms_
-                 << " ms, total " << stall_ms_ << " ms";
-        }
-        line << "\n";
-        out << line.str();
-    }
-
-private:
-    static constexpr std::size_t kRing = 8;
-    static_assert(kRing > 4 + 1, "the ring must hold more frames than --gpu-frames-ahead lets queue");
-
-    struct Timer {
-        ComPtr<ID3D11Query> disjoint;
-        ComPtr<ID3D11Query> start;
-        ComPtr<ID3D11Query> end;
-    };
-
-    struct Frame {
-        std::array<Timer, kMaximumViews> views;
-        ComPtr<ID3D11Query> done; // event: the frame's GPU work has run
-        uint32_t views_used{0};
-        uint32_t iterations{0}; // the frame's total, before its views' shares
-    };
-
-    ComPtr<ID3D11Query> CreateQuery(D3D11_QUERY type) {
-        D3D11_QUERY_DESC desc{};
-        desc.Query = type;
-        ComPtr<ID3D11Query> query;
-        ThrowIfFailed(device_->CreateQuery(&desc, &query), "CreateQuery(GPU load)");
-        return query;
-    }
-
-    Timer CreateTimer() {
-        return {CreateQuery(D3D11_QUERY_TIMESTAMP_DISJOINT), CreateQuery(D3D11_QUERY_TIMESTAMP),
-                CreateQuery(D3D11_QUERY_TIMESTAMP)};
-    }
-
-    void Dispatch(uint32_t iterations) {
-        D3D11_MAPPED_SUBRESOURCE mapped{};
-        ThrowIfFailed(context_->Map(constants_.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped),
-                      "Map(GPU load constants)");
-        const std::array<uint32_t, 4> constants{iterations, 0, 0, 0};
-        std::memcpy(mapped.pData, constants.data(), sizeof(constants));
-        context_->Unmap(constants_.Get(), 0);
-        ID3D11Buffer* constant_buffer = constants_.Get();
-        ID3D11UnorderedAccessView* view = values_view_.Get();
-        context_->CSSetShader(shader_.Get(), nullptr, 0);
-        context_->CSSetConstantBuffers(0, 1, &constant_buffer);
-        context_->CSSetUnorderedAccessViews(0, 1, &view, nullptr);
-        context_->Dispatch(kLoadGroups, 1, 1);
-        // No compute state is left behind for the frame's rendering or a layer's work.
-        ID3D11UnorderedAccessView* no_view = nullptr;
-        ID3D11Buffer* no_buffer = nullptr;
-        context_->CSSetUnorderedAccessViews(0, 1, &no_view, nullptr);
-        context_->CSSetConstantBuffers(0, 1, &no_buffer);
-        context_->CSSetShader(nullptr, nullptr, 0);
-    }
-
-    // Whether `query` has its result (written to `data` when given). Only the first poll of a wait flushes.
-    bool Poll(ID3D11Query* query, void* data, UINT size, bool flush) {
-        const HRESULT result =
-            context_->GetData(query, data, size, flush ? 0 : D3D11_ASYNC_GETDATA_DONOTFLUSH);
-        ThrowIfFailed(result, "ID3D11DeviceContext::GetData(GPU load)");
-        return result == S_OK;
-    }
-
-    void Wait(ID3D11Query* query, void* data, UINT size) {
-        if (Poll(query, data, size, true)) {
-            return;
-        }
-        while (!Poll(query, data, size, false)) {
-            std::this_thread::yield();
-        }
-    }
-
-    // A timer's span in ms; nullopt when it straddled a clock change.
-    std::optional<double> Read(const Timer& timer) {
-        D3D11_QUERY_DATA_TIMESTAMP_DISJOINT disjoint{};
-        UINT64 start = 0;
-        UINT64 end = 0;
-        Wait(timer.disjoint.Get(), &disjoint, sizeof(disjoint));
-        Wait(timer.start.Get(), &start, sizeof(start));
-        Wait(timer.end.Get(), &end, sizeof(end));
-        if (disjoint.Disjoint || disjoint.Frequency == 0 || end < start) {
-            return std::nullopt;
-        }
-        return static_cast<double>(end - start) * 1000.0 / static_cast<double>(disjoint.Frequency);
-    }
-
-    // A frame's load: the sum of its views' timers; nullopt when one straddled a clock change.
-    std::optional<double> ReadFrame(const Frame& frame) {
-        double ms = 0.0;
-        for (uint32_t view = 0; view < frame.views_used; ++view) {
-            const std::optional<double> view_ms = Read(frame.views[view]);
-            if (!view_ms) {
-                return std::nullopt;
-            }
-            ms += *view_ms;
-        }
-        return ms;
-    }
-
-    void RecordTimed(const Timer& timer, uint32_t iterations) {
-        context_->Begin(timer.disjoint.Get());
-        context_->End(timer.start.Get());
-        Dispatch(iterations);
-        context_->End(timer.end.Get());
-        context_->End(timer.disjoint.Get());
-    }
-
-    // Blocks until frame `index` has run on the GPU; a wait that blocks is a stall.
-    void WaitForFrame(uint64_t index) {
-        if (index < collected_) {
-            return; // collected: it has run
-        }
-        ID3D11Query* done = ring_[index % kRing].done.Get();
-        if (Poll(done, nullptr, 0, true)) {
-            return;
-        }
-        const auto begun = std::chrono::steady_clock::now();
-        while (!Poll(done, nullptr, 0, false)) {
-            std::this_thread::yield();
-        }
-        const double ms =
-            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - begun).count();
-        ++stalls_;
-        stall_ms_ += ms;
-        stall_max_ms_ = std::max(stall_max_ms_, ms);
-    }
-
-    void Collect(bool wait) {
-        while (collected_ < frames_ && CollectOldest(wait)) {
-        }
-    }
-
-    // The oldest uncollected frame's timing, once it has run; recalibrates every 30 frames unless --gpu-ms-fixed.
-    bool CollectOldest(bool wait) {
-        const Frame& frame = ring_[collected_ % kRing];
-        if (wait) {
-            Wait(frame.done.Get(), nullptr, 0);
-        } else if (!Poll(frame.done.Get(), nullptr, 0, false)) {
-            return false;
-        }
-        ++collected_;
-        if (frame.views_used == 0) {
-            return true;
-        }
-        const std::optional<double> ms = ReadFrame(frame);
-        if (!ms) {
-            ++disjoint_frames_;
-            return true;
-        }
-        frame_ms_.push_back(*ms);
-        // Only frames recorded at the current iterations judge them (older ones may still be in flight).
-        if (!fixed_ && frame.iterations == iterations_) {
-            window_ms_ += *ms;
-            if (++window_frames_ >= kLoadRecalibrationFrames) {
-                iterations_ = ScaleIterations(
-                    iterations_, RecalibrationFactor(target_ms_, window_ms_ / static_cast<double>(window_frames_)));
-                ++adjustments_;
-                window_ms_ = 0.0;
-                window_frames_ = 0;
-            }
-        }
-        return true;
-    }
-
-    ID3D11Device* device_{nullptr};
-    ID3D11DeviceContext* context_{nullptr};
-    double target_ms_{0.0};
-    uint64_t frames_ahead_{0};
-    bool fixed_{false};
-    ComPtr<ID3D11ComputeShader> shader_;
-    ComPtr<ID3D11Buffer> values_;
-    ComPtr<ID3D11UnorderedAccessView> values_view_;
-    ComPtr<ID3D11Buffer> constants_;
-    Frame calibration_; // its views' timers only
-    std::array<Frame, kRing> ring_;
-    uint64_t frames_{0};    // frames recorded
-    uint64_t collected_{0}; // frames whose timings were read, oldest first
-    bool open_{false};      // the current frame has recorded a view
-    uint32_t iterations_{kLoadFirstIterations};
-    uint32_t calibrated_iterations_{0};
-    uint64_t adjustments_{0};
-    double window_ms_{0.0};
-    int window_frames_{0};
-    std::vector<double> frame_ms_;
-    uint64_t disjoint_frames_{0};
-    uint64_t stalls_{0};
-    double stall_ms_{0.0};
-    double stall_max_ms_{0.0};
-    uint64_t max_queued_{0};
-};
-
-// The Direct3D 11 debug layer's errors and warnings over the run (the first
-// few of them, and how many).
-void ReportD3D11Messages(ID3D11Device* device) {
-    ComPtr<ID3D11InfoQueue> queue;
-    if (FAILED(device->QueryInterface(IID_PPV_ARGS(&queue)))) {
-        std::cout << "Direct3D 11 debug layer: unavailable\n";
-        return;
-    }
-    uint64_t errors = 0;
-    uint64_t warnings = 0;
-    int shown = 0;
-    for (UINT64 i = 0; i < queue->GetNumStoredMessages(); ++i) {
-        SIZE_T size = 0;
-        queue->GetMessage(i, nullptr, &size);
-        std::vector<char> storage(size);
-        auto* message = reinterpret_cast<D3D11_MESSAGE*>(storage.data());
-        if (FAILED(queue->GetMessage(i, message, &size))) continue;
-        if (message->Severity <= D3D11_MESSAGE_SEVERITY_ERROR) {
-            ++errors;
-        } else if (message->Severity == D3D11_MESSAGE_SEVERITY_WARNING) {
-            ++warnings;
-        } else {
-            continue;
-        }
-        if (shown++ < 10) {
-            std::cout << "Direct3D 11 debug layer [" << message->ID << "]: " << message->pDescription << "\n";
-        }
-    }
-    std::cout << "Direct3D 11 debug layer: " << errors << " errors, " << warnings << " warnings (of "
-              << queue->GetNumStoredMessages() << " stored, " << queue->GetNumMessagesDiscardedByMessageCountLimit()
-              << " discarded)\n";
-}
-
-// --gpu-calibrate: the GPU load alone, without OpenXR, on the default hardware adapter. Its frames are paced as a
-// 90 Hz runtime would (or at --frame-ms when longer) and split into two views (four with --quad-views). True when
-// their mean load is within 3% of --gpu-ms and no frame began with more frames queued than --gpu-frames-ahead allows.
-bool RunGpuCalibration(const Options& options) {
-    const std::array<D3D_FEATURE_LEVEL, 4> feature_levels{
-        D3D_FEATURE_LEVEL_12_1, D3D_FEATURE_LEVEL_12_0, D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0,
-    };
-    ComPtr<ID3D11Device> device;
-    ComPtr<ID3D11DeviceContext> context;
-    ThrowIfFailed(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr,
-                                    options.d3d11_debug ? D3D11_CREATE_DEVICE_DEBUG : 0, feature_levels.data(),
-                                    static_cast<UINT>(feature_levels.size()), D3D11_SDK_VERSION, &device, nullptr,
-                                    &context),
-                  "D3D11CreateDevice");
-    ComPtr<IDXGIDevice> dxgi_device;
-    ComPtr<IDXGIAdapter> adapter;
-    DXGI_ADAPTER_DESC description{};
-    if (SUCCEEDED(device.As(&dxgi_device)) && SUCCEEDED(dxgi_device->GetAdapter(&adapter)) &&
-        SUCCEEDED(adapter->GetDesc(&description))) {
-        std::wcout << L"Graphics adapter: " << description.Description << L"\n";
-    }
-
-    GpuLoad load(device.Get(), context.Get(), options);
-    const uint32_t views = options.quad_views ? 4u : 2u;
-    load.Calibrate(views);
-    const double period_ms = std::max(options.frame_ms, 1000.0 / 90.0);
-    const auto period = std::chrono::duration_cast<std::chrono::steady_clock::duration>(
-        std::chrono::duration<double, std::milli>(period_ms));
-    const auto started = std::chrono::steady_clock::now();
-    auto next = started;
-    for (int frame = 0; frame < kLoadCalibrationFrames; ++frame) {
-        load.BeginFrame();
-        for (uint32_t view = 0; view < views; ++view) {
-            load.DispatchView(1.0 / views);
-        }
-        load.EndFrame();
-        context->Flush(); // as a frame's release would
-        // A late frame (the GPU holding it back) starts the next one at once, without catching up.
-        next = std::max(next + period, std::chrono::steady_clock::now());
-        while (std::chrono::steady_clock::now() < next) {
-            if (next - std::chrono::steady_clock::now() > std::chrono::milliseconds(2)) {
-                Sleep(1);
-            } else {
-                std::this_thread::yield();
-            }
-        }
-    }
-    load.Drain();
-    const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
-
-    load.Report(std::cout);
-    const double error = (load.MeanMs() - options.gpu_ms) / options.gpu_ms;
-    const bool within = std::abs(error) <= kLoadTolerance;
-    std::ostringstream line;
-    line << std::fixed << std::setprecision(2) << "Frames: " << kLoadCalibrationFrames << " in " << seconds << " s ("
-         << kLoadCalibrationFrames / seconds << " fps, paced at " << 1000.0 / period_ms << " Hz, " << views
-         << " views)\n"
-         << "GPU load check: the mean is " << std::showpos << error * 100.0 << std::noshowpos << "% off the target ("
-         << (within ? "within" : "outside") << " 3%); the frame queue "
-         << (load.QueueBounded() ? "stayed within" : "exceeded") << " --gpu-frames-ahead\n";
-    std::cout << line.str();
-    if (options.d3d11_debug) {
-        ReportD3D11Messages(device.Get());
-    }
-    return within && load.QueueBounded();
-}
-
-struct EyeSwapchain {
+// An OpenXR swapchain the views render into, and its depth swapchain (--depth).
+struct ProbeSwapchain {
     XrSwapchain handle{XR_NULL_HANDLE};
+    uint32_t id{0}; // the graphics' id
     uint32_t width{0};
     uint32_t height{0};
-    int64_t format{0};
-    std::vector<XrSwapchainImageD3D11KHR> images;
-    std::vector<ComPtr<ID3D11RenderTargetView>> render_targets;
-    ComPtr<ID3D11Texture2D> depth_texture;
-    ComPtr<ID3D11DepthStencilView> depth_target;
-    // --depth: a depth swapchain, one view per image, instead of depth_texture.
     XrSwapchain depth_handle{XR_NULL_HANDLE};
-    std::vector<ComPtr<ID3D11DepthStencilView>> depth_targets;
+    uint32_t depth_id{0};
 };
+
+// Where a view renders: its swapchain and its pixels there (--side-by-side: one half).
+struct ViewTarget {
+    uint32_t swapchain{0};
+    PixelRect rect{};
+};
+
+int32_t RectWidth(const PixelRect& rect) {
+    return rect.right - rect.left;
+}
+
+int32_t RectHeight(const PixelRect& rect) {
+    return rect.bottom - rect.top;
+}
 
 struct WaitedFrame {
     XrResult result{XR_SUCCESS};
@@ -1431,28 +738,25 @@ public:
     explicit ProbeApp(Options options)
         : options_(options),
           view_configuration_(options.quad_views ? XR_VIEW_CONFIGURATION_TYPE_PRIMARY_QUAD_VARJO
-                                                 : XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO) {}
+                                                 : XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO),
+          graphics_(options.graphics == GraphicsApi::Vulkan ? CreateVulkanGraphics(options)
+                                                            : CreateD3D11Graphics(options)) {}
 
+    // The graphics device outlives the session and the instance that used it, and the GPU's work on the swapchains
+    // ends before they are destroyed (Vulkan needs both; Direct3D 11 keeps its resources alive by itself).
     ~ProbeApp() {
         DestroySwapchains();
         gpu_load_.reset();
-        renderer_.reset();
-        context1_.Reset();
-        context_.Reset();
-        device_.Reset();
         DestroySession();
         if (instance_ != XR_NULL_HANDLE) {
             xrDestroyInstance(instance_);
         }
+        graphics_.reset();
     }
 
     void DestroySwapchains() {
-        for (EyeSwapchain& swapchain : swapchains_) {
-            swapchain.depth_target.Reset();
-            swapchain.depth_texture.Reset();
-            swapchain.depth_targets.clear();
-            swapchain.render_targets.clear();
-            swapchain.images.clear();
+        graphics_->RemoveSwapchains();
+        for (const ProbeSwapchain& swapchain : swapchains_) {
             if (swapchain.handle != XR_NULL_HANDLE) {
                 xrDestroySwapchain(swapchain.handle);
             }
@@ -1460,7 +764,12 @@ public:
                 xrDestroySwapchain(swapchain.depth_handle);
             }
         }
+        if (quad_ && quad_->handle != XR_NULL_HANDLE) {
+            xrDestroySwapchain(quad_->handle);
+        }
         swapchains_.clear();
+        views_.clear();
+        quad_.reset();
     }
 
     void DestroySession() {
@@ -1494,9 +803,12 @@ public:
             CreateSwapchains();
             WaitForSessionReady();
 
-            std::cout << "Probe active: mode=" << ModeName(options_.mode)
+            std::cout << "Probe active: graphics=" << graphics_->Describe() << ", mode=" << ModeName(options_.mode)
                       << ", threadedWait=" << (options_.threaded_wait ? "yes" : "no")
-                      << ", views=" << swapchains_.size()
+                      << ", views=" << ViewCount()
+                      << ", swapchains=" << (options_.side_by_side ? "side-by-side" : "one per view")
+                      << (options_.quad_layer ? ", quadLayer=yes" : "")
+                      << (options_.minimal_usage ? ", colorUsage=0" : "")
                       << ", frameMs=" << options_.frame_ms;
             if (gpu_load_) {
                 std::cout << ", gpuMs=" << options_.gpu_ms << " (framesAhead " << options_.gpu_frames_ahead
@@ -1513,9 +825,7 @@ public:
                   << ", swapchainRecreations=" << recreations_ << ", hitches=" << hitches_
                   << ", invalidViewFrames=" << invalid_view_frames_
                   << ", spaceRelationFailures=" << space_relation_failures_ << "\n";
-        if (options_.d3d11_debug) {
-            ReportD3D11Messages(device_.Get());
-        }
+        graphics_->Report();
         static const char* const call_names[] = {"acquire", "wait", "release", "endFrame"};
         for (int call = 0; call < 4; ++call) {
             std::vector<double> sorted = call_ms_[call];
@@ -1559,11 +869,12 @@ private:
                 return std::strcmp(extension.extensionName, name) == 0;
             });
         };
-        if (!offered(XR_KHR_D3D11_ENABLE_EXTENSION_NAME)) {
-            throw std::runtime_error("active OpenXR runtime does not expose XR_KHR_D3D11_enable");
+        const char* graphics_extension = graphics_->InstanceExtension();
+        if (!offered(graphics_extension)) {
+            throw std::runtime_error(std::string("active OpenXR runtime does not expose ") + graphics_extension);
         }
 
-        std::vector<const char*> enabled_extensions{XR_KHR_D3D11_ENABLE_EXTENSION_NAME};
+        std::vector<const char*> enabled_extensions{graphics_extension};
         if (options_.depth) {
             if (!offered(XR_KHR_COMPOSITION_LAYER_DEPTH_EXTENSION_NAME)) {
                 throw std::runtime_error("the runtime does not offer XR_KHR_composition_layer_depth");
@@ -1614,67 +925,16 @@ private:
                 "xrGetSystemProperties");
         std::cout << "System: " << system_properties.systemName << "\n";
 
-        PFN_xrGetD3D11GraphicsRequirementsKHR get_requirements = nullptr;
-        CheckXr(instance_, xrGetInstanceProcAddr(
-                               instance_, "xrGetD3D11GraphicsRequirementsKHR",
-                               reinterpret_cast<PFN_xrVoidFunction*>(&get_requirements)),
-                "xrGetInstanceProcAddr(xrGetD3D11GraphicsRequirementsKHR)");
-        XrGraphicsRequirementsD3D11KHR requirements{
-            XR_TYPE_GRAPHICS_REQUIREMENTS_D3D11_KHR};
-        CheckXr(instance_, get_requirements(instance_, system_id_, &requirements),
-                "xrGetD3D11GraphicsRequirementsKHR");
-
-        ComPtr<IDXGIFactory1> factory;
-        ThrowIfFailed(CreateDXGIFactory1(IID_PPV_ARGS(&factory)),
-                      "CreateDXGIFactory1");
-        ComPtr<IDXGIAdapter1> selected_adapter;
-        for (UINT index = 0;; ++index) {
-            ComPtr<IDXGIAdapter1> candidate;
-            if (factory->EnumAdapters1(index, &candidate) == DXGI_ERROR_NOT_FOUND) {
-                break;
-            }
-            DXGI_ADAPTER_DESC1 description{};
-            ThrowIfFailed(candidate->GetDesc1(&description), "IDXGIAdapter1::GetDesc1");
-            if (description.AdapterLuid.HighPart == requirements.adapterLuid.HighPart &&
-                description.AdapterLuid.LowPart == requirements.adapterLuid.LowPart) {
-                selected_adapter = candidate;
-                std::wcout << L"Graphics adapter: " << description.Description << L"\n";
-                break;
-            }
-        }
-        if (!selected_adapter) {
-            throw std::runtime_error("could not find the D3D11 adapter requested by the runtime");
-        }
-
-        const std::array<D3D_FEATURE_LEVEL, 7> feature_levels{
-            D3D_FEATURE_LEVEL_12_1, D3D_FEATURE_LEVEL_12_0,
-            D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0,
-            D3D_FEATURE_LEVEL_10_1, D3D_FEATURE_LEVEL_10_0,
-            D3D_FEATURE_LEVEL_9_3,
-        };
-        D3D_FEATURE_LEVEL created_level{};
-        ThrowIfFailed(D3D11CreateDevice(
-                          selected_adapter.Get(), D3D_DRIVER_TYPE_UNKNOWN, nullptr,
-                          D3D11_CREATE_DEVICE_BGRA_SUPPORT |
-                              (options_.d3d11_debug ? D3D11_CREATE_DEVICE_DEBUG : 0),
-                          feature_levels.data(), static_cast<UINT>(feature_levels.size()),
-                          D3D11_SDK_VERSION, &device_, &created_level, &context_),
-                      "D3D11CreateDevice");
-        if (created_level < requirements.minFeatureLevel) {
-            throw std::runtime_error("created D3D11 device does not meet the runtime feature-level requirement");
-        }
+        graphics_->CreateDevice(instance_, system_id_);
         if (options_.gpu_ms > 0.0) {
-            gpu_load_ = std::make_unique<GpuLoad>(device_.Get(), context_.Get(), options_);
+            gpu_load_ = graphics_->CreateGpuLoad(options_);
             gpu_load_->Calibrate(options_.quad_views ? 4u : 2u);
         }
     }
 
     void CreateSession() {
-        XrGraphicsBindingD3D11KHR graphics_binding{
-            XR_TYPE_GRAPHICS_BINDING_D3D11_KHR};
-        graphics_binding.device = device_.Get();
         XrSessionCreateInfo create_info{XR_TYPE_SESSION_CREATE_INFO};
-        create_info.next = &graphics_binding;
+        create_info.next = graphics_->Binding();
         create_info.systemId = system_id_;
         CheckXr(instance_, xrCreateSession(instance_, &create_info, &session_),
                 "xrCreateSession");
@@ -1718,6 +978,8 @@ private:
                 "xrCreateReferenceSpace(offset LOCAL)");
     }
 
+    // One color swapchain per view, or one double-wide for both eyes (--side-by-side), each with a depth swapchain
+    // of its size (--depth); and the quad layer's (--quad-layer).
     void CreateSwapchains() {
         uint32_t view_count = 0;
         CheckXr(instance_, xrEnumerateViewConfigurationViews(
@@ -1743,122 +1005,109 @@ private:
         CheckXr(instance_, xrEnumerateSwapchainFormats(
                                session_, format_count, &format_count, formats.data()),
                 "xrEnumerateSwapchainFormats");
-        const std::array<int64_t, 4> preferences{
-            DXGI_FORMAT_R8G8B8A8_UNORM_SRGB,
-            DXGI_FORMAT_B8G8R8A8_UNORM_SRGB,
-            DXGI_FORMAT_R8G8B8A8_UNORM,
-            DXGI_FORMAT_B8G8R8A8_UNORM,
-        };
-        const auto preferred = std::find_if(
-            preferences.begin(), preferences.end(), [&](int64_t candidate) {
-                return std::find(formats.begin(), formats.end(), candidate) != formats.end();
-            });
-        if (preferred == preferences.end()) {
+        const std::optional<int64_t> color_format = ChooseFormat(formats, graphics_->ColorFormats());
+        if (!color_format) {
             throw std::runtime_error("runtime exposes no supported RGBA/BGRA render-target format");
         }
+        if (options_.depth &&
+            std::find(formats.begin(), formats.end(), graphics_->DepthFormat()) == formats.end()) {
+            throw std::runtime_error("the runtime offers no 32-bit float depth swapchains");
+        }
 
-        swapchains_.resize(view_count);
-        for (uint32_t eye = 0; eye < view_count; ++eye) {
-            EyeSwapchain& swapchain = swapchains_[eye];
+        std::vector<std::pair<uint32_t, uint32_t>> sizes;
+        for (uint32_t view = 0; view < view_count; ++view) {
             const uint32_t limit = options_.full_size ? UINT32_MAX : kMaximumEyeDimension;
-            swapchain.width = std::min(view_configuration_views_[eye].recommendedImageRectWidth, limit);
-            swapchain.height = std::min(view_configuration_views_[eye].recommendedImageRectHeight, limit);
-            if (swapchain.width == 0 || swapchain.height == 0) {
+            const uint32_t width = std::min(view_configuration_views_[view].recommendedImageRectWidth, limit);
+            const uint32_t height = std::min(view_configuration_views_[view].recommendedImageRectHeight, limit);
+            if (width == 0 || height == 0) {
                 throw std::runtime_error("runtime returned a zero recommended view dimension");
             }
-            swapchain.format = *preferred;
-
-            XrSwapchainCreateInfo create_info{XR_TYPE_SWAPCHAIN_CREATE_INFO};
-            create_info.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT |
-                                     (options_.quad_views ? XR_SWAPCHAIN_USAGE_SAMPLED_BIT : 0);
-            create_info.format = swapchain.format;
-            create_info.sampleCount = 1;
-            create_info.width = swapchain.width;
-            create_info.height = swapchain.height;
-            create_info.faceCount = 1;
-            create_info.arraySize = 1;
-            create_info.mipCount = 1;
-            CheckXr(instance_, xrCreateSwapchain(session_, &create_info, &swapchain.handle),
-                    "xrCreateSwapchain");
-
-            uint32_t image_count = 0;
-            CheckXr(instance_, xrEnumerateSwapchainImages(
-                                   swapchain.handle, 0, &image_count, nullptr),
-                    "xrEnumerateSwapchainImages(count)");
-            swapchain.images.assign(image_count, {XR_TYPE_SWAPCHAIN_IMAGE_D3D11_KHR});
-            CheckXr(instance_, xrEnumerateSwapchainImages(
-                                   swapchain.handle, image_count, &image_count,
-                                   reinterpret_cast<XrSwapchainImageBaseHeader*>(
-                                       swapchain.images.data())),
-                    "xrEnumerateSwapchainImages");
-            swapchain.render_targets.resize(image_count);
-            for (uint32_t image = 0; image < image_count; ++image) {
-                CreateSwapchainRenderTarget(
-                    device_.Get(), swapchain.images[image].texture,
-                    swapchain.format, &swapchain.render_targets[image]);
-            }
-
-            if (options_.depth) {
-                if (std::find(formats.begin(), formats.end(), DXGI_FORMAT_D32_FLOAT) == formats.end()) {
-                    throw std::runtime_error("the runtime offers no D32_FLOAT swapchains");
-                }
-                XrSwapchainCreateInfo depth_info{XR_TYPE_SWAPCHAIN_CREATE_INFO};
-                depth_info.usageFlags = XR_SWAPCHAIN_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
-                depth_info.format = DXGI_FORMAT_D32_FLOAT;
-                depth_info.sampleCount = 1;
-                depth_info.width = swapchain.width;
-                depth_info.height = swapchain.height;
-                depth_info.faceCount = 1;
-                depth_info.arraySize = 1;
-                depth_info.mipCount = 1;
-                CheckXr(instance_, xrCreateSwapchain(session_, &depth_info, &swapchain.depth_handle),
-                        "xrCreateSwapchain(depth)");
-                uint32_t depth_count = 0;
-                CheckXr(instance_, xrEnumerateSwapchainImages(swapchain.depth_handle, 0, &depth_count, nullptr),
-                        "xrEnumerateSwapchainImages(depth count)");
-                std::vector<XrSwapchainImageD3D11KHR> depth_images(depth_count, {XR_TYPE_SWAPCHAIN_IMAGE_D3D11_KHR});
-                CheckXr(instance_,
-                        xrEnumerateSwapchainImages(swapchain.depth_handle, depth_count, &depth_count,
-                                                   reinterpret_cast<XrSwapchainImageBaseHeader*>(depth_images.data())),
-                        "xrEnumerateSwapchainImages(depth)");
-                for (const XrSwapchainImageD3D11KHR& image : depth_images) {
-                    D3D11_DEPTH_STENCIL_VIEW_DESC view{};
-                    view.Format = DXGI_FORMAT_D32_FLOAT;
-                    view.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2D;
-                    ComPtr<ID3D11DepthStencilView> target;
-                    ThrowIfFailed(device_->CreateDepthStencilView(image.texture, &view, &target),
-                                  "CreateDepthStencilView(depth swapchain)");
-                    swapchain.depth_targets.push_back(target);
-                }
-                continue;
-            }
-
-            D3D11_TEXTURE2D_DESC depth_desc{};
-            depth_desc.Width = swapchain.width;
-            depth_desc.Height = swapchain.height;
-            depth_desc.MipLevels = 1;
-            depth_desc.ArraySize = 1;
-            depth_desc.Format = DXGI_FORMAT_D32_FLOAT;
-            depth_desc.SampleDesc.Count = 1;
-            depth_desc.Usage = D3D11_USAGE_DEFAULT;
-            depth_desc.BindFlags = D3D11_BIND_DEPTH_STENCIL;
-            ThrowIfFailed(device_->CreateTexture2D(
-                              &depth_desc, nullptr, &swapchain.depth_texture),
-                          "CreateTexture2D(depth)");
-            ThrowIfFailed(device_->CreateDepthStencilView(
-                              swapchain.depth_texture.Get(), nullptr,
-                              &swapchain.depth_target),
-                          "CreateDepthStencilView");
+            sizes.emplace_back(width, height);
         }
 
-        renderer_ = std::make_unique<DiagnosticRenderer>();
-        renderer_->Initialize(device_.Get(), context_.Get());
+        views_.assign(view_count, {});
+        if (options_.side_by_side) {
+            // As X-Plane: both eyes in one image, the left eye in the left half.
+            uint32_t eye_width = 0;
+            uint32_t eye_height = 0;
+            for (const auto& [width, height] : sizes) {
+                eye_width = std::max(eye_width, width);
+                eye_height = std::max(eye_height, height);
+            }
+            CreateProjectionSwapchain(eye_width * view_count, eye_height, *color_format);
+            for (uint32_t view = 0; view < view_count; ++view) {
+                const int32_t left = static_cast<int32_t>(eye_width * view);
+                views_[view] = {0, {left, 0, left + static_cast<int32_t>(sizes[view].first),
+                                    static_cast<int32_t>(sizes[view].second)}};
+            }
+        } else {
+            for (uint32_t view = 0; view < view_count; ++view) {
+                CreateProjectionSwapchain(sizes[view].first, sizes[view].second, *color_format);
+                views_[view] = {view, {0, 0, static_cast<int32_t>(sizes[view].first),
+                                       static_cast<int32_t>(sizes[view].second)}};
+            }
+        }
+        if (options_.quad_layer) {
+            quad_.emplace();
+            const XrSwapchainCreateInfo info = SwapchainInfo(
+                kQuadLayerSize, kQuadLayerSize, *color_format,
+                options_.minimal_usage ? 0 : XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_SAMPLED_BIT);
+            CheckXr(instance_, xrCreateSwapchain(session_, &info, &quad_->handle), "xrCreateSwapchain(quad layer)");
+            quad_->width = info.width;
+            quad_->height = info.height;
+            quad_->id = graphics_->AddSwapchain(instance_, quad_->handle, info, SwapchainRole::Quad);
+        }
+
         std::cout << "Probe swapchains:";
-        for (const EyeSwapchain& swapchain : swapchains_) {
+        for (const ProbeSwapchain& swapchain : swapchains_) {
             std::cout << " " << swapchain.width << "x" << swapchain.height;
         }
-        std::cout << " (format " << swapchains_[0].format << ", "
-                  << swapchains_[0].images.size() << " images each)\n";
+        std::cout << " (format " << *color_format << ", " << graphics_->ImageCount(swapchains_[0].id)
+                  << " images each" << (options_.depth ? ", with depth swapchains" : "")
+                  << (options_.minimal_usage ? ", usage 0" : "") << ")";
+        if (quad_) {
+            std::cout << "; quad layer " << quad_->width << "x" << quad_->height << " ("
+                      << graphics_->ImageCount(quad_->id) << " images)";
+        }
+        std::cout << "\n";
+    }
+
+    static XrSwapchainCreateInfo SwapchainInfo(uint32_t width, uint32_t height, int64_t format,
+                                               XrSwapchainUsageFlags usage) {
+        XrSwapchainCreateInfo info{XR_TYPE_SWAPCHAIN_CREATE_INFO};
+        info.usageFlags = usage;
+        info.format = format;
+        info.sampleCount = 1;
+        info.width = width;
+        info.height = height;
+        info.faceCount = 1;
+        info.arraySize = 1;
+        info.mipCount = 1;
+        return info;
+    }
+
+    void CreateProjectionSwapchain(uint32_t width, uint32_t height, int64_t format) {
+        swapchains_.emplace_back();
+        ProbeSwapchain& swapchain = swapchains_.back();
+        swapchain.width = width;
+        swapchain.height = height;
+        const XrSwapchainUsageFlags usage =
+            options_.minimal_usage ? 0
+                                   : XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT |
+                                         (options_.quad_views ? XR_SWAPCHAIN_USAGE_SAMPLED_BIT : 0);
+        const XrSwapchainCreateInfo info = SwapchainInfo(width, height, format, usage);
+        CheckXr(instance_, xrCreateSwapchain(session_, &info, &swapchain.handle), "xrCreateSwapchain");
+        swapchain.id = graphics_->AddSwapchain(
+            instance_, swapchain.handle, info,
+            options_.depth ? SwapchainRole::ProjectionWithDepth : SwapchainRole::Projection);
+        if (options_.depth) {
+            const XrSwapchainCreateInfo depth_info = SwapchainInfo(
+                width, height, graphics_->DepthFormat(), XR_SWAPCHAIN_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT);
+            CheckXr(instance_, xrCreateSwapchain(session_, &depth_info, &swapchain.depth_handle),
+                    "xrCreateSwapchain(depth)");
+            swapchain.depth_id =
+                graphics_->AddSwapchain(instance_, swapchain.depth_handle, depth_info, SwapchainRole::Depth);
+        }
     }
 
     bool PollEvents() {
@@ -1977,14 +1226,13 @@ private:
         }
     }
 
-    void RenderEye(uint32_t eye, const XrView& view) {
-        EyeSwapchain& swapchain = swapchains_[eye];
-        uint32_t image_index = 0;
+    // Acquires and waits for the swapchain's color image (timed) and its depth image.
+    void AcquireImages(const ProbeSwapchain& swapchain, uint32_t* color_index, uint32_t* depth_index) {
         const XrSwapchainImageAcquireInfo acquire_info{
             XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};
         auto call_start = std::chrono::steady_clock::now();
         CheckXr(instance_, xrAcquireSwapchainImage(
-                               swapchain.handle, &acquire_info, &image_index),
+                               swapchain.handle, &acquire_info, color_index),
                 "xrAcquireSwapchainImage");
         NoteCall(0, call_start);
         const XrSwapchainImageWaitInfo wait_info{
@@ -1993,25 +1241,18 @@ private:
         CheckXr(instance_, xrWaitSwapchainImage(swapchain.handle, &wait_info),
                 "xrWaitSwapchainImage");
         NoteCall(1, call_start);
-        ID3D11DepthStencilView* depth_target = swapchain.depth_target.Get();
         if (swapchain.depth_handle != XR_NULL_HANDLE) {
-            uint32_t depth_index = 0;
-            CheckXr(instance_, xrAcquireSwapchainImage(swapchain.depth_handle, &acquire_info, &depth_index),
+            CheckXr(instance_, xrAcquireSwapchainImage(swapchain.depth_handle, &acquire_info, depth_index),
                     "xrAcquireSwapchainImage(depth)");
             CheckXr(instance_, xrWaitSwapchainImage(swapchain.depth_handle, &wait_info),
                     "xrWaitSwapchainImage(depth)");
-            depth_target = swapchain.depth_targets[depth_index].Get();
         }
-        renderer_->Render(swapchain.render_targets[image_index].Get(),
-                          depth_target,
-                          swapchain.width, swapchain.height,
-                          view.pose, view.fov, eye % 2);
-        if (options_.pattern) {
-            DrawPattern(swapchain.render_targets[image_index].Get(), swapchain.width, swapchain.height, eye);
-        }
+    }
+
+    void ReleaseImages(const ProbeSwapchain& swapchain) {
         const XrSwapchainImageReleaseInfo release_info{
             XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
-        call_start = std::chrono::steady_clock::now();
+        const auto call_start = std::chrono::steady_clock::now();
         CheckXr(instance_, xrReleaseSwapchainImage(
                                swapchain.handle, &release_info),
                 "xrReleaseSwapchainImage");
@@ -2022,39 +1263,66 @@ private:
         }
     }
 
-    // A grid of squares, a frame and a bar sweeping across once every four
-    // seconds, in the view's own pixels: peripheral views white and green,
-    // focus views yellow and magenta.
-    void DrawPattern(ID3D11RenderTargetView* target, uint32_t width, uint32_t height, uint32_t view) {
-        if (!context1_) {
-            ThrowIfFailed(context_.As(&context1_), "ID3D11DeviceContext1");
-        }
-        const bool focus = view >= 2;
-        const float bar[4] = {1.0f, 1.0f, focus ? 0.0f : 1.0f, 1.0f};
-        const float grid[4] = {focus ? 0.9f : 0.1f, focus ? 0.1f : 0.8f, focus ? 0.9f : 0.2f, 1.0f};
-        const LONG w = static_cast<LONG>(width);
-        const LONG h = static_cast<LONG>(height);
-        std::vector<D3D11_RECT> squares;
-        const LONG square = std::max<LONG>(4, w / 40);
-        for (int y = 1; y < 8; ++y) {
-            for (int x = 1; x < 8; ++x) {
-                const LONG left = w * x / 8 - square / 2;
-                const LONG top = h * y / 8 - square / 2;
-                squares.push_back({left, top, left + square, top + square});
+    // The views that render into swapchain `index`: each view's GPU load share right before it renders (the first
+    // one's before the acquire), the image released after its last view.
+    void RenderSwapchain(uint32_t index, const std::array<XrView, kMaximumViews>& views, double total_pixels) {
+        const ProbeSwapchain& swapchain = swapchains_[index];
+        uint32_t color_index = 0;
+        uint32_t depth_index = 0;
+        bool acquired = false;
+        for (uint32_t view = 0; view < ViewCount(); ++view) {
+            const ViewTarget& target = views_[view];
+            if (target.swapchain != index) {
+                continue;
             }
+            if (gpu_load_) {
+                gpu_load_->DispatchView(static_cast<double>(RectWidth(target.rect)) * RectHeight(target.rect) /
+                                        total_pixels);
+            }
+            ViewDraw draw;
+            draw.first_in_image = !acquired;
+            if (!acquired) {
+                AcquireImages(swapchain, &color_index, &depth_index);
+                acquired = true;
+            }
+            draw.color = swapchain.id;
+            draw.color_image = color_index;
+            if (swapchain.depth_handle != XR_NULL_HANDLE) {
+                draw.depth = swapchain.depth_id;
+                draw.depth_image = depth_index;
+            }
+            draw.rect = target.rect;
+            draw.pose = views[view].pose;
+            draw.fov = views[view].fov;
+            draw.view = view;
+            draw.pattern = options_.pattern;
+            graphics_->Draw(draw);
         }
-        const LONG edge = std::max<LONG>(2, w / 200);
-        squares.push_back({0, 0, w, edge});
-        squares.push_back({0, h - edge, w, h});
-        squares.push_back({0, 0, edge, h});
-        squares.push_back({w - edge, 0, w, h});
-        context1_->ClearView(target, grid, squares.data(), static_cast<UINT>(squares.size()));
-        const double seconds =
-            std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
-        const LONG bar_width = std::max<LONG>(4, w / 24);
-        const LONG bar_left = static_cast<LONG>(std::fmod(seconds / 4.0, 1.0) * static_cast<double>(w - bar_width));
-        const D3D11_RECT bar_rect{bar_left, 0, bar_left + bar_width, h};
-        context1_->ClearView(target, bar, &bar_rect, 1);
+        if (!acquired) {
+            return;
+        }
+        graphics_->ImageDone();
+        ReleaseImages(swapchain);
+    }
+
+    // --quad-layer: as X-Plane's UI panel, re-rendered and released every frame.
+    void RenderQuad() {
+        uint32_t color_index = 0;
+        const XrSwapchainImageAcquireInfo acquire_info{XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};
+        CheckXr(instance_, xrAcquireSwapchainImage(quad_->handle, &acquire_info, &color_index),
+                "xrAcquireSwapchainImage(quad layer)");
+        const XrSwapchainImageWaitInfo wait_info{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO, nullptr, XR_INFINITE_DURATION};
+        CheckXr(instance_, xrWaitSwapchainImage(quad_->handle, &wait_info), "xrWaitSwapchainImage(quad layer)");
+        ViewDraw draw;
+        draw.color = quad_->id;
+        draw.color_image = color_index;
+        draw.rect = {0, 0, static_cast<int32_t>(quad_->width), static_cast<int32_t>(quad_->height)};
+        draw.quad = true;
+        graphics_->Draw(draw);
+        graphics_->ImageDone();
+        const XrSwapchainImageReleaseInfo release_info{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
+        CheckXr(instance_, xrReleaseSwapchainImage(quad_->handle, &release_info),
+                "xrReleaseSwapchainImage(quad layer)");
     }
 
     void RenderLoop() {
@@ -2079,6 +1347,7 @@ private:
             if (gpu_load_) {
                 gpu_load_->BeginFrame();
             }
+            graphics_->BeginFrame();
 
             const auto frame_started = std::chrono::steady_clock::now();
             if (last_frame_started_) {
@@ -2112,32 +1381,30 @@ private:
 
                 if (options_.mode == ProbeMode::SourceExact || source_in_target.has_value()) {
                     double total_pixels = 0.0;
-                    for (const EyeSwapchain& swapchain : swapchains_) {
-                        total_pixels += static_cast<double>(swapchain.width) * swapchain.height;
+                    for (const ViewTarget& target : views_) {
+                        total_pixels += static_cast<double>(RectWidth(target.rect)) * RectHeight(target.rect);
+                    }
+                    for (uint32_t swapchain = 0; swapchain < swapchains_.size(); ++swapchain) {
+                        RenderSwapchain(swapchain, source_views, total_pixels);
                     }
                     for (uint32_t eye = 0; eye < ViewCount(); ++eye) {
-                        if (gpu_load_) {
-                            gpu_load_->DispatchView(
-                                static_cast<double>(swapchains_[eye].width) * swapchains_[eye].height / total_pixels);
-                        }
-                        RenderEye(eye, source_views[eye]);
+                        const ProbeSwapchain& swapchain = swapchains_[views_[eye].swapchain];
+                        const PixelRect& rect = views_[eye].rect;
                         projection_views[eye].pose =
                             source_in_target.has_value()
                                 ? ComposePose(*source_in_target, source_views[eye].pose)
                                 : source_views[eye].pose;
                         projection_views[eye].fov = source_views[eye].fov;
-                        projection_views[eye].subImage.swapchain =
-                            swapchains_[eye].handle;
+                        projection_views[eye].subImage.swapchain = swapchain.handle;
                         projection_views[eye].subImage.imageRect = {
-                            {0, 0},
-                            {static_cast<int32_t>(swapchains_[eye].width),
-                             static_cast<int32_t>(swapchains_[eye].height)},
+                            {rect.left, rect.top},
+                            {RectWidth(rect), RectHeight(rect)},
                         };
                         projection_views[eye].subImage.imageArrayIndex = 0;
-                        if (swapchains_[eye].depth_handle != XR_NULL_HANDLE) {
+                        if (swapchain.depth_handle != XR_NULL_HANDLE) {
                             XrCompositionLayerDepthInfoKHR& depth = depth_infos[eye];
                             depth.subImage = projection_views[eye].subImage;
-                            depth.subImage.swapchain = swapchains_[eye].depth_handle;
+                            depth.subImage.swapchain = swapchain.depth_handle;
                             depth.minDepth = 0.0f;
                             depth.maxDepth = 1.0f;
                             depth.nearZ = kNearZ;
@@ -2150,6 +1417,11 @@ private:
             } else if (waited.state.shouldRender == XR_TRUE) {
                 ++invalid_view_frames_;
             }
+            const bool submit_quad = quad_.has_value() && waited.state.shouldRender == XR_TRUE;
+            if (submit_quad) {
+                RenderQuad();
+            }
+            graphics_->EndFrame();
             if (gpu_load_) {
                 gpu_load_->EndFrame();
             }
@@ -2159,8 +1431,26 @@ private:
             projection.space = projection_space;
             projection.viewCount = ViewCount();
             projection.views = projection_views.data();
-            const XrCompositionLayerBaseHeader* layers[] = {
-                reinterpret_cast<const XrCompositionLayerBaseHeader*>(&projection)};
+            // The quad layer: a panel a metre ahead of where the session started, on top of the projection.
+            XrCompositionLayerQuad quad{XR_TYPE_COMPOSITION_LAYER_QUAD};
+            if (submit_quad) {
+                quad.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
+                quad.space = source_space_;
+                quad.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
+                quad.subImage.swapchain = quad_->handle;
+                quad.subImage.imageRect = {{0, 0},
+                                           {static_cast<int32_t>(quad_->width), static_cast<int32_t>(quad_->height)}};
+                quad.subImage.imageArrayIndex = 0;
+                quad.pose = {{0.0f, 0.0f, 0.0f, 1.0f}, {0.0f, -0.15f, -1.0f}};
+                quad.size = {0.6f, 0.6f};
+            }
+            std::vector<const XrCompositionLayerBaseHeader*> layers;
+            if (submit_projection) {
+                layers.push_back(reinterpret_cast<const XrCompositionLayerBaseHeader*>(&projection));
+            }
+            if (submit_quad) {
+                layers.push_back(reinterpret_cast<const XrCompositionLayerBaseHeader*>(&quad));
+            }
 
             // A slower game: the frame takes at least --frame-ms (plus, now and
             // then, a stutter: --hitch-every).
@@ -2193,8 +1483,8 @@ private:
             XrFrameEndInfo end_info{XR_TYPE_FRAME_END_INFO};
             end_info.displayTime = waited.state.predictedDisplayTime;
             end_info.environmentBlendMode = blend_mode_;
-            end_info.layerCount = submit_projection ? 1u : 0u;
-            end_info.layers = submit_projection ? layers : nullptr;
+            end_info.layerCount = static_cast<uint32_t>(layers.size());
+            end_info.layers = layers.empty() ? nullptr : layers.data();
             const auto end_start = std::chrono::steady_clock::now();
             const XrResult end_result = xrEndFrame(session_, &end_info);
             NoteCall(3, end_start);
@@ -2246,6 +1536,10 @@ private:
         }
     }
 
+    uint32_t ViewCount() const {
+        return static_cast<uint32_t>(views_.size());
+    }
+
     std::optional<std::chrono::steady_clock::time_point> last_frame_started_;
     std::vector<double> frame_ms_;
     uint64_t recreations_{0};
@@ -2253,12 +1547,9 @@ private:
     std::array<std::vector<double>, 4> call_ms_;
     int slow_calls_reported_{0};
 
-    uint32_t ViewCount() const {
-        return static_cast<uint32_t>(swapchains_.size());
-    }
-
     Options options_;
     XrViewConfigurationType view_configuration_;
+    std::unique_ptr<ProbeGraphics> graphics_;
     XrInstance instance_{XR_NULL_HANDLE};
     XrSystemId system_id_{XR_NULL_SYSTEM_ID};
     XrSession session_{XR_NULL_HANDLE};
@@ -2267,12 +1558,10 @@ private:
     XrSessionState session_state_{XR_SESSION_STATE_UNKNOWN};
     XrEnvironmentBlendMode blend_mode_{XR_ENVIRONMENT_BLEND_MODE_OPAQUE};
     bool session_running_{false};
-    ComPtr<ID3D11Device> device_;
-    ComPtr<ID3D11DeviceContext> context_;
-    ComPtr<ID3D11DeviceContext1> context1_;
     std::vector<XrViewConfigurationView> view_configuration_views_;
-    std::vector<EyeSwapchain> swapchains_;
-    std::unique_ptr<DiagnosticRenderer> renderer_;
+    std::vector<ProbeSwapchain> swapchains_;
+    std::vector<ViewTarget> views_;
+    std::optional<ProbeSwapchain> quad_;
     std::unique_ptr<GpuLoad> gpu_load_;
     uint64_t rendered_frames_{0};
     uint64_t invalid_view_frames_{0};
@@ -2283,18 +1572,24 @@ private:
 
 int main(int argc, char** argv) {
     try {
-        const Options options = ParseOptions(argc, argv);
+        const Options options = probe::ParseOptions(argc, argv);
         if (options.help) {
-            PrintUsage();
+            probe::PrintUsage();
             return 0;
         }
         if (options.self_test) {
-            RunSelfTest();
+            probe::RunSelfTest();
+            RunPoseSelfTest();
+            std::cout << "vectorxr_hardware_probe self-test passed\n";
             return 0;
+        }
+        if (options.render_check) {
+            return probe::RunRenderCheck(options) ? 0 : 1;
         }
         if (options.gpu_calibrate) {
             timeBeginPeriod(1);
-            const bool within = RunGpuCalibration(options);
+            const bool within = options.graphics == GraphicsApi::Vulkan ? probe::RunVulkanGpuCalibration(options)
+                                                                        : probe::RunD3D11GpuCalibration(options);
             timeEndPeriod(1);
             return within ? 0 : 1;
         }
