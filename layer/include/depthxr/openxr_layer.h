@@ -423,6 +423,8 @@ class OpenXrLayer {
     void RefreshResolvedSettings();
     void ResetPivotInputStateForConfigChange();
     void PollRuntimeRelay();
+    // The app's status line for Frame Generation (RuntimeStatusDocument::framegen_reason).
+    static std::string FrameGenStatusReason(const FrameGenStatus& framegen);
     void CaptureInstanceFunctions();
     void LogResolvedSettings(const ResolvedRuntimeConfig& settings);
     void ResetPivotActivationState();
@@ -686,6 +688,12 @@ class OpenXrLayer {
         uint32_t restored{0}; // eye views whose depth geometry was restored
         FrameGenComposition composition; // per eye: views eye and eye + 2
         bool log_diagnostic{false};      // the frame logs the compositor's Debug diagnostics
+        // Frame Generation's thread shows the composed frame later, between
+        // frames it writes itself (left to the layer while that thread
+        // presents just in time): the outputs' releases are lazy, and the
+        // runtime's queue (Frame Generation's) waits for the game's frame
+        // only when the composed frame is submitted.
+        bool shown_later{false};
     };
     // The plan for `source_layer` at `display_time`; false when its views
     // cannot be composed. Logs the focus rectangles on diagnostic frames.
@@ -745,6 +753,7 @@ class OpenXrLayer {
         bool rgba{};
         std::array<XrCompositionLayerProjectionView,2> eyes;
         std::array<XrSwapchain,2> swapchains{};
+        std::array<uint32_t,2> indices{}; // the images acquired, released by ReleasePendingOsdImages
         std::array<ID3D11RenderTargetView*,2> targets{};
         std::array<ID3D11Texture2D*,2> output_images{}, private_images{};
         uint32_t width{},height{};
@@ -775,17 +784,29 @@ class OpenXrLayer {
     // The layer's final submission: OSD overlay, then the runtime xrEndFrame.
     // Frame Generation submits each of its runtime frames through it.
     XrResult SubmitRuntimeFrame(XrSession, const XrFrameEndInfo*);
-    // The layer's own swapchains (Quadviews' outputs): through the queue
-    // substitution and the Direct3D 11 bridge when the session is bridged,
-    // else straight to the runtime. `drawn_index`: the released image holds a
-    // new frame (Frame Generation captures it; the bridge copies it into the
-    // runtime's image); without it the image's content is dropped.
     // After xrDestroySession or xrDestroyInstance: the bridge's summary, then its teardown.
     void EndD3D11Bridge();
+    // The layer's own swapchains (Quadviews' outputs): through the queue
+    // substitution and the Direct3D 11 bridge when the session is bridged,
+    // else straight to the runtime. `shown_later`: Frame Generation's thread
+    // shows the image later (QuadViewsComposePlan::shown_later), so its calls
+    // may be held back. Releasing `index`, `drawn`: the image holds a new
+    // frame (Frame Generation captures it; the bridge copies it into the
+    // runtime's image), else its content is dropped. Frame Generation is told
+    // of every release made (NoteFrameGenRelease).
     XrResult AcquireLayerSwapchainImage(XrSwapchain swapchain, uint32_t image_count, uint32_t* index);
-    XrResult WaitLayerSwapchainImage(XrSwapchain swapchain, const XrSwapchainImageWaitInfo* info);
-    XrResult ReleaseLayerSwapchainImage(XrSwapchain swapchain, std::optional<uint32_t> drawn_index);
+    XrResult WaitLayerSwapchainImage(XrSwapchain swapchain, const XrSwapchainImageWaitInfo* info, bool shown_later);
+    XrResult ReleaseLayerSwapchainImage(XrSwapchain swapchain, uint32_t index, bool drawn, bool shown_later);
     XrResult DestroyLayerSwapchain(XrSwapchain swapchain);
+    // Frame Generation is told of each release of a swapchain it tracks
+    // (FrameGenPresenter::NoteRelease), drawn or not: the runtime shows the
+    // swapchain's image released last wherever a frame shows the swapchain,
+    // even a frame composed before it.
+    void NoteFrameGenRelease(XrSwapchain swapchain, uint32_t index);
+#if defined(DEPTHXR_TESTING)
+    std::mutex framegen_noted_releases_mutex_;
+    std::map<XrSwapchain, uint64_t> framegen_noted_releases_; // each swapchain's NoteFrameGenRelease calls
+#endif
     void PollFrameGenToggle();
     void StartFrameGen(XrSession session, const void* binding_chain);
     // Frame Generation is latched per session. While it owns pacing, the app's
@@ -802,13 +823,25 @@ class OpenXrLayer {
     bool d3d11_bridge_depth_logged_{false};   // mutex_
     bool d3d11_bridge_sharpen_logged_{false}; // mutex_
     std::chrono::steady_clock::time_point d3d11_bridge_last_summary_; // mutex_
-    // Quad views frames of a bridged session (mutex_): composed by the
-    // Direct3D 11 compositor, or split into projection layers when composing
-    // failed. The session's, and as of the last summary.
+    // Quad views frames of a bridged session (mutex_): composed by Frame
+    // Generation, by the Direct3D 11 compositor, or split into projection
+    // layers when composing failed. The session's, and as of the last summary.
     struct D3D11BridgeQuadFrames {
+        std::uint64_t fg{0};
         std::uint64_t d3d11{0};
         std::uint64_t split{0};
     };
+    // The frame being ended came from the emulated quad views compose site
+    // of a session whose pacing Frame Generation owns: how it was routed
+    // (FrameGenPresenter::ClaimQuadFrame). Set in EndFrame under mutex_,
+    // consumed by TraceRuntimeEndFrame; only the application's end-frame
+    // thread touches it.
+    std::optional<FrameGenQuadFrame> pending_framegen_quad_;
+    bool framegen_quad_unforwarded_logged_{false};
+    // The frame's quad route is dropped: an EndFrame that returns before
+    // forwarding a claimed frame abandons it (`abandon`, when the caller
+    // does not abandon the frame itself).
+    void DropPendingFrameGenQuad(bool abandon);
     D3D11BridgeQuadFrames d3d11_bridge_quad_frames_;
     D3D11BridgeQuadFrames d3d11_bridge_quad_frames_summarized_;
     FrameGenQueueSubstitution::Calls FrameGenQueueCalls() const {

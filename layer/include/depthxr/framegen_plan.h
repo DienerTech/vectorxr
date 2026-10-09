@@ -371,11 +371,24 @@ struct FrameGenViewPlan {
 };
 
 // Slots of per-real-frame textures (history, filtered flow, depth, trust)
-// at most: two let the newest frame be generated from while the next is
-// captured; just-in-time synthesis keeps a third, as the frames generated
-// between two real frames are still being written when the next one is
-// captured into the slot after them.
-inline constexpr std::uint8_t kFrameGenHistoryRingMax = 3;
+// at most (see FrameGenHistoryRing).
+inline constexpr std::uint8_t kFrameGenHistoryRingMax = 5;
+
+// The slots of a view's ring. Two let the newest real frame be generated
+// from while the next is captured. Just in time, frames are written from a
+// real frame (moved, from its previous images too) while newer ones are
+// captured, a slot each: a ring of n moves a real frame until n - 1 newer
+// ones were captured (shows it until n). A canvas keeps three (its images
+// are large); quad views (FrameGenTuning::composition) keep five, as their
+// lead at the game's own rate spans a few real frames, and theirs are
+// smaller.
+constexpr std::uint8_t FrameGenHistoryRing(bool composed) { return composed ? 5 : 3; }
+// The ring a submission with `tuning` uses (two unless just in time).
+inline std::uint8_t FrameGenHistoryRing(const FrameGenTuning& tuning) {
+    return tuning.analyze_only ? FrameGenHistoryRing(tuning.composition != nullptr) : 2;
+}
+static_assert(FrameGenHistoryRing(true) <= kFrameGenHistoryRingMax &&
+              FrameGenHistoryRing(false) <= kFrameGenHistoryRingMax);
 
 // Per-view ring bookkeeping shared by every backend. Slots hold the history
 // color copy and the filtered flow that seeds the next search; Newest() is

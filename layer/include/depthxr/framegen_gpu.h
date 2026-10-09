@@ -202,7 +202,7 @@ class FrameGenGpu {
     // interpolation, with FrameGenTuning::cover). `outputs` are acquired and
     // waited output images, one per view, in Execute's view order. False
     // when the frame's images have since been replaced by newer captures
-    // (the last kFrameGenHistoryRingMax real frames are kept) or the GPU
+    // (the last FrameGenHistoryRing real frames are kept) or the GPU
     // failed. Never waits on the CPU; the session's queue waits for the
     // frame on the GPU, so the outputs can be released right after.
     virtual bool Synthesize(std::uint64_t /*frame*/, FrameGenSynthesisMode /*mode*/, float /*fraction*/,
@@ -233,6 +233,11 @@ class FrameGenGpu {
     // Whether its images' capture has run on the GPU by now: its exact copy
     // written before then waits for that (and the game's frame before it).
     virtual bool Captured(std::uint64_t /*frame*/) const { return true; }
+    // Whether Synthesize/SynthesizeComposed can still write analyzed real
+    // frame `frame`: as its exact copy (`exact`, its newest images), or moved
+    // (its previous images too), before newer captures replace them in the
+    // history ring. Never waits; under the caller's GPU lock.
+    virtual bool Writable(std::uint64_t /*frame*/, bool /*exact*/) const { return true; }
     // GPU-aware pacing: identifies every capture submitted so far (0: none).
     // Under the caller's GPU lock, after Capture.
     virtual std::uint64_t CaptureMark() const { return 0; }

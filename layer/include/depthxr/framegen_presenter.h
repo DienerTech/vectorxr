@@ -114,6 +114,9 @@ struct FrameGenStatus {
     std::uint64_t unmeasured_copies{0}; // moved frames written as exact copies: motion not measured yet
     std::uint64_t copies_skipped{0};  // refreshes repeating the exact copy the outputs already hold
     std::uint64_t unwritten{0};       // refreshes that could not be written
+    // Refreshes whose real frame's images newer captures had replaced in the
+    // backend's history: written as its exact copy, or as the frame before.
+    std::uint64_t ring_exhausted{0};
     std::uint64_t analyses_timed{0};  // analyses whose GPU timing was read
     std::uint64_t analyses_late{0};   // of those, ended after their frames were needed
     // Quad views the layer composes into stereo (FrameGenQuadFrame).
@@ -123,7 +126,12 @@ struct FrameGenStatus {
     std::uint64_t quad_setups{0};        // frames the views were set up from (their releases not captured)
     std::uint64_t quad_unanalyzed{0};    // claimed frames whose motion could not be measured (not shown)
     std::uint64_t quad_write_declines{0}; // times composing stopped for a while: frames kept failing to be written
-    bool quad_declining{false};          // ...and it has not resumed yet
+    bool quad_declining{false};          // ...and it has not resumed yet (frames pass straight through meanwhile)
+    // Refreshes not submitted, nothing current to show (the runtime shows
+    // its last frame again): the frame shown as it is had newer images in
+    // its swapchains by then (the runtime shows a swapchain's newest), and no
+    // newer frame shown as it is could take its place.
+    std::uint64_t stale_skipped{0};
 };
 
 // Emulated quad views (the layer composes XR_VARJO_quad_views into stereo):
@@ -139,9 +147,10 @@ enum class FrameGenQuadRoute : std::uint8_t {
 // Handed to EndFrame with every frame from the emulated quad compose site.
 struct FrameGenQuadFrame {
     FrameGenQuadRoute route{FrameGenQuadRoute::kDeclined};
-    // kClaimed: each eye's composition (views 0/1 peripheral, 2/3 focus),
-    // and the composed eye views as the runtime gets them (pose, fov;
-    // subImage is ignored), made for this frame's own display time.
+    // kClaimed: each eye's composition (views 0/1 peripheral, 2/3 focus;
+    // kUncaptured too, the views are set up for it), and the composed eye
+    // views as the runtime gets them (pose, fov; subImage is ignored), made
+    // for this frame's own display time.
     FrameGenComposition composition;
     std::array<XrCompositionLayerProjectionView, 2> eyes{};
     // kUncaptured: the four source views (subImage as the application
@@ -152,9 +161,9 @@ struct FrameGenQuadFrame {
 
 // Dynamic multiplier policy (tests shorten the times).
 struct FrameGenDynamicPolicy {
-    double engage_below{0.78};                    // standing by: engage once the game runs below this share of the refresh rate...
+    double engage_below{0.90};                    // standing by: engage once the game runs below this share of the refresh rate...
     std::chrono::milliseconds engage_after{2000}; // ...this long without a break
-    double stay_above{0.85};                      // a probe stays standing by only if the game holds this share
+    double stay_above{0.95};                      // a probe stays standing by only if the game holds this share
     std::chrono::milliseconds settle{2000};       // after any switch, nothing is judged (allocation, first write)
     std::chrono::milliseconds guard_window{2500}; // engaged: the benefit guard's window
     std::chrono::milliseconds hold{10000};        // after a stand-down: no engagement for this long, doubling...
@@ -385,6 +394,9 @@ class FrameGenPresenter {
             std::vector<std::uint8_t> has_depth;
             // The depth swapchains' SwapchainRecord::releases when copied.
             std::vector<std::uint64_t> depth_releases;
+            // Per view, its color swapchain's SwapchainRecord::releases when
+            // copied (for frames shown as they are).
+            std::vector<std::uint64_t> color_releases;
             XrCompositionLayerQuad quad{};
             XrCompositionLayerCylinderKHR cylinder{};
             XrCompositionLayerEquirectKHR equirect{};
@@ -507,21 +519,28 @@ class FrameGenPresenter {
     std::uint32_t DynamicSetCapLocked() const;
     void UpdateAutoLocked(std::chrono::steady_clock::time_point now, const std::optional<PendingFrame>& frame,
                           bool started_late = false);
-    // Dynamic: standing by, engages once the game runs well below the
-    // refresh rate; engaged, stands down when Frame Generation does not pay
-    // (the benefit guard) or to probe whether the game holds the rate alone.
+    // Dynamic: standing by, engages once the game runs below the refresh
+    // rate; engaged, the game keeps its own rate (generated frames fill the
+    // refreshes it misses) and Dynamic stands down when Frame Generation
+    // does not pay (the benefit guard) or to probe whether the game holds the
+    // rate alone.
     void UpdateDynamicLocked(std::chrono::steady_clock::time_point now, XrDuration period);
     void DynamicEngageLocked(std::chrono::steady_clock::time_point now, double rate, double refresh);
     void DynamicStandDownLocked(std::chrono::steady_clock::time_point now, const std::string& reason, bool probe);
-    // Dynamic engaged: refreshes between the game's waits at least (half the
-    // refresh rate, or every refresh where that would be below 40 fps).
-    static std::uint32_t DynamicCadence(XrDuration period);
+    // Turned back on (toggled, configured, retried after a pause): Dynamic
+    // stands by again and judges the game's rate afresh.
+    void DynamicReenableLocked(std::chrono::steady_clock::time_point now);
     // Seconds standing by this session (Dynamic).
     double StandbySecondsLocked(std::chrono::steady_clock::time_point now) const;
     // ", dynamic=standby (reason)" or engaged for summaries; empty unless Dynamic.
     std::string DynamicSummaryLocked() const;
-    // A gap between real frames nothing is measured or extrapolated across.
-    static XrDuration PauseLimit(XrDuration period);
+    // A gap between real frames nothing is measured or extrapolated across:
+    // relative to the game's own pace (hitches are not pauses), and never
+    // more than a second (loading stalls always are).
+    XrDuration PauseLimitLocked() const;
+    // A real frame ended (wall clock): the game's smoothed frame interval,
+    // pauses left out.
+    void NoteRealEndLocked(std::chrono::steady_clock::time_point end);
     void NotePauseLocked(XrDuration gap);
     void MaybeRetryLocked();
     void PauseLocked(const std::string& reason);
@@ -547,6 +566,9 @@ class FrameGenPresenter {
     // Writing composed frames kept failing: the layer composes quad views
     // for a while (ClaimQuadFrame declines).
     void DeclineQuadLocked(std::chrono::steady_clock::time_point now, const std::string& error);
+    // ...and that while is not over: nothing engages, and the layer's
+    // composed frames pass straight through to the runtime at full rate.
+    bool QuadDeclinedLocked() const;
 
     XrResult SubmitAt(XrSession session, const XrFrameEndInfo& info, XrTime time, const FrameGenRuntimeCalls& calls);
     void NotePhaseLocked(std::chrono::steady_clock::time_point called, std::chrono::steady_clock::time_point returned,
@@ -590,6 +612,24 @@ class FrameGenPresenter {
     // replaced are dropped.
     void RecordDepthReleasesLocked(FrameCopy& copy) const;
     void DropStaleDepthLocked(FrameCopy& copy) const;
+    // Likewise for color, for frames shown as they are (the layer's composed
+    // frames, or a frame passed through): the runtime shows a swapchain's
+    // newest image, so once a newer one was released into a copy's
+    // swapchains, the copy would show that image with its own views.
+    void RecordColorReleasesLocked(FrameCopy& copy) const;
+    bool ColorReleasedSinceLocked(const FrameCopy& copy) const;
+    // Just in time: what shows a frame as it is (`copy` of real frame `id`,
+    // made for display time `time`; 0 for a frame passed through): the copy
+    // while its images are still the newest; else a newer kept frame the
+    // layer composed whose images are, unless a frame Frame Generation
+    // writes comes between them (shown early, with its own views, correct
+    // for the runtime's reprojection); else nothing (copy null).
+    struct AsIs {
+        const FrameCopy* copy{nullptr};
+        std::uint64_t id{0};
+        XrTime time{0};
+    };
+    AsIs CurrentAsIsLocked(const FrameCopy& copy, std::uint64_t id, XrTime time) const;
     // How far each eye moves per unit of generated-frame time from the real
     // frame shown at `newest_time` (FrameGenViewRequest::shift), in that
     // eye's view space: as far as it moved since the previous real frame
@@ -640,7 +680,14 @@ class FrameGenPresenter {
     // GPU-aware pacing: the capture a game wait is held for (none while
     // gating is off or not armed), and what holding it showed.
     std::optional<std::uint64_t> GpuGateMarkLocked() const;
-    void NoteGpuWaitLocked(double waited_ms, bool reached);
+    // A held wait ended: reached, or timed out with or without captures
+    // having run since the last held wait (`progressed`). Only timeouts
+    // without progress count toward turning holding off (a slow GPU is held
+    // for, a stuck one not).
+    void NoteGpuWaitLocked(double waited_ms, bool reached, bool progressed);
+    // The newest capture mark that has run on the GPU by now, at least
+    // `known` (captures run in order).
+    std::uint64_t ReachedCaptureMarkLocked(std::uint64_t known) const;
     // Arms GPU-aware pacing once a window shows the game's frames reaching
     // the GPU late (real frames uncaptured when needed, or captures ending
     // after their refresh was due).
@@ -690,8 +737,7 @@ class FrameGenPresenter {
     // when its end was already late); a frame not kept is scored on time.
     // `quad`: a claimed quad frame's composition (kept with it).
     bool AnalyzeJit(const XrCompositionLayerProjection& projection, const PendingFrame& frame, FrameGenSynthesisMode mode,
-                    FrameCopy copy, const JitFrame& score, XrDuration period,
-                    std::shared_ptr<const FrameGenQuadFrame> quad = nullptr);
+                    FrameCopy copy, const JitFrame& score, std::shared_ptr<const FrameGenQuadFrame> quad = nullptr);
     // Presenter thread, just in time: what the refresh at `time` shows: the
     // real frame `index` of jit_frames_ at `fraction` in `mode`, or nothing
     // (repeat). `due` is set when the next real frame is needed and not
@@ -714,11 +760,17 @@ class FrameGenPresenter {
     // after it there): a moved frame whose motion is not measured yet
     // becomes its real frame's exact copy; a real frame not captured yet
     // gives way to `fallback` (the choice as if it had not arrived; `frame`
-    // and `choice` become it), else nothing is written. A claimed quad
-    // frame is written composed, into one output image per eye.
+    // and `choice` become it), else nothing is written. A moved frame whose
+    // real frame's previous images newer captures replaced in the backend's
+    // history (FrameGenGpu::Writable) becomes its exact copy; one whose
+    // newest images were replaced too gives way to `fallback` the same way.
+    // A claimed quad frame is written composed, into one output image per
+    // eye.
     struct JitWrite {
         bool exact{false};      // the real frame's exact copy
         bool uncaptured{false}; // the chosen frame was not captured yet (whether or not the fallback was written)
+        bool unmeasured{false}; // a moved frame was to be written as its exact copy: its motion was not measured yet
+        bool ring_exhausted{false}; // images it was to be written from were replaced by newer captures (Writable)
         bool as_is{false};      // nothing written: the frame (JitFrame::as_is) is shown as the layer composed it
         bool failed{false};     // writing was attempted and failed: outputs, an acquire or wait, or the GPU
         bool timed_out{false};  // ...an output image the runtime did not hand back in time
@@ -808,6 +860,10 @@ class FrameGenPresenter {
     };
     std::deque<Cadence> cadence_;
     std::optional<std::chrono::steady_clock::time_point> last_app_end_;
+    // The game's real frames: the last one's end and the smoothed interval
+    // between their ends, nanoseconds (0 until measured; PauseLimitLocked).
+    std::optional<std::chrono::steady_clock::time_point> real_end_;
+    double real_interval_ns_{0.0};
     std::chrono::steady_clock::time_point multiplier_changed_at_{};
     std::chrono::steady_clock::time_point probe_not_before_{};
     std::chrono::milliseconds probe_backoff_{10000};
@@ -829,8 +885,9 @@ class FrameGenPresenter {
     std::chrono::milliseconds memory_recovery_delay_{30000};
 
     // Dynamic (FrameGenDynamicPolicy): standing by, frames pass straight
-    // through; engaged, the game is released at most every DynamicCadence
-    // refreshes and the benefit guard watches what generation adds.
+    // through; engaged, the game runs at its own rate (released at most once
+    // a refresh), generated frames fill the refreshes it misses, and the
+    // benefit guard watches what generation adds.
     FrameGenDynamicPolicy dynamic_policy_;
     bool dynamic_standby_{true};
     std::optional<std::chrono::steady_clock::time_point> dynamic_below_since_;
@@ -860,6 +917,9 @@ class FrameGenPresenter {
         std::uint64_t analyses_timed{0};
         std::uint64_t analyses_late{0};
         std::uint64_t copies_skipped{0};
+        std::uint64_t ring_exhausted{0}; // refreshes whose real frame's images newer captures had replaced
+        std::uint64_t stale_skipped{0};  // refreshes not submitted: nothing current to show
+        std::uint64_t unrendered{0};     // refreshes the runtime did not render (shouldRender false)
         std::uint64_t late_cpu{0};
         std::uint64_t late_gpu{0};
         std::uint64_t gpu_waits{0};
@@ -901,11 +961,13 @@ class FrameGenPresenter {
     // always): a game wait is held until the capture recorded at the begin
     // of the frame gpu_frames_ahead_ - 1 before the newest begun one has run
     // on the GPU (0: the newest capture). Armed by evidence, then for the
-    // session; turned off after kGpuTimeoutsBeforeOff timeouts in a row.
+    // session; turned off after kGpuTimeoutsBeforeOff timeouts in a row with
+    // no capture running meanwhile (a slow GPU is held for, a stuck one not).
     bool gpu_gate_enabled_{true};
     bool gpu_gate_armed_{false};
     int gpu_frames_ahead_{1};
     std::uint32_t gpu_timeouts_in_row_{0};
+    std::uint64_t gpu_reached_mark_{0}; // the newest capture mark seen run (ReachedCaptureMarkLocked)
     std::uint32_t gpu_waiters_{0}; // app threads inside WaitCapture (Stop waits for them)
     std::uint64_t last_capture_mark_{0};
     std::deque<std::uint64_t> begun_capture_marks_; // ThreadedFrame::capture_mark, newest last
@@ -1001,12 +1063,22 @@ class FrameGenPresenter {
     // Just-in-time presentation (latched when the presenter thread starts).
     bool jit_{false};
     std::deque<JitFrame> jit_frames_; // oldest first
-    // The last frame the presenter thread wrote (real frame id, mode,
-    // fraction), for distinct-frame counting, and the views submitted with it.
+    // The last frame the presenter thread submitted (real frame id, mode,
+    // fraction), for distinct-frame counting, and what was submitted: the
+    // layers, with the views showing Frame Generation's output images when
+    // it wrote the frame, or, shown as it is, without (a refresh nothing is
+    // written for repeats exactly that, never an older frame).
     std::optional<std::tuple<std::uint64_t, int, float>> jit_shown_;
     std::vector<XrCompositionLayerProjectionView> jit_views_;
-    FrameCopy jit_content_; // the layers submitted with them
+    FrameCopy jit_content_;
+    bool jit_shown_as_is_{false}; // jit_content_ was shown as it is (jit_views_ empty)...
+    std::uint64_t jit_content_id_{0}; // ...of this real frame (0: one passed through)
+    XrTime jit_content_time_{0};  // ...made for this display time
     bool jit_exact_{false}; // they were a real frame's exact copy
+    // The presenter thread began a runtime frame and did not end it (nothing
+    // current to show): the runtime shows its last frame again, and the next
+    // begin discards it.
+    bool presenter_frame_open_{false};
     bool jit_interpolate_{false}; // the presenter thread interpolates (latched with jit_)
     bool logged_jit_{false};
     bool jit_started_{false}; // a frame was written just in time since the presenter thread started
@@ -1030,12 +1102,14 @@ class FrameGenPresenter {
     std::chrono::milliseconds quad_decline_longest_{80000};
     std::chrono::milliseconds quad_decline_{10000};
     std::uint64_t quad_write_declines_{0};
+    bool quad_decline_resumes_{false}; // a decline started: log when composing resumes
     std::uint32_t quad_unwritten_in_row_{0}; // presenter thread: attempted writes that failed in a row
     std::uint32_t logged_quad_write_failures_{0};
     bool logged_quad_lost_claim_{false};
     bool logged_quad_unanalyzed_{false};
     // Presenter thread (and Stop): output images replaced while composing
-    // quad views, kept alive while the last frame written still shows them.
+    // quad views, kept alive while the last frame written still shows them
+    // (until a frame is written into the new ones, or the thread exits).
     std::vector<Output> retired_outputs_;
     std::uint64_t jit_covers_{0};   // refreshes shown past the newest real frame while the next was late (summary)
     XrTime last_target_time_{0};    // just in time: the display time the newest waited frame was told
@@ -1078,6 +1152,9 @@ class FrameGenPresenter {
     std::vector<double> capture_done_ms_;
     std::vector<double> analysis_ms_;
     std::vector<double> ofa_ms_;
+    // An analysis's end after its newest capture's, smoothed (milliseconds):
+    // a real frame moved at its first refresh needs that much more lead.
+    double analysis_lag_ms_{0.0};
     // Since the last summary: game waits held for its GPU, the game's
     // xrEndFrame time in EndFrame, the presenter thread's wait for the GPU
     // lock to write a frame, and the longest pause, milliseconds.

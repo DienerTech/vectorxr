@@ -1,8 +1,11 @@
 // Runs the Frame Generation GPU backends on synthetic frames with known motion
 // and compares the generated image against analytic ground truth.
-//   depthxr_framegen_tests d3d11 | d3d12 | vulkan
+//   depthxr_framegen_tests d3d11 | d3d12 | vulkan | hw-d3d12
 // Direct3D runs on WARP so the test needs no GPU; Vulkan needs a device and
-// exits 77 (skipped) when none is present.
+// exits 77 (skipped) when none is present. hw-d3d12 runs the Direct3D 12
+// scenarios on the first hardware adapter (variable-rate shading, the
+// optical flow hardware, a GPU's fence budgets: what WARP does not have) and
+// passes with a message when there is none.
 
 #include <windows.h>
 #include <d3d11.h>
@@ -50,6 +53,9 @@ constexpr int kSkip = 77;
 // On a hardware adapter (bench-, hw-, profile, nvof, replay) and benchmarking.
 bool g_bench = false;
 bool g_hardware = false;
+// Direct3D 12: the optical flow hardware's status once one view used it
+// (RunScenarios); quad views then need it for all four.
+std::string g_flow_status;
 
 void Check(bool ok, const std::string& why) {
     if (!ok) {
@@ -480,11 +486,35 @@ int RunScenarios(Harness& harness) {
             const double cover_hold = MeanError(b, MovingSquare(144, 132), 96, 96, 272, 272);
             std::cout << harness.name << " cover: error " << cover_error << " vs hold " << cover_hold << '\n';
             Check(cover_error < 0.5 * cover_hold, harness.name + " a cover frame does not move content past the newest frame");
-            // Two real frames on, the first one's images are gone.
+            // An output that is not tracked is refused before anything is
+            // recorded: the real frame and its views stay as they were.
+            FrameGenImage untracked = first_output;
+            untracked.swapchain = reinterpret_cast<XrSwapchain>(0x5f);
+            Check(!gpu->Synthesize(frame, FrameGenSynthesisMode::kInterpolate, 0.5f, {untracked}, error),
+                  harness.name + " an output that is not tracked was written");
+            Check(gpu->Writable(frame, false), harness.name + " a refused output dropped its real frame (" + error + ")");
+            // Writable says what Synthesize then does (a canvas's ring of
+            // three, FrameGenHistoryRing): one real frame on, all of the
+            // frame is kept; two on, its previous images are gone (frames
+            // moved by it are refused, its exact copy is not); three on, its
+            // newest too.
             measure(2);
+            Check(gpu->Writable(frame, false) && gpu->Writable(frame, true),
+                  harness.name + " a real frame whose images are kept is not writable");
+            Check(!gpu->Writable(0, true) && !gpu->Writable(frame + 100, true),
+                  harness.name + " a real frame never analyzed is writable");
             measure(0);
+            Check(!gpu->Writable(frame, false) && gpu->Writable(frame, true),
+                  harness.name + " two real frames on, Writable does not refuse moved frames only");
             Check(!gpu->Synthesize(frame, FrameGenSynthesisMode::kInterpolate, 0.5f, {first_output}, error),
                   harness.name + " a real frame whose images were replaced is not synthesized from");
+            const Pixels kept_copy = synthesize(FrameGenSynthesisMode::kInterpolate, 1.0f, first_output);
+            Check(MeanError(kept_copy, b, 0, 0, kSize, kSize) < 0.002,
+                  harness.name + " a real frame's exact copy is not its newest image while that is kept");
+            measure(1);
+            Check(!gpu->Writable(frame, true), harness.name + " a real frame whose newest images were replaced is writable");
+            Check(!gpu->Synthesize(frame, FrameGenSynthesisMode::kInterpolate, 1.0f, {first_output}, error),
+                  harness.name + " a real frame's replaced newest images are copied");
             gpu->ResetHistory();
         }
         tuning.generated = 1;
@@ -597,6 +627,7 @@ int RunScenarios(Harness& harness) {
         };
         const Pixels facade = sequence(Facade(0.0f), Facade(3.0f), Facade(6.0f));
         const std::string status = gpu->HardwareFlowStatus();
+        if (harness.name == "D3D12") g_flow_status = status;
         const double facade_error = MeanError(facade, Facade(7.5f), 32, 32, kSize - 32, kSize - 32);
         const double facade_hold = MeanError(Facade(6.0f), Facade(7.5f), 32, 32, kSize - 32, kSize - 32);
         const Pixels square = sequence(MovingSquare(104, 112), MovingSquare(120, 120), MovingSquare(136, 128));
@@ -1641,6 +1672,38 @@ int RunQuadViews(Harness& harness) {
     }
     const std::vector<FrameGenImage> eye_images{{outputs[0], 0, 0, whole(output), output_format},
                                                 {outputs[1], 0, 0, whole(output), output_format}};
+    // Each view's frame written on its own (Synthesize, as a canvas is),
+    // at its own size.
+    const std::array<XrSwapchain, 4> view_outputs{chain(0xda), chain(0xdb), chain(0xdc), chain(0xdd)};
+    for (std::size_t i = 0; i < 4; ++i) {
+        const FrameGenExtent extent = i < 2 ? periphery_extent : focus_extent;
+        g_swapchains[view_outputs[i]] = {harness.create(extent.width, extent.height)};
+        Check(gpu->Track(view_outputs[i], EnumerateImages, error), error);
+    }
+    // On the GPU: whether the backend shades wide views' periphery coarsely
+    // (tier 2 variable-rate shading, not turned off), which a composed
+    // periphery never is; without it that check cannot see coarse shading.
+    bool variable_rate = false;
+    if (g_hardware) {
+        for (auto* base = static_cast<const XrBaseInStructure*>(harness.binding); base; base = base->next) {
+            if (base->type != XR_TYPE_GRAPHICS_BINDING_D3D12_KHR) continue;
+            ID3D12Device* device = reinterpret_cast<const XrGraphicsBindingD3D12KHR*>(base)->device;
+            D3D12_FEATURE_DATA_D3D12_OPTIONS6 options6{};
+            variable_rate = SUCCEEDED(device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS6, &options6, sizeof(options6))) &&
+                            options6.VariableShadingRateTier >= D3D12_VARIABLE_SHADING_RATE_TIER_2 &&
+                            options6.ShadingRateImageTileSize > 0;
+        }
+        const char* vrs = std::getenv("VECTORXR_FRAMEGEN_VRS");
+        variable_rate = variable_rate && !(vrs && std::atof(vrs) <= 0.0);
+        if (!variable_rate) {
+            std::cout << harness.name << " quad views: no variable-rate shading on this GPU; the composed periphery's "
+                         "per-pixel shading is not checked\n";
+        }
+        if (g_flow_status != "active") {
+            std::cout << harness.name << " quad views: no optical flow hardware (" << g_flow_status
+                      << "); its four sessions are not checked\n";
+        }
+    }
     // The views of a frame: the peripheral views share the field of view,
     // the right eye's inset sits a little up and to the right.
     auto quad_views = [&](float focus_x, float focus_y) {
@@ -1750,6 +1813,11 @@ int RunQuadViews(Harness& harness) {
                 gpu->ResetHistory();
                 const QuadFrame a = analyze(*gpu, 0, views, nullptr, moving(0.0f), tuning, 25.0, 0.0, true);
                 const QuadFrame b = analyze(*gpu, 1, views, &a, moving(1.0f), tuning, 25.0, 0.0, true);
+                // Where one view could use the optical flow hardware, all
+                // four have a session of their own.
+                Check(!hardware || g_flow_status != "active" || gpu->HardwareFlowStatus() == "active",
+                      harness.name + " quad views: the optical flow hardware failed with four views: " +
+                          gpu->HardwareFlowStatus());
                 const std::array<Pixels, 2> hold{
                     ComposeReference(LinearImage(b.pixels[0], periphery_extent), LinearImage(b.pixels[2], focus_extent),
                                      BuildFrameGenComposeConstants(b.composition.eyes[0], output), output),
@@ -1789,6 +1857,32 @@ int RunQuadViews(Harness& harness) {
                 std::cout << harness.name << " quad views: still periphery off the axis differs from the real frame by "
                           << still << '\n';
                 Check(!interpolate || still < 0.0025, harness.name + " quad views: still periphery far off the axis changed");
+                if (variable_rate && interpolate && !hardware) {
+                    // That check sees coarse shading: the same frame written
+                    // per view (as a canvas is, not composed) is shaded
+                    // coarsely there and differs from the real frame more.
+                    std::vector<FrameGenImage> view_images;
+                    for (std::size_t i = 0; i < 4; ++i) {
+                        view_images.push_back({view_outputs[i], 0, 0, whole(views[i].extent), output_format});
+                    }
+                    Check(gpu->Synthesize(b.id, mode, 0.5f, view_images, error),
+                          harness.name + " quad views written per view: " + error);
+                    auto view_off_axis = [&](std::uint32_t x, std::uint32_t y) {
+                        const float tx = -0.8f + 1.6f * (x + 0.5f) / periphery_extent.width;
+                        const float ty = 0.8f - 1.6f * (y + 0.5f) / periphery_extent.height;
+                        return std::hypot(tx, ty) > 1.02f;
+                    };
+                    double coarse = 0.0;
+                    for (std::size_t eye = 0; eye < 2; ++eye) {
+                        const Pixels written = harness.readback_sized(g_swapchains[view_outputs[eye]][0]);
+                        coarse += 0.5 * Compare(written, b.pixels[eye], periphery_extent, view_off_axis).mean;
+                    }
+                    std::cout << harness.name << " quad views: the periphery written on its own (variable-rate shading) "
+                              << "differs there by " << coarse << '\n';
+                    Check(coarse > 3.0 * std::max(still, 0.001),
+                          harness.name + " quad views: a periphery written on its own is not shaded coarsely off the "
+                                         "axis, so the composed periphery's check proves nothing");
+                }
                 if (interpolate) {
                     // Cover: past the newest frame from the same analysis.
                     const auto cover = generate(*gpu, b, FrameGenSynthesisMode::kExtrapolate, 0.5f, b.composition);
@@ -1808,6 +1902,20 @@ int RunQuadViews(Harness& harness) {
                     std::cout << harness.name << " quad views drawn vs copied: difference " << difference << '\n';
                     Check(difference < 0.001, harness.name + " quad views written by compute differ from drawn ones");
 
+                    // An eye's output that cannot be drawn into (not the
+                    // composed size) is refused before anything is recorded:
+                    // the real frame and its views stay as they were.
+                    FrameGenImage narrow = eye_images[1];
+                    narrow.rect.extent.width -= 2;
+                    Check(!gpu->SynthesizeComposed(b.id, mode, 0.5f, b.composition, {eye_images[0], narrow}, error),
+                          harness.name + " a composed eye's output of the wrong size was accepted");
+                    Check(gpu->Writable(b.id, false),
+                          harness.name + " a refused composed eye's output dropped its real frame (" + error + ")");
+                    const auto rewritten = generate(*gpu, b, mode, 0.5f, b.composition);
+                    Check(Compare(rewritten[0], generated[0], output, path).max <= 1 &&
+                              Compare(rewritten[1], generated[1], output, path).max <= 1,
+                          harness.name + " a quad views frame composed after a refused output differs");
+
                     // A newer real frame with its inset elsewhere is pending:
                     // frames generated from the older one keep its inset.
                     const auto moved_views = quad_views(0.12f, -0.08f);
@@ -1824,15 +1932,45 @@ int RunQuadViews(Harness& harness) {
                     const auto kept_exact = generate(*gpu, b, mode, 1.0f, b.composition);
                     Check(Compare(kept_exact[0], hold[0], output, path).max <= 2,
                           harness.name + " the older real frame's refresh is not its own views");
-                    // Two real frames on, its images are gone: refused.
-                    analyze(*gpu, 3, moved_views, &c, moving(3.0f), tuning, 25.0, 0.0, true);
-                    Check(!gpu->SynthesizeComposed(b.id, mode, 0.5f, b.composition, eye_images, error),
+                    // Writable says what SynthesizeComposed then does.
+                    auto writes = [&](const QuadFrame& frame, float fraction) {
+                        return gpu->SynthesizeComposed(frame.id, mode, fraction, frame.composition, eye_images, error);
+                    };
+                    Check(gpu->Writable(b.id, false) && gpu->Writable(b.id, true) && gpu->Writable(c.id, false),
+                          harness.name + " a quad views frame whose images are kept is not writable");
+                    // Quad views keep five real frames (FrameGenHistoryRing):
+                    // three real frames on, it is still moved; four on, its
+                    // previous images are gone: frames moved by it are
+                    // refused, its exact copy is not.
+                    const QuadFrame d = analyze(*gpu, 3, moved_views, &c, moving(3.0f), tuning, 25.0, 0.0, true);
+                    const QuadFrame e = analyze(*gpu, 0, moved_views, &d, moving(4.0f), tuning, 25.0, 0.0, true);
+                    Check(gpu->Writable(b.id, false) && writes(b, 0.5f),
+                          harness.name + " a quad views frame three real frames on is not composed from: " + error);
+                    const QuadFrame f = analyze(*gpu, 1, moved_views, &e, moving(5.0f), tuning, 25.0, 0.0, true);
+                    Check(!gpu->Writable(b.id, false) && !writes(b, 0.5f),
                           harness.name + " a quad views frame whose images were replaced is composed from");
+                    Check(gpu->Writable(b.id, true) && writes(b, 1.0f),
+                          harness.name + " a quad views frame's exact copy is refused while its newest images are kept: " +
+                              error);
+                    Check(Compare(harness.readback_sized(g_swapchains[outputs[0]][0]), hold[0], output, path).max <= 2,
+                          harness.name + " a quad views frame's exact copy is not its own views");
                     // An eye naming a view the frame does not have is refused.
                     FrameGenComposition wrong = c.composition;
                     wrong.eyes[1].focus = 4;
                     Check(!gpu->SynthesizeComposed(c.id, mode, 0.5f, wrong, eye_images, error),
                           harness.name + " a composed eye naming a missing view was accepted");
+                    // A newer capture into its newest images (the game's next
+                    // release): its exact copy is refused too; the newest
+                    // frame is still writable.
+                    for (std::size_t i = 0; i < 4; ++i) {
+                        const FrameGenViewSubmission next = submission(sources[i], 0, moved_views[i], moved_views[i], true);
+                        Check(gpu->Capture(i, next.source, next.request, tuning.quality, error),
+                              harness.name + " quad capture: " + error);
+                    }
+                    Check(!gpu->Writable(b.id, true) && !writes(b, 1.0f),
+                          harness.name + " a quad views frame whose newest images were replaced is written");
+                    Check(gpu->Writable(f.id, false) && writes(f, 0.5f),
+                          harness.name + " the newest quad views frame is not writable: " + error);
                 }
             }
         }
@@ -1958,6 +2096,11 @@ int RunQuadViews(Harness& harness) {
                       << merged.interior << " (hold " << merged.band_hold << "), views disagree by " << merged.double_edge
                       << "; without the flow merge: band " << unmerged.band << " vs interior " << unmerged.interior
                       << ", views disagree by " << unmerged.double_edge << '\n';
+            // How close each bound is (a ratio of 1 is the limit).
+            std::cout << harness.name << " quad views seam, " << what << " margins: band/interior "
+                      << merged.band / (1.2 * merged.interior) << ", band/hold " << merged.band / (0.5 * merged.band_hold)
+                      << ", merged/unmerged band " << merged.band / (0.5 * unmerged.band) << ", views disagreeing "
+                      << merged.double_edge / (0.5 * unmerged.double_edge) << '\n';
             Check(merged.band <= 1.2 * merged.interior,
                   harness.name + " quad views seam (" + what + "): the blend band is worse than the inset");
             Check(merged.band < 0.5 * merged.band_hold,
@@ -2070,6 +2213,210 @@ int RunQuadViews(Harness& harness) {
         }
         Check(backend->TakeTimings().empty(), harness.name + " analysis timings returned twice");
         backend->Reset();
+    }
+
+    // 4b. The history ring (FrameGenHistoryRing): quad views (analyzed with
+    // their composition) keep five real frames, the same views otherwise
+    // three, as a canvas does. A real frame is moved until the ring's size
+    // less one newer frames were captured, shown until the ring's size; the
+    // views' images differ by just the two slots more each (a history image,
+    // the flow filtered for and past the newest frame, and depth).
+    {
+        ID3D12Device* device = nullptr;
+        for (auto* base = static_cast<const XrBaseInStructure*>(harness.binding); base; base = base->next) {
+            if (base->type == XR_TYPE_GRAPHICS_BINDING_D3D12_KHR) {
+                device = reinterpret_cast<const XrGraphicsBindingD3D12KHR*>(base)->device;
+            }
+        }
+        Check(device != nullptr, "the history ring's memory needs the game's Direct3D 12 device");
+        auto backend = CreateFrameGenGpu(harness.binding, error);
+        Check(backend != nullptr, harness.name + " backend: " + error);
+        backend->SetCopyAfterRelease(true);
+        for (std::size_t i = 0; i < 4; ++i) Check(backend->Track(sources[i], EnumerateImages, error), error);
+        FrameGenTuning tuning;
+        tuning.mode = FrameGenSynthesisMode::kInterpolate;
+        tuning.cover = true;
+        const auto views = quad_views(0.0f, 0.0f);
+        std::array<std::uint64_t, 2> bytes{}; // composed, not
+        for (const bool composed : {true, false}) {
+            const std::uint8_t ring = FrameGenHistoryRing(composed);
+            QuadFrame newest = analyze(*backend, 0, views, nullptr, moving(0.0f), tuning, 25.0, 0.0, composed);
+            const QuadFrame frame = analyze(*backend, 1, views, &newest, moving(1.0f), tuning, 25.0, 0.0, composed);
+            Check(backend->WaitIdle(), harness.name + " idle");
+            bytes[composed ? 0 : 1] = backend->WorkingMemoryBytes();
+            newest = frame;
+            for (std::uint32_t newer = 1; newer <= ring; ++newer) {
+                newest = analyze(*backend, (newer + 1) % kQuadImages, views, &newest, moving(1.0f + newer), tuning, 25.0,
+                                 0.0, composed);
+                const bool moved = backend->Writable(frame.id, false), shown = backend->Writable(frame.id, true);
+                Check(moved == (newer + 1 < ring) && shown == (newer < ring),
+                      harness.name + " a real frame of " + (composed ? "quad views" : "views not composed") + ", " +
+                          std::to_string(newer) + " newer ones captured: moved " + (moved ? "writable" : "refused") +
+                          ", shown " + (shown ? "writable" : "refused") + " (a ring of " + std::to_string(ring) + ")");
+            }
+        }
+        // A ring slot of the four views, as the backend creates its images.
+        auto allocation = [&](FrameGenExtent extent, DXGI_FORMAT format, bool uav) {
+            D3D12_RESOURCE_DESC desc{};
+            desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+            desc.Width = extent.width;
+            desc.Height = extent.height;
+            desc.DepthOrArraySize = 1;
+            desc.MipLevels = 1;
+            desc.Format = format;
+            desc.SampleDesc.Count = 1;
+            desc.Flags = uav ? D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS : D3D12_RESOURCE_FLAG_NONE;
+            return device->GetResourceAllocationInfo(0, 1, &desc).SizeInBytes;
+        };
+        std::uint64_t slot = 0;
+        for (std::size_t i = 0; i < 4; ++i) {
+            const auto levels = FrameGenPyramid(views[i].extent);
+            const FrameGenExtent filtered = levels[FrameGenFinalFlowLevel(tuning)];
+            slot += allocation(views[i].extent, static_cast<ID3D12Resource*>(g_swapchains[sources[i]][0])->GetDesc().Format,
+                               false) +
+                    2 * allocation(filtered, DXGI_FORMAT_R16G16B16A16_FLOAT, true) +
+                    allocation(levels[1], DXGI_FORMAT_R32_FLOAT, true);
+        }
+        const std::uint64_t slots = FrameGenHistoryRing(true) - FrameGenHistoryRing(false);
+        std::cout << harness.name << " history ring: quad views " << bytes[0] / 1024 << " KiB, not composed "
+                  << bytes[1] / 1024 << " KiB (" << slots << " slots of " << slot / 1024 << " KiB)\n";
+        Check(bytes[0] == bytes[1] + slots * slot,
+              harness.name + " quad views' working memory is not their views' otherwise and two ring slots more");
+        backend->Reset();
+    }
+
+    // 5. Leaving quad views (a canvas of two views from then on): the focus
+    // views' images are freed once the GPU is done with them, frames
+    // analyzed with them are no longer written, and quad views coming back
+    // set them up again (on the GPU, with their optical flow sessions).
+    {
+        auto backend = CreateFrameGenGpu(harness.binding, error);
+        Check(backend != nullptr, harness.name + " backend: " + error);
+        backend->SetCopyAfterRelease(true);
+        for (std::size_t i = 0; i < 4; ++i) Check(backend->Track(sources[i], EnumerateImages, error), error);
+        for (const XrSwapchain out : outputs) Check(backend->Track(out, EnumerateImages, error), error);
+        FrameGenTuning tuning;
+        tuning.mode = FrameGenSynthesisMode::kInterpolate;
+        tuning.cover = true;
+        tuning.hardware_flow = g_hardware;
+        const auto views = quad_views(0.0f, 0.0f);
+        const QuadFrame a = analyze(*backend, 0, views, nullptr, moving(0.0f), tuning, 25.0, 0.0, true);
+        const QuadFrame b = analyze(*backend, 1, views, &a, moving(1.0f), tuning, 25.0, 0.0, true);
+        if (composes) generate(*backend, b, tuning.mode, 0.5f, b.composition); // the compose targets too
+        const std::uint64_t quad_bytes = backend->WorkingMemoryBytes();
+        // The least freeing the focus views gives back: their history rings
+        // (RGBA8 at their size), whatever else they hold on this device.
+        const std::uint64_t focus_history =
+            2ull * FrameGenHistoryRing(true) * focus_extent.width * focus_extent.height * 4;
+        FrameGenTuning canvas = tuning;
+        canvas.analyze_only = true;
+        const std::vector<FrameGenViewSubmission> pair{submission(sources[0], 2, views[0], views[0], false),
+                                                       submission(sources[1], 2, views[1], views[1], false)};
+        FrameGenExecuteResult canvas_result;
+        // Not while a frame written from them waits on the runtime's queue
+        // (held back here, so nothing the test does may wait for it): the
+        // two views measured in the quad views' ring then (a canvas's ring
+        // sets them up anew, which waits for the GPU, as any other change of
+        // their images does).
+        FrameGenTuning two_views = canvas;
+        const FrameGenComposition no_eyes;
+        two_views.composition = &no_eyes;
+        ID3D12Device* device = nullptr;
+        ID3D12CommandQueue* runtime_queue = nullptr;
+        for (auto* base = static_cast<const XrBaseInStructure*>(harness.binding); base; base = base->next) {
+            if (base->type == XR_TYPE_GRAPHICS_BINDING_D3D12_KHR) {
+                device = reinterpret_cast<const XrGraphicsBindingD3D12KHR*>(base)->device;
+            } else if (base->type == kFrameGenRuntimeQueueType) {
+                runtime_queue = static_cast<ID3D12CommandQueue*>(reinterpret_cast<const FrameGenRuntimeQueue*>(base)->d3d12_queue);
+            }
+        }
+        if (composes && device && runtime_queue) {
+            Check(backend->WaitIdle(), harness.name + " idle");
+            ComPtr<ID3D12Fence> gate;
+            Check(SUCCEEDED(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&gate))), "gate fence");
+            runtime_queue->Wait(gate.Get(), 1);
+            const bool written = backend->SynthesizeComposed(b.id, tuning.mode, 0.5f, b.composition, eye_images, error);
+            const bool executed = written && backend->Execute(pair, two_views, canvas_result, error);
+            const std::uint64_t pending_bytes = backend->WorkingMemoryBytes();
+            Check(SUCCEEDED(gate->Signal(1)), "gate signal");
+            Check(written && executed, harness.name + " a canvas after quad views, a frame pending: " + error);
+            Check(pending_bytes + focus_history > quad_bytes,
+                  harness.name + " the focus views' images were freed while a frame written from them was pending");
+        }
+        // The peripheral views alone, once the GPU is done with the others.
+        Check(backend->WaitIdle(), harness.name + " idle");
+        Check(backend->Execute(pair, canvas, canvas_result, error), harness.name + " canvas analyze: " + error);
+        const std::uint64_t canvas_bytes = backend->WorkingMemoryBytes();
+        std::cout << harness.name << " quad views left for a canvas: working memory " << quad_bytes / 1024 << " KiB -> "
+                  << canvas_bytes / 1024 << " KiB (the focus views' history rings: " << focus_history / 1024 << " KiB)\n";
+        Check(canvas_bytes > 0 && canvas_bytes + focus_history <= quad_bytes,
+              harness.name + " the focus views' images are kept after leaving quad views");
+        Check(!backend->Writable(b.id, true) && !backend->SynthesizeComposed(b.id, tuning.mode, 1.0f, b.composition,
+                                                                             eye_images, error),
+              harness.name + " a quad views frame is written after its focus views' images were freed");
+        Check(backend->Writable(canvas_result.frame, true), harness.name + " the canvas frame is not writable");
+        // Quad views again: set up anew, measured and composed.
+        const QuadFrame c = analyze(*backend, 2, views, nullptr, moving(2.0f), tuning, 25.0, 0.0, true);
+        const QuadFrame d = analyze(*backend, 3, views, &c, moving(3.0f), tuning, 25.0, 0.0, true);
+        Check(backend->Writable(d.id, false), harness.name + " quad views coming back are not writable");
+        Check(!g_hardware || g_flow_status != "active" || backend->HardwareFlowStatus() == "active",
+              harness.name + " quad views coming back lost the optical flow hardware: " + backend->HardwareFlowStatus());
+        if (composes) {
+            const auto again = generate(*backend, d, tuning.mode, 0.5f, d.composition);
+            const auto truth = composed_truth(d, d.composition, moving(2.5f));
+            std::array<Pixels, 2> hold;
+            for (std::size_t eye = 0; eye < 2; ++eye) {
+                hold[eye] = ComposeReference(LinearImage(d.pixels[eye], periphery_extent),
+                                             LinearImage(d.pixels[eye + 2], focus_extent),
+                                             BuildFrameGenComposeConstants(d.composition.eyes[eye], output), output);
+            }
+            const double again_error = eyes_error(again, truth), again_hold = eyes_error(hold, truth);
+            std::cout << harness.name << " quad views back from a canvas: error " << again_error << " vs hold "
+                      << again_hold << '\n';
+            Check(again_error < 0.4 * again_hold, harness.name + " quad views coming back are not generated");
+        }
+        backend->Reset();
+
+        // 6. Torn down while frames written from the views wait on the
+        // runtime's queue (a GPU stall: held back here), nothing they use is
+        // freed under them; on the GPU (its fence waits give up after 2 s,
+        // WARP's after 40), with the periphery's shading-rate images in use.
+        if (variable_rate && composes && device && runtime_queue) {
+            auto stalled = CreateFrameGenGpu(harness.binding, error);
+            Check(stalled != nullptr, harness.name + " backend: " + error);
+            stalled->SetCopyAfterRelease(true);
+            for (std::size_t i = 0; i < 4; ++i) {
+                Check(stalled->Track(sources[i], EnumerateImages, error) &&
+                          stalled->Track(view_outputs[i], EnumerateImages, error),
+                      error);
+            }
+            for (const XrSwapchain out : outputs) Check(stalled->Track(out, EnumerateImages, error), error);
+            const QuadFrame e = analyze(*stalled, 0, views, nullptr, moving(0.0f), tuning, 25.0, 0.0, true);
+            const QuadFrame f = analyze(*stalled, 1, views, &e, moving(1.0f), tuning, 25.0, 0.0, true);
+            std::vector<FrameGenImage> view_images;
+            for (std::size_t i = 0; i < 4; ++i) {
+                view_images.push_back({view_outputs[i], 0, 0, whole(views[i].extent), output_format});
+            }
+            Check(stalled->WaitIdle(), harness.name + " idle");
+            ComPtr<ID3D12Fence> gate;
+            Check(SUCCEEDED(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&gate))), "gate fence");
+            runtime_queue->Wait(gate.Get(), 1);
+            const bool written = stalled->Synthesize(f.id, tuning.mode, 0.5f, view_images, error) &&
+                                 stalled->SynthesizeComposed(f.id, tuning.mode, 0.5f, f.composition, eye_images, error);
+            const auto before = stalled->MemoryBudget();
+            const auto start = std::chrono::steady_clock::now();
+            stalled->Reset();
+            const double waited = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+            const auto after = stalled->MemoryBudget();
+            Check(SUCCEEDED(gate->Signal(1)), "gate signal");
+            Check(written, harness.name + " frames written before a stall: " + error);
+            if (before && after) {
+                const double freed = (static_cast<double>(before->usage_bytes) - static_cast<double>(after->usage_bytes)) / 1024.0;
+                std::cout << harness.name << " torn down during a stall (after " << waited << " ms): " << freed
+                          << " KiB of video memory freed\n";
+                Check(freed < 64.0, harness.name + " teardown during a stall freed images frames waiting to run use");
+            }
+        }
     }
     std::cout << harness.name << " quad views passed\n";
     return 0;
@@ -2215,6 +2562,13 @@ Pixels CockpitView(const QuadView& view, float head_x, float scroll) {
     return pixels;
 }
 
+// A profile's working memory, in bytes too (comparable across changes).
+void PrintWorkingMemory(const FrameGenGpu& gpu) {
+    const std::uint64_t bytes = gpu.WorkingMemoryBytes();
+    std::printf("  working memory %.0f MB (%llu bytes)\n", static_cast<double>(bytes) / (1024.0 * 1024.0),
+                static_cast<unsigned long long>(bytes));
+}
+
 // FG_PROFILE_QUAD=1: DCS's quad views on a Pimax Crystal Super, just in
 // time: two peripheral views of 2184x2200 and two focus views of 2748x2764
 // composed into two eyes of 6864x6908 (no depth: DCS sends none). Per real
@@ -2354,7 +2708,7 @@ int RunQuadProfile(Harness& harness, const char* const* names, std::size_t name_
         print(exact_sums, exacts);
         std::printf("  per generated frame: %.3f ms\n", generated_total / std::max(generated, 1));
         print(generated_sums, generated);
-        std::printf("  working memory %.0f MB\n", static_cast<double>(gpu->WorkingMemoryBytes()) / (1024.0 * 1024.0));
+        PrintWorkingMemory(*gpu);
     }
     gpu->Reset();
     if (const char* load = std::getenv("FG_PROFILE_LOAD_MS")) {
@@ -2563,7 +2917,7 @@ int RunProfile(Harness& harness) {
                 }
             }
         }
-        std::printf("  working memory %.0f MB\n", static_cast<double>(gpu->WorkingMemoryBytes()) / (1024.0 * 1024.0));
+        PrintWorkingMemory(*gpu);
     }
     gpu->Reset();
     if (const char* load = std::getenv("FG_PROFILE_LOAD_MS")) {
@@ -3993,11 +4347,28 @@ int D3D12Test() {
         }
     }
     if (g_bench || g_hardware) {
-        Check(SUCCEEDED(factory->EnumAdapters(0, &warp)), "hardware adapter");
+        // The first hardware adapter that runs Direct3D 12; without one
+        // (a machine with no GPU, or only Microsoft's software adapter)
+        // there is nothing to run on, which is not a failure.
+        ComPtr<IDXGIAdapter1> adapter;
+        for (UINT i = 0; !device && factory->EnumAdapters1(i, &adapter) != DXGI_ERROR_NOT_FOUND; ++i) {
+            DXGI_ADAPTER_DESC1 desc{};
+            if (SUCCEEDED(adapter->GetDesc1(&desc)) && !(desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) &&
+                SUCCEEDED(D3D12CreateDevice(adapter.Get(), D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&device)))) {
+                warp = adapter;
+                char name[128] = {};
+                WideCharToMultiByte(CP_UTF8, 0, desc.Description, -1, name, sizeof(name), nullptr, nullptr);
+                std::cout << "D3D12 on " << name << '\n';
+            }
+        }
+        if (!device) {
+            std::cout << "skipped: no hardware Direct3D 12 adapter\n";
+            return 0;
+        }
     } else {
         Check(SUCCEEDED(factory->EnumWarpAdapter(IID_PPV_ARGS(&warp))), "WARP adapter");
+        Check(SUCCEEDED(D3D12CreateDevice(warp.Get(), D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&device))), "D3D12 WARP device");
     }
-    Check(SUCCEEDED(D3D12CreateDevice(warp.Get(), D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&device))), "D3D12 WARP device");
     D3D12_COMMAND_QUEUE_DESC queue_desc{};
     Check(SUCCEEDED(device->CreateCommandQueue(&queue_desc, IID_PPV_ARGS(&queue))), "D3D12 queue");
     ComPtr<ID3D12CommandAllocator> allocator;

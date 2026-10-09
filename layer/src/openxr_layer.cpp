@@ -3659,7 +3659,7 @@ XrResult OpenXrLayer::ReleaseSwapchainImage(XrSwapchain swapchain,
             if (const std::optional<uint32_t> released_index = it->second.image_states.ReleaseOldest()) {
                 it->second.last_released_image_index = *released_index;
                 it->second.has_last_released_image_index = true;
-                framegen_.NoteRelease(swapchain, *released_index);
+                NoteFrameGenRelease(swapchain, *released_index);
                 // Before forwarding (or deferring) the release: the image is
                 // still the application's and in its pre-release state.
                 if (copied) {
@@ -4651,7 +4651,7 @@ bool OpenXrLayer::ComposeQuadViewsD3D11(const XrCompositionLayerProjection* sour
         }
         XrSwapchainImageWaitInfo wait_info{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};
         wait_info.timeout = kInternalSwapchainWaitTimeout;
-        result = WaitLayerSwapchainImage(target.swapchain, &wait_info);
+        result = WaitLayerSwapchainImage(target.swapchain, &wait_info, plan.shown_later);
         if (result == XR_TIMEOUT_EXPIRED) {
             // The runtime has not handed the image back: it is neither drawn
             // into nor released, and is waited for again next frame.
@@ -4665,11 +4665,13 @@ bool OpenXrLayer::ComposeQuadViewsD3D11(const XrCompositionLayerProjection* sour
         if (XR_FAILED(result)) {
             failure_reason = "outputWait eye=" + std::to_string(eye) +
                              ", result=" + FormatHex(static_cast<uint64_t>(result));
-            ReleaseLayerSwapchainImage(target.swapchain, std::nullopt);
+            ReleaseLayerSwapchainImage(target.swapchain, output_indices[eye], false, plan.shown_later);
             rendered = false;
             break;
         }
-        auto release_output_after_failure = [&]() { ReleaseLayerSwapchainImage(target.swapchain, std::nullopt); };
+        auto release_output_after_failure = [&]() {
+            ReleaseLayerSwapchainImage(target.swapchain, output_indices[eye], false, plan.shown_later);
+        };
 
         const uint32_t peripheral_index = QuadViewsSourceImageIndex(*swapchains[eye]);
         const uint32_t focus_index = QuadViewsSourceImageIndex(*swapchains[eye + 2]);
@@ -4836,6 +4838,7 @@ bool OpenXrLayer::ComposeQuadViewsD3D11(const XrCompositionLayerProjection* sour
         // the runtime; head-locked placement must be sampled after that wait.
         if(composite_osd) {
             pending_osd.swapchains[eye]=target.swapchain;
+            pending_osd.indices[eye]=output_indices[eye];
             pending_osd.targets[eye]=render_target;
             pending_osd.output_images[eye]=target.d3d11_images[output_indices[eye]];
             pending_osd.private_images[eye]=direct_output?nullptr:target.render_texture;
@@ -4885,14 +4888,13 @@ bool OpenXrLayer::ComposeQuadViewsD3D11(const XrCompositionLayerProjection* sour
             deferred_release[eye]=true;
             continue;
         }
-        result = ReleaseLayerSwapchainImage(target.swapchain, output_indices[eye]);
+        result = ReleaseLayerSwapchainImage(target.swapchain, output_indices[eye], true, plan.shown_later);
         if (XR_FAILED(result)) {
             failure_reason = "outputRelease eye=" + std::to_string(eye) +
                              ", result=" + FormatHex(static_cast<uint64_t>(result));
             rendered = false;
             break;
         }
-        framegen_.NoteRelease(target.swapchain, output_indices[eye]);
     }
     if (active_gpu_query) {
         context->End(active_gpu_query->end);
@@ -4919,8 +4921,10 @@ bool OpenXrLayer::ComposeQuadViewsD3D11(const XrCompositionLayerProjection* sour
     if (!rendered) {
         // A partial scene failure must not strand the first eye's acquired image.
         XrSwapchainImageReleaseInfo release{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
-        for(unsigned eye=0;eye<2;++eye)if(deferred_release[eye])
-            next_release_swapchain_image_(pending_osd.swapchains[eye],&release);
+        for(unsigned eye=0;eye<2;++eye)
+            if(deferred_release[eye] &&
+               XR_SUCCEEDED(next_release_swapchain_image_(pending_osd.swapchains[eye],&release)))
+                NoteFrameGenRelease(pending_osd.swapchains[eye],pending_osd.indices[eye]);
         if (d3d11_quadviews_compositor_.failure_logs_remaining > 0) {
             logger_.Error("D3D11 quadviews composition failed; falling back to projection-layer split. reason=" +
                           failure_reason);
@@ -5059,9 +5063,13 @@ XrResult OpenXrLayer::ReleasePendingOsdImages() {
     auto pending=std::move(*pending_osd_composite_);pending_osd_composite_.reset();
     XrResult result=XR_SUCCESS;
     XrSwapchainImageReleaseInfo release{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
-    for(const auto swapchain:pending.swapchains)if(swapchain && next_release_swapchain_image_) {
+    for(unsigned eye=0;eye<2;++eye) {
+        const auto swapchain=pending.swapchains[eye];
+        if(!swapchain || !next_release_swapchain_image_)continue;
         const auto released=next_release_swapchain_image_(swapchain,&release);
         if(XR_FAILED(released) && XR_SUCCEEDED(result))result=released;
+        // As of every release of the compositor's outputs, Frame Generation is told.
+        if(XR_SUCCEEDED(released))NoteFrameGenRelease(swapchain,pending.indices[eye]);
     }
     if(XR_FAILED(result))logger_.Error("OSD eye-image release failed: "+std::to_string(result));
     return result;
@@ -5110,11 +5118,34 @@ XrResult OpenXrLayer::FinishOsdComposite(const XrFrameEndInfo* info, bool& drawn
     return ReleasePendingOsdImages();
 }
 
+void OpenXrLayer::DropPendingFrameGenQuad(bool abandon) {
+    const bool claimed =
+        pending_framegen_quad_ && pending_framegen_quad_->route == FrameGenQuadRoute::kClaimed;
+    pending_framegen_quad_.reset();
+    if (abandon && claimed) {
+        // Its end never reaches Frame Generation: the claim goes.
+        framegen_.AbandonFrame(0);
+    }
+}
+
 XrResult OpenXrLayer::TraceRuntimeEndFrame(XrSession session, const XrFrameEndInfo* info) {
+    // This frame's route at the quad views compose site, if it came from it.
+    std::optional<FrameGenQuadFrame> quad = std::move(pending_framegen_quad_);
+    pending_framegen_quad_.reset();
     // Frame Generation turns one app frame into two runtime frames, each of
     // which goes through SubmitRuntimeFrame (and so carries the OSD).
     if (framegen_owns_pacing_.load(std::memory_order_acquire) && info) {
-        return framegen_.EndFrame(session, info, framegen_calls_);
+        return framegen_.EndFrame(session, info, framegen_calls_, quad ? &*quad : nullptr);
+    }
+    if (quad && quad->route == FrameGenQuadRoute::kClaimed) {
+        // Its primary projection holds four views: a stereo runtime never
+        // gets it (only Frame Generation composes it).
+        if (!framegen_quad_unforwarded_logged_) {
+            framegen_quad_unforwarded_logged_ = true;
+            logger_.Error("A quad views frame Frame Generation claimed ended after it stopped owning frame pacing; "
+                          "it was not shown.");
+        }
+        return XR_SUCCESS;
     }
     return SubmitRuntimeFrame(session, info);
 }
@@ -5699,9 +5730,14 @@ XrResult OpenXrLayer::ForwardEndFrame(XrSession session,
                                       std::unique_lock<std::mutex>& config_lock) {
     // Runtime wait/begin can fail before TraceRuntimeEndFrame is reached.
     // Release any held output images on every early-return path as well.
+    // Likewise a quad views frame Frame Generation claimed: one that never
+    // reached TraceRuntimeEndFrame is abandoned.
     struct PendingImageGuard {
         OpenXrLayer& layer;
-        ~PendingImageGuard() { layer.ReleasePendingOsdImages(); }
+        ~PendingImageGuard() {
+            layer.ReleasePendingOsdImages();
+            layer.DropPendingFrameGenQuad(true);
+        }
     } pending_guard{*this};
     ObserveCompositionLayerTopology(frame_end_info);
     if (frame_pacing_debug_enabled_.load(std::memory_order_relaxed) && frame_end_info) {
@@ -7350,6 +7386,8 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
     if (diag) {
         logger_.Debug("Turbo-diag: xrEndFrame config lock acquired.");
     }
+    // Each frame's own quad route only (set at the compose site below).
+    DropPendingFrameGenQuad(true);
     // A bridged session lives on the bridge's device; depth that stays the
     // game's is left out of its frames.
     std::optional<DepthlessFrame> depthless_frame;
@@ -7362,8 +7400,11 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
             std::string quad_frames;
             if (has_active_primary_view_configuration_ &&
                 IsQuadViewConfiguration(active_primary_view_configuration_type_)) {
-                // This window's quad views frames: composed by Direct3D 11, or split into layers.
-                quad_frames = ", quadFrames=d3d11:" +
+                // This window's quad views frames: composed by Frame Generation,
+                // by Direct3D 11, or split into layers.
+                quad_frames = ", quadFrames=fg:" +
+                              std::to_string(d3d11_bridge_quad_frames_.fg - d3d11_bridge_quad_frames_summarized_.fg) +
+                              ",d3d11:" +
                               std::to_string(d3d11_bridge_quad_frames_.d3d11 -
                                              d3d11_bridge_quad_frames_summarized_.d3d11) +
                               ",split:" +
@@ -7378,6 +7419,7 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
                 d3d11_bridge_lost_logged_ = true;
                 logger_.Error("Frame Generation's Direct3D 11 bridge: " + lost + "; the session is lost.");
             }
+            DropPendingFrameGenQuad(false);
             framegen_.AbandonFrame(frame_end_info->displayTime);
             return XR_ERROR_SESSION_LOST;
         }
@@ -7449,6 +7491,7 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
         PruneDepthSubmissionGeometry(frame_end_info->displayTime);
         PruneQuadViewsFrames(frame_end_info->displayTime);
         if (XR_FAILED(release_result)) {
+            DropPendingFrameGenQuad(false);
             framegen_.AbandonFrame(frame_end_info->displayTime);
             return release_result;
         }
@@ -7748,6 +7791,7 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
         PruneDepthSubmissionGeometry(frame_end_info->displayTime);
         PruneQuadViewsFrames(frame_end_info->displayTime);
         if (XR_FAILED(release_result)) {
+            DropPendingFrameGenQuad(false);
             framegen_.AbandonFrame(frame_end_info->displayTime);
             return release_result;
         }
@@ -7959,6 +8003,7 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
         corrected_projection_view_count += view_count;
     };
 
+    bool primary_projection_seen = false;
     for (uint32_t i = 0; i < frame_end_info->layerCount; ++i) {
         const XrCompositionLayerBaseHeader* base_header = frame_end_info->layers[i];
         if (!base_header || base_header->type != XR_TYPE_COMPOSITION_LAYER_PROJECTION) {
@@ -7986,18 +8031,84 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
             }
         }
 
+        // The frame's primary projection (its first with views) is the one
+        // Frame Generation generates from.
+        const bool primary_projection = !primary_projection_seen;
+        primary_projection_seen = true;
         if (quadviews_projection_split_active && projection_layer->viewCount >= 4) {
             QuadViewsComposePlan plan;
             const bool planned = BuildQuadViewsComposePlan(
                 projection_layer, frame_end_info->displayTime, layer_pivot_delta.reverse,
                 layer_pivot_delta.non_identity, find_depth_submission_geometry_for_layer(projection_layer, nullptr),
                 &plan);
+            // Frame Generation may compose the frame itself (just in time, on
+            // a bridged session whose pacing it owns), from the four views as
+            // the layer would submit them, with the alpha bits the composed
+            // layer clears. The diagnostic overlay is the layer's compositor's
+            // alone: such frames are declined.
+            const bool from_site = primary_projection && d3d11_bridge_.Active() &&
+                                   framegen_owns_pacing_.load(std::memory_order_acquire);
+            const bool offer = planned && from_site;
+            FrameGenQuadRoute route = FrameGenQuadRoute::kDeclined;
+            XrCompositionLayerProjection source = *projection_layer;
+            if (offer) {
+                source.viewCount = static_cast<uint32_t>(plan.source_views.size());
+                source.views = plan.source_views.data();
+                source.layerFlags &= ~(XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT |
+                                       XR_COMPOSITION_LAYER_UNPREMULTIPLIED_ALPHA_BIT |
+                                       XR_COMPOSITION_LAYER_INVERTED_ALPHA_BIT_EXT);
+                if (!quadviews_diagnostic_visualization_enabled_) {
+                    route = framegen_.ClaimQuadFrame(source);
+                }
+            }
+            if (route == FrameGenQuadRoute::kClaimed) {
+                // Frame Generation composes it (from the views' captures) for
+                // every refresh: the four views go to it, never to the
+                // runtime, and the Direct3D 11 compositor has nothing to do.
+                adjusted_projection_views.emplace_back(plan.source_views.begin(), plan.source_views.end());
+                adjusted_projection_layers.push_back(source);
+                adjusted_projection_layers.back().views = adjusted_projection_views.back().data();
+                adjusted_layers.push_back(
+                    reinterpret_cast<const XrCompositionLayerBaseHeader*>(&adjusted_projection_layers.back()));
+                for (uint32_t view = 0; view < 4; ++view) {
+                    d3d11_bridge_.SetComposed(projection_layer->views[view].subImage.swapchain, true);
+                }
+                ++d3d11_bridge_quad_frames_.fg;
+                FrameGenQuadFrame& pending = pending_framegen_quad_.emplace();
+                pending.route = route;
+                pending.composition = plan.composition;
+                pending.eyes = plan.eye_views;
+                pending.source_views = plan.source_views;
+                pending.source_space = projection_layer->space;
+                depth_anchor_restored_view_count += plan.restored;
+                ++corrected_projection_layer_count;
+                corrected_projection_view_count += 4;
+                ++split_quad_projection_layer_count;
+                continue;
+            }
             adjusted_projection_views.emplace_back();
             adjusted_projection_layers.emplace_back();
+            // Left to the layer while Frame Generation's thread presents just
+            // in time (composing the quad views, or not for now): the thread
+            // shows the frame as it is, at the frame's refresh.
+            plan.shown_later = route == FrameGenQuadRoute::kUncaptured || route == FrameGenQuadRoute::kBusy ||
+                               (route == FrameGenQuadRoute::kNotPresenting && framegen_.ShowsOwnImagesOnly());
             const bool composed = planned && ComposeQuadViewsD3D11(
                 projection_layer, frame_end_info->displayTime, plan, &depth_anchor_restored_view_count,
                 i == 0 && !framegen_owns_pacing_.load(std::memory_order_acquire) && !d3d11_bridge_.Active(),
                 &adjusted_projection_layers.back(), &adjusted_projection_views.back());
+            // Frame Generation shows it as the layer composed it (or split
+            // it), and sets the views up from it when their releases were not
+            // captured. A frame that could not be planned is the layer's too.
+            if (from_site) {
+                FrameGenQuadFrame& pending = pending_framegen_quad_.emplace();
+                pending.route = offer ? route : FrameGenQuadRoute::kNotPresenting;
+                if (route == FrameGenQuadRoute::kUncaptured) {
+                    pending.composition = plan.composition;
+                    pending.source_views = plan.source_views;
+                    pending.source_space = projection_layer->space;
+                }
+            }
             // The views of a composed layer reach the runtime only when
             // composing fails: their next releases need not wait on the
             // runtime's queue (FrameGenLazy).
@@ -8098,6 +8209,8 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
     PruneQuadViewsFrames(frame_end_info->displayTime);
     if (XR_FAILED(release_result)) {
         ReleasePendingOsdImages();
+        // A frame Frame Generation claimed is abandoned with it.
+        DropPendingFrameGenQuad(false);
         framegen_.AbandonFrame(frame_end_info->displayTime);
         return release_result;
     }
@@ -11928,7 +12041,7 @@ void OpenXrLayer::StartFrameGen(XrSession session, const void* binding_chain) {
         turbo_frame_interception_required_.store(false, std::memory_order_release);
         if (turbo_yielded_to_framegen_) {
             logger_.Info("Turbo yields to Frame Generation for this session: both change frame pacing, "
-                         "and Frame Generation holds the application at half the refresh rate.");
+                         "and Frame Generation paces the application's frames itself.");
         }
     } else if (framegen_session_enabled_) {
         logger_.Info("Frame Generation is enabled but unavailable for this session: " + framegen_.Status().reason);
@@ -11959,32 +12072,49 @@ XrResult OpenXrLayer::AcquireLayerSwapchainImage(XrSwapchain swapchain, uint32_t
     return result;
 }
 
-XrResult OpenXrLayer::WaitLayerSwapchainImage(XrSwapchain swapchain, const XrSwapchainImageWaitInfo* info) {
+XrResult OpenXrLayer::WaitLayerSwapchainImage(XrSwapchain swapchain, const XrSwapchainImageWaitInfo* info,
+                                              bool shown_later) {
     if (!d3d11_bridge_.Bridged(swapchain)) {
         return next_wait_swapchain_image_(swapchain, info);
     }
-    return framegen_queue_.Wait(swapchain, FrameGenLazy(swapchain), FrameGenQueueCalls(), info);
+    return framegen_queue_.Wait(swapchain, FrameGenLazy(swapchain) || shown_later, FrameGenQueueCalls(), info);
 }
 
-XrResult OpenXrLayer::ReleaseLayerSwapchainImage(XrSwapchain swapchain, std::optional<uint32_t> drawn_index) {
+XrResult OpenXrLayer::ReleaseLayerSwapchainImage(XrSwapchain swapchain, uint32_t index, bool drawn,
+                                                 bool shown_later) {
     XrSwapchainImageReleaseInfo info{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
     if (!d3d11_bridge_.Bridged(swapchain)) {
-        if (drawn_index) {
-            framegen_.CaptureOnRelease(swapchain, *drawn_index);
+        if (drawn) {
+            framegen_.CaptureOnRelease(swapchain, index);
         }
+        NoteFrameGenRelease(swapchain, index);
         return next_release_swapchain_image_(swapchain, &info);
     }
-    if (drawn_index) {
+    if (drawn) {
         // The bridge's copy into the runtime's image goes ahead of Frame
         // Generation's capture of it, and of the release (as in
         // ReleaseSwapchainImage).
         if (d3d11_bridge_.Released(swapchain)) {
-            framegen_.CaptureOnRelease(swapchain, *drawn_index);
+            framegen_.CaptureOnRelease(swapchain, index);
         }
     } else {
         d3d11_bridge_.Abandoned(swapchain);
     }
-    return framegen_queue_.Release(swapchain, FrameGenLazy(swapchain), FrameGenQueueCalls(), &info);
+    // Before the runtime may get the release: a frame Frame Generation's
+    // thread picks to show from then on sees it.
+    NoteFrameGenRelease(swapchain, index);
+    // Shown later by Frame Generation's thread, the frame's submission makes
+    // the runtime's queue wait for it (SubmitRuntimeFrame); until then
+    // nothing Frame Generation writes waits for the game's frame.
+    return framegen_queue_.Release(swapchain, FrameGenLazy(swapchain) || shown_later, FrameGenQueueCalls(), &info);
+}
+
+void OpenXrLayer::NoteFrameGenRelease(XrSwapchain swapchain, uint32_t index) {
+    framegen_.NoteRelease(swapchain, index);
+#if defined(DEPTHXR_TESTING)
+    std::scoped_lock lock(framegen_noted_releases_mutex_);
+    ++framegen_noted_releases_[swapchain];
+#endif
 }
 
 XrResult OpenXrLayer::DestroyLayerSwapchain(XrSwapchain swapchain) {
@@ -12474,7 +12604,9 @@ void OpenXrLayer::SharpenNativeFocusViews(std::vector<XrCompositionLayerProjecti
         result = next_wait_swapchain_image_(target.swapchain, &wait_info);
         if (XR_FAILED(result)) {
             XrSwapchainImageReleaseInfo release_info{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
-            next_release_swapchain_image_(target.swapchain, &release_info);
+            if (XR_SUCCEEDED(next_release_swapchain_image_(target.swapchain, &release_info))) {
+                NoteFrameGenRelease(target.swapchain, output_index);
+            }
             reason = "sharpen output wait failed";
             continue;
         }
@@ -12531,7 +12663,7 @@ void OpenXrLayer::SharpenNativeFocusViews(std::vector<XrCompositionLayerProjecti
             reason = "sharpen output release failed";
             continue;
         }
-        framegen_.NoteRelease(target.swapchain, output_index);
+        NoteFrameGenRelease(target.swapchain, output_index);
 
         // Repoint the submitted view at our sharpened swapchain.
         view.subImage.swapchain = target.swapchain;
@@ -13472,6 +13604,34 @@ bool OpenXrLayer::IsPivotXrActive() {
 #endif
 }
 
+std::string OpenXrLayer::FrameGenStatusReason(const FrameGenStatus& framegen) {
+    if (framegen.state != FrameGenState::kActive) {
+        return framegen.reason;
+    }
+    const auto fps = [](double rate) { return std::to_string(static_cast<int>(rate + 0.5)); };
+    const std::string mode = framegen.dynamic ? std::string("Dynamic")
+                                              : std::string(framegen.automatic ? "Auto " : "") +
+                                                    std::to_string(framegen.multiplier) + "x";
+    // Composed quad views frames kept failing to be written: for a while the
+    // layer composes the quad views again, whatever else the state says
+    // meanwhile (Frame Generation composes none of them).
+    if (framegen.quad_declining) {
+        return mode + ", quad views composed by the layer for a while: Frame Generation could not write its "
+                      "composed frames (the game runs at " + fps(framegen.app_fps) + " fps).";
+    }
+    if (!framegen.reason.empty()) {
+        return framegen.reason;
+    }
+    if (framegen.standby) {
+        return "Dynamic, standing by: the game runs at " + fps(framegen.app_fps) + " fps.";
+    }
+    if (framegen.full_rate) {
+        return "Auto, full rate: no generation needed.";
+    }
+    return mode + ", " + fps(framegen.app_fps) + " -> " + fps(framegen.distinct_fps) + " fps" +
+           (framegen.quad ? ", quad views composed by Frame Generation." : ".");
+}
+
 void OpenXrLayer::PollRuntimeRelay() {
     std::vector<std::string> sessions_to_remove;
     std::filesystem::path root;
@@ -13549,15 +13709,8 @@ void OpenXrLayer::PollRuntimeRelay() {
             status.turbo_reason = "Frame Generation owns frame pacing in this session.";
         const FrameGenStatus framegen = framegen_.Status();
         status.framegen_state = ToString(framegen.state);
-        status.framegen_reason = framegen.reason;
+        status.framegen_reason = FrameGenStatusReason(framegen);
         status.framegen_depth = framegen.depth == FrameGenDepthState::kUnknown ? "" : ToString(framegen.depth);
-        if (framegen.state == FrameGenState::kActive && status.framegen_reason.empty())
-            status.framegen_reason = framegen.full_rate ? "Auto, full rate: no generation needed."
-                : (framegen.dynamic ? std::string("Dynamic, ")
-                                    : std::string(framegen.automatic ? "Auto " : "") + std::to_string(framegen.multiplier) +
-                                          "x, ") +
-                  std::to_string(static_cast<int>(framegen.app_fps + 0.5)) + " -> " +
-                  std::to_string(static_cast<int>(framegen.distinct_fps + 0.5)) + " fps.";
         if (status.turbo_reason.empty() && turbo_auto_suspended_.load())
             status.turbo_reason = "Runtime pacing repeatedly stalled. Use the Turbo toggle to retry.";
 

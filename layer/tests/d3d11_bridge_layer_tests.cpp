@@ -11,9 +11,11 @@
 // installed), after every case's teardown; without either, a warning says so
 // and the behavioural checks stand alone. Quad views (XR_VARJO_quad_views)
 // run on a stereo stand-in whose waits are paced like a runtime's: the layer
-// composes the four views into stereo. Exit code 77: this machine shares
-// nothing between the APIs.
+// composes the four views into stereo. The device's removal while Frame
+// Generation composes them runs in a process of its own, on hardware only
+// (`hw`). Exit code 77: this machine shares nothing between the APIs.
 #include <windows.h>
+#include <process.h>
 #include <d3d11_4.h>
 #include <d3d12.h>
 #include <dxgi1_4.h>
@@ -125,11 +127,33 @@ class D3D11BridgeLayerTestPeer {
         std::scoped_lock lock(layer.mutex_);
         return {layer.d3d11_bridge_quad_frames_.d3d11, layer.d3d11_bridge_quad_frames_.split};
     }
+    // The bridged session's quad views frames Frame Generation composed so far.
+    static std::uint64_t QuadFramesComposedByFrameGen() {
+        OpenXrLayer& layer = OpenXrLayer::Instance();
+        std::scoped_lock lock(layer.mutex_);
+        return layer.d3d11_bridge_quad_frames_.fg;
+    }
+    // How long the layer composes quad views after Frame Generation's writes
+    // kept failing (kept across sessions).
+    static void SetFrameGenQuadDecline(std::chrono::milliseconds first, std::chrono::milliseconds longest) {
+        OpenXrLayer::Instance().framegen_.SetQuadDecline(first, longest);
+    }
     // The bridge's 30 s summary is logged at the next xrEndFrame.
     static void ExpireBridgeSummary() {
         OpenXrLayer& layer = OpenXrLayer::Instance();
         std::scoped_lock lock(layer.mutex_);
         layer.d3d11_bridge_last_summary_ = std::chrono::steady_clock::now() - std::chrono::seconds(31);
+    }
+    // How many releases of `swapchain` Frame Generation was told of (kept across sessions).
+    static std::uint64_t FrameGenReleases(XrSwapchain swapchain) {
+        OpenXrLayer& layer = OpenXrLayer::Instance();
+        std::scoped_lock lock(layer.framegen_noted_releases_mutex_);
+        const auto it = layer.framegen_noted_releases_.find(swapchain);
+        return it == layer.framegen_noted_releases_.end() ? 0 : it->second;
+    }
+    // The app's status line for Frame Generation in `status`.
+    static std::string FrameGenStatusReason(const FrameGenStatus& status) {
+        return OpenXrLayer::FrameGenStatusReason(status);
     }
 };
 
@@ -499,6 +523,24 @@ struct StandIn {
     // Direct3D 11 held back behind it: the next readback is checked to wait
     // for the game's rendering, then the gate is opened.
     Gate* hold{nullptr};
+    // The next `refusals` acquires of these swapchains fail.
+    std::vector<XrSwapchain> refuse_acquire;
+    int refusals{0};
+    // The next `wait_refusals` waits on these swapchains fail, the image
+    // handed back all the same (it may be released).
+    std::vector<XrSwapchain> refuse_wait;
+    int wait_refusals{0};
+    // Each stereo view's field of view, as xrLocateViews returns it.
+    std::array<XrFovf, 2> fovs{{{-0.8f, 0.8f, 0.8f, -0.8f}, {-0.8f, 0.8f, 0.8f, -0.8f}}};
+    // While `watch_gate` holds Direct3D 11 back: the images of the `watched`
+    // swapchains the thread `watch_thread` acquires, and how many of them it
+    // releases to the runtime before the gate opens (before the work on
+    // them has run).
+    const Gate* watch_gate{nullptr};
+    std::thread::id watch_thread;
+    std::vector<XrSwapchain> watched;
+    std::map<XrSwapchain, std::uint32_t> watched_acquired;
+    int early_releases{0};
 
     std::vector<std::vector<std::string>> instance_attempts; // each attempt's extensions
     std::vector<std::string> calls;
@@ -595,6 +637,15 @@ void SleepUntil(std::chrono::steady_clock::time_point until) {
 StandInSwapchain* FindSwapchain(XrSwapchain swapchain) {
     const auto it = g_runtime.swapchains.find(swapchain);
     return it == g_runtime.swapchains.end() ? nullptr : &it->second;
+}
+
+// A call on `swapchain` the stand-in watches (StandIn::watch_gate): on the
+// watched thread, while the gate is still closed.
+bool Watching(XrSwapchain swapchain) {
+    const StandIn& rt = g_runtime;
+    return rt.watch_gate && std::this_thread::get_id() == rt.watch_thread &&
+           std::find(rt.watched.begin(), rt.watched.end(), swapchain) != rt.watched.end() &&
+           rt.watch_gate->fence->GetCompletedValue() < 1;
 }
 
 D3D12_RESOURCE_BARRIER Transition(ID3D12Resource* resource, D3D12_RESOURCE_STATES before, D3D12_RESOURCE_STATES after) {
@@ -1029,12 +1080,13 @@ XrResult XRAPI_CALL RtLocateSpace(XrSpace, XrSpace, XrTime, XrSpaceLocation* loc
 
 XrResult XRAPI_CALL RtLocateViews(XrSession, const XrViewLocateInfo*, XrViewState* state, std::uint32_t capacity,
                                   std::uint32_t* count, XrView* views) {
+    std::scoped_lock lock(g_runtime_mutex);
     *count = 2;
     state->viewStateFlags = XR_VIEW_STATE_ORIENTATION_VALID_BIT | XR_VIEW_STATE_POSITION_VALID_BIT |
                             XR_VIEW_STATE_ORIENTATION_TRACKED_BIT | XR_VIEW_STATE_POSITION_TRACKED_BIT;
     for (std::uint32_t i = 0; i < std::min(capacity, 2u); ++i) {
         views[i].pose = {{0, 0, 0, 1}, {i ? 0.032f : -0.032f, 0, 0}};
-        views[i].fov = {-0.8f, 0.8f, 0.8f, -0.8f};
+        views[i].fov = g_runtime.fovs[i];
     }
     return XR_SUCCESS;
 }
@@ -1095,6 +1147,9 @@ XrResult XRAPI_CALL RtEndFrame(XrSession, const XrFrameEndInfo* info) {
         const XrCompositionLayerBaseHeader* base = info->layers[i];
         if (!base || base->type != XR_TYPE_COMPOSITION_LAYER_PROJECTION) continue;
         const auto& projection = *reinterpret_cast<const XrCompositionLayerProjection*>(base);
+        // The stand-in is a stereo runtime, whatever the application's views.
+        Check(projection.viewCount == 2,
+              "the runtime gets projections of two views, not " + std::to_string(projection.viewCount));
         for (std::uint32_t v = 0; v < projection.viewCount; ++v) {
             const XrCompositionLayerProjectionView& view = projection.views[v];
             ShownView shown;
@@ -1111,7 +1166,9 @@ XrResult XRAPI_CALL RtEndFrame(XrSession, const XrFrameEndInfo* info) {
     std::vector<Color> texels;
     bool read = false;
     std::size_t per_view = 1; // texels read per view: the centre, then the probes (Direct3D 12)
-    if (rt.device12) {
+    // Nothing is read on a removed device: its fences read as done at once,
+    // and WARP may still be running the readback when it is let go.
+    if (rt.device12 && SUCCEEDED(rt.device12->GetDeviceRemovedReason())) {
         Sources sources;
         per_view += rt.probes.size();
         for (const ShownView& view : frame.views) {
@@ -1260,11 +1317,19 @@ XrResult XRAPI_CALL RtAcquire(XrSwapchain swapchain, const XrSwapchainImageAcqui
     std::scoped_lock lock(g_runtime_mutex);
     StandInSwapchain* chain = FindSwapchain(swapchain);
     if (!chain) return XR_ERROR_HANDLE_INVALID;
+    if (g_runtime.refusals > 0 && std::find(g_runtime.refuse_acquire.begin(), g_runtime.refuse_acquire.end(),
+                                            swapchain) != g_runtime.refuse_acquire.end()) {
+        --g_runtime.refusals;
+        return XR_ERROR_RUNTIME_FAILURE;
+    }
     if (chain->acquired.size() >= chain->Count()) return XR_ERROR_CALL_ORDER_INVALID;
     *index = chain->next;
     chain->next = (chain->next + 1) % static_cast<std::uint32_t>(chain->Count());
     chain->acquired.push_back(*index);
     ++chain->acquires;
+    if (Watching(swapchain)) {
+        g_runtime.watched_acquired[swapchain] = *index;
+    }
     return XR_SUCCESS;
 }
 
@@ -1274,6 +1339,11 @@ XrResult XRAPI_CALL RtWait(XrSwapchain swapchain, const XrSwapchainImageWaitInfo
     if (!chain) return XR_ERROR_HANDLE_INVALID;
     if (chain->waits >= chain->acquires) return XR_ERROR_CALL_ORDER_INVALID;
     ++chain->waits;
+    const std::vector<XrSwapchain>& refused = g_runtime.refuse_wait;
+    if (g_runtime.wait_refusals > 0 && std::find(refused.begin(), refused.end(), swapchain) != refused.end()) {
+        --g_runtime.wait_refusals;
+        return XR_ERROR_RUNTIME_FAILURE;
+    }
     return XR_SUCCESS;
 }
 
@@ -1286,6 +1356,10 @@ XrResult XRAPI_CALL RtRelease(XrSwapchain swapchain, const XrSwapchainImageRelea
     chain->released = chain->acquired.front();
     chain->acquired.pop_front();
     ++chain->releases;
+    if (Watching(swapchain)) {
+        const auto acquired = rt.watched_acquired.find(swapchain);
+        rt.early_releases += acquired != rt.watched_acquired.end() && acquired->second == *chain->released ? 1 : 0;
+    }
     // As runtimes do: the image counts as written once the session's queue
     // has run everything submitted before the release.
     if (rt.queue) {
@@ -1790,16 +1864,48 @@ std::array<XrView, 4> LocateQuadViews(App& app, XrTime time) {
     return views;
 }
 
+// What QuadFrame does beyond rendering and submitting the frame.
+struct QuadFrameOptions {
+    // Direct3D 11 waits for the gate from just before xrEndFrame on: the
+    // game's rendering of the frame runs, nothing the layer does with the
+    // frame on Direct3D 11 (its composition) runs until the gate opens.
+    Gate* hold{nullptr};
+    std::int32_t trim{0}; // each view's image rectangle is this many texels narrower than its image
+    // The stand-in's stereo fields of view, from the frame's xrLocateViews on.
+    std::optional<std::array<XrFovf, 2>> fovs;
+    XrTime* display_time{nullptr}; // where the frame's display time goes
+    // The session may be lost: xrWaitFrame or xrBeginFrame returning
+    // XR_ERROR_SESSION_LOST ends the frame there (returned as it is); any
+    // other failure of theirs fails the test.
+    bool session_may_be_lost{false};
+};
+
 // One application frame of quad views: the four views located at the frame's
 // time, each periphery cleared to P(frame, eye) and each focus view to
 // F(frame, eye) with stripes of StripeColor(frame, eye), released, then
 // submitted as located in one projection.
-XrResult QuadFrame(App& app, Game& game, const QuadTargets& targets, int frame) {
+XrResult QuadFrame(App& app, Game& game, const QuadTargets& targets, int frame, const QuadFrameOptions& options = {}) {
+    const auto expect = [&](XrResult result, const char* call) {
+        Check(result == XR_SUCCESS || (options.session_may_be_lost && result == XR_ERROR_SESSION_LOST),
+              std::string(call) + ": " + std::to_string(result));
+        return result;
+    };
     XrFrameWaitInfo wait_info{XR_TYPE_FRAME_WAIT_INFO};
     XrFrameState state{XR_TYPE_FRAME_STATE};
-    Check(app.api.wait_frame(app.session, &wait_info, &state) == XR_SUCCESS, "xrWaitFrame");
+    if (const XrResult result = expect(app.api.wait_frame(app.session, &wait_info, &state), "xrWaitFrame")) {
+        return result;
+    }
+    if (options.display_time) {
+        *options.display_time = state.predictedDisplayTime;
+    }
     XrFrameBeginInfo begin_info{XR_TYPE_FRAME_BEGIN_INFO};
-    Check(app.api.begin_frame(app.session, &begin_info) == XR_SUCCESS, "xrBeginFrame");
+    if (const XrResult result = expect(app.api.begin_frame(app.session, &begin_info), "xrBeginFrame")) {
+        return result;
+    }
+    if (options.fovs) {
+        std::scoped_lock lock(g_runtime_mutex);
+        g_runtime.fovs = *options.fovs;
+    }
     const std::array<XrView, 4> located = LocateQuadViews(app, state.predictedDisplayTime);
 
     std::array<std::uint32_t, 4> indices{};
@@ -1816,6 +1922,9 @@ XrResult QuadFrame(App& app, Game& game, const QuadTargets& targets, int frame) 
     for (const Target& target : targets) {
         Release(app, target);
     }
+    if (options.hold) {
+        options.hold->HoldGame(game);
+    }
 
     std::array<XrCompositionLayerProjectionView, 4> views{};
     for (std::size_t i = 0; i < views.size(); ++i) {
@@ -1826,7 +1935,7 @@ XrResult QuadFrame(App& app, Game& game, const QuadTargets& targets, int frame) 
         views[i].fov = located[i].fov;
         views[i].subImage.swapchain = targets[i].swapchain;
         views[i].subImage.imageRect = {
-            {0, 0}, {static_cast<std::int32_t>(desc.Width), static_cast<std::int32_t>(desc.Height)}};
+            {0, 0}, {static_cast<std::int32_t>(desc.Width) - options.trim, static_cast<std::int32_t>(desc.Height)}};
     }
     XrCompositionLayerProjection projection{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
     projection.space = app.space;
@@ -1895,6 +2004,7 @@ struct CaseSettings {
     // Quadviews' stereo-composite emulation, the focus fixed at the centre.
     bool quadviews{false};
     std::string frame_multiplier; // Frame Generation's (its default when empty)
+    std::string synthesis_mode;   // Frame Generation's (its default when empty)
 };
 
 // A fresh stand-in runtime, a log of the case's own, and the test's settings.
@@ -1925,8 +2035,16 @@ void BeginCase(const std::string& name, const Game& game, const CaseSettings& ca
     }
     settings << R"("turbo": {"enabled": false}, "framegen": {"enabled": )"
              << (case_settings.framegen ? "true" : "false");
-    if (!case_settings.frame_multiplier.empty()) {
-        settings << R"(, "defaults": {"frameMultiplier": ")" << case_settings.frame_multiplier << R"("})";
+    if (!case_settings.frame_multiplier.empty() || !case_settings.synthesis_mode.empty()) {
+        settings << R"(, "defaults": {)";
+        if (!case_settings.frame_multiplier.empty()) {
+            settings << R"("frameMultiplier": ")" << case_settings.frame_multiplier << R"(")"
+                     << (case_settings.synthesis_mode.empty() ? "" : ", ");
+        }
+        if (!case_settings.synthesis_mode.empty()) {
+            settings << R"("synthesisMode": ")" << case_settings.synthesis_mode << R"(")";
+        }
+        settings << "}";
     }
     settings << "}}}\n";
 }
@@ -2768,8 +2886,9 @@ void TestBridgedQuadViewsComposed(Game& game, bool framegen) {
     Peer::ExpireBridgeSummary();
     Check(QuadFrame(app, game, targets, kFrames + 2) == XR_SUCCESS, "a quad frame logging the bridge's summary");
     const std::string log = Peer::Log();
-    Check(Contains(log, "quadFrames=d3d11:" + std::to_string(kFrames) + ",split:0") &&
-              Contains(log, "quadFrames=d3d11:2,split:0"),
+    // The stand-in backend does not compose: Frame Generation composes none.
+    Check(Contains(log, "quadFrames=fg:0,d3d11:" + std::to_string(kFrames) + ",split:0") &&
+              Contains(log, "quadFrames=fg:0,d3d11:2,split:0"),
           "the bridge's summaries count each window's quad frames");
     Check(!Contains(log, "D3D11 quadviews composition failed"), "composing never failed");
 
@@ -2791,6 +2910,41 @@ void TestBridgedQuadViewsComposed(Game& game, bool framegen) {
               << " texels): digest " << hex.str() << ", frame 0 band " << Text(readbacks.front()[2]) << " / "
               << Text(readbacks.front()[eye_texels + 2]) << "\n";
 
+    // An output the runtime hands back with an error is released with
+    // nothing drawn, and that frame is split into layers. Frame Generation
+    // is told of every release of the outputs all the same: the runtime
+    // shows the image released last wherever a frame shows the swapchain.
+    const std::array<XrSwapchain, 2> outputs = Peer::CompositorOutputs();
+    const auto runtime_releases = [](XrSwapchain swapchain) {
+        std::scoped_lock lock(g_runtime_mutex);
+        const StandInSwapchain* chain = FindSwapchain(swapchain);
+        return chain ? chain->releases : -1;
+    };
+    std::array<int, 2> released_before{};
+    std::array<std::uint64_t, 2> told_before{};
+    for (int eye = 0; eye < 2; ++eye) {
+        released_before[eye] = runtime_releases(outputs[eye]);
+        told_before[eye] = Peer::FrameGenReleases(outputs[eye]);
+    }
+    {
+        std::scoped_lock lock(g_runtime_mutex);
+        g_runtime.refuse_wait = {outputs[1]};
+        g_runtime.wait_refusals = 1;
+    }
+    const auto [d3d11_before, split_before] = Peer::QuadFrames();
+    Check(QuadFrame(app, game, targets, kFrames + 3) == XR_SUCCESS, "a quad frame whose right output's wait fails");
+    Check(QuadFrame(app, game, targets, kFrames + 4) == XR_SUCCESS, "a quad frame after it");
+    const auto [d3d11_after, split_after] = Peer::QuadFrames();
+    Check(d3d11_after == d3d11_before + 1 && split_after == split_before + 1,
+          "the frame whose output wait failed is split, the one after it composed");
+    for (int eye = 0; eye < 2; ++eye) {
+        const int released = runtime_releases(outputs[eye]) - released_before[eye];
+        const std::uint64_t told = Peer::FrameGenReleases(outputs[eye]) - told_before[eye];
+        Check(released == 2 && told == 2, "output " + std::to_string(eye) + ": the runtime got " +
+                                              std::to_string(released) + " releases, Frame Generation was told of " +
+                                              std::to_string(told));
+    }
+
     for (const Target& target : targets) {
         Check(app.api.destroy_swapchain(target.swapchain) == XR_SUCCESS, "a quad view's swapchain is destroyed");
     }
@@ -2800,6 +2954,579 @@ void TestBridgedQuadViewsComposed(Game& game, bool framegen) {
     }
     Check(GameRuns(game), "the game's device works");
     EndCase(game);
+}
+
+
+// The real frame whose periphery colour `texel` shows (frames mod 8), or none.
+std::optional<int> PeripheryFrame(const std::optional<Color>& texel, int eye) {
+    for (int frame = 0; frame < 8; ++frame) {
+        if (Near(texel, PeripheryColor(frame, eye))) return frame;
+    }
+    return std::nullopt;
+}
+
+// Each channel of `texel` lies between those of `a` and `b` (a step either side).
+bool Within(const std::optional<Color>& texel, const Color& a, const Color& b) {
+    if (!texel) return false;
+    for (int i = 0; i < 3; ++i) {
+        if ((*texel)[i] < std::min(a[i], b[i]) - 1 || (*texel)[i] > std::max(a[i], b[i]) + 1) return false;
+    }
+    return true;
+}
+
+// Interpolating: a frame between real frames n - 1 and n, its corner between
+// their peripheries and its centre between their focus views (frames mod 8).
+bool BetweenFrames(const std::optional<Color>& corner, const std::optional<Color>& centre, int eye) {
+    for (int frame = 0; frame < 8; ++frame) {
+        const int before = (frame + 7) % 8;
+        if (Within(corner, PeripheryColor(before, eye), PeripheryColor(frame, eye)) &&
+            Within(centre, FocusColor(before, eye), FocusColor(frame, eye))) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// 10. Quad views on a bridged session with Frame Generation composing them,
+// on the real Direct3D 12 backend (on the bridge's device: WARP, or the
+// first hardware adapter with `hw`), at 2x, extrapolating or interpolating.
+// Engaged, Frame Generation claims each frame at the layer's compose site:
+// the Direct3D 11 compositor composes nothing more, the runtime gets two
+// views naming Frame Generation's own output images, and each shows, in its
+// centre, the focus colour and, at a corner, the periphery colour of one same
+// real frame (interpolating, of the same two real frames it lies between).
+// Output acquires the runtime refuses fall back to the last frame written
+// (logged), and when they keep failing the layer composes for a while.
+// Toggled off, the Direct3D 11 compositor composes again, with the right
+// colours, and no frame shown on the way is black.
+void TestBridgedQuadFrameGen(Game& game, const std::string& mode) {
+    CaseSettings settings;
+    settings.quadviews = true;
+    settings.frame_multiplier = "2x";
+    settings.synthesis_mode = mode;
+    BeginCase("quad-views-framegen-composed-" + mode, game, settings);
+    g_runtime.recommended_width = g_runtime.recommended_height = kQuadStereoSize;
+    g_runtime.paced = true;
+    Peer::SetFrameGenEngagement(2, std::chrono::milliseconds(0));
+    Peer::SetFrameGenQuadDecline(std::chrono::milliseconds(300), std::chrono::milliseconds(600));
+    Peer::UseFrameGenGpu(depthxr::CreateFrameGenGpu);
+    App app = StartApp({kD3D11Extension, kQuadViewsExtension, kFoveatedExtension});
+    std::uint32_t count = 0;
+    std::array<XrViewConfigurationView, 4> configuration{};
+    for (XrViewConfigurationView& view : configuration) view.type = XR_TYPE_VIEW_CONFIGURATION_VIEW;
+    Check(app.api.enumerate_views(app.api.instance, app.system, XR_VIEW_CONFIGURATION_TYPE_PRIMARY_QUAD_VARJO, 4,
+                                  &count, configuration.data()) == XR_SUCCESS &&
+              count == 4,
+          "the layer offers the quad views configuration's four views");
+    SessionCreate create(game.device.Get(), app.system);
+    Check(app.api.create_session(app.api.instance, &create.info, &app.session) == XR_SUCCESS && Peer::Bridge().Active(),
+          "a bridged session");
+    BeginSession(app, XR_VIEW_CONFIGURATION_TYPE_PRIMARY_QUAD_VARJO);
+    QuadTargets targets;
+    for (std::size_t i = 0; i < targets.size(); ++i) {
+        targets[i] = MakeTarget(app,
+                                ColorInfo(1, configuration[i].recommendedImageRectWidth,
+                                          configuration[i].recommendedImageRectHeight),
+                                i < 2 ? "a peripheral view" : "a focus view");
+    }
+    {
+        std::scoped_lock lock(g_runtime_mutex);
+        g_runtime.probes = {{0.03f, 0.03f}};
+    }
+
+    int frame = 0;
+    // Every frame the runtime showed from `from` on: two views, each read
+    // back, none black; those of Frame Generation's own outputs show one real
+    // frame's focus at the centre and its periphery at the corner. Returns
+    // how many showed its outputs.
+    const auto check_shown = [&](std::size_t from, const std::string& at) {
+        const std::array<XrSwapchain, 2> compositor = Peer::CompositorOutputs();
+        std::size_t own = 0;
+        for (const ShownFrame& shown : Shown(from)) {
+            Check(shown.views.size() == 2, at + ": the runtime gets two views, not " + std::to_string(shown.views.size()));
+            const bool composed = shown.views[0].swapchain == compositor[0] && shown.views[1].swapchain == compositor[1];
+            for (int eye = 0; eye < 2; ++eye) {
+                const ShownView& view = shown.views[eye];
+                Check(std::none_of(targets.begin(), targets.end(),
+                                   [&](const Target& target) { return target.swapchain == view.swapchain; }),
+                      at + ": the runtime never shows a quad view itself");
+                Check(view.texel && view.probed.size() == 1, at + ": the runtime read the frame back");
+                Check(*view.texel != Color{0, 0, 0, 255} && *view.texel != Color{0, 0, 0, 0},
+                      at + ": no frame shown is black (eye " + std::to_string(eye) + ")");
+                if (!composed && mode == "interpolate") {
+                    // Frames between two real ones blend them.
+                    Check(BetweenFrames(view.probed[0], view.texel, eye),
+                          at + ": the corner and the centre show the periphery and the focus view between the same "
+                               "two real frames, " +
+                              Text(view.probed[0]) + " and " + Text(*view.texel) + " (eye " + std::to_string(eye) + ")");
+                    continue;
+                }
+                const std::optional<int> real = PeripheryFrame(view.probed[0], eye);
+                Check(real.has_value(), at + ": the corner shows a periphery, " + Text(view.probed[0]) + " (eye " +
+                                            std::to_string(eye) + (composed ? ", composed by Direct3D 11)" : ")"));
+                Check(Near(view.texel, FocusColor(*real, eye)),
+                      at + ": the centre shows the focus view of the same real frame, " + Text(*view.texel) +
+                          ", rendered " + Text(FocusColor(*real, eye)) + (composed ? " (Direct3D 11)" : ""));
+            }
+            own += composed ? 0 : 1;
+        }
+        return own;
+    };
+    const auto run = [&](int frames, const std::string& at) {
+        for (int i = 0; i < frames; ++i, ++frame) {
+            Check(QuadFrame(app, game, targets, frame) == XR_SUCCESS, at + ": xrEndFrame of quad frame " +
+                                                                          std::to_string(frame));
+        }
+    };
+
+    // Engaged after two steady frames: the first frame presented from Frame
+    // Generation's thread sets the views up (composed by Direct3D 11), the
+    // ones after it are claimed.
+    run(8, "engaging");
+    depthxr::FrameGenStatus status = Peer::FrameGen();
+    Check(status.threaded && status.quad && status.quad_setups == 1,
+          "Frame Generation composes the quad views itself after setting the views up once: quad=" +
+              std::to_string(status.quad) + ", setups=" + std::to_string(status.quad_setups));
+    const std::uint64_t d3d11_engaged = Peer::QuadFrames().first;
+    const std::uint64_t fg_engaged = Peer::QuadFramesComposedByFrameGen();
+    const std::size_t engaged_from = ShownCount();
+    const std::uint64_t unwritten_engaged = status.unwritten;
+    const std::uint64_t unready_engaged = status.unready_capture;
+    // Until frames are generated between the real ones (a loaded machine may
+    // analyze none in time for a while).
+    int composing_frames = 0;
+    do {
+        run(24, "composing");
+        composing_frames += 24;
+    } while (Peer::FrameGen().generated == 0 && composing_frames < 96);
+    const std::size_t own = check_shown(engaged_from, "composing");
+    const std::vector<ShownFrame> composing = Shown(engaged_from);
+    // Once its first frame is written, every refresh shows Frame Generation's
+    // outputs, but for one it could not write, or whose real frame was not
+    // captured yet (a loaded machine stalls it): that shows the frame shown
+    // last, or the one Direct3D 11 composed to set the views up, again. So do
+    // the refreshes before its first frame.
+    const XrSwapchain compositor_left = Peer::CompositorOutputs()[0];
+    const auto is_own = [&](const ShownFrame& shown) { return shown.views[0].swapchain != compositor_left; };
+    const auto first_own = std::find_if(composing.begin(), composing.end(), is_own);
+    const std::size_t from_first_own = static_cast<std::size_t>(composing.end() - first_own);
+    const depthxr::FrameGenStatus composed_status = Peer::FrameGen();
+    const std::uint64_t unwritten = composed_status.unwritten - unwritten_engaged;
+    const std::uint64_t unready = composed_status.unready_capture - unready_engaged;
+    Check(own >= static_cast<std::size_t>(composing_frames) && own + unwritten + unready >= from_first_own,
+          "composing: every refresh shows Frame Generation's outputs (" + std::to_string(own) + " of " +
+              std::to_string(from_first_own) + " from its first, " + std::to_string(unwritten) + " not written, " +
+              std::to_string(unready) + " not captured yet)");
+    Check(Peer::QuadFrames().first == d3d11_engaged &&
+              Peer::QuadFramesComposedByFrameGen() == fg_engaged + static_cast<std::uint64_t>(composing_frames),
+          "composing: the Direct3D 11 compositor composes nothing more, Frame Generation every frame");
+    status = Peer::FrameGen();
+    Check(status.generated > 0 && status.quad_claimed >= static_cast<std::uint64_t>(composing_frames),
+          "composing: frames are generated between the real ones (" + std::to_string(status.generated) + ")");
+    const auto last_own = std::find_if(composing.rbegin(), composing.rend(), is_own);
+    const std::array<XrSwapchain, 2> outputs{last_own->views[0].swapchain, last_own->views[1].swapchain};
+    CheckValidation(game, "composing");
+
+    // A frame whose views' rectangles change cannot be claimed (their
+    // releases were captured with the old ones): Direct3D 11 composes it,
+    // and Frame Generation's thread shows it later as it is. The
+    // compositor's outputs reach the runtime once their composition has run
+    // on the GPU, never before it with the runtime's queue (Frame
+    // Generation's, which writes every refresh) waiting for it: Direct3D 11
+    // is held back from just before xrEndFrame until the frame has ended,
+    // and the stand-in counts the outputs' releases the application's thread
+    // makes meanwhile.
+    {
+        const std::array<XrSwapchain, 2> compositor = Peer::CompositorOutputs();
+        Gate gate(g_runtime.device12.Get(), game);
+        {
+            std::scoped_lock lock(g_runtime_mutex);
+            g_runtime.watch_gate = &gate;
+            g_runtime.watch_thread = std::this_thread::get_id();
+            g_runtime.watched = {compositor[0], compositor[1]};
+            g_runtime.watched_acquired.clear();
+            g_runtime.early_releases = 0;
+        }
+        // Opened after a while whatever happens: a runtime's queue waiting
+        // for the composition would hold the stand-in's readbacks.
+        const HANDLE ended = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+        std::thread opener([&] {
+            WaitForSingleObject(ended, 3000);
+            gate.Open();
+        });
+        const std::uint64_t d3d11_before = Peer::QuadFrames().first;
+        const std::size_t moved_from = ShownCount();
+        QuadFrameOptions moved;
+        moved.hold = &gate;
+        moved.trim = 2;
+        const XrResult result = QuadFrame(app, game, targets, frame++, moved);
+        gate.Open();
+        SetEvent(ended);
+        opener.join();
+        CloseHandle(ended);
+        int early = 0;
+        {
+            std::scoped_lock lock(g_runtime_mutex);
+            early = g_runtime.early_releases;
+            g_runtime.watch_gate = nullptr;
+            g_runtime.watched.clear();
+        }
+        Check(result == XR_SUCCESS, "rectangles changed: xrEndFrame " + std::to_string(result));
+        Check(Peer::QuadFrames().first == d3d11_before + 1, "rectangles changed: Direct3D 11 composes the frame");
+        Check(early == 0, "rectangles changed: " + std::to_string(early) +
+                              " of the compositor's outputs reached the runtime before their composition ran");
+        // Back to the whole images (one frame more for Direct3D 11): Frame
+        // Generation composes the views again.
+        const std::uint64_t fg_moved = Peer::QuadFramesComposedByFrameGen();
+        run(6, "rectangles changed back");
+        Check(Peer::QuadFramesComposedByFrameGen() > fg_moved,
+              "rectangles changed back: Frame Generation composes the quad views again");
+        check_shown(moved_from, "rectangles changed");
+    }
+
+    // The runtime refuses Frame Generation's output acquires: the last
+    // frame written is shown again (logged); refused ten times in a row, the
+    // layer composes for a while, then Frame Generation composes again.
+    {
+        std::scoped_lock lock(g_runtime_mutex);
+        g_runtime.refuse_acquire = {outputs[0], outputs[1]};
+        g_runtime.refusals = 12;
+    }
+    const std::size_t refused_from = ShownCount();
+    const std::uint64_t d3d11_refused = Peer::QuadFrames().first;
+    run(12, "refused");
+    std::string log = Peer::Log();
+    Check(Contains(log, "Frame Generation could not write a composed frame ("), "refused: failed writes are logged");
+    Check(Contains(log, "Frame Generation could not write 10 composed frames in a row (output image acquire failed") &&
+              Peer::FrameGen().quad_write_declines == 1,
+          "refused: ten in a row hand the quad views back to the layer");
+    Check(Peer::QuadFrames().first > d3d11_refused, "refused: the Direct3D 11 compositor composes meanwhile");
+    check_shown(refused_from, "refused");
+    // The app's status line says so while it lasts (when the case is still
+    // that quick).
+    if (const depthxr::FrameGenStatus declined = Peer::FrameGen(); declined.quad_declining) {
+        const std::string line = Peer::FrameGenStatusReason(declined);
+        Check(!Contains(line, "composed by Frame Generation") && Contains(line, "quad views composed by the layer"),
+              "refused: the app's status line says the layer composes the quad views for a while: " + line);
+    }
+    {
+        std::scoped_lock lock(g_runtime_mutex);
+        g_runtime.refusals = 0;
+    }
+    Sleep(350); // the decline ends
+    const std::uint64_t fg_resumed = Peer::QuadFramesComposedByFrameGen();
+    const std::size_t resumed_from = ShownCount();
+    run(10, "resumed");
+    Check(Peer::QuadFramesComposedByFrameGen() >= fg_resumed + 9 && check_shown(resumed_from, "resumed") > 0,
+          "resumed: Frame Generation composes again after the decline");
+
+    // Toggled off: frames already in flight end through Frame Generation,
+    // then the Direct3D 11 compositor composes each frame as it ends.
+    Check(!Peer::ToggleFrameGen(), "Frame Generation toggled off");
+    const std::size_t off_from = ShownCount();
+    run(6, "toggled off");
+    check_shown(off_from, "toggled off");
+    const std::uint64_t d3d11_off = Peer::QuadFrames().first;
+    const std::size_t inline_from = ShownCount();
+    run(4, "toggled off");
+    Check(Peer::QuadFrames().first == d3d11_off + 4 && check_shown(inline_from, "toggled off") == 0,
+          "toggled off: the Direct3D 11 compositor composes every frame");
+    const std::vector<ShownFrame> last = Shown(inline_from);
+    Check(last.size() == 4 && Near(last.back().views[0].probed[0], PeripheryColor((frame - 1) % 8, 0)) &&
+              Near(last.back().views[0].texel, FocusColor((frame - 1) % 8, 0)),
+          "toggled off: the runtime shows the frame just ended");
+
+    Peer::ExpireBridgeSummary();
+    run(1, "summary");
+    log = Peer::Log();
+    Check(Contains(log, "quadFrames=fg:") && !Contains(log, "quadFrames=fg:0,"),
+          "the bridge's summary counts the frames Frame Generation composed");
+    Check(!Contains(log, "D3D11 quadviews composition failed") && !Contains(log, "Frame Generation paused"),
+          "nothing failed or paused");
+    for (const Target& target : targets) {
+        Check(app.api.destroy_swapchain(target.swapchain) == XR_SUCCESS, "a quad view's swapchain is destroyed");
+    }
+    StopApp(app);
+    Peer::UseFrameGenGpu(MakeStandInGpu);
+    Peer::SetFrameGenEngagement(45, std::chrono::milliseconds(3000)); // the presenter's own
+    Peer::SetFrameGenQuadDecline(std::chrono::milliseconds(10000), std::chrono::milliseconds(80000));
+    Check(GameRuns(game), "the game's device works");
+    EndCase(game);
+}
+
+// A bridged quad views session with Frame Generation composing the views
+// itself on the real Direct3D 12 backend, at 2x in `mode`, engaged after two
+// steady frames: the application and its four views' targets.
+struct QuadFrameGenSession {
+    App app;
+    std::unique_ptr<SessionCreate> create;
+    QuadTargets targets;
+};
+
+QuadFrameGenSession StartQuadFrameGen(Game& game, const std::string& name, const std::string& mode) {
+    CaseSettings settings;
+    settings.quadviews = true;
+    settings.frame_multiplier = "2x";
+    settings.synthesis_mode = mode;
+    BeginCase(name, game, settings);
+    g_runtime.recommended_width = g_runtime.recommended_height = kQuadStereoSize;
+    g_runtime.paced = true;
+    Peer::SetFrameGenEngagement(2, std::chrono::milliseconds(0));
+    Peer::UseFrameGenGpu(depthxr::CreateFrameGenGpu);
+    QuadFrameGenSession session;
+    App& app = session.app;
+    app = StartApp({kD3D11Extension, kQuadViewsExtension, kFoveatedExtension});
+    std::uint32_t count = 0;
+    std::array<XrViewConfigurationView, 4> configuration{};
+    for (XrViewConfigurationView& view : configuration) view.type = XR_TYPE_VIEW_CONFIGURATION_VIEW;
+    Check(app.api.enumerate_views(app.api.instance, app.system, XR_VIEW_CONFIGURATION_TYPE_PRIMARY_QUAD_VARJO, 4,
+                                  &count, configuration.data()) == XR_SUCCESS &&
+              count == 4,
+          "the layer offers the quad views configuration's four views");
+    session.create = std::make_unique<SessionCreate>(game.device.Get(), app.system);
+    Check(app.api.create_session(app.api.instance, &session.create->info, &app.session) == XR_SUCCESS &&
+              Peer::Bridge().Active(),
+          "a bridged session");
+    BeginSession(app, XR_VIEW_CONFIGURATION_TYPE_PRIMARY_QUAD_VARJO);
+    for (std::size_t i = 0; i < session.targets.size(); ++i) {
+        session.targets[i] = MakeTarget(app,
+                                        ColorInfo(1, configuration[i].recommendedImageRectWidth,
+                                                  configuration[i].recommendedImageRectHeight),
+                                        i < 2 ? "a peripheral view" : "a focus view");
+    }
+    return session;
+}
+
+// Its swapchains, session and instance destroyed (within 10 s), and the
+// case ended (`device_removed`: as EndCase). How long the teardown took.
+double StopQuadFrameGen(Game& game, QuadFrameGenSession& session, bool device_removed = false) {
+    const auto start = std::chrono::steady_clock::now();
+    for (const Target& target : session.targets) {
+        Check(session.app.api.destroy_swapchain(target.swapchain) == XR_SUCCESS,
+              "a quad view's swapchain is destroyed");
+    }
+    StopApp(session.app);
+    const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+    Check(seconds < 10.0, "the teardown took " + std::to_string(seconds) + " s");
+    Peer::UseFrameGenGpu(MakeStandInGpu);
+    Peer::SetFrameGenEngagement(45, std::chrono::milliseconds(3000)); // the presenter's own
+    Check(GameRuns(game), "the game's device works");
+    EndCase(game, device_removed);
+    return seconds;
+}
+
+// The stand-in's stereo fields of view for frame `frame` of the geometry
+// case: the eyes' differ (each is wider towards its own side, so its focus
+// view lands off its image's centre, the other way from the other eye's),
+// and they move from frame to frame (each focus view with them).
+std::array<XrFovf, 2> GeometryFovs(int frame) {
+    const float shift = 0.04f * static_cast<float>(frame % 4);
+    return {{{-0.95f + shift, 0.7f + shift, 0.8f, -0.75f}, {-0.7f - shift, 0.95f - shift, 0.75f, -0.8f}}};
+}
+
+// 12. What Frame Generation composes is what the Direct3D 11 compositor
+// composes from the same frame: at each real frame's own refresh
+// (extrapolating, nothing moved yet), each eye's image matches (a step
+// either way), at a corner and across a row and three columns through its
+// focus view and blend band, the one Direct3D 11 composes from the same
+// frame with Frame Generation toggled off. The eyes' fields of view differ
+// and move from frame to frame, so each eye's focus view lands in a place of
+// its own in each frame: Frame Generation must compose each eye of each
+// frame with that frame's own composition of that eye. A frame's content
+// (its colours, and its fields of view) repeats every 8 frames: Direct3D 11
+// composes one such period for reference.
+void TestBridgedQuadFrameGenGeometry(Game& game) {
+    QuadFrameGenSession session = StartQuadFrameGen(game, "quad-views-framegen-geometry", "extrapolate");
+    App& app = session.app;
+    // A corner, the centre row, and three columns.
+    constexpr int kRowProbes = 96;
+    constexpr int kColumnProbes = 48;
+    {
+        std::scoped_lock lock(g_runtime_mutex);
+        g_runtime.probes = {{0.03f, 0.03f}};
+        for (int i = 0; i < kRowProbes; ++i) {
+            g_runtime.probes.push_back({(i + 0.5f) / kRowProbes, 0.5f});
+        }
+        for (const float column : {0.4f, 0.5f, 0.6f}) {
+            for (int i = 0; i < kColumnProbes; ++i) {
+                g_runtime.probes.push_back({column, (i + 0.5f) / kColumnProbes});
+            }
+        }
+    }
+    constexpr int kPeriod = 8;
+    int frame = 0;
+    // The next `count` frames, each with its own fields of view; their
+    // display times by frame.
+    const auto run = [&](int count, const std::string& at) {
+        std::map<int, XrTime> times;
+        for (const int last = frame + count; frame < last; ++frame) {
+            QuadFrameOptions options;
+            options.fovs = GeometryFovs(frame);
+            options.display_time = &times[frame];
+            Check(QuadFrame(app, game, session.targets, frame, options) == XR_SUCCESS,
+                  at + ": xrEndFrame of quad frame " + std::to_string(frame));
+        }
+        return times;
+    };
+    // Each eye's texels (its centre, then the probes) of the frame the
+    // runtime showed at each frame's display time from `from` on, when it
+    // shows Frame Generation's outputs (`own`) or the compositor's, and its
+    // corner that frame's periphery.
+    using EyeTexels = std::array<std::vector<Color>, 2>;
+    const auto shown_at = [&](std::size_t from, const std::map<int, XrTime>& times, bool own) {
+        const std::array<XrSwapchain, 2> compositor = Peer::CompositorOutputs();
+        std::map<int, EyeTexels> texels;
+        const std::vector<ShownFrame> shown = Shown(from);
+        for (const auto& [shown_frame, time] : times) {
+            for (const ShownFrame& candidate : shown) {
+                if (candidate.time != time) continue;
+                const bool composed =
+                    candidate.views[0].swapchain == compositor[0] && candidate.views[1].swapchain == compositor[1];
+                if (composed == own) continue;
+                EyeTexels eyes;
+                for (int eye = 0; eye < 2; ++eye) {
+                    const ShownView& view = candidate.views[eye];
+                    Check(view.texel && view.probed.size() == g_runtime.probes.size(),
+                          "geometry: the runtime read the frame back");
+                    if (!Near(view.probed[0], PeripheryColor(shown_frame, eye))) break;
+                    eyes[eye].push_back(*view.texel);
+                    eyes[eye].insert(eyes[eye].end(), view.probed.begin(), view.probed.end());
+                }
+                if (!eyes[0].empty() && !eyes[1].empty()) texels[shown_frame] = eyes;
+            }
+        }
+        return texels;
+    };
+
+    run(kPeriod, "engaging");
+    const depthxr::FrameGenStatus status = Peer::FrameGen();
+    Check(status.threaded && status.quad, "Frame Generation composes the quad views itself");
+    // Real frames Frame Generation showed at their own refreshes (the others
+    // came late, and are left out): a few periods' worth, until there are
+    // enough of them on a loaded machine.
+    std::map<int, EyeTexels> composed;
+    for (int periods = 0; periods < 8 && composed.size() < 4; periods += 2) {
+        const std::size_t from = ShownCount();
+        composed.merge(shown_at(from, run(2 * kPeriod, "composing"), true));
+    }
+    Check(composed.size() >= 4, "Frame Generation showed at least four real frames at their own refreshes (" +
+                                    std::to_string(composed.size()) + " in " + std::to_string(frame) + " frames)");
+    CheckValidation(game, "composing");
+
+    // A period of frames, Frame Generation toggled off: each composed by
+    // Direct3D 11 as it ends, and shown at its display time.
+    Check(!Peer::ToggleFrameGen(), "Frame Generation toggled off");
+    run(kPeriod + (kPeriod - frame % kPeriod), "toggled off");
+    const std::size_t reference_from = ShownCount();
+    std::map<int, EyeTexels> reference;
+    for (const auto& [reference_frame, texels] : shown_at(reference_from, run(kPeriod, "reference"), false)) {
+        reference[reference_frame % kPeriod] = texels;
+    }
+    Check(reference.size() == static_cast<std::size_t>(kPeriod),
+          "the runtime shows each frame Direct3D 11 composed at its display time (" +
+              std::to_string(reference.size()) + " of " + std::to_string(kPeriod) + ")");
+
+    // Each eye's focus view lands in a place of its own, moving from frame to
+    // frame (where the centre row first shows its focus colour), with a
+    // blend band on the way.
+    const auto focus_starts = [&](int phase, int eye) {
+        const std::vector<Color>& texels = reference.at(phase)[eye];
+        for (int i = 0; i < kRowProbes; ++i) {
+            if (Near(texels[2 + i], FocusColor(phase, eye))) return i;
+        }
+        return -1;
+    };
+    for (int phase = 0; phase < kPeriod; ++phase) {
+        const std::string at = "geometry frame phase " + std::to_string(phase);
+        for (int eye = 0; eye < 2; ++eye) {
+            const std::string where = at + " eye " + std::to_string(eye);
+            const std::vector<Color>& texels = reference.at(phase)[eye];
+            Check(focus_starts(phase, eye) > 0, where + ": the centre row crosses the focus view");
+            Check(std::any_of(texels.begin() + 2, texels.begin() + 2 + kRowProbes,
+                              [&](const Color& texel) {
+                                  return Between(texel, PeripheryColor(phase, eye), FocusColor(phase, eye));
+                              }),
+                  where + ": the centre row crosses the blend band");
+        }
+        Check(focus_starts(phase, 0) != focus_starts(phase, 1),
+              at + ": each eye's focus view lands in a place of its own");
+        const int before = (phase + kPeriod - 2) % kPeriod;
+        Check(focus_starts(phase, 0) != focus_starts(before, 0) && focus_starts(phase, 1) != focus_starts(before, 1),
+              at + ": the focus views move from frame to frame");
+    }
+
+    // Frame Generation's own frames match them.
+    int most = 0;
+    for (const auto& [composed_frame, eyes] : composed) {
+        for (int eye = 0; eye < 2; ++eye) {
+            const std::vector<Color>& expected = reference.at(composed_frame % kPeriod)[eye];
+            for (std::size_t i = 0; i < eyes[eye].size(); ++i) {
+                for (int channel = 0; channel < 4; ++channel) {
+                    const int difference = std::abs(static_cast<int>(eyes[eye][i][channel]) -
+                                                    static_cast<int>(expected[i][channel]));
+                    most = std::max(most, difference);
+                    Check(difference <= 1, "geometry frame " + std::to_string(composed_frame) + " eye " +
+                                               std::to_string(eye) + ", texel " + std::to_string(i) +
+                                               ": Frame Generation composed " + Text(eyes[eye][i]) +
+                                               ", Direct3D 11 " + Text(expected[i]));
+                }
+            }
+        }
+    }
+    std::cout << g_case << ": " << composed.size() << " real frames compared at their own refreshes, largest "
+              << "difference " << most << "\n";
+    StopQuadFrameGen(game, session);
+}
+
+// 13. The bridge's device removed while Frame Generation composes the quad
+// views (on the real backend, its presenter thread writing every refresh):
+// the session is lost at once, no projection of four views reaches the
+// runtime, and the teardown waits on nothing of the removed device. In a
+// process of its own: Direct3D 12 makes one device per adapter in a process.
+void TestBridgedQuadDeviceLost(Game& game) {
+    QuadFrameGenSession session = StartQuadFrameGen(game, "quad-views-framegen-device-lost", "extrapolate");
+    App& app = session.app;
+    int frame = 0;
+    for (; frame < 14; ++frame) {
+        Check(QuadFrame(app, game, session.targets, frame) == XR_SUCCESS,
+              "xrEndFrame of quad frame " + std::to_string(frame));
+    }
+    const depthxr::FrameGenStatus status = Peer::FrameGen();
+    Check(status.threaded && status.quad && Peer::QuadFramesComposedByFrameGen() > 0,
+          "Frame Generation composes the quad views itself");
+    ComPtr<ID3D12Device5> device5;
+    if (FAILED(BridgeBinding()->device->QueryInterface(IID_PPV_ARGS(&device5)))) {
+        std::cout << "quad views device loss not tested: no ID3D12Device5\n";
+        StopQuadFrameGen(game, session);
+        return;
+    }
+    CheckValidation(game, "before the device's removal");
+    {
+        // Not while the stand-in reads a frame of the presenter thread's back.
+        std::scoped_lock lock(g_runtime_mutex);
+        device5->RemoveDevice();
+    }
+    device5.Reset();
+    const std::size_t shown = ShownCount();
+    QuadFrameOptions lost;
+    lost.session_may_be_lost = true;
+    for (int attempt = 0; attempt < 2; ++attempt, ++frame) {
+        const XrResult result = QuadFrame(app, game, session.targets, frame, lost);
+        Check(result == XR_ERROR_SESSION_LOST, "quad frame " + std::to_string(attempt + 1) +
+                                                   " after the removal loses the session: " + std::to_string(result));
+    }
+    for (const ShownFrame& shown_frame : Shown(shown)) {
+        for (const ShownView& view : shown_frame.views) {
+            Check(std::none_of(session.targets.begin(), session.targets.end(),
+                               [&](const Target& target) { return target.swapchain == view.swapchain; }),
+                  "after the removal, the runtime never gets a quad view itself");
+        }
+    }
+    const std::string log = Peer::Log();
+    Check(Count(log, "the session is lost") == 1, "the loss is logged once, for two frames");
+    const std::string name = g_case;
+    const double seconds = StopQuadFrameGen(game, session, true);
+    std::cout << name << ": the session was lost, its teardown took " << seconds << " s\n";
 }
 
 // 8. The bridge's device removed: the session is lost. Last: Direct3D 12
@@ -2850,6 +3577,46 @@ void TestDeviceLost(Game& game) {
     EndCase(game, true);
 }
 
+// 11. The app's status line for Frame Generation (the runtime relay's): while
+// composed quad views frames could not be written for a while, it says the
+// layer composes the quad views, never Frame Generation, whatever else the
+// state says meanwhile.
+void CheckFrameGenStatusLine() {
+    depthxr::FrameGenStatus status;
+    status.state = depthxr::FrameGenState::kActive;
+    status.multiplier = 2;
+    status.app_fps = 45.2;
+    status.distinct_fps = 89.6;
+    status.quad = true;
+    std::string line = Peer::FrameGenStatusReason(status);
+    Check(line == "2x, 45 -> 90 fps, quad views composed by Frame Generation.", "composing: " + line);
+    status.quad_declining = true;
+    status.distinct_fps = 45.0;
+    const std::string declining = Peer::FrameGenStatusReason(status);
+    Check(!Contains(declining, "composed by Frame Generation") &&
+              Contains(declining, "2x, quad views composed by the layer for a while") &&
+              Contains(declining, "could not write") && Contains(declining, "45 fps"),
+          "declining: " + declining);
+    // Frames passing straight through meanwhile, standing by.
+    status.full_rate = true;
+    status.reason = "frames pass straight through";
+    line = Peer::FrameGenStatusReason(status);
+    Check(line == declining, "declining, at full rate: " + line);
+    status.dynamic = true;
+    status.standby = true;
+    line = Peer::FrameGenStatusReason(status);
+    Check(!Contains(line, "composed by Frame Generation") &&
+              Contains(line, "Dynamic, quad views composed by the layer"),
+          "declining, Dynamic standing by: " + line);
+    status.quad_declining = false;
+    status.reason.clear();
+    Check(Peer::FrameGenStatusReason(status) == "Dynamic, standing by: the game runs at 45 fps.", "standing by");
+    status.state = depthxr::FrameGenState::kPaused;
+    status.reason = "paused";
+    status.quad_declining = true;
+    Check(Peer::FrameGenStatusReason(status) == "paused", "paused: the reason alone");
+}
+
 // Everything the layer reads and writes on the host goes to the test's own directory.
 void IsolateHost() {
     wchar_t temp[MAX_PATH + 1]{};
@@ -2872,10 +3639,34 @@ void IsolateHost() {
     SetEnv("VECTORXR_D3D11_BRIDGE_DEBUG", "");
 }
 
+// Case 13 (TestBridgedQuadDeviceLost) in a process of its own: this program
+// again, on the first hardware adapter ("hw"), then `kQuadDeviceLost`. Its
+// exit code.
+constexpr const char* kQuadDeviceLost = "quad-device-lost";
+
+int RunQuadDeviceLostProcess() {
+    char path[MAX_PATH + 1]{};
+    Check(GetModuleFileNameA(nullptr, path, MAX_PATH) > 0, "this program's path");
+    const std::string quoted = std::string("\"") + path + "\"";
+    std::cout << std::flush;
+    return static_cast<int>(_spawnl(_P_WAIT, path, quoted.c_str(), "hw", kQuadDeviceLost, nullptr));
+}
+
+// The game's adapter renders in software (WARP).
+bool SoftwareAdapter(const Game& game) {
+    ComPtr<IDXGIFactory4> factory;
+    ComPtr<IDXGIAdapter1> adapter;
+    DXGI_ADAPTER_DESC1 desc{};
+    return FAILED(CreateDXGIFactory1(IID_PPV_ARGS(&factory))) ||
+           FAILED(factory->EnumAdapterByLuid(game.luid, IID_PPV_ARGS(&adapter))) || FAILED(adapter->GetDesc1(&desc)) ||
+           (desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) != 0;
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
     const bool hardware = argc > 1 && std::string(argv[1]) == "hw";
+    const bool quad_device_lost = std::string(argv[argc - 1]) == kQuadDeviceLost;
     // Before any Direct3D 12 device exists.
     ComPtr<ID3D12Debug> debug;
     const HRESULT debug_result = D3D12GetDebugInterface(IID_PPV_ARGS(&debug));
@@ -2905,6 +3696,20 @@ int main(int argc, char** argv) {
     }
     IsolateHost();
     Peer::UseFrameGenGpu(MakeStandInGpu);
+    if (quad_device_lost) {
+        // Only run once the cases before it found this machine bridges.
+        if (SoftwareAdapter(game)) {
+            std::cout << "skipped: quad views device loss is not tested on WARP\n";
+            return kSkip;
+        }
+        TestBridgedQuadDeviceLost(game);
+        g_runtime = StandIn{};
+        Peer::ReleaseLog(g_root / "released" / "vectorxr.log");
+        std::error_code error;
+        std::filesystem::remove_all(g_root, error);
+        return 0;
+    }
+    CheckFrameGenStatusLine();
     const bool bridged = TestBridgedSession(game);
     if (bridged) {
         TestKeepGameQueue(game);
@@ -2914,6 +3719,9 @@ int main(int argc, char** argv) {
         TestDestroyInstanceWithSession(game);
         TestBridgedQuadViewsComposed(game, false);
         TestBridgedQuadViewsComposed(game, true);
+        TestBridgedQuadFrameGen(game, "extrapolate");
+        TestBridgedQuadFrameGen(game, "interpolate");
+        TestBridgedQuadFrameGenGeometry(game);
         TestDeviceLost(game);
     }
     g_runtime = StandIn{};
@@ -2922,6 +3730,15 @@ int main(int argc, char** argv) {
     std::filesystem::remove_all(g_root, error);
     if (!bridged) {
         return kSkip;
+    }
+    if (SoftwareAdapter(game)) {
+        // Its Direct3D 12 work is still running when it reads as done after
+        // the device's removal: letting it go at the teardown crashes WARP.
+        std::cout << "quad views device loss not tested on WARP (`hw` tests it)\n";
+    } else {
+        const int quad_device_lost_code = RunQuadDeviceLostProcess();
+        Check(quad_device_lost_code == 0, "the quad views device loss case (a process of its own) exited with " +
+                                              std::to_string(quad_device_lost_code));
     }
     std::cout << "d3d11 bridge layer tests passed (" << (hardware ? "hardware" : "WARP")
               << (debug ? ", D3D12 debug layer" : ", WITHOUT the D3D12 debug layer")

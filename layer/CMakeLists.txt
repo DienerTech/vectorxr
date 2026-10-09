@@ -353,8 +353,16 @@ if(WIN32 AND DEPTHXR_BUILD_LAYER)
         add_test(NAME depthxr_framegen_d3d11_tests COMMAND depthxr_framegen_tests d3d11)
         add_test(NAME depthxr_framegen_d3d12_tests COMMAND depthxr_framegen_tests d3d12)
         add_test(NAME depthxr_framegen_vulkan_tests COMMAND depthxr_framegen_tests vulkan)
-        set_tests_properties(depthxr_framegen_d3d11_tests depthxr_framegen_d3d12_tests depthxr_framegen_vulkan_tests PROPERTIES TIMEOUT 60)
+        set_tests_properties(depthxr_framegen_d3d11_tests depthxr_framegen_vulkan_tests PROPERTIES TIMEOUT 60)
+        # WARP runs on the CPU: slower while other builds share it.
+        set_tests_properties(depthxr_framegen_d3d12_tests PROPERTIES TIMEOUT 120)
         set_tests_properties(depthxr_framegen_vulkan_tests PROPERTIES SKIP_RETURN_CODE 77)
+        # The Direct3D 12 scenarios on the GPU: variable-rate shading, the optical flow hardware (a
+        # session per view, four for quad views) and a GPU's fence budgets, none of which WARP has.
+        # Passes with a message without a hardware adapter (and without the optical flow hardware,
+        # its checks are skipped with one).
+        add_test(NAME depthxr_framegen_d3d12_hw_tests COMMAND depthxr_framegen_tests hw-d3d12)
+        set_tests_properties(depthxr_framegen_d3d12_hw_tests PROPERTIES TIMEOUT 180)
         # Direct3D 11 <-> 12 sharing probe for the D3D11 bridge. It needs a real GPU, so it is
         # built here but is not a CTest (`depthxr_bridge_probe --help`).
         add_executable(depthxr_bridge_probe tests/bridge_probe.cpp)
@@ -374,7 +382,7 @@ if(WIN32 AND DEPTHXR_BUILD_LAYER)
         target_link_libraries(depthxr_framegen_presenter_tests PRIVATE depthxr_framegen)
         target_compile_definitions(depthxr_framegen_presenter_tests PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
         add_test(NAME depthxr_framegen_presenter_tests COMMAND depthxr_framegen_presenter_tests)
-        set_tests_properties(depthxr_framegen_presenter_tests PROPERTIES TIMEOUT 120)
+        set_tests_properties(depthxr_framegen_presenter_tests PROPERTIES TIMEOUT 240)
         add_executable(depthxr_osd_tests tests/osd_tests.cpp)
         target_link_libraries(depthxr_osd_tests PRIVATE depthxr_osd)
         target_compile_definitions(depthxr_osd_tests PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX XR_USE_GRAPHICS_API_D3D11)

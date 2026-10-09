@@ -96,8 +96,8 @@ struct CaptureKey {
 struct ViewResources {
     FrameGenHistoryState history_state;
     CaptureKey capture;
-    // Per real frame, in the history state's ring (two slots, or three for
-    // just-in-time synthesis; see FrameGenHistoryState).
+    // Per real frame, in the history state's ring (FrameGenHistoryRing
+    // slots; only those are created).
     std::array<Texture, kFrameGenHistoryRingMax> history;
     std::array<Texture, kFrameGenHistoryRingMax> filtered;
     // FrameGenTuning::cover: the flow filtered for extrapolation as well.
@@ -122,6 +122,13 @@ struct ViewResources {
     std::array<std::uint32_t, kFrameGenHistoryRingMax> slot_generation{};
     std::array<UINT64, kFrameGenHistoryRingMax> slot_read{};
     std::array<UINT64, kFrameGenHistoryRingMax> slot_read_present{}; // ... of the present queue (synthesis)
+    // The last submission using any of the view's images, per fence (the
+    // work queue's, the captures' while separate, the present queue's): the
+    // images of a view frames no longer have are freed once they have
+    // passed (TrimViews).
+    UINT64 used_work{0};
+    UINT64 used_capture{0};
+    UINT64 used_present{0};
     // While recording Synthesize: the ring slots the analyzed frame's
     // newest and previous textures are in (-1: the history state's own).
     int bound_newest{-1};
@@ -1669,6 +1676,7 @@ class D3D12FrameGen final : public FrameGenGpu {
         profile_labels_.clear();
         if (profiling_) commands_->EndQuery(profile_heap_.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 0);
 
+        TrimViews(views.size());
         if (views_.size() < views.size()) {
             views_.resize(views.size());
         }
@@ -1688,7 +1696,8 @@ class D3D12FrameGen final : public FrameGenGpu {
         if (views.size() >= 2 && validator_.Usable()) {
             bool both = true;
             for (std::size_t i = 0; i < 2; ++i) {
-                both = both && Prepared(views[i], views_[i]) && views_[i].capture.Matches(views[i].source);
+                both = both && Prepared(views[i], views_[i], FrameGenHistoryRing(tuning)) &&
+                       views_[i].capture.Matches(views[i].source);
             }
             for (std::size_t i = 0; i < 2 && both && ok; ++i) {
                 ViewResources& view = views_[i];
@@ -1813,6 +1822,9 @@ class D3D12FrameGen final : public FrameGenGpu {
         }
         result.submission = slot.timed_submission;
         hr = SubmitWork(commands_.Get());
+        for (std::size_t i = 0; i < views.size(); ++i) {
+            MarkUsed(views_[i], fence_.Get(), fence_value_); // submitted even when its signal failed
+        }
         if (FAILED(hr)) {
             error = Failure("D3D12 Frame Generation queue signal", hr);
             signal_failed_ = true;
@@ -1858,7 +1870,8 @@ class D3D12FrameGen final : public FrameGenGpu {
                 frame.views.push_back(analyzed);
             }
             analyzed_.push_back(std::move(frame));
-            while (analyzed_.size() > kFrameGenHistoryRingMax) {
+            // No more than the ring holds images of.
+            while (analyzed_.size() > FrameGenHistoryRing(effective_tuning)) {
                 analyzed_.pop_front();
             }
             result.frame = analyzed_.back().id;
@@ -1880,16 +1893,14 @@ class D3D12FrameGen final : public FrameGenGpu {
     bool SupportsJustInTime() const override { return just_in_time_; }
 
     bool Measured(std::uint64_t frame_id) const override {
-        const auto found = std::find_if(analyzed_.begin(), analyzed_.end(),
-                                        [&](const AnalyzedFrame& frame) { return frame.id == frame_id; });
-        return found == analyzed_.end() || !fence_ || fence_->GetCompletedValue() >= found->work_value;
+        const AnalyzedFrame* found = FindAnalyzed(frame_id);
+        return !found || !fence_ || fence_->GetCompletedValue() >= found->work_value;
     }
 
     bool Captured(std::uint64_t frame_id) const override {
-        const auto found = std::find_if(analyzed_.begin(), analyzed_.end(),
-                                        [&](const AnalyzedFrame& frame) { return frame.id == frame_id; });
+        const AnalyzedFrame* found = FindAnalyzed(frame_id);
         ID3D12Fence* fence = CaptureFence();
-        return found == analyzed_.end() || !fence || fence->GetCompletedValue() >= found->capture_value;
+        return !found || !fence || fence->GetCompletedValue() >= found->capture_value;
     }
 
     bool Synthesize(std::uint64_t frame_id, FrameGenSynthesisMode mode, float fraction,
@@ -1910,29 +1921,35 @@ class D3D12FrameGen final : public FrameGenGpu {
             error = "the real frame is no longer kept";
             return false;
         }
+        // Set up before anything is recorded: a refusal leaves the views and
+        // their analyzed frames as they are.
+        std::vector<FrameGenViewSubmission> submissions(frame.views.size());
+        std::vector<ViewRecording> recordings(frame.views.size());
+        for (std::size_t i = 0; i < frame.views.size(); ++i) {
+            const AnalyzedView& analyzed = frame.views[i];
+            const auto output_it = images_.find(outputs[i].swapchain);
+            if (output_it == images_.end() || outputs[i].image_index >= output_it->second.size()) {
+                error = "Frame Generation output image is not tracked";
+                return false;
+            }
+            FrameGenViewSubmission& submission = submissions[i];
+            submission.outputs = {outputs[i]};
+            submission.request = analyzed.request;
+            ViewRecording& recording = recordings[i];
+            recording.submission = &submission;
+            recording.view = &views_[i];
+            recording.request = analyzed.request;
+            recording.outputs = {output_it->second[outputs[i].image_index]};
+            recording.plan = BuildFrameGenSynthesisPlan(analyzed.request, frame.tuning, mode, fraction, analyzed.cover);
+            if (!PrepareFrame(recording, error)) {
+                return false;
+            }
+        }
         return RecordSynthesis(
             frame, exact,
             [&](std::string& record_error) {
-                std::vector<FrameGenViewSubmission> submissions(frame.views.size());
-                std::vector<ViewRecording> recordings(frame.views.size());
                 for (std::size_t i = 0; i < frame.views.size(); ++i) {
-                    const AnalyzedView& analyzed = frame.views[i];
-                    const auto output_it = images_.find(outputs[i].swapchain);
-                    if (output_it == images_.end() || outputs[i].image_index >= output_it->second.size()) {
-                        record_error = "Frame Generation output image is not tracked";
-                        return false;
-                    }
-                    FrameGenViewSubmission& submission = submissions[i];
-                    submission.outputs = {outputs[i]};
-                    submission.request = analyzed.request;
-                    ViewRecording& recording = recordings[i];
-                    recording.submission = &submission;
-                    recording.view = &views_[i];
-                    recording.request = analyzed.request;
-                    recording.outputs = {output_it->second[outputs[i].image_index]};
-                    recording.plan =
-                        BuildFrameGenSynthesisPlan(analyzed.request, frame.tuning, mode, fraction, analyzed.cover);
-                    if (!RecordFrame(recording, analyzed, record_error)) {
+                    if (!RecordFrame(recordings[i], frame.views[i], record_error)) {
                         return false;
                     }
                 }
@@ -2003,7 +2020,42 @@ class D3D12FrameGen final : public FrameGenGpu {
                 }
             }
         }
+        // Everything that can be refused is set up before anything is
+        // recorded, so a refusal (an image that cannot be created or drawn
+        // into) leaves the views and their analyzed frames as they are: each
+        // moved view's compose target and frame, then each eye's output.
         std::vector<FrameGenViewSubmission> submissions(count);
+        for (std::size_t i = 0; i < count; ++i) {
+            if (!warped[i]) {
+                continue;
+            }
+            const AnalyzedView& analyzed = frame.views[i];
+            ViewResources& view = views_[i];
+            if (!EnsureComposeTarget(view, analyzed.request, error)) {
+                return false;
+            }
+            FrameGenViewSubmission& submission = submissions[i];
+            const XrRect2Di whole{{0, 0},
+                                  {static_cast<std::int32_t>(analyzed.request.extent.width),
+                                   static_cast<std::int32_t>(analyzed.request.extent.height)}};
+            submission.outputs = {
+                FrameGenImage{XR_NULL_HANDLE, 0, 0, whole, static_cast<std::int64_t>(view.compose_target.view_format)}};
+            submission.request = analyzed.request;
+            ViewRecording& recording = recordings[i];
+            recording.submission = &submission;
+            recording.view = &view;
+            recording.request = analyzed.request;
+            recording.outputs = {view.compose_target.resource.Get()};
+            if (!PrepareFrame(recording, error)) {
+                return false;
+            }
+        }
+        std::vector<ID3D12Resource*> eye_outputs(composition.eyes.size(), nullptr);
+        for (std::size_t e = 0; e < composition.eyes.size(); ++e) {
+            if (!ComposeOutput(outputs[e], composition.output, eye_outputs[e], error)) {
+                return false;
+            }
+        }
         return RecordSynthesis(
             frame, exact,
             [&](std::string& record_error) {
@@ -2012,29 +2064,13 @@ class D3D12FrameGen final : public FrameGenGpu {
                     if (!warped[i]) {
                         continue;
                     }
-                    const AnalyzedView& analyzed = frame.views[i];
                     ViewResources& view = views_[i];
-                    if (!EnsureComposeTarget(view, analyzed.request, record_error)) {
-                        return false;
-                    }
                     // Drawn into like an output image (RecordDraw does not
                     // transition those).
                     Require(barriers, view.compose_target, D3D12_RESOURCE_STATE_RENDER_TARGET);
                     Flush(barriers);
-                    FrameGenViewSubmission& submission = submissions[i];
-                    const XrRect2Di whole{{0, 0},
-                                          {static_cast<std::int32_t>(analyzed.request.extent.width),
-                                           static_cast<std::int32_t>(analyzed.request.extent.height)}};
-                    submission.outputs = {
-                        FrameGenImage{XR_NULL_HANDLE, 0, 0, whole, static_cast<std::int64_t>(view.compose_target.view_format)}};
-                    submission.request = analyzed.request;
-                    ViewRecording& recording = recordings[i];
-                    recording.submission = &submission;
-                    recording.view = &view;
-                    recording.request = analyzed.request;
-                    recording.outputs = {view.compose_target.resource.Get()};
                     coarse_shading_ = !periphery[i];
-                    const bool recorded = RecordFrame(recording, analyzed, record_error);
+                    const bool recorded = RecordFrame(recordings[i], frame.views[i], record_error);
                     coarse_shading_ = true;
                     if (!recorded) {
                         return false;
@@ -2046,7 +2082,7 @@ class D3D12FrameGen final : public FrameGenGpu {
                         ViewResources& view = views_[index];
                         return eye_moved[e] ? view.compose_target : view.history[frame.views[index].newest];
                     };
-                    if (!RecordCompose(source(eye.peripheral), source(eye.focus), outputs[e],
+                    if (!RecordCompose(source(eye.peripheral), source(eye.focus), outputs[e], eye_outputs[e],
                                        BuildFrameGenComposeConstants(eye, composition.output), composition.output,
                                        record_error)) {
                         return false;
@@ -2213,41 +2249,69 @@ class D3D12FrameGen final : public FrameGenGpu {
         return {};
     }
 
-    // The frame functions' checks: analyzed real frame `frame_id` with every
-    // view's images still kept (`exact`: only its newest), or null with the
-    // reason.
-    const AnalyzedFrame* KeptFrame(std::uint64_t frame_id, bool exact, std::string& error) const {
+    bool Writable(std::uint64_t frame_id, bool exact) const override {
+        const AnalyzedFrame* frame = FindAnalyzed(frame_id);
+        return frame && ImagesKept(*frame, exact);
+    }
+
+    // Analyzed real frame `frame_id` while it is kept (null: never analyzed,
+    // or dropped since).
+    const AnalyzedFrame* FindAnalyzed(std::uint64_t frame_id) const {
         const auto found = std::find_if(analyzed_.begin(), analyzed_.end(),
                                         [&](const AnalyzedFrame& frame) { return frame.id == frame_id; });
-        if (found == analyzed_.end() || views_.size() < found->views.size()) {
-            error = "the real frame is no longer kept";
-            return nullptr;
+        return found == analyzed_.end() ? nullptr : &*found;
+    }
+
+    // Whether every view's images `frame` is written from are still in the
+    // history ring (`exact`: only its newest).
+    bool ImagesKept(const AnalyzedFrame& frame, bool exact) const {
+        if (views_.size() < frame.views.size()) {
+            return false;
         }
-        for (std::size_t i = 0; i < found->views.size(); ++i) {
-            const AnalyzedView& analyzed = found->views[i];
+        for (std::size_t i = 0; i < frame.views.size(); ++i) {
+            const AnalyzedView& analyzed = frame.views[i];
             const ViewResources& view = views_[i];
             if (!analyzed.valid || view.slot_generation[analyzed.newest] != analyzed.newest_generation ||
                 (analyzed.request.synthesize && !exact &&
                  view.slot_generation[analyzed.previous] != analyzed.previous_generation)) {
-                error = "the real frame's images were replaced by newer ones";
-                return nullptr;
+                return false;
             }
         }
-        return &*found;
+        return true;
     }
 
-    // Records one view's frame of `recording`'s plan into its one output,
-    // from the analyzed frame's ring slots.
-    bool RecordFrame(ViewRecording& recording, const AnalyzedView& analyzed, std::string& error) {
-        ViewResources& view = *recording.view;
+    // The frame functions' checks (Writable's): analyzed real frame
+    // `frame_id` with every view's images still kept (`exact`: only its
+    // newest), or null with the reason.
+    const AnalyzedFrame* KeptFrame(std::uint64_t frame_id, bool exact, std::string& error) const {
+        const AnalyzedFrame* frame = FindAnalyzed(frame_id);
+        if (!frame || views_.size() < frame->views.size()) {
+            error = "the real frame is no longer kept";
+            return nullptr;
+        }
+        if (!ImagesKept(*frame, exact)) {
+            error = "the real frame's images were replaced by newer ones";
+            return nullptr;
+        }
+        return frame;
+    }
+
+    // Sets one view's frame of `recording`'s plan up before anything is
+    // recorded: drawn straight into its one output, or else written into
+    // the view's own image first (created here).
+    bool PrepareFrame(ViewRecording& recording, std::string& error) {
         recording.frames.assign(1, nullptr);
         for (const FrameGenDispatch& dispatch : recording.plan.dispatches) {
             if (Generates(dispatch)) recording.frames[0] = &dispatch;
         }
         recording.draw = recording.frames[0] && CanDraw(*recording.submission, recording.outputs, 1, false);
-        if (!recording.draw && !EnsureOutput(view, *recording.submission, error)) {
-            return false;
-        }
+        return recording.draw || EnsureOutput(*recording.view, *recording.submission, error);
+    }
+
+    // Records one view's frame of `recording`'s plan (PrepareFrame set it
+    // up) into its one output, from the analyzed frame's ring slots.
+    bool RecordFrame(ViewRecording& recording, const AnalyzedView& analyzed, std::string& error) {
+        ViewResources& view = *recording.view;
         view.bound_newest = analyzed.newest;
         view.bound_previous = analyzed.previous;
         const bool ok = RecordPlan(recording, false, error);
@@ -2322,6 +2386,9 @@ class D3D12FrameGen final : public FrameGenGpu {
         UINT64 done_value = 0;
         hr = exact ? SubmitPresent(synthesis_commands_.Get(), CaptureFence(), frame.capture_value, done, done_value)
                    : SubmitPresent(synthesis_commands_.Get(), fence_.Get(), frame.work_value, done, done_value);
+        for (std::size_t i = 0; i < frame.views.size(); ++i) {
+            MarkUsed(views_[i], done, done_value);
+        }
         if (FAILED(hr)) {
             error = Failure("D3D12 Frame Generation synthesis signal", hr);
             signal_failed_ = true;
@@ -2443,17 +2510,17 @@ class D3D12FrameGen final : public FrameGenGpu {
         return pipeline.Get();
     }
 
-    // Composes one eye into `image` (an acquired output, the composed
-    // image's size) from its peripheral and focus views' images
-    // (FG_PASS_COMPOSE_DRAW).
-    bool RecordCompose(Texture& peripheral, Texture& focus, const FrameGenImage& image, const FrameGenConstants& constants,
-                       FrameGenExtent extent, std::string& error) {
+    // Whether an eye can be composed into `image` (an acquired output): a
+    // tracked, single-sampled render target of a typed format, the composed
+    // image's size, with a compose pipeline for its format. `output`
+    // receives the image's resource.
+    bool ComposeOutput(const FrameGenImage& image, FrameGenExtent extent, ID3D12Resource*& output, std::string& error) {
         const auto output_it = images_.find(image.swapchain);
         if (output_it == images_.end() || image.image_index >= output_it->second.size()) {
             error = "Frame Generation output image is not tracked";
             return false;
         }
-        ID3D12Resource* output = output_it->second[image.image_index];
+        output = output_it->second[image.image_index];
         const D3D12_RESOURCE_DESC desc = output->GetDesc();
         const DXGI_FORMAT format = static_cast<DXGI_FORMAT>(image.format);
         if (!(desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET) || desc.SampleDesc.Count != 1 ||
@@ -2465,6 +2532,19 @@ class D3D12FrameGen final : public FrameGenGpu {
             error = "a composed eye's output image cannot be drawn into";
             return false;
         }
+        if (!ComposePipeline(format)) {
+            error = "D3D12 Frame Generation compose pipeline unavailable";
+            return false;
+        }
+        return true;
+    }
+
+    // Composes one eye into `image`, `output` (ComposeOutput accepted it),
+    // from its peripheral and focus views' images (FG_PASS_COMPOSE_DRAW).
+    bool RecordCompose(Texture& peripheral, Texture& focus, const FrameGenImage& image, ID3D12Resource* output,
+                       const FrameGenConstants& constants, FrameGenExtent extent, std::string& error) {
+        const D3D12_RESOURCE_DESC desc = output->GetDesc();
+        const DXGI_FORMAT format = static_cast<DXGI_FORMAT>(image.format);
         ID3D12PipelineState* pipeline = ComposePipeline(format);
         if (!pipeline) {
             error = "D3D12 Frame Generation compose pipeline unavailable";
@@ -2530,9 +2610,9 @@ class D3D12FrameGen final : public FrameGenGpu {
         if (views_.size() < views.size()) {
             views_.resize(views.size());
         }
-        // A capture made for the other ring size (batch or just in time) is
-        // into textures EnsureView replaces.
-        const std::uint8_t ring = tuning.analyze_only ? kFrameGenHistoryRingMax : 2;
+        // A capture made for another ring size (batch or just in time, a
+        // canvas or quad views) is into textures EnsureView replaces.
+        const std::uint8_t ring = FrameGenHistoryRing(tuning);
         bool captured = true;
         for (std::size_t i = 0; i < views.size(); ++i) {
             captured = captured && views_[i].capture.Matches(views[i].source) && views_[i].history_state.Ring() == ring;
@@ -2601,21 +2681,7 @@ class D3D12FrameGen final : public FrameGenGpu {
         stalled_ = true;
         hardware_hung_ = true; // RetireHardware keeps the optical flow images as well
         for (auto& view : views_) {
-            for (auto* group : {&view.history, &view.filtered, &view.filtered_cover, &view.depth, &view.trust}) {
-                for (auto& texture : *group) texture.resource.Detach();
-            }
-            for (auto* group : {&view.luma_newest, &view.luma_previous, &view.flow}) {
-                for (auto& texture : *group) texture.resource.Detach();
-            }
-            view.output.resource.Detach();
-            view.compose_target.resource.Detach();
-            view.shift_keys.resource.Detach();
-            view.shift_map.resource.Detach();
-            view.trust_tiles.resource.Detach();
-            view.trust_votes.resource.Detach();
-            view.depth_scales.resource.Detach();
-            view.depth_scale_raw.resource.Detach();
-            view.depth_scale_votes.resource.Detach();
+            ForEachTexture(view, [](Texture& texture) { texture.resource.Detach(); });
         }
         root_signature_.Detach();
         for (auto& pipeline : pipelines_) pipeline.Detach();
@@ -2660,25 +2726,38 @@ class D3D12FrameGen final : public FrameGenGpu {
             bytes += device_->GetResourceAllocationInfo(0, 1, &desc).SizeInBytes;
         };
         for (const ViewResources& view : views_) {
-            for (const Texture& texture : view.history) add(texture);
-            for (const Texture& texture : view.filtered) add(texture);
-            for (const Texture& texture : view.filtered_cover) add(texture);
-            for (const Texture& texture : view.luma_newest) add(texture);
-            for (const Texture& texture : view.luma_previous) add(texture);
-            for (const Texture& texture : view.flow) add(texture);
-            for (const Texture& texture : view.depth) add(texture);
-            for (const Texture& texture : view.trust) add(texture);
-            for (const Texture& texture : view.raw) add(texture);
-            for (const Texture* texture : {&view.output, &view.compose_target, &view.shift_keys, &view.shift_map, &view.hardware_newest,
-                                           &view.hardware_previous, &view.hardware_flow, &view.raw_flow,
-                                           &view.world_partials, &view.world_params, &view.shading_rate,
-                                           &view.trust_tiles, &view.trust_votes, &view.depth_scales,
-                                           &view.depth_scale_raw, &view.depth_scale_votes}) {
-                add(*texture);
-            }
+            ForEachTexture(view, add);
         }
         add(check_scores_);
         return bytes;
+    }
+
+    // Every image of a view, one list for LeakAll (which must keep all that
+    // submitted work may use), WorkingMemoryBytes and TrimViews: the view's
+    // own, then those registered with its optical flow session.
+    template <typename View, typename Visit>
+    static void ForEachTexture(View& view, Visit&& visit) {
+        ForEachOwnTexture(view, visit);
+        for (auto* texture : {&view.hardware_newest, &view.hardware_previous, &view.hardware_flow, &view.raw[0],
+                              &view.raw[1], &view.raw_flow}) {
+            visit(*texture);
+        }
+    }
+
+    // A view's own images (TrimViews frees them).
+    template <typename View, typename Visit>
+    static void ForEachOwnTexture(View& view, Visit&& visit) {
+        for (auto* group : {&view.history, &view.filtered, &view.filtered_cover, &view.depth, &view.trust}) {
+            for (auto& texture : *group) visit(texture);
+        }
+        for (auto* group : {&view.luma_newest, &view.luma_previous, &view.flow}) {
+            for (auto& texture : *group) visit(texture);
+        }
+        for (auto* texture : {&view.output, &view.compose_target, &view.shift_keys, &view.shift_map,
+                              &view.world_partials, &view.world_params, &view.shading_rate, &view.trust_tiles,
+                              &view.trust_votes, &view.depth_scales, &view.depth_scale_raw, &view.depth_scale_votes}) {
+            visit(*texture);
+        }
     }
 
     std::optional<FrameGenMemoryBudget> MemoryBudget() const override {
@@ -2839,7 +2918,7 @@ class D3D12FrameGen final : public FrameGenGpu {
     // Submits a capture list on the game's queue, once the work queue has
     // finished reading the ring slot it writes (the view's newest), and
     // returns the value its fence reaches when done in `value`.
-    HRESULT SubmitCapture(ID3D12GraphicsCommandList* list, const ViewResources& view, UINT64& value) {
+    HRESULT SubmitCapture(ID3D12GraphicsCommandList* list, ViewResources& view, UINT64& value) {
         if (separate_) {
             const UINT64 read = view.slot_read[view.history_state.Newest()];
             if (read && fence_->GetCompletedValue() < read) {
@@ -2858,7 +2937,62 @@ class D3D12FrameGen final : public FrameGenGpu {
                                      : queue_->Signal(fence_.Get(), ++fence_value_);
         value = separate_ ? capture_value_ : fence_value_;
         last_capture_value_ = value; // CaptureMark
+        MarkUsed(view, CaptureFence(), value);
         return hr;
+    }
+
+    // `view`'s images are used by a submission that signals `fence` `value`.
+    void MarkUsed(ViewResources& view, ID3D12Fence* fence, UINT64 value) {
+        UINT64& used = fence == fence_.Get()           ? view.used_work
+                       : fence == present_fence_.Get() ? view.used_present
+                                                       : view.used_capture;
+        used = std::max(used, value);
+    }
+
+    // Whether every submission that used `view`'s images has finished (the
+    // optical flow hardware's included). Never waits.
+    bool Unused(const ViewResources& view) const {
+        ID3D12Fence* capture = CaptureFence();
+        return !stalled_ && fence_ && fence_->GetCompletedValue() >= view.used_work &&
+               (!view.used_capture || (capture && capture->GetCompletedValue() >= view.used_capture)) &&
+               (!view.used_present || (present_fence_ && present_fence_->GetCompletedValue() >= view.used_present)) &&
+               (!view.hardware_fence || view.hardware_fence->GetCompletedValue() >= view.hardware_fence_value);
+    }
+
+    // Views the frames no longer have (quad views' focus views once a
+    // canvas replaced them): their images are freed as soon as no
+    // submission uses them, without waiting, and frames analyzed with them
+    // are forgotten. Their optical flow sessions stay for when they come
+    // back: the driver's images cannot be freed (see RetireHardware).
+    void TrimViews(std::size_t count) {
+        bool trimmed = false;
+        for (std::size_t i = count; i < views_.size(); ++i) {
+            ViewResources& view = views_[i];
+            bool images = false;
+            ForEachOwnTexture(view, [&](const Texture& texture) { images = images || texture.resource; });
+            if (!images || !Unused(view)) {
+                continue; // nothing to free, or a later frame tries again
+            }
+            ForEachOwnTexture(view, [](Texture& texture) { texture = {}; });
+            // Set up again (EnsureView) when a frame has it; frames analyzed
+            // from its old images are not written.
+            view.history_state = {};
+            view.capture = {};
+            for (auto& generation : view.slot_generation) ++generation;
+            view.trust_stereo = view.depth_ready = view.depth_fresh = false;
+            // Its optical flow session matches afresh (no hints, no raw
+            // capture to use).
+            view.hardware_fresh = true;
+            view.raw_previous = false;
+            view.raw_value = 0;
+            view.raw_captured = view.raw_executed = 0;
+            trimmed = true;
+        }
+        if (trimmed) {
+            analyzed_.erase(std::remove_if(analyzed_.begin(), analyzed_.end(),
+                                           [&](const AnalyzedFrame& frame) { return frame.views.size() > count; }),
+                            analyzed_.end());
+        }
     }
 
     // Submits Frame Generation's own work, after every capture so far
@@ -2982,10 +3116,11 @@ class D3D12FrameGen final : public FrameGenGpu {
     }
 
     // Whether EnsureView would keep the view's images (history and depth) as
-    // they are.
-    bool Prepared(const FrameGenViewSubmission& submission, const ViewResources& view) const {
+    // they are, for a ring of `ring` slots.
+    bool Prepared(const FrameGenViewSubmission& submission, const ViewResources& view, std::uint8_t ring) const {
         const auto it = images_.find(submission.source.swapchain);
-        if (it == images_.end() || submission.source.image_index >= it->second.size() || !view.depth[1].resource) {
+        if (it == images_.end() || submission.source.image_index >= it->second.size() || !view.depth[1].resource ||
+            view.history_state.Ring() != ring) {
             return false;
         }
         return view.history_state.MatchesImages(submission.request.extent,
@@ -2998,9 +3133,9 @@ class D3D12FrameGen final : public FrameGenGpu {
         const D3D12_RESOURCE_DESC source_desc = source->GetDesc();
         const FrameGenExtent extent = submission.request.extent;
         const std::uint8_t final_level = FrameGenFinalFlowLevel(tuning);
-        // Just-in-time synthesis keeps a third real frame (see
-        // kFrameGenHistoryRingMax): a headset-resolution image per view more.
-        const std::uint8_t ring = tuning.analyze_only ? kFrameGenHistoryRingMax : 2;
+        // Just-in-time synthesis keeps more real frames (see
+        // FrameGenHistoryRing): a headset-resolution image per view each.
+        const std::uint8_t ring = FrameGenHistoryRing(tuning);
         const unsigned change = view.history_state.Configure(extent, source_desc.Format, submission.request.output,
                                                               final_level, ring);
         const auto levels = FrameGenPyramid(extent);
@@ -3344,6 +3479,9 @@ class D3D12FrameGen final : public FrameGenGpu {
             return false;
         }
         hr = SubmitWork(commands_.Get());
+        for (const ViewRecording& recording : recordings) {
+            MarkUsed(*recording.view, fence_.Get(), fence_value_);
+        }
         if (FAILED(hr)) {
             error = Failure("D3D12 Frame Generation queue signal", hr);
             signal_failed_ = true;

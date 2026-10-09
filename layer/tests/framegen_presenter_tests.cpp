@@ -67,6 +67,7 @@ std::map<XrSwapchain, SwapchainImages> g_images;
 int g_creates = 0;
 std::vector<XrSwapchain> g_destroyed; // swapchains the layer destroyed
 int g_wait_timeouts = 0; // number of upcoming output waits that time out
+int g_wait_timeouts_on_create = 0; // g_wait_timeouts once the next output swapchain is made
 bool g_release_violation = false;
 std::map<XrSwapchain, int> g_releases; // images released per swapchain
 // What the fake GPU drew into output images, as the eye position (x) the
@@ -74,16 +75,22 @@ std::map<XrSwapchain, int> g_releases; // images released per swapchain
 // newest released one, which the runtime shows (NaN: released unwritten).
 std::map<XrSwapchain, std::deque<float>> g_written;
 std::map<XrSwapchain, float> g_shown;
+std::vector<std::pair<std::uint32_t, std::uint32_t>> g_create_sizes; // each output swapchain's width and height
 
 XrResult XRAPI_PTR Formats(XrSession, std::uint32_t capacity, std::uint32_t* count, std::int64_t* formats) {
     *count = 1;
     if (capacity) formats[0] = kFormat;
     return XR_SUCCESS;
 }
-XrResult XRAPI_PTR Create(XrSession, const XrSwapchainCreateInfo*, XrSwapchain* swapchain) {
+XrResult XRAPI_PTR Create(XrSession, const XrSwapchainCreateInfo* info, XrSwapchain* swapchain) {
     std::scoped_lock lock(g_xr_mutex);
     *swapchain = reinterpret_cast<XrSwapchain>(++g_next_handle);
     ++g_creates;
+    g_create_sizes.push_back({info->width, info->height});
+    if (g_wait_timeouts_on_create) {
+        g_wait_timeouts = g_wait_timeouts_on_create;
+        g_wait_timeouts_on_create = 0;
+    }
     return XR_SUCCESS;
 }
 XrResult XRAPI_PTR Destroy(XrSwapchain swapchain) {
@@ -174,6 +181,36 @@ struct GpuLog {
     std::mutex syntheses_mutex;
     std::vector<Synthesis> syntheses;
     std::atomic<int> synthesis_failures{0};
+    // Quad views (SupportsComposition): frames composed per eye from their
+    // views (under syntheses_mutex), with the composition each analysis was
+    // measured with (FrameGenTuning::composition) by analyzed frame.
+    bool composition{false};
+    std::atomic<bool> compose_fail{false}; // SynthesizeComposed fails
+    std::atomic<int> compose_failures{0};
+    std::atomic<int> compose_calls{0}; // SynthesizeComposed called at all
+    // SynthesizeComposed sleeps this long the first time it writes into an
+    // output image (the real backend allocates its compose targets then,
+    // under the caller's GPU lock).
+    std::chrono::microseconds compose_first_delay{0};
+    struct Composed {
+        std::uint64_t frame{0};
+        FrameGenSynthesisMode mode{FrameGenSynthesisMode::kInterpolate};
+        float fraction{1.0f};
+        FrameGenComposition composition;
+        std::vector<XrSwapchain> outputs;
+    };
+    std::vector<Composed> composed;
+    std::map<std::uint64_t, FrameGenComposition> analysis_compositions;
+    std::atomic<int> composed_analyses{0};
+    // Views are set up by an Execute whose views were not captured at their
+    // release, as Direct3D 12's are: until then a view's captures fail, and
+    // an Execute for another ring size (FrameGenHistoryRing) sets them up
+    // again.
+    bool setup_views{false};
+    std::atomic<int> setups{0};
+    // Not 0: the history ring quad views' analyses get instead of
+    // FrameGenHistoryRing's (what a shallower ring would do).
+    std::uint8_t quad_ring{0};
 
     // The GPU timeline, zero by default (everything has run at once). A
     // released image is captured `capture_lag` after its release, or, with
@@ -193,6 +230,9 @@ struct GpuLog {
     // frames written before their motion was measured: neither may happen.
     std::atomic<int> uncaptured_writes{0};
     std::atomic<int> unmeasured_moves{0};
+    // Writes refused because newer captures replaced the images they needed
+    // in a view's history ring (FrameGenGpu::Writable said so beforehand).
+    std::atomic<int> ring_refusals{0};
     // Analyses whose source images were not captured at their release.
     std::atomic<int> execute_uncaptured{0};
     // Game waits held for the GPU: (mark, the newest begun frame's mark
@@ -255,10 +295,28 @@ class FakeGpu final : public FrameGenGpu {
     }
     bool Track(XrSwapchain, PFN_xrEnumerateSwapchainImages, std::string&) override { return true; }
     void Forget(XrSwapchain) override {}
-    bool Capture(std::size_t view, const FrameGenImage& source, const FrameGenViewRequest&, FrameGenFlowQuality,
-                 std::string&) override {
+    bool Capture(std::size_t view, const FrameGenImage& source, const FrameGenViewRequest& request, FrameGenFlowQuality,
+                 std::string& error) override {
+        if (log_->setup_views) {
+            std::scoped_lock lock(marks_mutex_);
+            const auto it = set_up_.find(view);
+            if (it == set_up_.end() || it->second.extent.width != request.extent.width ||
+                it->second.extent.height != request.extent.height) {
+                error.clear(); // not set up for this region yet
+                return false;
+            }
+        }
         ++log_->captures;
         log_->last_capture = source;
+        {
+            // The view's history ring, as the real backend keeps it: the
+            // capture writes the slot its next analysis calls its newest, and
+            // frames analyzed from what that slot held cannot be written from
+            // it any more.
+            std::scoped_lock lock(ring_mutex_);
+            Ring& ring = rings_[view];
+            ++ring.generation[ring.newest];
+        }
         const TimePoint now = std::chrono::steady_clock::now();
         TimePoint done = now + log_->capture_lag;
         if (log_->game_gpu.count()) {
@@ -310,19 +368,37 @@ class FakeGpu final : public FrameGenGpu {
         log_->last = views;
         log_->tuning = tuning;
         result.submission = ++submission_;
+        // The views' history ring, as the real backend sizes it.
+        const std::uint8_t ring_size =
+            tuning.analyze_only && tuning.composition && log_->quad_ring ? log_->quad_ring : FrameGenHistoryRing(tuning);
         // The newest capture is when the analysis can start; its views were
         // captured at their release, or are read too late.
         TimePoint captured_at = std::chrono::steady_clock::now();
+        bool uncaptured = false;
         {
             std::scoped_lock lock(marks_mutex_);
             if (!marks_.empty()) captured_at = std::max(captured_at, marks_.back().done);
             for (std::size_t i = 0; i < views.size(); ++i) {
                 const auto it = captured_.find(i);
+                // A view set up for another ring is set up anew: the real
+                // backend replaces the images its captures went into.
+                const auto set_up = set_up_.find(i);
                 if (it == captured_.end() || it->second.first != views[i].source.swapchain ||
-                    it->second.second != views[i].source.image_index) {
+                    it->second.second != views[i].source.image_index ||
+                    (log_->setup_views && (set_up == set_up_.end() || set_up->second.ring != ring_size))) {
                     ++log_->execute_uncaptured;
+                    uncaptured = true;
                     break;
                 }
+            }
+            if (uncaptured && log_->setup_views) {
+                // Set up for these regions: the next releases are captured.
+                for (std::size_t i = 0; i < views.size(); ++i) set_up_[i] = {views[i].request.extent, ring_size};
+                captured_.clear();
+                ++log_->setups;
+                result.uncaptured = true;
+                error = "not captured";
+                return false;
             }
         }
         if (log_->fail) {
@@ -340,15 +416,35 @@ class FakeGpu final : public FrameGenGpu {
         Analyzed analyzed;
         for (std::size_t i = 0; i < views.size(); ++i) {
             history_[i].Configure(views[i].request.extent, views[i].source.format, views[i].request.output, 3,
-                                  tuning.analyze_only ? 3 : 2);
+                                  ring_size);
             const bool synthesized = history_[i].Effective(views[i].request).synthesize;
             history_[i].Commit(synthesized);
             result.synthesized.push_back(synthesized);
             result.depth.push_back(synthesized && views[i].request.depth && log_->depth);
+            Analyzed::View kept{views[i].request.newest.position[0],
+                                result.depth.back() ? views[i].request.shift[0] : 0.0f, synthesized};
+            {
+                // Its newest images are the slot just captured into, its
+                // previous ones the slot before; the next capture takes the
+                // slot after.
+                std::scoped_lock lock(ring_mutex_);
+                Ring& ring = rings_[i];
+                if (ring.size != ring_size) {
+                    // Made anew for another ring size: nothing analyzed
+                    // before is written from it.
+                    for (auto& generation : ring.generation) ++generation;
+                    ring.size = ring_size;
+                    ring.newest = 0;
+                }
+                kept.newest = ring.newest;
+                kept.previous = static_cast<std::uint8_t>((ring.newest + ring_size - 1) % ring_size);
+                kept.newest_generation = ring.generation[kept.newest];
+                kept.previous_generation = ring.generation[kept.previous];
+                ring.newest = static_cast<std::uint8_t>((ring.newest + 1) % ring_size);
+            }
             if (tuning.analyze_only) {
                 // Kept for Synthesize: where the eye is and how it moves.
-                analyzed.views.push_back({views[i].request.newest.position[0],
-                                          result.depth.back() ? views[i].request.shift[0] : 0.0f, synthesized});
+                analyzed.views.push_back(kept);
                 continue;
             }
             // Each output shows the scene from the eye position of its time.
@@ -381,9 +477,14 @@ class FakeGpu final : public FrameGenGpu {
             timing.end = analyzed.measured_at;
             timings_.push_back(timing);
             result.frame = analyzed.id;
+            if (tuning.composition) {
+                ++log_->composed_analyses;
+                std::scoped_lock lock(log_->syntheses_mutex);
+                log_->analysis_compositions[analyzed.id] = *tuning.composition;
+            }
             std::scoped_lock lock(analyzed_mutex_);
             analyzed_.push_back(analyzed);
-            while (analyzed_.size() > 3) analyzed_.pop_front();
+            while (analyzed_.size() > ring_size) analyzed_.pop_front();
         }
         return true;
     }
@@ -398,6 +499,11 @@ class FakeGpu final : public FrameGenGpu {
         const auto it = std::find_if(analyzed_.begin(), analyzed_.end(), [&](const Analyzed& a) { return a.id == frame; });
         return it == analyzed_.end() || std::chrono::steady_clock::now() >= it->measured_at;
     }
+    bool Writable(std::uint64_t frame, bool exact) const override {
+        std::scoped_lock lock(analyzed_mutex_);
+        const auto it = std::find_if(analyzed_.begin(), analyzed_.end(), [&](const Analyzed& a) { return a.id == frame; });
+        return it != analyzed_.end() && WritableLocked(*it, exact);
+    }
     bool Synthesize(std::uint64_t frame, FrameGenSynthesisMode mode, float fraction, const std::vector<FrameGenImage>& outputs,
                     std::string& error) override {
         Analyzed analyzed;
@@ -411,6 +517,12 @@ class FakeGpu final : public FrameGenGpu {
                 return false;
             }
             const bool moved = mode == FrameGenSynthesisMode::kExtrapolate ? fraction > 0.0f : fraction < 1.0f;
+            if (!WritableLocked(*it, !moved)) {
+                ++log_->ring_refusals;
+                ++log_->synthesis_failures;
+                error = "the real frame's images were replaced by newer ones";
+                return false;
+            }
             if (now < it->captured_at) {
                 ++log_->uncaptured_writes;
             } else if (moved && now < it->measured_at) {
@@ -429,6 +541,66 @@ class FakeGpu final : public FrameGenGpu {
         for (std::size_t i = 0; i < analyzed.views.size(); ++i) {
             const auto& view = analyzed.views[i];
             g_written[outputs[i].swapchain].push_back(view.x + (view.synthesized ? eye_time * view.shift : 0.0f));
+        }
+        return true;
+    }
+    bool SupportsComposition() const override { return log_->composition; }
+    // Each eye's output shows its periphery view's frame, from where that
+    // view's eye is at the frame's time (as Synthesize's outputs do).
+    bool SynthesizeComposed(std::uint64_t frame, FrameGenSynthesisMode mode, float fraction,
+                            const FrameGenComposition& composition, const std::vector<FrameGenImage>& outputs,
+                            std::string& error) override {
+        ++log_->compose_calls;
+        if (log_->compose_fail) {
+            ++log_->compose_failures;
+            error = "fake compose failure";
+            return false;
+        }
+        if (log_->compose_first_delay.count()) {
+            bool first = false;
+            for (const FrameGenImage& output : outputs) first = composed_into_.insert(output.swapchain).second || first;
+            if (first) SleepPrecise(std::chrono::steady_clock::now() + log_->compose_first_delay);
+        }
+        Analyzed analyzed;
+        const TimePoint now = std::chrono::steady_clock::now();
+        {
+            std::scoped_lock lock(analyzed_mutex_);
+            const auto it = std::find_if(analyzed_.begin(), analyzed_.end(), [&](const Analyzed& a) { return a.id == frame; });
+            bool views_known = it != analyzed_.end() && outputs.size() >= composition.eyes.size();
+            for (const FrameGenComposeEye& eye : composition.eyes) {
+                views_known = views_known && eye.peripheral < it->views.size() && eye.focus < it->views.size();
+            }
+            if (!views_known) {
+                ++log_->synthesis_failures;
+                error = "the real frame is no longer kept";
+                return false;
+            }
+            const bool moved = mode == FrameGenSynthesisMode::kExtrapolate ? fraction > 0.0f : fraction < 1.0f;
+            if (!WritableLocked(*it, !moved)) {
+                ++log_->ring_refusals;
+                ++log_->synthesis_failures;
+                error = "the real frame's images were replaced by newer ones";
+                return false;
+            }
+            if (now < it->captured_at) {
+                ++log_->uncaptured_writes;
+            } else if (moved && now < it->measured_at) {
+                ++log_->unmeasured_moves;
+            }
+            analyzed = *it;
+        }
+        {
+            std::scoped_lock lock(log_->syntheses_mutex);
+            log_->syntheses.push_back({frame, mode, fraction, now});
+            GpuLog::Composed entry{frame, mode, fraction, composition, {}};
+            for (const FrameGenImage& output : outputs) entry.outputs.push_back(output.swapchain);
+            log_->composed.push_back(std::move(entry));
+        }
+        const float eye_time = mode == FrameGenSynthesisMode::kExtrapolate ? fraction : fraction - 1.0f;
+        std::scoped_lock lock(g_xr_mutex);
+        for (std::size_t e = 0; e < composition.eyes.size(); ++e) {
+            const auto& view = analyzed.views[composition.eyes[e].peripheral];
+            g_written[outputs[e].swapchain].push_back(view.x + (view.synthesized ? eye_time * view.shift : 0.0f));
         }
         return true;
     }
@@ -464,9 +636,37 @@ class FakeGpu final : public FrameGenGpu {
             float x{0.0f};
             float shift{0.0f};
             bool synthesized{false};
+            // Its ring slots and their generations when analyzed.
+            std::uint8_t newest{0};
+            std::uint8_t previous{0};
+            std::uint32_t newest_generation{0};
+            std::uint32_t previous_generation{0};
         };
         std::vector<View> views;
     };
+    // A view's history ring: each slot's generation, the slot the next
+    // capture writes, and its slots (FrameGenHistoryRing).
+    struct Ring {
+        std::array<std::uint32_t, kFrameGenHistoryRingMax> generation{};
+        std::uint8_t newest{0};
+        std::uint8_t size{0};
+    };
+    // As the real backend's KeptFrame: every view's newest images still in
+    // its ring, and unless `exact` its previous ones too (where it was
+    // synthesized against them).
+    bool WritableLocked(const Analyzed& analyzed, bool exact) const {
+        std::scoped_lock lock(ring_mutex_);
+        for (std::size_t i = 0; i < analyzed.views.size(); ++i) {
+            const auto ring = rings_.find(i);
+            if (ring == rings_.end()) return false;
+            const Analyzed::View& view = analyzed.views[i];
+            if (ring->second.generation[view.newest] != view.newest_generation ||
+                (!exact && view.synthesized && ring->second.generation[view.previous] != view.previous_generation)) {
+                return false;
+            }
+        }
+        return true;
+    }
     struct Mark {
         std::uint64_t id{0};
         TimePoint done{};
@@ -492,6 +692,14 @@ class FakeGpu final : public FrameGenGpu {
     std::deque<Mark> marks_;
     std::uint64_t mark_{0};
     std::map<std::size_t, std::pair<XrSwapchain, std::uint32_t>> captured_; // per view: the image last captured
+    struct SetUp {
+        FrameGenExtent extent;
+        std::uint8_t ring{0};
+    };
+    std::map<std::size_t, SetUp> set_up_; // GpuLog::setup_views: each view's region and ring
+    mutable std::mutex ring_mutex_;
+    std::map<std::size_t, Ring> rings_; // per view
+    std::set<XrSwapchain> composed_into_; // output images SynthesizeComposed has written (compose_first_delay)
 };
 
 // --- fake runtime ------------------------------------------------------------------
@@ -515,6 +723,11 @@ struct Runtime {
     std::atomic<bool> ordering_violation{false};
     std::atomic<bool> fail_next_submit{false};
     std::atomic<bool> fail_next_wait{false};
+    // False: the headset is off (waits report shouldRender false).
+    std::atomic<bool> should_render{true};
+    // Frames begun and never ended, discarded by the next begin
+    // (XR_FRAME_DISCARDED): the runtime showed its last frame again.
+    std::atomic<int> discarded{0};
     std::atomic<bool> used_destroyed{false};
     std::vector<XrSwapchain> destroyed; // under g_xr_mutex
     std::vector<XrSpace> destroyed_spaces; // under g_xr_mutex
@@ -522,6 +735,8 @@ struct Runtime {
     // Submissions showing an output image generated for another eye position
     // than the views submitted with it (another frame's, or none).
     std::atomic<int> mismatched_images{0};
+    // Projections submitted with other than two views (a stereo runtime's).
+    std::atomic<int> not_stereo{0};
     std::atomic<int> wait_sleep_ms{0};
     bool begun{false};
     std::vector<XrTime> submitted_times;
@@ -544,20 +759,26 @@ struct Runtime {
                 SleepPrecise(epoch + tick * refresh);
                 state->predictedDisplayTime = 1'000'000'000 + (tick + 1) * period;
                 state->predictedDisplayPeriod = period;
-                state->shouldRender = XR_TRUE;
+                state->shouldRender = should_render ? XR_TRUE : XR_FALSE;
                 return XR_SUCCESS;
             }
             state->predictedDisplayTime = next_display.fetch_add(period);
             state->predictedDisplayPeriod = period;
-            state->shouldRender = XR_TRUE;
+            state->shouldRender = should_render ? XR_TRUE : XR_FALSE;
             return XR_SUCCESS;
         };
         calls.begin = [this](XrSession, const XrFrameBeginInfo*) {
             if (outstanding_waits.load() != 1) ordering_violation = true;
             --outstanding_waits;
             std::scoped_lock lock(g_xr_mutex);
-            if (begun) ordering_violation = true;
+            const bool open = begun;
             begun = true;
+            if (open) {
+                // A frame begun and never ended: discarded, as OpenXR does
+                // (the runtime keeps showing its last frame).
+                ++discarded;
+                return XR_FRAME_DISCARDED;
+            }
             return XR_SUCCESS;
         };
         calls.submit = [this](XrSession, const XrFrameEndInfo* info) {
@@ -574,6 +795,7 @@ struct Runtime {
                     const auto* p = reinterpret_cast<const XrCompositionLayerProjection*>(info->layers[layer]);
                     for (std::uint32_t v = 0; v < p->viewCount; ++v) used.push_back(p->views[v].subImage.swapchain);
                     space = p->space;
+                    not_stereo += p->viewCount != 2 ? 1 : 0;
                 } else if (info->layers[layer]->type == XR_TYPE_COMPOSITION_LAYER_QUAD) {
                     const auto* q = reinterpret_cast<const XrCompositionLayerQuad*>(info->layers[layer]);
                     used.push_back(q->subImage.swapchain);
@@ -747,6 +969,16 @@ FrameGenDynamicPolicy QuickDynamic() {
     return policy;
 }
 
+// As QuickDynamic, for a game that must stay standing by: a hitch lowers
+// its rate (measured over a second) for that second, and standing by
+// engages only after longer than that below the refresh rate (as with the
+// default policy).
+FrameGenDynamicPolicy SteadyDynamic() {
+    FrameGenDynamicPolicy policy = QuickDynamic();
+    policy.engage_after = 1200ms;
+    return policy;
+}
+
 // Dynamic with every decision quick: the guard judges 300 ms windows, a
 // stand-down holds 600 ms; probes stay off.
 FrameGenDynamicPolicy GuardDynamic() {
@@ -776,8 +1008,10 @@ void StartPresenter(FrameGenPresenter& presenter, GpuLog& gpu, FrameGenSynthesis
     presenter.TrackSwapchain(kRight, format, 1, usage);
     std::scoped_lock lock(g_xr_mutex);
     g_creates = 0;
+    g_create_sizes.clear();
     g_destroyed.clear();
     g_wait_timeouts = 0;
+    g_wait_timeouts_on_create = 0;
     g_release_violation = false;
 }
 
@@ -997,7 +1231,9 @@ void TestAutomaticMultiplier() {
     // A fast app is probed back down, all the way to full rate.
     run(4000ms, 0ms);
     Check(presenter.Status().full_rate && presenter.Status().state == FrameGenState::kActive,
-          "auto: an app that holds full refresh runs without generation");
+          "auto: an app that holds full refresh runs without generation (" +
+              std::string(ToString(presenter.Status().state)) + ", " + presenter.Status().reason + ", " +
+              std::to_string(presenter.Status().multiplier) + "x)");
     Check(app.Frame().predictedDisplayPeriod == kPeriod, "auto: full rate passes frames through");
     Check(presenter.OsdText().find("full rate") != std::string::npos, "auto: the OSD says full rate");
 
@@ -1167,10 +1403,10 @@ void TestThreadedDynamic() {
         [&](int frame, const XrFrameState& state) {
             max_generated = std::max<int>(max_generated, gpu.tuning.generated);
             if (frame >= 10) {
-                Check(state.predictedDisplayPeriod % kPeriod == 0 && state.predictedDisplayPeriod >= 2 * kPeriod &&
-                          state.predictedDisplayPeriod <= 4 * kPeriod,
-                      "dynamic: the app is told a whole number of refreshes per frame (" +
-                          std::to_string(state.predictedDisplayPeriod) + ")");
+                // Paced like a runtime paces it: told the refresh period.
+                Check(state.predictedDisplayPeriod == kPeriod,
+                      "dynamic: the app is told the refresh period (" + std::to_string(state.predictedDisplayPeriod) +
+                          ")");
             }
         },
         &gap, 8ms);
@@ -1726,13 +1962,24 @@ void TestJitWaitsForNoGameFrame() {
     // copies at 2x and the rest are moved on.
     Check(status.lead_slots >= 2, "jit unready: the lead covers the game's GPU (" +
                                       std::to_string(status.lead_slots) + " refreshes)");
-    Check(SynthesesWhere(gpu, [](FrameGenSynthesisMode mode, float fraction) {
-              return mode == FrameGenSynthesisMode::kExtrapolate && fraction > 0.0f;
-          }) > static_cast<int>(refresh * elapsed * 0.4),
-          "jit unready: the frames between real frames are moved on");
-    Check(status.distinct_fps > 0.8 * status.output_fps,
+    // ...unless, with a lead of four refreshes, the backend's history no
+    // longer holds what moving them needs: those are shown unmoved.
+    const int moved = SynthesesWhere(gpu, [](FrameGenSynthesisMode mode, float fraction) {
+        return mode == FrameGenSynthesisMode::kExtrapolate && fraction > 0.0f;
+    });
+    Check(moved + static_cast<int>(status.ring_exhausted) > static_cast<int>(refresh * elapsed * 0.4) &&
+              gpu.ring_refusals == 0,
+          "jit unready: the frames between real frames are moved on (" + std::to_string(moved) + " of " +
+              std::to_string(static_cast<int>(refresh * elapsed)) + " refreshes; lead " +
+              std::to_string(status.lead_slots) + ", " + std::to_string(status.ring_exhausted) + " ring exhausted, " +
+              std::to_string(status.unmeasured_copies) + " unmeasured, " + std::to_string(status.unready_capture) +
+              " uncaptured)");
+    // Refreshes show new frames, but for those the backend's history no
+    // longer allowed to move.
+    const double exhausted = static_cast<double>(status.ring_exhausted) / elapsed;
+    Check(status.distinct_fps + exhausted > 0.8 * status.output_fps,
           "jit unready: refreshes show new frames (" + std::to_string(status.distinct_fps) + " of " +
-              std::to_string(status.output_fps) + " fps)");
+              std::to_string(status.output_fps) + " fps, " + std::to_string(exhausted) + "/s ring exhausted)");
     Check(!runtime.ordering_violation && !g_release_violation, "jit unready: calls stayed ordered");
     presenter.Stop();
 }
@@ -1833,12 +2080,18 @@ void TestToggleOffReadsOff() {
                 Check(XR_SUCCEEDED(app->End(state.predictedDisplayTime)), name + ": end");
             }
         });
-        if (jit) std::this_thread::sleep_for(500ms); // standing by first
         int engaged = 0, not_off = 0;
         for (int i = 0; i < 8; ++i) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(250 + 7 * i));
-            const FrameGenStatus status = presenter.Status();
-            engaged += status.state == FrameGenState::kActive && (!jit || (status.threaded && !status.standby)) ? 1 : 0;
+            // Turned back on, Dynamic stands by and judges the game's rate
+            // afresh before it engages again.
+            auto active = [&] {
+                const FrameGenStatus status = presenter.Status();
+                return status.state == FrameGenState::kActive && (!jit || (status.threaded && !status.standby));
+            };
+            const auto deadline = std::chrono::steady_clock::now() + 3s;
+            while (!active() && std::chrono::steady_clock::now() < deadline) std::this_thread::sleep_for(10ms);
+            std::this_thread::sleep_for(std::chrono::milliseconds(100 + 7 * i));
+            engaged += active() ? 1 : 0;
             Check(!presenter.Toggle(), name + ": turned off");
             std::this_thread::sleep_for(150ms);
             const FrameGenState state = presenter.Status().state;
@@ -2118,7 +2371,7 @@ void TestJitDynamicExtrapolation() {
     app->eye_speed = 0.5;
     app->end_offset_periods = 1;
     // Standing by until the game has run below the refresh rate a while;
-    // engaged, it is held at half the refresh rate at most.
+    // engaged, it runs at its own rate.
     RunPipelined(*app, 900ms, 16ms, 26ms, {}, nullptr, 8ms);
     Check(presenter.Status().threaded && !presenter.Status().standby, "jit dynamic extrapolation: engages");
     const std::size_t first = runtime.Submissions();
@@ -2578,15 +2831,17 @@ int RunWork(App& app, std::chrono::milliseconds duration, const std::vector<std:
 }
 
 // Against a paced runtime, standing by, each frame takes ticks[i % size]
-// refreshes: {1, 2, 2} runs at 0.6x the refresh rate. Engaged, the
-// presenter paces the waits instead (the work still fits those refreshes).
+// refreshes (its work ends 3 ms before the last of them): {1, 2, 2} runs at
+// 0.6x the refresh rate. Engaged, Dynamic paces the waits instead, at the
+// game's own rate: the same work runs unquantized ({1, 2, 2}: 0.72x at
+// 90 Hz), at most once a refresh.
 int RunTicks(App& app, std::chrono::milliseconds duration, const std::vector<int>& ticks,
              const std::function<bool(const XrFrameState&)>& each = {}) {
     std::vector<std::chrono::microseconds> work;
     for (const int tick : ticks) {
         work.push_back(std::chrono::duration_cast<std::chrono::microseconds>(
-                           std::chrono::nanoseconds((tick - 1) * app.runtime.period)) +
-                       2ms);
+                           std::chrono::nanoseconds(tick * app.runtime.period)) -
+                       3ms);
     }
     return RunWork(app, duration, work, each);
 }
@@ -2594,6 +2849,15 @@ int RunTicks(App& app, std::chrono::milliseconds duration, const std::vector<int
 bool Engaged(FrameGenPresenter& presenter) {
     const FrameGenStatus status = presenter.Status();
     return status.state == FrameGenState::kActive && status.threaded && !status.standby;
+}
+
+// A game whose frame times jitter about the refresh period: three light
+// frames and one of two refreshes' work. Standing by, a paced runtime
+// quantizes it to refreshes {1, 1, 1, 2} (0.8x); engaged at its own rate,
+// released at once when late, it shows a real frame every refresh, with
+// room to spare on a busy machine.
+std::vector<std::chrono::microseconds> JitterWork(XrDuration period) {
+    return {4ms, 4ms, 4ms, std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::nanoseconds(2 * period)) - 3ms};
 }
 
 // Runs a game at 0.6x the refresh rate until Dynamic engages (or fails the test).
@@ -2694,9 +2958,9 @@ void TestGpuAwarePacing() {
         Check(!runtime.ordering_violation && !g_release_violation, "gpu pacing: calls stayed ordered");
         return result;
     };
-    const Run free = run("");
+    const Run free = run("off");
     const Run held = run("always");
-    Check(!free.status.gpu_gating && free.status.gpu_waits == 0, "gpu pacing: not armed without evidence");
+    Check(!free.status.gpu_gating && free.status.gpu_waits == 0, "gpu pacing: off never holds the game's waits");
     Check(held.status.gpu_gating && held.status.gpu_waits > 0, "gpu pacing: always holds the game's waits (" +
                                                                     std::to_string(held.status.gpu_waits) + ")");
     Check(free.max_queued >= 3 && held.max_queued <= 2,
@@ -2762,6 +3026,113 @@ void TestGpuAwarePacing() {
         presenter.Stop();
         Check(!runtime.ordering_violation && !g_release_violation, "gpu pacing pipelined: calls stayed ordered");
     }
+
+    // By default it arms on evidence: a game running frames ahead on its
+    // GPU, engaged by Dynamic, has its frames captured late; within two
+    // benefit guard windows its waits are held, and one frame stays queued.
+    {
+        FrameGenPresenter presenter;
+        GpuLog gpu;
+        gpu.game_gpu = 26ms;
+        gpu.frames_ahead = 4;
+        Runtime runtime;
+        runtime.paced = true;
+        std::unique_ptr<App> owned;
+        App* app = nullptr;
+        StartJit(presenter, gpu, FrameGenSynthesisMode::kExtrapolate, FrameGenMultiplier::kDynamic, app, runtime, owned);
+        // What the late frames cost before holding starts stands nothing down here.
+        FrameGenDynamicPolicy policy = GuardDynamic();
+        policy.distinct_margin_fps = -1000.0;
+        policy.unready_share = 2.0;
+        presenter.SetDynamicPolicy(policy);
+        app->before_release = [&] { gpu.GameFrame(); };
+        RunWork(*app, 3000ms, {2ms}, [&](const XrFrameState&) { return Engaged(presenter); });
+        Check(Engaged(presenter) && !presenter.Status().gpu_gating, "gpu pacing armed: engaged, not armed yet");
+        const auto engaged = std::chrono::steady_clock::now();
+        RunWork(*app, 2000ms, {2ms}, [&](const XrFrameState&) { return presenter.Status().gpu_gating; });
+        const double armed_after = Seconds(std::chrono::steady_clock::now() - engaged);
+        Check(presenter.Status().gpu_gating && armed_after < Seconds(policy.settle + 3 * policy.guard_window),
+              "gpu pacing armed: frames captured late arm it within two windows (" + std::to_string(armed_after) +
+                  " s)");
+        RunWork(*app, 300ms, {2ms});
+        {
+            std::scoped_lock lock(gpu.timeline_mutex);
+            gpu.max_queued = 0;
+        }
+        RunWork(*app, 600ms, {2ms});
+        const FrameGenStatus status = presenter.Status();
+        Check(Engaged(presenter) && status.dynamic_stand_downs == 0,
+              "gpu pacing armed: stays engaged (" + status.dynamic_reason + ")");
+        Check(status.gpu_waits > 0 && gpu.max_queued <= 2, "gpu pacing armed: one game frame stays queued (" +
+                                                               std::to_string(gpu.max_queued.load()) + ")");
+        presenter.Stop();
+        Check(!runtime.ordering_violation && !g_release_violation, "gpu pacing armed: calls stayed ordered");
+    }
+
+    // A pipelined game whose frames reach the GPU in time (captured before
+    // their refresh) gives no evidence: its waits are never held.
+    {
+        FrameGenPresenter presenter;
+        GpuLog gpu;
+        Runtime runtime;
+        runtime.paced = true;
+        std::unique_ptr<App> owned;
+        App* app = nullptr;
+        StartJit(presenter, gpu, FrameGenSynthesisMode::kInterpolate, FrameGenMultiplier::kDynamic, app, runtime, owned);
+        presenter.SetDynamicPolicy(GuardDynamic());
+        app->end_offset_periods = 1;
+        RunPipelined(*app, 900ms, 16ms, 26ms, {}, nullptr, 8ms);
+        Check(Engaged(presenter), "gpu pacing unarmed: dynamic engages");
+        RunPipelined(*app, 2000ms, 16ms, 26ms, {}, nullptr, 8ms);
+        const FrameGenStatus status = presenter.Status();
+        Check(!status.gpu_gating && status.gpu_waits == 0, "gpu pacing unarmed: a game on time is never held");
+        presenter.Stop();
+        Check(!runtime.ordering_violation && !g_release_violation, "gpu pacing unarmed: calls stayed ordered");
+    }
+
+    // A GPU hitch (frames taking 150 ms for a while): waits time out in a
+    // row, but captures keep finishing, so holding stays on (only a GPU that
+    // makes no progress turns it off), and one frame stays queued after.
+    {
+        FrameGenPresenter presenter;
+        GpuLog gpu;
+        gpu.game_gpu = 8ms;
+        gpu.frames_ahead = 4;
+        Runtime runtime;
+        runtime.paced = true;
+        std::unique_ptr<App> owned;
+        App* app = nullptr;
+        _putenv_s("VECTORXR_FRAMEGEN_GPU_AHEAD", "always");
+        StartJit(presenter, gpu, FrameGenSynthesisMode::kExtrapolate, FrameGenMultiplier::k2, app, runtime, owned);
+        _putenv_s("VECTORXR_FRAMEGEN_GPU_AHEAD", "");
+        app->before_release = [&] { gpu.GameFrame(); };
+        for (int i = 0; i < 3; ++i) app->Frame();
+        RunWork(*app, 400ms, {2ms});
+        {
+            std::scoped_lock lock(gpu.timeline_mutex);
+            gpu.game_gpu = 150ms;
+        }
+        RunWork(*app, 900ms, {2ms});
+        const FrameGenStatus hitch = presenter.Status();
+        {
+            std::scoped_lock lock(gpu.timeline_mutex);
+            gpu.game_gpu = 8ms;
+        }
+        RunWork(*app, 500ms, {2ms});
+        {
+            std::scoped_lock lock(gpu.timeline_mutex);
+            gpu.max_queued = 0;
+        }
+        RunWork(*app, 500ms, {2ms});
+        const FrameGenStatus status = presenter.Status();
+        Check(hitch.gpu_wait_timeouts >= 5 && status.gpu_gating,
+              "gpu pacing hitch: timeouts while the GPU still makes progress keep holding on (" +
+                  std::to_string(hitch.gpu_wait_timeouts) + " timeouts)");
+        Check(gpu.max_queued <= 2, "gpu pacing hitch: one game frame stays queued afterwards (" +
+                                       std::to_string(gpu.max_queued.load()) + ")");
+        presenter.Stop();
+        Check(!runtime.ordering_violation && !g_release_violation, "gpu pacing hitch: calls stayed ordered");
+    }
 }
 
 // A real frame whose game frame is not on the GPU when its refresh first
@@ -2800,7 +3171,7 @@ void TestUncapturedAtOwnRefreshIsLate() {
     Check(!runtime.ordering_violation && !g_release_violation, "uncaptured late: calls stayed ordered");
 }
 
-// Dynamic standing by: a game at 0.9x the refresh rate passes straight
+// Dynamic standing by: a game at 0.96x the refresh rate passes straight
 // through, at the runtime's period, and nothing is captured or analyzed.
 void TestDynamicPassThroughNearRefresh() {
     FrameGenPresenter presenter;
@@ -2810,16 +3181,19 @@ void TestDynamicPassThroughNearRefresh() {
     std::unique_ptr<App> owned;
     App* app = nullptr;
     StartJit(presenter, gpu, FrameGenSynthesisMode::kExtrapolate, FrameGenMultiplier::kDynamic, app, runtime, owned);
+    presenter.SetDynamicPolicy(SteadyDynamic());
     bool refresh_period = true;
     const auto start = std::chrono::steady_clock::now();
-    const int frames = RunTicks(*app, 1500ms, {1, 1, 1, 1, 1, 1, 1, 1, 1, 2}, [&](const XrFrameState& state) {
+    std::vector<int> ticks(24, 1);
+    ticks.push_back(2); // 25 frames in 26 refreshes
+    const int frames = RunTicks(*app, 1500ms, ticks, [&](const XrFrameState& state) {
         refresh_period = refresh_period && state.predictedDisplayPeriod == kPeriod;
         return false;
     });
     const double rate = frames / Seconds(std::chrono::steady_clock::now() - start);
     const double refresh = 1e9 / static_cast<double>(kPeriod);
     const FrameGenStatus status = presenter.Status();
-    Check(rate > 0.8 * refresh, "standing by: the game runs at about 0.9x (" + std::to_string(rate) + " fps)");
+    Check(rate > 0.9 * refresh, "standing by: the game runs at about 0.96x (" + std::to_string(rate) + " fps)");
     Check(status.standby && status.full_rate && status.state == FrameGenState::kActive && !status.threaded &&
               status.dynamic_engagements == 0,
           "standing by: a game near the refresh rate passes straight through");
@@ -2833,7 +3207,7 @@ void TestDynamicPassThroughNearRefresh() {
     Check(!runtime.ordering_violation && !g_release_violation, "standing by: calls stayed ordered");
 }
 
-// A game at 0.6x the refresh rate engages Dynamic once it has run below 0.78x
+// A game at 0.6x the refresh rate engages Dynamic once it has run below 0.9x
 // for engage_after, and frames are generated from then on.
 void TestDynamicEngagesBelow() {
     FrameGenPresenter presenter;
@@ -2854,50 +3228,118 @@ void TestDynamicEngagesBelow() {
     const FrameGenStatus status = presenter.Status();
     Check(status.dynamic_engagements == 1 && status.dynamic_reason.find("the game ran at") != std::string::npos,
           "engage: one engagement, with its reason (" + status.dynamic_reason + ")");
-    Check(gpu.captures > 0 && gpu.analyzes > 0 && status.generated > 0, "engage: frames are generated once engaged");
+    Check(gpu.captures > 0 && gpu.analyzes > 0 && status.generated > 0,
+          "engage: frames are generated once engaged (" + std::to_string(gpu.captures.load()) + " captures, " +
+              std::to_string(gpu.analyzes.load()) + " analyses, " + std::to_string(status.generated) + " generated)");
     presenter.Stop();
     Check(!runtime.ordering_violation && !g_release_violation, "engage: calls stayed ordered");
 }
 
-// Engaged, a game that could hold the refresh rate is held at half of it:
-// it is told two refreshes per frame, runs at 45 fps, and every refresh is
-// a new frame.
-void TestDynamicHalfRateLock() {
+// Engaged, Dynamic keeps the game at its own rate: a game taking 1.35
+// refreshes a frame is never held in its waits (66.7 fps at 90 Hz), where a
+// fixed 2x holds it at half the refresh rate; it is told the refresh
+// period, every refresh gets a frame, and the refreshes it misses show
+// generated frames. At 72, 90 and 120 Hz alike.
+void TestDynamicOwnRate() {
+    // The game's frames for `duration`: per second, and the mean time its
+    // waits held it (refreshes).
+    struct Pace {
+        double rate{0.0};
+        double held{0.0};
+        bool told{true}; // every wait reported `period`
+    };
+    auto pace = [](App& app, std::chrono::milliseconds duration, std::chrono::microseconds work, XrDuration period,
+                   XrDuration told) {
+        Pace result;
+        int frames = 0;
+        double held_ms = 0.0;
+        const auto start = std::chrono::steady_clock::now();
+        while (std::chrono::steady_clock::now() - start < duration) {
+            const auto waiting = std::chrono::steady_clock::now();
+            const XrFrameState state = app.Wait();
+            held_ms += Seconds(std::chrono::steady_clock::now() - waiting) * 1000.0;
+            result.told = result.told && state.predictedDisplayPeriod == told;
+            app.Begin();
+            SleepPrecise(std::chrono::steady_clock::now() + work);
+            app.Release();
+            Check(XR_SUCCEEDED(app.End(state.predictedDisplayTime)), "own rate: end");
+            ++frames;
+        }
+        result.rate = frames / Seconds(std::chrono::steady_clock::now() - start);
+        result.held = held_ms / std::max(frames, 1) / (static_cast<double>(period) / 1e6);
+        return result;
+    };
+    for (const int hz : {72, 90, 120}) {
+        const std::string name = "own rate " + std::to_string(hz) + " Hz";
+        FrameGenPresenter presenter;
+        GpuLog gpu;
+        Runtime runtime;
+        runtime.paced = true;
+        runtime.period = 1'000'000'000 / hz;
+        std::unique_ptr<App> owned;
+        App* app = nullptr;
+        StartJit(presenter, gpu, FrameGenSynthesisMode::kExtrapolate, FrameGenMultiplier::kDynamic, app, runtime, owned);
+        // The benefit guard judges every 300 ms window while engaged (three
+        // or more below): staying engaged is its verdict, not its absence.
+        presenter.SetDynamicPolicy(GuardDynamic());
+        EngageDynamic(presenter, *app, name);
+        const auto work = std::chrono::microseconds(runtime.period * 135 / 100 / 1000);
+        RunWork(*app, 300ms, {work});
+        auto moved = [&] {
+            return SynthesesWhere(gpu, [](FrameGenSynthesisMode mode, float fraction) {
+                return mode == FrameGenSynthesisMode::kExtrapolate && fraction > 0.0f;
+            });
+        };
+        const int moved_before = moved();
+        const std::size_t first = runtime.Submissions();
+        const auto start = std::chrono::steady_clock::now();
+        const Pace own = pace(*app, 1000ms, work, runtime.period, runtime.period);
+        const double elapsed = Seconds(std::chrono::steady_clock::now() - start);
+        const double refresh = 1e9 / static_cast<double>(runtime.period);
+        Check(own.held < 0.15, name + ": the game's waits never hold it (" + std::to_string(own.held) +
+                                   " refreshes a frame)");
+        Check(own.rate > refresh / 2 * 1.1 && own.rate < refresh,
+              name + ": it runs at its own rate, between half the refresh rate and the refresh rate (" +
+                  std::to_string(own.rate) + " fps)");
+        Check(own.told, name + ": the game is told the refresh period");
+        Check(static_cast<double>(runtime.Submissions() - first) / elapsed > refresh * 0.85,
+              name + ": every refresh gets a frame");
+        const double gaps = (refresh - own.rate) * elapsed;
+        Check(moved() - moved_before > gaps * 0.6, name + ": generated frames fill the refreshes the game misses (" +
+                                                       std::to_string(moved() - moved_before) + " of about " +
+                                                       std::to_string(gaps) + ")");
+        const FrameGenStatus status = presenter.Status();
+        Check(status.distinct_fps > 0.85 * status.output_fps,
+              name + ": every refresh is a new frame (" + std::to_string(status.distinct_fps) + " of " +
+                  std::to_string(status.output_fps) + " fps)");
+        Check(Engaged(presenter) && status.dynamic_stand_downs == 0, name + ": stays engaged");
+        presenter.Stop();
+        Check(!runtime.ordering_violation && !g_release_violation, name + ": calls stayed ordered");
+    }
+    // Fixed 2x: the same game is held at half the refresh rate (its waits
+    // hold it most of a refresh a frame), told two refreshes per frame.
     FrameGenPresenter presenter;
     GpuLog gpu;
     Runtime runtime;
     runtime.paced = true;
     std::unique_ptr<App> owned;
     App* app = nullptr;
-    StartJit(presenter, gpu, FrameGenSynthesisMode::kExtrapolate, FrameGenMultiplier::kDynamic, app, runtime, owned);
-    EngageDynamic(presenter, *app, "half rate");
-    RunTicks(*app, 400ms, {1});
-    const std::size_t first = runtime.Submissions();
-    const auto start = std::chrono::steady_clock::now();
-    bool two_refreshes = true;
-    const int frames = RunTicks(*app, 1000ms, {1}, [&](const XrFrameState& state) {
-        two_refreshes = two_refreshes && state.predictedDisplayPeriod == 2 * kPeriod;
-        return false;
-    });
-    const double elapsed = Seconds(std::chrono::steady_clock::now() - start);
-    const double refresh = 1e9 / static_cast<double>(kPeriod);
-    const double rate = frames / elapsed;
-    Check(rate > refresh / 2 * 0.9 && rate < refresh / 2 * 1.1,
-          "half rate: a game able to hold the refresh rate runs at half of it (" + std::to_string(rate) + " fps)");
-    Check(two_refreshes, "half rate: the game is told two refreshes per frame");
-    Check(static_cast<double>(runtime.Submissions() - first) / elapsed > refresh * 0.85,
-          "half rate: every refresh gets a frame");
-    const FrameGenStatus status = presenter.Status();
-    Check(status.distinct_fps > 0.9 * status.output_fps,
-          "half rate: every refresh is a new frame (" + std::to_string(status.distinct_fps) + " of " +
-              std::to_string(status.output_fps) + " fps)");
-    Check(Engaged(presenter) && status.dynamic_stand_downs == 0, "half rate: stays engaged");
+    StartJit(presenter, gpu, FrameGenSynthesisMode::kExtrapolate, FrameGenMultiplier::k2, app, runtime, owned);
+    for (int i = 0; i < 3; ++i) app->Frame();
+    const auto work = std::chrono::microseconds(kPeriod * 135 / 100 / 1000);
+    RunWork(*app, 300ms, {work});
+    const Pace held = pace(*app, 800ms, work, kPeriod, 2 * kPeriod);
+    const double half = 1e9 / static_cast<double>(kPeriod) / 2;
+    Check(held.rate > half * 0.9 && held.rate < half * 1.1 && held.held > 0.25,
+          "fixed 2x: held at half the refresh rate (" + std::to_string(held.rate) + " fps, held " +
+              std::to_string(held.held) + " refreshes a frame)");
+    Check(held.told, "fixed 2x: the game is told two refreshes per frame");
     presenter.Stop();
-    Check(!runtime.ordering_violation && !g_release_violation, "half rate: calls stayed ordered");
+    Check(!runtime.ordering_violation && !g_release_violation, "fixed 2x: calls stayed ordered");
 }
 
-// Between the thresholds nothing changes: standing by at 0.83x stays standing
-// by, engaged at 0.83x stays engaged. After a stand-down nothing engages
+// Between the thresholds nothing changes: standing by at 0.92x stays standing
+// by, engaged at 0.92x stays engaged. After a stand-down nothing engages
 // until the hold has passed, however slow the game.
 void TestDynamicHysteresis() {
     FrameGenPresenter presenter;
@@ -2907,19 +3349,26 @@ void TestDynamicHysteresis() {
     std::unique_ptr<App> owned;
     App* app = nullptr;
     StartJit(presenter, gpu, FrameGenSynthesisMode::kExtrapolate, FrameGenMultiplier::kDynamic, app, runtime, owned);
-    presenter.SetDynamicPolicy(GuardDynamic());
-    const std::vector<int> between{1, 1, 1, 1, 2}; // 0.83x
+    FrameGenDynamicPolicy policy = GuardDynamic();
+    policy.engage_after = SteadyDynamic().engage_after;
+    presenter.SetDynamicPolicy(policy);
+    std::vector<int> between(11, 1);
+    between.push_back(2); // 0.92x
     RunTicks(*app, 700ms, between);
     Check(presenter.Status().standby && presenter.Status().dynamic_engagements == 0,
-          "hysteresis: 0.83x stays standing by");
+          "hysteresis: 0.92x stays standing by");
+    presenter.SetDynamicPolicy(GuardDynamic());
     EngageDynamic(presenter, *app, "hysteresis");
-    RunTicks(*app, 700ms, between);
+    // Engaged, the game runs at its own rate: 0.92x is a frame of 1.09
+    // refreshes' work. Long enough for the guard to judge three windows.
+    RunWork(*app, 1300ms, {std::chrono::microseconds(kPeriod * 109 / 100 / 1000)});
     FrameGenStatus status = presenter.Status();
     Check(Engaged(presenter) && status.dynamic_engagements == 1 && status.dynamic_stand_downs == 0,
-          "hysteresis: 0.83x stays engaged");
-    // Motion never measured: nothing new to show, the guard stands down.
+          "hysteresis: 0.92x stays engaged");
+    // Motion never measured: nothing new to show, and the game slower
+    // than standing by; the guard stands down.
     gpu.measure_lag = 1s;
-    RunTicks(*app, 3000ms, {1, 2, 2}, [&](const XrFrameState&) { return presenter.Status().standby; });
+    RunTicks(*app, 3000ms, {3}, [&](const XrFrameState&) { return presenter.Status().standby; });
     Check(presenter.Status().standby && presenter.Status().dynamic_stand_downs == 1, "hysteresis: the guard stands down");
     const auto stood_down = std::chrono::steady_clock::now();
     gpu.measure_lag = 0us;
@@ -2936,33 +3385,50 @@ void TestDynamicHysteresis() {
 // The benefit guard stands down on each trigger, after two failing windows:
 // (a) no more distinct frames than the game alone, (b) too few generated
 // frames, (c) real frames on the GPU too late, (d) motion measured too late.
-// The others are turned off for (b)-(d). After the hold, with the fault
-// gone, it engages again.
+// (b) and (d) judge only an engagement not showing more distinct frames than
+// the game did alone, so (a) fails with them; a cause is named before that
+// effect. The other causes are turned off for each. Except for (c), the
+// game, engaged at its own rate, runs slower than it did standing by.
+// After the hold, with the fault gone, it engages again.
 void TestBenefitGuardBacksOff() {
     struct Case {
         const char* name;
         const char* reason;
         std::function<void(GpuLog&)> fault;
         std::function<void(FrameGenDynamicPolicy&)> isolate;
+        std::vector<int> fault_ticks{3}; // the game's frames while the fault lasts
+        FrameGenSynthesisMode mode{FrameGenSynthesisMode::kExtrapolate};
     };
     const std::vector<Case> cases{
         {"guard (a)", "distinct frames/s", [](GpuLog& gpu) { gpu.measure_lag = 1s; },
-         [](FrameGenDynamicPolicy&) {}},
+         [](FrameGenDynamicPolicy& policy) {
+             policy.generated_share = 0.0;
+             policy.late_analyses_share = 2.0;
+         }},
         {"guard (b)", "too few", [](GpuLog& gpu) { gpu.measure_lag = 1s; },
-         [](FrameGenDynamicPolicy& policy) { policy.distinct_margin_fps = -1000.0; }},
+         [](FrameGenDynamicPolicy& policy) { policy.late_analyses_share = 2.0; }},
         {"guard (c)", "reached the GPU too late", [](GpuLog& gpu) { gpu.capture_lag = 150ms; },
          [](FrameGenDynamicPolicy& policy) {
              policy.distinct_margin_fps = -1000.0;
              policy.generated_share = 0.0;
              policy.late_analyses_share = 2.0;
-         }},
+         },
+         {1, 2, 2}},
         {"guard (d)", "measured too late",
          [](GpuLog& gpu) { gpu.measure_lag = std::chrono::microseconds(4 * kPeriod / 1000); },
          [](FrameGenDynamicPolicy& policy) {
-             policy.distinct_margin_fps = -1000.0;
              policy.generated_share = 0.0;
              policy.unready_share = 2.0;
          }},
+        // Interpolating, the frames between real frames need the newer one's
+        // motion at the refresh after the older one's: measured later than
+        // any lead makes up for.
+        {"guard (d) interpolating", "measured too late", [](GpuLog& gpu) { gpu.measure_lag = 120ms; },
+         [](FrameGenDynamicPolicy& policy) {
+             policy.generated_share = 0.0;
+             policy.unready_share = 2.0;
+         },
+         {3}, FrameGenSynthesisMode::kInterpolate},
     };
     for (const Case& test : cases) {
         const std::string name = test.name;
@@ -2972,7 +3438,7 @@ void TestBenefitGuardBacksOff() {
         runtime.paced = true;
         std::unique_ptr<App> owned;
         App* app = nullptr;
-        StartJit(presenter, gpu, FrameGenSynthesisMode::kExtrapolate, FrameGenMultiplier::kDynamic, app, runtime, owned);
+        StartJit(presenter, gpu, test.mode, FrameGenMultiplier::kDynamic, app, runtime, owned);
         FrameGenDynamicPolicy policy = GuardDynamic();
         test.isolate(policy);
         presenter.SetDynamicPolicy(policy);
@@ -2980,7 +3446,7 @@ void TestBenefitGuardBacksOff() {
         RunTicks(*app, 300ms, {1, 2, 2});
         Check(Engaged(presenter), name + ": no stand-down without a fault");
         test.fault(gpu);
-        RunTicks(*app, 3000ms, {1, 2, 2}, [&](const XrFrameState&) { return presenter.Status().standby; });
+        RunTicks(*app, 3000ms, test.fault_ticks, [&](const XrFrameState&) { return presenter.Status().standby; });
         FrameGenStatus status = presenter.Status();
         Check(status.standby && status.dynamic_stand_downs == 1 &&
                   status.dynamic_reason.find(test.reason) != std::string::npos,
@@ -3001,8 +3467,9 @@ void TestBenefitGuardBacksOff() {
 
 // Engaged without a guard trigger for probe_after, Dynamic stands by to see
 // whether the game holds the refresh rate alone: a game still slow engages
-// again and the next probe waits twice as long; a game holding 0.85x stays
-// standing by.
+// again and the next probe waits twice as long; a game holding 0.95x stays
+// standing by. Probes come only while the game, engaged at its own rate,
+// runs near what standing by needs: one far below never probes.
 void TestDynamicProbe() {
     FrameGenPresenter presenter;
     GpuLog gpu;
@@ -3016,24 +3483,32 @@ void TestDynamicProbe() {
     policy.probe_max = 4s;
     presenter.SetDynamicPolicy(policy);
     EngageDynamic(presenter, *app, "probe");
+    // Engaged at 0.72x of the refresh rate ({1, 2, 2} at its own rate):
+    // standing by it would not come near 0.95x.
+    RunTicks(*app, 1200ms, {1, 2, 2});
+    Check(Engaged(presenter) && presenter.Status().dynamic_probes == 0,
+          "probe: a game far below the refresh rate engaged is not probed (" +
+              std::to_string(presenter.Status().dynamic_probes) + " probes)");
+    // Quantized to 0.8x standing by, about the refresh rate engaged.
+    const auto quantized = JitterWork(runtime.period);
     auto engaged_for = [&](std::uint64_t probes) {
         const auto start = std::chrono::steady_clock::now();
-        RunTicks(*app, 4000ms, {1, 2, 2},
-                 [&](const XrFrameState&) { return presenter.Status().dynamic_probes >= probes; });
+        RunWork(*app, 4000ms, quantized, [&](const XrFrameState&) { return presenter.Status().dynamic_probes >= probes; });
         return Seconds(std::chrono::steady_clock::now() - start);
     };
     const double first = engaged_for(1);
-    Check(presenter.Status().dynamic_probes == 1 && first >= 0.45,
-          "probe: probes after probe_after engaged (" + std::to_string(first) + " s)");
-    RunTicks(*app, 3000ms, {1, 2, 2}, [&](const XrFrameState&) { return Engaged(presenter); });
+    Check(presenter.Status().dynamic_probes == 1 && first < 2.0,
+          "probe: probes once the game runs near the refresh rate engaged (" + std::to_string(first) + " s)");
+    RunWork(*app, 3000ms, quantized, [&](const XrFrameState&) { return Engaged(presenter); });
     Check(Engaged(presenter) && presenter.Status().dynamic_engagements == 2,
-          "probe: a game still below 0.85x engages again");
+          "probe: a game still below 0.95x engages again");
     const double second = engaged_for(2);
     Check(presenter.Status().dynamic_probes == 2 && second >= 0.95,
           "probe: a failed probe doubles the wait before the next (" + std::to_string(first) + " s, then " +
               std::to_string(second) + " s)");
-    // The game now holds the refresh rate: the probe succeeds and stays.
-    RunTicks(*app, 1100ms, {1});
+    // The game now holds the refresh rate (with room to spare, so a busy
+    // machine does not make it miss refreshes): the probe succeeds and stays.
+    RunWork(*app, 1100ms, kLightWork);
     const FrameGenStatus status = presenter.Status();
     Check(status.standby && !status.threaded && status.dynamic_engagements == 2 &&
               status.dynamic_reason.find("holds") != std::string::npos,
@@ -3043,7 +3518,7 @@ void TestDynamicProbe() {
 }
 
 // Each real frame has a refresh of its own, extrapolating too: a 72 Hz game
-// waited every refresh (no half-rate lock below 40 fps) whose lead shortens
+// waited every refresh (Dynamic runs it at its own rate) whose lead shortens
 // would give two frames the same refresh, and the older would never be shown.
 void TestExtrapolateDuplicateTargetGuard() {
     FrameGenPresenter presenter;
@@ -3092,12 +3567,13 @@ void TestExtrapolateDuplicateTargetGuard() {
     Check(!runtime.ordering_violation && !g_release_violation, "duplicate targets: calls stayed ordered");
 }
 
-// A game that stops sending frames: its last frame moves on for at most the
-// pause limit (max(5 refreshes, 50 ms)), then shows unchanged; the frame
-// after the gap is not measured against the one before it (no motion across
-// the gap), and refreshes show their own time again from the next.
+// A game that stops sending frames: its last frame moves on for at most four
+// of its intervals (and never past the pause limit, at least 250 ms and four
+// of the game's frame intervals), then shows unchanged; the frame after the
+// gap is not measured against the one before it (no motion across the gap),
+// and refreshes show their own time again from the next.
 void TestNoExtrapolationAcrossPauses() {
-    for (const auto pause : {1000ms, 250ms}) {
+    for (const auto pause : {1000ms, 400ms}) {
         const std::string name = "pause " + std::to_string(pause.count()) + " ms";
         FrameGenPresenter presenter;
         GpuLog gpu;
@@ -3119,23 +3595,26 @@ void TestNoExtrapolationAcrossPauses() {
         SleepPrecise(last_end + pause);
         const FrameGenStatus paused = presenter.Status();
         // Up to the last frame's refresh (its lead) the one before is still
-        // moved on; past it, at most its four steps at 4x.
-        Check(paused.generated - before.generated <= 4 + before.lead_slots,
-              name + ": the last frame moves on a few refreshes only (" +
+        // moved on; past it, at most four intervals of four refreshes at 4x.
+        Check(paused.generated - before.generated <= 16 + before.lead_slots + 1,
+              name + ": the last frame moves on a few intervals only (" +
                   std::to_string(paused.generated - before.generated) + " generated, lead " +
                   std::to_string(before.lead_slots) + ")");
+        // Its refresh is its lead after its wait, which came right before
+        // its end; then four intervals, and a refresh to spare.
+        const auto moves_until = last_end + std::chrono::nanoseconds((before.lead_slots + 16 + 1) * kPeriod);
         int moved_late = 0;
         {
             std::scoped_lock lock(gpu.syntheses_mutex);
             for (std::size_t i = syntheses_before; i < gpu.syntheses.size(); ++i) {
                 const GpuLog::Synthesis& entry = gpu.syntheses[i];
                 moved_late += entry.mode == FrameGenSynthesisMode::kExtrapolate && entry.fraction > 0.0f &&
-                                      entry.at > last_end + 120ms
+                                      entry.at > moves_until
                                   ? 1
                                   : 0;
             }
         }
-        Check(moved_late == 0, name + ": nothing moves past the pause limit (" + std::to_string(moved_late) + ")");
+        Check(moved_late == 0, name + ": nothing moves past four intervals (" + std::to_string(moved_late) + ")");
         std::size_t syntheses_resumed = 0;
         {
             std::scoped_lock lock(gpu.syntheses_mutex);
@@ -3186,6 +3665,7 @@ void TestCaptureOnlyWhileArmed() {
     Runtime runtime;
     runtime.paced = true;
     StartThreaded(presenter, gpu, FrameGenMultiplier::kDynamic);
+    presenter.SetDynamicPolicy(SteadyDynamic());
     App app(presenter, runtime);
     RunTicks(app, 600ms, {1});
     Check(presenter.Status().standby && gpu.captures == 0 && gpu.executes == 0,
@@ -3265,7 +3745,10 @@ void TestSkipIdenticalExactCopies() {
     const double refresh = 1e9 / static_cast<double>(kPeriod);
     const std::size_t refreshes = runtime.Submissions() - first;
     Check(static_cast<double>(refreshes) / elapsed > refresh * 0.85, "skip copies: every refresh still gets a frame");
-    Check(exact <= 2 && moved <= 8, "skip copies: the stalled frame's exact copy is written once (" +
+    // Moved: the frame before up to the last one's refresh, then the last
+    // one for four of its intervals (two refreshes each).
+    Check(exact <= 2 && moved <= static_cast<int>(before.lead_slots) + 8 + 1,
+          "skip copies: the stalled frame's exact copy is written once (" +
                                         std::to_string(exact) + " exact, " + std::to_string(moved) + " moved)");
     Check(stalled.copies_skipped - before.copies_skipped >= refreshes / 2,
           "skip copies: the refreshes after it repeat the outputs' images (" +
@@ -3380,16 +3863,18 @@ void TestTelemetryWindows() {
           "telemetry: standing-by time is reported (" + std::to_string(standby) + " of " + std::to_string(standing_by) +
               " s:" + standby_windows + ")");
     const double app_fps = number(last, "appFps=");
-    Check(app_fps > 36.0 && app_fps < 52.0, "telemetry: appFps is the window's average (" + std::to_string(app_fps) + ")");
+    // Engaged at its own rate: {1, 2, 2} refreshes of work run unquantized
+    // (a refresh, then 1.7 twice: 60.6 fps).
+    Check(app_fps > 52.0 && app_fps < 70.0, "telemetry: appFps is the window's average (" + std::to_string(app_fps) + ")");
     Check(!status.dynamic_reason.empty() && last.find(status.dynamic_reason) != std::string::npos,
           "telemetry: the summary carries Status's dynamic reason");
     Check(!runtime.ordering_violation && !g_release_violation, "telemetry: calls stayed ordered");
 }
 
-// A game GPU-bound just past the half-rate cadence (1.05x two refreshes),
-// its waits held for its GPU: the cadence counts from where it released
-// each wait, so real frames stay at the GPU's own pace (2.1 refreshes), not
-// a refresh later each time a GPU wait crosses one.
+// A game GPU-bound at 1.05x two refreshes, its waits held for its GPU: the
+// cadence counts from where it released each wait, so real frames stay at
+// the GPU's own pace (2.1 refreshes), not a refresh later each time a GPU
+// wait crosses one.
 void TestGpuWaitKeepsCadence() {
     FrameGenPresenter presenter;
     GpuLog gpu;
@@ -3436,9 +3921,9 @@ void TestExtrapolateMeasureLagIsOnTime() {
     RunTicks(*app, 300ms, {1, 2, 2});
     gpu.measure_lag = std::chrono::microseconds(kPeriod * 6 / 10 / 1000);
     const FrameGenStatus before = presenter.Status();
-    // Each frame ends about half a refresh before it is shown: measured
-    // after its refresh is due, before the next.
-    RunWork(*app, 1500ms, {7ms});
+    // Measured after its refresh is due, before the next. The game (at its
+    // own rate, 0.75x) leaves refreshes for generated frames to fill.
+    RunWork(*app, 1500ms, {std::chrono::microseconds(kPeriod * 4 / 3 / 1000)});
     const FrameGenStatus after = presenter.Status();
     Check(after.analyses_timed - before.analyses_timed > 20, "measure lag on time: analyses are timed");
     Check(after.analyses_late == before.analyses_late,
@@ -3481,43 +3966,1539 @@ void TestPauseAndLoadingDoNotStandDown() {
     Check(!runtime.ordering_violation && !g_release_violation, "pause and loading: calls stayed ordered");
 }
 
-// The policy at 72, 90 and 120 Hz: engaged, a game able to hold the refresh
-// rate is held at half of it where that is 40 fps or more, else (72 Hz) it
-// runs at its own rate.
-void TestDynamicCadenceByRefresh() {
-    for (const int hz : {72, 90, 120}) {
-        const std::string name = "cadence " + std::to_string(hz) + " Hz";
+// A game whose frame times jitter about the refresh period: standing by, the
+// runtime's waits quantize it to 0.8x ({1, 1, 1, 2}), so Dynamic engages;
+// engaged at its own rate it fills every refresh itself (released at once
+// when late, its lead absorbs its long frames), so hardly any frame is
+// generated. Showing clearly more distinct frames than the game did alone,
+// the engagement pays: too few generated frames (b) or analyses (d) never
+// stand it down.
+void TestWinningEngagementStays() {
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    runtime.paced = true;
+    std::unique_ptr<App> owned;
+    App* app = nullptr;
+    StartJit(presenter, gpu, FrameGenSynthesisMode::kExtrapolate, FrameGenMultiplier::kDynamic, app, runtime, owned);
+    presenter.SetDynamicPolicy(GuardDynamic());
+    const auto jitter = JitterWork(runtime.period);
+    RunWork(*app, 3000ms, jitter, [&](const XrFrameState&) { return Engaged(presenter); });
+    Check(Engaged(presenter), "winning: dynamic engages for a game quantized to 0.8x standing by");
+    // Settle, then four or more 300 ms windows judged.
+    RunWork(*app, 1600ms, jitter);
+    const FrameGenStatus status = presenter.Status();
+    const double refresh = 1e9 / static_cast<double>(kPeriod);
+    Check(status.distinct_fps > 0.9 * refresh, "winning: engaged, nearly every refresh shows a new frame (" +
+                                                   std::to_string(status.distinct_fps) + " fps)");
+    Check(Engaged(presenter) && status.dynamic_stand_downs == 0 && status.dynamic_engagements == 1,
+          "winning: an engagement showing more than the game alone stays (" + status.dynamic_reason + ")");
+    // Its motion measured too late for the few frames it would move: the
+    // real frames still fill the refreshes, and it stays.
+    gpu.measure_lag = std::chrono::microseconds(4 * kPeriod / 1000);
+    const FrameGenStatus before = presenter.Status();
+    RunWork(*app, 1200ms, jitter);
+    const FrameGenStatus late = presenter.Status();
+    Check(late.analyses_late - before.analyses_late > 20 && Engaged(presenter) && late.dynamic_stand_downs == 0,
+          "winning: analyses measured late do not stand it down either (" +
+              std::to_string(late.analyses_late - before.analyses_late) + " late; " + late.dynamic_reason + ")");
+    presenter.Stop();
+    Check(!runtime.ordering_violation && !g_release_violation, "winning: calls stayed ordered");
+}
+
+// Turned off while engaged and on again, Dynamic stands by and judges the
+// game's rate afresh (its guard and probes start over): a game that holds
+// the refresh rate meanwhile is not engaged again.
+void TestDynamicToggleStandsBy() {
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    runtime.paced = true;
+    std::unique_ptr<App> owned;
+    App* app = nullptr;
+    StartJit(presenter, gpu, FrameGenSynthesisMode::kExtrapolate, FrameGenMultiplier::kDynamic, app, runtime, owned);
+    presenter.SetDynamicPolicy(SteadyDynamic());
+    EngageDynamic(presenter, *app, "toggle standby");
+    Check(!presenter.Toggle(), "toggle standby: turned off");
+    RunTicks(*app, 300ms, {1});
+    Check(!presenter.Status().threaded, "toggle standby: turned off, frames pass straight through");
+    Check(presenter.Toggle(), "toggle standby: turned on");
+    RunTicks(*app, 1000ms, {1});
+    const FrameGenStatus status = presenter.Status();
+    Check(status.standby && !status.threaded && status.state == FrameGenState::kActive && status.dynamic_engagements == 1,
+          "toggle standby: turned on again, a game holding the refresh rate is not engaged (" +
+              std::string(status.standby ? "standing by" : "engaged") + ", " +
+              std::to_string(status.dynamic_engagements) + " engagements)");
+    // Slow again: it engages after its own run below the refresh rate.
+    EngageDynamic(presenter, *app, "toggle standby");
+    Check(presenter.Status().dynamic_engagements == 2, "toggle standby: engages again once the game is slow");
+    presenter.Stop();
+    Check(!runtime.ordering_violation && !g_release_violation, "toggle standby: calls stayed ordered");
+}
+
+// A hitch is part of a game's pace, not a pause: a 30 fps game whose frames
+// take six refreshes now and then still engages Dynamic, and a frame of 150
+// ms at a 4x multiplier (an interval of 44 ms) is measured and covered
+// across like any other. A pause is at least 250 ms, and at least four of
+// the game's own frame intervals.
+void TestHitchesAreNotPauses() {
+    {
         FrameGenPresenter presenter;
         GpuLog gpu;
         Runtime runtime;
         runtime.paced = true;
-        runtime.period = 1'000'000'000 / hz;
         std::unique_ptr<App> owned;
         App* app = nullptr;
         StartJit(presenter, gpu, FrameGenSynthesisMode::kExtrapolate, FrameGenMultiplier::kDynamic, app, runtime, owned);
-        EngageDynamic(presenter, *app, name);
-        RunTicks(*app, 300ms, {1});
-        const auto start = std::chrono::steady_clock::now();
-        const int frames = RunTicks(*app, 800ms, {1});
-        const double rate = frames / Seconds(std::chrono::steady_clock::now() - start);
-        const double half = hz / 2.0;
-        if (half >= 40.0) {
-            Check(rate > half * 0.88 && rate < half * 1.1,
-                  name + ": held at half the refresh rate (" + std::to_string(rate) + " fps)");
-        } else {
-            Check(rate > half * 1.3, name + ": not held at half the refresh rate (" + std::to_string(rate) + " fps)");
+        // A six-refresh frame about every quarter second, closer together
+        // than the run below the refresh rate engaging takes (QuickDynamic).
+        RunTicks(*app, 3000ms, {3, 3, 3, 3, 3, 6}, [&](const XrFrameState&) { return Engaged(presenter); });
+        Check(Engaged(presenter), "hitches: a 30 fps game with hitches engages Dynamic");
+        presenter.Stop();
+        Check(!runtime.ordering_violation && !g_release_violation, "hitches (standing by): calls stayed ordered");
+    }
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    runtime.paced = true;
+    std::unique_ptr<App> owned;
+    App* app = nullptr;
+    StartJit(presenter, gpu, FrameGenSynthesisMode::kExtrapolate, FrameGenMultiplier::k4, app, runtime, owned);
+    app->eye_speed = 0.5;
+    for (int i = 0; i < 3; ++i) app->Frame();
+    RunWork(*app, 500ms, kLightWork);
+    const FrameGenStatus before = presenter.Status();
+    RunWork(*app, 1ms, {150ms});
+    RunWork(*app, 400ms, kLightWork);
+    const FrameGenStatus after = presenter.Status();
+    Check(after.pauses == before.pauses, "hitches: a 150 ms frame at 4x is not a pause (" +
+                                             std::to_string(after.pauses - before.pauses) + " counted)");
+    presenter.Stop();
+    Check(!runtime.ordering_violation && !g_release_violation, "hitches: calls stayed ordered");
+}
+
+// Interpolating at the game's own rate, the refresh rate, a real frame
+// follows the newest one by a refresh: its own refresh shows its exact copy
+// (its capture is needed then), and its motion only a refresh later, for a
+// cover frame. An analysis ending after its frame's refresh, within the
+// next, is on time.
+void TestInterpolateMeasureLagIsOnTime() {
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    runtime.paced = true;
+    std::unique_ptr<App> owned;
+    App* app = nullptr;
+    StartJit(presenter, gpu, FrameGenSynthesisMode::kInterpolate, FrameGenMultiplier::kDynamic, app, runtime, owned);
+    presenter.SetDynamicPolicy(GuardDynamic());
+    RunWork(*app, 3000ms, JitterWork(runtime.period), [&](const XrFrameState&) { return Engaged(presenter); });
+    Check(Engaged(presenter), "interpolate on time: dynamic engages");
+    // Engaged, the game now ends each frame well within a refresh: one real
+    // frame a refresh, each shown its lead of refreshes after its wait (a
+    // game that misses none keeps the lead it has).
+    XrDuration lead = 0;
+    RunWork(*app, 600ms, kLightWork, [&](const XrFrameState& state) {
+        // The refresh its wait was released in, and the one it is shown in.
+        const auto tick = (std::chrono::steady_clock::now() - runtime.epoch) / std::chrono::nanoseconds(runtime.period);
+        const XrTime released = 1'000'000'000 + (tick + 1) * runtime.period;
+        lead = std::max<XrDuration>(lead, (state.predictedDisplayTime - released + runtime.period / 2) / runtime.period);
+        return false;
+    });
+    // Measured once that lead has passed after its end: past its own
+    // refresh, before the next.
+    gpu.measure_lag = std::chrono::microseconds(lead * kPeriod / 1000);
+    const FrameGenStatus before = presenter.Status();
+    RunWork(*app, 1000ms, kLightWork);
+    const FrameGenStatus after = presenter.Status();
+    Check(lead >= 1 && after.analyses_timed - before.analyses_timed > 20, "interpolate on time: analyses are timed");
+    Check(after.analyses_late == before.analyses_late,
+          "interpolate on time: none counts late (" + std::to_string(after.analyses_late - before.analyses_late) +
+              " of " + std::to_string(after.analyses_timed - before.analyses_timed) + ", lead " +
+              std::to_string(lead) + ")");
+    Check(Engaged(presenter) && after.dynamic_stand_downs == 0,
+          "interpolate on time: no stand-down (" + after.dynamic_reason + ")");
+    presenter.Stop();
+    Check(!runtime.ordering_violation && !g_release_violation, "interpolate on time: calls stayed ordered");
+}
+
+// Interpolating at 2x, the refresh before a real frame's own shows it moved:
+// its motion is needed then. Measured a refresh and a half after its
+// capture, a lead of two refreshes (what a quick game settles at) shows it
+// unmoved there (unmeasured); such refreshes count against the lead, which
+// grows until its motion is ready in time, and holds there.
+void TestInterpolateLeadMakesRoomForAnalysis() {
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    runtime.paced = true;
+    std::unique_ptr<App> owned;
+    App* app = nullptr;
+    StartJit(presenter, gpu, FrameGenSynthesisMode::kInterpolate, FrameGenMultiplier::k2, app, runtime, owned);
+    for (int i = 0; i < 3; ++i) app->Frame();
+    RunWork(*app, 800ms, kLightWork);
+    const FrameGenStatus settled = presenter.Status();
+    gpu.measure_lag = std::chrono::microseconds(kPeriod * 3 / 2 / 1000);
+    RunWork(*app, 800ms, kLightWork);
+    const FrameGenStatus before = presenter.Status();
+    const int frames = RunWork(*app, 800ms, kLightWork);
+    const FrameGenStatus after = presenter.Status();
+    Check(settled.lead_slots <= 2, "analysis lead: a quick game's lead settles at two refreshes or fewer (" +
+                                       std::to_string(settled.lead_slots) + ")");
+    Check(after.lead_slots >= 3, "analysis lead: the lead makes room for the analysis (" +
+                                     std::to_string(after.lead_slots) + " refreshes)");
+    Check((after.unmeasured_copies - before.unmeasured_copies) * 10 <= static_cast<std::uint64_t>(frames),
+          "analysis lead: frames between real frames are moved, not shown unmeasured (" +
+              std::to_string(after.unmeasured_copies - before.unmeasured_copies) + " unmeasured of " +
+              std::to_string(frames) + " real frames)");
+    Check(gpu.unmeasured_moves == 0, "analysis lead: nothing moved before its motion was measured");
+    presenter.Stop();
+    Check(!runtime.ordering_violation && !g_release_violation, "analysis lead: calls stayed ordered");
+}
+
+// An MSFS-like game on Interpolate and Dynamic (pipelined, ending frames a
+// period late, rendering 26 and 18 ms in turn, its analyses 6 ms on the
+// optical flow hardware): the benefit guard judges window after window and
+// stands nothing down; most analyses end before the frames moved by them
+// are needed.
+void TestBenefitGuardInterpolateMsfs() {
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    gpu.ofa = 6ms;
+    Runtime runtime;
+    runtime.paced = true;
+    std::unique_ptr<App> owned;
+    App* app = nullptr;
+    StartJit(presenter, gpu, FrameGenSynthesisMode::kInterpolate, FrameGenMultiplier::kDynamic, app, runtime, owned);
+    presenter.SetDynamicPolicy(GuardDynamic());
+    app->end_offset_periods = 1;
+    RunPipelined(*app, 900ms, 16ms, 26ms, {}, nullptr, 8ms);
+    Check(Engaged(presenter), "interpolate guard: dynamic engages");
+    const FrameGenStatus before = presenter.Status();
+    RunPipelined(*app, 2500ms, 16ms, 26ms, {}, nullptr, 8ms);
+    const FrameGenStatus after = presenter.Status();
+    const std::uint64_t timed = after.analyses_timed - before.analyses_timed;
+    const std::uint64_t late = after.analyses_late - before.analyses_late;
+    Check(timed > 30 && late * 2 < timed, "interpolate guard: analyses are mostly on time (" + std::to_string(late) +
+                                              " of " + std::to_string(timed) + " late)");
+    Check(Engaged(presenter) && after.dynamic_stand_downs == 0,
+          "interpolate guard: nothing stands down (" + after.dynamic_reason + ")");
+    Check(after.distinct_fps > 0.85 * after.output_fps, "interpolate guard: refreshes show new frames (" +
+                                                            std::to_string(after.distinct_fps) + " of " +
+                                                            std::to_string(after.output_fps) + " fps)");
+    presenter.Stop();
+    Check(!runtime.ordering_violation && !g_release_violation, "interpolate guard: calls stayed ordered");
+}
+
+// --- quad views composed by Frame Generation -----------------------------------------
+
+// Emulated quad views as the layer's compose site hands them over: views 0/1
+// peripheral and 2/3 focus, each with a swapchain of its own and of its own
+// size, and the layer's compositor outputs the eyes are composed into when
+// Frame Generation does not compose them.
+const std::array<XrSwapchain, 4> kQuadViews{reinterpret_cast<XrSwapchain>(0x41), reinterpret_cast<XrSwapchain>(0x42),
+                                            reinterpret_cast<XrSwapchain>(0x43), reinterpret_cast<XrSwapchain>(0x44)};
+const std::array<XrSwapchain, 2> kComposedOutputs{reinterpret_cast<XrSwapchain>(0x45),
+                                                  reinterpret_cast<XrSwapchain>(0x46)};
+constexpr FrameGenExtent kPeripheryExtent{1000, 1000};
+constexpr FrameGenExtent kFocusExtent{800, 700};
+constexpr FrameGenExtent kCanvasExtent{1200, 1100};
+
+// Each eye composed from its periphery and its focus view, inset at `left`.
+FrameGenComposition QuadComposition(float left, FrameGenExtent canvas = kCanvasExtent) {
+    FrameGenComposition composition;
+    composition.output = canvas;
+    for (std::uint32_t eye = 0; eye < 2; ++eye) {
+        FrameGenComposeEye composed;
+        composed.peripheral = eye;
+        composed.focus = eye + 2;
+        composed.focus_rect = {left, 0.3f, left + 0.4f, 0.7f};
+        composed.feather = {0.01f, 0.01f};
+        composition.eyes.push_back(composed);
+    }
+    return composition;
+}
+
+// A quad views game behind the layer: its four views released (each release
+// captured, as the bridge's copy is, unless `uncaptured_release`), then at
+// its end the layer offers the frame (ClaimQuadFrame). A claimed frame ends
+// with its four views and its composition; any other is composed by the
+// layer into its compositor outputs (released as the layer releases them)
+// and ends with those two views. The eyes move sideways at `eye_speed` m/s:
+// every view of a frame is posed where they are at its display time.
+struct QuadApp {
+    FrameGenPresenter& presenter;
+    Runtime& runtime;
+    FrameGenRuntimeCalls calls;
+    std::uint32_t images{3}; // each view swapchain's images, cycled
+    std::uint32_t image{0};
+    std::uint32_t composed_image{0};
+    double eye_speed{0.5};
+    bool offer{true};       // false: the layer declines (kDeclined, its diagnostic overlay on)
+    std::optional<FrameGenQuadRoute> force; // the layer routes the frame so without offering it
+    std::array<bool, 4> uncaptured_release{};
+    std::function<float(int)> inset; // each frame's focus rectangle (left edge in output uv)
+    FrameGenExtent canvas{kCanvasExtent}; // each eye's composed image
+    // Between the claim and the end of a frame (the layer's xrEndFrame, then
+    // its forward); false: the layer abandons the frame instead.
+    std::function<bool(FrameGenQuadRoute)> after_claim;
+    // The game renders nothing (told not to, the headset off): it releases
+    // no view and ends its frames without layers.
+    bool no_layers{false};
+    struct Ended {
+        XrTime time{0};
+        FrameGenQuadRoute route{FrameGenQuadRoute::kDeclined};
+        float x{0.0f};
+    };
+    std::vector<Ended> ended;
+    std::vector<double> release_end_ms; // per frame: its views' releases and its end, milliseconds
+    int frames{0};
+
+    QuadApp(FrameGenPresenter& p, Runtime& r) : presenter(p), runtime(r), calls(r.Calls()) {}
+
+    float X(XrTime time) const {
+        return static_cast<float>(eye_speed * static_cast<double>(time - 1'000'000'000) * 1e-9);
+    }
+
+    XrFrameState Wait() {
+        XrFrameWaitInfo info{XR_TYPE_FRAME_WAIT_INFO};
+        XrFrameState state{XR_TYPE_FRAME_STATE};
+        Check(XR_SUCCEEDED(presenter.WaitFrame(kSession, &info, &state, calls)), "quad app wait");
+        return state;
+    }
+
+    void Begin() {
+        XrFrameBeginInfo info{XR_TYPE_FRAME_BEGIN_INFO};
+        Check(XR_SUCCEEDED(presenter.BeginFrame(kSession, &info, calls)), "quad app begin");
+    }
+
+    void Release() {
+        image = (image + 1) % images;
+        for (std::size_t i = 0; i < kQuadViews.size(); ++i) {
+            presenter.NoteRelease(kQuadViews[i], image);
+            if (!uncaptured_release[i]) presenter.CaptureOnRelease(kQuadViews[i], image);
         }
-        Check(Engaged(presenter), name + ": engaged");
+        uncaptured_release = {};
+    }
+
+    XrResult End(XrTime time) {
+        if (no_layers) {
+            XrFrameEndInfo info{XR_TYPE_FRAME_END_INFO};
+            info.displayTime = time;
+            info.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
+            return presenter.EndFrame(kSession, &info, calls);
+        }
+        const float x = X(time);
+        std::array<XrCompositionLayerProjectionView, 4> source{};
+        for (std::size_t i = 0; i < source.size(); ++i) {
+            source[i] = {XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW};
+            source[i].pose.orientation.w = 1.0f;
+            source[i].pose.position.x = x;
+            source[i].fov = i < 2 ? XrFovf{-0.8f, 0.8f, 0.8f, -0.8f} : XrFovf{-0.3f, 0.3f, 0.3f, -0.3f};
+            const FrameGenExtent extent = i < 2 ? kPeripheryExtent : kFocusExtent;
+            source[i].subImage.swapchain = kQuadViews[i];
+            source[i].subImage.imageRect = {{0, 0}, {static_cast<std::int32_t>(extent.width),
+                                                     static_cast<std::int32_t>(extent.height)}};
+        }
+        XrCompositionLayerProjection projection{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
+        projection.space = kSpace;
+        projection.viewCount = 4;
+        projection.views = source.data();
+        FrameGenQuadFrame quad;
+        if (force) {
+            quad.route = *force;
+        } else if (offer) {
+            quad.route = presenter.ClaimQuadFrame(projection);
+        }
+        ended.push_back({time, quad.route, x});
+        const int frame = frames++;
+        if (after_claim && !after_claim(quad.route)) {
+            presenter.AbandonFrame(time);
+            return XR_SUCCESS;
+        }
+        XrFrameEndInfo info{XR_TYPE_FRAME_END_INFO};
+        info.displayTime = time;
+        info.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
+        std::array<XrCompositionLayerProjectionView, 2> composed{};
+        XrCompositionLayerProjection composed_layer{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
+        const XrCompositionLayerBaseHeader* layer = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&projection);
+        if (quad.route == FrameGenQuadRoute::kClaimed) {
+            quad.composition = QuadComposition(inset ? inset(frame) : 0.3f, canvas);
+            for (std::size_t eye = 0; eye < 2; ++eye) {
+                quad.eyes[eye] = source[eye];
+                quad.eyes[eye].subImage = {};
+            }
+        } else {
+            composed_image = (composed_image + 1) % 3;
+            for (std::size_t eye = 0; eye < 2; ++eye) {
+                presenter.CaptureOnRelease(kComposedOutputs[eye], composed_image);
+                presenter.NoteRelease(kComposedOutputs[eye], composed_image);
+                {
+                    // What the runtime shows from the layer's compositor
+                    // outputs from now on: this frame's image (its eye at x).
+                    std::scoped_lock lock(g_xr_mutex);
+                    g_shown[kComposedOutputs[eye]] = x;
+                }
+                composed[eye] = source[eye];
+                composed[eye].subImage.swapchain = kComposedOutputs[eye];
+                composed[eye].subImage.imageRect = {{0, 0}, {static_cast<std::int32_t>(canvas.width),
+                                                             static_cast<std::int32_t>(canvas.height)}};
+            }
+            composed_layer.space = kSpace;
+            composed_layer.viewCount = 2;
+            composed_layer.views = composed.data();
+            layer = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&composed_layer);
+            if (quad.route == FrameGenQuadRoute::kUncaptured) {
+                quad.composition = QuadComposition(inset ? inset(frame) : 0.3f, canvas);
+                quad.source_views = source;
+                quad.source_space = kSpace;
+            }
+        }
+        info.layerCount = 1;
+        info.layers = &layer;
+        return presenter.EndFrame(kSession, &info, calls, &quad);
+    }
+
+    XrFrameState Frame(std::chrono::microseconds work = 0us) {
+        const XrFrameState state = Wait();
+        Begin();
+        if (work.count()) SleepPrecise(std::chrono::steady_clock::now() + work);
+        const auto released = std::chrono::steady_clock::now();
+        if (!no_layers) Release();
+        Check(XR_SUCCEEDED(End(state.predictedDisplayTime)), "quad app end");
+        release_end_ms.push_back(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - released).count());
+        return state;
+    }
+
+    int Run(std::chrono::milliseconds duration, std::chrono::microseconds work = 4000us,
+            const std::function<bool()>& until = {}) {
+        return RunWorks(duration, {work}, until);
+    }
+
+    // Frames working works[i % size] each.
+    int RunWorks(std::chrono::milliseconds duration, const std::vector<std::chrono::microseconds>& works,
+                 const std::function<bool()>& until = {}) {
+        const auto start = std::chrono::steady_clock::now();
+        int count = 0;
+        while (std::chrono::steady_clock::now() - start < duration) {
+            Frame(works[static_cast<std::size_t>(count) % works.size()]);
+            ++count;
+            if (until && until()) break;
+        }
+        return count;
+    }
+
+    std::size_t Routed(FrameGenQuadRoute route, std::size_t from = 0) const {
+        return static_cast<std::size_t>(std::count_if(ended.begin() + static_cast<std::ptrdiff_t>(std::min(from, ended.size())),
+                                                      ended.end(), [&](const Ended& e) { return e.route == route; }));
+    }
+};
+
+void StartQuad(FrameGenPresenter& presenter, GpuLog& gpu, FrameGenSynthesisMode mode, FrameGenMultiplier multiplier) {
+    gpu.threaded = true;
+    gpu.jit = true;
+    gpu.composition = true;
+    StartPresenter(presenter, gpu, mode, kFormat, kAppUsage, multiplier);
+    for (const XrSwapchain view : kQuadViews) presenter.TrackSwapchain(view, kFormat, 1, kAppUsage);
+    for (const XrSwapchain output : kComposedOutputs) presenter.TrackSwapchain(output, kFormat, 1, kAppUsage);
+    std::scoped_lock lock(g_xr_mutex);
+    for (const XrSwapchain output : kComposedOutputs) g_shown.erase(output);
+}
+
+// A quad views game's work per frame against a paced runtime, standing by:
+// each frame takes ticks[i] refreshes, its work ending 3 ms before the last
+// (QuadApp::RunWorks; as RunTicks).
+std::vector<std::chrono::microseconds> QuadTicks(const Runtime& runtime, const std::vector<int>& ticks) {
+    std::vector<std::chrono::microseconds> works;
+    for (const int tick : ticks) {
+        works.push_back(std::chrono::duration_cast<std::chrono::microseconds>(
+                            std::chrono::nanoseconds(tick * runtime.period)) -
+                        3ms);
+    }
+    return works;
+}
+
+// The submissions' first view positions (the eyes move +x) never step back:
+// nothing older is shown after anything newer. Returns the steps back.
+std::size_t StepsBack(Runtime& runtime, std::size_t first) {
+    std::scoped_lock lock(g_xr_mutex);
+    std::size_t backwards = 0;
+    std::optional<float> last;
+    for (std::size_t i = first; i < runtime.submitted_left_x.size(); ++i) {
+        if (runtime.submitted_swapchains[i].empty()) continue;
+        backwards += last && runtime.submitted_left_x[i] + 1e-6f < *last ? 1 : 0;
+        last = runtime.submitted_left_x[i];
+    }
+    return backwards;
+}
+
+bool ShowsComposedOutputs(const Submission& submission) {
+    return submission.swapchains.size() == 2 && submission.swapchains[0] == kComposedOutputs[0] &&
+           submission.swapchains[1] == kComposedOutputs[1];
+}
+
+// Frame Generation's own output images, not the game's or the layer's.
+bool ShowsFrameGenOutputs(const Submission& submission) {
+    if (submission.swapchains.size() != 2) return false;
+    for (const XrSwapchain swapchain : submission.swapchains) {
+        if (std::find(kQuadViews.begin(), kQuadViews.end(), swapchain) != kQuadViews.end() ||
+            std::find(kComposedOutputs.begin(), kComposedOutputs.end(), swapchain) != kComposedOutputs.end() ||
+            swapchain == kLeft || swapchain == kRight) {
+            return false;
+        }
+    }
+    return true;
+}
+
+int Composed(GpuLog& gpu, const std::function<bool(const GpuLog::Composed&)>& match) {
+    std::scoped_lock lock(gpu.syntheses_mutex);
+    return static_cast<int>(std::count_if(gpu.composed.begin(), gpu.composed.end(), match));
+}
+
+// Engaged, every frame is claimed: its four views are captured at release,
+// measured with their composition, and every refresh, real or generated, is
+// composed into one output image per eye of the canvas's size; the runtime
+// gets two views, posed as the periphery, showing what was written for them.
+void TestQuadClaimAndCompose() {
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    runtime.paced = true;
+    StartQuad(presenter, gpu, FrameGenSynthesisMode::kExtrapolate, FrameGenMultiplier::k2);
+    QuadApp app(presenter, runtime);
+    for (int i = 0; i < 3; ++i) app.Frame();
+    Check(gpu.captures == 0, "quad: nothing captured before engagement");
+    const std::size_t first = runtime.Submissions();
+    const std::size_t first_frame = app.ended.size();
+    const auto start = std::chrono::steady_clock::now();
+    const int frames = app.Run(1200ms);
+    const double elapsed = Seconds(std::chrono::steady_clock::now() - start);
+    const FrameGenStatus status = presenter.Status();
+    Check(status.threaded && status.quad, "quad: Frame Generation composes the quad views itself");
+    const std::size_t claimed = app.Routed(FrameGenQuadRoute::kClaimed, first_frame);
+    Check(claimed + 2 >= static_cast<std::size_t>(frames) && status.quad_claimed == claimed,
+          "quad: every engaged frame is claimed (" + std::to_string(claimed) + " of " + std::to_string(frames) + ")");
+    Check(gpu.captures >= static_cast<int>(4 * claimed),
+          "quad: each claimed frame's four views are captured (" + std::to_string(gpu.captures.load()) + ")");
+    Check(gpu.last.size() == 4 && gpu.last[0].request.extent.width == kPeripheryExtent.width &&
+              gpu.last[2].request.extent.width == kFocusExtent.width && gpu.last[2].source.swapchain == kQuadViews[2],
+          "quad: the four views are measured, each at its own size");
+    Check(gpu.composed_analyses == gpu.analyzes && gpu.analyzes >= static_cast<int>(claimed) - 1,
+          "quad: every analysis has the frame's composition (" + std::to_string(gpu.composed_analyses.load()) + " of " +
+              std::to_string(gpu.analyzes.load()) + ")");
+    const auto log = runtime.Snapshot();
+    std::size_t own = 0;
+    for (std::size_t i = first + 4; i < log.size(); ++i) own += ShowsFrameGenOutputs(log[i]) ? 1 : 0;
+    Check(own + 4 + first >= log.size(), "quad: refreshes show Frame Generation's composed outputs (" +
+                                             std::to_string(own) + " of " + std::to_string(log.size() - first) + ")");
+    Check(runtime.not_stereo == 0, "quad: the runtime never gets four views");
+    Check(runtime.mismatched_images == 0, "quad: every image shown was composed for its views (" +
+                                              std::to_string(runtime.mismatched_images.load()) + " mismatched)");
+    {
+        std::scoped_lock lock(g_xr_mutex);
+        Check(g_creates == 2 && g_create_sizes[0].first == kCanvasExtent.width &&
+                  g_create_sizes[0].second == kCanvasExtent.height && g_create_sizes[1] == g_create_sizes[0],
+              "quad: one output image per eye, of the canvas's size (" + std::to_string(g_creates) + " made)");
+    }
+    const int moved = Composed(gpu, [](const GpuLog::Composed& entry) {
+        return entry.mode == FrameGenSynthesisMode::kExtrapolate && entry.fraction > 0.0f;
+    });
+    bool composed_only = false;
+    {
+        std::scoped_lock lock(gpu.syntheses_mutex);
+        composed_only = gpu.syntheses.size() == gpu.composed.size();
+    }
+    Check(moved > frames / 2 && composed_only,
+          "quad: frames between real frames are composed from them (" + std::to_string(moved) + ")");
+    const double refresh = 1e9 / static_cast<double>(kPeriod);
+    Check(static_cast<double>(runtime.Submissions() - first) / elapsed > refresh * 0.85, "quad: every refresh gets a frame");
+    Check(status.distinct_fps > 0.8 * status.output_fps, "quad: refreshes show new frames (" +
+                                                             std::to_string(status.distinct_fps) + " of " +
+                                                             std::to_string(status.output_fps) + " fps)");
+    presenter.Stop();
+    Check(!runtime.ordering_violation && !g_release_violation, "quad: calls stayed ordered");
+}
+
+// The views are set up from the first engaged frame (the backend sets a view
+// up when its release was not captured): its claim reports it uncaptured,
+// the layer composes it, it is shown as it is at its own refresh, and the
+// frames after it are claimed.
+void TestQuadSetupThroughComposedFrame() {
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    gpu.setup_views = true;
+    Runtime runtime;
+    runtime.paced = true;
+    StartQuad(presenter, gpu, FrameGenSynthesisMode::kExtrapolate, FrameGenMultiplier::k2);
+    QuadApp app(presenter, runtime);
+    for (int i = 0; i < 3; ++i) app.Frame();
+    const std::size_t first_frame = app.ended.size();
+    app.Run(600ms);
+    std::size_t setup = app.ended.size();
+    for (std::size_t i = first_frame; i < app.ended.size(); ++i) {
+        if (app.ended[i].route != FrameGenQuadRoute::kNotPresenting) {
+            setup = i;
+            break;
+        }
+    }
+    Check(setup < app.ended.size() && app.ended[setup].route == FrameGenQuadRoute::kUncaptured,
+          "quad set-up: the first engaged frame's views were not captured");
+    Check(app.Routed(FrameGenQuadRoute::kUncaptured) == 1 && app.ended.size() > setup + 5 &&
+              app.Routed(FrameGenQuadRoute::kClaimed, setup + 1) == app.ended.size() - setup - 1,
+          "quad set-up: every frame after it is claimed");
+    const FrameGenStatus status = presenter.Status();
+    Check(status.quad_setups == 1 && gpu.setups == 1, "quad set-up: the views are set up once");
+    const auto log = runtime.Snapshot();
+    const float x = app.ended[setup].x;
+    const auto shown = std::find_if(log.begin(), log.end(), [&](const Submission& submission) {
+        return ShowsComposedOutputs(submission) && submission.time >= app.ended[setup].time - kPeriod / 2;
+    });
+    Check(shown != log.end(), "quad set-up: the frame is shown as the layer composed it");
+    {
+        std::scoped_lock lock(g_xr_mutex);
+        const std::size_t index = static_cast<std::size_t>(shown - log.begin());
+        Check(std::abs(runtime.submitted_left_x[index] - x) < 1e-6f,
+              "quad set-up: at its own refresh, its own composed views");
+    }
+    Check(runtime.not_stereo == 0 && runtime.mismatched_images == 0, "quad set-up: two views, images matching them");
+    presenter.Stop();
+    Check(!runtime.ordering_violation && !g_release_violation, "quad set-up: calls stayed ordered");
+}
+
+// Frames the layer composes while Frame Generation composes the rest are
+// queued in order at their own display time: each is shown from its own
+// refresh, the frames before it are shown before it, and nothing older (the
+// frame passed through before the start) is shown after anything newer.
+void TestQuadFallbackShownAsIs() {
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    runtime.paced = true;
+    StartQuad(presenter, gpu, FrameGenSynthesisMode::kExtrapolate, FrameGenMultiplier::k2);
+    QuadApp app(presenter, runtime);
+    for (int i = 0; i < 3; ++i) app.Frame();
+    app.Run(300ms);
+    const std::size_t first = runtime.Submissions();
+    const std::size_t first_frame = app.ended.size();
+    const auto start = std::chrono::steady_clock::now();
+    for (int i = 0; std::chrono::steady_clock::now() - start < 1200ms; ++i) {
+        // Every fifth frame is not a frame of Frame Generation's own (the
+        // layer composes it, as when the claim finds it busy).
+        app.force = i % 5 == 4 ? std::optional<FrameGenQuadRoute>(FrameGenQuadRoute::kBusy) : std::nullopt;
+        app.Frame(4000us);
+    }
+    app.force.reset();
+    app.Run(100ms); // the last frames the layer composed reach their refreshes
+    const auto log = runtime.Snapshot();
+    std::vector<float> left_x;
+    {
+        std::scoped_lock lock(g_xr_mutex);
+        left_x.assign(runtime.submitted_left_x.begin() + static_cast<std::ptrdiff_t>(first), runtime.submitted_left_x.end());
+    }
+    std::size_t busy = 0, shown_in_time = 0;
+    std::string off;
+    for (std::size_t i = first_frame; i < app.ended.size(); ++i) {
+        if (app.ended[i].route != FrameGenQuadRoute::kBusy) continue;
+        ++busy;
+        // First shown at its own refresh (half a refresh either side), never before.
+        bool shown = false;
+        for (std::size_t s = first; s < log.size() && !shown; ++s) {
+            if (ShowsComposedOutputs(log[s]) && std::abs(left_x[s - first] - app.ended[i].x) < 1e-6f) {
+                shown = true;
+                const XrDuration early = app.ended[i].time - log[s].time;
+                if (std::llabs(early) <= kPeriod / 2) {
+                    ++shown_in_time;
+                } else {
+                    off += " " + std::to_string(static_cast<double>(early) / static_cast<double>(kPeriod)) + " early";
+                }
+            }
+        }
+        if (!shown) off += " never";
+    }
+    Check(busy >= 10 && shown_in_time == busy, "fallback as is: each frame the layer composed is first shown at its own "
+                                               "refresh (" + std::to_string(shown_in_time) + " of " +
+                                                   std::to_string(busy) + ";" + off + ")");
+    std::size_t backwards = 0;
+    for (std::size_t i = 1; i < left_x.size(); ++i) backwards += left_x[i] + 1e-6f < left_x[i - 1] ? 1 : 0;
+    Check(backwards == 0, "fallback as is: nothing older is shown after anything newer (" + std::to_string(backwards) +
+                              " steps back)");
+    const FrameGenStatus status = presenter.Status();
+    Check(status.quad && status.threaded, "fallback as is: Frame Generation still composes the rest");
+    Check(Composed(gpu, [](const GpuLog::Composed& entry) { return entry.fraction > 0.0f; }) > 20,
+          "fallback as is: frames are still generated between the claimed ones");
+    Check(runtime.not_stereo == 0 && runtime.mismatched_images == 0, "fallback as is: two views, images matching them");
+    presenter.Stop();
+    Check(!runtime.ordering_violation && !g_release_violation, "fallback as is: calls stayed ordered");
+}
+
+// A claimed frame never reaches the runtime with its four views: not when
+// the session stops between its claim and its end, not when presenting from
+// the presenter thread ends meanwhile (it is shown composed if the thread is
+// still presenting when it ends, else not at all), and an abandoned claim
+// does not keep later frames from being claimed.
+void TestQuadNeverSubmitsFourViews() {
+    {
+        FrameGenPresenter presenter;
+        GpuLog gpu;
+        Runtime runtime;
+        runtime.paced = true;
+        StartQuad(presenter, gpu, FrameGenSynthesisMode::kExtrapolate, FrameGenMultiplier::k2);
+        QuadApp app(presenter, runtime);
+        for (int i = 0; i < 3; ++i) app.Frame();
+        app.Run(300ms);
+        bool stopped = false;
+        std::size_t before = 0;
+        app.after_claim = [&](FrameGenQuadRoute route) {
+            if (route == FrameGenQuadRoute::kClaimed && !stopped) {
+                stopped = true;
+                presenter.Stop();
+                before = runtime.Submissions();
+            }
+            return true;
+        };
+        const XrFrameState state = app.Wait();
+        app.Begin();
+        app.Release();
+        Check(app.End(state.predictedDisplayTime) == XR_SUCCESS && stopped,
+              "four views (stop): a claimed frame ending after the session stopped is swallowed");
+        Check(runtime.Submissions() == before && runtime.not_stereo == 0,
+              "four views (stop): nothing reaches the runtime");
+        Check(!runtime.ordering_violation && !g_release_violation, "four views (stop): calls stayed ordered");
+    }
+    {
+        FrameGenPresenter presenter;
+        GpuLog gpu;
+        Runtime runtime;
+        runtime.paced = true;
+        StartQuad(presenter, gpu, FrameGenSynthesisMode::kExtrapolate, FrameGenMultiplier::k2);
+        QuadApp app(presenter, runtime);
+        for (int i = 0; i < 3; ++i) app.Frame();
+        app.Run(300ms);
+        // Turned off between the claim and the end: the next wait (another
+        // thread's) drains the presenter thread, which presents the frame at
+        // its own refresh before it stops.
+        std::optional<XrFrameState> next;
+        std::thread waiter;
+        float claimed_x = 0.0f;
+        app.after_claim = [&](FrameGenQuadRoute route) {
+            if (route == FrameGenQuadRoute::kClaimed && !waiter.joinable()) {
+                claimed_x = app.ended.back().x;
+                Check(!presenter.Toggle(), "four views (exit): turned off");
+                waiter = std::thread([&] { next = app.Wait(); });
+                // The frame then ends before its own refresh, already draining.
+                SleepPrecise(std::chrono::steady_clock::now() + 4ms);
+            }
+            return true;
+        };
+        const XrFrameState state = app.Wait();
+        app.Begin();
+        app.Release();
+        Check(app.End(state.predictedDisplayTime) == XR_SUCCESS, "four views (exit): the claimed frame ends");
+        waiter.join();
+        app.after_claim = nullptr;
+        Check(next.has_value() && !presenter.Status().threaded, "four views (exit): the next wait went inline");
+        app.Begin();
+        app.Release();
+        Check(app.End(next->predictedDisplayTime) == XR_SUCCESS, "four views (exit): the inline frame ends");
+        app.Run(200ms);
+        const auto log = runtime.Snapshot();
+        bool shown = false;
+        {
+            std::scoped_lock lock(g_xr_mutex);
+            for (std::size_t i = 0; i < log.size(); ++i) {
+                shown = shown || (ShowsFrameGenOutputs(log[i]) && std::abs(runtime.submitted_left_x[i] - claimed_x) < 1e-6f);
+            }
+        }
+        // Draining, the presenter thread shows every kept frame up to its
+        // own refresh before it stops: the claimed frame is not dropped.
+        Check(shown, "four views (exit): the claimed frame is shown, composed, before the presenter thread stops");
+        Check(app.Routed(FrameGenQuadRoute::kNotPresenting) >= 10 && ShowsComposedOutputs(log.back()),
+              "four views (exit): the layer composes the frames after it");
+        Check(runtime.not_stereo == 0, "four views (exit): the runtime never gets four views");
+        presenter.Stop();
+        Check(!runtime.ordering_violation && !g_release_violation, "four views (exit): calls stayed ordered");
+    }
+    {
+        FrameGenPresenter presenter;
+        GpuLog gpu;
+        Runtime runtime;
+        runtime.paced = true;
+        StartQuad(presenter, gpu, FrameGenSynthesisMode::kExtrapolate, FrameGenMultiplier::k2);
+        QuadApp app(presenter, runtime);
+        for (int i = 0; i < 3; ++i) app.Frame();
+        app.Run(300ms);
+        bool abandoned = false;
+        app.after_claim = [&](FrameGenQuadRoute route) {
+            if (route == FrameGenQuadRoute::kClaimed && !abandoned) {
+                abandoned = true;
+                return false;
+            }
+            return true;
+        };
+        const std::size_t from = app.ended.size();
+        const auto start = std::chrono::steady_clock::now();
+        const int frames = app.Run(500ms);
+        Check(abandoned, "four views (abandon): a claimed frame was abandoned");
+        Check(app.Routed(FrameGenQuadRoute::kClaimed, from) + 3 >= static_cast<std::size_t>(frames) &&
+                  frames / Seconds(std::chrono::steady_clock::now() - start) > 35.0,
+              "four views (abandon): the frames after it are claimed, at the game's pace");
+        Check(runtime.not_stereo == 0, "four views (abandon): the runtime never gets four views");
+        presenter.Stop();
+        Check(!runtime.ordering_violation && !g_release_violation, "four views (abandon): calls stayed ordered");
+    }
+    {
+        // Claimed frames none of which can be written: until the layer
+        // composes again, every refresh shows the frame passed through
+        // before the start, never a claimed frame's own layers.
+        FrameGenPresenter presenter;
+        GpuLog gpu;
+        gpu.compose_fail = true;
+        Runtime runtime;
+        runtime.paced = true;
+        StartQuad(presenter, gpu, FrameGenSynthesisMode::kExtrapolate, FrameGenMultiplier::k2);
+        QuadApp app(presenter, runtime);
+        for (int i = 0; i < 3; ++i) app.Frame();
+        const std::size_t first = runtime.Submissions();
+        app.Run(400ms);
+        Check(app.Routed(FrameGenQuadRoute::kClaimed) >= 3, "four views (never written): frames are claimed");
+        const auto log = runtime.Snapshot();
+        std::size_t shown = 0;
+        for (std::size_t i = first; i < log.size(); ++i) shown += log[i].layers == 1 && log[i].swapchains.size() == 2 ? 1 : 0;
+        Check(shown == log.size() - first && runtime.not_stereo == 0,
+              "four views (never written): every refresh shows two views (" + std::to_string(shown) + " of " +
+                  std::to_string(log.size() - first) + ")");
+        presenter.Stop();
+        Check(!runtime.ordering_violation && !g_release_violation, "four views (never written): calls stayed ordered");
+    }
+}
+
+// A claimed frame's end is its own, ahead of a frame dropped after its
+// claim (the presenter thread stopped, its unclaimed frame dropped by the
+// next wait): the dropped frame's end is swallowed, and presenting resumes
+// without frames left in flight.
+void TestQuadClaimAheadOfDroppedFrames() {
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    runtime.paced = true;
+    StartQuad(presenter, gpu, FrameGenSynthesisMode::kExtrapolate, FrameGenMultiplier::k2);
+    presenter.SetRetryPolicy(50ms, 3);
+    QuadApp app(presenter, runtime);
+    for (int i = 0; i < 3; ++i) app.Frame();
+    app.Run(300ms);
+    // Frame N begun, frame N + 1 waited (pipelined), then N claimed.
+    const XrFrameState n = app.Wait();
+    app.Begin();
+    app.Release();
+    const XrFrameState n1 = app.Wait();
+    std::optional<XrFrameState> n2;
+    app.after_claim = [&](FrameGenQuadRoute route) {
+        Check(route == FrameGenQuadRoute::kClaimed, "dropped: frame N is claimed");
+        // The presenter thread stops (a runtime failure); the wait for N + 2
+        // drops N + 1, which is not claimed.
+        runtime.fail_next_wait = true;
+        const auto deadline = std::chrono::steady_clock::now() + 1s;
+        while (presenter.Status().threaded && std::chrono::steady_clock::now() < deadline) {
+            SleepPrecise(std::chrono::steady_clock::now() + 2ms);
+        }
+        Check(!presenter.Status().threaded, "dropped: the presenter thread stopped");
+        n2 = app.Wait();
+        return true;
+    };
+    Check(app.End(n.predictedDisplayTime) == XR_SUCCESS, "dropped: frame N ends");
+    app.after_claim = nullptr;
+    const std::size_t before = runtime.Submissions();
+    app.Begin();
+    app.Release();
+    Check(app.End(n1.predictedDisplayTime) == XR_SUCCESS, "dropped: frame N + 1 ends");
+    Check(runtime.Submissions() == before, "dropped: the dropped frame reaches nothing");
+    app.Begin();
+    app.Release();
+    Check(app.End(n2->predictedDisplayTime) == XR_SUCCESS, "dropped: frame N + 2 ends");
+    Check(runtime.Submissions() == before + 1 && ShowsComposedOutputs(runtime.Snapshot().back()),
+          "dropped: frame N + 2 is shown as the layer composed it");
+    // Retried after the pause: composing resumes with nothing in flight.
+    const std::size_t from = app.ended.size();
+    std::chrono::steady_clock::duration longest{};
+    auto last = std::chrono::steady_clock::now();
+    const auto start = last;
+    while (std::chrono::steady_clock::now() - start < 1500ms) {
+        app.Frame(4000us);
+        const auto now = std::chrono::steady_clock::now();
+        longest = std::max(longest, now - last);
+        last = now;
+    }
+    Check(presenter.Status().quad && app.Routed(FrameGenQuadRoute::kClaimed, from) > 20,
+          "dropped: composing resumes after the pause");
+    Check(longest < 300ms, "dropped: no frame is held for one left in flight (" +
+                               std::to_string(Seconds(longest)) + " s)");
+    Check(runtime.not_stereo == 0, "dropped: the runtime never gets four views");
+    presenter.Stop();
+    Check(!runtime.ordering_violation && !g_release_violation, "dropped: calls stayed ordered");
+}
+
+// Every frame written from a claimed frame, its own refresh's or a generated
+// one, is composed with that frame's composition (its inset) and shows its
+// eye views, even while newer frames with another inset are kept.
+void TestQuadKeepsRealFramesInset() {
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    runtime.paced = true;
+    StartQuad(presenter, gpu, FrameGenSynthesisMode::kExtrapolate, FrameGenMultiplier::k2);
+    QuadApp app(presenter, runtime);
+    app.inset = [](int frame) { return 0.2f + 0.005f * static_cast<float>(frame % 40); };
+    for (int i = 0; i < 3; ++i) app.Frame();
+    app.Run(1000ms);
+    std::size_t matched = 0, total = 0;
+    {
+        std::scoped_lock lock(gpu.syntheses_mutex);
+        for (const GpuLog::Composed& entry : gpu.composed) {
+            const auto analysis = gpu.analysis_compositions.find(entry.frame);
+            ++total;
+            matched += analysis != gpu.analysis_compositions.end() &&
+                               analysis->second.eyes[0].focus_rect == entry.composition.eyes[0].focus_rect &&
+                               analysis->second.eyes[1].focus_rect == entry.composition.eyes[1].focus_rect
+                           ? 1
+                           : 0;
+        }
+    }
+    Check(total > 60 && matched == total, "inset: every frame is composed with its real frame's inset (" +
+                                              std::to_string(matched) + " of " + std::to_string(total) + ")");
+    Check(runtime.mismatched_images == 0, "inset: every frame shows its real frame's eye views (" +
+                                              std::to_string(runtime.mismatched_images.load()) + " mismatched)");
+    Check(runtime.not_stereo == 0, "inset: the runtime never gets four views");
+    presenter.Stop();
+    Check(!runtime.ordering_violation && !g_release_violation, "inset: calls stayed ordered");
+}
+
+// The layer declines its frames (its diagnostic overlay on): the presenter
+// thread restarts on the layer's composed views (canvas), then, offered
+// again, composing quad views itself; the output images serve both.
+void TestQuadDeclinedSwitchesToCanvas() {
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    runtime.paced = true;
+    StartQuad(presenter, gpu, FrameGenSynthesisMode::kExtrapolate, FrameGenMultiplier::k2);
+    QuadApp app(presenter, runtime);
+    for (int i = 0; i < 3; ++i) app.Frame();
+    app.Run(400ms);
+    Check(presenter.Status().quad, "declined: composing quad views first");
+    app.offer = false;
+    app.Run(2000ms, 4000us, [&] {
+        const FrameGenStatus status = presenter.Status();
+        return status.threaded && !status.quad;
+    });
+    Check(presenter.Status().threaded && !presenter.Status().quad, "declined: restarts on the composed views");
+    const std::size_t first = runtime.Submissions();
+    app.Run(500ms);
+    Check(gpu.last.size() == 2 && gpu.last[0].source.swapchain == kComposedOutputs[0] &&
+              presenter.CapturesFrom(kComposedOutputs[0]) && !presenter.CapturesFrom(kQuadViews[0]),
+          "declined: frames are generated from the composed views");
+    const auto log = runtime.Snapshot();
+    std::size_t own = 0;
+    for (std::size_t i = first; i < log.size(); ++i) own += ShowsFrameGenOutputs(log[i]) ? 1 : 0;
+    Check(own * 10 >= (log.size() - first) * 9, "declined: refreshes show Frame Generation's frames");
+    app.offer = true;
+    app.Run(2000ms, 4000us, [&] { return presenter.Status().quad; });
+    const std::size_t from = app.ended.size();
+    app.Run(300ms);
+    Check(presenter.Status().quad && app.Routed(FrameGenQuadRoute::kClaimed, from) > 10,
+          "declined: offered again, it composes quad views again");
+    {
+        std::scoped_lock lock(g_xr_mutex);
+        Check(g_creates == 2, "declined: switching reallocates no output (" + std::to_string(g_creates) + " made)");
+    }
+    Check(runtime.not_stereo == 0 && runtime.mismatched_images == 0, "declined: two views, images matching them");
+    presenter.Stop();
+    Check(!runtime.ordering_violation && !g_release_violation, "declined: calls stayed ordered");
+}
+
+// Composed frames that keep failing to be written hand the quad views back
+// to the layer for a while (doubling), without pausing Frame Generation or
+// using its retries: it stands by meanwhile (the presenter thread stops, and
+// the layer's frames go straight to the runtime, each with its own views),
+// and composing resumes afterwards.
+void TestQuadWriteFailuresDecline() {
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    runtime.paced = true;
+    StartQuad(presenter, gpu, FrameGenSynthesisMode::kExtrapolate, FrameGenMultiplier::k2);
+    presenter.SetQuadDecline(500ms, 2000ms);
+    QuadApp app(presenter, runtime);
+    for (int i = 0; i < 3; ++i) app.Frame();
+    app.Run(400ms);
+    const FrameGenStatus before = presenter.Status();
+    Check(before.quad && before.quad_write_declines == 0, "write failures: composing first");
+    gpu.compose_fail = true;
+    app.Run(1000ms, 4000us, [&] { return presenter.Status().quad_write_declines > 0; });
+    const auto declined_at = std::chrono::steady_clock::now();
+    FrameGenStatus status = presenter.Status();
+    Check(status.quad_write_declines == 1 && status.quad_declining && gpu.compose_failures >= 10 &&
+              gpu.compose_failures <= 20,
+          "write failures: ten failed writes in a row hand the views back (" +
+              std::to_string(gpu.compose_failures.load()) + " failed)");
+    Check(status.state == FrameGenState::kActive && status.failures == before.failures && !status.retry_pending,
+          "write failures: Frame Generation is not paused, nor counts failures toward a pause");
+    app.Run(100ms); // the frames in flight drain
+    const std::size_t first = runtime.Submissions();
+    const std::size_t from = app.ended.size();
+    app.Run(300ms);
+    status = presenter.Status();
+    Check(app.Routed(FrameGenQuadRoute::kNotPresenting, from) == app.ended.size() - from,
+          "write failures: while declined, the layer composes every frame");
+    Check(!status.threaded && status.state == FrameGenState::kActive && status.full_rate && status.quad_declining &&
+              presenter.OsdText().find("Standing by") != std::string::npos,
+          "write failures: while declined, Frame Generation stands by (" + presenter.OsdText() + ")");
+    const auto log = runtime.Snapshot();
+    std::size_t as_is = 0;
+    for (std::size_t i = first; i < log.size(); ++i) as_is += ShowsComposedOutputs(log[i]) ? 1 : 0;
+    Check(as_is == log.size() - first && log.size() - first + 3 >= app.ended.size() - from,
+          "write failures: each frame the layer composes goes straight to the runtime (" + std::to_string(as_is) +
+              " of " + std::to_string(log.size() - first) + " refreshes, " + std::to_string(app.ended.size() - from) +
+              " frames)");
+    Check(runtime.mismatched_images == 0, "write failures: every image shown matches its views");
+    gpu.compose_fail = false;
+    app.Run(1000ms, 4000us, [&] { return !presenter.Status().quad_declining; });
+    const double first_decline = Seconds(std::chrono::steady_clock::now() - declined_at);
+    const std::size_t resumed = app.ended.size();
+    app.Run(300ms);
+    status = presenter.Status();
+    Check(first_decline >= 0.45 && app.Routed(FrameGenQuadRoute::kClaimed, resumed) > 10 && status.quad_write_declines == 1,
+          "write failures: composing resumes after the decline (" + std::to_string(first_decline) + " s)");
+    // Failing again: the next decline lasts twice as long.
+    gpu.compose_fail = true;
+    app.Run(1000ms, 4000us, [&] { return presenter.Status().quad_write_declines > 1; });
+    const auto again = std::chrono::steady_clock::now();
+    gpu.compose_fail = false;
+    app.Run(2000ms, 4000us, [&] { return !presenter.Status().quad_declining; });
+    const double second_decline = Seconds(std::chrono::steady_clock::now() - again);
+    Check(presenter.Status().quad_write_declines == 2 && second_decline >= 0.9,
+          "write failures: the next decline doubles (" + std::to_string(second_decline) + " s)");
+    Check(runtime.not_stereo == 0, "write failures: the runtime never gets four views");
+    presenter.Stop();
+    Check(!runtime.ordering_violation && !g_release_violation, "write failures: calls stayed ordered");
+}
+
+// Dynamic standing by on quad views: the four views stay the capture
+// targets (the layer's composed views never take them over), nothing is
+// captured, and the layer composes every frame.
+void TestQuadStandbyRecordsViewTargets() {
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    runtime.paced = true;
+    StartQuad(presenter, gpu, FrameGenSynthesisMode::kExtrapolate, FrameGenMultiplier::kDynamic);
+    QuadApp app(presenter, runtime);
+    const int frames = app.Run(800ms);
+    const FrameGenStatus status = presenter.Status();
+    Check(status.standby && !status.threaded && !status.quad, "standby: Dynamic stands by");
+    Check(std::all_of(kQuadViews.begin(), kQuadViews.end(), [&](XrSwapchain view) { return presenter.CapturesFrom(view); }) &&
+              !presenter.CapturesFrom(kComposedOutputs[0]) && !presenter.CapturesFrom(kComposedOutputs[1]),
+          "standby: the four views stay the capture targets");
+    Check(gpu.captures == 0 && gpu.executes == 0, "standby: nothing is captured or analyzed");
+    Check(app.Routed(FrameGenQuadRoute::kNotPresenting) == static_cast<std::size_t>(frames) &&
+              status.quad_declined == static_cast<std::uint64_t>(frames),
+          "standby: the layer composes every frame");
+    Check(runtime.not_stereo == 0, "standby: the runtime never gets four views");
+    presenter.Stop();
+    Check(!runtime.ordering_violation && !g_release_violation, "standby: calls stayed ordered");
+}
+
+// The claim tests what the backend's analysis does: each view's latest
+// release captured. A view whose latest release was not captured (the same
+// image as its last capture: only the release count tells) is not claimed;
+// the layer composes that frame, and the next is claimed again.
+void TestQuadClaimNeedsLatestCapture() {
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    runtime.paced = true;
+    StartQuad(presenter, gpu, FrameGenSynthesisMode::kExtrapolate, FrameGenMultiplier::k2);
+    QuadApp app(presenter, runtime);
+    app.images = 1; // every release is image 0
+    for (int i = 0; i < 3; ++i) app.Frame();
+    app.Run(300ms);
+    Check(app.ended.back().route == FrameGenQuadRoute::kClaimed, "latest capture: frames are claimed");
+    const std::size_t skipped = app.ended.size();
+    app.uncaptured_release[2] = true;
+    app.Frame(4000us);
+    app.Run(200ms);
+    Check(app.ended[skipped].route == FrameGenQuadRoute::kUncaptured,
+          "latest capture: a view whose latest release was not captured is not claimed");
+    Check(app.ended[skipped - 1].route == FrameGenQuadRoute::kClaimed &&
+              app.ended[skipped + 1].route == FrameGenQuadRoute::kClaimed &&
+              app.Routed(FrameGenQuadRoute::kClaimed, skipped + 1) == app.ended.size() - skipped - 1,
+          "latest capture: the frames either side are claimed");
+    Check(presenter.Status().quad_setups == 1 && runtime.not_stereo == 0, "latest capture: set up from it once");
+    presenter.Stop();
+    Check(!runtime.ordering_violation && !g_release_violation, "latest capture: calls stayed ordered");
+}
+
+
+// The canvas changes size (a live focus scale change): each eye's output
+// image is made anew once, frames kept at the old size are not written
+// again, and the old images stay (shown again meanwhile) until a frame is
+// written into the new ones: no refresh shows nothing or a destroyed image.
+void TestQuadOutputsResized() {
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    runtime.paced = true;
+    StartQuad(presenter, gpu, FrameGenSynthesisMode::kExtrapolate, FrameGenMultiplier::k2);
+    QuadApp app(presenter, runtime);
+    for (int i = 0; i < 3; ++i) app.Frame();
+    app.Run(400ms);
+    const std::size_t first = runtime.Submissions();
+    const std::vector<XrSwapchain> old_outputs = runtime.Snapshot().back().swapchains;
+    Check(ShowsFrameGenOutputs(runtime.Snapshot().back()), "resized: composing first");
+    {
+        // The new images are not handed back at once: the last frame
+        // written is shown again meanwhile.
+        std::scoped_lock lock(g_xr_mutex);
+        g_wait_timeouts_on_create = 2;
+    }
+    app.canvas = {1400, 1300};
+    app.Run(600ms);
+    {
+        std::scoped_lock lock(g_xr_mutex);
+        Check(g_creates == 4 && g_create_sizes[2].first == 1400 && g_create_sizes[3].second == 1300,
+              "resized: each eye's output is made anew once, at the new size (" + std::to_string(g_creates) + " made)");
+        Check(std::count(g_destroyed.begin(), g_destroyed.end(), old_outputs[0]) == 1 &&
+                  std::count(g_destroyed.begin(), g_destroyed.end(), old_outputs[1]) == 1,
+              "resized: the old outputs are destroyed");
+    }
+    const auto log = runtime.Snapshot();
+    std::size_t shown = 0;
+    for (std::size_t i = first; i < log.size(); ++i) shown += log[i].layers == 1 && log[i].swapchains.size() == 2 ? 1 : 0;
+    Check(shown == log.size() - first, "resized: every refresh shows two views (" + std::to_string(shown) + " of " +
+                                           std::to_string(log.size() - first) + ")");
+    Check(ShowsFrameGenOutputs(log.back()) && log.back().swapchains != old_outputs,
+          "resized: refreshes show the new outputs");
+    Check(!runtime.used_destroyed && runtime.mismatched_images == 0 && runtime.not_stereo == 0,
+          "resized: never a destroyed image, every image matching its views");
+    std::size_t old_after_new = 0;
+    {
+        std::scoped_lock lock(gpu.syntheses_mutex);
+        bool resized = false;
+        for (const GpuLog::Composed& entry : gpu.composed) {
+            resized = resized || entry.composition.output.width == 1400;
+            old_after_new += resized && entry.composition.output.width != 1400 ? 1 : 0;
+        }
+    }
+    Check(old_after_new == 0, "resized: frames of the old size are not written again (" +
+                                  std::to_string(old_after_new) + ")");
+    presenter.Stop();
+    Check(!runtime.ordering_violation && !g_release_violation, "resized: calls stayed ordered");
+}
+
+// Frames the layer composes one after another (the claim finds every frame
+// busy for a while) at 3x, interpolating: each is released into the layer's
+// compositor outputs as it ends, a lead of refreshes before its own, so the
+// refreshes after a frame's own, which still choose it (the nearer of two
+// frames shown as they are), would show the next one's image there with its
+// views. Such a refresh shows the next frame instead, early, with its own
+// views: no image is ever shown with another frame's views, and nothing
+// steps back.
+void TestQuadAsIsShowsNewestImage() {
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    runtime.paced = true;
+    StartQuad(presenter, gpu, FrameGenSynthesisMode::kInterpolate, FrameGenMultiplier::k3);
+    QuadApp app(presenter, runtime);
+    for (int i = 0; i < 3; ++i) app.Frame();
+    app.Run(400ms);
+    Check(presenter.Status().quad, "as is newest: composing quad views first");
+    const std::size_t first = runtime.Submissions();
+    app.force = FrameGenQuadRoute::kBusy;
+    app.Run(700ms);
+    app.force.reset();
+    app.Run(200ms);
+    const FrameGenStatus status = presenter.Status();
+    const auto log = runtime.Snapshot();
+    std::size_t as_is = 0;
+    for (std::size_t i = first; i < log.size(); ++i) as_is += ShowsComposedOutputs(log[i]) ? 1 : 0;
+    Check(as_is > 30, "as is newest: the frames the layer composed are shown (" + std::to_string(as_is) + ")");
+    Check(runtime.mismatched_images == 0, "as is newest: no frame the layer composed is shown with another's views (" +
+                                              std::to_string(runtime.mismatched_images.load()) + " mismatched)");
+    Check(StepsBack(runtime, first) == 0, "as is newest: nothing older is shown after anything newer");
+    Check(runtime.discarded <= static_cast<int>(status.stale_skipped) && runtime.not_stereo == 0,
+          "as is newest: refreshes left to the runtime are the ones counted, two views each");
+    presenter.Stop();
+    Check(!runtime.ordering_violation && !g_release_violation, "as is newest: calls stayed ordered");
+}
+
+// A refresh nothing can be written for shows again what was submitted last:
+// after a claimed frame written, then a frame the layer composed shown as it
+// is, a claimed frame whose write fails shows the composed frame again (its
+// images still the newest), never the older written one.
+void TestQuadFailedWriteRepeatsLastShown() {
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    runtime.paced = true;
+    StartQuad(presenter, gpu, FrameGenSynthesisMode::kExtrapolate, FrameGenMultiplier::k2);
+    QuadApp app(presenter, runtime);
+    for (int i = 0; i < 3; ++i) app.Frame();
+    app.Run(400ms);
+    const std::size_t first = runtime.Submissions();
+    const auto start = std::chrono::steady_clock::now();
+    for (int i = 0; std::chrono::steady_clock::now() - start < 1200ms; ++i) {
+        // Every fifth frame the layer composes; the frame after it, and its
+        // refreshes, cannot be written (two refreshes, never ten in a row).
+        app.force = i % 5 == 3 ? std::optional<FrameGenQuadRoute>(FrameGenQuadRoute::kBusy) : std::nullopt;
+        gpu.compose_fail = i % 5 == 4 || i % 5 == 0;
+        app.Frame(4000us);
+    }
+    gpu.compose_fail = false;
+    app.force.reset();
+    app.Run(100ms);
+    const FrameGenStatus status = presenter.Status();
+    Check(gpu.compose_failures > 10, "failed write: writes failed (" + std::to_string(gpu.compose_failures.load()) + ")");
+    Check(status.quad_write_declines == 0 && status.quad, "failed write: composing goes on");
+    Check(StepsBack(runtime, first) == 0, "failed write: a failed write never shows an older frame again");
+    Check(runtime.mismatched_images == 0 && runtime.not_stereo == 0, "failed write: images matching their views");
+    presenter.Stop();
+    Check(!runtime.ordering_violation && !g_release_violation, "failed write: calls stayed ordered");
+}
+
+// Output images replaced (a canvas size change) are kept while the last
+// frame written shows them, but no longer once the presenter thread stops:
+// writing into the new ones failing, Frame Generation stands by, and the
+// old images (headset resolution) are destroyed, never submitted again.
+void TestQuadRetiredOutputsFreed() {
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    runtime.paced = true;
+    StartQuad(presenter, gpu, FrameGenSynthesisMode::kExtrapolate, FrameGenMultiplier::k2);
+    presenter.SetQuadDecline(3000ms, 3000ms);
+    QuadApp app(presenter, runtime);
+    for (int i = 0; i < 3; ++i) app.Frame();
+    app.Run(400ms);
+    const std::vector<XrSwapchain> old_outputs = runtime.Snapshot().back().swapchains;
+    Check(ShowsFrameGenOutputs(runtime.Snapshot().back()), "retired: composing first");
+    {
+        // The new images are never handed back.
+        std::scoped_lock lock(g_xr_mutex);
+        g_wait_timeouts_on_create = 1000000;
+    }
+    app.canvas = {1400, 1300};
+    app.Run(2000ms, 4000us, [&] {
+        const FrameGenStatus status = presenter.Status();
+        return status.quad_declining && !status.threaded;
+    });
+    const FrameGenStatus status = presenter.Status();
+    std::size_t destroyed = 0;
+    {
+        std::scoped_lock lock(g_xr_mutex);
+        g_wait_timeouts = 0;
+        for (const XrSwapchain output : old_outputs) {
+            destroyed += static_cast<std::size_t>(std::count(g_destroyed.begin(), g_destroyed.end(), output));
+        }
+    }
+    Check(status.quad_declining && !status.threaded, "retired: writes failing, Frame Generation stands by");
+    Check(destroyed == 2, "retired: standing by, the replaced output images are destroyed (" + std::to_string(destroyed) +
+                              " of 2)");
+    app.Run(200ms);
+    Check(!runtime.used_destroyed && runtime.not_stereo == 0, "retired: a destroyed image is never submitted");
+    presenter.Stop();
+    Check(!runtime.ordering_violation && !g_release_violation, "retired: calls stayed ordered");
+}
+
+// The headset taken off (the runtime's waits say shouldRender false) while
+// quad views are composed under Dynamic: nothing is written while the
+// runtime does not render (writes that would fail say nothing about
+// writing), its refreshes say nothing about what generation adds, and
+// claims resume at once afterwards. Once with a game that renders anyway,
+// once with one ending its frames without layers.
+void TestQuadHeadsetOffBreak() {
+    for (const bool layers : {true, false}) {
+        const std::string name = layers ? "headset off (rendering)" : "headset off (no layers)";
+        FrameGenPresenter presenter;
+        GpuLog gpu;
+        Runtime runtime;
+        runtime.paced = true;
+        StartQuad(presenter, gpu, FrameGenSynthesisMode::kExtrapolate, FrameGenMultiplier::kDynamic);
+        presenter.SetDynamicPolicy(GuardDynamic());
+        QuadApp app(presenter, runtime);
+        const auto works = QuadTicks(runtime, {1, 2, 2});
+        auto composing = [&] {
+            const FrameGenStatus status = presenter.Status();
+            return status.threaded && status.quad && !status.standby;
+        };
+        app.RunWorks(3000ms, works, composing);
+        Check(composing(), name + ": composing under Dynamic");
+        app.RunWorks(400ms, works);
+        const int composes = gpu.compose_calls;
+        runtime.should_render = false;
+        gpu.compose_fail = true; // writing would fail now
+        app.no_layers = !layers;
+        app.RunWorks(1200ms, works);
+        const int during = gpu.compose_calls - composes;
+        runtime.should_render = true;
+        gpu.compose_fail = false;
+        app.no_layers = false;
+        const std::size_t resumed = app.ended.size();
+        app.RunWorks(400ms, works);
+        const FrameGenStatus status = presenter.Status();
+        Check(during <= 2, name + ": nothing is written while the runtime does not render (" + std::to_string(during) +
+                               " writes)");
+        Check(status.quad_write_declines == 0, name + ": the break hands nothing back to the layer");
+        Check(status.dynamic_stand_downs == 0 && composing(),
+              name + ": the break stands nothing down (" + status.dynamic_reason + ")");
+        Check(app.ended.size() > resumed + 5 && app.Routed(FrameGenQuadRoute::kClaimed, resumed + 2) ==
+                                                    app.ended.size() - resumed - 2,
+              name + ": claims resume within three frames");
+        Check(runtime.not_stereo == 0 && runtime.mismatched_images == 0, name + ": two views, images matching them");
         presenter.Stop();
         Check(!runtime.ordering_violation && !g_release_violation, name + ": calls stayed ordered");
     }
 }
 
+// Quad views under Dynamic through its cycle: engaged, probed (the game,
+// quantized to 0.8x standing by, runs about the refresh rate engaged),
+// engaged again, then stood down by a fault (frames reaching the GPU late).
+// Each engagement claims its frames from the first (nothing set up again,
+// hardly a frame busy), and across every switch the runtime gets two views,
+// each image with its own views, never an older frame after a newer one.
+void TestQuadDynamicCycle() {
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    runtime.paced = true;
+    StartQuad(presenter, gpu, FrameGenSynthesisMode::kExtrapolate, FrameGenMultiplier::kDynamic);
+    FrameGenDynamicPolicy policy = GuardDynamic();
+    policy.probe_after = 500ms;
+    policy.probe_max = 4s;
+    presenter.SetDynamicPolicy(policy);
+    QuadApp app(presenter, runtime);
+    const auto quantized = JitterWork(runtime.period);
+    app.RunWorks(4000ms, quantized, [&] { return presenter.Status().dynamic_probes >= 1; });
+    Check(presenter.Status().dynamic_probes == 1 && presenter.Status().dynamic_engagements == 1,
+          "quad dynamic: engaged, then probed (" + std::to_string(presenter.Status().dynamic_engagements) +
+              " engagements, " + std::to_string(presenter.Status().dynamic_stand_downs) + " stand-downs: " +
+              presenter.Status().dynamic_reason + "; " + std::to_string(presenter.Status().app_fps) + " fps, " +
+              std::to_string(presenter.Status().distinct_fps) + " distinct)");
+    app.RunWorks(3000ms, quantized, [&] {
+        const FrameGenStatus status = presenter.Status();
+        return status.dynamic_engagements >= 2 && status.threaded && status.quad;
+    });
+    Check(presenter.Status().dynamic_engagements == 2 && presenter.Status().quad, "quad dynamic: engaged again");
+    app.RunWorks(300ms, quantized);
+    gpu.capture_lag = 150ms;
+    app.RunWorks(4000ms, quantized, [&] { return presenter.Status().dynamic_stand_downs >= 1; });
+    gpu.capture_lag = 0us;
+    app.RunWorks(300ms, quantized);
+    const FrameGenStatus status = presenter.Status();
+    Check(status.dynamic_stand_downs == 1 && status.standby &&
+              status.dynamic_reason.find("reached the GPU too late") != std::string::npos,
+          "quad dynamic: a fault stands it down (" + status.dynamic_reason + ")");
+    // Each engagement: the frames from its first claimed one to its last
+    // one not composed by the layer for want of presenting.
+    std::size_t engagements = 0;
+    std::string off;
+    for (std::size_t i = 0; i < app.ended.size();) {
+        if (app.ended[i].route == FrameGenQuadRoute::kNotPresenting) {
+            ++i;
+            continue;
+        }
+        std::size_t end = i;
+        std::size_t claimed = 0, uncaptured = 0, busy = 0;
+        for (; end < app.ended.size() && app.ended[end].route != FrameGenQuadRoute::kNotPresenting; ++end) {
+            claimed += app.ended[end].route == FrameGenQuadRoute::kClaimed ? 1 : 0;
+            uncaptured += app.ended[end].route == FrameGenQuadRoute::kUncaptured ? 1 : 0;
+            busy += app.ended[end].route == FrameGenQuadRoute::kBusy ? 1 : 0;
+        }
+        const std::size_t frames = end - i;
+        ++engagements;
+        if (uncaptured > 1 || busy * 50 > frames + 50 || claimed * 100 < frames * 95) {
+            off += " engagement " + std::to_string(engagements) + ": " + std::to_string(claimed) + " claimed, " +
+                   std::to_string(uncaptured) + " set up, " + std::to_string(busy) + " busy of " +
+                   std::to_string(frames) + ";";
+        }
+        i = end;
+    }
+    Check(engagements == 2 && off.empty(), "quad dynamic: each engagement claims its frames (" +
+                                               std::to_string(engagements) + " engagements;" + off + ")");
+    Check(runtime.not_stereo == 0 && runtime.mismatched_images == 0, "quad dynamic: two views, images matching them");
+    Check(StepsBack(runtime, 0) == 0, "quad dynamic: nothing older is shown after anything newer");
+    Check(runtime.discarded <= static_cast<int>(status.stale_skipped), "quad dynamic: only counted refreshes left out");
+    presenter.Stop();
+    Check(!runtime.ordering_violation && !g_release_violation, "quad dynamic: calls stayed ordered");
+}
+
+// The backend keeps a canvas's real frame's images in a history ring of
+// three: once two newer frames were captured, the frame can no longer be
+// moved (its previous images are gone), once three, not even shown. With a
+// lead of four refreshes or more at 2x (frames reaching the GPU late), that
+// is so by the refresh after a frame's own: such refreshes show its exact
+// copy instead of asking the backend for what it no longer has (writes that
+// would fail, and, composing quad views, hand them back to the layer).
+// Quad views keep five (FrameGenHistoryRing): the same lead moves them.
+void TestJitRingExhaustion() {
+    enum class Case { kCanvas, kQuad, kQuadRingOfThree };
+    for (const Case test : {Case::kCanvas, Case::kQuad, Case::kQuadRingOfThree}) {
+        const bool quad = test != Case::kCanvas;
+        const std::string name = test == Case::kCanvas ? "ring"
+                                 : test == Case::kQuad ? "ring (quad views)"
+                                                       : "ring (quad views, a ring of three)";
+        FrameGenPresenter presenter;
+        GpuLog gpu;
+        gpu.capture_lag = 40ms;
+        if (test == Case::kQuadRingOfThree) gpu.quad_ring = 3;
+        Runtime runtime;
+        runtime.paced = true;
+        FrameGenStatus status;
+        if (quad) {
+            StartQuad(presenter, gpu, FrameGenSynthesisMode::kExtrapolate, FrameGenMultiplier::k2);
+            QuadApp app(presenter, runtime);
+            for (int i = 0; i < 3; ++i) app.Frame();
+            app.Run(1200ms);
+            status = presenter.Status();
+        } else {
+            std::unique_ptr<App> owned;
+            App* app = nullptr;
+            StartJit(presenter, gpu, FrameGenSynthesisMode::kExtrapolate, FrameGenMultiplier::k2, app, runtime, owned);
+            for (int i = 0; i < 3; ++i) app->Frame();
+            RunWork(*app, 1200ms, kLightWork);
+            status = presenter.Status();
+        }
+        if (std::getenv("FG_TEST_STATS")) {
+            std::cerr << name << ": lead " << status.lead_slots << ", " << status.ring_exhausted << " ring exhausted, "
+                      << Composed(gpu, [](const GpuLog::Composed& entry) {
+                             return entry.mode == FrameGenSynthesisMode::kExtrapolate && entry.fraction > 0.0f;
+                         })
+                      << " composed moved\n";
+        }
+        Check(status.lead_slots >= 4, name + ": the lead grew (" + std::to_string(status.lead_slots) + ")");
+        Check(gpu.ring_refusals == 0 && gpu.synthesis_failures == 0,
+              name + ": nothing is asked of the backend it no longer has (" + std::to_string(gpu.ring_refusals.load()) +
+                  " refused)");
+        Check(status.quad_write_declines == 0, name + ": nothing is handed back to the layer");
+        if (test == Case::kQuad) {
+            const int moved = Composed(gpu, [](const GpuLog::Composed& entry) {
+                return entry.mode == FrameGenSynthesisMode::kExtrapolate && entry.fraction > 0.0f;
+            });
+            Check(status.ring_exhausted <= 2 && moved > 30,
+                  name + ": refreshes still move their frame (" + std::to_string(moved) + " moved, " +
+                      std::to_string(status.ring_exhausted) + " found its images replaced)");
+        } else {
+            Check(status.ring_exhausted > 10, name + ": refreshes found their frame's images replaced (" +
+                                                  std::to_string(status.ring_exhausted) + ")");
+        }
+        Check(runtime.mismatched_images == 0 && runtime.not_stereo == 0, name + ": images matching their views");
+        presenter.Stop();
+        Check(!runtime.ordering_violation && !g_release_violation, name + ": calls stayed ordered");
+    }
+}
+
+// Quad views under Dynamic at the game's own rate (a real frame every one or
+// two refreshes), its frames reaching the GPU late enough for a lead of four
+// refreshes: by the refresh after a real frame's own, two newer ones were
+// captured, and a ring of three (a canvas's) no longer holds its previous
+// images. Quad views keep five (FrameGenHistoryRing): those refreshes still
+// move it. With a ring of three they show its exact copy.
+void TestQuadDynamicDeepRing() {
+    for (const bool shallow : {false, true}) {
+        const std::string name = shallow ? "quad own rate (a ring of three)" : "quad own rate";
+        FrameGenPresenter presenter;
+        GpuLog gpu;
+        if (shallow) gpu.quad_ring = 3;
+        Runtime runtime;
+        runtime.paced = true;
+        StartQuad(presenter, gpu, FrameGenSynthesisMode::kExtrapolate, FrameGenMultiplier::kDynamic);
+        presenter.SetDynamicPolicy(GuardDynamic());
+        QuadApp app(presenter, runtime);
+        const auto works = QuadTicks(runtime, {1, 2, 2});
+        auto composing = [&] {
+            const FrameGenStatus status = presenter.Status();
+            return status.threaded && status.quad && !status.standby;
+        };
+        app.RunWorks(3000ms, works, composing);
+        Check(composing(), name + ": composing under Dynamic");
+        // Captured 14 ms after their release: a lead of four refreshes.
+        gpu.capture_lag = 14ms;
+        app.RunWorks(1000ms, works);
+        const FrameGenStatus before = presenter.Status();
+        auto moved = [&] {
+            return Composed(gpu, [](const GpuLog::Composed& entry) {
+                return entry.mode == FrameGenSynthesisMode::kExtrapolate && entry.fraction > 0.0f;
+            });
+        };
+        const int moved_before = moved();
+        const std::size_t first = runtime.Submissions();
+        app.RunWorks(1500ms, works);
+        const FrameGenStatus status = presenter.Status();
+        const int refreshes = static_cast<int>(runtime.Submissions() - first);
+        const int moved_during = moved() - moved_before;
+        const int exhausted = static_cast<int>(status.ring_exhausted - before.ring_exhausted);
+        const std::string counts = std::to_string(moved_during) + " moved, " + std::to_string(exhausted) +
+                                   " found its images replaced of " + std::to_string(refreshes) + " refreshes; lead " +
+                                   std::to_string(before.lead_slots) + " then " + std::to_string(status.lead_slots);
+        if (std::getenv("FG_TEST_STATS")) std::cerr << name << ": " << counts << '\n';
+        Check(before.lead_slots >= 4 && status.lead_slots >= 4 && composing(),
+              name + ": composing at a lead of four refreshes or more (" + counts + ")");
+        Check(gpu.ring_refusals == 0, name + ": nothing is asked of the backend it no longer has");
+        if (shallow) {
+            Check(exhausted > refreshes / 10, name + ": refreshes find their frame's images replaced (" + counts + ")");
+        } else {
+            Check(exhausted <= refreshes / 50 && moved_during > refreshes / 4,
+                  name + ": refreshes between real frames move them (" + counts + ")");
+        }
+        Check(runtime.not_stereo == 0 && runtime.mismatched_images == 0, name + ": two views, images matching them");
+        presenter.Stop();
+        Check(!runtime.ordering_violation && !g_release_violation, name + ": calls stayed ordered");
+    }
+}
+
+// Composing into new output images takes the backend a while the first time
+// (it allocates under the GPU lock, which the game's releases also need):
+// the game's frame is held once a session, not at every engagement (output
+// images are kept while standing by).
+void TestQuadComposeStallOnce() {
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    gpu.compose_first_delay = 60ms;
+    Runtime runtime;
+    runtime.paced = true;
+    StartQuad(presenter, gpu, FrameGenSynthesisMode::kExtrapolate, FrameGenMultiplier::kDynamic);
+    presenter.SetDynamicPolicy(GuardDynamic());
+    QuadApp app(presenter, runtime);
+    const auto works = QuadTicks(runtime, {1, 2, 2});
+    auto composing = [&] {
+        const FrameGenStatus status = presenter.Status();
+        return status.threaded && status.quad && !status.standby;
+    };
+    app.RunWorks(3000ms, works, composing);
+    app.RunWorks(500ms, works);
+    Check(!presenter.Toggle(), "compose stall: turned off");
+    app.RunWorks(300ms, works);
+    Check(presenter.Toggle(), "compose stall: turned on");
+    app.RunWorks(3000ms, works, composing);
+    Check(composing() && presenter.Status().dynamic_engagements == 2, "compose stall: engaged twice");
+    app.RunWorks(500ms, works);
+    const std::size_t held = static_cast<std::size_t>(
+        std::count_if(app.release_end_ms.begin(), app.release_end_ms.end(), [](double ms) { return ms > 45.0; }));
+    Check(held <= 1, "compose stall: the game's frame is held at most once (" + std::to_string(held) + " times)");
+    presenter.Stop();
+    Check(!runtime.ordering_violation && !g_release_violation, "compose stall: calls stayed ordered");
+}
+
 } // namespace
 
-// FG_TEST_VERBOSE=1 names each test as it starts; FG_TEST_ONLY=<name> runs
-// only the tests whose name contains it.
-#define RUN(test)                                                                                                          do {                                                                                                                       const char* only = std::getenv("FG_TEST_ONLY");                                                                        if (only && std::string(#test).find(only) == std::string::npos) break;                                                 if (std::getenv("FG_TEST_VERBOSE")) std::cerr << #test << (g_jit ? " (just in time)" : "") << std::endl;              test();                                                                                                            } while (0)
+// FG_TEST_ONLY=<name> runs only the tests whose name contains it. Each test
+// is named on stderr as it starts, so a failure, a hang or a CTest timeout
+// says which one it was in (the policy tests' process too).
+#define RUN(test)                                                                                \
+    do {                                                                                         \
+        const char* only = std::getenv("FG_TEST_ONLY");                                          \
+        if (only && std::string(#test).find(only) == std::string::npos) break;                   \
+        std::cerr << #test << (g_jit ? " (just in time)" : "") << std::endl;                     \
+        test();                                                                                  \
+    } while (0)
 
 // Dynamic stand-by and its benefit guard, GPU-aware pacing, pauses and
 // telemetry.
@@ -3532,7 +5513,7 @@ void RunPolicyTests() {
     RUN(TestUncapturedAtOwnRefreshIsLate);
     RUN(TestDynamicPassThroughNearRefresh);
     RUN(TestDynamicEngagesBelow);
-    RUN(TestDynamicHalfRateLock);
+    RUN(TestDynamicOwnRate);
     RUN(TestDynamicHysteresis);
     RUN(TestBenefitGuardBacksOff);
     RUN(TestDynamicProbe);
@@ -3544,13 +5525,19 @@ void RunPolicyTests() {
     RUN(TestGpuWaitKeepsCadence);
     RUN(TestExtrapolateMeasureLagIsOnTime);
     RUN(TestPauseAndLoadingDoNotStandDown);
-    RUN(TestDynamicCadenceByRefresh);
+    RUN(TestWinningEngagementStays);
+    RUN(TestDynamicToggleStandsBy);
+    RUN(TestHitchesAreNotPauses);
+    RUN(TestInterpolateMeasureLagIsOnTime);
+    RUN(TestInterpolateLeadMakesRoomForAnalysis);
+    RUN(TestBenefitGuardInterpolateMsfs);
 }
 
 // The policy tests in a second process of this executable, alongside the
-// rest: CTest gives the executable one timeout, and each half runs about a
-// minute against a paced runtime. The process is in a job that closes with
-// this one, so a failure here ends it too. Null when it could not start.
+// rest: CTest gives the executable one timeout, and each half runs one to
+// two minutes against a paced runtime. The process is in a job that closes
+// with this one, so a failure here ends it too. Null when it could not
+// start.
 HANDLE StartPolicyTests() {
     wchar_t path[MAX_PATH] = {};
     if (!GetModuleFileNameW(nullptr, path, MAX_PATH)) return nullptr;
@@ -3580,7 +5567,10 @@ HANDLE StartPolicyTests() {
     return process.hProcess;
 }
 
-// FG_TEST_SERIAL=1 runs the policy tests after the rest, in this process.
+// FG_TEST_SERIAL=1 runs the policy tests after the rest, in this process:
+// both halves assert wall-clock pacing, each with presenter threads at the
+// highest priority, so side by side each is a load the other is judged
+// under (serially, the run takes about twice as long).
 int main(int argc, char** argv) {
     // An exception escaping a thread (the presenter's included) ends the run
     // with what it was, not a bare fail-fast.
@@ -3648,6 +5638,26 @@ int main(int argc, char** argv) {
     RUN(TestUncapturedFramesAreSkipped);
     RUN(TestSettingsAndSessionChanges);
     RUN(TestUnavailableWithoutBackend);
+    // Quad views Frame Generation composes itself.
+    RUN(TestQuadClaimAndCompose);
+    RUN(TestQuadSetupThroughComposedFrame);
+    RUN(TestQuadFallbackShownAsIs);
+    RUN(TestQuadNeverSubmitsFourViews);
+    RUN(TestQuadClaimAheadOfDroppedFrames);
+    RUN(TestQuadKeepsRealFramesInset);
+    RUN(TestQuadDeclinedSwitchesToCanvas);
+    RUN(TestQuadWriteFailuresDecline);
+    RUN(TestQuadStandbyRecordsViewTargets);
+    RUN(TestQuadClaimNeedsLatestCapture);
+    RUN(TestQuadOutputsResized);
+    RUN(TestQuadAsIsShowsNewestImage);
+    RUN(TestQuadFailedWriteRepeatsLastShown);
+    RUN(TestQuadRetiredOutputsFreed);
+    RUN(TestQuadHeadsetOffBreak);
+    RUN(TestQuadDynamicCycle);
+    RUN(TestJitRingExhaustion);
+    RUN(TestQuadDynamicDeepRing);
+    RUN(TestQuadComposeStallOnce);
     if (!policy) {
         RunPolicyTests();
     } else {
