@@ -2,6 +2,8 @@
 
 #include <cstring>
 #include <iostream>
+#include <map>
+#include <set>
 #include <stdexcept>
 
 namespace {
@@ -14,6 +16,9 @@ const auto private_set = Handle<XrActionSet>(4);
 const auto app_action = Handle<XrAction>(5);
 const auto other_action = Handle<XrAction>(6);
 const auto private_action = Handle<XrAction>(7);
+// An application action set created after attachment; it was never attached.
+const auto late_set = Handle<XrActionSet>(10);
+const auto late_action = Handle<XrAction>(11);
 constexpr XrPath profile = 65, pose = 66;
 XrAction app_created_action = app_action;
 XrResult suggestion_result = XR_SUCCESS, attachment_result = XR_SUCCESS, sync_result = XR_SUCCESS;
@@ -23,6 +28,10 @@ int suggestions = 0, attachments = 0, syncs = 0, state_queries = 0, source_queri
 std::vector<XrActionSuggestedBinding> runtime_bindings;
 std::vector<XrActionSet> runtime_sets;
 std::vector<XrActiveActionSet> runtime_active_sets;
+// Spec: a suggestion naming an action whose set was ever attached (in any
+// session of the instance) fails with XR_ERROR_ACTIONSETS_ALREADY_ATTACHED.
+std::set<XrActionSet> runtime_attached;
+std::map<XrAction, XrActionSet> runtime_owner;
 const void* runtime_next = nullptr;
 XrEventDataBuffer event{XR_TYPE_EVENT_DATA_BUFFER};
 bool event_pending = false;
@@ -38,6 +47,7 @@ XrResult XRAPI_CALL CreateSet(XrInstance, const XrActionSetCreateInfo* info, XrA
 XrResult XRAPI_CALL CreateAction(XrActionSet set, const XrActionCreateInfo* info, XrAction* out) {
     if (set == private_set) Expect(info->countSubactionPaths == 0, "private gaze has no subactions");
     *out = set == private_set ? private_action : app_created_action;
+    runtime_owner[*out] = set;
     return XR_SUCCESS;
 }
 XrResult XRAPI_CALL CreateSpace(XrSession, const XrActionSpaceCreateInfo*, XrSpace* out) {
@@ -47,6 +57,11 @@ XrResult XRAPI_CALL CreateSpace(XrSession, const XrActionSpaceCreateInfo*, XrSpa
 XrResult XRAPI_CALL Suggest(XrInstance, const XrInteractionProfileSuggestedBinding* info) {
     ++suggestions;
     runtime_next = info->next;
+    for (uint32_t i = 0; i < info->countSuggestedBindings; ++i) {
+        const auto owner = runtime_owner.find(info->suggestedBindings[i].action);
+        if (owner != runtime_owner.end() && runtime_attached.contains(owner->second))
+            return XR_ERROR_ACTIONSETS_ALREADY_ATTACHED;
+    }
     bool has_private = false;
     for (uint32_t i = 0; i < info->countSuggestedBindings; ++i)
         has_private |= info->suggestedBindings[i].action == private_action;
@@ -60,6 +75,7 @@ XrResult XRAPI_CALL Attach(XrSession, const XrSessionActionSetsAttachInfo* info)
     runtime_next = info->next;
     runtime_sets.clear();
     if (info->countActionSets) runtime_sets.assign(info->actionSets, info->actionSets + info->countActionSets);
+    if (XR_SUCCEEDED(attachment_result)) runtime_attached.insert(runtime_sets.begin(), runtime_sets.end());
     return attachment_result;
 }
 XrResult XRAPI_CALL Sync(XrSession, const XrActionsSyncInfo* info) {
@@ -92,11 +108,11 @@ XrResult XRAPI_CALL Poll(XrInstance, XrEventDataBuffer* out) {
     *out = event; event_pending = false; return XR_SUCCESS;
 }
 auto& Layer() { return depthxr::OpenXrLayer::Instance(); }
-void MakeAction(XrAction action) {
+void MakeAction(XrAction action, XrActionSet set = app_set) {
     app_created_action = action;
     XrActionCreateInfo info{XR_TYPE_ACTION_CREATE_INFO}; info.actionType = XR_ACTION_TYPE_POSE_INPUT;
     XrAction out{};
-    Expect(Layer().CreateAction(app_set, &info, &out) == XR_SUCCESS && out == action, "create app action");
+    Expect(Layer().CreateAction(set, &info, &out) == XR_SUCCESS && out == action, "create app action");
 }
 XrResult Bind(std::initializer_list<XrAction> actions, const void* next = nullptr, XrPath target = profile) {
     std::vector<XrActionSuggestedBinding> bindings;
@@ -153,6 +169,7 @@ public:
         suggestion_result = attachment_result = sync_result = XR_SUCCESS;
         reject_private = event_pending = runtime_gaze_active = false;
         runtime_bindings.clear(); runtime_sets.clear(); runtime_active_sets.clear(); runtime_next = nullptr;
+        runtime_attached.clear(); runtime_owner.clear();
     }
     static void SetupSession() { Layer().active_session_ = session; }
     static void Resources() { Expect(Layer().CreateEyeGazeResources(session) == XR_SUCCESS, "create private resources"); }
@@ -170,7 +187,7 @@ public:
         Layer().last_app_action_sync_attempt_time_ = old;
         Layer().last_eye_gaze_self_sync_attempt_time_ = old;
     }
-    static void NewSession() { Layer().ResetSessionState(); SetupSession(); }
+    static void NewSession() { Layer().ResetSessionState(); SetupSession(); runtime_attached.erase(private_set); }
 };
 }
 
@@ -243,9 +260,10 @@ int main() {
         Expect(attachments == 1 && suggestions == 1, "failed fallback attachment must not retry");
 
         Peer::Prepare(); MakeAction(app_action); Bind({app_action}); Peer::Resources(); AttachApp();
-        Peer::NewSession(); Peer::Resources(); AttachApp();
-        Expect(runtime_bindings.size() == 2 && runtime_bindings[0].action == app_action,
-               "instance-owned suggestions survive session recreation");
+        Peer::NewSession(); Peer::Resources();
+        Expect(AttachApp() == XR_SUCCESS && runtime_bindings.size() == 1 &&
+                   runtime_bindings[0].action == private_action && runtime_sets.size() == 2,
+               "a later session must keep private gaze when attached app actions cannot be re-suggested");
         Peer::Prepare(); Peer::Resources(); AttachApp();
         Expect(runtime_bindings.size() == 1, "instance reset must clear old suggestions");
 
@@ -285,8 +303,13 @@ int main() {
         Expect(syncs == 2 && state_queries == 1, "unknown focus must recover without app polling");
         Peer::AgeAttempts(); sync_result = XR_ERROR_RUNTIME_FAILURE; Peer::Gaze(); Peer::Gaze();
         Expect(syncs == 3 && state_queries == 1, "failed private attempts must be throttled too");
-        Bind({app_action}); const int replaced_suggestions = suggestions; Peer::Gaze();
-        Expect(syncs == 3 && suggestions == replaced_suggestions, "late replacement must disable gaze without rebinding");
+        MakeAction(late_action, late_set); Bind({late_action}); const int replaced_suggestions = suggestions;
+        Peer::AgeAttempts(); sync_result = XR_SUCCESS; Peer::Gaze();
+        Expect(syncs == 4 && suggestions == replaced_suggestions,
+               "a late suggestion for an unattached set must neither rebind nor disable this session's gaze");
+        MakeAction(app_action);
+        Expect(Bind({app_action}) == XR_ERROR_ACTIONSETS_ALREADY_ATTACHED,
+               "re-suggesting attached application actions must fail as the runtime reports");
         Peer::NewSession(); Peer::Resources(); AttachApp();
         Expect(!Peer::GoodAppSync() && !Peer::GoodPrivateSync(), "session recreation must reset focus and sync freshness");
         std::cout << "Eye-gaze handshake tests passed.\n";

@@ -2503,10 +2503,14 @@ XrResult OpenXrLayer::AttachSessionActionSets(XrSession session, const XrSession
                  ", appendedEyeGazeSet=" + (appended_eye_gaze_set ? "1" : "0"));
 
     const XrResult result = next_attach_session_action_sets_(session, &downstream_attach_info);
-    if (attachment_attempt_prepared) {
+    {
         std::scoped_lock lock(mutex_);
-        if (session == active_session_) {
+        if (attachment_attempt_prepared && session == active_session_) {
             eye_gaze_action_set_attachment_.CompleteAttachment(attachment_attempt, XR_SUCCEEDED(result));
+        }
+        if (XR_SUCCEEDED(result) && attach_info->actionSets) {
+            application_attached_action_sets_.insert(attach_info->actionSets,
+                                                     attach_info->actionSets + attach_info->countActionSets);
         }
     }
     if (XR_FAILED(result)) {
@@ -2603,15 +2607,13 @@ XrResult OpenXrLayer::SyncActions(XrSession session, const XrActionsSyncInfo* sy
     }
 
     const XrResult result = next_sync_actions_(session, &downstream_sync_info);
-    {
+    if (appended_eye_gaze_active_set || pending_eye_gaze_sync_diagnostics_ > 0) {
         std::scoped_lock lock(mutex_);
-        if (session == active_session_ && eye_gaze_resources_ready_ && eye_gaze_bindings_ready_ &&
-            eye_gaze_action_set_attachment_.PrivateActionSetAttached()) {
+        // Only a sync that carried the private set says anything about gaze input.
+        if (appended_eye_gaze_active_set && session == active_session_ && eye_gaze_resources_ready_ &&
+            eye_gaze_bindings_ready_ && eye_gaze_action_set_attachment_.PrivateActionSetAttached()) {
             RecordEyeGazeSyncResult(true, result);
         }
-    }
-    {
-        std::scoped_lock lock(mutex_);
         if (pending_eye_gaze_sync_diagnostics_ > 0 && session == active_session_ && eye_gaze_resources_ready_) {
             logger_.Debug("Quadviews eye-gaze action sync: result=" +
                           FormatHex(static_cast<uint64_t>(result)) +
@@ -7968,6 +7970,7 @@ XrResult OpenXrLayer::DestroyActionSet(XrActionSet set) {
             eye_gaze_bindings_ready_ = false;
         }
         std::erase_if(application_action_owners_, [set](const auto& entry) { return entry.second == set; });
+        application_attached_action_sets_.erase(set);
         std::erase_if(application_pose_actions_, [set](const auto& entry) { return entry.second->owner == set; });
     }
     return result;
@@ -7989,15 +7992,18 @@ XrResult OpenXrLayer::SuggestInteractionProfileBindings(XrInstance instance, con
                 application_eye_gaze_bindings_.assign(bindings->suggestedBindings,
                     bindings->suggestedBindings + bindings->countSuggestedBindings);
             }
-            eye_gaze_bindings_ready_ = false;
             logger_.Info("Application eye-gaze binding suggestions accepted: count=" +
                          std::to_string(bindings->countSuggestedBindings) +
                          ", extensionChain=" + std::to_string(bindings->next != nullptr) +
                          ", privateSetAttached=" +
                          std::to_string(eye_gaze_action_set_attachment_.PrivateActionSetAttached()));
-            if (eye_gaze_action_set_attachment_.PrivateActionSetAttached()) {
-                logger_.Info("Application replaced eye-gaze bindings after attachment; private gaze is disabled "
-                             "for this session because attached actions cannot be re-suggested.");
+            if (eye_gaze_action_set_attachment_.SessionAttachmentCompleted()) {
+                // An accepted suggestion after attachment can only name
+                // unattached action sets; it cannot change this session's
+                // bindings and is merged again at the next session's attach.
+                logger_.Info("Application eye-gaze bindings suggested after attachment apply to later sessions.");
+            } else {
+                eye_gaze_bindings_ready_ = false;
             }
             // A successful re-suggestion replaces this profile's whole list.
             for (const auto& [handle, action] : application_pose_actions_) action->eye_gaze = false;
@@ -9534,6 +9540,7 @@ void OpenXrLayer::ResetInstanceState() {
     application_action_spaces_.clear();
     application_pose_actions_.clear();
     application_action_owners_.clear();
+    application_attached_action_sets_.clear();
     application_eye_gaze_bindings_.clear();
     application_eye_gaze_binding_chain_unsupported_ = false;
     quad_views_extension_requested_ = false;
@@ -9615,25 +9622,49 @@ bool OpenXrLayer::FinalizeEyeGazeBindings() {
         logger_.Info("Private eye-gaze binding skipped: application extension-chain semantics cannot be replayed; "
                      "preserving application bindings and using head/static focus offsets.");
     } else {
-        std::vector<XrActionSuggestedBinding> merged;
-        const auto add_unique = [&](const XrActionSuggestedBinding& binding) {
-            if (std::none_of(merged.begin(), merged.end(), [&](const auto& existing) {
-                    return existing.action == binding.action && existing.binding == binding.binding;
-                })) {
-                merged.push_back(binding);
+        const auto merge = [&](bool include_attached_application_bindings) {
+            std::vector<XrActionSuggestedBinding> merged;
+            const auto add_unique = [&](const XrActionSuggestedBinding& binding) {
+                if (std::none_of(merged.begin(), merged.end(), [&](const auto& existing) {
+                        return existing.action == binding.action && existing.binding == binding.binding;
+                    })) {
+                    merged.push_back(binding);
+                }
+            };
+            for (const auto& binding : application_eye_gaze_bindings_) {
+                const auto owner = application_action_owners_.find(binding.action);
+                const bool attached = owner != application_action_owners_.end() &&
+                                      application_attached_action_sets_.contains(owner->second);
+                if (!attached || include_attached_application_bindings) add_unique(binding);
             }
+            add_unique({quadviews_eye_gaze_action_, eye_gaze_pose_path_});
+            return merged;
         };
-        for (const auto& binding : application_eye_gaze_bindings_) add_unique(binding);
-        add_unique({quadviews_eye_gaze_action_, eye_gaze_pose_path_});
-        XrInteractionProfileSuggestedBinding info{XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING};
-        info.interactionProfile = eye_gaze_interaction_profile_path_;
-        info.countSuggestedBindings = static_cast<uint32_t>(merged.size());
-        info.suggestedBindings = merged.data();
-        const XrResult result = next_suggest_interaction_profile_bindings_(instance_, &info);
-        logger_.Info("Finalized eye-gaze binding suggestions before attachment: result=" +
-                     std::to_string(static_cast<int>(result)) +
-                     ", appBindings=" + std::to_string(application_eye_gaze_bindings_.size()) +
-                     ", mergedBindings=" + std::to_string(merged.size()) + ", privatePriority=0");
+        const auto suggest = [&](const std::vector<XrActionSuggestedBinding>& merged) {
+            XrInteractionProfileSuggestedBinding info{XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING};
+            info.interactionProfile = eye_gaze_interaction_profile_path_;
+            info.countSuggestedBindings = static_cast<uint32_t>(merged.size());
+            info.suggestedBindings = merged.data();
+            const XrResult result = next_suggest_interaction_profile_bindings_(instance_, &info);
+            logger_.Info("Finalized eye-gaze binding suggestions before attachment: result=" +
+                         std::to_string(static_cast<int>(result)) +
+                         ", appBindings=" + std::to_string(application_eye_gaze_bindings_.size()) +
+                         ", mergedBindings=" + std::to_string(merged.size()) + ", privatePriority=0");
+            return result;
+        };
+        const auto all_bindings = merge(true);
+        XrResult result = suggest(all_bindings);
+        if (result == XR_ERROR_ACTIONSETS_ALREADY_ATTACHED) {
+            // A later session of the same instance: the application's gaze
+            // actions were attached before and can never be suggested again,
+            // which rejects the whole list. Suggest without them.
+            const auto unattached = merge(false);
+            if (unattached.size() < all_bindings.size()) {
+                logger_.Info("Application eye-gaze actions were attached in an earlier session and cannot be "
+                             "re-suggested; suggesting VectorXR's gaze binding without them.");
+                result = suggest(unattached);
+            }
+        }
         if (result == XR_SUCCESS) {
             eye_gaze_bindings_ready_ = true;
             return true;

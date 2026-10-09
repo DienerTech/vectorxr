@@ -1272,6 +1272,10 @@ class OpenXrLayer {
     };
     std::unordered_map<XrAction, std::shared_ptr<ApplicationPoseAction>> application_pose_actions_;
     std::unordered_map<XrAction, XrActionSet> application_action_owners_;
+    // Instance lifetime: application action sets ever passed to a successful
+    // xrAttachSessionActionSets. Their actions can never be suggested again
+    // (XR_ERROR_ACTIONSETS_ALREADY_ATTACHED), even for a later session.
+    std::unordered_set<XrActionSet> application_attached_action_sets_;
     struct ApplicationActionSpace {
         std::shared_ptr<ApplicationPoseAction> action;
         bool includes_eyes{false};
