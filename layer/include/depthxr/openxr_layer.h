@@ -885,6 +885,13 @@ class OpenXrLayer {
                ((framegen_.ShowsOwnImagesOnly() && framegen_.CapturesFrom(swapchain)) ||
                 d3d11_bridge_.Composed(swapchain));
     }
+    // A layer's swapchain (not a projection's) a frame shows while Frame
+    // Generation shows images of its own only and does not capture it: kept
+    // lazy under VECTORXR_FRAMEGEN_SHOWN_LAYERS=lazy (FrameGenQueueSubstitution::Flush).
+    bool FrameGenShownLazily(XrSwapchain swapchain) {
+        return framegen_queue_.ShownLayersLazy() && framegen_.ShowsOwnImagesOnly() &&
+               !framegen_.CapturesFrom(swapchain);
+    }
     FrameGenPresenter::GpuFactory framegen_gpu_factory_{CreateFrameGenGpu};
     FrameGenRuntimeCalls framegen_calls_;
     std::atomic<bool> framegen_owns_pacing_{false};

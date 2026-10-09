@@ -72,6 +72,10 @@ class D3D11BridgeLayerTestPeer {
     static bool QueueSubstituted() {
         return OpenXrLayer::Instance().framegen_queue_.Active();
     }
+    // What VECTORXR_FRAMEGEN_SHOWN_LAYERS=lazy did in the session so far.
+    static FrameGenQueueSubstitution::ShownLayerCounts ShownLayers() {
+        return OpenXrLayer::Instance().framegen_queue_.ShownLayers();
+    }
     static bool FrameGenOwnsPacing() {
         return OpenXrLayer::Instance().framegen_owns_pacing_.load();
     }
@@ -1343,7 +1347,10 @@ XrResult XRAPI_CALL RtWait(XrSwapchain swapchain, const XrSwapchainImageWaitInfo
     std::scoped_lock lock(g_runtime_mutex);
     StandInSwapchain* chain = FindSwapchain(swapchain);
     if (!chain) return XR_ERROR_HANDLE_INVALID;
-    if (chain->waits >= chain->acquires) return XR_ERROR_CALL_ORDER_INVALID;
+    // An image acquired and not waited for, and none waited for and not
+    // released (OpenXR's order: a wait only after the image waited before it
+    // was released).
+    if (chain->waits >= chain->acquires || chain->waits > chain->releases) return XR_ERROR_CALL_ORDER_INVALID;
     ++chain->waits;
     const std::vector<XrSwapchain>& refused = g_runtime.refuse_wait;
     if (g_runtime.wait_refusals > 0 && std::find(refused.begin(), refused.end(), swapchain) != refused.end()) {
@@ -3665,6 +3672,7 @@ struct SideBySideShown {
     bool quad_layer{false};            // the game's quad layer, after the projection
     std::optional<Color> quad_texel;   // what it showed, read on the runtime's queue
     int quad_releases{0};              // the game's releases of its swapchain the runtime had by then
+    int game_quad_releases{0};         // the game's releases of it by then (read first)
     double latency_ms{0.0};            // from xrEndFrame until the runtime's queue reached the frame
     std::optional<std::size_t> during; // the game's hold (GameLoad) still closed at xrEndFrame
     UINT64 mark{0};
@@ -3680,6 +3688,7 @@ struct SideBySideSession {
     Target depth; // both eyes' depth side by side
     int frames{0};
     int ui_releases{0};
+    std::atomic<int> ui_released{0}; // the game's releases of the UI that returned
 };
 
 // What a side-by-side frame does beyond rendering both eyes.
@@ -3731,6 +3740,7 @@ void SideBySideFrame(SideBySideSession& session, Game& game, const SideBySideFra
     if (options.quad_layer) {
         Draw(game, session.ui.images[ui_index], QuadLayerColor(session.ui_releases++));
         Release(app, session.ui);
+        ++session.ui_released;
     }
 
     XrBaseInStructure after_depth{kApplicationStructType};
@@ -3818,11 +3828,19 @@ std::string Spread(std::vector<double> values) {
 // for comparison. Depth the game submits in the same shape (one swapchain,
 // each eye's half) never reaches the runtime, Frame Generation on or off,
 // and colour is still captured and shown through Frame Generation.
-void TestSideBySideFrameGen(Game& game, const std::string& mode) {
+// `shown_lazy` (VECTORXR_FRAMEGEN_SHOWN_LAYERS=lazy): the quad layer's
+// releases are kept lazy instead, so under the same load no frame of Frame
+// Generation's waits for the game's work on the runtime's queue (the
+// game's next wait on the quad's swapchain waits for its release on the
+// CPU), and every refresh shows the quad's newest finished release, the
+// game's latest or the one before it; the runtime still sees every call on
+// it in order.
+void TestSideBySideFrameGen(Game& game, const std::string& mode, bool shown_lazy = false) {
     CaseSettings settings;
     settings.frame_multiplier = "2x";
     settings.synthesis_mode = mode;
-    BeginCase("side-by-side-framegen-" + mode, game, settings);
+    BeginCase("side-by-side-framegen-" + mode + (shown_lazy ? "-shown-lazy" : ""), game, settings);
+    SetEnv("VECTORXR_FRAMEGEN_SHOWN_LAYERS", shown_lazy ? "lazy" : "");
     g_runtime.recommended_width = kSideBySideEyeWidth;
     g_runtime.recommended_height = kSideBySideEyeHeight;
     g_runtime.paced = true;
@@ -3843,6 +3861,11 @@ void TestSideBySideFrameGen(Game& game, const std::string& mode) {
               Peer::QueueSubstituted(),
           "the side-by-side session is bridged");
     Check(Count(Peer::Log(), kBridgedSessionLine) == 1, "the log tells once that the session is bridged");
+    SetEnv("VECTORXR_FRAMEGEN_SHOWN_LAYERS", "");
+    constexpr const char* kShownLazyLine = "Frame Generation keeps releases of layers it does not capture lazy";
+    Check(Count(Peer::Log(), kShownLazyLine) == (shown_lazy ? 1 : 0),
+          std::string("the log tells once that shown layers are kept lazy, only when they are (") +
+              (shown_lazy ? "on" : "off") + ")");
     BeginSession(app);
     session.eyes = MakeTarget(app, XPlaneInfo(2 * kSideBySideEyeWidth, kSideBySideEyeHeight), "both eyes side by side");
     session.ui = MakeTarget(app, XPlaneInfo(kQuadLayerSize, kQuadLayerSize), "the quad layer's");
@@ -3874,6 +3897,8 @@ void TestSideBySideFrameGen(Game& game, const std::string& mode) {
             StandIn& rt = g_runtime;
             Check(extras.size() == rt.frames.size(), "the stand-in notes every frame");
             SideBySideShown shown;
+            // Before the runtime's count (no release reaches it meanwhile).
+            shown.game_quad_releases = session.ui_released.load();
             shown.layers = info.layerCount;
             const XrCompositionLayerBaseHeader* first = info.layerCount ? info.layers[0] : nullptr;
             shown.projection_first = first && first->type == XR_TYPE_COMPOSITION_LAYER_PROJECTION;
@@ -3925,6 +3950,8 @@ void TestSideBySideFrameGen(Game& game, const std::string& mode) {
     // its own half. How many showed Frame Generation's outputs.
     constexpr auto kEyeWidth = static_cast<std::int32_t>(kSideBySideEyeWidth);
     constexpr auto kEyeHeight = static_cast<std::int32_t>(kSideBySideEyeHeight);
+    // Refreshes whose quad layer showed the game's release before its latest.
+    std::size_t quad_behind = 0;
     const auto check_shown = [&](std::size_t from, const std::string& at, bool quad_layer) {
         std::scoped_lock lock(g_runtime_mutex);
         std::size_t own = 0;
@@ -3943,6 +3970,14 @@ void TestSideBySideFrameGen(Game& game, const std::string& mode) {
                       where + ": the quad layer shows " + (extra.quad_texel ? Text(*extra.quad_texel) : "nothing") +
                           ", the game's latest release (" + std::to_string(extra.quad_releases) + ") rendered " +
                           Text(expected));
+                // Lazy, the newest release whose rendering is done: the
+                // game's latest, or the one before it.
+                const int behind = extra.game_quad_releases - extra.quad_releases;
+                Check(behind <= (shown_lazy ? 1 : 0),
+                      where + ": the runtime had the game's releases of the quad layer's swapchain but " +
+                          std::to_string(behind) + " (" + std::to_string(extra.quad_releases) + " of " +
+                          std::to_string(extra.game_quad_releases) + ")");
+                quad_behind += behind > 0 ? 1 : 0;
             } else {
                 Check(extra.layers == 1, where + ": the projection alone reaches the runtime");
             }
@@ -4035,10 +4070,15 @@ void TestSideBySideFrameGen(Game& game, const std::string& mode) {
         std::vector<double> others;    // of the others
         std::uint64_t moved{0};    // frames Frame Generation generated meanwhile
         std::uint64_t repeated{0}; // refreshes it repeated the frame before at
+        depthxr::FrameGenQueueSubstitution::ShownLayerCounts shown; // the quad's, meanwhile
+        std::size_t behind{0}; // refreshes whose quad layer showed the release before the game's latest
+        double game_ms{0.0};   // the game's 16 frames took
     };
     const auto loaded = [&](bool quad_layer, const std::string& at) {
         Backlog backlog;
         const depthxr::FrameGenStatus before = Peer::FrameGen();
+        const depthxr::FrameGenQueueSubstitution::ShownLayerCounts shown_before = Peer::ShownLayers();
+        const std::size_t behind_before = quad_behind;
         const std::size_t from = ShownCount();
         {
             GameLoad game_load(g_runtime.readback.Get());
@@ -4049,7 +4089,10 @@ void TestSideBySideFrameGen(Game& game, const std::string& mode) {
             SideBySideFrameOptions options;
             options.quad_layer = quad_layer;
             options.load = &game_load;
+            const auto game_start = std::chrono::steady_clock::now();
             run(16, options);
+            backlog.game_ms =
+                std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - game_start).count();
             game_load.Finish();
             std::scoped_lock lock(g_runtime_mutex);
             load = nullptr;
@@ -4077,6 +4120,11 @@ void TestSideBySideFrameGen(Game& game, const std::string& mode) {
         const depthxr::FrameGenStatus after = Peer::FrameGen();
         backlog.moved = after.generated - before.generated;
         backlog.repeated = after.repeated - before.repeated;
+        const depthxr::FrameGenQueueSubstitution::ShownLayerCounts shown_after = Peer::ShownLayers();
+        backlog.shown.releases = shown_after.releases - shown_before.releases;
+        backlog.shown.cpu_waits = shown_after.cpu_waits - shown_before.cpu_waits;
+        backlog.shown.gpu_waits = shown_after.gpu_waits - shown_before.gpu_waits;
+        backlog.behind = quad_behind - behind_before;
         return backlog;
     };
     const Backlog with_quad = loaded(true, "GPU-bound, with the quad layer");
@@ -4089,26 +4137,63 @@ void TestSideBySideFrameGen(Game& game, const std::string& mode) {
     const auto describe = [](const Backlog& backlog) {
         return std::to_string(backlog.waited) + " of " + std::to_string(backlog.during) + " (waited " +
                Spread(backlog.latencies) + "; the others " + Spread(backlog.others) + "; " +
-               std::to_string(backlog.moved) + " generated, " + std::to_string(backlog.repeated) + " repeated)";
+               std::to_string(backlog.moved) + " generated, " + std::to_string(backlog.repeated) + " repeated; " +
+               "the game's 16 frames in " + std::to_string(static_cast<int>(backlog.game_ms)) + " ms)";
     };
-    std::cout << g_case << ": KNOWN LIMITATION (the uncaptured-layer backlog): the game's GPU work held back "
-              << kGameLoadMs << " ms a frame, the runtime's queue waited for it before frames of Frame Generation's "
-              << "ended meanwhile: with a quad layer released every frame " << describe(with_quad)
-              << "; without it " << describe(without_quad)
-              << ". While a layer Frame Generation does not capture is shown, its frames wait for the game's.\n";
-    // What the code does today: each release of a swapchain Frame Generation
-    // does not capture queues a wait for the game's work on the runtime's
-    // queue (FrameGenQueueSubstitution::Release), and every frame of its own
-    // queued after it waits there. Should this no longer hold, the backlog
-    // is gone: update this case. Without the quad layer nothing of the
-    // game's is waited for before them.
-    Check(with_quad.waited > 0, "GPU-bound, with the quad layer: frames of Frame Generation's wait for the game's work "
-                                "on the runtime's queue: " +
-                                    describe(with_quad));
-    Check(without_quad.during > 0 && without_quad.waited == 0,
-          "GPU-bound, without the quad layer: no frame of Frame Generation's waits for the game's work: " +
-              describe(without_quad));
-    CheckValidation(game, "GPU-bound");
+    if (shown_lazy) {
+        // The quad layer's releases kept lazy: no frame of Frame
+        // Generation's waits for the game's work, with the quad layer or
+        // without it. Each of the game's releases of the quad (one a frame)
+        // was held back, its next wait waiting for it on the CPU, never on
+        // the runtime's queue (that wait is bounded far beyond the game's
+        // held-back work).
+        const auto counts = [](const Backlog& backlog) {
+            return std::to_string(backlog.shown.releases) + " lazy releases, " +
+                   std::to_string(backlog.shown.cpu_waits) + " waited for on the CPU, " +
+                   std::to_string(backlog.shown.gpu_waits) + " on the runtime's queue; " +
+                   std::to_string(backlog.behind) + " refreshes showed the release before the game's latest";
+        };
+        std::cout << g_case << ": shown layers kept lazy: the game's GPU work held back " << kGameLoadMs
+                  << " ms a frame, the runtime's queue waited for it before frames of Frame Generation's ended "
+                  << "meanwhile: with a quad layer released every frame " << describe(with_quad) << " ("
+                  << counts(with_quad) << "); without it " << describe(without_quad) << ".\n";
+        Check(with_quad.during > 0 && with_quad.waited == 0,
+              "GPU-bound, with the quad layer kept lazy: no frame of Frame Generation's waits for the game's work on "
+              "the runtime's queue: " +
+                  describe(with_quad));
+        Check(with_quad.shown.releases == 16 && with_quad.shown.cpu_waits > 0 && with_quad.shown.gpu_waits == 0,
+              "GPU-bound, with the quad layer kept lazy: its releases are held back until their work has run, "
+              "the game's next wait waiting for them on the CPU: " +
+                  counts(with_quad));
+        Check(without_quad.during > 0 && without_quad.waited == 0 && without_quad.shown.releases == 0,
+              "GPU-bound, without the quad layer: no frame of Frame Generation's waits for the game's work: " +
+                  describe(without_quad));
+        CheckValidation(game, "GPU-bound");
+    } else {
+        std::cout << g_case << ": KNOWN LIMITATION (the uncaptured-layer backlog, by default): the game's GPU work "
+                  << "held back " << kGameLoadMs << " ms a frame, the runtime's queue waited for it before frames of "
+                  << "Frame Generation's ended meanwhile: with a quad layer released every frame "
+                  << describe(with_quad) << "; without it " << describe(without_quad)
+                  << ". While a layer Frame Generation does not capture is shown, its frames wait for the game's "
+                  << "(unless VECTORXR_FRAMEGEN_SHOWN_LAYERS=lazy).\n";
+        // What the code does by default: each release of a swapchain Frame
+        // Generation does not capture queues a wait for the game's work on the
+        // runtime's queue (FrameGenQueueSubstitution::Release), and every frame
+        // of its own queued after it waits there (`shown_lazy` keeps them
+        // lazy instead). Without the quad layer nothing of the game's is
+        // waited for before them.
+        Check(with_quad.waited > 0,
+              "GPU-bound, with the quad layer: frames of Frame Generation's wait for the game's work on the runtime's "
+              "queue: " +
+                  describe(with_quad));
+        Check(without_quad.during > 0 && without_quad.waited == 0,
+              "GPU-bound, without the quad layer: no frame of Frame Generation's waits for the game's work: " +
+                  describe(without_quad));
+        CheckValidation(game, "GPU-bound");
+        const depthxr::FrameGenQueueSubstitution::ShownLayerCounts off = Peer::ShownLayers();
+        Check(off.releases == 0 && off.cpu_waits == 0 && off.gpu_waits == 0 && quad_behind == 0,
+              "shown layers are not kept lazy by default");
+    }
 
     // Depth in the same shape (one swapchain, each view's depth its half):
     // colour still captured and shown through Frame Generation; then, Frame
@@ -4173,6 +4258,8 @@ void TestSideBySideFrameGen(Game& game, const std::string& mode) {
         Check(app.api.destroy_swapchain(target->swapchain) == XR_SUCCESS, "a swapchain is destroyed");
     }
     StopApp(app);
+    Check(Count(Peer::Log(), "Frame Generation's shown layers at session end") == (shown_lazy ? 1 : 0),
+          "the session's end tells what keeping shown layers lazy did, only when it was on");
     Peer::UseFrameGenGpu(MakeStandInGpu);
     Peer::SetFrameGenEngagement(45, std::chrono::milliseconds(3000)); // the presenter's own
     Check(GameRuns(game), "the game's device works");
@@ -4285,6 +4372,7 @@ void IsolateHost() {
     SetEnv("XR_RUNTIME_JSON", (g_root / "no-runtime.json").string());
     // Whatever the host sets for the bridge does not apply.
     SetEnv("VECTORXR_FRAMEGEN_QUEUE", "");
+    SetEnv("VECTORXR_FRAMEGEN_SHOWN_LAYERS", "");
     SetEnv("VECTORXR_D3D11_BRIDGE", "");
     SetEnv("VECTORXR_D3D11_BRIDGE_DEBUG", "");
 }
@@ -4374,6 +4462,8 @@ int main(int argc, char** argv) {
         TestBridgedQuadFrameGenGeometry(game);
         TestSideBySideFrameGen(game, "extrapolate");
         TestSideBySideFrameGen(game, "interpolate");
+        TestSideBySideFrameGen(game, "extrapolate", true);
+        TestSideBySideFrameGen(game, "interpolate", true);
         TestDeviceLost(game);
     }
     g_runtime = StandIn{};

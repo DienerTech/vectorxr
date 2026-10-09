@@ -10,6 +10,8 @@
 #include "depthxr/framegen_gpu.h"
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <cstdlib>
 #include <deque>
 #include <mutex>
@@ -41,6 +43,11 @@ struct FrameGenQueueSubstitution::Impl {
     UINT64 handed_back_value{0};
     std::function<void(const std::string&)> log;
     int failures{0};
+    // VECTORXR_FRAMEGEN_SHOWN_LAYERS=lazy, and what it did (ShownLayerCounts).
+    bool shown_layers_lazy{false};
+    std::atomic<std::uint64_t> shown_releases{0};
+    std::atomic<std::uint64_t> shown_cpu_waits{0};
+    std::atomic<std::uint64_t> shown_gpu_waits{0};
 
     // An application call held back: a release (after the game's work up
     // to `value` on the `released` fence) or a wait.
@@ -57,6 +64,8 @@ struct FrameGenQueueSubstitution::Impl {
         std::uint32_t held{0};         // acquired by the application, not released by it
         std::uint32_t image_count{0};  // as acquiring last said
         std::uint32_t direct_waits{0}; // waits not held back: an image was shown since
+        bool shown_lazily{false};      // the frame showing it last did so lazily (Flush)
+        bool runtime_released{false};  // the runtime got a release of it
         HANDLE event{nullptr};
         ~Swapchain() {
             if (event) CloseHandle(event);
@@ -126,11 +135,20 @@ struct FrameGenQueueSubstitution::Impl {
             }
             XrSwapchainImageReleaseInfo info{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
             Note(next.release(swapchain, &info), "release");
+            state.runtime_released = true;
             state.held_back.pop_front();
             --state.releases;
             if (until == Until::kOldest) break;
         }
         return true;
+    }
+
+    // Held-back releases whose work has not run (holding `state.calls`).
+    std::uint64_t Pending(const Swapchain& state) {
+        const UINT64 done = released->GetCompletedValue();
+        return static_cast<std::uint64_t>(
+            std::count_if(state.held_back.begin(), state.held_back.end(),
+                          [&](const Call& call) { return !call.wait && call.value > done; }));
     }
 
     // After the runtime handed an image back: anything it queued for the
@@ -182,6 +200,7 @@ const XrSessionCreateInfo* FrameGenQueueSubstitution::Prepare(const XrSessionCre
         return info;
     }
     const auto& binding = *reinterpret_cast<const XrGraphicsBindingD3D12KHR*>(first);
+    const char* shown_layers = std::getenv("VECTORXR_FRAMEGEN_SHOWN_LAYERS");
     if (!binding.device || !binding.queue || binding.queue->GetDesc().Type != D3D12_COMMAND_LIST_TYPE_DIRECT) {
         return info;
     }
@@ -203,6 +222,7 @@ const XrSessionCreateInfo* FrameGenQueueSubstitution::Prepare(const XrSessionCre
     impl->info.next = &impl->binding;
     impl->marker.d3d12_queue = impl->runtime.Get();
     impl->log = log_;
+    impl->shown_layers_lazy = shown_layers && std::string(shown_layers) == "lazy";
     impl_ = std::move(impl);
     note = "Frame Generation gives the runtime a Direct3D 12 queue of its own: frames it writes reach the runtime "
            "as soon as they are written, not after the game's queued work; the game's images are kept in order "
@@ -285,6 +305,33 @@ XrResult FrameGenQueueSubstitution::Wait(XrSwapchain swapchain, bool lazy, const
             impl_->AfterWait();
             return XR_SUCCESS;
         }
+        if (state->shown_lazily && state->releases) {
+            // A layer the runtime shows: the releases before this wait go
+            // first, once their work has run. Waited for on the CPU without
+            // `calls` (a frame showing the layer meanwhile takes what has
+            // run), on the runtime's queue only when that takes too long.
+            const auto newest = std::find_if(state->held_back.rbegin(), state->held_back.rend(),
+                                             [](const Impl::Call& call) { return !call.wait; });
+            if (newest->value > impl_->released->GetCompletedValue()) {
+                ++impl_->shown_cpu_waits;
+                if (!state->event) state->event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+                const UINT64 value = newest->value;
+                calls.unlock();
+                // The event may still be set for an earlier value: waited
+                // for until this one has passed.
+                const auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(kReleaseWaitMs);
+                if (state->event && SUCCEEDED(impl_->released->SetEventOnCompletion(value, state->event))) {
+                    for (auto now = std::chrono::steady_clock::now();
+                         impl_->released->GetCompletedValue() < value && now < until;
+                         now = std::chrono::steady_clock::now()) {
+                        const auto left = std::chrono::ceil<std::chrono::milliseconds>(until - now);
+                        WaitForSingleObject(state->event, static_cast<DWORD>(left.count()));
+                    }
+                }
+                calls.lock();
+            }
+            impl_->shown_gpu_waits += impl_->Pending(*state);
+        }
         if (!impl_->Forward(swapchain, *state, next, Impl::Until::kAll)) {
             return XR_ERROR_RUNTIME_FAILURE;
         }
@@ -310,7 +357,8 @@ XrResult FrameGenQueueSubstitution::Release(XrSwapchain swapchain, bool lazy, co
     std::scoped_lock calls(state->calls);
     state->held = state->held ? state->held - 1 : 0;
     const UINT64 value = impl_->MarkGameWork();
-    if (lazy) {
+    if (lazy || state->shown_lazily) {
+        if (!lazy) ++impl_->shown_releases;
         state->held_back.push_back({false, value});
         ++state->releases;
         impl_->Forward(swapchain, *state, next, Impl::Until::kDone);
@@ -320,16 +368,24 @@ XrResult FrameGenQueueSubstitution::Release(XrSwapchain swapchain, bool lazy, co
         return XR_ERROR_RUNTIME_FAILURE;
     }
     impl_->runtime->Wait(impl_->released.Get(), value);
+    state->runtime_released = true;
     return next.release(swapchain, info);
 }
 
-void FrameGenQueueSubstitution::Flush(XrSwapchain swapchain, const Calls& next) {
+void FrameGenQueueSubstitution::Flush(XrSwapchain swapchain, const Calls& next, bool shown_lazily) {
     if (!impl_) {
         return;
     }
     if (const auto state = impl_->Find(swapchain, false)) {
         std::scoped_lock calls(state->calls);
-        impl_->Forward(swapchain, *state, next, Impl::Until::kReleases);
+        state->shown_lazily = shown_lazily && impl_->shown_layers_lazy;
+        if (state->shown_lazily && state->runtime_released) {
+            // The runtime shows the newest of its images whose work has run.
+            impl_->Forward(swapchain, *state, next, Impl::Until::kDone);
+        } else {
+            if (state->shown_lazily) impl_->shown_gpu_waits += impl_->Pending(*state);
+            impl_->Forward(swapchain, *state, next, Impl::Until::kReleases);
+        }
         state->direct_waits = state->image_count ? state->image_count : 3;
     }
 }
@@ -350,8 +406,33 @@ void FrameGenQueueSubstitution::BeforeRelease(XrSwapchain swapchain, const Calls
         std::scoped_lock calls(state->calls);
         impl_->Forward(swapchain, *state, next, Impl::Until::kAll);
         state->held = state->held ? state->held - 1 : 0;
+        state->runtime_released = true;
     }
     impl_->runtime->Wait(impl_->released.Get(), impl_->MarkGameWork());
+}
+
+bool FrameGenQueueSubstitution::ShownLayersLazy() const {
+    return impl_ && impl_->shown_layers_lazy;
+}
+
+FrameGenQueueSubstitution::ShownLayerCounts FrameGenQueueSubstitution::ShownLayers() const {
+    ShownLayerCounts counts;
+    if (impl_) {
+        counts.releases = impl_->shown_releases.load();
+        counts.cpu_waits = impl_->shown_cpu_waits.load();
+        counts.gpu_waits = impl_->shown_gpu_waits.load();
+    }
+    return counts;
+}
+
+std::string FrameGenQueueSubstitution::ShownLayersSummary() const {
+    if (!ShownLayersLazy()) {
+        return {};
+    }
+    const ShownLayerCounts counts = ShownLayers();
+    return "Frame Generation's shown layers at session end (VECTORXR_FRAMEGEN_SHOWN_LAYERS=lazy): lazyReleases=" +
+           std::to_string(counts.releases) + " cpuWaits=" + std::to_string(counts.cpu_waits) +
+           " runtimeQueueWaits=" + std::to_string(counts.gpu_waits) + ".";
 }
 
 void FrameGenQueueSubstitution::Reset() {

@@ -2242,6 +2242,11 @@ XrResult OpenXrLayer::CreateSession(XrInstance instance,
             framegen_queue_.SetLog([this](const std::string& message) { logger_.Error(message); });
             downstream_info = framegen_queue_.Prepare(game_info, note);
             if (!note.empty()) logger_.Info(note);
+            if (framegen_queue_.ShownLayersLazy()) {
+                logger_.Info("Frame Generation keeps releases of layers it does not capture lazy "
+                             "(VECTORXR_FRAMEGEN_SHOWN_LAYERS=lazy): the runtime shows each layer's newest finished "
+                             "image, at most one game frame old.");
+            }
             if (d3d11_bridge_.Active() && !framegen_queue_.Active()) {
                 // The runtime must never be given the bridge's queue: it
                 // waits for the game's Direct3D 11 work.
@@ -2484,6 +2489,7 @@ XrResult OpenXrLayer::DestroySession(XrSession session) {
     }
     const XrResult result = next_destroy_session_(session);
     if (destroying_active && XR_SUCCEEDED(result)) {
+        if (const std::string shown = framegen_queue_.ShownLayersSummary(); !shown.empty()) logger_.Info(shown);
         framegen_queue_.Reset();
         EndD3D11Bridge();
     }
@@ -5355,7 +5361,10 @@ XrResult OpenXrLayer::SubmitRuntimeFrame(XrSession session, const XrFrameEndInfo
         for (std::uint32_t i = 0; i < info->layerCount; ++i) {
             const XrCompositionLayerBaseHeader* header = info->layers ? info->layers[i] : nullptr;
             if (!header) continue;
-            auto flush = [&](XrSwapchain swapchain) { framegen_queue_.Flush(swapchain, FrameGenQueueCalls()); };
+            const bool layer = header->type != XR_TYPE_COMPOSITION_LAYER_PROJECTION;
+            auto flush = [&](XrSwapchain swapchain) {
+                framegen_queue_.Flush(swapchain, FrameGenQueueCalls(), layer && FrameGenShownLazily(swapchain));
+            };
             switch (header->type) {
             case XR_TYPE_COMPOSITION_LAYER_PROJECTION: {
                 const auto* projection = reinterpret_cast<const XrCompositionLayerProjection*>(header);

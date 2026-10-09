@@ -38,6 +38,18 @@ namespace depthxr {
 // application's next call on the swapchain once their work has run, as far
 // as the runtime needs them to hand out an image, or before a frame showing
 // the swapchain is submitted (then with the runtime's queue waiting).
+//
+// A layer the runtime shows that Frame Generation does not capture (a quad,
+// say, released every frame) still makes the runtime's queue wait for the
+// game's work at each release, and every frame Frame Generation writes after
+// it with it. With VECTORXR_FRAMEGEN_SHOWN_LAYERS=lazy (read as the session
+// is created; off by default), such a swapchain's releases are lazy too once
+// a frame showed it so (Flush's `shown_lazily`): a frame showing it gets
+// only the releases whose work has run, so the runtime shows the newest
+// finished image (at most one game frame old), and the game's next wait on
+// it, which the runtime must get after the release before it, first waits
+// for that release's work on the CPU (for a while; then the runtime's queue
+// waits for the rest, counted). Its waits are never held back.
 class FrameGenQueueSubstitution {
   public:
     // The runtime's swapchain calls (the next layer down).
@@ -79,17 +91,23 @@ class FrameGenQueueSubstitution {
     // Wait: held back (XR_SUCCESS at once) while a lazy release before it is,
     // unless an image of the swapchain was shown since the swapchain's
     // images were last waited for one by one; otherwise every held-back call
-    // goes first.
+    // goes first (a layer's shown lazily once its work has run, waited for
+    // on the CPU for a while).
     XrResult Wait(XrSwapchain swapchain, bool lazy, const Calls& next, const XrSwapchainImageWaitInfo* info);
-    // Release: `lazy` holds it back (XR_SUCCESS); otherwise held-back calls
-    // go first, then this release, each release after the runtime's queue
-    // waits for the game's work.
+    // Release: `lazy`, or a layer shown lazily (Flush), holds it back
+    // (XR_SUCCESS); otherwise held-back calls go first, then this release,
+    // each release after the runtime's queue waits for the game's work.
     XrResult Release(XrSwapchain swapchain, bool lazy, const Calls& next, const XrSwapchainImageReleaseInfo* info);
     // Before a frame showing `swapchain`'s images is submitted, or before it
     // is destroyed: every held-back release goes (after the runtime's queue
     // waits for the game's work), and the swapchain's next waits are not
-    // held back until each image was waited for again.
-    void Flush(XrSwapchain swapchain, const Calls& next);
+    // held back until each image was waited for again. `shown_lazily`: the
+    // frame shows it in a layer Frame Generation does not capture while it
+    // shows only images of its own; with VECTORXR_FRAMEGEN_SHOWN_LAYERS=lazy
+    // only releases whose work has run go (all of them while the runtime
+    // has none of the swapchain's yet), and its releases until the next
+    // frame showing it otherwise are lazy.
+    void Flush(XrSwapchain swapchain, const Calls& next, bool shown_lazily = false);
     void Forget(XrSwapchain swapchain);
     // Before a release of `swapchain` made elsewhere (deferred releases):
     // held-back calls go first, and the runtime's queue waits for the game's
@@ -98,6 +116,20 @@ class FrameGenQueueSubstitution {
     // After xrDestroySession (or a failed xrCreateSession): waits for the
     // runtime's queue and lets everything go.
     void Reset();
+
+    // VECTORXR_FRAMEGEN_SHOWN_LAYERS=lazy for this session.
+    bool ShownLayersLazy() const;
+    // Shown layers' releases kept lazy, the game's waits that first waited
+    // for one on the CPU, and the releases the runtime's queue waited for
+    // all the same (the CPU wait expired, or the runtime had none yet).
+    struct ShownLayerCounts {
+        std::uint64_t releases{0};
+        std::uint64_t cpu_waits{0};
+        std::uint64_t gpu_waits{0};
+    };
+    ShownLayerCounts ShownLayers() const;
+    // For the session's end in the log (empty unless ShownLayersLazy()).
+    std::string ShownLayersSummary() const;
 
   private:
     struct Impl;

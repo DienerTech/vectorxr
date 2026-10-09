@@ -4327,6 +4327,213 @@ void SubstitutionTest(ID3D12Device* device, ID3D12CommandQueue* game_queue) {
     std::cout << "D3D12 queue substitution passed\n";
 }
 
+// A layer the runtime shows that Frame Generation does not capture (a native
+// Direct3D 12 game's quad layer, say), against the strict stand-in, with
+// VECTORXR_FRAMEGEN_SHOWN_LAYERS=lazy. Until a frame shows it lazily its
+// releases go at once (the runtime's queue waiting for the game's work);
+// after, a release whose work has not run is held back, a frame showing the
+// layer does not get it and the runtime's queue never waits for the game's
+// work, and the game's next wait first waits for it on the CPU (then it
+// goes, before the wait); only once that takes too long does the runtime's
+// queue wait instead. Off by default: a frame showing it so changes nothing.
+void SubstitutionShownTest(ID3D12Device* device, ID3D12CommandQueue* game_queue) {
+    XrGraphicsBindingD3D12KHR binding{XR_TYPE_GRAPHICS_BINDING_D3D12_KHR};
+    binding.device = device;
+    binding.queue = game_queue;
+    XrSessionCreateInfo info{XR_TYPE_SESSION_CREATE_INFO};
+    info.next = &binding;
+    FrameGenQueueSubstitution substitution;
+    std::vector<std::string> logged;
+    substitution.SetLog([&](const std::string& message) { logged.push_back(message); });
+    std::string note;
+    _putenv_s("VECTORXR_FRAMEGEN_SHOWN_LAYERS", "lazy");
+    const XrSessionCreateInfo* created = substitution.Prepare(&info, note);
+    _putenv_s("VECTORXR_FRAMEGEN_SHOWN_LAYERS", "");
+    Check(substitution.Active() && substitution.ShownLayersLazy(),
+          "shown layers: the session keeps shown layers lazy (VECTORXR_FRAMEGEN_SHOWN_LAYERS=lazy)");
+    ID3D12CommandQueue* runtime = static_cast<const XrGraphicsBindingD3D12KHR*>(created->next)->queue;
+
+    const FrameGenQueueSubstitution::Calls strict{StrictAcquire, StrictWait, StrictRelease};
+    const XrSwapchain ui = reinterpret_cast<XrSwapchain>(0x51);
+    const XrSwapchainImageWaitInfo wait{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO, nullptr, XR_INFINITE_DURATION};
+    const XrSwapchainImageReleaseInfo release{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
+    g_strict = {};
+    ComPtr<ID3D12Fence> busy;
+    ComPtr<ID3D12Fence> idle;
+    ComPtr<ID3D12Fence> marks;
+    Check(SUCCEEDED(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&busy))) &&
+              SUCCEEDED(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&idle))) &&
+              SUCCEEDED(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&marks))),
+          "shown layers: fences");
+    const HANDLE event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    UINT64 idle_value = 0;
+    UINT64 mark_value = 0;
+    auto finish_game_queue = [&](const std::string& what) {
+        game_queue->Signal(idle.Get(), ++idle_value);
+        idle->SetEventOnCompletion(idle_value, event);
+        Check(WaitForSingleObject(event, 5000) == WAIT_OBJECT_0, "shown layers: " + what);
+    };
+    // Whether a mark after everything queued on the runtime's queue runs
+    // within `ms` (Frame Generation's next frame would).
+    auto runtime_reaches = [&](DWORD ms) {
+        runtime->Signal(marks.Get(), ++mark_value);
+        marks->SetEventOnCompletion(mark_value, event);
+        return WaitForSingleObject(event, ms) == WAIT_OBJECT_0;
+    };
+    auto acquire = [&](const std::string& what) {
+        std::uint32_t index = 0;
+        Check(substitution.Acquire(ui, g_strict.images, strict, nullptr, &index) == XR_SUCCESS,
+              "shown layers: " + what + ": acquire (" + g_strict.calls + ")");
+    };
+    // The layer's calls on a swapchain Frame Generation does not capture are
+    // never lazy themselves.
+    auto wait_release = [&](const std::string& what) {
+        Check(substitution.Wait(ui, false, strict, &wait) == XR_SUCCESS,
+              "shown layers: " + what + ": wait (" + g_strict.calls + ")");
+        Check(substitution.Release(ui, false, strict, &release) == XR_SUCCESS,
+              "shown layers: " + what + ": release (" + g_strict.calls + ")");
+    };
+
+    // Not shown lazily yet: its first release goes at once, the runtime's
+    // queue waiting for the game's work.
+    game_queue->Wait(busy.Get(), 1);
+    acquire("first frame");
+    wait_release("first frame");
+    Check(g_strict.calls == "awr", "shown layers: a release before a frame showed the layer lazily goes at once (" +
+                                       g_strict.calls + ")");
+    Check(!runtime_reaches(50), "shown layers: ...with the runtime's queue waiting for the game's work");
+    Check(SUCCEEDED(busy->Signal(1)), "shown layers: release the game's queue");
+    finish_game_queue("the game's queue finishes");
+    Check(runtime_reaches(5000), "shown layers: the runtime's queue runs on once the game's work has");
+
+    // A frame shows it lazily: its next release is held back while its work
+    // has not run, and a frame showing it meanwhile does not get it.
+    substitution.Flush(ui, strict, true);
+    game_queue->Wait(busy.Get(), 2);
+    acquire("second frame");
+    wait_release("second frame");
+    substitution.Flush(ui, strict, true);
+    Check(g_strict.calls == "awraw" && substitution.ShownLayers().releases == 1,
+          "shown layers: a release whose work has not run is held back, past a frame showing the layer (" +
+              g_strict.calls + ")");
+    Check(runtime_reaches(1000), "shown layers: the runtime's queue does not wait for the game's work");
+    // The game's next wait: the release before it goes first, once its work
+    // has run (here 30 ms later), waited for on the CPU.
+    acquire("third frame");
+    std::thread work([&] {
+        Sleep(30);
+        busy->Signal(2);
+    });
+    const auto start = std::chrono::steady_clock::now();
+    Check(substitution.Wait(ui, false, strict, &wait) == XR_SUCCESS, "shown layers: third frame: wait");
+    const double waited = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+    work.join();
+    FrameGenQueueSubstitution::ShownLayerCounts counts = substitution.ShownLayers();
+    Check(g_strict.calls == "awrawarw" && counts.cpu_waits == 1 && counts.gpu_waits == 0 && waited >= 20.0 &&
+              waited < 90.0,
+          "shown layers: the game's next wait gets the release before it first, once its work has run (" +
+              g_strict.calls + ", waited " + std::to_string(waited) + " ms, " + std::to_string(counts.cpu_waits) +
+              " CPU waits, " + std::to_string(counts.gpu_waits) + " on the runtime's queue)");
+    Check(runtime_reaches(1000), "shown layers: the runtime's queue never waited for the game's work");
+    Check(substitution.Release(ui, false, strict, &release) == XR_SUCCESS, "shown layers: third frame: release");
+    finish_game_queue("the game's queue finishes the third frame");
+    substitution.Flush(ui, strict, true);
+    Check(g_strict.calls == "awrawarwr",
+          "shown layers: a frame showing the layer gets a release whose work has run (" + g_strict.calls + ")");
+
+    // The game's work takes longer than the CPU waits: the runtime's queue
+    // waits for the rest (counted).
+    game_queue->Wait(busy.Get(), 3);
+    acquire("fourth frame");
+    wait_release("fourth frame");
+    acquire("fifth frame");
+    const auto bounded = std::chrono::steady_clock::now();
+    Check(substitution.Wait(ui, false, strict, &wait) == XR_SUCCESS, "shown layers: fifth frame: wait");
+    counts = substitution.ShownLayers();
+    Check(std::chrono::steady_clock::now() - bounded < std::chrono::milliseconds(1000) &&
+              g_strict.calls == "awrawarwrawarw" && counts.cpu_waits == 2 && counts.gpu_waits == 1,
+          "shown layers: a CPU wait that expires leaves the release to the runtime's queue (" + g_strict.calls + ", " +
+              std::to_string(counts.gpu_waits) + " on the runtime's queue)");
+    Check(!runtime_reaches(50), "shown layers: ...whose queue then waits for the game's work");
+    Check(SUCCEEDED(busy->Signal(3)), "shown layers: release the game's queue");
+    finish_game_queue("the game's queue finishes the fourth frame");
+    Check(runtime_reaches(5000), "shown layers: the runtime's queue runs on");
+    // The expired wait's completion does not cut the next one short.
+    game_queue->Wait(busy.Get(), 4);
+    Check(substitution.Release(ui, false, strict, &release) == XR_SUCCESS, "shown layers: fifth frame: release");
+    acquire("sixth frame");
+    std::thread later_work([&] {
+        Sleep(30);
+        busy->Signal(4);
+    });
+    const auto again = std::chrono::steady_clock::now();
+    Check(substitution.Wait(ui, false, strict, &wait) == XR_SUCCESS, "shown layers: sixth frame: wait");
+    const double waited_again =
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - again).count();
+    later_work.join();
+    counts = substitution.ShownLayers();
+    Check(g_strict.calls == "awrawarwrawarwarw" && counts.cpu_waits == 3 && counts.gpu_waits == 1 &&
+              waited_again >= 20.0 && waited_again < 90.0,
+          "shown layers: a wait after an expired one still waits for its release on the CPU (" + g_strict.calls +
+              ", waited " + std::to_string(waited_again) + " ms, " + std::to_string(counts.gpu_waits) +
+              " on the runtime's queue)");
+    Check(substitution.Release(ui, false, strict, &release) == XR_SUCCESS, "shown layers: sixth frame: release");
+    finish_game_queue("the game's queue finishes the sixth frame");
+    // A frame showing it otherwise (passing through, say): every release
+    // goes, and its next releases go at once again.
+    substitution.Flush(ui, strict, false);
+    acquire("seventh frame");
+    wait_release("seventh frame");
+    Check(g_strict.calls == "awrawarwrawarwarwrawr" && substitution.ShownLayers().releases == 5,
+          "shown layers: once shown otherwise, releases go at once again (" + g_strict.calls + ")");
+    Check(g_strict.refused == 0, "shown layers: the runtime saw every call in order (" + g_strict.calls + ")");
+    Check(logged.empty(), "shown layers: no call failed (" + (logged.empty() ? std::string() : logged.front()) + ")");
+    Check(substitution.ShownLayersSummary().find("runtimeQueueWaits=1") != std::string::npos,
+          "shown layers: the summary counts the runtime's queue's wait (" + substitution.ShownLayersSummary() + ")");
+    // A swapchain shown lazily before the runtime had any release of it:
+    // a frame showing it gets its first release all the same.
+    const XrSwapchain fresh = reinterpret_cast<XrSwapchain>(0x52);
+    g_strict = {};
+    std::uint32_t fresh_index = 0;
+    Check(substitution.Acquire(fresh, g_strict.images, strict, nullptr, &fresh_index) == XR_SUCCESS,
+          "shown layers: a fresh swapchain: acquire");
+    substitution.Flush(fresh, strict, true);
+    game_queue->Wait(busy.Get(), 5);
+    Check(substitution.Wait(fresh, false, strict, &wait) == XR_SUCCESS &&
+              substitution.Release(fresh, false, strict, &release) == XR_SUCCESS,
+          "shown layers: a fresh swapchain: wait and release");
+    Check(g_strict.calls == "aw", "shown layers: a fresh swapchain's release is held back (" + g_strict.calls + ")");
+    substitution.Flush(fresh, strict, true);
+    Check(g_strict.calls == "awr" && g_strict.refused == 0 && substitution.ShownLayers().gpu_waits == 2 &&
+              !runtime_reaches(50),
+          "shown layers: a frame showing a swapchain the runtime has no release of gets its first, the runtime's "
+          "queue waiting for its work (" +
+              g_strict.calls + ")");
+    Check(SUCCEEDED(busy->Signal(5)), "shown layers: release the game's queue");
+    finish_game_queue("the game's queue finishes the fresh swapchain's frame");
+    substitution.Reset();
+
+    // Off by default: a frame showing the layer so changes nothing.
+    substitution.Prepare(&info, note);
+    Check(substitution.Active() && !substitution.ShownLayersLazy() && substitution.ShownLayersSummary().empty(),
+          "shown layers: off by default");
+    g_strict = {};
+    acquire("off");
+    wait_release("off");
+    substitution.Flush(ui, strict, true);
+    game_queue->Wait(busy.Get(), 6);
+    acquire("off, second frame");
+    wait_release("off, second frame");
+    Check(g_strict.calls == "awrawr" && g_strict.refused == 0 && !runtime_reaches(50),
+          "shown layers, off: releases go at once, the runtime's queue waiting for the game's work (" +
+              g_strict.calls + ")");
+    Check(SUCCEEDED(busy->Signal(6)), "shown layers: release the game's queue");
+    substitution.Reset();
+    finish_game_queue("the game's queue is not left waiting");
+    CloseHandle(event);
+    std::cout << "D3D12 queue substitution with shown layers kept lazy passed\n";
+}
+
 int D3D12Test() {
     ComPtr<IDXGIFactory4> factory;
     ComPtr<IDXGIAdapter> warp;
@@ -4673,6 +4880,7 @@ int D3D12Test() {
 #endif
     if (!g_replay && !g_contention && !g_profile && !g_bench) {
         SubstitutionTest(device.Get(), queue.Get());
+        SubstitutionShownTest(device.Get(), queue.Get());
     }
     int result = g_replay      ? RunReplay(harness)
                  : g_contention ? RunContention(harness)
