@@ -69,6 +69,13 @@ void Expect(bool condition, std::string_view what) {
     }
 }
 
+int UnavailableExitCode() {
+    std::array<char, 8> value{};
+    const DWORD length =
+        GetEnvironmentVariableA("VECTORXR_TESTS_REQUIRE_HW", value.data(), static_cast<DWORD>(value.size()));
+    return length == 1 && value[0] == '1' ? 1 : 77;
+}
+
 std::optional<int64_t> ChooseFormat(const std::vector<int64_t>& available, const std::vector<int64_t>& preferences) {
     for (const int64_t candidate : preferences) {
         if (std::find(available.begin(), available.end(), candidate) != available.end()) {
@@ -171,12 +178,18 @@ void PrintUsage() {
         << "                          the one N before it; 0 waits for its own before xrEndFrame.\n"
         << "  --gpu-ms-fixed          Keep the calibrated GPU work (default: re-measured every 30 frames to\n"
         << "                          hold --gpu-ms while other GPU work competes).\n"
+        << "  --gpu-chunks N          Split each view's share of --gpu-ms into N equal dispatches (1-256,\n"
+        << "                          default: 1), the same GPU time in many short dispatches, as a game's\n"
+        << "                          frame is (e.g. --gpu-ms 20 --gpu-chunks 40 for Frame Generation).\n"
         << "  --gpu-calibrate         Without OpenXR: calibrate --gpu-ms on the default adapter (--graphics\n"
         << "                          vulkan: the first discrete GPU), run 200 frames of the load alone (paced\n"
         << "                          at 90 Hz, or --frame-ms when longer), report what they measured and fail\n"
         << "                          if the mean is off by over 3%.\n"
         << "  --render-check          Without OpenXR: draw the swapchain shapes into images the probe makes\n"
         << "                          itself, check their pixels, and fail on debug layer or validation messages.\n"
+        << "                          Exits 77 (skipped) when the machine lacks vulkan-1.dll, a hardware GPU, the\n"
+        << "                          Direct3D 11 SDK layers or the validation layer (1 with\n"
+        << "                          VECTORXR_TESTS_REQUIRE_HW=1).\n"
         << "  --depth                 Render depth into depth swapchains and submit it with each view\n"
         << "                          (XR_KHR_composition_layer_depth).\n"
         << "  --recreate-seconds N    Destroy and recreate the swapchains every N seconds.\n"
@@ -188,6 +201,10 @@ void PrintUsage() {
         << "                          errors and warnings at the end.\n"
         << "  --self-test             Validate pose math, option parsing and GPU load arithmetic without\n"
         << "                          a headset.\n"
+        << "  --vk-test-leak          Check of the probe itself (Vulkan): leave one VkFence undestroyed at the\n"
+        << "                          end, which --vulkan-validation must report.\n"
+        << "  --vk-test-stuck-queue   Check of the probe itself (--render-check, Vulkan): the first swapchain\n"
+        << "                          removal finds the queue waiting on a semaphore that is never signalled.\n"
         << "  --help                  Show this help.\n\n"
         << "Press Escape in the console window to end an active run early.\n";
 }
@@ -278,6 +295,12 @@ Options ParseOptions(int argc, char** argv) {
         } else if (argument == "--vk-late-submit") {
             options.vk_late_submit = true;
             vulkan_only = vulkan_only.empty() ? std::string(argument) : vulkan_only;
+        } else if (argument == "--vk-test-leak") {
+            options.vk_test_leak = true;
+            vulkan_only = vulkan_only.empty() ? std::string(argument) : vulkan_only;
+        } else if (argument == "--vk-test-stuck-queue") {
+            options.vk_test_stuck_queue = true;
+            vulkan_only = vulkan_only.empty() ? std::string(argument) : vulkan_only;
         } else if (argument == "--hitch-every" || argument == "--hitch-ms") {
             (argument == "--hitch-every" ? options.hitch_every : options.hitch_ms) =
                 ParseNumber(argc, argv, i, 0.0, 10000.0, false);
@@ -293,6 +316,8 @@ Options ParseOptions(int argc, char** argv) {
             options.gpu_frames_ahead = static_cast<int>(ParseNumber(argc, argv, i, 0.0, 4.0, true));
         } else if (argument == "--gpu-ms-fixed") {
             options.gpu_ms_fixed = true;
+        } else if (argument == "--gpu-chunks") {
+            options.gpu_chunks = static_cast<int>(ParseNumber(argc, argv, i, 1.0, 256.0, true));
         } else if (argument == "--gpu-calibrate") {
             options.gpu_calibrate = true;
         } else if (argument == "--mode") {
@@ -330,6 +355,9 @@ Options ParseOptions(int argc, char** argv) {
     if (options.gpu_calibrate && options.gpu_ms <= 0.0) {
         throw std::runtime_error("--gpu-calibrate requires --gpu-ms N with N above 0");
     }
+    if (options.vk_test_stuck_queue && (!options.render_check || options.vulkan_api < VK_API_VERSION_1_2)) {
+        throw std::runtime_error("--vk-test-stuck-queue requires --render-check and --vulkan-api 1.2 or above");
+    }
     return options;
 }
 
@@ -353,8 +381,17 @@ void RunOptionSelfTest() {
 
     const Options defaults = parse({});
     Expect(defaults.gpu_ms == 0.0 && defaults.gpu_frames_ahead == 2 && !defaults.gpu_ms_fixed &&
-               !defaults.gpu_calibrate,
+               !defaults.gpu_calibrate && defaults.gpu_chunks == 1,
            "GPU load defaults");
+    Expect(parse({"--gpu-ms", "20", "--gpu-chunks", "40"}).gpu_chunks == 40 &&
+               parse({"--gpu-chunks", "1"}).gpu_chunks == 1 && parse({"--gpu-chunks", "256"}).gpu_chunks == 256 &&
+               parse({"--graphics", "vulkan", "--gpu-calibrate", "--gpu-ms", "5", "--gpu-chunks", "8"}).gpu_chunks == 8,
+           "--gpu-chunks parses for both graphics APIs");
+    const Options probe_checks =
+        parse({"--graphics", "vulkan", "--render-check", "--vk-test-leak", "--vk-test-stuck-queue"});
+    Expect(probe_checks.vk_test_leak && probe_checks.vk_test_stuck_queue && !defaults.vk_test_leak &&
+               !defaults.vk_test_stuck_queue,
+           "the probe's checks of itself parse");
     Expect(defaults.graphics == GraphicsApi::D3D11 && defaults.vulkan_enable == 2 &&
                defaults.vulkan_api == VK_API_VERSION_1_2 && !defaults.vulkan_validation && !defaults.vk_late_submit &&
                !defaults.side_by_side && !defaults.quad_layer && !defaults.minimal_usage,
@@ -407,6 +444,15 @@ void RunOptionSelfTest() {
              {"--gpu-frames-ahead", "1.5"},
              {"--gpu-calibrate"},
              {"--gpu-calibrate", "--gpu-ms", "0"},
+             {"--gpu-chunks"},
+             {"--gpu-chunks", "0"},
+             {"--gpu-chunks", "257"},
+             {"--gpu-chunks", "1.5"},
+             {"--gpu-chunks", "x"},
+             {"--vk-test-leak"},
+             {"--render-check", "--vk-test-stuck-queue"},
+             {"--graphics", "vulkan", "--vk-test-stuck-queue"},
+             {"--graphics", "vulkan", "--render-check", "--vk-test-stuck-queue", "--vulkan-api", "1.1"},
              {"--graphics"},
              {"--graphics", "Vulkan"},
              {"--graphics", "d3d12"},
@@ -480,6 +526,33 @@ void RunGpuLoadSelfTest() {
     Expect(ViewIterations(kIterations, 0.0) == 0 && ViewIterations(1, 1.0e-9) == 1 &&
                ViewIterations(kIterations, 2.0) == kIterations,
            "view share edges");
+
+    // --gpu-chunks: a view's share in equal dispatches that add up to it.
+    for (const uint32_t chunks : {1u, 2u, 7u, 40u, 256u}) {
+        for (const uint32_t iterations : {kIterations, 451539u, 100000u}) {
+            const uint64_t total = static_cast<uint64_t>(ChunkIterations(iterations, chunks)) * chunks;
+            Expect(total + chunks / 2 >= iterations && total <= iterations + chunks / 2,
+                   "a view's chunks add up to its share (" + std::to_string(chunks) + " chunks)");
+        }
+    }
+    Expect(ChunkIterations(kIterations, 1) == kIterations && ChunkIterations(1000, 40) == 25 &&
+               ChunkIterations(10, 40) == 1 && ChunkIterations(0, 40) == 0 && ChunkIterations(1000, 0) == 1000,
+           "chunk edges: one chunk is the share, at least one iteration each, none without a share");
+
+    // --render-check on a machine without what it needs: skipped, unless the tests require the hardware.
+    std::array<char, 64> saved{};
+    const DWORD saved_length =
+        GetEnvironmentVariableA("VECTORXR_TESTS_REQUIRE_HW", saved.data(), static_cast<DWORD>(saved.size()));
+    SetEnvironmentVariableA("VECTORXR_TESTS_REQUIRE_HW", nullptr);
+    const int unset = UnavailableExitCode();
+    SetEnvironmentVariableA("VECTORXR_TESTS_REQUIRE_HW", "0");
+    const int zero = UnavailableExitCode();
+    SetEnvironmentVariableA("VECTORXR_TESTS_REQUIRE_HW", "1");
+    const int required = UnavailableExitCode();
+    SetEnvironmentVariableA("VECTORXR_TESTS_REQUIRE_HW",
+                            saved_length > 0 && saved_length < saved.size() ? saved.data() : nullptr);
+    Expect(unset == 77 && zero == 77 && required == 1,
+           "an unavailable environment skips (77), or fails with VECTORXR_TESTS_REQUIRE_HW=1");
 
     std::vector<double> samples;
     for (int i = 1; i <= 100; ++i) {
@@ -743,15 +816,21 @@ public:
                                                             : CreateD3D11Graphics(options)) {}
 
     // The graphics device outlives the session and the instance that used it, and the GPU's work on the swapchains
-    // ends before they are destroyed (Vulkan needs both; Direct3D 11 keeps its resources alive by itself).
+    // ends before they are destroyed (Vulkan needs both; Direct3D 11 keeps its resources alive by itself). Finish
+    // does the same before its summary; after it this finds nothing left but the graphics object.
     ~ProbeApp() {
+        TearDown();
+        graphics_.reset();
+    }
+
+    void TearDown() {
         DestroySwapchains();
         gpu_load_.reset();
         DestroySession();
         if (instance_ != XR_NULL_HANDLE) {
             xrDestroyInstance(instance_);
+            instance_ = XR_NULL_HANDLE;
         }
-        graphics_.reset();
     }
 
     void DestroySwapchains() {
@@ -812,7 +891,11 @@ public:
                       << ", frameMs=" << options_.frame_ms;
             if (gpu_load_) {
                 std::cout << ", gpuMs=" << options_.gpu_ms << " (framesAhead " << options_.gpu_frames_ahead
-                          << (options_.gpu_ms_fixed ? ", fixed" : "") << ")";
+                          << (options_.gpu_ms_fixed ? ", fixed" : "");
+                if (options_.gpu_chunks > 1) {
+                    std::cout << ", " << options_.gpu_chunks << " dispatches a view";
+                }
+                std::cout << ")";
             }
             std::cout << ", duration=" << options_.seconds << "s\n"
                       << "Use a Pivot profile with both yaw and pitch for the strongest visual test.\n";
@@ -820,12 +903,17 @@ public:
             RenderLoop();
             RequestAndDrainExit();
         }
+        Finish();
+    }
 
+private:
+    // The run's summary. The debug layer's or validation's report comes last, after the swapchains, the session (the
+    // bridge's teardown), the OpenXR instance and the graphics device are gone, so that it includes what they did.
+    void Finish() {
         std::cout << "Probe complete: frames=" << rendered_frames_
                   << ", swapchainRecreations=" << recreations_ << ", hitches=" << hitches_
                   << ", invalidViewFrames=" << invalid_view_frames_
                   << ", spaceRelationFailures=" << space_relation_failures_ << "\n";
-        graphics_->Report();
         static const char* const call_names[] = {"acquire", "wait", "release", "endFrame"};
         for (int call = 0; call < 4; ++call) {
             std::vector<double> sorted = call_ms_[call];
@@ -850,9 +938,11 @@ public:
             gpu_load_->Drain();
             gpu_load_->Report(std::cout);
         }
+        TearDown();
+        graphics_->DestroyDevice();
+        graphics_->Report();
     }
 
-private:
     void CreateInstance() {
         uint32_t extension_count = 0;
         CheckXr(XR_NULL_HANDLE,
@@ -1584,7 +1674,15 @@ int main(int argc, char** argv) {
             return 0;
         }
         if (options.render_check) {
-            return probe::RunRenderCheck(options) ? 0 : 1;
+            try {
+                return probe::RunRenderCheck(options) ? 0 : 1;
+            } catch (const probe::Unavailable& unavailable) {
+                const int code = probe::UnavailableExitCode();
+                std::cerr << "vectorxr_hardware_probe: render check "
+                          << (code == 77 ? "skipped" : "FAILED (VECTORXR_TESTS_REQUIRE_HW=1)") << ": "
+                          << unavailable.what() << "\n";
+                return code;
+            }
         }
         if (options.gpu_calibrate) {
             timeBeginPeriod(1);

@@ -258,6 +258,8 @@ bool RunRenderCheck(const Options& options) {
         images->Remove();
     }
 
+    // The device goes first, so that the report includes what validation finds at vkDestroyDevice (leaks).
+    graphics.DestroyDevice();
     const uint64_t problems = graphics.Report();
     for (const std::string& failure : checks.failures) {
         std::cout << "Render check failed: " << failure << "\n";

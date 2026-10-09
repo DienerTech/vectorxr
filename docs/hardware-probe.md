@@ -51,7 +51,14 @@ Two further checks need the desktop's GPU but no OpenXR runtime or headset:
   probe makes itself, in the layout OpenXR hands swapchain images over in,
   for ten frames, twice with the swapchains recreated in between. It reads
   the pixels back, checks the clear colors, the pattern and (Vulkan) the
-  depth, and fails on any debug layer or validation message:
+  depth, destroys its device, and fails on any debug layer or validation
+  message, including objects validation finds undestroyed at
+  `vkDestroyDevice`. On a machine that lacks what the check needs
+  (`vulkan-1.dll`, a hardware GPU, the Direct3D 11 SDK layers of the Graphics
+  Tools optional feature for `--d3d11-debug`, or the validation layer for
+  `--vulkan-validation`) it exits with 77, which CTest reports as skipped;
+  with `VECTORXR_TESTS_REQUIRE_HW=1` (the build's `DEPTHXR_REQUIRE_HW_TESTS`)
+  it fails instead:
 
 ```powershell
 $probe = '.\build\hardware-probe\layer\RelWithDebInfo\vectorxr_hardware_probe.exe'
@@ -61,7 +68,13 @@ $probe = '.\build\hardware-probe\layer\RelWithDebInfo\vectorxr_hardware_probe.ex
 ```
 
 With `DEPTHXR_BUILD_TESTS`, the probe's build tree runs the self-test and
-these three render checks as CTests.
+these three render checks as CTests, and checks of the checks: a run with
+`--vk-test-leak` (one `VkFence` left undestroyed) must fail on validation's
+report of it, a run with `--vk-test-stuck-queue` (the queue held by a wait
+that never ends, as a stuck Frame Generation bridge would hold it) must end
+with an error within its 10-second waits instead of hanging (the check then
+signals the wait from the CPU, so the process never exits with its queue
+held), and a run without the validation layer must be skipped.
 
 ## Prepare VectorXR
 
@@ -188,7 +201,7 @@ whose sessions are the only ones VectorXR composes quad views for).
 | `--graphics d3d11\|vulkan` | The graphics API (default: `d3d11`). |
 | `--vulkan-enable 1\|2` | `XR_KHR_vulkan_enable2` (default): the runtime creates the `VkInstance` and `VkDevice` from the probe's create infos. `1`: `XR_KHR_vulkan_enable`: the probe creates them with the extensions the runtime names, and prints those names. |
 | `--vulkan-api 1.0\|1.1\|1.2\|1.3` | The instance's API version (default 1.2), checked against the runtime's minimum and the device's version. The probe uses Vulkan 1.0 entry points only. |
-| `--vulkan-validation` | The Khronos validation layer and a debug-utils messenger; its errors and validation warnings are reported at the end, as `--d3d11-debug` reports the Direct3D 11 debug layer's. Without OpenXR (`--gpu-calibrate`, `--render-check`) synchronization validation is on too, and any message fails the check. |
+| `--vulkan-validation` | The Khronos validation layer and a debug-utils messenger; its errors and validation warnings are reported at the end, as `--d3d11-debug` reports the Direct3D 11 debug layer's. The report comes after the swapchains, the session, the OpenXR instance and the Vulkan device are destroyed, so it includes what their teardown did (Frame Generation's bridge tears down in `xrDestroySession`) and the objects validation finds undestroyed at `vkDestroyDevice`. Without OpenXR (`--gpu-calibrate`, `--render-check`) synchronization validation is on too, and any message fails the check. |
 | `--vk-late-submit` | Each view's image is released first, and the frame's rendering is submitted only after the last release, before `xrEndFrame`. |
 
 Each view is a render pass over the view's pixels: its load clears the view
@@ -209,8 +222,12 @@ message may be the runtime's. Implicit Vulkan layers (overlays, capture tools)
 can be kept out with `VK_LOADER_LAYERS_DISABLE=~implicit~`.
 
 Before the probe destroys swapchains (`--recreate-seconds`, `--sessions`, the
-end) it waits until its queue is idle; the Vulkan device outlives the session
-and the OpenXR instance.
+end) it waits until its queue is idle, for at most 10 seconds; the Vulkan
+device outlives the session and the OpenXR instance. A queue that is not idle
+by then (for example one waiting on a Frame Generation bridge's semaphore that
+is never signaled) is reported with "the queue did not finish within 10 s
+before ...", and the objects it may still use are left undestroyed rather
+than destroyed under it, so the run ends with an error instead of hanging.
 
 To run the probe against the runtime without the installed VectorXR layer,
 `DISABLE_XR_APILAYER_DIENERTECH_VECTORXR=1` disables it for the probe's
@@ -251,6 +268,7 @@ probe like DCS, or stress the bridge:
 | `--gpu-ms N` | Each frame takes N ms (0-100) of GPU work, split between the views by pixel count (see [GPU load](#gpu-load)). |
 | `--gpu-frames-ahead N` | At most N frames' GPU work is queued (0-4, default 2): each frame waits until the one N before it has run on the GPU; 0 waits for the frame's own work before `xrEndFrame`. |
 | `--gpu-ms-fixed` | The calibrated GPU work stays fixed, so work competing for the GPU shows as a longer load. By default the load is re-measured every 30 frames to hold N ms. |
+| `--gpu-chunks N` | Each view's share of `--gpu-ms` runs as N dispatches of equal size (1-256, default 1): the same GPU time, in many short dispatches as a game's frame is, instead of one long one. |
 | `--gpu-calibrate` | No OpenXR: calibrates `--gpu-ms` on the default adapter, runs 200 frames of the load alone and reports what they measured. |
 | `--depth` | Depth rendered into depth swapchains and submitted (`XR_KHR_composition_layer_depth`). |
 | `--recreate-seconds N` | The swapchains are destroyed and recreated every N seconds. |
@@ -322,6 +340,17 @@ Frame Generation's Dynamic multiplier must tell apart. Compare
 `--gpu-frames-ahead` 0, 1 and 2 to see how far a game's GPU queue changes the
 result.
 
+By default each view's share is one long dispatch. A game's frame is many
+short draws and dispatches instead, between which the GPU can run other work,
+such as Frame Generation's own analysis of the frames. One dispatch of many
+milliseconds per view can keep that work waiting and leave Frame Generation
+with almost nothing to show. For Frame Generation checks, split the load with
+`--gpu-chunks`, which keeps its total time:
+
+```powershell
+& $probe --mode source-exact --quad-views --pattern --threaded-wait --gpu-ms 20 --gpu-chunks 40 --seconds 60
+```
+
 Other GPU work (the runtime's compositor, Frame Generation, other
 applications) can lengthen the load. By default the probe re-measures it
 every 30 frames and adjusts the work by at most 10% a step, so the game's
@@ -333,10 +362,12 @@ To check the load without a headset:
 ```powershell
 & $probe --gpu-calibrate --gpu-ms 11
 & $probe --gpu-calibrate --gpu-ms 11 --graphics vulkan --vulkan-validation
+& $probe --gpu-calibrate --gpu-ms 20 --gpu-chunks 40
 ```
 
 It paces 200 frames at 90 Hz (or `--frame-ms`, when longer), split into two
-views (four with `--quad-views`), reports as above, and exits with an error
+views (four with `--quad-views`) and `--gpu-chunks` dispatches each, reports
+as above, and exits with an error
 when the frames' mean is more than 3% off the target or a frame began with
 more frames queued than `--gpu-frames-ahead` allows (and, for Vulkan with
 `--vulkan-validation`, on any validation message). Direct3D 11 uses the

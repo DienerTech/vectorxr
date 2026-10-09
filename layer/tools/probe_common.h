@@ -18,6 +18,7 @@
 #include <memory>
 #include <optional>
 #include <ostream>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -59,6 +60,7 @@ struct Options {
     double hitch_ms{300.0};
     double frame_ms{0.0};
     double gpu_ms{0.0};       // GPU work per frame (0: none)
+    int gpu_chunks{1};        // dispatches each view's share is split into
     int gpu_frames_ahead{2};  // frames whose GPU work may be queued
     bool gpu_ms_fixed{false}; // keep the calibrated work instead of re-measuring
     bool gpu_calibrate{false};
@@ -71,11 +73,23 @@ struct Options {
     bool quad_layer{false};      // a quad layer released every frame, after the projection
     bool minimal_usage{false};   // colour swapchains with usage 0
     bool render_check{false};    // no OpenXR: draw the shapes into the probe's own images and check their pixels
+    // Checks of the probe itself (Vulkan): one VkFence is left undestroyed at the end, or --render-check's first
+    // swapchain removal finds its queue held by a wait that never ends (as a stuck bridge's 'done' would).
+    bool vk_test_leak{false};
+    bool vk_test_stuck_queue{false};
     bool self_test{false};
     bool help{false};
 };
 
 const char* ModeName(ProbeMode mode);
+
+// The machine lacks what a check needs (vulkan-1.dll, a hardware GPU, the Direct3D 11 SDK layers, the validation
+// layer): --render-check exits 77 (skipped) instead of failing, unless VECTORXR_TESTS_REQUIRE_HW=1.
+struct Unavailable : std::runtime_error {
+    using std::runtime_error::runtime_error;
+};
+// --render-check's exit code for an Unavailable environment.
+int UnavailableExitCode();
 
 void ThrowIfFailed(HRESULT result, std::string_view operation);
 void CheckXr(XrInstance instance, XrResult result, std::string_view operation);
@@ -138,6 +152,9 @@ double CalibrationFactor(double target_ms, double measured_ms);
 double RecalibrationFactor(double target_ms, double measured_ms);
 // One view's share of a frame's iterations: none without a share, else at least one.
 uint32_t ViewIterations(uint32_t iterations, double share);
+// --gpu-chunks: the iterations of each of `chunks` equal dispatches that together take `iterations` (at least one
+// each, none without iterations).
+uint32_t ChunkIterations(uint32_t iterations, uint32_t chunks);
 
 // What the GPU load needs from a graphics API: dispatches, timestamps and a signal per frame. Frames use the slots of
 // a ring in turn; a slot is reused only after its previous frame was collected.
@@ -149,20 +166,21 @@ public:
     virtual ~GpuLoadBackend() = default;
     // `count` untimed dispatches of `iterations` (calibration's warm-up).
     virtual void Warm(uint32_t iterations, int count) = 0;
-    // One calibration run: `views` timed dispatches of `iterations` each, waited for; their summed time in ms, or
-    // nullopt when one straddled a clock change.
-    virtual std::optional<double> TimeViews(uint32_t views, uint32_t iterations) = 0;
+    // One calibration run: `views` timed spans of `chunks` dispatches of `iterations` each, waited for; their summed
+    // time in ms, or nullopt when one straddled a clock change.
+    virtual std::optional<double> TimeViews(uint32_t views, uint32_t iterations, uint32_t chunks) = 0;
     // A frame opens `slot`.
     virtual void BeginSlot(std::size_t slot) = 0;
-    // A timed dispatch for the frame in `slot`, as the frame's view `view` (0-3) is about to render.
-    virtual void RecordTimed(std::size_t slot, uint32_t view, uint32_t iterations) = 0;
+    // A timed span of `chunks` dispatches of `iterations` each for the frame in `slot`, as the frame's view `view`
+    // (0-3) is about to render.
+    virtual void RecordTimed(std::size_t slot, uint32_t view, uint32_t iterations, uint32_t chunks) = 0;
     // The frame in `slot` recorded its last view: its GPU work gets a completion signal.
     virtual void SignalFrame(std::size_t slot) = 0;
     // Whether the frame in `slot` has run; only the first poll of a wait may `flush` queued work to the GPU.
     virtual bool FrameDone(std::size_t slot, bool flush) = 0;
     // Blocks until the frame in `slot` has run.
     virtual void WaitFrame(std::size_t slot) = 0;
-    // A timed dispatch's span in ms (the frame has run); nullopt when it straddled a clock change.
+    // A timed span in ms (the frame has run); nullopt when it straddled a clock change.
     virtual std::optional<double> ReadView(std::size_t slot, uint32_t view) = 0;
 };
 
@@ -174,9 +192,9 @@ class GpuLoad {
 public:
     GpuLoad(std::unique_ptr<GpuLoadBackend> backend, const Options& options);
 
-    // The iterations that take --gpu-ms as frames record them, split evenly into `views` timed dispatches (a split
-    // load measures a few percent above one dispatch of the same iterations): 30 warm-up dispatches, then rounds of
-    // 5 timed frames, each scaled by target / median, until within 3% (at most 8 rounds).
+    // The iterations that take --gpu-ms as frames record them, split evenly into `views` timed spans of --gpu-chunks
+    // dispatches each (a split load measures a few percent above one dispatch of the same iterations): 30 warm-up
+    // dispatches, then rounds of 5 timed frames, each scaled by target / median, until within 3% (at most 8 rounds).
     void Calibrate(uint32_t views);
     // A frame begins: waits until the frame --gpu-frames-ahead before it has run on the GPU.
     void BeginFrame();
@@ -204,6 +222,7 @@ private:
 
     std::unique_ptr<GpuLoadBackend> backend_;
     double target_ms_{0.0};
+    uint32_t chunks_{1};
     uint64_t frames_ahead_{0};
     bool fixed_{false};
     std::array<Frame, GpuLoadBackend::kRing> ring_{};
@@ -289,8 +308,13 @@ public:
     virtual void ImageDone() = 0;
     // After the frame's last release, before xrEndFrame.
     virtual void EndFrame() = 0;
+    // At the end of the run, after the session and the OpenXR instance (and before Report): the GPU is waited for
+    // and the device destroyed, so that validation reports what the teardown did (Vulkan: the leaks it finds at
+    // vkDestroyDevice). Nothing may be used afterwards but Report.
+    virtual void DestroyDevice() {}
     // At the end of the run: the debug layer's or validation's messages, and the backend's own counts. Returns how
-    // many errors and warnings the debug layer or validation reported (0 without them).
+    // many errors and warnings the debug layer or validation reported (0 without them), and a queue that never went
+    // idle.
     virtual uint64_t Report() = 0;
 };
 

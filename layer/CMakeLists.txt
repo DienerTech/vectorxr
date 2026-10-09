@@ -295,6 +295,11 @@ if(WIN32 AND DEPTHXR_BUILD_LAYER)
                 $<TARGET_FILE_DIR:XR_APILAYER_DIENERTECH_VECTORXR>/sounds/
     )
 
+    # On a machine that has the GPU and the validation layer, the Vulkan
+    # bridge's suites (and the hardware probe's render checks) must run
+    # validated: a skip (77) then fails them.
+    option(DEPTHXR_REQUIRE_HW_TESTS "The Vulkan bridge tests fail instead of skipping without a GPU or validation" OFF)
+
     if(DEPTHXR_BUILD_HARDWARE_PROBES)
         add_executable(
             vectorxr_hardware_probe
@@ -380,8 +385,39 @@ if(WIN32 AND DEPTHXR_BUILD_LAYER)
             add_test(NAME vectorxr_hardware_probe_render_check_vulkan_late_1_0
                      COMMAND vectorxr_hardware_probe --render-check --graphics vulkan --vk-late-submit
                              --vulkan-api 1.0 ${_probe_validation})
-            set_tests_properties(vectorxr_hardware_probe_render_check_d3d11 vectorxr_hardware_probe_render_check_vulkan
-                                 vectorxr_hardware_probe_render_check_vulkan_late_1_0 PROPERTIES TIMEOUT 60)
+            # The checks of the checks: a VkFence left undestroyed must fail the render check (validation reports it
+            # at vkDestroyDevice, before the summary), and a queue that never goes idle must end the run within its
+            # 10 s waits instead of hanging (then the check releases it, so no process exits with a stalled queue).
+            set(_probe_render_checks vectorxr_hardware_probe_render_check_d3d11
+                vectorxr_hardware_probe_render_check_vulkan vectorxr_hardware_probe_render_check_vulkan_late_1_0
+                vectorxr_hardware_probe_render_check_vulkan_stuck_queue)
+            add_test(NAME vectorxr_hardware_probe_render_check_vulkan_stuck_queue
+                     COMMAND vectorxr_hardware_probe --render-check --graphics vulkan --vk-test-stuck-queue)
+            string(CONCAT _probe_stuck_output "did not finish within 10 s before the swapchains are destroyed"
+                   ".*the queue ran on.*did not finish on the GPU within 10 s")
+            set_tests_properties(vectorxr_hardware_probe_render_check_vulkan_stuck_queue PROPERTIES
+                                 PASS_REGULAR_EXPRESSION "${_probe_stuck_output}")
+            if(_probe_validation)
+                add_test(NAME vectorxr_hardware_probe_render_check_vulkan_leak
+                         COMMAND vectorxr_hardware_probe --render-check --graphics vulkan --vulkan-validation
+                                 --vk-test-leak)
+                string(CONCAT _probe_leak_output "vkDestroyDevice-device-05137.*VkFence"
+                       ".*0 failed, 1 debug/validation messages: FAILED")
+                set_tests_properties(vectorxr_hardware_probe_render_check_vulkan_leak PROPERTIES
+                                     PASS_REGULAR_EXPRESSION "${_probe_leak_output}")
+                list(APPEND _probe_render_checks vectorxr_hardware_probe_render_check_vulkan_leak)
+            endif()
+            # A machine without vulkan-1.dll, a hardware GPU, the Direct3D 11 SDK layers or the validation layer
+            # skips them (77), unless the tests require the hardware.
+            set_tests_properties(${_probe_render_checks} PROPERTIES TIMEOUT 60 SKIP_RETURN_CODE 77)
+            if(DEPTHXR_REQUIRE_HW_TESTS)
+                set_tests_properties(${_probe_render_checks} PROPERTIES ENVIRONMENT "VECTORXR_TESTS_REQUIRE_HW=1")
+            endif()
+            add_test(NAME vectorxr_hardware_probe_render_check_unavailable
+                     COMMAND ${CMAKE_COMMAND} -DPROBE=$<TARGET_FILE:vectorxr_hardware_probe>
+                             -DEMPTY_LAYER_DIR=${CMAKE_CURRENT_BINARY_DIR}/probe_no_vulkan_layers
+                             -P ${CMAKE_CURRENT_SOURCE_DIR}/tools/probe_expect_unavailable.cmake)
+            set_tests_properties(vectorxr_hardware_probe_render_check_unavailable PROPERTIES TIMEOUT 120)
         endif()
     endif()
 
@@ -555,9 +591,6 @@ if(WIN32 AND DEPTHXR_BUILD_LAYER)
         else()
             message(STATUS "Vulkan bridge tests: no Khronos validation layer (set DEPTHXR_VULKAN_VALIDATION_LAYER)")
         endif()
-        # On a machine that has the GPU and the validation layer, the Vulkan
-        # bridge's suites must run validated: a skip (77) then fails them.
-        option(DEPTHXR_REQUIRE_HW_TESTS "The Vulkan bridge tests fail instead of skipping without a GPU or validation" OFF)
         file(TO_NATIVE_PATH "${_vk_layer_dir}" _vk_layer_dir_native)
         string(REPLACE "\\" "\\\\" _vk_layer_dir_define "${_vk_layer_dir_native}")
 

@@ -43,9 +43,17 @@ uint32_t ViewIterations(uint32_t iterations, double share) {
     return ScaleIterations(iterations, std::min(share, 1.0));
 }
 
+uint32_t ChunkIterations(uint32_t iterations, uint32_t chunks) {
+    if (iterations == 0) {
+        return 0;
+    }
+    return ScaleIterations(iterations, 1.0 / static_cast<double>(std::max(chunks, 1u)));
+}
+
 GpuLoad::GpuLoad(std::unique_ptr<GpuLoadBackend> backend, const Options& options)
     : backend_(std::move(backend)),
       target_ms_(options.gpu_ms),
+      chunks_(static_cast<uint32_t>(std::max(options.gpu_chunks, 1))),
       frames_ahead_(static_cast<uint64_t>(options.gpu_frames_ahead)),
       fixed_(options.gpu_ms_fixed) {}
 
@@ -57,7 +65,9 @@ void GpuLoad::Calibrate(uint32_t views) {
     for (int round = 0; round < kLoadCalibrationRounds; ++round) {
         std::vector<double> runs;
         for (int run = 0; run < kLoadCalibrationRuns; ++run) {
-            if (const std::optional<double> ms = backend_->TimeViews(views, ViewIterations(iterations_, 1.0 / views))) {
+            const uint32_t view_iterations = ViewIterations(iterations_, 1.0 / views);
+            if (const std::optional<double> ms =
+                    backend_->TimeViews(views, ChunkIterations(view_iterations, chunks_), chunks_)) {
                 runs.push_back(*ms);
             }
         }
@@ -74,7 +84,11 @@ void GpuLoad::Calibrate(uint32_t views) {
     calibrated_iterations_ = iterations_;
     std::ostringstream line;
     line << std::fixed << std::setprecision(2) << "GPU load: target " << target_ms_ << " ms = " << iterations_
-         << " iterations in " << views << " views (measured " << measured << " ms)\n";
+         << " iterations in " << views << " views";
+    if (chunks_ > 1) {
+        line << " of " << chunks_ << " dispatches each";
+    }
+    line << " (measured " << measured << " ms)\n";
     std::cout << line.str();
 }
 
@@ -103,7 +117,7 @@ void GpuLoad::DispatchView(double share) {
     if (iterations == 0 || frame.views_used >= kMaximumViews) {
         return;
     }
-    backend_->RecordTimed(slot, frame.views_used++, iterations);
+    backend_->RecordTimed(slot, frame.views_used++, ChunkIterations(iterations, chunks_), chunks_);
 }
 
 void GpuLoad::EndFrame() {
@@ -145,7 +159,8 @@ void GpuLoad::Report(std::ostream& out) const {
         line << ", " << disjoint_frames_ << " straddled a clock change";
     }
     line << "), iterations " << iterations_ << " (calibrated " << calibrated_iterations_ << ", "
-         << (fixed_ ? std::string("fixed") : std::to_string(adjustments_) + " adjustments") << ")\n"
+         << (fixed_ ? std::string("fixed") : std::to_string(adjustments_) + " adjustments")
+         << (chunks_ > 1 ? ", " + std::to_string(chunks_) + " dispatches a view" : std::string()) << ")\n"
          << "GPU frames ahead " << frames_ahead_ << ": at most " << max_queued_
          << " earlier frames queued when a frame began, " << stalls_ << " stalls of " << frames_ << " frames";
     if (stalls_ > 0) {

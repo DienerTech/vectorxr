@@ -153,6 +153,11 @@ struct VulkanMessages {
     uint64_t errors{0};
     uint64_t warnings{0};
     std::vector<std::pair<bool, std::string>> first; // error?, message
+    // After the summary (VulkanDevice::Report): the counts it printed, and the first few messages since.
+    bool reported{false};
+    uint64_t reported_errors{0};
+    uint64_t reported_warnings{0};
+    std::vector<std::pair<bool, std::string>> late;
 };
 
 VKAPI_ATTR VkBool32 VKAPI_CALL OnVulkanMessage(VkDebugUtilsMessageSeverityFlagBitsEXT severity,
@@ -166,10 +171,26 @@ VKAPI_ATTR VkBool32 VKAPI_CALL OnVulkanMessage(VkDebugUtilsMessageSeverityFlagBi
     }
     std::scoped_lock lock(messages->mutex);
     ++(error ? messages->errors : messages->warnings);
-    if (messages->first.size() < 10) {
-        messages->first.emplace_back(error, data != nullptr && data->pMessage != nullptr ? data->pMessage : "");
+    auto& kept = messages->reported ? messages->late : messages->first;
+    if (kept.size() < 10) {
+        kept.emplace_back(error, data != nullptr && data->pMessage != nullptr ? data->pMessage : "");
     }
     return VK_FALSE;
+}
+
+// --render-check and --gpu-calibrate without OpenXR: the first discrete GPU, else the first that is not a CPU
+// implementation; nullopt when there is none (the check cannot run here).
+std::optional<std::size_t> StandaloneDeviceIndex(const std::vector<VkPhysicalDeviceType>& types) {
+    std::optional<std::size_t> chosen;
+    for (std::size_t index = 0; index < types.size(); ++index) {
+        if (types[index] == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU) {
+            return index;
+        }
+        if (!chosen && types[index] != VK_PHYSICAL_DEVICE_TYPE_CPU) {
+            chosen = index;
+        }
+    }
+    return chosen;
 }
 
 // The probe's Vulkan instance, device and queue, and its frames' command buffers. The instance and the device are
@@ -183,7 +204,7 @@ public:
         }
         loader_ = LoadLibraryExW(L"vulkan-1.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
         if (loader_ == nullptr) {
-            throw std::runtime_error("vulkan-1.dll is not installed (no Vulkan driver)");
+            throw Unavailable("vulkan-1.dll is not installed (no Vulkan driver)");
         }
         vk_.GetInstanceProcAddr =
             reinterpret_cast<PFN_vkGetInstanceProcAddr>(GetProcAddress(loader_, "vkGetInstanceProcAddr"));
@@ -199,8 +220,33 @@ public:
 #undef PROBE_VK_LOAD
     }
 
+    // A queue that never went idle keeps everything: the device, the instance and the loader.
     ~VulkanDevice() {
-        WaitIdle();
+        DestroyDevice();
+        if (!idle_stuck_) {
+            if (messenger_ != VK_NULL_HANDLE) {
+                vk_.DestroyDebugUtilsMessengerEXT(instance_, messenger_, nullptr);
+            }
+            if (instance_ != VK_NULL_HANDLE) {
+                vk_.DestroyInstance(instance_, nullptr);
+            }
+        }
+        ReportLate();
+        if (loader_ != nullptr && !idle_stuck_) {
+            FreeLibrary(loader_);
+        }
+    }
+
+    // Waits for the queue (bounded), then destroys the device's objects and the device, while the messenger still
+    // reports what vkDestroyDevice finds (objects never destroyed). After a wait that timed out nothing is destroyed:
+    // the stuck queue may still use it. Idempotent; never throws.
+    void DestroyDevice() {
+        if (device_ == VK_NULL_HANDLE || !WaitIdle("the Vulkan device is destroyed")) {
+            return;
+        }
+        if (idle_fence_ != VK_NULL_HANDLE) {
+            vk_.DestroyFence(device_, idle_fence_, nullptr);
+        }
         if (once_fence_ != VK_NULL_HANDLE) {
             vk_.DestroyFence(device_, once_fence_, nullptr);
         }
@@ -214,19 +260,27 @@ public:
             if (slot.pool != VK_NULL_HANDLE) {
                 vk_.DestroyCommandPool(device_, slot.pool, nullptr);
             }
+            slot = Slot{};
         }
-        if (device_ != VK_NULL_HANDLE) {
-            vk_.DestroyDevice(device_, nullptr);
+        if (options_.vk_test_leak) {
+            const VkFenceCreateInfo fence_info{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+            VkFence leaked = VK_NULL_HANDLE;
+            if (vk_.CreateFence(device_, &fence_info, nullptr, &leaked) == VK_SUCCESS) {
+                std::cout << "Vulkan: --vk-test-leak leaves a VkFence undestroyed\n";
+            }
         }
-        if (messenger_ != VK_NULL_HANDLE) {
-            vk_.DestroyDebugUtilsMessengerEXT(instance_, messenger_, nullptr);
-        }
-        if (instance_ != VK_NULL_HANDLE) {
-            vk_.DestroyInstance(instance_, nullptr);
-        }
-        if (loader_ != nullptr) {
-            FreeLibrary(loader_);
-        }
+        vk_.DestroyDevice(device_, nullptr);
+        idle_fence_ = VK_NULL_HANDLE;
+        once_fence_ = VK_NULL_HANDLE;
+        once_pool_ = VK_NULL_HANDLE;
+        once_buffer_ = VK_NULL_HANDLE;
+        device_ = VK_NULL_HANDLE;
+        queue_ = VK_NULL_HANDLE;
+    }
+
+    // Whether a wait for the queue timed out: what it may still use is kept, not destroyed.
+    bool Stuck() const {
+        return idle_stuck_;
     }
 
     VulkanDevice(const VulkanDevice&) = delete;
@@ -375,6 +429,12 @@ public:
         device_info_.pQueueCreateInfos = &queue_info_;
         device_info_.enabledExtensionCount = static_cast<uint32_t>(device_extension_names_.size());
         device_info_.ppEnabledExtensionNames = device_extension_names_.data();
+        if (options_.vk_test_stuck_queue) {
+            // A timeline semaphore may be waited for before anything signals it (Vulkan 1.2).
+            timeline_features_ = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES};
+            timeline_features_.timelineSemaphore = VK_TRUE;
+            device_info_.pNext = &timeline_features_;
+        }
         return device_info_;
     }
 
@@ -475,29 +535,31 @@ public:
         WaitFence(once_fence_, "a one-off submission");
     }
 
-    // Without OpenXR (--gpu-calibrate, --render-check): an instance, the first discrete GPU (else the first one) and
-    // a device of the probe's own.
+    // Without OpenXR (--gpu-calibrate, --render-check): an instance, the first discrete GPU (else the first one that
+    // is not a CPU implementation) and a device of the probe's own.
     void CreateStandalone() {
         VkInstance instance = VK_NULL_HANDLE;
-        CheckVk(vk_.CreateInstance(&InstanceCreateInfo({}, true), nullptr, &instance), "vkCreateInstance");
+        const VkResult created = vk_.CreateInstance(&InstanceCreateInfo({}, true), nullptr, &instance);
+        if (created == VK_ERROR_INCOMPATIBLE_DRIVER) {
+            throw Unavailable("vkCreateInstance: VK_ERROR_INCOMPATIBLE_DRIVER (no Vulkan driver)");
+        }
+        CheckVk(created, "vkCreateInstance");
         SetInstance(instance);
         uint32_t count = 0;
         CheckVk(vk_.EnumeratePhysicalDevices(instance_, &count, nullptr), "vkEnumeratePhysicalDevices");
         std::vector<VkPhysicalDevice> physicals(count);
         CheckVk(vk_.EnumeratePhysicalDevices(instance_, &count, physicals.data()), "vkEnumeratePhysicalDevices");
-        if (physicals.empty()) {
-            throw std::runtime_error("no Vulkan device");
-        }
-        VkPhysicalDevice physical = physicals.front();
+        std::vector<VkPhysicalDeviceType> types;
         for (const VkPhysicalDevice candidate : physicals) {
             VkPhysicalDeviceProperties properties{};
             vk_.GetPhysicalDeviceProperties(candidate, &properties);
-            if (properties.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU) {
-                physical = candidate;
-                break;
-            }
+            types.push_back(properties.deviceType);
         }
-        SetPhysicalDevice(physical);
+        const std::optional<std::size_t> chosen = StandaloneDeviceIndex(types);
+        if (!chosen) {
+            throw Unavailable("no Vulkan device that is not a CPU implementation");
+        }
+        SetPhysicalDevice(physicals[*chosen]);
         VkDevice device = VK_NULL_HANDLE;
         CheckVk(vk_.CreateDevice(physical_, &DeviceCreateInfo({}), nullptr, &device), "vkCreateDevice");
         SetDevice(device);
@@ -595,19 +657,49 @@ public:
         in_frame_ = false;
     }
 
-    // Waits until the queue has run everything (the runtime's work on it included). Called on the render thread
-    // between frames, when no OpenXR call that may use the queue is in flight.
-    void WaitIdle() {
+    // Waits until the queue has run everything (the runtime's work on it included), at most 10 s: an empty batch's
+    // fence covers all earlier work on the queue. Called on the render thread between frames, when no OpenXR call
+    // that may use the queue is in flight, and from destructors: it never throws. False when the queue did not
+    // finish (a wait on the bridge's 'done' semaphore that never ends): the caller keeps what the queue may still
+    // use, and every later wait returns false at once.
+    bool WaitIdle(std::string_view before) {
         if (queue_ == VK_NULL_HANDLE) {
-            return;
+            return true;
         }
-        const VkResult result = vk_.QueueWaitIdle(queue_);
+        if (idle_stuck_) {
+            return false;
+        }
+        if (idle_fence_ == VK_NULL_HANDLE) {
+            const VkFenceCreateInfo fence_info{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+            if (vk_.CreateFence(device_, &fence_info, nullptr, &idle_fence_) != VK_SUCCESS) {
+                idle_fence_ = VK_NULL_HANDLE;
+                return vk_.QueueWaitIdle(queue_) == VK_SUCCESS;
+            }
+        }
+        constexpr uint64_t kTimeoutNs = 10'000'000'000ull;
+        VkResult result = vk_.ResetFences(device_, 1, &idle_fence_);
+        if (result == VK_SUCCESS) {
+            result = vk_.QueueSubmit(queue_, 0, nullptr, idle_fence_);
+        }
+        if (result == VK_SUCCESS) {
+            result = vk_.WaitForFences(device_, 1, &idle_fence_, VK_TRUE, kTimeoutNs);
+        }
+        if (result == VK_TIMEOUT) {
+            std::cout << "Vulkan: the queue did not finish within 10 s before " << before
+                      << " (a wait on the bridge's 'done' semaphore that never ended?); what it may still use is "
+                         "kept\n";
+            idle_stuck_ = true;
+            return false;
+        }
         if (result != VK_SUCCESS) {
-            std::cout << "vkQueueWaitIdle failed: VkResult " << static_cast<int32_t>(result) << "\n";
+            std::cout << "Vulkan: waiting for the queue to go idle failed: VkResult " << static_cast<int32_t>(result)
+                      << "\n";
         }
+        return true;
     }
 
-    // Returns validation's errors and warnings (0 without --vulkan-validation).
+    // Returns validation's errors and warnings (0 without --vulkan-validation), and 1 for a queue that never went
+    // idle. Messages after it (the instance's destruction) are printed by the destructor.
     uint64_t Report() {
         std::ostringstream line;
         line << std::fixed << std::setprecision(2) << "Vulkan: " << submissions_ << " submissions"
@@ -617,8 +709,12 @@ public:
             line << " (max " << slot_wait_max_ms_ << " ms)";
         }
         std::cout << line.str() << "\n";
+        const uint64_t stuck = idle_stuck_ ? 1 : 0;
+        if (idle_stuck_) {
+            std::cout << "Vulkan: the queue never went idle; the objects it may still use were not destroyed\n";
+        }
         if (!options_.vulkan_validation) {
-            return 0;
+            return stuck;
         }
         std::scoped_lock lock(messages_.mutex);
         for (const auto& [error, message] : messages_.first) {
@@ -626,7 +722,10 @@ public:
         }
         std::cout << "Vulkan validation: " << messages_.errors << " errors, " << messages_.warnings << " warnings"
                   << (layer_path_.empty() ? std::string() : " (layer from " + layer_path_ + ")") << "\n";
-        return messages_.errors + messages_.warnings;
+        messages_.reported = true;
+        messages_.reported_errors = messages_.errors;
+        messages_.reported_warnings = messages_.warnings;
+        return messages_.errors + messages_.warnings + stuck;
     }
 
 private:
@@ -657,6 +756,24 @@ private:
 #endif
     }
 
+    // Validation's messages after Report (the instance's destruction), so that none goes unseen.
+    void ReportLate() {
+        if (!options_.vulkan_validation) {
+            return;
+        }
+        std::scoped_lock lock(messages_.mutex);
+        if (!messages_.reported ||
+            (messages_.errors == messages_.reported_errors && messages_.warnings == messages_.reported_warnings)) {
+            return;
+        }
+        for (const auto& [error, message] : messages_.late) {
+            std::cout << "Vulkan validation [" << (error ? "error" : "warning") << "] (teardown): " << message << "\n";
+        }
+        std::cout << "Vulkan validation during teardown, after the summary: "
+                  << messages_.errors - messages_.reported_errors << " errors, "
+                  << messages_.warnings - messages_.reported_warnings << " warnings\n";
+    }
+
     void RequireValidationLayer() {
         uint32_t count = 0;
         CheckVk(vk_.EnumerateInstanceLayerProperties(&count, nullptr), "vkEnumerateInstanceLayerProperties");
@@ -666,9 +783,9 @@ private:
             return std::strcmp(layer.layerName, "VK_LAYER_KHRONOS_validation") == 0;
         });
         if (!found) {
-            throw std::runtime_error("--vulkan-validation: VK_LAYER_KHRONOS_validation was not found; set "
-                                     "VK_ADD_LAYER_PATH to the folder of its manifest (VK_ADD_LAYER_PATH=" +
-                                     (layer_path_.empty() ? std::string("unset") : layer_path_) + ")");
+            throw Unavailable("--vulkan-validation: VK_LAYER_KHRONOS_validation was not found; set "
+                              "VK_ADD_LAYER_PATH to the folder of its manifest (VK_ADD_LAYER_PATH=" +
+                              (layer_path_.empty() ? std::string("unset") : layer_path_) + ")");
         }
     }
 
@@ -701,6 +818,7 @@ private:
     std::vector<const char*> device_extension_names_;
     float queue_priority_{1.0f};
     VkDeviceQueueCreateInfo queue_info_{};
+    VkPhysicalDeviceTimelineSemaphoreFeatures timeline_features_{}; // --vk-test-stuck-queue
     VkDeviceCreateInfo device_info_{};
     VkInstance instance_{VK_NULL_HANDLE};
     VkDebugUtilsMessengerEXT messenger_{VK_NULL_HANDLE};
@@ -720,6 +838,8 @@ private:
     VkCommandPool once_pool_{VK_NULL_HANDLE};
     VkCommandBuffer once_buffer_{VK_NULL_HANDLE};
     VkFence once_fence_{VK_NULL_HANDLE};
+    VkFence idle_fence_{VK_NULL_HANDLE}; // WaitIdle's
+    bool idle_stuck_{false};             // a WaitIdle timed out
     uint64_t submissions_{0};
     uint64_t slot_waits_{0};
     double slot_wait_max_ms_{0.0};
@@ -734,7 +854,9 @@ public:
 
     ~VulkanGpuLoadBackend() override {
         const VkDevice device = device_.Device();
-        device_.WaitIdle();
+        if (!device_.WaitIdle("the GPU load is destroyed")) {
+            return; // the stuck queue may still use it
+        }
         for (const VkFence fence : fences_) {
             if (fence != VK_NULL_HANDLE) {
                 vk_.DestroyFence(device, fence, nullptr);
@@ -870,16 +992,16 @@ public:
     void Warm(uint32_t iterations, int count) override {
         device_.RunOnce([&](VkCommandBuffer commands) {
             for (int i = 0; i < count; ++i) {
-                Record(commands, iterations, std::nullopt);
+                Record(commands, iterations, 1, std::nullopt);
             }
         });
     }
 
-    std::optional<double> TimeViews(uint32_t views, uint32_t iterations) override {
+    std::optional<double> TimeViews(uint32_t views, uint32_t iterations, uint32_t chunks) override {
         views = std::min(views, kMaximumViews);
         device_.RunOnce([&](VkCommandBuffer commands) {
             for (uint32_t view = 0; view < views; ++view) {
-                Record(commands, iterations, Query(kRing, view));
+                Record(commands, iterations, chunks, Query(kRing, view));
             }
         });
         double ms = 0.0;
@@ -891,8 +1013,8 @@ public:
 
     void BeginSlot(std::size_t) override {}
 
-    void RecordTimed(std::size_t slot, uint32_t view, uint32_t iterations) override {
-        Record(device_.Recording(), iterations, Query(slot, view));
+    void RecordTimed(std::size_t slot, uint32_t view, uint32_t iterations, uint32_t chunks) override {
+        Record(device_.Recording(), iterations, chunks, Query(slot, view));
     }
 
     void SignalFrame(std::size_t slot) override {
@@ -929,8 +1051,9 @@ private:
         return static_cast<uint32_t>((slot * kMaximumViews + view) * 2);
     }
 
-    // One dispatch, timed by queries `query` and `query + 1` when given.
-    void Record(VkCommandBuffer commands, uint32_t iterations, std::optional<uint32_t> query) {
+    // `chunks` dispatches of `iterations` each (--gpu-chunks), timed together by queries `query` and `query + 1`
+    // when given.
+    void Record(VkCommandBuffer commands, uint32_t iterations, uint32_t chunks, std::optional<uint32_t> query) {
         if (query) {
             vk_.CmdResetQueryPool(commands, queries_, *query, 2);
         }
@@ -950,7 +1073,14 @@ private:
                                   nullptr);
         vk_.CmdPushConstants(commands, pipeline_layout_, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(iterations),
                              &iterations);
-        vk_.CmdDispatch(commands, kLoadGroups, 1, 1);
+        for (uint32_t chunk = 0; chunk < chunks; ++chunk) {
+            if (chunk > 0) {
+                // Each chunk continues from the previous one's values.
+                vk_.CmdPipelineBarrier(commands, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                                       VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &barrier, 0, nullptr, 0, nullptr);
+            }
+            vk_.CmdDispatch(commands, kLoadGroups, 1, 1);
+        }
         if (query) {
             vk_.CmdWriteTimestamp(commands, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, queries_, *query + 1);
         }
@@ -1004,9 +1134,7 @@ public:
 
     ~VulkanGraphics() override {
         RemoveSwapchains();
-        for (const auto& [formats, render_pass] : render_passes_) {
-            device_->vk().DestroyRenderPass(device_->Device(), render_pass, nullptr);
-        }
+        DestroyRenderPasses();
     }
 
     std::string Describe() const override {
@@ -1101,12 +1229,17 @@ public:
         return static_cast<uint32_t>(sets_[id].views.size());
     }
 
-    // The queue runs dry first: the views and framebuffers may still be in use by submitted frames.
+    // The queue runs dry first: the views and framebuffers may still be in use by submitted frames. A queue that
+    // does not finish within 10 s keeps them (they leak), so that xrDestroySwapchain and xrDestroySession still run.
     void RemoveSwapchains() override {
         if (sets_.empty() && framebuffers_.empty()) {
             return;
         }
-        device_->WaitIdle();
+        if (!device_->WaitIdle("the swapchains are destroyed")) {
+            framebuffers_.clear();
+            sets_.clear();
+            return;
+        }
         for (const auto& [key, framebuffer] : framebuffers_) {
             device_->vk().DestroyFramebuffer(device_->Device(), framebuffer, nullptr);
         }
@@ -1170,6 +1303,12 @@ public:
         device_->EndFrame();
     }
 
+    void DestroyDevice() override {
+        RemoveSwapchains();
+        DestroyRenderPasses();
+        device_->DestroyDevice();
+    }
+
     uint64_t Report() override {
         return device_->Report();
     }
@@ -1187,6 +1326,16 @@ private:
         VkFormat format{VK_FORMAT_UNDEFINED};
         std::vector<VkImageView> views;
     };
+
+    // Kept (leaked) when the queue never went idle: its frames may still use them.
+    void DestroyRenderPasses() {
+        if (!device_->Stuck() && device_->Device() != VK_NULL_HANDLE) {
+            for (const auto& [formats, render_pass] : render_passes_) {
+                device_->vk().DestroyRenderPass(device_->Device(), render_pass, nullptr);
+            }
+        }
+        render_passes_.clear();
+    }
 
     void CheckRequirements(const XrGraphicsRequirementsVulkanKHR& requirements) const {
         const uint32_t minimum = VulkanApiFromXr(requirements.minApiVersionSupported);
@@ -1420,6 +1569,7 @@ bool RunVulkanGpuCalibration(const Options& options) {
         const std::unique_ptr<GpuLoad> load = CreateVulkanGpuLoad(device, options);
         within = RunGpuCalibrationLoop(*load, options, [&] { device.BeginFrame(); }, [&] { device.EndFrame(); });
     }
+    device.DestroyDevice(); // validation reports what is left at vkDestroyDevice before the summary
     return device.Report() == 0 && within;
 }
 
@@ -1429,12 +1579,14 @@ namespace {
 // family), read back through a buffer copy.
 class VulkanCheckImages final : public CheckImages {
 public:
-    explicit VulkanCheckImages(const Options& options) : graphics_(options) {
+    explicit VulkanCheckImages(const Options& options)
+        : graphics_(options), stall_queue_(options.vk_test_stuck_queue) {
         device_ = &graphics_.CreateStandaloneDevice();
     }
 
     ~VulkanCheckImages() override {
         Remove();
+        ReleaseStuckQueue();
     }
 
     ProbeGraphics& Graphics() override {
@@ -1506,11 +1658,17 @@ public:
     }
 
     void Remove() override {
+        if (stall_queue_ && !sets_.empty()) {
+            stall_queue_ = false;
+            StallQueue();
+        }
         graphics_.RemoveSwapchains();
-        for (const Set& set : sets_) {
-            for (const Image& image : set.images) {
-                device_->vk().DestroyImage(device_->Device(), image.image, nullptr);
-                device_->vk().FreeMemory(device_->Device(), image.memory, nullptr);
+        if (!device_->Stuck()) {
+            for (const Set& set : sets_) {
+                for (const Image& image : set.images) {
+                    device_->vk().DestroyImage(device_->Device(), image.image, nullptr);
+                    device_->vk().FreeMemory(device_->Device(), image.memory, nullptr);
+                }
             }
         }
         sets_.clear();
@@ -1528,6 +1686,51 @@ private:
         bool depth{false};
         std::vector<Image> images;
     };
+
+    // --vk-test-stuck-queue: the queue waits for a timeline semaphore value that is never signalled, as it does for a
+    // bridge whose D3D12 'done' fence never signals; the semaphore leaks with the queue.
+    void StallQueue() {
+        const auto create_semaphore = reinterpret_cast<PFN_vkCreateSemaphore>(
+            device_->vk().GetDeviceProcAddr(device_->Device(), "vkCreateSemaphore"));
+        VkSemaphoreTypeCreateInfo type{VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO};
+        type.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE;
+        VkSemaphoreCreateInfo info{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
+        info.pNext = &type;
+        VkSemaphore never = VK_NULL_HANDLE;
+        CheckVk(create_semaphore(device_->Device(), &info, nullptr, &never), "vkCreateSemaphore(stuck queue)");
+        const uint64_t value = 1;
+        VkTimelineSemaphoreSubmitInfo values{VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO};
+        values.waitSemaphoreValueCount = 1;
+        values.pWaitSemaphoreValues = &value;
+        const VkPipelineStageFlags stage = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+        VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+        submit.pNext = &values;
+        submit.waitSemaphoreCount = 1;
+        submit.pWaitSemaphores = &never;
+        submit.pWaitDstStageMask = &stage;
+        CheckVk(device_->vk().QueueSubmit(device_->Queue(), 1, &submit, VK_NULL_HANDLE),
+                "vkQueueSubmit(stuck queue)");
+        stuck_ = never;
+        std::cout << "Render check: --vk-test-stuck-queue holds the queue on a semaphore that is never signalled\n";
+    }
+
+    // Once the run has shown its bounded waits, the semaphore is signalled from the CPU and the queue runs on: the
+    // process never exits with a queue waiting on the GPU (what is left is freed with the process). Never throws.
+    void ReleaseStuckQueue() {
+        if (stuck_ == VK_NULL_HANDLE) {
+            return;
+        }
+        const auto signal = reinterpret_cast<PFN_vkSignalSemaphore>(
+            device_->vk().GetDeviceProcAddr(device_->Device(), "vkSignalSemaphore"));
+        VkSemaphoreSignalInfo info{VK_STRUCTURE_TYPE_SEMAPHORE_SIGNAL_INFO};
+        info.semaphore = stuck_;
+        info.value = 1;
+        if (signal != nullptr && signal(device_->Device(), &info) == VK_SUCCESS &&
+            device_->vk().QueueWaitIdle(device_->Queue()) == VK_SUCCESS) {
+            std::cout << "Render check: --vk-test-stuck-queue's semaphore signalled from the CPU; the queue ran on\n";
+        }
+        stuck_ = VK_NULL_HANDLE;
+    }
 
     static VkImageLayout AttachmentLayout(bool depth) {
         return depth ? VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL : VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
@@ -1613,6 +1816,8 @@ private:
     VulkanGraphics graphics_;
     VulkanDevice* device_{nullptr};
     std::vector<Set> sets_;
+    bool stall_queue_{false}; // --vk-test-stuck-queue, until the first removal
+    VkSemaphore stuck_{VK_NULL_HANDLE}; // the semaphore the stalled queue waits for, until released
 };
 
 } // namespace
@@ -1642,6 +1847,15 @@ void RunVulkanSelfTest() {
     const VkRect2D placed = ToVulkan({10, 20, 110, 70}, 1000, 5);
     Expect(placed.offset.x == 1010 && placed.offset.y == 25 && placed.extent.width == 100 && placed.extent.height == 50,
            "pattern rects are placed in a side-by-side image");
+    using Types = std::vector<VkPhysicalDeviceType>;
+    Expect(StandaloneDeviceIndex(Types{VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU, VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU}) ==
+                   1u &&
+               StandaloneDeviceIndex(Types{VK_PHYSICAL_DEVICE_TYPE_CPU, VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU}) ==
+                   1u &&
+               StandaloneDeviceIndex(Types{VK_PHYSICAL_DEVICE_TYPE_VIRTUAL_GPU}) == 0u,
+           "without OpenXR the first discrete GPU, else the first that is not a CPU");
+    Expect(!StandaloneDeviceIndex(Types{}) && !StandaloneDeviceIndex(Types{VK_PHYSICAL_DEVICE_TYPE_CPU}),
+           "only CPU Vulkan devices (or none): the check cannot run here");
 #ifdef VECTORXR_PROBE_SPIRV
     uint32_t magic = 0;
     std::memcpy(&magic, kProbeLoadSpirv, sizeof(magic));

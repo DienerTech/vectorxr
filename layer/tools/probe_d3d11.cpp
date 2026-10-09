@@ -112,6 +112,12 @@ void CreateSwapchainRenderTarget(ID3D11Device* device,
     }
 }
 
+// --render-check: D3D11CreateDevice's results that mean the machine lacks what the check needs (the Graphics Tools'
+// SDK layers for --d3d11-debug, a hardware adapter), not that the probe is wrong.
+bool DeviceUnavailable(HRESULT result) {
+    return result == DXGI_ERROR_SDK_COMPONENT_MISSING || result == DXGI_ERROR_UNSUPPORTED;
+}
+
 D3D11_RECT ToD3D11(const PixelRect& rect, int32_t x, int32_t y) {
     return {rect.left + x, rect.top + y, rect.right + x, rect.bottom + y};
 }
@@ -427,10 +433,10 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
         }
     }
 
-    std::optional<double> TimeViews(uint32_t views, uint32_t iterations) override {
+    std::optional<double> TimeViews(uint32_t views, uint32_t iterations, uint32_t chunks) override {
         double ms = 0.0;
         for (uint32_t view = 0; view < views && view < kMaximumViews; ++view) {
-            RecordTimed(calibration_.views[view], iterations);
+            RecordTimed(calibration_.views[view], iterations, chunks);
         }
         for (uint32_t view = 0; view < views && view < kMaximumViews; ++view) {
             const std::optional<double> view_ms = Read(calibration_.views[view]);
@@ -444,8 +450,8 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
 
     void BeginSlot(std::size_t) override {}
 
-    void RecordTimed(std::size_t slot, uint32_t view, uint32_t iterations) override {
-        RecordTimed(ring_[slot].views[view], iterations);
+    void RecordTimed(std::size_t slot, uint32_t view, uint32_t iterations, uint32_t chunks) override {
+        RecordTimed(ring_[slot].views[view], iterations, chunks);
     }
 
     void SignalFrame(std::size_t slot) override {
@@ -491,7 +497,8 @@ private:
                 CreateQuery(D3D11_QUERY_TIMESTAMP)};
     }
 
-    void Dispatch(uint32_t iterations) {
+    // `count` dispatches of `iterations` each (--gpu-chunks), one after another.
+    void Dispatch(uint32_t iterations, uint32_t count = 1) {
         D3D11_MAPPED_SUBRESOURCE mapped{};
         ThrowIfFailed(context_->Map(constants_.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped),
                       "Map(GPU load constants)");
@@ -503,7 +510,9 @@ private:
         context_->CSSetShader(shader_.Get(), nullptr, 0);
         context_->CSSetConstantBuffers(0, 1, &constant_buffer);
         context_->CSSetUnorderedAccessViews(0, 1, &view, nullptr);
-        context_->Dispatch(kLoadGroups, 1, 1);
+        for (uint32_t i = 0; i < count; ++i) {
+            context_->Dispatch(kLoadGroups, 1, 1);
+        }
         // No compute state is left behind for the frame's rendering or a layer's work.
         ID3D11UnorderedAccessView* no_view = nullptr;
         ID3D11Buffer* no_buffer = nullptr;
@@ -543,10 +552,10 @@ private:
         return static_cast<double>(end - start) * 1000.0 / static_cast<double>(disjoint.Frequency);
     }
 
-    void RecordTimed(const Timer& timer, uint32_t iterations) {
+    void RecordTimed(const Timer& timer, uint32_t iterations, uint32_t chunks) {
         context_->Begin(timer.disjoint.Get());
         context_->End(timer.start.Get());
-        Dispatch(iterations);
+        Dispatch(iterations, chunks);
         context_->End(timer.end.Get());
         context_->End(timer.disjoint.Get());
     }
@@ -665,12 +674,20 @@ public:
         const std::array<D3D_FEATURE_LEVEL, 4> feature_levels{
             D3D_FEATURE_LEVEL_12_1, D3D_FEATURE_LEVEL_12_0, D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0,
         };
-        ThrowIfFailed(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr,
-                                        D3D11_CREATE_DEVICE_BGRA_SUPPORT |
-                                            (options_.d3d11_debug ? D3D11_CREATE_DEVICE_DEBUG : 0),
-                                        feature_levels.data(), static_cast<UINT>(feature_levels.size()),
-                                        D3D11_SDK_VERSION, &device_, nullptr, &context_),
-                      "D3D11CreateDevice");
+        const HRESULT result = D3D11CreateDevice(
+            nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr,
+            D3D11_CREATE_DEVICE_BGRA_SUPPORT | (options_.d3d11_debug ? D3D11_CREATE_DEVICE_DEBUG : 0),
+            feature_levels.data(), static_cast<UINT>(feature_levels.size()), D3D11_SDK_VERSION, &device_, nullptr,
+            &context_);
+        if (DeviceUnavailable(result)) {
+            std::ostringstream message;
+            message << "D3D11CreateDevice failed with HRESULT 0x" << std::hex << static_cast<uint32_t>(result)
+                    << (options_.d3d11_debug ? " (no hardware Direct3D 11 adapter, or the Graphics Tools' SDK layers "
+                                               "for --d3d11-debug are not installed)"
+                                             : " (no hardware Direct3D 11 adapter)");
+            throw Unavailable(message.str());
+        }
+        ThrowIfFailed(result, "D3D11CreateDevice");
         DeviceCreated();
     }
 
@@ -960,6 +977,9 @@ void RunD3D11SelfTest() {
                ChooseFormat({DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_B8G8R8A8_UNORM_SRGB}, graphics.ColorFormats()) ==
                    DXGI_FORMAT_B8G8R8A8_UNORM_SRGB,
            "Direct3D 11 colour formats prefer sRGB");
+    Expect(DeviceUnavailable(DXGI_ERROR_SDK_COMPONENT_MISSING) && DeviceUnavailable(DXGI_ERROR_UNSUPPORTED) &&
+               !DeviceUnavailable(E_INVALIDARG) && !DeviceUnavailable(E_OUTOFMEMORY) && !DeviceUnavailable(S_OK),
+           "--render-check skips without the SDK layers or a hardware adapter, and fails otherwise");
 }
 
 } // namespace probe
