@@ -11,6 +11,7 @@
 #include <mutex>
 #include <string_view>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -35,11 +36,18 @@ struct Hooks {
     // The game's vkGetInstanceProcAddr, which the layer's own forwards to.
     // Kept past the instance: a runtime may hold on to the layer's.
     PFN_vkGetInstanceProcAddr game_get_instance_proc_addr{nullptr};
-    // The VkInstance the runtime resolved vkCreateDevice for.
+    // The VkInstance the runtime resolved vkCreateDevice for. Kept until
+    // the next lookup (or instance): a runtime may hold on to the layer's
+    // vkCreateDevice and call it without looking it up again.
     VkInstance device_instance{VK_NULL_HANDLE};
+    // The VkInstance made through the layer last (when no lookup named one).
+    VkInstance last_instance{VK_NULL_HANDLE};
     // The API version each VkInstance made through the layer asked for.
     std::unordered_map<std::uint64_t, std::uint32_t> instance_versions;
     std::unordered_map<std::uint64_t, DeviceRecord> devices;
+    // Devices the runtime made in xrCreateVulkanDeviceKHR without the
+    // layer's vkCreateDevice.
+    std::unordered_set<std::uint64_t> unshimmed_devices;
     // How many times the layer's vkCreateInstance / vkCreateDevice ran.
     std::uint64_t instances_made{0};
     std::uint64_t devices_made{0};
@@ -187,6 +195,7 @@ VKAPI_ATTR VkResult VKAPI_CALL LayerCreateInstance(const VkInstanceCreateInfo* i
             std::scoped_lock lock(hooks.mutex);
             hooks.instance_versions[reinterpret_cast<std::uint64_t>(*instance)] =
                 info->pApplicationInfo ? info->pApplicationInfo->apiVersion : VK_API_VERSION_1_0;
+            hooks.last_instance = *instance;
         }
         Report("vkCreateInstance(+" + std::to_string(added.size()) + (missing.empty() ? "" : ", lacks " + Joined(missing)) +
                    ")",
@@ -234,7 +243,9 @@ VKAPI_ATTR VkResult VKAPI_CALL LayerCreateDevice(VkPhysicalDevice physical_devic
         Hooks& hooks = State();
         std::scoped_lock lock(hooks.mutex);
         game = hooks.game_get_instance_proc_addr;
-        instance = hooks.device_instance;
+        // The instance vkCreateDevice was looked up for last; a runtime
+        // that never looked it up gets the instance made last.
+        instance = hooks.device_instance != VK_NULL_HANDLE ? hooks.device_instance : hooks.last_instance;
         wanted = hooks.wanted;
         ++hooks.devices_made;
         const auto it = hooks.instance_versions.find(reinterpret_cast<std::uint64_t>(instance));
@@ -242,6 +253,9 @@ VKAPI_ATTR VkResult VKAPI_CALL LayerCreateDevice(VkPhysicalDevice physical_devic
     }
     const auto create = Resolve<PFN_vkCreateDevice>(game, instance, "vkCreateDevice");
     if (!create) {
+        Report("vkCreateDevice(unresolved)",
+               "Frame Generation's Vulkan bridge: the game's vkGetInstanceProcAddr has no vkCreateDevice for the "
+               "game's Vulkan instance; the game's Vulkan device cannot be made.");
         return VK_ERROR_INITIALIZATION_FAILED;
     }
     if (!wanted || !info || !device || !physical_device) {
@@ -495,7 +509,6 @@ XrResult XRAPI_CALL HookCreateVulkanDevice(XrInstance instance, const XrVulkanDe
         Hooks& hooks = State();
         std::scoped_lock lock(hooks.mutex);
         hooks.game_get_instance_proc_addr = info->pfnGetInstanceProcAddr;
-        hooks.device_instance = VK_NULL_HANDLE;
         made = hooks.devices_made;
     }
     XrVulkanDeviceCreateInfoKHR forwarded = *info;
@@ -506,6 +519,9 @@ XrResult XRAPI_CALL HookCreateVulkanDevice(XrInstance instance, const XrVulkanDe
         Hooks& hooks = State();
         std::scoped_lock lock(hooks.mutex);
         ran = hooks.devices_made != made;
+        if (XR_SUCCEEDED(result) && !ran && vulkan_device && *vulkan_device) {
+            hooks.unshimmed_devices.insert(reinterpret_cast<std::uint64_t>(*vulkan_device));
+        }
     }
     if (XR_SUCCEEDED(result) && !ran) {
         Report("xrCreateVulkanDeviceKHR(not seen)",
@@ -527,8 +543,10 @@ void ResetVulkanEnableHooks(XrInstance instance, PFN_xrGetInstanceProcAddr next_
     hooks.log = instance != XR_NULL_HANDLE ? std::move(log) : nullptr;
     // Devices of an instance before are not this one's.
     hooks.device_instance = VK_NULL_HANDLE;
+    hooks.last_instance = VK_NULL_HANDLE;
     hooks.instance_versions.clear();
     hooks.devices.clear();
+    hooks.unshimmed_devices.clear();
     hooks.instance_list_logged = false;
     hooks.device_list_logged = false;
     hooks.summary.clear();
@@ -572,6 +590,15 @@ VulkanBridgeGame VulkanGameFor(std::uint64_t device) {
         return {};
     }
     return {reinterpret_cast<PFN_xrVoidFunction>(it->second.get_instance_proc_addr), it->second.timeline_semaphores};
+}
+
+VulkanDeviceOrigin VulkanDeviceOriginOf(std::uint64_t device) {
+    Hooks& hooks = State();
+    std::scoped_lock lock(hooks.mutex);
+    if (hooks.devices.count(device)) {
+        return VulkanDeviceOrigin::kRuntimeWithLayer;
+    }
+    return hooks.unshimmed_devices.count(device) ? VulkanDeviceOrigin::kRuntimeWithoutLayer : VulkanDeviceOrigin::kGame;
 }
 
 std::uint64_t VulkanSessionDevice(const XrSessionCreateInfo* info) {

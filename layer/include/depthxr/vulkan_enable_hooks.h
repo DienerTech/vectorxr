@@ -51,6 +51,13 @@ PFN_xrVoidFunction VulkanEnableHook(XrInstance instance, const char* name);
 // game itself, XR_KHR_vulkan_enable) get the defaults.
 VulkanBridgeGame VulkanGameFor(std::uint64_t device);
 
+// How a game's VkDevice (its handle as an integer) was made, as the hooks saw
+// it while the bridge was wanted: by the runtime in xrCreateVulkanDeviceKHR,
+// with the layer's vkCreateDevice or without it, or otherwise by the game
+// itself (XR_KHR_vulkan_enable; also any device the hooks did not see).
+enum class VulkanDeviceOrigin { kGame, kRuntimeWithLayer, kRuntimeWithoutLayer };
+VulkanDeviceOrigin VulkanDeviceOriginOf(std::uint64_t device);
+
 // The game's VkDevice (its handle as an integer) named by a session create
 // info whose first structure is a Vulkan binding; 0 otherwise. For the layer,
 // which is built without Vulkan's types.
