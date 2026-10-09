@@ -13139,6 +13139,7 @@ void OpenXrLayer::EngagePivotMotionProfile(size_t index) {
     pivotxr_active_profile_index_ = index;
     pivotxr_engaged_ = true;
 }
+
 void OpenXrLayer::ActivatePivotQuickView(size_t profile_index, size_t view_index) {
     const PivotQuickView& view =
         resolved_settings_.pivotxr.profiles[profile_index].view_controls.quick_views[view_index];
