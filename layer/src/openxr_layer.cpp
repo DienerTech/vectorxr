@@ -2368,6 +2368,11 @@ XrResult OpenXrLayer::EndSession(XrSession session) {
                                           XR_SUCCEEDED(turbo_async_wait_result_);
         begin_pending_frame = (async_wait_succeeded && !turbo_frame_begun_) || turbo_begin_owed_;
         end_pending_frame = turbo_frame_begun_ || begin_pending_frame;
+        // After a rejected runtime call, consumption is unknown. EndSession
+        // resets runtime frame state; do not guess another begin/empty submit.
+        if (XR_FAILED(turbo_frame_failure_.load())) {
+            begin_pending_frame = end_pending_frame = false;
+        }
         display_time = turbo_last_predicted_display_time_;
         blend_mode = turbo_last_environment_blend_mode_;
         turbo_begin_owed_ = false;
@@ -4705,6 +4710,7 @@ bool OpenXrLayer::ComposeQuadViewsD3D11(const XrCompositionLayerProjection* sour
 
 XrResult OpenXrLayer::TraceRuntimeWaitFrame(XrSession session, const XrFrameWaitInfo* info, XrFrameState* state) {
     const auto trace_call = turbo_trace_.Watch("runtime.wait");
+    if (const auto failure = turbo_frame_failure_.load(); XR_FAILED(failure)) return failure;
     if (!turbo_trace_.Enabled()) {
         const auto result=next_wait_frame_(session, info, state);
         if (XR_SUCCEEDED(result) && state)
@@ -4724,6 +4730,7 @@ XrResult OpenXrLayer::TraceRuntimeWaitFrame(XrSession session, const XrFrameWait
 
 XrResult OpenXrLayer::TraceRuntimeBeginFrame(XrSession session, const XrFrameBeginInfo* info) {
     const auto trace_call = turbo_trace_.Watch("runtime.begin");
+    if (const auto failure = turbo_frame_failure_.load(); XR_FAILED(failure)) return failure;
     std::unique_lock queue_lock(osd_vulkan_queue_mutex_,std::defer_lock);
     if(osd_vulkan_.load())queue_lock.lock();
     if (!turbo_trace_.Enabled()) return next_begin_frame_(session, info);
@@ -4794,6 +4801,7 @@ XrResult OpenXrLayer::FinishOsdComposite(const XrFrameEndInfo* info, bool& drawn
 
 XrResult OpenXrLayer::TraceRuntimeEndFrame(XrSession session, const XrFrameEndInfo* info) {
     const auto trace_call = turbo_trace_.Watch("forward.end");
+    if (const auto failure = turbo_frame_failure_.load(); XR_FAILED(failure)) return failure;
     std::unique_lock queue_lock(osd_vulkan_queue_mutex_,std::defer_lock);
     if(osd_vulkan_.load())queue_lock.lock();
     XrFrameEndInfo with_osd{};
@@ -4918,6 +4926,7 @@ XrResult OpenXrLayer::WaitFrame(XrSession session,
     }
     const auto trace_id = turbo_trace_.NextId();
     turbo_trace_.Record("wait.enter", trace_id);
+    if (const auto failure = turbo_frame_failure_.load(); XR_FAILED(failure)) return failure;
     const bool experimental_active = turbo_experiment_.enabled &&
         turbo_effective_active_.load(std::memory_order_relaxed) && turbo_effective_async_.load(std::memory_order_relaxed);
     if (experimental_active && turbo_experiment_.frame_limit > 0) {
@@ -4974,12 +4983,14 @@ XrResult OpenXrLayer::WaitFrame(XrSession session,
             const auto gate_start = std::chrono::steady_clock::now();
             turbo_trace_.Record("gate.enter", trace_id);
             const bool complete = turbo_async_handoff_cv_.wait_for(lock, std::chrono::milliseconds(50), [this] {
-                return !turbo_end_frame_in_flight_ && !turbo_async_handoff_active_;
+                return XR_FAILED(turbo_frame_failure_.load()) ||
+                       (!turbo_end_frame_in_flight_ && !turbo_async_handoff_active_);
             });
             turbo_metrics_wait_pending_ms_ += std::chrono::duration<double, std::milli>(
                 std::chrono::steady_clock::now() - gate_start).count();
             turbo_trace_.Record("gate.return", trace_id, complete);
         }
+        if (const auto failure = turbo_frame_failure_.load(); XR_FAILED(failure)) return failure;
         bool wait_pipelined = turbo_async_wait_.valid();
         bool async_handoff = turbo_async_handoff_active_;
         bool async_interception_cancelled = false;
@@ -5011,7 +5022,8 @@ XrResult OpenXrLayer::WaitFrame(XrSession session,
                 const auto valve_wait_start = std::chrono::steady_clock::now();
                 const auto deadline = valve_wait_start + kValveTimeout;
                 while (turbo_pacing_tokens_ == 0 && !turbo_valve_open_ &&
-                       turbo_seq_state_ == TurboSequencedState::kActive) {
+                       turbo_seq_state_ == TurboSequencedState::kActive &&
+                       XR_SUCCEEDED(turbo_frame_failure_.load())) {
                     if (turbo_valve_cv_.wait_until(lock, deadline) == std::cv_status::timeout) {
                         break;
                     }
@@ -5051,7 +5063,8 @@ XrResult OpenXrLayer::WaitFrame(XrSession session,
                         }
                         turbo_trace_.Record("poll.handoff.enter", trace_id, turbo_async_wait_generation_);
                         turbo_async_handoff_cv_.wait(lock, [this] {
-                            return !turbo_async_handoff_active_ || turbo_async_wait_.valid();
+                            return XR_FAILED(turbo_frame_failure_.load()) ||
+                                   !turbo_async_handoff_active_ || turbo_async_wait_.valid();
                         });
                         turbo_trace_.Record("poll.handoff.return", trace_id, turbo_async_wait_generation_);
                         wait_pipelined = turbo_async_wait_.valid();
@@ -5077,7 +5090,12 @@ XrResult OpenXrLayer::WaitFrame(XrSession session,
                         lock.unlock();
                         turbo_trace_.Record("poll.worker.enter", trace_id, pending_generation);
                         if (!recouple) {
-                            pending_wait.wait();
+                            // A safety stop must also release app polls already
+                            // waiting on this snapshot. The real runtime wait
+                            // itself is retained and cannot be cancelled.
+                            while (pending_wait.wait_for(std::chrono::milliseconds(100)) != std::future_status::ready) {
+                                if (turbo_auto_suspended_.load() || XR_FAILED(turbo_frame_failure_.load())) break;
+                            }
                         } else {
                             // Keep ownership of waits/begins stable when Turbo
                             // is switched off, but re-couple the app to runtime
@@ -5103,6 +5121,7 @@ XrResult OpenXrLayer::WaitFrame(XrSession session,
                 }
             }
 
+            if (const auto failure = turbo_frame_failure_.load(); XR_FAILED(failure)) return failure;
             if (async_interception_cancelled) {
                 // The downstream submit failed and EndFrame cancelled the
                 // pre-publication shield. This call has not fabricated a frame,
@@ -5182,6 +5201,7 @@ XrResult OpenXrLayer::WaitFrame(XrSession session,
     XrResult result = XR_SUCCESS;
     {
         std::scoped_lock wait_lock(turbo_runtime_wait_mutex_);
+        if (const auto failure = turbo_frame_failure_.load(); XR_FAILED(failure)) return failure;
         result = TraceRuntimeWaitFrame(session, frame_wait_info, frame_state);
     }
     const double wait_ms =
@@ -5225,6 +5245,9 @@ XrResult OpenXrLayer::WaitFrame(XrSession session,
             turbo_seq_state_ = TurboSequencedState::kInactive;
         }
     }
+    if (XR_FAILED(result) && (handshake || turbo_effective_active_.load())) {
+        NoteTurboRuntimeFailure(result, 0, TurboFrameOperation::kWait);
+    }
     turbo_trace_.Record("wait.return", trace_id, XR_SUCCEEDED(result) ? frame_state->predictedDisplayTime : 0,
                         XR_SUCCEEDED(result) ? frame_state->predictedDisplayPeriod : 0, result);
     return result;
@@ -5236,6 +5259,7 @@ XrResult OpenXrLayer::BeginFrame(XrSession session, const XrFrameBeginInfo* fram
     if (frame_begin_info && frame_begin_info->type != XR_TYPE_FRAME_BEGIN_INFO) {
         return XR_ERROR_VALIDATION_FAILURE;
     }
+    if (const auto failure = turbo_frame_failure_.load(); XR_FAILED(failure)) return failure;
     {
         std::scoped_lock lock(mutex_);
         if (session == active_session_) {
@@ -5291,10 +5315,13 @@ XrResult OpenXrLayer::BeginFrame(XrSession session, const XrFrameBeginInfo* fram
             logger_.Debug("Turbo-diag: app xrBeginFrame passing through while engaging.");
         }
     }
+    if (const auto failure = turbo_frame_failure_.load(); XR_FAILED(failure)) return failure;
     const XrResult result = TraceRuntimeBeginFrame(session, frame_begin_info);
     if (XR_SUCCEEDED(result)) {
         std::scoped_lock lock(turbo_mutex_);
         turbo_frame_begun_ = true;
+    } else if (turbo_effective_active_.load()) {
+        NoteTurboRuntimeFailure(result, 0, TurboFrameOperation::kBegin);
     }
     return result;
 }
@@ -5325,6 +5352,7 @@ XrResult OpenXrLayer::ForwardEndFrame(XrSession session,
         OpenXrLayer& layer;
         ~PendingImageGuard() { layer.ReleasePendingOsdImages(); }
     } pending_guard{*this};
+    if (const auto failure = turbo_frame_failure_.load(); XR_FAILED(failure)) return failure;
     ObserveCompositionLayerTopology(frame_end_info);
     if (frame_pacing_debug_enabled_.load(std::memory_order_relaxed) && frame_end_info) {
         std::scoped_lock lock(turbo_mutex_);
@@ -5604,9 +5632,9 @@ XrResult OpenXrLayer::ForwardEndFrame(XrSession session,
         // This is the latest point the pipelined frame must have been fully
         // waited. Some runtimes interlock the wait with the next submit
         // (PiOpenXR, Oculus, Varjo), stalling it until we proceed anyway —
-        // cap the per-frame damage with a short timeout. If it trips, the
-        // future stays valid and no second wait is enqueued below; submitting
-        // is what unblocks the stalled runtime wait.
+        // cap the frame-thread wait. A timeout never grants a begin token:
+        // only an already-begun frame may be submitted while this wait remains
+        // outstanding. Retain the future and interception until it completes.
         constexpr std::chrono::milliseconds kTurboDrainTimeout{250};
         const bool diag_drain = TurboSequencedDebugTick();
         if (diag_drain) {
@@ -5625,6 +5653,12 @@ XrResult OpenXrLayer::ForwardEndFrame(XrSession session,
         if (diag_drain) {
             logger_.Debug("Turbo-diag: async drain completed in " + std::to_string(drain_ms) +
                           "ms, ready=" + std::to_string(ready ? 1 : 0));
+        }
+        if (!ready && !frame_begun) {
+            SuspendTurboForPendingWait(pending_async_generation);
+            turbo_last_frame_blocked_ms_ = frame_blocked_ms;
+            abandon_end_frame_window();
+            return XR_ERROR_RUNTIME_FAILURE;
         }
         XrResult async_wait_result = XR_SUCCESS;
         bool handed_over = false;
@@ -5663,6 +5697,7 @@ XrResult OpenXrLayer::ForwardEndFrame(XrSession session,
                          "); frame pacing continues on the application's frame thread for this session.");
         }
         if (ready && XR_FAILED(async_wait_result)) {
+            NoteTurboRuntimeFailure(async_wait_result, 0, TurboFrameOperation::kWait);
             abandon_end_frame_window();
             return async_wait_result;
         }
@@ -5696,6 +5731,8 @@ XrResult OpenXrLayer::ForwardEndFrame(XrSession session,
             if (XR_FAILED(begin_result)) {
                 logger_.Error("Turbo: deferred xrBeginFrame failed with " +
                               std::to_string(static_cast<int>(begin_result)));
+                NoteTurboRuntimeFailure(begin_result, frame_end_info ? frame_end_info->displayTime : 0,
+                                        TurboFrameOperation::kBegin);
                 abandon_end_frame_window();
                 return begin_result;
             }
@@ -5747,12 +5784,17 @@ XrResult OpenXrLayer::ForwardEndFrame(XrSession session,
             if (XR_FAILED(begin_result)) {
                 logger_.Error("Turbo: compensation xrBeginFrame failed with " +
                               std::to_string(static_cast<int>(begin_result)));
+                NoteTurboRuntimeFailure(begin_result, frame_end_info ? frame_end_info->displayTime : 0,
+                                        TurboFrameOperation::kBegin);
                 abandon_end_frame_window();
                 return begin_result;
             }
         } else {
             logger_.Error("Turbo: compensation xrWaitFrame failed with " +
                           std::to_string(static_cast<int>(comp_result)) + ".");
+            NoteTurboRuntimeFailure(comp_result, 0, TurboFrameOperation::kWait);
+            abandon_end_frame_window();
+            return comp_result;
         }
     }
 
@@ -5900,10 +5942,9 @@ XrResult OpenXrLayer::ForwardEndFrame(XrSession session,
                         std::scoped_lock lock(turbo_mutex_);
                         turbo_frame_begun_ = true;
                     } else {
-                        // Session state advanced under us; the next EndFrame's
-                        // compensation path re-establishes the sequence.
                         logger_.Error("Turbo: sequenced xrBeginFrame failed with " +
                                       std::to_string(static_cast<int>(begin_result)));
+                        NoteTurboRuntimeFailure(begin_result, 0, TurboFrameOperation::kBegin);
                     }
                     // The wait cannot be capped, but it can be judged after
                     // the fact: a post-submit wait that blocks far beyond
@@ -5922,6 +5963,7 @@ XrResult OpenXrLayer::ForwardEndFrame(XrSession session,
                     logger_.Error("Turbo: sequenced xrWaitFrame failed with " +
                                   std::to_string(static_cast<int>(wait_result)) +
                                   "; keeping previous frame timing.");
+                    NoteTurboRuntimeFailure(wait_result, 0, TurboFrameOperation::kWait);
                 }
             }
         } else if (turbo_engaged || keep_async_pipeline) {
@@ -6022,10 +6064,11 @@ XrResult OpenXrLayer::ForwardEndFrame(XrSession session,
             std::scoped_lock lock(turbo_mutex_);
             turbo_frame_begun_ = true;
         } else {
-            // The app already saw XR_SUCCESS for the swallowed begin; log and
-            // let the next EndFrame's compensation path re-establish.
+            // The app already saw XR_SUCCESS for the swallowed begin. Stop
+            // forwarding instead of guessing whether the rejection consumed it.
             logger_.Error("Turbo: deferred establishment xrBeginFrame failed with " +
                           std::to_string(static_cast<int>(begin_result)));
+            NoteTurboRuntimeFailure(begin_result, 0, TurboFrameOperation::kBegin);
         }
     }
 
@@ -6243,17 +6286,37 @@ bool OpenXrLayer::TryTurboAutoFallbackLocked(const std::string& reason) {
     return true;
 }
 
-void OpenXrLayer::NoteTurboRuntimeFailure(XrResult result, XrTime submitted_display_time) {
+void OpenXrLayer::NoteTurboRuntimeFailure(XrResult result, XrTime submitted_display_time,
+                                          TurboFrameOperation operation) {
+    std::scoped_lock lock(mutex_);
     // A failure breaks the stability window even below the suspension threshold.
     turbo_stable_accumulated_ms_ = 0.0;
     if (result == XR_ERROR_SESSION_LOST || result == XR_ERROR_INSTANCE_LOST ||
         result == XR_ERROR_SESSION_NOT_RUNNING) return;
-    if (++turbo_runtime_error_streak_ < 3 || turbo_auto_suspended_.load()) return;
-    std::scoped_lock lock(mutex_);
+    const bool restart_required = operation != TurboFrameOperation::kEnd ||
+                                  result == XR_ERROR_CALL_ORDER_INVALID;
+    // A successful EndFrame must not erase a failed post-submit wait/begin.
+    // That runtime call may have consumed state even on failure; keep frame
+    // forwarding stopped until a new session establishes known ownership.
+    if (restart_required) {
+        XrResult expected = XR_SUCCESS;
+        if (!turbo_frame_failure_.compare_exchange_strong(expected, result)) return;
+    } else if (++turbo_runtime_error_streak_ < 3 || turbo_auto_suspended_.load()) {
+        return;
+    }
+    const char* operation_name = operation == TurboFrameOperation::kWait ? "xrWaitFrame" :
+                                 operation == TurboFrameOperation::kBegin ? "xrBeginFrame" : "xrEndFrame";
+    const char* fault_event = operation == TurboFrameOperation::kWait ? "fault.wait" :
+                              operation == TurboFrameOperation::kBegin ? "fault.begin" : "fault.end";
+    turbo_trace_.Burst();
+    turbo_trace_.Record(fault_event, 0, result, submitted_display_time, restart_required);
     const std::string error = result == XR_ERROR_TIME_INVALID
         ? "XR_ERROR_TIME_INVALID (-30): runtime rejected the submitted display time"
+        : result == XR_ERROR_CALL_ORDER_INVALID
+        ? "XR_ERROR_CALL_ORDER_INVALID (-37): runtime frame ownership is uncertain"
         : "runtime error " + std::to_string(static_cast<int>(result));
-    const std::string reason = "Three consecutive xrEndFrame failures in " + std::string(ToString(turbo_pacing_mode_)) +
+    const std::string reason = (restart_required ? std::string(operation_name) + " failed in " :
+        "Three consecutive xrEndFrame failures in ") + std::string(ToString(turbo_pacing_mode_)) +
         " pacing. " + error + ".";
     {
         std::scoped_lock timing_lock(turbo_mutex_);
@@ -6261,7 +6324,7 @@ void OpenXrLayer::NoteTurboRuntimeFailure(XrResult result, XrTime submitted_disp
             ", latestRuntimeDisplayTime=" + std::to_string(turbo_last_predicted_display_time_) +
             ", displayPeriod=" + std::to_string(turbo_last_predicted_display_period_) + ".");
     }
-    if (TryTurboAutoFallbackLocked(reason)) {
+    if (!restart_required && TryTurboAutoFallbackLocked(reason)) {
         // A rejected submit cannot take the normal success-only establishment
         // path. Let the application's next WaitFrame establish sequenced mode.
         std::scoped_lock timing_lock(turbo_mutex_);
@@ -6272,8 +6335,39 @@ void OpenXrLayer::NoteTurboRuntimeFailure(XrResult result, XrTime submitted_disp
     turbo_auto_suspended_.store(true);
     turbo_effective_active_.store(false);
     turbo_pacing_verdict_pending_ = false;
-    turbo_recovery_.Fail(reason + " Turbo suspended. Restart the VR session if presentation does not recover.");
+    turbo_recovery_.Fail(reason + (restart_required ?
+        " Turbo suspended. Restart the VR session; queued frame calls will not be retried." :
+        " Turbo suspended. Restart the VR session if presentation does not recover."));
+    {
+        std::scoped_lock timing_lock(turbo_mutex_);
+        turbo_valve_open_ = false;
+        turbo_async_handoff_cv_.notify_all();
+        turbo_valve_cv_.notify_all();
+    }
     logger_.Error("Turbo: " + reason + " Turbo suspended.");
+    SoundPlayer::Instance().PlayTransition(resolved_settings_.turbo.toggle_binding.sound, false,
+        dll_directory_, resolved_settings_.core.sound_volume, L"turbo-on.wav", L"turbo-off.wav");
+}
+
+void OpenXrLayer::SuspendTurboForPendingWait(std::uint64_t generation) {
+    std::scoped_lock lock(mutex_);
+    turbo_stable_accumulated_ms_ = 0.0;
+    ++turbo_probe_timeout_total_;
+    if (turbo_auto_suspended_.exchange(true)) return;
+    turbo_effective_active_.store(false);
+    turbo_pacing_verdict_pending_ = false;
+    const std::string reason = "xrWaitFrame is still pending after 250ms; no runtime frame has been begun. "
+        "Turbo suspended without issuing an unmatched xrBeginFrame/xrEndFrame. "
+        "The owned wait is retained until completion; restart the VR application if it remains stalled.";
+    turbo_recovery_.Fail(reason);
+    logger_.Error("Turbo: " + reason);
+    turbo_trace_.Burst();
+    turbo_trace_.Record("drain.unresolved", generation);
+    {
+        std::scoped_lock timing_lock(turbo_mutex_);
+        turbo_valve_open_ = false;
+        turbo_valve_cv_.notify_all();
+    }
     SoundPlayer::Instance().PlayTransition(resolved_settings_.turbo.toggle_binding.sound, false,
         dll_directory_, resolved_settings_.core.sound_volume, L"turbo-on.wav", L"turbo-off.wav");
 }
@@ -6886,6 +6980,7 @@ void OpenXrLayer::ResetTurboFrameState() {
     // Join it before taking that mutex ourselves; destroying the last async
     // shared state under the lock would otherwise deadlock teardown.
     DrainTurboAsyncWait();
+    turbo_frame_failure_.store(XR_SUCCESS);
     end_frame_error_log_budget_ = 5;
     submission_transition_log_budget_ = 8;
     app_submitting_layers_.reset();

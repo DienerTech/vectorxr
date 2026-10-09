@@ -946,7 +946,13 @@ class OpenXrLayer {
     std::atomic<int> turbo_runtime_error_streak_{0};
     std::atomic<bool> turbo_effective_active_{false};
     std::atomic<bool> turbo_effective_async_{false};
-    void NoteTurboRuntimeFailure(XrResult result, XrTime submitted_display_time);
+    enum class TurboFrameOperation { kWait, kBegin, kEnd };
+    // A rejected wait/begin leaves consumption of the runtime frame uncertain.
+    // Preserve the result until session reset; never guess a compensating call.
+    std::atomic<XrResult> turbo_frame_failure_{XR_SUCCESS};
+    void NoteTurboRuntimeFailure(XrResult result, XrTime submitted_display_time,
+                                 TurboFrameOperation operation = TurboFrameOperation::kEnd);
+    void SuspendTurboForPendingWait(std::uint64_t generation);
     // Info once per pipelining engage/release cycle; small Debug budget for the
     // first fabricated xrWaitFrame returns of each cycle.
     bool turbo_pipelining_logged_{false};
