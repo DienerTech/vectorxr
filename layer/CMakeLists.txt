@@ -196,6 +196,9 @@ if(WIN32 AND DEPTHXR_BUILD_LAYER)
         src/framegen/framegen_presenter.cpp
         src/framegen/framegen_runtime_queue.cpp
         src/framegen/framegen_d3d11_bridge.cpp
+        src/framegen/framegen_vulkan_bridge.cpp
+        src/framegen/framegen_vulkan_formats.cpp
+        src/framegen/vulkan_enable_hooks.cpp
         src/framegen/framegen_d3d11.cpp
         src/framegen/framegen_d3d12.cpp
         src/framegen/framegen_vulkan.cpp
@@ -459,6 +462,85 @@ if(WIN32 AND DEPTHXR_BUILD_LAYER)
         add_test(NAME depthxr_d3d11_bridge_layer_hw_tests COMMAND depthxr_d3d11_bridge_layer_tests hw)
         set_tests_properties(depthxr_d3d11_bridge_layer_tests depthxr_d3d11_bridge_layer_hw_tests PROPERTIES
                              TIMEOUT 180 SKIP_RETURN_CODE 77)
+
+        # Khronos validation for the Vulkan bridge's tests: the Vulkan SDK's
+        # layer, or a VkLayer_khronos_validation.dll named here, copied into the
+        # build tree with a manifest of its own (tests run unvalidated, with a
+        # warning, when there is none).
+        set(DEPTHXR_VULKAN_VALIDATION_LAYER "" CACHE FILEPATH
+            "VkLayer_khronos_validation.dll for the Vulkan bridge tests (default: the Vulkan SDK's)")
+        set(_vk_layer_source "${DEPTHXR_VULKAN_VALIDATION_LAYER}")
+        if(NOT _vk_layer_source AND DEFINED ENV{VULKAN_SDK} AND EXISTS "$ENV{VULKAN_SDK}/Bin/VkLayer_khronos_validation.dll")
+            set(_vk_layer_source "$ENV{VULKAN_SDK}/Bin/VkLayer_khronos_validation.dll")
+        endif()
+        set(_vk_layer_dir "")
+        if(_vk_layer_source AND EXISTS "${_vk_layer_source}")
+            set(_vk_layer_dir "${CMAKE_CURRENT_BINARY_DIR}/vulkan_layers")
+            file(MAKE_DIRECTORY "${_vk_layer_dir}")
+            file(COPY "${_vk_layer_source}" DESTINATION "${_vk_layer_dir}")
+            get_filename_component(_vk_layer_name "${_vk_layer_source}" NAME)
+            file(WRITE "${_vk_layer_dir}/VkLayer_khronos_validation.json"
+"{
+    \"file_format_version\": \"1.2.0\",
+    \"layer\": {
+        \"name\": \"VK_LAYER_KHRONOS_validation\",
+        \"type\": \"GLOBAL\",
+        \"library_path\": \".\\\\${_vk_layer_name}\",
+        \"api_version\": \"1.3.290\",
+        \"implementation_version\": \"1\",
+        \"description\": \"Khronos validation layer for the VectorXR tests\",
+        \"instance_extensions\": [
+            { \"name\": \"VK_EXT_debug_report\", \"spec_version\": \"9\" },
+            { \"name\": \"VK_EXT_debug_utils\", \"spec_version\": \"2\" },
+            { \"name\": \"VK_EXT_layer_settings\", \"spec_version\": \"2\" },
+            { \"name\": \"VK_EXT_validation_features\", \"spec_version\": \"6\" }
+        ],
+        \"device_extensions\": [
+            { \"name\": \"VK_EXT_tooling_info\", \"spec_version\": \"1\",
+              \"entrypoints\": [ \"vkGetPhysicalDeviceToolPropertiesEXT\" ] }
+        ]
+    }
+}
+")
+            message(STATUS "Vulkan bridge tests validate with ${_vk_layer_source}")
+        else()
+            message(STATUS "Vulkan bridge tests: no Khronos validation layer (set DEPTHXR_VULKAN_VALIDATION_LAYER)")
+        endif()
+        # On a machine that has the GPU and the validation layer, the Vulkan
+        # bridge's suites must run validated: a skip (77) then fails them.
+        option(DEPTHXR_REQUIRE_HW_TESTS "The Vulkan bridge tests fail instead of skipping without a GPU or validation" OFF)
+        file(TO_NATIVE_PATH "${_vk_layer_dir}" _vk_layer_dir_native)
+        string(REPLACE "\\" "\\\\" _vk_layer_dir_define "${_vk_layer_dir_native}")
+
+        # Frame Generation's Vulkan bridge: its pure parts, and its shared images
+        # and fences on a GPU (there is no software Vulkan device that shares
+        # memory with Direct3D 12, so there is no WARP variant).
+        add_executable(depthxr_vulkan_bridge_tests tests/vulkan_bridge_tests.cpp)
+        target_link_libraries(depthxr_vulkan_bridge_tests PRIVATE depthxr_framegen d3d12 dxgi)
+        target_compile_definitions(depthxr_vulkan_bridge_tests PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX
+            XR_USE_GRAPHICS_API_D3D12 XR_USE_GRAPHICS_API_VULKAN
+            "DEPTHXR_VULKAN_LAYER_DIR=\"${_vk_layer_dir_define}\"")
+        add_test(NAME depthxr_vulkan_bridge_tests COMMAND depthxr_vulkan_bridge_tests)
+        set_tests_properties(depthxr_vulkan_bridge_tests PROPERTIES TIMEOUT 120 SKIP_RETURN_CODE 77)
+        # The Vulkan bridge through the layer's own hooks with a Vulkan game
+        # against the stand-in runtime of the Direct3D 11 bridge's layer tests.
+        # Only the test sees the Vulkan and Direct3D 12 OpenXR types.
+        add_executable(depthxr_vulkan_bridge_layer_tests tests/vulkan_bridge_layer_tests.cpp src/openxr_layer.cpp
+            src/layer_entry.cpp)
+        set_source_files_properties(tests/vulkan_bridge_layer_tests.cpp PROPERTIES
+            COMPILE_DEFINITIONS "XR_USE_GRAPHICS_API_D3D12;XR_USE_GRAPHICS_API_VULKAN")
+        target_include_directories(depthxr_vulkan_bridge_layer_tests PRIVATE include)
+        target_link_libraries(depthxr_vulkan_bridge_layer_tests PRIVATE depthxr_core depthxr_osd depthxr_framegen
+            OpenXR::openxr_loader d3d11 d3d12 d3dcompiler dxgi shlwapi)
+        target_compile_definitions(depthxr_vulkan_bridge_layer_tests PRIVATE DEPTHXR_TESTING
+            WIN32_LEAN_AND_MEAN NOMINMAX XR_USE_GRAPHICS_API_D3D11 VECTORXR_VERSION="${_vectorxr_version}"
+            "DEPTHXR_VULKAN_LAYER_DIR=\"${_vk_layer_dir_define}\"")
+        add_test(NAME depthxr_vulkan_bridge_layer_tests COMMAND depthxr_vulkan_bridge_layer_tests)
+        set_tests_properties(depthxr_vulkan_bridge_layer_tests PROPERTIES TIMEOUT 180 SKIP_RETURN_CODE 77)
+        if(DEPTHXR_REQUIRE_HW_TESTS)
+            set_tests_properties(depthxr_vulkan_bridge_tests depthxr_vulkan_bridge_layer_tests PROPERTIES
+                                 ENVIRONMENT "VECTORXR_TESTS_REQUIRE_HW=1")
+        endif()
     endif()
 endif()
 
