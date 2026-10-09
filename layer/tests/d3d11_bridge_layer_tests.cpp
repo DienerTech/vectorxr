@@ -566,6 +566,9 @@ struct StandIn {
     std::function<void(XrSwapchain)> on_destroy_swapchain;
     std::function<void()> on_destroy_session;
     std::function<void()> on_destroy_instance; // before a session still alive goes with the instance
+    // At each xrEndFrame, with the frame's views as the stand-in took them,
+    // before it reads them back.
+    std::function<void(const XrFrameEndInfo&, ShownFrame&)> on_end_frame;
     XrTime time{1'000'000'000};
     std::chrono::steady_clock::time_point refresh{}; // paced: the refresh the last wait returned at
     // The frame loop as the stand-in saw it: every begin follows a wait of its
@@ -1162,6 +1165,9 @@ XrResult XRAPI_CALL RtEndFrame(XrSession, const XrFrameEndInfo* info) {
             }
             frame.views.push_back(shown);
         }
+    }
+    if (rt.on_end_frame) {
+        rt.on_end_frame(*info, frame);
     }
     std::vector<Color> texels;
     bool read = false;
@@ -3529,6 +3535,648 @@ void TestBridgedQuadDeviceLost(Game& game) {
     std::cout << name << ": the session was lost, its teardown took " << seconds << " s\n";
 }
 
+// --- X-Plane's shapes -------------------------------------------------------
+
+// The side-by-side image's halves in frame `frame`: each eye's differs from
+// the other eye's in blue whatever the frame (so a frame generated from
+// either half shows its eye's), and from those of the seven frames before it.
+Color SideBySideColor(int frame, int eye) {
+    return {static_cast<std::uint8_t>(20 + 29 * (frame % 8)), static_cast<std::uint8_t>(230 - 23 * (frame % 8)),
+            static_cast<std::uint8_t>(eye ? 220 : 60), 255};
+}
+
+// The quad layer's at the game's `release`th release of its swapchain: it
+// differs from those of the fifteen releases before it.
+Color QuadLayerColor(int release) {
+    return {static_cast<std::uint8_t>(250 - 13 * (release % 16)), 120,
+            static_cast<std::uint8_t>(10 + 15 * (release % 16)), 255};
+}
+
+// Each eye's view of the side-by-side session, and the quad layer's swapchain.
+constexpr std::uint32_t kSideBySideEyeWidth = 128;
+constexpr std::uint32_t kSideBySideEyeHeight = 96;
+constexpr std::uint32_t kQuadLayerSize = 128;
+// How long the game's GPU work of a loaded frame takes (three refreshes).
+constexpr DWORD kGameLoadMs = 30;
+
+// X-Plane's swapchains: sRGB, with no usage asked for.
+XrSwapchainCreateInfo XPlaneInfo(std::uint32_t width, std::uint32_t height) {
+    XrSwapchainCreateInfo info = ColorInfo(1, width, height);
+    info.usageFlags = 0;
+    return info;
+}
+
+// Each half of `image` (its first slice) cleared to its eye's colour.
+void ClearHalves(Game& game, ID3D11Texture2D* image, const std::array<Color, 2>& colors) {
+    D3D11_TEXTURE2D_DESC desc{};
+    image->GetDesc(&desc);
+    D3D11_RENDER_TARGET_VIEW_DESC view{};
+    view.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    view.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2DARRAY;
+    view.Texture2DArray.ArraySize = 1;
+    ComPtr<ID3D11RenderTargetView> target;
+    Check(SUCCEEDED(game.device->CreateRenderTargetView(image, &view, &target)), "a render-target view of an image");
+    for (std::uint32_t eye = 0; eye < 2; ++eye) {
+        const D3D11_RECT half{static_cast<LONG>(eye * desc.Width / 2), 0, static_cast<LONG>((eye + 1) * desc.Width / 2),
+                              static_cast<LONG>(desc.Height)};
+        const Color& color = colors[eye];
+        const float rgba[4] = {color[0] / 255.0f, color[1] / 255.0f, color[2] / 255.0f, color[3] / 255.0f};
+        game.context4->ClearView(target.Get(), rgba, &half, 1);
+    }
+}
+
+// A GPU-bound game: its Direct3D 11 work of a frame held back from just
+// before its rendering for kGameLoadMs, each hold opened by a thread of its
+// own, which first notes when, and how far the stand-in's marks on the
+// runtime's queue (StandIn::readback, one at each xrEndFrame) had run by then.
+struct GameLoad {
+    using Clock = std::chrono::steady_clock;
+    // A mark made this long before a hold opened that had not run by then
+    // waited for it: nothing else on the runtime's queue takes this long.
+    static constexpr std::chrono::milliseconds kTell{15};
+    struct Hold {
+        std::unique_ptr<Gate> gate;
+        std::thread opener;
+        bool open{false};
+        Clock::time_point opened;
+        UINT64 marks_at_open{0};
+    };
+    ComPtr<ID3D12Fence> marks;
+    std::mutex mutex;
+    std::deque<Hold> holds;
+
+    explicit GameLoad(ID3D12Fence* fence) : marks(fence) {}
+    GameLoad(const GameLoad&) = delete;
+    GameLoad& operator=(const GameLoad&) = delete;
+    ~GameLoad() { Finish(); }
+
+    void HoldGame(Game& game) {
+        std::scoped_lock lock(mutex);
+        Hold& hold = holds.emplace_back();
+        hold.gate = std::make_unique<Gate>(g_runtime.device12.Get(), game);
+        hold.gate->HoldGame(game);
+        hold.opener = std::thread([this, &hold] {
+            Sleep(kGameLoadMs);
+            {
+                std::scoped_lock opening(mutex);
+                hold.marks_at_open = marks->GetCompletedValue();
+                hold.opened = Clock::now();
+                hold.open = true;
+            }
+            hold.gate->Open();
+        });
+    }
+    // A mark of `value` on `queue`, after everything queued there, made at
+    // `at`: the hold still closed meanwhile, if any.
+    std::optional<std::size_t> Mark(ID3D12CommandQueue* queue, UINT64 value, Clock::time_point& at) {
+        std::scoped_lock lock(mutex);
+        queue->Signal(marks.Get(), value);
+        at = Clock::now();
+        for (std::size_t i = 0; i < holds.size(); ++i) {
+            if (!holds[i].open) return i;
+        }
+        return std::nullopt;
+    }
+    // Every hold opened.
+    void Finish() {
+        for (Hold& hold : holds) {
+            if (hold.opener.joinable()) hold.opener.join();
+        }
+    }
+    // Whether the mark `value`, made at `at` while hold `index` was closed,
+    // was reached only once the hold opened (the runtime's queue waited for
+    // the game's work); none when it was made too shortly before to tell.
+    std::optional<bool> Waited(std::size_t index, UINT64 value, Clock::time_point at) {
+        std::scoped_lock lock(mutex);
+        const Hold& hold = holds[index];
+        if (!hold.open || hold.opened - at < kTell) return std::nullopt;
+        return value > hold.marks_at_open;
+    }
+};
+
+// What the stand-in saw of each frame beyond its views (by its index in
+// StandIn::frames).
+struct SideBySideShown {
+    std::uint32_t layers{0};
+    bool projection_first{false};
+    std::array<XrRect2Di, 2> rects{};  // the projection's views'
+    bool quad_layer{false};            // the game's quad layer, after the projection
+    std::optional<Color> quad_texel;   // what it showed, read on the runtime's queue
+    int quad_releases{0};              // the game's releases of its swapchain the runtime had by then
+    double latency_ms{0.0};            // from xrEndFrame until the runtime's queue reached the frame
+    std::optional<std::size_t> during; // the game's hold (GameLoad) still closed at xrEndFrame
+    UINT64 mark{0};
+    GameLoad::Clock::time_point marked;
+};
+
+// The X-Plane-shaped game: its session and swapchains, what it rendered.
+struct SideBySideSession {
+    App app;
+    std::unique_ptr<SessionCreate> create;
+    Target eyes;  // both eyes side by side
+    Target ui;    // the quad layer's
+    Target depth; // both eyes' depth side by side
+    int frames{0};
+    int ui_releases{0};
+};
+
+// What a side-by-side frame does beyond rendering both eyes.
+struct SideBySideFrameOptions {
+    bool quad_layer{true};   // the UI rendered, released and submitted as a quad layer after the projection
+    bool depth{false};       // depth rendered and chained to each view, its half
+    GameLoad* load{nullptr}; // the game's work held back from before the eyes' rendering
+};
+
+// One frame of the X-Plane-shaped game: both eyes rendered into their halves
+// of one image and released, depth likewise, then the UI rendered and
+// released; submitted as a stereo projection naming each eye's half by its
+// rectangle, then the UI's quad layer.
+void SideBySideFrame(SideBySideSession& session, Game& game, const SideBySideFrameOptions& options) {
+    App& app = session.app;
+    const int frame = session.frames++;
+    const std::string at = "side-by-side frame " + std::to_string(frame);
+    XrFrameWaitInfo wait_info{XR_TYPE_FRAME_WAIT_INFO};
+    XrFrameState state{XR_TYPE_FRAME_STATE};
+    Check(app.api.wait_frame(app.session, &wait_info, &state) == XR_SUCCESS, at + ": xrWaitFrame");
+    XrFrameBeginInfo begin_info{XR_TYPE_FRAME_BEGIN_INFO};
+    Check(app.api.begin_frame(app.session, &begin_info) == XR_SUCCESS, at + ": xrBeginFrame");
+    XrViewLocateInfo locate{XR_TYPE_VIEW_LOCATE_INFO};
+    locate.viewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
+    locate.displayTime = state.predictedDisplayTime;
+    locate.space = app.space;
+    XrViewState view_state{XR_TYPE_VIEW_STATE};
+    std::array<XrView, 2> located{};
+    for (XrView& view : located) view.type = XR_TYPE_VIEW;
+    std::uint32_t located_count = 0;
+    Check(app.api.locate_views(app.session, &locate, &view_state, 2, &located_count, located.data()) == XR_SUCCESS &&
+              located_count == 2,
+          at + ": xrLocateViews");
+
+    const std::uint32_t eyes_index = Acquire(app, session.eyes);
+    const std::uint32_t depth_index = options.depth ? Acquire(app, session.depth) : 0;
+    const std::uint32_t ui_index = options.quad_layer ? Acquire(app, session.ui) : 0;
+    if (options.load) {
+        options.load->HoldGame(game);
+    }
+    ClearHalves(game, session.eyes.images[eyes_index], {SideBySideColor(frame, 0), SideBySideColor(frame, 1)});
+    if (options.depth) {
+        ClearDepth(game, session.depth.images[depth_index], 0);
+    }
+    Release(app, session.eyes);
+    if (options.depth) {
+        Release(app, session.depth);
+    }
+    if (options.quad_layer) {
+        Draw(game, session.ui.images[ui_index], QuadLayerColor(session.ui_releases++));
+        Release(app, session.ui);
+    }
+
+    XrBaseInStructure after_depth{kApplicationStructType};
+    std::array<XrCompositionLayerDepthInfoKHR, 2> depth_infos{};
+    std::array<XrCompositionLayerProjectionView, 2> views{};
+    for (std::uint32_t eye = 0; eye < 2; ++eye) {
+        const XrRect2Di half{{static_cast<std::int32_t>(eye * kSideBySideEyeWidth), 0},
+                             {static_cast<std::int32_t>(kSideBySideEyeWidth),
+                              static_cast<std::int32_t>(kSideBySideEyeHeight)}};
+        views[eye] = {XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW};
+        views[eye].pose = located[eye].pose;
+        views[eye].fov = located[eye].fov;
+        views[eye].subImage.swapchain = session.eyes.swapchain;
+        views[eye].subImage.imageRect = half;
+        if (options.depth) {
+            depth_infos[eye] = {XR_TYPE_COMPOSITION_LAYER_DEPTH_INFO_KHR};
+            depth_infos[eye].next = &after_depth;
+            depth_infos[eye].subImage.swapchain = session.depth.swapchain;
+            depth_infos[eye].subImage.imageRect = half;
+            depth_infos[eye].minDepth = 0.0f;
+            depth_infos[eye].maxDepth = 1.0f;
+            depth_infos[eye].nearZ = 0.05f;
+            depth_infos[eye].farZ = 1000.0f;
+            views[eye].next = &depth_infos[eye];
+        }
+    }
+    XrCompositionLayerProjection projection{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
+    projection.space = app.space;
+    projection.viewCount = 2;
+    projection.views = views.data();
+    XrCompositionLayerQuad ui{XR_TYPE_COMPOSITION_LAYER_QUAD};
+    ui.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
+    ui.space = app.space;
+    ui.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
+    ui.subImage.swapchain = session.ui.swapchain;
+    ui.subImage.imageRect = {{0, 0}, {static_cast<std::int32_t>(kQuadLayerSize), static_cast<std::int32_t>(kQuadLayerSize)}};
+    ui.pose = {{0, 0, 0, 1}, {0, 0, -1.0f}};
+    ui.size = {0.6f, 0.6f};
+    const XrCompositionLayerBaseHeader* layers[] = {reinterpret_cast<const XrCompositionLayerBaseHeader*>(&projection),
+                                                    reinterpret_cast<const XrCompositionLayerBaseHeader*>(&ui)};
+    XrFrameEndInfo end{XR_TYPE_FRAME_END_INFO};
+    end.displayTime = state.predictedDisplayTime;
+    end.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
+    end.layerCount = options.quad_layer ? 2 : 1;
+    end.layers = layers;
+    const XrResult result = app.api.end_frame(app.session, &end);
+    Check(result == XR_SUCCESS, at + ": xrEndFrame " + std::to_string(result));
+}
+
+// The real frame (frames mod 8) whose eye `eye` `texel` shows, or none.
+std::optional<int> SideBySideFrameOf(const std::optional<Color>& texel, int eye) {
+    for (int frame = 0; frame < 8; ++frame) {
+        if (Near(texel, SideBySideColor(frame, eye))) return frame;
+    }
+    return std::nullopt;
+}
+
+// `values`' median and largest.
+std::string Spread(std::vector<double> values) {
+    if (values.empty()) return "none";
+    std::sort(values.begin(), values.end());
+    std::ostringstream text;
+    text << std::fixed << std::setprecision(1) << "p50 " << values[values.size() / 2] << " ms, max " << values.back()
+         << " ms";
+    return text.str();
+}
+
+// 14. An X-Plane-shaped bridged session (X-Plane 12 renders through Direct3D
+// 11 to OpenXR), Frame Generation on the real Direct3D 12 backend (on the
+// bridge's device) at 2x in `mode`, its presenter paced by the stand-in: the
+// game renders both eyes into one sRGB swapchain asked for with no usage, its
+// views naming each eye's half by its rectangle, and renders and releases
+// a small UI swapchain every frame, submitted as a quad layer after the
+// projection. The session is bridged; once engaged, every refresh shows
+// Frame Generation's outputs, each eye its own half (real frames as the
+// game rendered both halves, generated ones between or after them); the
+// quad layer reaches the runtime on every refresh, after the projection,
+// showing what the game rendered for its latest release (its rendering
+// done: read on the runtime's queue). Under a GPU load on the game (its work
+// of each frame held back for three refreshes) the quad layer still shows
+// that on every refresh, which costs what the stand-in measures and the case
+// prints: a released layer Frame Generation does not capture makes the
+// runtime's queue wait for the game's frame before each generated frame
+// queued after the release. A game without the quad layer is measured alike
+// for comparison. Depth the game submits in the same shape (one swapchain,
+// each eye's half) never reaches the runtime, Frame Generation on or off,
+// and colour is still captured and shown through Frame Generation.
+void TestSideBySideFrameGen(Game& game, const std::string& mode) {
+    CaseSettings settings;
+    settings.frame_multiplier = "2x";
+    settings.synthesis_mode = mode;
+    BeginCase("side-by-side-framegen-" + mode, game, settings);
+    g_runtime.recommended_width = kSideBySideEyeWidth;
+    g_runtime.recommended_height = kSideBySideEyeHeight;
+    g_runtime.paced = true;
+    {
+        std::scoped_lock lock(g_runtime_mutex);
+        // Each eye's half of the side-by-side image (the whole of an eye's
+        // own output image).
+        g_runtime.probes = {{0.25f, 0.5f}, {0.75f, 0.5f}};
+    }
+    Peer::SetFrameGenEngagement(2, std::chrono::milliseconds(0));
+    Peer::UseFrameGenGpu(depthxr::CreateFrameGenGpu);
+    SideBySideSession session;
+    App& app = session.app;
+    app = StartApp();
+    session.create = std::make_unique<SessionCreate>(game.device.Get(), app.system);
+    Check(app.api.create_session(app.api.instance, &session.create->info, &app.session) == XR_SUCCESS &&
+              Peer::Bridge().Active() && g_runtime.binding == XR_TYPE_GRAPHICS_BINDING_D3D12_KHR &&
+              Peer::QueueSubstituted(),
+          "the side-by-side session is bridged");
+    Check(Count(Peer::Log(), kBridgedSessionLine) == 1, "the log tells once that the session is bridged");
+    BeginSession(app);
+    session.eyes = MakeTarget(app, XPlaneInfo(2 * kSideBySideEyeWidth, kSideBySideEyeHeight), "both eyes side by side");
+    session.ui = MakeTarget(app, XPlaneInfo(kQuadLayerSize, kQuadLayerSize), "the quad layer's");
+    XrSwapchainCreateInfo depth_info = DepthInfo(1);
+    depth_info.width = 2 * kSideBySideEyeWidth;
+    depth_info.height = kSideBySideEyeHeight;
+    session.depth = MakeTarget(app, depth_info, "both eyes' depth side by side");
+    {
+        std::scoped_lock lock(g_runtime_mutex);
+        const StandInSwapchain* eyes = FindSwapchain(session.eyes.swapchain);
+        const StandInSwapchain* ui = FindSwapchain(session.ui.swapchain);
+        Check(eyes && ui && eyes->info.width == 2 * kSideBySideEyeWidth && eyes->info.format == 29 &&
+                  (eyes->info.usageFlags & XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT) &&
+                  (eyes->info.usageFlags & XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT) && ui->info.width == kQuadLayerSize &&
+                  (ui->info.usageFlags & XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT),
+              "the runtime's swapchains are the bridge's copy destinations, whatever usage the game asked for");
+    }
+    Check(Peer::Bridge().Bridged(session.eyes.swapchain) && Peer::Bridge().Bridged(session.ui.swapchain) &&
+              Peer::Bridge().Unmirrored(session.depth.swapchain),
+          "both colour swapchains are bridged, depth is the game's own");
+
+    // What the stand-in saw of each frame: its layers, and the runtime's
+    // queue reaching it (with the quad layer read there).
+    std::vector<SideBySideShown> extras;
+    GameLoad* load = nullptr;
+    {
+        std::scoped_lock lock(g_runtime_mutex);
+        g_runtime.on_end_frame = [&](const XrFrameEndInfo& info, ShownFrame&) {
+            StandIn& rt = g_runtime;
+            Check(extras.size() == rt.frames.size(), "the stand-in notes every frame");
+            SideBySideShown shown;
+            shown.layers = info.layerCount;
+            const XrCompositionLayerBaseHeader* first = info.layerCount ? info.layers[0] : nullptr;
+            shown.projection_first = first && first->type == XR_TYPE_COMPOSITION_LAYER_PROJECTION;
+            if (shown.projection_first) {
+                const auto& projection = *reinterpret_cast<const XrCompositionLayerProjection*>(first);
+                for (std::uint32_t v = 0; v < 2 && v < projection.viewCount; ++v) {
+                    shown.rects[v] = projection.views[v].subImage.imageRect;
+                }
+            }
+            const XrCompositionLayerQuad* quad =
+                info.layerCount >= 2 && info.layers[1] && info.layers[1]->type == XR_TYPE_COMPOSITION_LAYER_QUAD
+                    ? reinterpret_cast<const XrCompositionLayerQuad*>(info.layers[1])
+                    : nullptr;
+            shown.quad_layer = quad && quad->subImage.swapchain == session.ui.swapchain;
+            // A mark after everything queued on the runtime's queue: how long
+            // a compositor would wait to show the frame.
+            const auto start = std::chrono::steady_clock::now();
+            shown.mark = ++rt.readback_value;
+            if (load) {
+                shown.during = load->Mark(rt.queue.Get(), shown.mark, shown.marked);
+            } else {
+                rt.queue->Signal(rt.readback.Get(), shown.mark);
+            }
+            Check(WaitFence(rt.readback.Get(), shown.mark, 10000), "the runtime's queue reaches the frame");
+            shown.latency_ms =
+                std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+            const StandInSwapchain* chain = quad ? FindSwapchain(quad->subImage.swapchain) : nullptr;
+            if (shown.quad_layer && chain && chain->released && !chain->images12.empty()) {
+                shown.quad_releases = chain->releases;
+                Readback readback;
+                std::vector<Color> texels;
+                if (SubmitReadback(rt.queue.Get(), rt.readback.Get(), rt.readback_value,
+                                   {{chain->images12[*chain->released].Get(), 0}}, readback) &&
+                    FinishReadback(readback, texels)) {
+                    shown.quad_texel = texels[0];
+                }
+            }
+            extras.push_back(shown);
+        };
+    }
+    const auto run = [&](int frames, const SideBySideFrameOptions& options = {}) {
+        for (int i = 0; i < frames; ++i) {
+            SideBySideFrame(session, game, options);
+        }
+    };
+    // Every frame the runtime showed from `from` on: two views; the quad
+    // layer after the projection (`quad_layer`) showing the game's latest
+    // release; Frame Generation's outputs, or the game's image, each eye
+    // its own half. How many showed Frame Generation's outputs.
+    constexpr auto kEyeWidth = static_cast<std::int32_t>(kSideBySideEyeWidth);
+    constexpr auto kEyeHeight = static_cast<std::int32_t>(kSideBySideEyeHeight);
+    const auto check_shown = [&](std::size_t from, const std::string& at, bool quad_layer) {
+        std::scoped_lock lock(g_runtime_mutex);
+        std::size_t own = 0;
+        for (std::size_t i = from; i < g_runtime.frames.size(); ++i) {
+            const ShownFrame& shown = g_runtime.frames[i];
+            const SideBySideShown& extra = extras[i];
+            const std::string where = at + ", runtime frame " + std::to_string(i);
+            Check(shown.views.size() == 2 && extra.projection_first,
+                  where + ": the runtime gets the projection first, of two views");
+            if (quad_layer) {
+                Check(extra.layers == 2 && extra.quad_layer,
+                      where + ": the quad layer reaches the runtime after the projection (" +
+                          std::to_string(extra.layers) + " layers)");
+                const Color expected = QuadLayerColor(extra.quad_releases - 1);
+                Check(Near(extra.quad_texel, expected),
+                      where + ": the quad layer shows " + (extra.quad_texel ? Text(*extra.quad_texel) : "nothing") +
+                          ", the game's latest release (" + std::to_string(extra.quad_releases) + ") rendered " +
+                          Text(expected));
+            } else {
+                Check(extra.layers == 1, where + ": the projection alone reaches the runtime");
+            }
+            const bool real = shown.views[0].swapchain == session.eyes.swapchain;
+            for (int eye = 0; eye < 2; ++eye) {
+                const ShownView& view = shown.views[eye];
+                const std::string seen = where + " eye " + std::to_string(eye);
+                Check(view.probed.size() == 2, seen + ": the runtime read the frame back");
+                const XrRect2Di& rect = extra.rects[eye];
+                if (real) {
+                    // The game's image itself: the view names its eye's half.
+                    Check(view.swapchain == session.eyes.swapchain && rect.offset.x == eye * kEyeWidth &&
+                              rect.offset.y == 0 && rect.extent.width == kEyeWidth && rect.extent.height == kEyeHeight,
+                          seen + ": the view names its eye's half of the game's image");
+                    const std::optional<int> frame = SideBySideFrameOf(view.probed[0], 0);
+                    Check(frame && Near(view.probed[1], SideBySideColor(*frame, 1)),
+                          seen + ": the image shows one real frame's halves, " + Text(view.probed[0]) + " and " +
+                              Text(view.probed[1]));
+                    continue;
+                }
+                // Frame Generation's own output: its eye alone, the whole image.
+                Check(view.swapchain != session.eyes.swapchain && view.swapchain != session.ui.swapchain &&
+                          view.swapchain != shown.views[1 - eye].swapchain,
+                      seen + ": a frame of Frame Generation's shows an output image of its own for each eye");
+                Check(rect.offset.x == 0 && rect.offset.y == 0 && rect.extent.width == kEyeWidth &&
+                          rect.extent.height == kEyeHeight,
+                      seen + ": the output is the eye's whole image, " + std::to_string(rect.extent.width) + "x" +
+                          std::to_string(rect.extent.height) + " at " + std::to_string(rect.offset.x));
+                const std::uint8_t blue = SideBySideColor(0, eye)[2];
+                for (const Color& texel : view.probed) {
+                    Check(std::abs(static_cast<int>(texel[2]) - blue) <= 1 && texel != Color{0, 0, 0, 255},
+                          seen + ": the output shows its eye's half, " + Text(texel));
+                    bool rendered = false;
+                    for (int frame = 0; frame < 8 && !rendered; ++frame) {
+                        rendered = mode == "interpolate" ? Within(texel, SideBySideColor(frame + 7, eye),
+                                                                  SideBySideColor(frame, eye))
+                                                         : Near(texel, SideBySideColor(frame, eye));
+                    }
+                    Check(rendered, seen + ": the output shows " +
+                                        (mode == "interpolate" ? "a frame between two real ones, "
+                                                               : "a real frame's half, ") +
+                                        Text(texel));
+                }
+            }
+            own += real ? 0 : 1;
+        }
+        return own;
+    };
+
+    // The first frames pass straight through: the game's image, each view its half.
+    run(2);
+    check_shown(0, "passing through", true);
+    // Engaged after two steady frames, until frames are generated between
+    // the real ones (a loaded machine may analyze none in time for a while).
+    run(6);
+    const std::size_t engaged_from = ShownCount();
+    const depthxr::FrameGenStatus engaged = Peer::FrameGen();
+    Check(engaged.threaded, "Frame Generation presents from its own thread");
+    int steady_frames = 0;
+    do {
+        run(24);
+        steady_frames += 24;
+    } while (Peer::FrameGen().generated == 0 && steady_frames < 96);
+    const std::size_t own = check_shown(engaged_from, "steady", true);
+    // Once its first frame is written, every refresh shows Frame
+    // Generation's outputs, but for one it could not write, or whose real
+    // frame was not captured yet (a loaded machine stalls it).
+    const std::vector<ShownFrame> steady = Shown(engaged_from);
+    const auto first_own = std::find_if(steady.begin(), steady.end(), [&](const ShownFrame& shown) {
+        return shown.views[0].swapchain != session.eyes.swapchain;
+    });
+    const std::size_t from_first_own = static_cast<std::size_t>(steady.end() - first_own);
+    depthxr::FrameGenStatus status = Peer::FrameGen();
+    const std::uint64_t unwritten = status.unwritten - engaged.unwritten;
+    const std::uint64_t unready = status.unready_capture - engaged.unready_capture;
+    Check(status.generated > 0 && own >= static_cast<std::size_t>(steady_frames) &&
+              own + unwritten + unready >= from_first_own,
+          "steady: every refresh shows Frame Generation's outputs (" + std::to_string(own) + " of " +
+              std::to_string(from_first_own) + " from its first, " + std::to_string(unwritten) + " not written, " +
+              std::to_string(unready) + " not captured yet; " + std::to_string(status.generated) + " generated)");
+    CheckValidation(game, "steady");
+
+    // The game GPU-bound, with the quad layer and without it: every frame
+    // ended while the game's work was held back, of Frame Generation's
+    // outputs, waited for that work on the runtime's queue or not.
+    struct Backlog {
+        std::size_t during{0}; // frames of Frame Generation's ended while the game's work was held back
+        std::size_t waited{0}; // ...that the runtime's queue reached only once the work could run
+        std::vector<double> latencies; // of those that waited
+        std::vector<double> others;    // of the others
+        std::uint64_t moved{0};    // frames Frame Generation generated meanwhile
+        std::uint64_t repeated{0}; // refreshes it repeated the frame before at
+    };
+    const auto loaded = [&](bool quad_layer, const std::string& at) {
+        Backlog backlog;
+        const depthxr::FrameGenStatus before = Peer::FrameGen();
+        const std::size_t from = ShownCount();
+        {
+            GameLoad game_load(g_runtime.readback.Get());
+            {
+                std::scoped_lock lock(g_runtime_mutex);
+                load = &game_load;
+            }
+            SideBySideFrameOptions options;
+            options.quad_layer = quad_layer;
+            options.load = &game_load;
+            run(16, options);
+            game_load.Finish();
+            std::scoped_lock lock(g_runtime_mutex);
+            load = nullptr;
+            for (std::size_t i = from; i < extras.size(); ++i) {
+                const SideBySideShown& extra = extras[i];
+                const std::vector<ShownView>& views = g_runtime.frames[i].views;
+                if (views.empty() || views[0].swapchain == session.eyes.swapchain) continue;
+                Check(extra.latency_ms < kGameLoadMs + 2000.0,
+                      at + ": the runtime's queue reaches a frame of Frame Generation's within the game's work (" +
+                          std::to_string(extra.latency_ms) + " ms)");
+                const std::optional<bool> waited =
+                    extra.during ? game_load.Waited(*extra.during, extra.mark, extra.marked) : std::nullopt;
+                if (!waited) continue;
+                ++backlog.during;
+                if (*waited) {
+                    ++backlog.waited;
+                    backlog.latencies.push_back(extra.latency_ms);
+                } else {
+                    backlog.others.push_back(extra.latency_ms);
+                }
+            }
+        }
+        // Each frame's content held all the same.
+        check_shown(from, at, quad_layer);
+        const depthxr::FrameGenStatus after = Peer::FrameGen();
+        backlog.moved = after.generated - before.generated;
+        backlog.repeated = after.repeated - before.repeated;
+        return backlog;
+    };
+    const Backlog with_quad = loaded(true, "GPU-bound, with the quad layer");
+    // The game's frames without the quad layer for a while first: frames
+    // shown until one of them is real still have it.
+    SideBySideFrameOptions no_quad_layer;
+    no_quad_layer.quad_layer = false;
+    run(4, no_quad_layer);
+    const Backlog without_quad = loaded(false, "GPU-bound, without the quad layer");
+    const auto describe = [](const Backlog& backlog) {
+        return std::to_string(backlog.waited) + " of " + std::to_string(backlog.during) + " (waited " +
+               Spread(backlog.latencies) + "; the others " + Spread(backlog.others) + "; " +
+               std::to_string(backlog.moved) + " generated, " + std::to_string(backlog.repeated) + " repeated)";
+    };
+    std::cout << g_case << ": KNOWN LIMITATION (the uncaptured-layer backlog): the game's GPU work held back "
+              << kGameLoadMs << " ms a frame, the runtime's queue waited for it before frames of Frame Generation's "
+              << "ended meanwhile: with a quad layer released every frame " << describe(with_quad)
+              << "; without it " << describe(without_quad)
+              << ". While a layer Frame Generation does not capture is shown, its frames wait for the game's.\n";
+    // What the code does today: each release of a swapchain Frame Generation
+    // does not capture queues a wait for the game's work on the runtime's
+    // queue (FrameGenQueueSubstitution::Release), and every frame of its own
+    // queued after it waits there. Should this no longer hold, the backlog
+    // is gone: update this case. Without the quad layer nothing of the
+    // game's is waited for before them.
+    Check(with_quad.waited > 0, "GPU-bound, with the quad layer: frames of Frame Generation's wait for the game's work "
+                                "on the runtime's queue: " +
+                                    describe(with_quad));
+    Check(without_quad.during > 0 && without_quad.waited == 0,
+          "GPU-bound, without the quad layer: no frame of Frame Generation's waits for the game's work: " +
+              describe(without_quad));
+    CheckValidation(game, "GPU-bound");
+
+    // Depth in the same shape (one swapchain, each view's depth its half):
+    // colour still captured and shown through Frame Generation; then, Frame
+    // Generation toggled off, the game's frames reach the runtime as they
+    // are, without the depth (the rest of each view's chain kept).
+    run(4);
+    const depthxr::FrameGenStatus before_depth = Peer::FrameGen();
+    const std::size_t depth_from = ShownCount();
+    SideBySideFrameOptions with_depth;
+    with_depth.depth = true;
+    run(16, with_depth);
+    const std::size_t depth_own = check_shown(depth_from, "depth", true);
+    status = Peer::FrameGen();
+    // Both eyes' halves of (nearly) every release; frames of Frame
+    // Generation's shown from them (moved or written as exact copies).
+    Check(status.captured >= before_depth.captured + 2 * 12 && depth_own >= 12,
+          "depth: colour is still captured and shown through Frame Generation (captured " +
+              std::to_string(status.captured - before_depth.captured) + " in 16 frames, " + std::to_string(depth_own) +
+              " frames of its outputs shown, " + std::to_string(status.generated - before_depth.generated) +
+              " generated)");
+    Check(!Peer::ToggleFrameGen(), "Frame Generation toggled off");
+    run(4, with_depth); // frames already in flight end through Frame Generation
+    const std::size_t as_is_from = ShownCount();
+    run(6, with_depth);
+    Check(check_shown(as_is_from, "depth, Frame Generation off", true) == 0,
+          "depth, Frame Generation off: the game's frames reach the runtime as they are");
+    {
+        std::scoped_lock lock(g_runtime_mutex);
+        for (std::size_t i = depth_from; i < g_runtime.frames.size(); ++i) {
+            for (const ShownView& view : g_runtime.frames[i].views) {
+                Check(!view.depth, "depth: the runtime gets no depth in a bridged session's views");
+                if (i >= as_is_from) {
+                    Check(view.next_type == kApplicationStructType,
+                          "depth: the rest of a view's chain reaches the runtime: " + std::to_string(view.next_type));
+                }
+            }
+        }
+        const StandInSwapchain* depth = FindSwapchain(session.depth.swapchain);
+        Check(depth && depth->releases == 26, "depth: the depth swapchain's releases reach the runtime");
+    }
+    std::string log = Peer::Log();
+    Check(Contains(log, "keeps the game's depth to itself"), "depth: the log tells depth is left out");
+
+    {
+        std::scoped_lock lock(g_runtime_mutex);
+        g_runtime.on_end_frame = nullptr;
+    }
+    for (const Target* target : {&session.eyes, &session.ui}) {
+        const std::string describe = Peer::Bridge().Describe(target->swapchain);
+        Check(Contains(describe, "skippedCopies=0"), "every release copied: " + describe);
+    }
+    log = Peer::Log();
+    Check(!Contains(log, "the runtime refused") && !Contains(log, "could not write") &&
+              !Contains(log, "Frame Generation could not capture") && !Contains(log, "[error] Direct3D 11 bridge:") &&
+              !Contains(log, "Frame Generation paused"),
+          "nothing was refused, failed or paused");
+    // The layer logged no error of its own (the test's reads of the log are logged as errors).
+    Check(Count(log, "[error]") == Count(log, "[error] D3D11 bridge layer tests: log read"),
+          "the layer logged no error");
+    CheckValidation(game, "depth");
+    for (const Target* target : {&session.eyes, &session.ui, &session.depth}) {
+        Check(app.api.destroy_swapchain(target->swapchain) == XR_SUCCESS, "a swapchain is destroyed");
+    }
+    StopApp(app);
+    Peer::UseFrameGenGpu(MakeStandInGpu);
+    Peer::SetFrameGenEngagement(45, std::chrono::milliseconds(3000)); // the presenter's own
+    Check(GameRuns(game), "the game's device works");
+    EndCase(game);
+}
+
 // 8. The bridge's device removed: the session is lost. Last: Direct3D 12
 // makes one device per adapter in a process.
 void TestDeviceLost(Game& game) {
@@ -3722,6 +4370,8 @@ int main(int argc, char** argv) {
         TestBridgedQuadFrameGen(game, "extrapolate");
         TestBridgedQuadFrameGen(game, "interpolate");
         TestBridgedQuadFrameGenGeometry(game);
+        TestSideBySideFrameGen(game, "extrapolate");
+        TestSideBySideFrameGen(game, "interpolate");
         TestDeviceLost(game);
     }
     g_runtime = StandIn{};
