@@ -149,7 +149,10 @@ std::vector<PivotActivationBinding> FilterUnclaimedActivationBindings(
         });
         const bool claimed_earlier = std::any_of(
             earlier_profiles.begin(), earlier_profiles.end(), [&](const PivotXrResolvedProfile& earlier) {
-                return earlier.behavior == PivotProfileBehavior::EnhancedMotion && std::any_of(earlier.activation_bindings.begin(), earlier.activation_bindings.end(),
+                // Snap View profiles have no motion activation, so they never
+                // claim a binding from a later motion profile.
+                return earlier.behavior == PivotProfileBehavior::EnhancedMotion &&
+                       std::any_of(earlier.activation_bindings.begin(), earlier.activation_bindings.end(),
                                    [&](const PivotActivationBinding& earlier_binding) {
                                        return SameActivationInput(earlier_binding.binding, binding);
                                    });

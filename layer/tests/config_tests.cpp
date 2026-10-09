@@ -2925,41 +2925,166 @@ void TestSwapchainImageQueuePreservesFifo() {
     Expect(queue.Size() == 0, "Fully released queue was not emptied");
 }
 
-} // namespace
+constexpr double kRadiansPerDegree = 3.14159265358979323846 / 180.0;
 
-void TestExpandedPivotMathAndConfig() {
-    using namespace depthxr;
-    constexpr double rad=3.14159265358979323846/180;
-    auto f=[&](double a,double width){return ComputePivotContinuousExtra(a*rad,2,8,width,180)/rad;};
-    Expect(f(8,4)==0 && f(7,4)==0,"Soft deadzone must retain 1:1 inside the threshold");
-    Expect(std::abs(f(12,4)-2)<1e-9 && std::abs(f(20,4)-10)<1e-9,"Integrated soft sensitivity is incorrect");
-    Expect(std::abs(f(20,0)-12)<1e-9 && std::abs(f(-20,4)+f(20,4))<1e-9,"Legacy curve or sign symmetry changed");
-    double prev=0;
-    for(double a=8;a<180;a+=.1){const double next=f(a,4);Expect(next>=prev,"Soft deadzone must be monotonic");prev=next;}
-    const double eps=.0001;
-    Expect(std::abs((f(8+eps,4)-f(8,4))/eps)<.001,"Deadzone entry sensitivity is abrupt");
-    Expect(std::abs((f(12+eps,4)-f(12-eps,4))/(2*eps)-1)<.001,"Deadzone transition exit sensitivity is abrupt");
-    PivotPositionAssist p; p.enabled=true; p.yaw={10,4,-2,0,90};
-    auto center=ComputePivotPositionAssist(0,0,p),half=ComputePivotPositionAssist(-45*rad,0,p),full=ComputePivotPositionAssist(-150*rad,0,p);
-    Expect(PivotViewOffsetNearlyZero(center),"Position assist moves at neutral");
-    Expect(std::abs(half.right_meters-.05)<1e-9 && std::abs(half.up_meters-.02)<1e-9,"Position midpoint curve mismatch");
-    Expect(std::abs(full.right_meters-.1)<1e-9 && std::abs(full.forward_meters+.02)<1e-9,"Position limits mismatch");
-    Expect(std::abs(ComputePivotPositionAssist(45*rad,0,p).right_meters+.05)<1e-9,"Position lean does not mirror left/right");
-    p.advanced_directions=true;p.yaw_left={-12,2,0,0,45};p.pitch_up={0,8,3,0,30};
-    const auto combined=ComputePivotPositionAssist(45*rad,30*rad,p);
-    Expect(std::abs(combined.right_meters+.12)<1e-9 && std::abs(combined.up_meters-.1)<1e-9,"Advanced Position axes fail to compose");
-    ConfigDocument config;std::string error;
-    const char* json=R"({"version":3,"core":{},"applications":[],"modules":{"depthxr":{},"pivotxr":{"enabled":true,"defaults":{"applyMotionToSnapViews":true,"deadzoneTransitionDegrees":4,"pitchDeadzoneTransitionDegrees":2,"yawLeft":{"deadzoneTransitionDegrees":7},"positionAssist":{"enabled":true,"yaw":{"rightCm":10,"upCm":4,"startAngleDegrees":0,"fullAngleDegrees":90}}}}}})";
-    auto parsed=ParseConfig(json); Expect(parsed.ok,parsed.error.c_str());config=parsed.document;
-    const auto resolved=ResolveRuntimeConfig(config,"FlightSimulator.exe").pivotxr;
-    Expect(resolved.profiles[0].apply_motion_to_snap_views && resolved.profiles[0].position_assist.enabled &&
-        resolved.profiles[0].yaw_positive.deadzone_transition_degrees==4,"Expanded Pivot fields failed resolution");
-    config={};error.clear();
-    Expect(!ParseConfig(R"({"version":3,"core":{},"applications":[],"modules":{"depthxr":{},"pivotxr":{"defaults":{"positionAssist":{"yaw":{"startAngleDegrees":60,"fullAngleDegrees":20}}}}}})").ok,"Inverted position range must be rejected");
+// Extra yaw in degrees for a x2 multiplier, 8-degree deadzone and the given
+// Deadzone Transition width.
+double SoftDeadzoneExtraDegrees(double angle_degrees, double transition_degrees) {
+    return depthxr::ComputePivotContinuousExtra(angle_degrees * kRadiansPerDegree, 2.0, 8.0, transition_degrees,
+                                                180.0) /
+           kRadiansPerDegree;
 }
 
+void TestPivotSoftDeadzoneKeepsOneToOneInsideTheDeadzone() {
+    Expect(SoftDeadzoneExtraDegrees(7.0, 4.0) == 0.0 && SoftDeadzoneExtraDegrees(8.0, 4.0) == 0.0,
+           "Soft deadzone must stay 1:1 up to the deadzone");
+}
+
+void TestPivotSoftDeadzoneIntegratesSmoothstepSensitivity() {
+    Expect(std::abs(SoftDeadzoneExtraDegrees(12.0, 4.0) - 2.0) < 1e-9,
+           "Soft deadzone must add half the transition's linear extra at the transition's far edge");
+    Expect(std::abs(SoftDeadzoneExtraDegrees(20.0, 4.0) - 10.0) < 1e-9,
+           "Beyond the transition the soft deadzone must give up transition/2 x (gain - 1) of reach");
+    Expect(std::abs(SoftDeadzoneExtraDegrees(20.0, 0.0) - 12.0) < 1e-9,
+           "A zero transition must reproduce the legacy hard deadzone");
+    Expect(std::abs(SoftDeadzoneExtraDegrees(-20.0, 4.0) + SoftDeadzoneExtraDegrees(20.0, 4.0)) < 1e-9,
+           "Soft deadzone must be symmetric for left and right");
+}
+
+void TestPivotSoftDeadzoneIsMonotonicAndSmooth() {
+    double previous = 0.0;
+    for (double angle = 8.0; angle < 180.0; angle += 0.1) {
+        const double next = SoftDeadzoneExtraDegrees(angle, 4.0);
+        Expect(next >= previous, "Soft deadzone extra must never decrease as the head turns further");
+        previous = next;
+    }
+    constexpr double kStep = 0.0001;
+    const double entry_slope =
+        (SoftDeadzoneExtraDegrees(8.0 + kStep, 4.0) - SoftDeadzoneExtraDegrees(8.0, 4.0)) / kStep;
+    Expect(std::abs(entry_slope) < 0.001, "Sensitivity must not step up where the transition starts");
+    const double exit_slope =
+        (SoftDeadzoneExtraDegrees(12.0 + kStep, 4.0) - SoftDeadzoneExtraDegrees(12.0 - kStep, 4.0)) / (2.0 * kStep);
+    Expect(std::abs(exit_slope - 1.0) < 0.001, "Sensitivity must reach the full multiplier smoothly");
+}
+
+void TestPivotPositionAssistBasicCurve() {
+    depthxr::PivotPositionAssist assist;
+    assist.enabled = true;
+    assist.yaw = {10.0, 4.0, -2.0, 0.0, 90.0};
+    Expect(depthxr::PivotViewOffsetNearlyZero(depthxr::ComputePivotPositionAssist(0.0, 0.0, assist)),
+           "Position Assist must not move the view at neutral");
+    const depthxr::PivotViewOffset half = depthxr::ComputePivotPositionAssist(-45.0 * kRadiansPerDegree, 0.0, assist);
+    Expect(std::abs(half.right_meters - 0.05) < 1e-9 && std::abs(half.up_meters - 0.02) < 1e-9,
+           "Position Assist must ease to half its offsets midway between the start and full angles");
+    const depthxr::PivotViewOffset full = depthxr::ComputePivotPositionAssist(-150.0 * kRadiansPerDegree, 0.0, assist);
+    Expect(std::abs(full.right_meters - 0.1) < 1e-9 && std::abs(full.forward_meters + 0.02) < 1e-9,
+           "Position Assist must hold its configured offsets beyond the full angle");
+    const depthxr::PivotViewOffset left = depthxr::ComputePivotPositionAssist(45.0 * kRadiansPerDegree, 0.0, assist);
+    Expect(std::abs(left.right_meters + 0.05) < 1e-9, "Basic sideways lean must mirror between left and right turns");
+}
+
+void TestPivotPositionAssistAdvancedDirectionsCompose() {
+    depthxr::PivotPositionAssist assist;
+    assist.enabled = true;
+    assist.advanced_directions = true;
+    assist.yaw_left = {-12.0, 2.0, 0.0, 0.0, 45.0};
+    assist.pitch_up = {0.0, 8.0, 3.0, 0.0, 30.0};
+    const depthxr::PivotViewOffset combined =
+        depthxr::ComputePivotPositionAssist(45.0 * kRadiansPerDegree, 30.0 * kRadiansPerDegree, assist);
+    Expect(std::abs(combined.right_meters + 0.12) < 1e-9 && std::abs(combined.up_meters - 0.1) < 1e-9,
+           "Advanced Position Assist directions must add together");
+}
+
+void TestExpandedPivotSettingsResolve() {
+    const depthxr::ParseResult parsed = depthxr::ParseConfig(R"json(
+{
+  "version": 3,
+  "core": {},
+  "applications": [],
+  "modules": {
+    "depthxr": {},
+    "pivotxr": {
+      "enabled": true,
+      "defaults": {
+        "applyMotionToSnapViews": true,
+        "deadzoneTransitionDegrees": 4,
+        "pitchDeadzoneTransitionDegrees": 2,
+        "positionAssist": {
+          "enabled": true,
+          "yaw": { "rightCm": 10, "upCm": 4, "startAngleDegrees": 0, "fullAngleDegrees": 90 }
+        }
+      }
+    }
+  }
+}
+)json");
+    Expect(parsed.ok, "Expanded Pivot settings must parse: " + parsed.error);
+    const depthxr::PivotXrResolvedProfile profile =
+        depthxr::ResolveRuntimeConfig(parsed.document, "FlightSimulator.exe").pivotxr.profiles[0];
+    Expect(profile.apply_motion_to_snap_views, "Apply Enhanced Motion to Snap Views must resolve");
+    Expect(profile.position_assist.enabled && std::abs(profile.position_assist.yaw.right_cm - 10.0) < 1e-9,
+           "Position Assist must resolve");
+    Expect(profile.yaw_positive.deadzone_transition_degrees == 4.0 &&
+               profile.yaw_negative.deadzone_transition_degrees == 4.0,
+           "The basic yaw Deadzone Transition must apply to both yaw directions");
+    Expect(profile.pitch_positive.deadzone_transition_degrees == 2.0 &&
+               profile.pitch_negative.deadzone_transition_degrees == 2.0,
+           "The basic pitch Deadzone Transition must apply to both pitch directions");
+}
+
+void TestPerDirectionDeadzoneTransitionParsing() {
+    const depthxr::ParseResult parsed = depthxr::ParseConfig(R"json(
+{
+  "version": 3,
+  "core": {},
+  "applications": [],
+  "modules": {
+    "depthxr": {},
+    "pivotxr": {
+      "enabled": true,
+      "defaults": {
+        "advancedAxes": true,
+        "deadzoneTransitionDegrees": 9,
+        "yawLeft": { "deadzoneTransitionDegrees": 1 },
+        "yawRight": { "deadzoneTransitionDegrees": 2 },
+        "pitchUp": { "deadzoneTransitionDegrees": 3 },
+        "pitchDown": { "deadzoneTransitionDegrees": 4 }
+      }
+    }
+  }
+}
+)json");
+    Expect(parsed.ok, "Per-direction Deadzone Transition must parse: " + parsed.error);
+    const depthxr::PivotXrResolvedProfile profile =
+        depthxr::ResolveRuntimeConfig(parsed.document, "FlightSimulator.exe").pivotxr.profiles[0];
+    Expect(profile.yaw_positive.deadzone_transition_degrees == 1.0, "Yaw Left Deadzone Transition was not parsed");
+    Expect(profile.yaw_negative.deadzone_transition_degrees == 2.0, "Yaw Right Deadzone Transition was not parsed");
+    Expect(profile.pitch_positive.deadzone_transition_degrees == 3.0, "Pitch Up Deadzone Transition was not parsed");
+    Expect(profile.pitch_negative.deadzone_transition_degrees == 4.0, "Pitch Down Deadzone Transition was not parsed");
+
+    const depthxr::ParseResult out_of_range = depthxr::ParseConfig(
+        R"({"version":3,"core":{},"applications":[],"modules":{"depthxr":{},"pivotxr":{"defaults":{"advancedAxes":true,"pitchDown":{"deadzoneTransitionDegrees":181}}}}})");
+    Expect(!out_of_range.ok && out_of_range.error.find("pitchDown") != std::string::npos,
+           "An out-of-range per-direction Deadzone Transition must be rejected and name its direction");
+}
+
+void TestInvertedPositionAssistRangeRejected() {
+    const depthxr::ParseResult parsed = depthxr::ParseConfig(
+        R"({"version":3,"core":{},"applications":[],"modules":{"depthxr":{},"pivotxr":{"defaults":{"positionAssist":{"yaw":{"startAngleDegrees":60,"fullAngleDegrees":20}}}}}})");
+    Expect(!parsed.ok, "A Position Assist full angle below its start angle must be rejected");
+}
+
+} // namespace
+
 int main() {
-    TestExpandedPivotMathAndConfig();
+    TestPivotSoftDeadzoneKeepsOneToOneInsideTheDeadzone();
+    TestPivotSoftDeadzoneIntegratesSmoothstepSensitivity();
+    TestPivotSoftDeadzoneIsMonotonicAndSmooth();
+    TestPivotPositionAssistBasicCurve();
+    TestPivotPositionAssistAdvancedDirectionsCompose();
+    TestExpandedPivotSettingsResolve();
+    TestPerDirectionDeadzoneTransitionParsing();
+    TestInvertedPositionAssistRangeRejected();
     TestOsdConfig();
     TestTurboExperimentalConfig();
     TestParseConfig();
