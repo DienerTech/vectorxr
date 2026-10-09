@@ -930,8 +930,11 @@ void TestPivotViewTransitionMath() {
            "Pivot View transition did not settle exactly on its target");
 
     depthxr::RetargetPivotViewTransition(target, 0.0, state);
+    Expect(state.active && depthxr::PivotViewOffsetNearlyZero(state.current),
+           "A zero-duration Pivot View retarget must not move the offset before the next drive update");
+    depthxr::UpdatePivotViewTransition(0.0, state);
     Expect(!state.active && depthxr::PivotViewOffsetNearlyEqual(state.current, target),
-           "A zero-duration Pivot View transition must apply instantly");
+           "A zero-duration Pivot View transition must land on the next drive update");
 }
 
 void TestPivotSteppedGlideMath() {
