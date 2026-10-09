@@ -124,6 +124,8 @@ class OpenXrLayer {
         // for XR_KHR_vulkan_enable, 0 for neither (the Vulkan bridge's
         // XR_KHR_D3D12_enable is then a Vulkan application's).
         int vulkan_enable_version{0};
+        // XR_KHR_vulkan_enable was requested (also alongside _enable2).
+        bool vulkan_enable1_requested{false};
         // The names of the layers below VectorXR, nearest first.
         std::string layers_below;
     };
@@ -1355,6 +1357,8 @@ class OpenXrLayer {
     bool d3d12_extension_enabled_{false};
     // The application's Vulkan extension (InstanceCreateDiagnostics::vulkan_enable_version).
     int vulkan_enable_version_{0};
+    // InstanceCreateDiagnostics::vulkan_enable1_requested.
+    bool vulkan_enable1_requested_{false};
     // Latched when the instance was made: the Vulkan bridge was wanted then
     // and the instance has XR_KHR_D3D12_enable, so the XR_KHR_vulkan_enable(2)
     // hooks add what the bridge needs (vulkan_enable_hooks.h).

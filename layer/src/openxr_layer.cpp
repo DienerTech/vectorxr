@@ -1777,10 +1777,14 @@ XrResult OpenXrLayer::OnInstanceCreated(const XrInstanceCreateInfo* create_info,
     turbo_clock_enabled_ = diagnostics.turbo_clock_enabled;
     d3d12_extension_enabled_ = diagnostics.d3d12_enabled;
     vulkan_enable_version_ = diagnostics.vulkan_enable_version;
+    vulkan_enable1_requested_ = diagnostics.vulkan_enable1_requested;
     // Decided once for the instance, so both calls of an extension list's
-    // two-call idiom, the game's Vulkan device and its session agree.
+    // two-call idiom, the game's Vulkan device and its session agree. The
+    // Vulkan bridge's own decision only: an application that also enables
+    // XR_KHR_D3D11_enable had XR_KHR_D3D12_enable added for the Direct3D 11
+    // bridge, whatever VECTORXR_VULKAN_BRIDGE says.
     vulkan_bridge_extensions_ = vulkan_enable_version_ != 0 && d3d12_extension_enabled_ &&
-                                (diagnostics.d3d12_wanted || WantsVulkanBridge());
+                                ((diagnostics.d3d12_wanted && !diagnostics.app_requested_d3d11) || WantsVulkanBridge());
     ResetVulkanEnableHooks(instance, next_get_instance_proc_addr_, vulkan_bridge_extensions_,
                            [this](const std::string& message) { logger_.Info(message); });
     eye_gaze_extension_enabled_ = eye_gaze_extension_enabled;
@@ -2166,10 +2170,19 @@ XrResult OpenXrLayer::CreateSession(XrInstance instance,
     // it (D3D11Bridge): the bridge's queue then stands for the game's.
     const XrSessionCreateInfo* downstream_info = create_info;
     std::string bridge_description;
+    // The session's graphics binding is the first in the chain, as Frame
+    // Generation's backend factory finds it: a Vulkan binding after another
+    // structure makes a Vulkan session too (one the bridge does not take).
+    const auto* first_binding = create_info ? static_cast<const XrBaseInStructure*>(create_info->next) : nullptr;
+    const XrBaseInStructure* graphics_binding = first_binding;
+    while (graphics_binding && graphics_binding->type != XR_TYPE_GRAPHICS_BINDING_D3D11_KHR &&
+           graphics_binding->type != XR_TYPE_GRAPHICS_BINDING_D3D12_KHR &&
+           graphics_binding->type != XR_TYPE_GRAPHICS_BINDING_VULKAN_KHR) {
+        graphics_binding = graphics_binding->next;
+    }
+    const bool vulkan_session = graphics_binding && graphics_binding->type == XR_TYPE_GRAPHICS_BINDING_VULKAN_KHR;
     // A Vulkan session runs Frame Generation only through the Vulkan bridge:
     // why one is not bridged.
-    const auto* first_binding = create_info ? static_cast<const XrBaseInStructure*>(create_info->next) : nullptr;
-    const bool vulkan_session = first_binding && first_binding->type == XR_TYPE_GRAPHICS_BINDING_VULKAN_KHR;
     std::string vulkan_unbridged;
     bool vulkan_queried_d3d12 = false; // the Vulkan bridge asked for Direct3D 12's graphics requirements
     bool framegen_wanted = false;
@@ -2213,8 +2226,11 @@ XrResult OpenXrLayer::CreateSession(XrInstance instance,
                                  hooks + ".");
                 }
                 const char* bridge_switch = std::getenv("VECTORXR_VULKAN_BRIDGE");
-                const VulkanBridgeGame game = VulkanGameFor(VulkanSessionDevice(create_info));
-                if (bridge_switch && std::string(bridge_switch) == "off") {
+                const std::uint64_t device = VulkanSessionDevice(create_info);
+                const VulkanBridgeGame game = VulkanGameFor(device);
+                if (graphics_binding != first_binding) {
+                    vulkan_unbridged = "its Vulkan binding is not the first structure of the session's create info";
+                } else if (bridge_switch && std::string(bridge_switch) == "off") {
                     vulkan_unbridged = "VECTORXR_VULKAN_BRIDGE=off";
                 } else if (!d3d12_extension_enabled_) {
                     vulkan_unbridged = "the instance has no XR_KHR_D3D12_enable for the bridge (Frame Generation was "
@@ -2222,7 +2238,7 @@ XrResult OpenXrLayer::CreateSession(XrInstance instance,
                                        "extension); restart the game to use it";
                 } else if (!vulkan_bridge_extensions_) {
                     vulkan_unbridged = "Frame Generation was enabled after the game started; restart the game to use it";
-                } else if (vulkan_enable_version_ == 2 && !game.get_instance_proc_addr) {
+                } else if (VulkanDeviceOriginOf(device) == VulkanDeviceOrigin::kRuntimeWithoutLayer) {
                     vulkan_unbridged = "the runtime made the game's Vulkan device without the layer's vkCreateDevice, "
                                        "so it lacks what the bridge needs";
                 } else {
@@ -2281,13 +2297,18 @@ XrResult OpenXrLayer::CreateSession(XrInstance instance,
             get_requirements(instance, create_info->systemId, &requirements);
         }
     };
-    // Likewise for the Vulkan requirements (of the extension the game enabled).
+    // Likewise for the Vulkan requirements, of the extension the game made
+    // its device with (a game enabling both that made its device itself used
+    // XR_KHR_vulkan_enable's).
     const auto requery_vulkan_requirements = [&] {
         if (!vulkan_queried_d3d12 || !create_info || !next_get_instance_proc_addr_) {
             return;
         }
+        const bool own_device = VulkanDeviceOriginOf(VulkanSessionDevice(create_info)) == VulkanDeviceOrigin::kGame;
         RequeryVulkanGraphicsRequirements(next_get_instance_proc_addr_, instance, create_info->systemId,
-                                          vulkan_enable_version_);
+                                          vulkan_enable_version_ == 2 && vulkan_enable1_requested_ && own_device
+                                              ? 1
+                                              : vulkan_enable_version_);
     };
     if (!d3d11_bridge_.Active()) {
         requery_d3d11_requirements();
@@ -10157,6 +10178,7 @@ void OpenXrLayer::ResetInstanceState() {
     d3d11_graphics_extension_requested_ = false;
     d3d12_extension_enabled_ = false;
     vulkan_enable_version_ = 0;
+    vulkan_enable1_requested_ = false;
     vulkan_bridge_extensions_ = false;
     eye_gaze_extension_enabled_ = false;
     next_get_visibility_mask_khr_ = nullptr;

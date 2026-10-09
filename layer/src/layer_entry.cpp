@@ -739,10 +739,11 @@ XrResult XRAPI_CALL xrCreateApiLayerInstance(const XrInstanceCreateInfo* instanc
     constexpr const char* d3d11_extension = "XR_KHR_D3D11_enable";
     constexpr const char* d3d12_extension = "XR_KHR_D3D12_enable";
     diagnostics.app_requested_d3d11 = ApplicationRequestedExtension(instance_create_info, d3d11_extension);
+    diagnostics.vulkan_enable1_requested = ApplicationRequestedExtension(instance_create_info, "XR_KHR_vulkan_enable");
     diagnostics.vulkan_enable_version =
         ApplicationRequestedExtension(instance_create_info, "XR_KHR_vulkan_enable2") ? 2
-        : ApplicationRequestedExtension(instance_create_info, "XR_KHR_vulkan_enable") ? 1
-                                                                                      : 0;
+        : diagnostics.vulkan_enable1_requested                                          ? 1
+                                                                                        : 0;
     // The application's graphics extension, of an API a bridge takes.
     const char* const bridged_extension = diagnostics.app_requested_d3d11              ? d3d11_extension
                                           : diagnostics.vulkan_enable_version == 2 ? "XR_KHR_vulkan_enable2"
