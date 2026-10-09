@@ -57,10 +57,14 @@ bool IsDepthVulkanFormat(std::int64_t format) {
 
 const std::vector<const char*>& VulkanBridge::InstanceExtensions() {
     // Core in Vulkan 1.1; named so a Vulkan 1.0 game's instance has them too.
+    // The fence capabilities are not used, but the validation layer accepts
+    // VkPhysicalDeviceIDProperties (the adapter's LUID) on a Vulkan 1.0
+    // instance only with them.
     static const std::vector<const char*> extensions{
         VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME,
         VK_KHR_EXTERNAL_MEMORY_CAPABILITIES_EXTENSION_NAME,
         VK_KHR_EXTERNAL_SEMAPHORE_CAPABILITIES_EXTENSION_NAME,
+        VK_KHR_EXTERNAL_FENCE_CAPABILITIES_EXTENSION_NAME,
     };
     return extensions;
 }
