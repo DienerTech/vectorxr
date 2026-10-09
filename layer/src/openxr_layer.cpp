@@ -34,6 +34,7 @@
 #include "depthxr/seen_apps.h"
 #include "depthxr/sound_player.h"
 #include "depthxr/turbo_metrics.h"
+#include "depthxr/vulkan_enable_hooks.h"
 
 // Injected by layer/CMakeLists.txt from the canonical app version in
 // app/src-tauri/tauri.conf.json. Falls back when the layer is built without that
@@ -1775,6 +1776,13 @@ XrResult OpenXrLayer::OnInstanceCreated(const XrInstanceCreateInfo* create_info,
     ResetInstanceState();
     turbo_clock_enabled_ = diagnostics.turbo_clock_enabled;
     d3d12_extension_enabled_ = diagnostics.d3d12_enabled;
+    vulkan_enable_version_ = diagnostics.vulkan_enable_version;
+    // Decided once for the instance, so both calls of an extension list's
+    // two-call idiom, the game's Vulkan device and its session agree.
+    vulkan_bridge_extensions_ = vulkan_enable_version_ != 0 && d3d12_extension_enabled_ &&
+                                (diagnostics.d3d12_wanted || WantsVulkanBridge());
+    ResetVulkanEnableHooks(instance, next_get_instance_proc_addr_, vulkan_bridge_extensions_,
+                           [this](const std::string& message) { logger_.Info(message); });
     eye_gaze_extension_enabled_ = eye_gaze_extension_enabled;
     varjo_compatible_quadviews_active_ = diagnostics.varjo_compatible_quad_forwarded;
     ResetSessionState();
@@ -1836,8 +1844,14 @@ XrResult OpenXrLayer::OnInstanceCreated(const XrInstanceCreateInfo* create_info,
         }
         logger_.Info(ext_stream.str());
         logger_.Info("OpenXR API layers below VectorXR: [" + diagnostics.layers_below + "]");
+        // The bridge the instance's XR_KHR_D3D12_enable is for, and what Frame
+        // Generation does without it.
+        const bool vulkan_bridge = !diagnostics.app_requested_d3d11 && diagnostics.vulkan_enable_version != 0;
+        const std::string bridge_name = vulkan_bridge ? "Vulkan bridge" : "Direct3D 11 bridge";
+        const std::string without_bridge = vulkan_bridge ? "Frame Generation is off for Vulkan sessions."
+                                                         : "Frame Generation keeps Direct3D 11 sessions as they are.";
         if (diagnostics.layer_injected_d3d12) {
-            logger_.Info(std::string("Frame Generation's Direct3D 11 bridge: XR_KHR_D3D12_enable ") +
+            logger_.Info("Frame Generation's " + bridge_name + ": XR_KHR_D3D12_enable " +
                          (diagnostics.d3d12_enabled
                               ? "added to the instance's extensions" +
                                     std::string(diagnostics.d3d12_scan_trusted
@@ -1848,11 +1862,10 @@ XrResult OpenXrLayer::OnInstanceCreated(const XrInstanceCreateInfo* create_info,
                                     std::to_string(static_cast<int>(diagnostics.first_create_result)) +
                                     "; created again without it, result " +
                                     std::to_string(static_cast<int>(diagnostics.d3d12_retry_result)) +
-                                    "; which extension the runtime refused is not known); Frame Generation "
-                                    "keeps Direct3D 11 sessions as they are."));
+                                    "; which extension the runtime refused is not known); " + without_bridge));
         } else if (diagnostics.d3d12_wanted) {
-            logger_.Info("Frame Generation's Direct3D 11 bridge is unavailable: the runtime does not offer "
-                         "XR_KHR_D3D12_enable; Frame Generation keeps Direct3D 11 sessions as they are.");
+            logger_.Info("Frame Generation's " + bridge_name +
+                         " is unavailable: the runtime does not offer XR_KHR_D3D12_enable; " + without_bridge);
         }
         if (quad_views_extension_requested_ || varjo_foveated_rendering_extension_requested_) {
             logger_.Info(std::string("Application requested layer-owned extensions: quadViews=") +
@@ -2052,6 +2065,11 @@ XrResult OpenXrLayer::DestroyInstance(XrInstance instance) {
 
     std::scoped_lock lock(mutex_);
 
+    // A bridged Vulkan session's last releases get through the bridge's
+    // queue first (or are let through): Frame Generation's waits on it end.
+    if (vulkan_bridge_.Active()) {
+        vulkan_bridge_.Escape();
+    }
     framegen_.Stop();
     framegen_owns_pacing_.store(false, std::memory_order_release);
     framegen_session_enabled_ = false;
@@ -2063,10 +2081,13 @@ XrResult OpenXrLayer::DestroyInstance(XrInstance instance) {
     DestroyInternalReferenceSpaces();
     ResetSwapchainState();
     d3d11_bridge_.Drain();
+    vulkan_bridge_.Drain();
     const XrResult result = next_destroy_instance_(instance);
     framegen_queue_.Reset();
     EndD3D11Bridge();
+    EndVulkanBridge();
     if (XR_SUCCEEDED(result)) {
+        ResetVulkanEnableHooks(XR_NULL_HANDLE, nullptr, false, {});
         turbo_recovery_.Complete();
         instance_ = XR_NULL_HANDLE;
         next_destroy_instance_ = nullptr;
@@ -2145,8 +2166,14 @@ XrResult OpenXrLayer::CreateSession(XrInstance instance,
     // it (D3D11Bridge): the bridge's queue then stands for the game's.
     const XrSessionCreateInfo* downstream_info = create_info;
     std::string bridge_description;
+    // A Vulkan session runs Frame Generation only through the Vulkan bridge:
+    // why one is not bridged.
+    const auto* first_binding = create_info ? static_cast<const XrBaseInStructure*>(create_info->next) : nullptr;
+    const bool vulkan_session = first_binding && first_binding->type == XR_TYPE_GRAPHICS_BINDING_VULKAN_KHR;
+    std::string vulkan_unbridged;
+    bool vulkan_queried_d3d12 = false; // the Vulkan bridge asked for Direct3D 12's graphics requirements
+    bool framegen_wanted = false;
     {
-        bool framegen_wanted = false;
         {
             std::scoped_lock lock(mutex_);
             ReloadConfigIfNeeded();
@@ -2155,6 +2182,7 @@ XrResult OpenXrLayer::CreateSession(XrInstance instance,
         }
         framegen_queue_.Reset();
         d3d11_bridge_.End();
+        vulkan_bridge_.End();
         if (framegen_wanted) {
             const XrSessionCreateInfo* game_info = create_info;
             const auto* first = create_info ? static_cast<const XrBaseInStructure*>(create_info->next) : nullptr;
@@ -2178,6 +2206,37 @@ XrResult OpenXrLayer::CreateSession(XrInstance instance,
                                      reason);
                     }
                 }
+            } else if (vulkan_session) {
+                if (const std::string hooks = VulkanEnableHookSummary(); !hooks.empty()) {
+                    logger_.Info("Frame Generation's Vulkan bridge: what the XR_KHR_vulkan_enable hooks did for the "
+                                 "game's Vulkan instance and device: " +
+                                 hooks + ".");
+                }
+                const char* bridge_switch = std::getenv("VECTORXR_VULKAN_BRIDGE");
+                const VulkanBridgeGame game = VulkanGameFor(VulkanSessionDevice(create_info));
+                if (bridge_switch && std::string(bridge_switch) == "off") {
+                    vulkan_unbridged = "VECTORXR_VULKAN_BRIDGE=off";
+                } else if (!d3d12_extension_enabled_) {
+                    vulkan_unbridged = "the instance has no XR_KHR_D3D12_enable for the bridge (Frame Generation was "
+                                       "enabled after the game started, or the runtime refused or does not offer the "
+                                       "extension); restart the game to use it";
+                } else if (!vulkan_bridge_extensions_) {
+                    vulkan_unbridged = "Frame Generation was enabled after the game started; restart the game to use it";
+                } else if (vulkan_enable_version_ == 2 && !game.get_instance_proc_addr) {
+                    vulkan_unbridged = "the runtime made the game's Vulkan device without the layer's vkCreateDevice, "
+                                       "so it lacks what the bridge needs";
+                } else {
+                    std::string reason;
+                    vulkan_bridge_.SetLog([this](const std::string& message) { logger_.Error(message); });
+                    const XrSessionCreateInfo* bridged = vulkan_bridge_.Begin(
+                        instance, create_info, next_get_instance_proc_addr_, game, reason, bridge_description);
+                    vulkan_queried_d3d12 = vulkan_bridge_.QueriedD3D12Requirements();
+                    if (bridged) {
+                        game_info = bridged;
+                    } else {
+                        vulkan_unbridged = "no bridge: " + reason;
+                    }
+                }
             }
             std::string note;
             framegen_queue_.SetLog([this](const std::string& message) { logger_.Error(message); });
@@ -2190,6 +2249,13 @@ XrResult OpenXrLayer::CreateSession(XrInstance instance,
                              "would be given the bridge's queue.");
                 framegen_queue_.Reset();
                 d3d11_bridge_.End();
+                downstream_info = create_info;
+            }
+            if (vulkan_bridge_.Active() && !framegen_queue_.Active()) {
+                // Likewise: the runtime's queue must never wait for the game's Vulkan work.
+                vulkan_unbridged = "the runtime would be given the bridge's queue";
+                framegen_queue_.Reset();
+                vulkan_bridge_.End();
                 downstream_info = create_info;
             }
         }
@@ -2210,8 +2276,19 @@ XrResult OpenXrLayer::CreateSession(XrInstance instance,
             get_requirements(instance, create_info->systemId, &requirements);
         }
     };
+    // Likewise for the Vulkan requirements (of the extension the game enabled).
+    const auto requery_vulkan_requirements = [&] {
+        if (!vulkan_queried_d3d12 || !create_info || !next_get_instance_proc_addr_) {
+            return;
+        }
+        RequeryVulkanGraphicsRequirements(next_get_instance_proc_addr_, instance, create_info->systemId,
+                                          vulkan_enable_version_);
+    };
     if (!d3d11_bridge_.Active()) {
         requery_d3d11_requirements();
+    }
+    if (!vulkan_bridge_.Active()) {
+        requery_vulkan_requirements();
     }
     XrResult result = next_create_session_(instance, downstream_info, session);
     if (XR_FAILED(result) && d3d11_bridge_.Active()) {
@@ -2223,18 +2300,45 @@ XrResult OpenXrLayer::CreateSession(XrInstance instance,
         requery_d3d11_requirements();
         result = next_create_session_(instance, create_info, session);
     }
+    if (XR_FAILED(result) && vulkan_bridge_.Active()) {
+        logger_.Error("xrCreateSession refused the bridged Direct3D 12 session (result=" +
+                      std::to_string(static_cast<int>(result)) + "); creating it with the game's Vulkan binding instead.");
+        vulkan_unbridged = "the runtime refused the bridged Direct3D 12 session (result=" +
+                           std::to_string(static_cast<int>(result)) + ")";
+        framegen_queue_.Reset();
+        vulkan_bridge_.End();
+        requery_vulkan_requirements();
+        result = next_create_session_(instance, create_info, session);
+    }
     if (XR_FAILED(result) || !session) {
         if (XR_FAILED(result)) {
             logger_.Error("xrCreateSession failed downstream: result=" + std::to_string(static_cast<int>(result)));
         }
         framegen_queue_.Reset();
         d3d11_bridge_.End();
+        vulkan_bridge_.End();
         return result;
     }
     if (d3d11_bridge_.Active()) {
         logger_.Info("Frame Generation's Direct3D 11 bridge: the session is Direct3D 12 and the game renders into "
                      "images shared with it (the OSD's eye-image composite and Varjo focus sharpening are off); " +
                      bridge_description);
+    }
+    if (vulkan_bridge_.Active()) {
+        logger_.Info("Frame Generation's Vulkan bridge: the session is Direct3D 12 and the game renders into images "
+                     "shared with it; " +
+                     bridge_description);
+    }
+    // Frame Generation is unavailable for a Vulkan session the bridge does not take.
+    std::string framegen_unavailable;
+    if (vulkan_session && !vulkan_bridge_.Active()) {
+        if (vulkan_unbridged.empty()) {
+            vulkan_unbridged = framegen_wanted ? "the session is not bridged" : "Frame Generation was off";
+        }
+        if (framegen_wanted) {
+            logger_.Info("Frame Generation is off for this Vulkan session: " + vulkan_unbridged + ".");
+        }
+        framegen_unavailable = "Vulkan sessions need the Vulkan bridge, and this one has none (" + vulkan_unbridged + ")";
     }
     logger_.Info("xrCreateSession succeeded downstream; configuring VectorXR session resources.");
 
@@ -2247,6 +2351,9 @@ XrResult OpenXrLayer::CreateSession(XrInstance instance,
     d3d11_bridge_quad_frames_ = {};
     d3d11_bridge_quad_frames_summarized_ = {};
     d3d11_bridge_sharpen_logged_ = false;
+    vulkan_bridge_lost_logged_ = false;
+    vulkan_bridge_depth_logged_ = false;
+    vulkan_bridge_last_summary_ = std::chrono::steady_clock::now();
     const auto* d3d11_binding = create_info
                                     ? static_cast<const XrGraphicsBindingD3D11KHR*>(
                                           FindStructInChain(create_info->next, XR_TYPE_GRAPHICS_BINDING_D3D11_KHR))
@@ -2298,6 +2405,7 @@ XrResult OpenXrLayer::CreateSession(XrInstance instance,
          next_destroy_swapchain_, next_create_reference_space_, next_destroy_space_}, &logger_, "application="+current_exe_name_+" runtime="+runtime_name_);
     graphics_api_=osd_.GraphicsApi();
     if (d3d11_bridge_.Active()) graphics_api_ = "D3D11-on-D3D12";
+    if (vulkan_bridge_.Active()) graphics_api_ = "Vulkan-on-D3D12";
     osd_vulkan_.store(graphics_api_=="Vulkan");
     const XrResult internal_result = CreateInternalReferenceSpaces(*session);
     if (XR_FAILED(internal_result)) {
@@ -2308,11 +2416,14 @@ XrResult OpenXrLayer::CreateSession(XrInstance instance,
     RefreshResolvedSettings();
     quadviews_session_active_ = resolved_settings_.core.enabled && resolved_settings_.quadviews.enabled;
     // A bridged session's Frame Generation is Direct3D 12, on the bridge's
-    // device, capturing on the bridge's queue.
-    StartFrameGen(*session, framegen_queue_.FrameGenChain(
-                                d3d11_bridge_.Active() ? d3d11_bridge_.Binding()
-                                                       : (create_info ? create_info->next : nullptr)));
+    // device, capturing on the bridge's queue (a Vulkan game's is never touched).
+    StartFrameGen(*session,
+                  framegen_queue_.FrameGenChain(d3d11_bridge_.Active()    ? d3d11_bridge_.Binding()
+                                                : vulkan_bridge_.Active() ? vulkan_bridge_.Binding()
+                                                                          : (create_info ? create_info->next : nullptr)),
+                  framegen_unavailable);
     d3d11_bridge_.SessionCreated();
+    vulkan_bridge_.SessionCreated();
     if (runtime_relay_root_.empty()) runtime_relay_root_ = ResolveRuntimeRelayRoot();
     runtime_relay_session_id_ = std::to_string(GetCurrentProcessId()) + "-" +
         std::to_string(RuntimeRelayUnixMilliseconds()) + "-" +
@@ -2340,6 +2451,12 @@ XrResult OpenXrLayer::DestroySession(XrSession session) {
     {
         std::scoped_lock lock(mutex_);
         if (session == active_session_) {
+            // A bridged Vulkan session's last releases get through the
+            // bridge's queue first (or are let through): Frame Generation's
+            // waits on it end.
+            if (vulkan_bridge_.Active()) {
+                vulkan_bridge_.Escape();
+            }
             // Output swapchains and GPU work must go before the session does.
             framegen_.Stop();
             framegen_owns_pacing_.store(false, std::memory_order_release);
@@ -2356,6 +2473,7 @@ XrResult OpenXrLayer::DestroySession(XrSession session) {
             // The bridge's copies into the runtime's images finish before the
             // runtime frees them with the session.
             d3d11_bridge_.Drain();
+            vulkan_bridge_.Drain();
         }
     }
 
@@ -2368,6 +2486,11 @@ XrResult OpenXrLayer::DestroySession(XrSession session) {
     if (destroying_active && XR_SUCCEEDED(result)) {
         framegen_queue_.Reset();
         EndD3D11Bridge();
+    }
+    if (destroying_active) {
+        // Whatever the runtime returned: the game may destroy its Vulkan
+        // device as soon as the session is gone.
+        EndVulkanBridge();
     }
     if (XR_SUCCEEDED(result)) {
         std::scoped_lock lock(mutex_);
@@ -3291,6 +3414,46 @@ XrResult OpenXrLayer::EnumerateSwapchainFormats(XrSession session,
                                                 uint32_t format_capacity_input,
                                                 uint32_t* format_count_output,
                                                 int64_t* formats) {
+    if (vulkan_bridge_.Active()) {
+        // A bridged Vulkan session's runtime formats are Direct3D 12's: the
+        // game is offered their VkFormats, those its device can share.
+        std::uint32_t count = 0;
+        XrResult runtime_result = next_enumerate_swapchain_formats_(session, 0, &count, nullptr);
+        std::vector<int64_t> runtime_formats(count);
+        if (XR_SUCCEEDED(runtime_result) && count) {
+            runtime_result = next_enumerate_swapchain_formats_(session, count, &count, runtime_formats.data());
+        }
+        if (XR_FAILED(runtime_result)) {
+            logger_.Error("xrEnumerateSwapchainFormats failed downstream: result=" +
+                          std::to_string(static_cast<int>(runtime_result)) + " (Vulkan bridge)");
+            return runtime_result;
+        }
+        runtime_formats.resize(std::min<std::size_t>(runtime_formats.size(), count));
+        const std::vector<int64_t> game_formats = vulkan_bridge_.GameFormats(runtime_formats);
+        if (!format_count_output) {
+            return XR_ERROR_VALIDATION_FAILURE;
+        }
+        *format_count_output = static_cast<uint32_t>(game_formats.size());
+        if (format_capacity_input == 0) {
+            return XR_SUCCESS;
+        }
+        if (format_capacity_input < game_formats.size()) {
+            return XR_ERROR_SIZE_INSUFFICIENT;
+        }
+        if (!formats) {
+            return XR_ERROR_VALIDATION_FAILURE;
+        }
+        std::copy(game_formats.begin(), game_formats.end(), formats);
+        std::ostringstream stream;
+        stream << "xrEnumerateSwapchainFormats returned " << game_formats.size()
+               << " Vulkan format(s) for the runtime's " << runtime_formats.size()
+               << " Direct3D 12 one(s) (Vulkan bridge):";
+        for (const int64_t format : game_formats) {
+            stream << ' ' << format;
+        }
+        logger_.Info(stream.str());
+        return XR_SUCCESS;
+    }
     const XrResult result = next_enumerate_swapchain_formats_(
         session, format_capacity_input, format_count_output, formats);
 
@@ -3340,10 +3503,26 @@ XrResult OpenXrLayer::CreateSwapchain(XrSession session,
 
     const XrSwapchainCreateInfo* const original_create_info = create_info;
     // A bridged session's runtime swapchains take the bridge's copies of the
-    // game's images (D3D11Bridge).
-    const bool bridged = create_info && d3d11_bridge_.Active();
+    // game's images (D3D11Bridge, VulkanBridge).
+    const bool vulkan_bridged = create_info && vulkan_bridge_.Active();
+    const bool bridged = create_info && (d3d11_bridge_.Active() || vulkan_bridged);
     XrSwapchainCreateInfo bridged_create_info{};
-    if (bridged) {
+    if (vulkan_bridged) {
+        // What the bridge cannot share is refused before the runtime is asked.
+        XrResult refusal = XR_ERROR_SWAPCHAIN_FORMAT_UNSUPPORTED;
+        std::string reason;
+        bool shareable = vulkan_bridge_.CheckSwapchain(*create_info, refusal, reason);
+        if (shareable && !VulkanBridge::RuntimeCreateInfo(*create_info, bridged_create_info, reason)) {
+            shareable = false;
+            refusal = XR_ERROR_SWAPCHAIN_FORMAT_UNSUPPORTED;
+        }
+        if (!shareable) {
+            logger_.Error("Frame Generation's Vulkan bridge refuses a swapchain it cannot share (result=" +
+                          std::to_string(static_cast<int>(refusal)) + "): " + reason);
+            return refusal;
+        }
+        create_info = &bridged_create_info;
+    } else if (bridged) {
         bridged_create_info = D3D11Bridge::RuntimeCreateInfo(*create_info);
         create_info = &bridged_create_info;
     }
@@ -3399,7 +3578,18 @@ XrResult OpenXrLayer::CreateSwapchain(XrSession session,
     if (!create_info || !swapchain || *swapchain == XR_NULL_HANDLE) {
         return result;
     }
-    if (bridged) {
+    if (vulkan_bridged) {
+        std::string reason;
+        if (!vulkan_bridge_.AddSwapchain(*swapchain, *original_create_info, next_enumerate_swapchain_images_,
+                                         reason)) {
+            logger_.Error("Frame Generation's Vulkan bridge refuses a swapchain it cannot share: " + reason);
+            next_destroy_swapchain_(*swapchain);
+            *swapchain = XR_NULL_HANDLE;
+            return XR_ERROR_RUNTIME_FAILURE;
+        }
+        logger_.Info("Frame Generation's Vulkan bridge: swapchain " + FormatHandle(*swapchain) + " is shared (" +
+                     vulkan_bridge_.Describe(*swapchain) + ").");
+    } else if (bridged) {
         std::string reason;
         if (!d3d11_bridge_.AddSwapchain(*swapchain, *original_create_info, next_enumerate_swapchain_images_,
                                         reason)) {
@@ -3457,15 +3647,18 @@ XrResult OpenXrLayer::DestroySwapchain(XrSwapchain swapchain) {
     // swapchain with its session.
     XrResult result = XR_SUCCESS;
     // So do the bridge's copies into the runtime's images.
-    if (framegen_.ForgetSwapchain(swapchain) && d3d11_bridge_.RemoveSwapchain(swapchain)) {
+    const bool vulkan_bridged = vulkan_bridge_.Bridged(swapchain);
+    if (framegen_.ForgetSwapchain(swapchain) && d3d11_bridge_.RemoveSwapchain(swapchain) &&
+        vulkan_bridge_.RemoveSwapchain(swapchain)) {
         result = next_destroy_swapchain_(swapchain);
         if (XR_FAILED(result)) {
             return result;
         }
     } else {
-        logger_.Error("Swapchain " + FormatHandle(swapchain) +
-                      " is kept until its session ends: GPU work on it (Frame Generation's, or the Direct3D 11 "
-                      "bridge's) did not finish.");
+        logger_.Error("Swapchain " + FormatHandle(swapchain) + " is kept until its session ends: GPU work on it " +
+                      (vulkan_bridged ? "(Frame Generation's, or the Vulkan bridge's)"
+                                      : "(Frame Generation's, or the Direct3D 11 bridge's)") +
+                      " did not finish.");
     }
 
     std::scoped_lock lock(mutex_);
@@ -3506,6 +3699,10 @@ XrResult OpenXrLayer::EnumerateSwapchainImages(XrSwapchain swapchain,
                 d3d11_images[i].texture = textures[i];
             }
         }
+    } else if (vulkan_bridge_.Bridged(swapchain)) {
+        // A bridged Vulkan swapchain's images are the bridge's VkImages; the
+        // runtime's are Direct3D 12.
+        result = vulkan_bridge_.EnumerateImages(swapchain, image_capacity_input, image_count_output, images);
     } else {
         result = next_enumerate_swapchain_images_(swapchain, image_capacity_input, image_count_output, images);
     }
@@ -3574,7 +3771,7 @@ XrResult OpenXrLayer::AcquireSwapchainImage(XrSwapchain swapchain,
     // as far as the runtime needs them to hand out an image.
     // A bridged swapchain whose runtime images never get anything (depth)
     // needs no ordering with the game's queue.
-    const XrResult result = d3d11_bridge_.Unmirrored(swapchain)
+    const XrResult result = UnmirroredSwapchain(swapchain)
                                 ? next_acquire_swapchain_image_(swapchain, acquire_info, index)
                                 : framegen_queue_.Acquire(swapchain, image_count, FrameGenQueueCalls(), acquire_info,
                                                           index);
@@ -3587,6 +3784,7 @@ XrResult OpenXrLayer::AcquireSwapchainImage(XrSwapchain swapchain,
     if (index) {
         // A bridged image is rendered again only after the bridge's last copy of it.
         d3d11_bridge_.Acquired(swapchain, *index);
+        vulkan_bridge_.Acquired(swapchain, *index);
     }
 
     std::scoped_lock lock(mutex_);
@@ -3615,7 +3813,7 @@ XrResult OpenXrLayer::WaitSwapchainImage(XrSwapchain swapchain, const XrSwapchai
     const auto wait_start = std::chrono::steady_clock::now();
     // Anything the runtime queued for the image runs before the game's
     // rendering into it; held back with a release before it that is.
-    const XrResult result = d3d11_bridge_.Unmirrored(swapchain)
+    const XrResult result = UnmirroredSwapchain(swapchain)
                                 ? next_wait_swapchain_image_(swapchain, wait_info)
                                 : framegen_queue_.Wait(swapchain, FrameGenLazy(swapchain), FrameGenQueueCalls(),
                                                        wait_info);
@@ -3650,7 +3848,7 @@ XrResult OpenXrLayer::ReleaseSwapchainImage(XrSwapchain swapchain,
         // bridge's queue, or the runtime may read the image before it). A
         // copy skipped (a stalled queue) leaves an older frame there: not
         // captured.
-        const bool copied = d3d11_bridge_.Released(swapchain);
+        const bool copied = d3d11_bridge_.Released(swapchain) && vulkan_bridge_.Released(swapchain);
         const auto it = tracked_swapchains_.find(swapchain);
         if (it != tracked_swapchains_.end()) {
             // Snapshot the released image index at the app's release moment —
@@ -3687,7 +3885,7 @@ XrResult OpenXrLayer::ReleaseSwapchainImage(XrSwapchain swapchain,
     // Generation shows only images of its own, an image it captures reaches
     // the runtime once that has run, without the runtime's queue waiting.
     const XrResult result =
-        d3d11_bridge_.Unmirrored(swapchain)
+        UnmirroredSwapchain(swapchain)
             ? next_release_swapchain_image_(swapchain, release_info)
             : framegen_queue_.Release(swapchain, FrameGenLazy(swapchain), FrameGenQueueCalls(), release_info);
     if (diag) {
@@ -5245,6 +5443,16 @@ bool OpenXrLayer::WantsTurboClockConversion() {
 
 bool OpenXrLayer::WantsD3D11Bridge() {
     if (const char* bridge = std::getenv("VECTORXR_D3D11_BRIDGE"); bridge && std::string(bridge) == "off") {
+        return false;
+    }
+    const auto parsed = LoadConfigFromFile(ResolveConfigPath());
+    if (!parsed.ok) return false;
+    return parsed.document.core.enabled &&
+           ResolveFrameGenSettings(parsed.document, GetCurrentExecutableName()).enabled;
+}
+
+bool OpenXrLayer::WantsVulkanBridge() {
+    if (const char* bridge = std::getenv("VECTORXR_VULKAN_BRIDGE"); bridge && std::string(bridge) == "off") {
         return false;
     }
     const auto parsed = LoadConfigFromFile(ResolveConfigPath());
@@ -7431,6 +7639,35 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
                 d3d11_bridge_depth_logged_ = true;
                 logger_.Info("Frame Generation's Direct3D 11 bridge keeps the game's depth to itself: it is left "
                              "out of the frames the runtime and Frame Generation get.");
+            }
+            frame_end_info = without_depth;
+        }
+    }
+    if (vulkan_bridge_.Active()) {
+        std::string lost;
+        vulkan_bridge_.FrameEnded();
+        const auto now = std::chrono::steady_clock::now();
+        if (now - vulkan_bridge_last_summary_ >= std::chrono::seconds(30)) {
+            vulkan_bridge_last_summary_ = now;
+            logger_.Info("Frame Generation's Vulkan bridge: " + vulkan_bridge_.Summary());
+        }
+        if (vulkan_bridge_.Lost(lost)) {
+            if (!vulkan_bridge_lost_logged_) {
+                vulkan_bridge_lost_logged_ = true;
+                logger_.Error("Frame Generation's Vulkan bridge: " + lost + "; the session is lost.");
+            }
+            DropPendingFrameGenQuad(false);
+            framegen_.AbandonFrame(frame_end_info->displayTime);
+            return XR_ERROR_SESSION_LOST;
+        }
+        if (vulkan_bridge_.HasUnmirrored()) {
+            const XrFrameEndInfo* without_depth = WithoutDepth(
+                frame_end_info, depthless_frame.emplace(),
+                [this](XrSwapchain swapchain) { return vulkan_bridge_.Unmirrored(swapchain); });
+            if (without_depth != frame_end_info && !vulkan_bridge_depth_logged_) {
+                vulkan_bridge_depth_logged_ = true;
+                logger_.Info("Frame Generation's Vulkan bridge keeps the game's multisampled depth to itself: it is "
+                             "left out of the frames the runtime and Frame Generation get.");
             }
             frame_end_info = without_depth;
         }
@@ -9910,6 +10147,8 @@ void OpenXrLayer::ResetInstanceState() {
     varjo_foveated_rendering_extension_requested_ = false;
     d3d11_graphics_extension_requested_ = false;
     d3d12_extension_enabled_ = false;
+    vulkan_enable_version_ = 0;
+    vulkan_bridge_extensions_ = false;
     eye_gaze_extension_enabled_ = false;
     next_get_visibility_mask_khr_ = nullptr;
     defer_quadviews_swapchain_releases_ = false;
@@ -12014,7 +12253,7 @@ void OpenXrLayer::ResetTurboToggleState() {
     turbo_binding_down_cached_ = false;
 }
 
-void OpenXrLayer::StartFrameGen(XrSession session, const void* binding_chain) {
+void OpenXrLayer::StartFrameGen(XrSession session, const void* binding_chain, const std::string& unavailable) {
     framegen_session_enabled_ = resolved_settings_.core.enabled && resolved_settings_.framegen.enabled;
     framegen_toggle_binding_was_down_ = false;
     framegen_binding_down_cached_ = false;
@@ -12031,7 +12270,11 @@ void OpenXrLayer::StartFrameGen(XrSession session, const void* binding_chain) {
                          next_enumerate_swapchain_images_, next_acquire_swapchain_image_, next_wait_swapchain_image_,
                          next_release_swapchain_image_},
                         &logger_, graphics_api_ == "Vulkan" ? &osd_vulkan_queue_mutex_ : nullptr,
-                        framegen_gpu_factory_);
+                        unavailable.empty() ? framegen_gpu_factory_
+                                            : FrameGenPresenter::GpuFactory([unavailable](const void*, std::string& error) {
+                                                  error = unavailable;
+                                                  return std::unique_ptr<FrameGenGpu>();
+                                              }));
     }
     framegen_owns_pacing_.store(framegen_.OwnsPacing(), std::memory_order_release);
     if (framegen_owns_pacing_.load(std::memory_order_acquire)) {
@@ -12049,7 +12292,18 @@ void OpenXrLayer::StartFrameGen(XrSession session, const void* binding_chain) {
             logger_.Info("Frame Generation's Direct3D 11 bridge stays for the session all the same: its session is "
                          "Direct3D 12 for life.");
         }
+        if (vulkan_bridge_.Active()) {
+            logger_.Info("Frame Generation's Vulkan bridge stays for the session all the same: its session is "
+                         "Direct3D 12 for life.");
+        }
     }
+}
+
+void OpenXrLayer::EndVulkanBridge() {
+    if (vulkan_bridge_.Active()) {
+        logger_.Info("Frame Generation's Vulkan bridge at session end: " + vulkan_bridge_.Summary());
+    }
+    vulkan_bridge_.End();
 }
 
 void OpenXrLayer::EndD3D11Bridge() {

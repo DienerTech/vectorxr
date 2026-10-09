@@ -34,6 +34,7 @@
 #include "depthxr/osd_renderer.h"
 #include "depthxr/osd_composite.h"
 #include "depthxr/framegen_d3d11_bridge.h"
+#include "depthxr/framegen_vulkan_bridge.h"
 #include "depthxr/framegen_presenter.h"
 #include "depthxr/framegen_runtime_queue.h"
 #include "depthxr/turbo_recovery.h"
@@ -119,6 +120,10 @@ class OpenXrLayer {
         bool retried_without_d3d12{false};
         XrResult d3d12_retry_result{XR_SUCCESS};
         bool d3d12_enabled{false};
+        // The application's Vulkan extension: 2 for XR_KHR_vulkan_enable2, 1
+        // for XR_KHR_vulkan_enable, 0 for neither (the Vulkan bridge's
+        // XR_KHR_D3D12_enable is then a Vulkan application's).
+        int vulkan_enable_version{0};
         // The names of the layers below VectorXR, nearest first.
         std::string layers_below;
     };
@@ -133,6 +138,10 @@ class OpenXrLayer {
     // application's instance needs XR_KHR_D3D12_enable for the bridge. Safe
     // before the instance exists (reads the config file).
     bool WantsD3D11Bridge();
+    // Likewise for a Vulkan application (XR_KHR_vulkan_enable or _enable2)
+    // and the Vulkan bridge: Frame Generation enabled for the executable,
+    // VECTORXR_VULKAN_BRIDGE not "off".
+    bool WantsVulkanBridge();
 
 
     XrResult OnInstanceCreated(const XrInstanceCreateInfo* create_info,
@@ -221,6 +230,7 @@ class OpenXrLayer {
     friend class PivotPoseTestPeer;
     friend class PivotGazeTestPeer;
     friend class D3D11BridgeLayerTestPeer;
+    friend class VulkanBridgeLayerTestPeer;
 #endif
 
     OpenXrLayer() = default;
@@ -786,6 +796,7 @@ class OpenXrLayer {
     XrResult SubmitRuntimeFrame(XrSession, const XrFrameEndInfo*);
     // After xrDestroySession or xrDestroyInstance: the bridge's summary, then its teardown.
     void EndD3D11Bridge();
+    void EndVulkanBridge();
     // The layer's own swapchains (Quadviews' outputs): through the queue
     // substitution and the Direct3D 11 bridge when the session is bridged,
     // else straight to the runtime. `shown_later`: Frame Generation's thread
@@ -808,7 +819,9 @@ class OpenXrLayer {
     std::map<XrSwapchain, uint64_t> framegen_noted_releases_; // each swapchain's NoteFrameGenRelease calls
 #endif
     void PollFrameGenToggle();
-    void StartFrameGen(XrSession session, const void* binding_chain);
+    // `unavailable`: Frame Generation cannot run this session (a Vulkan
+    // session without the Vulkan bridge), for that reason.
+    void StartFrameGen(XrSession session, const void* binding_chain, const std::string& unavailable = {});
     // Frame Generation is latched per session. While it owns pacing, the app's
     // Wait/Begin/End go to the presenter and Turbo stays off for the session.
     FrameGenPresenter framegen_;
@@ -844,6 +857,21 @@ class OpenXrLayer {
     void DropPendingFrameGenQuad(bool abandon);
     D3D11BridgeQuadFrames d3d11_bridge_quad_frames_;
     D3D11BridgeQuadFrames d3d11_bridge_quad_frames_summarized_;
+    // Vulkan games with Frame Generation: the session is Direct3D 12 and the
+    // game renders into images shared with it (see VulkanBridge); decided at
+    // xrCreateSession. Frame Generation runs a Vulkan session only through it.
+    VulkanBridge vulkan_bridge_;
+    bool vulkan_bridge_lost_logged_{false};  // mutex_
+    bool vulkan_bridge_depth_logged_{false}; // mutex_
+    std::chrono::steady_clock::time_point vulkan_bridge_last_summary_; // mutex_
+    // Either bridge's swapchain, and one whose runtime images never get
+    // anything (its calls need no ordering with the game's queue).
+    bool BridgedSwapchain(XrSwapchain swapchain) const {
+        return d3d11_bridge_.Bridged(swapchain) || vulkan_bridge_.Bridged(swapchain);
+    }
+    bool UnmirroredSwapchain(XrSwapchain swapchain) const {
+        return d3d11_bridge_.Unmirrored(swapchain) || vulkan_bridge_.Unmirrored(swapchain);
+    }
     FrameGenQueueSubstitution::Calls FrameGenQueueCalls() const {
         return {next_acquire_swapchain_image_, next_wait_swapchain_image_, next_release_swapchain_image_};
     }
@@ -1318,6 +1346,12 @@ class OpenXrLayer {
     bool d3d11_graphics_extension_requested_{false};
     // XR_KHR_D3D12_enable is enabled on the instance (the Direct3D 11 bridge needs it).
     bool d3d12_extension_enabled_{false};
+    // The application's Vulkan extension (InstanceCreateDiagnostics::vulkan_enable_version).
+    int vulkan_enable_version_{0};
+    // Latched when the instance was made: the Vulkan bridge was wanted then
+    // and the instance has XR_KHR_D3D12_enable, so the XR_KHR_vulkan_enable(2)
+    // hooks add what the bridge needs (vulkan_enable_hooks.h).
+    bool vulkan_bridge_extensions_{false};
     bool eye_gaze_extension_enabled_{false};
     // True for the life of the instance when native Varjo quad-views were
     // forwarded to the runtime (Varjo compatible quadviews). Single source of truth

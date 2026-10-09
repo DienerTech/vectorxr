@@ -2603,8 +2603,10 @@ void TestInstanceExtensions(Game& game) {
 
     BeginCase("instance-vulkan", game);
     result = InstanceAttempts({"XR_KHR_vulkan_enable2"}, attempts, log);
-    Check(result == XR_SUCCESS && attempts.size() == 1 && attempts[0] == Names{"XR_KHR_vulkan_enable2"},
-          "not added for an application without Direct3D 11: " + Text(attempts));
+    Check(result == XR_SUCCESS && attempts.size() == 1 &&
+              attempts[0] == Names{"XR_KHR_vulkan_enable2", kD3D12Extension} &&
+              Contains(log, "Frame Generation's Vulkan bridge: " + added) && !Contains(log, "Direct3D 11 bridge"),
+          "added for a Vulkan application, for the Vulkan bridge: " + Text(attempts));
     EndCase(game);
 
     BeginCase("instance-own-d3d12", game);
