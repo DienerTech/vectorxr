@@ -5,9 +5,11 @@ import type { PivotXRSettings } from '../lib/model'
 
 // Compact read-only summary of a profile's rotation settings. Editing happens
 // on the dedicated settings sub-page (see PivotSettingsPage), opened via `edit`.
-const props = defineProps<{
+const props = withDefaults(defineProps<{
   settings: PivotXRSettings
-}>()
+  // The Default profile cannot stack motion on Snap Views.
+  snapStackingAvailable?: boolean
+}>(), { snapStackingAvailable: true })
 
 defineEmits<{
   edit: []
@@ -63,9 +65,25 @@ const chips = computed(() => {
     title: settings.responseMode === 'stepped' ? 'Pivot activation and release ramp.' : `Tracking smoothing ${settings.smoothing}; activation ramp ${settings.activationRampSeconds}s.`,
   })
 
-  if (settings.applyMotionToSnapViews) result.push({label:'Snap Views',value:'Motion enabled',title:'This motion profile can run alongside a selected Snap View.'})
-  if (settings.positionAssist.enabled) result.push({label:'Position Assist',value:'On',title:'Rotation-driven extra lean and height.'})
-  if (settings.responseMode==='continuous') result.push({label:'Deadzone Transition',value:settings.advancedAxes?'Per direction':`Y ${settings.deadzoneTransitionDegrees}° · P ${settings.pitchDeadzoneTransitionDegrees}°`,title:'Angular sensitivity ramp beyond the deadzone.'})
+  if (props.snapStackingAvailable && settings.applyMotionToSnapViews) {
+    result.push({
+      label: 'Snap Views',
+      value: 'Motion enabled',
+      title: 'This motion profile keeps running inside a selected Snap View.',
+    })
+  }
+  if (settings.positionAssist.enabled) {
+    result.push({ label: 'Position Assist', value: 'On', title: 'Rotation-driven extra lean and height.' })
+  }
+  if (settings.responseMode === 'continuous') {
+    result.push({
+      label: 'Deadzone Transition',
+      value: settings.advancedAxes
+        ? 'Per direction'
+        : `Y ${settings.deadzoneTransitionDegrees}° · P ${settings.pitchDeadzoneTransitionDegrees}°`,
+      title: 'Angular sensitivity ramp beyond the deadzone.',
+    })
+  }
   return result
 })
 </script>

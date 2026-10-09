@@ -198,6 +198,7 @@ class OpenXrLayer {
 #if defined(DEPTHXR_TESTING)
     friend class TurboFrameTestPeer;
     friend class PivotPoseTestPeer;
+    friend class PivotSnapTestPeer;
     friend class PivotGazeTestPeer;
     friend class EyeGazeTestPeer;
 #endif
@@ -407,6 +408,23 @@ class OpenXrLayer {
     void PollDepthAnchorToggle();
     bool IsPivotXrActive();
     const PivotXrResolvedProfile& ActivePivotProfile() const;
+    // Snap View and Enhanced Motion transitions. Input may arrive on any
+    // locate call, so each keeps the composed transform unchanged until the
+    // next xrLocateViews drive; see ApplyPivotToLocatedSpace.
+    void EngagePivotMotionProfile(size_t index);
+    void ActivatePivotQuickView(size_t profile_index, size_t view_index);
+    void ReleasePivotQuickView(double duration_seconds);
+    void ClearPivotSnapState();
+    void ResetPivotMotionState();
+    void FoldPivotMotionIntoSnap(double settle_seconds);
+    bool PivotSnapEffectActive() const;
+    bool PivotMotionVisible() const;
+    bool PivotProfilesShareNudgeSet(size_t lhs, size_t rhs) const;
+    double SelectedQuickViewTransitionSeconds() const;
+    double PivotPositionAssistYawRadians() const;
+    PivotViewOffset PivotMotionOffset() const;
+    PivotViewOffset ComposedPivotMotionOffset() const;
+    PivotViewOffset CapturePivotMotionForSnapEntry() const;
     bool IsDepthXrActive();
     // Turbo mode (async frame pacing). IsTurboActive polls the toggle binding
     // and applies the Varjo deferred-release guard; ForwardEndFrame wraps
@@ -833,24 +851,25 @@ class OpenXrLayer {
     };
     std::vector<PivotProfileInputState> pivotxr_profile_input_states_;
     // Engaged profile index; retains the last-engaged profile during the
-    // release ramp so the easing keeps using that profile's settings.
+    // release ramp so the easing keeps using that profile's settings. While a
+    // stacked Snap View is selected it names the motion profile; the snap's
+    // owner is pivotxr_quick_view_profile_index_.
     size_t pivotxr_active_profile_index_{0};
     bool pivotxr_engaged_{false};
-    // Stacked snaps retain the motion owner in active_profile_index; the snap
-    // owner remains in quick_view_profile_index. Never retain a profile stack.
+    // A stacked Snap View keeps applying Enhanced Motion on top of the snap.
+    // Stacked motion is measured from a head reference captured on the first
+    // drive after stacking starts (or after a recenter re-measures it).
     bool pivotxr_snap_stacked_{false};
     bool pivotxr_snap_reference_pending_{false};
-    bool pivotxr_snap_return_pending_{false};
-    bool pivotxr_snap_rebase_motion_{false};
-    PivotViewOffset pivotxr_snap_rebase_offset_;
-    PivotViewOffset CurrentPivotMotionOffset() const;
     bool pivotxr_snap_reference_valid_{false};
-    double pivotxr_snap_reference_yaw_{0}, pivotxr_snap_reference_pitch_{0};
+    double pivotxr_snap_reference_yaw_radians_{0.0};
+    double pivotxr_snap_reference_pitch_radians_{0.0};
+    // A released stacked snap hands its motion back to the seated origin on
+    // the next drive, folding the difference into the return transition.
+    bool pivotxr_snap_return_pending_{false};
+    // Position Assist in meters (right/up/forward; angles unused), expressed
+    // in the gravity-aligned heading of PivotPositionAssistYawRadians().
     PivotViewOffset pivotxr_position_offset_;
-    void EngagePivotMotionProfile(size_t index);
-    void ActivatePivotQuickView(size_t profile_index, size_t view_index);
-    void ReleasePivotQuickView(double duration);
-    void ClearPivotSnapState();
     // Independent Nudge Sets contribute to the global transition; active-only
     // Nudge Sets use the profile transition and are cleared on profile release.
     PivotViewTransitionState pivotxr_manual_view_transition_;

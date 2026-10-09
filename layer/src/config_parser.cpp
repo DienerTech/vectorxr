@@ -1405,6 +1405,14 @@ bool ParseTurboModule(const JsonValue::Object& object, TurboModuleConfig& out, s
     return true;
 }
 
+constexpr double kMaxPivotDeadzoneTransitionDegrees = 180.0;
+constexpr double kMaxPivotPositionAssistCm = 100.0;
+constexpr double kMaxPivotPositionAssistAngleDegrees = 180.0;
+
+bool IsValidPivotDeadzoneTransition(double degrees) {
+    return degrees >= 0.0 && degrees <= kMaxPivotDeadzoneTransitionDegrees;
+}
+
 bool ParsePivotAxisTuning(const JsonValue& value, const char* field, PivotAxisTuning& out, std::string& error) {
     const JsonValue::Object* object = RequireObject(value, field, error);
     if (!object) {
@@ -1414,7 +1422,8 @@ bool ParsePivotAxisTuning(const JsonValue& value, const char* field, PivotAxisTu
     static const std::unordered_set<std::string> allowed = {
         "rotationMultiplier",
         "deadzoneDegrees",
-        "maxExtraDegrees", "deadzoneTransitionDegrees",
+        "maxExtraDegrees",
+        "deadzoneTransitionDegrees",
     };
 
     if (!CheckAllowedKeys(*object, allowed, error)) {
@@ -1424,11 +1433,12 @@ bool ParsePivotAxisTuning(const JsonValue& value, const char* field, PivotAxisTu
     std::optional<double> rotation_multiplier;
     std::optional<double> deadzone_degrees;
     std::optional<double> max_extra_degrees;
-    std::optional<double> transition;
+    std::optional<double> deadzone_transition_degrees;
 
     if (!ReadOptionalNumber(*object, "rotationMultiplier", rotation_multiplier, error) ||
         !ReadOptionalNumber(*object, "deadzoneDegrees", deadzone_degrees, error) ||
-        !ReadOptionalNumber(*object, "maxExtraDegrees", max_extra_degrees, error)) {
+        !ReadOptionalNumber(*object, "maxExtraDegrees", max_extra_degrees, error) ||
+        !ReadOptionalNumber(*object, "deadzoneTransitionDegrees", deadzone_transition_degrees, error)) {
         return false;
     }
 
@@ -1441,11 +1451,14 @@ bool ParsePivotAxisTuning(const JsonValue& value, const char* field, PivotAxisTu
     if (max_extra_degrees.has_value()) {
         out.max_extra_degrees = *max_extra_degrees;
     }
-
-    if (transition) {
-        if (*transition < 0 || *transition > 180) { error = "deadzoneTransitionDegrees must be between 0 and 180"; return false; }
-        out.deadzone_transition_degrees = *transition;
+    if (deadzone_transition_degrees.has_value()) {
+        if (!IsValidPivotDeadzoneTransition(*deadzone_transition_degrees)) {
+            error = std::string(field) + ".deadzoneTransitionDegrees must be between 0 and 180";
+            return false;
+        }
+        out.deadzone_transition_degrees = *deadzone_transition_degrees;
     }
+
     return true;
 }
 
@@ -1496,34 +1509,98 @@ double MigratedStepGlideSeconds(double smoothing) {
     const double bounded = std::clamp(std::log(0.001) / (90.0 * std::log(per_frame_error)), 0.01, 2.0);
     return std::round(bounded * 100.0) / 100.0;
 }
-bool ParsePivotPositionDirection(const JsonValue& value, PivotPositionDirection& out, std::string& error) {
-    const auto* object = RequireObject(value, "positionAssist direction", error);
-    if (!object) return false;
-    static const std::unordered_set<std::string> allowed = {"rightCm", "upCm", "forwardCm", "startAngleDegrees", "fullAngleDegrees"};
-    if (!CheckAllowedKeys(*object, allowed, error)) return false;
-    std::optional<double> right, up, forward, start, full;
-    if (!ReadOptionalNumber(*object, "rightCm", right, error) || !ReadOptionalNumber(*object, "upCm", up, error) ||
-        !ReadOptionalNumber(*object, "forwardCm", forward, error) || !ReadOptionalNumber(*object, "startAngleDegrees", start, error) ||
-        !ReadOptionalNumber(*object, "fullAngleDegrees", full, error)) return false;
-    if (right) out.right_cm=*right; if (up) out.up_cm=*up; if (forward) out.forward_cm=*forward;
-    if (start) out.start_angle_degrees=*start; if (full) out.full_angle_degrees=*full;
-    if (std::abs(out.right_cm)>100 || std::abs(out.up_cm)>100 || std::abs(out.forward_cm)>100 ||
-        out.start_angle_degrees<0 || out.full_angle_degrees>180 || out.full_angle_degrees<=out.start_angle_degrees) {
-        error="Position Assist requires offsets within +/-100 cm and 0 <= start angle < full angle <= 180"; return false;
+
+bool ParsePivotPositionDirection(const JsonValue& value,
+                                 const std::string& context,
+                                 PivotPositionDirection& out,
+                                 std::string& error) {
+    const JsonValue::Object* object = RequireObject(value, context, error);
+    if (!object) {
+        return false;
+    }
+    static const std::unordered_set<std::string> allowed = {
+        "rightCm",
+        "upCm",
+        "forwardCm",
+        "startAngleDegrees",
+        "fullAngleDegrees",
+    };
+    if (!CheckAllowedKeys(*object, allowed, error)) {
+        return false;
+    }
+
+    std::optional<double> right_cm;
+    std::optional<double> up_cm;
+    std::optional<double> forward_cm;
+    std::optional<double> start_angle_degrees;
+    std::optional<double> full_angle_degrees;
+    if (!ReadOptionalNumber(*object, "rightCm", right_cm, error) ||
+        !ReadOptionalNumber(*object, "upCm", up_cm, error) ||
+        !ReadOptionalNumber(*object, "forwardCm", forward_cm, error) ||
+        !ReadOptionalNumber(*object, "startAngleDegrees", start_angle_degrees, error) ||
+        !ReadOptionalNumber(*object, "fullAngleDegrees", full_angle_degrees, error)) {
+        return false;
+    }
+    if (right_cm) out.right_cm = *right_cm;
+    if (up_cm) out.up_cm = *up_cm;
+    if (forward_cm) out.forward_cm = *forward_cm;
+    if (start_angle_degrees) out.start_angle_degrees = *start_angle_degrees;
+    if (full_angle_degrees) out.full_angle_degrees = *full_angle_degrees;
+
+    const bool offsets_valid = std::abs(out.right_cm) <= kMaxPivotPositionAssistCm &&
+                               std::abs(out.up_cm) <= kMaxPivotPositionAssistCm &&
+                               std::abs(out.forward_cm) <= kMaxPivotPositionAssistCm;
+    const bool angles_valid = out.start_angle_degrees >= 0.0 &&
+                              out.full_angle_degrees <= kMaxPivotPositionAssistAngleDegrees &&
+                              out.full_angle_degrees > out.start_angle_degrees;
+    if (!offsets_valid || !angles_valid) {
+        error = context + " requires offsets within +/-100 cm and 0 <= start angle < full angle <= 180";
+        return false;
     }
     return true;
 }
+
 bool ParsePivotPositionAssist(const JsonValue& value, PivotPositionAssist& out, std::string& error) {
-    const auto* object=RequireObject(value,"positionAssist",error); if (!object) return false;
-    static const std::unordered_set<std::string> allowed={"enabled","advancedDirections","yaw","yawLeft","yawRight","pitchUp","pitchDown"};
-    if (!CheckAllowedKeys(*object,allowed,error)) return false;
-    std::optional<bool> enabled, advanced;
-    if (!ReadOptionalBool(*object,"enabled",enabled,error) || !ReadOptionalBool(*object,"advancedDirections",advanced,error)) return false;
-    if (enabled) out.enabled=*enabled; if (advanced) out.advanced_directions=*advanced;
-    for (auto entry : {std::pair{"yaw", &out.yaw}, {"yawLeft", &out.yaw_left}, {"yawRight", &out.yaw_right},
-                       {"pitchUp", &out.pitch_up}, {"pitchDown", &out.pitch_down}}) {
-        const auto it=object->find(entry.first);
-        if (it!=object->end() && !ParsePivotPositionDirection(it->second,*entry.second,error)) return false;
+    const JsonValue::Object* object = RequireObject(value, "positionAssist", error);
+    if (!object) {
+        return false;
+    }
+    static const std::unordered_set<std::string> allowed = {
+        "enabled",
+        "advancedDirections",
+        "yaw",
+        "yawLeft",
+        "yawRight",
+        "pitchUp",
+        "pitchDown",
+    };
+    if (!CheckAllowedKeys(*object, allowed, error)) {
+        return false;
+    }
+
+    std::optional<bool> enabled;
+    std::optional<bool> advanced_directions;
+    if (!ReadOptionalBool(*object, "enabled", enabled, error) ||
+        !ReadOptionalBool(*object, "advancedDirections", advanced_directions, error)) {
+        return false;
+    }
+    if (enabled) out.enabled = *enabled;
+    if (advanced_directions) out.advanced_directions = *advanced_directions;
+
+    const std::pair<const char*, PivotPositionDirection*> directions[] = {
+        {"yaw", &out.yaw},
+        {"yawLeft", &out.yaw_left},
+        {"yawRight", &out.yaw_right},
+        {"pitchUp", &out.pitch_up},
+        {"pitchDown", &out.pitch_down},
+    };
+    for (const auto& [key, direction] : directions) {
+        const auto direction_it = object->find(key);
+        if (direction_it != object->end() &&
+            !ParsePivotPositionDirection(direction_it->second, std::string("positionAssist.") + key, *direction,
+                                         error)) {
+            return false;
+        }
     }
     return true;
 }
@@ -1532,7 +1609,11 @@ bool ParsePivotSettings(const JsonValue::Object& object, PivotXrSettings& out, s
 
 
     static const std::unordered_set<std::string> allowed = {
-        "smoothing", "applyMotionToSnapViews", "positionAssist", "deadzoneTransitionDegrees", "pitchDeadzoneTransitionDegrees",
+        "smoothing",
+        "applyMotionToSnapViews",
+        "positionAssist",
+        "deadzoneTransitionDegrees",
+        "pitchDeadzoneTransitionDegrees",
         "activationRampSeconds",
         "rotationMultiplier",
         "deadzoneDegrees",
@@ -1567,18 +1648,34 @@ bool ParsePivotSettings(const JsonValue::Object& object, PivotXrSettings& out, s
         return false;
     }
 
-    std::optional<bool> coexist;
-    std::optional<double> yaw_transition, pitch_transition;
-    if (!ReadOptionalBool(object, "applyMotionToSnapViews", coexist, error) ||
-        !ReadOptionalNumber(object,"deadzoneTransitionDegrees",yaw_transition,error) ||
-        !ReadOptionalNumber(object,"pitchDeadzoneTransitionDegrees",pitch_transition,error)) return false;
-    if ((yaw_transition && (*yaw_transition<0 || *yaw_transition>180)) ||
-        (pitch_transition && (*pitch_transition<0 || *pitch_transition>180))) { error="Deadzone transition must be between 0 and 180 degrees"; return false; }
-    if (coexist) out.apply_motion_to_snap_views=*coexist;
-    if (yaw_transition) out.yaw_deadzone_transition_degrees=*yaw_transition;
-    if (pitch_transition) out.pitch_deadzone_transition_degrees=*pitch_transition;
-    const auto position=object.find("positionAssist");
-    if (position!=object.end() && !ParsePivotPositionAssist(position->second,out.position_assist,error)) return false;
+    std::optional<bool> apply_motion_to_snap_views;
+    std::optional<double> yaw_deadzone_transition_degrees;
+    std::optional<double> pitch_deadzone_transition_degrees;
+    if (!ReadOptionalBool(object, "applyMotionToSnapViews", apply_motion_to_snap_views, error) ||
+        !ReadOptionalNumber(object, "deadzoneTransitionDegrees", yaw_deadzone_transition_degrees, error) ||
+        !ReadOptionalNumber(object, "pitchDeadzoneTransitionDegrees", pitch_deadzone_transition_degrees, error)) {
+        return false;
+    }
+    if ((yaw_deadzone_transition_degrees && !IsValidPivotDeadzoneTransition(*yaw_deadzone_transition_degrees)) ||
+        (pitch_deadzone_transition_degrees && !IsValidPivotDeadzoneTransition(*pitch_deadzone_transition_degrees))) {
+        error = "Deadzone transition must be between 0 and 180 degrees";
+        return false;
+    }
+    if (apply_motion_to_snap_views) {
+        out.apply_motion_to_snap_views = *apply_motion_to_snap_views;
+    }
+    if (yaw_deadzone_transition_degrees) {
+        out.yaw_deadzone_transition_degrees = *yaw_deadzone_transition_degrees;
+    }
+    if (pitch_deadzone_transition_degrees) {
+        out.pitch_deadzone_transition_degrees = *pitch_deadzone_transition_degrees;
+    }
+    const auto position_assist_it = object.find("positionAssist");
+    if (position_assist_it != object.end() &&
+        !ParsePivotPositionAssist(position_assist_it->second, out.position_assist, error)) {
+        return false;
+    }
+
     std::optional<double> smoothing;
     std::optional<double> activation_ramp_seconds;
     std::optional<double> rotation_multiplier;

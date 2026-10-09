@@ -2,7 +2,9 @@
 import { computed, onMounted, onUnmounted, ref, useId } from 'vue'
 import { osdCompactLayout } from '../lib/osdCompactLayout'
 import { osdAccentColors, type OsdSettings, type OsdBodyRow } from '../lib/model'
-const props = defineProps<{ settings: OsdSettings }>()
+// pivotSnapLine mirrors the layer: the Pivot row gains a Snap View line only
+// when Snap Views are configured.
+const props = withDefaults(defineProps<{ settings: OsdSettings; pivotSnapLine?: boolean }>(), { pivotSnapLine: false })
 const legible = defineModel<boolean>('legible', { default: false })
 const edgeId = useId()
 const emit = defineEmits<{ position: [horizontal: number, vertical: number] }>()
@@ -13,15 +15,16 @@ const expandedHeader = computed(() => {
   return { shift: s.showBrand || s.showApp || s.showRuntime || s.showClock ? 0 : 40,
     clockX, appX, runtimeX: s.showRuntime ? (s.showApp ? Math.floor((appX + clockX) / 2) : appX) : clockX }
 })
+const rowHeight = (row: OsdBodyRow) => row === 'graph' ? 156 : row === 'pivot' && props.pivotSnapLine ? 84 : 52
 const rows = computed(() => {
   let y = 190 - expandedHeader.value.shift
   return props.settings.bodyOrder.filter(row => props.settings[flags[row]]).map(row => {
-    const result = { key: row, y }; y += row === 'graph' ? 156 : row === 'pivot' ? 84 : 52; return result
+    const result = { key: row, y }; y += rowHeight(row); return result
   })
 })
-const compactLayout = computed(() => osdCompactLayout(props.settings))
+const compactLayout = computed(() => osdCompactLayout(props.settings, props.pivotSnapLine))
 const panelWidth = computed(() => props.settings.compact ? compactLayout.value.width : 960)
-const height = computed(() => props.settings.compact ? compactLayout.value.height : 210 - expandedHeader.value.shift + rows.value.reduce((sum, row) => sum + (row.key === 'graph' ? 156 : row.key === 'pivot' ? 84 : 52), 0))
+const height = computed(() => props.settings.compact ? compactLayout.value.height : 210 - expandedHeader.value.shift + rows.value.reduce((sum, row) => sum + rowHeight(row.key), 0))
 const width = computed(() => 2 * Math.atan(.275 * props.settings.scale / 100 * (panelWidth.value - 2) / 958) * 180 / Math.PI)
 const angularHeight = computed(() => width.value * (height.value - 2) / (panelWidth.value - 2))
 // Legible mode draws both layouts at one shared scale so text size matches between Compact and Expanded.
@@ -80,7 +83,7 @@ function move(event: PointerEvent) {
             <g v-if="settings.compactShowPivot" :transform="`translate(0 ${compactLayout.pivotY})`">
               <text x="30" y="22" font-size="20" fill="#94a5b8">PIVOT</text>
               <foreignObject x="128" :width="panelWidth - 156" height="36"><div class="body-value" style="color: #e9f0f8">Motion: Cont Active + Position</div></foreignObject>
-              <foreignObject x="128" y="32" :width="panelWidth - 156" height="36"><div class="body-value" style="color: #e9f0f8">Snap: Active / Stacked</div></foreignObject>
+              <foreignObject v-if="pivotSnapLine" x="128" y="32" :width="panelWidth - 156" height="36"><div class="body-value" style="color: #e9f0f8">Snap: Active / Stacked</div></foreignObject>
             </g>
           </g>
         </template>
@@ -96,7 +99,7 @@ function move(event: PointerEvent) {
         </template>
         <template v-if="!settings.compact"><g v-for="row in rows" :key="row.key" :transform="`translate(0 ${row.y})`">
           <template v-if="row.key === 'graph'"><rect x="28" width="904" height="130" fill="#141f2d" /><text x="40" y="22" font-size="18" fill="#94a5b8">FRAME TIME / LAST 120 FRAMES</text><path d="M40 94 L100 90 160 98 220 94 280 92 340 35 400 87 460 91 520 96 580 92 640 90 700 99 760 88 820 94 920 93" fill="none" :stroke="accent" stroke-width="3" /></template>
-          <template v-else><text x="30" y="20" font-size="20" fill="#94a5b8">{{ labels[row.key][0] }}</text><foreignObject x="242" width="680" height="36"><div class="body-value" :style="{ color: row.key === 'turbo' ? accent : '#e9f0f8' }">{{ labels[row.key][1] }}</div></foreignObject><foreignObject v-if="row.key === 'pivot'" x="242" y="32" width="680" height="36"><div class="body-value">Snap: Active / Stacked / Check Six</div></foreignObject></template>
+          <template v-else><text x="30" y="20" font-size="20" fill="#94a5b8">{{ labels[row.key][0] }}</text><foreignObject x="242" width="680" height="36"><div class="body-value" :style="{ color: row.key === 'turbo' ? accent : '#e9f0f8' }">{{ labels[row.key][1] }}</div></foreignObject><foreignObject v-if="row.key === 'pivot' && pivotSnapLine" x="242" y="32" width="680" height="36"><div class="body-value">Snap: Active / Stacked / Check Six</div></foreignObject></template>
         </g></template>
       </svg>
     </svg>

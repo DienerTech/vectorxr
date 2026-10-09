@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import type { PivotAxisTuning, PivotXRSettings } from '../lib/model'
+import type { PivotAxisTuning, PivotSnapStackingStatus, PivotXRSettings } from '../lib/model'
 import PivotSteppedSettings from './PivotSteppedSettings.vue'
 import PivotPositionAssistEditor from './PivotPositionAssistEditor.vue'
 
@@ -12,7 +12,11 @@ import PivotPositionAssistEditor from './PivotPositionAssistEditor.vue'
 // empty.
 const props = defineProps<{
   settings: PivotXRSettings
+  snapStacking: PivotSnapStackingStatus
 }>()
+
+const deadzoneTransitionHint =
+  'Eases from 1:1 to full sensitivity over this many degrees beyond the deadzone. The ease-in gives up half the transition width of amplified rotation. 0 keeps the original hard deadzone.'
 
 const advancedDirections = [
   { key: 'yawLeft', label: 'Yaw Left', hint: 'Applied when turning your head to the left.', deadzoneMax: 180 },
@@ -58,11 +62,20 @@ function onAdvancedAxesChange(enabled: boolean) {
 <template>
   <div class="space-y-3">
     <section class="rounded-[1rem] border p-4 surface-panel-soft">
-      <label class="flex items-start gap-3">
+      <label v-if="snapStacking.available" class="flex items-start gap-3">
         <input v-model="settings.applyMotionToSnapViews" type="checkbox" class="mt-1 h-4 w-4 accent-depthxr-copper" />
-        <span><span class="block font-semibold">Apply Enhanced Motion to Snap Views</span>
-        <span class="mt-1 block text-sm text-muted">Keep assistance when entering a Snap View, or activate it around a view already selected. Uses this profile’s rotation and position tuning.</span></span>
+        <span>
+          <span class="block font-semibold">Apply Enhanced Motion to Snap Views</span>
+          <span class="mt-1 block text-sm text-muted">
+            Keep assistance when entering a Snap View, or activate it around a view already selected. Uses this profile’s rotation and position tuning.
+          </span>
+          <span v-if="snapStacking.message" class="mt-1 block text-xs text-muted">{{ snapStacking.message }}</span>
+        </span>
       </label>
+      <div v-else>
+        <p class="font-semibold">Apply Enhanced Motion to Snap Views</p>
+        <p class="mt-1 text-sm text-muted">{{ snapStacking.message }}</p>
+      </div>
     </section>
     <!-- General: applies to both axes -->
     <div class="rounded-[1rem] border p-4 surface-panel-soft">
@@ -146,9 +159,24 @@ function onAdvancedAxesChange(enabled: boolean) {
     <div v-if="settings.responseMode === 'continuous' && !settings.advancedAxes" class="grid gap-3 md:grid-cols-2">
       <div class="rounded-[1rem] border p-4 surface-panel-soft">
         <p class="eyebrow text-xs uppercase tracking-[0.18em]">Yaw</p>
-        <label class="mt-3 block text-sm">Deadzone Transition (°)
-          <input v-model.number="settings.deadzoneTransitionDegrees" class="app-input mt-1 w-full rounded-[0.75rem] px-4 py-2.5" type="number" min="0" max="180" step="0.5" />
-          <span class="mt-1 block text-xs text-muted">Ease from 1:1 to full sensitivity over this angle beyond the deadzone. 0 preserves the original response.</span>
+        <label class="mt-3 block">
+          <span class="mb-1.5 flex items-center gap-1.5 text-sm font-medium">
+            Deadzone Transition
+            <span
+              :title="deadzoneTransitionHint"
+              class="cursor-help select-none text-xs text-muted"
+              >ⓘ</span
+            >
+          </span>
+          <input
+            v-model.number="settings.deadzoneTransitionDegrees"
+            class="app-input w-full rounded-[0.75rem] px-4 py-2.5"
+            min="0"
+            max="180"
+            step="0.5"
+            type="number"
+          />
+          <span class="mt-1 block text-xs text-muted">degrees · 0 keeps the original hard deadzone</span>
         </label>
         <div class="mt-3 grid gap-3 sm:grid-cols-3">
           <label class="block">
@@ -212,8 +240,24 @@ function onAdvancedAxesChange(enabled: boolean) {
 
       <div class="rounded-[1rem] border p-4 surface-panel-soft">
         <p class="eyebrow text-xs uppercase tracking-[0.18em]">Pitch</p>
-        <label class="mt-3 block text-sm">Deadzone Transition (°)
-          <input v-model.number="settings.pitchDeadzoneTransitionDegrees" class="app-input mt-1 w-full rounded-[0.75rem] px-4 py-2.5" type="number" min="0" max="180" step="0.5" />
+        <label class="mt-3 block">
+          <span class="mb-1.5 flex items-center gap-1.5 text-sm font-medium">
+            Deadzone Transition
+            <span
+              :title="deadzoneTransitionHint"
+              class="cursor-help select-none text-xs text-muted"
+              >ⓘ</span
+            >
+          </span>
+          <input
+            v-model.number="settings.pitchDeadzoneTransitionDegrees"
+            class="app-input w-full rounded-[0.75rem] px-4 py-2.5"
+            min="0"
+            max="180"
+            step="0.5"
+            type="number"
+          />
+          <span class="mt-1 block text-xs text-muted">degrees · 0 keeps the original hard deadzone</span>
         </label>
         <div class="mt-3 grid gap-3 sm:grid-cols-3">
           <label class="block">
@@ -296,10 +340,7 @@ function onAdvancedAxesChange(enabled: boolean) {
       <div class="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
         <div v-for="direction in advancedDirections" :key="direction.key" class="rounded-[0.9rem] border p-3 surface-panel">
           <p class="eyebrow text-xs uppercase tracking-[0.18em]" :title="direction.hint">{{ direction.label }}</p>
-          <label class="mt-3 block text-sm">Deadzone Transition (°)
-          <input v-model.number="axisTuning(direction.key).deadzoneTransitionDegrees" class="app-input mt-1 w-full rounded-[0.75rem] px-4 py-2.5" type="number" min="0" max="180" step="0.5" />
-        </label>
-        <div class="mt-3 grid gap-3">
+          <div class="mt-3 grid gap-3">
             <label class="block">
               <span class="mb-1.5 flex items-center gap-1.5 text-sm font-medium">
                 Multiplier
@@ -332,6 +373,25 @@ function onAdvancedAxesChange(enabled: boolean) {
                 class="app-input w-full rounded-[0.75rem] px-3 py-2"
                 min="0"
                 :max="direction.deadzoneMax"
+                step="0.5"
+                type="number"
+              />
+              <span class="mt-1 block text-xs text-muted">degrees</span>
+            </label>
+            <label class="block">
+              <span class="mb-1.5 flex items-center gap-1.5 text-sm font-medium">
+                Deadzone Transition
+                <span
+                  :title="deadzoneTransitionHint"
+                  class="cursor-help select-none text-xs text-muted"
+                  >ⓘ</span
+                >
+              </span>
+              <input
+                v-model.number="axisTuning(direction.key).deadzoneTransitionDegrees"
+                class="app-input w-full rounded-[0.75rem] px-3 py-2"
+                min="0"
+                max="180"
                 step="0.5"
                 type="number"
               />

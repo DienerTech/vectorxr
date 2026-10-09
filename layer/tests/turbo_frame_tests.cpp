@@ -183,7 +183,9 @@ class TurboFrameTestPeer {
         layer.pivotxr_engaged_=true; layer.pivotxr_activation_gain_=1; layer.pivotxr_quick_view_active_=false; layer.pivotxr_quick_view_transitioning_=false;
         layer.pivotxr_manual_view_transition_={}; layer.pivotxr_profile_view_transition_={};
         layer.pivotxr_profile_view_transition_.current.yaw_radians=.1;
-        ok=ok && layer.BuildOsdSnapshot().pivot=="Motion: Active / continuous / DCS Stepped" && layer.BuildOsdSnapshot().pivot_secondary=="Snap: Off / Nudge";
+        // Without Snap Views the nudge joins the single Pivot line.
+        ok=ok && layer.BuildOsdSnapshot().pivot=="Motion: Active / Continuous + Nudge / DCS Stepped" &&
+            layer.BuildOsdSnapshot().pivot_secondary.empty();
         layer.pivotxr_engaged_=false; layer.pivotxr_activation_gain_=0; layer.pivotxr_profile_view_transition_={};
         ok=ok && layer.BuildOsdSnapshot().pivot=="Motion: Off";
         layer.pivotxr_engaged_=true; layer.resolved_settings_.pivotxr.enabled=false;

@@ -161,23 +161,32 @@ up/down than your physical neck allows.
 - **Advanced axes** can tune left, right, up, and down independently. Continuous and Stepped keep
   separate directional values, so switching response modes does not discard either setup.
 - In Continuous response, **Deadzone Transition** gradually increases sensitivity over the
-  specified number of degrees beyond the deadzone. For an 8� deadzone and a 4� transition,
-  movement stays 1:1 through 8� and reaches the configured sensitivity at 12�. **0�** preserves
-  the original response. This angle-based transition is separate from tracking Smoothing.
+  specified number of degrees beyond the deadzone. For an 8° deadzone and a 4° transition,
+  movement stays 1:1 through 8° and reaches the configured sensitivity at 12°. The ease-in costs
+  some reach: beyond the transition, the extra rotation is transition/2 × (multiplier − 1) lower
+  than with a hard deadzone, as if the deadzone were half the transition wider. With a 2×
+  multiplier, the example adds 10° of extra rotation at 20° instead of 12°. **0°** preserves the
+  original response. This angle-based transition is separate from tracking Smoothing.
 - Enable **Position Assist** in Motion settings to add sideways lean, height, and forward/back
   movement as you turn. **Start angle** and **Full-offset angle** define the physical head-angle
   range; offsets ease in, stop at their configured maximum, and return toward zero at neutral.
   Basic sideways lean mirrors left/right. **Advanced directions** supplies independent signed
   offsets for turning left/right and looking up/down. Physical leaning remains available at 1:1.
-- Enable **Apply Enhanced Motion to Snap Views** on a motion profile to combine it with a
-  Snap View profile for the same application. Configure and enable both custom profiles for
-  that application; custom profiles replace the default profile. Motion can already be active
-  when you select a snap, or you can activate it while snapped. The snap captures a temporary
-  physical head reference, so assisted movement works around that pose without altering the
-  normal Pivot origin. Leaving the snap returns to ordinary motion; disabling motion leaves
-  the snap selected. Selecting an incompatible motion profile dismisses the snap.
-- Pivot's OSD uses two lines for motion and snap state. **Stacked** indicates that both effects
-  are applied. It also reports Position Assist, nudges, and snap entry/return transitions.
+  Offsets stay level with the horizon and face your seated origin's heading, even when the origin
+  was captured looking down; inside a stacked Snap View they face the snapped view instead.
+- Enable **Apply Enhanced Motion to Snap Views** on a custom Enhanced Motion profile to keep its
+  motion running inside a Snap View profile for the same application. Configure and enable both
+  custom profiles for that application; custom profiles replace the default profile, so the
+  default profile cannot combine the two. Motion can already be active when you select a snap, or
+  you can activate it while snapped. The snap captures a temporary physical head reference, so
+  assisted movement works around that pose without altering the normal Pivot origin; switching
+  between opted-in motion profiles keeps that reference. Leaving the snap returns to ordinary
+  motion, and disabling motion leaves the snap selected. Engaging a motion profile without this
+  option while a snap is selected keeps the snap and makes it exclusive, as Snap Views always
+  behaved: the stacked motion eases out, and leaving the snap restores the state from before it.
+- Pivot's OSD adds a second line for snap state when the application has Snap Views. **Stacked**
+  indicates that both effects are applied. The lines also report Position Assist, nudges, and
+  snap entry/return transitions.
 - The **Activation Ramp** (default 0.35s) eases Pivot in and out when it engages or disengages
   rather than snapping the view.
 
@@ -228,7 +237,9 @@ while its view is selected.
    clears the accumulated yaw and pitch. Offsets are limited to ±180° yaw and ±85° pitch.
 
 Editing a shared Nudge Set updates every profile linked to it. Nudges are applied after Enhanced
-Motion, and a selected Snap View uses its own linked Nudge Set while active.
+Motion, and a selected Snap View uses its own linked Nudge Set while active. When the snap and the
+motion it returns to share a Nudge Set, the nudges carry over; otherwise they ease out with the
+snap.
 
 ### Pivot FAQ
 

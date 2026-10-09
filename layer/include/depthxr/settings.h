@@ -182,15 +182,26 @@ struct PivotStepTuning {
     double max_extra_degrees{120.0};
 };
 
+// Position Assist offsets reached at full_angle_degrees of physical head
+// rotation, eased in from start_angle_degrees.
 struct PivotPositionDirection {
-    double right_cm{0.0}, up_cm{0.0}, forward_cm{0.0};
-    double start_angle_degrees{15.0}, full_angle_degrees{60.0};
+    double right_cm{0.0};
+    double up_cm{0.0};
+    double forward_cm{0.0};
+    double start_angle_degrees{15.0};
+    double full_angle_degrees{60.0};
 };
+
 struct PivotPositionAssist {
     bool enabled{false};
+    // Basic mode uses `yaw` for both turn directions and mirrors the sideways
+    // offset; advanced mode uses the four signed directions independently.
     bool advanced_directions{false};
     PivotPositionDirection yaw;
-    PivotPositionDirection yaw_left, yaw_right, pitch_up, pitch_down;
+    PivotPositionDirection yaw_left;
+    PivotPositionDirection yaw_right;
+    PivotPositionDirection pitch_up;
+    PivotPositionDirection pitch_down;
 };
 
 struct PivotXrSettings {
