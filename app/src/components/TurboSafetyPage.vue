@@ -102,6 +102,7 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
           <div><dt class="text-muted">Process ID</dt><dd>{{ selected.processId ?? 'Not recorded' }}</dd></div>
         </dl>
         <p v-if="selected.state === 'armed'" class="mt-4 text-xs text-muted">An unclean exit was inferred from a stopped process. This does not establish that Turbo caused a crash.</p>
+        <p v-else-if="selected.state === 'recovered'" class="mt-4 text-xs text-muted">VectorXR recovered from this fault during the same session and kept the game running. It does not block Turbo.</p>
       </section>
     </div>
   </article>

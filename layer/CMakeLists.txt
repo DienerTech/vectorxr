@@ -250,7 +250,7 @@ if(WIN32 AND DEPTHXR_BUILD_LAYER)
             VECTORXR_VERSION="${_vectorxr_version}"
         )
         add_test(NAME depthxr_turbo_frame_tests COMMAND depthxr_turbo_frame_tests)
-        set_tests_properties(depthxr_turbo_frame_tests PROPERTIES TIMEOUT 15)
+        set_tests_properties(depthxr_turbo_frame_tests PROPERTIES TIMEOUT 90)
 
         add_executable(depthxr_pivot_pose_tests tests/pivot_pose_tests.cpp src/openxr_layer.cpp)
         target_include_directories(depthxr_pivot_pose_tests PRIVATE include)

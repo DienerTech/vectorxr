@@ -362,7 +362,22 @@ class TurboFrameTestPeer {
         layer.next_end_session_ = previous;
         return result;
     }
-    static bool FrameSequenceStopped() { return XR_FAILED(Layer().turbo_frame_failure_.load()); }
+    static bool ProbeRequired() {
+        auto& layer = Layer();
+        std::scoped_lock lock(layer.turbo_mutex_);
+        return layer.turbo_begin_probe_required_;
+    }
+    static bool WaitsBeforeBegin() { return Layer().turbo_async_waits_before_begin_; }
+    static bool DrainBounded(std::chrono::milliseconds timeout) { return Layer().DrainTurboAsyncWait(timeout); }
+    static void ResetFrameState() { Layer().ResetTurboFrameState(); }
+    static bool StaleCompletionPublished() {
+        auto& layer = Layer();
+        std::scoped_lock lock(layer.turbo_mutex_);
+        return layer.turbo_async_wait_completed_ || layer.turbo_async_wait_.valid();
+    }
+    static std::filesystem::path SnapshotPath(const std::filesystem::path& log) {
+        return TurboTimingTrace::SnapshotPath(log, 0);
+    }
     static std::filesystem::path StartRecorder(const std::filesystem::path& path) {
         auto& layer = Layer();
         layer.logger_.Initialize(path);
@@ -429,9 +444,21 @@ void Expect(bool condition, const std::string& message) {
 
 enum class RuntimeCall { kWait, kBegin, kEnd };
 
+// Models the OpenXR frame-call rules VectorXR depends on:
+// - xrBeginFrame needs a completed xrWaitFrame (XR_ERROR_CALL_ORDER_INVALID
+//   otherwise, with no state change) and returns XR_FRAME_DISCARDED when a
+//   frame is already begun.
+// - A second xrWaitFrame while a waited frame is still unbegun must block until
+//   a begin (spec). The layer must never do that; it is counted as a violation
+//   and failed immediately instead of deadlocking the test.
+// - Optional interlock profile (PiOpenXR/Oculus/Varjo): a wait issued from a
+//   thread other than the submitting thread completes only after a later
+//   xrEndFrame, and xrBeginFrame is accepted before that wait completes.
+// Injected failures can be one-shot or persistent, and can model a rejected
+// begin/end that the runtime nevertheless consumed.
 class FakeRuntime {
   public:
-    FakeRuntime() {
+    FakeRuntime() : frame_thread_(std::this_thread::get_id()) {
         Expect(active_ == nullptr, "Only one fake runtime may be active at a time");
         active_ = this;
         release_runtime_on_failure = [] { Active().ReleaseAll(); };
@@ -456,11 +483,21 @@ class FakeRuntime {
                                  frame_state->type == XR_TYPE_FRAME_STATE;
         runtime.calls_.push_back(RuntimeCall::kWait);
         ++runtime.wait_entered_;
+        if (runtime.wait_tokens_ > 0) {
+            ++runtime.stacked_waits_;
+            runtime.cv_.notify_all();
+            return XR_ERROR_RUNTIME_FAILURE;
+        }
         ++runtime.active_waits_;
         runtime.max_active_waits_ = std::max(runtime.max_active_waits_, runtime.active_waits_);
         runtime.cv_.notify_all();
-        runtime.cv_.wait(lock, [&runtime] { return runtime.wait_released_; });
-        const XrResult result = runtime.wait_result_;
+        const bool interlocked = runtime.interlock_ && std::this_thread::get_id() != runtime.frame_thread_;
+        const int end_mark = runtime.end_entered_;
+        runtime.cv_.wait(lock, [&runtime, interlocked, end_mark] {
+            if (runtime.release_all_) return true;
+            return runtime.wait_released_ && (!interlocked || runtime.end_entered_ > end_mark);
+        });
+        const XrResult result = TakeResult(runtime.wait_result_, runtime.wait_failures_remaining_);
         if (XR_SUCCEEDED(result) && frame_state) {
             ++runtime.wait_tokens_;
             runtime.next_display_time_ += runtime.display_period_;
@@ -476,22 +513,24 @@ class FakeRuntime {
 
     static XrResult XRAPI_CALL BeginFrame(XrSession, const XrFrameBeginInfo* frame_begin_info) {
         FakeRuntime& runtime = Active();
-        std::scoped_lock lock(runtime.mutex_);
+        std::unique_lock lock(runtime.mutex_);
         runtime.valid_structs_ = runtime.valid_structs_ && frame_begin_info &&
                                  frame_begin_info->type == XR_TYPE_FRAME_BEGIN_INFO;
         runtime.calls_.push_back(RuntimeCall::kBegin);
         ++runtime.begin_calls_;
         runtime.cv_.notify_all();
-        const bool discarded = runtime.frame_open_;
-        {
-            if (!runtime.wait_tokens_) return XR_ERROR_CALL_ORDER_INVALID;
-            if (XR_SUCCEEDED(runtime.begin_result_) || runtime.begin_failure_consumes_frame_) {
-            --runtime.wait_tokens_;
-            runtime.frame_open_ = true;
-            }
+        runtime.cv_.wait(lock, [&runtime] { return runtime.begin_released_ || runtime.release_all_; });
+        if (!runtime.wait_tokens_ && !runtime.interlock_) {
+            ++runtime.begin_rejections_;
+            return XR_ERROR_CALL_ORDER_INVALID;
         }
-        return XR_FAILED(runtime.begin_result_) ? runtime.begin_result_ :
-               discarded ? XR_FRAME_DISCARDED : runtime.begin_result_;
+        const bool discarded = runtime.frame_open_;
+        const XrResult result = TakeResult(runtime.begin_result_, runtime.begin_failures_remaining_);
+        if (XR_SUCCEEDED(result) || runtime.begin_failure_consumes_frame_) {
+            if (runtime.wait_tokens_ > 0) --runtime.wait_tokens_;
+            runtime.frame_open_ = true;
+        }
+        return XR_FAILED(result) ? result : discarded ? XR_FRAME_DISCARDED : result;
     }
 
     static XrResult XRAPI_CALL EndFrame(XrSession, const XrFrameEndInfo* frame_end_info) {
@@ -500,21 +539,34 @@ class FakeRuntime {
         runtime.valid_structs_ = runtime.valid_structs_ && frame_end_info &&
                                  frame_end_info->type == XR_TYPE_FRAME_END_INFO;
         runtime.calls_.push_back(RuntimeCall::kEnd);
+        runtime.frame_thread_ = std::this_thread::get_id();
         ++runtime.end_entered_;
-        {
-            if (!runtime.frame_open_) return XR_ERROR_CALL_ORDER_INVALID;
-            if (XR_SUCCEEDED(runtime.end_result_) || runtime.end_failure_consumes_frame_)
-                runtime.frame_open_ = false;
+        runtime.cv_.notify_all();
+        if (!runtime.frame_open_) {
+            ++runtime.end_rejections_;
+            return XR_ERROR_CALL_ORDER_INVALID;
+        }
+        const XrResult result = TakeResult(runtime.end_result_, runtime.end_failures_remaining_);
+        if (XR_SUCCEEDED(result) || runtime.end_failure_consumes_frame_) {
+            runtime.frame_open_ = false;
         }
         if (runtime.release_wait_on_next_end_) {
             runtime.release_wait_on_next_end_ = false;
             runtime.wait_released_ = true;
         }
+        if (XR_SUCCEEDED(result) && frame_end_info && frame_end_info->layerCount == 0) ++runtime.empty_ends_;
         runtime.cv_.notify_all();
-        runtime.cv_.wait(lock, [&runtime] { return runtime.end_released_; });
+        runtime.cv_.wait(lock, [&runtime] { return runtime.end_released_ || runtime.release_all_; });
         ++runtime.end_exited_;
         runtime.cv_.notify_all();
-        return runtime.end_result_;
+        return result;
+    }
+
+    // PiOpenXR/Oculus/Varjo profile: off-thread waits complete only after a
+    // later submit, and begins are accepted before that wait completes.
+    void InterlockOffThreadWaits() {
+        std::scoped_lock lock(mutex_);
+        interlock_ = true;
     }
 
     void BlockEnd() {
@@ -522,7 +574,29 @@ class FakeRuntime {
         end_released_ = false;
     }
 
+    void BlockBegin() {
+        std::scoped_lock lock(mutex_);
+        begin_released_ = false;
+    }
+
+    void ReleaseBegin() {
+        std::scoped_lock lock(mutex_);
+        begin_released_ = true;
+        cv_.notify_all();
+    }
+
+    bool WaitForBeginEntered(int count, std::chrono::milliseconds timeout = 2s) {
+        std::unique_lock lock(mutex_);
+        return cv_.wait_for(lock, timeout, [this, count] { return begin_calls_ >= count; });
+    }
+
     void NoOpenFrame() { frame_open_ = false; }
+
+    // Models another component consuming the waited frame behind our back.
+    void DropWaitTokens() {
+        std::scoped_lock lock(mutex_);
+        wait_tokens_ = 0;
+    }
 
     void ReleaseEnd() {
         std::scoped_lock lock(mutex_);
@@ -550,24 +624,29 @@ class FakeRuntime {
         std::scoped_lock lock(mutex_);
         end_released_ = true;
         wait_released_ = true;
+        release_all_ = true;
         cv_.notify_all();
     }
 
-    void SetEndResult(XrResult result, bool consumes_frame = false) {
+    // count < 0: persistent; otherwise the next `count` calls fail.
+    void SetEndResult(XrResult result, bool consumes_frame = false, int count = -1) {
         std::scoped_lock lock(mutex_);
         end_result_ = result;
         end_failure_consumes_frame_ = consumes_frame;
+        end_failures_remaining_ = count;
     }
 
-    void SetWaitResult(XrResult result) {
+    void SetWaitResult(XrResult result, int count = -1) {
         std::scoped_lock lock(mutex_);
         wait_result_ = result;
+        wait_failures_remaining_ = count;
     }
 
-    void SetBeginResult(XrResult result, bool consumes_frame = false) {
+    void SetBeginResult(XrResult result, bool consumes_frame = false, int count = -1) {
         std::scoped_lock lock(mutex_);
         begin_result_ = result;
         begin_failure_consumes_frame_ = consumes_frame;
+        begin_failures_remaining_ = count;
     }
 
     bool WaitForEndEntered(int count, std::chrono::milliseconds timeout = 2s) {
@@ -600,6 +679,26 @@ class FakeRuntime {
         return end_entered_;
     }
 
+    int EmptyEnds() const {
+        std::scoped_lock lock(mutex_);
+        return empty_ends_;
+    }
+
+    int BeginRejections() const {
+        std::scoped_lock lock(mutex_);
+        return begin_rejections_;
+    }
+
+    int EndRejections() const {
+        std::scoped_lock lock(mutex_);
+        return end_rejections_;
+    }
+
+    int StackedWaits() const {
+        std::scoped_lock lock(mutex_);
+        return stacked_waits_;
+    }
+
     int MaxConcurrentWaits() const {
         std::scoped_lock lock(mutex_);
         return max_active_waits_;
@@ -621,24 +720,42 @@ class FakeRuntime {
         return *active_;
     }
 
+    static XrResult TakeResult(XrResult configured, int& remaining) {
+        if (XR_SUCCEEDED(configured) || remaining == 0) return XR_SUCCESS;
+        if (remaining > 0) --remaining;
+        return configured;
+    }
+
     inline static FakeRuntime* active_{nullptr};
     mutable std::mutex mutex_;
     std::condition_variable cv_;
     std::vector<RuntimeCall> calls_;
+    std::thread::id frame_thread_;
+    bool interlock_{false};
     bool end_released_{true};
+    bool begin_released_{true};
     bool wait_released_{true};
+    bool release_all_{false};
     bool release_wait_on_next_end_{false};
     bool valid_structs_{true};
     bool frame_open_{true};
-    bool begin_failure_consumes_frame_{false}, end_failure_consumes_frame_{false};
+    bool begin_failure_consumes_frame_{false};
+    bool end_failure_consumes_frame_{false};
     int wait_tokens_{0};
     int wait_entered_{0};
     int wait_exited_{0};
     int begin_calls_{0};
+    int begin_rejections_{0};
     int end_entered_{0};
     int end_exited_{0};
+    int end_rejections_{0};
+    int empty_ends_{0};
+    int stacked_waits_{0};
     int active_waits_{0};
     int max_active_waits_{0};
+    int wait_failures_remaining_{-1};
+    int begin_failures_remaining_{-1};
+    int end_failures_remaining_{-1};
     XrResult wait_result_{XR_SUCCESS};
     XrResult begin_result_{XR_SUCCESS};
     XrResult end_result_{XR_SUCCESS};
@@ -780,28 +897,23 @@ void TestAsyncReleaseHandsOverToFrameThread(bool disable_in_settings) {
 
 void TestAsyncRecoupleStallReleasesPipeline() {
     FakeRuntime runtime;
+    runtime.InterlockOffThreadWaits();
     TurboHarness harness(runtime, depthxr::TurboPacingMode::kAsync);
     const auto end_info = FrameEndInfo();
-    Expect(depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &end_info) == XR_SUCCESS,
-           "Stall test could not establish async pacing");
-    Expect(runtime.WaitForWaitExited(1), "Stall test worker wait did not complete");
+    Expect(depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &end_info) == XR_SUCCESS &&
+               runtime.WaitForWaitEntered(1), "Stall test could not establish async pacing");
 
-    // Manual toggle-off keeps the async pipeline re-coupled...
+    // Manual toggle-off keeps the async pipeline re-coupled. Its interlocked
+    // worker wait stalls until this submit, which the runtime accepts.
     depthxr::TurboFrameTestPeer::Toggle(false);
-    runtime.BlockWait();
     Expect(depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &end_info) == XR_SUCCESS,
            "Stall test toggle-off submit failed");
-    Expect(runtime.WaitForWaitEntered(2), "Re-coupled pipeline did not keep its worker wait");
+    Expect(runtime.WaitForWaitExited(1), "Interlocked worker wait did not release on submit");
     Expect(depthxr::TurboFrameTestPeer::PacingMode() == depthxr::TurboPacingMode::kAsync,
-           "A manual toggle-off must keep the async pipeline");
+           "A manual toggle-off must keep the async pipeline until its wait retires");
 
-    // A runtime interlock cannot be broken with an unmatched begin/submit.
-    const auto calls_before_timeout = runtime.Calls();
-    Expect(depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &end_info) == XR_ERROR_RUNTIME_FAILURE &&
-               runtime.Calls() == calls_before_timeout,
-           "Stalled re-coupled wait invented a runtime frame token");
-    runtime.ReleaseWait();
-    Expect(runtime.WaitForWaitExited(2), "Interlocked worker wait did not release on submit");
+    // Turbo being off must not keep the stall: the retired wait hands the
+    // frame to frame-thread pacing.
     Expect(depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &end_info) == XR_SUCCESS,
            "Release after a re-coupled stall failed");
     Expect(depthxr::TurboFrameTestPeer::PacingMode() == depthxr::TurboPacingMode::kSequenced &&
@@ -811,7 +923,8 @@ void TestAsyncRecoupleStallReleasesPipeline() {
     Expect(depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &end_info) == XR_SUCCESS &&
                runtime.WaitCalls() == waits + 1 && !depthxr::TurboFrameTestPeer::Handoff().wait_valid,
            "Released pipeline launched another off-thread wait");
-    Expect(runtime.MaxConcurrentWaits() == 1, "Stall release duplicated a runtime wait");
+    Expect(runtime.MaxConcurrentWaits() == 1 && runtime.StackedWaits() == 0 && runtime.BeginRejections() == 0,
+           "Stall release duplicated, stacked, or misordered a runtime wait");
 }
 
 void TestMetricsPauseFlushesWithoutAnotherFrame() {
@@ -1038,121 +1151,305 @@ void TestRepeatedSubmissionFailuresSuspend() {
            "Failed submissions must not start an async worker wait");
 }
 
-void TestPendingWaitNeverBeginsUnwaitedFrame() {
+XrResult AppFrame(const XrFrameEndInfo& end_info) {
+    XrFrameState state{XR_TYPE_FRAME_STATE};
+    const XrResult wait_result = AppWait(&state);
+    if (XR_FAILED(wait_result)) return wait_result;
+    const XrResult begin_result = AppBegin();
+    if (XR_FAILED(begin_result)) return begin_result;
+    return depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &end_info);
+}
+
+void ExpectHealthyFrames(FakeRuntime& runtime, int count, const std::string& context) {
+    const auto end_info = FrameEndInfo();
+    for (int frame = 0; frame < count; ++frame) {
+        Expect(AppFrame(end_info) == XR_SUCCESS, context + ": an application frame failed after recovery");
+    }
+    Expect(runtime.StackedWaits() == 0 && runtime.MaxConcurrentWaits() == 1,
+           context + ": a runtime wait was stacked on an unbegun frame or duplicated");
+}
+
+double ElapsedMs(std::chrono::steady_clock::time_point start) {
+    return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+}
+
+std::string ReadDirectory(const std::filesystem::path& directory) {
+    std::string text;
+    std::error_code error;
+    for (const auto& entry : std::filesystem::directory_iterator(directory, error)) {
+        std::ifstream stream(entry.path());
+        text.append(std::istreambuf_iterator<char>(stream), {});
+    }
+    return text;
+}
+
+// A conformant runtime rejects a begin before its wait completes and finishes
+// the wait itself: Turbo waits for it and submits the frame (previously this
+// suspended Turbo and failed the application's xrEndFrame).
+void TestConformantLateWaitIsWaitedFor() {
     FakeRuntime runtime;
+    TurboHarness harness(runtime, depthxr::TurboPacingMode::kAsync);
+    const auto end_info = FrameEndInfo();
+    Expect(depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &end_info) == XR_SUCCESS &&
+               runtime.WaitForWaitExited(1), "Late-wait test could not establish async pacing");
+    XrFrameState state{XR_TYPE_FRAME_STATE};
+    for (int late = 0; late < 2; ++late) {
+        // Block only the next worker wait, never one still being issued.
+        Expect(runtime.WaitForWaitExited(1 + 2 * late), "Previous worker wait did not complete");
+        Expect(AppWait(&state) == XR_SUCCESS && XR_SUCCEEDED(AppBegin()), "Late-wait virtual frame failed");
+        runtime.BlockWait();
+        Expect(depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &end_info) == XR_SUCCESS,
+               "Frame before the late wait failed");
+        Expect(AppWait(&state) == XR_SUCCESS && XR_SUCCEEDED(AppBegin()), "Late-wait app frame was not fabricated");
+        const int ends_before = runtime.EndCalls();
+        auto release = std::async(std::launch::async, [&runtime] {
+            std::this_thread::sleep_for(600ms);
+            runtime.ReleaseWait();
+        });
+        const auto start = std::chrono::steady_clock::now();
+        Expect(depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &end_info) == XR_SUCCESS,
+               "A late conformant wait failed the application's xrEndFrame");
+        const double elapsed = ElapsedMs(start);
+        release.get();
+        Expect(elapsed >= 550.0 && elapsed < 2200.0, "Late wait was not waited for within its bound");
+        Expect(runtime.EndCalls() == ends_before + 1, "Late-wait frame was not submitted exactly once");
+    }
+    Expect(runtime.BeginRejections() == 1 && depthxr::TurboFrameTestPeer::WaitsBeforeBegin(),
+           "A conformant runtime was probed with more than one early xrBeginFrame");
+    Expect(!depthxr::TurboFrameTestPeer::AutoSuspended() &&
+               depthxr::TurboFrameTestPeer::PacingMode() == depthxr::TurboPacingMode::kAsync,
+           "Two isolated late waits suspended or abandoned async pacing");
+    ExpectHealthyFrames(runtime, 32, "Late conformant wait");
+}
+
+// A runtime wait that never completes must not freeze the application inside
+// VectorXR: the frame is dropped after a bounded wait, and forwarding resumes
+// as soon as the runtime completes the wait.
+void TestStuckWaitDropsFrameThenResumes() {
+    FakeRuntime runtime;
+    TurboHarness harness(runtime, depthxr::TurboPacingMode::kAsync);
+    const auto end_info = FrameEndInfo();
+    Expect(depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &end_info) == XR_SUCCESS &&
+               runtime.WaitForWaitExited(1), "Stuck-wait test could not establish async pacing");
+    XrFrameState state{XR_TYPE_FRAME_STATE};
+    Expect(AppWait(&state) == XR_SUCCESS && XR_SUCCEEDED(AppBegin()), "Stuck-wait first frame failed");
     runtime.BlockWait();
+    Expect(depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &end_info) == XR_SUCCESS,
+           "Stuck-wait frame before the stall failed");
+    Expect(AppWait(&state) == XR_SUCCESS && XR_SUCCEEDED(AppBegin()), "Stuck-wait app frame was not fabricated");
+    const int ends_before = runtime.EndCalls();
+    const auto start = std::chrono::steady_clock::now();
+    Expect(depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &end_info) == XR_SUCCESS,
+           "A stuck runtime wait returned an error to the application");
+    const double elapsed = ElapsedMs(start);
+    Expect(elapsed >= 2000.0 && elapsed < 3000.0, "Stuck-wait xrEndFrame was not bounded");
+    Expect(runtime.EndCalls() == ends_before && depthxr::TurboFrameTestPeer::Handoff().wait_valid,
+           "A frame was submitted without its wait, or the retained wait was discarded");
+    auto poll = std::async(std::launch::async, [] {
+        XrFrameState next{XR_TYPE_FRAME_STATE};
+        return AppWait(&next);
+    });
+    Expect(poll.wait_for(50ms) == std::future_status::timeout,
+           "The next app poll ran ahead of the runtime's outstanding wait");
+    runtime.ReleaseWait();
+    Expect(poll.wait_for(2s) == std::future_status::ready && poll.get() == XR_SUCCESS,
+           "The app poll did not resume when the runtime completed its wait");
+    Expect(XR_SUCCEEDED(AppBegin()) &&
+               depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &end_info) == XR_SUCCESS &&
+               runtime.EndCalls() == ends_before + 1,
+           "Forwarding did not resume after the stuck wait completed");
+    ExpectHealthyFrames(runtime, 16, "Stuck wait");
+}
+
+// PiOpenXR/Oculus/Varjo: the off-thread wait completes only after a submit.
+// Auto discovery must keep accepting those early begins and fall back to
+// frame-thread pacing (restores the coverage the strict-only fixture lost).
+void TestInterlockedRuntimeAutoFallsBackToSequenced() {
+    FakeRuntime runtime;
+    runtime.InterlockOffThreadWaits();
+    TurboHarness harness(runtime, depthxr::TurboPacingMode::kAsync);
+    depthxr::TurboFrameTestPeer::SetPolicy(depthxr::TurboPacingMode::kAsync,
+                                          depthxr::TurboFrameTestPeer::Source::kProbing);
+    const auto end_info = FrameEndInfo();
+    Expect(depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &end_info) == XR_SUCCESS &&
+               runtime.WaitForWaitEntered(1), "Interlock test could not establish async pacing");
+    int frames = 0;
+    while (depthxr::TurboFrameTestPeer::SequencedState() != depthxr::TurboFrameTestPeer::ActiveState() &&
+           frames < 8) {
+        Expect(AppFrame(end_info) == XR_SUCCESS, "An interlocked async frame failed");
+        ++frames;
+    }
+    Expect(depthxr::TurboFrameTestPeer::PacingMode() == depthxr::TurboPacingMode::kSequenced &&
+               depthxr::TurboFrameTestPeer::SequencedState() == depthxr::TurboFrameTestPeer::ActiveState() &&
+               frames <= 5,
+           "Auto did not hand interlocked async pacing to the frame thread after two stalls");
+    Expect(!depthxr::TurboFrameTestPeer::AutoSuspended() && runtime.BeginRejections() == 0,
+           "The interlock fallback suspended Turbo or was rejected");
+    const auto start = std::chrono::steady_clock::now();
+    ExpectHealthyFrames(runtime, 64, "Interlocked fallback");
+    Expect(ElapsedMs(start) < 64 * 50.0, "Frame-thread pacing still stalled on the interlocked runtime");
+}
+
+// A forced async strategy is never adapted, but stalls must still end in a
+// suspension that keeps frames flowing rather than freezing the game.
+void TestInterlockedForcedAsyncSuspendsAndKeepsRunning() {
+    FakeRuntime runtime;
+    runtime.InterlockOffThreadWaits();
     TurboHarness harness(runtime, depthxr::TurboPacingMode::kAsync);
     const auto end_info = FrameEndInfo();
     Expect(depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &end_info) == XR_SUCCESS,
-           "Delayed wait test could not establish async pacing");
-    Expect(runtime.WaitForWaitEntered(1), "Delayed runtime wait was not issued");
-    XrFrameState state{XR_TYPE_FRAME_STATE};
-    Expect(AppWait(&state) == XR_SUCCESS, "First virtual app wait failed");
-    auto queued_poll = std::async(std::launch::async, [] {
-        XrFrameState next{XR_TYPE_FRAME_STATE}; return AppWait(&next);
-    });
-    Expect(queued_poll.wait_for(20ms) == std::future_status::timeout,
-           "Second virtual poll did not wait for the pending runtime frame");
-    const auto result = depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &end_info);
-    Expect(runtime.BeginCalls() == 0 && runtime.EndCalls() == 1,
-           "Pending runtime wait triggered an unmatched xrBeginFrame or xrEndFrame");
-    Expect(queued_poll.wait_for(300ms) == std::future_status::ready && queued_poll.get() == XR_SUCCESS,
-           "Suspension stranded an app poll already waiting on the retained future");
-    Expect(result == XR_ERROR_RUNTIME_FAILURE && depthxr::TurboFrameTestPeer::AutoSuspended(),
-           "Unresolved wait must suspend Turbo while preserving runtime ownership");
-    Expect(depthxr::TurboFrameTestPeer::Handoff().wait_valid && runtime.WaitCalls() == 1,
-           "Timed-out runtime wait was discarded or duplicated");
-    Expect(depthxr::TurboFrameTestPeer::FailureReason().find("xrWaitFrame") != std::string::npos,
-           "Unresolved wait did not preserve an operation-specific fault reason");
-    Expect(XR_SUCCEEDED(AppBegin()) && runtime.BeginCalls() == 0,
-           "A queued app begin escaped the retained wait shield");
-    runtime.ReleaseWait();
-    Expect(runtime.WaitForWaitExited(1), "Delayed wait never completed");
-    Expect(depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &end_info) == XR_SUCCESS,
-           "Completed delayed wait could not be retired safely");
-    Expect(depthxr::TurboFrameTestPeer::PacingMode() == depthxr::TurboPacingMode::kSequenced &&
-               !depthxr::TurboFrameTestPeer::Handoff().wait_valid && runtime.MaxConcurrentWaits() == 1,
-           "Delayed wait recovery lost ownership or started another worker wait");
+           "Forced interlock test could not establish async pacing");
+    int frames = 0;
+    while (!depthxr::TurboFrameTestPeer::AutoSuspended() && frames < 16) {
+        Expect(AppFrame(end_info) == XR_SUCCESS, "A forced interlocked async frame failed");
+        ++frames;
+    }
+    Expect(depthxr::TurboFrameTestPeer::AutoSuspended(), "Repeated forced-async stalls never suspended Turbo");
+    ExpectHealthyFrames(runtime, 32, "Forced interlocked suspension");
+    Expect(depthxr::TurboFrameTestPeer::PacingMode() == depthxr::TurboPacingMode::kSequenced,
+           "A suspended interlocked pipeline was not handed to the frame thread");
 }
 
-void TestDeferredBeginFailureStopsTurbo(bool consumes_frame) {
+// Ressay's -37: the runtime rejected the deferred begin after a completed
+// wait. The runtime proved it holds no waited frame, so the frame is opened on
+// the frame thread and the game keeps running; the event is recorded as a
+// recovered (non-blocking) fault and freezes recorder history.
+void TestOwnershipDesyncRecoversInSession() {
     FakeRuntime runtime;
     TurboHarness harness(runtime, depthxr::TurboPacingMode::kAsync);
     const auto recovery_path = std::filesystem::temp_directory_path() /
-        ("vectorxr-begin-fault-" + std::to_string(GetCurrentProcessId()) +
-         (consumes_frame ? "-consumed" : "-unconsumed"));
+        ("vxr-desync-" + std::to_string(GetCurrentProcessId()));
     std::filesystem::remove_all(recovery_path);
     depthxr::TurboFrameTestPeer::ConfigureRecovery(recovery_path);
     const auto recorder_log = depthxr::TurboFrameTestPeer::StartRecorder(recovery_path / "frame.log");
     const auto end_info = FrameEndInfo();
     Expect(depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &end_info) == XR_SUCCESS &&
-               runtime.WaitForWaitExited(1), "Begin failure test could not establish a completed wait");
-    depthxr::TurboFrameTestPeer::BeginStabilityCheck();
-    runtime.SetBeginResult(XR_ERROR_CALL_ORDER_INVALID, consumes_frame);
-    Expect(depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &end_info) == XR_ERROR_CALL_ORDER_INVALID,
-           "Rejected begin result was not returned");
-    Expect(depthxr::TurboFrameTestPeer::AutoSuspended(),
-           "Rejected deferred xrBeginFrame bypassed Turbo Safety");
-    Expect(depthxr::TurboFrameTestPeer::FailureReason().find("xrBeginFrame") != std::string::npos,
-           "Rejected begin did not preserve its operation");
-    Expect(depthxr::TurboFrameTestPeer::StabilityMs() == 0,
-           "Rejected begin was still counted as a stable pacing observation");
-    Expect(runtime.EndCalls() == 1, "Rejected begin was followed by an unmatched submit");
-    const auto calls = runtime.Calls();
+               runtime.WaitForWaitExited(1), "Desync test could not establish a completed wait");
     XrFrameState state{XR_TYPE_FRAME_STATE};
-    Expect(AppWait(&state) == XR_ERROR_CALL_ORDER_INVALID && AppBegin() == XR_ERROR_CALL_ORDER_INVALID &&
-               depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &end_info) == XR_ERROR_CALL_ORDER_INVALID &&
-               runtime.Calls() == calls,
-           "A faulted frame sequence resumed forwarding before a session reset");
-    std::string persisted;
-    for (const auto& entry : std::filesystem::directory_iterator(recovery_path / "faults")) {
-        std::ifstream stream(entry.path());
-        persisted.append(std::istreambuf_iterator<char>(stream), {});
-    }
-    Expect(persisted.find("xrBeginFrame") != std::string::npos && persisted.find("-37") != std::string::npos,
-           "Begin failure lost the operation/result in persistent fault history");
-    Expect(depthxr::TurboFrameTestPeer::EndFaultedSession() == XR_SUCCESS &&
-               !depthxr::TurboFrameTestPeer::FrameSequenceStopped() && runtime.Calls() == calls,
-           "Session reset retried uncertain frame calls or retained the stopped state");
-    Expect(std::filesystem::exists(recovery_path / "faults"), "Clean teardown erased the runtime fault evidence");
+    Expect(AppWait(&state) == XR_SUCCESS && XR_SUCCEEDED(AppBegin()), "Desync virtual frame failed");
+    runtime.DropWaitTokens();
+    Expect(depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &end_info) == XR_SUCCESS,
+           "A rejected deferred begin was returned to the application instead of recovered");
+    Expect(runtime.BeginRejections() == 1 &&
+               depthxr::TurboFrameTestPeer::PacingMode() == depthxr::TurboPacingMode::kSequenced &&
+               depthxr::TurboFrameTestPeer::SequencedState() == depthxr::TurboFrameTestPeer::ActiveState(),
+           "Desync recovery did not continue on frame-thread pacing");
+    ExpectHealthyFrames(runtime, 32, "Ownership desync");
+    Expect(!depthxr::TurboFrameTestPeer::AutoSuspended() && depthxr::TurboFrameTestPeer::FailureReason().empty(),
+           "A single recovered desync suspended or blocked Turbo");
+    const std::string faults = ReadDirectory(recovery_path / "faults");
+    Expect(faults.find("recovered") != std::string::npos && faults.find("xrBeginFrame") != std::string::npos,
+           "The recovered fault was not archived with its operation");
     depthxr::TurboFrameTestPeer::EndRecorder();
     std::string recording;
     for (unsigned part = 0; part < 2; ++part) {
         std::ifstream stream(depthxr::TurboTimingTrace::RecorderPath(recorder_log, part));
         recording.append(std::istreambuf_iterator<char>(stream), {});
     }
-    Expect(recording.find("fault.begin") != std::string::npos && recording.find("a=-37") != std::string::npos,
-           "Flight recorder omitted the operation-specific safety event");
+    Expect(recording.find("fault.begin") != std::string::npos && recording.find("a=-37") != std::string::npos &&
+               recording.find("recover.handover") != std::string::npos,
+           "Flight recorder omitted the fault or its recovery");
+    Expect(std::filesystem::exists(depthxr::TurboFrameTestPeer::SnapshotPath(recorder_log)),
+           "A fault did not freeze a recorder snapshot");
+    std::error_code error;
+    std::filesystem::remove_all(recovery_path, error);
 }
 
-void TestAsyncWaitFailureStopsTurbo() {
+// An app poll already blocked on the async handoff when a failure hands frame
+// ownership to the frame thread must stay fabricated. Falling through to a
+// real runtime wait would race the frame thread's own wait.
+void TestHandoverKeepsBlockedPollShielded() {
     FakeRuntime runtime;
-    runtime.SetWaitResult(XR_ERROR_RUNTIME_FAILURE);
+    TurboHarness harness(runtime, depthxr::TurboPacingMode::kAsync);
+    const auto end_info = FrameEndInfo();
+    Expect(depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &end_info) == XR_SUCCESS &&
+               runtime.WaitForWaitExited(1), "Blocked-poll test could not establish a completed wait");
+    XrFrameState state{XR_TYPE_FRAME_STATE};
+    Expect(AppWait(&state) == XR_SUCCESS && XR_SUCCEEDED(AppBegin()), "Blocked-poll virtual frame failed");
+    runtime.DropWaitTokens();
+    runtime.BlockBegin();
+    auto end = std::async(std::launch::async, [&] {
+        return depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &end_info);
+    });
+    Expect(runtime.WaitForBeginEntered(1), "Deferred begin never reached the runtime");
+    Expect(AppWait(&state) == XR_SUCCESS && XR_SUCCEEDED(AppBegin()), "First poll during the handoff failed");
+    auto blocked_poll = std::async(std::launch::async, [] {
+        XrFrameState next{XR_TYPE_FRAME_STATE};
+        return AppWait(&next);
+    });
+    Expect(WaitForSecondPollBlock(), "Second poll did not wait on the handoff");
+    runtime.ReleaseBegin();
+    Expect(end.wait_for(3s) == std::future_status::ready && end.get() == XR_SUCCESS,
+           "The handed-over frame was not recovered");
+    Expect(blocked_poll.wait_for(2s) == std::future_status::ready && blocked_poll.get() == XR_SUCCESS,
+           "The blocked poll did not resume after the handover");
+    const std::vector<RuntimeCall> expected{
+        RuntimeCall::kEnd, RuntimeCall::kWait,                       // async establishment + worker wait
+        RuntimeCall::kBegin,                                         // deferred begin, rejected (-37)
+        RuntimeCall::kWait, RuntimeCall::kBegin, RuntimeCall::kEnd,  // frame-thread recovery + submit
+        RuntimeCall::kWait, RuntimeCall::kBegin,                     // sequenced post-submit pacing
+    };
+    Expect(runtime.Calls() == expected && runtime.StackedWaits() == 0,
+           "A blocked poll reached the runtime alongside the frame thread's own wait");
+    ExpectHealthyFrames(runtime, 16, "Handover with a blocked poll");
+}
+
+// A begin rejected for another reason may or may not have consumed the waited
+// frame. Recovery probes with xrBeginFrame before any further wait, so it never
+// stacks a wait on an unbegun frame (which the spec makes block forever).
+void TestFailedBeginProbesBeforeWaiting(bool consumes_frame) {
+    FakeRuntime runtime;
+    TurboHarness harness(runtime, depthxr::TurboPacingMode::kAsync);
+    const auto end_info = FrameEndInfo();
+    Expect(depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &end_info) == XR_SUCCESS &&
+               runtime.WaitForWaitExited(1), "Probe test could not establish a completed wait");
+    XrFrameState state{XR_TYPE_FRAME_STATE};
+    Expect(AppWait(&state) == XR_SUCCESS && XR_SUCCEEDED(AppBegin()), "Probe test virtual frame failed");
+    runtime.SetBeginResult(XR_ERROR_RUNTIME_FAILURE, consumes_frame, 1);
+    const auto calls_before = runtime.Calls().size();
+    Expect(depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &end_info) == XR_SUCCESS,
+           "A failed deferred begin was not recovered within the frame");
+    const auto calls = runtime.Calls();
+    Expect(calls.size() > calls_before + 1 && calls[calls_before] == RuntimeCall::kBegin &&
+               calls[calls_before + 1] == RuntimeCall::kBegin,
+           "Recovery did not probe with xrBeginFrame before waiting again");
+    Expect(!depthxr::TurboFrameTestPeer::ProbeRequired(), "A settled probe stayed armed");
+    ExpectHealthyFrames(runtime, 16, consumes_frame ? "Consumed failed begin" : "Unconsumed failed begin");
+}
+
+void TestAsyncWaitFailureRecoversOnFrameThread() {
+    FakeRuntime runtime;
+    runtime.SetWaitResult(XR_ERROR_RUNTIME_FAILURE, 1);
     TurboHarness harness(runtime, depthxr::TurboPacingMode::kAsync);
     const auto end_info = FrameEndInfo();
     Expect(depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &end_info) == XR_SUCCESS &&
                runtime.WaitForWaitExited(1), "Wait failure test could not establish async pacing");
-    Expect(depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &end_info) == XR_ERROR_RUNTIME_FAILURE &&
-               depthxr::TurboFrameTestPeer::AutoSuspended(), "Failed async wait bypassed Turbo Safety");
-    Expect(runtime.BeginCalls() == 0 && runtime.EndCalls() == 1,
-           "Failed async wait was followed by an unmatched begin or end");
+    Expect(AppFrame(end_info) == XR_SUCCESS,
+           "A failed async wait was returned to the application instead of recovered");
+    Expect(runtime.EndCalls() == 2 && runtime.EndRejections() == 0,
+           "The recovered frame was not submitted with a begun runtime frame");
+    Expect(depthxr::TurboFrameTestPeer::PacingMode() == depthxr::TurboPacingMode::kSequenced,
+           "A failed async wait did not hand pacing to the frame thread");
+    ExpectHealthyFrames(runtime, 16, "Async wait failure");
 }
 
-void TestCompensationWaitFailureDoesNotSubmit() {
+void TestCompensationWaitFailureRetriesNextFrame() {
     FakeRuntime runtime;
     runtime.NoOpenFrame();
-    runtime.SetWaitResult(XR_ERROR_RUNTIME_FAILURE);
+    runtime.SetWaitResult(XR_ERROR_RUNTIME_FAILURE, 1);
     TurboHarness harness(runtime, depthxr::TurboPacingMode::kSequenced);
     depthxr::TurboFrameTestPeer::NeedSequencedCompensation();
     const auto end_info = FrameEndInfo();
     Expect(depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &end_info) == XR_ERROR_RUNTIME_FAILURE,
            "Failed compensation wait was not returned");
-    Expect(runtime.BeginCalls() == 0 && runtime.EndCalls() == 0 &&
-               depthxr::TurboFrameTestPeer::AutoSuspended(),
-           "Failed compensation wait fell through to submit or bypassed Safety");
+    Expect(runtime.BeginCalls() == 0 && runtime.EndCalls() == 0 && !depthxr::TurboFrameTestPeer::AutoSuspended(),
+           "Failed compensation wait fell through to submit or suspended on one failure");
+    Expect(AppFrame(end_info) == XR_SUCCESS && runtime.EndCalls() == 1,
+           "The next frame did not re-open and submit after a failed compensation wait");
+    ExpectHealthyFrames(runtime, 16, "Compensation wait failure");
 }
 
-void TestSequencedPostSubmitFailureStopsNextFrame(bool fail_begin) {
+void TestSequencedPostSubmitFailureRecovers(bool fail_begin) {
     FakeRuntime runtime;
     TurboHarness harness(runtime, depthxr::TurboPacingMode::kSequenced);
     const auto end_info = FrameEndInfo();
@@ -1160,18 +1457,18 @@ void TestSequencedPostSubmitFailureStopsNextFrame(bool fail_begin) {
            "Post-submit failure test could not start the sequenced handshake");
     XrFrameState state{XR_TYPE_FRAME_STATE};
     Expect(AppWait(&state) == XR_SUCCESS && XR_SUCCEEDED(AppBegin()), "Sequenced handshake failed");
-    const auto error = fail_begin ? XR_ERROR_CALL_ORDER_INVALID : XR_ERROR_RUNTIME_FAILURE;
-    if (fail_begin) runtime.SetBeginResult(error);
-    else runtime.SetWaitResult(error);
+    if (fail_begin) runtime.SetBeginResult(XR_ERROR_RUNTIME_FAILURE, false, 1);
+    else runtime.SetWaitResult(XR_ERROR_RUNTIME_FAILURE, 1);
     Expect(depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &end_info) == XR_SUCCESS,
            "Failure preparing the next frame changed the already-accepted submit result");
-    Expect(depthxr::TurboFrameTestPeer::AutoSuspended() &&
-               depthxr::TurboFrameTestPeer::FailureReason().find(fail_begin ? "xrBeginFrame" : "xrWaitFrame") != std::string::npos,
-           "Post-submit wait/begin failure was erased by the successful submit");
-    const auto calls = runtime.Calls();
-    Expect(AppWait(&state) == error && AppBegin() == error &&
-               depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &end_info) == error && runtime.Calls() == calls,
-           "Post-submit failure permitted another downstream frame call");
+    Expect(depthxr::TurboFrameTestPeer::ProbeRequired() == fail_begin,
+           "A failed post-submit begin did not require a begin probe");
+    const int waits_before = runtime.WaitCalls();
+    Expect(AppFrame(end_info) == XR_SUCCESS, "The frame after a post-submit failure was not recovered");
+    Expect(!fail_begin || runtime.WaitCalls() == waits_before + 1,
+           "Recovery waited again instead of beginning the already-waited frame");
+    ExpectHealthyFrames(runtime, 16, fail_begin ? "Post-submit begin failure" : "Post-submit wait failure");
+    Expect(!depthxr::TurboFrameTestPeer::AutoSuspended(), "One post-submit failure suspended Turbo");
 }
 
 void TestSessionEndingWaitDoesNotCreateSafetyFault(XrResult error) {
@@ -1182,23 +1479,83 @@ void TestSessionEndingWaitDoesNotCreateSafetyFault(XrResult error) {
     depthxr::TurboFrameTestPeer::NeedSequencedCompensation();
     const auto end_info = FrameEndInfo();
     Expect(depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &end_info) == error &&
-               !depthxr::TurboFrameTestPeer::AutoSuspended() && !depthxr::TurboFrameTestPeer::FrameSequenceStopped() &&
+               !depthxr::TurboFrameTestPeer::AutoSuspended() &&
                depthxr::TurboFrameTestPeer::FailureReason().empty() && runtime.EndCalls() == 0,
            "Ordinary session-ending wait created a Turbo fault or fell through to submit");
 }
 
-void TestRejectedEndStopsUnknownState(bool consumes_frame) {
+void TestRejectedEndRecovers(bool consumes_frame) {
     FakeRuntime runtime;
     TurboHarness harness(runtime, depthxr::TurboPacingMode::kAsync);
-    runtime.SetEndResult(XR_ERROR_CALL_ORDER_INVALID, consumes_frame);
+    runtime.SetEndResult(XR_ERROR_CALL_ORDER_INVALID, consumes_frame, 1);
     const auto end_info = FrameEndInfo();
-    Expect(depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &end_info) == XR_ERROR_CALL_ORDER_INVALID &&
-               depthxr::TurboFrameTestPeer::AutoSuspended(), "Rejected end did not stop uncertain frame ownership");
-    const auto calls = runtime.Calls();
+    Expect(depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &end_info) == XR_ERROR_CALL_ORDER_INVALID,
+           "A rejected submit result was not returned to the application");
+    Expect(!depthxr::TurboFrameTestPeer::AutoSuspended(), "One rejected submit suspended Turbo");
+    ExpectHealthyFrames(runtime, 16, consumes_frame ? "Consumed rejected end" : "Unconsumed rejected end");
+}
+
+// Persistent failures end Turbo's pacing, but every frame call still returns
+// promptly, and forwarding resumes when the runtime recovers.
+void TestPersistentFailuresSuspendWithoutStoppingFrames() {
+    FakeRuntime runtime;
+    TurboHarness harness(runtime, depthxr::TurboPacingMode::kSequenced);
+    const auto end_info = FrameEndInfo();
+    Expect(depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &end_info) == XR_SUCCESS,
+           "Persistent-failure test could not start the sequenced handshake");
     XrFrameState state{XR_TYPE_FRAME_STATE};
-    Expect(AppWait(&state) == XR_ERROR_CALL_ORDER_INVALID && AppBegin() == XR_ERROR_CALL_ORDER_INVALID &&
-               depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &end_info) == XR_ERROR_CALL_ORDER_INVALID &&
-               runtime.Calls() == calls, "Rejected end was retried or followed by another frame operation");
+    Expect(AppWait(&state) == XR_SUCCESS && XR_SUCCEEDED(AppBegin()), "Sequenced handshake failed");
+    runtime.SetBeginResult(XR_ERROR_RUNTIME_FAILURE);
+    for (int frame = 0; frame < 6; ++frame) {
+        const auto start = std::chrono::steady_clock::now();
+        const XrResult result = AppFrame(end_info);
+        Expect(frame == 0 ? result == XR_SUCCESS : result == XR_ERROR_RUNTIME_FAILURE,
+               "A persistent begin failure was hidden or changed");
+        Expect(ElapsedMs(start) < 500.0, "A failing frame call blocked the application");
+    }
+    Expect(depthxr::TurboFrameTestPeer::AutoSuspended(), "Persistent failures did not suspend Turbo");
+    runtime.SetBeginResult(XR_SUCCESS);
+    ExpectHealthyFrames(runtime, 16, "Persistent failure recovery");
+}
+
+// Session end must not hang on a pending interlocked wait: it is released
+// with a balancing begin and empty submit.
+void TestSessionEndReleasesInterlockedWait() {
+    FakeRuntime runtime;
+    runtime.InterlockOffThreadWaits();
+    TurboHarness harness(runtime, depthxr::TurboPacingMode::kAsync);
+    const auto end_info = FrameEndInfo();
+    Expect(depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &end_info) == XR_SUCCESS &&
+               runtime.WaitForWaitEntered(1), "Session-end interlock test could not establish async pacing");
+    const auto start = std::chrono::steady_clock::now();
+    Expect(depthxr::TurboFrameTestPeer::EndFaultedSession() == XR_SUCCESS, "xrEndSession failed");
+    const double elapsed = ElapsedMs(start);
+    Expect(elapsed < 1500.0,
+           "Session end waited " + std::to_string(elapsed) + "ms on an interlocked wait instead of releasing it");
+    Expect(runtime.WaitForWaitExited(1, 0ms), "Session end left the interlocked worker wait outstanding");
+    Expect(runtime.StackedWaits() == 0 && runtime.EndRejections() == 0,
+           "Session-end balancing violated frame ordering");
+}
+
+// A wait that never returns cannot hang session teardown, and its late
+// completion cannot publish into the next session's frame state.
+void TestSessionEndWithStuckWaitIsBounded() {
+    FakeRuntime runtime;
+    TurboHarness harness(runtime, depthxr::TurboPacingMode::kAsync);
+    runtime.BlockWait();
+    const auto end_info = FrameEndInfo();
+    Expect(depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &end_info) == XR_SUCCESS &&
+               runtime.WaitForWaitEntered(1), "Stuck session-end test could not establish async pacing");
+    Expect(!depthxr::TurboFrameTestPeer::DrainBounded(250ms), "A blocked wait reported completion");
+    const auto start = std::chrono::steady_clock::now();
+    Expect(depthxr::TurboFrameTestPeer::EndFaultedSession() == XR_SUCCESS, "xrEndSession failed");
+    const double elapsed = ElapsedMs(start);
+    Expect(elapsed < 6000.0, "Session teardown was not bounded by a stuck runtime wait");
+    runtime.ReleaseWait();
+    Expect(runtime.WaitForWaitExited(1), "Stuck wait never returned after release");
+    std::this_thread::sleep_for(50ms);
+    Expect(!depthxr::TurboFrameTestPeer::StaleCompletionPublished(),
+           "A wait from an ended session published into the next session's state");
 }
 
 void TestHealthyPipelineRetainsStrictOrder(depthxr::TurboPacingMode mode) {
@@ -1213,8 +1570,9 @@ void TestHealthyPipelineRetainsStrictOrder(depthxr::TurboPacingMode mode) {
                    depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &end_info) == XR_SUCCESS,
                "Healthy frame violated strict wait/begin/end ordering");
     }
-    Expect(!depthxr::TurboFrameTestPeer::AutoSuspended() && runtime.MaxConcurrentWaits() == 1,
-           "Healthy simulation tripped Safety or duplicated a runtime wait");
+    Expect(!depthxr::TurboFrameTestPeer::AutoSuspended() && runtime.MaxConcurrentWaits() == 1 &&
+               runtime.StackedWaits() == 0 && runtime.BeginRejections() == 0 && runtime.EndRejections() == 0,
+           "Healthy simulation tripped Safety or violated runtime frame ordering");
 }
 
 void TestStartupFailuresDoNotQuarantineTurbo() {
@@ -1356,17 +1714,27 @@ void TestSequencedStallPolicySuspends() {
 } // namespace
 
 int main() {
-    TestPendingWaitNeverBeginsUnwaitedFrame();
-    TestDeferredBeginFailureStopsTurbo(false);
-    TestDeferredBeginFailureStopsTurbo(true);
-    TestAsyncWaitFailureStopsTurbo();
-    TestCompensationWaitFailureDoesNotSubmit();
-    TestSequencedPostSubmitFailureStopsNextFrame(false);
-    TestSequencedPostSubmitFailureStopsNextFrame(true);
+    TestHandoverKeepsBlockedPollShielded();
+    // Runtime-profile and fault-recovery simulations: none may stop frame
+    // forwarding, block the application unboundedly, or stack a runtime wait.
+    TestConformantLateWaitIsWaitedFor();
+    TestStuckWaitDropsFrameThenResumes();
+    TestInterlockedRuntimeAutoFallsBackToSequenced();
+    TestInterlockedForcedAsyncSuspendsAndKeepsRunning();
+    TestOwnershipDesyncRecoversInSession();
+    TestFailedBeginProbesBeforeWaiting(false);
+    TestFailedBeginProbesBeforeWaiting(true);
+    TestAsyncWaitFailureRecoversOnFrameThread();
+    TestCompensationWaitFailureRetriesNextFrame();
+    TestSequencedPostSubmitFailureRecovers(false);
+    TestSequencedPostSubmitFailureRecovers(true);
     for (const auto error : {XR_ERROR_SESSION_LOST, XR_ERROR_INSTANCE_LOST, XR_ERROR_SESSION_NOT_RUNNING})
         TestSessionEndingWaitDoesNotCreateSafetyFault(error);
-    TestRejectedEndStopsUnknownState(false);
-    TestRejectedEndStopsUnknownState(true);
+    TestRejectedEndRecovers(false);
+    TestRejectedEndRecovers(true);
+    TestPersistentFailuresSuspendWithoutStoppingFrames();
+    TestSessionEndReleasesInterlockedWait();
+    TestSessionEndWithStuckWaitIsBounded();
     TestHealthyPipelineRetainsStrictOrder(depthxr::TurboPacingMode::kAsync);
     TestHealthyPipelineRetainsStrictOrder(depthxr::TurboPacingMode::kSequenced);
     TestAsyncTogglePreservesQueuedFrame(false);

@@ -419,8 +419,7 @@ and enable it only for applications where an in-headset A/B comparison demonstra
    **Auto · stability-first**. Auto picks a stable strategy, not necessarily the fastest one.
 4. Use **In-game Turbo Toggle > Edit Binding…** to assign a keyboard or controller control,
    then click **Save Changes**. The binding works only where Turbo is enabled in the
-   application's profile; it can also retry after a safety block or suspension unless
-   the fault details require a session restart.
+   application's profile; it can also retry after a safety block or suspension.
 5. Launch the game and compare Turbo on/off in the same scene. Use **Performance Diagnostics**
    to compare FPS, frame times, and pacing waits alongside what you see in the headset.
 
@@ -503,10 +502,14 @@ and runtime setup, including its headset and graphics configuration. Turbo remai
 in the profile so the in-game binding can retry it. A forced exit or unrelated crash can
 also leave an interrupted-session record; a block does not prove Turbo caused a crash.
 
-If a runtime frame call fails and VectorXR cannot establish which frame the runtime owns,
-frame forwarding stops for that VR session. The fault details name the failed call and ask
-you to restart the VR session. Relaunch the game before retesting; toggling Turbo or bypassing
-Safety cannot resume frame forwarding in that session.
+Turbo never stops the game's frames. If the runtime rejects or fails a frame call, VectorXR
+re-establishes a valid runtime frame on the game's own frame thread and continues with
+Sequenced pacing for the rest of that session. A runtime frame wait that is late but completes
+is waited for; one that does not complete within two seconds drops that single frame, and
+frames resume as soon as the runtime catches up. These events appear in the **Fault log** as
+recovered and do not block Turbo. After three consecutive failed frame calls, Auto tries
+Sequenced pacing, or Turbo suspends for the session; either way frames continue at the
+runtime's own pace.
 
 The page shows live Turbo status when a game is running, **Blocked setups**, and a separate
 **Fault log**. The overview's block/fault counts describe recorded history, not whether Turbo
@@ -515,7 +518,7 @@ by the saved global or per-profile Safety settings.
 
 | Control | What it changes |
 | --- | --- |
-| In-game Turbo toggle | Retries Turbo for the running application after a block or suspension, unless the fault details require a session restart. A full strategy retest still requires relaunching. |
+| In-game Turbo toggle | Retries Turbo for the running application after a block or suspension. A full strategy retest still requires relaunching. |
 | **Details** | Opens the fault reason, recorded time, pacing mode, runtime, headset, graphics API, and process ID where available. |
 | **Clear & retest** | Clears the selected setup's block and its runtime's learned pacing decision, while retaining fault history. Relaunch in Auto without a manual override to test Async and then Sequenced if needed. |
 | **Clear Logs** | Removes recorded fault history. It does **not** clear safety blocks or learned pacing decisions. The button is disabled when there are no faults. |

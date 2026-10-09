@@ -438,8 +438,14 @@ class OpenXrLayer {
     void CancelTurboAsyncHandoffLocked(const char* reason);
     void EnsureTurboAsyncWorkerLocked();
     void StopTurboAsyncWorker();
-    void TurboAsyncWorkerLoop();
-    void DrainTurboAsyncWait();
+    void TurboAsyncWorkerLoop(std::uint64_t epoch);
+    // Waits for the pipelined runtime xrWaitFrame without consuming it. Returns
+    // false if it is still outstanding after `timeout`; teardown never waits
+    // unbounded on a runtime call that may only release on a later submit.
+    bool DrainTurboAsyncWait(std::chrono::milliseconds timeout);
+    // EndSession only: releases an interlocked off-thread wait with a balancing
+    // begin/empty submit, then waits a bounded time for it to complete.
+    void ReleaseTurboPendingWaitForSessionEnd(XrSession session);
     void ResetTurboFrameState();
     // Frame pacing telemetry: logs a summary line (debug level) every ~5s so a
     // judder report can be localized to our drain, the runtime's end-frame, the
@@ -933,6 +939,9 @@ class OpenXrLayer {
     int turbo_async_handoff_debug_log_budget_{0};
     std::thread turbo_async_worker_;
     bool turbo_async_worker_stop_{false};
+    // A worker abandoned at teardown (blocked inside the runtime) exits on its
+    // own once its epoch is stale; it never takes a later session's job.
+    std::uint64_t turbo_async_worker_epoch_{0};
     bool turbo_async_job_pending_{false};
     XrSession turbo_async_job_session_{XR_NULL_HANDLE};
     std::shared_ptr<std::promise<void>> turbo_async_job_completion_;
@@ -962,12 +971,30 @@ class OpenXrLayer {
     std::atomic<bool> turbo_effective_active_{false};
     std::atomic<bool> turbo_effective_async_{false};
     enum class TurboFrameOperation { kWait, kBegin, kEnd };
-    // A rejected wait/begin leaves consumption of the runtime frame uncertain.
-    // Preserve the result until session reset; never guess a compensating call.
-    std::atomic<XrResult> turbo_frame_failure_{XR_SUCCESS};
+    // Records a failed runtime frame call. Failures never stop frame
+    // forwarding: ForwardEndFrame re-establishes a known runtime frame state
+    // (see OpenTurboRuntimeFrame), and three consecutive failures fall back or
+    // suspend Turbo for the session while frames continue at runtime pacing.
     void NoteTurboRuntimeFailure(XrResult result, XrTime submitted_display_time,
                                  TurboFrameOperation operation = TurboFrameOperation::kEnd);
-    void SuspendTurboForPendingWait(std::uint64_t generation);
+    // Frame thread only. Opens the runtime frame a submit needs when none is
+    // open. A second xrWaitFrame must never be stacked on a waited-but-unbegun
+    // frame: the spec makes it block until a begin that would never arrive.
+    // When a failed begin left that uncertain, xrBeginFrame probes it first;
+    // XR_ERROR_CALL_ORDER_INVALID proves no waited frame exists.
+    XrResult OpenTurboRuntimeFrame(XrSession session, XrTime display_time, double& frame_blocked_ms);
+    // Frame thread only, after the async wait has been retired. Moves frame
+    // ownership to frame-thread (sequenced) pacing without an interception
+    // gap: an app frame already fabricated keeps its begin swallowed.
+    void HandOverTurboToFrameThread(const char* reason);
+    // (turbo_mutex_) A runtime wait succeeded but its begin failed with an
+    // error that does not prove the frame unconsumed.
+    bool turbo_begin_probe_required_{false};
+    // (frame thread) The runtime rejected a begin issued before the pipelined
+    // wait completed (XR_ERROR_CALL_ORDER_INVALID): it does not interlock the
+    // wait with submission, so late waits are waited for instead.
+    bool turbo_async_waits_before_begin_{false};
+    int turbo_dropped_frame_log_budget_{0};
     // Info once per pipelining engage/release cycle; small Debug budget for the
     // first fabricated xrWaitFrame returns of each cycle.
     bool turbo_pipelining_logged_{false};

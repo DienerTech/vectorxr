@@ -37,6 +37,9 @@ public:
     bool Prepare(bool enabled, bool retry, const std::string& mode,
                  const ProcessAlive& alive = TurboProcessAlive);
     void Fail(const std::string& reason);
+    // Archives a fault Turbo recovered from within the session. It appears in
+    // fault history but never blocks Turbo or changes the session's marker.
+    void NoteRecovered(const std::string& reason);
     void Complete();
     bool Blocked() const { return blocked_; }
     bool ConsumeClearRequest();

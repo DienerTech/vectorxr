@@ -294,6 +294,25 @@ void TurboRecoveryGuard::Fail(const std::string& reason) {
     ArchiveFault(own_path_);
 }
 
+void TurboRecoveryGuard::NoteRecovered(const std::string& reason) {
+    if (root_.empty()) return;
+    const TurboRecoveryRecord saved = record_;
+    record_.state = "recovered";
+    record_.reason = reason;
+    const bool written = Write() && ArchiveFault(own_path_);
+    // Keep the monotonic timestamp so a later archive can never collide with
+    // this one, then restore the live marker exactly as it was.
+    const auto updated_at = record_.updated_at;
+    record_ = saved;
+    record_.updated_at = updated_at;
+    if (armed_ || failed_) {
+        Write();
+    } else if (written) {
+        std::error_code ec;
+        std::filesystem::remove(own_path_, ec);
+    }
+}
+
 bool TurboRecoveryGuard::ConsumeClearRequest() {
     if ((!blocked_ && !failed_) || root_.empty()) return false;
     const auto now = std::chrono::steady_clock::now();
