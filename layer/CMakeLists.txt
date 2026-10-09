@@ -299,15 +299,23 @@ if(WIN32 AND DEPTHXR_BUILD_LAYER)
         add_executable(
             vectorxr_hardware_probe
             tools/pivot_space_probe.cpp
+            tools/probe_gpu_load.cpp
+            tools/probe_d3d11.cpp
+            tools/probe_vulkan.cpp
+            tools/probe_render_check.cpp
+            tools/probe_common.h
         )
+        # Vulkan is loaded at run time (vulkan-1.dll): only its headers are linked.
         target_link_libraries(
             vectorxr_hardware_probe
             PRIVATE
             OpenXR::openxr_loader
+            Vulkan::Headers
             d3d11
             d3dcompiler
             dxgi
         )
+        target_compile_features(vectorxr_hardware_probe PRIVATE cxx_std_20)
         target_compile_definitions(
             vectorxr_hardware_probe
             PRIVATE
@@ -315,10 +323,35 @@ if(WIN32 AND DEPTHXR_BUILD_LAYER)
             NOMINMAX
             XR_USE_PLATFORM_WIN32
             XR_USE_GRAPHICS_API_D3D11
+            XR_USE_GRAPHICS_API_VULKAN
+            VK_NO_PROTOTYPES
         )
         if(MSVC)
             target_compile_options(vectorxr_hardware_probe PRIVATE /W4 /permissive-)
         endif()
+        # --graphics vulkan --gpu-ms: the GPU load as SPIR-V from the pinned DXC (without it the Vulkan mode runs
+        # without --gpu-ms).
+        if(DEPTHXR_DXC)
+            set(_probe_shaders "${CMAKE_CURRENT_BINARY_DIR}/probe_shaders")
+            file(MAKE_DIRECTORY "${_probe_shaders}")
+            add_custom_command(
+                OUTPUT "${_probe_shaders}/probe_vulkan_load.h"
+                COMMAND "${DEPTHXR_DXC}" -nologo -spirv -T cs_6_0 -E CSMain -O3 -WX -fspv-target-env=vulkan1.0
+                        -Vn kProbeLoadSpirv -Fh "${_probe_shaders}/probe_vulkan_load.h"
+                        "${CMAKE_CURRENT_SOURCE_DIR}/tools/probe_vulkan_load.hlsl"
+                DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/tools/probe_vulkan_load.hlsl"
+                COMMENT "Compiling the hardware probe's Vulkan GPU load (SPIR-V)"
+                VERBATIM)
+            target_sources(vectorxr_hardware_probe PRIVATE "${_probe_shaders}/probe_vulkan_load.h")
+            target_include_directories(vectorxr_hardware_probe PRIVATE "${_probe_shaders}")
+            target_compile_definitions(vectorxr_hardware_probe PRIVATE VECTORXR_PROBE_SPIRV=1)
+        endif()
+        # --vulkan-validation without VK_ADD_LAYER_PATH: the validation layer manifest the tests' configuration
+        # writes into this build tree, when there is one.
+        file(TO_NATIVE_PATH "${CMAKE_CURRENT_BINARY_DIR}/vulkan_layers" _probe_vk_layer_dir)
+        string(REPLACE "\\" "\\\\" _probe_vk_layer_dir "${_probe_vk_layer_dir}")
+        target_compile_definitions(vectorxr_hardware_probe PRIVATE
+            "VECTORXR_PROBE_VULKAN_LAYER_DIR=\"${_probe_vk_layer_dir}\"")
         add_custom_command(
             TARGET vectorxr_hardware_probe
             POST_BUILD
@@ -333,6 +366,22 @@ if(WIN32 AND DEPTHXR_BUILD_LAYER)
                 COMMAND vectorxr_hardware_probe --self-test
             )
             set_tests_properties(vectorxr_hardware_probe_self_test PROPERTIES TIMEOUT 10)
+            # The rendering half on this machine's GPU, without OpenXR: Direct3D 11 with its debug layer, Vulkan
+            # validated (with synchronization validation) when the tests have a validation layer.
+            set(_probe_validation "")
+            if(DEPTHXR_VULKAN_VALIDATION_LAYER OR
+               (DEFINED ENV{VULKAN_SDK} AND EXISTS "$ENV{VULKAN_SDK}/Bin/VkLayer_khronos_validation.dll"))
+                set(_probe_validation --vulkan-validation)
+            endif()
+            add_test(NAME vectorxr_hardware_probe_render_check_d3d11
+                     COMMAND vectorxr_hardware_probe --render-check --d3d11-debug)
+            add_test(NAME vectorxr_hardware_probe_render_check_vulkan
+                     COMMAND vectorxr_hardware_probe --render-check --graphics vulkan ${_probe_validation})
+            add_test(NAME vectorxr_hardware_probe_render_check_vulkan_late_1_0
+                     COMMAND vectorxr_hardware_probe --render-check --graphics vulkan --vk-late-submit
+                             --vulkan-api 1.0 ${_probe_validation})
+            set_tests_properties(vectorxr_hardware_probe_render_check_d3d11 vectorxr_hardware_probe_render_check_vulkan
+                                 vectorxr_hardware_probe_render_check_vulkan_late_1_0 PROPERTIES TIMEOUT 60)
         endif()
     endif()
 
