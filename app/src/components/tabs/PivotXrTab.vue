@@ -16,7 +16,7 @@ import PivotViewControlsPage from '../PivotViewControlsPage.vue'
 import PivotViewControlsPanel from '../PivotViewControlsPanel.vue'
 import ProfileShell from '../ProfileShell.vue'
 import type { RegisteredApplication, VectorXRConfig } from '../../lib/model'
-import { bindingLabel, bindingsMatchRuntimeActivation, createPivotNudgeSet, pivotBindingConflictWarnings } from '../../lib/model'
+import { bindingLabel, bindingsMatchRuntimeActivation, createPivotNudgeSet, pivotBindingConflictWarnings, pivotSnapStackingStatus } from '../../lib/model'
 
 const props = defineProps<{
   config: VectorXRConfig
@@ -78,6 +78,7 @@ const settingsSubject = computed(() => {
 })
 
 const settingsContextLabel = computed(() => profileContextLabel(settingsTarget.value))
+const settingsSnapStacking = computed(() => pivotSnapStackingStatus(props.config, settingsTarget.value ?? 'default'))
 
 const viewControlsTarget = ref<'default' | number | null>(null)
 const viewControlsSubject = computed(() => {
@@ -304,6 +305,7 @@ const profileOverviewWarningIndexes = computed(() => new Set(
     v-else-if="settingsSubject"
     :settings="settingsSubject"
     :context-label="settingsContextLabel"
+    :snap-stacking="settingsSnapStacking"
     @close="closeSubPages"
   />
   <div v-else class="space-y-4">
@@ -380,6 +382,7 @@ const profileOverviewWarningIndexes = computed(() => new Set(
           <PivotSettingsSummary
             v-if="config.modules.pivotxr.behavior !== 'snapViews'"
             :settings="config.modules.pivotxr.defaults"
+            :snap-stacking-available="false"
             class="mb-3"
             @edit="openSettings('default')"
           />

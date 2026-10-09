@@ -264,6 +264,7 @@ export interface PivotPositionDirection {
   startAngleDegrees: number
   fullAngleDegrees: number
 }
+
 export interface PivotPositionAssist {
   enabled: boolean
   advancedDirections: boolean
@@ -273,20 +274,92 @@ export interface PivotPositionAssist {
   pitchUp: PivotPositionDirection
   pitchDown: PivotPositionDirection
 }
+
 export function defaultPivotPositionDirection(): PivotPositionDirection {
   return { rightCm: 0, upCm: 0, forwardCm: 0, startAngleDegrees: 15, fullAngleDegrees: 60 }
 }
+
 export function defaultPivotPositionAssist(): PivotPositionAssist {
-  return { enabled: false, advancedDirections: false, yaw: defaultPivotPositionDirection(), yawLeft: defaultPivotPositionDirection(), yawRight: defaultPivotPositionDirection(), pitchUp: defaultPivotPositionDirection(), pitchDown: defaultPivotPositionDirection() }
-}
-function normalizePivotPositionAssist(value: unknown): PivotPositionAssist {
-  const s = isRecord(value) ? value : {}
-  const direction = (value: unknown): PivotPositionDirection => {
-    const d = isRecord(value) ? value : {}
-    const start = Math.min(179, Math.max(0, normalizeNumber(d.startAngleDegrees, 15)))
-    return { rightCm: Math.min(100,Math.max(-100,normalizeNumber(d.rightCm,0))), upCm: Math.min(100,Math.max(-100,normalizeNumber(d.upCm,0))), forwardCm: Math.min(100,Math.max(-100,normalizeNumber(d.forwardCm,0))), startAngleDegrees: start, fullAngleDegrees: Math.min(180,Math.max(start+0.1,normalizeNumber(d.fullAngleDegrees,60))) }
+  return {
+    enabled: false,
+    advancedDirections: false,
+    yaw: defaultPivotPositionDirection(),
+    yawLeft: defaultPivotPositionDirection(),
+    yawRight: defaultPivotPositionDirection(),
+    pitchUp: defaultPivotPositionDirection(),
+    pitchDown: defaultPivotPositionDirection(),
   }
-  return { enabled: normalizeBoolean(s.enabled,false), advancedDirections: normalizeBoolean(s.advancedDirections,false), yaw: direction(s.yaw), yawLeft: direction(s.yawLeft), yawRight: direction(s.yawRight), pitchUp: direction(s.pitchUp), pitchDown: direction(s.pitchDown) }
+}
+
+const maxPivotPositionAssistCm = 100
+
+function clampPositionCm(value: unknown): number {
+  return Math.min(maxPivotPositionAssistCm, Math.max(-maxPivotPositionAssistCm, normalizeNumber(value, 0)))
+}
+
+function normalizePivotPositionDirection(value: unknown): PivotPositionDirection {
+  const source = isRecord(value) ? value : {}
+  const startAngleDegrees = Math.min(179, Math.max(0, normalizeNumber(source.startAngleDegrees, 15)))
+  return {
+    rightCm: clampPositionCm(source.rightCm),
+    upCm: clampPositionCm(source.upCm),
+    forwardCm: clampPositionCm(source.forwardCm),
+    startAngleDegrees,
+    fullAngleDegrees: Math.min(180, Math.max(startAngleDegrees + 0.1, normalizeNumber(source.fullAngleDegrees, 60))),
+  }
+}
+
+function normalizePivotPositionAssist(value: unknown): PivotPositionAssist {
+  const source = isRecord(value) ? value : {}
+  return {
+    enabled: normalizeBoolean(source.enabled, false),
+    advancedDirections: normalizeBoolean(source.advancedDirections, false),
+    yaw: normalizePivotPositionDirection(source.yaw),
+    yawLeft: normalizePivotPositionDirection(source.yawLeft),
+    yawRight: normalizePivotPositionDirection(source.yawRight),
+    pitchUp: normalizePivotPositionDirection(source.pitchUp),
+    pitchDown: normalizePivotPositionDirection(source.pitchDown),
+  }
+}
+
+function normalizeDeadzoneTransitionDegrees(value: unknown): number {
+  return Math.min(180, Math.max(0, normalizeNumber(value, 0)))
+}
+
+// Whether any Snap View can be selected in some application; the OSD only
+// reserves a Snap View line in that case.
+export function pivotSnapViewsConfigured(config: VectorXRConfig): boolean {
+  const pivot = config.modules.pivotxr
+  return (pivot.behavior === 'snapViews' && pivot.viewControls.quickViews.length > 0) ||
+    pivot.profiles.some((profile) => profile.enabled && profile.behavior === 'snapViews' && profile.viewControls.quickViews.length > 0)
+}
+
+export interface PivotSnapStackingStatus {
+  available: boolean
+  message: string
+}
+
+// Stacking Enhanced Motion on Snap Views needs a custom Enhanced Motion profile
+// and a custom Snap Views profile for the same application. The Default
+// profile is one behavior at a time and any custom profile for an application
+// replaces it, so it can never stack.
+export function pivotSnapStackingStatus(config: VectorXRConfig, target: 'default' | number): PivotSnapStackingStatus {
+  if (target === 'default') {
+    return {
+      available: false,
+      message: 'Not available on the Default profile, which is either Enhanced Motion or Snap Views. Use a custom Enhanced Motion profile together with a custom Snap Views profile for the same application.',
+    }
+  }
+  const profiles = config.modules.pivotxr.profiles
+  const profile = profiles[target]
+  const hasSnapPartner = !!profile && profiles.some((candidate) =>
+    candidate.enabled &&
+    candidate.behavior === 'snapViews' &&
+    candidate.applicationIds.some((applicationId) => profile.applicationIds.includes(applicationId)))
+  return {
+    available: true,
+    message: hasSnapPartner ? '' : 'No enabled Snap Views profile targets this profile’s applications yet.',
+  }
 }
 
 export interface PivotXRSettings {
@@ -942,7 +1015,7 @@ function normalizePivotAxisTuning(value: unknown, fallback: PivotAxisTuning): Pi
   const source = isRecord(value) ? value : {}
 
   return {
-    deadzoneTransitionDegrees: Math.min(180,Math.max(0,normalizeNumber(source.deadzoneTransitionDegrees,0))),
+    deadzoneTransitionDegrees: normalizeDeadzoneTransitionDegrees(source.deadzoneTransitionDegrees),
     rotationMultiplier: normalizeNumber(source.rotationMultiplier, fallback.rotationMultiplier),
     deadzoneDegrees: normalizeNumber(source.deadzoneDegrees, fallback.deadzoneDegrees),
     maxExtraDegrees: normalizeNumber(source.maxExtraDegrees, fallback.maxExtraDegrees),
@@ -1002,10 +1075,10 @@ function normalizePivotXRSettings(value: unknown, fallback: PivotXRSettings): Pi
 
   return {
     smoothing,
-    applyMotionToSnapViews: normalizeBoolean(source.applyMotionToSnapViews,false),
+    applyMotionToSnapViews: normalizeBoolean(source.applyMotionToSnapViews, false),
     positionAssist: normalizePivotPositionAssist(source.positionAssist),
-    deadzoneTransitionDegrees: Math.min(180,Math.max(0,normalizeNumber(source.deadzoneTransitionDegrees,0))),
-    pitchDeadzoneTransitionDegrees: Math.min(180,Math.max(0,normalizeNumber(source.pitchDeadzoneTransitionDegrees,0))),
+    deadzoneTransitionDegrees: normalizeDeadzoneTransitionDegrees(source.deadzoneTransitionDegrees),
+    pitchDeadzoneTransitionDegrees: normalizeDeadzoneTransitionDegrees(source.pitchDeadzoneTransitionDegrees),
     activationRampSeconds: normalizeNumber(source.activationRampSeconds, fallback.activationRampSeconds),
     rotationMultiplier: normalizeNumber(source.rotationMultiplier, fallback.rotationMultiplier),
     deadzoneDegrees: normalizeNumber(source.deadzoneDegrees, fallback.deadzoneDegrees),
