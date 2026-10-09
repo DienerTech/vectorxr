@@ -4351,6 +4351,7 @@ void SubstitutionShownTest(ID3D12Device* device, ID3D12CommandQueue* game_queue)
     _putenv_s("VECTORXR_FRAMEGEN_SHOWN_LAYERS", "");
     Check(substitution.Active() && substitution.ShownLayersLazy(),
           "shown layers: the session keeps shown layers lazy (VECTORXR_FRAMEGEN_SHOWN_LAYERS=lazy)");
+    // The session's runtime queue (another after each Prepare: Reset releases it).
     ID3D12CommandQueue* runtime = static_cast<const XrGraphicsBindingD3D12KHR*>(created->next)->queue;
 
     const FrameGenQueueSubstitution::Calls strict{StrictAcquire, StrictWait, StrictRelease};
@@ -4366,6 +4367,9 @@ void SubstitutionShownTest(ID3D12Device* device, ID3D12CommandQueue* game_queue)
               SUCCEEDED(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&marks))),
           "shown layers: fences");
     const HANDLE event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    // A mark that did not run in time completes later: it has an event of its
+    // own, so it never ends a wait for the game's queue.
+    const HANDLE mark_event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
     UINT64 idle_value = 0;
     UINT64 mark_value = 0;
     auto finish_game_queue = [&](const std::string& what) {
@@ -4377,8 +4381,8 @@ void SubstitutionShownTest(ID3D12Device* device, ID3D12CommandQueue* game_queue)
     // within `ms` (Frame Generation's next frame would).
     auto runtime_reaches = [&](DWORD ms) {
         runtime->Signal(marks.Get(), ++mark_value);
-        marks->SetEventOnCompletion(mark_value, event);
-        return WaitForSingleObject(event, ms) == WAIT_OBJECT_0;
+        marks->SetEventOnCompletion(mark_value, mark_event);
+        return WaitForSingleObject(mark_event, ms) == WAIT_OBJECT_0;
     };
     auto acquire = [&](const std::string& what) {
         std::uint32_t index = 0;
@@ -4418,7 +4422,10 @@ void SubstitutionShownTest(ID3D12Device* device, ID3D12CommandQueue* game_queue)
               g_strict.calls + ")");
     Check(runtime_reaches(1000), "shown layers: the runtime's queue does not wait for the game's work");
     // The game's next wait: the release before it goes first, once its work
-    // has run (here 30 ms later), waited for on the CPU.
+    // has run (here 30 ms later), waited for on the CPU. No gpu_waits shows
+    // the signal ended the wait; the bound is the CPU wait's own (100 ms)
+    // plus a timer tick, so a loaded machine's late wake-up is no failure.
+    constexpr double kShownWaitBoundMs = 100.0 + 15.6;
     acquire("third frame");
     std::thread work([&] {
         Sleep(30);
@@ -4430,7 +4437,7 @@ void SubstitutionShownTest(ID3D12Device* device, ID3D12CommandQueue* game_queue)
     work.join();
     FrameGenQueueSubstitution::ShownLayerCounts counts = substitution.ShownLayers();
     Check(g_strict.calls == "awrawarw" && counts.cpu_waits == 1 && counts.gpu_waits == 0 && waited >= 20.0 &&
-              waited < 90.0,
+              waited < kShownWaitBoundMs,
           "shown layers: the game's next wait gets the release before it first, once its work has run (" +
               g_strict.calls + ", waited " + std::to_string(waited) + " ms, " + std::to_string(counts.cpu_waits) +
               " CPU waits, " + std::to_string(counts.gpu_waits) + " on the runtime's queue)");
@@ -4473,7 +4480,7 @@ void SubstitutionShownTest(ID3D12Device* device, ID3D12CommandQueue* game_queue)
     later_work.join();
     counts = substitution.ShownLayers();
     Check(g_strict.calls == "awrawarwrawarwarw" && counts.cpu_waits == 3 && counts.gpu_waits == 1 &&
-              waited_again >= 20.0 && waited_again < 90.0,
+              waited_again >= 20.0 && waited_again < kShownWaitBoundMs,
           "shown layers: a wait after an expired one still waits for its release on the CPU (" + g_strict.calls +
               ", waited " + std::to_string(waited_again) + " ms, " + std::to_string(counts.gpu_waits) +
               " on the runtime's queue)");
@@ -4511,12 +4518,14 @@ void SubstitutionShownTest(ID3D12Device* device, ID3D12CommandQueue* game_queue)
               g_strict.calls + ")");
     Check(SUCCEEDED(busy->Signal(5)), "shown layers: release the game's queue");
     finish_game_queue("the game's queue finishes the fresh swapchain's frame");
+    Check(runtime_reaches(5000), "shown layers: the runtime's queue runs on after the fresh swapchain's frame");
     substitution.Reset();
 
     // Off by default: a frame showing the layer so changes nothing.
-    substitution.Prepare(&info, note);
+    created = substitution.Prepare(&info, note);
     Check(substitution.Active() && !substitution.ShownLayersLazy() && substitution.ShownLayersSummary().empty(),
           "shown layers: off by default");
+    runtime = static_cast<const XrGraphicsBindingD3D12KHR*>(created->next)->queue;
     g_strict = {};
     acquire("off");
     wait_release("off");
@@ -4528,8 +4537,10 @@ void SubstitutionShownTest(ID3D12Device* device, ID3D12CommandQueue* game_queue)
           "shown layers, off: releases go at once, the runtime's queue waiting for the game's work (" +
               g_strict.calls + ")");
     Check(SUCCEEDED(busy->Signal(6)), "shown layers: release the game's queue");
-    substitution.Reset();
     finish_game_queue("the game's queue is not left waiting");
+    Check(runtime_reaches(5000), "shown layers, off: the runtime's queue runs on");
+    substitution.Reset();
+    CloseHandle(mark_event);
     CloseHandle(event);
     std::cout << "D3D12 queue substitution with shown layers kept lazy passed\n";
 }
