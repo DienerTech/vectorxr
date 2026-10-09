@@ -201,6 +201,7 @@ HMODULE g_loader = nullptr;
 PFN_vkGetInstanceProcAddr g_get_instance_proc_addr = nullptr;
 bool g_validation = false;
 bool g_d3d12_debug = false;
+bool g_require = false; // VECTORXR_TESTS_REQUIRE_HW=1
 vulkan_test::Messages g_messages; // every instance's messenger reports here
 
 #define GAME_INSTANCE_FUNCTIONS(X)                                                                                 \
@@ -282,7 +283,10 @@ PFN_vkVoidFunction InstanceFunction(VkInstance instance, const char* name) {
     return g_get_instance_proc_addr(instance, name);
 }
 
-bool MakeInstance(std::uint32_t api, bool bridge_extensions, Game& game, std::string& error) {
+PFN_vkCreateInstance g_create_instance = nullptr; // a stand-in for the loader's (the pure tests)
+
+bool MakeInstance(std::uint32_t api, bool bridge_extensions, Game& game, std::string& error,
+                  VkResult* failure = nullptr) {
     std::vector<const char*> layers;
     std::vector<const char*> extensions{VK_EXT_DEBUG_UTILS_EXTENSION_NAME};
     if (g_validation) layers.push_back(vulkan_test::kValidationLayer);
@@ -300,11 +304,14 @@ bool MakeInstance(std::uint32_t api, bool bridge_extensions, Game& game, std::st
     create.ppEnabledLayerNames = layers.data();
     create.enabledExtensionCount = static_cast<std::uint32_t>(extensions.size());
     create.ppEnabledExtensionNames = extensions.data();
-    auto create_instance = reinterpret_cast<PFN_vkCreateInstance>(InstanceFunction(nullptr, "vkCreateInstance"));
+    auto create_instance = g_create_instance ? g_create_instance
+                                             : reinterpret_cast<PFN_vkCreateInstance>(
+                                                   InstanceFunction(nullptr, "vkCreateInstance"));
     const VkResult result =
         create_instance ? create_instance(&create, nullptr, &game.instance) : VK_ERROR_INITIALIZATION_FAILED;
     if (result != VK_SUCCESS) {
         error = "vkCreateInstance failed (" + std::to_string(result) + ")";
+        if (failure) *failure = result;
         return false;
     }
 #define GAME_LOAD(name) game.name = reinterpret_cast<PFN_##name>(InstanceFunction(game.instance, #name));
@@ -320,6 +327,37 @@ bool MakeInstance(std::uint32_t api, bool bridge_extensions, Game& game, std::st
         game.vkCreateDebugUtilsMessengerEXT(game.instance, &messenger_info, nullptr, &game.messenger);
     }
     return true;
+}
+
+// The fixture's instance: 0 when made; no Vulkan driver (the loader finds no
+// ICD) skips, and any other failure (a validation layer that is listed but
+// does not load, say) fails.
+int FixtureInstance(Game& game, std::string& error) {
+    VkResult failure = VK_SUCCESS;
+    if (MakeInstance(VK_API_VERSION_1_2, true, game, error, &failure)) return 0;
+    if (failure == VK_ERROR_INCOMPATIBLE_DRIVER) {
+        error = "no Vulkan driver: " + error;
+        return kSkip;
+    }
+    return 1;
+}
+
+template <VkResult kResult>
+VKAPI_ATTR VkResult VKAPI_CALL FailingCreateInstance(const VkInstanceCreateInfo*, const VkAllocationCallbacks*,
+                                                     VkInstance*) {
+    return kResult;
+}
+
+void TestFixtureInstance() {
+    Game game;
+    std::string error;
+    g_create_instance = &FailingCreateInstance<VK_ERROR_INCOMPATIBLE_DRIVER>;
+    Check(FixtureInstance(game, error) == kSkip, "no Vulkan driver skips: " + error);
+    g_create_instance = &FailingCreateInstance<VK_ERROR_LAYER_NOT_PRESENT>;
+    Check(FixtureInstance(game, error) == 1, "a validation layer that does not load fails: " + error);
+    g_create_instance = &FailingCreateInstance<VK_ERROR_INITIALIZATION_FAILED>;
+    Check(FixtureInstance(game, error) == 1, "an instance that fails to initialise fails: " + error);
+    g_create_instance = nullptr;
 }
 
 // The physical device whose LUID is a hardware DXGI adapter's (or, with
@@ -665,6 +703,8 @@ struct Recorder {
     PFN_vkDeviceWaitIdle real_device_wait_idle{nullptr};
     PFN_vkImportSemaphoreWin32HandleKHR real_import{nullptr};
     PFN_vkGetPhysicalDeviceProperties2KHR real_properties2_khr{nullptr};
+    PFN_vkGetFenceStatus real_get_fence_status{nullptr};
+    PFN_vkResetFences real_reset_fences{nullptr};
     std::unordered_map<VkCommandBuffer, std::vector<Command>> recorded;
     std::vector<Submission> submissions;
     std::atomic<bool> in_call{false}; // inside Acquired or Released
@@ -672,6 +712,8 @@ struct Recorder {
     int fail_submits{0}; // the next ones fail with `fail_result`
     VkResult fail_result{VK_SUCCESS};
     bool fail_import{false};
+    VkResult fence_status_result{VK_SUCCESS}; // else returned for every fence instead of its status
+    VkResult reset_fences_result{VK_SUCCESS}; // else returned instead of resetting
     std::uint64_t device_functions{0}; // device functions the bridge resolved through the getter
     std::atomic<int> properties2_khr_calls{0}; // calls through the KHR name (a Vulkan 1.0 game has only that)
 
@@ -779,6 +821,16 @@ VKAPI_ATTR VkResult VKAPI_CALL RecordingImport(VkDevice device, const VkImportSe
     return g_recorder.real_import(device, info);
 }
 
+VKAPI_ATTR VkResult VKAPI_CALL RecordingGetFenceStatus(VkDevice device, VkFence fence) {
+    if (g_recorder.fence_status_result != VK_SUCCESS) return g_recorder.fence_status_result;
+    return g_recorder.real_get_fence_status(device, fence);
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL RecordingResetFences(VkDevice device, std::uint32_t count, const VkFence* fences) {
+    if (g_recorder.reset_fences_result != VK_SUCCESS) return g_recorder.reset_fences_result;
+    return g_recorder.real_reset_fences(device, count, fences);
+}
+
 VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL RecordingGetDeviceProcAddr(VkDevice device, const char* name) {
     const PFN_vkVoidFunction real = g_recorder.real_get_device_proc_addr(device, name);
     ++g_recorder.device_functions;
@@ -796,6 +848,8 @@ VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL RecordingGetDeviceProcAddr(VkDevice dev
     if (function == "vkImportSemaphoreWin32HandleKHR") {
         RECORD(real_import, RecordingImport, PFN_vkImportSemaphoreWin32HandleKHR)
     }
+    if (function == "vkGetFenceStatus") { RECORD(real_get_fence_status, RecordingGetFenceStatus, PFN_vkGetFenceStatus) }
+    if (function == "vkResetFences") { RECORD(real_reset_fences, RecordingResetFences, PFN_vkResetFences) }
 #undef RECORD
     return real;
 }
@@ -848,6 +902,7 @@ LUID g_runtime_luid{};
 bool g_requirements_offered = true;
 std::vector<ComPtr<ID3D12Resource>> g_runtime_images;
 std::vector<std::string> g_log; // what the bridge reported
+int g_enumerations = 0;         // calls of the runtime's xrEnumerateSwapchainImages
 
 XrResult XRAPI_CALL FakeGetRequirements(XrInstance, XrSystemId, XrGraphicsRequirementsD3D12KHR* requirements) {
     requirements->adapterLuid = g_runtime_luid;
@@ -865,6 +920,7 @@ XrResult XRAPI_CALL FakeGetInstanceProcAddr(XrInstance, const char* name, PFN_xr
 }
 
 XrResult XRAPI_CALL FakeEnumerate(XrSwapchain, uint32_t capacity, uint32_t* count, XrSwapchainImageBaseHeader* images) {
+    ++g_enumerations;
     *count = static_cast<uint32_t>(g_runtime_images.size());
     if (capacity == 0) return XR_SUCCESS;
     if (capacity < g_runtime_images.size()) return XR_ERROR_SIZE_INSUFFICIENT;
@@ -1110,11 +1166,23 @@ bool TexelMatches(VkFormat format, const std::vector<std::uint8_t>& texel, const
 // ---------------------------------------------------------------------------
 // Direct3D 12 helpers.
 
-// Every error and corruption message the Direct3D 12 debug layer stored since the last check.
+// The bridges' Direct3D 12 device (one per adapter in a process), kept so
+// what End does on it is checked after End too.
+ComPtr<ID3D12Device> g_device12;
+
+// Every error and corruption message the Direct3D 12 debug layer stored since
+// the last check (messages it had to drop counted as errors; with the require
+// switch, a device without an info queue is one).
 std::string D3D12Errors(ID3D12Device* device) {
     std::string errors;
     ComPtr<ID3D12InfoQueue> queue12;
-    if (device && SUCCEEDED(device->QueryInterface(IID_PPV_ARGS(&queue12)))) {
+    if (device && FAILED(device->QueryInterface(IID_PPV_ARGS(&queue12))) && g_require) {
+        return "[D3D12] the device has no ID3D12InfoQueue: the debug layer stores nothing\n";
+    }
+    if (queue12) {
+        if (const UINT64 dropped = queue12->GetNumMessagesDiscardedByMessageCountLimit()) {
+            errors += "[D3D12] " + std::to_string(dropped) + " messages dropped at the message limit\n";
+        }
         for (UINT64 i = 0; i < queue12->GetNumStoredMessages(); ++i) {
             SIZE_T size = 0;
             queue12->GetMessage(i, nullptr, &size);
@@ -1132,6 +1200,43 @@ std::string D3D12Errors(ID3D12Device* device) {
 
 ID3D12Device* BridgeDevice(const VulkanBridge& bridge) {
     return static_cast<const XrGraphicsBindingD3D12KHR*>(bridge.Binding())->device;
+}
+
+// Keeps the bridge's Direct3D 12 device for the checks. The first time, its
+// debug layer is set to store only errors (nothing is crowded out by the
+// message limit) and shown to store them: an invalid resource is reported.
+void WatchDevice12(ID3D12Device* device) {
+    if (!device || g_device12.Get() == device) return;
+    g_device12 = device;
+    ComPtr<ID3D12InfoQueue> queue12;
+    if (FAILED(device->QueryInterface(IID_PPV_ARGS(&queue12)))) {
+        Check(!g_require, "the bridge's Direct3D 12 device has an info queue (the debug layer is on)");
+        return;
+    }
+    D3D12_MESSAGE_SEVERITY deny[] = {D3D12_MESSAGE_SEVERITY_WARNING, D3D12_MESSAGE_SEVERITY_INFO,
+                                     D3D12_MESSAGE_SEVERITY_MESSAGE};
+    D3D12_INFO_QUEUE_FILTER filter{};
+    filter.DenyList.NumSeverities = static_cast<UINT>(std::size(deny));
+    filter.DenyList.pSeverityList = deny;
+    queue12->PushStorageFilter(&filter);
+    Check(D3D12Errors(device).empty(), "the Direct3D 12 debug layer reported nothing before the canary");
+    // Canary: a texture cannot be 0 texels wide.
+    D3D12_HEAP_PROPERTIES heap{D3D12_HEAP_TYPE_DEFAULT};
+    D3D12_RESOURCE_DESC desc{};
+    desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    desc.Width = 0;
+    desc.Height = 16;
+    desc.DepthOrArraySize = 1;
+    desc.MipLevels = 1;
+    desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    desc.SampleDesc.Count = 1;
+    ComPtr<ID3D12Resource> canary;
+    const HRESULT created = device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc,
+                                                            D3D12_RESOURCE_STATE_COMMON, nullptr,
+                                                            IID_PPV_ARGS(&canary));
+    const std::string reported = D3D12Errors(device);
+    if (reported.empty()) std::printf("WARNING: the Direct3D 12 canary was not reported\n");
+    Check(FAILED(created) && !reported.empty(), "the Direct3D 12 debug layer reports an invalid resource (canary)");
 }
 
 ID3D12CommandQueue* BridgeQueue(const VulkanBridge& bridge) {
@@ -1256,6 +1361,7 @@ void BeginBridge(Game& game, VulkanBridge& bridge, Session& session, bool timeli
     Check(bridge.Begin(XR_NULL_HANDLE, &session.info, FakeGetInstanceProcAddr, Recording(timeline), reason,
                        description) != nullptr,
           "bridged: " + reason);
+    WatchDevice12(BridgeDevice(bridge));
     Check(Contains(description, timeline ? "semaphores=timeline" : "semaphores=binary"),
           "the semaphore mode is described: " + description);
     bridge.SessionCreated();
@@ -1264,10 +1370,8 @@ void BeginBridge(Game& game, VulkanBridge& bridge, Session& session, bool timeli
 // The case's GPU work passed both validators, the bridge reported nothing and
 // used the game's queue only inside Acquired and Released.
 void CheckClean(const VulkanBridge* bridge, const std::string& test) {
-    if (bridge && bridge->Active()) {
-        const std::string errors = D3D12Errors(BridgeDevice(*bridge));
-        Check(errors.empty(), test + ": the Direct3D 12 debug layer reported\n" + errors);
-    }
+    const std::string errors = D3D12Errors(bridge && bridge->Active() ? BridgeDevice(*bridge) : g_device12.Get());
+    Check(errors.empty(), test + ": the Direct3D 12 debug layer reported\n" + errors);
     std::string messages;
     for (const std::string& message : g_messages.Take()) messages += message + "\n";
     Check(messages.empty(), test + ": the Vulkan validation layer reported\n" + messages);
@@ -1345,6 +1449,7 @@ void TestBegin(Game& game, Game& bare_game) {
     const XrSessionCreateInfo* bridged =
         bridge.Begin(XR_NULL_HANDLE, &session.info, FakeGetInstanceProcAddr, Recording(true), reason, description);
     Check(bridged != nullptr, "the session is bridged: " + reason);
+    WatchDevice12(BridgeDevice(bridge));
     Check(g_recorder.device_functions > resolved_before, "device functions are resolved through the game's getter");
     Check(bridge.Active(), "active after Begin");
     Check(bridged->systemId == 1 && bridged->createFlags == session.info.createFlags, "the create info is kept");
@@ -1443,6 +1548,21 @@ void TestSwapchainChecks(Game& game) {
     check(DepthInfo(64, 64, VK_FORMAT_D32_SFLOAT, 2, 2), XR_ERROR_FEATURE_UNSUPPORTED,
           "an array of mipmapped images");
     check(DepthInfo(64, 64, VK_FORMAT_D32_SFLOAT, 1, 1, 4), XR_SUCCESS, "multisampled depth");
+    // Vulkan sample counts are single bits and multisampled images have one
+    // mip: refused before the runtime is asked (its images are not counted).
+    const auto refused_early = [&](const XrSwapchainCreateInfo& info, const std::string& what) {
+        check(info, XR_ERROR_FEATURE_UNSUPPORTED, what);
+        const int enumerations = g_enumerations;
+        Check(!bridge.AddSwapchain(Handle(0x18), info, FakeEnumerate, reason) && g_enumerations == enumerations &&
+                  !bridge.Bridged(Handle(0x18)),
+              what + ": AddSwapchain refuses before the runtime's images are counted: " + reason);
+    };
+    refused_early(ColorInfo(64, 64, 3), "three samples");
+    refused_early(ColorInfo(64, 64, 6), "six samples");
+    XrSwapchainCreateInfo multisampled_mips = ColorInfo(64, 64, 4);
+    multisampled_mips.mipCount = 2;
+    refused_early(multisampled_mips, "multisampled colour with mips");
+    refused_early(DepthInfo(64, 64, VK_FORMAT_D32_SFLOAT, 1, 2, 4), "multisampled depth with mips");
     XrSwapchainCreateInfo info = ColorInfo(64, 64);
     info.format = VK_FORMAT_R8G8B8_UNORM;
     check(info, XR_ERROR_SWAPCHAIN_FORMAT_UNSUPPORTED, "a format without a DXGI equivalent");
@@ -1478,6 +1598,7 @@ void TestSwapchainChecks(Game& game) {
     check(info, XR_ERROR_FEATURE_UNSUPPORTED, "flags the import cannot provide");
     CheckClean(&bridge, "swapchain checks");
     bridge.End();
+    CheckClean(nullptr, "swapchain checks (End)");
 }
 
 // Frames through a three-image swapchain: each release reaches its runtime
@@ -1589,6 +1710,7 @@ void TestColorFormats(Game& game) {
     }
     CheckClean(&bridge, "colour formats");
     bridge.End();
+    CheckClean(nullptr, "colour formats (End)");
 }
 
 // The copy runs only after the game's rendering: with the game's queue held
@@ -1621,6 +1743,7 @@ void TestWrittenOrdering(Game& game, bool timeline) {
     Check(NearRgba8(texel, color, true), "the runtime's image holds the frame drawn after the gate: " + Bytes(texel));
     CheckClean(&bridge, std::string("written ordering ") + (timeline ? "timeline" : "binary"));
     bridge.End();
+    CheckClean(nullptr, std::string("written ordering ") + (timeline ? "timeline" : "binary") + " (End)");
 }
 
 // An image released again while its last copy is still queued gets another
@@ -1654,6 +1777,7 @@ void TestPendingRelease(Game& game) {
     Check(NearRgba8(ReadRuntimeImage(device, 0), second, true), "the runtime's image holds the later frame");
     CheckClean(&bridge, "pending release");
     bridge.End();
+    CheckClean(nullptr, "pending release (End)");
 }
 
 // The game renders into an image again while its copy is still queued (the
@@ -1699,6 +1823,7 @@ void TestDoneWait(Game& game, bool timeline) {
     GameIdle(game);
     CheckClean(&bridge, test);
     bridge.End();
+    CheckClean(nullptr, test + " (End)");
 }
 
 // Three frames in flight with both queues racing (the game's slow in the first
@@ -1804,6 +1929,7 @@ void TestRace(Game& game, bool timeline) {
     Check(wrong == 0, test + ": " + std::to_string(wrong) + " frames read back wrong (" + first_wrong + ")");
     CheckClean(&bridge, test);
     bridge.End();
+    CheckClean(nullptr, test + " (End)");
 }
 
 // Multisampled images are rendered privately and resolved into the twin, two
@@ -1835,6 +1961,7 @@ void TestResolve(Game& game) {
     GameIdle(game);
     CheckClean(&bridge, "resolve");
     bridge.End();
+    CheckClean(nullptr, "resolve (End)");
 }
 
 // Array images: every slice reaches the runtime.
@@ -1863,6 +1990,7 @@ void TestArray(Game& game) {
     GameIdle(game);
     CheckClean(&bridge, "array");
     bridge.End();
+    CheckClean(nullptr, "array (End)");
 }
 
 // Depth reaches the runtime's depth images: every mapped depth format, typed
@@ -1970,6 +2098,7 @@ void TestDepthValues(Game& game) {
     }
     CheckClean(&bridge, "depth values");
     bridge.End();
+    CheckClean(nullptr, "depth values (End)");
 }
 
 // The images get their attachment, transfer and sampled usage whatever the
@@ -2040,6 +2169,7 @@ void TestUsage(Game& game) {
         Check(bridge.RemoveSwapchain(swapchain), "removed");
     }
     bridge.End();
+    CheckClean(nullptr, "usage (End)");
 }
 
 // A runtime image that does not match is refused, with the reason; depth the
@@ -2086,6 +2216,7 @@ void TestMismatch(Game& game) {
     Check(!bridge.HasUnmirrored(), "no private depth once removed");
     CheckClean(&bridge, "mismatch");
     bridge.End();
+    CheckClean(nullptr, "mismatch (End)");
 }
 
 // Multisampled depth stays private: no copies, and the caller learns to leave it out.
@@ -2111,6 +2242,7 @@ void TestPrivateDepth(Game& game) {
     Check(bridge.RemoveSwapchain(swapchain), "depth removes at once");
     CheckClean(&bridge, "private depth");
     bridge.End();
+    CheckClean(nullptr, "private depth (End)");
 }
 
 // Releases without acquires are counted, not copied.
@@ -2129,6 +2261,7 @@ void TestUnmatched(Game& game) {
           "a release with nothing acquired is counted, not submitted: " + summary);
     CheckClean(&bridge, "unmatched");
     bridge.End();
+    CheckClean(nullptr, "unmatched (End)");
 }
 
 // A stalled bridge queue: a destroyed swapchain whose copies did not finish
@@ -2165,7 +2298,8 @@ void TestStalledQueue(Game& game) {
     Sleep(200);
     Check(device->GetDeviceRemovedReason() == S_OK, "the queue's late copies remove nothing");
     Check(NearRgba8(ReadRuntimeImage(device.Get(), 0), color, true), "the late copy landed in the runtime's image");
-    D3D12Errors(device.Get()); // the stall's own messages
+    const std::string errors12 = D3D12Errors(device.Get());
+    Check(errors12.empty(), "stalled queue: the Direct3D 12 debug layer reported\n" + errors12);
     g_log.clear();
     CheckClean(nullptr, "stalled queue");
 }
@@ -2211,6 +2345,7 @@ void TestSkippedCopy(Game& game) {
     g_log.clear();
     CheckClean(&bridge, "skipped copy");
     bridge.End();
+    CheckClean(nullptr, "skipped copy (End)");
 }
 
 // The game's queue held back over many frames of a stereo colour+depth set:
@@ -2242,8 +2377,13 @@ void TestRingStall(Game& game) {
         chain.images = GameImages(bridge, chain.swapchain);
         chains.push_back(chain);
     }
+    // A call that waits for the held queue takes 100 ms or more; one the
+    // scheduler or a page fault holds up only a few milliseconds, now and
+    // then.
     double slowest_acquire = 0.0;
     double slowest_release = 0.0;
+    int slow_acquires = 0; // 5 ms or more
+    int slow_releases = 0;
     constexpr int kFrames = 12; // 48 acquire/release pairs, 96 submissions
     {
         Gate gate(device, game);
@@ -2253,16 +2393,21 @@ void TestRingStall(Game& game) {
                 const std::uint32_t index = frame % 3;
                 auto start = std::chrono::steady_clock::now();
                 Acquire(bridge, chain.swapchain, index);
-                slowest_acquire = std::max(slowest_acquire, SecondsSince(start));
+                double seconds = SecondsSince(start);
+                slowest_acquire = std::max(slowest_acquire, seconds);
+                slow_acquires += seconds >= 0.005 ? 1 : 0;
                 start = std::chrono::steady_clock::now();
                 Check(Release(bridge, chain.swapchain), "copied (a recording is free)");
-                slowest_release = std::max(slowest_release, SecondsSince(start));
+                seconds = SecondsSince(start);
+                slowest_release = std::max(slowest_release, seconds);
+                slow_releases += seconds >= 0.005 ? 1 : 0;
             }
         }
         const std::string summary = bridge.Summary();
         std::cout << "ring stall: slowest acquire " << slowest_acquire * 1000.0 << " ms, slowest release "
-                  << slowest_release * 1000.0 << " ms, " << summary << '\n';
-        Check(slowest_acquire < 0.005 && slowest_release < 0.005,
+                  << slowest_release * 1000.0 << " ms, " << slow_acquires << " acquires and " << slow_releases
+                  << " releases of 5 ms or more, " << summary << '\n';
+        Check(slowest_acquire < 0.050 && slowest_release < 0.050 && slow_acquires <= 2 && slow_releases <= 2,
               "no acquire or release waits while the game's queue is held");
         Check(SummaryValue(summary, "liveFences") == 64 && SummaryValue(summary, "fenceGrowth") == 48 &&
                   SummaryValue(summary, "unfencedSubmits") == 2 * kFrames * 4 - 64,
@@ -2337,7 +2482,8 @@ void TestDrainPastGame(Game& game, bool timeline) {
         Check(g_log.empty(), "nothing to report when the queue finished");
     }
     Check(GameRuns(game), "the game's queue runs on");
-    D3D12Errors(device);
+    const std::string errors12 = D3D12Errors(device);
+    Check(errors12.empty(), test + ": the Direct3D 12 debug layer reported\n" + errors12);
     CheckClean(nullptr, test);
     bridge.End();
     CheckClean(nullptr, test + " teardown");
@@ -2421,6 +2567,64 @@ void TestRefusedSubmissions(Game& game) {
     CheckClean(nullptr, "lost device");
 }
 
+// The game's device lost as the bridge's fences show it: a fence whose status
+// is VK_ERROR_DEVICE_LOST counts as complete and makes the session lost, with
+// "written" signalled from the CPU so the bridge's queue gets through, and
+// removing the swapchain and ending do not wait; vkResetFences reporting the
+// loss does the same.
+void TestFenceDeviceLost(Game& game) {
+    for (const bool status : {true, false}) {
+        const std::string test = status ? "fence status lost" : "fence reset lost";
+        VulkanBridge bridge;
+        Session session(game);
+        BeginBridge(game, bridge, session);
+        ID3D12Device* device = BridgeDevice(bridge);
+        MakeRuntimeImages(device, 2, 32, 32, DXGI_FORMAT_R8G8B8A8_UNORM_SRGB);
+        const XrSwapchain swapchain = Handle(0xd8);
+        std::string reason;
+        Check(bridge.AddSwapchain(swapchain, ColorInfo(32, 32), FakeEnumerate, reason), "bridged: " + reason);
+        {
+            Gate gate(device, game);
+            if (status) {
+                // A release queued behind the held game: its fence pending.
+                gate.HoldGame();
+                Acquire(bridge, swapchain, 1);
+                Check(Release(bridge, swapchain), test + ": a release behind the held game");
+                Check(!bridge.WaitIdle(200), test + ": the bridge's queue waits for the game");
+                g_recorder.fence_status_result = VK_ERROR_DEVICE_LOST;
+            } else {
+                // A frame the game's queue finished: its fences signalled.
+                Acquire(bridge, swapchain, 0);
+                Clear(game, GameImages(bridge, swapchain)[0], FrameColor(0));
+                Check(Release(bridge, swapchain), test + ": a frame");
+                GameIdle(game);
+                g_recorder.reset_fences_result = VK_ERROR_DEVICE_LOST;
+            }
+            bridge.FrameEnded(); // polls the fences
+            std::string lost;
+            Check(bridge.Lost(lost) && Contains(lost, status ? "vkGetFenceStatus" : "vkResetFences"),
+                  test + ": the session is lost, naming the call: " + lost);
+            Check(bridge.WaitIdle(1000), test + ": the bridge's queue got through at once");
+            Check(g_log.size() == 1 && Contains(g_log[0], "lost"), test + ": the loss is reported");
+            g_log.clear();
+        }
+        auto start = std::chrono::steady_clock::now();
+        Check(bridge.RemoveSwapchain(swapchain), test + ": the swapchain is let go");
+        const double removed = SecondsSince(start);
+        start = std::chrono::steady_clock::now();
+        Check(bridge.Drain(), test + ": a lost bridge drains");
+        bridge.End();
+        const double ended = SecondsSince(start);
+        Check(removed < 0.5 && ended < 0.5, test + ": teardown does not wait: RemoveSwapchain " +
+                                                std::to_string(removed) + " s, Drain and End " +
+                                                std::to_string(ended) + " s");
+        g_recorder.fence_status_result = VK_SUCCESS;
+        g_recorder.reset_fences_result = VK_SUCCESS;
+        Check(GameRuns(game), test + ": the game's queue runs on");
+        CheckClean(nullptr, test);
+    }
+}
+
 // The hand-overs, as recorded: barriers (families, layouts, stages, accesses,
 // aspects, ranges) and where they are submitted, for each kind of image.
 void TestQfotRecorded(Game& game) {
@@ -2469,6 +2673,11 @@ void TestQfotRecorded(Game& game) {
         Check(bridge.AddSwapchain(chain.swapchain, chain.info, FakeEnumerate, reason), "bridged: " + reason);
         const std::vector<VkImage> images = GameImages(bridge, chain.swapchain);
         g_recorder.Take();
+        // The bridge's queue held until both rounds are recorded: round 0's
+        // copies are still queued at round 1's acquires, so each of those
+        // waits for done.
+        Gate gate(device, game);
+        gate.HoldQueue(BridgeQueue(bridge));
         const auto covers = [&](const VkImageMemoryBarrier& barrier, VkImageAspectFlags wanted, std::uint32_t levels) {
             return barrier.subresourceRange.aspectMask == wanted && barrier.subresourceRange.baseMipLevel == 0 &&
                    barrier.subresourceRange.levelCount == levels && barrier.subresourceRange.baseArrayLayer == 0 &&
@@ -2492,16 +2701,31 @@ void TestQfotRecorded(Game& game) {
                 Acquire(bridge, chain.swapchain, index);
                 std::vector<Submission> acquired = g_recorder.Take();
                 const bool waited = SummaryValue(bridge.Summary(), "doneWaits") > waits_before;
+                if (round == 1 && !private_depth && !waited) {
+                    fail(chain, where + ": an acquire behind a queued copy waits for done");
+                }
                 Command command;
                 VkImageMemoryBarrier barrier{};
                 if (round == 0) {
-                    // first_acquire: UNDEFINED to the attachment layout, no ownership transfer.
+                    // first_acquire: UNDEFINED to the attachment layout, no
+                    // ownership transfer, after everything before it.
                     single(acquired, command, barrier, where + " first acquire");
+                    const VkPipelineStageFlags first_destination =
+                        resolve ? VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT : VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+                    const VkAccessFlags first_access =
+                        resolve ? VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT
+                                : VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
                     if (barrier.image != images[index] || barrier.oldLayout != VK_IMAGE_LAYOUT_UNDEFINED ||
                         barrier.newLayout != layout || barrier.srcQueueFamilyIndex != VK_QUEUE_FAMILY_IGNORED ||
                         barrier.dstQueueFamilyIndex != VK_QUEUE_FAMILY_IGNORED ||
-                        !covers(barrier, aspect, resolve ? 1 : mips) || barrier.dstAccessMask == 0) {
+                        !covers(barrier, aspect, resolve ? 1 : mips) || barrier.srcAccessMask != 0 ||
+                        barrier.dstAccessMask != first_access ||
+                        command.source_stages != VK_PIPELINE_STAGE_ALL_COMMANDS_BIT ||
+                        command.destination_stages != first_destination) {
                         fail(chain, where + ": the first acquire's barrier");
+                    }
+                    if (waited || acquired[0].waits != 0 || acquired[0].signals != 0) {
+                        fail(chain, where + ": a first acquire waits for nothing");
                     }
                 } else if (private_depth) {
                     if (!acquired.empty()) fail(chain, where + ": private depth needs nothing at a later acquire");
@@ -2514,18 +2738,21 @@ void TestQfotRecorded(Game& game) {
                             }
                         }
                     }
-                    if (waited != (!acquired.empty() && acquired[0].waits == 1)) {
+                    if (acquired.size() != 1 || acquired[0].waits != 1 || acquired[0].signals != 0) {
                         fail(chain, where + ": the done wait is submitted exactly when issued");
                     }
                 } else {
-                    // acquire: from the external queue family (GENERAL) to the game's.
+                    // acquire: from the external queue family (GENERAL) to the
+                    // game's, its source stages chained with the done wait's
+                    // (ALL_COMMANDS) in the same submission.
                     single(acquired, command, barrier, where + " acquire");
                     if (barrier.image != images[index] || barrier.oldLayout != VK_IMAGE_LAYOUT_GENERAL ||
                         barrier.newLayout != layout || barrier.srcQueueFamilyIndex != VK_QUEUE_FAMILY_EXTERNAL ||
                         barrier.dstQueueFamilyIndex != family || !covers(barrier, aspect, mips) ||
-                        (barrier.dstAccessMask & (VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT)) !=
-                            (VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT) ||
-                        !(command.destination_stages & VK_PIPELINE_STAGE_ALL_COMMANDS_BIT)) {
+                        barrier.srcAccessMask != 0 ||
+                        barrier.dstAccessMask != (VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT) ||
+                        command.source_stages != VK_PIPELINE_STAGE_ALL_COMMANDS_BIT ||
+                        command.destination_stages != VK_PIPELINE_STAGE_ALL_COMMANDS_BIT) {
                         fail(chain, where + ": the acquire's barrier");
                     }
                     if (waited != (acquired[0].waits == 1) || acquired[0].signals != 0) {
@@ -2556,12 +2783,19 @@ void TestQfotRecorded(Game& game) {
                     const VkImageMemoryBarrier& back = commands[2].barriers[0];
                     const VkImageMemoryBarrier& handed = commands[2].barriers[1];
                     const VkImage twin = to_twin.image;
+                    // After the game's rendering and (chained with the
+                    // acquire's done wait) the copy that last read the twin.
                     if (to_source.image != images[index] || to_source.oldLayout != layout ||
                         to_source.newLayout != VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL ||
-                        !(commands[0].source_stages & VK_PIPELINE_STAGE_ALL_COMMANDS_BIT) ||
+                        commands[0].source_stages != VK_PIPELINE_STAGE_ALL_COMMANDS_BIT ||
+                        commands[0].destination_stages != VK_PIPELINE_STAGE_TRANSFER_BIT ||
+                        to_source.srcAccessMask != VK_ACCESS_MEMORY_WRITE_BIT ||
+                        to_source.dstAccessMask != VK_ACCESS_TRANSFER_READ_BIT ||
                         to_twin.oldLayout != VK_IMAGE_LAYOUT_UNDEFINED ||
-                        to_twin.newLayout != VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL ||
-                        to_twin.srcQueueFamilyIndex != VK_QUEUE_FAMILY_IGNORED || twin == images[index] ||
+                        to_twin.newLayout != VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL || to_twin.srcAccessMask != 0 ||
+                        to_twin.dstAccessMask != VK_ACCESS_TRANSFER_WRITE_BIT ||
+                        to_twin.srcQueueFamilyIndex != VK_QUEUE_FAMILY_IGNORED ||
+                        to_twin.dstQueueFamilyIndex != VK_QUEUE_FAMILY_IGNORED || twin == images[index] ||
                         !covers(to_source, aspect, 1) || !covers(to_twin, aspect, 1)) {
                         fail(chain, where + ": the barriers before the resolve");
                     }
@@ -2570,12 +2804,22 @@ void TestQfotRecorded(Game& game) {
                         commands[1].resolve_destination_layout != VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL) {
                         fail(chain, where + ": the resolve");
                     }
+                    // After the resolve: the private image back for the
+                    // game's rendering, the twin released to Direct3D 12.
                     if (back.image != images[index] || back.oldLayout != VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL ||
-                        back.newLayout != layout || handed.image != twin ||
-                        handed.oldLayout != VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL ||
+                        back.newLayout != layout || back.srcAccessMask != 0 ||
+                        back.dstAccessMask !=
+                            (VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT) ||
+                        back.srcQueueFamilyIndex != VK_QUEUE_FAMILY_IGNORED ||
+                        back.dstQueueFamilyIndex != VK_QUEUE_FAMILY_IGNORED || !covers(back, aspect, 1) ||
+                        commands[2].source_stages != VK_PIPELINE_STAGE_TRANSFER_BIT ||
+                        commands[2].destination_stages !=
+                            (VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT) ||
+                        handed.image != twin || handed.oldLayout != VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL ||
                         handed.newLayout != VK_IMAGE_LAYOUT_GENERAL || handed.srcQueueFamilyIndex != family ||
                         handed.dstQueueFamilyIndex != VK_QUEUE_FAMILY_EXTERNAL ||
-                        !(handed.srcAccessMask & VK_ACCESS_TRANSFER_WRITE_BIT) || !covers(handed, aspect, 1)) {
+                        handed.srcAccessMask != VK_ACCESS_TRANSFER_WRITE_BIT || handed.dstAccessMask != 0 ||
+                        !covers(handed, aspect, 1)) {
                         fail(chain, where + ": the barriers after the resolve");
                     }
                 } else {
@@ -2584,19 +2828,22 @@ void TestQfotRecorded(Game& game) {
                     if (handed.image != images[index] || handed.oldLayout != layout ||
                         handed.newLayout != VK_IMAGE_LAYOUT_GENERAL || handed.srcQueueFamilyIndex != family ||
                         handed.dstQueueFamilyIndex != VK_QUEUE_FAMILY_EXTERNAL || !covers(handed, aspect, mips) ||
-                        !(handed.srcAccessMask & VK_ACCESS_MEMORY_WRITE_BIT) ||
-                        !(commands[0].source_stages & VK_PIPELINE_STAGE_ALL_COMMANDS_BIT)) {
+                        handed.srcAccessMask != VK_ACCESS_MEMORY_WRITE_BIT || handed.dstAccessMask != 0 ||
+                        commands[0].source_stages != VK_PIPELINE_STAGE_ALL_COMMANDS_BIT ||
+                        commands[0].destination_stages != VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT) {
                         fail(chain, where + ": the release's barrier");
                     }
                 }
             }
         }
+        gate.Open();
         Check(bridge.WaitIdle(10000), "the bridge's queue finishes");
         Check(bridge.RemoveSwapchain(chain.swapchain), "removed");
     }
     GameIdle(game);
     CheckClean(&bridge, "qfot-recorded");
     bridge.End();
+    CheckClean(nullptr, "qfot-recorded (End)");
 }
 
 // The bridge uses the game's queue only inside the application's acquire and
@@ -2673,6 +2920,7 @@ void TestVulkan10(const Game& like) {
             std::cout << "Vulkan 1.0 without the extensions: " << reason << '\n';
         } else {
             Check(bridged != nullptr, "a Vulkan 1.0 game with the extensions is bridged: " + reason);
+            WatchDevice12(BridgeDevice(bridge));
             Check(g_recorder.properties2_khr_calls > 0,
                   "the bridge calls the 1.1 functions of a Vulkan 1.0 game by their KHR names");
             Check(Contains(description, "semaphores=binary") && Contains(description, "formatLists=no"),
@@ -2696,6 +2944,7 @@ void TestVulkan10(const Game& like) {
             GameIdle(game);
             CheckClean(&bridge, "Vulkan 1.0");
             bridge.End();
+            CheckClean(nullptr, "Vulkan 1.0 (End)");
         }
         DestroyInstance(game);
         CheckClean(nullptr, std::string("Vulkan 1.0 ") + (extensions ? "with" : "without") + " the extensions");
@@ -2783,6 +3032,7 @@ void TestCopyCost(Game& game) {
         Check(copy.first > 0, "the copies are timed: " + summary);
         CheckClean(&bridge, "copy cost");
         bridge.End();
+        CheckClean(nullptr, "copy cost (End)");
     }
 }
 
@@ -2817,6 +3067,7 @@ void TestSecondThread(Game& game) {
     GameIdle(game);
     CheckClean(&bridge, "second thread");
     bridge.End();
+    CheckClean(nullptr, "second thread (End)");
 }
 
 // The bridge's device removed: the session is lost, and teardown does not wait.
@@ -2836,6 +3087,7 @@ void TestDeviceLost(Game& game, bool timeline) {
     std::string lost;
     Check(!bridge.Lost(lost), "not lost yet");
     device5->RemoveDevice();
+    g_device12.Reset();
     Check(bridge.Lost(lost) && Contains(lost, "removed"), "the removal is seen: " + lost);
     Acquire(bridge, swapchain, 0); // the done fence reads past every value: no wait
     Release(bridge, swapchain);
@@ -2853,7 +3105,8 @@ void TestDeviceLost(Game& game, bool timeline) {
 }
 
 // The validation layer is live: a barrier from a layout the image is not in
-// is reported.
+// is reported, as a layout error, and nothing else is (the fixture's setup was
+// checked clean before).
 bool ValidationCanary(Game& game) {
     VkImageCreateInfo create{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
     create.imageType = VK_IMAGE_TYPE_2D;
@@ -2886,7 +3139,15 @@ bool ValidationCanary(Game& game) {
     game.vkDestroyImage(game.device, image, nullptr);
     game.vkFreeMemory(game.device, memory, nullptr);
     bool error = false;
-    for (const std::string& message : g_messages.Take()) error = error || Contains(message, "[vulkan error]");
+    std::string other;
+    for (const std::string& message : g_messages.Take()) {
+        if (Contains(message, "[vulkan error]") && Contains(message, "layout")) {
+            error = true;
+        } else {
+            other += message + "\n";
+        }
+    }
+    Check(other.empty(), "the validation canary reported only its layout error, not\n" + other);
     return error;
 }
 
@@ -2898,9 +3159,11 @@ int main(int argc, char** argv) {
     TestFormats();
     TestRuntimeCreateInfo();
     TestExtensions();
+    TestFixtureInstance();
     std::printf("Vulkan bridge pure tests passed\n");
 
     const bool require = vulkan_test::RequireHardware();
+    g_require = require;
     const auto skip = [&](const std::string& why) {
         std::printf("%s: %s\n", require ? "FAIL (VECTORXR_TESTS_REQUIRE_HW=1)" : "skipped", why.c_str());
         return require ? 1 : kSkip;
@@ -2925,11 +3188,15 @@ int main(int argc, char** argv) {
 
     Game game;
     std::string error;
-    Check(MakeInstance(VK_API_VERSION_1_2, true, game, error), error);
+    const int instance = FixtureInstance(game, error);
+    if (instance == kSkip) return skip(error);
+    Check(instance == 0, "the fixture's Vulkan instance: " + error);
     if (!FindPhysical(game, nullptr, error)) return skip(error);
     if (!SharingWorks(game, error)) return skip(error);
     // A second queue of the family, so the binding's queue index is not 0.
     Check(MakeDevice(game, true, true, 1, error), error);
+    // The fixture comes up clean: nothing it set off can pass for the canary.
+    CheckClean(nullptr, "fixture setup");
     if (g_validation) {
         const bool canary = ValidationCanary(game);
         if (!canary) std::printf("WARNING: the validation canary was not reported\n");
@@ -2965,6 +3232,7 @@ int main(int argc, char** argv) {
     TestQfotRecorded(game);
     TestQueueOnlyInAcquireRelease(game);
     TestRefusedSubmissions(game);
+    TestFenceDeviceLost(game);
     TestStalledQueue(game);
     TestSkippedCopy(game);
     TestRingStall(game);

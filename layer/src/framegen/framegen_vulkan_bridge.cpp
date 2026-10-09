@@ -814,6 +814,16 @@ struct VulkanBridge::Impl {
         plan.mip_count = std::max(1u, info.mipCount);
         plan.sample_count = std::max(1u, info.sampleCount);
         plan.xr_usage = info.usageFlags;
+        // Vulkan sample counts are single bits, and multisampled images have
+        // one mip.
+        if ((plan.sample_count & (plan.sample_count - 1)) != 0) {
+            reason = std::to_string(plan.sample_count) + " samples is not a Vulkan sample count";
+            return false;
+        }
+        if (plan.sample_count > 1 && plan.mip_count > 1) {
+            reason = "multisampled images cannot have mips";
+            return false;
+        }
         // Measured on NVIDIA: an imported image that is an array and has mips
         // lays out its later layers' mips unlike Direct3D 12, and a mipmapped
         // depth-stencil image its stencil (they would reach the runtime
@@ -918,7 +928,7 @@ struct VulkanBridge::Impl {
         if (vk.vkGetPhysicalDeviceImageFormatProperties(physical, plan.format, VK_IMAGE_TYPE_2D,
                                                          VK_IMAGE_TILING_OPTIMAL, plan.usage, plan.flags,
                                                          &properties) != VK_SUCCESS ||
-            !(properties.sampleCounts & plan.sample_count) || !fits(properties, plan.mip_count)) {
+            (properties.sampleCounts & plan.sample_count) != plan.sample_count || !fits(properties, plan.mip_count)) {
             reason = "the game's Vulkan device cannot make its " + std::to_string(plan.sample_count) +
                      "-sample images";
             return false;
