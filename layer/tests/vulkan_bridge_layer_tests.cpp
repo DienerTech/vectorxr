@@ -389,12 +389,14 @@ VKAPI_ATTR VkResult VKAPI_CALL GameCreateDevice(VkPhysicalDevice physical, const
 }
 
 // The game's vkGetInstanceProcAddr (XR_KHR_vulkan_enable2's create infos):
-// the loader's, watching instance and device creation.
+// the loader's, watching instance and device creation (vkCreateDevice only
+// where the loader has it: never for a null instance).
 VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL GameGetInstanceProcAddr(VkInstance instance, const char* name) {
     if (std::strcmp(name, "vkCreateInstance") == 0) {
         return reinterpret_cast<PFN_vkVoidFunction>(GameCreateInstance);
     }
     if (std::strcmp(name, "vkCreateDevice") == 0) {
+        if (!g_vk.vkGetInstanceProcAddr(instance, name)) return nullptr;
         g_game_instance = instance;
         return reinterpret_cast<PFN_vkVoidFunction>(GameCreateDevice);
     }
@@ -793,6 +795,12 @@ struct StandIn {
     bool refuse_destroy_session{false}; // xrDestroySession fails (the session stays)
     bool refuse_transfer_dst{false};    // swapchains with TRANSFER_DST are refused
     bool ignore_getter{false}; // makes the game's Vulkan instance and device with the loader's own functions
+    // Looks vkCreateDevice up through the getter in xrCreateVulkanInstanceKHR
+    // (for the instance it made) and calls that in xrCreateVulkanDeviceKHR
+    // without looking it up again.
+    bool cache_create_device{false};
+    PFN_vkCreateDevice cached_create_device{nullptr};
+    bool skip_readback{false}; // shown frames are not read back
     std::uint32_t width_error{0}; // images this much wider than asked for
     bool read_depth{false};       // shown views' depth is read back too
     LUID luid{};                  // the adapter it composes on
@@ -1296,6 +1304,10 @@ XrResult XRAPI_CALL RtCreateVulkanInstance(XrInstance, const XrVulkanInstanceCre
                                        : reinterpret_cast<PFN_vkCreateInstance>(
                                              info->pfnGetInstanceProcAddr(VK_NULL_HANDLE, "vkCreateInstance"));
     *result = make ? make(&create, info->vulkanAllocator, instance) : VK_ERROR_INITIALIZATION_FAILED;
+    if (rt.cache_create_device && *result == VK_SUCCESS) {
+        rt.cached_create_device =
+            reinterpret_cast<PFN_vkCreateDevice>(info->pfnGetInstanceProcAddr(*instance, "vkCreateDevice"));
+    }
     return XR_SUCCESS;
 }
 
@@ -1314,6 +1326,8 @@ XrResult XRAPI_CALL RtCreateVulkanDevice(XrInstance, const XrVulkanDeviceCreateI
     if (rt.ignore_getter) {
         g_game_instance = rt.vk_instance;
         make = GameCreateDevice; // the loader's, watched by the test
+    } else if (rt.cache_create_device) {
+        make = rt.cached_create_device;
     } else {
         make = reinterpret_cast<PFN_vkCreateDevice>(info->pfnGetInstanceProcAddr(rt.vk_instance, "vkCreateDevice"));
     }
@@ -1365,7 +1379,12 @@ XrResult XRAPI_CALL RtPollEvent(XrInstance, XrEventDataBuffer*) {
 XrResult XRAPI_CALL RtCreateSession(XrInstance, const XrSessionCreateInfo* info, XrSession* session) {
     std::scoped_lock lock(g_runtime_mutex);
     StandIn& rt = g_runtime;
+    // The graphics binding, wherever the chain has it.
     const auto* first = info ? static_cast<const XrBaseInStructure*>(info->next) : nullptr;
+    while (first && first->type != XR_TYPE_GRAPHICS_BINDING_D3D12_KHR &&
+           first->type != XR_TYPE_GRAPHICS_BINDING_VULKAN_KHR) {
+        first = first->next;
+    }
     if (first && first->type == XR_TYPE_GRAPHICS_BINDING_D3D12_KHR) {
         rt.calls.push_back("xrCreateSession:D3D12");
         const auto& binding = *reinterpret_cast<const XrGraphicsBindingD3D12KHR*>(first);
@@ -1550,7 +1569,7 @@ XrResult XRAPI_CALL RtEndFrame(XrSession, const XrFrameEndInfo* info) {
     }
     // A Direct3D 12 session's frames are read back (nothing is read on a
     // removed device: its fences read as done at once).
-    if (rt.device12 && SUCCEEDED(rt.device12->GetDeviceRemovedReason())) {
+    if (rt.device12 && !rt.skip_readback && SUCCEEDED(rt.device12->GetDeviceRemovedReason())) {
         Sources sources;
         std::vector<int> depth_at(frame.views.size(), -1);
         for (std::size_t v = 0; v < frame.views.size(); ++v) {
@@ -1829,6 +1848,7 @@ struct FrameGenChain {
     void* queue{nullptr};      // FrameGenRuntimeQueue::d3d12_queue
     const void* next{nullptr}; // the chain after it (or the chain itself)
     int made{0};               // backends made
+    bool vulkan{false};        // a backend was ever asked for with a Vulkan binding in its chain
 };
 FrameGenChain g_framegen_chain;
 
@@ -1860,7 +1880,10 @@ class StandInGpu final : public depthxr::FrameGenGpu {
 };
 
 void NoteChain(const void* chain) {
-    g_framegen_chain = {XR_TYPE_UNKNOWN, nullptr, nullptr, g_framegen_chain.made + 1};
+    g_framegen_chain = {XR_TYPE_UNKNOWN, nullptr, nullptr, g_framegen_chain.made + 1, g_framegen_chain.vulkan};
+    for (auto* next = static_cast<const XrBaseInStructure*>(chain); next; next = next->next) {
+        g_framegen_chain.vulkan = g_framegen_chain.vulkan || next->type == XR_TYPE_GRAPHICS_BINDING_VULKAN_KHR;
+    }
     if (const auto* first = static_cast<const XrBaseInStructure*>(chain)) {
         g_framegen_chain.first = first->type;
         g_framegen_chain.next = chain;
@@ -2312,6 +2335,8 @@ struct FrameOptions {
     // target's release on (after the others' releases): that image alone is
     // not written yet. The stand-in opens it once its readback waits all the same.
     Gate* hold{nullptr};
+    // As `hold`, but nothing opens it: the frame ends with the game's queue held.
+    Gate* stall{nullptr};
     XrTime* display_time{nullptr};
 };
 
@@ -2352,8 +2377,8 @@ XrResult Frame(App& app, const Renderer& renderer, const std::vector<const Targe
         renderer.ClearDepth(*depth, depth_index, options.depth_value);
     }
     for (std::size_t i = 0; i < targets.size(); ++i) {
-        if (options.hold && i + 1 == targets.size()) {
-            options.hold->HoldGame();
+        if ((options.hold || options.stall) && i + 1 == targets.size()) {
+            (options.hold ? options.hold : options.stall)->HoldGame();
         }
         Release(app, *targets[i]);
     }
@@ -2873,6 +2898,38 @@ void TestEnable2CreateInfos() {
     }
 }
 
+void CheckRouting(SessionCreate& create);
+
+// 2b. A runtime that looks vkCreateDevice up while it makes the game's
+// instance and calls what it got in xrCreateVulkanDeviceKHR without looking
+// it up again: the layer's vkCreateDevice still makes the game's device on
+// that instance, with what the bridge needs, and the session is bridged.
+void TestCachedCreateDevice() {
+    BeginCase("enable2-cached-create-device");
+    g_runtime.cache_create_device = true;
+    App app = StartApp({kVulkan2Extension});
+    VulkanGame game = MakeVulkanGame(app); // the device is made (VK_SUCCESS)
+    Check(g_runtime.cached_create_device != nullptr && g_final.devices == 1,
+          "the runtime's vkCreateDevice, looked up with the instance, made the game's device");
+    for (const char* name : depthxr::VulkanBridge::DeviceExtensions()) {
+        Check(std::count(g_final.device_extensions.begin(), g_final.device_extensions.end(), name) == 1,
+              std::string("the final device has ") + name + " once: " + Text(g_final.device_extensions));
+    }
+    Check(g_final.timeline_first && *g_final.timeline_first == VK_TRUE,
+          "timeline semaphores are added (the layer knew the game's instance and its version)");
+    const depthxr::VulkanBridgeGame known = depthxr::VulkanGameFor(reinterpret_cast<std::uint64_t>(game.device));
+    Check(known.timeline_semaphores &&
+              known.get_instance_proc_addr == reinterpret_cast<PFN_xrVoidFunction>(GameGetInstanceProcAddr),
+          "the hooks know the game's device");
+    SessionCreate create(game, app.system);
+    Check(app.api.create_session(app.api.instance, &create.info, &app.session) == XR_SUCCESS, "xrCreateSession");
+    CheckRouting(create);
+    Check(Contains(Peer::Log(), "semaphores=timeline"), "the bridge runs with timeline semaphores");
+    StopApp(app);
+    DestroyGame(game);
+    EndCase();
+}
+
 // 3. XR_KHR_vulkan_enable: the lists the game asks for get the bridge's
 // names, the two-call idiom standing across a change of settings between its
 // calls (decided with the instance).
@@ -2999,6 +3056,84 @@ void TestBridgeOffSession() {
     StopApp(app);
     SetEnv("VECTORXR_VULKAN_BRIDGE", "");
     Check(GameRuns(game), "the game's device works");
+    DestroyGame(game);
+    EndCase();
+}
+
+// 4b. VECTORXR_VULKAN_BRIDGE=off for an application that enables
+// XR_KHR_D3D11_enable too (the instance's XR_KHR_D3D12_enable is then the
+// Direct3D 11 bridge's): nothing of the game's Vulkan is changed.
+void TestBridgeOffWithD3D11() {
+    BeginCase("session-bridge-off-with-d3d11");
+    SetEnv("VECTORXR_VULKAN_BRIDGE", "off");
+    App app = StartApp({kD3D11Extension, kVulkanExtension, kVulkan2Extension});
+    Check(g_runtime.instance_attempts.size() == 1 && Has(g_runtime.instance_attempts[0], kD3D12Extension),
+          "the Direct3D 11 bridge's XR_KHR_D3D12_enable is added: " + Text(g_runtime.instance_attempts));
+    Check(!Peer::HooksAddForBridge(), "the hooks add nothing for the Vulkan bridge on this instance");
+    const auto list = [&](auto function, const char* what) {
+        std::uint32_t size = 0;
+        Check(function && function(app.api.instance, app.system, 0, &size, nullptr) == XR_SUCCESS && size > 0,
+              std::string(what) + " counted");
+        std::string text(size, '\0');
+        Check(function(app.api.instance, app.system, size, &size, text.data()) == XR_SUCCESS, what);
+        return std::string(text.c_str());
+    };
+    const std::string instance_list = list(app.api.vulkan_instance_extensions, "xrGetVulkanInstanceExtensionsKHR");
+    const std::string device_list = list(app.api.vulkan_device_extensions, "xrGetVulkanDeviceExtensionsKHR");
+    Check(instance_list == g_runtime.vulkan_instance_extensions && device_list == g_runtime.vulkan_device_extensions,
+          "the extension lists are the runtime's: \"" + instance_list + "\", \"" + device_list + "\"");
+    VulkanGame game = MakeVulkanGame(app);
+    Check(g_runtime.given_get_instance_proc_addr == GameGetInstanceProcAddr,
+          "the runtime gets the game's own vkGetInstanceProcAddr");
+    Names instance_expected;
+    if (g_validation) instance_expected.emplace_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
+    for (const char* name : g_runtime.vulkan_instance_additions) instance_expected.emplace_back(name);
+    Names device_expected;
+    for (const char* name : g_runtime.vulkan_device_additions) device_expected.emplace_back(name);
+    Check(g_final.instance_extensions == instance_expected,
+          "the game's instance is made with its own and the runtime's extensions only: " +
+              Text(g_final.instance_extensions));
+    Check(g_final.device_extensions == device_expected && g_final.device_next == nullptr && !g_final.timeline_first,
+          "the game's device is made with the runtime's extensions only, its chain as it was: " +
+              Text(g_final.device_extensions));
+    SessionCreate create(game, app.system);
+    Check(app.api.create_session(app.api.instance, &create.info, &app.session) == XR_SUCCESS, "xrCreateSession");
+    CheckGameSession(app, game, create, "VECTORXR_VULKAN_BRIDGE=off");
+    StopApp(app);
+    SetEnv("VECTORXR_VULKAN_BRIDGE", "");
+    Check(GameRuns(game), "the game's device works");
+    DestroyGame(game);
+    EndCase();
+}
+
+// 4c. A Vulkan binding after another structure of the application's (the
+// runtime finds it all the same): no bridge takes the session, Frame
+// Generation is off for it, and no backend is made from its Vulkan chain.
+void TestVulkanBindingNotFirst() {
+    BeginCase("vulkan-binding-not-first");
+    App app = StartApp({kVulkan2Extension});
+    VulkanGame game = MakeVulkanGame(app);
+    SessionCreate create(game, app.system);
+    XrBaseInStructure ahead{kApplicationStructType};
+    ahead.next = reinterpret_cast<const XrBaseInStructure*>(&create.binding);
+    create.info.next = &ahead;
+    Check(app.api.create_session(app.api.instance, &create.info, &app.session) == XR_SUCCESS, "xrCreateSession");
+    Check(g_runtime.binding == XR_TYPE_GRAPHICS_BINDING_VULKAN_KHR && g_runtime.vk_device == game.device &&
+              g_runtime.Position("xrGetD3D12GraphicsRequirementsKHR") < 0,
+          "the runtime gets the game's Vulkan session");
+    Check(!Peer::Bridge().Active() && !Peer::QueueSubstituted(), "no bridge, no substitution");
+    Check(g_framegen_chain.made == 0 && !g_framegen_chain.vulkan,
+          "no Frame Generation backend is made from a chain with a Vulkan binding (made=" +
+              std::to_string(g_framegen_chain.made) + ", vulkan=" + std::to_string(g_framegen_chain.vulkan) + ")");
+    const depthxr::FrameGenStatus status = Peer::FrameGen();
+    Check(status.state == depthxr::FrameGenState::kUnavailable &&
+              Contains(status.reason, "Vulkan sessions need the Vulkan bridge") && !Peer::FrameGenOwnsPacing(),
+          "Frame Generation is unavailable: " + status.reason);
+    const std::string log = Peer::Log();
+    Check(Count(log, std::string(kUnbridgedLine) +
+                         "its Vulkan binding is not the first structure of the session's create info") == 1,
+          "the log tells why, once: " + Unbridged(log));
+    StopApp(app);
     DestroyGame(game);
     EndCase();
 }
@@ -3386,6 +3521,63 @@ void TestBridgedFallbacks() {
     }
 }
 
+// 10b. An application enabling both XR_KHR_vulkan_enable and _enable2 that
+// makes its device itself, with the lists the layer hands out (as
+// XR_KHR_vulkan_enable says): bridged as such a game is (the loader's
+// functions, binary semaphores). When the runtime refuses the Direct3D 12
+// session, XR_KHR_vulkan_enable's requirements are the ones asked for again.
+void TestBothEnablesOwnDevice() {
+    for (const bool refused : {false, true}) {
+        BeginCase(refused ? "both-enables-refused-d3d12-session" : "both-enables-own-device");
+        g_runtime.refuse_d3d12_session = refused;
+        App app = StartApp({kVulkanExtension, kVulkan2Extension});
+        Check(Peer::HooksAddForBridge(), "the hooks add for the bridge on this instance");
+        GameOptions options;
+        options.enable = 1;
+        VulkanGame game = MakeVulkanGame(app, options);
+        Check(depthxr::VulkanDeviceOriginOf(reinterpret_cast<std::uint64_t>(game.device)) ==
+                  depthxr::VulkanDeviceOrigin::kGame,
+              "the game made its device itself");
+        SessionCreate create(game, app.system);
+        Check(app.api.create_session(app.api.instance, &create.info, &app.session) == XR_SUCCESS, "xrCreateSession");
+        if (!refused) {
+            CheckRouting(create);
+            Check(Contains(Peer::Log(), "semaphores=binary"),
+                  "the bridge runs with binary semaphores: " + LineWith(Peer::Log(), kBridgedSessionLine));
+            BeginSession(app);
+            const Renderer vulkan{&game, nullptr};
+            Target left = MakeTarget(app, ColorInfo(), "the left eye");
+            Target right = MakeTarget(app, ColorInfo(), "the right eye");
+            for (int frame = 0; frame < 3; ++frame) {
+                const std::vector<Color> colors{FrameColor(frame, 0), FrameColor(frame, 1)};
+                Check(Frame(app, vulkan, {&left, &right}, colors, {{{&left, 0}, {&right, 0}}}) == XR_SUCCESS,
+                      "a bridged frame");
+                for (int eye = 0; eye < 2; ++eye) {
+                    Check(Near(g_runtime.frames.back().views[eye].texel, colors[eye]),
+                          "the runtime shows what the game rendered: " + Text(g_runtime.frames.back().views[eye].texel));
+                }
+            }
+            Check(app.api.destroy_swapchain(left.swapchain) == XR_SUCCESS &&
+                      app.api.destroy_swapchain(right.swapchain) == XR_SUCCESS,
+                  "the swapchains are destroyed");
+        } else {
+            const std::ptrdiff_t d3d12 = g_runtime.Position("xrGetD3D12GraphicsRequirementsKHR");
+            const std::ptrdiff_t refusal = g_runtime.Position("xrCreateSession:D3D12");
+            const std::ptrdiff_t vulkan = g_runtime.Position("xrGetVulkanGraphicsRequirementsKHR", refusal + 1);
+            const std::ptrdiff_t session = g_runtime.Position("xrCreateSession:Vulkan");
+            Check(d3d12 >= 0 && refusal > d3d12 && vulkan > refusal && session > vulkan &&
+                      g_runtime.Position("xrGetVulkanGraphicsRequirements2KHR", d3d12) < 0,
+                  "XR_KHR_vulkan_enable's requirements are asked for again before the Vulkan session, not "
+                  "XR_KHR_vulkan_enable2's");
+            CheckGameSession(app, game, create, "the runtime refused the bridged Direct3D 12 session");
+        }
+        StopApp(app);
+        Check(GameRuns(game), "the game's device works");
+        DestroyGame(game);
+        EndCase();
+    }
+}
+
 // 11. The instance destroyed with its bridged session still alive (as a game
 // that quits may): the bridge's copies into the session's images are done
 // before the runtime frees them with the instance.
@@ -3544,6 +3736,97 @@ void TestBridgedFrameGen(const std::string& mode) {
     RunFrameGen(app, vulkan, left, right, &depth, "bridged " + mode);
     CheckValidation("generating");
     StopApp(app);
+    Peer::UseFrameGenGpu(MakeStandInGpu);
+    Peer::SetFrameGenEngagement(45, std::chrono::milliseconds(3000)); // the presenter's own
+    DestroyGame(game);
+    EndCase();
+}
+
+// 13b. The game's queue stalls before its last release of a frame while
+// Frame Generation (the real Direct3D 12 backend) generates, and the game
+// destroys its session (or its instance, the session alive): the bridge lets
+// its queue through before Frame Generation stops, so Frame Generation's work
+// queued behind the stalled release finishes and its output swapchains go
+// before the session does, which reaches the runtime after about the
+// bridge's 2 s bound. The game's queue runs on from there (else the bridge
+// would keep its Vulkan objects for the process, as it does for a queue that
+// never finishes).
+void TestStalledTeardown(bool with_instance) {
+    CaseSettings settings;
+    settings.frame_multiplier = "2x";
+    settings.synthesis_mode = "interpolate";
+    const std::string name = with_instance ? "stalled-teardown-instance" : "stalled-teardown-session";
+    BeginCase(name, settings);
+    g_runtime.paced = true;
+    g_image_width = g_image_height = kFrameGenSize;
+    Peer::SetFrameGenEngagement(2, std::chrono::milliseconds(0));
+    Peer::UseFrameGenGpu(MakeRealGpu);
+    App app = StartApp({kVulkan2Extension});
+    VulkanGame game = MakeVulkanGame(app);
+    SessionCreate create(game, app.system);
+    Check(app.api.create_session(app.api.instance, &create.info, &app.session) == XR_SUCCESS && Peer::Bridge().Active(),
+          "a bridged session (" + Unbridged(Peer::Log()) + ")");
+    BeginSession(app);
+    const Renderer vulkan{&game, nullptr};
+    Target left = MakeTarget(app, ColorInfo(), "the left eye");
+    Target right = MakeTarget(app, ColorInfo(), "the right eye");
+    RunFrameGen(app, vulkan, left, right, nullptr, name);
+    CheckValidation("generating");
+    std::vector<XrSwapchain> outputs; // Frame Generation's own
+    {
+        std::scoped_lock lock(g_runtime_mutex);
+        for (const XrSwapchain swapchain : g_runtime.created) {
+            if (swapchain != left.swapchain && swapchain != right.swapchain) outputs.push_back(swapchain);
+        }
+        // Nothing waits for the game's held work on the runtime's side.
+        g_runtime.skip_readback = true;
+    }
+    Check(!outputs.empty(), "Frame Generation made output swapchains");
+    {
+        Gate gate(g_runtime.device12.Get(), &game);
+        FrameOptions options;
+        options.stall = &gate;
+        Check(Frame(app, vulkan, {&left, &right}, {FrameColor(1, 0), FrameColor(1, 1)}, {{{&left, 0}, {&right, 0}}},
+                    options) == XR_SUCCESS,
+              "a frame whose last release the game's queue never reaches");
+        Check(app.api.destroy_space(app.space) == XR_SUCCESS, "xrDestroySpace");
+        app.space = XR_NULL_HANDLE;
+        // What the runtime had destroyed when the session went, and when.
+        std::optional<std::vector<XrSwapchain>> destroyed_before;
+        std::chrono::steady_clock::time_point reached{};
+        const auto note = [&] {
+            reached = std::chrono::steady_clock::now();
+            destroyed_before = g_runtime.destroyed;
+            gate.Open();
+        };
+        if (with_instance) {
+            g_runtime.on_destroy_instance = note;
+        } else {
+            g_runtime.on_destroy_session = note;
+        }
+        const auto start = std::chrono::steady_clock::now();
+        const XrResult result = with_instance ? app.api.destroy_instance(app.api.instance)
+                                              : app.api.destroy_session(app.session);
+        Check(result == XR_SUCCESS && destroyed_before, with_instance ? "xrDestroyInstance" : "xrDestroySession");
+        const double seconds = std::chrono::duration<double>(reached - start).count();
+        if (!with_instance) app.session = XR_NULL_HANDLE;
+        for (const XrSwapchain output : outputs) {
+            Check(std::find(destroyed_before->begin(), destroyed_before->end(), output) != destroyed_before->end(),
+                  "Frame Generation's output swapchains were destroyed before the session went");
+        }
+        const std::string log = Peer::Log();
+        Check(!Contains(log, "did not finish its work on a swapchain being destroyed"),
+              "Frame Generation's work finished: " + LineWith(log, "did not finish its work"));
+        Check(Contains(log, "the game's queue did not reach its last release in time at teardown"),
+              "the bridge let its queue through at teardown");
+        Check(seconds < 3.5, "the session reached the runtime after " + std::to_string(seconds) +
+                                 " s (the bridge waits 2 s for the game's queue)");
+    }
+    if (!with_instance) {
+        Check(app.api.destroy_instance(app.api.instance) == XR_SUCCESS, "xrDestroyInstance");
+    }
+    Check(Peer::Idle(), "nothing is left of the instance");
+    Check(GameRuns(game), "the game's device works after teardown");
     Peer::UseFrameGenGpu(MakeStandInGpu);
     Peer::SetFrameGenEngagement(45, std::chrono::milliseconds(3000)); // the presenter's own
     DestroyGame(game);
@@ -3724,7 +4007,22 @@ std::string FindGpu() {
     info.ppEnabledLayerNames = layers.empty() ? nullptr : layers.data();
     info.enabledExtensionCount = static_cast<std::uint32_t>(extensions.size());
     info.ppEnabledExtensionNames = extensions.empty() ? nullptr : extensions.data();
-    if (g_vk.vkCreateInstance(&info, nullptr, &fixture.instance) != VK_SUCCESS) return "no Vulkan instance";
+    VkResult created = g_vk.vkCreateInstance(&info, nullptr, &fixture.instance);
+    if (created == VK_ERROR_INCOMPATIBLE_DRIVER) return "no Vulkan driver";
+    if (created != VK_SUCCESS && g_validation) {
+        // The loader lists the validation layer, but it does not load.
+        std::cout << "WARNING: " << vulkan_test::kValidationLayer << " is listed but the instance failed with it ("
+                  << static_cast<int>(created) << "); running without validation\n";
+        g_validation = false;
+        info.enabledLayerCount = 0;
+        info.ppEnabledLayerNames = nullptr;
+        info.enabledExtensionCount = 0;
+        info.ppEnabledExtensionNames = nullptr;
+        created = g_vk.vkCreateInstance(&info, nullptr, &fixture.instance);
+        if (created == VK_ERROR_INCOMPATIBLE_DRIVER) return "no Vulkan driver";
+    }
+    // Any other failure is the suite's, never a reason to skip.
+    CheckVk(created, "the fixture's Vulkan instance");
     LoadInstanceFunctions(fixture.instance);
     MakeMessenger(fixture);
 
@@ -3811,6 +4109,8 @@ std::string FindGpu() {
         VkDeviceMemory memory = VK_NULL_HANDLE;
         CheckVk(g_vk.vkAllocateMemory(fixture.device, &allocate, nullptr, &memory), "the canary's memory");
         CheckVk(g_vk.vkBindImageMemory(fixture.device, image, memory, 0), "the canary's memory bound");
+        // Nothing before the canary reported anything: what it reports is its own.
+        CheckVulkanValidation("the GPU search");
         std::uint32_t slot = 0;
         const VkCommandBuffer commands = BeginCommands(fixture, slot);
         VkImageMemoryBarrier barrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
@@ -3824,14 +4124,21 @@ std::string FindGpu() {
         SubmitCommands(fixture, slot);
         g_vk.vkQueueWaitIdle(fixture.queue);
         const std::vector<std::string> reported = g_vk_messages.Take();
+        std::string text;
+        for (const std::string& message : reported) {
+            text += message + "\n";
+        }
         Check(std::any_of(reported.begin(), reported.end(),
-                          [](const std::string& message) { return Contains(message, "[vulkan error]"); }),
-              "the validation canary (a barrier from a layout the image is not in) is reported");
+                          [](const std::string& message) {
+                              return Contains(message, "[vulkan error]") && Contains(message, "layout");
+                          }),
+              "the validation canary (a barrier from a layout the image is not in) is reported as a layout error:\n" +
+                  text);
         g_vk.vkDestroyImage(fixture.device, image, nullptr);
         g_vk.vkFreeMemory(fixture.device, memory, nullptr);
     }
     DestroyGame(fixture);
-    g_vk_messages.Take();
+    CheckVulkanValidation("the GPU search's teardown");
     return why;
 }
 
@@ -3871,16 +4178,22 @@ int main(int argc, char** argv) {
     TestEnable2CreateInfos();
     TestEnableLists();
     TestBridgeOffSession();
+    TestBridgeOffWithD3D11();
+    TestVulkanBindingNotFirst();
     TestNativeD3D12("native-d3d12");
     if (!g_unbridged_only) {
         // The bridge's.
+        TestCachedCreateDevice();
         TestBridgedSession(2);
         TestBridgedSession(1);
         TestBridgedFallbacks();
+        TestBothEnablesOwnDevice();
         TestDestroyInstanceWithSession();
         TestRefusedDestroySession();
         TestBridgedFrameGen("interpolate");
         TestBridgedFrameGen("extrapolate");
+        TestStalledTeardown(false);
+        TestStalledTeardown(true);
         TestNativeD3D12("native-d3d12-after-bridged");
         TestDeviceLost();
     }
