@@ -830,6 +830,21 @@ class OpenXrLayer {
     // release ramp so the easing keeps using that profile's settings.
     size_t pivotxr_active_profile_index_{0};
     bool pivotxr_engaged_{false};
+    // Stacked snaps retain the motion owner in active_profile_index; the snap
+    // owner remains in quick_view_profile_index. Never retain a profile stack.
+    bool pivotxr_snap_stacked_{false};
+    bool pivotxr_snap_reference_pending_{false};
+    bool pivotxr_snap_return_pending_{false};
+    bool pivotxr_snap_rebase_motion_{false};
+    PivotViewOffset pivotxr_snap_rebase_offset_;
+    PivotViewOffset CurrentPivotMotionOffset() const;
+    bool pivotxr_snap_reference_valid_{false};
+    double pivotxr_snap_reference_yaw_{0}, pivotxr_snap_reference_pitch_{0};
+    PivotViewOffset pivotxr_position_offset_;
+    void EngagePivotMotionProfile(size_t index);
+    void ActivatePivotQuickView(size_t profile_index, size_t view_index);
+    void ReleasePivotQuickView(double duration);
+    void ClearPivotSnapState();
     // Independent Nudge Sets contribute to the global transition; active-only
     // Nudge Sets use the profile transition and are cleared on profile release.
     PivotViewTransitionState pivotxr_manual_view_transition_;

@@ -247,6 +247,7 @@ export interface PivotAxisTuning {
   rotationMultiplier: number
   deadzoneDegrees: number
   maxExtraDegrees: number
+  deadzoneTransitionDegrees: number
 }
 export interface PivotStepTuning {
   deadzoneDegrees: number
@@ -256,7 +257,43 @@ export interface PivotStepTuning {
   maxExtraDegrees: number
 }
 
+export interface PivotPositionDirection {
+  rightCm: number
+  upCm: number
+  forwardCm: number
+  startAngleDegrees: number
+  fullAngleDegrees: number
+}
+export interface PivotPositionAssist {
+  enabled: boolean
+  advancedDirections: boolean
+  yaw: PivotPositionDirection
+  yawLeft: PivotPositionDirection
+  yawRight: PivotPositionDirection
+  pitchUp: PivotPositionDirection
+  pitchDown: PivotPositionDirection
+}
+export function defaultPivotPositionDirection(): PivotPositionDirection {
+  return { rightCm: 0, upCm: 0, forwardCm: 0, startAngleDegrees: 15, fullAngleDegrees: 60 }
+}
+export function defaultPivotPositionAssist(): PivotPositionAssist {
+  return { enabled: false, advancedDirections: false, yaw: defaultPivotPositionDirection(), yawLeft: defaultPivotPositionDirection(), yawRight: defaultPivotPositionDirection(), pitchUp: defaultPivotPositionDirection(), pitchDown: defaultPivotPositionDirection() }
+}
+function normalizePivotPositionAssist(value: unknown): PivotPositionAssist {
+  const s = isRecord(value) ? value : {}
+  const direction = (value: unknown): PivotPositionDirection => {
+    const d = isRecord(value) ? value : {}
+    const start = Math.min(179, Math.max(0, normalizeNumber(d.startAngleDegrees, 15)))
+    return { rightCm: Math.min(100,Math.max(-100,normalizeNumber(d.rightCm,0))), upCm: Math.min(100,Math.max(-100,normalizeNumber(d.upCm,0))), forwardCm: Math.min(100,Math.max(-100,normalizeNumber(d.forwardCm,0))), startAngleDegrees: start, fullAngleDegrees: Math.min(180,Math.max(start+0.1,normalizeNumber(d.fullAngleDegrees,60))) }
+  }
+  return { enabled: normalizeBoolean(s.enabled,false), advancedDirections: normalizeBoolean(s.advancedDirections,false), yaw: direction(s.yaw), yawLeft: direction(s.yawLeft), yawRight: direction(s.yawRight), pitchUp: direction(s.pitchUp), pitchDown: direction(s.pitchDown) }
+}
+
 export interface PivotXRSettings {
+  applyMotionToSnapViews: boolean
+  positionAssist: PivotPositionAssist
+  deadzoneTransitionDegrees: number
+  pitchDeadzoneTransitionDegrees: number
   smoothing: number
   activationRampSeconds: number
   rotationMultiplier: number
@@ -614,6 +651,7 @@ export function defaultPivotAxisTuning(): PivotAxisTuning {
     rotationMultiplier: 1.5,
     deadzoneDegrees: 8,
     maxExtraDegrees: 120,
+    deadzoneTransitionDegrees: 0,
   }
 }
 
@@ -629,6 +667,10 @@ export function defaultPivotStepTuning(): PivotStepTuning {
 
 export function defaultPivotXRSettings(): PivotXRSettings {
   return {
+    applyMotionToSnapViews: false,
+    positionAssist: defaultPivotPositionAssist(),
+    deadzoneTransitionDegrees: 0,
+    pitchDeadzoneTransitionDegrees: 0,
     smoothing: 0.2,
     activationRampSeconds: 0.35,
     rotationMultiplier: 1.5,
@@ -900,6 +942,7 @@ function normalizePivotAxisTuning(value: unknown, fallback: PivotAxisTuning): Pi
   const source = isRecord(value) ? value : {}
 
   return {
+    deadzoneTransitionDegrees: Math.min(180,Math.max(0,normalizeNumber(source.deadzoneTransitionDegrees,0))),
     rotationMultiplier: normalizeNumber(source.rotationMultiplier, fallback.rotationMultiplier),
     deadzoneDegrees: normalizeNumber(source.deadzoneDegrees, fallback.deadzoneDegrees),
     maxExtraDegrees: normalizeNumber(source.maxExtraDegrees, fallback.maxExtraDegrees),
@@ -959,6 +1002,10 @@ function normalizePivotXRSettings(value: unknown, fallback: PivotXRSettings): Pi
 
   return {
     smoothing,
+    applyMotionToSnapViews: normalizeBoolean(source.applyMotionToSnapViews,false),
+    positionAssist: normalizePivotPositionAssist(source.positionAssist),
+    deadzoneTransitionDegrees: Math.min(180,Math.max(0,normalizeNumber(source.deadzoneTransitionDegrees,0))),
+    pitchDeadzoneTransitionDegrees: Math.min(180,Math.max(0,normalizeNumber(source.pitchDeadzoneTransitionDegrees,0))),
     activationRampSeconds: normalizeNumber(source.activationRampSeconds, fallback.activationRampSeconds),
     rotationMultiplier: normalizeNumber(source.rotationMultiplier, fallback.rotationMultiplier),
     deadzoneDegrees: normalizeNumber(source.deadzoneDegrees, fallback.deadzoneDegrees),

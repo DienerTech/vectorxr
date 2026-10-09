@@ -79,6 +79,10 @@ DepthXrResolvedSettings ResolveDepthXrSettings(const ConfigDocument& config, std
 
 void ApplyPivotSettings(PivotXrResolvedProfile& resolved, const PivotXrSettings& settings) {
     resolved.smoothing = settings.smoothing;
+    resolved.apply_motion_to_snap_views = settings.apply_motion_to_snap_views;
+    resolved.position_assist = settings.position_assist;
+    resolved.yaw_deadzone_transition_degrees = settings.yaw_deadzone_transition_degrees;
+    resolved.pitch_deadzone_transition_degrees = settings.pitch_deadzone_transition_degrees;
     resolved.activation_ramp_seconds = settings.activation_ramp_seconds;
     resolved.yaw_rotation_multiplier = settings.yaw_rotation_multiplier;
     resolved.yaw_deadzone_degrees = settings.yaw_deadzone_degrees;
@@ -101,9 +105,9 @@ void ApplyPivotSettings(PivotXrResolvedProfile& resolved, const PivotXrSettings&
         resolved.pitch_step_negative = settings.pitch_down_step;
     } else {
         const PivotAxisTuning yaw{settings.yaw_rotation_multiplier, settings.yaw_deadzone_degrees,
-                                  settings.yaw_max_extra_degrees};
+                                  settings.yaw_max_extra_degrees, settings.yaw_deadzone_transition_degrees};
         const PivotAxisTuning pitch{settings.pitch_rotation_multiplier, settings.pitch_deadzone_degrees,
-                                    settings.pitch_max_extra_degrees};
+                                    settings.pitch_max_extra_degrees, settings.pitch_deadzone_transition_degrees};
         resolved.yaw_positive = yaw;
         resolved.yaw_negative = yaw;
         resolved.pitch_positive = pitch;
@@ -145,7 +149,7 @@ std::vector<PivotActivationBinding> FilterUnclaimedActivationBindings(
         });
         const bool claimed_earlier = std::any_of(
             earlier_profiles.begin(), earlier_profiles.end(), [&](const PivotXrResolvedProfile& earlier) {
-                return std::any_of(earlier.activation_bindings.begin(), earlier.activation_bindings.end(),
+                return earlier.behavior == PivotProfileBehavior::EnhancedMotion && std::any_of(earlier.activation_bindings.begin(), earlier.activation_bindings.end(),
                                    [&](const PivotActivationBinding& earlier_binding) {
                                        return SameActivationInput(earlier_binding.binding, binding);
                                    });
@@ -215,6 +219,7 @@ PivotXrResolvedSettings ResolvePivotXrSettings(const ConfigDocument& config, std
             }
 
             PivotXrResolvedProfile candidate;
+            candidate.id = profile.id.empty() ? profile.name : profile.id;
             candidate.name = profile.name;
             candidate.behavior = profile.behavior;
             candidate.nudge_set_id = profile.nudge_set_id;
@@ -236,6 +241,7 @@ PivotXrResolvedSettings ResolvePivotXrSettings(const ConfigDocument& config, std
     // participates when no custom profile targets this application.
     if (resolved.profiles.empty() && config.pivotxr.enabled) {
         PivotXrResolvedProfile candidate;
+        candidate.id = "default";
         candidate.name = "Default";
         candidate.behavior = config.pivotxr.behavior;
         candidate.nudge_set_id = config.pivotxr.nudge_set_id;

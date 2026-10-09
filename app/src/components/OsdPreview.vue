@@ -16,12 +16,12 @@ const expandedHeader = computed(() => {
 const rows = computed(() => {
   let y = 190 - expandedHeader.value.shift
   return props.settings.bodyOrder.filter(row => props.settings[flags[row]]).map(row => {
-    const result = { key: row, y }; y += row === 'graph' ? 156 : 52; return result
+    const result = { key: row, y }; y += row === 'graph' ? 156 : row === 'pivot' ? 84 : 52; return result
   })
 })
 const compactLayout = computed(() => osdCompactLayout(props.settings))
 const panelWidth = computed(() => props.settings.compact ? compactLayout.value.width : 960)
-const height = computed(() => props.settings.compact ? compactLayout.value.height : 210 - expandedHeader.value.shift + rows.value.reduce((sum, row) => sum + (row.key === 'graph' ? 156 : 52), 0))
+const height = computed(() => props.settings.compact ? compactLayout.value.height : 210 - expandedHeader.value.shift + rows.value.reduce((sum, row) => sum + (row.key === 'graph' ? 156 : row.key === 'pivot' ? 84 : 52), 0))
 const width = computed(() => 2 * Math.atan(.275 * props.settings.scale / 100 * (panelWidth.value - 2) / 958) * 180 / Math.PI)
 const angularHeight = computed(() => width.value * (height.value - 2) / (panelWidth.value - 2))
 // Legible mode draws both layouts at one shared scale so text size matches between Compact and Expanded.
@@ -36,7 +36,7 @@ const legibleScale = computed(() => Math.min(legibleMaxScale, stageSize.value.wi
 const legibleStageHeight = computed(() => Math.max(300, Math.ceil(height.value * legibleScale.value) + legiblePadY))
 const legibleView = computed(() => ({ width: stageSize.value.width || legibleWidestPanel, height: stageSize.value.height || legibleStageHeight.value }))
 const headerValues = computed(() => ({ brand: 'VECTORXR', app: 'your-game.exe', runtime: 'Your OpenXR runtime', clock: props.settings.clockFormat === '12' ? '8:42 PM' : '20:42' }))
-const labels: Record<OsdBodyRow, [string, string]> = { graph: ['', ''], turbo: ['TURBO', 'Async / Experimental'], pivot: ['PIVOT', 'DCS Stepped Applied, Nudges Applied'], modules: ['ENHANCEMENTS', 'Depth / Pivot / Turbo / Quadviews'] }
+const labels: Record<OsdBodyRow, [string, string]> = { graph: ['', ''], turbo: ['TURBO', 'Async / Experimental'], pivot: ['PIVOT', 'Motion: Active / Continuous + Position / Flight'], modules: ['ENHANCEMENTS', 'Depth / Pivot / Turbo / Quadviews'] }
 let drag: { x: number; y: number; h: number; v: number; unit: number } | null = null
 function start(event: PointerEvent) {
   if (event.button !== 0 || legible.value) return
@@ -79,7 +79,8 @@ function move(event: PointerEvent) {
             </g>
             <g v-if="settings.compactShowPivot" :transform="`translate(0 ${compactLayout.pivotY})`">
               <text x="30" y="22" font-size="20" fill="#94a5b8">PIVOT</text>
-              <foreignObject x="128" :width="panelWidth - 156" height="36"><div class="body-value" style="color: #e9f0f8">Applied + Nudge</div></foreignObject>
+              <foreignObject x="128" :width="panelWidth - 156" height="36"><div class="body-value" style="color: #e9f0f8">Motion: Cont Active + Position</div></foreignObject>
+              <foreignObject x="128" y="32" :width="panelWidth - 156" height="36"><div class="body-value" style="color: #e9f0f8">Snap: Active / Stacked</div></foreignObject>
             </g>
           </g>
         </template>
@@ -95,7 +96,7 @@ function move(event: PointerEvent) {
         </template>
         <template v-if="!settings.compact"><g v-for="row in rows" :key="row.key" :transform="`translate(0 ${row.y})`">
           <template v-if="row.key === 'graph'"><rect x="28" width="904" height="130" fill="#141f2d" /><text x="40" y="22" font-size="18" fill="#94a5b8">FRAME TIME / LAST 120 FRAMES</text><path d="M40 94 L100 90 160 98 220 94 280 92 340 35 400 87 460 91 520 96 580 92 640 90 700 99 760 88 820 94 920 93" fill="none" :stroke="accent" stroke-width="3" /></template>
-          <template v-else><text x="30" y="20" font-size="20" fill="#94a5b8">{{ labels[row.key][0] }}</text><foreignObject x="242" width="680" height="36"><div class="body-value" :style="{ color: row.key === 'turbo' ? accent : '#e9f0f8' }">{{ labels[row.key][1] }}</div></foreignObject></template>
+          <template v-else><text x="30" y="20" font-size="20" fill="#94a5b8">{{ labels[row.key][0] }}</text><foreignObject x="242" width="680" height="36"><div class="body-value" :style="{ color: row.key === 'turbo' ? accent : '#e9f0f8' }">{{ labels[row.key][1] }}</div></foreignObject><foreignObject v-if="row.key === 'pivot'" x="242" y="32" width="680" height="36"><div class="body-value">Snap: Active / Stacked / Check Six</div></foreignObject></template>
         </g></template>
       </svg>
     </svg>

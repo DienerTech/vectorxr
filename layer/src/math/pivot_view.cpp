@@ -24,6 +24,44 @@ PivotViewOffset InterpolateOffset(const PivotViewOffset& start,
 
 } // namespace
 
+double ComputePivotContinuousExtra(double angle, double multiplier, double deadzone, double transition, double max_extra) {
+    constexpr double radians = 3.14159265358979323846 / 180.0;
+    const double x=std::max(0.0, std::abs(angle)-std::max(0.0,deadzone)*radians);
+    const double width=std::max(0.0,transition)*radians;
+    double distance=x;
+    if (width>0) {
+        if (x<width) {
+            const double t=x/width;
+            // Integral of smoothstep: sensitivity rises from 1 to multiplier,
+            // without overshoot or a catch-up discontinuity at the far edge.
+            distance=width*(t*t*t-0.5*t*t*t*t);
+        } else distance=x-width*0.5;
+    }
+    double extra=distance*std::max(0.0,multiplier-1.0);
+    if (max_extra>0) extra=std::min(extra,max_extra*radians);
+    return std::copysign(extra,angle);
+}
+PivotViewOffset ComputePivotPositionAssist(double yaw, double pitch, const PivotPositionAssist& settings) {
+    PivotViewOffset result;
+    if (!settings.enabled) return result;
+    auto add=[&](double angle, const PivotPositionDirection& d, double mirror) {
+        const double degrees=std::abs(angle)*180.0/3.14159265358979323846;
+        const double t=std::clamp((degrees-d.start_angle_degrees)/std::max(0.001,d.full_angle_degrees-d.start_angle_degrees),0.0,1.0);
+        const double gain=t*t*(3-2*t)/100.0;
+        result.right_meters+=d.right_cm*gain*mirror;
+        result.up_meters+=d.up_cm*gain;
+        result.forward_meters+=d.forward_cm*gain;
+    };
+    if (settings.advanced_directions) {
+        add(yaw,yaw>=0?settings.yaw_left:settings.yaw_right,1);
+        add(pitch,pitch>=0?settings.pitch_up:settings.pitch_down,1);
+    } else add(yaw,settings.yaw,yaw>=0?-1:1);
+    result.right_meters=std::clamp(result.right_meters,-1.0,1.0);
+    result.up_meters=std::clamp(result.up_meters,-1.0,1.0);
+    result.forward_meters=std::clamp(result.forward_meters,-1.0,1.0);
+    return result;
+}
+
 bool PivotViewOffsetNearlyEqual(const PivotViewOffset& lhs,
                                 const PivotViewOffset& rhs,
                                 double epsilon) {

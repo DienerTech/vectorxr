@@ -180,14 +180,14 @@ class TurboFrameTestPeer {
         layer.resolved_settings_.pivotxr.enabled=true;
         PivotXrResolvedProfile profile; profile.name="DCS Stepped";
         layer.resolved_settings_.pivotxr.profiles={profile}; layer.pivotxr_active_profile_index_=0;
-        layer.pivotxr_engaged_=true; layer.pivotxr_quick_view_active_=false; layer.pivotxr_quick_view_transitioning_=false;
+        layer.pivotxr_engaged_=true; layer.pivotxr_activation_gain_=1; layer.pivotxr_quick_view_active_=false; layer.pivotxr_quick_view_transitioning_=false;
         layer.pivotxr_manual_view_transition_={}; layer.pivotxr_profile_view_transition_={};
         layer.pivotxr_profile_view_transition_.current.yaw_radians=.1;
-        ok=ok && layer.BuildOsdSnapshot().pivot=="DCS Stepped Applied, Nudges Applied";
-        layer.pivotxr_engaged_=false; layer.pivotxr_profile_view_transition_={};
-        ok=ok && layer.BuildOsdSnapshot().pivot=="Pivot ready";
+        ok=ok && layer.BuildOsdSnapshot().pivot=="Motion: Active / continuous / DCS Stepped" && layer.BuildOsdSnapshot().pivot_secondary=="Snap: Off / Nudge";
+        layer.pivotxr_engaged_=false; layer.pivotxr_activation_gain_=0; layer.pivotxr_profile_view_transition_={};
+        ok=ok && layer.BuildOsdSnapshot().pivot=="Motion: Off";
         layer.pivotxr_engaged_=true; layer.resolved_settings_.pivotxr.enabled=false;
-        ok=ok && layer.BuildOsdSnapshot().pivot=="Disabled";
+        ok=ok && layer.BuildOsdSnapshot().pivot=="Motion: Disabled";
         layer.pivotxr_engaged_=false;
         return ok;
     }

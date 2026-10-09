@@ -2927,7 +2927,39 @@ void TestSwapchainImageQueuePreservesFifo() {
 
 } // namespace
 
+void TestExpandedPivotMathAndConfig() {
+    using namespace depthxr;
+    constexpr double rad=3.14159265358979323846/180;
+    auto f=[&](double a,double width){return ComputePivotContinuousExtra(a*rad,2,8,width,180)/rad;};
+    Expect(f(8,4)==0 && f(7,4)==0,"Soft deadzone must retain 1:1 inside the threshold");
+    Expect(std::abs(f(12,4)-2)<1e-9 && std::abs(f(20,4)-10)<1e-9,"Integrated soft sensitivity is incorrect");
+    Expect(std::abs(f(20,0)-12)<1e-9 && std::abs(f(-20,4)+f(20,4))<1e-9,"Legacy curve or sign symmetry changed");
+    double prev=0;
+    for(double a=8;a<180;a+=.1){const double next=f(a,4);Expect(next>=prev,"Soft deadzone must be monotonic");prev=next;}
+    const double eps=.0001;
+    Expect(std::abs((f(8+eps,4)-f(8,4))/eps)<.001,"Deadzone entry sensitivity is abrupt");
+    Expect(std::abs((f(12+eps,4)-f(12-eps,4))/(2*eps)-1)<.001,"Deadzone transition exit sensitivity is abrupt");
+    PivotPositionAssist p; p.enabled=true; p.yaw={10,4,-2,0,90};
+    auto center=ComputePivotPositionAssist(0,0,p),half=ComputePivotPositionAssist(-45*rad,0,p),full=ComputePivotPositionAssist(-150*rad,0,p);
+    Expect(PivotViewOffsetNearlyZero(center),"Position assist moves at neutral");
+    Expect(std::abs(half.right_meters-.05)<1e-9 && std::abs(half.up_meters-.02)<1e-9,"Position midpoint curve mismatch");
+    Expect(std::abs(full.right_meters-.1)<1e-9 && std::abs(full.forward_meters+.02)<1e-9,"Position limits mismatch");
+    Expect(std::abs(ComputePivotPositionAssist(45*rad,0,p).right_meters+.05)<1e-9,"Position lean does not mirror left/right");
+    p.advanced_directions=true;p.yaw_left={-12,2,0,0,45};p.pitch_up={0,8,3,0,30};
+    const auto combined=ComputePivotPositionAssist(45*rad,30*rad,p);
+    Expect(std::abs(combined.right_meters+.12)<1e-9 && std::abs(combined.up_meters-.1)<1e-9,"Advanced Position axes fail to compose");
+    ConfigDocument config;std::string error;
+    const char* json=R"({"version":3,"core":{},"applications":[],"modules":{"depthxr":{},"pivotxr":{"enabled":true,"defaults":{"applyMotionToSnapViews":true,"deadzoneTransitionDegrees":4,"pitchDeadzoneTransitionDegrees":2,"yawLeft":{"deadzoneTransitionDegrees":7},"positionAssist":{"enabled":true,"yaw":{"rightCm":10,"upCm":4,"startAngleDegrees":0,"fullAngleDegrees":90}}}}}})";
+    auto parsed=ParseConfig(json); Expect(parsed.ok,parsed.error.c_str());config=parsed.document;
+    const auto resolved=ResolveRuntimeConfig(config,"FlightSimulator.exe").pivotxr;
+    Expect(resolved.profiles[0].apply_motion_to_snap_views && resolved.profiles[0].position_assist.enabled &&
+        resolved.profiles[0].yaw_positive.deadzone_transition_degrees==4,"Expanded Pivot fields failed resolution");
+    config={};error.clear();
+    Expect(!ParseConfig(R"({"version":3,"core":{},"applications":[],"modules":{"depthxr":{},"pivotxr":{"defaults":{"positionAssist":{"yaw":{"startAngleDegrees":60,"fullAngleDegrees":20}}}}}})").ok,"Inverted position range must be rejected");
+}
+
 int main() {
+    TestExpandedPivotMathAndConfig();
     TestOsdConfig();
     TestTurboExperimentalConfig();
     TestParseConfig();

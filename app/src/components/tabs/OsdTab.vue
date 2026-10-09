@@ -49,7 +49,7 @@ function closeBinding() {
 const contents: Record<OsdBodyRow, { key: 'showGraph' | 'showTurbo' | 'showPivot' | 'showModules'; label: string; hint: string }> = {
   graph: { key: 'showGraph', label: 'Frame-time graph', hint: 'Rolling history of the last 120 application frames.' },
   turbo: { key: 'showTurbo', label: 'Turbo state', hint: 'Distinguishes disabled, enabled but off, active strategy, and safety states.' },
-  pivot: { key: 'showPivot', label: 'Pivot state', hint: 'Engaged profile, applied nudges and quick views, or ready when idle.' },
+  pivot: { key: 'showPivot', label: 'Pivot state', hint: 'Two lines for motion and Snap Views, including stacked state, Position Assist, nudges, and transitions.' },
   modules: { key: 'showModules', label: 'Active enhancements', hint: 'Depth, Pivot, Turbo, and Quadviews enabled for this app.' },
 }
 const compactContents = [

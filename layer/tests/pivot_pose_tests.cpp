@@ -150,6 +150,58 @@ public:
         RetargetPivotViewTransition({to},1,l.pivotxr_quick_view_transition_);
         UpdatePivotViewTransition(elapsed,l.pivotxr_quick_view_transition_);
     }
+    static void Expanded(bool motion_first=true,bool stepped=false,bool coexist=true) {
+        Prepare(Mode::Continuous,0);
+        auto& l=OpenXrLayer::Instance(); l.resolved_settings_.core.enabled=true;
+        auto& motion=l.resolved_settings_.pivotxr.profiles[0];
+        motion.name="Flight";motion.apply_motion_to_snap_views=coexist;motion.activation_ramp_seconds=0;motion.smoothing=0;
+        motion.yaw_positive=motion.yaw_negative={2,0,180};motion.pitch_positive=motion.pitch_negative={2,0,180};
+        motion.response_mode=stepped?PivotResponseMode::Stepped:PivotResponseMode::Continuous;
+        motion.yaw_step_positive=motion.yaw_step_negative={0,10,10,0,180};motion.step_glide_mode=PivotStepGlideMode::Instant;
+        InputBinding input;input.type=InputBindingType::Keyboard;input.chord={"F1"};
+        motion.activation_bindings={{PivotActivationBehavior::Toggle,input}};
+        PivotXrResolvedProfile snap;snap.name="Views";snap.behavior=PivotProfileBehavior::SnapViews;
+        PivotQuickView view;view.name="Right";view.yaw_degrees=90;view.transition_seconds=0;
+        input.chord={"F2"};view.activation_bindings={{PivotActivationBehavior::Hold,input}};
+        snap.view_controls.quick_views={view};
+        l.resolved_settings_.pivotxr.profiles.push_back(snap);
+        auto exclusive=l.resolved_settings_.pivotxr.profiles[0];exclusive.name="Exclusive";exclusive.apply_motion_to_snap_views=false;
+        exclusive.activation_bindings[0].binding.chord={"F3"};
+        l.resolved_settings_.pivotxr.profiles.push_back(exclusive);
+        // Prime all real input structures, then provide cached inputs without
+        // calling hardware polling. This tests actual production arbitration.
+        l.pivotxr_binding_last_poll_time_.reset();l.IsPivotXrActive();
+        l.pivotxr_binding_last_poll_time_=std::chrono::steady_clock::now()+std::chrono::hours(1);
+        if(motion_first) { l.EngagePivotMotionProfile(0);l.pivotxr_profile_input_states_[0].toggle_latched=true; }
+    }
+    static void Key(size_t owner,bool down) {
+        auto& l=OpenXrLayer::Instance();
+        if(owner==1)l.pivotxr_profile_input_states_[1].quick_views[0].activation[0].down_cached=down;
+        else l.pivotxr_profile_input_states_[owner].activation[0].down_cached=down;
+        l.IsPivotXrActive();
+    }
+    static void SnapDuration(double seconds) {OpenXrLayer::Instance().resolved_settings_.pivotxr.profiles[1].view_controls.quick_views[0].transition_seconds=seconds;}
+    static void Snap() {OpenXrLayer::Instance().ActivatePivotQuickView(1,0);}
+    static void Motion() {OpenXrLayer::Instance().EngagePivotMotionProfile(0);}
+    static void Exit(double duration=0) {OpenXrLayer::Instance().ReleasePivotQuickView(duration);}
+    static bool Engaged() {return OpenXrLayer::Instance().pivotxr_engaged_;}
+    static size_t Owner() {return OpenXrLayer::Instance().pivotxr_active_profile_index_;}
+    static bool SnapActive() {return OpenXrLayer::Instance().pivotxr_quick_view_active_;}
+    static OsdSnapshot Status() {return OpenXrLayer::Instance().BuildOsdSnapshot();}
+    static void AlwaysHold() {
+        auto& l=OpenXrLayer::Instance();auto& p=l.resolved_settings_.pivotxr.profiles[0];
+        p.always_active=true;p.activation_bindings[0].behavior=PivotActivationBehavior::Hold;
+        l.pivotxr_profile_input_states_[0].toggle_latched=false;
+    }
+    static void Position() {auto& p=OpenXrLayer::Instance().resolved_settings_.pivotxr.profiles[0].position_assist;p.enabled=true;p.yaw={10,4,0,0,30};}
+    static XrPosef Advance(XrPosef pose,double seconds) {
+        auto& l=OpenXrLayer::Instance();
+        l.pivotxr_last_smoothing_wall_time_=std::chrono::steady_clock::now()-std::chrono::duration_cast<std::chrono::steady_clock::duration>(std::chrono::duration<double>(seconds));
+        XrSpaceLocation location{XR_TYPE_SPACE_LOCATION};location.pose=pose;location.locationFlags=valid_pose;
+        l.ApplyPivotToLocatedSpace(Space(1),Space(2),100,true,&location,nullptr,nullptr,nullptr,true);
+        return location.pose;
+    }
+    static double Yaw(XrPosef pose) {return std::atan2(2*(pose.orientation.w*pose.orientation.y+pose.orientation.x*pose.orientation.z),1-2*(pose.orientation.y*pose.orientation.y+pose.orientation.x*pose.orientation.x));}
     inline static XrPosef relation=Pose(pi/3,{2,.4f,-3});
     inline static bool relation_valid=true;
     inline static bool runtime_failed=false;
@@ -307,6 +359,49 @@ int main() {
             Expect(Close(Peer::Apply(alternate_raw,nullptr,false,Space(3)).position,alternate_raw.position),
                    "Failed reference conversion must not apply an anchor from the wrong space");
         }
+        for(bool stepped:{false,true}) {
+            Peer::Expanded(true,stepped);Peer::Apply(Pose());Peer::Snap();
+            Expect(Close(Peer::Apply(Pose()),Pose(-pi/2)),"Stacked snap must land on named pose");
+            auto output=Peer::Apply(Pose(11*pi/180));
+            const double expected_yaw=-pi/2+(stepped?21:22)*pi/180;
+            Expect(std::abs(Peer::Yaw(output)-expected_yaw)<1e-5,"Motion must persist inside Snap Views");
+            auto status=Peer::Status();Expect(status.pivot.find("Active")!=std::string::npos && status.pivot_secondary.find("Stacked")!=std::string::npos,"OSD omits applied stacked state");
+            Peer::Exit(.2);Peer::Advance(Pose(11*pi/180),.3);
+            Expect(Peer::Engaged() && Peer::Owner()==0,"Snap release must retain motion owner");
+            Expect(Peer::Status().pivot_secondary.find("Stacked")==std::string::npos,"OSD retains stale stack after return");
+        }
+        // Returning from a snap entered off-center must not abruptly swap
+        // local assistance for normal-origin assistance, even with zero filtering.
+        for(bool stepped:{false,true}) {
+            Peer::Expanded(true,stepped);Peer::Apply(Pose(.25));Peer::Snap();Peer::Apply(Pose(.25));
+            const auto displayed=Peer::Apply(Pose(.45));Peer::Exit(.2);
+            Expect(Close(Peer::Apply(Pose(.45)),displayed),"Snap return must preserve its initial pose while rebasing motion");
+        }
+        Peer::Expanded(false);Peer::Snap();Peer::Apply(Pose(.2));
+        const auto before=Peer::Apply(Pose(.2));Peer::Motion();
+        Expect(Close(Peer::Apply(Pose(.2)),before),"Enabling motion inside snap must preserve current pose");
+        Expect(std::abs(Peer::Yaw(Peer::Apply(Pose(.3)))-(-pi/2+.2))<1e-5,"Snap-first motion must amplify around captured physical reference");
+        Peer::Expanded();Peer::Key(1,true);Peer::Apply(Pose());
+        Peer::Key(0,true);Expect(!Peer::Engaged() && Peer::SnapActive(),"Disabling stacked motion must leave snap selected");
+        Peer::Apply(Pose());Expect(Peer::Status().pivot_secondary.find("Stacked")==std::string::npos,"Off motion must not be labelled stacked");
+        Peer::Key(0,false);Peer::Key(0,true);Peer::Apply(Pose());
+        Peer::Key(2,true);Expect(Peer::Owner()==2 && !Peer::SnapActive(),"Incompatible profile must dismiss snap");
+        Peer::Key(1,false);Expect(Peer::Owner()==2 && Peer::Engaged(),"Stale snap Hold release must not resurrect outgoing profile");
+        Peer::Expanded();Peer::SnapDuration(1);Peer::Apply(Pose());Peer::Key(1,true);Peer::Apply(Pose());
+        Peer::Advance(Pose(),.3);Peer::Key(0,true);Peer::Apply(Pose(.1));Peer::Key(0,false);
+        const auto reenable_before=Peer::Apply(Pose(.1));Peer::Key(0,true);
+        Expect(Close(Peer::Apply(Pose(.1)),reenable_before),"Re-enabling motion must preserve the in-progress snap pose");
+        Expect(std::abs(Peer::Yaw(Peer::Advance(Pose(.1),1))-(-pi/2+.1))<1e-4,"Re-enabling motion must not cancel an entering snap transition");
+        Peer::Expanded();Peer::AlwaysHold();Peer::Key(0,true);Peer::Key(2,true);Peer::Key(0,false);
+        Expect(Peer::Owner()==2 && Peer::Engaged(),"Outgoing Always On Hold release must not override a newly selected profile");
+        Peer::Expanded(true,false,false);Peer::Apply(Pose());Peer::Snap();Peer::Apply(Pose());
+        Expect(std::abs(Peer::Yaw(Peer::Apply(Pose(.1)))-(-pi/2+.1))<1e-5,"Non-opt-in snap must preserve 1:1 behavior");
+        Peer::Exit();Expect(Peer::Owner()==0 && Peer::Engaged(),"Legacy snap must restore previous motion");
+        Peer::Expanded();Peer::Position();Peer::Apply(Pose());
+        const auto translated=Peer::Advance(Pose(-pi/6),1);
+        Expect(std::abs(translated.position.x-(Pose().position.x+.1))<1e-4 && std::abs(translated.position.y-(Pose().position.y+.04))<1e-4,"Live Position Assist must add expected origin-relative displacement");
+        auto center_position=Peer::Advance(Pose(),1);
+        Expect(Close(center_position.position,Pose().position),"Position Assist must return to neutral");
         std::cout << "Pivot pose regression tests passed\n";
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n'; return 1;
