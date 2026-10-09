@@ -7,7 +7,7 @@ import OsdPreview from '../OsdPreview.vue'
 import ModuleBindingPanel from '../ModuleBindingPanel.vue'
 import ModuleBindingPage from '../ModuleBindingPage.vue'
 import BindingConflictWarnings from '../BindingConflictWarnings.vue'
-import { bindingLabel, savedBindingConflictWarnings, osdAccentColors, osdBodyRows, osdLayout, type OsdBodyRow, type VectorXRConfig, type OsdSettings } from '../../lib/model'
+import { bindingLabel, savedBindingConflictWarnings, osdAccentColors, osdBodyRows, osdLayout, pivotSnapViewsConfigured, type OsdBodyRow, type VectorXRConfig, type OsdSettings } from '../../lib/model'
 import { loadRuntimeStatus, type RuntimeStatusSession } from '../../lib/commands'
 
 const props = defineProps<{ config: VectorXRConfig; savedConfig: VectorXRConfig }>()
@@ -16,7 +16,8 @@ const colorExpanded = ref(false)
 const previewCompact = ref(osd.value.compact)
 const previewSettings = computed(() => ({ ...osd.value, compact: previewCompact.value }))
 const previewLegible = ref(false)
-const previewWindow = useOsdPreviewWindow(osd, previewCompact, previewLegible)
+const previewPivotSnapLine = computed(() => pivotSnapViewsConfigured(props.config))
+const previewWindow = useOsdPreviewWindow(osd, previewCompact, previewLegible, previewPivotSnapLine)
 watch(() => osd.value.compact, compact => { previewCompact.value = compact })
 function customColor() { osd.value.accent = 'custom'; colorExpanded.value = !colorExpanded.value }
 const editing = ref<'toggleBinding' | 'cycleBinding' | null>(null)
@@ -49,12 +50,12 @@ function closeBinding() {
 const contents: Record<OsdBodyRow, { key: 'showGraph' | 'showTurbo' | 'showPivot' | 'showModules'; label: string; hint: string }> = {
   graph: { key: 'showGraph', label: 'Frame-time graph', hint: 'Rolling history of the last 120 application frames.' },
   turbo: { key: 'showTurbo', label: 'Turbo state', hint: 'Distinguishes disabled, enabled but off, active strategy, and safety states.' },
-  pivot: { key: 'showPivot', label: 'Pivot state', hint: 'Two lines for motion and Snap Views, including stacked state, Position Assist, nudges, and transitions.' },
+  pivot: { key: 'showPivot', label: 'Pivot state', hint: 'Motion state, Position Assist, and nudges. Apps with Snap Views add a second line for the snap, stacking, and transitions.' },
   modules: { key: 'showModules', label: 'Active enhancements', hint: 'Depth, Pivot, Turbo, and Quadviews enabled for this app.' },
 }
 const compactContents = [
   { key: 'compactShowTurbo', label: 'Turbo state', hint: 'Current strategy, off, waiting, or safety state.' },
-  { key: 'compactShowPivot', label: 'Pivot state', hint: 'Ready, applied, nudged, or quick view in a short label.' },
+  { key: 'compactShowPivot', label: 'Pivot state', hint: 'Motion state in a short label, plus a Snap View line when Snap Views are configured.' },
 ] as const
 const compactHeaders = [
   { key: 'compactShowBrand', label: 'VectorXR name' },
@@ -212,7 +213,7 @@ function preset(name: 'balanced' | 'minimal' | 'performance') {
         </div>
       </div>
       <p v-if="previewWindow.error.value" role="alert" class="chip-danger px-5 py-2 text-xs">{{ previewWindow.error.value }}</p>
-      <OsdPreview v-if="!previewWindow.opened.value" v-model:legible="previewLegible" :settings="previewSettings" @position="(horizontal, vertical) => { osd.horizontalDegrees = horizontal; osd.verticalDegrees = vertical }" />
+      <OsdPreview v-if="!previewWindow.opened.value" v-model:legible="previewLegible" :settings="previewSettings" :pivot-snap-line="previewPivotSnapLine" @position="(horizontal, vertical) => { osd.horizontalDegrees = horizontal; osd.verticalDegrees = vertical }" />
       <p v-else class="surface-panel-soft border-y px-5 py-4 text-xs text-muted" style="border-color: var(--app-border)">Preview is open in a separate window.</p>
 
       <div class="grid gap-x-8 gap-y-6 border-t p-5 lg:grid-cols-2" style="border-color: var(--app-border)">

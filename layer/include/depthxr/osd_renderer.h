@@ -53,7 +53,9 @@ struct OsdSnapshot {
     bool experimental{false};
     std::string pivot;
     std::string compact_pivot;
-    std::string pivot_secondary, compact_pivot_secondary;
+    // Snap View line; empty (and not drawn) for apps without Snap Views.
+    std::string pivot_secondary;
+    std::string compact_pivot_secondary;
 };
 
 struct OsdPresentation {
@@ -89,7 +91,8 @@ struct OsdCompactLayout {
     std::array<int,4> header_x{-1,-1,-1,-1};
     bool fps{}, frame_time{}, empty{};
 };
-OsdCompactLayout CompactOsdLayout(const OsdSettings&);
+// pivot_snap_line adds the second Pivot row used when Snap Views exist.
+OsdCompactLayout CompactOsdLayout(const OsdSettings&, bool pivot_snap_line = false);
 
 // Produces premultiplied sRGB pixels for an sRGB OpenXR swapchain.
 OsdBitmap RasterizeOsd(const OsdSettings&, bool compact, const OsdSnapshot&, const OsdTelemetry&, bool rgba);

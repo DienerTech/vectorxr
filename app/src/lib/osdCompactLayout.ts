@@ -1,7 +1,8 @@
 import type { OsdSettings } from './model'
 
 // Keep dimensions in sync with CompactOsdLayout in the layer rasterizer.
-export function osdCompactLayout(settings: OsdSettings) {
+// pivotSnapLine adds the second Pivot row shown when Snap Views are configured.
+export function osdCompactLayout(settings: OsdSettings, pivotSnapLine = false) {
   const header = [
     { key: 'brand', show: settings.compactShowBrand, width: 155 },
     { key: 'app', show: settings.compactShowApp, width: 260 },
@@ -20,7 +21,7 @@ export function osdCompactLayout(settings: OsdSettings) {
   let y = 18
   const row = (show: boolean, height: number) => { if (!show) return -1; const top = y; y += height + 12; return top }
   const headerY = row(!!fields.length, 32), metricsY = row(fps || frameTime, 56)
-  const turboY = row(settings.compactShowTurbo, 36), pivotY = row(settings.compactShowPivot, 68)
+  const turboY = row(settings.compactShowTurbo, 36), pivotY = row(settings.compactShowPivot, pivotSnapLine ? 68 : 36)
   const statusY = turboY >= 0 ? turboY : pivotY
   return { width, height: empty ? 80 : y + 6, fields, fps, frameTime, headerY, metricsY, statusY, turboY, pivotY, empty }
 }

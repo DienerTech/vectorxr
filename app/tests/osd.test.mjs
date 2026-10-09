@@ -79,13 +79,17 @@ test('compact layout packs selected rows and preserves a small FPS-only footprin
     const flags = ['compactShowBrand', 'compactShowApp', 'compactShowRuntime', 'compactShowClock', 'compactShowTurbo', 'compactShowPivot']
     Object.assign(settings, { compactMetrics }, Object.fromEntries(flags.map((key, i) => [key, !!(bits & 1 << i)])))
     const layout = osdCompactLayout(settings)
+    const snapLayout = osdCompactLayout(settings, true)
     assert.ok(layout.width >= 240 && layout.width <= 960)
-    assert.ok(layout.height >= 68 && layout.height <= 264)
+    assert.ok(layout.height >= 68 && snapLayout.height <= 264)
+    // The Snap View line only grows a shown Pivot row.
+    assert.equal(snapLayout.height, layout.height + (settings.compactShowPivot ? 32 : 0))
     if (settings.compactShowTurbo && settings.compactShowPivot) {
       assert.equal(layout.pivotY, layout.turboY + 48)
       const turboOnly = osdCompactLayout({ ...settings, compactShowPivot: false })
       assert.equal(layout.width, turboOnly.width)
-      assert.equal(layout.height, turboOnly.height + 80)
+      assert.equal(layout.height, turboOnly.height + 48)
+      assert.equal(snapLayout.height, turboOnly.height + 80)
     }
     assert.equal(layout.empty, compactMetrics === 'none' && bits === 0)
     assert.ok(layout.fields.every(field => field.x + field.width <= layout.width - 28))
