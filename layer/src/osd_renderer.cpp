@@ -140,7 +140,7 @@ OsdCompactLayout CompactOsdLayout(const OsdSettings& settings) {
     if(count) { layout.header_y=y; y+=44; }
     if(layout.fps || layout.frame_time) { layout.metrics_y=y; y+=68; }
     if(settings.compact_show_turbo) { layout.turbo_y=y; y+=48; }
-    if(settings.compact_show_pivot) { layout.pivot_y=y; y+=48; }
+    if(settings.compact_show_pivot) { layout.pivot_y=y; y+=80; }
     layout.status_y=layout.turbo_y>=0?layout.turbo_y:layout.pivot_y;
     layout.height=layout.empty?80:y+6;
     return layout;
@@ -162,7 +162,7 @@ OsdBitmap RasterizeOsd(const OsdSettings& settings, bool compact, const OsdSnaps
     const int panel_width=compact?layout.width:OsdBitmap::width;
     const int header_shift=(settings.show_brand || settings.show_app || settings.show_runtime || settings.show_clock)?0:40;
     const int height=compact?layout.height:210-header_shift+(settings.show_graph?156:0)+
-        (settings.show_turbo?52:0)+(settings.show_pivot?52:0)+(settings.show_modules?52:0)+(!snapshot.restart.empty()?48:0);
+        (settings.show_turbo?52:0)+(settings.show_pivot?84:0)+(settings.show_modules?52:0)+(!snapshot.restart.empty()?48:0);
     OsdBitmap output; output.height=height; output.content_width=panel_width;
     Canvas canvas(output.width,height);
     if (!canvas.bits || !canvas.dc) return output;
@@ -189,6 +189,7 @@ OsdBitmap RasterizeOsd(const OsdSettings& settings, bool compact, const OsdSnaps
             if(settings.compact_show_pivot) {
                 canvas.Text(30,layout.pivot_y+2,80,20,"PIVOT",muted);
                 canvas.Text(128,layout.pivot_y,panel_width-156,24,snapshot.compact_pivot.empty()?snapshot.pivot:snapshot.compact_pivot,white,true);
+                canvas.Text(128,layout.pivot_y+32,panel_width-156,24,snapshot.compact_pivot_secondary.empty()?snapshot.pivot_secondary:snapshot.compact_pivot_secondary,white,true);
             }
         }
     } else {
@@ -227,7 +228,9 @@ OsdBitmap RasterizeOsd(const OsdSettings& settings, bool compact, const OsdSnaps
                 const auto label=row=="turbo"?"TURBO":row=="pivot"?"PIVOT":"ENHANCEMENTS";
                 const auto value=row=="turbo"?snapshot.turbo+(snapshot.experimental?" / EXPERIMENTAL":""):row=="pivot"?snapshot.pivot:snapshot.modules;
                 canvas.Text(30,y,210,20,label,muted);
-                canvas.Text(242,y,680,24,value,row=="turbo"?accent:white,true); y+=52;
+                canvas.Text(242,y,680,24,value,row=="turbo"?accent:white,true);
+                if(row=="pivot") { canvas.Text(242,y+32,680,24,snapshot.pivot_secondary,white,true); y+=32; }
+                y+=52;
             }
         }
         if (!snapshot.restart.empty()) canvas.Text(30,y,902,20,"RESTART PENDING  /  "+snapshot.restart,RGB(245,185,108));

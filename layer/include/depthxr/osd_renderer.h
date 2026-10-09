@@ -53,6 +53,7 @@ struct OsdSnapshot {
     bool experimental{false};
     std::string pivot;
     std::string compact_pivot;
+    std::string pivot_secondary, compact_pivot_secondary;
 };
 
 struct OsdPresentation {

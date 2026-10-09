@@ -171,6 +171,7 @@ struct PivotAxisTuning {
     double rotation_multiplier{1.5};
     double deadzone_degrees{8.0};
     double max_extra_degrees{120.0};
+    double deadzone_transition_degrees{0.0};
 };
 
 struct PivotStepTuning {
@@ -181,17 +182,32 @@ struct PivotStepTuning {
     double max_extra_degrees{120.0};
 };
 
+struct PivotPositionDirection {
+    double right_cm{0.0}, up_cm{0.0}, forward_cm{0.0};
+    double start_angle_degrees{15.0}, full_angle_degrees{60.0};
+};
+struct PivotPositionAssist {
+    bool enabled{false};
+    bool advanced_directions{false};
+    PivotPositionDirection yaw;
+    PivotPositionDirection yaw_left, yaw_right, pitch_up, pitch_down;
+};
+
 struct PivotXrSettings {
     // General (apply to both axes).
     double smoothing{0.2};
     double activation_ramp_seconds{0.35};
+    bool apply_motion_to_snap_views{false};
+    PivotPositionAssist position_assist;
     // Yaw.
     double yaw_rotation_multiplier{1.5};
     double yaw_deadzone_degrees{8.0};
+    double yaw_deadzone_transition_degrees{0.0};
     double yaw_max_extra_degrees{120.0};
     // Pitch (defaults intentionally match yaw for a consistent feel).
     double pitch_rotation_multiplier{1.5};
     double pitch_deadzone_degrees{8.0};
+    double pitch_deadzone_transition_degrees{0.0};
     double pitch_max_extra_degrees{120.0};
     PivotResponseMode response_mode{PivotResponseMode::Continuous};
     PivotStepGlideMode step_glide_mode{PivotStepGlideMode::Glide};
@@ -300,6 +316,7 @@ struct PivotXrModuleConfig {
 // One activatable pivot behavior for the current executable, flattened from a
 // matched profile (or the module defaults when nothing matches).
 struct PivotXrResolvedProfile {
+    std::string id;
     std::string name;
     PivotProfileBehavior behavior{PivotProfileBehavior::EnhancedMotion};
     std::string nudge_set_id;
@@ -311,11 +328,15 @@ struct PivotXrResolvedProfile {
     PivotViewControls view_controls;
     double smoothing{0.2};
     double activation_ramp_seconds{0.35};
+    bool apply_motion_to_snap_views{false};
+    PivotPositionAssist position_assist;
     double yaw_rotation_multiplier{1.5};
     double yaw_deadzone_degrees{8.0};
+    double yaw_deadzone_transition_degrees{0.0};
     double yaw_max_extra_degrees{120.0};
     double pitch_rotation_multiplier{1.5};
     double pitch_deadzone_degrees{8.0};
+    double pitch_deadzone_transition_degrees{0.0};
     double pitch_max_extra_degrees{120.0};
     PivotResponseMode response_mode{PivotResponseMode::Continuous};
     PivotStepGlideMode step_glide_mode{PivotStepGlideMode::Glide};

@@ -70,8 +70,8 @@ function removeBinding(index: number) {
 
       <div v-if="activationBindings.length === 0" class="mt-4 rounded-[0.75rem] border border-dashed px-4 py-3 text-sm surface-panel-strong">
         {{ alwaysActive
-          ? 'No suspend bindings assigned. Pivot remains active for the whole session.'
-          : 'No activation binding assigned. Pivot cannot be activated until one is added.' }}
+          ? 'No suspend bindings assigned. Enhanced Motion remains active for the whole session.'
+          : 'No activation binding assigned. Enhanced Motion cannot be activated until one is added.' }}
       </div>
 
       <div v-else class="mt-4 space-y-4">
@@ -81,8 +81,8 @@ function removeBinding(index: number) {
           :model-value="item.binding"
           :label="`Binding ${index + 1}`"
           :description="alwaysActive
-            ? (item.behavior === 'toggle' ? 'Press once to suspend Pivot; press again to resume.' : 'Hold to suspend Pivot; release to resume.')
-            : (item.behavior === 'toggle' ? 'Press once to activate Pivot; press again to deactivate.' : 'Pivot stays active only while this control is held.')"
+            ? (item.behavior === 'toggle' ? 'Press once to suspend Enhanced Motion; press again to resume.' : 'Hold to suspend Enhanced Motion; release to resume.')
+            : (item.behavior === 'toggle' ? 'Press once to activate Enhanced Motion; press again to deactivate.' : 'Enhanced Motion stays active only while this control is held.')"
           :none-text="alwaysActive ? 'No suspend control assigned for this slot.' : 'No activation control assigned for this slot.'"
           removable
           @update:model-value="updateBinding(index, $event)"

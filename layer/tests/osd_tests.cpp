@@ -159,9 +159,9 @@ int main(int argc, char** argv) {
         const auto plain=RasterizeOsd(settings,true,Snapshot(),stats,false);
         for (bool turbo:{false,true}) for (bool pivot:{false,true}) {
             settings.compact_show_turbo=turbo; settings.compact_show_pivot=pivot;
-            auto states=Snapshot(); states.turbo="Recovery blocked / Analyzing"; states.pivot=std::string(150,'W'); states.compact_pivot="Quick view + Nudge";
+            auto states=Snapshot(); states.turbo="Recovery blocked / Analyzing"; states.pivot=std::string(150,'W'); states.compact_pivot="Motion: Cont Active + Position";states.compact_pivot_secondary="Snap: Active / Stacked + Nudge";
             const auto compact=RasterizeOsd(settings,true,states,stats,false);
-            Check(compact.height==136+48*static_cast<int>(turbo)+48*static_cast<int>(pivot),"Compact states did not get separate rows");
+            Check(compact.height==136+48*static_cast<int>(turbo)+80*static_cast<int>(pivot),"Compact states did not get separate rows");
             for(int y=18;y<100;++y) for(int x=28;x<600;++x)
                 Check(plain.pixels[y*960+x]==compact.pixels[y*960+x],"Compact states changed the performance header");
             Check(RasterizeOsd(settings,false,Snapshot(),stats,false).pixels==expanded.pixels,"Compact options changed expanded output");
@@ -186,11 +186,11 @@ int main(int argc, char** argv) {
             options.compact_show_runtime=flags&4;options.compact_show_clock=flags&8;
             options.compact_show_turbo=flags&16;options.compact_show_pivot=flags&32;
             const auto layout=CompactOsdLayout(options);
-            Check(layout.width>=240 && layout.width<=960 && layout.height>=68 && layout.height<=232,"Compact geometry escaped texture bounds");
+            Check(layout.width>=240 && layout.width<=960 && layout.height>=68 && layout.height<=264,"Compact geometry escaped texture bounds");
             if(options.compact_show_turbo && options.compact_show_pivot) {
                 options.compact_show_pivot=false;
                 const auto turbo_only=CompactOsdLayout(options);
-                Check(layout.pivot_y==layout.turbo_y+48 && layout.width==turbo_only.width && layout.height==turbo_only.height+48,
+                Check(layout.pivot_y==layout.turbo_y+48 && layout.width==turbo_only.width && layout.height==turbo_only.height+80,
                     "Adding compact Pivot widened the panel instead of adding a row");
             }
             Check(layout.empty==(flags==0 && options.compact_metrics=="none"),"Empty compact detection failed");

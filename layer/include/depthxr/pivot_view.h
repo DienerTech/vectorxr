@@ -1,5 +1,7 @@
 #pragma once
 
+#include "depthxr/settings.h"
+
 namespace depthxr {
 
 struct PivotViewOffset {
@@ -18,6 +20,9 @@ struct PivotViewTransitionState {
     double duration_seconds{0.0};
     bool active{false};
 };
+
+double ComputePivotContinuousExtra(double angle, double multiplier, double deadzone, double transition, double max_extra);
+PivotViewOffset ComputePivotPositionAssist(double yaw, double pitch, const PivotPositionAssist& settings);
 
 bool PivotViewOffsetNearlyEqual(const PivotViewOffset& lhs,
                                 const PivotViewOffset& rhs,

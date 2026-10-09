@@ -14,7 +14,7 @@ defineEmits<{ edit: [] }>()
   <div class="rounded-[1rem] border p-4 surface-panel-soft">
     <div class="flex items-start justify-between gap-3">
       <div class="grid min-w-0 flex-1 grid-cols-[auto_auto_minmax(0,1fr)] items-start gap-2">
-        <p class="pt-1 text-sm font-semibold tracking-tight">Activation</p>
+        <p class="pt-1 text-sm font-semibold tracking-tight">Motion Activation</p>
         <span class="inline-flex items-center rounded-full border px-3 py-1 text-xs font-semibold" style="border-color: var(--app-border)">
           {{ alwaysActive ? 'Always active' : 'Manual' }}
         </span>

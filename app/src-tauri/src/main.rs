@@ -3020,6 +3020,21 @@ mod tests {
     }
 
     #[test]
+    fn expanded_pivot_settings_survive_the_config_save_round_trip() {
+        let original = serde_json::json!({
+            "applyMotionToSnapViews": true, "deadzoneTransitionDegrees": 4.0,
+            "pitchDeadzoneTransitionDegrees": 2.0,
+            "yawLeft": { "deadzoneTransitionDegrees": 7.0 },
+            "positionAssist": {"enabled": true, "advancedDirections": true,
+                "yaw": {"rightCm": 10.0, "upCm": 4.0, "startAngleDegrees": 15.0, "fullAngleDegrees": 60.0},
+                "pitchUp": {"upCm": 12.0, "forwardCm": -5.0}}
+        });
+        let settings: PivotXRSettings = serde_json::from_value(original.clone()).unwrap();
+        let saved = serde_json::to_value(settings).unwrap();
+        for (key, value) in original.as_object().unwrap() { assert_eq!(&saved[key], value, "{key}"); }
+    }
+
+    #[test]
     fn pivot_step_settings_survive_the_config_save_round_trip() {
         let settings: PivotXRSettings = serde_json::from_value(serde_json::json!({
             "responseMode": "stepped",

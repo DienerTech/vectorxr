@@ -25,12 +25,14 @@ function onAdvancedAxesChange(enabled: boolean) {
     rotationMultiplier: props.settings.rotationMultiplier,
     deadzoneDegrees: props.settings.deadzoneDegrees,
     maxExtraDegrees: props.settings.maxExtraYawDegrees,
+    deadzoneTransitionDegrees: props.settings.deadzoneTransitionDegrees,
   }
   props.settings.yawRight = { ...props.settings.yawLeft }
   props.settings.pitchUp = {
     rotationMultiplier: props.settings.pitchRotationMultiplier,
     deadzoneDegrees: props.settings.pitchDeadzoneDegrees,
     maxExtraDegrees: props.settings.maxExtraPitchDegrees,
+    deadzoneTransitionDegrees: props.settings.pitchDeadzoneTransitionDegrees,
   }
   props.settings.pitchDown = { ...props.settings.pitchUp }
 }

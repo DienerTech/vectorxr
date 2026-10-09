@@ -322,7 +322,12 @@
         },
         "compactMetrics": {
           "type": "string",
-          "enum": ["all", "fps", "frameTime", "none"],
+          "enum": [
+            "all",
+            "fps",
+            "frameTime",
+            "none"
+          ],
           "default": "all"
         },
         "compactShowRuntime": {
@@ -486,7 +491,12 @@
                   },
                   "compactMetrics": {
                     "type": "string",
-                    "enum": ["all", "fps", "frameTime", "none"],
+                    "enum": [
+                      "all",
+                      "fps",
+                      "frameTime",
+                      "none"
+                    ],
                     "default": "all"
                   },
                   "compactShowRuntime": {
@@ -706,6 +716,12 @@
           "type": "number",
           "minimum": 0.0,
           "maximum": 180.0
+        },
+        "deadzoneTransitionDegrees": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 180,
+          "default": 0
         }
       }
     },
@@ -866,6 +882,25 @@
         },
         "pitchDownStep": {
           "$ref": "#/$defs/pivotStepTuning"
+        },
+        "deadzoneTransitionDegrees": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 180,
+          "default": 0
+        },
+        "pitchDeadzoneTransitionDegrees": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 180,
+          "default": 0
+        },
+        "applyMotionToSnapViews": {
+          "type": "boolean",
+          "default": false
+        },
+        "positionAssist": {
+          "$ref": "#/$defs/pivotPositionAssist"
         }
       }
     },
@@ -1496,6 +1531,71 @@
         },
         "quadviews": {
           "$ref": "#/$defs/quadviewsModule"
+        }
+      }
+    },
+    "pivotPositionDirection": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "rightCm": {
+          "type": "number",
+          "minimum": -100,
+          "maximum": 100,
+          "default": 0
+        },
+        "upCm": {
+          "type": "number",
+          "minimum": -100,
+          "maximum": 100,
+          "default": 0
+        },
+        "forwardCm": {
+          "type": "number",
+          "minimum": -100,
+          "maximum": 100,
+          "default": 0
+        },
+        "startAngleDegrees": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 179,
+          "default": 15
+        },
+        "fullAngleDegrees": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 180,
+          "default": 60
+        }
+      }
+    },
+    "pivotPositionAssist": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": false
+        },
+        "advancedDirections": {
+          "type": "boolean",
+          "default": false
+        },
+        "yaw": {
+          "$ref": "#/$defs/pivotPositionDirection"
+        },
+        "yawLeft": {
+          "$ref": "#/$defs/pivotPositionDirection"
+        },
+        "yawRight": {
+          "$ref": "#/$defs/pivotPositionDirection"
+        },
+        "pitchUp": {
+          "$ref": "#/$defs/pivotPositionDirection"
+        },
+        "pitchDown": {
+          "$ref": "#/$defs/pivotPositionDirection"
         }
       }
     }

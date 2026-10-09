@@ -80,12 +80,12 @@ test('compact layout packs selected rows and preserves a small FPS-only footprin
     Object.assign(settings, { compactMetrics }, Object.fromEntries(flags.map((key, i) => [key, !!(bits & 1 << i)])))
     const layout = osdCompactLayout(settings)
     assert.ok(layout.width >= 240 && layout.width <= 960)
-    assert.ok(layout.height >= 68 && layout.height <= 232)
+    assert.ok(layout.height >= 68 && layout.height <= 264)
     if (settings.compactShowTurbo && settings.compactShowPivot) {
       assert.equal(layout.pivotY, layout.turboY + 48)
       const turboOnly = osdCompactLayout({ ...settings, compactShowPivot: false })
       assert.equal(layout.width, turboOnly.width)
-      assert.equal(layout.height, turboOnly.height + 48)
+      assert.equal(layout.height, turboOnly.height + 80)
     }
     assert.equal(layout.empty, compactMetrics === 'none' && bits === 0)
     assert.ok(layout.fields.every(field => field.x + field.width <= layout.width - 28))

@@ -196,7 +196,7 @@ const defaultBindingWarnings = computed(() => [
     props.config.modules.pivotxr.releaseOriginBindings,
   ),
   ...(props.config.modules.pivotxr.behavior !== 'snapViews' && !props.config.modules.pivotxr.alwaysActive && props.config.modules.pivotxr.activationBindings.length === 0
-    ? [{ title: 'No Motion Assist activation', message: 'Motion Assist will remain off until you add a Toggle or Hold binding, or enable Always active. Snap View bindings still work.' }]
+    ? [{ title: 'No Motion Assist activation', message: 'Motion Assist will remain off until you add a Toggle or Hold binding, or enable Always active. Compatible Snap View profiles remain available.' }]
     : []),
 ])
 
@@ -208,9 +208,9 @@ const profileWarnings = computed(() => {
     .filter(({ profile }) => profile.enabled)
 
   for (const { profile, index } of enabledProfiles) {
-    if (profile.alwaysActive) {
+    if (profile.behavior === 'enhancedMotion' && profile.alwaysActive) {
       for (const applicationId of profile.applicationIds) {
-        const owner = enabledProfiles.find((candidate) => candidate.index < index && candidate.profile.alwaysActive && candidate.profile.applicationIds.includes(applicationId))
+        const owner = enabledProfiles.find((candidate) => candidate.index < index && candidate.profile.behavior === 'enhancedMotion' && candidate.profile.alwaysActive && candidate.profile.applicationIds.includes(applicationId))
         if (owner) {
           const appName = applicationNameById.get(applicationId) ?? applicationId
           warnings.set(index, [...(warnings.get(index) ?? []), `Both this profile and "${owner.profile.name}" are Always active for ${appName}. The higher-priority profile engages first; use activation controls when you need predictable switching.`])
@@ -228,7 +228,7 @@ const profileWarnings = computed(() => {
     }
 
     if (profile.behavior !== 'snapViews' && !profile.alwaysActive && profile.activationBindings.length === 0) {
-      warnings.set(index, [...(warnings.get(index) ?? []), 'Motion Assist has no activation bindings and will remain off. Add a Toggle or Hold binding, or enable Always active. Snap View bindings still work.'])
+      warnings.set(index, [...(warnings.get(index) ?? []), 'Motion Assist has no activation bindings and will remain off. Add a Toggle or Hold binding, or enable Always active. Compatible Snap View profiles remain available.'])
     }
 
     for (const activationBinding of profile.behavior === 'snapViews' ? [] : profile.activationBindings) {
@@ -236,6 +236,7 @@ const profileWarnings = computed(() => {
       for (const applicationId of profile.applicationIds) {
         const owner = enabledProfiles.find((candidate) => (
           candidate.index < index
+          && candidate.profile.behavior === 'enhancedMotion'
           && candidate.profile.applicationIds.includes(applicationId)
           && candidate.profile.activationBindings.some((candidateBinding) => (
             bindingsMatchRuntimeActivation(binding, candidateBinding.binding)

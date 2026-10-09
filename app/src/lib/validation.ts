@@ -145,6 +145,18 @@ function validatePivotStepTuning(prefix: string, tuning: PivotXRSettings['yawSte
 function validatePivotXRSettings(prefix: string, settings: PivotXRSettings): string[] {
   const errors: string[] = []
 
+  if (typeof settings.applyMotionToSnapViews !== 'boolean') errors.push(`${prefix}applyMotionToSnapViews must be a boolean`)
+  for (const [name,value] of [['deadzoneTransitionDegrees',settings.deadzoneTransitionDegrees], ['pitchDeadzoneTransitionDegrees',settings.pitchDeadzoneTransitionDegrees], ...(['yawLeft','yawRight','pitchUp','pitchDown'] as const).map(key => [`${key}.deadzoneTransitionDegrees`,settings[key].deadzoneTransitionDegrees])] as Array<[string,number]>) {
+    if (!Number.isFinite(value) || value<0 || value>180) errors.push(`${prefix}${name} must be between 0 and 180`)
+  }
+  for (const key of ['yaw','yawLeft','yawRight','pitchUp','pitchDown'] as const) {
+    const d=settings.positionAssist[key]
+    for (const field of ['rightCm','upCm','forwardCm'] as const) {
+      if (!Number.isFinite(d[field]) || Math.abs(d[field])>100) errors.push(`${prefix}positionAssist.${key}.${field} must be between -100 and 100 cm`)
+    }
+    if (!Number.isFinite(d.startAngleDegrees) || !Number.isFinite(d.fullAngleDegrees) || d.startAngleDegrees<0 || d.fullAngleDegrees>180 || d.fullAngleDegrees<=d.startAngleDegrees) errors.push(`${prefix}positionAssist.${key} requires 0 <= start angle < full-offset angle <= 180`)
+  }
+
   if (Number.isNaN(settings.rotationMultiplier) || settings.rotationMultiplier < 1.0 || settings.rotationMultiplier > 3.0) {
     errors.push(`${prefix}rotationMultiplier must be between 1.0 and 3.0`)
   }

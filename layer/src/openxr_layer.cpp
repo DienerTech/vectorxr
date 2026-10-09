@@ -1204,7 +1204,8 @@ XrPosef ReexpressPoseDelta(const XrPosef& pose_delta_in_source,
 // All generated Pivot movement flows through one pose-offset composition
 // point. Motion Assist/manual nudges and Quick Views populate mutually
 // exclusive components without creating parallel pose
-// rewrite paths. A Quick View intentionally replaces Motion Assist, while the
+// rewrite paths. Exclusive views replace motion; opted-in views include its
+// live contribution in the selected pose before routing. The
 // Shoulder Assist component is applied after the selected high-level behavior.
 struct PivotPoseOffsetComponents {
     XrPosef motion_assist{IdentityPose()};
@@ -1252,7 +1253,8 @@ double ComputePivotExtraAngleRadians(double current_angle_radians,
                                      double smoothing,
                                      double delta_seconds,
                                      double& smoothed_extra_angle_radians,
-                                     bool subtract_deadzone_from_gain = true) {
+                                     bool subtract_deadzone_from_gain = true,
+                                     double transition_degrees = 0.0) {
     if (rotation_multiplier <= 1.0) {
         smoothed_extra_angle_radians = 0.0;
         return 0.0;
@@ -1263,17 +1265,15 @@ double ComputePivotExtraAngleRadians(double current_angle_radians,
     const double abs_angle = std::abs(current_angle_radians);
 
     double target_extra_angle = 0.0;
-    if (abs_angle <= deadzone_radians * 0.5) {
+    if (transition_degrees <= 0 && abs_angle <= deadzone_radians * 0.5) {
         smoothed_extra_angle_radians = 0.0;
         return 0.0;
     }
 
     if (abs_angle > deadzone_radians) {
         if (subtract_deadzone_from_gain) {
-            const double direction = current_angle_radians >= 0.0 ? 1.0 : -1.0;
-            const double pivoted_angle = direction * deadzone_radians +
-                                         (current_angle_radians - direction * deadzone_radians) * rotation_multiplier;
-            target_extra_angle = pivoted_angle - current_angle_radians;
+            target_extra_angle = ComputePivotContinuousExtra(current_angle_radians, rotation_multiplier,
+                deadzone_degrees, transition_degrees, max_extra_degrees);
         } else {
             target_extra_angle = current_angle_radians * (rotation_multiplier - 1.0);
         }
@@ -1415,7 +1415,8 @@ bool SamePivotActivationBindings(const std::vector<PivotActivationBinding>& lhs,
 bool SamePivotAxisTuning(const PivotAxisTuning& lhs, const PivotAxisTuning& rhs) {
     return NearlyEqual(lhs.rotation_multiplier, rhs.rotation_multiplier) &&
            NearlyEqual(lhs.deadzone_degrees, rhs.deadzone_degrees) &&
-           NearlyEqual(lhs.max_extra_degrees, rhs.max_extra_degrees);
+           NearlyEqual(lhs.max_extra_degrees, rhs.max_extra_degrees) &&
+           NearlyEqual(lhs.deadzone_transition_degrees, rhs.deadzone_transition_degrees);
 }
 
 bool SamePivotStepTuning(const PivotStepTuning& lhs, const PivotStepTuning& rhs) {
@@ -1456,10 +1457,23 @@ bool SamePivotViewControls(const PivotViewControls& lhs, const PivotViewControls
     }
     return true;
 }
+bool SamePositionDirection(const PivotPositionDirection& a, const PivotPositionDirection& b) {
+    return NearlyEqual(a.right_cm,b.right_cm) && NearlyEqual(a.up_cm,b.up_cm) && NearlyEqual(a.forward_cm,b.forward_cm) &&
+        NearlyEqual(a.start_angle_degrees,b.start_angle_degrees) && NearlyEqual(a.full_angle_degrees,b.full_angle_degrees);
+}
+bool SamePositionAssist(const PivotPositionAssist& a, const PivotPositionAssist& b) {
+    return a.enabled==b.enabled && a.advanced_directions==b.advanced_directions && SamePositionDirection(a.yaw,b.yaw) &&
+        SamePositionDirection(a.yaw_left,b.yaw_left) && SamePositionDirection(a.yaw_right,b.yaw_right) &&
+        SamePositionDirection(a.pitch_up,b.pitch_up) && SamePositionDirection(a.pitch_down,b.pitch_down);
+}
 bool SamePivotResolvedProfile(const PivotXrResolvedProfile& lhs, const PivotXrResolvedProfile& rhs) {
 
-    return lhs.name == rhs.name &&
+    return lhs.id == rhs.id && lhs.name == rhs.name &&
            lhs.behavior == rhs.behavior &&
+           lhs.apply_motion_to_snap_views == rhs.apply_motion_to_snap_views &&
+           SamePositionAssist(lhs.position_assist, rhs.position_assist) &&
+           NearlyEqual(lhs.yaw_deadzone_transition_degrees,rhs.yaw_deadzone_transition_degrees) &&
+           NearlyEqual(lhs.pitch_deadzone_transition_degrees,rhs.pitch_deadzone_transition_degrees) &&
            lhs.nudge_set_id == rhs.nudge_set_id &&
            lhs.allow_inactive_nudges == rhs.allow_inactive_nudges &&
            lhs.always_active == rhs.always_active &&
@@ -1583,7 +1597,12 @@ bool SamePivotActivationSet(const PivotXrResolvedSettings& lhs, const PivotXrRes
         return false;
     }
     for (size_t i = 0; i < lhs.profiles.size(); ++i) {
-        if (lhs.profiles[i].always_active != rhs.profiles[i].always_active ||
+        if (lhs.profiles[i].id != rhs.profiles[i].id ||
+            lhs.profiles[i].behavior != rhs.profiles[i].behavior ||
+            lhs.profiles[i].apply_motion_to_snap_views != rhs.profiles[i].apply_motion_to_snap_views ||
+            lhs.profiles[i].nudge_set_id != rhs.profiles[i].nudge_set_id ||
+            lhs.profiles[i].allow_inactive_nudges != rhs.profiles[i].allow_inactive_nudges ||
+            lhs.profiles[i].always_active != rhs.profiles[i].always_active ||
             !SamePivotActivationBindings(lhs.profiles[i].activation_bindings, rhs.profiles[i].activation_bindings) ||
             !SameInputBindings(lhs.profiles[i].set_origin_bindings, rhs.profiles[i].set_origin_bindings) ||
             !SameInputBindings(lhs.profiles[i].release_origin_bindings, rhs.profiles[i].release_origin_bindings) ||
@@ -7002,6 +7021,7 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
         cached_quadviews_frames_.Clear();
         pivotxr_smoothed_extra_yaw_radians_ = 0.0;
         pivotxr_smoothed_extra_pitch_radians_ = 0.0;
+        pivotxr_position_offset_ = {};
         pivotxr_yaw_step_ = 0;
         pivotxr_pitch_step_ = 0;
         pivotxr_yaw_step_glide_ = {};
@@ -7053,6 +7073,7 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
         cached_pivot_pose_deltas_.clear();
         pivotxr_smoothed_extra_yaw_radians_ = 0.0;
         pivotxr_smoothed_extra_pitch_radians_ = 0.0;
+        pivotxr_position_offset_ = {};
         pivotxr_yaw_step_ = 0;
         pivotxr_pitch_step_ = 0;
         pivotxr_yaw_step_glide_ = {};
@@ -8344,6 +8365,7 @@ XrResult OpenXrLayer::LocateViews(XrSession session,
         if (!pivotxr_origin_) pivotxr_translation_anchor_.reset();
         pivotxr_smoothed_extra_yaw_radians_ = 0.0;
         pivotxr_smoothed_extra_pitch_radians_ = 0.0;
+        pivotxr_position_offset_ = {};
         pivotxr_yaw_step_ = 0;
         pivotxr_pitch_step_ = 0;
         pivotxr_yaw_step_glide_ = {};
@@ -8860,22 +8882,40 @@ OsdSnapshot OpenXrLayer::BuildOsdSnapshot() const {
     if (turbo_enabled) add("Turbo");
     if (quadviews_session_active_.value_or(false)) add("Quadviews");
     if (snapshot.modules.empty()) snapshot.modules="Off";
-    snapshot.pivot="Disabled";
-    snapshot.compact_pivot="Disabled";
+    snapshot.pivot="Motion: Disabled"; snapshot.pivot_secondary="Snap: Off";
+    snapshot.compact_pivot=snapshot.pivot; snapshot.compact_pivot_secondary=snapshot.pivot_secondary;
     if (resolved_settings_.core.enabled && resolved_settings_.pivotxr.enabled) {
-        snapshot.pivot="Pivot ready";
-        const auto& profiles=resolved_settings_.pivotxr.profiles;
-        const bool quick=pivotxr_quick_view_active_ || pivotxr_quick_view_transitioning_;
-        const auto index=quick?pivotxr_quick_view_profile_index_:pivotxr_active_profile_index_;
-        if ((pivotxr_engaged_ || quick) && index<profiles.size()) snapshot.pivot=profiles[index].name+" Applied";
+        const bool quick=pivotxr_quick_view_active_ || pivotxr_quick_view_transitioning_ || pivotxr_quick_view_transition_.active;
+        const auto& motion=ActivePivotProfile();
+        const bool applied_motion=motion.behavior==PivotProfileBehavior::EnhancedMotion &&
+            (!quick || pivotxr_snap_stacked_) && pivotxr_activation_gain_>kPivotActivationGainEpsilon;
         const bool nudged=!PivotViewOffsetNearlyZero(pivotxr_manual_view_transition_.current) ||
-            !PivotViewOffsetNearlyZero(pivotxr_manual_view_transition_.target) ||
-            !PivotViewOffsetNearlyZero(pivotxr_profile_view_transition_.current) ||
-            !PivotViewOffsetNearlyZero(pivotxr_profile_view_transition_.target);
-        if (nudged) snapshot.pivot+=(snapshot.pivot=="Pivot ready"?" / ":", ")+std::string("Nudges Applied");
-        if (quick) snapshot.pivot+=", Quick View Applied";
-        snapshot.compact_pivot=quick?"Quick view":pivotxr_engaged_?"Applied":"Ready";
-        if (nudged) snapshot.compact_pivot=(!quick && !pivotxr_engaged_)?"Nudged":snapshot.compact_pivot+" + Nudge";
+            !PivotViewOffsetNearlyZero(pivotxr_profile_view_transition_.current);
+        const bool position=applied_motion && (!NearlyZero(pivotxr_position_offset_.right_meters) ||
+            !NearlyZero(pivotxr_position_offset_.up_meters) || !NearlyZero(pivotxr_position_offset_.forward_meters));
+        const std::string state=applied_motion?(pivotxr_engaged_?"Active":"Releasing"):
+            (quick && !pivotxr_snap_stacked_ && pivotxr_quick_view_return_engaged_)?"Suspended":"Off";
+        snapshot.pivot="Motion: "+state;
+        if (applied_motion) snapshot.pivot+=std::string(" / ")+ToString(motion.response_mode);
+        if (position) snapshot.pivot+=" + Position";
+        snapshot.compact_pivot="Motion: "+std::string(applied_motion?(motion.response_mode==PivotResponseMode::Continuous?"Cont ":"Step "):"")+state+(position?" + Position":"");
+        if (applied_motion) snapshot.pivot+=" / "+motion.name;
+        snapshot.pivot_secondary="Snap: Off";
+        const auto& profiles=resolved_settings_.pivotxr.profiles;
+        if (quick && pivotxr_quick_view_profile_index_<profiles.size()) {
+            const auto& owner=profiles[pivotxr_quick_view_profile_index_];
+            snapshot.pivot_secondary=pivotxr_quick_view_active_?
+                (pivotxr_quick_view_transition_.active || pivotxr_quick_view_retarget_pending_?"Snap: Entering":"Snap: Active"):"Snap: Returning";
+            if (pivotxr_snap_stacked_ && applied_motion) snapshot.pivot_secondary+=" / Stacked";
+            if (nudged) snapshot.pivot_secondary+=" + Nudge";
+            snapshot.compact_pivot_secondary=snapshot.pivot_secondary;
+            if (pivotxr_quick_view_index_<owner.view_controls.quick_views.size())
+                snapshot.pivot_secondary+=" / "+owner.view_controls.quick_views[pivotxr_quick_view_index_].name;
+            snapshot.pivot_secondary+=" / "+owner.name;
+        } else {
+            if (nudged) snapshot.pivot_secondary+=" / Nudge";
+            snapshot.compact_pivot_secondary=snapshot.pivot_secondary;
+        }
     }
     const auto& e=resolved_settings_.turbo.experimental;
     if (e.enabled!=turbo_experiment_.enabled || (e.enabled &&
@@ -9319,6 +9359,7 @@ void OpenXrLayer::ResetSessionState() {
     pivotxr_yaw_step_glide_ = {};
     pivotxr_pitch_step_glide_ = {};
     pivotxr_activation_gain_ = 0.0;
+    pivotxr_position_offset_ = {};
     pivotxr_last_smoothing_wall_time_.reset();
     ResetDepthToggleState();
     ResetQuadViewsDiagnosticVisualizationState();
@@ -11080,7 +11121,7 @@ XrResult OpenXrLayer::ApplyPivotToLocatedSpace(XrSpace space,
             pivotxr_quick_view_return_profile_index_ < resolved_settings_.pivotxr.profiles.size() &&
             resolved_settings_.pivotxr.profiles[pivotxr_quick_view_return_profile_index_].behavior ==
                 PivotProfileBehavior::EnhancedMotion;
-        const bool suspend_activation_gain = returns_to_engaged_motion &&
+        const bool suspend_activation_gain = !pivotxr_snap_stacked_ && returns_to_engaged_motion &&
             (pivotxr_quick_view_active_ || pivotxr_quick_view_transitioning_ ||
              pivotxr_quick_view_transition_.active);
         pivotxr_activation_gain_ = AdvancePivotActivationGain(
@@ -11097,6 +11138,7 @@ XrResult OpenXrLayer::ApplyPivotToLocatedSpace(XrSpace space,
         pivotxr_activation_gain_ = 0.0;
         pivotxr_smoothed_extra_yaw_radians_ = 0.0;
         pivotxr_smoothed_extra_pitch_radians_ = 0.0;
+        pivotxr_position_offset_ = {};
         pivotxr_yaw_step_ = 0;
         pivotxr_pitch_step_ = 0;
         pivotxr_yaw_step_glide_ = {};
@@ -11132,6 +11174,7 @@ XrResult OpenXrLayer::ApplyPivotToLocatedSpace(XrSpace space,
             }
             if (PivotAnchorAffectedBy(change.type)) {
                 pivotxr_translation_anchor_.reset();
+                if (pivotxr_snap_stacked_) pivotxr_snap_reference_pending_ = true;
                 logger_.Info("PivotXR: re-anchoring the seated position after a runtime recenter.");
             }
             return true;
@@ -11156,6 +11199,41 @@ XrResult OpenXrLayer::ApplyPivotToLocatedSpace(XrSpace space,
         current_pitch_radians = current_pitch_radians - pivotxr_origin_->pitch_radians;
     }
 
+    if (update_smoothing && pivotxr_snap_reference_pending_) {
+        if (pivotxr_snap_rebase_motion_) {
+            const auto correction=pivotxr_snap_rebase_offset_;
+            pivotxr_quick_view_transition_.current.yaw_radians+=correction.yaw_radians;
+            pivotxr_quick_view_transition_.current.pitch_radians+=correction.pitch_radians;
+            pivotxr_quick_view_transition_.current.right_meters+=correction.right_meters;
+            pivotxr_quick_view_transition_.current.up_meters+=correction.up_meters;
+            pivotxr_quick_view_transition_.current.forward_meters+=correction.forward_meters;
+            if (!pivotxr_quick_view_retarget_pending_) {
+                auto target=pivotxr_quick_view_transition_.target;
+                target.yaw_radians+=correction.yaw_radians;
+                target.pitch_radians+=correction.pitch_radians;
+                target.right_meters+=correction.right_meters;
+                target.up_meters+=correction.up_meters;
+                target.forward_meters+=correction.forward_meters;
+                RetargetPivotViewTransition(target,
+                    std::max(0.0,pivotxr_quick_view_transition_.duration_seconds-pivotxr_quick_view_transition_.elapsed_seconds),
+                    pivotxr_quick_view_transition_);
+            }
+        }
+        pivotxr_snap_reference_yaw_=current_yaw_radians;
+        pivotxr_snap_reference_pitch_=current_pitch_radians;
+        pivotxr_snap_reference_valid_=true;
+        pivotxr_snap_reference_pending_=false;
+        pivotxr_snap_rebase_motion_=false;
+        pivotxr_smoothed_extra_yaw_radians_=pivotxr_smoothed_extra_pitch_radians_=0;
+        pivotxr_yaw_step_=pivotxr_pitch_step_=0;
+        pivotxr_yaw_step_glide_={}; pivotxr_pitch_step_glide_={};
+        pivotxr_position_offset_={};
+    }
+    double motion_yaw=current_yaw_radians, motion_pitch=current_pitch_radians;
+    if (pivotxr_snap_stacked_ && pivotxr_snap_reference_valid_) {
+        motion_yaw=WrapRadians(motion_yaw-pivotxr_snap_reference_yaw_);
+        motion_pitch-=pivotxr_snap_reference_pitch_;
+    }
     if (update_smoothing) {
         UpdatePivotViewTransition(delta_seconds, pivotxr_manual_view_transition_);
         UpdatePivotViewTransition(delta_seconds, pivotxr_profile_view_transition_);
@@ -11179,8 +11257,18 @@ XrResult OpenXrLayer::ApplyPivotToLocatedSpace(XrSpace space,
         if (!pivotxr_quick_view_active_ && pivotxr_quick_view_transitioning_ &&
             !pivotxr_quick_view_transition_.active) {
             pivotxr_quick_view_transitioning_ = false;
+            if (pivotxr_snap_stacked_) {
+                // The correction has reached identity; resume normal-origin
+                // motion through the existing smoothing/glide state.
+                pivotxr_snap_stacked_=false;
+                pivotxr_snap_reference_valid_=false;
+                motion_yaw=current_yaw_radians; motion_pitch=current_pitch_radians;
+            }
         }
     }
+    const double previous_motion_yaw=pivotxr_smoothed_extra_yaw_radians_;
+    const double previous_motion_pitch=pivotxr_smoothed_extra_pitch_radians_;
+    const auto previous_position=pivotxr_position_offset_;
     const bool quick_view_override = pivotxr_quick_view_active_ ||
                                      pivotxr_quick_view_transitioning_ ||
                                      pivotxr_quick_view_transition_.active;
@@ -11188,12 +11276,12 @@ XrResult OpenXrLayer::ApplyPivotToLocatedSpace(XrSpace space,
     // Track the steady-state pivot amount only while actively engaged. During
     // the release ramp it is frozen and the envelope eases the applied angle to
     // zero, avoiding any snap on toggle-off.
-    if (update_smoothing && pivotxr_engaged_ && !quick_view_override &&
+    if (update_smoothing && pivotxr_engaged_ && (!quick_view_override || pivotxr_snap_stacked_) &&
         settings.behavior != PivotProfileBehavior::SnapViews) {
         const int previous_yaw_step = pivotxr_yaw_step_;
         const int previous_pitch_step = pivotxr_pitch_step_;
         if (settings.response_mode == PivotResponseMode::Stepped) {
-            UpdatePivotSteppedExtraAngleRadians(current_yaw_radians,
+            UpdatePivotSteppedExtraAngleRadians(motion_yaw,
                                                 settings.yaw_step_positive,
                                                 settings.yaw_step_negative,
                                                 settings.step_glide_mode,
@@ -11202,7 +11290,7 @@ XrResult OpenXrLayer::ApplyPivotToLocatedSpace(XrSpace space,
                                                 pivotxr_yaw_step_,
                                                 pivotxr_smoothed_extra_yaw_radians_,
                                                 pivotxr_yaw_step_glide_);
-            UpdatePivotSteppedExtraAngleRadians(current_pitch_radians,
+            UpdatePivotSteppedExtraAngleRadians(motion_pitch,
                                                 settings.pitch_step_positive,
                                                 settings.pitch_step_negative,
                                                 settings.step_glide_mode,
@@ -11213,23 +11301,23 @@ XrResult OpenXrLayer::ApplyPivotToLocatedSpace(XrSpace space,
                                                 pivotxr_pitch_step_glide_);
         } else {
             const PivotAxisTuning& yaw_tuning =
-                current_yaw_radians >= 0.0 ? settings.yaw_positive : settings.yaw_negative;
+                motion_yaw >= 0.0 ? settings.yaw_positive : settings.yaw_negative;
             const PivotAxisTuning& pitch_tuning =
-                current_pitch_radians >= 0.0 ? settings.pitch_positive : settings.pitch_negative;
-            ComputePivotExtraAngleRadians(current_yaw_radians,
+                motion_pitch >= 0.0 ? settings.pitch_positive : settings.pitch_negative;
+            ComputePivotExtraAngleRadians(motion_yaw,
                                           yaw_tuning.rotation_multiplier,
                                           yaw_tuning.deadzone_degrees,
                                           yaw_tuning.max_extra_degrees,
                                           settings.smoothing,
                                           delta_seconds,
-                                          pivotxr_smoothed_extra_yaw_radians_);
-            ComputePivotExtraAngleRadians(current_pitch_radians,
+                                          pivotxr_smoothed_extra_yaw_radians_, true, yaw_tuning.deadzone_transition_degrees);
+            ComputePivotExtraAngleRadians(motion_pitch,
                                           pitch_tuning.rotation_multiplier,
                                           pitch_tuning.deadzone_degrees,
                                           pitch_tuning.max_extra_degrees,
                                           settings.smoothing,
                                           delta_seconds,
-                                          pivotxr_smoothed_extra_pitch_radians_);
+                                          pivotxr_smoothed_extra_pitch_radians_, true, pitch_tuning.deadzone_transition_degrees);
             pivotxr_yaw_step_ = 0;
             pivotxr_pitch_step_ = 0;
             pivotxr_yaw_step_glide_ = {pivotxr_smoothed_extra_yaw_radians_,
@@ -11249,6 +11337,28 @@ XrResult OpenXrLayer::ApplyPivotToLocatedSpace(XrSpace space,
         }
     }
 
+    if (update_smoothing && pivotxr_engaged_ && (!quick_view_override || pivotxr_snap_stacked_)) {
+        const auto target=ComputePivotPositionAssist(motion_yaw,motion_pitch,settings.position_assist);
+        const double blend=1-std::exp(-std::max(0.0,delta_seconds)/0.12);
+        pivotxr_position_offset_.right_meters+=(target.right_meters-pivotxr_position_offset_.right_meters)*blend;
+        pivotxr_position_offset_.up_meters+=(target.up_meters-pivotxr_position_offset_.up_meters)*blend;
+        pivotxr_position_offset_.forward_meters+=(target.forward_meters-pivotxr_position_offset_.forward_meters)*blend;
+    }
+    if (update_smoothing && pivotxr_snap_return_pending_) {
+        pivotxr_snap_return_pending_=false;
+        if (quick_view_override) {
+            const double gain=SmoothStep(pivotxr_activation_gain_);
+            auto& transition=pivotxr_quick_view_transition_;
+            transition.current.yaw_radians+=(previous_motion_yaw-pivotxr_smoothed_extra_yaw_radians_)*gain;
+            transition.current.pitch_radians+=(previous_motion_pitch-pivotxr_smoothed_extra_pitch_radians_)*gain;
+            transition.current.right_meters+=(previous_position.right_meters-pivotxr_position_offset_.right_meters)*gain;
+            transition.current.up_meters+=(previous_position.up_meters-pivotxr_position_offset_.up_meters)*gain;
+            transition.current.forward_meters+=(previous_position.forward_meters-pivotxr_position_offset_.forward_meters)*gain;
+            PivotViewOffset target;
+            target.yaw_radians=transition.current.yaw_radians+WrapRadians(-transition.current.yaw_radians);
+            RetargetPivotViewTransition(target,std::max(0.0,transition.duration_seconds-transition.elapsed_seconds),transition);
+        }
+    }
     const double eased_gain = SmoothStep(pivotxr_activation_gain_);
     PivotViewOffset applied_view_offset;
     if (quick_view_override) {
@@ -11265,6 +11375,15 @@ XrResult OpenXrLayer::ApplyPivotToLocatedSpace(XrSpace space,
             applied_view_offset.yaw_radians += pivotxr_smoothed_extra_yaw_radians_ * eased_gain;
             applied_view_offset.pitch_radians += pivotxr_smoothed_extra_pitch_radians_ * eased_gain;
         }
+    }
+    if ((!quick_view_override || pivotxr_snap_stacked_) && settings.behavior==PivotProfileBehavior::EnhancedMotion) {
+        if (quick_view_override) {
+            applied_view_offset.yaw_radians+=pivotxr_smoothed_extra_yaw_radians_*eased_gain;
+            applied_view_offset.pitch_radians+=pivotxr_smoothed_extra_pitch_radians_*eased_gain;
+        }
+        applied_view_offset.right_meters+=pivotxr_position_offset_.right_meters*eased_gain;
+        applied_view_offset.up_meters+=pivotxr_position_offset_.up_meters*eased_gain;
+        applied_view_offset.forward_meters+=pivotxr_position_offset_.forward_meters*eased_gain;
     }
     constexpr double kPi = 3.14159265358979323846;
     const double extra_yaw_radians =
@@ -11387,6 +11506,10 @@ void OpenXrLayer::LogResolvedSettings(const ResolvedRuntimeConfig& settings) {
                                                 profile.view_controls.nudges.yaw_right_bindings.size() + profile.view_controls.nudges.pitch_up_bindings.size() +
                                                 profile.view_controls.nudges.pitch_down_bindings.size() + profile.view_controls.nudges.center_bindings.size())
                << ", quickViewCount=" << profile.view_controls.quick_views.size()
+               << ", motionInSnaps=" << profile.apply_motion_to_snap_views
+               << ", positionAssist=" << profile.position_assist.enabled
+               << ", deadzoneTransition=" << profile.yaw_deadzone_transition_degrees
+               << ", pitchDeadzoneTransition=" << profile.pitch_deadzone_transition_degrees
                << ", smoothing=" << profile.smoothing
                << ", activationRamp=" << profile.activation_ramp_seconds
                << ", yawMultiplier=" << profile.yaw_rotation_multiplier
@@ -11449,6 +11572,7 @@ void OpenXrLayer::ResetPivotActivationState() {
     pivotxr_yaw_step_glide_ = {};
     pivotxr_pitch_step_glide_ = {};
     pivotxr_activation_gain_ = 0.0;
+    pivotxr_position_offset_ = {};
     pivotxr_last_smoothing_wall_time_.reset();
     pivotxr_engaged_ = false;
     pivotxr_active_profile_index_ = 0;
@@ -11456,6 +11580,7 @@ void OpenXrLayer::ResetPivotActivationState() {
     pivotxr_manual_view_transition_ = {};
     pivotxr_profile_view_transition_ = {};
     pivotxr_quick_view_transition_ = {};
+    ClearPivotSnapState();
     pivotxr_quick_view_retarget_pending_ = false;
     pivotxr_quick_view_active_ = false;
     pivotxr_quick_view_transitioning_ = false;
@@ -11484,6 +11609,7 @@ void OpenXrLayer::ResetPivotInputStateForConfigChange() {
     pivotxr_manual_view_transition_ = {};
     pivotxr_profile_view_transition_ = {};
     pivotxr_quick_view_transition_ = {};
+    ClearPivotSnapState();
     pivotxr_quick_view_retarget_pending_ = false;
     pivotxr_quick_view_active_ = false;
     pivotxr_quick_view_transitioning_ = false;
@@ -12510,6 +12636,127 @@ bool OpenXrLayer::IsDepthXrActive() {
 #endif
 }
 
+PivotViewOffset OpenXrLayer::CurrentPivotMotionOffset() const {
+    const double gain=SmoothStep(pivotxr_activation_gain_);
+    return {pivotxr_smoothed_extra_yaw_radians_*gain,pivotxr_smoothed_extra_pitch_radians_*gain,
+        pivotxr_position_offset_.right_meters*gain,pivotxr_position_offset_.up_meters*gain,pivotxr_position_offset_.forward_meters*gain};
+}
+void OpenXrLayer::ClearPivotSnapState() {
+    pivotxr_snap_stacked_=false; pivotxr_snap_reference_pending_=false; pivotxr_snap_return_pending_=false;
+    pivotxr_snap_reference_valid_=false; pivotxr_snap_rebase_motion_=false;
+    pivotxr_snap_rebase_offset_={};
+    pivotxr_quick_view_return_engaged_=false;
+}
+void OpenXrLayer::EngagePivotMotionProfile(size_t index) {
+    const auto& profile=resolved_settings_.pivotxr.profiles[index];
+    const bool snap=pivotxr_quick_view_active_ || pivotxr_quick_view_transitioning_;
+    if (snap && profile.apply_motion_to_snap_views) {
+        if (!pivotxr_snap_stacked_ || !pivotxr_engaged_ || pivotxr_active_profile_index_!=index) {
+            pivotxr_snap_reference_pending_=true;
+            pivotxr_snap_rebase_motion_=pivotxr_snap_stacked_;
+            pivotxr_snap_rebase_offset_=CurrentPivotMotionOffset();
+        }
+        pivotxr_snap_stacked_=true;
+        pivotxr_quick_view_return_engaged_=false;
+    } else if (snap) {
+        // Convert an exclusive correction to additive form before fading it
+        // out, so applying the new profile cannot count old motion twice.
+        if (!pivotxr_snap_stacked_) {
+            const double gain=SmoothStep(pivotxr_activation_gain_);
+            pivotxr_quick_view_transition_.current.yaw_radians-=pivotxr_smoothed_extra_yaw_radians_*gain;
+            pivotxr_quick_view_transition_.current.pitch_radians-=pivotxr_smoothed_extra_pitch_radians_*gain;
+        }
+        pivotxr_snap_stacked_=true;
+        pivotxr_quick_view_active_=false;
+        pivotxr_quick_view_retarget_pending_=false;
+        pivotxr_snap_reference_pending_=false;
+        pivotxr_snap_reference_valid_=false;
+        pivotxr_snap_return_pending_=true;
+        const auto& snap_profile=resolved_settings_.pivotxr.profiles[pivotxr_quick_view_profile_index_];
+        const double duration=snap_profile.view_controls.quick_views[pivotxr_quick_view_index_].transition_seconds;
+        RetargetPivotViewTransition({},duration,pivotxr_quick_view_transition_);
+        pivotxr_quick_view_transitioning_=pivotxr_quick_view_transition_.active;
+        for (auto& state:pivotxr_profile_input_states_) for (auto& view:state.quick_views) view.toggle_latched=false;
+        pivotxr_quick_view_return_engaged_=false;
+    }
+    pivotxr_active_profile_index_=index; pivotxr_engaged_=true;
+}
+void OpenXrLayer::ActivatePivotQuickView(size_t profile_index,size_t view_index) {
+    pivotxr_snap_return_pending_=false;
+    const bool existing=pivotxr_quick_view_active_ || pivotxr_quick_view_transitioning_;
+    const bool was_stacked=pivotxr_snap_stacked_;
+    if (!existing) {
+        pivotxr_quick_view_return_profile_index_=pivotxr_active_profile_index_;
+        pivotxr_quick_view_return_engaged_=pivotxr_engaged_;
+        pivotxr_quick_view_transition_={};
+        if (ActivePivotProfile().behavior==PivotProfileBehavior::EnhancedMotion) {
+            const double gain=SmoothStep(pivotxr_activation_gain_);
+            pivotxr_quick_view_transition_.current={pivotxr_smoothed_extra_yaw_radians_*gain,
+                pivotxr_smoothed_extra_pitch_radians_*gain,pivotxr_position_offset_.right_meters*gain,
+                pivotxr_position_offset_.up_meters*gain,pivotxr_position_offset_.forward_meters*gain};
+        }
+        pivotxr_quick_view_transition_.target=pivotxr_quick_view_transition_.current;
+    }
+    const bool stack=ActivePivotProfile().behavior==PivotProfileBehavior::EnhancedMotion &&
+        ActivePivotProfile().apply_motion_to_snap_views && (pivotxr_engaged_ || was_stacked);
+    if (stack) {
+        pivotxr_snap_stacked_=true;
+        pivotxr_snap_reference_pending_=true;
+        pivotxr_snap_rebase_motion_=existing && was_stacked;
+        pivotxr_snap_rebase_offset_=CurrentPivotMotionOffset();
+        pivotxr_quick_view_return_engaged_=false;
+    } else {
+        if (pivotxr_active_profile_index_!=profile_index) {
+            const auto& current=ActivePivotProfile();
+            if (current.nudge_set_id.empty() || current.nudge_set_id!=resolved_settings_.pivotxr.profiles[profile_index].nudge_set_id)
+                pivotxr_profile_view_transition_={};
+            pivotxr_engaged_=false;
+            pivotxr_active_profile_index_=profile_index;
+        }
+        pivotxr_snap_stacked_=false;
+        pivotxr_snap_reference_valid_=false;
+    }
+    const auto& view=resolved_settings_.pivotxr.profiles[profile_index].view_controls.quick_views[view_index];
+    const size_t previous_owner=existing?pivotxr_quick_view_profile_index_:pivotxr_quick_view_return_profile_index_;
+    if (previous_owner<resolved_settings_.pivotxr.profiles.size() &&
+        resolved_settings_.pivotxr.profiles[previous_owner].nudge_set_id!=resolved_settings_.pivotxr.profiles[profile_index].nudge_set_id)
+        RetargetPivotViewTransition({},view.transition_seconds,pivotxr_profile_view_transition_);
+    pivotxr_quick_view_pending_pose_={DegreesToRadians(-std::clamp(view.yaw_degrees,-180.0,180.0)),
+        DegreesToRadians(std::clamp(view.pitch_degrees,-85.0,85.0)),view.position_right_cm/100,
+        view.position_up_cm/100,view.position_forward_cm/100};
+    pivotxr_quick_view_pending_duration_seconds_=view.transition_seconds;
+    pivotxr_quick_view_retarget_pending_=true;
+    pivotxr_quick_view_active_=true; pivotxr_quick_view_transitioning_=true;
+    pivotxr_quick_view_profile_index_=profile_index; pivotxr_quick_view_index_=view_index;
+}
+void OpenXrLayer::ReleasePivotQuickView(double duration) {
+    pivotxr_quick_view_retarget_pending_=false;
+    pivotxr_snap_return_pending_=pivotxr_snap_stacked_;
+    PivotViewOffset target;
+    if (!pivotxr_snap_stacked_) {
+        if (pivotxr_quick_view_return_profile_index_<resolved_settings_.pivotxr.profiles.size()) {
+            const auto& back=resolved_settings_.pivotxr.profiles[pivotxr_quick_view_return_profile_index_];
+            if (back.behavior==PivotProfileBehavior::EnhancedMotion && pivotxr_quick_view_return_engaged_) {
+                const double gain=SmoothStep(pivotxr_activation_gain_);
+                target={pivotxr_smoothed_extra_yaw_radians_*gain,pivotxr_smoothed_extra_pitch_radians_*gain,
+                    pivotxr_position_offset_.right_meters*gain,pivotxr_position_offset_.up_meters*gain,pivotxr_position_offset_.forward_meters*gain};
+            }
+        }
+        pivotxr_active_profile_index_=pivotxr_quick_view_return_profile_index_;
+        pivotxr_engaged_=pivotxr_quick_view_return_engaged_;
+    }
+    target.yaw_radians=pivotxr_quick_view_transition_.current.yaw_radians+
+        WrapRadians(target.yaw_radians-pivotxr_quick_view_transition_.current.yaw_radians);
+    RetargetPivotViewTransition(target,duration,pivotxr_quick_view_transition_);
+    pivotxr_quick_view_active_=false;
+    pivotxr_quick_view_transitioning_=pivotxr_quick_view_transition_.active;
+    RetargetPivotViewTransition({},duration,pivotxr_profile_view_transition_);
+    // Returning uses normal-origin assistance. Leave current filter values
+    // intact so the switch in reference is approached smoothly.
+    pivotxr_snap_reference_valid_=false;
+    pivotxr_snap_reference_pending_=false;
+}
+
 const PivotXrResolvedProfile& OpenXrLayer::ActivePivotProfile() const {
     static const PivotXrResolvedProfile kDisabledPivotProfile{};
     const auto& profiles = resolved_settings_.pivotxr.profiles;
@@ -12651,8 +12898,7 @@ bool OpenXrLayer::IsPivotXrActive() {
             !shares_nudge_set(pivotxr_active_profile_index_, index)) {
             pivotxr_profile_view_transition_ = {};
         }
-        pivotxr_active_profile_index_ = index;
-        pivotxr_engaged_ = true;
+        EngagePivotMotionProfile(index);
         note_transition_diagnostics();
         logger_.Info("PivotXR profile '" + profile.name + "' engaged via " +
                      BindingLabel(trigger) + (switching ? " (switched profile)." : "."));
@@ -12667,31 +12913,6 @@ bool OpenXrLayer::IsPivotXrActive() {
         logger_.Info("PivotXR profile '" + profile.name + "' disengaged via " + BindingLabel(trigger) + ".");
         SoundPlayer::Instance().PlayTransition(trigger.sound, false, dll_directory_,
                                                resolved_settings_.core.sound_volume);
-    };
-    auto motion_view_offset = [&]() {
-        PivotViewOffset offset;
-        const double gain = SmoothStep(pivotxr_activation_gain_);
-        offset.yaw_radians = pivotxr_smoothed_extra_yaw_radians_ * gain;
-        offset.pitch_radians = pivotxr_smoothed_extra_pitch_radians_ * gain;
-        constexpr double kPi = 3.14159265358979323846;
-        offset.yaw_radians = std::clamp(offset.yaw_radians, -kPi, kPi);
-        offset.pitch_radians = std::clamp(offset.pitch_radians,
-                                          DegreesToRadians(-85.0), DegreesToRadians(85.0));
-        return offset;
-    };
-    auto high_level_view_offset = [&]() {
-        return ActivePivotProfile().behavior != PivotProfileBehavior::SnapViews
-            ? motion_view_offset()
-            : PivotViewOffset{};
-    };
-    auto select_view_profile = [&](size_t index) {
-        if (pivotxr_active_profile_index_ != index) {
-            if (!shares_nudge_set(pivotxr_active_profile_index_, index)) {
-                pivotxr_profile_view_transition_ = {};
-            }
-            if (pivotxr_engaged_) pivotxr_engaged_ = false;
-            pivotxr_active_profile_index_ = index;
-        }
     };
     auto apply_nudge = [&](size_t index, const InputBinding& trigger,
                            double yaw_delta, double pitch_delta, bool center) {
@@ -12720,28 +12941,8 @@ bool OpenXrLayer::IsPivotXrActive() {
     };
     auto activate_quick_view = [&](size_t profile_index, size_t view_index,
                                    const PivotActivationBinding& trigger) {
-        if (!pivotxr_quick_view_active_ && !pivotxr_quick_view_transitioning_) {
-            pivotxr_quick_view_return_profile_index_ = pivotxr_active_profile_index_;
-            pivotxr_quick_view_return_engaged_ = pivotxr_engaged_;
-            pivotxr_quick_view_transition_.current = high_level_view_offset();
-            pivotxr_quick_view_transition_.target = pivotxr_quick_view_transition_.current;
-        }
-        select_view_profile(profile_index);
-        const PivotXrResolvedProfile& profile = pivot.profiles[profile_index];
-        const PivotQuickView& quick_view = profile.view_controls.quick_views[view_index];
-        pivotxr_quick_view_pending_pose_ = {
-            DegreesToRadians(-std::clamp(quick_view.yaw_degrees, -180.0, 180.0)),
-            DegreesToRadians(std::clamp(quick_view.pitch_degrees, -85.0, 85.0)),
-            quick_view.position_right_cm / 100.0,
-            quick_view.position_up_cm / 100.0,
-            quick_view.position_forward_cm / 100.0,
-        };
-        pivotxr_quick_view_pending_duration_seconds_ = quick_view.transition_seconds;
-        pivotxr_quick_view_retarget_pending_ = true;
-        pivotxr_quick_view_active_ = true;
-        pivotxr_quick_view_transitioning_ = true;
-        pivotxr_quick_view_profile_index_ = profile_index;
-        pivotxr_quick_view_index_ = view_index;
+        const PivotQuickView& quick_view=pivot.profiles[profile_index].view_controls.quick_views[view_index];
+        ActivatePivotQuickView(profile_index,view_index);
         note_transition_diagnostics();
         logger_.Info("PivotXR Quick View '" + quick_view.name + "' activated via " +
                      BindingLabel(trigger.binding) + ".");
@@ -12749,32 +12950,7 @@ bool OpenXrLayer::IsPivotXrActive() {
                                                resolved_settings_.core.sound_volume);
     };
     auto deactivate_quick_view = [&](const PivotQuickView& quick_view, const InputBinding& trigger) {
-        pivotxr_quick_view_retarget_pending_ = false;
-        PivotViewOffset return_offset;
-        if (pivotxr_quick_view_return_profile_index_ < pivot.profiles.size() &&
-            pivot.profiles[pivotxr_quick_view_return_profile_index_].behavior !=
-                PivotProfileBehavior::SnapViews && pivotxr_quick_view_return_engaged_) {
-            return_offset = motion_view_offset();
-        }
-        const bool returns_to_active_motion =
-            pivotxr_quick_view_return_profile_index_ < pivot.profiles.size() &&
-            pivotxr_quick_view_return_engaged_ &&
-            pivot.profiles[pivotxr_quick_view_return_profile_index_].behavior ==
-                PivotProfileBehavior::EnhancedMotion;
-        const double return_yaw_delta = WrapRadians(
-            return_offset.yaw_radians - pivotxr_quick_view_transition_.current.yaw_radians);
-        return_offset.yaw_radians =
-            pivotxr_quick_view_transition_.current.yaw_radians + return_yaw_delta;
-        RetargetPivotViewTransition(return_offset, quick_view.transition_seconds,
-                                    pivotxr_quick_view_transition_);
-        if (!shares_nudge_set(pivotxr_active_profile_index_, pivotxr_quick_view_return_profile_index_) ||
-            !returns_to_active_motion) {
-            pivotxr_profile_view_transition_ = {};
-        }
-        pivotxr_active_profile_index_ = pivotxr_quick_view_return_profile_index_;
-        pivotxr_engaged_ = pivotxr_quick_view_return_engaged_;
-        pivotxr_quick_view_active_ = false;
-        pivotxr_quick_view_transitioning_ = pivotxr_quick_view_transition_.active;
+        ReleasePivotQuickView(quick_view.transition_seconds);
         note_transition_diagnostics();
         logger_.Info("PivotXR Quick View '" + quick_view.name + "' released via " +
                      BindingLabel(trigger) + ".");
@@ -12826,6 +13002,7 @@ bool OpenXrLayer::IsPivotXrActive() {
             pivotxr_manual_view_transition_ = {};
             pivotxr_profile_view_transition_ = {};
             pivotxr_quick_view_transition_ = {};
+            ClearPivotSnapState();
             pivotxr_quick_view_retarget_pending_ = false;
             pivotxr_quick_view_active_ = false;
             pivotxr_quick_view_transitioning_ = false;
@@ -12844,6 +13021,7 @@ bool OpenXrLayer::IsPivotXrActive() {
             pivotxr_manual_view_transition_ = {};
             pivotxr_profile_view_transition_ = {};
             pivotxr_quick_view_transition_ = {};
+            ClearPivotSnapState();
             pivotxr_quick_view_retarget_pending_ = false;
             pivotxr_quick_view_active_ = false;
             pivotxr_quick_view_transitioning_ = false;
@@ -12860,8 +13038,10 @@ bool OpenXrLayer::IsPivotXrActive() {
         const BindingTransitions pitch_up = consume_transitions(nudges.pitch_up_bindings, input_state.nudge_pitch_up);
         const BindingTransitions pitch_down = consume_transitions(nudges.pitch_down_bindings, input_state.nudge_pitch_down);
         const BindingTransitions center = consume_transitions(nudges.center_bindings, input_state.nudge_center);
-        bool nudge_set_input_owner = true;
-        if (!profile.nudge_set_id.empty()) {
+        const bool following_owner = pivotxr_quick_view_active_
+            ? pivotxr_quick_view_profile_index_==i : (pivotxr_engaged_ && pivotxr_active_profile_index_==i);
+        bool nudge_set_input_owner = following_owner || profile.allow_inactive_nudges;
+        if (nudge_set_input_owner && !profile.nudge_set_id.empty()) {
             nudge_set_input_owner =
                 std::find(polled_nudge_sets.begin(), polled_nudge_sets.end(),
                           profile.nudge_set_id) == polled_nudge_sets.end();
@@ -12869,7 +13049,7 @@ bool OpenXrLayer::IsPivotXrActive() {
         }
         const bool behavior_active =
             (profile.behavior == PivotProfileBehavior::EnhancedMotion &&
-             pivotxr_engaged_ && pivotxr_active_profile_index_ == i) ||
+             !pivotxr_quick_view_active_ && pivotxr_engaged_ && pivotxr_active_profile_index_ == i) ||
             (profile.behavior == PivotProfileBehavior::SnapViews &&
              pivotxr_quick_view_active_ && pivotxr_quick_view_profile_index_ == i);
         const bool directional_nudges_enabled =
@@ -12943,9 +13123,10 @@ bool OpenXrLayer::IsPivotXrActive() {
             binding_state.was_down = binding_state.down_cached;
         }
 
+        if (profile.behavior != PivotProfileBehavior::EnhancedMotion) continue;
         bool is_engaged_profile = pivotxr_engaged_ && pivotxr_active_profile_index_ == i;
         if (profile.always_active) {
-            if (toggle_pressed) {
+            if (toggle_pressed && claim_view_input(toggle_pressed->binding)) {
                 input_state.toggle_suspended = !input_state.toggle_suspended;
                 if (input_state.toggle_suspended) {
                     logger_.Info("PivotXR always-active profile '" + profile.name + "' suspended.");
@@ -12956,15 +13137,15 @@ bool OpenXrLayer::IsPivotXrActive() {
                 }
                 is_engaged_profile = pivotxr_engaged_ && pivotxr_active_profile_index_ == i;
             }
-            if (hold_pressed && is_engaged_profile) {
+            if (hold_pressed && is_engaged_profile && claim_view_input(hold_pressed->binding)) {
                 disengage(i, hold_pressed->binding);
                 is_engaged_profile = false;
             }
-            if (hold_released && !any_hold_down && !input_state.toggle_suspended && !is_engaged_profile) {
+            if (hold_released && !any_hold_down && !input_state.toggle_suspended && !is_engaged_profile && !pivotxr_engaged_) {
                 engage(i, hold_released->binding);
             }
         } else {
-            if (toggle_pressed) {
+            if (toggle_pressed && claim_view_input(toggle_pressed->binding)) {
                 if (is_engaged_profile && input_state.toggle_latched) {
                     input_state.toggle_latched = false;
                     if (!any_hold_down) disengage(i, toggle_pressed->binding);
@@ -12974,7 +13155,7 @@ bool OpenXrLayer::IsPivotXrActive() {
                 }
                 is_engaged_profile = pivotxr_engaged_ && pivotxr_active_profile_index_ == i;
             }
-            if (hold_pressed && !is_engaged_profile) {
+            if (hold_pressed && !is_engaged_profile && claim_view_input(hold_pressed->binding)) {
                 engage(i, hold_pressed->binding);
                 is_engaged_profile = true;
             }
@@ -13000,8 +13181,11 @@ bool OpenXrLayer::IsPivotXrActive() {
     // profile releases the pivot.
     if (!pivotxr_engaged_) {
         for (size_t i = 0; i < pivot.profiles.size(); ++i) {
-            if (view_controls_active && pivotxr_active_profile_index_ != i) continue;
+
             const PivotXrResolvedProfile& profile = pivot.profiles[i];
+            if (profile.behavior!=PivotProfileBehavior::EnhancedMotion) continue;
+            if (view_controls_active && pivotxr_active_profile_index_ != i &&
+                !(quick_view_effect_active && profile.apply_motion_to_snap_views)) continue;
             const PivotProfileInputState& input_state = pivotxr_profile_input_states_[i];
             bool hold_suspended = false;
             for (size_t index = 0; index < profile.activation_bindings.size(); ++index) {
@@ -13014,8 +13198,7 @@ bool OpenXrLayer::IsPivotXrActive() {
                 !shares_nudge_set(pivotxr_active_profile_index_, i)) {
                 pivotxr_profile_view_transition_ = {};
             }
-            pivotxr_active_profile_index_ = i;
-            pivotxr_engaged_ = true;
+            EngagePivotMotionProfile(i);
             note_transition_diagnostics();
             logger_.Info("PivotXR profile '" + profile.name + "' engaged (always active).");
             break;
