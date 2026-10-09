@@ -51,6 +51,11 @@ PFN_xrVoidFunction VulkanEnableHook(XrInstance instance, const char* name);
 // game itself, XR_KHR_vulkan_enable) get the defaults.
 VulkanBridgeGame VulkanGameFor(std::uint64_t device);
 
+// The game's VkDevice (its handle as an integer) named by a session create
+// info whose first structure is a Vulkan binding; 0 otherwise. For the layer,
+// which is built without Vulkan's types.
+std::uint64_t VulkanSessionDevice(const XrSessionCreateInfo* info);
+
 // A session made with Vulkan after the bridge asked the runtime for Direct3D
 // 12's graphics requirements asks for the Vulkan ones again (`enable_version`
 // 1 or 2, the extension the game enabled), as a runtime may expect the
