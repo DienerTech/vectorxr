@@ -220,6 +220,7 @@ struct FrameSlot {
     UINT64 calibration_cpu{0};
     std::uint64_t timed_submission{0};
     bool hardware_timed{false};   // its stamps around the optical flow hardware were written
+    double hardware_call_ms{0.0}; // CPU time in the optical flow hardware's execute calls
     bool analysis_pending{false}; // an analysis whose timing TakeTimings has not returned
     UINT64 capture_mark{0};       // the newest capture submitted before it (0: none)
     ComPtr<ID3D12Resource> check_readback; // depth check scores, read once the slot's fence passes
@@ -277,6 +278,29 @@ struct HardwareWatch {
         operation.done = done;
     }
 };
+
+#ifdef DEPTHXR_NVOF
+// One optical flow session for every view (EnsureAtlas): the views'
+// packed images side by side in one image, matched by one execute a
+// frame. Beside a game keeping the GPU busy, each submission to the
+// hardware waits ~3.5 ms for the GPU and every execute after the first
+// ~0.5-2 ms more: four quad views' sessions took 5.8 ms, one atlas 4.8
+// (notes/ofa-latency-investigation-2026-10-09.md). Watched as view 0.
+struct HardwareAtlas {
+    NvOFHandle session{};
+    NvOFGPUBufferHandle buffers[3]{}; // newest, previous, vectors
+    Texture newest;
+    Texture previous;
+    Texture flow;
+    ComPtr<ID3D12Fence> fence;
+    UINT64 fence_value{0};
+    NV_OF_PERF_LEVEL perf{NV_OF_PERF_LEVEL_UNDEFINED};
+    std::vector<FrameGenExtent> inputs;     // the views' packed images it is laid out for
+    std::vector<std::array<UINT, 2>> cells; // where each view's are in it
+    bool fresh{true};    // no vectors of its own to hint the next match yet
+    bool matched{false}; // matched once (see StartHardwareWatchdog)
+};
+#endif
 
 class D3D12FrameGen final : public FrameGenGpu {
   public:
@@ -779,6 +803,25 @@ class D3D12FrameGen final : public FrameGenGpu {
                 Sleep(1);
             }
         }
+#ifdef DEPTHXR_NVOF
+        auto atlas_done = [&](const HardwareAtlas& atlas) {
+            while (atlas.fence && atlas.fence->GetCompletedValue() < atlas.fence_value) {
+                if (GetTickCount64() >= deadline) {
+                    return false;
+                }
+                Sleep(1);
+            }
+            return true;
+        };
+        if (!atlas_done(atlas_)) {
+            return false;
+        }
+        for (const HardwareAtlas& atlas : atlas_cache_) {
+            if (!atlas_done(atlas)) {
+                return false;
+            }
+        }
+#endif
         return true;
     }
 
@@ -1657,6 +1700,7 @@ class D3D12FrameGen final : public FrameGenGpu {
             CollectTiming(slot, slot_index); // before its stamps are written again
         }
         slot.hardware_timed = false;
+        slot.hardware_call_ms = 0.0;
         ReadDepthCheck(slot);
         hr = slot.allocator->Reset();
         if (SUCCEEDED(hr)) hr = commands_->Reset(slot.allocator.Get(), nullptr);
@@ -1684,9 +1728,21 @@ class D3D12FrameGen final : public FrameGenGpu {
         effective_tuning.occlusion = tuning.occlusion && occlusion_;
         effective_tuning.cross_fade = tuning.cross_fade || cross_fade_;
         effective_tuning.hardware_flow = tuning.hardware_flow && HardwareFlowReady();
+        // Several views on Frame Generation's own queue match on one atlas;
+        // otherwise (one view, matching at release on the game's queue, or
+        // the atlas refused) a session per view, its hints following that
+        // view's motion.
+        atlas_in_use_ = effective_tuning.hardware_flow && atlas_enabled_ && !atlas_failed_ && separate_ && views.size() >= 2;
         for (std::size_t i = 0; i < views.size() && effective_tuning.hardware_flow; ++i) {
-            // A session per view: its hints follow that view's motion.
-            effective_tuning.hardware_flow = EnsureHardware(views_[i], i, views[i], tuning);
+            effective_tuning.hardware_flow = EnsureHardware(views_[i], i, views[i], tuning, !atlas_in_use_);
+        }
+        if (atlas_in_use_ && effective_tuning.hardware_flow && !EnsureAtlas(views, tuning)) {
+            atlas_in_use_ = false;
+            atlas_failed_ = !hardware_failed_;
+            effective_tuning.hardware_flow = !hardware_failed_;
+            for (std::size_t i = 0; i < views.size() && effective_tuning.hardware_flow; ++i) {
+                effective_tuning.hardware_flow = EnsureHardware(views_[i], i, views[i], tuning, true);
+            }
         }
         // Captures start matching on the hardware while it is in use.
         hardware_active_ = effective_tuning.hardware_flow;
@@ -2169,6 +2225,7 @@ class D3D12FrameGen final : public FrameGenGpu {
         if (slot.hardware_timed) {
             timing.hardware_start = clock(stamps[1]);
             timing.hardware_end = clock(stamps[2]);
+            timing.hardware_call_ms = slot.hardware_call_ms;
         }
         timing.end = clock(stamps[kTimingStamps - 1]);
         constexpr std::size_t kKeptTimings = 16;
@@ -2658,6 +2715,7 @@ class D3D12FrameGen final : public FrameGenGpu {
         for (auto& view : views_) {
             RetireHardware(view);
         }
+        RetireAtlases();
         hardware_loaded_ = false;
         views_.clear();
         analyzed_.clear();
@@ -3245,6 +3303,7 @@ class D3D12FrameGen final : public FrameGenGpu {
 
     std::string HardwareFlowStatus() const override { return hardware_status_; }
     void StallHardwareForTest() override { stall_hardware_for_test_ = true; }
+    void SetHardwareAtlas(bool on) override { atlas_enabled_ = on; }
 
     // The game's queue waits on the optical flow hardware's fence: should
     // the hardware stop answering, the game would hang behind it, and stop
@@ -3311,21 +3370,39 @@ class D3D12FrameGen final : public FrameGenGpu {
 
     // The view's optical flow session and images for its size; false (and
     // hardware flow off for the session) when the hardware refuses them.
+    // With `own_session` false, only the images the view packs into and
+    // unpacks from: the atlas matches them (EnsureAtlas, RunHardwareAtlas).
     bool EnsureHardware(ViewResources& view, std::size_t index, const FrameGenViewSubmission& submission,
-                        const FrameGenTuning& tuning) {
+                        const FrameGenTuning& tuning, bool own_session) {
 #ifdef DEPTHXR_NVOF
         const FrameGenExtent input = FrameGenPyramid(submission.request.extent)[1];
         const FrameGenExtent flow = FrameGenPyramid(submission.request.extent)[kFrameGenHardwareFlowLevel];
-        const NV_OF_PERF_LEVEL perf =
-            tuning.quality == FrameGenFlowQuality::kPerformance ? NV_OF_PERF_LEVEL_FAST : NV_OF_PERF_LEVEL_MEDIUM;
-        if (view.hardware && view.hardware_extent.width == input.width && view.hardware_extent.height == input.height &&
-            view.hardware_perf == perf) {
+        const NV_OF_PERF_LEVEL perf = HardwarePerf(tuning);
+        const bool sized = view.hardware_extent.width == input.width && view.hardware_extent.height == input.height;
+        if (own_session ? view.hardware && sized && view.hardware_perf == perf
+                        : !view.hardware && view.hardware_newest.resource && sized) {
             return true;
         }
-        if (view.hardware && !WaitIdle()) {
+        if ((view.hardware || view.hardware_newest.resource) && !WaitIdle()) {
             return HardwareFailed("the GPU did not finish before the optical flow session was resized");
         }
         RetireHardware(view);
+        if (!own_session) {
+            std::string error;
+            if (!Create(view.hardware_newest, input, DXGI_FORMAT_R8_UNORM, DXGI_FORMAT_R8_UNORM, true, error, true) ||
+                !Create(view.hardware_previous, input, DXGI_FORMAT_R8_UNORM, DXGI_FORMAT_R8_UNORM, true, error, true) ||
+                !Create(view.hardware_flow, flow, DXGI_FORMAT_R16G16_SINT, DXGI_FORMAT_R16G16_SINT, false, error, true)) {
+                return HardwareFailed("its images could not be created (" + error + ")");
+            }
+            view.hardware_extent = input;
+            view.hardware_fresh = true;
+            view.hardware_matched = view.raw_matched = false;
+            view.hardware_mode = 0;
+            view.raw_previous = false;
+            view.raw_value = 0;
+            view.raw_captured = view.raw_executed = 0;
+            return true;
+        }
         // The hardware reads and writes them in COMMON, to which the work
         // before it returns them (RunHardwareFlow).
         std::string error;
@@ -3397,6 +3474,7 @@ class D3D12FrameGen final : public FrameGenGpu {
         static_cast<void>(index);
         static_cast<void>(submission);
         static_cast<void>(tuning);
+        static_cast<void>(own_session);
         return false;
 #endif
     }
@@ -3453,12 +3531,341 @@ class D3D12FrameGen final : public FrameGenGpu {
         view.hardware_extent = {};
     }
 
+#ifdef DEPTHXR_NVOF
+    static NV_OF_PERF_LEVEL HardwarePerf(const FrameGenTuning& tuning) {
+        return tuning.quality == FrameGenFlowQuality::kPerformance ? NV_OF_PERF_LEVEL_FAST : NV_OF_PERF_LEVEL_MEDIUM;
+    }
+
+    // The atlas session for `views`' packed images: two views a row (see
+    // the layouts below), each at a multiple of 8 texels (whole cells of the hardware's
+    // 4-texel vectors) with 64 texels between them, left black (committed
+    // textures start zeroed) so matches stay within a view. False when the
+    // hardware refuses it (too large, or anything else): sessions per view.
+    bool EnsureAtlas(const std::vector<FrameGenViewSubmission>& views, const FrameGenTuning& tuning) {
+        const NV_OF_PERF_LEVEL perf = HardwarePerf(tuning);
+        std::vector<FrameGenExtent> inputs;
+        for (const FrameGenViewSubmission& view : views) {
+            inputs.push_back(FrameGenPyramid(view.request.extent)[1]);
+        }
+        auto laid_out = [&](const HardwareAtlas& atlas) {
+            return atlas.session && atlas.perf == perf && atlas.inputs.size() == inputs.size() &&
+                   std::equal(inputs.begin(), inputs.end(), atlas.inputs.begin(), [](FrameGenExtent a, FrameGenExtent b) {
+                       return a.width == b.width && a.height == b.height;
+                   });
+        };
+        if (laid_out(atlas_)) {
+            return true;
+        }
+        // Another layout's atlas becomes the current one, kept, without
+        // waiting for the GPU; one laid out so already comes back.
+        if (atlas_.session) {
+            atlas_cache_.push_back(std::move(atlas_));
+        }
+        atlas_ = {};
+        const auto cached = std::find_if(atlas_cache_.begin(), atlas_cache_.end(), laid_out);
+        if (cached != atlas_cache_.end()) {
+            atlas_ = std::move(*cached);
+            atlas_cache_.erase(cached);
+            atlas_.fresh = true; // its hints are from another sequence of frames
+            WatchAtlas();
+            TrimAtlases();
+            return true;
+        }
+        constexpr UINT kGutter = 64;
+        auto align = [](UINT value) { return (value + 7u) & ~7u; };
+        // Rows of views: in order two a row, or (four views) each row a
+        // periphery with a focus view, which wastes less (a quad views
+        // atlas 10% smaller); the smallest that fits the hardware.
+        std::vector<std::vector<std::vector<std::size_t>>> layouts;
+        std::vector<std::vector<std::size_t>> in_order;
+        for (std::size_t row = 0; row < inputs.size(); row += 2) {
+            in_order.push_back(row + 1 < inputs.size() ? std::vector<std::size_t>{row, row + 1} : std::vector<std::size_t>{row});
+        }
+        layouts.push_back(in_order);
+        if (inputs.size() == 4) {
+            layouts.push_back({{0, 2}, {1, 3}});
+            layouts.push_back({{0, 3}, {1, 2}});
+        }
+        if (inputs.size() == 2) {
+            layouts.push_back({{0}, {1}}); // one above the other, for views too wide side by side
+        }
+        constexpr UINT kHardwareMax = 8192;
+        std::vector<std::array<UINT, 2>> cells(inputs.size());
+        UINT width = 0;
+        UINT height = 0;
+        bool chosen = false;
+        for (const auto& rows : layouts) {
+            std::vector<std::array<UINT, 2>> layout_cells(inputs.size());
+            UINT layout_width = 0;
+            UINT layout_height = 0;
+            for (const auto& row : rows) {
+                UINT x = 0;
+                UINT row_height = 0;
+                for (const std::size_t i : row) {
+                    layout_cells[i] = {x, layout_height};
+                    x += align(inputs[i].width) + kGutter;
+                    row_height = std::max(row_height, align(inputs[i].height));
+                }
+                layout_width = std::max(layout_width, x - kGutter);
+                layout_height += row_height + kGutter;
+            }
+            layout_height -= kGutter;
+            const bool fits = layout_width <= kHardwareMax && layout_height <= kHardwareMax;
+            const bool smaller = std::uint64_t{layout_width} * layout_height < std::uint64_t{width} * height;
+            if (fits && (!chosen || smaller)) {
+                cells = layout_cells;
+                width = layout_width;
+                height = layout_height;
+                chosen = true;
+            }
+        }
+        if (!chosen) {
+            return false; // too large for one image: sessions per view
+        }
+        std::string error;
+        const FrameGenExtent extent{width, height};
+        const FrameGenExtent flow{(width + 3) / 4, (height + 3) / 4};
+        if (!Create(atlas_.newest, extent, DXGI_FORMAT_R8_UNORM, DXGI_FORMAT_R8_UNORM, false, error, true) ||
+            !Create(atlas_.previous, extent, DXGI_FORMAT_R8_UNORM, DXGI_FORMAT_R8_UNORM, false, error, true) ||
+            !Create(atlas_.flow, flow, DXGI_FORMAT_R16G16_SINT, DXGI_FORMAT_R16G16_SINT, false, error, true)) {
+            RetireAtlas(atlas_);
+            return false;
+        }
+        if (hardware_api_.nvCreateOpticalFlowD3D12(device_.Get(), &atlas_.session) != NV_OF_SUCCESS || !atlas_.session) {
+            atlas_.session = {};
+            RetireAtlas(atlas_);
+            return false;
+        }
+        NV_OF_INIT_PARAMS init{};
+        init.width = width;
+        init.height = height;
+        init.outGridSize = NV_OF_OUTPUT_VECTOR_GRID_SIZE_4;
+        init.hintGridSize = NV_OF_HINT_VECTOR_GRID_SIZE_UNDEFINED;
+        init.mode = NV_OF_MODE_OPTICALFLOW;
+        init.perfLevel = perf;
+        init.predDirection = NV_OF_PRED_DIRECTION_FORWARD;
+        init.inputBufferFormat = NV_OF_BUFFER_FORMAT_GRAYSCALE8;
+        if (hardware_api_.nvOFInit(atlas_.session, &init) != NV_OF_SUCCESS ||
+            FAILED(device_->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&atlas_.fence)))) {
+            RetireAtlas(atlas_);
+            return false;
+        }
+        Texture* images[3] = {&atlas_.newest, &atlas_.previous, &atlas_.flow};
+        for (int i = 0; i < 3; ++i) {
+            NV_OF_REGISTER_RESOURCE_PARAMS_D3D12 params{};
+            params.resource = images[i]->resource.Get();
+            params.inputFencePoint = {atlas_.fence.Get(), atlas_.fence_value};
+            params.hOFGpuBuffer = &atlas_.buffers[i];
+            params.outputFencePoint = {atlas_.fence.Get(), ++atlas_.fence_value};
+            if (hardware_api_.nvOFRegisterResourceD3D12(atlas_.session, &params) != NV_OF_SUCCESS) {
+                RetireAtlas(atlas_);
+                return false;
+            }
+        }
+        atlas_.perf = perf;
+        atlas_.inputs = inputs;
+        atlas_.cells = cells;
+        atlas_.fresh = true;
+        atlas_.matched = false;
+        WatchAtlas();
+        TrimAtlases();
+        return true;
+    }
+
+    // The watchdog watches the current atlas as view 0 (operations of
+    // another fence never carry over to it).
+    void WatchAtlas() {
+        for (auto& operation : hardware_watch_[0].operations) {
+            operation.done = 0;
+        }
+        hardware_watch_[0].fence = atlas_.fence.Get();
+    }
+
+    // Frees kept atlases beyond the newest three once nothing submitted
+    // can use them (never waits).
+    void TrimAtlases() {
+        constexpr std::size_t kKeptAtlases = 3;
+        for (auto it = atlas_cache_.begin(); atlas_cache_.size() > kKeptAtlases && it != atlas_cache_.end();) {
+            const bool done = (!it->fence || it->fence->GetCompletedValue() >= it->fence_value) &&
+                              fence_->GetCompletedValue() >= fence_value_;
+            if (done) {
+                RetireAtlas(*it);
+                it = atlas_cache_.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    }
+
+    void RetireAtlases() {
+        RetireAtlas(atlas_);
+        for (HardwareAtlas& atlas : atlas_cache_) {
+            RetireAtlas(atlas);
+        }
+        atlas_cache_.clear();
+    }
+
+    // Ends the atlas session, as RetireHardware a view's: images the driver
+    // was given are never freed.
+    void RetireAtlas(HardwareAtlas& atlas) {
+        ID3D12Fence* const fence = atlas.fence.Get();
+        if (atlas.session && !hardware_hung_) {
+            for (NvOFGPUBufferHandle& buffer : atlas.buffers) {
+                if (buffer) {
+                    NV_OF_UNREGISTER_RESOURCE_PARAMS_D3D12 params{buffer};
+                    hardware_api_.nvOFUnregisterResourceD3D12(&params);
+                }
+            }
+            hardware_api_.nvOFDestroy(atlas.session);
+        }
+        if (atlas.session) {
+            for (Texture* texture : {&atlas.newest, &atlas.previous, &atlas.flow}) {
+                texture->resource.Detach();
+            }
+            // The watchdog may still look at it: a fence that is never freed.
+            atlas.fence.Detach();
+        }
+        if (fence && hardware_watch_[0].fence == fence) {
+            hardware_watch_[0].fence = nullptr;
+        }
+        atlas = {};
+    }
+
+    // RunHardwareFlow on the atlas: copies every waiting view's packed images
+    // into its cell, submits, has the hardware match the atlas once, makes
+    // the queue wait for the vectors, reopens the command list and copies
+    // each view's vectors out of its cell into the view's own image.
+    bool RunHardwareAtlas(std::vector<ViewRecording>& recordings, FrameSlot& slot, std::size_t slot_index,
+                          std::string& error) {
+        std::vector<D3D12_RESOURCE_BARRIER> barriers;
+        auto waiting = [&](std::size_t index) {
+            return recordings[index].waits_for_hardware && index < atlas_.cells.size();
+        };
+        for (std::size_t index = 0; index < recordings.size(); ++index) {
+            if (!waiting(index)) continue;
+            Require(barriers, recordings[index].view->hardware_newest, D3D12_RESOURCE_STATE_COPY_SOURCE);
+            Require(barriers, recordings[index].view->hardware_previous, D3D12_RESOURCE_STATE_COPY_SOURCE);
+        }
+        Require(barriers, atlas_.newest, D3D12_RESOURCE_STATE_COPY_DEST);
+        Require(barriers, atlas_.previous, D3D12_RESOURCE_STATE_COPY_DEST);
+        Flush(barriers);
+        bool temporal = !atlas_.fresh;
+        for (std::size_t index = 0; index < recordings.size(); ++index) {
+            if (!waiting(index)) continue;
+            ViewResources& view = *recordings[index].view;
+            temporal = temporal && recordings[index].temporal && !view.hardware_fresh;
+            const auto [x, y] = atlas_.cells[index];
+            for (const auto& [from, to] : {std::pair{&view.hardware_newest, &atlas_.newest},
+                                           std::pair{&view.hardware_previous, &atlas_.previous}}) {
+                D3D12_TEXTURE_COPY_LOCATION destination{to->resource.Get(), D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX};
+                D3D12_TEXTURE_COPY_LOCATION source{from->resource.Get(), D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX};
+                destination.SubresourceIndex = source.SubresourceIndex = 0;
+                commands_->CopyTextureRegion(&destination, x, y, 0, &source, nullptr);
+            }
+        }
+        // The hardware reads and writes its images in COMMON.
+        Require(barriers, atlas_.newest, D3D12_RESOURCE_STATE_COMMON);
+        Require(barriers, atlas_.previous, D3D12_RESOURCE_STATE_COMMON);
+        Require(barriers, atlas_.flow, D3D12_RESOURCE_STATE_COMMON);
+        Flush(barriers);
+        Stamp(kProfileHardware);
+        const UINT first = static_cast<UINT>(slot_index * kTimingStamps);
+        if (query_heap_) commands_->EndQuery(query_heap_.Get(), D3D12_QUERY_TYPE_TIMESTAMP, first + 1);
+        HRESULT hr = commands_->Close();
+        if (FAILED(hr)) {
+            error = Failure("D3D12 Frame Generation command close", hr);
+            return false;
+        }
+        hr = SubmitWork(commands_.Get());
+        for (const ViewRecording& recording : recordings) {
+            MarkUsed(*recording.view, fence_.Get(), fence_value_);
+        }
+        if (FAILED(hr)) {
+            error = Failure("D3D12 Frame Generation queue signal", hr);
+            signal_failed_ = true;
+            return false;
+        }
+        NV_OF_FENCE_POINT ready{fence_.Get(), fence_value_};
+        NV_OF_EXECUTE_INPUT_PARAMS_D3D12 in{};
+        in.inputFrame = atlas_.buffers[0];
+        in.referenceFrame = atlas_.buffers[1];
+        in.disableTemporalHints = temporal ? NV_OF_FALSE : NV_OF_TRUE;
+        in.numFencePoints = 1;
+        in.fencePoint = &ready;
+        NV_OF_FENCE_POINT done{atlas_.fence.Get(), ++atlas_.fence_value};
+        NV_OF_EXECUTE_OUTPUT_PARAMS_D3D12 out{};
+        out.outputBuffer = atlas_.buffers[2];
+        out.fencePoint = &done;
+        hardware_watch_[0].Watch(done.value, ready.value, atlas_.matched ? 250 : 3000);
+        const auto call = std::chrono::steady_clock::now();
+        if (stall_hardware_for_test_) {
+            stall_hardware_for_test_ = false; // its fence is never signalled
+        } else if (hardware_api_.nvOFExecuteD3D12(atlas_.session, &in, &out) != NV_OF_SUCCESS) {
+            // This frame keeps the last vectors; later frames match on the
+            // shader cores again.
+            HardwareFailed("the optical flow hardware failed: " + HardwareError(atlas_.session));
+            work_->Signal(atlas_.fence.Get(), done.value);
+        }
+        slot.hardware_call_ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - call).count();
+        atlas_.fresh = false;
+        atlas_.matched = true;
+        for (std::size_t index = 0; index < recordings.size(); ++index) {
+            if (!waiting(index)) continue;
+            ViewResources& view = *recordings[index].view;
+            view.hardware_fresh = false;
+            view.hardware_matched = true;
+            view.hardware_mode = 1;
+        }
+        work_->Wait(atlas_.fence.Get(), done.value);
+        hr = slot.after_hardware->Reset();
+        if (SUCCEEDED(hr)) hr = commands_->Reset(slot.after_hardware.Get(), nullptr);
+        if (FAILED(hr)) {
+            error = Failure("D3D12 Frame Generation command reset", hr);
+            return false;
+        }
+        ID3D12DescriptorHeap* heaps[] = {heap_.Get()};
+        commands_->SetDescriptorHeaps(1, heaps);
+        commands_->SetComputeRootSignature(root_signature_.Get());
+        Stamp(kProfileHardware);
+        if (query_heap_) {
+            commands_->EndQuery(query_heap_.Get(), D3D12_QUERY_TYPE_TIMESTAMP, first + 2);
+            slot.hardware_timed = true;
+        }
+        // Each view's vectors, out of its cell.
+        Require(barriers, atlas_.flow, D3D12_RESOURCE_STATE_COPY_SOURCE);
+        for (std::size_t index = 0; index < recordings.size(); ++index) {
+            if (waiting(index)) Require(barriers, recordings[index].view->hardware_flow, D3D12_RESOURCE_STATE_COPY_DEST);
+        }
+        Flush(barriers);
+        for (std::size_t index = 0; index < recordings.size(); ++index) {
+            if (!waiting(index)) continue;
+            Texture& flow = recordings[index].view->hardware_flow;
+            const D3D12_RESOURCE_DESC desc = flow.resource->GetDesc();
+            const auto [x, y] = atlas_.cells[index];
+            const D3D12_BOX box{x / 4, y / 4, 0, x / 4 + static_cast<UINT>(desc.Width), y / 4 + desc.Height, 1};
+            D3D12_TEXTURE_COPY_LOCATION destination{flow.resource.Get(), D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX};
+            D3D12_TEXTURE_COPY_LOCATION source{atlas_.flow.resource.Get(), D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX};
+            destination.SubresourceIndex = source.SubresourceIndex = 0;
+            commands_->CopyTextureRegion(&destination, 0, 0, 0, &source, &box);
+        }
+        Require(barriers, atlas_.flow, D3D12_RESOURCE_STATE_COMMON);
+        Flush(barriers);
+        return true;
+    }
+#else
+    bool EnsureAtlas(const std::vector<FrameGenViewSubmission>&, const FrameGenTuning&) { return false; }
+    void RetireAtlases() {}
+#endif
+
     // Submits the work recorded so far, has the optical flow hardware match
     // every view waiting for it, makes the queue wait for its vectors and
     // reopens the command list for the rest of the frame.
     bool RunHardwareFlow(std::vector<ViewRecording>& recordings, FrameSlot& slot, std::size_t slot_index,
                          std::string& error) {
 #ifdef DEPTHXR_NVOF
+        if (atlas_in_use_) {
+            return RunHardwareAtlas(recordings, slot, slot_index, error);
+        }
         std::vector<D3D12_RESOURCE_BARRIER> barriers;
         for (const ViewRecording& recording : recordings) {
             if (recording.waits_for_hardware && !recording.view->raw_in_use) {
@@ -3518,6 +3925,7 @@ class D3D12FrameGen final : public FrameGenGpu {
             if (watch) {
                 watch->Watch(wait, ready.value, view.hardware_matched ? 250 : 3000);
             }
+            const auto call = std::chrono::steady_clock::now();
             if (stall_hardware_for_test_) {
                 stall_hardware_for_test_ = false; // its fence is never signalled
             } else if (hardware_api_.nvOFExecuteD3D12(view.hardware, &in, &out) != NV_OF_SUCCESS) {
@@ -3526,6 +3934,8 @@ class D3D12FrameGen final : public FrameGenGpu {
                 HardwareFailed("the optical flow hardware failed: " + HardwareError(view.hardware));
                 work_->Signal(view.hardware_fence.Get(), wait);
             }
+            slot.hardware_call_ms +=
+                std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - call).count();
             view.hardware_fresh = false;
             view.hardware_matched = true;
             view.hardware_mode = 1;
@@ -3971,6 +4381,20 @@ class D3D12FrameGen final : public FrameGenGpu {
     std::thread hardware_watchdog_;
     std::atomic<bool> hardware_watchdog_stop_{false};
     std::array<HardwareWatch, kWatchedViews> hardware_watch_;
+#ifdef DEPTHXR_NVOF
+    HardwareAtlas atlas_;
+    // Atlases of other layouts (quad views and a canvas in turn), kept for
+    // when their layout comes back, as views keep their sessions: switching
+    // never waits for the GPU. Freed once the GPU is done with them, beyond
+    // the newest few, or at Reset.
+    std::vector<HardwareAtlas> atlas_cache_;
+#endif
+    // VECTORXR_FRAMEGEN_HARDWARE_ATLAS=0 (or SetHardwareAtlas): a session
+    // per view instead of the atlas.
+    bool atlas_enabled_{!(std::getenv("VECTORXR_FRAMEGEN_HARDWARE_ATLAS") &&
+                          std::string(std::getenv("VECTORXR_FRAMEGEN_HARDWARE_ATLAS")) == "0")};
+    bool atlas_failed_{false}; // the hardware refused the atlas: sessions per view from then on
+    bool atlas_in_use_{false}; // this Execute matches on the atlas
     std::atomic<ULONGLONG> hardware_allowed_ms_{250};
     bool hardware_active_{false};  // the last Execute used the hardware: captures match early
     std::atomic<bool> hardware_stuck_{false};

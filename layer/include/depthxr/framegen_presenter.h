@@ -244,6 +244,15 @@ class FrameGenPresenter {
     // Quad views: how long the layer composes them after frames kept failing
     // to be written, doubling up to `longest` (tests shorten it).
     void SetQuadDecline(std::chrono::milliseconds first, std::chrono::milliseconds longest);
+    // Interpolating, motion is measured on the shader cores even with
+    // NVIDIA's optical flow hardware chosen (a Direct3D 11 game's session,
+    // through the bridge). Beside such a game's rendering the hardware's
+    // vectors come about 7 ms later than idle (four matches a frame, each
+    // after the first waiting for the busy GPU), while the frames between
+    // real frames need them within a refresh: DCS, flight 2, measured 8.6 ms
+    // against 1.1 on the shader cores, and 6-10% of refreshes repeated a
+    // frame. Extrapolate keeps the hardware.
+    void SetInterpolateOnShaders(bool on);
     // Delay before a paused session retries by itself, and how often.
     void SetRetryPolicy(std::chrono::milliseconds delay, std::uint32_t attempts);
     // In-session A/B toggle; also retries after a pause. Returns the new
@@ -1098,6 +1107,8 @@ class FrameGenPresenter {
     // Writing composed frames kept failing: the layer composes them until
     // then (doubling from quad_decline_first_ up to quad_decline_longest_).
     std::chrono::steady_clock::time_point quad_declined_until_{};
+    bool interpolate_on_shaders_{false};
+    bool logged_interpolate_on_shaders_{false};
     std::chrono::milliseconds quad_decline_first_{10000};
     std::chrono::milliseconds quad_decline_longest_{80000};
     std::chrono::milliseconds quad_decline_{10000};
@@ -1151,6 +1162,7 @@ class FrameGenPresenter {
     // optical flow hardware's part, milliseconds, since the last summary.
     std::vector<double> capture_done_ms_;
     std::vector<double> analysis_ms_;
+    std::vector<double> measure_lag_ms_; // an analysis' end after its newest capture's
     std::vector<double> ofa_ms_;
     // An analysis's end after its newest capture's, smoothed (milliseconds):
     // a real frame moved at its first refresh needs that much more lead.

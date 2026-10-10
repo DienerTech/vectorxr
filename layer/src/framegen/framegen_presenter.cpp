@@ -462,6 +462,7 @@ void FrameGenPresenter::Stop() {
     gpu_done_ms_.clear();
     capture_done_ms_.clear();
     analysis_ms_.clear();
+    measure_lag_ms_.clear();
     ofa_ms_.clear();
     analysis_lag_ms_ = 0.0;
     gpu_wait_ms_.clear();
@@ -560,6 +561,12 @@ void FrameGenPresenter::SetQuadDecline(std::chrono::milliseconds first, std::chr
     quad_decline_first_ = first;
     quad_decline_longest_ = std::max(first, longest);
     quad_decline_ = first;
+}
+
+void FrameGenPresenter::SetInterpolateOnShaders(bool on) {
+    std::scoped_lock lock(mutex_);
+    interpolate_on_shaders_ = on;
+    logged_interpolate_on_shaders_ = false;
 }
 
 void FrameGenPresenter::SetEngagementPolicy(std::uint32_t steady_frames, std::chrono::milliseconds minimum_session_age) {
@@ -1485,15 +1492,18 @@ void FrameGenPresenter::UpdateDynamicLocked(Clock::time_point now, XrDuration pe
     const std::uint64_t timed = totals_.analyses_timed - start.analyses_timed;
     const std::uint64_t late = totals_.analyses_late - start.analyses_late;
     // Showing clearly more distinct frames than the game alone did, engaged
-    // pays even with few frames generated or measured late: the game,
-    // released once a refresh and late at once, fills refreshes it missed
-    // standing by (the lead absorbs its frame time's jitter). (b) and (d)
-    // then judge nothing; probes check whether standing by would hold.
+    // pays even with few frames generated, real frames on the GPU late or
+    // motion measured late: the game, released once a refresh and late at
+    // once, fills refreshes it missed standing by (the lead absorbs its frame
+    // time's jitter), and a hitch's late frames cost a few refreshes of a
+    // window that still shows more. (b), (c) and (d) then judge nothing;
+    // probes check whether standing by would hold.
     const bool winning = passthrough_fps_ > 0.0 && distinct >= passthrough_fps_ + policy.distinct_margin_fps;
     const std::array<bool, 4> failing{
         passthrough_fps_ > 0.0 && !winning,
         !winning && generated < policy.generated_share * gap,
-        refreshes > 0 && static_cast<double>(unready) > policy.unready_share * static_cast<double>(refreshes),
+        !winning && refreshes > 0 &&
+            static_cast<double>(unready) > policy.unready_share * static_cast<double>(refreshes),
         !winning && timed > 0 && static_cast<double>(late) > policy.late_analyses_share * static_cast<double>(timed),
     };
     for (std::size_t i = 0; i < failing.size(); ++i) {
@@ -2476,6 +2486,7 @@ void FrameGenPresenter::NoteGpuTimingLocked(std::uint64_t submission, const Pend
         if (timing.capture_end != Clock::time_point{} && timing.end > timing.capture_end) {
             const double lag = Milliseconds(timing.end - timing.capture_end);
             analysis_lag_ms_ = analysis_lag_ms_ > 0.0 ? analysis_lag_ms_ * 0.9 + lag * 0.1 : lag;
+            AddSample(measure_lag_ms_, lag);
         }
         if (timing.hardware_start != Clock::time_point{} && timing.hardware_end != Clock::time_point{}) {
             AddSample(ofa_ms_, Milliseconds(timing.hardware_end - timing.hardware_start));
@@ -2527,6 +2538,17 @@ bool FrameGenPresenter::Generate(const XrCompositionLayerProjection& projection,
         tuning.spare = frame.spare;
         tuning.quality = settings_.flow_quality;
         tuning.hardware_flow = settings_.motion_estimation == FrameGenMotionEstimation::kHardware;
+        if (tuning.hardware_flow && interpolate_on_shaders_ && mode == FrameGenSynthesisMode::kInterpolate) {
+            tuning.hardware_flow = false;
+            if (logger_ && !logged_interpolate_on_shaders_) {
+                logged_interpolate_on_shaders_ = true;
+                logger_->Info("Frame Generation measures motion on the shader cores while interpolating in this "
+                              "Direct3D 11 game, though NVIDIA's optical flow hardware is chosen: beside the game's "
+                              "rendering the hardware's vectors come too late for the frames between real frames. "
+                              "Extrapolate uses the hardware; VECTORXR_FRAMEGEN_INTERPOLATE_HARDWARE=1 keeps it for "
+                              "Interpolate too.");
+            }
+        }
         tuning.diagnostic = settings_.diagnostic_view;
         tuning.artifact_suppression = settings_.artifact_suppression;
         tuning.motion_limit_percent = settings_.motion_limit_percent;
@@ -4371,6 +4393,7 @@ void FrameGenPresenter::SummaryLocked(Clock::time_point now) {
             ", eyeMissMm=" + Number(eye_frames_ ? eye_miss_sum_mm_ / eye_frames_ : 0.0, 1) +
             ", gpuStartMs=" + MedianAndMax(gpu_start_ms_) + ", gpuDoneMs=" + MedianAndMax(gpu_done_ms_) +
             ", captureDoneMs=" + MedianAndMax(capture_done_ms_) + ", analysisMs=" + MedianAndMax(analysis_ms_) +
+            ", measureLagMs=" + MedianAndMax(measure_lag_ms_) +
             ", ofaMs=" + MedianAndMax(ofa_ms_) + ", gpuWaits=" + std::to_string(delta(&Totals::gpu_waits)) + "/" +
             (gpu_wait_ms_.empty() ? std::string("-") : Number(*Median(gpu_wait_ms_), 1)) + "/" +
             std::to_string(delta(&Totals::gpu_wait_timeouts)) +
@@ -4398,6 +4421,7 @@ void FrameGenPresenter::SummaryLocked(Clock::time_point now) {
     gpu_done_ms_.clear();
     capture_done_ms_.clear();
     analysis_ms_.clear();
+    measure_lag_ms_.clear();
     ofa_ms_.clear();
     gpu_wait_ms_.clear();
     end_call_ms_.clear();

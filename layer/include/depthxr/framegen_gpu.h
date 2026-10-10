@@ -63,6 +63,7 @@ struct FrameGenAnalysisTiming {
     std::chrono::steady_clock::time_point hardware_start{}; // waiting for the optical flow hardware ({} without it)
     std::chrono::steady_clock::time_point hardware_end{};
     std::chrono::steady_clock::time_point end{};
+    double hardware_call_ms{0.0}; // CPU time the optical flow hardware's execute calls took
 };
 
 struct FrameGenMemoryBudget {
@@ -132,6 +133,9 @@ class FrameGenGpu {
     // Tests: the next optical flow hardware work is never handed to the
     // hardware, as if it had stopped responding.
     virtual void StallHardwareForTest() {}
+    // Several views match on one optical flow atlas (the default) or on a
+    // session each (tests, research; VECTORXR_FRAMEGEN_HARDWARE_ATLAS=0).
+    virtual void SetHardwareAtlas(bool /*on*/) {}
     // Tests and research: the flow the last Execute measured for `view`
     // (the filtered field synthesis used) in full-resolution pixels, x and
     // y per cell row by row; `cells` receives the field's size. Waits for the

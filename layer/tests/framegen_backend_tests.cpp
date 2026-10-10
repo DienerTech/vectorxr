@@ -1801,10 +1801,13 @@ int RunQuadViews(Harness& harness) {
     if (composes) {
         const auto views = quad_views(0.0f, 0.0f);
         // Interpolating (with cover flow for a late real frame), then
-        // extrapolating; on the GPU also with the optical flow hardware: an
-        // optical flow session per view, four of them.
-        for (const bool hardware : {false, true}) {
+        // extrapolating; on the GPU also with the optical flow hardware:
+        // the four views matched on one atlas (flow 1), then with a session
+        // each (flow 2).
+        for (const int flow : {0, 1, 2}) {
+            const bool hardware = flow > 0;
             if (hardware && !g_hardware) continue;
+            gpu->SetHardwareAtlas(flow != 2);
             for (const auto mode : {FrameGenSynthesisMode::kInterpolate, FrameGenSynthesisMode::kExtrapolate}) {
                 FrameGenTuning tuning;
                 tuning.mode = mode;
@@ -1814,7 +1817,7 @@ int RunQuadViews(Harness& harness) {
                 const QuadFrame a = analyze(*gpu, 0, views, nullptr, moving(0.0f), tuning, 25.0, 0.0, true);
                 const QuadFrame b = analyze(*gpu, 1, views, &a, moving(1.0f), tuning, 25.0, 0.0, true);
                 // Where one view could use the optical flow hardware, all
-                // four have a session of their own.
+                // four views match on it, on the atlas or a session each.
                 Check(!hardware || g_flow_status != "active" || gpu->HardwareFlowStatus() == "active",
                       harness.name + " quad views: the optical flow hardware failed with four views: " +
                           gpu->HardwareFlowStatus());
@@ -1830,7 +1833,9 @@ int RunQuadViews(Harness& harness) {
                 const double error_generated = eyes_error(generated, truth);
                 const double error_hold = eyes_error(hold, truth);
                 const std::string what = std::string(interpolate ? "interpolate" : "extrapolate") +
-                                         (hardware ? " (hardware flow: " + gpu->HardwareFlowStatus() + ")" : "");
+                                         (hardware ? std::string(flow == 1 ? " (hardware flow, atlas: " : " (hardware flow, per view: ") +
+                                                         gpu->HardwareFlowStatus() + ")"
+                                                   : "");
                 std::cout << harness.name << " quad views " << what << ": error " << error_generated << " vs hold "
                           << error_hold << '\n';
                 DumpSized(harness.name + "-quad-" + (interpolate ? "interpolated" : "extrapolated"), generated[0], output);
@@ -1973,6 +1978,49 @@ int RunQuadViews(Harness& harness) {
                           harness.name + " the newest quad views frame is not writable: " + error);
                 }
             }
+        }
+        gpu->SetHardwareAtlas(true);
+
+        // The atlas' match that never finishes: the watchdog releases the
+        // queue waiting for it, the hardware is not used again, and block
+        // matching takes over for all four views.
+        if (g_hardware && g_flow_status == "active") {
+            auto stalled = CreateFrameGenGpu(harness.binding, error);
+            Check(stalled != nullptr, harness.name + " backend: " + error);
+            stalled->SetCopyAfterRelease(true);
+            for (const XrSwapchain source : sources) Check(stalled->Track(source, EnumerateImages, error), error);
+            for (const XrSwapchain out : outputs) Check(stalled->Track(out, EnumerateImages, error), error);
+            FrameGenTuning tuning;
+            tuning.mode = FrameGenSynthesisMode::kExtrapolate;
+            tuning.hardware_flow = true;
+            const QuadFrame a = analyze(*stalled, 0, views, nullptr, moving(0.0f), tuning, 25.0, 0.0, true);
+            const QuadFrame b = analyze(*stalled, 1, views, &a, moving(1.0f), tuning, 25.0, 0.0, true);
+            Check(stalled->HardwareFlowStatus() == "active",
+                  harness.name + " quad views atlas: the optical flow hardware is not in use: " + stalled->HardwareFlowStatus());
+            stalled->StallHardwareForTest();
+            const auto start = std::chrono::steady_clock::now();
+            const QuadFrame c = analyze(*stalled, 2, views, &b, moving(2.0f), tuning, 25.0, 0.0, true);
+            const QuadFrame d = analyze(*stalled, 3, views, &c, moving(3.0f), tuning, 25.0, 0.0, true);
+            Check(stalled->WaitIdle(), harness.name + " quad views atlas: the stalled match was not released");
+            const double waited = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+            const QuadFrame e = analyze(*stalled, 0, views, &d, moving(4.0f), tuning, 25.0, 0.0, true);
+            std::cout << harness.name << " quad views stalled atlas: released after " << waited << " ms, now "
+                      << stalled->HardwareFlowStatus() << '\n';
+            Check(stalled->HardwareFlowStatus() == "the optical flow hardware stopped responding" && waited < 2000.0,
+                  harness.name + " quad views: a stalled atlas match was not released");
+            const QuadFrame f = analyze(*stalled, 1, views, &e, moving(5.0f), tuning, 25.0, 0.0, true);
+            const std::array<Pixels, 2> hold{
+                ComposeReference(LinearImage(f.pixels[0], periphery_extent), LinearImage(f.pixels[2], focus_extent),
+                                 BuildFrameGenComposeConstants(f.composition.eyes[0], output), output),
+                ComposeReference(LinearImage(f.pixels[1], periphery_extent), LinearImage(f.pixels[3], focus_extent),
+                                 BuildFrameGenComposeConstants(f.composition.eyes[1], output), output)};
+            const auto truth = composed_truth(f, f.composition, moving(5.5f));
+            const double taken_over = eyes_error(generate(*stalled, f, FrameGenSynthesisMode::kExtrapolate, 0.5f, f.composition), truth);
+            std::cout << harness.name << " quad views after a stalled atlas: error " << taken_over << " vs hold "
+                      << eyes_error(hold, truth) << '\n';
+            Check(taken_over < 0.5 * eyes_error(hold, truth),
+                  harness.name + " quad views: block matching did not take over from a stalled atlas");
+            stalled->Reset();
         }
 
         // A focus view limits the motion its periphery would: at the lowest
@@ -2533,6 +2581,1013 @@ void ProfileUnderLoad(Harness& harness, double load_ms, const std::function<std:
     load->Reset();
 }
 
+// A game keeping the GPU busy without a break (FG_PROFILE_D3D11_LOAD=N:
+// N ms of work a frame, in chunks of about half a millisecond, at most two
+// frames queued), beside Frame Generation's analyses.
+class GpuLoad {
+  public:
+    virtual ~GpuLoad() = default;
+    virtual const char* Name() const = 0;
+    virtual void Start() = 0;
+    // Ends the load once its queued frames have run (never abandons them).
+    virtual void Stop() = 0;
+    virtual double ChunkMs() const = 0;
+    virtual int ChunksPerFrame() const = 0;
+    virtual std::uint64_t Frames() const = 0;
+    // Since Start: the load thread's time submitting its work (a driver
+    // lock shows here) and waiting for its frames on the GPU.
+    virtual double SubmitMs() const = 0;
+    virtual double WaitMs() const = 0;
+};
+
+// FG_PROFILE_LOAD_API=d3d11 (the default): a game like DCS, rendering on a
+// Direct3D 11 device of its own beside Frame Generation's Direct3D 12 one
+// (the bridge's case): full-screen draws.
+class D3D11Load final : public GpuLoad {
+  public:
+    D3D11Load(LUID luid, double frame_ms, double chunk_ms = 0.5) : chunk_target_ms_(chunk_ms) {
+        ComPtr<IDXGIFactory4> factory;
+        ComPtr<IDXGIAdapter> adapter;
+        Check(SUCCEEDED(CreateDXGIFactory1(IID_PPV_ARGS(&factory))) &&
+                  SUCCEEDED(factory->EnumAdapterByLuid(luid, IID_PPV_ARGS(&adapter))),
+              "the load's adapter");
+        const D3D_FEATURE_LEVEL levels[] = {D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0};
+        Check(SUCCEEDED(D3D11CreateDevice(adapter.Get(), D3D_DRIVER_TYPE_UNKNOWN, nullptr, 0, levels, 2,
+                                          D3D11_SDK_VERSION, &device_, nullptr, &context_)),
+              "the load's Direct3D 11 device");
+        static const char source[] = R"(
+cbuffer Load : register(b0) { uint iterations; uint3 pad; };
+float4 VSMain(uint id : SV_VertexID) : SV_Position {
+    const float2 uv = float2((id << 1) & 2, id & 2);
+    return float4(uv * float2(2.0, -2.0) + float2(-1.0, 1.0), 0.0, 1.0);
+}
+float4 PSMain(float4 position : SV_Position) : SV_Target {
+    float4 v = float4(position.xy * 0.001, 0.5, 1.0);
+    [loop] for (uint i = 0; i < iterations; ++i) { v = frac(v * 1.0001 + v.yzwx * 0.37 + 0.11); }
+    return v;
+}
+)";
+        ComPtr<ID3DBlob> vs, ps;
+        Check(SUCCEEDED(D3DCompile(source, std::strlen(source), "load", nullptr, nullptr, "VSMain", "vs_5_0", 0, 0, &vs,
+                                   nullptr)) &&
+                  SUCCEEDED(D3DCompile(source, std::strlen(source), "load", nullptr, nullptr, "PSMain", "ps_5_0", 0, 0,
+                                       &ps, nullptr)),
+              "the load's shaders");
+        Check(SUCCEEDED(device_->CreateVertexShader(vs->GetBufferPointer(), vs->GetBufferSize(), nullptr, &vs_)) &&
+                  SUCCEEDED(device_->CreatePixelShader(ps->GetBufferPointer(), ps->GetBufferSize(), nullptr, &ps_)),
+              "the load's shader objects");
+        D3D11_TEXTURE2D_DESC desc{};
+        desc.Width = desc.Height = kSize;
+        desc.MipLevels = desc.ArraySize = 1;
+        desc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+        desc.SampleDesc.Count = 1;
+        desc.BindFlags = D3D11_BIND_RENDER_TARGET;
+        Check(SUCCEEDED(device_->CreateTexture2D(&desc, nullptr, &target_)) &&
+                  SUCCEEDED(device_->CreateRenderTargetView(target_.Get(), nullptr, &rtv_)),
+              "the load's target");
+        D3D11_BUFFER_DESC constants{16, D3D11_USAGE_DEFAULT, D3D11_BIND_CONSTANT_BUFFER, 0, 0, 0};
+        Check(SUCCEEDED(device_->CreateBuffer(&constants, nullptr, &constants_)), "the load's constants");
+        const D3D11_QUERY_DESC event{D3D11_QUERY_EVENT, 0};
+        for (auto& query : frames_) Check(SUCCEEDED(device_->CreateQuery(&event, &query)), "the load's frame query");
+        Calibrate(frame_ms);
+    }
+
+    ~D3D11Load() override { Stop(); }
+
+    const char* Name() const override { return "Direct3D 11 (own device)"; }
+
+    void Start() override {
+        stop_ = false;
+        thread_ = std::thread([this] { Run(); });
+    }
+
+    void Stop() override {
+        if (!thread_.joinable()) return;
+        stop_ = true;
+        thread_.join();
+        context_->Flush();
+        Idle();
+    }
+
+    double ChunkMs() const override { return chunk_ms_; }
+    int ChunksPerFrame() const override { return chunks_; }
+    std::uint64_t Frames() const override { return frames_done_; }
+    double SubmitMs() const override { return submit_ms_; }
+    double WaitMs() const override { return wait_ms_; }
+
+  private:
+    static constexpr UINT kSize = 2048;
+
+    void Bind(std::uint32_t iterations) {
+        const std::uint32_t data[4]{iterations, 0, 0, 0};
+        context_->UpdateSubresource(constants_.Get(), 0, nullptr, data, 0, 0);
+        const D3D11_VIEWPORT viewport{0.0f, 0.0f, static_cast<float>(kSize), static_cast<float>(kSize), 0.0f, 1.0f};
+        context_->RSSetViewports(1, &viewport);
+        context_->OMSetRenderTargets(1, rtv_.GetAddressOf(), nullptr);
+        context_->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        context_->IASetInputLayout(nullptr);
+        context_->VSSetShader(vs_.Get(), nullptr, 0);
+        context_->PSSetShader(ps_.Get(), nullptr, 0);
+        context_->PSSetConstantBuffers(0, 1, constants_.GetAddressOf());
+    }
+
+    void Idle() {
+        context_->End(frames_[0].Get());
+        context_->Flush();
+        BOOL done = FALSE;
+        while (context_->GetData(frames_[0].Get(), &done, sizeof(done), 0) == S_FALSE) std::this_thread::yield();
+    }
+
+    // One draw's GPU time at `iterations` (median of five).
+    double Measure(std::uint32_t iterations) {
+        ComPtr<ID3D11Query> disjoint, begin, end;
+        const D3D11_QUERY_DESC disjoint_desc{D3D11_QUERY_TIMESTAMP_DISJOINT, 0}, stamp{D3D11_QUERY_TIMESTAMP, 0};
+        Check(SUCCEEDED(device_->CreateQuery(&disjoint_desc, &disjoint)) && SUCCEEDED(device_->CreateQuery(&stamp, &begin)) &&
+                  SUCCEEDED(device_->CreateQuery(&stamp, &end)),
+              "the load's timing queries");
+        Bind(iterations);
+        std::vector<double> times;
+        for (int i = 0; i < 5; ++i) {
+            context_->Begin(disjoint.Get());
+            context_->End(begin.Get());
+            context_->Draw(3, 0);
+            context_->End(end.Get());
+            context_->End(disjoint.Get());
+            D3D11_QUERY_DATA_TIMESTAMP_DISJOINT frequency{};
+            while (context_->GetData(disjoint.Get(), &frequency, sizeof(frequency), 0) == S_FALSE) std::this_thread::yield();
+            UINT64 a = 0, b = 0;
+            while (context_->GetData(begin.Get(), &a, sizeof(a), 0) == S_FALSE) std::this_thread::yield();
+            while (context_->GetData(end.Get(), &b, sizeof(b), 0) == S_FALSE) std::this_thread::yield();
+            if (!frequency.Disjoint && b > a) times.push_back(static_cast<double>(b - a) * 1000.0 / frequency.Frequency);
+        }
+        std::sort(times.begin(), times.end());
+        return times.empty() ? 0.0 : times[times.size() / 2];
+    }
+
+    void Calibrate(double frame_ms) {
+        std::uint32_t iterations = 64;
+        double ms = Measure(iterations);
+        while (ms < chunk_target_ms_ * 0.5 && iterations < (1u << 22)) {
+            iterations *= 2;
+            ms = Measure(iterations);
+        }
+        iterations_ = std::max<std::uint32_t>(1, static_cast<std::uint32_t>(iterations * chunk_target_ms_ / std::max(ms, 1e-3)));
+        chunk_ms_ = Measure(iterations_);
+        chunks_ = std::max(1, static_cast<int>(std::lround(frame_ms / std::max(chunk_ms_, 1e-3))));
+    }
+
+    void Run() {
+        Bind(iterations_);
+        std::uint64_t frame = 0;
+        submit_ms_ = wait_ms_ = 0.0;
+        using Clock = std::chrono::steady_clock;
+        auto ms = [](Clock::time_point since) { return std::chrono::duration<double, std::milli>(Clock::now() - since).count(); };
+        while (!stop_) {
+            const auto submitting = Clock::now();
+            for (int chunk = 0; chunk < chunks_; ++chunk) {
+                context_->Draw(3, 0);
+                if (chunk % 4 == 3) context_->Flush();
+            }
+            context_->End(frames_[frame % frames_.size()].Get());
+            context_->Flush();
+            submit_ms_ += ms(submitting);
+            ++frame;
+            // At most two frames queued, as a game's present allows.
+            if (frame >= 2) {
+                const auto waiting = Clock::now();
+                ID3D11Query* oldest = frames_[(frame - 2) % frames_.size()].Get();
+                BOOL done = FALSE;
+                while (context_->GetData(oldest, &done, sizeof(done), 0) == S_FALSE) std::this_thread::yield();
+                wait_ms_ += ms(waiting);
+                ++frames_done_; // counted across runs: Frames() differences are a run's frames
+            }
+        }
+    }
+
+    ComPtr<ID3D11Device> device_;
+    ComPtr<ID3D11DeviceContext> context_;
+    ComPtr<ID3D11VertexShader> vs_;
+    ComPtr<ID3D11PixelShader> ps_;
+    ComPtr<ID3D11Texture2D> target_;
+    ComPtr<ID3D11RenderTargetView> rtv_;
+    ComPtr<ID3D11Buffer> constants_;
+    std::array<ComPtr<ID3D11Query>, 3> frames_;
+    double chunk_target_ms_{0.5};
+    std::uint32_t iterations_{1};
+    double chunk_ms_{0.0};
+    int chunks_{1};
+    std::thread thread_;
+    std::atomic<bool> stop_{false};
+    std::atomic<std::uint64_t> frames_done_{0};
+    double submit_ms_{0.0};
+    double wait_ms_{0.0};
+};
+
+// FG_PROFILE_LOAD_API=d3d12-same: a game like MSFS, on Frame Generation's own
+// Direct3D 12 device (its queue of its own, as a game's); d3d12-separate: on
+// a Direct3D 12 device of its own. Compute dispatches filling the GPU.
+class D3D12Load final : public GpuLoad {
+  public:
+    D3D12Load(ID3D12Device* same_device, LUID luid, double frame_ms, double chunk_ms)
+        : chunk_target_ms_(chunk_ms), same_(same_device != nullptr) {
+        if (same_device) {
+            device_ = same_device;
+        } else {
+            ComPtr<IDXGIFactory4> factory;
+            ComPtr<IDXGIAdapter> adapter;
+            Check(SUCCEEDED(CreateDXGIFactory1(IID_PPV_ARGS(&factory))) &&
+                      SUCCEEDED(factory->EnumAdapterByLuid(luid, IID_PPV_ARGS(&adapter))) &&
+                      SUCCEEDED(D3D12CreateDevice(adapter.Get(), D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&device_))),
+                  "the load's Direct3D 12 device");
+        }
+        D3D12_COMMAND_QUEUE_DESC queue_desc{};
+        Check(SUCCEEDED(device_->CreateCommandQueue(&queue_desc, IID_PPV_ARGS(&queue_))), "the load's queue");
+        for (auto& allocator : allocators_) {
+            Check(SUCCEEDED(device_->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&allocator))),
+                  "the load's allocator");
+        }
+        Check(SUCCEEDED(device_->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, allocators_[0].Get(), nullptr,
+                                                   IID_PPV_ARGS(&list_))) &&
+                  SUCCEEDED(list_->Close()),
+              "the load's list");
+        Check(SUCCEEDED(device_->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence_))), "the load's fence");
+        event_ = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+        static const char source[] = R"(
+cbuffer Load : register(b0) { uint iterations; };
+RWByteAddressBuffer output : register(u0);
+[numthreads(64, 1, 1)] void CSMain(uint3 id : SV_DispatchThreadID) {
+    float4 v = float4(id.x * 0.001, 0.5, 0.25, 1.0);
+    [loop] for (uint i = 0; i < iterations; ++i) { v = frac(v * 1.0001 + v.yzwx * 0.37 + 0.11); }
+    output.Store((id.x & 1023u) * 4u, asuint(v.x + v.y + v.z + v.w));
+}
+)";
+        ComPtr<ID3DBlob> cs;
+        Check(SUCCEEDED(D3DCompile(source, std::strlen(source), "load", nullptr, nullptr, "CSMain", "cs_5_0", 0, 0, &cs,
+                                   nullptr)),
+              "the load's compute shader");
+        D3D12_ROOT_PARAMETER parameters[2]{};
+        parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+        parameters[0].Constants.Num32BitValues = 1;
+        parameters[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_UAV;
+        D3D12_ROOT_SIGNATURE_DESC root{2, parameters, 0, nullptr, D3D12_ROOT_SIGNATURE_FLAG_NONE};
+        ComPtr<ID3DBlob> serialized;
+        Check(SUCCEEDED(D3D12SerializeRootSignature(&root, D3D_ROOT_SIGNATURE_VERSION_1, &serialized, nullptr)) &&
+                  SUCCEEDED(device_->CreateRootSignature(0, serialized->GetBufferPointer(), serialized->GetBufferSize(),
+                                                         IID_PPV_ARGS(&root_))),
+              "the load's root signature");
+        D3D12_COMPUTE_PIPELINE_STATE_DESC pipeline{};
+        pipeline.pRootSignature = root_.Get();
+        pipeline.CS = {cs->GetBufferPointer(), cs->GetBufferSize()};
+        Check(SUCCEEDED(device_->CreateComputePipelineState(&pipeline, IID_PPV_ARGS(&pipeline_))), "the load's pipeline");
+        D3D12_HEAP_PROPERTIES heap{D3D12_HEAP_TYPE_DEFAULT};
+        D3D12_RESOURCE_DESC buffer{};
+        buffer.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        buffer.Width = 4096;
+        buffer.Height = buffer.DepthOrArraySize = buffer.MipLevels = 1;
+        buffer.SampleDesc.Count = 1;
+        buffer.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        buffer.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+        Check(SUCCEEDED(device_->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &buffer,
+                                                         D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr,
+                                                         IID_PPV_ARGS(&output_))),
+              "the load's buffer");
+        D3D12_QUERY_HEAP_DESC query{D3D12_QUERY_HEAP_TYPE_TIMESTAMP, 2, 0};
+        Check(SUCCEEDED(device_->CreateQueryHeap(&query, IID_PPV_ARGS(&queries_))), "the load's timestamps");
+        D3D12_HEAP_PROPERTIES readback_heap{D3D12_HEAP_TYPE_READBACK};
+        buffer.Width = 16;
+        buffer.Flags = D3D12_RESOURCE_FLAG_NONE;
+        Check(SUCCEEDED(device_->CreateCommittedResource(&readback_heap, D3D12_HEAP_FLAG_NONE, &buffer,
+                                                         D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&readback_))),
+              "the load's readback");
+        Calibrate(frame_ms);
+    }
+
+    ~D3D12Load() override {
+        Stop();
+        if (event_) CloseHandle(event_);
+    }
+
+    const char* Name() const override { return same_ ? "Direct3D 12 (Frame Generation's device)" : "Direct3D 12 (own device)"; }
+
+    void Start() override {
+        stop_ = false;
+        thread_ = std::thread([this] { Run(); });
+    }
+
+    void Stop() override {
+        if (!thread_.joinable()) return;
+        stop_ = true;
+        thread_.join();
+        WaitFor(value_);
+    }
+
+    double ChunkMs() const override { return chunk_ms_; }
+    int ChunksPerFrame() const override { return chunks_; }
+    std::uint64_t Frames() const override { return frames_done_; }
+    double SubmitMs() const override { return submit_ms_; }
+    double WaitMs() const override { return wait_ms_; }
+
+  private:
+    static constexpr UINT kGroups = 8192;
+
+    void WaitFor(UINT64 value) {
+        if (fence_->GetCompletedValue() >= value) return;
+        Check(SUCCEEDED(fence_->SetEventOnCompletion(value, event_)), "the load's fence wait");
+        WaitForSingleObject(event_, INFINITE);
+    }
+
+    void Record(ID3D12CommandAllocator* allocator, std::uint32_t iterations, int dispatches, bool timed) {
+        Check(SUCCEEDED(allocator->Reset()) && SUCCEEDED(list_->Reset(allocator, pipeline_.Get())), "the load's reset");
+        list_->SetComputeRootSignature(root_.Get());
+        list_->SetComputeRoot32BitConstant(0, iterations, 0);
+        list_->SetComputeRootUnorderedAccessView(1, output_->GetGPUVirtualAddress());
+        if (timed) list_->EndQuery(queries_.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 0);
+        for (int i = 0; i < dispatches; ++i) list_->Dispatch(kGroups, 1, 1);
+        if (timed) {
+            list_->EndQuery(queries_.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 1);
+            list_->ResolveQueryData(queries_.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 0, 2, readback_.Get(), 0);
+        }
+        Check(SUCCEEDED(list_->Close()), "the load's close");
+        ID3D12CommandList* lists[] = {list_.Get()};
+        queue_->ExecuteCommandLists(1, lists);
+        Check(SUCCEEDED(queue_->Signal(fence_.Get(), ++value_)), "the load's signal");
+    }
+
+    // One dispatch's GPU time at `iterations` (median of five).
+    double Measure(std::uint32_t iterations) {
+        UINT64 frequency = 0;
+        Check(SUCCEEDED(queue_->GetTimestampFrequency(&frequency)), "the load's timestamp frequency");
+        std::vector<double> times;
+        for (int i = 0; i < 5; ++i) {
+            Record(allocators_[0].Get(), iterations, 1, true);
+            WaitFor(value_);
+            void* mapped = nullptr;
+            const D3D12_RANGE range{0, 16};
+            Check(SUCCEEDED(readback_->Map(0, &range, &mapped)), "the load's readback map");
+            const auto* stamps = static_cast<const UINT64*>(mapped);
+            if (stamps[1] > stamps[0]) times.push_back(static_cast<double>(stamps[1] - stamps[0]) * 1000.0 / frequency);
+            const D3D12_RANGE none{0, 0};
+            readback_->Unmap(0, &none);
+        }
+        std::sort(times.begin(), times.end());
+        return times.empty() ? 0.0 : times[times.size() / 2];
+    }
+
+    void Calibrate(double frame_ms) {
+        std::uint32_t iterations = 64;
+        double ms = Measure(iterations);
+        while (ms < chunk_target_ms_ * 0.5 && iterations < (1u << 22)) {
+            iterations *= 2;
+            ms = Measure(iterations);
+        }
+        iterations_ = std::max<std::uint32_t>(1, static_cast<std::uint32_t>(iterations * chunk_target_ms_ / std::max(ms, 1e-3)));
+        chunk_ms_ = Measure(iterations_);
+        chunks_ = std::max(1, static_cast<int>(std::lround(frame_ms / std::max(chunk_ms_, 1e-3))));
+    }
+
+    void Run() {
+        std::uint64_t frame = 0;
+        std::array<UINT64, 3> frame_values{};
+        submit_ms_ = wait_ms_ = 0.0;
+        using Clock = std::chrono::steady_clock;
+        auto ms = [](Clock::time_point since) { return std::chrono::duration<double, std::milli>(Clock::now() - since).count(); };
+        while (!stop_) {
+            // At most two frames queued, as a game's present allows.
+            if (frame >= 2) {
+                const auto waiting = Clock::now();
+                WaitFor(frame_values[(frame - 2) % frame_values.size()]);
+                wait_ms_ += ms(waiting);
+                ++frames_done_; // counted across runs: Frames() differences are a run's frames
+            }
+            const auto submitting = Clock::now();
+            // A list per four dispatches, as a game submits its frame in parts.
+            for (int chunk = 0; chunk < chunks_; chunk += 4) {
+                Record(PartAllocator(frame, chunk), iterations_, std::min(4, chunks_ - chunk), false);
+            }
+            frame_values[frame % frame_values.size()] = value_;
+            submit_ms_ += ms(submitting);
+            ++frame;
+        }
+    }
+
+    // A frame's parts each get an allocator of their own (reused once that
+    // frame is done, two frames later).
+    ID3D12CommandAllocator* PartAllocator(std::uint64_t frame, int chunk) {
+        const std::size_t part = static_cast<std::size_t>(chunk / 4);
+        auto& allocators = part_allocators_[frame % 3];
+        while (allocators.size() <= part) {
+            ComPtr<ID3D12CommandAllocator> allocator;
+            Check(SUCCEEDED(device_->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&allocator))),
+                  "the load's part allocator");
+            allocators.push_back(allocator);
+        }
+        return allocators[part].Get();
+    }
+
+    double chunk_target_ms_{0.5};
+    bool same_{false};
+    ComPtr<ID3D12Device> device_;
+    ComPtr<ID3D12CommandQueue> queue_;
+    std::array<ComPtr<ID3D12CommandAllocator>, 1> allocators_;
+    std::array<std::vector<ComPtr<ID3D12CommandAllocator>>, 3> part_allocators_;
+    ComPtr<ID3D12GraphicsCommandList> list_;
+    ComPtr<ID3D12Fence> fence_;
+    UINT64 value_{0};
+    HANDLE event_{nullptr};
+    ComPtr<ID3D12RootSignature> root_;
+    ComPtr<ID3D12PipelineState> pipeline_;
+    ComPtr<ID3D12Resource> output_;
+    ComPtr<ID3D12QueryHeap> queries_;
+    ComPtr<ID3D12Resource> readback_;
+    std::uint32_t iterations_{1};
+    double chunk_ms_{0.0};
+    int chunks_{1};
+    std::thread thread_;
+    std::atomic<bool> stop_{false};
+    std::atomic<std::uint64_t> frames_done_{0};
+    double submit_ms_{0.0};
+    double wait_ms_{0.0};
+};
+
+// The load FG_PROFILE_LOAD_API names (d3d11, d3d12-same, d3d12-separate),
+// beside Frame Generation's device `device`.
+std::unique_ptr<GpuLoad> MakeLoad(ID3D12Device* device, double frame_ms, double chunk_ms) {
+    const std::string api = std::getenv("FG_PROFILE_LOAD_API") ? std::getenv("FG_PROFILE_LOAD_API") : "d3d11";
+    if (api == "d3d12-same") return std::make_unique<D3D12Load>(device, device->GetAdapterLuid(), frame_ms, chunk_ms);
+    if (api == "d3d12-separate") return std::make_unique<D3D12Load>(nullptr, device->GetAdapterLuid(), frame_ms, chunk_ms);
+    Check(api == "d3d11", "FG_PROFILE_LOAD_API is d3d11, d3d12-same or d3d12-separate");
+    return std::make_unique<D3D11Load>(device->GetAdapterLuid(), frame_ms, chunk_ms);
+}
+
+// Times real frames' analyses (captures, then the analysis, every 14 ms as
+// a game at about 70 fps releases them) from the analysis' submission: how
+// long before the GPU started it, how long it ran, how long it waited for
+// the optical flow hardware, and when it was done.
+struct AnalysisLatency {
+    std::vector<double> start, run, hardware, done, capture, calls;
+};
+
+AnalysisLatency TimeAnalyses(FrameGenGpu& backend, int frames,
+                             const std::function<std::uint64_t(FrameGenGpu&, int)>& real_frame) {
+    AnalysisLatency latency;
+    std::map<std::uint64_t, std::chrono::steady_clock::time_point> submitted;
+    auto take = [&](int frame) {
+        for (const FrameGenAnalysisTiming& timing : backend.TakeTimings()) {
+            const auto found = submitted.find(timing.submission);
+            if (frame < 16 || found == submitted.end() || timing.start == std::chrono::steady_clock::time_point{}) {
+                continue;
+            }
+            auto ms = [&](std::chrono::steady_clock::time_point t) {
+                return std::chrono::duration<double, std::milli>(t - found->second).count();
+            };
+            latency.start.push_back(ms(timing.start));
+            latency.run.push_back(std::chrono::duration<double, std::milli>(timing.end - timing.start).count());
+            latency.done.push_back(ms(timing.end));
+            if (timing.hardware_start != std::chrono::steady_clock::time_point{}) {
+                latency.hardware.push_back(
+                    std::chrono::duration<double, std::milli>(timing.hardware_end - timing.hardware_start).count());
+                latency.calls.push_back(timing.hardware_call_ms);
+            }
+            if (timing.capture_end != std::chrono::steady_clock::time_point{}) latency.capture.push_back(ms(timing.capture_end));
+        }
+    };
+    auto next = std::chrono::steady_clock::now();
+    for (int frame = 0; frame < frames; ++frame) {
+        const std::uint64_t submission = real_frame(backend, frame);
+        submitted[submission] = std::chrono::steady_clock::now();
+        next += std::chrono::milliseconds(14);
+        std::this_thread::sleep_until(next);
+        take(frame);
+    }
+    backend.WaitIdle();
+    take(frames);
+    return latency;
+}
+
+std::string Percentiles(std::vector<double> values) {
+    if (values.empty()) return "      -";
+    std::sort(values.begin(), values.end());
+    char text[64];
+    std::snprintf(text, sizeof(text), "%6.2f / %6.2f", values[values.size() / 2], values[values.size() * 9 / 10]);
+    return text;
+}
+
+void PrintLatency(const char* label, const AnalysisLatency& latency) {
+    std::printf("  %-34s started %s  ran %s  hardware %s  done %s  (median / p90 ms after submission, %zu analyses)\n",
+                label, Percentiles(latency.start).c_str(), Percentiles(latency.run).c_str(),
+                Percentiles(latency.hardware).c_str(), Percentiles(latency.done).c_str(), latency.done.size());
+    if (!latency.calls.empty()) {
+        std::printf("    the hardware's execute calls took %s ms on the CPU\n", Percentiles(latency.calls).c_str());
+    }
+}
+
+// FG_PROFILE_VK_OF=1 (with FG_PROFILE_D3D11_LOAD): NVIDIA's optical flow
+// through Vulkan (VK_NV_optical_flow) instead of its Direct3D 12 interface:
+// the four quad views' matches (their half-size luma, as the Direct3D 12
+// hardware path matches) submitted on Vulkan's optical flow queue every
+// 14 ms, timed from submission to completion, idle and beside the
+// Direct3D 11 load. FG_PROFILE_VK_OF_PRIORITY=high|realtime asks for that
+// global priority for the queue.
+void ProfileVulkanOpticalFlow(ID3D12Device* d3d12_device, double load_ms, double chunk_ms) {
+    const LUID luid = d3d12_device->GetAdapterLuid();
+    const HMODULE loader = LoadLibraryExW(L"vulkan-1.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+    Check(loader != nullptr, "Vulkan loader");
+    const auto get_instance = reinterpret_cast<PFN_vkGetInstanceProcAddr>(GetProcAddress(loader, "vkGetInstanceProcAddr"));
+    Check(get_instance != nullptr, "vkGetInstanceProcAddr");
+    const auto create_instance = reinterpret_cast<PFN_vkCreateInstance>(get_instance(nullptr, "vkCreateInstance"));
+    VkApplicationInfo app{VK_STRUCTURE_TYPE_APPLICATION_INFO};
+    app.pApplicationName = "VectorXR optical flow profile";
+    app.apiVersion = VK_API_VERSION_1_3;
+    VkInstanceCreateInfo instance_info{VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};
+    instance_info.pApplicationInfo = &app;
+    VkInstance instance = VK_NULL_HANDLE;
+    Check(create_instance(&instance_info, nullptr, &instance) == VK_SUCCESS, "Vulkan 1.3 instance");
+#define VKI(name)                                                                                   \
+    const auto vk##name = reinterpret_cast<PFN_vk##name>(get_instance(instance, "vk" #name)); \
+    Check(vk##name != nullptr, "vk" #name);
+    VKI(DestroyInstance)
+    VKI(EnumeratePhysicalDevices)
+    VKI(GetPhysicalDeviceProperties2)
+    VKI(GetPhysicalDeviceQueueFamilyProperties)
+    VKI(GetPhysicalDeviceMemoryProperties)
+    VKI(CreateDevice)
+    VKI(GetDeviceProcAddr)
+    VKI(GetPhysicalDeviceOpticalFlowImageFormatsNV)
+#undef VKI
+    std::uint32_t count = 0;
+    vkEnumeratePhysicalDevices(instance, &count, nullptr);
+    std::vector<VkPhysicalDevice> physicals(count);
+    vkEnumeratePhysicalDevices(instance, &count, physicals.data());
+    VkPhysicalDevice physical = VK_NULL_HANDLE;
+    for (const VkPhysicalDevice candidate : physicals) {
+        VkPhysicalDeviceIDProperties id{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES};
+        VkPhysicalDeviceProperties2 properties{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, &id};
+        vkGetPhysicalDeviceProperties2(candidate, &properties);
+        if (id.deviceLUIDValid && std::memcmp(id.deviceLUID, &luid, sizeof(luid)) == 0) physical = candidate;
+    }
+    Check(physical != VK_NULL_HANDLE, "the Vulkan device of the Direct3D 12 adapter");
+    VkPhysicalDeviceProperties2 physical_properties{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};
+    vkGetPhysicalDeviceProperties2(physical, &physical_properties);
+    const double tick_ns = physical_properties.properties.limits.timestampPeriod;
+    vkGetPhysicalDeviceQueueFamilyProperties(physical, &count, nullptr);
+    std::vector<VkQueueFamilyProperties> families(count);
+    vkGetPhysicalDeviceQueueFamilyProperties(physical, &count, families.data());
+    std::uint32_t family = 0;
+    while (family < count && !(families[family].queueFlags & VK_QUEUE_OPTICAL_FLOW_BIT_NV)) ++family;
+    Check(family < count, "an optical flow queue family");
+    const std::string priority_name = std::getenv("FG_PROFILE_VK_OF_PRIORITY") ? std::getenv("FG_PROFILE_VK_OF_PRIORITY") : "";
+    const float queue_priority = 1.0f;
+    VkDeviceQueueGlobalPriorityCreateInfoKHR global{VK_STRUCTURE_TYPE_DEVICE_QUEUE_GLOBAL_PRIORITY_CREATE_INFO_KHR};
+    global.globalPriority = priority_name == "realtime" ? VK_QUEUE_GLOBAL_PRIORITY_REALTIME_KHR : VK_QUEUE_GLOBAL_PRIORITY_HIGH_KHR;
+    VkDeviceQueueCreateInfo queue_info{VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};
+    queue_info.pNext = priority_name.empty() ? nullptr : &global;
+    queue_info.queueFamilyIndex = family;
+    queue_info.queueCount = 1;
+    queue_info.pQueuePriorities = &queue_priority;
+    VkPhysicalDeviceOpticalFlowFeaturesNV flow_features{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_OPTICAL_FLOW_FEATURES_NV};
+    flow_features.opticalFlow = VK_TRUE;
+    VkPhysicalDeviceVulkan13Features features13{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES, &flow_features};
+    features13.synchronization2 = VK_TRUE;
+    VkPhysicalDeviceVulkan12Features features12{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES, &features13};
+    features12.timelineSemaphore = VK_TRUE;
+    features12.hostQueryReset = VK_TRUE;
+    const char* extensions[] = {VK_NV_OPTICAL_FLOW_EXTENSION_NAME, VK_KHR_CALIBRATED_TIMESTAMPS_EXTENSION_NAME,
+                                VK_KHR_GLOBAL_PRIORITY_EXTENSION_NAME};
+    VkDeviceCreateInfo device_info{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, &features12};
+    device_info.queueCreateInfoCount = 1;
+    device_info.pQueueCreateInfos = &queue_info;
+    device_info.enabledExtensionCount = priority_name.empty() ? 2u : 3u;
+    device_info.ppEnabledExtensionNames = extensions;
+    VkDevice device = VK_NULL_HANDLE;
+    const VkResult created = vkCreateDevice(physical, &device_info, nullptr, &device);
+    Check(created == VK_SUCCESS, "Vulkan optical flow device (" + std::to_string(created) + ")");
+#define VKD(name)                                                                                    \
+    const auto vk##name = reinterpret_cast<PFN_vk##name>(vkGetDeviceProcAddr(device, "vk" #name)); \
+    Check(vk##name != nullptr, "vk" #name);
+    VKD(DestroyDevice)
+    VKD(GetDeviceQueue)
+    VKD(CreateImage)
+    VKD(DestroyImage)
+    VKD(GetImageMemoryRequirements)
+    VKD(AllocateMemory)
+    VKD(FreeMemory)
+    VKD(BindImageMemory)
+    VKD(CreateImageView)
+    VKD(DestroyImageView)
+    VKD(CreateBuffer)
+    VKD(DestroyBuffer)
+    VKD(GetBufferMemoryRequirements)
+    VKD(BindBufferMemory)
+    VKD(MapMemory)
+    VKD(UnmapMemory)
+    VKD(CreateCommandPool)
+    VKD(DestroyCommandPool)
+    VKD(AllocateCommandBuffers)
+    VKD(BeginCommandBuffer)
+    VKD(EndCommandBuffer)
+    VKD(ResetCommandBuffer)
+    VKD(CmdPipelineBarrier2)
+    VKD(CmdCopyBufferToImage)
+    VKD(QueueSubmit2)
+    VKD(CreateSemaphore)
+    VKD(DestroySemaphore)
+    VKD(WaitSemaphores)
+    VKD(DeviceWaitIdle)
+    VKD(CreateOpticalFlowSessionNV)
+    VKD(DestroyOpticalFlowSessionNV)
+    VKD(BindOpticalFlowSessionImageNV)
+    VKD(CmdOpticalFlowExecuteNV)
+    VKD(CreateQueryPool)
+    VKD(DestroyQueryPool)
+    VKD(ResetQueryPool)
+    VKD(CmdWriteTimestamp2)
+    VKD(GetQueryPoolResults)
+    VKD(GetCalibratedTimestampsKHR)
+#undef VKD
+    VkQueue queue = VK_NULL_HANDLE;
+    vkGetDeviceQueue(device, family, 0, &queue);
+    auto first_format = [&](VkOpticalFlowUsageFlagsNV usage, VkFormat wanted) {
+        VkOpticalFlowImageFormatInfoNV info{VK_STRUCTURE_TYPE_OPTICAL_FLOW_IMAGE_FORMAT_INFO_NV, nullptr, usage};
+        std::uint32_t n = 0;
+        vkGetPhysicalDeviceOpticalFlowImageFormatsNV(physical, &info, &n, nullptr);
+        std::vector<VkOpticalFlowImageFormatPropertiesNV> formats(n, {VK_STRUCTURE_TYPE_OPTICAL_FLOW_IMAGE_FORMAT_PROPERTIES_NV});
+        vkGetPhysicalDeviceOpticalFlowImageFormatsNV(physical, &info, &n, formats.data());
+        for (const auto& format : formats) {
+            if (format.format == wanted) return wanted;
+        }
+        return formats.empty() ? VK_FORMAT_UNDEFINED : formats.front().format;
+    };
+    const VkFormat input_format = first_format(VK_OPTICAL_FLOW_USAGE_INPUT_BIT_NV, VK_FORMAT_R8_UNORM);
+    const VkFormat flow_format = first_format(VK_OPTICAL_FLOW_USAGE_OUTPUT_BIT_NV, VK_FORMAT_R16G16_SFIXED5_NV);
+    Check(input_format == VK_FORMAT_R8_UNORM && flow_format == VK_FORMAT_R16G16_SFIXED5_NV,
+          "optical flow formats R8 in, S10.5 vectors out (" + std::to_string(input_format) + ", " +
+              std::to_string(flow_format) + ")");
+    VkPhysicalDeviceMemoryProperties memory{};
+    vkGetPhysicalDeviceMemoryProperties(physical, &memory);
+    auto memory_type = [&](std::uint32_t bits, VkMemoryPropertyFlags flags) {
+        for (std::uint32_t i = 0; i < memory.memoryTypeCount; ++i) {
+            if ((bits & (1u << i)) && (memory.memoryTypes[i].propertyFlags & flags) == flags) return i;
+        }
+        Check(false, "a memory type");
+        return 0u;
+    };
+
+    struct Image {
+        VkImage image{VK_NULL_HANDLE};
+        VkDeviceMemory memory{VK_NULL_HANDLE};
+        VkImageView view{VK_NULL_HANDLE};
+    };
+    auto make_image = [&](std::uint32_t width, std::uint32_t height, VkFormat format, VkOpticalFlowUsageFlagsNV flow_usage,
+                          VkImageUsageFlags usage) {
+        VkOpticalFlowImageFormatInfoNV flow{VK_STRUCTURE_TYPE_OPTICAL_FLOW_IMAGE_FORMAT_INFO_NV, nullptr, flow_usage};
+        VkImageCreateInfo info{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, &flow};
+        info.imageType = VK_IMAGE_TYPE_2D;
+        info.format = format;
+        info.extent = {width, height, 1};
+        info.mipLevels = info.arrayLayers = 1;
+        info.samples = VK_SAMPLE_COUNT_1_BIT;
+        info.tiling = VK_IMAGE_TILING_OPTIMAL;
+        info.usage = usage;
+        Image image;
+        Check(vkCreateImage(device, &info, nullptr, &image.image) == VK_SUCCESS, "optical flow image");
+        VkMemoryRequirements requirements{};
+        vkGetImageMemoryRequirements(device, image.image, &requirements);
+        VkMemoryAllocateInfo allocate{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+        allocate.allocationSize = requirements.size;
+        allocate.memoryTypeIndex = memory_type(requirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+        Check(vkAllocateMemory(device, &allocate, nullptr, &image.memory) == VK_SUCCESS &&
+                  vkBindImageMemory(device, image.image, image.memory, 0) == VK_SUCCESS,
+              "optical flow image memory");
+        VkImageViewCreateInfo view{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+        view.image = image.image;
+        view.viewType = VK_IMAGE_VIEW_TYPE_2D;
+        view.format = format;
+        view.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+        Check(vkCreateImageView(device, &view, nullptr, &image.view) == VK_SUCCESS, "optical flow image view");
+        return image;
+    };
+
+    // The views' half-size luma, as FrameGenPyramid(...)[1] of the quad
+    // views (2184x2200 and 2748x2764). FG_PROFILE_VK_OF_LAYOUT=same: four
+    // matches on the first view's session; single: that one match only;
+    // atlas: one match of the four views packed 2x2 (2466x2482).
+    const std::string layout = std::getenv("FG_PROFILE_VK_OF_LAYOUT") ? std::getenv("FG_PROFILE_VK_OF_LAYOUT") : "views";
+    std::vector<VkExtent2D> sizes{{1092, 1100}, {1092, 1100}, {1374, 1382}, {1374, 1382}};
+    if (layout == "same" || layout == "single") sizes = {{1092, 1100}};
+    if (layout == "atlas") sizes = {{2466, 2482}};
+    const std::size_t executes = layout == "same" ? 4 : layout == "single" || layout == "atlas" ? 1 : 4;
+    {
+        VkPhysicalDeviceOpticalFlowPropertiesNV flow_properties{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_OPTICAL_FLOW_PROPERTIES_NV};
+        VkPhysicalDeviceProperties2 properties{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, &flow_properties};
+        vkGetPhysicalDeviceProperties2(physical, &properties);
+        std::printf("Optical flow limits: %ux%u to %ux%u, output grids 0x%x, regions %u\n", flow_properties.minWidth,
+                    flow_properties.minHeight, flow_properties.maxWidth, flow_properties.maxHeight,
+                    flow_properties.supportedOutputGridSizes, flow_properties.maxNumRegionsOfInterest);
+    }
+    struct Session {
+        VkOpticalFlowSessionNV session{VK_NULL_HANDLE};
+        Image input, reference, flow;
+    };
+    std::vector<Session> sessions(sizes.size());
+    VkCommandPool pool = VK_NULL_HANDLE;
+    VkCommandPoolCreateInfo pool_info{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
+    pool_info.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+    pool_info.queueFamilyIndex = family;
+    Check(vkCreateCommandPool(device, &pool_info, nullptr, &pool) == VK_SUCCESS, "command pool");
+    std::array<VkCommandBuffer, 3> commands{};
+    VkCommandBufferAllocateInfo allocate{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+    allocate.commandPool = pool;
+    allocate.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    allocate.commandBufferCount = static_cast<std::uint32_t>(commands.size());
+    Check(vkAllocateCommandBuffers(device, &allocate, commands.data()) == VK_SUCCESS, "command buffers");
+    VkSemaphoreTypeCreateInfo timeline_type{VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO};
+    timeline_type.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE;
+    VkSemaphoreCreateInfo semaphore_info{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO, &timeline_type};
+    VkSemaphore timeline = VK_NULL_HANDLE;
+    Check(vkCreateSemaphore(device, &semaphore_info, nullptr, &timeline) == VK_SUCCESS, "timeline semaphore");
+    // Two timestamps a frame (before and after its matches), per command
+    // buffer.
+    VkQueryPoolCreateInfo query_info{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
+    query_info.queryType = VK_QUERY_TYPE_TIMESTAMP;
+    query_info.queryCount = 15;
+    VkQueryPool queries = VK_NULL_HANDLE;
+    Check(vkCreateQueryPool(device, &query_info, nullptr, &queries) == VK_SUCCESS, "timestamp queries");
+    // The GPU's clock against QueryPerformanceCounter (steady_clock's).
+    auto calibrate = [&](std::uint64_t& gpu, std::uint64_t& cpu) {
+        VkCalibratedTimestampInfoKHR domains[2]{{VK_STRUCTURE_TYPE_CALIBRATED_TIMESTAMP_INFO_KHR},
+                                                {VK_STRUCTURE_TYPE_CALIBRATED_TIMESTAMP_INFO_KHR}};
+        domains[0].timeDomain = VK_TIME_DOMAIN_DEVICE_KHR;
+        domains[1].timeDomain = VK_TIME_DOMAIN_QUERY_PERFORMANCE_COUNTER_KHR;
+        std::uint64_t values[2]{};
+        std::uint64_t deviation = 0;
+        Check(vkGetCalibratedTimestampsKHR(device, 2, domains, values, &deviation) == VK_SUCCESS, "calibrated timestamps");
+        gpu = values[0];
+        cpu = values[1];
+    };
+    LARGE_INTEGER qpc_frequency{};
+    QueryPerformanceFrequency(&qpc_frequency);
+    auto gpu_time = [&](std::uint64_t stamp, std::uint64_t gpu, std::uint64_t cpu) {
+        const double seconds = static_cast<double>(cpu) / static_cast<double>(qpc_frequency.QuadPart) +
+                               (static_cast<double>(stamp) - static_cast<double>(gpu)) * tick_ns * 1e-9;
+        return std::chrono::steady_clock::time_point(
+            std::chrono::duration_cast<std::chrono::steady_clock::duration>(std::chrono::duration<double>(seconds)));
+    };
+    std::uint64_t submitted = 0;
+    auto submit = [&](VkCommandBuffer command) {
+        VkCommandBufferSubmitInfo command_info{VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO};
+        command_info.commandBuffer = command;
+        VkSemaphoreSubmitInfo signal{VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO};
+        signal.semaphore = timeline;
+        signal.value = ++submitted;
+        signal.stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+        VkSubmitInfo2 info{VK_STRUCTURE_TYPE_SUBMIT_INFO_2};
+        info.commandBufferInfoCount = 1;
+        info.pCommandBufferInfos = &command_info;
+        info.signalSemaphoreInfoCount = 1;
+        info.pSignalSemaphoreInfos = &signal;
+        Check(vkQueueSubmit2(queue, 1, &info, VK_NULL_HANDLE) == VK_SUCCESS, "optical flow submit");
+        return submitted;
+    };
+    auto wait = [&](std::uint64_t value) {
+        VkSemaphoreWaitInfo info{VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO};
+        info.semaphoreCount = 1;
+        info.pSemaphores = &timeline;
+        info.pValues = &value;
+        return vkWaitSemaphores(device, &info, 2'000'000'000ull) == VK_SUCCESS;
+    };
+
+    // Images: a textured input and the same texture moved a few texels as
+    // the reference, uploaded through a staging buffer.
+    VkDeviceSize staging_size = 0;
+    for (const VkExtent2D size : sizes) staging_size += 2ull * size.width * size.height;
+    VkBuffer staging = VK_NULL_HANDLE;
+    VkDeviceMemory staging_memory = VK_NULL_HANDLE;
+    VkBufferCreateInfo buffer_info{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+    buffer_info.size = staging_size;
+    buffer_info.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+    Check(vkCreateBuffer(device, &buffer_info, nullptr, &staging) == VK_SUCCESS, "staging buffer");
+    VkMemoryRequirements staging_requirements{};
+    vkGetBufferMemoryRequirements(device, staging, &staging_requirements);
+    VkMemoryAllocateInfo staging_allocate{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+    staging_allocate.allocationSize = staging_requirements.size;
+    staging_allocate.memoryTypeIndex = memory_type(staging_requirements.memoryTypeBits,
+                                                   VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    Check(vkAllocateMemory(device, &staging_allocate, nullptr, &staging_memory) == VK_SUCCESS &&
+              vkBindBufferMemory(device, staging, staging_memory, 0) == VK_SUCCESS,
+          "staging memory");
+    void* mapped = nullptr;
+    Check(vkMapMemory(device, staging_memory, 0, staging_size, 0, &mapped) == VK_SUCCESS, "staging map");
+    auto* bytes = static_cast<std::uint8_t*>(mapped);
+    VkDeviceSize offset = 0;
+    std::vector<VkDeviceSize> offsets;
+    for (const VkExtent2D size : sizes) {
+        for (int frame = 0; frame < 2; ++frame) {
+            offsets.push_back(offset);
+            for (std::uint32_t y = 0; y < size.height; ++y) {
+                for (std::uint32_t x = 0; x < size.width; ++x) {
+                    // Its green channel as the luma.
+                    const std::uint32_t p = Background(static_cast<float>(x + 3 * frame), static_cast<float>(y + 2 * frame));
+                    bytes[offset + std::size_t{y} * size.width + x] = static_cast<std::uint8_t>((p >> 8) & 0xffu);
+                }
+            }
+            offset += std::size_t{size.width} * size.height;
+        }
+    }
+    vkUnmapMemory(device, staging_memory);
+
+    VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+    begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    Check(vkBeginCommandBuffer(commands[0], &begin) == VK_SUCCESS, "upload begin");
+    auto barrier = [&](VkCommandBuffer command, VkImage image, VkImageLayout from, VkImageLayout to, VkPipelineStageFlags2 src_stage,
+                       VkAccessFlags2 src_access, VkPipelineStageFlags2 dst_stage, VkAccessFlags2 dst_access) {
+        VkImageMemoryBarrier2 b{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2};
+        b.srcStageMask = src_stage;
+        b.srcAccessMask = src_access;
+        b.dstStageMask = dst_stage;
+        b.dstAccessMask = dst_access;
+        b.oldLayout = from;
+        b.newLayout = to;
+        b.srcQueueFamilyIndex = b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        b.image = image;
+        b.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+        VkDependencyInfo dependency{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+        dependency.imageMemoryBarrierCount = 1;
+        dependency.pImageMemoryBarriers = &b;
+        vkCmdPipelineBarrier2(command, &dependency);
+    };
+    const char* perf_name = std::getenv("FG_PROFILE_QUALITY");
+    const VkOpticalFlowPerformanceLevelNV perf = perf_name && std::string(perf_name) == "performance"
+                                                     ? VK_OPTICAL_FLOW_PERFORMANCE_LEVEL_FAST_NV
+                                                     : VK_OPTICAL_FLOW_PERFORMANCE_LEVEL_MEDIUM_NV;
+    for (std::size_t i = 0; i < sizes.size(); ++i) {
+        const VkExtent2D size = sizes[i];
+        Session& s = sessions[i];
+        s.input = make_image(size.width, size.height, input_format, VK_OPTICAL_FLOW_USAGE_INPUT_BIT_NV,
+                             VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
+        s.reference = make_image(size.width, size.height, input_format, VK_OPTICAL_FLOW_USAGE_INPUT_BIT_NV,
+                                 VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
+        s.flow = make_image((size.width + 3) / 4, (size.height + 3) / 4, flow_format, VK_OPTICAL_FLOW_USAGE_OUTPUT_BIT_NV,
+                            VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
+        VkOpticalFlowSessionCreateInfoNV info{VK_STRUCTURE_TYPE_OPTICAL_FLOW_SESSION_CREATE_INFO_NV};
+        info.width = size.width;
+        info.height = size.height;
+        info.imageFormat = input_format;
+        info.flowVectorFormat = flow_format;
+        info.outputGridSize = VK_OPTICAL_FLOW_GRID_SIZE_4X4_BIT_NV;
+        info.performanceLevel = perf;
+        Check(vkCreateOpticalFlowSessionNV(device, &info, nullptr, &s.session) == VK_SUCCESS, "optical flow session");
+        Check(vkBindOpticalFlowSessionImageNV(device, s.session, VK_OPTICAL_FLOW_SESSION_BINDING_POINT_INPUT_NV, s.input.view,
+                                              VK_IMAGE_LAYOUT_GENERAL) == VK_SUCCESS &&
+                  vkBindOpticalFlowSessionImageNV(device, s.session, VK_OPTICAL_FLOW_SESSION_BINDING_POINT_REFERENCE_NV,
+                                                  s.reference.view, VK_IMAGE_LAYOUT_GENERAL) == VK_SUCCESS &&
+                  vkBindOpticalFlowSessionImageNV(device, s.session, VK_OPTICAL_FLOW_SESSION_BINDING_POINT_FLOW_VECTOR_NV,
+                                                  s.flow.view, VK_IMAGE_LAYOUT_GENERAL) == VK_SUCCESS,
+              "optical flow bindings");
+        for (int frame = 0; frame < 2; ++frame) {
+            const VkImage image = frame ? s.reference.image : s.input.image;
+            barrier(commands[0], image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_PIPELINE_STAGE_2_NONE, 0,
+                    VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT);
+            VkBufferImageCopy copy{};
+            copy.bufferOffset = offsets[i * 2 + frame];
+            copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+            copy.imageExtent = {size.width, size.height, 1};
+            vkCmdCopyBufferToImage(commands[0], staging, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
+            barrier(commands[0], image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL, VK_PIPELINE_STAGE_2_COPY_BIT,
+                    VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_2_OPTICAL_FLOW_BIT_NV, VK_ACCESS_2_OPTICAL_FLOW_READ_BIT_NV);
+        }
+        barrier(commands[0], s.flow.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL, VK_PIPELINE_STAGE_2_NONE, 0,
+                VK_PIPELINE_STAGE_2_OPTICAL_FLOW_BIT_NV, VK_ACCESS_2_OPTICAL_FLOW_WRITE_BIT_NV);
+    }
+    Check(vkEndCommandBuffer(commands[0]) == VK_SUCCESS, "upload end");
+    Check(wait(submit(commands[0])), "upload");
+
+    // One frame: the four matches, after the last frame's (their vectors
+    // are written again).
+    auto frame = [&](std::size_t index) {
+        const VkCommandBuffer command = commands[index % commands.size()];
+        Check(vkResetCommandBuffer(command, 0) == VK_SUCCESS && vkBeginCommandBuffer(command, &begin) == VK_SUCCESS,
+              "frame begin");
+        VkMemoryBarrier2 previous{VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
+        previous.srcStageMask = previous.dstStageMask = VK_PIPELINE_STAGE_2_OPTICAL_FLOW_BIT_NV;
+        previous.srcAccessMask = VK_ACCESS_2_OPTICAL_FLOW_WRITE_BIT_NV;
+        previous.dstAccessMask = VK_ACCESS_2_OPTICAL_FLOW_READ_BIT_NV | VK_ACCESS_2_OPTICAL_FLOW_WRITE_BIT_NV;
+        VkDependencyInfo dependency{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+        dependency.memoryBarrierCount = 1;
+        dependency.pMemoryBarriers = &previous;
+        vkCmdPipelineBarrier2(command, &dependency);
+        const std::uint32_t query = static_cast<std::uint32_t>(index % commands.size()) * 5;
+        vkResetQueryPool(device, queries, query, 5);
+        vkCmdWriteTimestamp2(command, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, queries, query);
+        std::uint32_t stamp = query;
+        for (std::size_t k = 0; k < 4; ++k) {
+            if (k < executes) {
+                VkOpticalFlowExecuteInfoNV execute{VK_STRUCTURE_TYPE_OPTICAL_FLOW_EXECUTE_INFO_NV};
+                vkCmdOpticalFlowExecuteNV(command, sessions[k % sessions.size()].session, &execute);
+            }
+            vkCmdWriteTimestamp2(command, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, queries, ++stamp);
+        }
+        Check(vkEndCommandBuffer(command) == VK_SUCCESS, "frame end");
+        return submit(command);
+    };
+    auto run = [&](int frames) {
+        std::vector<double> latency;
+        std::vector<std::chrono::steady_clock::time_point> at(static_cast<std::size_t>(frames));
+        std::vector<std::uint64_t> values(static_cast<std::size_t>(frames));
+        std::atomic<int> submitted_frames{0};
+        std::atomic<int> completed{0};
+        // Completions, timed as they happen on a thread of their own.
+        std::vector<std::chrono::steady_clock::time_point> done(static_cast<std::size_t>(frames));
+        std::vector<std::chrono::steady_clock::time_point> gpu_start(static_cast<std::size_t>(frames)),
+            gpu_end(static_cast<std::size_t>(frames));
+        std::array<std::vector<double>, 4> each;
+        std::uint64_t calibration_gpu = 0, calibration_cpu = 0;
+        calibrate(calibration_gpu, calibration_cpu);
+        std::thread waiter([&] {
+            for (int i = 0; i < frames; ++i) {
+                while (submitted_frames.load() <= i) std::this_thread::yield();
+                Check(wait(values[static_cast<std::size_t>(i)]), "optical flow frame");
+                done[static_cast<std::size_t>(i)] = std::chrono::steady_clock::now();
+                std::uint64_t stamps[5]{};
+                const std::uint32_t query = static_cast<std::uint32_t>(i % static_cast<int>(commands.size())) * 5;
+                if (vkGetQueryPoolResults(device, queries, query, 5, sizeof(stamps), stamps, sizeof(std::uint64_t),
+                                          VK_QUERY_RESULT_64_BIT) == VK_SUCCESS) {
+                    gpu_start[static_cast<std::size_t>(i)] = gpu_time(stamps[0], calibration_gpu, calibration_cpu);
+                    gpu_end[static_cast<std::size_t>(i)] = gpu_time(stamps[4], calibration_gpu, calibration_cpu);
+                    if (i >= 16) {
+                        for (std::size_t k = 0; k < 4; ++k) {
+                            each[k].push_back(static_cast<double>(stamps[k + 1] - stamps[k]) * tick_ns * 1e-6);
+                        }
+                    }
+                }
+                completed = i + 1;
+            }
+        });
+        auto next = std::chrono::steady_clock::now();
+        for (int i = 0; i < frames; ++i) {
+            // A command buffer is recorded again once its frame is done.
+            while (completed.load() < i - 2) std::this_thread::yield();
+            values[static_cast<std::size_t>(i)] = frame(static_cast<std::size_t>(i));
+            at[static_cast<std::size_t>(i)] = std::chrono::steady_clock::now();
+            submitted_frames = i + 1;
+            next += std::chrono::milliseconds(14);
+            std::this_thread::sleep_until(next);
+        }
+        waiter.join();
+        std::vector<double> started, ran, noticed;
+        auto ms = [](auto a, auto b) { return std::chrono::duration<double, std::milli>(a - b).count(); };
+        for (int i = 16; i < frames; ++i) {
+            const std::size_t f = static_cast<std::size_t>(i);
+            latency.push_back(ms(done[f], at[f]));
+            if (gpu_start[f] != std::chrono::steady_clock::time_point{}) {
+                started.push_back(ms(gpu_start[f], at[f]));
+                ran.push_back(ms(gpu_end[f], gpu_start[f]));
+                noticed.push_back(ms(done[f], gpu_end[f]));
+            }
+        }
+        std::printf("            on the GPU: started %s, ran %s, seen done %s ms after (median / p90)\n",
+                    Percentiles(started).c_str(), Percentiles(ran).c_str(), Percentiles(noticed).c_str());
+        std::printf("            each match:");
+        for (const auto& times : each) std::printf("  %s", Percentiles(times).c_str());
+        std::printf(" ms\n");
+        return latency;
+    };
+    const std::unique_ptr<GpuLoad> load = MakeLoad(d3d12_device, load_ms, chunk_ms);
+    const int frames = std::getenv("FG_PROFILE_D3D11_FRAMES") ? std::atoi(std::getenv("FG_PROFILE_D3D11_FRAMES")) : 200;
+    std::printf("\nVulkan optical flow (queue family %u%s): %zu match(es) a frame, layout %s, %s\n", family,
+                priority_name.empty() ? "" : (", global priority " + priority_name).c_str(), executes, layout.c_str(),
+                perf == VK_OPTICAL_FLOW_PERFORMANCE_LEVEL_FAST_NV ? "fast" : "medium");
+    const std::vector<double> idle = run(frames);
+    std::printf("  idle      done %s ms after submission (median / p90)\n", Percentiles(idle).c_str());
+    const std::uint64_t first = load->Frames();
+    const auto began = std::chrono::steady_clock::now();
+    load->Start();
+    const std::vector<double> loaded = run(frames);
+    load->Stop();
+    const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - began).count();
+    std::printf("  loaded    done %s ms after submission (median / p90); the %s load ran %.1f frames/s\n",
+                Percentiles(loaded).c_str(), load->Name(), (load->Frames() - first) / seconds);
+    vkDeviceWaitIdle(device);
+    for (Session& s : sessions) {
+        vkDestroyOpticalFlowSessionNV(device, s.session, nullptr);
+        for (Image* image : {&s.input, &s.reference, &s.flow}) {
+            vkDestroyImageView(device, image->view, nullptr);
+            vkDestroyImage(device, image->image, nullptr);
+            vkFreeMemory(device, image->memory, nullptr);
+        }
+    }
+    vkDestroyBuffer(device, staging, nullptr);
+    vkFreeMemory(device, staging_memory, nullptr);
+    vkDestroySemaphore(device, timeline, nullptr);
+    vkDestroyQueryPool(device, queries, nullptr);
+    vkDestroyCommandPool(device, pool, nullptr);
+    vkDestroyDevice(device, nullptr);
+    vkDestroyInstance(instance, nullptr);
+}
+
+#ifdef DEPTHXR_NVOF_RESEARCH
+void ProfileD3D12OpticalFlow(ID3D12Device* device, ID3D12CommandQueue* queue, double load_ms, double chunk_ms);
+#endif
+
 // The cockpit (CockpitAt) through a view of any field of view, rendered on
 // every CPU thread.
 Pixels CockpitView(const QuadView& view, float head_x, float scroll) {
@@ -2649,6 +3704,75 @@ int RunQuadProfile(Harness& harness, const char* const* names, std::size_t name_
         const bool analyzed = backend.Execute(views_now, analyze, result, error);
         Check(analyzed, "quad profile analyze: " + error);
     };
+    if (const char* load_ms = std::getenv("FG_PROFILE_D3D11_LOAD")) {
+        // DCS's case: analyses beside a game rendering on a Direct3D 11
+        // device of its own, with the GPU busy without a break.
+        const XrGraphicsBindingD3D12KHR* game = nullptr;
+        for (auto* base = static_cast<const XrBaseInStructure*>(harness.binding); base; base = base->next) {
+            if (base->type == XR_TYPE_GRAPHICS_BINDING_D3D12_KHR) game = reinterpret_cast<const XrGraphicsBindingD3D12KHR*>(base);
+        }
+        Check(game != nullptr, "the Direct3D 11 load needs a Direct3D 12 binding");
+        gpu->Reset();
+        // FG_PROFILE_D3D11_CHUNK_MS: each draw's GPU time (0.5).
+        const double chunk_ms = std::getenv("FG_PROFILE_D3D11_CHUNK_MS") ? std::atof(std::getenv("FG_PROFILE_D3D11_CHUNK_MS")) : 0.5;
+        if (std::getenv("FG_PROFILE_VK_OF") && std::string(std::getenv("FG_PROFILE_VK_OF")) == "1") {
+            ProfileVulkanOpticalFlow(game->device, std::atof(load_ms), chunk_ms);
+            return 0;
+        }
+#ifdef DEPTHXR_NVOF_RESEARCH
+        if (std::getenv("FG_PROFILE_D3D12_OF") && std::string(std::getenv("FG_PROFILE_D3D12_OF")) == "1") {
+            ProfileD3D12OpticalFlow(game->device, game->queue, std::atof(load_ms), chunk_ms);
+            return 0;
+        }
+#endif
+        const std::unique_ptr<GpuLoad> load = MakeLoad(game->device, std::atof(load_ms), chunk_ms);
+        std::printf("\n%s load: %d chunks of %.2f ms a frame (%.1f ms), at most two frames queued; %s\n", load->Name(),
+                    load->ChunksPerFrame(), load->ChunkMs(), load->ChunksPerFrame() * load->ChunkMs(),
+                    interpolate ? "interpolate" : "extrapolate");
+        // FG_PROFILE_D3D11_FLOWS=shader|hardware: one of them only;
+        // FG_PROFILE_D3D11_FRAMES=N analyses each (200); FG_PROFILE_QUALITY=
+        // performance|balanced|quality.
+        const std::string flows = std::getenv("FG_PROFILE_D3D11_FLOWS") ? std::getenv("FG_PROFILE_D3D11_FLOWS") : "";
+        const int load_frames = std::getenv("FG_PROFILE_D3D11_FRAMES") ? std::atoi(std::getenv("FG_PROFILE_D3D11_FRAMES")) : 200;
+        const std::string quality = std::getenv("FG_PROFILE_QUALITY") ? std::getenv("FG_PROFILE_QUALITY") : "balanced";
+        for (const bool hardware : {false, true}) {
+            if (!flows.empty() && flows != (hardware ? "hardware" : "shader")) continue;
+            for (const bool loaded : {false, true}) {
+                FrameGenTuning tuning;
+                tuning.mode = interpolate ? FrameGenSynthesisMode::kInterpolate : FrameGenSynthesisMode::kExtrapolate;
+                tuning.quality = quality == "performance" ? FrameGenFlowQuality::kPerformance
+                                 : quality == "quality"   ? FrameGenFlowQuality::kQuality
+                                                          : FrameGenFlowQuality::kBalanced;
+                tuning.hardware_flow = hardware;
+                auto backend = CreateFrameGenGpu(harness.binding, error);
+                Check(backend != nullptr, "load profile backend: " + error);
+                backend->SetCopyAfterRelease(true);
+                for (const XrSwapchain source : sources) Check(backend->Track(source, EnumerateImages, error), error);
+                for (const XrSwapchain eye : eyes) Check(backend->Track(eye, EnumerateImages, error), error);
+                const auto began = std::chrono::steady_clock::now();
+                const std::uint64_t first = load->Frames();
+                if (loaded) load->Start();
+                const AnalysisLatency latency = TimeAnalyses(*backend, load_frames, [&](FrameGenGpu& b, int i) {
+                    FrameGenExecuteResult result;
+                    real_frame(b, i, tuning, result);
+                    return result.submission;
+                });
+                if (loaded) load->Stop();
+                const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - began).count();
+                const std::string label = std::string(hardware ? "hardware (" + backend->HardwareFlowStatus() + ")" : "shader") +
+                                          (loaded ? ", loaded" : ", idle");
+                PrintLatency(label.c_str(), latency);
+                if (loaded) {
+                    std::printf("    the load ran %.1f frames/s; its thread spent %.0f%% submitting, %.0f%% waiting for "
+                                "the GPU\n",
+                                (load->Frames() - first) / seconds, 100.0 * load->SubmitMs() / (seconds * 1000.0),
+                                100.0 * load->WaitMs() / (seconds * 1000.0));
+                }
+                backend->Reset();
+            }
+        }
+        return 0;
+    }
     for (const int config : {0, 1, 2}) {
         FrameGenTuning tuning;
         tuning.quality = config == 1 ? FrameGenFlowQuality::kQuality : FrameGenFlowQuality::kBalanced;
@@ -3600,6 +4724,11 @@ class NvofSession {
 
     std::uint32_t OutputWidth() const { return output_width_; }
     std::uint32_t OutputHeight() const { return output_height_; }
+    // Flow from input `input` to input `reference` without waiting; the
+    // fence value it signals, and whether it has.
+    void Submit(int input, int reference, bool temporal) { Execute(input, reference, temporal); }
+    UINT64 Value() const { return fence_value_; }
+    bool Done(UINT64 value) const { return fence_->GetCompletedValue() >= value; }
 
   private:
     std::string LastError() {
@@ -3744,6 +4873,101 @@ class NvofSession {
     NvOFGPUBufferHandle output_handle_{};
     std::vector<NvOFGPUBufferHandle> registered_;
 };
+
+// FG_PROFILE_D3D12_OF=1 (with FG_PROFILE_D3D11_LOAD and FG_PROFILE_LOAD_API):
+// NVIDIA's optical flow through its Direct3D 12 interface, as the backend
+// calls it, alone: FG_PROFILE_VK_OF_LAYOUT's layouts (views: the four quad
+// views' sessions; single: the first only; atlas: one session for the four
+// packed 2x2), executed every 14 ms with their inputs ready, each execute's
+// completion seen on the CPU, idle and beside the load.
+void ProfileD3D12OpticalFlow(ID3D12Device* device, ID3D12CommandQueue* queue, double load_ms, double chunk_ms) {
+    const std::string layout = std::getenv("FG_PROFILE_VK_OF_LAYOUT") ? std::getenv("FG_PROFILE_VK_OF_LAYOUT") : "views";
+    std::vector<std::pair<std::uint32_t, std::uint32_t>> sizes{{1092, 1100}, {1092, 1100}, {1374, 1382}, {1374, 1382}};
+    if (layout == "single") sizes = {{1092, 1100}};
+    if (layout == "atlas") sizes = {{2466, 2482}};
+    const char* perf_name = std::getenv("FG_PROFILE_QUALITY");
+    const NV_OF_PERF_LEVEL perf =
+        perf_name && std::string(perf_name) == "performance" ? NV_OF_PERF_LEVEL_FAST : NV_OF_PERF_LEVEL_MEDIUM;
+    std::vector<std::unique_ptr<NvofSession>> sessions;
+    for (const auto& [width, height] : sizes) {
+        auto session = std::make_unique<NvofSession>();
+        std::string error;
+        Check(session->Create(device, queue, width, height, 2, NV_OF_OUTPUT_VECTOR_GRID_SIZE_4, perf, error), error);
+        for (int frame = 0; frame < 2; ++frame) {
+            std::vector<std::uint8_t> gray(std::size_t{width} * height);
+            for (std::uint32_t y = 0; y < height; ++y) {
+                for (std::uint32_t x = 0; x < width; ++x) {
+                    const std::uint32_t pixel = Background(static_cast<float>(x + 3 * frame), static_cast<float>(y + 2 * frame));
+                    gray[std::size_t{y} * width + x] = static_cast<std::uint8_t>((pixel >> 8) & 0xffu);
+                }
+            }
+            session->Upload(frame, gray);
+        }
+        sessions.push_back(std::move(session));
+    }
+    auto run = [&](int frames) {
+        using Clock = std::chrono::steady_clock;
+        std::vector<Clock::time_point> at(static_cast<std::size_t>(frames));
+        std::vector<std::vector<UINT64>> values(static_cast<std::size_t>(frames));
+        std::vector<std::vector<Clock::time_point>> done(static_cast<std::size_t>(frames));
+        std::atomic<int> submitted{0};
+        std::atomic<int> completed{0};
+        std::thread waiter([&] {
+            for (int i = 0; i < frames; ++i) {
+                while (submitted.load() <= i) std::this_thread::yield();
+                const std::size_t f = static_cast<std::size_t>(i);
+                done[f].resize(sessions.size());
+                for (std::size_t k = 0; k < sessions.size(); ++k) {
+                    while (!sessions[k]->Done(values[f][k])) std::this_thread::yield();
+                    done[f][k] = Clock::now();
+                }
+                completed = i + 1;
+            }
+        });
+        auto next = Clock::now();
+        for (int i = 0; i < frames; ++i) {
+            while (completed.load() < i - 2) std::this_thread::yield();
+            const std::size_t f = static_cast<std::size_t>(i);
+            for (const auto& session : sessions) {
+                session->Submit(0, 1, true);
+                values[f].push_back(session->Value());
+            }
+            at[f] = Clock::now();
+            submitted = i + 1;
+            next += std::chrono::milliseconds(14);
+            std::this_thread::sleep_until(next);
+        }
+        waiter.join();
+        std::vector<std::vector<double>> each(sessions.size());
+        std::vector<double> total;
+        for (int i = 16; i < frames; ++i) {
+            const std::size_t f = static_cast<std::size_t>(i);
+            for (std::size_t k = 0; k < sessions.size(); ++k) {
+                each[k].push_back(std::chrono::duration<double, std::milli>(done[f][k] - at[f]).count());
+            }
+            total.push_back(each.back().back());
+        }
+        std::printf("            each execute done:");
+        for (const auto& times : each) std::printf("  %s", Percentiles(times).c_str());
+        std::printf(" ms after submission\n");
+        return total;
+    };
+    const std::unique_ptr<GpuLoad> load = MakeLoad(device, load_ms, chunk_ms);
+    const int frames = std::getenv("FG_PROFILE_D3D11_FRAMES") ? std::atoi(std::getenv("FG_PROFILE_D3D11_FRAMES")) : 200;
+    std::printf("\nDirect3D 12 optical flow: %zu execute(s) a frame, layout %s, %s\n", sessions.size(), layout.c_str(),
+                perf == NV_OF_PERF_LEVEL_FAST ? "fast" : "medium");
+    const std::vector<double> idle = run(frames);
+    std::printf("  idle      done %s ms after submission (median / p90)\n", Percentiles(idle).c_str());
+    const std::uint64_t first = load->Frames();
+    const auto began = std::chrono::steady_clock::now();
+    load->Start();
+    const std::vector<double> loaded = run(frames);
+    load->Stop();
+    const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - began).count();
+    std::printf("  loaded    done %s ms after submission (median / p90); the %s load ran %.1f frames/s\n",
+                Percentiles(loaded).c_str(), load->Name(), (load->Frames() - first) / seconds);
+}
+
 
 // Mean endpoint error (pixels) of a flow field against `truth(x, y)` over
 // cells whose centre lies in [margin, size - margin).
