@@ -3987,6 +3987,21 @@ void TestSideBySideFrameGen(Game& game, const std::string& mode, bool shown_lazy
             SideBySideFrame(session, game, options);
         }
     };
+    // Frames in `options` until the runtime shows their layers: the frames
+    // shown are the lead's refreshes behind the game's, and a GPU-bound
+    // phase grows the lead past four of the game's frames (a canvas keeps
+    // five real frames, so those before are still shown as paced).
+    const auto settle = [&](const SideBySideFrameOptions& options) {
+        run(4, options);
+        const std::uint32_t layers = options.quad_layer ? 2u : 1u;
+        for (int i = 0; i < 32; ++i) {
+            {
+                std::scoped_lock lock(g_runtime_mutex);
+                if (!extras.empty() && extras.back().layers == layers) break;
+            }
+            run(1, options);
+        }
+    };
     // Every frame the runtime showed from `from` on: two views; the quad
     // layer after the projection (`quad_layer`) showing the game's latest
     // release; Frame Generation's outputs, or the game's image, each eye
@@ -4022,7 +4037,12 @@ void TestSideBySideFrameGen(Game& game, const std::string& mode, bool shown_lazy
                           std::to_string(extra.game_quad_releases) + ")");
                 quad_behind += behind > 0 ? 1 : 0;
             } else {
-                Check(extra.layers == 1, where + ": the projection alone reaches the runtime");
+                Check(extra.layers == 1, where + ": the projection alone reaches the runtime (" +
+                                             std::to_string(extra.layers) + " layers, " +
+                                             (shown.views.empty() || shown.views[0].swapchain == session.eyes.swapchain
+                                                  ? "the game's image"
+                                                  : "Frame Generation's") +
+                                             ", " + std::to_string(i - from) + " frames into the check)");
             }
             const bool real = shown.views[0].swapchain == session.eyes.swapchain;
             for (int eye = 0; eye < 2; ++eye) {
@@ -4175,7 +4195,7 @@ void TestSideBySideFrameGen(Game& game, const std::string& mode, bool shown_lazy
     // shown until one of them is real still have it.
     SideBySideFrameOptions no_quad_layer;
     no_quad_layer.quad_layer = false;
-    run(4, no_quad_layer);
+    settle(no_quad_layer);
     const Backlog without_quad = loaded(false, "GPU-bound, without the quad layer");
     const auto describe = [](const Backlog& backlog) {
         return std::to_string(backlog.waited) + " of " + std::to_string(backlog.during) + " (waited " +
@@ -4242,7 +4262,7 @@ void TestSideBySideFrameGen(Game& game, const std::string& mode, bool shown_lazy
     // colour still captured and shown through Frame Generation; then, Frame
     // Generation toggled off, the game's frames reach the runtime as they
     // are, without the depth (the rest of each view's chain kept).
-    run(4);
+    settle({});
     const depthxr::FrameGenStatus before_depth = Peer::FrameGen();
     const std::size_t depth_from = ShownCount();
     SideBySideFrameOptions with_depth;
