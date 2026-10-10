@@ -44,6 +44,7 @@
 #include <functional>
 #include <iomanip>
 #include <iostream>
+#include <limits>
 #include <map>
 #include <mutex>
 #include <optional>
@@ -3097,10 +3098,16 @@ void TestBridgedQuadFrameGen(Game& game, const std::string& mode) {
     // back, none black; those of Frame Generation's own outputs show one real
     // frame's focus at the centre and its periphery at the corner. Returns
     // how many showed its outputs.
-    const auto check_shown = [&](std::size_t from, const std::string& at) {
+    // The frames shown from `from` on, or the first `count` of them (the
+    // presenter thread keeps showing frames: counts compared with another
+    // look at them must stop where it did).
+    const auto check_shown = [&](std::size_t from, const std::string& at,
+                                 std::size_t count = std::numeric_limits<std::size_t>::max()) {
         const std::array<XrSwapchain, 2> compositor = Peer::CompositorOutputs();
         std::size_t own = 0;
-        for (const ShownFrame& shown : Shown(from)) {
+        std::vector<ShownFrame> frames = Shown(from);
+        frames.resize(std::min(frames.size(), count));
+        for (const ShownFrame& shown : frames) {
             Check(shown.views.size() == 2, at + ": the runtime gets two views, not " + std::to_string(shown.views.size()));
             const bool composed = shown.views[0].swapchain == compositor[0] && shown.views[1].swapchain == compositor[1];
             for (int eye = 0; eye < 2; ++eye) {
@@ -3157,8 +3164,8 @@ void TestBridgedQuadFrameGen(Game& game, const std::string& mode) {
         run(24, "composing");
         composing_frames += 24;
     } while (Peer::FrameGen().generated == 0 && composing_frames < 96);
-    const std::size_t own = check_shown(engaged_from, "composing");
     const std::vector<ShownFrame> composing = Shown(engaged_from);
+    const std::size_t own = check_shown(engaged_from, "composing", composing.size());
     // Once its first frame is written, every refresh shows Frame Generation's
     // outputs, but for one it could not write, or whose real frame was not
     // captured yet (a loaded machine stalls it): that shows the frame shown
