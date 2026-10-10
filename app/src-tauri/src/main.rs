@@ -282,6 +282,7 @@ struct OsdSettings {
     show_clock: bool,
     show_pivot: bool,
     show_framegen: bool,
+    show_framegen_fps: bool,
     compact_show_runtime: bool,
     compact_show_brand: bool,
     compact_show_app: bool,
@@ -324,6 +325,7 @@ impl Default for OsdSettings {
             show_clock: true,
             show_pivot: true,
             show_framegen: true,
+            show_framegen_fps: true,
             compact_show_runtime: true,
             compact_show_brand: true,
             compact_show_app: true,
@@ -2778,13 +2780,14 @@ mod tests {
         assert!(!legacy.osd.enabled);
         assert_eq!(legacy.osd.update_hz, 5);
         assert!(legacy.osd.show_framegen && !legacy.osd.compact_show_framegen);
+        assert!(legacy.osd.show_framegen_fps);
         assert_eq!(legacy.osd.body_order, ["graph", "turbo", "framegen", "pivot", "modules"]);
         let input = serde_json::json!({"enabled":true,"compact":true,"visibleOnStart":false,
             "horizontalDegrees":-30.0,"verticalDegrees":15.0,"distanceMeters":2.0,"scale":75.0,
             "opacity":70,"updateHz":10,"showGraph":false,"showRuntime":false,"showTurbo":false,
             "showModules":false,"showClock":false,"accent":"blue","toggleBinding":{"type":"none"},
             "showPivot":false,"clockFormat":"12","customColor":"#aB12Ef","bodyOrder":["pivot","framegen","turbo","modules","graph"],
-            "showFramegen":false,"compactShowFramegen":true,
+            "showFramegen":false,"compactShowFramegen":true,"showFramegenFps":false,
             "compactShowRuntime":true,"compactShowClock":true,"compactShowTurbo":true,"compactShowPivot":true,
             "compactShowBrand":false,"compactShowApp":false,"compactMetrics":"fps",
             "showBrand":false,"showApp":false,
@@ -3022,6 +3025,7 @@ mod tests {
         assert_eq!(saved["modules"]["framegen"]["toggleBinding"]["type"], "none");
         assert_eq!(saved["core"]["osd"]["showFramegen"], true);
         assert_eq!(saved["core"]["osd"]["compactShowFramegen"], false);
+        assert_eq!(saved["core"]["osd"]["showFramegenFps"], true);
 
         let unnamed: super::VectorXRConfig = serde_json::from_value(serde_json::json!({
             "applications": [{ "id": "dcs", "name": "DCS", "enabled": true, "match": { "exe": "DCS.exe" } }],

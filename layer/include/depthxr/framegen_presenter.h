@@ -66,9 +66,6 @@ enum class FrameGenDepthState {
 };
 
 const char* ToString(FrameGenDepthState state); // "unknown", "not-sent", ... (relay names)
-// One line for people (the OSD's second Frame Generation line): "Depth in
-// use: ...", "No depth from this game: ...", ...
-const char* Describe(FrameGenDepthState state);
 
 struct FrameGenStatus {
     FrameGenState state{FrameGenState::kOff};
@@ -139,6 +136,22 @@ struct FrameGenStatus {
     // newer frame shown as it is could take its place.
     std::uint64_t stale_skipped{0};
 };
+
+// What the On-Screen Display and the desktop app say about a Frame Generation
+// status, in one vocabulary: On, Standby, Starting, Paused, Unavailable, Off.
+struct FrameGenOsdText {
+    std::string row;       // the expanded OSD's Frame Generation row
+    std::string compact;   // the compact OSD's one-line status
+    std::string detail;    // a second, smaller line under the row; empty for none
+    // Beside the OSD's FPS counter: ON, STBY, WAIT, PAUSED, OFF or N/A (empty
+    // when the session did not start with Frame Generation on).
+    std::string badge;
+    double shown_fps{0.0}; // frames per second the headset shows while generating; 0 otherwise
+    std::string state;     // the desktop app's state: active, standby, waiting, paused, unavailable or off
+    std::string reason;    // the desktop app's status line beside that state; empty for none
+};
+// `started`: the session started with Frame Generation on.
+FrameGenOsdText DescribeFrameGen(const FrameGenStatus& status, bool started);
 
 // Emulated quad views (the layer composes XR_VARJO_quad_views into stereo):
 // what happens to one frame from the layer's quad views compose site.
@@ -342,10 +355,11 @@ class FrameGenPresenter {
     // Frame Generation captures the images of `swapchain` (a primary
     // projection's color or depth).
     bool CapturesFrom(XrSwapchain swapchain) const;
+    // DescribeFrameGen of the current status, and its parts.
+    FrameGenOsdText OsdDescription() const;
     std::string OsdText() const;
     std::string CompactOsdText() const;
-    // A second OSD line under OsdText: what the game's depth does for
-    // generated frames, or empty.
+    // A second OSD line under OsdText (a hint the player can act on), or empty.
     std::string OsdDetailText() const;
 
   private:

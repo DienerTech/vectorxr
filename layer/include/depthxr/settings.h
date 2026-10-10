@@ -92,6 +92,9 @@ struct OsdSettings {
     bool show_clock{true};
     bool show_pivot{true};
     bool show_framegen{true};
+    // Beside the FPS counter, in both layouts, in sessions with Frame
+    // Generation on: its state and the frames per second the headset shows.
+    bool show_framegen_fps{true};
     bool compact_show_runtime{true};
     bool compact_show_brand{true};
     bool compact_show_app{true};

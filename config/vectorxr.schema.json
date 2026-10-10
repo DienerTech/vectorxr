@@ -255,6 +255,11 @@
           "type": "boolean",
           "default": true
         },
+        "showFramegenFps": {
+          "type": "boolean",
+          "default": true,
+          "description": "Both layouts, in sessions with Frame Generation on: its state (FG ON, STBY, WAIT, PAUSED, OFF or N/A) and the frames per second the headset shows, beside the FPS value."
+        },
         "showModules": {
           "type": "boolean",
           "default": true
@@ -436,6 +441,11 @@
                   "showFramegen": {
                     "type": "boolean",
                     "default": true
+                  },
+                  "showFramegenFps": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "Both layouts, in sessions with Frame Generation on: its state (FG ON, STBY, WAIT, PAUSED, OFF or N/A) and the frames per second the headset shows, beside the FPS value."
                   },
                   "showModules": {
                     "type": "boolean",

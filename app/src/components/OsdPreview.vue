@@ -13,15 +13,19 @@ const expandedHeader = computed(() => {
   return { shift: s.showBrand || s.showApp || s.showRuntime || s.showClock ? 0 : 40,
     clockX, appX, runtimeX: s.showRuntime ? (s.showApp ? Math.floor((appX + clockX) / 2) : appX) : clockX }
 })
+// Row heights as the layer draws them; Frame Generation's row has a second
+// line while it generates.
+const rowHeight = (row: OsdBodyRow) => row === 'graph' ? 156 : row === 'framegen' ? 80 : 52
 const rows = computed(() => {
   let y = 190 - expandedHeader.value.shift
   return props.settings.bodyOrder.filter(row => props.settings[flags[row]]).map(row => {
-    const result = { key: row, y }; y += row === 'graph' ? 156 : 52; return result
+    const result = { key: row, y }; y += rowHeight(row); return result
   })
 })
-const compactLayout = computed(() => osdCompactLayout(props.settings))
+// The preview shows a session with Frame Generation on.
+const compactLayout = computed(() => osdCompactLayout(props.settings, true))
 const panelWidth = computed(() => props.settings.compact ? compactLayout.value.width : 960)
-const height = computed(() => props.settings.compact ? compactLayout.value.height : 210 - expandedHeader.value.shift + rows.value.reduce((sum, row) => sum + (row.key === 'graph' ? 156 : 52), 0))
+const height = computed(() => props.settings.compact ? compactLayout.value.height : 210 - expandedHeader.value.shift + rows.value.reduce((sum, row) => sum + rowHeight(row.key), 0))
 const width = computed(() => 2 * Math.atan(.275 * props.settings.scale / 100 * (panelWidth.value - 2) / 958) * 180 / Math.PI)
 const angularHeight = computed(() => width.value * (height.value - 2) / (panelWidth.value - 2))
 // Legible mode draws both layouts at one shared scale so text size matches between Compact and Expanded.
@@ -36,7 +40,15 @@ const legibleScale = computed(() => Math.min(legibleMaxScale, stageSize.value.wi
 const legibleStageHeight = computed(() => Math.max(300, Math.ceil(height.value * legibleScale.value) + legiblePadY))
 const legibleView = computed(() => ({ width: stageSize.value.width || legibleWidestPanel, height: stageSize.value.height || legibleStageHeight.value }))
 const headerValues = computed(() => ({ brand: 'VECTORXR', app: 'your-game.exe', runtime: 'Your OpenXR runtime', clock: props.settings.clockFormat === '12' ? '8:42 PM' : '20:42' }))
-const labels: Record<OsdBodyRow, [string, string]> = { graph: ['', ''], turbo: ['TURBO', 'Async / Experimental'], framegen: ['FRAME GEN', 'Extrapolate 3x / 30 -> 90 fps / 3.1 ms'], pivot: ['PIVOT', 'DCS Stepped Applied, Nudges Applied'], modules: ['ENHANCEMENTS', 'Depth / Pivot / Turbo / Quadviews'] }
+const labels: Record<OsdBodyRow, [string, string]> = { graph: ['', ''], turbo: ['TURBO', 'Async / Experimental'], framegen: ['FRAME GEN', 'On  /  Interpolate  /  Dynamic'], pivot: ['PIVOT', 'DCS Stepped Applied, Nudges Applied'], modules: ['ENHANCEMENTS', 'Depth / Pivot / Turbo / Quadviews'] }
+const framegenDetail = '45 \u2192 90 fps  /  GPU 3.1 ms'
+// Sample readings: a game Frame Generation doubles while the preview shows
+// Frame Generation, a game at full rate otherwise.
+const sample = computed(() => {
+  const s = props.settings
+  const framegen = s.compact ? s.compactShowFramegen || compactLayout.value.framegenBadge : s.showFramegen || s.showFramegenFps
+  return framegen ? { fps: '45', average: '22.2', p95: '24.8' } : { fps: '90', average: '11.1', p95: '12.4' }
+})
 let drag: { x: number; y: number; h: number; v: number; unit: number } | null = null
 function start(event: PointerEvent) {
   if (event.button !== 0 || legible.value) return
@@ -69,8 +81,12 @@ function move(event: PointerEvent) {
         </g>
         <template v-if="settings.compact">
           <foreignObject v-for="field in compactLayout.fields" :key="field.key" :x="field.x" :y="compactLayout.headerY" :width="field.width" height="34"><div class="header-field" :style="field.key === 'brand' ? { color: accent, fontWeight: 600, fontSize: '22px' } : undefined">{{ headerValues[field.key as keyof typeof headerValues] }}</div></foreignObject>
-          <text v-if="compactLayout.fps" x="28" :y="compactLayout.metricsY + 40" font-size="40" fill="#e9f0f8" font-weight="600">90 fps</text>
-          <text v-if="compactLayout.frameTime" :x="compactLayout.fps ? 262 : 28" :y="compactLayout.metricsY + 40" font-size="40" fill="#e9f0f8" font-weight="600">11.1 ms avg</text>
+          <text v-if="compactLayout.fps" x="28" :y="compactLayout.metricsY + 40" font-size="40" fill="#e9f0f8" font-weight="600">{{ sample.fps }} fps</text>
+          <g v-if="compactLayout.framegenBadge" font-size="20" font-weight="600">
+            <text x="150" :y="compactLayout.metricsY + 23" :fill="accent">FG ON</text>
+            <text x="150" :y="compactLayout.metricsY + 47" fill="#e9f0f8">90 fps</text>
+          </g>
+          <text v-if="compactLayout.frameTime" :x="compactLayout.frameTimeX" :y="compactLayout.metricsY + 40" font-size="40" fill="#e9f0f8" font-weight="600">{{ sample.average }} ms avg</text>
           <g v-if="compactLayout.statusY >= 0">
             <path v-if="compactLayout.statusY > 18" :d="`M28 ${compactLayout.statusY - 8} H${panelWidth - 28}`" stroke="#141f2d" />
             <g v-if="settings.compactShowTurbo" :transform="`translate(0 ${compactLayout.turboY})`">
@@ -79,7 +95,7 @@ function move(event: PointerEvent) {
             </g>
             <g v-if="settings.compactShowFramegen" :transform="`translate(0 ${compactLayout.framegenY})`">
               <text x="30" y="22" font-size="20" fill="#94a5b8">FRAME GEN</text>
-              <foreignObject :x="compactLayout.statusValueX" :width="panelWidth - compactLayout.statusValueX - 28" height="36"><div class="body-value" style="color: #e9f0f8">3x / 30 -> 90 fps</div></foreignObject>
+              <foreignObject :x="compactLayout.statusValueX" :width="panelWidth - compactLayout.statusValueX - 28" height="36"><div class="body-value" style="color: #e9f0f8">Dynamic  /  45 &#8594; 90 fps</div></foreignObject>
             </g>
             <g v-if="settings.compactShowPivot" :transform="`translate(0 ${compactLayout.pivotY})`">
               <text x="30" y="22" font-size="20" fill="#94a5b8">PIVOT</text>
@@ -93,13 +109,15 @@ function move(event: PointerEvent) {
           <foreignObject v-if="settings.showRuntime" :x="expandedHeader.runtimeX" y="18" :width="expandedHeader.clockX - expandedHeader.runtimeX - 18" height="34"><div class="header-field">Your OpenXR runtime</div></foreignObject>
           <text v-if="settings.showClock" x="790" y="39" font-size="21" fill="#94a5b8">{{ headerValues.clock }}</text>
           <g :transform="`translate(0 ${-expandedHeader.shift})`">
-            <g font-size="68" fill="#e9f0f8" font-weight="600"><text x="28" y="125">90</text><text x="325" y="125">11.1 ms</text><text x="655" y="125" :fill="accent">12.4 ms</text></g>
+            <g font-size="68" fill="#e9f0f8" font-weight="600"><text x="28" y="125">{{ sample.fps }}</text><text x="325" y="125">{{ sample.average }} ms</text><text x="655" y="125" :fill="accent">{{ sample.p95 }} ms</text></g>
+            <g v-if="settings.showFramegenFps" font-size="24" font-weight="600"><text x="120" y="99" :fill="accent">FG ON</text><text x="120" y="128" fill="#e9f0f8">90 fps</text></g>
             <g font-size="20" fill="#94a5b8"><text x="30" y="161">APP FPS</text><text x="327" y="161">APP FRAME / AVG</text><text x="657" y="161">APP FRAME / P95</text></g>
           </g>
         </template>
         <template v-if="!settings.compact"><g v-for="row in rows" :key="row.key" :transform="`translate(0 ${row.y})`">
           <template v-if="row.key === 'graph'"><rect x="28" width="904" height="130" fill="#141f2d" /><text x="40" y="22" font-size="18" fill="#94a5b8">FRAME TIME / LAST 120 FRAMES</text><path d="M40 94 L100 90 160 98 220 94 280 92 340 35 400 87 460 91 520 96 580 92 640 90 700 99 760 88 820 94 920 93" fill="none" :stroke="accent" stroke-width="3" /></template>
-          <template v-else><text x="30" y="20" font-size="20" fill="#94a5b8">{{ labels[row.key][0] }}</text><foreignObject x="242" width="680" height="36"><div class="body-value" :style="{ color: row.key === 'turbo' ? accent : '#e9f0f8' }">{{ labels[row.key][1] }}</div></foreignObject></template>
+          <template v-else><text x="30" y="20" font-size="20" fill="#94a5b8">{{ labels[row.key][0] }}</text><foreignObject x="242" width="680" height="36"><div class="body-value" :style="{ color: row.key === 'turbo' ? accent : '#e9f0f8' }">{{ labels[row.key][1] }}</div></foreignObject>
+            <foreignObject v-if="row.key === 'framegen'" x="242" y="30" width="680" height="30"><div class="body-detail">{{ framegenDetail }}</div></foreignObject></template>
         </g></template>
       </svg>
     </svg>
@@ -120,5 +138,6 @@ function move(event: PointerEvent) {
 .preview { cursor: grab; touch-action: none; user-select: none; font-family: 'Segoe UI', sans-serif; }
 .preview:active { cursor: grabbing; }
 .header-field { font: 21px 'Segoe UI', sans-serif; color: #94a5b8; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.body-value { font: 600 24px 'Segoe UI', sans-serif; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.body-value { font: 600 24px 'Segoe UI', sans-serif; white-space: pre; overflow: hidden; text-overflow: ellipsis; }
+.body-detail { font: 20px 'Segoe UI', sans-serif; color: #94a5b8; white-space: pre; overflow: hidden; text-overflow: ellipsis; }
 </style>

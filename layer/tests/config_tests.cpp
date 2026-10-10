@@ -1222,6 +1222,7 @@ void TestFrameGenModuleOptional() {
            "Frame Generation should default to Dynamic");
     Expect(resolved.core.osd.show_framegen && !resolved.core.osd.compact_show_framegen,
            "OSD Frame Gen rows should default to full-panel only");
+    Expect(resolved.core.osd.show_framegen_fps, "The OSD should show Frame Generation beside FPS by default");
     Expect(resolved.core.osd.body_order.size() == 5 && resolved.core.osd.body_order[2] == "framegen",
            "Default OSD body order should include the Frame Gen row after Turbo");
 }
@@ -1305,10 +1306,17 @@ void TestFrameGenInvalidSettingsRejected() {
 
 void TestFrameGenOsdRows() {
     const auto result = depthxr::ParseConfig(FrameGenConfigJson(R"json({ "enabled": false })json",
-        R"json({ "showFramegen": false, "compactShowFramegen": true, "bodyOrder": ["modules", "graph", "turbo", "pivot"] })json"));
+        R"json({ "showFramegen": false, "compactShowFramegen": true, "showFramegenFps": false, "bodyOrder": ["modules", "graph", "turbo", "pivot"] })json"));
     Expect(result.ok, "OSD Frame Gen settings were rejected: " + result.error);
     const auto& osd = result.document.core.osd;
     Expect(!osd.show_framegen && osd.compact_show_framegen, "OSD Frame Gen row toggles were not parsed");
+    Expect(!osd.show_framegen_fps, "OSD Frame Gen beside FPS was not parsed");
+    const auto invalid = depthxr::ParseConfig(FrameGenConfigJson(R"json({ "enabled": false })json",
+        R"json({ "showFramegenFps": "yes" })json"));
+    Expect(!invalid.ok, "A non-boolean showFramegenFps was accepted");
+    const auto preset = depthxr::ParseConfig(FrameGenConfigJson(R"json({ "enabled": false })json",
+        R"json({ "customPresets": [ { "name": "Quiet", "settings": { "showFramegenFps": false } } ] })json"));
+    Expect(preset.ok, "OSD presets should accept showFramegenFps: " + preset.error);
     Expect(osd.body_order.size() == 5 && osd.body_order.back() == "framegen",
            "Saved OSD orders without the Frame Gen row should append it");
     const auto ordered = depthxr::ParseConfig(FrameGenConfigJson(R"json({ "enabled": false })json",

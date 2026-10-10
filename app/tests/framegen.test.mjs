@@ -220,6 +220,9 @@ test('the OSD Frame Gen rows default sensibly and old saved orders gain the row 
   assert.deepEqual(osd.bodyOrder, ['graph', 'turbo', 'framegen', 'pivot', 'modules'])
   assert.equal(osd.showFramegen, true)
   assert.equal(osd.compactShowFramegen, false)
+  assert.equal(osd.showFramegenFps, true)
+  assert.equal(normalizeOsdSettings({ showFramegenFps: false }).showFramegenFps, false)
+  assert.equal(normalizeOsdSettings({ showFramegenFps: 'no' }).showFramegenFps, true)
 
   const legacy = normalizeOsdSettings({ bodyOrder: ['pivot', 'modules', 'graph', 'turbo'], showTurbo: false })
   assert.deepEqual(legacy.bodyOrder, ['pivot', 'modules', 'graph', 'turbo', 'framegen'])
@@ -253,4 +256,22 @@ test('the compact Frame Gen row sits between Turbo and Pivot and keeps values al
   assert.equal(only.empty, false)
   assert.equal(only.statusY, only.framegenY)
   assert.equal(only.width, 520)
+})
+
+test('Frame Generation beside FPS widens only the compact FPS column, only when it can show', () => {
+  const settings = { ...defaultOsdSettings(), compactShowBrand: false, compactShowApp: false, compactShowRuntime: false, compactShowClock: false }
+  const plain = osdCompactLayout(settings)
+  const session = osdCompactLayout(settings, true)
+  assert.equal(plain.framegenBadge, false)
+  assert.equal(plain.frameTimeX, 262)
+  assert.equal(session.framegenBadge, true)
+  assert.equal(session.frameTimeX, plain.frameTimeX + 50)
+  assert.equal(session.width, plain.width + 50)
+  assert.equal(session.height, plain.height)
+  // Off, or without an FPS value, the layout is the plain one.
+  assert.deepEqual(osdCompactLayout({ ...settings, showFramegenFps: false }, true), plain)
+  const frameTimeOnly = { ...settings, compactMetrics: 'frameTime' }
+  assert.deepEqual(osdCompactLayout(frameTimeOnly, true), osdCompactLayout(frameTimeOnly))
+  // The FPS-only display grows by the badge's room alone.
+  assert.equal(osdCompactLayout({ ...settings, compactMetrics: 'fps' }, true).width, 266 + 50)
 })

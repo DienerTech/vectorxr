@@ -1315,8 +1315,9 @@ void TestFrameGenOwnsFramePacing() {
 
     const auto snapshot = depthxr::TurboFrameTestPeer::Snapshot();
     Expect(snapshot.turbo == "Paused for Frame Generation", "OSD should show Turbo yielding");
-    Expect(snapshot.modules.find("Frame Gen") != std::string::npos && snapshot.framegen.rfind("Interpolate", 0) == 0,
+    Expect(snapshot.modules.find("Frame Gen") != std::string::npos && snapshot.framegen.rfind("On  /  Interpolate", 0) == 0,
            "OSD should list and describe active Frame Generation");
+    Expect(snapshot.framegen_session && snapshot.framegen_badge == "ON", "OSD should show Frame Generation on beside FPS");
     depthxr::TurboFrameTestPeer::StopFrameGen();
     Expect(!depthxr::TurboFrameTestPeer::FrameGenOwnsPacing(), "Stopping Frame Generation returns pacing");
 }

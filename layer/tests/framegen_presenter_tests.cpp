@@ -1281,7 +1281,8 @@ void TestAutomaticMultiplier() {
               std::string(ToString(presenter.Status().state)) + ", " + presenter.Status().reason + ", " +
               std::to_string(presenter.Status().multiplier) + "x)");
     Check(app.Frame().predictedDisplayPeriod == kPeriod, "auto: full rate passes frames through");
-    Check(presenter.OsdText().find("full rate") != std::string::npos, "auto: the OSD says full rate");
+    Check(presenter.OsdText().find("Standby  /  Auto") != std::string::npos && presenter.OsdDescription().badge == "STBY",
+          "auto: at full rate the OSD says Auto stands by (" + presenter.OsdText() + ")");
 
     // Slow again: generation comes back.
     run(1500ms, 20ms); // the fake runtime let the fast phase run thousands of frames a second
@@ -3002,7 +3003,7 @@ void TestUnavailableWithoutBackend() {
     });
     Check(presenter.Started() && !presenter.OwnsPacing(), "a session without a backend leaves pacing alone");
     Check(presenter.Status().state == FrameGenState::kUnavailable &&
-              presenter.OsdText() == "Unavailable  /  no backend for this API",
+              presenter.OsdText() == "Unavailable" && presenter.OsdDetailText() == "No backend for this API",
           "unavailable reason reaches the OSD");
 }
 
@@ -3396,8 +3397,9 @@ void TestDynamicPassThroughNearRefresh() {
     Check(gpu.captures == 0 && gpu.executes == 0, "standing by: nothing is captured or analyzed (" +
                                                       std::to_string(gpu.captures.load()) + " captures)");
     Check(refresh_period, "standing by: the game is told the runtime's period");
-    Check(presenter.OsdText().find("standing by") != std::string::npos &&
-              presenter.CompactOsdText().find("standing by") != std::string::npos,
+    Check(presenter.OsdText().find("Standby  /  Dynamic") != std::string::npos &&
+              presenter.CompactOsdText().find("Standby") != std::string::npos &&
+              presenter.OsdDescription().badge == "STBY",
           "standing by: the OSD says so (" + presenter.OsdText() + ")");
     presenter.Stop();
     Check(!runtime.ordering_violation && !g_release_violation, "standing by: calls stayed ordered");
@@ -5290,7 +5292,7 @@ void TestQuadWriteFailuresDecline() {
     Check(app.Routed(FrameGenQuadRoute::kNotPresenting, from) == app.ended.size() - from,
           "write failures: while declined, the layer composes every frame");
     Check(!status.threaded && status.state == FrameGenState::kActive && status.full_rate && status.quad_declining &&
-              presenter.OsdText().find("Standing by") != std::string::npos,
+              presenter.OsdText().find("Standby") != std::string::npos,
           "write failures: while declined, Frame Generation stands by (" + presenter.OsdText() + ")");
     const auto log = runtime.Snapshot();
     std::size_t as_is = 0;
@@ -5833,6 +5835,108 @@ void TestQuadComposeStallOnce() {
 // FG_TEST_ONLY=<name> runs only the tests whose name contains it. Each test
 // is named on stderr as it starts, so a failure, a hang or a CTest timeout
 // says which one it was in (the policy tests' process too).
+// What the OSD and the app say about each status: short, general words in
+// one vocabulary (On, Standby, Starting, Paused, Unavailable, Off).
+void TestOsdDescription() {
+    const std::string arrow = " \xE2\x86\x92 ";
+    const std::string dot = " \xC2\xB7 ";
+    std::vector<FrameGenOsdText> said;
+    const auto describe = [&](const FrameGenStatus& status, bool started = true) {
+        said.push_back(DescribeFrameGen(status, started));
+        return said.back();
+    };
+    FrameGenStatus status;
+    status.state = FrameGenState::kActive;
+    status.dynamic = true;
+    status.multiplier = 2;
+    status.app_fps = 45.2;
+    status.distinct_fps = 89.6;
+    status.gpu_ms = 3.14;
+    FrameGenOsdText text = describe(status);
+    Check(text.row == "On  /  Interpolate  /  Dynamic" && text.detail == "45" + arrow + "90 fps  /  GPU 3.1 ms",
+          "generating: row " + text.row + " | " + text.detail);
+    Check(text.compact == "Dynamic  /  45" + arrow + "90 fps", "generating: compact " + text.compact);
+    Check(text.badge == "ON" && text.shown_fps == 89.6 && text.state == "active", "generating: the FPS badge");
+    Check(text.reason == "Interpolate" + dot + "Dynamic" + dot + "45" + arrow + "90 fps" + dot + "GPU 3.1 ms",
+          "generating: the app's line " + text.reason);
+
+    status.dynamic = false;
+    status.multiplier = 3;
+    status.mode = FrameGenSynthesisMode::kExtrapolate;
+    status.gpu_ms = -1.0;
+    status.app_fps = 30.0;
+    status.distinct_fps = 90.0;
+    text = describe(status);
+    Check(text.row == "On  /  Extrapolate  /  3x" && text.detail == "30" + arrow + "90 fps", "fixed: " + text.row + " | " + text.detail);
+    status.automatic = true;
+    text = describe(status);
+    Check(text.row == "On  /  Extrapolate  /  Auto 3x" && text.compact == "Auto 3x  /  30" + arrow + "90 fps" &&
+              text.shown_fps == 90.0,
+          "auto: " + text.row + " | " + text.compact);
+
+    status.full_rate = true;
+    status.app_fps = 89.7;
+    text = describe(status);
+    Check(text.row == "Standby  /  Auto" && text.detail == "The game holds 90 fps on its own" &&
+              text.compact == "Standby  /  game at 90 fps" && text.badge == "STBY" && text.shown_fps == 0.0 &&
+              text.state == "standby" && text.reason == "Auto" + dot + "game at 90 fps",
+          "auto at full rate stands by: " + text.row + " | " + text.reason);
+    status.dynamic = true;
+    status.standby = true;
+    status.automatic = false;
+    status.app_fps = 84.0;
+    text = describe(status);
+    Check(text.row == "Standby  /  Dynamic" && text.detail == "The game holds 84 fps on its own" && text.badge == "STBY" &&
+              text.state == "standby",
+          "dynamic stands by: " + text.row);
+    status.quad_declining = true;
+    status.reason = "the layer composes the quad views for a while";
+    text = describe(status);
+    Check(text.row == "Standby" && text.badge == "STBY" && text.state == "standby" &&
+              text.detail.find("retrying soon") != std::string::npos &&
+              text.reason.find("could not be shown") != std::string::npos &&
+              text.reason.find("quad") == std::string::npos,
+          "frames that could not be written stand by: " + text.row + " | " + text.reason);
+
+    status = FrameGenStatus{};
+    status.state = FrameGenState::kWaiting;
+    text = describe(status);
+    Check(text.row == "Starting" && text.detail == "Waiting for steady frames" && text.compact == "Starting" &&
+              text.badge == "WAIT" && text.state == "waiting" && text.reason.empty(),
+          "waiting: " + text.row);
+    status.state = FrameGenState::kPaused;
+    status.reason = "runtime rejected a generated frame (-2)";
+    status.retry_pending = true;
+    text = describe(status);
+    Check(text.row == "Paused  /  retrying soon" && text.detail == "Runtime rejected a generated frame (-2)" &&
+              text.compact == "Paused" && text.badge == "PAUSED" && text.state == "paused" &&
+              text.reason == "runtime rejected a generated frame (-2)" + dot + "retrying soon",
+          "paused: " + text.row + " | " + text.reason);
+    status.retry_pending = false;
+    Check(describe(status).reason == "runtime rejected a generated frame (-2)", "paused for good: the reason alone");
+    status.state = FrameGenState::kUnavailable;
+    status.reason = "no backend for this API";
+    text = describe(status);
+    Check(text.row == "Unavailable" && text.detail == "No backend for this API" && text.compact == "Unavailable" &&
+              text.badge == "N/A" && text.state == "unavailable" && text.reason == "no backend for this API",
+          "unavailable: " + text.row);
+    status = FrameGenStatus{};
+    text = describe(status);
+    Check(text.row == "Off" && text.compact == "Off" && text.detail.empty() && text.badge == "OFF" && text.state == "off" &&
+              text.reason.empty(),
+          "off: " + text.row);
+    text = describe(status, false);
+    Check(text.row == "Disabled" && text.badge.empty(), "never started: " + text.row);
+
+    for (const FrameGenOsdText& words : said) {
+        for (const std::string& line : {words.row, words.compact, words.detail, words.reason}) {
+            for (const char* jargon : {"cockpit", "Direct3D", "Vulkan", "quad", "MSFS", "DCS", "full rate", "->"}) {
+                Check(line.find(jargon) == std::string::npos, "plain words: \"" + line + "\" says " + jargon);
+            }
+        }
+    }
+}
+
 #define RUN(test)                                                                                \
     do {                                                                                         \
         const char* only = std::getenv("FG_TEST_ONLY");                                          \
@@ -5984,6 +6088,7 @@ int main(int argc, char** argv) {
     RUN(TestUncapturedFramesAreSkipped);
     RUN(TestSettingsAndSessionChanges);
     RUN(TestUnavailableWithoutBackend);
+    RUN(TestOsdDescription);
     // Quad views Frame Generation composes itself.
     RUN(TestQuadClaimAndCompose);
     RUN(TestQuadSetupThroughComposedFrame);

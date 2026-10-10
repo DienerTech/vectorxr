@@ -45,6 +45,8 @@ test('schema describes generated Frame Generation settings and keeps the module 
   assert.deepEqual(osd.customPresets.items.properties.settings.properties.bodyOrder.items.enum, defaultConfig().core.osd.bodyOrder)
   assert.equal(osd.showFramegen.default, true)
   assert.equal(osd.compactShowFramegen.default, false)
+  assert.equal(osd.showFramegenFps.default, true)
+  assert.equal(osd.customPresets.items.properties.settings.properties.showFramegenFps.default, true)
 })
 
 function assertSchemaDescribesObject(definition, value) {

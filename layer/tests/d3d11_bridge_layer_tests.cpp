@@ -3264,8 +3264,8 @@ void TestBridgedQuadFrameGen(Game& game, const std::string& mode) {
     // that quick).
     if (const depthxr::FrameGenStatus declined = Peer::FrameGen(); declined.quad_declining) {
         const std::string line = Peer::FrameGenStatusReason(declined);
-        Check(!Contains(line, "composed by Frame Generation") && Contains(line, "quad views composed by the layer"),
-              "refused: the app's status line says the layer composes the quad views for a while: " + line);
+        Check(Contains(line, "could not be shown") && !Contains(line, " fps"),
+              "refused: the app's status line says generated frames could not be shown for a while: " + line);
     }
     {
         std::scoped_lock lock(g_runtime_mutex);
@@ -4450,11 +4450,13 @@ void TestDeviceLost(Game& game) {
     EndCase(game, true);
 }
 
-// 11. The app's status line for Frame Generation (the runtime relay's): while
-// composed quad views frames could not be written for a while, it says the
-// layer composes the quad views, never Frame Generation, whatever else the
+// 11. The app's status line for Frame Generation (the runtime relay's), in
+// the OSD's words: while composed quad views frames could not be written for
+// a while, it says generated frames could not be shown, whatever else the
 // state says meanwhile.
 void CheckFrameGenStatusLine() {
+    const std::string dot = " \xC2\xB7 ";
+    const std::string arrow = " \xE2\x86\x92 ";
     depthxr::FrameGenStatus status;
     status.state = depthxr::FrameGenState::kActive;
     status.multiplier = 2;
@@ -4462,13 +4464,11 @@ void CheckFrameGenStatusLine() {
     status.distinct_fps = 89.6;
     status.quad = true;
     std::string line = Peer::FrameGenStatusReason(status);
-    Check(line == "2x, 45 -> 90 fps, quad views composed by Frame Generation.", "composing: " + line);
+    Check(line == "Interpolate" + dot + "2x" + dot + "45" + arrow + "90 fps", "composing: " + line);
     status.quad_declining = true;
     status.distinct_fps = 45.0;
     const std::string declining = Peer::FrameGenStatusReason(status);
-    Check(!Contains(declining, "composed by Frame Generation") &&
-              Contains(declining, "2x, quad views composed by the layer for a while") &&
-              Contains(declining, "could not write") && Contains(declining, "45 fps"),
+    Check(Contains(declining, "could not be shown") && Contains(declining, "retrying soon") && !Contains(declining, " fps"),
           "declining: " + declining);
     // Frames passing straight through meanwhile, standing by.
     status.full_rate = true;
@@ -4478,12 +4478,10 @@ void CheckFrameGenStatusLine() {
     status.dynamic = true;
     status.standby = true;
     line = Peer::FrameGenStatusReason(status);
-    Check(!Contains(line, "composed by Frame Generation") &&
-              Contains(line, "Dynamic, quad views composed by the layer"),
-          "declining, Dynamic standing by: " + line);
+    Check(line == declining, "declining, Dynamic standing by: " + line);
     status.quad_declining = false;
     status.reason.clear();
-    Check(Peer::FrameGenStatusReason(status) == "Dynamic, standing by: the game runs at 45 fps.", "standing by");
+    Check(Peer::FrameGenStatusReason(status) == "Dynamic" + dot + "game at 45 fps", "standing by");
     status.state = depthxr::FrameGenState::kPaused;
     status.reason = "paused";
     status.quad_declining = true;
