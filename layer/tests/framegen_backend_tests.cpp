@@ -517,6 +517,45 @@ int RunScenarios(Harness& harness) {
             Check(!gpu->Writable(frame, true), harness.name + " a real frame whose newest images were replaced is writable");
             Check(!gpu->Synthesize(frame, FrameGenSynthesisMode::kInterpolate, 1.0f, {first_output}, error),
                   harness.name + " a real frame's replaced newest images are copied");
+
+            // 2f. Stale motion: extrapolating, a real frame whose own motion
+            // is not measured yet is moved by the previous one's. A, B and C
+            // move steadily (16, 8) a frame: C moved half a frame on by B's
+            // motion lands near where its own motion puts it, far closer
+            // than C held. Only the frame's own previous, itself measured
+            // from a pair, may move it.
+            harness.upload(g_swapchains[kSource][2], MovingSquare(152, 136));
+            FrameGenTuning extrapolating = analyze;
+            extrapolating.mode = FrameGenSynthesisMode::kExtrapolate;
+            extrapolating.cover = false;
+            gpu->ResetHistory();
+            auto measure_extrapolating = [&](std::uint32_t index) {
+                const std::vector<FrameGenViewSubmission> views{Submission(index, harness.format, output_format, true, 0, 0)};
+                Check(gpu->Execute(views, extrapolating, result, error), harness.name + " analyze: " + error);
+                return result.frame;
+            };
+            const std::uint64_t frame_a = measure_extrapolating(0);
+            const std::uint64_t frame_b = measure_extrapolating(1);
+            const std::uint64_t frame_c = measure_extrapolating(2);
+            Check(gpu->WaitIdle(), harness.name + " analyses did not finish");
+            Check(gpu->Synthesize(frame_c, FrameGenSynthesisMode::kExtrapolate, 0.5f, {first_output}, error),
+                  harness.name + " synthesize: " + error);
+            const Pixels own = harness.readback(g_swapchains[first_output.swapchain][0]);
+            Check(gpu->SynthesizeStale(frame_c, frame_b, 0.5f, {first_output}, error),
+                  harness.name + " stale synthesize: " + error);
+            const Pixels stale = harness.readback(g_swapchains[first_output.swapchain][0]);
+            const Pixels stale_truth = MovingSquare(160, 140);
+            const double own_error = MeanError(own, stale_truth, 112, 104, 288, 280);
+            const double stale_error = MeanError(stale, stale_truth, 112, 104, 288, 280);
+            const double stale_hold = MeanError(MovingSquare(152, 136), stale_truth, 112, 104, 288, 280);
+            std::cout << harness.name << " stale motion: error " << stale_error << " vs own motion " << own_error
+                      << " vs hold " << stale_hold << std::endl;
+            Check(stale_error < 0.5 * stale_hold && stale_error < own_error + 0.25 * stale_hold,
+                  harness.name + " the previous frame's motion does not move a frame on as its own does");
+            Check(!gpu->SynthesizeStale(frame_c, frame_a, 0.5f, {first_output}, error),
+                  harness.name + " a frame was moved by motion other than its previous frame's");
+            Check(!gpu->SynthesizeStale(frame_b, frame_a, 0.5f, {first_output}, error),
+                  harness.name + " a frame was moved by a first frame's motion (never measured from a pair)");
             gpu->ResetHistory();
         }
         tuning.generated = 1;
@@ -4090,7 +4129,9 @@ int RunProfile(Harness& harness) {
 // FG_REPLAY_HARDWARE=1 (optical flow hardware), FG_REPLAY_NOSHIFT=1 (no eye
 // shift), FG_REPLAY_NODEPTH=1 (rotation only), FG_REPLAY_PREDICT=1 (the eye
 // keeps moving as it did from the previous frame, as the presenter shifts,
-// instead of exactly to the next frame's position).
+// instead of exactly to the next frame's position), FG_REPLAY_JIT=own|stale
+// (extrapolating just in time from frames k - 2..k analyzed alone: frame k
+// moved by its own motion, or by frame k - 1's, FrameGenGpu::SynthesizeStale).
 bool g_replay = false;
 std::string g_replay_directory, g_replay_output;
 
@@ -4392,6 +4433,7 @@ int RunReplay(Harness& harness) {
 
     const bool interpolate = env("FG_REPLAY_MODE") == "interpolate";
     const bool dump_maps = env("FG_REPLAY_DUMP") == "1";
+    const std::string jit_variant = env("FG_REPLAY_JIT");
     std::optional<std::array<int, 4>> crop;
     if (std::array<int, 4> box{}; std::sscanf(env("FG_REPLAY_CROP").c_str(), "%d,%d,%d,%d", &box[0], &box[1], &box[2], &box[3]) == 4) {
         crop = box;
@@ -4401,10 +4443,13 @@ int RunReplay(Harness& harness) {
     // a fresh sequence, nothing generated), generating one frame at
     // `fraction` seen from the eye moved by shift * time (FrameGenViewRequest).
     auto execute = [&](std::size_t k, std::optional<std::size_t> before, FrameGenSynthesisMode mode, float fraction,
-                       const std::vector<std::array<float, 3>>& shifts, FrameGenExecuteResult& result) {
+                       const std::vector<std::array<float, 3>>& shifts, FrameGenExecuteResult& result,
+                       bool analyze_only = false) {
         const ReplayFrame& frame = frames[k];
         FrameGenTuning tuning = frame.tuning;
         tuning.mode = mode;
+        tuning.analyze_only = analyze_only;
+        tuning.cover = false;
         tuning.hardware_flow = hardware;
         if (quality == "performance") tuning.quality = FrameGenFlowQuality::kPerformance;
         if (quality == "balanced") tuning.quality = FrameGenFlowQuality::kBalanced;
@@ -4548,6 +4593,40 @@ int RunReplay(Harness& harness) {
         for (std::size_t k = 0; k < frames.size(); ++k) {
             FrameGenExecuteResult result;
             const bool has_next = k + 1 < frames.size();
+            if (!jit_variant.empty() && measure && !interpolate) {
+                // Just in time: frames k - 2, k - 1 and k analyzed alone, then
+                // frame k moved to frame k + 1 by its own motion or by frame
+                // k - 1's (no eye shift: nothing of frame k's analysis is read).
+                if (k < 2 || !has_next) continue;
+                const float fraction = std::clamp(frames[k + 1].tuning.interval_ratio, 0.25f, 1.0f);
+                gpu->ResetHistory();
+                std::uint64_t ids[3] = {};
+                for (std::size_t j = 0; j < 3; ++j) {
+                    const std::size_t f = k - 2 + j;
+                    const auto shifts = f == k && jit_variant == "own" ? eye_shifts(k, k + 1, fraction)
+                                                                       : std::vector<std::array<float, 3>>{};
+                    execute(f, j > 0 ? std::optional<std::size_t>(f - 1) : std::nullopt, FrameGenSynthesisMode::kExtrapolate,
+                            fraction, shifts, result, true);
+                    ids[j] = result.frame;
+                }
+                Check(gpu->WaitIdle(), "replay: the analyses did not finish");
+                std::vector<FrameGenImage> images;
+                for (std::size_t v = 0; v < view_count; ++v) {
+                    const ReplayView& view = frames[k].views[v];
+                    images.push_back({outputs[v], 0, 0,
+                                      {{0, 0}, {static_cast<int>(view.width), static_cast<int>(view.height)}},
+                                      output_format});
+                }
+                const bool written =
+                    jit_variant == "stale"
+                        ? gpu->SynthesizeStale(ids[2], ids[1], fraction, images, error)
+                        : gpu->Synthesize(ids[2], FrameGenSynthesisMode::kExtrapolate, fraction, images, error);
+                Check(written, "replay just in time (" + jit_variant + "): " + error);
+                Check(gpu->WaitIdle(), "replay: the frame was not written");
+                result.synthesized.assign(view_count, true);
+                evaluate(k, k, k + 1, frames[k].views[0].color, result, fraction);
+                continue;
+            }
             if (interpolate && measure) {
                 // Frame k from the frames either side of it: k - 1, then k + 1
                 // as the next real frame, at k's share of the two intervals.

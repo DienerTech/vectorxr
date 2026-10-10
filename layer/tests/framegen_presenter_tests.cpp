@@ -182,6 +182,11 @@ struct GpuLog {
     std::mutex syntheses_mutex;
     std::vector<Synthesis> syntheses;
     std::atomic<int> synthesis_failures{0};
+    // SynthesizeStale: supported, written, and asked of a motion frame that
+    // was not the frame's previous one or not measured yet.
+    std::atomic<bool> stale{false};
+    std::atomic<int> stale_writes{0};
+    std::atomic<int> stale_wrong_motion{0};
     // Quad views (SupportsComposition): frames composed per eye from their
     // views (under syntheses_mutex), with the composition each analysis was
     // measured with (FrameGenTuning::composition) by analyzed frame.
@@ -542,6 +547,46 @@ class FakeGpu final : public FrameGenGpu {
         for (std::size_t i = 0; i < analyzed.views.size(); ++i) {
             const auto& view = analyzed.views[i];
             g_written[outputs[i].swapchain].push_back(view.x + (view.synthesized ? eye_time * view.shift : 0.0f));
+        }
+        return true;
+    }
+    bool SynthesizeStale(std::uint64_t frame, std::uint64_t motion, float fraction,
+                         const std::vector<FrameGenImage>& outputs, std::string& error) override {
+        if (!log_->stale) {
+            error = "the fake backend does not move frames by older motion";
+            return false;
+        }
+        Analyzed analyzed;
+        const TimePoint now = std::chrono::steady_clock::now();
+        {
+            std::scoped_lock lock(analyzed_mutex_);
+            const auto it = std::find_if(analyzed_.begin(), analyzed_.end(), [&](const Analyzed& a) { return a.id == frame; });
+            const auto before =
+                std::find_if(analyzed_.begin(), analyzed_.end(), [&](const Analyzed& a) { return a.id == motion; });
+            if (it == analyzed_.end() || before == analyzed_.end() || outputs.size() < it->views.size() ||
+                !WritableLocked(*it, false) || !WritableLocked(*before, true)) {
+                ++log_->synthesis_failures;
+                error = "the real frame or the one before it is no longer kept";
+                return false;
+            }
+            if (now < it->captured_at) {
+                ++log_->uncaptured_writes;
+            }
+            // Ids follow analysis order: the frame's previous is the id before.
+            if (motion + 1 != frame || now < before->measured_at) {
+                ++log_->stale_wrong_motion;
+            }
+            analyzed = *it;
+        }
+        {
+            std::scoped_lock lock(log_->syntheses_mutex);
+            log_->syntheses.push_back({frame, FrameGenSynthesisMode::kExtrapolate, fraction, now});
+        }
+        ++log_->stale_writes;
+        // No eye shift: seen from the real frame's own eye position.
+        std::scoped_lock lock(g_xr_mutex);
+        for (std::size_t i = 0; i < analyzed.views.size(); ++i) {
+            g_written[outputs[i].swapchain].push_back(analyzed.views[i].x);
         }
         return true;
     }
@@ -3063,6 +3108,133 @@ void EngageDynamic(FrameGenPresenter& presenter, App& app, const std::string& na
 }
 
 const std::vector<std::chrono::microseconds> kLightWork{4ms};
+
+// Extrapolating just in time, motion measured a refresh after the real
+// frame's own (as NVIDIA's flow beside MSFS 2024 was, 2026-10-09): the
+// refresh after a frame's own needs its motion before it is measured. The
+// previous real frame's motion moves it instead (SynthesizeStale) rather
+// than its exact copy standing still: those refreshes are distinct, every
+// such write names the frame's previous, already measured, and nothing is
+// written before its frame was captured. VECTORXR_FRAMEGEN_STALE_MOTION=0,
+// or a backend that cannot, shows the exact copy as before.
+void TestJitStaleMotion() {
+    struct Run {
+        FrameGenStatus status;
+        int stale_writes{0};
+        int wrong_motion{0};
+        int uncaptured{0};
+        int unmeasured_moves{0};
+        bool ordered{true};
+        int mismatched{0};
+    };
+    auto run = [](bool backend, bool enabled) {
+        _putenv_s("VECTORXR_FRAMEGEN_STALE_MOTION", enabled ? "" : "0");
+        FrameGenPresenter presenter;
+        GpuLog gpu;
+        gpu.stale = backend;
+        Runtime runtime;
+        runtime.paced = true;
+        std::unique_ptr<App> owned;
+        App* app = nullptr;
+        StartJit(presenter, gpu, FrameGenSynthesisMode::kExtrapolate, FrameGenMultiplier::k2, app, runtime, owned);
+        _putenv_s("VECTORXR_FRAMEGEN_STALE_MOTION", "");
+        gpu.measure_lag = 35ms; // past the refresh after its own, up to a lead of two
+        for (int i = 0; i < 3; ++i) app->Frame();
+        RunWork(*app, 900ms, kLightWork);
+        Run result;
+        result.status = presenter.Status();
+        result.stale_writes = gpu.stale_writes;
+        result.wrong_motion = gpu.stale_wrong_motion;
+        result.uncaptured = gpu.uncaptured_writes;
+        result.unmeasured_moves = gpu.unmeasured_moves;
+        result.mismatched = runtime.mismatched_images;
+        presenter.Stop();
+        result.ordered = !runtime.ordering_violation && !g_release_violation;
+        return result;
+    };
+    const Run stale = run(true, true);
+    const Run off = run(true, false);
+    const Run unsupported = run(false, true);
+    std::cerr << "  stale: " << stale.status.stale_motion << " stale, " << stale.status.unmeasured_copies
+              << " unmeasured copies, distinct " << stale.status.distinct_fps << " of " << stale.status.output_fps
+              << "; off: " << off.status.unmeasured_copies << " unmeasured copies, distinct " << off.status.distinct_fps
+              << "; unsupported: " << unsupported.status.unmeasured_copies << " unmeasured copies" << std::endl;
+    Check(off.status.unmeasured_copies > 10 && off.status.stale_motion == 0 && off.stale_writes == 0,
+          "stale motion: off, moved frames whose motion is late are shown unchanged (" +
+              std::to_string(off.status.unmeasured_copies) + ")");
+    Check(stale.status.stale_motion > 10 && stale.stale_writes == static_cast<int>(stale.status.stale_motion) &&
+              stale.status.unmeasured_copies * 4 < off.status.unmeasured_copies,
+          "stale motion: the previous real frame's motion moves them instead (" +
+              std::to_string(stale.status.stale_motion) + " moved so, " +
+              std::to_string(stale.status.unmeasured_copies) + " unchanged)");
+    Check(stale.wrong_motion == 0 && stale.uncaptured == 0 && stale.unmeasured_moves == 0,
+          "stale motion: always the frame's previous, measured, from a captured frame (" +
+              std::to_string(stale.wrong_motion) + " wrong, " + std::to_string(stale.uncaptured) + " uncaptured)");
+    Check(stale.status.distinct_fps > off.status.distinct_fps + 5.0,
+          "stale motion: more refreshes show a new frame (" + std::to_string(stale.status.distinct_fps) + " vs " +
+              std::to_string(off.status.distinct_fps) + ")");
+    Check(unsupported.status.stale_motion == 0 && unsupported.status.unmeasured_copies > 10 &&
+              unsupported.status.failures == 0,
+          "stale motion: a backend that cannot shows the exact copy, without a failure (" +
+              std::to_string(unsupported.status.unmeasured_copies) + ")");
+    for (const Run* r : {&stale, &off, &unsupported}) {
+        Check(r->ordered && r->mismatched == 0, "stale motion: calls stayed ordered, images match their views");
+    }
+}
+
+// Interpolating just in time with each real frame's motion measured late
+// (35 ms after its capture): a refresh between two real frames needs the
+// newer one's motion before it is measured. The older one moves on past
+// itself instead (a cover frame) rather than the newer one being shown
+// unchanged before its time, which jumps ahead and then holds: refreshes
+// keep showing content of their own time. VECTORXR_FRAMEGEN_STALE_MOTION=0
+// shows the newer one unchanged as before.
+void TestJitInterpolateCoversLateMotion() {
+    struct Run {
+        FrameGenStatus status;
+        double timeline{0.0};
+        bool ordered{true};
+    };
+    auto run = [](bool enabled) {
+        _putenv_s("VECTORXR_FRAMEGEN_STALE_MOTION", enabled ? "" : "0");
+        FrameGenPresenter presenter;
+        GpuLog gpu;
+        Runtime runtime;
+        runtime.paced = true;
+        std::unique_ptr<App> owned;
+        App* app = nullptr;
+        StartJit(presenter, gpu, FrameGenSynthesisMode::kInterpolate, FrameGenMultiplier::k2, app, runtime, owned);
+        _putenv_s("VECTORXR_FRAMEGEN_STALE_MOTION", "");
+        app->eye_speed = 0.5;
+        gpu.measure_lag = 35ms;
+        for (int i = 0; i < 3; ++i) app->Frame();
+        const std::size_t first = runtime.Submissions();
+        RunWork(*app, 1200ms, kLightWork);
+        Run result;
+        result.status = presenter.Status();
+        result.timeline = TimelineShare(runtime, first, 20, app->eye_speed);
+        presenter.Stop();
+        result.ordered = !runtime.ordering_violation && !g_release_violation;
+        return result;
+    };
+    const Run cover = run(true);
+    const Run off = run(false);
+    std::cerr << "  cover: " << cover.status.stale_motion << " covered, " << cover.status.unmeasured_copies
+              << " unchanged, timeline " << cover.timeline << "; off: " << off.status.unmeasured_copies
+              << " unchanged, timeline " << off.timeline << std::endl;
+    // The lead grows to make room for the motion (a few refreshes meet it
+    // late meanwhile): each of those is a cover frame instead.
+    Check(off.status.unmeasured_copies > 0 && off.status.stale_motion == 0,
+          "interpolate late motion: off, the newer frame is shown unchanged (" +
+              std::to_string(off.status.unmeasured_copies) + ")");
+    Check(cover.status.stale_motion > 0 && cover.status.unmeasured_copies == 0,
+          "interpolate late motion: the older frame moves on instead (" + std::to_string(cover.status.stale_motion) +
+              " covered, " + std::to_string(cover.status.unmeasured_copies) + " unchanged)");
+    Check(cover.timeline >= off.timeline - 0.02,
+          "interpolate late motion: refreshes show content of their own time as often (" +
+              std::to_string(cover.timeline) + " vs " + std::to_string(off.timeline) + ")");
+    Check(cover.ordered && off.ordered, "interpolate late motion: calls stayed ordered");
+}
 
 // The game's frames reach the GPU history (captured) long before their
 // motion is measured, or the other way round: an exact copy needs only its
@@ -5959,6 +6131,8 @@ int main(int argc, char** argv) {
     RUN(TestThreadedInterpolation);
     RUN(TestJitExtrapolation);
     RUN(TestJitDynamicExtrapolation);
+    RUN(TestJitStaleMotion);
+    RUN(TestJitInterpolateCoversLateMotion);
     RUN(TestJitInterpolation);
     RUN(TestJitDynamicInterpolation);
     RUN(TestJitWaitsForNoGameFrame);

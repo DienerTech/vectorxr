@@ -118,6 +118,7 @@ struct FrameGenStatus {
     std::uint64_t pauses{0};          // gaps no frame is measured or extrapolated across
     std::uint64_t unready_capture{0}; // refreshes whose real frame was not captured yet
     std::uint64_t unmeasured_copies{0}; // moved frames written as exact copies: motion not measured yet
+    std::uint64_t stale_motion{0};      // moved frames moved by the previous real frame's motion instead
     std::uint64_t copies_skipped{0};  // refreshes repeating the exact copy the outputs already hold
     std::uint64_t unwritten{0};       // refreshes that could not be written
     // Refreshes whose real frame's images newer captures had replaced in the
@@ -471,6 +472,10 @@ class FrameGenPresenter {
         std::uint64_t analyzed{0}; // FrameGenExecuteResult::frame
         XrTime time{0};            // the display time it was rendered for
         XrTime previous_time{0};   // the real frame before's, when continuous (0: shown unchanged only)
+        // The real frame analyzed right before it, when continuous (0: none):
+        // its motion moves this frame while this one's is still measured
+        // (FrameGenGpu::SynthesizeStale).
+        std::uint64_t previous_analyzed{0};
         FrameCopy copy;            // its layers; the primary projection's views are its own
         std::vector<FrameGenOutputKind> kinds;       // per view
         std::vector<std::array<float, 3>> velocity; // per view (Analysis::velocity)
@@ -820,6 +825,11 @@ class FrameGenPresenter {
         bool exact{false};      // the real frame's exact copy
         bool uncaptured{false}; // the chosen frame was not captured yet (whether or not the fallback was written)
         bool unmeasured{false}; // a moved frame was to be written as its exact copy: its motion was not measured yet
+        bool stale{false};      // a moved frame moved by the previous real frame's motion (its own not measured yet)
+        // Interpolating, a frame between two real frames needed the newer
+        // one's motion before it was measured: the older one moved on past
+        // itself instead (the fallback, a cover frame). Late for the lead.
+        bool motion_late{false};
         bool ring_exhausted{false}; // images it was to be written from were replaced by newer captures (Writable)
         bool as_is{false};      // nothing written: the frame (JitFrame::as_is) is shown as the layer composed it
         bool failed{false};     // writing was attempted and failed: outputs, an acquire or wait, or the GPU
@@ -987,6 +997,7 @@ class FrameGenPresenter {
         std::uint64_t captured{0};
         std::uint64_t unready{0};      // refreshes whose real frame was not captured yet
         std::uint64_t unmeasured{0};   // moved frames written as exact copies: motion not measured yet
+        std::uint64_t stale_motion{0}; // moved frames moved by the previous real frame's motion instead
         std::uint64_t analyses_timed{0};
         std::uint64_t analyses_late{0};
         std::uint64_t copies_skipped{0};
@@ -1188,6 +1199,10 @@ class FrameGenPresenter {
     // (FrameGenTuning::history_ring): chosen as the presenter thread starts,
     // five where video memory allows, else three (CanvasRingLocked).
     std::uint8_t jit_canvas_ring_{3};
+    // Extrapolating just in time, a frame whose motion is not measured yet
+    // is moved by the previous real frame's (VECTORXR_FRAMEGEN_STALE_MOTION=0:
+    // shown unchanged instead).
+    bool stale_motion_enabled_{true};
     bool logged_canvas_ring_{false};
     std::uint8_t CanvasRingLocked();
     // The real frames the backend keeps for a frame of this path.

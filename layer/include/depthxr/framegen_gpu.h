@@ -214,6 +214,18 @@ class FrameGenGpu {
         error = "this graphics API cannot write generated frames one at a time";
         return false;
     }
+    // Extrapolating just in time, a real frame whose own motion is not
+    // measured yet, moved by the previous real frame's (`motion`, analyzed
+    // right before it and measured): written like Synthesize from the
+    // frame's images and `motion`'s flow (read where the content was in
+    // that frame), without depth. Needs only the frame captured; false
+    // (nothing written) when either frame's images are gone, `motion` is
+    // not the frame's previous one or is not measured, or the backend cannot.
+    virtual bool SynthesizeStale(std::uint64_t /*frame*/, std::uint64_t /*motion*/, float /*fraction*/,
+                                 const std::vector<FrameGenImage>& /*outputs*/, std::string& error) {
+        error = "this graphics API cannot move a frame by the previous one's motion";
+        return false;
+    }
     // Quad views: frames written just in time from views of their own
     // (FrameGenComposition), composed per eye.
     virtual bool SupportsComposition() const { return false; }

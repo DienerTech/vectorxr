@@ -504,7 +504,8 @@ FrameGenViewPlan BuildFrameGenViewPlan(const FrameGenViewRequest& request, const
 }
 
 FrameGenViewPlan BuildFrameGenSynthesisPlan(const FrameGenViewRequest& request, const FrameGenTuning& tuning,
-                                            FrameGenSynthesisMode mode, float fraction, bool cover_flow) {
+                                            FrameGenSynthesisMode mode, float fraction, bool cover_flow,
+                                            bool stale_flow) {
     FrameGenViewPlan plan;
     plan.extent = request.extent;
     plan.levels = FrameGenPyramid(request.extent);
@@ -530,6 +531,19 @@ FrameGenViewPlan BuildFrameGenSynthesisPlan(const FrameGenViewRequest& request, 
         still.copy_mask = 1u;
         plan.synthesize = false;
         plan.dispatches.push_back(still);
+        return plan;
+    }
+    if (stale_flow && extrapolate) {
+        // The previous real frame's flow, read where the content was in that
+        // frame; neither this frame's depth nor its trust is measured yet.
+        FrameGenDispatch output = Dispatch(synthesize, plan.levels[0], plan.levels[plan.final_flow_level], base);
+        output.inputs = {Texture(FrameGenTextureKind::kHistoryNewest), Texture(FrameGenTextureKind::kHistoryPrevious),
+                         Texture(FrameGenTextureKind::kFilteredPrevious, plan.final_flow_level), {}, {}, {}};
+        output.constants.options[1] &= ~kFrameGenFlagDepth;
+        output.constants.options[1] |= kFrameGenFlagStaleFlow;
+        output.outputs = {Texture(FrameGenTextureKind::kOutput), {}};
+        output.copy_mask = 1u;
+        plan.dispatches.push_back(output);
         return plan;
     }
     const FrameGenTexture depth = request.depth ? Texture(FrameGenTextureKind::kDepth) : FrameGenTexture{};

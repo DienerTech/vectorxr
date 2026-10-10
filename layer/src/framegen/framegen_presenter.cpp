@@ -292,6 +292,10 @@ void FrameGenPresenter::Start(XrSession session, const void* binding_chain, cons
     // (0) or one or two game frames before it, or always (from the start).
     gpu_gate_enabled_ = true;
     gpu_gate_armed_ = false;
+    {
+        const char* stale = std::getenv("VECTORXR_FRAMEGEN_STALE_MOTION");
+        stale_motion_enabled_ = !(stale && std::string(stale) == "0");
+    }
     gpu_frames_ahead_ = 1;
     gpu_timeouts_in_row_ = 0;
     std::string gpu_gate_setting;
@@ -4690,6 +4694,7 @@ void FrameGenPresenter::SummaryLocked(Clock::time_point now) {
                         std::to_string(delta(&Totals::unwritten_source)) +
                         ", unready=" + std::to_string(delta(&Totals::unready)) + "/" +
                         std::to_string(delta(&Totals::unmeasured)) +
+                        ", staleMotion=" + std::to_string(delta(&Totals::stale_motion)) +
                         ", ringExhausted=" + std::to_string(delta(&Totals::ring_exhausted)) +
                         ", staleSkipped=" + std::to_string(delta(&Totals::stale_skipped))
                   : std::string()) +
@@ -4794,6 +4799,10 @@ bool FrameGenPresenter::AnalyzeJit(const XrCompositionLayerProjection& projectio
     jit.analyzed = analysis.frame;
     jit.time = frame.app_time;
     jit.previous_time = analysis.synthesized ? previous_time : 0;
+    if (jit.previous_time && !jit_frames_.empty() && !jit_frames_.back().as_is &&
+        jit_frames_.back().time == jit.previous_time && jit_frames_.back().analyzed) {
+        jit.previous_analyzed = jit_frames_.back().analyzed;
+    }
     RecordDepthReleasesLocked(copy);
     jit.copy = std::move(copy);
     jit.kinds = std::move(analysis.kinds);
@@ -5138,7 +5147,19 @@ bool FrameGenPresenter::SynthesizeJit(std::optional<JitFrame>& source, JitChoice
         if (!gpu_) {
             return false;
         }
-        auto ready = [&](const JitFrame& frame, JitChoice& choice, bool& not_captured) {
+        // Interpolating, a frame between two real frames whose newer one's
+        // motion is not measured yet gives way to the fallback (the older one
+        // moved on past itself, measured already) rather than showing the
+        // newer one unchanged before its time, which jumps ahead and then
+        // holds (DCS and MSFS 2024, 2026-10-09: 70-140 such refreshes in 30 s).
+        const bool cover_when_unmeasured = stale_motion_enabled_ && fallback && fallback->id != source->id &&
+                                           !fallback->as_is &&
+                                           choice.mode == FrameGenSynthesisMode::kInterpolate &&
+                                           fallback_choice.mode == FrameGenSynthesisMode::kExtrapolate;
+        bool motion_late = false;
+        auto ready = [&](const JitFrame& frame, JitChoice& choice, bool& not_captured, bool& stale,
+                         bool cover_instead = false) {
+            stale = false;
             if (frame.as_is) {
                 return true; // shown as the layer composed it
             }
@@ -5162,22 +5183,41 @@ bool FrameGenPresenter::SynthesizeJit(std::optional<JitFrame>& source, JitChoice
                 not_captured = true;
                 return false;
             }
-            // Its motion is still being measured: its real frame unchanged.
+            // Its motion is still being measured. Extrapolating, the previous
+            // real frame's motion moves it instead, when that was measured
+            // and is still kept: the refresh does not stand still and jump
+            // the next (MSFS 2024 with NVIDIA's flow, 2026-10-09: motion came
+            // 16 ms after the capture, and 8% of refreshes stood still).
+            if (moved && stale_motion_enabled_ && !frame.quad && choice.mode == FrameGenSynthesisMode::kExtrapolate &&
+                frame.previous_analyzed && gpu_->Measured(frame.previous_analyzed) &&
+                gpu_->Writable(frame.previous_analyzed, true)) {
+                stale = true;
+                return true;
+            }
+            if (moved && cover_instead) {
+                motion_late = true;
+                return false;
+            }
+            // Else its real frame unchanged.
             unmeasured = moved;
             exact_copy(choice);
             return true;
         };
-        if (!ready(*source, choice, write.uncaptured)) {
+        bool stale_source = false;
+        if (!ready(*source, choice, write.uncaptured, stale_source, cover_when_unmeasured)) {
             JitChoice alternative = fallback_choice;
             bool fallback_uncaptured = false;
-            if (!fallback || !ready(*fallback, alternative, fallback_uncaptured)) {
+            bool stale_fallback = false;
+            if (!fallback || !ready(*fallback, alternative, fallback_uncaptured, stale_fallback)) {
                 std::scoped_lock lock(mutex_);
                 ++repeated_;
                 write.unmeasured = unmeasured;
+                write.motion_late = motion_late;
                 return false;
             }
             source = fallback;
             choice = alternative;
+            stale_source = stale_fallback;
             if (source->as_is) {
                 write.as_is = true;
                 write.unmeasured = unmeasured;
@@ -5185,6 +5225,8 @@ bool FrameGenPresenter::SynthesizeJit(std::optional<JitFrame>& source, JitChoice
             }
         }
         write.unmeasured = unmeasured;
+        write.stale = stale_source;
+        write.motion_late = motion_late;
     }
     const JitFrame& frame = *source;
     write.exact = JitCopyOnly(frame, choice);
@@ -5309,9 +5351,22 @@ bool FrameGenPresenter::SynthesizeJit(std::optional<JitFrame>& source, JitChoice
         for (const FrameGenImage& image : images) {
             ok = ok && gpu_->Track(image.swapchain, xr_.images, error);
         }
-        ok = ok && (quad ? gpu_->SynthesizeComposed(frame.analyzed, choice.mode, choice.fraction, quad->composition,
-                                                    images, error)
-                         : gpu_->Synthesize(frame.analyzed, choice.mode, choice.fraction, images, error));
+        if (ok && write.stale && !write.exact) {
+            std::string stale_error;
+            if (!gpu_->SynthesizeStale(frame.analyzed, frame.previous_analyzed, choice.fraction, images, stale_error)) {
+                // Refused (nothing written): its real frame unchanged after all.
+                write.stale = false;
+                write.unmeasured = unmeasured = true;
+                exact_copy(choice);
+                write.exact = true;
+                ok = gpu_->Synthesize(frame.analyzed, choice.mode, choice.fraction, images, error);
+            }
+        } else {
+            write.stale = false;
+            ok = ok && (quad ? gpu_->SynthesizeComposed(frame.analyzed, choice.mode, choice.fraction,
+                                                        quad->composition, images, error)
+                             : gpu_->Synthesize(frame.analyzed, choice.mode, choice.fraction, images, error));
+        }
     }
     const bool extrapolate = choice.mode == FrameGenSynthesisMode::kExtrapolate;
     if (!ok) {
@@ -5338,7 +5393,7 @@ bool FrameGenPresenter::SynthesizeJit(std::optional<JitFrame>& source, JitChoice
     // The real frame's views, showing the images just written, seen from
     // where the eye is at the frame's time (where depth is used). Composed,
     // each eye's view as the layer composes it, moved as its periphery.
-    const float eye_time = write.exact ? 0.0f : extrapolate ? choice.fraction : choice.fraction - 1.0f;
+    const float eye_time = write.exact || write.stale ? 0.0f : extrapolate ? choice.fraction : choice.fraction - 1.0f;
     if (quad) {
         views.assign(quad->eyes.begin(), quad->eyes.end());
     } else {
@@ -5370,6 +5425,7 @@ bool FrameGenPresenter::SynthesizeJit(std::optional<JitFrame>& source, JitChoice
     consecutive_failures_ = 0;
     AddSample(synth_lock_ms_, lock_wait_ms);
     totals_.unmeasured += unmeasured ? 1 : 0;
+    totals_.stale_motion += write.stale || write.motion_late ? 1 : 0;
     if (logger_ && !logged_jit_ && !write.exact) {
         logged_jit_ = true;
         logger_->Info("Frame Generation writes each generated frame right before its refresh (" +
@@ -5605,7 +5661,8 @@ void FrameGenPresenter::CompositorLoop() {
                         ScoreLeadLocked(kept, true);
                         continue;
                     }
-                    const bool late = write.uncaptured || write.unmeasured || slot_time_ > kept.needed + period / 2;
+                    const bool late = write.uncaptured || write.unmeasured || write.motion_late ||
+                                      slot_time_ > kept.needed + period / 2;
                     totals_.late_gpu += late && write.uncaptured ? 1 : 0;
                     ScoreLeadLocked(kept, late);
                 }
@@ -5904,6 +5961,7 @@ FrameGenStatus FrameGenPresenter::Status() const {
     status.pauses = totals_.pauses;
     status.unready_capture = totals_.unready;
     status.unmeasured_copies = totals_.unmeasured;
+    status.stale_motion = totals_.stale_motion;
     status.copies_skipped = totals_.copies_skipped;
     status.unwritten = totals_.unwritten_wait + totals_.unwritten_failed + totals_.unwritten_outputs +
                        totals_.unwritten_source;

@@ -164,6 +164,9 @@ inline constexpr std::uint32_t kFrameGenFlagOcclusion = 256u;
 // Synthesis, interpolating: untrusted motion fades between the two real
 // frames (FrameGenTuning::cross_fade, research).
 inline constexpr std::uint32_t kFrameGenFlagCrossFade = 512u;
+// Synthesis, extrapolating: the previous real frame's flow, read where the
+// content was in that frame (BuildFrameGenSynthesisPlan's `stale_flow`).
+inline constexpr std::uint32_t kFrameGenFlagStaleFlow = 1024u;
 // World motion: samples per side of the fit's grid, and its iterations.
 inline constexpr std::uint32_t kFrameGenWorldGrid = 128u;
 // The trust vote's tile side in half-resolution texels (FG_TRUST_TILE):
@@ -604,9 +607,14 @@ FrameGenViewPlan BuildFrameGenViewPlan(const FrameGenViewRequest& request, const
 // when the eye moves, then the frame into output 0. Extrapolating from a
 // frame analyzed for interpolation reads the cover flow (kFilteredCover). A
 // frame at the newest frame's own time, or without motion measured, is the
-// newest frame unchanged.
+// newest frame unchanged. `stale_flow` (extrapolating): the frame's own
+// motion is not measured yet, so the previous real frame's flow moves it
+// (kFilteredPrevious, read where the content was in that frame); nothing
+// of its own analysis is read (no depth, so no eye shift: one refresh's head
+// movement is a fraction of a millimetre).
 FrameGenViewPlan BuildFrameGenSynthesisPlan(const FrameGenViewRequest& request, const FrameGenTuning& tuning,
-                                            FrameGenSynthesisMode mode, float fraction, bool cover_flow);
+                                            FrameGenSynthesisMode mode, float fraction, bool cover_flow,
+                                            bool stale_flow = false);
 
 // Interpolation fraction or extrapolation distance for a generated frame
 // displayed at target_time, given the two real frames' display times. Clamped

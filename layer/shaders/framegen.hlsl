@@ -68,6 +68,10 @@ cbuffer FrameGenConstantBuffer : register(b0) {
 // (head movement taken out) where its motion is not trusted, instead of to
 // the newest frame.
 #define FG_FLAG_CROSSFADE 512u
+// Synthesis, extrapolating: the flow is the previous real frame's (this
+// frame's own motion is not measured yet), read where each pixel's content
+// was in that frame by head rotation alone.
+#define FG_FLAG_STALE_FLOW 1024u
 
 // Linear depth at or beyond this many meters is treated as infinitely far.
 #define FG_FAR_DEPTH 100000.0
@@ -1145,6 +1149,16 @@ float4 Synthesize(float2 position, float fraction) {
     float2 occlusion_v = float2(0.0, 0.0);
     float occlusion_depth = 0.0;
     if (!still) {
+        // FG_FLAG_STALE_FLOW: the field is laid out in the previous real
+        // frame's view; it is read where this pixel's content was there (head
+        // rotation alone: depth is not measured yet either).
+        float2 flow_offset = float2(0.0, 0.0);
+        if ((g.options.y & FG_FLAG_STALE_FLOW) != 0u) {
+            float2 mapped;
+            if (MapToPrevious(uv, 0.0, mapped)) {
+                flow_offset = mapped - uv;
+            }
+        }
         // Candidates: the smooth field solved with a fixed-point iteration,
         // the field at this pixel, the four surrounding block vectors, and
         // zero motion. Later candidates carry a small bias so noise alone
@@ -1153,15 +1167,15 @@ float4 Synthesize(float2 position, float fraction) {
         // Where each candidate's motion was measured, in the newest frame:
         // its depth orders surfaces (FG_FLAG_OCCLUSION).
         float candidate_depth[7];
-        const float4 here = g_flow.SampleLevel(g_linear, uv, 0.0);
-        float4 solved = g_flow.SampleLevel(g_linear, uv + step * here.xy, 0.0);
-        solved = g_flow.SampleLevel(g_linear, uv + step * solved.xy, 0.0);
+        const float4 here = g_flow.SampleLevel(g_linear, uv + flow_offset, 0.0);
+        float4 solved = g_flow.SampleLevel(g_linear, uv + step * here.xy + flow_offset, 0.0);
+        solved = g_flow.SampleLevel(g_linear, uv + step * solved.xy + flow_offset, 0.0);
         candidates[0] = solved;
         candidates[1] = here;
         uint flow_width, flow_height;
         g_flow.GetDimensions(flow_width, flow_height);
         const int2 limit_cell = int2(flow_width, flow_height) - 1;
-        const int2 base = int2(floor(uv * float2(flow_width, flow_height) - 0.5));
+        const int2 base = int2(floor((uv + flow_offset) * float2(flow_width, flow_height) - 0.5));
         [unroll]
         for (int i = 0; i < 4; ++i) {
             const int2 cell = clamp(base + int2(i & 1, i >> 1), int2(0, 0), limit_cell);

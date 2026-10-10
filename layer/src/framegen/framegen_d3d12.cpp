@@ -2014,6 +2014,73 @@ class D3D12FrameGen final : public FrameGenGpu {
             error);
     }
 
+    bool SynthesizeStale(std::uint64_t frame_id, std::uint64_t motion_id, float fraction,
+                         const std::vector<FrameGenImage>& outputs, std::string& error) override {
+        HRESULT hr = device_->GetDeviceRemovedReason();
+        if (FAILED(hr)) {
+            error = Failure("D3D12 Frame Generation device", hr);
+            return false;
+        }
+        // The frame's newest and previous images (its previous slot holds
+        // `motion`'s newest image and filtered flow).
+        const AnalyzedFrame* kept = KeptFrame(frame_id, false, error);
+        if (!kept) {
+            return false;
+        }
+        const AnalyzedFrame& frame = *kept;
+        const AnalyzedFrame* motion = FindAnalyzed(motion_id);
+        if (!motion || motion->views.size() != frame.views.size() || !ImagesKept(*motion, true) ||
+            fence_->GetCompletedValue() < motion->work_value || outputs.size() < frame.views.size()) {
+            error = "the previous real frame's motion is not kept or not measured";
+            return false;
+        }
+        std::vector<FrameGenViewSubmission> submissions(frame.views.size());
+        std::vector<ViewRecording> recordings(frame.views.size());
+        for (std::size_t i = 0; i < frame.views.size(); ++i) {
+            const AnalyzedView& analyzed = frame.views[i];
+            const AnalyzedView& before = motion->views[i];
+            // Its filtered flow is the one in this frame's previous slot, and
+            // was measured from a pair (it had a previous frame itself).
+            if (!analyzed.request.synthesize || !before.valid || !before.request.synthesize ||
+                before.newest != analyzed.previous || before.newest_generation != analyzed.previous_generation) {
+                error = "the previous real frame's motion is not this frame's previous";
+                return false;
+            }
+            const auto output_it = images_.find(outputs[i].swapchain);
+            if (output_it == images_.end() || outputs[i].image_index >= output_it->second.size()) {
+                error = "Frame Generation output image is not tracked";
+                return false;
+            }
+            FrameGenViewSubmission& submission = submissions[i];
+            submission.outputs = {outputs[i]};
+            submission.request = analyzed.request;
+            ViewRecording& recording = recordings[i];
+            recording.submission = &submission;
+            recording.view = &views_[i];
+            recording.request = analyzed.request;
+            recording.outputs = {output_it->second[outputs[i].image_index]};
+            recording.plan = BuildFrameGenSynthesisPlan(analyzed.request, motion->tuning, FrameGenSynthesisMode::kExtrapolate,
+                                                        fraction, false, true);
+            if (!PrepareFrame(recording, error)) {
+                return false;
+            }
+        }
+        // Waits for the frame's capture alone, as its exact copy does: what
+        // it reads of `motion` was measured already, and every texture read
+        // stays readable by any queue until its slot is written again.
+        return RecordSynthesis(
+            frame, true,
+            [&](std::string& record_error) {
+                for (std::size_t i = 0; i < frame.views.size(); ++i) {
+                    if (!RecordFrame(recordings[i], frame.views[i], record_error)) {
+                        return false;
+                    }
+                }
+                return true;
+            },
+            error);
+    }
+
     bool SupportsComposition() const override { return supports_composition_; }
 
     bool SynthesizeComposed(std::uint64_t frame_id, FrameGenSynthesisMode mode, float fraction,
