@@ -1184,6 +1184,16 @@ class FrameGenPresenter {
     // begin discards it.
     bool presenter_frame_open_{false};
     bool jit_interpolate_{false}; // the presenter thread interpolates (latched with jit_)
+    // Just in time, the real frames a canvas's ring keeps
+    // (FrameGenTuning::history_ring): chosen as the presenter thread starts,
+    // five where video memory allows, else three (CanvasRingLocked).
+    std::uint8_t jit_canvas_ring_{3};
+    bool logged_canvas_ring_{false};
+    std::uint8_t CanvasRingLocked();
+    // The real frames the backend keeps for a frame of this path.
+    std::uint8_t JitRingLocked(bool quad) const {
+        return quad ? FrameGenHistoryRing(true) : jit_canvas_ring_;
+    }
     bool logged_jit_{false};
     bool jit_started_{false}; // a frame was written just in time since the presenter thread started
     std::uint64_t newest_copy_id_{0}; // the ThreadedFrame::id newest_copy_ came from

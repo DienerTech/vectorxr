@@ -5671,25 +5671,30 @@ void TestQuadDynamicCycle() {
     Check(!runtime.ordering_violation && !g_release_violation, "quad dynamic: calls stayed ordered");
 }
 
-// The backend keeps a canvas's real frame's images in a history ring of
-// three: once two newer frames were captured, the frame can no longer be
+// The backend keeps a real frame's images in a history ring: in a ring of
+// three, once two newer frames were captured, the frame can no longer be
 // moved (its previous images are gone), once three, not even shown. With a
 // lead of four refreshes or more at 2x (frames reaching the GPU late), that
 // is so by the refresh after a frame's own: such refreshes show its exact
 // copy instead of asking the backend for what it no longer has (writes that
 // would fail, and, composing quad views, hand them back to the layer).
-// Quad views keep five (FrameGenHistoryRing): the same lead moves them.
+// Quad views keep five (FrameGenHistoryRing), and so does a canvas where
+// video memory allows (CanvasRingLocked): the same lead moves them. A
+// canvas short of video memory keeps three.
 void TestJitRingExhaustion() {
-    enum class Case { kCanvas, kQuad, kQuadRingOfThree };
-    for (const Case test : {Case::kCanvas, Case::kQuad, Case::kQuadRingOfThree}) {
-        const bool quad = test != Case::kCanvas;
-        const std::string name = test == Case::kCanvas ? "ring"
-                                 : test == Case::kQuad ? "ring (quad views)"
-                                                       : "ring (quad views, a ring of three)";
+    enum class Case { kCanvas, kCanvasShortMemory, kQuad, kQuadRingOfThree };
+    for (const Case test : {Case::kCanvas, Case::kCanvasShortMemory, Case::kQuad, Case::kQuadRingOfThree}) {
+        const bool quad = test == Case::kQuad || test == Case::kQuadRingOfThree;
+        const bool shallow = test == Case::kCanvasShortMemory || test == Case::kQuadRingOfThree;
+        const std::string name = test == Case::kCanvas              ? "ring"
+                                 : test == Case::kCanvasShortMemory ? "ring (video memory short)"
+                                 : test == Case::kQuad              ? "ring (quad views)"
+                                                                    : "ring (quad views, a ring of three)";
         FrameGenPresenter presenter;
         GpuLog gpu;
         gpu.capture_lag = 40ms;
         if (test == Case::kQuadRingOfThree) gpu.quad_ring = 3;
+        if (test == Case::kCanvasShortMemory) gpu.memory_pressure = true;
         Runtime runtime;
         runtime.paced = true;
         FrameGenStatus status;
@@ -5725,6 +5730,10 @@ void TestJitRingExhaustion() {
             });
             Check(status.ring_exhausted <= 2 && moved > 30,
                   name + ": refreshes still move their frame (" + std::to_string(moved) + " moved, " +
+                      std::to_string(status.ring_exhausted) + " found its images replaced)");
+        } else if (!shallow) {
+            Check(status.ring_exhausted <= 2 && status.generated > 30,
+                  name + ": refreshes still move their frame (" + std::to_string(status.generated) + " generated, " +
                       std::to_string(status.ring_exhausted) + " found its images replaced)");
         } else {
             Check(status.ring_exhausted > 10, name + ": refreshes found their frame's images replaced (" +

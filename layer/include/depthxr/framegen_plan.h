@@ -356,6 +356,9 @@ struct FrameGenTuning {
     // merge and the focus views' motion limit; null on the canvas path. Not
     // owned: the caller keeps it alive for the Execute call.
     const FrameGenComposition* composition{nullptr};
+    // With analyze_only: the real frames each view's ring keeps
+    // (FrameGenHistoryRing); 0 for the default of the path.
+    std::uint8_t history_ring{0};
 };
 
 struct FrameGenViewPlan {
@@ -378,17 +381,29 @@ inline constexpr std::uint8_t kFrameGenHistoryRingMax = 5;
 // from while the next is captured. Just in time, frames are written from a
 // real frame (moved, from its previous images too) while newer ones are
 // captured, a slot each: a ring of n moves a real frame until n - 1 newer
-// ones were captured (shows it until n). A canvas keeps three (its images
-// are large); quad views (FrameGenTuning::composition) keep five, as their
-// lead at the game's own rate spans a few real frames, and theirs are
-// smaller.
+// ones were captured (shows it until n). Quad views
+// (FrameGenTuning::composition) keep five, as their lead at the game's own
+// rate spans a few real frames, and theirs are smaller. A canvas keeps three
+// by default (its images are large); the presenter gives it five where video
+// memory allows (FrameGenTuning::history_ring): a game at 30 fps keeps a real
+// frame in use for 80-130 ms after its capture (Interpolate, and Extrapolate
+// at its slowest), three captures and more (MSFS 2024, 2026-10-09: up to
+// 308 refreshes in 30 s found the frame they needed replaced).
 constexpr std::uint8_t FrameGenHistoryRing(bool composed) { return composed ? 5 : 3; }
+inline constexpr std::uint8_t kFrameGenCanvasRingRoomy = 5;
 // The ring a submission with `tuning` uses (two unless just in time).
 inline std::uint8_t FrameGenHistoryRing(const FrameGenTuning& tuning) {
-    return tuning.analyze_only ? FrameGenHistoryRing(tuning.composition != nullptr) : 2;
+    if (!tuning.analyze_only) return 2;
+    if (tuning.history_ring) {
+        return tuning.history_ring < 2 ? std::uint8_t{2}
+               : tuning.history_ring > kFrameGenHistoryRingMax ? kFrameGenHistoryRingMax
+                                                               : tuning.history_ring;
+    }
+    return FrameGenHistoryRing(tuning.composition != nullptr);
 }
 static_assert(FrameGenHistoryRing(true) <= kFrameGenHistoryRingMax &&
-              FrameGenHistoryRing(false) <= kFrameGenHistoryRingMax);
+              FrameGenHistoryRing(false) <= kFrameGenHistoryRingMax &&
+              kFrameGenCanvasRingRoomy <= kFrameGenHistoryRingMax);
 
 // Per-view ring bookkeeping shared by every backend. Slots hold the history
 // color copy and the filtered flow that seeds the next search; Newest() is

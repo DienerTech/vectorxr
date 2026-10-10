@@ -1103,6 +1103,41 @@ void FrameGenPresenter::RecordCaptureTargetsLocked(const XrCompositionLayerProje
     }
 }
 
+std::uint8_t FrameGenPresenter::CanvasRingLocked() {
+    // Each further slot keeps a real frame per view: its image, and depth,
+    // trust and flow at half resolution or less (about one and a half
+    // images' worth).
+    const FrameCopy& copy = newest_copy_.valid ? newest_copy_ : passthrough_copy_;
+    std::uint64_t slot_bytes = 0;
+    if (copy.valid && copy.has_projection && copy.projection_index < copy.layers.size()) {
+        for (const XrCompositionLayerProjectionView& view : copy.layers[copy.projection_index].views) {
+            const std::uint64_t pixels = static_cast<std::uint64_t>(std::max(view.subImage.imageRect.extent.width, 0)) *
+                                         static_cast<std::uint64_t>(std::max(view.subImage.imageRect.extent.height, 0));
+            slot_bytes += pixels * 6;
+        }
+    }
+    const std::uint8_t roomy = kFrameGenCanvasRingRoomy;
+    const std::uint8_t lean = FrameGenHistoryRing(false);
+    const std::uint64_t extra = slot_bytes * (roomy - lean);
+    const std::optional<FrameGenMemoryBudget> memory = gpu_ ? gpu_->MemoryBudget() : std::nullopt;
+    // Unknown sizes or budget: the default. Room means the extra slots and
+    // a tenth of the budget still fit.
+    const bool room = slot_bytes && memory && memory->budget_bytes &&
+                      memory->usage_bytes + extra + memory->budget_bytes / 10 < memory->budget_bytes;
+    const std::uint8_t ring = room ? roomy : lean;
+    if (logger_ && !logged_canvas_ring_ && slot_bytes && memory && memory->budget_bytes) {
+        logged_canvas_ring_ = true;
+        constexpr double megabytes = 1024.0 * 1024.0;
+        logger_->Info("Frame Generation keeps the last " + std::to_string(ring) + " real frames to generate from" +
+                      (room ? " (" + Number(static_cast<double>(extra) / megabytes, 0) +
+                                  " MB more video memory than three, so slow games keep every frame they need)."
+                            : " (video memory is short: usage " +
+                                  Number(static_cast<double>(memory->usage_bytes) / megabytes, 0) + " of " +
+                                  Number(static_cast<double>(memory->budget_bytes) / megabytes, 0) + " MB)."));
+    }
+    return ring;
+}
+
 bool FrameGenPresenter::QuadCapableLocked() const {
     return started_ && gpu_ && ThreadedEligibleLocked() && gpu_->SupportsJustInTime() && gpu_->SupportsComposition();
 }
@@ -2719,6 +2754,7 @@ bool FrameGenPresenter::Generate(const XrCompositionLayerProjection& projection,
         // Quad views: the periphery moves as its focus view does where an
         // eye blends them, and a focus view limits its periphery's motion.
         tuning.composition = analyze ? composition : nullptr;
+        tuning.history_ring = analyze && !composition ? jit_canvas_ring_ : 0;
         // Nothing is measured across a pause: the motion of a game that
         // stopped for a while says nothing about its next frames.
         if (last_real_.valid && frame.app_time - last_real_.display_time > PauseLimitLocked()) {
@@ -3821,6 +3857,7 @@ void FrameGenPresenter::StartCompositorLocked(const FrameGenRuntimeCalls& calls)
     quad_switch_pending_ = false;
     quad_unwritten_in_row_ = 0;
     jit_interpolate_ = settings_.synthesis_mode == FrameGenSynthesisMode::kInterpolate;
+    jit_canvas_ring_ = jit_ && !quad_mode_ ? CanvasRingLocked() : FrameGenHistoryRing(false);
     jit_frames_.clear();
     jit_shown_.reset();
     jit_views_.clear();
@@ -4765,7 +4802,7 @@ bool FrameGenPresenter::AnalyzeJit(const XrCompositionLayerProjection& projectio
     jit_frames_.push_back(std::move(jit));
     // The backend keeps the images of the last few real frames: as many as
     // its ring for this analysis has (quad views keep more).
-    while (jit_frames_.size() > FrameGenHistoryRing(jit_frames_.back().quad != nullptr)) {
+    while (jit_frames_.size() > JitRingLocked(jit_frames_.back().quad != nullptr)) {
         ScoreErasedLocked(jit_frames_.front());
         jit_frames_.pop_front();
     }
@@ -4885,7 +4922,7 @@ XrResult FrameGenPresenter::ThreadedEndJit(const XrFrameEndInfo& info, const Thr
         RecordDepthReleasesLocked(copy);
         kept.copy = copy;
         jit_frames_.push_back(std::move(kept));
-        while (jit_frames_.size() > FrameGenHistoryRing(quad_mode_)) {
+        while (jit_frames_.size() > JitRingLocked(quad_mode_)) {
             ScoreErasedLocked(jit_frames_.front());
             jit_frames_.pop_front();
         }
