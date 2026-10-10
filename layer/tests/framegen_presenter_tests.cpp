@@ -650,6 +650,52 @@ class FakeGpu final : public FrameGenGpu {
         }
         return true;
     }
+    bool SynthesizeComposedStale(std::uint64_t frame, std::uint64_t motion, float fraction,
+                                 const FrameGenComposition& composition, const std::vector<FrameGenImage>& outputs,
+                                 std::string& error) override {
+        if (!log_->stale) {
+            error = "the fake backend does not move frames by older motion";
+            return false;
+        }
+        ++log_->compose_calls;
+        Analyzed analyzed;
+        const TimePoint now = std::chrono::steady_clock::now();
+        {
+            std::scoped_lock lock(analyzed_mutex_);
+            const auto it = std::find_if(analyzed_.begin(), analyzed_.end(), [&](const Analyzed& a) { return a.id == frame; });
+            const auto before =
+                std::find_if(analyzed_.begin(), analyzed_.end(), [&](const Analyzed& a) { return a.id == motion; });
+            bool views_known = it != analyzed_.end() && before != analyzed_.end() && outputs.size() >= composition.eyes.size();
+            for (const FrameGenComposeEye& eye : composition.eyes) {
+                views_known = views_known && eye.peripheral < it->views.size() && eye.focus < it->views.size();
+            }
+            if (!views_known || !WritableLocked(*it, false) || !WritableLocked(*before, true)) {
+                ++log_->synthesis_failures;
+                error = "the real frame or the one before it is no longer kept";
+                return false;
+            }
+            if (now < it->captured_at) {
+                ++log_->uncaptured_writes;
+            }
+            if (motion + 1 != frame || now < before->measured_at) {
+                ++log_->stale_wrong_motion;
+            }
+            analyzed = *it;
+        }
+        {
+            std::scoped_lock lock(log_->syntheses_mutex);
+            log_->syntheses.push_back({frame, FrameGenSynthesisMode::kExtrapolate, fraction, now});
+            GpuLog::Composed entry{frame, FrameGenSynthesisMode::kExtrapolate, fraction, composition, {}};
+            for (const FrameGenImage& output : outputs) entry.outputs.push_back(output.swapchain);
+            log_->composed.push_back(std::move(entry));
+        }
+        ++log_->stale_writes;
+        std::scoped_lock lock(g_xr_mutex);
+        for (std::size_t e = 0; e < composition.eyes.size(); ++e) {
+            g_written[outputs[e].swapchain].push_back(analyzed.views[composition.eyes[e].peripheral].x);
+        }
+        return true;
+    }
     bool WaitIdle() override {
         ++log_->wait_idles;
         return true;
@@ -5843,6 +5889,41 @@ void TestQuadDynamicCycle() {
     Check(!runtime.ordering_violation && !g_release_violation, "quad dynamic: calls stayed ordered");
 }
 
+// Quad views (composed per eye) with motion measured late, extrapolating:
+// as TestJitStaleMotion, through SynthesizeComposedStale.
+void TestQuadStaleMotion() {
+    auto run = [](bool stale) {
+        FrameGenPresenter presenter;
+        GpuLog gpu;
+        gpu.stale = stale;
+        Runtime runtime;
+        runtime.paced = true;
+        StartQuad(presenter, gpu, FrameGenSynthesisMode::kExtrapolate, FrameGenMultiplier::k2);
+        gpu.measure_lag = 35ms;
+        QuadApp app(presenter, runtime);
+        for (int i = 0; i < 3; ++i) app.Frame();
+        app.Run(1200ms);
+        const FrameGenStatus status = presenter.Status();
+        presenter.Stop();
+        Check(!runtime.ordering_violation && !g_release_violation && runtime.not_stereo == 0 &&
+                  runtime.mismatched_images == 0,
+              "quad stale motion: calls stayed ordered, two views, images matching them");
+        Check(gpu.stale_wrong_motion == 0 && gpu.uncaptured_writes == 0 && gpu.unmeasured_moves == 0,
+              "quad stale motion: the frame's previous, measured, from a captured frame");
+        return status;
+    };
+    const FrameGenStatus stale = run(true);
+    const FrameGenStatus unchanged = run(false);
+    std::cerr << "  quad stale: " << stale.stale_motion << " stale, " << stale.unmeasured_copies
+              << " unchanged; without: " << unchanged.unmeasured_copies << " unchanged" << std::endl;
+    Check(unchanged.unmeasured_copies > 10 && unchanged.stale_motion == 0,
+          "quad stale motion: a backend that cannot shows them unchanged (" +
+              std::to_string(unchanged.unmeasured_copies) + ")");
+    Check(stale.stale_motion > 10 && stale.unmeasured_copies * 4 < unchanged.unmeasured_copies,
+          "quad stale motion: the previous real frame's motion moves them (" + std::to_string(stale.stale_motion) +
+              " moved so, " + std::to_string(stale.unmeasured_copies) + " unchanged)");
+}
+
 // The backend keeps a real frame's images in a history ring: in a ring of
 // three, once two newer frames were captured, the frame can no longer be
 // moved (its previous images are gone), once three, not even shown. With a
@@ -6185,6 +6266,7 @@ int main(int argc, char** argv) {
     RUN(TestQuadHeadsetOffBreak);
     RUN(TestQuadDynamicCycle);
     RUN(TestJitRingExhaustion);
+    RUN(TestQuadStaleMotion);
     RUN(TestQuadDynamicDeepRing);
     RUN(TestQuadComposeStallOnce);
     if (!policy) {

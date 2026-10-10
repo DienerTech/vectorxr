@@ -5188,7 +5188,7 @@ bool FrameGenPresenter::SynthesizeJit(std::optional<JitFrame>& source, JitChoice
             // and is still kept: the refresh does not stand still and jump
             // the next (MSFS 2024 with NVIDIA's flow, 2026-10-09: motion came
             // 16 ms after the capture, and 8% of refreshes stood still).
-            if (moved && stale_motion_enabled_ && !frame.quad && choice.mode == FrameGenSynthesisMode::kExtrapolate &&
+            if (moved && stale_motion_enabled_ && choice.mode == FrameGenSynthesisMode::kExtrapolate &&
                 frame.previous_analyzed && gpu_->Measured(frame.previous_analyzed) &&
                 gpu_->Writable(frame.previous_analyzed, true)) {
                 stale = true;
@@ -5353,13 +5353,19 @@ bool FrameGenPresenter::SynthesizeJit(std::optional<JitFrame>& source, JitChoice
         }
         if (ok && write.stale && !write.exact) {
             std::string stale_error;
-            if (!gpu_->SynthesizeStale(frame.analyzed, frame.previous_analyzed, choice.fraction, images, stale_error)) {
+            const bool stale_written =
+                quad ? gpu_->SynthesizeComposedStale(frame.analyzed, frame.previous_analyzed, choice.fraction,
+                                                     quad->composition, images, stale_error)
+                     : gpu_->SynthesizeStale(frame.analyzed, frame.previous_analyzed, choice.fraction, images, stale_error);
+            if (!stale_written) {
                 // Refused (nothing written): its real frame unchanged after all.
                 write.stale = false;
                 write.unmeasured = unmeasured = true;
                 exact_copy(choice);
                 write.exact = true;
-                ok = gpu_->Synthesize(frame.analyzed, choice.mode, choice.fraction, images, error);
+                ok = quad ? gpu_->SynthesizeComposed(frame.analyzed, choice.mode, choice.fraction, quad->composition,
+                                                     images, error)
+                          : gpu_->Synthesize(frame.analyzed, choice.mode, choice.fraction, images, error);
             }
         } else {
             write.stale = false;

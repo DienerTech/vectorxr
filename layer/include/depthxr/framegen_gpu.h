@@ -226,6 +226,13 @@ class FrameGenGpu {
         error = "this graphics API cannot move a frame by the previous one's motion";
         return false;
     }
+    // SynthesizeStale for quad views composed per eye (SynthesizeComposed).
+    virtual bool SynthesizeComposedStale(std::uint64_t /*frame*/, std::uint64_t /*motion*/, float /*fraction*/,
+                                         const FrameGenComposition& /*composition*/,
+                                         const std::vector<FrameGenImage>& /*outputs*/, std::string& error) {
+        error = "this graphics API cannot move a frame by the previous one's motion";
+        return false;
+    }
     // Quad views: frames written just in time from views of their own
     // (FrameGenComposition), composed per eye.
     virtual bool SupportsComposition() const { return false; }

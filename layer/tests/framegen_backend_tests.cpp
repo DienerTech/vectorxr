@@ -99,6 +99,14 @@ std::uint32_t Patch(float x, float y) {
 }
 
 // Static background with a 96 px textured square whose top-left is at (px, py).
+// FG_TEST_NO_STALL=1: the hardware checks that leave a queue waiting on an
+// optical flow match that never finishes (the watchdog releases it) are
+// skipped; on some driver versions such waits have preceded system crashes.
+bool StallChecksAllowed() {
+    const char* value = std::getenv("FG_TEST_NO_STALL");
+    return !(value && std::string(value) == "1");
+}
+
 Pixels MovingSquare(float px, float py) {
     Pixels pixels(kSize * kSize);
     for (std::uint32_t y = 0; y < kSize; ++y) {
@@ -682,7 +690,7 @@ int RunScenarios(Harness& harness) {
             Check(facade_error < facade_hold, harness.name + " the optical flow hardware's facade is worse than holding");
         }
         Check(square_error < 0.5 * square_hold, harness.name + " motion is not extrapolated with hardware flow asked for");
-        if (status == "active") {
+        if (status == "active" && StallChecksAllowed()) {
             // Hardware that stops answering must not hang the game's queue:
             // the watchdog releases it and block matching takes over.
             gpu->StallHardwareForTest();
@@ -742,6 +750,8 @@ int RunScenarios(Harness& harness) {
         if (status == "active") {
             Check(square_error < 0.5 * square_hold, harness.name + " motion matched at release is not extrapolated");
             Check(turned_error < 0.3 * turned_baseline, harness.name + " head rotation leaked into vectors matched at release");
+        }
+        if (status == "active" && StallChecksAllowed()) {
             // A match at release that never finishes, with the next
             // capture's work queued behind it (its input can never become
             // ready): the watchdog still releases the game's queue.
@@ -1938,6 +1948,34 @@ int RunQuadViews(Harness& harness) {
                               << '\n';
                     Check(cover_error < 0.5 * cover_hold, harness.name + " quad views cover frames do not move content");
                 }
+                if (!interpolate) {
+                    // Stale motion: the next real frame moved half a frame on
+                    // by this one's motion (its own not measured yet) lands
+                    // near where its own motion puts it, far from it held.
+                    const QuadFrame c = analyze(*gpu, 2, views, &b, moving(2.0f), tuning, 25.0, 0.0, true);
+                    Check(gpu->WaitIdle(), harness.name + " quad views: the analyses did not finish");
+                    const auto own = generate(*gpu, c, mode, 0.5f, c.composition);
+                    Check(gpu->SynthesizeComposedStale(c.id, b.id, 0.5f, c.composition, eye_images, error),
+                          harness.name + " quad views stale motion: " + error);
+                    const std::array<Pixels, 2> stale{harness.readback_sized(g_swapchains[outputs[0]][0]),
+                                                      harness.readback_sized(g_swapchains[outputs[1]][0])};
+                    const auto stale_truth = composed_truth(c, c.composition, moving(2.5f));
+                    const std::array<Pixels, 2> c_hold{
+                        ComposeReference(LinearImage(c.pixels[0], periphery_extent), LinearImage(c.pixels[2], focus_extent),
+                                         BuildFrameGenComposeConstants(c.composition.eyes[0], output), output),
+                        ComposeReference(LinearImage(c.pixels[1], periphery_extent), LinearImage(c.pixels[3], focus_extent),
+                                         BuildFrameGenComposeConstants(c.composition.eyes[1], output), output)};
+                    const double own_error = eyes_error(own, stale_truth);
+                    const double stale_error = eyes_error(stale, stale_truth);
+                    const double held_error = eyes_error(c_hold, stale_truth);
+                    std::cout << harness.name << " quad views stale motion" << (hardware ? " (hardware flow)" : "")
+                              << ": error " << stale_error << " vs own motion " << own_error << " vs hold " << held_error
+                              << std::endl;
+                    Check(stale_error < 0.75 * held_error && stale_error < own_error + 0.25 * held_error,
+                          harness.name + " quad views: the previous frame's motion does not move a frame on");
+                    Check(!gpu->SynthesizeComposedStale(c.id, a.id, 0.5f, c.composition, eye_images, error),
+                          harness.name + " quad views: a frame was moved by motion other than its previous frame's");
+                }
                 if (!hardware && interpolate) {
                     // Written by compute and copied instead of drawn: the same.
                     gpu->SetDirectOutput(false);
@@ -2025,7 +2063,7 @@ int RunQuadViews(Harness& harness) {
         // The atlas' match that never finishes: the watchdog releases the
         // queue waiting for it, the hardware is not used again, and block
         // matching takes over for all four views.
-        if (g_hardware && g_flow_status == "active") {
+        if (g_hardware && g_flow_status == "active" && StallChecksAllowed()) {
             auto stalled = CreateFrameGenGpu(harness.binding, error);
             Check(stalled != nullptr, harness.name + " backend: " + error);
             stalled->SetCopyAfterRelease(true);

@@ -2086,6 +2086,21 @@ class D3D12FrameGen final : public FrameGenGpu {
     bool SynthesizeComposed(std::uint64_t frame_id, FrameGenSynthesisMode mode, float fraction,
                             const FrameGenComposition& composition, const std::vector<FrameGenImage>& outputs,
                             std::string& error) override {
+        return ComposeSynthesis(frame_id, 0, mode, fraction, composition, outputs, error);
+    }
+
+    bool SynthesizeComposedStale(std::uint64_t frame_id, std::uint64_t motion_id, float fraction,
+                                 const FrameGenComposition& composition, const std::vector<FrameGenImage>& outputs,
+                                 std::string& error) override {
+        return motion_id && ComposeSynthesis(frame_id, motion_id, FrameGenSynthesisMode::kExtrapolate, fraction,
+                                             composition, outputs, error);
+    }
+
+    // SynthesizeComposed, or with `motion_id` SynthesizeComposedStale (the
+    // checks and waits of SynthesizeStale).
+    bool ComposeSynthesis(std::uint64_t frame_id, std::uint64_t motion_id, FrameGenSynthesisMode mode, float fraction,
+                          const FrameGenComposition& composition, const std::vector<FrameGenImage>& outputs,
+                          std::string& error) {
         if (!supports_composition_) {
             error = "this Direct3D 12 device cannot compose quad views";
             return false;
@@ -2095,13 +2110,29 @@ class D3D12FrameGen final : public FrameGenGpu {
             error = Failure("D3D12 device", hr);
             return false;
         }
-        const bool exact = mode == FrameGenSynthesisMode::kExtrapolate ? fraction <= 0.0f : fraction >= 1.0f;
+        const bool stale = motion_id != 0;
+        const bool exact = !stale && (mode == FrameGenSynthesisMode::kExtrapolate ? fraction <= 0.0f : fraction >= 1.0f);
         const AnalyzedFrame* kept = KeptFrame(frame_id, exact, error);
         if (!kept) {
             return false;
         }
         const AnalyzedFrame& frame = *kept;
         const std::size_t count = frame.views.size();
+        const AnalyzedFrame* motion = stale ? FindAnalyzed(motion_id) : nullptr;
+        if (stale && (!motion || motion->views.size() != count || !ImagesKept(*motion, true) ||
+                      fence_->GetCompletedValue() < motion->work_value)) {
+            error = "the previous real frame's motion is not kept or not measured";
+            return false;
+        }
+        for (std::size_t i = 0; stale && i < count; ++i) {
+            const AnalyzedView& analyzed = frame.views[i];
+            const AnalyzedView& before = motion->views[i];
+            if (!analyzed.request.synthesize || !before.valid || !before.request.synthesize ||
+                before.newest != analyzed.previous || before.newest_generation != analyzed.previous_generation) {
+                error = "the previous real frame's motion is not this frame's previous";
+                return false;
+            }
+        }
         if (composition.eyes.empty() || outputs.size() < composition.eyes.size()) {
             error = "a composed eye has no output image";
             return false;
@@ -2118,7 +2149,10 @@ class D3D12FrameGen final : public FrameGenGpu {
         std::vector<bool> moved(count, false);
         for (std::size_t i = 0; i < count; ++i) {
             const AnalyzedView& analyzed = frame.views[i];
-            recordings[i].plan = BuildFrameGenSynthesisPlan(analyzed.request, frame.tuning, mode, fraction, analyzed.cover);
+            recordings[i].plan = stale ? BuildFrameGenSynthesisPlan(analyzed.request, motion->tuning, mode, fraction,
+                                                                    false, true)
+                                       : BuildFrameGenSynthesisPlan(analyzed.request, frame.tuning, mode, fraction,
+                                                                    analyzed.cover);
             moved[i] = recordings[i].plan.synthesize;
         }
         // An eye whose views disagree shows the real frame in both, so the two
@@ -2179,8 +2213,9 @@ class D3D12FrameGen final : public FrameGenGpu {
                 return false;
             }
         }
+        // Stale: the frame's capture alone is waited for, as its exact copy.
         return RecordSynthesis(
-            frame, exact,
+            frame, exact || stale,
             [&](std::string& record_error) {
                 std::vector<D3D12_RESOURCE_BARRIER> barriers;
                 for (std::size_t i = 0; i < count; ++i) {
