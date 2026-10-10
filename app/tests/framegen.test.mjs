@@ -6,6 +6,7 @@ import {
   defaultFrameGenModule,
   defaultFrameGenSettings,
   defaultOsdSettings,
+  frameGenFixedMultipliers,
   moduleStateForApplication,
   normalizeConfig,
   normalizeFrameGenSettings,
@@ -23,7 +24,7 @@ test('configs written before Frame Generation load with it off and default setti
   delete config.modules.framegen
   const normalized = normalizeConfig(config)
   assert.deepEqual(normalized.modules.framegen, defaultFrameGenModule())
-  assert.deepEqual(normalized.modules.framegen.defaults, { synthesisMode: 'interpolate', flowQuality: 'balanced', motionEstimation: 'shader', frameMultiplier: 'auto', artifactSuppression: 50, motionLimitPercent: 10 })
+  assert.deepEqual(normalized.modules.framegen.defaults, { synthesisMode: 'interpolate', flowQuality: 'balanced', motionEstimation: 'shader', frameMultiplier: 'dynamic', artifactSuppression: 50, motionLimitPercent: 10 })
   assert.equal(normalized.modules.framegen.toggleBinding.type, 'none')
   assert.equal(normalized.modules.framegen.diagnosticView, 'off')
   assert.deepEqual(validateConfig(normalized), [])
@@ -58,23 +59,27 @@ test('invalid imported values normalize safely: enums fall back, integers clamp'
   assert.notEqual(framegen.profiles[0].settings, framegen.defaults)
 })
 
-test('the frame multiplier defaults to Auto, keeps valid choices, and falls back on bad values', () => {
-  assert.equal(defaultFrameGenSettings().frameMultiplier, 'auto')
+test('the frame multiplier defaults to Dynamic, keeps valid choices, and falls back on bad values', () => {
+  assert.equal(defaultFrameGenSettings().frameMultiplier, 'dynamic')
+  assert.deepEqual([...frameGenFixedMultipliers], ['auto', '2x', '3x', '4x'])
   for (const value of ['auto', 'dynamic', '2x', '3x', '4x']) {
     assert.equal(normalizeFrameGenSettings({ frameMultiplier: value }).frameMultiplier, value)
   }
-  for (const value of ['8x', '1x', '2X', 'Auto', 3, null, true, {}]) {
-    assert.equal(normalizeFrameGenSettings({ frameMultiplier: value }).frameMultiplier, 'auto', String(value))
+  for (const value of ['8x', '1x', '2X', 'Auto', 'fixed', 3, null, true, {}]) {
+    assert.equal(normalizeFrameGenSettings({ frameMultiplier: value }).frameMultiplier, 'dynamic', String(value))
   }
 
-  // Settings saved before the multiplier existed load as Auto; profiles fall back to the module defaults.
+  // Settings saved without a multiplier load as Dynamic; profiles fall back to the module defaults.
   const config = defaultConfig()
   config.applications = [dcs]
   config.modules.framegen.defaults = { synthesisMode: 'extrapolate', flowQuality: 'balanced', artifactSuppression: 50, motionLimitPercent: 10 }
   config.modules.framegen.profiles = [{ name: 'DCS', enabled: true, applicationIds: ['dcs'], settings: { synthesisMode: 'extrapolate', frameMultiplier: 'turbo' } }]
   let framegen = normalizeConfig(config).modules.framegen
-  assert.equal(framegen.defaults.frameMultiplier, 'auto')
-  assert.equal(framegen.profiles[0].settings.frameMultiplier, 'auto')
+  assert.equal(framegen.defaults.frameMultiplier, 'dynamic')
+  assert.equal(framegen.profiles[0].settings.frameMultiplier, 'dynamic')
+  // A saved fixed rate, Auto included, stays as chosen.
+  config.modules.framegen.defaults.frameMultiplier = 'auto'
+  assert.equal(normalizeConfig(config).modules.framegen.defaults.frameMultiplier, 'auto')
   config.modules.framegen.defaults.frameMultiplier = '3x'
   framegen = normalizeConfig(config).modules.framegen
   assert.equal(framegen.profiles[0].settings.frameMultiplier, '3x')

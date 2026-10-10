@@ -811,7 +811,7 @@ fn default_framegen_motion_estimation() -> String {
 }
 
 fn default_framegen_frame_multiplier() -> String {
-    "auto".into()
+    "dynamic".into()
 }
 
 fn default_framegen_artifact_suppression() -> i64 {
@@ -2965,7 +2965,7 @@ mod tests {
         assert_eq!(defaults.defaults.synthesis_mode, "interpolate");
         assert_eq!(defaults.defaults.flow_quality, "balanced");
         assert_eq!(defaults.defaults.motion_estimation, "shader");
-        assert_eq!(defaults.defaults.frame_multiplier, "auto");
+        assert_eq!(defaults.defaults.frame_multiplier, "dynamic");
         assert_eq!(defaults.defaults.artifact_suppression, 50);
         assert_eq!(defaults.defaults.motion_limit_percent, 10);
         assert!(defaults.profiles.is_empty());
@@ -2990,18 +2990,18 @@ mod tests {
         let config: super::FrameGenModuleConfig = serde_json::from_value(input.clone()).unwrap();
         assert_eq!(serde_json::to_value(config).unwrap(), input);
 
-        // Settings saved before the frame multiplier existed load as Auto and save it.
+        // Settings saved without a frame multiplier load as Dynamic and save it.
         let older: super::FrameGenSettings = serde_json::from_value(serde_json::json!({
             "synthesisMode": "extrapolate", "flowQuality": "quality",
             "artifactSuppression": 80, "motionLimitPercent": 4
         }))
         .unwrap();
-        assert_eq!(older.frame_multiplier, "auto");
+        assert_eq!(older.frame_multiplier, "dynamic");
         assert_eq!(older.motion_estimation, "shader");
-        assert_eq!(serde_json::to_value(older).unwrap()["frameMultiplier"], "auto");
+        assert_eq!(serde_json::to_value(older).unwrap()["frameMultiplier"], "dynamic");
         assert_eq!(
             serde_json::to_value(super::FrameGenSettings::default()).unwrap()["frameMultiplier"],
-            "auto"
+            "dynamic"
         );
 
         // Configs written before Frame Generation load with it off and save the defaults.
@@ -3032,7 +3032,7 @@ mod tests {
         assert_eq!(profile.name, "DCS");
         assert!(profile.enabled);
         assert_eq!(profile.settings.flow_quality, "balanced");
-        assert_eq!(profile.settings.frame_multiplier, "auto");
+        assert_eq!(profile.settings.frame_multiplier, "dynamic");
     }
 
     #[test]

@@ -2057,7 +2057,9 @@ struct CaseSettings {
     bool debug_log{false};
     // Quadviews' stereo-composite emulation, the focus fixed at the centre.
     bool quadviews{false};
-    std::string frame_multiplier; // Frame Generation's (its default when empty)
+    // Frame Generation's (its default when empty). The cases were written when
+    // Auto was the default, so they keep it unless they choose another.
+    std::string frame_multiplier{"auto"};
     std::string synthesis_mode;   // Frame Generation's (its default when empty)
 };
 

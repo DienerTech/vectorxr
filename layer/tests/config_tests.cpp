@@ -1218,8 +1218,8 @@ void TestFrameGenModuleOptional() {
            "Frame Generation numeric defaults changed");
     Expect(resolved.framegen.diagnostic_view == depthxr::FrameGenDiagnosticView::kOff,
            "Frame Generation diagnostics should default off");
-    Expect(resolved.framegen.multiplier == depthxr::FrameGenMultiplier::kAuto,
-           "Frame Generation should default to the automatic multiplier");
+    Expect(resolved.framegen.multiplier == depthxr::FrameGenMultiplier::kDynamic,
+           "Frame Generation should default to Dynamic");
     Expect(resolved.core.osd.show_framegen && !resolved.core.osd.compact_show_framegen,
            "OSD Frame Gen rows should default to full-panel only");
     Expect(resolved.core.osd.body_order.size() == 5 && resolved.core.osd.body_order[2] == "framegen",
@@ -1271,6 +1271,17 @@ void TestFrameGenProfileResolution() {
            "Dynamic frame multiplier was not parsed");
     Expect(std::string(depthxr::ToString(depthxr::FrameGenMultiplier::kDynamic)) == "dynamic",
            "Dynamic frame multiplier did not round-trip");
+    // The fixed rates, Auto among them, are still chosen explicitly.
+    const depthxr::ParseResult automatic =
+        depthxr::ParseConfig(FrameGenConfigJson(R"json({ "enabled": true, "defaults": { "frameMultiplier": "auto" } })json"));
+    Expect(automatic.ok && automatic.document.framegen.defaults.multiplier == depthxr::FrameGenMultiplier::kAuto,
+           "Auto frame multiplier was not parsed");
+    // A profile saved without a multiplier runs Dynamic.
+    const depthxr::ParseResult inherited = depthxr::ParseConfig(FrameGenConfigJson(
+        R"json({ "enabled": false, "profiles": [ { "name": "DCS", "applicationIds": ["app-dcs"], "settings": { "synthesisMode": "extrapolate" } } ] })json"));
+    Expect(inherited.ok && depthxr::ResolveFrameGenSettings(inherited.document, "DCS.exe").multiplier ==
+                               depthxr::FrameGenMultiplier::kDynamic,
+           "A profile without a frame multiplier should run Dynamic");
 }
 
 void TestFrameGenInvalidSettingsRejected() {
