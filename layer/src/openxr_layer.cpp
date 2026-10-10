@@ -9769,9 +9769,12 @@ OsdSnapshot OpenXrLayer::BuildOsdSnapshot() const {
     if (turbo_enabled) add("Turbo");
     if (framegen_owns_pacing_.load(std::memory_order_acquire)) add("Frame Gen");
     if (quadviews_session_active_.value_or(false)) add("Quadviews");
-    snapshot.framegen=framegen_.OsdText();
-    snapshot.compact_framegen=framegen_.CompactOsdText();
-    snapshot.framegen_detail=framegen_.OsdDetailText();
+    const FrameGenOsdText framegen=framegen_.OsdDescription();
+    snapshot.framegen=framegen.row;
+    snapshot.compact_framegen=framegen.compact;
+    snapshot.framegen_detail=framegen.detail;
+    snapshot.framegen_badge=framegen.badge;
+    snapshot.framegen_fps=framegen.shown_fps;
     if (snapshot.modules.empty()) snapshot.modules="Off";
     snapshot.pivot="Disabled";
     snapshot.compact_pivot="Disabled";
@@ -14071,31 +14074,9 @@ bool OpenXrLayer::IsPivotXrActive() {
 }
 
 std::string OpenXrLayer::FrameGenStatusReason(const FrameGenStatus& framegen) {
-    if (framegen.state != FrameGenState::kActive) {
-        return framegen.reason;
-    }
-    const auto fps = [](double rate) { return std::to_string(static_cast<int>(rate + 0.5)); };
-    const std::string mode = framegen.dynamic ? std::string("Dynamic")
-                                              : std::string(framegen.automatic ? "Auto " : "") +
-                                                    std::to_string(framegen.multiplier) + "x";
-    // Composed quad views frames kept failing to be written: for a while the
-    // layer composes the quad views again, whatever else the state says
-    // meanwhile (Frame Generation composes none of them).
-    if (framegen.quad_declining) {
-        return mode + ", quad views composed by the layer for a while: Frame Generation could not write its "
-                      "composed frames (the game runs at " + fps(framegen.app_fps) + " fps).";
-    }
-    if (!framegen.reason.empty()) {
-        return framegen.reason;
-    }
-    if (framegen.standby) {
-        return "Dynamic, standing by: the game runs at " + fps(framegen.app_fps) + " fps.";
-    }
-    if (framegen.full_rate) {
-        return "Auto, full rate: no generation needed.";
-    }
-    return mode + ", " + fps(framegen.app_fps) + " -> " + fps(framegen.distinct_fps) + " fps" +
-           (framegen.quad ? ", quad views composed by Frame Generation." : ".");
+    // The app shows it beside the state (On, Standby, Paused, ...), in the
+    // OSD's words.
+    return DescribeFrameGen(framegen, true).reason;
 }
 
 void OpenXrLayer::PollRuntimeRelay() {
@@ -14174,8 +14155,9 @@ void OpenXrLayer::PollRuntimeRelay() {
         if (turbo_yielded_to_framegen_)
             status.turbo_reason = "Frame Generation owns frame pacing in this session.";
         const FrameGenStatus framegen = framegen_.Status();
-        status.framegen_state = ToString(framegen.state);
-        status.framegen_reason = FrameGenStatusReason(framegen);
+        const FrameGenOsdText described = DescribeFrameGen(framegen, true);
+        status.framegen_state = described.state;
+        status.framegen_reason = described.reason;
         status.framegen_depth = framegen.depth == FrameGenDepthState::kUnknown ? "" : ToString(framegen.depth);
         if (status.turbo_reason.empty() && turbo_auto_suspended_.load())
             status.turbo_reason = "Runtime pacing repeatedly stalled. Use the Turbo toggle to retry.";

@@ -517,10 +517,11 @@ unavailable or limited files. Review the ZIP for private information before shar
 
 ### Frame Generation (experimental)
 
-Frame Generation holds a game at half your headset's refresh rate or lower, for example 45 fps
-on a 90 Hz headset, and inserts generated frames between real frames. The headset still
-receives a full-rate image stream while the game renders only a fraction of it. The
-[Frame multiplier](#frame-multiplier) sets that fraction: 2x, 3x, 4x, or Auto.
+Frame Generation adds generated frames between a game's frames, so the headset gets a fresh
+image every refresh even when the game renders fewer. With the default **Dynamic**
+[frame rate](#frame-rate-dynamic-or-fixed) the game runs as fast as it can and generated frames
+fill the refreshes in between; a **Fixed** rate holds the game at a fraction of the refresh rate
+instead (2x, 3x, 4x, or Auto).
 
 Generated frames come from GPU optical flow measured on the final color images the game
 submits. VectorXR removes your head rotation from the flow before matching, because the
@@ -542,14 +543,15 @@ comparing it in the headset.
 4. On **Frame Generation**, leave **Default Profile** off, click **Add Profile**, and assign the
    game. An enabled matching custom profile turns Frame Generation on for that game even when
    the Default Profile is off.
-5. Start with the default settings (**Synthesis mode: Interpolate**, **Frame multiplier: Auto**),
-   then click **Save Changes**. For very heavy games, such as MSFS at very high resolution, start
-   with **Extrapolate** and **3x**, **4x**, or **Auto** instead.
+5. Start with the default settings (**Mode: Interpolate**, **Frame rate: Dynamic**, **Motion
+   source: Shader**), then click **Save Changes**. On an NVIDIA RTX GPU, **NVIDIA hardware** as the
+   motion source is usually more accurate; for the lowest latency, try **Extrapolate** with it.
 6. Restart the game. Turning Frame Generation on, for the Default Profile or a custom profile,
    takes effect at the next launch. Turning it off applies to a running game at once: frames
    pass straight through.
-7. Confirm it is running: turn on the **Frame Generation state** row on the **On-Screen
-   Display** page, or set **Diagnostic view** to **Generated-frame tint**.
+7. Confirm it is running: with the **On-Screen Display** on, **FG ON** appears beside its FPS
+   value with the frames per second the headset shows. You can also set **Diagnostic view** to
+   **Generated-frame tint**.
 8. Optional: use **A/B toggle > Edit Binding…** to assign a keyboard or controller input, then
    switch generated frames off and on in the same scene to compare.
 
@@ -564,23 +566,24 @@ the OSD and in the live status.
 
 The page's collapsible **Setup guide** repeats this checklist; it starts open until a Frame
 Generation profile is enabled. **In-headset controls** lists running VR applications with
-their live Frame Generation status. **Needs the updated VectorXR layer** means the running
-layer predates Frame Generation.
+their live Frame Generation status, in the On-Screen Display's words: **On** (with the mode,
+frame rate, and game-to-headset frame rates), **Standby** (the game holds the refresh rate on
+its own, so nothing is generated), **Starting**, **Paused**, **Unavailable** (with the reason),
+or **Off**. **Needs the updated VectorXR layer** means the running layer predates Frame
+Generation.
 
-#### Interpolate or Extrapolate
+#### Mode: Interpolate or Extrapolate
 
 | Mode | How it works | Trade-off |
 | --- | --- | --- |
-| **Interpolate** (default) | Blends generated frames between the previous and the newest real frame. | Fewest artifacts, and the closest match to OFXR-Bridge. Each real frame is shown after the generated frames leading up to it, so everything appears one real frame interval later (about 33 ms at 4x, 22 ms at 3x); head rotation is still corrected by the headset. |
-| **Extrapolate** | Pushes the newest real frame forward along its motion, like ASW or Smart Smoothing. | No added latency. More edge artifacts on fast motion and in newly revealed areas, and fine cockpit detail depends more on the game's depth (see Game depth). Use it with **NVIDIA hardware** motion estimation; with **Shader**, Interpolate usually looks cleaner. |
+| **Interpolate** (default) | Blends generated frames between the previous and the newest real frame. | Fewest artifacts. Each real frame is shown after the generated frames leading up to it, so everything appears one real frame interval later (about 33 ms at 4x, 22 ms at 3x); head rotation is still corrected by the headset. |
+| **Extrapolate** | Pushes the newest real frame forward along its motion, like ASW or Smart Smoothing. | No added latency. More edge artifacts on fast motion and in newly revealed areas, and fine near detail depends more on the game's depth (see Game depth). Use it with **NVIDIA hardware** as the motion source; with **Shader**, Interpolate usually looks cleaner. |
 
-On Direct3D 12 both modes present from their own thread: a frame every refresh while the game
-renders at its own pace, as it would without Frame Generation. With Direct3D 11 and Vulkan, the
-game's frame thread presents the generated frames itself before it can start the next frame.
-That works when the game finishes each frame well within the time the runtime gives it, but a
-game whose frame takes longer, or that starts its next frame before ending the current one,
-loses frame rate instead of gaining it. **Auto** detects this and holds full rate for a minute
-before trying again (turning Frame Generation off and on retries at once); the log says so.
+Both modes present from Frame Generation's own thread in Direct3D 11, Direct3D 12 and Vulkan
+games: a frame every refresh, each written right before its refresh, while the game renders at
+its own pace, as it would without Frame Generation. When a real frame's motion is not measured
+in time for a refresh, the previous real frame's motion carries it on, so the picture does not
+stand still for a refresh and then jump.
 
 #### Game depth
 
@@ -615,12 +618,10 @@ Generated frames finishing much later than that miss their refresh, and the head
 previous frame again. **skippedGenerated** counts generated frames passed over because they were
 made for a refresh already past.
 
-A second line under the OSD's Frame Generation row and the Frame Generation page's session
-status say what the depth is doing: **Depth in use**, **Checking the game's depth against the other eye**, **No
-depth from this game** (near cockpit detail may jitter in Extrapolate; Interpolate depends on
-depth less), **Depth is only read in Direct3D 12 games for now** (Direct3D 11 and Vulkan),
-**Depth empty** (the game sends depth but fills it only with its own depth reprojection on), or
-**Depth does not match the other eye**.
+The Frame Generation page's session status shows **Using game depth** while depth is in use,
+**Game depth is empty** when the game sends depth but fills it only with its own depth-based
+reprojection on (turn that option on), or **Game depth not used** when the depth does not line
+the eyes up. The log reports every other case.
 
 #### Still detail
 
@@ -630,53 +631,61 @@ frame to frame under anti-aliasing and upscaling, and motion estimation reads th
 that changes every frame; extrapolating it would make still cockpit detail jitter. Steady
 motion, including after a real frame arrives late, is extrapolated as before.
 
-#### Frame multiplier
+#### Frame rate: Dynamic or Fixed
 
-The **Frame multiplier** sets how many headset frames each real game frame covers:
+**Dynamic** (default) holds the game at no fixed rate: it runs as fast as it can, and generated
+frames fill the refreshes between its frames, as many as each gap needs. When the game holds the
+headset's refresh rate on its own, Frame Generation stands by and its frames pass straight
+through (the status reads **Standby**). Where Frame Generation cannot present from its own
+thread, Dynamic runs as Auto.
 
-| Multiplier | Game rate | Example at 90 Hz | Generated frames between real frames |
+**Fixed** holds the game at a set fraction of the headset refresh rate, for even pacing:
+
+| Fixed rate | Game rate | Example at 90 Hz | Generated frames between real frames |
 | --- | --- | --- | --- |
 | **2x** | 1/2 of the headset refresh rate | 45 fps | One |
 | **3x** | 1/3 | 30 fps | Two |
 | **4x** | 1/4 | 22.5 fps | Three |
 
-**Auto** (default) starts at full rate: while the game holds the headset refresh, frames pass
-straight through and the status reads **Full rate**. When it cannot, Auto steps up to 2x, 3x or
-4x, and steps back down when it can, checking now and then whether a lower multiplier holds.
-Output images, once allocated, are kept for the session, so changing multiplier never stalls
-the game.
+**Auto** starts at full rate: while the game holds the headset refresh, frames pass straight
+through and the status reads **Standby**. When it cannot, Auto steps up to 2x, 3x or 4x, and
+steps back down when it can, checking now and then whether a lower rate holds. Output images,
+once allocated, are kept for the session, so changing rate never stalls the game.
 
-Higher multipliers rescue very heavy games, such as MSFS at very high resolution, but each
-generated frame moves content further, so artifacts grow; 4x shows the most. Each generated frame
-also needs its own set of headset-resolution output images, and in Extrapolate on Direct3D 12 one
-spare set covers a game frame that arrives late (up to three sets), so video memory use grows
-with the multiplier. The log reports the estimate.
+Higher rates rescue very heavy games, but each generated frame moves content further, so
+artifacts grow; 4x shows the most. Each generated frame can also need its own set of
+headset-resolution output images, so video memory use grows with the rate. The log reports the
+estimate.
 
 #### Frame Generation settings
 
 Every setting below applies live after **Save Changes**. Only turning Frame Generation on
 needs a game restart; turning it off applies at once.
 
-- **Frame multiplier** (**Auto**, **2x**, **3x**, or **4x**; default Auto) sets how many headset
-  frames each real game frame covers. See [Frame multiplier](#frame-multiplier).
-- **Flow quality** sets the resolution motion is measured at: **Performance** (1/16 of the eye
-  image), **Balanced** (1/8, default), or **Quality** (1/4). Higher quality tracks small and
-  thin objects better and costs more GPU time.
-- **Motion estimation**: **Shader** (default) measures motion by block matching on the GPU's
-  shader cores, on any GPU, and pairs best with Interpolate. **NVIDIA hardware** uses the optical
-  flow accelerator of NVIDIA RTX 20-50 GPUs in Direct3D 12 games such as MSFS, at 1/8 of the eye
-  image, and is recommended wherever it is available: it measures motion at least as well as
-  Shader, and Extrapolate needs it to look its best. Repeating
-  patterns such as building windows and railings no longer lock onto the wrong repeat. The
-  accelerator starts on each eye's image as soon as the game releases it, so it mostly runs
-  while the game finishes its frame (about 7 ms of accelerator time at a Pimax Crystal Super's
-  resolution). With **Performance** flow quality it uses the accelerator's fastest preset, which
-  is less accurate on repeating patterns. Elsewhere Shader is used, and the log says why. In
-  `settings.json`, set `"motionEstimation": "hardware"` in a profile's settings.
-- **Artifact suppression** (0–100, default 50): higher values fall back to the real image
-  sooner where motion is uncertain. You get fewer warping artifacts and more local judder.
-- **Motion limit** (2–25% of view width, default 10%) is the farthest a generated frame may
-  move image content. Motion beyond it falls back to the real image.
+- **Mode** (**Interpolate**, default, or **Extrapolate**). See
+  [Mode](#mode-interpolate-or-extrapolate).
+- **Frame rate** (**Dynamic**, default, or **Fixed** at **Auto**, **2x**, **3x**, or **4x**). See
+  [Frame rate](#frame-rate-dynamic-or-fixed). In `settings.json` both are `frameMultiplier`:
+  `dynamic`, `auto`, `2x`, `3x`, or `4x`.
+- **Motion source**: **Shader** (default) measures motion by block matching on the GPU's
+  shader cores, on any GPU. **NVIDIA hardware** uses the optical flow accelerator of NVIDIA RTX
+  20-50 GPUs for Extrapolate: repeating patterns such as building windows and railings stay put,
+  and Extrapolate needs it to look its best. Interpolate measures motion with Shader even when
+  NVIDIA hardware is chosen: while the game keeps the GPU busy, the accelerator's results arrive
+  too late for the frames between real frames. The accelerator starts on each eye's image as
+  soon as the game releases it, so it mostly runs while the game finishes its frame. With
+  **Performance** flow quality it uses the accelerator's fastest preset, which is less accurate
+  on repeating patterns. Where it cannot be used, Shader is, and the log says why.
+  In `settings.json`, set `"motionEstimation": "hardware"` in a profile's settings.
+- **Advanced** (collapsed by default):
+  - **Flow quality** sets the resolution motion is measured at: **Performance** (1/16 of the eye
+    image), **Balanced** (1/8, default), or **Quality** (1/4). Higher quality tracks small and
+    thin objects better and costs more GPU time.
+  - **Artifact suppression** (0–100, default 50): higher values fall back to the real image
+    sooner where motion is uncertain. You get fewer warping artifacts and more local judder.
+  - **Motion limit** (2–25% of view width, default 10%) is the farthest a generated frame may
+    move image content. Motion beyond it falls back to the real image.
+  - **Reset advanced settings** returns all three to their defaults.
 - **Diagnostic view** applies to every Frame Generation session: **Off**, **Motion flow**
   (color-coded motion overlay on generated frames), **Confidence** (heat map of where
   generation fell back to the real image), or **Generated-frame tint** (a faint tint on
@@ -684,9 +693,8 @@ needs a game restart; turning it off applies at once.
 - **A/B toggle** is an optional binding that switches generated frames off and on live. It only
   works in sessions that started with Frame Generation on.
 
-The Default Profile and each custom profile have their own Synthesis mode, Frame multiplier,
-Flow quality, Artifact suppression, and Motion limit. The first enabled custom profile that matches the
-running game wins.
+The Default Profile and each custom profile have their own Mode, Frame rate, Motion source, and
+Advanced settings. The first enabled custom profile that matches the running game wins.
 
 #### How Frame Generation works with other features
 
@@ -697,9 +705,10 @@ running game wins.
 - **Quadviews:** works with VectorXR's synthesized quad views and with Varjo-native quad views,
   because generation runs on the final images sent to the headset.
 - **Graphics APIs:** Direct3D 11, Direct3D 12, and Vulkan.
-- **On-Screen Display:** the expanded layout has a Frame Generation row, shown only in games
-  where Frame Generation is on, and the compact layout an optional one-line status. See
-  [On-Screen Display](#on-screen-display).
+- **On-Screen Display:** in games where Frame Generation is on, both layouts show its state
+  beside the FPS value (**FG ON** with the frames per second the headset shows, or **FG STBY**,
+  **FG PAUSED**, **FG OFF**), the expanded layout has a Frame Generation row, and the compact
+  layout an optional one-line status. See [On-Screen Display](#on-screen-display).
 - **Runtime smoothing:** SteamVR Motion Smoothing, Pimax Smart Smoothing, Virtual Desktop SSW,
   and Meta ASW fight the pacing. Turn them off for games that use Frame Generation.
 - **Runtime frame rate:** keep the headset at its full refresh rate. Do not halve the frame rate
@@ -710,7 +719,7 @@ running game wins.
 
 - Frame Generation does not use game motion vectors yet; motion is estimated from color
   images, with the game's depth (Direct3D 12) used only to remove head movement.
-- There is no HUD masking yet. Cockpit text and gauges baked into the 3D image can shimmer on
+- There is no HUD masking yet. Text, HUDs, and gauges baked into the 3D image can shimmer on
   generated frames.
 - Fast motion and newly revealed areas can warp, more so with Extrapolate. Raise **Artifact
   suppression** or lower **Motion limit** to trade warping for local judder.
@@ -718,25 +727,25 @@ running game wins.
   Frame Generation work. On an RTX 5090 at a Pimax Crystal Super's 6240x6280 per eye, 4x
   Extrapolate on Direct3D 12 takes about 3.1 ms per real frame at Balanced flow quality and
   3.8 ms at Quality, for both eyes; slower GPUs and Direct3D 11 and Vulkan take more.
-- Higher multipliers show more artifacts, most at 4x, and in Extrapolate each generated frame
-  adds a set of headset-resolution output images to video memory.
+- Higher fixed rates show more artifacts, most at 4x, and can add headset-resolution output
+  images to video memory.
 - Only the first projection layer is generated; other layers, such as menus drawn as quads,
   repeat unchanged. Generated frames keep the real frame's depth for the runtime.
 
 ### Frame Generation FAQ
 
-**Why does the game now run at 45 fps or lower?**
+**Why does the game run at 45 fps or lower?**
 
-That is expected. Frame Generation holds the game at half the headset refresh rate or lower and
-fills in the frames between: 45, 30, or 22.5 fps on a 90 Hz headset at 2x, 3x, or 4x. With
-**Auto**, the rate changes as the game gets lighter or heavier. Judge the image in the headset,
-not the game's own FPS counter.
+With a **Fixed** frame rate that is expected: Frame Generation holds the game at a fraction of
+the headset refresh rate and fills in the frames between: 45, 30, or 22.5 fps on a 90 Hz headset
+at 2x, 3x, or 4x. With **Dynamic**, the game runs as fast as it can. Judge the image in the
+headset, not the game's own FPS counter; the On-Screen Display shows the frames per second the
+headset gets beside **FG ON**.
 
-**Which frame multiplier should I use?**
+**Which frame rate should I use?**
 
-Start with Auto. For very heavy games, such as MSFS at very high resolution, use Extrapolate with
-3x, 4x, or Auto. Each step up adds artifacts, and 4x shows the most, so use the lowest
-multiplier the game can hold.
+Start with Dynamic. If the game's pacing is uneven, try a Fixed rate: Auto, or the lowest of 2x,
+3x, or 4x the game can hold. Each step up adds artifacts, and 4x shows the most.
 
 **I saved, but nothing changed in the running game. Why?**
 
@@ -751,13 +760,13 @@ on, save, restart the game, then use the binding.
 **Should I use Interpolate or Extrapolate?**
 
 Interpolate has the fewest artifacts and adds about one real frame interval of latency;
-Extrapolate adds none and has more artifacts. On Direct3D 12 (MSFS) both present from their own
-thread; with Direct3D 11 and Vulkan, prefer Extrapolate for games that cannot hold full rate.
+Extrapolate adds none and has more artifacts, and looks best with **NVIDIA hardware** as the
+motion source.
 
-**Why do cockpit gauges and text shimmer?**
+**Why do HUDs, gauges, and text shimmer?**
 
 HUD masking is not available yet, so text and gauges in the 3D image can wobble on generated
-frames. Raising Artifact suppression can help.
+frames. Raising Artifact suppression under Advanced can help.
 
 **Can I use Turbo with Frame Generation?**
 
@@ -823,10 +832,16 @@ layouts from earlier versions gain the Frame Generation row at the end. The **Co
 layout chooses its **Performance** readout (FPS and average frame time, either one, or
 none) and can add one-line Turbo, Frame Generation, and Pivot status rows. **Just FPS** clears the compact
 header and status rows for the smallest display. Turbo distinguishes **Disabled**, **Enabled / Off**, **Enabled / Waiting**, active
-**Async** or **Sequenced**, and safety states. Frame Generation shows its mode, multiplier,
-and frame rates, such as `Extrapolate 3x / 30 -> 90 fps / 3.1 ms` (`Auto 3x` with Auto, or
-**Full rate** when Auto needs no generated frames), or a status such as **Waiting for steady
-frames**, **Paused**, or **Unavailable** with a reason. Enabled enhancements include Turbo even
+**Async** or **Sequenced**, and safety states.
+
+In games where Frame Generation is on, **Frame Generation beside FPS** (on by default, both
+layouts) adds a small badge next to the FPS value: **FG ON** over the frames per second the
+headset shows, generated frames included, or **FG STBY**, **FG WAIT**, **FG PAUSED**, **FG OFF**,
+or **FG N/A**. The Frame Generation row reads, for example, `On / Interpolate / Dynamic` with
+`45 → 90 fps / GPU 3.1 ms` on a second line (the game's and the headset's frame rates, and the
+GPU time Frame Generation took), or **Standby**, **Starting**, **Paused**, or **Unavailable**
+with the reason on the second line. The compact row is shorter, such as `Dynamic / 45 → 90 fps`.
+Enabled enhancements include Turbo even
 when its binding has switched pacing off. Pivot shows the engaged profile and applied
 nudges/quick views without angle measurements; idle enabled Pivot reads **Pivot ready**.
 Disabling Pivot clears its applied-state display. Independently enabled inactive nudges

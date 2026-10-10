@@ -147,6 +147,9 @@ export interface OsdSettings {
   showClock: boolean
   showPivot: boolean
   showFramegen: boolean
+  // Both layouts, in sessions with Frame Generation on: its state (FG ON,
+  // STBY, OFF...) and the frames per second the headset shows, beside FPS.
+  showFramegenFps: boolean
   compactShowRuntime: boolean
   compactShowBrand: boolean
   compactShowApp: boolean
@@ -168,7 +171,7 @@ export function defaultOsdSettings(): OsdSettings {
   return { enabled: false, visibleOnStart: true, compact: false,
     horizontalDegrees: 20, verticalDegrees: -12, distanceMeters: 1.2, scale: 100, opacity: 90, updateHz: 5,
     showGraph: true, showRuntime: true, showTurbo: true, showModules: true, showClock: true, showPivot: true,
-    showFramegen: true, showBrand: true, showApp: true,
+    showFramegen: true, showFramegenFps: true, showBrand: true, showApp: true,
     compactShowRuntime: true, compactShowClock: true, compactShowTurbo: false, compactShowPivot: false, compactShowFramegen: false,
     compactShowBrand: true, compactShowApp: true, compactMetrics: 'all',
     clockFormat: '24', bodyOrder: [...osdBodyRows], accent: 'teal', customColor: '#51ddbd', customPresets: [],
@@ -185,7 +188,7 @@ export function normalizeOsdSettings(value: unknown): OsdSettings {
       (!integer || Number.isInteger(value)) ? value : fallback[key] as number
   }
   return { ...fallback,
-    ...Object.fromEntries(['enabled', 'visibleOnStart', 'compact', 'showGraph', 'showRuntime', 'showBrand', 'showApp', 'showTurbo', 'showModules', 'showClock', 'showPivot', 'showFramegen', 'compactShowRuntime', 'compactShowClock', 'compactShowTurbo', 'compactShowPivot', 'compactShowFramegen', 'compactShowBrand', 'compactShowApp']
+    ...Object.fromEntries(['enabled', 'visibleOnStart', 'compact', 'showGraph', 'showRuntime', 'showBrand', 'showApp', 'showTurbo', 'showModules', 'showClock', 'showPivot', 'showFramegen', 'showFramegenFps', 'compactShowRuntime', 'compactShowClock', 'compactShowTurbo', 'compactShowPivot', 'compactShowFramegen', 'compactShowBrand', 'compactShowApp']
       .map(key => [key, typeof input[key] === 'boolean' ? input[key] : fallback[key as keyof OsdSettings]])),
     compactMetrics: ['all', 'fps', 'frameTime', 'none'].includes(input.compactMetrics as string) ? input.compactMetrics as OsdSettings['compactMetrics'] : 'all',
     horizontalDegrees: number('horizontalDegrees', -40, 40), verticalDegrees: number('verticalDegrees', -35, 35),
@@ -422,32 +425,34 @@ export interface TurboModuleConfig {
   profiles: TurboProfileConfig[]
 }
 
-// Frame Generation: the layer holds the application at half the headset
-// refresh rate or lower and inserts optical-flow frames between real frames.
-// Enablement is session-latched; every other setting applies live.
-// 'interpolate' blends between the previous and newest real frame (fewer
-// artifacts, the real frame must be ready before the generated frames leading
-// up to it); 'extrapolate' pushes the newest real frame forward along its
-// motion (more GPU time per frame, more edge artifacts).
+// Frame Generation: the layer synthesizes frames between the application's
+// frames so the headset gets a frame every refresh. Enablement is
+// session-latched; every other setting applies live.
+// 'interpolate' blends between the previous and newest real frame (fewest
+// artifacts, a little added latency); 'extrapolate' pushes the newest real
+// frame forward along its motion (lowest latency, more edge artifacts).
 export const frameGenSynthesisModes = ['interpolate', 'extrapolate'] as const
 export type FrameGenSynthesisMode = typeof frameGenSynthesisModes[number]
 // Optical-flow resolution relative to the eye image: 1/16, 1/8, or 1/4.
 export const frameGenFlowQualities = ['performance', 'balanced', 'quality'] as const
 export type FrameGenFlowQuality = typeof frameGenFlowQualities[number]
 // How motion is measured: 'shader' block matching (any GPU) or 'hardware',
-// the optical flow accelerator of NVIDIA RTX 20-50 GPUs in Direct3D 12 games
-// (experimental; the layer falls back to shader elsewhere).
+// the optical flow accelerator of NVIDIA RTX GPUs (the layer falls back to
+// shader where it cannot be used).
 export const frameGenMotionEstimations = ['shader', 'hardware'] as const
 export type FrameGenMotionEstimation = typeof frameGenMotionEstimations[number]
-// Headset frames per real application frame: 2x holds the application at 1/2
-// the headset refresh, 3x at 1/3, 4x at 1/4. 'auto' starts at full rate,
-// passing frames through while the application holds the headset refresh,
-// steps up while it misses its cadence, and probes back down when it keeps up.
-// 'dynamic' holds nothing: the application runs at its own rate and generated
-// frames fill the refreshes between its frames (Direct3D 12; elsewhere the
-// layer treats it as 'auto').
+// Headset frames per real application frame. 'dynamic' (the default) holds
+// nothing: the application runs at its own rate and generated frames fill the
+// refreshes between its frames (the layer treats it as 'auto' where it cannot
+// present from its own thread). The fixed rates hold the application at a
+// fraction of the refresh rate: 2x at 1/2, 3x at 1/3, 4x at 1/4, and 'auto'
+// picks among them, passing frames through while the application holds the
+// refresh rate on its own.
 export const frameGenFrameMultipliers = ['auto', 'dynamic', '2x', '3x', '4x'] as const
 export type FrameGenFrameMultiplier = typeof frameGenFrameMultipliers[number]
+// The fixed rates, as the settings page groups them under "Fixed".
+export const frameGenFixedMultipliers = ['auto', '2x', '3x', '4x'] as const satisfies readonly FrameGenFrameMultiplier[]
+export type FrameGenFixedMultiplier = typeof frameGenFixedMultipliers[number]
 // Module-level overlay drawn into generated frames only.
 export const frameGenDiagnosticViews = ['off', 'flow', 'confidence', 'tint'] as const
 export type FrameGenDiagnosticView = typeof frameGenDiagnosticViews[number]
@@ -492,7 +497,7 @@ export function defaultFrameGenSettings(): FrameGenSettings {
     synthesisMode: 'interpolate',
     flowQuality: 'balanced',
     motionEstimation: 'shader',
-    frameMultiplier: 'auto',
+    frameMultiplier: 'dynamic',
     artifactSuppression: 50,
     motionLimitPercent: 10,
   }

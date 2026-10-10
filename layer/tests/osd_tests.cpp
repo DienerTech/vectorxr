@@ -123,14 +123,53 @@ int main(int argc, char** argv) {
         }
         if(argc>1) WriteBitmap(argv[1],bitmap);
         {
-            // Frame Generation's depth status gets a second line under its row.
+            // Frame Generation's hint gets a second line under its row.
             auto framegen=Snapshot(); framegen.framegen_session=true;
-            framegen.framegen="Extrapolate  /  Auto 4x  /  23 -> 90 fps  /  8.0 ms";
+            framegen.framegen="On  /  Extrapolate  /  Auto 4x";
             const auto one_line=RasterizeOsd(settings,false,framegen,stats,false);
-            framegen.framegen_detail="Depth empty: turn on the game's depth reprojection";
+            framegen.framegen_detail="23 \xE2\x86\x92 90 fps  /  GPU 8.0 ms";
             const auto two_lines=RasterizeOsd(settings,false,framegen,stats,false);
             Check(two_lines.Valid() && two_lines.height==one_line.height+28,"Frame Generation's second line did not add its height");
-            if(const char* path=std::getenv("OSD_FRAMEGEN_BMP")) WriteBitmap(path,two_lines);
+
+            // Its badge sits beside the FPS value, inside the FPS column, without
+            // changing the panel's size or anything else on it.
+            auto badged=framegen; badged.framegen_badge="ON"; badged.framegen_fps=90;
+            const auto with_badge=RasterizeOsd(settings,false,badged,stats,false);
+            Check(with_badge.Valid() && with_badge.height==two_lines.height,"Frame Generation's FPS badge changed the panel height");
+            bool in_column=false, elsewhere=false;
+            for(int y=0;y<with_badge.height;++y) for(int x=0;x<960;++x)
+                if(with_badge.pixels[y*960+x]!=two_lines.pixels[y*960+x]) (x>=60 && x<315 && y>=57 && y<140?in_column:elsewhere)=true;
+            Check(in_column && !elsewhere,"Frame Generation's FPS badge was not drawn beside the FPS value alone");
+            for(const char* state:{"STBY","WAIT","PAUSED","OFF","N/A"}) {
+                auto other=badged; other.framegen_badge=state; other.framegen_fps=0;
+                const auto raster=RasterizeOsd(settings,false,other,stats,false);
+                Check(raster.pixels!=with_badge.pixels && raster.pixels!=two_lines.pixels,"Frame Generation's FPS badge did not show its state");
+            }
+            settings.show_framegen_fps=false;
+            Check(RasterizeOsd(settings,false,badged,stats,false).pixels==two_lines.pixels,"The FPS badge setting did not hide the badge");
+            settings.show_framegen_fps=true;
+            auto other_session=badged; other_session.framegen_session=false;
+            auto plain_session=framegen; plain_session.framegen_session=false;
+            Check(RasterizeOsd(settings,false,other_session,stats,false).pixels==RasterizeOsd(settings,false,plain_session,stats,false).pixels,
+                "A session without Frame Generation showed its FPS badge");
+            if(const char* path=std::getenv("OSD_FRAMEGEN_BMP")) WriteBitmap(path,with_badge);
+
+            // Compact: the FPS column widens for the badge, only in sessions
+            // with Frame Generation and only while FPS is shown.
+            auto compact_settings=settings;
+            compact_settings.compact_show_brand=compact_settings.compact_show_app=compact_settings.compact_show_runtime=false;
+            const auto plain_layout=CompactOsdLayout(compact_settings), badge_layout=CompactOsdLayout(compact_settings,true);
+            Check(!plain_layout.framegen_badge && badge_layout.framegen_badge && badge_layout.width==plain_layout.width+50 &&
+                  badge_layout.frame_time_x==plain_layout.frame_time_x+50 && badge_layout.height==plain_layout.height,
+                "The compact FPS column did not make room for Frame Generation's badge");
+            const auto compact_badged=RasterizeOsd(compact_settings,true,badged,stats,false);
+            Check(compact_badged.Valid() && compact_badged.content_width==badge_layout.width,"Compact badge raster has the wrong width");
+            if(const char* path=std::getenv("OSD_FRAMEGEN_COMPACT_BMP")) WriteBitmap(path,compact_badged);
+            compact_settings.compact_metrics="frameTime";
+            Check(!CompactOsdLayout(compact_settings,true).framegen_badge,"Compact badge shown without an FPS value");
+            compact_settings.compact_metrics="fps"; compact_settings.show_framegen_fps=false;
+            Check(!CompactOsdLayout(compact_settings,true).framegen_badge &&
+                  CompactOsdLayout(compact_settings,true).width==CompactOsdLayout(compact_settings).width,"Compact badge shown while turned off");
         }
         settings.accent="custom"; settings.custom_color="#123456";
         settings.body_order={"pivot","modules","turbo","graph"};
@@ -190,20 +229,20 @@ int main(int argc, char** argv) {
         micro_settings.compact_metrics="none";
         const auto empty=RasterizeOsd(micro_settings,true,Snapshot(),stats,false);
         Check(std::all_of(empty.pixels.begin(),empty.pixels.end(),[](auto p){return p==0;}),"Empty compact selection rendered a panel");
-        for(const auto* metrics:{"all","fps","frameTime","none"}) for(int flags=0;flags<64;++flags) {
+        for(const auto* metrics:{"all","fps","frameTime","none"}) for(int flags=0;flags<128;++flags) {
             auto options=OsdSettings{};options.compact_metrics=metrics;
             options.compact_show_brand=flags&1;options.compact_show_app=flags&2;
             options.compact_show_runtime=flags&4;options.compact_show_clock=flags&8;
             options.compact_show_turbo=flags&16;options.compact_show_pivot=flags&32;
-            const auto layout=CompactOsdLayout(options);
+            const auto layout=CompactOsdLayout(options,flags&64);
             Check(layout.width>=240 && layout.width<=960 && layout.height>=68 && layout.height<=232,"Compact geometry escaped texture bounds");
             if(options.compact_show_turbo && options.compact_show_pivot) {
                 options.compact_show_pivot=false;
-                const auto turbo_only=CompactOsdLayout(options);
+                const auto turbo_only=CompactOsdLayout(options,flags&64);
                 Check(layout.pivot_y==layout.turbo_y+48 && layout.width==turbo_only.width && layout.height==turbo_only.height+48,
                     "Adding compact Pivot widened the panel instead of adding a row");
             }
-            Check(layout.empty==(flags==0 && options.compact_metrics=="none"),"Empty compact detection failed");
+            Check(layout.empty==((flags&63)==0 && options.compact_metrics=="none"),"Empty compact detection failed");
         }
         std::cout<<"Two rasters (includes initial LUT): "<<std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count()<<" ms\n";
         stats.Tick(now+std::chrono::seconds(2)); Check(stats.samples.empty(),"Paused session polluted frame history");

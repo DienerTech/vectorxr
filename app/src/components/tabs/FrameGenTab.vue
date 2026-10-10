@@ -40,13 +40,13 @@ const setupGuideOpen = !(props.config.modules.framegen.enabled || props.config.m
 const toggleBindingWarnings = computed(() => savedBindingConflictWarnings(props.config, [framegen.value.toggleBinding]))
 const turboWarnings = computed(() => configWarnings(props.config))
 
-const restartNote = 'Turning Frame Generation off applies to a running game at once; turning it on takes effect the next time the game starts.'
+const restartNote = 'Turning Frame Generation on takes effect the next time the game starts; turning it off applies at once.'
 
 const diagnosticViews: { value: FrameGenDiagnosticView; label: string; description: string }[] = [
-  { value: 'off', label: 'Off', description: 'Generated frames are shown without an overlay.' },
-  { value: 'flow', label: 'Motion flow', description: 'Overlays color-coded motion on generated frames, so you can see what the flow is tracking.' },
-  { value: 'confidence', label: 'Confidence', description: 'Heat map of where generation fell back to the real image. Use it while tuning Artifact suppression and Motion limit.' },
-  { value: 'tint', label: 'Generated-frame tint', description: 'Adds a faint tint to generated frames so you can confirm they are being shown.' },
+  { value: 'off', label: 'Off', description: 'Generated frames are shown as they are.' },
+  { value: 'flow', label: 'Motion flow', description: 'Color-codes the motion Frame Generation measured on generated frames.' },
+  { value: 'confidence', label: 'Confidence', description: 'Shows where generated frames fell back to the real image; useful while tuning the Advanced settings.' },
+  { value: 'tint', label: 'Generated-frame tint', description: 'Tints generated frames faintly, so you can see they are shown.' },
 ]
 const diagnosticDescription = computed(() => diagnosticViews.find((view) => view.value === framegen.value.diagnosticView)?.description ?? '')
 
@@ -65,13 +65,15 @@ async function refresh() {
 onMounted(refresh)
 onUnmounted(() => { disposed = true; if (poll) clearTimeout(poll) })
 
+// The layer's state and a short reason, in the words the OSD uses.
 function sessionStatus(session: RuntimeStatusSession): { label: string; chip: string } {
   const reason = session.state.framegenReason?.trim()
   const withReason = (label: string, separator = ' · ') => reason ? `${label}${separator}${reason}` : label
   switch (session.state.framegenState) {
-    case 'active': return { label: withReason('Active'), chip: 'chip-success' }
-    case 'waiting': return { label: withReason('Waiting for steady frames'), chip: 'chip-idle' }
-    case 'paused': return { label: withReason('Paused'), chip: 'chip-idle' }
+    case 'active': return { label: withReason('On'), chip: 'chip-success' }
+    case 'standby': return { label: withReason('Standby'), chip: 'chip-idle' }
+    case 'waiting': return { label: withReason('Starting · waiting for steady frames'), chip: 'chip-idle' }
+    case 'paused': return { label: withReason('Paused'), chip: 'chip-warning' }
     case 'unavailable': return { label: withReason('Unavailable', ': '), chip: 'chip-warning' }
     case 'off': return { label: withReason('Off'), chip: 'chip-idle' }
     case undefined: return { label: 'Needs the updated VectorXR layer', chip: 'chip-idle' }
@@ -79,15 +81,13 @@ function sessionStatus(session: RuntimeStatusSession): { label: string; chip: st
   }
 }
 
-// What the game's depth does for generated frames (Direct3D 12 reads it).
-function depthStatus(session: RuntimeStatusSession): { label: string; chip: string } | null {
+// The game's depth helps generated frames keep near objects steady as the
+// head moves. Shown only while it is in use or when the player can act on it.
+function depthStatus(session: RuntimeStatusSession): { label: string; title: string; chip: string } | null {
   switch (session.state.framegenDepth) {
-    case 'in-use': return { label: 'Depth in use: cockpit detail is compensated exactly', chip: 'chip-success' }
-    case 'checking': return { label: "Checking the game's depth against the other eye", chip: 'chip-idle' }
-    case 'not-sent': return { label: 'No depth from this game: near cockpit detail may jitter, Interpolate fits best', chip: 'chip-idle' }
-    case 'not-readable': return { label: 'Depth is only read in Direct3D 12 games for now', chip: 'chip-idle' }
-    case 'empty': return { label: "The game's depth is empty: turn on its depth reprojection (MSFS: Motion reprojection = Depth)", chip: 'chip-warning' }
-    case 'unusable': return { label: "The game's depth does not match the other eye, so it is not used", chip: 'chip-warning' }
+    case 'in-use': return { label: 'Using game depth', title: 'The game shares its depth, so near objects stay steady as you move your head.', chip: 'chip-success' }
+    case 'empty': return { label: 'Game depth is empty', title: 'The game sends depth without filling it. If the game has a depth-based reprojection option, turning it on lets Frame Generation use it.', chip: 'chip-warning' }
+    case 'unusable': return { label: 'Game depth not used', title: 'The depth the game sends does not line up between the eyes, so Frame Generation works without it.', chip: 'chip-idle' }
     default: return null
   }
 }
@@ -137,9 +137,9 @@ const profileWarnings = computed(() => {
 
 function settingsSummary(settings: FrameGenSettings) {
   const mode = settings.synthesisMode === 'extrapolate' ? 'Extrapolate' : 'Interpolate'
-  const quality = settings.flowQuality.charAt(0).toUpperCase() + settings.flowQuality.slice(1)
-  const multiplier = settings.frameMultiplier === 'auto' ? 'Auto' : settings.frameMultiplier === 'dynamic' ? 'Dynamic' : settings.frameMultiplier
-  return `${mode} · ${quality} · ${multiplier}`
+  const rate = settings.frameMultiplier === 'dynamic' ? 'Dynamic' : settings.frameMultiplier === 'auto' ? 'Fixed Auto' : `Fixed ${settings.frameMultiplier}`
+  const motion = settings.motionEstimation === 'hardware' ? 'NVIDIA hardware' : 'Shader'
+  return `${mode} · ${rate} · ${motion}`
 }
 </script>
 
@@ -149,8 +149,8 @@ function settingsSummary(settings: FrameGenSettings) {
     module-label="Frame Generation"
     :binding="framegen.toggleBinding"
     label="Frame Generation A/B Toggle"
-    description="Switch generated frames off and on while in-game to compare motion directly. It works only in sessions that started with Frame Generation on for the application."
-    none-text="No binding assigned. Frame Generation runs wherever it is enabled when the game starts."
+    description="Switches generated frames off and on in the headset, to compare motion in the same scene. Works in games that started with Frame Generation on."
+    none-text="No binding assigned. Frame Generation runs wherever it is on when the game starts."
     :warnings="toggleBindingWarnings"
     @update:binding="framegen.toggleBinding = $event"
     @close="closeToggleBinding"
@@ -164,7 +164,7 @@ function settingsSummary(settings: FrameGenSettings) {
             <span class="rounded-full px-2.5 py-1 text-xs font-semibold uppercase tracking-[0.14em] chip-warning">Experimental</span>
           </div>
           <p class="mt-2 max-w-3xl text-sm leading-6 text-muted">
-            Holds the game at half your headset's refresh rate or lower and adds optical-flow frames between real frames, so the headset still gets a full-rate image stream. Test it per game with the A/B toggle.
+            Adds generated frames between the game's frames, so motion stays smooth at your headset's full refresh rate even when the game can't keep up. Try it per game and compare with the A/B toggle.
           </p>
         </div>
         <button
@@ -187,23 +187,23 @@ function settingsSummary(settings: FrameGenSettings) {
         {{ warning }}
       </div>
 
-      <SetupGuide class="mb-3" title="Setup guide" summary="Enable it for one game, then compare in the headset" :open="setupGuideOpen">
+      <SetupGuide class="mb-3" title="Setup guide" summary="Turn it on for one game, then compare in the headset" :open="setupGuideOpen">
         <ol class="list-decimal space-y-1 pl-5 text-sm leading-6">
-          <li><strong>Turn off runtime smoothing:</strong> SteamVR Motion Smoothing, Pimax Smart Smoothing, Virtual Desktop SSW, or Meta ASW. They fight Frame Generation's pacing.</li>
-          <li><strong>Keep the runtime at full refresh:</strong> don't halve the frame rate in Pimax Play or with a SteamVR fixed 45 fps setting. Frame Generation lowers the game's rate itself.</li>
-          <li><strong>Enable it for one game:</strong> leave the Default Profile off, add a custom profile below, and assign the game. Frame multiplier Auto suits most games; for very heavy games, try Extrapolate with 3x, 4x, or Auto.</li>
+          <li><strong>Turn off runtime smoothing</strong> such as SteamVR Motion Smoothing, Pimax Smart Smoothing, Virtual Desktop SSW or Meta ASW. It fights Frame Generation.</li>
+          <li><strong>Keep the headset at its full refresh rate.</strong> Don't use a runtime's half-rate or fixed 45 fps mode; Frame Generation sets the game's rate itself.</li>
+          <li><strong>Turn it on for one game:</strong> leave the Default Profile off, add a custom profile below and assign the game. The default settings suit most games.</li>
           <li><strong>Save and restart the game.</strong> Turning Frame Generation on takes effect at the next launch.</li>
-          <li><strong>Check it in the headset:</strong> show the Frame Generation state row in the <button class="underline underline-offset-2" type="button" @click="$emit('navigate', 'osd')">On-Screen Display</button>, or pick the Generated-frame tint diagnostic view.</li>
+          <li><strong>Check it in the headset:</strong> the <button class="underline underline-offset-2" type="button" @click="$emit('navigate', 'osd')">On-Screen Display</button> shows FG ON next to its FPS, or pick the Generated-frame tint diagnostic view.</li>
           <li><strong>Compare:</strong> assign the A/B toggle and switch generated frames off and on in the same scene.</li>
         </ol>
         <p class="mt-3 text-xs leading-5 text-muted">
-          Works with Direct3D 11, Direct3D 12, and Vulkan games, in stereo or Quadviews. Turbo stays off in sessions where Frame Generation runs.
+          Turbo stays off in games where Frame Generation runs.
         </p>
       </SetupGuide>
 
       <p class="mb-4 flex items-start gap-2 text-xs leading-5 text-muted" role="note">
         <span class="restart-required-mark" aria-hidden="true">&#8635;</span>
-        <span><strong class="font-semibold">Restart to apply:</strong> turning Frame Generation on for an application, through the Default Profile or a custom profile and its applications, takes effect the next time that VR application starts. Turning it off, and every other setting on this page, updates during play.</span>
+        <span><strong class="font-semibold">Restart to apply:</strong> turning Frame Generation on for a game takes effect the next time the game starts. Turning it off, and every other setting on this page, applies during play.</span>
       </p>
 
       <div class="mb-4 space-y-3 rounded-[1rem] border p-4 surface-panel-soft">
@@ -216,7 +216,7 @@ function settingsSummary(settings: FrameGenSettings) {
               <span class="rounded-full px-2.5 py-1 text-xs" :class="sessionStatus(session).chip">
                 <strong class="font-semibold">{{ session.application }}</strong> · {{ sessionStatus(session).label }}
               </span>
-              <span v-if="depthStatus(session)" class="rounded-full px-2.5 py-1 text-xs" :class="depthStatus(session)!.chip">
+              <span v-if="depthStatus(session)" class="rounded-full px-2.5 py-1 text-xs" :class="depthStatus(session)!.chip" :title="depthStatus(session)!.title">
                 {{ depthStatus(session)!.label }}
               </span>
             </template>
@@ -226,7 +226,7 @@ function settingsSummary(settings: FrameGenSettings) {
           <ModuleBindingPanel
             heading="A/B toggle"
             :binding="framegen.toggleBinding"
-            hint="Optional. Switches generated frames off and on in sessions that started with Frame Generation on."
+            hint="Optional. Switches generated frames off and on in games that started with Frame Generation on."
             @edit="openToggleBinding"
           />
           <div class="rounded-[1rem] border p-4 surface-panel-soft">
@@ -236,7 +236,7 @@ function settingsSummary(settings: FrameGenSettings) {
                 <option v-for="view in diagnosticViews" :key="view.value" :value="view.value">{{ view.label }}</option>
               </select>
             </label>
-            <p class="mt-2 text-xs leading-5 text-muted">{{ diagnosticDescription }} Applies to every Frame Generation session and updates during play.</p>
+            <p class="mt-2 text-xs leading-5 text-muted">{{ diagnosticDescription }} Applies to every game and updates during play.</p>
           </div>
         </div>
       </div>
@@ -247,7 +247,7 @@ function settingsSummary(settings: FrameGenSettings) {
             <path fill-rule="evenodd" d="M7.2 14.8a1 1 0 0 1 0-1.4L10.6 10 7.2 6.6a1 1 0 1 1 1.4-1.4l4.1 4.1a1 1 0 0 1 0 1.4l-4.1 4.1a1 1 0 0 1-1.4 0Z" clip-rule="evenodd" />
           </svg>
           <span class="eyebrow text-xs font-semibold uppercase tracking-[0.24em]">Default Profile</span>
-          <span class="text-xs text-muted">Applies to applications without an enabled custom profile</span>
+          <span class="text-xs text-muted">Applies to games without an enabled custom profile</span>
           <span v-if="framegen.enabled" class="ml-auto rounded-full px-2.5 py-1 text-xs font-semibold uppercase tracking-[0.14em] chip-accent">
             {{ settingsSummary(framegen.defaults) }}
           </span>
@@ -261,11 +261,11 @@ function settingsSummary(settings: FrameGenSettings) {
           <DefaultProfileExclusions :applications="applications" :profiles="framegen.profiles" />
         </div>
         <p v-if="!framegen.enabled" class="mt-2 text-xs text-muted">
-          Off unless an enabled custom profile turns it on. Custom profiles below still apply to their applications.
+          Off for games without a custom profile. Custom profiles below still turn it on for their games.
         </p>
         <template v-else>
           <div class="mt-3 rounded-[0.9rem] border px-4 py-3 text-sm leading-6 chip-warning" style="border-color: var(--app-border)">
-            <strong>Broad enablement is active.</strong> Frame Generation applies to every application without a custom profile, including ones you have not tested. The safer setup is Default Off with custom profiles for the games you have checked.
+            <strong>On for every game without a custom profile,</strong> including ones you haven't tried it with. The safer setup is to leave this off and add a profile for each game you've checked.
           </div>
           <FrameGenSettingsFields class="mt-3" :settings="framegen.defaults" />
         </template>
@@ -276,7 +276,7 @@ function settingsSummary(settings: FrameGenSettings) {
       <div class="sticky top-0 z-20 flex flex-wrap items-center justify-between gap-3 rounded-[1rem] border px-4 py-3 shadow-panel backdrop-blur surface-panel-strong">
         <div class="min-w-0 flex-1">
           <h2 class="text-lg font-semibold tracking-tight">Custom Profiles</h2>
-          <p class="text-sm text-muted">Turn Frame Generation on per application. The first enabled matching profile wins.</p>
+          <p class="text-sm text-muted">Turn Frame Generation on per game. The first enabled matching profile wins.</p>
         </div>
         <button
           class="button-accent rounded-[0.75rem] px-5 py-2.5 text-sm font-medium"
@@ -310,7 +310,7 @@ function settingsSummary(settings: FrameGenSettings) {
         v-if="framegen.profiles.length === 0"
         class="rounded-[1rem] border border-dashed px-6 py-7 text-center text-sm surface-panel-soft"
       >
-        No custom profiles yet. Add a profile to turn Frame Generation on for a specific application.
+        No custom profiles yet. Add a profile to turn Frame Generation on for a game.
       </div>
     </section>
 
@@ -328,59 +328,47 @@ function settingsSummary(settings: FrameGenSettings) {
           <section class="space-y-3">
             <p class="eyebrow text-xs font-semibold uppercase tracking-[0.24em]">What it does</p>
             <div class="rounded-[1rem] border px-4 py-3 surface-panel">
-              Frame Generation holds the game at half your headset's refresh rate or lower, for example 45 fps on a 90 Hz headset, and inserts generated frames between real frames. The headset still receives a full-rate image stream, while the game only has to render a fraction of it.
-            </div>
-            <div class="rounded-[1rem] border px-4 py-3 surface-panel">
-              Generated frames come from GPU optical flow measured on the final images the game submits. VectorXR removes your head rotation from that flow first, because the runtime's own reprojection already handles head rotation, so the flow follows world, vehicle, and object motion.
+              Frame Generation measures how the image moves between the game's frames and creates new frames from that motion, so the headset gets a fresh image every refresh even when the game renders fewer. Your head rotation is taken out first, because the headset's own reprojection already handles it.
             </div>
           </section>
 
           <section class="space-y-3">
-            <p class="eyebrow text-xs font-semibold uppercase tracking-[0.24em]">Interpolate or Extrapolate</p>
+            <p class="eyebrow text-xs font-semibold uppercase tracking-[0.24em]">Mode</p>
             <div class="rounded-[1rem] border px-4 py-3 surface-panel">
-              <strong>Interpolate</strong> (default) blends generated frames between the previous and the newest real frame. It shows the fewest artifacts and is the approach closest to OFXR-Bridge, but each real frame must be ready before the generated frames leading up to it are shown, so it needs more GPU headroom at any multiplier.
+              <strong>Interpolate</strong> (default) blends between the last two game frames. It looks smoothest and has the fewest artifacts, but shows each game frame a little later.
             </div>
             <div class="rounded-[1rem] border px-4 py-3 surface-panel">
-              <strong>Extrapolate</strong> pushes the newest real frame forward along its motion, like ASW or Smart Smoothing. The game gets more GPU time per frame, but fast motion and newly revealed areas show more edge artifacts. It is the better choice for heavy GPU-bound games.
+              <strong>Extrapolate</strong> projects the newest game frame forward along its motion, so it adds no latency. Fast motion and newly revealed areas show more artifacts; it looks best with NVIDIA hardware as the motion source.
             </div>
           </section>
 
           <section class="space-y-3">
-            <p class="eyebrow text-xs font-semibold uppercase tracking-[0.24em]">Frame multiplier</p>
+            <p class="eyebrow text-xs font-semibold uppercase tracking-[0.24em]">Frame rate</p>
             <div class="rounded-[1rem] border px-4 py-3 surface-panel">
-              The multiplier sets how many headset frames each real game frame covers. On a 90 Hz headset, <strong>2x</strong> runs the game at 45 fps with one generated frame between real frames, <strong>3x</strong> at 30 fps with two, and <strong>4x</strong> at 22.5 fps with three.
+              <strong>Dynamic</strong> (default) lets the game run as fast as it can and fills the refreshes between its frames with generated ones. When the game keeps up on its own, Frame Generation stands by and generates nothing.
             </div>
             <div class="rounded-[1rem] border px-4 py-3 surface-panel">
-              <strong>Auto</strong> (default) starts at full rate: while the game holds the headset refresh, frames pass straight through and the status reads Full rate. When it cannot, Auto steps up to 2x, 3x or 4x, and steps back down when it can, checking now and then.
-            </div>
-            <div class="rounded-[1rem] border px-4 py-3 chip-warning" style="border-color: var(--app-border)">
-              <strong>Higher multipliers rescue very heavy games, such as MSFS at very high resolution, at a cost.</strong> Each generated frame moves content further, so artifacts grow, most at 4x. Use Extrapolate with 3x, 4x, or Auto for these games. In Extrapolate, each generated frame also needs its own set of headset-resolution images, so memory use grows with the multiplier.
+              <strong>Fixed</strong> holds the game at a set fraction of the refresh rate for even pacing. On a 90 Hz headset, <strong>2x</strong> runs the game at 45 fps, <strong>3x</strong> at 30 fps and <strong>4x</strong> at 22.5 fps; <strong>Auto</strong> picks among them as the game needs. Each generated frame moves the image further, so higher rates show more artifacts.
             </div>
           </section>
 
           <section class="space-y-3">
             <p class="eyebrow text-xs font-semibold uppercase tracking-[0.24em]">Before you start</p>
             <div class="rounded-[1rem] border px-4 py-3 chip-warning" style="border-color: var(--app-border)">
-              <strong>Turn off runtime smoothing.</strong> SteamVR Motion Smoothing, Pimax Smart Smoothing, Virtual Desktop SSW, and Meta ASW fight Frame Generation's pacing. Disable them for games that use Frame Generation.
-            </div>
-            <div class="rounded-[1rem] border px-4 py-3 chip-warning" style="border-color: var(--app-border)">
-              <strong>Keep the runtime at full refresh.</strong> Don't halve the frame rate in Pimax Play or with a SteamVR fixed 45 fps setting. Frame Generation lowers the game's rate itself and needs the headset running at its full refresh rate.
+              <strong>Turn off runtime smoothing</strong> such as SteamVR Motion Smoothing, Pimax Smart Smoothing, Virtual Desktop SSW and Meta ASW, and keep the headset at its full refresh rate. Frame Generation sets the game's rate itself.
             </div>
             <div class="rounded-[1rem] border px-4 py-3 surface-panel">
-              <strong>Turbo stays off while Frame Generation runs.</strong> The two have opposite pacing goals, so in a session where Frame Generation runs, Turbo yields and its status reads Paused for Frame Generation. Your Turbo profiles are not changed.
+              <strong>Turbo stays off while Frame Generation runs.</strong> The two pace frames in opposite ways, so Turbo yields in those games and reads Paused for Frame Generation. Your Turbo profiles are not changed.
             </div>
             <div class="rounded-[1rem] border px-4 py-3 surface-panel">
-              Works with Direct3D 11, Direct3D 12, and Vulkan games. It also works with Quadviews, both VectorXR's synthesized quad views and Varjo-native quad views, because generation runs on the final images sent to the headset. Turning it on needs a game restart; turning it off and every other setting apply live.
+              Works with Direct3D 11, Direct3D 12 and Vulkan games, including with Quadviews.
             </div>
           </section>
 
           <section class="space-y-3">
-            <p class="eyebrow text-xs font-semibold uppercase tracking-[0.24em]">Current limits</p>
+            <p class="eyebrow text-xs font-semibold uppercase tracking-[0.24em]">Known limits</p>
             <div class="rounded-[1rem] border px-4 py-3 surface-panel">
-              Frame Generation does not use game motion vectors or depth yet; that is planned. Motion is estimated from color images only, so fine detail, transparency, and repeating patterns can confuse it.
-            </div>
-            <div class="rounded-[1rem] border px-4 py-3 chip-warning" style="border-color: var(--app-border)">
-              <strong>Cockpit text and gauges can shimmer.</strong> HUD elements baked into the 3D image are not masked yet, so they may wobble on generated frames. If warping is distracting, raise Artifact suppression or lower Motion limit.
+              Motion is measured from the images the game shows, so text, HUDs, transparency and repeating patterns can shimmer or warp on generated frames. If it is distracting, raise Artifact suppression or lower Motion limit under Advanced.
             </div>
           </section>
         </div>

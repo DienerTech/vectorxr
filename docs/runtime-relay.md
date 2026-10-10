@@ -34,14 +34,16 @@ Status documents identify one process-local OpenXR session and advertise only th
     "turboState": "framegen",
     "turboReason": "Frame Generation owns frame pacing in this session.",
     "framegenState": "active",
-    "framegenReason": ""
+    "framegenReason": "Interpolate · Dynamic · 45 → 90 fps · GPU 3.1 ms"
   }
 }
 ```
 
-`framegenState` is `off`, `waiting`, `active`, `paused`, or `unavailable`, with
-`framegenReason` explaining a pause or why the session cannot generate frames. `turboState`
-reads `framegen` while Turbo yields to Frame Generation.
+`framegenState` is `off`, `waiting`, `active` (generating frames), `standby` (on, but the game
+holds the refresh rate itself, so its frames pass straight through), `paused`, or `unavailable`.
+`framegenReason` is a short line in the On-Screen Display's words: the mode, frame rate, and
+frame rates while active; the game's rate on standby; or why it is paused or unavailable.
+`turboState` reads `framegen` while Turbo yields to Frame Generation.
 
 Control documents target that exact session and express desired state rather than a toggle event:
 

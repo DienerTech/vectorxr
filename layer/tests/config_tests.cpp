@@ -1218,10 +1218,11 @@ void TestFrameGenModuleOptional() {
            "Frame Generation numeric defaults changed");
     Expect(resolved.framegen.diagnostic_view == depthxr::FrameGenDiagnosticView::kOff,
            "Frame Generation diagnostics should default off");
-    Expect(resolved.framegen.multiplier == depthxr::FrameGenMultiplier::kAuto,
-           "Frame Generation should default to the automatic multiplier");
+    Expect(resolved.framegen.multiplier == depthxr::FrameGenMultiplier::kDynamic,
+           "Frame Generation should default to Dynamic");
     Expect(resolved.core.osd.show_framegen && !resolved.core.osd.compact_show_framegen,
            "OSD Frame Gen rows should default to full-panel only");
+    Expect(resolved.core.osd.show_framegen_fps, "The OSD should show Frame Generation beside FPS by default");
     Expect(resolved.core.osd.body_order.size() == 5 && resolved.core.osd.body_order[2] == "framegen",
            "Default OSD body order should include the Frame Gen row after Turbo");
 }
@@ -1271,6 +1272,17 @@ void TestFrameGenProfileResolution() {
            "Dynamic frame multiplier was not parsed");
     Expect(std::string(depthxr::ToString(depthxr::FrameGenMultiplier::kDynamic)) == "dynamic",
            "Dynamic frame multiplier did not round-trip");
+    // The fixed rates, Auto among them, are still chosen explicitly.
+    const depthxr::ParseResult automatic =
+        depthxr::ParseConfig(FrameGenConfigJson(R"json({ "enabled": true, "defaults": { "frameMultiplier": "auto" } })json"));
+    Expect(automatic.ok && automatic.document.framegen.defaults.multiplier == depthxr::FrameGenMultiplier::kAuto,
+           "Auto frame multiplier was not parsed");
+    // A profile saved without a multiplier runs Dynamic.
+    const depthxr::ParseResult inherited = depthxr::ParseConfig(FrameGenConfigJson(
+        R"json({ "enabled": false, "profiles": [ { "name": "DCS", "applicationIds": ["app-dcs"], "settings": { "synthesisMode": "extrapolate" } } ] })json"));
+    Expect(inherited.ok && depthxr::ResolveFrameGenSettings(inherited.document, "DCS.exe").multiplier ==
+                               depthxr::FrameGenMultiplier::kDynamic,
+           "A profile without a frame multiplier should run Dynamic");
 }
 
 void TestFrameGenInvalidSettingsRejected() {
@@ -1294,10 +1306,17 @@ void TestFrameGenInvalidSettingsRejected() {
 
 void TestFrameGenOsdRows() {
     const auto result = depthxr::ParseConfig(FrameGenConfigJson(R"json({ "enabled": false })json",
-        R"json({ "showFramegen": false, "compactShowFramegen": true, "bodyOrder": ["modules", "graph", "turbo", "pivot"] })json"));
+        R"json({ "showFramegen": false, "compactShowFramegen": true, "showFramegenFps": false, "bodyOrder": ["modules", "graph", "turbo", "pivot"] })json"));
     Expect(result.ok, "OSD Frame Gen settings were rejected: " + result.error);
     const auto& osd = result.document.core.osd;
     Expect(!osd.show_framegen && osd.compact_show_framegen, "OSD Frame Gen row toggles were not parsed");
+    Expect(!osd.show_framegen_fps, "OSD Frame Gen beside FPS was not parsed");
+    const auto invalid = depthxr::ParseConfig(FrameGenConfigJson(R"json({ "enabled": false })json",
+        R"json({ "showFramegenFps": "yes" })json"));
+    Expect(!invalid.ok, "A non-boolean showFramegenFps was accepted");
+    const auto preset = depthxr::ParseConfig(FrameGenConfigJson(R"json({ "enabled": false })json",
+        R"json({ "customPresets": [ { "name": "Quiet", "settings": { "showFramegenFps": false } } ] })json"));
+    Expect(preset.ok, "OSD presets should accept showFramegenFps: " + preset.error);
     Expect(osd.body_order.size() == 5 && osd.body_order.back() == "framegen",
            "Saved OSD orders without the Frame Gen row should append it");
     const auto ordered = depthxr::ParseConfig(FrameGenConfigJson(R"json({ "enabled": false })json",

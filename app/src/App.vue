@@ -133,7 +133,7 @@ const tabs = computed(() => [
   {
     id: 'framegen' as const,
     label: 'Frame Generation',
-    subtitle: 'Optical-flow frames between real frames',
+    subtitle: 'Smoother motion with generated frames',
     status: enhancementActive('framegen') ? 'Active' : 'Inactive',
     enhancementActive: enhancementActive('framegen'),
   },

@@ -255,6 +255,11 @@
           "type": "boolean",
           "default": true
         },
+        "showFramegenFps": {
+          "type": "boolean",
+          "default": true,
+          "description": "Both layouts, in sessions with Frame Generation on: its state (FG ON, STBY, WAIT, PAUSED, OFF or N/A) and the frames per second the headset shows, beside the FPS value."
+        },
         "showModules": {
           "type": "boolean",
           "default": true
@@ -436,6 +441,11 @@
                   "showFramegen": {
                     "type": "boolean",
                     "default": true
+                  },
+                  "showFramegenFps": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "Both layouts, in sessions with Frame Generation on: its state (FG ON, STBY, WAIT, PAUSED, OFF or N/A) and the frames per second the headset shows, beside the FPS value."
                   },
                   "showModules": {
                     "type": "boolean",
@@ -1511,7 +1521,7 @@
             "extrapolate"
           ],
           "default": "interpolate",
-          "description": "interpolate blends between the previous and newest real frame (fewer artifacts, needs more GPU headroom); extrapolate pushes the newest real frame forward along its motion (more GPU time per frame, more edge artifacts; best with motionEstimation hardware)."
+          "description": "interpolate blends between the previous and newest real frame (smoothest, fewest artifacts, a little added latency); extrapolate pushes the newest real frame forward along its motion (lowest latency, more edge artifacts; best with motionEstimation hardware)."
         },
         "flowQuality": {
           "type": "string",
@@ -1530,7 +1540,7 @@
             "hardware"
           ],
           "default": "shader",
-          "description": "How motion is measured: block matching on the shader cores (any GPU), or the optical flow accelerator of NVIDIA RTX 20-50 GPUs in Direct3D 12 games (recommended where available, and needed for extrapolate to look its best; falls back to shader elsewhere)."
+          "description": "How motion is measured: block matching on the shader cores (any GPU), or the optical flow accelerator of NVIDIA RTX GPUs (recommended where available, and needed for extrapolate to look its best; shader is used where it cannot be)."
         },
         "frameMultiplier": {
           "type": "string",
@@ -1541,8 +1551,8 @@
             "3x",
             "4x"
           ],
-          "default": "auto",
-          "description": "Headset frames per real game frame. 2x holds the game at 1/2 the headset refresh rate (one generated frame between real frames), 3x at 1/3 (two), 4x at 1/4 (three). auto starts at 2x, steps up when the game cannot keep the cadence, steps back down when it can, and passes frames straight through when the game already holds full refresh. dynamic holds the game at no fixed rate: it runs as fast as it can and generated frames fill the refreshes between its frames (Direct3D 12 games; elsewhere it behaves as auto). Higher multipliers produce more artifacts. On Direct3D 12 each generated frame is written right before its refresh into one set of headset-resolution output images; elsewhere, with extrapolate, each generated frame adds one set."
+          "default": "dynamic",
+          "description": "How the game's frame rate relates to the headset's. dynamic (default) holds the game at no fixed rate: it runs as fast as it can and generated frames fill the refreshes between its frames (where that is unavailable it behaves as auto). The fixed rates hold the game at a fraction of the headset refresh rate: 2x at 1/2 (one generated frame between real frames), 3x at 1/3 (two), 4x at 1/4 (three); auto picks among them as the game needs and passes frames straight through when the game already holds full refresh. Higher multipliers produce more artifacts."
         },
         "artifactSuppression": {
           "type": "integer",

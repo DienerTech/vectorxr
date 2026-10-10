@@ -212,18 +212,6 @@ const char* ToString(FrameGenDepthState state) {
     }
 }
 
-const char* Describe(FrameGenDepthState state) {
-    switch (state) {
-    case FrameGenDepthState::kNotSent: return "No depth from this game: near cockpit detail may jitter";
-    case FrameGenDepthState::kNotReadable: return "Depth is only read in Direct3D 12 games for now";
-    case FrameGenDepthState::kChecking: return "Checking the game's depth against the other eye";
-    case FrameGenDepthState::kInUse: return "Depth in use: cockpit detail follows head movement";
-    case FrameGenDepthState::kEmpty: return "Depth empty: turn on the game's depth reprojection";
-    case FrameGenDepthState::kUnusable: return "Depth does not match the other eye, so it is not used";
-    default: return "";
-    }
-}
-
 const char* ToString(FrameGenState state) {
     switch (state) {
     case FrameGenState::kWaiting:
@@ -5996,67 +5984,102 @@ FrameGenStatus FrameGenPresenter::Status() const {
     return status;
 }
 
-std::string FrameGenPresenter::OsdText() const {
-    const FrameGenStatus status = Status();
+FrameGenOsdText DescribeFrameGen(const FrameGenStatus& status, bool started) {
+    // The expanded OSD row says the state and how it runs; the line under it
+    // what it does right now, or why not. The OSD separates parts as its other
+    // rows do, the app with a middle dot.
+    constexpr const char* kOsd = "  /  ";
+    constexpr const char* kApp = " \xC2\xB7 ";
+    constexpr const char* kArrow = " \xE2\x86\x92 ";
+    // The OSD's second line starts as a sentence; reasons start lowercase.
+    const auto sentence = [](std::string line) {
+        if (!line.empty() && line[0] >= 'a' && line[0] <= 'z') line[0] = static_cast<char>(line[0] - 'a' + 'A');
+        return line;
+    };
+    FrameGenOsdText text;
+    text.state = ToString(status.state);
     switch (status.state) {
     case FrameGenState::kActive: {
-        if (status.standby) {
-            return "Dynamic  /  standing by, " + Number(status.app_fps, 0) + " fps";
+        text.badge = "STBY";
+        text.state = "standby";
+        // Composed quad views frames kept failing to be written: frames pass
+        // straight through for a while, whatever else the state says.
+        if (status.quad_declining || (status.full_rate && !status.reason.empty())) {
+            text.row = "Standby";
+            text.detail = "Generated frames could not be shown, retrying soon";
+            text.compact = std::string("Standby") + kOsd + "retrying soon";
+            text.reason = text.detail;
+            return text;
         }
-        if (status.full_rate && status.quad_declining) {
-            return "Standing by  /  the quad views could not be composed, retrying soon";
-        }
-        if (status.full_rate) {
-            return "Auto  /  full rate, no generation needed";
+        // Standing by: the game holds the refresh rate on its own, so its
+        // frames pass straight through.
+        if (status.standby || status.full_rate) {
+            const std::string rate = status.dynamic ? "Dynamic" : "Auto";
+            const std::string game = "game at " + Number(status.app_fps, 0) + " fps";
+            text.row = std::string("Standby") + kOsd + rate;
+            text.detail = "The game holds " + Number(status.app_fps, 0) + " fps on its own";
+            text.compact = std::string("Standby") + kOsd + game;
+            text.reason = rate + kApp + game;
+            return text;
         }
         // Distinct frames: a frame shown twice (generation or the game ran
         // late) is not counted again.
-        std::string text = std::string(status.mode == FrameGenSynthesisMode::kExtrapolate ? "Extrapolate" : "Interpolate") +
-                           "  /  " +
-                           (status.dynamic ? std::string("Dynamic")
-                                           : (status.automatic ? "Auto " : "") + MultiplierText(status.multiplier)) +
-                           "  /  " + Number(status.app_fps, 0) + " -> " + Number(status.distinct_fps, 0) + " fps";
-        if (status.gpu_ms > 0.0) text += "  /  " + Number(status.gpu_ms, 1) + " ms";
+        const std::string mode = status.mode == FrameGenSynthesisMode::kExtrapolate ? "Extrapolate" : "Interpolate";
+        const std::string rate =
+            status.dynamic ? std::string("Dynamic") : (status.automatic ? "Auto " : "") + MultiplierText(status.multiplier);
+        const std::string rates = Number(status.app_fps, 0) + kArrow + Number(status.distinct_fps, 0) + " fps";
+        const std::string gpu = status.gpu_ms > 0.0 ? "GPU " + Number(status.gpu_ms, 1) + " ms" : std::string();
+        text.badge = "ON";
+        text.state = "active";
+        text.shown_fps = status.distinct_fps;
+        text.row = std::string("On") + kOsd + mode + kOsd + rate;
+        text.detail = rates + (gpu.empty() ? "" : kOsd + gpu);
+        text.compact = rate + kOsd + rates;
+        text.reason = mode + kApp + rate + kApp + rates + (gpu.empty() ? "" : kApp + gpu);
         return text;
     }
     case FrameGenState::kWaiting:
-        return "Waiting for steady frames";
+        text.badge = "WAIT";
+        text.row = "Starting";
+        text.detail = "Waiting for steady frames";
+        text.compact = "Starting";
+        text.reason = status.reason;
+        return text;
     case FrameGenState::kPaused:
-        return "Paused  /  " + status.reason + (status.retry_pending ? "  /  retrying soon" : "");
+        text.badge = "PAUSED";
+        text.row = status.retry_pending ? std::string("Paused") + kOsd + "retrying soon" : std::string("Paused");
+        text.detail = sentence(status.reason);
+        text.compact = "Paused";
+        text.reason = status.reason;
+        if (status.retry_pending) text.reason += (text.reason.empty() ? "" : kApp) + std::string("retrying soon");
+        return text;
     case FrameGenState::kUnavailable:
-        return "Unavailable  /  " + status.reason;
+        text.badge = "N/A";
+        text.row = text.compact = "Unavailable";
+        text.detail = sentence(status.reason);
+        text.reason = status.reason;
+        return text;
     default:
-        return Started() ? "Off" : "Disabled";
+        text.row = text.compact = started ? "Off" : "Disabled";
+        if (started) text.badge = "OFF";
+        return text;
     }
+}
+
+FrameGenOsdText FrameGenPresenter::OsdDescription() const {
+    return DescribeFrameGen(Status(), Started());
+}
+
+std::string FrameGenPresenter::OsdText() const {
+    return OsdDescription().row;
 }
 
 std::string FrameGenPresenter::OsdDetailText() const {
-    const FrameGenStatus status = Status();
-    if (status.state != FrameGenState::kActive || status.full_rate || status.depth == FrameGenDepthState::kUnknown) {
-        return {};
-    }
-    return Describe(status.depth);
+    return OsdDescription().detail;
 }
 
 std::string FrameGenPresenter::CompactOsdText() const {
-    const FrameGenStatus status = Status();
-    switch (status.state) {
-    case FrameGenState::kActive:
-        if (status.standby) return "Dynamic  /  standing by, " + Number(status.app_fps, 0) + " fps";
-        if (status.full_rate && status.quad_declining) return "Standing by";
-        if (status.full_rate) return "Full rate";
-        return (status.dynamic ? std::string("Dynamic")
-                               : std::string(status.automatic ? "Auto " : "") + MultiplierText(status.multiplier)) +
-               "  /  " + Number(status.app_fps, 0) + " -> " + Number(status.distinct_fps, 0) + " fps";
-    case FrameGenState::kWaiting:
-        return "Waiting";
-    case FrameGenState::kPaused:
-        return "Paused";
-    case FrameGenState::kUnavailable:
-        return "Unavailable";
-    default:
-        return Started() ? "Off" : "Disabled";
-    }
+    return OsdDescription().compact;
 }
 
 } // namespace depthxr

@@ -696,14 +696,14 @@ bool CheckAllowedKeys(const JsonValue::Object& object,
 bool ParseOsdSettings(const JsonValue::Object& object, OsdSettings& out, std::string& error) {
     if (!CheckAllowedKeys(object, {"enabled", "visibleOnStart", "compact", "horizontalDegrees", "verticalDegrees",
         "distanceMeters", "scale", "opacity", "updateHz", "showGraph", "showRuntime", "showBrand", "showApp", "showTurbo", "showModules",
-        "showClock", "showPivot", "showFramegen", "compactShowRuntime", "compactShowClock", "compactShowTurbo", "compactShowPivot",
+        "showClock", "showPivot", "showFramegen", "showFramegenFps", "compactShowRuntime", "compactShowClock", "compactShowTurbo", "compactShowPivot",
         "compactShowFramegen",
         "compactShowBrand", "compactShowApp", "compactMetrics",
         "clockFormat", "bodyOrder", "customColor", "customPresets", "accent", "toggleBinding", "cycleBinding"}, error)) return false;
     for (const auto& [key, target] : {std::pair{"enabled", &out.enabled}, {"visibleOnStart", &out.visible_on_start},
         {"compact", &out.compact}, {"showGraph", &out.show_graph}, {"showRuntime", &out.show_runtime}, {"showBrand", &out.show_brand}, {"showApp", &out.show_app},
         {"showTurbo", &out.show_turbo}, {"showModules", &out.show_modules}, {"showClock", &out.show_clock}, {"showPivot", &out.show_pivot},
-        {"showFramegen", &out.show_framegen}}) {
+        {"showFramegen", &out.show_framegen}, {"showFramegenFps", &out.show_framegen_fps}}) {
         std::optional<bool> value;
         if (!ReadOptionalBool(object, key, value, error)) return false;
         if (value) *target = *value;

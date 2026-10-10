@@ -2534,7 +2534,9 @@ void CheckValidation(const std::string& when) {
 struct CaseSettings {
     bool framegen{true};
     bool debug_log{false};
-    std::string frame_multiplier; // Frame Generation's (its default when empty)
+    // Frame Generation's (its default when empty). The cases were written when
+    // Auto was the default, so they keep it unless they choose another.
+    std::string frame_multiplier{"auto"};
     std::string synthesis_mode;   // Frame Generation's (its default when empty)
 };
 

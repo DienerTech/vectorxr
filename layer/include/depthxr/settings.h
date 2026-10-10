@@ -92,6 +92,9 @@ struct OsdSettings {
     bool show_clock{true};
     bool show_pivot{true};
     bool show_framegen{true};
+    // Beside the FPS counter, in both layouts, in sessions with Frame
+    // Generation on: its state and the frames per second the headset shows.
+    bool show_framegen_fps{true};
     bool compact_show_runtime{true};
     bool compact_show_brand{true};
     bool compact_show_app{true};
@@ -490,13 +493,14 @@ enum class FrameGenMotionEstimation {
     kHardware,
 };
 
-// Headset frames per real application frame. 2x holds the application at
-// half the runtime refresh rate, 3x at a third, 4x at a quarter. Auto starts
-// at 2x, steps up while the application misses its cadence, probes back down
-// when it keeps up, and passes frames through when it holds full refresh.
-// Dynamic holds nothing: the application runs at its own rate and generated
-// frames fill the refreshes between its frames (Extrapolate presented from
-// the presenter thread; elsewhere it behaves as Auto).
+// Headset frames per real application frame. Dynamic (the default) holds
+// nothing: the application runs at its own rate and generated frames fill the
+// refreshes between its frames (presented from the presenter thread; where
+// that is unavailable it behaves as Auto). The fixed rates hold the
+// application at a fraction of the runtime refresh rate: 2x at half, 3x at a
+// third, 4x at a quarter. Auto starts at full rate, steps up while the
+// application misses its cadence, probes back down when it keeps up, and
+// passes frames through when it holds full refresh.
 enum class FrameGenMultiplier {
     kAuto,
     k2,
@@ -517,7 +521,7 @@ struct FrameGenSettings {
     FrameGenSynthesisMode synthesis_mode{FrameGenSynthesisMode::kInterpolate};
     FrameGenFlowQuality flow_quality{FrameGenFlowQuality::kBalanced};
     FrameGenMotionEstimation motion_estimation{FrameGenMotionEstimation::kShader};
-    FrameGenMultiplier multiplier{FrameGenMultiplier::kAuto};
+    FrameGenMultiplier multiplier{FrameGenMultiplier::kDynamic};
     // 0-100: higher falls back to the real image sooner where motion is uncertain.
     int artifact_suppression{50};
     // 2-25: largest content shift, in percent of view width, a generated frame may apply.
