@@ -107,6 +107,7 @@ struct FrameGenStatus {
     std::uint64_t lead_downs{0};      // steps down (frames with a refresh to spare)
     std::uint64_t lead_probes{0};     // steps down after a calm while (FrameGenLeadPolicy)
     std::uint64_t lead_probes_failed{0}; // probes undone by late frames
+    std::uint64_t lead_downs_undone{0};  // steps down undone by late frames within FrameGenLeadPolicy::judge
     std::uint64_t late_cpu{0};        // real frames ended after their refresh was due
     std::uint64_t late_gpu{0};        // real frames not captured on the GPU when first chosen for a refresh
     bool gpu_gating{false};           // game waits are held until its GPU catches up
@@ -206,6 +207,11 @@ struct FrameGenLeadPolicy {
     std::chrono::milliseconds judge{3000};          // a step up this soon after a probe: it failed
     std::chrono::milliseconds explore_after{10000}; // below the lowest lead known to hold: this long, doubling...
     std::chrono::milliseconds explore_max{60000};   // ...up to this
+    // Steps down for frames with a refresh to spare are judged as probes too,
+    // and frames late at the lowest lead known to hold raise it: below it,
+    // once frames were late there, the lead is retried only after
+    // explore_after, doubling (tests compare without).
+    bool slack_hysteresis{true};
 };
 
 // Frame Generation pacing for one OpenXR session.
@@ -1033,6 +1039,7 @@ class FrameGenPresenter {
         std::uint64_t lead_downs{0};
         std::uint64_t lead_probes{0};
         std::uint64_t lead_probes_failed{0};
+        std::uint64_t lead_downs_undone{0};
         // Frames of the layer's quad compose site, by route (FrameGenQuadRoute).
         std::uint64_t quad_claimed{0};
         std::uint64_t quad_uncaptured{0};
@@ -1149,10 +1156,14 @@ class FrameGenPresenter {
         // Its first frames are not judged: the game's pacing still follows
         // the lead before it.
         std::uint32_t grace{2};
+        bool slack{false}; // a step down for frames with a refresh to spare, not a calm probe
     };
     std::optional<LeadProbe> lead_probe_; // a probe being judged
     std::uint32_t lead_floor_{0};         // the lowest lead known to hold (0: none yet)
     std::chrono::milliseconds lead_explore_after_{10000};
+    // Frames were late at lead_floor_ or below it (a probe or step down
+    // undone): steps down for slack below it also wait lead_explore_after_.
+    bool lead_floor_failed_{false};
     // A new run measures its lead afresh (StartCompositorLocked, Start).
     void ResetLeadLocked();
     // Dynamic: refreshes between real frames' slots, smoothed, and the slot

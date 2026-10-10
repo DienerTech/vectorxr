@@ -4223,6 +4223,10 @@ LeadRun RunLeadAfterHitches(bool probes) {
     policy.judge = 200ms;
     policy.explore_after = 700ms;
     policy.explore_max = 1400ms;
+    // Without: the lead as it stepped before either (a step down for slack
+    // judged as a probe skips the frames in flight across it, so it too
+    // brings the lead back down here).
+    policy.slack_hysteresis = probes;
     presenter.SetLeadPolicy(policy);
     app->before_release = [&] { gpu.GameFrame(); };
     for (int i = 0; i < 3; ++i) app->Frame();
@@ -4250,13 +4254,14 @@ void TestLeadStepsDownAfterHitches() {
     const auto late = [](const LeadRun& run) {
         return (run.after.late_cpu - run.before.late_cpu) + (run.after.late_gpu - run.before.late_gpu);
     };
-    std::cerr << "  without probes: lead " << held.settled << " -> " << held.peak << " -> " << held.final
+    std::cerr << "  without probes or hysteresis: lead " << held.settled << " -> " << held.peak << " -> " << held.final
               << " (late " << late(held) << "); with probes: " << probed.settled << " -> " << probed.peak << " -> "
               << probed.final << " (floor " << probed.after.lead_floor << ", probes " << probed.after.lead_probes
               << ", failed " << probed.after.lead_probes_failed << ", late " << late(probed) << ")" << std::endl;
     Check(held.peak > held.settled && probed.peak > probed.settled, "lead probes: the hitches grow the lead");
     Check(held.final >= held.peak && held.after.lead_probes == 0,
-          "lead probes: without probes the lead stays up after the hitches (" + std::to_string(held.settled) +
+          "lead probes: without probes or hysteresis the lead stays up after the hitches (" +
+              std::to_string(held.settled) +
               " -> " + std::to_string(held.peak) + " -> " + std::to_string(held.final) + ")");
     Check(probed.after.lead_probes > probed.before.lead_probes && probed.final < probed.peak &&
               probed.final <= probed.settled,
@@ -4267,6 +4272,98 @@ void TestLeadStepsDownAfterHitches() {
     Check(late(probed) <= late(held) * 3 / 2 + 10,
           "lead probes: frames are late about as often with probes (" + std::to_string(late(probed)) + " vs " +
               std::to_string(late(held)) + ")");
+}
+
+
+// A game whose frames mostly fit a lead but a few in ten need one more
+// refresh (DCS and MSFS 2024, 2026-10-09: the lead stepped 4 <-> 5 about
+// once a second; every step down cost two late frames, each shown as a
+// cover or a repeat). A lead that failed is retried only rarely.
+struct LeadFlapRun {
+    int changes{0};          // lead changes in the window
+    std::uint64_t late{0};   // real frames late in the window
+    double mean_lead{0.0};   // sampled each frame
+    std::uint32_t floor{0};
+    std::uint64_t undone{0}; // steps down undone by late frames
+};
+
+LeadFlapRun RunLeadFlap(bool hysteresis) {
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    gpu.frames_ahead = 3;
+    Runtime runtime;
+    runtime.paced = true;
+    std::unique_ptr<App> owned;
+    App* app = nullptr;
+    StartJit(presenter, gpu, FrameGenSynthesisMode::kExtrapolate, FrameGenMultiplier::kDynamic, app, runtime, owned);
+    FrameGenLeadPolicy policy;
+    policy.probe_after = 600s;
+    policy.judge = 1000ms;
+    policy.explore_after = 1500ms;
+    policy.explore_max = 3000ms;
+    policy.slack_hysteresis = hysteresis;
+    presenter.SetLeadPolicy(policy);
+    // GPU-bound near 50 fps, one frame in five a refresh longer.
+    const std::vector<std::chrono::microseconds> pattern = {18ms, 18ms, 18ms, 18ms, 30ms};
+    std::size_t n = 0;
+    app->before_release = [&] {
+        gpu.game_gpu = pattern[n++ % pattern.size()];
+        gpu.GameFrame();
+    };
+    for (int i = 0; i < 3; ++i) app->Frame();
+    RunWork(*app, 3000ms, {6ms}, [&](const XrFrameState&) { return Engaged(presenter); });
+    Check(Engaged(presenter), "lead flapping: Dynamic engages for the GPU-bound game");
+    RunWork(*app, 4000ms, {6ms});
+    const FrameGenStatus before = presenter.Status();
+    const bool trace = std::getenv("FG_TEST_LEAD_TRACE") != nullptr;
+    const auto trace_start = std::chrono::steady_clock::now();
+    LeadFlapRun run;
+    std::uint32_t lead = before.lead_slots;
+    double lead_sum = 0.0;
+    int samples = 0;
+    RunWork(*app, 6000ms, {6ms}, [&](const XrFrameState&) {
+        const FrameGenStatus now = presenter.Status();
+        lead_sum += now.lead_slots;
+        ++samples;
+        if (now.lead_slots != lead) {
+            ++run.changes;
+            lead = now.lead_slots;
+            if (trace) {
+                std::cerr << "    " << Seconds(std::chrono::steady_clock::now() - trace_start) << " s: lead " << lead
+                          << " floor " << now.lead_floor << " undone " << now.lead_downs_undone << " late "
+                          << now.late_cpu << "/" << now.late_gpu << std::endl;
+            }
+        }
+        return false;
+    });
+    const FrameGenStatus after = presenter.Status();
+    presenter.Stop();
+    Check(!runtime.ordering_violation && !g_release_violation, "lead flapping: calls stayed ordered");
+    run.late = (after.late_cpu - before.late_cpu) + (after.late_gpu - before.late_gpu);
+    run.mean_lead = samples ? lead_sum / samples : 0.0;
+    run.floor = after.lead_floor;
+    run.undone = after.lead_downs_undone - before.lead_downs_undone;
+    return run;
+}
+
+void TestLeadDoesNotFlap() {
+    const LeadFlapRun flapping = RunLeadFlap(false);
+    const LeadFlapRun held = RunLeadFlap(true);
+    std::cerr << "  lead flapping without hysteresis: " << flapping.changes << " changes, " << flapping.late
+              << " late in 6 s, mean lead " << flapping.mean_lead << "; with: " << held.changes << " changes ("
+              << held.undone << " undone), " << held.late << " late, mean lead " << held.mean_lead << ", floor "
+              << held.floor << std::endl;
+    // Retried after 1.5 s, then every 3 s: two retries, each undone, in 6 s.
+    Check(flapping.changes >= 8, "lead flapping: the game makes the lead flap without hysteresis (" +
+                                     std::to_string(flapping.changes) + " changes in 6 s)");
+    Check(held.changes <= 6 && held.changes * 3 <= flapping.changes * 2,
+          "lead flapping: a lead that failed is retried only rarely (" + std::to_string(held.changes) + " vs " +
+              std::to_string(flapping.changes) + " changes in 6 s)");
+    Check(held.late < flapping.late, "lead flapping: fewer frames are late (" + std::to_string(held.late) + " vs " +
+                                         std::to_string(flapping.late) + ")");
+    Check(held.mean_lead <= flapping.mean_lead + 1.0,
+          "lead flapping: the lead holds about where it flapped (" + std::to_string(held.mean_lead) + " vs " +
+              std::to_string(flapping.mean_lead) + ")");
 }
 
 // A game showing its last frame (stalled): its exact copy is written once,
@@ -4388,7 +4485,7 @@ void TestTelemetryWindows() {
     for (const char* field : {"appFps=", "outputFps=", "distinctFps=", "standbyS=", "generated=+", "copiesSkipped=",
                               "lateReal=", "gpuWaits=", "captureDoneMs=", "analysisMs=", "measureLagMs=", "ofaMs=",
                               "gpuStartMs=", "gpuDoneMs=", "endCallMs=", "synthLockMs=", "unwritten=", "unready=", "pauses=",
-                              "leadSlots=", "leadFloor=", "leadMoves=+", "leadProbes=",
+                              "leadSlots=", "leadFloor=", "leadMoves=+", "leadProbes=", "leadUndone=",
                               "dynamic=engaged (the game ran at"}) {
         Check(threaded.back().find(field) != std::string::npos,
               std::string("telemetry: the summary has ") + field + " (" + threaded.back() + ")");
@@ -6228,6 +6325,7 @@ void RunPolicyTests() {
     RUN(TestNoExtrapolationAcrossPauses);
     RUN(TestLeadResetOnRestart);
     RUN(TestLeadStepsDownAfterHitches);
+    RUN(TestLeadDoesNotFlap);
     RUN(TestSkipIdenticalExactCopies);
     RUN(TestTelemetryWindows);
     RUN(TestGpuWaitKeepsCadence);

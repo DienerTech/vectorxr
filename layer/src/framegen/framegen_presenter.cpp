@@ -580,6 +580,7 @@ void FrameGenPresenter::ResetLeadLocked() {
     lead_probe_.reset();
     lead_floor_ = 0;
     lead_explore_after_ = lead_policy_.explore_after;
+    lead_floor_failed_ = false;
 }
 
 void FrameGenPresenter::SetDynamicPolicy(const FrameGenDynamicPolicy& policy) {
@@ -3999,6 +4000,7 @@ void FrameGenPresenter::UpdateLeadLocked(bool late, std::optional<double> slack_
         if (lead_floor_ == 0 || lead_slots_ < lead_floor_) {
             lead_floor_ = lead_slots_;
             lead_explore_after_ = lead_policy_.explore_after;
+            lead_floor_failed_ = false;
         }
         lead_probe_.reset();
     }
@@ -4017,17 +4019,23 @@ void FrameGenPresenter::UpdateLeadLocked(bool late, std::optional<double> slack_
         const auto count = [&](std::uint8_t kind) {
             return static_cast<std::size_t>(std::count(lead_history_.begin(), lead_history_.end(), kind));
         };
+        const bool hysteresis = lead_policy_.slack_hysteresis;
         if (count(1) >= 2) {
             if (lead_probe_) {
-                // The probe failed: the lead before it is the lowest known to
-                // hold, and below it is tried only rarely (more rarely after
-                // each failure there).
+                // The probe (or step down) failed: the lead before it is the
+                // lowest known to hold, and below it is tried only rarely
+                // (more rarely after each failure there).
                 const bool exploring = lead_floor_ != 0 && lead_probe_->from <= lead_floor_;
                 lead_floor_ = lead_probe_->from;
+                lead_floor_failed_ = true;
                 lead_explore_after_ = exploring ? std::min(lead_explore_after_ * 2, lead_policy_.explore_max)
                                                 : lead_policy_.explore_after;
+                ++(lead_probe_->slack ? totals_.lead_downs_undone : totals_.lead_probes_failed);
                 lead_probe_.reset();
-                ++totals_.lead_probes_failed;
+            } else if (hysteresis && lead_floor_ != 0 && lead_slots_ <= lead_floor_) {
+                // Late at the lowest lead known to hold: it holds no longer.
+                lead_floor_ = std::min(lead_slots_ + 1, 4 * multiplier);
+                lead_floor_failed_ = true;
             }
             lead_slots_ = std::min(lead_slots_ + 1, 4 * multiplier);
             ++totals_.lead_ups;
@@ -4035,7 +4043,19 @@ void FrameGenPresenter::UpdateLeadLocked(bool late, std::optional<double> slack_
             lead_calm_since_ = now;
             return;
         }
-        if (lead_history_.size() >= 8 && count(2) >= 7 && lead_slots_ > 1) {
+        // Frames with a refresh to spare: one slot less, judged as a probe.
+        // Below the lowest lead known to hold, once frames were late there,
+        // only every lead_explore_after_ (as calm probes): a game whose
+        // frames mostly fit a lead but a few in ten need one more otherwise
+        // steps down and back up about once a second, each time with two
+        // late frames (DCS and MSFS 2024, 2026-10-09).
+        const bool exploring = lead_floor_ != 0 && lead_slots_ <= lead_floor_ && lead_floor_failed_;
+        if (lead_history_.size() >= 8 && count(2) >= 7 && lead_slots_ > 1 &&
+            (!hysteresis || !exploring || now - lead_calm_since_ >= lead_explore_after_)) {
+            if (hysteresis) {
+                lead_probe_ = LeadProbe{now, lead_slots_};
+                lead_probe_->slack = true;
+            }
             --lead_slots_;
             ++totals_.lead_downs;
             lead_history_.clear();
@@ -4653,6 +4673,7 @@ void FrameGenPresenter::SummaryLocked(Clock::time_point now) {
             ", leadMoves=+" + std::to_string(delta(&Totals::lead_ups)) + "/-" +
             std::to_string(delta(&Totals::lead_downs)) + ", leadProbes=" + std::to_string(delta(&Totals::lead_probes)) +
             "/" + std::to_string(delta(&Totals::lead_probes_failed)) +
+            ", leadUndone=" + std::to_string(delta(&Totals::lead_downs_undone)) +
             ", appWorkMs=" + Number(app_work_frames_ ? app_work_ms_ / app_work_frames_ : 0.0, 1) +
             ", lateReal=" + std::to_string(delta(&Totals::late_cpu)) + "/" + std::to_string(delta(&Totals::late_gpu)) +
             ", skippedGenerated=" + std::to_string(skipped_generated_) + ", generated=+" +
@@ -5946,6 +5967,7 @@ FrameGenStatus FrameGenPresenter::Status() const {
     status.lead_downs = totals_.lead_downs;
     status.lead_probes = totals_.lead_probes;
     status.lead_probes_failed = totals_.lead_probes_failed;
+    status.lead_downs_undone = totals_.lead_downs_undone;
     status.late_cpu = totals_.late_cpu;
     status.late_gpu = totals_.late_gpu;
     status.gpu_gating = gpu_gate_enabled_ && gpu_gate_armed_;
