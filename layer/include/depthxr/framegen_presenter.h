@@ -265,13 +265,13 @@ class FrameGenPresenter {
     // to be written, doubling up to `longest` (tests shorten it).
     void SetQuadDecline(std::chrono::milliseconds first, std::chrono::milliseconds longest);
     // Interpolating, motion is measured on the shader cores even with
-    // NVIDIA's optical flow hardware chosen (a Direct3D 11 or Vulkan game's
-    // session, through a bridge). Beside such a game's rendering the hardware's
-    // vectors come about 7 ms later than idle (four matches a frame, each
-    // after the first waiting for the busy GPU), while the frames between
-    // real frames need them within a refresh: DCS, flight 2, measured 8.6 ms
-    // against 1.1 on the shader cores, and 6-10% of refreshes repeated a
-    // frame. Extrapolate keeps the hardware.
+    // NVIDIA's optical flow hardware chosen. Beside a game's rendering the
+    // hardware's vectors come late on every graphics API (they wait for the
+    // busy GPU), while the frames between real frames need them first: DCS,
+    // flight 2, measured 8.6 ms against 1.1 on the shader cores, and 6-10% of
+    // refreshes repeated a frame; MSFS 2024 (2026-10-09) 9-17 ms, and its lead
+    // grew to 11-14 refreshes to make room. Both looked the same interpolated
+    // (MSFS, 2026-10-07). Extrapolate keeps the hardware.
     void SetInterpolateOnShaders(bool on);
     // Delay before a paused session retries by itself, and how often.
     void SetRetryPolicy(std::chrono::milliseconds delay, std::uint32_t attempts);

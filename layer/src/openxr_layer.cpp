@@ -12466,11 +12466,10 @@ void OpenXrLayer::StartFrameGen(XrSession session, const void* binding_chain, co
         framegen_calls_.begin = [this](XrSession s, const XrFrameBeginInfo* i) { return TraceRuntimeBeginFrame(s, i); };
         framegen_calls_.submit = [this](XrSession s, const XrFrameEndInfo* i) { return SubmitRuntimeFrame(s, i); };
         framegen_.Configure(resolved_settings_.framegen);
-        // A Direct3D 11 or Vulkan game (a bridge): interpolating, motion is
-        // measured on the shader cores (FrameGenPresenter::SetInterpolateOnShaders).
+        // Interpolating, motion is measured on the shader cores
+        // (FrameGenPresenter::SetInterpolateOnShaders).
         const char* interpolate_hardware = std::getenv("VECTORXR_FRAMEGEN_INTERPOLATE_HARDWARE");
-        framegen_.SetInterpolateOnShaders((d3d11_bridge_.Active() || vulkan_bridge_.Active()) &&
-                                          !(interpolate_hardware && std::string(interpolate_hardware) == "1"));
+        framegen_.SetInterpolateOnShaders(!(interpolate_hardware && std::string(interpolate_hardware) == "1"));
         // How long a teardown waits on the presenter thread (2 s unless set).
         std::chrono::milliseconds teardown_wait{2000};
         if (const char* wait = std::getenv("VECTORXR_FRAMEGEN_TEARDOWN_WAIT_MS"); wait && *wait) {
