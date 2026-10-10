@@ -12296,6 +12296,11 @@ void OpenXrLayer::StartFrameGen(XrSession session, const void* binding_chain, co
         framegen_calls_.begin = [this](XrSession s, const XrFrameBeginInfo* i) { return TraceRuntimeBeginFrame(s, i); };
         framegen_calls_.submit = [this](XrSession s, const XrFrameEndInfo* i) { return SubmitRuntimeFrame(s, i); };
         framegen_.Configure(resolved_settings_.framegen);
+        // A Direct3D 11 game (the bridge): interpolating, motion is measured
+        // on the shader cores (FrameGenPresenter::SetInterpolateOnShaders).
+        const char* interpolate_hardware = std::getenv("VECTORXR_FRAMEGEN_INTERPOLATE_HARDWARE");
+        framegen_.SetInterpolateOnShaders(d3d11_bridge_.Active() &&
+                                          !(interpolate_hardware && std::string(interpolate_hardware) == "1"));
         framegen_.Start(session, binding_chain,
                         {next_enumerate_swapchain_formats_, next_create_swapchain_, next_destroy_swapchain_,
                          next_enumerate_swapchain_images_, next_acquire_swapchain_image_, next_wait_swapchain_image_,

@@ -3385,11 +3385,11 @@ void TestDynamicHysteresis() {
 // The benefit guard stands down on each trigger, after two failing windows:
 // (a) no more distinct frames than the game alone, (b) too few generated
 // frames, (c) real frames on the GPU too late, (d) motion measured too late.
-// (b) and (d) judge only an engagement not showing more distinct frames than
-// the game did alone, so (a) fails with them; a cause is named before that
-// effect. The other causes are turned off for each. Except for (c), the
-// game, engaged at its own rate, runs slower than it did standing by.
-// After the hold, with the fault gone, it engages again.
+// (b), (c) and (d) judge only an engagement not showing more distinct frames
+// than the game did alone, so (a) fails with them; a cause is named before
+// that effect. The other causes are turned off for each. The game, engaged
+// at its own rate, runs slower than it did standing by. After the hold,
+// with the fault gone, it engages again.
 void TestBenefitGuardBacksOff() {
     struct Case {
         const char* name;
@@ -3409,7 +3409,6 @@ void TestBenefitGuardBacksOff() {
          [](FrameGenDynamicPolicy& policy) { policy.late_analyses_share = 2.0; }},
         {"guard (c)", "reached the GPU too late", [](GpuLog& gpu) { gpu.capture_lag = 150ms; },
          [](FrameGenDynamicPolicy& policy) {
-             policy.distinct_margin_fps = -1000.0;
              policy.generated_share = 0.0;
              policy.late_analyses_share = 2.0;
          },
@@ -3461,6 +3460,71 @@ void TestBenefitGuardBacksOff() {
                   name + ": engages again after the hold once the fault is gone");
         }
         presenter.Stop();
+        Check(!runtime.ordering_violation && !g_release_violation, name + ": calls stayed ordered");
+    }
+}
+
+// Real frames on the GPU too late for more than (c)'s share of refreshes do
+// not stand down an engagement showing more distinct frames than the game
+// alone (DCS, flight 2: a hitch's late frames in two 2.5 s windows stood
+// down an engagement filling the refresh rate, for 20-80 s).
+void TestWinningEngagementSurvivesLateCaptures() {
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    runtime.paced = true;
+    std::unique_ptr<App> owned;
+    App* app = nullptr;
+    StartJit(presenter, gpu, FrameGenSynthesisMode::kExtrapolate, FrameGenMultiplier::kDynamic, app, runtime, owned);
+    FrameGenDynamicPolicy policy = GuardDynamic();
+    policy.distinct_margin_fps = -1000.0; // always winning
+    policy.generated_share = 0.0;
+    policy.late_analyses_share = 2.0;
+    presenter.SetDynamicPolicy(policy);
+    EngageDynamic(presenter, *app, "winning late captures");
+    RunTicks(*app, 300ms, {1, 2, 2});
+    const FrameGenStatus before = presenter.Status();
+    gpu.capture_lag = 150ms;
+    RunTicks(*app, 3000ms, {1, 2, 2});
+    const FrameGenStatus status = presenter.Status();
+    const double refreshes = 3.0 * 1e9 / static_cast<double>(kPeriod);
+    Check(static_cast<double>(status.unready_capture - before.unready_capture) > policy.unready_share * refreshes,
+          "winning late captures: real frames reached the GPU late for more than (c)'s share (" +
+              std::to_string(status.unready_capture - before.unready_capture) + " uncaptured)");
+    Check(Engaged(presenter) && status.dynamic_stand_downs == 0,
+          "winning late captures: the engagement stays (" + status.dynamic_reason + ")");
+    presenter.Stop();
+    Check(!runtime.ordering_violation && !g_release_violation, "winning late captures: calls stayed ordered");
+}
+
+// A Direct3D 11 game's session (SetInterpolateOnShaders) with NVIDIA's
+// optical flow hardware chosen: interpolating, motion is measured on the
+// shader cores; extrapolating, on the hardware.
+void TestInterpolateOnShaders() {
+    for (const FrameGenSynthesisMode mode : {FrameGenSynthesisMode::kInterpolate, FrameGenSynthesisMode::kExtrapolate}) {
+        const bool interpolate = mode == FrameGenSynthesisMode::kInterpolate;
+        const std::string name = interpolate ? "interpolate on shaders" : "extrapolate on hardware";
+        FrameGenPresenter presenter;
+        GpuLog gpu;
+        Runtime runtime;
+        runtime.paced = true;
+        std::unique_ptr<App> owned;
+        App* app = nullptr;
+        StartJit(presenter, gpu, mode, FrameGenMultiplier::kDynamic, app, runtime, owned);
+        presenter.SetInterpolateOnShaders(true);
+        FrameGenResolvedSettings settings;
+        settings.enabled = true;
+        settings.synthesis_mode = mode;
+        settings.multiplier = FrameGenMultiplier::kDynamic;
+        settings.motion_estimation = FrameGenMotionEstimation::kHardware;
+        presenter.Configure(settings);
+        EngageDynamic(presenter, *app, name);
+        const int before = gpu.executes;
+        RunTicks(*app, 300ms, {1, 2, 2});
+        presenter.Stop();
+        Check(gpu.executes > before, name + ": real frames were analyzed");
+        Check(gpu.tuning.hardware_flow == !interpolate,
+              name + ": motion measured on the " + (gpu.tuning.hardware_flow ? "hardware" : "shader cores"));
         Check(!runtime.ordering_violation && !g_release_violation, name + ": calls stayed ordered");
     }
 }
@@ -3826,8 +3890,8 @@ void TestTelemetryWindows() {
     Check(threaded.size() >= 3, "telemetry: summaries every window while engaged (" + std::to_string(threaded.size()) + ")");
     Check(!inline_lines.empty(), "telemetry: summaries while standing by");
     for (const char* field : {"appFps=", "outputFps=", "distinctFps=", "standbyS=", "generated=+", "copiesSkipped=",
-                              "lateReal=", "gpuWaits=", "captureDoneMs=", "analysisMs=", "ofaMs=", "gpuStartMs=",
-                              "gpuDoneMs=", "endCallMs=", "synthLockMs=", "unwritten=", "unready=", "pauses=",
+                              "lateReal=", "gpuWaits=", "captureDoneMs=", "analysisMs=", "measureLagMs=", "ofaMs=",
+                              "gpuStartMs=", "gpuDoneMs=", "endCallMs=", "synthLockMs=", "unwritten=", "unready=", "pauses=",
                               "dynamic=engaged (the game ran at"}) {
         Check(threaded.back().find(field) != std::string::npos,
               std::string("telemetry: the summary has ") + field + " (" + threaded.back() + ")");
@@ -5526,6 +5590,8 @@ void RunPolicyTests() {
     RUN(TestExtrapolateMeasureLagIsOnTime);
     RUN(TestPauseAndLoadingDoNotStandDown);
     RUN(TestWinningEngagementStays);
+    RUN(TestWinningEngagementSurvivesLateCaptures);
+    RUN(TestInterpolateOnShaders);
     RUN(TestDynamicToggleStandsBy);
     RUN(TestHitchesAreNotPauses);
     RUN(TestInterpolateMeasureLagIsOnTime);

@@ -57,7 +57,7 @@ const motionEstimations: { value: FrameGenMotionEstimation; label: string; descr
   {
     value: 'hardware',
     label: 'NVIDIA hardware',
-    description: 'Recommended on NVIDIA RTX 20-50 GPUs: their optical flow accelerator measures motion in Direct3D 12 games, such as MSFS, at least as well as Shader, and repeating patterns stay put. Extrapolate needs it to look its best. It runs on Frame Generation\'s own GPU queue, after head movement is taken out, so the game does not wait for it. Elsewhere Shader is used and the log says why.',
+    description: 'Recommended on NVIDIA RTX 20-50 GPUs: their optical flow accelerator measures motion in Direct3D 12 games, such as MSFS, at least as well as Shader, and repeating patterns stay put. Extrapolate needs it to look its best. It runs on Frame Generation\'s own GPU queue, after head movement is taken out, so the game does not wait for it. In Direct3D 11 games such as DCS, Interpolate measures motion with Shader instead: beside the game\'s rendering the hardware answers too late for the frames between real frames. Elsewhere Shader is used and the log says why.',
   },
 ]
 
