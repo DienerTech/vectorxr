@@ -16,7 +16,7 @@ Developed by DienerTech LLC.
 - Configure enhanced yaw and pitch rotation through the Pivot module.
 - Drive foveated-style rendering with a visible performance budget through the Quadviews module.
 - Override OpenXR runtime frame pacing per application with Turbo and compare strategies using built-in diagnostics.
-- Add optical-flow generated frames between real frames with experimental [Frame Generation](docs/usage.md#frame-generation-experimental), holding the game at half the headset refresh rate or lower.
+- Add optical-flow generated frames between real frames with experimental [Frame Generation](docs/usage.md#frame-generation-experimental), so the headset gets a fresh image every refresh even when the game renders fewer.
 - Monitor application frame times, Turbo and Frame Generation state, and enhancements with a configurable [in-headset OSD](docs/usage.md#on-screen-display) for Direct3D 11, Direct3D 12, and Vulkan games.
 - Create per-application profiles so different OpenXR games can use different settings.
 - Track OpenXR apps VectorXR has seen and register them as profile targets.
@@ -93,19 +93,19 @@ See the [Turbo setup and Safety guide](docs/usage.md#turbo) for the controls and
 
 ### Frame Generation (experimental)
 
-Frame Generation holds a game at half your headset's refresh rate or lower, for example 45 fps
-on a 90 Hz headset, and inserts optical-flow generated frames between real frames, so the
-headset still gets a full-rate image stream. Choose **Interpolate** (fewest artifacts, needs more
-GPU headroom) or **Extrapolate** (more GPU time per frame, more edge artifacts) and a frame
-multiplier (**Auto**, 2x, 3x, or 4x) per profile, tune flow quality and artifact fallback live, and compare in game with an A/B toggle
-and diagnostic views. It works with Direct3D 11, Direct3D 12, and Vulkan games, in stereo or
-Quadviews.
+Frame Generation inserts optical-flow generated frames between a game's frames, so the headset
+gets a fresh image every refresh even when the game renders fewer. By default (**Dynamic**) the
+game runs as fast as it can and generated frames fill the gaps; a **Fixed** rate (Auto, 2x, 3x,
+or 4x) holds it at a fraction of the refresh rate instead. Choose **Interpolate** (smoothest,
+fewest artifacts, a little latency) or **Extrapolate** (lowest latency, more edge artifacts) and
+**Shader** or **NVIDIA hardware** motion per profile, and compare in game with an A/B toggle and
+diagnostic views. The On-Screen Display shows **FG ON** and the headset's frame rate beside its
+FPS. It works with Direct3D 11, Direct3D 12, and Vulkan games, in stereo or Quadviews.
 
-It is experimental: flow is measured on the final color images only (no game motion vectors or
-depth yet), and cockpit text can shimmer on generated frames. Turn off runtime smoothing such as
-SteamVR Motion Smoothing or ASW, and expect Turbo to stay off where Frame Generation runs.
-Turning it on needs a game restart. See the
-[Frame Generation guide](docs/usage.md#frame-generation-experimental).
+It is experimental: motion is measured on the final images (no game motion vectors yet), and
+text and HUDs can shimmer on generated frames. Turn off runtime smoothing such as SteamVR Motion
+Smoothing or ASW, and expect Turbo to stay off where Frame Generation runs. Turning it on needs a
+game restart. See the [Frame Generation guide](docs/usage.md#frame-generation-experimental).
 
 ### On-Screen Display
 
