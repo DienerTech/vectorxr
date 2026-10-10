@@ -785,6 +785,9 @@ struct ShownView {
 struct ShownFrame {
     XrTime time{0};
     std::vector<ShownView> views;
+    std::vector<XrCompositionLayerFlags> projection_flags; // each projection layer's
+    std::vector<XrSwapchain> quads;                        // each quad layer's swapchain
+    std::vector<XrCompositionLayerFlags> quad_flags;
     bool held{false}; // the readback still waited while the game's rendering was held back
     std::vector<Color> unordered; // read meanwhile on a queue ordered after nothing (the control)
 };
@@ -1550,8 +1553,13 @@ XrResult XRAPI_CALL RtEndFrame(XrSession, const XrFrameEndInfo* info) {
     frame.time = info->displayTime;
     for (std::uint32_t i = 0; i < info->layerCount; ++i) {
         const XrCompositionLayerBaseHeader* base = info->layers[i];
+        if (base && base->type == XR_TYPE_COMPOSITION_LAYER_QUAD) {
+            frame.quads.push_back(reinterpret_cast<const XrCompositionLayerQuad*>(base)->subImage.swapchain);
+            frame.quad_flags.push_back(base->layerFlags);
+        }
         if (!base || base->type != XR_TYPE_COMPOSITION_LAYER_PROJECTION) continue;
         const auto& projection = *reinterpret_cast<const XrCompositionLayerProjection*>(base);
+        frame.projection_flags.push_back(projection.layerFlags);
         Check(projection.viewCount == 2,
               "the runtime gets projections of two views, not " + std::to_string(projection.viewCount));
         for (std::uint32_t v = 0; v < projection.viewCount; ++v) {
@@ -2342,6 +2350,12 @@ struct FrameOptions {
     // As `hold`, but nothing opens it: the frame ends with the game's queue held.
     Gate* stall{nullptr};
     XrTime* display_time{nullptr};
+    // A quad layer over the projection (a game's interface): its swapchain
+    // acquired, cleared to `quad_color` and released after the colour
+    // targets, every frame.
+    const Target* quad{nullptr};
+    Color quad_color{255, 255, 255, 255};
+    XrCompositionLayerFlags layer_flags{0}; // the projection's and the quad's
 };
 
 // One application frame: each colour target acquired, waited, rendered in
@@ -2377,6 +2391,9 @@ XrResult Frame(App& app, const Renderer& renderer, const std::vector<const Targe
     for (std::size_t i = 0; i < targets.size(); ++i) {
         renderer.Clear(*targets[i], indices[i], colors[i]);
     }
+    if (options.quad) {
+        renderer.Clear(*options.quad, Acquire(app, *options.quad), options.quad_color);
+    }
     if (depth) {
         renderer.ClearDepth(*depth, depth_index, options.depth_value);
     }
@@ -2388,6 +2405,9 @@ XrResult Frame(App& app, const Renderer& renderer, const std::vector<const Targe
     }
     if (depth) {
         Release(app, *depth);
+    }
+    if (options.quad) {
+        Release(app, *options.quad);
     }
 
     XrBaseInStructure after_depth{kApplicationStructType};
@@ -2416,14 +2436,29 @@ XrResult Frame(App& app, const Renderer& renderer, const std::vector<const Targe
         }
     }
     XrCompositionLayerProjection projection{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
+    projection.layerFlags = options.layer_flags;
     projection.space = app.space;
     projection.viewCount = 2;
     projection.views = views.data();
-    const XrCompositionLayerBaseHeader* layers[] = {reinterpret_cast<const XrCompositionLayerBaseHeader*>(&projection)};
+    XrCompositionLayerQuad quad{XR_TYPE_COMPOSITION_LAYER_QUAD};
+    if (options.quad) {
+        quad.layerFlags = options.layer_flags;
+        quad.space = app.space;
+        quad.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
+        quad.subImage.swapchain = options.quad->swapchain;
+        quad.subImage.imageRect = {{0, 0},
+                                   {static_cast<std::int32_t>(options.quad->info.width),
+                                    static_cast<std::int32_t>(options.quad->info.height)}};
+        quad.pose.orientation.w = 1.0f;
+        quad.pose.position.z = -1.0f;
+        quad.size = {1.0f, 0.5f};
+    }
+    const XrCompositionLayerBaseHeader* layers[] = {reinterpret_cast<const XrCompositionLayerBaseHeader*>(&projection),
+                                                    reinterpret_cast<const XrCompositionLayerBaseHeader*>(&quad)};
     XrFrameEndInfo end{XR_TYPE_FRAME_END_INFO};
     end.displayTime = state.predictedDisplayTime;
     end.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
-    end.layerCount = 1;
+    end.layerCount = options.quad ? 2 : 1;
     end.layers = layers;
     {
         std::scoped_lock lock(g_runtime_mutex);
@@ -3746,6 +3781,98 @@ void TestBridgedFrameGen(const std::string& mode) {
     EndCase();
 }
 
+// 13c. Star Citizen's shapes (its log, 2026-10-09): XR_KHR_vulkan_enable2, an
+// sRGB swapchain per eye the game only copies into (TRANSFER_DST alone), and
+// its interface on a quad swapchain (TRANSFER_DST alone too) shown over the
+// projection every frame, both layers with source alpha. Frame Generation
+// (the real Direct3D 12 backend) generates with the quad shown lazily, which
+// is on for Vulkan games: frames of its own reach the runtime with the quad
+// and the layers' flags, and the quad's releases go lazily, so its frames
+// never wait for the game's work.
+void TestStarCitizenShapes() {
+    CaseSettings settings;
+    settings.frame_multiplier = "2x";
+    BeginCase("star-citizen-shapes", settings);
+    SetEnv("VECTORXR_FRAMEGEN_SHOWN_LAYERS", "");
+    g_runtime.paced = true;
+    g_image_width = g_image_height = kFrameGenSize;
+    Peer::SetFrameGenEngagement(2, std::chrono::milliseconds(0));
+    Peer::UseFrameGenGpu(MakeRealGpu);
+    App app = StartApp({kVulkan2Extension});
+    VulkanGame game = MakeVulkanGame(app);
+    SessionCreate create(game, app.system);
+    Check(app.api.create_session(app.api.instance, &create.info, &app.session) == XR_SUCCESS && Peer::Bridge().Active(),
+          "star citizen: a bridged session (" + Unbridged(Peer::Log()) + ")");
+    Check(Contains(Peer::Log(), "Frame Generation keeps releases of layers it does not capture lazy (on for Vulkan games"),
+          "star citizen: a Vulkan game's shown layers are lazy by default");
+    BeginSession(app);
+    const Renderer vulkan{&game, nullptr};
+    XrSwapchainCreateInfo eye_info = ColorInfo();
+    eye_info.usageFlags = XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT;
+    Target left = MakeTarget(app, eye_info, "star citizen's left eye (copied into)");
+    Target right = MakeTarget(app, eye_info, "star citizen's right eye (copied into)");
+    const XrSwapchainCreateInfo& eye_asked = g_runtime.swapchain_requests.back();
+    Check((eye_asked.usageFlags & XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT) &&
+              (eye_asked.usageFlags & XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT) &&
+              eye_asked.format == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB,
+          "star citizen: the runtime's eye swapchains are sRGB colour attachments and copy destinations");
+    XrSwapchainCreateInfo ui_info = ColorInfo();
+    ui_info.usageFlags = XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT;
+    ui_info.height = kFrameGenSize / 2;
+    Target ui = MakeTarget(app, ui_info, "star citizen's interface quad");
+    Check(Peer::Bridge().Bridged(left.swapchain) && Peer::Bridge().Bridged(right.swapchain) &&
+              Peer::Bridge().Bridged(ui.swapchain),
+          "star citizen: its swapchains are bridged");
+    const Color ui_color{240, 200, 40, 128};
+    const XrCompositionLayerFlags alpha = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
+    const std::size_t from = ShownCount();
+    int frame = 0;
+    do {
+        for (int i = 0; i < 24; ++i, ++frame) {
+            FrameOptions options;
+            options.quad = &ui;
+            options.quad_color = ui_color;
+            options.layer_flags = alpha;
+            Check(Frame(app, vulkan, {&left, &right}, {FrameColor(frame, 0), FrameColor(frame, 1)},
+                        {{{&left, 0}, {&right, 0}}}, options) == XR_SUCCESS,
+                  "star citizen: frame " + std::to_string(frame));
+        }
+    } while (Peer::FrameGen().generated == 0 && frame < 144);
+    const depthxr::FrameGenStatus status = Peer::FrameGen();
+    Check(status.threaded && status.multiplier == 2 && status.generated > 0,
+          "star citizen: Frame Generation generates at 2x from its own thread (generated=" +
+              std::to_string(status.generated) + ", state " + depthxr::ToString(status.state) + ": " + status.reason + ")");
+    const FrameGenShown shown = CheckFrameGenShown(from, {left.swapchain, right.swapchain}, "star citizen");
+    Check(shown.own > 0 && shown.increasing,
+          "star citizen: Frame Generation's own frames reach the runtime, in display-time order");
+    {
+        std::scoped_lock lock(g_runtime_mutex);
+        std::size_t with_projection = 0;
+        for (std::size_t i = from; i < g_runtime.frames.size(); ++i) {
+            const ShownFrame& shown_frame = g_runtime.frames[i];
+            if (shown_frame.views.empty()) continue;
+            ++with_projection;
+            Check(shown_frame.projection_flags.size() == 1 && shown_frame.projection_flags[0] == alpha,
+                  "star citizen: frame " + std::to_string(i) + " keeps the projection's source alpha");
+            Check(shown_frame.quads.size() == 1 && shown_frame.quads[0] == ui.swapchain && shown_frame.quad_flags[0] == alpha,
+                  "star citizen: frame " + std::to_string(i) + " shows the interface quad over the projection");
+        }
+        Check(with_projection > 0, "star citizen: the runtime showed frames");
+    }
+    CheckValidation("star citizen");
+    StopApp(app);
+    const std::string log = Peer::Log();
+    const std::string summary = LineWith(log, "Frame Generation's shown layers at session end (lazy): lazyReleases=");
+    const std::size_t at = summary.find("lazyReleases=");
+    const unsigned long lazy_releases =
+        at == std::string::npos ? 0 : std::stoul(summary.substr(at + std::string("lazyReleases=").size()));
+    Check(lazy_releases > 0, "star citizen: the interface quad's releases went lazily (" + summary + ")");
+    Peer::UseFrameGenGpu(MakeStandInGpu);
+    Peer::SetFrameGenEngagement(45, std::chrono::milliseconds(3000)); // the presenter's own
+    DestroyGame(game);
+    EndCase();
+}
+
 // 13b. The game's queue stalls before its last release of a frame while
 // Frame Generation (the real Direct3D 12 backend) generates, and the game
 // destroys its session (or its instance, the session alive): the bridge lets
@@ -4196,6 +4323,7 @@ int main(int argc, char** argv) {
         TestRefusedDestroySession();
         TestBridgedFrameGen("interpolate");
         TestBridgedFrameGen("extrapolate");
+        TestStarCitizenShapes();
         TestStalledTeardown(false);
         TestStalledTeardown(true);
         TestNativeD3D12("native-d3d12-after-bridged");

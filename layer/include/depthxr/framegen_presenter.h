@@ -245,8 +245,8 @@ class FrameGenPresenter {
     // to be written, doubling up to `longest` (tests shorten it).
     void SetQuadDecline(std::chrono::milliseconds first, std::chrono::milliseconds longest);
     // Interpolating, motion is measured on the shader cores even with
-    // NVIDIA's optical flow hardware chosen (a Direct3D 11 game's session,
-    // through the bridge). Beside such a game's rendering the hardware's
+    // NVIDIA's optical flow hardware chosen (a Direct3D 11 or Vulkan game's
+    // session, through a bridge). Beside such a game's rendering the hardware's
     // vectors come about 7 ms later than idle (four matches a frame, each
     // after the first waiting for the busy GPU), while the frames between
     // real frames need them within a refresh: DCS, flight 2, measured 8.6 ms

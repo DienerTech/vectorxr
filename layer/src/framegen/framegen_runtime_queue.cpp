@@ -43,7 +43,7 @@ struct FrameGenQueueSubstitution::Impl {
     UINT64 handed_back_value{0};
     std::function<void(const std::string&)> log;
     int failures{0};
-    // VECTORXR_FRAMEGEN_SHOWN_LAYERS=lazy, and what it did (ShownLayerCounts).
+    // Shown layers are lazy (Prepare), and what that did (ShownLayerCounts).
     bool shown_layers_lazy{false};
     std::atomic<std::uint64_t> shown_releases{0};
     std::atomic<std::uint64_t> shown_cpu_waits{0};
@@ -176,7 +176,8 @@ FrameGenQueueSubstitution::~FrameGenQueueSubstitution() {
     }
 }
 
-const XrSessionCreateInfo* FrameGenQueueSubstitution::Prepare(const XrSessionCreateInfo* info, std::string& note) {
+const XrSessionCreateInfo* FrameGenQueueSubstitution::Prepare(const XrSessionCreateInfo* info, std::string& note,
+                                                               bool shown_layers_lazy) {
     Reset();
     note.clear();
     if (!info || !info->next) {
@@ -222,7 +223,8 @@ const XrSessionCreateInfo* FrameGenQueueSubstitution::Prepare(const XrSessionCre
     impl->info.next = &impl->binding;
     impl->marker.d3d12_queue = impl->runtime.Get();
     impl->log = log_;
-    impl->shown_layers_lazy = shown_layers && std::string(shown_layers) == "lazy";
+    const std::string shown_choice = shown_layers ? shown_layers : "";
+    impl->shown_layers_lazy = shown_choice == "lazy" || (shown_layers_lazy && shown_choice != "off");
     impl_ = std::move(impl);
     note = "Frame Generation gives the runtime a Direct3D 12 queue of its own: frames it writes reach the runtime "
            "as soon as they are written, not after the game's queued work; the game's images are kept in order "
@@ -430,7 +432,7 @@ std::string FrameGenQueueSubstitution::ShownLayersSummary() const {
         return {};
     }
     const ShownLayerCounts counts = ShownLayers();
-    return "Frame Generation's shown layers at session end (VECTORXR_FRAMEGEN_SHOWN_LAYERS=lazy): lazyReleases=" +
+    return "Frame Generation's shown layers at session end (lazy): lazyReleases=" +
            std::to_string(counts.releases) + " cpuWaits=" + std::to_string(counts.cpu_waits) +
            " runtimeQueueWaits=" + std::to_string(counts.gpu_waits) + ".";
 }

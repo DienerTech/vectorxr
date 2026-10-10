@@ -2256,12 +2256,15 @@ XrResult OpenXrLayer::CreateSession(XrInstance instance,
             }
             std::string note;
             framegen_queue_.SetLog([this](const std::string& message) { logger_.Error(message); });
-            downstream_info = framegen_queue_.Prepare(game_info, note);
+            // A Vulkan game's interface (Star Citizen's, a quad over its
+            // projection every frame) would otherwise make every frame
+            // Frame Generation writes wait for the game's GPU work.
+            downstream_info = framegen_queue_.Prepare(game_info, note, vulkan_bridge_.Active());
             if (!note.empty()) logger_.Info(note);
             if (framegen_queue_.ShownLayersLazy()) {
-                logger_.Info("Frame Generation keeps releases of layers it does not capture lazy "
-                             "(VECTORXR_FRAMEGEN_SHOWN_LAYERS=lazy): the runtime shows each layer's newest finished "
-                             "image, at most one game frame old.");
+                logger_.Info("Frame Generation keeps releases of layers it does not capture lazy (on for Vulkan "
+                             "games; VECTORXR_FRAMEGEN_SHOWN_LAYERS=lazy or =off decides for any): the runtime shows "
+                             "each layer's newest finished image, at most one game frame old.");
             }
             if (d3d11_bridge_.Active() && !framegen_queue_.Active()) {
                 // The runtime must never be given the bridge's queue: it
@@ -12296,10 +12299,10 @@ void OpenXrLayer::StartFrameGen(XrSession session, const void* binding_chain, co
         framegen_calls_.begin = [this](XrSession s, const XrFrameBeginInfo* i) { return TraceRuntimeBeginFrame(s, i); };
         framegen_calls_.submit = [this](XrSession s, const XrFrameEndInfo* i) { return SubmitRuntimeFrame(s, i); };
         framegen_.Configure(resolved_settings_.framegen);
-        // A Direct3D 11 game (the bridge): interpolating, motion is measured
-        // on the shader cores (FrameGenPresenter::SetInterpolateOnShaders).
+        // A Direct3D 11 or Vulkan game (a bridge): interpolating, motion is
+        // measured on the shader cores (FrameGenPresenter::SetInterpolateOnShaders).
         const char* interpolate_hardware = std::getenv("VECTORXR_FRAMEGEN_INTERPOLATE_HARDWARE");
-        framegen_.SetInterpolateOnShaders(d3d11_bridge_.Active() &&
+        framegen_.SetInterpolateOnShaders((d3d11_bridge_.Active() || vulkan_bridge_.Active()) &&
                                           !(interpolate_hardware && std::string(interpolate_hardware) == "1"));
         framegen_.Start(session, binding_chain,
                         {next_enumerate_swapchain_formats_, next_create_swapchain_, next_destroy_swapchain_,

@@ -2543,10 +2543,10 @@ bool FrameGenPresenter::Generate(const XrCompositionLayerProjection& projection,
             if (logger_ && !logged_interpolate_on_shaders_) {
                 logged_interpolate_on_shaders_ = true;
                 logger_->Info("Frame Generation measures motion on the shader cores while interpolating in this "
-                              "Direct3D 11 game, though NVIDIA's optical flow hardware is chosen: beside the game's "
-                              "rendering the hardware's vectors come too late for the frames between real frames. "
-                              "Extrapolate uses the hardware; VECTORXR_FRAMEGEN_INTERPOLATE_HARDWARE=1 keeps it for "
-                              "Interpolate too.");
+                              "Direct3D 11 or Vulkan game, though NVIDIA's optical flow hardware is chosen: beside the "
+                              "game's rendering the hardware's vectors come too late for the frames between real "
+                              "frames. Extrapolate uses the hardware; VECTORXR_FRAMEGEN_INTERPOLATE_HARDWARE=1 keeps "
+                              "it for Interpolate too.");
             }
         }
         tuning.diagnostic = settings_.diagnostic_view;

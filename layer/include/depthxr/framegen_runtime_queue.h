@@ -42,8 +42,10 @@ namespace depthxr {
 // A layer the runtime shows that Frame Generation does not capture (a quad,
 // say, released every frame) still makes the runtime's queue wait for the
 // game's work at each release, and every frame Frame Generation writes after
-// it with it. With VECTORXR_FRAMEGEN_SHOWN_LAYERS=lazy (read as the session
-// is created; off by default), such a swapchain's releases are lazy too once
+// it with it. Lazy shown layers (Prepare's `shown_layers_lazy`: Vulkan games,
+// whose interfaces are such layers, Star Citizen's; VECTORXR_FRAMEGEN_SHOWN_
+// LAYERS=lazy or =off, read as the session is created, decides for any
+// game): such a swapchain's releases are lazy too once
 // a frame showed it so (Flush's `shown_lazily`): a frame showing it gets
 // only the releases whose work has run, so the runtime shows the newest
 // finished image (at most one game frame old), and the game's next wait on
@@ -68,7 +70,10 @@ class FrameGenQueueSubstitution {
     // binding, makes a high-priority queue on its device and returns create
     // info naming it (valid until Reset); otherwise `info` itself, with
     // `note` saying why. VECTORXR_FRAMEGEN_QUEUE=game keeps the game's queue.
-    const XrSessionCreateInfo* Prepare(const XrSessionCreateInfo* info, std::string& note);
+    // `shown_layers_lazy`: the session's shown layers are lazy unless
+    // VECTORXR_FRAMEGEN_SHOWN_LAYERS=off (=lazy makes them lazy for any).
+    const XrSessionCreateInfo* Prepare(const XrSessionCreateInfo* info, std::string& note,
+                                       bool shown_layers_lazy = false);
     bool Active() const;
     // Where a held-back call the runtime failed is reported (a few times).
     void SetLog(std::function<void(const std::string&)> log);
@@ -117,7 +122,7 @@ class FrameGenQueueSubstitution {
     // runtime's queue and lets everything go.
     void Reset();
 
-    // VECTORXR_FRAMEGEN_SHOWN_LAYERS=lazy for this session.
+    // Shown layers are lazy for this session (Prepare).
     bool ShownLayersLazy() const;
     // Shown layers' releases kept lazy, the game's waits that first waited
     // for one on the CPU, and the releases the runtime's queue waited for

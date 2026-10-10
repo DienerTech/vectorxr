@@ -5608,6 +5608,17 @@ void SubstitutionShownTest(ID3D12Device* device, ID3D12CommandQueue* game_queue)
     std::vector<std::string> logged;
     substitution.SetLog([&](const std::string& message) { logged.push_back(message); });
     std::string note;
+    // Who decides: the session's default (lazy for Vulkan games), which
+    // VECTORXR_FRAMEGEN_SHOWN_LAYERS=off or =lazy overrides.
+    for (const auto& [setting, by_default, lazy] : {std::tuple{"", false, false}, std::tuple{"", true, true},
+                                                    std::tuple{"off", true, false}, std::tuple{"lazy", false, true}}) {
+        _putenv_s("VECTORXR_FRAMEGEN_SHOWN_LAYERS", setting);
+        FrameGenQueueSubstitution choice;
+        Check(choice.Prepare(&info, note, by_default) != &info && choice.ShownLayersLazy() == lazy,
+              std::string("shown layers: VECTORXR_FRAMEGEN_SHOWN_LAYERS=") + setting + (by_default ? ", lazy by default" : "") +
+                  (lazy ? " keeps them lazy" : " keeps them as they are"));
+        choice.Reset();
+    }
     _putenv_s("VECTORXR_FRAMEGEN_SHOWN_LAYERS", "lazy");
     const XrSessionCreateInfo* created = substitution.Prepare(&info, note);
     _putenv_s("VECTORXR_FRAMEGEN_SHOWN_LAYERS", "");
