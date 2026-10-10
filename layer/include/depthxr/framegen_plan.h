@@ -65,8 +65,12 @@ enum class FrameGenPass : std::uint8_t {
     // surface lines up best at, which kTrustResolve applies.
     kDepthScale,
     kDepthScaleVote,
+    // Depth (Direct3D 12): for a frame moved by the previous real frame's
+    // motion (FrameGenSynthesisPlan's stale flow), the previous frame's
+    // resolved depth on this frame's grid, for its eye-shift map.
+    kDepthStale,
 };
-inline constexpr std::size_t kFrameGenPassCount = 25;
+inline constexpr std::size_t kFrameGenPassCount = 26;
 
 // Logical textures owned per view. History and filtered flow are ping-pong
 // pairs: "newest" is written this submission, "previous" is last
@@ -119,6 +123,9 @@ enum class FrameGenTextureKind : std::uint8_t {
     kDepthScales,
     kDepthScaleVotes,
     kDepthScaleRaw, // kDepthScaleVote's first stage, before the neighbours agree
+    // kDepthStale's output: the previous frame's resolved depth read where
+    // each half-resolution texel's content was in that frame.
+    kDepthStale,
 };
 
 // The flow level the optical flow hardware fills: a 4x4 grid on the

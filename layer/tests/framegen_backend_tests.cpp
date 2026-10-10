@@ -869,9 +869,12 @@ int RunScenarios(Harness& harness) {
         // Runs one depth case on a fresh backend: depth images for the newest
         // frame (panel and background values, the near value over the panel
         // grown by `glass` px) described by `encoding`; the eyes keep moving
-        // `eye` meters sideways per unit of generated-frame time.
+        // `eye` meters sideways per unit of generated-frame time. `stale`:
+        // just in time, a third frame (the newest image again, the head
+        // still since) moved by the newest frame's motion and depth
+        // (SynthesizeStale) instead.
         auto run_case = [&](float panel_value, float background_value, const FrameGenDepthEncoding& encoding,
-                            bool use_depth, int glass, float eye = 0.0f) {
+                            bool use_depth, int glass, float eye = 0.0f, bool stale = false) {
             auto backend = CreateFrameGenGpu(harness.binding, error);
             if (backend) backend->SetCopyAfterRelease(true); // the tests' images are their own
             Check(backend != nullptr, harness.name + " backend: " + error);
@@ -881,7 +884,7 @@ int RunScenarios(Harness& harness) {
                  {kSource, kOutput, kOutputSecond, right_source, right_output, right_second, kDepthImage, right_depth}) {
                 Check(backend->Track(chain, EnumerateImages, error), error);
             }
-            auto views = [&](std::uint32_t index) {
+            auto views = [&](std::uint32_t index, bool head_still = false) {
                 FrameGenViewSubmission left = Submission(index, harness.format, output_format, true, 0, 0);
                 FrameGenViewSubmission right = left;
                 right.source.swapchain = right_source;
@@ -898,18 +901,18 @@ int RunScenarios(Harness& harness) {
                     geometry->angle_right = std::atan(outer);
                 }
                 left.request.newest.position = {shift - half_ipd, 0, 0};
-                left.request.previous.position = {-half_ipd, 0, 0};
+                left.request.previous.position = {head_still ? shift - half_ipd : -half_ipd, 0, 0};
                 right.request.newest.position = {shift + half_ipd, 0, 0};
-                right.request.previous.position = {half_ipd, 0, 0};
+                right.request.previous.position = {head_still ? shift + half_ipd : half_ipd, 0, 0};
                 left.request.depth = right.request.depth = use_depth;
                 left.request.shift = right.request.shift = {eye, 0.0f, 0.0f};
                 return std::vector<FrameGenViewSubmission>{left, right};
             };
             // Color is captured at release, as games' frames are; the depth
             // trust pass needs both eyes' images of the frame.
-            auto capture = [&](std::uint32_t index) {
+            auto capture = [&](std::uint32_t index, bool head_still = false) {
                 const XrRect2Di rect{{0, 0}, {static_cast<int>(kSize), static_cast<int>(kSize)}};
-                const auto requests = views(index);
+                const auto requests = views(index, head_still);
                 // Each call before its message: arguments are evaluated in no
                 // set order, and the message must read the call's error.
                 for (std::size_t i = 0; i < 2; ++i) {
@@ -931,10 +934,25 @@ int RunScenarios(Harness& harness) {
                 Check(backend->Execute(views(1), tuning, result, error), harness.name + " execute: " + error);
             }
             backend->ResetHistory();
+            FrameGenTuning last = tuning;
+            last.analyze_only = stale;
+            last.cover = false;
             capture(0);
-            Check(backend->Execute(views(0), tuning, result, error), harness.name + " execute: " + error);
+            Check(backend->Execute(views(0), last, result, error), harness.name + " execute: " + error);
             capture(1);
-            Check(backend->Execute(views(1), tuning, result, error), harness.name + " execute: " + error);
+            Check(backend->Execute(views(1), last, result, error), harness.name + " execute: " + error);
+            if (stale) {
+                const std::uint64_t motion = result.frame;
+                capture(1, true);
+                Check(backend->Execute(views(1, true), last, result, error), harness.name + " execute: " + error);
+                // The previous frame measured, as the presenter waits for.
+                Check(backend->WaitIdle(), harness.name + " analyses did not finish");
+                const auto requests = views(1, true);
+                const bool written = backend->SynthesizeStale(
+                    result.frame, motion, tuning.fractions[0], {requests[0].outputs[0], requests[1].outputs[0]}, error);
+                Check(written, harness.name + " stale synthesize: " + error);
+                Check(backend->WaitIdle(), harness.name + " stale synthesis did not finish");
+            }
             Outcome outcome;
             outcome.used = result.depth.size() == 2 && result.depth[0];
             outcome.output = harness.readback(g_swapchains[kOutput][0]);
@@ -1017,6 +1035,18 @@ int RunScenarios(Harness& harness) {
               harness.name + " generated frames did not follow the eye");
         Check(moving_glass.used && moving_glass_error < 0.4 * unshifted_error,
               harness.name + " glass moved with the eye");
+        // 3g''. Just in time, a frame whose own motion is late, moved by the
+        // previous frame's (SynthesizeStale): seen from where the eye is at
+        // its time all the same, by the previous frame's depth.
+        const Outcome stale_moving = run_case(panel, 1.0f, standard, true, 0, eye, true);
+        const Outcome stale_still = run_case(panel, 1.0f, standard, true, 0, 0.0f, true);
+        Dump(harness.name + "-cockpit-eye-shift-stale", stale_moving.output);
+        const double stale_error = moved_error_of(stale_moving.output);
+        const double stale_unshifted_error = moved_error_of(stale_still.output);
+        std::cout << harness.name << " eye shift, stale motion: error " << stale_error << " vs " << stale_unshifted_error
+                  << " unshifted, " << moving_error << " own motion" << std::endl;
+        Check(stale_moving.used && stale_error < 0.4 * stale_unshifted_error && stale_error < 2.0 * moving_error + 0.002,
+              harness.name + " a frame moved by the previous frame's motion did not follow the eye");
         // The panel faces the eye, so neighbours land at one depth: the map
         // must not depend on which of them the GPU ran first.
         const Outcome again = run_case(panel, 1.0f, standard, true, 0, eye);
@@ -1206,7 +1236,7 @@ Pixels CockpitAt(std::uint32_t width, std::uint32_t height, float head_x, float 
 const char* const kProfileNames[] = {"luma",        "downsample",  "search",      "refine",      "filter",
                                      "synthesize",  "synthesize16", "depth",      "depth check", "depth trust",
                                      "flow pack",   "flow unpack", "trust update", "shift clear", "shift splat",
-                                     "shift resolve", "shift fill", "raw pack",   "trust resolve", "shading rate", "world reduce", "world solve", "trust vote", "depth scale", "scale vote",
+                                     "shift resolve", "shift fill", "raw pack",   "trust resolve", "shading rate", "world reduce", "world solve", "trust vote", "depth scale", "scale vote", "depth stale",
                                      "source copy", "output copy",
                                      "hardware wait", "compose", "flow merge"};
 static_assert(std::size(kProfileNames) == kFrameGenPassCount + 5, "a name per profiled category");
@@ -4167,9 +4197,10 @@ int RunProfile(Harness& harness) {
 // FG_REPLAY_HARDWARE=1 (optical flow hardware), FG_REPLAY_NOSHIFT=1 (no eye
 // shift), FG_REPLAY_NODEPTH=1 (rotation only), FG_REPLAY_PREDICT=1 (the eye
 // keeps moving as it did from the previous frame, as the presenter shifts,
-// instead of exactly to the next frame's position), FG_REPLAY_JIT=own|stale
-// (extrapolating just in time from frames k - 2..k analyzed alone: frame k
-// moved by its own motion, or by frame k - 1's, FrameGenGpu::SynthesizeStale).
+// instead of exactly to the next frame's position), FG_REPLAY_JIT=own|stale|
+// stale-noshift (extrapolating just in time from frames k - 2..k analyzed
+// alone: frame k moved by its own motion, or by frame k - 1's,
+// FrameGenGpu::SynthesizeStale, with or without the eye shift).
 bool g_replay = false;
 std::string g_replay_directory, g_replay_output;
 
@@ -4634,15 +4665,17 @@ int RunReplay(Harness& harness) {
             if (!jit_variant.empty() && measure && !interpolate) {
                 // Just in time: frames k - 2, k - 1 and k analyzed alone, then
                 // frame k moved to frame k + 1 by its own motion or by frame
-                // k - 1's (no eye shift: nothing of frame k's analysis is read).
+                // k - 1's (seen from the eye moved as frame k's own, by frame
+                // k - 1's depth; FG_REPLAY_JIT=stale-noshift: unmoved, as
+                // before 2026-10-10).
                 if (k < 2 || !has_next) continue;
                 const float fraction = std::clamp(frames[k + 1].tuning.interval_ratio, 0.25f, 1.0f);
                 gpu->ResetHistory();
                 std::uint64_t ids[3] = {};
                 for (std::size_t j = 0; j < 3; ++j) {
                     const std::size_t f = k - 2 + j;
-                    const auto shifts = f == k && jit_variant == "own" ? eye_shifts(k, k + 1, fraction)
-                                                                       : std::vector<std::array<float, 3>>{};
+                    const auto shifts = f == k && jit_variant != "stale-noshift" ? eye_shifts(k, k + 1, fraction)
+                                                                                : std::vector<std::array<float, 3>>{};
                     execute(f, j > 0 ? std::optional<std::size_t>(f - 1) : std::nullopt, FrameGenSynthesisMode::kExtrapolate,
                             fraction, shifts, result, true);
                     ids[j] = result.frame;
@@ -4656,7 +4689,7 @@ int RunReplay(Harness& harness) {
                                       output_format});
                 }
                 const bool written =
-                    jit_variant == "stale"
+                    jit_variant.rfind("stale", 0) == 0
                         ? gpu->SynthesizeStale(ids[2], ids[1], fraction, images, error)
                         : gpu->Synthesize(ids[2], FrameGenSynthesisMode::kExtrapolate, fraction, images, error);
                 Check(written, "replay just in time (" + jit_variant + "): " + error);

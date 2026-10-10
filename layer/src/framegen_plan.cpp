@@ -536,11 +536,31 @@ FrameGenViewPlan BuildFrameGenSynthesisPlan(const FrameGenViewRequest& request, 
     if (stale_flow && extrapolate) {
         // The previous real frame's flow, read where the content was in that
         // frame; neither this frame's depth nor its trust is measured yet.
+        // The eye's movement to the frame's time is shown all the same, from
+        // the previous frame's resolved depth on this frame's grid: without
+        // it, near content held still for the refresh (MSFS 2024 replays:
+        // the cockpit as wrong as the frame unchanged).
+        const std::array<float, 3> eye{request.shift[0] * fraction, request.shift[1] * fraction,
+                                       request.shift[2] * fraction};
+        const bool shifted = request.depth && request.depth_previous &&
+                             std::sqrt(eye[0] * eye[0] + eye[1] * eye[1] + eye[2] * eye[2]) >= kFrameGenMinimumShift;
+        if (shifted) {
+            FrameGenDispatch warp = Dispatch(FrameGenPass::kDepthStale, plan.levels[1], plan.levels[1], base);
+            warp.inputs = {Texture(FrameGenTextureKind::kDepthPrevious), {}, {}, {}, {}};
+            warp.outputs = {Texture(FrameGenTextureKind::kDepthStale), {}};
+            plan.dispatches.push_back(warp);
+            AppendShiftMap(plan, base, eye, Texture(FrameGenTextureKind::kDepthStale));
+        }
         FrameGenDispatch output = Dispatch(synthesize, plan.levels[0], plan.levels[plan.final_flow_level], base);
         output.inputs = {Texture(FrameGenTextureKind::kHistoryNewest), Texture(FrameGenTextureKind::kHistoryPrevious),
-                         Texture(FrameGenTextureKind::kFilteredPrevious, plan.final_flow_level), {}, {}, {}};
+                         Texture(FrameGenTextureKind::kFilteredPrevious, plan.final_flow_level), {},
+                         shifted ? Texture(FrameGenTextureKind::kShiftMap) : FrameGenTexture{}, {}};
         output.constants.options[1] &= ~kFrameGenFlagDepth;
         output.constants.options[1] |= kFrameGenFlagStaleFlow;
+        if (shifted) {
+            output.constants.options[1] |= kFrameGenFlagShift;
+            output.constants.options[3] = FrameGenHalf(fraction);
+        }
         output.outputs = {Texture(FrameGenTextureKind::kOutput), {}};
         output.copy_mask = 1u;
         plan.dispatches.push_back(output);

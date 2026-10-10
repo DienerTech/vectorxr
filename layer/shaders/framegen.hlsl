@@ -2280,6 +2280,35 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
 }
 #endif
 
+#if defined(FG_PASS_DEPTH_STALE)
+FG_BIND(0) Texture2D<float4> g_depth_previous : register(t0);
+FG_BIND(4) FG_FORMAT("r32f") RWTexture2D<float> g_depth_stale : register(u0);
+
+// A frame moved by the previous real frame's motion (FG_FLAG_STALE_FLOW)
+// before its own depth is resolved: the previous frame's resolved depth,
+// read where each half-resolution texel's content was in that frame
+// (through the head's rotation, then its movement at the depth found
+// there), for the frame's eye-shift map. Negative (dropped) depth stays so;
+// texels outside the previous view have none (as far).
+[numthreads(8, 8, 1)]
+void CSMain(uint3 id : SV_DispatchThreadID) {
+    if (any(id.xy >= g.size.xy)) {
+        return;
+    }
+    const float2 uv = (float2(id.xy) + 0.5) / float2(g.size.xy);
+    float depth = 0.0;
+    float2 mapped;
+    if (MapToPrevious(uv, 0.0, mapped)) {
+        depth = DepthNearest(g_depth_previous, mapped);
+        float2 moved;
+        if (depth > 0.0 && MapToPrevious(uv, depth, moved)) {
+            depth = DepthNearest(g_depth_previous, moved);
+        }
+    }
+    g_depth_stale[id.xy] = depth;
+}
+#endif
+
 #if defined(FG_PASS_SHIFT_SPLAT) || defined(FG_PASS_SHIFT_RESOLVE)
 FG_BIND(0) Texture2D<float4> g_depth : register(t0);
 

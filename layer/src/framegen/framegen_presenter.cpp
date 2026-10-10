@@ -5407,7 +5407,9 @@ bool FrameGenPresenter::SynthesizeJit(std::optional<JitFrame>& source, JitChoice
     // The real frame's views, showing the images just written, seen from
     // where the eye is at the frame's time (where depth is used). Composed,
     // each eye's view as the layer composes it, moved as its periphery.
-    const float eye_time = write.exact || write.stale ? 0.0f : extrapolate ? choice.fraction : choice.fraction - 1.0f;
+    // Frames moved by the previous real frame's motion too (their eye shift
+    // reads its depth: FrameGenGpu::SynthesizeStale).
+    const float eye_time = write.exact ? 0.0f : extrapolate ? choice.fraction : choice.fraction - 1.0f;
     if (quad) {
         views.assign(quad->eyes.begin(), quad->eyes.end());
     } else {

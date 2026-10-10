@@ -218,9 +218,12 @@ class FrameGenGpu {
     // measured yet, moved by the previous real frame's (`motion`, analyzed
     // right before it and measured): written like Synthesize from the
     // frame's images and `motion`'s flow (read where the content was in
-    // that frame), without depth. Needs only the frame captured; false
-    // (nothing written) when either frame's images are gone, `motion` is
-    // not the frame's previous one or is not measured, or the backend cannot.
+    // that frame). Where the frame uses depth, it is shown from where the
+    // eye is at its time, as Synthesize's are, by `motion`'s resolved depth.
+    // Needs only the frame captured; false (nothing written) when either
+    // frame's images are gone, `motion` is not the frame's previous one or
+    // is not measured, a view using depth has none of `motion`'s, or the
+    // backend cannot.
     virtual bool SynthesizeStale(std::uint64_t /*frame*/, std::uint64_t /*motion*/, float /*fraction*/,
                                  const std::vector<FrameGenImage>& /*outputs*/, std::string& error) {
         error = "this graphics API cannot move a frame by the previous one's motion";

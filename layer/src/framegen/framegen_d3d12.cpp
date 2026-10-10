@@ -135,6 +135,7 @@ struct ViewResources {
     int bound_previous{-1};
     Texture shift_keys;
     Texture shift_map; // rebuilt for each generated frame
+    Texture depth_stale; // kDepthStale's, for a frame moved by the previous frame's motion
     Texture trust_tiles; // the trust vote's counts per tile, then summed around each
     Texture trust_votes;
     Texture depth_scales; // the stereo depth-scale probe per tile, then the vote on it (raw, accepted)
@@ -1051,6 +1052,7 @@ class D3D12FrameGen final : public FrameGenGpu {
                Create(view.trust_votes, tiles, DXGI_FORMAT_R32G32B32A32_FLOAT, DXGI_FORMAT_R32G32B32A32_FLOAT, true,
                       error) &&
                Create(view.shift_keys, half, DXGI_FORMAT_R32_UINT, DXGI_FORMAT_R32_UINT, true, error) &&
+               Create(view.depth_stale, half, DXGI_FORMAT_R32_FLOAT, DXGI_FORMAT_R32_FLOAT, true, error) &&
                Create(view.shift_map, half, DXGI_FORMAT_R32_UINT, DXGI_FORMAT_R32_UINT, true, error);
     }
 
@@ -2046,6 +2048,12 @@ class D3D12FrameGen final : public FrameGenGpu {
                 error = "the previous real frame's motion is not this frame's previous";
                 return false;
             }
+            // Shown from where the eye is at its time, like the frames its own
+            // motion moves: its eye shift reads the previous frame's depth.
+            if (analyzed.request.depth && !analyzed.request.depth_previous) {
+                error = "the previous real frame's depth is not resolved";
+                return false;
+            }
             const auto output_it = images_.find(outputs[i].swapchain);
             if (output_it == images_.end() || outputs[i].image_index >= output_it->second.size()) {
                 error = "Frame Generation output image is not tracked";
@@ -2130,6 +2138,10 @@ class D3D12FrameGen final : public FrameGenGpu {
             if (!analyzed.request.synthesize || !before.valid || !before.request.synthesize ||
                 before.newest != analyzed.previous || before.newest_generation != analyzed.previous_generation) {
                 error = "the previous real frame's motion is not this frame's previous";
+                return false;
+            }
+            if (analyzed.request.depth && !analyzed.request.depth_previous) {
+                error = "the previous real frame's depth is not resolved";
                 return false;
             }
         }
@@ -2913,7 +2925,7 @@ class D3D12FrameGen final : public FrameGenGpu {
         for (auto* group : {&view.luma_newest, &view.luma_previous, &view.flow}) {
             for (auto& texture : *group) visit(texture);
         }
-        for (auto* texture : {&view.output, &view.compose_target, &view.shift_keys, &view.shift_map,
+        for (auto* texture : {&view.output, &view.compose_target, &view.shift_keys, &view.shift_map, &view.depth_stale,
                               &view.world_partials, &view.world_params, &view.shading_rate, &view.trust_tiles,
                               &view.trust_votes, &view.depth_scales, &view.depth_scale_raw, &view.depth_scale_votes}) {
             visit(*texture);
@@ -3335,6 +3347,7 @@ class D3D12FrameGen final : public FrameGenGpu {
             view.trust = {};  // likewise (see EnsureTrust)
             view.shift_keys = {};
             view.shift_map = {};
+            view.depth_stale = {};
             view.trust_tiles = {};
             view.trust_votes = {};
             view.depth_scales = {};
@@ -4104,6 +4117,7 @@ class D3D12FrameGen final : public FrameGenGpu {
         case FrameGenTextureKind::kTrustPrevious: return &view.trust[previous];
         case FrameGenTextureKind::kShiftKeys: return &view.shift_keys;
         case FrameGenTextureKind::kShiftMap: return &view.shift_map;
+        case FrameGenTextureKind::kDepthStale: return &view.depth_stale;
         case FrameGenTextureKind::kWorldPartials: return &view.world_partials;
         case FrameGenTextureKind::kWorldParams: return &view.world_params;
         case FrameGenTextureKind::kTrustTiles: return &view.trust_tiles;
