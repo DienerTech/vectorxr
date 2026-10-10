@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
@@ -104,6 +105,11 @@ struct FrameGenStatus {
     FrameGenDepthState depth{FrameGenDepthState::kUnknown};
     // Session totals for the summaries and tests.
     std::uint32_t lead_slots{0};      // refreshes between a game wait's release and its frame's refresh
+    std::uint32_t lead_floor{0};      // the lowest lead known to hold this run (0: none yet)
+    std::uint64_t lead_ups{0};        // steps up (late frames)
+    std::uint64_t lead_downs{0};      // steps down (frames with a refresh to spare)
+    std::uint64_t lead_probes{0};     // steps down after a calm while (FrameGenLeadPolicy)
+    std::uint64_t lead_probes_failed{0}; // probes undone by late frames
     std::uint64_t late_cpu{0};        // real frames ended after their refresh was due
     std::uint64_t late_gpu{0};        // real frames not captured on the GPU when first chosen for a refresh
     bool gpu_gating{false};           // game waits are held until its GPU catches up
@@ -177,6 +183,17 @@ struct FrameGenDynamicPolicy {
     double late_analyses_share{0.5}; // (d) analyses ending after their frames were needed, at most
 };
 
+// How the lead steps back down when nothing late made it grow for a while
+// (tests shorten the times). A probe takes one slot off; frames late again
+// within `judge` restore it, and that lead is then the lowest known to hold:
+// below it is tried only every `explore_after`, doubling after each failure.
+struct FrameGenLeadPolicy {
+    std::chrono::milliseconds probe_after{5000};    // no step up this long: one slot less (a probe)
+    std::chrono::milliseconds judge{3000};          // a step up this soon after a probe: it failed
+    std::chrono::milliseconds explore_after{10000}; // below the lowest lead known to hold: this long, doubling...
+    std::chrono::milliseconds explore_max{60000};   // ...up to this
+};
+
 // Frame Generation pacing for one OpenXR session.
 //
 // While engaged at multiplier N, every application frame owns N runtime
@@ -239,6 +256,8 @@ class FrameGenPresenter {
                        std::chrono::milliseconds probe_confirm, std::chrono::milliseconds probe_backoff);
     // When Dynamic engages, stands down and probes (tests shorten it).
     void SetDynamicPolicy(const FrameGenDynamicPolicy& policy);
+    // When the lead steps back down (tests shorten it).
+    void SetLeadPolicy(const FrameGenLeadPolicy& policy);
     // How often the session summary is logged (tests shorten it).
     void SetSummaryInterval(std::chrono::milliseconds interval);
     // Quad views: how long the layer composes them after frames kept failing
@@ -259,8 +278,28 @@ class FrameGenPresenter {
     // user-enabled state.
     bool Toggle();
     // Session state changes (begin/end session) drop frames in flight and
-    // history continuity.
-    void ResetFrames();
+    // history continuity. False when the presenter thread did not stop
+    // within the teardown wait (it is inside a runtime call): nothing was
+    // reset, and the thread is left stopping.
+    bool ResetFrames();
+    // Teardown never waits on the presenter thread for long: how long it
+    // waits for the thread to stop, or for a lock the thread holds over a
+    // runtime call (VECTORXR_FRAMEGEN_TEARDOWN_WAIT_MS; tests shorten it).
+    void SetTeardownWait(std::chrono::milliseconds wait);
+    std::chrono::milliseconds TeardownWait() const;
+    // Stops the presenter thread within the teardown wait. False when it is
+    // still inside a runtime call: it is left stopping (a runtime may hold
+    // a wait until its session ends; ending it lets the thread go).
+    bool StopPresenter();
+    // A presenter thread that never left a runtime call is left behind at a
+    // session's teardown: detached, with everything it uses (its GPU work,
+    // output images, the runtime's session) kept for the process's exit.
+    // Frame Generation stays off for the rest of the process.
+    void AbandonPresenter();
+    bool PresenterAbandoned() const;
+    // What the presenter thread is doing, and the runtime call it is in and
+    // for how long, read without locks: for logs while a teardown waits.
+    std::string PresenterActivity() const;
     // The layer ended an application frame without forwarding it.
     void AbandonFrame(XrTime display_time);
 
@@ -273,8 +312,10 @@ class FrameGenPresenter {
     // the layer may still use the swapchain's images.
     bool ForgetSwapchain(XrSwapchain swapchain);
     // Call before forwarding xrDestroySpace: nothing the presenter thread
-    // repeats may refer to the space afterwards.
-    void ForgetSpace(XrSpace space);
+    // repeats may refer to the space afterwards. False when its submission
+    // in flight may still name it (a runtime call past the teardown wait):
+    // the space must then be kept, for the runtime to free with the session.
+    bool ForgetSpace(XrSpace space);
     void NoteRelease(XrSwapchain swapchain, std::uint32_t image_index);
     // Call before forwarding a release: captures the image into history while
     // the application still owns it.
@@ -795,9 +836,32 @@ class FrameGenPresenter {
     // Lets the presenter thread present every frame in flight, then stops it.
     void ExitThreadedLocked(std::unique_lock<std::mutex>& lock);
     // Stops the presenter thread at its next slot; frames still in flight are
-    // dropped.
-    void StopCompositorLocked(std::unique_lock<std::mutex>& lock);
+    // dropped. With `limit`, waits at most that long: a thread still inside
+    // a runtime call is left stopping (nothing reset) and false is returned.
+    // Either way a wait past the teardown wait is logged with what the
+    // thread is in.
+    bool StopCompositorLocked(std::unique_lock<std::mutex>& lock,
+                              std::optional<std::chrono::milliseconds> limit = std::nullopt);
     void JoinCompositorLocked(std::unique_lock<std::mutex>& lock);
+    // Detaches a presenter thread that never left a runtime call (logged).
+    void AbandonPresenterLocked();
+    // Teardown takes `lock` on a mutex the presenter thread holds over its
+    // runtime calls (submit_mutex_, gpu_mutex_): within the teardown wait, or
+    // briefly while the thread has been inside one runtime call longer than
+    // that (PresenterWedged); false (logged) when it could not.
+    bool LockForTeardown(std::unique_lock<std::timed_mutex>& lock, const std::string& what);
+    // The presenter thread has been inside one runtime call longer than the
+    // teardown wait (read without locks).
+    bool PresenterWedged() const;
+    // The presenter thread's runtime call (PresenterActivity): set around
+    // each one it makes, on that thread only.
+    struct PresenterCall {
+        PresenterCall(FrameGenPresenter& presenter, const char* call);
+        ~PresenterCall();
+        PresenterCall(const PresenterCall&) = delete;
+        PresenterCall& operator=(const PresenterCall&) = delete;
+        FrameGenPresenter* presenter{nullptr}; // null off the presenter thread
+    };
     void CompositorLoop();
     static bool CopyFrame(const XrFrameEndInfo& info, FrameCopy& copy, std::string& unsupported);
     // Points `pointers` at `copy`'s layers, replacing its primary projection's
@@ -940,6 +1004,10 @@ class FrameGenPresenter {
         std::uint64_t unwritten_source{0};  // no real frame to write from
         std::uint64_t non_renderable{0};    // real frames without a projection
         std::uint64_t restarts{0};          // presenter thread starts and synthesis mode switches
+        std::uint64_t lead_ups{0};
+        std::uint64_t lead_downs{0};
+        std::uint64_t lead_probes{0};
+        std::uint64_t lead_probes_failed{0};
         // Frames of the layer's quad compose site, by route (FrameGenQuadRoute).
         std::uint64_t quad_claimed{0};
         std::uint64_t quad_uncaptured{0};
@@ -1041,9 +1109,27 @@ class FrameGenPresenter {
     // predicted with the current lead move it, so frames in flight do not
     // move it twice. An early frame is held until its slot, which delays the
     // app's next frame; a lead that is too long therefore slows the app, not
-    // just adds latency.
+    // just adds latency. That is why a GPU-bound game's frames rarely show
+    // the slack that would take a slot off (DCS, 2026-10-09: captured ~9 ms
+    // before their refresh at a lead of 5 and of 8 alike, the lead climbing
+    // after each burst of hitches): after a calm while a slot is taken off
+    // anyway (a probe, FrameGenLeadPolicy).
     std::uint32_t lead_slots_{0};
     std::deque<std::uint8_t> lead_history_; // last frames at the current lead: 0 on time, 1 late, 2 slack
+    FrameGenLeadPolicy lead_policy_;
+    std::chrono::steady_clock::time_point lead_calm_since_{}; // the lead's last step (none yet: unset)
+    struct LeadProbe {
+        std::chrono::steady_clock::time_point at;
+        std::uint32_t from{0}; // the lead before it
+        // Its first frames are not judged: the game's pacing still follows
+        // the lead before it.
+        std::uint32_t grace{2};
+    };
+    std::optional<LeadProbe> lead_probe_; // a probe being judged
+    std::uint32_t lead_floor_{0};         // the lowest lead known to hold (0: none yet)
+    std::chrono::milliseconds lead_explore_after_{10000};
+    // A new run measures its lead afresh (StartCompositorLocked, Start).
+    void ResetLeadLocked();
     // Dynamic: refreshes between real frames' slots, smoothed, and the slot
     // the last real frame was shown in.
     double dynamic_interval_slots_{0.0};
@@ -1057,8 +1143,17 @@ class FrameGenPresenter {
     bool logged_order_guard_{false};
     double display_offset_periods_{0.0};
     std::uint32_t display_offset_samples_{0};
-    const char* compositor_phase_{"stopped"}; // for the watchdog log
+    // For the watchdog logs and PresenterActivity (read without locks).
+    std::atomic<const char*> compositor_phase_{"stopped"};
     bool logged_watchdog_{false};
+    // The presenter thread (its Windows thread id), the runtime call it is in
+    // (PresenterCall) and since when (steady clock, ns): read without locks.
+    std::atomic<std::uint32_t> compositor_thread_id_{0};
+    std::atomic<const char*> presenter_call_{nullptr};
+    std::atomic<std::int64_t> presenter_call_since_{0};
+    std::atomic<std::int64_t> teardown_wait_ms_{2000};
+    std::atomic<bool> abandoned_{false};
+    bool logged_abandoned_start_{false};
     bool logged_swallowed_{false};
     std::optional<SlotRequest> slot_request_;
     std::optional<SlotOffer> slot_offer_;
@@ -1185,8 +1280,9 @@ class FrameGenPresenter {
     std::uint32_t capture_frames_left_{0};
     std::uint32_t capture_index_{0};
     std::string capture_root_;
-    std::mutex submit_mutex_;            // presenter-thread submissions vs output swapchain calls
-    std::mutex gpu_mutex_;               // the GPU backend (Track, Capture, Execute, WaitIdle, Forget, Reset)
+    // Timed: teardown never waits on them for long (LockForTeardown).
+    std::timed_mutex submit_mutex_;      // presenter-thread submissions vs output swapchain calls
+    std::timed_mutex gpu_mutex_;         // the GPU backend (Track, Capture, Execute, WaitIdle, Forget, Reset)
     double gpu_ms_{-1.0};                // last generation GPU time, read without the backend
     // The GPU did not finish this session's Frame Generation work before
     // teardown: swapchains it may still use are never reported idle.

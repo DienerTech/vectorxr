@@ -37,6 +37,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <condition_variable>
 #include <deque>
 #include <filesystem>
 #include <fstream>
@@ -159,6 +160,10 @@ class D3D11BridgeLayerTestPeer {
     // The app's status line for Frame Generation in `status`.
     static std::string FrameGenStatusReason(const FrameGenStatus& status) {
         return OpenXrLayer::FrameGenStatusReason(status);
+    }
+    // Frame Generation left a presenter thread behind (for the process).
+    static bool FrameGenPresenterAbandoned() {
+        return OpenXrLayer::Instance().framegen_.PresenterAbandoned();
     }
 };
 
@@ -611,6 +616,22 @@ std::recursive_mutex g_runtime_mutex;
 std::atomic<int> g_waits_in{0};
 std::atomic<int> g_begins_ends_in{0};
 
+// The stand-in holds its xrWaitFrame calls (once g_hold_waits is set) until
+// the session ends (xrEndSession or xrDestroySession), then fails them: a
+// runtime holding its waits while the session stops.
+std::mutex g_hold_mutex;
+std::condition_variable g_hold_cv;
+bool g_hold_waits{false};
+std::atomic<int> g_waits_held{0};
+
+void ReleaseHeldWaits() {
+    {
+        std::scoped_lock lock(g_hold_mutex);
+        g_hold_waits = false;
+    }
+    g_hold_cv.notify_all();
+}
+
 struct InCall {
     std::atomic<int>& calls;
     InCall(std::atomic<int>& in, const char* call) : calls(in) {
@@ -1018,6 +1039,7 @@ XrResult XRAPI_CALL RtCreateSession(XrInstance, const XrSessionCreateInfo* info,
 }
 
 XrResult XRAPI_CALL RtDestroySession(XrSession session) {
+    ReleaseHeldWaits();
     std::scoped_lock lock(g_runtime_mutex);
     StandIn& rt = g_runtime;
     rt.calls.push_back("xrDestroySession");
@@ -1042,6 +1064,7 @@ XrResult XRAPI_CALL RtBeginSession(XrSession, const XrSessionBeginInfo* info) {
 }
 
 XrResult XRAPI_CALL RtEndSession(XrSession) {
+    ReleaseHeldWaits();
     std::scoped_lock lock(g_runtime_mutex);
     g_runtime.calls.push_back("xrEndSession");
     return XR_SUCCESS;
@@ -1109,6 +1132,15 @@ XrResult XRAPI_CALL RtLocateViews(XrSession, const XrViewLocateInfo*, XrViewStat
 
 XrResult XRAPI_CALL RtWaitFrame(XrSession, const XrFrameWaitInfo*, XrFrameState* state) {
     const InCall in(g_waits_in, "xrWaitFrame");
+    {
+        std::unique_lock hold(g_hold_mutex);
+        if (g_hold_waits) {
+            ++g_waits_held;
+            g_hold_cv.wait(hold, [] { return !g_hold_waits; });
+            --g_waits_held;
+            return XR_ERROR_SESSION_NOT_RUNNING;
+        }
+    }
     std::optional<std::chrono::steady_clock::time_point> until;
     XrTime time = 0;
     {
@@ -4275,6 +4307,99 @@ void TestSideBySideFrameGen(Game& game, const std::string& mode, bool shown_lazy
     EndCase(game);
 }
 
+// 15. A game quitting while Frame Generation presents from its own thread,
+// the runtime holding that thread inside xrWaitFrame until the session ends
+// (DCS hung so on quitting, 2026-10-09). With `ends_session` the game ends
+// its session first; otherwise it destroys its swapchain, space and session
+// at once. Either way its teardown is held at most about the teardown wait
+// (VECTORXR_FRAMEGEN_TEARDOWN_WAIT_MS): when the game did not end the
+// session, the layer ends the runtime's session itself, which lets the
+// thread go. Nothing is left behind, the runtime sees xrEndSession before
+// xrDestroySession, and the log tells what the thread was in.
+void TestQuitWhilePresenterHeld(Game& game, bool ends_session) {
+    CaseSettings settings;
+    settings.frame_multiplier = "2x";
+    settings.synthesis_mode = "extrapolate";
+    BeginCase(std::string("quit-presenter-held") + (ends_session ? "-session-ended" : ""), game, settings);
+    SetEnv("VECTORXR_FRAMEGEN_TEARDOWN_WAIT_MS", "400");
+    g_runtime.recommended_width = kSideBySideEyeWidth;
+    g_runtime.recommended_height = kSideBySideEyeHeight;
+    g_runtime.paced = true;
+    Peer::SetFrameGenEngagement(2, std::chrono::milliseconds(0));
+    Peer::UseFrameGenGpu(depthxr::CreateFrameGenGpu);
+    SideBySideSession session;
+    App& app = session.app;
+    app = StartApp();
+    session.create = std::make_unique<SessionCreate>(game.device.Get(), app.system);
+    Check(app.api.create_session(app.api.instance, &session.create->info, &app.session) == XR_SUCCESS &&
+              Peer::Bridge().Active(),
+          "a bridged session");
+    SetEnv("VECTORXR_FRAMEGEN_TEARDOWN_WAIT_MS", "");
+    BeginSession(app);
+    session.eyes = MakeTarget(app, XPlaneInfo(2 * kSideBySideEyeWidth, kSideBySideEyeHeight), "both eyes side by side");
+    SideBySideFrameOptions options;
+    options.quad_layer = false;
+    int frames = 0;
+    do {
+        SideBySideFrame(session, game, options);
+    } while (!Peer::FrameGen().threaded && ++frames < 48);
+    Check(Peer::FrameGen().threaded, "Frame Generation presents from its own thread");
+    for (int i = 0; i < 6; ++i) {
+        SideBySideFrame(session, game, options);
+    }
+
+    {
+        std::scoped_lock lock(g_hold_mutex);
+        g_hold_waits = true;
+    }
+    const auto held_until = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (g_waits_held.load() == 0 && std::chrono::steady_clock::now() < held_until) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    Check(g_waits_held.load() == 1, "the runtime holds Frame Generation's presenter thread in xrWaitFrame");
+    const auto start = std::chrono::steady_clock::now();
+    if (ends_session) {
+        Check(app.api.end_session(app.session) == XR_SUCCESS, "xrEndSession");
+    }
+    Check(app.api.destroy_swapchain(session.eyes.swapchain) == XR_SUCCESS, "the eyes' swapchain is destroyed");
+    Check(app.api.destroy_space(app.space) == XR_SUCCESS, "xrDestroySpace");
+    app.space = XR_NULL_HANDLE;
+    Check(app.api.destroy_session(app.session) == XR_SUCCESS, "xrDestroySession");
+    app.session = XR_NULL_HANDLE;
+    const double took = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+    std::cout << "  quitting with the presenter thread held took " << std::fixed << std::setprecision(2) << took
+              << " s" << std::endl;
+    Check(took < 2.0, "the game's teardown is held at most about the teardown wait (" + std::to_string(took) + " s)");
+    Check(g_waits_held.load() == 0 && !Peer::FrameGenPresenterAbandoned(),
+          "the presenter thread was let go, not left behind");
+    {
+        std::scoped_lock lock(g_runtime_mutex);
+        const std::ptrdiff_t ended = g_runtime.Position("xrEndSession");
+        const std::ptrdiff_t destroyed = g_runtime.Position("xrDestroySession");
+        Check(ended >= 0 && destroyed > ended, "the runtime's session ended before it was destroyed");
+    }
+    const std::string log = Peer::Log();
+    Check(Contains(log, "its presenter thread has not stopped after") &&
+              Contains(log, "in the runtime's xrWaitFrame for"),
+          "the log tells what the presenter thread was in");
+    Check(Contains(log, ends_session ? "xrEndSession: Frame Generation's presenter thread was still in the runtime; it "
+                                       "stopped once the runtime's session ended."
+                                     : "the layer ended the runtime's session (result=0), and the thread stopped."),
+          "the log tells how the presenter thread was let go");
+    Check(Contains(log, "xrDestroySession requested by application."), "the log tells the session's teardown");
+    std::cout << "  teardown watch " << (Contains(log, "Teardown: xrDestroySession has run") ||
+                                                 Contains(log, "Teardown: xrEndSession has run")
+                                             ? "reported"
+                                             : "did not report (the teardown ended first)")
+              << std::endl;
+    Check(app.api.destroy_instance(app.api.instance) == XR_SUCCESS, "xrDestroyInstance");
+    Check(Peer::Idle(), "nothing is left of the instance");
+    Peer::UseFrameGenGpu(MakeStandInGpu);
+    Peer::SetFrameGenEngagement(45, std::chrono::milliseconds(3000)); // the presenter's own
+    Check(GameRuns(game), "the game's device works");
+    EndCase(game);
+}
+
 // 8. The bridge's device removed: the session is lost. Last: Direct3D 12
 // makes one device per adapter in a process.
 void TestDeviceLost(Game& game) {
@@ -4473,6 +4598,8 @@ int main(int argc, char** argv) {
         TestSideBySideFrameGen(game, "interpolate");
         TestSideBySideFrameGen(game, "extrapolate", true);
         TestSideBySideFrameGen(game, "interpolate", true);
+        TestQuitWhilePresenterHeld(game, false);
+        TestQuitWhilePresenterHeld(game, true);
         TestDeviceLost(game);
     }
     g_runtime = StandIn{};

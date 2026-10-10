@@ -33,6 +33,7 @@
 #include "depthxr/runtime_pacing.h"
 #include "depthxr/seen_apps.h"
 #include "depthxr/sound_player.h"
+#include "depthxr/teardown_watch.h"
 #include "depthxr/turbo_metrics.h"
 #include "depthxr/vulkan_enable_hooks.h"
 
@@ -1283,10 +1284,34 @@ std::string FormatViewConfigurationTypes(std::span<const XrViewConfigurationType
     return stream.str();
 }
 
-std::string FormatHandle(XrSwapchain swapchain) {
+std::string SessionStateName(XrSessionState state) {
+    switch (state) {
+    case XR_SESSION_STATE_IDLE:
+        return "IDLE";
+    case XR_SESSION_STATE_READY:
+        return "READY";
+    case XR_SESSION_STATE_SYNCHRONIZED:
+        return "SYNCHRONIZED";
+    case XR_SESSION_STATE_VISIBLE:
+        return "VISIBLE";
+    case XR_SESSION_STATE_FOCUSED:
+        return "FOCUSED";
+    case XR_SESSION_STATE_STOPPING:
+        return "STOPPING";
+    case XR_SESSION_STATE_LOSS_PENDING:
+        return "LOSS_PENDING";
+    case XR_SESSION_STATE_EXITING:
+        return "EXITING";
+    default:
+        return std::to_string(static_cast<int>(state));
+    }
+}
+
+template <typename Handle>
+std::string FormatHandle(Handle handle) {
     std::uint64_t value = 0;
-    static_assert(sizeof(swapchain) <= sizeof(value));
-    std::memcpy(&value, &swapchain, sizeof(swapchain));
+    static_assert(sizeof(handle) <= sizeof(value));
+    std::memcpy(&value, &handle, sizeof(handle));
 
     std::ostringstream stream;
     stream << "0x" << std::hex << value;
@@ -2059,14 +2084,34 @@ XrResult OpenXrLayer::GetInstanceProcAddr(XrInstance instance, const char* name,
 }
 
 XrResult OpenXrLayer::DestroyInstance(XrInstance instance) {
+    logger_.Info("xrDestroyInstance requested by application.");
+    TeardownWatch watch(logger_, "xrDestroyInstance", framegen_.TeardownWait(),
+                        [this] { return framegen_.PresenterActivity(); });
     // Join the watcher before taking mutex_: it may be mid-PollConfigFile
     // holding the lock, so stopping it under mutex_ would deadlock.
+    watch.Step("stopping the layer's background work");
     StopConfigWatcher();
     StopTurboAsyncWorker();
     // The loader may unload the layer after this returns; let in-flight
     // background input-device setup finish first.
     DrainInputDeviceWork(std::chrono::seconds(2));
 
+    // A session still alive goes with the instance: its presenter thread
+    // first, before the layer's lock (as at xrDestroySession).
+    XrSession session = XR_NULL_HANDLE;
+    {
+        std::scoped_lock lock(mutex_);
+        session = active_session_;
+        if (session != XR_NULL_HANDLE && vulkan_bridge_.Active()) {
+            watch.Step("letting the Vulkan bridge's last releases through");
+            vulkan_bridge_.Escape();
+        }
+    }
+    if (session != XR_NULL_HANDLE) {
+        StopFrameGenPresenterForTeardown(session, [&watch](const char* step) { watch.Step(step); });
+    }
+
+    watch.Step("stopping Frame Generation and the layer's resources");
     std::scoped_lock lock(mutex_);
 
     // A bridged Vulkan session's last releases get through the bridge's
@@ -2084,9 +2129,21 @@ XrResult OpenXrLayer::DestroyInstance(XrInstance instance) {
     DestroyVarjoNativeFoveationResources();
     DestroyInternalReferenceSpaces();
     ResetSwapchainState();
+    watch.Step("draining the bridges");
     d3d11_bridge_.Drain();
     vulkan_bridge_.Drain();
+    if (framegen_.PresenterAbandoned()) {
+        // The thread left behind may still be inside the runtime: its
+        // instance (and the runtime's module, and this one) stay for the
+        // process's exit, with what the layer holds of them.
+        PinModulesForAbandonedPresenter();
+        logger_.Error("xrDestroyInstance: the runtime's instance is kept for the process's exit (Frame Generation's "
+                      "presenter thread never left the runtime).");
+        return XR_SUCCESS;
+    }
+    watch.Step("in the runtime's xrDestroyInstance");
     const XrResult result = next_destroy_instance_(instance);
+    watch.Step("ending the bridges");
     framegen_queue_.Reset();
     EndD3D11Bridge();
     EndVulkanBridge();
@@ -2475,9 +2532,29 @@ XrResult OpenXrLayer::CreateSession(XrInstance instance,
 }
 
 XrResult OpenXrLayer::DestroySession(XrSession session) {
+    logger_.Info("xrDestroySession requested by application.");
+    TeardownWatch watch(logger_, "xrDestroySession", framegen_.TeardownWait(),
+                        [this] { return framegen_.PresenterActivity(); });
     // Join any in-flight turbo async wait before tearing the session down.
+    watch.Step("joining Turbo's in-flight wait");
     ResetTurboFrameState();
+    bool ending_active = false;
     {
+        std::scoped_lock lock(mutex_);
+        ending_active = session == active_session_;
+        if (ending_active && vulkan_bridge_.Active()) {
+            // Frame Generation's waits on the bridge's queue end first.
+            watch.Step("letting the Vulkan bridge's last releases through");
+            vulkan_bridge_.Escape();
+        }
+    }
+    if (ending_active) {
+        // Before the layer's lock: the presenter thread is stopped, let go by
+        // the runtime, or left behind.
+        StopFrameGenPresenterForTeardown(session, [&watch](const char* step) { watch.Step(step); });
+    }
+    {
+        watch.Step("stopping Frame Generation and the layer's session resources");
         std::scoped_lock lock(mutex_);
         if (session == active_session_) {
             // A bridged Vulkan session's last releases get through the
@@ -2511,7 +2588,18 @@ XrResult OpenXrLayer::DestroySession(XrSession session) {
         std::scoped_lock lock(mutex_);
         destroying_active = session == active_session_;
     }
+    if (destroying_active && framegen_.PresenterAbandoned()) {
+        // The thread left behind may still be inside the runtime's session:
+        // destroying it under the thread could crash the runtime. It is
+        // kept, with what the layer holds of it, for the process's exit.
+        PinModulesForAbandonedPresenter();
+        logger_.Error("xrDestroySession: the runtime's session is kept for the process's exit (Frame Generation's "
+                      "presenter thread never left the runtime).");
+        return XR_SUCCESS;
+    }
+    watch.Step("in the runtime's xrDestroySession");
     const XrResult result = next_destroy_session_(session);
+    watch.Step("ending the bridges");
     if (destroying_active && XR_SUCCEEDED(result)) {
         if (const std::string shown = framegen_queue_.ShownLayersSummary(); !shown.empty()) logger_.Info(shown);
         framegen_queue_.Reset();
@@ -2635,10 +2723,18 @@ XrResult OpenXrLayer::BeginSession(XrSession session, const XrSessionBeginInfo* 
 }
 
 XrResult OpenXrLayer::EndSession(XrSession session) {
-    framegen_.ResetFrames();
+    logger_.Info("xrEndSession requested by application.");
+    TeardownWatch watch(logger_, "xrEndSession", framegen_.TeardownWait(),
+                        [this] { return framegen_.PresenterActivity(); });
+    // A presenter thread a runtime holds inside a call (its waits once the
+    // session is stopping, until it ends) is stopped again once the
+    // runtime's session has ended below.
+    watch.Step("stopping Frame Generation's presenter thread");
+    const bool presenter_stopped = framegen_.ResetFrames();
     // Turbo deliberately pre-waits (and, in sequenced mode, pre-begins) the
     // following frame. Balance that owned frame before ending the session so a
     // later xrBeginSession starts from a clean runtime call-order state.
+    watch.Step("draining Turbo's pending wait");
     DrainTurboAsyncWait();
 
     bool begin_pending_frame = false;
@@ -2683,13 +2779,25 @@ XrResult OpenXrLayer::EndSession(XrSession session) {
         }
     }
 
+    watch.Step("in the runtime's xrEndSession");
     const XrResult result = next_end_session_(session);
+    if (!presenter_stopped) {
+        // The runtime's session has ended (or refused to): a runtime that
+        // held the presenter thread lets it go now. One it still holds is
+        // left behind at xrDestroySession.
+        watch.Step("stopping Frame Generation's presenter thread after the runtime's xrEndSession");
+        const bool stopped = framegen_.ResetFrames();
+        logger_.Info(std::string("xrEndSession: Frame Generation's presenter thread was still in the runtime; ") +
+                     (stopped ? "it stopped once the runtime's session ended."
+                              : "it is still there (" + framegen_.PresenterActivity() + ")."));
+    }
     if (XR_FAILED(result)) {
         logger_.Error("xrEndSession failed downstream: result=" +
                       std::to_string(static_cast<int>(result)));
         return result;
     }
 
+    watch.Step("resetting Turbo's frame state");
     ResetTurboFrameState();
     {
         std::scoped_lock lock(mutex_);
@@ -3653,10 +3761,14 @@ XrResult OpenXrLayer::CreateSwapchain(XrSession session,
 }
 
 XrResult OpenXrLayer::DestroySwapchain(XrSwapchain swapchain) {
+    TeardownWatch watch(logger_, "xrDestroySwapchain", framegen_.TeardownWait(),
+                        [this] { return framegen_.PresenterActivity(); });
     // A pipelined turbo frame may still hold onto this swapchain; make sure the
     // async xrWaitFrame has finished before the swapchain goes away.
+    watch.Step("draining Turbo's pending wait");
     DrainTurboAsyncWait();
     {
+        watch.Step("releasing the swapchain's deferred releases");
         std::scoped_lock lock(mutex_);
         auto it = tracked_swapchains_.find(swapchain);
         if (it != tracked_swapchains_.end()) {
@@ -3668,6 +3780,7 @@ XrResult OpenXrLayer::DestroySwapchain(XrSwapchain swapchain) {
         }
     }
 
+    watch.Step("flushing Frame Generation's queued releases");
     framegen_queue_.Flush(swapchain, FrameGenQueueCalls());
     framegen_queue_.Forget(swapchain);
     // Frame Generation's GPU work may still read the swapchain's images (a
@@ -3678,8 +3791,10 @@ XrResult OpenXrLayer::DestroySwapchain(XrSwapchain swapchain) {
     XrResult result = XR_SUCCESS;
     // So do the bridge's copies into the runtime's images.
     const bool vulkan_bridged = vulkan_bridge_.Bridged(swapchain);
+    watch.Step("Frame Generation and the bridges letting the swapchain go");
     if (framegen_.ForgetSwapchain(swapchain) && d3d11_bridge_.RemoveSwapchain(swapchain) &&
         vulkan_bridge_.RemoveSwapchain(swapchain)) {
+        watch.Step("in the runtime's xrDestroySwapchain");
         result = next_destroy_swapchain_(swapchain);
         if (XR_FAILED(result)) {
             return result;
@@ -3688,9 +3803,10 @@ XrResult OpenXrLayer::DestroySwapchain(XrSwapchain swapchain) {
         logger_.Error("Swapchain " + FormatHandle(swapchain) + " is kept until its session ends: GPU work on it " +
                       (vulkan_bridged ? "(Frame Generation's, or the Vulkan bridge's)"
                                       : "(Frame Generation's, or the Direct3D 11 bridge's)") +
-                      " did not finish.");
+                      " did not finish, or Frame Generation's presenter thread may still submit it.");
     }
 
+    watch.Step("in the layer's bookkeeping");
     std::scoped_lock lock(mutex_);
     const auto it = tracked_swapchains_.find(swapchain);
     if (it == tracked_swapchains_.end()) {
@@ -8718,6 +8834,11 @@ XrResult OpenXrLayer::PollEvent(XrInstance instance, XrEventDataBuffer* event_da
         return XR_ERROR_FUNCTION_UNSUPPORTED;
     }
     const XrResult result = next_poll_event_(instance, event_data);
+    if (result == XR_SUCCESS && event_data && event_data->type == XR_TYPE_EVENT_DATA_SESSION_STATE_CHANGED) {
+        // Rare, and what a teardown follows: the runtime asks the session to stop, or it is lost.
+        const auto& changed = *reinterpret_cast<const XrEventDataSessionStateChanged*>(event_data);
+        logger_.Info("Runtime session state: " + SessionStateName(changed.state) + ".");
+    }
     if (result != XR_SUCCESS || !event_data ||
         event_data->type != XR_TYPE_EVENT_DATA_REFERENCE_SPACE_CHANGE_PENDING) {
         return result;
@@ -9381,8 +9502,18 @@ XrResult OpenXrLayer::LocateViews(XrSession session,
 }
 
 XrResult OpenXrLayer::DestroySpace(XrSpace space) {
+    TeardownWatch watch(logger_, "xrDestroySpace", framegen_.TeardownWait(),
+                        [this] { return framegen_.PresenterActivity(); });
     // Frame Generation may still repeat a frame that refers to this space.
-    framegen_.ForgetSpace(space);
+    watch.Step("Frame Generation letting the space go");
+    if (!framegen_.ForgetSpace(space)) {
+        // Its submission in flight (a runtime call past the teardown wait)
+        // may name the space: the runtime frees it with the session.
+        logger_.Error("Space " + FormatHandle(space) +
+                      " is kept until its session ends: Frame Generation's presenter thread may still submit it.");
+        return XR_SUCCESS;
+    }
+    watch.Step("in the runtime's xrDestroySpace");
     const XrResult result = next_destroy_space_(space);
     if (XR_SUCCEEDED(result)) {
         std::scoped_lock lock(mutex_);
@@ -12287,6 +12418,42 @@ void OpenXrLayer::ResetTurboToggleState() {
     turbo_binding_down_cached_ = false;
 }
 
+void OpenXrLayer::StopFrameGenPresenterForTeardown(XrSession session,
+                                                   const std::function<void(const char*)>& step) {
+    step("stopping Frame Generation's presenter thread");
+    if (framegen_.StopPresenter()) {
+        return;
+    }
+    // A runtime may hold a call (its waits once the session is stopping)
+    // until the session ends: the application never ended it, or the
+    // presenter thread was still inside when it did. Ending it lets the
+    // thread go; a runtime whose session already ended refuses harmlessly.
+    step("in the runtime's xrEndSession, to let Frame Generation's presenter thread go");
+    const XrResult ended = next_end_session_ ? next_end_session_(session) : XR_ERROR_FUNCTION_UNSUPPORTED;
+    step("stopping Frame Generation's presenter thread after the runtime's xrEndSession");
+    const bool stopped = framegen_.StopPresenter();
+    logger_.Info("Frame Generation's presenter thread was still in the runtime at the session's teardown; the layer "
+                 "ended the runtime's session (result=" +
+                 std::to_string(static_cast<int>(ended)) + ")" +
+                 (stopped ? ", and the thread stopped." : ", and the thread is still there."));
+    if (!stopped) {
+        framegen_.AbandonPresenter();
+    }
+}
+
+void OpenXrLayer::PinModulesForAbandonedPresenter() {
+    // The loader may unload both after xrDestroyInstance returns; a thread
+    // left inside the runtime would return into neither.
+    const auto pin = [](const void* address) {
+        HMODULE module = nullptr;
+        GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
+                           static_cast<LPCWSTR>(address), &module);
+    };
+    pin(reinterpret_cast<const void*>(&SessionStateName));
+    if (next_wait_frame_) pin(reinterpret_cast<const void*>(next_wait_frame_));
+    if (next_end_frame_) pin(reinterpret_cast<const void*>(next_end_frame_));
+}
+
 void OpenXrLayer::StartFrameGen(XrSession session, const void* binding_chain, const std::string& unavailable) {
     framegen_session_enabled_ = resolved_settings_.core.enabled && resolved_settings_.framegen.enabled;
     framegen_toggle_binding_was_down_ = false;
@@ -12304,6 +12471,13 @@ void OpenXrLayer::StartFrameGen(XrSession session, const void* binding_chain, co
         const char* interpolate_hardware = std::getenv("VECTORXR_FRAMEGEN_INTERPOLATE_HARDWARE");
         framegen_.SetInterpolateOnShaders((d3d11_bridge_.Active() || vulkan_bridge_.Active()) &&
                                           !(interpolate_hardware && std::string(interpolate_hardware) == "1"));
+        // How long a teardown waits on the presenter thread (2 s unless set).
+        std::chrono::milliseconds teardown_wait{2000};
+        if (const char* wait = std::getenv("VECTORXR_FRAMEGEN_TEARDOWN_WAIT_MS"); wait && *wait) {
+            const long long ms = std::atoll(wait);
+            if (ms > 0) teardown_wait = std::chrono::milliseconds(std::min(ms, 60000LL));
+        }
+        framegen_.SetTeardownWait(teardown_wait);
         framegen_.Start(session, binding_chain,
                         {next_enumerate_swapchain_formats_, next_create_swapchain_, next_destroy_swapchain_,
                          next_enumerate_swapchain_images_, next_acquire_swapchain_image_, next_wait_swapchain_image_,

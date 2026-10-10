@@ -28,6 +28,7 @@
 #include <limits>
 #include <cstdlib>
 #include <iostream>
+#include <iterator>
 #include <map>
 #include <mutex>
 #include <set>
@@ -738,7 +739,50 @@ struct Runtime {
     // Projections submitted with other than two views (a stereo runtime's).
     std::atomic<int> not_stereo{0};
     std::atomic<int> wait_sleep_ms{0};
+    // A runtime holding a call (as one may while its session stops, until
+    // the session ends): the next waits (hold_waits) or submissions
+    // (hold_submits) block until ReleaseHolds; a held wait then fails, as a
+    // runtime's whose session ended.
+    std::mutex hold_mutex;
+    std::condition_variable hold_cv;
+    bool hold_waits{false};
+    bool hold_submits{false};
+    std::atomic<int> held{0}; // calls inside a hold now
     bool begun{false};
+
+    void HoldWaits() {
+        std::scoped_lock lock(hold_mutex);
+        hold_waits = true;
+    }
+    void HoldSubmits() {
+        std::scoped_lock lock(hold_mutex);
+        hold_submits = true;
+    }
+    void ReleaseHolds() {
+        {
+            std::scoped_lock lock(hold_mutex);
+            hold_waits = hold_submits = false;
+        }
+        hold_cv.notify_all();
+    }
+    // Whether a call was held (it returned once released).
+    bool HoldIf(bool Runtime::*flag) {
+        std::unique_lock lock(hold_mutex);
+        if (!(this->*flag)) return false;
+        ++held;
+        hold_cv.wait(lock, [&] { return !(this->*flag); });
+        --held;
+        return true;
+    }
+    // Until a call is inside a hold, at most `limit`.
+    bool WaitHeld(std::chrono::milliseconds limit) {
+        const auto until = std::chrono::steady_clock::now() + limit;
+        while (held.load() == 0) {
+            if (std::chrono::steady_clock::now() > until) return false;
+            std::this_thread::sleep_for(1ms);
+        }
+        return true;
+    }
     std::vector<XrTime> submitted_times;
     std::vector<std::chrono::steady_clock::time_point> submitted_at;
     std::vector<std::vector<XrSwapchain>> submitted_swapchains;
@@ -749,6 +793,7 @@ struct Runtime {
         FrameGenRuntimeCalls calls;
         calls.wait = [this](XrSession, const XrFrameWaitInfo*, XrFrameState* state) {
             if (fail_next_wait.exchange(false)) return XR_ERROR_RUNTIME_FAILURE;
+            if (HoldIf(&Runtime::hold_waits)) return XR_ERROR_SESSION_NOT_RUNNING;
             if (++outstanding_waits > 1) ordering_violation = true;
             if (wait_sleep_ms) std::this_thread::sleep_for(std::chrono::milliseconds(wait_sleep_ms));
             if (paced) {
@@ -782,6 +827,7 @@ struct Runtime {
             return XR_SUCCESS;
         };
         calls.submit = [this](XrSession, const XrFrameEndInfo* info) {
+            HoldIf(&Runtime::hold_submits);
             std::scoped_lock lock(g_xr_mutex);
             if (!begun) ordering_violation = true;
             begun = false;
@@ -1712,6 +1758,156 @@ void TestThreadedDestroyedSwapchain() {
     Check(!runtime.used_destroyed, "destroy: a destroyed swapchain is never submitted again");
     presenter.Stop();
     Check(!runtime.ordering_violation, "destroy: calls stayed ordered");
+}
+
+// Until the presenter thread has stopped (a thread left behind ends on its
+// own once its call returns), at most `limit`.
+bool PresenterStops(FrameGenPresenter& presenter, std::chrono::milliseconds limit) {
+    const auto until = std::chrono::steady_clock::now() + limit;
+    while (presenter.PresenterActivity().rfind("presenter thread stopped", 0) != 0) {
+        if (std::chrono::steady_clock::now() > until) return false;
+        std::this_thread::sleep_for(2ms);
+    }
+    std::this_thread::sleep_for(50ms); // its last steps after it says so
+    return true;
+}
+
+// DCS, quitting with Frame Generation presenting from its own thread
+// (2026-10-09): the game hung in its teardown. A runtime holding the
+// presenter thread inside xrEndFrame (which holds submit_mutex_) never holds
+// the game's teardown past the teardown wait: a swapchain destroyed meanwhile
+// is forgotten and kept (the later ones only try briefly), ending the session
+// leaves the thread stopping, and stopping leaves it behind with what it
+// uses (logged with the call it is in). Once the runtime lets it go it ends
+// on its own; Frame Generation stays off for the rest of the process.
+void TestTeardownPresenterHeldInSubmit() {
+    const std::filesystem::path directory =
+        std::filesystem::temp_directory_path() / ("vectorxr-presenter-teardown-" + std::to_string(GetCurrentProcessId()));
+    std::error_code ignored;
+    std::filesystem::remove_all(directory, ignored);
+    auto logger = std::make_unique<Logger>();
+    logger->Initialize(directory / "teardown.log");
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    runtime.paced = true;
+    gpu.threaded = true;
+    gpu.jit = g_jit;
+    FrameGenResolvedSettings settings;
+    settings.enabled = true;
+    settings.synthesis_mode = FrameGenSynthesisMode::kExtrapolate;
+    settings.multiplier = FrameGenMultiplier::k2;
+    presenter.Configure(settings);
+    presenter.SetEngagementPolicy(3, 0ms);
+    presenter.SetTeardownWait(300ms);
+    presenter.Start(kSession, nullptr, Dispatch(), logger.get(), nullptr,
+                    [&](const void*, std::string&) { return std::make_unique<FakeGpu>(&gpu); });
+    presenter.TrackSwapchain(kLeft, kFormat, 1, kAppUsage);
+    presenter.TrackSwapchain(kRight, kFormat, 1, kAppUsage);
+    {
+        std::scoped_lock lock(g_xr_mutex);
+        g_destroyed.clear();
+        g_release_violation = false;
+    }
+    App app(presenter, runtime);
+    for (int i = 0; i < 12; ++i) app.Frame();
+    Check(presenter.Status().threaded, "held submit: presenting from its own thread");
+    runtime.HoldSubmits();
+    Check(runtime.WaitHeld(2000ms), "held submit: the runtime holds the presenter thread in xrEndFrame");
+    const std::string activity = presenter.PresenterActivity();
+    Check(activity.find("in the runtime's xrEndFrame for") != std::string::npos,
+          "held submit: what the presenter thread is in is told (" + activity + ")");
+
+    auto start = std::chrono::steady_clock::now();
+    Check(!presenter.ForgetSwapchain(kLeft), "held submit: a swapchain destroyed meanwhile is kept");
+    const auto first = std::chrono::steady_clock::now() - start;
+    Check(first >= 250ms && first < 1000ms,
+          "held submit: the destroy waits the teardown wait, no more (" + std::to_string(Seconds(first)) + " s)");
+    start = std::chrono::steady_clock::now();
+    Check(!presenter.ForgetSwapchain(kRight), "held submit: the next swapchain is kept too");
+    Check(std::chrono::steady_clock::now() - start < 200ms, "held submit: later destroys only try briefly");
+    start = std::chrono::steady_clock::now();
+    Check(!presenter.ForgetSpace(kSpace), "held submit: a space destroyed meanwhile is kept");
+    Check(std::chrono::steady_clock::now() - start < 200ms, "held submit: so does the space's");
+    start = std::chrono::steady_clock::now();
+    Check(!presenter.ResetFrames(), "held submit: ending the session leaves the thread stopping");
+    Check(std::chrono::steady_clock::now() - start < 1000ms, "held submit: ending the session waits no more");
+    start = std::chrono::steady_clock::now();
+    presenter.Stop();
+    Check(std::chrono::steady_clock::now() - start < 1000ms, "held submit: stopping waits no more");
+    Check(presenter.PresenterAbandoned() && !presenter.Started(), "held submit: the thread is left behind");
+
+    // The runtime lets it go: it ends on its own.
+    runtime.ReleaseHolds();
+    Check(PresenterStops(presenter, 2000ms), "held submit: the thread left behind ends once its call returns (" +
+                                                 presenter.PresenterActivity() + ")");
+    // Frame Generation stays off for the process.
+    presenter.Start(kSession, nullptr, Dispatch(), logger.get(), nullptr,
+                    [&](const void*, std::string&) { return std::make_unique<FakeGpu>(&gpu); });
+    const FrameGenStatus after = presenter.Status();
+    Check(after.state == FrameGenState::kUnavailable && !presenter.OwnsPacing(),
+          "held submit: Frame Generation stays off for the process (" + after.reason + ")");
+    const std::filesystem::path path = logger->ActiveLogPath();
+    logger.reset(); // flushed
+    std::ifstream file(path);
+    const std::string log((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+    for (const char* line : {"a swapchain being destroyed waited 300 ms for its presenter thread (presenter thread",
+                             "its presenter thread has not stopped after",
+                             "Frame Generation leaves its presenter thread behind: it never left the runtime",
+                             "in the runtime's xrEndFrame for",
+                             "Frame Generation stays off for this process"}) {
+        Check(log.find(line) != std::string::npos, std::string("held submit: the log tells \"") + line + "\"");
+    }
+    file.close();
+    std::filesystem::remove_all(directory, ignored);
+}
+
+// A runtime holding the presenter thread inside xrWaitFrame until its
+// session ends (a runtime may hold its waits while the session stops): a
+// stop gives up within the teardown wait; once the session ends (the held
+// wait fails) the thread stops, nothing is left behind, and the next
+// session presents again.
+void TestTeardownPresenterReleasedBySessionEnd() {
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    runtime.paced = true;
+    StartThreaded(presenter, gpu, FrameGenMultiplier::k2);
+    presenter.SetTeardownWait(300ms);
+    App app(presenter, runtime);
+    for (int i = 0; i < 12; ++i) app.Frame();
+    Check(presenter.Status().threaded, "held wait: presenting from its own thread");
+    runtime.HoldWaits();
+    Check(runtime.WaitHeld(2000ms), "held wait: the runtime holds the presenter thread in xrWaitFrame");
+    Check(presenter.PresenterActivity().find("in the runtime's xrWaitFrame for") != std::string::npos,
+          "held wait: what the presenter thread is in is told (" + presenter.PresenterActivity() + ")");
+    // Destroying a swapchain does not wait for a thread holding nothing it needs.
+    auto start = std::chrono::steady_clock::now();
+    Check(presenter.ForgetSwapchain(kLeft), "held wait: a swapchain destroyed meanwhile goes");
+    Check(std::chrono::steady_clock::now() - start < 200ms, "held wait: at once");
+    start = std::chrono::steady_clock::now();
+    Check(!presenter.StopPresenter(), "held wait: the stop gives up while the runtime holds the thread");
+    const auto waited = std::chrono::steady_clock::now() - start;
+    Check(waited >= 250ms && waited < 1000ms,
+          "held wait: after the teardown wait (" + std::to_string(Seconds(waited)) + " s)");
+    runtime.ReleaseHolds(); // the session ended
+    start = std::chrono::steady_clock::now();
+    Check(presenter.StopPresenter() && !presenter.PresenterAbandoned(),
+          "held wait: the thread stops once the runtime lets its wait go");
+    Check(std::chrono::steady_clock::now() - start < 300ms, "held wait: at once");
+    start = std::chrono::steady_clock::now();
+    presenter.Stop();
+    Check(std::chrono::steady_clock::now() - start < 500ms && !presenter.PresenterAbandoned(),
+          "held wait: the session stops normally");
+    // The next session presents from its own thread again.
+    Runtime next;
+    next.paced = true;
+    StartThreaded(presenter, gpu, FrameGenMultiplier::k2);
+    App again(presenter, next);
+    for (int i = 0; i < 12; ++i) again.Frame();
+    Check(presenter.Status().threaded, "held wait: the next session presents from its own thread");
+    presenter.Stop();
+    Check(!next.ordering_violation && !g_release_violation, "held wait: runtime calls stayed ordered");
 }
 
 void TestThreadedRuntimeFailureRecovers() {
@@ -3773,6 +3969,86 @@ void TestLeadResetOnRestart() {
     Check(!runtime.ordering_violation && !g_release_violation, "lead reset: calls stayed ordered");
 }
 
+// The lead after a burst of hitches (DCS on Cold War Germany, 2026-10-09:
+// 4-5 slots after each restart, 7-8 after minutes, the latency felt). A
+// GPU-bound game (19 ms of GPU a frame, three frames queued at most, Dynamic
+// engaged at its own ~52 fps) whose GPU slows to 45 ms a frame for a while
+// (the hitches: the lead climbs), then back. Its frames reach the GPU
+// history at the GPU's pace whatever the lead (an early frame is held until
+// its slot, which delays the game's next one), so they never show the slack
+// that takes a slot off: without probes (FrameGenLeadPolicy) the lead stays
+// up; with them it steps back down to the lowest lead that holds (a probe
+// below it fails, and is tried again only rarely), costing a few late
+// frames per probe.
+struct LeadRun {
+    std::uint32_t settled{0}; // before the hitches
+    std::uint32_t peak{0};    // after them
+    std::uint32_t final{0};   // a while after
+    FrameGenStatus before;    // at the hitches' end
+    FrameGenStatus after;     // at the end
+};
+
+LeadRun RunLeadAfterHitches(bool probes) {
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    gpu.game_gpu = 19ms;
+    gpu.frames_ahead = 3;
+    Runtime runtime;
+    runtime.paced = true;
+    std::unique_ptr<App> owned;
+    App* app = nullptr;
+    StartJit(presenter, gpu, FrameGenSynthesisMode::kExtrapolate, FrameGenMultiplier::kDynamic, app, runtime, owned);
+    FrameGenLeadPolicy policy;
+    policy.probe_after = probes ? 250ms : 600s;
+    policy.judge = 200ms;
+    policy.explore_after = 700ms;
+    policy.explore_max = 1400ms;
+    presenter.SetLeadPolicy(policy);
+    app->before_release = [&] { gpu.GameFrame(); };
+    for (int i = 0; i < 3; ++i) app->Frame();
+    RunWork(*app, 3000ms, {6ms}, [&](const XrFrameState&) { return Engaged(presenter); });
+    Check(Engaged(presenter), "lead probes: Dynamic engages for the GPU-bound game");
+    RunWork(*app, 800ms, {6ms});
+    LeadRun run;
+    run.settled = presenter.Status().lead_slots;
+    gpu.game_gpu = 45ms; // the hitches
+    RunWork(*app, 600ms, {6ms});
+    run.peak = presenter.Status().lead_slots;
+    gpu.game_gpu = 19ms;
+    run.before = presenter.Status();
+    RunWork(*app, 3000ms, {6ms});
+    run.after = presenter.Status();
+    run.final = run.after.lead_slots;
+    presenter.Stop();
+    Check(!runtime.ordering_violation && !g_release_violation, "lead probes: calls stayed ordered");
+    return run;
+}
+
+void TestLeadStepsDownAfterHitches() {
+    const LeadRun held = RunLeadAfterHitches(false);
+    const LeadRun probed = RunLeadAfterHitches(true);
+    const auto late = [](const LeadRun& run) {
+        return (run.after.late_cpu - run.before.late_cpu) + (run.after.late_gpu - run.before.late_gpu);
+    };
+    std::cerr << "  without probes: lead " << held.settled << " -> " << held.peak << " -> " << held.final
+              << " (late " << late(held) << "); with probes: " << probed.settled << " -> " << probed.peak << " -> "
+              << probed.final << " (floor " << probed.after.lead_floor << ", probes " << probed.after.lead_probes
+              << ", failed " << probed.after.lead_probes_failed << ", late " << late(probed) << ")" << std::endl;
+    Check(held.peak > held.settled && probed.peak > probed.settled, "lead probes: the hitches grow the lead");
+    Check(held.final >= held.peak && held.after.lead_probes == 0,
+          "lead probes: without probes the lead stays up after the hitches (" + std::to_string(held.settled) +
+              " -> " + std::to_string(held.peak) + " -> " + std::to_string(held.final) + ")");
+    Check(probed.after.lead_probes > probed.before.lead_probes && probed.final < probed.peak &&
+              probed.final <= probed.settled,
+          "lead probes: the lead steps back down after the hitches (" + std::to_string(probed.settled) + " -> " +
+              std::to_string(probed.peak) + " -> " + std::to_string(probed.final) + ")");
+    // The game's frames are late about as often whatever the lead (it is the
+    // GPU's pace, not the lead, that makes them late): probing adds little.
+    Check(late(probed) <= late(held) * 3 / 2 + 10,
+          "lead probes: frames are late about as often with probes (" + std::to_string(late(probed)) + " vs " +
+              std::to_string(late(held)) + ")");
+}
+
 // A game showing its last frame (stalled): its exact copy is written once,
 // then the runtime shows the output images' newest again each refresh.
 void TestSkipIdenticalExactCopies() {
@@ -3892,6 +4168,7 @@ void TestTelemetryWindows() {
     for (const char* field : {"appFps=", "outputFps=", "distinctFps=", "standbyS=", "generated=+", "copiesSkipped=",
                               "lateReal=", "gpuWaits=", "captureDoneMs=", "analysisMs=", "measureLagMs=", "ofaMs=",
                               "gpuStartMs=", "gpuDoneMs=", "endCallMs=", "synthLockMs=", "unwritten=", "unready=", "pauses=",
+                              "leadSlots=", "leadFloor=", "leadMoves=+", "leadProbes=",
                               "dynamic=engaged (the game ran at"}) {
         Check(threaded.back().find(field) != std::string::npos,
               std::string("telemetry: the summary has ") + field + " (" + threaded.back() + ")");
@@ -5584,6 +5861,7 @@ void RunPolicyTests() {
     RUN(TestExtrapolateDuplicateTargetGuard);
     RUN(TestNoExtrapolationAcrossPauses);
     RUN(TestLeadResetOnRestart);
+    RUN(TestLeadStepsDownAfterHitches);
     RUN(TestSkipIdenticalExactCopies);
     RUN(TestTelemetryWindows);
     RUN(TestGpuWaitKeepsCadence);
@@ -5685,6 +5963,8 @@ int main(int argc, char** argv) {
         RUN(TestThreadedPipelinedDouble);
         RUN(TestThreadedDestroyedSwapchain);
         RUN(TestThreadedRuntimeFailureRecovers);
+        RUN(TestTeardownPresenterHeldInSubmit);
+        RUN(TestTeardownPresenterReleasedBySessionEnd);
         RUN(TestThreadedPauseRetryMsfsTiming);
         RUN(TestThreadedDestroyedSpace);
         RUN(TestThreadedKeepsOtherLayers);

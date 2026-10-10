@@ -262,6 +262,17 @@ void FrameGenPresenter::Start(XrSession session, const void* binding_chain, cons
                               Logger* logger, std::mutex* queue_mutex, GpuFactory factory) {
     Stop();
     std::scoped_lock lock(gpu_mutex_, mutex_);
+    if (abandoned_) {
+        // What the thread left behind still uses is never reset under it.
+        logger_ = logger;
+        const std::string reason = "its presenter thread of an earlier session never left the runtime";
+        UnavailableLocked(reason);
+        if (logger_ && !logged_abandoned_start_) {
+            logged_abandoned_start_ = true;
+            logger_->Error("Frame Generation stays off for this process: " + reason + ".");
+        }
+        return;
+    }
     session_ = session;
     xr_ = dispatch;
     logger_ = logger;
@@ -337,19 +348,36 @@ void FrameGenPresenter::Stop() {
     if (!started_) {
         return;
     }
-    StopCompositorLocked(lock);
+    if (!abandoned_ && !StopCompositorLocked(lock, TeardownWait())) {
+        AbandonPresenterLocked();
+    }
     // From here no release thread starts a capture.
     started_ = false;
+    if (abandoned_) {
+        // The thread left behind may still use the backend, the output
+        // images and the runtime when its call returns: all of them are kept
+        // for the process's exit, as is the rest of the session's state.
+        state_ = FrameGenState::kOff;
+        reason_.clear();
+        return;
+    }
     // A game wait held for its GPU uses the backend without the GPU lock;
-    // it returns within its timeout, before the backend is reset.
-    idle_cv_.wait(lock, [&] { return gpu_waiters_ == 0; });
+    // it returns within its timeout, before the backend is reset. One that
+    // does not (logged) keeps the backend, unreset, and its outputs.
+    const bool waiters_returned = idle_cv_.wait_for(lock, TeardownWait(), [&] { return gpu_waiters_ == 0; });
+    if (!waiters_returned && logger_) {
+        logger_->Error("Frame Generation: a game wait held for its GPU did not return within " +
+                       std::to_string(TeardownWait().count()) + " ms of the session's end; its backend is kept.");
+    }
     lock.unlock();
     {
         // Finish outstanding GPU work before the runtime frees the output
         // images it writes. Teardown runs between frames, so no EndFrame
         // touches the outputs concurrently.
         std::scoped_lock gpu_lock(gpu_mutex_);
-        if (gpu_) {
+        if (gpu_ && !waiters_returned) {
+            gpu_stalled_ = true;
+        } else if (gpu_) {
             gpu_->Reset();
             // A backend whose work did not finish keeps what it used; the
             // swapchains that work reads and writes must stay too.
@@ -362,7 +390,11 @@ void FrameGenPresenter::Stop() {
     {
         std::scoped_lock gpu_lock(gpu_mutex_);
         lock.lock();
-        gpu_.reset();
+        if (waiters_returned) {
+            gpu_.reset();
+        } else {
+            (void)gpu_.release(); // the wait still reads it
+        }
     }
     if (logger_ && (generated_ || repeated_ || failures_ || demoted_)) {
         logger_->Info("Frame Generation session summary: generated=" + std::to_string(generated_) + ", repeated=" +
@@ -430,8 +462,7 @@ void FrameGenPresenter::Stop() {
     passthrough_copy_ = {};
     jit_covers_ = 0;
     logged_jit_ = false;
-    lead_slots_ = 0;
-    lead_history_.clear();
+    ResetLeadLocked();
     dynamic_interval_slots_ = 0.0;
     dynamic_standby_ = true;
     dynamic_below_since_.reset();
@@ -544,6 +575,21 @@ void FrameGenPresenter::SetAutoPolicy(std::chrono::milliseconds settle, std::chr
     probe_backoff_ = probe_backoff;
 }
 
+void FrameGenPresenter::SetLeadPolicy(const FrameGenLeadPolicy& policy) {
+    std::scoped_lock lock(mutex_);
+    lead_policy_ = policy;
+    lead_explore_after_ = policy.explore_after;
+}
+
+void FrameGenPresenter::ResetLeadLocked() {
+    lead_slots_ = 0;
+    lead_history_.clear();
+    lead_calm_since_ = {};
+    lead_probe_.reset();
+    lead_floor_ = 0;
+    lead_explore_after_ = lead_policy_.explore_after;
+}
+
 void FrameGenPresenter::SetDynamicPolicy(const FrameGenDynamicPolicy& policy) {
     std::scoped_lock lock(mutex_);
     dynamic_policy_ = policy;
@@ -612,11 +658,15 @@ bool FrameGenPresenter::Toggle() {
     return user_enabled_;
 }
 
-void FrameGenPresenter::ResetFrames() {
+bool FrameGenPresenter::ResetFrames() {
     std::unique_lock lock(mutex_);
     // The session is starting or stopping: the presenter thread must not
-    // touch the runtime frame loop past this point.
-    StopCompositorLocked(lock);
+    // touch the runtime frame loop past this point. One still inside a
+    // runtime call is left stopping (the runtime may hold it until the
+    // session ends: the layer ends it, then stops the thread again).
+    if (!abandoned_ && !StopCompositorLocked(lock, TeardownWait())) {
+        return false;
+    }
     dropped_unended_ = 0;
     dropped_unbegun_ = 0;
     // A new session starts with no runtime frame in flight.
@@ -629,6 +679,99 @@ void FrameGenPresenter::ResetFrames() {
         SetStateLocked(IdleStateLocked(), "");
     }
     idle_cv_.notify_all();
+    return true;
+}
+
+void FrameGenPresenter::SetTeardownWait(std::chrono::milliseconds wait) {
+    teardown_wait_ms_ = std::max<std::int64_t>(wait.count(), 1);
+}
+
+std::chrono::milliseconds FrameGenPresenter::TeardownWait() const {
+    return std::chrono::milliseconds(teardown_wait_ms_.load());
+}
+
+bool FrameGenPresenter::StopPresenter() {
+    std::unique_lock lock(mutex_);
+    return abandoned_ || StopCompositorLocked(lock, TeardownWait());
+}
+
+void FrameGenPresenter::AbandonPresenter() {
+    std::scoped_lock lock(mutex_);
+    AbandonPresenterLocked();
+}
+
+void FrameGenPresenter::AbandonPresenterLocked() {
+    if (!compositor_running_ || !compositor_.joinable()) {
+        return;
+    }
+    // It ends when its call returns (compositor_stop_ stays set); until then
+    // it holds what its call uses, so nothing of the session is let go.
+    compositor_stop_ = true;
+    compositor_.detach();
+    abandoned_ = true;
+    if (logger_) {
+        logger_->Error("Frame Generation leaves its presenter thread behind: it never left the runtime (" +
+                       PresenterActivity() +
+                       "). Its GPU work, output images and the runtime's session are kept for the process's exit, "
+                       "and Frame Generation stays off for the rest of the process.");
+    }
+}
+
+bool FrameGenPresenter::PresenterAbandoned() const {
+    return abandoned_;
+}
+
+std::string FrameGenPresenter::PresenterActivity() const {
+    std::string text = std::string("presenter thread ") + compositor_phase_.load();
+    if (const char* call = presenter_call_.load()) {
+        const auto now = std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now().time_since_epoch()).count();
+        const double seconds = static_cast<double>(now - presenter_call_since_.load()) / 1e9;
+        text += std::string(", in the runtime's ") + call + " for " + Number(seconds, 1) + " s";
+    }
+    if (abandoned_) {
+        text += ", left behind";
+    }
+    return text;
+}
+
+bool FrameGenPresenter::LockForTeardown(std::unique_lock<std::timed_mutex>& lock, const std::string& what) {
+    // The presenter thread holds it over runtime calls: a runtime holding
+    // one must not hold this caller too. While one call has held it past
+    // the teardown wait already, later callers only try briefly.
+    const auto limit = PresenterWedged() ? std::chrono::milliseconds(50) : TeardownWait();
+    if (lock.try_lock_for(limit)) {
+        return true;
+    }
+    if (logger_) {
+        logger_->Error("Frame Generation: " + what + " waited " + std::to_string(limit.count()) +
+                       " ms for its presenter thread (" + PresenterActivity() + ") and went on without it.");
+    }
+    return false;
+}
+
+bool FrameGenPresenter::PresenterWedged() const {
+    if (!presenter_call_.load()) {
+        return false;
+    }
+    const auto now = std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now().time_since_epoch()).count();
+    return now - presenter_call_since_.load() >
+           std::chrono::duration_cast<std::chrono::nanoseconds>(TeardownWait()).count();
+}
+
+FrameGenPresenter::PresenterCall::PresenterCall(FrameGenPresenter& owner, const char* call) {
+    if (GetCurrentThreadId() != owner.compositor_thread_id_.load()) {
+        return;
+    }
+    presenter = &owner;
+    owner.presenter_call_since_ =
+        std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now().time_since_epoch()).count();
+    owner.presenter_call_ = call;
+}
+
+FrameGenPresenter::PresenterCall::~PresenterCall() {
+    if (presenter) {
+        presenter->presenter_call_ = nullptr;
+    }
 }
 
 void FrameGenPresenter::AbandonFrame(XrTime display_time) {
@@ -694,8 +837,12 @@ void FrameGenPresenter::TrackSwapchain(XrSwapchain swapchain, std::int64_t forma
 
 bool FrameGenPresenter::ForgetSwapchain(XrSwapchain swapchain) {
     // Holding submit_mutex_ keeps the presenter thread from submitting the
-    // swapchain while it goes; afterwards no copy refers to it.
-    std::scoped_lock submit(submit_mutex_);
+    // swapchain while it goes; afterwards no copy refers to it. A presenter
+    // thread inside a runtime call past the teardown wait holds it: the
+    // swapchain is forgotten all the same (no later submission names it) and
+    // kept (false), as the submission in flight may name it.
+    std::unique_lock submit(submit_mutex_, std::defer_lock);
+    const bool submit_held = LockForTeardown(submit, "a swapchain being destroyed");
     {
         std::scoped_lock lock(mutex_);
         swapchains_.erase(swapchain);
@@ -712,7 +859,11 @@ bool FrameGenPresenter::ForgetSwapchain(XrSwapchain swapchain) {
             StripSwapchain(frame.copy, swapchain);
         }
     }
-    std::scoped_lock gpu_lock(gpu_mutex_);
+    std::unique_lock gpu_lock(gpu_mutex_, std::defer_lock);
+    if (!LockForTeardown(gpu_lock, "a swapchain being destroyed")) {
+        // The backend may still use its images: kept.
+        return false;
+    }
     bool idle = !gpu_stalled_;
     if (gpu_ && idle) {
         // A recent submission may still read or write this swapchain's
@@ -725,13 +876,17 @@ bool FrameGenPresenter::ForgetSwapchain(XrSwapchain swapchain) {
     if (!idle && logger_) {
         logger_->Error("Frame Generation: the GPU did not finish its work on a swapchain being destroyed within 6 s.");
     }
-    return idle;
+    return idle && submit_held;
 }
 
-void FrameGenPresenter::ForgetSpace(XrSpace space) {
+bool FrameGenPresenter::ForgetSpace(XrSpace space) {
     // As for swapchains: under submit_mutex_, no presenter-thread submission
-    // is using the space, and none will after this.
-    std::scoped_lock submit(submit_mutex_);
+    // is using the space, and none will after this. Without it (a presenter
+    // thread inside a runtime call past the teardown wait) the space is
+    // forgotten all the same and kept (false): the submission in flight may
+    // name it.
+    std::unique_lock submit(submit_mutex_, std::defer_lock);
+    const bool submit_held = LockForTeardown(submit, "a space being destroyed");
     std::scoped_lock lock(mutex_);
     StripSpace(newest_copy_, space);
     StripSpace(passthrough_copy_, space);
@@ -760,6 +915,7 @@ void FrameGenPresenter::ForgetSpace(XrSpace space) {
     if (last_real_.space == space) {
         InvalidateContinuityLocked();
     }
+    return submit_held;
 }
 
 void FrameGenPresenter::NoteRelease(XrSwapchain swapchain, std::uint32_t image_index) {
@@ -2953,6 +3109,7 @@ bool FrameGenPresenter::EnsureOutputs(const std::vector<OutputSpec>& specs, std:
                     // Unfinished GPU work may still write it: then it is left
                     // to the runtime, which frees it with the session.
                     std::scoped_lock submit(submit_mutex_);
+                    const PresenterCall call(*this, "xrDestroySwapchain");
                     xr_.destroy(output.swapchain);
                 }
                 output = {};
@@ -3064,6 +3221,7 @@ bool FrameGenPresenter::AcquireOutputs(std::size_t sets, std::string& error, boo
                 XrResult acquired;
                 {
                     std::scoped_lock submit(submit_mutex_);
+                    const PresenterCall call(*this, "xrAcquireSwapchainImage");
                     acquired = xr_.acquire(output.swapchain, &acquire, &output.index);
                 }
                 if (XR_FAILED(acquired)) {
@@ -3076,7 +3234,10 @@ bool FrameGenPresenter::AcquireOutputs(std::size_t sets, std::string& error, boo
             if (!output.waited) {
                 XrSwapchainImageWaitInfo wait{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};
                 wait.timeout = kOutputWaitTimeout;
-                const XrResult waited = xr_.wait(output.swapchain, &wait);
+                const XrResult waited = [&] {
+                    const PresenterCall call(*this, "xrWaitSwapchainImage");
+                    return xr_.wait(output.swapchain, &wait);
+                }();
                 if (waited == XR_TIMEOUT_EXPIRED) {
                     timed_out = true;
                     error = "output image wait timed out";
@@ -3102,6 +3263,7 @@ void FrameGenPresenter::ReleaseOutputs() {
             XrSwapchainImageReleaseInfo release{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
             {
                 std::scoped_lock submit(submit_mutex_);
+                const PresenterCall call(*this, "xrReleaseSwapchainImage");
                 xr_.release(output.swapchain, &release);
             }
             output.acquired = false;
@@ -3131,6 +3293,7 @@ void FrameGenPresenter::TrimOutputs(std::size_t keep) {
             // the runtime, which frees it with the session.
             if (ForgetSwapchain(output.swapchain)) {
                 std::scoped_lock submit(submit_mutex_);
+                const PresenterCall call(*this, "xrDestroySwapchain");
                 if (xr_.destroy) xr_.destroy(output.swapchain);
             }
         }
@@ -3153,12 +3316,14 @@ void FrameGenPresenter::DestroyRetiredOutputs() {
         if (output.acquired && output.waited) {
             XrSwapchainImageReleaseInfo release{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
             std::scoped_lock submit(submit_mutex_);
+            const PresenterCall call(*this, "xrReleaseSwapchainImage");
             xr_.release(output.swapchain, &release);
         }
         // Unfinished GPU work may still write it: then it is left to the
         // runtime, which frees it with the session.
         if (output.swapchain && ForgetSwapchain(output.swapchain)) {
             std::scoped_lock submit(submit_mutex_);
+            const PresenterCall call(*this, "xrDestroySwapchain");
             if (xr_.destroy) xr_.destroy(output.swapchain);
         }
     }
@@ -3171,6 +3336,7 @@ void FrameGenPresenter::DestroyOutputs() {
         for (Output& output : set) {
             if (output.swapchain && ForgetSwapchain(output.swapchain)) {
                 std::scoped_lock submit(submit_mutex_);
+                const PresenterCall call(*this, "xrDestroySwapchain");
                 if (xr_.destroy) xr_.destroy(output.swapchain);
             }
         }
@@ -3413,7 +3579,11 @@ XrFrameEndInfo FrameGenPresenter::BuildFrame(FrameCopy& copy, const std::vector<
 
 XrResult FrameGenPresenter::RuntimeWait(const FrameGenRuntimeCalls& calls, XrSession session, const XrFrameWaitInfo* info,
                                         XrFrameState* state) {
-    const XrResult result = calls.wait(session, info, state);
+    XrResult result = XR_SUCCESS;
+    {
+        const PresenterCall call(*this, "xrWaitFrame");
+        result = calls.wait(session, info, state);
+    }
     if (XR_SUCCEEDED(result)) {
         std::scoped_lock lock(mutex_);
         ++runtime_waits_;
@@ -3423,7 +3593,11 @@ XrResult FrameGenPresenter::RuntimeWait(const FrameGenRuntimeCalls& calls, XrSes
 
 XrResult FrameGenPresenter::RuntimeBegin(const FrameGenRuntimeCalls& calls, XrSession session,
                                          const XrFrameBeginInfo* info) {
-    const XrResult result = calls.begin(session, info);
+    XrResult result = XR_SUCCESS;
+    {
+        const PresenterCall call(*this, "xrBeginFrame");
+        result = calls.begin(session, info);
+    }
     if (XR_SUCCEEDED(result)) {
         std::scoped_lock lock(mutex_);
         ++runtime_begins_;
@@ -3436,7 +3610,11 @@ XrResult FrameGenPresenter::RuntimeBegin(const FrameGenRuntimeCalls& calls, XrSe
 }
 
 XrResult FrameGenPresenter::RuntimeEnd(const FrameGenRuntimeCalls& calls, XrSession session, const XrFrameEndInfo* info) {
-    const XrResult result = calls.submit(session, info);
+    XrResult result = XR_SUCCESS;
+    {
+        const PresenterCall call(*this, "xrEndFrame");
+        result = calls.submit(session, info);
+    }
     {
         std::scoped_lock lock(mutex_);
         // Counted even when the runtime rejects the frame: it is over either way.
@@ -3660,8 +3838,7 @@ void FrameGenPresenter::StartCompositorLocked(const FrameGenRuntimeCalls& calls)
     }
     // Pacing measured by an earlier run (another mode, rate or engagement)
     // does not describe this one.
-    lead_slots_ = 0;
-    lead_history_.clear();
+    ResetLeadLocked();
     dynamic_interval_slots_ = 0.0;
     begun_capture_marks_.clear();
     ++totals_.restarts;
@@ -3718,14 +3895,33 @@ void FrameGenPresenter::DropUnclaimedLocked() {
     }
 }
 
-void FrameGenPresenter::StopCompositorLocked(std::unique_lock<std::mutex>& lock) {
+bool FrameGenPresenter::StopCompositorLocked(std::unique_lock<std::mutex>& lock,
+                                             std::optional<std::chrono::milliseconds> limit) {
     // Also after the thread stopped itself: its frames would otherwise stay
     // in flight forever and hold every later wait.
     DropUnclaimedLocked();
     if (compositor_running_) {
         compositor_stop_ = true;
         WakeSlots();
-        slot_cv_.wait(lock, [&] { return !compositor_running_; });
+        // It stops at its next slot, unless a runtime call holds it: never
+        // waited on silently, and with a limit not past it.
+        const auto started = Clock::now();
+        const auto report = limit ? std::min(*limit, TeardownWait()) : TeardownWait();
+        bool reported = false;
+        while (!slot_cv_.wait_for(lock, std::chrono::milliseconds(20), [&] { return !compositor_running_; })) {
+            const auto waited = Clock::now() - started;
+            if (!reported && waited >= report) {
+                reported = true;
+                if (logger_) {
+                    logger_->Error("Frame Generation: its presenter thread has not stopped after " +
+                                   Number(std::chrono::duration<double>(waited).count(), 1) + " s (" +
+                                   PresenterActivity() + ")" + (limit ? "; it is left stopping." : "."));
+                }
+            }
+            if (limit && waited >= *limit) {
+                return false;
+            }
+        }
     }
     JoinCompositorLocked(lock);
     compositor_stop_ = compositor_drain_ = false;
@@ -3744,6 +3940,7 @@ void FrameGenPresenter::StopCompositorLocked(std::unique_lock<std::mutex>& lock)
     compositor_phase_ = "stopped";
     InvalidateContinuityLocked();
     WakeSlots();
+    return true;
 }
 
 void FrameGenPresenter::ExitThreadedLocked(std::unique_lock<std::mutex>& lock) {
@@ -3765,26 +3962,75 @@ void FrameGenPresenter::ExitThreadedLocked(std::unique_lock<std::mutex>& lock) {
 
 void FrameGenPresenter::UpdateLeadLocked(bool late, std::optional<double> slack_ms, std::uint32_t lead,
                                          std::uint32_t multiplier) {
-    // Frames predicted with an older lead say nothing about this one.
-    if (lead < lead_slots_) {
+    const auto now = Clock::now();
+    if (lead_calm_since_ == Clock::time_point{}) {
+        lead_calm_since_ = now;
+    }
+    // A probe nothing late undid within its judging time: its lead holds.
+    if (lead_probe_ && now - lead_probe_->at >= lead_policy_.judge) {
+        if (lead_floor_ == 0 || lead_slots_ < lead_floor_) {
+            lead_floor_ = lead_slots_;
+            lead_explore_after_ = lead_policy_.explore_after;
+        }
+        lead_probe_.reset();
+    }
+    // Frames predicted with another lead say nothing about this one (those
+    // in flight across a step would move it twice, or judge a probe by
+    // frames it never set).
+    if (lead == lead_slots_ && lead_probe_ && lead_probe_->grace > 0) {
+        --lead_probe_->grace;
+    } else if (lead == lead_slots_) {
+        const double period_ms = static_cast<double>(std::max<XrDuration>(last_period_, 1)) / 1e6;
+        // Slack: it could have arrived a refresh later and still made its slot.
+        lead_history_.push_back(late ? 1 : (slack_ms && *slack_ms > period_ms * 1.1) ? 2 : 0);
+        while (lead_history_.size() > 10) {
+            lead_history_.pop_front();
+        }
+        const auto count = [&](std::uint8_t kind) {
+            return static_cast<std::size_t>(std::count(lead_history_.begin(), lead_history_.end(), kind));
+        };
+        if (count(1) >= 2) {
+            if (lead_probe_) {
+                // The probe failed: the lead before it is the lowest known to
+                // hold, and below it is tried only rarely (more rarely after
+                // each failure there).
+                const bool exploring = lead_floor_ != 0 && lead_probe_->from <= lead_floor_;
+                lead_floor_ = lead_probe_->from;
+                lead_explore_after_ = exploring ? std::min(lead_explore_after_ * 2, lead_policy_.explore_max)
+                                                : lead_policy_.explore_after;
+                lead_probe_.reset();
+                ++totals_.lead_probes_failed;
+            }
+            lead_slots_ = std::min(lead_slots_ + 1, 4 * multiplier);
+            ++totals_.lead_ups;
+            lead_history_.clear();
+            lead_calm_since_ = now;
+            return;
+        }
+        if (lead_history_.size() >= 8 && count(2) >= 7 && lead_slots_ > 1) {
+            --lead_slots_;
+            ++totals_.lead_downs;
+            lead_history_.clear();
+            lead_calm_since_ = now;
+            return;
+        }
+    }
+    // Calm: one slot less (a probe), every probe_after down to the lowest
+    // lead known to hold, below it every lead_explore_after_. A burst of
+    // hitches leaves latency for seconds, not for good.
+    if (lead_probe_ || lead_slots_ <= 1) {
         return;
     }
-    const double period_ms = static_cast<double>(std::max<XrDuration>(last_period_, 1)) / 1e6;
-    // Slack: it could have arrived a refresh later and still made its slot.
-    lead_history_.push_back(late ? 1 : (slack_ms && *slack_ms > period_ms * 1.1) ? 2 : 0);
-    while (lead_history_.size() > 10) {
-        lead_history_.pop_front();
+    const auto wait =
+        lead_floor_ != 0 && lead_slots_ <= lead_floor_ ? lead_explore_after_ : lead_policy_.probe_after;
+    if (now - lead_calm_since_ < wait) {
+        return;
     }
-    const auto count = [&](std::uint8_t kind) {
-        return static_cast<std::size_t>(std::count(lead_history_.begin(), lead_history_.end(), kind));
-    };
-    if (count(1) >= 2) {
-        lead_slots_ = std::min(lead_slots_ + 1, 4 * multiplier);
-        lead_history_.clear();
-    } else if (lead_history_.size() >= 8 && count(2) >= 7 && lead_slots_ > 1) {
-        --lead_slots_;
-        lead_history_.clear();
-    }
+    lead_probe_ = LeadProbe{now, lead_slots_};
+    --lead_slots_;
+    ++totals_.lead_probes;
+    lead_history_.clear();
+    lead_calm_since_ = now;
 }
 
 void FrameGenPresenter::ScoreLeadLocked(JitFrame& frame, bool late) {
@@ -3921,8 +4167,8 @@ std::optional<XrResult> FrameGenPresenter::ThreadedWaitLocked(std::unique_lock<s
                               [&] { return !compositor_running_ || slot_index_ >= release; })) {
         if (logger_ && !logged_watchdog_) {
             logged_watchdog_ = true;
-            logger_->Error(std::string("Frame Generation: the presenter thread has published no refresh for 2 s (it is ") +
-                           compositor_phase_ + ").");
+            logger_->Error("Frame Generation: the presenter thread has published no refresh for 2 s (" +
+                           PresenterActivity() + ").");
         }
     }
     if (!compositor_running_) {
@@ -4134,9 +4380,7 @@ XrResult FrameGenPresenter::ThreadedEnd(XrSession session, const XrFrameEndInfo&
     })) {
         if (logger_ && !logged_watchdog_) {
             logged_watchdog_ = true;
-            logger_->Error(std::string("Frame Generation: a real frame has waited 2 s for a slot (the presenter thread "
-                                       "is ") +
-                           compositor_phase_ + ").");
+            logger_->Error("Frame Generation: a real frame has waited 2 s for a slot (" + PresenterActivity() + ").");
         }
     }
     if (!slot_offer_ || slot_offer_->frame_id != frame.id) {
@@ -4377,7 +4621,10 @@ void FrameGenPresenter::SummaryLocked(Clock::time_point now) {
             ", distinctFps=" + Number(PerSecond(delta(&Totals::distinct), seconds), 1) +
             ", standbyS=" + Number(standby - summary_standby_seconds_, 1) +
             ", repeatedFrames=" + std::to_string(repeated_submissions_) + ", appLatencyMs=" + Number(app_latency_ms_, 1) +
-            ", leadSlots=" + std::to_string(lead_slots_) +
+            ", leadSlots=" + std::to_string(lead_slots_) + ", leadFloor=" + std::to_string(lead_floor_) +
+            ", leadMoves=+" + std::to_string(delta(&Totals::lead_ups)) + "/-" +
+            std::to_string(delta(&Totals::lead_downs)) + ", leadProbes=" + std::to_string(delta(&Totals::lead_probes)) +
+            "/" + std::to_string(delta(&Totals::lead_probes_failed)) +
             ", appWorkMs=" + Number(app_work_frames_ ? app_work_ms_ / app_work_frames_ : 0.0, 1) +
             ", lateReal=" + std::to_string(delta(&Totals::late_cpu)) + "/" + std::to_string(delta(&Totals::late_gpu)) +
             ", skippedGenerated=" + std::to_string(skipped_generated_) + ", generated=+" +
@@ -4964,6 +5211,7 @@ bool FrameGenPresenter::SynthesizeJit(std::optional<JitFrame>& source, JitChoice
             XrResult acquired;
             {
                 std::scoped_lock submit(submit_mutex_);
+                const PresenterCall call(*this, "xrAcquireSwapchainImage");
                 acquired = xr_.acquire(output.swapchain, &acquire, &output.index);
             }
             if (XR_FAILED(acquired)) {
@@ -4980,7 +5228,10 @@ bool FrameGenPresenter::SynthesizeJit(std::optional<JitFrame>& source, JitChoice
         if (!output.waited) {
             XrSwapchainImageWaitInfo wait{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};
             wait.timeout = kOutputWaitTimeout;
-            const XrResult waited = xr_.wait(output.swapchain, &wait);
+            const XrResult waited = [&] {
+                const PresenterCall call(*this, "xrWaitSwapchainImage");
+                return xr_.wait(output.swapchain, &wait);
+            }();
             if (XR_FAILED(waited) || waited == XR_TIMEOUT_EXPIRED) {
                 // Kept acquired: waited for again next refresh.
                 std::scoped_lock lock(mutex_);
@@ -5041,6 +5292,7 @@ bool FrameGenPresenter::SynthesizeJit(std::optional<JitFrame>& source, JitChoice
         XrSwapchainImageReleaseInfo release{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
         {
             std::scoped_lock submit(submit_mutex_);
+            const PresenterCall call(*this, "xrReleaseSwapchainImage");
             xr_.release(output.swapchain, &release);
         }
         output.acquired = false;
@@ -5099,6 +5351,7 @@ void FrameGenPresenter::CompositorLoop() {
     // game saturates the CPU.
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
     SetThreadDescription(GetCurrentThread(), L"VectorXR Frame Generation presenter");
+    compositor_thread_id_ = GetCurrentThreadId();
     std::unique_lock lock(mutex_);
     const FrameGenRuntimeCalls calls = compositor_calls_;
     const XrSession session = session_;
@@ -5553,6 +5806,7 @@ void FrameGenPresenter::CompositorLoop() {
         DestroyRetiredOutputs();
         lock.lock();
     }
+    compositor_thread_id_ = 0;
     compositor_running_ = false;
     compositor_phase_ = "stopped";
     slot_request_.reset();
@@ -5600,6 +5854,11 @@ FrameGenStatus FrameGenPresenter::Status() const {
     status.dynamic_probes = dynamic_probes_;
     status.threaded = compositor_running_;
     status.lead_slots = lead_slots_;
+    status.lead_floor = lead_floor_;
+    status.lead_ups = totals_.lead_ups;
+    status.lead_downs = totals_.lead_downs;
+    status.lead_probes = totals_.lead_probes;
+    status.lead_probes_failed = totals_.lead_probes_failed;
     status.late_cpu = totals_.late_cpu;
     status.late_gpu = totals_.late_gpu;
     status.gpu_gating = gpu_gate_enabled_ && gpu_gate_armed_;

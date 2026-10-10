@@ -5,6 +5,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <filesystem>
+#include <functional>
 #include <future>
 #include <map>
 #include <memory>
@@ -824,6 +825,17 @@ class OpenXrLayer {
     // `unavailable`: Frame Generation cannot run this session (a Vulkan
     // session without the Vulkan bridge), for that reason.
     void StartFrameGen(XrSession session, const void* binding_chain, const std::string& unavailable = {});
+    // A session (or its instance) is going: Frame Generation's presenter
+    // thread is stopped within its teardown wait. One a runtime holds inside
+    // a call is let go by ending the runtime's session (a runtime may hold
+    // its waits until then); one that still never leaves is left behind
+    // (FrameGenPresenter::AbandonPresenter), and the session and instance
+    // are then kept downstream for the process's exit. `step` names what
+    // the teardown waits on (TeardownWatch::Step).
+    void StopFrameGenPresenterForTeardown(XrSession session, const std::function<void(const char*)>& step);
+    // A presenter thread was left behind: neither this module nor the one
+    // below it (the runtime) may be unloaded under it.
+    void PinModulesForAbandonedPresenter();
     // Frame Generation is latched per session. While it owns pacing, the app's
     // Wait/Begin/End go to the presenter and Turbo stays off for the session.
     FrameGenPresenter framegen_;
