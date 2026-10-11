@@ -160,6 +160,7 @@ struct GpuLog {
     std::atomic<int> executes{0};
     std::atomic<int> captures{0};
     int wait_idles{0};
+    bool idle_fails{false}; // WaitIdle reports GPU work that did not finish
     bool fail{false};
     bool uncaptured{false}; // views not captured at release: nothing generated
     bool threaded{false};
@@ -698,7 +699,7 @@ class FakeGpu final : public FrameGenGpu {
     }
     bool WaitIdle() override {
         ++log_->wait_idles;
-        return true;
+        return !log_->idle_fails;
     }
     void ResetHistory() override { history_.clear(); }
     void Reset() override {}
@@ -1959,6 +1960,24 @@ void TestTeardownPresenterHeldInSubmit() {
 // stop gives up within the teardown wait; once the session ends (the held
 // wait fails) the thread stops, nothing is left behind, and the next
 // session presents again.
+// A session whose teardown found GPU work unfinished keeps its swapchains,
+// for the runtime to free with the session. The next session, here one
+// without Frame Generation (never Started), owes that work nothing: its
+// swapchains are destroyed downstream as usual.
+void TestStalledTeardownDoesNotKeepLaterSwapchains() {
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    StartPresenter(presenter, gpu, FrameGenSynthesisMode::kExtrapolate);
+    gpu.idle_fails = true;
+    presenter.Stop();
+    Check(!presenter.ForgetSwapchain(kLeft), "stalled teardown: the session's own swapchain is kept");
+    gpu.idle_fails = false;
+    presenter.BeginSession();
+    Check(presenter.ForgetSwapchain(kRight), "stalled teardown: a later session's swapchain is destroyed");
+    Check(presenter.ForgetSwapchain(reinterpret_cast<XrSwapchain>(0x77)),
+          "stalled teardown: an untracked later swapchain is destroyed");
+}
+
 void TestTeardownPresenterReleasedBySessionEnd() {
     FrameGenPresenter presenter;
     GpuLog gpu;
@@ -6431,6 +6450,7 @@ int main(int argc, char** argv) {
         RUN(TestThreadedRuntimeFailureRecovers);
         RUN(TestTeardownPresenterHeldInSubmit);
         RUN(TestTeardownPresenterReleasedBySessionEnd);
+        RUN(TestStalledTeardownDoesNotKeepLaterSwapchains);
         RUN(TestThreadedPauseRetryMsfsTiming);
         RUN(TestThreadedDestroyedSpace);
         RUN(TestThreadedKeepsOtherLayers);

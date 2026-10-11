@@ -946,6 +946,10 @@ class OpenXrLayer {
     FrameGenRuntimeCalls framegen_calls_;
     std::atomic<bool> framegen_owns_pacing_{false};
     bool framegen_session_enabled_{false};  // mutex_
+    // A session of this instance started with Frame Generation on: its
+    // teardown calls are watched (TeardownWatch). Sessions without it log
+    // their teardown as 0.19 did.
+    std::atomic<bool> framegen_teardowns_watched_{false};
     bool turbo_yielded_to_framegen_{false}; // mutex_
     bool framegen_toggle_binding_was_down_{false};
     bool framegen_binding_down_cached_{false};

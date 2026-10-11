@@ -21,16 +21,17 @@ namespace depthxr {
 // seconds, so a teardown that never returns still says where it is. A call
 // that was reported logs when it returns. `context` runs on the timer's
 // thread while the call runs: it must not take a lock the call may hold.
+// An unarmed watch (Frame Generation never ran) reports nothing.
 class TeardownWatch {
   public:
     using Clock = std::chrono::steady_clock;
 
     TeardownWatch(Logger& logger, const char* call, std::chrono::milliseconds report_after,
-                  std::function<std::string()> context)
+                  std::function<std::string()> context, bool armed = true)
         : logger_(logger), call_(call), context_(std::move(context)), started_(Clock::now()) {
         const DWORD due = static_cast<DWORD>(std::clamp<long long>(report_after.count(), 1, 600000));
-        if (!CreateTimerQueueTimer(&timer_, nullptr, &TeardownWatch::Fire, this, due, kRepeatMs,
-                                   WT_EXECUTEDEFAULT)) {
+        if (!armed || !CreateTimerQueueTimer(&timer_, nullptr, &TeardownWatch::Fire, this, due, kRepeatMs,
+                                             WT_EXECUTEDEFAULT)) {
             timer_ = nullptr;
         }
     }

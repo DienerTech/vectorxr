@@ -1891,6 +1891,7 @@ XrResult OpenXrLayer::OnInstanceCreated(const XrInstanceCreateInfo* create_info,
 
     instance_ = instance;
     ResetInstanceState();
+    framegen_teardowns_watched_.store(false, std::memory_order_release);
     turbo_clock_enabled_ = diagnostics.turbo_clock_enabled;
     d3d12_extension_enabled_ = diagnostics.d3d12_enabled;
     vulkan_enable_version_ = diagnostics.vulkan_enable_version;
@@ -2178,7 +2179,8 @@ XrResult OpenXrLayer::GetInstanceProcAddr(XrInstance instance, const char* name,
 XrResult OpenXrLayer::DestroyInstance(XrInstance instance) {
     logger_.Info("xrDestroyInstance requested by application.");
     TeardownWatch watch(logger_, "xrDestroyInstance", framegen_.TeardownWait(),
-                        [this] { return framegen_.PresenterActivity(); });
+                        [this] { return framegen_.PresenterActivity(); },
+                        framegen_teardowns_watched_.load(std::memory_order_acquire));
     // Join the watcher before taking mutex_: it may be mid-PollConfigFile
     // holding the lock, so stopping it under mutex_ would deadlock.
     watch.Step("stopping the layer's background work");
@@ -2628,7 +2630,8 @@ XrResult OpenXrLayer::CreateSession(XrInstance instance,
 XrResult OpenXrLayer::DestroySession(XrSession session) {
     logger_.Info("xrDestroySession requested by application.");
     TeardownWatch watch(logger_, "xrDestroySession", framegen_.TeardownWait(),
-                        [this] { return framegen_.PresenterActivity(); });
+                        [this] { return framegen_.PresenterActivity(); },
+                        framegen_teardowns_watched_.load(std::memory_order_acquire));
     // Join any in-flight turbo async wait before tearing the session down.
     watch.Step("joining Turbo's in-flight wait");
     ResetTurboFrameState();
@@ -2819,7 +2822,8 @@ XrResult OpenXrLayer::BeginSession(XrSession session, const XrSessionBeginInfo* 
 XrResult OpenXrLayer::EndSession(XrSession session) {
     logger_.Info("xrEndSession requested by application.");
     TeardownWatch watch(logger_, "xrEndSession", framegen_.TeardownWait(),
-                        [this] { return framegen_.PresenterActivity(); });
+                        [this] { return framegen_.PresenterActivity(); },
+                        framegen_teardowns_watched_.load(std::memory_order_acquire));
     // A presenter thread a runtime holds inside a call (its waits once the
     // session is stopping, until it ends) is stopped again once the
     // runtime's session has ended below.
@@ -3870,7 +3874,8 @@ XrResult OpenXrLayer::CreateSwapchain(XrSession session,
 
 XrResult OpenXrLayer::DestroySwapchain(XrSwapchain swapchain) {
     TeardownWatch watch(logger_, "xrDestroySwapchain", framegen_.TeardownWait(),
-                        [this] { return framegen_.PresenterActivity(); });
+                        [this] { return framegen_.PresenterActivity(); },
+                        framegen_teardowns_watched_.load(std::memory_order_acquire));
     // A pipelined turbo frame may still hold onto this swapchain; let the
     // async xrWaitFrame finish before the swapchain goes away. Bounded: an
     // interlocked runtime releases that wait only on the app's next submit,
@@ -9999,7 +10004,8 @@ XrResult OpenXrLayer::LocateViews(XrSession session,
 
 XrResult OpenXrLayer::DestroySpace(XrSpace space) {
     TeardownWatch watch(logger_, "xrDestroySpace", framegen_.TeardownWait(),
-                        [this] { return framegen_.PresenterActivity(); });
+                        [this] { return framegen_.PresenterActivity(); },
+                        framegen_teardowns_watched_.load(std::memory_order_acquire));
     // Frame Generation may still repeat a frame that refers to this space.
     watch.Step("Frame Generation letting the space go");
     if (!framegen_.ForgetSpace(space)) {
@@ -13222,7 +13228,9 @@ void OpenXrLayer::StartFrameGen(XrSession session, const void* binding_chain, co
     framegen_binding_down_cached_ = false;
     framegen_binding_last_poll_time_.reset();
     framegen_toggle_pressed_.reset();
+    framegen_.BeginSession();
     if (framegen_session_enabled_) {
+        framegen_teardowns_watched_.store(true, std::memory_order_release);
         framegen_calls_.wait = [this](XrSession s, const XrFrameWaitInfo* i, XrFrameState* f) {
             return TraceRuntimeWaitFrame(s, i, f);
         };

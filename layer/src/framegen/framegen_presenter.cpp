@@ -246,6 +246,14 @@ FrameGenPresenter::~FrameGenPresenter() {
     }
 }
 
+void FrameGenPresenter::BeginSession() {
+    // As Start: what an abandoned thread still uses is never reset under it
+    // (and its GPU lock may be held for good).
+    if (abandoned_) return;
+    std::scoped_lock lock(gpu_mutex_);
+    gpu_stalled_ = false;
+}
+
 void FrameGenPresenter::Start(XrSession session, const void* binding_chain, const FrameGenSwapchainDispatch& dispatch,
                               Logger* logger, std::mutex* queue_mutex, GpuFactory factory) {
     Stop();

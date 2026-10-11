@@ -255,6 +255,10 @@ class FrameGenPresenter {
     void Start(XrSession session, const void* binding_chain, const FrameGenSwapchainDispatch& dispatch,
                Logger* logger, std::mutex* queue_mutex, GpuFactory factory = CreateFrameGenGpu);
     void Stop();
+    // At every session's start, Frame Generation on or off: GPU work an
+    // earlier session's teardown found unfinished went with that session's
+    // swapchains, so a later session's swapchains are never kept for it.
+    void BeginSession();
     // Started with a working GPU backend; such a session keeps frame pacing
     // away from Turbo even while toggled off, so toggling never races Turbo.
     bool OwnsPacing() const;
