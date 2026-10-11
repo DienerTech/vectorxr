@@ -15,7 +15,7 @@ signed layer into Program Files and registers it; Windows asks for an administra
 Guards:
 - Refuses a checkout with uncommitted changes to tracked files; -AllowDirty overrides, and
   the ledger records it.
-- Refuses a DLL older than the last commit that changed the layer's sources; rebuild first.
+- Refuses a DLL older than any of the layer's source files; rebuild first.
 - The signing client is a pinned NuGet package, checked against its SHA256 when it is
   downloaded and against Microsoft's signature before every use.
 - Only the Azure CLI credential is offered to Azure, and only the file's digest is sent.
@@ -126,14 +126,17 @@ foreach ($path in @($sourceDll, $sourceManifest)) {
         throw "'$path' was not found. Build the layer first (scripts\Build-Layer.ps1 -Configuration $Configuration)."
     }
 }
-$sourcesTime = Invoke-Git $repoRoot (@("log", "-1", "--format=%ct", "--") + $LayerSources)
-if ($sourcesTime) {
-    $sourcesChanged = [DateTimeOffset]::FromUnixTimeSeconds([int64]$sourcesTime).UtcDateTime
-    $built = (Get-Item -LiteralPath $sourceDll).LastWriteTimeUtc
-    if ($built -lt $sourcesChanged) {
-        throw "'$sourceDll' was built at $($built.ToString('u')), before the layer's last committed change " +
-              "($($sourcesChanged.ToString('u'))): rebuild it."
-    }
+# Built from these sources: none of the layer's tracked files is newer than the
+# DLL (with the checkout clean, they are the commit's). Commit times would not
+# do: building, testing, then committing leaves the DLL older than its commit,
+# and a rebuild of unchanged sources does not relink it.
+$built = (Get-Item -LiteralPath $sourceDll).LastWriteTimeUtc
+$newest = Invoke-Git $repoRoot (@("ls-files", "--") + $LayerSources) | Where-Object { $_ } |
+    ForEach-Object { Get-Item -LiteralPath (Join-Path $repoRoot $_) -ErrorAction SilentlyContinue } |
+    Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 1
+if ($newest -and $newest.LastWriteTimeUtc -gt $built) {
+    throw "'$sourceDll' was built at $($built.ToString('u')), before '$($newest.FullName)' last changed " +
+          "($($newest.LastWriteTimeUtc.ToString('u'))): rebuild it."
 }
 
 # --- Settings: the release workflow's variables, else the local file.
