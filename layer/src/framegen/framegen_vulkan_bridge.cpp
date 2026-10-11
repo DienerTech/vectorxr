@@ -425,6 +425,7 @@ struct VulkanBridge::Impl {
     std::vector<double> copy_gpu_us;
     std::size_t next_copy_sample{0};
     std::function<void(const std::string&)> log;
+    std::function<void(const std::string&)> info_log;
 
     XrGraphicsBindingD3D12KHR binding{XR_TYPE_GRAPHICS_BINDING_D3D12_KHR};
     XrSessionCreateInfo info{XR_TYPE_SESSION_CREATE_INFO};
@@ -432,6 +433,15 @@ struct VulkanBridge::Impl {
     void Log(const std::string& message) const {
         if (log) {
             log("Vulkan bridge: " + message);
+        }
+    }
+
+    // Only worth knowing, not a problem (VulkanBridge::SetInfoLog).
+    void Info(const std::string& message) const {
+        if (info_log) {
+            info_log("Vulkan bridge: " + message);
+        } else {
+            Log(message);
         }
     }
 
@@ -449,7 +459,7 @@ struct VulkanBridge::Impl {
             return;
         }
         reported_second_thread = true;
-        Log("the game's swapchain and frame calls come from more than one thread (" + std::to_string(current) +
+        Info("the game's swapchain and frame calls come from more than one thread (" + std::to_string(current) +
             ", first " + std::to_string(thread) + "); the bridge submits to the game's queue only inside them.");
     }
 
@@ -1398,6 +1408,14 @@ void VulkanBridge::SetLog(std::function<void(const std::string&)> log) {
     }
 }
 
+void VulkanBridge::SetInfoLog(std::function<void(const std::string&)> log) {
+    info_log_ = std::move(log);
+    if (impl_) {
+        std::scoped_lock lock(impl_->mutex);
+        impl_->info_log = info_log_;
+    }
+}
+
 const XrSessionCreateInfo* VulkanBridge::Begin(XrInstance instance, const XrSessionCreateInfo* info,
                                                PFN_xrGetInstanceProcAddr get_instance_proc_addr,
                                                const VulkanBridgeGame& game, std::string& reason,
@@ -1428,6 +1446,7 @@ const XrSessionCreateInfo* VulkanBridge::Begin(XrInstance instance, const XrSess
     impl->family = vulkan_binding.queueFamilyIndex;
     impl->queue_index = vulkan_binding.queueIndex;
     impl->log = log_;
+    impl->info_log = info_log_;
     Vulkan& vk = impl->vk;
 
     // The game's own vkGetInstanceProcAddr, else the loader's it already
@@ -1916,7 +1935,7 @@ bool VulkanBridge::AddSwapchain(XrSwapchain swapchain, const XrSwapchainCreateIn
                 // the game: the depth stays the game's own.
                 chain.plan.mode = Impl::Mode::kPrivate;
                 chain.private_reason = "the runtime's depth images are not depth targets";
-                impl.Log("a depth swapchain stays private: " + chain.private_reason + ".");
+                impl.Info("a depth swapchain stays private: " + chain.private_reason + ".");
                 break;
             }
         }

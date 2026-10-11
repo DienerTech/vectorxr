@@ -63,6 +63,10 @@ class VulkanBridge {
 
     // Where retirements that leaked, skipped copies and refused submissions are reported.
     void SetLog(std::function<void(const std::string&)> log);
+    // Where what is only worth knowing is reported (the game's frame calls
+    // from several threads, a depth swapchain kept private); without it,
+    // the log above.
+    void SetInfoLog(std::function<void(const std::string&)> log);
 
     // The Vulkan extensions the bridge needs on the game's instance and device:
     // XR_KHR_vulkan_enable's extension lists and XR_KHR_vulkan_enable2's create
@@ -189,6 +193,7 @@ class VulkanBridge {
     struct Impl;
     std::unique_ptr<Impl> impl_;
     std::function<void(const std::string&)> log_;
+    std::function<void(const std::string&)> info_log_;
     bool queried_d3d12_requirements_{false};
 };
 

@@ -2301,6 +2301,7 @@ XrResult OpenXrLayer::CreateSession(XrInstance instance,
                 } else {
                     std::string reason;
                     vulkan_bridge_.SetLog([this](const std::string& message) { logger_.Error(message); });
+                    vulkan_bridge_.SetInfoLog([this](const std::string& message) { logger_.Info(message); });
                     const XrSessionCreateInfo* bridged = vulkan_bridge_.Begin(
                         instance, create_info, next_get_instance_proc_addr_, game, reason, bridge_description);
                     vulkan_queried_d3d12 = vulkan_bridge_.QueriedD3D12Requirements();
