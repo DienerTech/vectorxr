@@ -275,7 +275,6 @@ VectorXR exists in the wider OpenXR community, and several open source projects 
 - [Quad-Views-Foveated](https://github.com/mbucchia/Quad-Views-Foveated) by mbucchia: an OpenXR API layer for quad views and foveated rendering. It has been a major reference point for real-world OpenXR API layer behavior and compatibility concerns.
 - [OpenXR API Layers GUI](https://github.com/fredemmott/OpenXR-API-Layers-GUI) by Fred Emmott: a Windows tool for viewing, enabling, disabling, and reordering OpenXR API layers. It directly inspired VectorXR's built-in OpenXR layer management experience.
 - [XrNeckSafer](https://gitlab.com/NobiWan/xrnecksafer) by NobiWan: an OpenXR neck-saver utility that helped prove how useful runtime rotation assistance can be for seated VR and flight simulation setups.
-- [OFXR-Bridge](https://github.com/tig3rmast3r/OFXR-Bridge) by tig3rmast3r, and its [fork](https://github.com/djules75/OFXR-Bridge) by djules75: an OpenXR API layer that inserts an optical-flow generated frame between rendered frames. It showed how well layer-level frame generation can work and inspired VectorXR's Frame Generation.
 
 Thank you to the maintainers and contributors behind these projects.
 

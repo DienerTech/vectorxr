@@ -528,8 +528,7 @@ instead (2x, 3x, 4x, or Auto).
 Generated frames come from GPU optical flow measured on the final color images the game
 submits. VectorXR removes your head rotation from the flow before matching, because the
 runtime's own reprojection already handles head rotation, so the flow follows world,
-vehicle, and object motion. The approach is inspired by
-[OFXR-Bridge](https://github.com/tig3rmast3r/OFXR-Bridge).
+vehicle, and object motion.
 
 Frame Generation is experimental. Keep the Default Profile off and enable it per game after
 comparing it in the headset.
