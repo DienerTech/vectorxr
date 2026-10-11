@@ -269,6 +269,35 @@ int main(int argc, char** argv) {
             Check(layout.empty==((flags&(63|128))==0 && options.compact_metrics=="none"),"Empty compact detection failed");
         }
         Check(tallest_compact==kWorstCompactHeight,"The compact worst case changed; re-derive it against the OSD texture");
+        {
+            // Everything that grows the panel at once, as a Frame Generation
+            // session of an app with Snap Views draws it: rasterized, within
+            // the texture, and nothing past the panel's edges.
+            OsdSettings all{};
+            all.show_brand=all.show_app=all.show_runtime=all.show_clock=true;
+            all.show_graph=all.show_turbo=all.show_framegen=all.show_pivot=all.show_modules=true;
+            all.compact_show_brand=all.compact_show_app=all.compact_show_runtime=all.compact_show_clock=true;
+            all.compact_metrics="all";
+            all.compact_show_turbo=all.compact_show_framegen=all.compact_show_pivot=true;
+            auto busy=Snapshot();
+            busy.framegen_session=true; busy.framegen_badge="ON"; busy.framegen_fps=90;
+            busy.framegen="On  /  Interpolate  /  Dynamic"; busy.framegen_detail="45 -> 90 fps  /  GPU 3.1 ms";
+            busy.compact_framegen="Dynamic  /  45 -> 90 fps";
+            busy.pivot="Motion: Active / Continuous + Position / Flight"; busy.compact_pivot="Motion: Cont Active + Position";
+            busy.pivot_secondary="Snap: Active / Stacked + Nudge / Check Six / Views";
+            busy.compact_pivot_secondary="Snap: Active / Stacked + Nudge";
+            const auto expanded=RasterizeOsd(all,false,busy,stats,false);
+            const auto compact=RasterizeOsd(all,true,busy,stats,false);
+            // Header and metrics 210, graph 156, Turbo 52, Frame Gen with its
+            // detail 80, Pivot with its snap line 84, enhancements 52, restart 48.
+            Check(expanded.Valid() && expanded.height==210+156+52+80+84+52+48 && expanded.height<=OsdBitmap::texture_height,
+                  "The expanded worst case escaped the OSD texture");
+            Check(compact.Valid() && compact.height==kWorstCompactHeight,"The compact worst case rasterized at another height");
+            for(const OsdBitmap* raster:{&expanded,&compact})
+                for(int y=0;y<raster->height;++y) for(int x=0;x<OsdBitmap::width;++x)
+                    if(x<3 || y<3 || x>=raster->content_width-3 || y>=raster->height-3)
+                        Check(raster->pixels[y*OsdBitmap::width+x]==0,"The worst-case OSD drew past its panel");
+        }
         std::cout<<"Two rasters (includes initial LUT): "<<std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count()<<" ms\n";
         stats.Tick(now+std::chrono::seconds(2)); Check(stats.samples.empty(),"Paused session polluted frame history");
         for(int i=0;i<140;++i) stats.Tick(now+std::chrono::seconds(3)+std::chrono::milliseconds(i*11));
