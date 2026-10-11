@@ -15,6 +15,7 @@
 #include <Windows.h>
 
 #include "depthxr/openxr_layer.h"
+#include "depthxr/framegen_gpu.h"
 #include "depthxr/turbo_metrics.h"
 
 using namespace std::chrono_literals;
@@ -265,6 +266,70 @@ class TurboFrameTestPeer {
         OpenXrLayer& layer = Layer();
         layer.StopTurboAsyncWorker();
         layer.ResetTurboFrameState();
+    }
+
+    // Starts Frame Generation through the layer's own session hook, with a
+    // fake GPU backend and fake swapchain entry points.
+    static void PrepareFrameGen(XrSession session, FrameGenPresenter::GpuFactory factory,
+                                const FrameGenSwapchainDispatch& xr) {
+        OpenXrLayer& layer = Layer();
+        std::scoped_lock lock(layer.mutex_);
+        layer.resolved_settings_.framegen.enabled = true;
+        // Auto starts at full rate; these tests need an engaged 2x session.
+        layer.resolved_settings_.framegen.multiplier = FrameGenMultiplier::k2;
+        layer.next_enumerate_swapchain_formats_ = xr.formats;
+        layer.next_create_swapchain_ = xr.create;
+        layer.next_destroy_swapchain_ = xr.destroy;
+        layer.next_enumerate_swapchain_images_ = xr.images;
+        layer.next_acquire_swapchain_image_ = xr.acquire;
+        layer.next_wait_swapchain_image_ = xr.wait;
+        layer.next_release_swapchain_image_ = xr.release;
+        layer.framegen_gpu_factory_ = std::move(factory);
+        layer.StartFrameGen(session, nullptr);
+        layer.framegen_.SetEngagementPolicy(2, std::chrono::milliseconds(0));
+    }
+
+    static void StopFrameGen() {
+        OpenXrLayer& layer = Layer();
+        std::scoped_lock lock(layer.mutex_);
+        layer.framegen_.Stop();
+        layer.framegen_owns_pacing_.store(false);
+        layer.framegen_session_enabled_ = false;
+        layer.turbo_yielded_to_framegen_ = false;
+        layer.framegen_gpu_factory_ = CreateFrameGenGpu;
+        layer.resolved_settings_.framegen = {};
+    }
+
+    // A session Frame Generation latches starts with no frame of Turbo's open:
+    // the harness otherwise models a Turbo pipeline mid-flight.
+    static void FreshSession() {
+        auto& layer = Layer();
+        std::scoped_lock lock(layer.turbo_mutex_);
+        layer.turbo_frame_begun_ = false;
+        layer.turbo_begin_owed_ = false;
+    }
+    // A settings.json reload: a new document, re-resolved as the frame loop does.
+    static void ReloadConfig(const ConfigDocument& config) {
+        auto& layer = Layer();
+        std::scoped_lock lock(layer.mutex_);
+        layer.config_ = config;
+        ++layer.config_generation_;
+        layer.RefreshResolvedSettings();
+    }
+    static bool TurboEffective() { return Layer().turbo_effective_active_.load(); }
+    static bool TurboYielded() {
+        auto& layer = Layer();
+        std::scoped_lock lock(layer.mutex_);
+        return layer.turbo_yielded_to_framegen_;
+    }
+    static FrameGenPresenter& FrameGen() { return Layer().framegen_; }
+    static bool FrameGenOwnsPacing() { return Layer().framegen_owns_pacing_.load(); }
+    static bool TurboInterceptionRequired() { return Layer().turbo_frame_interception_required_.load(); }
+    static bool TurboConfigured() { return Layer().resolved_settings_.turbo.enabled; }
+    static OsdSnapshot Snapshot() {
+        OpenXrLayer& layer = Layer();
+        std::scoped_lock lock(layer.mutex_);
+        return layer.BuildOsdSnapshot();
     }
 
     static XrResult ForwardEndFrame(XrSession session, const XrFrameEndInfo* frame_end_info) {
@@ -803,6 +868,63 @@ XrResult AppBegin() {
     const XrFrameBeginInfo begin_info{XR_TYPE_FRAME_BEGIN_INFO};
     return depthxr::TurboFrameTestPeer::Layer().BeginFrame(TestSession(), &begin_info);
 }
+
+// --- Frame Generation through the layer hooks ------------------------------------
+
+constexpr std::int64_t kFrameGenFormat = 29;
+constexpr XrDuration kFrameGenPeriod = 11'111'111; // FakeRuntime::display_period_
+std::uint64_t g_framegen_handles = 0x9000;
+
+XrResult XRAPI_PTR FgFormats(XrSession, std::uint32_t capacity, std::uint32_t* count, std::int64_t* formats) {
+    *count = 1;
+    if (capacity) formats[0] = kFrameGenFormat;
+    return XR_SUCCESS;
+}
+XrResult XRAPI_PTR FgCreate(XrSession, const XrSwapchainCreateInfo*, XrSwapchain* swapchain) {
+    *swapchain = reinterpret_cast<XrSwapchain>(++g_framegen_handles);
+    return XR_SUCCESS;
+}
+XrResult XRAPI_PTR FgDestroy(XrSwapchain) { return XR_SUCCESS; }
+XrResult XRAPI_PTR FgImages(XrSwapchain, std::uint32_t, std::uint32_t* count, XrSwapchainImageBaseHeader*) {
+    *count = 3;
+    return XR_SUCCESS;
+}
+XrResult XRAPI_PTR FgAcquire(XrSwapchain, const XrSwapchainImageAcquireInfo*, std::uint32_t* index) {
+    *index = 0;
+    return XR_SUCCESS;
+}
+XrResult XRAPI_PTR FgWait(XrSwapchain, const XrSwapchainImageWaitInfo*) { return XR_SUCCESS; }
+XrResult XRAPI_PTR FgRelease(XrSwapchain, const XrSwapchainImageReleaseInfo*) { return XR_SUCCESS; }
+
+class FgGpu final : public depthxr::FrameGenGpu {
+  public:
+    explicit FgGpu(int* executes) : executes_(executes) {}
+    const char* Name() const override { return "Fake"; }
+    std::optional<depthxr::FrameGenOutputKind> Classify(std::int64_t format) const override {
+        return format == kFrameGenFormat ? std::optional(depthxr::FrameGenOutputKind::kSrgb8) : std::nullopt;
+    }
+    std::vector<std::int64_t> OutputFormats(depthxr::FrameGenOutputKind) const override { return {kFrameGenFormat}; }
+    XrSwapchainUsageFlags RequiredSourceUsage() const override { return 0; }
+    XrSwapchainUsageFlags OutputUsage() const override { return XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT; }
+    bool Track(XrSwapchain, PFN_xrEnumerateSwapchainImages, std::string&) override { return true; }
+    void Forget(XrSwapchain) override {}
+    bool Capture(std::size_t, const depthxr::FrameGenImage&, const depthxr::FrameGenViewRequest&,
+                 depthxr::FrameGenFlowQuality, std::string&) override {
+        return true;
+    }
+    bool WaitIdle() override { return true; }
+    bool Execute(const std::vector<depthxr::FrameGenViewSubmission>& views, const depthxr::FrameGenTuning&,
+                 depthxr::FrameGenExecuteResult& result, std::string&) override {
+        ++*executes_;
+        result.synthesized.assign(views.size(), true);
+        return true;
+    }
+    void ResetHistory() override {}
+    void Reset() override {}
+
+  private:
+    int* executes_;
+};
 
 bool WaitForSecondPollBlock() {
     const auto deadline = std::chrono::steady_clock::now() + 2s;
@@ -1715,6 +1837,180 @@ void TestSequencedStallPolicySuspends() {
 
 } // namespace
 
+// Frame Generation owns pacing through the layer's real hooks: Turbo yields,
+// the runtime sees an ordered wait/begin/end pair per engaged app frame, and
+// the OSD reports both features.
+void TestFrameGenOwnsFramePacing() {
+    FakeRuntime runtime;
+    // A new session: the runtime has no frame open, and Turbo owns none.
+    runtime.NoOpenFrame();
+    TurboHarness harness(runtime, depthxr::TurboPacingMode::kSequenced);
+    depthxr::TurboFrameTestPeer::FreshSession();
+    int executes = 0;
+    depthxr::TurboFrameTestPeer::PrepareFrameGen(
+        TestSession(), [&](const void*, std::string&) { return std::make_unique<FgGpu>(&executes); },
+        {FgFormats, FgCreate, FgDestroy, FgImages, FgAcquire, FgWait, FgRelease});
+    Expect(depthxr::TurboFrameTestPeer::FrameGenOwnsPacing(), "Frame Generation should own pacing with a backend");
+    Expect(!depthxr::TurboFrameTestPeer::TurboInterceptionRequired() && !depthxr::TurboFrameTestPeer::TurboConfigured(),
+           "Turbo must yield to Frame Generation for the session");
+
+    const XrSwapchain left = reinterpret_cast<XrSwapchain>(0x71), right = reinterpret_cast<XrSwapchain>(0x72);
+    auto& framegen = depthxr::TurboFrameTestPeer::FrameGen();
+    framegen.TrackSwapchain(left, kFrameGenFormat, 1, XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT);
+    framegen.TrackSwapchain(right, kFrameGenFormat, 1, XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT);
+    std::array<XrCompositionLayerProjectionView, 2> views{};
+    for (int eye = 0; eye < 2; ++eye) {
+        views[eye] = {XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW};
+        views[eye].pose.orientation.w = 1.0f;
+        views[eye].fov = {-0.8f, 0.8f, 0.8f, -0.8f};
+        views[eye].subImage.swapchain = eye ? right : left;
+        views[eye].subImage.imageRect = {{0, 0}, {1024, 1024}};
+    }
+    XrCompositionLayerProjection projection{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
+    projection.viewCount = 2;
+    projection.views = views.data();
+    const auto* layer = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&projection);
+
+    auto frame = [&] {
+        XrFrameState state{XR_TYPE_FRAME_STATE};
+        Expect(AppWait(&state) == XR_SUCCESS, "Frame Generation app wait failed");
+        Expect(AppBegin() == XR_SUCCESS, "Frame Generation app begin failed");
+        framegen.NoteRelease(left, 1);
+        framegen.NoteRelease(right, 1);
+        XrFrameEndInfo info = FrameEndInfo();
+        info.displayTime = state.predictedDisplayTime;
+        info.layerCount = 1;
+        info.layers = &layer;
+        Expect(depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &info) == XR_SUCCESS,
+               "Frame Generation app end failed");
+        return state;
+    };
+
+    for (int i = 0; i < 2; ++i) {
+        Expect(frame().predictedDisplayPeriod == kFrameGenPeriod, "Frame Generation passes through until steady");
+    }
+    Expect(runtime.WaitCalls() == 2 && runtime.EndCalls() == 2, "Pass-through frames make one runtime frame each");
+    const XrFrameState engaged = frame();
+    Expect(engaged.predictedDisplayPeriod == 2 * kFrameGenPeriod, "Engaged app sees a doubled period");
+    Expect(runtime.WaitCalls() == 4 && runtime.BeginCalls() == 4 && runtime.EndCalls() == 4 && executes == 1,
+           "An engaged app frame makes two runtime frames and one generation");
+    frame();
+    const std::vector<RuntimeCall> calls = runtime.Calls();
+    const std::vector<RuntimeCall> tail(calls.end() - 6, calls.end());
+    const std::vector<RuntimeCall> pair{RuntimeCall::kWait, RuntimeCall::kBegin, RuntimeCall::kEnd,
+                                        RuntimeCall::kWait, RuntimeCall::kBegin, RuntimeCall::kEnd};
+    Expect(tail == pair, "Engaged frames must reach the runtime as wait/begin/end twice in order");
+    Expect(runtime.MaxConcurrentWaits() == 1 && runtime.ValidStructs(), "Runtime waits never overlapped");
+    // The strict runtime's rules hold for Frame Generation's frames too: no
+    // wait stacked on a waited, unbegun frame, and no begin or end out of order.
+    Expect(runtime.StackedWaits() == 0 && runtime.BeginRejections() == 0 && runtime.EndRejections() == 0,
+           "Frame Generation broke the runtime's frame-call order");
+
+    const auto snapshot = depthxr::TurboFrameTestPeer::Snapshot();
+    Expect(snapshot.turbo == "Paused for Frame Generation", "OSD should show Turbo yielding");
+    Expect(snapshot.modules.find("Frame Gen") != std::string::npos && snapshot.framegen.rfind("On  /  Interpolate", 0) == 0,
+           "OSD should list and describe active Frame Generation");
+    Expect(snapshot.framegen_session && snapshot.framegen_badge == "ON", "OSD should show Frame Generation on beside FPS");
+    depthxr::TurboFrameTestPeer::StopFrameGen();
+    Expect(!depthxr::TurboFrameTestPeer::FrameGenOwnsPacing(), "Stopping Frame Generation returns pacing");
+}
+
+// Every settings reload while Frame Generation owns pacing resolves Turbo as
+// configured (on here) and forces it off again. That must stay inert: no
+// Turbo engage or disengage transition, no recovery record or fault, no
+// frame interception, and the runtime keeps getting Frame Generation's
+// frames in order.
+void TestConfigReloadWhileFrameGenOwnsPacing() {
+    const auto recovery = std::filesystem::temp_directory_path() /
+                          ("vectorxr-fg-reload-" + std::to_string(GetCurrentProcessId()));
+    std::filesystem::remove_all(recovery);
+    FakeRuntime runtime;
+    runtime.NoOpenFrame();
+    TurboHarness harness(runtime, depthxr::TurboPacingMode::kSequenced);
+    depthxr::TurboFrameTestPeer::FreshSession();
+    depthxr::TurboFrameTestPeer::ConfigureRecovery(recovery);
+    int executes = 0;
+    depthxr::TurboFrameTestPeer::PrepareFrameGen(
+        TestSession(), [&](const void*, std::string&) { return std::make_unique<FgGpu>(&executes); },
+        {FgFormats, FgCreate, FgDestroy, FgImages, FgAcquire, FgWait, FgRelease});
+    Expect(depthxr::TurboFrameTestPeer::FrameGenOwnsPacing() && depthxr::TurboFrameTestPeer::TurboYielded(),
+           "Reload test: Frame Generation should own pacing with Turbo yielded");
+
+    const XrSwapchain left = reinterpret_cast<XrSwapchain>(0x81), right = reinterpret_cast<XrSwapchain>(0x82);
+    auto& framegen = depthxr::TurboFrameTestPeer::FrameGen();
+    framegen.TrackSwapchain(left, kFrameGenFormat, 1, XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT);
+    framegen.TrackSwapchain(right, kFrameGenFormat, 1, XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT);
+    std::array<XrCompositionLayerProjectionView, 2> views{};
+    for (int eye = 0; eye < 2; ++eye) {
+        views[eye] = {XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW};
+        views[eye].pose.orientation.w = 1.0f;
+        views[eye].fov = {-0.8f, 0.8f, 0.8f, -0.8f};
+        views[eye].subImage.swapchain = eye ? right : left;
+        views[eye].subImage.imageRect = {{0, 0}, {1024, 1024}};
+    }
+    XrCompositionLayerProjection projection{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
+    projection.viewCount = 2;
+    projection.views = views.data();
+    const auto* layer = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&projection);
+    auto frame = [&] {
+        XrFrameState state{XR_TYPE_FRAME_STATE};
+        Expect(AppWait(&state) == XR_SUCCESS, "Reload test: app wait failed");
+        Expect(AppBegin() == XR_SUCCESS, "Reload test: app begin failed");
+        framegen.NoteRelease(left, 1);
+        framegen.NoteRelease(right, 1);
+        XrFrameEndInfo info = FrameEndInfo();
+        info.displayTime = state.predictedDisplayTime;
+        info.layerCount = 1;
+        info.layers = &layer;
+        Expect(depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &info) == XR_SUCCESS,
+               "Reload test: app end failed");
+        return state;
+    };
+    for (int i = 0; i < 3; ++i) frame();
+    Expect(executes >= 1, "Reload test: Frame Generation did not engage");
+
+    // Turbo on for every application, as a user who had it on would have;
+    // Frame Generation stays on at 2x.
+    depthxr::ConfigDocument config;
+    config.core.enabled = true;
+    config.turbo.enabled = true;
+    config.turbo.pacing_mode = depthxr::TurboPacingSetting::kSequenced;
+    config.turbo.metrics_mode = depthxr::TurboMetricsMode::kOff;
+    config.framegen.enabled = true;
+    config.framegen.defaults.multiplier = depthxr::FrameGenMultiplier::k2;
+    for (int reload = 0; reload < 3; ++reload) {
+        config.core.osd.opacity = 80 + reload; // a different document each time
+        depthxr::TurboFrameTestPeer::ReloadConfig(config);
+        Expect(!depthxr::TurboFrameTestPeer::TurboConfigured() && depthxr::TurboFrameTestPeer::TurboYielded(),
+               "A reload while Frame Generation owns pacing turned Turbo back on");
+        Expect(!depthxr::TurboFrameTestPeer::TurboInterceptionRequired(),
+               "A reload while Frame Generation owns pacing armed Turbo's frame interception");
+        for (int i = 0; i < 2; ++i) {
+            const XrFrameState state = frame();
+            Expect(state.predictedDisplayPeriod == 2 * kFrameGenPeriod,
+                   "Frame Generation stopped pacing the app after a reload");
+        }
+        Expect(!depthxr::TurboFrameTestPeer::TurboEffective(), "A reload engaged Turbo under Frame Generation");
+    }
+    Expect(depthxr::TurboFrameTestPeer::FailureReason().empty(),
+           "A reload while Frame Generation owns pacing recorded a Turbo fault");
+    Expect(!depthxr::TurboFrameTestPeer::Handoff().active && depthxr::TurboFrameTestPeer::SequencedState() == 0,
+           "A reload while Frame Generation owns pacing left a Turbo pipeline behind");
+    bool recovery_written = false;
+    std::error_code error;
+    for (const auto& entry : std::filesystem::recursive_directory_iterator(recovery, error)) {
+        recovery_written |= entry.is_regular_file();
+    }
+    Expect(!recovery_written, "A reload while Frame Generation owns pacing wrote a Turbo recovery record");
+    Expect(runtime.MaxConcurrentWaits() == 1 && runtime.StackedWaits() == 0 && runtime.BeginRejections() == 0 &&
+               runtime.EndRejections() == 0,
+           "Frame Generation's frames broke the runtime's call order across reloads");
+    Expect(depthxr::TurboFrameTestPeer::Snapshot().turbo == "Paused for Frame Generation",
+           "The OSD lost Turbo's paused-for-Frame-Generation state across reloads");
+    depthxr::TurboFrameTestPeer::StopFrameGen();
+    std::filesystem::remove_all(recovery, error);
+}
+
 int main() {
     TestHandoverKeepsBlockedPollShielded();
     // Runtime-profile and fault-recovery simulations: none may stop frame
@@ -1739,6 +2035,8 @@ int main() {
     TestSessionEndWithStuckWaitIsBounded();
     TestHealthyPipelineRetainsStrictOrder(depthxr::TurboPacingMode::kAsync);
     TestHealthyPipelineRetainsStrictOrder(depthxr::TurboPacingMode::kSequenced);
+    TestFrameGenOwnsFramePacing();
+    TestConfigReloadWhileFrameGenOwnsPacing();
     TestAsyncTogglePreservesQueuedFrame(false);
     TestAsyncTogglePreservesQueuedFrame(true);
     TestAsyncReleaseHandsOverToFrameThread(false);

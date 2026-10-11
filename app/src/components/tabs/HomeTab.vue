@@ -88,6 +88,7 @@ const systemHealthDescription = computed(() => {
 const moduleMeta: { id: ModuleId; label: string }[] = [
   { id: 'quadviews', label: 'Quadviews' },
   { id: 'turbo', label: 'Turbo' },
+  { id: 'framegen', label: 'Frame Generation' },
   { id: 'pivotxr', label: 'Pivot' },
   { id: 'depthxr', label: 'Depth' },
 ]

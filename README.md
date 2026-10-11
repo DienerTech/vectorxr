@@ -16,7 +16,8 @@ Developed by DienerTech LLC.
 - Configure enhanced yaw and pitch rotation through the Pivot module.
 - Drive foveated-style rendering with a visible performance budget through the Quadviews module.
 - Override OpenXR runtime frame pacing per application with Turbo and compare strategies using built-in diagnostics.
-- Monitor application frame times, Turbo state, and enhancements with a configurable [in-headset OSD](docs/usage.md#on-screen-display) for Direct3D 11, Direct3D 12, and Vulkan games.
+- Add optical-flow generated frames between real frames with experimental [Frame Generation](docs/usage.md#frame-generation-experimental), so the headset gets a fresh image every refresh even when the game renders fewer.
+- Monitor application frame times, Turbo and Frame Generation state, and enhancements with a configurable [in-headset OSD](docs/usage.md#on-screen-display) for Direct3D 11, Direct3D 12, and Vulkan games.
 - Create per-application profiles so different OpenXR games can use different settings.
 - Track OpenXR apps VectorXR has seen and register them as profile targets.
 - Bind feature toggles to keyboard shortcuts or detected input devices.
@@ -90,13 +91,29 @@ for a fresh strategy test. **Clear Logs** clears fault history while preserving 
 learned pacing decisions. Global and per-profile controls let you bypass persistent protection.
 See the [Turbo setup and Safety guide](docs/usage.md#turbo) for the controls and save/relaunch behavior.
 
+### Frame Generation (experimental)
+
+Frame Generation inserts optical-flow generated frames between a game's frames, so the headset
+gets a fresh image every refresh even when the game renders fewer. By default (**Dynamic**) the
+game runs as fast as it can and generated frames fill the gaps; a **Fixed** rate (Auto, 2x, 3x,
+or 4x) holds it at a fraction of the refresh rate instead. Choose **Interpolate** (smoothest,
+fewest artifacts, a little latency) or **Extrapolate** (lowest latency, more edge artifacts) and
+**Shader** or **NVIDIA hardware** motion per profile, and compare in game with an A/B toggle and
+diagnostic views. The On-Screen Display shows **FG ON** and the headset's frame rate beside its
+FPS. It works with Direct3D 11, Direct3D 12, and Vulkan games, in stereo or Quadviews.
+
+It is experimental: motion is measured on the final images (no game motion vectors yet), and
+text and HUDs can shimmer on generated frames. Turn off runtime smoothing such as SteamVR Motion
+Smoothing or ASW, and expect Turbo to stay off where Frame Generation runs. Turning it on needs a
+game restart. See the [Frame Generation guide](docs/usage.md#frame-generation-experimental).
+
 ### On-Screen Display
 
 ![VectorXR On-Screen Display page](docs/screenshots/osd.jpg)
 
 The On-Screen Display adds an optional head-following panel in Direct3D 11, Direct3D 12, and
-Vulkan games showing application FPS, frame times, a frame-time graph, Turbo state, Pivot, and
-active enhancements. Choose compact or expanded layouts, place the panel with a live preview,
+Vulkan games showing application FPS, frame times, a frame-time graph, Turbo and Frame
+Generation state, Pivot, and active enhancements. Choose compact or expanded layouts, place the panel with a live preview,
 customize its contents and colors, save presets, and show or switch it in game with
 **Ctrl+Alt+F10** and **Ctrl+Alt+F11**. See the [On-Screen Display guide](docs/usage.md#on-screen-display).
 
@@ -139,7 +156,7 @@ The installer registers the VectorXR API layer with Windows so OpenXR runtimes c
 
 ## Usage
 
-For a walkthrough of configuring profiles and each module — Depth, Pivot, Quadviews, Turbo, the application registry, and OpenXR layer management — see the [usage guide](docs/usage.md).
+For a walkthrough of configuring profiles and each module — Depth, Pivot, Quadviews, Turbo, Frame Generation, the application registry, and OpenXR layer management — see the [usage guide](docs/usage.md).
 
 ## Installation
 
@@ -159,7 +176,7 @@ VectorXR does not currently auto-download or auto-install updates. Updates are i
 
 ## Current Status
 
-VectorXR is in **beta**. It is feature-complete for its current scope — the desktop app, Windows installer, OpenXR layer registration, per-application profile model, Depth, Pivot, Quadviews, and Turbo modules, app discovery, logs, update checks, and the OpenXR layer manager are all implemented and working.
+VectorXR is in **beta**. It is feature-complete for its current scope — the desktop app, Windows installer, OpenXR layer registration, per-application profile model, Depth, Pivot, Quadviews, and Turbo modules, app discovery, logs, update checks, and the OpenXR layer manager are all implemented and working. Frame Generation is new and experimental.
 
 Beta means it is ready to use day-to-day, but it is young and has had limited real-world testing across the range of VR runtimes, hardware, and game-specific VR behavior. Some games expose Force IPD or world-scale controls that can override Stereo Boost; disable those controls before testing Depth. VectorXR is designed to be reversible: you can disable any Enhancement, disable the VectorXR layer, or uninstall entirely if anything misbehaves.
 
@@ -185,6 +202,11 @@ VectorXR is Windows-focused and expects:
 The local `OpenXR.Loader.*.nupkg` package is intentionally not tracked in source control.
 CI and the GitHub release workflow install the OpenXR loader from a pinned vcpkg registry
 before building the layer.
+
+Frame Generation's NVIDIA hardware optical flow builds from the two MIT-licensed interface
+headers of the [NVIDIA Optical Flow SDK](https://developer.nvidia.com/optical-flow-sdk)
+included in `third_party/nvidia-optical-flow/`; no SDK download is needed. The optical flow
+library itself, `nvofapi64.dll`, comes with the NVIDIA driver and is loaded at run time.
 
 Install app dependencies:
 

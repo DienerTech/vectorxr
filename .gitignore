@@ -25,6 +25,9 @@ Claude outputs/
 !release/notes/
 !release/notes/*.md
 
+# Locally signed test builds, their ledger and signing tools (scripts/Sign-LocalLayer.ps1)
+local-signing/
+
 # Scratch dir from local signature/copyright checks
 .tmp-signature-check/
 

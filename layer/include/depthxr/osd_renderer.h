@@ -56,6 +56,18 @@ struct OsdSnapshot {
     // Snap View line; empty (and not drawn) for apps without Snap Views.
     std::string pivot_secondary;
     std::string compact_pivot_secondary;
+    std::string framegen{"Disabled"};
+    std::string compact_framegen{"Disabled"};
+    // A second, smaller line under the expanded row (what the game's depth
+    // does), empty for none.
+    std::string framegen_detail;
+    // The expanded row is shown only in sessions with Frame Generation on.
+    bool framegen_session{false};
+    // Beside the FPS counter in those sessions: Frame Generation's state (ON,
+    // STBY, WAIT, PAUSED, OFF or N/A) and, while it generates, the frames per
+    // second the headset shows (0 otherwise).
+    std::string framegen_badge;
+    double framegen_fps{0.0};
 };
 
 struct OsdPresentation {
@@ -87,12 +99,24 @@ struct OsdBitmap {
 };
 
 struct OsdCompactLayout {
-    int width{240}, height{}, header_y{-1}, metrics_y{-1}, status_y{-1}, turbo_y{-1}, pivot_y{-1};
+    int width{240}, height{}, header_y{-1}, metrics_y{-1}, status_y{-1}, turbo_y{-1}, framegen_y{-1}, pivot_y{-1};
+    int status_value_x{128};
+    int frame_time_x{262};
     std::array<int,4> header_x{-1,-1,-1,-1};
-    bool fps{}, frame_time{}, empty{};
+    // framegen_badge: Frame Generation's badge sits beside the FPS value.
+    bool fps{}, frame_time{}, empty{}, framegen_badge{};
 };
-// pivot_snap_line adds the second Pivot row used when Snap Views exist.
-OsdCompactLayout CompactOsdLayout(const OsdSettings&, bool pivot_snap_line = false);
+// What a compact layout must make room for beyond the settings. Named fields,
+// not bare bools: 0.19 (the Pivot snap line) and Frame Generation (the FPS
+// badge) each added one, and a positional bool compiled with either meaning.
+struct OsdCompactLayoutOptions {
+    // The second Pivot row used when Snap Views exist.
+    bool pivot_snap_line{false};
+    // The session started with Frame Generation on, so the FPS value has room
+    // for its badge when settings show it.
+    bool framegen_session{false};
+};
+OsdCompactLayout CompactOsdLayout(const OsdSettings&, const OsdCompactLayoutOptions& options = {});
 
 // Produces premultiplied sRGB pixels for an sRGB OpenXR swapchain.
 OsdBitmap RasterizeOsd(const OsdSettings&, bool compact, const OsdSnapshot&, const OsdTelemetry&, bool rgba);

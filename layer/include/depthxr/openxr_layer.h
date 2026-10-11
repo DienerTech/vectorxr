@@ -5,6 +5,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <filesystem>
+#include <functional>
 #include <future>
 #include <map>
 #include <memory>
@@ -33,10 +34,15 @@
 #include "depthxr/runtime_relay.h"
 #include "depthxr/osd_renderer.h"
 #include "depthxr/osd_composite.h"
+#include "depthxr/framegen_d3d11_bridge.h"
+#include "depthxr/framegen_vulkan_bridge.h"
+#include "depthxr/framegen_presenter.h"
+#include "depthxr/framegen_runtime_queue.h"
 #include "depthxr/turbo_recovery.h"
 #include "depthxr/turbo_trace.h"
 #include "depthxr/settings_resolver.h"
 #include "depthxr/swapchain_state.h"
+#include "depthxr/thread_census.h"
 
 struct ID3D11BlendState;
 struct ID3D11Buffer;
@@ -104,6 +110,25 @@ class OpenXrLayer {
         // This covers Varjo's unreliable pre-instance extension enumeration.
         bool active_runtime_is_varjo{false};
         std::string active_runtime_path;
+        // XR_KHR_D3D12_enable, for the Direct3D 11 bridge (Frame Generation in
+        // Direct3D 11 games): whether the layer added it to a Direct3D 11
+        // application's extensions, whether the runtime refused the instance
+        // with it, and whether the instance has it.
+        bool app_requested_d3d11{false};
+        bool d3d12_wanted{false};       // Frame Generation is enabled for the executable
+        bool d3d12_scan_trusted{false}; // the runtime's pre-instance extension list was believable
+        bool layer_injected_d3d12{false};
+        bool retried_without_d3d12{false};
+        XrResult d3d12_retry_result{XR_SUCCESS};
+        bool d3d12_enabled{false};
+        // The application's Vulkan extension: 2 for XR_KHR_vulkan_enable2, 1
+        // for XR_KHR_vulkan_enable, 0 for neither (the Vulkan bridge's
+        // XR_KHR_D3D12_enable is then a Vulkan application's).
+        int vulkan_enable_version{0};
+        // XR_KHR_vulkan_enable was requested (also alongside _enable2).
+        bool vulkan_enable1_requested{false};
+        // The names of the layers below VectorXR, nearest first.
+        std::string layers_below;
     };
 
     // True when VectorXR quadviews should run in Varjo compatible mode, i.e. core
@@ -112,6 +137,14 @@ class OpenXrLayer {
     // pairs this with a runtime extension probe.
     bool IsVarjoCompatibleQuadviewsEligible();
     bool WantsTurboClockConversion();
+    // Whether Frame Generation is enabled for this executable, so a Direct3D 11
+    // application's instance needs XR_KHR_D3D12_enable for the bridge. Safe
+    // before the instance exists (reads the config file).
+    bool WantsD3D11Bridge();
+    // Likewise for a Vulkan application (XR_KHR_vulkan_enable or _enable2)
+    // and the Vulkan bridge: Frame Generation enabled for the executable,
+    // VECTORXR_VULKAN_BRIDGE not "off".
+    bool WantsVulkanBridge();
 
 
     XrResult OnInstanceCreated(const XrInstanceCreateInfo* create_info,
@@ -201,6 +234,8 @@ class OpenXrLayer {
     friend class PivotSnapTestPeer;
     friend class PivotGazeTestPeer;
     friend class EyeGazeTestPeer;
+    friend class D3D11BridgeLayerTestPeer;
+    friend class VulkanBridgeLayerTestPeer;
 #endif
 
     OpenXrLayer() = default;
@@ -249,6 +284,10 @@ class OpenXrLayer {
         std::vector<ID3D11RenderTargetView*> image_render_target_views;
         ID3D11Texture2D* render_texture{nullptr};
         ID3D11RenderTargetView* render_target_view{nullptr};
+        // An image acquired whose wait timed out: still the runtime's, waited
+        // for again before anything is drawn into it.
+        bool awaiting_wait{false};
+        uint32_t awaiting_index{0};
     };
 
     struct QuadViewsInputCopy {
@@ -399,6 +438,8 @@ class OpenXrLayer {
     void RefreshResolvedSettings();
     void ResetPivotInputStateForConfigChange();
     void PollRuntimeRelay();
+    // The app's status line for Frame Generation (RuntimeStatusDocument::framegen_reason).
+    static std::string FrameGenStatusReason(const FrameGenStatus& framegen);
     void CaptureInstanceFunctions();
     void LogResolvedSettings(const ResolvedRuntimeConfig& settings);
     void ResetPivotActivationState();
@@ -483,10 +524,10 @@ class OpenXrLayer {
                                  double frame_blocked_ms,
                                  bool timed_out,
                                  TurboMetricsMode metrics_mode,
-                                 const InputBinding& metrics_binding,
+                                 const std::vector<InputBinding>& metrics_bindings,
                                  bool metrics_available,
                                  int sound_volume);
-    bool IsTurboMetricsCaptureArmed(const InputBinding& binding, int sound_volume);
+    bool IsTurboMetricsCaptureArmed(const std::vector<InputBinding>& bindings, int sound_volume);
     void FlushTurboMetrics(bool final_flush, bool queue_after_pending = false);
     void ResetTurboMetricsState();
     // Logs shouldRender changes (turbo_mutex_ held by caller). A silent
@@ -497,6 +538,8 @@ class OpenXrLayer {
     bool IsQuadViewsEmulationActive() const;
     void ResetSwapchainState();
     void LogSwapchainSummary(XrSwapchain swapchain, const SwapchainInfo& info, std::string_view event_name);
+    // Counts an application call on the calling thread; logs the first call of each kind on each thread.
+    void NoteThread(ThreadCensus::Call call);
     bool ShouldDeferSwapchainRelease(const SwapchainInfo& info) const;
     XrResult FlushDeferredSwapchainReleaseLocked(XrSwapchain swapchain,
                                                  SwapchainInfo& info,
@@ -505,6 +548,10 @@ class OpenXrLayer {
     void PollQuadViewsDiagnosticVisualizationToggle();
     void ResetQuadViewsDiagnosticVisualizationState();
     bool PollInputBindingDown(const InputBinding& binding);
+    // A toggle's list: the first of its bindings held down (its label and
+    // sound say what acted), or null. Every binding is polled each time, so
+    // each device's reconnection and diagnostics keep running.
+    const InputBinding* PollInputBindingsDown(const std::vector<InputBinding>& bindings);
     bool ShouldLogQuadViewsDebugHeartbeat(std::optional<std::chrono::steady_clock::time_point>& last_heartbeat);
     void ResetQuadViewsDebugHeartbeatState();
     void ResetSessionState();
@@ -666,11 +713,49 @@ class OpenXrLayer {
                                         int64_t output_format);
     bool EnsureD3D11SwapchainShaderResources(SwapchainInfo& swapchain, uint32_t array_slice = 0);
     void TryPrewarmD3D11QuadViewsCompositor();
+    // An emulated quad views frame (views 0/1 peripheral, 2/3 focus) as it is
+    // composed into stereo, worked out on the CPU alone: what the Direct3D 11
+    // compositor draws from, and what Frame Generation composes from.
+    struct QuadViewsComposePlan {
+        uint32_t width{0}; // each eye's composed image
+        uint32_t height{0};
+        double density{1.0};
+        int64_t format{0}; // the focus swapchain's (the composed images')
+        bool has_cached_fovs{false};
+        XrTime matched_time{0};
+        QuadViewsGazeDiagnostic gaze{};
+        std::array<XrFovf, 4> fovs{}; // located at the display time, else as submitted
+        // As submitted, posed times the Pivot reverse delta, fov = fovs[i].
+        std::array<XrCompositionLayerProjectionView, 4> source_views{};
+        // The composed eyes: source views 0/1 with their depth geometry
+        // restored; subImage unset.
+        std::array<XrCompositionLayerProjectionView, 2> eye_views{};
+        uint32_t restored{0}; // eye views whose depth geometry was restored
+        FrameGenComposition composition; // per eye: views eye and eye + 2
+        bool log_diagnostic{false};      // the frame logs the compositor's Debug diagnostics
+        // Frame Generation's thread shows the composed frame later, between
+        // frames it writes itself (left to the layer while that thread
+        // presents just in time): the outputs' releases are lazy, and the
+        // runtime's queue (Frame Generation's) waits for the game's frame
+        // only when the composed frame is submitted.
+        bool shown_later{false};
+    };
+    // The plan for `source_layer` at `display_time`; false when its views
+    // cannot be composed. Logs the focus rectangles on diagnostic frames.
+    bool BuildQuadViewsComposePlan(const XrCompositionLayerProjection* source_layer,
+                                   XrTime display_time,
+                                   const XrPosef& reverse_delta,
+                                   bool has_non_identity_delta,
+                                   const DepthSubmissionGeometry* depth_geometry,
+                                   QuadViewsComposePlan* plan);
+    // The four views' swapchains, when each has a released (or acquired)
+    // image of its own to compose from.
+    bool FindQuadViewsSourceSwapchains(const XrCompositionLayerProjection* source_layer,
+                                       std::array<SwapchainInfo*, 4>* swapchains);
+    static uint32_t QuadViewsSourceImageIndex(const SwapchainInfo& swapchain);
     bool ComposeQuadViewsD3D11(const XrCompositionLayerProjection* source_layer,
                                XrTime display_time,
-                               const XrPosef& reverse_delta,
-                               bool has_non_identity_delta,
-                               const DepthSubmissionGeometry* depth_geometry,
+                               const QuadViewsComposePlan& plan,
                                uint32_t* restored_view_count,
                                bool allow_osd_composite,
                                XrCompositionLayerProjection* composed_layer,
@@ -699,6 +784,8 @@ class OpenXrLayer {
 
     Logger logger_;
     TurboTimingTrace turbo_trace_; // destroyed before logger_
+    // Which threads the application calls the frame loop and swapchain functions on, per session.
+    ThreadCensus thread_census_;
     // Immutable between BeginSession and teardown; live edits apply next session.
     OsdRenderer osd_;
     OsdComposite osd_composite_;
@@ -711,6 +798,7 @@ class OpenXrLayer {
         bool rgba{};
         std::array<XrCompositionLayerProjectionView,2> eyes;
         std::array<XrSwapchain,2> swapchains{};
+        std::array<uint32_t,2> indices{}; // the images acquired, released by ReleasePendingOsdImages
         std::array<ID3D11RenderTargetView*,2> targets{};
         std::array<ID3D11Texture2D*,2> output_images{}, private_images{};
         uint32_t width{},height{};
@@ -727,6 +815,10 @@ class OpenXrLayer {
     std::atomic<bool> osd_should_render_{true};
     std::optional<std::chrono::steady_clock::time_point> osd_last_input_poll_;
     bool osd_toggle_down_{false}, osd_cycle_down_{false}, osd_was_enabled_{false};
+    // The binding of each list that last went down: its sound plays for the
+    // change it made (none yet: the list's first binding's).
+    std::optional<SoundFeedback> osd_toggle_sound_;
+    std::optional<SoundFeedback> osd_cycle_sound_;
     std::uint64_t osd_settings_revision_{1}; // bumped whenever settings re-resolve
     OsdSnapshot BuildOsdSnapshot() const;
     void PrepareOsd();
@@ -738,6 +830,127 @@ class OpenXrLayer {
     XrResult TraceRuntimeWaitFrame(XrSession, const XrFrameWaitInfo*, XrFrameState*);
     XrResult TraceRuntimeBeginFrame(XrSession, const XrFrameBeginInfo*);
     XrResult TraceRuntimeEndFrame(XrSession, const XrFrameEndInfo*);
+    // The layer's final submission: OSD overlay, then the runtime xrEndFrame.
+    // Frame Generation submits each of its runtime frames through it.
+    XrResult SubmitRuntimeFrame(XrSession, const XrFrameEndInfo*);
+    // After xrDestroySession or xrDestroyInstance: the bridge's summary, then its teardown.
+    void EndD3D11Bridge();
+    void EndVulkanBridge();
+    // The layer's own swapchains (Quadviews' outputs): through the queue
+    // substitution and the Direct3D 11 bridge when the session is bridged,
+    // else straight to the runtime. `shown_later`: Frame Generation's thread
+    // shows the image later (QuadViewsComposePlan::shown_later), so its calls
+    // may be held back. Releasing `index`, `drawn`: the image holds a new
+    // frame (Frame Generation captures it; the bridge copies it into the
+    // runtime's image), else its content is dropped. Frame Generation is told
+    // of every release made (NoteFrameGenRelease).
+    XrResult AcquireLayerSwapchainImage(XrSwapchain swapchain, uint32_t image_count, uint32_t* index);
+    XrResult WaitLayerSwapchainImage(XrSwapchain swapchain, const XrSwapchainImageWaitInfo* info, bool shown_later);
+    XrResult ReleaseLayerSwapchainImage(XrSwapchain swapchain, uint32_t index, bool drawn, bool shown_later);
+    XrResult DestroyLayerSwapchain(XrSwapchain swapchain);
+    // Frame Generation is told of each release of a swapchain it tracks
+    // (FrameGenPresenter::NoteRelease), drawn or not: the runtime shows the
+    // swapchain's image released last wherever a frame shows the swapchain,
+    // even a frame composed before it.
+    void NoteFrameGenRelease(XrSwapchain swapchain, uint32_t index);
+#if defined(DEPTHXR_TESTING)
+    std::mutex framegen_noted_releases_mutex_;
+    std::map<XrSwapchain, uint64_t> framegen_noted_releases_; // each swapchain's NoteFrameGenRelease calls
+#endif
+    void PollFrameGenToggle();
+    // `unavailable`: Frame Generation cannot run this session (a Vulkan
+    // session without the Vulkan bridge), for that reason.
+    void StartFrameGen(XrSession session, const void* binding_chain, const std::string& unavailable = {});
+    // A session (or its instance) is going: Frame Generation's presenter
+    // thread is stopped within its teardown wait. One a runtime holds inside
+    // a call is let go by ending the runtime's session (a runtime may hold
+    // its waits until then); one that still never leaves is left behind
+    // (FrameGenPresenter::AbandonPresenter), and the session and instance
+    // are then kept downstream for the process's exit. `step` names what
+    // the teardown waits on (TeardownWatch::Step).
+    void StopFrameGenPresenterForTeardown(XrSession session, const std::function<void(const char*)>& step);
+    // A presenter thread was left behind: neither this module nor the one
+    // below it (the runtime) may be unloaded under it.
+    void PinModulesForAbandonedPresenter();
+    // Frame Generation is latched per session. While it owns pacing, the app's
+    // Wait/Begin/End go to the presenter and Turbo stays off for the session.
+    FrameGenPresenter framegen_;
+    // Direct3D 12: the runtime is given Frame Generation's queue (see
+    // FrameGenQueueSubstitution); decided at xrCreateSession.
+    FrameGenQueueSubstitution framegen_queue_;
+    // Direct3D 11 games with Frame Generation: the session is Direct3D 12 and
+    // the game renders into images shared with it (see D3D11Bridge); decided
+    // at xrCreateSession.
+    D3D11Bridge d3d11_bridge_;
+    bool d3d11_bridge_lost_logged_{false};    // mutex_
+    bool d3d11_bridge_depth_logged_{false};   // mutex_
+    bool d3d11_bridge_sharpen_logged_{false}; // mutex_
+    std::chrono::steady_clock::time_point d3d11_bridge_last_summary_; // mutex_
+    // Quad views frames of a bridged session (mutex_): composed by Frame
+    // Generation, by the Direct3D 11 compositor, or split into projection
+    // layers when composing failed. The session's, and as of the last summary.
+    struct D3D11BridgeQuadFrames {
+        std::uint64_t fg{0};
+        std::uint64_t d3d11{0};
+        std::uint64_t split{0};
+    };
+    // The frame being ended came from the emulated quad views compose site
+    // of a session whose pacing Frame Generation owns: how it was routed
+    // (FrameGenPresenter::ClaimQuadFrame). Set in EndFrame under mutex_,
+    // consumed by TraceRuntimeEndFrame; only the application's end-frame
+    // thread touches it.
+    std::optional<FrameGenQuadFrame> pending_framegen_quad_;
+    bool framegen_quad_unforwarded_logged_{false};
+    // The frame's quad route is dropped: an EndFrame that returns before
+    // forwarding a claimed frame abandons it (`abandon`, when the caller
+    // does not abandon the frame itself).
+    void DropPendingFrameGenQuad(bool abandon);
+    D3D11BridgeQuadFrames d3d11_bridge_quad_frames_;
+    D3D11BridgeQuadFrames d3d11_bridge_quad_frames_summarized_;
+    // Vulkan games with Frame Generation: the session is Direct3D 12 and the
+    // game renders into images shared with it (see VulkanBridge); decided at
+    // xrCreateSession. Frame Generation runs a Vulkan session only through it.
+    VulkanBridge vulkan_bridge_;
+    bool vulkan_bridge_lost_logged_{false};  // mutex_
+    bool vulkan_bridge_depth_logged_{false}; // mutex_
+    std::chrono::steady_clock::time_point vulkan_bridge_last_summary_; // mutex_
+    // Either bridge's swapchain, and one whose runtime images never get
+    // anything (its calls need no ordering with the game's queue).
+    bool BridgedSwapchain(XrSwapchain swapchain) const {
+        return d3d11_bridge_.Bridged(swapchain) || vulkan_bridge_.Bridged(swapchain);
+    }
+    bool UnmirroredSwapchain(XrSwapchain swapchain) const {
+        return d3d11_bridge_.Unmirrored(swapchain) || vulkan_bridge_.Unmirrored(swapchain);
+    }
+    FrameGenQueueSubstitution::Calls FrameGenQueueCalls() const {
+        return {next_acquire_swapchain_image_, next_wait_swapchain_image_, next_release_swapchain_image_};
+    }
+    // Whether the application's calls on `swapchain` may be held back
+    // (FrameGenQueueSubstitution: Frame Generation captures its images and
+    // shows images of its own only).
+    // A bridged swapchain the layer composes (Quadviews' views) reaches the
+    // runtime only when composing fails, likewise.
+    bool FrameGenLazy(XrSwapchain swapchain) {
+        return framegen_queue_.Active() &&
+               ((framegen_.ShowsOwnImagesOnly() && framegen_.CapturesFrom(swapchain)) ||
+                d3d11_bridge_.Composed(swapchain));
+    }
+    // A layer's swapchain (not a projection's) a frame shows while Frame
+    // Generation shows images of its own only and does not capture it: kept
+    // lazy under VECTORXR_FRAMEGEN_SHOWN_LAYERS=lazy (FrameGenQueueSubstitution::Flush).
+    bool FrameGenShownLazily(XrSwapchain swapchain) {
+        return framegen_queue_.ShownLayersLazy() && framegen_.ShowsOwnImagesOnly() &&
+               !framegen_.CapturesFrom(swapchain);
+    }
+    FrameGenPresenter::GpuFactory framegen_gpu_factory_{CreateFrameGenGpu};
+    FrameGenRuntimeCalls framegen_calls_;
+    std::atomic<bool> framegen_owns_pacing_{false};
+    bool framegen_session_enabled_{false};  // mutex_
+    bool turbo_yielded_to_framegen_{false}; // mutex_
+    bool framegen_toggle_binding_was_down_{false};
+    bool framegen_binding_down_cached_{false};
+    std::optional<InputBinding> framegen_toggle_pressed_; // its list's binding that last went down (ActingBinding)
+    std::optional<std::chrono::steady_clock::time_point> framegen_binding_last_poll_time_;
     XrTime TurboClockNow();
     void ConfigureTurboExperiment();
     std::string TurboTimingConfiguration() const;
@@ -918,11 +1131,13 @@ class OpenXrLayer {
     std::optional<std::chrono::steady_clock::time_point> pivotxr_binding_last_poll_time_;
     std::optional<std::chrono::steady_clock::time_point> depthxr_binding_last_poll_time_;
     bool depthxr_binding_down_cached_{false};
+    std::optional<InputBinding> depthxr_toggle_pressed_; // its list's binding that last went down (ActingBinding)
     bool depth_anchor_toggle_inverted_{false};
     bool depth_anchor_active_{false};
     bool depth_anchor_toggle_binding_was_down_{false};
     std::optional<std::chrono::steady_clock::time_point> depth_anchor_binding_last_poll_time_;
     bool depth_anchor_binding_down_cached_{false};
+    std::optional<InputBinding> depth_anchor_toggle_pressed_; // its list's binding that last went down (ActingBinding)
 
     // Turbo mode. The runtime always sees a conformant wait->begin->end
     // sequence; the application is decoupled from runtime frame pacing: its
@@ -982,6 +1197,7 @@ class OpenXrLayer {
     bool turbo_toggle_binding_was_down_{false};
     std::optional<std::chrono::steady_clock::time_point> turbo_binding_last_poll_time_;
     bool turbo_binding_down_cached_{false};
+    std::optional<InputBinding> turbo_toggle_pressed_; // its list's binding that last went down (ActingBinding)
     bool has_logged_turbo_varjo_note_{false};
     TurboRecoveryGuard turbo_recovery_; // mutex_ (config lock)
     bool turbo_recovery_retry_requested_{false};
@@ -1200,6 +1416,7 @@ class OpenXrLayer {
     bool turbo_metrics_binding_was_down_{false};
     std::optional<std::chrono::steady_clock::time_point> turbo_metrics_binding_last_poll_time_;
     bool turbo_metrics_binding_down_cached_{false};
+    std::optional<InputBinding> turbo_metrics_pressed_; // its list's binding that last went down (ActingBinding)
     // Cleared whenever capture pauses so the first frame interval after a
     // resume (which spans the pause) never lands in the stats.
     bool turbo_metrics_was_capturing_{false};
@@ -1232,6 +1449,16 @@ class OpenXrLayer {
     bool quad_views_extension_requested_{false};
     bool varjo_foveated_rendering_extension_requested_{false};
     bool d3d11_graphics_extension_requested_{false};
+    // XR_KHR_D3D12_enable is enabled on the instance (the Direct3D 11 bridge needs it).
+    bool d3d12_extension_enabled_{false};
+    // The application's Vulkan extension (InstanceCreateDiagnostics::vulkan_enable_version).
+    int vulkan_enable_version_{0};
+    // InstanceCreateDiagnostics::vulkan_enable1_requested.
+    bool vulkan_enable1_requested_{false};
+    // Latched when the instance was made: the Vulkan bridge was wanted then
+    // and the instance has XR_KHR_D3D12_enable, so the XR_KHR_vulkan_enable(2)
+    // hooks add what the bridge needs (vulkan_enable_hooks.h).
+    bool vulkan_bridge_extensions_{false};
     bool eye_gaze_extension_enabled_{false};
     // True for the life of the instance when native Varjo quad-views were
     // forwarded to the runtime (Varjo compatible quadviews). Single source of truth

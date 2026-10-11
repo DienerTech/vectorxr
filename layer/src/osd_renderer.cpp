@@ -87,6 +87,9 @@ namespace {
 bool SameInput(const InputBinding& a, const InputBinding& b) {
     return a.type==b.type && a.chord==b.chord && a.device_guid==b.device_guid && a.input_path==b.input_path && a.product_guid==b.product_guid;
 }
+bool SameInputs(const std::vector<InputBinding>& a, const std::vector<InputBinding>& b) {
+    return std::equal(a.begin(),a.end(),b.begin(),b.end(),SameInput);
+}
 std::wstring Wide(const std::string& s) {
     const int size = MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), nullptr, 0);
     std::wstring result(size, L' ');
@@ -113,18 +116,31 @@ struct Canvas {
     void Rect(int x, int y, int w, int h, COLORREF color) {
         const auto brush = CreateSolidBrush(color); RECT r{x,y,x+w,y+h}; FillRect(dc,&r,brush); DeleteObject(brush);
     }
-    void Text(int x, int y, int width, int size, const std::string& text, COLORREF color, bool bold=false) {
-        const auto font = CreateFontW(-size,0,0,0,bold?FW_SEMIBOLD:FW_NORMAL,FALSE,FALSE,FALSE,
+    static HFONT Font(int size, bool bold) {
+        return CreateFontW(-size,0,0,0,bold?FW_SEMIBOLD:FW_NORMAL,FALSE,FALSE,FALSE,
             DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,ANTIALIASED_QUALITY,DEFAULT_PITCH,L"Segoe UI");
+    }
+    void Text(int x, int y, int width, int size, const std::string& text, COLORREF color, bool bold=false) {
+        const auto font = Font(size,bold);
         auto previous = SelectObject(dc,font); SetTextColor(dc,color);
         RECT r{x,y,x+width,y+size+12}; const auto wide=Wide(text);
         DrawTextW(dc,wide.c_str(),static_cast<int>(wide.size()),&r,DT_SINGLELINE|DT_END_ELLIPSIS|DT_NOPREFIX);
         SelectObject(dc,previous); DeleteObject(font);
     }
+    // The width Text draws `text` at, in pixels.
+    int Width(int size, const std::string& text, bool bold=false) {
+        const auto font = Font(size,bold);
+        auto previous = SelectObject(dc,font); const auto wide=Wide(text); SIZE extent{};
+        GetTextExtentPoint32W(dc,wide.c_str(),static_cast<int>(wide.size()),&extent);
+        SelectObject(dc,previous); DeleteObject(font);
+        return extent.cx;
+    }
 };
+// The compact FPS value's column, and with Frame Generation's badge beside it.
+constexpr int kCompactFpsWidth=210, kCompactFpsBadgeWidth=260;
 }
 
-OsdCompactLayout CompactOsdLayout(const OsdSettings& settings, bool pivot_snap_line) {
+OsdCompactLayout CompactOsdLayout(const OsdSettings& settings, const OsdCompactLayoutOptions& options) {
     OsdCompactLayout layout;
     const std::array<bool,4> headers{settings.compact_show_brand,settings.compact_show_app,settings.compact_show_runtime,settings.compact_show_clock};
     constexpr std::array<int,4> widths{155,260,297,142};
@@ -132,16 +148,24 @@ OsdCompactLayout CompactOsdLayout(const OsdSettings& settings, bool pivot_snap_l
     for (int i=0;i<4;++i) if(headers[i]) { layout.header_x[i]=x; x+=widths[i]+16; ++count; }
     layout.fps=settings.compact_metrics=="all" || settings.compact_metrics=="fps";
     layout.frame_time=settings.compact_metrics=="all" || settings.compact_metrics=="frameTime";
-    const bool status=settings.compact_show_turbo || settings.compact_show_pivot;
+    // Frame Generation's badge widens the FPS value's column.
+    layout.framegen_badge=layout.fps && options.framegen_session && settings.show_framegen_fps;
+    const int fps_width=layout.framegen_badge?kCompactFpsBadgeWidth:kCompactFpsWidth;
+    layout.frame_time_x=layout.fps?28+fps_width+24:28;
+    const bool status=settings.compact_show_turbo || settings.compact_show_framegen || settings.compact_show_pivot;
     layout.empty=!count && !layout.fps && !layout.frame_time && !status;
     layout.width=std::max({240,count?x+12:0,
-        (layout.fps || layout.frame_time)?56+(layout.fps?210:0)+(layout.frame_time?300:0)+(layout.fps&&layout.frame_time?24:0):0,
+        (layout.fps || layout.frame_time)?56+(layout.fps?fps_width:0)+(layout.frame_time?300:0)+(layout.fps&&layout.frame_time?24:0):0,
         status?520:0});
     if(count) { layout.header_y=y; y+=44; }
     if(layout.fps || layout.frame_time) { layout.metrics_y=y; y+=68; }
+    // Status rows stack Turbo, Frame Gen, then Pivot. "FRAME GEN" is the
+    // widest label, so values move right while that row is shown.
     if(settings.compact_show_turbo) { layout.turbo_y=y; y+=48; }
-    if(settings.compact_show_pivot) { layout.pivot_y=y; y+=pivot_snap_line?80:48; }
-    layout.status_y=layout.turbo_y>=0?layout.turbo_y:layout.pivot_y;
+    if(settings.compact_show_framegen) { layout.framegen_y=y; y+=48; }
+    if(settings.compact_show_pivot) { layout.pivot_y=y; y+=options.pivot_snap_line?80:48; }
+    layout.status_y=layout.turbo_y>=0?layout.turbo_y:layout.framegen_y>=0?layout.framegen_y:layout.pivot_y;
+    layout.status_value_x=settings.compact_show_framegen?150:128;
     layout.height=layout.empty?80:y+6;
     return layout;
 }
@@ -160,12 +184,14 @@ OsdBitmap RasterizeOsd(const OsdSettings& settings, bool compact, const OsdSnaps
     }
     // Apps without Snap Views keep the single-line Pivot row.
     const bool pivot_snap_line=!snapshot.pivot_secondary.empty() || !snapshot.compact_pivot_secondary.empty();
-    const auto layout=CompactOsdLayout(settings,pivot_snap_line);
+    const auto layout=CompactOsdLayout(settings,{.pivot_snap_line=pivot_snap_line,.framegen_session=snapshot.framegen_session});
     const int panel_width=compact?layout.width:OsdBitmap::width;
     const int header_shift=(settings.show_brand || settings.show_app || settings.show_runtime || settings.show_clock)?0:40;
     const int pivot_row_height=pivot_snap_line?84:52;
     const int height=compact?layout.height:210-header_shift+(settings.show_graph?156:0)+
-        (settings.show_turbo?52:0)+(settings.show_pivot?pivot_row_height:0)+(settings.show_modules?52:0)+(!snapshot.restart.empty()?48:0);
+        (settings.show_turbo?52:0)+(settings.show_framegen&&snapshot.framegen_session?(snapshot.framegen_detail.empty()?52:80):0)+
+        (settings.show_pivot?pivot_row_height:0)+(settings.show_modules?52:0)+
+        (!snapshot.restart.empty()?48:0);
     OsdBitmap output; output.height=height; output.content_width=panel_width;
     Canvas canvas(output.width,height);
     if (!canvas.bits || !canvas.dc) return output;
@@ -175,24 +201,49 @@ OsdBitmap RasterizeOsd(const OsdSettings& settings, bool compact, const OsdSnaps
     if (settings.clock_format=="12") snprintf(clock_label,sizeof(clock_label),"%u:%02u %s",time.wHour%12?time.wHour%12:12,time.wMinute,time.wHour<12?"AM":"PM");
     else snprintf(clock_label,sizeof(clock_label),"%02u:%02u",time.wHour,time.wMinute);
     const auto mean=telemetry.Mean();
+    const std::string fps=Number(mean>0?1000/mean:0,0);
+    // Frame Generation's badge beside an FPS value: its state, in the accent
+    // while it generates, over the frames per second the headset shows. Two
+    // lines span the value's digits; a state alone sits at their middle.
+    const auto framegen_badge=[&](int x,int top,int size,int first,int second,int single,int width) {
+        if (snapshot.framegen_badge.empty() || width<=0) return;
+        const bool on=snapshot.framegen_badge=="ON";
+        const std::string state="FG "+snapshot.framegen_badge;
+        if (on && snapshot.framegen_fps>0) {
+            canvas.Text(x,top+first,width,size,state,accent,true);
+            canvas.Text(x,top+second,width,size,Number(snapshot.framegen_fps,0)+" fps",white,true);
+        } else canvas.Text(x,top+single,width,size,state,on?accent:muted,true);
+    };
     if (compact) {
         constexpr std::array<int,4> widths{155,260,297,142};
         const std::array<std::string,4> values{"VECTORXR",snapshot.application,snapshot.runtime,clock_label};
         for(int i=0;i<4;++i) if(layout.header_x[i]>=0)
             canvas.Text(layout.header_x[i],layout.header_y,widths[i],i==0?22:21,values[i],i==0?accent:muted,i==0);
-        if(layout.fps) canvas.Text(28,layout.metrics_y,210,40,Number(mean>0?1000/mean:0,0)+" fps",white,true);
-        if(layout.frame_time) canvas.Text(layout.fps?262:28,layout.metrics_y,300,40,Number(mean)+" ms avg",white,true);
+        if(layout.fps) {
+            const int column=layout.framegen_badge?kCompactFpsBadgeWidth:kCompactFpsWidth;
+            canvas.Text(28,layout.metrics_y,column,40,fps+" fps",white,true);
+            if(layout.framegen_badge) {
+                const int x=28+canvas.Width(40,fps+" fps",true)+14;
+                framegen_badge(x,layout.metrics_y,20,2,26,14,28+column-x);
+            }
+        }
+        if(layout.frame_time) canvas.Text(layout.frame_time_x,layout.metrics_y,300,40,Number(mean)+" ms avg",white,true);
         if(layout.status_y>=0) {
             const int y=layout.status_y;
             if(y>18) canvas.Rect(28,y-8,panel_width-56,1,inset);
+            const int value_x=layout.status_value_x;
             if(settings.compact_show_turbo) {
                 canvas.Text(30,layout.turbo_y+2,90,20,"TURBO",muted);
-                canvas.Text(128,layout.turbo_y,panel_width-156,24,snapshot.turbo+(snapshot.experimental?" / EXP":""),accent,true);
+                canvas.Text(value_x,layout.turbo_y,panel_width-value_x-28,24,snapshot.turbo+(snapshot.experimental?" / EXP":""),accent,true);
+            }
+            if(settings.compact_show_framegen) {
+                canvas.Text(30,layout.framegen_y+2,118,20,"FRAME GEN",muted);
+                canvas.Text(value_x,layout.framegen_y,panel_width-value_x-28,24,snapshot.compact_framegen,white,true);
             }
             if(settings.compact_show_pivot) {
                 canvas.Text(30,layout.pivot_y+2,80,20,"PIVOT",muted);
-                canvas.Text(128,layout.pivot_y,panel_width-156,24,snapshot.compact_pivot.empty()?snapshot.pivot:snapshot.compact_pivot,white,true);
-                if(pivot_snap_line) canvas.Text(128,layout.pivot_y+32,panel_width-156,24,snapshot.compact_pivot_secondary.empty()?snapshot.pivot_secondary:snapshot.compact_pivot_secondary,white,true);
+                canvas.Text(value_x,layout.pivot_y,panel_width-value_x-28,24,snapshot.compact_pivot.empty()?snapshot.pivot:snapshot.compact_pivot,white,true);
+                if(pivot_snap_line) canvas.Text(value_x,layout.pivot_y+32,panel_width-value_x-28,24,snapshot.compact_pivot_secondary.empty()?snapshot.pivot_secondary:snapshot.compact_pivot_secondary,white,true);
             }
         }
     } else {
@@ -203,7 +254,11 @@ OsdBitmap RasterizeOsd(const OsdSettings& settings, bool compact, const OsdSnaps
         if(settings.show_app) canvas.Text(app_x,18,runtime_x-app_x-16,21,snapshot.application,muted);
         if(settings.show_runtime) canvas.Text(runtime_x,18,clock_x-runtime_x-18,21,snapshot.runtime,muted);
         if(settings.show_clock) canvas.Text(clock_x,18,142,21,clock_label,muted);
-        canvas.Text(28,57-header_shift,265,68,Number(mean>0?1000/mean:0,0),white,true);
+        canvas.Text(28,57-header_shift,265,68,fps,white,true);
+        if(settings.show_framegen_fps && snapshot.framegen_session) {
+            const int x=28+canvas.Width(68,fps,true)+16;
+            framegen_badge(x,57-header_shift,24,17,46,31,315-x);
+        }
         canvas.Text(325,57-header_shift,280,68,Number(mean)+" ms",white,true);
         canvas.Text(655,57-header_shift,276,68,Number(telemetry.Percentile95())+" ms",accent,true);
         canvas.Text(30,141-header_shift,270,20,"APP FPS",muted);
@@ -227,13 +282,18 @@ OsdBitmap RasterizeOsd(const OsdSettings& settings, bool compact, const OsdSnaps
                     if (first) { MoveToEx(canvas.dc,x,py,nullptr); first=false; } else LineTo(canvas.dc,x,py);
                 }
                 SelectObject(canvas.dc,old); DeleteObject(pen); y+=156;
-            } else if ((row=="turbo" && settings.show_turbo) || (row=="pivot" && settings.show_pivot) || (row=="modules" && settings.show_modules)) {
-                const auto label=row=="turbo"?"TURBO":row=="pivot"?"PIVOT":"ENHANCEMENTS";
-                const auto value=row=="turbo"?snapshot.turbo+(snapshot.experimental?" / EXPERIMENTAL":""):row=="pivot"?snapshot.pivot:snapshot.modules;
+            } else if ((row=="turbo" && settings.show_turbo) || (row=="framegen" && settings.show_framegen && snapshot.framegen_session) ||
+                       (row=="pivot" && settings.show_pivot) || (row=="modules" && settings.show_modules)) {
+                const auto label=row=="turbo"?"TURBO":row=="framegen"?"FRAME GEN":row=="pivot"?"PIVOT":"ENHANCEMENTS";
+                const auto value=row=="turbo"?snapshot.turbo+(snapshot.experimental?" / EXPERIMENTAL":""):
+                    row=="framegen"?snapshot.framegen:row=="pivot"?snapshot.pivot:snapshot.modules;
                 canvas.Text(30,y,210,20,label,muted);
                 canvas.Text(242,y,680,24,value,row=="turbo"?accent:white,true);
                 if(row=="pivot" && pivot_snap_line) { canvas.Text(242,y+32,680,24,snapshot.pivot_secondary,white,true); y+=32; }
                 y+=52;
+                if (row=="framegen" && !snapshot.framegen_detail.empty()) {
+                    canvas.Text(242,y-22,680,20,snapshot.framegen_detail,muted); y+=28;
+                }
             }
         }
         if (!snapshot.restart.empty()) canvas.Text(30,y,902,20,"RESTART PENDING  /  "+snapshot.restart,RGB(245,185,108));
@@ -393,7 +453,7 @@ std::pair<OsdPresentation, OsdPresentation> OsdRenderer::Prepare(const OsdSettin
     }
     if (settings.compact!=settings_.compact) compact_=settings.compact;
     if (settings.visible_on_start!=settings_.visible_on_start) visible_=settings.visible_on_start;
-    if (!SameInput(settings.toggle_binding,settings_.toggle_binding) || !SameInput(settings.cycle_binding,settings_.cycle_binding)) primed_=false;
+    if (!SameInputs(settings.toggle_bindings,settings_.toggle_bindings) || !SameInputs(settings.cycle_bindings,settings_.cycle_bindings)) primed_=false;
     if (primed_ && settings.enabled) {
         if (toggle && !toggle_down_) visible_=!visible_;
         if (cycle && !cycle_down_) { compact_=!compact_; updated_={}; }
@@ -403,6 +463,8 @@ std::pair<OsdPresentation, OsdPresentation> OsdRenderer::Prepare(const OsdSettin
         (settings.enabled&&visible_)!=status_.shown || settings.update_hz!=settings_.update_hz ||
         settings.scale!=settings_.scale || settings.opacity!=settings_.opacity || settings.body_order!=settings_.body_order ||
         settings.show_graph!=settings_.show_graph || settings.show_turbo!=settings_.show_turbo || settings.show_pivot!=settings_.show_pivot || settings.show_modules!=settings_.show_modules ||
+        settings.show_framegen!=settings_.show_framegen || settings.compact_show_framegen!=settings_.compact_show_framegen ||
+        settings.show_framegen_fps!=settings_.show_framegen_fps ||
         settings.show_runtime!=settings_.show_runtime || settings.show_brand!=settings_.show_brand || settings.show_app!=settings_.show_app || settings.show_clock!=settings_.show_clock || settings.clock_format!=settings_.clock_format ||
         settings.compact_metrics!=settings_.compact_metrics || settings.compact_show_brand!=settings_.compact_show_brand || settings.compact_show_app!=settings_.compact_show_app ||
         settings.compact_show_runtime!=settings_.compact_show_runtime || settings.compact_show_clock!=settings_.compact_show_clock ||
@@ -415,7 +477,7 @@ std::pair<OsdPresentation, OsdPresentation> OsdRenderer::Prepare(const OsdSettin
     if(changed){
         Event(false,"configuration enabled="+std::to_string(settings.enabled)+" shown="+std::to_string(settings.enabled&&visible_)+" compact="+std::to_string(compact_)+
             " refreshHz="+std::to_string(settings.update_hz)+" scale="+std::to_string(settings.scale)+" opacity="+std::to_string(settings.opacity)+
-            " graph="+std::to_string(settings.show_graph)+" turbo="+std::to_string(settings.show_turbo)+" pivot="+std::to_string(settings.show_pivot)+" modules="+std::to_string(settings.show_modules));
+            " graph="+std::to_string(settings.show_graph)+" turbo="+std::to_string(settings.show_turbo)+" framegen="+std::to_string(settings.show_framegen)+" framegenFps="+std::to_string(settings.show_framegen_fps)+" pivot="+std::to_string(settings.show_pivot)+" modules="+std::to_string(settings.show_modules));
         updated_={};
     }
     if (settings.enabled) telemetry_.Tick(Clock::now()); else telemetry_={};

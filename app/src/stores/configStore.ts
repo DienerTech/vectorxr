@@ -13,7 +13,7 @@ import {
   type ActiveRuntimeInfo,
   type SeenApplication,
 } from '../lib/commands'
-import { cloneConfig, createApplication, createProfile, createPivotProfile, createQuadViewsProfile, createTurboProfile, defaultConfig } from '../lib/model'
+import { cloneConfig, createApplication, createFrameGenProfile, createProfile, createPivotProfile, createQuadViewsProfile, createTurboProfile, defaultConfig } from '../lib/model'
 import type { AppTab, ModuleId, RuntimePacingObservation, TurboMetricsSession, VectorXRConfig } from '../lib/model'
 
 interface StoreState {
@@ -300,6 +300,29 @@ export function useConfigStore() {
     }
   }
 
+  function addFrameGenProfile() {
+    const defaultApplicationId = state.config.applications[0]?.id
+    state.config.modules.framegen.profiles.push(
+      createFrameGenProfile(state.config.modules.framegen.defaults, defaultApplicationId ? [defaultApplicationId] : []),
+    )
+  }
+
+  function removeFrameGenProfile(index: number) {
+    state.config.modules.framegen.profiles.splice(index, 1)
+  }
+
+  function syncFrameGenProfileName(index: number) {
+    const profile = state.config.modules.framegen.profiles[index]
+    if (!profile) {
+      return
+    }
+
+    if (!profile.name.trim() || profile.name === 'New Profile') {
+      const firstApplication = state.config.applications.find((application) => application.id === profile.applicationIds[0])
+      profile.name = firstApplication?.name || 'New Profile'
+    }
+  }
+
   // Registry shortcut: create a profile pre-assigned to one application and jump to the module tab.
   function addModuleProfileForApplication(moduleId: ModuleId, applicationId: string) {
     const application = state.config.applications.find((candidate) => candidate.id === applicationId)
@@ -324,6 +347,9 @@ export function useConfigStore() {
     } else if (moduleId === 'turbo') {
       state.config.modules.turbo.profiles.push(createTurboProfile(applicationIds))
       syncTurboProfileName(state.config.modules.turbo.profiles.length - 1)
+    } else if (moduleId === 'framegen') {
+      state.config.modules.framegen.profiles.push(createFrameGenProfile(state.config.modules.framegen.defaults, applicationIds))
+      syncFrameGenProfileName(state.config.modules.framegen.profiles.length - 1)
     } else {
       state.config.modules.quadviews.profiles.push(createQuadViewsProfile(state.config.modules.quadviews.defaults, applicationIds))
       syncQuadViewsProfileName(state.config.modules.quadviews.profiles.length - 1)
@@ -372,6 +398,12 @@ export function useConfigStore() {
     for (const profile of state.config.modules.quadviews.profiles) {
       profile.applicationIds = profile.applicationIds.filter((id) => id !== application.id)
     }
+    for (const profile of state.config.modules.turbo.profiles) {
+      profile.applicationIds = profile.applicationIds.filter((id) => id !== application.id)
+    }
+    for (const profile of state.config.modules.framegen.profiles) {
+      profile.applicationIds = profile.applicationIds.filter((id) => id !== application.id)
+    }
   }
 
   return {
@@ -401,6 +433,9 @@ export function useConfigStore() {
     addTurboProfile,
     removeTurboProfile,
     syncTurboProfileName,
+    addFrameGenProfile,
+    removeFrameGenProfile,
+    syncFrameGenProfileName,
     addModuleProfileForApplication,
     addApplication,
     addSeenApplication,

@@ -19,6 +19,10 @@ tauri-plugin-dialog = "2"
 windows = { version = "0.61.3", features = [
   "Win32_Devices_HumanInterfaceDevice",
   "Win32_Foundation",
+  "Win32_Graphics_Direct3D",
+  "Win32_Graphics_Direct3D12",
+  "Win32_Graphics_Dxgi",
+  "Win32_Graphics_Dxgi_Common",
   "Win32_Media_Audio",
   "Win32_Security",
   "Win32_System_LibraryLoader",

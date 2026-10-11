@@ -12,7 +12,8 @@ const selected = ref<TurboRecoveryRecord | null>(null)
 function date(value: number) { return value ? new Date(value).toLocaleString() : 'Unknown' }
 function sessionState(state?: string) {
   return ({ 'recovery-disabled': 'Turbo enabled · off after safety block', suspended: 'Turbo enabled · suspended after a fault',
-    async: 'Turbo active · Async', sequenced: 'Turbo active · Sequenced', waiting: 'Turbo waiting to engage', off: 'Turbo off' } as Record<string, string>)[state ?? ''] ?? 'Status unavailable'
+    async: 'Turbo active · Async', sequenced: 'Turbo active · Sequenced', waiting: 'Turbo waiting to engage', off: 'Turbo off',
+    framegen: 'Paused for Frame Generation' } as Record<string, string>)[state ?? ''] ?? 'Status unavailable'
 }
 function onKeydown(event: KeyboardEvent) {
   if (event.key === 'Escape') { if (selected.value) selected.value = null; else emit('close') }

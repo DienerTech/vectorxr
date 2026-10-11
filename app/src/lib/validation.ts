@@ -1,4 +1,13 @@
-import type { CoreConfig, DepthXRProfileConfig, DepthXRSettings, InputBinding, PivotViewControls, PivotXRProfileConfig, PivotXRSettings, QuadViewsProfileConfig, QuadViewsSettings, RegisteredApplication, VectorXRConfig } from './model'
+import type { CoreConfig, DepthXRProfileConfig, DepthXRSettings, FrameGenProfileConfig, FrameGenSettings, InputBinding, PivotViewControls, PivotXRProfileConfig, PivotXRSettings, QuadViewsProfileConfig, QuadViewsSettings, RegisteredApplication, VectorXRConfig } from './model'
+
+// Runtime value imports from './model' are avoided so node:test can load this
+// module directly; keep these lists in sync with model.ts.
+const osdBodyRowNames = ['graph', 'turbo', 'framegen', 'pivot', 'modules']
+const frameGenSynthesisModeNames = ['interpolate', 'extrapolate']
+const frameGenFlowQualityNames = ['performance', 'balanced', 'quality']
+const frameGenMotionEstimationNames = ['shader', 'hardware']
+const frameGenFrameMultiplierNames = ['auto', 'dynamic', '2x', '3x', '4x']
+const frameGenDiagnosticViewNames = ['off', 'flow', 'confidence', 'tint']
 
 function validateCoreConfig(core: CoreConfig): string[] {
   const errors: string[] = []
@@ -11,12 +20,12 @@ function validateCoreConfig(core: CoreConfig): string[] {
     if (!Number.isFinite(value) || value < low || value > high ||
         ((name === 'opacity' || name === 'updateHz') && !Number.isInteger(value))) errors.push(`OSD ${name} must be between ${low} and ${high}`)
   }
-  errors.push(...validateInputBinding('core.osd.toggleBinding', core.osd.toggleBinding), ...validateInputBinding('core.osd.cycleBinding', core.osd.cycleBinding))
+  errors.push(...validateInputBindings('core.osd.toggleBindings', core.osd.toggleBindings), ...validateInputBindings('core.osd.cycleBindings', core.osd.cycleBindings))
   if (!/^#[0-9a-f]{6}$/i.test(core.osd.customColor)) errors.push('OSD custom color must be a six-digit hex color')
   if (!['teal', 'copper', 'blue', 'violet', 'rose', 'custom'].includes(core.osd.accent)) errors.push('OSD accent is invalid')
   if (!['12', '24'].includes(core.osd.clockFormat)) errors.push('OSD clock format must be 12 or 24 hour')
   if (!['all', 'fps', 'frameTime', 'none'].includes(core.osd.compactMetrics)) errors.push('OSD compact performance selection is invalid')
-  if (core.osd.bodyOrder.length !== 4 || new Set(core.osd.bodyOrder).size !== 4 || core.osd.bodyOrder.some(row => !['graph', 'turbo', 'pivot', 'modules'].includes(row))) errors.push('OSD body order must contain each row once')
+  if (core.osd.bodyOrder.length !== osdBodyRowNames.length || new Set(core.osd.bodyOrder).size !== osdBodyRowNames.length || core.osd.bodyOrder.some(row => !osdBodyRowNames.includes(row))) errors.push('OSD body order must contain each row once')
 
   if (!Number.isInteger(core.logRetentionFiles) || core.logRetentionFiles < 1 || core.logRetentionFiles > 50) {
     errors.push('core.logRetentionFiles must be an integer between 1 and 50')
@@ -320,6 +329,35 @@ function validateQuadViewsSettings(prefix: string, settings: QuadViewsSettings):
   return errors
 }
 
+function validateFrameGenSettings(prefix: string, settings: FrameGenSettings): string[] {
+  const errors: string[] = []
+
+  if (!frameGenSynthesisModeNames.includes(settings.synthesisMode)) {
+    errors.push(`${prefix}synthesisMode must be interpolate or extrapolate`)
+  }
+  if (!frameGenFlowQualityNames.includes(settings.flowQuality)) {
+    errors.push(`${prefix}flowQuality must be performance, balanced, or quality`)
+  }
+  if (!frameGenMotionEstimationNames.includes(settings.motionEstimation)) {
+    errors.push(`${prefix}motionEstimation must be shader or hardware`)
+  }
+  if (!frameGenFrameMultiplierNames.includes(settings.frameMultiplier)) {
+    errors.push(`${prefix}frameMultiplier must be auto, dynamic, 2x, 3x, or 4x`)
+  }
+
+  const bounded = [
+    ['artifactSuppression', settings.artifactSuppression, 0, 100],
+    ['motionLimitPercent', settings.motionLimitPercent, 2, 25],
+  ] as const
+  for (const [name, value, min, max] of bounded) {
+    if (!Number.isInteger(value) || value < min || value > max) {
+      errors.push(`${prefix}${name} must be a whole number from ${min} to ${max}`)
+    }
+  }
+
+  return errors
+}
+
 function validateApplications(applications: RegisteredApplication[]): string[] {
   const errors: string[] = []
   const seenIds = new Set<string>()
@@ -483,6 +521,86 @@ function validateQuadViewsProfileConflicts(profiles: QuadViewsProfileConfig[]): 
   return errors
 }
 
+function validateFrameGenProfile(profile: FrameGenProfileConfig, index: number, applicationIds: Set<string>): string[] {
+  const errors: string[] = []
+  const prefix = `modules.framegen.profiles[${index}].`
+
+  if (!profile.name.trim()) {
+    errors.push(`${prefix}name is required`)
+  }
+
+  const seenProfileApplicationIds = new Set<string>()
+  for (const applicationId of profile.applicationIds) {
+    if (!applicationIds.has(applicationId)) {
+      errors.push(`${prefix}applicationIds references unknown application: ${applicationId}`)
+    }
+    if (seenProfileApplicationIds.has(applicationId)) {
+      errors.push(`${prefix}applicationIds duplicates ${applicationId}`)
+    }
+    seenProfileApplicationIds.add(applicationId)
+  }
+
+  errors.push(...validateFrameGenSettings(`${prefix}settings.`, profile.settings))
+  return errors
+}
+
+function validateFrameGenProfileConflicts(profiles: FrameGenProfileConfig[]): string[] {
+  const errors: string[] = []
+  const firstProfileByApplication = new Map<string, number>()
+
+  profiles.forEach((profile, index) => {
+    if (!profile.enabled) {
+      return
+    }
+
+    for (const applicationId of profile.applicationIds) {
+      const firstIndex = firstProfileByApplication.get(applicationId)
+      if (firstIndex !== undefined) {
+        errors.push(`modules.framegen.profiles[${index}] conflicts with profiles[${firstIndex}] for application ${applicationId}; first enabled profile wins`)
+      } else {
+        firstProfileByApplication.set(applicationId, index)
+      }
+    }
+  })
+
+  return errors
+}
+
+// Mirrors the layer resolver: the first enabled profile targeting the
+// application turns the module on; otherwise the default profile decides.
+function moduleOnForApplication(module: { enabled: boolean; profiles: Array<{ enabled: boolean; applicationIds: string[] }> }, applicationId: string): { on: boolean; custom: boolean } {
+  const profile = module.profiles.find((candidate) => candidate.enabled && candidate.applicationIds.includes(applicationId))
+  return profile ? { on: true, custom: true } : { on: module.enabled, custom: false }
+}
+
+// Applications where Turbo and Frame Generation would both start. Frame
+// Generation owns pacing in those sessions, so Turbo stays off. Applications
+// covered only by both default profiles are reported once, as `defaults`.
+export function frameGenTurboOverlap(config: VectorXRConfig): { applications: string[]; defaults: boolean } {
+  const { turbo, framegen } = config.modules
+  const applications = config.applications.flatMap((application) => {
+    const turboState = moduleOnForApplication(turbo, application.id)
+    const frameGenState = moduleOnForApplication(framegen, application.id)
+    return turboState.on && frameGenState.on && (turboState.custom || frameGenState.custom) ? [application.name || application.id] : []
+  })
+  return { applications, defaults: turbo.enabled && framegen.enabled }
+}
+
+// Non-blocking advice: shown on the affected pages, never prevents Save.
+export function configWarnings(config: VectorXRConfig): string[] {
+  const overlap = frameGenTurboOverlap(config)
+  const targets = overlap.applications.length > 3
+    ? [...overlap.applications.slice(0, 3), `${overlap.applications.length - 3} more`]
+    : [...overlap.applications]
+  if (overlap.defaults) targets.push('applications without a custom profile')
+  if (targets.length === 0) return []
+
+  const list = targets.length === 1
+    ? targets[0]
+    : `${targets.slice(0, -1).join(', ')} and ${targets[targets.length - 1]}`
+  return [`Turbo and Frame Generation are both on for ${list}. Frame Generation takes over frame pacing; Turbo stays off in sessions where Frame Generation runs.`]
+}
+
 export function validateConfig(config: VectorXRConfig): string[] {
   const errors: string[] = []
 
@@ -493,8 +611,8 @@ export function validateConfig(config: VectorXRConfig): string[] {
   errors.push(...validateCoreConfig(config.core))
   errors.push(...validateApplications(config.applications))
   errors.push(...validateDepthXRSettings('modules.depthxr.defaults.', config.modules.depthxr.defaults))
-  errors.push(...validateInputBinding('modules.depthxr.bindings.toggleEnabled', config.modules.depthxr.bindings.toggleEnabled))
-  errors.push(...validateInputBinding('modules.depthxr.bindings.toggleAnchor', config.modules.depthxr.bindings.toggleAnchor))
+  errors.push(...validateInputBindings('modules.depthxr.bindings.toggleEnabledBindings', config.modules.depthxr.bindings.toggleEnabledBindings))
+  errors.push(...validateInputBindings('modules.depthxr.bindings.toggleAnchorBindings', config.modules.depthxr.bindings.toggleAnchorBindings))
   errors.push(...validatePivotXRSettings('modules.pivotxr.defaults.', config.modules.pivotxr.defaults))
   errors.push(...validateInputBindings('modules.pivotxr.activationBindings', config.modules.pivotxr.activationBindings.map((item) => item.binding)))
   errors.push(...validateInputBindings('modules.pivotxr.setOriginBindings', config.modules.pivotxr.setOriginBindings))
@@ -540,7 +658,8 @@ export function validateConfig(config: VectorXRConfig): string[] {
   })
   errors.push(...validateQuadViewsProfileConflicts(config.modules.quadviews.profiles))
 
-  errors.push(...validateInputBinding('modules.turbo.toggleBinding', config.modules.turbo.toggleBinding))
+  errors.push(...validateInputBindings('modules.turbo.toggleBindings', config.modules.turbo.toggleBindings))
+  errors.push(...validateInputBindings('modules.turbo.metricsBindings', config.modules.turbo.metricsBindings))
   for (const experiment of [config.modules.turbo.experimental, ...config.modules.turbo.profiles.map(profile => profile.experimental)]) {
   if (!Number.isInteger(experiment.predictionPercent) || experiment.predictionPercent < 50 || experiment.predictionPercent > 100) {
     errors.push('Turbo experimental prediction dampening must be an integer from 50 to 100')
@@ -549,6 +668,16 @@ export function validateConfig(config: VectorXRConfig): string[] {
     errors.push('Turbo experimental frame cap must be 0 (off) or an integer from 20 to 240')
   }
   }
+  errors.push(...validateInputBindings('modules.framegen.toggleBindings', config.modules.framegen.toggleBindings))
+  if (!frameGenDiagnosticViewNames.includes(config.modules.framegen.diagnosticView)) {
+    errors.push('modules.framegen.diagnosticView must be off, flow, confidence, or tint')
+  }
+  errors.push(...validateFrameGenSettings('modules.framegen.defaults.', config.modules.framegen.defaults))
+  config.modules.framegen.profiles.forEach((profile, index) => {
+    errors.push(...validateFrameGenProfile(profile, index, applicationIds))
+  })
+  errors.push(...validateFrameGenProfileConflicts(config.modules.framegen.profiles))
+
   config.modules.turbo.profiles.forEach((profile, index) => {
     const prefix = `modules.turbo.profiles[${index}].`
     if (!profile.name.trim()) {

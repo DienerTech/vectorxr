@@ -11,3 +11,4 @@
 - Use `scripts/Build-And-Install-Layer.ps1 -Configuration Release` for the build and installation workflow, and run the relevant checks.
 - Verify that the enabled OpenXR manifest resolves to the newly built Release DLL. If it already points to the workspace Release output, rebuilding that DLL updates the active installation; verify the registration instead of unnecessarily reinstalling it.
 - Remind the user to relaunch the VR application to load the rebuilt DLL. If building or installing is blocked, report that explicitly; do not imply the changes are ready for headset testing.
+- Sign a local build (`scripts/Build-And-Install-Layer.ps1 -Configuration Release -Sign`, or `scripts/Sign-LocalLayer.ps1`) only when the user asks for it, to test in a game with anti-cheat. It signs as DienerTech LLC, and a signed build cannot be recalled.

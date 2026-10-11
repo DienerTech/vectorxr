@@ -20,8 +20,8 @@ const previewPivotSnapLine = computed(() => pivotSnapViewsConfigured(props.confi
 const previewWindow = useOsdPreviewWindow(osd, previewCompact, previewLegible, previewPivotSnapLine)
 watch(() => osd.value.compact, compact => { previewCompact.value = compact })
 function customColor() { osd.value.accent = 'custom'; colorExpanded.value = !colorExpanded.value }
-const editing = ref<'toggleBinding' | 'cycleBinding' | null>(null)
-const warnings = computed(() => savedBindingConflictWarnings(props.config, [osd.value.toggleBinding, osd.value.cycleBinding]))
+const editing = ref<'toggleBindings' | 'cycleBindings' | null>(null)
+const warnings = computed(() => savedBindingConflictWarnings(props.config, [...osd.value.toggleBindings, ...osd.value.cycleBindings]))
 const sessions = ref<RuntimeStatusSession[]>([])
 const statusError = ref('')
 let disposed = false
@@ -38,7 +38,7 @@ onUnmounted(() => { disposed = true; if (poll) clearTimeout(poll) })
 
 let savedScrollTop = 0
 const scroller = () => document.querySelector('main section.overflow-y-auto')
-function openBinding(binding: 'toggleBinding' | 'cycleBinding') {
+function openBinding(binding: 'toggleBindings' | 'cycleBindings') {
   savedScrollTop = scroller()?.scrollTop ?? 0
   editing.value = binding
   void nextTick(() => scroller()?.scrollTo({ top: 0 }))
@@ -47,14 +47,16 @@ function closeBinding() {
   editing.value = null
   void nextTick(() => scroller()?.scrollTo({ top: savedScrollTop }))
 }
-const contents: Record<OsdBodyRow, { key: 'showGraph' | 'showTurbo' | 'showPivot' | 'showModules'; label: string; hint: string }> = {
+const contents: Record<OsdBodyRow, { key: 'showGraph' | 'showTurbo' | 'showFramegen' | 'showPivot' | 'showModules'; label: string; hint: string }> = {
   graph: { key: 'showGraph', label: 'Frame-time graph', hint: 'Rolling history of the last 120 application frames.' },
   turbo: { key: 'showTurbo', label: 'Turbo state', hint: 'Distinguishes disabled, enabled but off, active strategy, and safety states.' },
+  framegen: { key: 'showFramegen', label: 'Frame Generation state', hint: 'On, Standby, Paused or Off, with the mode and frame rate, and a second line with frame rates or the reason. Shown only in games where Frame Generation is on.' },
   pivot: { key: 'showPivot', label: 'Pivot state', hint: 'Motion state, Position Assist, and nudges. Apps with Snap Views add a second line for the snap, stacking, and transitions.' },
-  modules: { key: 'showModules', label: 'Active enhancements', hint: 'Depth, Pivot, Turbo, and Quadviews enabled for this app.' },
+  modules: { key: 'showModules', label: 'Active enhancements', hint: 'Depth, Pivot, Turbo, Quadviews, and Frame Generation enabled for this app.' },
 }
 const compactContents = [
   { key: 'compactShowTurbo', label: 'Turbo state', hint: 'Current strategy, off, waiting, or safety state.' },
+  { key: 'compactShowFramegen', label: 'Frame Generation state', hint: 'Frame rate and game-to-headset frame rates, or Standby, Paused or Off.' },
   { key: 'compactShowPivot', label: 'Pivot state', hint: 'Motion state in a short label, plus a Snap View line when Snap Views are configured.' },
 ] as const
 const compactHeaders = [
@@ -64,10 +66,11 @@ const compactHeaders = [
   { key: 'compactShowClock', label: 'Local clock' },
 ] as const
 const metricChoices = { all: 'FPS + average frame time', fps: 'FPS only', frameTime: 'Average frame time only', none: 'Hidden' } as const
+const framegenFpsHint = 'In games with Frame Generation on: FG ON with the frames per second the headset shows, or STBY, PAUSED or OFF.'
 const compactEmpty = computed(() => osdCompactLayout(osd.value).empty)
 function fpsOnly() {
   Object.assign(osd.value, { compactMetrics: 'fps', compactShowBrand: false, compactShowApp: false,
-    compactShowRuntime: false, compactShowClock: false, compactShowTurbo: false, compactShowPivot: false })
+    compactShowRuntime: false, compactShowClock: false, compactShowTurbo: false, compactShowFramegen: false, compactShowPivot: false })
   previewCompact.value = true
 }
 function moveRow(row: OsdBodyRow, direction: number) {
@@ -130,9 +133,9 @@ function deletePreset() {
 }
 function preset(name: 'balanced' | 'minimal' | 'performance') {
   const shared: Partial<OsdSettings> = { opacity: 90, accent: 'teal', distanceMeters: 1.2, updateHz: 5,
-    compactShowRuntime: true, compactShowClock: true, compactShowTurbo: false, compactShowPivot: false,
+    compactShowRuntime: true, compactShowClock: true, compactShowTurbo: false, compactShowFramegen: false, compactShowPivot: false,
     compactShowBrand: true, compactShowApp: true, compactMetrics: 'all',
-    showGraph: true, showRuntime: true, showBrand: true, showApp: true, showTurbo: true, showModules: true, showClock: true, showPivot: true, clockFormat: '24', bodyOrder: [...osdBodyRows] }
+    showGraph: true, showRuntime: true, showBrand: true, showApp: true, showTurbo: true, showFramegen: true, showFramegenFps: true, showModules: true, showClock: true, showPivot: true, clockFormat: '24', bodyOrder: [...osdBodyRows] }
   const layout = name === 'minimal'
     ? { compact: true, horizontalDegrees: 0, verticalDegrees: -23, scale: 80 }
     : name === 'performance'
@@ -146,10 +149,10 @@ function preset(name: 'balanced' | 'minimal' | 'performance') {
 </script>
 
 <template>
-  <ModuleBindingPage v-if="editing" module-label="On-Screen Display" :binding="osd[editing]"
-    :label="editing === 'toggleBinding' ? 'Show / hide display' : 'Switch compact / expanded'"
+  <ModuleBindingPage v-if="editing" module-label="On-Screen Display" :bindings="osd[editing]"
+    :label="editing === 'toggleBindings' ? 'Show / hide display' : 'Switch compact / expanded'"
     description="Works in the VR application. Assign a keyboard chord, joystick button, or hat direction. Save to apply it live."
-    :warnings="warnings" @update:binding="osd[editing!] = $event" @close="closeBinding" />
+    :warnings="warnings" @update:bindings="osd[editing!] = $event" @close="closeBinding" />
   <div v-else class="space-y-4">
     <article class="surface-panel rounded-[1.25rem] border p-5 shadow-panel backdrop-blur">
       <div class="flex flex-wrap items-start justify-between gap-4">
@@ -178,8 +181,8 @@ function preset(name: 'balanced' | 'minimal' | 'performance') {
           </template>
         </div>
         <div class="grid gap-3 lg:grid-cols-2">
-          <ModuleBindingPanel heading="Show / hide" :binding="osd.toggleBinding" @edit="openBinding('toggleBinding')" />
-          <ModuleBindingPanel heading="Compact / expanded" :binding="osd.cycleBinding" @edit="openBinding('cycleBinding')" />
+          <ModuleBindingPanel heading="Show / hide" :bindings="osd.toggleBindings" @edit="openBinding('toggleBindings')" />
+          <ModuleBindingPanel heading="Compact / expanded" :bindings="osd.cycleBindings" @edit="openBinding('cycleBindings')" />
         </div>
         <BindingConflictWarnings class="mt-3" :warnings="warnings" />
       </section>
@@ -191,8 +194,8 @@ function preset(name: 'balanced' | 'minimal' | 'performance') {
         </summary>
         <div class="mt-3 max-w-4xl space-y-2 text-xs leading-5 text-muted">
           <p>Every setting on this page applies after Save, including enabling the OSD in a running game. Bindings change visibility and layout immediately for the current session. The next session uses your saved starting layout and visibility.</p>
-          <p>The overlay measures intervals between the application's xrEndFrame calls over the last 120 frames. P95 is the interval at the 95th percentile; lower, steadier frame times are better. These values do not measure GPU work, reprojection, or compositor frame rate. Turbo can make application cadence differ from the headset's refresh rate.</p>
-          <p>Turbo can be enabled after Save in a running game, and the in-game binding switches it off/on; live enable and Async toggles have been observed in DCS. Experimental timing controls and Quadviews enable/disable changes still require an application restart. The expanded OSD shows these pending changes. Other VectorXR controls retain the behavior described on their own settings pages.</p>
+          <p>The overlay measures intervals between the application's xrEndFrame calls over the last 120 frames. P95 is the interval at the 95th percentile; lower, steadier frame times are better. These values do not measure GPU work, reprojection, or compositor frame rate. Turbo can make application cadence differ from the headset's refresh rate. With Frame Generation on, FG ON beside FPS shows the frames per second the headset gets, generated ones included.</p>
+          <p>Turbo can be enabled after Save in a running game, and the in-game binding switches it off/on; live enable and Async toggles have been observed in DCS. Experimental timing controls and Quadviews enable/disable changes still require an application restart; the expanded OSD shows these pending changes. Turning Frame Generation on also needs a restart; turning it off applies at once. Other VectorXR controls retain the behavior described on their own settings pages.</p>
           <p>This is an information panel with in-game visibility and layout controls. Edit settings in the desktop app. OpenGL is not supported. A runtime with no spare composition layers cannot show the panel.</p>
         </div>
       </details>
@@ -260,6 +263,12 @@ function preset(name: 'balanced' | 'minimal' | 'performance') {
             </fieldset>
           </template>
 
+          <label class="flex items-start gap-2.5 text-sm" :title="framegenFpsHint">
+            <input v-model="osd.showFramegenFps" type="checkbox" class="mt-0.5 accent-depthxr-copper" />
+            <span>Frame Generation beside FPS <span class="text-xs text-muted">(both layouts)</span>
+              <span class="mt-0.5 block text-xs leading-5 text-muted">{{ framegenFpsHint }}</span>
+            </span>
+          </label>
           <label v-if="osd.showClock || osd.compactShowClock" class="flex items-center justify-between gap-3 text-xs text-muted">Clock format (both layouts)<select v-model="osd.clockFormat" aria-label="Clock format" class="app-input manual-input-select rounded-[0.75rem] px-2 py-1 text-xs"><option value="12">12 hour · 8:42 PM</option><option value="24">24 hour · 20:42</option></select></label>
         </section>
 

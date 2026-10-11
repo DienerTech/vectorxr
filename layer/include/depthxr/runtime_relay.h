@@ -28,6 +28,11 @@ struct RuntimeStatusDocument {
     std::string osd_message;
     std::string turbo_state;
     std::string turbo_reason;
+    std::string framegen_state;
+    std::string framegen_reason;
+    // FrameGenDepthState relay name ("in-use", "not-sent", ...), empty
+    // before generated frames.
+    std::string framegen_depth;
     std::vector<QuadViewDimensions> quadviews_dimensions;
     std::uint64_t quadviews_dimensions_at{0};
     std::string session_id;

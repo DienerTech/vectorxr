@@ -91,6 +91,10 @@ struct OsdSettings {
     bool show_modules{true};
     bool show_clock{true};
     bool show_pivot{true};
+    bool show_framegen{true};
+    // Beside the FPS counter, in both layouts, in sessions with Frame
+    // Generation on: its state and the frames per second the headset shows.
+    bool show_framegen_fps{true};
     bool compact_show_runtime{true};
     bool compact_show_brand{true};
     bool compact_show_app{true};
@@ -98,12 +102,15 @@ struct OsdSettings {
     bool compact_show_clock{true};
     bool compact_show_turbo{false};
     bool compact_show_pivot{false};
+    bool compact_show_framegen{false};
     std::string clock_format{"24"};
-    std::vector<std::string> body_order{"graph", "turbo", "pivot", "modules"};
+    std::vector<std::string> body_order{"graph", "turbo", "framegen", "pivot", "modules"};
     std::string accent{"teal"};
     std::string custom_color{"#51ddbd"};
-    InputBinding toggle_binding{InputBindingType::Keyboard, {"Ctrl", "Alt", "F10"}};
-    InputBinding cycle_binding{InputBindingType::Keyboard, {"Ctrl", "Alt", "F11"}};
+    // Any one of a list's bindings acts (one per device: a HOTAS's button and
+    // a HOSAS's, say); none means none bound.
+    std::vector<InputBinding> toggle_bindings{InputBinding{InputBindingType::Keyboard, {"Ctrl", "Alt", "F10"}}};
+    std::vector<InputBinding> cycle_bindings{InputBinding{InputBindingType::Keyboard, {"Ctrl", "Alt", "F11"}}};
 };
 
 struct CoreSettings {
@@ -133,9 +140,10 @@ struct DepthXrResolvedSettings {
     bool depth_anchor{false};
 };
 
+// Any one of a list's bindings toggles; empty: none bound.
 struct DepthXrBindings {
-    InputBinding toggle_enabled{InputBindingType::None, {}, "", "button-1", "", "", ""};
-    InputBinding toggle_anchor{InputBindingType::None, {}, "", "button-1", "", "", ""};
+    std::vector<InputBinding> toggle_enabled_bindings;
+    std::vector<InputBinding> toggle_anchor_bindings;
 };
 
 struct ProfileMatch {
@@ -469,8 +477,9 @@ enum class TurboMetricsMode {
 struct TurboModuleConfig {
     bool enabled{false};
     bool interrupted_session_recovery{true};
-    // Optional in-session A/B toggle, mirroring the Depth toggle binding.
-    InputBinding toggle_binding;
+    // Optional in-session A/B toggle, mirroring the Depth toggle binding
+    // (any one of the list's bindings).
+    std::vector<InputBinding> toggle_bindings;
     TurboPacingSetting pacing_mode{TurboPacingSetting::kAuto};
     // Per-runtime user overrides, keyed by exact xrGetInstanceProperties
     // runtimeName. Only consulted when pacing_mode is kAuto.
@@ -478,7 +487,7 @@ struct TurboModuleConfig {
     TurboExperimentalSettings experimental;
     TurboMetricsMode metrics_mode{TurboMetricsMode::kAlways};
     // Begin/end metric capture while in-game (kBinding mode only).
-    InputBinding metrics_binding;
+    std::vector<InputBinding> metrics_bindings;
     std::vector<TurboProfile> profiles;
 };
 
@@ -486,12 +495,99 @@ struct TurboResolvedSettings {
     std::string profile_name;
     bool enabled{false};
     bool interrupted_session_recovery{true};
-    InputBinding toggle_binding;
+    std::vector<InputBinding> toggle_bindings;
     TurboPacingSetting pacing_mode{TurboPacingSetting::kAuto};
     std::vector<std::pair<std::string, TurboPacingMode>> runtime_pins;
     TurboExperimentalSettings experimental;
     TurboMetricsMode metrics_mode{TurboMetricsMode::kAlways};
-    InputBinding metrics_binding;
+    std::vector<InputBinding> metrics_bindings;
+};
+
+// Frame Generation: holds the application at half the runtime refresh rate and
+// presents an optical-flow generated frame between every pair of real frames.
+// Interpolate places the generated frame between the previous and newest real
+// frames (fewer artifacts; the real frame is due one refresh earlier).
+// Extrapolate pushes the newest real frame forward along its motion (the real
+// frame keeps an extra refresh of GPU time; more disocclusion artifacts).
+enum class FrameGenSynthesisMode {
+    kInterpolate,
+    kExtrapolate,
+};
+
+// Optical-flow resolution relative to the eye image: 1/16, 1/8 or 1/4.
+enum class FrameGenFlowQuality {
+    kPerformance,
+    kBalanced,
+    kQuality,
+};
+
+// How motion is measured. Shader: block matching on the GPU's shader cores
+// (any GPU). Hardware: the optical flow accelerator of NVIDIA RTX 20-50 GPUs
+// in Direct3D 12 games (experimental; falls back to shader elsewhere).
+enum class FrameGenMotionEstimation {
+    kShader,
+    kHardware,
+};
+
+// Headset frames per real application frame. Dynamic (the default) holds
+// nothing: the application runs at its own rate and generated frames fill the
+// refreshes between its frames (presented from the presenter thread; where
+// that is unavailable it behaves as Auto). The fixed rates hold the
+// application at a fraction of the runtime refresh rate: 2x at half, 3x at a
+// third, 4x at a quarter. Auto starts at full rate, steps up while the
+// application misses its cadence, probes back down when it keeps up, and
+// passes frames through when it holds full refresh.
+enum class FrameGenMultiplier {
+    kAuto,
+    k2,
+    k3,
+    k4,
+    kDynamic,
+};
+
+// Diagnostic overlays drawn into generated frames only.
+enum class FrameGenDiagnosticView {
+    kOff,
+    kFlow,
+    kConfidence,
+    kTint,
+};
+
+struct FrameGenSettings {
+    FrameGenSynthesisMode synthesis_mode{FrameGenSynthesisMode::kInterpolate};
+    FrameGenFlowQuality flow_quality{FrameGenFlowQuality::kBalanced};
+    FrameGenMotionEstimation motion_estimation{FrameGenMotionEstimation::kShader};
+    FrameGenMultiplier multiplier{FrameGenMultiplier::kDynamic};
+    // 0-100: higher falls back to the real image sooner where motion is uncertain.
+    int artifact_suppression{50};
+    // 2-25: largest content shift, in percent of view width, a generated frame may apply.
+    int motion_limit_percent{10};
+};
+
+struct FrameGenProfile {
+    std::string name;
+    bool enabled{true};
+    ProfileMode mode{ProfileMode::Custom};
+    std::vector<std::string> application_ids;
+    FrameGenSettings settings;
+};
+
+struct FrameGenModuleConfig {
+    bool enabled{false};
+    // Optional in-session A/B toggle (any one of the list's bindings); only
+    // effective in sessions that started with Frame Generation enabled (the
+    // pacing takeover is session-latched).
+    std::vector<InputBinding> toggle_bindings;
+    FrameGenDiagnosticView diagnostic_view{FrameGenDiagnosticView::kOff};
+    FrameGenSettings defaults;
+    std::vector<FrameGenProfile> profiles;
+};
+
+struct FrameGenResolvedSettings : FrameGenSettings {
+    bool enabled{false};
+    std::string profile_name;
+    std::vector<InputBinding> toggle_bindings;
+    FrameGenDiagnosticView diagnostic_view{FrameGenDiagnosticView::kOff};
 };
 
 struct ConfigDocument {
@@ -502,6 +598,7 @@ struct ConfigDocument {
     PivotXrModuleConfig pivotxr;
     QuadViewsModuleConfig quadviews;
     TurboModuleConfig turbo;
+    FrameGenModuleConfig framegen;
 };
 
 struct ResolvedRuntimeConfig {
@@ -511,6 +608,7 @@ struct ResolvedRuntimeConfig {
     PivotXrResolvedSettings pivotxr;
     QuadViewsResolvedSettings quadviews;
     TurboResolvedSettings turbo;
+    FrameGenResolvedSettings framegen;
 };
 
 const char* ToString(LogLevel level);
@@ -530,6 +628,16 @@ const char* ToString(InputBindingType type);
 std::optional<InputBindingType> ParseInputBindingType(const std::string& value);
 const char* ToString(QuadViewsTrackingMode mode);
 std::optional<QuadViewsTrackingMode> ParseQuadViewsTrackingMode(const std::string& value);
+const char* ToString(FrameGenSynthesisMode mode);
+std::optional<FrameGenSynthesisMode> ParseFrameGenSynthesisMode(const std::string& value);
+const char* ToString(FrameGenFlowQuality quality);
+std::optional<FrameGenFlowQuality> ParseFrameGenFlowQuality(const std::string& value);
+const char* ToString(FrameGenMotionEstimation estimation);
+std::optional<FrameGenMotionEstimation> ParseFrameGenMotionEstimation(const std::string& value);
+const char* ToString(FrameGenDiagnosticView view);
+const char* ToString(FrameGenMultiplier multiplier);
+std::optional<FrameGenMultiplier> ParseFrameGenMultiplier(const std::string& value);
+std::optional<FrameGenDiagnosticView> ParseFrameGenDiagnosticView(const std::string& value);
 const char* ToString(ProfileMode mode);
 std::optional<ProfileMode> ParseProfileMode(const std::string& value);
 const char* ToString(PivotResponseMode mode);

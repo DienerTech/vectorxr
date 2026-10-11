@@ -64,14 +64,15 @@ function closeBindings() {
   void nextTick(() => pageScroller()?.scrollTo({ top: savedScrollTop }))
 }
 
+// Toggles with at least one binding ("n of 2 assigned"), however many each has.
 const depthBindingCount = computed(() => [
-  props.config.modules.depthxr.bindings.toggleEnabled,
-  props.config.modules.depthxr.bindings.toggleAnchor,
-].filter((binding) => binding.type !== 'none').length)
+  props.config.modules.depthxr.bindings.toggleEnabledBindings,
+  props.config.modules.depthxr.bindings.toggleAnchorBindings,
+].filter((bindings) => bindings.some((binding) => binding.type !== 'none')).length)
 
 const depthBindingWarnings = computed(() => savedBindingConflictWarnings(props.config, [
-  props.config.modules.depthxr.bindings.toggleEnabled,
-  props.config.modules.depthxr.bindings.toggleAnchor,
+  ...props.config.modules.depthxr.bindings.toggleEnabledBindings,
+  ...props.config.modules.depthxr.bindings.toggleAnchorBindings,
 ]))
 
 const profileWarnings = computed(() => {

@@ -1,6 +1,9 @@
+#include <algorithm>
 #include <array>
+#include <bit>
 #include <chrono>
 #include <cmath>
+#include <cstdint>
 #include <cstdlib>
 #include <filesystem>
 #include <iostream>
@@ -11,11 +14,13 @@
 
 #include "depthxr/config_parser.h"
 #include "depthxr/effects.h"
+#include "depthxr/framegen_plan.h"
 #include "depthxr/input_devices.h"
 #include "depthxr/logger.h"
 #include "depthxr/pivot_routing.h"
 #include "depthxr/pivot_step.h"
 #include "depthxr/pivot_view.h"
+#include "depthxr/quadviews_compose.h"
 #include "depthxr/quadviews_frame_cache.h"
 #include "depthxr/quadviews_recovery.h"
 #include "depthxr/quadviews_sizing.h"
@@ -39,6 +44,17 @@ void Expect(bool condition, const std::string& message) {
         std::cerr << message << '\n';
         std::exit(1);
     }
+}
+
+// A toggle's first binding (an unbound list's: a None binding).
+const depthxr::InputBinding& FirstBinding(const std::vector<depthxr::InputBinding>& bindings) {
+    static const depthxr::InputBinding none;
+    return bindings.empty() ? none : bindings.front();
+}
+
+bool FirstChordKey(const std::vector<depthxr::InputBinding>& bindings, const std::string& key) {
+    const depthxr::InputBinding& binding = FirstBinding(bindings);
+    return !binding.chord.empty() && binding.chord.front() == key;
 }
 
 void TestOsdConfig() {
@@ -77,8 +93,8 @@ void TestOsdConfig() {
     Expect(osd.enabled && !osd.visible_on_start && osd.compact && osd.horizontal_degrees==-40 &&
            osd.vertical_degrees==35 && osd.distance_meters==.5 && osd.scale==150 && osd.opacity==30 &&
            osd.update_hz==20 && !osd.show_graph && !osd.show_runtime && !osd.show_turbo && !osd.show_modules &&
-           !osd.show_clock && osd.accent=="blue" && osd.toggle_binding.chord.size()==2 &&
-           osd.cycle_binding.type==depthxr::InputBindingType::None,"OSD fields were dropped");
+           !osd.show_clock && osd.accent=="blue" && osd.toggle_bindings.size()==1 &&
+           osd.toggle_bindings.front().chord.size()==2 && osd.cycle_bindings.empty(),"OSD fields were dropped");
     for(const std::string& fields:{R"("horizontalDegrees":41)",R"("verticalDegrees":-36)",R"("distanceMeters":0)",
       R"("scale":24)",R"("opacity":101)",R"("updateHz":0)",R"("updateHz":5.5)",R"("enabled":"true")",
       R"("showClock":1)",R"("accent":"red")",R"("unknown":true)"})
@@ -234,8 +250,8 @@ void TestParseConfig() {
     Expect(std::abs(result.document.depthxr.defaults.convergence - 0.08) < 0.0001, "DepthXR convergence mismatch");
     Expect(!result.document.depthxr.defaults.depth_anchor, "DepthXR default Depth Anchor mismatch");
     Expect(result.document.depthxr.profiles[0].settings.depth_anchor.value_or(false), "DepthXR profile Depth Anchor mismatch");
-    Expect(result.document.depthxr.bindings.toggle_enabled.chord[0] == "F7", "DepthXR toggle binding mismatch");
-    Expect(result.document.depthxr.bindings.toggle_anchor.chord[0] == "F9",
+    Expect(FirstChordKey(result.document.depthxr.bindings.toggle_enabled_bindings, "F7"), "DepthXR toggle binding mismatch");
+    Expect(FirstChordKey(result.document.depthxr.bindings.toggle_anchor_bindings, "F9"),
            "DepthXR Depth Anchor toggle binding mismatch");
     Expect(result.document.depthxr.profiles.size() == 1, "DepthXR profile count mismatch");
     Expect(result.document.depthxr.profiles[0].application_ids[0] == "game", "DepthXR profile application id mismatch");
@@ -394,7 +410,7 @@ void TestResolveRuntimeConfig() {
     Expect(std::abs(resolved.depthxr.stereo_boost - 1.15) < 0.0001, "Profile stereoBoost override was not applied");
     Expect(std::abs(resolved.depthxr.convergence - 0.12) < 0.0001, "Profile convergence override was not applied");
     Expect(resolved.depthxr.depth_anchor, "Profile Depth Anchor override was not applied");
-    Expect(resolved.depthxr_bindings.toggle_enabled.type == depthxr::InputBindingType::None, "DepthXR toggle binding should be none");
+    Expect(resolved.depthxr_bindings.toggle_enabled_bindings.empty(), "DepthXR toggle binding should be none");
     Expect(resolved.pivotxr.enabled, "PivotXR module enable was not resolved");
     Expect(resolved.pivotxr.profiles.size() == 1, "PivotXR resolved candidate count mismatch");
     const depthxr::PivotXrResolvedProfile& pivot_profile = resolved.pivotxr.profiles[0];
@@ -1048,7 +1064,7 @@ void TestTurboModuleResolution() {
 
     const depthxr::ResolvedRuntimeConfig resolved = depthxr::ResolveRuntimeConfig(result.document, "DCS.exe");
     Expect(resolved.turbo.enabled, "Turbo should resolve enabled for a matched profile");
-    Expect(resolved.turbo.toggle_binding.chord.size() == 2, "Turbo toggle binding chord mismatch");
+    Expect(FirstBinding(resolved.turbo.toggle_bindings).chord.size() == 2, "Turbo toggle binding chord mismatch");
 
     const depthxr::ResolvedRuntimeConfig resolved_other = depthxr::ResolveRuntimeConfig(result.document, "other.exe");
     Expect(!resolved_other.turbo.enabled, "Turbo default-off should not apply to unmatched applications");
@@ -1160,6 +1176,350 @@ void TestTurboModuleOptional() {
     Expect(!resolved.turbo.enabled, "Turbo resolved settings should default to disabled");
 }
 
+std::string FrameGenConfigJson(const std::string& framegen_module, const std::string& osd = "{}") {
+    return std::string(R"json(
+{
+  "version": 3,
+  "core": { "enabled": true, "logLevel": "info", "logRetentionFiles": 7, "osd": )json") + osd + R"json( },
+  "applications": [
+    { "id": "app-dcs", "name": "DCS", "enabled": true, "match": { "exe": "DCS.exe" } },
+    { "id": "app-msfs", "name": "MSFS", "enabled": true, "match": { "exe": "FlightSimulator2024.exe" } }
+  ],
+  "modules": {
+    "depthxr": {
+      "enabled": false,
+      "defaults": { "stereoBoost": 1.0, "convergence": 0.0 },
+      "bindings": { "toggleEnabled": { "type": "none" } },
+      "profiles": []
+    },
+    "pivotxr": { "enabled": false, "defaults": {}, "profiles": [] },
+    "framegen": )json" + framegen_module + R"json(
+  }
+}
+)json";
+}
+
+void TestFrameGenModuleOptional() {
+    // Configs written before Frame Generation existed must parse with it off.
+    const std::string json = R"json(
+{
+  "version": 3,
+  "core": { "enabled": true, "logLevel": "info", "logRetentionFiles": 7 },
+  "applications": [],
+  "modules": {
+    "depthxr": {
+      "enabled": false,
+      "defaults": { "stereoBoost": 1.0, "convergence": 0.0 },
+      "bindings": { "toggleEnabled": { "type": "none" } },
+      "profiles": []
+    },
+    "pivotxr": { "enabled": false, "defaults": {}, "profiles": [] }
+  }
+}
+)json";
+    const depthxr::ParseResult result = depthxr::ParseConfig(json);
+    Expect(result.ok, "Config without framegen module was rejected: " + result.error);
+    Expect(!result.document.framegen.enabled, "Frame Generation should default off when absent");
+    const auto resolved = depthxr::ResolveRuntimeConfig(result.document, "DCS.exe");
+    Expect(!resolved.framegen.enabled, "Frame Generation should resolve off when absent");
+    Expect(resolved.framegen.synthesis_mode == depthxr::FrameGenSynthesisMode::kInterpolate,
+           "Frame Generation should default to interpolation");
+    Expect(resolved.framegen.flow_quality == depthxr::FrameGenFlowQuality::kBalanced,
+           "Frame Generation should default to balanced flow");
+    Expect(resolved.framegen.motion_estimation == depthxr::FrameGenMotionEstimation::kShader,
+           "Frame Generation should default to shader motion estimation");
+    Expect(resolved.framegen.artifact_suppression == 50 && resolved.framegen.motion_limit_percent == 10,
+           "Frame Generation numeric defaults changed");
+    Expect(resolved.framegen.diagnostic_view == depthxr::FrameGenDiagnosticView::kOff,
+           "Frame Generation diagnostics should default off");
+    Expect(resolved.framegen.multiplier == depthxr::FrameGenMultiplier::kDynamic,
+           "Frame Generation should default to Dynamic");
+    Expect(resolved.core.osd.show_framegen && !resolved.core.osd.compact_show_framegen,
+           "OSD Frame Gen rows should default to full-panel only");
+    Expect(resolved.core.osd.show_framegen_fps, "The OSD should show Frame Generation beside FPS by default");
+    Expect(resolved.core.osd.body_order.size() == 5 && resolved.core.osd.body_order[2] == "framegen",
+           "Default OSD body order should include the Frame Gen row after Turbo");
+}
+
+void TestFrameGenProfileResolution() {
+    const std::string module = R"json({
+      "enabled": false,
+      "diagnosticView": "tint",
+      "toggleBinding": { "type": "keyboard", "chord": ["Ctrl", "Alt", "F9"] },
+      "defaults": { "synthesisMode": "interpolate", "flowQuality": "performance", "frameMultiplier": "2x", "artifactSuppression": 40, "motionLimitPercent": 8 },
+      "profiles": [
+        { "name": "Disabled", "enabled": false, "applicationIds": ["app-dcs"],
+          "settings": { "synthesisMode": "interpolate", "flowQuality": "quality" } },
+        { "name": "DCS", "enabled": true, "applicationIds": ["app-dcs"],
+          "settings": { "synthesisMode": "extrapolate", "flowQuality": "quality", "motionEstimation": "hardware", "frameMultiplier": "4x", "artifactSuppression": 75, "motionLimitPercent": 25 } }
+      ]
+    })json";
+    const depthxr::ParseResult result = depthxr::ParseConfig(FrameGenConfigJson(module));
+    Expect(result.ok, "Frame Generation module was rejected: " + result.error);
+    Expect(result.document.framegen.profiles.size() == 2, "Frame Generation profiles were not parsed");
+    Expect(FirstBinding(result.document.framegen.toggle_bindings).type == depthxr::InputBindingType::Keyboard,
+           "Frame Generation toggle binding was not parsed");
+
+    const auto dcs = depthxr::ResolveFrameGenSettings(result.document, "DCS.exe");
+    Expect(dcs.enabled, "Matching enabled profile should enable Frame Generation over an off default");
+    Expect(dcs.profile_name == "DCS", "Disabled profiles must not win resolution");
+    Expect(dcs.synthesis_mode == depthxr::FrameGenSynthesisMode::kExtrapolate &&
+               dcs.flow_quality == depthxr::FrameGenFlowQuality::kQuality &&
+               dcs.artifact_suppression == 75 && dcs.motion_limit_percent == 25,
+           "Profile settings did not replace defaults");
+    Expect(dcs.multiplier == depthxr::FrameGenMultiplier::k4, "Profile frame multiplier did not apply");
+    Expect(dcs.motion_estimation == depthxr::FrameGenMotionEstimation::kHardware, "Profile motion estimation did not apply");
+    Expect(dcs.diagnostic_view == depthxr::FrameGenDiagnosticView::kTint,
+           "Module diagnostic view should apply to profiles");
+
+    const auto other = depthxr::ResolveFrameGenSettings(result.document, "FlightSimulator2024.exe");
+    Expect(!other.enabled && other.profile_name.empty(), "Unmatched application should use the off default");
+    Expect(other.motion_estimation == depthxr::FrameGenMotionEstimation::kShader,
+           "Unmatched application should keep shader motion estimation");
+    Expect(other.flow_quality == depthxr::FrameGenFlowQuality::kPerformance && other.artifact_suppression == 40 &&
+               other.motion_limit_percent == 8,
+           "Unmatched application should use module defaults");
+
+    const depthxr::ParseResult dynamic =
+        depthxr::ParseConfig(FrameGenConfigJson(R"json({ "enabled": true, "defaults": { "frameMultiplier": "dynamic" } })json"));
+    Expect(dynamic.ok && dynamic.document.framegen.defaults.multiplier == depthxr::FrameGenMultiplier::kDynamic,
+           "Dynamic frame multiplier was not parsed");
+    Expect(std::string(depthxr::ToString(depthxr::FrameGenMultiplier::kDynamic)) == "dynamic",
+           "Dynamic frame multiplier did not round-trip");
+    // The fixed rates, Auto among them, are still chosen explicitly.
+    const depthxr::ParseResult automatic =
+        depthxr::ParseConfig(FrameGenConfigJson(R"json({ "enabled": true, "defaults": { "frameMultiplier": "auto" } })json"));
+    Expect(automatic.ok && automatic.document.framegen.defaults.multiplier == depthxr::FrameGenMultiplier::kAuto,
+           "Auto frame multiplier was not parsed");
+    // A profile saved without a multiplier runs Dynamic.
+    const depthxr::ParseResult inherited = depthxr::ParseConfig(FrameGenConfigJson(
+        R"json({ "enabled": false, "profiles": [ { "name": "DCS", "applicationIds": ["app-dcs"], "settings": { "synthesisMode": "extrapolate" } } ] })json"));
+    Expect(inherited.ok && depthxr::ResolveFrameGenSettings(inherited.document, "DCS.exe").multiplier ==
+                               depthxr::FrameGenMultiplier::kDynamic,
+           "A profile without a frame multiplier should run Dynamic");
+}
+
+// Frame Generation's A/B toggle takes a list too, and its legacy binding.
+void TestFrameGenToggleBindingList() {
+    const auto config = [](const std::string& framegen) {
+        return depthxr::ParseConfig(
+            R"({"version":3,"core":{"enabled":true,"logLevel":"info"},"applications":[],"modules":{"depthxr":{"enabled":false,"defaults":{"stereoBoost":1,"convergence":0},"bindings":{"toggleEnabled":{"type":"none"}},"profiles":[]},"pivotxr":{"enabled":false,"defaults":{},"profiles":[]},"framegen":)" +
+            framegen + "}}");
+    };
+    const auto lists = config(
+        R"({"enabled":false,"toggleBindings":[{"type":"device","deviceGuid":"{11111111-0000-0000-0000-000000000001}","inputPath":"button-23"},{"type":"keyboard","chord":["Ctrl","F8"]}]})");
+    Expect(lists.ok && lists.document.framegen.toggle_bindings.size() == 2 &&
+               lists.document.framegen.toggle_bindings[1].type == depthxr::InputBindingType::Keyboard,
+           "Frame Generation's toggle binding list was not kept: " + lists.error);
+    Expect(depthxr::ResolveFrameGenSettings(lists.document, "any.exe").toggle_bindings.size() == 2,
+           "Frame Generation's toggle binding list did not resolve through");
+    const auto legacy = config(R"({"enabled":false,"toggleBinding":{"type":"keyboard","chord":["Ctrl","F8"]}})");
+    Expect(legacy.ok && legacy.document.framegen.toggle_bindings.size() == 1,
+           "Frame Generation's legacy toggle binding was not read: " + legacy.error);
+    Expect(!config(R"({"enabled":false,"toggleBinding":{"type":"none"},"toggleBindings":[]})").ok,
+           "Frame Generation's toggle with both a list and a legacy binding was accepted");
+}
+
+void TestFrameGenInvalidSettingsRejected() {
+    const std::array<std::string, 8> invalid_modules{
+        R"json({ "enabled": true, "defaults": { "frameMultiplier": "6x" } })json",
+        R"json({ "enabled": true, "defaults": { "synthesisMode": "blend" } })json",
+        R"json({ "enabled": true, "defaults": { "flowQuality": "ultra" } })json",
+        R"json({ "enabled": true, "defaults": { "motionEstimation": "cuda" } })json",
+        R"json({ "enabled": true, "defaults": { "artifactSuppression": 101 } })json",
+        R"json({ "enabled": true, "defaults": { "motionLimitPercent": 1 } })json",
+        R"json({ "enabled": true, "defaults": { "motionLimitPercent": 7.5 } })json",
+        R"json({ "enabled": true, "diagnosticView": "wireframe" })json",
+    };
+    for (const auto& module : invalid_modules) {
+        const auto result = depthxr::ParseConfig(FrameGenConfigJson(module));
+        Expect(!result.ok, "Invalid Frame Generation settings were accepted: " + module);
+    }
+    const auto unknown = depthxr::ParseConfig(FrameGenConfigJson(R"json({ "enabled": true, "presenter": true })json"));
+    Expect(!unknown.ok, "Unknown Frame Generation keys must be rejected like other modules");
+}
+
+void TestFrameGenOsdRows() {
+    const auto result = depthxr::ParseConfig(FrameGenConfigJson(R"json({ "enabled": false })json",
+        R"json({ "showFramegen": false, "compactShowFramegen": true, "showFramegenFps": false, "bodyOrder": ["modules", "graph", "turbo", "pivot"] })json"));
+    Expect(result.ok, "OSD Frame Gen settings were rejected: " + result.error);
+    const auto& osd = result.document.core.osd;
+    Expect(!osd.show_framegen && osd.compact_show_framegen, "OSD Frame Gen row toggles were not parsed");
+    Expect(!osd.show_framegen_fps, "OSD Frame Gen beside FPS was not parsed");
+    const auto invalid = depthxr::ParseConfig(FrameGenConfigJson(R"json({ "enabled": false })json",
+        R"json({ "showFramegenFps": "yes" })json"));
+    Expect(!invalid.ok, "A non-boolean showFramegenFps was accepted");
+    const auto preset = depthxr::ParseConfig(FrameGenConfigJson(R"json({ "enabled": false })json",
+        R"json({ "customPresets": [ { "name": "Quiet", "settings": { "showFramegenFps": false } } ] })json"));
+    Expect(preset.ok, "OSD presets should accept showFramegenFps: " + preset.error);
+    Expect(osd.body_order.size() == 5 && osd.body_order.back() == "framegen",
+           "Saved OSD orders without the Frame Gen row should append it");
+    const auto ordered = depthxr::ParseConfig(FrameGenConfigJson(R"json({ "enabled": false })json",
+        R"json({ "bodyOrder": ["framegen", "graph", "turbo", "pivot", "modules"] })json"));
+    Expect(ordered.ok && ordered.document.core.osd.body_order.front() == "framegen",
+           "OSD body order should accept the Frame Gen row");
+}
+
+void TestFrameGenPlan() {
+    using depthxr::FrameGenPass;
+    using depthxr::FrameGenTextureKind;
+    depthxr::FrameGenViewRequest request;
+    request.extent = {2000, 1800};
+    request.synthesize = true;
+    request.temporal = true;
+    request.newest.angle_left = request.previous.angle_left = -0.8f;
+    request.newest.angle_right = request.previous.angle_right = 0.8f;
+    request.newest.angle_up = request.previous.angle_up = 0.8f;
+    request.newest.angle_down = request.previous.angle_down = -0.8f;
+    depthxr::FrameGenTuning tuning;
+
+    const auto pyramid = depthxr::FrameGenPyramid({2001, 7});
+    Expect(pyramid[1].width == 1001 && pyramid[1].height == 4 && pyramid[5].height == 1,
+           "Frame Generation pyramid should round up and never reach zero");
+
+    const std::array<std::pair<depthxr::FrameGenFlowQuality, std::size_t>, 3> qualities{{
+        {depthxr::FrameGenFlowQuality::kPerformance, 1},
+        {depthxr::FrameGenFlowQuality::kBalanced, 2},
+        {depthxr::FrameGenFlowQuality::kQuality, 3},
+    }};
+    for (const auto& [quality, refines] : qualities) {
+        tuning.quality = quality;
+        const auto plan = depthxr::BuildFrameGenViewPlan(request, tuning);
+        Expect(plan.synthesize, "Frame Generation plan should synthesize with history");
+        // luma + 4 downsamples + search + refines + filter + synthesize
+        Expect(plan.dispatches.size() == 1 + 4 + 1 + refines + 1 + 1, "Unexpected Frame Generation dispatch count");
+        Expect(plan.dispatches.front().pass == FrameGenPass::kLuma &&
+                   plan.dispatches.back().pass == FrameGenPass::kSynthesizeUnorm8,
+               "Frame Generation plan should start with luma and end with synthesis");
+        const auto& final_refine = plan.dispatches[plan.dispatches.size() - 3];
+        Expect(final_refine.pass == FrameGenPass::kRefine &&
+                   final_refine.outputs[0].level == depthxr::FrameGenFinalFlowLevel(quality),
+               "Last refine should write the quality's flow level");
+        Expect(final_refine.inputs[3].kind == FrameGenTextureKind::kFilteredPrevious,
+               "Temporal flow should seed refinement when requested");
+        Expect(final_refine.inputs[0].level == depthxr::FrameGenMatchLevel(final_refine.outputs[0].level) &&
+                   final_refine.constants.options[3] == (1u << (final_refine.outputs[0].level - final_refine.inputs[0].level)),
+               "Refine should match on a finer level with the matching cell scale");
+        for (const auto& dispatch : plan.dispatches) {
+            Expect(dispatch.width > 0 && dispatch.height > 0, "Frame Generation dispatch has an empty extent");
+        }
+    }
+
+    request.synthesize = false;
+    const auto still = depthxr::BuildFrameGenViewPlan(request, tuning);
+    Expect(!still.synthesize && still.dispatches.size() == 1 &&
+               (still.dispatches[0].constants.options[1] & depthxr::kFrameGenFlagStill) != 0,
+           "Priming should write the newest frame through one still dispatch");
+    request.synthesize = true;
+    request.extent = {48, 48};
+    Expect(!depthxr::BuildFrameGenViewPlan(request, tuning).synthesize, "Tiny views should not run optical flow");
+
+    request.extent = {1024, 1024};
+    request.output = depthxr::FrameGenOutputKind::kFloat16;
+    tuning.mode = depthxr::FrameGenSynthesisMode::kExtrapolate;
+    tuning.diagnostic = depthxr::FrameGenDiagnosticView::kFlow;
+    const auto extrapolate = depthxr::BuildFrameGenViewPlan(request, tuning);
+    const auto& synth = extrapolate.dispatches.back();
+    Expect(synth.pass == FrameGenPass::kSynthesizeFloat16, "Float swapchains should use the float synthesis pass");
+    Expect((synth.constants.options[1] & depthxr::kFrameGenFlagExtrapolate) != 0 &&
+               (synth.constants.options[1] & depthxr::kFrameGenFlagSrgbEncode) == 0,
+           "Extrapolation flag set and no sRGB encode for float output");
+    Expect(synth.constants.options[2] == static_cast<std::uint32_t>(depthxr::FrameGenDiagnosticView::kFlow),
+           "Diagnostic view should reach the synthesis pass");
+
+    // Depth: the trust scores, their surface vote, the stereo depth-scale
+    // vote (with this frame's stereo evidence) in two stages, then the resolve.
+    request.depth = true;
+    for (const bool stereo : {true, false}) {
+        request.trust_stereo = stereo;
+        const auto depth_plan = depthxr::BuildFrameGenViewPlan(request, tuning);
+        std::vector<FrameGenPass> passes;
+        for (const auto& dispatch : depth_plan.dispatches) {
+            passes.push_back(dispatch.pass);
+            if (dispatch.pass == FrameGenPass::kTrustResolve) break;
+        }
+        const std::vector<FrameGenPass> expected =
+            stereo ? std::vector<FrameGenPass>{FrameGenPass::kTrustUpdate, FrameGenPass::kTrustVote,
+                                               FrameGenPass::kDepthScaleVote, FrameGenPass::kDepthScaleVote,
+                                               FrameGenPass::kTrustResolve}
+                   : std::vector<FrameGenPass>{FrameGenPass::kTrustUpdate, FrameGenPass::kTrustVote,
+                                               FrameGenPass::kTrustResolve};
+        Expect(passes == expected, "Depth trust passes should vote per surface before the resolve");
+        const auto& trust = depth_plan.dispatches[0];
+        const auto half = depthxr::FrameGenPyramid(request.extent)[1];
+        Expect(trust.width == half.width && trust.outputs[1].kind == FrameGenTextureKind::kTrustTiles &&
+                   depth_plan.dispatches[1].inputs[0].kind == FrameGenTextureKind::kTrustTiles &&
+                   depth_plan.dispatches[1].width == (half.width + depthxr::kFrameGenTrustTile - 1) / depthxr::kFrameGenTrustTile,
+               "The trust update should count its tiles for the vote, which runs per tile");
+        const auto& resolve = depth_plan.dispatches[passes.size() - 1];
+        Expect(resolve.inputs[1].kind == FrameGenTextureKind::kTrustVotes &&
+                   resolve.inputs[2].kind == (stereo ? FrameGenTextureKind::kDepthScaleVotes : FrameGenTextureKind::kNone) &&
+                   resolve.constants.options[0] == (stereo ? depthxr::kFrameGenResolveScale : 0u),
+               "The resolve should read the trust vote, and the stereo scale vote only with this frame's stereo evidence");
+        if (stereo) {
+            Expect(depth_plan.dispatches[2].outputs[0].kind == FrameGenTextureKind::kDepthScaleRaw &&
+                       depth_plan.dispatches[3].inputs[0].kind == FrameGenTextureKind::kDepthScaleRaw &&
+                       depth_plan.dispatches[3].constants.options[0] == depthxr::kFrameGenScaleAccept,
+                   "The scale vote's second stage should accept the first stage's votes");
+        }
+    }
+    const auto scale = depthxr::BuildFrameGenDepthScaleDispatch(request.extent, request.newest, request.previous);
+    Expect(scale.pass == FrameGenPass::kDepthScale && scale.outputs[0].kind == FrameGenTextureKind::kDepthScales &&
+               scale.constants.size[2] == depthxr::FrameGenPyramid(request.extent)[1].width,
+           "The stereo scale probe should run per trust tile over the half-resolution depth");
+    request.depth = false;
+    request.trust_stereo = false;
+
+    // Fractions follow display times and clamp.
+    using depthxr::FrameGenFraction;
+    using depthxr::FrameGenSynthesisMode;
+    Expect(std::abs(FrameGenFraction(FrameGenSynthesisMode::kInterpolate, 0, 22'222'222, 11'111'111) - 0.5f) < 1e-4f,
+           "Interpolation halfway between two real frames should be 0.5");
+    Expect(std::abs(FrameGenFraction(FrameGenSynthesisMode::kExtrapolate, 0, 22'222'222, 33'333'333) - 0.5f) < 1e-4f,
+           "Extrapolation one refresh past a half-rate frame should be 0.5");
+    Expect(FrameGenFraction(FrameGenSynthesisMode::kExtrapolate, 0, 10, 100) == 1.0f &&
+               FrameGenFraction(FrameGenSynthesisMode::kInterpolate, 10, 10, 10) == 1.0f,
+           "Frame Generation fractions should clamp hitches and degenerate intervals");
+
+    // Relative rotation: identity for equal poses; a yaw maps newest forward
+    // into the previous view by the yaw difference.
+    const float half = 0.05f;
+    const auto same = depthxr::FrameGenRelativeRotation({0, std::sin(half), 0, std::cos(half)}, {0, std::sin(half), 0, std::cos(half)});
+    Expect(std::abs(same[0][0] - 1) < 1e-5f && std::abs(same[0][2]) < 1e-5f && std::abs(same[2][2] - 1) < 1e-5f,
+           "Equal orientations should give an identity rotation");
+    const auto yawed = depthxr::FrameGenRelativeRotation({0, std::sin(half), 0, std::cos(half)}, {0, 0, 0, 1});
+    // Newest forward (0,0,-1) expressed in the previous view: rotated by +0.1 rad about +Y.
+    const float x = -yawed[0][2], z = -yawed[2][2];
+    Expect(std::abs(x + std::sin(2 * half)) < 1e-4f && std::abs(z + std::cos(2 * half)) < 1e-4f,
+           "Relative rotation should carry the newest view's yaw into previous-view space");
+}
+
+void TestFrameGenHistoryState() {
+    depthxr::FrameGenHistoryState state;
+    depthxr::FrameGenViewRequest request;
+    request.synthesize = true;
+    request.temporal = true;
+    Expect(state.Configure({1000, 1000}, 29, depthxr::FrameGenOutputKind::kSrgb8, 3) == depthxr::FrameGenHistoryState::kAll,
+           "First configuration should create every texture");
+    Expect(!state.Effective(request).synthesize, "No history yet: the first frame must be a still");
+    state.Commit(false);
+    auto effective = state.Effective(request);
+    Expect(effective.synthesize && !effective.temporal, "Second frame synthesizes without temporal flow");
+    state.Commit(true);
+    effective = state.Effective(request);
+    Expect(effective.synthesize && effective.temporal, "Third frame may reuse the previous filtered flow");
+    Expect(state.Configure({1000, 1000}, 29, depthxr::FrameGenOutputKind::kSrgb8, 2) == depthxr::FrameGenHistoryState::kFiltered,
+           "A flow quality change should only recreate the filtered flow");
+    effective = state.Effective(request);
+    Expect(effective.synthesize && !effective.temporal, "A quality change keeps history but drops temporal flow");
+    Expect(state.Configure({1200, 1000}, 29, depthxr::FrameGenOutputKind::kSrgb8, 2) == depthxr::FrameGenHistoryState::kAll &&
+               !state.Effective(request).synthesize,
+           "A view resize should drop history");
+    state.Commit(false);
+    state.Invalidate();
+    Expect(!state.Effective(request).synthesize, "Invalidate should drop history");
+}
+
 void TestTurboMetricsSettingsParsing() {
     const std::string json = R"json(
 {
@@ -1190,13 +1550,13 @@ void TestTurboMetricsSettingsParsing() {
     Expect(result.ok, "Config parser rejected turbo metrics config: " + result.error);
     Expect(result.document.turbo.metrics_mode == depthxr::TurboMetricsMode::kBinding,
            "Turbo metrics mode should parse binding");
-    Expect(result.document.turbo.metrics_binding.type == depthxr::InputBindingType::Keyboard,
+    Expect(FirstBinding(result.document.turbo.metrics_bindings).type == depthxr::InputBindingType::Keyboard,
            "Turbo metrics binding should parse as keyboard");
 
     const depthxr::ResolvedRuntimeConfig resolved = depthxr::ResolveRuntimeConfig(result.document, "any.exe");
     Expect(resolved.turbo.metrics_mode == depthxr::TurboMetricsMode::kBinding,
            "Turbo metrics mode should resolve through");
-    Expect(resolved.turbo.metrics_binding.chord.size() == 2,
+    Expect(FirstBinding(resolved.turbo.metrics_bindings).chord.size() == 2,
            "Turbo metrics binding chord should resolve through");
 
     // Absent keys default to always-on capture with no binding.
@@ -1210,7 +1570,7 @@ void TestTurboMetricsSettingsParsing() {
     Expect(default_result.ok, "Config parser rejected config without metrics keys: " + default_result.error);
     Expect(default_result.document.turbo.metrics_mode == depthxr::TurboMetricsMode::kAlways,
            "Turbo metrics mode should default to always");
-    Expect(default_result.document.turbo.metrics_binding.type == depthxr::InputBindingType::None,
+    Expect(default_result.document.turbo.metrics_bindings.empty(),
            "Turbo metrics binding should default to none");
 
     // Invalid values are rejected rather than silently defaulted.
@@ -1679,7 +2039,7 @@ void TestNoneBindingParsed() {
 
     const depthxr::ParseResult result = depthxr::ParseConfig(json);
     Expect(result.ok, "Config parser rejected valid config with none binding: " + result.error);
-    Expect(result.document.depthxr.bindings.toggle_enabled.type == depthxr::InputBindingType::None,
+    Expect(result.document.depthxr.bindings.toggle_enabled_bindings.empty(),
            "DepthXR toggle binding should be None");
 }
 
@@ -1709,7 +2069,8 @@ void TestDeviceBindingMetadataParsed() {
 
     const depthxr::ParseResult result = depthxr::ParseConfig(json);
     Expect(result.ok, "Config parser rejected valid device binding metadata: " + result.error);
-    const depthxr::InputBinding& binding = result.document.depthxr.bindings.toggle_enabled;
+    Expect(result.document.depthxr.bindings.toggle_enabled_bindings.size() == 1, "Device binding was dropped");
+    const depthxr::InputBinding& binding = result.document.depthxr.bindings.toggle_enabled_bindings.front();
     Expect(binding.type == depthxr::InputBindingType::Device, "Device binding type mismatch");
     Expect(binding.device_guid == "{11111111-2222-3333-4444-555555555555}", "Device GUID metadata mismatch");
     Expect(binding.product_guid == "{aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee}", "Product GUID metadata mismatch");
@@ -1745,7 +2106,7 @@ void TestBindingSoundFeedbackParsed() {
 
     const depthxr::ParseResult result = depthxr::ParseConfig(json);
     Expect(result.ok, "Config parser rejected valid binding sound feedback: " + result.error);
-    const depthxr::SoundFeedback& sound = result.document.depthxr.bindings.toggle_enabled.sound;
+    const depthxr::SoundFeedback& sound = FirstBinding(result.document.depthxr.bindings.toggle_enabled_bindings).sound;
     Expect(sound.enabled, "Binding sound feedback should be enabled");
     Expect(sound.activate_sound == "C:\\sounds\\on.wav", "Activate sound path mismatch");
     Expect(sound.deactivate_sound.empty(), "Deactivate sound should default to bundled (empty)");
@@ -1766,8 +2127,66 @@ void TestBindingWithoutSoundDefaultsDisabled() {
 
     const depthxr::ParseResult result = depthxr::ParseConfig(json);
     Expect(result.ok, "Config parser rejected binding without sound: " + result.error);
-    Expect(!result.document.depthxr.bindings.toggle_enabled.sound.enabled,
+    Expect(!FirstBinding(result.document.depthxr.bindings.toggle_enabled_bindings).sound.enabled,
            "Binding without sound block should default to disabled feedback");
+}
+
+// A toggle may have several bindings, one per device (a HOTAS's and a
+// HOSAS's): every toggle takes a list under its plural key, and still reads
+// its single legacy binding.
+void TestToggleBindingLists() {
+    const auto config = [](const std::string& osd, const std::string& depth_bindings, const std::string& turbo) {
+        return depthxr::ParseConfig(
+            R"({"version":3,"core":{"enabled":true,"logLevel":"info","osd":)" + osd +
+            R"(},"applications":[],"modules":{"depthxr":{"enabled":false,"defaults":{"stereoBoost":1,"convergence":0},"bindings":)" +
+            depth_bindings + R"(,"profiles":[]},"pivotxr":{"enabled":false,"defaults":{},"profiles":[]},"turbo":)" + turbo + "}}");
+    };
+    const std::string hotas = R"({"type":"device","deviceGuid":"{11111111-0000-0000-0000-000000000001}","inputPath":"button-23"})";
+    const std::string hosas = R"({"type":"device","deviceGuid":"{22222222-0000-0000-0000-000000000002}","inputPath":"button-5"})";
+    const std::string pair = "[" + hotas + "," + hosas + "]";
+    const auto lists = config(R"({"toggleBindings":)" + pair + R"(,"cycleBindings":)" + pair + "}",
+                              R"({"toggleEnabledBindings":)" + pair + R"(,"toggleAnchorBindings":)" + pair + "}",
+                              R"({"enabled":false,"toggleBindings":)" + pair + R"(,"metricsBindings":)" + pair + "}");
+    Expect(lists.ok, "Toggle binding lists were rejected: " + lists.error);
+    const auto& document = lists.document;
+    for (const auto* bindings : {&document.core.osd.toggle_bindings, &document.core.osd.cycle_bindings,
+                                 &document.depthxr.bindings.toggle_enabled_bindings,
+                                 &document.depthxr.bindings.toggle_anchor_bindings, &document.turbo.toggle_bindings,
+                                 &document.turbo.metrics_bindings}) {
+        Expect(bindings->size() == 2 && (*bindings)[0].input_path == "button-23" && (*bindings)[1].input_path == "button-5",
+               "A toggle's binding list was not kept in order");
+    }
+    const auto resolved = depthxr::ResolveRuntimeConfig(document, "any.exe");
+    Expect(resolved.turbo.toggle_bindings.size() == 2 && resolved.turbo.metrics_bindings.size() == 2,
+           "Toggle binding lists did not resolve through");
+
+    // Configs written before lists, and by the app for a single binding.
+    const auto legacy = config(R"({"toggleBinding":)" + hotas + R"(,"cycleBinding":{"type":"none"}})",
+                               R"({"toggleEnabled":)" + hotas + R"(,"toggleAnchor":{"type":"none"}})",
+                               R"({"enabled":false,"toggleBinding":)" + hotas + "}");
+    Expect(legacy.ok, "Single legacy bindings were rejected: " + legacy.error);
+    Expect(legacy.document.core.osd.toggle_bindings.size() == 1 && legacy.document.core.osd.cycle_bindings.empty() &&
+               legacy.document.depthxr.bindings.toggle_enabled_bindings.size() == 1 &&
+               legacy.document.depthxr.bindings.toggle_anchor_bindings.empty() &&
+               legacy.document.turbo.toggle_bindings.size() == 1 && legacy.document.turbo.metrics_bindings.empty(),
+           "Single legacy bindings did not become one-binding lists");
+
+    // An OSD without either key keeps its default keyboard bindings.
+    const auto defaults = config("{}", R"({"toggleEnabled":{"type":"none"}})", R"({"enabled":false})");
+    Expect(defaults.ok && FirstChordKey(defaults.document.core.osd.toggle_bindings, "Ctrl") &&
+               FirstChordKey(defaults.document.core.osd.cycle_bindings, "Ctrl"),
+           "The OSD's default bindings were lost: " + defaults.error);
+
+    // A list and a legacy binding for the same toggle are ambiguous.
+    const auto both = config(R"({"toggleBinding":)" + hotas + R"(,"toggleBindings":)" + pair + "}",
+                             R"({"toggleEnabled":{"type":"none"}})", R"({"enabled":false})");
+    Expect(!both.ok, "A toggle with both a list and a legacy binding was accepted");
+    Expect(!config(R"({"customPresets":[{"name":"Bad","settings":{"toggleBindings":[]}}]})",
+                   R"({"toggleEnabled":{"type":"none"}})", R"({"enabled":false})").ok,
+           "An OSD preset with bindings was accepted");
+    // Depth still requires one of its toggle's keys.
+    Expect(!config("{}", R"({"toggleAnchorBindings":[]})", R"({"enabled":false})").ok,
+           "Depth bindings without the toggle were accepted");
 }
 
 void TestCoreSoundVolumeParsedAndClamped() {
@@ -2283,21 +2702,21 @@ void TestD3D11SharpenShaderRegression() {
     Expect(stream.good(), "Failed to open the D3D11 shader source for regression testing");
     const std::string source_file((std::istreambuf_iterator<char>(stream)), std::istreambuf_iterator<char>());
 
-    for (const std::string& function_marker : {
-             "const char* D3D11QuadViewsShaderSource()",
-             "const char* D3D11FocusSharpenShaderSource()",
-         }) {
-        const std::string shader = ExtractRawShaderSource(source_file, function_marker);
+    const std::string compositor = depthxr::QuadViewsD3D11ShaderSource();
+    const std::array<std::pair<std::string, std::string>, 2> shaders{{
+        {"QuadViewsD3D11ShaderSource()", compositor},
+        {"D3D11FocusSharpenShaderSource()",
+         ExtractRawShaderSource(source_file, "const char* D3D11FocusSharpenShaderSource()")},
+    }};
+    for (const auto& [label, shader] : shaders) {
         Expect(shader.find("focus.rgb = saturate(focus.rgb + detail);") != std::string::npos,
-               function_marker + " lost the extrema-preserving sharpen output");
+               label + " lost the extrema-preserving sharpen output");
         Expect(shader.find("focus.rgb = clamp(sharpened, lo, hi);") == std::string::npos,
-               function_marker + " regressed to the clamp that cancelled sharpening at extrema");
-        ExpectShaderCompiles(shader, "VSMain", "vs_5_0", function_marker + " vertex shader");
-        ExpectShaderCompiles(shader, "PSMain", "ps_5_0", function_marker + " pixel shader");
+               label + " regressed to the clamp that cancelled sharpening at extrema");
+        ExpectShaderCompiles(shader, "VSMain", "vs_5_0", label + " vertex shader");
+        ExpectShaderCompiles(shader, "PSMain", "ps_5_0", label + " pixel shader");
     }
 
-    const std::string compositor =
-        ExtractRawShaderSource(source_file, "const char* D3D11QuadViewsShaderSource()");
     Expect(compositor.find("saturate(blendParams.z) * edgeAlpha") != std::string::npos,
            "Quadviews compositor sharpening no longer ramps with the focus feather");
     Expect(compositor.find("diagnosticParams.x < 0.5") != std::string::npos &&
@@ -2905,6 +3324,185 @@ void TestQuadViewsCanvasDimensionsMatchCompositionDensity() {
            "Quadviews canvas dimensions exceeded the runtime maximum");
 }
 
+depthxr::FrameGenFov FovFromTangents(double left, double right, double up, double down) {
+    return {static_cast<float>(std::atan(left)), static_cast<float>(std::atan(right)),
+            static_cast<float>(std::atan(up)), static_cast<float>(std::atan(down))};
+}
+
+void TestFrameGenComposeEye() {
+    const auto close_to = [](float value, double expected) {
+        return std::abs(value - expected) <= 1e-5 * (std::max)(1.0, std::abs(expected));
+    };
+    const auto relative = [](float value, double expected) {
+        return std::abs(value - expected) <= 1e-4 * std::abs(expected);
+    };
+    const depthxr::FrameGenFov full = FovFromTangents(-1.0, 1.0, 1.0, -1.0);
+    const depthxr::FrameGenFov focus = FovFromTangents(-0.5, 0.25, 0.5, -0.25);
+
+    const depthxr::FrameGenComposeEye eye =
+        depthxr::BuildFrameGenComposeEye(full, focus, {2000, 1000}, {1200, 900}, 10.0, 50.0);
+    Expect(eye.peripheral == 0 && eye.focus == 0, "The compose builder should leave the view indices to the caller");
+    Expect(close_to(eye.focus_rect[0], 0.25) && close_to(eye.focus_rect[1], 0.25) &&
+               close_to(eye.focus_rect[2], 0.625) && close_to(eye.focus_rect[3], 0.625),
+           "The focus rectangle should lie where the focus view's tangents fall in the full view's");
+    Expect(close_to(eye.feather[0], 0.0375) && close_to(eye.feather[1], 0.0375),
+           "The blend band should be the transition's share of the focus rectangle");
+    Expect(eye.sharpen == 0.5f, "Sharpness 50 should sharpen by half");
+    Expect(eye.focus_texel[0] == 1.0f / 1200.0f && eye.focus_texel[1] == 1.0f / 900.0f,
+           "The focus texel should be one over the focus view's extent");
+    Expect(relative(eye.output_pixel_in_focus[0], (1.0 / 2000.0) / 0.375) &&
+               relative(eye.output_pixel_in_focus[1], (1.0 / 1000.0) / 0.375),
+           "One output pixel should be expressed in focus uv");
+
+    // A focus view reaching past the full view's left and bottom edges.
+    const depthxr::FrameGenComposeEye edge = depthxr::BuildFrameGenComposeEye(
+        full, FovFromTangents(-1.5, 0.5, 0.5, -2.0), {2000, 1000}, {1200, 900}, 10.0, 50.0);
+    Expect(edge.focus_rect[0] == 0.0f && edge.focus_rect[3] == 1.0f && close_to(edge.focus_rect[1], 0.25) &&
+               close_to(edge.focus_rect[2], 0.75),
+           "The focus rectangle should be clamped at the full view's edges");
+    Expect(close_to(edge.feather[0], 0.075) && close_to(edge.feather[1], 0.075),
+           "The blend band should follow the clamped focus rectangle");
+
+    // The blend band is never under one output pixel.
+    for (const double transition : {0.0, -20.0, 0.01}) {
+        const depthxr::FrameGenComposeEye hard =
+            depthxr::BuildFrameGenComposeEye(full, focus, {2000, 1000}, {1200, 900}, transition, 50.0);
+        Expect(hard.feather[0] == static_cast<float>(1.0 / 2000.0) &&
+                   hard.feather[1] == static_cast<float>(1.0 / 1000.0),
+               "A transition under one output pixel should keep a one-pixel blend band");
+    }
+    const depthxr::FrameGenComposeEye empty = depthxr::BuildFrameGenComposeEye(full, focus, {0, 0}, {0, 0}, 0.0, 50.0);
+    Expect(empty.feather[0] == 1.0f && empty.feather[1] == 1.0f && empty.focus_texel[0] == 1.0f &&
+               empty.focus_texel[1] == 1.0f,
+           "Empty extents should count as one pixel");
+    const depthxr::FrameGenComposeEye wide =
+        depthxr::BuildFrameGenComposeEye(full, focus, {2000, 1000}, {1200, 900}, 250.0, 50.0);
+    Expect(close_to(wide.feather[0], 0.375) && close_to(wide.feather[1], 0.375),
+           "A transition over 100% should blend across the whole focus rectangle");
+
+    const std::array<std::pair<double, float>, 5> sharpness{{
+        {-10.0, 0.0f},
+        {0.0, 0.0f},
+        {37.0, static_cast<float>(37.0 / 100.0)},
+        {100.0, 1.0f},
+        {250.0, 1.0f},
+    }};
+    for (const auto& [percent, expected] : sharpness) {
+        Expect(depthxr::BuildFrameGenComposeEye(full, focus, {2000, 1000}, {1200, 900}, 10.0, percent).sharpen ==
+                   expected,
+               "Sharpness should be clamped to 0-100 and scaled to 0-1");
+    }
+
+    const depthxr::FrameGenConstants constants = depthxr::BuildFrameGenComposeConstants(eye, {2000, 1000});
+    Expect(constants.fov_current == eye.focus_rect, "The compose constants should carry the focus rectangle");
+    Expect(constants.fov_previous == std::array<float, 4>{eye.feather[0], eye.feather[1], eye.sharpen, 0.0f},
+           "The compose constants should carry the blend band and sharpening");
+    Expect(constants.rot0 == std::array<float, 4>{eye.focus_texel[0], eye.focus_texel[1], eye.output_pixel_in_focus[0],
+                                                  eye.output_pixel_in_focus[1]},
+           "The compose constants should carry the focus texel and one output pixel in focus uv");
+    Expect(constants.size == std::array<std::uint32_t, 4>{2000, 1000, 0, 0},
+           "The compose constants should carry the output extent");
+    Expect(constants.options == std::array<std::uint32_t, 4>{} && constants.rot1 == std::array<float, 4>{} &&
+               constants.rot2 == std::array<float, 4>{} && constants.tuning == std::array<float, 4>{},
+           "The compose constants' other fields should be zero");
+}
+
+// The quad views compositor's focus rectangle arithmetic before the shared
+// builder: focus_rect, blend_params and focus_texel, 4 floats each.
+std::array<float, 12> ReferenceFocusRectConstants(const depthxr::FrameGenFov& full_fov,
+                                                  const depthxr::FrameGenFov& focus_fov,
+                                                  std::uint32_t width,
+                                                  std::uint32_t height,
+                                                  std::uint32_t focus_width,
+                                                  std::uint32_t focus_height,
+                                                  double transition_thickness_percent,
+                                                  double foveate_sharpness) {
+    const auto clamp = [](double value, double min_value, double max_value) {
+        return (std::max)(min_value, (std::min)(max_value, value));
+    };
+    const double full_left = std::tan(full_fov.left);
+    const double full_right = std::tan(full_fov.right);
+    const double full_down = std::tan(full_fov.down);
+    const double full_up = std::tan(full_fov.up);
+    const double focus_left = std::tan(focus_fov.left);
+    const double focus_right = std::tan(focus_fov.right);
+    const double focus_down = std::tan(focus_fov.down);
+    const double focus_up = std::tan(focus_fov.up);
+    const double full_width = (std::max)(0.0001, full_right - full_left);
+    const double full_height = (std::max)(0.0001, full_up - full_down);
+
+    std::array<float, 12> constants{};
+    float* focus_rect = constants.data();
+    float* blend_params = constants.data() + 4;
+    float* focus_texel = constants.data() + 8;
+    focus_rect[0] = static_cast<float>(clamp((focus_left - full_left) / full_width, 0.0, 1.0));
+    focus_rect[2] = static_cast<float>(clamp((focus_right - full_left) / full_width, 0.0, 1.0));
+    focus_rect[1] = static_cast<float>(clamp((full_up - focus_up) / full_height, 0.0, 1.0));
+    focus_rect[3] = static_cast<float>(clamp((full_up - focus_down) / full_height, 0.0, 1.0));
+
+    const double focus_rect_width = (std::max)(0.0001, static_cast<double>(focus_rect[2]) - focus_rect[0]);
+    const double focus_rect_height = (std::max)(0.0001, static_cast<double>(focus_rect[3]) - focus_rect[1]);
+    const double transition_fraction = clamp(transition_thickness_percent, 0.0, 100.0) / 100.0;
+    blend_params[0] =
+        static_cast<float>((std::max)(1.0 / std::max<std::uint32_t>(1, width), focus_rect_width * transition_fraction));
+    blend_params[1] = static_cast<float>(
+        (std::max)(1.0 / std::max<std::uint32_t>(1, height), focus_rect_height * transition_fraction));
+    blend_params[2] = static_cast<float>(clamp(foveate_sharpness, 0.0, 100.0) / 100.0);
+    blend_params[3] = 0.0f;
+    focus_texel[0] = 1.0f / static_cast<float>(std::max<std::uint32_t>(1, focus_width));
+    focus_texel[1] = 1.0f / static_cast<float>(std::max<std::uint32_t>(1, focus_height));
+    focus_texel[2] = static_cast<float>((1.0 / std::max<std::uint32_t>(1, width)) / focus_rect_width);
+    focus_texel[3] = static_cast<float>((1.0 / std::max<std::uint32_t>(1, height)) / focus_rect_height);
+    return constants;
+}
+
+void TestFrameGenComposeEyeMatchesCompositor() {
+    // A fixed-seed generator, so every run checks the same 50 pairs.
+    std::uint64_t state = 0x5EED0F0CA1ULL;
+    const auto random = [&state](double low, double high) {
+        state = state * 6364136223846793005ULL + 1442695040888963407ULL;
+        return low + (high - low) * static_cast<double>(state >> 11) / 9007199254740992.0;
+    };
+    int clamped = 0;
+    for (int pair = 0; pair < 50; ++pair) {
+        const depthxr::FrameGenFov full{static_cast<float>(random(-1.2, -0.5)), static_cast<float>(random(0.5, 1.2)),
+                                        static_cast<float>(random(0.5, 1.1)), static_cast<float>(random(-1.2, -0.5))};
+        // Some focus views reach past the full view's edges.
+        const double center_x = random(-0.6, 0.6);
+        const double center_y = random(-0.5, 0.5);
+        const double half_width = random(0.1, 0.7);
+        const double half_height = random(0.1, 0.7);
+        const depthxr::FrameGenFov focus{
+            static_cast<float>(center_x - half_width), static_cast<float>(center_x + half_width),
+            static_cast<float>(center_y + half_height), static_cast<float>(center_y - half_height)};
+        const auto width = static_cast<std::uint32_t>(random(500.0, 4000.0));
+        const auto height = static_cast<std::uint32_t>(random(500.0, 4000.0));
+        const auto focus_width = static_cast<std::uint32_t>(random(400.0, 3000.0));
+        const auto focus_height = static_cast<std::uint32_t>(random(400.0, 3000.0));
+        const double transition = random(-10.0, 110.0);
+        const double sharpness = random(-10.0, 110.0);
+
+        const depthxr::FrameGenComposeEye eye = depthxr::BuildFrameGenComposeEye(
+            full, focus, {width, height}, {focus_width, focus_height}, transition, sharpness);
+        const std::array<float, 12> shared{
+            eye.focus_rect[0], eye.focus_rect[1], eye.focus_rect[2], eye.focus_rect[3],
+            eye.feather[0], eye.feather[1], eye.sharpen, 0.0f,
+            eye.focus_texel[0], eye.focus_texel[1], eye.output_pixel_in_focus[0], eye.output_pixel_in_focus[1]};
+        const std::array<float, 12> reference = ReferenceFocusRectConstants(
+            full, focus, width, height, focus_width, focus_height, transition, sharpness);
+        for (std::size_t value = 0; value < shared.size(); ++value) {
+            Expect(std::bit_cast<std::uint32_t>(shared[value]) == std::bit_cast<std::uint32_t>(reference[value]),
+                   "The compose builder should match the quadviews compositor bit for bit (pair " +
+                       std::to_string(pair) + ", value " + std::to_string(value) + ")");
+        }
+        if (std::any_of(eye.focus_rect.begin(), eye.focus_rect.end(),
+                        [](float edge) { return edge == 0.0f || edge == 1.0f; })) {
+            ++clamped;
+        }
+    }
+    Expect(clamped > 0, "The compose builder comparison should include focus views clamped at an edge");
+}
+
 void TestSwapchainImageQueuePreservesFifo() {
     depthxr::SwapchainImageQueue queue;
     queue.Acquire(2);
@@ -3104,6 +3702,13 @@ int main() {
     TestTurboModuleResolution();
     TestTurboPacingModeParsing();
     TestTurboModuleOptional();
+    TestFrameGenModuleOptional();
+    TestFrameGenProfileResolution();
+    TestFrameGenInvalidSettingsRejected();
+    TestFrameGenToggleBindingList();
+    TestFrameGenOsdRows();
+    TestFrameGenPlan();
+    TestFrameGenHistoryState();
     TestTurboMetricsSettingsParsing();
     TestTurboMetricsSessionRoundTrip();
     TestQuadViewsProfileResolution();
@@ -3113,6 +3718,7 @@ int main() {
     TestDeviceBindingMetadataParsed();
     TestBindingSoundFeedbackParsed();
     TestBindingWithoutSoundDefaultsDisabled();
+    TestToggleBindingLists();
     TestCoreSoundVolumeParsedAndClamped();
     TestExeMatch();
     TestSeenAppObservationRecording();
@@ -3134,6 +3740,8 @@ int main() {
     TestQuadViewsRecoveryStabilizer();
     TestQuadViewsFrameCacheKeepsGazeWithLocatedFrame();
     TestQuadViewsCanvasDimensionsMatchCompositionDensity();
+    TestFrameGenComposeEye();
+    TestFrameGenComposeEyeMatchesCompositor();
     TestPivotLocateViewsRouting();
     TestPivotPoseDeltaSpaceReexpression();
     TestNumpadActivationKeys();

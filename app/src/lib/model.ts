@@ -5,7 +5,7 @@ export type PivotResponseMode = 'continuous' | 'stepped'
 export type PivotStepGlideMode = 'instant' | 'glide'
 export type PivotProfileBehavior = 'enhancedMotion' | 'snapViews'
 export type QuadViewsTrackingMode = 'head' | 'eye'
-export type AppTab = 'osd' | 'home' | 'core' | 'registry' | 'layers' | 'about' | 'depthxr' | 'pivotxr' | 'quadviews' | 'turbo'
+export type AppTab = 'osd' | 'home' | 'core' | 'registry' | 'layers' | 'about' | 'depthxr' | 'pivotxr' | 'quadviews' | 'turbo' | 'framegen'
 export const keyboardBindingKeyGroups = [
   {
     label: 'Function Keys',
@@ -115,14 +115,16 @@ export interface SoundSettings {
   volume: number
 }
 
-export const osdBodyRows = ['graph', 'turbo', 'pivot', 'modules'] as const
+// Default expanded-row order. Saved orders missing a row get it appended at
+// the end (the layer does the same), so new rows never reorder existing ones.
+export const osdBodyRows = ['graph', 'turbo', 'framegen', 'pivot', 'modules'] as const
 export type OsdBodyRow = typeof osdBodyRows[number]
-export type OsdLayout = Omit<OsdSettings, 'enabled' | 'visibleOnStart' | 'toggleBinding' | 'cycleBinding' | 'customPresets'>
+export type OsdLayout = Omit<OsdSettings, 'enabled' | 'visibleOnStart' | 'toggleBindings' | 'cycleBindings' | 'customPresets'>
 export interface OsdPreset { name: string; settings: OsdLayout }
 export const osdAccentColors = { teal: '#51ddbd', copper: '#f5ae78', blue: '#6facff', violet: '#bd9aff', rose: '#ff91b2' } as const
 
 export function osdLayout(settings: OsdSettings): OsdLayout {
-  const { enabled, visibleOnStart, toggleBinding, cycleBinding, customPresets, ...layout } = settings
+  const { enabled, visibleOnStart, toggleBindings, cycleBindings, customPresets, ...layout } = settings
   return { ...layout, bodyOrder: [...layout.bodyOrder] }
 }
 
@@ -144,6 +146,10 @@ export interface OsdSettings {
   showModules: boolean
   showClock: boolean
   showPivot: boolean
+  showFramegen: boolean
+  // Both layouts, in sessions with Frame Generation on: its state (FG ON,
+  // STBY, OFF...) and the frames per second the headset shows, beside FPS.
+  showFramegenFps: boolean
   compactShowRuntime: boolean
   compactShowBrand: boolean
   compactShowApp: boolean
@@ -151,25 +157,27 @@ export interface OsdSettings {
   compactShowClock: boolean
   compactShowTurbo: boolean
   compactShowPivot: boolean
+  compactShowFramegen: boolean
   clockFormat: '12' | '24'
   bodyOrder: OsdBodyRow[]
   accent: keyof typeof osdAccentColors | 'custom'
   customColor: string
   customPresets: OsdPreset[]
-  toggleBinding: InputBinding
-  cycleBinding: InputBinding
+  // Any one of a list's bindings acts (one per device, say a HOTAS's and a HOSAS's).
+  toggleBindings: InputBinding[]
+  cycleBindings: InputBinding[]
 }
 
 export function defaultOsdSettings(): OsdSettings {
   return { enabled: false, visibleOnStart: true, compact: false,
     horizontalDegrees: 20, verticalDegrees: -12, distanceMeters: 1.2, scale: 100, opacity: 90, updateHz: 5,
     showGraph: true, showRuntime: true, showTurbo: true, showModules: true, showClock: true, showPivot: true,
-    showBrand: true, showApp: true,
-    compactShowRuntime: true, compactShowClock: true, compactShowTurbo: false, compactShowPivot: false,
+    showFramegen: true, showFramegenFps: true, showBrand: true, showApp: true,
+    compactShowRuntime: true, compactShowClock: true, compactShowTurbo: false, compactShowPivot: false, compactShowFramegen: false,
     compactShowBrand: true, compactShowApp: true, compactMetrics: 'all',
     clockFormat: '24', bodyOrder: [...osdBodyRows], accent: 'teal', customColor: '#51ddbd', customPresets: [],
-    toggleBinding: { type: 'keyboard', chord: ['Ctrl', 'Alt', 'F10'] },
-    cycleBinding: { type: 'keyboard', chord: ['Ctrl', 'Alt', 'F11'] } }
+    toggleBindings: [{ type: 'keyboard', chord: ['Ctrl', 'Alt', 'F10'] }],
+    cycleBindings: [{ type: 'keyboard', chord: ['Ctrl', 'Alt', 'F11'] }] }
 }
 
 export function normalizeOsdSettings(value: unknown): OsdSettings {
@@ -181,7 +189,7 @@ export function normalizeOsdSettings(value: unknown): OsdSettings {
       (!integer || Number.isInteger(value)) ? value : fallback[key] as number
   }
   return { ...fallback,
-    ...Object.fromEntries(['enabled', 'visibleOnStart', 'compact', 'showGraph', 'showRuntime', 'showBrand', 'showApp', 'showTurbo', 'showModules', 'showClock', 'showPivot', 'compactShowRuntime', 'compactShowClock', 'compactShowTurbo', 'compactShowPivot', 'compactShowBrand', 'compactShowApp']
+    ...Object.fromEntries(['enabled', 'visibleOnStart', 'compact', 'showGraph', 'showRuntime', 'showBrand', 'showApp', 'showTurbo', 'showModules', 'showClock', 'showPivot', 'showFramegen', 'showFramegenFps', 'compactShowRuntime', 'compactShowClock', 'compactShowTurbo', 'compactShowPivot', 'compactShowFramegen', 'compactShowBrand', 'compactShowApp']
       .map(key => [key, typeof input[key] === 'boolean' ? input[key] : fallback[key as keyof OsdSettings]])),
     compactMetrics: ['all', 'fps', 'frameTime', 'none'].includes(input.compactMetrics as string) ? input.compactMetrics as OsdSettings['compactMetrics'] : 'all',
     horizontalDegrees: number('horizontalDegrees', -40, 40), verticalDegrees: number('verticalDegrees', -35, 35),
@@ -193,8 +201,8 @@ export function normalizeOsdSettings(value: unknown): OsdSettings {
     bodyOrder: [...new Set([...(Array.isArray(input.bodyOrder) ? input.bodyOrder.filter((row): row is OsdBodyRow => osdBodyRows.includes(row)) : []), ...osdBodyRows])],
     customPresets: Array.isArray(input.customPresets) ? input.customPresets.filter(item => isRecord(item) && typeof item.name === 'string' && item.name.trim() && isRecord(item.settings)).slice(0, 50)
       .map(item => ({ name: item.name.trim().slice(0, 60), settings: osdLayout(normalizeOsdSettings({ ...item.settings, customPresets: [] })) })) : [],
-    toggleBinding: normalizeInputBinding(input.toggleBinding, fallback.toggleBinding),
-    cycleBinding: normalizeInputBinding(input.cycleBinding, fallback.cycleBinding),
+    toggleBindings: normalizeToggleBindings(input.toggleBindings, input.toggleBinding, fallback.toggleBindings),
+    cycleBindings: normalizeToggleBindings(input.cycleBindings, input.cycleBinding, fallback.cycleBindings),
   }
 }
 
@@ -229,9 +237,10 @@ export interface DepthXRProfileConfig {
   settings: DepthXRSettings
 }
 
+// Any one of a list's bindings toggles.
 export interface DepthXRBindings {
-  toggleEnabled: InputBinding
-  toggleAnchor: InputBinding
+  toggleEnabledBindings: InputBinding[]
+  toggleAnchorBindings: InputBinding[]
 }
 
 export interface DepthXRModuleConfig {
@@ -580,14 +589,133 @@ export interface TurboModuleConfig {
   experimental: TurboExperimentalSettings
   enabled: boolean
   interruptedSessionRecovery: boolean
-  toggleBinding: InputBinding
+  toggleBindings: InputBinding[]
   pacingMode: TurboPacingSetting
   // Per-runtime user overrides keyed by the exact OpenXR runtime name.
   // Only consulted when pacingMode is 'auto'.
   runtimePins: Record<string, TurboPacingMode>
   metricsMode: TurboMetricsMode
-  metricsBinding: InputBinding
+  metricsBindings: InputBinding[]
   profiles: TurboProfileConfig[]
+}
+
+// Frame Generation: the layer synthesizes frames between the application's
+// frames so the headset gets a frame every refresh. Enablement is
+// session-latched; every other setting applies live.
+// 'interpolate' blends between the previous and newest real frame (fewest
+// artifacts, a little added latency); 'extrapolate' pushes the newest real
+// frame forward along its motion (lowest latency, more edge artifacts).
+export const frameGenSynthesisModes = ['interpolate', 'extrapolate'] as const
+export type FrameGenSynthesisMode = typeof frameGenSynthesisModes[number]
+// Optical-flow resolution relative to the eye image: 1/16, 1/8, or 1/4.
+export const frameGenFlowQualities = ['performance', 'balanced', 'quality'] as const
+export type FrameGenFlowQuality = typeof frameGenFlowQualities[number]
+// How motion is measured: 'shader' block matching (any GPU) or 'hardware',
+// the optical flow accelerator of NVIDIA RTX GPUs (the layer falls back to
+// shader where it cannot be used).
+export const frameGenMotionEstimations = ['shader', 'hardware'] as const
+export type FrameGenMotionEstimation = typeof frameGenMotionEstimations[number]
+// Headset frames per real application frame. 'dynamic' (the default) holds
+// nothing: the application runs at its own rate and generated frames fill the
+// refreshes between its frames (the layer treats it as 'auto' where it cannot
+// present from its own thread). The fixed rates hold the application at a
+// fraction of the refresh rate: 2x at 1/2, 3x at 1/3, 4x at 1/4, and 'auto'
+// picks among them, passing frames through while the application holds the
+// refresh rate on its own.
+export const frameGenFrameMultipliers = ['auto', 'dynamic', '2x', '3x', '4x'] as const
+export type FrameGenFrameMultiplier = typeof frameGenFrameMultipliers[number]
+// The fixed rates, as the settings page groups them under "Fixed".
+export const frameGenFixedMultipliers = ['auto', '2x', '3x', '4x'] as const satisfies readonly FrameGenFrameMultiplier[]
+export type FrameGenFixedMultiplier = typeof frameGenFixedMultipliers[number]
+// Module-level overlay drawn into generated frames only.
+export const frameGenDiagnosticViews = ['off', 'flow', 'confidence', 'tint'] as const
+export type FrameGenDiagnosticView = typeof frameGenDiagnosticViews[number]
+
+// Integer ranges used by the normalizer and editor; validation.ts, the public
+// schema, and the layer parser mirror them.
+export const frameGenLimits = {
+  artifactSuppression: { min: 0, max: 100 },
+  motionLimitPercent: { min: 2, max: 25 },
+} as const
+
+export interface FrameGenSettings {
+  synthesisMode: FrameGenSynthesisMode
+  flowQuality: FrameGenFlowQuality
+  motionEstimation: FrameGenMotionEstimation
+  frameMultiplier: FrameGenFrameMultiplier
+  // 0-100: higher falls back to the real image sooner where motion is uncertain.
+  artifactSuppression: number
+  // 2-25: largest content shift, in % of view width, a generated frame may apply.
+  motionLimitPercent: number
+}
+
+export interface FrameGenProfileConfig {
+  name: string
+  enabled: boolean
+  applicationIds: string[]
+  settings: FrameGenSettings
+}
+
+export interface FrameGenModuleConfig {
+  enabled: boolean
+  // Optional in-session A/B toggle (any one of the list's bindings). Only
+  // effective in sessions that started with Frame Generation enabled.
+  toggleBindings: InputBinding[]
+  diagnosticView: FrameGenDiagnosticView
+  defaults: FrameGenSettings
+  profiles: FrameGenProfileConfig[]
+}
+
+export function defaultFrameGenSettings(): FrameGenSettings {
+  return {
+    synthesisMode: 'interpolate',
+    flowQuality: 'balanced',
+    motionEstimation: 'shader',
+    frameMultiplier: 'dynamic',
+    artifactSuppression: 50,
+    motionLimitPercent: 10,
+  }
+}
+
+export function defaultFrameGenModule(): FrameGenModuleConfig {
+  return {
+    enabled: false,
+    toggleBindings: [],
+    diagnosticView: 'off',
+    defaults: defaultFrameGenSettings(),
+    profiles: [],
+  }
+}
+
+function normalizeFrameGenInteger(value: unknown, limits: { min: number; max: number }, fallback: number): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    return fallback
+  }
+  return Math.min(limits.max, Math.max(limits.min, Math.round(value)))
+}
+
+export function normalizeFrameGenSettings(value: unknown, fallback: FrameGenSettings = defaultFrameGenSettings()): FrameGenSettings {
+  const source = isRecord(value) ? value : {}
+  return {
+    synthesisMode: frameGenSynthesisModes.includes(source.synthesisMode as FrameGenSynthesisMode)
+      ? source.synthesisMode as FrameGenSynthesisMode
+      : fallback.synthesisMode,
+    flowQuality: frameGenFlowQualities.includes(source.flowQuality as FrameGenFlowQuality)
+      ? source.flowQuality as FrameGenFlowQuality
+      : fallback.flowQuality,
+    motionEstimation: frameGenMotionEstimations.includes(source.motionEstimation as FrameGenMotionEstimation)
+      ? source.motionEstimation as FrameGenMotionEstimation
+      : fallback.motionEstimation,
+    frameMultiplier: frameGenFrameMultipliers.includes(source.frameMultiplier as FrameGenFrameMultiplier)
+      ? source.frameMultiplier as FrameGenFrameMultiplier
+      : fallback.frameMultiplier,
+    artifactSuppression: normalizeFrameGenInteger(source.artifactSuppression, frameGenLimits.artifactSuppression, fallback.artifactSuppression),
+    motionLimitPercent: normalizeFrameGenInteger(source.motionLimitPercent, frameGenLimits.motionLimitPercent, fallback.motionLimitPercent),
+  }
+}
+
+export function normalizeFrameGenDiagnosticView(value: unknown): FrameGenDiagnosticView {
+  return frameGenDiagnosticViews.includes(value as FrameGenDiagnosticView) ? value as FrameGenDiagnosticView : 'off'
 }
 
 // One row of the layer-written runtime-pacing.json sidecar: what Auto pacing
@@ -648,6 +776,7 @@ export interface VectorXRConfig {
     pivotxr: PivotXRModuleConfig
     quadviews: QuadViewsModuleConfig
     turbo: TurboModuleConfig
+    framegen: FrameGenModuleConfig
   }
 }
 
@@ -736,8 +865,8 @@ export function defaultDepthXRSettings(): DepthXRSettings {
 
 export function defaultDepthXRBindings(): DepthXRBindings {
   return {
-    toggleEnabled: defaultNoneBinding(),
-    toggleAnchor: defaultNoneBinding(),
+    toggleEnabledBindings: [],
+    toggleAnchorBindings: [],
   }
 }
 
@@ -964,15 +1093,16 @@ export function defaultConfig(): VectorXRConfig {
       },
       turbo: {
         enabled: false,
-        toggleBinding: defaultNoneBinding(),
+        toggleBindings: [],
         interruptedSessionRecovery: true,
         experimental: defaultTurboExperimental(),
         pacingMode: 'auto',
         runtimePins: {},
         metricsMode: 'always',
-        metricsBinding: defaultNoneBinding(),
+        metricsBindings: [],
         profiles: [],
       },
+      framegen: defaultFrameGenModule(),
     },
   }
 }
@@ -1031,6 +1161,15 @@ export function createPivotProfile(
 }
 
 export function createQuadViewsProfile(defaultSettings: QuadViewsSettings, applicationIds: string[] = []): QuadViewsProfileConfig {
+  return {
+    name: 'New Profile',
+    enabled: true,
+    applicationIds,
+    settings: { ...defaultSettings },
+  }
+}
+
+export function createFrameGenProfile(defaultSettings: FrameGenSettings, applicationIds: string[] = []): FrameGenProfileConfig {
   return {
     name: 'New Profile',
     enabled: true,
@@ -1340,6 +1479,16 @@ export function normalizeInputBinding(value: unknown, fallback: InputBinding): I
   }, sound)
 }
 
+// A toggle's bindings: its list, or the single binding configs keep for one
+// (and configs from before lists); neither present: `fallback` (the OSD's
+// default keys, say).
+export function normalizeToggleBindings(value: unknown, legacyValue: unknown, fallback: InputBinding[]): InputBinding[] {
+  if (value === undefined && legacyValue === undefined) {
+    return fallback.map((binding) => normalizeInputBinding(binding, defaultNoneBinding()))
+  }
+  return normalizeInputBindings(value, legacyValue)
+}
+
 export function normalizeInputBindings(value: unknown, legacyValue?: unknown): InputBinding[] {
   const source = Array.isArray(value)
     ? value
@@ -1480,14 +1629,15 @@ function pushBindingAssignments(
 
 function savedBindingAssignments(config: VectorXRConfig): SavedBindingAssignment[] {
   const assignments: SavedBindingAssignment[] = [
-    { id: 'depth.toggle', label: 'Depth: A/B toggle', binding: config.modules.depthxr.bindings.toggleEnabled },
-    { id: 'depth.lock', label: 'Depth: Depth Lock A/B', binding: config.modules.depthxr.bindings.toggleAnchor },
-    { id: 'osd.toggle', label: 'OSD: show/hide', binding: config.core.osd.toggleBinding },
-    { id: 'osd.cycle', label: 'OSD: switch layout', binding: config.core.osd.cycleBinding },
     { id: 'quadviews.diagnostics', label: 'Quadviews: diagnostic visualization', binding: config.modules.quadviews.diagnosticVisualizationBinding },
-    { id: 'turbo.toggle', label: 'Turbo: A/B toggle', binding: config.modules.turbo.toggleBinding },
-    { id: 'turbo.metrics', label: 'Turbo: metrics capture', binding: config.modules.turbo.metricsBinding },
   ]
+  pushBindingAssignments(assignments, 'depth.toggle', 'Depth: A/B toggle', config.modules.depthxr.bindings.toggleEnabledBindings)
+  pushBindingAssignments(assignments, 'depth.lock', 'Depth: Depth Lock A/B', config.modules.depthxr.bindings.toggleAnchorBindings)
+  pushBindingAssignments(assignments, 'osd.toggle', 'OSD: show/hide', config.core.osd.toggleBindings)
+  pushBindingAssignments(assignments, 'osd.cycle', 'OSD: switch layout', config.core.osd.cycleBindings)
+  pushBindingAssignments(assignments, 'turbo.toggle', 'Turbo: A/B toggle', config.modules.turbo.toggleBindings)
+  pushBindingAssignments(assignments, 'turbo.metrics', 'Turbo: metrics capture', config.modules.turbo.metricsBindings)
+  pushBindingAssignments(assignments, 'framegen.toggle', 'Frame Generation: A/B toggle', config.modules.framegen.toggleBindings)
 
   const pivot = config.modules.pivotxr
   pivot.nudgeSets.forEach((set) => {
@@ -1714,10 +1864,13 @@ function normalizeVectorXRConfig(value: unknown): VectorXRConfig {
   const pivotxr = isRecord(modules.pivotxr) ? modules.pivotxr : {}
   const quadviews = isRecord(modules.quadviews) ? modules.quadviews : {}
   const turbo = isRecord(modules.turbo) ? modules.turbo : {}
+  // Optional: configs written before Frame Generation have no framegen block.
+  const framegen = isRecord(modules.framegen) ? modules.framegen : {}
   const depthProfileValues = Array.isArray(depthxr.profiles) ? depthxr.profiles : []
   const pivotProfileValues = Array.isArray(pivotxr.profiles) ? pivotxr.profiles : []
   const quadViewsProfileValues = Array.isArray(quadviews.profiles) ? quadviews.profiles : []
   const turboProfileValues = Array.isArray(turbo.profiles) ? turbo.profiles : []
+  const frameGenProfileValues = Array.isArray(framegen.profiles) ? framegen.profiles : []
   const legacyTurboExperimental = normalizeTurboExperimental(turbo.experimental)
   const applicationValues = Array.isArray(source.applications) ? source.applications : []
   const applications: RegisteredApplication[] = []
@@ -1752,6 +1905,7 @@ function normalizeVectorXRConfig(value: unknown): VectorXRConfig {
     if (defaultSet) defaultSet.allowWhileInactive = true
   }
   const quadViewsDefaults = normalizeQuadViewsSettings(quadviews.defaults, fallback.modules.quadviews.defaults)
+  const frameGenDefaults = normalizeFrameGenSettings(framegen.defaults, fallback.modules.framegen.defaults)
 
   return {
     version: 3,
@@ -1769,13 +1923,15 @@ function normalizeVectorXRConfig(value: unknown): VectorXRConfig {
         enabled: normalizeBoolean(depthxr.enabled, fallback.modules.depthxr.enabled),
         defaults: normalizeDepthXRSettings(depthxr.defaults, fallback.modules.depthxr.defaults),
         bindings: {
-          toggleEnabled: normalizeInputBinding(
+          toggleEnabledBindings: normalizeToggleBindings(
+            isRecord(depthxr.bindings) ? depthxr.bindings.toggleEnabledBindings : undefined,
             isRecord(depthxr.bindings) ? depthxr.bindings.toggleEnabled : undefined,
-            fallback.modules.depthxr.bindings.toggleEnabled,
+            fallback.modules.depthxr.bindings.toggleEnabledBindings,
           ),
-          toggleAnchor: normalizeInputBinding(
+          toggleAnchorBindings: normalizeToggleBindings(
+            isRecord(depthxr.bindings) ? depthxr.bindings.toggleAnchorBindings : undefined,
             isRecord(depthxr.bindings) ? depthxr.bindings.toggleAnchor : undefined,
-            fallback.modules.depthxr.bindings.toggleAnchor,
+            fallback.modules.depthxr.bindings.toggleAnchorBindings,
           ),
         },
         profiles: depthProfileValues.map((profileValue) => {
@@ -1862,7 +2018,7 @@ function normalizeVectorXRConfig(value: unknown): VectorXRConfig {
       },
       turbo: {
         enabled: normalizeBoolean(turbo.enabled, fallback.modules.turbo.enabled),
-        toggleBinding: normalizeInputBinding(turbo.toggleBinding, fallback.modules.turbo.toggleBinding),
+        toggleBindings: normalizeToggleBindings(turbo.toggleBindings, turbo.toggleBinding, fallback.modules.turbo.toggleBindings),
         interruptedSessionRecovery: typeof turbo.interruptedSessionRecovery === 'boolean' ? turbo.interruptedSessionRecovery : true,
         // Consume old assignments after migration so deleting a profile cannot
         // resurrect it. Preserve unassigned/orphaned values for explicit reuse.
@@ -1871,7 +2027,7 @@ function normalizeVectorXRConfig(value: unknown): VectorXRConfig {
         pacingMode: normalizeTurboPacingSetting(turbo.pacingMode),
         runtimePins: normalizeTurboRuntimePins(turbo.runtimePins),
         metricsMode: normalizeTurboMetricsMode(turbo.metricsMode),
-        metricsBinding: normalizeInputBinding(turbo.metricsBinding, fallback.modules.turbo.metricsBinding),
+        metricsBindings: normalizeToggleBindings(turbo.metricsBindings, turbo.metricsBinding, fallback.modules.turbo.metricsBindings),
         profiles: turboProfileValues.flatMap((profileValue) => {
           const profile = isRecord(profileValue) ? profileValue : {}
           const applicationIds = applicationIdsFromProfile(profile, applications)
@@ -1898,6 +2054,24 @@ function normalizeVectorXRConfig(value: unknown): VectorXRConfig {
           .map(id => ({ ...createTurboProfile([id]), name: `${applications.find(app => app.id === id)?.name ?? id} timing`,
             enabled: normalizeBoolean(turbo.enabled, false), experimental: { ...legacyTurboExperimental, applicationIds: [] } }))),
       },
+      framegen: {
+        enabled: normalizeBoolean(framegen.enabled, fallback.modules.framegen.enabled),
+        toggleBindings: normalizeToggleBindings(framegen.toggleBindings, framegen.toggleBinding, fallback.modules.framegen.toggleBindings),
+        diagnosticView: normalizeFrameGenDiagnosticView(framegen.diagnosticView),
+        defaults: frameGenDefaults,
+        profiles: frameGenProfileValues.map((profileValue) => {
+          const profile = isRecord(profileValue) ? profileValue : {}
+          const settings = normalizeFrameGenSettings(profile.settings, frameGenDefaults)
+          const applicationIds = applicationIdsFromProfile(profile, applications)
+
+          return {
+            name: normalizeString(profile.name, 'New Profile'),
+            enabled: normalizeBoolean(profile.enabled, true),
+            applicationIds,
+            settings,
+          }
+        }),
+      },
     },
   }
 }
@@ -1914,13 +2088,14 @@ export function cloneConfig(config: VectorXRConfig): VectorXRConfig {
   return JSON.parse(JSON.stringify(config)) as VectorXRConfig
 }
 
-export type ModuleId = 'depthxr' | 'pivotxr' | 'quadviews' | 'turbo'
+export type ModuleId = 'depthxr' | 'pivotxr' | 'quadviews' | 'turbo' | 'framegen'
 
 export const moduleLabels: Record<ModuleId, string> = {
   depthxr: 'Depth',
   pivotxr: 'Pivot',
   quadviews: 'Quadviews',
   turbo: 'Turbo',
+  framegen: 'Frame Generation',
 }
 
 export interface ModuleApplicationState {
@@ -1933,7 +2108,7 @@ export interface ModuleApplicationState {
 export function moduleStateForApplication(config: VectorXRConfig, moduleId: ModuleId, applicationId: string): ModuleApplicationState {
   const module = config.modules[moduleId]
 
-  const profiles: Array<DepthXRProfileConfig | PivotXRProfileConfig | QuadViewsProfileConfig | TurboProfileConfig> = module.profiles
+  const profiles: Array<DepthXRProfileConfig | PivotXRProfileConfig | QuadViewsProfileConfig | TurboProfileConfig | FrameGenProfileConfig> = module.profiles
   for (const [index, profile] of profiles.entries()) {
     if (!profile.enabled || !profile.applicationIds.includes(applicationId)) {
       continue
