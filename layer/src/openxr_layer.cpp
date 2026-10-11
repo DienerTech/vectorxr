@@ -10455,6 +10455,14 @@ void OpenXrLayer::RefreshResolvedSettings() {
         previous.turbo.enabled != resolved_settings_.turbo.enabled) {
         ResetTurboToggleState();
     }
+    // The OSD's transition sounds follow the binding last pressed; a changed
+    // list (its sounds included) plays its own again.
+    if (!SameInputBindings(previous.core.osd.toggle_bindings, resolved_settings_.core.osd.toggle_bindings)) {
+        osd_toggle_sound_.reset();
+    }
+    if (!SameInputBindings(previous.core.osd.cycle_bindings, resolved_settings_.core.osd.cycle_bindings)) {
+        osd_cycle_sound_.reset();
+    }
     if (!SameInputBinding(previous.quadviews.diagnostic_visualization_binding,
                           resolved_settings_.quadviews.diagnostic_visualization_binding)) {
         ResetQuadViewsDiagnosticVisualizationState();
