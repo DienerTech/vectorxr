@@ -833,21 +833,32 @@ struct Runtime {
     std::atomic<int> wait_sleep_ms{0};
     // Runtime motion smoothing (SteamVR Motion Smoothing, Meta ASW, Virtual
     // Desktop SSW, Pimax Smart Smoothing) holds the app to half the refresh
-    // rate through its waits and fills the other refreshes itself. How a
-    // runtime reports that is not documented, so each way is modeled (paced
-    // runtimes only): kHalfWaits releases waits two refreshes apart and
-    // reports the refresh period unchanged; kHalfPeriod also reports twice
+    // rate (or a third, with throttle_refreshes 3) through its waits and
+    // fills the other refreshes itself. How a runtime reports that is not
+    // documented, so each way is modeled (paced runtimes only): kWaits
+    // releases waits throttle_refreshes refreshes apart and reports the
+    // refresh period unchanged; kPeriod also reports throttle_refreshes times
     // the period. `throttled` turns it on and off; with throttle_on_after set
     // the runtime decides itself, as one judging the frames it gets: on after
     // that many late frames (a frame ended after its display time, or less
     // than deadline_lead before it), off after throttle_off_after frames in
     // a row on time.
-    enum class Throttle { kHalfWaits, kHalfPeriod };
-    Throttle throttle{Throttle::kHalfWaits};
+    enum class Throttle { kWaits, kPeriod };
+    Throttle throttle{Throttle::kWaits};
+    int throttle_refreshes{2}; // set before the first wait
     std::atomic<bool> throttled{false};
     int throttle_on_after{0};  // 0: only `throttled` decides (set before the first wait)
     int throttle_off_after{0};
     XrDuration deadline_lead{0};
+    // Each submission takes this long (a runtime slow to take frames, or a
+    // caller held up after each): its caller asks for its next wait late.
+    std::atomic<int> submit_sleep_us{0};
+    // A wait first waits for the frame begun before it to end, as a runtime
+    // may (paced runtimes only): a game that waits for its next frame while
+    // it renders this one, as MSFS does, is then released at the first
+    // refresh after that frame ends.
+    std::atomic<bool> wait_for_end{false};
+    std::condition_variable ended_cv; // with g_xr_mutex: a frame ended
     // Under g_xr_mutex: late frames this session, on/off switches, and the
     // automatic throttle's counts.
     int late_frames{0};
@@ -943,15 +954,20 @@ struct Runtime {
             if (++outstanding_waits > 1) ordering_violation = true;
             if (wait_sleep_ms) std::this_thread::sleep_for(std::chrono::milliseconds(wait_sleep_ms));
             if (paced) {
+                if (wait_for_end) {
+                    std::unique_lock lock(g_xr_mutex);
+                    ended_cv.wait_for(lock, 1s, [&] { return !begun; });
+                }
                 const auto refresh = std::chrono::nanoseconds(period);
-                const bool half = throttled.load();
+                const bool throttling = throttled.load();
                 const bool miss = miss_every > 0 && ++paced_waits % miss_every == 0;
                 std::int64_t tick = (std::chrono::steady_clock::now() - epoch) / refresh + (miss ? 2 : 1);
-                tick = std::max(tick, last_tick + (half ? 2 : 1));
+                tick = std::max(tick, last_tick + (throttling ? throttle_refreshes : 1));
                 last_tick = tick;
                 SleepPrecise(epoch + tick * refresh);
                 state->predictedDisplayTime = 1'000'000'000 + (tick + 1) * period;
-                state->predictedDisplayPeriod = half && throttle == Throttle::kHalfPeriod ? 2 * period : period;
+                state->predictedDisplayPeriod =
+                    throttling && throttle == Throttle::kPeriod ? throttle_refreshes * period : period;
                 state->shouldRender = should_render ? XR_TRUE : XR_FALSE;
                 return XR_SUCCESS;
             }
@@ -976,9 +992,11 @@ struct Runtime {
         };
         calls.submit = [this](XrSession, const XrFrameEndInfo* info) {
             HoldIf(&Runtime::hold_submits);
+            if (submit_sleep_us) SleepPrecise(std::chrono::steady_clock::now() + std::chrono::microseconds(submit_sleep_us));
             std::scoped_lock lock(g_xr_mutex);
             if (!begun) ordering_violation = true;
             begun = false;
+            ended_cv.notify_all();
             if (fail_next_submit.exchange(false)) return XR_ERROR_TIME_INVALID;
             if (paced) {
                 // Display time t is shown at epoch + (t - 1 s) (the wait for it
@@ -6347,12 +6365,15 @@ std::vector<std::chrono::microseconds> PeriodsOfWork(XrDuration period, double p
 // automatically, for late frames, Frame Generation's too (a runtime judging
 // frames by when their GPU work ends may find them late); and twice its
 // period reported, after a while at full rate, where the game's rate is
-// judged against the refresh rate, not the halved period. A fixed multiplier
-// is reported the same way and has nothing to stand down to.
+// judged against the refresh rate, not the halved period. A runtime cutting
+// the rate to a third either way is reported the same, the log naming what
+// it measured. A fixed multiplier is reported the same way and has nothing
+// to stand down to.
 void TestRuntimeHalvingStandsDown() {
     struct Case {
         const char* name;
-        Runtime::Throttle throttle{Runtime::Throttle::kHalfWaits};
+        Runtime::Throttle throttle{Runtime::Throttle::kWaits};
+        int refreshes{2}; // Runtime::throttle_refreshes
         bool from_start{false};
         bool automatic{false};
         bool after_full_rate{false};
@@ -6360,14 +6381,18 @@ void TestRuntimeHalvingStandsDown() {
         const char* evidence;
     };
     const std::vector<Case> cases{
-        {"halving waits", Runtime::Throttle::kHalfWaits, true, false, false, FrameGenMultiplier::kDynamic,
+        {"halving waits", Runtime::Throttle::kWaits, 2, true, false, false, FrameGenMultiplier::kDynamic,
          "only every other refresh at 90 Hz"},
-        {"halving late frames", Runtime::Throttle::kHalfWaits, false, true, false, FrameGenMultiplier::kDynamic,
+        {"halving late frames", Runtime::Throttle::kWaits, 2, false, true, false, FrameGenMultiplier::kDynamic,
          "only every other refresh at 90 Hz"},
-        {"halving the period", Runtime::Throttle::kHalfPeriod, false, false, true, FrameGenMultiplier::kDynamic,
+        {"halving the period", Runtime::Throttle::kPeriod, 2, false, false, true, FrameGenMultiplier::kDynamic,
          "reported a frame period of 22.2 ms, twice its refresh period at 90 Hz"},
-        {"halving fixed 2x", Runtime::Throttle::kHalfWaits, true, false, false, FrameGenMultiplier::k2,
+        {"halving fixed 2x", Runtime::Throttle::kWaits, 2, true, false, false, FrameGenMultiplier::k2,
          "only every other refresh at 90 Hz"},
+        {"a third, waits", Runtime::Throttle::kWaits, 3, true, false, false, FrameGenMultiplier::kDynamic,
+         "only every third refresh at 90 Hz"},
+        {"a third, the period", Runtime::Throttle::kPeriod, 3, false, false, true, FrameGenMultiplier::kDynamic,
+         "reported a frame period of 33.3 ms, three times its refresh period at 90 Hz"},
     };
     const double refresh = 1e9 / static_cast<double>(kPeriod);
     for (const Case& test : cases) {
@@ -6376,6 +6401,7 @@ void TestRuntimeHalvingStandsDown() {
         GpuLog gpu;
         Runtime runtime;
         runtime.throttle = test.throttle;
+        runtime.throttle_refreshes = test.refreshes;
         runtime.throttled = test.from_start;
         // Late at full rate (a frame of 1.35 refreshes), and every frame late
         // for a runtime wanting them two refreshes before they are shown.
@@ -6386,7 +6412,7 @@ void TestRuntimeHalvingStandsDown() {
             runtime.deadline_lead = 2 * kPeriod;
             work = PeriodsOfWork(kPeriod, 1.35);
         }
-        SessionLog log(name.substr(name.find(' ') + 1));
+        SessionLog log(name);
         std::unique_ptr<App> owned;
         App* app = nullptr;
         StartHalving(presenter, gpu, runtime, test.multiplier, app, owned, log.logger.get());
@@ -6396,18 +6422,20 @@ void TestRuntimeHalvingStandsDown() {
             runtime.throttled = true;
         }
         const bool dynamic = test.multiplier == FrameGenMultiplier::kDynamic;
+        const std::string share = test.refreshes == 2 ? "half" : "a third of";
         if (dynamic) {
             RunWork(*app, 3000ms, work, [&](const XrFrameState&) { return Engaged(presenter); });
-            Check(Engaged(presenter), name + ": the game held to half the refresh rate engages Dynamic");
+            Check(Engaged(presenter), name + ": the game held to " + share + " the refresh rate engages Dynamic");
         } else {
             for (int i = 0; i < 3; ++i) app->Frame();
         }
-        // Frame Generation's own output is halved too: the runtime makes the
-        // frames between.
+        // Frame Generation's own output is halved (or cut to a third) too:
+        // the runtime makes the frames between.
         const double output = SubmissionRate(*app, 500ms, work);
-        Check(output < 0.6 * refresh && output > 0.4 * refresh,
-              name + ": the runtime takes Frame Generation's frames at half the refresh rate (" + std::to_string(output) +
-                  " fps)");
+        const double held = refresh / test.refreshes;
+        Check(output < held + 0.1 * refresh && output > held - 0.1 * refresh,
+              name + ": the runtime takes Frame Generation's frames at " + share + " the refresh rate (" +
+                  std::to_string(output) + " fps)");
         RunWork(*app, 3000ms, work, [&](const XrFrameState&) {
             const FrameGenStatus status = presenter.Status();
             return dynamic ? status.standby : status.runtime_halving;
@@ -6456,16 +6484,16 @@ void TestRuntimeHalvingStandsDown() {
 // the runtime soon gives every refresh again: nothing is reported, nothing
 // stands down, and every refresh gets a frame.
 void TestRuntimeHalvingRecovers() {
-    for (const Runtime::Throttle throttle : {Runtime::Throttle::kHalfWaits, Runtime::Throttle::kHalfPeriod}) {
+    for (const Runtime::Throttle throttle : {Runtime::Throttle::kWaits, Runtime::Throttle::kPeriod}) {
         const std::string name =
-            std::string("halving recovers, ") + (throttle == Runtime::Throttle::kHalfWaits ? "waits" : "period");
+            std::string("halving recovers, ") + (throttle == Runtime::Throttle::kWaits ? "waits" : "period");
         FrameGenPresenter presenter;
         GpuLog gpu;
         Runtime runtime;
         runtime.throttle = throttle;
         runtime.throttle_on_after = 5;
         runtime.throttle_off_after = 20;
-        SessionLog log(throttle == Runtime::Throttle::kHalfWaits ? "recovers-waits" : "recovers-period");
+        SessionLog log(throttle == Runtime::Throttle::kWaits ? "recovers-waits" : "recovers-period");
         std::unique_ptr<App> owned;
         App* app = nullptr;
         StartHalving(presenter, gpu, runtime, FrameGenMultiplier::kDynamic, app, owned, log.logger.get());
@@ -6490,9 +6518,15 @@ void TestRuntimeHalvingRecovers() {
 
 // Nothing is reported against a runtime giving every refresh: engaged at 72,
 // 90 and 120 Hz with a game at its own rate below the refresh rate, or at a
-// third of it; with a third of the presenter's waits missing a refresh; or
-// standing by with a game at a third of the refresh rate, whose waits come
-// late (it is slow, the runtime does not hold it).
+// third of it; with a third of the presenter's waits missing a refresh; with
+// the presenter thread asking for every wait late, so that it misses every
+// other refresh itself; or standing by with a game at a third of the refresh
+// rate, whose waits come late (it is slow, the runtime does not hold it), and
+// then with one that waits for its next frame while it renders this one, as
+// MSFS does, against a runtime whose wait waits for that frame to end: those
+// waits are asked for at once and released two refreshes apart, as a
+// runtime halving the frame rate releases them, and only the presenter
+// thread's waits report that.
 void TestRuntimeHalvingNotReported() {
     auto quiet = [](FrameGenPresenter& presenter, Runtime& runtime, SessionLog& log, const std::string& name) {
         const FrameGenStatus status = presenter.Status();
@@ -6534,6 +6568,29 @@ void TestRuntimeHalvingNotReported() {
         quiet(presenter, runtime, log, name);
     }
     {
+        const std::string name = "not halving, presenter late";
+        FrameGenPresenter presenter;
+        GpuLog gpu;
+        Runtime runtime;
+        SessionLog log("quiet-late");
+        std::unique_ptr<App> owned;
+        App* app = nullptr;
+        StartHalving(presenter, gpu, runtime, FrameGenMultiplier::k2, app, owned, log.logger.get());
+        for (int i = 0; i < 3; ++i) app->Frame();
+        // Each submission takes 1.2 refreshes: the presenter thread asks for
+        // its next wait after the next refresh, and the runtime releases it
+        // at the one after, two refreshes after the last.
+        runtime.submit_sleep_us = static_cast<int>(kPeriod * 6 / 5 / 1000);
+        RunWork(*app, 300ms, kLightWork);
+        const double output = SubmissionRate(*app, 2000ms, kLightWork);
+        const double refresh = 1e9 / static_cast<double>(kPeriod);
+        const FrameGenStatus status = presenter.Status();
+        Check(output < 0.6 * refresh && status.state == FrameGenState::kActive && status.threaded,
+              name + ": engaged, the late presenter thread made only every other refresh (" + std::to_string(output) +
+                  " fps)");
+        quiet(presenter, runtime, log, name);
+    }
+    {
         const std::string name = "not halving, slow game standing by";
         FrameGenPresenter presenter;
         GpuLog gpu;
@@ -6547,6 +6604,18 @@ void TestRuntimeHalvingNotReported() {
         presenter.SetDynamicPolicy(policy);
         RunTicks(*app, 2000ms, {3});
         Check(presenter.Status().standby, name + ": standing by throughout");
+        // MSFS-style: the main thread waits for the next frame 2 ms after
+        // each wait's release, while the render thread renders this one for
+        // 14 ms; the runtime releases that wait a refresh after the frame
+        // ends, two refreshes after the last.
+        runtime.wait_for_end = true;
+        const auto start = std::chrono::steady_clock::now();
+        const int frames = RunPipelined(*app, 2000ms, 2ms, 14ms);
+        const double rate = frames / Seconds(std::chrono::steady_clock::now() - start);
+        const double refresh = 1e9 / static_cast<double>(kPeriod);
+        Check(rate < 0.6 * refresh && rate > 0.4 * refresh && presenter.Status().standby,
+              name + ": standing by, the pipelined game's waits are released two refreshes apart (" +
+                  std::to_string(rate) + " fps)");
         quiet(presenter, runtime, log, name);
     }
 }
@@ -6555,8 +6624,93 @@ void TestRuntimeHalvingNotReported() {
 // game's own waits are halved too, never flapping; once the runtime gives
 // every refresh again (its smoothing turned off), the game's waits clear it
 // within the window, and a game holding the refresh rate is not engaged
-// again.
+// again. A slower game (frames of 9.5 ms and two refreshes, 60 fps at
+// 90 Hz) asks for every wait late, more than three quarters of a refresh
+// after the last one's release: its waits held two refreshes apart say
+// nothing, but those released at the next refresh clear it too.
 void TestRuntimeHalvingClears() {
+    for (const bool slow : {false, true}) {
+        const std::string name = slow ? "halving clears, slow game" : "halving clears";
+        const std::vector<std::chrono::microseconds> work =
+            slow ? std::vector<std::chrono::microseconds>{9500us, std::chrono::microseconds(2 * kPeriod / 1000) - 3ms}
+                 : kLightWork;
+        FrameGenPresenter presenter;
+        GpuLog gpu;
+        Runtime runtime;
+        runtime.throttled = true;
+        std::unique_ptr<App> owned;
+        App* app = nullptr;
+        StartHalving(presenter, gpu, runtime, FrameGenMultiplier::kDynamic, app, owned, nullptr);
+        RunWork(*app, 3000ms, work, [&](const XrFrameState&) { return Engaged(presenter); });
+        RunWork(*app, 3000ms, work, [&](const XrFrameState&) { return presenter.Status().standby; });
+        Check(presenter.Status().standby && presenter.Status().runtime_halving, name + ": reported and stood down");
+        bool cleared = false;
+        RunWork(*app, 1500ms, work, [&](const XrFrameState&) {
+            cleared = cleared || !presenter.Status().runtime_halving;
+            return false;
+        });
+        Check(!cleared, name + ": standing by, the report stays while the runtime halves the frame rate");
+        runtime.throttled = false;
+        const auto off = std::chrono::steady_clock::now();
+        RunWork(*app, 3000ms, work, [&](const XrFrameState&) { return !presenter.Status().runtime_halving; });
+        const double took = Seconds(std::chrono::steady_clock::now() - off);
+        const FrameGenStatus status = presenter.Status();
+        Check(!status.runtime_halving && took < 2.0,
+              name + ": the game's waits at the refresh rate clear it (" + std::to_string(took) + " s)");
+        if (slow) {
+            Check(status.standby && status.dynamic_engagements == 1 && presenter.OsdDetailText() != kHalvingDetail,
+                  name + ": standing by through the hold, no longer saying so (" + presenter.OsdDetailText() + ")");
+        } else {
+            Check(status.standby && status.dynamic_engagements == 1 &&
+                      presenter.OsdDetailText().find("on its own") != std::string::npos,
+                  name + ": a game holding the refresh rate stays standing by (" + presenter.OsdDetailText() + ")");
+        }
+        presenter.Stop();
+        Check(!runtime.ordering_violation && !g_release_violation, name + ": calls stayed ordered");
+    }
+}
+
+// Reported and cleared under a fixed multiplier (nothing to stand down to),
+// then Dynamic again, engaged as before: a report gone says nothing about
+// this engagement, and nothing stands down for it.
+void TestRuntimeHalvingClearedDoesNotStandDown() {
+    const std::string name = "halving cleared";
+    FrameGenPresenter presenter;
+    GpuLog gpu;
+    Runtime runtime;
+    std::unique_ptr<App> owned;
+    App* app = nullptr;
+    StartHalving(presenter, gpu, runtime, FrameGenMultiplier::kDynamic, app, owned, nullptr);
+    EngageDynamic(presenter, *app, name);
+    auto configure = [&](FrameGenMultiplier multiplier) {
+        FrameGenResolvedSettings settings;
+        settings.enabled = true;
+        settings.synthesis_mode = FrameGenSynthesisMode::kExtrapolate;
+        settings.multiplier = multiplier;
+        presenter.Configure(settings);
+    };
+    configure(FrameGenMultiplier::k2);
+    runtime.throttled = true;
+    RunTicks(*app, 3000ms, {1, 2, 2}, [&](const XrFrameState&) { return presenter.Status().runtime_halving; });
+    Check(presenter.Status().runtime_halving, name + ": reported at a fixed multiplier");
+    runtime.throttled = false;
+    RunTicks(*app, 3000ms, {1, 2, 2}, [&](const XrFrameState&) { return !presenter.Status().runtime_halving; });
+    Check(!presenter.Status().runtime_halving, name + ": cleared once the runtime gives every refresh");
+    configure(FrameGenMultiplier::kDynamic);
+    RunTicks(*app, 1500ms, {1, 2, 2});
+    const FrameGenStatus status = presenter.Status();
+    Check(Engaged(presenter) && status.dynamic_stand_downs == 0 && !status.runtime_halving,
+          name + ": Dynamic stays engaged (" + status.dynamic_reason + ")");
+    presenter.Stop();
+    Check(!runtime.ordering_violation && !g_release_violation, name + ": calls stayed ordered");
+}
+
+// A runtime that keeps halving the frame rate: Dynamic stands down after
+// the window, and each time its hold ends it engages again for the game held
+// to half the refresh rate. With the report standing, the presenter thread's
+// waits show it again within a quarter of the window: each try is brief.
+void TestRuntimeHalvingRetriesBriefly() {
+    const std::string name = "halving retries";
     FrameGenPresenter presenter;
     GpuLog gpu;
     Runtime runtime;
@@ -6564,27 +6718,52 @@ void TestRuntimeHalvingClears() {
     std::unique_ptr<App> owned;
     App* app = nullptr;
     StartHalving(presenter, gpu, runtime, FrameGenMultiplier::kDynamic, app, owned, nullptr);
-    RunWork(*app, 3000ms, kLightWork, [&](const XrFrameState&) { return Engaged(presenter); });
-    RunWork(*app, 3000ms, kLightWork, [&](const XrFrameState&) { return presenter.Status().standby; });
-    Check(presenter.Status().standby && presenter.Status().runtime_halving, "halving clears: reported and stood down");
+    FrameGenDynamicPolicy policy = QuickDynamic();
+    policy.hold = policy.hold_max = 600ms;
+    presenter.SetDynamicPolicy(policy);
+    // Each engagement: when it began and ended (stood down), in seconds from
+    // the start.
+    std::vector<std::pair<double, double>> engagements;
+    std::uint64_t engaged = 0;
+    std::uint64_t stood_down = 0;
+    bool reported = false;
     bool cleared = false;
-    RunWork(*app, 1500ms, kLightWork, [&](const XrFrameState&) {
-        cleared = cleared || !presenter.Status().runtime_halving;
-        return false;
+    const auto start = std::chrono::steady_clock::now();
+    RunWork(*app, 9000ms, kLightWork, [&](const XrFrameState&) {
+        const FrameGenStatus status = presenter.Status();
+        const double at = Seconds(std::chrono::steady_clock::now() - start);
+        if (status.dynamic_engagements > engaged) {
+            engaged = status.dynamic_engagements;
+            engagements.push_back({at, -1.0});
+        }
+        if (status.dynamic_stand_downs > stood_down) {
+            stood_down = status.dynamic_stand_downs;
+            if (!engagements.empty()) engagements.back().second = at;
+        }
+        cleared = cleared || (reported && !status.runtime_halving);
+        reported = reported || status.runtime_halving;
+        return engagements.size() >= 4 && engagements.back().second >= 0.0;
     });
-    Check(!cleared, "halving clears: standing by, the report stays while the runtime halves the frame rate");
-    runtime.throttled = false;
-    const auto off = std::chrono::steady_clock::now();
-    RunWork(*app, 3000ms, kLightWork, [&](const XrFrameState&) { return !presenter.Status().runtime_halving; });
-    const double took = Seconds(std::chrono::steady_clock::now() - off);
     const FrameGenStatus status = presenter.Status();
-    Check(!status.runtime_halving && took < 2.0,
-          "halving clears: the game's waits at the refresh rate clear it (" + std::to_string(took) + " s)");
-    Check(status.standby && status.dynamic_engagements == 1 &&
-              presenter.OsdDetailText().find("on its own") != std::string::npos,
-          "halving clears: a game holding the refresh rate stays standing by (" + presenter.OsdDetailText() + ")");
+    std::string seen;
+    for (const auto& [from, to] : engagements) {
+        seen += " " + std::to_string(from) + "-" + std::to_string(to);
+    }
+    Check(engagements.size() >= 4 && engagements.back().second >= 0.0 &&
+              status.dynamic_stand_downs == engagements.size() &&
+              status.dynamic_reason == "the runtime halves the frame rate" && reported && !cleared,
+          name + ": stood down for halving after each engagement, reported throughout (" + status.dynamic_reason +
+              ";" + seen + ")");
+    if (engagements.size() >= 4) {
+        Check(engagements[0].second - engagements[0].first >= 0.8,
+              name + ": the first engagement is judged over the whole window (" + seen + ")");
+        for (std::size_t i = 1; i < engagements.size(); ++i) {
+            Check(engagements[i].second >= 0.0 && engagements[i].second - engagements[i].first < 0.7,
+                  name + ": engaging again under the report is brief (" + seen + ")");
+        }
+    }
     presenter.Stop();
-    Check(!runtime.ordering_violation && !g_release_violation, "halving clears: calls stayed ordered");
+    Check(!runtime.ordering_violation && !g_release_violation, name + ": calls stayed ordered");
 }
 
 // What the OSD and the app say while the runtime halves the frame rate:
@@ -6907,6 +7086,8 @@ int main(int argc, char** argv) {
     RUN(TestRuntimeHalvingRecovers);
     RUN(TestRuntimeHalvingNotReported);
     RUN(TestRuntimeHalvingClears);
+    RUN(TestRuntimeHalvingClearedDoesNotStandDown);
+    RUN(TestRuntimeHalvingRetriesBriefly);
     // Quad views Frame Generation composes itself.
     RUN(TestQuadClaimAndCompose);
     RUN(TestQuadSetupThroughComposedFrame);

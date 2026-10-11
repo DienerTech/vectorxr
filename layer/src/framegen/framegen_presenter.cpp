@@ -58,9 +58,41 @@ constexpr std::uint32_t kLoggedQuadWriteFailures = 3;
 // halves the frame rate (FrameGenStatus::runtime_halving).
 constexpr const char* kHalvingDetail = "The runtime halves the frame rate: turn off its smoothing";
 constexpr const char* kHalvingReason = "the runtime halves the frame rate: turn off its smoothing";
+// A runtime cutting the frame rate (its motion smoothing) holds frames to
+// every second, third or at most fourth refresh: a period reported as two to
+// this many times the refresh period is not taken as another refresh rate.
+constexpr std::uint32_t kMaxThrottleRefreshes = 4;
 
 std::string MultiplierText(std::uint32_t multiplier) {
     return std::to_string(multiplier) + "x";
+}
+
+// "twice", "three times": how many times the refresh period.
+std::string TimesText(std::uint32_t times) {
+    switch (times) {
+    case 2:
+        return "twice";
+    case 3:
+        return "three times";
+    case 4:
+        return "four times";
+    default:
+        return std::to_string(times) + " times";
+    }
+}
+
+// "other", "third": released only every ... refresh.
+std::string EveryText(std::uint32_t refreshes) {
+    switch (refreshes) {
+    case 2:
+        return "other";
+    case 3:
+        return "third";
+    case 4:
+        return "fourth";
+    default:
+        return std::to_string(refreshes) + "th";
+    }
 }
 
 const XrCompositionLayerProjection* FindProjection(const XrFrameEndInfo& info, std::uint32_t* index = nullptr) {
@@ -1690,8 +1722,11 @@ void FrameGenPresenter::UpdateDynamicLocked(Clock::time_point now, XrDuration pe
     // The runtime holds the frames presented to half its refresh rate (its
     // motion smoothing, probably) and makes its own between them: engaged
     // gains nothing while that lasts. Standing by, frames pass straight
-    // through as they would without Frame Generation.
-    if (halving_confirmed_at_ && *halving_confirmed_at_ > dynamic_engaged_at_) {
+    // through as they would without Frame Generation. Only the presenter
+    // thread's waits during this engagement count, and only while halving is
+    // still reported; re-engaged while it is, they decide within a quarter
+    // of the window, so trying again costs little.
+    if (runtime_halving_ && halving_confirmed_at_ && *halving_confirmed_at_ > dynamic_engaged_at_) {
         DynamicStandDownLocked(now, "the runtime halves the frame rate", false);
         return;
     }
@@ -2413,13 +2448,17 @@ void FrameGenPresenter::NoteRuntimePeriodLocked(XrDuration period) {
         return;
     }
     last_period_ = period;
-    // About twice the refresh period: the runtime halving the frame rate,
-    // not another refresh rate (a session's refresh rate dropping to exactly
-    // half is not told apart from it).
-    const bool doubled = refresh_period_ > 0 && std::llabs(period - 2 * refresh_period_) <= refresh_period_ / 20;
-    if (!doubled) {
-        refresh_period_ = period;
+    // About two, three or four times the refresh period: the runtime cutting
+    // the frame rate to that fraction, not another refresh rate (a session's
+    // refresh rate dropping to exactly such a fraction is not told apart
+    // from it).
+    for (std::uint32_t refreshes = 2; refresh_period_ > 0 && refreshes <= kMaxThrottleRefreshes; ++refreshes) {
+        const XrDuration held = refresh_period_ * static_cast<XrDuration>(refreshes);
+        if (std::llabs(period - held) <= held / 20) {
+            return;
+        }
     }
+    refresh_period_ = period;
 }
 
 void FrameGenPresenter::NoteRuntimeHalvingLocked(Clock::time_point called, Clock::time_point returned,
@@ -2436,33 +2475,45 @@ void FrameGenPresenter::NoteRuntimeHalvingLocked(Clock::time_point called, Clock
     if (refresh <= 0 || display_time <= previous->display_time) {
         return;
     }
-    // Halved: twice the refresh period reported, or a wait asked for well
-    // within a refresh of the last one's release that got the refresh after
-    // the next. A wait asked for later says nothing: its caller missed the
-    // next refresh itself (the presenter thread ran late, or the game is
-    // slow).
-    const bool doubled = period >= refresh + refresh / 2;
-    if (!doubled && called - previous->returned >= std::chrono::nanoseconds(refresh * 3 / 4)) {
+    // Halved (or cut further): a multiple of the refresh period reported, or
+    // a wait asked for well within a refresh of the last one's release that
+    // got a refresh after the next. A wait asked for later says nothing of
+    // that: its caller missed the next refresh itself (the presenter thread
+    // ran late, or the game is slow). One still released at the next refresh
+    // shows the runtime giving every refresh, whenever it was asked for.
+    const auto refreshes = [&](XrDuration duration) {
+        return static_cast<std::uint32_t>(std::min<XrDuration>((duration + refresh / 2) / refresh, 64));
+    };
+    const bool reported = period >= refresh + refresh / 2;
+    const std::uint32_t held = reported ? refreshes(period) : refreshes(display_time - previous->display_time);
+    const bool halved = held >= 2;
+    if (halved && !reported && called - previous->returned >= std::chrono::nanoseconds(refresh * 3 / 4)) {
         return;
     }
-    const bool halved = doubled || display_time - previous->display_time >= refresh + refresh / 2;
     if (presenter) {
         ++totals_.halving_measured;
         totals_.halving_halved += halved ? 1 : 0;
     }
-    halving_samples_.emplace_back(returned, halved);
+    halving_samples_.emplace_back(returned, halved ? held : 1);
     while (returned - halving_samples_.front().first > halving_window_) {
         halving_samples_.pop_front();
     }
-    // A whole window measured, with at least half the waits a runtime
-    // halving the frame rate releases in it.
+    // A window measured, with at least half the waits a runtime holding the
+    // frame rate to a quarter of its refresh rate releases in it. While
+    // halving is reported, the presenter thread's waits decide a quarter of
+    // the window after they start: Dynamic engaging again under it stands
+    // down again soon, or clears it, rather than presenting halved for a
+    // whole window each time.
+    std::chrono::nanoseconds window = halving_window_;
+    if (presenter && runtime_halving_) {
+        window /= 4;
+    }
     const std::size_t total = halving_samples_.size();
-    if (returned - halving_since_ < halving_window_ ||
-        static_cast<XrDuration>(total) * 4 * refresh < std::chrono::nanoseconds(halving_window_).count()) {
+    if (returned - halving_since_ < window || static_cast<XrDuration>(total) * 8 * refresh < window.count()) {
         return;
     }
     const auto count = static_cast<std::size_t>(std::count_if(
-        halving_samples_.begin(), halving_samples_.end(), [](const auto& sample) { return sample.second; }));
+        halving_samples_.begin(), halving_samples_.end(), [](const auto& sample) { return sample.second >= 2; }));
     // Three quarters of the window's waits halved report it, a quarter or
     // fewer clear it: an occasional missed refresh does neither.
     if (presenter && count * 4 >= total * 3) {
@@ -2470,11 +2521,17 @@ void FrameGenPresenter::NoteRuntimeHalvingLocked(Clock::time_point called, Clock
         runtime_halving_ = true;
         if (logger_ && !logged_runtime_halving_) {
             logged_runtime_halving_ = true;
+            // The waits' release: every Nth refresh, the N seen most often.
+            std::array<std::size_t, 9> seen{};
+            for (const auto& sample : halving_samples_) {
+                ++seen[std::min<std::uint32_t>(sample.second, 8)];
+            }
+            const auto every = static_cast<std::uint32_t>(std::max_element(seen.begin() + 2, seen.end()) - seen.begin());
             const std::string hz = Number(1e9 / static_cast<double>(refresh), 0) + " Hz";
             const std::string evidence =
-                doubled ? "reported a frame period of " + Number(static_cast<double>(period) / 1e6, 1) +
-                              " ms, twice its refresh period at " + hz
-                        : "released Frame Generation's frames only every other refresh at " + hz;
+                reported ? "reported a frame period of " + Number(static_cast<double>(period) / 1e6, 1) + " ms, " +
+                               TimesText(held) + " its refresh period at " + hz
+                         : "released Frame Generation's frames only every " + EveryText(every) + " refresh at " + hz;
             logger_->Info("Frame Generation: the runtime appears to be halving the frame rate, probably through its "
                           "motion smoothing: for " +
                           Number(std::chrono::duration<double>(halving_window_).count(), 0) + " s it " + evidence +
@@ -2484,6 +2541,7 @@ void FrameGenPresenter::NoteRuntimeHalvingLocked(Clock::time_point called, Clock
         }
     } else if (runtime_halving_ && count * 4 <= total) {
         runtime_halving_ = false;
+        halving_confirmed_at_.reset();
     }
 }
 

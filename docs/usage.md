@@ -825,8 +825,8 @@ Advanced settings. The first enabled custom profile that matches the running gam
   in Pimax Play or with a SteamVR fixed 45 fps setting; Frame Generation lowers the game's rate
   itself.
 
-When the runtime holds Frame Generation's frames to half its refresh rate anyway, as its
-smoothing does, VectorXR reports it after about 4 seconds of it:
+When the runtime holds Frame Generation's frames to half its refresh rate anyway (or to a third
+or a quarter of it), as its smoothing does, VectorXR reports it after about 4 seconds of it:
 
 - The line under the On-Screen Display's Frame Generation row (expanded layout) reads **The
   runtime halves the frame rate: turn off its smoothing**, and the app's live status ends with
@@ -835,12 +835,17 @@ smoothing does, VectorXR reports it after about 4 seconds of it:
   appears to be halving the frame rate, probably through its motion smoothing: ...**.
 - With **Dynamic**, Frame Generation stands down while it lasts (**Frame Generation (dynamic)
   stands down: the runtime halves the frame rate**): frames pass straight through, as without
-  Frame Generation, and it tries again after a hold, 10 seconds at first.
+  Frame Generation, and it tries again after a hold, 10 seconds at first and longer after each
+  stand-down. While the message stands, a try ends within about a second if the runtime still
+  holds the frame rate down.
 - Each 30-second summary counts the waits on Frame Generation's own thread that the runtime held
   back, as **runtimeHalved** (held back/measured), followed by **(halving)** while it lasts.
 
 Turn off the runtime's smoothing and check that it runs at full refresh. The message clears once
-the runtime shows every refresh again.
+the runtime gives Frame Generation's frames every refresh again: within a few seconds while
+Frame Generation presents them, and with **Dynamic** standing by, the next time it engages.
+Standing by, it can clear sooner if the game runs well above half the refresh rate: its own
+frames then show the runtime giving every refresh.
 
 #### Current limits
 
