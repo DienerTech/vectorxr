@@ -20,7 +20,7 @@ function validateCoreConfig(core: CoreConfig): string[] {
     if (!Number.isFinite(value) || value < low || value > high ||
         ((name === 'opacity' || name === 'updateHz') && !Number.isInteger(value))) errors.push(`OSD ${name} must be between ${low} and ${high}`)
   }
-  errors.push(...validateInputBinding('core.osd.toggleBinding', core.osd.toggleBinding), ...validateInputBinding('core.osd.cycleBinding', core.osd.cycleBinding))
+  errors.push(...validateInputBindings('core.osd.toggleBindings', core.osd.toggleBindings), ...validateInputBindings('core.osd.cycleBindings', core.osd.cycleBindings))
   if (!/^#[0-9a-f]{6}$/i.test(core.osd.customColor)) errors.push('OSD custom color must be a six-digit hex color')
   if (!['teal', 'copper', 'blue', 'violet', 'rose', 'custom'].includes(core.osd.accent)) errors.push('OSD accent is invalid')
   if (!['12', '24'].includes(core.osd.clockFormat)) errors.push('OSD clock format must be 12 or 24 hour')
@@ -582,8 +582,8 @@ export function validateConfig(config: VectorXRConfig): string[] {
   errors.push(...validateCoreConfig(config.core))
   errors.push(...validateApplications(config.applications))
   errors.push(...validateDepthXRSettings('modules.depthxr.defaults.', config.modules.depthxr.defaults))
-  errors.push(...validateInputBinding('modules.depthxr.bindings.toggleEnabled', config.modules.depthxr.bindings.toggleEnabled))
-  errors.push(...validateInputBinding('modules.depthxr.bindings.toggleAnchor', config.modules.depthxr.bindings.toggleAnchor))
+  errors.push(...validateInputBindings('modules.depthxr.bindings.toggleEnabledBindings', config.modules.depthxr.bindings.toggleEnabledBindings))
+  errors.push(...validateInputBindings('modules.depthxr.bindings.toggleAnchorBindings', config.modules.depthxr.bindings.toggleAnchorBindings))
   errors.push(...validatePivotXRSettings('modules.pivotxr.defaults.', config.modules.pivotxr.defaults))
   errors.push(...validateInputBindings('modules.pivotxr.activationBindings', config.modules.pivotxr.activationBindings.map((item) => item.binding)))
   errors.push(...validateInputBindings('modules.pivotxr.setOriginBindings', config.modules.pivotxr.setOriginBindings))
@@ -629,7 +629,8 @@ export function validateConfig(config: VectorXRConfig): string[] {
   })
   errors.push(...validateQuadViewsProfileConflicts(config.modules.quadviews.profiles))
 
-  errors.push(...validateInputBinding('modules.turbo.toggleBinding', config.modules.turbo.toggleBinding))
+  errors.push(...validateInputBindings('modules.turbo.toggleBindings', config.modules.turbo.toggleBindings))
+  errors.push(...validateInputBindings('modules.turbo.metricsBindings', config.modules.turbo.metricsBindings))
   for (const experiment of [config.modules.turbo.experimental, ...config.modules.turbo.profiles.map(profile => profile.experimental)]) {
   if (!Number.isInteger(experiment.predictionPercent) || experiment.predictionPercent < 50 || experiment.predictionPercent > 100) {
     errors.push('Turbo experimental prediction dampening must be an integer from 50 to 100')

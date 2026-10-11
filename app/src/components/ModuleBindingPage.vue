@@ -3,14 +3,19 @@ import { onMounted, onUnmounted } from 'vue'
 
 import BindingConflictWarnings from './BindingConflictWarnings.vue'
 import BindingEditor from './BindingEditor.vue'
+import BindingListEditor from './BindingListEditor.vue'
 import type { InputBinding, PivotBindingWarning } from '../lib/model'
 
-// Dedicated sub-page for editing a single module-level binding (Turbo/Depth
-// toggles), mirroring PivotBindingsPage: breadcrumb, Esc/Done to return.
+// Dedicated sub-page for editing a module-level toggle's bindings (Turbo,
+// Depth, the OSD): with `bindings`, a list, any one of
+// which acts, so each device in use (a HOTAS, a HOSAS) can have its own; with
+// `binding`, a single one (Quadviews' diagnostic view). Mirrors
+// PivotBindingsPage: breadcrumb, Esc/Done to return.
 defineProps<{
   // Names the module in the breadcrumb, e.g. "Turbo" or "Depth".
   moduleLabel: string
-  binding: InputBinding
+  bindings?: InputBinding[]
+  binding?: InputBinding
   label: string
   description: string
   noneText?: string
@@ -21,6 +26,7 @@ defineProps<{
 
 const emit = defineEmits<{
   close: []
+  'update:bindings': [value: InputBinding[]]
   'update:binding': [value: InputBinding]
 }>()
 
@@ -66,7 +72,18 @@ onUnmounted(() => {
 
       <div class="mt-5 space-y-4">
         <BindingConflictWarnings :warnings="warnings ?? []" />
+        <BindingListEditor
+          v-if="bindings"
+          :model-value="bindings"
+          :label="label"
+          :description="`${description} Add a binding for each device you fly with; any one of them acts.`"
+          :none-text="noneText"
+          :default-activate-sound="defaultActivateSound"
+          :default-deactivate-sound="defaultDeactivateSound"
+          @update:model-value="emit('update:bindings', $event)"
+        />
         <BindingEditor
+          v-else-if="binding"
           :model-value="binding"
           :label="label"
           :description="description"

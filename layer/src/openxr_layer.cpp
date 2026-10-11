@@ -1502,21 +1502,15 @@ bool SameSettings(const ResolvedRuntimeConfig& lhs, const ResolvedRuntimeConfig&
            NearlyEqual(lhs.depthxr.stereo_boost, rhs.depthxr.stereo_boost) &&
            NearlyEqual(lhs.depthxr.convergence, rhs.depthxr.convergence) &&
            lhs.depthxr.depth_anchor == rhs.depthxr.depth_anchor &&
-           lhs.depthxr_bindings.toggle_enabled.type == rhs.depthxr_bindings.toggle_enabled.type &&
-           lhs.depthxr_bindings.toggle_enabled.chord == rhs.depthxr_bindings.toggle_enabled.chord &&
-           lhs.depthxr_bindings.toggle_enabled.device_guid == rhs.depthxr_bindings.toggle_enabled.device_guid &&
-           lhs.depthxr_bindings.toggle_enabled.input_path == rhs.depthxr_bindings.toggle_enabled.input_path &&
-           lhs.depthxr_bindings.toggle_enabled.product_guid == rhs.depthxr_bindings.toggle_enabled.product_guid &&
-           lhs.depthxr_bindings.toggle_enabled.device_name == rhs.depthxr_bindings.toggle_enabled.device_name &&
-           lhs.depthxr_bindings.toggle_enabled.input_label == rhs.depthxr_bindings.toggle_enabled.input_label &&
-           SameInputBinding(lhs.depthxr_bindings.toggle_anchor, rhs.depthxr_bindings.toggle_anchor) &&
+           SameInputBindings(lhs.depthxr_bindings.toggle_enabled_bindings, rhs.depthxr_bindings.toggle_enabled_bindings) &&
+           SameInputBindings(lhs.depthxr_bindings.toggle_anchor_bindings, rhs.depthxr_bindings.toggle_anchor_bindings) &&
            SamePivotResolvedSettings(lhs.pivotxr, rhs.pivotxr) &&
            lhs.turbo.enabled == rhs.turbo.enabled &&
-           SameInputBinding(lhs.turbo.toggle_binding, rhs.turbo.toggle_binding) &&
+           SameInputBindings(lhs.turbo.toggle_bindings, rhs.turbo.toggle_bindings) &&
            lhs.turbo.pacing_mode == rhs.turbo.pacing_mode &&
            lhs.turbo.runtime_pins == rhs.turbo.runtime_pins &&
            lhs.turbo.metrics_mode == rhs.turbo.metrics_mode &&
-           SameInputBinding(lhs.turbo.metrics_binding, rhs.turbo.metrics_binding) &&
+           SameInputBindings(lhs.turbo.metrics_bindings, rhs.turbo.metrics_bindings) &&
            lhs.quadviews.enabled == rhs.quadviews.enabled &&
            SameInputBinding(lhs.quadviews.diagnostic_visualization_binding, rhs.quadviews.diagnostic_visualization_binding) &&
            lhs.quadviews.eye_tracking_correction == rhs.quadviews.eye_tracking_correction &&
@@ -1624,6 +1618,12 @@ std::string BindingListLabel(const std::vector<InputBinding>& bindings) {
     }
     return stream.str();
 }
+// What a toggle's log line and sound name: the binding of its list that last
+// went down, else the list's first (a change Turbo itself makes, say).
+InputBinding ActingBinding(const std::optional<InputBinding>& pressed, const std::vector<InputBinding>& bindings) {
+    return pressed ? *pressed : bindings.empty() ? InputBinding{} : bindings.front();
+}
+
 std::string BindingListLabel(const std::vector<PivotActivationBinding>& bindings) {
     if (bindings.empty()) return "None";
     std::ostringstream stream;
@@ -1681,6 +1681,16 @@ void OpenXrLayer::SetLayerDirectory(std::filesystem::path dll_directory) {
 void OpenXrLayer::SetNextProcAddr(PFN_xrGetInstanceProcAddr next_get_instance_proc_addr) {
     std::scoped_lock lock(mutex_);
     next_get_instance_proc_addr_ = next_get_instance_proc_addr;
+}
+
+const InputBinding* OpenXrLayer::PollInputBindingsDown(const std::vector<InputBinding>& bindings) {
+    const InputBinding* down = nullptr;
+    for (const InputBinding& binding : bindings) {
+        if (PollInputBindingDown(binding) && !down) {
+            down = &binding;
+        }
+    }
+    return down;
 }
 
 bool OpenXrLayer::PollInputBindingDown(const InputBinding& binding) {
@@ -6298,7 +6308,7 @@ XrResult OpenXrLayer::ForwardEndFrame(XrSession session,
     turbo_effective_async_.store(turbo_pacing_mode_ == TurboPacingMode::kAsync);
     const bool was_effective = turbo_effective_active_.exchange(turbo_engaged);
     if (turbo_engaged && !was_effective) {
-        SoundPlayer::Instance().PlayTransition(resolved_settings_.turbo.toggle_binding.sound, true,
+        SoundPlayer::Instance().PlayTransition(ActingBinding(turbo_toggle_pressed_, resolved_settings_.turbo.toggle_bindings).sound, true,
             dll_directory_, resolved_settings_.core.sound_volume, L"turbo-on.wav", L"turbo-off.wav");
     }
 
@@ -6307,13 +6317,13 @@ XrResult OpenXrLayer::ForwardEndFrame(XrSession session,
     SoundFeedback turbo_sound{};
     int turbo_sound_volume = 100;
     if (turbo_engaged) {
-        turbo_sound = resolved_settings_.turbo.toggle_binding.sound;
+        turbo_sound = ActingBinding(turbo_toggle_pressed_, resolved_settings_.turbo.toggle_bindings).sound;
         turbo_sound_volume = resolved_settings_.core.sound_volume;
     }
     // Metrics capture config, also copied under the lock: the recorder runs
     // at the tail of this function, after the lock is released.
     const TurboMetricsMode metrics_mode = resolved_settings_.turbo.metrics_mode;
-    const InputBinding metrics_binding = resolved_settings_.turbo.metrics_binding;
+    const std::vector<InputBinding> metrics_bindings = resolved_settings_.turbo.metrics_bindings;
     const bool metrics_available = resolved_settings_.core.enabled && resolved_settings_.turbo.enabled;
     const int metrics_sound_volume = resolved_settings_.core.sound_volume;
     // Why Turbo is off decides whether an established async pipeline may stay
@@ -6834,7 +6844,7 @@ XrResult OpenXrLayer::ForwardEndFrame(XrSession session,
     // should catch it).
     turbo_last_frame_blocked_ms_ = frame_blocked_ms;
 
-    RecordTurboMetricsFrame(turbo_engaged, frame_blocked_ms, timed_out, metrics_mode, metrics_binding,
+    RecordTurboMetricsFrame(turbo_engaged, frame_blocked_ms, timed_out, metrics_mode, metrics_bindings,
                             metrics_available, metrics_sound_volume);
 
     return result;
@@ -7073,7 +7083,7 @@ void OpenXrLayer::NoteTurboRuntimeFailure(XrResult result, XrTime submitted_disp
     turbo_pacing_verdict_pending_ = false;
     turbo_recovery_.Fail(reason + " Turbo suspended. Restart the VR session if presentation does not recover.");
     logger_.Error("Turbo: " + reason + " Turbo suspended.");
-    SoundPlayer::Instance().PlayTransition(resolved_settings_.turbo.toggle_binding.sound, false,
+    SoundPlayer::Instance().PlayTransition(ActingBinding(turbo_toggle_pressed_, resolved_settings_.turbo.toggle_bindings).sound, false,
         dll_directory_, resolved_settings_.core.sound_volume, L"turbo-on.wav", L"turbo-off.wav");
 }
 
@@ -7262,7 +7272,7 @@ void OpenXrLayer::RecordTurboMetricsFrame(bool turbo_engaged,
                                           double frame_blocked_ms,
                                           bool timed_out,
                                           TurboMetricsMode metrics_mode,
-                                          const InputBinding& metrics_binding,
+                                          const std::vector<InputBinding>& metrics_bindings,
                                           bool metrics_available,
                                           int sound_volume) {
     // Drain the WaitFrame-side pending counters unconditionally so a later
@@ -7281,7 +7291,7 @@ void OpenXrLayer::RecordTurboMetricsFrame(bool turbo_engaged,
         metrics_available &&
         (metrics_mode == TurboMetricsMode::kAlways ||
          (metrics_mode == TurboMetricsMode::kBinding &&
-          IsTurboMetricsCaptureArmed(metrics_binding, sound_volume)));
+          IsTurboMetricsCaptureArmed(metrics_bindings, sound_volume)));
     turbo_metrics_active_.store(capturing);
     if (!capturing) {
         if (turbo_metrics_was_capturing_) {
@@ -7351,7 +7361,7 @@ void OpenXrLayer::RecordTurboMetricsFrame(bool turbo_engaged,
     }
 }
 
-bool OpenXrLayer::IsTurboMetricsCaptureArmed(const InputBinding& binding, int sound_volume) {
+bool OpenXrLayer::IsTurboMetricsCaptureArmed(const std::vector<InputBinding>& bindings, int sound_volume) {
 #if defined(_WIN32)
     const auto now = std::chrono::steady_clock::now();
     // Prime the edge detector on the first poll so a button held from the
@@ -7359,7 +7369,11 @@ bool OpenXrLayer::IsTurboMetricsCaptureArmed(const InputBinding& binding, int so
     const bool first_poll = !turbo_metrics_binding_last_poll_time_.has_value();
     if (first_poll || now - *turbo_metrics_binding_last_poll_time_ >= kInputBindingPollInterval) {
         turbo_metrics_binding_last_poll_time_ = now;
-        turbo_metrics_binding_down_cached_ = PollInputBindingDown(binding);
+        const InputBinding* down = PollInputBindingsDown(bindings);
+        turbo_metrics_binding_down_cached_ = down != nullptr;
+        if (down) {
+            turbo_metrics_pressed_ = *down;
+        }
     }
     const bool binding_down = turbo_metrics_binding_down_cached_;
     if (first_poll) {
@@ -7369,6 +7383,7 @@ bool OpenXrLayer::IsTurboMetricsCaptureArmed(const InputBinding& binding, int so
     turbo_metrics_binding_was_down_ = binding_down;
 
     if (was_pressed_this_call) {
+        const InputBinding binding = ActingBinding(turbo_metrics_pressed_, bindings);
         turbo_metrics_capture_armed_ = !turbo_metrics_capture_armed_;
         logger_.Info(std::string("Turbo metrics: capture ") +
                      (turbo_metrics_capture_armed_ ? "started" : "paused") + " via " +
@@ -7378,7 +7393,7 @@ bool OpenXrLayer::IsTurboMetricsCaptureArmed(const InputBinding& binding, int so
                                                L"metrics-off.wav");
     }
 #else
-    (void)binding;
+    (void)bindings;
     (void)sound_volume;
 #endif
     return turbo_metrics_capture_armed_;
@@ -9845,8 +9860,12 @@ void OpenXrLayer::PrepareOsd() {
         const auto now=std::chrono::steady_clock::now();
         if (!osd_last_input_poll_ || now-*osd_last_input_poll_>=kInputBindingPollInterval) {
             osd_last_input_poll_=now;
-            osd_toggle_down_=PollInputBindingDown(settings.toggle_binding);
-            osd_cycle_down_=PollInputBindingDown(settings.cycle_binding);
+            const InputBinding* toggle=PollInputBindingsDown(settings.toggle_bindings);
+            const InputBinding* cycle=PollInputBindingsDown(settings.cycle_bindings);
+            osd_toggle_down_=toggle!=nullptr;
+            osd_cycle_down_=cycle!=nullptr;
+            if (toggle) osd_toggle_sound_=toggle->sound;
+            if (cycle) osd_cycle_sound_=cycle->sound;
         }
     }
     // The status strings are only read when the worker rasterizes (at the
@@ -9856,8 +9875,11 @@ void OpenXrLayer::PrepareOsd() {
     const auto [before, after]=osd_.Prepare(settings, std::move(snapshot), osd_toggle_down_, osd_cycle_down_,
                                             osd_settings_revision_);
     record();
-    if (before.compact!=after.compact) SoundPlayer::Instance().PlayTransition(settings.cycle_binding.sound,after.compact,dll_directory_,resolved_settings_.core.sound_volume);
-    if (before.shown!=after.shown) SoundPlayer::Instance().PlayTransition(settings.toggle_binding.sound,after.shown,dll_directory_,resolved_settings_.core.sound_volume);
+    const auto sound=[](const std::optional<SoundFeedback>& pressed, const std::vector<InputBinding>& bindings) {
+        return pressed ? *pressed : bindings.empty() ? SoundFeedback{} : bindings.front().sound;
+    };
+    if (before.compact!=after.compact) SoundPlayer::Instance().PlayTransition(sound(osd_cycle_sound_,settings.cycle_bindings),after.compact,dll_directory_,resolved_settings_.core.sound_volume);
+    if (before.shown!=after.shown) SoundPlayer::Instance().PlayTransition(sound(osd_toggle_sound_,settings.toggle_bindings),after.shown,dll_directory_,resolved_settings_.core.sound_volume);
 }
 
 void OpenXrLayer::RefreshResolvedSettings() {
@@ -9927,11 +9949,13 @@ void OpenXrLayer::RefreshResolvedSettings() {
         // required until ResetTurboFrameState balances and clears it.
         turbo_frame_interception_required_.store(true, std::memory_order_release);
     }
-    if (!SameInputBinding(previous.depthxr_bindings.toggle_enabled, resolved_settings_.depthxr_bindings.toggle_enabled) ||
+    if (!SameInputBindings(previous.depthxr_bindings.toggle_enabled_bindings,
+                           resolved_settings_.depthxr_bindings.toggle_enabled_bindings) ||
         previous.depthxr.enabled != resolved_settings_.depthxr.enabled) {
         ResetDepthToggleState();
     }
-    if (!SameInputBinding(previous.depthxr_bindings.toggle_anchor, resolved_settings_.depthxr_bindings.toggle_anchor) ||
+    if (!SameInputBindings(previous.depthxr_bindings.toggle_anchor_bindings,
+                           resolved_settings_.depthxr_bindings.toggle_anchor_bindings) ||
         previous.depthxr.depth_anchor != resolved_settings_.depthxr.depth_anchor) {
         ResetDepthAnchorToggleState();
     }
@@ -9939,7 +9963,7 @@ void OpenXrLayer::RefreshResolvedSettings() {
         ResetPivotInputStateForConfigChange();
         has_logged_pivotxr_spike_mode_ = false;
     }
-    if (!SameInputBinding(previous.turbo.toggle_binding, resolved_settings_.turbo.toggle_binding) ||
+    if (!SameInputBindings(previous.turbo.toggle_bindings, resolved_settings_.turbo.toggle_bindings) ||
         previous.turbo.enabled != resolved_settings_.turbo.enabled) {
         ResetTurboToggleState();
     }
@@ -9947,7 +9971,7 @@ void OpenXrLayer::RefreshResolvedSettings() {
                           resolved_settings_.quadviews.diagnostic_visualization_binding)) {
         ResetQuadViewsDiagnosticVisualizationState();
     }
-    if (!SameInputBinding(previous.turbo.metrics_binding, resolved_settings_.turbo.metrics_binding) ||
+    if (!SameInputBindings(previous.turbo.metrics_bindings, resolved_settings_.turbo.metrics_bindings) ||
         previous.turbo.metrics_mode != resolved_settings_.turbo.metrics_mode) {
         // Re-prime the capture binding's edge detector; a mode change also
         // disarms binding-gated capture so it always starts paused.
@@ -9955,6 +9979,7 @@ void OpenXrLayer::RefreshResolvedSettings() {
         turbo_metrics_binding_was_down_ = false;
         turbo_metrics_binding_last_poll_time_.reset();
         turbo_metrics_binding_down_cached_ = false;
+        turbo_metrics_pressed_.reset();
     }
     if (previous.turbo.pacing_mode != resolved_settings_.turbo.pacing_mode ||
         previous.turbo.runtime_pins != resolved_settings_.turbo.runtime_pins) {
@@ -12205,8 +12230,8 @@ void OpenXrLayer::LogResolvedSettings(const ResolvedRuntimeConfig& settings) {
            << "coreEnabled=" << settings.core.enabled
            << ", logLevel=" << ToString(settings.core.log_level)
            << ", depthxrEnabled=" << settings.depthxr.enabled
-           << ", depthToggleBinding=" << BindingLabel(settings.depthxr_bindings.toggle_enabled)
-           << ", depthAnchorToggleBinding=" << BindingLabel(settings.depthxr_bindings.toggle_anchor)
+           << ", depthToggleBindings=" << BindingListLabel(settings.depthxr_bindings.toggle_enabled_bindings)
+           << ", depthAnchorToggleBindings=" << BindingListLabel(settings.depthxr_bindings.toggle_anchor_bindings)
            << ", stereoBoost=" << settings.depthxr.stereo_boost
            << ", convergence=" << settings.depthxr.convergence
            << ", depthAnchor=" << settings.depthxr.depth_anchor
@@ -12250,11 +12275,11 @@ void OpenXrLayer::LogResolvedSettings(const ResolvedRuntimeConfig& settings) {
                << ", pitchDownMultiplier=" << profile.pitch_negative.rotation_multiplier << "}";
     }
     stream << ", turboEnabled=" << settings.turbo.enabled
-           << ", turboToggleBinding=" << BindingLabel(settings.turbo.toggle_binding)
+           << ", turboToggleBindings=" << BindingListLabel(settings.turbo.toggle_bindings)
            << ", turboPacingMode=" << ToString(settings.turbo.pacing_mode)
            << ", turboRuntimePins=" << settings.turbo.runtime_pins.size()
            << ", turboMetricsMode=" << ToString(settings.turbo.metrics_mode)
-           << ", turboMetricsBinding=" << BindingLabel(settings.turbo.metrics_binding)
+           << ", turboMetricsBindings=" << BindingListLabel(settings.turbo.metrics_bindings)
            << ", quadviewsEnabled=" << settings.quadviews.enabled
            << ", quadviewsDiagnosticVisualizationBinding=" << BindingLabel(settings.quadviews.diagnostic_visualization_binding)
            << ", quadviewsTrackingMode=" << ToString(settings.quadviews.tracking_mode)
@@ -12394,6 +12419,7 @@ void OpenXrLayer::ResetDepthToggleState() {
     depthxr_toggle_enabled_ = true;
     depthxr_toggle_binding_was_down_ = false;
     depthxr_binding_last_poll_time_.reset();
+    depthxr_toggle_pressed_.reset();
     depthxr_binding_down_cached_ = false;
     ResetDepthAnchorToggleState();
 }
@@ -12403,6 +12429,7 @@ void OpenXrLayer::ResetDepthAnchorToggleState() {
     depth_anchor_active_ = resolved_settings_.depthxr.depth_anchor;
     depth_anchor_toggle_binding_was_down_ = false;
     depth_anchor_binding_last_poll_time_.reset();
+    depth_anchor_toggle_pressed_.reset();
     depth_anchor_binding_down_cached_ = false;
 }
 
@@ -12414,8 +12441,11 @@ void OpenXrLayer::PollDepthAnchorToggle() {
     const bool first_poll = !depth_anchor_binding_last_poll_time_.has_value();
     if (first_poll || now - *depth_anchor_binding_last_poll_time_ >= kInputBindingPollInterval) {
         depth_anchor_binding_last_poll_time_ = now;
-        depth_anchor_binding_down_cached_ =
-            PollInputBindingDown(resolved_settings_.depthxr_bindings.toggle_anchor);
+        const InputBinding* down = PollInputBindingsDown(resolved_settings_.depthxr_bindings.toggle_anchor_bindings);
+        depth_anchor_binding_down_cached_ = down != nullptr;
+        if (down) {
+            depth_anchor_toggle_pressed_ = *down;
+        }
     }
     const bool binding_down = depth_anchor_binding_down_cached_;
     if (first_poll) {
@@ -12432,10 +12462,11 @@ void OpenXrLayer::PollDepthAnchorToggle() {
         depth_submission_info_not_before_time_.reset();
         pending_locate_views_diagnostics_ = 5;
         pending_end_frame_diagnostics_ = 5;
+        const InputBinding binding =
+            ActingBinding(depth_anchor_toggle_pressed_, resolved_settings_.depthxr_bindings.toggle_anchor_bindings);
         logger_.Info(std::string("Depth Lock ") +
-                     (depth_anchor_active_ ? "enabled" : "disabled") + " via " +
-                     BindingLabel(resolved_settings_.depthxr_bindings.toggle_anchor) + ".");
-        SoundPlayer::Instance().PlayTransition(resolved_settings_.depthxr_bindings.toggle_anchor.sound,
+                     (depth_anchor_active_ ? "enabled" : "disabled") + " via " + BindingLabel(binding) + ".");
+        SoundPlayer::Instance().PlayTransition(binding.sound,
                                                depth_anchor_active_, dll_directory_,
                                                resolved_settings_.core.sound_volume,
                                                L"depth-lock-on.wav", L"depth-lock-off.wav");
@@ -12447,6 +12478,7 @@ void OpenXrLayer::ResetTurboToggleState() {
     turbo_toggle_enabled_ = true;
     turbo_toggle_binding_was_down_ = false;
     turbo_binding_last_poll_time_.reset();
+    turbo_toggle_pressed_.reset();
     turbo_binding_down_cached_ = false;
 }
 
@@ -12688,7 +12720,11 @@ bool OpenXrLayer::IsTurboActive() {
     const bool first_poll = !turbo_binding_last_poll_time_.has_value();
     if (first_poll || now - *turbo_binding_last_poll_time_ >= kInputBindingPollInterval) {
         turbo_binding_last_poll_time_ = now;
-        turbo_binding_down_cached_ = PollInputBindingDown(resolved_settings_.turbo.toggle_binding);
+        const InputBinding* down = PollInputBindingsDown(resolved_settings_.turbo.toggle_bindings);
+        turbo_binding_down_cached_ = down != nullptr;
+        if (down) {
+            turbo_toggle_pressed_ = *down;
+        }
     }
     const bool binding_down = turbo_binding_down_cached_;
     if (first_poll) {
@@ -12719,13 +12755,13 @@ bool OpenXrLayer::IsTurboActive() {
             }
             turbo_toggle_enabled_ = true;
             logger_.Info("Turbo mode re-armed after auto-suspend via " +
-                         BindingLabel(resolved_settings_.turbo.toggle_binding) + ".");
+                         BindingLabel(ActingBinding(turbo_toggle_pressed_, resolved_settings_.turbo.toggle_bindings)) + ".");
         } else {
             turbo_toggle_enabled_ = !turbo_toggle_enabled_;
             logger_.Info(std::string("Turbo mode ") + (turbo_toggle_enabled_ ? "enabled" : "disabled") +
-                         " via " + BindingLabel(resolved_settings_.turbo.toggle_binding) + ".");
+                         " via " + BindingLabel(ActingBinding(turbo_toggle_pressed_, resolved_settings_.turbo.toggle_bindings)) + ".");
         }
-        if (!turbo_toggle_enabled_) SoundPlayer::Instance().PlayTransition(resolved_settings_.turbo.toggle_binding.sound,
+        if (!turbo_toggle_enabled_) SoundPlayer::Instance().PlayTransition(ActingBinding(turbo_toggle_pressed_, resolved_settings_.turbo.toggle_bindings).sound,
                                                false, dll_directory_,
                                                resolved_settings_.core.sound_volume,
                                                L"turbo-on.wav", L"turbo-off.wav");
@@ -13554,7 +13590,11 @@ bool OpenXrLayer::IsDepthXrActive() {
     const bool first_poll = !depthxr_binding_last_poll_time_.has_value();
     if (first_poll || now - *depthxr_binding_last_poll_time_ >= kInputBindingPollInterval) {
         depthxr_binding_last_poll_time_ = now;
-        depthxr_binding_down_cached_ = PollInputBindingDown(resolved_settings_.depthxr_bindings.toggle_enabled);
+        const InputBinding* down = PollInputBindingsDown(resolved_settings_.depthxr_bindings.toggle_enabled_bindings);
+        depthxr_binding_down_cached_ = down != nullptr;
+        if (down) {
+            depthxr_toggle_pressed_ = *down;
+        }
     }
     const bool binding_down = depthxr_binding_down_cached_;
     if (first_poll) {
@@ -13570,10 +13610,11 @@ bool OpenXrLayer::IsDepthXrActive() {
         depth_submission_info_not_before_time_.reset();
         pending_locate_views_diagnostics_ = 5;
         pending_end_frame_diagnostics_ = 5;
+        const InputBinding binding =
+            ActingBinding(depthxr_toggle_pressed_, resolved_settings_.depthxr_bindings.toggle_enabled_bindings);
         logger_.Info(std::string("Depth effects ") +
-                     (depthxr_toggle_enabled_ ? "enabled" : "disabled") + " via " +
-                     BindingLabel(resolved_settings_.depthxr_bindings.toggle_enabled) + ".");
-        SoundPlayer::Instance().PlayTransition(resolved_settings_.depthxr_bindings.toggle_enabled.sound,
+                     (depthxr_toggle_enabled_ ? "enabled" : "disabled") + " via " + BindingLabel(binding) + ".");
+        SoundPlayer::Instance().PlayTransition(binding.sound,
                                                depthxr_toggle_enabled_, dll_directory_,
                                                resolved_settings_.core.sound_volume);
     }

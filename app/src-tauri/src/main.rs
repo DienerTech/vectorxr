@@ -115,6 +115,33 @@ where
     Ok(bindings)
 }
 
+// A toggle's bindings (any one of them acts; one per device, say a HOTAS's
+// and a HOSAS's) as a config file holds them: one, or none, under the single
+// legacy key, which layers from before binding lists also read; two or more
+// under the plural key alone. Neither key present means the toggle's default
+// (`absent`), as it does to the layer.
+fn normalize_toggle_bindings(
+    single: &mut Option<InputBinding>,
+    list: &mut Option<Vec<InputBinding>>,
+    absent: impl FnOnce() -> InputBinding,
+) {
+    let present = single.is_some() || list.is_some();
+    let mut bindings: Vec<InputBinding> = single
+        .take()
+        .into_iter()
+        .chain(list.take().unwrap_or_default())
+        .filter(|binding| !matches!(binding, InputBinding::None))
+        .collect();
+    if !present {
+        bindings = vec![absent()];
+    }
+    if bindings.len() <= 1 {
+        *single = Some(bindings.pop().unwrap_or(InputBinding::None));
+    } else {
+        *list = Some(bindings);
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct PivotActivationBinding {
@@ -297,8 +324,29 @@ struct OsdSettings {
     custom_color: String,
     custom_presets: Vec<serde_json::Value>,
     accent: String,
-    toggle_binding: InputBinding,
-    cycle_binding: InputBinding,
+    // Toggle binding lists (normalize_toggle_bindings); absent: the defaults.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    toggle_binding: Option<InputBinding>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    toggle_bindings: Option<Vec<InputBinding>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    cycle_binding: Option<InputBinding>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    cycle_bindings: Option<Vec<InputBinding>>,
+}
+
+fn default_osd_toggle_binding() -> InputBinding {
+    InputBinding::Keyboard {
+        chord: vec!["Ctrl".into(), "Alt".into(), "F10".into()],
+        sound: SoundFeedback::default(),
+    }
+}
+
+fn default_osd_cycle_binding() -> InputBinding {
+    InputBinding::Keyboard {
+        chord: vec!["Ctrl".into(), "Alt".into(), "F11".into()],
+        sound: SoundFeedback::default(),
+    }
 }
 
 impl Default for OsdSettings {
@@ -346,8 +394,10 @@ impl Default for OsdSettings {
             custom_color: "#51ddbd".into(),
             custom_presets: vec![],
             accent: "teal".into(),
-            toggle_binding: binding("F10"),
-            cycle_binding: binding("F11"),
+            toggle_binding: Some(binding("F10")),
+            toggle_bindings: None,
+            cycle_binding: Some(binding("F11")),
+            cycle_bindings: None,
         }
     }
 }
@@ -437,17 +487,24 @@ struct DepthXRModuleConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct DepthXRBindings {
-    #[serde(default = "default_depth_toggle_binding")]
-    toggle_enabled: InputBinding,
-    #[serde(default = "default_depth_toggle_binding")]
-    toggle_anchor: InputBinding,
+    // Toggle binding lists (normalize_toggle_bindings).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    toggle_enabled: Option<InputBinding>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    toggle_enabled_bindings: Option<Vec<InputBinding>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    toggle_anchor: Option<InputBinding>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    toggle_anchor_bindings: Option<Vec<InputBinding>>,
 }
 
 impl Default for DepthXRBindings {
     fn default() -> Self {
         Self {
-            toggle_enabled: default_depth_toggle_binding(),
-            toggle_anchor: default_depth_toggle_binding(),
+            toggle_enabled: Some(default_depth_toggle_binding()),
+            toggle_enabled_bindings: None,
+            toggle_anchor: Some(default_depth_toggle_binding()),
+            toggle_anchor_bindings: None,
         }
     }
 }
@@ -745,16 +802,21 @@ struct TurboModuleConfig {
     interrupted_session_recovery: bool,
     #[serde(default = "default_false")]
     enabled: bool,
-    #[serde(default = "default_activation_binding")]
-    toggle_binding: InputBinding,
+    // Toggle binding lists (normalize_toggle_bindings), as is metrics_binding.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    toggle_binding: Option<InputBinding>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    toggle_bindings: Option<Vec<InputBinding>>,
     #[serde(default = "default_turbo_pacing_mode")]
     pacing_mode: String,
     #[serde(default)]
     runtime_pins: std::collections::BTreeMap<String, String>,
     #[serde(default = "default_turbo_metrics_mode")]
     metrics_mode: String,
-    #[serde(default = "default_activation_binding")]
-    metrics_binding: InputBinding,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    metrics_binding: Option<InputBinding>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    metrics_bindings: Option<Vec<InputBinding>>,
     #[serde(default)]
     profiles: Vec<TurboProfileConfig>,
 }
@@ -790,12 +852,14 @@ impl Default for TurboModuleConfig {
         Self {
             interrupted_session_recovery: true,
             enabled: false,
-            toggle_binding: default_activation_binding(),
+            toggle_binding: Some(default_activation_binding()),
+            toggle_bindings: None,
             experimental: TurboExperimentalSettings::default(),
             pacing_mode: default_turbo_pacing_mode(),
             runtime_pins: std::collections::BTreeMap::new(),
             metrics_mode: default_turbo_metrics_mode(),
-            metrics_binding: default_activation_binding(),
+            metrics_binding: Some(default_activation_binding()),
+            metrics_bindings: None,
             profiles: Vec::new(),
         }
     }
@@ -1326,6 +1390,16 @@ fn normalize_config(mut config: VectorXRConfig) -> VectorXRConfig {
     }
 
     config.version = 3;
+
+    let osd = &mut config.core.osd;
+    normalize_toggle_bindings(&mut osd.toggle_binding, &mut osd.toggle_bindings, default_osd_toggle_binding);
+    normalize_toggle_bindings(&mut osd.cycle_binding, &mut osd.cycle_bindings, default_osd_cycle_binding);
+    let depth = &mut config.modules.depthxr.bindings;
+    normalize_toggle_bindings(&mut depth.toggle_enabled, &mut depth.toggle_enabled_bindings, default_depth_toggle_binding);
+    normalize_toggle_bindings(&mut depth.toggle_anchor, &mut depth.toggle_anchor_bindings, default_depth_toggle_binding);
+    let turbo = &mut config.modules.turbo;
+    normalize_toggle_bindings(&mut turbo.toggle_binding, &mut turbo.toggle_bindings, default_activation_binding);
+    normalize_toggle_bindings(&mut turbo.metrics_binding, &mut turbo.metrics_bindings, default_activation_binding);
 
     for application in &mut config.applications {
         application.enabled = true;
@@ -3402,6 +3476,61 @@ mod tests {
         let serialized = serde_json::to_value(bindings).expect("Depth bindings should serialize");
         assert_eq!(serialized["toggleAnchor"]["type"], "keyboard");
         assert_eq!(serialized["toggleAnchor"]["chord"][0], "F9");
+    }
+
+    fn saved(config: serde_json::Value) -> serde_json::Value {
+        let config: super::VectorXRConfig = serde_json::from_value(config).expect("config should deserialize");
+        serde_json::to_value(super::normalize_config(config)).expect("config should serialize")
+    }
+
+    // A toggle keeps one binding, or none, under its single legacy key, which
+    // layers from before binding lists read too; two or more go under the
+    // plural key alone.
+    #[test]
+    fn toggle_binding_lists_are_written_so_older_layers_read_single_bindings() {
+        let hotas = serde_json::json!({ "type": "device", "deviceGuid": "{1}", "inputPath": "button-23" });
+        let hosas = serde_json::json!({ "type": "device", "deviceGuid": "{2}", "inputPath": "button-5" });
+        let output = saved(serde_json::json!({
+            "version": 3,
+            "core": { "osd": { "toggleBindings": [hotas, hosas], "cycleBindings": [] } },
+            "applications": [],
+            "modules": {
+                "depthxr": { "bindings": { "toggleEnabledBindings": [hotas], "toggleAnchorBindings": [hotas, hosas] } },
+                "turbo": { "toggleBindings": [], "metricsBindings": [hosas] }
+            }
+        }));
+        let osd = &output["core"]["osd"];
+        assert_eq!(osd["toggleBindings"].as_array().map(Vec::len), Some(2));
+        assert!(osd.get("toggleBinding").is_none());
+        assert_eq!(osd["cycleBinding"]["type"], "none", "an emptied list is written as none, not left to the default");
+        assert!(osd.get("cycleBindings").is_none());
+        let depth = &output["modules"]["depthxr"]["bindings"];
+        assert_eq!(depth["toggleEnabled"]["inputPath"], "button-23");
+        assert!(depth.get("toggleEnabledBindings").is_none());
+        assert_eq!(depth["toggleAnchorBindings"][1]["inputPath"], "button-5");
+        assert!(depth.get("toggleAnchor").is_none());
+        let turbo = &output["modules"]["turbo"];
+        assert_eq!(turbo["toggleBinding"]["type"], "none");
+        assert_eq!(turbo["metricsBinding"]["inputPath"], "button-5");
+        assert!(turbo.get("toggleBindings").is_none() && turbo.get("metricsBindings").is_none());
+    }
+
+    #[test]
+    fn toggles_without_either_key_keep_their_defaults() {
+        let output = saved(serde_json::json!({ "version": 3, "core": { "osd": {} }, "applications": [], "modules": {} }));
+        assert_eq!(output["core"]["osd"]["toggleBinding"]["chord"], serde_json::json!(["Ctrl", "Alt", "F10"]));
+        assert_eq!(output["core"]["osd"]["cycleBinding"]["chord"], serde_json::json!(["Ctrl", "Alt", "F11"]));
+        assert_eq!(output["modules"]["depthxr"]["bindings"]["toggleEnabled"]["type"], "none");
+        // A legacy binding beside a list (a hand edit) joins it.
+        let merged = saved(serde_json::json!({
+            "version": 3, "applications": [],
+            "modules": { "turbo": {
+                "toggleBinding": { "type": "keyboard", "chord": ["F7"] },
+                "toggleBindings": [{ "type": "keyboard", "chord": ["F8"] }]
+            } }
+        }));
+        assert_eq!(merged["modules"]["turbo"]["toggleBindings"].as_array().map(Vec::len), Some(2));
+        assert!(merged["modules"]["turbo"].get("toggleBinding").is_none());
     }
 }
 

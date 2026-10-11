@@ -188,7 +188,7 @@ test('a matching custom profile enables Frame Generation even with the default o
 
 test('the A/B toggle participates in global binding conflict detection', () => {
   const config = defaultConfig()
-  config.modules.turbo.toggleBinding = { type: 'keyboard', chord: ['Ctrl', 'F7'] }
+  config.modules.turbo.toggleBindings = [{ type: 'keyboard', chord: ['Ctrl', 'F7'] }]
   config.modules.framegen.toggleBinding = { type: 'keyboard', chord: ['F7', 'Ctrl'] }
   const warnings = savedBindingConflictWarnings(config, [config.modules.framegen.toggleBinding])
   assert.equal(warnings.length, 1)

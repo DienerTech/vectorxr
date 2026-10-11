@@ -1,13 +1,18 @@
 <script setup lang="ts">
-import type { InputBinding } from '../lib/model'
-import { bindingLabel } from '../lib/model'
+import { computed } from 'vue'
 
-// Compact one-line summary of a module-level binding (Turbo/Depth toggles).
+import type { InputBinding } from '../lib/model'
+import { bindingListLabel } from '../lib/model'
+
+// Compact one-line summary of a module-level toggle's bindings (Turbo, Depth,
+// the OSD): any one of them acts, one per device for instance.
 // Editing happens on the dedicated sub-page (ModuleBindingPage), opened via
 // `edit` — mirrors the Pivot bindings panel/page pair.
-defineProps<{
+const props = defineProps<{
   heading: string
-  binding: InputBinding
+  // A toggle's list; or `binding`, a single one (Quadviews' diagnostic view).
+  bindings?: InputBinding[]
+  binding?: InputBinding
   // Tooltip explaining what the binding does.
   hint?: string
 }>()
@@ -15,6 +20,9 @@ defineProps<{
 defineEmits<{
   edit: []
 }>()
+
+const list = computed(() => props.bindings ?? (props.binding && props.binding.type !== 'none' ? [props.binding] : []))
+const withSound = computed(() => list.value.some((binding) => binding.type !== 'none' && binding.sound?.enabled))
 </script>
 
 <template>
@@ -27,18 +35,18 @@ defineEmits<{
           style="border-color: var(--app-border)"
           :title="hint"
         >
-          <span class="text-muted">{{ bindingLabel(binding) }}</span>
+          <span class="text-muted">{{ bindingListLabel(list) }}</span>
           <span
-            v-if="binding.type !== 'none' && binding.sound?.enabled"
+            v-if="withSound"
             class="text-muted"
-            title="Sound feedback is enabled for this binding"
+            title="Sound feedback is enabled for a binding"
             aria-label="Sound feedback enabled"
           >♪</span>
         </span>
       </div>
 
       <button class="button-secondary shrink-0 rounded-[0.75rem] px-4 py-2 text-sm font-medium" type="button" @click="$emit('edit')">
-        Edit Binding…
+        {{ list.length > 1 ? 'Edit Bindings…' : 'Edit Binding…' }}
       </button>
     </div>
   </div>

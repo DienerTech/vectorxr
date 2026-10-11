@@ -10,8 +10,8 @@ test('old configs keep OSD off and acquire independent default bindings', () => 
   delete config.core.osd
   assert.deepEqual(normalizeConfig(config).core.osd, defaultOsdSettings())
   const first = defaultOsdSettings()
-  first.toggleBinding.chord.push('X')
-  assert.deepEqual(defaultOsdSettings().toggleBinding.chord, ['Ctrl', 'Alt', 'F10'])
+  first.toggleBindings[0].chord.push('X')
+  assert.deepEqual(defaultOsdSettings().toggleBindings[0].chord, ['Ctrl', 'Alt', 'F10'])
 })
 
 test('all OSD settings and device bindings survive normalization and serialization', () => {
@@ -21,11 +21,13 @@ test('all OSD settings and device bindings survive normalization and serializati
     showGraph: false, showRuntime: false, showTurbo: false, showModules: false, showClock: false,
     accent: 'copper', toggleBinding: { type: 'device', deviceGuid: 'stick', inputPath: 'button-4' },
     cycleBinding: { type: 'none' } }
+  // One binding per toggle, as configs from before binding lists hold them.
   const normalized = normalizeConfig(JSON.parse(JSON.stringify(config)))
-  assert.equal(normalized.core.osd.toggleBinding.inputPath, 'button-4')
+  assert.equal(normalized.core.osd.toggleBindings[0].inputPath, 'button-4')
+  assert.deepEqual(normalized.core.osd.cycleBindings, [])
   assert.deepEqual(normalizeConfig(normalized), normalized)
   for (const [key, value] of Object.entries(config.core.osd)) {
-    if (key !== 'toggleBinding') assert.deepEqual(normalized.core.osd[key], value)
+    if (key !== 'toggleBinding' && key !== 'cycleBinding') assert.deepEqual(normalized.core.osd[key], value)
   }
   assert.deepEqual(validateConfig(normalized), [])
 })
@@ -42,8 +44,8 @@ test('invalid OSD imports fall back safely and invalid edits prevent save', () =
 
 test('OSD bindings participate in global binding conflicts', () => {
   const config = defaultConfig()
-  config.core.osd.cycleBinding = structuredClone(config.core.osd.toggleBinding)
-  assert.ok(savedBindingConflictWarnings(config, [config.core.osd.toggleBinding]).length > 0)
+  config.core.osd.cycleBindings = structuredClone(config.core.osd.toggleBindings)
+  assert.ok(savedBindingConflictWarnings(config, config.core.osd.toggleBindings).length > 0)
 })
 
 test('compact contents have independent defaults and survive presets', () => {
@@ -100,7 +102,7 @@ test('custom layouts retain small sizes, row order and colors without capturing 
   osd.customPresets.push({ name: 'Small cockpit', settings: layout })
   osd.bodyOrder.reverse()
   assert.deepEqual(layout.bodyOrder, ['pivot', 'modules', 'framegen', 'graph', 'turbo'])
-  for (const key of ['enabled', 'visibleOnStart', 'toggleBinding', 'cycleBinding', 'customPresets']) assert.ok(!(key in layout))
+  for (const key of ['enabled', 'visibleOnStart', 'toggleBindings', 'cycleBindings', 'customPresets']) assert.ok(!(key in layout))
   assert.deepEqual(normalizeOsdSettings(JSON.parse(JSON.stringify(osd))), osd)
   assert.deepEqual(normalizeOsdSettings({ bodyOrder: ['pivot', 'pivot', 'unknown', 'turbo'] }).bodyOrder, ['pivot', 'turbo', 'graph', 'framegen', 'modules'])
   assert.equal(normalizeOsdSettings({ accent: 'toString' }).accent, 'teal')

@@ -124,7 +124,9 @@ enabled.
 - Treat per-game profiles as independent calibrations. Different titles may need different
   quadrants—not merely small variations of one universal setting.
 - The **Depth Toggle Binding** at the top lets you toggle Depth on/off at runtime for quick A/B
-  comparisons in headset.
+  comparisons in headset. Like every in-game toggle (Depth, Depth Lock, Turbo, Turbo metrics
+  capture, and the On-Screen Display's), it takes several bindings, one for each device you fly
+  with (a HOTAS throttle's button and a HOSAS stick's, say); any one of them acts.
 - Games with a **Force IPD**, virtual-IPD, stereo-separation, or
   world-scale setting can override Stereo Boost; disable that setting before testing Depth.
   In DCS, uncheck **Force IPD Distance** under **Options > VR**, fully restart DCS, and open

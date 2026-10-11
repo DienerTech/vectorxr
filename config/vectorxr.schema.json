@@ -318,8 +318,16 @@
         "toggleBinding": {
           "$ref": "#/$defs/inputBinding"
         },
+        "toggleBindings": {
+          "$ref": "#/$defs/inputBindings",
+          "description": "Any one of the list's bindings acts (one per device, say a HOTAS's and a HOSAS's). Configs hold one binding, or none, under toggleBinding instead, which layers before binding lists read; never both."
+        },
         "cycleBinding": {
           "$ref": "#/$defs/inputBinding"
+        },
+        "cycleBindings": {
+          "$ref": "#/$defs/inputBindings",
+          "description": "Any one of the list's bindings acts (one per device, say a HOTAS's and a HOSAS's). Configs hold one binding, or none, under cycleBinding instead, which layers before binding lists read; never both."
         },
         "compactShowBrand": {
           "type": "boolean",
@@ -677,15 +685,32 @@
     "depthxrBindings": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "toggleEnabled"
+      "anyOf": [
+        {
+          "required": [
+            "toggleEnabled"
+          ]
+        },
+        {
+          "required": [
+            "toggleEnabledBindings"
+          ]
+        }
       ],
       "properties": {
         "toggleEnabled": {
           "$ref": "#/$defs/inputBinding"
         },
+        "toggleEnabledBindings": {
+          "$ref": "#/$defs/inputBindings",
+          "description": "Any one of the list's bindings acts (one per device, say a HOTAS's and a HOSAS's). Configs hold one binding, or none, under toggleEnabled instead, which layers before binding lists read; never both."
+        },
         "toggleAnchor": {
           "$ref": "#/$defs/inputBinding"
+        },
+        "toggleAnchorBindings": {
+          "$ref": "#/$defs/inputBindings",
+          "description": "Any one of the list's bindings acts (one per device, say a HOTAS's and a HOSAS's). Configs hold one binding, or none, under toggleAnchor instead, which layers before binding lists read; never both."
         }
       }
     },
@@ -1404,8 +1429,16 @@
         "toggleBinding": {
           "$ref": "#/$defs/inputBinding"
         },
+        "toggleBindings": {
+          "$ref": "#/$defs/inputBindings",
+          "description": "Any one of the list's bindings acts (one per device, say a HOTAS's and a HOSAS's). Configs hold one binding, or none, under toggleBinding instead, which layers before binding lists read; never both."
+        },
         "metricsBinding": {
           "$ref": "#/$defs/inputBinding"
+        },
+        "metricsBindings": {
+          "$ref": "#/$defs/inputBindings",
+          "description": "Any one of the list's bindings acts (one per device, say a HOTAS's and a HOSAS's). Configs hold one binding, or none, under metricsBinding instead, which layers before binding lists read; never both."
         },
         "pacingMode": {
           "enum": [

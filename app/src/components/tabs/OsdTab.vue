@@ -19,8 +19,8 @@ const previewLegible = ref(false)
 const previewWindow = useOsdPreviewWindow(osd, previewCompact, previewLegible)
 watch(() => osd.value.compact, compact => { previewCompact.value = compact })
 function customColor() { osd.value.accent = 'custom'; colorExpanded.value = !colorExpanded.value }
-const editing = ref<'toggleBinding' | 'cycleBinding' | null>(null)
-const warnings = computed(() => savedBindingConflictWarnings(props.config, [osd.value.toggleBinding, osd.value.cycleBinding]))
+const editing = ref<'toggleBindings' | 'cycleBindings' | null>(null)
+const warnings = computed(() => savedBindingConflictWarnings(props.config, [...osd.value.toggleBindings, ...osd.value.cycleBindings]))
 const sessions = ref<RuntimeStatusSession[]>([])
 const statusError = ref('')
 let disposed = false
@@ -37,7 +37,7 @@ onUnmounted(() => { disposed = true; if (poll) clearTimeout(poll) })
 
 let savedScrollTop = 0
 const scroller = () => document.querySelector('main section.overflow-y-auto')
-function openBinding(binding: 'toggleBinding' | 'cycleBinding') {
+function openBinding(binding: 'toggleBindings' | 'cycleBindings') {
   savedScrollTop = scroller()?.scrollTop ?? 0
   editing.value = binding
   void nextTick(() => scroller()?.scrollTo({ top: 0 }))
@@ -148,10 +148,10 @@ function preset(name: 'balanced' | 'minimal' | 'performance') {
 </script>
 
 <template>
-  <ModuleBindingPage v-if="editing" module-label="On-Screen Display" :binding="osd[editing]"
-    :label="editing === 'toggleBinding' ? 'Show / hide display' : 'Switch compact / expanded'"
+  <ModuleBindingPage v-if="editing" module-label="On-Screen Display" :bindings="osd[editing]"
+    :label="editing === 'toggleBindings' ? 'Show / hide display' : 'Switch compact / expanded'"
     description="Works in the VR application. Assign a keyboard chord, joystick button, or hat direction. Save to apply it live."
-    :warnings="warnings" @update:binding="osd[editing!] = $event" @close="closeBinding" />
+    :warnings="warnings" @update:bindings="osd[editing!] = $event" @close="closeBinding" />
   <div v-else class="space-y-4">
     <article class="surface-panel rounded-[1.25rem] border p-5 shadow-panel backdrop-blur">
       <div class="flex flex-wrap items-start justify-between gap-4">
@@ -180,8 +180,8 @@ function preset(name: 'balanced' | 'minimal' | 'performance') {
           </template>
         </div>
         <div class="grid gap-3 lg:grid-cols-2">
-          <ModuleBindingPanel heading="Show / hide" :binding="osd.toggleBinding" @edit="openBinding('toggleBinding')" />
-          <ModuleBindingPanel heading="Compact / expanded" :binding="osd.cycleBinding" @edit="openBinding('cycleBinding')" />
+          <ModuleBindingPanel heading="Show / hide" :bindings="osd.toggleBindings" @edit="openBinding('toggleBindings')" />
+          <ModuleBindingPanel heading="Compact / expanded" :bindings="osd.cycleBindings" @edit="openBinding('cycleBindings')" />
         </div>
         <BindingConflictWarnings class="mt-3" :warnings="warnings" />
       </section>

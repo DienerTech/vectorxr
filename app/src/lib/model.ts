@@ -119,12 +119,12 @@ export interface SoundSettings {
 // the end (the layer does the same), so new rows never reorder existing ones.
 export const osdBodyRows = ['graph', 'turbo', 'framegen', 'pivot', 'modules'] as const
 export type OsdBodyRow = typeof osdBodyRows[number]
-export type OsdLayout = Omit<OsdSettings, 'enabled' | 'visibleOnStart' | 'toggleBinding' | 'cycleBinding' | 'customPresets'>
+export type OsdLayout = Omit<OsdSettings, 'enabled' | 'visibleOnStart' | 'toggleBindings' | 'cycleBindings' | 'customPresets'>
 export interface OsdPreset { name: string; settings: OsdLayout }
 export const osdAccentColors = { teal: '#51ddbd', copper: '#f5ae78', blue: '#6facff', violet: '#bd9aff', rose: '#ff91b2' } as const
 
 export function osdLayout(settings: OsdSettings): OsdLayout {
-  const { enabled, visibleOnStart, toggleBinding, cycleBinding, customPresets, ...layout } = settings
+  const { enabled, visibleOnStart, toggleBindings, cycleBindings, customPresets, ...layout } = settings
   return { ...layout, bodyOrder: [...layout.bodyOrder] }
 }
 
@@ -163,8 +163,9 @@ export interface OsdSettings {
   accent: keyof typeof osdAccentColors | 'custom'
   customColor: string
   customPresets: OsdPreset[]
-  toggleBinding: InputBinding
-  cycleBinding: InputBinding
+  // Any one of a list's bindings acts (one per device, say a HOTAS's and a HOSAS's).
+  toggleBindings: InputBinding[]
+  cycleBindings: InputBinding[]
 }
 
 export function defaultOsdSettings(): OsdSettings {
@@ -175,8 +176,8 @@ export function defaultOsdSettings(): OsdSettings {
     compactShowRuntime: true, compactShowClock: true, compactShowTurbo: false, compactShowPivot: false, compactShowFramegen: false,
     compactShowBrand: true, compactShowApp: true, compactMetrics: 'all',
     clockFormat: '24', bodyOrder: [...osdBodyRows], accent: 'teal', customColor: '#51ddbd', customPresets: [],
-    toggleBinding: { type: 'keyboard', chord: ['Ctrl', 'Alt', 'F10'] },
-    cycleBinding: { type: 'keyboard', chord: ['Ctrl', 'Alt', 'F11'] } }
+    toggleBindings: [{ type: 'keyboard', chord: ['Ctrl', 'Alt', 'F10'] }],
+    cycleBindings: [{ type: 'keyboard', chord: ['Ctrl', 'Alt', 'F11'] }] }
 }
 
 export function normalizeOsdSettings(value: unknown): OsdSettings {
@@ -200,8 +201,8 @@ export function normalizeOsdSettings(value: unknown): OsdSettings {
     bodyOrder: [...new Set([...(Array.isArray(input.bodyOrder) ? input.bodyOrder.filter((row): row is OsdBodyRow => osdBodyRows.includes(row)) : []), ...osdBodyRows])],
     customPresets: Array.isArray(input.customPresets) ? input.customPresets.filter(item => isRecord(item) && typeof item.name === 'string' && item.name.trim() && isRecord(item.settings)).slice(0, 50)
       .map(item => ({ name: item.name.trim().slice(0, 60), settings: osdLayout(normalizeOsdSettings({ ...item.settings, customPresets: [] })) })) : [],
-    toggleBinding: normalizeInputBinding(input.toggleBinding, fallback.toggleBinding),
-    cycleBinding: normalizeInputBinding(input.cycleBinding, fallback.cycleBinding),
+    toggleBindings: normalizeToggleBindings(input.toggleBindings, input.toggleBinding, fallback.toggleBindings),
+    cycleBindings: normalizeToggleBindings(input.cycleBindings, input.cycleBinding, fallback.cycleBindings),
   }
 }
 
@@ -236,9 +237,10 @@ export interface DepthXRProfileConfig {
   settings: DepthXRSettings
 }
 
+// Any one of a list's bindings toggles.
 export interface DepthXRBindings {
-  toggleEnabled: InputBinding
-  toggleAnchor: InputBinding
+  toggleEnabledBindings: InputBinding[]
+  toggleAnchorBindings: InputBinding[]
 }
 
 export interface DepthXRModuleConfig {
@@ -415,13 +417,13 @@ export interface TurboModuleConfig {
   experimental: TurboExperimentalSettings
   enabled: boolean
   interruptedSessionRecovery: boolean
-  toggleBinding: InputBinding
+  toggleBindings: InputBinding[]
   pacingMode: TurboPacingSetting
   // Per-runtime user overrides keyed by the exact OpenXR runtime name.
   // Only consulted when pacingMode is 'auto'.
   runtimePins: Record<string, TurboPacingMode>
   metricsMode: TurboMetricsMode
-  metricsBinding: InputBinding
+  metricsBindings: InputBinding[]
   profiles: TurboProfileConfig[]
 }
 
@@ -691,8 +693,8 @@ export function defaultDepthXRSettings(): DepthXRSettings {
 
 export function defaultDepthXRBindings(): DepthXRBindings {
   return {
-    toggleEnabled: defaultNoneBinding(),
-    toggleAnchor: defaultNoneBinding(),
+    toggleEnabledBindings: [],
+    toggleAnchorBindings: [],
   }
 }
 
@@ -914,13 +916,13 @@ export function defaultConfig(): VectorXRConfig {
       },
       turbo: {
         enabled: false,
-        toggleBinding: defaultNoneBinding(),
+        toggleBindings: [],
         interruptedSessionRecovery: true,
         experimental: defaultTurboExperimental(),
         pacingMode: 'auto',
         runtimePins: {},
         metricsMode: 'always',
-        metricsBinding: defaultNoneBinding(),
+        metricsBindings: [],
         profiles: [],
       },
       framegen: defaultFrameGenModule(),
@@ -1295,6 +1297,16 @@ export function normalizeInputBinding(value: unknown, fallback: InputBinding): I
   }, sound)
 }
 
+// A toggle's bindings: its list, or the single binding configs keep for one
+// (and configs from before lists); neither present: `fallback` (the OSD's
+// default keys, say).
+export function normalizeToggleBindings(value: unknown, legacyValue: unknown, fallback: InputBinding[]): InputBinding[] {
+  if (value === undefined && legacyValue === undefined) {
+    return fallback.map((binding) => normalizeInputBinding(binding, defaultNoneBinding()))
+  }
+  return normalizeInputBindings(value, legacyValue)
+}
+
 export function normalizeInputBindings(value: unknown, legacyValue?: unknown): InputBinding[] {
   const source = Array.isArray(value)
     ? value
@@ -1435,15 +1447,15 @@ function pushBindingAssignments(
 
 function savedBindingAssignments(config: VectorXRConfig): SavedBindingAssignment[] {
   const assignments: SavedBindingAssignment[] = [
-    { id: 'depth.toggle', label: 'Depth: A/B toggle', binding: config.modules.depthxr.bindings.toggleEnabled },
-    { id: 'depth.lock', label: 'Depth: Depth Lock A/B', binding: config.modules.depthxr.bindings.toggleAnchor },
-    { id: 'osd.toggle', label: 'OSD: show/hide', binding: config.core.osd.toggleBinding },
-    { id: 'osd.cycle', label: 'OSD: switch layout', binding: config.core.osd.cycleBinding },
     { id: 'quadviews.diagnostics', label: 'Quadviews: diagnostic visualization', binding: config.modules.quadviews.diagnosticVisualizationBinding },
-    { id: 'turbo.toggle', label: 'Turbo: A/B toggle', binding: config.modules.turbo.toggleBinding },
-    { id: 'turbo.metrics', label: 'Turbo: metrics capture', binding: config.modules.turbo.metricsBinding },
     { id: 'framegen.toggle', label: 'Frame Generation: A/B toggle', binding: config.modules.framegen.toggleBinding },
   ]
+  pushBindingAssignments(assignments, 'depth.toggle', 'Depth: A/B toggle', config.modules.depthxr.bindings.toggleEnabledBindings)
+  pushBindingAssignments(assignments, 'depth.lock', 'Depth: Depth Lock A/B', config.modules.depthxr.bindings.toggleAnchorBindings)
+  pushBindingAssignments(assignments, 'osd.toggle', 'OSD: show/hide', config.core.osd.toggleBindings)
+  pushBindingAssignments(assignments, 'osd.cycle', 'OSD: switch layout', config.core.osd.cycleBindings)
+  pushBindingAssignments(assignments, 'turbo.toggle', 'Turbo: A/B toggle', config.modules.turbo.toggleBindings)
+  pushBindingAssignments(assignments, 'turbo.metrics', 'Turbo: metrics capture', config.modules.turbo.metricsBindings)
 
   const pivot = config.modules.pivotxr
   pivot.nudgeSets.forEach((set) => {
@@ -1729,13 +1741,15 @@ function normalizeVectorXRConfig(value: unknown): VectorXRConfig {
         enabled: normalizeBoolean(depthxr.enabled, fallback.modules.depthxr.enabled),
         defaults: normalizeDepthXRSettings(depthxr.defaults, fallback.modules.depthxr.defaults),
         bindings: {
-          toggleEnabled: normalizeInputBinding(
+          toggleEnabledBindings: normalizeToggleBindings(
+            isRecord(depthxr.bindings) ? depthxr.bindings.toggleEnabledBindings : undefined,
             isRecord(depthxr.bindings) ? depthxr.bindings.toggleEnabled : undefined,
-            fallback.modules.depthxr.bindings.toggleEnabled,
+            fallback.modules.depthxr.bindings.toggleEnabledBindings,
           ),
-          toggleAnchor: normalizeInputBinding(
+          toggleAnchorBindings: normalizeToggleBindings(
+            isRecord(depthxr.bindings) ? depthxr.bindings.toggleAnchorBindings : undefined,
             isRecord(depthxr.bindings) ? depthxr.bindings.toggleAnchor : undefined,
-            fallback.modules.depthxr.bindings.toggleAnchor,
+            fallback.modules.depthxr.bindings.toggleAnchorBindings,
           ),
         },
         profiles: depthProfileValues.map((profileValue) => {
@@ -1822,7 +1836,7 @@ function normalizeVectorXRConfig(value: unknown): VectorXRConfig {
       },
       turbo: {
         enabled: normalizeBoolean(turbo.enabled, fallback.modules.turbo.enabled),
-        toggleBinding: normalizeInputBinding(turbo.toggleBinding, fallback.modules.turbo.toggleBinding),
+        toggleBindings: normalizeToggleBindings(turbo.toggleBindings, turbo.toggleBinding, fallback.modules.turbo.toggleBindings),
         interruptedSessionRecovery: typeof turbo.interruptedSessionRecovery === 'boolean' ? turbo.interruptedSessionRecovery : true,
         // Consume old assignments after migration so deleting a profile cannot
         // resurrect it. Preserve unassigned/orphaned values for explicit reuse.
@@ -1831,7 +1845,7 @@ function normalizeVectorXRConfig(value: unknown): VectorXRConfig {
         pacingMode: normalizeTurboPacingSetting(turbo.pacingMode),
         runtimePins: normalizeTurboRuntimePins(turbo.runtimePins),
         metricsMode: normalizeTurboMetricsMode(turbo.metricsMode),
-        metricsBinding: normalizeInputBinding(turbo.metricsBinding, fallback.modules.turbo.metricsBinding),
+        metricsBindings: normalizeToggleBindings(turbo.metricsBindings, turbo.metricsBinding, fallback.modules.turbo.metricsBindings),
         profiles: turboProfileValues.flatMap((profileValue) => {
           const profile = isRecord(profileValue) ? profileValue : {}
           const applicationIds = applicationIdsFromProfile(profile, applications)

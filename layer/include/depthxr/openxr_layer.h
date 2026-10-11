@@ -499,10 +499,10 @@ class OpenXrLayer {
                                  double frame_blocked_ms,
                                  bool timed_out,
                                  TurboMetricsMode metrics_mode,
-                                 const InputBinding& metrics_binding,
+                                 const std::vector<InputBinding>& metrics_bindings,
                                  bool metrics_available,
                                  int sound_volume);
-    bool IsTurboMetricsCaptureArmed(const InputBinding& binding, int sound_volume);
+    bool IsTurboMetricsCaptureArmed(const std::vector<InputBinding>& bindings, int sound_volume);
     void FlushTurboMetrics(bool final_flush, bool queue_after_pending = false);
     void ResetTurboMetricsState();
     // Logs shouldRender changes (turbo_mutex_ held by caller). A silent
@@ -523,6 +523,10 @@ class OpenXrLayer {
     void PollQuadViewsDiagnosticVisualizationToggle();
     void ResetQuadViewsDiagnosticVisualizationState();
     bool PollInputBindingDown(const InputBinding& binding);
+    // A toggle's list: the first of its bindings held down (its label and
+    // sound say what acted), or null. Every binding is polled each time, so
+    // each device's reconnection and diagnostics keep running.
+    const InputBinding* PollInputBindingsDown(const std::vector<InputBinding>& bindings);
     bool ShouldLogQuadViewsDebugHeartbeat(std::optional<std::chrono::steady_clock::time_point>& last_heartbeat);
     void ResetQuadViewsDebugHeartbeatState();
     void ResetSessionState();
@@ -783,6 +787,10 @@ class OpenXrLayer {
     std::atomic<bool> osd_should_render_{true};
     std::optional<std::chrono::steady_clock::time_point> osd_last_input_poll_;
     bool osd_toggle_down_{false}, osd_cycle_down_{false}, osd_was_enabled_{false};
+    // The binding of each list that last went down: its sound plays for the
+    // change it made (none yet: the list's first binding's).
+    std::optional<SoundFeedback> osd_toggle_sound_;
+    std::optional<SoundFeedback> osd_cycle_sound_;
     std::uint64_t osd_settings_revision_{1}; // bumped whenever settings re-resolve
     OsdSnapshot BuildOsdSnapshot() const;
     void PrepareOsd();
@@ -1078,11 +1086,13 @@ class OpenXrLayer {
     std::optional<std::chrono::steady_clock::time_point> pivotxr_binding_last_poll_time_;
     std::optional<std::chrono::steady_clock::time_point> depthxr_binding_last_poll_time_;
     bool depthxr_binding_down_cached_{false};
+    std::optional<InputBinding> depthxr_toggle_pressed_; // its list's binding that last went down (ActingBinding)
     bool depth_anchor_toggle_inverted_{false};
     bool depth_anchor_active_{false};
     bool depth_anchor_toggle_binding_was_down_{false};
     std::optional<std::chrono::steady_clock::time_point> depth_anchor_binding_last_poll_time_;
     bool depth_anchor_binding_down_cached_{false};
+    std::optional<InputBinding> depth_anchor_toggle_pressed_; // its list's binding that last went down (ActingBinding)
 
     // Turbo mode. The runtime always sees a conformant wait->begin->end
     // sequence; the application is decoupled from runtime frame pacing: its
@@ -1139,6 +1149,7 @@ class OpenXrLayer {
     bool turbo_toggle_binding_was_down_{false};
     std::optional<std::chrono::steady_clock::time_point> turbo_binding_last_poll_time_;
     bool turbo_binding_down_cached_{false};
+    std::optional<InputBinding> turbo_toggle_pressed_; // its list's binding that last went down (ActingBinding)
     bool has_logged_turbo_varjo_note_{false};
     TurboRecoveryGuard turbo_recovery_; // mutex_ (config lock)
     bool turbo_recovery_retry_requested_{false};
@@ -1333,6 +1344,7 @@ class OpenXrLayer {
     bool turbo_metrics_binding_was_down_{false};
     std::optional<std::chrono::steady_clock::time_point> turbo_metrics_binding_last_poll_time_;
     bool turbo_metrics_binding_down_cached_{false};
+    std::optional<InputBinding> turbo_metrics_pressed_; // its list's binding that last went down (ActingBinding)
     // Cleared whenever capture pauses so the first frame interval after a
     // resume (which spans the pause) never lands in the stats.
     bool turbo_metrics_was_capturing_{false};

@@ -87,6 +87,9 @@ namespace {
 bool SameInput(const InputBinding& a, const InputBinding& b) {
     return a.type==b.type && a.chord==b.chord && a.device_guid==b.device_guid && a.input_path==b.input_path && a.product_guid==b.product_guid;
 }
+bool SameInputs(const std::vector<InputBinding>& a, const std::vector<InputBinding>& b) {
+    return std::equal(a.begin(),a.end(),b.begin(),b.end(),SameInput);
+}
 std::wstring Wide(const std::string& s) {
     const int size = MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), nullptr, 0);
     std::wstring result(size, L' ');
@@ -444,7 +447,7 @@ std::pair<OsdPresentation, OsdPresentation> OsdRenderer::Prepare(const OsdSettin
     }
     if (settings.compact!=settings_.compact) compact_=settings.compact;
     if (settings.visible_on_start!=settings_.visible_on_start) visible_=settings.visible_on_start;
-    if (!SameInput(settings.toggle_binding,settings_.toggle_binding) || !SameInput(settings.cycle_binding,settings_.cycle_binding)) primed_=false;
+    if (!SameInputs(settings.toggle_bindings,settings_.toggle_bindings) || !SameInputs(settings.cycle_bindings,settings_.cycle_bindings)) primed_=false;
     if (primed_ && settings.enabled) {
         if (toggle && !toggle_down_) visible_=!visible_;
         if (cycle && !cycle_down_) { compact_=!compact_; updated_={}; }

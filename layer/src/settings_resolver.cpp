@@ -311,11 +311,11 @@ TurboResolvedSettings ResolveTurboSettings(const ConfigDocument& config, std::st
     TurboResolvedSettings resolved;
     resolved.enabled = config.turbo.enabled;
     resolved.interrupted_session_recovery = config.turbo.interrupted_session_recovery;
-    resolved.toggle_binding = config.turbo.toggle_binding;
+    resolved.toggle_bindings = config.turbo.toggle_bindings;
     resolved.pacing_mode = config.turbo.pacing_mode;
     resolved.runtime_pins = config.turbo.runtime_pins;
     resolved.metrics_mode = config.turbo.metrics_mode;
-    resolved.metrics_binding = config.turbo.metrics_binding;
+    resolved.metrics_bindings = config.turbo.metrics_bindings;
 
     const RegisteredApplication* application = FindMatchingApplication(config, exe_name);
     // Pre-release 0.18 configs listed applications under a module-level

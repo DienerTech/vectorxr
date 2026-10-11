@@ -18,9 +18,7 @@ const emit = defineEmits<{
 
 const metricsBindingOpen = ref(false)
 const selectedSessionId = ref('')
-const metricsBindingWarnings = computed(() => savedBindingConflictWarnings(props.config, [
-  props.config.modules.turbo.metricsBinding,
-]))
+const metricsBindingWarnings = computed(() => savedBindingConflictWarnings(props.config, props.config.modules.turbo.metricsBindings))
 
 let savedScrollTop = 0
 
@@ -160,14 +158,14 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
   <ModuleBindingPage
     v-if="metricsBindingOpen"
     module-label="Turbo Diagnostics"
-    :binding="config.modules.turbo.metricsBinding"
+    :bindings="config.modules.turbo.metricsBindings"
     label="Metrics Capture Binding"
     description="Start and stop metric collection while in-game. Arm it once you are actually flying and pause it before loading screens or menus, so the recorded numbers reflect real play."
     none-text="No binding assigned. In capture-binding mode, no metrics are recorded until a binding is set."
     default-activate-sound="metrics-on.wav"
     default-deactivate-sound="metrics-off.wav"
     :warnings="metricsBindingWarnings"
-    @update:binding="config.modules.turbo.metricsBinding = $event"
+    @update:bindings="config.modules.turbo.metricsBindings = $event"
     @close="closeMetricsBinding"
   />
   <div v-else class="space-y-4">
@@ -234,7 +232,7 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
           v-if="config.modules.turbo.metricsMode === 'binding'"
           class="mt-3"
           heading="Metrics Capture Binding"
-          :binding="config.modules.turbo.metricsBinding"
+          :bindings="config.modules.turbo.metricsBindings"
           hint="Arm capture once you are actually flying; pause it before loading screens or menus."
           @edit="openMetricsBinding"
         />

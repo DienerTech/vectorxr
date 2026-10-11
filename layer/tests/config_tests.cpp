@@ -46,6 +46,17 @@ void Expect(bool condition, const std::string& message) {
     }
 }
 
+// A toggle's first binding (an unbound list's: a None binding).
+const depthxr::InputBinding& FirstBinding(const std::vector<depthxr::InputBinding>& bindings) {
+    static const depthxr::InputBinding none;
+    return bindings.empty() ? none : bindings.front();
+}
+
+bool FirstChordKey(const std::vector<depthxr::InputBinding>& bindings, const std::string& key) {
+    const depthxr::InputBinding& binding = FirstBinding(bindings);
+    return !binding.chord.empty() && binding.chord.front() == key;
+}
+
 void TestOsdConfig() {
     const auto parse=[](const std::string& osd) {
         return depthxr::ParseConfig(R"({"version":3,"core":{"enabled":true,"logLevel":"info","osd":)"+osd+R"(},"applications":[],"modules":{"depthxr":{"enabled":false,"defaults":{"stereoBoost":1,"convergence":0},"bindings":{"toggleEnabled":{"type":"none"}},"profiles":[]},"pivotxr":{"enabled":false,"defaults":{},"profiles":[]}}})");
@@ -82,8 +93,8 @@ void TestOsdConfig() {
     Expect(osd.enabled && !osd.visible_on_start && osd.compact && osd.horizontal_degrees==-40 &&
            osd.vertical_degrees==35 && osd.distance_meters==.5 && osd.scale==150 && osd.opacity==30 &&
            osd.update_hz==20 && !osd.show_graph && !osd.show_runtime && !osd.show_turbo && !osd.show_modules &&
-           !osd.show_clock && osd.accent=="blue" && osd.toggle_binding.chord.size()==2 &&
-           osd.cycle_binding.type==depthxr::InputBindingType::None,"OSD fields were dropped");
+           !osd.show_clock && osd.accent=="blue" && osd.toggle_bindings.size()==1 &&
+           osd.toggle_bindings.front().chord.size()==2 && osd.cycle_bindings.empty(),"OSD fields were dropped");
     for(const std::string& fields:{R"("horizontalDegrees":41)",R"("verticalDegrees":-36)",R"("distanceMeters":0)",
       R"("scale":24)",R"("opacity":101)",R"("updateHz":0)",R"("updateHz":5.5)",R"("enabled":"true")",
       R"("showClock":1)",R"("accent":"red")",R"("unknown":true)"})
@@ -239,8 +250,8 @@ void TestParseConfig() {
     Expect(std::abs(result.document.depthxr.defaults.convergence - 0.08) < 0.0001, "DepthXR convergence mismatch");
     Expect(!result.document.depthxr.defaults.depth_anchor, "DepthXR default Depth Anchor mismatch");
     Expect(result.document.depthxr.profiles[0].settings.depth_anchor.value_or(false), "DepthXR profile Depth Anchor mismatch");
-    Expect(result.document.depthxr.bindings.toggle_enabled.chord[0] == "F7", "DepthXR toggle binding mismatch");
-    Expect(result.document.depthxr.bindings.toggle_anchor.chord[0] == "F9",
+    Expect(FirstChordKey(result.document.depthxr.bindings.toggle_enabled_bindings, "F7"), "DepthXR toggle binding mismatch");
+    Expect(FirstChordKey(result.document.depthxr.bindings.toggle_anchor_bindings, "F9"),
            "DepthXR Depth Anchor toggle binding mismatch");
     Expect(result.document.depthxr.profiles.size() == 1, "DepthXR profile count mismatch");
     Expect(result.document.depthxr.profiles[0].application_ids[0] == "game", "DepthXR profile application id mismatch");
@@ -399,7 +410,7 @@ void TestResolveRuntimeConfig() {
     Expect(std::abs(resolved.depthxr.stereo_boost - 1.15) < 0.0001, "Profile stereoBoost override was not applied");
     Expect(std::abs(resolved.depthxr.convergence - 0.12) < 0.0001, "Profile convergence override was not applied");
     Expect(resolved.depthxr.depth_anchor, "Profile Depth Anchor override was not applied");
-    Expect(resolved.depthxr_bindings.toggle_enabled.type == depthxr::InputBindingType::None, "DepthXR toggle binding should be none");
+    Expect(resolved.depthxr_bindings.toggle_enabled_bindings.empty(), "DepthXR toggle binding should be none");
     Expect(resolved.pivotxr.enabled, "PivotXR module enable was not resolved");
     Expect(resolved.pivotxr.profiles.size() == 1, "PivotXR resolved candidate count mismatch");
     const depthxr::PivotXrResolvedProfile& pivot_profile = resolved.pivotxr.profiles[0];
@@ -1050,7 +1061,7 @@ void TestTurboModuleResolution() {
 
     const depthxr::ResolvedRuntimeConfig resolved = depthxr::ResolveRuntimeConfig(result.document, "DCS.exe");
     Expect(resolved.turbo.enabled, "Turbo should resolve enabled for a matched profile");
-    Expect(resolved.turbo.toggle_binding.chord.size() == 2, "Turbo toggle binding chord mismatch");
+    Expect(FirstBinding(resolved.turbo.toggle_bindings).chord.size() == 2, "Turbo toggle binding chord mismatch");
 
     const depthxr::ResolvedRuntimeConfig resolved_other = depthxr::ResolveRuntimeConfig(result.document, "other.exe");
     Expect(!resolved_other.turbo.enabled, "Turbo default-off should not apply to unmatched applications");
@@ -1515,13 +1526,13 @@ void TestTurboMetricsSettingsParsing() {
     Expect(result.ok, "Config parser rejected turbo metrics config: " + result.error);
     Expect(result.document.turbo.metrics_mode == depthxr::TurboMetricsMode::kBinding,
            "Turbo metrics mode should parse binding");
-    Expect(result.document.turbo.metrics_binding.type == depthxr::InputBindingType::Keyboard,
+    Expect(FirstBinding(result.document.turbo.metrics_bindings).type == depthxr::InputBindingType::Keyboard,
            "Turbo metrics binding should parse as keyboard");
 
     const depthxr::ResolvedRuntimeConfig resolved = depthxr::ResolveRuntimeConfig(result.document, "any.exe");
     Expect(resolved.turbo.metrics_mode == depthxr::TurboMetricsMode::kBinding,
            "Turbo metrics mode should resolve through");
-    Expect(resolved.turbo.metrics_binding.chord.size() == 2,
+    Expect(FirstBinding(resolved.turbo.metrics_bindings).chord.size() == 2,
            "Turbo metrics binding chord should resolve through");
 
     // Absent keys default to always-on capture with no binding.
@@ -1535,7 +1546,7 @@ void TestTurboMetricsSettingsParsing() {
     Expect(default_result.ok, "Config parser rejected config without metrics keys: " + default_result.error);
     Expect(default_result.document.turbo.metrics_mode == depthxr::TurboMetricsMode::kAlways,
            "Turbo metrics mode should default to always");
-    Expect(default_result.document.turbo.metrics_binding.type == depthxr::InputBindingType::None,
+    Expect(default_result.document.turbo.metrics_bindings.empty(),
            "Turbo metrics binding should default to none");
 
     // Invalid values are rejected rather than silently defaulted.
@@ -2004,7 +2015,7 @@ void TestNoneBindingParsed() {
 
     const depthxr::ParseResult result = depthxr::ParseConfig(json);
     Expect(result.ok, "Config parser rejected valid config with none binding: " + result.error);
-    Expect(result.document.depthxr.bindings.toggle_enabled.type == depthxr::InputBindingType::None,
+    Expect(result.document.depthxr.bindings.toggle_enabled_bindings.empty(),
            "DepthXR toggle binding should be None");
 }
 
@@ -2034,7 +2045,8 @@ void TestDeviceBindingMetadataParsed() {
 
     const depthxr::ParseResult result = depthxr::ParseConfig(json);
     Expect(result.ok, "Config parser rejected valid device binding metadata: " + result.error);
-    const depthxr::InputBinding& binding = result.document.depthxr.bindings.toggle_enabled;
+    Expect(result.document.depthxr.bindings.toggle_enabled_bindings.size() == 1, "Device binding was dropped");
+    const depthxr::InputBinding& binding = result.document.depthxr.bindings.toggle_enabled_bindings.front();
     Expect(binding.type == depthxr::InputBindingType::Device, "Device binding type mismatch");
     Expect(binding.device_guid == "{11111111-2222-3333-4444-555555555555}", "Device GUID metadata mismatch");
     Expect(binding.product_guid == "{aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee}", "Product GUID metadata mismatch");
@@ -2070,7 +2082,7 @@ void TestBindingSoundFeedbackParsed() {
 
     const depthxr::ParseResult result = depthxr::ParseConfig(json);
     Expect(result.ok, "Config parser rejected valid binding sound feedback: " + result.error);
-    const depthxr::SoundFeedback& sound = result.document.depthxr.bindings.toggle_enabled.sound;
+    const depthxr::SoundFeedback& sound = FirstBinding(result.document.depthxr.bindings.toggle_enabled_bindings).sound;
     Expect(sound.enabled, "Binding sound feedback should be enabled");
     Expect(sound.activate_sound == "C:\\sounds\\on.wav", "Activate sound path mismatch");
     Expect(sound.deactivate_sound.empty(), "Deactivate sound should default to bundled (empty)");
@@ -2091,8 +2103,66 @@ void TestBindingWithoutSoundDefaultsDisabled() {
 
     const depthxr::ParseResult result = depthxr::ParseConfig(json);
     Expect(result.ok, "Config parser rejected binding without sound: " + result.error);
-    Expect(!result.document.depthxr.bindings.toggle_enabled.sound.enabled,
+    Expect(!FirstBinding(result.document.depthxr.bindings.toggle_enabled_bindings).sound.enabled,
            "Binding without sound block should default to disabled feedback");
+}
+
+// A toggle may have several bindings, one per device (a HOTAS's and a
+// HOSAS's): every toggle takes a list under its plural key, and still reads
+// its single legacy binding.
+void TestToggleBindingLists() {
+    const auto config = [](const std::string& osd, const std::string& depth_bindings, const std::string& turbo) {
+        return depthxr::ParseConfig(
+            R"({"version":3,"core":{"enabled":true,"logLevel":"info","osd":)" + osd +
+            R"(},"applications":[],"modules":{"depthxr":{"enabled":false,"defaults":{"stereoBoost":1,"convergence":0},"bindings":)" +
+            depth_bindings + R"(,"profiles":[]},"pivotxr":{"enabled":false,"defaults":{},"profiles":[]},"turbo":)" + turbo + "}}");
+    };
+    const std::string hotas = R"({"type":"device","deviceGuid":"{11111111-0000-0000-0000-000000000001}","inputPath":"button-23"})";
+    const std::string hosas = R"({"type":"device","deviceGuid":"{22222222-0000-0000-0000-000000000002}","inputPath":"button-5"})";
+    const std::string pair = "[" + hotas + "," + hosas + "]";
+    const auto lists = config(R"({"toggleBindings":)" + pair + R"(,"cycleBindings":)" + pair + "}",
+                              R"({"toggleEnabledBindings":)" + pair + R"(,"toggleAnchorBindings":)" + pair + "}",
+                              R"({"enabled":false,"toggleBindings":)" + pair + R"(,"metricsBindings":)" + pair + "}");
+    Expect(lists.ok, "Toggle binding lists were rejected: " + lists.error);
+    const auto& document = lists.document;
+    for (const auto* bindings : {&document.core.osd.toggle_bindings, &document.core.osd.cycle_bindings,
+                                 &document.depthxr.bindings.toggle_enabled_bindings,
+                                 &document.depthxr.bindings.toggle_anchor_bindings, &document.turbo.toggle_bindings,
+                                 &document.turbo.metrics_bindings}) {
+        Expect(bindings->size() == 2 && (*bindings)[0].input_path == "button-23" && (*bindings)[1].input_path == "button-5",
+               "A toggle's binding list was not kept in order");
+    }
+    const auto resolved = depthxr::ResolveRuntimeConfig(document, "any.exe");
+    Expect(resolved.turbo.toggle_bindings.size() == 2 && resolved.turbo.metrics_bindings.size() == 2,
+           "Toggle binding lists did not resolve through");
+
+    // Configs written before lists, and by the app for a single binding.
+    const auto legacy = config(R"({"toggleBinding":)" + hotas + R"(,"cycleBinding":{"type":"none"}})",
+                               R"({"toggleEnabled":)" + hotas + R"(,"toggleAnchor":{"type":"none"}})",
+                               R"({"enabled":false,"toggleBinding":)" + hotas + "}");
+    Expect(legacy.ok, "Single legacy bindings were rejected: " + legacy.error);
+    Expect(legacy.document.core.osd.toggle_bindings.size() == 1 && legacy.document.core.osd.cycle_bindings.empty() &&
+               legacy.document.depthxr.bindings.toggle_enabled_bindings.size() == 1 &&
+               legacy.document.depthxr.bindings.toggle_anchor_bindings.empty() &&
+               legacy.document.turbo.toggle_bindings.size() == 1 && legacy.document.turbo.metrics_bindings.empty(),
+           "Single legacy bindings did not become one-binding lists");
+
+    // An OSD without either key keeps its default keyboard bindings.
+    const auto defaults = config("{}", R"({"toggleEnabled":{"type":"none"}})", R"({"enabled":false})");
+    Expect(defaults.ok && FirstChordKey(defaults.document.core.osd.toggle_bindings, "Ctrl") &&
+               FirstChordKey(defaults.document.core.osd.cycle_bindings, "Ctrl"),
+           "The OSD's default bindings were lost: " + defaults.error);
+
+    // A list and a legacy binding for the same toggle are ambiguous.
+    const auto both = config(R"({"toggleBinding":)" + hotas + R"(,"toggleBindings":)" + pair + "}",
+                             R"({"toggleEnabled":{"type":"none"}})", R"({"enabled":false})");
+    Expect(!both.ok, "A toggle with both a list and a legacy binding was accepted");
+    Expect(!config(R"({"customPresets":[{"name":"Bad","settings":{"toggleBindings":[]}}]})",
+                   R"({"toggleEnabled":{"type":"none"}})", R"({"enabled":false})").ok,
+           "An OSD preset with bindings was accepted");
+    // Depth still requires one of its toggle's keys.
+    Expect(!config("{}", R"({"toggleAnchorBindings":[]})", R"({"enabled":false})").ok,
+           "Depth bindings without the toggle were accepted");
 }
 
 void TestCoreSoundVolumeParsedAndClamped() {
@@ -3461,6 +3531,7 @@ int main() {
     TestDeviceBindingMetadataParsed();
     TestBindingSoundFeedbackParsed();
     TestBindingWithoutSoundDefaultsDisabled();
+    TestToggleBindingLists();
     TestCoreSoundVolumeParsedAndClamped();
     TestExeMatch();
     TestSeenAppObservationRecording();

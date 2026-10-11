@@ -97,9 +97,7 @@ onUnmounted(() => { disposed = true; clearTimeout(recoveryPoll) })
 const bindingSubPageOpen = ref(false)
 const activeSubPage = ref<'runtime' | 'diagnostics' | 'safety' | null>(null)
 let savedScrollTop = 0
-const toggleBindingWarnings = computed(() => savedBindingConflictWarnings(props.config, [
-  props.config.modules.turbo.toggleBinding,
-]))
+const toggleBindingWarnings = computed(() => savedBindingConflictWarnings(props.config, props.config.modules.turbo.toggleBindings))
 
 
 const turboInUse = computed(
@@ -200,14 +198,14 @@ function closeSubPage() {
   <ModuleBindingPage
     v-if="bindingSubPageOpen"
     module-label="Turbo"
-    :binding="config.modules.turbo.toggleBinding"
+    :bindings="config.modules.turbo.toggleBindings"
     label="Turbo Toggle Binding"
     description="Flip Turbo on and off while in-game to compare fps and frame feel directly—and to disable it immediately if presentation breaks. The binding requires Turbo to be enabled for the application in its profile. It can also retry Turbo when recovery has blocked it or pacing trouble has suspended it. Switching it mid-session can cause a brief re-synchronization hitch."
     none-text="No binding assigned. Turbo starts automatically where enabled, unless recovery or pacing protection blocks it."
     default-activate-sound="turbo-on.wav"
     default-deactivate-sound="turbo-off.wav"
     :warnings="toggleBindingWarnings"
-    @update:binding="config.modules.turbo.toggleBinding = $event"
+    @update:bindings="config.modules.turbo.toggleBindings = $event"
     @close="closeSubPage"
   />
   <TurboRuntimePage
@@ -307,7 +305,7 @@ function closeSubPage() {
           </div>
           <ModuleBindingPanel
             heading="In-game Turbo Toggle"
-            :binding="config.modules.turbo.toggleBinding"
+            :bindings="config.modules.turbo.toggleBindings"
             hint="Flip Turbo on and off while in-game for a direct comparison."
             @edit="openToggleBinding"
           />

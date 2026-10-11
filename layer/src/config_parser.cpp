@@ -681,6 +681,27 @@ bool ParseInputBinding(const JsonValue& value, InputBinding& out, std::string& e
     return true;
 }
 
+bool ParseInputBindings(const JsonValue::Object& object,
+                        std::string_view plural_key,
+                        std::string_view legacy_key,
+                        std::vector<InputBinding>& out,
+                        std::string& error);
+
+// A toggle's bindings: `plural_key`'s list, or the single binding under
+// `legacy_key` that configs written before lists hold (and that the app still
+// writes for one binding, so older layers read it). Neither present leaves
+// `out`, its defaults, as it is.
+bool ParseToggleBindings(const JsonValue::Object& object,
+                         std::string_view plural_key,
+                         std::string_view legacy_key,
+                         std::vector<InputBinding>& out,
+                         std::string& error) {
+    if (!object.count(std::string(plural_key)) && !object.count(std::string(legacy_key))) {
+        return true;
+    }
+    return ParseInputBindings(object, plural_key, legacy_key, out, error);
+}
+
 bool CheckAllowedKeys(const JsonValue::Object& object,
                       const std::unordered_set<std::string>& allowed,
                       std::string& error) {
@@ -699,7 +720,7 @@ bool ParseOsdSettings(const JsonValue::Object& object, OsdSettings& out, std::st
         "showClock", "showPivot", "showFramegen", "showFramegenFps", "compactShowRuntime", "compactShowClock", "compactShowTurbo", "compactShowPivot",
         "compactShowFramegen",
         "compactShowBrand", "compactShowApp", "compactMetrics",
-        "clockFormat", "bodyOrder", "customColor", "customPresets", "accent", "toggleBinding", "cycleBinding"}, error)) return false;
+        "clockFormat", "bodyOrder", "customColor", "customPresets", "accent", "toggleBinding", "cycleBinding", "toggleBindings", "cycleBindings"}, error)) return false;
     for (const auto& [key, target] : {std::pair{"enabled", &out.enabled}, {"visibleOnStart", &out.visible_on_start},
         {"compact", &out.compact}, {"showGraph", &out.show_graph}, {"showRuntime", &out.show_runtime}, {"showBrand", &out.show_brand}, {"showApp", &out.show_app},
         {"showTurbo", &out.show_turbo}, {"showModules", &out.show_modules}, {"showClock", &out.show_clock}, {"showPivot", &out.show_pivot},
@@ -792,16 +813,14 @@ bool ParseOsdSettings(const JsonValue::Object& object, OsdSettings& out, std::st
             if (layout==entry->end()) { error="Missing OSD preset settings"; return false; }
             const auto* values=RequireObject(layout->second,"OSD preset settings",error);
             if (!values) return false;
-            for (const auto* key:{"customPresets","enabled","visibleOnStart","toggleBinding","cycleBinding"})
+            for (const auto* key:{"customPresets","enabled","visibleOnStart","toggleBinding","cycleBinding","toggleBindings","cycleBindings"})
                 if (values->count(key)) { error="OSD presets may only contain layout settings"; return false; }
             OsdSettings checked;
             if (!ParseOsdSettings(*values,checked,error)) return false;
         }
     }
-    for (const auto& [key, target] : {std::pair{"toggleBinding", &out.toggle_binding}, {"cycleBinding", &out.cycle_binding}}) {
-        if (const auto it = object.find(key); it != object.end() && !ParseInputBinding(it->second, *target, error)) return false;
-    }
-    return true;
+    return ParseToggleBindings(object, "toggleBindings", "toggleBinding", out.toggle_bindings, error) &&
+           ParseToggleBindings(object, "cycleBindings", "cycleBinding", out.cycle_bindings, error);
 }
 
 bool ParseCoreSettings(const JsonValue::Object& object, CoreSettings& out, std::string& error) {
@@ -1051,28 +1070,21 @@ bool ParseDepthBindings(const JsonValue::Object& object, DepthXrBindings& out, s
     static const std::unordered_set<std::string> allowed = {
         "toggleEnabled",
         "toggleAnchor",
+        "toggleEnabledBindings",
+        "toggleAnchorBindings",
     };
 
     if (!CheckAllowedKeys(object, allowed, error)) {
         return false;
     }
 
-    const auto toggle_it = object.find("toggleEnabled");
-    if (toggle_it == object.end()) {
+    if (!object.count("toggleEnabled") && !object.count("toggleEnabledBindings")) {
         error = "Missing required field: toggleEnabled";
         return false;
     }
 
-    if (!ParseInputBinding(toggle_it->second, out.toggle_enabled, error)) {
-        return false;
-    }
-
-    const auto anchor_it = object.find("toggleAnchor");
-    if (anchor_it != object.end() && !ParseInputBinding(anchor_it->second, out.toggle_anchor, error)) {
-        return false;
-    }
-
-    return true;
+    return ParseToggleBindings(object, "toggleEnabledBindings", "toggleEnabled", out.toggle_enabled_bindings, error) &&
+           ParseToggleBindings(object, "toggleAnchorBindings", "toggleAnchor", out.toggle_anchor_bindings, error);
 }
 
 bool ParseDepthProfileSettings(const JsonValue::Object& object, DepthXrSettingsOverride& out, std::string& error) {
@@ -1304,10 +1316,12 @@ bool ParseTurboModule(const JsonValue::Object& object, TurboModuleConfig& out, s
         "experimental",
         "enabled",
         "toggleBinding",
+        "toggleBindings",
         "pacingMode",
         "runtimePins",
         "metricsMode",
         "metricsBinding",
+        "metricsBindings",
         "profiles",
     };
 
@@ -1377,15 +1391,8 @@ bool ParseTurboModule(const JsonValue::Object& object, TurboModuleConfig& out, s
         out.metrics_mode = *parsed;
     }
 
-    const auto toggle_binding_it = object.find("toggleBinding");
-    if (toggle_binding_it != object.end() &&
-        !ParseInputBinding(toggle_binding_it->second, out.toggle_binding, error)) {
-        return false;
-    }
-
-    const auto metrics_binding_it = object.find("metricsBinding");
-    if (metrics_binding_it != object.end() &&
-        !ParseInputBinding(metrics_binding_it->second, out.metrics_binding, error)) {
+    if (!ParseToggleBindings(object, "toggleBindings", "toggleBinding", out.toggle_bindings, error) ||
+        !ParseToggleBindings(object, "metricsBindings", "metricsBinding", out.metrics_bindings, error)) {
         return false;
     }
 

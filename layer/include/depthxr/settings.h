@@ -107,8 +107,10 @@ struct OsdSettings {
     std::vector<std::string> body_order{"graph", "turbo", "framegen", "pivot", "modules"};
     std::string accent{"teal"};
     std::string custom_color{"#51ddbd"};
-    InputBinding toggle_binding{InputBindingType::Keyboard, {"Ctrl", "Alt", "F10"}};
-    InputBinding cycle_binding{InputBindingType::Keyboard, {"Ctrl", "Alt", "F11"}};
+    // Any one of a list's bindings acts (one per device: a HOTAS's button and
+    // a HOSAS's, say); none means none bound.
+    std::vector<InputBinding> toggle_bindings{InputBinding{InputBindingType::Keyboard, {"Ctrl", "Alt", "F10"}}};
+    std::vector<InputBinding> cycle_bindings{InputBinding{InputBindingType::Keyboard, {"Ctrl", "Alt", "F11"}}};
 };
 
 struct CoreSettings {
@@ -138,9 +140,10 @@ struct DepthXrResolvedSettings {
     bool depth_anchor{false};
 };
 
+// Any one of a list's bindings toggles; empty: none bound.
 struct DepthXrBindings {
-    InputBinding toggle_enabled{InputBindingType::None, {}, "", "button-1", "", "", ""};
-    InputBinding toggle_anchor{InputBindingType::None, {}, "", "button-1", "", "", ""};
+    std::vector<InputBinding> toggle_enabled_bindings;
+    std::vector<InputBinding> toggle_anchor_bindings;
 };
 
 struct ProfileMatch {
@@ -442,8 +445,9 @@ enum class TurboMetricsMode {
 struct TurboModuleConfig {
     bool enabled{false};
     bool interrupted_session_recovery{true};
-    // Optional in-session A/B toggle, mirroring the Depth toggle binding.
-    InputBinding toggle_binding;
+    // Optional in-session A/B toggle, mirroring the Depth toggle binding
+    // (any one of the list's bindings).
+    std::vector<InputBinding> toggle_bindings;
     TurboPacingSetting pacing_mode{TurboPacingSetting::kAuto};
     // Per-runtime user overrides, keyed by exact xrGetInstanceProperties
     // runtimeName. Only consulted when pacing_mode is kAuto.
@@ -451,7 +455,7 @@ struct TurboModuleConfig {
     TurboExperimentalSettings experimental;
     TurboMetricsMode metrics_mode{TurboMetricsMode::kAlways};
     // Begin/end metric capture while in-game (kBinding mode only).
-    InputBinding metrics_binding;
+    std::vector<InputBinding> metrics_bindings;
     std::vector<TurboProfile> profiles;
 };
 
@@ -459,12 +463,12 @@ struct TurboResolvedSettings {
     std::string profile_name;
     bool enabled{false};
     bool interrupted_session_recovery{true};
-    InputBinding toggle_binding;
+    std::vector<InputBinding> toggle_bindings;
     TurboPacingSetting pacing_mode{TurboPacingSetting::kAuto};
     std::vector<std::pair<std::string, TurboPacingMode>> runtime_pins;
     TurboExperimentalSettings experimental;
     TurboMetricsMode metrics_mode{TurboMetricsMode::kAlways};
-    InputBinding metrics_binding;
+    std::vector<InputBinding> metrics_bindings;
 };
 
 // Frame Generation: holds the application at half the runtime refresh rate and
