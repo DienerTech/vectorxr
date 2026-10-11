@@ -539,20 +539,26 @@ comparing it in the headset.
 2. Keep the runtime at full refresh. Do not halve the frame rate in **Pimax Play** or with a
    SteamVR fixed 45 fps setting: Frame Generation lowers the game's rate itself and needs the
    headset running at its full refresh rate.
-3. Register the game's executable in **Application Registry**.
-4. On **Frame Generation**, leave **Default Profile** off, click **Add Profile**, and assign the
+3. Get the game to half the refresh rate on its own first: at least 45 fps at 90 Hz, with Frame
+   Generation off (the On-Screen Display shows it). Frame Generation can take a game from half
+   the refresh rate to full, but it cannot do that first half: below it, each generated frame
+   covers a longer gap and artifacts grow quickly. Lower the game's graphics settings, its
+   upscaler's quality mode, or the runtime's render resolution until it holds. High-resolution
+   headsets at 100% render resolution can ask for several times a 4K monitor's pixels per eye.
+4. Register the game's executable in **Application Registry**.
+5. On **Frame Generation**, leave **Default Profile** off, click **Add Profile**, and assign the
    game. An enabled matching custom profile turns Frame Generation on for that game even when
    the Default Profile is off.
-5. Start with the default settings (**Mode: Interpolate**, **Frame rate: Dynamic**, **Motion
+6. Start with the default settings (**Mode: Interpolate**, **Frame rate: Dynamic**, **Motion
    source: Shader**), then click **Save Changes**. On an NVIDIA RTX GPU, **NVIDIA hardware** as the
    motion source is usually more accurate; for the lowest latency, try **Extrapolate** with it.
-6. Restart the game. Turning Frame Generation on, for the Default Profile or a custom profile,
+7. Restart the game. Turning Frame Generation on, for the Default Profile or a custom profile,
    takes effect at the next launch. Turning it off applies to a running game at once: frames
    pass straight through.
-7. Confirm it is running: with the **On-Screen Display** on, **FG ON** appears beside its FPS
+8. Confirm it is running: with the **On-Screen Display** on, **FG ON** appears beside its FPS
    value with the frames per second the headset shows. You can also set **Diagnostic view** to
    **Generated-frame tint**.
-8. Optional: use **A/B toggle > Edit Binding…** to assign a keyboard or controller input, then
+9. Optional: use **A/B toggle > Edit Binding…** to assign a keyboard or controller input, then
    switch generated frames off and on in the same scene to compare.
 
 Frame Generation engages a few seconds after the game starts rendering steadily. Loading

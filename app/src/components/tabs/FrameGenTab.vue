@@ -191,6 +191,7 @@ function settingsSummary(settings: FrameGenSettings) {
         <ol class="list-decimal space-y-1 pl-5 text-sm leading-6">
           <li><strong>Turn off runtime smoothing</strong> such as SteamVR Motion Smoothing, Pimax Smart Smoothing, Virtual Desktop SSW or Meta ASW. It fights Frame Generation.</li>
           <li><strong>Keep the headset at its full refresh rate.</strong> Don't use a runtime's half-rate or fixed 45 fps mode; Frame Generation sets the game's rate itself.</li>
+          <li><strong>Get the game to half the refresh rate first.</strong> With Frame Generation off, lower the game's settings or the render resolution until it holds at least half the headset's rate (45 fps at 90 Hz). Frame Generation can take it from half to full, but it can't do the first half.</li>
           <li><strong>Turn it on for one game:</strong> leave the Default Profile off, add a custom profile below and assign the game. The default settings suit most games.</li>
           <li><strong>Save and restart the game.</strong> Turning Frame Generation on takes effect at the next launch.</li>
           <li><strong>Check it in the headset:</strong> the <button class="underline underline-offset-2" type="button" @click="$emit('navigate', 'osd')">On-Screen Display</button> shows FG ON next to its FPS, or pick the Generated-frame tint diagnostic view.</li>
