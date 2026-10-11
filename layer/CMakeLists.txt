@@ -195,6 +195,7 @@ if(WIN32 AND DEPTHXR_BUILD_LAYER)
         src/framegen/framegen_gpu.cpp
         src/framegen/framegen_presenter.cpp
         src/framegen/framegen_runtime_queue.cpp
+        src/framegen/framegen_trace.cpp
         src/framegen/framegen_d3d11_bridge.cpp
         src/framegen/framegen_vulkan_bridge.cpp
         src/framegen/framegen_vulkan_formats.cpp

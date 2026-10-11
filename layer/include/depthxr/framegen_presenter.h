@@ -19,6 +19,7 @@
 #include <openxr/openxr.h>
 
 #include "depthxr/framegen_gpu.h"
+#include "depthxr/framegen_trace.h"
 #include "depthxr/settings.h"
 
 namespace depthxr {
@@ -356,6 +357,12 @@ class FrameGenPresenter {
     FrameGenQuadRoute ClaimQuadFrame(const XrCompositionLayerProjection& source);
 
     FrameGenStatus Status() const;
+    // The session's frame-by-frame trace (FrameGenTrace), for the layer's
+    // own frame calls; it records only while debug logging is on.
+    FrameGenTrace& Trace() { return trace_; }
+    // The log level changed: a started session's trace follows debug logging
+    // (a session starts with it as the level is then).
+    void SetTraceEnabled(bool enabled);
     // The runtime shows only images of Frame Generation's own (just in time,
     // once its first frame is written): the game's are captured, never shown.
     bool ShowsOwnImagesOnly() const;
@@ -905,6 +912,7 @@ class FrameGenPresenter {
     std::condition_variable idle_cv_;
     XrSession session_{XR_NULL_HANDLE};
     Logger* logger_{nullptr};
+    FrameGenTrace trace_;
     std::mutex* queue_mutex_{nullptr};
     FrameGenSwapchainDispatch xr_{};
     std::unique_ptr<FrameGenGpu> gpu_;

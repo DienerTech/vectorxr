@@ -265,6 +265,9 @@ void FrameGenPresenter::Start(XrSession session, const void* binding_chain, cons
     xr_ = dispatch;
     logger_ = logger;
     queue_mutex_ = queue_mutex;
+    if (logger_ && logger_->IsDebugEnabled()) {
+        trace_.Start(*logger_);
+    }
     started_ = true;
     user_enabled_ = true;
     gpu_stalled_ = false; // the last session's stalled work went with its swapchains
@@ -336,6 +339,7 @@ void FrameGenPresenter::Start(XrSession session, const void* binding_chain, cons
 }
 
 void FrameGenPresenter::Stop() {
+    trace_.Stop();
     std::unique_lock lock(mutex_);
     if (!started_) {
         return;
@@ -518,6 +522,23 @@ bool FrameGenPresenter::OwnsPacing() const {
 bool FrameGenPresenter::Started() const {
     std::scoped_lock lock(mutex_);
     return started_;
+}
+
+void FrameGenPresenter::SetTraceEnabled(bool enabled) {
+    Logger* logger = nullptr;
+    {
+        std::scoped_lock lock(mutex_);
+        if (!started_ || abandoned_) {
+            return;
+        }
+        logger = logger_;
+    }
+    // Outside the presenter lock: stopping joins the trace's writer.
+    if (!enabled) {
+        trace_.Stop();
+    } else if (logger) {
+        trace_.Start(*logger);
+    }
 }
 
 void FrameGenPresenter::Configure(const FrameGenResolvedSettings& settings) {
@@ -1037,6 +1058,9 @@ void FrameGenPresenter::CaptureOnRelease(XrSwapchain swapchain, std::uint32_t im
     }
     // Still under the GPU lock: what the game's waits are held for.
     const std::uint64_t mark = captured ? gpu_->CaptureMark() : 0;
+    trace_.Record("cap", reinterpret_cast<std::uint64_t>(swapchain), image_index, static_cast<std::int64_t>(captured),
+                  static_cast<std::int64_t>(jobs.size()), static_cast<std::int64_t>(releases),
+                  static_cast<std::int64_t>(mark));
     std::scoped_lock lock(mutex_);
     captured_ += captured;
     totals_.captured += captured;
@@ -3639,6 +3663,25 @@ XrResult FrameGenPresenter::RuntimeBegin(const FrameGenRuntimeCalls& calls, XrSe
 
 XrResult FrameGenPresenter::RuntimeEnd(const FrameGenRuntimeCalls& calls, XrSession session, const XrFrameEndInfo* info) {
     XrResult result = XR_SUCCESS;
+    if (trace_.Enabled() && info) {
+        // What the runtime is given: its first projection layer's views.
+        const XrCompositionLayerProjection* projection = nullptr;
+        for (std::uint32_t i = 0; info->layers && i < info->layerCount && !projection; ++i) {
+            if (info->layers[i] && info->layers[i]->type == XR_TYPE_COMPOSITION_LAYER_PROJECTION) {
+                projection = reinterpret_cast<const XrCompositionLayerProjection*>(info->layers[i]);
+            }
+        }
+        const bool views = projection && projection->views && projection->viewCount > 0;
+        trace_.Record("sub", 0, info->displayTime, info->layerCount,
+                      views ? reinterpret_cast<std::int64_t>(projection->views[0].subImage.swapchain) : 0,
+                      views ? projection->views[0].subImage.imageRect.extent.width : 0);
+        if (views) {
+            trace_.RecordPose("sub.v0", 0, projection->views[0].pose);
+            if (projection->viewCount > 1) {
+                trace_.RecordPose("sub.v1", 0, projection->views[1].pose);
+            }
+        }
+    }
     {
         const PresenterCall call(*this, "xrEndFrame");
         result = calls.submit(session, info);
@@ -4816,6 +4859,14 @@ bool FrameGenPresenter::AnalyzeJit(const XrCompositionLayerProjection& projectio
     jit.kinds = std::move(analysis.kinds);
     jit.velocity = std::move(analysis.velocity);
     jit.quad = std::move(quad);
+    if (trace_.Enabled()) {
+        trace_.Record("keep", jit.id, jit.time, jit.previous_time, static_cast<std::int64_t>(jit.analyzed),
+                      static_cast<std::int64_t>(jit.previous_analyzed), 0, static_cast<std::int64_t>(jit.capture_mark));
+        if (jit.copy.has_projection && jit.copy.projection_index < jit.copy.layers.size() &&
+            !jit.copy.layers[jit.copy.projection_index].views.empty()) {
+            trace_.RecordPose("keep.v0", jit.id, jit.copy.layers[jit.copy.projection_index].views[0].pose);
+        }
+    }
     jit_frames_.push_back(std::move(jit));
     // The backend keeps the images of the last few real frames: as many as
     // its ring for this analysis has (quad views keep more).
@@ -4938,6 +4989,7 @@ XrResult FrameGenPresenter::ThreadedEndJit(const XrFrameEndInfo& info, const Thr
         kept.scored = true; // scored below: nothing of it waits for the GPU
         RecordDepthReleasesLocked(copy);
         kept.copy = copy;
+        trace_.Record("keep", kept.id, kept.time, 0, 0, 0, 1);
         jit_frames_.push_back(std::move(kept));
         while (jit_frames_.size() > JitRingLocked(quad_mode_)) {
             ScoreErasedLocked(jit_frames_.front());
@@ -5741,13 +5793,17 @@ void FrameGenPresenter::CompositorLoop() {
             };
             const auto as_is = write.as_is ? find_kept(source->id) : jit_frames_.end();
             const auto kept = written ? find_kept(source->id) : jit_frames_.end();
+            int path = 0; // the trace's "pick": which of the branches below showed the refresh
             if (!rendered) {
                 // Not shown: no layers (below), and the last frame submitted
                 // stays what a refresh nothing is written for repeats.
+                path = 1;
             } else if (as_is != jit_frames_.end()) {
                 // A frame the layer composed.
+                path = 2;
                 show_as_is(as_is->copy, as_is->id, as_is->time);
             } else if (kept != jit_frames_.end()) {
+                path = 3;
                 content = kept->copy;
                 jit_started_ = true;
                 jit_content_ = content;
@@ -5765,6 +5821,7 @@ void FrameGenPresenter::CompositorLoop() {
                 // Written, but its real frame was dropped meanwhile: the
                 // image just released goes with its own views and the last
                 // layers shown around it.
+                path = 4;
                 content = jit_content_;
                 jit_views_ = std::move(written_views);
                 jit_exact_ = false;
@@ -5773,9 +5830,11 @@ void FrameGenPresenter::CompositorLoop() {
             } else if (jit_shown_as_is_ && jit_content_.valid && !written) {
                 // Nothing written: the frame last shown as it is, again (a
                 // frame written before it would step back).
+                path = 5;
                 show_as_is(jit_content_, jit_content_id_, jit_content_time_);
             } else if (jit_content_.valid && !jit_views_.empty() && !written) {
                 // The last frame written again: the output images' newest.
+                path = 6;
                 content = jit_content_;
                 generated = true;
             } else if (!quad_mode_ || newest_copy_fresh_ || !jit_started_) {
@@ -5788,6 +5847,7 @@ void FrameGenPresenter::CompositorLoop() {
                 // Composing quad views, claimed frames never become the newest
                 // copy: the frame passed through before the start is shown only
                 // until anything else was, then the newest the layer composed.
+                path = 7;
                 const bool passed_through = quad_mode_ ? !newest_copy_fresh_ : !jit_started_;
                 const FrameCopy& fallback_copy = quad_mode_ || jit_started_ ? newest_copy_ : passthrough_copy_;
                 const std::uint64_t id = passed_through ? 0 : newest_copy_id_;
@@ -5797,6 +5857,7 @@ void FrameGenPresenter::CompositorLoop() {
                 // Composing quad views, with nothing the layer composed since
                 // the last frame written: that frame again, as the runtime
                 // shows it.
+                path = 8;
                 submit = false;
                 ++totals_.stale_skipped;
             }
@@ -5811,6 +5872,23 @@ void FrameGenPresenter::CompositorLoop() {
             // image of Frame Generation's own.
             const bool depth = false;
             const XrTime time = slot_time_;
+            if (trace_.Enabled()) {
+                const std::uint64_t shown_id = jit_shown_ ? std::get<0>(*jit_shown_) : 0;
+                const int shown_mode = jit_shown_ ? std::get<1>(*jit_shown_) : -3;
+                const float shown_fraction = jit_shown_ ? std::get<2>(*jit_shown_) : 0.0f;
+                const auto shown_frame = find_kept(shown_id);
+                const auto bit = [](bool value, int position) { return value ? (std::int64_t{1} << position) : 0; };
+                const std::int64_t flags =
+                    bit(rendered, 0) | bit(skip, 1) | bit(written, 2) | bit(write.exact, 3) | bit(write.uncaptured, 4) |
+                    bit(write.unmeasured, 5) | bit(write.stale, 6) | bit(write.motion_late, 7) |
+                    bit(write.ring_exhausted, 8) | bit(write.as_is, 9) | bit(write.failed, 10) | bit(choice.cover, 11) |
+                    bit(submit, 12) | bit(distinct, 13) | bit(generated, 14) | bit(choice.index.has_value(), 15) |
+                    (static_cast<std::int64_t>(path) << 16) | (static_cast<std::int64_t>(shown_mode + 3) << 20);
+                trace_.Record("pick", shown_id, time, shown_frame != jit_frames_.end() ? shown_frame->time : 0, flags,
+                              static_cast<std::int64_t>(std::llround(shown_fraction * 1e6)),
+                              shown_frame != jit_frames_.end() ? shown_frame->previous_time : 0,
+                              static_cast<std::int64_t>(chosen_id.value_or(0)));
+            }
             lock.unlock();
             XrFrameEndInfo end_info =
                 BuildFrame(content, generated && usable ? &views : nullptr, space, flags, depth, pointers);

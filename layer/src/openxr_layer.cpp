@@ -3931,6 +3931,7 @@ XrResult OpenXrLayer::AcquireSwapchainImage(XrSwapchain swapchain,
         // A bridged image is rendered again only after the bridge's last copy of it.
         d3d11_bridge_.Acquired(swapchain, *index);
         vulkan_bridge_.Acquired(swapchain, *index);
+        framegen_.Trace().Record("acq", reinterpret_cast<uint64_t>(swapchain), *index);
     }
 
     std::scoped_lock lock(mutex_);
@@ -4004,6 +4005,7 @@ XrResult OpenXrLayer::ReleaseSwapchainImage(XrSwapchain swapchain,
                 it->second.last_released_image_index = *released_index;
                 it->second.has_last_released_image_index = true;
                 NoteFrameGenRelease(swapchain, *released_index);
+                framegen_.Trace().Record("rel", reinterpret_cast<uint64_t>(swapchain), *released_index, copied);
                 // Before forwarding (or deferring) the release: the image is
                 // still the application's and in its pre-release state.
                 if (copied) {
@@ -5479,6 +5481,26 @@ XrResult OpenXrLayer::TraceRuntimeEndFrame(XrSession session, const XrFrameEndIn
     // Frame Generation turns one app frame into two runtime frames, each of
     // which goes through SubmitRuntimeFrame (and so carries the OSD).
     if (framegen_owns_pacing_.load(std::memory_order_acquire) && info) {
+        if (FrameGenTrace& trace = framegen_.Trace(); trace.Enabled()) {
+            const XrCompositionLayerProjection* projection = nullptr;
+            for (uint32_t i = 0; info->layers && i < info->layerCount && !projection; ++i) {
+                if (info->layers[i] && info->layers[i]->type == XR_TYPE_COMPOSITION_LAYER_PROJECTION) {
+                    projection = reinterpret_cast<const XrCompositionLayerProjection*>(info->layers[i]);
+                }
+            }
+            const bool views = projection && projection->views && projection->viewCount > 0;
+            trace.Record("end", 0, info->displayTime, info->layerCount, views ? projection->viewCount : 0,
+                         views ? reinterpret_cast<int64_t>(projection->views[0].subImage.swapchain) : 0,
+                         views && projection->viewCount > 1
+                             ? reinterpret_cast<int64_t>(projection->views[1].subImage.swapchain)
+                             : 0);
+            if (views) {
+                trace.RecordPose("end.v0", 0, projection->views[0].pose);
+                if (projection->viewCount > 1) {
+                    trace.RecordPose("end.v1", 0, projection->views[1].pose);
+                }
+            }
+        }
         return framegen_.EndFrame(session, info, framegen_calls_, quad ? &*quad : nullptr);
     }
     if (quad && quad->route == FrameGenQuadRoute::kClaimed) {
@@ -5677,7 +5699,10 @@ XrResult OpenXrLayer::WaitFrame(XrSession session,
     }
     NoteThread(ThreadCensus::Call::WaitFrame);
     if (framegen_owns_pacing_.load(std::memory_order_acquire)) {
-        return framegen_.WaitFrame(session, frame_wait_info, frame_state, framegen_calls_);
+        const XrResult result = framegen_.WaitFrame(session, frame_wait_info, frame_state, framegen_calls_);
+        framegen_.Trace().Record("wait", 0, frame_state->predictedDisplayTime, frame_state->predictedDisplayPeriod,
+                                 frame_state->shouldRender, result);
+        return result;
     }
     const auto trace_id = turbo_trace_.NextId();
     turbo_trace_.Record("wait.enter", trace_id);
@@ -6008,7 +6033,9 @@ XrResult OpenXrLayer::BeginFrame(XrSession session, const XrFrameBeginInfo* fram
     TryAttachEyeGazeActionSetFallback(session);
 
     if (framegen_owns_pacing_.load(std::memory_order_acquire)) {
-        return framegen_.BeginFrame(session, frame_begin_info, framegen_calls_);
+        const XrResult result = framegen_.BeginFrame(session, frame_begin_info, framegen_calls_);
+        framegen_.Trace().Record("begin", 0, result);
+        return result;
     }
     if (!turbo_frame_interception_required_.load(std::memory_order_acquire)) {
         return TraceRuntimeBeginFrame(session, frame_begin_info);
@@ -9938,6 +9965,7 @@ void OpenXrLayer::RefreshResolvedSettings() {
                                       std::memory_order_relaxed);
     logger_.SetLevel(resolved_settings_.core.log_level);
     turbo_trace_.SetDebugEnabled(logger_, resolved_settings_.core.log_level == LogLevel::Debug);
+    framegen_.SetTraceEnabled(resolved_settings_.core.log_level == LogLevel::Debug);
     logger_.SetRetentionFiles(resolved_settings_.core.log_retention_files);
     if (!last_logged_settings_ || !SameSettings(*last_logged_settings_, resolved_settings_)) {
         LogResolvedSettings(resolved_settings_);
