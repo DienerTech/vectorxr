@@ -9310,12 +9310,12 @@ XrResult OpenXrLayer::PollEvent(XrInstance instance, XrEventDataBuffer* event_da
     }
     if (event_data->type == XR_TYPE_EVENT_DATA_SESSION_STATE_CHANGED) {
         const auto& change = *reinterpret_cast<const XrEventDataSessionStateChanged*>(event_data);
-        std::scoped_lock lock(mutex_);
         // Rare, and what a teardown follows: the runtime asks the session to
-        // stop, or it is lost. Logged for any session.
+        // stop, or it is lost. Logged for any session, before the layer's
+        // lock, so a teardown that holds the lock cannot hide it.
         logger_.Info("Runtime session state changed: state=" + std::to_string(static_cast<int>(change.state)) +
-                     " (" + SessionStateName(change.state) + "), time=" + std::to_string(change.time) +
-                     (change.session == active_session_ ? "" : ", inactive session"));
+                     " (" + SessionStateName(change.state) + "), time=" + std::to_string(change.time));
+        std::scoped_lock lock(mutex_);
         if (change.session == active_session_) {
             observed_session_state_ = change.state;
             if (change.state == XR_SESSION_STATE_FOCUSED) {
