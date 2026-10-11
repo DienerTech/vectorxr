@@ -25,6 +25,7 @@
 namespace test_adapter {
 
 inline constexpr const char* kVariable = "FG_TEST_ADAPTER";
+inline constexpr const wchar_t* kWideVariable = L"FG_TEST_ADAPTER";
 
 // An adapter as the tests choose among them.
 struct Adapter {
@@ -53,15 +54,27 @@ inline std::string Trimmed(std::string_view text) {
     return std::string(text);
 }
 
-// FG_TEST_ADAPTER's text; nullopt when it is unset, empty or only spaces.
+// A DXGI adapter description (or any UTF-16 text) in UTF-8.
+inline std::string Utf8(const wchar_t* text) {
+    const int size = WideCharToMultiByte(CP_UTF8, 0, text, -1, nullptr, 0, nullptr, nullptr);
+    if (size <= 1) return {};
+    std::string utf8(static_cast<std::size_t>(size), '\0');
+    WideCharToMultiByte(CP_UTF8, 0, text, -1, utf8.data(), size, nullptr, nullptr);
+    utf8.resize(static_cast<std::size_t>(size) - 1);
+    return utf8;
+}
+
+// FG_TEST_ADAPTER's text in UTF-8, as the adapters' names are; nullopt when
+// it is unset, empty or only spaces. Read as UTF-16, so a name outside the
+// ANSI code page arrives whole.
 inline std::optional<std::string> Wanted() {
-    const DWORD size = GetEnvironmentVariableA(kVariable, nullptr, 0);
+    const DWORD size = GetEnvironmentVariableW(kWideVariable, nullptr, 0);
     if (size <= 1) return std::nullopt;
-    std::string value(size, '\0');
-    const DWORD length = GetEnvironmentVariableA(kVariable, value.data(), size);
+    std::wstring value(size, L'\0');
+    const DWORD length = GetEnvironmentVariableW(kWideVariable, value.data(), size);
     if (length == 0 || length >= size) return std::nullopt;
     value.resize(length);
-    std::string wanted = Trimmed(value);
+    std::string wanted = Trimmed(Utf8(value.c_str()));
     if (wanted.empty()) return std::nullopt;
     return wanted;
 }
@@ -84,16 +97,6 @@ inline std::string NoMatch(std::string_view wanted, const std::vector<Adapter>& 
         message += (i ? ", \"" : "\"") + adapters[i].name + "\"" + (adapters[i].software ? " (software)" : "");
     }
     return message;
-}
-
-// A DXGI adapter description in UTF-8.
-inline std::string Utf8(const wchar_t* text) {
-    const int size = WideCharToMultiByte(CP_UTF8, 0, text, -1, nullptr, 0, nullptr, nullptr);
-    if (size <= 1) return {};
-    std::string utf8(static_cast<std::size_t>(size), '\0');
-    WideCharToMultiByte(CP_UTF8, 0, text, -1, utf8.data(), size, nullptr, nullptr);
-    utf8.resize(static_cast<std::size_t>(size) - 1);
-    return utf8;
 }
 
 // Of the adapters `enumerate(index, &adapter)` lists in turn (an HRESULT,

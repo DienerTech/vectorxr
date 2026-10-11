@@ -52,20 +52,20 @@ private:
 };
 
 // FG_TEST_ADAPTER as the test found it, put back at the end.
-std::string g_saved;
+std::wstring g_saved;
 bool g_was_set = false;
 
 void SaveVariable() {
-    const DWORD size = GetEnvironmentVariableA(test_adapter::kVariable, nullptr, 0);
+    const DWORD size = GetEnvironmentVariableW(test_adapter::kWideVariable, nullptr, 0);
     g_was_set = size > 0;
     if (g_was_set) {
-        g_saved.assign(size, '\0');
-        g_saved.resize(GetEnvironmentVariableA(test_adapter::kVariable, g_saved.data(), size));
+        g_saved.assign(size, L'\0');
+        g_saved.resize(GetEnvironmentVariableW(test_adapter::kWideVariable, g_saved.data(), size));
     }
 }
 
 void RestoreVariable() {
-    SetEnvironmentVariableA(test_adapter::kVariable, g_was_set ? g_saved.c_str() : nullptr);
+    SetEnvironmentVariableW(test_adapter::kWideVariable, g_was_set ? g_saved.c_str() : nullptr);
 }
 
 void TestNameMatches() {
@@ -106,6 +106,13 @@ void TestWanted() {
     const std::string long_name(300, 'x');
     SetEnvironmentVariableA(test_adapter::kVariable, long_name.c_str());
     Expect(Wanted() == long_name, "a long value is read whole");
+    // In UTF-8, as the adapters' names are, whatever the ANSI code page:
+    // U+2122 (trade mark sign; one other byte in code page 1252) and U+4E2D
+    // (not in code page 1252 at all).
+    SetEnvironmentVariableW(test_adapter::kWideVariable, L" Radeon\x2122 \x4E2D ");
+    Expect(Wanted() == std::string("Radeon\xE2\x84\xA2 \xE4\xB8\xAD"), "a value outside ASCII arrives in UTF-8");
+    Expect(test_adapter::NameMatches("AMD Radeon\xE2\x84\xA2 \xE4\xB8\xAD Graphics", *Wanted()),
+           "a value outside ASCII matches the adapter's UTF-8 name");
     SetEnvironmentVariableA(test_adapter::kVariable, nullptr);
 }
 
