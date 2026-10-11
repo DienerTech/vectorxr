@@ -3035,8 +3035,9 @@ webview2-com-sys 0.38.2
 No license file is included. Declared license: MIT.
 Repository: https://github.com/wravery/webview2-rs
 
-[DRAFT: copyright holder not determined: the crate ships no license file,
-names no authors and has no copyright notice in its sources.]
+Copyright (c) 2021 Bill Avery
+[Copyright notice from the LICENSE of their repository,
+https://github.com/wravery/webview2-rs.]
 
 The standard MIT license text:
 

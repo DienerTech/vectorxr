@@ -168,8 +168,12 @@ const ADDED_NOTICES = {
 // file in the package with the notice in a comment near its top; `lines`
 // gives a notice taken from elsewhere, and `source` says where. `draft` marks
 // a package whose copyright holder could not be determined from local files.
-const WEBVIEW2_RS_DRAFT =
-  'the crate ships no license file, names no authors and has no copyright notice in its sources'
+// webview2-com and webview2-com-sys ship no license file; their repository's
+// LICENSE (unchanged since it was added in 2021) names the holder.
+const WEBVIEW2_RS_COPYRIGHT = {
+  lines: ['Copyright (c) 2021 Bill Avery'],
+  source: 'the LICENSE of their repository, https://github.com/wravery/webview2-rs',
+}
 const COPYRIGHT_OVERRIDES = {
   '@tauri-apps/plugin-dialog': { file: 'dist-js/index.js' },
   'alloc-stdlib': {
@@ -181,8 +185,8 @@ const COPYRIGHT_OVERRIDES = {
   'unic-common': { file: 'src/lib.rs' },
   'unic-ucd-ident': { file: 'src/lib.rs' },
   'unic-ucd-version': { file: 'src/lib.rs' },
-  'webview2-com': { draft: WEBVIEW2_RS_DRAFT },
-  'webview2-com-sys': { draft: WEBVIEW2_RS_DRAFT },
+  'webview2-com': WEBVIEW2_RS_COPYRIGHT,
+  'webview2-com-sys': WEBVIEW2_RS_COPYRIGHT,
 }
 
 const warnings = []
