@@ -406,10 +406,15 @@ Video memory with the VRAM ballast: usage 17820 MB, budget 30400 MB (12580 MB to
 Both of Frame Generation's limits are fractions of the budget, so to stand
 in for a card whose budget is `B_small` on one whose budget is `B` (the
 budget the probe prints), use N of about 0.9 x (`B` - `B_small`) MB; a 12 GB
-card's budget is somewhat under 12 GB. For example:
+card's budget is somewhat under 12 GB. Use a full-size stereo run: without
+`--full-size` each eye is limited to 1280 pixels, which shrinks the frames
+Frame Generation weighs against the budget, and with `--quad-views` neither
+limit applies (quad views always keep five real frames, and generating just
+in time never lowers the rate for memory), so the ballast only shows whether
+the session still fits. For example:
 
 ```powershell
-& $probe --mode source-exact --quad-views --pattern --threaded-wait --gpu-ms 20 --gpu-chunks 40 --vram-ballast-mb 17408 --seconds 60
+& $probe --mode source-exact --full-size --pattern --threaded-wait --gpu-ms 20 --gpu-chunks 40 --vram-ballast-mb 17408 --seconds 60
 ```
 
 What the ballast does not simulate:

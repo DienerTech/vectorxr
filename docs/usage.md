@@ -743,15 +743,21 @@ estimate.
 
 Frame Generation keeps the last few real frames to generate from: five where video memory
 allows, otherwise three (with quad views always five, of the smaller views the game renders).
-Each kept frame costs about 6 bytes per pixel per eye: the image, plus its depth, trust, and
+These figures are for just-in-time writing (`justInTime=1` in the session summaries), which
+Direct3D 12 games and both bridges use; otherwise Frame Generation keeps two real frames and a
+set of output images per generated frame, as described under
+[Frame rate](#frame-rate-dynamic-or-fixed). Each kept frame costs about 6 bytes per pixel per eye: the image, plus its depth, trust, and
 motion at lower resolution. That is about 0.55 GB per kept frame at 6864x6908 per eye, and about
 0.1 GB at 3000x3000. The output images generated frames are written into come on top: a swapchain
 per eye at the game's resolution, usually with three images of 4 bytes per pixel, so about 1.1 GB
 at 6864x6908 per eye and 0.2 GB at 3000x3000. In all, plan for about 3 to 4 GB of video memory at
-6864x6908 per eye, and under 1 GB at 3000x3000.
+6864x6908 per eye, and under 1 GB at 3000x3000. Direct3D 11 and Vulkan games (DCS, Star Citizen)
+also keep a shared copy of each of the game's swapchain images for the bridge, about as much again
+as the output images (the bridge logs it as `twinMiB`): plan for about 4 to 5 GB for them at
+6864x6908 per eye.
 
-The log says how many real frames are kept (**Frame Generation keeps the last 5 real frames to
-generate from**, or 3 with the reason), and the **Frame Generation process video memory** lines
+Outside quad views, the log says how many real frames are kept (**Frame Generation keeps the
+last 5 real frames to generate from**, or 3 with the reason; quad views sessions always keep five), and the **Frame Generation process video memory** lines
 report the game process's video memory use and budget, and how much of it Frame Generation's
 working images and output images take.
 
@@ -905,7 +911,8 @@ frame rate anyway, the On-Screen Display and the log say so (see
 **How much video memory does it need?**
 
 About 0.55 GB per kept real frame at 6864x6908 per eye and 0.1 GB at 3000x3000, three to five of
-them, plus its output images: about 3 to 4 GB in all at 6864x6908 per eye. See
+them, plus its output images: about 3 to 4 GB in all at 6864x6908 per eye, and about 4 to 5 GB
+for Direct3D 11 and Vulkan games, whose bridge keeps a shared copy of the game's images. See
 [Video memory](#video-memory).
 
 ## On-Screen Display
