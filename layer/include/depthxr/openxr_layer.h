@@ -1182,6 +1182,11 @@ class OpenXrLayer {
     // Shared snapshots let WaitFrame, EndFrame, and teardown observe the same
     // in-flight wait without concurrently mutating a std::future object.
     std::shared_future<void> turbo_async_wait_;
+    // The worker's latest job. Session teardown clears turbo_async_wait_ even
+    // when that wait is still inside the runtime; this one stays until the
+    // worker stops, so StopTurboAsyncWorker can tell a busy worker from an
+    // idle one.
+    std::shared_future<void> turbo_async_worker_job_;
     std::uint64_t turbo_async_wait_generation_{0};
     bool turbo_async_wait_polled_{false};
     bool turbo_async_wait_completed_{false};

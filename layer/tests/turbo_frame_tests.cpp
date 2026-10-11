@@ -437,6 +437,8 @@ class TurboFrameTestPeer {
     static bool WaitsBeforeBegin() { return Layer().turbo_async_waits_before_begin_; }
     static bool DrainBounded(std::chrono::milliseconds timeout) { return Layer().DrainTurboAsyncWait(timeout); }
     static void ResetFrameState() { Layer().ResetTurboFrameState(); }
+    static void StopWorker() { Layer().StopTurboAsyncWorker(); }
+    static bool WorkerJoinable() { return Layer().turbo_async_worker_.joinable(); }
     static bool StaleCompletionPublished() {
         auto& layer = Layer();
         std::scoped_lock lock(layer.turbo_mutex_);
@@ -1682,6 +1684,32 @@ void TestSessionEndWithStuckWaitIsBounded() {
            "A wait from an ended session published into the next session's state");
 }
 
+// After a session ended around a wait the runtime never returned (its future
+// cleared by the bounded session teardown), xrDestroyInstance's worker stop
+// must still be bounded: the worker is released, not joined.
+void TestWorkerStopAfterStuckSessionEndIsBounded() {
+    FakeRuntime runtime;
+    TurboHarness harness(runtime, depthxr::TurboPacingMode::kAsync);
+    runtime.BlockWait();
+    const auto end_info = FrameEndInfo();
+    Expect(depthxr::TurboFrameTestPeer::ForwardEndFrame(TestSession(), &end_info) == XR_SUCCESS &&
+               runtime.WaitForWaitEntered(1), "Stuck worker-stop test could not establish async pacing");
+    Expect(depthxr::TurboFrameTestPeer::EndFaultedSession() == XR_SUCCESS, "xrEndSession failed");
+    depthxr::TurboFrameTestPeer::ResetFrameState();
+    Expect(depthxr::TurboFrameTestPeer::DrainBounded(0ms),
+           "Session teardown should have dropped the stuck wait's frame future");
+    const auto start = std::chrono::steady_clock::now();
+    depthxr::TurboFrameTestPeer::StopWorker();
+    const double elapsed = ElapsedMs(start);
+    Expect(elapsed < 3000.0, "Stopping the Turbo worker joined a wait still inside the runtime");
+    Expect(!depthxr::TurboFrameTestPeer::WorkerJoinable(), "The stuck Turbo worker was neither joined nor released");
+    runtime.ReleaseWait();
+    Expect(runtime.WaitForWaitExited(1), "Stuck wait never returned after release");
+    std::this_thread::sleep_for(50ms);
+    Expect(!depthxr::TurboFrameTestPeer::StaleCompletionPublished(),
+           "A released worker published into a later session's state");
+}
+
 void TestHealthyPipelineRetainsStrictOrder(depthxr::TurboPacingMode mode) {
     FakeRuntime runtime;
     TurboHarness harness(runtime, mode);
@@ -2033,6 +2061,7 @@ int main() {
     TestPersistentFailuresSuspendWithoutStoppingFrames();
     TestSessionEndReleasesInterlockedWait();
     TestSessionEndWithStuckWaitIsBounded();
+    TestWorkerStopAfterStuckSessionEndIsBounded();
     TestHealthyPipelineRetainsStrictOrder(depthxr::TurboPacingMode::kAsync);
     TestHealthyPipelineRetainsStrictOrder(depthxr::TurboPacingMode::kSequenced);
     TestFrameGenOwnsFramePacing();

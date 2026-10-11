@@ -6946,6 +6946,7 @@ XrResult OpenXrLayer::ForwardEndFrame(XrSession session,
                 EnsureTurboAsyncWorkerLocked();
                 turbo_async_job_completion_ = std::make_shared<std::promise<void>>();
                 turbo_async_wait_ = turbo_async_job_completion_->get_future().share();
+                turbo_async_worker_job_ = turbo_async_wait_;
                 PublishTurboAsyncHandoffLocked();
                 turbo_async_job_session_ = session;
                 turbo_async_job_pending_ = true;
@@ -7967,7 +7968,16 @@ void OpenXrLayer::TurboAsyncWorkerLoop(std::uint64_t epoch) {
 
 void OpenXrLayer::StopTurboAsyncWorker() {
     constexpr std::chrono::milliseconds kWorkerDrainTimeout{2000};
-    const bool drained = DrainTurboAsyncWait(kWorkerDrainTimeout);
+    // The worker runs one job at a time, so its latest job completing means
+    // it is idle. Not turbo_async_wait_: session teardown clears that after
+    // its own bounded drain even while the wait is still in the runtime, and
+    // joining such a worker would hang xrDestroyInstance.
+    std::shared_future<void> last_job;
+    {
+        std::scoped_lock lock(turbo_mutex_);
+        last_job = turbo_async_worker_job_;
+    }
+    const bool drained = !last_job.valid() || last_job.wait_for(kWorkerDrainTimeout) == std::future_status::ready;
     {
         std::scoped_lock lock(turbo_mutex_);
         turbo_async_worker_stop_ = true;
@@ -7982,6 +7992,9 @@ void OpenXrLayer::StopTurboAsyncWorker() {
             // application exit. Its epoch is stale, so it exits on return.
             logger_.Error("Turbo: the async worker is still inside the runtime's xrWaitFrame at teardown; "
                           "releasing it without joining.");
+            // It may return after the loader unloads this layer and the
+            // runtime: keep both loaded for the process's exit.
+            PinModulesForAbandonedPresenter();
             turbo_async_worker_.detach();
         }
     }
@@ -7991,6 +8004,7 @@ void OpenXrLayer::StopTurboAsyncWorker() {
         turbo_async_job_pending_ = false;
         turbo_async_job_session_ = XR_NULL_HANDLE;
         turbo_async_job_completion_.reset();
+        turbo_async_worker_job_ = {};
     }
 }
 
