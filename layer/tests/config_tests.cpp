@@ -250,6 +250,73 @@ void TestUnknownKeysAreIgnoredWithWarnings() {
     }
 }
 
+// The single binding keys of configs from before binding lists are read, so
+// they are known keys: applied, and never reported as unknown.
+void TestLegacySingularViewControlBindings() {
+    const depthxr::ParseResult parsed = depthxr::ParseConfig(R"json(
+{
+  "version": 3,
+  "core": { "enabled": true },
+  "applications": [ { "id": "dcs", "name": "DCS", "enabled": true, "match": { "exe": "DCS.exe" } } ],
+  "modules": {
+    "depthxr": { "enabled": false },
+    "pivotxr": {
+      "enabled": false,
+      "nudgeSets": [
+        {
+          "id": "hat",
+          "name": "HAT",
+          "settings": {
+            "yawLeftBinding": { "type": "keyboard", "chord": ["Q"] },
+            "yawRightBinding": { "type": "keyboard", "chord": ["E"] },
+            "pitchUpBinding": { "type": "keyboard", "chord": ["R"] },
+            "pitchDownBinding": { "type": "keyboard", "chord": ["F"] },
+            "centerBinding": { "type": "keyboard", "chord": ["X"] }
+          }
+        }
+      ],
+      "profiles": [
+        {
+          "id": "views",
+          "name": "Views",
+          "applicationIds": ["dcs"],
+          "enabled": true,
+          "behavior": "snapViews",
+          "viewControls": {
+            "nudges": { "centerBinding": { "type": "keyboard", "chord": ["C"] } },
+            "quickViews": [
+              {
+                "id": "check-six",
+                "name": "Check Six",
+                "yawDegrees": 180.0,
+                "activationBinding": { "type": "keyboard", "chord": ["F9"] }
+              }
+            ]
+          }
+        }
+      ]
+    }
+  }
+}
+)json");
+    std::string reported;
+    for (const std::string& warning : parsed.warnings) reported += "\n  " + warning;
+    Expect(parsed.ok && parsed.warnings.empty(),
+           "Legacy single binding keys must parse without warnings: " + parsed.error + reported);
+    const depthxr::PivotViewControls& controls = parsed.document.pivotxr.profiles[0].view_controls;
+    Expect(FirstChordKey(controls.nudges.center_bindings, "C"),
+           "A nudge's legacy centerBinding was not applied");
+    Expect(controls.quick_views.size() == 1 && controls.quick_views[0].activation_bindings.size() == 1 &&
+               controls.quick_views[0].activation_bindings[0].binding.chord == std::vector<std::string>{"F9"} &&
+               controls.quick_views[0].activation_bindings[0].behavior == depthxr::PivotActivationBehavior::Toggle,
+           "A quick view's legacy activationBinding was not applied as a toggle");
+    const depthxr::PivotNudgeSettings& hat = parsed.document.pivotxr.nudge_sets[0].settings;
+    Expect(FirstChordKey(hat.yaw_left_bindings, "Q") && FirstChordKey(hat.yaw_right_bindings, "E") &&
+               FirstChordKey(hat.pitch_up_bindings, "R") && FirstChordKey(hat.pitch_down_bindings, "F") &&
+               FirstChordKey(hat.center_bindings, "X"),
+           "A nudge set's legacy single bindings were not applied");
+}
+
 void TestParseConfig() {
     const std::string json = R"json(
 {
@@ -2151,6 +2218,30 @@ void TestNoneBindingParsed() {
     Expect(result.ok, "Config parser rejected valid config with none binding: " + result.error);
     Expect(result.document.depthxr.bindings.toggle_enabled_bindings.empty(),
            "DepthXR toggle binding should be None");
+    Expect(result.warnings.empty(), "A none binding with only its type must not warn");
+
+    // A none binding has only its type: anything beside it is ignored with a
+    // warning, as on the other bindings.
+    const depthxr::ParseResult extra = depthxr::ParseConfig(R"json(
+{
+  "version": 3,
+  "core": { "enabled": true },
+  "applications": [],
+  "modules": {
+    "depthxr": { "enabled": true, "bindings": { "toggleEnabled": { "type": "none", "chord": ["F8"] } } },
+    "pivotxr": { "enabled": false },
+    "turbo": { "enabled": true, "toggleBindings": [{ "type": "none", "sound": { "enabled": true } }] }
+  }
+}
+)json");
+    std::string reported;
+    for (const std::string& warning : extra.warnings) reported += "\n  " + warning;
+    Expect(extra.ok && extra.document.depthxr.bindings.toggle_enabled_bindings.empty() &&
+               extra.document.turbo.toggle_bindings.empty(),
+           "None bindings with extra keys must still parse as None: " + extra.error);
+    Expect(extra.warnings == std::vector<std::string>{"Unknown field ignored: modules.depthxr.bindings.toggleEnabled.chord",
+                                                      "Unknown field ignored: modules.turbo.toggleBindings[0].sound"},
+           "Keys beside a none binding's type were not reported by their path:" + reported);
 }
 
 void TestDeviceBindingMetadataParsed() {
@@ -3956,6 +4047,7 @@ int main() {
     TestOsdConfig();
     TestTurboExperimentalConfig();
     TestUnknownKeysAreIgnoredWithWarnings();
+    TestLegacySingularViewControlBindings();
     TestParseConfig();
     TestPivotActivationBindingModel();
     TestLogLevelCompatibility();

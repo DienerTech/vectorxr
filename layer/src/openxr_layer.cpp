@@ -1911,9 +1911,7 @@ XrResult OpenXrLayer::OnInstanceCreated(const XrInstanceCreateInfo* create_info,
     ResetSessionState();
     config_path_ = ResolveConfigPath();
     log_path_ = ResolveLogPath();
-    logger_.Initialize(log_path_);
-    // A new log: it shows the config's warnings again.
-    logged_config_warnings_.clear();
+    BeginInstanceLogLocked(log_path_);
 
     current_exe_name_ = GetCurrentExecutableName();
     logger_.Info(std::string("VectorXR layer version: ") + VECTORXR_VERSION);
@@ -10283,6 +10281,12 @@ void OpenXrLayer::PollConfigFile() {
             logger_.Info(line);
         }
     }
+}
+
+void OpenXrLayer::BeginInstanceLogLocked(const std::filesystem::path& log_path) {
+    logger_.Initialize(log_path);
+    // A new log: it shows the config's warnings again.
+    logged_config_warnings_.clear();
 }
 
 std::vector<std::string> OpenXrLayer::UnloggedConfigWarningsLocked() {

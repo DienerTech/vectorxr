@@ -634,6 +634,8 @@ bool ParseInputBinding(const JsonValue& value, InputBinding& out, std::string& e
     out = InputBinding{};
     out.type = *type;
     if (out.type == InputBindingType::None) {
+        static const std::unordered_set<std::string> allowed = {"type"};
+        NoteUnknownKeys(*object, allowed);
         return true;
     }
 
@@ -1864,6 +1866,8 @@ bool ParsePivotNudgeSettings(const JsonValue& value, PivotNudgeSettings& out, st
     static const std::unordered_set<std::string> allowed = {
         "yawStepDegrees", "pitchStepDegrees", "transitionSeconds",
         "yawLeftBindings", "yawRightBindings", "pitchUpBindings", "pitchDownBindings", "centerBindings",
+        // The single bindings of configs from before lists (ParseInputBindings reads them).
+        "yawLeftBinding", "yawRightBinding", "pitchUpBinding", "pitchDownBinding", "centerBinding",
     };
     NoteUnknownKeys(*object, allowed);
 
@@ -1923,6 +1927,8 @@ bool ParsePivotQuickView(const JsonValue& value, PivotQuickView& out, std::strin
     static const std::unordered_set<std::string> allowed = {
         "id", "name", "yawDegrees", "pitchDegrees", "positionRightCm", "positionUpCm",
         "positionForwardCm", "transitionSeconds", "turnDirection", "activationBindings",
+        // The single binding of configs from before lists (ParsePivotActivationBindings reads it).
+        "activationBinding",
     };
     NoteUnknownKeys(*object, allowed);
 

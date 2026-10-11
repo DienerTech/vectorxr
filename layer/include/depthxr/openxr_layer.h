@@ -438,6 +438,9 @@ class OpenXrLayer {
     // Log lines for the active config's warnings that this instance's log does
     // not show yet, which are then counted as shown. Caller holds mutex_.
     std::vector<std::string> UnloggedConfigWarningsLocked();
+    // Starts this instance's log at `log_path` (at xrCreateInstance): a new
+    // log, which shows none of the config's warnings yet. Caller holds mutex_.
+    void BeginInstanceLogLocked(const std::filesystem::path& log_path);
     void RefreshResolvedSettings();
     void ResetPivotInputStateForConfigChange();
     void PollRuntimeRelay();

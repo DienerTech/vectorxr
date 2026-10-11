@@ -309,12 +309,11 @@ class TurboFrameTestPeer {
         layer.turbo_begin_owed_ = false;
     }
     // An instance's first load of the settings file at `config`, into a new log
-    // at `log` (as at xrCreateInstance). Returns that log's path.
+    // at `log`, begun as xrCreateInstance begins one. Returns that log's path.
     static std::filesystem::path LoadConfigFile(const std::filesystem::path& config, const std::filesystem::path& log) {
         auto& layer = Layer();
         std::scoped_lock lock(layer.mutex_);
-        layer.logger_.Initialize(log);
-        layer.logged_config_warnings_.clear();
+        layer.BeginInstanceLogLocked(log);
         layer.config_path_ = config;
         layer.has_loaded_config_ = false;
         layer.ReloadConfigIfNeeded();
@@ -342,8 +341,7 @@ class TurboFrameTestPeer {
         std::scoped_lock lock(layer.mutex_);
         layer.config_path_.clear();
         layer.has_loaded_config_ = false;
-        layer.logged_config_warnings_.clear();
-        layer.logger_.Initialize(log);
+        layer.BeginInstanceLogLocked(log);
     }
     // A settings.json reload: a new document, re-resolved as the frame loop does.
     static void ReloadConfig(const ConfigDocument& config) {
@@ -2086,8 +2084,9 @@ std::size_t Occurrences(const std::string& text, const std::string& needle) {
 
 // A settings file with a key this layer does not know (a newer app's) still
 // loads. Each unknown key is logged once per log: at the first load, not again
-// on reloads, and a reload that adds one logs only that one. A reload that
-// fails to parse keeps the last good config, as before.
+// on reloads, and a reload that adds one logs only that one; the next
+// instance's new log shows them all again. A reload that fails to parse keeps
+// the last good config, as before.
 void TestConfigWarningsLoggedOncePerKey() {
     const auto directory = std::filesystem::temp_directory_path() /
                            ("vectorxr-config-warnings-" + std::to_string(GetCurrentProcessId()));
@@ -2140,7 +2139,17 @@ void TestConfigWarningsLoggedOncePerKey() {
     Expect(Occurrences(text, later) == 1 && Occurrences(text, presenter) == 1,
            "A failed reload logged unknown keys");
 
-    depthxr::TurboFrameTestPeer::UnloadConfigFile(log);
+    // The next instance begins a log of its own, which shows each unknown key
+    // again, once.
+    write(R"({"scale":70,"later":true})");
+    const auto next_log = depthxr::TurboFrameTestPeer::LoadConfigFile(config, directory / "next-instance.log");
+    text = depthxr::TurboFrameTestPeer::Log();
+    Expect(next_log != log && depthxr::TurboFrameTestPeer::LoadedConfig().core.osd.scale == 70,
+           "The next instance did not load the settings into a new log");
+    Expect(Occurrences(text, presenter) == 1 && Occurrences(text, later) == 1,
+           "The next instance's log did not show each unknown key once");
+
+    depthxr::TurboFrameTestPeer::UnloadConfigFile(next_log);
     std::error_code error;
     std::filesystem::remove_all(directory, error);
 }
