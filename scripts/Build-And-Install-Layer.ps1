@@ -5,7 +5,11 @@ param(
     [string]$Configuration = "Release",
     [switch]$SkipTests,
     [switch]$SkipFresh,
-    [switch]$CleanScratch
+    [switch]$CleanScratch,
+    # Signs the built layer locally and installs that signed copy instead
+    # (Sign-LocalLayer.ps1): for testing in games with anti-cheat only.
+    [switch]$Sign,
+    [string]$SignNote = ""
 )
 
 Set-StrictMode -Version Latest
@@ -32,4 +36,8 @@ if ($CleanScratch) {
 }
 
 & $buildScript @buildArgs
-& $installScript -BuildDir $BuildDir -Configuration $Configuration
+if ($Sign) {
+    & (Join-Path $PSScriptRoot "Sign-LocalLayer.ps1") -BuildDir $BuildDir -Configuration $Configuration -Install -Note $SignNote
+} else {
+    & $installScript -BuildDir $BuildDir -Configuration $Configuration
+}
