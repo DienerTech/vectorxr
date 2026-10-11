@@ -2,9 +2,11 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { readFileSync } from 'node:fs'
 import {
+  applyPivotPositionAssistPreset,
   createPivotProfile,
   createPivotQuickView,
   defaultConfig,
+  matchingPivotPositionAssistPreset,
   normalizeConfig,
   pivotSnapStackingStatus,
   pivotSnapViewMotionNote,
@@ -135,4 +137,33 @@ test('the OSD reserves a Snap View line only when Snap Views are configured', ()
   assert.equal(pivotSnapViewsConfigured(config), true)
   config.modules.pivotxr.profiles[0].enabled = false
   assert.equal(pivotSnapViewsConfigured(config), false)
+})
+
+test('Position Assist presets fill turning in either direction mode and are recognized', () => {
+  const assist = defaultConfig().modules.pivotxr.defaults.positionAssist
+  assert.equal(matchingPivotPositionAssistPreset(assist), 'none')
+
+  applyPivotPositionAssistPreset(assist, 'gentle')
+  assert.deepEqual(assist.yaw, { rightCm: 8, upCm: 3, forwardCm: 0, startAngleDegrees: 20, fullAngleDegrees: 70 })
+  assert.equal(assist.yawRight.rightCm, 8)
+  assert.equal(assist.yawLeft.rightCm, -8)
+  assert.equal(assist.pitchUp.upCm, 0)
+  assert.equal(matchingPivotPositionAssistPreset(assist), 'gentle')
+  assist.advancedDirections = true
+  assert.equal(matchingPivotPositionAssistPreset(assist), 'gentle')
+
+  assist.pitchDown.forwardCm = 4
+  assert.equal(matchingPivotPositionAssistPreset(assist), null)
+  applyPivotPositionAssistPreset(assist, 'strong')
+  assert.equal(matchingPivotPositionAssistPreset(assist), 'strong')
+  assert.equal(assist.pitchDown.forwardCm, 0)
+
+  applyPivotPositionAssistPreset(assist, 'none')
+  assert.equal(Object.is(assist.yawLeft.rightCm, -0), false)
+  assert.equal(matchingPivotPositionAssistPreset(assist), 'none')
+
+  const config = defaultConfig()
+  applyPivotPositionAssistPreset(config.modules.pivotxr.defaults.positionAssist, 'strong')
+  config.modules.pivotxr.defaults.positionAssist.enabled = true
+  assert.equal(validateConfig(config).filter((error) => error.includes('positionAssist')).length, 0)
 })

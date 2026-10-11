@@ -291,6 +291,47 @@ export function defaultPivotPositionAssist(): PivotPositionAssist {
   }
 }
 
+export type PivotPositionAssistPreset = 'none' | 'gentle' | 'strong'
+
+// Starting points for Position Assist. They describe turning only: lean toward
+// the turn plus a little height, to see past the seat when checking six. Advanced
+// directions get the same turn mirrored left/right, and no pitch movement.
+const pivotPositionAssistPresets: Record<PivotPositionAssistPreset, PivotPositionDirection> = {
+  none: defaultPivotPositionDirection(),
+  gentle: { rightCm: 8, upCm: 3, forwardCm: 0, startAngleDegrees: 20, fullAngleDegrees: 70 },
+  strong: { rightCm: 15, upCm: 6, forwardCm: 0, startAngleDegrees: 15, fullAngleDegrees: 60 },
+}
+
+function leftTurn(turn: PivotPositionDirection): PivotPositionDirection {
+  return { ...turn, rightCm: -turn.rightCm || 0 }
+}
+
+function samePositionDirection(lhs: PivotPositionDirection, rhs: PivotPositionDirection): boolean {
+  return lhs.rightCm === rhs.rightCm && lhs.upCm === rhs.upCm && lhs.forwardCm === rhs.forwardCm &&
+    lhs.startAngleDegrees === rhs.startAngleDegrees && lhs.fullAngleDegrees === rhs.fullAngleDegrees
+}
+
+export function applyPivotPositionAssistPreset(settings: PivotPositionAssist, preset: PivotPositionAssistPreset): void {
+  const turn = pivotPositionAssistPresets[preset]
+  settings.yaw = { ...turn }
+  settings.yawRight = { ...turn }
+  settings.yawLeft = leftTurn(turn)
+  settings.pitchUp = defaultPivotPositionDirection()
+  settings.pitchDown = defaultPivotPositionDirection()
+}
+
+// The preset the visible directions match, or null once tuned by hand.
+export function matchingPivotPositionAssistPreset(settings: PivotPositionAssist): PivotPositionAssistPreset | null {
+  const presets = Object.keys(pivotPositionAssistPresets) as PivotPositionAssistPreset[]
+  return presets.find((preset) => {
+    const turn = pivotPositionAssistPresets[preset]
+    if (!settings.advancedDirections) return samePositionDirection(settings.yaw, turn)
+    const still = defaultPivotPositionDirection()
+    return samePositionDirection(settings.yawRight, turn) && samePositionDirection(settings.yawLeft, leftTurn(turn)) &&
+      samePositionDirection(settings.pitchUp, still) && samePositionDirection(settings.pitchDown, still)
+  }) ?? null
+}
+
 const maxPivotPositionAssistCm = 100
 
 function clampPositionCm(value: unknown): number {

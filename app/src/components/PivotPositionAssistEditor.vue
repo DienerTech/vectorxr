@@ -1,8 +1,16 @@
 <script setup lang="ts">
 import { computed } from 'vue'
-import type { PivotPositionAssist, PivotPositionDirection } from '../lib/model'
+import type { PivotPositionAssist, PivotPositionAssistPreset, PivotPositionDirection } from '../lib/model'
+import { applyPivotPositionAssistPreset, matchingPivotPositionAssistPreset } from '../lib/model'
 
 const props = defineProps<{ settings: PivotPositionAssist }>()
+
+const presets: Array<{ id: PivotPositionAssistPreset; label: string; title: string }> = [
+  { id: 'none', label: 'No movement', title: 'Clears every offset and restores the default angles.' },
+  { id: 'gentle', label: 'Gentle', title: '8 cm lean toward the turn and 3 cm up, between 20° and 70° of head turn.' },
+  { id: 'strong', label: 'Strong', title: '15 cm lean toward the turn and 6 cm up, between 15° and 60° of head turn.' },
+]
+const activePreset = computed(() => matchingPivotPositionAssistPreset(props.settings))
 
 const directions = computed(() => props.settings.advancedDirections
   ? [
@@ -40,6 +48,28 @@ function anglesOutOfOrder(direction: PivotPositionDirection) {
       </span>
     </label>
     <template v-if="settings.enabled">
+      <div class="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-[0.75rem] border px-3 py-2.5 surface-panel-strong">
+        <div class="min-w-0 flex-1 basis-72">
+          <p class="text-sm font-semibold">Starting points</p>
+          <p class="mt-1 text-xs text-muted">
+            Gentle leans 8 cm toward the turn and rises 3 cm between 20° and 70° of head turn, enough to see past the seat when checking six. Strong leans 15 cm and rises 6 cm between 15° and 60°.
+            Keep Start angle beyond your normal panel scan so glances stay still, and set Full-offset angle near where you stop turning. A preset replaces every direction; Advanced directions get no up/down movement.
+          </p>
+        </div>
+        <div class="flex flex-wrap gap-2">
+          <button
+            v-for="preset in presets"
+            :key="preset.id"
+            class="rounded-[0.65rem] border px-3 py-1.5 text-xs font-semibold"
+            :class="activePreset === preset.id ? 'button-accent' : 'button-secondary'"
+            type="button"
+            :title="preset.title"
+            @click="applyPivotPositionAssistPreset(settings, preset.id)"
+          >
+            {{ preset.label }}
+          </button>
+        </div>
+      </div>
       <label class="mt-4 flex gap-3 text-sm">
         <input v-model="settings.advancedDirections" type="checkbox" @change="seedDirections" />
         Advanced directions — independent left, right, up, and down
