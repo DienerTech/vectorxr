@@ -362,6 +362,27 @@ export function pivotSnapStackingStatus(config: VectorXRConfig, target: 'default
   }
 }
 
+// The Snap Views side of stacking: which enabled Enhanced Motion profiles keep
+// working inside this Snap Views profile's views.
+export function pivotSnapViewMotionNote(config: VectorXRConfig, target: 'default' | number): string {
+  if (target === 'default') {
+    return pivotSnapStackingStatus(config, 'default').message
+  }
+  const profiles = config.modules.pivotxr.profiles
+  const profile = profiles[target]
+  const sources = profile
+    ? profiles.filter((candidate) =>
+      candidate.enabled &&
+      candidate.behavior === 'enhancedMotion' &&
+      candidate.settings.applyMotionToSnapViews &&
+      candidate.applicationIds.some((applicationId) => profile.applicationIds.includes(applicationId)))
+    : []
+  if (sources.length === 0) {
+    return 'An Enhanced Motion profile for the same application can keep working in these Snap Views when it turns on Apply Enhanced Motion to Snap Views.'
+  }
+  return `Enhanced Motion from ${sources.map((source) => source.name).join(', ')} keeps working in these Snap Views.`
+}
+
 export interface PivotXRSettings {
   applyMotionToSnapViews: boolean
   positionAssist: PivotPositionAssist

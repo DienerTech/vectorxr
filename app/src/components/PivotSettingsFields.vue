@@ -2,6 +2,7 @@
 import type { PivotAxisTuning, PivotSnapStackingStatus, PivotXRSettings } from '../lib/model'
 import PivotSteppedSettings from './PivotSteppedSettings.vue'
 import PivotPositionAssistEditor from './PivotPositionAssistEditor.vue'
+import PivotSnapStackingControl from './PivotSnapStackingControl.vue'
 
 // Shared Pivot settings editor used by both the Default Profile and each custom
 // profile, so the two stay visually and structurally identical. Fields mutate
@@ -62,20 +63,7 @@ function onAdvancedAxesChange(enabled: boolean) {
 <template>
   <div class="space-y-3">
     <section class="rounded-[1rem] border p-4 surface-panel-soft">
-      <label v-if="snapStacking.available" class="flex items-start gap-3">
-        <input v-model="settings.applyMotionToSnapViews" type="checkbox" class="mt-1 h-4 w-4 accent-depthxr-copper" />
-        <span>
-          <span class="block font-semibold">Apply Enhanced Motion to Snap Views</span>
-          <span class="mt-1 block text-sm text-muted">
-            Keep assistance when entering a Snap View, or activate it around a view already selected. Uses this profile’s rotation and position tuning.
-          </span>
-          <span v-if="snapStacking.message" class="mt-1 block text-xs text-muted">{{ snapStacking.message }}</span>
-        </span>
-      </label>
-      <div v-else>
-        <p class="font-semibold">Apply Enhanced Motion to Snap Views</p>
-        <p class="mt-1 text-sm text-muted">{{ snapStacking.message }}</p>
-      </div>
+      <PivotSnapStackingControl :settings="settings" :status="snapStacking" />
     </section>
     <!-- General: applies to both axes -->
     <div class="rounded-[1rem] border p-4 surface-panel-soft">

@@ -16,7 +16,7 @@ import PivotViewControlsPage from '../PivotViewControlsPage.vue'
 import PivotViewControlsPanel from '../PivotViewControlsPanel.vue'
 import ProfileShell from '../ProfileShell.vue'
 import type { RegisteredApplication, VectorXRConfig } from '../../lib/model'
-import { bindingLabel, bindingsMatchRuntimeActivation, createPivotNudgeSet, pivotBindingConflictWarnings, pivotSnapStackingStatus } from '../../lib/model'
+import { bindingLabel, bindingsMatchRuntimeActivation, createPivotNudgeSet, pivotBindingConflictWarnings, pivotSnapStackingStatus, pivotSnapViewMotionNote } from '../../lib/model'
 
 const props = defineProps<{
   config: VectorXRConfig
@@ -375,6 +375,9 @@ const profileOverviewWarningIndexes = computed(() => new Set(
           <PivotBehaviorPanel
             :subject="config.modules.pivotxr"
             :nudge-sets="config.modules.pivotxr.nudgeSets"
+            :settings="config.modules.pivotxr.defaults"
+            :snap-stacking="pivotSnapStackingStatus(config, 'default')"
+            :snap-view-motion-note="pivotSnapViewMotionNote(config, 'default')"
             class="mb-3"
             @edit-nudges="openNudgeSet"
             @add-nudge-set="addNudgeSet(config.modules.pivotxr)"
@@ -382,7 +385,6 @@ const profileOverviewWarningIndexes = computed(() => new Set(
           <PivotSettingsSummary
             v-if="config.modules.pivotxr.behavior !== 'snapViews'"
             :settings="config.modules.pivotxr.defaults"
-            :snap-stacking-available="false"
             class="mb-3"
             @edit="openSettings('default')"
           />
@@ -462,6 +464,9 @@ const profileOverviewWarningIndexes = computed(() => new Set(
           <PivotBehaviorPanel
             :subject="profile"
             :nudge-sets="config.modules.pivotxr.nudgeSets"
+            :settings="profile.settings"
+            :snap-stacking="pivotSnapStackingStatus(config, index)"
+            :snap-view-motion-note="pivotSnapViewMotionNote(config, index)"
             @edit-nudges="openNudgeSet"
             @add-nudge-set="addNudgeSet(profile)"
           />

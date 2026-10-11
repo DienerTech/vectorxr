@@ -7,6 +7,7 @@ import {
   defaultConfig,
   normalizeConfig,
   pivotSnapStackingStatus,
+  pivotSnapViewMotionNote,
   pivotSnapViewsConfigured,
 } from '../src/lib/model.ts'
 import { validateConfig } from '../src/lib/validation.ts'
@@ -104,6 +105,27 @@ test('custom motion profiles can stack and say when no Snap Views profile shares
 
   config.modules.pivotxr.profiles.push(snapViewsProfile(['dcs']))
   assert.deepEqual(pivotSnapStackingStatus(config, 0), { available: true, message: '' })
+})
+
+test('Snap Views profiles name the Enhanced Motion profiles that keep working in their views', () => {
+  const config = defaultConfig()
+  assert.match(pivotSnapViewMotionNote(config, 'default'), /Not available on the Default profile/)
+
+  const motion = createPivotProfile(config.modules.pivotxr.defaults)
+  motion.name = 'Hornet Motion'
+  motion.applicationIds = ['dcs']
+  const otherGame = createPivotProfile(config.modules.pivotxr.defaults)
+  otherGame.name = 'MSFS Motion'
+  otherGame.applicationIds = ['msfs']
+  otherGame.settings.applyMotionToSnapViews = true
+  config.modules.pivotxr.profiles.push(motion, otherGame, snapViewsProfile(['dcs']))
+  assert.match(pivotSnapViewMotionNote(config, 2), /can keep working in these Snap Views when it turns on/)
+
+  motion.settings.applyMotionToSnapViews = true
+  assert.equal(pivotSnapViewMotionNote(config, 2), 'Enhanced Motion from Hornet Motion keeps working in these Snap Views.')
+
+  motion.enabled = false
+  assert.match(pivotSnapViewMotionNote(config, 2), /can keep working/)
 })
 
 test('the OSD reserves a Snap View line only when Snap Views are configured', () => {
