@@ -19,6 +19,8 @@
       "icons/icon.ico"
     ],
     "resources": {
+      "../../LICENSE": "LICENSE.txt",
+      "../../THIRD-PARTY-NOTICES.txt": "THIRD-PARTY-NOTICES.txt",
       "resources/vectorxr-layer/XR_APILAYER_DIENERTECH_VECTORXR.dll": "vectorxr-layer/XR_APILAYER_DIENERTECH_VECTORXR.dll",
       "resources/vectorxr-layer/XR_APILAYER_DIENERTECH_VECTORXR.json": "vectorxr-layer/XR_APILAYER_DIENERTECH_VECTORXR.json",
       "resources/vectorxr-layer/sounds/activate.wav": "vectorxr-layer/sounds/activate.wav",

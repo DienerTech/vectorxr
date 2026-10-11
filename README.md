@@ -284,4 +284,6 @@ The VectorXR source code is released under the Mozilla Public License 2.0 (MPL-2
 
 MPL-2.0 is a file-level copyleft license: you are free to use, modify, and redistribute VectorXR, including as part of a larger work that combines it with proprietary code, provided that modifications to the MPL-covered files themselves remain available under the MPL.
 
+[THIRD-PARTY-NOTICES.txt](THIRD-PARTY-NOTICES.txt) lists the third-party code that VectorXR ships, with the notices and license texts it requires. The installer puts it next to the app, together with LICENSE as LICENSE.txt. After changing the app's dependencies, regenerate the list with `node scripts/generate-third-party-notices.mjs`.
+
 VectorXR, the VectorXR name, and VectorXR branding are product identifiers of DienerTech LLC. Consistent with MPL-2.0 section 2.3, the license covers the source code but does not grant rights to use DienerTech LLC trademarks, logos, or branding except to refer to the project.
