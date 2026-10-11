@@ -25,9 +25,10 @@ What this file covers
    1.2  the Khronos OpenXR SDK headers;
    1.3  the OpenXR loader interface, which the layer re-declares;
    1.4  the Khronos Vulkan-Headers.
-2. The VectorXR app, vectorxr-app.exe: the Rust standard library and the
+2. The VectorXR app, vectorxr-app.exe: the Rust standard library, the
+   WebView2 loader from Microsoft's WebView2 SDK (part 2.1) and the
    139 Rust crates compiled into it.
-3. The app's user interface: the 27 npm packages it is built from.
+3. The app's user interface: the 30 npm packages it is built from.
 4. The license texts that many of the entries above share.
 
 
@@ -37,15 +38,19 @@ What this file does not cover
 - Software that VectorXR uses but does not install, which comes with its own
   terms: the Microsoft Visual C++ runtime (the layer and the app link it
   dynamically), D3DCompiler_47.dll and the other Windows system libraries, the
-  Microsoft Edge WebView2 Runtime that shows the app's window, NVIDIA's
-  optical flow library nvofapi64.dll (installed with the NVIDIA driver and
-  loaded at run time), and the OpenXR loader (each game loads the layer
-  through its own loader; VectorXR neither links nor installs one).
+  Microsoft Edge WebView2 Runtime that shows the app's window (part 2.1
+  covers the WebView2 loader in the app, which finds and starts the Runtime),
+  NVIDIA's optical flow library nvofapi64.dll (installed with the NVIDIA
+  driver and loaded at run time), and the OpenXR loader (each game loads the
+  layer through its own loader; VectorXR neither links nor installs one).
 - Tools that only run while VectorXR is built and whose own code is not in
   the installed files: the DirectX Shader Compiler (DXC) and fxc, which
   compile VectorXR's own shaders into the layer; the C++ and Rust compilers;
   Rust build-script dependencies, procedural macros and the crates only they
-  use; and npm development dependencies such as Vite and Tailwind CSS.
+  use; and the npm development dependencies that only process the
+  interface's code, such as vue-tsc, Autoprefixer and the Tauri CLI. The
+  development dependencies that put some of their own code into the
+  interface, such as Vite and Tailwind CSS, are listed in part 3.
 - C++ standard library code that the compiler builds into the layer.
   Microsoft's STL is licensed under Apache-2.0 WITH LLVM-exception, which
   waives the notice conditions for compiled code.
@@ -169,7 +174,7 @@ headers are Apache-2.0 only. The license text is in part 4.1.
 
 
 ================================================================================
-2. VectorXR app: Rust crates
+2. VectorXR app: Rust crates and the WebView2 loader
 ================================================================================
 
 vectorxr-app.exe statically links the Rust standard library, which is
@@ -177,19 +182,41 @@ Copyright The Rust Project Developers and licensed under Apache-2.0 OR MIT
 (the Apache License 2.0 text is in part 4.1). The Rust toolchain lists the
 standard library's full notices in share/doc/rust/COPYRIGHT-library.html.
 
-It also links the 139 crates below: the normal dependencies of
-vectorxr-app for x86_64-pc-windows-msvc, with features resolved as in the
-release build (cargo tree -e normal,no-proc-macro). Each crate's source code
-is at https://crates.io/crates/<name>/<version>.
+It also links Microsoft's WebView2 loader (part 2.1) and the 139 crates in
+parts 2.2 to 2.13: the normal dependencies of vectorxr-app for
+x86_64-pc-windows-msvc, with features resolved as in the release build
+(cargo tree -e normal,no-proc-macro). Each crate's source code is at
+https://crates.io/crates/<name>/<version>.
 
 The crates are grouped by the license that each one declares. Each entry
 reproduces the license and notice files that the crate's package ships. Where
 a crate offers a choice of licenses (OR), the files for every offered license
-are reproduced as shipped. The Apache License 2.0 and Mozilla Public License
-2.0 terms, which many crates share, are printed once, in part 4.
+are reproduced as shipped. Where a package ships no license file, or not the
+text of every license it requires, its entry says so, adds the missing text
+and says where any copyright notice it adds comes from. The Apache License
+2.0 and Mozilla Public License 2.0 terms, which many crates share, are
+printed once, in part 4.
 
 
-2.1  Apache-2.0 (1 crate)
+2.1  Microsoft WebView2 loader
+------------------------------
+
+vectorxr-app.exe statically links WebView2LoaderStatic.lib, the WebView2
+loader from Microsoft's WebView2 SDK, which is the Microsoft.Web.WebView2
+1.0.3650.58 NuGet package. The webview2-com-sys 0.38.2 crate, listed below,
+ships the library and links it. The loader finds the Microsoft Edge WebView2
+Runtime installed on the computer and starts it; the Runtime is not part of
+VectorXR.
+Source: https://www.nuget.org/packages/Microsoft.Web.WebView2/1.0.3650.58
+
+  Copyright (C) Microsoft Corporation
+
+The license of the Microsoft.Web.WebView2 package (its LICENSE.txt):
+
+[DRAFT: paste the LICENSE.txt of the Microsoft.Web.WebView2 1.0.3650.58 NuGet package here]
+
+
+2.2  Apache-2.0 (1 crate)
 -------------------------
 
 --------------------------------------------------------------------------------
@@ -201,7 +228,7 @@ LICENSE:
 [The Apache License 2.0; the text is in part 4.1.]
 
 
-2.2  Apache-2.0 AND MIT (1 crate)
+2.3  Apache-2.0 AND MIT (1 crate)
 ---------------------------------
 
 --------------------------------------------------------------------------------
@@ -269,7 +296,7 @@ have been licensed under extremely permissive terms.
 ------------------------------------------------------------------------------
 
 
-2.3  Apache-2.0 OR CC0-1.0 OR MIT-0 (1 crate)
+2.4  Apache-2.0 OR CC0-1.0 OR MIT-0 (1 crate)
 ---------------------------------------------
 
 --------------------------------------------------------------------------------
@@ -401,7 +428,7 @@ express Statement of Purpose.
     this CC0 or use of the Work.
 
 
-2.4  Apache-2.0 OR MIT (94 crates)
+2.5  Apache-2.0 OR MIT (94 crates)
 ----------------------------------
 
 --------------------------------------------------------------------------------
@@ -1978,6 +2005,11 @@ http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
 <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
 option.
 
+- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+
+[The package ships no text of Apache-2.0 or MIT. The Apache License 2.0 text
+is in part 4.1.]
+
 --------------------------------------------------------------------------------
 smallvec 1.15.1
 --------------------------------------------------------------------------------
@@ -2187,11 +2219,28 @@ SOFTWARE.
 unic-char-property 0.9.0
 unic-char-range 0.9.0
 unic-common 0.9.0
-unic-ucd-ident 0.9.0
 unic-ucd-version 0.9.0
 --------------------------------------------------------------------------------
 
 No license file is included. Declared license: MIT/Apache-2.0.
+Authors: The UNIC Project Developers.
+Repository: https://github.com/open-i18n/rust-unic/
+
+Copyright 2017 The UNIC Project Developers.
+[Copyright notice from a comment in the package's src/lib.rs.]
+
+[The Apache License 2.0; the text is in part 4.1.]
+
+--------------------------------------------------------------------------------
+unic-ucd-ident 0.9.0
+--------------------------------------------------------------------------------
+
+No license file is included. Declared license: MIT/Apache-2.0.
+Authors: The UNIC Project Developers.
+Repository: https://github.com/open-i18n/rust-unic/
+
+Copyright 2017-2019 The UNIC Project Developers.
+[Copyright notice from a comment in the package's src/lib.rs.]
 
 [The Apache License 2.0; the text is in part 4.1.]
 
@@ -2514,7 +2563,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 
-2.5  Apache-2.0 OR MIT OR Zlib (1 crate)
+2.6  Apache-2.0 OR MIT OR Zlib (1 crate)
 ----------------------------------------
 
 --------------------------------------------------------------------------------
@@ -2568,7 +2617,7 @@ Permission is granted to anyone to use this software for any purpose, including 
 3. This notice may not be removed or altered from any source distribution.
 
 
-2.6  BSD-3-Clause (2 crates)
+2.7  BSD-3-Clause (2 crates)
 ----------------------------
 
 --------------------------------------------------------------------------------
@@ -2598,6 +2647,10 @@ No license file is included. Declared license: BSD-3-Clause.
 Authors: Daniel Reiter Horn.
 Repository: https://github.com/dropbox/rust-alloc-no-stdlib
 
+Copyright (c) 2016 Dropbox, Inc.
+[Copyright notice from the LICENSE of alloc-no-stdlib, which comes from the
+same repository.]
+
 The standard BSD-3-Clause license text:
 
 Redistribution and use in source and binary forms, with or without
@@ -2626,7 +2679,7 @@ OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 
-2.7  BSD-3-Clause AND MIT (1 crate)
+2.8  BSD-3-Clause AND MIT (1 crate)
 -----------------------------------
 
 --------------------------------------------------------------------------------
@@ -2655,8 +2708,43 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 
+- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
 
-2.8  BSD-3-Clause OR MIT (1 crate)
+BSD-3-Clause (added by VectorXR):
+
+[The package declares BSD-3-Clause AND MIT but does not ship the BSD-3-Clause
+text. This is the standard BSD-3-Clause text, with the copyright notice from
+the LICENSE of brotli-decompressor, whose authors are the same.]
+
+Copyright (c) 2016 Dropbox, Inc.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+
+1. Redistributions of source code must retain the above copyright notice, this
+   list of conditions and the following disclaimer.
+
+2. Redistributions in binary form must reproduce the above copyright notice,
+   this list of conditions and the following disclaimer in the documentation
+   and/or other materials provided with the distribution.
+
+3. Neither the name of the copyright holder nor the names of its
+   contributors may be used to endorse or promote products derived from
+   this software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+
+2.9  BSD-3-Clause OR MIT (1 crate)
 ----------------------------------
 
 --------------------------------------------------------------------------------
@@ -2679,8 +2767,8 @@ Redistribution and use in source and binary forms, with or without modification,
 THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 
-2.9  MIT (15 crates)
---------------------
+2.10  MIT (15 crates)
+---------------------
 
 --------------------------------------------------------------------------------
 bytes 1.11.1
@@ -2923,6 +3011,9 @@ webview2-com-sys 0.38.2
 No license file is included. Declared license: MIT.
 Repository: https://github.com/wravery/webview2-rs
 
+[DRAFT: copyright holder not determined: the crate ships no license file,
+names no authors and has no copyright notice in its sources.]
+
 The standard MIT license text:
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
@@ -3000,7 +3091,7 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 
 
-2.10  MIT OR Unlicense (6 crates)
+2.11  MIT OR Unlicense (6 crates)
 ---------------------------------
 
 --------------------------------------------------------------------------------
@@ -3138,7 +3229,7 @@ OTHER DEALINGS IN THE SOFTWARE.
 For more information, please refer to <http://unlicense.org/>
 
 
-2.11  MPL-2.0 (1 crate)
+2.12  MPL-2.0 (1 crate)
 -----------------------
 
 VectorXR uses this crate unmodified. Its source code is available at:
@@ -3154,7 +3245,7 @@ LICENSE.txt:
 [The Mozilla Public License 2.0; see part 4.2.]
 
 
-2.12  Unicode-3.0 (15 crates)
+2.13  Unicode-3.0 (15 crates)
 -----------------------------
 
 --------------------------------------------------------------------------------
@@ -3229,9 +3320,16 @@ ICU 1.8.1 to ICU 57.1 © 1995-2016 International Business Machines Corporation a
 3. VectorXR app: npm packages
 ================================================================================
 
-The app's user interface is built from these 27 packages: every
-package in app/package-lock.json that is not marked as a development
-dependency. Some of them, such as the Vue compiler packages and TypeScript,
+The app's user interface is built from these 30 packages: every package in
+app/package-lock.json that is not marked as a development dependency, and the
+3 development dependencies whose own code the build puts into the interface:
+  - @vitejs/plugin-vue 5.2.4: its export helper, which assembles each compiled
+    single-file component.
+  - tailwindcss 3.4.19: Preflight, Tailwind CSS's base stylesheet, and the CSS
+    it generates for the classes the interface uses.
+  - vite 5.4.21: its module preload polyfill and the helper that preloads
+    dynamically imported modules.
+Some of the other packages, such as the Vue compiler packages and TypeScript,
 only run while the interface is built. Each package's source code is at
 https://www.npmjs.com/package/<name>/v/<version>.
 
@@ -3544,6 +3642,10 @@ SOFTWARE.
 --------------------------------------------------------------------------------
 
 No license file is included. Declared license: MIT OR Apache-2.0.
+Repository: https://github.com/tauri-apps/plugins-workspace
+
+Copyright 2019-2023 Tauri Programme within The Commons Conservancy
+[Copyright notice from a comment in the package's dist-js/index.js.]
 
 [The Apache License 2.0; the text is in part 4.1.]
 
@@ -3634,7 +3736,7 @@ ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
 OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 
 
-3.6  MIT (20 packages)
+3.6  MIT (23 packages)
 ----------------------
 
 --------------------------------------------------------------------------------
@@ -3711,6 +3813,34 @@ furnished to do so, subject to the following conditions:
 
 The above copyright notice and this permission notice shall be included in
 all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+--------------------------------------------------------------------------------
+@vitejs/plugin-vue 5.2.4
+--------------------------------------------------------------------------------
+
+LICENSE:
+
+MIT License
+
+Copyright (c) 2019-present, Yuxi (Evan) You and Vite contributors
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
 
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
 IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
@@ -3864,6 +3994,95 @@ FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR
 COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
 IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
 CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+--------------------------------------------------------------------------------
+tailwindcss 3.4.19
+--------------------------------------------------------------------------------
+
+LICENSE:
+
+MIT License
+
+Copyright (c) Tailwind Labs, Inc.
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+
+lib/css/LICENSE:
+
+MIT License
+
+Copyright (c) Nicolas Gallagher
+Copyright (c) Jonathan Neal
+Copyright (c) Sindre Sorhus <sindresorhus@gmail.com> (sindresorhus.com)
+Copyright (c) Adam Wathan
+Copyright (c) Jonathan Reinink
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+--------------------------------------------------------------------------------
+vite 5.4.21
+--------------------------------------------------------------------------------
+
+LICENSE.md (Vite's own license):
+
+# Vite core license
+Vite is released under the MIT license:
+
+MIT License
+
+Copyright (c) 2019-present, VoidZero Inc. and Vite contributors
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
 
 
 ================================================================================

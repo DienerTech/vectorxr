@@ -2,13 +2,21 @@
 // notices and license texts for the third-party code in the files that the
 // VectorXR installer ships. Re-run with
 // `node scripts/generate-third-party-notices.mjs` after changing
-// app/src-tauri/Cargo.lock, app/package-lock.json, the vendored NVIDIA headers
-// or the pinned Khronos headers. With `--check` it only reports whether the
-// file in the repository is current, and exits with 1 when it is not.
+// app/src-tauri/Cargo.lock, app/package-lock.json, the app's build setup, the
+// vendored NVIDIA headers or the pinned Khronos headers. With `--check` it
+// only reports whether the file in the repository is current, and exits with
+// 1 when it is not.
 //
 // Everything is read locally; nothing is downloaded. The app's crate sources
 // must already be in Cargo's registry (any build of the app puts them there),
 // and app/node_modules must be installed (`npm ci`).
+//
+// Some entries are maintained by hand below: the WebView2 loader (WEBVIEW2),
+// the development dependencies whose code the build puts into the interface
+// (BUNDLED_DEV_PACKAGES), license texts that a package requires but does not
+// ship (ADDED_NOTICES) and copyright notices for packages that ship no
+// license file (COPYRIGHT_OVERRIDES). The generator warns, or stops with an
+// error, when one of them no longer matches the packages it describes.
 import { execFileSync } from 'node:child_process'
 import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { dirname, extname, join } from 'node:path'
@@ -24,6 +32,7 @@ const TARGET = 'x86_64-pc-windows-msvc'
 const RULE = '='.repeat(80)
 const THIN_RULE = '-'.repeat(80)
 const FILE_RULE = '- '.repeat(40).trimEnd()
+const WRAP_WIDTH = 78
 
 // Files in a package that carry license terms or copyright notices. SPDX
 // metadata documents (LICENSE.spdx) and source files are not notices.
@@ -34,8 +43,8 @@ const APACHE_START = /Apache License\s+Version 2\.0, January 2004/
 const APACHE_END = 'END OF TERMS AND CONDITIONS'
 const MPL_START = /Mozilla Public License Version 2\.0/
 
-// Standard texts, used only for a package that ships no license file and
-// offers no license whose text this file already contains.
+// Standard texts, used for a package that ships no license file and offers
+// no license whose text this file already contains, and for ADDED_NOTICES.
 const STANDARD_TEXTS = {
   MIT: `Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -80,7 +89,104 @@ OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.`,
 }
 
+// Recognizes the full text of a license in a notice file (with its
+// whitespace collapsed), so the generator can check that every license a
+// package's declared expression requires has its text in the output. A file
+// that only names a license does not count.
+const MIT_GRANT = /Permission is hereby granted, free of charge, to any person obtaining a copy of this software/i
+const MIT_CONDITION = /shall be included in all copies or substantial portions/i
+const ISC_GRANT = /Permission to use, copy, modify, and(\/or)? distribute this software for any purpose with or without fee is hereby granted/i
+const BSD_GRANT = /Redistribution and use in source and binary forms, with or without modification, are permitted/i
+const BSD_ENDORSEMENT = /endorse or promote products derived from this software/i
+const LICENSE_TEXTS = {
+  '0BSD': (text) => ISC_GRANT.test(text) && !/appear in all copies/i.test(text),
+  'Apache-2.0': (text) => APACHE_START.test(text),
+  'BSD-2-Clause': (text) => BSD_GRANT.test(text) && !BSD_ENDORSEMENT.test(text),
+  'BSD-3-Clause': (text) => BSD_GRANT.test(text) && BSD_ENDORSEMENT.test(text),
+  'BlueOak-1.0.0': (text) => /Blue Oak Model License/i.test(text),
+  'CC0-1.0': (text) => /CC0 1\.0 Universal/.test(text),
+  ISC: (text) => ISC_GRANT.test(text) && /appear in all copies/i.test(text),
+  MIT: (text) => MIT_GRANT.test(text) && MIT_CONDITION.test(text),
+  'MIT-0': (text) => MIT_GRANT.test(text) && !MIT_CONDITION.test(text),
+  'MPL-2.0': (text) => MPL_START.test(text),
+  'Unicode-3.0': (text) => /UNICODE LICENSE V3/.test(text),
+  Unlicense: (text) => /This is free and unencumbered software released into the public domain/i.test(text),
+  Zlib: (text) =>
+    /Permission is granted to anyone to use this software for any purpose/i.test(text) &&
+    /The origin of this software must not be misrepresented/i.test(text),
+}
+
+// The WebView2 loader. webview2-com-sys ships WebView2LoaderStatic.lib from
+// Microsoft's WebView2 SDK (the Microsoft.Web.WebView2 NuGet package) and
+// links it into vectorxr-app.exe statically. Part 2.1 describes this SDK
+// version; the generator stops when the linked crate brings another one. The
+// SDK's license text is read from licensePath: save the LICENSE.txt of the
+// NuGet package there. Until then the output has a DRAFT placeholder.
+const WEBVIEW2 = {
+  crate: 'webview2-com-sys',
+  sdkVersion: '1.0.3650.58',
+  licensePath: join(repoRoot, 'third_party', 'microsoft-webview2', 'LICENSE.txt'),
+}
+
+// Development dependencies whose own code the build puts into the interface
+// (app/dist), with the notice files that cover that code. Check the built
+// app/dist after changing the build setup or these packages. `end` cuts a
+// file before the given line.
+const BUNDLED_DEV_PACKAGES = [
+  {
+    name: '@vitejs/plugin-vue',
+    code: 'its export helper, which assembles each compiled single-file component',
+    files: [{ path: 'LICENSE' }],
+  },
+  {
+    name: 'tailwindcss',
+    code: "Preflight, Tailwind CSS's base stylesheet, and the CSS it generates for the classes the interface uses",
+    files: [{ path: 'LICENSE' }, { path: 'lib/css/LICENSE' }],
+  },
+  {
+    name: 'vite',
+    code: 'its module preload polyfill and the helper that preloads dynamically imported modules',
+    // The rest of LICENSE.md lists the licenses of the code bundled into
+    // Vite's own build tool, which does not reach app/dist.
+    files: [{ path: 'LICENSE.md', end: '# Licenses of bundled dependencies', note: "Vite's own license" }],
+  },
+]
+
+// License texts that a package's declared license requires but that the
+// package does not ship. Each is added after the package's own files.
+const ADDED_NOTICES = {
+  brotli: [
+    {
+      license: 'BSD-3-Clause',
+      copyright: 'Copyright (c) 2016 Dropbox, Inc.',
+      source: 'the LICENSE of brotli-decompressor, whose authors are the same',
+    },
+  ],
+}
+
+// Copyright notices for packages that ship no license file. `file` names a
+// file in the package with the notice in a comment near its top; `lines`
+// gives a notice taken from elsewhere, and `source` says where. `draft` marks
+// a package whose copyright holder could not be determined from local files.
+const WEBVIEW2_RS_DRAFT =
+  'the crate ships no license file, names no authors and has no copyright notice in its sources'
+const COPYRIGHT_OVERRIDES = {
+  '@tauri-apps/plugin-dialog': { file: 'dist-js/index.js' },
+  'alloc-stdlib': {
+    lines: ['Copyright (c) 2016 Dropbox, Inc.'],
+    source: 'the LICENSE of alloc-no-stdlib, which comes from the same repository',
+  },
+  'unic-char-property': { file: 'src/lib.rs' },
+  'unic-char-range': { file: 'src/lib.rs' },
+  'unic-common': { file: 'src/lib.rs' },
+  'unic-ucd-ident': { file: 'src/lib.rs' },
+  'unic-ucd-version': { file: 'src/lib.rs' },
+  'webview2-com': { draft: WEBVIEW2_RS_DRAFT },
+  'webview2-com-sys': { draft: WEBVIEW2_RS_DRAFT },
+}
+
 const warnings = []
+const usedOverrides = new Set()
 
 function readText(path) {
   const text = readFileSync(path, 'utf8')
@@ -96,12 +202,35 @@ function readText(path) {
 
 const collapse = (text) => text.replace(/\s+/g, ' ').trim()
 const compareText = (a, b) => (a < b ? -1 : a > b ? 1 : 0)
+const compareLower = (a, b) => compareText(a.toLowerCase(), b.toLowerCase())
 const comparePackages = (a, b) =>
-  compareText(a.name.toLowerCase(), b.name.toLowerCase()) ||
-  a.version.localeCompare(b.version, 'en', { numeric: true })
+  compareLower(a.name, b.name) || a.version.localeCompare(b.version, 'en', { numeric: true })
 
 function heading(text, underline) {
   return [text, underline.repeat(text.length)].join('\n')
+}
+
+// wrap() keeps text passed through unbroken() on one line.
+const NO_BREAK = String.fromCharCode(0xa0)
+const unbroken = (text) => text.replace(/ /g, NO_BREAK)
+
+// Fills words into lines of at most WRAP_WIDTH characters. `indent` starts
+// the first line and `hanging` the others.
+function wrap(text, indent = '', hanging = indent) {
+  const lines = []
+  let prefix = indent
+  let line = ''
+  for (const word of text.split(/[ \t\n]+/).filter(Boolean)) {
+    if (line && prefix.length + line.length + 1 + word.length > WRAP_WIDTH) {
+      lines.push(prefix + line)
+      prefix = hanging
+      line = word
+    } else {
+      line = line ? `${line} ${word}` : word
+    }
+  }
+  lines.push(prefix + line)
+  return lines.join('\n').replaceAll(NO_BREAK, ' ')
 }
 
 function noticeFiles(dir) {
@@ -156,17 +285,78 @@ function isApacheAppendixTemplate(text) {
   )
 }
 
-function splitOrAlternatives(expression) {
-  const normalized = expression.trim().replace(/\s*\/\s*/g, ' OR ').replace(/\s+/g, ' ')
-  if (/[()]|\bAND\b|\bWITH\b/.test(normalized)) return null
-  return normalized.split(' OR ')
+// Parses an SPDX license expression into { id, exception }, { and: [...] }
+// and { or: [...] } nodes; AND binds more tightly than OR, and "/" is the old
+// crates.io spelling of OR. Returns null for text that is not an expression.
+function parseExpression(expression) {
+  const tokens = expression.replace(/\//g, ' OR ').match(/[()]|[^\s()]+/g) ?? []
+  const operators = new Set(['AND', 'OR', 'WITH', '(', ')'])
+  let at = 0
+  const parseAtom = () => {
+    const token = tokens[at++]
+    if (token === '(') {
+      const node = parseOr()
+      return node && tokens[at++] === ')' ? node : null
+    }
+    if (token === undefined || operators.has(token)) return null
+    if (tokens[at] !== 'WITH') return { id: token }
+    const exception = tokens[at + 1]
+    at += 2
+    return exception === undefined || operators.has(exception) ? null : { id: token, exception }
+  }
+  const parseList = (operator, parseItem) => {
+    const items = [parseItem()]
+    while (items.at(-1) && tokens[at] === operator) {
+      at += 1
+      items.push(parseItem())
+    }
+    if (items.some((item) => !item)) return null
+    return items.length === 1 ? items[0] : { [operator.toLowerCase()]: items }
+  }
+  const parseAnd = () => parseList('AND', parseAtom)
+  const parseOr = () => parseList('OR', parseAnd)
+  const node = parseOr()
+  return node && at === tokens.length ? node : null
 }
 
-// Groups "MIT/Apache-2.0", "MIT OR Apache-2.0" and "Apache-2.0 OR MIT" alike.
+// Sorts and deduplicates the operands, so "MIT/Apache-2.0", "MIT OR
+// Apache-2.0" and "Apache-2.0 OR MIT" read alike.
+function formatExpression(node, nested = false) {
+  if (node.id) return node.exception ? `${node.id} WITH ${node.exception}` : node.id
+  const operator = node.and ? 'AND' : 'OR'
+  const operands = [...new Set((node.and ?? node.or).map((item) => formatExpression(item, true)))]
+  const text = operands.sort(compareLower).join(` ${operator} `)
+  return nested && operands.length > 1 ? `(${text})` : text
+}
+
 function normalizeExpression(expression) {
-  const alternatives = splitOrAlternatives(expression)
-  if (!alternatives) return expression.trim().replace(/\s*\/\s*/g, ' OR ').replace(/\s+/g, ' ')
-  return [...new Set(alternatives)].sort((a, b) => compareText(a.toLowerCase(), b.toLowerCase())).join(' OR ')
+  const node = parseExpression(expression)
+  return node ? formatExpression(node) : expression.trim().replace(/\s+/g, ' ')
+}
+
+// The parts of an expression that all apply (AND), each of which may offer a
+// choice (OR).
+const conjuncts = (node) => node.and ?? [node]
+
+// The plain licenses (without exceptions) that a part offers.
+function alternatives(node) {
+  const items = node.or ?? [node]
+  return [...new Set(items.filter((item) => item.id && !item.exception).map((item) => item.id))].sort(compareLower)
+}
+
+function satisfies(node, available) {
+  if (node.and) return node.and.every((item) => satisfies(item, available))
+  if (node.or) return node.or.some((item) => satisfies(item, available))
+  return available.has(node.id)
+}
+
+function licenseTexts(files) {
+  const found = new Set()
+  for (const file of files) {
+    const flat = collapse(file.text)
+    for (const [id, test] of Object.entries(LICENSE_TEXTS)) if (test(flat)) found.add(id)
+  }
+  return found
 }
 
 // Names only: drops the e-mail and web addresses that author fields carry.
@@ -174,6 +364,28 @@ function authorNames(authors) {
   return authors
     .map((author) => author.replace(/\s*<[^>]*>/g, '').replace(/\s*\([^)]*\)/g, '').trim())
     .filter(Boolean)
+}
+
+// The license texts in ADDED_NOTICES for a package, after its own files.
+function addedNotices(pkg, files) {
+  const added = ADDED_NOTICES[pkg.name]
+  if (!added) return []
+  usedOverrides.add(`ADDED_NOTICES.${pkg.name}`)
+  const shipped = licenseTexts(files)
+  const notices = []
+  for (const notice of added) {
+    if (shipped.has(notice.license)) {
+      warnings.push(`${pkg.name} ${pkg.version} now ships the ${notice.license} text; remove it from ADDED_NOTICES`)
+      continue
+    }
+    const note = `[The package declares ${pkg.license} but does not ship the ${notice.license} text. This is ` +
+      `the standard ${notice.license} text, with the copyright notice from ${notice.source}.]`
+    notices.push({
+      name: `${notice.license} (added by VectorXR)`,
+      text: [wrap(note), notice.copyright, STANDARD_TEXTS[notice.license]].join('\n\n'),
+    })
+  }
+  return notices
 }
 
 function loadCrates() {
@@ -226,20 +438,57 @@ function loadCrates() {
     if (pkg.license_file && !files.some((file) => file.name === pkg.license_file)) {
       files.push({ name: pkg.license_file, text: readText(join(dir, pkg.license_file)) })
     }
-    crates.push({
+    const crate = {
       name: pkg.name,
       version: pkg.version,
       license: pkg.license ?? (pkg.license_file ? `see ${pkg.license_file}` : 'not declared'),
       authors: authorNames(pkg.authors ?? []),
       repository: pkg.repository ?? pkg.homepage ?? null,
+      dir,
       files,
-    })
+    }
+    files.push(...addedNotices(crate, files))
+    crates.push(crate)
   }
   built.delete(`${root.name} ${root.version}`)
   if (built.size > 0) {
     throw new Error(`cargo tree lists crates outside the normal dependency graph: ${[...built].join(', ')}`)
   }
   return crates.sort(comparePackages)
+}
+
+function npmPackage(path, entry, files) {
+  const dir = join(appDir, path)
+  if (!existsSync(dir)) throw new Error(`${path} is not installed; run npm ci in app/ first.`)
+  const manifest = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8'))
+  const author = typeof manifest.author === 'string' ? manifest.author : manifest.author?.name
+  const repository = typeof manifest.repository === 'string' ? manifest.repository : manifest.repository?.url
+  const pkg = {
+    name: entry.name ?? path.slice(path.lastIndexOf('node_modules/') + 'node_modules/'.length),
+    version: entry.version,
+    license: entry.license ?? manifest.license ?? 'not declared',
+    authors: authorNames(author ? [author] : []),
+    repository: repository ?? manifest.homepage ?? null,
+    dir,
+    files: files ? files(dir) : noticeFiles(dir),
+  }
+  pkg.files.push(...addedNotices(pkg, pkg.files))
+  return pkg
+}
+
+function bundledDevFiles(spec) {
+  return (dir) =>
+    spec.files.map((file) => {
+      const path = join(dir, file.path)
+      if (!existsSync(path)) throw new Error(`${spec.name} no longer ships ${file.path}; update BUNDLED_DEV_PACKAGES.`)
+      let text = readText(path)
+      if (file.end) {
+        const endAt = text.indexOf(file.end)
+        if (endAt < 0) throw new Error(`${spec.name}'s ${file.path} no longer contains "${file.end}".`)
+        text = text.slice(0, endAt).trim()
+      }
+      return { name: file.note ? `${file.path} (${file.note})` : file.path, text }
+    })
 }
 
 function loadNpmPackages() {
@@ -250,21 +499,72 @@ function loadNpmPackages() {
   const packages = []
   for (const [path, entry] of Object.entries(lock.packages)) {
     if (path === '' || entry.dev) continue
-    const dir = join(appDir, path)
-    if (!existsSync(dir)) throw new Error(`${path} is not installed; run npm ci in app/ first.`)
-    const manifest = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8'))
-    const author = typeof manifest.author === 'string' ? manifest.author : manifest.author?.name
-    const repository = typeof manifest.repository === 'string' ? manifest.repository : manifest.repository?.url
-    packages.push({
-      name: entry.name ?? path.slice(path.lastIndexOf('node_modules/') + 'node_modules/'.length),
-      version: entry.version,
-      license: entry.license ?? manifest.license ?? 'not declared',
-      authors: authorNames(author ? [author] : []),
-      repository: repository ?? manifest.homepage ?? null,
-      files: noticeFiles(dir),
-    })
+    packages.push(npmPackage(path, entry))
   }
-  return packages.sort(comparePackages)
+  const bundledDev = []
+  for (const spec of BUNDLED_DEV_PACKAGES) {
+    const path = `node_modules/${spec.name}`
+    const entry = lock.packages[path]
+    if (!entry) throw new Error(`${spec.name} is not in app/package-lock.json; update BUNDLED_DEV_PACKAGES.`)
+    if (!entry.dev) {
+      warnings.push(`${spec.name} is no longer a development dependency; remove it from BUNDLED_DEV_PACKAGES`)
+      continue
+    }
+    const pkg = npmPackage(path, entry, bundledDevFiles(spec))
+    packages.push(pkg)
+    bundledDev.push({ ...spec, version: pkg.version })
+  }
+  return { npmPackages: packages.sort(comparePackages), bundledDev }
+}
+
+function loadWebView2Loader(crates) {
+  const crate = crates.find((pkg) => pkg.name === WEBVIEW2.crate)
+  if (!crate) throw new Error(`The app no longer links ${WEBVIEW2.crate}; update part 2.1 and WEBVIEW2.`)
+  const lib = readFileSync(join(crate.dir, 'src', 'lib.rs'), 'utf8')
+  if (!/link\(name = "WebView2LoaderStatic", kind = "static"\)/.test(lib)) {
+    throw new Error(`${crate.name} ${crate.version} no longer links WebView2LoaderStatic.lib statically; update part 2.1.`)
+  }
+  // Each release's CHANGELOG entry, or an older one below it, names the SDK
+  // version that the crate's libraries come from.
+  const changelog = readText(join(crate.dir, 'CHANGELOG.md'))
+  const entryAt = changelog.indexOf(`## [${crate.version}]`)
+  const sdk = entryAt < 0 ? null : /WebView2 SDK to (\d+(?:\.\d+){3})/.exec(changelog.slice(entryAt))
+  if (!sdk) throw new Error(`Cannot find the WebView2 SDK version of ${crate.name} ${crate.version} in its CHANGELOG.md.`)
+  if (sdk[1] !== WEBVIEW2.sdkVersion) {
+    throw new Error(`${crate.name} ${crate.version} brings WebView2 SDK ${sdk[1]}, but part 2.1 describes ` +
+      `${WEBVIEW2.sdkVersion}. Check the new SDK's license, then update WEBVIEW2.`)
+  }
+  let license = null
+  if (existsSync(WEBVIEW2.licensePath)) {
+    license = readText(WEBVIEW2.licensePath)
+  } else {
+    warnings.push(`the WebView2 SDK license is missing: save the LICENSE.txt of the Microsoft.Web.WebView2 ` +
+      `${WEBVIEW2.sdkVersion} NuGet package as third_party/microsoft-webview2/LICENSE.txt and regenerate`)
+  }
+  return { crate, license }
+}
+
+function renderWebView2Loader({ crate, license }) {
+  const copyright = 'Copyright (C) Microsoft Corporation'
+  const lines = [
+    heading('2.1  Microsoft WebView2 loader', '-'),
+    '',
+    wrap(`vectorxr-app.exe statically links WebView2LoaderStatic.lib, the WebView2 loader from Microsoft's ` +
+      `WebView2 SDK, which is the Microsoft.Web.WebView2 ${WEBVIEW2.sdkVersion} NuGet package. The ` +
+      `${crate.name} ${crate.version} crate, listed below, ships the library and links it. The loader finds ` +
+      'the Microsoft Edge WebView2 Runtime installed on the computer and starts it; the Runtime is not part ' +
+      'of VectorXR.'),
+    `Source: https://www.nuget.org/packages/Microsoft.Web.WebView2/${WEBVIEW2.sdkVersion}`,
+    '',
+  ]
+  if (!license || !license.includes(copyright)) lines.push(`  ${copyright}`, '')
+  lines.push(
+    'The license of the Microsoft.Web.WebView2 package (its LICENSE.txt):',
+    '',
+    license ??
+      `[DRAFT: paste the LICENSE.txt of the Microsoft.Web.WebView2 ${WEBVIEW2.sdkVersion} NuGet package here]`,
+  )
+  return lines.join('\n')
 }
 
 function nvidiaNotice(path) {
@@ -317,26 +617,87 @@ function renderFile(file, texts) {
   return file.text
 }
 
+// The copyright notice from COPYRIGHT_OVERRIDES for a package that ships no
+// license file.
+function overrideCopyright(pkg) {
+  const override = COPYRIGHT_OVERRIDES[pkg.name]
+  if (!override) {
+    warnings.push(`${pkg.name} ${pkg.version}: no license file and no copyright notice; add one to COPYRIGHT_OVERRIDES`)
+    return []
+  }
+  usedOverrides.add(`COPYRIGHT_OVERRIDES.${pkg.name}`)
+  if (override.draft) {
+    warnings.push(`${pkg.name} ${pkg.version}: copyright holder not determined; the output has a DRAFT marker`)
+    return [wrap(`[DRAFT: copyright holder not determined: ${override.draft}.]`)]
+  }
+  if (override.lines) {
+    return [...override.lines, wrap(`[Copyright notice from ${override.source}.]`)]
+  }
+  // The comment lines near the top of the file that state a copyright.
+  const lines = readText(join(pkg.dir, override.file))
+    .split('\n')
+    .slice(0, 20)
+    .map((line) => /^\s*(?:\/\/+|\/\*+|\*+)\s*(Copyright\b.*?)\s*(?:\*\/)?$/i.exec(line)?.[1])
+    .filter(Boolean)
+  if (lines.length === 0) throw new Error(`${pkg.name}'s ${override.file} has no copyright comment near its top.`)
+  return [...lines, `[Copyright notice from a comment in the package's ${override.file}.]`]
+}
+
+// The start of the entry for a package that ships no license file, with a
+// copyright notice from COPYRIGHT_OVERRIDES.
 function renderMissingFiles(pkg) {
   const lines = [`No license file is included. Declared license: ${pkg.license}.`]
-  const alternatives = splitOrAlternatives(pkg.license) ?? []
-  if (alternatives.includes('Apache-2.0')) {
-    lines.push('', '[The Apache License 2.0; the text is in part 4.1.]')
-  } else if (alternatives.length === 1 && STANDARD_TEXTS[alternatives[0]]) {
-    if (pkg.authors.length > 0) lines.push(`Authors: ${pkg.authors.join(', ')}.`)
-    if (pkg.repository) lines.push(`Repository: ${pkg.repository}`)
-    lines.push('', `The standard ${alternatives[0]} license text:`, '', STANDARD_TEXTS[alternatives[0]])
-    warnings.push(`${pkg.name} ${pkg.version}: no license file; printed the standard ${alternatives[0]} text`)
-  } else {
-    lines.push('', `[See https://spdx.org/licenses/ for the text of ${pkg.license}.]`)
-    warnings.push(`${pkg.name} ${pkg.version}: no license file and no standard text for "${pkg.license}"`)
-  }
+  if (pkg.authors.length > 0) lines.push(`Authors: ${pkg.authors.join(', ')}.`)
+  if (pkg.repository) lines.push(`Repository: ${pkg.repository}`)
+  const copyright = overrideCopyright(pkg)
+  if (copyright.length > 0) lines.push('', ...copyright)
   return lines.join('\n')
+}
+
+// A package's entry: its notice files, then, for each license that its
+// declared expression requires (AND) but whose text none of the files has, a
+// pointer to part 4.1 when the package offers Apache-2.0. A package that
+// ships no files gets a standard text instead where there is one. Warns
+// about each license whose text is still missing.
+function renderPackage(pkg, texts) {
+  const shipsFiles = pkg.files.length > 0
+  const parts = shipsFiles
+    ? [pkg.files.map((file) => `${file.name}:\n\n${renderFile(file, texts)}`).join(`\n\n${FILE_RULE}\n\n`)]
+    : [renderMissingFiles(pkg)]
+  const available = licenseTexts(pkg.files)
+  const expression = parseExpression(pkg.license)
+  for (const part of expression ? conjuncts(expression) : []) {
+    if (satisfies(part, available)) continue
+    const offered = alternatives(part)
+    const standard = offered.find((id) => STANDARD_TEXTS[id])
+    if (offered.includes('Apache-2.0')) {
+      parts.push(shipsFiles
+        ? wrap(`[The package ships no text of ${offered.join(' or ')}. The Apache License 2.0 text is in part 4.1.]`)
+        : '[The Apache License 2.0; the text is in part 4.1.]')
+      available.add('Apache-2.0')
+    } else if (standard && !shipsFiles) {
+      parts.push(`The standard ${standard} license text:\n\n${STANDARD_TEXTS[standard]}`)
+      available.add(standard)
+    } else if (!shipsFiles) {
+      parts.push(`[See https://spdx.org/licenses/ for the text of ${formatExpression(part)}.]`)
+    }
+  }
+  if (!expression) {
+    warnings.push(`${pkg.name} ${pkg.version}: cannot read the declared license "${pkg.license}"`)
+    if (!shipsFiles) parts.push(`[See https://spdx.org/licenses/ for the text of ${pkg.license}.]`)
+  }
+  for (const part of expression ? conjuncts(expression) : []) {
+    if (!satisfies(part, available)) {
+      warnings.push(`${pkg.name} ${pkg.version}: declares ${formatExpression(expression)}, but no notice file ` +
+        `has the text of ${formatExpression(part)}`)
+    }
+  }
+  return parts.join(shipsFiles ? `\n\n${FILE_RULE}\n\n` : '\n\n')
 }
 
 // One block per distinct set of notice files, listing every package that
 // ships exactly that set, inside one section per declared license.
-function renderPackageGroups(packages, texts, kind, number) {
+function renderPackageGroups(packages, texts, kind, number, firstIndex = 1) {
   const groups = new Map()
   for (const pkg of packages) {
     const license = normalizeExpression(pkg.license)
@@ -344,16 +705,13 @@ function renderPackageGroups(packages, texts, kind, number) {
     groups.get(license).push(pkg)
   }
   const sections = []
-  let index = 0
-  for (const license of [...groups.keys()].sort((a, b) => compareText(a.toLowerCase(), b.toLowerCase()))) {
+  let index = firstIndex - 1
+  for (const license of [...groups.keys()].sort(compareLower)) {
     index += 1
     const members = groups.get(license)
     const blocks = new Map()
     for (const pkg of members) {
-      const body =
-        pkg.files.length === 0
-          ? renderMissingFiles(pkg)
-          : pkg.files.map((file) => `${file.name}:\n\n${renderFile(file, texts)}`).join(`\n\n${FILE_RULE}\n\n`)
+      const body = renderPackage(pkg, texts)
       if (!blocks.has(body)) blocks.set(body, [])
       blocks.get(body).push(pkg)
     }
@@ -371,7 +729,7 @@ function renderPackageGroups(packages, texts, kind, number) {
     }
     sections.push(lines.join('\n'))
   }
-  return sections.join('\n\n\n')
+  return { text: sections.join('\n\n\n'), lastIndex: index }
 }
 
 function sourceUrl(pkg, kind) {
@@ -382,7 +740,8 @@ function sourceUrl(pkg, kind) {
 
 function generate() {
   const crates = loadCrates()
-  const npmPackages = loadNpmPackages()
+  const { npmPackages, bundledDev } = loadNpmPackages()
+  const webView2 = loadWebView2Loader(crates)
   const license = readText(join(repoRoot, 'LICENSE'))
   const mplAt = license.search(MPL_START)
   if (mplAt < 0) throw new Error('LICENSE does not contain the Mozilla Public License 2.0 text.')
@@ -390,6 +749,21 @@ function generate() {
   const texts = { apacheKey: apache.key, mplKey: collapse(license.slice(mplAt)) }
   const nvidiaDir = join(repoRoot, 'third_party', 'nvidia-optical-flow')
   const nvidiaHeaders = ['nvOpticalFlowCommon.h', 'nvOpticalFlowD3D12.h']
+  const crateGroups = renderPackageGroups(crates, texts, 'crate', 2, 2)
+  const npmGroups = renderPackageGroups(npmPackages, texts, 'package', 3)
+  const bundledDevList = bundledDev
+    .map((spec) => wrap(`${spec.name} ${spec.version}: ${spec.code}.`, '  - ', '    '))
+    .join('\n')
+  const devCount = bundledDev.length === 1 ? 'development dependency' : `${bundledDev.length} development dependencies`
+
+  for (const name of Object.keys(ADDED_NOTICES)) {
+    if (!usedOverrides.has(`ADDED_NOTICES.${name}`)) warnings.push(`ADDED_NOTICES lists ${name}, which is not shipped`)
+  }
+  for (const name of Object.keys(COPYRIGHT_OVERRIDES)) {
+    if (!usedOverrides.has(`COPYRIGHT_OVERRIDES.${name}`)) {
+      warnings.push(`COPYRIGHT_OVERRIDES lists ${name}, which is not shipped or now ships a license file`)
+    }
+  }
 
   // Parts 1.2 to 1.4 describe headers that are not in the source tree (the
   // OpenXR.Loader package and the pins in layer/CMakeLists.txt and the
@@ -420,7 +794,8 @@ ${heading('What this file covers', '-')}
    1.2  the Khronos OpenXR SDK headers;
    1.3  the OpenXR loader interface, which the layer re-declares;
    1.4  the Khronos Vulkan-Headers.
-2. The VectorXR app, vectorxr-app.exe: the Rust standard library and the
+2. The VectorXR app, vectorxr-app.exe: the Rust standard library, the
+   WebView2 loader from Microsoft's WebView2 SDK (part 2.1) and the
    ${crates.length} Rust crates compiled into it.
 3. The app's user interface: the ${npmPackages.length} npm packages it is built from.
 4. The license texts that many of the entries above share.
@@ -431,15 +806,19 @@ ${heading('What this file does not cover', '-')}
 - Software that VectorXR uses but does not install, which comes with its own
   terms: the Microsoft Visual C++ runtime (the layer and the app link it
   dynamically), D3DCompiler_47.dll and the other Windows system libraries, the
-  Microsoft Edge WebView2 Runtime that shows the app's window, NVIDIA's
-  optical flow library nvofapi64.dll (installed with the NVIDIA driver and
-  loaded at run time), and the OpenXR loader (each game loads the layer
-  through its own loader; VectorXR neither links nor installs one).
+  Microsoft Edge WebView2 Runtime that shows the app's window (part 2.1
+  covers the WebView2 loader in the app, which finds and starts the Runtime),
+  NVIDIA's optical flow library nvofapi64.dll (installed with the NVIDIA
+  driver and loaded at run time), and the OpenXR loader (each game loads the
+  layer through its own loader; VectorXR neither links nor installs one).
 - Tools that only run while VectorXR is built and whose own code is not in
   the installed files: the DirectX Shader Compiler (DXC) and fxc, which
   compile VectorXR's own shaders into the layer; the C++ and Rust compilers;
   Rust build-script dependencies, procedural macros and the crates only they
-  use; and npm development dependencies such as Vite and Tailwind CSS.
+  use; and the npm development dependencies that only process the
+  interface's code, such as vue-tsc, Autoprefixer and the Tauri CLI. The
+  development dependencies that put some of their own code into the
+  interface, such as Vite and Tailwind CSS, are listed in part 3.
 - C++ standard library code that the compiler builds into the layer.
   Microsoft's STL is licensed under Apache-2.0 WITH LLVM-exception, which
   waives the notice conditions for compiled code.
@@ -505,7 +884,7 @@ The repository as a whole is licensed under Apache-2.0 OR MIT, but these C
 headers are Apache-2.0 only. The license text is in part 4.1.`,
 
     `${RULE}
-2. VectorXR app: Rust crates
+2. VectorXR app: Rust crates and the WebView2 loader
 ${RULE}
 
 vectorxr-app.exe statically links the Rust standard library, which is
@@ -513,34 +892,42 @@ Copyright The Rust Project Developers and licensed under Apache-2.0 OR MIT
 (the Apache License 2.0 text is in part 4.1). The Rust toolchain lists the
 standard library's full notices in share/doc/rust/COPYRIGHT-library.html.
 
-It also links the ${crates.length} crates below: the normal dependencies of
-${APP_CRATE} for ${TARGET}, with features resolved as in the
-release build (cargo tree -e normal,no-proc-macro). Each crate's source code
-is at https://crates.io/crates/<name>/<version>.
+${wrap(`It also links Microsoft's WebView2 loader (part 2.1) and the ${crates.length} crates in parts 2.2 to ` +
+  `2.${crateGroups.lastIndex}: the normal dependencies of ${APP_CRATE} for ${TARGET}, with features resolved as ` +
+  `in the release build (${unbroken('cargo tree -e normal,no-proc-macro')}). Each crate's source code is at ` +
+  'https://crates.io/crates/<name>/<version>.')}
 
 The crates are grouped by the license that each one declares. Each entry
 reproduces the license and notice files that the crate's package ships. Where
 a crate offers a choice of licenses (OR), the files for every offered license
-are reproduced as shipped. The Apache License 2.0 and Mozilla Public License
-2.0 terms, which many crates share, are printed once, in part 4.
+are reproduced as shipped. Where a package ships no license file, or not the
+text of every license it requires, its entry says so, adds the missing text
+and says where any copyright notice it adds comes from. The Apache License
+2.0 and Mozilla Public License 2.0 terms, which many crates share, are
+printed once, in part 4.
 
 
-${renderPackageGroups(crates, texts, 'crate', 2)}`,
+${renderWebView2Loader(webView2)}
+
+
+${crateGroups.text}`,
 
     `${RULE}
 3. VectorXR app: npm packages
 ${RULE}
 
-The app's user interface is built from these ${npmPackages.length} packages: every
-package in app/package-lock.json that is not marked as a development
-dependency. Some of them, such as the Vue compiler packages and TypeScript,
+${wrap(`The app's user interface is built from these ${npmPackages.length} packages: every package in ` +
+  'app/package-lock.json that is not marked as a development dependency, and the ' +
+  `${devCount} whose own code the build puts into the interface:`)}
+${bundledDevList}
+Some of the other packages, such as the Vue compiler packages and TypeScript,
 only run while the interface is built. Each package's source code is at
 https://www.npmjs.com/package/<name>/v/<version>.
 
 The packages are grouped and reproduced the same way as the crates in part 2.
 
 
-${renderPackageGroups(npmPackages, texts, 'package', 3)}`,
+${npmGroups.text}`,
 
     `${RULE}
 4. Shared license texts
