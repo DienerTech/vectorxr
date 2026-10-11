@@ -17,6 +17,8 @@
 #include <stdexcept>
 #include <thread>
 
+#include "test_adapter.h"
+
 using Microsoft::WRL::ComPtr;
 using namespace DirectX;
 
@@ -116,6 +118,23 @@ void CreateSwapchainRenderTarget(ID3D11Device* device,
 // SDK layers for --d3d11-debug, a hardware adapter), not that the probe is wrong.
 bool DeviceUnavailable(HRESULT result) {
     return result == DXGI_ERROR_SDK_COMPONENT_MISSING || result == DXGI_ERROR_UNSUPPORTED;
+}
+
+// Without OpenXR (--render-check, --gpu-calibrate): the adapter FG_TEST_ADAPTER names, or nullptr for the default
+// hardware adapter. When it names none, the machine lacks what the run needs (Unavailable).
+ComPtr<IDXGIAdapter1> StandaloneAdapter() {
+    const std::optional<std::string> wanted = test_adapter::Wanted();
+    if (!wanted) {
+        return nullptr;
+    }
+    ComPtr<IDXGIFactory1> factory;
+    ThrowIfFailed(CreateDXGIFactory1(IID_PPV_ARGS(&factory)), "CreateDXGIFactory1");
+    std::string why;
+    ComPtr<IDXGIAdapter1> adapter = test_adapter::FindDxgiAdapter(factory.Get(), *wanted, why);
+    if (!adapter) {
+        throw Unavailable(why);
+    }
+    return adapter;
 }
 
 D3D11_RECT ToD3D11(const PixelRect& rect, int32_t x, int32_t y) {
@@ -642,6 +661,8 @@ public:
                 description.AdapterLuid.LowPart == requirements.adapterLuid.LowPart) {
                 selected_adapter = candidate;
                 std::wcout << L"Graphics adapter: " << description.Description << L"\n";
+                CheckRuntimeAdapter(test_adapter::Utf8(description.Description));
+                luid_ = description.AdapterLuid;
                 break;
             }
         }
@@ -669,13 +690,14 @@ public:
         DeviceCreated();
     }
 
-    // --render-check: the default hardware adapter, without OpenXR.
+    // --render-check: the default hardware adapter (or FG_TEST_ADAPTER's), without OpenXR.
     void CreateStandaloneDevice() {
         const std::array<D3D_FEATURE_LEVEL, 4> feature_levels{
             D3D_FEATURE_LEVEL_12_1, D3D_FEATURE_LEVEL_12_0, D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0,
         };
+        const ComPtr<IDXGIAdapter1> adapter = StandaloneAdapter();
         const HRESULT result = D3D11CreateDevice(
-            nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr,
+            adapter.Get(), adapter ? D3D_DRIVER_TYPE_UNKNOWN : D3D_DRIVER_TYPE_HARDWARE, nullptr,
             D3D11_CREATE_DEVICE_BGRA_SUPPORT | (options_.d3d11_debug ? D3D11_CREATE_DEVICE_DEBUG : 0),
             feature_levels.data(), static_cast<UINT>(feature_levels.size()), D3D11_SDK_VERSION, &device_, nullptr,
             &context_);
@@ -689,6 +711,10 @@ public:
         }
         ThrowIfFailed(result, "D3D11CreateDevice");
         DeviceCreated();
+    }
+
+    std::optional<LUID> AdapterLuid() const override {
+        return luid_;
     }
 
     ID3D11Device* Device() const {
@@ -844,6 +870,7 @@ private:
     }
 
     Options options_;
+    std::optional<LUID> luid_; // the runtime's adapter
     ComPtr<ID3D11Device> device_;
     ComPtr<ID3D11DeviceContext> context_;
     ComPtr<ID3D11DeviceContext1> context1_;
@@ -941,7 +968,8 @@ bool RunD3D11GpuCalibration(const Options& options) {
     };
     ComPtr<ID3D11Device> device;
     ComPtr<ID3D11DeviceContext> context;
-    ThrowIfFailed(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr,
+    const ComPtr<IDXGIAdapter1> chosen = StandaloneAdapter();
+    ThrowIfFailed(D3D11CreateDevice(chosen.Get(), chosen ? D3D_DRIVER_TYPE_UNKNOWN : D3D_DRIVER_TYPE_HARDWARE, nullptr,
                                     options.d3d11_debug ? D3D11_CREATE_DEVICE_DEBUG : 0, feature_levels.data(),
                                     static_cast<UINT>(feature_levels.size()), D3D11_SDK_VERSION, &device, nullptr,
                                     &context),

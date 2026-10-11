@@ -313,8 +313,12 @@ if(WIN32 AND DEPTHXR_BUILD_LAYER)
             tools/probe_d3d11.cpp
             tools/probe_vulkan.cpp
             tools/probe_render_check.cpp
+            tools/probe_vram_ballast.cpp
             tools/probe_common.h
+            tests/test_adapter.h
         )
+        # FG_TEST_ADAPTER's helper is shared with the GPU tests.
+        target_include_directories(vectorxr_hardware_probe PRIVATE tests)
         # Vulkan is loaded at run time (vulkan-1.dll): only its headers are linked.
         target_link_libraries(
             vectorxr_hardware_probe
@@ -322,6 +326,7 @@ if(WIN32 AND DEPTHXR_BUILD_LAYER)
             OpenXR::openxr_loader
             Vulkan::Headers
             d3d11
+            d3d12
             d3dcompiler
             dxgi
         )
@@ -427,6 +432,11 @@ if(WIN32 AND DEPTHXR_BUILD_LAYER)
     endif()
 
     if(DEPTHXR_BUILD_TESTS)
+        # FG_TEST_ADAPTER's name matching and environment parsing (test_adapter.h), without a GPU.
+        add_executable(depthxr_test_adapter_tests tests/test_adapter_tests.cpp)
+        target_compile_definitions(depthxr_test_adapter_tests PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+        add_test(NAME depthxr_test_adapter_tests COMMAND depthxr_test_adapter_tests)
+        set_tests_properties(depthxr_test_adapter_tests PROPERTIES TIMEOUT 10)
         add_executable(depthxr_osd_backend_tests tests/osd_backend_tests.cpp)
         target_link_libraries(depthxr_osd_backend_tests PRIVATE depthxr_osd dxgi)
         target_compile_definitions(depthxr_osd_backend_tests PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX XR_USE_GRAPHICS_API_D3D11 XR_USE_GRAPHICS_API_D3D12 XR_USE_GRAPHICS_API_VULKAN)

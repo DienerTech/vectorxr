@@ -20,6 +20,8 @@
 #include <stdexcept>
 #include <tuple>
 
+#include "test_adapter.h"
+
 namespace probe {
 namespace {
 
@@ -370,6 +372,8 @@ public:
         physical_ = physical;
         VkPhysicalDeviceProperties properties{};
         vk_.GetPhysicalDeviceProperties(physical_, &properties);
+        device_name_ = properties.deviceName;
+        luid_.reset();
         std::ostringstream line;
         line << "Vulkan device: " << properties.deviceName << ", API " << ApiText(properties.apiVersion) << "."
              << VK_API_VERSION_PATCH(properties.apiVersion) << ", driver 0x" << std::hex << properties.driverVersion
@@ -382,6 +386,7 @@ public:
             if (id.deviceLUIDValid) {
                 LUID luid{};
                 std::memcpy(&luid, id.deviceLUID, sizeof(luid));
+                luid_ = luid;
                 line << ", LUID " << std::hex << std::setfill('0') << std::setw(8)
                      << static_cast<uint32_t>(luid.HighPart) << ":" << std::setw(8) << luid.LowPart << std::dec;
             }
@@ -464,6 +469,13 @@ public:
     VkPhysicalDevice PhysicalDevice() const {
         return physical_;
     }
+    const std::string& DeviceName() const {
+        return device_name_;
+    }
+    // The physical device's adapter; nullopt on a Vulkan 1.0 instance (no vkGetPhysicalDeviceProperties2).
+    std::optional<LUID> Luid() const {
+        return luid_;
+    }
     VkDevice Device() const {
         return device_;
     }
@@ -536,7 +548,7 @@ public:
     }
 
     // Without OpenXR (--gpu-calibrate, --render-check): an instance, the first discrete GPU (else the first one that
-    // is not a CPU implementation) and a device of the probe's own.
+    // is not a CPU implementation; with FG_TEST_ADAPTER, the first it names) and a device of the probe's own.
     void CreateStandalone() {
         VkInstance instance = VK_NULL_HANDLE;
         const VkResult created = vk_.CreateInstance(&InstanceCreateInfo({}, true), nullptr, &instance);
@@ -550,14 +562,19 @@ public:
         std::vector<VkPhysicalDevice> physicals(count);
         CheckVk(vk_.EnumeratePhysicalDevices(instance_, &count, physicals.data()), "vkEnumeratePhysicalDevices");
         std::vector<VkPhysicalDeviceType> types;
+        std::vector<test_adapter::Adapter> adapters;
         for (const VkPhysicalDevice candidate : physicals) {
             VkPhysicalDeviceProperties properties{};
             vk_.GetPhysicalDeviceProperties(candidate, &properties);
             types.push_back(properties.deviceType);
+            adapters.push_back({properties.deviceName, properties.deviceType == VK_PHYSICAL_DEVICE_TYPE_CPU});
         }
-        const std::optional<std::size_t> chosen = StandaloneDeviceIndex(types);
+        const std::optional<std::string> wanted = test_adapter::Wanted();
+        const std::optional<std::size_t> chosen =
+            wanted ? test_adapter::FirstMatch(adapters, *wanted) : StandaloneDeviceIndex(types);
         if (!chosen) {
-            throw Unavailable("no Vulkan device that is not a CPU implementation");
+            throw Unavailable(wanted ? test_adapter::NoMatch(*wanted, adapters)
+                                     : "no Vulkan device that is not a CPU implementation");
         }
         SetPhysicalDevice(physicals[*chosen]);
         VkDevice device = VK_NULL_HANDLE;
@@ -823,6 +840,8 @@ private:
     VkInstance instance_{VK_NULL_HANDLE};
     VkDebugUtilsMessengerEXT messenger_{VK_NULL_HANDLE};
     VkPhysicalDevice physical_{VK_NULL_HANDLE};
+    std::string device_name_;
+    std::optional<LUID> luid_;
     VkPhysicalDeviceMemoryProperties memory_{};
     uint32_t family_{0};
     uint32_t timestamp_bits_{0};
@@ -1168,6 +1187,10 @@ public:
         binding_.queueIndex = 0;
     }
 
+    std::optional<LUID> AdapterLuid() const override {
+        return device_->Luid();
+    }
+
     const void* Binding() const override {
         return &binding_;
     }
@@ -1381,6 +1404,7 @@ private:
                     instance, &get_info, &physical),
                 "xrGetVulkanGraphicsDevice2KHR");
         device_->SetPhysicalDevice(physical);
+        CheckRuntimeAdapter(device_->DeviceName());
 
         XrVulkanDeviceCreateInfoKHR device_info{XR_TYPE_VULKAN_DEVICE_CREATE_INFO_KHR};
         device_info.systemId = system;
@@ -1422,6 +1446,7 @@ private:
                     instance, system, vulkan_instance, &physical),
                 "xrGetVulkanGraphicsDeviceKHR");
         device_->SetPhysicalDevice(physical);
+        CheckRuntimeAdapter(device_->DeviceName());
 
         const std::vector<std::string> device_extensions = RuntimeExtensions(
             instance, system, XrFunction<PFN_xrGetVulkanDeviceExtensionsKHR>(instance, "xrGetVulkanDeviceExtensionsKHR"),

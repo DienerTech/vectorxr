@@ -275,6 +275,7 @@ probe like DCS, or stress the bridge:
 | `--sessions N` | N sessions one after another in one instance. |
 | `--hitch-every N`, `--hitch-ms M` | Every N seconds one frame takes M ms longer (a stutter). |
 | `--d3d11-debug` | The Direct3D 11 device has the debug layer; its errors and warnings are reported at the end. |
+| `--vram-ballast-mb N` | N MB (0-131072) of video memory held on the session's adapter from before the session to the end of the run, so Frame Generation has as little room as on a card with less memory (see [VRAM ballast](#vram-ballast)). |
 | `--graphics vulkan` and its options | See [Vulkan mode](#vulkan-mode). |
 | `--side-by-side`, `--quad-layer`, `--minimal-usage` | See [X-Plane's swapchain shapes](#x-planes-swapchain-shapes). |
 
@@ -371,8 +372,104 @@ as above, and exits with an error
 when the frames' mean is more than 3% off the target or a frame began with
 more frames queued than `--gpu-frames-ahead` allows (and, for Vulkan with
 `--vulkan-validation`, on any validation message). Direct3D 11 uses the
-default adapter, Vulkan the first discrete GPU. Other applications using the
-GPU at the same time add spikes to the p99.
+default adapter, Vulkan the first discrete GPU (or the adapter
+`FG_TEST_ADAPTER` names, see [Choosing the GPU](#choosing-the-gpu)). Other
+applications using the GPU at the same time add spikes to the p99.
+
+### VRAM ballast
+
+Frame Generation sizes itself by the video memory its process uses against
+the budget Windows gives the process on that adapter (DXGI's
+`QueryVideoMemoryInfo`, local segment group). In a stereo session that
+generates just in time, it keeps the last five real frames instead of three
+only while the two extra frames and a tenth of the budget still fit. Where
+each generated frame needs output images of its own, it generates fewer
+frames per real frame once the usage comes within 5% of the budget. On a
+large card neither limit comes near.
+
+`--vram-ballast-mb N` allocates N MB (1 MB = 1,048,576 bytes, as Frame
+Generation's log counts them) of committed Direct3D 12 buffers in the default
+heap on the session's adapter, after the graphics device is created and
+before the session, and holds them until the session has ended. Committed
+resources are resident from their creation, so the process's usage rises by
+about N MB, and Frame Generation, which counts the whole process's usage, has
+that much less room left, as it would with a smaller card. The probe prints
+the usage and budget before and after the allocation, and again at the end of
+the run, before the session ends (Frame Generation's images included):
+
+```text
+Video memory before the VRAM ballast: usage 410 MB, budget 30400 MB (29990 MB to spare; this process, local segment group)
+VRAM ballast: 17408 MB in 68 committed buffers on "NVIDIA GeForce RTX 5090"; the process's usage rose by 17410 MB
+Video memory with the VRAM ballast: usage 17820 MB, budget 30400 MB (12580 MB to spare; this process, local segment group)
+```
+
+Both of Frame Generation's limits are fractions of the budget, so to stand
+in for a card whose budget is `B_small` on one whose budget is `B` (the
+budget the probe prints), use N of about 0.9 x (`B` - `B_small`) MB; a 12 GB
+card's budget is somewhat under 12 GB. For example:
+
+```powershell
+& $probe --mode source-exact --quad-views --pattern --threaded-wait --gpu-ms 20 --gpu-chunks 40 --vram-ballast-mb 17408 --seconds 60
+```
+
+What the ballast does not simulate:
+
+- The budget. Windows assigns it from the card's memory and from what other
+  processes use; the probe's figures and Frame Generation's margins (a tenth
+  and a twentieth of the budget) stay the large card's.
+- Other processes. On a small card the runtime's compositor, the desktop and
+  other applications use the same memory and shrink the budget; the ballast
+  only adds to this process's usage.
+- Going over the budget. Then Windows may move allocations, the ballast's
+  among them, to system memory, which lowers the usage again instead of
+  showing what a small card would do. Keep the ballast, the game and Frame
+  Generation under the budget; the line at the end of the run shows whether
+  they stayed there.
+- A smaller card's bandwidth and speed.
+
+On an integrated GPU the local segment group is system memory shared with
+the processor, so the ballast takes system memory.
+
+The ballast is for an OpenXR session only (not `--render-check` or
+`--gpu-calibrate`); with `--graphics vulkan` it needs `--vulkan-api` 1.1 or
+above, for the device's adapter LUID. It cannot run with
+`VECTORXR_D3D11_BRIDGE_DEBUG=1` or `VECTORXR_VULKAN_BRIDGE_DEBUG=1`: Direct3D
+12 keeps one device per adapter in a process, so the ballast's device is the
+one the bridge uses, and the bridge enabling the debug layer once that device
+exists would remove it.
+
+## Choosing the GPU
+
+On a machine with more than one GPU (for example a processor's integrated AMD
+GPU beside an NVIDIA card), `FG_TEST_ADAPTER` picks the one the GPU tests and
+the probes run on. Its value is matched, ignoring case and the spaces around
+it, against each adapter's name (the DXGI description for Direct3D, the
+`deviceName` for Vulkan), and the first hardware adapter whose name contains
+it is used. Unset or empty, nothing changes.
+
+```powershell
+$env:FG_TEST_ADAPTER = "radeon"
+```
+
+| Run | Without `FG_TEST_ADAPTER` | When it names no adapter |
+| --- | --- | --- |
+| `depthxr_framegen_tests` on Direct3D hardware (`hw-d3d12`, `hw-d3d11`, `bench-d3d12`, `bench-d3d11`, `profile`, `contention`, `replay`, `nvof`) | Direct3D 12: the first hardware adapter that runs it; Direct3D 11: the default adapter | Fails |
+| `depthxr_framegen_tests vulkan` (and `hw-vulkan`, `bench-vulkan`), `depthxr_osd_backend_tests vulkan` | The first Vulkan device | Skipped (77) |
+| `depthxr_d3d11_bridge_tests hw`, `depthxr_d3d11_bridge_layer_tests hw` | The first adapter | Skipped (77) |
+| `depthxr_vulkan_bridge_tests`, `depthxr_vulkan_bridge_layer_tests` | The first GPU whose Vulkan device and Direct3D 12 adapter are the same | Skipped (77); fails with `VECTORXR_TESTS_REQUIRE_HW=1` |
+| `depthxr_bridge_probe` | The first high-performance hardware adapter | Aborts |
+| `vectorxr_hardware_probe --render-check` | The default adapter (Vulkan: the first discrete GPU) | Skipped (77); fails with `VECTORXR_TESTS_REQUIRE_HW=1` |
+| `vectorxr_hardware_probe --gpu-calibrate` | The same | Fails |
+
+The message lists the adapters there are. The suites that run on WARP are not
+affected. In the layer tests only the test's own devices follow
+`FG_TEST_ADAPTER`; VectorXR takes the adapter of the game's device, as it does
+in a session.
+
+An OpenXR session renders on the adapter the runtime asks for, so the probe
+cannot choose one there. With `FG_TEST_ADAPTER` set, a session run checks the
+runtime's adapter against it and stops with an error when they differ, rather
+than run on a GPU other than the one asked for.
 
 ## What this probe does not prove
 

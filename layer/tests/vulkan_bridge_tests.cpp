@@ -10,7 +10,8 @@
 // through a getter of the test's, which records the bridge's barriers and
 // queue calls (and fails submissions on demand), so the hand-over protocol is
 // checked structurally as well as by readbacks. Only the fixture decides a
-// skip; with VECTORXR_TESTS_REQUIRE_HW=1 a skip fails.
+// skip; with VECTORXR_TESTS_REQUIRE_HW=1 a skip fails. FG_TEST_ADAPTER picks
+// the GPU by name (test_adapter.h).
 
 #include <windows.h>
 #include <d3d12.h>
@@ -23,6 +24,7 @@
 #include <openxr/openxr_platform.h>
 
 #include "depthxr/framegen_vulkan_bridge.h"
+#include "test_adapter.h"
 #include "test_gates.h"
 #include "vulkan_test_validation.h"
 
@@ -362,8 +364,9 @@ void TestFixtureInstance() {
     g_create_instance = nullptr;
 }
 
-// The physical device whose LUID is a hardware DXGI adapter's (or, with
-// `like` set, the one with the same name and IDs).
+// The physical device whose LUID is a hardware DXGI adapter's, the first
+// whose name contains FG_TEST_ADAPTER when it is set (or, with `like` set,
+// the one with the same name and IDs).
 bool FindPhysical(Game& game, const Game* like, std::string& error) {
     std::uint32_t count = 0;
     game.vkEnumeratePhysicalDevices(game.instance, &count, nullptr);
@@ -371,10 +374,14 @@ bool FindPhysical(Game& game, const Game* like, std::string& error) {
     game.vkEnumeratePhysicalDevices(game.instance, &count, devices.data());
     ComPtr<IDXGIFactory4> factory;
     CreateDXGIFactory1(IID_PPV_ARGS(&factory));
+    const std::optional<std::string> named = like ? std::nullopt : test_adapter::Wanted();
+    std::vector<test_adapter::Adapter> adapters; // for FG_TEST_ADAPTER's message
     for (VkPhysicalDevice device : devices) {
         VkPhysicalDeviceProperties properties{};
         game.vkGetPhysicalDeviceProperties(device, &properties);
+        adapters.push_back({properties.deviceName, properties.deviceType == VK_PHYSICAL_DEVICE_TYPE_CPU});
         if (properties.deviceType == VK_PHYSICAL_DEVICE_TYPE_CPU) continue;
+        if (named && !test_adapter::NameMatches(properties.deviceName, *named)) continue;
         if (like) {
             VkPhysicalDeviceProperties wanted{};
             like->vkGetPhysicalDeviceProperties(like->physical, &wanted);
@@ -406,6 +413,7 @@ bool FindPhysical(Game& game, const Game* like, std::string& error) {
     }
     if (!game.physical) {
         error = "no Vulkan device whose adapter is a hardware Direct3D 12 adapter";
+        if (named) error += ": " + test_adapter::NoMatch(*named, adapters);
         return false;
     }
     game.vkGetPhysicalDeviceMemoryProperties(game.physical, &game.memory);

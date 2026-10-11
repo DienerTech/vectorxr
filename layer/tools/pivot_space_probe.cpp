@@ -20,6 +20,8 @@
 #include <stdexcept>
 #include <thread>
 
+#include "test_adapter.h"
+
 #pragma comment(lib, "winmm.lib")
 
 using namespace DirectX;
@@ -74,6 +76,15 @@ int UnavailableExitCode() {
     const DWORD length =
         GetEnvironmentVariableA("VECTORXR_TESTS_REQUIRE_HW", value.data(), static_cast<DWORD>(value.size()));
     return length == 1 && value[0] == '1' ? 1 : 77;
+}
+
+void CheckRuntimeAdapter(const std::string& name) {
+    const std::optional<std::string> wanted = test_adapter::Wanted();
+    if (wanted && !test_adapter::NameMatches(name, *wanted)) {
+        throw std::runtime_error(std::string(test_adapter::kVariable) + "=\"" + *wanted +
+                                 "\" does not name the runtime's adapter, \"" + name +
+                                 "\": an OpenXR session renders on the adapter the runtime asks for");
+    }
 }
 
 std::optional<int64_t> ChooseFormat(const std::vector<int64_t>& available, const std::vector<int64_t>& preferences) {
@@ -185,6 +196,10 @@ void PrintUsage() {
         << "                          vulkan: the first discrete GPU), run 200 frames of the load alone (paced\n"
         << "                          at 90 Hz, or --frame-ms when longer), report what they measured and fail\n"
         << "                          if the mean is off by over 3%.\n"
+        << "  --vram-ballast-mb N     Hold N MB (0-131072) of video memory on the session's adapter from before\n"
+        << "                          the session to the end of the run, so Frame Generation finds that much\n"
+        << "                          less of the process's budget left, as on a card with less memory. The\n"
+        << "                          usage and budget are printed before and after.\n"
         << "  --render-check          Without OpenXR: draw the swapchain shapes into images the probe makes\n"
         << "                          itself, check their pixels, and fail on debug layer or validation messages.\n"
         << "                          Exits 77 (skipped) when the machine lacks vulkan-1.dll, a hardware GPU, the\n"
@@ -206,7 +221,9 @@ void PrintUsage() {
         << "  --vk-test-stuck-queue   Check of the probe itself (--render-check, Vulkan): the first swapchain\n"
         << "                          removal finds the queue waiting on a semaphore that is never signalled.\n"
         << "  --help                  Show this help.\n\n"
-        << "Press Escape in the console window to end an active run early.\n";
+        << "Press Escape in the console window to end an active run early.\n\n"
+        << "FG_TEST_ADAPTER=<text>: --render-check and --gpu-calibrate run on the first hardware adapter whose name\n"
+        << "contains the text (ignoring case); in a session the run stops unless it names the runtime's adapter.\n";
 }
 
 // The value after argv[i] (advancing i).
@@ -320,6 +337,8 @@ Options ParseOptions(int argc, char** argv) {
             options.gpu_chunks = static_cast<int>(ParseNumber(argc, argv, i, 1.0, 256.0, true));
         } else if (argument == "--gpu-calibrate") {
             options.gpu_calibrate = true;
+        } else if (argument == "--vram-ballast-mb") {
+            options.vram_ballast_mb = static_cast<uint32_t>(ParseNumber(argc, argv, i, 0.0, 131072.0, true));
         } else if (argument == "--mode") {
             const std::string value = ParseValue(argc, argv, i);
             if (value == "source-exact") {
@@ -357,6 +376,15 @@ Options ParseOptions(int argc, char** argv) {
     }
     if (options.vk_test_stuck_queue && (!options.render_check || options.vulkan_api < VK_API_VERSION_1_2)) {
         throw std::runtime_error("--vk-test-stuck-queue requires --render-check and --vulkan-api 1.2 or above");
+    }
+    if (options.vram_ballast_mb > 0 && (options.render_check || options.gpu_calibrate)) {
+        throw std::runtime_error("--vram-ballast-mb is for an OpenXR session (Frame Generation runs only there): not "
+                                 "with --render-check or --gpu-calibrate");
+    }
+    if (options.vram_ballast_mb > 0 && options.graphics == GraphicsApi::Vulkan &&
+        options.vulkan_api < VK_API_VERSION_1_1) {
+        throw std::runtime_error("--vram-ballast-mb with --graphics vulkan requires --vulkan-api 1.1 or above (the "
+                                 "device's adapter LUID)");
     }
     return options;
 }
@@ -429,6 +457,11 @@ void RunOptionSelfTest() {
                   "--hitch-every", "4", "--hitch-ms", "250"})
                    .sessions == 3,
            "frame options parse");
+    Expect(defaults.vram_ballast_mb == 0 && parse({"--vram-ballast-mb", "20480"}).vram_ballast_mb == 20480 &&
+               parse({"--vram-ballast-mb", "131072"}).vram_ballast_mb == 131072 &&
+               parse({"--graphics", "vulkan", "--vram-ballast-mb", "512"}).vram_ballast_mb == 512 &&
+               parse({"--vram-ballast-mb", "0", "--render-check"}).render_check,
+           "--vram-ballast-mb parses (0: none, which any mode allows)");
     for (const std::vector<std::string>& arguments : std::vector<std::vector<std::string>>{
              {"--gpu-ms"},
              {"--gpu-ms", "-1"},
@@ -486,6 +519,14 @@ void RunOptionSelfTest() {
              {"--mode"},
              {"--mode", "cross"},
              {"--side-by-side=1"},
+             {"--vram-ballast-mb"},
+             {"--vram-ballast-mb", "-1"},
+             {"--vram-ballast-mb", "1.5"},
+             {"--vram-ballast-mb", "131073"},
+             {"--vram-ballast-mb", "8GB"},
+             {"--vram-ballast-mb", "8", "--render-check"},
+             {"--vram-ballast-mb", "8", "--gpu-calibrate", "--gpu-ms", "5"},
+             {"--graphics", "vulkan", "--vulkan-api", "1.0", "--vram-ballast-mb", "8"},
          }) {
         std::string joined;
         for (const std::string& argument : arguments) {
@@ -562,6 +603,40 @@ void RunGpuLoadSelfTest() {
            "percentiles");
 }
 
+void RunAdapterSelfTest() {
+    // FG_TEST_ADAPTER in a session: the runtime's adapter is only checked against it.
+    std::array<char, 256> saved_adapter{};
+    const DWORD saved_adapter_length = GetEnvironmentVariableA(test_adapter::kVariable, saved_adapter.data(),
+                                                               static_cast<DWORD>(saved_adapter.size()));
+    const auto rejects_runtime_adapter = [](const std::string& name) {
+        try {
+            CheckRuntimeAdapter(name);
+        } catch (const std::exception&) {
+            return true;
+        }
+        return false;
+    };
+    SetEnvironmentVariableA(test_adapter::kVariable, nullptr);
+    const bool unset_accepts = !rejects_runtime_adapter("NVIDIA GeForce RTX 5090");
+    SetEnvironmentVariableA(test_adapter::kVariable, "radeon");
+    const bool named_accepted = !rejects_runtime_adapter("AMD Radeon(TM) Graphics");
+    const bool other_rejected = rejects_runtime_adapter("NVIDIA GeForce RTX 5090");
+    SetEnvironmentVariableA(test_adapter::kVariable,
+                            saved_adapter_length > 0 && saved_adapter_length < saved_adapter.size()
+                                ? saved_adapter.data()
+                                : nullptr);
+    Expect(unset_accepts && named_accepted && other_rejected,
+           "FG_TEST_ADAPTER accepts the runtime's adapter only when it names it (any adapter when unset)");
+
+    // --vram-ballast-mb: 256 MB buffers, the last one the rest.
+    constexpr uint64_t kMegabyte = 1024ull * 1024ull;
+    const std::vector<uint64_t> ballast = BallastBufferBytes(1000);
+    Expect(BallastBufferBytes(0).empty() && BallastBufferBytes(256) == std::vector<uint64_t>{256 * kMegabyte} &&
+               ballast == std::vector<uint64_t>{256 * kMegabyte, 256 * kMegabyte, 256 * kMegabyte, 232 * kMegabyte} &&
+               BallastBufferBytes(131072).size() == 512,
+           "the VRAM ballast's buffers add up to it");
+}
+
 void RunPatternSelfTest() {
     const auto inside = [](const PixelRect& rect, uint32_t width, uint32_t height) {
         return rect.left >= 0 && rect.top >= 0 && rect.right <= static_cast<int32_t>(width) &&
@@ -595,6 +670,7 @@ void RunPatternSelfTest() {
 void RunSelfTest() {
     RunOptionSelfTest();
     RunGpuLoadSelfTest();
+    RunAdapterSelfTest();
     RunPatternSelfTest();
     RunD3D11SelfTest();
     RunVulkanSelfTest();
@@ -820,6 +896,7 @@ public:
     // does the same before its summary; after it this finds nothing left but the graphics object.
     ~ProbeApp() {
         TearDown();
+        ballast_.reset();
         graphics_.reset();
     }
 
@@ -888,6 +965,7 @@ public:
                       << ", swapchains=" << (options_.side_by_side ? "side-by-side" : "one per view")
                       << (options_.quad_layer ? ", quadLayer=yes" : "")
                       << (options_.minimal_usage ? ", colorUsage=0" : "")
+                      << (ballast_ ? ", vramBallastMb=" + std::to_string(options_.vram_ballast_mb) : "")
                       << ", frameMs=" << options_.frame_ms;
             if (gpu_load_) {
                 std::cout << ", gpuMs=" << options_.gpu_ms << " (framesAhead " << options_.gpu_frames_ahead
@@ -938,7 +1016,11 @@ private:
             gpu_load_->Drain();
             gpu_load_->Report(std::cout);
         }
+        if (ballast_) {
+            ballast_->Report("at the end of the run, before the session ends");
+        }
         TearDown();
+        ballast_.reset();
         graphics_->DestroyDevice();
         graphics_->Report();
     }
@@ -1016,6 +1098,14 @@ private:
         std::cout << "System: " << system_properties.systemName << "\n";
 
         graphics_->CreateDevice(instance_, system_id_);
+        if (options_.vram_ballast_mb > 0) {
+            // Before the session, so that Frame Generation finds it from the start.
+            const std::optional<LUID> adapter = graphics_->AdapterLuid();
+            if (!adapter) {
+                throw std::runtime_error("--vram-ballast-mb: the graphics device's adapter (its LUID) is unknown");
+            }
+            ballast_ = CreateVramBallast(*adapter, options_.vram_ballast_mb);
+        }
         if (options_.gpu_ms > 0.0) {
             gpu_load_ = graphics_->CreateGpuLoad(options_);
             gpu_load_->Calibrate(options_.quad_views ? 4u : 2u);
@@ -1653,6 +1743,7 @@ private:
     std::vector<ViewTarget> views_;
     std::optional<ProbeSwapchain> quad_;
     std::unique_ptr<GpuLoad> gpu_load_;
+    std::unique_ptr<VramBallast> ballast_; // --vram-ballast-mb, from before the session until after it
     uint64_t rendered_frames_{0};
     uint64_t invalid_view_frames_{0};
     uint64_t space_relation_failures_{0};

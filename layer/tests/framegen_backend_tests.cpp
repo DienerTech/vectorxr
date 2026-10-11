@@ -5,7 +5,9 @@
 // exits 77 (skipped) when none is present. hw-d3d12 runs the Direct3D 12
 // scenarios on the first hardware adapter (variable-rate shading, the
 // optical flow hardware, a GPU's fence budgets: what WARP does not have) and
-// passes with a message when there is none.
+// passes with a message when there is none. FG_TEST_ADAPTER=<text> puts the
+// hardware modes and Vulkan on the adapter it names instead (test_adapter.h);
+// naming none fails the hardware modes and skips Vulkan.
 
 #include <windows.h>
 #include <d3d11.h>
@@ -19,6 +21,7 @@
 #include "depthxr/framegen_gpu.h"
 #include "depthxr/framegen_runtime_queue.h"
 #include "depthxr/quadviews_compose.h"
+#include "test_adapter.h"
 #include "test_gates.h"
 
 #ifdef DEPTHXR_NVOF_RESEARCH
@@ -64,6 +67,20 @@ void Check(bool ok, const std::string& why) {
         test_gates::OpenAllBeforeExit();
         std::exit(1);
     }
+}
+
+// The hardware modes' adapter: FG_TEST_ADAPTER's, or nullptr without it
+// (Direct3D 11 then takes the default adapter, Direct3D 12 the first hardware
+// adapter that runs it). Naming no hardware adapter fails.
+ComPtr<IDXGIAdapter1> WantedAdapter() {
+    const std::optional<std::string> wanted = test_adapter::Wanted();
+    if (!wanted) return nullptr;
+    ComPtr<IDXGIFactory1> factory;
+    Check(SUCCEEDED(CreateDXGIFactory1(IID_PPV_ARGS(&factory))), "DXGI factory");
+    std::string why;
+    ComPtr<IDXGIAdapter1> adapter = test_adapter::FindDxgiAdapter(factory.Get(), *wanted, why);
+    Check(adapter != nullptr, why);
+    return adapter;
 }
 
 using Pixels = std::vector<std::uint32_t>; // RGBA8, sRGB encoded
@@ -1380,8 +1397,11 @@ class D3D11Compositor {
   public:
     explicit D3D11Compositor(bool hardware) {
         const D3D_FEATURE_LEVEL level = D3D_FEATURE_LEVEL_11_0;
-        Check(SUCCEEDED(D3D11CreateDevice(nullptr, hardware ? D3D_DRIVER_TYPE_HARDWARE : D3D_DRIVER_TYPE_WARP, nullptr, 0,
-                                          &level, 1, D3D11_SDK_VERSION, &device_, nullptr, &context_)),
+        const ComPtr<IDXGIAdapter1> adapter = hardware ? WantedAdapter() : nullptr;
+        const D3D_DRIVER_TYPE type =
+            adapter ? D3D_DRIVER_TYPE_UNKNOWN : hardware ? D3D_DRIVER_TYPE_HARDWARE : D3D_DRIVER_TYPE_WARP;
+        Check(SUCCEEDED(D3D11CreateDevice(adapter.Get(), type, nullptr, 0, &level, 1, D3D11_SDK_VERSION, &device_,
+                                          nullptr, &context_)),
               "D3D11 compositor device");
         const char* source = QuadViewsD3D11ShaderSource();
         ComPtr<ID3DBlob> vs, ps, errors;
@@ -5312,8 +5332,12 @@ int D3D11Test() {
     ComPtr<ID3D11Device> device;
     ComPtr<ID3D11DeviceContext> context;
     const D3D_FEATURE_LEVEL level = D3D_FEATURE_LEVEL_11_0;
-    Check(SUCCEEDED(D3D11CreateDevice(nullptr, g_bench || g_hardware ? D3D_DRIVER_TYPE_HARDWARE : D3D_DRIVER_TYPE_WARP, nullptr, 0,
-                                      &level, 1, D3D11_SDK_VERSION, &device, nullptr, &context)),
+    const bool hardware = g_bench || g_hardware;
+    const ComPtr<IDXGIAdapter1> adapter = hardware ? WantedAdapter() : nullptr;
+    const D3D_DRIVER_TYPE type =
+        adapter ? D3D_DRIVER_TYPE_UNKNOWN : hardware ? D3D_DRIVER_TYPE_HARDWARE : D3D_DRIVER_TYPE_WARP;
+    Check(SUCCEEDED(D3D11CreateDevice(adapter.Get(), type, nullptr, 0, &level, 1, D3D11_SDK_VERSION, &device, nullptr,
+                                      &context)),
           "D3D11 device");
     std::vector<ComPtr<ID3D11Texture2D>> keep;
     XrGraphicsBindingD3D11KHR binding{XR_TYPE_GRAPHICS_BINDING_D3D11_KHR};
@@ -6010,7 +6034,16 @@ int D3D12Test() {
             debug1->SetEnableGPUBasedValidation(TRUE);
         }
     }
-    if (g_bench || g_hardware) {
+    if (const ComPtr<IDXGIAdapter1> wanted = g_bench || g_hardware ? WantedAdapter() : nullptr) {
+        // FG_TEST_ADAPTER's adapter, which must run Direct3D 12.
+        DXGI_ADAPTER_DESC1 desc{};
+        Check(SUCCEEDED(wanted->GetDesc1(&desc)), "the adapter's description");
+        const std::string name = test_adapter::Utf8(desc.Description);
+        Check(SUCCEEDED(D3D12CreateDevice(wanted.Get(), D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&device))),
+              "a Direct3D 12 device on " + name + " (FG_TEST_ADAPTER)");
+        warp = wanted;
+        std::cout << "D3D12 on " << name << " (FG_TEST_ADAPTER)\n";
+    } else if (g_bench || g_hardware) {
         // The first hardware adapter that runs Direct3D 12; without one
         // (a machine with no GPU, or only Microsoft's software adapter)
         // there is nothing to run on, which is not a failure.
@@ -6374,7 +6407,8 @@ int D3D12Test() {
 // --- Vulkan -------------------------------------------------------------------
 
 #define VK_TEST_FUNCTIONS(X)                                                                                             \
-    X(CreateInstance) X(DestroyInstance) X(EnumeratePhysicalDevices) X(GetPhysicalDeviceQueueFamilyProperties)            \
+    X(CreateInstance) X(DestroyInstance) X(EnumeratePhysicalDevices) X(GetPhysicalDeviceProperties)                       \
+    X(GetPhysicalDeviceQueueFamilyProperties)                                                                             \
     X(GetPhysicalDeviceMemoryProperties) X(CreateDevice) X(DestroyDevice) X(GetDeviceQueue) X(CreateImage) X(DestroyImage) \
     X(GetImageMemoryRequirements) X(AllocateMemory) X(FreeMemory) X(BindImageMemory) X(CreateBuffer) X(DestroyBuffer)      \
     X(GetBufferMemoryRequirements) X(BindBufferMemory) X(MapMemory) X(UnmapMemory) X(CreateCommandPool)                   \
@@ -6411,7 +6445,25 @@ int VulkanTest() {
     }
     std::vector<VkPhysicalDevice> devices(count);
     vkEnumeratePhysicalDevices(instance, &count, devices.data());
-    const VkPhysicalDevice physical = devices.front();
+    VkPhysicalDevice physical = devices.front();
+    if (const std::optional<std::string> wanted = test_adapter::Wanted()) {
+        // FG_TEST_ADAPTER: the first device it names.
+        std::vector<test_adapter::Adapter> adapters;
+        for (const VkPhysicalDevice device : devices) {
+            VkPhysicalDeviceProperties properties{};
+            vkGetPhysicalDeviceProperties(device, &properties);
+            adapters.push_back({properties.deviceName, properties.deviceType == VK_PHYSICAL_DEVICE_TYPE_CPU});
+        }
+        const std::optional<std::size_t> chosen = test_adapter::FirstMatch(adapters, *wanted);
+        if (!chosen) {
+            std::cout << test_adapter::NoMatch(*wanted, adapters) << "; skipping\n";
+            vkDestroyInstance(instance, nullptr);
+            FreeLibrary(loader);
+            return kSkip;
+        }
+        physical = devices[*chosen];
+        std::cout << "Vulkan on " << adapters[*chosen].name << " (FG_TEST_ADAPTER)\n";
+    }
     vkGetPhysicalDeviceQueueFamilyProperties(physical, &count, nullptr);
     std::vector<VkQueueFamilyProperties> families(count);
     vkGetPhysicalDeviceQueueFamilyProperties(physical, &count, families.data());

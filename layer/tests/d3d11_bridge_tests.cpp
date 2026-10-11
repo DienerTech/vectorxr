@@ -2,9 +2,10 @@
 // runtime whose swapchain images are Direct3D 12 textures on the bridge's
 // device. WARP shares textures and fences between its Direct3D 11 and 12
 // devices, so this runs without a GPU; `hw` runs it on the first hardware
-// adapter. The Direct3D 12 debug layer checks every test's GPU work (and the
-// Direct3D 11 one when installed). Exit code 77: this machine shares nothing
-// between the APIs.
+// adapter (FG_TEST_ADAPTER: the one it names, test_adapter.h). The Direct3D 12
+// debug layer checks every test's GPU work (and the Direct3D 11 one when
+// installed). Exit code 77: this machine shares nothing between the APIs, or
+// FG_TEST_ADAPTER names no adapter.
 #include <windows.h>
 #include <d3d11_4.h>
 #include <d3d12.h>
@@ -14,6 +15,7 @@
 
 #include "depthxr/framegen_d3d11_bridge.h"
 #include "depthxr/session_graphics.h"
+#include "test_adapter.h"
 #include "test_gates.h"
 
 #include <array>
@@ -101,7 +103,17 @@ bool MakeGame(bool hardware, Game& game) {
     ComPtr<IDXGIAdapter1> adapter;
     if (hardware) {
         ComPtr<IDXGIFactory1> factory;
-        if (FAILED(CreateDXGIFactory1(IID_PPV_ARGS(&factory))) || FAILED(factory->EnumAdapters1(0, &adapter))) {
+        if (FAILED(CreateDXGIFactory1(IID_PPV_ARGS(&factory)))) {
+            return false;
+        }
+        if (const std::optional<std::string> wanted = test_adapter::Wanted()) {
+            std::string why;
+            adapter = test_adapter::FindDxgiAdapter(factory.Get(), *wanted, why);
+            if (!adapter) {
+                std::cout << why << '\n';
+                return false;
+            }
+        } else if (FAILED(factory->EnumAdapters1(0, &adapter))) {
             return false;
         }
     }

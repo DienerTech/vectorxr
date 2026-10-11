@@ -18,6 +18,9 @@
 //   --teardown        Only leave a D3D11 wait pending on a value D3D12 never signals: what releases it.
 //   --json <path>     Write every record as JSON.
 //
+// It runs on the first high-performance hardware adapter; FG_TEST_ADAPTER=<text> picks the first whose description
+// contains the text instead (test_adapter.h), and naming none aborts.
+//
 // Ownership lineages, each in two variants:
 //   A  Direct3D 11 creates the texture and an NT handle; Direct3D 12 opens it.
 //      A_keyed_mutex: MiscFlags SHARED_NTHANDLE | SHARED_KEYEDMUTEX (2304), the flags that ran in DCS.
@@ -39,6 +42,8 @@
 #include <dxgi1_6.h>
 #include <dxgidebug.h>
 #include <wrl/client.h>
+
+#include "test_adapter.h"
 
 #include <algorithm>
 #include <array>
@@ -1336,8 +1341,19 @@ void CreateDevices() {
         }
         DXGIGetDebugInterface1(0, IID_PPV_ARGS(&g.info_dxgi));
     }
-    // The game's adapter: the first high-performance hardware adapter.
-    for (UINT index = 0;; ++index) {
+    // The game's adapter: the first high-performance hardware adapter, or with FG_TEST_ADAPTER the first in that
+    // order whose description contains it (test_adapter.h).
+    if (const std::optional<std::string> wanted = test_adapter::Wanted()) {
+        const auto enumerate = [&](UINT index, IDXGIAdapter1** adapter) {
+            return factory->EnumAdapterByGpuPreference(index, DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE,
+                                                       IID_PPV_ARGS(adapter));
+        };
+        std::string why;
+        g.adapter = test_adapter::FindDxgiAdapter(enumerate, *wanted, why);
+        if (!g.adapter) Abort(why);
+        Must(g.adapter->GetDesc1(&g.adapter_desc), "adapter GetDesc1");
+    }
+    for (UINT index = 0; !g.adapter; ++index) {
         ComPtr<IDXGIAdapter1> candidate;
         if (factory->EnumAdapterByGpuPreference(index, DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE,
                                                 IID_PPV_ARGS(&candidate)) == DXGI_ERROR_NOT_FOUND) {
@@ -1347,7 +1363,6 @@ void CreateDevices() {
         if (FAILED(candidate->GetDesc1(&desc)) || (desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) != 0) continue;
         g.adapter = candidate;
         g.adapter_desc = desc;
-        break;
     }
     if (!g.adapter) Abort("no hardware adapter");
     g.adapter->CheckInterfaceSupport(__uuidof(IDXGIDevice), &g.driver_version);
@@ -3601,7 +3616,8 @@ void PrintUsage() {
     std::cout << "depthxr_bridge_probe [--debug] [--gpu-validation] [--timings] [--quick]\n"
                  "                     [--feature-level-11-0] [--single-threaded] [--removal] [--teardown]\n"
                  "                     [--json <path>]\n"
-                 "Direct3D 11 <-> 12 sharing probe for the D3D11 bridge (real GPU only).\n";
+                 "Direct3D 11 <-> 12 sharing probe for the D3D11 bridge (real GPU only).\n"
+                 "FG_TEST_ADAPTER=<text>: run on the first hardware adapter whose description contains it.\n";
 }
 
 } // namespace

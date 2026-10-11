@@ -2,10 +2,11 @@
 // hooks, from xrCreateApiLayerInstance on, against a stand-in runtime whose
 // swapchain images are Direct3D 12 textures on the device of the binding it
 // is given, with a real Direct3D 11 game (WARP; `hw`: the first hardware
-// adapter). The stand-in reads back what each frame shows on the session's
-// queue, after the images' releases there, as a compositor reads what it
-// shows. Frame Generation runs on a stand-in backend: it owns frame pacing, as
-// with a real one, and does no GPU work. The host is left alone: settings,
+// adapter, or the one FG_TEST_ADAPTER names, test_adapter.h; the layer takes
+// the game's adapter, as in a session). The stand-in reads back what each
+// frame shows on the session's queue, after the images' releases there, as a
+// compositor reads what it shows. Frame Generation runs on a stand-in
+// backend: it owns frame pacing, as with a real one, and does no GPU work. The host is left alone: settings,
 // logs and the layer's other files go to a temporary directory. The
 // Direct3D 12 debug layer checks the GPU work (and the Direct3D 11 one when
 // installed), after every case's teardown; without either, a warning says so
@@ -13,7 +14,8 @@
 // run on a stereo stand-in whose waits are paced like a runtime's: the layer
 // composes the four views into stereo. The device's removal while Frame
 // Generation composes them runs in a process of its own, on hardware only
-// (`hw`). Exit code 77: this machine shares nothing between the APIs.
+// (`hw`). Exit code 77: this machine shares nothing between the APIs, or
+// FG_TEST_ADAPTER names no adapter.
 #include <windows.h>
 #include <process.h>
 #include <d3d11_4.h>
@@ -27,6 +29,7 @@
 #include "depthxr/openxr_layer.h"
 #include "depthxr/openxr_loader_api_layer.h"
 #include "depthxr/quadviews_sizing.h"
+#include "test_adapter.h"
 #include "test_gates.h"
 
 #include <algorithm>
@@ -310,7 +313,17 @@ bool MakeGame(bool hardware, Game& game) {
     ComPtr<IDXGIAdapter1> adapter;
     if (hardware) {
         ComPtr<IDXGIFactory1> factory;
-        if (FAILED(CreateDXGIFactory1(IID_PPV_ARGS(&factory))) || FAILED(factory->EnumAdapters1(0, &adapter))) {
+        if (FAILED(CreateDXGIFactory1(IID_PPV_ARGS(&factory)))) {
+            return false;
+        }
+        if (const std::optional<std::string> wanted = test_adapter::Wanted()) {
+            std::string why;
+            adapter = test_adapter::FindDxgiAdapter(factory.Get(), *wanted, why);
+            if (!adapter) {
+                std::cout << why << '\n';
+                return false;
+            }
+        } else if (FAILED(factory->EnumAdapters1(0, &adapter))) {
             return false;
         }
     }

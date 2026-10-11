@@ -73,6 +73,7 @@ struct Options {
     bool quad_layer{false};      // a quad layer released every frame, after the projection
     bool minimal_usage{false};   // colour swapchains with usage 0
     bool render_check{false};    // no OpenXR: draw the shapes into the probe's own images and check their pixels
+    uint32_t vram_ballast_mb{0}; // video memory held on the session's adapter for the whole run (0: none)
     // Checks of the probe itself (Vulkan): one VkFence is left undestroyed at the end, or --render-check's first
     // swapchain removal finds its queue held by a wait that never ends (as a stuck bridge's 'done' would).
     bool vk_test_leak{false};
@@ -94,6 +95,27 @@ int UnavailableExitCode();
 void ThrowIfFailed(HRESULT result, std::string_view operation);
 void CheckXr(XrInstance instance, XrResult result, std::string_view operation);
 void Expect(bool condition, std::string_view what); // --self-test
+
+// FG_TEST_ADAPTER (layer/tests/test_adapter.h) picks the adapter of --render-check and --gpu-calibrate. An OpenXR
+// session renders on the adapter the runtime asks for, so there it can only be checked: the run stops unless the
+// runtime's adapter (`name`) is one FG_TEST_ADAPTER names.
+void CheckRuntimeAdapter(const std::string& name);
+
+// --vram-ballast-mb: video memory the probe allocates on the session's adapter before the session and holds until
+// the end of the run, so that Frame Generation, which sizes itself by the process's video memory usage against its
+// budget (DXGI's QueryVideoMemoryInfo, local segment group), finds less room, as on a card with less memory.
+class VramBallast {
+public:
+    virtual ~VramBallast() = default;
+    // Prints the process's video memory usage and budget on the adapter now, after `when`.
+    virtual void Report(std::string_view when) const = 0;
+};
+// Throws when the memory cannot be allocated, or with a Direct3D 12 debug layer requested for a bridge
+// (VECTORXR_D3D11_BRIDGE_DEBUG, VECTORXR_VULKAN_BRIDGE_DEBUG): enabling it once the ballast's Direct3D 12 device
+// exists would remove that device, which the bridge then shares (one Direct3D 12 device per adapter in a process).
+std::unique_ptr<VramBallast> CreateVramBallast(LUID adapter, uint32_t megabytes);
+// The sizes of the buffers a ballast of `megabytes` is made of (256 MB each, the last one the rest).
+std::vector<uint64_t> BallastBufferBytes(uint32_t megabytes);
 
 // The first of `preferences` the runtime offers in `available`.
 std::optional<int64_t> ChooseFormat(const std::vector<int64_t>& available, const std::vector<int64_t>& preferences);
@@ -283,6 +305,8 @@ public:
     virtual const char* InstanceExtension() const = 0;
     // The device the runtime asks for (after xrGetSystem, before xrCreateSession).
     virtual void CreateDevice(XrInstance instance, XrSystemId system) = 0;
+    // The device's adapter (after CreateDevice); nullopt when the API does not say (a Vulkan 1.0 instance).
+    virtual std::optional<LUID> AdapterLuid() const = 0;
     // The graphics binding for XrSessionCreateInfo::next.
     virtual const void* Binding() const = 0;
     // Colour formats in order of preference (sRGB first), and the depth format.
@@ -321,7 +345,8 @@ public:
 std::unique_ptr<ProbeGraphics> CreateD3D11Graphics(const Options& options);
 std::unique_ptr<ProbeGraphics> CreateVulkanGraphics(const Options& options);
 
-// --gpu-calibrate without OpenXR, on the default adapter (Direct3D 11) or the first discrete GPU (Vulkan).
+// --gpu-calibrate without OpenXR, on the default adapter (Direct3D 11) or the first discrete GPU (Vulkan), or the
+// adapter FG_TEST_ADAPTER names.
 bool RunD3D11GpuCalibration(const Options& options);
 bool RunVulkanGpuCalibration(const Options& options);
 

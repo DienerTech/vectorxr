@@ -17,12 +17,12 @@
 // the Direct3D 12 debug layer the Direct3D 12 work, after every case.
 //
 // Exit code 77: no vulkan-1.dll, no GPU whose Vulkan device and Direct3D 12
-// adapter are the same, or a driver that imports no Direct3D 12 images or
-// fences (with VECTORXR_TESTS_REQUIRE_HW=1 that fails instead, as does
-// running without validation or the Direct3D 12 debug layer). Past that,
-// every bridge refusal fails. `unbridged` runs only the cases that need no
-// working bridge (the hooks, the instance, fallbacks the bridge never sees,
-// native Direct3D 12).
+// adapter are the same (with FG_TEST_ADAPTER, test_adapter.h: none it names),
+// or a driver that imports no Direct3D 12 images or fences (with
+// VECTORXR_TESTS_REQUIRE_HW=1 that fails instead, as does running without
+// validation or the Direct3D 12 debug layer). Past that, every bridge refusal
+// fails. `unbridged` runs only the cases that need no working bridge (the
+// hooks, the instance, fallbacks the bridge never sees, native Direct3D 12).
 #define VK_NO_PROTOTYPES
 #define VK_USE_PLATFORM_WIN32_KHR
 #include <windows.h>
@@ -37,6 +37,7 @@
 #include "depthxr/openxr_layer.h"
 #include "depthxr/openxr_loader_api_layer.h"
 #include "depthxr/vulkan_enable_hooks.h"
+#include "test_adapter.h"
 #include "test_gates.h"
 #include "vulkan_test_validation.h"
 
@@ -4165,15 +4166,21 @@ std::string FindGpu() {
     g_vk.vkEnumeratePhysicalDevices(fixture.instance, &count, devices.data());
     ComPtr<IDXGIFactory4> factory;
     std::string why = "no Vulkan device whose LUID matches a hardware Direct3D 12 adapter";
+    // FG_TEST_ADAPTER: only the devices whose names contain it.
+    const std::optional<std::string> wanted = test_adapter::Wanted();
+    std::vector<test_adapter::Adapter> adapters;
     for (VkPhysicalDevice device : devices) {
         VkPhysicalDeviceIDProperties id{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES};
         VkPhysicalDeviceProperties2 properties{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};
         properties.pNext = &id;
         g_vk.vkGetPhysicalDeviceProperties2(device, &properties);
+        adapters.push_back(
+            {properties.properties.deviceName, properties.properties.deviceType == VK_PHYSICAL_DEVICE_TYPE_CPU});
         ComPtr<IDXGIAdapter1> adapter;
         DXGI_ADAPTER_DESC1 desc{};
         LUID luid{};
         std::memcpy(&luid, id.deviceLUID, sizeof(luid));
+        if (wanted && !test_adapter::NameMatches(properties.properties.deviceName, *wanted)) continue;
         if (!id.deviceLUIDValid || properties.properties.deviceType == VK_PHYSICAL_DEVICE_TYPE_CPU ||
             (!factory && FAILED(CreateDXGIFactory1(IID_PPV_ARGS(&factory)))) ||
             FAILED(factory->EnumAdapterByLuid(luid, IID_PPV_ARGS(&adapter))) || FAILED(adapter->GetDesc1(&desc)) ||
@@ -4209,6 +4216,9 @@ std::string FindGpu() {
         fixture.physical = device;
         why.clear();
         break;
+    }
+    if (!why.empty() && wanted && !test_adapter::FirstMatch(adapters, *wanted)) {
+        why = test_adapter::NoMatch(*wanted, adapters);
     }
     if (why.empty() && g_validation) {
         // The canary: a barrier from a layout the image is not in must be reported.
