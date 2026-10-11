@@ -8,6 +8,7 @@
 #include <optional>
 #include <sstream>
 #include <stdexcept>
+#include <unordered_map>
 #include <unordered_set>
 #include <variant>
 #include <vector>
@@ -547,9 +548,46 @@ bool ReadOptionalProfileMode(const JsonValue::Object& object,
     return true;
 }
 
-bool CheckAllowedKeys(const JsonValue::Object& object,
-                      const std::unordered_set<std::string>& allowed,
-                      std::string& error);
+// A key that its object's parser does not know, and the object holding it (a
+// node of the document ParseConfig parsed, which turns it into a JSON path).
+struct UnknownKey {
+    const JsonValue::Object* object;
+    std::string key;
+};
+
+// Where NoteUnknownKeys records the unknown keys of the ParseConfig running on
+// this thread; null outside one. Thread-local because the layer parses on its
+// config watcher and on application threads at the same time.
+thread_local std::vector<UnknownKey>* t_unknown_keys = nullptr;
+
+// Points t_unknown_keys at `keys` while in scope.
+class UnknownKeyCollector {
+  public:
+    explicit UnknownKeyCollector(std::vector<UnknownKey>& keys) : previous_(t_unknown_keys) {
+        t_unknown_keys = &keys;
+    }
+    ~UnknownKeyCollector() { t_unknown_keys = previous_; }
+    UnknownKeyCollector(const UnknownKeyCollector&) = delete;
+    UnknownKeyCollector& operator=(const UnknownKeyCollector&) = delete;
+
+  private:
+    std::vector<UnknownKey>* previous_;
+};
+
+// Keys outside `allowed` are ignored rather than rejected: a newer app may
+// save settings this layer does not know, and one of them must not turn every
+// module off. ParseConfig reports each one as a warning with its JSON path.
+// Wrong types, out-of-range values and invalid names stay fatal.
+void NoteUnknownKeys(const JsonValue::Object& object, const std::unordered_set<std::string>& allowed) {
+    if (!t_unknown_keys) {
+        return;
+    }
+    for (const auto& [key, _] : object) {
+        if (!allowed.contains(key)) {
+            t_unknown_keys->push_back({&object, key});
+        }
+    }
+}
 
 bool ParseSoundFeedback(const JsonValue& value, SoundFeedback& out, std::string& error) {
     const JsonValue::Object* object = RequireObject(value, "inputBinding.sound", error);
@@ -558,9 +596,7 @@ bool ParseSoundFeedback(const JsonValue& value, SoundFeedback& out, std::string&
     }
 
     static const std::unordered_set<std::string> allowed = {"enabled", "activateSound", "deactivateSound"};
-    if (!CheckAllowedKeys(*object, allowed, error)) {
-        return false;
-    }
+    NoteUnknownKeys(*object, allowed);
 
     std::optional<bool> enabled;
     std::optional<std::string> activate_sound;
@@ -603,9 +639,7 @@ bool ParseInputBinding(const JsonValue& value, InputBinding& out, std::string& e
 
     if (out.type == InputBindingType::Keyboard) {
         static const std::unordered_set<std::string> allowed = {"type", "chord", "sound"};
-        if (!CheckAllowedKeys(*object, allowed, error)) {
-            return false;
-        }
+        NoteUnknownKeys(*object, allowed);
 
         const auto chord_it = object->find("chord");
         if (chord_it == object->end()) {
@@ -641,9 +675,7 @@ bool ParseInputBinding(const JsonValue& value, InputBinding& out, std::string& e
     }
 
     static const std::unordered_set<std::string> allowed = {"type", "deviceGuid", "inputPath", "productGuid", "deviceName", "inputLabel", "sound"};
-    if (!CheckAllowedKeys(*object, allowed, error)) {
-        return false;
-    }
+    NoteUnknownKeys(*object, allowed);
 
     if (!ReadRequiredString(*object, "deviceGuid", out.device_guid, error) ||
         !ReadRequiredString(*object, "inputPath", out.input_path, error)) {
@@ -702,25 +734,13 @@ bool ParseToggleBindings(const JsonValue::Object& object,
     return ParseInputBindings(object, plural_key, legacy_key, out, error);
 }
 
-bool CheckAllowedKeys(const JsonValue::Object& object,
-                      const std::unordered_set<std::string>& allowed,
-                      std::string& error) {
-    for (const auto& [key, _] : object) {
-        if (!allowed.contains(key)) {
-            error = "Unknown field: " + key;
-            return false;
-        }
-    }
-    return true;
-}
-
 bool ParseOsdSettings(const JsonValue::Object& object, OsdSettings& out, std::string& error) {
-    if (!CheckAllowedKeys(object, {"enabled", "visibleOnStart", "compact", "horizontalDegrees", "verticalDegrees",
+    NoteUnknownKeys(object, {"enabled", "visibleOnStart", "compact", "horizontalDegrees", "verticalDegrees",
         "distanceMeters", "scale", "opacity", "updateHz", "showGraph", "showRuntime", "showBrand", "showApp", "showTurbo", "showModules",
         "showClock", "showPivot", "showFramegen", "showFramegenFps", "compactShowRuntime", "compactShowClock", "compactShowTurbo", "compactShowPivot",
         "compactShowFramegen",
         "compactShowBrand", "compactShowApp", "compactMetrics",
-        "clockFormat", "bodyOrder", "customColor", "customPresets", "accent", "toggleBinding", "cycleBinding", "toggleBindings", "cycleBindings"}, error)) return false;
+        "clockFormat", "bodyOrder", "customColor", "customPresets", "accent", "toggleBinding", "cycleBinding", "toggleBindings", "cycleBindings"});
     for (const auto& [key, target] : {std::pair{"enabled", &out.enabled}, {"visibleOnStart", &out.visible_on_start},
         {"compact", &out.compact}, {"showGraph", &out.show_graph}, {"showRuntime", &out.show_runtime}, {"showBrand", &out.show_brand}, {"showApp", &out.show_app},
         {"showTurbo", &out.show_turbo}, {"showModules", &out.show_modules}, {"showClock", &out.show_clock}, {"showPivot", &out.show_pivot},
@@ -806,7 +826,8 @@ bool ParseOsdSettings(const JsonValue::Object& object, OsdSettings& out, std::st
         if (!presets || presets->size()>50) { error="Invalid core.osd.customPresets"; return false; }
         for (const auto& preset:*presets) {
             const auto* entry=RequireObject(preset,"OSD preset",error);
-            if (!entry || !CheckAllowedKeys(*entry,{"name","settings"},error)) return false;
+            if (!entry) return false;
+            NoteUnknownKeys(*entry,{"name","settings"});
             std::optional<std::string> name;
             if (!ReadOptionalString(*entry,"name",name,error) || !name || name->empty() || name->size()>240) { error="Invalid OSD preset name"; return false; }
             const auto layout=entry->find("settings");
@@ -833,9 +854,7 @@ bool ParseCoreSettings(const JsonValue::Object& object, CoreSettings& out, std::
         "sound",
     };
 
-    if (!CheckAllowedKeys(object, allowed, error)) {
-        return false;
-    }
+    NoteUnknownKeys(object, allowed);
 
     std::optional<bool> enabled;
     std::optional<LogLevel> log_level;
@@ -872,9 +891,7 @@ bool ParseCoreSettings(const JsonValue::Object& object, CoreSettings& out, std::
             return false;
         }
         static const std::unordered_set<std::string> sound_allowed = {"volume"};
-        if (!CheckAllowedKeys(*sound_object, sound_allowed, error)) {
-            return false;
-        }
+        NoteUnknownKeys(*sound_object, sound_allowed);
         std::optional<int> volume;
         if (!ReadOptionalInt(*sound_object, "volume", volume, error)) {
             return false;
@@ -900,9 +917,7 @@ bool ParseApplication(const JsonValue& value, RegisteredApplication& out, std::s
         "match",
     };
 
-    if (!CheckAllowedKeys(*object, allowed, error)) {
-        return false;
-    }
+    NoteUnknownKeys(*object, allowed);
 
     if (!ReadRequiredString(*object, "id", out.id, error) ||
         !ReadRequiredString(*object, "name", out.name, error) ||
@@ -922,9 +937,7 @@ bool ParseApplication(const JsonValue& value, RegisteredApplication& out, std::s
     }
 
     static const std::unordered_set<std::string> allowed_match = {"exe"};
-    if (!CheckAllowedKeys(*match_object, allowed_match, error)) {
-        return false;
-    }
+    NoteUnknownKeys(*match_object, allowed_match);
 
     return ReadRequiredString(*match_object, "exe", out.match.exe_name, error);
 }
@@ -936,18 +949,16 @@ bool ParseDepthDefaults(const JsonValue::Object& object, DepthXrResolvedSettings
         // (stereoBoost 1.0 / convergence 0.0) mean "off".
         "stereoBoostEnabled",
         "convergenceEnabled",
-        // Retired 0.13.7-development field. Accept and ignore it so a config
-        // written by the experimental compatibility-mode branch does not make
-        // the entire layer fall back to defaults.
+        // Retired 0.13.7-development field. Accepted and ignored without a
+        // warning: configs written by the experimental compatibility-mode
+        // branch still carry it.
         "compatibilityMode",
         "stereoBoost",
         "convergence",
         "depthAnchor",
     };
 
-    if (!CheckAllowedKeys(object, allowed, error)) {
-        return false;
-    }
+    NoteUnknownKeys(object, allowed);
 
     std::optional<double> stereo_boost;
     std::optional<double> convergence;
@@ -1031,7 +1042,7 @@ bool ParsePivotActivationBindings(const JsonValue::Object& object,
         const JsonValue::Object* wrapper = value.IsObject() ? &value.AsObject() : nullptr;
         if (wrapper && wrapper->contains("binding")) {
             static const std::unordered_set<std::string> allowed = {"behavior", "binding"};
-            if (!CheckAllowedKeys(*wrapper, allowed, error)) return false;
+            NoteUnknownKeys(*wrapper, allowed);
             const auto behavior_it = wrapper->find("behavior");
             if (behavior_it == wrapper->end() || !behavior_it->second.IsString()) {
                 error = "pivot activation behavior must be a string";
@@ -1074,9 +1085,7 @@ bool ParseDepthBindings(const JsonValue::Object& object, DepthXrBindings& out, s
         "toggleAnchorBindings",
     };
 
-    if (!CheckAllowedKeys(object, allowed, error)) {
-        return false;
-    }
+    NoteUnknownKeys(object, allowed);
 
     if (!object.count("toggleEnabled") && !object.count("toggleEnabledBindings")) {
         error = "Missing required field: toggleEnabled";
@@ -1093,16 +1102,14 @@ bool ParseDepthProfileSettings(const JsonValue::Object& object, DepthXrSettingsO
         "stereoBoostEnabled",
         "convergenceEnabled",
         // Profile copies of the retired experimental field are harmless too.
-        // Keep strict rejection for every other unknown setting.
+        // Any other unknown setting is ignored with a warning.
         "compatibilityMode",
         "stereoBoost",
         "convergence",
         "depthAnchor",
     };
 
-    if (!CheckAllowedKeys(object, allowed, error)) {
-        return false;
-    }
+    NoteUnknownKeys(object, allowed);
 
     return ReadOptionalNumber(object, "stereoBoost", out.stereo_boost, error) &&
            ReadOptionalNumber(object, "convergence", out.convergence, error) &&
@@ -1123,9 +1130,7 @@ bool ParseDepthProfile(const JsonValue& value, DepthXrProfile& out, std::string&
         "settings",
     };
 
-    if (!CheckAllowedKeys(*object, allowed, error)) {
-        return false;
-    }
+    NoteUnknownKeys(*object, allowed);
 
     const auto application_ids_it = object->find("applicationIds");
     if (application_ids_it == object->end()) {
@@ -1170,9 +1175,7 @@ bool ParseDepthModule(const JsonValue::Object& object,
         "profiles",
     };
 
-    if (!CheckAllowedKeys(object, allowed, error)) {
-        return false;
-    }
+    NoteUnknownKeys(object, allowed);
 
     std::optional<bool> enabled;
     if (!ReadOptionalBool(object, "enabled", enabled, error)) {
@@ -1236,9 +1239,7 @@ bool ParseTurboProfile(const JsonValue& value, TurboProfile& out, std::string& e
         "applicationIds",
     };
 
-    if (!CheckAllowedKeys(*object, allowed, error)) {
-        return false;
-    }
+    NoteUnknownKeys(*object, allowed);
 
     if (const auto it=object->find("experimental");it!=object->end()){
         const auto* settings=RequireObject(it->second,"turboProfile.experimental",error);
@@ -1279,8 +1280,8 @@ bool ParseTurboProfile(const JsonValue& value, TurboProfile& out, std::string& e
 }
 
 bool ParseTurboExperimental(const JsonValue::Object& object, TurboExperimentalSettings& out, std::string& error) {
-    if (!CheckAllowedKeys(object, {"enabled", "applicationIds", "waitForSubmit", "sampleAtEntry",
-                                  "predictionPercent", "frameLimit", "timingTrace"}, error)) return false;
+    NoteUnknownKeys(object, {"enabled", "applicationIds", "waitForSubmit", "sampleAtEntry",
+                            "predictionPercent", "frameLimit", "timingTrace"});
     for (auto [key, target] : {std::pair{"enabled", &out.enabled}, {"waitForSubmit", &out.wait_for_submit},
                               {"sampleAtEntry", &out.sample_at_entry}}) {
         std::optional<bool> value;
@@ -1325,9 +1326,7 @@ bool ParseTurboModule(const JsonValue::Object& object, TurboModuleConfig& out, s
         "profiles",
     };
 
-    if (!CheckAllowedKeys(object, allowed, error)) {
-        return false;
-    }
+    NoteUnknownKeys(object, allowed);
 
     std::optional<bool> enabled;
     if (!ReadOptionalBool(object, "enabled", enabled, error)) {
@@ -1436,9 +1435,7 @@ bool ParsePivotAxisTuning(const JsonValue& value, const char* field, PivotAxisTu
         "deadzoneTransitionDegrees",
     };
 
-    if (!CheckAllowedKeys(*object, allowed, error)) {
-        return false;
-    }
+    NoteUnknownKeys(*object, allowed);
 
     std::optional<double> rotation_multiplier;
     std::optional<double> deadzone_degrees;
@@ -1487,9 +1484,7 @@ bool ParsePivotStepTuning(const JsonValue& value,
         "hysteresisDegrees",
         "maxExtraDegrees",
     };
-    if (!CheckAllowedKeys(*object, allowed, error)) {
-        return false;
-    }
+    NoteUnknownKeys(*object, allowed);
 
     std::optional<double> deadzone;
     std::optional<double> trigger;
@@ -1535,9 +1530,7 @@ bool ParsePivotPositionDirection(const JsonValue& value,
         "startAngleDegrees",
         "fullAngleDegrees",
     };
-    if (!CheckAllowedKeys(*object, allowed, error)) {
-        return false;
-    }
+    NoteUnknownKeys(*object, allowed);
 
     std::optional<double> right_cm;
     std::optional<double> up_cm;
@@ -1584,9 +1577,7 @@ bool ParsePivotPositionAssist(const JsonValue& value, PivotPositionAssist& out, 
         "pitchUp",
         "pitchDown",
     };
-    if (!CheckAllowedKeys(*object, allowed, error)) {
-        return false;
-    }
+    NoteUnknownKeys(*object, allowed);
 
     std::optional<bool> enabled;
     std::optional<bool> advanced_directions;
@@ -1654,9 +1645,7 @@ bool ParsePivotSettings(const JsonValue::Object& object, PivotXrSettings& out, s
         "pitchSmoothing",
     };
 
-    if (!CheckAllowedKeys(object, allowed, error)) {
-        return false;
-    }
+    NoteUnknownKeys(object, allowed);
 
     std::optional<bool> apply_motion_to_snap_views;
     std::optional<double> yaw_deadzone_transition_degrees;
@@ -1876,7 +1865,7 @@ bool ParsePivotNudgeSettings(const JsonValue& value, PivotNudgeSettings& out, st
         "yawStepDegrees", "pitchStepDegrees", "transitionSeconds",
         "yawLeftBindings", "yawRightBindings", "pitchUpBindings", "pitchDownBindings", "centerBindings",
     };
-    if (!CheckAllowedKeys(*object, allowed, error)) return false;
+    NoteUnknownKeys(*object, allowed);
 
     std::optional<double> yaw_step;
     std::optional<double> pitch_step;
@@ -1903,7 +1892,7 @@ bool ParsePivotNudgeSet(const JsonValue& value, PivotNudgeSet& out, std::string&
     static const std::unordered_set<std::string> allowed = {
         "id", "name", "allowWhileInactive", "settings",
     };
-    if (!CheckAllowedKeys(*object, allowed, error)) return false;
+    NoteUnknownKeys(*object, allowed);
 
     std::optional<std::string> id;
     std::optional<std::string> name;
@@ -1935,7 +1924,7 @@ bool ParsePivotQuickView(const JsonValue& value, PivotQuickView& out, std::strin
         "id", "name", "yawDegrees", "pitchDegrees", "positionRightCm", "positionUpCm",
         "positionForwardCm", "transitionSeconds", "turnDirection", "activationBindings",
     };
-    if (!CheckAllowedKeys(*object, allowed, error)) return false;
+    NoteUnknownKeys(*object, allowed);
 
     std::optional<std::string> id;
     std::optional<std::string> name;
@@ -1979,7 +1968,7 @@ bool ParsePivotViewControls(const JsonValue& value, PivotViewControls& out, std:
     const JsonValue::Object* object = RequireObject(value, "pivot viewControls", error);
     if (!object) return false;
     static const std::unordered_set<std::string> allowed = {"nudges", "quickViews"};
-    if (!CheckAllowedKeys(*object, allowed, error)) return false;
+    NoteUnknownKeys(*object, allowed);
 
     const auto nudges_it = object->find("nudges");
     if (nudges_it != object->end() && !ParsePivotNudgeSettings(nudges_it->second, out.nudges, error)) {
@@ -2028,9 +2017,7 @@ bool ParsePivotProfile(const JsonValue& value, PivotXrProfile& out, std::string&
         "settings",
     };
 
-    if (!CheckAllowedKeys(*object, allowed, error)) {
-        return false;
-    }
+    NoteUnknownKeys(*object, allowed);
 
     const auto application_ids_it = object->find("applicationIds");
     if (application_ids_it == object->end()) {
@@ -2128,9 +2115,7 @@ bool ParsePivotModule(const JsonValue::Object& object, PivotXrModuleConfig& out,
         "profiles",
     };
 
-    if (!CheckAllowedKeys(object, allowed, error)) {
-        return false;
-    }
+    NoteUnknownKeys(object, allowed);
 
     std::optional<bool> enabled;
     std::optional<std::string> behavior;
@@ -2238,9 +2223,7 @@ bool ParseQuadViewsSettings(const JsonValue::Object& object, QuadViewsSettings& 
         "gazeDeadzoneDegrees",
     };
 
-    if (!CheckAllowedKeys(object, allowed, error)) {
-        return false;
-    }
+    NoteUnknownKeys(object, allowed);
 
     std::optional<std::string> eye_tracking_correction;
     std::optional<QuadViewsTrackingMode> tracking_mode;
@@ -2328,9 +2311,7 @@ bool ParseQuadViewsProfile(const JsonValue& value, QuadViewsProfile& out, std::s
         "settings",
     };
 
-    if (!CheckAllowedKeys(*object, allowed, error)) {
-        return false;
-    }
+    NoteUnknownKeys(*object, allowed);
 
     const auto application_ids_it = object->find("applicationIds");
     if (application_ids_it == object->end()) {
@@ -2373,9 +2354,7 @@ bool ParseQuadViewsModule(const JsonValue::Object& object, QuadViewsModuleConfig
         "profiles",
     };
 
-    if (!CheckAllowedKeys(object, allowed, error)) {
-        return false;
-    }
+    NoteUnknownKeys(object, allowed);
 
     std::optional<bool> enabled;
     if (!ReadOptionalBool(object, "enabled", enabled, error)) {
@@ -2446,9 +2425,7 @@ bool ParseFrameGenSettings(const JsonValue::Object& object, const char* field, F
         "artifactSuppression",
         "motionLimitPercent",
     };
-    if (!CheckAllowedKeys(object, allowed, error)) {
-        return false;
-    }
+    NoteUnknownKeys(object, allowed);
 
     std::optional<std::string> synthesis_mode;
     std::optional<std::string> flow_quality;
@@ -2509,9 +2486,7 @@ bool ParseFrameGenProfile(const JsonValue& value, FrameGenProfile& out, std::str
         "applicationIds",
         "settings",
     };
-    if (!CheckAllowedKeys(*object, allowed, error)) {
-        return false;
-    }
+    NoteUnknownKeys(*object, allowed);
 
     const auto application_ids_it = object->find("applicationIds");
     if (application_ids_it == object->end()) {
@@ -2553,9 +2528,7 @@ bool ParseFrameGenModule(const JsonValue::Object& object, FrameGenModuleConfig& 
         "defaults",
         "profiles",
     };
-    if (!CheckAllowedKeys(object, allowed, error)) {
-        return false;
-    }
+    NoteUnknownKeys(object, allowed);
 
     std::optional<bool> enabled;
     std::optional<std::string> diagnostic_view;
@@ -2606,9 +2579,7 @@ bool ParseFrameGenModule(const JsonValue::Object& object, FrameGenModuleConfig& 
 
 bool ParseVectorDocument(const JsonValue::Object& root_object, ConfigDocument& out, std::string& error) {
     static const std::unordered_set<std::string> allowed_root = {"version", "core", "applications", "modules"};
-    if (!CheckAllowedKeys(root_object, allowed_root, error)) {
-        return false;
-    }
+    NoteUnknownKeys(root_object, allowed_root);
 
     const auto core_it = root_object.find("core");
     if (core_it == root_object.end()) {
@@ -2651,9 +2622,7 @@ bool ParseVectorDocument(const JsonValue::Object& root_object, ConfigDocument& o
     }
 
     static const std::unordered_set<std::string> allowed_modules = {"depthxr", "pivotxr", "quadviews", "turbo", "framegen"};
-    if (!CheckAllowedKeys(*modules_object, allowed_modules, error)) {
-        return false;
-    }
+    NoteUnknownKeys(*modules_object, allowed_modules);
 
     const auto depth_it = modules_object->find("depthxr");
     if (depth_it == modules_object->end()) {
@@ -2704,6 +2673,24 @@ bool ParseVectorDocument(const JsonValue::Object& root_object, ConfigDocument& o
     return true;
 }
 
+// The JSON path of every object under `value` (empty for the root), keyed by
+// the object, so that an unknown key can be reported where it sits.
+void IndexObjectPaths(const JsonValue& value,
+                      const std::string& path,
+                      std::unordered_map<const JsonValue::Object*, std::string>& out) {
+    if (value.IsObject()) {
+        out.emplace(&value.AsObject(), path);
+        for (const auto& [key, child] : value.AsObject()) {
+            IndexObjectPaths(child, path.empty() ? key : path + "." + key, out);
+        }
+    } else if (value.IsArray()) {
+        const JsonValue::Array& items = value.AsArray();
+        for (size_t index = 0; index < items.size(); ++index) {
+            IndexObjectPaths(items[index], path + "[" + std::to_string(index) + "]", out);
+        }
+    }
+}
+
 } // namespace
 
 ParseResult ParseConfig(std::string_view json_text) {
@@ -2736,9 +2723,27 @@ ParseResult ParseConfig(std::string_view json_text) {
     }
 
     result.document.version = 3;
-    if (!ParseVectorDocument(*root_object, result.document, error)) {
-        result.error = error;
-        return result;
+    std::vector<UnknownKey> unknown_keys;
+    {
+        const UnknownKeyCollector collector(unknown_keys);
+        if (!ParseVectorDocument(*root_object, result.document, error)) {
+            result.error = error;
+            return result;
+        }
+    }
+
+    if (!unknown_keys.empty()) {
+        std::unordered_map<const JsonValue::Object*, std::string> paths;
+        IndexObjectPaths(root, "", paths);
+        for (const UnknownKey& unknown : unknown_keys) {
+            const auto path_it = paths.find(unknown.object);
+            const std::string warning = "Unknown field ignored: " +
+                (path_it == paths.end() || path_it->second.empty() ? unknown.key
+                                                                   : path_it->second + "." + unknown.key);
+            if (std::find(result.warnings.begin(), result.warnings.end(), warning) == result.warnings.end()) {
+                result.warnings.push_back(warning);
+            }
+        }
     }
 
     result.document.depthxr.defaults.enabled = result.document.depthxr.enabled;

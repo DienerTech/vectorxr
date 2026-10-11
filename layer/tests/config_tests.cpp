@@ -98,8 +98,19 @@ void TestOsdConfig() {
            osd.toggle_bindings.front().chord.size()==2 && osd.cycle_bindings.empty(),"OSD fields were dropped");
     for(const std::string& fields:{R"("horizontalDegrees":41)",R"("verticalDegrees":-36)",R"("distanceMeters":0)",
       R"("scale":24)",R"("opacity":101)",R"("updateHz":0)",R"("updateHz":5.5)",R"("enabled":"true")",
-      R"("showClock":1)",R"("accent":"red")",R"("unknown":true)"})
+      R"("showClock":1)",R"("accent":"red")"})
         Expect(!parse("{"+fields+"}").ok,"Invalid OSD accepted: "+fields);
+    // An unknown key is ignored with a warning; the known values still apply.
+    const auto unknown=parse(R"({"scale":40,"unknown":true})");
+    Expect(unknown.ok && unknown.document.core.osd.scale==40 &&
+           unknown.warnings==std::vector<std::string>{"Unknown field ignored: core.osd.unknown"},
+           "Unknown OSD key was not ignored with a warning: "+unknown.error);
+    Expect(!parse(R"({"scale":24,"unknown":true})").ok,"Out-of-range OSD value accepted beside an unknown key");
+    const auto preset=parse(R"({"customPresets":[{"name":"Small cockpit","note":"x","settings":{"scale":25,"later":1}}]})");
+    Expect(preset.ok && preset.warnings==std::vector<std::string>{
+               "Unknown field ignored: core.osd.customPresets[0].note",
+               "Unknown field ignored: core.osd.customPresets[0].settings.later"},
+           "Unknown OSD preset keys were not reported by their path: "+preset.error);
 }
 
 void TestTurboExperimentalConfig() {
@@ -142,9 +153,100 @@ void TestTurboExperimentalConfig() {
     Expect(!parse(R"({"profiles":[{"name":"Bad","applicationIds":["dcs"],"experimental":{"predictionPercent":200}}]})").ok,"Bad profile timing accepted");
     for (const std::string& fields : {R"("predictionPercent":49)", R"("predictionPercent":101)",
          R"("predictionPercent":75.5)", R"("frameLimit":1)", R"("frameLimit":241)", R"("frameLimit":45.5)",
-         R"("waitForSubmit":"yes")", R"("unknown":true)"}) {
+         R"("waitForSubmit":"yes")"}) {
         const auto invalid = parse("{\"experimental\":{" + fields + "}}");
         Expect(!invalid.ok, "Invalid experimental settings accepted: " + fields);
+    }
+    // An unknown key is ignored with a warning; the known values still apply.
+    const auto unknown = parse(R"({"experimental":{"predictionPercent":80,"unknown":true}})");
+    Expect(unknown.ok && unknown.document.turbo.experimental.prediction_percent == 80 &&
+               unknown.warnings == std::vector<std::string>{"Unknown field ignored: modules.turbo.experimental.unknown"},
+           "Unknown experimental Turbo key was not ignored with a warning: " + unknown.error);
+    Expect(!parse(R"({"experimental":{"predictionPercent":49,"unknown":true}})").ok,
+           "Out-of-range experimental Turbo value accepted beside an unknown key");
+}
+
+// A key this layer does not know (a newer app's setting) is ignored and
+// reported by its JSON path; every other error stays fatal.
+void TestUnknownKeysAreIgnoredWithWarnings() {
+    const depthxr::ParseResult parsed = depthxr::ParseConfig(R"json(
+{
+  "version": 3,
+  "telemetry": true,
+  "core": { "enabled": true, "logLevel": "info", "sound": { "volume": 40, "chime": "soft" } },
+  "applications": [
+    { "id": "app-dcs", "name": "DCS", "enabled": true, "icon": "dcs.png", "match": { "exe": "DCS.exe", "path": "C:/DCS" } }
+  ],
+  "modules": {
+    "depthxr": {
+      "enabled": true,
+      "defaults": { "stereoBoost": 1.2, "convergence": 0.0 },
+      "bindings": { "toggleEnabled": { "type": "keyboard", "chord": ["Ctrl", "F9"], "repeat": true } },
+      "profiles": [ { "name": "DCS", "applicationIds": ["app-dcs"], "settings": { "stereoBoost": 1.5, "sharpen": 3 } } ]
+    },
+    "pivotxr": { "enabled": false, "defaults": { "yawLeft": { "maxExtraDegrees": 30, "curve": "s" } }, "profiles": [] },
+    "turbo": {
+      "enabled": true,
+      "toggleBindings": [
+        { "type": "keyboard", "chord": ["Ctrl", "F10"] },
+        { "type": "device", "deviceGuid": "{11111111-0000-0000-0000-000000000001}", "inputPath": "button-3", "hint": "x" }
+      ]
+    },
+    "framegen": { "enabled": true, "presenter": true },
+    "eyetrack": { "enabled": true }
+  }
+}
+)json");
+    Expect(parsed.ok, "A config with unknown keys must still load: " + parsed.error);
+    const std::vector<std::string> expected{
+        "Unknown field ignored: telemetry",
+        "Unknown field ignored: core.sound.chime",
+        "Unknown field ignored: applications[0].icon",
+        "Unknown field ignored: applications[0].match.path",
+        "Unknown field ignored: modules.eyetrack",
+        "Unknown field ignored: modules.depthxr.bindings.toggleEnabled.repeat",
+        "Unknown field ignored: modules.depthxr.profiles[0].settings.sharpen",
+        "Unknown field ignored: modules.pivotxr.defaults.yawLeft.curve",
+        "Unknown field ignored: modules.turbo.toggleBindings[1].hint",
+        "Unknown field ignored: modules.framegen.presenter",
+    };
+    std::string reported;
+    for (const std::string& warning : parsed.warnings) reported += "\n  " + warning;
+    Expect(parsed.warnings == expected, "Unknown keys were not reported once each by their JSON path:" + reported);
+    const depthxr::ConfigDocument& document = parsed.document;
+    Expect(document.core.sound_volume == 40 && document.applications.size() == 1 &&
+               document.applications[0].match.exe_name == "DCS.exe" && document.depthxr.enabled &&
+               document.depthxr.defaults.stereo_boost == 1.2 && FirstChordKey(document.depthxr.bindings.toggle_enabled_bindings, "Ctrl") &&
+               document.depthxr.profiles.size() == 1 && document.depthxr.profiles[0].settings.stereo_boost == 1.5 &&
+               document.pivotxr.defaults.yaw_left.max_extra_degrees == 30 && document.turbo.enabled &&
+               document.turbo.toggle_bindings.size() == 2 && document.framegen.enabled,
+           "Known settings beside unknown keys were not applied");
+
+    const auto framegen = [](const std::string& module) {
+        return depthxr::ParseConfig(R"({"version":3,"core":{"enabled":true},"applications":[],"modules":{"depthxr":{"enabled":false},"pivotxr":{"enabled":false},"framegen":)" +
+                                    module + "}}");
+    };
+    const auto clean = framegen(R"({"enabled":true})");
+    Expect(clean.ok && clean.warnings.empty(), "A config without unknown keys reported warnings: " + clean.error);
+
+    // Wrong types, out-of-range values, invalid names and structural errors
+    // beside an unknown key still reject the document, and name the error.
+    const std::pair<const char*, const char*> fatal[] = {
+        {R"({"presenter":true,"enabled":"yes"})", "enabled must be a boolean"},
+        {R"({"presenter":true,"defaults":{"motionLimitPercent":30}})",
+         "framegen.defaults.motionLimitPercent must be an integer from 2 to 25"},
+        {R"({"presenter":true,"defaults":{"synthesisMode":"blend"}})",
+         "framegen.defaults.synthesisMode must be interpolate or extrapolate"},
+        {R"({"presenter":true,"defaults":[]})", "framegen.defaults must be an object"},
+        {R"({"presenter":true,"profiles":[{"name":"DCS"}]})", "Missing required field: framegenProfile.applicationIds"},
+        {R"({"presenter":true,"toggleBinding":{"type":"none"},"toggleBindings":[]})",
+         "Fields toggleBindings and toggleBinding cannot both be present"},
+    };
+    for (const auto& [module, error] : fatal) {
+        const auto result = framegen(module);
+        Expect(!result.ok && result.error == error && result.warnings.empty(),
+               std::string("An invalid setting beside an unknown key must stay fatal: ") + module + " gave '" +
+                   result.error + "'");
     }
 }
 
@@ -1336,8 +1438,15 @@ void TestFrameGenInvalidSettingsRejected() {
         const auto result = depthxr::ParseConfig(FrameGenConfigJson(module));
         Expect(!result.ok, "Invalid Frame Generation settings were accepted: " + module);
     }
-    const auto unknown = depthxr::ParseConfig(FrameGenConfigJson(R"json({ "enabled": true, "presenter": true })json"));
-    Expect(!unknown.ok, "Unknown Frame Generation keys must be rejected like other modules");
+    // Unknown keys are ignored with a warning, like other modules' (a newer
+    // app may save settings this layer does not know).
+    const auto unknown = depthxr::ParseConfig(FrameGenConfigJson(
+        R"json({ "enabled": true, "presenter": true, "defaults": { "frameMultiplier": "3x", "lookahead": 2 } })json"));
+    Expect(unknown.ok && unknown.document.framegen.enabled &&
+               unknown.document.framegen.defaults.multiplier == depthxr::FrameGenMultiplier::k3 &&
+               unknown.warnings == std::vector<std::string>{"Unknown field ignored: modules.framegen.presenter",
+                                                            "Unknown field ignored: modules.framegen.defaults.lookahead"},
+           "Unknown Frame Generation keys were not ignored with a warning: " + unknown.error);
 }
 
 void TestFrameGenOsdRows() {
@@ -3794,6 +3903,7 @@ int main() {
     TestInvertedPositionAssistRangeRejected();
     TestOsdConfig();
     TestTurboExperimentalConfig();
+    TestUnknownKeysAreIgnoredWithWarnings();
     TestParseConfig();
     TestPivotActivationBindingModel();
     TestLogLevelCompatibility();

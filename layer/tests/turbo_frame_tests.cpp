@@ -308,6 +308,43 @@ class TurboFrameTestPeer {
         layer.turbo_frame_begun_ = false;
         layer.turbo_begin_owed_ = false;
     }
+    // An instance's first load of the settings file at `config`, into a new log
+    // at `log` (as at xrCreateInstance). Returns that log's path.
+    static std::filesystem::path LoadConfigFile(const std::filesystem::path& config, const std::filesystem::path& log) {
+        auto& layer = Layer();
+        std::scoped_lock lock(layer.mutex_);
+        layer.logger_.Initialize(log);
+        layer.logged_config_warnings_.clear();
+        layer.config_path_ = config;
+        layer.has_loaded_config_ = false;
+        layer.ReloadConfigIfNeeded();
+        return layer.logger_.ActiveLogPath();
+    }
+    // The settings file is read again now (as the layer's watcher does).
+    static void PollConfigFile() { Layer().PollConfigFile(); }
+    static ConfigDocument LoadedConfig() {
+        auto& layer = Layer();
+        std::scoped_lock lock(layer.mutex_);
+        return layer.config_;
+    }
+    // The log so far: an error reaches the file at once, with everything
+    // logged before it.
+    static std::string Log() {
+        static int reads = 0;
+        auto& layer = Layer();
+        layer.logger_.Error("Turbo frame tests: log read " + std::to_string(++reads) + ".");
+        std::ifstream stream(layer.logger_.ActiveLogPath(), std::ios::binary);
+        return std::string(std::istreambuf_iterator<char>(stream), {});
+    }
+    // Forgets the test's settings file and lets its log go.
+    static void UnloadConfigFile(const std::filesystem::path& log) {
+        auto& layer = Layer();
+        std::scoped_lock lock(layer.mutex_);
+        layer.config_path_.clear();
+        layer.has_loaded_config_ = false;
+        layer.logged_config_warnings_.clear();
+        layer.logger_.Initialize(log);
+    }
     // A settings.json reload: a new document, re-resolved as the frame loop does.
     static void ReloadConfig(const ConfigDocument& config) {
         auto& layer = Layer();
@@ -2039,6 +2076,75 @@ void TestConfigReloadWhileFrameGenOwnsPacing() {
     std::filesystem::remove_all(recovery, error);
 }
 
+std::size_t Occurrences(const std::string& text, const std::string& needle) {
+    std::size_t count = 0;
+    for (std::size_t at = text.find(needle); at != std::string::npos; at = text.find(needle, at + needle.size())) {
+        ++count;
+    }
+    return count;
+}
+
+// A settings file with a key this layer does not know (a newer app's) still
+// loads. Each unknown key is logged once per log: at the first load, not again
+// on reloads, and a reload that adds one logs only that one. A reload that
+// fails to parse keeps the last good config, as before.
+void TestConfigWarningsLoggedOncePerKey() {
+    const auto directory = std::filesystem::temp_directory_path() /
+                           ("vectorxr-config-warnings-" + std::to_string(GetCurrentProcessId()));
+    std::filesystem::remove_all(directory);
+    std::filesystem::create_directories(directory);
+    const auto config = directory / "settings.json";
+    int revision = 0;
+    const auto write = [&](const std::string& osd) {
+        {
+            std::ofstream stream(config, std::ios::binary | std::ios::trunc);
+            stream << R"({"version":3,"core":{"enabled":true,"osd":)" << osd
+                   << R"(},"applications":[],"modules":{"depthxr":{"enabled":false},"pivotxr":{"enabled":false},)"
+                   << R"("framegen":{"enabled":false,"presenter":true}}})";
+        }
+        // A distinct write time for every revision, as the watcher compares them.
+        std::filesystem::last_write_time(config, std::filesystem::file_time_type::clock::now() +
+                                                     std::chrono::seconds(++revision));
+    };
+    const std::string presenter = "Config warning: Unknown field ignored: modules.framegen.presenter";
+    const std::string later = "Config warning: Unknown field ignored: core.osd.later";
+
+    write(R"({"scale":40})");
+    const auto log = depthxr::TurboFrameTestPeer::LoadConfigFile(config, directory / "config.log");
+    Expect(depthxr::TurboFrameTestPeer::LoadedConfig().core.osd.scale == 40,
+           "A config with an unknown key did not load");
+    Expect(Occurrences(depthxr::TurboFrameTestPeer::Log(), presenter) == 1,
+           "The first load did not log its unknown key once");
+
+    write(R"({"scale":50})");
+    depthxr::TurboFrameTestPeer::PollConfigFile();
+    std::string text = depthxr::TurboFrameTestPeer::Log();
+    Expect(depthxr::TurboFrameTestPeer::LoadedConfig().core.osd.scale == 50 &&
+               text.find("Reloaded config from") != std::string::npos,
+           "A reload with the same unknown key did not apply");
+    Expect(Occurrences(text, presenter) == 1, "A reload logged an already-logged unknown key again");
+
+    write(R"({"scale":60,"later":true})");
+    depthxr::TurboFrameTestPeer::PollConfigFile();
+    text = depthxr::TurboFrameTestPeer::Log();
+    Expect(depthxr::TurboFrameTestPeer::LoadedConfig().core.osd.scale == 60 && Occurrences(text, later) == 1 &&
+               Occurrences(text, presenter) == 1,
+           "A reload that adds an unknown key did not log only that key, once");
+
+    write(R"({"scale":"big","later":true})");
+    depthxr::TurboFrameTestPeer::PollConfigFile();
+    text = depthxr::TurboFrameTestPeer::Log();
+    Expect(text.find("Failed to parse config: scale must be a number") != std::string::npos &&
+               depthxr::TurboFrameTestPeer::LoadedConfig().core.osd.scale == 60,
+           "A wrong type beside unknown keys did not fail the reload and keep the last good config");
+    Expect(Occurrences(text, later) == 1 && Occurrences(text, presenter) == 1,
+           "A failed reload logged unknown keys");
+
+    depthxr::TurboFrameTestPeer::UnloadConfigFile(log);
+    std::error_code error;
+    std::filesystem::remove_all(directory, error);
+}
+
 int main() {
     TestHandoverKeepsBlockedPollShielded();
     // Runtime-profile and fault-recovery simulations: none may stop frame
@@ -2089,6 +2195,8 @@ int main() {
     TestSequencedStallPolicySuspends();
     Expect(depthxr::TurboFrameTestPeer::OsdStateTransitions(), "OSD lost enabled/off Turbo or applied/ready/disabled Pivot state");
     Expect(depthxr::TurboFrameTestPeer::OsdLatePoseAndRelease(), "OSD late prediction or deferred-image cleanup failed");
+    // Last: it points the layer's log at a file of its own.
+    TestConfigWarningsLoggedOncePerKey();
     std::cout << "depthxr_turbo_frame_tests passed\n";
     return 0;
 }

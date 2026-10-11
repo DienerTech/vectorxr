@@ -435,6 +435,9 @@ class OpenXrLayer {
     void StopConfigWatcher();
     void ConfigWatcherLoop();
     void PollConfigFile();
+    // Log lines for the active config's warnings that this instance's log does
+    // not show yet, which are then counted as shown. Caller holds mutex_.
+    std::vector<std::string> UnloggedConfigWarningsLocked();
     void RefreshResolvedSettings();
     void ResetPivotInputStateForConfigChange();
     void PollRuntimeRelay();
@@ -977,6 +980,11 @@ class OpenXrLayer {
     uint64_t resolved_settings_generation_{~0ull};
     XrSession resolved_settings_session_{XR_NULL_HANDLE};
     std::string last_failed_config_error_;
+    // The warnings of the config in config_: unknown keys its parse ignored.
+    std::vector<std::string> config_warnings_;
+    // The config warnings this instance's log already shows. Each is logged
+    // once per log, however often the file reloads.
+    std::unordered_set<std::string> logged_config_warnings_;
 
     // Config hot-reload runs on a dedicated watcher thread so that filesystem
     // latency never blocks the render hot path. The watcher does all I/O without

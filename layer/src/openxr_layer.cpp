@@ -1912,6 +1912,8 @@ XrResult OpenXrLayer::OnInstanceCreated(const XrInstanceCreateInfo* create_info,
     config_path_ = ResolveConfigPath();
     log_path_ = ResolveLogPath();
     logger_.Initialize(log_path_);
+    // A new log: it shows the config's warnings again.
+    logged_config_warnings_.clear();
 
     current_exe_name_ = GetCurrentExecutableName();
     logger_.Info(std::string("VectorXR layer version: ") + VECTORXR_VERSION);
@@ -2145,6 +2147,9 @@ XrResult OpenXrLayer::OnInstanceCreated(const XrInstanceCreateInfo* create_info,
                           ". Using default settings; VectorXR enhancements are disabled until a valid config is loaded.");
         } else if (has_config_timestamp_) {
             logger_.Info("Loaded config from " + config_path_.string());
+            for (const std::string& line : UnloggedConfigWarningsLocked()) {
+                logger_.Info(line);
+            }
         } else {
             logger_.Info("No config file found. Using default settings.");
         }
@@ -10097,6 +10102,7 @@ void OpenXrLayer::ReloadConfigIfNeeded() {
     std::error_code ec;
     if (!std::filesystem::exists(config_path_, ec) || ec) {
         config_ = DefaultConfig();
+        config_warnings_.clear();
         has_loaded_config_ = true;
         has_config_timestamp_ = false;
         has_failed_config_timestamp_ = false;
@@ -10118,12 +10124,14 @@ void OpenXrLayer::ReloadConfigIfNeeded() {
         }
         last_failed_config_error_ = loaded.error;
         config_ = DefaultConfig();
+        config_warnings_.clear();
         has_loaded_config_ = true;
         ++config_generation_;
         return;
     }
 
     config_ = loaded.document;
+    config_warnings_ = loaded.warnings;
     has_loaded_config_ = true;
     has_failed_config_timestamp_ = false;
     last_failed_config_error_.clear();
@@ -10133,6 +10141,9 @@ void OpenXrLayer::ReloadConfigIfNeeded() {
     }
     ++config_generation_;
     logger_.Info("Loaded config from " + config_path_.string());
+    for (const std::string& line : UnloggedConfigWarningsLocked()) {
+        logger_.Info(line);
+    }
 }
 
 void OpenXrLayer::StartConfigWatcher() {
@@ -10236,6 +10247,7 @@ void OpenXrLayer::PollConfigFile() {
 
     bool log_parse_failure = false;
     bool log_reload_success = false;
+    std::vector<std::string> warning_lines;
     {
         std::scoped_lock lock(mutex_);
         if (!loaded.ok) {
@@ -10248,6 +10260,8 @@ void OpenXrLayer::PollConfigFile() {
             last_failed_config_error_ = loaded.error;
         } else {
             config_ = std::move(loaded.document);
+            config_warnings_ = std::move(loaded.warnings);
+            warning_lines = UnloggedConfigWarningsLocked();
             has_loaded_config_ = true;
             has_config_timestamp_ = true;
             last_config_write_time_ = timestamp;
@@ -10265,7 +10279,20 @@ void OpenXrLayer::PollConfigFile() {
         logger_.Error("Failed to parse config: " + loaded.error);
     } else if (log_reload_success) {
         logger_.Info("Reloaded config from " + path.string());
+        for (const std::string& line : warning_lines) {
+            logger_.Info(line);
+        }
     }
+}
+
+std::vector<std::string> OpenXrLayer::UnloggedConfigWarningsLocked() {
+    std::vector<std::string> lines;
+    for (const std::string& warning : config_warnings_) {
+        if (logged_config_warnings_.insert(warning).second) {
+            lines.push_back("Config warning: " + warning);
+        }
+    }
+    return lines;
 }
 
 OsdSnapshot OpenXrLayer::BuildOsdSnapshot() const {

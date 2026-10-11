@@ -893,8 +893,9 @@ fn default_framegen_diagnostic_view() -> String {
     "off".into()
 }
 
-// Frame Generation tuning. The layer parser rejects unknown keys, so these
-// six fields are the complete serialized shape.
+// Frame Generation tuning. Older layers reject unknown keys (current ones
+// ignore them with a warning), so these six fields are the complete
+// serialized shape.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct FrameGenSettings {
@@ -3068,7 +3069,8 @@ mod tests {
         assert_eq!(defaults.defaults.motion_limit_percent, 10);
         assert!(defaults.profiles.is_empty());
 
-        // The layer rejects unknown keys, so the saved shape must match exactly.
+        // Older layers reject unknown keys (current ones ignore them with a
+        // warning), so the saved shape must match exactly.
         let input = serde_json::json!({
             "enabled": true,
             "toggleBinding": { "type": "keyboard", "chord": ["Ctrl", "F7"] },
