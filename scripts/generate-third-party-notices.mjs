@@ -775,9 +775,6 @@ function generate() {
   const parts = [
     `${heading('VectorXR third-party notices', '=')}
 
-DRAFT FOR REVIEW. DienerTech LLC has not yet reviewed this file. It is not
-yet a final statement of the licenses of VectorXR's third-party components.
-
 VectorXR is Copyright (c) 2026 DienerTech LLC and is licensed under the
 Mozilla Public License 2.0: see LICENSE.txt next to this file (LICENSE in the
 source repository).
