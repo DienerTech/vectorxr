@@ -3830,6 +3830,10 @@ void TestSessionGraphicsVideoMemory() {
     Expect(VideoMemoryText(0) == "0 MiB", "No dedicated video memory (WARP) must read 0 MiB");
     Expect(VideoMemoryText(512 * kMiB) == "512 MiB", "Video memory below 1 GiB must read in MiB");
     Expect(VideoMemoryText(kGiB) == "1.0 GiB", "1 GiB must read 1.0 GiB");
+    Expect(VideoMemoryText(kGiB - kMiB / 4) == "1.0 GiB",
+           "Just under 1 GiB rounds to 1024 MiB and must read 1.0 GiB: " + VideoMemoryText(kGiB - kMiB / 4));
+    Expect(VideoMemoryText(kGiB - kMiB / 2 - 1) == "1023 MiB",
+           "What rounds below 1024 MiB must stay in MiB: " + VideoMemoryText(kGiB - kMiB / 2 - 1));
     Expect(VideoMemoryText(32607 * kMiB) == "31.8 GiB",
            "32607 MiB must read 31.8 GiB: " + VideoMemoryText(32607 * kMiB));
     Expect(VideoMemoryText(kGiB + kGiB * 96 / 100) == "2.0 GiB",
@@ -3852,18 +3856,33 @@ void TestSessionGraphicsLine() {
                    "(process uses 1.2 GiB), runtime=\"PimaxXR\" 1.2.3",
            "A Direct3D 12 session's graphics line must name everything found: " + line);
 
-    // A Vulkan device without an adapter LUID: Vulkan's own figures, and why
-    // DXGI's are missing.
+    // A Vulkan device whose LUID could not be read, its adapter matched by
+    // PCI IDs: DXGI's figures, and how the adapter was found.
+    depthxr::SessionGraphics matched = d3d12;
+    matched.api = "Vulkan";
+    matched.vulkan_driver_version = (581u << 22) | (42u << 14);
+    matched.problem = depthxr::AdapterIdMatchText(depthxr::AdapterIdMatch{std::size_t{0}, 1},
+                                                  "the Vulkan device names no adapter LUID");
+    line = depthxr::FormatSessionGraphics(matched, "SteamVR/OpenXR", "2.7.4");
+    Expect(line == "Session graphics: api=Vulkan, adapter=\"NVIDIA GeForce RTX 5090\", vendor=0x10de, "
+                   "driver=581.42 (32.0.15.8142), vulkanDriver=581.42 (0x914a8000), dedicatedVideoMemory=31.8 GiB, "
+                   "budget=29.6 GiB (process uses 1.2 GiB), runtime=\"SteamVR/OpenXR\" 2.7.4; adapter matched by "
+                   "PCI vendor and device ID, not by LUID: the Vulkan device names no adapter LUID",
+           "A Vulkan session's graphics line must say when its adapter was matched by PCI IDs: " + line);
+
+    // Neither the LUID nor the IDs: Vulkan's own figures, and why DXGI's are
+    // missing.
     depthxr::SessionGraphics vulkan;
     vulkan.api = "Vulkan";
     vulkan.adapter = "NVIDIA GeForce RTX 5090";
     vulkan.vendor_id = 0x10de;
     vulkan.vulkan_driver_version = (581u << 22) | (42u << 14);
-    vulkan.problem = "the Vulkan device names no adapter LUID";
+    vulkan.problem = depthxr::AdapterIdMatchText({}, "the Vulkan device names no adapter LUID");
     line = depthxr::FormatSessionGraphics(vulkan, "SteamVR/OpenXR", "2.7.4");
     Expect(line == "Session graphics: api=Vulkan, adapter=\"NVIDIA GeForce RTX 5090\", vendor=0x10de, driver=unknown, "
                    "vulkanDriver=581.42 (0x914a8000), dedicatedVideoMemory=unknown, budget=unknown, "
-                   "runtime=\"SteamVR/OpenXR\" 2.7.4; the Vulkan device names no adapter LUID",
+                   "runtime=\"SteamVR/OpenXR\" 2.7.4; DXGI has no adapter with the Vulkan device's PCI vendor and "
+                   "device ID, and its LUID is unknown: the Vulkan device names no adapter LUID",
            "A Vulkan session's graphics line must say what is missing and why: " + line);
 
     // WARP: no dedicated video memory, a budget without its usage.
@@ -3888,6 +3907,39 @@ void TestSessionGraphicsLine() {
                    "dedicatedVideoMemory=unknown, budget=unknown, runtime=unknown; the session has no "
                    "Direct3D 11, Direct3D 12 or Vulkan binding",
            "A session without a known binding must still get a graphics line: " + line);
+}
+
+// A Vulkan device whose LUID cannot be read safely: DXGI's first adapter with
+// its PCI vendor and device ID, and how many have them.
+void TestSessionGraphicsAdapterIds() {
+    using depthxr::AdapterIdMatchText;
+    using depthxr::MatchAdapterByIds;
+    const std::vector<depthxr::PciIds> adapters{
+        {0x10de, 0x2b85}, {0x1002, 0x13c0}, {0x1414, 0x008c}, {0x10de, 0x2b85}};
+    depthxr::AdapterIdMatch match = MatchAdapterByIds(adapters, {0x1002, 0x13c0});
+    Expect(match.first == std::size_t{1} && match.count == 1, "The one adapter with a device's IDs must be matched");
+    match = MatchAdapterByIds(adapters, {0x10de, 0x2b85});
+    Expect(match.first == std::size_t{0} && match.count == 2,
+           "Of two adapters with a device's IDs, the first in DXGI's order must be matched, and both counted");
+    match = MatchAdapterByIds(adapters, {0x10de, 0x2684});
+    Expect(!match.first && match.count == 0, "The vendor's ID alone must not match an adapter");
+    match = MatchAdapterByIds(adapters, {0x13c0, 0x1002});
+    Expect(!match.first && match.count == 0, "A vendor ID must not match a device ID");
+    match = MatchAdapterByIds({}, {0x10de, 0x2b85});
+    Expect(!match.first && match.count == 0, "No adapters must match nothing");
+
+    const std::string why = "the Vulkan device names no adapter LUID";
+    std::string text = AdapterIdMatchText(depthxr::AdapterIdMatch{std::size_t{1}, 1}, why);
+    Expect(text == "adapter matched by PCI vendor and device ID, not by LUID: " + why,
+           "An adapter matched by PCI IDs must say so and why: " + text);
+    text = AdapterIdMatchText(depthxr::AdapterIdMatch{std::size_t{0}, 2}, why);
+    Expect(text == "adapter matched by PCI vendor and device ID (the first of 2 adapters with them), not by LUID: " +
+                       why,
+           "An adapter matched among several must say how many there were: " + text);
+    text = AdapterIdMatchText({}, why);
+    Expect(text == "DXGI has no adapter with the Vulkan device's PCI vendor and device ID, and its LUID is unknown: " +
+                       why,
+           "No adapter with a device's IDs must say so and why: " + text);
 }
 
 } // namespace
@@ -3943,6 +3995,7 @@ int main() {
     TestSessionGraphicsDriverVersions();
     TestSessionGraphicsVideoMemory();
     TestSessionGraphicsLine();
+    TestSessionGraphicsAdapterIds();
     TestQuadViewStereoBoostKeepsInsetViewsInSync();
     TestStereoBoostScalesRotatedEyeBaseline();
     TestQuadViewConvergenceKeepsInsetOffsetsAligned();

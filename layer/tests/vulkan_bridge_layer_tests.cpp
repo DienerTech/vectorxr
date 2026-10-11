@@ -220,6 +220,21 @@ constexpr const char* kBridgedSessionLine =
     "Frame Generation's Vulkan bridge: the session is Direct3D 12 and the game renders into images shared with it";
 // Logged for each Vulkan session Frame Generation does not run.
 constexpr const char* kUnbridgedLine = "Frame Generation is off for this Vulkan session: ";
+// The session's graphics lines (session_graphics.h): the game's Vulkan device,
+// and the Direct3D 12 device of a bridged session.
+constexpr const char* kGameGraphicsLine = "Session graphics: api=Vulkan, adapter=\"";
+constexpr const char* kBridgeGraphicsLine =
+    "Session graphics: api=Direct3D 12 (Frame Generation's Vulkan bridge), adapter=\"";
+
+// The game's graphics line is logged once and names Vulkan's driver version
+// and DXGI's, so DXGI's adapter was found (by the device's LUID, or by its PCI
+// vendor and device ID when the LUID cannot be read).
+void CheckGameGraphicsLine(const std::string& log) {
+    const std::string line = LineWith(log, kGameGraphicsLine);
+    Check(Count(log, kGameGraphicsLine) == 1 && Contains(line, ", vulkanDriver=") && Contains(line, ", driver=") &&
+              !Contains(line, ", driver=unknown"),
+          "the log names the hardware of the game's Vulkan device once, with both driver versions: " + line);
+}
 
 bool SameLuid(const LUID& a, const LUID& b) {
     return a.LowPart == b.LowPart && a.HighPart == b.HighPart;
@@ -3045,6 +3060,9 @@ void CheckGameSession(App& app, VulkanGame& game, SessionCreate& create, const s
     const std::string log = Peer::Log();
     Check(Count(log, std::string(kUnbridgedLine) + why) == 1, "the log tells why, once: " + Unbridged(log));
     Check(!Contains(log, kBridgedSessionLine), "the log does not tell of a bridged session");
+    CheckGameGraphicsLine(log);
+    Check(!Contains(log, kBridgeGraphicsLine),
+          "the log names no bridge's hardware: " + LineWith(log, kBridgeGraphicsLine));
     const depthxr::FrameGenStatus status = Peer::FrameGen();
     Check(status.state == depthxr::FrameGenState::kUnavailable && Contains(status.reason, why) &&
               !Peer::FrameGenOwnsPacing() && g_framegen_chain.made == 0,
@@ -3215,6 +3233,9 @@ void CheckRouting(SessionCreate& create) {
               Contains(log, "Frame Generation gives the runtime a Direct3D 12 queue of its own"),
           "the log tells the session's bridge and queue");
     Check(Count(log, kBridgedSessionLine) == 1, "the log tells once that the session is bridged");
+    CheckGameGraphicsLine(log);
+    Check(Count(log, kBridgeGraphicsLine) == 1,
+          "the log names the hardware of the bridge's Direct3D 12 device once: " + LineWith(log, kBridgeGraphicsLine));
 }
 
 // 6. Swapchains on a bridged session: formats translated, the runtime's

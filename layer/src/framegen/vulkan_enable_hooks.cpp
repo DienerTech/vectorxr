@@ -592,6 +592,16 @@ VulkanBridgeGame VulkanGameFor(std::uint64_t device) {
     return {reinterpret_cast<PFN_xrVoidFunction>(it->second.get_instance_proc_addr), it->second.timeline_semaphores};
 }
 
+std::uint32_t VulkanInstanceVersionOf(std::uint64_t instance) {
+    Hooks& hooks = State();
+    std::scoped_lock lock(hooks.mutex);
+    const auto it = hooks.instance_versions.find(instance);
+    if (it == hooks.instance_versions.end()) {
+        return 0;
+    }
+    return std::max<std::uint32_t>(it->second, VK_API_VERSION_1_0);
+}
+
 VulkanDeviceOrigin VulkanDeviceOriginOf(std::uint64_t device) {
     Hooks& hooks = State();
     std::scoped_lock lock(hooks.mutex);

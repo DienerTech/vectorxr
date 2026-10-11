@@ -579,7 +579,8 @@ cards; Vulkan games add `vulkanDriver`), the card's dedicated video memory, the 
 memory budget and what it uses at that moment, and the OpenXR runtime's name and version.
 Direct3D 11 and Vulkan games with Frame Generation on log a second line for the Direct3D 12
 device Frame Generation runs on. A value that could not be found reads `unknown`, and the line
-ends with the reason.
+ends with the reason. When a Vulkan game's card cannot be identified exactly, it is matched by its
+PCI vendor and device ID instead, and the line ends by saying so.
 
 ### Frame Generation (experimental)
 

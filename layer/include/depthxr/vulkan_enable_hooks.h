@@ -51,6 +51,12 @@ PFN_xrVoidFunction VulkanEnableHook(XrInstance instance, const char* name);
 // game itself, XR_KHR_vulkan_enable) get the defaults.
 VulkanBridgeGame VulkanGameFor(std::uint64_t device);
 
+// The Vulkan API version a game's VkInstance (its handle as an integer) was
+// made with (VkApplicationInfo::apiVersion, 1.0 when it names none), when the
+// layer's vkCreateInstance made it (XR_KHR_vulkan_enable2 while the bridge was
+// wanted); 0 for any other instance, whose version the layer does not know.
+std::uint32_t VulkanInstanceVersionOf(std::uint64_t instance);
+
 // How a game's VkDevice (its handle as an integer) was made, as the hooks saw
 // it while the bridge was wanted: by the runtime in xrCreateVulkanDeviceKHR,
 // with the layer's vkCreateDevice or without it, or otherwise by the game

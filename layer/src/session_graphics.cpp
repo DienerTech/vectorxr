@@ -58,12 +58,40 @@ std::string VulkanDriverVersionText(std::uint32_t version, std::optional<std::ui
 std::string VideoMemoryText(std::uint64_t bytes) {
     constexpr std::uint64_t kMiB = 1ull << 20;
     constexpr std::uint64_t kGiB = 1ull << 30;
-    if (bytes < kGiB) {
-        return std::to_string((bytes + kMiB / 2) / kMiB) + " MiB";
+    // The unit follows the rounded figure: just under 1 GiB reads "1.0 GiB",
+    // never "1024 MiB".
+    const std::uint64_t mebibytes = bytes / kMiB + (bytes % kMiB >= kMiB / 2 ? 1 : 0);
+    if (mebibytes < 1024) {
+        return std::to_string(mebibytes) + " MiB";
     }
     // Tenths of a GiB, rounded.
     const std::uint64_t tenths = (bytes / kGiB) * 10 + ((bytes % kGiB) * 10 + kGiB / 2) / kGiB;
     return std::to_string(tenths / 10) + "." + std::to_string(tenths % 10) + " GiB";
+}
+
+AdapterIdMatch MatchAdapterByIds(const std::vector<PciIds>& adapters, PciIds wanted) {
+    AdapterIdMatch match;
+    for (std::size_t i = 0; i < adapters.size(); ++i) {
+        if (adapters[i].vendor_id == wanted.vendor_id && adapters[i].device_id == wanted.device_id) {
+            if (!match.first) {
+                match.first = i;
+            }
+            ++match.count;
+        }
+    }
+    return match;
+}
+
+std::string AdapterIdMatchText(const AdapterIdMatch& match, std::string_view no_luid) {
+    if (!match.first) {
+        return "DXGI has no adapter with the Vulkan device's PCI vendor and device ID, and its LUID is unknown: " +
+               std::string(no_luid);
+    }
+    std::string text = "adapter matched by PCI vendor and device ID";
+    if (match.count > 1) {
+        text += " (the first of " + std::to_string(match.count) + " adapters with them)";
+    }
+    return text + ", not by LUID: " + std::string(no_luid);
 }
 
 std::string FormatSessionGraphics(const SessionGraphics& graphics, std::string_view runtime_name,
