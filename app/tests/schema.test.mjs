@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import test from 'node:test'
 
-import { createFrameGenProfile, createPivotQuickView, createTurboProfile, defaultConfig, defaultFrameGenSettings } from '../src/lib/model.ts'
+import { createFrameGenProfile, createPivotQuickView, createTurboProfile, defaultConfig, defaultFrameGenSettings, normalizeToggleBindings } from '../src/lib/model.ts'
 
 const schema = JSON.parse(readFileSync(new URL('../../config/vectorxr.schema.json', import.meta.url), 'utf8'))
 
@@ -75,4 +75,30 @@ test('schema describes generated Quick Views while accepting the legacy turn dir
   assertSchemaDescribesObject(definition, quickView)
   assert.ok(!definition.required.includes('turnDirection'))
   assert.deepEqual(definition.properties.turnDirection.enum, ['left', 'right'])
+})
+
+test('schema never accepts a toggle with both its legacy binding and its list, as the layer rejects that', () => {
+  const pairs = {
+    osdSettings: [['toggleBinding', 'toggleBindings'], ['cycleBinding', 'cycleBindings']],
+    turboModule: [['toggleBinding', 'toggleBindings'], ['metricsBinding', 'metricsBindings']],
+    framegenModule: [['toggleBinding', 'toggleBindings']],
+    depthxrBindings: [['toggleAnchor', 'toggleAnchorBindings']],
+  }
+  for (const [name, list] of Object.entries(pairs)) {
+    const forbidden = schema.$defs[name].allOf.map((rule) => rule.not.required.join())
+    for (const pair of list) assert.ok(forbidden.includes(pair.join()), `${name}: ${pair.join(' + ')}`)
+  }
+  // Depth's enable toggle: exactly one of the two keys.
+  assert.deepEqual(schema.$defs.depthxrBindings.oneOf.map((rule) => rule.required.join()), ['toggleEnabled', 'toggleEnabledBindings'])
+  assert.equal(schema.$defs.depthxrBindings.anyOf, undefined)
+})
+
+test('a toggle holding both its legacy binding and its list reads both, legacy first, as the Rust side does', () => {
+  const legacy = { type: 'keyboard', chord: ['Ctrl', 'F7'] }
+  const listed = { type: 'keyboard', chord: ['Ctrl', 'F8'] }
+  const chords = (bindings) => bindings.map((binding) => binding.chord.join('+'))
+  assert.deepEqual(chords(normalizeToggleBindings([listed], legacy, [])), ['Ctrl+F7', 'Ctrl+F8'])
+  assert.deepEqual(chords(normalizeToggleBindings([listed], undefined, [])), ['Ctrl+F8'])
+  assert.deepEqual(chords(normalizeToggleBindings(undefined, legacy, [])), ['Ctrl+F7'])
+  assert.deepEqual(normalizeToggleBindings(undefined, { type: 'none' }, [legacy]), [])
 })

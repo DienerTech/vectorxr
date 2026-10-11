@@ -1486,7 +1486,12 @@ export function normalizeToggleBindings(value: unknown, legacyValue: unknown, fa
   if (value === undefined && legacyValue === undefined) {
     return fallback.map((binding) => normalizeInputBinding(binding, defaultNoneBinding()))
   }
-  return normalizeInputBindings(value, legacyValue)
+  // As the desktop app's Rust side reads a file holding both keys: the legacy
+  // binding first, then the list (the layer itself rejects such a file).
+  const list = Array.isArray(value) ? value : value !== undefined ? [value] : []
+  return [...(legacyValue !== undefined ? [legacyValue] : []), ...list]
+    .map((binding) => normalizeInputBinding(binding, defaultNoneBinding()))
+    .filter((binding) => binding.type !== 'none')
 }
 
 export function normalizeInputBindings(value: unknown, legacyValue?: unknown): InputBinding[] {

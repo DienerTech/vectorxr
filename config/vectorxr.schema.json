@@ -218,6 +218,10 @@
     "osdSettings": {
       "type": "object",
       "additionalProperties": false,
+      "allOf": [
+        { "not": { "required": ["toggleBinding", "toggleBindings"] } },
+        { "not": { "required": ["cycleBinding", "cycleBindings"] } }
+      ],
       "properties": {
         "enabled": {
           "type": "boolean",
@@ -695,7 +699,10 @@
     "depthxrBindings": {
       "type": "object",
       "additionalProperties": false,
-      "anyOf": [
+      "allOf": [
+        { "not": { "required": ["toggleAnchor", "toggleAnchorBindings"] } }
+      ],
+      "oneOf": [
         {
           "required": [
             "toggleEnabled"
@@ -1404,6 +1411,10 @@
     "turboModule": {
       "type": "object",
       "additionalProperties": false,
+      "allOf": [
+        { "not": { "required": ["toggleBinding", "toggleBindings"] } },
+        { "not": { "required": ["metricsBinding", "metricsBindings"] } }
+      ],
       "properties": {
         "experimental": {
           "type": "object",
@@ -1681,6 +1692,9 @@
     "framegenModule": {
       "type": "object",
       "additionalProperties": false,
+      "allOf": [
+        { "not": { "required": ["toggleBinding", "toggleBindings"] } }
+      ],
       "description": "Experimental Frame Generation. Optional; configs without it use the defaults.",
       "properties": {
         "enabled": {
