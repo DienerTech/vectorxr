@@ -4,6 +4,8 @@ import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue'
 import { loadRuntimeStatus, type RuntimeStatusSession } from '../../lib/commands'
 import DefaultProfileExclusions from '../DefaultProfileExclusions.vue'
 import FrameGenSettingsFields from '../FrameGenSettingsFields.vue'
+import { useGpuCapabilities } from '../../lib/gpuCapabilities'
+import { motionSourceState } from '../../lib/motionSource'
 import ModuleBindingPage from '../ModuleBindingPage.vue'
 import ModuleBindingPanel from '../ModuleBindingPanel.vue'
 import ProfileShell from '../ProfileShell.vue'
@@ -135,10 +137,13 @@ const profileWarnings = computed(() => {
   return warnings
 })
 
+const gpuCapabilities = useGpuCapabilities()
+
 function settingsSummary(settings: FrameGenSettings) {
   const mode = settings.synthesisMode === 'extrapolate' ? 'Extrapolate' : 'Interpolate'
   const rate = settings.frameMultiplier === 'dynamic' ? 'Dynamic' : settings.frameMultiplier === 'auto' ? 'Fixed Auto' : `Fixed ${settings.frameMultiplier}`
-  const motion = settings.motionEstimation === 'hardware' ? 'NVIDIA hardware' : 'Shader'
+  // The source in use: Shader while interpolating, or with no card that has the hardware.
+  const motion = motionSourceState(settings, gpuCapabilities.value).effective === 'hardware' ? 'NVIDIA hardware' : 'Shader'
   return `${mode} · ${rate} · ${motion}`
 }
 </script>

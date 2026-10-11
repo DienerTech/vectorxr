@@ -7,6 +7,7 @@ import {
   type TurboMetricsSession,
   type VectorXRConfig,
 } from './model'
+import type { GpuCapabilities } from './motionSource'
 
 const localKey = 'vectorxr-config'
 
@@ -222,6 +223,16 @@ export async function exportConfigFile(config: VectorXRConfig): Promise<boolean>
   link.remove()
   window.setTimeout(() => URL.revokeObjectURL(url), 0)
   return true
+}
+
+// Every graphics card, and whether any has NVIDIA's optical flow hardware
+// (checked once per app run).
+export async function loadGpuCapabilities(): Promise<GpuCapabilities> {
+  if (!tauriAvailable()) {
+    return { probed: false, adapters: [], opticalFlow: false, error: 'not running in the VectorXR app' }
+  }
+
+  return invoke<GpuCapabilities>('load_gpu_capabilities')
 }
 
 export async function listInputDevices(): Promise<InputDeviceInfo[]> {

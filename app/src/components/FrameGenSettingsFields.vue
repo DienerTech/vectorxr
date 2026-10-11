@@ -2,6 +2,8 @@
 import { computed, ref, watch } from 'vue'
 
 import OptionCards from './OptionCards.vue'
+import { useGpuCapabilities } from '../lib/gpuCapabilities'
+import { motionSourceState } from '../lib/motionSource'
 import {
   defaultFrameGenSettings,
   frameGenFixedMultipliers,
@@ -77,19 +79,31 @@ const frameRate = computed<FrameRate>({
 })
 const fixedRateDescription = computed(() => fixedRates.find((rate) => rate.value === props.settings.frameMultiplier)?.description ?? '')
 
-const motionSources: { value: FrameGenMotionEstimation; label: string; badge?: string; description: string }[] = [
+// Interpolate always measures with Shader, and NVIDIA hardware needs a card
+// that has it (any card in the PC, as the driver reports): the cards show
+// the source in use, greyed where the choice does nothing; a click still
+// saves the choice.
+const gpuCapabilities = useGpuCapabilities()
+const motionSource = computed(() => motionSourceState(props.settings, gpuCapabilities.value))
+const motionSourceModel = computed<FrameGenMotionEstimation>({
+  get: () => motionSource.value.effective,
+  set: (value) => { props.settings.motionEstimation = value },
+})
+const motionSources = computed(() => [
   {
-    value: 'shader',
+    value: 'shader' as const,
     label: 'Shader',
     badge: 'Default',
     description: 'Measures motion on the GPU\'s shader cores. Works on any GPU, and pairs best with Interpolate.',
   },
   {
-    value: 'hardware',
+    value: 'hardware' as const,
     label: 'NVIDIA hardware',
-    description: 'Uses the optical flow unit of NVIDIA RTX GPUs: more accurate, especially on repeating patterns. Used by Extrapolate; Interpolate measures with Shader, which is ready sooner.',
+    description: 'Uses the optical flow unit of NVIDIA RTX GPUs: more accurate, especially on repeating patterns. Used by Extrapolate.',
+    disabled: motionSource.value.hardwareUnavailable !== null,
+    disabledReason: motionSource.value.hardwareUnavailable,
   },
-]
+])
 
 const flowQualities: { value: FrameGenFlowQuality; label: string; resolution: string }[] = [
   { value: 'performance', label: 'Performance', resolution: '1/16' },
@@ -144,7 +158,9 @@ function resetAdvanced() {
     </div>
 
     <div class="rounded-[1rem] border p-4 surface-panel-soft">
-      <OptionCards v-model="settings.motionEstimation" legend="Motion source" :options="motionSources" />
+      <OptionCards v-model="motionSourceModel" legend="Motion source" :options="motionSources" :disabled="motionSource.locked">
+        <p v-if="motionSource.note" class="mt-2 text-xs leading-5 text-muted">{{ motionSource.note }}</p>
+      </OptionCards>
     </div>
 
     <details class="section-disclosure rounded-[1rem] border p-4 surface-panel-soft" style="border-color: var(--app-border)">

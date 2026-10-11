@@ -681,7 +681,11 @@ needs a game restart; turning it off applies at once.
   too late for the frames between real frames. The accelerator starts on each eye's image as
   soon as the game releases it, so it mostly runs while the game finishes its frame. With
   **Performance** flow quality it uses the accelerator's fastest preset, which is less accurate
-  on repeating patterns. Where it cannot be used, Shader is, and the log says why.
+  on repeating patterns. Where it cannot be used, Shader is, and the log says why. The page
+  checks every graphics card in the PC with NVIDIA's driver, not only the first one listed, and
+  greys out **NVIDIA hardware**, with each card's reason, when none has the accelerator. While the
+  mode is Interpolate the whole Motion source is greyed out and shows Shader; the choice you made
+  is kept for Extrapolate.
   In `settings.json`, set `"motionEstimation": "hardware"` in a profile's settings.
 - **Advanced** (collapsed by default):
   - **Flow quality** sets the resolution motion is measured at: **Performance** (1/16 of the eye

@@ -10,6 +10,7 @@ use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
 mod debug_sources;
+mod gpu_capabilities;
 mod input_devices;
 mod openxr_layers;
 
@@ -1941,6 +1942,20 @@ fn reset_stored_data() -> Result<ResetStoredDataEnvelope, String> {
     })
 }
 
+// Whether any graphics card has NVIDIA's optical flow hardware (Frame
+// Generation's motion source), checked once, off the UI thread.
+#[tauri::command]
+async fn load_gpu_capabilities() -> gpu_capabilities::GpuCapabilities {
+    tauri::async_runtime::spawn_blocking(gpu_capabilities::load)
+        .await
+        .unwrap_or_else(|error| gpu_capabilities::GpuCapabilities {
+            probed: false,
+            adapters: Vec::new(),
+            optical_flow: false,
+            error: format!("the graphics card check failed ({error})"),
+        })
+}
+
 #[tauri::command]
 fn list_input_devices() -> Result<Vec<input_devices::InputDeviceInfo>, String> {
     input_devices::list_input_devices()
@@ -3418,6 +3433,7 @@ fn main() {
             clear_turbo_fault_logs,
             load_debug_sources,
             set_runtime_quadviews_diagnostic_visualization,
+            load_gpu_capabilities,
             list_input_devices,
             capture_device_binding,
             cancel_device_binding_capture,
