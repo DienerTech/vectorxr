@@ -96,16 +96,23 @@ See the [Turbo setup and Safety guide](docs/usage.md#turbo) for the controls and
 Frame Generation inserts optical-flow generated frames between a game's frames, so the headset
 gets a fresh image every refresh even when the game renders fewer. By default (**Dynamic**) the
 game runs as fast as it can and generated frames fill the gaps; a **Fixed** rate (Auto, 2x, 3x,
-or 4x) holds it at a fraction of the refresh rate instead. Choose **Interpolate** (smoothest,
-fewest artifacts, a little latency) or **Extrapolate** (lowest latency, more edge artifacts) and
-**Shader** or **NVIDIA hardware** motion per profile, and compare in game with an A/B toggle and
+or 4x) holds it at a fraction of the refresh rate instead. Choose per profile between
+**Interpolate** (smoothest, fewest artifacts, a little latency), which measures motion on the
+GPU's shader cores, and **Extrapolate** (lowest latency, more edge artifacts), which can use an
+NVIDIA RTX GPU's optical flow hardware, and compare them in game with an A/B toggle and
 diagnostic views. The On-Screen Display shows **FG ON** and the headset's frame rate beside its
 FPS. It works with Direct3D 11, Direct3D 12, and Vulkan games, in stereo or Quadviews.
 
-It is experimental: motion is measured on the final images (no game motion vectors yet), and
-text and HUDs can shimmer on generated frames. Turn off runtime smoothing such as SteamVR Motion
-Smoothing or ASW, and expect Turbo to stay off where Frame Generation runs. Turning it on needs a
-game restart. See the [Frame Generation guide](docs/usage.md#frame-generation-experimental).
+It is experimental, and tested on one PC so far: an NVIDIA RTX 5090 with a Pimax Crystal Super on
+PiOpenXR, in DCS (Direct3D 11 with quad views), MSFS 2024 (Direct3D 12), and Star Citizen
+(Vulkan). AMD and Intel GPUs are untested: measuring motion on the shader cores works on any GPU,
+but the bridges that carry Direct3D 11 and Vulkan games' images to Frame Generation have not been
+verified on AMD. Motion is measured on the final images (no game motion vectors yet), text and
+HUDs can shimmer on generated frames, and the real frames it keeps take video memory: about
+0.55 GB each at 6864x6908 per eye. Turn off runtime smoothing such as SteamVR Motion Smoothing or
+ASW (the OSD and log say so when the runtime halves the frame rate), and expect Turbo to stay off
+where Frame Generation runs. Turning it on needs a game restart. See the
+[Frame Generation guide](docs/usage.md#frame-generation-experimental).
 
 ### On-Screen Display
 

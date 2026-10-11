@@ -572,6 +572,15 @@ session logs, then older recorder history.
 Raw capture is limited to 8 MiB per file and 64 MiB total; the ZIP inventory lists any
 unavailable or limited files. Review the ZIP for private information before sharing it.
 
+Each session's log names the hardware it runs on, right after the runtime creates the VR
+session, in a line starting `Session graphics:`. It gives the graphics API, the graphics card
+(`adapter`) and its PCI vendor ID, the driver version (in NVIDIA's numbering as well on NVIDIA
+cards; Vulkan games add `vulkanDriver`), the card's dedicated video memory, the process's video
+memory budget and what it uses at that moment, and the OpenXR runtime's name and version.
+Direct3D 11 and Vulkan games with Frame Generation on log a second line for the Direct3D 12
+device Frame Generation runs on. A value that could not be found reads `unknown`, and the line
+ends with the reason.
+
 ### Frame Generation (experimental)
 
 Frame Generation adds generated frames between a game's frames, so the headset gets a fresh
@@ -586,7 +595,17 @@ runtime's own reprojection already handles head rotation, so the flow follows wo
 vehicle, and object motion.
 
 Frame Generation is experimental. Keep the Default Profile off and enable it per game after
-comparing it in the headset.
+comparing it in the headset. It has been tested on one PC so far:
+
+- **GPU:** NVIDIA GeForce RTX 5090.
+- **Headset and runtime:** Pimax Crystal Super on PiOpenXR, Pimax's OpenXR runtime.
+- **Games:** DCS (Direct3D 11 with quad views), MSFS 2024 (Direct3D 12), and Star Citizen
+  (Vulkan).
+
+AMD and Intel GPUs are untested. The **Shader** motion source is vendor-neutral, but Direct3D 11
+and Vulkan games reach Frame Generation through bridges that share their images with a Direct3D 12
+device, and those bridges have not been verified on AMD. Frame Generation also needs video memory
+for the frames it keeps: see [Video memory](#video-memory).
 
 #### Set up Frame Generation for a game
 
@@ -606,8 +625,9 @@ comparing it in the headset.
    game. An enabled matching custom profile turns Frame Generation on for that game even when
    the Default Profile is off.
 6. Start with the default settings (**Mode: Interpolate**, **Frame rate: Dynamic**, **Motion
-   source: Shader**), then click **Save Changes**. On an NVIDIA RTX GPU, **NVIDIA hardware** as the
-   motion source is usually more accurate; for the lowest latency, try **Extrapolate** with it.
+   source: Shader**), then click **Save Changes**. Interpolate always measures motion on the
+   GPU's shader cores. **NVIDIA hardware** motion, on an NVIDIA RTX GPU, is for **Extrapolate**,
+   which has the lowest latency: try the two together.
 7. Restart the game. Turning Frame Generation on, for the Default Profile or a custom profile,
    takes effect at the next launch. Turning it off applies to a running game at once: frames
    pass straight through.
@@ -719,6 +739,22 @@ artifacts grow; 4x shows the most. Each generated frame can also need its own se
 headset-resolution output images, so video memory use grows with the rate. The log reports the
 estimate.
 
+#### Video memory
+
+Frame Generation keeps the last few real frames to generate from: five where video memory
+allows, otherwise three (with quad views always five, of the smaller views the game renders).
+Each kept frame costs about 6 bytes per pixel per eye: the image, plus its depth, trust, and
+motion at lower resolution. That is about 0.55 GB per kept frame at 6864x6908 per eye, and about
+0.1 GB at 3000x3000. The output images generated frames are written into come on top: a swapchain
+per eye at the game's resolution, usually with three images of 4 bytes per pixel, so about 1.1 GB
+at 6864x6908 per eye and 0.2 GB at 3000x3000. In all, plan for about 3 to 4 GB of video memory at
+6864x6908 per eye, and under 1 GB at 3000x3000.
+
+The log says how many real frames are kept (**Frame Generation keeps the last 5 real frames to
+generate from**, or 3 with the reason), and the **Frame Generation process video memory** lines
+report the game process's video memory use and budget, and how much of it Frame Generation's
+working images and output images take.
+
 #### Frame Generation settings
 
 Every setting below applies live after **Save Changes**. Only turning Frame Generation on
@@ -783,6 +819,23 @@ Advanced settings. The first enabled custom profile that matches the running gam
   in Pimax Play or with a SteamVR fixed 45 fps setting; Frame Generation lowers the game's rate
   itself.
 
+When the runtime holds Frame Generation's frames to half its refresh rate anyway, as its
+smoothing does, VectorXR reports it after about 4 seconds of it:
+
+- The line under the On-Screen Display's Frame Generation row (expanded layout) reads **The
+  runtime halves the frame rate: turn off its smoothing**, and the app's live status ends with
+  the same words.
+- The log says so once per session, with what it measured: **Frame Generation: the runtime
+  appears to be halving the frame rate, probably through its motion smoothing: ...**.
+- With **Dynamic**, Frame Generation stands down while it lasts (**Frame Generation (dynamic)
+  stands down: the runtime halves the frame rate**): frames pass straight through, as without
+  Frame Generation, and it tries again after a hold, 10 seconds at first.
+- Each 30-second summary counts the waits on Frame Generation's own thread that the runtime held
+  back, as **runtimeHalved** (held back/measured), followed by **(halving)** while it lasts.
+
+Turn off the runtime's smoothing and check that it runs at full refresh. The message clears once
+the runtime shows every refresh again.
+
 #### Current limits
 
 - Frame Generation does not use game motion vectors yet; motion is estimated from color
@@ -845,7 +898,15 @@ Frame Generation runs. Turbo still works for games without Frame Generation.
 
 Yes. Runtime smoothing (SteamVR Motion Smoothing, Pimax Smart Smoothing, Virtual Desktop SSW,
 Meta ASW) fights Frame Generation's pacing. Also keep the runtime at full refresh: do not halve
-the frame rate in Pimax Play or with a SteamVR fixed 45 fps setting.
+the frame rate in Pimax Play or with a SteamVR fixed 45 fps setting. When a runtime halves the
+frame rate anyway, the On-Screen Display and the log say so (see
+[How Frame Generation works with other features](#how-frame-generation-works-with-other-features)).
+
+**How much video memory does it need?**
+
+About 0.55 GB per kept real frame at 6864x6908 per eye and 0.1 GB at 3000x3000, three to five of
+them, plus its output images: about 3 to 4 GB in all at 6864x6908 per eye. See
+[Video memory](#video-memory).
 
 ## On-Screen Display
 
