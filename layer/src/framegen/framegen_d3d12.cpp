@@ -3395,7 +3395,10 @@ class D3D12FrameGen final : public FrameGenGpu {
         if (hardware_loaded_) {
             return true;
         }
-        const HMODULE library = LoadLibraryW(L"nvofapi64.dll");
+        // The driver installs it in System32: only from there, never from
+        // the game's folder or the search path (a file planted there would
+        // run inside the game, under VectorXR's signature).
+        const HMODULE library = LoadLibraryExW(L"nvofapi64.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
         const auto create = library ? reinterpret_cast<decltype(&NvOFAPICreateInstanceD3D12)>(
                                           GetProcAddress(library, "NvOFAPICreateInstanceD3D12"))
                                     : nullptr;
