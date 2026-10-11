@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed } from 'vue'
-import type { PivotPositionAssist } from '../lib/model'
+import type { PivotPositionAssist, PivotPositionDirection } from '../lib/model'
 
 const props = defineProps<{ settings: PivotPositionAssist }>()
 
@@ -21,6 +21,10 @@ function seedDirections() {
   if (directional.some((direction) => direction.rightCm || direction.upCm || direction.forwardCm)) return
   props.settings.yawRight = { ...props.settings.yaw }
   props.settings.yawLeft = { ...props.settings.yaw, rightCm: -props.settings.yaw.rightCm }
+}
+
+function anglesOutOfOrder(direction: PivotPositionDirection) {
+  return direction.fullAngleDegrees <= direction.startAngleDegrees
 }
 </script>
 
@@ -55,16 +59,19 @@ function seedDirections() {
             Forward / back (cm)
             <input v-model.number="direction.value.forwardCm" class="app-input mt-1 w-full rounded-[0.75rem] px-3 py-2" type="number" min="-100" max="100" step="1" />
           </label>
+          <!-- Fixed bounds keep step="1" counting from whole degrees; a min/max
+               tied to the other angle would shift the step base (15.1, 16.1, ...)
+               and flag whole-degree values. Ordering is flagged separately. -->
           <label class="text-sm">
             Start angle (°)
-            <input v-model.number="direction.value.startAngleDegrees" class="app-input mt-1 w-full rounded-[0.75rem] px-3 py-2" type="number" min="0" :max="direction.value.fullAngleDegrees - 0.1" step="1" />
+            <input v-model.number="direction.value.startAngleDegrees" class="app-input mt-1 w-full rounded-[0.75rem] px-3 py-2" :class="{ 'app-input-error': anglesOutOfOrder(direction.value) }" type="number" min="0" max="179" step="1" />
           </label>
           <label class="text-sm">
             Full-offset angle (°)
-            <input v-model.number="direction.value.fullAngleDegrees" class="app-input mt-1 w-full rounded-[0.75rem] px-3 py-2" type="number" :min="direction.value.startAngleDegrees + 0.1" max="180" step="1" />
+            <input v-model.number="direction.value.fullAngleDegrees" class="app-input mt-1 w-full rounded-[0.75rem] px-3 py-2" :class="{ 'app-input-error': anglesOutOfOrder(direction.value) }" type="number" min="0" max="180" step="1" />
           </label>
         </div>
-        <p v-if="direction.value.fullAngleDegrees <= direction.value.startAngleDegrees" class="mt-2 text-sm text-warning">
+        <p v-if="anglesOutOfOrder(direction.value)" class="mt-2 text-sm text-warning">
           Full-offset angle must be greater than Start angle.
         </p>
       </div>
