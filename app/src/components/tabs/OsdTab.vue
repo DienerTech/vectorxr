@@ -49,13 +49,13 @@ function closeBinding() {
 }
 const contents: Record<OsdBodyRow, { key: 'showGraph' | 'showTurbo' | 'showFramegen' | 'showPivot' | 'showModules'; label: string; hint: string }> = {
   graph: { key: 'showGraph', label: 'Frame-time graph', hint: 'Rolling history of the last 120 application frames.' },
-  turbo: { key: 'showTurbo', label: 'Turbo state', hint: 'Distinguishes disabled, enabled but off, active strategy, and safety states.' },
+  turbo: { key: 'showTurbo', label: 'Turbo state', hint: 'Distinguishes disabled, enabled but off, active strategy, safety states, and paused for Frame Generation.' },
   framegen: { key: 'showFramegen', label: 'Frame Generation state', hint: 'On, Standby, Paused or Off, with the mode and frame rate, and a second line with frame rates or the reason. Shown only in games where Frame Generation is on.' },
   pivot: { key: 'showPivot', label: 'Pivot state', hint: 'Motion state, Position Assist, and nudges. Apps with Snap Views add a second line for the snap, stacking, and transitions.' },
   modules: { key: 'showModules', label: 'Active enhancements', hint: 'Depth, Pivot, Turbo, Quadviews, and Frame Generation enabled for this app.' },
 }
 const compactContents = [
-  { key: 'compactShowTurbo', label: 'Turbo state', hint: 'Current strategy, off, waiting, or safety state.' },
+  { key: 'compactShowTurbo', label: 'Turbo state', hint: 'Current strategy, off, waiting, safety state, or paused for Frame Generation.' },
   { key: 'compactShowFramegen', label: 'Frame Generation state', hint: 'Frame rate and game-to-headset frame rates, or Standby, Paused or Off.' },
   { key: 'compactShowPivot', label: 'Pivot state', hint: 'Motion state in a short label, plus a Snap View line when Snap Views are configured.' },
 ] as const
@@ -66,7 +66,7 @@ const compactHeaders = [
   { key: 'compactShowClock', label: 'Local clock' },
 ] as const
 const metricChoices = { all: 'FPS + average frame time', fps: 'FPS only', frameTime: 'Average frame time only', none: 'Hidden' } as const
-const framegenFpsHint = 'In games with Frame Generation on: FG ON with the frames per second the headset shows, or STBY, PAUSED or OFF.'
+const framegenFpsHint = 'In games with Frame Generation on: FG ON with the frames per second the headset shows, or STBY, WAIT, PAUSED, OFF or N/A.'
 const compactEmpty = computed(() => osdCompactLayout(osd.value).empty)
 function fpsOnly() {
   Object.assign(osd.value, { compactMetrics: 'fps', compactShowBrand: false, compactShowApp: false,

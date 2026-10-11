@@ -42,14 +42,18 @@ const legibleScale = computed(() => Math.min(legibleMaxScale, stageSize.value.wi
 const legibleStageHeight = computed(() => Math.max(300, Math.ceil(height.value * legibleScale.value) + legiblePadY))
 const legibleView = computed(() => ({ width: stageSize.value.width || legibleWidestPanel, height: stageSize.value.height || legibleStageHeight.value }))
 const headerValues = computed(() => ({ brand: 'VECTORXR', app: 'your-game.exe', runtime: 'Your OpenXR runtime', clock: props.settings.clockFormat === '12' ? '8:42 PM' : '20:42' }))
-const labels: Record<OsdBodyRow, [string, string]> = { graph: ['', ''], turbo: ['TURBO', 'Async / Experimental'], framegen: ['FRAME GEN', 'On  /  Interpolate  /  Dynamic'], pivot: ['PIVOT', 'Motion: Active / Continuous + Position / Flight'], modules: ['ENHANCEMENTS', 'Depth / Pivot / Turbo / Quadviews'] }
+// Whether the sample shows a game Frame Generation runs in: Turbo then yields
+// to it, as in the headset.
+const framegenShown = computed(() => {
+  const s = props.settings
+  return s.compact ? s.compactShowFramegen || compactLayout.value.framegenBadge : s.showFramegen || s.showFramegenFps
+})
+const labels = computed<Record<OsdBodyRow, [string, string]>>(() => ({ graph: ['', ''], turbo: ['TURBO', framegenShown.value ? 'Paused for Frame Generation' : 'Async / Experimental'], framegen: ['FRAME GEN', 'On  /  Interpolate  /  Dynamic'], pivot: ['PIVOT', 'Motion: Active / Continuous + Position / Flight'], modules: ['ENHANCEMENTS', framegenShown.value ? 'Depth / Pivot / Turbo / Frame Gen / Quadviews' : 'Depth / Pivot / Turbo / Quadviews'] }))
 const framegenDetail = '45 \u2192 90 fps  /  GPU 3.1 ms'
 // Sample readings: a game Frame Generation doubles while the preview shows
 // Frame Generation, a game at full rate otherwise.
 const sample = computed(() => {
-  const s = props.settings
-  const framegen = s.compact ? s.compactShowFramegen || compactLayout.value.framegenBadge : s.showFramegen || s.showFramegenFps
-  return framegen ? { fps: '45', average: '22.2', p95: '24.8' } : { fps: '90', average: '11.1', p95: '12.4' }
+  return framegenShown.value ? { fps: '45', average: '22.2', p95: '24.8' } : { fps: '90', average: '11.1', p95: '12.4' }
 })
 let drag: { x: number; y: number; h: number; v: number; unit: number } | null = null
 function start(event: PointerEvent) {
@@ -93,7 +97,7 @@ function move(event: PointerEvent) {
             <path v-if="compactLayout.statusY > 18" :d="`M28 ${compactLayout.statusY - 8} H${panelWidth - 28}`" stroke="#141f2d" />
             <g v-if="settings.compactShowTurbo" :transform="`translate(0 ${compactLayout.turboY})`">
               <text x="30" y="22" font-size="20" fill="#94a5b8">TURBO</text>
-              <foreignObject :x="compactLayout.statusValueX" :width="panelWidth - compactLayout.statusValueX - 28" height="36"><div class="body-value" :style="{ color: accent }">Async / EXP</div></foreignObject>
+              <foreignObject :x="compactLayout.statusValueX" :width="panelWidth - compactLayout.statusValueX - 28" height="36"><div class="body-value" :style="{ color: accent }">{{ framegenShown ? 'Paused for Frame Generation' : 'Async / EXP' }}</div></foreignObject>
             </g>
             <g v-if="settings.compactShowFramegen" :transform="`translate(0 ${compactLayout.framegenY})`">
               <text x="30" y="22" font-size="20" fill="#94a5b8">FRAME GEN</text>

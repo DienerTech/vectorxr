@@ -124,9 +124,10 @@ enabled.
 - Treat per-game profiles as independent calibrations. Different titles may need different
   quadrants—not merely small variations of one universal setting.
 - The **Depth Toggle Binding** at the top lets you toggle Depth on/off at runtime for quick A/B
-  comparisons in headset. Like every in-game toggle (Depth, Depth Lock, Turbo, Turbo metrics
-  capture, and the On-Screen Display's), it takes several bindings, one for each device you fly
-  with (a HOTAS throttle's button and a HOSAS stick's, say); any one of them acts.
+  comparisons in headset. Like the Depth Lock, Turbo, Turbo metrics capture, Frame Generation,
+  and On-Screen Display toggles, it takes several bindings, one for each device you fly with (a
+  HOTAS throttle's button and a HOSAS stick's, say); any one of them acts. The Quadviews
+  in-headset shortcut takes one.
 - Games with a **Force IPD**, virtual-IPD, stereo-separation, or
   world-scale setting can override Stereo Boost; disable that setting before testing Depth.
   In DCS, uncheck **Force IPD Distance** under **Options > VR**, fully restart DCS, and open
@@ -413,6 +414,7 @@ API-layer, runtime, and in-game VR changes also require a full game restart.
 Live app control requires an active VectorXR synthesized D3D11 Quadviews session. Start a compatible
 quad-view application with the VectorXR profile enabled. Native Varjo composition does not expose
 this visualization; the saved in-headset shortcut also begins each new session with the overlay off.
+
 **What else should I disable while troubleshooting?**
 
 Avoid overlapping features: DCS **Force IPD Distance** can mask Depth, another tool's Turbo mode
@@ -772,7 +774,8 @@ Advanced settings. The first enabled custom profile that matches the running gam
 - **Graphics APIs:** Direct3D 11, Direct3D 12, and Vulkan.
 - **On-Screen Display:** in games where Frame Generation is on, both layouts show its state
   beside the FPS value (**FG ON** with the frames per second the headset shows, or **FG STBY**,
-  **FG PAUSED**, **FG OFF**), the expanded layout has a Frame Generation row, and the compact
+  **FG WAIT**, **FG PAUSED**, **FG OFF**, or **FG N/A**), the expanded layout has a Frame
+  Generation row, and the compact
   layout an optional one-line status. See [On-Screen Display](#on-screen-display).
 - **Runtime smoothing:** SteamVR Motion Smoothing, Pimax Smart Smoothing, Virtual Desktop SSW,
   and Meta ASW fight the pacing. Turn them off for games that use Frame Generation.
@@ -895,9 +898,11 @@ and P95, and adds selectable rows for the frame-time graph, Turbo, Frame Generat
 and active enhancements. Drag these rows or use their up/down arrows to arrange them. Saved
 layouts from earlier versions gain the Frame Generation row at the end. The **Compact**
 layout chooses its **Performance** readout (FPS and average frame time, either one, or
-none) and can add one-line Turbo, Frame Generation, and Pivot status rows. **Just FPS** clears the compact
-header and status rows for the smallest display. Turbo distinguishes **Disabled**, **Enabled / Off**, **Enabled / Waiting**, active
-**Async** or **Sequenced**, and safety states.
+none) and can add Turbo, Frame Generation, and Pivot status rows (Pivot adds a Snap View line
+when the application has Snap Views). **Just FPS** clears the compact header and status rows for
+the smallest display. Turbo distinguishes **Disabled**, **Enabled / Off**, **Enabled / Waiting**,
+active **Async** or **Sequenced**, safety states, and **Paused for Frame Generation**. Active
+enhancements include Turbo even when its binding has switched pacing off.
 
 In games where Frame Generation is on, **Frame Generation beside FPS** (on by default, both
 layouts) adds a small badge next to the FPS value: **FG ON** over the frames per second the
@@ -906,11 +911,14 @@ or **FG N/A**. The Frame Generation row reads, for example, `On / Interpolate / 
 `45 → 90 fps / GPU 3.1 ms` on a second line (the game's and the headset's frame rates, and the
 GPU time Frame Generation took), or **Standby**, **Starting**, **Paused**, or **Unavailable**
 with the reason on the second line. The compact row is shorter, such as `Dynamic / 45 → 90 fps`.
-Enabled enhancements include Turbo even
-when its binding has switched pacing off. Pivot shows the engaged profile and applied
-nudges/quick views without angle measurements; idle enabled Pivot reads **Pivot ready**.
-Disabling Pivot clears its applied-state display. Independently enabled inactive nudges
-remain reported while their offset is still applied.
+
+The Pivot row starts with **Motion:**. It reads **Active** or **Releasing**, followed by
+**Continuous** or **Stepped**, **+ Position** while Position Assist moves you, and the profile
+name. Otherwise it reads **Suspended** while an exclusive Snap View holds motion, **Off**, or
+**Disabled** when Pivot is turned off. It shows no angle measurements. Applications with Snap
+Views add a **Snap:** line: **Off**, **Entering**, **Active**, or **Returning**, with
+**Stacked**, **+ Nudge**, the view, and its profile. Without a Snap line, applied nudges show as
+**+ Nudge** on the Motion line, and remain reported while their offset is still applied.
 
 Size ranges from **25–150%**. Choose Teal, Copper, Blue, Violet, Rose, or a custom accent
 using the color wheel, brightness slider, native color picker, or hex field. Presets
@@ -921,8 +929,8 @@ edits. The trash icon removes the selected preset; **Save Changes** persists the
 Presets do not change enablement, startup visibility, or bindings, and travel with the
 saved configuration rather than becoming application profiles.
 
-Pending changes to Turbo experiments or Quadviews activation appear as a restart notice
-in the expanded layout. Other settings retain the live/restart behavior described on
+Pending changes to Turbo experiments or Quadviews activation, and turning Frame Generation on,
+appear as a restart notice in the expanded layout. Other settings retain the live/restart behavior described on
 their respective pages; this notice is not an exhaustive list of every restart-sensitive
 setting. Settings editing remains in the desktop app.
 
@@ -930,7 +938,9 @@ setting. Settings editing remains in the desktop app.
 calls over the last 120 frames. FPS is calculated from the average interval; P95 is
 the 95th-percentile interval. Lower, steadier frame times generally indicate smoother
 application cadence. These numbers do not measure GPU execution, compositor FPS, or
-reprojection. Turbo can make application cadence differ from the headset refresh rate.
+reprojection. Turbo and Frame Generation can make application cadence differ from the headset
+refresh rate; with Frame Generation on, **FG ON** beside FPS shows the frames per second the
+headset gets, generated frames included.
 Pauses longer than one second reset the history.
 
 Panel refresh is independent of frame sampling. The default **5 Hz** redraw rate keeps
