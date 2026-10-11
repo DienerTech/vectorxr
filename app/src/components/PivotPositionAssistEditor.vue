@@ -7,8 +7,8 @@ const props = defineProps<{ settings: PivotPositionAssist }>()
 
 const presets: Array<{ id: PivotPositionAssistPreset; label: string; title: string }> = [
   { id: 'none', label: 'No movement', title: 'Clears every offset and restores the default angles.' },
-  { id: 'gentle', label: 'Gentle', title: '8 cm lean toward the turn and 3 cm up, between 20° and 70° of head turn.' },
-  { id: 'strong', label: 'Strong', title: '15 cm lean toward the turn and 6 cm up, between 15° and 60° of head turn.' },
+  { id: 'gentle', label: 'Gentle', title: '12 cm lean toward the turn and 4 cm up, between 20° and 70° of head turn.' },
+  { id: 'strong', label: 'Strong', title: '20 cm lean toward the turn and 8 cm up, between 15° and 60° of head turn.' },
 ]
 const activePreset = computed(() => matchingPivotPositionAssistPreset(props.settings))
 
@@ -52,7 +52,7 @@ function anglesOutOfOrder(direction: PivotPositionDirection) {
         <div class="min-w-0 flex-1 basis-72">
           <p class="text-sm font-semibold">Starting points</p>
           <p class="mt-1 text-xs text-muted">
-            Gentle leans 8 cm toward the turn and rises 3 cm between 20° and 70° of head turn, enough to see past the seat when checking six. Strong leans 15 cm and rises 6 cm between 15° and 60°.
+            Gentle leans 12 cm toward the turn and rises 4 cm between 20° and 70° of head turn, enough to see past the seat when checking six. Strong leans 20 cm and rises 8 cm between 15° and 60°.
             Keep Start angle beyond your normal panel scan so glances stay still, and set Full-offset angle near where you stop turning. A preset replaces every direction; Advanced directions get no up/down movement.
           </p>
         </div>

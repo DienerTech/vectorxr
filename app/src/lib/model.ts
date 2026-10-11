@@ -298,8 +298,8 @@ export type PivotPositionAssistPreset = 'none' | 'gentle' | 'strong'
 // directions get the same turn mirrored left/right, and no pitch movement.
 const pivotPositionAssistPresets: Record<PivotPositionAssistPreset, PivotPositionDirection> = {
   none: defaultPivotPositionDirection(),
-  gentle: { rightCm: 8, upCm: 3, forwardCm: 0, startAngleDegrees: 20, fullAngleDegrees: 70 },
-  strong: { rightCm: 15, upCm: 6, forwardCm: 0, startAngleDegrees: 15, fullAngleDegrees: 60 },
+  gentle: { rightCm: 12, upCm: 4, forwardCm: 0, startAngleDegrees: 20, fullAngleDegrees: 70 },
+  strong: { rightCm: 20, upCm: 8, forwardCm: 0, startAngleDegrees: 15, fullAngleDegrees: 60 },
 }
 
 function leftTurn(turn: PivotPositionDirection): PivotPositionDirection {

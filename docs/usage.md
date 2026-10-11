@@ -170,8 +170,8 @@ up/down than your physical neck allows.
 - Enable **Position Assist** in Motion settings to add sideways lean, height, and forward/back
   movement as you turn. **Start angle** and **Full-offset angle** define the physical head-angle
   range; offsets ease in, stop at their configured maximum, and return toward zero at neutral.
-  **Starting points** fill in values to tune from: **Gentle** leans 8 cm toward the
-  turn and rises 3 cm between 20° and 70° of head turn, **Strong** leans 15 cm and rises 6 cm
+  **Starting points** fill in values to tune from: **Gentle** leans 12 cm toward the
+  turn and rises 4 cm between 20° and 70° of head turn, **Strong** leans 20 cm and rises 8 cm
   between 15° and 60°, and **No movement** clears every offset. Keep the start angle beyond your
   normal panel scan, and set the full-offset angle near where you stop turning.
   Basic sideways lean mirrors left/right. **Advanced directions** supplies independent signed

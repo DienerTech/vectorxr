@@ -144,9 +144,9 @@ test('Position Assist presets fill turning in either direction mode and are reco
   assert.equal(matchingPivotPositionAssistPreset(assist), 'none')
 
   applyPivotPositionAssistPreset(assist, 'gentle')
-  assert.deepEqual(assist.yaw, { rightCm: 8, upCm: 3, forwardCm: 0, startAngleDegrees: 20, fullAngleDegrees: 70 })
-  assert.equal(assist.yawRight.rightCm, 8)
-  assert.equal(assist.yawLeft.rightCm, -8)
+  assert.deepEqual(assist.yaw, { rightCm: 12, upCm: 4, forwardCm: 0, startAngleDegrees: 20, fullAngleDegrees: 70 })
+  assert.equal(assist.yawRight.rightCm, 12)
+  assert.equal(assist.yawLeft.rightCm, -12)
   assert.equal(assist.pitchUp.upCm, 0)
   assert.equal(matchingPivotPositionAssistPreset(assist), 'gentle')
   assist.advancedDirections = true
