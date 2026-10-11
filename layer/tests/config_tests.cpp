@@ -28,6 +28,7 @@
 #include "depthxr/runtime_relay.h"
 #include "depthxr/runtime_compatibility.h"
 #include "depthxr/seen_apps.h"
+#include "depthxr/session_graphics.h"
 #include "depthxr/settings_resolver.h"
 #include "depthxr/swapchain_state.h"
 #include "depthxr/turbo_metrics.h"
@@ -3675,6 +3676,111 @@ void TestInvertedPositionAssistRangeRejected() {
     Expect(!parsed.ok, "A Position Assist full angle below its start angle must be rejected");
 }
 
+// DXGI's user-mode driver version: a.b.c.d in four 16-bit fields.
+std::uint64_t UserModeDriverVersion(std::uint64_t a, std::uint64_t b, std::uint64_t c, std::uint64_t d) {
+    return (a << 48) | (b << 32) | (c << 16) | d;
+}
+
+void TestSessionGraphicsDriverVersions() {
+    using depthxr::DxgiDriverVersionText;
+    using depthxr::VulkanDriverVersionText;
+    constexpr std::uint32_t kNvidia = 0x10de;
+    Expect(DxgiDriverVersionText(UserModeDriverVersion(32, 0, 15, 8142), kNvidia) == "581.42 (32.0.15.8142)",
+           "NVIDIA's DXGI driver version must read as NVIDIA shows it: " +
+               DxgiDriverVersionText(UserModeDriverVersion(32, 0, 15, 8142), kNvidia));
+    Expect(DxgiDriverVersionText(UserModeDriverVersion(31, 0, 15, 5222), kNvidia) == "552.22 (31.0.15.5222)",
+           "NVIDIA 552.22 must decode from 31.0.15.5222");
+    Expect(DxgiDriverVersionText(UserModeDriverVersion(27, 21, 14, 5671), kNvidia) == "456.71 (27.21.14.5671)",
+           "NVIDIA 456.71 must decode from 27.21.14.5671");
+    Expect(DxgiDriverVersionText(UserModeDriverVersion(32, 0, 16, 5), kNvidia) == "600.05 (32.0.16.5)",
+           "NVIDIA's hundredths must keep their leading zero: " +
+               DxgiDriverVersionText(UserModeDriverVersion(32, 0, 16, 5), kNvidia));
+    Expect(DxgiDriverVersionText(UserModeDriverVersion(32, 0, 15, 8142), 0x1002u) == "32.0.15.8142",
+           "Other vendors' DXGI driver versions must read as DXGI has them");
+    Expect(DxgiDriverVersionText(UserModeDriverVersion(10, 0, 26100, 4061), 0x1414u) == "10.0.26100.4061",
+           "WARP's DXGI driver version must read as DXGI has it, with fields above 9999");
+    Expect(DxgiDriverVersionText(UserModeDriverVersion(32, 0, 15, 8142), std::nullopt) == "32.0.15.8142",
+           "An unknown vendor's DXGI driver version must not be read as NVIDIA's");
+
+    // NVIDIA packs Vulkan's driverVersion as 10 bits major, 8 bits minor.
+    constexpr std::uint32_t kVulkan58142 = (581u << 22) | (42u << 14);
+    Expect(VulkanDriverVersionText(kVulkan58142, kNvidia) == "581.42 (0x914a8000)",
+           "NVIDIA's Vulkan driver version must read as NVIDIA shows it: " +
+               VulkanDriverVersionText(kVulkan58142, kNvidia));
+    Expect(VulkanDriverVersionText((551u << 22) | (6u << 14) | (3u << 6) | 1u, kNvidia) == "551.06 (0x89c180c1)",
+           "NVIDIA's Vulkan minor version must keep its leading zero: " +
+               VulkanDriverVersionText((551u << 22) | (6u << 14) | (3u << 6) | 1u, kNvidia));
+    Expect(VulkanDriverVersionText(0x00801234u, 0x1002u) == "0x00801234",
+           "Other vendors' Vulkan driver versions must stay raw, in eight hex digits");
+}
+
+void TestSessionGraphicsVideoMemory() {
+    using depthxr::VideoMemoryText;
+    constexpr std::uint64_t kMiB = 1ull << 20;
+    constexpr std::uint64_t kGiB = 1ull << 30;
+    Expect(VideoMemoryText(0) == "0 MiB", "No dedicated video memory (WARP) must read 0 MiB");
+    Expect(VideoMemoryText(512 * kMiB) == "512 MiB", "Video memory below 1 GiB must read in MiB");
+    Expect(VideoMemoryText(kGiB) == "1.0 GiB", "1 GiB must read 1.0 GiB");
+    Expect(VideoMemoryText(32607 * kMiB) == "31.8 GiB",
+           "32607 MiB must read 31.8 GiB: " + VideoMemoryText(32607 * kMiB));
+    Expect(VideoMemoryText(kGiB + kGiB * 96 / 100) == "2.0 GiB",
+           "Rounding must carry into the whole GiB: " + VideoMemoryText(kGiB + kGiB * 96 / 100));
+}
+
+void TestSessionGraphicsLine() {
+    constexpr std::uint64_t kGiB = 1ull << 30;
+    depthxr::SessionGraphics d3d12;
+    d3d12.api = "Direct3D 12";
+    d3d12.adapter = "NVIDIA GeForce RTX 5090";
+    d3d12.vendor_id = 0x10de;
+    d3d12.driver_version = UserModeDriverVersion(32, 0, 15, 8142);
+    d3d12.dedicated_video_memory = 32607ull << 20;
+    d3d12.budget = 29 * kGiB + kGiB * 6 / 10;
+    d3d12.usage = kGiB + kGiB * 2 / 10;
+    std::string line = depthxr::FormatSessionGraphics(d3d12, "PimaxXR", "1.2.3");
+    Expect(line == "Session graphics: api=Direct3D 12, adapter=\"NVIDIA GeForce RTX 5090\", vendor=0x10de, "
+                   "driver=581.42 (32.0.15.8142), dedicatedVideoMemory=31.8 GiB, budget=29.6 GiB "
+                   "(process uses 1.2 GiB), runtime=\"PimaxXR\" 1.2.3",
+           "A Direct3D 12 session's graphics line must name everything found: " + line);
+
+    // A Vulkan device without an adapter LUID: Vulkan's own figures, and why
+    // DXGI's are missing.
+    depthxr::SessionGraphics vulkan;
+    vulkan.api = "Vulkan";
+    vulkan.adapter = "NVIDIA GeForce RTX 5090";
+    vulkan.vendor_id = 0x10de;
+    vulkan.vulkan_driver_version = (581u << 22) | (42u << 14);
+    vulkan.problem = "the Vulkan device names no adapter LUID";
+    line = depthxr::FormatSessionGraphics(vulkan, "SteamVR/OpenXR", "2.7.4");
+    Expect(line == "Session graphics: api=Vulkan, adapter=\"NVIDIA GeForce RTX 5090\", vendor=0x10de, driver=unknown, "
+                   "vulkanDriver=581.42 (0x914a8000), dedicatedVideoMemory=unknown, budget=unknown, "
+                   "runtime=\"SteamVR/OpenXR\" 2.7.4; the Vulkan device names no adapter LUID",
+           "A Vulkan session's graphics line must say what is missing and why: " + line);
+
+    // WARP: no dedicated video memory, a budget without its usage.
+    depthxr::SessionGraphics warp;
+    warp.api = "Direct3D 12 (Frame Generation's Direct3D 11 bridge)";
+    warp.adapter = "Microsoft Basic Render Driver";
+    warp.vendor_id = 0x1414;
+    warp.dedicated_video_memory = 0;
+    warp.budget = 512ull << 20;
+    line = depthxr::FormatSessionGraphics(warp, "VectorXR stand-in runtime", "");
+    Expect(line == "Session graphics: api=Direct3D 12 (Frame Generation's Direct3D 11 bridge), "
+                   "adapter=\"Microsoft Basic Render Driver\", vendor=0x1414, driver=unknown, "
+                   "dedicatedVideoMemory=0 MiB, budget=512 MiB, runtime=\"VectorXR stand-in runtime\"",
+           "A bridge's graphics line must name the bridge, and a runtime without a version: " + line);
+
+    // Nothing known, not even the runtime.
+    depthxr::SessionGraphics none;
+    none.api = "none";
+    none.problem = "the session has no Direct3D 11, Direct3D 12 or Vulkan binding";
+    line = depthxr::FormatSessionGraphics(none, "", "");
+    Expect(line == "Session graphics: api=none, adapter=unknown, vendor=unknown, driver=unknown, "
+                   "dedicatedVideoMemory=unknown, budget=unknown, runtime=unknown; the session has no "
+                   "Direct3D 11, Direct3D 12 or Vulkan binding",
+           "A session without a known binding must still get a graphics line: " + line);
+}
+
 } // namespace
 
 int main() {
@@ -3724,6 +3830,9 @@ int main() {
     TestSeenAppObservationRecording();
     TestRuntimePacingObservationRoundTrip();
     TestRuntimeRelayControlAndStatusRoundTrip();
+    TestSessionGraphicsDriverVersions();
+    TestSessionGraphicsVideoMemory();
+    TestSessionGraphicsLine();
     TestQuadViewStereoBoostKeepsInsetViewsInSync();
     TestStereoBoostScalesRotatedEyeBaseline();
     TestQuadViewConvergenceKeepsInsetOffsetsAligned();

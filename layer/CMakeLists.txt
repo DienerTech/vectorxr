@@ -16,6 +16,7 @@ add_library(
     src/settings.cpp
     src/sound_player.cpp
     src/settings_resolver.cpp
+    src/session_graphics.cpp
     src/swapchain_state.cpp
     src/thread_census.cpp
     src/util/config_path.cpp
@@ -203,6 +204,9 @@ if(WIN32 AND DEPTHXR_BUILD_LAYER)
         src/framegen/framegen_d3d11.cpp
         src/framegen/framegen_d3d12.cpp
         src/framegen/framegen_vulkan.cpp
+        # Not Frame Generation's: the session's adapters for its log line,
+        # which needs the Direct3D 12 and Vulkan types the layer lacks.
+        src/session_graphics_query.cpp
         "${_framegen_out}/framegen_shaders.cpp"
         "${_framegen_out}/framegen_flow_merge.h")
     target_include_directories(depthxr_framegen PUBLIC include)

@@ -32,6 +32,7 @@
 #include "depthxr/runtime_compatibility.h"
 #include "depthxr/runtime_pacing.h"
 #include "depthxr/seen_apps.h"
+#include "depthxr/session_graphics.h"
 #include "depthxr/sound_player.h"
 #include "depthxr/teardown_watch.h"
 #include "depthxr/turbo_metrics.h"
@@ -2523,8 +2524,21 @@ XrResult OpenXrLayer::CreateSession(XrInstance instance,
         framegen_unavailable = "Vulkan sessions need the Vulkan bridge, and this one has none (" + vulkan_unbridged + ")";
     }
     logger_.Info("xrCreateSession succeeded downstream; configuring VectorXR session resources.");
+    // The hardware of every graphics API in play, once per session: the
+    // game's, and a bridge's Direct3D 12 device. Looked up before the lock,
+    // as Direct3D 12 and Vulkan need a DXGI factory.
+    const std::vector<SessionGraphics> session_graphics = QuerySessionGraphics(
+        create_info ? create_info->next : nullptr,
+        d3d11_bridge_.Active()    ? d3d11_bridge_.Binding()
+        : vulkan_bridge_.Active() ? vulkan_bridge_.Binding()
+                                  : nullptr,
+        d3d11_bridge_.Active() ? "Direct3D 12 (Frame Generation's Direct3D 11 bridge)"
+                               : "Direct3D 12 (Frame Generation's Vulkan bridge)");
 
     std::scoped_lock lock(mutex_);
+    for (const SessionGraphics& graphics : session_graphics) {
+        logger_.Info(FormatSessionGraphics(graphics, runtime_name_, runtime_version_));
+    }
     ResetSessionState();
     active_session_ = *session;
     d3d11_bridge_lost_logged_ = false;

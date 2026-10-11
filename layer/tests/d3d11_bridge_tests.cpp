@@ -13,6 +13,7 @@
 #include <openxr/openxr_platform.h>
 
 #include "depthxr/framegen_d3d11_bridge.h"
+#include "depthxr/session_graphics.h"
 #include "test_gates.h"
 
 #include <array>
@@ -446,6 +447,58 @@ void TestBegin(Game& game) {
     bridge.End();
     Check(!bridge.Active() && bridge.Binding() == nullptr, "inactive after End");
     Check(GameRuns(game), "the game's device works after End");
+}
+
+// The session log's graphics lines (QuerySessionGraphics): the game's
+// Direct3D 11 device and the bridge's Direct3D 12 one both name the game's
+// adapter as DXGI describes it (WARP: Microsoft's vendor ID, 0x1414).
+void TestSessionGraphics(Game& game, bool hardware) {
+    D3D11Bridge bridge;
+    Session session(game.device.Get());
+    BeginBridge(game, bridge, session);
+    ComPtr<IDXGIDevice> dxgi_device;
+    ComPtr<IDXGIAdapter> adapter;
+    DXGI_ADAPTER_DESC desc{};
+    Check(SUCCEEDED(game.device.As(&dxgi_device)) && SUCCEEDED(dxgi_device->GetAdapter(&adapter)) &&
+              SUCCEEDED(adapter->GetDesc(&desc)),
+          "the game's adapter");
+    Check(hardware || desc.VendorId == 0x1414, "WARP's vendor is Microsoft's");
+    const auto check_entry = [&](const depthxr::SessionGraphics& entry, const std::string& api) {
+        const std::string line = depthxr::FormatSessionGraphics(entry, "stand-in", "1.0.0");
+        Check(entry.api == api && entry.problem.empty(), "the " + api + " entry: " + line);
+        Check(!entry.adapter.empty() && entry.vendor_id == desc.VendorId &&
+                  entry.dedicated_video_memory == desc.DedicatedVideoMemory,
+              "the " + api + " entry names the game's adapter: " + line);
+        Check(entry.driver_version.has_value() && entry.budget.has_value() && entry.usage.has_value(),
+              "the " + api + " entry has the driver version and the budget: " + line);
+        Check(!entry.vulkan_driver_version, "no Vulkan driver version without Vulkan: " + line);
+    };
+
+    const std::vector<depthxr::SessionGraphics> bridged =
+        depthxr::QuerySessionGraphics(session.info.next, bridge.Binding(), "Direct3D 12 (the bridge)");
+    Check(bridged.size() == 2, "the game's API and the bridge's: " + std::to_string(bridged.size()));
+    check_entry(bridged[0], "Direct3D 11");
+    check_entry(bridged[1], "Direct3D 12 (the bridge)");
+    Check(bridged[0].adapter == bridged[1].adapter && bridged[0].driver_version == bridged[1].driver_version,
+          "both name the same adapter and driver");
+
+    // A Direct3D 12 game (the bridge's device as its binding), after other structures.
+    XrBaseInStructure other{static_cast<XrStructureType>(1000999000)};
+    other.next = static_cast<const XrBaseInStructure*>(bridge.Binding());
+    const std::vector<depthxr::SessionGraphics> native = depthxr::QuerySessionGraphics(&other, nullptr, {});
+    Check(native.size() == 1, "one entry without a bridge");
+    check_entry(native[0], "Direct3D 12");
+
+    // A binding without a device, and no binding: an entry that says why.
+    XrGraphicsBindingD3D11KHR no_device{XR_TYPE_GRAPHICS_BINDING_D3D11_KHR};
+    const std::vector<depthxr::SessionGraphics> missing = depthxr::QuerySessionGraphics(&no_device, nullptr, {});
+    Check(missing.size() == 1 && missing[0].api == "Direct3D 11" && !missing[0].problem.empty() &&
+              !missing[0].vendor_id,
+          "a binding without a device says so");
+    const std::vector<depthxr::SessionGraphics> none = depthxr::QuerySessionGraphics(nullptr, nullptr, {});
+    Check(none.size() == 1 && none[0].api == "none" && !none[0].problem.empty(), "no binding says so");
+    CheckClean(bridge, game, "session graphics");
+    bridge.End();
 }
 
 void TestCreateInfo() {
@@ -949,6 +1002,7 @@ int main(int argc, char** argv) {
         return kSkip;
     }
     TestBegin(game);
+    TestSessionGraphics(game, hardware);
     TestCreateInfo();
     TestTwinFrames(game);
     TestWrittenOrdering(game);

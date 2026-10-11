@@ -220,6 +220,13 @@ std::size_t Count(const std::string& text, const std::string& part) {
 constexpr const char* kBridgedSessionLine =
     "the session is Direct3D 12 and the game renders into images shared with it";
 
+// The session's graphics lines (session_graphics.h): the game's API, the
+// bridge's, and the runtime each ends with.
+constexpr const char* kGameGraphicsLine = "Session graphics: api=Direct3D 11, adapter=\"";
+constexpr const char* kBridgeGraphicsLine =
+    "Session graphics: api=Direct3D 12 (Frame Generation's Direct3D 11 bridge), adapter=\"";
+constexpr const char* kGraphicsRuntime = "runtime=\"VectorXR stand-in runtime\" 1.0.0";
+
 // A figure from the bridge's summary ("name=value").
 std::uint64_t SummaryValue(const std::string& summary, const std::string& name) {
     const std::size_t at = summary.find(name + "=");
@@ -2168,6 +2175,9 @@ bool CheckRouting(Game& game, SessionCreate& create) {
           "the log tells the session's bridge and queue");
     Check(Count(log, std::string("Frame Generation's Direct3D 11 bridge: ") + kBridgedSessionLine) == 1,
           "the log tells once that the session is bridged");
+    Check(Count(log, kGameGraphicsLine) == 1 && Count(log, kBridgeGraphicsLine) == 1 &&
+              Count(log, kGraphicsRuntime) == 2,
+          "the log names the hardware of the game's Direct3D 11 device and of the bridge's Direct3D 12 one, once each");
     return true;
 }
 
@@ -2508,6 +2518,8 @@ void TestBridgeOffSession(Game& game) {
     Check(Count(log, "Frame Generation keeps this Direct3D 11 session as it is: VECTORXR_D3D11_BRIDGE=off.") == 1,
           "the log tells why, once");
     Check(!Contains(log, kBridgedSessionLine), "the log does not tell of a bridged session");
+    Check(Count(log, kGameGraphicsLine) == 1 && !Contains(log, kBridgeGraphicsLine),
+          "the log names the hardware of the game's Direct3D 11 device once, and of no bridge");
     BeginSession(app);
     Target left = MakeTarget(app, ColorInfo(), "the left eye");
     Target right = MakeTarget(app, ColorInfo(), "the right eye");
