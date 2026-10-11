@@ -486,9 +486,9 @@ export interface FrameGenProfileConfig {
 
 export interface FrameGenModuleConfig {
   enabled: boolean
-  // Optional in-session A/B toggle. Only effective in sessions that started
-  // with Frame Generation enabled.
-  toggleBinding: InputBinding
+  // Optional in-session A/B toggle (any one of the list's bindings). Only
+  // effective in sessions that started with Frame Generation enabled.
+  toggleBindings: InputBinding[]
   diagnosticView: FrameGenDiagnosticView
   defaults: FrameGenSettings
   profiles: FrameGenProfileConfig[]
@@ -508,7 +508,7 @@ export function defaultFrameGenSettings(): FrameGenSettings {
 export function defaultFrameGenModule(): FrameGenModuleConfig {
   return {
     enabled: false,
-    toggleBinding: defaultNoneBinding(),
+    toggleBindings: [],
     diagnosticView: 'off',
     defaults: defaultFrameGenSettings(),
     profiles: [],
@@ -1448,7 +1448,6 @@ function pushBindingAssignments(
 function savedBindingAssignments(config: VectorXRConfig): SavedBindingAssignment[] {
   const assignments: SavedBindingAssignment[] = [
     { id: 'quadviews.diagnostics', label: 'Quadviews: diagnostic visualization', binding: config.modules.quadviews.diagnosticVisualizationBinding },
-    { id: 'framegen.toggle', label: 'Frame Generation: A/B toggle', binding: config.modules.framegen.toggleBinding },
   ]
   pushBindingAssignments(assignments, 'depth.toggle', 'Depth: A/B toggle', config.modules.depthxr.bindings.toggleEnabledBindings)
   pushBindingAssignments(assignments, 'depth.lock', 'Depth: Depth Lock A/B', config.modules.depthxr.bindings.toggleAnchorBindings)
@@ -1456,6 +1455,7 @@ function savedBindingAssignments(config: VectorXRConfig): SavedBindingAssignment
   pushBindingAssignments(assignments, 'osd.cycle', 'OSD: switch layout', config.core.osd.cycleBindings)
   pushBindingAssignments(assignments, 'turbo.toggle', 'Turbo: A/B toggle', config.modules.turbo.toggleBindings)
   pushBindingAssignments(assignments, 'turbo.metrics', 'Turbo: metrics capture', config.modules.turbo.metricsBindings)
+  pushBindingAssignments(assignments, 'framegen.toggle', 'Frame Generation: A/B toggle', config.modules.framegen.toggleBindings)
 
   const pivot = config.modules.pivotxr
   pivot.nudgeSets.forEach((set) => {
@@ -1874,7 +1874,7 @@ function normalizeVectorXRConfig(value: unknown): VectorXRConfig {
       },
       framegen: {
         enabled: normalizeBoolean(framegen.enabled, fallback.modules.framegen.enabled),
-        toggleBinding: normalizeInputBinding(framegen.toggleBinding, fallback.modules.framegen.toggleBinding),
+        toggleBindings: normalizeToggleBindings(framegen.toggleBindings, framegen.toggleBinding, fallback.modules.framegen.toggleBindings),
         diagnosticView: normalizeFrameGenDiagnosticView(framegen.diagnosticView),
         defaults: frameGenDefaults,
         profiles: frameGenProfileValues.map((profileValue) => {

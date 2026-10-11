@@ -946,8 +946,11 @@ struct FrameGenProfileConfig {
 struct FrameGenModuleConfig {
     #[serde(default = "default_false")]
     enabled: bool,
-    #[serde(default = "default_activation_binding")]
-    toggle_binding: InputBinding,
+    // A toggle binding list (normalize_toggle_bindings).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    toggle_binding: Option<InputBinding>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    toggle_bindings: Option<Vec<InputBinding>>,
     #[serde(default = "default_framegen_diagnostic_view")]
     diagnostic_view: String,
     #[serde(default)]
@@ -960,7 +963,8 @@ impl Default for FrameGenModuleConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            toggle_binding: default_activation_binding(),
+            toggle_binding: Some(default_activation_binding()),
+            toggle_bindings: None,
             diagnostic_view: default_framegen_diagnostic_view(),
             defaults: FrameGenSettings::default(),
             profiles: Vec::new(),
@@ -1400,6 +1404,8 @@ fn normalize_config(mut config: VectorXRConfig) -> VectorXRConfig {
     let turbo = &mut config.modules.turbo;
     normalize_toggle_bindings(&mut turbo.toggle_binding, &mut turbo.toggle_bindings, default_activation_binding);
     normalize_toggle_bindings(&mut turbo.metrics_binding, &mut turbo.metrics_bindings, default_activation_binding);
+    let framegen = &mut config.modules.framegen;
+    normalize_toggle_bindings(&mut framegen.toggle_binding, &mut framegen.toggle_bindings, default_activation_binding);
 
     for application in &mut config.applications {
         application.enabled = true;
@@ -3052,7 +3058,7 @@ mod tests {
     fn framegen_defaults_and_round_trip() {
         let defaults: super::FrameGenModuleConfig = serde_json::from_str("{}").unwrap();
         assert!(!defaults.enabled);
-        assert!(matches!(defaults.toggle_binding, super::InputBinding::None));
+        assert!(defaults.toggle_binding.is_none() && defaults.toggle_bindings.is_none());
         assert_eq!(defaults.diagnostic_view, "off");
         assert_eq!(defaults.defaults.synthesis_mode, "interpolate");
         assert_eq!(defaults.defaults.flow_quality, "balanced");
@@ -3496,7 +3502,8 @@ mod tests {
             "applications": [],
             "modules": {
                 "depthxr": { "bindings": { "toggleEnabledBindings": [hotas], "toggleAnchorBindings": [hotas, hosas] } },
-                "turbo": { "toggleBindings": [], "metricsBindings": [hosas] }
+                "turbo": { "toggleBindings": [], "metricsBindings": [hosas] },
+                "framegen": { "toggleBindings": [hotas, hosas] }
             }
         }));
         let osd = &output["core"]["osd"];
@@ -3513,6 +3520,9 @@ mod tests {
         assert_eq!(turbo["toggleBinding"]["type"], "none");
         assert_eq!(turbo["metricsBinding"]["inputPath"], "button-5");
         assert!(turbo.get("toggleBindings").is_none() && turbo.get("metricsBindings").is_none());
+        let framegen = &output["modules"]["framegen"];
+        assert_eq!(framegen["toggleBindings"].as_array().map(Vec::len), Some(2));
+        assert!(framegen.get("toggleBinding").is_none());
     }
 
     #[test]
@@ -3521,6 +3531,7 @@ mod tests {
         assert_eq!(output["core"]["osd"]["toggleBinding"]["chord"], serde_json::json!(["Ctrl", "Alt", "F10"]));
         assert_eq!(output["core"]["osd"]["cycleBinding"]["chord"], serde_json::json!(["Ctrl", "Alt", "F11"]));
         assert_eq!(output["modules"]["depthxr"]["bindings"]["toggleEnabled"]["type"], "none");
+        assert_eq!(output["modules"]["framegen"]["toggleBinding"]["type"], "none");
         // A legacy binding beside a list (a hand edit) joins it.
         let merged = saved(serde_json::json!({
             "version": 3, "applications": [],

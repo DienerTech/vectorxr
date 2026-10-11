@@ -2402,6 +2402,7 @@ bool ParseFrameGenModule(const JsonValue::Object& object, FrameGenModuleConfig& 
     static const std::unordered_set<std::string> allowed = {
         "enabled",
         "toggleBinding",
+        "toggleBindings",
         "diagnosticView",
         "defaults",
         "profiles",
@@ -2428,8 +2429,7 @@ bool ParseFrameGenModule(const JsonValue::Object& object, FrameGenModuleConfig& 
         out.diagnostic_view = *parsed;
     }
 
-    const auto binding_it = object.find("toggleBinding");
-    if (binding_it != object.end() && !ParseInputBinding(binding_it->second, out.toggle_binding, error)) {
+    if (!ParseToggleBindings(object, "toggleBindings", "toggleBinding", out.toggle_bindings, error)) {
         return false;
     }
 

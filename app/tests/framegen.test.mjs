@@ -25,7 +25,7 @@ test('configs written before Frame Generation load with it off and default setti
   const normalized = normalizeConfig(config)
   assert.deepEqual(normalized.modules.framegen, defaultFrameGenModule())
   assert.deepEqual(normalized.modules.framegen.defaults, { synthesisMode: 'interpolate', flowQuality: 'balanced', motionEstimation: 'shader', frameMultiplier: 'dynamic', artifactSuppression: 50, motionLimitPercent: 10 })
-  assert.equal(normalized.modules.framegen.toggleBinding.type, 'none')
+  assert.deepEqual(normalized.modules.framegen.toggleBindings, [])
   assert.equal(normalized.modules.framegen.diagnosticView, 'off')
   assert.deepEqual(validateConfig(normalized), [])
   // Defaults are fresh objects, never shared between calls.
@@ -44,11 +44,11 @@ test('invalid imported values normalize safely: enums fall back, integers clamp'
 
   const config = defaultConfig()
   config.applications = [dcs]
-  config.modules.framegen = { enabled: 'yes', toggleBinding: { type: 'gamepad' }, diagnosticView: 'heatmap',
+  config.modules.framegen = { enabled: 'yes', toggleBindings: [{ type: 'gamepad' }], diagnosticView: 'heatmap',
     defaults: { synthesisMode: 'extrapolate', flowQuality: 7 }, profiles: [42, { applicationIds: ['dcs', 3] }] }
   const framegen = normalizeConfig(config).modules.framegen
   assert.equal(framegen.enabled, false)
-  assert.deepEqual(framegen.toggleBinding, { type: 'none' })
+  assert.deepEqual(framegen.toggleBindings, [])
   assert.equal(framegen.diagnosticView, 'off')
   assert.deepEqual(framegen.defaults, { ...defaultFrameGenSettings(), synthesisMode: 'extrapolate' })
   // Profiles without settings inherit the module defaults, like Quadviews profiles.
@@ -95,7 +95,7 @@ test('validateConfig rejects out-of-range and malformed edits', () => {
   config.modules.framegen.defaults.artifactSuppression = 101
   config.modules.framegen.defaults.motionLimitPercent = 2.5
   config.modules.framegen.diagnosticView = 'heatmap'
-  config.modules.framegen.toggleBinding = { type: 'keyboard', chord: [] }
+  config.modules.framegen.toggleBindings = [{ type: 'keyboard', chord: [] }]
   const profile = createFrameGenProfile(defaultFrameGenSettings(), ['dcs', 'ghost'])
   profile.settings.synthesisMode = 'warp'
   profile.settings.flowQuality = 'ultra'
@@ -109,7 +109,7 @@ test('validateConfig rejects out-of-range and malformed edits', () => {
     'modules.framegen.defaults.artifactSuppression must be a whole number from 0 to 100',
     'modules.framegen.defaults.motionLimitPercent must be a whole number from 2 to 25',
     'modules.framegen.diagnosticView must be off, flow, confidence, or tint',
-    'modules.framegen.toggleBinding.chord must include at least one key',
+    'modules.framegen.toggleBindings[0].chord must include at least one key',
     'modules.framegen.profiles[0].name is required',
     'modules.framegen.profiles[0].applicationIds references unknown application: ghost',
     'modules.framegen.profiles[0].settings.synthesisMode must be interpolate or extrapolate',
@@ -132,7 +132,10 @@ test('saved settings round-trip unchanged and emit only the keys the layer accep
   config.applications = [dcs, msfs]
   config.modules.framegen.enabled = true
   config.modules.framegen.diagnosticView = 'confidence'
-  config.modules.framegen.toggleBinding = { type: 'device', deviceGuid: '{stick}', inputPath: 'button-7', productGuid: '', deviceName: 'Stick', inputLabel: 'Button 7' }
+  config.modules.framegen.toggleBindings = [
+    { type: 'device', deviceGuid: '{stick}', inputPath: 'button-7', productGuid: '', deviceName: 'Stick', inputLabel: 'Button 7' },
+    { type: 'device', deviceGuid: '{left-stick}', inputPath: 'button-3', productGuid: '', deviceName: 'Left stick', inputLabel: 'Button 3' },
+  ]
   config.modules.framegen.defaults = { synthesisMode: 'extrapolate', flowQuality: 'performance', motionEstimation: 'hardware', frameMultiplier: '4x', artifactSuppression: 0, motionLimitPercent: 25 }
   const profile = createFrameGenProfile(config.modules.framegen.defaults, ['dcs'])
   profile.name = 'DCS'
@@ -144,7 +147,7 @@ test('saved settings round-trip unchanged and emit only the keys the layer accep
   assert.deepEqual(normalized.modules.framegen, config.modules.framegen)
   assert.deepEqual(normalizeConfig(normalized), normalized)
   assert.deepEqual(validateConfig(normalized), [])
-  assert.deepEqual(Object.keys(normalized.modules.framegen), ['enabled', 'toggleBinding', 'diagnosticView', 'defaults', 'profiles'])
+  assert.deepEqual(Object.keys(normalized.modules.framegen), ['enabled', 'toggleBindings', 'diagnosticView', 'defaults', 'profiles'])
   assert.deepEqual(Object.keys(normalized.modules.framegen.profiles[0]), ['name', 'enabled', 'applicationIds', 'settings'])
   assert.deepEqual(Object.keys(normalized.modules.framegen.defaults), ['synthesisMode', 'flowQuality', 'motionEstimation', 'frameMultiplier', 'artifactSuppression', 'motionLimitPercent'])
   assert.equal(normalized.modules.framegen.defaults.frameMultiplier, '4x')
@@ -189,11 +192,23 @@ test('a matching custom profile enables Frame Generation even with the default o
 test('the A/B toggle participates in global binding conflict detection', () => {
   const config = defaultConfig()
   config.modules.turbo.toggleBindings = [{ type: 'keyboard', chord: ['Ctrl', 'F7'] }]
-  config.modules.framegen.toggleBinding = { type: 'keyboard', chord: ['F7', 'Ctrl'] }
-  const warnings = savedBindingConflictWarnings(config, [config.modules.framegen.toggleBinding])
+  config.modules.framegen.toggleBindings = [
+    { type: 'device', deviceGuid: '{throttle}', inputPath: 'button-23' },
+    { type: 'keyboard', chord: ['F7', 'Ctrl'] },
+  ]
+  const warnings = savedBindingConflictWarnings(config, config.modules.framegen.toggleBindings)
   assert.equal(warnings.length, 1)
-  assert.match(warnings[0].message, /Frame Generation: A\/B toggle/)
+  assert.match(warnings[0].message, /Frame Generation: A\/B toggle \(binding 2\)/)
   assert.match(warnings[0].message, /Turbo: A\/B toggle/)
+})
+
+test('a config holding one A/B toggle binding, as older versions wrote it, loads as a one-binding list', () => {
+  const config = defaultConfig()
+  delete config.modules.framegen.toggleBindings
+  config.modules.framegen.toggleBinding = { type: 'keyboard', chord: ['Ctrl', 'F8'] }
+  const framegen = normalizeConfig(config).modules.framegen
+  assert.deepEqual(framegen.toggleBindings, [{ type: 'keyboard', chord: ['Ctrl', 'F8'] }])
+  assert.ok(!('toggleBinding' in framegen))
 })
 
 test('Turbo overlap produces a non-blocking warning naming the affected applications', () => {

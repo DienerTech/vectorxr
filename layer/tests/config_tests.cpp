@@ -1254,7 +1254,7 @@ void TestFrameGenProfileResolution() {
     const depthxr::ParseResult result = depthxr::ParseConfig(FrameGenConfigJson(module));
     Expect(result.ok, "Frame Generation module was rejected: " + result.error);
     Expect(result.document.framegen.profiles.size() == 2, "Frame Generation profiles were not parsed");
-    Expect(result.document.framegen.toggle_binding.type == depthxr::InputBindingType::Keyboard,
+    Expect(FirstBinding(result.document.framegen.toggle_bindings).type == depthxr::InputBindingType::Keyboard,
            "Frame Generation toggle binding was not parsed");
 
     const auto dcs = depthxr::ResolveFrameGenSettings(result.document, "DCS.exe");
@@ -1294,6 +1294,27 @@ void TestFrameGenProfileResolution() {
     Expect(inherited.ok && depthxr::ResolveFrameGenSettings(inherited.document, "DCS.exe").multiplier ==
                                depthxr::FrameGenMultiplier::kDynamic,
            "A profile without a frame multiplier should run Dynamic");
+}
+
+// Frame Generation's A/B toggle takes a list too, and its legacy binding.
+void TestFrameGenToggleBindingList() {
+    const auto config = [](const std::string& framegen) {
+        return depthxr::ParseConfig(
+            R"({"version":3,"core":{"enabled":true,"logLevel":"info"},"applications":[],"modules":{"depthxr":{"enabled":false,"defaults":{"stereoBoost":1,"convergence":0},"bindings":{"toggleEnabled":{"type":"none"}},"profiles":[]},"pivotxr":{"enabled":false,"defaults":{},"profiles":[]},"framegen":)" +
+            framegen + "}}");
+    };
+    const auto lists = config(
+        R"({"enabled":false,"toggleBindings":[{"type":"device","deviceGuid":"{11111111-0000-0000-0000-000000000001}","inputPath":"button-23"},{"type":"keyboard","chord":["Ctrl","F8"]}]})");
+    Expect(lists.ok && lists.document.framegen.toggle_bindings.size() == 2 &&
+               lists.document.framegen.toggle_bindings[1].type == depthxr::InputBindingType::Keyboard,
+           "Frame Generation's toggle binding list was not kept: " + lists.error);
+    Expect(depthxr::ResolveFrameGenSettings(lists.document, "any.exe").toggle_bindings.size() == 2,
+           "Frame Generation's toggle binding list did not resolve through");
+    const auto legacy = config(R"({"enabled":false,"toggleBinding":{"type":"keyboard","chord":["Ctrl","F8"]}})");
+    Expect(legacy.ok && legacy.document.framegen.toggle_bindings.size() == 1,
+           "Frame Generation's legacy toggle binding was not read: " + legacy.error);
+    Expect(!config(R"({"enabled":false,"toggleBinding":{"type":"none"},"toggleBindings":[]})").ok,
+           "Frame Generation's toggle with both a list and a legacy binding was accepted");
 }
 
 void TestFrameGenInvalidSettingsRejected() {
@@ -3519,6 +3540,7 @@ int main() {
     TestFrameGenModuleOptional();
     TestFrameGenProfileResolution();
     TestFrameGenInvalidSettingsRejected();
+    TestFrameGenToggleBindingList();
     TestFrameGenOsdRows();
     TestFrameGenPlan();
     TestFrameGenHistoryState();

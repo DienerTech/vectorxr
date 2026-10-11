@@ -7,7 +7,7 @@ import BindingListEditor from './BindingListEditor.vue'
 import type { InputBinding, PivotBindingWarning } from '../lib/model'
 
 // Dedicated sub-page for editing a module-level toggle's bindings (Turbo,
-// Depth, the OSD): with `bindings`, a list, any one of
+// Depth, Frame Generation, the OSD): with `bindings`, a list, any one of
 // which acts, so each device in use (a HOTAS, a HOSAS) can have its own; with
 // `binding`, a single one (Quadviews' diagnostic view). Mirrors
 // PivotBindingsPage: breadcrumb, Esc/Done to return.

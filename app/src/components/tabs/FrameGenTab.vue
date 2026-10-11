@@ -39,7 +39,7 @@ let savedScrollTop = 0
 
 // Open the setup guide for first-time setup; returning users with an enabled profile start with it closed.
 const setupGuideOpen = !(props.config.modules.framegen.enabled || props.config.modules.framegen.profiles.some((profile) => profile.enabled))
-const toggleBindingWarnings = computed(() => savedBindingConflictWarnings(props.config, [framegen.value.toggleBinding]))
+const toggleBindingWarnings = computed(() => savedBindingConflictWarnings(props.config, framegen.value.toggleBindings))
 const turboWarnings = computed(() => configWarnings(props.config))
 
 const restartNote = 'Turning Frame Generation on takes effect the next time the game starts; turning it off applies at once.'
@@ -152,12 +152,12 @@ function settingsSummary(settings: FrameGenSettings) {
   <ModuleBindingPage
     v-if="bindingSubPageOpen"
     module-label="Frame Generation"
-    :binding="framegen.toggleBinding"
+    :bindings="framegen.toggleBindings"
     label="Frame Generation A/B Toggle"
     description="Switches generated frames off and on in the headset, to compare motion in the same scene. Works in games that started with Frame Generation on."
     none-text="No binding assigned. Frame Generation runs wherever it is on when the game starts."
     :warnings="toggleBindingWarnings"
-    @update:binding="framegen.toggleBinding = $event"
+    @update:bindings="framegen.toggleBindings = $event"
     @close="closeToggleBinding"
   />
   <div v-else class="space-y-4">
@@ -231,7 +231,7 @@ function settingsSummary(settings: FrameGenSettings) {
         <div class="grid gap-3 lg:grid-cols-2">
           <ModuleBindingPanel
             heading="A/B toggle"
-            :binding="framegen.toggleBinding"
+            :bindings="framegen.toggleBindings"
             hint="Optional. Switches generated frames off and on in games that started with Frame Generation on."
             @edit="openToggleBinding"
           />

@@ -1534,7 +1534,7 @@ bool SameSettings(const ResolvedRuntimeConfig& lhs, const ResolvedRuntimeConfig&
            lhs.framegen.artifact_suppression == rhs.framegen.artifact_suppression &&
            lhs.framegen.motion_limit_percent == rhs.framegen.motion_limit_percent &&
            lhs.framegen.diagnostic_view == rhs.framegen.diagnostic_view &&
-           SameInputBinding(lhs.framegen.toggle_binding, rhs.framegen.toggle_binding);
+           SameInputBindings(lhs.framegen.toggle_bindings, rhs.framegen.toggle_bindings);
 }
 
 bool SameInputBinding(const InputBinding& lhs, const InputBinding& rhs) {
@@ -12302,7 +12302,7 @@ void OpenXrLayer::LogResolvedSettings(const ResolvedRuntimeConfig& settings) {
            << ", framegenArtifactSuppression=" << settings.framegen.artifact_suppression
            << ", framegenMotionLimitPercent=" << settings.framegen.motion_limit_percent
            << ", framegenDiagnosticView=" << ToString(settings.framegen.diagnostic_view)
-           << ", framegenToggleBinding=" << BindingLabel(settings.framegen.toggle_binding);
+           << ", framegenToggleBindings=" << BindingListLabel(settings.framegen.toggle_bindings);
     logger_.Debug(stream.str());
 }
 
@@ -12523,6 +12523,7 @@ void OpenXrLayer::StartFrameGen(XrSession session, const void* binding_chain, co
     framegen_toggle_binding_was_down_ = false;
     framegen_binding_down_cached_ = false;
     framegen_binding_last_poll_time_.reset();
+    framegen_toggle_pressed_.reset();
     if (framegen_session_enabled_) {
         framegen_calls_.wait = [this](XrSession s, const XrFrameWaitInfo* i, XrFrameState* f) {
             return TraceRuntimeWaitFrame(s, i, f);
@@ -12669,12 +12670,16 @@ void OpenXrLayer::PollFrameGenToggle() {
         return;
     }
 #if defined(_WIN32)
-    const InputBinding& binding = resolved_settings_.framegen.toggle_binding;
+    const std::vector<InputBinding>& bindings = resolved_settings_.framegen.toggle_bindings;
     const auto now = std::chrono::steady_clock::now();
     const bool first_poll = !framegen_binding_last_poll_time_.has_value();
     if (first_poll || now - *framegen_binding_last_poll_time_ >= kInputBindingPollInterval) {
         framegen_binding_last_poll_time_ = now;
-        framegen_binding_down_cached_ = PollInputBindingDown(binding);
+        const InputBinding* down = PollInputBindingsDown(bindings);
+        framegen_binding_down_cached_ = down != nullptr;
+        if (down) {
+            framegen_toggle_pressed_ = *down;
+        }
     }
     const bool down = framegen_binding_down_cached_;
     if (first_poll) {
@@ -12686,6 +12691,7 @@ void OpenXrLayer::PollFrameGenToggle() {
         return;
     }
     const bool enabled = framegen_.Toggle();
+    const InputBinding binding = ActingBinding(framegen_toggle_pressed_, bindings);
     logger_.Info(std::string("Frame Generation ") + (enabled ? "enabled" : "disabled") + " via " +
                  BindingLabel(binding) + ".");
     SoundPlayer::Instance().PlayTransition(binding.sound, enabled, dll_directory_, resolved_settings_.core.sound_volume);

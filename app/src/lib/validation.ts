@@ -639,7 +639,7 @@ export function validateConfig(config: VectorXRConfig): string[] {
     errors.push('Turbo experimental frame cap must be 0 (off) or an integer from 20 to 240')
   }
   }
-  errors.push(...validateInputBinding('modules.framegen.toggleBinding', config.modules.framegen.toggleBinding))
+  errors.push(...validateInputBindings('modules.framegen.toggleBindings', config.modules.framegen.toggleBindings))
   if (!frameGenDiagnosticViewNames.includes(config.modules.framegen.diagnosticView)) {
     errors.push('modules.framegen.diagnosticView must be off, flow, confidence, or tint')
   }

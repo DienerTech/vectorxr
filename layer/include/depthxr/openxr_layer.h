@@ -921,6 +921,7 @@ class OpenXrLayer {
     bool turbo_yielded_to_framegen_{false}; // mutex_
     bool framegen_toggle_binding_was_down_{false};
     bool framegen_binding_down_cached_{false};
+    std::optional<InputBinding> framegen_toggle_pressed_; // its list's binding that last went down (ActingBinding)
     std::optional<std::chrono::steady_clock::time_point> framegen_binding_last_poll_time_;
     XrTime TurboClockNow();
     void ConfigureTurboExperiment();

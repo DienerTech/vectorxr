@@ -5,7 +5,7 @@ import type { InputBinding } from '../lib/model'
 import { bindingListLabel } from '../lib/model'
 
 // Compact one-line summary of a module-level toggle's bindings (Turbo, Depth,
-// the OSD): any one of them acts, one per device for instance.
+// Frame Generation): any one of them acts, one per device for instance.
 // Editing happens on the dedicated sub-page (ModuleBindingPage), opened via
 // `edit` — mirrors the Pivot bindings panel/page pair.
 const props = defineProps<{

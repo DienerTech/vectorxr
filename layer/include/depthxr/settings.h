@@ -542,9 +542,10 @@ struct FrameGenProfile {
 
 struct FrameGenModuleConfig {
     bool enabled{false};
-    // Optional in-session A/B toggle; only effective in sessions that started
-    // with Frame Generation enabled (the pacing takeover is session-latched).
-    InputBinding toggle_binding;
+    // Optional in-session A/B toggle (any one of the list's bindings); only
+    // effective in sessions that started with Frame Generation enabled (the
+    // pacing takeover is session-latched).
+    std::vector<InputBinding> toggle_bindings;
     FrameGenDiagnosticView diagnostic_view{FrameGenDiagnosticView::kOff};
     FrameGenSettings defaults;
     std::vector<FrameGenProfile> profiles;
@@ -553,7 +554,7 @@ struct FrameGenModuleConfig {
 struct FrameGenResolvedSettings : FrameGenSettings {
     bool enabled{false};
     std::string profile_name;
-    InputBinding toggle_binding;
+    std::vector<InputBinding> toggle_bindings;
     FrameGenDiagnosticView diagnostic_view{FrameGenDiagnosticView::kOff};
 };
 

@@ -370,7 +370,7 @@ const FrameGenProfile* FindMatchingFrameGenProfile(const ConfigDocument& config,
 FrameGenResolvedSettings ResolveFrameGenSettings(const ConfigDocument& config, std::string_view exe_name) {
     FrameGenResolvedSettings resolved;
     resolved.enabled = config.framegen.enabled;
-    resolved.toggle_binding = config.framegen.toggle_binding;
+    resolved.toggle_bindings = config.framegen.toggle_bindings;
     resolved.diagnostic_view = config.framegen.diagnostic_view;
     static_cast<FrameGenSettings&>(resolved) = config.framegen.defaults;
     if (const FrameGenProfile* profile = FindMatchingFrameGenProfile(config, exe_name)) {

@@ -1657,6 +1657,10 @@
           "$ref": "#/$defs/inputBinding",
           "description": "Optional in-session A/B toggle. Only effective in sessions that started with Frame Generation on."
         },
+        "toggleBindings": {
+          "$ref": "#/$defs/inputBindings",
+          "description": "Optional in-session A/B toggle bindings. Only effective in sessions that started with Frame Generation on. Any one of the list's bindings acts (one per device, say a HOTAS's and a HOSAS's). Configs hold one binding, or none, under toggleBinding instead, which layers before binding lists read; never both."
+        },
         "diagnosticView": {
           "type": "string",
           "enum": [

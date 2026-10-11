@@ -703,7 +703,8 @@ needs a game restart; turning it off applies at once.
   generation fell back to the real image), or **Generated-frame tint** (a faint tint on
   generated frames, so you can confirm they are being shown).
 - **A/B toggle** is an optional binding that switches generated frames off and on live. It only
-  works in sessions that started with Frame Generation on.
+  works in sessions that started with Frame Generation on. It takes several bindings, one for
+  each device you fly with; any one of them acts.
 
 The Default Profile and each custom profile have their own Mode, Frame rate, Motion source, and
 Advanced settings. The first enabled custom profile that matches the running game wins.
