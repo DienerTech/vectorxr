@@ -2600,7 +2600,8 @@ XrResult OpenXrLayer::CreateSession(XrInstance instance,
         osd_limits ? osd_system.graphicsProperties.maxLayerCount : 0,
         {next_enumerate_swapchain_formats_, next_create_swapchain_, next_enumerate_swapchain_images_,
          next_acquire_swapchain_image_, next_wait_swapchain_image_, next_release_swapchain_image_,
-         next_destroy_swapchain_, next_create_reference_space_, next_destroy_space_}, &logger_, "application="+current_exe_name_+" runtime="+runtime_name_);
+         next_destroy_swapchain_, next_create_reference_space_, next_destroy_space_, next_locate_space_}, &logger_,
+        "application="+current_exe_name_+" runtime="+runtime_name_);
     graphics_api_=osd_.GraphicsApi();
     if (d3d11_bridge_.Active()) graphics_api_ = "D3D11-on-D3D12";
     if (vulkan_bridge_.Active()) graphics_api_ = "Vulkan-on-D3D12";
@@ -2620,6 +2621,7 @@ XrResult OpenXrLayer::CreateSession(XrInstance instance,
                                                 : vulkan_bridge_.Active() ? vulkan_bridge_.Binding()
                                                                           : (create_info ? create_info->next : nullptr)),
                   framegen_unavailable);
+    ConfigureOsdAnchor();
     d3d11_bridge_.SessionCreated();
     vulkan_bridge_.SessionCreated();
     if (runtime_relay_root_.empty()) runtime_relay_root_ = ResolveRuntimeRelayRoot();
@@ -13236,6 +13238,34 @@ void OpenXrLayer::StartFrameGen(XrSession session, const void* binding_chain, co
             logger_.Info("Frame Generation's Vulkan bridge stays for the session all the same: its session is "
                          "Direct3D 12 for life.");
         }
+    }
+}
+
+void OpenXrLayer::ConfigureOsdAnchor() {
+    // SteamVR draws a head-locked (VIEW) quad at the pose its frame carries,
+    // and with a driver that asks for app poses the whole image is then
+    // turned to the display pose. A generated frame carries its real frame's
+    // pose, so the OSD would land off by the head's turn in between: a
+    // double image in Extrapolate, a smear in Interpolate. Placed in the
+    // world at each frame's head pose instead, it lands head-locked whatever
+    // pose the frame carries. VECTORXR_OSD_ANCHOR=view or world overrides.
+    bool world = framegen_owns_pacing_.load(std::memory_order_acquire) &&
+                 runtime_name_.find("SteamVR") != std::string::npos;
+    std::string source = "Frame Generation on SteamVR";
+    if (const char* anchor = std::getenv("VECTORXR_OSD_ANCHOR"); anchor && *anchor) {
+        const std::string value(anchor);
+        if (value == "view" || value == "world") {
+            world = value == "world";
+            source = "VECTORXR_OSD_ANCHOR=" + value;
+        }
+    }
+    osd_.SetWorldAnchored(world);
+    if (world) {
+        logger_.Info("OSD is placed in the world at each frame's head pose (" + source +
+                     "): the runtime draws a head-locked panel at the pose a frame carries, and generated "
+                     "frames carry their real frame's pose.");
+    } else if (source != "Frame Generation on SteamVR") {
+        logger_.Info("OSD stays head-locked (" + source + ").");
     }
 }
 

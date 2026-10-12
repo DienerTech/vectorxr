@@ -46,9 +46,27 @@ XrResult XRAPI_PTR Acquire(XrSwapchain, const XrSwapchainImageAcquireInfo*, std:
 XrResult XRAPI_PTR Wait(XrSwapchain, const XrSwapchainImageWaitInfo* info) { ++waits; Check(info->timeout==0,"OSD blocked the frame thread"); if(timeouts>0) { --timeouts; return XR_TIMEOUT_EXPIRED; } return XR_SUCCESS; }
 XrResult XRAPI_PTR Release(XrSwapchain, const XrSwapchainImageReleaseInfo*) { ++releases; return XR_SUCCESS; }
 XrResult XRAPI_PTR Destroy(XrSwapchain) { ++destroys; for(auto* texture:textures) texture->Release(); textures.clear(); return XR_SUCCESS; }
+bool fail_local{};
+int local_creates{};
 XrResult XRAPI_PTR Space(XrSession, const XrReferenceSpaceCreateInfo* info, XrSpace* space) {
-    Check(info->referenceSpaceType==XR_REFERENCE_SPACE_TYPE_VIEW && info->poseInReferenceSpace.orientation.w==1,"OSD must use an identity VIEW space");
+    Check(info->poseInReferenceSpace.orientation.w==1,"OSD spaces must have an identity pose");
+    if (info->referenceSpaceType==XR_REFERENCE_SPACE_TYPE_LOCAL) {
+        ++local_creates; if (fail_local) return XR_ERROR_REFERENCE_SPACE_UNSUPPORTED;
+        ++spaces; *space=reinterpret_cast<XrSpace>(4); return XR_SUCCESS;
+    }
+    Check(info->referenceSpaceType==XR_REFERENCE_SPACE_TYPE_VIEW,"OSD must use a VIEW space");
     ++spaces; *space=reinterpret_cast<XrSpace>(3); return XR_SUCCESS;
+}
+// The head, 90 degrees to the left (about +Y), at (1, 2, 3).
+XrPosef head_pose{{0,0.70710678f,0,0.70710678f},{1,2,3}};
+bool head_valid{true};
+int locates{};
+XrTime located_at{};
+XrResult XRAPI_PTR Locate(XrSpace space, XrSpace base, XrTime time, XrSpaceLocation* location) {
+    Check(space==reinterpret_cast<XrSpace>(3) && base==reinterpret_cast<XrSpace>(4),"The head was not located in the anchor space");
+    ++locates; located_at=time;
+    location->locationFlags=head_valid?XR_SPACE_LOCATION_POSITION_VALID_BIT|XR_SPACE_LOCATION_ORIENTATION_VALID_BIT:0;
+    location->pose=head_pose; return XR_SUCCESS;
 }
 XrResult XRAPI_PTR DestroySpace(XrSpace) { --spaces; return XR_SUCCESS; }
 const XrCompositionLayerBaseHeader* WaitVisible(OsdRenderer& renderer, const XrFrameEndInfo& frame) {
@@ -410,6 +428,60 @@ int main(int argc, char** argv) {
         renderer.Shutdown(); renderer.Initialize(session,nullptr,4,dispatch);
         renderer.Prepare(settings,Snapshot(),false,false);
         Check(!renderer.Append(frame,true) && !renderer.Status().available,"Unsupported graphics API was not isolated");
+    }
+    {
+        // A world-anchored panel goes out in LOCAL, at the head pose located
+        // at each frame's own display time; head-locked otherwise.
+        OsdDispatch anchored=dispatch; anchored.locate=Locate;
+        OsdRenderer renderer; unsupported=false; renderer.Initialize(session,device,4,anchored);
+        auto settings=OsdSettings{}; settings.enabled=true; settings.show_clock=false; settings.horizontal_degrees=20;
+        renderer.Prepare(settings,Snapshot(),false,false);
+        XrCompositionLayerProjection game{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
+        const auto* original=reinterpret_cast<const XrCompositionLayerBaseHeader*>(&game);
+        XrFrameEndInfo frame{XR_TYPE_FRAME_END_INFO}; frame.layerCount=1; frame.layers=&original; frame.displayTime=1000;
+        auto* quad=reinterpret_cast<const XrCompositionLayerQuad*>(WaitVisible(renderer,frame));
+        Check(quad && quad->space==reinterpret_cast<XrSpace>(3) && locates==0 && local_creates==0,"A head-locked panel located the head");
+        const XrPosef panel=quad->pose;
+        renderer.SetWorldAnchored(true);
+        quad=reinterpret_cast<const XrCompositionLayerQuad*>(renderer.Append(frame,true));
+        Check(quad && quad->space==reinterpret_cast<XrSpace>(4) && locates==1 && located_at==1000,"The anchored panel was not placed at its frame's head pose");
+        // Turned 90 degrees left about +Y: x' = z, z' = -x.
+        Check(std::abs(quad->pose.position.x-(1+panel.position.z))<1e-5f && std::abs(quad->pose.position.y-(2+panel.position.y))<1e-5f &&
+              std::abs(quad->pose.position.z-(3-panel.position.x))<1e-5f,"The panel's position did not follow the head");
+        const XrQuaternionf& q=head_pose.orientation; const XrQuaternionf& p=panel.orientation;
+        const XrQuaternionf expected{q.w*p.x+q.x*p.w+q.y*p.z-q.z*p.y, q.w*p.y-q.x*p.z+q.y*p.w+q.z*p.x,
+                                     q.w*p.z+q.x*p.y-q.y*p.x+q.z*p.w, q.w*p.w-q.x*p.x-q.y*p.y-q.z*p.z};
+        Check(std::abs(quad->pose.orientation.x-expected.x)<1e-5f && std::abs(quad->pose.orientation.y-expected.y)<1e-5f &&
+              std::abs(quad->pose.orientation.z-expected.z)<1e-5f && std::abs(quad->pose.orientation.w-expected.w)<1e-5f,
+              "The panel's orientation did not follow the head");
+        // Every frame is located at its own display time: none reuses another's.
+        frame.displayTime=2000;
+        quad=reinterpret_cast<const XrCompositionLayerQuad*>(renderer.Append(frame,true));
+        Check(quad && locates==2 && located_at==2000 && local_creates==1,"A frame reused another frame's head pose");
+        // Without a located head the panel stays head-locked for that frame.
+        head_valid=false;
+        quad=reinterpret_cast<const XrCompositionLayerQuad*>(renderer.Append(frame,true));
+        Check(quad && quad->space==reinterpret_cast<XrSpace>(3) && std::abs(quad->pose.position.x-panel.position.x)<1e-6f,
+              "An unlocated head moved the panel");
+        head_valid=true;
+        renderer.SetWorldAnchored(false);
+        quad=reinterpret_cast<const XrCompositionLayerQuad*>(renderer.Append(frame,true));
+        Check(quad && quad->space==reinterpret_cast<XrSpace>(3) && locates==3,"Turning anchoring off kept the panel in the world");
+        renderer.Shutdown(); Check(spaces==0,"The anchor space leaked on teardown");
+        // A runtime without a LOCAL space keeps the panel head-locked, and is
+        // asked once.
+        renderer.Initialize(session,device,4,anchored); renderer.SetWorldAnchored(true); fail_local=true; local_creates=0;
+        renderer.Prepare(settings,Snapshot(),false,false);
+        quad=reinterpret_cast<const XrCompositionLayerQuad*>(WaitVisible(renderer,frame));
+        Check(quad && quad->space==reinterpret_cast<XrSpace>(3),"A missing LOCAL space hid the panel");
+        renderer.Append(frame,true);
+        Check(local_creates==1,"A missing LOCAL space was asked for every frame");
+        // A new session starts head-locked until it is set again.
+        renderer.Shutdown(); fail_local=false; local_creates=0; renderer.Initialize(session,device,4,anchored);
+        renderer.Prepare(settings,Snapshot(),false,false);
+        quad=reinterpret_cast<const XrCompositionLayerQuad*>(WaitVisible(renderer,frame));
+        Check(quad && quad->space==reinterpret_cast<XrSpace>(3) && local_creates==0,"A new session kept the last session's anchoring");
+        renderer.Shutdown(); Check(spaces==0,"Spaces leaked on teardown");
     }
     for(const auto preferred:{DXGI_FORMAT_R8G8B8A8_UNORM_SRGB,DXGI_FORMAT_B8G8R8A8_UNORM_SRGB}) {
         // Unsupported higher-ranked formats must be skipped, but the runtime's

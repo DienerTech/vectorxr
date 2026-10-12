@@ -34,6 +34,8 @@ struct OsdMetric {
 struct OsdMeasurements {
     OsdMetric prepare, append, raster, acquire, wait, upload, release, submit, cadence, age;
     std::uint64_t submitted{}, refreshed{}, no_render{}, layer_limit{}, image_timeouts{}, upload_busy{}, worker_busy{}, failures{}, frame_rejections{};
+    // Frames a world-anchored panel went out head-locked: its head pose was not located.
+    std::uint64_t anchor_fallbacks{};
 };
 
 struct OsdDispatch {
@@ -46,6 +48,7 @@ struct OsdDispatch {
     PFN_xrDestroySwapchain destroy{};
     PFN_xrCreateReferenceSpace create_space{};
     PFN_xrDestroySpace destroy_space{};
+    PFN_xrLocateSpace locate{};
 };
 
 struct OsdSnapshot {
@@ -144,6 +147,13 @@ class OsdRenderer {
     // Only called on the application's end-frame thread, after game-layer transforms.
     const XrCompositionLayerBaseHeader* Append(const XrFrameEndInfo&, bool should_render);
     OsdStatus Status() const;
+    // Places the panel in the world at each frame's head pose, located at
+    // that frame's own display time, instead of in the VIEW space. A runtime
+    // that draws a VIEW quad at the pose its frame carries, then turns the
+    // whole image to the display pose, moves a head-locked panel by the turn
+    // in between; generated frames carry their real frame's pose. Reset by
+    // InitializeGraphics.
+    void SetWorldAnchored(bool);
   private:
     void ShutdownLocked();
     bool CreateResources();
@@ -156,6 +166,9 @@ class OsdRenderer {
     XrSession session_{XR_NULL_HANDLE};
     XrSwapchain swapchain_{XR_NULL_HANDLE};
     XrSpace space_{XR_NULL_HANDLE};
+    // LOCAL, created by Append once the panel is world-anchored.
+    XrSpace anchor_space_{XR_NULL_HANDLE};
+    bool world_anchored_{false}, anchor_failed_{false}, anchor_logged_{false};
     std::unique_ptr<OsdGraphics> graphics_;
     OsdDispatch api_;
     std::uint32_t max_layers_{};

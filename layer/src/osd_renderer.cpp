@@ -26,6 +26,20 @@ case XR_ERROR_TIME_INVALID:return "XR_ERROR_TIME_INVALID";
 default:return "see OpenXR result code";}}
 double Milliseconds(Clock::time_point start){return std::chrono::duration<double,std::milli>(Clock::now()-start).count();}
 struct MetricTimer { OsdMetric& metric; Clock::time_point start; ~MetricTimer(){metric.Add(Milliseconds(start));} };
+// The panel's VIEW-space pose expressed in the space the head was located in.
+XrPosef PanelInWorld(const XrPosef& panel, const XrPosef& head) {
+    const XrQuaternionf& q=head.orientation; const XrQuaternionf& p=panel.orientation;
+    XrPosef out{};
+    out.orientation={q.w*p.x+q.x*p.w+q.y*p.z-q.z*p.y, q.w*p.y-q.x*p.z+q.y*p.w+q.z*p.x,
+                     q.w*p.z+q.x*p.y-q.y*p.x+q.z*p.w, q.w*p.w-q.x*p.x-q.y*p.y-q.z*p.z};
+    // v + 2w(u x v) + 2u x (u x v), for unit q = (u, w).
+    const XrVector3f& v=panel.position;
+    const float tx=2*(q.y*v.z-q.z*v.y), ty=2*(q.z*v.x-q.x*v.z), tz=2*(q.x*v.y-q.y*v.x);
+    out.position={head.position.x+v.x+q.w*tx+(q.y*tz-q.z*ty),
+                  head.position.y+v.y+q.w*ty+(q.z*tx-q.x*tz),
+                  head.position.z+v.z+q.w*tz+(q.x*ty-q.y*tx)};
+    return out;
+}
 }
 void OsdMetric::Add(double ms){if(!std::isfinite(ms)||ms<0)return;++count;sum+=ms;maximum=std::max(maximum,ms);++histogram[std::min<std::size_t>(255,static_cast<std::size_t>(ms<10?ms/.05:200+(ms-10)/2))];}
 double OsdMetric::P95Upper() const {if(!count)return 0;std::uint64_t total{};for(std::size_t i=0;i<256;++i){total+=histogram[i];if(total>=static_cast<std::uint64_t>(std::ceil(count*.95)))return i==255?maximum:std::min(maximum,(i<200?(i+1)*.05:10+(i-199)*2.0));}return maximum;}
@@ -57,7 +71,7 @@ std::vector<std::pair<LogLevel,std::string>> OsdRenderer::CollectDiagnosticsLock
     for(std::size_t i=0;i<3;++i){const auto& m=measurements_[i];if(!m.prepare.count&&!m.append.count&&!m.failures)continue;
         std::ostringstream out;out<<"OSD summary "<<identity_<<" api="<<(graphics_?graphics_->Name():"Unsupported")<<" mode="<<(i==0?"disabled":i==1?"hidden":"visible")<<" final="<<final<<" windowSeconds="<<seconds
             <<" submitted="<<m.submitted<<" refreshed="<<m.refreshed<<" activeSeconds="<<m.cadence.sum/1000.0<<" effectiveRefreshHz="<<(m.cadence.sum>0?m.refreshed*1000.0/m.cadence.sum:0)<<" noRender="<<m.no_render<<" layerLimit="<<m.layer_limit<<" imageTimeouts="<<m.image_timeouts<<" uploadBusy="<<m.upload_busy<<" workerBusy="<<m.worker_busy<<" failures="<<m.failures
-            <<" frameRejections="<<m.frame_rejections<<metric("prepareCpu",m.prepare)<<metric("appendCpu",m.append)<<metric("appCadence",m.cadence)<<metric("runtimeSubmitCpu",m.submit);
+            <<" frameRejections="<<m.frame_rejections<<" anchor="<<(anchor_space_?"world":"view")<<" anchorFallbacks="<<m.anchor_fallbacks<<metric("prepareCpu",m.prepare)<<metric("appendCpu",m.append)<<metric("appCadence",m.cadence)<<metric("runtimeSubmitCpu",m.submit);
         lines.emplace_back(LogLevel::Info,out.str());
         if(logger_->IsDebugEnabled())lines.emplace_back(LogLevel::Debug,"OSD detail "+identity_+" mode="+(i==0?std::string("disabled"):i==1?"hidden":"visible")+metric("rasterWorkerCpu",m.raster)+metric("acquireCpu",m.acquire)+metric("waitCpu",m.wait)+metric("uploadEnqueueCpu",m.upload)+metric("releaseCpu",m.release)+metric("imageAge",m.age)+"; CPU timings do not measure GPU/compositor execution; p95 bins: 0.05ms below 10ms, 2ms below 120ms, overflow=max");
     }
@@ -394,8 +408,10 @@ void OsdRenderer::ShutdownLocked() {
     if(graphics_) graphics_->Reset();
     if (swapchain_ && api_.destroy) api_.destroy(swapchain_);
     if (space_ && api_.destroy_space) api_.destroy_space(space_);
-    swapchain_=XR_NULL_HANDLE; space_=XR_NULL_HANDLE; session_=XR_NULL_HANDLE;
     WriteDiagnostics(logger_,CollectDiagnosticsLocked(true)); graphics_.reset();
+    if (anchor_space_ && api_.destroy_space) api_.destroy_space(anchor_space_);
+    swapchain_=XR_NULL_HANDLE; space_=XR_NULL_HANDLE; anchor_space_=XR_NULL_HANDLE; session_=XR_NULL_HANDLE;
+    anchor_failed_=false; anchor_logged_=false;
     acquired_.reset(); acquired_waited_=false; ready_=false; failed_=false; configured_=false; primed_=false;
     telemetry_={}; status_={}; updated_={}; image_updated_={};
 }
@@ -424,7 +440,7 @@ void OsdRenderer::Initialize(XrSession session, ID3D11Device* device, std::uint3
 }
 void OsdRenderer::InitializeGraphics(XrSession session,const void* chain,std::uint32_t max_layers,OsdDispatch api,Logger* logger,std::string identity) {
     std::scoped_lock lock(mutex_);ShutdownLocked();
-    session_=session;max_layers_=max_layers;api_=api;logger_=logger;identity_=std::move(identity);
+    session_=session;max_layers_=max_layers;api_=api;logger_=logger;identity_=std::move(identity);world_anchored_=false;
     measurements_={};events_.clear();dropped_events_=0;report_start_=Clock::now();cadence_last_={};cadence_mode_=3;
     std::string error;graphics_=CreateOsdGraphics(chain,error);
     status_.available=graphics_!=nullptr;status_.message=graphics_?"Disabled":error.empty()?"OSD graphics binding unavailable":error;
@@ -447,7 +463,9 @@ std::pair<OsdPresentation, OsdPresentation> OsdRenderer::Prepare(const OsdSettin
             if(graphics_) graphics_->Reset();
             if (swapchain_ && api_.destroy) api_.destroy(swapchain_);
             if (space_ && api_.destroy_space) api_.destroy_space(space_);
-            swapchain_=XR_NULL_HANDLE; space_=XR_NULL_HANDLE; acquired_.reset(); acquired_waited_=false; ready_=false;
+            if (anchor_space_ && api_.destroy_space) api_.destroy_space(anchor_space_);
+            swapchain_=XR_NULL_HANDLE; space_=XR_NULL_HANDLE; anchor_space_=XR_NULL_HANDLE; anchor_failed_=false;
+            acquired_.reset(); acquired_waited_=false; ready_=false;
         }
         visible_=settings.visible_on_start; compact_=settings.compact; primed_=false; failed_=false; telemetry_={};
     }
@@ -498,6 +516,7 @@ bool OsdRenderer::CreateResources() {
     // Clean up a failed previous attempt before a user-requested retry.
     if (swapchain_) { api_.destroy(swapchain_); swapchain_=XR_NULL_HANDLE; acquired_.reset(); acquired_waited_=false; ready_=false; }
     if (space_) { api_.destroy_space(space_); space_=XR_NULL_HANDLE; }
+    if (anchor_space_) { api_.destroy_space(anchor_space_); anchor_space_=XR_NULL_HANDLE; }
     std::uint32_t count=0; auto result=api_.formats(session_,0,&count,nullptr);
     if (XR_FAILED(result) || !count) { Fail("OSD formats",result); return false; }
     std::vector<std::int64_t> formats(count); result=api_.formats(session_,count,&count,formats.data());
@@ -610,10 +629,31 @@ const XrCompositionLayerBaseHeader* OsdRenderer::Append(const XrFrameEndInfo& in
     // Constant angular size when distance changes; depth is independently comfortable.
     quad_.size.width=static_cast<float>(settings_.distance_meters*.55*settings_.scale/100*(image_width_-2)/(OsdBitmap::width-2));
     quad_.size.height=quad_.size.width*(image_height_-2)/(image_width_-2);
+    if (world_anchored_ && !anchor_failed_) {
+        if (!anchor_space_) {
+            XrReferenceSpaceCreateInfo local{XR_TYPE_REFERENCE_SPACE_CREATE_INFO};
+            local.referenceSpaceType=XR_REFERENCE_SPACE_TYPE_LOCAL; local.poseInReferenceSpace.orientation.w=1;
+            const auto created=api_.locate?api_.create_space(session_,&local,&anchor_space_):XR_ERROR_FUNCTION_UNSUPPORTED;
+            if (XR_FAILED(created)) {
+                anchor_space_=XR_NULL_HANDLE; anchor_failed_=true;
+                Event(false,"world anchor unavailable XrResult="+std::to_string(created)+"("+XrResultName(created)+"); the panel stays head-locked");
+            }
+        }
+        // The head where this frame is shown: located at its own display
+        // time, never reused for another frame.
+        XrSpaceLocation head{XR_TYPE_SPACE_LOCATION};
+        constexpr XrSpaceLocationFlags valid=XR_SPACE_LOCATION_POSITION_VALID_BIT|XR_SPACE_LOCATION_ORIENTATION_VALID_BIT;
+        if (anchor_space_ && XR_SUCCEEDED(api_.locate(space_,anchor_space_,info.displayTime,&head)) &&
+            (head.locationFlags&valid)==valid) {
+            quad_.space=anchor_space_; quad_.pose=PanelInWorld(quad_.pose,head.pose);
+            if (!anchor_logged_) { anchor_logged_=true; Event(false,"world anchor active space=LOCAL pose=head at each frame's display time"); }
+        } else if (anchor_space_) ++stats.anchor_fallbacks;
+    }
     ++stats.submitted;stats.age.Add(Milliseconds(image_updated_));
     status_.visible=true; status_.message="Visible";
     return reinterpret_cast<const XrCompositionLayerBaseHeader*>(&quad_);
 }
 
 OsdStatus OsdRenderer::Status() const { std::scoped_lock lock(mutex_); return status_; }
+void OsdRenderer::SetWorldAnchored(bool anchored) { std::scoped_lock lock(mutex_); world_anchored_=anchored; }
 } // namespace depthxr
