@@ -372,7 +372,9 @@ in-headset view labels the rendered regions and tracking pipeline with color:
 - Cyan ring: raw eye gaze; yellow cross: gaze after deadzone and smoothing.
 
 The diagnostic view is available only for VectorXR's synthesized D3D11 Quadviews compositor. It is
-not currently supported on Varjo headsets, where the Varjo runtime owns native composition.
+not currently supported on Varjo headsets, where the Varjo runtime owns native composition, or
+while Frame Generation runs in a D3D11 game such as DCS: Frame Generation composes the quad views
+itself there. Turn Frame Generation off for the game to use the visualization.
 
 Quadviews and Pivot are designed to compose: unlike running separate foveation and neck-assist
 layers, VectorXR keeps the foveated focus region aligned with your gaze while Pivot rotates the

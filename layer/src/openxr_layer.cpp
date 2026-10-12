@@ -5245,7 +5245,8 @@ bool OpenXrLayer::ComposeQuadViewsD3D11(const XrCompositionLayerProjection* sour
         const bool eye_tracking_mode =
             resolved_settings_.quadviews.tracking_mode == QuadViewsTrackingMode::Eye;
         const bool raw_gaze_valid = eye_tracking_mode && gaze_diagnostic.valid;
-        constants.diagnostic_params[0] = quadviews_diagnostic_visualization_enabled_ ? 1.0f : 0.0f;
+        constants.diagnostic_params[0] =
+            quadviews_diagnostic_visualization_enabled_ && !FrameGenComposesQuadViews() ? 1.0f : 0.0f;
         constants.diagnostic_params[1] = eye_tracking_mode ? 1.0f : 0.0f;
         constants.diagnostic_params[2] = raw_gaze_valid ? 1.0f : 0.0f;
         constants.output_texel[0] = 1.0f / static_cast<float>(std::max<uint32_t>(1, target.width));
@@ -8758,8 +8759,9 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
             // Frame Generation may compose the frame itself (just in time, on
             // a bridged session whose pacing it owns), from the four views as
             // the layer would submit them, with the alpha bits the composed
-            // layer clears. The diagnostic overlay is the layer's compositor's
-            // alone: such frames are declined.
+            // layer clears. The diagnostic overlay is unavailable there: it is
+            // the layer's compositor's alone, and declining frames for it
+            // restarted Frame Generation on the composed full-size views.
             const bool from_site = primary_projection && d3d11_bridge_.Active() &&
                                    framegen_owns_pacing_.load(std::memory_order_acquire);
             const bool offer = planned && from_site;
@@ -8771,9 +8773,7 @@ XrResult OpenXrLayer::EndFrame(XrSession session, const XrFrameEndInfo* frame_en
                 source.layerFlags &= ~(XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT |
                                        XR_COMPOSITION_LAYER_UNPREMULTIPLIED_ALPHA_BIT |
                                        XR_COMPOSITION_LAYER_INVERTED_ALPHA_BIT_EXT);
-                if (!quadviews_diagnostic_visualization_enabled_) {
-                    route = framegen_.ClaimQuadFrame(source);
-                }
+                route = framegen_.ClaimQuadFrame(source);
             }
             if (route == FrameGenQuadRoute::kClaimed) {
                 // Frame Generation composes it (from the views' captures) for
@@ -10852,6 +10852,10 @@ void OpenXrLayer::ResetInstanceState() {
 bool OpenXrLayer::IsQuadViewsActive() const {
     const bool configured_active = resolved_settings_.core.enabled && resolved_settings_.quadviews.enabled;
     return ResolveQuadViewsSessionActive(configured_active, quadviews_session_active_);
+}
+
+bool OpenXrLayer::FrameGenComposesQuadViews() const {
+    return d3d11_bridge_.Active() && framegen_owns_pacing_.load(std::memory_order_acquire);
 }
 
 bool OpenXrLayer::IsQuadViewsEmulationActive() const {
@@ -13065,6 +13069,11 @@ void OpenXrLayer::PollQuadViewsDiagnosticVisualizationToggle() {
     if (!was_pressed) {
         return;
     }
+    if (FrameGenComposesQuadViews()) {
+        logger_.Info("Quadviews diagnostic visualization is unavailable while Frame Generation composes the quad "
+                     "views (" + BindingLabel(binding) + "); turn Frame Generation off for this game to use it.");
+        return;
+    }
 
     quadviews_diagnostic_visualization_enabled_ = !quadviews_diagnostic_visualization_enabled_;
     runtime_relay_status_dirty_.store(true, std::memory_order_release);
@@ -15065,7 +15074,7 @@ void OpenXrLayer::PollRuntimeRelay() {
         std::scoped_lock lock(mutex_);
         const bool available = runtime_relay_session_id_ == session_id &&
             active_session_ != XR_NULL_HANDLE && IsQuadViewsEmulationActive() &&
-            d3d11_quadviews_compositor_.context != nullptr;
+            d3d11_quadviews_compositor_.context != nullptr && !FrameGenComposesQuadViews();
         if (available && control.revision > runtime_relay_last_applied_revision_ &&
             control.quadviews_diagnostic_visualization.has_value()) {
             runtime_relay_last_applied_revision_ = control.revision;
@@ -15121,7 +15130,8 @@ void OpenXrLayer::PollRuntimeRelay() {
         status.updated_at_unix_milliseconds = RuntimeRelayUnixMilliseconds();
         status.acknowledged_revision = runtime_relay_acknowledged_revision_;
         status.quadviews_diagnostic_visualization_available =
-            IsQuadViewsEmulationActive() && d3d11_quadviews_compositor_.context != nullptr;
+            IsQuadViewsEmulationActive() && d3d11_quadviews_compositor_.context != nullptr &&
+            !FrameGenComposesQuadViews();
         status.quadviews_diagnostic_visualization_enabled = quadviews_diagnostic_visualization_enabled_;
     }
 

@@ -165,7 +165,7 @@ FrameGenOsdText DescribeFrameGen(const FrameGenStatus& status, bool started);
 // Emulated quad views (the layer composes XR_VARJO_quad_views into stereo):
 // what happens to one frame from the layer's quad views compose site.
 enum class FrameGenQuadRoute : std::uint8_t {
-    kDeclined,      // the layer composes it and did not offer it (its diagnostic overlay is on)
+    kDeclined,      // the layer composes it and did not offer it
     kClaimed,       // Frame Generation composes it: the frame's primary projection holds the four source views
     kNotPresenting, // the layer composes it: no just-in-time quad presentation is running
     kUncaptured,    // the layer composes it: a view's latest release was not captured (the views are set up from it)

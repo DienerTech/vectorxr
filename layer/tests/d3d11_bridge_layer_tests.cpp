@@ -137,6 +137,10 @@ class D3D11BridgeLayerTestPeer {
         std::scoped_lock lock(layer.mutex_);
         return {layer.d3d11_bridge_quad_frames_.d3d11, layer.d3d11_bridge_quad_frames_.split};
     }
+    // The quad views diagnostic overlay, as its binding or the app would set it.
+    static void SetQuadViewsDiagnosticVisualization(bool shown) {
+        OpenXrLayer::Instance().quadviews_diagnostic_visualization_enabled_ = shown;
+    }
     // The bridged session's quad views frames Frame Generation composed so far.
     static std::uint64_t QuadFramesComposedByFrameGen() {
         OpenXrLayer& layer = OpenXrLayer::Instance();
@@ -3216,6 +3220,24 @@ void TestBridgedQuadFrameGen(Game& game, const std::string& mode) {
     const auto last_own = std::find_if(composing.rbegin(), composing.rend(), is_own);
     const std::array<XrSwapchain, 2> outputs{last_own->views[0].swapchain, last_own->views[1].swapchain};
     CheckValidation(game, "composing");
+
+    // The diagnostic overlay is the Direct3D 11 compositor's alone, and is
+    // unavailable while Frame Generation composes the quad views: frames are
+    // never handed back for it (that restarted Frame Generation on the
+    // composed full-size views, and stalled SteamVR for seconds).
+    {
+        const std::uint64_t d3d11_before = Peer::QuadFrames().first;
+        const std::uint64_t fg_before = Peer::QuadFramesComposedByFrameGen();
+        const std::uint64_t setups_before = Peer::FrameGen().quad_setups;
+        Peer::SetQuadViewsDiagnosticVisualization(true);
+        run(8, "overlay");
+        Peer::SetQuadViewsDiagnosticVisualization(false);
+        const depthxr::FrameGenStatus overlay = Peer::FrameGen();
+        Check(Peer::QuadFrames().first == d3d11_before && Peer::QuadFramesComposedByFrameGen() == fg_before + 8 &&
+                  overlay.quad && overlay.quad_setups == setups_before,
+              "overlay: Frame Generation keeps composing the quad views (setups " +
+                  std::to_string(overlay.quad_setups) + ", was " + std::to_string(setups_before) + ")");
+    }
 
     // A frame whose views' rectangles change cannot be claimed (their
     // releases were captured with the old ones): Direct3D 11 composes it,

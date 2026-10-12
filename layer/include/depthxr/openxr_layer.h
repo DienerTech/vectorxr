@@ -544,6 +544,9 @@ class OpenXrLayer {
     void NoteTurboShouldRenderLocked(bool should_render);
     bool IsQuadViewsActive() const;
     bool IsQuadViewsEmulationActive() const;
+    // A bridged session whose pacing Frame Generation owns: it composes the
+    // quad views itself, and the diagnostic overlay is unavailable.
+    bool FrameGenComposesQuadViews() const;
     void ResetSwapchainState();
     void LogSwapchainSummary(XrSwapchain swapchain, const SwapchainInfo& info, std::string_view event_name);
     // Counts an application call on the calling thread; logs the first call of each kind on each thread.
