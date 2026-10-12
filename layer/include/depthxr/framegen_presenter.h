@@ -100,10 +100,10 @@ struct FrameGenStatus {
     std::uint64_t dynamic_stand_downs{0}; // benefit guard and runtime halving stand-downs (probes not included)
     std::uint64_t dynamic_probes{0};
     // The runtime holds the frames Frame Generation presents to half its
-    // refresh rate, or a third or a quarter of it (its motion smoothing,
-    // probably): reported from the presenter thread's waits, and kept until
-    // those or, passing frames through, the game's own show every refresh
-    // again.
+    // refresh rate, or a third or a quarter of it (runtime or headset
+    // smoothing, or a frame rate limit, can do that): reported from the
+    // presenter thread's waits, and kept until those or, passing frames
+    // through, the game's own show every refresh again.
     bool runtime_halving{false};
     bool threaded{false};        // presenting from the presenter thread
     FrameGenDepthState depth{FrameGenDepthState::kUnknown};
@@ -669,16 +669,19 @@ class FrameGenPresenter {
     bool QuadDeclinedLocked() const;
 
     XrResult SubmitAt(XrSession session, const XrFrameEndInfo& info, XrTime time, const FrameGenRuntimeCalls& calls);
-    // A runtime wait returned with this period: the refresh period follows
-    // it, unless it is about two, three or four times the refresh period
-    // already seen.
-    void NoteRuntimePeriodLocked(XrDuration period);
+    // A runtime wait returned with this period at `now`: the refresh period
+    // follows a shorter (or about the same) period at once, never one about
+    // two to five times it, and another longer one only once the periods
+    // reported have agreed with it for a while (kRefreshChangeAfter).
+    void NoteRuntimePeriodLocked(XrDuration period, std::chrono::steady_clock::time_point now);
     // A presenter-thread runtime wait (`presenter`) or, passing frames
     // through, one of the game's: whether the runtime held it a refresh or
     // more past the one asked for or reported a multiple of the refresh
     // period (it halves the frame rate, or cuts it to a third or a quarter),
     // over halving_window_ (while halving is reported, a quarter of it from
-    // when the presenter thread's waits start). Only the presenter thread's
+    // when the presenter thread's waits start). A wait asked for late shows
+    // that only when the runtime reported a multiple and still blocked it;
+    // one it released at once was not held. Only the presenter thread's
     // waits report halving; the game's own can clear it (they may also wait
     // for the game's frame before, as MSFS's do).
     void NoteRuntimeHalvingLocked(std::chrono::steady_clock::time_point called,
@@ -686,6 +689,16 @@ class FrameGenPresenter {
                                   XrDuration period, bool presenter);
     void NotePhaseLocked(std::chrono::steady_clock::time_point called, std::chrono::steady_clock::time_point returned,
                          XrTime display_time, XrDuration period);
+    // What paced submissions are spaced by: the period reported, at most the
+    // refresh period.
+    XrDuration SubmitSpacingLocked(XrDuration period) const;
+    // When the paced submission for `display_time` goes to the runtime, from
+    // `now` (recorded as the newest point of submit_grid_), and whether it is
+    // already more than half a refresh past the time the runtime would have
+    // released its wait.
+    std::pair<std::chrono::steady_clock::time_point, bool>
+    ScheduleSubmissionLocked(std::chrono::steady_clock::time_point now, XrTime display_time, XrDuration period);
+    // Sleeps until the slot's submission is due (ScheduleSubmissionLocked).
     // Returns true when the slot was already more than half a refresh past
     // the time the runtime would have released its wait.
     bool PaceSubmission(XrTime display_time, XrDuration period);
@@ -813,7 +826,9 @@ class FrameGenPresenter {
     XrResult RuntimeWait(const FrameGenRuntimeCalls& calls, XrSession session, const XrFrameWaitInfo* info,
                          XrFrameState* state);
     XrResult RuntimeBegin(const FrameGenRuntimeCalls& calls, XrSession session, const XrFrameBeginInfo* info);
-    XrResult RuntimeEnd(const FrameGenRuntimeCalls& calls, XrSession session, const XrFrameEndInfo* info);
+    // `paced`: the submission was scheduled (ScheduleSubmissionLocked), not
+    // a frame passed straight through.
+    XrResult RuntimeEnd(const FrameGenRuntimeCalls& calls, XrSession session, const XrFrameEndInfo* info, bool paced);
     bool RuntimeFrameOpenLocked() const { return runtime_ends_ < runtime_begins_; }
     bool RuntimeWaitPendingLocked() const { return runtime_waits_ > runtime_begins_; }
     // Some apps end a frame with a display time other than the one they were
@@ -983,26 +998,40 @@ class FrameGenPresenter {
     RealFrame last_real_;
     std::vector<std::vector<Output>> output_sets_; // [generated frame][view]
     Generated extrapolated_;
-    std::chrono::steady_clock::time_point last_runtime_submit_{};
+    // The submission grid: when the last submission to the runtime was due
+    // (a paced one's scheduled time), or was made (a frame passed straight
+    // through, or a paced one sent more than half a refresh late).
+    std::chrono::steady_clock::time_point submit_grid_{};
     XrDuration last_period_{0};
     // The runtime's refresh period: the period it reports, except one about
-    // two, three or four times the refresh period already seen (a runtime
-    // cutting the frame rate to that fraction may report the period it holds
-    // frames to). Dynamic judges the game's rate against it. A runtime
+    // two to five times the refresh period already seen (a runtime cutting
+    // the frame rate to that fraction may report the period it holds frames
+    // to, and SteamVR with Pimax's headset driver reports a late caller's
+    // own frame interval in whole refreshes), and another longer one until
+    // the periods reported have agreed with it for a while
+    // (refresh_candidate_: it, and since when). Dynamic judges the game's
+    // rate against it, and submissions are spaced by at most it. A runtime
     // cutting the rate from its first frame is indistinguishable from a
     // headset at that fraction of the refresh rate.
     XrDuration refresh_period_{0};
+    std::optional<std::pair<XrDuration, std::chrono::steady_clock::time_point>> refresh_candidate_;
     // Runtime halving (NoteRuntimeHalvingLocked): the last wait measured, its
-    // source's waits over the window (when, and how many refreshes the
-    // runtime held each to: 1 for the next one), since when that source has
-    // been measured, and the verdict.
+    // source's waits over the window (when, how many refreshes the runtime
+    // held each to: 1 for the next one, and whether a halved one blocked for
+    // half a refresh or more), since when that source has been measured, and
+    // the verdict.
     struct HalvingWait {
         std::chrono::steady_clock::time_point returned{};
         XrTime display_time{0};
         bool presenter{false};
     };
+    struct HalvingSample {
+        std::chrono::steady_clock::time_point returned{};
+        std::uint32_t held{1};
+        bool blocked{false};
+    };
     std::optional<HalvingWait> halving_last_;
-    std::deque<std::pair<std::chrono::steady_clock::time_point, std::uint32_t>> halving_samples_;
+    std::deque<HalvingSample> halving_samples_;
     std::chrono::steady_clock::time_point halving_since_{};
     std::chrono::milliseconds halving_window_{4000};
     bool runtime_halving_{false};

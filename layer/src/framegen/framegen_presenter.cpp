@@ -9,6 +9,7 @@
 #include <cstdio>
 #include <ctime>
 #include <filesystem>
+#include <tuple>
 
 namespace depthxr {
 namespace {
@@ -55,13 +56,20 @@ constexpr std::uint32_t kQuadUnwrittenBeforeDecline = 10;
 // Composing quad views: first few write failures logged one by one.
 constexpr std::uint32_t kLoggedQuadWriteFailures = 3;
 // What the On-Screen Display and the desktop app say while the runtime
-// halves the frame rate (FrameGenStatus::runtime_halving).
-constexpr const char* kHalvingDetail = "The runtime halves the frame rate: turn off its smoothing";
-constexpr const char* kHalvingReason = "the runtime halves the frame rate: turn off its smoothing";
-// A runtime cutting the frame rate (its motion smoothing) holds frames to
-// every second, third or at most fourth refresh: a period reported as two to
-// this many times the refresh period is not taken as another refresh rate.
-constexpr std::uint32_t kMaxThrottleRefreshes = 4;
+// holds the frames Frame Generation presents to half its refresh rate or
+// less (FrameGenStatus::runtime_halving), and why Dynamic stands down then.
+constexpr const char* kHalvingDetail = "Runtime holds frames to half rate: check its smoothing";
+constexpr const char* kHalvingReason = "the runtime holds frames to half rate: check its smoothing";
+constexpr const char* kHalvingStandDown = "the runtime holds frames to half rate";
+// A period reported as two to this many times the refresh period is not
+// taken as another refresh rate: a runtime cutting the frame rate (its
+// motion smoothing) holds frames to every second, third or fourth refresh,
+// and SteamVR with Pimax's headset driver (2.17.10) reports a late caller's
+// own frame interval in whole refreshes, up to five.
+constexpr std::uint32_t kMaxThrottleRefreshes = 5;
+// A longer period that is no such multiple is a new refresh rate only once
+// every period reported for this long agreed with it (a hitch is one wait).
+constexpr std::chrono::seconds kRefreshChangeAfter{1};
 
 std::string MultiplierText(std::uint32_t multiplier) {
     return std::to_string(multiplier) + "x";
@@ -76,6 +84,8 @@ std::string TimesText(std::uint32_t times) {
         return "three times";
     case 4:
         return "four times";
+    case 5:
+        return "five times";
     default:
         return std::to_string(times) + " times";
     }
@@ -90,6 +100,8 @@ std::string EveryText(std::uint32_t refreshes) {
         return "third";
     case 4:
         return "fourth";
+    case 5:
+        return "fifth";
     default:
         return std::to_string(refreshes) + "th";
     }
@@ -447,9 +459,10 @@ void FrameGenPresenter::Stop() {
     output_kinds_.clear();
     end_thread_ = {};
     logged_claimed_wait_ = false;
-    last_runtime_submit_ = {};
+    submit_grid_ = {};
     last_period_ = 0;
     refresh_period_ = 0;
+    refresh_candidate_.reset();
     halving_last_.reset();
     halving_samples_.clear();
     halving_since_ = {};
@@ -1708,9 +1721,9 @@ void FrameGenPresenter::UpdateDynamicLocked(Clock::time_point now, XrDuration pe
             dynamic_probing_ = false;
             dynamic_probe_after_ = policy.probe_after;
             dynamic_hold_ = policy.hold;
-            dynamic_reason_ = "the game holds " + Number(rate, 1) + " fps alone";
+            dynamic_reason_ = "the game runs at " + Number(rate, 1) + " fps";
             if (logger_) {
-                logger_->Info("Frame Generation (dynamic): the game holds " + Number(rate, 1) +
+                logger_->Info("Frame Generation (dynamic): the game runs at " + Number(rate, 1) +
                               " fps: stays standing by.");
             }
         }
@@ -1719,15 +1732,14 @@ void FrameGenPresenter::UpdateDynamicLocked(Clock::time_point now, XrDuration pe
     if (!compositor_running_) {
         return; // engaging, or presenting inline for a moment: nothing to judge
     }
-    // The runtime holds the frames presented to half its refresh rate (its
-    // motion smoothing, probably) and makes its own between them: engaged
-    // gains nothing while that lasts. Standing by, frames pass straight
-    // through as they would without Frame Generation. Only the presenter
-    // thread's waits during this engagement count, and only while halving is
-    // still reported; re-engaged while it is, they decide within a quarter
-    // of the window, so trying again costs little.
+    // The runtime holds the frames presented to half its refresh rate (or
+    // less): engaged gains nothing while that lasts. Standing by, frames pass
+    // straight through as they would without Frame Generation. Only the
+    // presenter thread's waits during this engagement count, and only while
+    // halving is still reported; re-engaged while it is, they decide within a
+    // quarter of the window, so trying again costs little.
     if (runtime_halving_ && halving_confirmed_at_ && *halving_confirmed_at_ > dynamic_engaged_at_) {
-        DynamicStandDownLocked(now, "the runtime halves the frame rate", false);
+        DynamicStandDownLocked(now, kHalvingStandDown, false);
         return;
     }
     // Engaged: the benefit guard. Windows with a pause, a frame without a
@@ -1948,7 +1960,7 @@ void FrameGenPresenter::SetStateLocked(FrameGenState state, const std::string& r
         const double refresh = refresh_period_ > 0 ? 1e9 / static_cast<double>(refresh_period_) : 0.0;
         const double rate = now - multiplier_changed_at_ >= std::chrono::seconds(1) ? RatePerSecond(app_frames_, now) : 0.0;
         logger_->Info("Frame Generation (dynamic) standing by: " +
-                      (rate > 0.0 ? "the game holds " + Number(rate, 1) + " fps" : std::string("frames pass straight through")) +
+                      (rate > 0.0 ? "the game runs at " + Number(rate, 1) + " fps" : std::string("frames pass straight through")) +
                       " (engages below " + Number(dynamic_policy_.engage_below * refresh, 1) + ").");
     } else if (state == FrameGenState::kActive && full_rate_) {
         logger_->Info("Frame Generation standing by: the application holds full refresh.");
@@ -2129,7 +2141,7 @@ XrResult FrameGenPresenter::WaitFrame(XrSession session, const XrFrameWaitInfo* 
     frame.multiplier = multiplier;
     frame.sequence = sequence;
     frame.wait_return = Clock::now();
-    NoteRuntimePeriodLocked(frame.period);
+    NoteRuntimePeriodLocked(frame.period, returned);
     if (!frame.engaged && frame.should_render) {
         // Passed straight through: the game's own wait.
         NoteRuntimeHalvingLocked(called, returned, frame.slot_time, frame.period, false);
@@ -2329,7 +2341,7 @@ XrResult FrameGenPresenter::EndFrame(XrSession session, const XrFrameEndInfo* in
         return XR_SUCCESS;
     }
     if (!frame || !frame->engaged) {
-        result = RuntimeEnd(calls, session, info);
+        result = RuntimeEnd(calls, session, info, false);
         bool eligible;
         {
             std::scoped_lock lock(mutex_);
@@ -2437,28 +2449,53 @@ XrResult FrameGenPresenter::SubmitAt(XrSession session, const XrFrameEndInfo& in
                                      const FrameGenRuntimeCalls& calls) {
     XrFrameEndInfo copy = info;
     copy.displayTime = time;
-    const XrResult result = RuntimeEnd(calls, session, &copy);
+    const XrResult result = RuntimeEnd(calls, session, &copy, false);
     std::scoped_lock lock(mutex_);
     NoteSubmissionLocked(true);
     return result;
 }
 
-void FrameGenPresenter::NoteRuntimePeriodLocked(XrDuration period) {
+void FrameGenPresenter::NoteRuntimePeriodLocked(XrDuration period, Clock::time_point now) {
     if (period <= 0) {
         return;
     }
     last_period_ = period;
-    // About two, three or four times the refresh period: the runtime cutting
-    // the frame rate to that fraction, not another refresh rate (a session's
-    // refresh rate dropping to exactly such a fraction is not told apart
-    // from it).
-    for (std::uint32_t refreshes = 2; refresh_period_ > 0 && refreshes <= kMaxThrottleRefreshes; ++refreshes) {
-        const XrDuration held = refresh_period_ * static_cast<XrDuration>(refreshes);
-        if (std::llabs(period - held) <= held / 20) {
-            return;
-        }
+    // About the refresh period or shorter: the refresh period, at once (no
+    // runtime reports less than the refresh period it holds frames to).
+    if (refresh_period_ <= 0 || period <= refresh_period_ + refresh_period_ / 20) {
+        refresh_period_ = period;
+        refresh_candidate_.reset();
+        return;
     }
-    refresh_period_ = period;
+    // About `from` to five times `base`.
+    const auto multiple = [](XrDuration longer, XrDuration base, std::uint32_t from) {
+        for (std::uint32_t refreshes = from; refreshes <= kMaxThrottleRefreshes; ++refreshes) {
+            const XrDuration held = base * static_cast<XrDuration>(refreshes);
+            if (std::llabs(longer - held) <= held / 20) {
+                return true;
+            }
+        }
+        return false;
+    };
+    // A longer period is a new refresh rate only once every period reported
+    // since agreed with it (it, or a multiple of it) for a while: a hitch's
+    // one long period never becomes the refresh period.
+    if (refresh_candidate_ && !multiple(period, refresh_candidate_->first, 1)) {
+        refresh_candidate_.reset();
+    }
+    // About two to five times the refresh period: the runtime cutting the
+    // frame rate to that fraction, or reporting how late its caller was in
+    // whole refreshes, not another refresh rate (a session's refresh rate
+    // dropping to exactly such a fraction is not told apart from it).
+    if (multiple(period, refresh_period_, 2)) {
+        return;
+    }
+    if (!refresh_candidate_) {
+        refresh_candidate_ = std::make_pair(period, now);
+    } else if (now - refresh_candidate_->second >= kRefreshChangeAfter) {
+        refresh_period_ = refresh_candidate_->first;
+        refresh_candidate_.reset();
+    }
 }
 
 void FrameGenPresenter::NoteRuntimeHalvingLocked(Clock::time_point called, Clock::time_point returned,
@@ -2478,24 +2515,36 @@ void FrameGenPresenter::NoteRuntimeHalvingLocked(Clock::time_point called, Clock
     // Halved (or cut further): a multiple of the refresh period reported, or
     // a wait asked for well within a refresh of the last one's release that
     // got a refresh after the next. A wait asked for later says nothing of
-    // that: its caller missed the next refresh itself (the presenter thread
-    // ran late, or the game is slow). One still released at the next refresh
-    // shows the runtime giving every refresh, whenever it was asked for.
+    // that by itself: its caller missed the next refresh itself (the
+    // presenter thread ran late, or the game is slow), and a runtime may
+    // report such a caller's own frame interval, in whole refreshes, as the
+    // period (SteamVR with Pimax's headset driver does, releasing the wait
+    // at once). Asked for late, a wait shows the runtime holding frames
+    // only where it reported a multiple and still blocked the wait for half
+    // a refresh or more; released at once, it got the earliest refresh the
+    // runtime had, as one released at the next refresh did: not halved.
     const auto refreshes = [&](XrDuration duration) {
         return static_cast<std::uint32_t>(std::min<XrDuration>((duration + refresh / 2) / refresh, 64));
     };
     const bool reported = period >= refresh + refresh / 2;
     const std::uint32_t held = reported ? refreshes(period) : refreshes(display_time - previous->display_time);
-    const bool halved = held >= 2;
-    if (halved && !reported && called - previous->returned >= std::chrono::nanoseconds(refresh * 3 / 4)) {
-        return;
+    const auto waited = returned - called;
+    const bool blocked = waited >= std::chrono::nanoseconds(refresh / 2);
+    bool halved = held >= 2;
+    if (halved && called - previous->returned >= std::chrono::nanoseconds(refresh * 3 / 4)) {
+        if (waited < std::max<std::chrono::nanoseconds>(std::chrono::milliseconds(1),
+                                                        std::chrono::nanoseconds(refresh / 10))) {
+            halved = false;
+        } else if (!reported || !blocked) {
+            return;
+        }
     }
     if (presenter) {
         ++totals_.halving_measured;
         totals_.halving_halved += halved ? 1 : 0;
     }
-    halving_samples_.emplace_back(returned, halved ? held : 1);
-    while (returned - halving_samples_.front().first > halving_window_) {
+    halving_samples_.push_back({returned, halved ? held : 1, halved && blocked});
+    while (returned - halving_samples_.front().returned > halving_window_) {
         halving_samples_.pop_front();
     }
     // A window measured, with at least half the waits a runtime holding the
@@ -2513,7 +2562,7 @@ void FrameGenPresenter::NoteRuntimeHalvingLocked(Clock::time_point called, Clock
         return;
     }
     const auto count = static_cast<std::size_t>(std::count_if(
-        halving_samples_.begin(), halving_samples_.end(), [](const auto& sample) { return sample.second >= 2; }));
+        halving_samples_.begin(), halving_samples_.end(), [](const HalvingSample& sample) { return sample.held >= 2; }));
     // Three quarters of the window's waits halved report it, a quarter or
     // fewer clear it: an occasional missed refresh does neither.
     if (presenter && count * 4 >= total * 3) {
@@ -2521,23 +2570,33 @@ void FrameGenPresenter::NoteRuntimeHalvingLocked(Clock::time_point called, Clock
         runtime_halving_ = true;
         if (logger_ && !logged_runtime_halving_) {
             logged_runtime_halving_ = true;
-            // The waits' release: every Nth refresh, the N seen most often.
+            // What was measured: the waits' release, every Nth refresh (the N
+            // seen most often), whether most of them blocked, and the period
+            // reported. Where it comes from is not measured: the log names
+            // the settings that can do this.
             std::array<std::size_t, 9> seen{};
-            for (const auto& sample : halving_samples_) {
-                ++seen[std::min<std::uint32_t>(sample.second, 8)];
+            std::size_t blocked_count = 0;
+            for (const HalvingSample& sample : halving_samples_) {
+                ++seen[std::min<std::uint32_t>(sample.held, 8)];
+                blocked_count += sample.blocked ? 1 : 0;
             }
             const auto every = static_cast<std::uint32_t>(std::max_element(seen.begin() + 2, seen.end()) - seen.begin());
             const std::string hz = Number(1e9 / static_cast<double>(refresh), 0) + " Hz";
-            const std::string evidence =
-                reported ? "reported a frame period of " + Number(static_cast<double>(period) / 1e6, 1) + " ms, " +
-                               TimesText(held) + " its refresh period at " + hz
-                         : "released Frame Generation's frames only every " + EveryText(every) + " refresh at " + hz;
-            logger_->Info("Frame Generation: the runtime appears to be halving the frame rate, probably through its "
-                          "motion smoothing: for " +
-                          Number(std::chrono::duration<double>(halving_window_).count(), 0) + " s it " + evidence +
-                          ". Runtime smoothing (SteamVR Motion Smoothing, Pimax Smart Smoothing, Virtual Desktop SSW, "
-                          "Meta ASW) fights Frame Generation's pacing: turn it off for games that use Frame "
-                          "Generation, and keep the runtime at full refresh.");
+            std::string evidence = blocked_count * 2 >= count ? "its frame waits blocked"
+                                                              : "from its frame waits' display times";
+            if (reported) {
+                evidence += "; it reported a frame period of " + Number(static_cast<double>(period) / 1e6, 1) +
+                            " ms, " + TimesText(held) + " its refresh period";
+            }
+            logger_->Info("Frame Generation: the runtime held Frame Generation's frames to every " + EveryText(every) +
+                          " refresh at " + hz + " for " +
+                          Number(std::chrono::duration<double>(halving_window_).count(), 0) + " s (" + evidence +
+                          "). Settings that can do this: SteamVR's Motion Smoothing (Settings > Video), and the "
+                          "game's Motion Smoothing and Throttling Behavior in SteamVR's Per-Application Video "
+                          "Settings; Pimax Play's Smart Smoothing and Lock Frame Rate to Half Refresh Rate (Device "
+                          "settings > Frame rate); Virtual Desktop's SSW; Meta's ASW. Check the ones your runtime "
+                          "and headset use, and keep the runtime at full refresh for games that use Frame "
+                          "Generation.");
         }
     } else if (runtime_halving_ && count * 4 <= total) {
         runtime_halving_ = false;
@@ -2557,32 +2616,62 @@ void FrameGenPresenter::NotePhaseLocked(Clock::time_point called, Clock::time_po
     }
 }
 
+XrDuration FrameGenPresenter::SubmitSpacingLocked(XrDuration period) const {
+    // A runtime may report a longer period than the refresh period without
+    // holding frames to it: SteamVR with Pimax's headset driver reports a
+    // late caller's own frame interval. Spaced by that, submissions would
+    // stay that late (the runtime echoing it back): never more than a
+    // refresh.
+    period = std::max<XrDuration>(period, 1);
+    return refresh_period_ > 0 ? std::min(period, refresh_period_) : period;
+}
+
+std::pair<Clock::time_point, bool> FrameGenPresenter::ScheduleSubmissionLocked(Clock::time_point now,
+                                                                                XrTime display_time,
+                                                                                XrDuration period) {
+    // Pimax and SteamVR can return waits at once instead of pacing them (a
+    // generated cycle's, or any asked for late), so frames would reach the
+    // compositor inside one refresh and only the newest would be shown. A
+    // submission goes when the runtime would have released its wait, from
+    // the last wait that did block, and on a refresh grid: most of a
+    // refresh after the last submission was due where the runtime's own
+    // cadence is known (the grid then only guards), and nearly a refresh
+    // otherwise (a little less, so that waits come a little earlier each
+    // refresh until a runtime that holds early ones does, and its cadence
+    // is known). Due from when the last one was due, not from when its
+    // xrEndFrame returned: that call's own time would add up, refresh after
+    // refresh. A grid behind now restarts from now. Runtimes that pace their
+    // waits rarely sleep.
+    const auto ns = [](XrDuration duration) { return std::chrono::nanoseconds(duration); };
+    const XrDuration spacing = SubmitSpacingLocked(period);
+    const bool phased = phase_wall_ != Clock::time_point{} && now - phase_wall_ <= kPhaseLifetime && display_time > phase_xr_;
+    Clock::time_point at = now;
+    bool late = false;
+    if (phased) {
+        const auto ideal = phase_wall_ + ns(display_time - phase_xr_);
+        late = now > ideal + ns(period / 2);
+        at = std::max(at, ideal);
+    }
+    if (submit_grid_ != Clock::time_point{}) {
+        at = std::max(at, submit_grid_ + ns(spacing * (phased ? 17 : 19) / 20));
+    }
+    // A wrong phase never costs more than about one refresh.
+    at = std::min(at, now + ns(spacing * 6 / 5));
+    submit_grid_ = at;
+    return {at, late};
+}
+
 bool FrameGenPresenter::PaceSubmission(XrTime display_time, XrDuration period) {
-    // Pimax and SteamVR can return the waits inside a generated cycle at once
-    // instead of pacing them, so the cycle's frames would reach the
-    // compositor inside one refresh and only the newest would be shown. Each
-    // slot is held until the runtime would have released its wait, measured
-    // from the last wait that did block, and at least most of a refresh after
-    // the previous submission. Runtimes that pace their waits rarely sleep.
     if (period <= 0) {
         return false;
     }
-    const auto now = Clock::now();
-    Clock::time_point target{};
+    Clock::time_point target;
     bool late = false;
     {
         std::scoped_lock lock(mutex_);
-        if (last_runtime_submit_ != Clock::time_point{}) {
-            target = last_runtime_submit_ + std::chrono::nanoseconds(period * 17 / 20);
-        }
-        if (phase_wall_ != Clock::time_point{} && now - phase_wall_ <= kPhaseLifetime && display_time > phase_xr_) {
-            const auto ideal = phase_wall_ + std::chrono::nanoseconds(display_time - phase_xr_);
-            late = now > ideal + std::chrono::nanoseconds(period / 2);
-            target = std::max(target, ideal);
-        }
+        std::tie(target, late) = ScheduleSubmissionLocked(Clock::now(), display_time, period);
     }
-    // A wrong phase never costs more than about one refresh.
-    SleepUntil(timer_, std::min(target, now + std::chrono::nanoseconds(period * 6 / 5)));
+    SleepUntil(timer_, target);
     return late;
 }
 
@@ -2728,7 +2817,7 @@ XrResult FrameGenPresenter::RunCycle(XrSession session, const XrFrameEndInfo& in
             content.layers = nullptr;
             distinct = false;
         }
-        const XrResult result = RuntimeEnd(calls, session, &content);
+        const XrResult result = RuntimeEnd(calls, session, &content, true);
         std::scoped_lock lock(mutex_);
         NoteSubmissionLocked(distinct, moved);
         if (XR_FAILED(result)) {
@@ -3576,11 +3665,11 @@ void FrameGenPresenter::DestroyOutputs() {
 }
 
 void FrameGenPresenter::NoteSubmissionLocked(bool distinct, bool generated) {
-    last_runtime_submit_ = Clock::now();
-    submissions_.push_back(last_runtime_submit_);
+    const auto now = Clock::now();
+    submissions_.push_back(now);
     ++totals_.submissions;
     if (distinct) {
-        distinct_submissions_.push_back(last_runtime_submit_);
+        distinct_submissions_.push_back(now);
         ++totals_.distinct;
         totals_.generated_distinct += generated ? 1 : 0;
     } else {
@@ -3837,7 +3926,8 @@ XrResult FrameGenPresenter::RuntimeBegin(const FrameGenRuntimeCalls& calls, XrSe
     return result;
 }
 
-XrResult FrameGenPresenter::RuntimeEnd(const FrameGenRuntimeCalls& calls, XrSession session, const XrFrameEndInfo* info) {
+XrResult FrameGenPresenter::RuntimeEnd(const FrameGenRuntimeCalls& calls, XrSession session, const XrFrameEndInfo* info,
+                                       bool paced) {
     XrResult result = XR_SUCCESS;
     if (trace_.Enabled() && info) {
         // What the runtime is given: its first projection layer's views.
@@ -3858,6 +3948,7 @@ XrResult FrameGenPresenter::RuntimeEnd(const FrameGenRuntimeCalls& calls, XrSess
             }
         }
     }
+    const auto entered = Clock::now();
     {
         const PresenterCall call(*this, "xrEndFrame");
         result = calls.submit(session, info);
@@ -3869,6 +3960,15 @@ XrResult FrameGenPresenter::RuntimeEnd(const FrameGenRuntimeCalls& calls, XrSess
             ++runtime_ends_;
         }
         presenter_frame_open_ = false;
+        // The submission grid (ScheduleSubmissionLocked): a frame submitted
+        // as it came (passed straight through) is the grid's newest point,
+        // and so is a paced one that went more than half a refresh after it
+        // was due (a hitch).
+        const XrDuration spacing = SubmitSpacingLocked(last_period_);
+        if (!paced || submit_grid_ == Clock::time_point{} ||
+            entered - submit_grid_ > std::chrono::nanoseconds(spacing / 2)) {
+            submit_grid_ = entered;
+        }
     }
     WakeSlots();
     return result;
@@ -4705,7 +4805,7 @@ XrResult FrameGenPresenter::ThreadedEnd(XrSession session, const XrFrameEndInfo&
             real.layerCount = 0;
             real.layers = nullptr;
         }
-        result = RuntimeEnd(calls, session, &real);
+        result = RuntimeEnd(calls, session, &real, true);
     }
     bool generate = !frame.interpolate && XR_SUCCEEDED(result) && renderable && copied && offer.should_render &&
                     frame.multiplier >= 2;
@@ -5746,7 +5846,7 @@ void FrameGenPresenter::CompositorLoop() {
         const std::uint64_t slot = ++slot_index_;
         slot_time_ = frame_state.predictedDisplayTime;
         slot_period_ = frame_state.predictedDisplayPeriod;
-        NoteRuntimePeriodLocked(slot_period_);
+        NoteRuntimePeriodLocked(slot_period_, returned);
         if (frame_state.shouldRender == XR_TRUE) {
             // The headset off, a runtime may pace its waits as it likes.
             NoteRuntimeHalvingLocked(called, returned, slot_time_, slot_period_, true);
@@ -5755,16 +5855,9 @@ void FrameGenPresenter::CompositorLoop() {
         slot_cv_.notify_all();
         const XrDuration period = std::max<XrDuration>(slot_period_, 1);
 
-        // Submit when the runtime would have released this wait, and most of
-        // a refresh after the previous submission.
-        Clock::time_point submit_at = returned;
-        if (phase_wall_ != Clock::time_point{} && slot_time_ > phase_xr_) {
-            submit_at = std::max(submit_at, phase_wall_ + ns(slot_time_ - phase_xr_));
-        }
-        if (last_runtime_submit_ != Clock::time_point{}) {
-            submit_at = std::max(submit_at, last_runtime_submit_ + ns(period * 17 / 20));
-        }
-        submit_at = std::min(submit_at, returned + ns(period * 6 / 5));
+        // Submit when the runtime would have released this wait, on a refresh
+        // grid from the previous submission (ScheduleSubmissionLocked).
+        const Clock::time_point submit_at = ScheduleSubmissionLocked(returned, slot_time_, period).first;
         compositor_phase_ = "choosing a frame for the refresh";
         // The newest real frame cannot be repeated (a space or swapchain it
         // used was destroyed) and nothing generated from it is ready: take
@@ -6084,7 +6177,7 @@ void FrameGenPresenter::CompositorLoop() {
             // runtime shows its last frame again (the next begin discards it).
             XrResult result = RuntimeBegin(calls, session, &begin_info);
             if (XR_SUCCEEDED(result) && submit) {
-                result = RuntimeEnd(calls, session, &end_info);
+                result = RuntimeEnd(calls, session, &end_info, true);
             }
             submit_lock.unlock();
             lock.lock();
@@ -6154,7 +6247,7 @@ void FrameGenPresenter::CompositorLoop() {
         compositor_phase_ = "submitting a generated frame";
         XrResult result = RuntimeBegin(calls, session, &begin_info);
         if (XR_SUCCEEDED(result)) {
-            result = RuntimeEnd(calls, session, &end_info);
+            result = RuntimeEnd(calls, session, &end_info, true);
         }
         submit_lock.unlock();
         lock.lock();
@@ -6281,8 +6374,8 @@ FrameGenOsdText DescribeFrameGen(const FrameGenStatus& status, bool started) {
     };
     FrameGenOsdText text;
     text.state = ToString(status.state);
-    // The runtime halves the frame rate (its motion smoothing, probably): the
-    // line under the row says so, and the app's line ends with it.
+    // The runtime holds the frames presented to half its refresh rate or
+    // less: the line under the row says so, and the app's line ends with it.
     const auto halving = [&](FrameGenOsdText& said) {
         if (status.runtime_halving) {
             said.detail = kHalvingDetail;
@@ -6309,7 +6402,7 @@ FrameGenOsdText DescribeFrameGen(const FrameGenStatus& status, bool started) {
             const std::string rate = status.dynamic ? "Dynamic" : "Auto";
             const std::string game = "game at " + Number(status.app_fps, 0) + " fps";
             text.row = std::string("Standby") + kOsd + rate;
-            text.detail = "The game holds " + Number(status.app_fps, 0) + " fps on its own";
+            text.detail = "The game runs at " + Number(status.app_fps, 0) + " fps";
             text.compact = std::string("Standby") + kOsd + game;
             text.reason = rate + kApp + game;
             return halving(text);

@@ -3752,6 +3752,10 @@ struct SideBySideShown {
     std::optional<std::size_t> during; // the game's hold (GameLoad) still closed at xrEndFrame
     UINT64 mark{0};
     GameLoad::Clock::time_point marked;
+    // The quad layer's read on the runtime's queue right after the mark (0:
+    // not read), and from xrEndFrame until it was done.
+    UINT64 read_mark{0};
+    double read_latency_ms{0.0};
 };
 
 // The X-Plane-shaped game: its session and swapchains, what it rendered.
@@ -4006,9 +4010,13 @@ void TestSideBySideFrameGen(Game& game, const std::string& mode, bool shown_lazy
                 Readback readback;
                 std::vector<Color> texels;
                 if (SubmitReadback(rt.queue.Get(), rt.readback.Get(), rt.readback_value,
-                                   {{chain->images12[*chain->released].Get(), 0}}, readback) &&
-                    FinishReadback(readback, texels)) {
-                    shown.quad_texel = texels[0];
+                                   {{chain->images12[*chain->released].Get(), 0}}, readback)) {
+                    shown.read_mark = readback.value;
+                    if (FinishReadback(readback, texels)) {
+                        shown.quad_texel = texels[0];
+                    }
+                    shown.read_latency_ms =
+                        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
                 }
             }
             extras.push_back(shown);
@@ -4157,7 +4165,13 @@ void TestSideBySideFrameGen(Game& game, const std::string& mode, bool shown_lazy
 
     // The game GPU-bound, with the quad layer and without it: every frame
     // ended while the game's work was held back, of Frame Generation's
-    // outputs, waited for that work on the runtime's queue or not.
+    // outputs, waited for that work on the runtime's queue or not: the
+    // queue reached its mark, or its quad layer read right after (as a
+    // compositor reads what it shows), only once the work could run.
+    // Frame Generation submits each frame as the runtime releases its wait,
+    // as the game's wait is released: one submitted a moment before the
+    // game's release of the quad layer is not behind it on the queue, but
+    // reading it is.
     struct Backlog {
         std::size_t during{0}; // frames of Frame Generation's ended while the game's work was held back
         std::size_t waited{0}; // ...that the runtime's queue reached only once the work could run
@@ -4198,13 +4212,18 @@ void TestSideBySideFrameGen(Game& game, const std::string& mode, bool shown_lazy
                 Check(extra.latency_ms < kGameLoadMs + 2000.0,
                       at + ": the runtime's queue reaches a frame of Frame Generation's within the game's work (" +
                           std::to_string(extra.latency_ms) + " ms)");
-                const std::optional<bool> waited =
+                std::optional<bool> waited =
                     extra.during ? game_load.Waited(*extra.during, extra.mark, extra.marked) : std::nullopt;
+                double latency_ms = extra.latency_ms;
+                if (waited && !*waited && extra.read_mark) {
+                    waited = game_load.Waited(*extra.during, extra.read_mark, extra.marked);
+                    latency_ms = extra.read_latency_ms;
+                }
                 if (!waited) continue;
                 ++backlog.during;
                 if (*waited) {
                     ++backlog.waited;
-                    backlog.latencies.push_back(extra.latency_ms);
+                    backlog.latencies.push_back(latency_ms);
                 } else {
                     backlog.others.push_back(extra.latency_ms);
                 }
