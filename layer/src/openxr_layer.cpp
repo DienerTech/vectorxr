@@ -13257,7 +13257,7 @@ void OpenXrLayer::ConfigureOsdAnchor() {
     // frame's pose, so the OSD lands off by the head's turn in between: a
     // double image in Extrapolate, a smear in Interpolate. Placed in the world
     // at each frame's head pose, it lands head-locked whatever pose the frame
-    // carries. SteamVR in its own direct mode (sboys3's driver, for one) shows
+    // carries. SteamVR in its own direct mode (with other headset drivers) shows
     // a VIEW quad steady, and both report the same system, so the placement
     // is opt-in: VECTORXR_OSD_ANCHOR=world (or view, the default).
     bool world = false;
